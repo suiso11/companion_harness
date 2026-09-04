@@ -150,6 +150,65 @@ describe("markdown connector search core", () => {
     expect(doc.title).toBe("blank");
   });
 
+  it("bounds ASCII heading-derived titles to 512 code units", async () => {
+    const dir = scratchVault("md-conn-longtitle-");
+    const heading = "a".repeat(600);
+    writeFileSync(join(dir, "long.md"), `# ${heading}\nbody uniqueword here\n`);
+    const connector = await createMarkdownConnector([{ path: dir }]);
+    const result = await connector.search({ query: "uniqueword" });
+    expect(result.hits).toHaveLength(1);
+    const hit = result.hits[0] as NonNullable<(typeof result.hits)[0]>;
+    expect(hit.title).toBe("a".repeat(512));
+    expect(hit.title.length).toBeLessThanOrEqual(512);
+    // Stable across searches and consistent with materialization.
+    const again = await connector.search({ query: "uniqueword" });
+    expect(again.hits[0]?.title).toBe(hit.title);
+    const doc = await connector.readCanonical("vault-1/long.md");
+    expect(doc.title).toBe(hit.title);
+    // Body/snapshot are never truncated: full text retained and hashed.
+    expect(doc.text).toContain(heading);
+    expect(doc.sourceRevision).toBe(sha256Hex(doc.text));
+  });
+
+  it("bounds astral heading-derived titles without splitting pairs", async () => {
+    const dir = scratchVault("md-conn-astraltitle-");
+    const heading = "😀".repeat(400); // 800 UTF-16 code units.
+    writeFileSync(join(dir, "astral.md"), `# ${heading}\nbody uniqueword here\n`);
+    const connector = await createMarkdownConnector([{ path: dir }]);
+    const result = await connector.search({ query: "uniqueword" });
+    expect(result.hits).toHaveLength(1);
+    const hit = result.hits[0] as NonNullable<(typeof result.hits)[0]>;
+    expect(hit.title.length).toBeLessThanOrEqual(512);
+    expect(hit.title.length).toBe(512);
+    expect(Array.from(hit.title)).toHaveLength(256);
+    expect(hit.title).toBe("😀".repeat(256));
+    for (const ch of Array.from(hit.title)) {
+      expect(ch).toBe("😀");
+    }
+    const again = await connector.search({ query: "uniqueword" });
+    expect(again.hits[0]?.title).toBe(hit.title);
+    const doc = await connector.readCanonical("vault-1/astral.md");
+    expect(doc.title).toBe(hit.title);
+    expect(doc.text).toContain(heading);
+    expect(doc.sourceRevision).toBe(sha256Hex(doc.text));
+  });
+
+  it("backs off one unit when 512 would split a surrogate pair", async () => {
+    const dir = scratchVault("md-conn-oddtitle-");
+    const heading = `${"a".repeat(511)}${"😀".repeat(10)}`;
+    writeFileSync(join(dir, "odd.md"), `# ${heading}\nbody uniqueword here\n`);
+    const connector = await createMarkdownConnector([{ path: dir }]);
+    const result = await connector.search({ query: "uniqueword" });
+    expect(result.hits).toHaveLength(1);
+    const hit = result.hits[0] as NonNullable<(typeof result.hits)[0]>;
+    // 512 units would end on the lead surrogate, so the bound is 511.
+    expect(hit.title).toBe("a".repeat(511));
+    expect(hit.title.length).toBe(511);
+    const doc = await connector.readCanonical("vault-1/odd.md");
+    expect(doc.title).toBe(hit.title);
+    expect(doc.text).toContain(heading);
+  });
+
   it("normalizes NFC text before matching and hashing", async () => {
     const dir = scratchVault("md-conn-nfc-");
     writeFileSync(join(dir, "nfd.md"), "# café\nbody café\n");

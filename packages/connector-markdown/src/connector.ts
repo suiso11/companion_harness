@@ -22,8 +22,9 @@
  * deterministically fall back to the leading body prefix; an empty body
  * falls back to the title slice so snippets are never empty.
  *
- * TITLE: first heading plain text, else the canonical filename stem
- * (basename minus trailing `.md`).
+ * TITLE: first heading plain text bounded to a ReferenceTitle-compatible
+ * deterministic prefix (max 512 UTF-16 code units, surrogate-safe), else
+ * the canonical filename stem (already bounded by the canonical key).
  *
  * SOURCE REVISION: SHA-256 hex of the NFC full text (stable for identical
  * content). Hits also carry the full normalized text for later
@@ -297,8 +298,29 @@ export function filenameStemOf(canonicalKey: string): string {
   return base.endsWith(".md") ? base.slice(0, -3) : base;
 }
 
+/** Display-title bound in UTF-16 code units (contract ReferenceTitle max). */
+export const REFERENCE_TITLE_MAX_UTF16 = 512;
+
+/**
+ * Bound a heading-derived display title to a ReferenceTitle-compatible
+ * deterministic prefix: at most 512 UTF-16 code units, never splitting a
+ * surrogate pair. Short titles pass through unchanged; the body/snapshot
+ * text is never truncated here.
+ */
+export function boundReferenceTitle(title: string): string {
+  if (title.length <= REFERENCE_TITLE_MAX_UTF16) return title;
+  let end = REFERENCE_TITLE_MAX_UTF16;
+  const high = title.charCodeAt(end - 1);
+  const low = title.charCodeAt(end);
+  if (high >= 0xd800 && high <= 0xdbff && low >= 0xdc00 && low <= 0xdfff) {
+    end -= 1;
+  }
+  return title.slice(0, end);
+}
+
 function deriveTitle(parsed: ParsedMarkdown, canonicalKey: string): string {
-  if (parsed.title !== null && parsed.title !== "") return parsed.title;
+  if (parsed.title !== null && parsed.title !== "")
+    return boundReferenceTitle(parsed.title);
   return filenameStemOf(canonicalKey);
 }
 
