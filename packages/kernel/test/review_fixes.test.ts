@@ -1,5 +1,11 @@
 // Regression tests for the M0 kernel core review fixes (ToolBroker excluded).
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -55,14 +61,21 @@ describe("event_seq guarded atomic append", () => {
   it("creates runs from an event_seq 0 row with a single run.queued seq1", async () => {
     const { handle, repo } = await openRepo();
     try {
-      const s = repo.createSession({ key: generateId(), now: T0 }).body.sessionId;
-      const m = repo.postMessage(s, { text: "hi" }, { key: generateId(), now: T0 });
+      const s = repo.createSession({ key: generateId(), now: T0 }).body
+        .sessionId;
+      const m = repo.postMessage(
+        s,
+        { text: "hi" },
+        { key: generateId(), now: T0 },
+      );
       const row = handle.raw
         .prepare("SELECT event_seq AS e FROM runs WHERE id = ?")
         .get(m.body.run.id) as { e: number };
       expect(row.e).toBe(1);
       const events = handle.raw
-        .prepare("SELECT seq, type FROM run_events WHERE run_id = ? ORDER BY seq")
+        .prepare(
+          "SELECT seq, type FROM run_events WHERE run_id = ? ORDER BY seq",
+        )
         .all(m.body.run.id) as Array<{ seq: number; type: string }>;
       expect(events).toEqual([{ seq: 1, type: "run.queued" }]);
     } finally {
@@ -73,8 +86,13 @@ describe("event_seq guarded atomic append", () => {
   it("rolls back the status CAS when the guarded event insert collides (stale seq)", async () => {
     const { handle, repo } = await openRepo();
     try {
-      const s = repo.createSession({ key: generateId(), now: T0 }).body.sessionId;
-      const m = repo.postMessage(s, { text: "hi" }, { key: generateId(), now: T0 });
+      const s = repo.createSession({ key: generateId(), now: T0 }).body
+        .sessionId;
+      const m = repo.postMessage(
+        s,
+        { text: "hi" },
+        { key: generateId(), now: T0 },
+      );
       // Occupy the next guarded seq so startRun's atomic insert must fail.
       handle.raw
         .prepare(
@@ -87,7 +105,9 @@ describe("event_seq guarded atomic append", () => {
       expect(repo.getRun(m.body.run.id).eventSeq).toBe(1);
       const n = (
         handle.raw
-          .prepare("SELECT COUNT(*) AS n FROM run_events WHERE run_id = ? AND seq = 2")
+          .prepare(
+            "SELECT COUNT(*) AS n FROM run_events WHERE run_id = ? AND seq = 2",
+          )
           .get(m.body.run.id) as { n: number }
       ).n;
       expect(n).toBe(1);
@@ -117,10 +137,15 @@ describe("engine lifecycle persistence retry + fail-closed shutdown", () => {
           return repo.completeRun(runId, result, options);
         },
       };
-      const engine = new RunEngine({ db: handle.raw, repo: flaky, pollIntervalMs: 5 });
+      const engine = new RunEngine({
+        db: handle.raw,
+        repo: flaky,
+        pollIntervalMs: 5,
+      });
       engineHolder.engine = engine;
       engine.strategies.register("ok", immediateSuccess("done"));
-      const s = repo.createSession({ key: generateId(), now: T0 }).body.sessionId;
+      const s = repo.createSession({ key: generateId(), now: T0 }).body
+        .sessionId;
       const m = repo.postMessage(
         s,
         { text: "q" },
@@ -150,9 +175,14 @@ describe("engine lifecycle persistence retry + fail-closed shutdown", () => {
           throw new KernelStorageError("kernel_io", "down");
         },
       };
-      const failing = new RunEngine({ db: handle.raw, repo: neverLands, pollIntervalMs: 5 });
+      const failing = new RunEngine({
+        db: handle.raw,
+        repo: neverLands,
+        pollIntervalMs: 5,
+      });
       failing.strategies.register("ok", immediateSuccess("done"));
-      const s = repo.createSession({ key: generateId(), now: T0 }).body.sessionId;
+      const s = repo.createSession({ key: generateId(), now: T0 }).body
+        .sessionId;
       const m = repo.postMessage(
         s,
         { text: "q" },
@@ -182,10 +212,18 @@ describe("engine lifecycle persistence retry + fail-closed shutdown", () => {
           throw new KernelStorageError("kernel_io", "drain down");
         },
       };
-      engine = new RunEngine({ db: handle.raw, repo: failDrain, pollIntervalMs: 5 });
+      engine = new RunEngine({
+        db: handle.raw,
+        repo: failDrain,
+        pollIntervalMs: 5,
+      });
       const eng = engine;
-      eng.strategies.register("hang", neverResolving("H", { entered: [], aborted: [] }));
-      const s = repo.createSession({ key: generateId(), now: T0 }).body.sessionId;
+      eng.strategies.register(
+        "hang",
+        neverResolving("H", { entered: [], aborted: [] }),
+      );
+      const s = repo.createSession({ key: generateId(), now: T0 }).body
+        .sessionId;
       const m = repo.postMessage(
         s,
         { text: "q" },
@@ -229,8 +267,12 @@ describe("engine lifecycle persistence retry + fail-closed shutdown", () => {
         cancelGraceMs: 30,
       });
       const eng = engine;
-      eng.strategies.register("hang", neverResolving("H", { entered: [], aborted: [] }));
-      const s = repo.createSession({ key: generateId(), now: T0 }).body.sessionId;
+      eng.strategies.register(
+        "hang",
+        neverResolving("H", { entered: [], aborted: [] }),
+      );
+      const s = repo.createSession({ key: generateId(), now: T0 }).body
+        .sessionId;
       const m = repo.postMessage(
         s,
         { text: "q" },
@@ -253,23 +295,38 @@ describe("idempotency hashes cover operation-affecting fields", () => {
   it("conflicts when strategy/selectOnSuccess/timeZone differ, replays when equal", async () => {
     const { handle, repo } = await openRepo();
     try {
-      const s = repo.createSession({ key: generateId(), now: T0 }).body.sessionId;
+      const s = repo.createSession({ key: generateId(), now: T0 }).body
+        .sessionId;
       const key = generateId();
       const first = repo.postMessage(s, { text: "hi" }, { key, now: T0 });
       const replay = repo.postMessage(s, { text: "hi" }, { key, now: T0 + 1 });
       expect(replay.replayed).toBe(true);
       expect(replay.body).toEqual(first.body);
       expect(() =>
-        repo.postMessage(s, { text: "hi" }, { key, now: T0, strategy: "other" }),
+        repo.postMessage(
+          s,
+          { text: "hi" },
+          { key, now: T0, strategy: "other" },
+        ),
       ).toThrow(IdempotencyConflictError);
       expect(() =>
-        repo.postMessage(s, { text: "hi" }, { key, now: T0, selectOnSuccess: false }),
+        repo.postMessage(
+          s,
+          { text: "hi" },
+          { key, now: T0, selectOnSuccess: false },
+        ),
       ).toThrow(IdempotencyConflictError);
       expect(() =>
-        repo.postMessage(s, { text: "hi" }, { key, now: T0, timeZone: "America/New_York" }),
+        repo.postMessage(
+          s,
+          { text: "hi" },
+          { key, now: T0, timeZone: "America/New_York" },
+        ),
       ).toThrow(IdempotencyConflictError);
       const turns = (
-        handle.raw.prepare("SELECT COUNT(*) AS n FROM turns").get() as { n: number }
+        handle.raw.prepare("SELECT COUNT(*) AS n FROM turns").get() as {
+          n: number;
+        }
       ).n;
       expect(turns).toBe(1);
     } finally {
@@ -280,8 +337,13 @@ describe("idempotency hashes cover operation-affecting fields", () => {
   it("conflicts on retry strategy/selectOnSuccess changes", async () => {
     const { handle, repo } = await openRepo();
     try {
-      const s = repo.createSession({ key: generateId(), now: T0 }).body.sessionId;
-      const m = repo.postMessage(s, { text: "q" }, { key: generateId(), now: T0 });
+      const s = repo.createSession({ key: generateId(), now: T0 }).body
+        .sessionId;
+      const m = repo.postMessage(
+        s,
+        { text: "q" },
+        { key: generateId(), now: T0 },
+      );
       await repo.startRun(m.body.run.id, { now: T0 + 1 });
       await repo.failRun(m.body.run.id, "execution_failed", { now: T0 + 2 });
       const key = generateId();
@@ -293,12 +355,24 @@ describe("idempotency hashes cover operation-affecting fields", () => {
       await repo.startRun(r1.body.run.id, { now: T0 + 5 });
       await repo.failRun(r1.body.run.id, "execution_failed", { now: T0 + 6 });
       const key2 = generateId();
-      repo.postRetry(s, m.body.turnId, { key: key2, now: T0 + 7, strategy: "x" });
+      repo.postRetry(s, m.body.turnId, {
+        key: key2,
+        now: T0 + 7,
+        strategy: "x",
+      });
       expect(() =>
-        repo.postRetry(s, m.body.turnId, { key: key2, now: T0 + 8, strategy: "y" }),
+        repo.postRetry(s, m.body.turnId, {
+          key: key2,
+          now: T0 + 8,
+          strategy: "y",
+        }),
       ).toThrow(IdempotencyConflictError);
       expect(() =>
-        repo.postRetry(s, m.body.turnId, { key: key2, now: T0 + 8, selectOnSuccess: false }),
+        repo.postRetry(s, m.body.turnId, {
+          key: key2,
+          now: T0 + 8,
+          selectOnSuccess: false,
+        }),
       ).toThrow(IdempotencyConflictError);
     } finally {
       closeKernelDatabase(handle);
@@ -331,7 +405,12 @@ describe("backup validation + traversal/symlink safety", () => {
         }),
       ).rejects.toBeInstanceOf(BackupError);
       expect(() =>
-        preMigrationBackupName(0, 1, new Date(), "00000000-0000-0000-0000-000000000000"),
+        preMigrationBackupName(
+          0,
+          1,
+          new Date(),
+          "00000000-0000-0000-0000-000000000000",
+        ),
       ).toThrow(BackupError);
       await expect(
         createPreMigrationBackup({
@@ -396,8 +475,14 @@ describe("per-file user_version retry", () => {
     const dir = tempDir();
     const migrations = join(dir, "migrations");
     mkdirSync(migrations, { recursive: true });
-    writeFileSync(join(migrations, "0001_first.sql"), "CREATE TABLE t1 (a TEXT NOT NULL) STRICT;");
-    writeFileSync(join(migrations, "0002_second.sql"), "THIS IS NOT VALID SQL;");
+    writeFileSync(
+      join(migrations, "0001_first.sql"),
+      "CREATE TABLE t1 (a TEXT NOT NULL) STRICT;",
+    );
+    writeFileSync(
+      join(migrations, "0002_second.sql"),
+      "THIS IS NOT VALID SQL;",
+    );
     const handle = openKernelDatabase(":memory:");
     try {
       await expect(
@@ -409,7 +494,10 @@ describe("per-file user_version retry", () => {
         }),
       ).rejects.toThrow(/migration 0 -> 2 failed/);
       expect(getSchemaVersion(handle.raw)).toBe(1);
-      writeFileSync(join(migrations, "0002_second.sql"), "CREATE TABLE t2 (b TEXT NOT NULL) STRICT;");
+      writeFileSync(
+        join(migrations, "0002_second.sql"),
+        "CREATE TABLE t2 (b TEXT NOT NULL) STRICT;",
+      );
       const retry = await migrateKernelDatabase({
         db: handle.raw,
         migrationsDir: migrations,

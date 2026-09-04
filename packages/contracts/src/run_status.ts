@@ -26,7 +26,11 @@ export const TerminalStatusSchema = z.enum(TERMINAL_STATUSES);
  * Active states: at most one Run in these states per session
  * (partial unique index, §10). `cancel_requested` counts as active.
  */
-export const ACTIVE_STATUSES = ["queued", "running", "cancel_requested"] as const;
+export const ACTIVE_STATUSES = [
+  "queued",
+  "running",
+  "cancel_requested",
+] as const;
 export type ActiveStatus = (typeof ACTIVE_STATUSES)[number];
 export const ActiveStatusSchema = z.enum(ACTIVE_STATUSES);
 

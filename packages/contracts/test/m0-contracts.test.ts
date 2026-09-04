@@ -13,30 +13,30 @@ import {
   IdempotencyLookupQuerySchema,
   IdempotencyLookupResponseSchema,
   IdempotencyScopeSchema,
+  isActiveStatus,
+  isTerminalStatus,
   M0_RUN_ERROR_CODES,
   M0_RUN_EVENT_TYPES,
   M0_TOOL_ERROR_CODES,
+  messageScope,
   PostMessageRequestSchema,
+  parseRunErrorCode,
+  parseRunEvent,
+  parseToolErrorCode,
+  parseTurnInput,
   RUN_ERROR_CODE_REGISTRY,
   RunErrorCodeSchema,
   RunEventSchema,
+  retryScope,
   SessionParamsSchema,
-  TERMINAL_STATUSES,
   TERMINAL_EVENT_TYPES,
+  TERMINAL_STATUSES,
   TOOL_ERROR_CODE_REGISTRY,
   ToolDescriptorSchema,
   ToolErrorCodeSchema,
   ToolResultSchema,
   TurnInputV1Schema,
   UuidSchema,
-  isActiveStatus,
-  isTerminalStatus,
-  messageScope,
-  parseRunErrorCode,
-  parseRunEvent,
-  parseToolErrorCode,
-  parseTurnInput,
-  retryScope,
 } from "../src/index.js";
 
 const UUID = "123e4567-e89b-42d3-a456-426614174000";
@@ -45,7 +45,11 @@ const UUID_V1 = "123e4567-e89b-12d3-a456-426614174000";
 const UUID_V7 = "01934abc-def7-7abc-8abc-426614174000";
 const UUID_NIL = "00000000-0000-0000-0000-000000000000";
 
-function envelope(type: string, payload: unknown, extra: Record<string, unknown> = {}) {
+function envelope(
+  type: string,
+  payload: unknown,
+  extra: Record<string, unknown> = {},
+) {
   return {
     schemaVersion: 1,
     runId: UUID,
@@ -59,7 +63,9 @@ function envelope(type: string, payload: unknown, extra: Record<string, unknown>
 
 describe("TurnInput closed registry (M0: user_text v1 only)", () => {
   it("accepts the single M0 variant", () => {
-    expect(parseTurnInput({ kind: "user_text", version: 1, text: "hello" })).toEqual({
+    expect(
+      parseTurnInput({ kind: "user_text", version: 1, text: "hello" }),
+    ).toEqual({
       kind: "user_text",
       version: 1,
       text: "hello",
@@ -68,10 +74,18 @@ describe("TurnInput closed registry (M0: user_text v1 only)", () => {
 
   it("rejects unknown kinds, versions, and M5 variants", () => {
     expect(() =>
-      TurnInputV1Schema.parse({ kind: "action_approval", version: 1, proposalId: UUID }),
+      TurnInputV1Schema.parse({
+        kind: "action_approval",
+        version: 1,
+        proposalId: UUID,
+      }),
     ).toThrow();
-    expect(() => parseTurnInput({ kind: "user_text", version: 2, text: "hi" })).toThrow();
-    expect(() => parseTurnInput({ kind: "user_text", text: "no version" })).toThrow();
+    expect(() =>
+      parseTurnInput({ kind: "user_text", version: 2, text: "hi" }),
+    ).toThrow();
+    expect(() =>
+      parseTurnInput({ kind: "user_text", text: "no version" }),
+    ).toThrow();
   });
 
   it("rejects blank, empty, oversized, and non-string text", () => {
@@ -84,7 +98,12 @@ describe("TurnInput closed registry (M0: user_text v1 only)", () => {
 
   it("rejects unknown keys (strict)", () => {
     expect(() =>
-      TurnInputV1Schema.parse({ kind: "user_text", version: 1, text: "hi", extra: 1 }),
+      TurnInputV1Schema.parse({
+        kind: "user_text",
+        version: 1,
+        text: "hi",
+        extra: 1,
+      }),
     ).toThrow();
   });
 });
@@ -186,7 +205,9 @@ describe("RunEvent closed registry (schemaVersion=1, exactly 9 types)", () => {
 
   it("rejects wrong schemaVersion, bad seq, and unknown envelope keys", () => {
     expect(() =>
-      parseRunEvent(envelope("run.queued", { attempt: 1 }, { schemaVersion: 2 })),
+      parseRunEvent(
+        envelope("run.queued", { attempt: 1 }, { schemaVersion: 2 }),
+      ),
     ).toThrow();
     expect(() =>
       parseRunEvent(envelope("run.queued", { attempt: 1 }, { seq: 0 })),
@@ -257,9 +278,13 @@ describe("defaults and bounds", () => {
 
 describe("API boundaries are strict", () => {
   it("rejects unknown keys on message/session requests", () => {
-    expect(() => PostMessageRequestSchema.parse({ text: "hi", bogus: 1 })).toThrow();
+    expect(() =>
+      PostMessageRequestSchema.parse({ text: "hi", bogus: 1 }),
+    ).toThrow();
     expect(() => PostMessageRequestSchema.parse({ text: "" })).toThrow();
-    expect(() => CreateSessionRequestSchema.parse({ timeZone: "UTC" })).toThrow();
+    expect(() =>
+      CreateSessionRequestSchema.parse({ timeZone: "UTC" }),
+    ).toThrow();
   });
 
   it("validates idempotency keys as UUIDs", () => {
@@ -284,7 +309,10 @@ describe("API boundaries are strict", () => {
 
   it("idempotency lookup is a closed found/resend union", () => {
     expect(
-      IdempotencyLookupResponseSchema.parse({ found: false, code: "resend_required" }),
+      IdempotencyLookupResponseSchema.parse({
+        found: false,
+        code: "resend_required",
+      }),
     ).toBeTruthy();
     expect(() =>
       IdempotencyLookupResponseSchema.parse({ found: false, code: "retry" }),
@@ -340,13 +368,25 @@ describe("ToolDescriptor is serializable and closed", () => {
     expect(() =>
       ToolDescriptorSchema.parse({ ...descriptor, category: "unknown" }),
     ).toThrow();
-    expect(() => ToolDescriptorSchema.parse({ ...descriptor, name: "Bad Name" })).toThrow();
-    expect(() => ToolDescriptorSchema.parse({ ...descriptor, name: "nonamespaced" })).toThrow();
+    expect(() =>
+      ToolDescriptorSchema.parse({ ...descriptor, name: "Bad Name" }),
+    ).toThrow();
+    expect(() =>
+      ToolDescriptorSchema.parse({ ...descriptor, name: "nonamespaced" }),
+    ).toThrow();
   });
 
   it("forces lowercase error codes, never raw text", () => {
-    expect(ToolErrorCodeSchema.parse("budget_exceeded")).toBe("budget_exceeded");
-    for (const bad of ["BudgetExceeded", "TOOL_FAILED", "has space", "semi;colon", ""]) {
+    expect(ToolErrorCodeSchema.parse("budget_exceeded")).toBe(
+      "budget_exceeded",
+    );
+    for (const bad of [
+      "BudgetExceeded",
+      "TOOL_FAILED",
+      "has space",
+      "semi;colon",
+      "",
+    ]) {
       expect(() => ToolErrorCodeSchema.parse(bad)).toThrow();
     }
   });
@@ -370,7 +410,12 @@ describe("ToolDescriptor is serializable and closed", () => {
       expect(parseToolErrorCode(code)).toBe(code);
     }
     expect(TOOL_ERROR_CODE_REGISTRY[1]).toBe(ToolErrorCodeSchema);
-    for (const bad of ["made_up_code", "custom_error", "server_error", "retry_later"]) {
+    for (const bad of [
+      "made_up_code",
+      "custom_error",
+      "server_error",
+      "retry_later",
+    ]) {
       expect(() => ToolErrorCodeSchema.parse(bad)).toThrow();
       expect(() => parseToolErrorCode(bad)).toThrow();
     }
@@ -451,11 +496,15 @@ describe("UUID v4 and idempotency scopes are exact", () => {
   });
 
   it("accepts only the three exact scopes with UUID v4 parent ids", () => {
-    expect(IdempotencyScopeSchema.parse("sessions:create")).toBe("sessions:create");
+    expect(IdempotencyScopeSchema.parse("sessions:create")).toBe(
+      "sessions:create",
+    );
     expect(IdempotencyScopeSchema.parse(messageScope(UUID))).toBe(
       `session:${UUID}:message`,
     );
-    expect(IdempotencyScopeSchema.parse(retryScope(UUID))).toBe(`turn:${UUID}:retry`);
+    expect(IdempotencyScopeSchema.parse(retryScope(UUID))).toBe(
+      `turn:${UUID}:retry`,
+    );
     expect(IdempotencyScopeSchema.parse(`session:${UUID_UPPER}:message`)).toBe(
       `session:${UUID_UPPER}:message`,
     );
@@ -506,9 +555,7 @@ describe("UUID v4 and idempotency scopes are exact", () => {
   });
 
   it("rejects unknown query keys strictly", () => {
-    expect(() =>
-      HistoryQuerySchema.parse({ limit: 10, bogus: 1 }),
-    ).toThrow();
+    expect(() => HistoryQuerySchema.parse({ limit: 10, bogus: 1 })).toThrow();
     expect(() => EventsQuerySchema.parse({ after: 0, extra: 1 })).toThrow();
     expect(() =>
       IdempotencyLookupQuerySchema.parse({

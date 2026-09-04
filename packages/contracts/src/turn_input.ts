@@ -13,9 +13,13 @@ export const MAX_USER_TEXT_LENGTH = 32_768;
 export const UserTextTurnInputV1Schema = z.strictObject({
   kind: z.literal("user_text"),
   version: z.literal(1),
-  text: z.string().min(1).max(MAX_USER_TEXT_LENGTH).refine((t) => t.trim().length > 0, {
-    message: "text must not be blank",
-  }),
+  text: z
+    .string()
+    .min(1)
+    .max(MAX_USER_TEXT_LENGTH)
+    .refine((t) => t.trim().length > 0, {
+      message: "text must not be blank",
+    }),
 });
 export type UserTextTurnInputV1 = z.infer<typeof UserTextTurnInputV1Schema>;
 

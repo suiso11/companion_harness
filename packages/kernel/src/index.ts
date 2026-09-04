@@ -8,7 +8,10 @@
 // policy pipeline (static registry, fixed ordering, metadata-only audit).
 // HTTP lives in later milestones and is NOT part of this module.
 
-export type { ManualBackupOptions, PreMigrationBackupOptions } from "./backup.js";
+export type {
+  ManualBackupOptions,
+  PreMigrationBackupOptions,
+} from "./backup.js";
 export {
   applyPrivatePosixMode,
   createManualBackup,
@@ -24,9 +27,9 @@ export {
   PRE_MIGRATION_PARTIAL_SUFFIX,
   PRE_MIGRATION_PREFIX,
   PRE_MIGRATION_SUFFIX,
-  preMigrationBackupName,
   PRIVATE_DIR_MODE,
   PRIVATE_FILE_MODE,
+  preMigrationBackupName,
   prunePreMigrationBackups,
 } from "./backup.js";
 export type {

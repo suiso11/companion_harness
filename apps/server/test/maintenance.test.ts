@@ -4,14 +4,14 @@
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { closeKernelDatabase, openKernelDatabase } from "@companion/kernel";
 import { afterEach, describe, expect, it } from "vitest";
-import { openKernelDatabase, closeKernelDatabase } from "@companion/kernel";
 import { runManualBackupCli } from "../src/cli.js";
 import { sanitizeLogStatus } from "../src/logger.js";
 import {
   measureStoreSize,
-  shouldWarnStoreSize,
   STORE_SIZE_WARN_BYTES,
+  shouldWarnStoreSize,
 } from "../src/maintenance.js";
 
 const tempRoots: string[] = [];
@@ -77,8 +77,12 @@ describe("store size warning", () => {
     expect(sanitizeLogStatus("Unknown")).toBe("unknown");
     // Known M0 startup codes are preserved.
     expect(sanitizeLogStatus("newer_database")).toBe("newer_database");
-    expect(sanitizeLogStatus("server_config_invalid")).toBe("server_config_invalid");
-    expect(sanitizeLogStatus("kernel_backup_failed")).toBe("kernel_backup_failed");
+    expect(sanitizeLogStatus("server_config_invalid")).toBe(
+      "server_config_invalid",
+    );
+    expect(sanitizeLogStatus("kernel_backup_failed")).toBe(
+      "kernel_backup_failed",
+    );
     // Numeric statuses (migration versions, recovery counts) are preserved.
     expect(sanitizeLogStatus(0)).toBe(0);
     expect(sanitizeLogStatus(Number.NaN)).toBe(undefined);
@@ -110,7 +114,9 @@ describe("manual backup CLI (stopped-only, backup API only)", () => {
   });
 
   it("rejects unknown commands without side effects", async () => {
-    await expect(runManualBackupCli(["restore"])).rejects.toThrow(/unknown command/);
+    await expect(runManualBackupCli(["restore"])).rejects.toThrow(
+      /unknown command/,
+    );
   });
 
   it("rejects path override flags and extra args with fixed text", async () => {
@@ -125,16 +131,18 @@ describe("manual backup CLI (stopped-only, backup API only)", () => {
       COMPANION_TIME_ZONE: "UTC",
       COMPANION_LOG_LEVEL: "error",
     };
-    await expect(runManualBackupCli(["backup", "--db", dbPath], env)).rejects.toThrow(
-      /accepts no arguments/,
-    );
+    await expect(
+      runManualBackupCli(["backup", "--db", dbPath], env),
+    ).rejects.toThrow(/accepts no arguments/);
     await expect(
       runManualBackupCli(["backup", "--backups", join(dir, "backups")], env),
     ).rejects.toThrow(/accepts no arguments/);
     await expect(runManualBackupCli(["backup", "extra"], env)).rejects.toThrow(
       /accepts no arguments/,
     );
-    await expect(runManualBackupCli([], env)).rejects.toThrow(/unknown command/);
+    await expect(runManualBackupCli([], env)).rejects.toThrow(
+      /unknown command/,
+    );
   });
 
   it("fails on a missing DB without creating DB or backups", async () => {

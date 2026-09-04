@@ -32,10 +32,7 @@ export const sessions = sqliteTable(
     nextTurnPosition: integer("next_turn_position").notNull(),
   },
   (t) => [
-    check(
-      "sessions_next_turn_position_check",
-      sql`${t.nextTurnPosition} >= 1`,
-    ),
+    check("sessions_next_turn_position_check", sql`${t.nextTurnPosition} >= 1`),
   ],
 );
 
@@ -100,14 +97,8 @@ export const runs = sqliteTable(
       sql`${t.status} IN ('queued','running','cancel_requested','completed','failed','cancelled','abandoned')`,
     ),
     check("runs_event_seq_check", sql`${t.eventSeq} >= 0`),
-    check(
-      "runs_select_on_success_check",
-      sql`${t.selectOnSuccess} IN (0,1)`,
-    ),
-    check(
-      "runs_tool_requests_used_check",
-      sql`${t.toolRequestsUsed} >= 0`,
-    ),
+    check("runs_select_on_success_check", sql`${t.selectOnSuccess} IN (0,1)`),
+    check("runs_tool_requests_used_check", sql`${t.toolRequestsUsed} >= 0`),
     check(
       "runs_result_json_check",
       sql`${t.resultJson} IS NULL OR json_valid(${t.resultJson})`,

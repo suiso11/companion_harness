@@ -5,11 +5,11 @@
 // which needs a file-backed DB to observe WAL mode. Temp files live under
 // os.tmpdir() and are removed in afterEach.
 
-import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   closeKernelDatabase,
@@ -34,14 +34,20 @@ function tempDir(): string {
   return dir;
 }
 
-async function openMigratedMemory(): Promise<ReturnType<typeof openKernelDatabase>> {
+async function openMigratedMemory(): Promise<
+  ReturnType<typeof openKernelDatabase>
+> {
   const handle = openKernelDatabase(":memory:");
   await migrateKernelDatabase({ db: handle.raw });
   return handle;
 }
 
 const NOW = 1790000000000;
-const INPUT_JSON = JSON.stringify({ kind: "user_text", version: 1, text: "hi" });
+const INPUT_JSON = JSON.stringify({
+  kind: "user_text",
+  version: 1,
+  text: "hi",
+});
 const FROZEN_JSON = JSON.stringify({ now: NOW, timeZone: "UTC" });
 
 function insertSession(
@@ -51,7 +57,7 @@ function insertSession(
   const id = randomUUID();
   db.prepare(
     "INSERT INTO sessions (id, created_at, last_active_at, next_turn_position) VALUES (?, ?, ?, ?)",
-  ).run(id, NOW, NOW, (overrides["next_turn_position"] as number) ?? 1);
+  ).run(id, NOW, NOW, (overrides.next_turn_position as number) ?? 1);
   return id;
 }
 
@@ -66,11 +72,11 @@ function insertTurn(
   ).run(
     id,
     sessionId,
-    (overrides["seq"] as number) ?? 1,
-    (overrides["input_json"] as string) ?? INPUT_JSON,
-    (overrides["frozen_context"] as string) ?? FROZEN_JSON,
+    (overrides.seq as number) ?? 1,
+    (overrides.input_json as string) ?? INPUT_JSON,
+    (overrides.frozen_context as string) ?? FROZEN_JSON,
     NOW,
-    (overrides["next_run_attempt"] as number) ?? 1,
+    (overrides.next_run_attempt as number) ?? 1,
   );
   return id;
 }
@@ -82,7 +88,7 @@ function insertRun(
   overrides: Record<string, unknown> = {},
 ): string {
   const id = randomUUID();
-  const status = (overrides["status"] as string) ?? "queued";
+  const status = (overrides.status as string) ?? "queued";
   db.prepare(
     `INSERT INTO runs (id, turn_id, session_id, attempt, status, strategy,
       result_json, error_code, event_seq, select_on_success,
@@ -93,18 +99,18 @@ function insertRun(
     id,
     turnId,
     sessionId,
-    (overrides["attempt"] as number) ?? 1,
+    (overrides.attempt as number) ?? 1,
     status,
     "test-strategy",
-    (overrides["result_json"] as string | null) ?? null,
-    (overrides["error_code"] as string | null) ?? null,
+    (overrides.result_json as string | null) ?? null,
+    (overrides.error_code as string | null) ?? null,
     0,
     1,
     0,
     NOW,
-    (overrides["started_at"] as number | null) ?? null,
-    (overrides["finished_at"] as number | null) ?? null,
-    (overrides["cancel_requested_at"] as number | null) ?? null,
+    (overrides.started_at as number | null) ?? null,
+    (overrides.finished_at as number | null) ?? null,
+    (overrides.cancel_requested_at as number | null) ?? null,
   );
   return id;
 }
@@ -129,12 +135,15 @@ describe("m0 kernel pragmas and single connection", () => {
     const handle = await openMigratedMemory();
     try {
       const id = randomUUID();
-      handle.drizzle.insert(sessions).values({
-        id,
-        createdAt: NOW,
-        lastActiveAt: NOW,
-        nextTurnPosition: 1,
-      }).run();
+      handle.drizzle
+        .insert(sessions)
+        .values({
+          id,
+          createdAt: NOW,
+          lastActiveAt: NOW,
+          nextTurnPosition: 1,
+        })
+        .run();
       const row = handle.raw
         .prepare("SELECT id FROM sessions WHERE id = ?")
         .get(id) as { id: string } | undefined;
@@ -150,7 +159,9 @@ describe("m0 kernel pragmas and single connection", () => {
       insertSession(handle.raw);
       expect(() =>
         handle.raw
-          .prepare("INSERT INTO turns (id, session_id, seq, input_json, frozen_context, created_at, next_run_attempt) VALUES (?, ?, 1, ?, ?, ?, 1)")
+          .prepare(
+            "INSERT INTO turns (id, session_id, seq, input_json, frozen_context, created_at, next_run_attempt) VALUES (?, ?, 1, ?, ?, ?, 1)",
+          )
           .run(randomUUID(), "missing-session", INPUT_JSON, FROZEN_JSON, NOW),
       ).toThrow();
     } finally {
@@ -190,7 +201,9 @@ describe("m0 kernel DDL shape", () => {
     const handle = await openMigratedMemory();
     try {
       const row = handle.raw
-        .prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'messages'")
+        .prepare(
+          "SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'messages'",
+        )
         .get() as { n: number };
       expect(row.n).toBe(0);
     } finally {
@@ -219,7 +232,9 @@ describe("m0 kernel JSON checks", () => {
     const handle = await openMigratedMemory();
     try {
       const sessionId = insertSession(handle.raw);
-      expect(() => insertTurn(handle.raw, sessionId, { input_json: "nope" })).toThrow();
+      expect(() =>
+        insertTurn(handle.raw, sessionId, { input_json: "nope" }),
+      ).toThrow();
       expect(() =>
         insertTurn(handle.raw, sessionId, { seq: 2, frozen_context: "[bad" }),
       ).toThrow();
@@ -293,15 +308,19 @@ describe("m0 kernel run lifecycle checks", () => {
         }),
       ).toBeTypeOf("string");
       expect(
-        mk("failed", { started_at: NOW, finished_at: NOW, error_code: "x_failed" }),
+        mk("failed", {
+          started_at: NOW,
+          finished_at: NOW,
+          error_code: "x_failed",
+        }),
       ).toBeTypeOf("string");
       // Queued direct cancel: started_at may stay NULL.
       expect(
         mk("cancelled", { cancel_requested_at: NOW, finished_at: NOW }),
       ).toBeTypeOf("string");
-      expect(
-        mk("abandoned", { started_at: NOW, finished_at: NOW }),
-      ).toBeTypeOf("string");
+      expect(mk("abandoned", { started_at: NOW, finished_at: NOW })).toBeTypeOf(
+        "string",
+      );
     } finally {
       closeKernelDatabase(handle);
     }
@@ -348,7 +367,9 @@ describe("m0 kernel run lifecycle checks", () => {
   it("rejects out-of-range counters and flags", async () => {
     const handle = await openMigratedMemory();
     try {
-      expect(() => insertSession(handle.raw, { next_turn_position: 0 })).toThrow();
+      expect(() =>
+        insertSession(handle.raw, { next_turn_position: 0 }),
+      ).toThrow();
       const sessionId = insertSession(handle.raw);
       expect(() => insertTurn(handle.raw, sessionId, { seq: 0 })).toThrow();
       expect(() =>
@@ -382,7 +403,9 @@ describe("m0 kernel active-run uniqueness", () => {
       const sessionId = insertSession(handle.raw);
       const turnId = insertTurn(handle.raw, sessionId);
       insertRun(handle.raw, sessionId, turnId);
-      expect(() => insertRun(handle.raw, sessionId, turnId, { attempt: 2 })).toThrow();
+      expect(() =>
+        insertRun(handle.raw, sessionId, turnId, { attempt: 2 }),
+      ).toThrow();
     } finally {
       closeKernelDatabase(handle);
     }
@@ -398,7 +421,9 @@ describe("m0 kernel active-run uniqueness", () => {
         started_at: NOW,
         cancel_requested_at: NOW,
       });
-      expect(() => insertRun(handle.raw, sessionId, turnId, { attempt: 2 })).toThrow();
+      expect(() =>
+        insertRun(handle.raw, sessionId, turnId, { attempt: 2 }),
+      ).toThrow();
 
       const freeId = insertSession(handle.raw);
       const freeTurn = insertTurn(handle.raw, freeId);
@@ -531,7 +556,11 @@ describe("m0 kernel run_events and tool_calls contracts", () => {
       const sessionId = insertSession(handle.raw);
       const turnId = insertTurn(handle.raw, sessionId);
       const runId = insertRun(handle.raw, sessionId, turnId);
-      const insertCall = (index: number, extra: string, ...params: unknown[]) => {
+      const insertCall = (
+        index: number,
+        extra: string,
+        ...params: unknown[]
+      ) => {
         handle.raw
           .prepare(
             `INSERT INTO tool_calls (id, run_id, call_index, lifecycle_status, tool, args_hash, requested_at, created_at${extra}) VALUES (?, ?, ?, 'finished', 't.v', 'h', ?, ?${", ?".repeat(params.length)})`,
@@ -588,7 +617,9 @@ describe("m0 private POSIX permissions (non-Windows only)", () => {
       return;
     }
     const { statSync } = await import("node:fs");
-    const { createManualBackup, ensureBackupDir } = await import("../src/index.js");
+    const { createManualBackup, ensureBackupDir } = await import(
+      "../src/index.js"
+    );
     const dir = tempDir();
     const backups = ensureBackupDir(join(dir, "backups"));
     expect(statSync(backups).mode & 0o777).toBe(0o700);

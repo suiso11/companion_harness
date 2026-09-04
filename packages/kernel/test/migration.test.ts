@@ -5,13 +5,12 @@
 // All databases and backup directories live under os.tmpdir() and are
 // removed in afterEach. Deterministic backup names use injected now/ids.
 
-import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 import {
   mkdirSync,
   mkdtempSync,
-  readFileSync,
   readdirSync,
+  readFileSync,
   renameSync,
   rmSync,
   statSync,
@@ -21,10 +20,11 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  BUNDLED_SCHEMA_VERSION,
   BackupRequiredError,
+  BUNDLED_SCHEMA_VERSION,
   closeKernelDatabase,
   createManualBackup,
   createPreMigrationBackup,
@@ -161,7 +161,9 @@ describe("m0 migration lifecycle", () => {
         backupId: "11111111-2222-4333-8444-555555555555",
       });
       expect(result.migrated).toBe(true);
-      expect(result.backupPath).toMatch(/companion-pre-migration-v0-to-v1-.*\.sqlite$/);
+      expect(result.backupPath).toMatch(
+        /companion-pre-migration-v0-to-v1-.*\.sqlite$/,
+      );
       const name = (result.backupPath as string).split(/[\\/]/).pop() as string;
       expect(name).toMatch(BACKUP_NAME_PATTERN);
       // No .partial residue next to the final backup.
@@ -169,12 +171,14 @@ describe("m0 migration lifecycle", () => {
         readdirSync(backups).filter((entry) => entry.endsWith(".partial")),
       ).toEqual([]);
       // Backup copy passes quick_check and holds the legacy table.
-      const copy = new Database(result.backupPath as string, { readonly: true });
+      const copy = new Database(result.backupPath as string, {
+        readonly: true,
+      });
       try {
         expect(quickCheck(copy)).toBe("ok");
-        const kept = copy
-          .prepare("SELECT v FROM legacy")
-          .get() as { v: string };
+        const kept = copy.prepare("SELECT v FROM legacy").get() as {
+          v: string;
+        };
         expect(kept.v).toBe("keep-me");
       } finally {
         copy.close();
@@ -182,9 +186,9 @@ describe("m0 migration lifecycle", () => {
       // Live DB upgraded in place with legacy data preserved.
       expect(getSchemaVersion(handle.raw)).toBe(BUNDLED_SCHEMA_VERSION);
       expect(tableNames(handle.raw)).toContain("runs");
-      const kept = handle.raw
-        .prepare("SELECT v FROM legacy")
-        .get() as { v: string };
+      const kept = handle.raw.prepare("SELECT v FROM legacy").get() as {
+        v: string;
+      };
       expect(kept.v).toBe("keep-me");
     } finally {
       closeKernelDatabase(handle);
@@ -199,9 +203,9 @@ describe("m0 migration lifecycle", () => {
     setup.close();
     const handle = openKernelDatabase(file);
     try {
-      await expect(migrateKernelDatabase({ db: handle.raw })).rejects.toBeInstanceOf(
-        BackupRequiredError,
-      );
+      await expect(
+        migrateKernelDatabase({ db: handle.raw }),
+      ).rejects.toBeInstanceOf(BackupRequiredError);
       expect(getSchemaVersion(handle.raw)).toBe(0);
       expect(tableNames(handle.raw)).toEqual(["legacy"]);
     } finally {
@@ -233,10 +237,18 @@ describe("m0 migration lifecycle", () => {
     const dir = tempDir();
     const migrations = join(dir, "migrations");
     mkdirSync(migrations, { recursive: true });
-    writeFileSync(join(migrations, "0001_first.sql"), "CREATE TABLE t1 (a TEXT NOT NULL) STRICT;");
-    writeFileSync(join(migrations, "0002_second.sql"), "CREATE TABLE t2 (b TEXT NOT NULL) STRICT;");
+    writeFileSync(
+      join(migrations, "0001_first.sql"),
+      "CREATE TABLE t1 (a TEXT NOT NULL) STRICT;",
+    );
+    writeFileSync(
+      join(migrations, "0002_second.sql"),
+      "CREATE TABLE t2 (b TEXT NOT NULL) STRICT;",
+    );
     writeFileSync(join(migrations, "README.md"), "ignored");
-    expect(listMigrations(migrations).map((entry) => entry.version)).toEqual([1, 2]);
+    expect(listMigrations(migrations).map((entry) => entry.version)).toEqual([
+      1, 2,
+    ]);
 
     const handle = openKernelDatabase(":memory:");
     try {
@@ -254,7 +266,10 @@ describe("m0 migration lifecycle", () => {
 
     const gapped = join(dir, "gapped");
     mkdirSync(gapped, { recursive: true });
-    writeFileSync(join(gapped, "0002_only.sql"), "CREATE TABLE t2 (b TEXT NOT NULL) STRICT;");
+    writeFileSync(
+      join(gapped, "0002_only.sql"),
+      "CREATE TABLE t2 (b TEXT NOT NULL) STRICT;",
+    );
     const other = openKernelDatabase(":memory:");
     try {
       await expect(
@@ -273,7 +288,10 @@ describe("m0 migration lifecycle", () => {
     const dir = tempDir();
     const migrations = join(dir, "migrations");
     mkdirSync(migrations, { recursive: true });
-    writeFileSync(join(migrations, "0001_broken.sql"), "CREATE TABLE broken (oops INVALID SYNTAX HERE) STRICT;");
+    writeFileSync(
+      join(migrations, "0001_broken.sql"),
+      "CREATE TABLE broken (oops INVALID SYNTAX HERE) STRICT;",
+    );
     const backups = join(dir, "backups");
     const handle = openKernelDatabase(":memory:");
     try {
@@ -311,13 +329,14 @@ describe("m0 pre-migration backup rotation", () => {
       const seed = new Database(join(backups, `seed-${i}.sqlite`));
       seed.exec("CREATE TABLE s (v TEXT NOT NULL) STRICT");
       seed.close();
-      const name =
-        `${PRE_MIGRATION_PREFIX}v0-to-v1-2026010${i}T000000Z-11111111-2222-4333-8444-55555555555${i}.sqlite`;
+      const name = `${PRE_MIGRATION_PREFIX}v0-to-v1-2026010${i}T000000Z-11111111-2222-4333-8444-55555555555${i}.sqlite`;
       renameSync(join(backups, `seed-${i}.sqlite`), join(backups, name));
       const atime = new Date(Date.UTC(2026, 0, i + 1));
       utimesSync(join(backups, name), atime, atime);
     }
-    const manualDb = new Database(join(backups, "companion-manual-20260101T000000Z-aaaa.sqlite"));
+    const manualDb = new Database(
+      join(backups, "companion-manual-20260101T000000Z-aaaa.sqlite"),
+    );
     manualDb.exec("CREATE TABLE m (v TEXT NOT NULL) STRICT");
     manualDb.close();
 
@@ -335,7 +354,9 @@ describe("m0 pre-migration backup rotation", () => {
       closeKernelDatabase(source);
     }
     const remaining = readdirSync(backups).sort();
-    expect(remaining).toContain("companion-manual-20260101T000000Z-aaaa.sqlite");
+    expect(remaining).toContain(
+      "companion-manual-20260101T000000Z-aaaa.sqlite",
+    );
     const keptPre = remaining.filter((n) => n.startsWith(PRE_MIGRATION_PREFIX));
     expect(keptPre).toHaveLength(PRE_MIGRATION_KEEP_GENERATIONS);
     // Five seeds (20260100..20260104) plus the new September backup: keep
@@ -365,7 +386,9 @@ describe("m0 pre-migration backup rotation", () => {
     expect(kept).toHaveLength(3);
     expect(pruned).toHaveLength(1);
     expect(pruned[0]?.endsWith(names[0] as string)).toBe(true);
-    expect(statSync(join(backups, "companion-manual-keep.sqlite")).isFile()).toBe(true);
+    expect(
+      statSync(join(backups, "companion-manual-keep.sqlite")).isFile(),
+    ).toBe(true);
   });
 });
 
@@ -467,24 +490,38 @@ describe("m0 storage helpers and provenance", () => {
   it("keeps migration provenance in the package (static check)", async () => {
     const testDir = dirname(fileURLToPath(import.meta.url));
     const kernelDir = join(testDir, "..");
-    const sql = readFileSync(join(kernelDir, "migrations", "0001_m0_foundation.sql"), "utf8");
+    const sql = readFileSync(
+      join(kernelDir, "migrations", "0001_m0_foundation.sql"),
+      "utf8",
+    );
     expect(sql).toContain("CREATE TABLE sessions");
     expect(sql).toContain("CREATE TABLE api_idempotency");
     expect(sql).toContain("idx_runs_one_active_per_session");
     const journal = JSON.parse(
-      readFileSync(join(kernelDir, "migrations", "meta", "_journal.json"), "utf8"),
+      readFileSync(
+        join(kernelDir, "migrations", "meta", "_journal.json"),
+        "utf8",
+      ),
     ) as { entries: Array<{ tag: string }> };
-    expect(journal.entries.map((entry) => entry.tag)).toContain("0001_m0_foundation");
+    expect(journal.entries.map((entry) => entry.tag)).toContain(
+      "0001_m0_foundation",
+    );
     const backupSrc = readFileSync(join(kernelDir, "src", "backup.ts"), "utf8");
     expect(backupSrc).toContain(".backup(");
     expect(backupSrc).not.toContain("VACUUM");
     expect(backupSrc).not.toContain("copyFile");
-    const migrateSrc = readFileSync(join(kernelDir, "src", "migrate.ts"), "utf8");
+    const migrateSrc = readFileSync(
+      join(kernelDir, "src", "migrate.ts"),
+      "utf8",
+    );
     expect(migrateSrc).not.toContain("drizzle-kit");
     expect(migrateSrc).toContain("user_version");
     const kernelPkg = JSON.parse(
       readFileSync(join(kernelDir, "package.json"), "utf8"),
-    ) as { dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
+    ) as {
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    };
     expect(kernelPkg.dependencies ?? {}).not.toHaveProperty("drizzle-kit");
     expect(kernelPkg.devDependencies ?? {}).not.toHaveProperty("drizzle-kit");
   });

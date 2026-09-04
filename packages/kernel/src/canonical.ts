@@ -31,7 +31,11 @@ function canonicalize(value: unknown): unknown {
     const sorted: JsonObject = {};
     for (const key of Object.keys(value).sort()) {
       const entry = (value as JsonObject)[key];
-      if (entry === undefined || typeof entry === "function" || typeof entry === "symbol") {
+      if (
+        entry === undefined ||
+        typeof entry === "function" ||
+        typeof entry === "symbol"
+      ) {
         continue;
       }
       sorted[key] = canonicalize(entry);
@@ -82,7 +86,9 @@ export function requestHash(
   if (!Number.isInteger(schemaVersion) || schemaVersion < 1) {
     throw new TypeError("schemaVersion must be an integer >= 1");
   }
-  return sha256Hex(`${operation}:${schemaVersion}:${canonicalJsonString(payload)}`);
+  return sha256Hex(
+    `${operation}:${schemaVersion}:${canonicalJsonString(payload)}`,
+  );
 }
 
 /** Operation ids + schema versions used for M0 idempotency hashing. */
@@ -107,9 +113,10 @@ export function isUuidV4(value: unknown): value is string {
 
 /** Decode the version nibble of a UUID string, or null when malformed. */
 export function uuidVersion(value: string): number | null {
-  const match = /^[0-9a-f]{8}-[0-9a-f]{4}-([0-9a-f])[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$/i.exec(
-    value,
-  );
+  const match =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-([0-9a-f])[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$/i.exec(
+      value,
+    );
   if (match?.[1] === undefined) {
     return null;
   }

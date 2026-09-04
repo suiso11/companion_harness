@@ -5,9 +5,12 @@
 // SAME connection object (drizzle() never opens another connection).
 // No connection pooling, no implicit connections elsewhere.
 
-import Database from "better-sqlite3";
-import { type BetterSQLite3Database, drizzle } from "drizzle-orm/better-sqlite3";
 import { chmodSync } from "node:fs";
+import Database from "better-sqlite3";
+import {
+  type BetterSQLite3Database,
+  drizzle,
+} from "drizzle-orm/better-sqlite3";
 import { PragmasError, QuickCheckError } from "./errors.js";
 import { kernelSchema } from "./schema.js";
 
@@ -109,7 +112,12 @@ export function openKernelDatabase(dbPath: string): KernelDatabaseHandle {
         throw error;
       }
     }
-    return { raw, drizzle: wrapped, path: dbPath, journalMode: applied.journalMode };
+    return {
+      raw,
+      drizzle: wrapped,
+      path: dbPath,
+      journalMode: applied.journalMode,
+    };
   } catch (error) {
     raw.close();
     throw error;

@@ -232,9 +232,7 @@ function requireUuid(
 
 async function readJsonBody(
   c: Context,
-): Promise<
-  { ok: true; value: unknown; bytes: number } | { ok: false }
-> {
+): Promise<{ ok: true; value: unknown; bytes: number } | { ok: false }> {
   // Early Content-Length gate: reject without streaming when the declared
   // size already exceeds the byte cap. Malformed lengths fail closed.
   const lengthHeader = c.req.header("content-length");
@@ -601,8 +599,8 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       return validationError(c);
     }
     const parsed = HistoryQuerySchema.safeParse({
-      beforePosition: gated.values["beforePosition"],
-      limit: gated.values["limit"],
+      beforePosition: gated.values.beforePosition,
+      limit: gated.values.limit,
     });
     if (!parsed.success) {
       return validationError(c);
@@ -637,8 +635,8 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       return validationError(c);
     }
     const parsed = EventsQuerySchema.safeParse({
-      after: gatedEvents.values["after"],
-      limit: gatedEvents.values["limit"],
+      after: gatedEvents.values.after,
+      limit: gatedEvents.values.limit,
     });
     if (!parsed.success) {
       return validationError(c);
@@ -670,7 +668,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       return validationError(c);
     }
     const parsedQuery = IdempotencyLookupQuerySchema.safeParse({
-      scope: gatedScope.values["scope"],
+      scope: gatedScope.values.scope,
     });
     if (!parsedQuery.success) {
       return validationError(c);

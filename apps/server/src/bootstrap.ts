@@ -35,14 +35,14 @@ import { createApp, type EnginePort, type ServerControls } from "./app.js";
 import {
   assertDbPathHasNoSymlink,
   loadServerConfig,
-  ServerConfigError,
   type ServerConfig,
+  ServerConfigError,
 } from "./config.js";
 import { createStdServerLogger, type ServerLogger } from "./logger.js";
 import {
   measureStoreSize,
-  shouldWarnStoreSize,
   type StatFn,
+  shouldWarnStoreSize,
 } from "./maintenance.js";
 
 /** Graceful-drain natural-completion budget (§11.5: max 10s). */
@@ -72,7 +72,10 @@ export interface StartedServer {
 
 function ensureDbDir(
   dbPath: string,
-  deps: { platform?: string; chmod?: (path: string, mode: number) => void } = {},
+  deps: {
+    platform?: string;
+    chmod?: (path: string, mode: number) => void;
+  } = {},
 ): void {
   // Re-check fail-closed guards, then create missing parents.
   assertDbPathHasNoSymlink(dbPath);

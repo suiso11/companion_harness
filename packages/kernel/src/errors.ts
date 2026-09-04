@@ -113,7 +113,10 @@ export class RepositoryNotFoundError extends KernelStorageError {
 export class IdempotencyConflictError extends KernelStorageError {
   readonly scope: string;
 
-  constructor(scope: string, message = "idempotency key already used for a different request") {
+  constructor(
+    scope: string,
+    message = "idempotency key already used for a different request",
+  ) {
     super("idempotency_key_reused", `${message} (scope ${scope})`);
     this.scope = scope;
   }

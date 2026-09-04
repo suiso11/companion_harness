@@ -9,15 +9,14 @@
 //
 // Out of scope: scheduler, ToolBroker, HTTP, server config.
 
-import type Database from "better-sqlite3";
 import {
   type AcceptedRun,
-  type FrozenContext,
   type CreateSessionResponse,
   CreateSessionResponseSchema,
   EventsQuerySchema,
   type EventsResponse,
   EventsResponseSchema,
+  type FrozenContext,
   FrozenContextSchema,
   HistoryQuerySchema,
   type HistoryResponse,
@@ -27,30 +26,31 @@ import {
   type IdempotencyLookupResponse,
   IdempotencyLookupResponseSchema,
   IdempotencyScopeSchema,
-  M0RunEventTypeSchema,
+  isTerminalStatus,
   type M0RunEventType,
+  M0RunEventTypeSchema,
+  messageScope,
   PostMessageRequestSchema,
   type PostMessageResponse,
   PostMessageResponseSchema,
   PostRetryRequestSchema,
   type PostRetryResponse,
-  RUN_EVENT_SCHEMA_VERSION,
-  type RunEvent,
-  type RunResult,
-  type RunStatus,
-  isTerminalStatus,
-  messageScope,
   parseRunErrorCode,
   parseRunEvent,
   parseRunEventPayload,
   parseRunResult,
   parseTurnInput,
+  RUN_EVENT_SCHEMA_VERSION,
+  type RunEvent,
+  type RunResult,
+  type RunStatus,
   retryScope,
 } from "@companion/contracts";
+import type Database from "better-sqlite3";
 import {
-  IDEMPOTENCY_OPERATIONS,
   assertUuidV4,
   generateId,
+  IDEMPOTENCY_OPERATIONS,
   isUuidV4,
   requestHash,
 } from "./canonical.js";
@@ -166,7 +166,9 @@ const ACTIVE_STATUSES_SQL = "('queued','running','cancel_requested')";
 function nowMs(input?: number): number {
   const now = input ?? Date.now();
   if (!Number.isInteger(now) || now < 0 || now > Number.MAX_SAFE_INTEGER) {
-    throw new RepositoryValidationError("now must be an integer Unix-ms timestamp");
+    throw new RepositoryValidationError(
+      "now must be an integer Unix-ms timestamp",
+    );
   }
   return now;
 }
@@ -179,7 +181,9 @@ function parseOrValidation<T>(fn: () => T, what: string): T {
       throw error;
     }
     const message = error instanceof Error ? error.message : String(error);
-    throw new RepositoryValidationError(`${what}: ${message}`, { cause: error });
+    throw new RepositoryValidationError(`${what}: ${message}`, {
+      cause: error,
+    });
   }
 }
 
@@ -221,11 +225,21 @@ function isBusyConstraint(error: unknown): boolean {
   return code === "SQLITE_CONSTRAINT_UNIQUE" || code === "SQLITE_CONSTRAINT";
 }
 
-function readSession(db: Database.Database, sessionId: string): SessionRow | null {
+function readSession(
+  db: Database.Database,
+  sessionId: string,
+): SessionRow | null {
   const row = db
-    .prepare("SELECT id, created_at, last_active_at, next_turn_position FROM sessions WHERE id = ?")
+    .prepare(
+      "SELECT id, created_at, last_active_at, next_turn_position FROM sessions WHERE id = ?",
+    )
     .get(sessionId) as
-    | { id: string; created_at: number; last_active_at: number; next_turn_position: number }
+    | {
+        id: string;
+        created_at: number;
+        last_active_at: number;
+        next_turn_position: number;
+      }
     | undefined;
   if (row === undefined) {
     return null;
@@ -249,7 +263,10 @@ interface RawTurn {
 }
 
 function parseTurnRow(row: RawTurn): TurnRow {
-  const input = parseOrValidation(() => parseTurnInput(JSON.parse(row.input_json)), "turn input_json");
+  const input = parseOrValidation(
+    () => parseTurnInput(JSON.parse(row.input_json)),
+    "turn input_json",
+  );
   const frozenContext = parseOrValidation(
     () => FrozenContextSchema.parse(JSON.parse(row.frozen_context)),
     "turn frozen_context",
@@ -287,7 +304,10 @@ function parseRunRow(row: RawRun): RunRow {
   const result =
     row.result_json === null
       ? null
-      : parseOrValidation(() => parseRunResult(JSON.parse(row.result_json as string)), "run result_json");
+      : parseOrValidation(
+          () => parseRunResult(JSON.parse(row.result_json as string)),
+          "run result_json",
+        );
   return {
     id: row.id,
     turnId: row.turn_id,
@@ -309,9 +329,9 @@ function parseRunRow(row: RawRun): RunRow {
 
 function readRun(db: Database.Database, runId: string): RawRun | null {
   return (
-    (db
-      .prepare("SELECT * FROM runs WHERE id = ?")
-      .get(runId) as RawRun | undefined) ?? null
+    (db.prepare("SELECT * FROM runs WHERE id = ?").get(runId) as
+      | RawRun
+      | undefined) ?? null
   );
 }
 
@@ -323,7 +343,10 @@ function appendEventInTx(
   payload: unknown,
   now: number,
 ): number {
-  const validType = parseOrValidation(() => M0RunEventTypeSchema.parse(type), "run event type");
+  const validType = parseOrValidation(
+    () => M0RunEventTypeSchema.parse(type),
+    "run event type",
+  );
   const validPayload = parseOrValidation(
     () => parseRunEventPayload(validType, payload),
     `run event payload for ${validType}`,
@@ -343,7 +366,14 @@ function appendEventInTx(
   }
   db.prepare(
     "INSERT INTO run_events (run_id, seq, schema_version, type, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-  ).run(runId, next, RUN_EVENT_SCHEMA_VERSION, validType, JSON.stringify(validPayload), now);
+  ).run(
+    runId,
+    next,
+    RUN_EVENT_SCHEMA_VERSION,
+    validType,
+    JSON.stringify(validPayload),
+    now,
+  );
   return next;
 }
 
@@ -353,9 +383,18 @@ function toStoredResponse(
   key: string,
 ): StoredIdempotencyRecord | null {
   const row = db
-    .prepare("SELECT scope, key, request_hash, response_status, response_body, created_at FROM api_idempotency WHERE scope = ? AND key = ?")
+    .prepare(
+      "SELECT scope, key, request_hash, response_status, response_body, created_at FROM api_idempotency WHERE scope = ? AND key = ?",
+    )
     .get(scope, key) as
-    | { scope: string; key: string; request_hash: string; response_status: number; response_body: string; created_at: number }
+    | {
+        scope: string;
+        key: string;
+        request_hash: string;
+        response_status: number;
+        response_body: string;
+        created_at: number;
+      }
     | undefined;
   if (row === undefined) {
     return null;
@@ -365,7 +404,10 @@ function toStoredResponse(
     key: row.key,
     requestHash: row.request_hash,
     responseStatus: row.response_status,
-    responseBody: parseOrValidation(() => JSON.parse(row.response_body), "stored idempotency body"),
+    responseBody: parseOrValidation(
+      () => JSON.parse(row.response_body),
+      "stored idempotency body",
+    ),
     createdAt: row.created_at,
   };
 }
@@ -400,7 +442,9 @@ export function createKernelRepository(db: Database.Database) {
 
   function getTurn(turnId: string): TurnRow {
     const id = requireId(turnId, "turnId");
-    const row = db.prepare("SELECT * FROM turns WHERE id = ?").get(id) as RawTurn | undefined;
+    const row = db.prepare("SELECT * FROM turns WHERE id = ?").get(id) as
+      | RawTurn
+      | undefined;
     if (row === undefined) {
       throw new RepositoryNotFoundError(`turn ${id} not found`);
     }
@@ -421,7 +465,9 @@ export function createKernelRepository(db: Database.Database) {
     const run = requireId(runId, "runId");
     const row = readRun(db, run);
     if (row === null || row.session_id !== session) {
-      throw new RepositoryNotFoundError(`run ${run} not found in session ${session}`);
+      throw new RepositoryNotFoundError(
+        `run ${run} not found in session ${session}`,
+      );
     }
     return row;
   }
@@ -429,14 +475,20 @@ export function createKernelRepository(db: Database.Database) {
   function requireOwnedTurn(sessionId: string, turnId: string): RawTurn {
     const session = requireId(sessionId, "sessionId");
     const turn = requireId(turnId, "turnId");
-    const row = db.prepare("SELECT * FROM turns WHERE id = ?").get(turn) as RawTurn | undefined;
+    const row = db.prepare("SELECT * FROM turns WHERE id = ?").get(turn) as
+      | RawTurn
+      | undefined;
     if (row === undefined || row.session_id !== session) {
-      throw new RepositoryNotFoundError(`turn ${turn} not found in session ${session}`);
+      throw new RepositoryNotFoundError(
+        `turn ${turn} not found in session ${session}`,
+      );
     }
     return row;
   }
 
-  function createSession(options: CreateSessionOptions): AcceptedResponse<CreateSessionResponse> {
+  function createSession(
+    options: CreateSessionOptions,
+  ): AcceptedResponse<CreateSessionResponse> {
     const key = requireKey(options.key);
     const now = nowMs(options.now);
     const scope = IDEMPOTENCY_SCOPE_SESSIONS_CREATE;
@@ -462,7 +514,8 @@ export function createKernelRepository(db: Database.Database) {
         "INSERT INTO sessions (id, created_at, last_active_at, next_turn_position) VALUES (?, ?, ?, 1)",
       ).run(id, now, now);
       const body = parseOrValidation(
-        () => CreateSessionResponseSchema.parse({ sessionId: id, createdAt: now }),
+        () =>
+          CreateSessionResponseSchema.parse({ sessionId: id, createdAt: now }),
         "create-session response",
       );
       storeIdempotentResponse(db, scope, key, hash, 201, body, now);
@@ -502,11 +555,15 @@ export function createKernelRepository(db: Database.Database) {
       "post-message frozen context",
     );
     const turnInput = parseOrValidation(
-      () => parseTurnInput({ kind: "user_text", version: 1, text: parsed.text }),
+      () =>
+        parseTurnInput({ kind: "user_text", version: 1, text: parsed.text }),
       "post-message turn input",
     );
     const scope = messageScope(session);
-    parseOrValidation(() => IdempotencyScopeSchema.parse(scope), "message scope");
+    parseOrValidation(
+      () => IdempotencyScopeSchema.parse(scope),
+      "message scope",
+    );
     // Idempotency hash covers every normalized operation-affecting field:
     // text/uiContext plus the strategy, selectOnSuccess, and timeZone values
     // that alter the persisted turn/run rows. Zod-defaulted canonical JSON
@@ -544,7 +601,14 @@ export function createKernelRepository(db: Database.Database) {
       try {
         db.prepare(
           "INSERT INTO turns (id, session_id, seq, input_json, frozen_context, created_at, next_run_attempt) VALUES (?, ?, ?, ?, ?, ?, 2)",
-        ).run(turnId, session, seq, JSON.stringify(turnInput), JSON.stringify(frozen), now);
+        ).run(
+          turnId,
+          session,
+          seq,
+          JSON.stringify(turnInput),
+          JSON.stringify(frozen),
+          now,
+        );
         db.prepare(
           `INSERT INTO runs (id, turn_id, session_id, attempt, status, strategy,
             result_json, error_code, event_seq, select_on_success,
@@ -555,10 +619,14 @@ export function createKernelRepository(db: Database.Database) {
         // atomically produces the persisted run.queued seq 1.
         appendEventInTx(db, runId, 0, "run.queued", { attempt: 1 }, now);
         const moved = db
-          .prepare("UPDATE sessions SET next_turn_position = ?, last_active_at = ? WHERE id = ? AND next_turn_position = ?")
+          .prepare(
+            "UPDATE sessions SET next_turn_position = ?, last_active_at = ? WHERE id = ? AND next_turn_position = ?",
+          )
           .run(seq + 1, now, session, seq);
         if (moved.changes !== 1) {
-          throw new RepositoryValidationError("concurrent turn allocation conflict");
+          throw new RepositoryValidationError(
+            "concurrent turn allocation conflict",
+          );
         }
       } catch (error) {
         if (error instanceof KernelStorageError) {
@@ -571,7 +639,12 @@ export function createKernelRepository(db: Database.Database) {
       }
       const accepted: AcceptedRun = { id: runId, attempt: 1, status: "queued" };
       const body = parseOrValidation(
-        () => PostMessageResponseSchema.parse({ sessionId: session, turnId, run: accepted }),
+        () =>
+          PostMessageResponseSchema.parse({
+            sessionId: session,
+            turnId,
+            run: accepted,
+          }),
         "post-message response",
       );
       storeIdempotentResponse(db, scope, key, hash, 202, body, now);
@@ -588,8 +661,12 @@ export function createKernelRepository(db: Database.Database) {
     const turn = requireId(turnId, "turnId");
     const key = requireKey(options.key);
     const now = nowMs(options.now);
-    parseOrValidation(() => PostRetryRequestSchema.parse({}), "post-retry request");
-    const strategy = options.strategy === undefined ? "m0-default" : options.strategy;
+    parseOrValidation(
+      () => PostRetryRequestSchema.parse({}),
+      "post-retry request",
+    );
+    const strategy =
+      options.strategy === undefined ? "m0-default" : options.strategy;
     if (strategy.length === 0 || strategy.length > 128) {
       throw new RepositoryValidationError("strategy must be 1..128 chars");
     }
@@ -621,28 +698,41 @@ export function createKernelRepository(db: Database.Database) {
       if (readSession(db, session) === null) {
         throw new RepositoryNotFoundError(`session ${session} not found`);
       }
-      const turnRow = db.prepare("SELECT * FROM turns WHERE id = ?").get(turn) as RawTurn | undefined;
+      const turnRow = db
+        .prepare("SELECT * FROM turns WHERE id = ?")
+        .get(turn) as RawTurn | undefined;
       if (turnRow === undefined || turnRow.session_id !== session) {
-        throw new RepositoryNotFoundError(`turn ${turn} not found in session ${session}`);
+        throw new RepositoryNotFoundError(
+          `turn ${turn} not found in session ${session}`,
+        );
       }
       // Retry reuses the original immutable input/frozen context: read + validate only.
-      parseOrValidation(() => parseTurnInput(JSON.parse(turnRow.input_json)), "retry turn input_json");
+      parseOrValidation(
+        () => parseTurnInput(JSON.parse(turnRow.input_json)),
+        "retry turn input_json",
+      );
       parseOrValidation(
         () => FrozenContextSchema.parse(JSON.parse(turnRow.frozen_context)),
         "retry turn frozen_context",
       );
       const busy = db
-        .prepare(`SELECT id FROM runs WHERE session_id = ? AND status IN ${ACTIVE_STATUSES_SQL} LIMIT 1`)
+        .prepare(
+          `SELECT id FROM runs WHERE session_id = ? AND status IN ${ACTIVE_STATUSES_SQL} LIMIT 1`,
+        )
         .get(session) as { id: string } | undefined;
       if (busy !== undefined) {
         throw new SessionBusyError(session);
       }
       const attempt = turnRow.next_run_attempt;
       const moved = db
-        .prepare("UPDATE turns SET next_run_attempt = ? WHERE id = ? AND next_run_attempt = ?")
+        .prepare(
+          "UPDATE turns SET next_run_attempt = ? WHERE id = ? AND next_run_attempt = ?",
+        )
         .run(attempt + 1, turn, attempt);
       if (moved.changes !== 1) {
-        throw new RepositoryValidationError("concurrent run-attempt allocation conflict");
+        throw new RepositoryValidationError(
+          "concurrent run-attempt allocation conflict",
+        );
       }
       const runId = generateId();
       try {
@@ -651,9 +741,20 @@ export function createKernelRepository(db: Database.Database) {
             result_json, error_code, event_seq, select_on_success,
             tool_requests_used, created_at, started_at, finished_at, cancel_requested_at)
            VALUES (?, ?, ?, ?, 'queued', ?, NULL, NULL, 0, ?, 0, ?, NULL, NULL, NULL)`,
-        ).run(runId, turn, session, attempt, strategy, selectOnSuccess ? 1 : 0, now);
+        ).run(
+          runId,
+          turn,
+          session,
+          attempt,
+          strategy,
+          selectOnSuccess ? 1 : 0,
+          now,
+        );
         appendEventInTx(db, runId, 0, "run.queued", { attempt }, now);
-        db.prepare("UPDATE sessions SET last_active_at = ? WHERE id = ?").run(now, session);
+        db.prepare("UPDATE sessions SET last_active_at = ? WHERE id = ?").run(
+          now,
+          session,
+        );
       } catch (error) {
         if (error instanceof KernelStorageError) {
           throw error;
@@ -665,7 +766,12 @@ export function createKernelRepository(db: Database.Database) {
       }
       const accepted: AcceptedRun = { id: runId, attempt, status: "queued" };
       const body = parseOrValidation(
-        () => PostMessageResponseSchema.parse({ sessionId: session, turnId: turn, run: accepted }),
+        () =>
+          PostMessageResponseSchema.parse({
+            sessionId: session,
+            turnId: turn,
+            run: accepted,
+          }),
         "post-retry response",
       );
       storeIdempotentResponse(db, scope, key, hash, 202, body, now);
@@ -673,7 +779,10 @@ export function createKernelRepository(db: Database.Database) {
     });
   }
 
-  function startRun(runId: string, options: TransitionOptions = {}): { applied: boolean; run: RunRow } {
+  function startRun(
+    runId: string,
+    options: TransitionOptions = {},
+  ): { applied: boolean; run: RunRow } {
     const id = requireId(runId, "runId");
     const now = nowMs(options.now);
     return withImmediate(db, () => {
@@ -685,7 +794,9 @@ export function createKernelRepository(db: Database.Database) {
         return { applied: false, run: parseRunRow(row) };
       }
       const moved = db
-        .prepare("UPDATE runs SET status = 'running', started_at = ? WHERE id = ? AND status = 'queued'")
+        .prepare(
+          "UPDATE runs SET status = 'running', started_at = ? WHERE id = ? AND status = 'queued'",
+        )
         .run(now, id);
       if (moved.changes !== 1) {
         const current = readRun(db, id);
@@ -694,7 +805,14 @@ export function createKernelRepository(db: Database.Database) {
         }
         return { applied: false, run: parseRunRow(current) };
       }
-      appendEventInTx(db, id, row.event_seq, "run.started", { attempt: row.attempt }, now);
+      appendEventInTx(
+        db,
+        id,
+        row.event_seq,
+        "run.started",
+        { attempt: row.attempt },
+        now,
+      );
       const current = readRun(db, id);
       if (current === null) {
         throw new RepositoryNotFoundError(`run ${id} not found`);
@@ -723,7 +841,9 @@ export function createKernelRepository(db: Database.Database) {
         return { applied: false, run: parseRunRow(row) };
       }
       const moved = db
-        .prepare("UPDATE runs SET status = 'completed', result_json = ?, finished_at = ? WHERE id = ? AND status = 'running'")
+        .prepare(
+          "UPDATE runs SET status = 'completed', result_json = ?, finished_at = ? WHERE id = ? AND status = 'running'",
+        )
         .run(JSON.stringify(valid), now, id);
       if (moved.changes !== 1) {
         const current = readRun(db, id);
@@ -732,7 +852,14 @@ export function createKernelRepository(db: Database.Database) {
         }
         return { applied: false, run: parseRunRow(current) };
       }
-      appendEventInTx(db, id, row.event_seq, "run.completed", { result: valid }, now);
+      appendEventInTx(
+        db,
+        id,
+        row.event_seq,
+        "run.completed",
+        { result: valid },
+        now,
+      );
       if (row.select_on_success === 1) {
         const selected = db
           .prepare("SELECT status FROM runs WHERE id = ?")
@@ -759,7 +886,10 @@ export function createKernelRepository(db: Database.Database) {
     const id = requireId(runId, "runId");
     const now = nowMs(options.now);
     // Never persist raw error strings: fixed snake_case code only.
-    const code = parseOrValidation(() => parseRunErrorCode(errorCode), "run error_code");
+    const code = parseOrValidation(
+      () => parseRunErrorCode(errorCode),
+      "run error_code",
+    );
     return withImmediate(db, () => {
       const row = readRun(db, id);
       if (row === null) {
@@ -769,7 +899,9 @@ export function createKernelRepository(db: Database.Database) {
         return { applied: false, run: parseRunRow(row) };
       }
       const moved = db
-        .prepare("UPDATE runs SET status = 'failed', error_code = ?, finished_at = ? WHERE id = ? AND status = 'running'")
+        .prepare(
+          "UPDATE runs SET status = 'failed', error_code = ?, finished_at = ? WHERE id = ? AND status = 'running'",
+        )
         .run(code, now, id);
       if (moved.changes !== 1) {
         const current = readRun(db, id);
@@ -778,7 +910,14 @@ export function createKernelRepository(db: Database.Database) {
         }
         return { applied: false, run: parseRunRow(current) };
       }
-      appendEventInTx(db, id, row.event_seq, "run.failed", { errorCode: code }, now);
+      appendEventInTx(
+        db,
+        id,
+        row.event_seq,
+        "run.failed",
+        { errorCode: code },
+        now,
+      );
       const current = readRun(db, id);
       if (current === null) {
         throw new RepositoryNotFoundError(`run ${id} not found`);
@@ -801,7 +940,9 @@ export function createKernelRepository(db: Database.Database) {
       if (row.status === "queued") {
         // Queued cancel goes directly to cancelled (never via cancel_requested).
         const moved = db
-          .prepare("UPDATE runs SET status = 'cancelled', cancel_requested_at = ?, finished_at = ? WHERE id = ? AND status = 'queued'")
+          .prepare(
+            "UPDATE runs SET status = 'cancelled', cancel_requested_at = ?, finished_at = ? WHERE id = ? AND status = 'queued'",
+          )
           .run(now, now, row.id);
         if (moved.changes !== 1) {
           const current = readRun(db, row.id);
@@ -820,7 +961,9 @@ export function createKernelRepository(db: Database.Database) {
       if (row.status === "running") {
         // Running cancel commits cancel_requested before any caller abort.
         const moved = db
-          .prepare("UPDATE runs SET status = 'cancel_requested', cancel_requested_at = ? WHERE id = ? AND status = 'running'")
+          .prepare(
+            "UPDATE runs SET status = 'cancel_requested', cancel_requested_at = ? WHERE id = ? AND status = 'running'",
+          )
           .run(now, row.id);
         if (moved.changes !== 1) {
           const current = readRun(db, row.id);
@@ -829,7 +972,14 @@ export function createKernelRepository(db: Database.Database) {
           }
           return { status: current.status, run: parseRunRow(current) };
         }
-        appendEventInTx(db, row.id, row.event_seq, "run.cancel_requested", {}, now);
+        appendEventInTx(
+          db,
+          row.id,
+          row.event_seq,
+          "run.cancel_requested",
+          {},
+          now,
+        );
         const current = readRun(db, row.id);
         if (current === null) {
           throw new RepositoryNotFoundError(`run ${row.id} not found`);
@@ -856,7 +1006,9 @@ export function createKernelRepository(db: Database.Database) {
         return { applied: false, run: parseRunRow(row) };
       }
       const moved = db
-        .prepare("UPDATE runs SET status = 'cancelled', finished_at = ? WHERE id = ? AND status = 'cancel_requested'")
+        .prepare(
+          "UPDATE runs SET status = 'cancelled', finished_at = ? WHERE id = ? AND status = 'cancel_requested'",
+        )
         .run(now, id);
       if (moved.changes !== 1) {
         const current = readRun(db, id);
@@ -880,25 +1032,40 @@ export function createKernelRepository(db: Database.Database) {
   ): { abandoned: number; cancelled: number } {
     return withImmediate(db, () => {
       const running = db
-        .prepare(`SELECT * FROM runs WHERE status = 'running' ORDER BY created_at ASC`)
+        .prepare(
+          `SELECT * FROM runs WHERE status = 'running' ORDER BY created_at ASC`,
+        )
         .all() as RawRun[];
       const cancelling = db
-        .prepare(`SELECT * FROM runs WHERE status = 'cancel_requested' ORDER BY created_at ASC`)
+        .prepare(
+          `SELECT * FROM runs WHERE status = 'cancel_requested' ORDER BY created_at ASC`,
+        )
         .all() as RawRun[];
       let abandoned = 0;
       for (const row of running) {
         const moved = db
-          .prepare("UPDATE runs SET status = 'abandoned', finished_at = ? WHERE id = ? AND status = 'running'")
+          .prepare(
+            "UPDATE runs SET status = 'abandoned', finished_at = ? WHERE id = ? AND status = 'running'",
+          )
           .run(now, row.id);
         if (moved.changes === 1) {
-          appendEventInTx(db, row.id, row.event_seq, "run.abandoned", { cause }, now);
+          appendEventInTx(
+            db,
+            row.id,
+            row.event_seq,
+            "run.abandoned",
+            { cause },
+            now,
+          );
           abandoned += 1;
         }
       }
       let cancelled = 0;
       for (const row of cancelling) {
         const moved = db
-          .prepare("UPDATE runs SET status = 'cancelled', finished_at = ? WHERE id = ? AND status = 'cancel_requested'")
+          .prepare(
+            "UPDATE runs SET status = 'cancelled', finished_at = ? WHERE id = ? AND status = 'cancel_requested'",
+          )
           .run(now, row.id);
         if (moved.changes === 1) {
           appendEventInTx(db, row.id, row.event_seq, "run.cancelled", {}, now);
@@ -910,11 +1077,17 @@ export function createKernelRepository(db: Database.Database) {
     });
   }
 
-  function recover(options: TransitionOptions = {}): { abandoned: number; cancelled: number } {
+  function recover(options: TransitionOptions = {}): {
+    abandoned: number;
+    cancelled: number;
+  } {
     return sweepTerminals("restart_recovery", nowMs(options.now));
   }
 
-  function drain(options: TransitionOptions = {}): { abandoned: number; cancelled: number } {
+  function drain(options: TransitionOptions = {}): {
+    abandoned: number;
+    cancelled: number;
+  } {
     return sweepTerminals("drain", nowMs(options.now));
   }
 
@@ -927,24 +1100,41 @@ export function createKernelRepository(db: Database.Database) {
     const id = requireId(runId, "runId");
     const now = nowMs(options.now);
     if (type !== "tool.requested" && type !== "tool.completed") {
-      throw new RepositoryValidationError("appendToolEvent accepts only tool.requested/tool.completed");
+      throw new RepositoryValidationError(
+        "appendToolEvent accepts only tool.requested/tool.completed",
+      );
     }
     return withImmediate(db, () => {
       const row = readRun(db, id);
       if (row === null) {
         throw new RepositoryNotFoundError(`run ${id} not found`);
       }
-      if (["completed", "failed", "cancelled", "abandoned"].includes(row.status)) {
-        throw new RepositoryValidationError("cannot append events to a terminal run");
+      if (
+        ["completed", "failed", "cancelled", "abandoned"].includes(row.status)
+      ) {
+        throw new RepositoryValidationError(
+          "cannot append events to a terminal run",
+        );
       }
       const next = appendEventInTx(db, id, row.event_seq, type, payload, now);
       const stored = db
-        .prepare("SELECT run_id, seq, schema_version, type, payload, created_at FROM run_events WHERE run_id = ? AND seq = ?")
+        .prepare(
+          "SELECT run_id, seq, schema_version, type, payload, created_at FROM run_events WHERE run_id = ? AND seq = ?",
+        )
         .get(id, next) as
-        | { run_id: string; seq: number; schema_version: number; type: string; payload: string; created_at: number }
+        | {
+            run_id: string;
+            seq: number;
+            schema_version: number;
+            type: string;
+            payload: string;
+            created_at: number;
+          }
         | undefined;
       if (stored === undefined) {
-        throw new RepositoryNotFoundError(`event ${next} for run ${id} not found`);
+        throw new RepositoryNotFoundError(
+          `event ${next} for run ${id} not found`,
+        );
       }
       return parseOrValidation(
         () =>
@@ -970,21 +1160,30 @@ export function createKernelRepository(db: Database.Database) {
       throw new RepositoryNotFoundError(`session ${session} not found`);
     }
     const parsed = parseOrValidation(
-      () => HistoryQuerySchema.parse({ beforePosition: query.beforePosition, limit: query.limit }),
+      () =>
+        HistoryQuerySchema.parse({
+          beforePosition: query.beforePosition,
+          limit: query.limit,
+        }),
       "history query",
     );
     const limit = parsed.limit;
     const rows =
       parsed.beforePosition === undefined
         ? (db
-            .prepare("SELECT * FROM turns WHERE session_id = ? ORDER BY seq DESC LIMIT ?")
+            .prepare(
+              "SELECT * FROM turns WHERE session_id = ? ORDER BY seq DESC LIMIT ?",
+            )
             .all(session, limit + 1) as RawTurn[])
         : (db
-            .prepare("SELECT * FROM turns WHERE session_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?")
+            .prepare(
+              "SELECT * FROM turns WHERE session_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?",
+            )
             .all(session, parsed.beforePosition, limit + 1) as RawTurn[]);
     const hasMore = rows.length > limit;
     const page = rows.slice(0, limit).reverse();
-    const nextBefore = hasMore && page.length > 0 ? (page[0] as RawTurn).seq : null;
+    const nextBefore =
+      hasMore && page.length > 0 ? (page[0] as RawTurn).seq : null;
     const items = page.map((row) => {
       const turn = parseTurnRow(row);
       if (turn.input.kind !== "user_text") {
@@ -1041,11 +1240,17 @@ export function createKernelRepository(db: Database.Database) {
   ): EventsResponse {
     const owned = requireOwnedRun(sessionId, runId);
     const parsed = parseOrValidation(
-      () => EventsQuerySchema.parse({ after: query.after ?? 0, limit: query.limit }),
+      () =>
+        EventsQuerySchema.parse({
+          after: query.after ?? 0,
+          limit: query.limit,
+        }),
       "events query",
     );
     const rows = db
-      .prepare("SELECT run_id, seq, schema_version, type, payload, created_at FROM run_events WHERE run_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?")
+      .prepare(
+        "SELECT run_id, seq, schema_version, type, payload, created_at FROM run_events WHERE run_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?",
+      )
       .all(owned.id, parsed.after, parsed.limit + 1) as Array<{
       run_id: string;
       seq: number;
@@ -1070,16 +1275,26 @@ export function createKernelRepository(db: Database.Database) {
         "run event envelope",
       ),
     );
-    const nextAfter = page.length > 0 ? (page[page.length - 1] as { seq: number }).seq : parsed.after;
+    const nextAfter =
+      page.length > 0
+        ? (page[page.length - 1] as { seq: number }).seq
+        : parsed.after;
     const terminal = isTerminalStatus(owned.status as RunStatus);
     return parseOrValidation(
-      () => EventsResponseSchema.parse({ events, nextAfter, hasMore, terminal }),
+      () =>
+        EventsResponseSchema.parse({ events, nextAfter, hasMore, terminal }),
       "events response",
     );
   }
 
-  function lookupIdempotency(scope: string, key: string): IdempotencyLookupResponse {
-    const validScope = parseOrValidation(() => IdempotencyScopeSchema.parse(scope), "idempotency scope");
+  function lookupIdempotency(
+    scope: string,
+    key: string,
+  ): IdempotencyLookupResponse {
+    const validScope = parseOrValidation(
+      () => IdempotencyScopeSchema.parse(scope),
+      "idempotency scope",
+    );
     const validKey = requireKey(key);
     const existing = toStoredResponse(db, validScope, validKey);
     if (existing === null) {
@@ -1102,7 +1317,10 @@ export function createKernelRepository(db: Database.Database) {
     scope: string,
   ): IdempotencyLookupResponse {
     const session = requireId(sessionId, "sessionId");
-    const validScope = parseOrValidation(() => IdempotencyScopeSchema.parse(scope), "idempotency scope");
+    const validScope = parseOrValidation(
+      () => IdempotencyScopeSchema.parse(scope),
+      "idempotency scope",
+    );
     const validKey = requireKey(key);
     parseOrValidation(
       () => IdempotencyLookupQuerySchema.parse({ scope: validScope }),
@@ -1122,23 +1340,33 @@ export function createKernelRepository(db: Database.Database) {
       requireOwnedTurn(session, assertUuidV4(turnMatch[1], "turnId"));
       return lookupIdempotency(validScope, validKey);
     }
-    throw new RepositoryNotFoundError(`scope ${validScope} not found in session ${session}`);
+    throw new RepositoryNotFoundError(
+      `scope ${validScope} not found in session ${session}`,
+    );
   }
 
   function getActiveRun(sessionId: string): RunRow | null {
     const session = requireId(sessionId, "sessionId");
     const row = db
-      .prepare(`SELECT * FROM runs WHERE session_id = ? AND status IN ${ACTIVE_STATUSES_SQL} LIMIT 1`)
+      .prepare(
+        `SELECT * FROM runs WHERE session_id = ? AND status IN ${ACTIVE_STATUSES_SQL} LIMIT 1`,
+      )
       .get(session) as RawRun | undefined;
     return row === undefined ? null : parseRunRow(row);
   }
 
-  function getSelection(turnId: string): { runId: string; selectedAt: number } | null {
+  function getSelection(
+    turnId: string,
+  ): { runId: string; selectedAt: number } | null {
     const turn = requireId(turnId, "turnId");
     const row = db
-      .prepare("SELECT run_id, selected_at FROM turn_selections WHERE turn_id = ?")
+      .prepare(
+        "SELECT run_id, selected_at FROM turn_selections WHERE turn_id = ?",
+      )
       .get(turn) as { run_id: string; selected_at: number } | undefined;
-    return row === undefined ? null : { runId: row.run_id, selectedAt: row.selected_at };
+    return row === undefined
+      ? null
+      : { runId: row.run_id, selectedAt: row.selected_at };
   }
 
   return {
@@ -1162,7 +1390,8 @@ export function createKernelRepository(db: Database.Database) {
     getEvents,
     lookupIdempotency,
     lookupIdempotencyForSession,
-    requireOwnedRun: (sessionId: string, runId: string): RunRow => parseRunRow(requireOwnedRun(sessionId, runId)),
+    requireOwnedRun: (sessionId: string, runId: string): RunRow =>
+      parseRunRow(requireOwnedRun(sessionId, runId)),
     requireOwnedTurn: (sessionId: string, turnId: string): TurnRow =>
       parseTurnRow(requireOwnedTurn(sessionId, turnId)),
   };

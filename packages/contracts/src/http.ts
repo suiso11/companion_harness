@@ -60,9 +60,13 @@ export type CreateSessionResponse = z.infer<typeof CreateSessionResponseSchema>;
  * seeds the frozen context. Strict: unknown keys rejected.
  */
 export const PostMessageRequestSchema = z.strictObject({
-  text: z.string().min(1).max(MAX_USER_TEXT_LENGTH).refine((t) => t.trim().length > 0, {
-    message: "text must not be blank",
-  }),
+  text: z
+    .string()
+    .min(1)
+    .max(MAX_USER_TEXT_LENGTH)
+    .refine((t) => t.trim().length > 0, {
+      message: "text must not be blank",
+    }),
   uiContext: z.record(z.string(), z.json()).optional().default({}),
 });
 export type PostMessageRequest = z.infer<typeof PostMessageRequestSchema>;
@@ -199,7 +203,9 @@ export type EventsResponse = z.infer<typeof EventsResponseSchema>;
 export const IdempotencyLookupQuerySchema = z.strictObject({
   scope: IdempotencyScopeSchema,
 });
-export type IdempotencyLookupQuery = z.infer<typeof IdempotencyLookupQuerySchema>;
+export type IdempotencyLookupQuery = z.infer<
+  typeof IdempotencyLookupQuerySchema
+>;
 
 export const IdempotencyLookupResponseSchema = z.discriminatedUnion("found", [
   z.strictObject({
@@ -212,7 +218,9 @@ export const IdempotencyLookupResponseSchema = z.discriminatedUnion("found", [
     code: z.literal("resend_required"),
   }),
 ]);
-export type IdempotencyLookupResponse = z.infer<typeof IdempotencyLookupResponseSchema>;
+export type IdempotencyLookupResponse = z.infer<
+  typeof IdempotencyLookupResponseSchema
+>;
 
 /* ------------------------------------------------------------------ */
 /* Errors                                                              */

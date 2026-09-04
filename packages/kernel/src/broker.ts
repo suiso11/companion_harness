@@ -43,6 +43,8 @@
 import {
   type ActualOutcome,
   isTerminalStatus,
+  parseRunEventPayload,
+  parseToolErrorCode,
   type ReportedOutcome,
   type ResultDisposition,
   RUN_EVENT_SCHEMA_VERSION,
@@ -50,8 +52,6 @@ import {
   TOOL_BUDGET_DEFAULTS,
   type ToolDescriptor,
   ToolDescriptorSchema,
-  parseRunEventPayload,
-  parseToolErrorCode,
   type ToolResult,
   ToolResultSchema,
 } from "@companion/contracts";
@@ -214,9 +214,7 @@ const TOOL_NAME_PATTERN =
   /^[a-z0-9]+(?:_[a-z0-9]+)*\.[a-z0-9]+(?:_[a-z0-9]+)*$/;
 
 function isValidToolNameFormat(name: string): boolean {
-  return (
-    name.length >= 1 && name.length <= 128 && TOOL_NAME_PATTERN.test(name)
-  );
+  return name.length >= 1 && name.length <= 128 && TOOL_NAME_PATTERN.test(name);
 }
 
 /* ------------------------------------------------------------------ */
@@ -745,7 +743,13 @@ export class ToolBroker {
       };
       // Begun-non-running budget exhaustion audits with no RunEvents.
       if (!this.isRunning(runId)) {
-        return this.finishFastAuditOnly(runId, auditTool, call, budgetFinal, trace);
+        return this.finishFastAuditOnly(
+          runId,
+          auditTool,
+          call,
+          budgetFinal,
+          trace,
+        );
       }
       return this.finishFast(runId, auditTool, call, budgetFinal, trace);
     }
@@ -839,7 +843,13 @@ export class ToolBroker {
         // Running-only delivery: a run that left `running` while this
         // request was in flight never receives cached output.
         if (!this.isRunning(runId)) {
-          return this.finishFast(runId, auditTool, call, cancelOutcome(null), trace);
+          return this.finishFast(
+            runId,
+            auditTool,
+            call,
+            cancelOutcome(null),
+            trace,
+          );
         }
         // Every delivered dedup reuse consumes cumulative budgets and is
         // marked accepted with the leader digest; over-budget duplicates
@@ -876,12 +886,24 @@ export class ToolBroker {
       if (prior !== undefined && prior.status === "inflight") {
         const leader = await this.awaitLeader(prior.promise, context.signal);
         if (leader === null) {
-          return this.finishFast(runId, auditTool, call, cancelOutcome(null), trace);
+          return this.finishFast(
+            runId,
+            auditTool,
+            call,
+            cancelOutcome(null),
+            trace,
+          );
         }
         // A run that left `running` during coalesced wait never receives
         // the leader output.
         if (!this.isRunning(runId)) {
-          return this.finishFast(runId, auditTool, call, cancelOutcome(null), trace);
+          return this.finishFast(
+            runId,
+            auditTool,
+            call,
+            cancelOutcome(null),
+            trace,
+          );
         }
         if (leader.accepted) {
           const reservation = this.reserveCumulative(
@@ -1136,9 +1158,7 @@ export class ToolBroker {
       try {
         const row = this.db
           .prepare("SELECT status, event_seq FROM runs WHERE id = ?")
-          .get(runId) as
-          | { status: string; event_seq: number }
-          | undefined;
+          .get(runId) as { status: string; event_seq: number } | undefined;
         if (row === undefined) {
           throw new RepositoryNotFoundError(`run ${runId} not found`);
         }
@@ -1176,7 +1196,9 @@ export class ToolBroker {
         });
         const next = row.event_seq + 1;
         const moved = this.db
-          .prepare("UPDATE runs SET event_seq = ? WHERE id = ? AND event_seq = ?")
+          .prepare(
+            "UPDATE runs SET event_seq = ? WHERE id = ? AND event_seq = ?",
+          )
           .run(next, runId, row.event_seq);
         if (moved.changes !== 1) {
           throw new KernelStorageError(
@@ -1239,8 +1261,8 @@ export class ToolBroker {
         if (!committed) {
           try {
             if (
-              (this.db as unknown as { inTransaction?: boolean }).inTransaction ===
-              true
+              (this.db as unknown as { inTransaction?: boolean })
+                .inTransaction === true
             ) {
               this.db.exec("ROLLBACK");
             }
@@ -1661,14 +1683,8 @@ export class ToolBroker {
     let normalizedOutput: NormalizedToolOutput;
     try {
       const normalizer = reg.normalize ?? defaultNormalizer;
-      let normalizerPromise: Promise<NormalizedToolOutput>;
-      try {
-        normalizerPromise = Promise.resolve().then(() =>
-          normalizer(raw, { input }),
-        );
-      } catch (error) {
-        throw error;
-      }
+      const normalizerPromise: Promise<NormalizedToolOutput> =
+        Promise.resolve().then(() => normalizer(raw, { input }));
       // Late async normalizer settlement is detached (no audit write; the
       // call already settled as timeout/cancel).
       void normalizerPromise.then(

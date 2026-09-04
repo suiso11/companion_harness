@@ -16,18 +16,12 @@ export type {
 export { createApp, hostNameOfHeader } from "./app.js";
 export type { StartedServer, StartServerOptions } from "./bootstrap.js";
 export {
+  SHUTDOWN_DRAIN_MS,
   sanitizeShutdownReason,
   sanitizeStartupErrorStatus,
-  SHUTDOWN_DRAIN_MS,
   startServer,
   startServerFromEnv,
 } from "./bootstrap.js";
-export type { StoreSize } from "./maintenance.js";
-export {
-  measureStoreSize,
-  shouldWarnStoreSize,
-  STORE_SIZE_WARN_BYTES,
-} from "./maintenance.js";
 export type { ServerConfig, ServerHost, ServerLogLevel } from "./config.js";
 export {
   assertDbPathHasNoSymlink,
@@ -47,6 +41,12 @@ export {
   createStdServerLogger,
   sanitizeLogStatus,
 } from "./logger.js";
+export type { StoreSize } from "./maintenance.js";
+export {
+  measureStoreSize,
+  STORE_SIZE_WARN_BYTES,
+  shouldWarnStoreSize,
+} from "./maintenance.js";
 
 function isMainModule(): boolean {
   const invoked = process.argv[1];

@@ -25,11 +25,11 @@ import {
   type RunResult,
 } from "@companion/contracts";
 import type Database from "better-sqlite3";
-import type { KernelRepository, RunRow, TurnRow } from "./repository.js";
 import {
   RepositoryNotFoundError,
   RepositoryValidationError,
 } from "./errors.js";
+import type { KernelRepository, RunRow, TurnRow } from "./repository.js";
 import {
   freezeStrategyContext,
   StrategyError,
@@ -131,7 +131,10 @@ export class RunEngine {
   private readonly drainMs: number;
   private readonly clock: EngineClock;
   private readonly inFlight = new Map<string, InFlight>();
-  private readonly watchdogs = new Map<string, { handle: unknown; deadline: number }>();
+  private readonly watchdogs = new Map<
+    string,
+    { handle: unknown; deadline: number }
+  >();
   private timer: unknown;
   private started = false;
   private draining = false;
@@ -262,14 +265,10 @@ export class RunEngine {
       await this.clock.sleep(Math.min(this.pollIntervalMs, remaining));
     }
     let swept: EngineRecovery = { abandoned: 0, cancelled: 0 };
-    try {
-      swept = this.repo.drain({ now: this.clock.now() });
-    } catch (error) {
-      // Fail closed: a drain storage failure rejects WITHOUT marking
-      // stopped, clearing in-flight ownership, or aborting controllers,
-      // so a later shutdown retry can still sweep the retained runs.
-      throw error;
-    }
+    // Fail closed: a drain storage failure rejects WITHOUT marking
+    // stopped, clearing in-flight ownership, or aborting controllers,
+    // so a later shutdown retry can still sweep the retained runs.
+    swept = this.repo.drain({ now: this.clock.now() });
     for (const [runId, entry] of this.inFlight) {
       this.clearWatchdog(runId);
       try {
@@ -492,7 +491,9 @@ export class RunEngine {
             const current = this.repo.getRun(runId);
             if (current.status === "cancel_requested") {
               finalizeFailed = !this.persistLifecycle(() =>
-                this.repo.finalizeCancelRequested(runId, { now: this.clock.now() }),
+                this.repo.finalizeCancelRequested(runId, {
+                  now: this.clock.now(),
+                }),
               );
             }
           } catch (error) {

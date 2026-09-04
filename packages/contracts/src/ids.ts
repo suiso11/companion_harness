@@ -23,7 +23,11 @@ export const IdempotencyKeySchema = z.string().regex(UUID_V4_REGEX, {
 export type IdempotencyKey = z.infer<typeof IdempotencyKeySchema>;
 
 /** Unix milliseconds (INTEGER in SQLite). */
-export const UnixMsSchema = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
+export const UnixMsSchema = z
+  .number()
+  .int()
+  .min(0)
+  .max(Number.MAX_SAFE_INTEGER);
 export type UnixMs = z.infer<typeof UnixMsSchema>;
 
 /** SHA-256 hex digest (request_hash / args_hash / result_digest). */

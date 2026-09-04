@@ -8,7 +8,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
-import { type StartedServer, sanitizeStartupErrorStatus, startServer } from "../src/bootstrap.js";
+import {
+  type StartedServer,
+  sanitizeStartupErrorStatus,
+  startServer,
+} from "../src/bootstrap.js";
 import { createCollectingLogger } from "../src/logger.js";
 import { STORE_SIZE_WARN_BYTES } from "../src/maintenance.js";
 
@@ -199,9 +203,7 @@ describe("bootstrap startup + graceful shutdown", () => {
       drainMs: 50,
       logger: over.logger,
       stat: (path) =>
-        path === dbPath
-          ? { size: STORE_SIZE_WARN_BYTES }
-          : { size: 1 },
+        path === dbPath ? { size: STORE_SIZE_WARN_BYTES } : { size: 1 },
     });
     servers.push(started);
     try {
@@ -234,11 +236,15 @@ describe("bootstrap startup + graceful shutdown", () => {
     try {
       // 512 MiB DB + 512 MiB WAL = exactly 1 GiB: no warning.
       expect(
-        exact.records.filter((record) => record.code === "server.store_size_warning"),
+        exact.records.filter(
+          (record) => record.code === "server.store_size_warning",
+        ),
       ).toHaveLength(0);
       await started.shutdown("evil reason; /etc/passwd");
       servers.pop();
-      const stopped = exact.records.filter((record) => record.code === "server.stopped");
+      const stopped = exact.records.filter(
+        (record) => record.code === "server.stopped",
+      );
       expect(stopped).toHaveLength(1);
       expect(stopped[0]?.status).toBe("unknown");
       expect(JSON.stringify(stopped[0])).not.toContain("evil");

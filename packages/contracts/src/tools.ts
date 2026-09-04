@@ -15,7 +15,12 @@ export type ToolName = z.infer<typeof ToolNameSchema>;
  * Risk category driving the M0 read-only policy: `read` tools are allowed;
  * `write` / `sensitive` / `unclassified` are default-deny (§9 blocker 6).
  */
-export const ToolCategorySchema = z.enum(["read", "write", "sensitive", "unclassified"]);
+export const ToolCategorySchema = z.enum([
+  "read",
+  "write",
+  "sensitive",
+  "unclassified",
+]);
 export type ToolCategory = z.infer<typeof ToolCategorySchema>;
 
 /**
@@ -51,7 +56,11 @@ export const TOOL_BUDGET_DEFAULTS = {
 } as const;
 
 /** Handler-reported outcome (`tool_calls.reported_outcome`). */
-export const ReportedOutcomeSchema = z.enum(["succeeded", "failed", "cancelled"]);
+export const ReportedOutcomeSchema = z.enum([
+  "succeeded",
+  "failed",
+  "cancelled",
+]);
 export type ReportedOutcome = z.infer<typeof ReportedOutcomeSchema>;
 
 /** Broker-observed conclusion (`tool_calls.actual_outcome`). */
@@ -68,7 +77,11 @@ export const ActualOutcomeSchema = z.enum([
 export type ActualOutcome = z.infer<typeof ActualOutcomeSchema>;
 
 /** How the tool result was used (`tool_calls.result_disposition`). */
-export const ResultDispositionSchema = z.enum(["accepted", "discarded", "none"]);
+export const ResultDispositionSchema = z.enum([
+  "accepted",
+  "discarded",
+  "none",
+]);
 export type ResultDisposition = z.infer<typeof ResultDispositionSchema>;
 
 /**

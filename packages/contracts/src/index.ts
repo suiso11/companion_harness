@@ -3,160 +3,163 @@
  * Run status, TurnInput, frozen context, RunResult, RunEvents, tools, and
  * the M0 HTTP DTOs. All boundary objects are strict (unknown keys rejected).
  */
-export {
-  UuidSchema,
-  UUID_V4_REGEX,
-  IdempotencyKeySchema,
-  UnixMsSchema,
-  Sha256HexSchema,
-  IDEMPOTENCY_SCOPE_SESSIONS_CREATE,
-  IdempotencyScopeSchema,
-  messageScope,
-  retryScope,
-} from "./ids.js";
-export type { Uuid, IdempotencyKey, UnixMs, Sha256Hex, IdempotencyScope } from "./ids.js";
 
+export type { M0RunEventType, RunEvent, TerminalEventType } from "./events.js";
 export {
-  RunStatusSchema,
-  TerminalStatusSchema,
-  ActiveStatusSchema,
-  TERMINAL_STATUSES,
-  ACTIVE_STATUSES,
-  isTerminalStatus,
-  isActiveStatus,
-} from "./run_status.js";
-export type { RunStatus, TerminalStatus, ActiveStatus } from "./run_status.js";
-
-export {
-  MAX_USER_TEXT_LENGTH,
-  UserTextTurnInputV1Schema,
-  TurnInputV1Schema,
-  TURN_INPUT_REGISTRY,
-  parseTurnInput,
-} from "./turn_input.js";
-export type {
-  UserTextTurnInputV1,
-  TurnInputV1,
-  TurnInputSchemaVersion,
-} from "./turn_input.js";
-
-export { TemporalContextSchema, FrozenContextSchema } from "./frozen_context.js";
-export type { TemporalContext, FrozenContext } from "./frozen_context.js";
-
-export {
-  MAX_ASSISTANT_TEXT_LENGTH,
-  RunResultV1Schema,
-  RunResultSchema,
-  RUN_RESULT_REGISTRY,
-  parseRunResult,
-} from "./run_result.js";
-export type { RunResultV1, RunResult } from "./run_result.js";
-
-export {
-  RUN_EVENT_SCHEMA_VERSION,
+  isTerminalEventType,
   M0_RUN_EVENT_TYPES,
   M0RunEventTypeSchema,
-  TERMINAL_EVENT_TYPES,
-  TerminalEventTypeSchema,
-  isTerminalEventType,
-  RunQueuedPayloadSchema,
-  RunStartedPayloadSchema,
-  RunCancelRequestedPayloadSchema,
-  RunCompletedPayloadSchema,
-  RunFailedPayloadSchema,
-  RunCancelledPayloadSchema,
-  RunAbandonedPayloadSchema,
-  ToolRequestedPayloadSchema,
-  ToolCompletedPayloadSchema,
-  RunEventSchema,
-  RUN_EVENT_PAYLOAD_SCHEMAS,
   parseRunEvent,
   parseRunEventPayload,
+  RUN_EVENT_PAYLOAD_SCHEMAS,
+  RUN_EVENT_SCHEMA_VERSION,
+  RunAbandonedPayloadSchema,
+  RunCancelledPayloadSchema,
+  RunCancelRequestedPayloadSchema,
+  RunCompletedPayloadSchema,
+  RunEventSchema,
+  RunFailedPayloadSchema,
+  RunQueuedPayloadSchema,
+  RunStartedPayloadSchema,
+  TERMINAL_EVENT_TYPES,
+  TerminalEventTypeSchema,
+  ToolCompletedPayloadSchema,
+  ToolRequestedPayloadSchema,
 } from "./events.js";
-export type { M0RunEventType, TerminalEventType, RunEvent } from "./events.js";
-
+export type { FrozenContext, TemporalContext } from "./frozen_context.js";
 export {
-  ToolNameSchema,
-  ToolCategorySchema,
-  ToolDescriptorSchema,
-  TOOL_BUDGET_DEFAULTS,
-  ReportedOutcomeSchema,
-  ActualOutcomeSchema,
-  ResultDispositionSchema,
-  ToolErrorCodeSchema,
-  M0_TOOL_ERROR_CODES,
-  KNOWN_M0_TOOL_ERROR_CODES,
-  TOOL_ERROR_CODE_REGISTRY,
-  parseToolErrorCode,
-  RunErrorCodeSchema,
-  M0_RUN_ERROR_CODES,
-  RUN_ERROR_CODE_REGISTRY,
-  parseRunErrorCode,
-  ToolResultSchema,
-} from "./tools.js";
+  FrozenContextSchema,
+  TemporalContextSchema,
+} from "./frozen_context.js";
 export type {
-  ToolName,
-  ToolCategory,
-  ToolDescriptor,
-  ReportedOutcome,
-  ActualOutcome,
-  ResultDisposition,
-  ToolErrorCode,
-  ToolErrorSchemaVersion,
-  RunErrorCode,
-  RunErrorSchemaVersion,
-  ToolResult,
-} from "./tools.js";
-
-export {
-  SessionParamsSchema,
-  TurnParamsSchema,
-  RunParamsSchema,
-  CreateSessionRequestSchema,
-  CreateSessionResponseSchema,
-  PostMessageRequestSchema,
-  AcceptedRunSchema,
-  PostMessageResponseSchema,
-  PostRetryRequestSchema,
-  PostRetryResponseSchema,
-  CancelRunRequestSchema,
-  CancelRunResponseSchema,
-  HistoryQuerySchema,
-  HistoryItemSchema,
-  HistoryResponseSchema,
-  EventsQuerySchema,
-  EventsResponseSchema,
-  IdempotencyLookupQuerySchema,
-  IdempotencyLookupResponseSchema,
-  ApiErrorCodeSchema,
-  ApiErrorSchema,
-  HealthLiveResponseSchema,
-  HealthReadyResponseSchema,
-} from "./http.js";
-export type {
-  SessionParams,
-  TurnParams,
-  RunParams,
-  CreateSessionRequest,
-  CreateSessionResponse,
-  PostMessageRequest,
   AcceptedRun,
-  PostMessageResponse,
-  PostRetryRequest,
-  PostRetryResponse,
+  ApiError,
+  ApiErrorCode,
   CancelRunRequest,
   CancelRunResponse,
-  HistoryQuery,
-  HistoryQueryInput,
-  HistoryItem,
-  HistoryResponse,
+  CreateSessionRequest,
+  CreateSessionResponse,
   EventsQuery,
   EventsQueryInput,
   EventsResponse,
-  IdempotencyLookupQuery,
-  IdempotencyLookupResponse,
-  ApiErrorCode,
-  ApiError,
   HealthLiveResponse,
   HealthReadyResponse,
+  HistoryItem,
+  HistoryQuery,
+  HistoryQueryInput,
+  HistoryResponse,
+  IdempotencyLookupQuery,
+  IdempotencyLookupResponse,
+  PostMessageRequest,
+  PostMessageResponse,
+  PostRetryRequest,
+  PostRetryResponse,
+  RunParams,
+  SessionParams,
+  TurnParams,
 } from "./http.js";
+export {
+  AcceptedRunSchema,
+  ApiErrorCodeSchema,
+  ApiErrorSchema,
+  CancelRunRequestSchema,
+  CancelRunResponseSchema,
+  CreateSessionRequestSchema,
+  CreateSessionResponseSchema,
+  EventsQuerySchema,
+  EventsResponseSchema,
+  HealthLiveResponseSchema,
+  HealthReadyResponseSchema,
+  HistoryItemSchema,
+  HistoryQuerySchema,
+  HistoryResponseSchema,
+  IdempotencyLookupQuerySchema,
+  IdempotencyLookupResponseSchema,
+  PostMessageRequestSchema,
+  PostMessageResponseSchema,
+  PostRetryRequestSchema,
+  PostRetryResponseSchema,
+  RunParamsSchema,
+  SessionParamsSchema,
+  TurnParamsSchema,
+} from "./http.js";
+export type {
+  IdempotencyKey,
+  IdempotencyScope,
+  Sha256Hex,
+  UnixMs,
+  Uuid,
+} from "./ids.js";
+export {
+  IDEMPOTENCY_SCOPE_SESSIONS_CREATE,
+  IdempotencyKeySchema,
+  IdempotencyScopeSchema,
+  messageScope,
+  retryScope,
+  Sha256HexSchema,
+  UnixMsSchema,
+  UUID_V4_REGEX,
+  UuidSchema,
+} from "./ids.js";
+export type { RunResult, RunResultV1 } from "./run_result.js";
+export {
+  MAX_ASSISTANT_TEXT_LENGTH,
+  parseRunResult,
+  RUN_RESULT_REGISTRY,
+  RunResultSchema,
+  RunResultV1Schema,
+} from "./run_result.js";
+export type { ActiveStatus, RunStatus, TerminalStatus } from "./run_status.js";
+export {
+  ACTIVE_STATUSES,
+  ActiveStatusSchema,
+  isActiveStatus,
+  isTerminalStatus,
+  RunStatusSchema,
+  TERMINAL_STATUSES,
+  TerminalStatusSchema,
+} from "./run_status.js";
+export type {
+  ActualOutcome,
+  ReportedOutcome,
+  ResultDisposition,
+  RunErrorCode,
+  RunErrorSchemaVersion,
+  ToolCategory,
+  ToolDescriptor,
+  ToolErrorCode,
+  ToolErrorSchemaVersion,
+  ToolName,
+  ToolResult,
+} from "./tools.js";
+export {
+  ActualOutcomeSchema,
+  KNOWN_M0_TOOL_ERROR_CODES,
+  M0_RUN_ERROR_CODES,
+  M0_TOOL_ERROR_CODES,
+  parseRunErrorCode,
+  parseToolErrorCode,
+  ReportedOutcomeSchema,
+  ResultDispositionSchema,
+  RUN_ERROR_CODE_REGISTRY,
+  RunErrorCodeSchema,
+  TOOL_BUDGET_DEFAULTS,
+  TOOL_ERROR_CODE_REGISTRY,
+  ToolCategorySchema,
+  ToolDescriptorSchema,
+  ToolErrorCodeSchema,
+  ToolNameSchema,
+  ToolResultSchema,
+} from "./tools.js";
+export type {
+  TurnInputSchemaVersion,
+  TurnInputV1,
+  UserTextTurnInputV1,
+} from "./turn_input.js";
+export {
+  MAX_USER_TEXT_LENGTH,
+  parseTurnInput,
+  TURN_INPUT_REGISTRY,
+  TurnInputV1Schema,
+  UserTextTurnInputV1Schema,
+} from "./turn_input.js";

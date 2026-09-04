@@ -1267,8 +1267,15 @@ describe("review regressions: running-only invocation and delivery", () => {
   it("never executes for queued runs, reserves budget first, audits cancelled", async () => {
     const { handle, repo } = await setup();
     try {
-      const sessionId = repo.createSession({ key: crypto.randomUUID(), now: T0 }).body.sessionId;
-      const posted = repo.postMessage(sessionId, { text: "hi" }, { key: crypto.randomUUID(), now: T0 });
+      const sessionId = repo.createSession({
+        key: crypto.randomUUID(),
+        now: T0,
+      }).body.sessionId;
+      const posted = repo.postMessage(
+        sessionId,
+        { text: "hi" },
+        { key: crypto.randomUUID(), now: T0 },
+      );
       const runId = posted.body.run.id;
       expect(repo.getRun(runId).status).toBe("queued");
       let calls = 0;
@@ -1309,7 +1316,12 @@ describe("review regressions: running-only invocation and delivery", () => {
           },
         }),
       ]);
-      const first = await broker.invoke(runId, "test.read", { q: "cached" }, CTX);
+      const first = await broker.invoke(
+        runId,
+        "test.read",
+        { q: "cached" },
+        CTX,
+      );
       expect(first.result.actualOutcome).toBe("succeeded");
       expect(calls).toBe(1);
       repo.cancelRun(sessionId, runId, { now: T0 + 5 });
@@ -1374,7 +1386,12 @@ describe("review regressions: composed deadline and detach", () => {
         ],
         { budgets: { maxConcurrentPerRun: 1 } },
       );
-      const first = broker.invoke(runId, "test.read", { q: "a" }, { ...CTX, freshness: "refresh" });
+      const first = broker.invoke(
+        runId,
+        "test.read",
+        { q: "a" },
+        { ...CTX, freshness: "refresh" },
+      );
       await sleep(10);
       const start = Date.now();
       const queued = await broker.invoke(
@@ -1449,7 +1466,9 @@ describe("review regressions: composed deadline and detach", () => {
         if (Date.now() > deadline) throw new Error("late success not audited");
         await sleep(5);
       }
-      expect(toolCalls(handle.raw, runId)[0]?.result_disposition).toBe("discarded");
+      expect(toolCalls(handle.raw, runId)[0]?.result_disposition).toBe(
+        "discarded",
+      );
 
       const { runId: run2 } = newRunningRun(repo, T0 + 100);
       const broker2 = makeBroker(handle, repo, [
@@ -1461,7 +1480,12 @@ describe("review regressions: composed deadline and detach", () => {
         }),
       ]);
       const c2 = new AbortController();
-      const p2 = broker2.invoke(run2, "test.read", { q: "slow-fail" }, { ...CTX, signal: c2.signal });
+      const p2 = broker2.invoke(
+        run2,
+        "test.read",
+        { q: "slow-fail" },
+        { ...CTX, signal: c2.signal },
+      );
       await sleep(10);
       c2.abort();
       const o2 = await p2;
@@ -1473,7 +1497,9 @@ describe("review regressions: composed deadline and detach", () => {
         if (Date.now() > deadline2) throw new Error("late failure not audited");
         await sleep(5);
       }
-      expect(toolCalls(handle.raw, run2)[0]?.result_disposition).toBe("discarded");
+      expect(toolCalls(handle.raw, run2)[0]?.result_disposition).toBe(
+        "discarded",
+      );
     } finally {
       handle.raw.close();
     }
@@ -1544,10 +1570,20 @@ describe("review regressions: dedup budgets and cache hygiene", () => {
           },
         }),
       ]);
-      const failed = await broker.invoke(runId, "test.read", { q: "flaky" }, CTX);
+      const failed = await broker.invoke(
+        runId,
+        "test.read",
+        { q: "flaky" },
+        CTX,
+      );
       expect(failed.result.actualOutcome).toBe("failed");
       expect(calls).toBe(1);
-      const retry = await broker.invoke(runId, "test.read", { q: "flaky" }, CTX);
+      const retry = await broker.invoke(
+        runId,
+        "test.read",
+        { q: "flaky" },
+        CTX,
+      );
       expect(retry.result.actualOutcome).toBe("succeeded");
       expect(calls).toBe(2);
       expect(retry.result.reusedFromCallId).toBeNull();
@@ -1606,12 +1642,21 @@ describe("tighten-broker-atomicity: non-running emits no RunEvents", () => {
   it("queued beginnings reserve/audit with zero tool.requested/tool.completed events", async () => {
     const { handle, repo } = await setup();
     try {
-      const sessionId = repo.createSession({ key: crypto.randomUUID(), now: T0 }).body.sessionId;
-      const posted = repo.postMessage(sessionId, { text: "hi" }, { key: crypto.randomUUID(), now: T0 });
+      const sessionId = repo.createSession({
+        key: crypto.randomUUID(),
+        now: T0,
+      }).body.sessionId;
+      const posted = repo.postMessage(
+        sessionId,
+        { text: "hi" },
+        { key: crypto.randomUUID(), now: T0 },
+      );
       const runId = posted.body.run.id;
       expect(repo.getRun(runId).status).toBe("queued");
       const broker = makeBroker(handle, repo, [echoReg()]);
-      const before = runEvents(handle.raw, runId).filter((e) => e.type.startsWith("tool."));
+      const before = runEvents(handle.raw, runId).filter((e) =>
+        e.type.startsWith("tool."),
+      );
       expect(before).toHaveLength(0);
       const out = await broker.invoke(runId, "test.read", { q: "a" }, CTX);
       expect(out.result.actualOutcome).toBe("cancelled");
@@ -1622,7 +1667,9 @@ describe("tighten-broker-atomicity: non-running emits no RunEvents", () => {
       expect(rows).toHaveLength(1);
       expect(rows[0]?.lifecycle_status).toBe("finished");
       expect(rows[0]?.actual_outcome).toBe("cancelled");
-      const toolEvents = runEvents(handle.raw, runId).filter((e) => e.type.startsWith("tool."));
+      const toolEvents = runEvents(handle.raw, runId).filter((e) =>
+        e.type.startsWith("tool."),
+      );
       expect(toolEvents).toHaveLength(0);
     } finally {
       handle.raw.close();
@@ -1636,7 +1683,9 @@ describe("tighten-broker-atomicity: non-running emits no RunEvents", () => {
       const broker = makeBroker(handle, repo, [echoReg()]);
       repo.cancelRun(sessionId, runId, { now: T0 + 5 });
       expect(repo.getRun(runId).status).toBe("cancel_requested");
-      const toolBefore = runEvents(handle.raw, runId).filter((e) => e.type.startsWith("tool."));
+      const toolBefore = runEvents(handle.raw, runId).filter((e) =>
+        e.type.startsWith("tool."),
+      );
       const out = await broker.invoke(runId, "test.read", { q: "a" }, CTX);
       expect(out.result.actualOutcome).toBe("cancelled");
       expect(out.normalized).toBeNull();
@@ -1644,7 +1693,9 @@ describe("tighten-broker-atomicity: non-running emits no RunEvents", () => {
       const rows = toolCalls(handle.raw, runId);
       expect(rows).toHaveLength(1);
       expect(rows[0]?.actual_outcome).toBe("cancelled");
-      const toolAfter = runEvents(handle.raw, runId).filter((e) => e.type.startsWith("tool."));
+      const toolAfter = runEvents(handle.raw, runId).filter((e) =>
+        e.type.startsWith("tool."),
+      );
       expect(toolAfter).toHaveLength(toolBefore.length);
       expect(toolAfter).toHaveLength(0);
     } finally {
@@ -1658,11 +1709,15 @@ describe("tighten-broker-atomicity: non-running emits no RunEvents", () => {
       const { runId } = newRunningRun(repo, T0);
       const broker = makeBroker(handle, repo, [echoReg()]);
       repo.completeRun(runId, { version: 1, text: "done" }, { now: T0 + 5 });
-      const toolBefore = runEvents(handle.raw, runId).filter((e) => e.type.startsWith("tool."));
+      const toolBefore = runEvents(handle.raw, runId).filter((e) =>
+        e.type.startsWith("tool."),
+      );
       const out = await broker.invoke(runId, "test.read", { q: "a" }, CTX);
       expect(out.result.actualOutcome).toBe("cancelled");
       expect(requestsUsed(handle.raw, runId)).toBe(1);
-      const toolAfter = runEvents(handle.raw, runId).filter((e) => e.type.startsWith("tool."));
+      const toolAfter = runEvents(handle.raw, runId).filter((e) =>
+        e.type.startsWith("tool."),
+      );
       expect(toolAfter).toHaveLength(toolBefore.length);
       expect(toolAfter).toHaveLength(0);
     } finally {
@@ -1680,7 +1735,9 @@ describe("tighten-broker-atomicity: nonterminal commit rollback", () => {
       handle.raw.exec(
         "CREATE TRIGGER inject_tool_completed_failure BEFORE INSERT ON run_events WHEN NEW.type = 'tool.completed' BEGIN SELECT RAISE(ABORT, 'injected_tool_completed_failure'); END",
       );
-      const toolBefore = runEvents(handle.raw, runId).filter((e) => e.type.startsWith("tool."));
+      const toolBefore = runEvents(handle.raw, runId).filter((e) =>
+        e.type.startsWith("tool."),
+      );
       let failure: unknown = null;
       try {
         await broker.invoke(runId, "test.read", { q: "a" }, CTX);
@@ -1689,8 +1746,12 @@ describe("tighten-broker-atomicity: nonterminal commit rollback", () => {
       }
       expect(failure).toBeInstanceOf(KernelStorageError);
       // Fixed code, no raw sqlite text leaked.
-      expect((failure as KernelStorageError).code).toBe("kernel_storage_failed");
-      expect(String((failure as Error).message)).not.toContain("injected_tool_completed_failure");
+      expect((failure as KernelStorageError).code).toBe(
+        "kernel_storage_failed",
+      );
+      expect(String((failure as Error).message)).not.toContain(
+        "injected_tool_completed_failure",
+      );
       // Atomic rollback: the finished update + event did not persist
       // (the pre-commit running marker remains, but the row is not
       // finished and no completion was recorded).
@@ -1700,9 +1761,15 @@ describe("tighten-broker-atomicity: nonterminal commit rollback", () => {
       expect(rows[0]?.lifecycle_status).toBe("running");
       expect(rows[0]?.actual_outcome).toBeNull();
       // Requested was emitted before the failing commit; completed was not.
-      const toolAfter = runEvents(handle.raw, runId).filter((e) => e.type.startsWith("tool."));
-      expect(toolAfter.filter((e) => e.type === "tool.requested")).toHaveLength(1);
-      expect(toolAfter.filter((e) => e.type === "tool.completed")).toHaveLength(0);
+      const toolAfter = runEvents(handle.raw, runId).filter((e) =>
+        e.type.startsWith("tool."),
+      );
+      expect(toolAfter.filter((e) => e.type === "tool.requested")).toHaveLength(
+        1,
+      );
+      expect(toolAfter.filter((e) => e.type === "tool.completed")).toHaveLength(
+        0,
+      );
       expect(toolAfter).toHaveLength(toolBefore.length + 1);
     } finally {
       try {
@@ -1787,9 +1854,7 @@ describe("final-m0-blockers: requested durability and safe tool-name audit", () 
       expect(rows[0]?.actual_outcome).toBeNull();
     } finally {
       try {
-        handle.raw.exec(
-          "DROP TRIGGER IF EXISTS inject_tool_requested_failure",
-        );
+        handle.raw.exec("DROP TRIGGER IF EXISTS inject_tool_requested_failure");
       } catch {
         // Best effort.
       }
@@ -1821,15 +1886,9 @@ describe("final-m0-blockers: requested durability and safe tool-name audit", () 
       expect(rows[0]?.tool).toBe("invalid.request");
       expect(rows[0]?.actual_outcome).toBe("invalid");
       const events = runEvents(handle.raw, runId);
-      expect(events.filter((e) => e.type === "tool.requested")).toHaveLength(
-        1,
-      );
-      expect(events.filter((e) => e.type === "tool.completed")).toHaveLength(
-        1,
-      );
-      for (const event of events.filter((e) =>
-        e.type.startsWith("tool."),
-      )) {
+      expect(events.filter((e) => e.type === "tool.requested")).toHaveLength(1);
+      expect(events.filter((e) => e.type === "tool.completed")).toHaveLength(1);
+      for (const event of events.filter((e) => e.type.startsWith("tool."))) {
         const payload = JSON.parse(event.payload) as Record<string, unknown>;
         expect(payload.tool).toBe("invalid.request");
       }

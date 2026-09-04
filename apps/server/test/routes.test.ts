@@ -804,9 +804,7 @@ describe("M0 review regressions", () => {
         },
       };
       const { createApp: makeBrokenApp } = await import("../src/app.js");
-      const { loadServerConfig: loadConfig } = await import(
-        "../src/config.js"
-      );
+      const { loadServerConfig: loadConfig } = await import("../src/config.js");
       const { createCollectingLogger: collect } = await import(
         "../src/logger.js"
       );
@@ -828,7 +826,10 @@ describe("M0 review regressions", () => {
       const created = makeBrokenApp({
         config,
         repo: broken as unknown as typeof f.repo,
-        engine: { cancel: () => ({ status: "cancelled" }), shutdown: async () => ({ abandoned: 0, cancelled: 0 }) },
+        engine: {
+          cancel: () => ({ status: "cancelled" }),
+          shutdown: async () => ({ abandoned: 0, cancelled: 0 }),
+        },
         logger,
       });
       const sessionId = f.repo.createSession({
@@ -896,16 +897,18 @@ describe("M0 review regressions", () => {
     try {
       const before = count(f.db, "api_idempotency");
       // Lone continuation byte / truncated sequence: fatal TextDecoder must throw.
-      const invalid = new Uint8Array([0x7b, 0x22, 0x78, 0x22, 0x3a, 0xff, 0x7d]);
+      const invalid = new Uint8Array([
+        0x7b, 0x22, 0x78, 0x22, 0x3a, 0xff, 0x7d,
+      ]);
       const res = await f.app.request("/api/sessions", {
         method: "POST",
         headers: { ...postHeaders(), "idempotency-key": randomUUID() },
         body: invalid as unknown as BodyInit,
       });
       expect(res.status).toBe(400);
-      expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
-        "validation_error",
-      );
+      expect(
+        ((await res.json()) as { error: { code: string } }).error.code,
+      ).toBe("validation_error");
       expect(count(f.db, "api_idempotency")).toBe(before);
     } finally {
       f.close();

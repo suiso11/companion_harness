@@ -5,10 +5,10 @@ import {
   ActualOutcomeSchema,
   ReportedOutcomeSchema,
   ResultDispositionSchema,
+  RunErrorCodeSchema,
   ToolErrorCodeSchema,
   ToolNameSchema,
 } from "./tools.js";
-import { RunErrorCodeSchema } from "./tools.js";
 
 /** Envelope schema version. M0 serves version 1 only. */
 export const RUN_EVENT_SCHEMA_VERSION = 1 as const;
@@ -98,7 +98,9 @@ export const TERMINAL_EVENT_TYPES = [
 export type TerminalEventType = (typeof TERMINAL_EVENT_TYPES)[number];
 export const TerminalEventTypeSchema = z.enum(TERMINAL_EVENT_TYPES);
 
-export function isTerminalEventType(type: M0RunEventType): type is TerminalEventType {
+export function isTerminalEventType(
+  type: M0RunEventType,
+): type is TerminalEventType {
   return (TERMINAL_EVENT_TYPES as readonly string[]).includes(type);
 }
 

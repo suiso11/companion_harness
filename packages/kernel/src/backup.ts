@@ -15,8 +15,8 @@
 // - Sole copy method is the online backup API; no vacuum-into, no file
 //   copy, no automatic domain deletion.
 
-import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
+import type { Stats } from "node:fs";
 import {
   chmodSync,
   lstatSync,
@@ -26,6 +26,7 @@ import {
   unlinkSync,
 } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
+import Database from "better-sqlite3";
 import { isUuidV4 } from "./canonical.js";
 import { quickCheck } from "./connection.js";
 import { BackupError } from "./errors.js";
@@ -65,7 +66,10 @@ export function applyPrivatePosixMode(path: string, mode: number): void {
   }
 }
 
-function requireMigrationVersions(fromVersion: number, toVersion: number): void {
+function requireMigrationVersions(
+  fromVersion: number,
+  toVersion: number,
+): void {
   if (!Number.isInteger(fromVersion) || fromVersion < 0) {
     throw new BackupError("invalid pre-migration source version");
   }
@@ -116,7 +120,7 @@ function isEnoent(error: unknown): boolean {
  */
 function assertSafeExistingAncestors(absDir: string): void {
   for (const prefix of ancestorChain(absDir)) {
-    let stat;
+    let stat: Stats;
     try {
       stat = lstatSync(prefix);
     } catch (error: unknown) {
@@ -185,7 +189,7 @@ export function ensureBackupDir(backupDir: string): string {
   if (parent !== absDir) {
     assertSafeExistingAncestors(parent);
   }
-  let stat;
+  let stat: Stats;
   try {
     stat = lstatSync(absDir);
   } catch (error: unknown) {
@@ -201,7 +205,9 @@ export function ensureBackupDir(backupDir: string): string {
         throw new BackupError("cannot validate backup directory", { cause });
       }
     } else {
-      throw new BackupError("cannot validate backup directory", { cause: error });
+      throw new BackupError("cannot validate backup directory", {
+        cause: error,
+      });
     }
   }
   if (stat.isSymbolicLink()) {
@@ -253,7 +259,10 @@ export async function createPreMigrationBackup(
   // unchecked name: both outputs must provably remain under absDir.
   const finalPath = resolve(absDir, finalName);
   const partialPath = `${finalPath}${PRE_MIGRATION_PARTIAL_SUFFIX}`;
-  if (!isPathUnderBase(absDir, finalPath) || !isPathUnderBase(absDir, partialPath)) {
+  if (
+    !isPathUnderBase(absDir, finalPath) ||
+    !isPathUnderBase(absDir, partialPath)
+  ) {
     throw new BackupError("invalid pre-migration backup path");
   }
 
@@ -351,7 +360,7 @@ export function listPreMigrationBackups(backupDir: string): string[] {
     if (!isPathUnderBase(absDir, resolve(path))) {
       continue;
     }
-    let stat;
+    let stat: Stats;
     try {
       stat = lstatSync(path);
     } catch {
@@ -363,7 +372,9 @@ export function listPreMigrationBackups(backupDir: string): string[] {
     }
     candidates.push({ path, name, mtimeMs: stat.mtimeMs });
   }
-  candidates.sort((a, b) => b.mtimeMs - a.mtimeMs || (a.name < b.name ? 1 : -1));
+  candidates.sort(
+    (a, b) => b.mtimeMs - a.mtimeMs || (a.name < b.name ? 1 : -1),
+  );
   return candidates.map((candidate) => candidate.path);
 }
 
@@ -387,7 +398,7 @@ export function prunePreMigrationBackups(
     if (!isPathUnderBase(absDir, absPath)) {
       throw new BackupError("invalid pre-migration backup path");
     }
-    let stat;
+    let stat: Stats;
     try {
       stat = lstatSync(absPath);
     } catch (error: unknown) {
@@ -449,7 +460,10 @@ export async function createManualBackup(
   const absDir = ensureBackupDir(backupDir);
   const finalPath = resolve(absDir, finalName);
   const partialPath = `${finalPath}${MANUAL_BACKUP_PARTIAL_SUFFIX}`;
-  if (!isPathUnderBase(absDir, finalPath) || !isPathUnderBase(absDir, partialPath)) {
+  if (
+    !isPathUnderBase(absDir, finalPath) ||
+    !isPathUnderBase(absDir, partialPath)
+  ) {
     throw new BackupError("invalid manual backup path");
   }
   try {

@@ -18,7 +18,7 @@ import {
   createManualBackup,
   openKernelDatabase,
 } from "@companion/kernel";
-import { loadServerConfig } from "./config.js";
+import { loadServerConfig, type ServerConfig } from "./config.js";
 
 const CLI_USAGE = "Use: backup";
 const ERR_UNKNOWN_COMMAND = `manual backup failed: unknown command. ${CLI_USAGE}`;
@@ -66,11 +66,14 @@ export async function runManualBackupCli(
   if (rest.length > 0) {
     throw cliError("extra_arguments", ERR_EXTRA_ARGS);
   }
-  let config;
+  let config: ServerConfig;
   try {
     config = loadServerConfig(env);
   } catch {
-    throw cliError("invalid_configuration", "manual backup failed: invalid configuration");
+    throw cliError(
+      "invalid_configuration",
+      "manual backup failed: invalid configuration",
+    );
   }
   const dbPath = config.dbPath;
   const backupDir = join(dirname(dbPath), "backups");
@@ -112,7 +115,7 @@ export async function runManualBackupCli(
 
 function isMainModule(): boolean {
   const invoked = process.argv[1];
-  return invoked !== undefined && invoked.endsWith("cli.ts");
+  return invoked?.endsWith("cli.ts") ?? false;
 }
 
 if (isMainModule()) {

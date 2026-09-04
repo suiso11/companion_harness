@@ -13,10 +13,10 @@
 //   external kit CLI are never used.
 // - Migration failure keeps the pre-upgrade backup and throws.
 
-import Database from "better-sqlite3";
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type Database from "better-sqlite3";
 import { createPreMigrationBackup } from "./backup.js";
 import {
   BackupRequiredError,
@@ -60,11 +60,7 @@ export interface MigrateResult {
 }
 
 export function defaultMigrationsDir(): string {
-  return join(
-    dirname(fileURLToPath(import.meta.url)),
-    "..",
-    "migrations",
-  );
+  return join(dirname(fileURLToPath(import.meta.url)), "..", "migrations");
 }
 
 /** Committed NNNN_name.sql migrations in ascending version order. */
@@ -117,7 +113,12 @@ export async function migrateKernelDatabase(
   }
   // Equal version: no backup, no migration.
   if (current === target) {
-    return { migrated: false, fromVersion: current, toVersion: target, applied: [] };
+    return {
+      migrated: false,
+      fromVersion: current,
+      toVersion: target,
+      applied: [],
+    };
   }
 
   const available = listMigrations(migrationsDir);
