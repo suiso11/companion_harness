@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { BUNDLED_SCHEMA_VERSION } from "@companion/kernel";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -73,7 +74,9 @@ describe("bootstrap startup + graceful shutdown", () => {
       // Startup order left a versioned, migrated file DB behind.
       const probe = new Database(dbPath, { readonly: true });
       try {
-        expect(probe.pragma("user_version", { simple: true })).toBe(1);
+        expect(probe.pragma("user_version", { simple: true })).toBe(
+          BUNDLED_SCHEMA_VERSION,
+        );
         const sessions = probe
           .prepare("SELECT COUNT(*) AS n FROM sessions")
           .get() as {

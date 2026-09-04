@@ -207,7 +207,7 @@ function mapToToolError(error: unknown, signal?: AbortSignal): ToolError {
 function toObservationLinks(
   standard: readonly MarkdownPortStandardLink[],
   wiki: readonly MarkdownPortWikiLink[],
-): ResourceObservation["links"] {
+): NonNullable<ResourceObservation["links"]> {
   const links: Array<{
     kind: "standard" | "wiki";
     status: "resolved" | "ambiguous" | "unresolved";

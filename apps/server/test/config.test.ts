@@ -161,9 +161,7 @@ describe("markdown roots config", () => {
       '{"path":"x"}',
       "null",
       JSON.stringify([{ path: vault, alias: "a", extra: 1 }]),
-      JSON.stringify(
-        [{ path: vault }, { path: vault }].slice(0, 1).concat(["nope"]),
-      ),
+      JSON.stringify([{ path: vault }, "nope"] as unknown[]),
     ]) {
       expect(() =>
         loadServerConfig({

@@ -124,6 +124,7 @@ export {
   successResult,
 } from "./fakes.js";
 export type {
+  CreateM1ToolRegistrationsOptions,
   MarkdownConnectorBinding,
   MarkdownConnectorPort,
   MarkdownPortDocument,
@@ -132,7 +133,6 @@ export type {
   MarkdownPortSkipped,
   MarkdownPortStandardLink,
   MarkdownPortWikiLink,
-  CreateM1ToolRegistrationsOptions,
 } from "./markdown_tools.js";
 export {
   createM1ReferenceTools,

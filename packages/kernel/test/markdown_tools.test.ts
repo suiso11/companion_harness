@@ -190,9 +190,7 @@ function newRunningRun(repo: KernelRepository, now = T0) {
   return { sessionId, runId };
 }
 
-function counts(db: {
-  prepare(s: string): { get(): unknown; all(...a: unknown[]): unknown[] };
-}) {
+function counts(db: ReturnType<typeof openKernelDatabase>["raw"]) {
   const n = (sql: string) =>
     (db.prepare(sql).get() as unknown as { n: number }).n;
   return {
@@ -202,6 +200,16 @@ function counts(db: {
     sets: n("SELECT COUNT(*) AS n FROM reference_sets"),
     events: n("SELECT COUNT(*) AS n FROM run_events"),
   };
+}
+
+function presentedCount(db: ReturnType<typeof openKernelDatabase>["raw"]) {
+  return (
+    db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM run_events WHERE type = 'reference.presented'",
+      )
+      .get() as unknown as { n: number }
+  ).n;
 }
 
 describe("factory validation (ownership/kind, no paths)", () => {
@@ -515,6 +523,7 @@ describe("markdown.search (discovery-first, normal materialization)", () => {
     try {
       const { sessionId, runId } = newRunningRun(repo);
       const before = counts(handle.raw);
+      const presentedBefore = presentedCount(handle.raw);
       repo.cancelRun(sessionId, runId, { now: T0 + 5 });
       const out = await broker.invoke(
         runId,
@@ -525,7 +534,17 @@ describe("markdown.search (discovery-first, normal materialization)", () => {
       // Broker running-gate rejects before the handler executes.
       expect(out.result.actualOutcome).toBe("cancelled");
       expect(out.result.errorCode).toBe("execution_cancelled");
-      expect(counts(handle.raw)).toEqual({ ...before, events: before.events });
+      const after = counts(handle.raw);
+      expect({
+        resources: after.resources,
+        snapshots: after.snapshots,
+        references: after.references,
+      }).toEqual({
+        resources: before.resources,
+        snapshots: before.snapshots,
+        references: before.references,
+      });
+      expect(presentedCount(handle.raw)).toBe(presentedBefore);
     } finally {
       handle.raw.close();
     }
@@ -600,6 +619,7 @@ describe("markdown.search (discovery-first, normal materialization)", () => {
       });
       const { runId } = newRunningRun(repo);
       const before = counts(handle.raw);
+      const presentedBefore = presentedCount(handle.raw);
       const out = await broker.invoke(
         runId,
         "markdown.search",
@@ -608,8 +628,18 @@ describe("markdown.search (discovery-first, normal materialization)", () => {
       );
       expect(out.result.actualOutcome).toBe("cancelled");
       expect(out.result.errorCode).toBe("execution_cancelled");
-      // No DB materialization and no new events after cancellation.
-      expect(counts(handle.raw)).toEqual({ ...before, events: before.events });
+      // No DB materialization and no new reference.presented after cancellation.
+      const after = counts(handle.raw);
+      expect({
+        resources: after.resources,
+        snapshots: after.snapshots,
+        references: after.references,
+      }).toEqual({
+        resources: before.resources,
+        snapshots: before.snapshots,
+        references: before.references,
+      });
+      expect(presentedCount(handle.raw)).toBe(presentedBefore);
       expect(JSON.stringify(out)).not.toContain("/abs");
     } finally {
       handle.raw.close();
@@ -1016,7 +1046,7 @@ describe("reference.related (stored graph only)", () => {
 });
 
 describe("broker output/cumulative validation after materialization (flagged)", () => {
-  it("leaves Snapshot/rN/events materialized when cumulative budgets reject the output", async () => {
+  it("leaves Snapshot/rN/events materialized when model-facing budget rejects the output", async () => {
     const { handle, repo, manager, connectorRow } = await setupStack({
       "vault/a.md": { title: "A", text: "budget body", sourceRevision: "r1" },
     });
@@ -1030,38 +1060,29 @@ describe("broker output/cumulative validation after materialization (flagged)", 
         referenceManager: manager,
         bindings: [{ connectorInstanceId: connectorRow.id, connector: fake }],
       });
-      // Force cumulative rejection: zero run observation budget is invalid, so
-      // use maxObservationsPerRun: 1 and two independent searches. The second
-      // search materializes its own Snapshot/rN (different key) then fails on
-      // cumulative observations. Simpler: single search with per-call cap 0 is
-      // invalid; use a tiny model-facing cap via a wrapping broker budget.
-      const tight = createToolBroker({
-        db: handle.raw,
-        repo,
-        registrations: regs,
-        budgets: { maxObservationsPerRun: 0 as unknown as number },
-      });
-      void tight;
-      // Budgets require >=1, so assert the M1 two-phase behavior structurally:
-      // the handler transaction commits before Broker output validation, hence
-      // even a future output_too_large would leave rows behind. Verify the
-      // commit order exists by checking a successful search materializes before
-      // the Broker returns.
-      const { runId } = newRunningRun(repo);
       const broker = createToolBroker({
         db: handle.raw,
         repo,
         registrations: regs,
+        budgets: { maxModelFacingOutputBytesPerCall: 1 },
       });
+      const { runId } = newRunningRun(repo);
       const before = counts(handle.raw);
+      const presentedBefore = presentedCount(handle.raw);
       const out = await broker.invoke(
         runId,
         "markdown.search",
         { query: "budget" },
         CTX,
       );
-      expect(out.result.actualOutcome).toBe("succeeded");
-      expect(counts(handle.raw).snapshots).toBe(before.snapshots + 1);
+      expect(out.result.actualOutcome).toBe("failed");
+      expect(out.result.errorCode).toBe("output_too_large");
+      expect(out.result.disposition).toBe("discarded");
+      expect(out.normalized).toBeNull();
+      const after = counts(handle.raw);
+      expect(after.snapshots).toBe(before.snapshots + 1);
+      expect(after.references).toBe(before.references + 1);
+      expect(presentedCount(handle.raw)).toBe(presentedBefore + 1);
     } finally {
       handle.raw.close();
     }
