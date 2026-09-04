@@ -3,7 +3,10 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { createMarkdownConnector } from "../src/connector.js";
+import {
+  createMarkdownConnector,
+  deriveIdentityFingerprint,
+} from "../src/connector.js";
 import { MarkdownConnectorError } from "../src/errors.js";
 import { MAX_FILE_BYTES } from "../src/safe_read.js";
 
@@ -366,5 +369,75 @@ describe("markdown connector search core", () => {
       expect(String(error)).not.toContain(dir);
       expect(String(error)).not.toContain(tmpdir());
     }
+  });
+});
+
+describe("markdown connector identity fingerprint", () => {
+  it("exposes an opaque 64-hex identity and keeps roots alias-only", async () => {
+    const dir = scratchVault("md-conn-ident-");
+    writeFileSync(join(dir, "a.md"), "# A\nbody\n");
+    const connector = await createMarkdownConnector([{ path: dir }]);
+    expect(connector.identityFingerprint).toMatch(/^[0-9a-f]{64}$/);
+    expect(connector.roots).toEqual([{ alias: "vault-1" }]);
+    expect(JSON.stringify(connector)).not.toContain(dir);
+    expect(JSON.stringify(connector)).not.toContain(tmpdir());
+    expect(connector.identityFingerprint).not.toContain("vault-1");
+  });
+
+  it("is deterministic for the same roots regardless of input order", async () => {
+    const first = scratchVault("md-conn-identord-a-");
+    const second = scratchVault("md-conn-identord-b-");
+    writeFileSync(join(first, "a.md"), "# A\n");
+    writeFileSync(join(second, "a.md"), "# A\n");
+    const one = await createMarkdownConnector([
+      { path: first, alias: "alpha" },
+      { path: second, alias: "beta" },
+    ]);
+    const two = await createMarkdownConnector([
+      { path: second, alias: "beta" },
+      { path: first, alias: "alpha" },
+    ]);
+    expect(one.identityFingerprint).toMatch(/^[0-9a-f]{64}$/);
+    expect(two.identityFingerprint).toBe(one.identityFingerprint);
+    const again = await createMarkdownConnector([
+      { path: first, alias: "alpha" },
+      { path: second, alias: "beta" },
+    ]);
+    expect(again.identityFingerprint).toBe(one.identityFingerprint);
+    expect(JSON.stringify(one)).not.toContain(first);
+    expect(JSON.stringify(one)).not.toContain(second);
+  });
+
+  it("differs when an alias or the real root changes", async () => {
+    const first = scratchVault("md-conn-identdiff-a-");
+    const second = scratchVault("md-conn-identdiff-b-");
+    const third = scratchVault("md-conn-identdiff-c-");
+    writeFileSync(join(first, "a.md"), "# A\n");
+    writeFileSync(join(second, "a.md"), "# A\n");
+    writeFileSync(join(third, "a.md"), "# A\n");
+    const base = await createMarkdownConnector([
+      { path: first, alias: "alpha" },
+    ]);
+    const renamed = await createMarkdownConnector([
+      { path: first, alias: "renamed" },
+    ]);
+    expect(renamed.identityFingerprint).toMatch(/^[0-9a-f]{64}$/);
+    expect(renamed.identityFingerprint).not.toBe(base.identityFingerprint);
+    const moved = await createMarkdownConnector([
+      { path: second, alias: "alpha" },
+    ]);
+    expect(moved.identityFingerprint).not.toBe(base.identityFingerprint);
+    // Two roots versus one root also differ.
+    const wider = await createMarkdownConnector([
+      { path: first, alias: "alpha" },
+      { path: third, alias: "beta" },
+    ]);
+    expect(wider.identityFingerprint).not.toBe(base.identityFingerprint);
+    for (const connector of [base, renamed, moved, wider]) {
+      expect(JSON.stringify(connector)).not.toContain(first);
+      expect(JSON.stringify(connector)).not.toContain(second);
+      expect(JSON.stringify(connector)).not.toContain(third);
+    }
+    void deriveIdentityFingerprint;
   });
 });

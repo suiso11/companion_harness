@@ -34,6 +34,7 @@ export type {
 } from "./connector.js";
 export {
   createMarkdownConnector,
+  deriveIdentityFingerprint,
   filenameStemOf,
   SEARCH_DEFAULT_LIMIT,
   SEARCH_MAX_LIMIT,

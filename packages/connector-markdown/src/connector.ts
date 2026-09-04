@@ -187,6 +187,14 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
 export interface MarkdownConnector {
   /** Path-free root descriptors in alias code-unit order. */
   readonly roots: readonly InitializedRootInfo[];
+  /**
+   * Opaque stable instance identity: SHA-256 hex over the deterministic
+   * versioned serialization of initialized roots sorted by alias
+   * (alias + real root identity internally). Metadata only, never a path:
+   * raw paths never leave, persist, log, or appear in errors.
+   * Internal composition property only (never HTTP/log).
+   */
+  readonly identityFingerprint: string;
   search(input: MarkdownSearchInput): Promise<MarkdownSearchResult>;
   readCanonical(
     canonicalKey: unknown,
@@ -238,6 +246,30 @@ function validateLimit(limit: unknown): number {
 
 function sha256HexUtf8(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+/** Versioned identity serialization input (internal, never leaves). */
+const IDENTITY_SERIALIZATION_VERSION = 1 as const;
+
+/**
+ * Derive the opaque stable instance identity fingerprint from initialized
+ * roots. Deterministic versioned serialization sorted by alias
+ * (`{"version":1,"roots":[{alias,realPath}...]}` in alias code-unit order)
+ * hashed with SHA-256 hex. The serialization (with real paths) is internal
+ * only; only the opaque 64-hex digest leaves this module.
+ */
+export function deriveIdentityFingerprint(
+  roots: readonly InitializedRoot[],
+): string {
+  const ordered = [...roots].sort((a, b) => compareCodeUnits(a.alias, b.alias));
+  const payload = JSON.stringify({
+    version: IDENTITY_SERIALIZATION_VERSION,
+    roots: ordered.map((root) => ({
+      alias: root.alias,
+      realPath: root.realPath,
+    })),
+  });
+  return sha256HexUtf8(payload);
 }
 
 /** Canonical filename stem: basename minus the trailing `.md`. */
@@ -501,6 +533,8 @@ function validateCanonicalShape(canonicalKey: unknown): {
 /**
  * Initialize configured roots and return the public connector. Root
  * descriptors are path-free (`{ alias }` only) in alias code-unit order.
+ * The connector also exposes the opaque `identityFingerprint` (internal
+ * composition property, never HTTP/log); roots output stays alias-only.
  */
 export async function createMarkdownConnector(
   inputs: readonly ConfiguredRootInput[],
@@ -510,6 +544,7 @@ export async function createMarkdownConnector(
   const infos: InitializedRootInfo[] = roots.map((root) => ({
     alias: root.alias,
   }));
+  const identityFingerprint = deriveIdentityFingerprint(roots);
 
   const byAlias = new Map<string, InitializedRoot>();
   for (const root of roots) byAlias.set(root.alias, root);
@@ -654,5 +689,10 @@ export async function createMarkdownConnector(
     };
   }
 
-  return { roots: infos, search, readCanonical };
+  return {
+    roots: infos,
+    identityFingerprint,
+    search,
+    readCanonical,
+  };
 }

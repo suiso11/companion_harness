@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { createMarkdownConnector } from "../src/connector.js";
 import { MarkdownConnectorError } from "../src/errors.js";
 import {
   initializeRoots,
@@ -73,5 +74,26 @@ describe("roots", () => {
       expect(error).toBeInstanceOf(MarkdownConnectorError);
       expect((error as Error).message).not.toContain(first);
     }
+  });
+
+  it("derives a stable opaque identity independent of input order", async () => {
+    const first = scratchDir("md-root-ident-a-");
+    const second = scratchDir("md-root-ident-b-");
+    mkdirSync(first, { recursive: true });
+    mkdirSync(second, { recursive: true });
+    const one = await createMarkdownConnector([
+      { path: first, alias: "alpha" },
+      { path: second, alias: "beta" },
+    ]);
+    const two = await createMarkdownConnector([
+      { path: second, alias: "beta" },
+      { path: first, alias: "alpha" },
+    ]);
+    expect(one.identityFingerprint).toMatch(/^[0-9a-f]{64}$/);
+    expect(two.identityFingerprint).toBe(one.identityFingerprint);
+    expect(one.roots).toEqual([{ alias: "alpha" }, { alias: "beta" }]);
+    expect(JSON.stringify(one)).not.toContain(first);
+    expect(JSON.stringify(one)).not.toContain(second);
+    expect(JSON.stringify(one)).not.toContain(tmpdir());
   });
 });
