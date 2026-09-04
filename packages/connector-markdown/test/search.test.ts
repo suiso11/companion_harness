@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -588,6 +588,73 @@ describe("markdown connector search core", () => {
     // Existing call compatibility: omitting the signal still searches.
     const ok = await connector.search({ query: "hello" });
     expect(ok.hits).toHaveLength(1);
+  });
+
+  it("uses canonical basename .md fallback for empty stems", async () => {
+    const dir = scratchVault("md-conn-emptystem-");
+    mkdirSync(join(dir, "sub"), { recursive: true });
+    // Body carries the query so discovery does not rely on the title.
+    writeFileSync(join(dir, ".md"), "emptystembody lives here\n");
+    writeFileSync(join(dir, "sub", ".md"), "#   \nemptystembody nested here\n");
+    // Nonempty stems keep the exact filename-stem fallback.
+    writeFileSync(join(dir, "notes.md"), "emptystembody regular here\n");
+    const connector = await createMarkdownConnector([{ path: dir }]);
+    const result = await connector.search({ query: "emptystembody" });
+    expect(result.hits.map((hit) => hit.canonicalKey)).toEqual([
+      "vault-1/.md",
+      "vault-1/notes.md",
+      "vault-1/sub/.md",
+    ]);
+    for (const hit of result.hits) {
+      expect(hit.title.length).toBeGreaterThan(0);
+      expect(hit.title.length).toBeLessThanOrEqual(512);
+      expect(hit.snippet.length).toBeGreaterThan(0);
+      expect(JSON.stringify(hit)).not.toContain(dir);
+    }
+    const rootHit = result.hits.find(
+      (hit) => hit.canonicalKey === "vault-1/.md",
+    );
+    const nestedHit = result.hits.find(
+      (hit) => hit.canonicalKey === "vault-1/sub/.md",
+    );
+    expect(rootHit?.title).toBe(".md");
+    expect(nestedHit?.title).toBe(".md");
+    expect(
+      result.hits.find((hit) => hit.canonicalKey === "vault-1/notes.md")?.title,
+    ).toBe("notes");
+    // Deterministic across repeated searches.
+    const again = await connector.search({ query: "emptystembody" });
+    expect(again).toEqual(result);
+    // Materialization agrees with search hits.
+    const rootDoc = await connector.readCanonical("vault-1/.md");
+    expect(rootDoc.title).toBe(".md");
+    expect(rootDoc.title).toBe(rootHit?.title);
+    expect(rootDoc.snippet.length).toBeGreaterThan(0);
+    expect(codePoints(rootDoc.snippet)).toBeLessThanOrEqual(512);
+    expect(JSON.stringify(rootDoc)).not.toContain(dir);
+    const nestedDoc = await connector.readCanonical("vault-1/sub/.md");
+    expect(nestedDoc.title).toBe(".md");
+    expect(nestedDoc.title).toBe(nestedHit?.title);
+    expect(nestedDoc.snippet.length).toBeGreaterThan(0);
+    const rootAgain = await connector.readCanonical("vault-1/.md");
+    expect(rootAgain).toEqual(rootDoc);
+  });
+
+  it("reads an empty-body .md file with a nonempty fallback title/snippet", async () => {
+    const dir = scratchVault("md-conn-emptystem-empty-");
+    writeFileSync(join(dir, ".md"), "");
+    const connector = await createMarkdownConnector([{ path: dir }]);
+    const doc = await connector.readCanonical("vault-1/.md");
+    expect(doc.canonicalKey).toBe("vault-1/.md");
+    expect(doc.title).toBe(".md");
+    expect(doc.title.length).toBeGreaterThan(0);
+    expect(doc.title.length).toBeLessThanOrEqual(512);
+    expect(doc.snippet).toBe(".md");
+    expect(doc.snippet.length).toBeGreaterThan(0);
+    expect(doc.text).toBe("");
+    expect(JSON.stringify(doc)).not.toContain(dir);
+    const again = await connector.readCanonical("vault-1/.md");
+    expect(again).toEqual(doc);
   });
 
   it("aborts during per-file reads and discards partial hits", async () => {

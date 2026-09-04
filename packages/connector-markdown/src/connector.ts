@@ -24,7 +24,8 @@
  *
  * TITLE: first heading plain text bounded to a ReferenceTitle-compatible
  * deterministic prefix (max 512 UTF-16 code units, surrogate-safe), else
- * the canonical filename stem (already bounded by the canonical key).
+ * the canonical filename stem (already bounded by the canonical key), or
+ * the canonical basename `.md` when the stem is empty.
  *
  * SOURCE REVISION: SHA-256 hex of the NFC full text (stable for identical
  * content). Hits also carry the full normalized text for later
@@ -324,7 +325,9 @@ export function boundReferenceTitle(title: string): string {
 function deriveTitle(parsed: ParsedMarkdown, canonicalKey: string): string {
   if (parsed.title !== null && parsed.title !== "")
     return boundReferenceTitle(parsed.title);
-  return filenameStemOf(canonicalKey);
+  const stem = filenameStemOf(canonicalKey);
+  if (stem !== "") return stem;
+  return boundReferenceTitle(".md");
 }
 
 function aliasOf(canonicalKey: string): string | null {
