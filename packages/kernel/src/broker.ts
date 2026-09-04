@@ -45,16 +45,20 @@ import {
   isTerminalStatus,
   type ReportedOutcome,
   type ResultDisposition,
+  RUN_EVENT_SCHEMA_VERSION,
+  type RunStatus,
   TOOL_BUDGET_DEFAULTS,
   type ToolDescriptor,
   ToolDescriptorSchema,
-  ToolErrorCodeSchema,
+  parseRunEventPayload,
+  parseToolErrorCode,
   type ToolResult,
   ToolResultSchema,
 } from "@companion/contracts";
 import type Database from "better-sqlite3";
 import { canonicalJsonString, generateId, sha256Hex } from "./canonical.js";
 import {
+  KernelStorageError,
   RepositoryNotFoundError,
   RepositoryValidationError,
 } from "./errors.js";
@@ -190,7 +194,7 @@ export class ToolError extends Error {
   readonly errorCode: string;
 
   constructor(errorCode: string, message?: string) {
-    const code = ToolErrorCodeSchema.parse(errorCode);
+    const code = parseToolErrorCode(errorCode);
     super(message ?? code);
     this.name = "ToolError";
     this.errorCode = code;
@@ -297,6 +301,10 @@ interface FinalOutcome {
   readonly reusedFromCallId: string | null;
   readonly normalized: unknown;
   readonly modelFacing: unknown;
+  /** Carried for coalesced budget charging; never persisted directly. */
+  readonly modelBytesForBudget?: number;
+  /** Carried for coalesced budget charging; never persisted directly. */
+  readonly observationsForBudget?: number;
 }
 
 /** Physical work passed all per-call checks; cumulative/terminal pending. */
@@ -327,6 +335,9 @@ interface DedupDone {
   readonly leaderCallId: string;
   readonly normalized: unknown;
   readonly modelFacing: unknown;
+  readonly modelBytes: number;
+  readonly observations: number;
+  readonly resultDigest: string;
 }
 
 type DedupEntry = DedupInflight | DedupDone;
@@ -696,25 +707,40 @@ export class ToolBroker {
     if (!this.reserveBudget(runId)) {
       const call = this.insertCallRow(runId, tool, arrivalHash);
       callIndexHolder.callIndex = call.callIndex;
-      return this.finishFast(
-        runId,
-        tool,
-        call,
-        {
-          actualOutcome: "failed",
-          reportedOutcome: null,
-          disposition: "none",
-          errorCode: "budget_exceeded",
-          resultDigest: null,
-          reusedFromCallId: null,
-          normalized: null,
-          modelFacing: null,
-        },
-        trace,
-      );
+      const budgetFinal: FinalOutcome = {
+        actualOutcome: "failed",
+        reportedOutcome: null,
+        disposition: "none",
+        errorCode: "budget_exceeded",
+        resultDigest: null,
+        reusedFromCallId: null,
+        normalized: null,
+        modelFacing: null,
+      };
+      // Begun-non-running budget exhaustion audits with no RunEvents.
+      if (!this.isRunning(runId)) {
+        return this.finishFastAuditOnly(runId, tool, call, budgetFinal, trace);
+      }
+      return this.finishFast(runId, tool, call, budgetFinal, trace);
     }
     const call = this.insertCallRow(runId, tool, arrivalHash);
     callIndexHolder.callIndex = call.callIndex;
+
+    // ---- Running-only eligibility: budget is already reserved (first),
+    // but queued / cancel_requested / terminal runs never execute and
+    // never receive cached output. Ineligible calls audit as cancelled
+    // before any further pipeline work, with no RunEvents. The
+    // tool.requested event is emitted only after confirmed running
+    // eligibility.
+    if (!this.isRunning(runId)) {
+      return this.finishFastAuditOnly(
+        runId,
+        tool,
+        call,
+        cancelOutcome(null),
+        trace,
+      );
+    }
     this.appendRequested(runId, tool, call, arrivalHash);
 
     // ---- Step 2: classification (allowlist + read-only default-deny). ----
@@ -774,6 +800,26 @@ export class ToolBroker {
     if (freshness !== "refresh") {
       const prior = this.dedup.get(runId)?.get(key);
       if (prior !== undefined && prior.status === "done") {
+        // Running-only delivery: a run that left `running` while this
+        // request was in flight never receives cached output.
+        if (!this.isRunning(runId)) {
+          return this.finishFast(runId, tool, call, cancelOutcome(null), trace);
+        }
+        // Every delivered dedup reuse consumes cumulative budgets and is
+        // marked accepted with the leader digest; over-budget duplicates
+        // are rejected with null payloads.
+        const reservation = this.reserveCumulative(
+          runId,
+          prior.modelBytes,
+          prior.observations,
+        );
+        if (reservation !== "ok") {
+          const over =
+            reservation === "model"
+              ? outputTooLargeOutcome("succeeded", prior.resultDigest)
+              : outputInvalidOutcome("succeeded", prior.resultDigest);
+          return this.finishFast(runId, tool, call, over, trace);
+        }
         return this.finishFast(
           runId,
           tool,
@@ -781,9 +827,9 @@ export class ToolBroker {
           {
             actualOutcome: "deduplicated",
             reportedOutcome: null,
-            disposition: "none",
+            disposition: "accepted",
             errorCode: null,
-            resultDigest: null,
+            resultDigest: prior.resultDigest,
             reusedFromCallId: prior.leaderCallId,
             normalized: prior.normalized,
             modelFacing: prior.modelFacing,
@@ -796,7 +842,24 @@ export class ToolBroker {
         if (leader === null) {
           return this.finishFast(runId, tool, call, cancelOutcome(null), trace);
         }
+        // A run that left `running` during coalesced wait never receives
+        // the leader output.
+        if (!this.isRunning(runId)) {
+          return this.finishFast(runId, tool, call, cancelOutcome(null), trace);
+        }
         if (leader.accepted) {
+          const reservation = this.reserveCumulative(
+            runId,
+            leader.final.modelBytesForBudget ?? 0,
+            leader.final.observationsForBudget ?? 0,
+          );
+          if (reservation !== "ok") {
+            const over =
+              reservation === "model"
+                ? outputTooLargeOutcome("succeeded", leader.final.resultDigest)
+                : outputInvalidOutcome("succeeded", leader.final.resultDigest);
+            return this.finishFast(runId, tool, call, over, trace);
+          }
           return this.finishFast(
             runId,
             tool,
@@ -804,9 +867,9 @@ export class ToolBroker {
             {
               actualOutcome: "deduplicated",
               reportedOutcome: null,
-              disposition: "none",
+              disposition: "accepted",
               errorCode: null,
-              resultDigest: null,
+              resultDigest: leader.final.resultDigest,
               reusedFromCallId: prior.leaderCallId,
               normalized: leader.final.normalized,
               modelFacing: leader.final.modelFacing,
@@ -944,7 +1007,10 @@ export class ToolBroker {
     call: CallRef,
     argsHash: string,
   ): void {
-    if (this.isTerminal(runId)) {
+    // Requested events require confirmed running eligibility: queued /
+    // cancel_requested / terminal beginnings (and lost running races)
+    // audit with no RunEvents.
+    if (!this.isRunning(runId)) {
       return;
     }
     try {
@@ -959,38 +1025,190 @@ export class ToolBroker {
     }
   }
 
-  private appendCompleted(
-    runId: string,
-    tool: string,
-    call: CallRef,
-    final: FinalOutcome,
-  ): void {
-    if (this.isTerminal(runId)) {
-      return;
-    }
-    try {
-      this.repo.appendToolEvent(runId, "tool.completed", {
-        callId: call.callId,
-        callIndex: call.callIndex,
-        tool,
-        actualOutcome: final.actualOutcome,
-        reportedOutcome: final.reportedOutcome,
-        disposition: final.disposition,
-        errorCode: final.errorCode,
-        resultDigest: final.resultDigest,
-        reusedFromCallId: final.reusedFromCallId,
-      });
-    } catch {
-      // A lost terminal race means audit-only from here on.
-    }
-  }
-
   private isTerminal(runId: string): boolean {
     try {
       return isTerminalStatus(this.repo.getRun(runId).status);
     } catch {
       return true;
     }
+  }
+
+  private runStatus(runId: string): RunStatus | null {
+    try {
+      return this.repo.getRun(runId).status;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Running-only: only `running` runs may execute or receive output. */
+  private isRunning(runId: string): boolean {
+    return this.runStatus(runId) === "running";
+  }
+
+  /**
+   * Atomic final commit: the tool_calls finished update and the
+   * tool.completed event commit or roll back together while the run is
+   * nonterminal. After an observed terminal status only the metadata
+   * audit update runs and no event is appended. A nonterminal storage
+   * failure (including exhausted event-seq conflict retries) never
+   * falls back to audit-only completion: the row/event changes are
+   * rolled back and a fixed KernelStorageError propagates.
+   * Raw args/results/errors are never written.
+   */
+  private commitFinished(
+    runId: string,
+    tool: string,
+    call: CallRef,
+    final: FinalOutcome,
+  ): void {
+    if (this.isTerminal(runId)) {
+      this.updateRowFinished(call.callId, final);
+      return;
+    }
+    let lastConflict: unknown = null;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        this.db.exec("BEGIN IMMEDIATE");
+      } catch {
+        // Cannot begin (busy); fall through to terminal check / retry.
+        if (this.isTerminal(runId)) {
+          this.updateRowFinished(call.callId, final);
+          return;
+        }
+        continue;
+      }
+      let committed = false;
+      try {
+        const row = this.db
+          .prepare("SELECT status, event_seq FROM runs WHERE id = ?")
+          .get(runId) as
+          | { status: string; event_seq: number }
+          | undefined;
+        if (row === undefined) {
+          throw new RepositoryNotFoundError(`run ${runId} not found`);
+        }
+        if (isTerminalStatus(row.status as RunStatus)) {
+          this.db.exec("ROLLBACK");
+          this.updateRowFinished(call.callId, final);
+          return;
+        }
+        const now = this.clock.now();
+        this.db
+          .prepare(
+            "UPDATE tool_calls SET lifecycle_status = 'finished', reported_outcome = ?, actual_outcome = ?, result_disposition = ?, reused_from_call_id = ?, error_code = ?, result_digest = ?, reported_at = ?, actual_finished_at = ? WHERE id = ?",
+          )
+          .run(
+            final.reportedOutcome,
+            final.actualOutcome,
+            final.disposition,
+            final.reusedFromCallId,
+            final.errorCode,
+            final.resultDigest,
+            now,
+            now,
+            call.callId,
+          );
+        const payload = parseRunEventPayload("tool.completed", {
+          callId: call.callId,
+          callIndex: call.callIndex,
+          tool,
+          actualOutcome: final.actualOutcome,
+          reportedOutcome: final.reportedOutcome,
+          disposition: final.disposition,
+          errorCode: final.errorCode,
+          resultDigest: final.resultDigest,
+          reusedFromCallId: final.reusedFromCallId,
+        });
+        const next = row.event_seq + 1;
+        const moved = this.db
+          .prepare("UPDATE runs SET event_seq = ? WHERE id = ? AND event_seq = ?")
+          .run(next, runId, row.event_seq);
+        if (moved.changes !== 1) {
+          throw new KernelStorageError(
+            "kernel_concurrent_conflict",
+            "concurrent event append conflict; retry the transition",
+          );
+        }
+        this.db
+          .prepare(
+            "INSERT INTO run_events (run_id, seq, schema_version, type, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+          )
+          .run(
+            runId,
+            next,
+            RUN_EVENT_SCHEMA_VERSION,
+            "tool.completed",
+            JSON.stringify(payload),
+            now,
+          );
+        this.db.exec("COMMIT");
+        committed = true;
+        return;
+      } catch (error) {
+        try {
+          this.db.exec("ROLLBACK");
+        } catch {
+          // Best effort; the original error carries the failure.
+        }
+        // Terminal observed after rollback: audit-only late update only.
+        if (this.isTerminal(runId)) {
+          this.updateRowFinished(call.callId, final);
+          return;
+        }
+        if (
+          error instanceof KernelStorageError &&
+          error.code === "kernel_concurrent_conflict"
+        ) {
+          lastConflict = error;
+          if (attempt < 4) {
+            continue;
+          }
+          throw error;
+        }
+        if (error instanceof KernelStorageError) {
+          throw error;
+        }
+        if (
+          error instanceof RepositoryNotFoundError ||
+          error instanceof RepositoryValidationError
+        ) {
+          throw error;
+        }
+        // Nonterminal storage failure: row/event rolled back, no
+        // audit-only fallback; propagate a fixed storage failure.
+        throw new KernelStorageError(
+          "kernel_storage_failed",
+          "tool audit commit failed",
+        );
+      } finally {
+        if (!committed) {
+          try {
+            if (
+              (this.db as unknown as { inTransaction?: boolean }).inTransaction ===
+              true
+            ) {
+              this.db.exec("ROLLBACK");
+            }
+          } catch {
+            // Best effort.
+          }
+        }
+      }
+    }
+    // Bounded retries exhausted while still nonterminal: propagate a
+    // fixed conflict failure with row/event rolled back.
+    if (this.isTerminal(runId)) {
+      this.updateRowFinished(call.callId, final);
+      return;
+    }
+    if (lastConflict instanceof KernelStorageError) {
+      throw lastConflict;
+    }
+    throw new KernelStorageError(
+      "kernel_concurrent_conflict",
+      "concurrent event append conflict; retry the transition",
+    );
   }
 
   private effectiveTimeout(
@@ -1054,28 +1272,29 @@ export class ToolBroker {
     const { runId, tool, call, dedupKey } = args;
 
     if (physical.kind === "failed") {
-      if (args.freshness === "refresh") {
-        // A failed refresh must not poison the cache: drop our entry.
-        const perRun = this.dedup.get(runId);
-        const current = perRun?.get(dedupKey);
-        if (
-          current !== undefined &&
-          current.status === "inflight" &&
-          current.leaderCallId === call.callId
-        ) {
-          perRun?.delete(dedupKey);
-        }
+      // A failed in-flight entry must not poison the cache: any freshness
+      // drops our entry so a later separately requested logical call may
+      // execute anew. This never retries the original call.
+      const perRun = this.dedup.get(runId);
+      const current = perRun?.get(dedupKey);
+      if (
+        current !== undefined &&
+        current.status === "inflight" &&
+        current.leaderCallId === call.callId
+      ) {
+        perRun?.delete(dedupKey);
       }
       args.note("audit");
-      this.updateRowFinished(call.callId, physical.final);
-      this.appendCompleted(runId, tool, call, physical.final);
+      this.commitFinished(runId, tool, call, physical.final);
       return { accepted: false, final: physical.final };
     }
 
     const pending = physical.pending;
-    // Terminal landing: the handler produced a value the run can no
-    // longer use. Preserve the report, mark discarded, emit no event.
-    if (this.isTerminal(runId)) {
+    // Non-running landing: the handler produced a value the run can no
+    // longer use. Preserve the report, mark discarded, emit no event when
+    // terminal (audit-only) and no delivery when queued/cancel_requested.
+    // The in-flight entry is dropped so later running calls may execute.
+    if (!this.isRunning(runId)) {
       const final: FinalOutcome = {
         actualOutcome: "cancelled",
         reportedOutcome: "succeeded",
@@ -1086,8 +1305,17 @@ export class ToolBroker {
         normalized: null,
         modelFacing: null,
       };
+      const perRun = this.dedup.get(runId);
+      const current = perRun?.get(dedupKey);
+      if (
+        current !== undefined &&
+        current.status === "inflight" &&
+        current.leaderCallId === call.callId
+      ) {
+        perRun?.delete(dedupKey);
+      }
       args.note("audit");
-      this.updateRowFinished(call.callId, final);
+      this.commitFinished(runId, tool, call, final);
       return { accepted: false, final };
     }
 
@@ -1102,20 +1330,17 @@ export class ToolBroker {
         reservation === "model"
           ? outputTooLargeOutcome("succeeded", pending.resultDigest)
           : outputInvalidOutcome("succeeded", pending.resultDigest);
-      args.note("audit");
-      this.updateRowFinished(call.callId, final);
-      this.appendCompleted(runId, tool, call, final);
-      if (args.freshness === "refresh") {
-        const perRun = this.dedup.get(runId);
-        const current = perRun?.get(dedupKey);
-        if (
-          current !== undefined &&
-          current.status === "inflight" &&
-          current.leaderCallId === call.callId
-        ) {
-          perRun?.delete(dedupKey);
-        }
+      const perRun = this.dedup.get(runId);
+      const current = perRun?.get(dedupKey);
+      if (
+        current !== undefined &&
+        current.status === "inflight" &&
+        current.leaderCallId === call.callId
+      ) {
+        perRun?.delete(dedupKey);
       }
+      args.note("audit");
+      this.commitFinished(runId, tool, call, final);
       return { accepted: false, final };
     }
 
@@ -1128,6 +1353,8 @@ export class ToolBroker {
       reusedFromCallId: null,
       normalized: pending.normalized,
       modelFacing: pending.modelFacing,
+      modelBytesForBudget: pending.modelBytes,
+      observationsForBudget: pending.observations,
     };
     const perRun = this.dedup.get(runId);
     const current = perRun?.get(dedupKey);
@@ -1136,16 +1363,31 @@ export class ToolBroker {
       current.status === "inflight" &&
       current.leaderCallId === call.callId
     ) {
-      perRun?.set(dedupKey, {
-        status: "done",
-        leaderCallId: call.callId,
-        normalized: pending.normalized,
-        modelFacing: pending.modelFacing,
-      });
+      if (args.freshness === "refresh") {
+        perRun?.delete(dedupKey);
+        perRun?.set(dedupKey, {
+          status: "done",
+          leaderCallId: call.callId,
+          normalized: pending.normalized,
+          modelFacing: pending.modelFacing,
+          modelBytes: pending.modelBytes,
+          observations: pending.observations,
+          resultDigest: pending.resultDigest,
+        });
+      } else {
+        perRun?.set(dedupKey, {
+          status: "done",
+          leaderCallId: call.callId,
+          normalized: pending.normalized,
+          modelFacing: pending.modelFacing,
+          modelBytes: pending.modelBytes,
+          observations: pending.observations,
+          resultDigest: pending.resultDigest,
+        });
+      }
     }
     args.note("audit");
-    this.updateRowFinished(call.callId, final);
-    this.appendCompleted(runId, tool, call, final);
+    this.commitFinished(runId, tool, call, final);
     return { accepted: true, final };
   }
 
@@ -1166,9 +1408,10 @@ export class ToolBroker {
   }): Promise<PhysicalSettlement> {
     const { runId, tool, reg, input, call } = args;
 
-    // Terminal check before any physical work: never execute for a
-    // terminal run; the late-arrival contract applies instead.
-    if (this.isTerminal(runId)) {
+    // Running-only check before any physical work: queued /
+    // cancel_requested / terminal runs never execute; the
+    // late-arrival contract applies instead.
+    if (!this.isRunning(runId)) {
       args.note("execute");
       args.note("normalize");
       return { kind: "failed", final: cancelOutcome(null) };
@@ -1204,7 +1447,9 @@ export class ToolBroker {
 
     // Bounded physical concurrency: per-run slot first (FIFO preserves
     // caller-visible per-run order), then the process-wide slot. Queued
-    // waiters abort on timeout/cancel instead of executing late.
+    // waiters abort on timeout/cancel instead of executing late. The
+    // composed deadline covers this queue wait, the handler, and the
+    // async normalizer below.
     let perRunSlot = this.perRunSlots.get(runId);
     if (perRunSlot === undefined) {
       perRunSlot = new Slot(this.budgets.maxConcurrentPerRun);
@@ -1224,6 +1469,18 @@ export class ToolBroker {
     );
     if (!gotProcessSlot) {
       perRunSlot.release();
+      cleanupTimer();
+      args.note("normalize");
+      return {
+        kind: "failed",
+        final: wasTimeout(abortKind) ? timeoutOutcome() : cancelOutcome(null),
+      };
+    }
+
+    // A run that left `running` while queued must not execute.
+    if (!this.isRunning(runId) || callController.signal.aborted) {
+      perRunSlot.release();
+      this.processSlot.release();
       cleanupTimer();
       args.note("normalize");
       return {
@@ -1259,8 +1516,9 @@ export class ToolBroker {
       handlerPromise = Promise.reject(error);
     }
 
-    // Detachment: a late handler settlement after timeout/cancel only
-    // updates the audit row (reported_outcome / discarded), never events.
+    // Detachment: the broker stops awaiting non-cooperative handlers at
+    // timeout/cancel. Every late handler settlement (success, failure, or
+    // cancel) only updates the audit row as discarded, never events.
     handlerPromise.then(
       () => {
         if (abortKind !== null) {
@@ -1273,7 +1531,7 @@ export class ToolBroker {
           this.lateReport(
             call.callId,
             mapped.cancelLike ? "cancelled" : "failed",
-            false,
+            true,
           );
         }
       },
@@ -1305,10 +1563,13 @@ export class ToolBroker {
 
     perRunSlot.release();
     this.processSlot.release();
-    cleanupTimer();
 
     if (!raced.settled || callController.signal.aborted) {
       args.note("normalize");
+      // Keep the composed deadline alive for the detached handler's late
+      // report, but the timer itself can be cleared: the late-report path
+      // no longer needs it. Normalize is skipped entirely.
+      cleanupTimer();
       return {
         kind: "failed",
         final: wasTimeout(abortKind) ? timeoutOutcome() : cancelOutcome(null),
@@ -1318,6 +1579,7 @@ export class ToolBroker {
     if ("error" in raced) {
       const mapped = mapHandlerError(raced.error);
       args.note("normalize");
+      cleanupTimer();
       if (mapped.cancelLike) {
         return { kind: "failed", final: cancelOutcome("cancelled") };
       }
@@ -1336,14 +1598,62 @@ export class ToolBroker {
       };
     }
 
-    // ---- Step 6: normalization + strict output validation. ----
+    // ---- Step 6: normalization + strict output validation, still under
+    // the composed timeout/cancel deadline. A non-cooperative async
+    // normalizer is detached: the broker returns timeout/cancel without
+    // waiting for it.
     args.note("normalize");
     const raw = raced.value;
     let normalizedOutput: NormalizedToolOutput;
     try {
       const normalizer = reg.normalize ?? defaultNormalizer;
-      normalizedOutput = await normalizer(raw, { input });
+      let normalizerPromise: Promise<NormalizedToolOutput>;
+      try {
+        normalizerPromise = Promise.resolve().then(() =>
+          normalizer(raw, { input }),
+        );
+      } catch (error) {
+        throw error;
+      }
+      // Late async normalizer settlement is detached (no audit write; the
+      // call already settled as timeout/cancel).
+      void normalizerPromise.then(
+        () => {},
+        () => {},
+      );
+      const normRaced = await Promise.race<{
+        settled: boolean;
+        value?: NormalizedToolOutput;
+      }>([
+        normalizerPromise.then(
+          (value) => ({ settled: true as const, value }),
+          () => ({ settled: true as const }),
+        ),
+        new Promise<{ settled: boolean }>((resolve) => {
+          if (callController.signal.aborted) {
+            resolve({ settled: false });
+          } else {
+            callController.signal.addEventListener(
+              "abort",
+              () => resolve({ settled: false }),
+              { once: true },
+            );
+          }
+        }),
+      ]);
+      if (!normRaced.settled || callController.signal.aborted) {
+        cleanupTimer();
+        return {
+          kind: "failed",
+          final: wasTimeout(abortKind) ? timeoutOutcome() : cancelOutcome(null),
+        };
+      }
+      if (normRaced.value === undefined) {
+        throw new Error("normalizer rejected");
+      }
+      normalizedOutput = normRaced.value;
     } catch {
+      cleanupTimer();
       return {
         kind: "failed",
         final: {
@@ -1358,6 +1668,15 @@ export class ToolBroker {
         },
       };
     }
+    // Abort that fired during normalization wins over a delivered value.
+    if (callController.signal.aborted) {
+      cleanupTimer();
+      return {
+        kind: "failed",
+        final: wasTimeout(abortKind) ? timeoutOutcome() : cancelOutcome(null),
+      };
+    }
+    cleanupTimer();
     if (
       !Number.isInteger(normalizedOutput.observations) ||
       (normalizedOutput.observations as number) < 0
@@ -1480,8 +1799,27 @@ export class ToolBroker {
   ): BrokerCallResult {
     trace.push("audit");
     this.onStep?.("audit", { runId, tool, callIndex: call.callIndex });
+    this.commitFinished(runId, tool, call, final);
+    return this.finalizeResult(tool, call, final, trace);
+  }
+
+  /**
+   * Audit-only finalization for begun-non-running invocations
+   * (queued / cancel_requested / terminal): reserves/audits with no
+   * RunEvents. Used only for the initial running-eligibility gate;
+   * terminal races inside commitFinished remain the only other
+   * audit-only path.
+   */
+  private finishFastAuditOnly(
+    runId: string,
+    tool: string,
+    call: CallRef,
+    final: FinalOutcome,
+    trace: PipelineStep[],
+  ): BrokerCallResult {
+    trace.push("audit");
+    this.onStep?.("audit", { runId, tool, callIndex: call.callIndex });
     this.updateRowFinished(call.callId, final);
-    this.appendCompleted(runId, tool, call, final);
     return this.finalizeResult(tool, call, final, trace);
   }
 

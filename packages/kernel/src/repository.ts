@@ -38,9 +38,9 @@ import {
   type RunEvent,
   type RunResult,
   type RunStatus,
-  RunErrorCodeSchema,
   isTerminalStatus,
   messageScope,
+  parseRunErrorCode,
   parseRunEvent,
   parseRunEventPayload,
   parseRunResult,
@@ -759,7 +759,7 @@ export function createKernelRepository(db: Database.Database) {
     const id = requireId(runId, "runId");
     const now = nowMs(options.now);
     // Never persist raw error strings: fixed snake_case code only.
-    const code = parseOrValidation(() => RunErrorCodeSchema.parse(errorCode), "run error_code");
+    const code = parseOrValidation(() => parseRunErrorCode(errorCode), "run error_code");
     return withImmediate(db, () => {
       const row = readRun(db, id);
       if (row === null) {

@@ -12,6 +12,7 @@ import {
   createKernelRepository,
   createToolBroker,
   type KernelRepository,
+  KernelStorageError,
   migrateKernelDatabase,
   openKernelDatabase,
   type PipelineStep,
@@ -1257,6 +1258,485 @@ describe("metadata-only audit", () => {
       ).rejects.toThrow();
       expect(requestsUsed(handle.raw, runId)).toBe(0);
     } finally {
+      handle.raw.close();
+    }
+  });
+});
+
+describe("review regressions: running-only invocation and delivery", () => {
+  it("never executes for queued runs, reserves budget first, audits cancelled", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const sessionId = repo.createSession({ key: crypto.randomUUID(), now: T0 }).body.sessionId;
+      const posted = repo.postMessage(sessionId, { text: "hi" }, { key: crypto.randomUUID(), now: T0 });
+      const runId = posted.body.run.id;
+      expect(repo.getRun(runId).status).toBe("queued");
+      let calls = 0;
+      const broker = makeBroker(handle, repo, [
+        echoReg({
+          handler: async (input: { q: string }) => {
+            calls += 1;
+            return { text: input.q };
+          },
+        }),
+      ]);
+      const out = await broker.invoke(runId, "test.read", { q: "a" }, CTX);
+      expect(out.result.actualOutcome).toBe("cancelled");
+      expect(out.result.errorCode).toBe("execution_cancelled");
+      expect(out.normalized).toBeNull();
+      expect(out.modelFacing).toBeNull();
+      expect(calls).toBe(0);
+      expect(out.pipeline).toEqual(["budget_reserve", "audit"]);
+      expect(requestsUsed(handle.raw, runId)).toBe(1);
+      const rows = toolCalls(handle.raw, runId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.actual_outcome).toBe("cancelled");
+    } finally {
+      handle.raw.close();
+    }
+  });
+
+  it("never executes nor delivers cached output for cancel_requested runs", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const { sessionId, runId } = newRunningRun(repo, T0);
+      let calls = 0;
+      const broker = makeBroker(handle, repo, [
+        echoReg({
+          handler: async (input: { q: string }) => {
+            calls += 1;
+            return { text: input.q };
+          },
+        }),
+      ]);
+      const first = await broker.invoke(runId, "test.read", { q: "cached" }, CTX);
+      expect(first.result.actualOutcome).toBe("succeeded");
+      expect(calls).toBe(1);
+      repo.cancelRun(sessionId, runId, { now: T0 + 5 });
+      expect(repo.getRun(runId).status).toBe("cancel_requested");
+      const out = await broker.invoke(runId, "test.read", { q: "cached" }, CTX);
+      expect(out.result.actualOutcome).toBe("cancelled");
+      expect(out.normalized).toBeNull();
+      expect(out.modelFacing).toBeNull();
+      expect(calls).toBe(1);
+      expect(out.pipeline).toEqual(["budget_reserve", "audit"]);
+    } finally {
+      handle.raw.close();
+    }
+  });
+
+  it("coalesced followers observe running-only cancel when the run leaves running", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const { sessionId, runId } = newRunningRun(repo, T0);
+      const gate = deferred();
+      const broker = makeBroker(handle, repo, [
+        echoReg({
+          handler: async (input: { q: string }) => {
+            await gate.promise;
+            return { text: input.q };
+          },
+        }),
+      ]);
+      const p1 = broker.invoke(runId, "test.read", { q: "same" }, CTX);
+      const p2 = broker.invoke(runId, "test.read", { q: "same" }, CTX);
+      await sleep(10);
+      repo.cancelRun(sessionId, runId, { now: T0 + 5 });
+      repo.finalizeCancelRequested(runId, { now: T0 + 6 });
+      gate.resolve();
+      const [r1, r2] = await Promise.all([p1, p2]);
+      expect(r1.result.actualOutcome).toBe("cancelled");
+      expect(r1.normalized).toBeNull();
+      expect(r2.result.actualOutcome).toBe("cancelled");
+      expect(r2.normalized).toBeNull();
+    } finally {
+      handle.raw.close();
+    }
+  });
+});
+
+describe("review regressions: composed deadline and detach", () => {
+  it("bounds queued semaphore wait with the requested timeout", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const { runId } = newRunningRun(repo, T0);
+      const gate = deferred();
+      const broker = makeBroker(
+        handle,
+        repo,
+        [
+          echoReg({
+            handler: async (input: { q: string }) => {
+              await gate.promise;
+              return { text: input.q };
+            },
+          }),
+        ],
+        { budgets: { maxConcurrentPerRun: 1 } },
+      );
+      const first = broker.invoke(runId, "test.read", { q: "a" }, { ...CTX, freshness: "refresh" });
+      await sleep(10);
+      const start = Date.now();
+      const queued = await broker.invoke(
+        runId,
+        "test.read",
+        { q: "b" },
+        { ...CTX, freshness: "refresh", timeoutMs: 25 },
+      );
+      expect(Date.now() - start).toBeLessThan(2000);
+      expect(queued.result.actualOutcome).toBe("timed_out");
+      expect(queued.result.errorCode).toBe("execution_timeout");
+      gate.resolve();
+      const r1 = await first;
+      expect(r1.result.actualOutcome).toBe("succeeded");
+    } finally {
+      handle.raw.close();
+    }
+  });
+
+  it("bounds a non-cooperative async normalizer and detaches", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const { runId } = newRunningRun(repo, T0);
+      const broker = makeBroker(handle, repo, [
+        echoReg({
+          handler: async () => ({ text: "ok" }),
+          normalize: () => new Promise<never>(() => {}),
+        }),
+      ]);
+      const start = Date.now();
+      const out = await broker.invoke(
+        runId,
+        "test.read",
+        { q: "a" },
+        { ...CTX, timeoutMs: 25 },
+      );
+      expect(Date.now() - start).toBeLessThan(2000);
+      expect(out.result.actualOutcome).toBe("timed_out");
+      expect(out.normalized).toBeNull();
+    } finally {
+      handle.raw.close();
+    }
+  });
+
+  it("marks every late handler settlement discarded (success and failure)", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const { runId } = newRunningRun(repo, T0);
+      const controller = new AbortController();
+      const broker = makeBroker(handle, repo, [
+        echoReg({
+          handler: async (input: { q: string }) => {
+            await sleep(120);
+            return { text: input.q };
+          },
+        }),
+      ]);
+      const pending = broker.invoke(
+        runId,
+        "test.read",
+        { q: "slow-ok" },
+        { ...CTX, signal: controller.signal },
+      );
+      await sleep(10);
+      controller.abort();
+      const out = await pending;
+      expect(out.result.actualOutcome).toBe("cancelled");
+      const deadline = Date.now() + 2000;
+      for (;;) {
+        const rows = toolCalls(handle.raw, runId);
+        if (rows[0]?.reported_outcome === "succeeded") break;
+        if (Date.now() > deadline) throw new Error("late success not audited");
+        await sleep(5);
+      }
+      expect(toolCalls(handle.raw, runId)[0]?.result_disposition).toBe("discarded");
+
+      const { runId: run2 } = newRunningRun(repo, T0 + 100);
+      const broker2 = makeBroker(handle, repo, [
+        echoReg({
+          handler: async () => {
+            await sleep(120);
+            throw new ToolError("execution_failed");
+          },
+        }),
+      ]);
+      const c2 = new AbortController();
+      const p2 = broker2.invoke(run2, "test.read", { q: "slow-fail" }, { ...CTX, signal: c2.signal });
+      await sleep(10);
+      c2.abort();
+      const o2 = await p2;
+      expect(o2.result.actualOutcome).toBe("cancelled");
+      const deadline2 = Date.now() + 2000;
+      for (;;) {
+        const rows = toolCalls(handle.raw, run2);
+        if (rows[0]?.reported_outcome === "failed") break;
+        if (Date.now() > deadline2) throw new Error("late failure not audited");
+        await sleep(5);
+      }
+      expect(toolCalls(handle.raw, run2)[0]?.result_disposition).toBe("discarded");
+    } finally {
+      handle.raw.close();
+    }
+  });
+});
+
+describe("review regressions: dedup budgets and cache hygiene", () => {
+  it("charges cumulative budgets for dedup reuse and marks accepted with digest", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const { runId } = newRunningRun(repo, T0);
+      const broker = makeBroker(
+        handle,
+        repo,
+        [
+          echoReg({
+            normalize: () => ({
+              normalized: { text: "ok" },
+              observations: 10,
+              modelFacing: "a".repeat(40),
+            }),
+          }),
+        ],
+        { budgets: { maxObservationsPerRun: 15 } },
+      );
+      const first = await broker.invoke(runId, "test.read", { q: "x" }, CTX);
+      expect(first.result.actualOutcome).toBe("succeeded");
+      const second = await broker.invoke(runId, "test.read", { q: "x" }, CTX);
+      expect(second.result.actualOutcome).toBe("failed");
+      expect(second.result.errorCode).toBe("output_invalid");
+      expect(second.normalized).toBeNull();
+      expect(second.modelFacing).toBeNull();
+    } finally {
+      handle.raw.close();
+    }
+  });
+
+  it("marks delivered dedup reuse accepted with the leader digest", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const { runId } = newRunningRun(repo, T0);
+      const broker = makeBroker(handle, repo, [echoReg()]);
+      const first = await broker.invoke(runId, "test.read", { q: "k" }, CTX);
+      const second = await broker.invoke(runId, "test.read", { q: "k" }, CTX);
+      expect(second.result.actualOutcome).toBe("deduplicated");
+      expect(second.result.disposition).toBe("accepted");
+      expect(second.result.resultDigest).toBe(first.result.resultDigest);
+      expect(second.normalized).toEqual(first.normalized);
+      const rows = toolCalls(handle.raw, runId);
+      expect(rows[1]?.result_disposition).toBe("accepted");
+      expect(rows[1]?.result_digest).toBe(rows[0]?.result_digest);
+    } finally {
+      handle.raw.close();
+    }
+  });
+
+  it("clears failed normal in-flight entries so a later call may execute without retry", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const { runId } = newRunningRun(repo, T0);
+      let calls = 0;
+      const broker = makeBroker(handle, repo, [
+        echoReg({
+          handler: async (input: { q: string }) => {
+            calls += 1;
+            if (calls === 1) throw new ToolError("execution_failed");
+            return { text: `ok:${input.q}` };
+          },
+        }),
+      ]);
+      const failed = await broker.invoke(runId, "test.read", { q: "flaky" }, CTX);
+      expect(failed.result.actualOutcome).toBe("failed");
+      expect(calls).toBe(1);
+      const retry = await broker.invoke(runId, "test.read", { q: "flaky" }, CTX);
+      expect(retry.result.actualOutcome).toBe("succeeded");
+      expect(calls).toBe(2);
+      expect(retry.result.reusedFromCallId).toBeNull();
+    } finally {
+      handle.raw.close();
+    }
+  });
+});
+
+describe("review regressions: atomic audit and closed registries", () => {
+  it("commits the final row update and tool.completed event together while nonterminal", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const { runId } = newRunningRun(repo, T0);
+      const broker = makeBroker(handle, repo, [echoReg()]);
+      const before = runEvents(handle.raw, runId).length;
+      const out = await broker.invoke(runId, "test.read", { q: "a" }, CTX);
+      expect(out.result.actualOutcome).toBe("succeeded");
+      const rows = toolCalls(handle.raw, runId);
+      expect(rows[0]?.lifecycle_status).toBe("finished");
+      expect(rows[0]?.actual_outcome).toBe("succeeded");
+      const after = runEvents(handle.raw, runId);
+      expect(after.length).toBe(before + 2);
+      expect(after.map((e) => e.type)).toContain("tool.completed");
+    } finally {
+      handle.raw.close();
+    }
+  });
+
+  it("writes audit-only rows with no event after terminal", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const { runId } = newRunningRun(repo, T0);
+      const broker = makeBroker(handle, repo, [echoReg()]);
+      repo.completeRun(runId, { version: 1, text: "done" }, { now: T0 + 5 });
+      const before = runEvents(handle.raw, runId).length;
+      const out = await broker.invoke(runId, "test.read", { q: "a" }, CTX);
+      expect(out.result.actualOutcome).toBe("cancelled");
+      expect(runEvents(handle.raw, runId).length).toBe(before);
+      const rows = toolCalls(handle.raw, runId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.actual_outcome).toBe("cancelled");
+      expect(rows[0]?.lifecycle_status).toBe("finished");
+    } finally {
+      handle.raw.close();
+    }
+  });
+
+  it("uses the closed tool error registry (unknown codes rejected)", async () => {
+    expect(() => new ToolError("not_a_real_code")).toThrow();
+    expect(() => new ToolError("execution_failed")).not.toThrow();
+  });
+});
+
+describe("tighten-broker-atomicity: non-running emits no RunEvents", () => {
+  it("queued beginnings reserve/audit with zero tool.requested/tool.completed events", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const sessionId = repo.createSession({ key: crypto.randomUUID(), now: T0 }).body.sessionId;
+      const posted = repo.postMessage(sessionId, { text: "hi" }, { key: crypto.randomUUID(), now: T0 });
+      const runId = posted.body.run.id;
+      expect(repo.getRun(runId).status).toBe("queued");
+      const broker = makeBroker(handle, repo, [echoReg()]);
+      const before = runEvents(handle.raw, runId).filter((e) => e.type.startsWith("tool."));
+      expect(before).toHaveLength(0);
+      const out = await broker.invoke(runId, "test.read", { q: "a" }, CTX);
+      expect(out.result.actualOutcome).toBe("cancelled");
+      expect(out.normalized).toBeNull();
+      expect(out.modelFacing).toBeNull();
+      expect(requestsUsed(handle.raw, runId)).toBe(1);
+      const rows = toolCalls(handle.raw, runId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.lifecycle_status).toBe("finished");
+      expect(rows[0]?.actual_outcome).toBe("cancelled");
+      const toolEvents = runEvents(handle.raw, runId).filter((e) => e.type.startsWith("tool."));
+      expect(toolEvents).toHaveLength(0);
+    } finally {
+      handle.raw.close();
+    }
+  });
+
+  it("cancel_requested beginnings reserve/audit with zero tool.requested/tool.completed events", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const { sessionId, runId } = newRunningRun(repo, T0);
+      const broker = makeBroker(handle, repo, [echoReg()]);
+      repo.cancelRun(sessionId, runId, { now: T0 + 5 });
+      expect(repo.getRun(runId).status).toBe("cancel_requested");
+      const toolBefore = runEvents(handle.raw, runId).filter((e) => e.type.startsWith("tool."));
+      const out = await broker.invoke(runId, "test.read", { q: "a" }, CTX);
+      expect(out.result.actualOutcome).toBe("cancelled");
+      expect(out.normalized).toBeNull();
+      expect(requestsUsed(handle.raw, runId)).toBe(1);
+      const rows = toolCalls(handle.raw, runId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.actual_outcome).toBe("cancelled");
+      const toolAfter = runEvents(handle.raw, runId).filter((e) => e.type.startsWith("tool."));
+      expect(toolAfter).toHaveLength(toolBefore.length);
+      expect(toolAfter).toHaveLength(0);
+    } finally {
+      handle.raw.close();
+    }
+  });
+
+  it("terminal beginnings reserve/audit with zero tool.requested/tool.completed events", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const { runId } = newRunningRun(repo, T0);
+      const broker = makeBroker(handle, repo, [echoReg()]);
+      repo.completeRun(runId, { version: 1, text: "done" }, { now: T0 + 5 });
+      const toolBefore = runEvents(handle.raw, runId).filter((e) => e.type.startsWith("tool."));
+      const out = await broker.invoke(runId, "test.read", { q: "a" }, CTX);
+      expect(out.result.actualOutcome).toBe("cancelled");
+      expect(requestsUsed(handle.raw, runId)).toBe(1);
+      const toolAfter = runEvents(handle.raw, runId).filter((e) => e.type.startsWith("tool."));
+      expect(toolAfter).toHaveLength(toolBefore.length);
+      expect(toolAfter).toHaveLength(0);
+    } finally {
+      handle.raw.close();
+    }
+  });
+});
+
+describe("tighten-broker-atomicity: nonterminal commit rollback", () => {
+  it("rolls back row+event on injected tool.completed failure and propagates a fixed storage error", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const { runId } = newRunningRun(repo, T0);
+      const broker = makeBroker(handle, repo, [echoReg()]);
+      handle.raw.exec(
+        "CREATE TRIGGER inject_tool_completed_failure BEFORE INSERT ON run_events WHEN NEW.type = 'tool.completed' BEGIN SELECT RAISE(ABORT, 'injected_tool_completed_failure'); END",
+      );
+      const toolBefore = runEvents(handle.raw, runId).filter((e) => e.type.startsWith("tool."));
+      let failure: unknown = null;
+      try {
+        await broker.invoke(runId, "test.read", { q: "a" }, CTX);
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toBeInstanceOf(KernelStorageError);
+      // Fixed code, no raw sqlite text leaked.
+      expect((failure as KernelStorageError).code).toBe("kernel_storage_failed");
+      expect(String((failure as Error).message)).not.toContain("injected_tool_completed_failure");
+      // Atomic rollback: the finished update + event did not persist
+      // (the pre-commit running marker remains, but the row is not
+      // finished and no completion was recorded).
+      const rows = toolCalls(handle.raw, runId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.lifecycle_status).not.toBe("finished");
+      expect(rows[0]?.lifecycle_status).toBe("running");
+      expect(rows[0]?.actual_outcome).toBeNull();
+      // Requested was emitted before the failing commit; completed was not.
+      const toolAfter = runEvents(handle.raw, runId).filter((e) => e.type.startsWith("tool."));
+      expect(toolAfter.filter((e) => e.type === "tool.requested")).toHaveLength(1);
+      expect(toolAfter.filter((e) => e.type === "tool.completed")).toHaveLength(0);
+      expect(toolAfter).toHaveLength(toolBefore.length + 1);
+    } finally {
+      try {
+        handle.raw.exec("DROP TRIGGER IF EXISTS inject_tool_completed_failure");
+      } catch {
+        // Best effort.
+      }
+      handle.raw.close();
+    }
+  });
+
+  it("retains terminal audit-only late completion with no event while the trigger is armed", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const { runId } = newRunningRun(repo, T0);
+      const broker = makeBroker(handle, repo, [echoReg()]);
+      handle.raw.exec(
+        "CREATE TRIGGER inject_tool_completed_failure BEFORE INSERT ON run_events WHEN NEW.type = 'tool.completed' BEGIN SELECT RAISE(ABORT, 'injected_tool_completed_failure'); END",
+      );
+      repo.completeRun(runId, { version: 1, text: "done" }, { now: T0 + 5 });
+      const before = runEvents(handle.raw, runId).length;
+      const out = await broker.invoke(runId, "test.read", { q: "a" }, CTX);
+      expect(out.result.actualOutcome).toBe("cancelled");
+      expect(runEvents(handle.raw, runId).length).toBe(before);
+      const rows = toolCalls(handle.raw, runId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.lifecycle_status).toBe("finished");
+      expect(rows[0]?.actual_outcome).toBe("cancelled");
+    } finally {
+      try {
+        handle.raw.exec("DROP TRIGGER IF EXISTS inject_tool_completed_failure");
+      } catch {
+        // Best effort.
+      }
       handle.raw.close();
     }
   });
