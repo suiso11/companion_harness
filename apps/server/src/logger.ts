@@ -15,6 +15,26 @@ const LEVEL_ORDER: Record<ServerLogLevel, number> = {
 };
 
 const CODE_PATTERN = /^[a-z0-9_.]{1,128}$/;
+/**
+ * Closed status vocabulary (M0 only). Every string status emitted through
+ * the logger must be a member; anything else maps to "unknown". Numeric
+ * statuses (migration versions, recovery counts) are preserved as-is.
+ */
+const LOG_STATUS_ALLOWLIST: ReadonlySet<string> = new Set([
+  "sigint",
+  "sigterm",
+  "signal",
+  "unknown",
+  "newer_database",
+  "server_config_invalid",
+  "kernel_pragmas_invalid",
+  "kernel_quick_check_failed",
+  "kernel_backup_failed",
+  "kernel_database_newer_than_bundle",
+  "kernel_migration_missing",
+  "kernel_migration_failed",
+  "kernel_backup_required",
+]);
 
 /** Whitelisted scalar fields. Nothing else is ever emitted. */
 export interface ServerLogFields {
@@ -56,6 +76,21 @@ function sanitizeString(value: unknown): string | undefined {
   return value.slice(0, MAX_STRING_LENGTH);
 }
 
+/** Map an arbitrary shutdown/startup reason or error name to a fixed status. */
+export function sanitizeLogStatus(value: unknown): string | number | undefined {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : undefined;
+  }
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const lowered = value.toLowerCase();
+  if (LOG_STATUS_ALLOWLIST.has(lowered)) {
+    return lowered;
+  }
+  return "unknown";
+}
+
 function sanitizeNumber(value: unknown): number | undefined {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return undefined;
@@ -85,7 +120,7 @@ function sanitizeFields(fields: ServerLogFields | undefined): ServerLogFields {
     out.scope = scope;
   }
   if (typeof fields.status === "string") {
-    const status = sanitizeString(fields.status);
+    const status = sanitizeLogStatus(fields.status);
     if (status !== undefined) {
       out.status = status;
     }

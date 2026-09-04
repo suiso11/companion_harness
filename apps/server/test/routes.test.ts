@@ -911,4 +911,29 @@ describe("M0 review regressions", () => {
       f.close();
     }
   });
+
+  it("exposes no HTTP maintenance routes (CLI only)", async () => {
+    const f = await makeApp();
+    try {
+      for (const path of [
+        "/api/backups",
+        "/api/backup",
+        "/api/restore",
+        "/api/maintenance/backup",
+      ]) {
+        const get = await f.app.request(path, {
+          headers: { host: "127.0.0.1" },
+        });
+        expect(get.status).toBe(404);
+        const post = await f.app.request(path, {
+          method: "POST",
+          headers: { ...postHeaders(), "idempotency-key": randomUUID() },
+          body: "{}",
+        });
+        expect(post.status).toBe(404);
+      }
+    } finally {
+      f.close();
+    }
+  });
 });

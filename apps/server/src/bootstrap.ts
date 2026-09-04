@@ -15,7 +15,7 @@
 // bootstrap narrows the window with an immediate post-open recheck of the
 // configured DB path (fail closed) before any migration writes.
 
-import { mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
   BUNDLED_SCHEMA_VERSION,
@@ -35,9 +35,15 @@ import { createApp, type EnginePort, type ServerControls } from "./app.js";
 import {
   assertDbPathHasNoSymlink,
   loadServerConfig,
+  ServerConfigError,
   type ServerConfig,
 } from "./config.js";
 import { createStdServerLogger, type ServerLogger } from "./logger.js";
+import {
+  measureStoreSize,
+  shouldWarnStoreSize,
+  type StatFn,
+} from "./maintenance.js";
 
 /** Graceful-drain natural-completion budget (§11.5: max 10s). */
 export const SHUTDOWN_DRAIN_MS = 10_000;
@@ -48,6 +54,12 @@ export interface StartServerOptions {
   drainMs?: number;
   logger?: ServerLogger;
   now?: () => number;
+  /** Injectable stat for the DB+WAL size warning (tests). */
+  stat?: StatFn;
+  /** Injectable platform override (tests). Defaults to process.platform. */
+  platform?: string;
+  /** Injectable chmod for the app-dir mode (tests). Defaults to chmodSync. */
+  chmod?: (path: string, mode: number) => void;
 }
 
 export interface StartedServer {
@@ -58,10 +70,27 @@ export interface StartedServer {
   shutdown: (reason?: string) => Promise<void>;
 }
 
-function ensureDbDir(dbPath: string): void {
+function ensureDbDir(
+  dbPath: string,
+  deps: { platform?: string; chmod?: (path: string, mode: number) => void } = {},
+): void {
   // Re-check fail-closed guards, then create missing parents.
   assertDbPathHasNoSymlink(dbPath);
   mkdirSync(dirname(dbPath), { recursive: true });
+  // Private POSIX permissions (0700) for the app dir. Windows: current-user
+  // ACL reliance, no chmod guarantee. POSIX chmod failure is fail-closed:
+  // startup aborts with a fixed safe error (no path in the message).
+  const platform = deps.platform ?? process.platform;
+  if (platform !== "win32") {
+    const chmod = deps.chmod ?? chmodSync;
+    try {
+      chmod(dirname(dbPath), 0o700);
+    } catch (error) {
+      throw new ServerConfigError("database directory permissions failed", {
+        cause: error,
+      });
+    }
+  }
   assertDbPathHasNoSymlink(dbPath);
 }
 
@@ -69,6 +98,49 @@ interface ListenerHandle {
   address(): unknown;
   close(callback?: (error?: unknown) => void): void;
   on(event: "error", listener: (error: unknown) => void): void;
+}
+
+/**
+ * Fixed shutdown-reason vocabulary. Arbitrary caller reasons never enter
+ * logs verbatim (logger also enforces a pattern + "unknown" fallback).
+ */
+export function sanitizeShutdownReason(reason: string): string {
+  const lowered = reason.toLowerCase();
+  if (lowered === "sigint" || lowered === "sigterm" || lowered === "signal") {
+    return lowered;
+  }
+  return "unknown";
+}
+
+/** Closed startup-error vocabulary: only known M0 codes pass, else "unknown". */
+const STARTUP_STATUS_ALLOWLIST: ReadonlySet<string> = new Set([
+  "newer_database",
+  "unknown",
+  "server_config_invalid",
+  "kernel_pragmas_invalid",
+  "kernel_quick_check_failed",
+  "kernel_backup_failed",
+  "kernel_database_newer_than_bundle",
+  "kernel_migration_missing",
+  "kernel_migration_failed",
+  "kernel_backup_required",
+]);
+
+/** Fixed startup-error vocabulary: error names never enter logs verbatim. */
+export function sanitizeStartupErrorStatus(error: unknown): string {
+  if (error instanceof NewerDatabaseError) {
+    return "newer_database";
+  }
+  if (typeof error === "object" && error !== null && "code" in error) {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === "string") {
+      const lowered = code.toLowerCase();
+      if (STARTUP_STATUS_ALLOWLIST.has(lowered)) {
+        return lowered;
+      }
+    }
+  }
+  return "unknown";
 }
 
 export async function startServer(
@@ -80,7 +152,10 @@ export async function startServer(
   const drainMs = options.drainMs ?? SHUTDOWN_DRAIN_MS;
 
   logger.info("server.starting", { port: config.port });
-  ensureDbDir(config.dbPath);
+  ensureDbDir(config.dbPath, {
+    platform: options.platform,
+    chmod: options.chmod,
+  });
 
   let handle: KernelDatabaseHandle | undefined;
   let engine: RunEngine | undefined;
@@ -117,6 +192,19 @@ export async function startServer(
       throw new NewerDatabaseError(version, BUNDLED_SCHEMA_VERSION);
     }
     quickCheck(handle.raw);
+    // DB+WAL combined size warning (§19.1): warning only above exactly
+    // 1 GiB. No vacuum/delete. Never logs the DB path.
+    try {
+      const size =
+        options.stat !== undefined
+          ? measureStoreSize(config.dbPath, options.stat)
+          : measureStoreSize(config.dbPath);
+      if (shouldWarnStoreSize(size.totalBytes)) {
+        logger.warn("server.store_size_warning", { bytes: size.totalBytes });
+      }
+    } catch {
+      // Best effort: sizing never blocks startup.
+    }
     const migrated = await migrateKernelDatabase({
       db: handle.raw,
       backupDir: join(dirname(config.dbPath), "backups"),
@@ -219,21 +307,22 @@ export async function startServer(
       }
       shutdownPromise = (async (): Promise<void> => {
         controls.markDraining();
-        logger.info("server.draining", { status: reason });
+        const safeReason = sanitizeShutdownReason(reason);
+        logger.info("server.draining", { status: safeReason });
         try {
           await activeEngine.shutdown({ drainMs });
         } catch {
           // Fail closed: leave DB + listener open and stay draining
           // (ready remains not_ready); do not report stopped so a later
           // shutdown retry can still drain. Reset the memo to permit retry.
-          logger.error("server.drain_failed", { status: reason });
+          logger.error("server.drain_failed", { status: safeReason });
           shutdownPromise = undefined;
           throw new Error("server drain failed");
         }
         try {
           closeKernelDatabase(activeHandle);
         } catch {
-          logger.error("server.db_close_failed", { status: reason });
+          logger.error("server.db_close_failed", { status: safeReason });
         }
         await new Promise<void>((resolveClose) => {
           try {
@@ -242,7 +331,7 @@ export async function startServer(
             resolveClose();
           }
         });
-        logger.info("server.stopped", { status: reason });
+        logger.info("server.stopped", { status: safeReason });
         removeSignalHandlers();
       })();
       await shutdownPromise;
@@ -267,7 +356,7 @@ export async function startServer(
         // Best effort: the original startup error carries the failure.
       }
     }
-    const code = error instanceof Error ? error.name : "startup_failed";
+    const code = sanitizeStartupErrorStatus(error);
     logger.error("server.start_failed", { status: code });
     throw error;
   }

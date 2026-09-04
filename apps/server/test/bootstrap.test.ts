@@ -8,7 +8,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
-import { type StartedServer, startServer } from "../src/bootstrap.js";
+import { type StartedServer, sanitizeStartupErrorStatus, startServer } from "../src/bootstrap.js";
+import { createCollectingLogger } from "../src/logger.js";
+import { STORE_SIZE_WARN_BYTES } from "../src/maintenance.js";
 
 const servers: StartedServer[] = [];
 let tempDirs: string[] = [];
@@ -187,5 +189,112 @@ describe("bootstrap startup + graceful shutdown", () => {
         servers.splice(index, 1);
       }
     }
+  });
+
+  it("warns (only) above 1 GiB DB+WAL without logging the DB path", async () => {
+    const { env, dbPath } = tempEnv();
+    const over = createCollectingLogger("debug");
+    const started = await startServer({
+      env,
+      drainMs: 50,
+      logger: over.logger,
+      stat: (path) =>
+        path === dbPath
+          ? { size: STORE_SIZE_WARN_BYTES }
+          : { size: 1 },
+    });
+    servers.push(started);
+    try {
+      const warnings = over.records.filter(
+        (record) => record.code === "server.store_size_warning",
+      );
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]?.bytes).toBe(STORE_SIZE_WARN_BYTES + 1);
+      expect(JSON.stringify(warnings[0])).not.toContain(dbPath);
+      await started.shutdown("test");
+      servers.pop();
+    } finally {
+      const index = servers.indexOf(started);
+      if (index >= 0) {
+        servers.splice(index, 1);
+      }
+    }
+  });
+
+  it("stays silent at exactly 1 GiB and sanitizes shutdown/status logs", async () => {
+    const { env } = tempEnv();
+    const exact = createCollectingLogger("debug");
+    const started = await startServer({
+      env,
+      drainMs: 50,
+      logger: exact.logger,
+      stat: () => ({ size: 512 * 1024 * 1024 }),
+    });
+    servers.push(started);
+    try {
+      // 512 MiB DB + 512 MiB WAL = exactly 1 GiB: no warning.
+      expect(
+        exact.records.filter((record) => record.code === "server.store_size_warning"),
+      ).toHaveLength(0);
+      await started.shutdown("evil reason; /etc/passwd");
+      servers.pop();
+      const stopped = exact.records.filter((record) => record.code === "server.stopped");
+      expect(stopped).toHaveLength(1);
+      expect(stopped[0]?.status).toBe("unknown");
+      expect(JSON.stringify(stopped[0])).not.toContain("evil");
+    } finally {
+      const index = servers.indexOf(started);
+      if (index >= 0) {
+        servers.splice(index, 1);
+      }
+    }
+  });
+
+  it("fails closed when the POSIX app-dir chmod fails (fixed safe error)", async () => {
+    const { env, dbPath } = tempEnv();
+    const failing = createCollectingLogger("debug");
+    const failure = await startServer({
+      env,
+      drainMs: 50,
+      logger: failing.logger,
+      platform: "linux",
+      chmod: () => {
+        throw new Error("EACCES: permission denied");
+      },
+    }).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe(
+      "database directory permissions failed",
+    );
+    expect((failure as Error).message).not.toContain(dbPath);
+    const failed = failing.records.filter(
+      (record) => record.code === "server.start_failed",
+    );
+    expect(failed).toHaveLength(1);
+    expect(failed[0]?.status).toBe("server_config_invalid");
+  });
+
+  it("maps unknown startup codes to unknown (closed vocabulary)", async () => {
+    expect(
+      sanitizeStartupErrorStatus(
+        Object.assign(new Error("boom"), { code: "injected_code" }),
+      ),
+    ).toBe("unknown");
+    expect(
+      sanitizeStartupErrorStatus(
+        Object.assign(new Error("boom"), { code: "EVIL-CODE!" }),
+      ),
+    ).toBe("unknown");
+    expect(
+      sanitizeStartupErrorStatus(
+        Object.assign(new Error("bad config"), {
+          code: "server_config_invalid",
+        }),
+      ),
+    ).toBe("server_config_invalid");
+    expect(sanitizeStartupErrorStatus(new Error("plain boom"))).toBe("unknown");
   });
 });

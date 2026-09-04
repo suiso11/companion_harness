@@ -16,10 +16,18 @@ export type {
 export { createApp, hostNameOfHeader } from "./app.js";
 export type { StartedServer, StartServerOptions } from "./bootstrap.js";
 export {
+  sanitizeShutdownReason,
+  sanitizeStartupErrorStatus,
   SHUTDOWN_DRAIN_MS,
   startServer,
   startServerFromEnv,
 } from "./bootstrap.js";
+export type { StoreSize } from "./maintenance.js";
+export {
+  measureStoreSize,
+  shouldWarnStoreSize,
+  STORE_SIZE_WARN_BYTES,
+} from "./maintenance.js";
 export type { ServerConfig, ServerHost, ServerLogLevel } from "./config.js";
 export {
   assertDbPathHasNoSymlink,
@@ -37,6 +45,7 @@ export {
   createCollectingLogger,
   createServerLogger,
   createStdServerLogger,
+  sanitizeLogStatus,
 } from "./logger.js";
 
 function isMainModule(): boolean {
@@ -54,9 +63,16 @@ function isMainModule(): boolean {
 if (isMainModule()) {
   const { startServerFromEnv: start } = await import("./bootstrap.js");
   start().catch((error: unknown) => {
-    const name = error instanceof Error ? error.name : "startup_failed";
+    const status =
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      typeof (error as { code?: unknown }).code === "string" &&
+      /^[a-z0-9_]{1,64}$/.test((error as { code: string }).code)
+        ? (error as { code: string }).code
+        : "unknown";
     process.stderr.write(
-      `${JSON.stringify({ level: "error", code: "server.start_failed", status: name })}\n`,
+      `${JSON.stringify({ level: "error", code: "server.start_failed", status })}\n`,
     );
     process.exitCode = 1;
   });
