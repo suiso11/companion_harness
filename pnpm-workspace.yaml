@@ -1,0 +1,17 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+allowBuilds:
+  better-sqlite3@13.0.3: true
+  esbuild@0.25.12: true
+  esbuild@0.28.2: true
+minimumReleaseAgeExclude:
+  - '@biomejs/biome@2.5.12'
+  - '@biomejs/cli-darwin-arm64@2.5.12'
+  - '@biomejs/cli-darwin-x64@2.5.12'
+  - '@biomejs/cli-linux-arm64-musl@2.5.12'
+  - '@biomejs/cli-linux-arm64@2.5.12'
+  - '@biomejs/cli-linux-x64-musl@2.5.12'
+  - '@biomejs/cli-linux-x64@2.5.12'
+  - '@biomejs/cli-win32-arm64@2.5.12'
+  - '@biomejs/cli-win32-x64@2.5.12'

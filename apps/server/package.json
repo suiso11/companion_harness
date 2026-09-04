@@ -1,0 +1,34 @@
+{
+  "name": "@companion/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "backup": "tsx src/cli.ts backup",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "biome check src"
+  },
+  "dependencies": {
+    "@companion/contracts": "workspace:*",
+    "@companion/kernel": "workspace:*",
+    "@hono/node-server": "2.1.1",
+    "hono": "4.13.5",
+    "zod": "4.5.4"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "9.6.0",
+    "@types/node": "24.12.4",
+    "better-sqlite3": "13.0.3",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3",
+    "vitest": "3.2.4"
+  },
+  "engines": {
+    "node": "24.12.0",
+    "pnpm": "11.25.0"
+  }
+}
