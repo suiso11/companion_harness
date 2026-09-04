@@ -5,6 +5,7 @@
  */
 export {
   UuidSchema,
+  UUID_V4_REGEX,
   IdempotencyKeySchema,
   UnixMsSchema,
   Sha256HexSchema,
@@ -83,8 +84,14 @@ export {
   ActualOutcomeSchema,
   ResultDispositionSchema,
   ToolErrorCodeSchema,
+  M0_TOOL_ERROR_CODES,
   KNOWN_M0_TOOL_ERROR_CODES,
+  TOOL_ERROR_CODE_REGISTRY,
+  parseToolErrorCode,
   RunErrorCodeSchema,
+  M0_RUN_ERROR_CODES,
+  RUN_ERROR_CODE_REGISTRY,
+  parseRunErrorCode,
   ToolResultSchema,
 } from "./tools.js";
 export type {
@@ -95,7 +102,9 @@ export type {
   ActualOutcome,
   ResultDisposition,
   ToolErrorCode,
+  ToolErrorSchemaVersion,
   RunErrorCode,
+  RunErrorSchemaVersion,
   ToolResult,
 } from "./tools.js";
 

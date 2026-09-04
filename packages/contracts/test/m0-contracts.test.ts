@@ -9,22 +9,40 @@ import {
   HistoryQuerySchema,
   HistoryResponseSchema,
   IdempotencyKeySchema,
+  IdempotencyLookupQuerySchema,
   IdempotencyLookupResponseSchema,
+  IdempotencyScopeSchema,
+  M0_RUN_ERROR_CODES,
   M0_RUN_EVENT_TYPES,
+  M0_TOOL_ERROR_CODES,
   PostMessageRequestSchema,
+  RUN_ERROR_CODE_REGISTRY,
+  RunErrorCodeSchema,
   RunEventSchema,
+  SessionParamsSchema,
   TERMINAL_STATUSES,
   TERMINAL_EVENT_TYPES,
+  TOOL_ERROR_CODE_REGISTRY,
   ToolDescriptorSchema,
   ToolErrorCodeSchema,
+  ToolResultSchema,
   TurnInputV1Schema,
+  UuidSchema,
   isActiveStatus,
   isTerminalStatus,
+  messageScope,
+  parseRunErrorCode,
   parseRunEvent,
+  parseToolErrorCode,
   parseTurnInput,
+  retryScope,
 } from "../src/index.js";
 
 const UUID = "123e4567-e89b-42d3-a456-426614174000";
+const UUID_UPPER = "123E4567-E89B-42D3-A456-426614174000";
+const UUID_V1 = "123e4567-e89b-12d3-a456-426614174000";
+const UUID_V7 = "01934abc-def7-7abc-8abc-426614174000";
+const UUID_NIL = "00000000-0000-0000-0000-000000000000";
 
 function envelope(type: string, payload: unknown, extra: Record<string, unknown> = {}) {
   return {
@@ -329,5 +347,152 @@ describe("ToolDescriptor is serializable and closed", () => {
     for (const bad of ["BudgetExceeded", "TOOL_FAILED", "has space", "semi;colon", ""]) {
       expect(() => ToolErrorCodeSchema.parse(bad)).toThrow();
     }
+  });
+
+  it("closes the tool vocabulary to exactly the 9 M0 broker codes", () => {
+    expect([...M0_TOOL_ERROR_CODES].sort()).toEqual(
+      [
+        "budget_exceeded",
+        "unknown_tool",
+        "tool_denied",
+        "invalid_input",
+        "execution_timeout",
+        "execution_cancelled",
+        "execution_failed",
+        "output_invalid",
+        "output_too_large",
+      ].sort(),
+    );
+    expect(M0_TOOL_ERROR_CODES).toHaveLength(9);
+    for (const code of M0_TOOL_ERROR_CODES) {
+      expect(parseToolErrorCode(code)).toBe(code);
+    }
+    expect(TOOL_ERROR_CODE_REGISTRY[1]).toBe(ToolErrorCodeSchema);
+    for (const bad of ["made_up_code", "custom_error", "server_error", "retry_later"]) {
+      expect(() => ToolErrorCodeSchema.parse(bad)).toThrow();
+      expect(() => parseToolErrorCode(bad)).toThrow();
+    }
+  });
+
+  it("closes the Run vocabulary to exactly execution_failed/cancelled + output_invalid", () => {
+    expect([...M0_RUN_ERROR_CODES].sort()).toEqual(
+      ["execution_cancelled", "execution_failed", "output_invalid"].sort(),
+    );
+    expect(M0_RUN_ERROR_CODES).toHaveLength(3);
+    for (const code of M0_RUN_ERROR_CODES) {
+      expect(RunErrorCodeSchema.parse(code)).toBe(code);
+      expect(parseRunErrorCode(code)).toBe(code);
+    }
+    expect(RUN_ERROR_CODE_REGISTRY[1]).toBe(RunErrorCodeSchema);
+    for (const bad of [
+      "made_up_code",
+      "budget_exceeded",
+      "unknown_tool",
+      "tool_denied",
+      "invalid_input",
+      "execution_timeout",
+      "output_too_large",
+    ]) {
+      expect(() => RunErrorCodeSchema.parse(bad)).toThrow();
+      expect(() => parseRunErrorCode(bad)).toThrow();
+    }
+  });
+
+  it("rejects made_up_code in run.failed, tool.completed, and ToolResult", () => {
+    expect(() =>
+      parseRunEvent(envelope("run.failed", { errorCode: "made_up_code" })),
+    ).toThrow();
+    expect(() =>
+      parseRunEvent(
+        envelope("tool.completed", {
+          callId: UUID,
+          callIndex: 1,
+          tool: "markdown.search",
+          actualOutcome: "failed",
+          reportedOutcome: "failed",
+          disposition: "none",
+          errorCode: "made_up_code",
+          resultDigest: null,
+          reusedFromCallId: null,
+        }),
+      ),
+    ).toThrow();
+    expect(() =>
+      ToolResultSchema.parse({
+        tool: "markdown.search",
+        callIndex: 1,
+        actualOutcome: "failed",
+        reportedOutcome: "failed",
+        disposition: "none",
+        errorCode: "made_up_code",
+        resultDigest: null,
+        reusedFromCallId: null,
+        finishedAt: 1,
+      }),
+    ).toThrow();
+  });
+});
+
+describe("UUID v4 and idempotency scopes are exact", () => {
+  it("accepts UUID v4 in either case", () => {
+    expect(UuidSchema.parse(UUID)).toBe(UUID);
+    expect(UuidSchema.parse(UUID_UPPER)).toBe(UUID_UPPER);
+    expect(IdempotencyKeySchema.parse(UUID)).toBe(UUID);
+  });
+
+  it("rejects UUID v1/v7/nil and malformed ids everywhere", () => {
+    for (const bad of [UUID_V1, UUID_V7, UUID_NIL, "not-a-uuid", "", "1234"]) {
+      expect(() => UuidSchema.parse(bad)).toThrow();
+      expect(() => IdempotencyKeySchema.parse(bad)).toThrow();
+      expect(() => SessionParamsSchema.parse({ sessionId: bad })).toThrow();
+    }
+  });
+
+  it("accepts only the three exact scopes with UUID v4 parent ids", () => {
+    expect(IdempotencyScopeSchema.parse("sessions:create")).toBe("sessions:create");
+    expect(IdempotencyScopeSchema.parse(messageScope(UUID))).toBe(
+      `session:${UUID}:message`,
+    );
+    expect(IdempotencyScopeSchema.parse(retryScope(UUID))).toBe(`turn:${UUID}:retry`);
+    expect(IdempotencyScopeSchema.parse(`session:${UUID_UPPER}:message`)).toBe(
+      `session:${UUID_UPPER}:message`,
+    );
+  });
+
+  it("rejects malformed scope ids and unknown scopes", () => {
+    expect(() => messageScope(UUID_V1)).toThrow();
+    expect(() => retryScope(UUID_NIL)).toThrow();
+    for (const bad of [
+      `session:${UUID_V1}:message`,
+      `turn:${UUID_V7}:retry`,
+      `session:${UUID_NIL}:message`,
+      "session:not-a-uuid:message",
+      "turn::retry",
+      "session::message",
+      `session:${UUID}:message:extra`,
+      `session:${UUID}`,
+      "sessions:create:extra",
+      "other:scope",
+      "",
+    ]) {
+      expect(() => IdempotencyScopeSchema.parse(bad)).toThrow();
+    }
+  });
+
+  it("binds the idempotency lookup query to the closed scope set", () => {
+    expect(
+      IdempotencyLookupQuerySchema.parse({ scope: "sessions:create" }),
+    ).toBeTruthy();
+    expect(
+      IdempotencyLookupQuerySchema.parse({ scope: messageScope(UUID) }),
+    ).toBeTruthy();
+    expect(() =>
+      IdempotencyLookupQuerySchema.parse({ scope: "made_up:scope" }),
+    ).toThrow();
+    expect(() =>
+      IdempotencyLookupQuerySchema.parse({
+        scope: `session:${UUID_V1}:message`,
+      }),
+    ).toThrow();
   });
 });

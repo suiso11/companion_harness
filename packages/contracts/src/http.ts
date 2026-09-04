@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { RunEventSchema } from "./events.js";
-import { UnixMsSchema, UuidSchema } from "./ids.js";
+import { IdempotencyScopeSchema, UnixMsSchema, UuidSchema } from "./ids.js";
 import { RunResultSchema } from "./run_result.js";
 import { ActiveStatusSchema, RunStatusSchema } from "./run_status.js";
 import { MAX_USER_TEXT_LENGTH } from "./turn_input.js";
@@ -197,7 +197,7 @@ export type EventsResponse = z.infer<typeof EventsResponseSchema>;
  * the browser.
  */
 export const IdempotencyLookupQuerySchema = z.strictObject({
-  scope: z.string().min(1).max(320),
+  scope: IdempotencyScopeSchema,
 });
 export type IdempotencyLookupQuery = z.infer<typeof IdempotencyLookupQuerySchema>;
 

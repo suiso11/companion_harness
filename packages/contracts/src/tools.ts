@@ -72,24 +72,12 @@ export const ResultDispositionSchema = z.enum(["accepted", "discarded", "none"])
 export type ResultDisposition = z.infer<typeof ResultDispositionSchema>;
 
 /**
- * Fixed error-code shape: lowercase snake_case, never raw errors/content.
- *
- * AMBIGUITY: the plan mandates "typed fixed codes" but enumerates no exact
- * M0 tool vocabulary (only M4/M5 codes, which are out of scope). Contracts
- * therefore fix the shape and document the known M0 codes below; the closed
- * vocabulary grows only via explicit registry additions, never free text.
+ * Closed M0 tool error vocabulary (schemaVersion=1): exactly the nine codes
+ * produced by the M0 kernel tool broker. No other code is valid in M0;
+ * M1+ codes must be added via an explicit versioned registry entry, never
+ * free text. Raw errors/content are never stored.
  */
-export const ToolErrorCodeSchema = z
-  .string()
-  .min(1)
-  .max(64)
-  .regex(/^[a-z][a-z0-9_]*$/, {
-    message: "error code must be lowercase snake_case",
-  });
-export type ToolErrorCode = z.infer<typeof ToolErrorCodeSchema>;
-
-/** Known M0 tool error codes (documentation of current vocabulary). */
-export const KNOWN_M0_TOOL_ERROR_CODES = [
+export const M0_TOOL_ERROR_CODES = [
   "budget_exceeded",
   "unknown_tool",
   "tool_denied",
@@ -101,9 +89,48 @@ export const KNOWN_M0_TOOL_ERROR_CODES = [
   "output_too_large",
 ] as const;
 
-/** Run failure code: fixed, redacted; raw errors are never stored. */
-export const RunErrorCodeSchema = ToolErrorCodeSchema;
+export const ToolErrorCodeSchema = z.enum(M0_TOOL_ERROR_CODES);
+export type ToolErrorCode = z.infer<typeof ToolErrorCodeSchema>;
+
+/** Known M0 tool error codes (alias of the closed M0 vocabulary). */
+export const KNOWN_M0_TOOL_ERROR_CODES = M0_TOOL_ERROR_CODES;
+
+/** Schema-versioned tool error-code registry. M0 serves version 1 only. */
+export const TOOL_ERROR_CODE_REGISTRY = {
+  1: ToolErrorCodeSchema,
+} as const;
+export type ToolErrorSchemaVersion = keyof typeof TOOL_ERROR_CODE_REGISTRY;
+
+/** Parse a tool error code for the M0 schema version; rejects unknown codes. */
+export function parseToolErrorCode(data: unknown): ToolErrorCode {
+  return TOOL_ERROR_CODE_REGISTRY[1].parse(data);
+}
+
+/**
+ * Closed M0 Run error vocabulary (schemaVersion=1): exactly the three codes
+ * the M0 RunEngine persists (`execution_failed` for strategy failure or
+ * unknown strategy, `execution_cancelled` for abort/cancel, `output_invalid`
+ * for an unparsable RunResult candidate). No tool-only or future M1+ codes.
+ */
+export const M0_RUN_ERROR_CODES = [
+  "execution_failed",
+  "execution_cancelled",
+  "output_invalid",
+] as const;
+
+export const RunErrorCodeSchema = z.enum(M0_RUN_ERROR_CODES);
 export type RunErrorCode = z.infer<typeof RunErrorCodeSchema>;
+
+/** Schema-versioned Run error-code registry. M0 serves version 1 only. */
+export const RUN_ERROR_CODE_REGISTRY = {
+  1: RunErrorCodeSchema,
+} as const;
+export type RunErrorSchemaVersion = keyof typeof RUN_ERROR_CODE_REGISTRY;
+
+/** Parse a Run error code for the M0 schema version; rejects unknown codes. */
+export function parseRunErrorCode(data: unknown): RunErrorCode {
+  return RUN_ERROR_CODE_REGISTRY[1].parse(data);
+}
 
 /**
  * Serializable tool outcome record. Audit-only: digests and codes, never
