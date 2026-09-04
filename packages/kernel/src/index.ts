@@ -39,6 +39,7 @@ export type {
   PipelineStepInfo,
   ToolBrokerBudgets,
   ToolBrokerOptions,
+  ToolDedupMode,
   ToolFreshness,
   ToolHandler,
   ToolHandlerContext,
@@ -122,6 +123,21 @@ export {
   nonCooperativeDelayed,
   successResult,
 } from "./fakes.js";
+export type {
+  MarkdownConnectorBinding,
+  MarkdownConnectorPort,
+  MarkdownPortDocument,
+  MarkdownPortSearchHit,
+  MarkdownPortSearchResult,
+  MarkdownPortSkipped,
+  MarkdownPortStandardLink,
+  MarkdownPortWikiLink,
+  CreateM1ToolRegistrationsOptions,
+} from "./markdown_tools.js";
+export {
+  createM1ReferenceTools,
+  createM1ToolRegistrations,
+} from "./markdown_tools.js";
 export type {
   BundledMigration,
   MigrateOptions,
