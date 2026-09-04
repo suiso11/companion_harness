@@ -144,12 +144,14 @@ export function parseMarkdown(content: string): ParsedMarkdown {
   const root = fromMarkdown(normalized) as unknown as MdNode;
 
   let title: string | null = null;
+  let headingSeen = false;
   const standardLinks: StandardLink[] = [];
   const wikiLinks: WikiLink[] = [];
   const textValues: string[] = [];
 
   walk(root, (node) => {
-    if (title === null && node.type === "heading") {
+    if (!headingSeen && node.type === "heading") {
+      headingSeen = true;
       const text = collectHeadingText(node);
       title = text === "" ? null : text;
     }

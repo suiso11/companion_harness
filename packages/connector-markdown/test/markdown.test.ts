@@ -10,6 +10,12 @@ describe("markdown parsing", () => {
     expect(parsed.title).toBe("First");
   });
 
+  it("honors only the first heading even when it is blank", () => {
+    expect(parseMarkdown("#   \n\n## Second\n").title).toBeNull();
+    expect(parseMarkdown("# First\n\n## Second\n").title).toBe("First");
+    expect(parseMarkdown("no headings here").title).toBeNull();
+  });
+
   it("accepts only standard relative .md links", () => {
     const parsed = parseMarkdown(
       "[a](./note.md) [b](../up/other.md#frag) " +

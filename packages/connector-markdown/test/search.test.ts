@@ -139,6 +139,17 @@ describe("markdown connector search core", () => {
     expect(again.hits[0]?.sourceRevision).toBe(hit.sourceRevision);
   });
 
+  it("falls back to the filename when the first heading is blank", async () => {
+    const dir = scratchVault("md-conn-blankfirst-");
+    writeFileSync(join(dir, "blank.md"), "#   \n\n## LaterHeading\nuniqueword body\n");
+    const connector = await createMarkdownConnector([{ path: dir }]);
+    const result = await connector.search({ query: "uniqueword" });
+    expect(result.hits).toHaveLength(1);
+    expect(result.hits[0]?.title).toBe("blank");
+    const doc = await connector.readCanonical("vault-1/blank.md");
+    expect(doc.title).toBe("blank");
+  });
+
   it("normalizes NFC text before matching and hashing", async () => {
     const dir = scratchVault("md-conn-nfc-");
     writeFileSync(join(dir, "nfd.md"), "# café\nbody café\n");
