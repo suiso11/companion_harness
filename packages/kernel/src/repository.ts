@@ -318,20 +318,33 @@ function readRun(db: Database.Database, runId: string): RawRun | null {
 function appendEventInTx(
   db: Database.Database,
   runId: string,
-  eventSeq: number,
+  expectedPrevSeq: number,
   type: M0RunEventType,
   payload: unknown,
   now: number,
-): void {
+): number {
   const validType = parseOrValidation(() => M0RunEventTypeSchema.parse(type), "run event type");
   const validPayload = parseOrValidation(
     () => parseRunEventPayload(validType, payload),
     `run event payload for ${validType}`,
   );
+  const next = expectedPrevSeq + 1;
+  // Guarded atomic increment: caller cannot assign an arbitrary next seq.
+  // The UPDATE + INSERT commit in the caller's transaction; a stale
+  // expectedPrevSeq (or a concurrent bump) rolls the whole transition back.
+  const moved = db
+    .prepare("UPDATE runs SET event_seq = ? WHERE id = ? AND event_seq = ?")
+    .run(next, runId, expectedPrevSeq);
+  if (moved.changes !== 1) {
+    throw new KernelStorageError(
+      "kernel_concurrent_conflict",
+      "concurrent event append conflict; retry the transition",
+    );
+  }
   db.prepare(
     "INSERT INTO run_events (run_id, seq, schema_version, type, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-  ).run(runId, eventSeq, RUN_EVENT_SCHEMA_VERSION, validType, JSON.stringify(validPayload), now);
-  db.prepare("UPDATE runs SET event_seq = ? WHERE id = ?").run(eventSeq, runId);
+  ).run(runId, next, RUN_EVENT_SCHEMA_VERSION, validType, JSON.stringify(validPayload), now);
+  return next;
 }
 
 function toStoredResponse(
@@ -494,10 +507,20 @@ export function createKernelRepository(db: Database.Database) {
     );
     const scope = messageScope(session);
     parseOrValidation(() => IdempotencyScopeSchema.parse(scope), "message scope");
+    // Idempotency hash covers every normalized operation-affecting field:
+    // text/uiContext plus the strategy, selectOnSuccess, and timeZone values
+    // that alter the persisted turn/run rows. Zod-defaulted canonical JSON
+    // with operation/version domain separation (via requestHash).
     const hash = requestHash(
       IDEMPOTENCY_OPERATIONS.postMessage.operation,
       IDEMPOTENCY_OPERATIONS.postMessage.schemaVersion,
-      parsed,
+      {
+        text: parsed.text,
+        uiContext: parsed.uiContext,
+        strategy,
+        selectOnSuccess,
+        timeZone: options.timeZone ?? "UTC",
+      },
     );
     return withImmediate(db, () => {
       const existing = toStoredResponse(db, scope, key);
@@ -526,9 +549,11 @@ export function createKernelRepository(db: Database.Database) {
           `INSERT INTO runs (id, turn_id, session_id, attempt, status, strategy,
             result_json, error_code, event_seq, select_on_success,
             tool_requests_used, created_at, started_at, finished_at, cancel_requested_at)
-           VALUES (?, ?, ?, 1, 'queued', ?, NULL, NULL, 1, ?, 0, ?, NULL, NULL, NULL)`,
+           VALUES (?, ?, ?, 1, 'queued', ?, NULL, NULL, 0, ?, 0, ?, NULL, NULL, NULL)`,
         ).run(runId, turnId, session, strategy, selectOnSuccess ? 1 : 0, now);
-        appendEventInTx(db, runId, 1, "run.queued", { attempt: 1 }, now);
+        // Creation starts from an event_seq 0 row; the guarded append
+        // atomically produces the persisted run.queued seq 1.
+        appendEventInTx(db, runId, 0, "run.queued", { attempt: 1 }, now);
         const moved = db
           .prepare("UPDATE sessions SET next_turn_position = ?, last_active_at = ? WHERE id = ? AND next_turn_position = ?")
           .run(seq + 1, now, session, seq);
@@ -571,10 +596,12 @@ export function createKernelRepository(db: Database.Database) {
     const selectOnSuccess = options.selectOnSuccess ?? true;
     const scope = retryScope(turn);
     parseOrValidation(() => IdempotencyScopeSchema.parse(scope), "retry scope");
+    // Retry hash includes the normalized strategy/selectOnSuccess inputs
+    // that alter the persisted run row (retry reuses immutable turn input).
     const hash = requestHash(
       IDEMPOTENCY_OPERATIONS.postRetry.operation,
       IDEMPOTENCY_OPERATIONS.postRetry.schemaVersion,
-      { sessionId: session, turnId: turn },
+      { sessionId: session, turnId: turn, strategy, selectOnSuccess },
     );
     return withImmediate(db, () => {
       const existing = toStoredResponse(db, scope, key);
@@ -623,9 +650,9 @@ export function createKernelRepository(db: Database.Database) {
           `INSERT INTO runs (id, turn_id, session_id, attempt, status, strategy,
             result_json, error_code, event_seq, select_on_success,
             tool_requests_used, created_at, started_at, finished_at, cancel_requested_at)
-           VALUES (?, ?, ?, ?, 'queued', ?, NULL, NULL, 1, ?, 0, ?, NULL, NULL, NULL)`,
+           VALUES (?, ?, ?, ?, 'queued', ?, NULL, NULL, 0, ?, 0, ?, NULL, NULL, NULL)`,
         ).run(runId, turn, session, attempt, strategy, selectOnSuccess ? 1 : 0, now);
-        appendEventInTx(db, runId, 1, "run.queued", { attempt }, now);
+        appendEventInTx(db, runId, 0, "run.queued", { attempt }, now);
         db.prepare("UPDATE sessions SET last_active_at = ? WHERE id = ?").run(now, session);
       } catch (error) {
         if (error instanceof KernelStorageError) {
@@ -667,7 +694,7 @@ export function createKernelRepository(db: Database.Database) {
         }
         return { applied: false, run: parseRunRow(current) };
       }
-      appendEventInTx(db, id, row.event_seq + 1, "run.started", { attempt: row.attempt }, now);
+      appendEventInTx(db, id, row.event_seq, "run.started", { attempt: row.attempt }, now);
       const current = readRun(db, id);
       if (current === null) {
         throw new RepositoryNotFoundError(`run ${id} not found`);
@@ -705,7 +732,7 @@ export function createKernelRepository(db: Database.Database) {
         }
         return { applied: false, run: parseRunRow(current) };
       }
-      appendEventInTx(db, id, row.event_seq + 1, "run.completed", { result: valid }, now);
+      appendEventInTx(db, id, row.event_seq, "run.completed", { result: valid }, now);
       if (row.select_on_success === 1) {
         const selected = db
           .prepare("SELECT status FROM runs WHERE id = ?")
@@ -751,7 +778,7 @@ export function createKernelRepository(db: Database.Database) {
         }
         return { applied: false, run: parseRunRow(current) };
       }
-      appendEventInTx(db, id, row.event_seq + 1, "run.failed", { errorCode: code }, now);
+      appendEventInTx(db, id, row.event_seq, "run.failed", { errorCode: code }, now);
       const current = readRun(db, id);
       if (current === null) {
         throw new RepositoryNotFoundError(`run ${id} not found`);
@@ -783,7 +810,7 @@ export function createKernelRepository(db: Database.Database) {
           }
           return { status: current.status, run: parseRunRow(current) };
         }
-        appendEventInTx(db, row.id, row.event_seq + 1, "run.cancelled", {}, now);
+        appendEventInTx(db, row.id, row.event_seq, "run.cancelled", {}, now);
         const current = readRun(db, row.id);
         if (current === null) {
           throw new RepositoryNotFoundError(`run ${row.id} not found`);
@@ -802,7 +829,7 @@ export function createKernelRepository(db: Database.Database) {
           }
           return { status: current.status, run: parseRunRow(current) };
         }
-        appendEventInTx(db, row.id, row.event_seq + 1, "run.cancel_requested", {}, now);
+        appendEventInTx(db, row.id, row.event_seq, "run.cancel_requested", {}, now);
         const current = readRun(db, row.id);
         if (current === null) {
           throw new RepositoryNotFoundError(`run ${row.id} not found`);
@@ -838,7 +865,7 @@ export function createKernelRepository(db: Database.Database) {
         }
         return { applied: false, run: parseRunRow(current) };
       }
-      appendEventInTx(db, id, row.event_seq + 1, "run.cancelled", {}, now);
+      appendEventInTx(db, id, row.event_seq, "run.cancelled", {}, now);
       const current = readRun(db, id);
       if (current === null) {
         throw new RepositoryNotFoundError(`run ${id} not found`);
@@ -864,7 +891,7 @@ export function createKernelRepository(db: Database.Database) {
           .prepare("UPDATE runs SET status = 'abandoned', finished_at = ? WHERE id = ? AND status = 'running'")
           .run(now, row.id);
         if (moved.changes === 1) {
-          appendEventInTx(db, row.id, row.event_seq + 1, "run.abandoned", { cause }, now);
+          appendEventInTx(db, row.id, row.event_seq, "run.abandoned", { cause }, now);
           abandoned += 1;
         }
       }
@@ -874,7 +901,7 @@ export function createKernelRepository(db: Database.Database) {
           .prepare("UPDATE runs SET status = 'cancelled', finished_at = ? WHERE id = ? AND status = 'cancel_requested'")
           .run(now, row.id);
         if (moved.changes === 1) {
-          appendEventInTx(db, row.id, row.event_seq + 1, "run.cancelled", {}, now);
+          appendEventInTx(db, row.id, row.event_seq, "run.cancelled", {}, now);
           cancelled += 1;
         }
       }
@@ -910,8 +937,7 @@ export function createKernelRepository(db: Database.Database) {
       if (["completed", "failed", "cancelled", "abandoned"].includes(row.status)) {
         throw new RepositoryValidationError("cannot append events to a terminal run");
       }
-      const next = row.event_seq + 1;
-      appendEventInTx(db, id, next, type, payload, now);
+      const next = appendEventInTx(db, id, row.event_seq, type, payload, now);
       const stored = db
         .prepare("SELECT run_id, seq, schema_version, type, payload, created_at FROM run_events WHERE run_id = ? AND seq = ?")
         .get(id, next) as

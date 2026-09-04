@@ -12,7 +12,8 @@
 //   (`companion-manual-*`) are never touched.
 // - Symlink-safe: the backups directory itself must not be a symlink, and
 //   rotation never follows or deletes symlinked entries.
-// - No VACUUM, no file copy, no automatic domain deletion.
+// - Sole copy method is the online backup API; no vacuum-into, no file
+//   copy, no automatic domain deletion.
 
 import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
@@ -23,7 +24,8 @@ import {
   renameSync,
   unlinkSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
+import { isUuidV4 } from "./canonical.js";
 import { quickCheck } from "./connection.js";
 import { BackupError } from "./errors.js";
 
@@ -31,6 +33,83 @@ export const PRE_MIGRATION_PREFIX = "companion-pre-migration-";
 export const PRE_MIGRATION_SUFFIX = ".sqlite";
 export const PRE_MIGRATION_PARTIAL_SUFFIX = ".partial";
 export const PRE_MIGRATION_KEEP_GENERATIONS = 3;
+
+function requireMigrationVersions(fromVersion: number, toVersion: number): void {
+  if (!Number.isInteger(fromVersion) || fromVersion < 0) {
+    throw new BackupError("invalid pre-migration source version");
+  }
+  if (!Number.isInteger(toVersion) || toVersion < 0) {
+    throw new BackupError("invalid pre-migration target version");
+  }
+  if (toVersion <= fromVersion) {
+    throw new BackupError("invalid pre-migration version range");
+  }
+}
+
+function requireBackupId(backupId: string): string {
+  if (!isUuidV4(backupId)) {
+    throw new BackupError("invalid pre-migration backup id");
+  }
+  return backupId;
+}
+
+/** Absolute ancestor chain from filesystem root to `abs` (inclusive). */
+function ancestorChain(abs: string): string[] {
+  const chain: string[] = [];
+  let current = abs;
+  for (;;) {
+    chain.push(current);
+    const parent = dirname(current);
+    if (parent === current) {
+      break;
+    }
+    current = parent;
+  }
+  return chain.reverse();
+}
+
+function isEnoent(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: string }).code === "ENOENT"
+  );
+}
+
+/**
+ * Assert every EXISTING prefix of `absDir` is a non-symlink directory.
+ * Missing trailing components are allowed (they will be created); any
+ * existing ancestor that is a symlink or a non-directory is rejected
+ * without following it. Never includes paths in the outward message.
+ */
+function assertSafeExistingAncestors(absDir: string): void {
+  for (const prefix of ancestorChain(absDir)) {
+    let stat;
+    try {
+      stat = lstatSync(prefix);
+    } catch (error: unknown) {
+      if (isEnoent(error)) {
+        continue;
+      }
+      throw new BackupError("cannot validate backup directory");
+    }
+    if (stat.isSymbolicLink()) {
+      throw new BackupError("backup directory must not traverse a symlink");
+    }
+    if (!stat.isDirectory()) {
+      throw new BackupError("backup directory ancestor is not a directory");
+    }
+  }
+}
+
+/** True when `target` provably remains under `base` (both absolute). */
+function isPathUnderBase(base: string, target: string): boolean {
+  if (target === base) {
+    return true;
+  }
+  return target.startsWith(base + sep);
+}
 
 /** YYYYMMDDTHHMMSSZ, e.g. 20260904T035959Z. */
 export function formatBackupUtc(now: Date): string {
@@ -47,40 +126,60 @@ export function preMigrationBackupName(
   now: Date,
   backupId: string,
 ): string {
+  requireMigrationVersions(fromVersion, toVersion);
+  requireBackupId(backupId);
+  if (!(now instanceof Date) || Number.isNaN(now.getTime())) {
+    throw new BackupError("invalid pre-migration backup timestamp");
+  }
   return `${PRE_MIGRATION_PREFIX}v${fromVersion}-to-v${toVersion}-${formatBackupUtc(now)}-${backupId}${PRE_MIGRATION_SUFFIX}`;
 }
 
 /**
  * Ensure the backups directory exists and is not a symlink.
  *
- * @throws {BackupError} when the path is (or resolves through) a symlink.
+ * Existing ancestors must all be non-symlink directories (checked with
+ * lstat, never followed). The leaf itself must not be a symlink.
+ *
+ * @throws {BackupError} when the path traverses a symlink or is unusable.
+ *   Messages never include filesystem paths or raw native text.
  */
 export function ensureBackupDir(backupDir: string): string {
+  if (typeof backupDir !== "string" || backupDir.length === 0) {
+    throw new BackupError("invalid backup directory");
+  }
+  const absDir = resolve(backupDir);
+  // Validate existing ancestors BEFORE creating anything, so mkdir can
+  // never create through a symlinked parent.
+  const parent = dirname(absDir);
+  if (parent !== absDir) {
+    assertSafeExistingAncestors(parent);
+  }
   let stat;
   try {
-    stat = lstatSync(backupDir);
+    stat = lstatSync(absDir);
   } catch (error: unknown) {
-    if (
-      typeof error === "object" &&
-      error !== null &&
-      "code" in error &&
-      (error as { code?: string }).code === "ENOENT"
-    ) {
-      mkdirSync(backupDir, { recursive: true });
-      stat = lstatSync(backupDir);
+    if (isEnoent(error)) {
+      try {
+        mkdirSync(absDir, { recursive: true });
+      } catch (cause: unknown) {
+        throw new BackupError("cannot create backup directory", { cause });
+      }
+      try {
+        stat = lstatSync(absDir);
+      } catch (cause: unknown) {
+        throw new BackupError("cannot validate backup directory", { cause });
+      }
     } else {
-      throw new BackupError(`cannot stat backup directory: ${backupDir}`, {
-        cause: error,
-      });
+      throw new BackupError("cannot validate backup directory", { cause: error });
     }
   }
-  if (!stat.isDirectory()) {
-    throw new BackupError(`backup path is not a directory: ${backupDir}`);
-  }
   if (stat.isSymbolicLink()) {
-    throw new BackupError(`backup directory must not be a symlink: ${backupDir}`);
+    throw new BackupError("backup directory must not be a symlink");
   }
-  return backupDir;
+  if (!stat.isDirectory()) {
+    throw new BackupError("backup path is not a directory");
+  }
+  return absDir;
 }
 
 export interface PreMigrationBackupOptions {
@@ -108,15 +207,22 @@ export async function createPreMigrationBackup(
   const { source, backupDir, fromVersion, toVersion } = options;
   const now = options.now ?? new Date();
   const backupId = options.backupId ?? randomUUID();
-  ensureBackupDir(backupDir);
+  requireMigrationVersions(fromVersion, toVersion);
+  requireBackupId(backupId);
+  const absDir = ensureBackupDir(backupDir);
   const finalName = preMigrationBackupName(
     fromVersion,
     toVersion,
     now,
     backupId,
   );
-  const finalPath = join(backupDir, finalName);
+  // Prevent filename traversal even if a future caller passes an
+  // unchecked name: both outputs must provably remain under absDir.
+  const finalPath = resolve(absDir, finalName);
   const partialPath = `${finalPath}${PRE_MIGRATION_PARTIAL_SUFFIX}`;
+  if (!isPathUnderBase(absDir, finalPath) || !isPathUnderBase(absDir, partialPath)) {
+    throw new BackupError("invalid pre-migration backup path");
+  }
 
   try {
     try {
@@ -124,7 +230,7 @@ export async function createPreMigrationBackup(
     } catch {
       // Best effort: stale partials must not block a fresh backup.
     }
-    // SOLE copy method: the online backup API. No VACUUM INTO, no copy.
+    // SOLE copy method: the online backup API (no vacuum-into, no copy).
     await source.backup(partialPath);
     const copy = new Database(partialPath, { readonly: true });
     try {
@@ -139,7 +245,7 @@ export async function createPreMigrationBackup(
     } catch {
       // Best effort cleanup of the unverified partial.
     }
-    throw new BackupError(`pre-migration backup failed: ${finalName}`, {
+    throw new BackupError("pre-migration backup failed", {
       cause: error,
     });
   }
@@ -161,19 +267,35 @@ interface BackupCandidate {
 
 /** Newest-first list of valid pre-migration backup files (symlinks excluded). */
 export function listPreMigrationBackups(backupDir: string): string[] {
-  let entries: string[];
+  if (typeof backupDir !== "string" || backupDir.length === 0) {
+    throw new BackupError("invalid backup directory");
+  }
+  const absDir = resolve(backupDir);
+  // Enforce non-symlink existing ancestors/directories before reading.
   try {
-    entries = readdirSync(backupDir);
+    assertSafeExistingAncestors(absDir);
   } catch (error: unknown) {
-    if (
-      typeof error === "object" &&
-      error !== null &&
-      "code" in error &&
-      (error as { code?: string }).code === "ENOENT"
-    ) {
-      return [];
+    if (error instanceof BackupError) {
+      // A missing directory lists as empty; a symlinked/blocked path fails.
+      try {
+        lstatSync(absDir);
+      } catch (statError: unknown) {
+        if (isEnoent(statError)) {
+          return [];
+        }
+      }
+      throw error;
     }
     throw error;
+  }
+  let entries: string[];
+  try {
+    entries = readdirSync(absDir);
+  } catch (error: unknown) {
+    if (isEnoent(error)) {
+      return [];
+    }
+    throw new BackupError("cannot list backup directory", { cause: error });
   }
   const candidates: BackupCandidate[] = [];
   for (const name of entries) {
@@ -184,7 +306,14 @@ export function listPreMigrationBackups(backupDir: string): string[] {
     ) {
       continue;
     }
-    const path = join(backupDir, name);
+    // Reject traversal names from readdir as well as future callers.
+    if (name.includes("/") || name.includes("\\") || name.includes("..")) {
+      continue;
+    }
+    const path = join(absDir, name);
+    if (!isPathUnderBase(absDir, resolve(path))) {
+      continue;
+    }
     let stat;
     try {
       stat = lstatSync(path);
@@ -211,10 +340,30 @@ export function prunePreMigrationBackups(
   keep: number = PRE_MIGRATION_KEEP_GENERATIONS,
 ): { kept: string[]; pruned: string[] } {
   const ranked = listPreMigrationBackups(backupDir);
+  const absDir = resolve(backupDir);
   const kept = ranked.slice(0, Math.max(0, keep));
   const pruned = ranked.slice(Math.max(0, keep));
   for (const path of pruned) {
-    unlinkSync(path);
+    // Re-verify containment + non-symlink immediately before delete
+    // (best-effort TOCTOU narrowing; see residual limitation).
+    const absPath = resolve(path);
+    if (!isPathUnderBase(absDir, absPath)) {
+      throw new BackupError("invalid pre-migration backup path");
+    }
+    let stat;
+    try {
+      stat = lstatSync(absPath);
+    } catch (error: unknown) {
+      throw new BackupError("cannot prune backup directory", { cause: error });
+    }
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      continue;
+    }
+    try {
+      unlinkSync(absPath);
+    } catch (error: unknown) {
+      throw new BackupError("cannot prune backup directory", { cause: error });
+    }
   }
   return { kept, pruned };
 }

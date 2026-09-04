@@ -9,8 +9,8 @@
 //   atomic rename) BEFORE any migration SQL runs; the initial empty DB
 //   (user_version 0, no tables) migrates without a backup.
 // - Only committed SQL files (NNNN_name.sql, ascending) are applied, in
-//   order, inside one transaction per file. `drizzle-kit push` is never
-//   used at runtime.
+//   order, inside one transaction per file. Runtime schema pushes via the
+//   external kit CLI are never used.
 // - Migration failure keeps the pre-upgrade backup and throws.
 
 import Database from "better-sqlite3";
@@ -151,13 +151,16 @@ export async function migrateKernelDatabase(
   try {
     for (const entry of pending) {
       const sqlText = readFileSync(join(migrationsDir, entry.file), "utf8");
+      // Each file commits its own user_version inside the same transaction
+      // so a failure after version N leaves user_version=N and a retry
+      // resumes at N+1 instead of replaying committed migrations.
       const apply = db.transaction(() => {
         db.exec(sqlText);
+        db.exec(`PRAGMA user_version = ${entry.version}`);
         applied.push(entry.version);
       });
       apply();
     }
-    setSchemaVersion(db, target);
   } catch (error) {
     // The pre-upgrade backup (if any) is deliberately kept.
     throw new MigrationFailedError(

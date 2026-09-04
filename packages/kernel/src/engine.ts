@@ -27,6 +27,10 @@ import {
 import type Database from "better-sqlite3";
 import type { KernelRepository, RunRow, TurnRow } from "./repository.js";
 import {
+  RepositoryNotFoundError,
+  RepositoryValidationError,
+} from "./errors.js";
+import {
   freezeStrategyContext,
   StrategyError,
   StrategyRegistry,
@@ -94,6 +98,28 @@ function toRunErrorCode(error: unknown, signal: AbortSignal): string {
   }
   return "execution_failed";
 }
+
+/**
+ * Definitive repository rejections (bad input, missing row) are never
+ * retried: only transient storage/concurrent failures merit another
+ * persistence attempt. No logical RunStrategy retry is ever added here;
+ * this only retries the durable lifecycle commit after the strategy
+ * already returned or threw.
+ */
+function isRetriablePersistenceError(error: unknown): boolean {
+  if (
+    error instanceof RepositoryValidationError ||
+    error instanceof RepositoryNotFoundError
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/** Bounded attempts for one durable lifecycle commit (initial + retries). */
+const LIFECYCLE_PERSIST_ATTEMPTS = 3;
+/** Bounded watchdog finalization attempts (initial + retries). */
+const WATCHDOG_FINALIZE_ATTEMPTS = 3;
 
 export class RunEngine {
   private readonly db: Database.Database;
@@ -172,6 +198,9 @@ export class RunEngine {
       }
       let applied = false;
       try {
+        // Benign CAS no-op (applied=false: row left queued/started elsewhere)
+        // simply skips; only a throw indicates a repository/storage failure
+        // and likewise skips without launching so the next pump retries.
         applied = this.repo.startRun(row.id, { now: this.clock.now() }).applied;
       } catch {
         continue;
@@ -235,8 +264,11 @@ export class RunEngine {
     let swept: EngineRecovery = { abandoned: 0, cancelled: 0 };
     try {
       swept = this.repo.drain({ now: this.clock.now() });
-    } catch {
-      swept = { abandoned: 0, cancelled: 0 };
+    } catch (error) {
+      // Fail closed: a drain storage failure rejects WITHOUT marking
+      // stopped, clearing in-flight ownership, or aborting controllers,
+      // so a later shutdown retry can still sweep the retained runs.
+      throw error;
     }
     for (const [runId, entry] of this.inFlight) {
       this.clearWatchdog(runId);
@@ -285,14 +317,18 @@ export class RunEngine {
     }, this.pollIntervalMs);
   }
 
-  private armWatchdog(runId: string): void {
+  private armWatchdog(runId: string, remaining: number = WATCHDOG_FINALIZE_ATTEMPTS): void {
     this.clearWatchdog(runId);
     const handle = this.clock.setTimeout(() => {
       this.watchdogs.delete(runId);
       try {
         this.repo.finalizeCancelRequested(runId, { now: this.clock.now() });
-      } catch {
-        // Finalize is best-effort: terminal/absent rows stay as they are.
+      } catch (error) {
+        // Retry transient finalization failures; terminal/absent rows
+        // (validation/not-found) stay as they are with no retry.
+        if (remaining > 1 && isRetriablePersistenceError(error)) {
+          this.armWatchdog(runId, remaining - 1);
+        }
       }
     }, this.cancelGraceMs);
     this.watchdogs.set(runId, handle);
@@ -308,6 +344,34 @@ export class RunEngine {
         // Clearing timers must never throw.
       }
     }
+  }
+
+  /**
+   * Retry one durable lifecycle commit after the strategy already
+   * returned/failed. Benign CAS no-ops (applied=false) settle immediately
+   * with true. Definitive rejections return true (nothing to retry).
+   * Only transient storage failures are retried, up to the bounded
+   * attempt budget; persistent failure returns false so the caller
+   * retains in-flight ownership for a fail-closed shutdown.
+   */
+  private persistLifecycle(commit: () => unknown): boolean {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= LIFECYCLE_PERSIST_ATTEMPTS; attempt += 1) {
+      try {
+        commit();
+        return true;
+      } catch (error) {
+        lastError = error;
+        if (!isRetriablePersistenceError(error)) {
+          return true;
+        }
+        if (attempt === LIFECYCLE_PERSIST_ATTEMPTS) {
+          break;
+        }
+      }
+    }
+    void lastError;
+    return false;
   }
 
   private launch(runId: string): void {
@@ -359,15 +423,17 @@ export class RunEngine {
       controller.signal,
     );
     const task = (async (): Promise<void> => {
+      // persistFailed=true means the durable commit never landed despite
+      // bounded retries: retain in-flight ownership so shutdown can fail
+      // closed via drain instead of silently dropping the run.
+      let persistFailed = false;
       try {
         if (strategy === undefined) {
-          try {
+          persistFailed = !this.persistLifecycle(() =>
             this.repo.failRun(runId, "execution_failed", {
               now: this.clock.now(),
-            });
-          } catch {
-            // CAS discard or missing row: terminal state wins.
-          }
+            }),
+          );
           return;
         }
         const candidate = await strategy(ctx);
@@ -375,41 +441,45 @@ export class RunEngine {
         try {
           valid = parseRunResult(candidate);
         } catch {
-          try {
+          persistFailed = !this.persistLifecycle(() =>
             this.repo.failRun(runId, "output_invalid", {
               now: this.clock.now(),
-            });
-          } catch {
-            // Discarded: terminal state wins.
-          }
+            }),
+          );
           return;
         }
-        try {
-          this.repo.completeRun(runId, valid, { now: this.clock.now() });
-        } catch {
-          // Discarded (cancel_requested/terminal): terminal state wins.
-        }
+        persistFailed = !this.persistLifecycle(() =>
+          this.repo.completeRun(runId, valid, { now: this.clock.now() }),
+        );
       } catch (error) {
         const code = toRunErrorCode(error, controller.signal);
-        try {
-          this.repo.failRun(runId, code, { now: this.clock.now() });
-        } catch {
-          // Discarded (cancel_requested/terminal): terminal state wins.
-        }
+        persistFailed = !this.persistLifecycle(() =>
+          this.repo.failRun(runId, code, { now: this.clock.now() }),
+        );
       } finally {
-        // Cooperative fast path: settle promptly instead of waiting out
-        // the full watchdog grace. The watchdog remains as the backstop
-        // for non-cooperative strategies (idempotent CAS either way).
-        try {
-          const current = this.repo.getRun(runId);
-          if (current.status === "cancel_requested") {
-            this.repo.finalizeCancelRequested(runId, { now: this.clock.now() });
+        if (!persistFailed) {
+          // Cooperative fast path: settle promptly instead of waiting out
+          // the full watchdog grace. The watchdog remains as the backstop
+          // for non-cooperative strategies (idempotent CAS either way).
+          // A persistently failing finalize likewise retains ownership.
+          let finalizeFailed = false;
+          try {
+            const current = this.repo.getRun(runId);
+            if (current.status === "cancel_requested") {
+              finalizeFailed = !this.persistLifecycle(() =>
+                this.repo.finalizeCancelRequested(runId, { now: this.clock.now() }),
+              );
+            }
+          } catch (error) {
+            if (isRetriablePersistenceError(error)) {
+              finalizeFailed = true;
+            }
           }
-        } catch {
-          // Best effort only.
+          if (!finalizeFailed) {
+            this.clearWatchdog(runId);
+            this.inFlight.delete(runId);
+          }
         }
-        this.clearWatchdog(runId);
-        this.inFlight.delete(runId);
       }
     })();
     task.catch(() => {

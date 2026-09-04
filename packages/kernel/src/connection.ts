@@ -68,22 +68,16 @@ export function openKernelDatabase(dbPath: string): KernelDatabaseHandle {
     const applied = readPragmas(raw);
     const isMemory = dbPath === ":memory:";
     if (!isMemory && applied.journalMode !== KERNEL_JOURNAL_MODE) {
-      throw new PragmasError(
-        `journal_mode is '${applied.journalMode}', expected '${KERNEL_JOURNAL_MODE}' for ${dbPath}`,
-      );
+      throw new PragmasError("kernel PRAGMA journal_mode verification failed");
     }
     if (applied.synchronous !== KERNEL_SYNCHRONOUS_NORMAL) {
-      throw new PragmasError(
-        `synchronous is ${applied.synchronous}, expected NORMAL(1)`,
-      );
+      throw new PragmasError("kernel PRAGMA synchronous verification failed");
     }
     if (applied.foreignKeys !== 1) {
-      throw new PragmasError("foreign_keys is not ON after PRAGMA");
+      throw new PragmasError("kernel PRAGMA foreign_keys verification failed");
     }
     if (applied.busyTimeoutMs !== KERNEL_BUSY_TIMEOUT_MS) {
-      throw new PragmasError(
-        `busy_timeout is ${applied.busyTimeoutMs}, expected ${KERNEL_BUSY_TIMEOUT_MS}`,
-      );
+      throw new PragmasError("kernel PRAGMA busy_timeout verification failed");
     }
     const wrapped: KernelDrizzle = drizzle(raw, { schema: kernelSchema });
     return { raw, drizzle: wrapped, path: dbPath, journalMode: applied.journalMode };

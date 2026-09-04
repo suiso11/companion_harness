@@ -24,10 +24,9 @@ export class QuickCheckError extends KernelStorageError {
   readonly details: readonly string[];
 
   constructor(details: readonly string[]) {
-    super(
-      "kernel_quick_check_failed",
-      `quick_check failed: ${details.join("; ") || "no output"}`,
-    );
+    // Keep raw native output out of the outward message; details stay
+    // available programmatically on the field.
+    super("kernel_quick_check_failed", "quick_check failed");
     this.details = details;
   }
 }
