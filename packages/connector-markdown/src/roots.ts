@@ -161,5 +161,11 @@ export async function initializeRoots(
 /** True when `realFile` is the root itself or beneath it (real paths only). */
 export function isWithinRealRoot(realRoot: string, realFile: string): boolean {
   if (realFile === realRoot) return true;
-  return realFile.startsWith(realRoot + path.sep);
+  // `path.relative` semantics (robust when the root already ends in a
+  // separator, e.g. a filesystem/drive root like `/` or `C:\`).
+  const relative = path.relative(realRoot, realFile);
+  if (relative === "") return true;
+  if (relative === ".." || relative.startsWith(`..${path.sep}`)) return false;
+  if (path.isAbsolute(relative)) return false;
+  return true;
 }
