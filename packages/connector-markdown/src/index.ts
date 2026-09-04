@@ -18,6 +18,27 @@
  * coherently.
  */
 
+export type {
+  MarkdownConnector,
+  MarkdownConnectorHooks,
+  MarkdownDocument,
+  MarkdownSearchHit,
+  MarkdownSearchInput,
+  MarkdownSearchResult,
+  MarkdownSkippedEntry,
+  ResolvedStandardLink,
+  ResolvedWikiLink,
+  StandardLinkStatus,
+  WikiLinkStatus,
+} from "./connector.js";
+export {
+  createMarkdownConnector,
+  filenameStemOf,
+  SEARCH_DEFAULT_LIMIT,
+  SEARCH_MAX_LIMIT,
+  SEARCH_QUERY_MAX_CODE_POINTS,
+  SEARCH_QUERY_MIN_CODE_POINTS,
+} from "./connector.js";
 export type { DiscoveredFile, DiscoveryHooks } from "./discovery.js";
 export {
   discoverMarkdownFiles,
