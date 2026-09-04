@@ -16,6 +16,13 @@
       "when": 1790000000001,
       "tag": "0002_m1_references",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": 3,
+      "when": 1790000000002,
+      "tag": "0003_m1_snapshot_links",
+      "breakpoints": true
     }
   ]
 }

@@ -139,15 +139,19 @@ export {
 export type {
   FreshnessKind,
   MarkdownConnectorView,
+  ObservationLink,
   PresentedReferenceView,
   PresentObservationsResult,
   PresentStoredResult,
   ReferenceManager,
+  RelatedStoredView,
   ResourceObservation,
 } from "./reference_manager.js";
 export {
   createReferenceManager,
   deriveSnippet,
+  RELATED_DEFAULT_LIMIT,
+  RELATED_MAX_LIMIT,
 } from "./reference_manager.js";
 export type {
   ReferenceResolver,
@@ -183,6 +187,7 @@ export {
   sessionReferenceContext,
   sessionReferences,
   sessions,
+  snapshotLinks,
   toolCalls,
   turnSelections,
   turns,

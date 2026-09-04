@@ -419,6 +419,50 @@ export const sessionReferenceContext = sqliteTable(
   ],
 );
 
+// M1 Markdown link graph (§14.5 related, §14.6 links). Mirrors
+// packages/kernel/migrations/0003_m1_snapshot_links.sql, which is
+// authoritative. One immutable row per ordered link of a newly materialized
+// snapshot, keyed by (source_snapshot_id, ordinal). No raw URL / wiki
+// target / alias / fragment is stored: only kind / status / path-free
+// canonical candidates / nullable target resource. State CHECK enforces:
+// resolved => exactly one candidate + target; ambiguous => >1 candidates,
+// no target (never guessed); unresolved => zero candidates, no target.
+// NOTE: the incoming-lookup index idx_snapshot_links_target is owned by the
+// committed migration SQL only (as with the M0 active-run partial index).
+
+export const snapshotLinks = sqliteTable(
+  "snapshot_links",
+  {
+    sourceSnapshotId: text("source_snapshot_id")
+      .notNull()
+      .references(() => resourceSnapshots.id),
+    ordinal: integer("ordinal").notNull(),
+    kind: text("kind").notNull(),
+    status: text("status").notNull(),
+    targetResourceId: text("target_resource_id").references(() => resources.id),
+    candidatesJson: text("candidates_json").notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.sourceSnapshotId, t.ordinal] }),
+    check("snapshot_links_ordinal_check", sql`${t.ordinal} >= 1`),
+    check("snapshot_links_kind_check", sql`${t.kind} IN ('standard','wiki')`),
+    check(
+      "snapshot_links_status_check",
+      sql`${t.status} IN ('resolved','ambiguous','unresolved')`,
+    ),
+    check(
+      "snapshot_links_candidates_json_check",
+      sql`json_valid(${t.candidatesJson})`,
+    ),
+    check(
+      "snapshot_links_state_check",
+      sql`(${t.status} = 'resolved' AND ${t.targetResourceId} IS NOT NULL AND json_type(${t.candidatesJson}) = 'array' AND json_array_length(${t.candidatesJson}) = 1) OR
+        (${t.status} = 'ambiguous' AND ${t.targetResourceId} IS NULL AND json_type(${t.candidatesJson}) = 'array' AND json_array_length(${t.candidatesJson}) > 1) OR
+        (${t.status} = 'unresolved' AND ${t.targetResourceId} IS NULL AND json_type(${t.candidatesJson}) = 'array' AND json_array_length(${t.candidatesJson}) = 0)`,
+    ),
+  ],
+);
+
 export const evidenceGrants = sqliteTable(
   "evidence_grants",
   {
@@ -460,6 +504,7 @@ export const kernelSchema = {
   connectorInstances,
   resources,
   resourceSnapshots,
+  snapshotLinks,
   sessionReferences,
   referenceSets,
   referenceSetItems,

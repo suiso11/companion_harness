@@ -171,7 +171,7 @@ describe("m0 kernel pragmas and single connection", () => {
 });
 
 describe("m0 kernel DDL shape", () => {
-  it("creates exactly the seven M0 plus eight M1 tables, all STRICT, none WITHOUT ROWID", async () => {
+  it("creates exactly the seven M0 plus nine M1 tables, all STRICT, none WITHOUT ROWID", async () => {
     const handle = await openMigratedMemory();
     try {
       const rows = handle.raw
@@ -192,6 +192,7 @@ describe("m0 kernel DDL shape", () => {
         "session_reference_context",
         "session_references",
         "sessions",
+        "snapshot_links",
         "tool_calls",
         "turn_selections",
         "turns",
@@ -926,10 +927,10 @@ describe("m1 reference storage invariants", () => {
     try {
       const rows = handle.raw
         .prepare(
-          "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name IN ('connector_instances','resources','resource_snapshots','session_references','reference_sets','reference_set_items','session_reference_context','evidence_grants')",
+          "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name IN ('connector_instances','resources','resource_snapshots','snapshot_links','session_references','reference_sets','reference_set_items','session_reference_context','evidence_grants')",
         )
         .all() as Array<{ name: string; sql: string }>;
-      expect(rows).toHaveLength(8);
+      expect(rows).toHaveLength(9);
       for (const row of rows) {
         expect(row.sql).toContain("STRICT");
         expect(row.sql).not.toContain("WITHOUT ROWID");
@@ -938,6 +939,152 @@ describe("m1 reference storage invariants", () => {
       expect(byName.get("connector_instances")).toContain("json_valid");
       expect(byName.get("resource_snapshots")).toContain("json_valid");
       expect(byName.get("session_reference_context")).toContain("json_valid");
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+});
+
+describe("m1 snapshot link graph invariants", () => {
+  function graphSetup(db: Database.Database): {
+    resourceId: string;
+    snapshotId: string;
+    targetId: string;
+  } {
+    const connectorId = randomUUID();
+    db.prepare(
+      "INSERT INTO connector_instances (id, kind, display_name, config_json, created_at) VALUES (?, 'markdown', ?, '{}', ?)",
+    ).run(connectorId, `vault-${connectorId.slice(0, 8)}`, NOW);
+    const resourceId = randomUUID();
+    db.prepare(
+      "INSERT INTO resources (id, connector_instance_id, canonical_key, title, next_revision, created_at) VALUES (?, ?, 'a.md', 'A', 2, ?)",
+    ).run(resourceId, connectorId, NOW);
+    const targetId = randomUUID();
+    db.prepare(
+      "INSERT INTO resources (id, connector_instance_id, canonical_key, title, next_revision, created_at) VALUES (?, ?, 'b.md', NULL, 1, ?)",
+    ).run(targetId, connectorId, NOW);
+    const snapshotId = randomUUID();
+    db.prepare(
+      "INSERT INTO resource_snapshots (id, resource_id, revision, source_revision, content_hash, body_json, size_bytes, observed_at, created_at) VALUES (?, ?, 1, NULL, 'h', ?, 5, ?, ?)",
+    ).run(
+      snapshotId,
+      resourceId,
+      JSON.stringify({ version: 1, text: "hi" }),
+      NOW,
+      NOW,
+    );
+    return { resourceId, snapshotId, targetId };
+  }
+
+  it("is STRICT with json_valid and no raw link-text columns", async () => {
+    const handle = await openMigratedMemory();
+    try {
+      const row = handle.raw
+        .prepare("SELECT sql FROM sqlite_master WHERE name = 'snapshot_links'")
+        .get() as { sql: string };
+      expect(row.sql).toContain("STRICT");
+      expect(row.sql).not.toContain("WITHOUT ROWID");
+      expect(row.sql).toContain("json_valid");
+      expect(row.sql).toContain("json_array_length");
+      const cols = handle.raw
+        .prepare("PRAGMA table_info(snapshot_links)")
+        .all() as Array<{ name: string }>;
+      expect(cols.map((c) => c.name).sort()).toEqual(
+        [
+          "candidates_json",
+          "kind",
+          "ordinal",
+          "source_snapshot_id",
+          "status",
+          "target_resource_id",
+        ].sort(),
+      );
+      const ddl = row.sql.toLowerCase();
+      expect(ddl).not.toContain("raw_url");
+      expect(ddl).not.toContain("fragment");
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("enforces the resolved/ambiguous/unresolved state CHECK", async () => {
+    const handle = await openMigratedMemory();
+    try {
+      const { snapshotId, targetId } = graphSetup(handle.raw);
+      const insert = (
+        ordinal: number,
+        kind: string,
+        status: string,
+        target: string | null,
+        candidates: string,
+      ) => {
+        handle.raw
+          .prepare(
+            "INSERT INTO snapshot_links (source_snapshot_id, ordinal, kind, status, target_resource_id, candidates_json) VALUES (?, ?, ?, ?, ?, ?)",
+          )
+          .run(snapshotId, ordinal, kind, status, target, candidates);
+      };
+      // Valid rows for each state.
+      expect(() =>
+        insert(1, "standard", "resolved", targetId, '["b.md"]'),
+      ).not.toThrow();
+      expect(() =>
+        insert(2, "wiki", "ambiguous", null, '["b.md","c.md"]'),
+      ).not.toThrow();
+      expect(() => insert(3, "wiki", "unresolved", null, "[]")).not.toThrow();
+      // State violations: resolved without target / wrong arity.
+      expect(() =>
+        insert(4, "standard", "resolved", null, '["b.md"]'),
+      ).toThrow();
+      expect(() => insert(5, "standard", "resolved", targetId, "[]")).toThrow();
+      expect(() =>
+        insert(6, "standard", "resolved", targetId, '["b.md","c.md"]'),
+      ).toThrow();
+      // Ambiguous with a target or a single candidate.
+      expect(() =>
+        insert(7, "wiki", "ambiguous", targetId, '["b.md","c.md"]'),
+      ).toThrow();
+      expect(() => insert(8, "wiki", "ambiguous", null, '["b.md"]')).toThrow();
+      // Unresolved with a target or any candidate.
+      expect(() => insert(9, "wiki", "unresolved", targetId, "[]")).toThrow();
+      expect(() =>
+        insert(10, "wiki", "unresolved", null, '["b.md"]'),
+      ).toThrow();
+      // Closed kind/status sets and ordinal bound.
+      expect(() =>
+        insert(11, "embed", "resolved", targetId, '["b.md"]'),
+      ).toThrow();
+      expect(() => insert(12, "standard", "guessed", null, "[]")).toThrow();
+      expect(() => insert(0, "standard", "unresolved", null, "[]")).toThrow();
+      // Non-JSON candidates rejected.
+      expect(() =>
+        insert(13, "standard", "unresolved", null, "nope"),
+      ).toThrow();
+      // Composite PK uniqueness.
+      expect(() => insert(1, "standard", "unresolved", null, "[]")).toThrow();
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("enforces snapshot/resource FKs", async () => {
+    const handle = await openMigratedMemory();
+    try {
+      const { snapshotId } = graphSetup(handle.raw);
+      expect(() =>
+        handle.raw
+          .prepare(
+            "INSERT INTO snapshot_links (source_snapshot_id, ordinal, kind, status, target_resource_id, candidates_json) VALUES ('missing', 1, 'standard', 'unresolved', NULL, '[]')",
+          )
+          .run(),
+      ).toThrow();
+      expect(() =>
+        handle.raw
+          .prepare(
+            "INSERT INTO snapshot_links (source_snapshot_id, ordinal, kind, status, target_resource_id, candidates_json) VALUES (?, 9, 'standard', 'resolved', 'missing', '[\"b.md\"]')",
+          )
+          .run(snapshotId),
+      ).toThrow();
     } finally {
       closeKernelDatabase(handle);
     }

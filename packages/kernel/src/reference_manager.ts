@@ -56,6 +56,13 @@ import {
 /* ------------------------------------------------------------------ */
 
 /** One already-read external fact. Ephemeral: not evidence until committed. */
+export interface ObservationLink {
+  kind: "standard" | "wiki";
+  status: "resolved" | "ambiguous" | "unresolved";
+  /** Ordered path-free CanonicalKeySchema values (same connector only). */
+  candidates: readonly string[];
+}
+
 export interface ResourceObservation {
   connectorInstanceId: string;
   canonicalKey: string;
@@ -65,6 +72,16 @@ export interface ResourceObservation {
   /** Opaque upstream revision signal (content-derived for Markdown). */
   sourceRevision: string | null;
   observedAt: number;
+  /**
+   * Ordered normalized link metadata (source-document order, ordinal 1..N).
+   * Persisted ONLY when a new snapshot is materialized: candidate resources
+   * are ensured under the same connector (title NULL if unseen) and one
+   * immutable `snapshot_links` row per link is inserted in the same
+   * presentation transaction. A reused snapshot never rewrites its graph;
+   * a refresh writes a wholly new graph for the new snapshot. No raw
+   * URL / wiki target / alias / fragment is accepted or stored.
+   */
+  links?: readonly ObservationLink[];
 }
 
 export type FreshnessKind = "normal" | "refresh";
@@ -102,6 +119,19 @@ export interface MarkdownConnectorView {
   rootCount: number;
   createdAt: number;
 }
+
+/** Stored-only related view (no snippet/body; tool layer presents later). */
+export interface RelatedStoredView {
+  referenceId: string;
+  ordinal: number;
+  snapshotId: string;
+  resourceId: string;
+  canonicalKey: string;
+  title: string | null;
+}
+
+export const RELATED_DEFAULT_LIMIT = 10 as const;
+export const RELATED_MAX_LIMIT = 20 as const;
 
 const CONNECTOR_CONFIG_VERSION = 1 as const;
 
@@ -145,6 +175,7 @@ function normalizeObservation(raw: ResourceObservation): {
   text: string;
   sourceRevision: string | null;
   observedAt: number;
+  links: NormalizedLink[];
 } {
   const connectorInstanceId = requireId(
     raw.connectorInstanceId,
@@ -199,6 +230,7 @@ function normalizeObservation(raw: ResourceObservation): {
     }
   }
   const observedAt = nowMs(raw.observedAt);
+  const links = normalizeObservationLinks(raw.links);
   return {
     connectorInstanceId,
     canonicalKey,
@@ -206,7 +238,84 @@ function normalizeObservation(raw: ResourceObservation): {
     text,
     sourceRevision,
     observedAt,
+    links,
   };
+}
+
+type NormalizedLink = {
+  kind: "standard" | "wiki";
+  status: "resolved" | "ambiguous" | "unresolved";
+  candidates: string[];
+};
+
+/**
+ * Ordered normalized link metadata: kind/status enums plus path-free
+ * CanonicalKeySchema candidates with the DB state CHECK mirrored here
+ * (resolved exactly 1, ambiguous >1, unresolved 0). No raw link text.
+ */
+function normalizeObservationLinks(
+  input: readonly ObservationLink[] | undefined,
+): NormalizedLink[] {
+  if (input === undefined) {
+    return [];
+  }
+  if (!Array.isArray(input)) {
+    throw new RepositoryValidationError("links must be an array");
+  }
+  if (input.length > 1024) {
+    throw new RepositoryValidationError("too many links in observation");
+  }
+  return input.map((entry, index) => {
+    if (typeof entry !== "object" || entry === null) {
+      throw new RepositoryValidationError(`link ${index} must be an object`);
+    }
+    const { kind, status, candidates } = entry as {
+      kind?: unknown;
+      status?: unknown;
+      candidates?: unknown;
+    };
+    if (kind !== "standard" && kind !== "wiki") {
+      throw new RepositoryValidationError(`link ${index} kind invalid`);
+    }
+    if (
+      status !== "resolved" &&
+      status !== "ambiguous" &&
+      status !== "unresolved"
+    ) {
+      throw new RepositoryValidationError(`link ${index} status invalid`);
+    }
+    if (!Array.isArray(candidates)) {
+      throw new RepositoryValidationError(
+        `link ${index} candidates must be an array`,
+      );
+    }
+    const parsed: string[] = candidates.map((candidate, j) => {
+      try {
+        return CanonicalKeySchema.parse(candidate);
+      } catch (error) {
+        throw new RepositoryValidationError(
+          `link ${index} candidate ${j} invalid: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error },
+        );
+      }
+    });
+    if (status === "resolved" && parsed.length !== 1) {
+      throw new RepositoryValidationError(
+        `link ${index} resolved requires exactly one candidate`,
+      );
+    }
+    if (status === "ambiguous" && parsed.length <= 1) {
+      throw new RepositoryValidationError(
+        `link ${index} ambiguous requires more than one candidate`,
+      );
+    }
+    if (status === "unresolved" && parsed.length !== 0) {
+      throw new RepositoryValidationError(
+        `link ${index} unresolved requires zero candidates`,
+      );
+    }
+    return { kind, status, candidates: parsed };
+  });
 }
 
 /** Deterministic prefix excerpt (manager has no search query). */
@@ -475,6 +584,7 @@ export function createReferenceManager(db: Database.Database) {
           | undefined;
 
         let snapshotId: string;
+        let snapshotIsNew = false;
         if (
           options.freshness === "normal" &&
           latest !== undefined &&
@@ -482,7 +592,7 @@ export function createReferenceManager(db: Database.Database) {
           latest.content_hash === contentHash
         ) {
           // Normal reuse: identical revision signal + identical normalized
-          // content reuses the latest Snapshot (no new row).
+          // content reuses the latest Snapshot (no new row, graph untouched).
           snapshotId = latest.id;
         } else {
           // Changed revision (even with identical content) or explicit
@@ -515,6 +625,56 @@ export function createReferenceManager(db: Database.Database) {
             );
           }
           resource = { ...resource, next_revision: revision + 1 };
+          snapshotIsNew = true;
+        }
+
+        // Link graph: written if and only if a new snapshot was just
+        // materialized. Candidate resources are ensured under the SAME
+        // connector instance (title NULL when unseen); a reused snapshot
+        // never rewrites its graph even if this observation carries links.
+        if (snapshotIsNew && obs.links.length > 0) {
+          const candidateIds = new Map<string, string>();
+          for (const link of obs.links) {
+            for (const candidate of link.candidates) {
+              if (candidateIds.has(candidate)) {
+                continue;
+              }
+              const target = db
+                .prepare(
+                  "SELECT id FROM resources WHERE connector_instance_id = ? AND canonical_key = ?",
+                )
+                .get(obs.connectorInstanceId, candidate) as
+                | { id: string }
+                | undefined;
+              if (target === undefined) {
+                const targetId = generateId();
+                db.prepare(
+                  "INSERT INTO resources (id, connector_instance_id, canonical_key, title, next_revision, created_at) VALUES (?, ?, ?, NULL, 1, ?)",
+                ).run(targetId, obs.connectorInstanceId, candidate, now);
+                candidateIds.set(candidate, targetId);
+              } else {
+                candidateIds.set(candidate, target.id);
+              }
+            }
+          }
+          let linkOrdinal = 1;
+          for (const link of obs.links) {
+            const targetResourceId =
+              link.status === "resolved"
+                ? (candidateIds.get(link.candidates[0] as string) as string)
+                : null;
+            db.prepare(
+              "INSERT INTO snapshot_links (source_snapshot_id, ordinal, kind, status, target_resource_id, candidates_json) VALUES (?, ?, ?, ?, ?, ?)",
+            ).run(
+              snapshotId,
+              linkOrdinal,
+              link.kind,
+              link.status,
+              targetResourceId,
+              JSON.stringify(link.candidates),
+            );
+            linkOrdinal += 1;
+          }
         }
 
         // Same-session + same-snapshot reuses the same rN (DB UNIQUE backs
@@ -772,10 +932,201 @@ export function createReferenceManager(db: Database.Database) {
     });
   }
 
+  /**
+   * Stored-only related resolution over the saved link graph (no external
+   * reads, no ReferenceSet / RunEvent / EvidenceGrant / Snapshot / I/O).
+   *
+   * DETERMINISTIC SELECTION (documented, never guesses ambiguous targets):
+   * 1. Outgoing: resolved links of the EXACT base snapshot in link-ordinal
+   *    order, deduped by target resource. Ambiguous/unresolved links are
+   *    ignored entirely.
+   * 2. Incoming: for every other resource with at least one reference in
+   *    this session, take its latest session-referenced snapshot (the
+   *    snapshot of its greatest-ordinal reference); if that snapshot holds
+   *    a resolved link targeting the base resource, the resource is an
+   *    incoming candidate sorted by canonical key code-unit order.
+   * 3. Each candidate resource maps to its latest session reference
+   *    (greatest ordinal) in this session; resources with no session
+   *    reference are skipped (stored-only: never invents rN). The base
+   *    reference itself is excluded, references are unique, and output is
+   *    outgoing-first then incoming, truncated to `limit`.
+   */
+  function getRelatedStored(
+    sessionId: string,
+    referenceId: string,
+    limit: number = RELATED_DEFAULT_LIMIT,
+  ): RelatedStoredView[] {
+    const session = requireId(sessionId, "sessionId");
+    const baseRef = requireId(referenceId, "referenceId");
+    if (!Number.isInteger(limit) || limit < 1 || limit > RELATED_MAX_LIMIT) {
+      throw new RepositoryValidationError(
+        `limit must be an integer 1..${RELATED_MAX_LIMIT}`,
+      );
+    }
+    const base = db
+      .prepare(
+        `SELECT sr.id AS id, sr.ordinal AS ordinal, sr.resource_id AS resource_id,
+                sr.snapshot_id AS snapshot_id
+           FROM session_references sr
+          WHERE sr.session_id = ? AND sr.id = ?`,
+      )
+      .get(session, baseRef) as
+      | {
+          id: string;
+          ordinal: number;
+          resource_id: string;
+          snapshot_id: string;
+        }
+      | undefined;
+    if (base === undefined) {
+      throw new ReferenceNotFoundError(
+        `reference ${baseRef} not found in session ${session}`,
+      );
+    }
+    const baseSnapshotId = base.snapshot_id;
+    const baseResourceId = base.resource_id;
+
+    // All session references (latest ordinal per resource wins the mapping).
+    const rows = db
+      .prepare(
+        `SELECT sr.id AS id, sr.ordinal AS ordinal, sr.resource_id AS resource_id,
+                sr.snapshot_id AS snapshot_id, r.canonical_key AS canonical_key, r.title AS title
+           FROM session_references sr
+           JOIN resources r ON r.id = sr.resource_id
+          WHERE sr.session_id = ?
+          ORDER BY sr.ordinal ASC`,
+      )
+      .all(session) as Array<{
+      id: string;
+      ordinal: number;
+      resource_id: string;
+      snapshot_id: string;
+      canonical_key: string;
+      title: string | null;
+    }>;
+    const latestByResource = new Map<
+      string,
+      {
+        id: string;
+        ordinal: number;
+        snapshot_id: string;
+        canonical_key: string;
+        title: string | null;
+      }
+    >();
+    for (const row of rows) {
+      const prev = latestByResource.get(row.resource_id);
+      if (prev === undefined || row.ordinal > prev.ordinal) {
+        latestByResource.set(row.resource_id, {
+          id: row.id,
+          ordinal: row.ordinal,
+          snapshot_id: row.snapshot_id,
+          canonical_key: row.canonical_key,
+          title: row.title,
+        });
+      }
+    }
+
+    const ordered: RelatedStoredView[] = [];
+    const seenRefs = new Set<string>([baseRef]);
+    const seenResources = new Set<string>();
+
+    // 1. Outgoing from the exact base snapshot.
+    const outgoing = db
+      .prepare(
+        `SELECT target_resource_id AS target_resource_id
+           FROM snapshot_links
+          WHERE source_snapshot_id = ? AND status = 'resolved'
+          ORDER BY ordinal ASC`,
+      )
+      .all(baseSnapshotId) as Array<{ target_resource_id: string }>;
+    for (const link of outgoing) {
+      const target = link.target_resource_id;
+      if (seenResources.has(target)) {
+        continue;
+      }
+      seenResources.add(target);
+      if (target === baseResourceId) {
+        continue;
+      }
+      const mapped = latestByResource.get(target);
+      if (mapped === undefined || seenRefs.has(mapped.id)) {
+        continue;
+      }
+      seenRefs.add(mapped.id);
+      ordered.push({
+        referenceId: mapped.id,
+        ordinal: mapped.ordinal,
+        snapshotId: mapped.snapshot_id,
+        resourceId: target,
+        canonicalKey: mapped.canonical_key,
+        title: mapped.title,
+      });
+      if (ordered.length >= limit) {
+        return ordered;
+      }
+    }
+
+    // 2. Incoming via each resource's latest session-referenced snapshot.
+    const incomingCandidates: Array<{
+      resourceId: string;
+      canonicalKey: string;
+    }> = [];
+    for (const [resourceId, mapped] of latestByResource) {
+      if (resourceId === baseResourceId || seenResources.has(resourceId)) {
+        continue;
+      }
+      const hit = db
+        .prepare(
+          `SELECT 1 AS hit FROM snapshot_links
+            WHERE source_snapshot_id = ? AND status = 'resolved' AND target_resource_id = ?
+            LIMIT 1`,
+        )
+        .get(mapped.snapshot_id, baseResourceId) as { hit: number } | undefined;
+      if (hit !== undefined) {
+        incomingCandidates.push({
+          resourceId,
+          canonicalKey: mapped.canonical_key,
+        });
+      }
+    }
+    incomingCandidates.sort((a, b) => {
+      if (a.canonicalKey < b.canonicalKey) return -1;
+      if (a.canonicalKey > b.canonicalKey) return 1;
+      return 0;
+    });
+    for (const candidate of incomingCandidates) {
+      const mapped = latestByResource.get(candidate.resourceId) as {
+        id: string;
+        ordinal: number;
+        snapshot_id: string;
+        canonical_key: string;
+        title: string | null;
+      };
+      if (seenRefs.has(mapped.id)) {
+        continue;
+      }
+      seenRefs.add(mapped.id);
+      ordered.push({
+        referenceId: mapped.id,
+        ordinal: mapped.ordinal,
+        snapshotId: mapped.snapshot_id,
+        resourceId: candidate.resourceId,
+        canonicalKey: mapped.canonical_key,
+        title: mapped.title,
+      });
+      if (ordered.length >= limit) {
+        break;
+      }
+    }
+    return ordered;
+  }
+
   return {
     ensureMarkdownConnectorInstance,
     presentObservations,
     presentStored,
+    getRelatedStored,
   };
 }
 

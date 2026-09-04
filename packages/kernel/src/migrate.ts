@@ -26,7 +26,7 @@ import {
 } from "./errors.js";
 
 /** Bundled M1 schema version. Bump only with a new committed migration. */
-export const BUNDLED_SCHEMA_VERSION = 2;
+export const BUNDLED_SCHEMA_VERSION = 3;
 
 export interface BundledMigration {
   version: number;

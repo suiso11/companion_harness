@@ -652,3 +652,564 @@ describe("allocator and schema invariants", () => {
     }
   });
 });
+
+describe("snapshot link graph persistence", () => {
+  function linkCounts(db: Database.Database) {
+    const n = (sql: string) => (db.prepare(sql).get() as { n: number }).n;
+    return {
+      links: n("SELECT COUNT(*) AS n FROM snapshot_links"),
+      resources: n("SELECT COUNT(*) AS n FROM resources"),
+      snapshots: n("SELECT COUNT(*) AS n FROM resource_snapshots"),
+    };
+  }
+
+  it("persists ordered links with candidate resources only on new snapshots", async () => {
+    const { handle, repo, manager, db } = await openStack();
+    try {
+      const connector = manager.ensureMarkdownConnectorInstance("vault", 1, {
+        now: T0,
+      });
+      const { sessionId, runId } = runningFixture(repo);
+      const result = manager.presentObservations(
+        sessionId,
+        runId,
+        [
+          obs(connector.id, "notes/a.md", "body a", {
+            links: [
+              {
+                kind: "standard",
+                status: "resolved",
+                candidates: ["notes/b.md"],
+              },
+              {
+                kind: "wiki",
+                status: "ambiguous",
+                candidates: ["notes/b.md", "notes/c.md"],
+              },
+              { kind: "wiki", status: "unresolved", candidates: [] },
+            ],
+          }),
+        ],
+        { freshness: "normal", now: T0 + 5 },
+      );
+      if (!result.applied) {
+        throw new Error("expected presentation to apply");
+      }
+      const snapshotId = result.references[0]?.snapshotId as string;
+      const rows = db
+        .prepare(
+          "SELECT ordinal, kind, status, target_resource_id, candidates_json FROM snapshot_links WHERE source_snapshot_id = ? ORDER BY ordinal ASC",
+        )
+        .all(snapshotId) as Array<{
+        ordinal: number;
+        kind: string;
+        status: string;
+        target_resource_id: string | null;
+        candidates_json: string;
+      }>;
+      expect(rows.map((r) => r.ordinal)).toEqual([1, 2, 3]);
+      expect(rows.map((r) => r.kind)).toEqual(["standard", "wiki", "wiki"]);
+      expect(rows.map((r) => r.status)).toEqual([
+        "resolved",
+        "ambiguous",
+        "unresolved",
+      ]);
+      expect(JSON.parse(rows[0]?.candidates_json ?? "")).toEqual([
+        "notes/b.md",
+      ]);
+      expect(rows[0]?.target_resource_id).toMatch(/^[0-9a-f-]{36}$/);
+      expect(JSON.parse(rows[1]?.candidates_json ?? "")).toEqual([
+        "notes/b.md",
+        "notes/c.md",
+      ]);
+      expect(rows[1]?.target_resource_id).toBeNull();
+      expect(JSON.parse(rows[2]?.candidates_json ?? "")).toEqual([]);
+      expect(rows[2]?.target_resource_id).toBeNull();
+      // Candidate resources ensured under the same connector, title NULL.
+      const b = db
+        .prepare(
+          "SELECT title, connector_instance_id FROM resources WHERE canonical_key = 'notes/b.md'",
+        )
+        .get() as { title: string | null; connector_instance_id: string };
+      expect(b.title).toBeNull();
+      expect(b.connector_instance_id).toBe(connector.id);
+      const c = db
+        .prepare(
+          "SELECT title FROM resources WHERE canonical_key = 'notes/c.md'",
+        )
+        .get() as { title: string | null };
+      expect(c.title).toBeNull();
+      // No raw link text stored anywhere in the graph table.
+      const ddl = (
+        db
+          .prepare(
+            "SELECT sql FROM sqlite_master WHERE name = 'snapshot_links'",
+          )
+          .get() as { sql: string }
+      ).sql.toLowerCase();
+      expect(ddl).not.toContain("raw_url");
+      expect(ddl).not.toContain("fragment");
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("never rewrites the graph when a snapshot is reused", async () => {
+    const { handle, repo, manager, db } = await openStack();
+    try {
+      const connector = manager.ensureMarkdownConnectorInstance("vault", 1, {
+        now: T0,
+      });
+      const { sessionId, runId } = runningFixture(repo);
+      const first = manager.presentObservations(
+        sessionId,
+        runId,
+        [
+          obs(connector.id, "notes/a.md", "same", {
+            links: [
+              {
+                kind: "standard",
+                status: "resolved",
+                candidates: ["notes/b.md"],
+              },
+            ],
+          }),
+        ],
+        { freshness: "normal", now: T0 + 5 },
+      );
+      if (!first.applied) {
+        throw new Error("expected first presentation to apply");
+      }
+      const before = linkCounts(db);
+      const second = manager.presentObservations(
+        sessionId,
+        runId,
+        [
+          obs(connector.id, "notes/a.md", "same", {
+            links: [
+              {
+                kind: "standard",
+                status: "resolved",
+                candidates: ["notes/z.md"],
+              },
+            ],
+          }),
+        ],
+        { freshness: "normal", now: T0 + 6 },
+      );
+      if (!second.applied) {
+        throw new Error("expected second presentation to apply");
+      }
+      expect(second.references[0]?.snapshotId).toBe(
+        first.references[0]?.snapshotId,
+      );
+      // Reuse wrote no new graph rows and created no new candidate resource.
+      expect(linkCounts(db)).toEqual({
+        ...before,
+        resources: before.resources,
+        snapshots: before.snapshots,
+      });
+      const z = db
+        .prepare("SELECT id FROM resources WHERE canonical_key = 'notes/z.md'")
+        .get() as { id: string } | undefined;
+      expect(z).toBeUndefined();
+      const rows = db
+        .prepare("SELECT candidates_json FROM snapshot_links")
+        .all() as Array<{ candidates_json: string }>;
+      expect(rows).toHaveLength(1);
+      expect(JSON.parse(rows[0]?.candidates_json ?? "")).toEqual([
+        "notes/b.md",
+      ]);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("writes a new graph on refresh and rolls back graph plus candidates on cancel", async () => {
+    const { handle, repo, manager, db } = await openStack();
+    try {
+      const connector = manager.ensureMarkdownConnectorInstance("vault", 1, {
+        now: T0,
+      });
+      const { sessionId, runId } = runningFixture(repo);
+      const first = manager.presentObservations(
+        sessionId,
+        runId,
+        [
+          obs(connector.id, "notes/a.md", "same", {
+            links: [
+              {
+                kind: "standard",
+                status: "resolved",
+                candidates: ["notes/b.md"],
+              },
+            ],
+          }),
+        ],
+        { freshness: "normal", now: T0 + 5 },
+      );
+      if (!first.applied) {
+        throw new Error("expected first presentation to apply");
+      }
+      const refreshed = manager.presentObservations(
+        sessionId,
+        runId,
+        [
+          obs(connector.id, "notes/a.md", "same", {
+            links: [
+              {
+                kind: "standard",
+                status: "resolved",
+                candidates: ["notes/c.md"],
+              },
+            ],
+          }),
+        ],
+        { freshness: "refresh", now: T0 + 6 },
+      );
+      if (!refreshed.applied) {
+        throw new Error("expected refresh to apply");
+      }
+      expect(refreshed.references[0]?.snapshotId).not.toBe(
+        first.references[0]?.snapshotId,
+      );
+      const oldRows = db
+        .prepare(
+          "SELECT candidates_json FROM snapshot_links WHERE source_snapshot_id = ?",
+        )
+        .all(first.references[0]?.snapshotId) as Array<{
+        candidates_json: string;
+      }>;
+      const newRows = db
+        .prepare(
+          "SELECT candidates_json FROM snapshot_links WHERE source_snapshot_id = ?",
+        )
+        .all(refreshed.references[0]?.snapshotId) as Array<{
+        candidates_json: string;
+      }>;
+      expect(JSON.parse(oldRows[0]?.candidates_json ?? "")).toEqual([
+        "notes/b.md",
+      ]);
+      expect(JSON.parse(newRows[0]?.candidates_json ?? "")).toEqual([
+        "notes/c.md",
+      ]);
+
+      // Cancel rollback discards the new graph and its unseen candidates.
+      repo.cancelRun(sessionId, runId, { now: T0 + 7 });
+      const before = linkCounts(db);
+      const late = manager.presentObservations(
+        sessionId,
+        runId,
+        [
+          obs(connector.id, "notes/a.md", "later", {
+            sourceRevision: "rev-2",
+            links: [
+              {
+                kind: "standard",
+                status: "resolved",
+                candidates: ["notes/new.md"],
+              },
+            ],
+          }),
+        ],
+        { freshness: "normal", now: T0 + 8 },
+      );
+      expect(late.applied).toBe(false);
+      expect(linkCounts(db)).toEqual(before);
+      const unseen = db
+        .prepare(
+          "SELECT id FROM resources WHERE canonical_key = 'notes/new.md'",
+        )
+        .get() as { id: string } | undefined;
+      expect(unseen).toBeUndefined();
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("rejects malformed link metadata without writing", async () => {
+    const { handle, repo, manager, db } = await openStack();
+    try {
+      const connector = manager.ensureMarkdownConnectorInstance("vault", 1, {
+        now: T0,
+      });
+      const { sessionId, runId } = runningFixture(repo);
+      const before = counts(db);
+      expect(() =>
+        manager.presentObservations(
+          sessionId,
+          runId,
+          [
+            obs(connector.id, "notes/a.md", "x", {
+              links: [
+                // Resolved with zero candidates violates the state rule.
+                { kind: "standard", status: "resolved", candidates: [] },
+              ],
+            }),
+          ],
+          { freshness: "normal", now: T0 + 5 },
+        ),
+      ).toThrow();
+      expect(counts(db)).toEqual(before);
+      expect(() =>
+        manager.presentObservations(
+          sessionId,
+          runId,
+          [
+            obs(connector.id, "notes/a.md", "x", {
+              links: [
+                // Path-shaped candidate is not a CanonicalKeySchema value.
+                {
+                  kind: "wiki",
+                  status: "unresolved",
+                  candidates: ["../escape"],
+                },
+              ],
+            }),
+          ],
+          { freshness: "normal", now: T0 + 5 },
+        ),
+      ).toThrow();
+      expect(counts(db)).toEqual(before);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+});
+
+describe("getRelatedStored (stored graph only)", () => {
+  function present(
+    manager: ReturnType<typeof createReferenceManager>,
+    sessionId: string,
+    runId: string,
+    observation: ResourceObservation,
+    freshness: "normal" | "refresh" = "normal",
+  ) {
+    const result = manager.presentObservations(
+      sessionId,
+      runId,
+      [observation],
+      {
+        freshness,
+        now: T0 + 5,
+      },
+    );
+    if (!result.applied) {
+      throw new Error("expected presentation to apply");
+    }
+    return result.references[0] as NonNullable<(typeof result.references)[0]>;
+  }
+
+  it("returns outgoing links first, then incoming, deterministically", async () => {
+    const { handle, repo, manager, db } = await openStack();
+    try {
+      const connector = manager.ensureMarkdownConnectorInstance("vault", 1, {
+        now: T0,
+      });
+      const { sessionId, runId } = runningFixture(repo);
+      // a -> b (resolved), a -> c (ambiguous, never guessed), a -> d (unresolved).
+      const a = present(
+        manager,
+        sessionId,
+        runId,
+        obs(connector.id, "notes/a.md", "body a", {
+          links: [
+            {
+              kind: "standard",
+              status: "resolved",
+              candidates: ["notes/b.md"],
+            },
+            {
+              kind: "wiki",
+              status: "ambiguous",
+              candidates: ["notes/b.md", "notes/c.md"],
+            },
+            { kind: "wiki", status: "unresolved", candidates: [] },
+          ],
+        }),
+      );
+      const b = present(
+        manager,
+        sessionId,
+        runId,
+        obs(connector.id, "notes/b.md", "body b"),
+      );
+      // c and d are referenced but only reachable ambiguously / not at all.
+      const c = present(
+        manager,
+        sessionId,
+        runId,
+        obs(connector.id, "notes/c.md", "body c"),
+      );
+      const d = present(
+        manager,
+        sessionId,
+        runId,
+        obs(connector.id, "notes/d.md", "body d"),
+      );
+      // e -> a (incoming to a).
+      const e = present(
+        manager,
+        sessionId,
+        runId,
+        obs(connector.id, "notes/e.md", "body e", {
+          links: [
+            {
+              kind: "standard",
+              status: "resolved",
+              candidates: ["notes/a.md"],
+            },
+          ],
+        }),
+      );
+      void d;
+      const related = manager.getRelatedStored(sessionId, a.referenceId);
+      // Outgoing b first, then incoming e. Ambiguous c is never guessed.
+      expect(related.map((r) => r.canonicalKey)).toEqual([
+        "notes/b.md",
+        "notes/e.md",
+      ]);
+      expect(related[0]?.referenceId).toBe(b.referenceId);
+      expect(related[1]?.referenceId).toBe(e.referenceId);
+      expect(related.map((r) => r.referenceId)).not.toContain(c.referenceId);
+      // Stored-only: no new sets, events, snapshots, or references.
+      const sets = (
+        db.prepare("SELECT COUNT(*) AS n FROM reference_sets").get() as {
+          n: number;
+        }
+      ).n;
+      const events = (
+        db.prepare("SELECT COUNT(*) AS n FROM run_events").get() as {
+          n: number;
+        }
+      ).n;
+      const snapshots = (
+        db.prepare("SELECT COUNT(*) AS n FROM resource_snapshots").get() as {
+          n: number;
+        }
+      ).n;
+      const second = manager.getRelatedStored(sessionId, a.referenceId);
+      expect(second).toEqual(related);
+      expect(
+        (
+          db.prepare("SELECT COUNT(*) AS n FROM reference_sets").get() as {
+            n: number;
+          }
+        ).n,
+      ).toBe(sets);
+      expect(
+        (
+          db.prepare("SELECT COUNT(*) AS n FROM run_events").get() as {
+            n: number;
+          }
+        ).n,
+      ).toBe(events);
+      expect(
+        (
+          db.prepare("SELECT COUNT(*) AS n FROM resource_snapshots").get() as {
+            n: number;
+          }
+        ).n,
+      ).toBe(snapshots);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("uses the exact base snapshot for outgoing and skips unreferenced targets", async () => {
+    const { handle, repo, manager } = await openStack();
+    try {
+      const connector = manager.ensureMarkdownConnectorInstance("vault", 1, {
+        now: T0,
+      });
+      const { sessionId, runId } = runningFixture(repo);
+      const v1 = present(
+        manager,
+        sessionId,
+        runId,
+        obs(connector.id, "notes/a.md", "v1", {
+          links: [
+            {
+              kind: "standard",
+              status: "resolved",
+              candidates: ["notes/b.md"],
+            },
+          ],
+        }),
+      );
+      present(
+        manager,
+        sessionId,
+        runId,
+        obs(connector.id, "notes/b.md", "body b"),
+      );
+      // Refresh a with identical content but a different graph (a -> c).
+      const v2 = present(
+        manager,
+        sessionId,
+        runId,
+        obs(connector.id, "notes/a.md", "v1"),
+        "refresh",
+      );
+      void v2;
+      // v1 still resolves outgoing b from its exact snapshot.
+      expect(
+        manager
+          .getRelatedStored(sessionId, v1.referenceId)
+          .map((r) => r.canonicalKey),
+      ).toEqual(["notes/b.md"]);
+      // A base whose target was never referenced in this session yields [].
+      const lonely = present(
+        manager,
+        sessionId,
+        runId,
+        obs(connector.id, "notes/lonely.md", "lonely", {
+          links: [
+            {
+              kind: "standard",
+              status: "resolved",
+              candidates: ["notes/ghost.md"],
+            },
+          ],
+        }),
+      );
+      expect(manager.getRelatedStored(sessionId, lonely.referenceId)).toEqual(
+        [],
+      );
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("validates session ownership, unknown ids, and limits", async () => {
+    const { handle, repo, manager } = await openStack();
+    try {
+      const connector = manager.ensureMarkdownConnectorInstance("vault", 1, {
+        now: T0,
+      });
+      const a = runningFixture(repo, T0);
+      const presented = manager.presentObservations(
+        a.sessionId,
+        a.runId,
+        [obs(connector.id, "notes/a.md", "x")],
+        { freshness: "normal", now: T0 + 5 },
+      );
+      if (!presented.applied) {
+        throw new Error("expected presentation to apply");
+      }
+      const refId = presented.references[0]?.referenceId as string;
+      const other = repo.createSession({ key: key(), now: T0 }).body.sessionId;
+      expect(() => manager.getRelatedStored(other, refId)).toThrow(
+        ReferenceNotFoundError,
+      );
+      expect(() => manager.getRelatedStored(a.sessionId, generateId())).toThrow(
+        ReferenceNotFoundError,
+      );
+      expect(() => manager.getRelatedStored(a.sessionId, refId, 0)).toThrow();
+      expect(() => manager.getRelatedStored(a.sessionId, refId, 21)).toThrow();
+      expect(manager.getRelatedStored(a.sessionId, refId, 1)).toEqual([]);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+});
