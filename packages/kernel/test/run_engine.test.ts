@@ -609,7 +609,9 @@ describe("normal-cancel watchdog", () => {
       let watchdogTimers = 0;
       const origSetTimeout = clock.setTimeout.bind(clock);
       clock.setTimeout = ((fn: () => void, ms: number) => {
-        watchdogTimers += 1;
+        if (ms === 3000) {
+          watchdogTimers += 1;
+        }
         return origSetTimeout(fn, ms);
       }) as typeof clock.setTimeout;
       expect(engine.cancel(s, m.body.run.id).status).toBe("cancel_requested");

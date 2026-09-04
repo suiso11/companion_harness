@@ -155,10 +155,6 @@ export async function startServer(
   const drainMs = options.drainMs ?? SHUTDOWN_DRAIN_MS;
 
   logger.info("server.starting", { port: config.port });
-  ensureDbDir(config.dbPath, {
-    ...(options.platform !== undefined ? { platform: options.platform } : {}),
-    ...(options.chmod !== undefined ? { chmod: options.chmod } : {}),
-  });
 
   let handle: KernelDatabaseHandle | undefined;
   let engine: RunEngine | undefined;
@@ -184,6 +180,10 @@ export async function startServer(
     }
   };
   try {
+    ensureDbDir(config.dbPath, {
+      ...(options.platform !== undefined ? { platform: options.platform } : {}),
+      ...(options.chmod !== undefined ? { chmod: options.chmod } : {}),
+    });
     handle = openKernelDatabase(config.dbPath);
     // Immediate post-open symlink recheck before any migration writes.
     // Residual TOCTOU: better-sqlite3 has no portable no-follow open, so a

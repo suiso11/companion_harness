@@ -27,7 +27,12 @@ afterEach(async () => {
     }
   }
   for (const dir of tempDirs) {
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 100,
+    });
   }
   tempDirs = [];
 });
@@ -79,12 +84,14 @@ describe("bootstrap startup + graceful shutdown", () => {
         probe.close();
       }
 
-      // End-to-end mutation over HTTP (local CLI-style: no Origin).
+      // End-to-end mutation over HTTP with exact same-origin Origin
+      // (undici emits Sec-Fetch metadata, so missing Origin is rejected).
       const created = await fetch(`${base}/api/sessions`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
           "idempotency-key": randomUUID(),
+          origin: base,
         },
         body: "{}",
       });
@@ -107,6 +114,7 @@ describe("bootstrap startup + graceful shutdown", () => {
         headers: {
           "content-type": "application/json",
           "idempotency-key": randomUUID(),
+          origin: base,
         },
         body: JSON.stringify({ text: "late" }),
       });

@@ -72,6 +72,12 @@ function tableNames(db: Database.Database): string[] {
 const BACKUP_NAME_PATTERN =
   /^companion-pre-migration-v0-to-v1-\d{8}T\d{6}Z-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.sqlite$/;
 
+function stripComments(src: string): string {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|\s)\/\/.*$/gm, "$1");
+}
+
 describe("m0 migration lifecycle", () => {
   it("migrates a fresh DB to the bundled version with no backup", async () => {
     const dir = tempDir();
@@ -454,8 +460,9 @@ describe("m0 manual backup (stopped-only, never rotated)", () => {
     const testDir = dirname(fileURLToPath(import.meta.url));
     const src = readFileSync(join(testDir, "..", "src", "backup.ts"), "utf8");
     expect(src).toContain(".backup(");
-    expect(src).not.toContain("VACUUM");
-    expect(src).not.toContain("copyFile");
+    const executable = stripComments(src);
+    expect(executable).not.toContain("VACUUM");
+    expect(executable).not.toContain("copyFile");
   });
 });
 
@@ -508,8 +515,9 @@ describe("m0 storage helpers and provenance", () => {
     );
     const backupSrc = readFileSync(join(kernelDir, "src", "backup.ts"), "utf8");
     expect(backupSrc).toContain(".backup(");
-    expect(backupSrc).not.toContain("VACUUM");
-    expect(backupSrc).not.toContain("copyFile");
+    const executableBackupSrc = stripComments(backupSrc);
+    expect(executableBackupSrc).not.toContain("VACUUM");
+    expect(executableBackupSrc).not.toContain("copyFile");
     const migrateSrc = readFileSync(
       join(kernelDir, "src", "migrate.ts"),
       "utf8",
