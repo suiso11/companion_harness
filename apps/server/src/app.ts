@@ -19,11 +19,20 @@ import {
   PostMessageRequestSchema,
   PostMessageResponseSchema,
   PostRetryRequestSchema,
+  ReferenceContextGetResponseSchema,
+  ReferenceContextPutRequestSchema,
+  ReferenceContextPutResponseSchema,
+  ReferenceDetailResponseSchema,
+  ReferenceListResponseSchema,
+  ReferenceSetDetailResponseSchema,
 } from "@companion/contracts";
 import {
   IdempotencyConflictError,
+  InvalidReferenceError,
   isUuidV4,
   type KernelRepository,
+  ReferenceNotFoundError,
+  ReferenceVersionConflictError,
   RepositoryNotFoundError,
   RepositoryValidationError,
   SessionBusyError,
@@ -368,6 +377,33 @@ function mapDomainError(c: Context, error: unknown): Response {
       "session already has an active run",
     );
   }
+  // M1 stored-only reference mapping (§14.8): fixed lowercase codes with
+  // fixed safe messages. Domain messages/IDs/content never leak.
+  if (error instanceof ReferenceNotFoundError) {
+    return c.json(
+      {
+        error: { code: "reference_not_found", message: "reference not found" },
+      },
+      404,
+    );
+  }
+  if (error instanceof ReferenceVersionConflictError) {
+    return c.json(
+      {
+        error: {
+          code: "reference_version_conflict",
+          message: "reference version conflict",
+        },
+      },
+      409,
+    );
+  }
+  if (error instanceof InvalidReferenceError) {
+    return c.json(
+      { error: { code: "invalid_reference", message: "invalid reference" } },
+      400,
+    );
+  }
   if (
     typeof error === "object" &&
     error !== null &&
@@ -699,6 +735,122 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         }
       }
       return c.json(found, 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  /* ---------------- M1 stored-only references (§14.8) ---------------- */
+  // Session-scoped stored-only GETs + reference-context GET/PUT. No direct
+  // POST search/open/refresh/related routes exist. GETs never create
+  // events/grants (repository reads are stored-only, no connector read).
+
+  app.get("/api/sessions/:sessionId/references", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      const body = ReferenceListResponseSchema.parse(
+        repo.listReferences(session.id),
+      );
+      return c.json(body, 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get("/api/sessions/:sessionId/references/:referenceId", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const reference = requireUuid(c, c.req.param("referenceId"), "referenceId");
+    if ("response" in reference) {
+      return reference.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      // Stored-only: returns the saved normalized full body, no read.
+      const body = ReferenceDetailResponseSchema.parse(
+        repo.getReferenceDetail(session.id, reference.id),
+      );
+      return c.json(body, 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get("/api/sessions/:sessionId/reference-sets/:setId", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const set = requireUuid(c, c.req.param("setId"), "setId");
+    if ("response" in set) {
+      return set.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      const body = ReferenceSetDetailResponseSchema.parse(
+        repo.getReferenceSet(session.id, set.id),
+      );
+      return c.json(body, 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get("/api/sessions/:sessionId/reference-context", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      const body = ReferenceContextGetResponseSchema.parse(
+        repo.getReferenceContext(session.id),
+      );
+      return c.json(body, 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.put("/api/sessions/:sessionId/reference-context", async (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    const raw = await readJsonBody(c);
+    if (!raw.ok) {
+      return validationError(c);
+    }
+    const parsed = ReferenceContextPutRequestSchema.safeParse(raw.value);
+    if (!parsed.success) {
+      return validationError(c);
+    }
+    try {
+      const body = ReferenceContextPutResponseSchema.parse(
+        repo.putReferenceContext(
+          session.id,
+          { version: parsed.data.version, items: [...parsed.data.items] },
+          { now: now() },
+        ),
+      );
+      return c.json(body, 200);
     } catch (error) {
       return mapDomainError(c, error);
     }
