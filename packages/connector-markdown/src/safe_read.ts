@@ -155,9 +155,11 @@ function parseRelativeSegments(
     if (segment === "" || segment === "." || segment === "..") {
       return null;
     }
-    // Block drive/ADS/scheme-like rest segments (e.g. `C:`) without ever
-    // echoing the raw input: the caller only ever sees the safe alias.
-    if (segment.includes(":")) {
+    // Windows rejects colon segments to avoid drive/ADS ambiguity; POSIX
+    // permits colon in relative filename segments (e.g. `notes:2026.md`).
+    // Alias grammar stays colon-free on all platforms (prefix check above).
+    // Blocked inputs never echo: the caller only ever sees the safe alias.
+    if (process.platform === "win32" && segment.includes(":")) {
       return null;
     }
   }
@@ -223,6 +225,11 @@ async function verifyFallbackComponents(
     ) {
       throw new MarkdownConnectorError("markdown_path_unsafe", key);
     }
+    // Windows rejects colon segments (drive/ADS ambiguity); POSIX permits
+    // colon in relative filename segments.
+    if (process.platform === "win32" && segment.includes(":")) {
+      throw new MarkdownConnectorError("markdown_path_unsafe", key);
+    }
   }
   const lstatOne = async (targetAbs: string): Promise<Stats> => {
     try {
@@ -265,9 +272,11 @@ async function verifyFallbackComponents(
 /**
  * Read one file identified by its canonical key. The key must be a
  * well-formed `<alias>/<relative-posix>` key for this root; anything else
- * (including absolute-looking, drive-like `C:/...`, or scheme-like
- * colon-containing input, which is never echoed back) fails with
- * `markdown_path_unsafe` carrying only the alias.
+ * fails with `markdown_path_unsafe` carrying only the alias. Alias grammar
+ * stays colon-free on all platforms; relative segments may contain `:` on
+ * POSIX (e.g. `notes:2026.md`) and are rejected on Windows to avoid
+ * drive/ADS ambiguity. Drive (`C:/...`) or scheme-like alias mismatches
+ * never echo back.
  */
 export async function safeReadMarkdownFile(
   root: InitializedRoot,

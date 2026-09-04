@@ -339,16 +339,16 @@ describe("safe read", () => {
     const root = onlyRoot(
       await initializeRoots([{ path: dir, alias: "vault" }]),
     );
-    const badKeys = [
+    // Alias mismatches (drive/scheme-like aliases) stay unsafe on all
+    // platforms; alias grammar is colon-free everywhere.
+    const alwaysBad = [
       "C:/secret.md",
       "C:\\secret.md",
       "a:b/c.md",
       "https:evil/a.md",
       "vault:C/note.md",
-      "vault/C:/note.md",
-      "vault/a:b.md",
     ];
-    for (const badKey of badKeys) {
+    for (const badKey of alwaysBad) {
       try {
         await safeReadMarkdownFile(root, badKey);
         expect.unreachable(`expected markdown_path_unsafe for ${badKey}`);
@@ -368,6 +368,55 @@ describe("safe read", () => {
         expect((error as MarkdownConnectorError).canonicalKey).toBe("vault");
       }
     }
+    // Relative colon segments: Windows rejects (drive/ADS ambiguity);
+    // POSIX permits them, so missing targets fail as read_failed instead.
+    const colonRest = ["vault/C:/note.md", "vault/a:b.md"];
+    for (const key of colonRest) {
+      try {
+        await safeReadMarkdownFile(root, key);
+        expect.unreachable(`expected rejection for ${key}`);
+      } catch (error) {
+        expect(error).toBeInstanceOf(MarkdownConnectorError);
+        if (process.platform === "win32") {
+          expect((error as MarkdownConnectorError).code).toBe(
+            "markdown_path_unsafe",
+          );
+          expect((error as MarkdownConnectorError).canonicalKey).toBe("vault");
+        } else {
+          // POSIX: well-formed colon key, but the fixture is missing.
+          expect((error as MarkdownConnectorError).code).toBe(
+            "markdown_read_failed",
+          );
+          expect((error as MarkdownConnectorError).canonicalKey).toBe(key);
+        }
+        expect((error as Error).message).not.toContain(dir);
+        expect((error as Error).message).not.toContain(tmpdir());
+      }
+    }
+  });
+
+  it("reads a POSIX colon filename (notes:2026.md)", async (ctx: TestContext) => {
+    if (process.platform === "win32") {
+      // Windows cannot create colon segments; the colon-rest rejection
+      // above already covers the Windows contract.
+      ctx.skip();
+      return;
+    }
+    const dir = scratchVault("md-read-colon-");
+    writeFileSync(join(dir, "notes:2026.md"), "# dated\ncolon body\n");
+    const root = onlyRoot(
+      await initializeRoots([{ path: dir, alias: "vault" }]),
+    );
+    const found = await discoverMarkdownFilesForRoot(root);
+    expect(found.map((entry) => entry.canonicalKey)).toEqual([
+      "vault/notes:2026.md",
+    ]);
+    const result = await safeReadMarkdownFile(root, "vault/notes:2026.md");
+    expect(result).toEqual({
+      status: "ok",
+      canonicalKey: "vault/notes:2026.md",
+      text: "# dated\ncolon body\n",
+    });
   });
 
   it("forces fallback verification and still reads stable files", async () => {

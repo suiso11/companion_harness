@@ -292,6 +292,40 @@ describe("discovery", () => {
     ]);
   });
 
+  it("handles POSIX colon filenames per platform", async (ctx: TestContext) => {
+    if (process.platform === "win32") {
+      // Windows cannot create colon files; injected colon candidates are
+      // ignored as unsupported (no failure, no content read).
+      const dir = scratchVault("md-disc-colonwin-");
+      const root = onlyRoot(
+        await initializeRoots([{ path: dir, alias: "vault" }]),
+      );
+      const found = await discoverMarkdownFilesForRoot(root, {
+        readdir: () =>
+          Promise.resolve([
+            {
+              name: "notes:2026.md",
+              isDirectory: false,
+              isFile: true,
+              isSymbolicLink: false,
+            },
+          ]),
+        realpath: (candidate) => Promise.resolve(candidate),
+      });
+      expect(found).toEqual([]);
+      return;
+    }
+    const dir = scratchVault("md-disc-colon-");
+    writeFileSync(join(dir, "notes:2026.md"), "# dated\n");
+    const root = onlyRoot(
+      await initializeRoots([{ path: dir, alias: "vault" }]),
+    );
+    const found = await discoverMarkdownFilesForRoot(root);
+    expect(found.map((entry) => entry.canonicalKey)).toEqual([
+      "vault/notes:2026.md",
+    ]);
+  });
+
   it("aborts before discovery when the signal is already aborted", async () => {
     const dir = scratchVault("md-disc-abortbefore-");
     writeFileSync(join(dir, "a.md"), "# a\n");

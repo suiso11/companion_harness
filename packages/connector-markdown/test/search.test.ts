@@ -314,6 +314,38 @@ describe("markdown connector search core", () => {
     ).rejects.toMatchObject({ code: "invalid_input" });
   });
 
+  it("searches and reads a POSIX colon filename (notes:2026.md)", async () => {
+    if (process.platform === "win32") {
+      // Windows rejects colon rest segments as invalid_input (no content
+      // byte) and never discovers them; alias grammar stays colon-free.
+      const dir = scratchVault("md-conn-colonwin-");
+      writeFileSync(join(dir, "plain.md"), "# Plain\nbody\n");
+      const connector = await createMarkdownConnector([{ path: dir }]);
+      await expect(
+        connector.readCanonical("vault-1/notes:2026.md"),
+      ).rejects.toMatchObject({ code: "invalid_input" });
+      const result = await connector.search({ query: "plain" });
+      expect(result.hits.map((hit) => hit.canonicalKey)).toEqual([
+        "vault-1/plain.md",
+      ]);
+      return;
+    }
+    const dir = scratchVault("md-conn-colon-");
+    writeFileSync(
+      join(dir, "notes:2026.md"),
+      "# Dated\ncolonquery body here\n",
+    );
+    const connector = await createMarkdownConnector([{ path: dir }]);
+    const result = await connector.search({ query: "colonquery" });
+    expect(result.hits.map((hit) => hit.canonicalKey)).toEqual([
+      "vault-1/notes:2026.md",
+    ]);
+    const doc = await connector.readCanonical("vault-1/notes:2026.md");
+    expect(doc.canonicalKey).toBe("vault-1/notes:2026.md");
+    expect(doc.text).toContain("colonquery");
+    expect(JSON.stringify({ result, doc })).not.toContain(dir);
+  });
+
   it("rejects drive/scheme/absolute keys as invalid without echo or bytes", async () => {
     const dir = scratchVault("md-conn-alias-");
     writeFileSync(join(dir, "real.md"), "# Real\nbody\n");

@@ -577,6 +577,16 @@ function validateCanonicalShape(canonicalKey: unknown): {
       throw new MarkdownConnectorError("invalid_input", null);
     }
   }
+  // Alias grammar stays colon-free on all platforms (ALIAS_PATTERN above).
+  // Relative segments may contain `:` on POSIX; Windows rejects them to
+  // avoid drive/ADS ambiguity.
+  if (process.platform === "win32") {
+    for (const segment of rest.split("/")) {
+      if (segment.includes(":")) {
+        throw new MarkdownConnectorError("invalid_input", null);
+      }
+    }
+  }
   // Only discovered exact `.md` canonical keys can be read: reject bare
   // directories, extensionless names, and non-Markdown suffixes here,
   // before any discovery metadata or content byte is touched.

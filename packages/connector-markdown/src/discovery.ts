@@ -20,6 +20,9 @@
  * - Determinism: entries are visited in UTF-16 code-unit order and the
  *   result is sorted by canonical key with explicit `<`/`>` comparison
  *   (never locale-sensitive APIs).
+ * - POSIX permits `:` in relative filename segments; Windows never
+ *   discovers colon segments (drive/ADS ambiguity). Alias grammar stays
+ *   colon-free on all platforms.
  * - Privacy: results and errors carry only alias-relative canonical keys or
  *   the alias itself; absolute paths and raw OS errors never escape.
  */
@@ -195,10 +198,25 @@ export async function discoverMarkdownFilesForRoot(
       if (entry.name === "" || entry.name === "." || entry.name === "..") {
         continue;
       }
+      // Windows never discovers colon segments (drive/ADS ambiguity);
+      // POSIX permits colon in relative filename segments.
+      if (process.platform === "win32" && entry.name.includes(":")) {
+        continue;
+      }
       const entryAbs = path.join(dir, entry.name);
       const classified = await classify(entryAbs, entry);
       if (classified.isDir) {
         if (!seenDirs.has(classified.real)) {
+          // Skip Windows colon directories derived via realpath as well.
+          if (process.platform === "win32") {
+            const dirRelative = path.relative(root.realPath, classified.real);
+            const dirPosix = dirRelative.split(path.sep).join("/");
+            if (
+              dirPosix.split("/").some((segment) => segment.includes(":"))
+            ) {
+              continue;
+            }
+          }
           seenDirs.add(classified.real);
           pending.push(classified.real);
         }
@@ -209,6 +227,15 @@ export async function discoverMarkdownFilesForRoot(
       }
       if (!classified.real.endsWith(".md")) {
         continue;
+      }
+      // Windows ignores colon candidates derived via realpath (e.g. symlink
+      // targets); POSIX keeps them. Checked before count acceptance.
+      if (process.platform === "win32") {
+        const fileRelative = path.relative(root.realPath, classified.real);
+        const filePosix = fileRelative.split(path.sep).join("/");
+        if (filePosix.split("/").some((segment) => segment.includes(":"))) {
+          continue;
+        }
       }
       if (!seenFiles.has(classified.real)) {
         seenFiles.add(classified.real);
