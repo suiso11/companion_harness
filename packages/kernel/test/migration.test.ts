@@ -73,9 +73,7 @@ const BACKUP_NAME_PATTERN =
   /^companion-pre-migration-v0-to-v1-\d{8}T\d{6}Z-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.sqlite$/;
 
 function stripComments(src: string): string {
-  return src
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/(^|\s)\/\/.*$/gm, "$1");
+  return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|\s)\/\/.*$/gm, "$1");
 }
 
 describe("m0 migration lifecycle", () => {
