@@ -114,11 +114,22 @@ export interface MarkdownPortDocument {
 /**
  * Dependency-inverted Markdown connector surface. Structural only: the kernel
  * never imports the connector package; any object with these two methods
- * satisfies the port (the real connector is assignable).
+ * satisfies the port (the real connector is assignable). Both methods accept
+ * an optional `{ signal }` for cooperative cancellation; connectors that
+ * predate the signal argument remain assignable (fewer parameters), and the
+ * kernel always passes `ctx.signal` so cancellable connectors abort early
+ * while non-cooperative ones are still discarded post-hoc via the aborted
+ * check before `presentObservations`.
  */
 export interface MarkdownConnectorPort {
-  search(input: { query: string; limit: number }): Promise<MarkdownPortSearchResult>;
-  readCanonical(canonicalKey: string): Promise<MarkdownPortDocument>;
+  search(
+    input: { query: string; limit: number },
+    options?: { signal?: AbortSignal },
+  ): Promise<MarkdownPortSearchResult>;
+  readCanonical(
+    canonicalKey: string,
+    options?: { signal?: AbortSignal },
+  ): Promise<MarkdownPortDocument>;
 }
 
 /** One validated binding: stored instance id + live port (no paths). */
@@ -234,6 +245,13 @@ function toObservationLinks(
  * connector instance ownership/kind (`SELECT kind ... WHERE id = ?` must be
  * `'markdown'`) without reading/storing paths. No HTTP endpoints, no M2
  * Agent/EvidenceGrant.
+ *
+ * M1 ARCHITECTURE (exact): exactly one Markdown connector binding is
+ * required. That single connector instance owns all configured roots
+ * (multi-root vaults live inside the one connector); passing zero bindings
+ * or more than one binding is rejected rather than silently ignoring extra
+ * connectors (the factory previously searched only the first binding, which
+ * silently dropped the rest).
  */
 export function createM1ToolRegistrations(
   options: CreateM1ToolRegistrationsOptions,
@@ -243,8 +261,10 @@ export function createM1ToolRegistrations(
     throw new RepositoryValidationError("db, repo, and referenceManager are required");
   }
   const bindings = options.bindings;
-  if (!Array.isArray(bindings) || bindings.length < 1) {
-    throw new RepositoryValidationError("at least one connector binding is required");
+  if (!Array.isArray(bindings) || bindings.length !== 1) {
+    throw new RepositoryValidationError(
+      "exactly one connector binding is required (one connector owns all roots)",
+    );
   }
   const clock = options.clock ?? { now: () => Date.now() };
   const byId = new Map<string, MarkdownConnectorPort>();
@@ -268,9 +288,9 @@ export function createM1ToolRegistrations(
     }
     byId.set(binding.connectorInstanceId, binding.connector);
   }
-  // M1 uses the first binding as the search/default vault. Multi-vault fan-out
-  // stays deterministic: every hit carries its owning connectorInstanceId, and
-  // observations preserve hit order. Single-vault deployments pass one binding.
+  // M1 uses the single binding as the search/default vault. The one
+  // connector owns every configured root; multi-root fan-out inside the
+  // connector stays deterministic with per-hit owning connectorInstanceId.
   const defaultBinding = bindings[0] as MarkdownConnectorBinding;
 
   function sessionOf(runId: string): string {
@@ -302,12 +322,18 @@ export function createM1ToolRegistrations(
         throw new ToolError("execution_cancelled");
       }
       // External discovery/read FIRST, outside any DB transaction.
+      // ctx.signal is passed through so cooperative connectors abort early;
+      // the post-call aborted check below still discards results from
+      // non-cooperative connectors before any materialization.
       let result: MarkdownPortSearchResult;
       try {
-        result = await defaultBinding.connector.search({
-          query: parsed.query,
-          limit: parsed.limit,
-        });
+        result = await defaultBinding.connector.search(
+          {
+            query: parsed.query,
+            limit: parsed.limit,
+          },
+          { signal: ctx.signal },
+        );
       } catch (error) {
         throw mapToToolError(error, ctx.signal);
       }
@@ -495,10 +521,11 @@ export function createM1ToolRegistrations(
       if (port === undefined) {
         throw new ToolError("reference_not_found");
       }
-      // External readCanonical OUTSIDE any transaction.
+      // External readCanonical OUTSIDE any transaction, with cooperative
+      // cancellation via ctx.signal.
       let doc: MarkdownPortDocument;
       try {
-        doc = await port.readCanonical(canonicalKey);
+        doc = await port.readCanonical(canonicalKey, { signal: ctx.signal });
       } catch (error) {
         throw mapToToolError(error, ctx.signal);
       }

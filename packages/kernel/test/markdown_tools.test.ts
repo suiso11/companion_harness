@@ -53,9 +53,16 @@ function makeFakeConnector(
     failRead?: unknown;
     gateSearch?: Promise<void>;
   } = {},
-): MarkdownConnectorPort & { searchCalls: number; readCalls: string[] } {
+): MarkdownConnectorPort & {
+  searchCalls: number;
+  readCalls: string[];
+  searchSignals: Array<AbortSignal | undefined>;
+  readSignals: Array<AbortSignal | undefined>;
+} {
   let searchCalls = 0;
   const readCalls: string[] = [];
+  const searchSignals: Array<AbortSignal | undefined> = [];
+  const readSignals: Array<AbortSignal | undefined> = [];
   return {
     get searchCalls() {
       return searchCalls;
@@ -63,8 +70,18 @@ function makeFakeConnector(
     get readCalls() {
       return readCalls;
     },
-    async search(input: { query: string; limit: number }) {
+    get searchSignals() {
+      return searchSignals;
+    },
+    get readSignals() {
+      return readSignals;
+    },
+    async search(
+      input: { query: string; limit: number },
+      options?: { signal?: AbortSignal },
+    ) {
       searchCalls += 1;
+      searchSignals.push(options?.signal);
       opts.onSearch?.();
       if (opts.gateSearch !== undefined) {
         await opts.gateSearch;
@@ -93,8 +110,9 @@ function makeFakeConnector(
       );
       return { hits: entries, skipped } as MarkdownPortSearchResult;
     },
-    async readCanonical(canonicalKey: string) {
+    async readCanonical(canonicalKey: string, options?: { signal?: AbortSignal }) {
       readCalls.push(canonicalKey);
+      readSignals.push(options?.signal);
       opts.onRead?.(canonicalKey);
       if (opts.failRead !== undefined) {
         throw opts.failRead;
@@ -229,6 +247,44 @@ describe("factory validation (ownership/kind, no paths)", () => {
           bindings: [{ connectorInstanceId: "not-a-uuid", connector: good }],
         }),
       ).toThrow();
+    } finally {
+      handle.raw.close();
+    }
+  });
+
+  it("requires exactly one binding: rejects zero or two instead of ignoring extras", async () => {
+    const handle = openKernelDatabase(":memory:");
+    try {
+      await migrateKernelDatabase({ db: handle.raw });
+      const repo = createKernelRepository(handle.raw);
+      const manager = createReferenceManager(handle.raw);
+      const first = manager.ensureMarkdownConnectorInstance("vault", 1, { now: T0 });
+      const second = manager.ensureMarkdownConnectorInstance("vault-b", 1, { now: T0 });
+      const good = makeFakeConnector({});
+      // Zero bindings rejected.
+      expect(() =>
+        createM1ToolRegistrations({
+          db: handle.raw,
+          repo,
+          referenceManager: manager,
+          bindings: [],
+        }),
+      ).toThrow(/exactly one/);
+      // Two distinct bindings rejected rather than searching only the first.
+      expect(() =>
+        createM1ToolRegistrations({
+          db: handle.raw,
+          repo,
+          referenceManager: manager,
+          bindings: [
+            { connectorInstanceId: first.id, connector: good },
+            {
+              connectorInstanceId: second.id,
+              connector: makeFakeConnector({}),
+            },
+          ],
+        }),
+      ).toThrow(/exactly one/);
     } finally {
       handle.raw.close();
     }
@@ -379,6 +435,85 @@ describe("markdown.search (discovery-first, normal materialization)", () => {
       expect(out.result.actualOutcome).toBe("cancelled");
       expect(out.result.errorCode).toBe("execution_cancelled");
       expect(counts(handle.raw)).toEqual({ ...before, events: before.events });
+    } finally {
+      handle.raw.close();
+    }
+  });
+
+  it("passes ctx.signal into the connector port", async () => {
+    const { handle, repo, broker, connector } = await setupStack({
+      "vault/a.md": { title: "A", text: "signal here", sourceRevision: "r1" },
+    });
+    try {
+      const { runId } = newRunningRun(repo);
+      const controller = new AbortController();
+      const out = await broker.invoke(
+        runId,
+        "markdown.search",
+        { query: "signal" },
+        { ...CTX, signal: controller.signal },
+      );
+      expect(out.result.actualOutcome).toBe("succeeded");
+      expect(connector.searchSignals).toHaveLength(1);
+      expect(connector.searchSignals[0]).toBeInstanceOf(AbortSignal);
+    } finally {
+      handle.raw.close();
+    }
+  });
+
+  it("discards a connector result aborted before manager presentation (no materialization, no leak)", async () => {
+    const caller = new AbortController();
+    const files: Record<string, FakeFile> = {
+      "vault/a.md": { title: "A", text: "late abort me", sourceRevision: "r1" },
+    };
+    const connector = makeFakeConnector(files, {
+      searchImpl: (query: string, limit: number) => {
+        // Abort after the external bytes are ready but before the handler
+        // presents them: the post-call aborted check must discard everything.
+        caller.abort();
+        const entries = Object.entries(files)
+          .filter(([, f]) => f.title.includes(query) || f.text.includes(query))
+          .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+          .slice(0, limit)
+          .map(([canonicalKey, f]) => ({
+            canonicalKey,
+            title: f.title,
+            snippet: `Q:${query}:${f.text.slice(0, 32)}`,
+            text: f.text,
+            sourceRevision: f.sourceRevision,
+            standardLinks: [],
+            wikiLinks: [],
+          }));
+        return { hits: entries, skipped: [] } as MarkdownPortSearchResult;
+      },
+    });
+    const handle = openKernelDatabase(":memory:");
+    try {
+      await migrateKernelDatabase({ db: handle.raw });
+      const repo = createKernelRepository(handle.raw);
+      const manager = createReferenceManager(handle.raw);
+      const connectorRow = manager.ensureMarkdownConnectorInstance("vault", 1, { now: T0 });
+      const regs = createM1ToolRegistrations({
+        db: handle.raw,
+        repo,
+        referenceManager: manager,
+        bindings: [{ connectorInstanceId: connectorRow.id, connector }],
+        clock: { now: () => T0 + 100 },
+      });
+      const broker = createToolBroker({ db: handle.raw, repo, registrations: regs });
+      const { runId } = newRunningRun(repo);
+      const before = counts(handle.raw);
+      const out = await broker.invoke(
+        runId,
+        "markdown.search",
+        { query: "late" },
+        { ...CTX, signal: caller.signal },
+      );
+      expect(out.result.actualOutcome).toBe("cancelled");
+      expect(out.result.errorCode).toBe("execution_cancelled");
+      // No DB materialization and no new events after cancellation.
+      expect(counts(handle.raw)).toEqual({ ...before, events: before.events });
+      expect(JSON.stringify(out)).not.toContain("/abs");
     } finally {
       handle.raw.close();
     }
@@ -538,6 +673,29 @@ describe("reference.refresh (owned reread, always new Snapshot+rN, always bypass
       );
       expect(cancelled.result.actualOutcome).toBe("cancelled");
       expect(cancelled.result.errorCode).toBe("execution_cancelled");
+    } finally {
+      handle.raw.close();
+    }
+  });
+
+  it("passes ctx.signal into readCanonical", async () => {
+    const { handle, repo, broker, connector } = await setupStack({
+      "vault/a.md": { title: "A", text: "signal read", sourceRevision: "r1" },
+    });
+    try {
+      const { runId } = newRunningRun(repo);
+      const searched = await broker.invoke(runId, "markdown.search", { query: "signal" }, CTX);
+      const hit = (searched.normalized as { hits: Array<{ referenceId: string }> }).hits[0] as { referenceId: string };
+      const controller = new AbortController();
+      const refreshed = await broker.invoke(
+        runId,
+        "reference.refresh",
+        { referenceId: hit.referenceId },
+        { ...CTX, signal: controller.signal },
+      );
+      expect(refreshed.result.actualOutcome).toBe("succeeded");
+      expect(connector.readSignals).toHaveLength(1);
+      expect(connector.readSignals[0]).toBeInstanceOf(AbortSignal);
     } finally {
       handle.raw.close();
     }
