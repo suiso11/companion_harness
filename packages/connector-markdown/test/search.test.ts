@@ -541,7 +541,10 @@ describe("markdown connector bounded search retention", () => {
     const result = await connector.search({ query: "retainme" });
     expect(result.hits).toHaveLength(10);
     expect(result.hits.map((hit) => hit.canonicalKey)).toEqual(
-      Array.from({ length: 10 }, (_, i) => `vault-1/r${String(i).padStart(2, "0")}.md`),
+      Array.from(
+        { length: 10 },
+        (_, i) => `vault-1/r${String(i).padStart(2, "0")}.md`,
+      ),
     );
     const { peak, calls, lastLimit } = tracker.stats();
     expect(calls).toBeGreaterThan(0);
