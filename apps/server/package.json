@@ -1,0 +1,28 @@
+{
+  "name": "@companion/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "biome check src"
+  },
+  "dependencies": {
+    "@companion/contracts": "workspace:*",
+    "@companion/kernel": "workspace:*",
+    "@hono/node-server": "2.1.1",
+    "hono": "4.13.5",
+    "zod": "4.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "24.12.4",
+    "typescript": "5.9.3",
+    "vitest": "3.2.4"
+  },
+  "engines": {
+    "node": "24.12.0",
+    "pnpm": "11.25.0"
+  }
+}
