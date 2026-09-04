@@ -511,3 +511,107 @@ describe("markdown connector identity fingerprint", () => {
     void deriveIdentityFingerprint;
   });
 });
+
+describe("markdown connector bounded search retention", () => {
+  function trackRetention() {
+    let peak = 0;
+    let calls = 0;
+    let lastLimit = 0;
+    const onSearchRetained = (retained: number, limit: number): void => {
+      calls += 1;
+      lastLimit = limit;
+      if (retained > peak) peak = retained;
+      expect(Number.isInteger(retained)).toBe(true);
+      expect(retained).toBeGreaterThanOrEqual(0);
+      expect(retained).toBeLessThanOrEqual(limit);
+    };
+    return { onSearchRetained, stats: () => ({ peak, calls, lastLimit }) };
+  }
+
+  it("retains at most the default 10 across many matching docs", async () => {
+    const dir = scratchVault("md-conn-retain10-");
+    for (let i = 0; i < 30; i += 1) {
+      const name = `r${String(i).padStart(2, "0")}.md`;
+      writeFileSync(join(dir, name), "# T\nretainme body\n");
+    }
+    const tracker = trackRetention();
+    const connector = await createMarkdownConnector([{ path: dir }], {
+      onSearchRetained: tracker.onSearchRetained,
+    });
+    const result = await connector.search({ query: "retainme" });
+    expect(result.hits).toHaveLength(10);
+    expect(result.hits.map((hit) => hit.canonicalKey)).toEqual(
+      Array.from({ length: 10 }, (_, i) => `vault-1/r${String(i).padStart(2, "0")}.md`),
+    );
+    const { peak, calls, lastLimit } = tracker.stats();
+    expect(calls).toBeGreaterThan(0);
+    expect(lastLimit).toBe(10);
+    expect(peak).toBeLessThanOrEqual(10);
+    expect(peak).toBe(10);
+    expect(result.skipped).toEqual([]);
+  });
+
+  it("retains at most the max 20 and matches full sort+slice order", async () => {
+    const dir = scratchVault("md-conn-retain20-");
+    for (let i = 0; i < 35; i += 1) {
+      const name = `s${String(i).padStart(2, "0")}.md`;
+      writeFileSync(join(dir, name), "# T\nretainmax body\n");
+    }
+    const tracker = trackRetention();
+    const connector = await createMarkdownConnector([{ path: dir }], {
+      onSearchRetained: tracker.onSearchRetained,
+    });
+    const result = await connector.search({ query: "retainmax", limit: 20 });
+    expect(result.hits).toHaveLength(20);
+    // Same rank for every doc, so canonical-key code-unit order is exact.
+    const keys = result.hits.map((hit) => hit.canonicalKey);
+    expect(keys).toEqual([...keys].sort());
+    expect(keys[0]).toBe("vault-1/s00.md");
+    const { peak, lastLimit } = tracker.stats();
+    expect(lastLimit).toBe(20);
+    expect(peak).toBeLessThanOrEqual(20);
+    expect(peak).toBe(20);
+    // Every retained hit keeps exact link metadata and query snippets.
+    for (const hit of result.hits) {
+      expect(hit.snippet).toContain("retainmax");
+      expect(hit.text).toContain("retainmax");
+      expect(hit.sourceRevision).toBe(sha256Hex(hit.text));
+      expect(hit.standardLinks).toEqual([]);
+      expect(hit.wikiLinks).toEqual([]);
+    }
+  });
+
+  it("bounds near-1MiB matches and keeps every skipped entry complete", async () => {
+    const dir = scratchVault("md-conn-retainbig-");
+    // Just under 1MiB per file (no multi-GiB allocation: 12 x ~1MiB).
+    const filler = "x".repeat(500_000);
+    for (let i = 0; i < 12; i += 1) {
+      const name = `b${String(i).padStart(2, "0")}.md`;
+      writeFileSync(join(dir, name), `# T\n${filler} bigretain ${filler}\n`);
+    }
+    writeFileSync(join(dir, "big.md"), `${"z".repeat(MAX_FILE_BYTES + 1)}`);
+    writeFileSync(join(dir, "bad.md"), Buffer.from([0xff, 0xfe, 0x41]));
+    const tracker = trackRetention();
+    const connector = await createMarkdownConnector([{ path: dir }], {
+      onSearchRetained: tracker.onSearchRetained,
+    });
+    const result = await connector.search({ query: "bigretain", limit: 5 });
+    expect(result.hits).toHaveLength(5);
+    expect(result.hits.map((hit) => hit.canonicalKey)).toEqual([
+      "vault-1/b00.md",
+      "vault-1/b01.md",
+      "vault-1/b02.md",
+      "vault-1/b03.md",
+      "vault-1/b04.md",
+    ]);
+    // Skipped entries remain complete, sorted, and untruncated by the limit.
+    expect(result.skipped).toEqual([
+      { canonicalKey: "vault-1/bad.md", reason: "invalid_utf8" },
+      { canonicalKey: "vault-1/big.md", reason: "file_too_large" },
+    ]);
+    const { peak, lastLimit } = tracker.stats();
+    expect(lastLimit).toBe(5);
+    expect(peak).toBeLessThanOrEqual(5);
+    expect(peak).toBe(5);
+  });
+});

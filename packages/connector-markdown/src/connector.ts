@@ -213,6 +213,15 @@ export interface MarkdownConnector {
 
 export interface MarkdownConnectorHooks {
   readonly safeRead?: SafeReadHooks;
+  /**
+   * Optional path/content-free retention observer for tests only.
+   * Called with `(retainedCount, limit)` after each scanned file is
+   * resolved to hit/skip/miss so tests can prove the retained set never
+   * exceeds the validated limit. Carries counts only (never a path, key,
+   * or content) and never alters ranking, output, or production behavior
+   * when absent.
+   */
+  readonly onSearchRetained?: (retainedCount: number, limit: number) => void;
 }
 
 function compareCodeUnits(a: string, b: string): number {
@@ -451,6 +460,11 @@ interface RankedHit extends MarkdownSearchHit {
   rank: number;
 }
 
+function compareRankedHits(a: RankedHit, b: RankedHit): number {
+  if (a.rank !== b.rank) return a.rank - b.rank;
+  return compareCodeUnits(a.canonicalKey, b.canonicalKey);
+}
+
 function buildHit(
   canonicalKey: string,
   text: string,
@@ -613,8 +627,40 @@ export async function createMarkdownConnector(
     // sorted); explicit skips accumulate without any result-limit slice.
     // The signal is checked before each file so a mid-search abort
     // discards buffered bytes instead of returning partial hits.
+    // RETENTION BOUND: at most `limit` top-ranked hits are retained.
+    // Each file is safe-read sequentially (bounded 1MiB+1 buffering);
+    // a matching hit is inserted into the sorted top-K set by
+    // (rank, canonical-key code-unit) order and the worst entry is
+    // evicted/released immediately, so transient memory is one in-flight
+    // file plus K retained hits and the final output is identical to a
+    // full sort+slice. Skipped entries stay complete, sorted, untruncated.
     const skipped: MarkdownSkippedEntry[] = [];
-    const ranked: RankedHit[] = [];
+    const top: RankedHit[] = [];
+    const notifyRetained = hooks.onSearchRetained;
+    const reportRetained = (): void => {
+      notifyRetained?.(top.length, limit);
+    };
+    const insertBounded = (hit: RankedHit): void => {
+      let lo = 0;
+      let hi = top.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        const current = top[mid] as RankedHit;
+        if (compareRankedHits(current, hit) < 0) lo = mid + 1;
+        else hi = mid;
+      }
+      if (top.length < limit) {
+        top.splice(lo, 0, hit);
+      } else if (lo < top.length) {
+        top.splice(lo, 0, hit);
+        // Evict/release the worst immediately; the dropped reference
+        // (including its full text) becomes garbage without retention.
+        top.pop();
+      }
+      // Else: strictly worse than the retained worst -> discard
+      // immediately (hit falls out of scope, nothing retained).
+      reportRetained();
+    };
     for (const entry of discovered) {
       throwIfAborted(signal);
       const alias = aliasOf(entry.canonicalKey) ?? "";
@@ -630,6 +676,7 @@ export async function createMarkdownConnector(
           canonicalKey: entry.canonicalKey,
           reason: result.reason,
         });
+        reportRetained();
         continue;
       }
       const hit = buildHit(
@@ -639,16 +686,13 @@ export async function createMarkdownConnector(
         existing,
         keysByAlias.get(alias) ?? [],
       );
-      if (hit !== null) ranked.push(hit);
+      if (hit !== null) insertBounded(hit);
+      else reportRetained();
     }
 
-    ranked.sort((a, b) => {
-      if (a.rank !== b.rank) return a.rank - b.rank;
-      return compareCodeUnits(a.canonicalKey, b.canonicalKey);
-    });
     skipped.sort((a, b) => compareCodeUnits(a.canonicalKey, b.canonicalKey));
 
-    const hits: MarkdownSearchHit[] = ranked.slice(0, limit).map((hit) => ({
+    const hits: MarkdownSearchHit[] = top.slice(0, limit).map((hit) => ({
       canonicalKey: hit.canonicalKey,
       title: hit.title,
       snippet: hit.snippet,
