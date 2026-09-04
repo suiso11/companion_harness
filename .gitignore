@@ -12,3 +12,4 @@ data/
 backups/
 .DS_Store
 Thumbs.db
+.pi/

@@ -20,8 +20,6 @@ import {
 } from "@companion/kernel";
 import { loadServerConfig } from "./config.js";
 
-const STOPPED_ONLY_NOTICE =
-  "Stopped-server only: stop the server before running this command.";
 const CLI_USAGE = "Use: backup";
 const ERR_UNKNOWN_COMMAND = `manual backup failed: unknown command. ${CLI_USAGE}`;
 const ERR_EXTRA_ARGS = "manual backup failed: backup accepts no arguments";
@@ -76,7 +74,8 @@ export async function runManualBackupCli(
   }
   const dbPath = config.dbPath;
   const backupDir = join(dirname(dbPath), "backups");
-  process.stderr.write(`${STOPPED_ONLY_NOTICE}\n`);
+  // Success emits only the safe basename (no stderr notice); failure paths
+  // below stay fixed/redacted.
   // Fail closed on a missing DB: better-sqlite3 would otherwise create an
   // empty file on open. No DB and no backups are created on this path.
   if (!existsSync(dbPath)) {
