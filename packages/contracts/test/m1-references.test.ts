@@ -10,25 +10,40 @@ import {
   FrozenContextSchema,
   LATEST_RUN_EVENT_PAYLOAD_SCHEMAS,
   LATEST_RUN_EVENT_TYPES,
+  LATEST_TOOL_ERROR_CODES,
   LatestEventsResponseSchema,
   LatestRunEventSchema,
+  LatestToolErrorCodeSchema,
   M0_RUN_EVENT_TYPES,
+  M0_TOOL_ERROR_CODES,
   M0RunEventSchema,
+  M0ToolCompletedPayloadSchema,
+  M0ToolErrorCodeSchema,
+  M0ToolResultSchema,
   M1_REFERENCE_ERROR_CODES,
   M1_RUN_EVENT_PAYLOAD_SCHEMAS,
   M1_RUN_EVENT_TYPES,
+  M1_TOOL_ERROR_CODES,
   M1_TOOL_NAMES,
+  M1ToolErrorCodeNewSchema,
+  M1ToolErrorCodeSchema,
   M1ToolNameSchema,
   MAX_SEARCH_LIMIT,
   MAX_SNAPSHOT_BODY_BYTES,
   MAX_SNIPPET_CODE_POINTS,
+  MAX_VAULT_FILES,
   MarkdownSearchHitSchema,
+  MarkdownSearchSkippedEntrySchema,
+  MarkdownSearchSkippedReasonSchema,
   MarkdownSearchToolInputSchema,
   MarkdownSearchToolOutputSchema,
+  parseLatestToolErrorCode,
   parseM0RunEvent,
   parseM0RunEventPayload,
+  parseM0ToolErrorCode,
   parseRunEvent,
   parseRunEventPayload,
+  parseToolErrorCode,
   REFERENCE_PRESENTED_EVENT_TYPE,
   ReferenceContextGetResponseSchema,
   ReferenceContextPutRequestSchema,
@@ -59,6 +74,9 @@ import {
   SnapshotBodySchema,
   SnippetSchema,
   StoredReferenceViewSchema,
+  ToolCompletedPayloadSchema,
+  ToolErrorCodeSchema,
+  ToolResultSchema,
   utf8ByteLength,
 } from "../src/index.js";
 
@@ -307,11 +325,13 @@ describe("code-point bounds (query 1-256, limit default10/max20, snippet 512)", 
     expect(
       MarkdownSearchToolOutputSchema.parse({
         hits: Array.from({ length: 20 }, () => hit),
+        skipped: [],
       }).hits,
     ).toHaveLength(20);
     expect(() =>
       MarkdownSearchToolOutputSchema.parse({
         hits: Array.from({ length: 21 }, () => hit),
+        skipped: [],
       }),
     ).toThrow();
     expect(() =>
@@ -731,5 +751,222 @@ describe("M1 tool names closed; no M2+ contracts", () => {
       }
     }
     expect(M1_TOOL_NAMES.includes("citation.submit" as never)).toBe(false);
+  });
+});
+
+describe("M1 tool error registry (connector/reference handlers)", () => {
+  it("fixes exactly the five M1 additions; latest is M0 nine + M1 five (14, closed)", () => {
+    expect([...M1_TOOL_ERROR_CODES].sort()).toEqual(
+      [
+        "markdown_path_unsafe",
+        "markdown_read_changed",
+        "markdown_read_failed",
+        "markdown_vault_too_large",
+        "reference_not_found",
+      ].sort(),
+    );
+    expect(M1_TOOL_ERROR_CODES).toHaveLength(5);
+    expect(M0_TOOL_ERROR_CODES).toHaveLength(9);
+    expect(LATEST_TOOL_ERROR_CODES).toHaveLength(14);
+    expect([...LATEST_TOOL_ERROR_CODES].sort()).toEqual(
+      [...M0_TOOL_ERROR_CODES, ...M1_TOOL_ERROR_CODES].sort(),
+    );
+    for (const code of M1_TOOL_ERROR_CODES) {
+      expect(M1ToolErrorCodeNewSchema.parse(code)).toBe(code);
+      expect(M1ToolErrorCodeSchema.parse(code)).toBe(code);
+      expect(LatestToolErrorCodeSchema.parse(code)).toBe(code);
+      expect(ToolErrorCodeSchema.parse(code)).toBe(code);
+      expect(parseToolErrorCode(code)).toBe(code);
+      expect(parseLatestToolErrorCode(code)).toBe(code);
+    }
+    for (const code of M0_TOOL_ERROR_CODES) {
+      expect(M1ToolErrorCodeSchema.parse(code)).toBe(code);
+      expect(ToolErrorCodeSchema.parse(code)).toBe(code);
+    }
+  });
+
+  it("latest/generic is an explicit closed union (no regex, no free text, no M2+)", () => {
+    for (const bad of [
+      "made_up_code",
+      "markdown_skipped",
+      "file_too_large",
+      "invalid_utf8",
+      "markdown_too_large",
+      "citation_failed",
+      "agent_failed",
+      "model_failed",
+      "",
+      "MARKDOWN_READ_FAILED",
+      "markdown read failed",
+    ]) {
+      expect(() => M1ToolErrorCodeSchema.parse(bad)).toThrow();
+      expect(() => ToolErrorCodeSchema.parse(bad)).toThrow();
+      expect(() => parseToolErrorCode(bad)).toThrow();
+    }
+    // Per-file skip reasons are output reasons, never error codes.
+    expect(() => ToolErrorCodeSchema.parse("file_too_large")).toThrow();
+    expect(() => ToolErrorCodeSchema.parse("invalid_utf8")).toThrow();
+  });
+
+  it("exact M0 stays nine-only while latest tool.completed accepts M1", () => {
+    const base = {
+      callId: UUID,
+      callIndex: 1,
+      tool: "markdown.search",
+      actualOutcome: "failed",
+      reportedOutcome: "failed",
+      disposition: "none",
+      resultDigest: null,
+      reusedFromCallId: null,
+    };
+    for (const code of M1_TOOL_ERROR_CODES) {
+      expect(() =>
+        M0ToolCompletedPayloadSchema.parse({ ...base, errorCode: code }),
+      ).toThrow();
+      expect(() => parseM0ToolErrorCode(code)).toThrow();
+      expect(
+        ToolCompletedPayloadSchema.parse({ ...base, errorCode: code })
+          .errorCode,
+      ).toBe(code);
+      expect(
+        ToolResultSchema.parse({
+          tool: "markdown.search",
+          callIndex: 1,
+          actualOutcome: "failed",
+          reportedOutcome: "failed",
+          disposition: "none",
+          errorCode: code,
+          resultDigest: null,
+          reusedFromCallId: null,
+          finishedAt: 1,
+        }).errorCode,
+      ).toBe(code);
+      expect(() =>
+        M0ToolResultSchema.parse({
+          tool: "markdown.search",
+          callIndex: 1,
+          actualOutcome: "failed",
+          reportedOutcome: "failed",
+          disposition: "none",
+          errorCode: code,
+          resultDigest: null,
+          reusedFromCallId: null,
+          finishedAt: 1,
+        }),
+      ).toThrow();
+    }
+    // M0 nine still validate on both paths.
+    for (const code of M0_TOOL_ERROR_CODES) {
+      expect(M0ToolErrorCodeSchema.parse(code)).toBe(code);
+      expect(ToolErrorCodeSchema.parse(code)).toBe(code);
+    }
+  });
+
+  it("fixes the vault bound at exactly 10000 files", () => {
+    expect(MAX_VAULT_FILES).toBe(10_000);
+  });
+});
+
+describe("Markdown search skipped list (explicit, non-truncated, no absolute paths)", () => {
+  const hit = {
+    referenceId: UUID,
+    ordinal: 1,
+    snapshotId: UUID3,
+    resourceId: UUID4,
+    canonicalKey: "notes/a.md",
+    title: "A",
+    snippet: "hit",
+  };
+
+  it("requires an explicit skipped list alongside hits", () => {
+    expect(
+      MarkdownSearchToolOutputSchema.parse({ hits: [hit], skipped: [] }),
+    ).toEqual({ hits: [hit], skipped: [] });
+    // Missing skipped is rejected (explicit, never implicit).
+    expect(() =>
+      MarkdownSearchToolOutputSchema.parse({ hits: [hit] }),
+    ).toThrow();
+    // Unknown keys rejected (strict).
+    expect(() =>
+      MarkdownSearchToolOutputSchema.parse({
+        hits: [hit],
+        skipped: [],
+        extra: 1,
+      }),
+    ).toThrow();
+  });
+
+  it("closes skip reasons to file_too_large/invalid_utf8 (never whole-call errors)", () => {
+    expect(MarkdownSearchSkippedReasonSchema.parse("file_too_large")).toBe(
+      "file_too_large",
+    );
+    expect(MarkdownSearchSkippedReasonSchema.parse("invalid_utf8")).toBe(
+      "invalid_utf8",
+    );
+    for (const bad of [
+      "markdown_vault_too_large",
+      "markdown_path_unsafe",
+      "markdown_read_failed",
+      "markdown_read_changed",
+      "reference_not_found",
+      "truncated",
+      "",
+    ]) {
+      expect(() => MarkdownSearchSkippedReasonSchema.parse(bad)).toThrow();
+    }
+    expect(
+      MarkdownSearchSkippedEntrySchema.parse({
+        canonicalKey: "notes/big.md",
+        reason: "file_too_large",
+      }),
+    ).toEqual({ canonicalKey: "notes/big.md", reason: "file_too_large" });
+    expect(() =>
+      MarkdownSearchSkippedEntrySchema.parse({
+        canonicalKey: "notes/big.md",
+        reason: "file_too_large",
+        extra: 1,
+      }),
+    ).toThrow();
+  });
+
+  it("skipped entries carry route-relative keys only (no absolute paths)", () => {
+    for (const bad of [
+      "/abs/path.md",
+      "C:/win/path.md",
+      "a\\b.md",
+      "../escape.md",
+      "a//b.md",
+      "",
+    ]) {
+      expect(() =>
+        MarkdownSearchSkippedEntrySchema.parse({
+          canonicalKey: bad,
+          reason: "file_too_large",
+        }),
+      ).toThrow();
+    }
+    expect(() =>
+      MarkdownSearchToolOutputSchema.parse({
+        hits: [],
+        skipped: [{ canonicalKey: "/abs/path.md", reason: "invalid_utf8" }],
+      }),
+    ).toThrow();
+  });
+
+  it("skipped list is unbounded by item count (truncation forbidden)", () => {
+    const skipped = Array.from({ length: 250 }, (_, i) => ({
+      canonicalKey: `notes/file-${i}.md`,
+      reason: "file_too_large" as const,
+    }));
+    expect(
+      MarkdownSearchToolOutputSchema.parse({ hits: [], skipped }).skipped,
+    ).toHaveLength(250);
+    // Hits stay capped at max 20 while skipped is uncapped.
+    expect(() =>
+      MarkdownSearchToolOutputSchema.parse({
+        hits: Array.from({ length: 21 }, () => hit),
+        skipped: [],
+      }),
+    ).toThrow();
   });
 });

@@ -18,8 +18,13 @@ import {
   M0_RUN_ERROR_CODES,
   M0_RUN_EVENT_TYPES,
   M0_TOOL_ERROR_CODES,
+  M0ToolErrorCodeSchema,
+  M0ToolResultSchema,
+  M1_TOOL_ERROR_CODES,
   messageScope,
   PostMessageRequestSchema,
+  parseM0RunEvent,
+  parseM0ToolErrorCode,
   parseRunErrorCode,
   parseRunEvent,
   parseToolErrorCode,
@@ -407,17 +412,86 @@ describe("ToolDescriptor is serializable and closed", () => {
     );
     expect(M0_TOOL_ERROR_CODES).toHaveLength(9);
     for (const code of M0_TOOL_ERROR_CODES) {
+      expect(M0ToolErrorCodeSchema.parse(code)).toBe(code);
+      expect(parseM0ToolErrorCode(code)).toBe(code);
+      // Generic/latest still accepts every M0 code.
       expect(parseToolErrorCode(code)).toBe(code);
     }
-    expect(TOOL_ERROR_CODE_REGISTRY[1]).toBe(ToolErrorCodeSchema);
+    expect(TOOL_ERROR_CODE_REGISTRY[1]).toBe(M0ToolErrorCodeSchema);
     for (const bad of [
       "made_up_code",
       "custom_error",
       "server_error",
       "retry_later",
     ]) {
+      expect(() => M0ToolErrorCodeSchema.parse(bad)).toThrow();
+      expect(() => parseM0ToolErrorCode(bad)).toThrow();
       expect(() => ToolErrorCodeSchema.parse(bad)).toThrow();
       expect(() => parseToolErrorCode(bad)).toThrow();
+    }
+  });
+
+  it("exact M0 tool codes reject the five M1 connector/reference codes", () => {
+    expect(M1_TOOL_ERROR_CODES).toHaveLength(5);
+    for (const code of M1_TOOL_ERROR_CODES) {
+      // Generic/latest accepts each M1 code.
+      expect(ToolErrorCodeSchema.parse(code)).toBe(code);
+      expect(parseToolErrorCode(code)).toBe(code);
+      // Exact M0 rejects each M1 code.
+      expect(() => M0ToolErrorCodeSchema.parse(code)).toThrow();
+      expect(() => parseM0ToolErrorCode(code)).toThrow();
+      // Exact M0 ToolResult rejects M1 codes; generic accepts them.
+      expect(() =>
+        M0ToolResultSchema.parse({
+          tool: "markdown.search",
+          callIndex: 1,
+          actualOutcome: "failed",
+          reportedOutcome: "failed",
+          disposition: "none",
+          errorCode: code,
+          resultDigest: null,
+          reusedFromCallId: null,
+          finishedAt: 1,
+        }),
+      ).toThrow();
+      expect(
+        ToolResultSchema.parse({
+          tool: "markdown.search",
+          callIndex: 1,
+          actualOutcome: "failed",
+          reportedOutcome: "failed",
+          disposition: "none",
+          errorCode: code,
+          resultDigest: null,
+          reusedFromCallId: null,
+          finishedAt: 1,
+        }).errorCode,
+      ).toBe(code);
+    }
+  });
+
+  it("exact M0 tool.completed envelope rejects M1 codes", () => {
+    const base = {
+      callId: UUID,
+      callIndex: 1,
+      tool: "markdown.search",
+      actualOutcome: "failed",
+      reportedOutcome: "failed",
+      disposition: "none",
+      resultDigest: null,
+      reusedFromCallId: null,
+    };
+    for (const code of M1_TOOL_ERROR_CODES) {
+      // Exact M0 envelope rejects M1 codes.
+      expect(() =>
+        parseM0RunEvent(
+          envelope("tool.completed", { ...base, errorCode: code }),
+        ),
+      ).toThrow();
+      // Generic/latest envelope accepts M1 codes.
+      expect(
+        parseRunEvent(envelope("tool.completed", { ...base, errorCode: code })),
+      ).toBeTruthy();
     }
   });
 

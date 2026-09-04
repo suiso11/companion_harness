@@ -406,6 +406,13 @@ export const SearchLimitSchema = z.number().int().min(1).max(MAX_SEARCH_LIMIT);
 export type SearchLimit = z.infer<typeof SearchLimitSchema>;
 
 /**
+ * Vault file-count bound (exact, §14.6): at most 10000 candidate files per
+ * vault. Exceeding it fails the whole `markdown.search` call with
+ * `markdown_vault_too_large` (never a per-file skip).
+ */
+export const MAX_VAULT_FILES = 10_000 as const;
+
+/**
  * `markdown.search` input (ToolBroker only, no HTTP POST). Searches only
  * configured roots deterministically (whole-query literal substring,
  * NFC + locale-independent folding, title-exact > title-partial > body +
@@ -438,8 +445,39 @@ export const MarkdownSearchHitSchema = z.strictObject({
 });
 export type MarkdownSearchHit = z.infer<typeof MarkdownSearchHitSchema>;
 
+/**
+ * Per-file skip reason (closed union, §14.6): oversize files (>1MiB UTF-8)
+ * and non-UTF-8 files are skipped per file, never truncated and never
+ * whole-call errors. Unsafe paths (`markdown_path_unsafe`) and vault
+ * >10000 (`markdown_vault_too_large`) fail the whole call instead and
+ * never appear here.
+ */
+export const MarkdownSearchSkippedReasonSchema = z.enum([
+  "file_too_large",
+  "invalid_utf8",
+]);
+export type MarkdownSearchSkippedReason = z.infer<
+  typeof MarkdownSearchSkippedReasonSchema
+>;
+
+/**
+ * One explicitly skipped file: route-relative canonical key only (never an
+ * absolute path) plus the closed skip reason. Truncation of this list is
+ * forbidden: it is unbounded by item count at the contract layer. The
+ * ToolBroker byte output cap may reject the whole output instead of
+ * truncating it.
+ */
+export const MarkdownSearchSkippedEntrySchema = z.strictObject({
+  canonicalKey: CanonicalKeySchema,
+  reason: MarkdownSearchSkippedReasonSchema,
+});
+export type MarkdownSearchSkippedEntry = z.infer<
+  typeof MarkdownSearchSkippedEntrySchema
+>;
+
 export const MarkdownSearchToolOutputSchema = z.strictObject({
   hits: z.array(MarkdownSearchHitSchema).max(MAX_SEARCH_LIMIT),
+  skipped: z.array(MarkdownSearchSkippedEntrySchema),
 });
 export type MarkdownSearchToolOutput = z.infer<
   typeof MarkdownSearchToolOutputSchema

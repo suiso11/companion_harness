@@ -4,10 +4,11 @@ import { ReferencePresentedPayloadSchema } from "./references.js";
 import { RunResultSchema } from "./run_result.js";
 import {
   ActualOutcomeSchema,
+  LatestToolErrorCodeSchema,
+  M0ToolErrorCodeSchema,
   ReportedOutcomeSchema,
   ResultDispositionSchema,
   RunErrorCodeSchema,
-  ToolErrorCodeSchema,
   ToolNameSchema,
 } from "./tools.js";
 
@@ -62,6 +63,26 @@ export const ToolRequestedPayloadSchema = z.strictObject({
   argsHash: Sha256HexSchema,
 });
 
+/**
+ * Exact M0 `tool.completed` payload: error codes limited to the M0 nine.
+ * Used by the exact M0 envelope registry and M0 page only.
+ */
+export const M0ToolCompletedPayloadSchema = z.strictObject({
+  callId: UuidSchema,
+  callIndex: z.number().int().min(1),
+  tool: ToolNameSchema,
+  actualOutcome: ActualOutcomeSchema,
+  reportedOutcome: ReportedOutcomeSchema.nullable(),
+  disposition: ResultDispositionSchema,
+  errorCode: M0ToolErrorCodeSchema.nullable(),
+  resultDigest: Sha256HexSchema.nullable(),
+  reusedFromCallId: UuidSchema.nullable(),
+});
+
+/**
+ * Generic/latest `tool.completed` payload: accepts M0+M1 codes (closed
+ * 14-code union). Used by the latest envelope registry.
+ */
 export const ToolCompletedPayloadSchema = z.strictObject({
   callId: UuidSchema,
   callIndex: z.number().int().min(1),
@@ -69,10 +90,14 @@ export const ToolCompletedPayloadSchema = z.strictObject({
   actualOutcome: ActualOutcomeSchema,
   reportedOutcome: ReportedOutcomeSchema.nullable(),
   disposition: ResultDispositionSchema,
-  errorCode: ToolErrorCodeSchema.nullable(),
+  errorCode: LatestToolErrorCodeSchema.nullable(),
   resultDigest: Sha256HexSchema.nullable(),
   reusedFromCallId: UuidSchema.nullable(),
 });
+
+/** Alias: M1/latest `tool.completed` payload (M0+M1 codes). */
+export const M1ToolCompletedPayloadSchema = ToolCompletedPayloadSchema;
+export const LatestToolCompletedPayloadSchema = ToolCompletedPayloadSchema;
 
 /** Exact M0 event type list. No other type exists in M0. */
 export const M0_RUN_EVENT_TYPES = [
@@ -145,13 +170,21 @@ const ToolRequestedEventSchema = z.strictObject({
   type: z.literal("tool.requested"),
   payload: ToolRequestedPayloadSchema,
 });
+/** Exact M0 `tool.completed` envelope (M0 nine codes only). */
+const M0ToolCompletedEventSchema = z.strictObject({
+  ...EnvelopeBase,
+  type: z.literal("tool.completed"),
+  payload: M0ToolCompletedPayloadSchema,
+});
+
+/** Latest (M0+M1) `tool.completed` envelope (closed 14-code union). */
 const ToolCompletedEventSchema = z.strictObject({
   ...EnvelopeBase,
   type: z.literal("tool.completed"),
   payload: ToolCompletedPayloadSchema,
 });
 
-/** Closed M0 RunEvent envelope registry (schemaVersion=1). */
+/** Closed M0 RunEvent envelope registry (schemaVersion=1, M0 codes only). */
 export const RunEventSchema = z.discriminatedUnion("type", [
   RunQueuedEventSchema,
   RunStartedEventSchema,
@@ -161,11 +194,11 @@ export const RunEventSchema = z.discriminatedUnion("type", [
   RunCancelledEventSchema,
   RunAbandonedEventSchema,
   ToolRequestedEventSchema,
-  ToolCompletedEventSchema,
+  M0ToolCompletedEventSchema,
 ]);
 export type RunEvent = z.infer<typeof RunEventSchema>;
 
-/** Per-type payload registry for targeted validation. */
+/** Exact M0 per-type payload registry (M0 codes only). */
 export const RUN_EVENT_PAYLOAD_SCHEMAS = {
   "run.queued": RunQueuedPayloadSchema,
   "run.started": RunStartedPayloadSchema,
@@ -175,7 +208,7 @@ export const RUN_EVENT_PAYLOAD_SCHEMAS = {
   "run.cancelled": RunCancelledPayloadSchema,
   "run.abandoned": RunAbandonedPayloadSchema,
   "tool.requested": ToolRequestedPayloadSchema,
-  "tool.completed": ToolCompletedPayloadSchema,
+  "tool.completed": M0ToolCompletedPayloadSchema,
 } as const;
 
 /* ------------------------------------------------------------------ */
@@ -210,9 +243,9 @@ const ReferencePresentedEventSchema = z.strictObject({
 });
 
 /**
- * Exact M0 RunEvent envelope registry (schemaVersion=1, exactly 9 types).
- * Retained verbatim for M0 assertions; rejects `reference.presented` and
- * any M2+ names.
+ * Exact M0 RunEvent envelope registry (schemaVersion=1, exactly 9 types,
+ * M0 nine tool codes only). Retained verbatim for M0 assertions; rejects
+ * `reference.presented`, M1 tool codes, and any M2+ names.
  */
 export const M0RunEventSchema = RunEventSchema;
 export type M0RunEvent = RunEvent;
@@ -236,9 +269,13 @@ export type LatestRunEvent = z.infer<typeof LatestRunEventSchema>;
 export const M1RunEventSchema = LatestRunEventSchema;
 export type M1RunEvent = LatestRunEvent;
 
-/** Latest per-type payload registry (M0 nine + reference.presented). */
+/**
+ * Latest per-type payload registry (M0 nine + reference.presented, with
+ * `tool.completed` accepting the closed M0+M1 code union).
+ */
 export const LATEST_RUN_EVENT_PAYLOAD_SCHEMAS = {
   ...RUN_EVENT_PAYLOAD_SCHEMAS,
+  "tool.completed": ToolCompletedPayloadSchema,
   "reference.presented": ReferencePresentedPayloadSchema,
 } as const;
 
