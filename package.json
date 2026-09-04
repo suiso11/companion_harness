@@ -9,6 +9,8 @@
     "pnpm": "11.25.0"
   },
   "scripts": {
+    "start": "pnpm --filter @companion/server start",
+    "dev": "pnpm --filter @companion/server dev",
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "biome check .",
