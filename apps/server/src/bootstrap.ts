@@ -156,8 +156,8 @@ export async function startServer(
 
   logger.info("server.starting", { port: config.port });
   ensureDbDir(config.dbPath, {
-    platform: options.platform,
-    chmod: options.chmod,
+    ...(options.platform !== undefined ? { platform: options.platform } : {}),
+    ...(options.chmod !== undefined ? { chmod: options.chmod } : {}),
   });
 
   let handle: KernelDatabaseHandle | undefined;

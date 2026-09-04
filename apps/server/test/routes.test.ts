@@ -903,7 +903,7 @@ describe("M0 review regressions", () => {
       const res = await f.app.request("/api/sessions", {
         method: "POST",
         headers: { ...postHeaders(), "idempotency-key": randomUUID() },
-        body: invalid as unknown as BodyInit,
+        body: Buffer.from(invalid),
       });
       expect(res.status).toBe(400);
       expect(

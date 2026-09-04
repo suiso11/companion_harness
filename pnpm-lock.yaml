@@ -36,9 +36,15 @@ importers:
         specifier: 4.5.4
         version: 4.5.4
     devDependencies:
+      '@types/better-sqlite3':
+        specifier: 9.6.0
+        version: 9.6.0
       '@types/node':
         specifier: 24.12.4
         version: 24.12.4
+      better-sqlite3:
+        specifier: 13.0.3
+        version: 13.0.3
       tsx:
         specifier: 4.20.6
         version: 4.20.6
@@ -86,6 +92,9 @@ importers:
       vitest:
         specifier: 3.2.4
         version: 3.2.4(@types/node@24.12.4)(tsx@4.20.6)
+      zod:
+        specifier: 4.5.4
+        version: 4.5.4
 
 packages:
 
