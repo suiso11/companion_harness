@@ -13,6 +13,7 @@
     "lint": "biome check src"
   },
   "dependencies": {
+    "@companion/connector-markdown": "workspace:*",
     "@companion/contracts": "workspace:*",
     "@companion/kernel": "workspace:*",
     "@hono/node-server": "2.1.1",

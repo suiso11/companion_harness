@@ -20,6 +20,9 @@ importers:
 
   apps/server:
     dependencies:
+      '@companion/connector-markdown':
+        specifier: workspace:*
+        version: link:../../packages/connector-markdown
       '@companion/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
