@@ -1,7 +1,7 @@
-// Schema migration / version management for the M0 kernel store.
+// Schema migration / version management for the M0+M1 kernel store.
 //
 // - Versions are tracked with `PRAGMA user_version`.
-// - The bundled version is BUNDLED_SCHEMA_VERSION (1 for M0).
+// - The bundled version is BUNDLED_SCHEMA_VERSION (2 for M1).
 // - Startup rule: a database NEWER than the bundle fails BEFORE any
 //   migration work (no backup, no writes). An EQUAL version is a no-op
 //   without a backup. An OLDER database with user tables requires a
@@ -25,8 +25,8 @@ import {
   NewerDatabaseError,
 } from "./errors.js";
 
-/** Bundled M0 schema version. Bump only with a new committed migration. */
-export const BUNDLED_SCHEMA_VERSION = 1;
+/** Bundled M1 schema version. Bump only with a new committed migration. */
+export const BUNDLED_SCHEMA_VERSION = 2;
 
 export interface BundledMigration {
   version: number;

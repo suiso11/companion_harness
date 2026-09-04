@@ -9,6 +9,13 @@
       "when": 1790000000000,
       "tag": "0001_m0_foundation",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": 2,
+      "when": 1790000000001,
+      "tag": "0002_m1_references",
+      "breakpoints": true
     }
   ]
 }

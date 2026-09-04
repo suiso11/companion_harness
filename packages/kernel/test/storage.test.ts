@@ -171,7 +171,7 @@ describe("m0 kernel pragmas and single connection", () => {
 });
 
 describe("m0 kernel DDL shape", () => {
-  it("creates exactly the seven M0 tables, all STRICT, none WITHOUT ROWID", async () => {
+  it("creates exactly the seven M0 plus eight M1 tables, all STRICT, none WITHOUT ROWID", async () => {
     const handle = await openMigratedMemory();
     try {
       const rows = handle.raw
@@ -181,8 +181,16 @@ describe("m0 kernel DDL shape", () => {
         .all() as Array<{ name: string; sql: string }>;
       expect(rows.map((row) => row.name)).toEqual([
         "api_idempotency",
+        "connector_instances",
+        "evidence_grants",
+        "reference_set_items",
+        "reference_sets",
+        "resource_snapshots",
+        "resources",
         "run_events",
         "runs",
+        "session_reference_context",
+        "session_references",
         "sessions",
         "tool_calls",
         "turn_selections",
@@ -603,6 +611,333 @@ describe("m0 kernel run_events and tool_calls contracts", () => {
       expect(() => insertEntry(randomUUID(), 202)).not.toThrow();
       expect(() => insertEntry(randomUUID(), 199)).toThrow();
       expect(() => insertEntry(randomUUID(), 300)).toThrow();
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+});
+
+describe("m1 reference storage invariants", () => {
+  const BODY_JSON = JSON.stringify({ version: 1, text: "hello" });
+
+  function insertConnector(db: Database.Database): string {
+    const id = randomUUID();
+    db.prepare(
+      "INSERT INTO connector_instances (id, kind, display_name, config_json, created_at) VALUES (?, 'markdown', ?, '{}', ?)",
+    ).run(id, `vault-${id.slice(0, 8)}`, NOW);
+    return id;
+  }
+
+  function insertResource(
+    db: Database.Database,
+    connectorId: string,
+    key = `note-${randomUUID().slice(0, 8)}.md`,
+  ): string {
+    const id = randomUUID();
+    db.prepare(
+      "INSERT INTO resources (id, connector_instance_id, canonical_key, title, next_revision, created_at) VALUES (?, ?, ?, 't', 1, ?)",
+    ).run(id, connectorId, key, NOW);
+    return id;
+  }
+
+  function insertSnapshot(
+    db: Database.Database,
+    resourceId: string,
+    revision: number,
+    contentHash = `hash-${revision}-${randomUUID().slice(0, 6)}`,
+  ): string {
+    const id = randomUUID();
+    db.prepare(
+      "INSERT INTO resource_snapshots (id, resource_id, revision, source_revision, content_hash, body_json, size_bytes, observed_at, created_at) VALUES (?, ?, ?, NULL, ?, ?, 5, ?, ?)",
+    ).run(id, resourceId, revision, contentHash, BODY_JSON, NOW, NOW);
+    return id;
+  }
+
+  function insertReference(
+    db: Database.Database,
+    sessionId: string,
+    ordinal: number,
+    resourceId: string,
+    snapshotId: string,
+  ): string {
+    const id = randomUUID();
+    db.prepare(
+      "INSERT INTO session_references (id, session_id, ordinal, resource_id, snapshot_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    ).run(id, sessionId, ordinal, resourceId, snapshotId, NOW);
+    return id;
+  }
+
+  function runningRun(db: Database.Database): {
+    sessionId: string;
+    runId: string;
+  } {
+    const sessionId = insertSession(db);
+    const turnId = insertTurn(db, sessionId);
+    const runId = insertRun(db, sessionId, turnId, {
+      status: "running",
+      started_at: NOW,
+    });
+    return { sessionId, runId };
+  }
+
+  it("rejects allocator underflow and bad counters", async () => {
+    const handle = await openMigratedMemory();
+    try {
+      expect(() =>
+        handle.raw
+          .prepare(
+            "INSERT INTO sessions (id, created_at, last_active_at, next_turn_position, next_reference_ordinal) VALUES (?, ?, ?, 1, 0)",
+          )
+          .run(randomUUID(), NOW, NOW),
+      ).toThrow();
+      const sessionId = insertSession(handle.raw);
+      const connectorId = insertConnector(handle.raw);
+      expect(() =>
+        handle.raw
+          .prepare(
+            "INSERT INTO resources (id, connector_instance_id, canonical_key, next_revision, created_at) VALUES (?, ?, 'k.md', 0, ?)",
+          )
+          .run(randomUUID(), connectorId, NOW),
+      ).toThrow();
+      const resourceId = insertResource(handle.raw, connectorId);
+      expect(() =>
+        handle.raw
+          .prepare(
+            "INSERT INTO resource_snapshots (id, resource_id, revision, content_hash, body_json, size_bytes, observed_at, created_at) VALUES (?, ?, 0, 'h', ?, 1, ?, ?)",
+          )
+          .run(randomUUID(), resourceId, BODY_JSON, NOW, NOW),
+      ).toThrow();
+      expect(() =>
+        handle.raw
+          .prepare(
+            "INSERT INTO resource_snapshots (id, resource_id, revision, content_hash, body_json, size_bytes, observed_at, created_at) VALUES (?, ?, 1, 'h', ?, -1, ?, ?)",
+          )
+          .run(randomUUID(), resourceId, BODY_JSON, NOW, NOW),
+      ).toThrow();
+      const snapshotId = insertSnapshot(handle.raw, resourceId, 1, "h");
+      expect(() =>
+        insertReference(handle.raw, sessionId, 0, resourceId, snapshotId),
+      ).toThrow();
+      const setId = randomUUID();
+      handle.raw
+        .prepare(
+          "INSERT INTO reference_sets (id, session_id, created_at) VALUES (?, ?, ?)",
+        )
+        .run(setId, sessionId, NOW);
+      const refId = insertReference(
+        handle.raw,
+        sessionId,
+        1,
+        resourceId,
+        snapshotId,
+      );
+      expect(() =>
+        handle.raw
+          .prepare(
+            "INSERT INTO reference_set_items (session_id, set_id, ordinal, reference_id) VALUES (?, ?, 0, ?)",
+          )
+          .run(sessionId, setId, refId),
+      ).toThrow();
+      expect(() =>
+        handle.raw
+          .prepare(
+            "INSERT INTO session_reference_context (session_id, version, items_json, updated_at) VALUES (?, 0, '[]', ?)",
+          )
+          .run(sessionId, NOW),
+      ).toThrow();
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("allows duplicate snapshot content (no UNIQUE resource_id+content_hash)", async () => {
+    const handle = await openMigratedMemory();
+    try {
+      const connectorId = insertConnector(handle.raw);
+      const resourceId = insertResource(handle.raw, connectorId);
+      expect(() =>
+        insertSnapshot(handle.raw, resourceId, 1, "same"),
+      ).not.toThrow();
+      // Same content hash, new revision: legitimate (e.g. refresh).
+      expect(() =>
+        insertSnapshot(handle.raw, resourceId, 2, "same"),
+      ).not.toThrow();
+      const idx = handle.raw
+        .prepare(
+          "SELECT sql FROM sqlite_master WHERE type = 'index' AND sql LIKE '%content_hash%'",
+        )
+        .all() as Array<{ sql: string }>;
+      expect(idx).toEqual([]);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("reuses the same rN for the same session+snapshot and isolates sessions", async () => {
+    const handle = await openMigratedMemory();
+    try {
+      const connectorId = insertConnector(handle.raw);
+      const resourceId = insertResource(handle.raw, connectorId);
+      const snapshotId = insertSnapshot(handle.raw, resourceId, 1, "h");
+      const sessionA = insertSession(handle.raw);
+      const sessionB = insertSession(handle.raw);
+      insertReference(handle.raw, sessionA, 1, resourceId, snapshotId);
+      // Same session + same snapshot cannot take a second ordinal.
+      expect(() =>
+        insertReference(handle.raw, sessionA, 2, resourceId, snapshotId),
+      ).toThrow();
+      // Another session may reference the same snapshot with its own rN.
+      expect(() =>
+        insertReference(handle.raw, sessionB, 1, resourceId, snapshotId),
+      ).not.toThrow();
+      // Mismatched resource/snapshot pair violates the compound FK.
+      const otherResource = insertResource(handle.raw, connectorId);
+      expect(() =>
+        insertReference(handle.raw, sessionB, 2, otherResource, snapshotId),
+      ).toThrow();
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("enforces same-session ownership on sets, items, and grants", async () => {
+    const handle = await openMigratedMemory();
+    try {
+      const connectorId = insertConnector(handle.raw);
+      const resourceId = insertResource(handle.raw, connectorId);
+      const snapshotId = insertSnapshot(handle.raw, resourceId, 1, "h");
+      const sessionA = insertSession(handle.raw);
+      const sessionB = insertSession(handle.raw);
+      const refA = insertReference(
+        handle.raw,
+        sessionA,
+        1,
+        resourceId,
+        snapshotId,
+      );
+      const setA = randomUUID();
+      handle.raw
+        .prepare(
+          "INSERT INTO reference_sets (id, session_id, created_at) VALUES (?, ?, ?)",
+        )
+        .run(setA, sessionA, NOW);
+      expect(() =>
+        handle.raw
+          .prepare(
+            "INSERT INTO reference_set_items (session_id, set_id, ordinal, reference_id) VALUES (?, ?, 1, ?)",
+          )
+          .run(sessionA, setA, refA),
+      ).not.toThrow();
+      const refB = insertReference(
+        handle.raw,
+        sessionB,
+        1,
+        resourceId,
+        snapshotId,
+      );
+      // Cross-session item (set of A, reference of B) is rejected.
+      expect(() =>
+        handle.raw
+          .prepare(
+            "INSERT INTO reference_set_items (session_id, set_id, ordinal, reference_id) VALUES (?, ?, 2, ?)",
+          )
+          .run(sessionA, setA, refB),
+      ).toThrow();
+      // Evidence grants require run and reference in the same session.
+      const { sessionId, runId } = runningRun(handle.raw);
+      const snap2 = insertSnapshot(handle.raw, resourceId, 2, "h2");
+      const refOwn = insertReference(
+        handle.raw,
+        sessionId,
+        1,
+        resourceId,
+        snap2,
+      );
+      expect(() =>
+        handle.raw
+          .prepare(
+            "INSERT INTO evidence_grants (session_id, run_id, reference_id, exposure, created_at) VALUES (?, ?, ?, 'snippet', ?)",
+          )
+          .run(sessionId, runId, refOwn, NOW),
+      ).not.toThrow();
+      expect(() =>
+        handle.raw
+          .prepare(
+            "INSERT INTO evidence_grants (session_id, run_id, reference_id, exposure, created_at) VALUES (?, ?, ?, 'full', ?)",
+          )
+          .run(sessionId, runId, refA, NOW),
+      ).toThrow();
+      expect(() =>
+        handle.raw
+          .prepare(
+            "INSERT INTO evidence_grants (session_id, run_id, reference_id, exposure, created_at) VALUES (?, ?, ?, 'bogus', ?)",
+          )
+          .run(sessionId, runId, refOwn, NOW),
+      ).toThrow();
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("validates context JSON and connector/resource uniqueness", async () => {
+    const handle = await openMigratedMemory();
+    try {
+      const sessionId = insertSession(handle.raw);
+      expect(() =>
+        handle.raw
+          .prepare(
+            "INSERT INTO session_reference_context (session_id, version, items_json, updated_at) VALUES (?, 1, '[]', ?)",
+          )
+          .run(sessionId, NOW),
+      ).not.toThrow();
+      expect(() =>
+        handle.raw
+          .prepare(
+            "INSERT INTO session_reference_context (session_id, version, items_json, updated_at) VALUES (?, 1, 'nope', ?)",
+          )
+          .run(insertSession(handle.raw), NOW),
+      ).toThrow();
+      expect(() =>
+        handle.raw
+          .prepare(
+            "INSERT INTO connector_instances (id, kind, display_name, config_json, created_at) VALUES (?, 'markdown', 'dup', 'bad', ?)",
+          )
+          .run(randomUUID(), NOW),
+      ).toThrow();
+      const connectorId = insertConnector(handle.raw);
+      insertResource(handle.raw, connectorId, "same.md");
+      expect(() =>
+        insertResource(handle.raw, connectorId, "same.md"),
+      ).toThrow();
+      expect(() =>
+        handle.raw
+          .prepare(
+            "INSERT INTO resource_snapshots (id, resource_id, revision, content_hash, body_json, size_bytes, observed_at, created_at) VALUES (?, ?, 9, 'h', 'bad', 1, ?, ?)",
+          )
+          .run(randomUUID(), "missing-resource", NOW, NOW),
+      ).toThrow();
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("keeps all M1 tables STRICT with json_valid checks", async () => {
+    const handle = await openMigratedMemory();
+    try {
+      const rows = handle.raw
+        .prepare(
+          "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name IN ('connector_instances','resources','resource_snapshots','session_references','reference_sets','reference_set_items','session_reference_context','evidence_grants')",
+        )
+        .all() as Array<{ name: string; sql: string }>;
+      expect(rows).toHaveLength(8);
+      for (const row of rows) {
+        expect(row.sql).toContain("STRICT");
+        expect(row.sql).not.toContain("WITHOUT ROWID");
+      }
+      const byName = new Map(rows.map((row) => [row.name, row.sql] as const));
+      expect(byName.get("connector_instances")).toContain("json_valid");
+      expect(byName.get("resource_snapshots")).toContain("json_valid");
+      expect(byName.get("session_reference_context")).toContain("json_valid");
     } finally {
       closeKernelDatabase(handle);
     }

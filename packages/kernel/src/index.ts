@@ -147,9 +147,17 @@ export type {
 export { createKernelRepository } from "./repository.js";
 export {
   apiIdempotency,
+  connectorInstances,
+  evidenceGrants,
   kernelSchema,
+  referenceSetItems,
+  referenceSets,
+  resourceSnapshots,
+  resources,
   runEvents,
   runs,
+  sessionReferenceContext,
+  sessionReferences,
   sessions,
   toolCalls,
   turnSelections,

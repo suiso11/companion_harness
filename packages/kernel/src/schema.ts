@@ -1,4 +1,4 @@
-// M0 kernel storage: Drizzle schema ownership.
+// M0+M1 kernel storage: Drizzle schema ownership.
 //
 // This module is the single owner of the M0 table shapes in TypeScript.
 // It mirrors packages/kernel/migrations/0001_m0_foundation.sql, which is
@@ -30,9 +30,18 @@ export const sessions = sqliteTable(
     createdAt: integer("created_at").notNull(),
     lastActiveAt: integer("last_active_at").notNull(),
     nextTurnPosition: integer("next_turn_position").notNull(),
+    // M1 rN allocator (§14.3). DB default keeps pre-M1 rows valid;
+    // allocation is a same-transaction CAS increment, never MAX()+1.
+    nextReferenceOrdinal: integer("next_reference_ordinal")
+      .notNull()
+      .default(1),
   },
   (t) => [
     check("sessions_next_turn_position_check", sql`${t.nextTurnPosition} >= 1`),
+    check(
+      "sessions_next_reference_ordinal_check",
+      sql`${t.nextReferenceOrdinal} >= 1`,
+    ),
   ],
 );
 
@@ -237,6 +246,209 @@ export const apiIdempotency = sqliteTable(
   ],
 );
 
+// M1 reference storage (§14.3). Mirrors
+// packages/kernel/migrations/0002_m1_references.sql, which is authoritative.
+// All M1 tables are STRICT in SQL; JSON columns carry json_valid CHECKs;
+// there is intentionally NO UNIQUE (resource_id, content_hash).
+
+export const connectorInstances = sqliteTable(
+  "connector_instances",
+  {
+    id: text("id").primaryKey(),
+    kind: text("kind").notNull(),
+    displayName: text("display_name").notNull(),
+    configJson: text("config_json").notNull(),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [
+    unique("connector_instances_kind_display_name_unique").on(
+      t.kind,
+      t.displayName,
+    ),
+    check(
+      "connector_instances_config_json_check",
+      sql`json_valid(${t.configJson})`,
+    ),
+  ],
+);
+
+export const resources = sqliteTable(
+  "resources",
+  {
+    id: text("id").primaryKey(),
+    connectorInstanceId: text("connector_instance_id")
+      .notNull()
+      .references(() => connectorInstances.id),
+    canonicalKey: text("canonical_key").notNull(),
+    title: text("title"),
+    nextRevision: integer("next_revision").notNull(),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [
+    unique("resources_connector_canonical_key_unique").on(
+      t.connectorInstanceId,
+      t.canonicalKey,
+    ),
+    unique("resources_connector_id_unique").on(t.connectorInstanceId, t.id),
+    check("resources_next_revision_check", sql`${t.nextRevision} >= 1`),
+  ],
+);
+
+export const resourceSnapshots = sqliteTable(
+  "resource_snapshots",
+  {
+    id: text("id").primaryKey(),
+    resourceId: text("resource_id")
+      .notNull()
+      .references(() => resources.id),
+    revision: integer("revision").notNull(),
+    sourceRevision: text("source_revision"),
+    contentHash: text("content_hash").notNull(),
+    bodyJson: text("body_json").notNull(),
+    sizeBytes: integer("size_bytes").notNull(),
+    observedAt: integer("observed_at").notNull(),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [
+    unique("resource_snapshots_resource_revision_unique").on(
+      t.resourceId,
+      t.revision,
+    ),
+    unique("resource_snapshots_resource_id_unique").on(t.resourceId, t.id),
+    check("resource_snapshots_revision_check", sql`${t.revision} >= 1`),
+    check("resource_snapshots_size_bytes_check", sql`${t.sizeBytes} >= 0`),
+    check("resource_snapshots_body_json_check", sql`json_valid(${t.bodyJson})`),
+  ],
+);
+
+export const sessionReferences = sqliteTable(
+  "session_references",
+  {
+    id: text("id").primaryKey(),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id),
+    ordinal: integer("ordinal").notNull(),
+    resourceId: text("resource_id").notNull(),
+    snapshotId: text("snapshot_id").notNull(),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [
+    foreignKey({
+      name: "session_references_resource_snapshot_fk",
+      columns: [t.resourceId, t.snapshotId],
+      foreignColumns: [resourceSnapshots.resourceId, resourceSnapshots.id],
+    }),
+    unique("session_references_session_ordinal_unique").on(
+      t.sessionId,
+      t.ordinal,
+    ),
+    unique("session_references_session_snapshot_unique").on(
+      t.sessionId,
+      t.snapshotId,
+    ),
+    unique("session_references_session_id_unique").on(t.sessionId, t.id),
+    unique("session_references_session_target_unique").on(
+      t.sessionId,
+      t.id,
+      t.resourceId,
+      t.snapshotId,
+    ),
+    check("session_references_ordinal_check", sql`${t.ordinal} >= 1`),
+  ],
+);
+
+export const referenceSets = sqliteTable(
+  "reference_sets",
+  {
+    id: text("id").primaryKey(),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [unique("reference_sets_session_id_unique").on(t.sessionId, t.id)],
+);
+
+export const referenceSetItems = sqliteTable(
+  "reference_set_items",
+  {
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id),
+    setId: text("set_id").notNull(),
+    ordinal: integer("ordinal").notNull(),
+    referenceId: text("reference_id").notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.setId, t.ordinal] }),
+    unique("reference_set_items_set_reference_unique").on(
+      t.setId,
+      t.referenceId,
+    ),
+    foreignKey({
+      name: "reference_set_items_session_set_fk",
+      columns: [t.sessionId, t.setId],
+      foreignColumns: [referenceSets.sessionId, referenceSets.id],
+    }),
+    foreignKey({
+      name: "reference_set_items_session_reference_fk",
+      columns: [t.sessionId, t.referenceId],
+      foreignColumns: [sessionReferences.sessionId, sessionReferences.id],
+    }),
+    check("reference_set_items_ordinal_check", sql`${t.ordinal} >= 1`),
+  ],
+);
+
+export const sessionReferenceContext = sqliteTable(
+  "session_reference_context",
+  {
+    sessionId: text("session_id")
+      .primaryKey()
+      .references(() => sessions.id),
+    version: integer("version").notNull(),
+    itemsJson: text("items_json").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (t) => [
+    check("session_reference_context_version_check", sql`${t.version} >= 1`),
+    check(
+      "session_reference_context_items_json_check",
+      sql`json_valid(${t.itemsJson})`,
+    ),
+  ],
+);
+
+export const evidenceGrants = sqliteTable(
+  "evidence_grants",
+  {
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id),
+    runId: text("run_id").notNull(),
+    referenceId: text("reference_id").notNull(),
+    exposure: text("exposure").notNull(),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.runId, t.referenceId] }),
+    foreignKey({
+      name: "evidence_grants_session_run_fk",
+      columns: [t.sessionId, t.runId],
+      foreignColumns: [runs.sessionId, runs.id],
+    }),
+    foreignKey({
+      name: "evidence_grants_session_reference_fk",
+      columns: [t.sessionId, t.referenceId],
+      foreignColumns: [sessionReferences.sessionId, sessionReferences.id],
+    }),
+    check(
+      "evidence_grants_exposure_check",
+      sql`${t.exposure} IN ('snippet','full')`,
+    ),
+  ],
+);
+
 export const kernelSchema = {
   sessions,
   turns,
@@ -245,4 +457,12 @@ export const kernelSchema = {
   runEvents,
   toolCalls,
   apiIdempotency,
+  connectorInstances,
+  resources,
+  resourceSnapshots,
+  sessionReferences,
+  referenceSets,
+  referenceSetItems,
+  sessionReferenceContext,
+  evidenceGrants,
 };
