@@ -59,7 +59,8 @@
  * Oversize/invalid-UTF8 targets cannot materialize and surface as
  * `markdown_read_failed`.
  *
- * CANCELLATION: `search` accepts an optional `{ signal }` input field and
+ * CANCELLATION: `search` accepts an optional `{ signal }` second options
+ * argument (matching the kernel `MarkdownConnectorPort`) and
  * `readCanonical` an optional `{ signal }` options argument. The signal is
  * passed into discovery and safe read and checked before discovery, before
  * each directory/entry traversal stage, before open/first byte, before
@@ -166,9 +167,14 @@ export interface MarkdownDocument {
 export interface MarkdownSearchInput {
   readonly query: unknown;
   readonly limit?: unknown;
-  /** Optional cooperative cancellation; checked before discovery, before
-   * each file read, and before ranking/return. Abort throws `AbortError`
-   * with no path or content. */
+}
+
+/**
+ * Optional second-argument search options (kernel-port aligned).
+ * Unknown keys are ignored; only `signal` is honored. The property is
+ * omitted entirely when absent so `exactOptionalPropertyTypes` holds.
+ */
+export interface MarkdownSearchOptions {
   readonly signal?: AbortSignal;
 }
 
@@ -195,7 +201,10 @@ export interface MarkdownConnector {
    * Internal composition property only (never HTTP/log).
    */
   readonly identityFingerprint: string;
-  search(input: MarkdownSearchInput): Promise<MarkdownSearchResult>;
+  search(
+    input: MarkdownSearchInput,
+    options?: MarkdownSearchOptions,
+  ): Promise<MarkdownSearchResult>;
   readCanonical(
     canonicalKey: unknown,
     options?: MarkdownReadOptions,
@@ -551,11 +560,18 @@ export async function createMarkdownConnector(
 
   async function search(
     input: MarkdownSearchInput,
+    options?: MarkdownSearchOptions,
   ): Promise<MarkdownSearchResult> {
     if (typeof input !== "object" || input === null) {
       throw new MarkdownConnectorError("invalid_input", null);
     }
-    const signal = (input as { signal?: unknown }).signal;
+    if (
+      options !== undefined &&
+      (typeof options !== "object" || options === null)
+    ) {
+      throw new MarkdownConnectorError("invalid_input", null);
+    }
+    const signal = options?.signal;
     if (signal !== undefined && !(signal instanceof AbortSignal)) {
       throw new MarkdownConnectorError("invalid_input", null);
     }
@@ -566,7 +582,9 @@ export async function createMarkdownConnector(
 
     // Discovery before any content byte; whole-call failures propagate
     // (including AbortError, which is never wrapped with paths).
-    const discovered = await discoverMarkdownFiles(roots, { signal });
+    const discovered = await discoverMarkdownFiles(roots, {
+      ...(signal === undefined ? {} : { signal }),
+    });
     throwIfAborted(signal);
     const existing = new Set(discovered.map((entry) => entry.canonicalKey));
     const keysByAlias = new Map<string, string[]>();
@@ -591,11 +609,10 @@ export async function createMarkdownConnector(
       const alias = aliasOf(entry.canonicalKey) ?? "";
       const root = byAlias.get(alias);
       if (root === undefined) continue;
-      const result = await safeReadMarkdownFile(
-        root,
-        entry.canonicalKey,
-        { ...(hooks.safeRead ?? {}), signal },
-      );
+      const result = await safeReadMarkdownFile(root, entry.canonicalKey, {
+        ...(hooks.safeRead ?? {}),
+        ...(signal === undefined ? {} : { signal }),
+      });
       throwIfAborted(signal);
       if (result.status === "skipped") {
         skipped.push({
@@ -652,7 +669,9 @@ export async function createMarkdownConnector(
     // anything undiscovered returns `reference_not_found` BEFORE the
     // single content read below, so no byte is touched for misses.
     throwIfAborted(signal);
-    const discovered = await discoverMarkdownFiles(roots, { signal });
+    const discovered = await discoverMarkdownFiles(roots, {
+      ...(signal === undefined ? {} : { signal }),
+    });
     throwIfAborted(signal);
     const existing = new Set(discovered.map((entry) => entry.canonicalKey));
     if (!existing.has(key)) {
@@ -664,7 +683,7 @@ export async function createMarkdownConnector(
     throwIfAborted(signal);
     const result = await safeReadMarkdownFile(root, key, {
       ...(hooks.safeRead ?? {}),
-      signal,
+      ...(signal === undefined ? {} : { signal }),
     });
     throwIfAborted(signal);
     if (result.status === "skipped") {

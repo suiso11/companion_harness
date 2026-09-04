@@ -25,6 +25,7 @@ export type {
   MarkdownReadOptions,
   MarkdownSearchHit,
   MarkdownSearchInput,
+  MarkdownSearchOptions,
   MarkdownSearchResult,
   MarkdownSkippedEntry,
   ResolvedStandardLink,

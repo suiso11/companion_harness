@@ -326,7 +326,7 @@ describe("markdown connector search core", () => {
     const controller = new AbortController();
     controller.abort();
     try {
-      await connector.search({ query: "hello", signal: controller.signal });
+      await connector.search({ query: "hello" }, { signal: controller.signal });
       expect.unreachable("expected AbortError");
     } catch (error) {
       expect((error as Error).name).toBe("AbortError");
@@ -362,7 +362,7 @@ describe("markdown connector search core", () => {
       },
     });
     try {
-      await connector.search({ query: "hello", signal: controller.signal });
+      await connector.search({ query: "hello" }, { signal: controller.signal });
       expect.unreachable("expected AbortError");
     } catch (error) {
       expect((error as Error).name).toBe("AbortError");

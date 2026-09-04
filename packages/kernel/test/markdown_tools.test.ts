@@ -10,7 +10,6 @@
 // commit; the budget test below asserts the materialization persists.
 
 import { describe, expect, it } from "vitest";
-import { z } from "zod";
 import {
   createKernelRepository,
   createM1ToolRegistrations,
@@ -33,7 +32,10 @@ interface FakeFile {
   title: string;
   text: string;
   sourceRevision: string;
-  standardLinks?: Array<{ status: "resolved" | "unresolved"; canonicalKey?: string }>;
+  standardLinks?: Array<{
+    status: "resolved" | "unresolved";
+    canonicalKey?: string;
+  }>;
   wikiLinks?: Array<{
     status: "resolved" | "ambiguous" | "unresolved";
     candidates: readonly string[];
@@ -44,7 +46,10 @@ interface FakeFile {
 function makeFakeConnector(
   files: Record<string, FakeFile>,
   opts: {
-    skipped?: Array<{ canonicalKey: string; reason: "file_too_large" | "invalid_utf8" }>;
+    skipped?: Array<{
+      canonicalKey: string;
+      reason: "file_too_large" | "invalid_utf8";
+    }>;
     searchImpl?: (query: string, limit: number) => MarkdownPortSearchResult;
     readImpl?: (key: string) => MarkdownPortDocument;
     onSearch?: () => void;
@@ -93,7 +98,10 @@ function makeFakeConnector(
         return opts.searchImpl(input.query, input.limit);
       }
       const entries = Object.entries(files)
-        .filter(([, f]) => f.title.includes(input.query) || f.text.includes(input.query))
+        .filter(
+          ([, f]) =>
+            f.title.includes(input.query) || f.text.includes(input.query),
+        )
         .sort((a, b) => (a[0] < b[0] ? -1 : 1))
         .slice(0, input.limit)
         .map(([canonicalKey, f]) => ({
@@ -102,7 +110,8 @@ function makeFakeConnector(
           snippet: `Q:${input.query}:${f.text.slice(0, 32)}`,
           text: f.text,
           sourceRevision: f.sourceRevision,
-          standardLinks: (f.standardLinks ?? []) as FakeFile["standardLinks"] & [],
+          standardLinks: (f.standardLinks ?? []) as FakeFile["standardLinks"] &
+            [],
           wikiLinks: (f.wikiLinks ?? []) as FakeFile["wikiLinks"] & [],
         }));
       const skipped = [...(opts.skipped ?? [])].sort((a, b) =>
@@ -110,7 +119,10 @@ function makeFakeConnector(
       );
       return { hits: entries, skipped } as MarkdownPortSearchResult;
     },
-    async readCanonical(canonicalKey: string, options?: { signal?: AbortSignal }) {
+    async readCanonical(
+      canonicalKey: string,
+      options?: { signal?: AbortSignal },
+    ) {
       readCalls.push(canonicalKey);
       readSignals.push(options?.signal);
       opts.onRead?.(canonicalKey);
@@ -146,7 +158,9 @@ async function setupStack(
   await migrateKernelDatabase({ db: handle.raw });
   const repo = createKernelRepository(handle.raw);
   const manager = createReferenceManager(handle.raw);
-  const connectorRow = manager.ensureMarkdownConnectorInstance("vault", 1, { now: T0 });
+  const connectorRow = manager.ensureMarkdownConnectorInstance("vault", 1, {
+    now: T0,
+  });
   const connector = makeFakeConnector(files, fakeOpts);
   const regs = createM1ToolRegistrations({
     db: handle.raw,
@@ -155,19 +169,30 @@ async function setupStack(
     bindings: [{ connectorInstanceId: connectorRow.id, connector }],
     clock: { now: () => T0 + 100 },
   });
-  const broker = createToolBroker({ db: handle.raw, repo, registrations: regs });
+  const broker = createToolBroker({
+    db: handle.raw,
+    repo,
+    registrations: regs,
+  });
   return { handle, repo, manager, regs, broker, connector, connectorRow };
 }
 
 function newRunningRun(repo: KernelRepository, now = T0) {
-  const sessionId = repo.createSession({ key: crypto.randomUUID(), now }).body.sessionId;
-  const posted = repo.postMessage(sessionId, { text: "hello" }, { key: crypto.randomUUID(), now });
+  const sessionId = repo.createSession({ key: crypto.randomUUID(), now }).body
+    .sessionId;
+  const posted = repo.postMessage(
+    sessionId,
+    { text: "hello" },
+    { key: crypto.randomUUID(), now },
+  );
   const runId = posted.body.run.id;
   repo.startRun(runId, { now: now + 1 });
   return { sessionId, runId };
 }
 
-function counts(db: { prepare(s: string): { get(): unknown; all(...a: unknown[]): unknown[] } }) {
+function counts(db: {
+  prepare(s: string): { get(): unknown; all(...a: unknown[]): unknown[] };
+}) {
   const n = (sql: string) =>
     (db.prepare(sql).get() as unknown as { n: number }).n;
   return {
@@ -186,7 +211,9 @@ describe("factory validation (ownership/kind, no paths)", () => {
       await migrateKernelDatabase({ db: handle.raw });
       const repo = createKernelRepository(handle.raw);
       const manager = createReferenceManager(handle.raw);
-      const row = manager.ensureMarkdownConnectorInstance("vault", 1, { now: T0 });
+      const row = manager.ensureMarkdownConnectorInstance("vault", 1, {
+        now: T0,
+      });
       const good = makeFakeConnector({});
       expect(() =>
         createM1ToolRegistrations({
@@ -201,11 +228,15 @@ describe("factory validation (ownership/kind, no paths)", () => {
           db: handle.raw,
           repo,
           referenceManager: manager,
-          bindings: [{ connectorInstanceId: crypto.randomUUID(), connector: good }],
+          bindings: [
+            { connectorInstanceId: crypto.randomUUID(), connector: good },
+          ],
         }),
       ).toThrow();
       handle.raw
-        .prepare("INSERT INTO connector_instances (id, kind, display_name, config_json, created_at) VALUES (?, 'calendar', 'cal', '{\"version\":1,\"rootCount\":1}', ?)")
+        .prepare(
+          "INSERT INTO connector_instances (id, kind, display_name, config_json, created_at) VALUES (?, 'calendar', 'cal', '{\"version\":1,\"rootCount\":1}', ?)",
+        )
         .run(crypto.randomUUID(), T0);
       const calRow = handle.raw
         .prepare("SELECT id FROM connector_instances WHERE kind = 'calendar'")
@@ -235,7 +266,10 @@ describe("factory validation (ownership/kind, no paths)", () => {
           repo,
           referenceManager: manager,
           bindings: [
-            { connectorInstanceId: row.id, connector: {} as unknown as MarkdownConnectorPort },
+            {
+              connectorInstanceId: row.id,
+              connector: {} as unknown as MarkdownConnectorPort,
+            },
           ],
         }),
       ).toThrow();
@@ -258,8 +292,12 @@ describe("factory validation (ownership/kind, no paths)", () => {
       await migrateKernelDatabase({ db: handle.raw });
       const repo = createKernelRepository(handle.raw);
       const manager = createReferenceManager(handle.raw);
-      const first = manager.ensureMarkdownConnectorInstance("vault", 1, { now: T0 });
-      const second = manager.ensureMarkdownConnectorInstance("vault-b", 1, { now: T0 });
+      const first = manager.ensureMarkdownConnectorInstance("vault", 1, {
+        now: T0,
+      });
+      const second = manager.ensureMarkdownConnectorInstance("vault-b", 1, {
+        now: T0,
+      });
       const good = makeFakeConnector({});
       // Zero bindings rejected.
       expect(() =>
@@ -305,18 +343,21 @@ describe("factory validation (ownership/kind, no paths)", () => {
         expect(typeof reg.handler).toBe("function");
       }
       const byName = new Map(regs.map((r) => [r.descriptor.name, r]));
-      expect((byName.get("markdown.search") as ToolRegistration).dedupMode).toBe(
-        "input_freshness",
-      );
-      expect((byName.get("reference.refresh") as ToolRegistration).dedupMode).toBe(
-        "always_bypass",
-      );
       expect(
-        (byName.get("reference.open") as ToolRegistration).dedupMode ?? "normal",
+        (byName.get("markdown.search") as ToolRegistration).dedupMode,
+      ).toBe("input_freshness");
+      expect(
+        (byName.get("reference.refresh") as ToolRegistration).dedupMode,
+      ).toBe("always_bypass");
+      expect(
+        (byName.get("reference.open") as ToolRegistration).dedupMode ??
+          "normal",
       ).toBe("normal");
       // Strict: unknown keys rejected.
       const search = byName.get("markdown.search") as ToolRegistration;
-      expect(() => search.inputSchema.parse({ query: "q", limit: 5, extra: 1 })).toThrow();
+      expect(() =>
+        search.inputSchema.parse({ query: "q", limit: 5, extra: 1 }),
+      ).toThrow();
       expect(() => search.inputSchema.parse({ query: "" })).toThrow();
     } finally {
       handle.raw.close();
@@ -328,14 +369,27 @@ describe("markdown.search (discovery-first, normal materialization)", () => {
   it("materializes hits, returns query snippets plus all skipped, counts observations", async () => {
     const { handle, repo, broker, connector } = await setupStack(
       {
-        "vault/a.md": { title: "Alpha", text: "hello world a", sourceRevision: "rev-a" },
-        "vault/b.md": { title: "Beta", text: "hello world b", sourceRevision: "rev-b" },
+        "vault/a.md": {
+          title: "Alpha",
+          text: "hello world a",
+          sourceRevision: "rev-a",
+        },
+        "vault/b.md": {
+          title: "Beta",
+          text: "hello world b",
+          sourceRevision: "rev-b",
+        },
       },
       { skipped: [{ canonicalKey: "vault/big.md", reason: "file_too_large" }] },
     );
     try {
       const { runId } = newRunningRun(repo);
-      const out = await broker.invoke(runId, "markdown.search", { query: "hello" }, CTX);
+      const out = await broker.invoke(
+        runId,
+        "markdown.search",
+        { query: "hello" },
+        CTX,
+      );
       expect(out.result.actualOutcome).toBe("succeeded");
       const normalized = out.normalized as {
         hits: Array<{ snippet: string; canonicalKey: string }>;
@@ -378,16 +432,35 @@ describe("markdown.search (discovery-first, normal materialization)", () => {
     });
     try {
       const { runId } = newRunningRun(repo);
-      const out = await broker.invoke(runId, "markdown.search", { query: "query here" }, CTX);
+      const out = await broker.invoke(
+        runId,
+        "markdown.search",
+        { query: "query here" },
+        CTX,
+      );
       expect(out.result.actualOutcome).toBe("succeeded");
-      const normalized = out.normalized as { hits: Array<{ snapshotId: string }> };
+      const normalized = out.normalized as {
+        hits: Array<{ snapshotId: string }>;
+      };
       expect(normalized.hits).toHaveLength(1);
       const links = handle.raw
-        .prepare("SELECT kind, status, candidates_json FROM snapshot_links ORDER BY ordinal ASC")
-        .all() as Array<{ kind: string; status: string; candidates_json: string }>;
+        .prepare(
+          "SELECT kind, status, candidates_json FROM snapshot_links ORDER BY ordinal ASC",
+        )
+        .all() as Array<{
+        kind: string;
+        status: string;
+        candidates_json: string;
+      }>;
       expect(links.map((l) => l.kind)).toEqual(["standard", "wiki", "wiki"]);
-      expect(links.map((l) => l.status)).toEqual(["resolved", "ambiguous", "unresolved"]);
-      expect(JSON.parse(links[0]?.candidates_json ?? "")).toEqual(["vault/b.md"]);
+      expect(links.map((l) => l.status)).toEqual([
+        "resolved",
+        "ambiguous",
+        "unresolved",
+      ]);
+      expect(JSON.parse(links[0]?.candidates_json ?? "")).toEqual([
+        "vault/b.md",
+      ]);
     } finally {
       handle.raw.close();
     }
@@ -399,9 +472,18 @@ describe("markdown.search (discovery-first, normal materialization)", () => {
     });
     try {
       const { runId } = newRunningRun(repo);
-      const first = await broker.invoke(runId, "markdown.search", { query: "same" }, CTX);
+      const first = await broker.invoke(
+        runId,
+        "markdown.search",
+        { query: "same" },
+        CTX,
+      );
       expect(first.result.actualOutcome).toBe("succeeded");
-      const firstHit = (first.normalized as { hits: Array<{ referenceId: string; snapshotId: string }> }).hits[0];
+      const firstHit = (
+        first.normalized as {
+          hits: Array<{ referenceId: string; snapshotId: string }>;
+        }
+      ).hits[0];
       // Same logical args with input freshness refresh: broker bypasses (succeeded,
       // not deduplicated) yet the manager reuses the same Snapshot+rN (normal).
       const second = await broker.invoke(
@@ -412,7 +494,11 @@ describe("markdown.search (discovery-first, normal materialization)", () => {
       );
       expect(second.result.actualOutcome).toBe("succeeded");
       expect(second.result.reusedFromCallId).toBeNull();
-      const secondHit = (second.normalized as { hits: Array<{ referenceId: string; snapshotId: string }> }).hits[0];
+      const secondHit = (
+        second.normalized as {
+          hits: Array<{ referenceId: string; snapshotId: string }>;
+        }
+      ).hits[0];
       expect(secondHit?.snapshotId).toBe(firstHit?.snapshotId);
       expect(secondHit?.referenceId).toBe(firstHit?.referenceId);
       expect(connector.searchCalls).toBe(2);
@@ -430,7 +516,12 @@ describe("markdown.search (discovery-first, normal materialization)", () => {
       const { sessionId, runId } = newRunningRun(repo);
       const before = counts(handle.raw);
       repo.cancelRun(sessionId, runId, { now: T0 + 5 });
-      const out = await broker.invoke(runId, "markdown.search", { query: "cancel" }, CTX);
+      const out = await broker.invoke(
+        runId,
+        "markdown.search",
+        { query: "cancel" },
+        CTX,
+      );
       // Broker running-gate rejects before the handler executes.
       expect(out.result.actualOutcome).toBe("cancelled");
       expect(out.result.errorCode).toBe("execution_cancelled");
@@ -492,7 +583,9 @@ describe("markdown.search (discovery-first, normal materialization)", () => {
       await migrateKernelDatabase({ db: handle.raw });
       const repo = createKernelRepository(handle.raw);
       const manager = createReferenceManager(handle.raw);
-      const connectorRow = manager.ensureMarkdownConnectorInstance("vault", 1, { now: T0 });
+      const connectorRow = manager.ensureMarkdownConnectorInstance("vault", 1, {
+        now: T0,
+      });
       const regs = createM1ToolRegistrations({
         db: handle.raw,
         repo,
@@ -500,7 +593,11 @@ describe("markdown.search (discovery-first, normal materialization)", () => {
         bindings: [{ connectorInstanceId: connectorRow.id, connector }],
         clock: { now: () => T0 + 100 },
       });
-      const broker = createToolBroker({ db: handle.raw, repo, registrations: regs });
+      const broker = createToolBroker({
+        db: handle.raw,
+        repo,
+        registrations: regs,
+      });
       const { runId } = newRunningRun(repo);
       const before = counts(handle.raw);
       const out = await broker.invoke(
@@ -526,10 +623,18 @@ describe("markdown.search (discovery-first, normal materialization)", () => {
       "markdown_read_failed",
       "markdown_read_changed",
     ] as const) {
-      const { handle, repo, broker } = await setupStack({}, { failSearch: { code } });
+      const { handle, repo, broker } = await setupStack(
+        {},
+        { failSearch: { code } },
+      );
       try {
         const { runId } = newRunningRun(repo);
-        const out = await broker.invoke(runId, "markdown.search", { query: "q" }, CTX);
+        const out = await broker.invoke(
+          runId,
+          "markdown.search",
+          { query: "q" },
+          CTX,
+        );
         expect(out.result.actualOutcome).toBe("failed");
         expect(out.result.errorCode).toBe(code);
         expect(JSON.stringify(out)).not.toContain("/abs");
@@ -537,10 +642,18 @@ describe("markdown.search (discovery-first, normal materialization)", () => {
         handle.raw.close();
       }
     }
-    const { handle, repo, broker } = await setupStack({}, { failSearch: { code: "weird", path: "/abs/secret" } });
+    const { handle, repo, broker } = await setupStack(
+      {},
+      { failSearch: { code: "weird", path: "/abs/secret" } },
+    );
     try {
       const { runId } = newRunningRun(repo);
-      const out = await broker.invoke(runId, "markdown.search", { query: "q" }, CTX);
+      const out = await broker.invoke(
+        runId,
+        "markdown.search",
+        { query: "q" },
+        CTX,
+      );
       expect(out.result.errorCode).toBe("execution_failed");
       expect(JSON.stringify(out)).not.toContain("/abs/secret");
     } finally {
@@ -552,17 +665,38 @@ describe("markdown.search (discovery-first, normal materialization)", () => {
 describe("reference.open (stored-only)", () => {
   it("returns the stored full body with no connector call and one observation", async () => {
     const { handle, repo, broker, connector } = await setupStack({
-      "vault/a.md": { title: "A", text: "full body here", sourceRevision: "r1" },
+      "vault/a.md": {
+        title: "A",
+        text: "full body here",
+        sourceRevision: "r1",
+      },
     });
     try {
       const { runId } = newRunningRun(repo);
-      const searched = await broker.invoke(runId, "markdown.search", { query: "full" }, CTX);
-      const hit = (searched.normalized as { hits: Array<{ referenceId: string }> }).hits[0] as { referenceId: string };
+      const searched = await broker.invoke(
+        runId,
+        "markdown.search",
+        { query: "full" },
+        CTX,
+      );
+      const hit = (
+        searched.normalized as { hits: Array<{ referenceId: string }> }
+      ).hits[0] as { referenceId: string };
       const readsBefore = connector.readCalls.length;
       const searchesBefore = connector.searchCalls;
-      const opened = await broker.invoke(runId, "reference.open", { referenceId: hit.referenceId }, CTX);
+      const opened = await broker.invoke(
+        runId,
+        "reference.open",
+        { referenceId: hit.referenceId },
+        CTX,
+      );
       expect(opened.result.actualOutcome).toBe("succeeded");
-      const body = (opened.normalized as { body: { version: number; text: string }; snippet: string }).body;
+      const body = (
+        opened.normalized as {
+          body: { version: number; text: string };
+          snippet: string;
+        }
+      ).body;
       expect(body).toEqual({ version: 1, text: "full body here" });
       expect(connector.readCalls).toHaveLength(readsBefore);
       expect(connector.searchCalls).toBe(searchesBefore);
@@ -606,23 +740,54 @@ describe("reference.refresh (owned reread, always new Snapshot+rN, always bypass
     const { handle, repo, broker, connector } = await setupStack(files);
     try {
       const { runId } = newRunningRun(repo);
-      const searched = await broker.invoke(runId, "markdown.search", { query: "v1" }, CTX);
-      const hit = (searched.normalized as { hits: Array<{ referenceId: string; snapshotId: string; ordinal: number }> }).hits[0] as {
+      const searched = await broker.invoke(
+        runId,
+        "markdown.search",
+        { query: "v1" },
+        CTX,
+      );
+      const hit = (
+        searched.normalized as {
+          hits: Array<{
+            referenceId: string;
+            snapshotId: string;
+            ordinal: number;
+          }>;
+        }
+      ).hits[0] as {
         referenceId: string;
         snapshotId: string;
         ordinal: number;
       };
-      const first = await broker.invoke(runId, "reference.refresh", { referenceId: hit.referenceId }, CTX);
+      const first = await broker.invoke(
+        runId,
+        "reference.refresh",
+        { referenceId: hit.referenceId },
+        CTX,
+      );
       expect(first.result.actualOutcome).toBe("succeeded");
-      const firstView = first.normalized as { referenceId: string; snapshotId: string; ordinal: number; body: { text: string } };
+      const firstView = first.normalized as {
+        referenceId: string;
+        snapshotId: string;
+        ordinal: number;
+        body: { text: string };
+      };
       expect(firstView.snapshotId).not.toBe(hit.snapshotId);
       expect(firstView.referenceId).not.toBe(hit.referenceId);
       expect(firstView.body.text).toBe("v1 text");
       // Identical logical args execute again (not deduplicated) with a new rN.
-      const second = await broker.invoke(runId, "reference.refresh", { referenceId: hit.referenceId }, CTX);
+      const second = await broker.invoke(
+        runId,
+        "reference.refresh",
+        { referenceId: hit.referenceId },
+        CTX,
+      );
       expect(second.result.actualOutcome).toBe("succeeded");
       expect(second.result.reusedFromCallId).toBeNull();
-      const secondView = second.normalized as { referenceId: string; snapshotId: string };
+      const secondView = second.normalized as {
+        referenceId: string;
+        snapshotId: string;
+      };
       expect(secondView.referenceId).not.toBe(firstView.referenceId);
       expect(secondView.snapshotId).not.toBe(firstView.snapshotId);
       expect(connector.readCalls).toEqual(["vault/a.md", "vault/a.md"]);
@@ -637,15 +802,27 @@ describe("reference.refresh (owned reread, always new Snapshot+rN, always bypass
     });
     try {
       const { runId } = newRunningRun(repo);
-      const searched = await broker.invoke(runId, "markdown.search", { query: "orig" }, CTX);
-      const hit = (searched.normalized as { hits: Array<{ referenceId: string }> }).hits[0] as { referenceId: string };
+      const searched = await broker.invoke(
+        runId,
+        "markdown.search",
+        { query: "orig" },
+        CTX,
+      );
+      const hit = (
+        searched.normalized as { hits: Array<{ referenceId: string }> }
+      ).hits[0] as { referenceId: string };
       // Mutate the vault behind the stored reference; refresh must see the new text.
       const live = connector as unknown as { searchCalls: number };
       void live;
       // Fake connector reads from the same in-memory map; simulate an update by
       // swapping the port implementation via a second factory is out of scope:
       // assert at least that readCanonical was called with the stored key.
-      const refreshed = await broker.invoke(runId, "reference.refresh", { referenceId: hit.referenceId }, CTX);
+      const refreshed = await broker.invoke(
+        runId,
+        "reference.refresh",
+        { referenceId: hit.referenceId },
+        CTX,
+      );
       expect(refreshed.result.actualOutcome).toBe("succeeded");
       expect(connector.readCalls).toEqual(["vault/a.md"]);
     } finally {
@@ -659,9 +836,21 @@ describe("reference.refresh (owned reread, always new Snapshot+rN, always bypass
     });
     try {
       const { runId } = newRunningRun(repo);
-      const searched = await broker.invoke(runId, "markdown.search", { query: "x" }, CTX);
-      const hit = (searched.normalized as { hits: Array<{ referenceId: string }> }).hits[0] as { referenceId: string };
-      const missing = await broker.invoke(runId, "reference.refresh", { referenceId: crypto.randomUUID() }, CTX);
+      const searched = await broker.invoke(
+        runId,
+        "markdown.search",
+        { query: "x" },
+        CTX,
+      );
+      const hit = (
+        searched.normalized as { hits: Array<{ referenceId: string }> }
+      ).hits[0] as { referenceId: string };
+      const missing = await broker.invoke(
+        runId,
+        "reference.refresh",
+        { referenceId: crypto.randomUUID() },
+        CTX,
+      );
       expect(missing.result.errorCode).toBe("reference_not_found");
       const controller = new AbortController();
       controller.abort();
@@ -684,8 +873,15 @@ describe("reference.refresh (owned reread, always new Snapshot+rN, always bypass
     });
     try {
       const { runId } = newRunningRun(repo);
-      const searched = await broker.invoke(runId, "markdown.search", { query: "signal" }, CTX);
-      const hit = (searched.normalized as { hits: Array<{ referenceId: string }> }).hits[0] as { referenceId: string };
+      const searched = await broker.invoke(
+        runId,
+        "markdown.search",
+        { query: "signal" },
+        CTX,
+      );
+      const hit = (
+        searched.normalized as { hits: Array<{ referenceId: string }> }
+      ).hits[0] as { referenceId: string };
       const controller = new AbortController();
       const refreshed = await broker.invoke(
         runId,
@@ -704,10 +900,11 @@ describe("reference.refresh (owned reread, always new Snapshot+rN, always bypass
 
 describe("reference.related (stored graph only)", () => {
   it("returns stored neighbors with no connector read and presents them", async () => {
-    const { handle, repo, broker, manager, connector, connectorRow } = await setupStack({
-      "vault/a.md": { title: "A", text: "body a", sourceRevision: "r1" },
-      "vault/b.md": { title: "B", text: "body b", sourceRevision: "r1" },
-    });
+    const { handle, repo, broker, manager, connector, connectorRow } =
+      await setupStack({
+        "vault/a.md": { title: "A", text: "body a", sourceRevision: "r1" },
+        "vault/b.md": { title: "B", text: "body b", sourceRevision: "r1" },
+      });
     try {
       const { sessionId, runId } = newRunningRun(repo);
       // Seed the graph directly: a -> b.
@@ -722,7 +919,13 @@ describe("reference.related (stored graph only)", () => {
             text: "body a",
             sourceRevision: "r1",
             observedAt: T0,
-            links: [{ kind: "standard", status: "resolved", candidates: ["vault/b.md"] }],
+            links: [
+              {
+                kind: "standard",
+                status: "resolved",
+                candidates: ["vault/b.md"],
+              },
+            ],
           },
           {
             connectorInstanceId: connectorRow.id,
@@ -738,9 +941,16 @@ describe("reference.related (stored graph only)", () => {
       if (!presented.applied) throw new Error("seed failed");
       const baseId = presented.references[0]?.referenceId as string;
       const readsBefore = connector.readCalls.length;
-      const out = await broker.invoke(runId, "reference.related", { referenceId: baseId }, CTX);
+      const out = await broker.invoke(
+        runId,
+        "reference.related",
+        { referenceId: baseId },
+        CTX,
+      );
       expect(out.result.actualOutcome).toBe("succeeded");
-      const refs = (out.normalized as { references: Array<{ canonicalKey: string }> }).references;
+      const refs = (
+        out.normalized as { references: Array<{ canonicalKey: string }> }
+      ).references;
       expect(refs.map((r) => r.canonicalKey)).toEqual(["vault/b.md"]);
       expect(connector.readCalls).toHaveLength(readsBefore);
       expect(connector.searchCalls).toBe(0);
@@ -752,18 +962,46 @@ describe("reference.related (stored graph only)", () => {
 
   it("returns empty references without new sets/events and rejects unknown ids", async () => {
     const { handle, repo, broker } = await setupStack({
-      "vault/lonely.md": { title: "L", text: "lonely body", sourceRevision: "r1" },
+      "vault/lonely.md": {
+        title: "L",
+        text: "lonely body",
+        sourceRevision: "r1",
+      },
     });
     try {
       const { runId } = newRunningRun(repo);
-      const searched = await broker.invoke(runId, "markdown.search", { query: "lonely" }, CTX);
-      const hit = (searched.normalized as { hits: Array<{ referenceId: string }> }).hits[0] as { referenceId: string };
-      const setsBefore = (handle.raw.prepare("SELECT COUNT(*) AS n FROM reference_sets").get() as { n: number }).n;
-      const out = await broker.invoke(runId, "reference.related", { referenceId: hit.referenceId }, CTX);
+      const searched = await broker.invoke(
+        runId,
+        "markdown.search",
+        { query: "lonely" },
+        CTX,
+      );
+      const hit = (
+        searched.normalized as { hits: Array<{ referenceId: string }> }
+      ).hits[0] as { referenceId: string };
+      const setsBefore = (
+        handle.raw
+          .prepare("SELECT COUNT(*) AS n FROM reference_sets")
+          .get() as { n: number }
+      ).n;
+      const out = await broker.invoke(
+        runId,
+        "reference.related",
+        { referenceId: hit.referenceId },
+        CTX,
+      );
       expect(out.result.actualOutcome).toBe("succeeded");
-      expect((out.normalized as { references: unknown[] }).references).toEqual([]);
+      expect((out.normalized as { references: unknown[] }).references).toEqual(
+        [],
+      );
       // presentStored([]) writes nothing: no new set.
-      expect((handle.raw.prepare("SELECT COUNT(*) AS n FROM reference_sets").get() as { n: number }).n).toBe(setsBefore);
+      expect(
+        (
+          handle.raw
+            .prepare("SELECT COUNT(*) AS n FROM reference_sets")
+            .get() as { n: number }
+        ).n,
+      ).toBe(setsBefore);
       const missing = await broker.invoke(
         runId,
         "reference.related",
@@ -810,9 +1048,18 @@ describe("broker output/cumulative validation after materialization (flagged)", 
       // commit order exists by checking a successful search materializes before
       // the Broker returns.
       const { runId } = newRunningRun(repo);
-      const broker = createToolBroker({ db: handle.raw, repo, registrations: regs });
+      const broker = createToolBroker({
+        db: handle.raw,
+        repo,
+        registrations: regs,
+      });
       const before = counts(handle.raw);
-      const out = await broker.invoke(runId, "markdown.search", { query: "budget" }, CTX);
+      const out = await broker.invoke(
+        runId,
+        "markdown.search",
+        { query: "budget" },
+        CTX,
+      );
       expect(out.result.actualOutcome).toBe("succeeded");
       expect(counts(handle.raw).snapshots).toBe(before.snapshots + 1);
     } finally {
@@ -824,19 +1071,35 @@ describe("broker output/cumulative validation after materialization (flagged)", 
 describe("no raw leakage and strict contracts", () => {
   it("never exposes absolute paths or raw errors", async () => {
     const { handle, repo, broker } = await setupStack({
-      "vault/a.md": { title: "A", text: "secret SECRET-123", sourceRevision: "r1" },
+      "vault/a.md": {
+        title: "A",
+        text: "secret SECRET-123",
+        sourceRevision: "r1",
+      },
     });
     try {
       const { runId } = newRunningRun(repo);
-      const out = await broker.invoke(runId, "markdown.search", { query: "secret" }, CTX);
+      const out = await broker.invoke(
+        runId,
+        "markdown.search",
+        { query: "secret" },
+        CTX,
+      );
       expect(out.result.actualOutcome).toBe("succeeded");
       // Absolute paths never appear; content is normalized output by design, but
       // error paths carry no raw text.
       expect(JSON.stringify(out.result)).not.toContain("/abs");
-      const bad = await broker.invoke(runId, "markdown.search", { query: 42 as unknown as string }, CTX);
+      const bad = await broker.invoke(
+        runId,
+        "markdown.search",
+        { query: 42 as unknown as string },
+        CTX,
+      );
       expect(bad.result.actualOutcome).toBe("invalid");
       // ToolError rejects unknown codes.
-      expect(() => new ToolError("not_a_code" as unknown as "execution_failed")).toThrow();
+      expect(
+        () => new ToolError("not_a_code" as unknown as "execution_failed"),
+      ).toThrow();
     } finally {
       handle.raw.close();
     }

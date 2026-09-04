@@ -53,11 +53,11 @@ import {
 import type Database from "better-sqlite3";
 import { ToolError, type ToolRegistration } from "./broker.js";
 import { isUuidV4 } from "./canonical.js";
-import {
-  ReferenceNotFoundError,
-  RepositoryValidationError,
-} from "./errors.js";
-import type { ReferenceManager, ResourceObservation } from "./reference_manager.js";
+import { ReferenceNotFoundError, RepositoryValidationError } from "./errors.js";
+import type {
+  ReferenceManager,
+  ResourceObservation,
+} from "./reference_manager.js";
 import type { KernelRepository } from "./repository.js";
 
 /* ------------------------------------------------------------------ */
@@ -155,9 +155,12 @@ function requirePort(
     typeof connector !== "object" ||
     connector === null ||
     typeof (connector as { search?: unknown }).search !== "function" ||
-    typeof (connector as { readCanonical?: unknown }).readCanonical !== "function"
+    typeof (connector as { readCanonical?: unknown }).readCanonical !==
+      "function"
   ) {
-    throw new RepositoryValidationError(`${what} must expose search/readCanonical`);
+    throw new RepositoryValidationError(
+      `${what} must expose search/readCanonical`,
+    );
   }
   return connector;
 }
@@ -212,7 +215,11 @@ function toObservationLinks(
   }> = [];
   for (const entry of standard) {
     if (entry.status === "resolved" && typeof entry.canonicalKey === "string") {
-      links.push({ kind: "standard", status: "resolved", candidates: [entry.canonicalKey] });
+      links.push({
+        kind: "standard",
+        status: "resolved",
+        candidates: [entry.canonicalKey],
+      });
     } else if (entry.status === "unresolved") {
       links.push({ kind: "standard", status: "unresolved", candidates: [] });
     } else {
@@ -230,7 +237,11 @@ function toObservationLinks(
       }
       links.push({ kind: "wiki", status: "resolved", candidates: single });
     } else if (entry.status === "ambiguous") {
-      links.push({ kind: "wiki", status: "ambiguous", candidates: [...entry.candidates] });
+      links.push({
+        kind: "wiki",
+        status: "ambiguous",
+        candidates: [...entry.candidates],
+      });
     } else if (entry.status === "unresolved") {
       links.push({ kind: "wiki", status: "unresolved", candidates: [] });
     } else {
@@ -257,8 +268,14 @@ export function createM1ToolRegistrations(
   options: CreateM1ToolRegistrationsOptions,
 ): readonly ToolRegistration[] {
   const { db, repo, referenceManager } = options;
-  if (db === undefined || repo === undefined || referenceManager === undefined) {
-    throw new RepositoryValidationError("db, repo, and referenceManager are required");
+  if (
+    db === undefined ||
+    repo === undefined ||
+    referenceManager === undefined
+  ) {
+    throw new RepositoryValidationError(
+      "db, repo, and referenceManager are required",
+    );
   }
   const bindings = options.bindings;
   if (!Array.isArray(bindings) || bindings.length !== 1) {
@@ -270,7 +287,9 @@ export function createM1ToolRegistrations(
   const byId = new Map<string, MarkdownConnectorPort>();
   for (const binding of bindings) {
     if (!isUuidV4(binding.connectorInstanceId)) {
-      throw new RepositoryValidationError("connectorInstanceId must be a UUID v4");
+      throw new RepositoryValidationError(
+        "connectorInstanceId must be a UUID v4",
+      );
     }
     requirePort(binding.connector, "connector binding");
     if (byId.has(binding.connectorInstanceId)) {
@@ -284,7 +303,9 @@ export function createM1ToolRegistrations(
       throw new RepositoryValidationError("connector instance not found");
     }
     if (row.kind !== "markdown") {
-      throw new RepositoryValidationError("connector instance kind must be markdown");
+      throw new RepositoryValidationError(
+        "connector instance kind must be markdown",
+      );
     }
     byId.set(binding.connectorInstanceId, binding.connector);
   }
@@ -306,7 +327,8 @@ export function createM1ToolRegistrations(
       name: "markdown.search",
       version: 1,
       title: "Search Markdown vault",
-      description: "Deterministic Markdown search with Snapshot materialization",
+      description:
+        "Deterministic Markdown search with Snapshot materialization",
       category: "read",
       defaultTimeoutMs: 15_000,
       maxTimeoutMs: 60_000,
@@ -316,7 +338,11 @@ export function createM1ToolRegistrations(
     outputSchema: MarkdownSearchToolOutputSchema,
     dedupMode: "input_freshness",
     handler: (async (input: unknown, ctx) => {
-      const parsed = input as { query: string; limit: number; freshness: string };
+      const parsed = input as {
+        query: string;
+        limit: number;
+        freshness: string;
+      };
       const sessionId = sessionOf(ctx.runId);
       if (ctx.signal.aborted) {
         throw new ToolError("execution_cancelled");
@@ -473,7 +499,11 @@ export function createM1ToolRegistrations(
         body: detail.body,
       };
     }) as ToolRegistration["handler"],
-    normalize: (raw) => ({ normalized: raw, observations: 1, modelFacing: raw }),
+    normalize: (raw) => ({
+      normalized: raw,
+      observations: 1,
+      modelFacing: raw,
+    }),
   };
 
   const refresh: ToolRegistration = {
@@ -590,7 +620,11 @@ export function createM1ToolRegistrations(
         body: { version: 1, text: doc.text.normalize("NFC") },
       };
     }) as ToolRegistration["handler"],
-    normalize: (raw) => ({ normalized: raw, observations: 1, modelFacing: raw }),
+    normalize: (raw) => ({
+      normalized: raw,
+      observations: 1,
+      modelFacing: raw,
+    }),
   };
 
   const related: ToolRegistration = {
@@ -650,7 +684,9 @@ export function createM1ToolRegistrations(
     }) as ToolRegistration["handler"],
     normalize: (raw) => {
       const output = raw as { references: unknown[] };
-      const count = Array.isArray(output.references) ? output.references.length : 0;
+      const count = Array.isArray(output.references)
+        ? output.references.length
+        : 0;
       return { normalized: raw, observations: count, modelFacing: raw };
     },
   };
