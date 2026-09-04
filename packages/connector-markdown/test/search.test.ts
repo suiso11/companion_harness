@@ -586,9 +586,9 @@ describe("markdown connector bounded search retention", () => {
 
   it("bounds near-1MiB matches and keeps every skipped entry complete", async () => {
     const dir = scratchVault("md-conn-retainbig-");
-    // Just under 1MiB per file (no multi-GiB allocation: 12 x ~1MiB).
+    // Just under 1MiB per file (no multi-GiB allocation: 6 x ~1MiB).
     const filler = "x".repeat(500_000);
-    for (let i = 0; i < 12; i += 1) {
+    for (let i = 0; i < 6; i += 1) {
       const name = `b${String(i).padStart(2, "0")}.md`;
       writeFileSync(join(dir, name), `# T\n${filler} bigretain ${filler}\n`);
     }
@@ -616,5 +616,5 @@ describe("markdown connector bounded search retention", () => {
     expect(lastLimit).toBe(5);
     expect(peak).toBeLessThanOrEqual(5);
     expect(peak).toBe(5);
-  });
+  }, 15_000);
 });

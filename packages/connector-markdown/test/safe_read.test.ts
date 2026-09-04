@@ -14,11 +14,7 @@ import { describe, expect, it } from "vitest";
 import { discoverMarkdownFilesForRoot } from "../src/discovery.js";
 import { MarkdownConnectorError } from "../src/errors.js";
 import { type InitializedRoot, initializeRoots } from "../src/roots.js";
-import {
-  isNoFollowSupported,
-  MAX_FILE_BYTES,
-  safeReadMarkdownFile,
-} from "../src/safe_read.js";
+import { MAX_FILE_BYTES, safeReadMarkdownFile } from "../src/safe_read.js";
 
 function scratchVault(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -320,14 +316,11 @@ describe("safe read", () => {
       });
       expect.unreachable("expected unsafe/changed rejection");
     } catch (error) {
-      if (isNoFollowSupported()) {
-        // ELOOP trap on the swapped final component.
-        expectConnectorError(error, "markdown_path_unsafe", dir);
-      } else {
-        // No O_NOFOLLOW here: the open follows the plant, but the pre-read
-        // fstat identity compare still rejects before bytes are consumed.
-        expectConnectorError(error, "markdown_read_changed", dir);
-      }
+      // Platform-independent: the planted final-component symlink is always
+      // rejected as path-unsafe. Where O_NOFOLLOW applies the open traps
+      // with ELOOP; where it is unavailable the fallback lstat component
+      // check rejects the plant before any open/byte is consumed.
+      expectConnectorError(error, "markdown_path_unsafe", dir);
     }
   });
 

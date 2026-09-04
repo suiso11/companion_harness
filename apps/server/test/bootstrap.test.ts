@@ -410,11 +410,28 @@ describe("bootstrap startup + graceful shutdown", () => {
     await expect(
       startServer({ env: badEnv, drainMs: 50, logger: retryLogger.logger }),
     ).rejects.toThrow();
-    expect(
-      retryLogger.records.filter(
-        (record) => record.code === "server.start_failed",
-      ),
-    ).toHaveLength(1);
+    const invalidJsonFailed = retryLogger.records.filter(
+      (record) => record.code === "server.start_failed",
+    );
+    // Invalid JSON config logs exactly once with the fixed sanitized
+    // status and no paths/raw values.
+    expect(invalidJsonFailed).toHaveLength(1);
+    expect(invalidJsonFailed[0]?.status).toBe("server_config_invalid");
+    expect(JSON.stringify(invalidJsonFailed[0])).not.toContain("not-json");
+    expect(JSON.stringify(invalidJsonFailed[0])).not.toContain(dbPath);
+    expect(JSON.stringify(retryLogger.records)).not.toContain("not-json");
+  });
+
+  it("logs early config failure once via the safe default logger", async () => {
+    const { env } = tempEnv();
+    // No injected logger: the safe default (process stderr) still emits
+    // exactly the sanitized failure without throwing a second error.
+    await expect(
+      startServer({
+        env: { ...env, COMPANION_MARKDOWN_ROOTS_JSON: "not-json" },
+        drainMs: 50,
+      }),
+    ).rejects.toThrow();
   });
 
   it("maps unknown startup codes to unknown (closed vocabulary)", async () => {

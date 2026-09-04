@@ -39,6 +39,7 @@ import { serve } from "@hono/node-server";
 import { createApp, type EnginePort, type ServerControls } from "./app.js";
 import {
   assertDbPathHasNoSymlink,
+  DEFAULT_LOG_LEVEL,
   loadServerConfig,
   type ServerConfig,
   ServerConfigError,
@@ -159,7 +160,22 @@ export function sanitizeStartupErrorStatus(error: unknown): string {
 export async function startServer(
   options: StartServerOptions = {},
 ): Promise<StartedServer> {
-  const config = loadServerConfig(options.env);
+  // Early config load: failures have no valid logLevel, so log exactly once
+  // through the injected logger or a safe default. Only the sanitized fixed
+  // status is emitted (never paths or raw values). Later startup failures
+  // are logged exactly once by the post-config catch below, which this
+  // early throw never reaches, so no double logging occurs.
+  let config: ServerConfig;
+  try {
+    config = loadServerConfig(options.env);
+  } catch (error) {
+    const earlyLogger =
+      options.logger ?? createStdServerLogger(DEFAULT_LOG_LEVEL);
+    earlyLogger.error("server.start_failed", {
+      status: sanitizeStartupErrorStatus(error),
+    });
+    throw error;
+  }
   const logger = options.logger ?? createStdServerLogger(config.logLevel);
   const now = options.now ?? Date.now;
   const drainMs = options.drainMs ?? SHUTDOWN_DRAIN_MS;
