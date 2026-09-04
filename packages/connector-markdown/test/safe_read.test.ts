@@ -340,6 +340,195 @@ describe("safe read", () => {
     expect(source).not.toMatch(/localeCompare|toLocale[A-Z]/);
   });
 
+  it("rejects drive/scheme-like keys without echoing input", async () => {
+    const dir = scratchVault("md-read-alias-");
+    writeFileSync(join(dir, "note.md"), "# ok\n");
+    const root = onlyRoot(
+      await initializeRoots([{ path: dir, alias: "vault" }]),
+    );
+    const badKeys = [
+      "C:/secret.md",
+      "C:\\secret.md",
+      "a:b/c.md",
+      "https:evil/a.md",
+      "vault:C/note.md",
+      "vault/C:/note.md",
+      "vault/a:b.md",
+    ];
+    for (const badKey of badKeys) {
+      try {
+        await safeReadMarkdownFile(root, badKey);
+        expect.unreachable(`expected markdown_path_unsafe for ${badKey}`);
+      } catch (error) {
+        expect(error).toBeInstanceOf(MarkdownConnectorError);
+        expect((error as MarkdownConnectorError).code).toBe(
+          "markdown_path_unsafe",
+        );
+        const message = (error as Error).message;
+        // Never echo the raw drive/scheme input or absolute paths.
+        expect(message).not.toContain("C:/secret");
+        expect(message).not.toContain("https:evil");
+        expect(message).not.toContain("a:b");
+        expect(message).not.toContain(dir);
+        expect(message).not.toContain(tmpdir());
+        // Malformed keys carry only the safe alias.
+        expect((error as MarkdownConnectorError).canonicalKey).toBe("vault");
+      }
+    }
+  });
+
+  it("forces fallback verification and still reads stable files", async () => {
+    const dir = scratchVault("md-read-forceok-");
+    mkdirSync(join(dir, "sub"), { recursive: true });
+    writeFileSync(join(dir, "sub", "note.md"), "# forced ok\n");
+    const root = onlyRoot(
+      await initializeRoots([{ path: dir, alias: "vault" }]),
+    );
+    const result = await safeReadMarkdownFile(root, "vault/sub/note.md", {
+      forceNoFollowUnsupported: true,
+    });
+    expect(result).toEqual({
+      status: "ok",
+      canonicalKey: "vault/sub/note.md",
+      text: "# forced ok\n",
+    });
+  });
+
+  it("fallback rejects a final-component swap via lstat before bytes", async (ctx: TestContext) => {
+    const dir = scratchVault("md-read-forcefallback-");
+    const outside = scratchVault("md-read-forcefallbackout-");
+    const file = join(dir, "target.md");
+    writeFileSync(file, "# original\n");
+    writeFileSync(join(outside, "other.md"), "# other\n");
+    const probeDir = scratchVault("md-read-forceprobe-");
+    writeFileSync(join(probeDir, "t.md"), "x");
+    if (
+      trySymlink(join(probeDir, "t.md"), join(probeDir, "l.md"), "file") ===
+      "privilege-denied"
+    ) {
+      ctx.skip();
+      return;
+    }
+    const root = onlyRoot(
+      await initializeRoots([{ path: dir, alias: "vault" }]),
+    );
+    try {
+      await safeReadMarkdownFile(root, "vault/target.md", {
+        forceNoFollowUnsupported: true,
+        afterPreStat: () => {
+          renameSync(file, `${file}.orig`);
+          symlinkSync(join(outside, "other.md"), file, "file");
+        },
+      });
+      expect.unreachable("expected markdown_path_unsafe");
+    } catch (error) {
+      // Fallback lstat sees the planted final symlink before any open.
+      expectConnectorError(error, "markdown_path_unsafe", dir);
+      expect((error as MarkdownConnectorError).canonicalKey).toBe(
+        "vault/target.md",
+      );
+    }
+  });
+
+  it("fallback verification is deterministic via injected lstat", async () => {
+    const dir = scratchVault("md-read-inject-");
+    writeFileSync(join(dir, "inject.md"), "# inject\n");
+    const root = onlyRoot(
+      await initializeRoots([{ path: dir, alias: "vault" }]),
+    );
+    const { promises: fsp } = await import("node:fs");
+    const realLstat = fsp.lstat.bind(fsp);
+    const fakeSymlink = {
+      isSymbolicLink: () => true,
+      isDirectory: () => false,
+      isFile: () => false,
+    };
+    try {
+      await safeReadMarkdownFile(root, "vault/inject.md", {
+        forceNoFollowUnsupported: true,
+        lstat: async (targetAbs: string) => {
+          if (targetAbs.endsWith("inject.md")) {
+            return fakeSymlink as never;
+          }
+          return realLstat(targetAbs);
+        },
+      });
+      expect.unreachable("expected markdown_path_unsafe");
+    } catch (error) {
+      expectConnectorError(error, "markdown_path_unsafe", dir);
+    }
+    // Production default (no injection) still reads the stable file.
+    expect(await safeReadMarkdownFile(root, "vault/inject.md")).toMatchObject({
+      status: "ok",
+    });
+  });
+
+  it("oversize-during-read defers to swap precedence", async () => {
+    const dir = scratchVault("md-read-overchange-");
+    const file = join(dir, "swapbig.md");
+    writeFileSync(file, "small\n");
+    const root = onlyRoot(
+      await initializeRoots([{ path: dir, alias: "vault" }]),
+    );
+    try {
+      await safeReadMarkdownFile(root, "vault/swapbig.md", {
+        afterPreStat: () => {
+          // Different inode with oversize content: identity mismatch must
+          // win over the oversize skip (pre-read fstat fires before bytes).
+          renameSync(file, `${file}.orig`);
+          writeFileSync(file, "z".repeat(MAX_FILE_BYTES + 32));
+        },
+      });
+      expect.unreachable("expected markdown_read_changed");
+    } catch (error) {
+      expectConnectorError(error, "markdown_read_changed", dir);
+    }
+  });
+
+  it("oversize-after-open defers to post-identity precedence", async () => {
+    const dir = scratchVault("md-read-overchange2-");
+    const file = join(dir, "swapbig2.md");
+    writeFileSync(file, "small\n");
+    const root = onlyRoot(
+      await initializeRoots([{ path: dir, alias: "vault" }]),
+    );
+    try {
+      await safeReadMarkdownFile(root, "vault/swapbig2.md", {
+        afterPreStat: () => {
+          // Same window but forced through the fallback path: the lstat
+          // component check plus pre-read fstat still reject before bytes.
+          renameSync(file, `${file}.orig`);
+          writeFileSync(file, "z".repeat(MAX_FILE_BYTES + 32));
+        },
+        forceNoFollowUnsupported: true,
+      });
+      expect.unreachable("expected markdown_read_changed");
+    } catch (error) {
+      expectConnectorError(error, "markdown_read_changed", dir);
+    }
+  });
+
+  it("stable growth during read still skips after post checks", async () => {
+    const dir = scratchVault("md-read-overstable-");
+    const file = join(dir, "growlate.md");
+    writeFileSync(file, "a".repeat(MAX_FILE_BYTES - 64));
+    const root = onlyRoot(
+      await initializeRoots([{ path: dir, alias: "vault" }]),
+    );
+    const result = await safeReadMarkdownFile(root, "vault/growlate.md", {
+      afterOpen: () => {
+        // Same inode growth past the bound: stable identity + contained
+        // realpath still returns an explicit skip.
+        appendFileSync(file, "b".repeat(256));
+      },
+    });
+    expect(result).toEqual({
+      status: "skipped",
+      canonicalKey: "vault/growlate.md",
+      reason: "file_too_large",
+    });
+  });
+
   it("aborts before the first byte when the signal is already aborted", async () => {
     const dir = scratchVault("md-read-abortbefore-");
     writeFileSync(join(dir, "note.md"), "# hello\n");

@@ -238,6 +238,76 @@ describe("markdown connector search core", () => {
     ).rejects.toMatchObject({ code: "invalid_input" });
   });
 
+  it("rejects drive/scheme/absolute keys as invalid without echo or bytes", async () => {
+    const dir = scratchVault("md-conn-alias-");
+    writeFileSync(join(dir, "real.md"), "# Real\nbody\n");
+    let hookCalls = 0;
+    const counting = () => {
+      hookCalls += 1;
+    };
+    const connector = await createMarkdownConnector([{ path: dir }], {
+      safeRead: {
+        afterPreStat: counting,
+        afterOpen: counting,
+        afterRead: counting,
+      },
+    });
+    const badKeys: unknown[] = [
+      "C:/secret.md",
+      "C:\\secret.md",
+      "a:b/c.md",
+      "https:evil/a.md",
+      "vault-1:C/a.md",
+      "/etc/passwd.md",
+      "\\server\\share.md",
+      "vault-1\\note.md",
+      "vault-1/a\0b.md",
+      "vault-1/../evil.md",
+      "vault-1/./a.md",
+      "vault-1//a.md",
+      ".hidden/a.md",
+      "-bad/a.md",
+      "vault-1/a.txt",
+      "vault-1/a",
+      "vault-1/",
+      "not-a-key",
+      "",
+      42,
+      null,
+    ];
+    for (const badKey of badKeys) {
+      try {
+        await connector.readCanonical(badKey);
+        expect.unreachable(`expected invalid_input for ${String(badKey)}`);
+      } catch (error) {
+        expect(error).toBeInstanceOf(MarkdownConnectorError);
+        expect((error as MarkdownConnectorError).code).toBe("invalid_input");
+        // Never echo raw input, absolute paths, or drive/scheme text.
+        expect((error as MarkdownConnectorError).canonicalKey).toBeNull();
+        expect(String(error)).not.toContain("C:/secret");
+        expect(String(error)).not.toContain("https:evil");
+        expect(String(error)).not.toContain("/etc/passwd");
+        expect(String(error)).not.toContain(dir);
+        expect(String(error)).not.toContain(tmpdir());
+      }
+    }
+    expect(hookCalls).toBe(0);
+    // Well-formed but unknown alias/key stays reference_not_found with safe key.
+    try {
+      await connector.readCanonical("vault-1/missing.md");
+      expect.unreachable();
+    } catch (error) {
+      expect((error as MarkdownConnectorError).code).toBe(
+        "reference_not_found",
+      );
+      expect((error as MarkdownConnectorError).canonicalKey).toBe(
+        "vault-1/missing.md",
+      );
+      expect(String(error)).not.toContain(dir);
+    }
+    expect(hookCalls).toBe(0);
+  });
+
   it("rejects non-.md keys as invalid before any byte read", async () => {
     const dir = scratchVault("md-conn-nomd-");
     writeFileSync(join(dir, "notes.txt"), "plain text body\n");

@@ -505,6 +505,9 @@ function rootForAlias(
   return null;
 }
 
+/** Same safe token grammar as configured roots (roots.ts). */
+const ALIAS_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+
 function validateCanonicalShape(canonicalKey: unknown): {
   alias: string;
 } {
@@ -515,7 +518,8 @@ function validateCanonicalShape(canonicalKey: unknown): {
     canonicalKey === "" ||
     canonicalKey.includes("\\") ||
     canonicalKey.includes("\0") ||
-    canonicalKey.startsWith("/")
+    canonicalKey.startsWith("/") ||
+    canonicalKey.startsWith("\\")
   ) {
     throw new MarkdownConnectorError("invalid_input", null);
   }
@@ -524,6 +528,13 @@ function validateCanonicalShape(canonicalKey: unknown): {
     throw new MarkdownConnectorError("invalid_input", null);
   }
   const alias = canonicalKey.slice(0, slash);
+  // The alias must use the same safe token grammar as configured roots so
+  // drive (`C:`), scheme-like (`a:b`), slash, dot-segment, or absolute
+  // aliases can never reach discovery or a content byte. Failures carry
+  // null and never echo the raw input.
+  if (!ALIAS_PATTERN.test(alias)) {
+    throw new MarkdownConnectorError("invalid_input", null);
+  }
   const rest = canonicalKey.slice(slash + 1);
   for (const segment of rest.split("/")) {
     if (segment === "" || segment === "." || segment === "..") {
