@@ -26,11 +26,14 @@ import {
   BUNDLED_SCHEMA_VERSION,
   BackupRequiredError,
   closeKernelDatabase,
+  createManualBackup,
   createPreMigrationBackup,
   getSchemaVersion,
   hasUserTables,
   listMigrations,
   listPreMigrationBackups,
+  MANUAL_BACKUP_PREFIX,
+  manualBackupName,
   migrateKernelDatabase,
   NewerDatabaseError,
   openKernelDatabase,
@@ -363,6 +366,73 @@ describe("m0 pre-migration backup rotation", () => {
     expect(pruned).toHaveLength(1);
     expect(pruned[0]?.endsWith(names[0] as string)).toBe(true);
     expect(statSync(join(backups, "companion-manual-keep.sqlite")).isFile()).toBe(true);
+  });
+});
+
+describe("m0 manual backup (stopped-only, never rotated)", () => {
+  const MANUAL_PATTERN =
+    /^companion-manual-\d{8}T\d{6}Z-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.sqlite$/;
+
+  it("names exact manual backups that never match the pre-migration prefix", () => {
+    const name = manualBackupName(
+      new Date("2026-09-04T03:59:59.000Z"),
+      "11111111-2222-4333-8444-555555555555",
+    );
+    expect(name).toBe(
+      "companion-manual-20260904T035959Z-11111111-2222-4333-8444-555555555555.sqlite",
+    );
+    expect(name).toMatch(MANUAL_PATTERN);
+    expect(name.startsWith(PRE_MIGRATION_PREFIX)).toBe(false);
+    expect(MANUAL_BACKUP_PREFIX.startsWith(PRE_MIGRATION_PREFIX)).toBe(false);
+  });
+
+  it("takes a manual backup via backup API + quick_check + rename, unrotated", async () => {
+    const dir = tempDir();
+    const backups = join(dir, "backups");
+    const source = openKernelDatabase(":memory:");
+    try {
+      const first = await createManualBackup({
+        source: source.raw,
+        backupDir: backups,
+        now: new Date("2026-09-04T03:59:59.000Z"),
+        backupId: "11111111-2222-4333-8444-555555555555",
+      });
+      const second = await createManualBackup({
+        source: source.raw,
+        backupDir: backups,
+        now: new Date("2026-09-05T00:00:00.000Z"),
+        backupId: "22222222-3333-4444-8555-666666666666",
+      });
+      for (const path of [first, second]) {
+        const name = path.split(/[\\/]/).pop() as string;
+        expect(name).toMatch(MANUAL_PATTERN);
+        const copy = new Database(path, { readonly: true });
+        try {
+          expect(quickCheck(copy)).toBe("ok");
+        } finally {
+          copy.close();
+        }
+      }
+      // No .partial residue, no rotation: both manual backups remain.
+      expect(
+        readdirSync(backups).filter((entry) => entry.endsWith(".partial")),
+      ).toEqual([]);
+      expect(readdirSync(backups)).toHaveLength(2);
+      // Pre-migration rotation never touches manual backups.
+      const { kept } = prunePreMigrationBackups(backups, 3);
+      expect(kept).toHaveLength(0);
+      expect(readdirSync(backups)).toHaveLength(2);
+    } finally {
+      closeKernelDatabase(source);
+    }
+  });
+
+  it("uses only the backup API (no VACUUM INTO / raw copy)", () => {
+    const testDir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(testDir, "..", "src", "backup.ts"), "utf8");
+    expect(src).toContain(".backup(");
+    expect(src).not.toContain("VACUUM");
+    expect(src).not.toContain("copyFile");
   });
 });
 

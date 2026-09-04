@@ -579,3 +579,33 @@ describe("m0 kernel run_events and tool_calls contracts", () => {
     }
   });
 });
+
+describe("m0 private POSIX permissions (non-Windows only)", () => {
+  const isWindows = process.platform === "win32";
+
+  it("creates app/backup dirs 0700 and DB/backup files 0600", async () => {
+    if (isWindows) {
+      return;
+    }
+    const { statSync } = await import("node:fs");
+    const { createManualBackup, ensureBackupDir } = await import("../src/index.js");
+    const dir = tempDir();
+    const backups = ensureBackupDir(join(dir, "backups"));
+    expect(statSync(backups).mode & 0o777).toBe(0o700);
+    const file = join(dir, "kernel.sqlite");
+    const handle = openKernelDatabase(file);
+    try {
+      expect(statSync(file).mode & 0o777).toBe(0o600);
+      const backupPath = await createManualBackup({
+        source: handle.raw,
+        backupDir: backups,
+        now: new Date("2026-09-04T03:59:59.000Z"),
+        backupId: "11111111-2222-4333-8444-555555555555",
+      });
+      expect(statSync(backupPath).mode & 0o777).toBe(0o600);
+      expect(statSync(backups).mode & 0o777).toBe(0o700);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+});

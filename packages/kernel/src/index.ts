@@ -8,17 +8,25 @@
 // policy pipeline (static registry, fixed ordering, metadata-only audit).
 // HTTP lives in later milestones and is NOT part of this module.
 
-export type { PreMigrationBackupOptions } from "./backup.js";
+export type { ManualBackupOptions, PreMigrationBackupOptions } from "./backup.js";
 export {
+  applyPrivatePosixMode,
+  createManualBackup,
   createPreMigrationBackup,
   ensureBackupDir,
   formatBackupUtc,
   listPreMigrationBackups,
+  MANUAL_BACKUP_PARTIAL_SUFFIX,
+  MANUAL_BACKUP_PREFIX,
+  MANUAL_BACKUP_SUFFIX,
+  manualBackupName,
   PRE_MIGRATION_KEEP_GENERATIONS,
   PRE_MIGRATION_PARTIAL_SUFFIX,
   PRE_MIGRATION_PREFIX,
   PRE_MIGRATION_SUFFIX,
   preMigrationBackupName,
+  PRIVATE_DIR_MODE,
+  PRIVATE_FILE_MODE,
   prunePreMigrationBackups,
 } from "./backup.js";
 export type {
@@ -58,9 +66,11 @@ export type {
   KernelPragmas,
 } from "./connection.js";
 export {
+  applyPrivateDbFileMode,
   closeKernelDatabase,
   getKernelPragmas,
   KERNEL_BUSY_TIMEOUT_MS,
+  KERNEL_DB_FILE_MODE,
   KERNEL_JOURNAL_MODE,
   KERNEL_SYNCHRONOUS_NORMAL,
   openKernelDatabase,

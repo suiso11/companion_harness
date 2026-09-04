@@ -7,6 +7,7 @@
 
 import Database from "better-sqlite3";
 import { type BetterSQLite3Database, drizzle } from "drizzle-orm/better-sqlite3";
+import { chmodSync } from "node:fs";
 import { PragmasError, QuickCheckError } from "./errors.js";
 import { kernelSchema } from "./schema.js";
 
@@ -32,7 +33,25 @@ export interface KernelPragmas {
   busyTimeoutMs: number;
 }
 
-/** Agreed single-connection PRAGMA set (§9 blocker 7.2). */
+/** Private POSIX file mode for the DB (0600). Windows: current-user ACL reliance. */
+export const KERNEL_DB_FILE_MODE = 0o600;
+
+/**
+ * Apply 0600 to a file-backed DB path. No-op for :memory: and Windows.
+ * Fail-closed: chmod failure closes nothing here; the caller maps it.
+ */
+export function applyPrivateDbFileMode(dbPath: string): void {
+  if (dbPath === ":memory:" || process.platform === "win32") {
+    return;
+  }
+  try {
+    chmodSync(dbPath, KERNEL_DB_FILE_MODE);
+  } catch (error) {
+    throw new PragmasError("kernel database file permissions failed", {
+      cause: error,
+    });
+  }
+}
 export const KERNEL_JOURNAL_MODE = "wal";
 export const KERNEL_SYNCHRONOUS_NORMAL = 1;
 export const KERNEL_BUSY_TIMEOUT_MS = 5000;
@@ -80,6 +99,16 @@ export function openKernelDatabase(dbPath: string): KernelDatabaseHandle {
       throw new PragmasError("kernel PRAGMA busy_timeout verification failed");
     }
     const wrapped: KernelDrizzle = drizzle(raw, { schema: kernelSchema });
+    // Private POSIX permissions (0600) for file-backed DBs. No-op on
+    // :memory:/Windows. Fail-closed: chmod failure aborts open.
+    if (!isMemory) {
+      try {
+        applyPrivateDbFileMode(dbPath);
+      } catch (error) {
+        raw.close();
+        throw error;
+      }
+    }
     return { raw, drizzle: wrapped, path: dbPath, journalMode: applied.journalMode };
   } catch (error) {
     raw.close();

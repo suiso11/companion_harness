@@ -18,6 +18,7 @@
 import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 import {
+  chmodSync,
   lstatSync,
   mkdirSync,
   readdirSync,
@@ -33,6 +34,36 @@ export const PRE_MIGRATION_PREFIX = "companion-pre-migration-";
 export const PRE_MIGRATION_SUFFIX = ".sqlite";
 export const PRE_MIGRATION_PARTIAL_SUFFIX = ".partial";
 export const PRE_MIGRATION_KEEP_GENERATIONS = 3;
+
+/** Manual backup naming (exact, §19.2): never rotated, never pre-migration prefix. */
+export const MANUAL_BACKUP_PREFIX = "companion-manual-";
+export const MANUAL_BACKUP_SUFFIX = ".sqlite";
+export const MANUAL_BACKUP_PARTIAL_SUFFIX = ".partial";
+
+/** Private POSIX modes. Windows: no chmod guarantee (current-user ACL reliance). */
+export const PRIVATE_DIR_MODE = 0o700;
+export const PRIVATE_FILE_MODE = 0o600;
+
+function isWindowsPlatform(): boolean {
+  return process.platform === "win32";
+}
+
+/**
+ * Apply a private POSIX mode. No-op on Windows (documented current-user
+ * ACL reliance; no misleading chmod security claim).
+ */
+export function applyPrivatePosixMode(path: string, mode: number): void {
+  if (isWindowsPlatform()) {
+    return;
+  }
+  try {
+    chmodSync(path, mode);
+  } catch (error: unknown) {
+    throw new BackupError("cannot secure backup path permissions", {
+      cause: error,
+    });
+  }
+}
 
 function requireMigrationVersions(fromVersion: number, toVersion: number): void {
   if (!Number.isInteger(fromVersion) || fromVersion < 0) {
@@ -179,6 +210,8 @@ export function ensureBackupDir(backupDir: string): string {
   if (!stat.isDirectory()) {
     throw new BackupError("backup path is not a directory");
   }
+  // Private POSIX permissions (0700). No-op on Windows.
+  applyPrivatePosixMode(absDir, PRIVATE_DIR_MODE);
   return absDir;
 }
 
@@ -232,6 +265,8 @@ export async function createPreMigrationBackup(
     }
     // SOLE copy method: the online backup API (no vacuum-into, no copy).
     await source.backup(partialPath);
+    // Private permissions before verification (0600; Windows no-op).
+    applyPrivatePosixMode(partialPath, PRIVATE_FILE_MODE);
     const copy = new Database(partialPath, { readonly: true });
     try {
       quickCheck(copy);
@@ -239,6 +274,8 @@ export async function createPreMigrationBackup(
       copy.close();
     }
     renameSync(partialPath, finalPath);
+    // Rename preserves the mode on POSIX; re-assert 0600 best-effort closed.
+    applyPrivatePosixMode(finalPath, PRIVATE_FILE_MODE);
   } catch (error) {
     try {
       unlinkSync(partialPath);
@@ -366,4 +403,79 @@ export function prunePreMigrationBackups(
     }
   }
   return { kept, pruned };
+}
+
+/** Exact manual backup name: companion-manual-<UTC>-<uuid>.sqlite. */
+export function manualBackupName(now: Date, backupId: string): string {
+  requireBackupId(backupId);
+  if (!(now instanceof Date) || Number.isNaN(now.getTime())) {
+    throw new BackupError("invalid manual backup timestamp");
+  }
+  const name = `${MANUAL_BACKUP_PREFIX}${formatBackupUtc(now)}-${backupId}${MANUAL_BACKUP_SUFFIX}`;
+  // Manual backups must never match the pre-migration prefix (no rotation).
+  if (name.startsWith(PRE_MIGRATION_PREFIX)) {
+    throw new BackupError("invalid manual backup name");
+  }
+  return name;
+}
+
+export interface ManualBackupOptions {
+  /** Open source handle. The SOLE copy method is its backup() API. */
+  source: Database.Database;
+  backupDir: string;
+  /** Injectable for deterministic tests. Defaults to new Date(). */
+  now?: Date;
+  /** Injectable for deterministic tests. Defaults to randomUUID(). */
+  backupId?: string;
+}
+
+/**
+ * Take a manual backup while the server is stopped: backup API ->
+ * .partial file, private permissions (0600; Windows no-op), quick_check
+ * of the copy, atomic rename to the final exact name.
+ *
+ * Manual backups are NEVER rotated or pruned.
+ *
+ * @returns the final backup file path.
+ * @throws {BackupError} on any backup/quick_check/rename failure.
+ */
+export async function createManualBackup(
+  options: ManualBackupOptions,
+): Promise<string> {
+  const { source, backupDir } = options;
+  const now = options.now ?? new Date();
+  const backupId = options.backupId ?? randomUUID();
+  const finalName = manualBackupName(now, backupId);
+  const absDir = ensureBackupDir(backupDir);
+  const finalPath = resolve(absDir, finalName);
+  const partialPath = `${finalPath}${MANUAL_BACKUP_PARTIAL_SUFFIX}`;
+  if (!isPathUnderBase(absDir, finalPath) || !isPathUnderBase(absDir, partialPath)) {
+    throw new BackupError("invalid manual backup path");
+  }
+  try {
+    try {
+      unlinkSync(partialPath);
+    } catch {
+      // Best effort: stale partials must not block a fresh backup.
+    }
+    // SOLE copy method: the online backup API (no VACUUM INTO, no file copy).
+    await source.backup(partialPath);
+    applyPrivatePosixMode(partialPath, PRIVATE_FILE_MODE);
+    const copy = new Database(partialPath, { readonly: true });
+    try {
+      quickCheck(copy);
+    } finally {
+      copy.close();
+    }
+    renameSync(partialPath, finalPath);
+    applyPrivatePosixMode(finalPath, PRIVATE_FILE_MODE);
+  } catch (error) {
+    try {
+      unlinkSync(partialPath);
+    } catch {
+      // Best effort cleanup of the unverified partial.
+    }
+    throw new BackupError("manual backup failed", { cause: error });
+  }
+  return finalPath;
 }
