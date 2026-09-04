@@ -1,7 +1,57 @@
-// @companion/connector-markdown — M1 scaffold placeholder.
-//
-// M1 implementation is not started. This module only reserves the package
-// boundary (direct Markdown connector, mdast-util-from-markdown parser).
-// No unified/remark, no HTML renderer, no wiki-link extension dependency.
+/**
+ * M1 Markdown connector core — first slice: errors, roots, text, markdown.
+ *
+ * RUNTIME PRIVACY (hard rule): configured absolute root paths are
+ * runtime-private. They never appear in returned values, persisted metadata,
+ * errors, logs, snapshots, or test assertions. Only root-relative POSIX
+ * canonical keys (`<alias>/<relative-posix>`) leave this package.
+ *
+ * DETERMINISM: explicit `<`/`>` code-unit ordering (never locale-sensitive),
+ * NFC normalization, locale-independent per-code-point lowercase folding,
+ * whole-query literal matching, and fixed snippet windows around the first
+ * body hit. No tokenization, FTS, GFM extensions, semantic search, HTML
+ * rendering, unified/remark, or locale-sensitive comparison anywhere.
+ *
+ * Later slices (discovery/safe read/search/DB/ToolBroker) are explicitly
+ * out of scope for this commit; this module exports only what exists so
+ * typecheck passes coherently.
+ */
 
-export const CONNECTOR_MARKDOWN_SCAFFOLD = "m1-scaffold" as const;
+export type {
+  ConnectorErrorCode,
+  ConnectorSkippedReason,
+} from "./errors.js";
+export {
+  CONNECTOR_ERROR_CODES,
+  MarkdownConnectorError,
+  SKIPPED_REASONS,
+} from "./errors.js";
+export type {
+  ParsedMarkdown,
+  StandardLink,
+  WikiLink,
+} from "./markdown.js";
+export { parseMarkdown } from "./markdown.js";
+export type {
+  ConfiguredRootInput,
+  InitializedRoot,
+  InitializedRootInfo,
+} from "./roots.js";
+export {
+  initializeRoots,
+  isWithinRealRoot,
+  validateRootInputs,
+} from "./roots.js";
+export type { TextHit } from "./text.js";
+export {
+  containsFolded,
+  countCodePointsLocal,
+  equalsFolded,
+  findFirstHit,
+  foldQuery,
+  makeSnippet,
+  normalizeNFC,
+  SNIPPET_CONTEXT_BEFORE,
+  SNIPPET_MAX_CODE_POINTS,
+  sliceCodePoints,
+} from "./text.js";
