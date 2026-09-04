@@ -1,0 +1,14 @@
+{
+  "version": 7,
+  "dialect": "sqlite",
+  "id": "m0-foundation",
+  "entries": [
+    {
+      "idx": 0,
+      "version": 1,
+      "when": 1790000000000,
+      "tag": "0001_m0_foundation",
+      "breakpoints": true
+    }
+  ]
+}
