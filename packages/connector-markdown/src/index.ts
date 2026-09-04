@@ -22,6 +22,7 @@ export type {
   MarkdownConnector,
   MarkdownConnectorHooks,
   MarkdownDocument,
+  MarkdownReadOptions,
   MarkdownSearchHit,
   MarkdownSearchInput,
   MarkdownSearchResult,

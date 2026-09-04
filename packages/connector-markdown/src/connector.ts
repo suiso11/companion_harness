@@ -58,6 +58,15 @@
  * the safe-read failure code.
  * Oversize/invalid-UTF8 targets cannot materialize and surface as
  * `markdown_read_failed`.
+ *
+ * CANCELLATION: `search` accepts an optional `{ signal }` input field and
+ * `readCanonical` an optional `{ signal }` options argument. The signal is
+ * passed into discovery and safe read and checked before discovery, before
+ * each directory/entry traversal stage, before open/first byte, before
+ * each 64KiB chunk, and before return. An abort throws `AbortError`
+ * (never wrapped, carrying no path or content); bytes buffered before the
+ * abort are discarded, and containment/identity/post-fstat/close/size/UTF-8
+ * rules are never weakened.
  */
 
 import { createHash } from "node:crypto";
@@ -157,13 +166,32 @@ export interface MarkdownDocument {
 export interface MarkdownSearchInput {
   readonly query: unknown;
   readonly limit?: unknown;
+  /** Optional cooperative cancellation; checked before discovery, before
+   * each file read, and before ranking/return. Abort throws `AbortError`
+   * with no path or content. */
+  readonly signal?: AbortSignal;
+}
+
+export interface MarkdownReadOptions {
+  readonly signal?: AbortSignal;
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    const error = new Error("operation aborted");
+    error.name = "AbortError";
+    throw error;
+  }
 }
 
 export interface MarkdownConnector {
   /** Path-free root descriptors in alias code-unit order. */
   readonly roots: readonly InitializedRootInfo[];
   search(input: MarkdownSearchInput): Promise<MarkdownSearchResult>;
-  readCanonical(canonicalKey: unknown): Promise<MarkdownDocument>;
+  readCanonical(
+    canonicalKey: unknown,
+    options?: MarkdownReadOptions,
+  ): Promise<MarkdownDocument>;
 }
 
 export interface MarkdownConnectorHooks {
@@ -492,11 +520,19 @@ export async function createMarkdownConnector(
     if (typeof input !== "object" || input === null) {
       throw new MarkdownConnectorError("invalid_input", null);
     }
+    const signal = (input as { signal?: unknown }).signal;
+    if (signal !== undefined && !(signal instanceof AbortSignal)) {
+      throw new MarkdownConnectorError("invalid_input", null);
+    }
+    throwIfAborted(signal);
     const query = validateQuery((input as { query?: unknown }).query);
     const limit = validateLimit((input as { limit?: unknown }).limit);
+    throwIfAborted(signal);
 
-    // Discovery before any content byte; whole-call failures propagate.
-    const discovered = await discoverMarkdownFiles(roots);
+    // Discovery before any content byte; whole-call failures propagate
+    // (including AbortError, which is never wrapped with paths).
+    const discovered = await discoverMarkdownFiles(roots, { signal });
+    throwIfAborted(signal);
     const existing = new Set(discovered.map((entry) => entry.canonicalKey));
     const keysByAlias = new Map<string, string[]>();
     for (const entry of discovered) {
@@ -511,17 +547,21 @@ export async function createMarkdownConnector(
 
     // Safely read every candidate (discovery order is canonical-key
     // sorted); explicit skips accumulate without any result-limit slice.
+    // The signal is checked before each file so a mid-search abort
+    // discards buffered bytes instead of returning partial hits.
     const skipped: MarkdownSkippedEntry[] = [];
     const ranked: RankedHit[] = [];
     for (const entry of discovered) {
+      throwIfAborted(signal);
       const alias = aliasOf(entry.canonicalKey) ?? "";
       const root = byAlias.get(alias);
       if (root === undefined) continue;
       const result = await safeReadMarkdownFile(
         root,
         entry.canonicalKey,
-        hooks.safeRead ?? {},
+        { ...(hooks.safeRead ?? {}), signal },
       );
+      throwIfAborted(signal);
       if (result.status === "skipped") {
         skipped.push({
           canonicalKey: entry.canonicalKey,
@@ -559,7 +599,13 @@ export async function createMarkdownConnector(
 
   async function readCanonical(
     canonicalKey: unknown,
+    options: MarkdownReadOptions = {},
   ): Promise<MarkdownDocument> {
+    const signal = options.signal;
+    if (signal !== undefined && !(signal instanceof AbortSignal)) {
+      throw new MarkdownConnectorError("invalid_input", null);
+    }
+    throwIfAborted(signal);
     const { alias } = validateCanonicalShape(canonicalKey);
     const key = canonicalKey as string;
     const root = rootForAlias(roots, alias);
@@ -570,7 +616,9 @@ export async function createMarkdownConnector(
     // search. The key must be an exact discovered `.md` canonical key:
     // anything undiscovered returns `reference_not_found` BEFORE the
     // single content read below, so no byte is touched for misses.
-    const discovered = await discoverMarkdownFiles(roots);
+    throwIfAborted(signal);
+    const discovered = await discoverMarkdownFiles(roots, { signal });
+    throwIfAborted(signal);
     const existing = new Set(discovered.map((entry) => entry.canonicalKey));
     if (!existing.has(key)) {
       throw new MarkdownConnectorError("reference_not_found", key);
@@ -578,7 +626,12 @@ export async function createMarkdownConnector(
     const keysInRoot = discovered
       .map((entry) => entry.canonicalKey)
       .filter((candidate) => aliasOf(candidate) === alias);
-    const result = await safeReadMarkdownFile(root, key, hooks.safeRead ?? {});
+    throwIfAborted(signal);
+    const result = await safeReadMarkdownFile(root, key, {
+      ...(hooks.safeRead ?? {}),
+      signal,
+    });
+    throwIfAborted(signal);
     if (result.status === "skipped") {
       throw new MarkdownConnectorError("markdown_read_failed", key);
     }

@@ -315,4 +315,56 @@ describe("markdown connector search core", () => {
     expect(source).not.toContain("toLocaleUpperCase(");
     expect(source).not.toContain("localeCompare(");
   });
+
+  it("aborts before discovery when the signal is already aborted", async () => {
+    const dir = scratchVault("md-conn-abortbefore-");
+    writeFileSync(join(dir, "a.md"), "# A\nhello body\n");
+    const connector = await createMarkdownConnector([{ path: dir }]);
+    const controller = new AbortController();
+    controller.abort();
+    try {
+      await connector.search({ query: "hello", signal: controller.signal });
+      expect.unreachable("expected AbortError");
+    } catch (error) {
+      expect((error as Error).name).toBe("AbortError");
+      expect(String(error)).not.toContain(dir);
+      expect(String(error)).not.toContain(tmpdir());
+    }
+    try {
+      await connector.readCanonical("vault-1/a.md", {
+        signal: controller.signal,
+      });
+      expect.unreachable("expected AbortError");
+    } catch (error) {
+      expect((error as Error).name).toBe("AbortError");
+      expect(String(error)).not.toContain(dir);
+      expect(String(error)).not.toContain(tmpdir());
+      expect(String(error)).not.toContain("a.md");
+    }
+    // Existing call compatibility: omitting the signal still searches.
+    const ok = await connector.search({ query: "hello" });
+    expect(ok.hits).toHaveLength(1);
+  });
+
+  it("aborts during per-file reads and discards partial hits", async () => {
+    const dir = scratchVault("md-conn-abortduring-");
+    writeFileSync(join(dir, "a.md"), "# A\nhello one\n");
+    writeFileSync(join(dir, "b.md"), "# B\nhello two\n");
+    const controller = new AbortController();
+    const connector = await createMarkdownConnector([{ path: dir }], {
+      safeRead: {
+        afterPreStat: () => {
+          controller.abort();
+        },
+      },
+    });
+    try {
+      await connector.search({ query: "hello", signal: controller.signal });
+      expect.unreachable("expected AbortError");
+    } catch (error) {
+      expect((error as Error).name).toBe("AbortError");
+      expect(String(error)).not.toContain(dir);
+      expect(String(error)).not.toContain(tmpdir());
+    }
+  });
 });

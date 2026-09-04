@@ -59,11 +59,25 @@ export const MAX_FILE_BYTES = 1_048_576;
 /** Chunk size for bounded reads; total buffering never exceeds 1MiB + 1. */
 const CHUNK_BYTES = 65_536;
 
-/** Deterministic TOCTOU windows for tests; no-ops unless provided. */
+/** Deterministic TOCTOU windows for tests; no-ops unless provided. `signal`
+ * adds cooperative cancellation: it is checked before every potentially
+ * long stage (resolve, stat, open, each chunk, post-checks, decode) and an
+ * abort throws an `AbortError` carrying no path or content. Buffered bytes
+ * are discarded on abort; containment, identity, post-fstat, close-finally,
+ * size, and UTF-8 rules are never weakened. */
 export interface SafeReadHooks {
   afterPreStat?: () => Promise<void> | void;
   afterOpen?: () => Promise<void> | void;
   afterRead?: () => Promise<void> | void;
+  signal?: AbortSignal;
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    const error = new Error("operation aborted");
+    error.name = "AbortError";
+    throw error;
+  }
 }
 
 export type SafeReadResult =
@@ -144,6 +158,8 @@ export async function safeReadMarkdownFile(
   if (typeof canonicalKey !== "string") {
     throw new MarkdownConnectorError("markdown_path_unsafe", null);
   }
+  const signal = hooks.signal;
+  throwIfAborted(signal);
   const segments = parseRelativeSegments(root, canonicalKey);
   if (segments === null) {
     throw new MarkdownConnectorError("markdown_path_unsafe", root.alias);
@@ -157,6 +173,7 @@ export async function safeReadMarkdownFile(
   } catch {
     throw new MarkdownConnectorError("markdown_read_failed", key);
   }
+  throwIfAborted(signal);
   if (!isWithinRealRoot(root.realPath, preReal)) {
     throw new MarkdownConnectorError("markdown_path_unsafe", key);
   }
@@ -166,6 +183,7 @@ export async function safeReadMarkdownFile(
   } catch {
     throw new MarkdownConnectorError("markdown_read_failed", key);
   }
+  throwIfAborted(signal);
   if (!preStat.isFile()) {
     throw new MarkdownConnectorError("markdown_read_failed", key);
   }
@@ -181,6 +199,7 @@ export async function safeReadMarkdownFile(
   }
 
   await hooks.afterPreStat?.();
+  throwIfAborted(signal);
 
   const nofollow = isNoFollowSupported() ? (constants.O_NOFOLLOW as number) : 0;
   let handle: FileHandle;
@@ -221,14 +240,17 @@ export async function safeReadMarkdownFile(
     if (!sameIdentity(pre, openedIdentity)) {
       throw new MarkdownConnectorError("markdown_read_changed", key);
     }
+    throwIfAborted(signal);
 
     await hooks.afterOpen?.();
+    throwIfAborted(signal);
 
     const parts: Buffer[] = [];
     let total = 0;
     let position = 0;
     let oversize = false;
     while (total <= MAX_FILE_BYTES) {
+      throwIfAborted(signal);
       const want = Math.min(CHUNK_BYTES, MAX_FILE_BYTES + 1 - total);
       const buffer = Buffer.alloc(want);
       let bytesRead: number;
@@ -253,6 +275,7 @@ export async function safeReadMarkdownFile(
     }
 
     await hooks.afterRead?.();
+    throwIfAborted(signal);
 
     let post: Stats;
     try {
@@ -286,6 +309,7 @@ export async function safeReadMarkdownFile(
     if (postReal !== preReal) {
       throw new MarkdownConnectorError("markdown_read_changed", key);
     }
+    throwIfAborted(signal);
 
     const raw = Buffer.concat(parts, total);
     let text: string;

@@ -339,4 +339,63 @@ describe("safe read", () => {
     expect(source).not.toMatch(/readFile|createReadStream/);
     expect(source).not.toMatch(/localeCompare|toLocale[A-Z]/);
   });
+
+  it("aborts before the first byte when the signal is already aborted", async () => {
+    const dir = scratchVault("md-read-abortbefore-");
+    writeFileSync(join(dir, "note.md"), "# hello\n");
+    const root = onlyRoot(
+      await initializeRoots([{ path: dir, alias: "vault" }]),
+    );
+    let hookCalls = 0;
+    const counting = () => {
+      hookCalls += 1;
+    };
+    const controller = new AbortController();
+    controller.abort();
+    try {
+      await safeReadMarkdownFile(root, "vault/note.md", {
+        signal: controller.signal,
+        afterPreStat: counting,
+        afterOpen: counting,
+        afterRead: counting,
+      });
+      expect.unreachable("expected AbortError");
+    } catch (error) {
+      expect((error as Error).name).toBe("AbortError");
+      expect(String(error)).not.toContain(dir);
+      expect(String(error)).not.toContain(tmpdir());
+      expect(String(error)).not.toContain("note.md");
+    }
+    expect(hookCalls).toBe(0);
+  });
+
+  it("aborts during chunk reads and discards buffered bytes", async () => {
+    const dir = scratchVault("md-read-abortchunk-");
+    // Multi-chunk file so the per-chunk checkpoint fires after afterOpen.
+    writeFileSync(join(dir, "long.md"), "a".repeat(200_000));
+    const root = onlyRoot(
+      await initializeRoots([{ path: dir, alias: "vault" }]),
+    );
+    const controller = new AbortController();
+    try {
+      await safeReadMarkdownFile(root, "vault/long.md", {
+        signal: controller.signal,
+        afterOpen: () => {
+          controller.abort();
+        },
+      });
+      expect.unreachable("expected AbortError");
+    } catch (error) {
+      expect((error as Error).name).toBe("AbortError");
+      // No path, no content: only the generic abort message escapes.
+      expect(String(error)).not.toContain(dir);
+      expect(String(error)).not.toContain(tmpdir());
+      expect(String(error)).not.toContain("long.md");
+      expect(String(error)).not.toContain("aaa");
+    }
+    // The handle was closed (finally) and nothing was returned: a later
+    // non-aborted read still succeeds deterministically.
+    const retry = await safeReadMarkdownFile(root, "vault/long.md");
+    expect(retry.status).toBe("ok");
+  });
 });

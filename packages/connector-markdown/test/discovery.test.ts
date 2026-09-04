@@ -291,4 +291,62 @@ describe("discovery", () => {
       "zzz/a.md",
     ]);
   });
+
+  it("aborts before discovery when the signal is already aborted", async () => {
+    const dir = scratchVault("md-disc-abortbefore-");
+    writeFileSync(join(dir, "a.md"), "# a\n");
+    const root = onlyRoot(
+      await initializeRoots([{ path: dir, alias: "vault" }]),
+    );
+    const controller = new AbortController();
+    controller.abort();
+    try {
+      await discoverMarkdownFilesForRoot(root, { signal: controller.signal });
+      expect.unreachable("expected AbortError");
+    } catch (error) {
+      expect((error as Error).name).toBe("AbortError");
+      expect(String(error)).not.toContain(dir);
+      expect(String(error)).not.toContain(tmpdir());
+    }
+    try {
+      await discoverMarkdownFiles([root], { signal: controller.signal });
+      expect.unreachable("expected AbortError");
+    } catch (error) {
+      expect((error as Error).name).toBe("AbortError");
+      expect(String(error)).not.toContain(dir);
+    }
+  });
+
+  it("aborts during discovery without leaking paths", async () => {
+    const dir = scratchVault("md-disc-abortduring-");
+    writeFileSync(join(dir, "a.md"), "# a\n");
+    const root = onlyRoot(
+      await initializeRoots([{ path: dir, alias: "vault" }]),
+    );
+    const controller = new AbortController();
+    try {
+      await discoverMarkdownFilesForRoot(root, {
+        signal: controller.signal,
+        readdir: () => {
+          // Abort mid-traversal: the per-entry checkpoint below must throw
+          // AbortError instead of returning partial results.
+          controller.abort();
+          return Promise.resolve([
+            {
+              name: "a.md",
+              isDirectory: false,
+              isFile: true,
+              isSymbolicLink: false,
+            },
+          ]);
+        },
+      });
+      expect.unreachable("expected AbortError");
+    } catch (error) {
+      expect((error as Error).name).toBe("AbortError");
+      expect(String(error)).not.toContain(dir);
+      expect(String(error)).not.toContain(tmpdir());
+      expect(String(error)).not.toContain("a.md");
+    }
+  });
 });

@@ -55,11 +55,26 @@ export interface DiscoveryStat {
  * Deterministic injection hooks for tests (e.g. synthesize 10001 entries
  * without creating 10001 disk files). Production passes no hooks, so the
  * default filesystem behavior is never weakened.
+ *
+ * Cooperative cancellation: `signal` is checked before every potentially
+ * long traversal stage (each directory visit and each entry) and before the
+ * final sort/return. An abort throws an `AbortError` carrying no path or
+ * content; containment, identity, and vault-bound rules are never weakened
+ * (an abort discards partial state instead of returning it).
  */
 export interface DiscoveryHooks {
   readdir?: (dirAbs: string) => Promise<readonly DiscoveryDirEntry[]>;
   realpath?: (candidateAbs: string) => Promise<string>;
   stat?: (targetAbs: string) => Promise<DiscoveryStat>;
+  signal?: AbortSignal;
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    const error = new Error("operation aborted");
+    error.name = "AbortError";
+    throw error;
+  }
 }
 
 function compareCodeUnits(a: string, b: string): number {
@@ -117,6 +132,8 @@ export async function discoverMarkdownFilesForRoot(
   const readdir = hooks.readdir ?? defaultReaddir;
   const realpath = hooks.realpath ?? fs.realpath;
   const stat = hooks.stat ?? fs.stat;
+  const signal = hooks.signal;
+  throwIfAborted(signal);
 
   const seenDirs = new Set<string>([root.realPath]);
   const seenFiles = new Set<string>();
@@ -161,6 +178,7 @@ export async function discoverMarkdownFilesForRoot(
   };
 
   while (pending.length > 0) {
+    throwIfAborted(signal);
     const dir = pending.pop() as string;
     let entries: readonly DiscoveryDirEntry[];
     try {
@@ -168,10 +186,12 @@ export async function discoverMarkdownFilesForRoot(
     } catch {
       throw new MarkdownConnectorError("markdown_read_failed", root.alias);
     }
+    throwIfAborted(signal);
     const ordered = [...entries].sort((a, b) =>
       compareCodeUnits(a.name, b.name),
     );
     for (const entry of ordered) {
+      throwIfAborted(signal);
       if (entry.name === "" || entry.name === "." || entry.name === "..") {
         continue;
       }
@@ -197,6 +217,7 @@ export async function discoverMarkdownFilesForRoot(
     }
   }
 
+  throwIfAborted(signal);
   const keys = [...seenFiles]
     .map((real) => toCanonicalKey(root.alias, root.realPath, real))
     .sort(compareCodeUnits);
@@ -212,13 +233,16 @@ export async function discoverMarkdownFiles(
   roots: readonly InitializedRoot[],
   hooks: DiscoveryHooks = {},
 ): Promise<DiscoveredFile[]> {
+  throwIfAborted(hooks.signal);
   const all: DiscoveredFile[] = [];
   for (const root of roots) {
+    throwIfAborted(hooks.signal);
     const found = await discoverMarkdownFilesForRoot(root, hooks);
     for (const entry of found) {
       all.push(entry);
     }
   }
+  throwIfAborted(hooks.signal);
   all.sort((a, b) => compareCodeUnits(a.canonicalKey, b.canonicalKey));
   return all;
 }
