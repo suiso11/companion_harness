@@ -235,6 +235,77 @@ describe("markdown connector search core", () => {
     ).rejects.toMatchObject({ code: "invalid_input" });
   });
 
+  it("rejects non-.md keys as invalid before any byte read", async () => {
+    const dir = scratchVault("md-conn-nomd-");
+    writeFileSync(join(dir, "notes.txt"), "plain text body\n");
+    let hookCalls = 0;
+    const connector = await createMarkdownConnector([{ path: dir }], {
+      safeRead: {
+        afterPreStat: () => {
+          hookCalls += 1;
+        },
+        afterOpen: () => {
+          hookCalls += 1;
+        },
+        afterRead: () => {
+          hookCalls += 1;
+        },
+      },
+    });
+    await expect(
+      connector.readCanonical("vault-1/notes.txt"),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    await expect(
+      connector.readCanonical("vault-1/notes"),
+    ).rejects.toMatchObject({
+      code: "invalid_input",
+    });
+    // The existing .txt file proves the rejection happened before safeRead:
+    // a content read would have run the TOCTOU hooks.
+    expect(hookCalls).toBe(0);
+  });
+
+  it("returns reference_not_found for undiscovered keys before any byte read", async () => {
+    const dir = scratchVault("md-conn-undiscovered-");
+    writeFileSync(join(dir, "real.md"), "# Real\nbody\n");
+    let hookCalls = 0;
+    const connector = await createMarkdownConnector([{ path: dir }], {
+      safeRead: {
+        afterPreStat: () => {
+          hookCalls += 1;
+        },
+        afterOpen: () => {
+          hookCalls += 1;
+        },
+        afterRead: () => {
+          hookCalls += 1;
+        },
+      },
+    });
+    // Well-formed `.md` keys that were never discovered: no byte is read.
+    await expect(
+      connector.readCanonical("vault-1/missing.md"),
+    ).rejects.toMatchObject({ code: "reference_not_found" });
+    await expect(
+      connector.readCanonical("vault-1/sub/missing.md"),
+    ).rejects.toMatchObject({ code: "reference_not_found" });
+    await expect(
+      connector.readCanonical("vault-9/real.md"),
+    ).rejects.toMatchObject({ code: "reference_not_found" });
+    expect(hookCalls).toBe(0);
+    // Malformed keys stay invalid_input, also before bytes.
+    await expect(connector.readCanonical("not-a-key")).rejects.toMatchObject({
+      code: "invalid_input",
+    });
+    await expect(connector.readCanonical(42)).rejects.toMatchObject({
+      code: "invalid_input",
+    });
+    expect(hookCalls).toBe(0);
+    // The discovered key still reads exactly once.
+    const doc = await connector.readCanonical("vault-1/real.md");
+    expect(doc.canonicalKey).toBe("vault-1/real.md");
+  });
+
   it("never uses locale-sensitive APIs in the connector", async () => {
     const { readFile } = await import("node:fs/promises");
     const { fileURLToPath } = await import("node:url");

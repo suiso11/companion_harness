@@ -48,11 +48,14 @@
  * snippets, and content-derived hashes leave this module. Absolute paths
  * and raw OS errors never escape.
  *
- * `readCanonical` validates the alias/key shape, resolves the owning root
- * by alias, runs discovery once (metadata only, to existence-check links
- * consistently with search) plus exactly one safe content read, then
- * parses. Unknown alias -> `reference_not_found`; malformed key ->
- * `invalid_input`; unreadable content -> the safe-read failure code.
+ * `readCanonical` validates the alias/key shape (including the exact `.md`
+ * suffix), resolves the owning root by alias, runs discovery once
+ * (metadata only, to existence-check links consistently with search) and
+ * requires the key to be an exact discovered canonical key, plus exactly
+ * one safe content read, then parses. Unknown alias or undiscovered key ->
+ * `reference_not_found` before any content byte; malformed key or non-`.md`
+ * suffix -> `invalid_input` before any content byte; unreadable content ->
+ * the safe-read failure code.
  * Oversize/invalid-UTF8 targets cannot materialize and surface as
  * `markdown_read_failed`.
  */
@@ -458,6 +461,12 @@ function validateCanonicalShape(canonicalKey: unknown): {
       throw new MarkdownConnectorError("invalid_input", null);
     }
   }
+  // Only discovered exact `.md` canonical keys can be read: reject bare
+  // directories, extensionless names, and non-Markdown suffixes here,
+  // before any discovery metadata or content byte is touched.
+  if (!rest.endsWith(".md")) {
+    throw new MarkdownConnectorError("invalid_input", null);
+  }
   return { alias };
 }
 
@@ -558,9 +567,14 @@ export async function createMarkdownConnector(
       throw new MarkdownConnectorError("reference_not_found", key);
     }
     // Metadata-only discovery keeps link existence consistent with
-    // search; the single content read below is the only file open.
+    // search. The key must be an exact discovered `.md` canonical key:
+    // anything undiscovered returns `reference_not_found` BEFORE the
+    // single content read below, so no byte is touched for misses.
     const discovered = await discoverMarkdownFiles(roots);
     const existing = new Set(discovered.map((entry) => entry.canonicalKey));
+    if (!existing.has(key)) {
+      throw new MarkdownConnectorError("reference_not_found", key);
+    }
     const keysInRoot = discovered
       .map((entry) => entry.canonicalKey)
       .filter((candidate) => aliasOf(candidate) === alias);
