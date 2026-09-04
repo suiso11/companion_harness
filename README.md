@@ -17,8 +17,25 @@ pnpm start
 
 Env: `COMPANION_DB_PATH` (default OS app-data
 `companion-harness/companion.sqlite`), `COMPANION_HOST` (loopback only),
-`COMPANION_PORT`, `COMPANION_TIME_ZONE` (IANA), `COMPANION_LOG_LEVEL`.
+`COMPANION_PORT`, `COMPANION_TIME_ZONE` (IANA), `COMPANION_LOG_LEVEL`,
+`COMPANION_MARKDOWN_ROOTS_JSON` (default `[]`, strict JSON array of
+`{ path, alias? }`; unset means no Markdown connector).
 Config is validated and frozen at startup.
+
+## References (M1 Markdown, read-only)
+
+Optional local Markdown vaults via `COMPANION_MARKDOWN_ROOTS_JSON`. One
+connector owns all configured roots; files are never written. Exact bounds:
+10000 files/vault, 1 MiB/file, query 1-256 code points, results default 10 /
+max 20, snippet max 512 code points, UTF-8 NFC (fatal decode, never
+replacement text). HTTP API is stored-only (`GET references`, `GET`
+reference detail, `GET` reference sets, `GET`/`PUT` context; no HTTP
+search/open/refresh/related). Search/open/refresh/related run only as
+internal ToolBroker tools (`markdown.search`, `reference.open`,
+`reference.refresh`, `reference.related`). Root configuration is
+fingerprint-bound to the DB: changing it fails startup (revert config or
+use a fresh store). M2 model/agent is not implemented, so runs fail closed
+instead of producing fake LLM output. Full contract: `docs/operations.md`.
 
 ## Data and permissions
 
