@@ -625,3 +625,290 @@ describe("host, mutation security, health, drain", () => {
     }
   });
 });
+
+describe("M0 review regressions", () => {
+  it("enforces byte-bounded streaming bodies (early length + UTF-8 bytes)", async () => {
+    const f = await makeApp();
+    try {
+      const bigText = "a".repeat(300_000);
+      const oversized = await postJson(
+        f.app,
+        "/api/sessions",
+        { text: "ignored" },
+        { "idempotency-key": randomUUID() },
+      );
+      void oversized;
+      // Char-count would pass but UTF-8 bytes exceed the 256KiB cap:
+      // multibyte body must be rejected by byte length, not char length.
+      const multi = `é`.repeat(200_000);
+      const multiRes = await f.app.request("/api/sessions", {
+        method: "POST",
+        headers: {
+          ...postHeaders(),
+          "idempotency-key": randomUUID(),
+        },
+        body: JSON.stringify({ unexpected: multi }),
+      });
+      expect(multiRes.status).toBe(400);
+      // Declared Content-Length beyond the cap fails without streaming.
+      const lied = await f.app.request("/api/sessions", {
+        method: "POST",
+        headers: {
+          ...postHeaders(),
+          "idempotency-key": randomUUID(),
+          "content-length": String(300_000),
+        },
+        body: "{}",
+      });
+      expect(lied.status).toBe(400);
+      // Oversized actual body is rejected and never persisted.
+      const before = count(f.db, "api_idempotency");
+      const huge = await f.app.request("/api/sessions", {
+        method: "POST",
+        headers: { ...postHeaders(), "idempotency-key": randomUUID() },
+        body: JSON.stringify({ unexpected: bigText }),
+      });
+      expect(huge.status).toBe(400);
+      expect(count(f.db, "api_idempotency")).toBe(before);
+      void bigText;
+    } finally {
+      f.close();
+    }
+  });
+
+  it("rejects non-object cancel bodies strictly", async () => {
+    const f = await makeApp();
+    try {
+      const sessionId = f.repo.createSession({
+        key: randomUUID(),
+        now: 1790000000000,
+      }).body.sessionId;
+      const posted = f.repo.postMessage(
+        sessionId,
+        { text: "q" },
+        { key: randomUUID(), now: 1790000000000 },
+      ).body;
+      for (const body of [`[]`, `5`, `"x"`, `null`, `{"unknown":1}`]) {
+        const res = await f.app.request(
+          `/api/sessions/${sessionId}/runs/${posted.run.id}/cancel`,
+          { method: "POST", headers: postHeaders(), body },
+        );
+        expect(res.status).toBe(400);
+      }
+      const ok = await postJson(
+        f.app,
+        `/api/sessions/${sessionId}/runs/${posted.run.id}/cancel`,
+        {},
+      );
+      expect(ok.status).toBe(200);
+    } finally {
+      f.close();
+    }
+  });
+
+  it("rejects unknown or duplicated query keys", async () => {
+    const f = await makeApp();
+    try {
+      const sessionId = f.repo.createSession({
+        key: randomUUID(),
+        now: 1790000000000,
+      }).body.sessionId;
+      const posted = f.repo.postMessage(
+        sessionId,
+        { text: "q" },
+        { key: randomUUID(), now: 1790000000000 },
+      ).body;
+      const unknownHistory = await f.app.request(
+        `/api/sessions/${sessionId}/history?bogus=1`,
+        { headers: { host: "127.0.0.1" } },
+      );
+      expect(unknownHistory.status).toBe(400);
+      const dupHistory = await f.app.request(
+        `/api/sessions/${sessionId}/history?limit=10&limit=10`,
+        { headers: { host: "127.0.0.1" } },
+      );
+      expect(dupHistory.status).toBe(400);
+      const dupEvents = await f.app.request(
+        `/api/sessions/${sessionId}/runs/${posted.run.id}/events?after=0&after=0`,
+        { headers: { host: "127.0.0.1" } },
+      );
+      expect(dupEvents.status).toBe(400);
+      const unknownEvents = await f.app.request(
+        `/api/sessions/${sessionId}/runs/${posted.run.id}/events?after=0&extra=1`,
+        { headers: { host: "127.0.0.1" } },
+      );
+      expect(unknownEvents.status).toBe(400);
+      const scope = `session:${sessionId}:message`;
+      const dupLookup = await f.app.request(
+        `/api/sessions/${sessionId}/idempotency/${randomUUID()}?scope=${encodeURIComponent(scope)}&scope=${encodeURIComponent(scope)}`,
+        { headers: { host: "127.0.0.1" } },
+      );
+      expect(dupLookup.status).toBe(400);
+      const unknownLookup = await f.app.request(
+        `/api/sessions/${sessionId}/idempotency/${randomUUID()}?scope=${encodeURIComponent(scope)}&other=1`,
+        { headers: { host: "127.0.0.1" } },
+      );
+      expect(unknownLookup.status).toBe(400);
+      // Exact known behavior still works.
+      const okHistory = await f.app.request(
+        `/api/sessions/${sessionId}/history?limit=10`,
+        { headers: { host: "127.0.0.1" } },
+      );
+      expect(okHistory.status).toBe(200);
+    } finally {
+      f.close();
+    }
+  });
+
+  it("distinguishes browser-like missing-Origin from CLI-style requests", async () => {
+    const f = await makeApp();
+    try {
+      const browserLike = await f.app.request("/api/sessions", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          host: "127.0.0.1",
+          "idempotency-key": randomUUID(),
+          "sec-fetch-site": "cross-site",
+          "sec-fetch-mode": "cors",
+        },
+        body: "{}",
+      });
+      expect(browserLike.status).toBe(403);
+      expect(
+        ((await browserLike.json()) as { error: { code: string } }).error.code,
+      ).toBe("validation_error");
+      const cli = await f.app.request("/api/sessions", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          host: "127.0.0.1",
+          "idempotency-key": randomUUID(),
+        },
+        body: "{}",
+      });
+      expect(cli.status).toBe(201);
+      expect(cli.headers.get("access-control-allow-origin")).toBeNull();
+    } finally {
+      f.close();
+    }
+  });
+
+  it("maps internal failures to fixed 500 internal_error", async () => {
+    const f = await makeApp();
+    try {
+      const broken = {
+        ...f.repo,
+        getHistory: () => {
+          throw new Error("boom with secret detail");
+        },
+      };
+      const { createApp: makeBrokenApp } = await import("../src/app.js");
+      const { loadServerConfig: loadConfig } = await import(
+        "../src/config.js"
+      );
+      const { createCollectingLogger: collect } = await import(
+        "../src/logger.js"
+      );
+      const config = loadConfig({
+        COMPANION_DB_PATH: join(
+          mkdtempSync(join(tmpdir(), "companion-500-")),
+          "db.sqlite",
+        ),
+        COMPANION_HOST: "127.0.0.1",
+        COMPANION_PORT: "3000",
+        COMPANION_TIME_ZONE: "UTC",
+        COMPANION_LOG_LEVEL: "error",
+      });
+      const { logger } = collect("error");
+      const { default: __unused } = await import("node:crypto").catch(() => ({
+        default: undefined,
+      }));
+      void __unused;
+      const created = makeBrokenApp({
+        config,
+        repo: broken as unknown as typeof f.repo,
+        engine: { cancel: () => ({ status: "cancelled" }), shutdown: async () => ({ abandoned: 0, cancelled: 0 }) },
+        logger,
+      });
+      const sessionId = f.repo.createSession({
+        key: randomUUID(),
+        now: 1790000000000,
+      }).body.sessionId;
+      void sessionId;
+      // Use a session known to the real DB through the broken app's repo
+      // wrapper: any getHistory call now throws an unexpected error.
+      const res = await created.app.request(
+        `/api/sessions/${sessionId}/history`,
+        { headers: { host: "127.0.0.1" } },
+      );
+      expect(res.status).toBe(500);
+      const body = (await res.json()) as {
+        error: { code: string; message: string };
+      };
+      expect(body.error.code).toBe("internal_error");
+      expect(JSON.stringify(body)).not.toContain("boom");
+    } finally {
+      f.close();
+    }
+  });
+
+  it("requires the path session to exist for sessions:create lookups", async () => {
+    const f = await makeApp();
+    try {
+      const ghost = randomUUID();
+      const ghostLookup = await f.app.request(
+        `/api/sessions/${ghost}/idempotency/${randomUUID()}?scope=sessions:create`,
+        { headers: { host: "127.0.0.1" } },
+      );
+      expect(ghostLookup.status).toBe(404);
+    } finally {
+      f.close();
+    }
+  });
+
+  it("replays the exact stored status and body", async () => {
+    const f = await makeApp();
+    try {
+      const key = randomUUID();
+      const first = await f.app.request("/api/sessions", {
+        method: "POST",
+        headers: { ...postHeaders(), "idempotency-key": key },
+        body: "{}",
+      });
+      expect(first.status).toBe(201);
+      const firstBody = await first.json();
+      const replay = await f.app.request("/api/sessions", {
+        method: "POST",
+        headers: { ...postHeaders(), "idempotency-key": key },
+        body: "{}",
+      });
+      // Must use the stored out.status, not a hard-coded replacement.
+      expect(replay.status).toBe(first.status);
+      expect(await replay.json()).toEqual(firstBody);
+    } finally {
+      f.close();
+    }
+  });
+
+  it("rejects invalid UTF-8 JSON bodies as validation_error", async () => {
+    const f = await makeApp();
+    try {
+      const before = count(f.db, "api_idempotency");
+      // Lone continuation byte / truncated sequence: fatal TextDecoder must throw.
+      const invalid = new Uint8Array([0x7b, 0x22, 0x78, 0x22, 0x3a, 0xff, 0x7d]);
+      const res = await f.app.request("/api/sessions", {
+        method: "POST",
+        headers: { ...postHeaders(), "idempotency-key": randomUUID() },
+        body: invalid as unknown as BodyInit,
+      });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
+        "validation_error",
+      );
+      expect(count(f.db, "api_idempotency")).toBe(before);
+    } finally {
+      f.close();
+    }
+  });
+});

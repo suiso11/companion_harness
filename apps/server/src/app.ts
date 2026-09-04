@@ -8,6 +8,7 @@
 
 import {
   type ApiErrorCode,
+  CancelRunRequestSchema,
   CancelRunResponseSchema,
   CreateSessionRequestSchema,
   CreateSessionResponseSchema,
@@ -147,8 +148,24 @@ function isMutationMethod(method: string): boolean {
 /**
  * Mutation security (§16.7): same-origin Origin only (Origin:null
  * rejected), application/json required, no CORS headers ever emitted.
- * A missing Origin is accepted as a documented local CLI-style request.
+ * A missing Origin is accepted only for local CLI-style requests without
+ * any browser Sec-Fetch metadata; a missing-Origin request that carries
+ * Sec-Fetch-Site/Mode/Dest/User is treated as browser-like and rejected.
  */
+function isBrowserLikeFetch(c: Context): boolean {
+  for (const name of [
+    "sec-fetch-site",
+    "sec-fetch-mode",
+    "sec-fetch-dest",
+    "sec-fetch-user",
+  ]) {
+    if (c.req.header(name) !== undefined) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function checkMutationSecurity(c: Context): Response | null {
   const contentType = c.req.header("content-type");
   const mediaType =
@@ -160,6 +177,14 @@ function checkMutationSecurity(c: Context): Response | null {
   }
   const origin = c.req.header("origin");
   if (origin === undefined) {
+    if (isBrowserLikeFetch(c)) {
+      return apiError(
+        c,
+        403,
+        "validation_error",
+        "cross-origin request rejected",
+      );
+    }
     return null;
   }
   if (origin === "null") {
@@ -207,19 +232,115 @@ function requireUuid(
 
 async function readJsonBody(
   c: Context,
-): Promise<{ ok: true; value: unknown } | { ok: false }> {
-  const text = await c.req.text();
-  if (text.length === 0) {
-    return { ok: true, value: {} };
+): Promise<
+  { ok: true; value: unknown; bytes: number } | { ok: false }
+> {
+  // Early Content-Length gate: reject without streaming when the declared
+  // size already exceeds the byte cap. Malformed lengths fail closed.
+  const lengthHeader = c.req.header("content-length");
+  if (lengthHeader !== undefined) {
+    const trimmed = lengthHeader.trim();
+    if (!/^\d+$/.test(trimmed)) {
+      return { ok: false };
+    }
+    const declared = Number(trimmed);
+    if (!Number.isSafeInteger(declared) || declared > MAX_BODY_BYTES) {
+      try {
+        await c.req.raw.body?.cancel();
+      } catch {
+        // Best effort: the request is rejected regardless.
+      }
+      return { ok: false };
+    }
   }
-  if (text.length > MAX_BODY_BYTES) {
+  const stream = c.req.raw.body;
+  if (stream === null || stream === undefined) {
+    return { ok: true, value: {}, bytes: 0 };
+  }
+  // Byte-bounded streaming accumulation: count raw UTF-8 bytes per chunk
+  // (multibyte sequences count as their encoded length) and stop/cancel
+  // as soon as the cap is crossed. Never call req.text()/arrayBuffer().
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      if (value !== undefined) {
+        total += value.byteLength;
+        if (total > MAX_BODY_BYTES) {
+          try {
+            await reader.cancel();
+          } catch {
+            // Best effort: the request is rejected regardless.
+          }
+          return { ok: false };
+        }
+        chunks.push(value);
+      }
+    }
+  } catch {
     return { ok: false };
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // Best effort.
+    }
+  }
+  if (total === 0) {
+    return { ok: true, value: {}, bytes: 0 };
+  }
+  const combined = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    combined.set(chunk, offset);
+    offset += chunk.byteLength;
   }
   try {
-    return { ok: true, value: JSON.parse(text) as unknown };
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(combined);
+    if (text.length === 0) {
+      return { ok: true, value: {}, bytes: 0 };
+    }
+    return { ok: true, value: JSON.parse(text) as unknown, bytes: total };
   } catch {
     return { ok: false };
   }
+}
+
+/**
+ * Strict query gate: unknown keys and duplicated keys are validation
+ * errors. Returns first-value mappings for the exact allowed keys so Zod
+ * defaults/coercions keep their agreed behavior.
+ */
+function strictQuery(
+  c: Context,
+  allowed: readonly string[],
+): { ok: true; values: Record<string, string | undefined> } | { ok: false } {
+  const params = new URL(c.req.url).searchParams;
+  const seen = new Map<string, number>();
+  for (const key of params.keys()) {
+    seen.set(key, (seen.get(key) ?? 0) + 1);
+  }
+  for (const count of seen.values()) {
+    if (count > 1) {
+      return { ok: false };
+    }
+  }
+  for (const key of seen.keys()) {
+    if (!allowed.includes(key)) {
+      return { ok: false };
+    }
+  }
+  const values: Record<string, string | undefined> = {};
+  for (const name of allowed) {
+    const value = params.get(name);
+    values[name] = value ?? undefined;
+  }
+  return { ok: true, values };
 }
 
 /** Fixed domain-error to HTTP mapping (§12.3). No raw errors leak. */
@@ -257,7 +378,7 @@ function mapDomainError(c: Context, error: unknown): Response {
   ) {
     return shuttingDown(c);
   }
-  return apiError(c, 500, "validation_error", "internal error");
+  return apiError(c, 500, "internal_error", "internal error");
 }
 
 export function createApp(deps: CreateAppDeps): CreatedServerApp {
@@ -333,7 +454,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         status: out.status,
         durationMs: Math.max(now() - started, 0),
       });
-      return c.json(body, out.status === 201 ? 201 : 201);
+      return c.json(body, out.status as 201);
     } catch (error) {
       return mapDomainError(c, error);
     }
@@ -377,10 +498,10 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         sessionId: session.id,
         turnId: body.turnId,
         status: out.status,
-        bytes: rawBodySize(raw.value),
+        bytes: raw.bytes,
         durationMs: Math.max(now() - started, 0),
       });
-      return c.json(body, out.status === 202 ? 202 : 202);
+      return c.json(body, out.status as 202);
     } catch (error) {
       return mapDomainError(c, error);
     }
@@ -424,7 +545,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         status: out.status,
         durationMs: Math.max(now() - started, 0),
       });
-      return c.json(body, out.status === 202 ? 202 : 202);
+      return c.json(body, out.status as 202);
     } catch (error) {
       return mapDomainError(c, error);
     }
@@ -444,6 +565,10 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     }
     const raw = await readJsonBody(c);
     if (!raw.ok) {
+      return validationError(c);
+    }
+    // Strict cancel body: exactly {} (reject arrays/scalars/unknown keys).
+    if (CancelRunRequestSchema.safeParse(raw.value).success !== true) {
       return validationError(c);
     }
     try {
@@ -471,9 +596,13 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     if ("response" in session) {
       return session.response;
     }
+    const gated = strictQuery(c, ["beforePosition", "limit"]);
+    if (!gated.ok) {
+      return validationError(c);
+    }
     const parsed = HistoryQuerySchema.safeParse({
-      beforePosition: c.req.query("beforePosition"),
-      limit: c.req.query("limit"),
+      beforePosition: gated.values["beforePosition"],
+      limit: gated.values["limit"],
     });
     if (!parsed.success) {
       return validationError(c);
@@ -503,9 +632,13 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     if ("response" in run) {
       return run.response;
     }
+    const gatedEvents = strictQuery(c, ["after", "limit"]);
+    if (!gatedEvents.ok) {
+      return validationError(c);
+    }
     const parsed = EventsQuerySchema.safeParse({
-      after: c.req.query("after"),
-      limit: c.req.query("limit"),
+      after: gatedEvents.values["after"],
+      limit: gatedEvents.values["limit"],
     });
     if (!parsed.success) {
       return validationError(c);
@@ -532,11 +665,24 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     if ("response" in key) {
       return key.response;
     }
+    const gatedScope = strictQuery(c, ["scope"]);
+    if (!gatedScope.ok) {
+      return validationError(c);
+    }
     const parsedQuery = IdempotencyLookupQuerySchema.safeParse({
-      scope: c.req.query("scope"),
+      scope: gatedScope.values["scope"],
     });
     if (!parsedQuery.success) {
       return validationError(c);
+    }
+    // sessions:create lookups require the path session to exist first,
+    // even when nothing is stored (fail closed on ghost sessions).
+    if (parsedQuery.data.scope === IDEMPOTENCY_SCOPE_SESSIONS_CREATE) {
+      try {
+        repo.getSession(session.id);
+      } catch (error) {
+        return mapDomainError(c, error);
+      }
     }
     try {
       const found = repo.lookupIdempotencyForSession(
@@ -561,12 +707,4 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   });
 
   return { app, controls };
-}
-
-function rawBodySize(value: unknown): number {
-  try {
-    return JSON.stringify(value)?.length ?? 0;
-  } catch {
-    return 0;
-  }
 }

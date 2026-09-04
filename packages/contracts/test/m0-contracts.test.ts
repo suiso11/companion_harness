@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ACTIVE_STATUSES,
   ApiErrorCodeSchema,
+  CancelRunRequestSchema,
   CreateSessionRequestSchema,
   EventsQuerySchema,
   EventsResponseSchema,
@@ -273,6 +274,7 @@ describe("API boundaries are strict", () => {
       "idempotency_key_reused",
       "session_busy",
       "server_shutting_down",
+      "internal_error",
     ]) {
       expect(ApiErrorCodeSchema.parse(code)).toBe(code);
     }
@@ -492,6 +494,26 @@ describe("UUID v4 and idempotency scopes are exact", () => {
     expect(() =>
       IdempotencyLookupQuerySchema.parse({
         scope: `session:${UUID_V1}:message`,
+      }),
+    ).toThrow();
+  });
+
+  it("keeps the cancel body strictly empty", () => {
+    expect(CancelRunRequestSchema.parse({})).toEqual({});
+    for (const bad of [[], 5, "x", null, { unknown: 1 }, { extra: 1 }]) {
+      expect(() => CancelRunRequestSchema.parse(bad)).toThrow();
+    }
+  });
+
+  it("rejects unknown query keys strictly", () => {
+    expect(() =>
+      HistoryQuerySchema.parse({ limit: 10, bogus: 1 }),
+    ).toThrow();
+    expect(() => EventsQuerySchema.parse({ after: 0, extra: 1 })).toThrow();
+    expect(() =>
+      IdempotencyLookupQuerySchema.parse({
+        scope: "sessions:create",
+        other: 1,
       }),
     ).toThrow();
   });

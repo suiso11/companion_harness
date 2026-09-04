@@ -131,4 +131,61 @@ describe("bootstrap startup + graceful shutdown", () => {
     }
     await expect(startServer({ env, drainMs: 50 })).rejects.toThrow();
   });
+
+  it("fails drain closed without closing DB/listener and permits retry", async () => {
+    const { env } = tempEnv();
+    const started = await startServer({ env, drainMs: 50 });
+    servers.push(started);
+    const base = `http://127.0.0.1:${started.port}`;
+    const originalShutdown = started.engine.shutdown.bind(started.engine);
+    let failOnce = true;
+    started.engine.shutdown = async (options?: { drainMs?: number }) => {
+      if (failOnce) {
+        failOnce = false;
+        throw new Error("drain boom");
+      }
+      return originalShutdown(options);
+    };
+    await expect(started.shutdown("test-drain-fail")).rejects.toThrow(
+      "drain failed",
+    );
+    // Fail-closed: listener and DB still serve; ready stays not_ready.
+    expect(await (await fetch(`${base}/health/live`)).json()).toEqual({
+      status: "live",
+    });
+    const ready = await fetch(`${base}/health/ready`);
+    expect(ready.status).toBe(503);
+    // Retry succeeds and stops the server.
+    await started.shutdown("test-drain-retry");
+    servers.pop();
+    await expect(fetch(`${base}/health/live`)).rejects.toThrow();
+  });
+
+  it("does not leak named signal handlers across start/shutdown", async () => {
+    const beforeInt = process.listenerCount("SIGINT");
+    const beforeTerm = process.listenerCount("SIGTERM");
+    const first = tempEnv();
+    const a = await startServer({ env: first.env, drainMs: 50 });
+    expect(process.listenerCount("SIGINT")).toBe(beforeInt + 1);
+    expect(process.listenerCount("SIGTERM")).toBe(beforeTerm + 1);
+    await a.shutdown("test");
+    expect(process.listenerCount("SIGINT")).toBe(beforeInt);
+    expect(process.listenerCount("SIGTERM")).toBe(beforeTerm);
+    const second = tempEnv();
+    const b = await startServer({ env: second.env, drainMs: 50 });
+    servers.push(b);
+    try {
+      expect(process.listenerCount("SIGINT")).toBe(beforeInt + 1);
+      expect(process.listenerCount("SIGTERM")).toBe(beforeTerm + 1);
+      await b.shutdown("test");
+      servers.pop();
+      expect(process.listenerCount("SIGINT")).toBe(beforeInt);
+      expect(process.listenerCount("SIGTERM")).toBe(beforeTerm);
+    } finally {
+      const index = servers.indexOf(b);
+      if (index >= 0) {
+        servers.splice(index, 1);
+      }
+    }
+  });
 });

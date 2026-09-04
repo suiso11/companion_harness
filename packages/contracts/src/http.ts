@@ -225,6 +225,7 @@ export const ApiErrorCodeSchema = z.enum([
   "idempotency_key_reused",
   "session_busy",
   "server_shutting_down",
+  "internal_error",
 ]);
 export type ApiErrorCode = z.infer<typeof ApiErrorCodeSchema>;
 
