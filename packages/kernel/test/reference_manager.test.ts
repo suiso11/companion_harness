@@ -13,6 +13,7 @@ import {
   openKernelDatabase,
   ReferenceNotFoundError,
   RepositoryNotFoundError,
+  RepositoryValidationError,
   type ResourceObservation,
   sha256Hex,
 } from "../src/index.js";
@@ -100,6 +101,143 @@ describe("markdown connector instance (metadata-only)", () => {
       expect(() =>
         manager.ensureMarkdownConnectorInstance("C:\\abs", 1, { now: T0 }),
       ).toThrow();
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+});
+
+describe("markdown connector instance identity (fingerprint)", () => {
+  const FP_A = "a".repeat(64);
+  const FP_B = "b".repeat(64);
+
+  it("stores the opaque hash without paths and reuses on exact match", async () => {
+    const { handle, manager, db } = await openStack();
+    try {
+      const first = manager.ensureMarkdownConnectorInstance("vault", 1, {
+        now: T0,
+        configFingerprint: FP_A,
+      });
+      const row = db
+        .prepare("SELECT config_json FROM connector_instances WHERE id = ?")
+        .get(first.id) as { config_json: string };
+      expect(JSON.parse(row.config_json)).toEqual({
+        version: 1,
+        rootCount: 1,
+        configFingerprint: FP_A,
+      });
+      expect(row.config_json).toContain(FP_A);
+      expect(row.config_json).not.toMatch(/vault-[0-9]/);
+      // Exact reuse returns the same row without rebinding.
+      const second = manager.ensureMarkdownConnectorInstance("vault", 1, {
+        now: T0 + 1,
+        configFingerprint: FP_A,
+      });
+      expect(second.id).toBe(first.id);
+      expect(second.rootCount).toBe(1);
+      const count = (
+        db
+          .prepare(
+            "SELECT COUNT(*) AS n FROM connector_instances WHERE display_name = 'vault'",
+          )
+          .get() as { n: number }
+      ).n;
+      expect(count).toBe(1);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("fails closed on fingerprint mismatch, count mismatch, and legacy rows", async () => {
+    const { handle, manager, db } = await openStack();
+    try {
+      const first = manager.ensureMarkdownConnectorInstance("vault", 1, {
+        now: T0,
+        configFingerprint: FP_A,
+      });
+      // Different fingerprint for the same display name rejects.
+      expect(() =>
+        manager.ensureMarkdownConnectorInstance("vault", 1, {
+          now: T0 + 1,
+          configFingerprint: FP_B,
+        }),
+      ).toThrow(RepositoryValidationError);
+      // Different root count rejects even with the same fingerprint.
+      expect(() =>
+        manager.ensureMarkdownConnectorInstance("vault", 2, {
+          now: T0 + 1,
+          configFingerprint: FP_A,
+        }),
+      ).toThrow(RepositoryValidationError);
+      // Legacy caller without a fingerprint also rejects a changed count.
+      expect(() =>
+        manager.ensureMarkdownConnectorInstance("vault", 2, { now: T0 + 1 }),
+      ).toThrow(RepositoryValidationError);
+      // The stored row was never updated or rebound.
+      const row = db
+        .prepare("SELECT config_json FROM connector_instances WHERE id = ?")
+        .get(first.id) as { config_json: string };
+      expect(JSON.parse(row.config_json)).toEqual({
+        version: 1,
+        rootCount: 1,
+        configFingerprint: FP_A,
+      });
+
+      // A fingerprinted startup meeting a legacy row fails closed.
+      const legacy = manager.ensureMarkdownConnectorInstance("legacy", 1, {
+        now: T0,
+      });
+      expect(() =>
+        manager.ensureMarkdownConnectorInstance("legacy", 1, {
+          now: T0 + 1,
+          configFingerprint: FP_A,
+        }),
+      ).toThrow(RepositoryValidationError);
+      const legacyRow = db
+        .prepare("SELECT config_json FROM connector_instances WHERE id = ?")
+        .get(legacy.id) as { config_json: string };
+      expect(JSON.parse(legacyRow.config_json)).toEqual({
+        version: 1,
+        rootCount: 1,
+      });
+      // Legacy callers still reuse a legacy row with a matching count.
+      const reused = manager.ensureMarkdownConnectorInstance("legacy", 1, {
+        now: T0 + 2,
+      });
+      expect(reused.id).toBe(legacy.id);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("validates the fingerprint shape without leaking values", async () => {
+    const { handle, manager } = await openStack();
+    try {
+      for (const bad of [
+        "short",
+        "A".repeat(64),
+        "g".repeat(64),
+        "a".repeat(63),
+        "a".repeat(65),
+        42,
+      ]) {
+        expect(() =>
+          manager.ensureMarkdownConnectorInstance("vault", 1, {
+            now: T0,
+            configFingerprint: bad as string,
+          }),
+        ).toThrow(RepositoryValidationError);
+      }
+      try {
+        manager.ensureMarkdownConnectorInstance("vault", 1, {
+          now: T0,
+          configFingerprint: "z".repeat(64),
+        });
+        expect.unreachable("expected fingerprint validation");
+      } catch (error) {
+        expect(error).toBeInstanceOf(RepositoryValidationError);
+        expect(String(error)).not.toContain("z".repeat(64));
+      }
     } finally {
       closeKernelDatabase(handle);
     }

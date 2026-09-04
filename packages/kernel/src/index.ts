@@ -153,6 +153,7 @@ export {
   setSchemaVersion,
 } from "./migrate.js";
 export type {
+  EnsureMarkdownConnectorOptions,
   FreshnessKind,
   MarkdownConnectorView,
   ObservationLink,

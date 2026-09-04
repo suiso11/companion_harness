@@ -25,7 +25,9 @@
 //   no search query, so query-relative excerpts stay a connector concern.
 // - Zero-hit presentations (`[]` observations or `[]` stored ids) write
 //   nothing: no ReferenceSet, no items, no events (`setId: null`).
-// - Connector `config_json` is metadata-only `{ version: 1, rootCount }`.
+// - Connector `config_json` is metadata-only `{ version: 1, rootCount }`
+//   for legacy rows or `{ version: 1, rootCount, configFingerprint }` for
+//   fingerprinted rows (opaque 64-hex SHA-256, never a path).
 //   Absolute paths / separators are rejected at the boundary.
 // - `reference.presented` payloads carry structural IDs/ordinals only.
 
@@ -134,6 +136,27 @@ export const RELATED_DEFAULT_LIMIT = 10 as const;
 export const RELATED_MAX_LIMIT = 20 as const;
 
 const CONNECTOR_CONFIG_VERSION = 1 as const;
+
+const CONFIG_FINGERPRINT_PATTERN = /^[0-9a-f]{64}$/;
+
+export interface EnsureMarkdownConnectorOptions {
+  readonly now?: number;
+  /**
+   * Opaque stable instance identity (64 lowercase hex). Optional for
+   * backward compatibility; when supplied the stored row must carry the
+   * identical fingerprint or the ensure fails closed. Never a path.
+   */
+  readonly configFingerprint?: string;
+}
+
+function requireConfigFingerprint(input: unknown): string {
+  if (typeof input !== "string" || !CONFIG_FINGERPRINT_PATTERN.test(input)) {
+    throw new RepositoryValidationError(
+      "configFingerprint must be 64 lowercase hex",
+    );
+  }
+  return input;
+}
 
 function nowMs(input?: number): number {
   const now = input ?? Date.now();
@@ -385,7 +408,7 @@ export function createReferenceManager(db: Database.Database) {
   function ensureMarkdownConnectorInstance(
     displayName: string,
     rootCount: number,
-    options: { now?: number } = {},
+    options: EnsureMarkdownConnectorOptions = {},
   ): MarkdownConnectorView {
     if (
       typeof displayName !== "string" ||
@@ -411,6 +434,10 @@ export function createReferenceManager(db: Database.Database) {
       );
     }
     const now = nowMs(options.now);
+    const requestedFingerprint =
+      options.configFingerprint === undefined
+        ? undefined
+        : requireConfigFingerprint(options.configFingerprint);
     return withImmediate(db, () => {
       const existing = db
         .prepare(
@@ -439,25 +466,60 @@ export function createReferenceManager(db: Database.Database) {
           parsed === null ||
           (parsed as { version?: unknown }).version !==
             CONNECTOR_CONFIG_VERSION ||
-          typeof (parsed as { rootCount?: unknown }).rootCount !== "number"
+          !Number.isInteger((parsed as { rootCount?: unknown }).rootCount)
         ) {
           throw new RepositoryValidationError(
             "stored connector config invalid",
           );
         }
+        const storedRootCount = (parsed as { rootCount: number }).rootCount;
+        // Changed root configuration must never silently reuse an instance:
+        // the stored root count always has to equal the requested count.
+        // Connector rows are never updated or rebound.
+        if (storedRootCount !== rootCount) {
+          throw new RepositoryValidationError("connector root count mismatch");
+        }
+        const storedFingerprint = (parsed as { configFingerprint?: unknown })
+          .configFingerprint;
+        if (storedFingerprint !== undefined) {
+          if (
+            typeof storedFingerprint !== "string" ||
+            !CONFIG_FINGERPRINT_PATTERN.test(storedFingerprint)
+          ) {
+            throw new RepositoryValidationError(
+              "stored connector config invalid",
+            );
+          }
+        }
+        if (requestedFingerprint !== undefined) {
+          // Fail closed: a fingerprinted startup requires the stored row to
+          // carry the identical fingerprint (legacy/mismatched rows reject).
+          if (storedFingerprint !== requestedFingerprint) {
+            throw new RepositoryValidationError(
+              "connector config fingerprint mismatch",
+            );
+          }
+        }
         return {
           id: existing.id,
           kind: existing.kind,
           displayName: existing.display_name,
-          rootCount: (parsed as { rootCount: number }).rootCount,
+          rootCount: storedRootCount,
           createdAt: existing.created_at,
         };
       }
       const id = generateId();
-      const configJson = JSON.stringify({
-        version: CONNECTOR_CONFIG_VERSION,
-        rootCount,
-      });
+      const configJson =
+        requestedFingerprint === undefined
+          ? JSON.stringify({
+              version: CONNECTOR_CONFIG_VERSION,
+              rootCount,
+            })
+          : JSON.stringify({
+              version: CONNECTOR_CONFIG_VERSION,
+              rootCount,
+              configFingerprint: requestedFingerprint,
+            });
       db.prepare(
         "INSERT INTO connector_instances (id, kind, display_name, config_json, created_at) VALUES (?, 'markdown', ?, ?, ?)",
       ).run(id, displayName, configJson, now);
