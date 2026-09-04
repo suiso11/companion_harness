@@ -201,6 +201,24 @@ export class ToolError extends Error {
   }
 }
 
+/**
+ * Fixed synthetic audit name for invalid tool-name requests. It is a valid
+ * `namespace.verb` value so tool_calls / run_events / ToolResult stay
+ * schema-valid while the arbitrary invalid text is never persisted,
+ * returned, logged, or embedded in errors.
+ */
+const INVALID_TOOL_AUDIT_NAME = "invalid.request" as const;
+
+/** Local `namespace.verb` check mirroring contracts ToolNameSchema (no raw text in errors). */
+const TOOL_NAME_PATTERN =
+  /^[a-z0-9]+(?:_[a-z0-9]+)*\.[a-z0-9]+(?:_[a-z0-9]+)*$/;
+
+function isValidToolNameFormat(name: string): boolean {
+  return (
+    name.length >= 1 && name.length <= 128 && TOOL_NAME_PATTERN.test(name)
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /* Internal helpers                                                    */
 /* ------------------------------------------------------------------ */
@@ -690,22 +708,30 @@ export class ToolBroker {
       );
     }
 
+    // Name validity is computed safely here (pure, no persistence), but
+    // rejection/audit occurs only after budget reservation and running
+    // eligibility below. Invalid text never persists: every audit/event/
+    // result/log path uses `auditTool` (a fixed valid synthetic name).
+    const requestedTool = tool;
+    const nameValid = isValidToolNameFormat(requestedTool);
+    const auditTool = nameValid ? requestedTool : INVALID_TOOL_AUDIT_NAME;
+
     const trace: PipelineStep[] = [];
     const callIndexHolder: { callIndex: number } = { callIndex: 0 };
     const note = (step: PipelineStep): void => {
       trace.push(step);
       this.onStep?.(step, {
         runId,
-        tool,
+        tool: auditTool,
         callIndex: callIndexHolder.callIndex,
       });
     };
 
     // ---- Step 1: atomic budget reservation (first, always). ----
     note("budget_reserve");
-    const arrivalHash = fingerprintRawArgs(tool, args);
+    const arrivalHash = fingerprintRawArgs(auditTool, args);
     if (!this.reserveBudget(runId)) {
-      const call = this.insertCallRow(runId, tool, arrivalHash);
+      const call = this.insertCallRow(runId, auditTool, arrivalHash);
       callIndexHolder.callIndex = call.callIndex;
       const budgetFinal: FinalOutcome = {
         actualOutcome: "failed",
@@ -719,11 +745,11 @@ export class ToolBroker {
       };
       // Begun-non-running budget exhaustion audits with no RunEvents.
       if (!this.isRunning(runId)) {
-        return this.finishFastAuditOnly(runId, tool, call, budgetFinal, trace);
+        return this.finishFastAuditOnly(runId, auditTool, call, budgetFinal, trace);
       }
-      return this.finishFast(runId, tool, call, budgetFinal, trace);
+      return this.finishFast(runId, auditTool, call, budgetFinal, trace);
     }
-    const call = this.insertCallRow(runId, tool, arrivalHash);
+    const call = this.insertCallRow(runId, auditTool, arrivalHash);
     callIndexHolder.callIndex = call.callIndex;
 
     // ---- Running-only eligibility: budget is already reserved (first),
@@ -735,25 +761,35 @@ export class ToolBroker {
     if (!this.isRunning(runId)) {
       return this.finishFastAuditOnly(
         runId,
-        tool,
+        auditTool,
         call,
         cancelOutcome(null),
         trace,
       );
     }
-    this.appendRequested(runId, tool, call, arrivalHash);
+    // Durable requested event before any classification/execution: a
+    // nonterminal persistence failure rejects here so physical work can
+    // never occur without the durable requested event. Only a run that
+    // left running (terminal/non-running audit-only) may omit events.
+    this.appendRequested(runId, auditTool, call, arrivalHash);
 
     // ---- Step 2: classification (allowlist + read-only default-deny). ----
+    // Invalid `namespace.verb` names are rejected here as fixed
+    // invalid_input with the synthetic audit name; valid-format unknown
+    // names fall through to the unknown_tool path in validate.
     note("classify");
-    const reg = this.registry.get(tool);
+    if (!nameValid) {
+      return this.finishFast(runId, auditTool, call, invalidOutcome(), trace);
+    }
+    const reg = this.registry.get(requestedTool);
     if (
       context.allowedTools !== undefined &&
-      !context.allowedTools.includes(tool)
+      !context.allowedTools.includes(requestedTool)
     ) {
-      return this.finishFast(runId, tool, call, deniedOutcome(), trace);
+      return this.finishFast(runId, auditTool, call, deniedOutcome(), trace);
     }
     if (reg !== undefined && reg.descriptor.category !== "read") {
-      return this.finishFast(runId, tool, call, deniedOutcome(), trace);
+      return this.finishFast(runId, auditTool, call, deniedOutcome(), trace);
     }
 
     // ---- Step 3: descriptor + input validation. ----
@@ -761,7 +797,7 @@ export class ToolBroker {
     if (reg === undefined) {
       return this.finishFast(
         runId,
-        tool,
+        auditTool,
         call,
         {
           actualOutcome: "unknown",
@@ -780,30 +816,30 @@ export class ToolBroker {
     try {
       input = reg.inputSchema.parse(args);
     } catch {
-      return this.finishFast(runId, tool, call, invalidOutcome(), trace);
+      return this.finishFast(runId, auditTool, call, invalidOutcome(), trace);
     }
     let canonicalInput: string;
     try {
       canonicalInput = canonicalJsonString(input);
     } catch {
-      return this.finishFast(runId, tool, call, invalidOutcome(), trace);
+      return this.finishFast(runId, auditTool, call, invalidOutcome(), trace);
     }
     if (byteLengthUtf8(canonicalInput) > this.budgets.maxInputBytesPerCall) {
-      return this.finishFast(runId, tool, call, invalidOutcome(), trace);
+      return this.finishFast(runId, auditTool, call, invalidOutcome(), trace);
     }
     const argsHash = sha256Hex(canonicalInput);
     this.updateArgsHash(call.callId, argsHash);
 
     // ---- Step 4: dedup (same run, post-defaults fingerprint). ----
     note("dedup");
-    const key = `${tool}:${argsHash}`;
+    const key = `${auditTool}:${argsHash}`;
     if (freshness !== "refresh") {
       const prior = this.dedup.get(runId)?.get(key);
       if (prior !== undefined && prior.status === "done") {
         // Running-only delivery: a run that left `running` while this
         // request was in flight never receives cached output.
         if (!this.isRunning(runId)) {
-          return this.finishFast(runId, tool, call, cancelOutcome(null), trace);
+          return this.finishFast(runId, auditTool, call, cancelOutcome(null), trace);
         }
         // Every delivered dedup reuse consumes cumulative budgets and is
         // marked accepted with the leader digest; over-budget duplicates
@@ -818,11 +854,11 @@ export class ToolBroker {
             reservation === "model"
               ? outputTooLargeOutcome("succeeded", prior.resultDigest)
               : outputInvalidOutcome("succeeded", prior.resultDigest);
-          return this.finishFast(runId, tool, call, over, trace);
+          return this.finishFast(runId, auditTool, call, over, trace);
         }
         return this.finishFast(
           runId,
-          tool,
+          auditTool,
           call,
           {
             actualOutcome: "deduplicated",
@@ -840,12 +876,12 @@ export class ToolBroker {
       if (prior !== undefined && prior.status === "inflight") {
         const leader = await this.awaitLeader(prior.promise, context.signal);
         if (leader === null) {
-          return this.finishFast(runId, tool, call, cancelOutcome(null), trace);
+          return this.finishFast(runId, auditTool, call, cancelOutcome(null), trace);
         }
         // A run that left `running` during coalesced wait never receives
         // the leader output.
         if (!this.isRunning(runId)) {
-          return this.finishFast(runId, tool, call, cancelOutcome(null), trace);
+          return this.finishFast(runId, auditTool, call, cancelOutcome(null), trace);
         }
         if (leader.accepted) {
           const reservation = this.reserveCumulative(
@@ -858,11 +894,11 @@ export class ToolBroker {
               reservation === "model"
                 ? outputTooLargeOutcome("succeeded", leader.final.resultDigest)
                 : outputInvalidOutcome("succeeded", leader.final.resultDigest);
-            return this.finishFast(runId, tool, call, over, trace);
+            return this.finishFast(runId, auditTool, call, over, trace);
           }
           return this.finishFast(
             runId,
-            tool,
+            auditTool,
             call,
             {
               actualOutcome: "deduplicated",
@@ -880,7 +916,7 @@ export class ToolBroker {
         // Leader failed/timed out/was cancelled: mirror the physical fate.
         return this.finishFast(
           runId,
-          tool,
+          auditTool,
           call,
           {
             actualOutcome: leader.final.actualOutcome,
@@ -901,7 +937,7 @@ export class ToolBroker {
     const effectiveTimeoutMs = this.effectiveTimeout(reg, context.timeoutMs);
     const leaderPromise = this.runLeaderCall({
       runId,
-      tool,
+      tool: auditTool,
       reg,
       input,
       call,
@@ -928,7 +964,7 @@ export class ToolBroker {
       promise: leaderPromise,
     });
     const settlement = await leaderPromise;
-    return this.finalizeResult(tool, call, settlement.final, trace);
+    return this.finalizeResult(auditTool, call, settlement.final, trace);
   }
 
   /* ------------------------------------------------------------ */
@@ -1009,7 +1045,9 @@ export class ToolBroker {
   ): void {
     // Requested events require confirmed running eligibility: queued /
     // cancel_requested / terminal beginnings (and lost running races)
-    // audit with no RunEvents.
+    // audit with no RunEvents. While the run is still running, the
+    // requested event is durable-or-reject: a persistence failure
+    // propagates so classification/execution can never occur without it.
     if (!this.isRunning(runId)) {
       return;
     }
@@ -1020,8 +1058,24 @@ export class ToolBroker {
         tool,
         argsHash,
       });
-    } catch {
-      // A lost terminal race means audit-only from here on.
+    } catch (error) {
+      // Lost running race (now terminal/non-running): audit-only.
+      if (!this.isRunning(runId)) {
+        return;
+      }
+      if (error instanceof KernelStorageError) {
+        throw error;
+      }
+      if (
+        error instanceof RepositoryNotFoundError ||
+        error instanceof RepositoryValidationError
+      ) {
+        throw error;
+      }
+      throw new KernelStorageError(
+        "kernel_storage_failed",
+        "tool audit commit failed",
+      );
     }
   }
 

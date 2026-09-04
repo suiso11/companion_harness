@@ -1741,3 +1741,121 @@ describe("tighten-broker-atomicity: nonterminal commit rollback", () => {
     }
   });
 });
+
+describe("final-m0-blockers: requested durability and safe tool-name audit", () => {
+  it("propagates nonterminal requested-event failure before classification/execution", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const { runId } = newRunningRun(repo, T0);
+      let entered = 0;
+      const broker = makeBroker(handle, repo, [
+        echoReg({
+          handler: async (input: { q: string }) => {
+            entered += 1;
+            return { text: input.q };
+          },
+        }),
+      ]);
+      handle.raw.exec(
+        "CREATE TRIGGER inject_tool_requested_failure BEFORE INSERT ON run_events WHEN NEW.type = 'tool.requested' BEGIN SELECT RAISE(ABORT, 'injected_tool_requested_failure'); END",
+      );
+      let failure: unknown = null;
+      try {
+        await broker.invoke(runId, "test.read", { q: "a" }, CTX);
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toBeInstanceOf(KernelStorageError);
+      expect((failure as KernelStorageError).code).toBe(
+        "kernel_storage_failed",
+      );
+      expect(String((failure as Error).message)).not.toContain(
+        "injected_tool_requested_failure",
+      );
+      // Physical execution never occurred without the durable requested event.
+      expect(entered).toBe(0);
+      // Budget was still reserved first.
+      expect(requestsUsed(handle.raw, runId)).toBe(1);
+      // No requested/completed events persisted; the call row never finished.
+      const toolEvents = runEvents(handle.raw, runId).filter((e) =>
+        e.type.startsWith("tool."),
+      );
+      expect(toolEvents).toHaveLength(0);
+      const rows = toolCalls(handle.raw, runId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.lifecycle_status).not.toBe("finished");
+      expect(rows[0]?.actual_outcome).toBeNull();
+    } finally {
+      try {
+        handle.raw.exec(
+          "DROP TRIGGER IF EXISTS inject_tool_requested_failure",
+        );
+      } catch {
+        // Best effort.
+      }
+      handle.raw.close();
+    }
+  });
+
+  it("audits invalid namespace.verb names with a fixed synthetic name and never persists the raw text", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const { runId } = newRunningRun(repo, T0);
+      const steps: PipelineStep[] = [];
+      const broker = makeBroker(handle, repo, [echoReg()], {
+        onStep: (s) => steps.push(s),
+      });
+      const secret = "SECRET-XYZ-789";
+      const evil = `BAD NAME ${secret}!!`;
+      const out = await broker.invoke(runId, evil, { q: secret }, CTX);
+      expect(out.result.actualOutcome).toBe("invalid");
+      expect(out.result.errorCode).toBe("invalid_input");
+      // Returned result uses the fixed valid synthetic name.
+      expect(out.result.tool).toBe("invalid.request");
+      // Observable pipeline still starts with budget_reserve.
+      expect(out.pipeline[0]).toBe("budget_reserve");
+      expect(steps[0]).toBe("budget_reserve");
+      expect(requestsUsed(handle.raw, runId)).toBe(1);
+      const rows = toolCalls(handle.raw, runId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.tool).toBe("invalid.request");
+      expect(rows[0]?.actual_outcome).toBe("invalid");
+      const events = runEvents(handle.raw, runId);
+      expect(events.filter((e) => e.type === "tool.requested")).toHaveLength(
+        1,
+      );
+      expect(events.filter((e) => e.type === "tool.completed")).toHaveLength(
+        1,
+      );
+      for (const event of events.filter((e) =>
+        e.type.startsWith("tool."),
+      )) {
+        const payload = JSON.parse(event.payload) as Record<string, unknown>;
+        expect(payload.tool).toBe("invalid.request");
+      }
+      // Raw invalid text and secrets appear nowhere durable/returned.
+      const rowText = JSON.stringify(rows);
+      expect(rowText).not.toContain(secret);
+      expect(rowText).not.toContain(evil);
+      expect(rowText).not.toContain("BAD NAME");
+      const eventText = JSON.stringify(events);
+      expect(eventText).not.toContain(secret);
+      expect(eventText).not.toContain(evil);
+      const resultText = JSON.stringify(out.result);
+      expect(resultText).not.toContain(secret);
+      expect(resultText).not.toContain(evil);
+      // Valid-format unknown names still produce unknown_tool.
+      const unknown = await broker.invoke(
+        runId,
+        "nope.missing",
+        { q: "a" },
+        CTX,
+      );
+      expect(unknown.result.actualOutcome).toBe("unknown");
+      expect(unknown.result.errorCode).toBe("unknown_tool");
+      expect(unknown.result.tool).toBe("nope.missing");
+    } finally {
+      handle.raw.close();
+    }
+  });
+});

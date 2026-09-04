@@ -131,7 +131,7 @@ export class RunEngine {
   private readonly drainMs: number;
   private readonly clock: EngineClock;
   private readonly inFlight = new Map<string, InFlight>();
-  private readonly watchdogs = new Map<string, unknown>();
+  private readonly watchdogs = new Map<string, { handle: unknown; deadline: number }>();
   private timer: unknown;
   private started = false;
   private draining = false;
@@ -317,29 +317,54 @@ export class RunEngine {
     }, this.pollIntervalMs);
   }
 
-  private armWatchdog(runId: string, remaining: number = WATCHDOG_FINALIZE_ATTEMPTS): void {
+  private armWatchdog(runId: string): void {
     this.clearWatchdog(runId);
+    const deadline = this.clock.now() + Math.max(this.cancelGraceMs, 0);
+    this.scheduleWatchdog(runId, deadline);
+  }
+
+  /**
+   * Watchdog finalization bound to the ORIGINAL cancel deadline. A single
+   * timer fires at `deadline`; transient synchronous failures are retried
+   * with a bounded loop inside that same callback (repository methods are
+   * synchronous) so they still settle at the original deadline. No retry
+   * ever schedules a new timer or extends the deadline; persistent failure
+   * simply stops retrying (retained fail-closed for recovery).
+   */
+  private scheduleWatchdog(runId: string, deadline: number): void {
+    const delay = Math.max(deadline - this.clock.now(), 0);
     const handle = this.clock.setTimeout(() => {
       this.watchdogs.delete(runId);
-      try {
-        this.repo.finalizeCancelRequested(runId, { now: this.clock.now() });
-      } catch (error) {
-        // Retry transient finalization failures; terminal/absent rows
-        // (validation/not-found) stay as they are with no retry.
-        if (remaining > 1 && isRetriablePersistenceError(error)) {
-          this.armWatchdog(runId, remaining - 1);
+      for (
+        let attempt = 1;
+        attempt <= WATCHDOG_FINALIZE_ATTEMPTS;
+        attempt += 1
+      ) {
+        try {
+          this.repo.finalizeCancelRequested(runId, { now: this.clock.now() });
+          break;
+        } catch (error) {
+          // Terminal/absent rows (validation/not-found) stay as they are;
+          // only transient failures merit another synchronous attempt, up
+          // to the fixed budget, without scheduling beyond the deadline.
+          if (
+            !isRetriablePersistenceError(error) ||
+            attempt === WATCHDOG_FINALIZE_ATTEMPTS
+          ) {
+            break;
+          }
         }
       }
-    }, this.cancelGraceMs);
-    this.watchdogs.set(runId, handle);
+    }, delay);
+    this.watchdogs.set(runId, { handle, deadline });
   }
 
   private clearWatchdog(runId: string): void {
-    const handle = this.watchdogs.get(runId);
-    if (handle !== undefined) {
+    const entry = this.watchdogs.get(runId);
+    if (entry !== undefined) {
       this.watchdogs.delete(runId);
       try {
-        this.clock.clearTimeout(handle);
+        this.clock.clearTimeout(entry.handle);
       } catch {
         // Clearing timers must never throw.
       }

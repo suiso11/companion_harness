@@ -569,6 +569,71 @@ describe("normal-cancel watchdog", () => {
       closeKernelDatabase(handle);
     }
   });
+
+  it("retries transient finalize failures within the original deadline (no new grace)", async () => {
+    const { handle, repo } = await openRepo();
+    const clock = createFakeClock();
+    let attempts = 0;
+    const wrapped: KernelRepository = {
+      ...repo,
+      finalizeCancelRequested: (runId: string, options?: { now?: number }) => {
+        attempts += 1;
+        if (attempts <= 2) {
+          throw new Error("transient-finalize-failure");
+        }
+        return repo.finalizeCancelRequested(runId, options);
+      },
+    };
+    const engine = new RunEngine({
+      db: handle.raw,
+      repo: wrapped,
+      clock,
+      cancelGraceMs: 3000,
+    });
+    try {
+      const obs = observer();
+      engine.strategies.register("fake-never", neverResolving("N", obs));
+      const s = newSession(repo, T0);
+      const m = await post({
+        repo,
+        sessionId: s,
+        text: "q",
+        key: crypto.randomUUID(),
+        now: T0,
+        strategy: "fake-never",
+      });
+      engine.start();
+      expect(engine.pump()).toBe(1);
+      // Single watchdog timer at the original deadline: count timers armed
+      // after cancel to prove retries never schedule beyond it.
+      let watchdogTimers = 0;
+      const origSetTimeout = clock.setTimeout.bind(clock);
+      clock.setTimeout = ((fn: () => void, ms: number) => {
+        watchdogTimers += 1;
+        return origSetTimeout(fn, ms);
+      }) as typeof clock.setTimeout;
+      expect(engine.cancel(s, m.body.run.id).status).toBe("cancel_requested");
+      expect(watchdogTimers).toBe(1);
+      clock.advance(2999);
+      expect(repo.getRun(m.body.run.id).status).toBe("cancel_requested");
+      // Two transient failures then success: still settles exactly at the
+      // original 3000ms deadline via a bounded synchronous loop in that
+      // single deadline callback (no additional timer).
+      clock.advance(1);
+      expect(attempts).toBe(3);
+      expect(watchdogTimers).toBe(1);
+      expect(repo.getRun(m.body.run.id).status).toBe("cancelled");
+      expect(eventTypes(handle, m.body.run.id)).toEqual([
+        "run.queued",
+        "run.started",
+        "run.cancel_requested",
+        "run.cancelled",
+      ]);
+    } finally {
+      await engine.shutdown({ drainMs: 0 });
+      closeKernelDatabase(handle);
+    }
+  });
 });
 
 describe("startup recovery", () => {
