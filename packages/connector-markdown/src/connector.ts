@@ -73,7 +73,7 @@
 
 import { createHash } from "node:crypto";
 import * as path from "node:path";
-import { discoverMarkdownFiles } from "./discovery.js";
+import { discoverMarkdownFiles, MAX_CANONICAL_KEY_UTF16 } from "./discovery.js";
 import { MarkdownConnectorError } from "./errors.js";
 import {
   type ParsedMarkdown,
@@ -300,6 +300,9 @@ export function filenameStemOf(canonicalKey: string): string {
 
 /** Display-title bound in UTF-16 code units (contract ReferenceTitle max). */
 export const REFERENCE_TITLE_MAX_UTF16 = 512;
+
+/** Canonical-key bound in UTF-16 code units (matches CanonicalKeySchema). */
+export { MAX_CANONICAL_KEY_UTF16 };
 
 /**
  * Bound a heading-derived display title to a ReferenceTitle-compatible
@@ -548,6 +551,12 @@ function validateCanonicalShape(canonicalKey: unknown): {
   alias: string;
 } {
   if (typeof canonicalKey !== "string") {
+    throw new MarkdownConnectorError("invalid_input", null);
+  }
+  // Canonical-key bound (UTF-16 units, matches CanonicalKeySchema max 512):
+  // rejected as `invalid_input` before any discovery metadata or content
+  // byte is touched. Never truncated.
+  if (canonicalKey.length > MAX_CANONICAL_KEY_UTF16) {
     throw new MarkdownConnectorError("invalid_input", null);
   }
   if (

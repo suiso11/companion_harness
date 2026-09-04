@@ -13,6 +13,7 @@ import {
   discoverMarkdownFiles,
   discoverMarkdownFilesForRoot,
   enforceVaultFileLimit,
+  MAX_CANONICAL_KEY_UTF16,
   MAX_FILES_PER_VAULT,
 } from "../src/discovery.js";
 import { MarkdownConnectorError } from "../src/errors.js";
@@ -292,7 +293,7 @@ describe("discovery", () => {
     ]);
   });
 
-  it("handles POSIX colon filenames per platform", async (ctx: TestContext) => {
+  it("handles POSIX colon filenames per platform", async () => {
     if (process.platform === "win32") {
       // Windows cannot create colon files; injected colon candidates are
       // ignored as unsupported (no failure, no content read).
@@ -381,6 +382,61 @@ describe("discovery", () => {
       expect(String(error)).not.toContain(dir);
       expect(String(error)).not.toContain(tmpdir());
       expect(String(error)).not.toContain("a.md");
+    }
+  });
+
+  it("enforces the 512 UTF-16-unit canonical-key bound via injection", async () => {
+    expect(MAX_CANONICAL_KEY_UTF16).toBe(512);
+    const dir = scratchVault("md-disc-keybound-");
+    const root = onlyRoot(
+      await initializeRoots([{ path: dir, alias: "vault" }]),
+    );
+    // vault/ (6) + 503 a's + .md (3) = 512 accepted; +1 = 513 rejected.
+    const name512 = `${"a".repeat(503)}.md`;
+    const key512 = `vault/${name512}`;
+    expect(key512.length).toBe(512);
+    const accepted = await discoverMarkdownFilesForRoot(root, {
+      readdir: () =>
+        Promise.resolve([
+          {
+            name: name512,
+            isDirectory: false,
+            isFile: true,
+            isSymbolicLink: false,
+          },
+        ]),
+      realpath: (candidate) => Promise.resolve(candidate),
+    });
+    expect(accepted.map((entry) => entry.canonicalKey)).toEqual([key512]);
+
+    const name513 = `${"a".repeat(504)}.md`;
+    const key513 = `vault/${name513}`;
+    expect(key513.length).toBe(513);
+    try {
+      await discoverMarkdownFilesForRoot(root, {
+        readdir: () =>
+          Promise.resolve([
+            {
+              name: name513,
+              isDirectory: false,
+              isFile: true,
+              isSymbolicLink: false,
+            },
+          ]),
+        realpath: (candidate) => Promise.resolve(candidate),
+      });
+      expect.unreachable("expected markdown_path_unsafe for 513");
+    } catch (error) {
+      expect(error).toBeInstanceOf(MarkdownConnectorError);
+      expect((error as MarkdownConnectorError).code).toBe(
+        "markdown_path_unsafe",
+      );
+      // Fixed code carries the alias only: never the overlong key, raw
+      // path, or a later execution_failed.
+      expect((error as MarkdownConnectorError).canonicalKey).toBe("vault");
+      expect((error as Error).message).not.toContain(name513.slice(0, 32));
+      expect((error as Error).message).not.toContain(dir);
+      expect((error as Error).message).not.toContain(tmpdir());
     }
   });
 });

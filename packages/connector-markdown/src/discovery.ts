@@ -35,6 +35,43 @@ import { type InitializedRoot, isWithinRealRoot } from "./roots.js";
 /** Maximum unique real `.md` files accepted per vault (exact, plan 14.6). */
 export const MAX_FILES_PER_VAULT = 10000;
 
+/**
+ * Maximum canonical-key length in UTF-16 code units. Single connector
+ * constant matching `CanonicalKeySchema` (`.max(512)`); discovery validates
+ * every derived key against it before count acceptance/output, and
+ * `readCanonical` rejects longer keys as `invalid_input` before discovery.
+ */
+export const MAX_CANONICAL_KEY_UTF16 = 512;
+
+/** Structural canonical-key grammar (mirrors CanonicalKeySchema minimum). */
+function isStructuralCanonicalKey(canonicalKey: string): boolean {
+  if (
+    canonicalKey.length < 1 ||
+    canonicalKey.length > MAX_CANONICAL_KEY_UTF16
+  ) {
+    return false;
+  }
+  if (canonicalKey.includes("\0") || canonicalKey.includes("\\")) {
+    return false;
+  }
+  if (canonicalKey.startsWith("/")) {
+    return false;
+  }
+  if (/^[A-Za-z]:(\/|$)/.test(canonicalKey)) {
+    return false;
+  }
+  const segments = canonicalKey.split("/");
+  if (segments.length < 2) {
+    return false;
+  }
+  for (const segment of segments) {
+    if (segment === "" || segment === "." || segment === "..") {
+      return false;
+    }
+  }
+  return true;
+}
+
 /** A discovered Markdown file, identified only by its canonical key. */
 export interface DiscoveredFile {
   readonly canonicalKey: string;
@@ -211,9 +248,7 @@ export async function discoverMarkdownFilesForRoot(
           if (process.platform === "win32") {
             const dirRelative = path.relative(root.realPath, classified.real);
             const dirPosix = dirRelative.split(path.sep).join("/");
-            if (
-              dirPosix.split("/").some((segment) => segment.includes(":"))
-            ) {
+            if (dirPosix.split("/").some((segment) => segment.includes(":"))) {
               continue;
             }
           }
@@ -235,6 +270,23 @@ export async function discoverMarkdownFilesForRoot(
         const filePosix = fileRelative.split(path.sep).join("/");
         if (filePosix.split("/").some((segment) => segment.includes(":"))) {
           continue;
+        }
+      }
+      // Canonical-key bounds: validate the derived key's structural grammar
+      // and 512 UTF-16-unit max after realpath-relative derivation and
+      // before content reads/output/count acceptance. Any other invalid or
+      // overlong generated key fails the whole discovery with fixed
+      // `markdown_path_unsafe` carrying the alias only (never a raw path or
+      // later `execution_failed`); keys are never truncated and no new
+      // skipped reason is introduced.
+      {
+        const candidateKey = toCanonicalKey(
+          root.alias,
+          root.realPath,
+          classified.real,
+        );
+        if (!isStructuralCanonicalKey(candidateKey)) {
+          throw new MarkdownConnectorError("markdown_path_unsafe", root.alias);
         }
       }
       if (!seenFiles.has(classified.real)) {

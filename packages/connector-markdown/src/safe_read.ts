@@ -76,6 +76,7 @@ import type { Stats } from "node:fs";
 import { constants, promises as fs } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
 import * as path from "node:path";
+import { MAX_CANONICAL_KEY_UTF16 } from "./discovery.js";
 import { MarkdownConnectorError } from "./errors.js";
 import { type InitializedRoot, isWithinRealRoot } from "./roots.js";
 
@@ -285,6 +286,11 @@ export async function safeReadMarkdownFile(
 ): Promise<SafeReadResult> {
   if (typeof canonicalKey !== "string") {
     throw new MarkdownConnectorError("markdown_path_unsafe", null);
+  }
+  // Downstream key bound (UTF-16 units, matches CanonicalKeySchema max):
+  // overlong keys fail before any resolve/stat/open byte is touched.
+  if (canonicalKey.length > MAX_CANONICAL_KEY_UTF16) {
+    throw new MarkdownConnectorError("markdown_path_unsafe", root.alias);
   }
   const signal = hooks.signal;
   throwIfAborted(signal);

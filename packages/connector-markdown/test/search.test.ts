@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   createMarkdownConnector,
   deriveIdentityFingerprint,
+  MAX_CANONICAL_KEY_UTF16,
 } from "../src/connector.js";
 import { MarkdownConnectorError } from "../src/errors.js";
 import { MAX_FILE_BYTES } from "../src/safe_read.js";
@@ -499,6 +500,54 @@ describe("markdown connector search core", () => {
     // The discovered key still reads exactly once.
     const doc = await connector.readCanonical("vault-1/real.md");
     expect(doc.canonicalKey).toBe("vault-1/real.md");
+  });
+
+  it("enforces the 512 canonical-key bound before any content byte", async () => {
+    expect(MAX_CANONICAL_KEY_UTF16).toBe(512);
+    const dir = scratchVault("md-conn-keybound-");
+    writeFileSync(join(dir, "real.md"), "# Real\nbody\n");
+    let hookCalls = 0;
+    const connector = await createMarkdownConnector([{ path: dir }], {
+      safeRead: {
+        afterPreStat: () => {
+          hookCalls += 1;
+        },
+        afterOpen: () => {
+          hookCalls += 1;
+        },
+        afterRead: () => {
+          hookCalls += 1;
+        },
+      },
+    });
+    // vault-1/ (8) + 501 a's + .md (3) = 512 accepted by shape (undiscovered
+    // -> reference_not_found, still before bytes); +1 = 513 rejected as
+    // invalid_input before discovery. Keys are never truncated and no new
+    // skipped reason is introduced.
+    const rest512 = `${"a".repeat(501)}.md`;
+    const key512 = `vault-1/${rest512}`;
+    expect(key512.length).toBe(512);
+    await expect(connector.readCanonical(key512)).rejects.toMatchObject({
+      code: "reference_not_found",
+    });
+    expect(hookCalls).toBe(0);
+    const rest513 = `${"a".repeat(502)}.md`;
+    const key513 = `vault-1/${rest513}`;
+    expect(key513.length).toBe(513);
+    try {
+      await connector.readCanonical(key513);
+      expect.unreachable("expected invalid_input for 513");
+    } catch (error) {
+      expect(error).toBeInstanceOf(MarkdownConnectorError);
+      expect((error as MarkdownConnectorError).code).toBe("invalid_input");
+      // Fixed code carries null: never the overlong key, raw path, or a
+      // later execution_failed; no content byte was opened.
+      expect((error as MarkdownConnectorError).canonicalKey).toBeNull();
+      expect(String(error)).not.toContain(rest513.slice(0, 32));
+      expect(String(error)).not.toContain(dir);
+      expect(String(error)).not.toContain(tmpdir());
+    }
+    expect(hookCalls).toBe(0);
   });
 
   it("never uses locale-sensitive APIs in the connector", async () => {

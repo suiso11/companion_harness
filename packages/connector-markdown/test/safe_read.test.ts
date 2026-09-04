@@ -629,4 +629,54 @@ describe("safe read", () => {
     const retry = await safeReadMarkdownFile(root, "vault/long.md");
     expect(retry.status).toBe("ok");
   });
+
+  it("rejects overlong canonical keys before any content byte", async () => {
+    const dir = scratchVault("md-read-keybound-");
+    writeFileSync(join(dir, "ok.md"), "# ok\n");
+    const root = onlyRoot(
+      await initializeRoots([{ path: dir, alias: "vault" }]),
+    );
+    // vault/ (6) + 503 a's + .md (3) = 512; +1 = 513 overlong (UTF-16).
+    const key512 = `vault/${"a".repeat(503)}.md`;
+    expect(key512.length).toBe(512);
+    let hookCalls = 0;
+    const counting = () => {
+      hookCalls += 1;
+    };
+    // 512-shaped but undiscovered: passes the bound, then fails as missing
+    // before any byte (proves 512 is accepted by the bound).
+    try {
+      await safeReadMarkdownFile(root, key512, {
+        afterPreStat: counting,
+        afterOpen: counting,
+        afterRead: counting,
+      });
+      expect.unreachable("expected markdown_read_failed for 512-missing");
+    } catch (error) {
+      expect((error as MarkdownConnectorError).code).toBe(
+        "markdown_read_failed",
+      );
+      expect((error as MarkdownConnectorError).canonicalKey).toBe(key512);
+    }
+    expect(hookCalls).toBe(0);
+    const key513 = `vault/${"a".repeat(504)}.md`;
+    expect(key513.length).toBe(513);
+    try {
+      await safeReadMarkdownFile(root, key513, {
+        afterPreStat: counting,
+        afterOpen: counting,
+        afterRead: counting,
+      });
+      expect.unreachable("expected markdown_path_unsafe for 513");
+    } catch (error) {
+      expect((error as MarkdownConnectorError).code).toBe(
+        "markdown_path_unsafe",
+      );
+      // Overlong carries the alias only, never the long key or raw path.
+      expect((error as MarkdownConnectorError).canonicalKey).toBe("vault");
+      expect((error as Error).message).not.toContain(dir);
+      expect((error as Error).message).not.toContain(tmpdir());
+    }
+    expect(hookCalls).toBe(0);
+  });
 });

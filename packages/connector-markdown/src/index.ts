@@ -47,6 +47,7 @@ export {
   discoverMarkdownFiles,
   discoverMarkdownFilesForRoot,
   enforceVaultFileLimit,
+  MAX_CANONICAL_KEY_UTF16,
   MAX_FILES_PER_VAULT,
 } from "./discovery.js";
 export type {
