@@ -29,6 +29,16 @@ export type ServerHost = z.infer<typeof HostSchema>;
 const LogLevelSchema = z.enum(["debug", "info", "warn", "error"]);
 export type ServerLogLevel = z.infer<typeof LogLevelSchema>;
 
+/** Validated Markdown vault root (path-private at runtime). */
+export interface MarkdownRootConfig {
+  readonly path: string;
+  readonly alias?: string;
+}
+
+export const MAX_MARKDOWN_ROOTS = 1024;
+export const MAX_MARKDOWN_ROOT_PATH_LENGTH = 4096;
+const MARKDOWN_ROOT_ALIAS_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+
 const ServerConfigSchema = z.strictObject({
   dbPath: z.string().min(1).max(4096),
   host: HostSchema,
@@ -45,6 +55,8 @@ export interface ServerConfig {
   /** Verified IANA time-zone name (Intl membership, not shape). */
   readonly timeZone: string;
   readonly logLevel: ServerLogLevel;
+  /** Validated Markdown vault roots (deep-frozen, default empty). */
+  readonly markdownRoots: readonly MarkdownRootConfig[];
 }
 
 export class ServerConfigError extends Error {
@@ -167,6 +179,86 @@ function parsePort(raw: string | undefined): number {
 }
 
 /**
+ * Strict Markdown roots parser (plan 14.1/14.6 server wiring).
+ *
+ * - Env COMPANION_MARKDOWN_ROOTS_JSON is strict JSON only; unset means [].
+ * - Top level must be an array (scalar/object rejected), max 1024 entries.
+ * - Each entry must be an exact { path, alias? } object: unknown keys
+ *   rejected, path must be a non-empty absolute path with no NUL byte and
+ *   at most 4096 chars, alias when present must be a safe 1..64 token
+ *   matching /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/ with no duplicates.
+ * - Failures carry fixed messages only: no raw values or paths escape.
+ * - The returned array and every entry are deep-frozen.
+ */
+export function parseMarkdownRoots(
+  raw: string | undefined,
+): readonly MarkdownRootConfig[] {
+  if (raw === undefined) {
+    return Object.freeze([]);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw configError("markdown roots must be a JSON array");
+  }
+  if (!Array.isArray(parsed)) {
+    throw configError("markdown roots must be a JSON array");
+  }
+  if (parsed.length > MAX_MARKDOWN_ROOTS) {
+    throw configError("markdown roots exceed the maximum count");
+  }
+  const seenAliases = new Set<string>();
+  const entries: MarkdownRootConfig[] = [];
+  for (const item of parsed) {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) {
+      throw configError("markdown roots entry must be an object");
+    }
+    const keys = Object.keys(item);
+    for (const key of keys) {
+      if (key !== "path" && key !== "alias") {
+        throw configError("markdown roots entry has an unknown key");
+      }
+    }
+    const record = item as { path?: unknown; alias?: unknown };
+    const pathValue = record.path;
+    if (
+      typeof pathValue !== "string" ||
+      pathValue.length === 0 ||
+      pathValue.length > MAX_MARKDOWN_ROOT_PATH_LENGTH
+    ) {
+      throw configError("markdown roots path is invalid");
+    }
+    if (pathValue.includes("\0")) {
+      throw configError("markdown roots path is invalid");
+    }
+    if (!isAbsolute(pathValue)) {
+      throw configError("markdown roots path is invalid");
+    }
+    if (record.alias !== undefined) {
+      if (
+        typeof record.alias !== "string" ||
+        !MARKDOWN_ROOT_ALIAS_PATTERN.test(record.alias)
+      ) {
+        throw configError("markdown roots alias is invalid");
+      }
+      if (seenAliases.has(record.alias)) {
+        throw configError("markdown roots alias is invalid");
+      }
+      seenAliases.add(record.alias);
+    }
+    entries.push(
+      Object.freeze(
+        record.alias === undefined
+          ? { path: pathValue }
+          : { path: pathValue, alias: record.alias as string },
+      ),
+    );
+  }
+  return Object.freeze(entries);
+}
+
+/**
  * Load + freeze the server config from the environment. Never logs paths,
  * secrets, or raw values: failures carry a fixed code only.
  */
@@ -202,6 +294,7 @@ export function loadServerConfig(
   }
   const dbPath = isAbsolute(dbRaw) ? dbRaw : resolve(dbRaw);
   assertDbPathHasNoSymlink(dbPath);
+  const markdownRoots = parseMarkdownRoots(env.COMPANION_MARKDOWN_ROOTS_JSON);
   const parsed = ServerConfigSchema.safeParse({
     dbPath,
     host: host.data,
@@ -218,5 +311,6 @@ export function loadServerConfig(
     port: parsed.data.port,
     timeZone: parsed.data.timeZone,
     logLevel: parsed.data.logLevel,
+    markdownRoots,
   });
 }
