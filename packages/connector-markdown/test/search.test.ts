@@ -141,7 +141,10 @@ describe("markdown connector search core", () => {
 
   it("falls back to the filename when the first heading is blank", async () => {
     const dir = scratchVault("md-conn-blankfirst-");
-    writeFileSync(join(dir, "blank.md"), "#   \n\n## LaterHeading\nuniqueword body\n");
+    writeFileSync(
+      join(dir, "blank.md"),
+      "#   \n\n## LaterHeading\nuniqueword body\n",
+    );
     const connector = await createMarkdownConnector([{ path: dir }]);
     const result = await connector.search({ query: "uniqueword" });
     expect(result.hits).toHaveLength(1);
@@ -173,7 +176,10 @@ describe("markdown connector search core", () => {
   it("bounds astral heading-derived titles without splitting pairs", async () => {
     const dir = scratchVault("md-conn-astraltitle-");
     const heading = "😀".repeat(400); // 800 UTF-16 code units.
-    writeFileSync(join(dir, "astral.md"), `# ${heading}\nbody uniqueword here\n`);
+    writeFileSync(
+      join(dir, "astral.md"),
+      `# ${heading}\nbody uniqueword here\n`,
+    );
     const connector = await createMarkdownConnector([{ path: dir }]);
     const result = await connector.search({ query: "uniqueword" });
     expect(result.hits).toHaveLength(1);

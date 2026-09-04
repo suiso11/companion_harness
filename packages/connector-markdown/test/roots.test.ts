@@ -81,12 +81,10 @@ describe("roots", () => {
     const hostRoot = parse(process.cwd()).root;
     expect(hostRoot.length).toBeGreaterThan(0);
     expect(isWithinRealRoot(hostRoot, hostRoot)).toBe(true);
-    expect(isWithinRealRoot(hostRoot, join(hostRoot, "child.md"))).toBe(
+    expect(isWithinRealRoot(hostRoot, join(hostRoot, "child.md"))).toBe(true);
+    expect(isWithinRealRoot(hostRoot, join(hostRoot, "sub", "nested.md"))).toBe(
       true,
     );
-    expect(
-      isWithinRealRoot(hostRoot, join(hostRoot, "sub", "nested.md")),
-    ).toBe(true);
   });
 
   it("rejects siblings, parent escapes, and absolute relative results", () => {
