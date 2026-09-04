@@ -9,7 +9,9 @@
  * matching approximated by `String.toLowerCase` applied per Unicode code
  * point (locale-independent by construction; never `toLocaleLowerCase`,
  * `toLocaleUpperCase`, or `localeCompare`). Per-code-point application keeps
- * astral characters intact via `Array.from` iteration.
+ * astral characters intact via `Array.from` iteration, and one-to-many
+ * expansions (e.g. U+0130) are flattened into individual lowered code
+ * points so queries fold exactly like haystacks.
  *
  * MATCHING: whole-query literal equality/substring only (sequence search,
  * never regex interpretation of the query). `findFirstHit` maps the folded
@@ -32,9 +34,18 @@ export function normalizeNFC(value: string): string {
   return value.normalize("NFC");
 }
 
-/** Fold already-NFC text per code point with locale-independent lowercase. */
+/** Fold already-NFC text per code point with locale-independent lowercase.
+ * Each source code point is lowered with `toLowerCase` then flattened into
+ * individual Unicode code points, so one-to-many expansions (e.g. U+0130
+ * `İ` -> `i` + combining dot) expand exactly like the haystack mapping. */
 function foldCodePoints(normalized: string): string[] {
-  return Array.from(normalized).map((ch) => ch.toLowerCase());
+  const out: string[] = [];
+  for (const ch of Array.from(normalized)) {
+    for (const cp of Array.from(ch.toLowerCase())) {
+      out.push(cp);
+    }
+  }
+  return out;
 }
 
 /**

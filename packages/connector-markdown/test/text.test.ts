@@ -77,6 +77,30 @@ describe("text primitives", () => {
     expect(makeSnippet("short", "missing")).toBe("short");
   });
 
+  it("flattens U+0130 one-to-many expansions for query and haystack", () => {
+    const dotted = "İ"; // U+0130.
+    // Lowered expansion is `i` + combining dot (two code points).
+    expect(foldQuery(dotted)).toBe("i̇");
+    expect(Array.from(foldQuery(dotted))).toEqual(["i", "̇"]);
+    // Expansion matches itself with a single source-code-point span.
+    expect(equalsFolded(dotted, dotted)).toBe(true);
+    expect(containsFolded(dotted, dotted)).toBe(true);
+    expect(findFirstHit(dotted, dotted)).toEqual({
+      codePointIndex: 0,
+      codePointLength: 1,
+    });
+    // Haystack containing U+0130 matches the same query and maps the span.
+    expect(findFirstHit(`a${dotted}b`, dotted)).toEqual({
+      codePointIndex: 1,
+      codePointLength: 1,
+    });
+    // Long-body snippet still windows the original source deterministically.
+    const body = `${"x".repeat(600)}${dotted}${"y".repeat(600)}`;
+    const snippet = makeSnippet(body, dotted);
+    expect(countCodePointsLocal(snippet)).toBeLessThanOrEqual(512);
+    expect(snippet).toContain(dotted);
+  });
+
   it("never uses locale-sensitive APIs", async () => {
     const { readFile } = await import("node:fs/promises");
     const { fileURLToPath } = await import("node:url");

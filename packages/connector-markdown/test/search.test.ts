@@ -314,6 +314,20 @@ describe("markdown connector search core", () => {
     ).rejects.toMatchObject({ code: "invalid_input" });
   });
 
+  it("matches U+0130 expansions literally with correct spans", async () => {
+    const dir = scratchVault("md-conn-fold130-");
+    const dotted = "İ"; // U+0130.
+    writeFileSync(join(dir, "dotted.md"), `# Title\nbody ${dotted} tail\n`);
+    const connector = await createMarkdownConnector([{ path: dir }]);
+    const result = await connector.search({ query: dotted });
+    expect(result.hits.map((hit) => hit.canonicalKey)).toEqual([
+      "vault-1/dotted.md",
+    ]);
+    const hit = result.hits[0] as NonNullable<(typeof result.hits)[0]>;
+    expect(hit.snippet).toContain(dotted);
+    expect(hit.text).toContain(dotted);
+  });
+
   it("searches and reads a POSIX colon filename (notes:2026.md)", async () => {
     if (process.platform === "win32") {
       // Windows rejects colon rest segments as invalid_input (no content
