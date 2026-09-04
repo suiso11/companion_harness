@@ -1,6 +1,9 @@
 packages:
   - "apps/*"
   - "packages/*"
+onlyBuiltDependencies:
+  - better-sqlite3
+  - esbuild
 minimumReleaseAgeExclude:
   - '@biomejs/biome@2.5.12'
   - '@biomejs/cli-darwin-arm64@2.5.12'

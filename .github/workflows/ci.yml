@@ -25,6 +25,7 @@ jobs:
           fetch-depth: 2
 
       - name: Static check (whitespace errors in HEAD patch)
+        shell: bash
         run: |
           if git rev-parse --verify -q HEAD^ >/dev/null 2>&1; then
             git diff --check HEAD^ HEAD
