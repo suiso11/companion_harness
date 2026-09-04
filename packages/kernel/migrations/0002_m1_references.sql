@@ -122,3 +122,10 @@ CREATE TABLE evidence_grants (
 
 -- rN allocator on sessions (CAS increment; MAX(ordinal)+1 is prohibited)
 ALTER TABLE sessions ADD COLUMN next_reference_ordinal INTEGER NOT NULL DEFAULT 1 CHECK (next_reference_ordinal >= 1);
+
+-- Backfill versioned reference context for pre-M1 sessions (§14.3, §14.8).
+-- Fresh databases hold no sessions yet, so the SELECT inserts zero rows.
+-- Existing sessions each gain exactly one `version = 1, items = []` row.
+-- New sessions gain the same row inside `createSession` (same transaction).
+INSERT OR IGNORE INTO session_reference_context (session_id, version, items_json, updated_at)
+  SELECT id, 1, '[]', created_at FROM sessions;

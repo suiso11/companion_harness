@@ -94,13 +94,17 @@ export {
 export {
   BackupError,
   BackupRequiredError,
+  DatabaseStateInvalidError,
   IdempotencyConflictError,
+  InvalidReferenceError,
   KernelStorageError,
   MigrationFailedError,
   MigrationMissingError,
   NewerDatabaseError,
   PragmasError,
   QuickCheckError,
+  ReferenceNotFoundError,
+  ReferenceVersionConflictError,
   RepositoryNotFoundError,
   RepositoryValidationError,
   SessionBusyError,
@@ -132,6 +136,26 @@ export {
   migrateKernelDatabase,
   setSchemaVersion,
 } from "./migrate.js";
+export type {
+  FreshnessKind,
+  MarkdownConnectorView,
+  PresentedReferenceView,
+  PresentObservationsResult,
+  PresentStoredResult,
+  ReferenceManager,
+  ResourceObservation,
+} from "./reference_manager.js";
+export {
+  createReferenceManager,
+  deriveSnippet,
+} from "./reference_manager.js";
+export type {
+  ReferenceResolver,
+  ResolverOutcome,
+  ResolverReferenceView,
+  ResolveStringOptions,
+} from "./reference_resolver.js";
+export { createReferenceResolver } from "./reference_resolver.js";
 export type {
   AcceptedResponse,
   CreateSessionOptions,
