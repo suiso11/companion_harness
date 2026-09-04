@@ -134,7 +134,7 @@ describe("m0 kernel pragmas and single connection", () => {
         createdAt: NOW,
         lastActiveAt: NOW,
         nextTurnPosition: 1,
-      });
+      }).run();
       const row = handle.raw
         .prepare("SELECT id FROM sessions WHERE id = ?")
         .get(id) as { id: string } | undefined;

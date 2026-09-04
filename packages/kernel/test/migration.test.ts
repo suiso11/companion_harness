@@ -335,10 +335,13 @@ describe("m0 pre-migration backup rotation", () => {
     expect(remaining).toContain("companion-manual-20260101T000000Z-aaaa.sqlite");
     const keptPre = remaining.filter((n) => n.startsWith(PRE_MIGRATION_PREFIX));
     expect(keptPre).toHaveLength(PRE_MIGRATION_KEEP_GENERATIONS);
-    // The two oldest January seeds are pruned; the newest seeds survive.
-    expect(keptPre.some((n) => n.includes("202601000"))).toBe(false);
-    expect(keptPre.some((n) => n.includes("202601001"))).toBe(false);
-    expect(keptPre.some((n) => n.includes("202601004"))).toBe(true);
+    // Five seeds (20260100..20260104) plus the new September backup: keep
+    // the 3 newest overall, so the three oldest January seeds are pruned.
+    expect(keptPre.some((n) => n.includes("20260100T000000Z"))).toBe(false);
+    expect(keptPre.some((n) => n.includes("20260101T000000Z"))).toBe(false);
+    expect(keptPre.some((n) => n.includes("20260102T000000Z"))).toBe(false);
+    expect(keptPre.some((n) => n.includes("20260103T000000Z"))).toBe(true);
+    expect(keptPre.some((n) => n.includes("20260104T000000Z"))).toBe(true);
   });
 
   it("prunes oldest-first and removes no manual files", () => {
