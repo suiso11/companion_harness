@@ -467,9 +467,7 @@ describe("bootstrap startup + graceful shutdown", () => {
     const probe = new Database(dbPath, { readonly: true });
     try {
       const rows = probe
-        .prepare(
-          "SELECT kind FROM connector_instances WHERE kind = 'markdown'",
-        )
+        .prepare("SELECT kind FROM connector_instances WHERE kind = 'markdown'")
         .all() as { kind: string }[];
       expect(rows).toHaveLength(1);
     } finally {
