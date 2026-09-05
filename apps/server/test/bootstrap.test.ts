@@ -422,6 +422,77 @@ describe("bootstrap startup + graceful shutdown", () => {
     expect(JSON.stringify(retryLogger.records)).not.toContain("not-json");
   });
 
+  it("rejects removal of bound Markdown roots with DB unchanged and restore succeeding", async () => {
+    const { env, dbPath } = tempEnv();
+    const vault = mkdtempSync(join(tmpdir(), "companion-bound-"));
+    tempDirs.push(vault);
+    writeFileSync(join(vault, "note.md"), "# Note\nbound body\n");
+    const rootsJson = JSON.stringify([{ path: vault }]);
+    const first = await startServer({
+      env: { ...env, COMPANION_MARKDOWN_ROOTS_JSON: rootsJson },
+      drainMs: 50,
+    });
+    servers.push(first);
+    expect(first.toolBroker).not.toBeNull();
+    await first.shutdown("test");
+    servers.pop();
+    // Empty roots after migration with a bound markdown instance fails
+    // before engine/listen with a fixed path-free ServerConfigError.
+    const failing = createCollectingLogger("debug");
+    const before = process.listenerCount("SIGINT");
+    const failure = await startServer({
+      env,
+      drainMs: 50,
+      logger: failing.logger,
+    }).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).name).toBe("ServerConfigError");
+    expect((failure as Error).message).toBe(
+      "markdown roots must not be removed while bound",
+    );
+    expect((failure as Error).message).not.toContain(vault);
+    expect((failure as Error).message).not.toContain(dbPath);
+    expect(process.listenerCount("SIGINT")).toBe(before);
+    const failed = failing.records.filter(
+      (record) => record.code === "server.start_failed",
+    );
+    expect(failed).toHaveLength(1);
+    expect(failed[0]?.status).toBe("server_config_invalid");
+    expect(JSON.stringify(failed[0])).not.toContain(vault);
+    expect(JSON.stringify(failed[0])).not.toContain(dbPath);
+    // DB unchanged: the single bound markdown row survives the rejection.
+    const probe = new Database(dbPath, { readonly: true });
+    try {
+      const rows = probe
+        .prepare(
+          "SELECT kind FROM connector_instances WHERE kind = 'markdown'",
+        )
+        .all() as { kind: string }[];
+      expect(rows).toHaveLength(1);
+    } finally {
+      probe.close();
+    }
+    // Exact roots restore succeeds on the same DB.
+    const restored = await startServer({
+      env: { ...env, COMPANION_MARKDOWN_ROOTS_JSON: rootsJson },
+      drainMs: 50,
+    });
+    servers.push(restored);
+    try {
+      expect(restored.toolBroker).not.toBeNull();
+      await restored.shutdown("test");
+      servers.pop();
+    } finally {
+      const index = servers.indexOf(restored);
+      if (index >= 0) {
+        servers.splice(index, 1);
+      }
+    }
+  });
+
   it("logs early config failure once via the safe default logger", async () => {
     const { env } = tempEnv();
     // No injected logger: the safe default (process stderr) still emits

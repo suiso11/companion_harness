@@ -240,6 +240,22 @@ export async function startServer(
     });
     logger.info("server.migrated", { status: migrated.toVersion });
 
+    // Bound-roots guard: removing every Markdown root while a Markdown
+    // connector instance remains bound must fail closed before the engine
+    // or listener starts. Fixed path-free ServerConfigError, no DB writes.
+    if (config.markdownRoots.length === 0) {
+      const bound = handle.raw
+        .prepare(
+          "SELECT COUNT(*) AS n FROM connector_instances WHERE kind = 'markdown'",
+        )
+        .get() as { n: number };
+      if (bound.n > 0) {
+        throw new ServerConfigError(
+          "markdown roots must not be removed while bound",
+        );
+      }
+    }
+
     const repo = createKernelRepository(handle.raw);
     // M1 (plan 14.1/14.5-14.6): after migration and before engine
     // recovery/listen, when roots are configured create one connector
