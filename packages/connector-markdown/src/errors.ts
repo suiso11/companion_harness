@@ -13,6 +13,12 @@
  * - `file_too_large`: >1MiB raw or NFC-normalized UTF-8 bytes.
  * - `invalid_utf8`: fatal UTF-8 decode failure.
  *
+ * Budget overflow (never truncation, never partial output):
+ * - `output_too_large`: the expanded link graph (persisted normalized
+ *   metadata only: kind / status / ordered path-free candidates /
+ *   ordering) exceeds the agreed 256KiB per tool call, summed over all
+ *   presented hits (search) or the single document (readCanonical).
+ *
  * `MarkdownConnectorError.message` carries only the code plus an
  * alias-relative key or alias (never an absolute path, raw OS error, or
  * file content).
@@ -25,6 +31,7 @@ export const CONNECTOR_ERROR_CODES = [
   "markdown_read_failed",
   "markdown_read_changed",
   "reference_not_found",
+  "output_too_large",
 ] as const;
 
 export type ConnectorErrorCode = (typeof CONNECTOR_ERROR_CODES)[number];

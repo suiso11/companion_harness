@@ -59,6 +59,25 @@
  * snippets, and content-derived hashes leave this module. Absolute paths
  * and raw OS errors never escape.
  *
+ * LINK GRAPH BUDGET (agreed, plan §14.6): the expanded link graph —
+ * persisted normalized metadata only (kind / status / ordered path-free
+ * canonical candidates / 1-based document ordinal), never raw bodies,
+ * URLs, wiki targets, aliases, fragments, or paths — is bounded to
+ * exactly 256KiB (262144 UTF-8 bytes, canonical JSON framing mirrored
+ * from contracts) per logical call: summed over all presented hits for
+ * `search`, or the single document for `readCanonical`. Overflow fails
+ * the whole call with fixed `output_too_large` (never truncation, never
+ * partial hits). Enforcement is incremental DURING resolution, before
+ * huge per-link candidate arrays are allocated: basename byte lower
+ * bounds reject doomed targets before union materialization, per
+ * (sourceDir, target) unions are cached and reused (bounded by distinct
+ * link occurrences in the call), and the
+ * running budget rejects the moment the exact entry would overflow.
+ * Discarded non-hit files cost no link budget: ranking retains the top-K
+ * texts first and links resolve only for the presented hits in output
+ * order. Existing bounds (1MiB file / query / snippet / results) are
+ * unchanged.
+ *
  * `readCanonical` validates the alias/key shape (including the exact `.md`
  * suffix), resolves the owning root by alias, runs discovery once
  * (metadata only, to existence-check links consistently with search) and
@@ -86,6 +105,13 @@ import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { discoverMarkdownFiles, MAX_CANONICAL_KEY_UTF16 } from "./discovery.js";
 import { MarkdownConnectorError } from "./errors.js";
+import {
+  createLinkGraphBudget,
+  type LinkGraphBudget,
+  LINK_GRAPH_BUDGET_BYTES,
+  linkGraphUtf8ByteLength,
+  MIN_CANONICAL_CANDIDATE_JSON_BYTES,
+} from "./link_budget.js";
 import {
   type ParsedMarkdown,
   parseMarkdown,
@@ -456,33 +482,74 @@ async function canonicalizeNormalizedCandidate(
   return canonical;
 }
 
+/**
+ * Per-call reusable link resolution state (one per root per call).
+ * Bounded: the canonicalization cache holds at most one entry per distinct
+ * lexical target, the wiki union cache at most one array per distinct wiki
+ * base whose total keys are bounded by the discovered vault size, and the
+ * basename index partitions the discovered keys. Nothing here grows with
+ * the number of links beyond distinct targets.
+ */
+interface RootLinkCache {
+  readonly basenameIndex: ReadonlyMap<string, readonly string[]>;
+  readonly canonicalized: Map<string, string | null>;
+  readonly wikiUnions: Map<string, readonly string[]>;
+}
+
+function buildRootLinkCache(keysInRoot: readonly string[]): RootLinkCache {
+  const grouped = new Map<string, string[]>();
+  for (const key of keysInRoot) {
+    const relativePart = relativeOf(key) ?? "";
+    const slash = relativePart.lastIndexOf("/");
+    const name = slash < 0 ? relativePart : relativePart.slice(slash + 1);
+    const list = grouped.get(name);
+    if (list === undefined) {
+      grouped.set(name, [key]);
+    } else {
+      list.push(key);
+    }
+  }
+  // Discovery order is already canonical-key sorted, so each group inherits
+  // code-unit order without re-sorting.
+  return { basenameIndex: grouped, canonicalized: new Map(), wikiUnions: new Map() };
+}
+
+function throwLinkBudgetExceeded(errorKey: string | null): never {
+  throw new MarkdownConnectorError("output_too_large", errorKey);
+}
+
 async function resolveStandardLinks(
   sourceKey: string,
   links: readonly StandardLink[],
   existing: ReadonlySet<string>,
   root: InitializedRoot,
   signal: AbortSignal | undefined,
-): Promise<ResolvedStandardLink[]> {
+  budget: LinkGraphBudget,
+  ordinalStart: number,
+  errorKey: string | null,
+  cache: RootLinkCache,
+): Promise<{ links: ResolvedStandardLink[]; nextOrdinal: number }> {
   const sourceDir = sourceDirPosix(sourceKey);
   const out: ResolvedStandardLink[] = [];
+  let ordinal = ordinalStart;
   for (const link of links) {
     throwIfAborted(signal);
     const normalized = normalizeInsideRoot(sourceDir, link.path);
-    if (normalized === null) {
-      out.push({
-        rawUrl: link.rawUrl,
-        path: link.path,
-        fragment: link.fragment,
-        status: "unresolved" as const,
-      });
-      continue;
+    let canonical: string | null = null;
+    if (normalized !== null) {
+      const cached = cache.canonicalized.get(normalized);
+      if (cached !== undefined) {
+        canonical = cached;
+      } else {
+        canonical = await canonicalizeNormalizedCandidate(
+          root,
+          normalized,
+          existing,
+          signal,
+        );
+        cache.canonicalized.set(normalized, canonical);
+      }
     }
-    const canonical = await canonicalizeNormalizedCandidate(
-      root,
-      normalized,
-      existing,
-      signal,
-    );
     if (canonical !== null) {
       out.push({
         rawUrl: link.rawUrl,
@@ -491,6 +558,16 @@ async function resolveStandardLinks(
         status: "resolved" as const,
         canonicalKey: canonical,
       });
+      if (
+        !budget.tryAddEntry({
+          kind: "standard",
+          status: "resolved",
+          candidates: [canonical],
+          ordinal,
+        })
+      ) {
+        throwLinkBudgetExceeded(errorKey);
+      }
     } else {
       out.push({
         rawUrl: link.rawUrl,
@@ -498,9 +575,20 @@ async function resolveStandardLinks(
         fragment: link.fragment,
         status: "unresolved" as const,
       });
+      if (
+        !budget.tryAddEntry({
+          kind: "standard",
+          status: "unresolved",
+          candidates: [],
+          ordinal,
+        })
+      ) {
+        throwLinkBudgetExceeded(errorKey);
+      }
     }
+    ordinal += 1;
   }
-  return out;
+  return { links: out, nextOrdinal: ordinal };
 }
 
 function wikiBasePath(target: string): string {
@@ -519,49 +607,171 @@ async function resolveWikiLinks(
   existing: ReadonlySet<string>,
   root: InitializedRoot,
   signal: AbortSignal | undefined,
-): Promise<ResolvedWikiLink[]> {
+  budget: LinkGraphBudget,
+  ordinalStart: number,
+  errorKey: string | null,
+  cache: RootLinkCache,
+): Promise<{ links: ResolvedWikiLink[]; nextOrdinal: number }> {
   const sourceDir = sourceDirPosix(sourceKey);
   const out: ResolvedWikiLink[] = [];
+  let ordinal = ordinalStart;
   for (const link of links) {
     throwIfAborted(signal);
     const base = wikiBasePath(link.target);
-    const found = new Set<string>();
-    // (1) source-directory-relative candidate (folded to real canonical).
-    const relative = normalizeInsideRoot(sourceDir, base);
-    if (relative !== null) {
-      const canonical = await canonicalizeNormalizedCandidate(
-        root,
-        relative,
-        existing,
-        signal,
-      );
-      if (canonical !== null) found.add(canonical);
-    }
-    throwIfAborted(signal);
-    // (2) root-relative candidate (folded to real canonical).
-    const rooted = normalizeInsideRoot("", base);
-    if (rooted !== null) {
-      const canonical = await canonicalizeNormalizedCandidate(
-        root,
-        rooted,
-        existing,
-        signal,
-      );
-      if (canonical !== null) found.add(canonical);
-    }
-    // (3) basename candidates: every same-root file with an equal
-    // trailing filename (exact, case-sensitive). Already discovered
-    // canonical keys, so no folding is needed; duplicates cannot occur
-    // because discovery dedups by realpath.
-    const wanted = wikiBasename(base);
-    for (const key of keysInRoot) {
-      const relativePart = relativeOf(key) ?? "";
-      const slash = relativePart.lastIndexOf("/");
-      const name = slash < 0 ? relativePart : relativePart.slice(slash + 1);
-      if (name === wanted) found.add(key);
-    }
-    const candidates = [...found].sort(compareCodeUnits);
-    if (candidates.length === 1) {
+    // P1: the union depends on the source directory (sourceDir-relative
+    // folding through symlinks), so the cache key MUST include it. Keying
+    // on `base` alone returns the first sourceDir's union for every later
+    // sourceDir (e.g. d1/Note.md->../a.md vs d2/Note.md->../b.md both
+    // linked as [[Note]] would wrongly yield `a` twice).
+    const cacheKey = `${sourceDir}\0${base}`;
+    let candidates = cache.wikiUnions.get(cacheKey);
+    if (candidates === undefined) {
+      // Lower-bound pre-check BEFORE allocating the union: every
+      // basename match survives into the union (so the union holds at
+      // least `basenameKeys.length` candidates of at least 8 JSON bytes
+      // each) plus the minimum static entry framing. A doomed target is
+      // rejected without materializing its array. Safe direction only
+      // (never a false reject: the real entry is always >= this bound).
+      const basenameKeys = cache.basenameIndex.get(wikiBasename(base)) ?? [];
+      const remaining = LINK_GRAPH_BUDGET_BYTES - budget.bytes;
+      const minFraming =
+        linkGraphUtf8ByteLength('{"candidates":[') +
+        linkGraphUtf8ByteLength('],"kind":"') +
+        linkGraphUtf8ByteLength("wiki") +
+        linkGraphUtf8ByteLength('","ordinal":') +
+        linkGraphUtf8ByteLength(String(ordinal)) +
+        linkGraphUtf8ByteLength(',"status":"') +
+        // Shortest persisted status (`resolved`/`ambiguous`, 8); the real
+        // status can only be equal or longer (`unresolved`, 10).
+        linkGraphUtf8ByteLength("resolved") +
+        linkGraphUtf8ByteLength('"}') +
+        (basenameKeys.length > 0 ? basenameKeys.length - 1 : 0);
+      if (
+        minFraming +
+          MIN_CANONICAL_CANDIDATE_JSON_BYTES * basenameKeys.length >
+        remaining
+      ) {
+        throwLinkBudgetExceeded(errorKey);
+      }
+      const found = new Set<string>();
+      // (1) source-directory-relative candidate (folded to real canonical).
+      const relative = normalizeInsideRoot(sourceDir, base);
+      if (relative !== null) {
+        const cached = cache.canonicalized.get(relative);
+        const canonical =
+          cached !== undefined
+            ? cached
+            : await canonicalizeNormalizedCandidate(
+                root,
+                relative,
+                existing,
+                signal,
+              );
+        if (cached === undefined) {
+          cache.canonicalized.set(relative, canonical);
+        }
+        if (canonical !== null) found.add(canonical);
+      }
+      throwIfAborted(signal);
+      // (2) root-relative candidate (folded to real canonical).
+      const rooted = normalizeInsideRoot("", base);
+      if (rooted !== null) {
+        const cached = cache.canonicalized.get(rooted);
+        const canonical =
+          cached !== undefined
+            ? cached
+            : await canonicalizeNormalizedCandidate(
+                root,
+                rooted,
+                existing,
+                signal,
+              );
+        if (cached === undefined) {
+          cache.canonicalized.set(rooted, canonical);
+        }
+        if (canonical !== null) found.add(canonical);
+      }
+      // (3) basename candidates: every same-root file with an equal
+      // trailing filename (exact, case-sensitive). Already discovered
+      // canonical keys, so no folding is needed; duplicates cannot occur
+      // because discovery dedups by realpath.
+      for (const key of basenameKeys) {
+        found.add(key);
+      }
+      void keysInRoot;
+      // The union is bounded by the discovered vault size (at most one key
+      // per vault file plus two folded candidates). It is materialized here
+      // but NOT cached or serialized yet: the exact incremental budget check
+      // below runs first, so an overflowing union is discarded without ever
+      // being retained or stringified (bounded retained metadata).
+      const union = [...found].sort(compareCodeUnits);
+      if (union.length === 1) {
+        const only = union[0] as string;
+        if (
+          !budget.tryAddEntry({
+            kind: "wiki",
+            status: "resolved",
+            candidates: union,
+            ordinal,
+          })
+        ) {
+          throwLinkBudgetExceeded(errorKey);
+        }
+        cache.wikiUnions.set(cacheKey, union);
+        candidates = union;
+        out.push({
+          raw: link.raw,
+          target: link.target,
+          alias: link.alias,
+          fragment: link.fragment,
+          status: "resolved" as const,
+          candidates,
+          canonicalKey: only,
+        });
+      } else if (union.length > 1) {
+        if (
+          !budget.tryAddEntry({
+            kind: "wiki",
+            status: "ambiguous",
+            candidates: union,
+            ordinal,
+          })
+        ) {
+          throwLinkBudgetExceeded(errorKey);
+        }
+        cache.wikiUnions.set(cacheKey, union);
+        candidates = union;
+        out.push({
+          raw: link.raw,
+          target: link.target,
+          alias: link.alias,
+          fragment: link.fragment,
+          status: "ambiguous" as const,
+          candidates,
+        });
+      } else {
+        if (
+          !budget.tryAddEntry({
+            kind: "wiki",
+            status: "unresolved",
+            candidates: union,
+            ordinal,
+          })
+        ) {
+          throwLinkBudgetExceeded(errorKey);
+        }
+        cache.wikiUnions.set(cacheKey, union);
+        candidates = union;
+        out.push({
+          raw: link.raw,
+          target: link.target,
+          alias: link.alias,
+          fragment: link.fragment,
+          status: "unresolved" as const,
+          candidates,
+        });
+      }
+    } else if (candidates.length === 1) {
       const only = candidates[0] as string;
       out.push({
         raw: link.raw,
@@ -572,6 +782,16 @@ async function resolveWikiLinks(
         candidates,
         canonicalKey: only,
       });
+      if (
+        !budget.tryAddEntry({
+          kind: "wiki",
+          status: "resolved",
+          candidates,
+          ordinal,
+        })
+      ) {
+        throwLinkBudgetExceeded(errorKey);
+      }
     } else if (candidates.length > 1) {
       out.push({
         raw: link.raw,
@@ -581,6 +801,16 @@ async function resolveWikiLinks(
         status: "ambiguous" as const,
         candidates,
       });
+      if (
+        !budget.tryAddEntry({
+          kind: "wiki",
+          status: "ambiguous",
+          candidates,
+          ordinal,
+        })
+      ) {
+        throwLinkBudgetExceeded(errorKey);
+      }
     } else {
       out.push({
         raw: link.raw,
@@ -590,30 +820,48 @@ async function resolveWikiLinks(
         status: "unresolved" as const,
         candidates,
       });
+      if (
+        !budget.tryAddEntry({
+          kind: "wiki",
+          status: "unresolved",
+          candidates,
+          ordinal,
+        })
+      ) {
+        throwLinkBudgetExceeded(errorKey);
+      }
     }
+    ordinal += 1;
   }
-  return out;
+  return { links: out, nextOrdinal: ordinal };
 }
 
-interface RankedHit extends MarkdownSearchHit {
+interface RankedPending {
   rank: number;
+  canonicalKey: string;
+  title: string;
+  snippet: string;
+  text: string;
+  sourceRevision: string;
+  parsed: ParsedMarkdown;
+  root: InitializedRoot;
 }
 
-function compareRankedHits(a: RankedHit, b: RankedHit): number {
+function compareRankedPending(
+  a: RankedPending,
+  b: RankedPending,
+): number {
   if (a.rank !== b.rank) return a.rank - b.rank;
   return compareCodeUnits(a.canonicalKey, b.canonicalKey);
 }
 
-async function buildHit(
+function rankFile(
   canonicalKey: string,
   text: string,
   query: string,
-  existing: ReadonlySet<string>,
-  keysInRoot: readonly string[],
+  parsed: ParsedMarkdown,
   root: InitializedRoot,
-  signal: AbortSignal | undefined,
-): Promise<RankedHit | null> {
-  const parsed = parseMarkdown(text);
+): RankedPending | null {
   const title = deriveTitle(parsed, canonicalKey);
   let rank: number;
   if (equalsFolded(title, query)) {
@@ -629,22 +877,6 @@ async function buildHit(
   if (snippet === "") {
     snippet = sliceCodePoints(title, 0, 512);
   }
-  throwIfAborted(signal);
-  const standardLinks = await resolveStandardLinks(
-    canonicalKey,
-    parsed.standardLinks,
-    existing,
-    root,
-    signal,
-  );
-  const wikiLinks = await resolveWikiLinks(
-    canonicalKey,
-    parsed.wikiLinks,
-    keysInRoot,
-    existing,
-    root,
-    signal,
-  );
   return {
     rank,
     canonicalKey,
@@ -652,8 +884,59 @@ async function buildHit(
     snippet,
     text,
     sourceRevision: sha256HexUtf8(text),
-    standardLinks,
-    wikiLinks,
+    parsed,
+    root,
+  };
+}
+
+/**
+ * Phase-2 link resolution for one presented hit in output order.
+ * Ordinals are 1-based within the document across the combined
+ * standard-then-wiki sequence (exactly what persists to snapshot_links).
+ * Every accepted entry is charged to the shared per-call budget; overflow
+ * throws `output_too_large` with no partial output.
+ */
+async function resolveHitLinks(
+  pending: RankedPending,
+  existing: ReadonlySet<string>,
+  keysInRoot: readonly string[],
+  cache: RootLinkCache,
+  budget: LinkGraphBudget,
+  errorKey: string | null,
+  signal: AbortSignal | undefined,
+): Promise<MarkdownSearchHit> {
+  throwIfAborted(signal);
+  const standard = await resolveStandardLinks(
+    pending.canonicalKey,
+    pending.parsed.standardLinks,
+    existing,
+    pending.root,
+    signal,
+    budget,
+    1,
+    errorKey,
+    cache,
+  );
+  const wiki = await resolveWikiLinks(
+    pending.canonicalKey,
+    pending.parsed.wikiLinks,
+    keysInRoot,
+    existing,
+    pending.root,
+    signal,
+    budget,
+    standard.nextOrdinal,
+    errorKey,
+    cache,
+  );
+  return {
+    canonicalKey: pending.canonicalKey,
+    title: pending.title,
+    snippet: pending.snippet,
+    text: pending.text,
+    sourceRevision: pending.sourceRevision,
+    standardLinks: standard.links,
+    wikiLinks: wiki.links,
   };
 }
 
@@ -791,26 +1074,28 @@ export async function createMarkdownConnector(
     // sorted); explicit skips accumulate without any result-limit slice.
     // The signal is checked before each file so a mid-search abort
     // discards buffered bytes instead of returning partial hits.
-    // RETENTION BOUND: at most `limit` top-ranked hits are retained.
-    // Each file is safe-read sequentially (bounded 1MiB+1 buffering);
-    // a matching hit is inserted into the sorted top-K set by
-    // (rank, canonical-key code-unit) order and the worst entry is
+    // RETENTION BOUND: at most `limit` top-ranked pending hits are
+    // retained. Each file is safe-read sequentially (bounded 1MiB+1
+    // buffering); a matching file is rank-scored into the sorted top-K
+    // set by (rank, canonical-key code-unit) order and the worst entry is
     // evicted/released immediately, so transient memory is one in-flight
-    // file plus K retained hits and the final output is identical to a
-    // full sort+slice. Skipped entries stay complete, sorted, untruncated.
+    // file plus K retained texts. Links resolve ONLY for the presented
+    // hits afterwards (phase 2) under the shared per-call link graph
+    // budget, so discarded files never consume link budget. Skipped
+    // entries stay complete, sorted, untruncated.
     const skipped: MarkdownSkippedEntry[] = [];
-    const top: RankedHit[] = [];
+    const top: RankedPending[] = [];
     const notifyRetained = hooks.onSearchRetained;
     const reportRetained = (): void => {
       notifyRetained?.(top.length, limit);
     };
-    const insertBounded = (hit: RankedHit): void => {
+    const insertBounded = (hit: RankedPending): void => {
       let lo = 0;
       let hi = top.length;
       while (lo < hi) {
         const mid = (lo + hi) >> 1;
-        const current = top[mid] as RankedHit;
-        if (compareRankedHits(current, hit) < 0) lo = mid + 1;
+        const current = top[mid] as RankedPending;
+        if (compareRankedPending(current, hit) < 0) lo = mid + 1;
         else hi = mid;
       }
       if (top.length < limit) {
@@ -843,30 +1128,45 @@ export async function createMarkdownConnector(
         reportRetained();
         continue;
       }
-      const hit = await buildHit(
+      const pending = rankFile(
         entry.canonicalKey,
         result.text,
         query,
-        existing,
-        keysByAlias.get(alias) ?? [],
+        parseMarkdown(result.text),
         root,
-        signal,
       );
-      if (hit !== null) insertBounded(hit);
+      if (pending !== null) insertBounded(pending);
       else reportRetained();
     }
 
     skipped.sort((a, b) => compareCodeUnits(a.canonicalKey, b.canonicalKey));
 
-    const hits: MarkdownSearchHit[] = top.slice(0, limit).map((hit) => ({
-      canonicalKey: hit.canonicalKey,
-      title: hit.title,
-      snippet: hit.snippet,
-      text: hit.text,
-      sourceRevision: hit.sourceRevision,
-      standardLinks: hit.standardLinks,
-      wikiLinks: hit.wikiLinks,
-    }));
+    // Phase 2: resolve links for the presented hits in output order under
+    // the shared per-call link graph budget. Overflow throws
+    // `output_too_large` with no partial hits (never truncation).
+    const budget = createLinkGraphBudget();
+    const caches = new Map<string, RootLinkCache>();
+    const hits: MarkdownSearchHit[] = [];
+    for (const pending of top.slice(0, limit)) {
+      throwIfAborted(signal);
+      const alias = aliasOf(pending.canonicalKey) ?? "";
+      let cache = caches.get(alias);
+      if (cache === undefined) {
+        cache = buildRootLinkCache(keysByAlias.get(alias) ?? []);
+        caches.set(alias, cache);
+      }
+      hits.push(
+        await resolveHitLinks(
+          pending,
+          existing,
+          keysByAlias.get(alias) ?? [],
+          cache,
+          budget,
+          null,
+          signal,
+        ),
+      );
+    }
     return { hits, skipped };
   }
 
@@ -919,21 +1219,36 @@ export async function createMarkdownConnector(
       snippet = sliceCodePoints(title, 0, 512);
     }
     throwIfAborted(signal);
-    const standardLinks = await resolveStandardLinks(
+    // Single-document presentation batch: one shared budget across the
+    // combined standard-then-wiki sequence. Overflow throws
+    // `output_too_large` with no partial document (never truncation).
+    const budget = createLinkGraphBudget();
+    const cache = buildRootLinkCache(keysInRoot);
+    const standard = await resolveStandardLinks(
       key,
       parsed.standardLinks,
       existing,
       root,
       signal,
+      budget,
+      1,
+      key,
+      cache,
     );
-    const wikiLinks = await resolveWikiLinks(
+    const wiki = await resolveWikiLinks(
       key,
       parsed.wikiLinks,
       keysInRoot,
       existing,
       root,
       signal,
+      budget,
+      standard.nextOrdinal,
+      key,
+      cache,
     );
+    const standardLinks = standard.links;
+    const wikiLinks = wiki.links;
     return {
       canonicalKey: key,
       title,

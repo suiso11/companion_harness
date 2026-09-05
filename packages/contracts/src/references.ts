@@ -412,6 +412,170 @@ export type SearchLimit = z.infer<typeof SearchLimitSchema>;
  */
 export const MAX_VAULT_FILES = 10_000 as const;
 
+/* ------------------------------------------------------------------ */
+/* Expanded link graph budget (agreed, §14.6: 256KiB per tool call)     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Agreed expanded link graph budget (exact, §14.6): at most 256KiB
+ * (262144 UTF-8 bytes) of persisted normalized graph metadata per logical
+ * tool call (one `markdown.search` or `reference.refresh` presentation
+ * batch). Exceeding it rejects the whole call with `output_too_large`
+ * (never truncation, never partial persistence). There is no per-link
+ * count cap: any number of links fits while the byte total fits.
+ *
+ * SCOPE (exact):
+ * - Aggregate over ALL presented observations in the call: every link of
+ *   every observation in presentation order (observation order, then
+ *   standard links in document order, then wiki links in document order).
+ * - `reference.open` / `reference.related` perform no graph expansion and
+ *   charge nothing.
+ * - Charged is ONLY persisted normalized metadata per `snapshot_links`
+ *   row: kind, status, ordered path-free canonical candidates, and link
+ *   ordering (1-based ordinal within the source document). Raw Markdown
+ *   bodies, URLs, wiki targets, aliases, fragments, titles, snippets, and
+ *   absolute paths are NEVER charged.
+ * - Existing bounds (1MiB file / query / snippet / results) are unchanged.
+ *
+ * CANONICAL FRAMING (exact, deterministic): the batch graph is the JSON
+ * array of entries
+ *   `{"candidates":[...],"kind":"...","ordinal":N,"status":"..."}`
+ * (keys in this exact insertion order; candidates in presented order;
+ * ordinal 1-based within the source document) serialized with
+ * `JSON.stringify`. Byte size is `utf8ByteLength` of that serialization
+ * (deterministic UTF-8 framing, never approximate character counts):
+ * 262144 bytes accepted, 262145 rejected.
+ */
+export const MAX_EXPANDED_LINK_GRAPH_BYTES = 262_144 as const;
+
+/** Normalized link kind as persisted (never raw URLs/targets). */
+export type ExpandedLinkGraphKind = "standard" | "wiki";
+/** Normalized link status as persisted (ambiguous is never guessed). */
+export type ExpandedLinkGraphStatus = "resolved" | "ambiguous" | "unresolved";
+
+/** One normalized graph entry in presentation order. */
+export interface ExpandedLinkGraphEntry {
+  readonly kind: ExpandedLinkGraphKind;
+  readonly status: ExpandedLinkGraphStatus;
+  readonly candidates: readonly string[];
+  /** 1-based link index within the source document. */
+  readonly ordinal: number;
+}
+
+/** Deterministic JSON serialization of one graph entry (canonical framing). */
+export function serializeExpandedLinkGraphEntry(
+  entry: ExpandedLinkGraphEntry,
+): string {
+  return JSON.stringify({
+    candidates: [...entry.candidates],
+    kind: entry.kind,
+    ordinal: entry.ordinal,
+    status: entry.status,
+  });
+}
+
+/** Exact UTF-8 byte size of one serialized graph entry. */
+export function measureExpandedLinkGraphEntryBytes(
+  entry: ExpandedLinkGraphEntry,
+): number {
+  return utf8ByteLength(serializeExpandedLinkGraphEntry(entry));
+}
+
+/**
+ * Exact UTF-8 byte size of the whole batch graph (`[...entries...]`,
+ * structural equivalent of `JSON.stringify` of the entry array: entries
+ * joined with ASCII commas inside ASCII brackets, so the incremental
+ * budget below and this whole measure always agree).
+ */
+export function measureExpandedLinkGraphBytes(
+  entries: readonly ExpandedLinkGraphEntry[],
+): number {
+  return utf8ByteLength(
+    `[${entries.map(serializeExpandedLinkGraphEntry).join(",")}]`,
+  );
+}
+
+/**
+ * Incremental per-call link graph budget. `tryAddEntry` accepts one entry
+ * exactly when the resulting canonical total stays within `limit`
+ * (262144 accepted); otherwise it returns false leaving the budget
+ * unchanged (the caller maps the overflow to `output_too_large`). The
+ * running total always equals `measureExpandedLinkGraphBytes` of the
+ * accepted entries. Never truncates.
+ *
+ * DEFENSIVE: candidates are measured one bounded key at a time
+ * (`JSON.stringify` per individual canonical key, each at most 512 UTF-16
+ * units so escaping stays small) against the remaining cap with early exit.
+ * The whole entry is never serialized before the cap check, so a
+ * pathological ambiguous entry cannot force a huge transient string.
+ */
+export interface ExpandedLinkGraphBudget {
+  /** Current exact graph bytes (`2` for the empty `[]`). */
+  readonly bytes: number;
+  /** Number of accepted entries. */
+  readonly count: number;
+  readonly tryAddEntry: (entry: ExpandedLinkGraphEntry) => boolean;
+}
+
+/**
+ * Exact byte size of one entry without serializing the whole entry first.
+ * Returns null when the entry alone already exceeds `cap` (the caller maps
+ * this to `output_too_large`). Static framing pieces are ASCII so their
+ * UTF-8 length equals their length; each candidate contributes its own
+ * `JSON.stringify` bytes plus one comma separator (except the first).
+ */
+function measureEntryBytesCapped(
+  entry: ExpandedLinkGraphEntry,
+  cap: number,
+): number | null {
+  let total =
+    utf8ByteLength('{"candidates":[') +
+    utf8ByteLength('],"kind":"') +
+    utf8ByteLength(entry.kind) +
+    utf8ByteLength('","ordinal":') +
+    utf8ByteLength(String(entry.ordinal)) +
+    utf8ByteLength(',"status":"') +
+    utf8ByteLength(entry.status) +
+    utf8ByteLength('"}');
+  if (total > cap) return null;
+  for (let index = 0; index < entry.candidates.length; index += 1) {
+    if (index > 0) {
+      total += 1; // comma between candidates (ASCII).
+      if (total > cap) return null;
+    }
+    const candidate = entry.candidates[index] as string;
+    const json = JSON.stringify(candidate) as string;
+    total += utf8ByteLength(json);
+    if (total > cap) return null;
+  }
+  return total;
+}
+
+export function createExpandedLinkGraphBudget(
+  limit: number = MAX_EXPANDED_LINK_GRAPH_BYTES,
+): ExpandedLinkGraphBudget {
+  let bytes = 2; // `[]`
+  let count = 0;
+  return {
+    get bytes() {
+      return bytes;
+    },
+    get count() {
+      return count;
+    },
+    tryAddEntry(entry) {
+      const remaining = limit - bytes - (count > 0 ? 1 : 0);
+      const entryBytes = measureEntryBytesCapped(entry, remaining);
+      if (entryBytes === null) {
+        return false;
+      }
+      bytes += entryBytes + (count > 0 ? 1 : 0);
+      count += 1;
+      return true;
+    },
+  };
+}
+
 /**
  * `markdown.search` input (ToolBroker only, no HTTP POST). Searches only
  * configured roots deterministically (whole-query literal substring,

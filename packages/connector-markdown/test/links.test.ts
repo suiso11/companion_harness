@@ -392,6 +392,78 @@ describe("markdown connector links", () => {
     expect(JSON.stringify(doc.wikiLinks)).not.toContain(dir);
   });
 
+  it("resolves the same wiki base per sourceDir through different symlink targets", async (ctx: TestContext) => {
+    const dir = scratchVault("md-link-wikisrcdir-");
+    writeFileSync(join(dir, "a.md"), "# A\ntarget alpha body\n");
+    writeFileSync(join(dir, "b.md"), "# B\ntarget beta body\n");
+    mkdirSync(join(dir, "d1"), { recursive: true });
+    mkdirSync(join(dir, "d2"), { recursive: true });
+    // No real `Note.md` exists: each sourceDir carries its own symlink alias
+    // folding to a different real target. The union is sourceDir-dependent.
+    const firstLink = trySymlink(
+      join(dir, "a.md"),
+      join(dir, "d1", "Note.md"),
+      "file",
+    );
+    const secondLink = trySymlink(
+      join(dir, "b.md"),
+      join(dir, "d2", "Note.md"),
+      "file",
+    );
+    if (
+      !skipUnlessPrivileged(ctx, firstLink) ||
+      !skipUnlessPrivileged(ctx, secondLink)
+    ) {
+      return;
+    }
+    writeFileSync(
+      join(dir, "d1", "s1.md"),
+      "# S1\nsourcedirwiki see [[Note]] here\n",
+    );
+    writeFileSync(
+      join(dir, "d2", "s2.md"),
+      "# S2\nsourcedirwiki see [[Note]] here\n",
+    );
+    const connector = await createMarkdownConnector([{ path: dir }]);
+    const found = await connector.search({ query: "sourcedirwiki" });
+    const first = found.hits.find(
+      (entry) => entry.canonicalKey === "vault-1/d1/s1.md",
+    );
+    const second = found.hits.find(
+      (entry) => entry.canonicalKey === "vault-1/d2/s2.md",
+    );
+    expect(first?.wikiLinks).toEqual([
+      {
+        raw: "[[Note]]",
+        target: "Note",
+        alias: null,
+        fragment: null,
+        status: "resolved",
+        candidates: ["vault-1/a.md"],
+        canonicalKey: "vault-1/a.md",
+      },
+    ]);
+    expect(second?.wikiLinks).toEqual([
+      {
+        raw: "[[Note]]",
+        target: "Note",
+        alias: null,
+        fragment: null,
+        status: "resolved",
+        candidates: ["vault-1/b.md"],
+        canonicalKey: "vault-1/b.md",
+      },
+    ]);
+    // Read path resolves identically (no cross-sourceDir cache reuse).
+    expect((await connector.readCanonical("vault-1/d1/s1.md")).wikiLinks).toEqual(
+      first?.wikiLinks,
+    );
+    expect((await connector.readCanonical("vault-1/d2/s2.md")).wikiLinks).toEqual(
+      second?.wikiLinks,
+    );
+    expect(JSON.stringify(found)).not.toContain(dir);
+  });
+
   it("rejects external symlink escapes without leaking paths", async (ctx: TestContext) => {
     const dir = scratchVault("md-link-ext-");
     const outside = scratchVault("md-link-extout-");
