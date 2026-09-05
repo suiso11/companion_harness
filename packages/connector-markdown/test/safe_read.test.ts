@@ -762,27 +762,23 @@ describe("safe read", () => {
     });
   });
 
-  it("compares retarget spelling exactly on POSIX and folded on Windows", () => {
-    const composedPosix = "é.md";
-    const decomposedPosix = "é.md";
+  it("requires exact retarget spelling on every platform", () => {
+    const composedPosix = "\u00E9.md";
+    const decomposedPosix = "e\u0301.md";
     expect(composedPosix).not.toBe(decomposedPosix);
     expect(composedPosix.normalize("NFC")).toBe(
       decomposedPosix.normalize("NFC"),
     );
-    expect(matchesRetargetSpelling(composedPosix, composedPosix, "linux")).toBe(
-      true,
-    );
-    expect(
-      matchesRetargetSpelling(composedPosix, decomposedPosix, "linux"),
-    ).toBe(false);
-    expect(
-      matchesRetargetSpelling(decomposedPosix, composedPosix, "linux"),
-    ).toBe(false);
-    expect(
-      matchesRetargetSpelling(composedPosix, decomposedPosix, "win32"),
-    ).toBe(true);
-    expect(matchesRetargetSpelling("A.md", "a.md", "win32")).toBe(true);
-    expect(matchesRetargetSpelling("A.md", "a.md", "linux")).toBe(false);
+    expect(matchesRetargetSpelling(composedPosix, composedPosix)).toBe(true);
+    expect(matchesRetargetSpelling(decomposedPosix, decomposedPosix)).toBe(true);
+    expect(matchesRetargetSpelling(composedPosix, decomposedPosix)).toBe(false);
+    expect(matchesRetargetSpelling(decomposedPosix, composedPosix)).toBe(false);
+    expect(matchesRetargetSpelling("A.md", "a.md")).toBe(false);
+    expect(matchesRetargetSpelling("a.md", "A.md")).toBe(false);
+    expect(matchesRetargetSpelling("\u0130.md", "i\u0307.md")).toBe(false);
+    expect(matchesRetargetSpelling("i\u0307.md", "\u0130.md")).toBe(false);
+    expect(matchesRetargetSpelling("\u0130.md", "\u0130.md")).toBe(true);
+    expect(matchesRetargetSpelling("note.md", "note.md")).toBe(true);
   });
 
   it("rejects a composed-key retarget to a decomposed internal target on POSIX", async (ctx: TestContext) => {
@@ -791,8 +787,8 @@ describe("safe read", () => {
       return;
     }
     const dir = scratchVault("md-read-nfcposix-");
-    const composedName = "é.md";
-    const decomposedName = "é.md";
+    const composedName = "\u00E9.md";
+    const decomposedName = "e\u0301.md";
     expect(composedName).not.toBe(decomposedName);
     writeFileSync(join(dir, composedName), "# composed\n");
     writeFileSync(join(dir, decomposedName), "# decomposed target body\n");

@@ -186,24 +186,17 @@ function isUnsupportedFlag(error: unknown): boolean {
 
 /**
  * Root-relative retarget spelling comparison (test-only export, never
- * re-exported from the package index). POSIX compares exact raw code-unit
- * spelling with no NFC collapse, so a composed requested key never accepts
- * a decomposed on-disk spelling (and vice versa). Windows folds NFC plus
- * ASCII/Unicode case to stay compatible with its case-insensitive FS.
- * Containment itself still uses `path.relative`; this only decides whether
- * the contained realpath spells the same canonical key.
+ * re-exported from the package index). Canonical keys originate from
+ * discovery realpath-relative raw spelling; exact
+ * `requestedPosix === actualPosix` raw code-unit equality on all platforms
+ * is the invariant, with no NFC collapse and no case folding. Containment
+ * itself still uses `path.relative`; this only decides whether the contained
+ * realpath spells the same canonical key.
  */
 export function matchesRetargetSpelling(
   requestedPosix: string,
   actualPosix: string,
-  platform: string = process.platform,
 ): boolean {
-  if (platform === "win32") {
-    return (
-      requestedPosix.normalize("NFC").toLowerCase() ===
-      actualPosix.normalize("NFC").toLowerCase()
-    );
-  }
   return requestedPosix === actualPosix;
 }
 
@@ -338,14 +331,16 @@ export async function safeReadMarkdownFile(
   // pre-open realpath must map back to exactly the requested relative
   // segments. An internal alias (a.md retargeted to b.md via a file symlink,
   // or a directory symlink alias) resolves inside the root yet yields a
-  // different canonical root-relative POSIX path; only the folded canonical
+  // different canonical root-relative POSIX path; only the exact canonical
   // key (b.md) may read, the stale key fails `markdown_read_changed` carrying
   // only the safe key (never a path or raw OS error). Separator handling uses
-  // `path.relative`/`path.sep` (never a string prefix). POSIX compares exact
-  // raw code-unit spelling with no NFC collapse, so a composed requested key
-  // cannot accept a decomposed on-disk spelling (internal symlink across NFC
-  // forms still fails `markdown_read_changed`); Windows folds NFC plus case
-  // for its case-insensitive FS. POSIX `:` segments stay allowed.
+  // `path.relative`/`path.sep` (never a string prefix). All platforms compare
+  // exact raw code-unit spelling with no NFC collapse and no case folding, so
+  // a composed requested key cannot accept a decomposed on-disk spelling
+  // (internal symlink across NFC forms still fails `markdown_read_changed`)
+  // and `A.md` cannot accept `a.md`. Canonical keys originate from discovery
+  // realpath-relative raw spelling, so direct reads of discovered keys pass.
+  // POSIX `:` segments stay allowed.
   {
     const relative = path.relative(root.realPath, preReal);
     let matches = false;
@@ -357,11 +352,7 @@ export async function safeReadMarkdownFile(
     ) {
       const actualPosix = relative.split(path.sep).join("/");
       const requestedPosix = segments.join("/");
-      matches = matchesRetargetSpelling(
-        requestedPosix,
-        actualPosix,
-        process.platform,
-      );
+      matches = matchesRetargetSpelling(requestedPosix, actualPosix);
     }
     if (!matches) {
       throw new MarkdownConnectorError("markdown_read_changed", key);
