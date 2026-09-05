@@ -4,7 +4,9 @@ import {
   countCodePointsLocal,
   equalsFolded,
   findFirstHit,
+  findFirstHitWithComparisons,
   foldQuery,
+  kmpIndexOfSequenceWithStats,
   makeSnippet,
   normalizeNFC,
   SNIPPET_CONTEXT_BEFORE,
@@ -186,5 +188,57 @@ describe("text primitives", () => {
     expect(foldQuery("Ꭰ")).toBe("Ꭰ");
     expect(foldQuery("ꭰ")).toBe("Ꭰ");
     expect(equalsFolded("Ꭰ", "ꭰ")).toBe(true);
+  });
+
+  it("finds the first folded occurrence with source mapping", () => {
+    expect(findFirstHit("aaabaaab", "aaab")).toEqual({
+      codePointIndex: 0,
+      codePointLength: 4,
+    });
+    expect(findFirstHit("xxabcabxx", "abcab")).toEqual({
+      codePointIndex: 2,
+      codePointLength: 5,
+    });
+    expect(findFirstHit("ABC", "bc")).toEqual({
+      codePointIndex: 1,
+      codePointLength: 2,
+    });
+    expect(findFirstHit("strasse", "ß")).toEqual({
+      codePointIndex: 4,
+      codePointLength: 2,
+    });
+    const hooked = findFirstHitWithComparisons("xxabcabxx", "abcab");
+    expect(hooked.hit).toEqual(findFirstHit("xxabcabxx", "abcab"));
+    expect(hooked.comparisons).toBeGreaterThan(0);
+    const rawHook = kmpIndexOfSequenceWithStats(
+      Array.from("xxabcabxx"),
+      Array.from("abcab"),
+    );
+    expect(rawHook.index).toBe(2);
+  });
+
+  it("matches folded queries in linear comparison steps", async () => {
+    const hay = "a".repeat(1_000_000);
+    const query = `${"a".repeat(255)}b`;
+    const { hit, comparisons } = findFirstHitWithComparisons(hay, query);
+    expect(hit).toBeNull();
+    expect(comparisons).toBeLessThanOrEqual(4 * (hay.length + query.length));
+    const found = findFirstHitWithComparisons(`${hay}b`, query);
+    expect(found.hit).toEqual({
+      codePointIndex: 1_000_000 - 255,
+      codePointLength: 256,
+    });
+    expect(found.comparisons).toBeLessThanOrEqual(
+      4 * (hay.length + 1 + query.length),
+    );
+
+    const { readFile } = await import("node:fs/promises");
+    const { fileURLToPath } = await import("node:url");
+    const here = fileURLToPath(new URL("./", import.meta.url));
+    const source = await readFile(`${here}../src/text.ts`, "utf8");
+    expect(source).toContain("buildKmpPrefixTable");
+    expect(source).not.toContain("continue outer");
+    expect(source).not.toContain('join("").indexOf');
+    expect(source).not.toContain("indexOfSequence(");
   });
 });
