@@ -10,20 +10,32 @@
  * matches, so folding consults this table first and only falls back to
  * the locale-independent `String.toLowerCase` for unlisted code points.
  *
- * GENERATION: enumerated with CPython `str.casefold() !== str.lower()`
- * over U+0000..U+10FFFF. `unicodedata.unidata_version` at generation time
- * is recorded in `UNICODE_DATA_VERSION` below; regenerate (same procedure)
- * when the runtime Unicode version moves.
+ * GENERATION: enumerated over U+0000..U+10FFFF (excluding surrogates)
+ * from the official Unicode 16.0.0 `CaseFolding.txt`
+ * (https://www.unicode.org/Public/16.0.0/ucd/CaseFolding.txt,
+ * upstream date 2024-04-30, SHA256
+ * `6f1f9c588eb4a5c718d9e8f93b782685e5c7fec872cf05e8e6878053599e09bb`):
+ * fold = `C`/`F` mapping when present, else `S` mapping when present,
+ * else the code point itself; kept iff
+ * `fold !== String.fromCodePoint(cp).toLowerCase()` under generator
+ * Node v24.12.0 -> 297 entries, stored as `[source, ...folded]`
+ * code-point tuples and materialized with `String.fromCodePoint`
+ * (astral-safe, ASCII-only source). Entries with no folding mapping but
+ * a distinct lowercase mapping (Cherokee capitals U+13A0..U+13F5) are
+ * stored as self-folds; U+1C89 folds to U+1C8A exactly like its
+ * lowercase mapping, so it has no override.
  *
  * Generation: CPython 3.12 (`unicodedata.unidata_version === "15.0.0"`),
  * `[(cp, chr(cp).casefold()) for cp in range(0x110000)
- *   if chr(cp).casefold() != chr(cp).lower()]` -> 297 entries, stored as
- * `[source, ...folded]` code-point tuples and materialized with
- * `String.fromCodePoint` (astral-safe, ASCII-only source).
+ *   if chr(cp).casefold() != chr(cp).lower()]` -> 297 entries; verified
+ * identical against Unicode 16.0.0 `CaseFolding.txt` with Node v24.12.0
+ * (same 297 tuples, zero delta), so only the metadata below moves to
+ * the Unicode 16.0.0 data version; regenerate (same procedure) when
+ * the runtime Unicode version moves.
  */
 
 /** Unicode data version used to generate `CASE_FOLD_OVERRIDES`. */
-export const UNICODE_DATA_VERSION = "15.0.0";
+export const UNICODE_DATA_VERSION = "16.0.0";
 
 /** Number of code points where `casefold` differs from `lower`. */
 export const CASE_FOLD_OVERRIDE_COUNT = 297;

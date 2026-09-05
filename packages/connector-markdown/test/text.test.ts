@@ -128,10 +128,11 @@ describe("text primitives", () => {
   });
 
   it("records the generated Unicode folding data version", () => {
-    expect(UNICODE_DATA_VERSION).toBe("15.0.0");
+    expect(UNICODE_DATA_VERSION).toBe("16.0.0");
     expect(TEXT_FOLD_UNICODE_VERSION).toBe(UNICODE_DATA_VERSION);
-    // Full generated map: every code point whose casefold differs from
-    // its lowercase mapping (CPython str.casefold() !== str.lower()).
+    // Full generated map: every code point whose default case fold
+    // (CaseFolding.txt C/F, else S, else itself) differs from its
+    // lowercase mapping (Node String.toLowerCase).
     expect(CASE_FOLD_OVERRIDE_COUNT).toBe(297);
     expect(getCaseFoldOverride(0xdf)).toBe("ss");
     expect(getCaseFoldOverride(0x1e9e)).toBe("ss");
@@ -140,6 +141,18 @@ describe("text primitives", () => {
     // Plain letters have no override: the lowercase fallback applies.
     expect(getCaseFoldOverride(0x69)).toBeUndefined();
     expect(getCaseFoldOverride(0x41)).toBeUndefined();
+  });
+
+  it("leaves U+1C89 to the lowercase fallback (folds with U+1C8A)", () => {
+    // U+1C89 CYRILLIC CAPITAL LETTER TJE folds (C) to U+1C8A, exactly its
+    // lowercase mapping, so there is no override entry.
+    expect(getCaseFoldOverride(0x1c89)).toBeUndefined();
+    expect(getCaseFoldOverride(0x1c8a)).toBeUndefined();
+    const tje = String.fromCodePoint(0x1c89);
+    const tjeLower = String.fromCodePoint(0x1c8a);
+    expect(foldQuery(tje)).toBe(tjeLower);
+    expect(foldQuery(tjeLower)).toBe(tjeLower);
+    expect(equalsFolded(tje, tjeLower)).toBe(true);
   });
 
   it("folds sharp s (ß/ẞ) to ss", () => {
