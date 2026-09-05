@@ -140,6 +140,23 @@ describe("markdown connector links", () => {
     });
   });
 
+  it("exposes only real wiki links in the graph when escapes/entities mix", async () => {
+    const dir = scratchVault("md-link-wiki-esc-");
+    writeFileSync(join(dir, "Note.md"), "# Note\nnote body\n");
+    writeFileSync(
+      join(dir, "a.md"),
+      "# A\nreal [[Note]] escaped \\[[Note]] entity &#91;&#91;Note&#93;&#93; code `[[Note]]`\n",
+    );
+    const connector = await createMarkdownConnector([{ path: dir }]);
+    const doc = await connector.readCanonical("vault-1/a.md");
+    expect(doc.wikiLinks.map((l) => l.raw)).toEqual(["[[Note]]"]);
+    expect(doc.wikiLinks[0]).toMatchObject({
+      target: "Note",
+      status: "resolved",
+      canonicalKey: "vault-1/Note.md",
+    });
+  });
+
   it("keeps wiki ambiguity stable across search and repeated reads", async () => {
     const dir = scratchVault("md-link-wiki-stable-");
     mkdirSync(join(dir, "a"), { recursive: true });

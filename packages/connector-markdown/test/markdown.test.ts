@@ -77,6 +77,37 @@ describe("markdown parsing", () => {
     ]);
   });
 
+  it("ignores escaped opening brackets with odd/even backslash handling", () => {
+    expect(parseMarkdown("escaped \\[[Skip]] end").wikiLinks).toEqual([]);
+    expect(
+      parseMarkdown("double \\\\[[Keep]] end").wikiLinks.map((l) => l.target),
+    ).toEqual(["Keep"]);
+    expect(parseMarkdown("triple \\\\\\[[Skip]] end").wikiLinks).toEqual([]);
+  });
+
+  it("ignores escaped closing brackets", () => {
+    expect(parseMarkdown("close [[A\\]] end").wikiLinks).toEqual([]);
+    expect(
+      parseMarkdown("close [[A]] and [[B\\]] end").wikiLinks.map(
+        (l) => l.target,
+      ),
+    ).toEqual(["A"]);
+  });
+
+  it("ignores entity-encoded brackets but keeps real links in order", () => {
+    expect(
+      parseMarkdown("entity &#91;&#91;Skip&#93;&#93; end").wikiLinks,
+    ).toEqual([]);
+    const parsed = parseMarkdown(
+      "mix \\[[Skip]] then [[Keep]] then &#91;&#91;Skip2&#93;&#93; then [[Keep2]] end",
+    );
+    expect(parsed.wikiLinks.map((l) => l.target)).toEqual(["Keep", "Keep2"]);
+    expect(parsed.wikiLinks.map((l) => l.raw)).toEqual([
+      "[[Keep]]",
+      "[[Keep2]]",
+    ]);
+  });
+
   it("uses mdast only (no HTML renderer/unified/remark/GFM)", async () => {
     const { readFile } = await import("node:fs/promises");
     const { fileURLToPath } = await import("node:url");
