@@ -2,6 +2,7 @@ import {
   appendFileSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   renameSync,
   symlinkSync,
@@ -14,7 +15,11 @@ import { describe, expect, it } from "vitest";
 import { discoverMarkdownFilesForRoot } from "../src/discovery.js";
 import { MarkdownConnectorError } from "../src/errors.js";
 import { type InitializedRoot, initializeRoots } from "../src/roots.js";
-import { MAX_FILE_BYTES, safeReadMarkdownFile } from "../src/safe_read.js";
+import {
+  MAX_FILE_BYTES,
+  matchesRetargetSpelling,
+  safeReadMarkdownFile,
+} from "../src/safe_read.js";
 
 function scratchVault(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -754,6 +759,84 @@ describe("safe read", () => {
       status: "ok",
       canonicalKey: "vault/realdir/note.md",
       text: "# real note\n",
+    });
+  });
+
+  it("compares retarget spelling exactly on POSIX and folded on Windows", () => {
+    const composedPosix = "é.md";
+    const decomposedPosix = "é.md";
+    expect(composedPosix).not.toBe(decomposedPosix);
+    expect(composedPosix.normalize("NFC")).toBe(
+      decomposedPosix.normalize("NFC"),
+    );
+    expect(matchesRetargetSpelling(composedPosix, composedPosix, "linux")).toBe(
+      true,
+    );
+    expect(
+      matchesRetargetSpelling(composedPosix, decomposedPosix, "linux"),
+    ).toBe(false);
+    expect(
+      matchesRetargetSpelling(decomposedPosix, composedPosix, "linux"),
+    ).toBe(false);
+    expect(
+      matchesRetargetSpelling(composedPosix, decomposedPosix, "win32"),
+    ).toBe(true);
+    expect(matchesRetargetSpelling("A.md", "a.md", "win32")).toBe(true);
+    expect(matchesRetargetSpelling("A.md", "a.md", "linux")).toBe(false);
+  });
+
+  it("rejects a composed-key retarget to a decomposed internal target on POSIX", async (ctx: TestContext) => {
+    if (process.platform === "win32") {
+      ctx.skip();
+      return;
+    }
+    const dir = scratchVault("md-read-nfcposix-");
+    const composedName = "é.md";
+    const decomposedName = "é.md";
+    expect(composedName).not.toBe(decomposedName);
+    writeFileSync(join(dir, composedName), "# composed\n");
+    writeFileSync(join(dir, decomposedName), "# decomposed target body\n");
+    // Filesystems that normalize names on write cannot hold both spellings.
+    const names = readdirSync(dir).sort();
+    if (
+      names.length !== 2 ||
+      !names.includes(composedName) ||
+      !names.includes(decomposedName)
+    ) {
+      ctx.skip();
+      return;
+    }
+    const root = onlyRoot(
+      await initializeRoots([{ path: dir, alias: "vault" }]),
+    );
+    const found = await discoverMarkdownFilesForRoot(root);
+    const decomposedKey = `vault/${decomposedName}`;
+    const composedKey = `vault/${composedName}`;
+    expect(found.map((entry) => entry.canonicalKey)).toEqual(
+      [decomposedKey, composedKey].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
+    );
+    renameSync(join(dir, composedName), join(dir, `${composedName}.orig`));
+    if (
+      trySymlink(join(dir, decomposedName), join(dir, composedName), "file") ===
+      "privilege-denied"
+    ) {
+      ctx.skip();
+      return;
+    }
+    try {
+      await safeReadMarkdownFile(root, composedKey);
+      expect.unreachable("expected markdown_read_changed");
+    } catch (error) {
+      expectConnectorError(error, "markdown_read_changed", dir);
+      expect((error as MarkdownConnectorError).canonicalKey).toBe(composedKey);
+      expect((error as Error).message).not.toContain("decomposed target body");
+      expect((error as Error).message).not.toContain(join(dir, decomposedName));
+    }
+    const direct = await safeReadMarkdownFile(root, decomposedKey);
+    expect(direct).toEqual({
+      status: "ok",
+      canonicalKey: decomposedKey,
+      text: "# decomposed target body\n",
     });
   });
 });
