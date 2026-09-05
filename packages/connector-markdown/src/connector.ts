@@ -107,8 +107,8 @@ import { discoverMarkdownFiles, MAX_CANONICAL_KEY_UTF16 } from "./discovery.js";
 import { MarkdownConnectorError } from "./errors.js";
 import {
   createLinkGraphBudget,
-  type LinkGraphBudget,
   LINK_GRAPH_BUDGET_BYTES,
+  type LinkGraphBudget,
   linkGraphUtf8ByteLength,
   MIN_CANONICAL_CANDIDATE_JSON_BYTES,
 } from "./link_budget.js";
@@ -511,7 +511,11 @@ function buildRootLinkCache(keysInRoot: readonly string[]): RootLinkCache {
   }
   // Discovery order is already canonical-key sorted, so each group inherits
   // code-unit order without re-sorting.
-  return { basenameIndex: grouped, canonicalized: new Map(), wikiUnions: new Map() };
+  return {
+    basenameIndex: grouped,
+    canonicalized: new Map(),
+    wikiUnions: new Map(),
+  };
 }
 
 function throwLinkBudgetExceeded(errorKey: string | null): never {
@@ -647,8 +651,7 @@ async function resolveWikiLinks(
         linkGraphUtf8ByteLength('"}') +
         (basenameKeys.length > 0 ? basenameKeys.length - 1 : 0);
       if (
-        minFraming +
-          MIN_CANONICAL_CANDIDATE_JSON_BYTES * basenameKeys.length >
+        minFraming + MIN_CANONICAL_CANDIDATE_JSON_BYTES * basenameKeys.length >
         remaining
       ) {
         throwLinkBudgetExceeded(errorKey);
@@ -847,10 +850,7 @@ interface RankedPending {
   root: InitializedRoot;
 }
 
-function compareRankedPending(
-  a: RankedPending,
-  b: RankedPending,
-): number {
+function compareRankedPending(a: RankedPending, b: RankedPending): number {
   if (a.rank !== b.rank) return a.rank - b.rank;
   return compareCodeUnits(a.canonicalKey, b.canonicalKey);
 }

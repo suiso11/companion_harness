@@ -455,12 +455,12 @@ describe("markdown connector links", () => {
       },
     ]);
     // Read path resolves identically (no cross-sourceDir cache reuse).
-    expect((await connector.readCanonical("vault-1/d1/s1.md")).wikiLinks).toEqual(
-      first?.wikiLinks,
-    );
-    expect((await connector.readCanonical("vault-1/d2/s2.md")).wikiLinks).toEqual(
-      second?.wikiLinks,
-    );
+    expect(
+      (await connector.readCanonical("vault-1/d1/s1.md")).wikiLinks,
+    ).toEqual(first?.wikiLinks);
+    expect(
+      (await connector.readCanonical("vault-1/d2/s2.md")).wikiLinks,
+    ).toEqual(second?.wikiLinks);
     expect(JSON.stringify(found)).not.toContain(dir);
   });
 

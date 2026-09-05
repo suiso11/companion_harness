@@ -14,11 +14,11 @@ import { describe, expect, it } from "vitest";
 import {
   createLinkGraphBudget,
   LINK_GRAPH_BUDGET_BYTES,
-  linkGraphUtf8ByteLength,
   type LinkGraphEntry,
+  linkGraphUtf8ByteLength,
+  MIN_CANONICAL_CANDIDATE_JSON_BYTES,
   measureLinkGraphBytes,
   measureLinkGraphEntryBytes,
-  MIN_CANONICAL_CANDIDATE_JSON_BYTES,
   serializeLinkGraphEntry,
 } from "../src/link_budget.js";
 
@@ -95,7 +95,12 @@ describe("link graph budget mirror vectors", () => {
 
   it("measures entries exactly (JSON.stringify + UTF-8 ground truth)", () => {
     const entries: readonly LinkGraphEntry[] = [
-      { kind: "standard", status: "resolved", candidates: ["a/b.md"], ordinal: 1 },
+      {
+        kind: "standard",
+        status: "resolved",
+        candidates: ["a/b.md"],
+        ordinal: 1,
+      },
       {
         kind: "wiki",
         status: "ambiguous",
@@ -152,7 +157,12 @@ describe("link graph budget mirror vectors", () => {
 
   it("keeps the incremental budget identical to the whole-graph measure", () => {
     const entries: readonly LinkGraphEntry[] = [
-      { kind: "standard", status: "resolved", candidates: ["a/b.md"], ordinal: 1 },
+      {
+        kind: "standard",
+        status: "resolved",
+        candidates: ["a/b.md"],
+        ordinal: 1,
+      },
       {
         kind: "wiki",
         status: "ambiguous",
@@ -185,7 +195,9 @@ describe("link graph budget mirror vectors", () => {
     expect(twice.tryAddEntry(entry)).toBe(true);
     // Same candidate repeated: no dedup across entries, charged twice.
     expect(twice.tryAddEntry({ ...entry, ordinal: 2 })).toBe(true);
-    expect(twice.bytes).toBe(measureLinkGraphBytes([entry, { ...entry, ordinal: 2 }]));
+    expect(twice.bytes).toBe(
+      measureLinkGraphBytes([entry, { ...entry, ordinal: 2 }]),
+    );
     expect(twice.bytes).toBeGreaterThan(once.bytes);
     expect(twice.count).toBe(2);
     // Unresolved entries (empty candidates) still consume framing bytes.

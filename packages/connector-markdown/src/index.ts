@@ -43,21 +43,6 @@ export {
   SEARCH_QUERY_MIN_CODE_POINTS,
 } from "./connector.js";
 export type { DiscoveredFile, DiscoveryHooks } from "./discovery.js";
-export type {
-  LinkGraphBudget,
-  LinkGraphEntry,
-  LinkGraphKind,
-  LinkGraphStatus,
-} from "./link_budget.js";
-export {
-  createLinkGraphBudget,
-  LINK_GRAPH_BUDGET_BYTES,
-  linkGraphUtf8ByteLength,
-  measureLinkGraphBytes,
-  measureLinkGraphEntryBytes,
-  MIN_CANONICAL_CANDIDATE_JSON_BYTES,
-  serializeLinkGraphEntry,
-} from "./link_budget.js";
 export {
   discoverMarkdownFiles,
   discoverMarkdownFilesForRoot,
@@ -74,6 +59,21 @@ export {
   MarkdownConnectorError,
   SKIPPED_REASONS,
 } from "./errors.js";
+export type {
+  LinkGraphBudget,
+  LinkGraphEntry,
+  LinkGraphKind,
+  LinkGraphStatus,
+} from "./link_budget.js";
+export {
+  createLinkGraphBudget,
+  LINK_GRAPH_BUDGET_BYTES,
+  linkGraphUtf8ByteLength,
+  MIN_CANONICAL_CANDIDATE_JSON_BYTES,
+  measureLinkGraphBytes,
+  measureLinkGraphEntryBytes,
+  serializeLinkGraphEntry,
+} from "./link_budget.js";
 export type {
   ParsedMarkdown,
   StandardLink,

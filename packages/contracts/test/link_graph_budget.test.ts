@@ -93,7 +93,12 @@ describe("expanded link graph budget vectors", () => {
 
   it("measures entries exactly (JSON.stringify + UTF-8 ground truth)", () => {
     const entries: readonly ExpandedLinkGraphEntry[] = [
-      { kind: "standard", status: "resolved", candidates: ["a/b.md"], ordinal: 1 },
+      {
+        kind: "standard",
+        status: "resolved",
+        candidates: ["a/b.md"],
+        ordinal: 1,
+      },
       {
         kind: "wiki",
         status: "ambiguous",
@@ -109,7 +114,9 @@ describe("expanded link graph budget vectors", () => {
       );
     }
     const whole = `[${entries.map(serializeExpandedLinkGraphEntry).join(",")}]`;
-    expect(measureExpandedLinkGraphBytes(entries)).toBe(groundTruthBytes(whole));
+    expect(measureExpandedLinkGraphBytes(entries)).toBe(
+      groundTruthBytes(whole),
+    );
   });
 
   it("charges astral candidates as 4 UTF-8 bytes per code point", () => {
@@ -150,7 +157,12 @@ describe("expanded link graph budget vectors", () => {
 
   it("keeps the incremental budget identical to the whole-graph measure", () => {
     const entries: readonly ExpandedLinkGraphEntry[] = [
-      { kind: "standard", status: "resolved", candidates: ["a/b.md"], ordinal: 1 },
+      {
+        kind: "standard",
+        status: "resolved",
+        candidates: ["a/b.md"],
+        ordinal: 1,
+      },
       {
         kind: "wiki",
         status: "ambiguous",
