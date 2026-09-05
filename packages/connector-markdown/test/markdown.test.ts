@@ -167,4 +167,71 @@ describe("markdown parsing", () => {
     expect(source).not.toContain("countPrecedingBackslashes");
     expect(source).not.toContain('indexOf("]]"');
   });
+
+  it("rejects CR-spanning wiki links without losing later links", () => {
+    expect(parseMarkdown("[[foo\rbar]]").wikiLinks).toEqual([]);
+    expect(parseMarkdown("[[foo\r\nbar]]").wikiLinks).toEqual([]);
+    // Invalid cross-line yields no edge, so no link-graph budget charge.
+    expect(parseMarkdown("[[foo\rbar]]").wikiLinks.length).toBe(0);
+    expect(parseMarkdown("[[foo\r\nbar]]").wikiLinks.length).toBe(0);
+    // Valid links before and after CR boundaries still resolve in order.
+    expect(
+      parseMarkdown("[[ok]]\r[[foo\rbar]] [[later]]").wikiLinks.map(
+        (l) => l.target,
+      ),
+    ).toEqual(["ok", "later"]);
+    expect(
+      parseMarkdown("[[foo\rbar]] [[good]]").wikiLinks.map((l) => l.target),
+    ).toEqual(["good"]);
+    expect(
+      parseMarkdown("[[foo\r\nbar]] [[good]]").wikiLinks.map((l) => l.target),
+    ).toEqual(["good"]);
+    expect(
+      parseMarkdown("before [[keep]]\r\nafter [[kept]]").wikiLinks.map(
+        (l) => l.target,
+      ),
+    ).toEqual(["keep", "kept"]);
+    // Escaped opener before a CR boundary stays escaped; later link found.
+    expect(
+      parseMarkdown("\\[[skip\r]] [[keep]]").wikiLinks.map((l) => l.target),
+    ).toEqual(["keep"]);
+    // Alias/fragment halves split by CR never emit a link edge.
+    expect(parseMarkdown("[[a|b\rc]]").wikiLinks).toEqual([]);
+    expect(parseMarkdown("[[a#b\rc]]").wikiLinks).toEqual([]);
+    expect(parseMarkdown("[[a|b\r\nc]]").wikiLinks).toEqual([]);
+    // No emitted target/alias/fragment may carry a line terminator.
+    for (const input of [
+      "[[foo\rbar]] [[ok]]",
+      "[[foo\r\nbar]] [[ok]]",
+      "[[a|b\rc]] [[ok]]",
+      "[[a#b\rc]] [[ok]]",
+    ]) {
+      for (const link of parseMarkdown(input).wikiLinks) {
+        expect(link.target).not.toContain("\r");
+        expect(link.target).not.toContain("\n");
+        if (link.alias !== null) {
+          expect(link.alias).not.toContain("\r");
+          expect(link.alias).not.toContain("\n");
+        }
+        if (link.fragment !== null) {
+          expect(link.fragment).not.toContain("\r");
+          expect(link.fragment).not.toContain("\n");
+        }
+      }
+    }
+  });
+
+  it("scans CR boundaries linearly without reopening inside CRLF", () => {
+    const cr = extractWikiCandidatesWithStats("[[foo\rbar]] [[good]]");
+    expect(cr.candidates.map((c) => c.inner)).toEqual(["good"]);
+    expect(cr.inspected).toBeLessThanOrEqual("[[foo\rbar]] [[good]]".length);
+    const crlf = extractWikiCandidatesWithStats("[[foo\r\nbar]] [[good]]");
+    expect(crlf.candidates.map((c) => c.inner)).toEqual(["good"]);
+    expect(crlf.inspected).toBeLessThanOrEqual(
+      "[[foo\r\nbar]] [[good]]".length,
+    );
+    const lone = extractWikiCandidatesWithStats("[[foo\rbar]]");
+    expect(lone.candidates).toEqual([]);
+    expect(lone.inspected).toBeLessThanOrEqual("[[foo\rbar]]".length);
+  });
 });

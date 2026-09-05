@@ -129,9 +129,11 @@ function parseStandardUrl(rawUrl: string): StandardLink | null {
  * of consecutive backslashes immediately before the current index), so long
  * backslash runs are inspected once, never rescanned. Only unescaped `[[`
  * openers (even preceding backslashes) open a link, and only the first
- * unescaped `]]` closes it. Inner content must contain no `[`, `]`, or
- * newline; the first invalid code unit abandons the pending opener
- * immediately. A nested viable literal `[[` inside a malformed opener
+ * unescaped `]]` closes it. Inner content must contain no `[`, `]`, `\r`,
+ * or `\n`; the first invalid code unit abandons the pending opener
+ * immediately (`\r` and `\n` each terminate independently, so a CRLF pair is
+ * consumed linearly with one inspection per code unit and no opener can
+ * start or reopen inside the sequence). A nested viable literal `[[` inside a malformed opener
  * replaces it (equivalent to finding the next viable literal opener after
  * `openStart + 2`), so no real link after a malformed opener is lost.
  * Entity-encoded brackets never appear as literal brackets here, so they
@@ -213,7 +215,7 @@ function scanWikiCandidates(
       i += 1;
       continue;
     }
-    if (ch === "\n") {
+    if (ch === "\n" || ch === "\r") {
       openStart = -1;
       pendingSlashes = 0;
       i += 1;
@@ -257,6 +259,9 @@ function rawSliceFor(normalized: string, node: MdNode): string | null {
 
 function parseWikiInner(raw: string, inner: string): WikiLink | null {
   if (inner.includes("\0")) return null;
+  // Defense in depth: even if the scanner ever emitted a CR/LF-containing
+  // inner, no target/alias/fragment may carry either line terminator.
+  if (inner.includes("\r") || inner.includes("\n")) return null;
   const pipeIndex = inner.indexOf("|");
   const targetFrag = pipeIndex < 0 ? inner : inner.slice(0, pipeIndex);
   const aliasRaw = pipeIndex < 0 ? null : inner.slice(pipeIndex + 1);
@@ -279,6 +284,16 @@ function parseWikiInner(raw: string, inner: string): WikiLink | null {
     fragmentRaw === null || fragmentRaw.trim() === ""
       ? null
       : fragmentRaw.trim();
+  if (target.includes("\r") || target.includes("\n")) return null;
+  if (alias !== null && (alias.includes("\r") || alias.includes("\n"))) {
+    return null;
+  }
+  if (
+    fragment !== null &&
+    (fragment.includes("\r") || fragment.includes("\n"))
+  ) {
+    return null;
+  }
   return { raw, target, alias, fragment };
 }
 
