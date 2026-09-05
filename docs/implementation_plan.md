@@ -989,6 +989,7 @@ ALTER TABLE sessions ADD COLUMN next_reference_ordinal INTEGER NOT NULL DEFAULT 
 - **絶対パスを露出しない。** CanonicalResource のキー・API 応答・エビデンスにはルート相対の正規キーのみを使う。
 - **Snapshot は正規化された全文テキスト** を `body_json` に保持する不変エビデンスとする。revision は `resources.next_revision` 採番の整数とし、`source_revision` / `content_hash` を記録する（§14.2）。
 - 対応リンク: **Markdown リンク（相対パスの .md 参照）と Wiki リンク（`[[Target]]`）**。解決は決定論的に行い、**複数候補が一意に定まらない場合は曖昧（ambiguous）として扱い、解決を確定しない**（候補列挙またはエラー）。パーサライブラリの選定と記法バリエーションの厳密範囲のみ未解決（§20 の #4）。
+- **展開リンクグラフ予算（合意・exact）:** `markdown.search` / `reference.refresh` の **1 回の呼び出し（search/refresh call）あたり、永続化する正規化グラフメタデータの合計は最大 256KiB（262144 UTF-8 バイト）** とする。**リンク件数の上限（no 1024 link cap）は設けない**（バイト合計に収まる限り任意件数）。課金対象は **正規化メタデータのみ（kind / status / candidates / ordinal）** とし、生 Markdown 本文・URL・wiki target・alias・fragment・title・snippet・絶対パスは課金しない。計量は **1 つのフラットな JSON 配列** の `utf8ByteLength` で行い、エントリのキー順は **`candidates` / `kind` / `ordinal` / `status`** の固定順、ordinal は **文書ごとに 1 から振り直し（per-document ordinal reset）**、candidates は提示順、**同一候補の繰り返しは出現ごとに計数** する。`[]` の素地・カンマ・JSON エスケープ・UTF-8 を exact に含め、**262144 バイトは受理・262145 バイトは拒否** とする。超過は切り詰めず **呼び出し全体を `output_too_large` で拒否し、部分的な DB 永続化は行わない**（no truncation / no partial DB changes）。対象は **Top-K で選ばれたヒットのみ** であり、`reference.open` / `reference.related` は展開せず課金しない。既存の **body 1MiB 制限は変更しない**。
 
 ### 14.7 ReferenceResolver（合意）
 
@@ -1029,6 +1030,7 @@ ALTER TABLE sessions ADD COLUMN next_reference_ordinal INTEGER NOT NULL DEFAULT 
 - **セキュリティ**: 設定ルート外・外部 symlink が前後再検証で拒否されること、非 UTF-8 が拒否されること、1MiB 超過が明示 skipped/rejected（無 truncate）であること、10000 件超過で検索失敗すること、絶対パスが露出しないこと、全文 Snapshot が正規化保持されること、リンク曖昧時が未解決扱いであること。
 - **検索**: 同一入力に対して結果が決定論的であること。境界値（10000 / 1MiB / 1-256 / default10/max20 / snippet 512）、NFC + locale 非依存 folding、whole-query リテラル、title 完全→title 部分→本文＋canonical-key tie、最初本文ヒットの順序であること。トークン/FTS/セマンティックが存在しないこと。
 - **related**: リンクグラフからの関連提示が決定論的であること。
+- **展開リンクグラフ予算**: search/refresh の 1 呼び出しあたり正規化メタデータ合計が 262144 バイト以下で受理・262145 バイトで `output_too_large` 拒否となること（件数上限なし、キー順 `candidates`/`kind`/`ordinal`/`status`・文書ごと ordinal reset・繰り返し出現ごと計数・`[]`/カンマ/エスケープ/UTF-8 exact を含む計量）。超過時は無 truncate かつ無部分永続化であること。open/related が展開・課金しないこと。Top-K ヒットのみが対象であり body 1MiB が不変であること。
 - **Resolver**: exact order（rN → frozen selected → frozen ordinal → canonical exact → title exact［frozen active 優先・一意のみ］）どおりに解決されること、曖昧 case が推測されないこと、M1 で意味的代名詞を解決しないこと。
 - **API**: §14.8 の Session スコープ exact ルート（stored-only GET + reference-context GET/PUT のみ。直接 POST の search/open/refresh/related は存在しないこと）と reference-context CAS（Session 所属検証を含む）が動作すること。
 

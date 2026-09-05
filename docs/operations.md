@@ -153,6 +153,16 @@ connector instance owns **all** configured roots.
   no-follow open where available, fstat identity comparison, and post-read
   recheck.
 
+### Expanded link graph budget (M1, agreed)
+
+- One `markdown.search` / `reference.refresh` call may persist at most
+  **256KiB** of normalized link graph metadata. There is **no per-link
+  count cap**.
+- Over budget, the whole call fails with **`output_too_large`**: no
+  truncation, no partial writes. `reference.open` / `reference.related`
+  never expand the graph. Exact accounting is defined in the
+  implementation plan (§14.6).
+
 ### Stored-only reference HTTP API
 
 - `GET /api/sessions/:sessionId/references` (saved reference list).
