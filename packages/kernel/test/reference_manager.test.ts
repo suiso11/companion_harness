@@ -1940,6 +1940,7 @@ describe("expanded link graph budget preflight (256KiB aggregate, no count bound
       kind: "standard";
       status: "unresolved";
       candidates: [];
+      ordinal: number;
     }> = [];
     const probe = createExpandedLinkGraphBudget();
     let ordinal = 1;
@@ -1964,7 +1965,12 @@ describe("expanded link graph budget preflight (256KiB aggregate, no count bound
         ordinal,
       };
       expect(probe.tryAddEntry(entry)).toBe(true);
-      head.push({ kind: "standard", status: "unresolved", candidates: [] });
+      head.push({
+        kind: "standard",
+        status: "unresolved",
+        candidates: [],
+        ordinal,
+      });
       ordinal += 1;
       expect(ordinal).toBeLessThan(10_000);
     }
