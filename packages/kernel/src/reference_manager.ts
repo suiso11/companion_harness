@@ -43,6 +43,7 @@
 import {
   CanonicalKeySchema,
   countCodePoints,
+  createExpandedLinkGraphBudget,
   MAX_SNIPPET_CODE_POINTS,
   parseRunEventPayload,
   ReferencePresentedPayloadSchema,
@@ -57,6 +58,7 @@ import { generateId, isUuidV4, sha256Hex } from "./canonical.js";
 import {
   InvalidReferenceError,
   KernelStorageError,
+  LinkGraphTooLargeError,
   ReferenceNotFoundError,
   RepositoryNotFoundError,
   RepositoryValidationError,
@@ -294,9 +296,8 @@ function normalizeObservationLinks(
   if (!Array.isArray(input)) {
     throw new RepositoryValidationError("links must be an array");
   }
-  if (input.length > 1024) {
-    throw new RepositoryValidationError("too many links in observation");
-  }
+  // No link-count bound: any number of links fits while the aggregate
+  // 256KiB graph budget (checked in presentObservations preflight) fits.
   return input.map((entry, index) => {
     if (typeof entry !== "object" || entry === null) {
       throw new RepositoryValidationError(`link ${index} must be an object`);
@@ -348,6 +349,110 @@ function normalizeObservationLinks(
     }
     return { kind, status, candidates: parsed };
   });
+}
+
+/**
+ * Defensive aggregate 256KiB graph preflight (exact contracts framing).
+ *
+ * Runs on the RAW observations BEFORE any normalization copies and BEFORE
+ * `withImmediate` (hence before any resource/title/allocator/graph/ref/
+ * set/event persistence). The flattened batch graph covers ALL observations
+ * in the call in presentation order (observation order, link order within
+ * each observation); ordinal is index+1 within each observation; repeated
+ * candidates are charged per occurrence; unresolved (zero-candidate) links
+ * are charged for their framing; body/title/snippets are never charged.
+ * Empty/undefined links are treated as empty; there is no link-count bound.
+ *
+ * Each candidate key is type/grammar validated (string + CanonicalKeySchema,
+ * <=512) one at a time before the incremental cap check, and the shared
+ * contracts `createExpandedLinkGraphBudget` measures one bounded key at a
+ * time with early exit, so no huge single serialization is ever built.
+ * Overflow throws `LinkGraphTooLargeError` (fixed code `output_too_large`).
+ * Structural link errors throw `RepositoryValidationError` (unchanged).
+ */
+function assertLinkGraphBudget(
+  observations: readonly ResourceObservation[],
+): void {
+  const budget = createExpandedLinkGraphBudget();
+  for (const raw of observations) {
+    const input: unknown =
+      (raw as { links?: unknown }).links === undefined
+        ? []
+        : (raw as { links?: unknown }).links;
+    if (input === undefined) {
+      continue;
+    }
+    if (!Array.isArray(input)) {
+      throw new RepositoryValidationError("links must be an array");
+    }
+    for (let index = 0; index < input.length; index += 1) {
+      const entry = input[index] as {
+        kind?: unknown;
+        status?: unknown;
+        candidates?: unknown;
+      };
+      if (typeof entry !== "object" || entry === null) {
+        throw new RepositoryValidationError(`link ${index} must be an object`);
+      }
+      const { kind, status, candidates } = entry;
+      if (kind !== "standard" && kind !== "wiki") {
+        throw new RepositoryValidationError(`link ${index} kind invalid`);
+      }
+      if (
+        status !== "resolved" &&
+        status !== "ambiguous" &&
+        status !== "unresolved"
+      ) {
+        throw new RepositoryValidationError(`link ${index} status invalid`);
+      }
+      if (!Array.isArray(candidates)) {
+        throw new RepositoryValidationError(
+          `link ${index} candidates must be an array`,
+        );
+      }
+      const parsed: string[] = [];
+      for (let j = 0; j < candidates.length; j += 1) {
+        const candidate = (candidates as unknown[])[j];
+        if (typeof candidate !== "string") {
+          throw new RepositoryValidationError(
+            `link ${index} candidate ${j} invalid: expected string`,
+          );
+        }
+        try {
+          parsed.push(CanonicalKeySchema.parse(candidate));
+        } catch (error) {
+          throw new RepositoryValidationError(
+            `link ${index} candidate ${j} invalid: ${error instanceof Error ? error.message : String(error)}`,
+            { cause: error },
+          );
+        }
+      }
+      if (status === "resolved" && parsed.length !== 1) {
+        throw new RepositoryValidationError(
+          `link ${index} resolved requires exactly one candidate`,
+        );
+      }
+      if (status === "ambiguous" && parsed.length <= 1) {
+        throw new RepositoryValidationError(
+          `link ${index} ambiguous requires more than one candidate`,
+        );
+      }
+      if (status === "unresolved" && parsed.length !== 0) {
+        throw new RepositoryValidationError(
+          `link ${index} unresolved requires zero candidates`,
+        );
+      }
+      const accepted = budget.tryAddEntry({
+        kind,
+        status,
+        candidates: parsed,
+        ordinal: index + 1,
+      });
+      if (!accepted) {
+        throw new LinkGraphTooLargeError();
+      }
+    }
+  }
 }
 
 /** Deterministic prefix excerpt (manager has no search query). */
@@ -548,6 +653,12 @@ export function createReferenceManager(db: Database.Database) {
       throw new RepositoryValidationError("freshness must be normal|refresh");
     }
     const now = nowMs(options.now);
+    // Defensive aggregate graph preflight FIRST: exact 256KiB budget over
+    // the flattened batch graph on RAW inputs, before any normalization
+    // copies and before withImmediate (hence before any resource/title/
+    // allocator/graph/ref/set/event persistence). Overflow throws
+    // output_too_large with zero DB changes.
+    assertLinkGraphBudget(observations);
     // Validate + normalize OUTSIDE the transaction is fine, but hashing and
     // persistence stay inside so a cancelled Run discards even validation
     // side effects: nothing is written before the running recheck.

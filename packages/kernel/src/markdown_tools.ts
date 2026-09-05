@@ -184,6 +184,7 @@ function mapToToolError(error: unknown, signal?: AbortSignal): ToolError {
         code === "markdown_read_failed" ||
         code === "markdown_read_changed" ||
         code === "reference_not_found" ||
+        code === "output_too_large" ||
         code === "invalid_input"
       ) {
         return new ToolError(code);

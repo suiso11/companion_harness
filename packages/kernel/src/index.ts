@@ -99,6 +99,7 @@ export {
   IdempotencyConflictError,
   InvalidReferenceError,
   KernelStorageError,
+  LinkGraphTooLargeError,
   MigrationFailedError,
   MigrationMissingError,
   NewerDatabaseError,

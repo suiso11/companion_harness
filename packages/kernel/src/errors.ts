@@ -171,6 +171,23 @@ export class InvalidReferenceError extends KernelStorageError {
 }
 
 /**
+ * Expanded link graph exceeds the agreed 256KiB per-call budget
+ * (fixed code `output_too_large`, never truncation/partial persistence).
+ * Thrown by ReferenceManager preflight before any normalization copy or
+ * DB transaction; M1 tool adapters map it (and the connector's
+ * `output_too_large`) to `ToolError("output_too_large")` with no raw
+ * args/errors/paths in outputs or audit.
+ */
+export class LinkGraphTooLargeError extends KernelStorageError {
+  constructor(
+    message = "expanded link graph exceeds 256KiB per-call budget",
+    options?: ErrorOptions,
+  ) {
+    super("output_too_large", message, options);
+  }
+}
+
+/**
  * Required reference-context row is missing (M1 invariant violation).
  * Fresh sessions gain the row in `createSession`; pre-M1 sessions gain it
  * via the 0002 backfill. A missing row is corrupt DB state, never healed

@@ -1,6 +1,11 @@
 // M1 ReferenceManager tests (§4, §14.2-§14.4, §14.10): identity, reuse vs
 // refresh, CAS allocators, atomicity, stored-only paths, metadata-only config.
 
+import {
+  createExpandedLinkGraphBudget,
+  MAX_EXPANDED_LINK_GRAPH_BYTES,
+  measureExpandedLinkGraphBytes,
+} from "@companion/contracts";
 import type Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import {
@@ -9,6 +14,7 @@ import {
   createReferenceManager,
   generateId,
   InvalidReferenceError,
+  LinkGraphTooLargeError,
   migrateKernelDatabase,
   openKernelDatabase,
   ReferenceNotFoundError,
@@ -1615,6 +1621,240 @@ describe("getRelatedStored (stored graph only)", () => {
       expect(() => manager.getRelatedStored(a.sessionId, refId, 0)).toThrow();
       expect(() => manager.getRelatedStored(a.sessionId, refId, 21)).toThrow();
       expect(manager.getRelatedStored(a.sessionId, refId, 1)).toEqual([]);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+});
+
+describe("expanded link graph budget preflight (256KiB aggregate, no count bound)", () => {
+  const unresolved = (n: number) =>
+    Array.from({ length: n }, () => ({
+      kind: "standard" as const,
+      status: "unresolved" as const,
+      candidates: [] as string[],
+    }));
+
+  it("accepts >1024 links while the aggregate graph stays under budget", async () => {
+    const { handle, repo, manager } = await openStack();
+    try {
+      const connector = manager.ensureMarkdownConnectorInstance("vault", 1, {
+        now: T0,
+      });
+      const { sessionId, runId } = runningFixture(repo);
+      const before = counts(handle.raw);
+      const result = manager.presentObservations(
+        sessionId,
+        runId,
+        [
+          obs(connector.id, "notes/big.md", "big body", {
+            links: unresolved(1500),
+          }),
+        ],
+        { freshness: "normal", now: T0 + 5 },
+      );
+      expect(result.applied).toBe(true);
+      expect(result.references).toHaveLength(1);
+      const after = counts(handle.raw);
+      expect(after.snapshots).toBe(before.snapshots + 1);
+      expect(after.references).toBe(before.references + 1);
+      expect(
+        (
+          handle.raw
+            .prepare("SELECT COUNT(*) AS n FROM snapshot_links")
+            .get() as { n: number }
+        ).n,
+      ).toBe(1500);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("accepts the exact 256KiB aggregate and rejects overflow with zero persistence", async () => {
+    const probe = createExpandedLinkGraphBudget();
+    let fit = 0;
+    while (
+      probe.tryAddEntry({
+        kind: "standard",
+        status: "unresolved",
+        candidates: [],
+        ordinal: fit + 1,
+      })
+    ) {
+      fit += 1;
+    }
+    expect(fit).toBeGreaterThan(1024);
+    const entries = Array.from({ length: fit }, (_, i) => ({
+      kind: "standard" as const,
+      status: "unresolved" as const,
+      candidates: [] as readonly string[],
+      ordinal: i + 1,
+    }));
+    expect(measureExpandedLinkGraphBytes(entries)).toBeLessThanOrEqual(
+      MAX_EXPANDED_LINK_GRAPH_BYTES,
+    );
+    expect(MAX_EXPANDED_LINK_GRAPH_BYTES).toBe(262_144);
+
+    const { handle, repo, manager } = await openStack();
+    try {
+      const connector = manager.ensureMarkdownConnectorInstance("vault", 1, {
+        now: T0,
+      });
+      const { sessionId, runId } = runningFixture(repo);
+      // Seed preexisting state: one titled resource + baseline counters.
+      const seeded = manager.presentObservations(
+        sessionId,
+        runId,
+        [
+          obs(connector.id, "notes/seed.md", "seed body", {
+            title: "Original",
+          }),
+        ],
+        { freshness: "normal", now: T0 + 5 },
+      );
+      expect(seeded.applied).toBe(true);
+      const titleBefore = (
+        handle.raw
+          .prepare("SELECT title FROM resources WHERE canonical_key = ?")
+          .get("notes/seed.md") as { title: string | null }
+      ).title;
+      expect(titleBefore).toBe("Original");
+      const eventSeqBefore = (
+        handle.raw
+          .prepare("SELECT event_seq FROM runs WHERE id = ?")
+          .get(runId) as {
+          event_seq: number;
+        }
+      ).event_seq;
+      const contextBefore = (
+        handle.raw
+          .prepare(
+            "SELECT version FROM session_reference_context WHERE session_id = ?",
+          )
+          .get(sessionId) as { version: number }
+      ).version;
+
+      // Exact-budget batch is accepted.
+      const exact = manager.presentObservations(
+        sessionId,
+        runId,
+        [
+          obs(connector.id, "notes/exact.md", "exact body", {
+            links: unresolved(fit),
+          }),
+        ],
+        { freshness: "normal", now: T0 + 6 },
+      );
+      expect(exact.applied).toBe(true);
+      const afterExact = counts(handle.raw);
+      const eventSeqAfterExact = (
+        handle.raw
+          .prepare("SELECT event_seq FROM runs WHERE id = ?")
+          .get(runId) as {
+          event_seq: number;
+        }
+      ).event_seq;
+      const linksAfterExact = (
+        handle.raw
+          .prepare("SELECT COUNT(*) AS n FROM snapshot_links")
+          .get() as {
+          n: number;
+        }
+      ).n;
+      expect(linksAfterExact).toBe(fit);
+
+      // Overflow by a clear margin: single-observation and split-batch cases.
+      const overflowLinks = unresolved(fit + 8);
+      const beforeOverflow = counts(handle.raw);
+      expect(() =>
+        manager.presentObservations(
+          sessionId,
+          runId,
+          [
+            obs(connector.id, "notes/seed.md", "mutated", {
+              title: "Mutated",
+              links: overflowLinks,
+            }),
+          ],
+          { freshness: "normal", now: T0 + 7 },
+        ),
+      ).toThrow(LinkGraphTooLargeError);
+      try {
+        manager.presentObservations(
+          sessionId,
+          runId,
+          [
+            obs(connector.id, "notes/seed.md", "mutated", {
+              title: "Mutated",
+              links: overflowLinks,
+            }),
+          ],
+          { freshness: "normal", now: T0 + 7 },
+        );
+        expect.unreachable();
+      } catch (error) {
+        expect((error as { code?: unknown }).code).toBe("output_too_large");
+      }
+      // Zero persistence: no partial resources/snapshots/refs/sets/events/graph.
+      expect(counts(handle.raw)).toEqual(beforeOverflow);
+      expect(
+        (
+          handle.raw
+            .prepare("SELECT COUNT(*) AS n FROM snapshot_links")
+            .get() as {
+            n: number;
+          }
+        ).n,
+      ).toBe(linksAfterExact);
+      // Preexisting title / allocator / events unchanged.
+      expect(
+        (
+          handle.raw
+            .prepare("SELECT title FROM resources WHERE canonical_key = ?")
+            .get("notes/seed.md") as { title: string | null }
+        ).title,
+      ).toBe("Original");
+      expect(
+        (
+          handle.raw
+            .prepare("SELECT event_seq FROM runs WHERE id = ?")
+            .get(runId) as {
+            event_seq: number;
+          }
+        ).event_seq,
+      ).toBe(eventSeqAfterExact);
+      void eventSeqBefore;
+      expect(
+        (
+          handle.raw
+            .prepare(
+              "SELECT version FROM session_reference_context WHERE session_id = ?",
+            )
+            .get(sessionId) as { version: number }
+        ).version,
+      ).toBe(contextBefore);
+      // Zero partial graph on a split batch whose combined graph overflows
+      // (wider margin: per-observation ordinals restart at 1, so the split
+      // total is slightly smaller than the single-observation total).
+      const splitTotal = fit + 24;
+      const half = Math.ceil(splitTotal / 2);
+      expect(() =>
+        manager.presentObservations(
+          sessionId,
+          runId,
+          [
+            obs(connector.id, "notes/split-a.md", "a", {
+              links: unresolved(half),
+            }),
+            obs(connector.id, "notes/split-b.md", "b", {
+              links: unresolved(splitTotal - half),
+            }),
+          ],
+          { freshness: "normal", now: T0 + 8 },
+        ),
+      ).toThrow(LinkGraphTooLargeError);
+      expect(counts(handle.raw)).toEqual(beforeOverflow);
+      expect(afterExact.references).toBeGreaterThan(0);
     } finally {
       closeKernelDatabase(handle);
     }

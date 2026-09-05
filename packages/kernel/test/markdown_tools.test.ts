@@ -1089,6 +1089,60 @@ describe("broker output/cumulative validation after materialization (flagged)", 
   });
 });
 
+describe("expanded link graph budget mapping (output_too_large, zero persistence)", () => {
+  it("maps an oversized pre-persistence link graph to ToolError output_too_large with no writes", async () => {
+    const huge = Array.from({ length: 5000 }, () => ({
+      status: "unresolved" as const,
+      candidates: [] as readonly string[],
+    }));
+    const { handle, repo, broker } = await setupStack(
+      {},
+      {
+        searchImpl: () => ({
+          hits: [
+            {
+              canonicalKey: "vault/big.md",
+              title: "Big",
+              snippet: "big snippet",
+              text: "big body",
+              sourceRevision: "r1",
+              standardLinks: [],
+              wikiLinks: huge,
+            },
+          ],
+          skipped: [],
+        }),
+      },
+    );
+    try {
+      // Fixed code is part of the closed ToolError vocabulary.
+      expect(() => new ToolError("output_too_large")).not.toThrow();
+      const { runId } = newRunningRun(repo);
+      const before = counts(handle.raw);
+      const presentedBefore = presentedCount(handle.raw);
+      const out = await broker.invoke(
+        runId,
+        "markdown.search",
+        { query: "big" },
+        CTX,
+      );
+      expect(out.result.actualOutcome).toBe("failed");
+      expect(out.result.errorCode).toBe("output_too_large");
+      // Handler preflight (unlike the broker output budget above): failed/none,
+      // never failed/discarded, with zero persistence.
+      expect(out.result.disposition).toBe("none");
+      expect(out.normalized).toBeNull();
+      // Preflight runs before any persistence: nothing materialized.
+      expect(counts(handle.raw)).toEqual(before);
+      expect(presentedCount(handle.raw)).toBe(presentedBefore);
+      // No raw graph content leaks into the failed result.
+      expect(JSON.stringify(out.result)).not.toContain("vault/big.md");
+    } finally {
+      handle.raw.close();
+    }
+  });
+});
+
 describe("no raw leakage and strict contracts", () => {
   it("never exposes absolute paths or raw errors", async () => {
     const { handle, repo, broker } = await setupStack({
