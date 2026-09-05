@@ -536,6 +536,202 @@ describe("presentObservations: materialization and reuse", () => {
     }
   });
 
+  it("normal preserves the session's latest matching rN despite another session's identical refresh", async () => {
+    const { handle, repo, manager, db } = await openStack();
+    try {
+      const connector = manager.ensureMarkdownConnectorInstance("vault", 1, {
+        now: T0,
+      });
+      const a = runningFixture(repo, T0);
+      const firstA = manager.presentObservations(
+        a.sessionId,
+        a.runId,
+        [obs(connector.id, "notes/a.md", "shared")],
+        { freshness: "normal", now: T0 + 5 },
+      );
+      if (!firstA.applied) {
+        throw new Error("expected first presentation to apply");
+      }
+      // Another session explicitly refreshes identical content: a new global
+      // snapshot + new rN in that session.
+      const b = runningFixture(repo, T0 + 10);
+      const refreshB = manager.presentObservations(
+        b.sessionId,
+        b.runId,
+        [obs(connector.id, "notes/a.md", "shared")],
+        { freshness: "refresh", now: T0 + 15 },
+      );
+      if (!refreshB.applied) {
+        throw new Error("expected refresh to apply");
+      }
+      expect(refreshB.references[0]?.snapshotId).not.toBe(
+        firstA.references[0]?.snapshotId,
+      );
+      expect(refreshB.references[0]?.ordinal).toBe(1);
+      // Session A observes the identical fact again: it must keep its own
+      // r1 (exact S1/r1_A), not adopt the other session's refresh snapshot.
+      const before = counts(db);
+      const secondA = manager.presentObservations(
+        a.sessionId,
+        a.runId,
+        [obs(connector.id, "notes/a.md", "shared")],
+        { freshness: "normal", now: T0 + 16 },
+      );
+      if (!secondA.applied) {
+        throw new Error("expected second presentation to apply");
+      }
+      expect(secondA.references[0]?.snapshotId).toBe(
+        firstA.references[0]?.snapshotId,
+      );
+      expect(secondA.references[0]?.referenceId).toBe(
+        firstA.references[0]?.referenceId,
+      );
+      expect(secondA.references[0]?.ordinal).toBe(1);
+      const after = counts(db);
+      expect(after.snapshots).toBe(before.snapshots);
+      expect(after.references).toBe(before.references);
+      // Re-presentation still records a new set + new events.
+      expect(after.sets).toBe(before.sets + 1);
+      expect(after.events).toBe(before.events + 1);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("same-session refresh followed by normal reuses the newest refresh rN; changed content still creates", async () => {
+    const { handle, repo, manager, db } = await openStack();
+    try {
+      const connector = manager.ensureMarkdownConnectorInstance("vault", 1, {
+        now: T0,
+      });
+      const { sessionId, runId } = runningFixture(repo);
+      const first = manager.presentObservations(
+        sessionId,
+        runId,
+        [obs(connector.id, "notes/a.md", "v1")],
+        { freshness: "normal", now: T0 + 5 },
+      );
+      if (!first.applied) {
+        throw new Error("expected first presentation to apply");
+      }
+      const refreshed = manager.presentObservations(
+        sessionId,
+        runId,
+        [obs(connector.id, "notes/a.md", "v1")],
+        { freshness: "refresh", now: T0 + 6 },
+      );
+      if (!refreshed.applied) {
+        throw new Error("expected refresh to apply");
+      }
+      expect(refreshed.references[0]?.snapshotId).not.toBe(
+        first.references[0]?.snapshotId,
+      );
+      expect(refreshed.references[0]?.ordinal).toBe(2);
+      // Normal after the refresh reuses the newest same-session refresh rN.
+      const before = counts(db);
+      const reused = manager.presentObservations(
+        sessionId,
+        runId,
+        [obs(connector.id, "notes/a.md", "v1")],
+        { freshness: "normal", now: T0 + 7 },
+      );
+      if (!reused.applied) {
+        throw new Error("expected reuse presentation to apply");
+      }
+      expect(reused.references[0]?.snapshotId).toBe(
+        refreshed.references[0]?.snapshotId,
+      );
+      expect(reused.references[0]?.referenceId).toBe(
+        refreshed.references[0]?.referenceId,
+      );
+      expect(reused.references[0]?.ordinal).toBe(2);
+      expect(counts(db).snapshots).toBe(before.snapshots);
+      expect(counts(db).references).toBe(before.references);
+      // Changed content still materializes a new snapshot + new rN.
+      const changed = manager.presentObservations(
+        sessionId,
+        runId,
+        [obs(connector.id, "notes/a.md", "v2")],
+        { freshness: "normal", now: T0 + 8 },
+      );
+      if (!changed.applied) {
+        throw new Error("expected changed presentation to apply");
+      }
+      expect(changed.references[0]?.snapshotId).not.toBe(
+        refreshed.references[0]?.snapshotId,
+      );
+      expect(changed.references[0]?.ordinal).toBe(3);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("normal session reuse matches source_revision NULL-safe exact", async () => {
+    const { handle, repo, manager, db } = await openStack();
+    try {
+      const connector = manager.ensureMarkdownConnectorInstance("vault", 1, {
+        now: T0,
+      });
+      const a = runningFixture(repo, T0);
+      const firstA = manager.presentObservations(
+        a.sessionId,
+        a.runId,
+        [obs(connector.id, "notes/a.md", "shared", { sourceRevision: null })],
+        { freshness: "normal", now: T0 + 5 },
+      );
+      if (!firstA.applied) {
+        throw new Error("expected first presentation to apply");
+      }
+      // NULL revision never equals a non-NULL signal: new snapshot + new rN.
+      const signalled = manager.presentObservations(
+        a.sessionId,
+        a.runId,
+        [obs(connector.id, "notes/a.md", "shared")],
+        { freshness: "normal", now: T0 + 6 },
+      );
+      if (!signalled.applied) {
+        throw new Error("expected signalled presentation to apply");
+      }
+      expect(signalled.references[0]?.snapshotId).not.toBe(
+        firstA.references[0]?.snapshotId,
+      );
+      expect(signalled.references[0]?.ordinal).toBe(2);
+      // Another session's identical NULL refresh must not steal the NULL rN.
+      const b = runningFixture(repo, T0 + 10);
+      const refreshB = manager.presentObservations(
+        b.sessionId,
+        b.runId,
+        [obs(connector.id, "notes/a.md", "shared", { sourceRevision: null })],
+        { freshness: "refresh", now: T0 + 15 },
+      );
+      if (!refreshB.applied) {
+        throw new Error("expected refresh to apply");
+      }
+      const before = counts(db);
+      const secondA = manager.presentObservations(
+        a.sessionId,
+        a.runId,
+        [obs(connector.id, "notes/a.md", "shared", { sourceRevision: null })],
+        { freshness: "normal", now: T0 + 16 },
+      );
+      if (!secondA.applied) {
+        throw new Error("expected second presentation to apply");
+      }
+      expect(secondA.references[0]?.snapshotId).toBe(
+        firstA.references[0]?.snapshotId,
+      );
+      expect(secondA.references[0]?.referenceId).toBe(
+        firstA.references[0]?.referenceId,
+      );
+      expect(secondA.references[0]?.ordinal).toBe(1);
+      const after = counts(db);
+      expect(after.snapshots).toBe(before.snapshots);
+      expect(after.references).toBe(before.references);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
   it("writes nothing for zero-hit presentations", async () => {
     const { handle, repo, manager, db } = await openStack();
     try {

@@ -20,6 +20,11 @@
 //   against the latest snapshot (`NULL` equals only `NULL`). A changed
 //   revision always materializes a new Snapshot even when the content hash
 //   is identical.
+// - Normal selection first reuses this session's highest-revision snapshot
+//   for the resource whose `source_revision` (NULL-safe exact) and
+//   `content_hash` equal the observation; only with no session match does
+//   the global-latest match/reuse apply. Explicit refresh always creates a
+//   new Snapshot + new rN.
 // - Snippets are deterministic 512-code-point prefixes of the normalized
 //   text (empty text falls back to `title ?? canonicalKey`). The manager has
 //   no search query, so query-relative excerpts stay a connector concern.
@@ -647,7 +652,28 @@ export function createReferenceManager(db: Database.Database) {
 
         let snapshotId: string;
         let snapshotIsNew = false;
-        if (
+        // Normal reuse prefers THIS session's highest-revision matching
+        // snapshot (same resource, NULL-safe source_revision equality plus
+        // identical content hash), so another session's identical refresh
+        // snapshot never steals this session's latest matching rN. Only when
+        // this session references no matching snapshot does the global-latest
+        // match/reuse behavior below apply.
+        let sessionMatch: { id: string } | undefined;
+        if (options.freshness === "normal") {
+          sessionMatch = db
+            .prepare(
+              "SELECT s.id AS id FROM resource_snapshots s JOIN session_references sr ON sr.snapshot_id = s.id WHERE sr.session_id = ? AND s.resource_id = ? AND s.source_revision IS ? AND s.content_hash = ? ORDER BY s.revision DESC LIMIT 1",
+            )
+            .get(session, resource.id, obs.sourceRevision, contentHash) as
+            | { id: string }
+            | undefined;
+        }
+        if (options.freshness === "normal" && sessionMatch !== undefined) {
+          // Session reuse: this session already references a matching
+          // snapshot, so reuse it (no new row, graph untouched). The
+          // session_reference lookup below then returns the existing rN.
+          snapshotId = sessionMatch.id;
+        } else if (
           options.freshness === "normal" &&
           latest !== undefined &&
           (latest.source_revision ?? null) === (obs.sourceRevision ?? null) &&
