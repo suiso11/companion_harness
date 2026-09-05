@@ -311,6 +311,38 @@ export async function safeReadMarkdownFile(
   if (!isWithinRealRoot(root.realPath, preReal)) {
     throw new MarkdownConnectorError("markdown_path_unsafe", key);
   }
+  // Canonical retarget guard (pre-read, before any byte is opened): the
+  // pre-open realpath must map back to exactly the requested relative
+  // segments. An internal alias (a.md retargeted to b.md via a file symlink,
+  // or a directory symlink alias) resolves inside the root yet yields a
+  // different canonical root-relative POSIX path; only the folded canonical
+  // key (b.md) may read, the stale key fails `markdown_read_changed` carrying
+  // only the safe key (never a path or raw OS error). Separator handling uses
+  // `path.relative`/`path.sep` (never a string prefix); case folds only on
+  // Windows; NFC forms compare equal; POSIX `:` segments stay allowed.
+  {
+    const relative = path.relative(root.realPath, preReal);
+    let matches = false;
+    if (
+      relative !== "" &&
+      !path.isAbsolute(relative) &&
+      relative !== ".." &&
+      !relative.startsWith(`..${path.sep}`)
+    ) {
+      const actualPosix = relative.split(path.sep).join("/");
+      const requestedPosix = segments.join("/");
+      const requestedNfc = requestedPosix.normalize("NFC");
+      const actualNfc = actualPosix.normalize("NFC");
+      if (process.platform === "win32") {
+        matches = requestedNfc.toLowerCase() === actualNfc.toLowerCase();
+      } else {
+        matches = requestedNfc === actualNfc;
+      }
+    }
+    if (!matches) {
+      throw new MarkdownConnectorError("markdown_read_changed", key);
+    }
+  }
   let preStat: Stats;
   try {
     preStat = await fs.stat(preReal);

@@ -679,4 +679,81 @@ describe("safe read", () => {
     }
     expect(hookCalls).toBe(0);
   });
+
+  it("rejects a pre-read canonical retarget to an internal file symlink", async (ctx: TestContext) => {
+    const dir = scratchVault("md-read-retarget-");
+    writeFileSync(join(dir, "a.md"), "# a original\n");
+    writeFileSync(join(dir, "b.md"), "# b secret body\n");
+    const root = onlyRoot(
+      await initializeRoots([{ path: dir, alias: "vault" }]),
+    );
+    const found = await discoverMarkdownFilesForRoot(root);
+    expect(found.map((entry) => entry.canonicalKey)).toEqual([
+      "vault/a.md",
+      "vault/b.md",
+    ]);
+    // Retarget a.md to b.md before the read (internal file symlink).
+    renameSync(join(dir, "a.md"), join(dir, "a.md.orig"));
+    if (
+      trySymlink(join(dir, "b.md"), join(dir, "a.md"), "file") ===
+      "privilege-denied"
+    ) {
+      ctx.skip();
+      return;
+    }
+    try {
+      await safeReadMarkdownFile(root, "vault/a.md");
+      expect.unreachable("expected markdown_read_changed");
+    } catch (error) {
+      expectConnectorError(error, "markdown_read_changed", dir);
+      expect((error as MarkdownConnectorError).canonicalKey).toBe("vault/a.md");
+      // No leak of the retargeted target bytes or absolute paths.
+      expect((error as Error).message).not.toContain("b secret body");
+      expect((error as Error).message).not.toContain(join(dir, "b.md"));
+    }
+    // The folded canonical key still reads the target directly.
+    const direct = await safeReadMarkdownFile(root, "vault/b.md");
+    expect(direct).toEqual({
+      status: "ok",
+      canonicalKey: "vault/b.md",
+      text: "# b secret body\n",
+    });
+  });
+
+  it("rejects a pre-read canonical retarget through an internal directory symlink", async (ctx: TestContext) => {
+    const dir = scratchVault("md-read-retdir-");
+    mkdirSync(join(dir, "realdir"), { recursive: true });
+    writeFileSync(join(dir, "realdir", "note.md"), "# real note\n");
+    const linkType = process.platform === "win32" ? "junction" : "dir";
+    if (
+      trySymlink(join(dir, "realdir"), join(dir, "linkdir"), linkType) ===
+      "privilege-denied"
+    ) {
+      ctx.skip();
+      return;
+    }
+    const root = onlyRoot(
+      await initializeRoots([{ path: dir, alias: "vault" }]),
+    );
+    try {
+      await safeReadMarkdownFile(root, "vault/linkdir/note.md");
+      expect.unreachable("expected markdown_read_changed");
+    } catch (error) {
+      expectConnectorError(error, "markdown_read_changed", dir);
+      expect((error as MarkdownConnectorError).canonicalKey).toBe(
+        "vault/linkdir/note.md",
+      );
+      expect((error as Error).message).not.toContain("real note");
+      expect((error as Error).message).not.toContain(
+        join(dir, "realdir", "note.md"),
+      );
+    }
+    // The folded canonical key succeeds.
+    const direct = await safeReadMarkdownFile(root, "vault/realdir/note.md");
+    expect(direct).toEqual({
+      status: "ok",
+      canonicalKey: "vault/realdir/note.md",
+      text: "# real note\n",
+    });
+  });
 });
