@@ -696,7 +696,9 @@ describe("presentObservations: materialization and reuse", () => {
         firstA.references[0]?.snapshotId,
       );
       expect(signalled.references[0]?.ordinal).toBe(2);
-      // Another session's identical NULL refresh must not steal the NULL rN.
+      // Another session's identical NULL refresh must not reuse the NULL rN
+      // when this session's latest differs: latest-only comparison creates a
+      // fresh snapshot even though a historical/global NULL match exists.
       const b = runningFixture(repo, T0 + 10);
       const refreshB = manager.presentObservations(
         b.sessionId,
@@ -717,16 +719,87 @@ describe("presentObservations: materialization and reuse", () => {
       if (!secondA.applied) {
         throw new Error("expected second presentation to apply");
       }
-      expect(secondA.references[0]?.snapshotId).toBe(
+      expect(secondA.references[0]?.snapshotId).not.toBe(
         firstA.references[0]?.snapshotId,
       );
-      expect(secondA.references[0]?.referenceId).toBe(
+      expect(secondA.references[0]?.snapshotId).not.toBe(
+        signalled.references[0]?.snapshotId,
+      );
+      expect(secondA.references[0]?.snapshotId).not.toBe(
+        refreshB.references[0]?.snapshotId,
+      );
+      expect(secondA.references[0]?.referenceId).not.toBe(
         firstA.references[0]?.referenceId,
       );
-      expect(secondA.references[0]?.ordinal).toBe(1);
+      expect(secondA.references[0]?.ordinal).toBe(3);
       const after = counts(db);
-      expect(after.snapshots).toBe(before.snapshots);
-      expect(after.references).toBe(before.references);
+      expect(after.snapshots).toBe(before.snapshots + 1);
+      expect(after.references).toBe(before.references + 1);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("normal creates a third snapshot when A->B->A returns to older content", async () => {
+    const { handle, repo, manager, db } = await openStack();
+    try {
+      const connector = manager.ensureMarkdownConnectorInstance("vault", 1, {
+        now: T0,
+      });
+      const { sessionId, runId } = runningFixture(repo);
+      const first = manager.presentObservations(
+        sessionId,
+        runId,
+        [obs(connector.id, "notes/a.md", "v1")],
+        { freshness: "normal", now: T0 + 5 },
+      );
+      if (!first.applied) {
+        throw new Error("expected first presentation to apply");
+      }
+      const second = manager.presentObservations(
+        sessionId,
+        runId,
+        [obs(connector.id, "notes/a.md", "v2")],
+        { freshness: "normal", now: T0 + 6 },
+      );
+      if (!second.applied) {
+        throw new Error("expected second presentation to apply");
+      }
+      expect(second.references[0]?.snapshotId).not.toBe(
+        first.references[0]?.snapshotId,
+      );
+      expect(second.references[0]?.ordinal).toBe(2);
+      // Returning to v1 matches the historical first snapshot, but the
+      // session latest (v2) differs, so a third snapshot + r3 is required.
+      const before = counts(db);
+      const third = manager.presentObservations(
+        sessionId,
+        runId,
+        [obs(connector.id, "notes/a.md", "v1")],
+        { freshness: "normal", now: T0 + 7 },
+      );
+      if (!third.applied) {
+        throw new Error("expected third presentation to apply");
+      }
+      expect(third.references[0]?.snapshotId).not.toBe(
+        first.references[0]?.snapshotId,
+      );
+      expect(third.references[0]?.snapshotId).not.toBe(
+        second.references[0]?.snapshotId,
+      );
+      expect(third.references[0]?.referenceId).not.toBe(
+        first.references[0]?.referenceId,
+      );
+      expect(third.references[0]?.ordinal).toBe(3);
+      const after = counts(db);
+      expect(after.snapshots).toBe(before.snapshots + 1);
+      expect(after.references).toBe(before.references + 1);
+      const revisions = db
+        .prepare(
+          "SELECT revision FROM resource_snapshots ORDER BY revision ASC",
+        )
+        .all() as Array<{ revision: number }>;
+      expect(revisions.map((r) => r.revision)).toEqual([1, 2, 3]);
     } finally {
       closeKernelDatabase(handle);
     }
