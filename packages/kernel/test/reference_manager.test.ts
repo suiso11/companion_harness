@@ -1859,4 +1859,172 @@ describe("expanded link graph budget preflight (256KiB aggregate, no count bound
       closeKernelDatabase(handle);
     }
   });
+
+  it("exits early on a huge candidate list without iterating all candidates and writes nothing", async () => {
+    const probe = createExpandedLinkGraphBudget();
+    let fit = 0;
+    while (
+      probe.tryAddEntry({
+        kind: "standard",
+        status: "unresolved",
+        candidates: [],
+        ordinal: fit + 1,
+      })
+    ) {
+      fit += 1;
+    }
+    // Leave room for roughly one more small entry so the final ambiguous
+    // entry overflows after a handful of candidates (not near the end).
+    const prefixCount = fit - 1;
+    const { handle, repo, manager } = await openStack();
+    try {
+      const connector = manager.ensureMarkdownConnectorInstance("vault", 1, {
+        now: T0,
+      });
+      const { sessionId, runId } = runningFixture(repo);
+      const before = counts(handle.raw);
+      const TOTAL = 20_000;
+      let maxIndex = -1;
+      const backing = Array.from(
+        { length: TOTAL },
+        (_, i) => `v/d${i}/Note.md`,
+      );
+      const proxied = new Proxy(backing, {
+        get(target, prop, receiver) {
+          if (typeof prop === "string" && /^\d+$/.test(prop)) {
+            const idx = Number(prop);
+            if (idx > maxIndex) {
+              maxIndex = idx;
+            }
+          }
+          return Reflect.get(target, prop, receiver);
+        },
+      });
+      const links = [
+        ...unresolved(prefixCount),
+        {
+          kind: "standard" as const,
+          status: "ambiguous" as const,
+          candidates: proxied as unknown as string[],
+        },
+      ];
+      expect(() =>
+        manager.presentObservations(
+          sessionId,
+          runId,
+          [obs(connector.id, "notes/huge.md", "body", { links })],
+          { freshness: "normal", now: T0 + 5 },
+        ),
+      ).toThrow(LinkGraphTooLargeError);
+      // Early exit: overflow raised long before the tail of the list.
+      expect(maxIndex).toBeGreaterThanOrEqual(0);
+      expect(maxIndex).toBeLessThan(TOTAL - 1);
+      expect(maxIndex).toBeLessThan(1000);
+      expect(counts(handle.raw)).toEqual(before);
+      expect(
+        (
+          handle.raw
+            .prepare("SELECT COUNT(*) AS n FROM snapshot_links")
+            .get() as { n: number }
+        ).n,
+      ).toBe(0);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("accepts an exactly-capped candidate tail without double charging", async () => {
+    // Bulk unresolved head plus one resolved tail candidate tuned to land
+    // the total at exactly 262144 (all keys valid, <=512 chars).
+    const head: Array<{
+      kind: "standard";
+      status: "unresolved";
+      candidates: [];
+    }> = [];
+    const probe = createExpandedLinkGraphBudget();
+    let ordinal = 1;
+    while (true) {
+      const tailOrdinal = ordinal + 1;
+      const tailProbe = {
+        kind: "standard" as const,
+        status: "resolved" as const,
+        candidates: [""] as readonly string[],
+        ordinal: tailOrdinal,
+      };
+      const tailOverhead = measureExpandedLinkGraphBytes([tailProbe]) - 2 - 2;
+      const remaining = MAX_EXPANDED_LINK_GRAPH_BYTES - probe.bytes - 1;
+      const fill = remaining - tailOverhead - 2;
+      if (fill >= 6 && fill <= 512) {
+        break;
+      }
+      const entry = {
+        kind: "standard" as const,
+        status: "unresolved" as const,
+        candidates: [] as const,
+        ordinal,
+      };
+      expect(probe.tryAddEntry(entry)).toBe(true);
+      head.push({ kind: "standard", status: "unresolved", candidates: [] });
+      ordinal += 1;
+      expect(ordinal).toBeLessThan(10_000);
+    }
+    const tailOrdinal = ordinal + 1;
+    const tailProbe = {
+      kind: "standard" as const,
+      status: "resolved" as const,
+      candidates: [""] as readonly string[],
+      ordinal: tailOrdinal,
+    };
+    const tailOverhead = measureExpandedLinkGraphBytes([tailProbe]) - 2 - 2;
+    const remaining = MAX_EXPANDED_LINK_GRAPH_BYTES - probe.bytes - 1;
+    const fill = remaining - tailOverhead - 2;
+    expect(fill).toBeGreaterThanOrEqual(1);
+    expect(fill).toBeLessThanOrEqual(512);
+    const tuned = `v/${"a".repeat(Math.max(0, fill - 5))}.md`.slice(0, fill);
+    expect(tuned.length).toBe(fill);
+    const tail = {
+      kind: "standard" as const,
+      status: "resolved" as const,
+      candidates: [tuned] as readonly string[],
+      ordinal: tailOrdinal,
+    };
+    expect(probe.tryAddEntry(tail)).toBe(true);
+    expect(probe.bytes).toBe(MAX_EXPANDED_LINK_GRAPH_BYTES);
+    const entries = [...head, tail];
+    expect(measureExpandedLinkGraphBytes(entries)).toBe(
+      MAX_EXPANDED_LINK_GRAPH_BYTES,
+    );
+    expect(probe.count).toBe(entries.length);
+    const { handle, repo, manager } = await openStack();
+    try {
+      const connector = manager.ensureMarkdownConnectorInstance("vault", 1, {
+        now: T0,
+      });
+      const { sessionId, runId } = runningFixture(repo);
+      const result = manager.presentObservations(
+        sessionId,
+        runId,
+        [
+          obs(connector.id, "notes/exact-tail.md", "body", {
+            links: entries.map((entry) => ({
+              kind: entry.kind,
+              status: entry.status,
+              candidates: [...entry.candidates],
+            })),
+          }),
+        ],
+        { freshness: "normal", now: T0 + 5 },
+      );
+      expect(result.applied).toBe(true);
+      expect(
+        (
+          handle.raw
+            .prepare("SELECT COUNT(*) AS n FROM snapshot_links")
+            .get() as { n: number }
+        ).n,
+      ).toBe(entries.length);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
 });

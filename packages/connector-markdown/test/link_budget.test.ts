@@ -29,10 +29,14 @@ function groundTruthBytes(value: string): number {
 }
 
 describe("link graph budget mirror vectors", () => {
-  it("fixes the agreed cap at exactly 256KiB with an 8-byte candidate floor", () => {
+  it("fixes the agreed cap at exactly 256KiB with a 7-byte candidate floor", () => {
     expect(LINK_GRAPH_BUDGET_BYTES).toBe(CAP);
-    expect(MIN_CANONICAL_CANDIDATE_JSON_BYTES).toBe(8);
-    // Shortest canonical key `a/b.md` (6 chars) + 2 JSON quotes.
+    expect(MIN_CANONICAL_CANDIDATE_JSON_BYTES).toBe(7);
+    // Shortest discovered key `v/.md` (5 chars: 1-char alias + `/` + `.md`
+    // with an empty stem) + 2 JSON quotes = 7 bytes.
+    expect(JSON.stringify("v/.md")).toBe('"v/.md"');
+    expect(groundTruthBytes(JSON.stringify("v/.md"))).toBe(7);
+    // A typical short key `a/b.md` (6 chars) + 2 quotes = 8 bytes.
     expect(JSON.stringify("a/b.md")).toBe('"a/b.md"');
     expect(groundTruthBytes(JSON.stringify("a/b.md"))).toBe(8);
   });

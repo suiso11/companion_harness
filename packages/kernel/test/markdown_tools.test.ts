@@ -1120,6 +1120,25 @@ describe("expanded link graph budget mapping (output_too_large, zero persistence
       const { runId } = newRunningRun(repo);
       const before = counts(handle.raw);
       const presentedBefore = presentedCount(handle.raw);
+      const linksBefore = (
+        handle.raw
+          .prepare("SELECT COUNT(*) AS n FROM snapshot_links")
+          .get() as { n: number }
+      ).n;
+      const requestedBefore = (
+        handle.raw
+          .prepare(
+            "SELECT COUNT(*) AS n FROM run_events WHERE type = 'tool.requested'",
+          )
+          .get() as { n: number }
+      ).n;
+      const completedBefore = (
+        handle.raw
+          .prepare(
+            "SELECT COUNT(*) AS n FROM run_events WHERE type = 'tool.completed'",
+          )
+          .get() as { n: number }
+      ).n;
       const out = await broker.invoke(
         runId,
         "markdown.search",
@@ -1129,12 +1148,45 @@ describe("expanded link graph budget mapping (output_too_large, zero persistence
       expect(out.result.actualOutcome).toBe("failed");
       expect(out.result.errorCode).toBe("output_too_large");
       // Handler preflight (unlike the broker output budget above): failed/none,
-      // never failed/discarded, with zero persistence.
+      // never failed/discarded, with zero domain persistence.
       expect(out.result.disposition).toBe("none");
       expect(out.normalized).toBeNull();
-      // Preflight runs before any persistence: nothing materialized.
-      expect(counts(handle.raw)).toEqual(before);
+      // Preflight runs before any domain persistence: no
+      // resources/snapshots/references/sets, snapshot_links, or
+      // reference.presented rows materialize. The two normal broker
+      // tool audits (tool.requested + tool.completed) are still expected.
+      const after = counts(handle.raw);
+      expect(after.resources).toBe(before.resources);
+      expect(after.snapshots).toBe(before.snapshots);
+      expect(after.references).toBe(before.references);
+      expect(after.sets).toBe(before.sets);
+      expect(after.events).toBe(before.events + 2);
       expect(presentedCount(handle.raw)).toBe(presentedBefore);
+      expect(
+        (
+          handle.raw
+            .prepare("SELECT COUNT(*) AS n FROM snapshot_links")
+            .get() as { n: number }
+        ).n,
+      ).toBe(linksBefore);
+      expect(
+        (
+          handle.raw
+            .prepare(
+              "SELECT COUNT(*) AS n FROM run_events WHERE type = 'tool.requested'",
+            )
+            .get() as { n: number }
+        ).n,
+      ).toBe(requestedBefore + 1);
+      expect(
+        (
+          handle.raw
+            .prepare(
+              "SELECT COUNT(*) AS n FROM run_events WHERE type = 'tool.completed'",
+            )
+            .get() as { n: number }
+        ).n,
+      ).toBe(completedBefore + 1);
       // No raw graph content leaks into the failed result.
       expect(JSON.stringify(out.result)).not.toContain("vault/big.md");
     } finally {

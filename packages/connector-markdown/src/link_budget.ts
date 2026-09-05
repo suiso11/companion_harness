@@ -31,13 +31,14 @@
 export const LINK_GRAPH_BUDGET_BYTES = 262_144 as const;
 
 /**
- * Minimum JSON bytes of one canonical candidate (`"a/b.md"`: the shortest
- * canonical key is 6 chars — 1-char alias + `/` + `x.md` — plus 2 quotes).
- * Canonical keys are never shorter, and JSON escaping only grows output,
- * so `8 * count` is always a safe lower bound for pre-checks (throwing on
- * the lower bound alone can never falsely reject).
+ * Minimum JSON bytes of one canonical candidate (`"v/.md"`: the shortest
+ * discovered key is 5 chars — 1-char alias + `/` + `.md` with an empty
+ * stem — plus 2 quotes = 7 bytes; e.g. `a/b.md` is 8 bytes).
+ * JSON escaping only grows output, so `7 * count` is always a safe lower
+ * bound for pre-checks (throwing on the lower bound alone can never
+ * falsely reject).
  */
-export const MIN_CANONICAL_CANDIDATE_JSON_BYTES = 8 as const;
+export const MIN_CANONICAL_CANDIDATE_JSON_BYTES = 7 as const;
 
 export type LinkGraphKind = "standard" | "wiki";
 export type LinkGraphStatus = "resolved" | "ambiguous" | "unresolved";

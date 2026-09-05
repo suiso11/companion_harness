@@ -44,6 +44,7 @@ import {
   CanonicalKeySchema,
   countCodePoints,
   createExpandedLinkGraphBudget,
+  MAX_EXPANDED_LINK_GRAPH_BYTES,
   MAX_SNIPPET_CODE_POINTS,
   parseRunEventPayload,
   ReferencePresentedPayloadSchema,
@@ -51,6 +52,7 @@ import {
   RUN_EVENT_SCHEMA_VERSION,
   SnapshotBodySchema,
   SourceRevisionSchema,
+  serializeExpandedLinkGraphEntry,
   utf8ByteLength,
 } from "@companion/contracts";
 import type Database from "better-sqlite3";
@@ -364,9 +366,15 @@ function normalizeObservationLinks(
  * Empty/undefined links are treated as empty; there is no link-count bound.
  *
  * Each candidate key is type/grammar validated (string + CanonicalKeySchema,
- * <=512) one at a time before the incremental cap check, and the shared
- * contracts `createExpandedLinkGraphBudget` measures one bounded key at a
- * time with early exit, so no huge single serialization is ever built.
+ * <=512) one at a time before the incremental cap check: the remaining
+ * byte budget for the entry (exact empty-candidates overhead plus
+ * `JSON.stringify` UTF-8 bytes per valid key, inter-candidate commas, and
+ * the outer entry comma) is enforced per candidate before append, so a
+ * huge candidate list exits early without pushing a full oversized parsed
+ * list. The shared contracts `createExpandedLinkGraphBudget` then confirms
+ * the same entry (same count, no double charging), and it also measures
+ * one bounded key at a time with early exit, so no huge single
+ * serialization is ever built.
  * Overflow throws `LinkGraphTooLargeError` (fixed code `output_too_large`).
  * Structural link errors throw `RepositoryValidationError` (unchanged).
  */
@@ -410,22 +418,53 @@ function assertLinkGraphBudget(
           `link ${index} candidates must be an array`,
         );
       }
+      const rawCandidates = candidates as unknown[];
+      const ordinal = index + 1;
+      // Exact remaining bytes for this entry (outer entry comma included).
+      const remaining =
+        MAX_EXPANDED_LINK_GRAPH_BYTES -
+        budget.bytes -
+        (budget.count > 0 ? 1 : 0);
+      // Exact empty-candidates overhead for this kind/status/ordinal
+      // (bounded: framing plus small enums/ordinal, safe to serialize).
+      const emptyOverhead = utf8ByteLength(
+        serializeExpandedLinkGraphEntry({
+          kind,
+          status,
+          candidates: [],
+          ordinal,
+        }),
+      );
+      if (emptyOverhead > remaining) {
+        throw new LinkGraphTooLargeError();
+      }
+      let projected = emptyOverhead;
       const parsed: string[] = [];
-      for (let j = 0; j < candidates.length; j += 1) {
-        const candidate = (candidates as unknown[])[j];
+      for (let j = 0; j < rawCandidates.length; j += 1) {
+        const candidate = rawCandidates[j];
         if (typeof candidate !== "string") {
           throw new RepositoryValidationError(
             `link ${index} candidate ${j} invalid: expected string`,
           );
         }
+        let valid: string;
         try {
-          parsed.push(CanonicalKeySchema.parse(candidate));
+          valid = CanonicalKeySchema.parse(candidate);
         } catch (error) {
           throw new RepositoryValidationError(
             `link ${index} candidate ${j} invalid: ${error instanceof Error ? error.message : String(error)}`,
             { cause: error },
           );
         }
+        // Bounded per-key serialization (valid keys are <=512 UTF-16
+        // units, so escaping stays small); enforced before append.
+        const jsonBytes = utf8ByteLength(JSON.stringify(valid) as string);
+        const separator = parsed.length > 0 ? 1 : 0;
+        if (projected + separator + jsonBytes > remaining) {
+          throw new LinkGraphTooLargeError();
+        }
+        projected += separator + jsonBytes;
+        parsed.push(valid);
       }
       if (status === "resolved" && parsed.length !== 1) {
         throw new RepositoryValidationError(
@@ -442,11 +481,13 @@ function assertLinkGraphBudget(
           `link ${index} unresolved requires zero candidates`,
         );
       }
+      // Final shared-budget confirmation for the same entry (same count,
+      // no double charging; framing never rewritten or approximated).
       const accepted = budget.tryAddEntry({
         kind,
         status,
         candidates: parsed,
-        ordinal: index + 1,
+        ordinal,
       });
       if (!accepted) {
         throw new LinkGraphTooLargeError();
