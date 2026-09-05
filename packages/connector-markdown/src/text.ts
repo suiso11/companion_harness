@@ -27,10 +27,7 @@
  * context, shifted to fit).
  */
 
-import {
-  foldCharCaseFold,
-  UNICODE_DATA_VERSION,
-} from "./unicode_case_fold.js";
+import { foldCharCaseFold, UNICODE_DATA_VERSION } from "./unicode_case_fold.js";
 
 /** Unicode data version backing the case-fold override map. */
 export const TEXT_FOLD_UNICODE_VERSION = UNICODE_DATA_VERSION;
