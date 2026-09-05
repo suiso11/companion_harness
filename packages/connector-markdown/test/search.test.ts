@@ -329,6 +329,39 @@ describe("markdown connector search core", () => {
     expect(hit.text).toContain(dotted);
   });
 
+  it("matches Unicode default folds (ß/ss, final sigma, ligatures)", async () => {
+    const dir = scratchVault("md-conn-casefold-");
+    writeFileSync(
+      join(dir, "fold.md"),
+      "# Fold\nstrasse body with ﬁle and sigma σ tail\n",
+    );
+    const connector = await createMarkdownConnector([{ path: dir }]);
+    // Sharp s query matches the ss body and vice versa.
+    const sharp = await connector.search({ query: "Straße" });
+    expect(sharp.hits.map((hit) => hit.canonicalKey)).toEqual([
+      "vault-1/fold.md",
+    ]);
+    const plain = await connector.search({ query: "STRASSE" });
+    expect(plain.hits.map((hit) => hit.canonicalKey)).toEqual([
+      "vault-1/fold.md",
+    ]);
+    // Ligature query matches the decomposed body form.
+    const ligature = await connector.search({ query: "ﬁle" });
+    expect(ligature.hits.map((hit) => hit.canonicalKey)).toEqual([
+      "vault-1/fold.md",
+    ]);
+    // Final sigma query matches the medial sigma body.
+    const sigma = await connector.search({ query: "ς" });
+    expect(sigma.hits.map((hit) => hit.canonicalKey)).toEqual([
+      "vault-1/fold.md",
+    ]);
+    // Dotted capital İ still expands; dotless ı stays distinct from i.
+    const dotted = await connector.search({ query: "İ" });
+    expect(dotted.hits).toEqual([]);
+    const dotless = await connector.search({ query: "ı" });
+    expect(dotless.hits).toEqual([]);
+  });
+
   it("searches and reads a POSIX colon filename (notes:2026.md)", async () => {
     if (process.platform === "win32") {
       // Windows rejects colon rest segments as invalid_input (no content

@@ -5,13 +5,17 @@
  * NORMALIZATION: everything is NFC (`String.normalize("NFC")`) before
  * comparison or snippet windowing.
  *
- * CASE FOLDING (documented approximation): Unicode default case-insensitive
- * matching approximated by `String.toLowerCase` applied per Unicode code
- * point (locale-independent by construction; never `toLocaleLowerCase`,
- * `toLocaleUpperCase`, or `localeCompare`). Per-code-point application keeps
- * astral characters intact via `Array.from` iteration, and one-to-many
- * expansions (e.g. U+0130) are flattened into individual lowered code
- * points so queries fold exactly like haystacks.
+ * CASE FOLDING: Unicode default case-insensitive matching via the
+ * generated static map in `unicode_case_fold.ts` (every code point whose
+ * default case fold differs from its lowercase mapping, generated from
+ * Python `str.casefold() !== str.lower()` with the Unicode data version
+ * recorded there), with a locale-independent `String.toLowerCase` fallback
+ * for unlisted code points (never `toLocaleLowerCase`,
+ * `toLocaleUpperCase`, or `localeCompare`). Folding applies per Unicode
+ * code point (astral-safe via `Array.from` iteration), and one-to-many
+ * expansions (e.g. U+00DF `ß` -> `ss`, U+0130 `İ` -> `i` + combining dot)
+ * are flattened into individual code points so queries fold exactly like
+ * haystacks.
  *
  * MATCHING: whole-query literal equality/substring only (sequence search,
  * never regex interpretation of the query). `findFirstHit` maps the folded
@@ -22,6 +26,14 @@
  * body hit when one exists (`SNIPPET_CONTEXT_BEFORE` code points of leading
  * context, shifted to fit).
  */
+
+import {
+  foldCharCaseFold,
+  UNICODE_DATA_VERSION,
+} from "./unicode_case_fold.js";
+
+/** Unicode data version backing the case-fold override map. */
+export const TEXT_FOLD_UNICODE_VERSION = UNICODE_DATA_VERSION;
 
 /** Maximum snippet length in Unicode code points. */
 export const SNIPPET_MAX_CODE_POINTS = 512;
@@ -34,14 +46,16 @@ export function normalizeNFC(value: string): string {
   return value.normalize("NFC");
 }
 
-/** Fold already-NFC text per code point with locale-independent lowercase.
- * Each source code point is lowered with `toLowerCase` then flattened into
- * individual Unicode code points, so one-to-many expansions (e.g. U+0130
- * `İ` -> `i` + combining dot) expand exactly like the haystack mapping. */
+/** Fold already-NFC text per code point with Unicode default case folding.
+ * Each source code point folds through the generated override map with a
+ * locale-independent lowercase fallback, then flattens into individual
+ * Unicode code points, so one-to-many expansions (e.g. U+00DF `ß` -> `ss`,
+ * U+0130 `İ` -> `i` + combining dot) expand exactly like the haystack
+ * mapping. */
 function foldCodePoints(normalized: string): string[] {
   const out: string[] = [];
   for (const ch of Array.from(normalized)) {
-    for (const cp of Array.from(ch.toLowerCase())) {
+    for (const cp of Array.from(foldCharCaseFold(ch))) {
       out.push(cp);
     }
   }
@@ -49,7 +63,7 @@ function foldCodePoints(normalized: string): string[] {
 }
 
 /**
- * NFC + per-code-point lowercase folding for a query.
+ * NFC + per-code-point default case folding for a query.
  * Pure structural fold; length validation lives in later slices.
  */
 export function foldQuery(query: string): string {
@@ -82,7 +96,8 @@ export interface TextHit {
 
 /**
  * Folded haystack plus per-folded-code-point map back to source indices.
- * Handles 1-to-N lowercase expansions (e.g. U+0130) deterministically.
+ * Handles 1-to-N case-fold expansions (e.g. U+00DF, U+0130)
+ * deterministically.
  */
 function foldWithMapping(normalized: string): {
   foldedCps: string[];
@@ -92,8 +107,8 @@ function foldWithMapping(normalized: string): {
   const map: number[] = [];
   const sourceCps = Array.from(normalized);
   for (let i = 0; i < sourceCps.length; i += 1) {
-    const lowered = (sourceCps[i] as string).toLowerCase();
-    for (const cp of Array.from(lowered)) {
+    const folded = foldCharCaseFold(sourceCps[i] as string);
+    for (const cp of Array.from(folded)) {
       foldedCps.push(cp);
       map.push(i);
     }

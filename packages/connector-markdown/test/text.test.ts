@@ -10,7 +10,13 @@ import {
   SNIPPET_CONTEXT_BEFORE,
   SNIPPET_MAX_CODE_POINTS,
   sliceCodePoints,
+  TEXT_FOLD_UNICODE_VERSION,
 } from "../src/text.js";
+import {
+  CASE_FOLD_OVERRIDE_COUNT,
+  getCaseFoldOverride,
+  UNICODE_DATA_VERSION,
+} from "../src/unicode_case_fold.js";
 
 describe("text primitives", () => {
   it("normalizes to NFC", () => {
@@ -105,13 +111,80 @@ describe("text primitives", () => {
     const { readFile } = await import("node:fs/promises");
     const { fileURLToPath } = await import("node:url");
     const here = fileURLToPath(new URL("./", import.meta.url));
-    const sources = ["text.ts", "markdown.ts", "roots.ts", "errors.ts"].map(
-      (name) => readFile(`${here}../src/${name}`, "utf8"),
-    );
+    const sources = [
+      "text.ts",
+      "markdown.ts",
+      "roots.ts",
+      "errors.ts",
+      "unicode_case_fold.ts",
+    ].map((name) => readFile(`${here}../src/${name}`, "utf8"));
     const contents = (await Promise.all(sources)).join("\n");
     // Doc comments may name the banned APIs; enforce absence of call sites.
     expect(contents).not.toContain("toLocaleLowerCase(");
     expect(contents).not.toContain("toLocaleUpperCase(");
     expect(contents).not.toContain("localeCompare(");
+  });
+
+  it("records the generated Unicode folding data version", () => {
+    expect(UNICODE_DATA_VERSION).toBe("15.0.0");
+    expect(TEXT_FOLD_UNICODE_VERSION).toBe(UNICODE_DATA_VERSION);
+    // Full generated map: every code point whose casefold differs from
+    // its lowercase mapping (CPython str.casefold() !== str.lower()).
+    expect(CASE_FOLD_OVERRIDE_COUNT).toBe(297);
+    expect(getCaseFoldOverride(0xdf)).toBe("ss");
+    expect(getCaseFoldOverride(0x1e9e)).toBe("ss");
+    expect(getCaseFoldOverride(0x3c2)).toBe("σ");
+    expect(getCaseFoldOverride(0xfb01)).toBe("fi");
+    // Plain letters have no override: the lowercase fallback applies.
+    expect(getCaseFoldOverride(0x69)).toBeUndefined();
+    expect(getCaseFoldOverride(0x41)).toBeUndefined();
+  });
+
+  it("folds sharp s (ß/ẞ) to ss", () => {
+    expect(foldQuery("ß")).toBe("ss");
+    expect(foldQuery("ẞ")).toBe("ss");
+    expect(equalsFolded("ß", "ss")).toBe(true);
+    expect(equalsFolded("ß", "ẞ")).toBe(true);
+    expect(equalsFolded("STRASSE", "Straße")).toBe(true);
+    expect(containsFolded("strasse", "ß")).toBe(true);
+    expect(findFirstHit("strasse", "ß")).toEqual({
+      codePointIndex: 4,
+      codePointLength: 2,
+    });
+  });
+
+  it("merges final sigma with medial sigma", () => {
+    expect(foldQuery("ς")).toBe("σ");
+    expect(equalsFolded("ς", "σ")).toBe(true);
+    expect(equalsFolded("ς", "Σ")).toBe(true);
+    expect(containsFolded("Ὀδυσσεύς", "ὀδυσσεύσ")).toBe(true);
+  });
+
+  it("expands compatibility ligatures", () => {
+    expect(foldQuery("ﬁ")).toBe("fi");
+    expect(foldQuery("ﬂ")).toBe("fl");
+    expect(foldQuery("ﬀ")).toBe("ff");
+    expect(equalsFolded("ﬁle", "file")).toBe(true);
+    expect(containsFolded("ﬁle", "file")).toBe(true);
+  });
+
+  it("keeps dotted and dotless i distinct", () => {
+    // U+0130 still expands through the lowercase fallback.
+    expect(Array.from(foldQuery("İ"))).toEqual(["i", "̇"]);
+    // Dotless ı (U+0131) is untouched by folding.
+    expect(foldQuery("ı")).toBe("ı");
+    expect(equalsFolded("I", "i")).toBe(true);
+    expect(equalsFolded("I", "ı")).toBe(false);
+    expect(equalsFolded("İ", "ı")).toBe(false);
+    expect(containsFolded("Kılıç", "kılıç")).toBe(true);
+    expect(containsFolded("Kilic", "Kılıç")).toBe(false);
+  });
+
+  it("folds Cherokee capitals to themselves, not lowercase", () => {
+    // U+13A0 casefolds to itself while lowercase maps it to U+AB70, so
+    // the override (not the fallback) must win.
+    expect(foldQuery("Ꭰ")).toBe("Ꭰ");
+    expect(foldQuery("ꭰ")).toBe("Ꭰ");
+    expect(equalsFolded("Ꭰ", "ꭰ")).toBe(true);
   });
 });
