@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { parseMarkdown } from "../src/markdown.js";
+import {
+  extractWikiCandidatesWithStats,
+  parseMarkdown,
+} from "../src/markdown.js";
 
 describe("markdown parsing", () => {
   it("extracts the first heading as plain text", () => {
@@ -120,5 +123,48 @@ describe("markdown parsing", () => {
       .filter((line) => /^\s*import\s/.test(line))
       .join("\n");
     expect(imports).not.toMatch(/unified|remark|rehype|hast|GFM/i);
+  });
+
+  it("recovers the next viable opener after a malformed opener", () => {
+    expect(parseMarkdown("[[a[[b]]").wikiLinks.map((l) => l.target)).toEqual([
+      "b",
+    ]);
+    expect(
+      parseMarkdown("[[bad[inner]] [[good]]").wikiLinks.map((l) => l.target),
+    ).toEqual(["good"]);
+    expect(
+      parseMarkdown("[[a\nb]] [[c]]").wikiLinks.map((l) => l.target),
+    ).toEqual(["c"]);
+    expect(
+      parseMarkdown("[[A\\]]B]] [[c]]").wikiLinks.map((l) => l.target),
+    ).toEqual(["c"]);
+    const direct = extractWikiCandidatesWithStats("[[a[[b]]");
+    expect(direct.candidates.map((c) => c.inner)).toEqual(["b"]);
+  });
+
+  it("scans wiki candidates in linear time without suffix rescans", async () => {
+    const manyOpeners = "[[a".repeat(200_000);
+    const many = extractWikiCandidatesWithStats(manyOpeners);
+    expect(many.candidates).toEqual([]);
+    expect(many.inspected).toBeLessThanOrEqual(manyOpeners.length);
+
+    const slashes = `\\`.repeat(1_000_000);
+    const slashRun = extractWikiCandidatesWithStats(`${slashes}[[a]]`);
+    expect(slashRun.candidates.map((c) => c.inner)).toEqual(["a"]);
+    expect(slashRun.inspected).toBeLessThanOrEqual(
+      slashRun.candidates.length + `${slashes}[[a]]`.length,
+    );
+
+    const mega = "[[".repeat(500_000);
+    const megaStats = extractWikiCandidatesWithStats(mega);
+    expect(megaStats.candidates).toEqual([]);
+    expect(megaStats.inspected).toBeLessThanOrEqual(mega.length);
+
+    const { readFile } = await import("node:fs/promises");
+    const { fileURLToPath } = await import("node:url");
+    const here = fileURLToPath(new URL("./", import.meta.url));
+    const source = await readFile(`${here}../src/markdown.ts`, "utf8");
+    expect(source).not.toContain("countPrecedingBackslashes");
+    expect(source).not.toContain('indexOf("]]"');
   });
 });

@@ -122,57 +122,128 @@ function parseStandardUrl(rawUrl: string): StandardLink | null {
   return { rawUrl: trimmed, path, fragment };
 }
 
-function countPrecedingBackslashes(text: string, index: number): number {
-  let count = 0;
-  let i = index - 1;
-  while (i >= 0 && text[i] === "\\") {
-    count += 1;
-    i -= 1;
-  }
-  return count;
-}
-
 /**
- * Literal Wiki candidates inside one raw Markdown slice. Only unescaped
- * `[[` openers (even preceding backslashes) open a link, and only the first
- * unescaped `]]` with no brackets/newline inside closes it. Entity-encoded
- * brackets never appear as literal brackets here, so they never match.
+ * Literal Wiki candidates inside one raw Markdown slice. Single-pass O(n):
+ * one left-to-right scan with O(1) work per code unit and no backtracking.
+ * Backslash parity for `[[`/`]]` is tracked incrementally (a running count
+ * of consecutive backslashes immediately before the current index), so long
+ * backslash runs are inspected once, never rescanned. Only unescaped `[[`
+ * openers (even preceding backslashes) open a link, and only the first
+ * unescaped `]]` closes it. Inner content must contain no `[`, `]`, or
+ * newline; the first invalid code unit abandons the pending opener
+ * immediately. A nested viable literal `[[` inside a malformed opener
+ * replaces it (equivalent to finding the next viable literal opener after
+ * `openStart + 2`), so no real link after a malformed opener is lost.
+ * Entity-encoded brackets never appear as literal brackets here, so they
+ * never match.
  */
-function extractWikiCandidates(
+function scanWikiCandidates(
   raw: string,
+  stats: { inspected: number } | null,
 ): Array<{ raw: string; inner: string }> {
   const out: Array<{ raw: string; inner: string }> = [];
+  const n = raw.length;
+  let openStart = -1;
+  let pendingSlashes = 0;
   let i = 0;
-  while (i < raw.length - 1) {
-    if (raw[i] !== "[" || raw[i + 1] !== "[") {
+  while (i < n) {
+    if (stats !== null) stats.inspected += 1;
+    const ch = raw[i] as string;
+    if (openStart < 0) {
+      if (ch === "\\") {
+        pendingSlashes += 1;
+        i += 1;
+        continue;
+      }
+      if (ch === "[" && i + 1 < n && (raw[i + 1] as string) === "[") {
+        if (pendingSlashes % 2 === 1) {
+          i += 2;
+          pendingSlashes = 0;
+          continue;
+        }
+        openStart = i;
+        i += 2;
+        pendingSlashes = 0;
+        continue;
+      }
+      pendingSlashes = 0;
       i += 1;
       continue;
     }
-    if (countPrecedingBackslashes(raw, i) % 2 === 1) {
-      i += 2;
+    if (ch === "\\") {
+      pendingSlashes += 1;
+      i += 1;
       continue;
     }
-    let matched = false;
-    let searchFrom = i + 2;
-    while (searchFrom < raw.length - 1) {
-      const close = raw.indexOf("]]", searchFrom);
-      if (close < 0) break;
-      if (countPrecedingBackslashes(raw, close) % 2 === 1) {
-        searchFrom = close + 2;
+    if (ch === "[") {
+      if (i + 1 < n && (raw[i + 1] as string) === "[") {
+        if (pendingSlashes % 2 === 1) {
+          openStart = -1;
+          i += 2;
+          pendingSlashes = 0;
+          continue;
+        }
+        openStart = i;
+        i += 2;
+        pendingSlashes = 0;
         continue;
       }
-      const inner = raw.slice(i + 2, close);
-      if (inner.includes("[") || inner.includes("]") || inner.includes("\n")) {
-        break;
-      }
-      out.push({ raw: raw.slice(i, close + 2), inner });
-      i = close + 2;
-      matched = true;
-      break;
+      openStart = -1;
+      pendingSlashes = 0;
+      i += 1;
+      continue;
     }
-    if (!matched) i += 2;
+    if (ch === "]") {
+      if (i + 1 < n && (raw[i + 1] as string) === "]") {
+        if (pendingSlashes % 2 === 1) {
+          openStart = -1;
+          i += 2;
+          pendingSlashes = 0;
+          continue;
+        }
+        const inner = raw.slice(openStart + 2, i);
+        out.push({ raw: raw.slice(openStart, i + 2), inner });
+        openStart = -1;
+        i += 2;
+        pendingSlashes = 0;
+        continue;
+      }
+      openStart = -1;
+      pendingSlashes = 0;
+      i += 1;
+      continue;
+    }
+    if (ch === "\n") {
+      openStart = -1;
+      pendingSlashes = 0;
+      i += 1;
+      continue;
+    }
+    pendingSlashes = 0;
+    i += 1;
   }
   return out;
+}
+
+function extractWikiCandidates(
+  raw: string,
+): Array<{ raw: string; inner: string }> {
+  return scanWikiCandidates(raw, null);
+}
+
+/**
+ * Test-only linear-scan hook (not re-exported from the package index).
+ * Returns the same candidates as the internal scanner plus the number of
+ * constant-time inspection steps (one per loop iteration, each advancing
+ * the index by >= 1, hence `inspected <= raw.length` on every input).
+ */
+export function extractWikiCandidatesWithStats(raw: string): {
+  candidates: Array<{ raw: string; inner: string }>;
+  inspected: number;
+} {
+  const stats = { inspected: 0 };
+  const candidates = scanWikiCandidates(raw, stats);
+  return { candidates, inspected: stats.inspected };
 }
 
 function rawSliceFor(normalized: string, node: MdNode): string | null {
