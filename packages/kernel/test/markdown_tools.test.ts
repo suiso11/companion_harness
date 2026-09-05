@@ -1323,11 +1323,13 @@ describe("real connector graph budget integration (temp vault, no fake port)", (
           .get() as { n: number }
       ).n;
       // 3: over-cap search fails with zero domain/graph/ref persistence but
-      // the two expected tool audit events.
+      // the two expected tool audit events. freshness:'refresh' forces the
+      // Broker to physically re-execute (bypass input-freshness dedup) while
+      // the manager keeps normal reuse semantics.
       const over = await broker.invoke(
         runId,
         "markdown.search",
-        { query: "realmarker" },
+        { query: "realmarker", freshness: "refresh" },
         CTX,
       );
       expect(over.result.actualOutcome).toBe("failed");
@@ -1366,13 +1368,17 @@ describe("real connector graph budget integration (temp vault, no fake port)", (
         ).n,
       ).toBe(snapshotsBefore);
       // 5: the original reference still opens with its pre-overflow body.
+      // Same args in the same run hit Broker dedup: deduplicated, no error,
+      // accepted disposition, normalized original body retained.
       const reopened = await broker.invoke(
         runId,
         "reference.open",
         { referenceId: hit.referenceId },
         CTX,
       );
-      expect(reopened.result.actualOutcome).toBe("succeeded");
+      expect(reopened.result.actualOutcome).toBe("deduplicated");
+      expect(reopened.result.errorCode).toBeNull();
+      expect(reopened.result.disposition).toBe("accepted");
       expect(
         (reopened.normalized as { body: { text: string } }).body.text,
       ).toBe(originalText);
