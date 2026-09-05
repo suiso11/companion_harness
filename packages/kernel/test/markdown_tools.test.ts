@@ -9,7 +9,11 @@
 // tool result is `failed`/`discarded`. M1 does NOT redesign the two-phase
 // commit; the budget test below asserts the materialization persists.
 
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { createMarkdownConnector } from "../../connector-markdown/src/connector.js";
 import {
   createKernelRepository,
   createM1ToolRegistrations,
@@ -1229,6 +1233,152 @@ describe("no raw leakage and strict contracts", () => {
       ).toThrow();
     } finally {
       handle.raw.close();
+    }
+  });
+});
+
+describe("real connector graph budget integration (temp vault, no fake port)", () => {
+  it("materializes >1024 under-cap links, then rejects aggregate/refresh overflow without persistence", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kernel-real-graph-"));
+    const links = (count: number): string =>
+      Array.from({ length: count }, () => "[l](./missing.md)").join("\n");
+    writeFileSync(
+      join(dir, "doc.md"),
+      `# Doc\nrealmarker body\n${links(1100)}\n`,
+    );
+    // Large vault file that never matches the query: proves non-hits cost
+    // no link budget even though the file alone would overflow.
+    writeFileSync(
+      join(dir, "noisy.md"),
+      `# Noisy\nunrelated content\n${links(3800)}\n`,
+    );
+    const handle = openKernelDatabase(":memory:");
+    try {
+      await migrateKernelDatabase({ db: handle.raw });
+      const repo = createKernelRepository(handle.raw);
+      const manager = createReferenceManager(handle.raw);
+      const connectorRow = manager.ensureMarkdownConnectorInstance("vault", 1, {
+        now: T0,
+      });
+      const real = await createMarkdownConnector([{ path: dir }]);
+      const regs = createM1ToolRegistrations({
+        db: handle.raw,
+        repo,
+        referenceManager: manager,
+        bindings: [
+          {
+            connectorInstanceId: connectorRow.id,
+            connector: real as unknown as MarkdownConnectorPort,
+          },
+        ],
+        clock: { now: () => T0 + 100 },
+      });
+      const broker = createToolBroker({
+        db: handle.raw,
+        repo,
+        registrations: regs,
+      });
+      const { runId } = newRunningRun(repo);
+      // 1: under-cap search succeeds and persists the full >1024-link graph.
+      const ok = await broker.invoke(
+        runId,
+        "markdown.search",
+        { query: "realmarker" },
+        CTX,
+      );
+      expect(ok.result.actualOutcome).toBe("succeeded");
+      const hit = (ok.normalized as { hits: Array<{ referenceId: string }> })
+        .hits[0] as { referenceId: string };
+      expect(hit?.referenceId).toBeDefined();
+      const graphRows = (
+        handle.raw
+          .prepare("SELECT COUNT(*) AS n FROM snapshot_links")
+          .get() as { n: number }
+      ).n;
+      expect(graphRows).toBeGreaterThan(1024);
+      // 2: stored open returns the full body with no new connector budget.
+      const opened = await broker.invoke(
+        runId,
+        "reference.open",
+        { referenceId: hit.referenceId },
+        CTX,
+      );
+      expect(opened.result.actualOutcome).toBe("succeeded");
+      expect(
+        (opened.normalized as { body: { text: string } }).body.text,
+      ).toContain("realmarker");
+      const originalText = (opened.normalized as { body: { text: string } })
+        .body.text;
+      // Grow the matched document past the 256KiB graph budget; the noisy
+      // non-hit stays irrelevant.
+      writeFileSync(
+        join(dir, "doc.md"),
+        `# Doc\nrealmarker body\n${links(4100)}\n`,
+      );
+      const before = counts(handle.raw);
+      const presentedBefore = presentedCount(handle.raw);
+      const linksBefore = (
+        handle.raw
+          .prepare("SELECT COUNT(*) AS n FROM snapshot_links")
+          .get() as { n: number }
+      ).n;
+      // 3: over-cap search fails with zero domain/graph/ref persistence but
+      // the two expected tool audit events.
+      const over = await broker.invoke(
+        runId,
+        "markdown.search",
+        { query: "realmarker" },
+        CTX,
+      );
+      expect(over.result.actualOutcome).toBe("failed");
+      expect(over.result.errorCode).toBe("output_too_large");
+      expect(over.normalized).toBeNull();
+      const after = counts(handle.raw);
+      expect(after.resources).toBe(before.resources);
+      expect(after.snapshots).toBe(before.snapshots);
+      expect(after.references).toBe(before.references);
+      expect(after.sets).toBe(before.sets);
+      expect(after.events).toBe(before.events + 2);
+      expect(presentedCount(handle.raw)).toBe(presentedBefore);
+      expect(
+        (
+          handle.raw
+            .prepare("SELECT COUNT(*) AS n FROM snapshot_links")
+            .get() as { n: number }
+        ).n,
+      ).toBe(linksBefore);
+      // 4: refresh rereads the now-oversized document and fails without
+      // replacing the stored reference.
+      const snapshotsBefore = after.snapshots;
+      const refreshed = await broker.invoke(
+        runId,
+        "reference.refresh",
+        { referenceId: hit.referenceId },
+        CTX,
+      );
+      expect(refreshed.result.actualOutcome).toBe("failed");
+      expect(refreshed.result.errorCode).toBe("output_too_large");
+      expect(
+        (
+          handle.raw
+            .prepare("SELECT COUNT(*) AS n FROM resource_snapshots")
+            .get() as { n: number }
+        ).n,
+      ).toBe(snapshotsBefore);
+      // 5: the original reference still opens with its pre-overflow body.
+      const reopened = await broker.invoke(
+        runId,
+        "reference.open",
+        { referenceId: hit.referenceId },
+        CTX,
+      );
+      expect(reopened.result.actualOutcome).toBe("succeeded");
+      expect(
+        (reopened.normalized as { body: { text: string } }).body.text,
+      ).toBe(originalText);
+    } finally {
+      handle.raw.close();
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });
