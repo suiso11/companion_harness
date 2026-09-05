@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { TestContext } from "vitest";
 import { describe, expect, it } from "vitest";
 import {
   createMarkdownConnector,
@@ -17,6 +18,39 @@ function scratchVault(prefix: string): string {
 
 function sha256Hex(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+function trySymlink(
+  target: string,
+  linkPath: string,
+  type: "dir" | "file" | "junction",
+): "ok" | "privilege-denied" {
+  try {
+    symlinkSync(target, linkPath, type);
+    return "ok";
+  } catch (error) {
+    const code = (error as { code?: unknown }).code;
+    if (
+      code === "EPERM" ||
+      code === "EACCES" ||
+      code === "EROFS" ||
+      code === "UNKNOWN"
+    ) {
+      return "privilege-denied";
+    }
+    throw error;
+  }
+}
+
+function skipUnlessPrivileged(
+  ctx: TestContext,
+  outcome: "ok" | "privilege-denied",
+): boolean {
+  if (outcome === "privilege-denied") {
+    ctx.skip();
+    return false;
+  }
+  return true;
 }
 
 function codePoints(value: string): number {
@@ -888,4 +922,45 @@ describe("markdown connector bounded search retention", () => {
     expect(peak).toBeLessThanOrEqual(5);
     expect(peak).toBe(5);
   }, 15_000);
+});
+
+describe("markdown connector owning-root reads", () => {
+  it("scopes canonical reads to the owning root (unrelated poisoned root untouched)", async (ctx: TestContext) => {
+    const ownDir = scratchVault("md-conn-owning-a-");
+    const otherDir = scratchVault("md-conn-owning-b-");
+    const outsideDir = scratchVault("md-conn-owning-out-");
+    writeFileSync(join(ownDir, "doc.md"), "# Own\nowning read body\n");
+    writeFileSync(join(otherDir, "ok.md"), "# Ok\nother body\n");
+    writeFileSync(join(outsideDir, "secret.md"), "# Secret\noutside\n");
+    // A true unrelated traversal would discover the poisoned root and fail
+    // the whole call with markdown_path_unsafe. The owning-root read must
+    // never touch it.
+    if (
+      !skipUnlessPrivileged(
+        ctx,
+        trySymlink(
+          join(outsideDir, "secret.md"),
+          join(otherDir, "evil.md"),
+          "file",
+        ),
+      )
+    ) {
+      return;
+    }
+    const connector = await createMarkdownConnector([
+      { path: ownDir, alias: "own" },
+      { path: otherDir, alias: "other" },
+    ]);
+    const doc = await connector.readCanonical("own/doc.md");
+    expect(doc.canonicalKey).toBe("own/doc.md");
+    expect(doc.title).toBe("Own");
+    expect(doc.text).toContain("owning read body");
+    expect(JSON.stringify(doc)).not.toContain(ownDir);
+    expect(JSON.stringify(doc)).not.toContain(otherDir);
+    expect(JSON.stringify(doc)).not.toContain(outsideDir);
+    expect(JSON.stringify(doc)).not.toContain(tmpdir());
+    // Repeat for determinism; search still sees both roots.
+    const again = await connector.readCanonical("own/doc.md");
+    expect(again).toEqual(doc);
+  });
 });

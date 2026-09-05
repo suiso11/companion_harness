@@ -79,10 +79,11 @@
  * unchanged.
  *
  * `readCanonical` validates the alias/key shape (including the exact `.md`
- * suffix), resolves the owning root by alias, runs discovery once
- * (metadata only, to existence-check links consistently with search) and
- * requires the key to be an exact discovered canonical key, plus exactly
- * one safe content read, then parses. Unknown alias or undiscovered key ->
+ * suffix), resolves the owning root by alias, runs discovery once over
+ * ONLY the owning root (metadata only, to existence-check links
+ * consistently with search) and requires the key to be an exact discovered
+ * canonical key, plus exactly one safe content read, then parses. Search
+ * still discovers all roots. Unknown alias or undiscovered key ->
  * `reference_not_found` before any content byte; malformed key or non-`.md`
  * suffix -> `invalid_input` before any content byte; unreadable content ->
  * the safe-read failure code.
@@ -1185,12 +1186,14 @@ export async function createMarkdownConnector(
     if (root === null) {
       throw new MarkdownConnectorError("reference_not_found", key);
     }
-    // Metadata-only discovery keeps link existence consistent with
-    // search. The key must be an exact discovered `.md` canonical key:
-    // anything undiscovered returns `reference_not_found` BEFORE the
-    // single content read below, so no byte is touched for misses.
+    // Metadata-only discovery over ONLY the owning root keeps link
+    // existence consistent with search without traversing unrelated roots.
+    // The key must be an exact discovered `.md` canonical key: anything
+    // undiscovered returns `reference_not_found` BEFORE the single content
+    // read below, so no byte is touched for misses. Search still discovers
+    // all roots; metadata/link canonicalization stays in the same root.
     throwIfAborted(signal);
-    const discovered = await discoverMarkdownFiles(roots, {
+    const discovered = await discoverMarkdownFiles([root], {
       ...(signal === undefined ? {} : { signal }),
     });
     throwIfAborted(signal);
