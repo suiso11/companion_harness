@@ -770,7 +770,9 @@ describe("safe read", () => {
       decomposedPosix.normalize("NFC"),
     );
     expect(matchesRetargetSpelling(composedPosix, composedPosix)).toBe(true);
-    expect(matchesRetargetSpelling(decomposedPosix, decomposedPosix)).toBe(true);
+    expect(matchesRetargetSpelling(decomposedPosix, decomposedPosix)).toBe(
+      true,
+    );
     expect(matchesRetargetSpelling(composedPosix, decomposedPosix)).toBe(false);
     expect(matchesRetargetSpelling(decomposedPosix, composedPosix)).toBe(false);
     expect(matchesRetargetSpelling("A.md", "a.md")).toBe(false);
