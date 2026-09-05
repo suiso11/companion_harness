@@ -1,11 +1,46 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { TestContext } from "vitest";
 import { describe, expect, it } from "vitest";
 import { createMarkdownConnector } from "../src/connector.js";
+import { MarkdownConnectorError } from "../src/errors.js";
 
 function scratchVault(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
+}
+
+function trySymlink(
+  target: string,
+  linkPath: string,
+  type: "dir" | "file" | "junction",
+): "ok" | "privilege-denied" {
+  try {
+    symlinkSync(target, linkPath, type);
+    return "ok";
+  } catch (error) {
+    const code = (error as { code?: unknown }).code;
+    if (
+      code === "EPERM" ||
+      code === "EACCES" ||
+      code === "EROFS" ||
+      code === "UNKNOWN"
+    ) {
+      return "privilege-denied";
+    }
+    throw error;
+  }
+}
+
+function skipUnlessPrivileged(
+  ctx: TestContext,
+  outcome: "ok" | "privilege-denied",
+): boolean {
+  if (outcome === "privilege-denied") {
+    ctx.skip();
+    return false;
+  }
+  return true;
 }
 
 describe("markdown connector links", () => {
@@ -178,5 +213,224 @@ describe("markdown connector links", () => {
     ]);
     const reread = await connector.readCanonical("vault-1/index.md");
     expect(reread.wikiLinks[0]).toEqual(wiki);
+  });
+
+  it("resolves standard links through internal file symlink aliases", async (ctx: TestContext) => {
+    const dir = scratchVault("md-link-aliasfile-");
+    writeFileSync(join(dir, "real.md"), "# Real\nlinkfold target body\n");
+    if (
+      !skipUnlessPrivileged(
+        ctx,
+        trySymlink(join(dir, "real.md"), join(dir, "alias.md"), "file"),
+      )
+    ) {
+      return;
+    }
+    writeFileSync(
+      join(dir, "a.md"),
+      "# A\nlinkfold see [via alias](alias.md) and [direct](real.md) and [missing](missing.md)\n",
+    );
+    const connector = await createMarkdownConnector([{ path: dir }]);
+    const first = await connector.search({ query: "linkfold" });
+    // Discovery folds the alias: no duplicate resource, no lost edge.
+    expect(first.hits.map((hit) => hit.canonicalKey).sort()).toEqual([
+      "vault-1/a.md",
+      "vault-1/real.md",
+    ]);
+    const hit = first.hits.find(
+      (entry) => entry.canonicalKey === "vault-1/a.md",
+    );
+    expect(hit?.standardLinks).toEqual([
+      {
+        rawUrl: "alias.md",
+        path: "alias.md",
+        fragment: null,
+        status: "resolved",
+        canonicalKey: "vault-1/real.md",
+      },
+      {
+        rawUrl: "real.md",
+        path: "real.md",
+        fragment: null,
+        status: "resolved",
+        canonicalKey: "vault-1/real.md",
+      },
+      {
+        rawUrl: "missing.md",
+        path: "missing.md",
+        fragment: null,
+        status: "unresolved",
+      },
+    ]);
+    // Search vs read consistency and determinism.
+    const doc = await connector.readCanonical("vault-1/a.md");
+    expect(doc.standardLinks).toEqual(hit?.standardLinks);
+    const second = await connector.search({ query: "linkfold" });
+    expect(second).toEqual(first);
+    const reread = await connector.readCanonical("vault-1/a.md");
+    expect(reread).toEqual(doc);
+    expect(JSON.stringify({ first, doc })).not.toContain(dir);
+    expect(JSON.stringify({ first, doc })).not.toContain(tmpdir());
+  });
+
+  it("resolves standard links through internal directory aliases", async (ctx: TestContext) => {
+    const dir = scratchVault("md-link-aliasdir-");
+    mkdirSync(join(dir, "docs"), { recursive: true });
+    writeFileSync(
+      join(dir, "docs", "note.md"),
+      "# Note\ndirfold target body\n",
+    );
+    const dirType = process.platform === "win32" ? "junction" : "dir";
+    if (
+      !skipUnlessPrivileged(
+        ctx,
+        trySymlink(join(dir, "docs"), join(dir, "linked"), dirType),
+      )
+    ) {
+      return;
+    }
+    writeFileSync(
+      join(dir, "a.md"),
+      "# A\ndirfold see [via alias](linked/note.md) and [direct](docs/note.md)\n",
+    );
+    const connector = await createMarkdownConnector([{ path: dir }]);
+    const first = await connector.search({ query: "dirfold" });
+    expect(first.hits.map((hit) => hit.canonicalKey).sort()).toEqual([
+      "vault-1/a.md",
+      "vault-1/docs/note.md",
+    ]);
+    const hit = first.hits.find(
+      (entry) => entry.canonicalKey === "vault-1/a.md",
+    );
+    expect(hit?.standardLinks).toEqual([
+      {
+        rawUrl: "linked/note.md",
+        path: "linked/note.md",
+        fragment: null,
+        status: "resolved",
+        canonicalKey: "vault-1/docs/note.md",
+      },
+      {
+        rawUrl: "docs/note.md",
+        path: "docs/note.md",
+        fragment: null,
+        status: "resolved",
+        canonicalKey: "vault-1/docs/note.md",
+      },
+    ]);
+    const doc = await connector.readCanonical("vault-1/a.md");
+    expect(doc.standardLinks).toEqual(hit?.standardLinks);
+    const second = await connector.search({ query: "dirfold" });
+    expect(second).toEqual(first);
+    expect(JSON.stringify({ first, doc })).not.toContain(dir);
+  });
+
+  it("collapses wiki alias spellings to one real candidate", async (ctx: TestContext) => {
+    const dir = scratchVault("md-link-wikialias-");
+    writeFileSync(join(dir, "real.md"), "# Real\nwikifold body\n");
+    mkdirSync(join(dir, "docs"), { recursive: true });
+    writeFileSync(join(dir, "docs", "note.md"), "# Note\nwikifold body\n");
+    const fileLink = trySymlink(
+      join(dir, "real.md"),
+      join(dir, "alias.md"),
+      "file",
+    );
+    const dirType = process.platform === "win32" ? "junction" : "dir";
+    const dirLink = trySymlink(join(dir, "docs"), join(dir, "linked"), dirType);
+    if (
+      !skipUnlessPrivileged(ctx, fileLink) ||
+      !skipUnlessPrivileged(ctx, dirLink)
+    ) {
+      return;
+    }
+    writeFileSync(
+      join(dir, "a.md"),
+      "# A\nwikifold see [[alias]] and [[real]] and [[linked/note]] here\n",
+    );
+    const connector = await createMarkdownConnector([{ path: dir }]);
+    const doc = await connector.readCanonical("vault-1/a.md");
+    expect(doc.wikiLinks).toEqual([
+      {
+        raw: "[[alias]]",
+        target: "alias",
+        alias: null,
+        fragment: null,
+        status: "resolved",
+        candidates: ["vault-1/real.md"],
+        canonicalKey: "vault-1/real.md",
+      },
+      {
+        raw: "[[real]]",
+        target: "real",
+        alias: null,
+        fragment: null,
+        status: "resolved",
+        candidates: ["vault-1/real.md"],
+        canonicalKey: "vault-1/real.md",
+      },
+      {
+        raw: "[[linked/note]]",
+        target: "linked/note",
+        alias: null,
+        fragment: null,
+        status: "resolved",
+        candidates: ["vault-1/docs/note.md"],
+        canonicalKey: "vault-1/docs/note.md",
+      },
+    ]);
+    // Duplicate alias spellings never become ambiguous duplicates.
+    for (const link of doc.wikiLinks) {
+      expect(link.candidates).toHaveLength(1);
+    }
+    const fromSearch = await connector.search({ query: "wikifold" });
+    const hit = fromSearch.hits.find(
+      (entry) => entry.canonicalKey === "vault-1/a.md",
+    );
+    expect(hit?.wikiLinks).toEqual(doc.wikiLinks);
+    const again = await connector.readCanonical("vault-1/a.md");
+    expect(again.wikiLinks).toEqual(doc.wikiLinks);
+    expect(JSON.stringify(doc.wikiLinks)).not.toContain(dir);
+  });
+
+  it("rejects external symlink escapes without leaking paths", async (ctx: TestContext) => {
+    const dir = scratchVault("md-link-ext-");
+    const outside = scratchVault("md-link-extout-");
+    writeFileSync(join(outside, "secret.md"), "# Secret\noutside body\n");
+    writeFileSync(join(dir, "ok.md"), "# Ok\nlinkext body\n");
+    writeFileSync(join(dir, "a.md"), "# A\nlinkext see [evil](evil.md) here\n");
+    if (
+      !skipUnlessPrivileged(
+        ctx,
+        trySymlink(join(outside, "secret.md"), join(dir, "evil.md"), "file"),
+      )
+    ) {
+      return;
+    }
+    const connector = await createMarkdownConnector([{ path: dir }]);
+    try {
+      await connector.search({ query: "linkext" });
+      expect.unreachable("expected markdown_path_unsafe");
+    } catch (error) {
+      expect(error).toBeInstanceOf(MarkdownConnectorError);
+      expect((error as MarkdownConnectorError).code).toBe(
+        "markdown_path_unsafe",
+      );
+      expect((error as MarkdownConnectorError).canonicalKey).toBe("vault-1");
+      expect(String(error)).not.toContain(dir);
+      expect(String(error)).not.toContain(outside);
+      expect(String(error)).not.toContain(tmpdir());
+    }
+    try {
+      await connector.readCanonical("vault-1/ok.md");
+      expect.unreachable("expected markdown_path_unsafe");
+    } catch (error) {
+      expect(error).toBeInstanceOf(MarkdownConnectorError);
+      expect((error as MarkdownConnectorError).code).toBe(
+        "markdown_path_unsafe",
+      );
+      expect(String(error)).not.toContain(dir);
+      expect(String(error)).not.toContain(outside);
+      expect(String(error)).not.toContain(tmpdir());
+    }
   });
 });

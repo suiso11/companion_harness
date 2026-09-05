@@ -34,17 +34,26 @@
  * LINKS:
  * - Standard relative `.md` links resolve against the source file's
  *   directory inside the same root. `..` escapes above the root are
- *   `unresolved` and never opened. Resolution is existence-checked
- *   against the discovery set: `resolved` carries the canonical key,
- *   otherwise `unresolved` with no guess.
+ *   `unresolved` and never opened. Each surviving candidate is
+ *   canonicalized metadata-only (`realpath` inside the owning root,
+ *   containment + canonical grammar/bounds checked, then converted to
+ *   `<alias>/<realpath-relative posix>`) and existence-checked against
+ *   the discovery set: `resolved` carries the discovered real canonical
+ *   key (so `alias.md -> real.md` and `aliasDir/note.md -> realDir/note.md`
+ *   fold without duplicates), otherwise `unresolved` with no guess. No
+ *   file content is read to resolve links and no alias map persists.
  * - Wiki subset (`[[Target]]`) deterministically collects, in code-unit
  *   order: (1) source-directory-relative `Target(.md)`, (2) root-relative
  *   `Target(.md)`, (3) any same-root file whose basename equals the target
- *   basename. Exactly one candidate -> `resolved`; several ->
- *   `ambiguous` with the sorted path-free candidate list (never guessed);
+ *   basename. Relative/root candidates fold through the same metadata-only
+ *   canonicalization (duplicate alias spellings collapse to one real key
+ *   before dedup); basename candidates are already discovered canonical
+ *   keys. Exactly one distinct canonical candidate -> `resolved`; several
+ *   -> `ambiguous` with the sorted path-free candidate list (never guessed);
  *   none -> `unresolved` with an empty list. Matching is exact
  *   (case-sensitive, extension appended only when absent); fragments and
- *   aliases never affect resolution.
+ *   aliases never affect resolution. A symlink escape outside the root
+ *   fails the whole call with fixed `markdown_path_unsafe` (alias only).
  *
  * PRIVACY: only `<alias>/<relative-posix>` canonical keys, aliases, titles,
  * snippets, and content-derived hashes leave this module. Absolute paths
@@ -73,6 +82,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { discoverMarkdownFiles, MAX_CANONICAL_KEY_UTF16 } from "./discovery.js";
 import { MarkdownConnectorError } from "./errors.js";
@@ -87,6 +97,7 @@ import {
   type InitializedRoot,
   type InitializedRootInfo,
   initializeRoots,
+  isWithinRealRoot,
 } from "./roots.js";
 import { type SafeReadHooks, safeReadMarkdownFile } from "./safe_read.js";
 import {
@@ -373,40 +384,123 @@ function normalizeInsideRoot(sourceDir: string, target: string): string | null {
   return normalized;
 }
 
-function resolveStandardLinks(
+/**
+ * Metadata-only canonicalization of one lexical `normalized` POSIX relative
+ * path (already proven inside the root lexically) to its discovered real
+ * canonical key. `realpath` folds internal file/directory symlink aliases;
+ * containment + structural grammar + 512-unit bound are enforced; the result
+ * is existence-checked against the discovery set. Missing targets return
+ * null (`unresolved`); escapes/invalid derived keys throw fixed
+ * `markdown_path_unsafe` carrying only the alias (never a path or OS error).
+ * No file content is read and no alias map is persisted.
+ */
+async function canonicalizeNormalizedCandidate(
+  root: InitializedRoot,
+  normalized: string,
+  existing: ReadonlySet<string>,
+  signal: AbortSignal | undefined,
+): Promise<string | null> {
+  throwIfAborted(signal);
+  for (const segment of normalized.split("/")) {
+    if (segment === "" || segment === "." || segment === "..") return null;
+  }
+  const candidateAbs = path.join(root.realPath, ...normalized.split("/"));
+  let real: string;
+  try {
+    real = await fs.realpath(candidateAbs);
+  } catch {
+    return null;
+  }
+  throwIfAborted(signal);
+  if (!isWithinRealRoot(root.realPath, real)) {
+    throw new MarkdownConnectorError("markdown_path_unsafe", root.alias);
+  }
+  const relative = path.relative(root.realPath, real);
+  if (relative === "") return null;
+  if (
+    relative === ".." ||
+    relative.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relative)
+  ) {
+    throw new MarkdownConnectorError("markdown_path_unsafe", root.alias);
+  }
+  const posix = relative.split(path.sep).join("/");
+  if (
+    process.platform === "win32" &&
+    posix.split("/").some((segment) => segment.includes(":"))
+  ) {
+    return null;
+  }
+  const canonical = `${root.alias}/${posix}`;
+  if (canonical.length > MAX_CANONICAL_KEY_UTF16) {
+    throw new MarkdownConnectorError("markdown_path_unsafe", root.alias);
+  }
+  if (
+    canonical.includes("\0") ||
+    canonical.includes("\\") ||
+    canonical.startsWith("/") ||
+    /^[A-Za-z]:(\/|$)/.test(canonical)
+  ) {
+    throw new MarkdownConnectorError("markdown_path_unsafe", root.alias);
+  }
+  const parts = canonical.split("/");
+  if (parts.length < 2) {
+    throw new MarkdownConnectorError("markdown_path_unsafe", root.alias);
+  }
+  for (const part of parts) {
+    if (part === "" || part === "." || part === "..") {
+      throw new MarkdownConnectorError("markdown_path_unsafe", root.alias);
+    }
+  }
+  if (!existing.has(canonical)) return null;
+  return canonical;
+}
+
+async function resolveStandardLinks(
   sourceKey: string,
   links: readonly StandardLink[],
   existing: ReadonlySet<string>,
-): ResolvedStandardLink[] {
-  const alias = aliasOf(sourceKey) ?? "";
+  root: InitializedRoot,
+  signal: AbortSignal | undefined,
+): Promise<ResolvedStandardLink[]> {
   const sourceDir = sourceDirPosix(sourceKey);
-  return links.map((link) => {
+  const out: ResolvedStandardLink[] = [];
+  for (const link of links) {
+    throwIfAborted(signal);
     const normalized = normalizeInsideRoot(sourceDir, link.path);
     if (normalized === null) {
-      return {
+      out.push({
         rawUrl: link.rawUrl,
         path: link.path,
         fragment: link.fragment,
         status: "unresolved" as const,
-      };
+      });
+      continue;
     }
-    const candidate = `${alias}/${normalized}`;
-    if (existing.has(candidate)) {
-      return {
+    const canonical = await canonicalizeNormalizedCandidate(
+      root,
+      normalized,
+      existing,
+      signal,
+    );
+    if (canonical !== null) {
+      out.push({
         rawUrl: link.rawUrl,
         path: link.path,
         fragment: link.fragment,
         status: "resolved" as const,
-        canonicalKey: candidate,
-      };
+        canonicalKey: canonical,
+      });
+    } else {
+      out.push({
+        rawUrl: link.rawUrl,
+        path: link.path,
+        fragment: link.fragment,
+        status: "unresolved" as const,
+      });
     }
-    return {
-      rawUrl: link.rawUrl,
-      path: link.path,
-      fragment: link.fragment,
-      status: "unresolved" as const,
-    };
-  });
+  }
+  return out;
 }
 
 function wikiBasePath(target: string): string {
@@ -418,31 +512,47 @@ function wikiBasename(base: string): string {
   return slash < 0 ? base : base.slice(slash + 1);
 }
 
-function resolveWikiLinks(
+async function resolveWikiLinks(
   sourceKey: string,
   links: readonly WikiLink[],
   keysInRoot: readonly string[],
   existing: ReadonlySet<string>,
-): ResolvedWikiLink[] {
-  const alias = aliasOf(sourceKey) ?? "";
+  root: InitializedRoot,
+  signal: AbortSignal | undefined,
+): Promise<ResolvedWikiLink[]> {
   const sourceDir = sourceDirPosix(sourceKey);
-  return links.map((link) => {
+  const out: ResolvedWikiLink[] = [];
+  for (const link of links) {
+    throwIfAborted(signal);
     const base = wikiBasePath(link.target);
     const found = new Set<string>();
-    // (1) source-directory-relative candidate.
+    // (1) source-directory-relative candidate (folded to real canonical).
     const relative = normalizeInsideRoot(sourceDir, base);
     if (relative !== null) {
-      const candidate = `${alias}/${relative}`;
-      if (existing.has(candidate)) found.add(candidate);
+      const canonical = await canonicalizeNormalizedCandidate(
+        root,
+        relative,
+        existing,
+        signal,
+      );
+      if (canonical !== null) found.add(canonical);
     }
-    // (2) root-relative candidate.
+    throwIfAborted(signal);
+    // (2) root-relative candidate (folded to real canonical).
     const rooted = normalizeInsideRoot("", base);
     if (rooted !== null) {
-      const candidate = `${alias}/${rooted}`;
-      if (existing.has(candidate)) found.add(candidate);
+      const canonical = await canonicalizeNormalizedCandidate(
+        root,
+        rooted,
+        existing,
+        signal,
+      );
+      if (canonical !== null) found.add(canonical);
     }
     // (3) basename candidates: every same-root file with an equal
-    // trailing filename (exact, case-sensitive).
+    // trailing filename (exact, case-sensitive). Already discovered
+    // canonical keys, so no folding is needed; duplicates cannot occur
+    // because discovery dedups by realpath.
     const wanted = wikiBasename(base);
     for (const key of keysInRoot) {
       const relativePart = relativeOf(key) ?? "";
@@ -453,7 +563,7 @@ function resolveWikiLinks(
     const candidates = [...found].sort(compareCodeUnits);
     if (candidates.length === 1) {
       const only = candidates[0] as string;
-      return {
+      out.push({
         raw: link.raw,
         target: link.target,
         alias: link.alias,
@@ -461,27 +571,28 @@ function resolveWikiLinks(
         status: "resolved" as const,
         candidates,
         canonicalKey: only,
-      };
-    }
-    if (candidates.length > 1) {
-      return {
+      });
+    } else if (candidates.length > 1) {
+      out.push({
         raw: link.raw,
         target: link.target,
         alias: link.alias,
         fragment: link.fragment,
         status: "ambiguous" as const,
         candidates,
-      };
+      });
+    } else {
+      out.push({
+        raw: link.raw,
+        target: link.target,
+        alias: link.alias,
+        fragment: link.fragment,
+        status: "unresolved" as const,
+        candidates,
+      });
     }
-    return {
-      raw: link.raw,
-      target: link.target,
-      alias: link.alias,
-      fragment: link.fragment,
-      status: "unresolved" as const,
-      candidates,
-    };
-  });
+  }
+  return out;
 }
 
 interface RankedHit extends MarkdownSearchHit {
@@ -493,13 +604,15 @@ function compareRankedHits(a: RankedHit, b: RankedHit): number {
   return compareCodeUnits(a.canonicalKey, b.canonicalKey);
 }
 
-function buildHit(
+async function buildHit(
   canonicalKey: string,
   text: string,
   query: string,
   existing: ReadonlySet<string>,
   keysInRoot: readonly string[],
-): RankedHit | null {
+  root: InitializedRoot,
+  signal: AbortSignal | undefined,
+): Promise<RankedHit | null> {
   const parsed = parseMarkdown(text);
   const title = deriveTitle(parsed, canonicalKey);
   let rank: number;
@@ -516,6 +629,22 @@ function buildHit(
   if (snippet === "") {
     snippet = sliceCodePoints(title, 0, 512);
   }
+  throwIfAborted(signal);
+  const standardLinks = await resolveStandardLinks(
+    canonicalKey,
+    parsed.standardLinks,
+    existing,
+    root,
+    signal,
+  );
+  const wikiLinks = await resolveWikiLinks(
+    canonicalKey,
+    parsed.wikiLinks,
+    keysInRoot,
+    existing,
+    root,
+    signal,
+  );
   return {
     rank,
     canonicalKey,
@@ -523,17 +652,8 @@ function buildHit(
     snippet,
     text,
     sourceRevision: sha256HexUtf8(text),
-    standardLinks: resolveStandardLinks(
-      canonicalKey,
-      parsed.standardLinks,
-      existing,
-    ),
-    wikiLinks: resolveWikiLinks(
-      canonicalKey,
-      parsed.wikiLinks,
-      keysInRoot,
-      existing,
-    ),
+    standardLinks,
+    wikiLinks,
   };
 }
 
@@ -723,12 +843,14 @@ export async function createMarkdownConnector(
         reportRetained();
         continue;
       }
-      const hit = buildHit(
+      const hit = await buildHit(
         entry.canonicalKey,
         result.text,
         query,
         existing,
         keysByAlias.get(alias) ?? [],
+        root,
+        signal,
       );
       if (hit !== null) insertBounded(hit);
       else reportRetained();
@@ -796,14 +918,30 @@ export async function createMarkdownConnector(
     if (snippet === "") {
       snippet = sliceCodePoints(title, 0, 512);
     }
+    throwIfAborted(signal);
+    const standardLinks = await resolveStandardLinks(
+      key,
+      parsed.standardLinks,
+      existing,
+      root,
+      signal,
+    );
+    const wikiLinks = await resolveWikiLinks(
+      key,
+      parsed.wikiLinks,
+      keysInRoot,
+      existing,
+      root,
+      signal,
+    );
     return {
       canonicalKey: key,
       title,
       text: result.text,
       sourceRevision: sha256HexUtf8(result.text),
       snippet,
-      standardLinks: resolveStandardLinks(key, parsed.standardLinks, existing),
-      wikiLinks: resolveWikiLinks(key, parsed.wikiLinks, keysInRoot, existing),
+      standardLinks,
+      wikiLinks,
     };
   }
 
