@@ -693,6 +693,75 @@ export function extractGrantCandidates(modelFacing: unknown): GrantCandidate[] {
 }
 
 /* ------------------------------------------------------------------ */
+/* Dynamic rN addressability (r3943599549) + UUID-free feedback            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Collect per-run addressability candidates from DELIVERED (accepted,
+ * size-accepted) broker model-facing payloads only: structural
+ * `{ ordinal, referenceId }` pairs actually present in the payload
+ * (search hits, open/refresh views, related listings). Ordinal must be an
+ * integer >= 1 and referenceId a UUID v4 on the SAME object; free-text
+ * fields are never inspected and no semantic inference is performed.
+ * Learning addressability NEVER creates an EvidenceGrant (see
+ * `extractGrantCandidates`): the caller inserts these into the per-run
+ * known ordinal map only, and citation still requires a grant.
+ */
+export function extractKnownOrdinalMappings(
+  modelFacing: unknown,
+): Array<{ ordinal: number; referenceId: string }> {
+  const out: Array<{ ordinal: number; referenceId: string }> = [];
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        visit(entry);
+      }
+      return;
+    }
+    if (typeof value !== "object" || value === null) {
+      return;
+    }
+    const record = value as Record<string, unknown>;
+    const referenceId = record.referenceId;
+    const ordinal = record.ordinal;
+    if (
+      typeof referenceId === "string" &&
+      isUuidV4(referenceId) &&
+      typeof ordinal === "number" &&
+      Number.isInteger(ordinal) &&
+      ordinal >= 1
+    ) {
+      out.push({ ordinal, referenceId });
+    }
+    for (const key of ["hits", "references"]) {
+      if (Array.isArray(record[key])) {
+        visit(record[key]);
+      }
+    }
+  };
+  visit(modelFacing);
+  return out;
+}
+
+/**
+ * Record delivered addressability into the per-run known ordinal map.
+ * Only fills ordinals that are still unknown; never overwrites the frozen
+ * seed (or an earlier delivered mapping), never guesses, and never touches
+ * EvidenceGrants. Call ONLY for size-accepted delivered payloads: oversized
+ * omitted, broker-rejected, or undelivered content must never teach.
+ */
+export function learnKnownOrdinalMappings(
+  target: Map<number, string>,
+  modelFacing: unknown,
+): void {
+  for (const candidate of extractKnownOrdinalMappings(modelFacing)) {
+    if (!target.has(candidate.ordinal)) {
+      target.set(candidate.ordinal, candidate.referenceId);
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* rN translation + UUID-free feedback (PR #4 r3943430520)               */
 /* ------------------------------------------------------------------ */
 
@@ -993,9 +1062,15 @@ export function createAgentStrategy(
     const history = loadHistory(db, sessionId, ctx.turn.seq);
     const frozenIds = frozenReferenceIds(ctx);
     const references = loadReferenceSummary(db, sessionId, frozenIds);
-    // Sole rN->UUID source: the frozen current-turn ordinal map. Fixed for
-    // the whole Run (frozen context never rewrites, including on Retry).
-    const frozenOrdinalMap = loadFrozenOrdinalMap(db, sessionId, frozenIds);
+    // Per-run known rN->UUID map (r3943599549): seeded ONLY from the frozen
+    // current-turn context (frozen context never rewrites, including on
+    // Retry), then extended across steps ONLY by structural
+    // `{ ordinal, referenceId }` pairs actually present in size-accepted
+    // delivered feedback (search / refresh / related newly expose rNs).
+    // The map is addressability only and never a grant; unknown, omitted,
+    // oversized, or undelivered rNs stay unresolved and fail via ToolBroker.
+    // No semantic lookup, no cross-session reuse. Scoped to this Run.
+    const knownOrdinalMap = loadFrozenOrdinalMap(db, sessionId, frozenIds);
     const messages = projectPrompt({
       requestText,
       history,
@@ -1121,7 +1196,7 @@ export function createAgentStrategy(
             runId,
             sessionId,
             calls: classification.calls,
-            frozenOrdinalMap,
+            knownOrdinalMap,
             signal: ctx.signal,
             wallSignal: wallController.signal,
             expireWall,
@@ -1890,20 +1965,25 @@ export function classifyStep(
  * Execute ordinary tool calls through ToolBroker with at most
  * AGENT_TOOL_CONCURRENCY physical executions, preserving request order
  * (never dropping for count alone). Reference `rN` arguments translate to
- * UUIDs from the frozen current-turn ordinal map immediately before each
- * broker call; every model-caused call (including translation failures)
- * still traverses ToolBroker and consumes its normal budget. Successful
- * reference payloads create/upgrade current-run EvidenceGrants from the
- * ORIGINAL delivered payload, while model feedback carries only the
- * UUID-free `rN` projection. Returns one deterministic per-call feedback
- * payload in request order; the caller emits one provider-neutral
+ * UUIDs from the per-run known ordinal map (seeded from the frozen
+ * current-turn context, then extended only by size-accepted delivered
+ * feedback in earlier steps) immediately before each broker call; every
+ * model-caused call (including translation failures) still traverses
+ * ToolBroker and consumes its normal budget. Successful reference payloads
+ * create/upgrade current-run EvidenceGrants from the ORIGINAL delivered
+ * payload, while model feedback carries only the UUID-free `rN`
+ * projection. Size-accepted delivered payloads additionally teach the
+ * per-run known map their structural `{ ordinal, referenceId }` pairs
+ * (addressability only, never a grant); oversized omitted, rejected, or
+ * undelivered content teaches nothing. Returns one deterministic per-call
+ * feedback payload in request order; the caller emits one provider-neutral
  * `role: tool` message per call with the matching `toolCallId` plus the
  * originating `toolName`. The Run wall signal is shared with every broker
  * invocation (composed with the engine signal): wall expiry aborts queued
  * and running connector work (the broker detaches) before the Run fails
- * with a fixed code, and no post-wall feedback, grants, or model steps
- * are produced. Engine cancellation keeps priority so user cancellation
- * is never misclassified as a wall failure.
+ * with a fixed code, and no post-wall feedback, grants, mappings, or model
+ * steps are produced. Engine cancellation keeps priority so user
+ * cancellation is never misclassified as a wall failure.
  */
 async function executeOrdinaryTools(args: {
   db: Database.Database;
@@ -1912,7 +1992,7 @@ async function executeOrdinaryTools(args: {
   runId: string;
   sessionId: string;
   calls: readonly NormalizedToolCall[];
-  frozenOrdinalMap: ReadonlyMap<number, string>;
+  knownOrdinalMap: Map<number, string>;
   signal: AbortSignal;
   wallSignal: AbortSignal;
   expireWall: () => void;
@@ -1927,7 +2007,7 @@ async function executeOrdinaryTools(args: {
     runId,
     sessionId,
     calls,
-    frozenOrdinalMap,
+    knownOrdinalMap,
     signal,
     wallSignal,
     expireWall,
@@ -2017,7 +2097,7 @@ async function executeOrdinaryTools(args: {
               arguments: translateReferenceArgs(
                 call.name,
                 call.arguments,
-                frozenOrdinalMap,
+                knownOrdinalMap,
               ),
             };
             const out = await broker.invoke(
@@ -2110,6 +2190,7 @@ async function executeOrdinaryTools(args: {
       sanitized,
     );
     if (isToolFeedbackOversized(full)) {
+      // Oversized omission teaches nothing: no grant, no addressability.
       return {
         toolCallId,
         toolName,
@@ -2118,6 +2199,9 @@ async function executeOrdinaryTools(args: {
     }
     if (entry.ok && entry.data !== null && entry.data !== undefined) {
       grantDeliveredReferences(repo, sessionId, runId, entry.data);
+      // Addressability is distinct from evidence: newly exposed ordinals
+      // become resolvable for LATER steps only (this phase already ran).
+      learnKnownOrdinalMappings(knownOrdinalMap, entry.data);
     }
     return { toolCallId, toolName, content: full };
   });
