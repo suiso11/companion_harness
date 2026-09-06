@@ -18,6 +18,7 @@ import {
   M0_RUN_ERROR_CODES,
   M0_RUN_EVENT_TYPES,
   M0_TOOL_ERROR_CODES,
+  M0EventsResponseSchema,
   M0ToolErrorCodeSchema,
   M0ToolResultSchema,
   M1_TOOL_ERROR_CODES,
@@ -246,13 +247,21 @@ describe("defaults and bounds", () => {
   });
 
   it("empty responses keep the request cursor (nextAfter == after)", () => {
-    const page = EventsResponseSchema.parse({
+    const page = M0EventsResponseSchema.parse({
       events: [],
       nextAfter: 7,
       hasMore: false,
       terminal: true,
     });
     expect(page.nextAfter).toBe(7);
+    // Generic/latest HTTP page keeps the same cursor semantics.
+    const latest = EventsResponseSchema.parse({
+      events: [],
+      nextAfter: 7,
+      hasMore: false,
+      terminal: true,
+    });
+    expect(latest.nextAfter).toBe(7);
   });
 
   it("history response caps items at 100", () => {

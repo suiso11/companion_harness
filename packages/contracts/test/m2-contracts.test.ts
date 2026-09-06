@@ -15,6 +15,7 @@ import {
   M0_RUN_ERROR_CODES,
   M0_RUN_EVENT_TYPES,
   M0_TOOL_ERROR_CODES,
+  M0EventsResponseSchema,
   M0RunEventSchema,
   M1_RUN_EVENT_PAYLOAD_SCHEMAS,
   M1_RUN_EVENT_TYPES,
@@ -540,15 +541,24 @@ describe("M2/latest event registry (model.step.* non-terminal)", () => {
           terminal: false,
         }),
       ).toThrow();
-      // Frozen M0 page rejects them too.
+      // Exact M0 HTTP page rejects them too.
       expect(() =>
-        EventsResponseSchema.parse({
+        M0EventsResponseSchema.parse({
           events: [envelope(type, payload)],
           nextAfter: 1,
           hasMore: false,
           terminal: false,
         }),
       ).toThrow();
+      // Generic/latest HTTP page accepts them (aligns with getEvents).
+      expect(
+        EventsResponseSchema.parse({
+          events: [envelope(type, payload)],
+          nextAfter: 1,
+          hasMore: false,
+          terminal: false,
+        }).events,
+      ).toHaveLength(1);
     }
   });
 
@@ -635,6 +645,54 @@ describe("M2/latest event registry (model.step.* non-terminal)", () => {
         hasMore: false,
         terminal: false,
         extra: 1,
+      }),
+    ).toThrow();
+  });
+
+  it("generic/latest HTTP page matches LatestRunEvent (V2 + steps, closed)", () => {
+    const durable = {
+      version: 2,
+      text: "first\n\nsecond",
+      answer: {
+        version: 1,
+        parts: [
+          { text: "first", citations: [] },
+          { text: "second", citations: ["r1"] },
+        ],
+      },
+    };
+    const page = EventsResponseSchema.parse({
+      events: [
+        envelope("model.step.started", { step: 1 }),
+        envelope("run.completed", { result: durable }),
+      ],
+      nextAfter: 2,
+      hasMore: false,
+      terminal: true,
+    });
+    expect(page.events).toHaveLength(2);
+    // Unknown future names are still rejected by the closed latest registry.
+    expect(() =>
+      EventsResponseSchema.parse({
+        events: [envelope("model.step.delta", {})],
+        nextAfter: 1,
+        hasMore: false,
+        terminal: false,
+      }),
+    ).toThrow();
+    // No raw model content leaks through the accepted step payload.
+    expect(() =>
+      EventsResponseSchema.parse({
+        events: [
+          envelope("model.step.completed", {
+            step: 1,
+            durationMs: 1,
+            text: "leaked output",
+          }),
+        ],
+        nextAfter: 1,
+        hasMore: false,
+        terminal: false,
       }),
     ).toThrow();
   });

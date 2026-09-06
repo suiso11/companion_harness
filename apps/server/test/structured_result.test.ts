@@ -8,7 +8,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   buildRunResultV2,
+  EventsResponseSchema,
+  M0EventsResponseSchema,
   M0RunEventSchema,
+  M1EventsResponseSchema,
   parseM0RunEvent,
 } from "@companion/contracts";
 import {
@@ -99,6 +102,12 @@ describe("structured result over HTTP (V2 durable, M0 pinned)", () => {
       const done = eventsBody.events.find((e) => e.type === "run.completed");
       expect(done?.payload.result).toEqual(durable);
 
+      // Generic/latest HTTP page aligns with repository output (V2 row).
+      expect(() => EventsResponseSchema.parse(eventsBody)).not.toThrow();
+      expect(
+        EventsResponseSchema.parse(eventsBody).events.map((e) => e.type),
+      ).toContain("run.completed");
+
       // Exact M0 envelope acceptance is unchanged: V2 rows are rejected.
       expect(() =>
         parseM0RunEvent({
@@ -120,6 +129,64 @@ describe("structured result over HTTP (V2 durable, M0 pinned)", () => {
           payload: { result: { version: 1, text: "legacy" } },
         }),
       ).not.toThrow();
+    } finally {
+      f.close();
+    }
+  });
+
+  it("serves model.step.* via the generic/latest page; exact M0/M1 pages reject them", async () => {
+    const f = await makeApp();
+    try {
+      const sessionId = f.repo.createSession({
+        key: randomUUID(),
+        now: T0,
+      }).body.sessionId;
+      const posted = f.repo.postMessage(
+        sessionId,
+        { text: "agent work" },
+        { key: randomUUID(), now: T0 + 1 },
+      );
+      const runId = posted.body.run.id;
+      f.repo.appendModelStepEvent(
+        runId,
+        "model.step.started",
+        { step: 1 },
+        { now: T0 + 2 },
+      );
+
+      const events = await f.app.request(
+        `/api/sessions/${sessionId}/runs/${runId}/events`,
+        { headers: { host: "127.0.0.1" } },
+      );
+      expect(events.status).toBe(200);
+      const eventsBody = (await events.json()) as unknown;
+      // Generic/latest HTTP page validates the repository output.
+      const page = EventsResponseSchema.parse(eventsBody);
+      expect(page.events.map((e) => e.type)).toContain("model.step.started");
+      // Structural metadata only: no prompt/content/raw output keys.
+      const started = page.events.find(
+        (e) => e.type === "model.step.started",
+      ) as unknown as { payload: Record<string, unknown> };
+      expect(started.payload).toEqual({ step: 1 });
+      // Exact legacy pages stay closed: M0 and M1 both reject model.step.*.
+      expect(() => M0EventsResponseSchema.parse(eventsBody)).toThrow();
+      expect(() => M1EventsResponseSchema.parse(eventsBody)).toThrow();
+      // Unknown future event names are still rejected by the latest page.
+      expect(() =>
+        EventsResponseSchema.parse({
+          ...(page as Record<string, unknown>),
+          events: [
+            {
+              schemaVersion: 1,
+              runId,
+              seq: 999,
+              createdAt: T0,
+              type: "model.step.delta",
+              payload: {},
+            },
+          ],
+        }),
+      ).toThrow();
     } finally {
       f.close();
     }

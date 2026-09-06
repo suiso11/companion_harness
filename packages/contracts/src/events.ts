@@ -395,7 +395,7 @@ export const LATEST_RUN_EVENT_PAYLOAD_SCHEMAS = M2_RUN_EVENT_PAYLOAD_SCHEMAS;
 /**
  * Latest (M2) events page: same cursor semantics as the M0/M1 pages, but
  * events may include `reference.presented` and `model.step.*`. The exact
- * M0 page (`EventsResponseSchema` in http.ts) and the exact M1 page
+ * M0 page (`M0EventsResponseSchema` in http.ts) and the exact M1 page
  * (`M1EventsResponseSchema` above) are untouched.
  */
 export const M2EventsResponseSchema = z.strictObject({
