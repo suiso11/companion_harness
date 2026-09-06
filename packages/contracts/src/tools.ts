@@ -102,21 +102,87 @@ export const M0_TOOL_ERROR_CODES = [
   "output_too_large",
 ] as const;
 
-export const ToolErrorCodeSchema = z.enum(M0_TOOL_ERROR_CODES);
-export type ToolErrorCode = z.infer<typeof ToolErrorCodeSchema>;
+/** Exact M0 tool error-code schema (schemaVersion=1, exactly nine codes). */
+export const M0ToolErrorCodeSchema = z.enum(M0_TOOL_ERROR_CODES);
+export type M0ToolErrorCode = z.infer<typeof M0ToolErrorCodeSchema>;
+
+/**
+ * Exact M1 additions only (deterministic Markdown connector failure codes
+ * plus the reference-handler code, §14.6): per-file oversize/invalid UTF-8
+ * are NEVER errors (they belong in the search `skipped` list); unsafe
+ * paths and vault >10000 fail the whole call.
+ */
+export const M1_TOOL_ERROR_CODES = [
+  "markdown_vault_too_large",
+  "markdown_path_unsafe",
+  "markdown_read_failed",
+  "markdown_read_changed",
+  "reference_not_found",
+] as const;
+export type M1ToolErrorCodeNew = (typeof M1_TOOL_ERROR_CODES)[number];
+export const M1ToolErrorCodeNewSchema = z.enum(M1_TOOL_ERROR_CODES);
+
+/**
+ * Closed M1 tool error vocabulary: the exact M0 nine plus the exact M1
+ * five (14 total, explicit closed union, never regex/free text; no M2+
+ * codes). Generic/latest validation accepts all fourteen; exact M0
+ * validation accepts only the nine above.
+ */
+export const LATEST_TOOL_ERROR_CODES = [
+  ...M0_TOOL_ERROR_CODES,
+  ...M1_TOOL_ERROR_CODES,
+] as const;
+export type LatestToolErrorCode = (typeof LATEST_TOOL_ERROR_CODES)[number];
+
+/** Latest (M1) tool error-code schema: closed M0+M1 union (14 codes). */
+export const M1ToolErrorCodeSchema = z.enum(LATEST_TOOL_ERROR_CODES);
+export type M1ToolErrorCode = z.infer<typeof M1ToolErrorCodeSchema>;
+
+/** Alias: M1 is the latest schema version served. */
+export const LatestToolErrorCodeSchema = M1ToolErrorCodeSchema;
+export type ToolErrorCode = z.infer<typeof LatestToolErrorCodeSchema>;
+
+/** Generic tool error-code schema: latest (M0+M1, 14 codes). */
+export const ToolErrorCodeSchema = LatestToolErrorCodeSchema;
 
 /** Known M0 tool error codes (alias of the closed M0 vocabulary). */
 export const KNOWN_M0_TOOL_ERROR_CODES = M0_TOOL_ERROR_CODES;
 
-/** Schema-versioned tool error-code registry. M0 serves version 1 only. */
+/** Known latest (M0+M1) tool error codes (closed 14-code vocabulary). */
+export const KNOWN_LATEST_TOOL_ERROR_CODES = LATEST_TOOL_ERROR_CODES;
+
+/** Exact M0 schema-versioned tool error-code registry (version 1 only). */
 export const TOOL_ERROR_CODE_REGISTRY = {
-  1: ToolErrorCodeSchema,
+  1: M0ToolErrorCodeSchema,
 } as const;
 export type ToolErrorSchemaVersion = keyof typeof TOOL_ERROR_CODE_REGISTRY;
 
-/** Parse a tool error code for the M0 schema version; rejects unknown codes. */
-export function parseToolErrorCode(data: unknown): ToolErrorCode {
+/** Latest (M1) schema-versioned tool error-code registry. */
+export const M1_TOOL_ERROR_CODE_REGISTRY = {
+  1: M1ToolErrorCodeSchema,
+} as const;
+export type M1ToolErrorSchemaVersion = keyof typeof M1_TOOL_ERROR_CODE_REGISTRY;
+
+/** Alias: M1 is the latest schema version served. */
+export const LATEST_TOOL_ERROR_CODE_REGISTRY = M1_TOOL_ERROR_CODE_REGISTRY;
+export type LatestToolErrorSchemaVersion = M1ToolErrorSchemaVersion;
+
+/** Parse a tool error code with the exact M0 registry (rejects M1+ codes). */
+export function parseM0ToolErrorCode(data: unknown): M0ToolErrorCode {
   return TOOL_ERROR_CODE_REGISTRY[1].parse(data);
+}
+
+/** Parse a tool error code with the latest (M0+M1) registry. */
+export function parseM1ToolErrorCode(data: unknown): M1ToolErrorCode {
+  return M1_TOOL_ERROR_CODE_REGISTRY[1].parse(data);
+}
+
+/** Alias: M1 is the latest schema version served. */
+export const parseLatestToolErrorCode = parseM1ToolErrorCode;
+
+/** Parse a tool error code for the latest schema version (M0+M1). */
+export function parseToolErrorCode(data: unknown): ToolErrorCode {
+  return LATEST_TOOL_ERROR_CODE_REGISTRY[1].parse(data);
 }
 
 /**
@@ -146,8 +212,25 @@ export function parseRunErrorCode(data: unknown): RunErrorCode {
 }
 
 /**
+ * Exact M0 tool outcome record: error codes limited to the M0 nine.
+ * Retained verbatim for M0 assertions.
+ */
+export const M0ToolResultSchema = z.strictObject({
+  tool: ToolNameSchema,
+  callIndex: z.number().int().min(1),
+  actualOutcome: ActualOutcomeSchema,
+  reportedOutcome: ReportedOutcomeSchema.nullable().default(null),
+  disposition: ResultDispositionSchema,
+  errorCode: M0ToolErrorCodeSchema.nullable().default(null),
+  resultDigest: Sha256HexSchema.nullable().default(null),
+  reusedFromCallId: UuidSchema.nullable().default(null),
+  finishedAt: UnixMsSchema.nullable().default(null),
+});
+export type M0ToolResult = z.infer<typeof M0ToolResultSchema>;
+
+/**
  * Serializable tool outcome record. Audit-only: digests and codes, never
- * raw args / results / content (§12.4).
+ * raw args / results / content (§12.4). Generic/latest accepts M0+M1 codes.
  */
 export const ToolResultSchema = z.strictObject({
   tool: ToolNameSchema,
@@ -155,9 +238,15 @@ export const ToolResultSchema = z.strictObject({
   actualOutcome: ActualOutcomeSchema,
   reportedOutcome: ReportedOutcomeSchema.nullable().default(null),
   disposition: ResultDispositionSchema,
-  errorCode: ToolErrorCodeSchema.nullable().default(null),
+  errorCode: LatestToolErrorCodeSchema.nullable().default(null),
   resultDigest: Sha256HexSchema.nullable().default(null),
   reusedFromCallId: UuidSchema.nullable().default(null),
   finishedAt: UnixMsSchema.nullable().default(null),
 });
 export type ToolResult = z.infer<typeof ToolResultSchema>;
+
+/** Alias: M1/latest tool outcome record (M0+M1 codes). */
+export const M1ToolResultSchema = ToolResultSchema;
+export type M1ToolResult = ToolResult;
+export const LatestToolResultSchema = ToolResultSchema;
+export type LatestToolResult = ToolResult;

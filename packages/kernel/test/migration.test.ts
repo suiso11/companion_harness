@@ -70,7 +70,7 @@ function tableNames(db: Database.Database): string[] {
 }
 
 const BACKUP_NAME_PATTERN =
-  /^companion-pre-migration-v0-to-v1-\d{8}T\d{6}Z-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.sqlite$/;
+  /^companion-pre-migration-v0-to-v3-\d{8}T\d{6}Z-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.sqlite$/;
 
 function stripComments(src: string): string {
   return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|\s)\/\/.*$/gm, "$1");
@@ -91,7 +91,7 @@ describe("m0 migration lifecycle", () => {
         migrated: true,
         fromVersion: 0,
         toVersion: BUNDLED_SCHEMA_VERSION,
-        applied: [1],
+        applied: [1, 2, 3],
       });
       expect(result.backupPath).toBeUndefined();
       expect(getSchemaVersion(handle.raw)).toBe(BUNDLED_SCHEMA_VERSION);
@@ -166,7 +166,7 @@ describe("m0 migration lifecycle", () => {
       });
       expect(result.migrated).toBe(true);
       expect(result.backupPath).toMatch(
-        /companion-pre-migration-v0-to-v1-.*\.sqlite$/,
+        /companion-pre-migration-v0-to-v3-.*\.sqlite$/,
       );
       const name = (result.backupPath as string).split(/[\\/]/).pop() as string;
       expect(name).toMatch(BACKUP_NAME_PATTERN);
@@ -502,6 +502,39 @@ describe("m0 storage helpers and provenance", () => {
     expect(sql).toContain("CREATE TABLE sessions");
     expect(sql).toContain("CREATE TABLE api_idempotency");
     expect(sql).toContain("idx_runs_one_active_per_session");
+    const m1 = readFileSync(
+      join(kernelDir, "migrations", "0002_m1_references.sql"),
+      "utf8",
+    );
+    for (const table of [
+      "connector_instances",
+      "resources",
+      "resource_snapshots",
+      "session_references",
+      "reference_sets",
+      "reference_set_items",
+      "session_reference_context",
+      "evidence_grants",
+    ]) {
+      expect(m1).toContain(`CREATE TABLE ${table}`);
+    }
+    expect(m1).toContain("next_reference_ordinal");
+    expect(m1).not.toContain("WITHOUT ROWID");
+    expect(m1).not.toMatch(/UNIQUE\s*\(\s*resource_id\s*,\s*content_hash\s*\)/);
+    const m3 = readFileSync(
+      join(kernelDir, "migrations", "0003_m1_snapshot_links.sql"),
+      "utf8",
+    );
+    expect(m3).toContain("CREATE TABLE snapshot_links");
+    expect(m3).toContain("candidates_json");
+    expect(m3).toContain("json_valid");
+    expect(m3).toContain("json_array_length");
+    expect(m3).not.toContain("WITHOUT ROWID");
+    // The file header documents the no-raw-link-text invariant by naming the
+    // forbidden tokens, so check the executable DDL only (strip `--` comments).
+    const m3Code = m3.replace(/--[^\n]*/g, "");
+    expect(m3Code).not.toMatch(/raw_url|rawUrl|fragment|alias/);
+    expect(BUNDLED_SCHEMA_VERSION).toBe(3);
     const journal = JSON.parse(
       readFileSync(
         join(kernelDir, "migrations", "meta", "_journal.json"),
@@ -510,6 +543,12 @@ describe("m0 storage helpers and provenance", () => {
     ) as { entries: Array<{ tag: string }> };
     expect(journal.entries.map((entry) => entry.tag)).toContain(
       "0001_m0_foundation",
+    );
+    expect(journal.entries.map((entry) => entry.tag)).toContain(
+      "0002_m1_references",
+    );
+    expect(journal.entries.map((entry) => entry.tag)).toContain(
+      "0003_m1_snapshot_links",
     );
     const backupSrc = readFileSync(join(kernelDir, "src", "backup.ts"), "utf8");
     expect(backupSrc).toContain(".backup(");
@@ -530,5 +569,277 @@ describe("m0 storage helpers and provenance", () => {
     };
     expect(kernelPkg.dependencies ?? {}).not.toHaveProperty("drizzle-kit");
     expect(kernelPkg.devDependencies ?? {}).not.toHaveProperty("drizzle-kit");
+  });
+});
+
+describe("m1 reference storage migration", () => {
+  const M1_TABLES = [
+    "connector_instances",
+    "resources",
+    "resource_snapshots",
+    "session_references",
+    "reference_sets",
+    "reference_set_items",
+    "session_reference_context",
+    "evidence_grants",
+  ];
+
+  it("migrates fresh 0 -> 3 applying all migrations", async () => {
+    const dir = tempDir();
+    const file = join(dir, "kernel.sqlite");
+    const backups = join(dir, "backups");
+    const handle = openKernelDatabase(file);
+    try {
+      const result = await migrateKernelDatabase({
+        db: handle.raw,
+        backupDir: backups,
+      });
+      expect(result).toMatchObject({
+        migrated: true,
+        fromVersion: 0,
+        toVersion: 3,
+        applied: [1, 2, 3],
+      });
+      expect(result.backupPath).toBeUndefined();
+      expect(getSchemaVersion(handle.raw)).toBe(3);
+      const names = tableNames(handle.raw);
+      for (const table of M1_TABLES) {
+        expect(names).toContain(table);
+      }
+      // The link graph arrives with migration 0003 only.
+      expect(names).toContain("snapshot_links");
+      expect(names).not.toContain("resource_links");
+      expect(names).not.toContain("markdown_links");
+      const col = handle.raw
+        .prepare("PRAGMA table_info(sessions)")
+        .all() as Array<{ name: string }>;
+      expect(col.map((c) => c.name)).toContain("next_reference_ordinal");
+      expect(readdirSync(dir)).not.toContain("backups");
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("upgrades v1 -> 3 with a pre-upgrade backup preserving v1 data", async () => {
+    const dir = tempDir();
+    const file = join(dir, "kernel.sqlite");
+    const backups = join(dir, "backups");
+    const sessionId = randomUUID();
+    const turnId = randomUUID();
+    const runId = randomUUID();
+    const setup = openKernelDatabase(file);
+    try {
+      const first = await migrateKernelDatabase({
+        db: setup.raw,
+        backupDir: backups,
+        targetVersion: 1,
+      });
+      expect(first.applied).toEqual([1]);
+      setup.raw
+        .prepare(
+          "INSERT INTO sessions (id, created_at, last_active_at, next_turn_position) VALUES (?, 1, 1, 1)",
+        )
+        .run(sessionId);
+      setup.raw
+        .prepare(
+          "INSERT INTO turns (id, session_id, seq, input_json, frozen_context, created_at, next_run_attempt) VALUES (?, ?, 1, '{}', '{}', 1, 1)",
+        )
+        .run(turnId, sessionId);
+      setup.raw
+        .prepare(
+          "INSERT INTO runs (id, turn_id, session_id, attempt, status, strategy, event_seq, select_on_success, tool_requests_used, created_at) VALUES (?, ?, ?, 1, 'queued', 's', 0, 1, 0, 1)",
+        )
+        .run(runId, turnId, sessionId);
+    } finally {
+      closeKernelDatabase(setup);
+    }
+
+    const handle = openKernelDatabase(file);
+    try {
+      const result = await migrateKernelDatabase({
+        db: handle.raw,
+        backupDir: backups,
+        now: new Date("2026-09-04T03:59:59.000Z"),
+        backupId: "11111111-2222-4333-8444-555555555555",
+      });
+      expect(result).toMatchObject({
+        migrated: true,
+        fromVersion: 1,
+        toVersion: 3,
+        applied: [2, 3],
+      });
+      expect(result.backupPath).toMatch(
+        /companion-pre-migration-v1-to-v3-.*\.sqlite$/,
+      );
+      expect(
+        readdirSync(backups).filter((entry) => entry.endsWith(".partial")),
+      ).toEqual([]);
+      // Backup preserves the v1 rows with the v1 schema version.
+      const copy = new Database(result.backupPath as string, {
+        readonly: true,
+      });
+      try {
+        expect(quickCheck(copy)).toBe("ok");
+        expect(Number(copy.pragma("user_version", { simple: true }))).toBe(1);
+        const kept = copy
+          .prepare("SELECT id FROM runs WHERE id = ?")
+          .get(runId) as { id: string } | undefined;
+        expect(kept?.id).toBe(runId);
+        const backupTables = (
+          copy
+            .prepare(
+              "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+            )
+            .all() as Array<{ name: string }>
+        ).map((row) => row.name);
+        expect(backupTables).not.toContain("session_references");
+      } finally {
+        copy.close();
+      }
+      // Live DB keeps the v1 rows and gains the M1 tables plus the graph.
+      expect(getSchemaVersion(handle.raw)).toBe(3);
+      const kept = handle.raw
+        .prepare("SELECT id FROM runs WHERE id = ?")
+        .get(runId) as { id: string } | undefined;
+      expect(kept?.id).toBe(runId);
+      const names = tableNames(handle.raw);
+      for (const table of M1_TABLES) {
+        expect(names).toContain(table);
+      }
+      const ordinal = handle.raw
+        .prepare(
+          "SELECT next_reference_ordinal AS v FROM sessions WHERE id = ?",
+        )
+        .get(sessionId) as { v: number };
+      expect(ordinal.v).toBe(1);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("upgrades v2 -> 3 with a pre-upgrade backup preserving v2 data", async () => {
+    const dir = tempDir();
+    const file = join(dir, "kernel.sqlite");
+    const backups = join(dir, "backups");
+    const sessionId = randomUUID();
+    const setup = openKernelDatabase(file);
+    try {
+      const first = await migrateKernelDatabase({
+        db: setup.raw,
+        backupDir: backups,
+        targetVersion: 2,
+      });
+      expect(first.applied).toEqual([1, 2]);
+      setup.raw
+        .prepare(
+          "INSERT INTO sessions (id, created_at, last_active_at, next_turn_position) VALUES (?, 1, 1, 1)",
+        )
+        .run(sessionId);
+    } finally {
+      closeKernelDatabase(setup);
+    }
+
+    const handle = openKernelDatabase(file);
+    try {
+      const result = await migrateKernelDatabase({
+        db: handle.raw,
+        backupDir: backups,
+        now: new Date("2026-09-04T03:59:59.000Z"),
+        backupId: "11111111-2222-4333-8444-555555555555",
+      });
+      expect(result).toMatchObject({
+        migrated: true,
+        fromVersion: 2,
+        toVersion: 3,
+        applied: [3],
+      });
+      expect(result.backupPath).toMatch(
+        /companion-pre-migration-v2-to-v3-.*\.sqlite$/,
+      );
+      expect(
+        readdirSync(backups).filter((entry) => entry.endsWith(".partial")),
+      ).toEqual([]);
+      const copy = new Database(result.backupPath as string, {
+        readonly: true,
+      });
+      try {
+        expect(quickCheck(copy)).toBe("ok");
+        expect(Number(copy.pragma("user_version", { simple: true }))).toBe(2);
+        const backupTables = (
+          copy
+            .prepare(
+              "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+            )
+            .all() as Array<{ name: string }>
+        ).map((row) => row.name);
+        expect(backupTables).not.toContain("snapshot_links");
+      } finally {
+        copy.close();
+      }
+      expect(getSchemaVersion(handle.raw)).toBe(3);
+      expect(tableNames(handle.raw)).toContain("snapshot_links");
+      const kept = handle.raw
+        .prepare("SELECT id FROM sessions WHERE id = ?")
+        .get(sessionId) as { id: string } | undefined;
+      expect(kept?.id).toBe(sessionId);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("requires a backup directory for v1 -> 3 on a non-empty DB", async () => {
+    const dir = tempDir();
+    const file = join(dir, "kernel.sqlite");
+    const setup = openKernelDatabase(file);
+    try {
+      await migrateKernelDatabase({
+        db: setup.raw,
+        backupDir: join(dir, "backups"),
+        targetVersion: 1,
+      });
+      setup.raw
+        .prepare(
+          "INSERT INTO sessions (id, created_at, last_active_at, next_turn_position) VALUES (?, 1, 1, 1)",
+        )
+        .run(randomUUID());
+    } finally {
+      closeKernelDatabase(setup);
+    }
+    const handle = openKernelDatabase(file);
+    try {
+      await expect(
+        migrateKernelDatabase({ db: handle.raw }),
+      ).rejects.toBeInstanceOf(BackupRequiredError);
+      expect(getSchemaVersion(handle.raw)).toBe(1);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("rejects a newer v4 DB without side effects", async () => {
+    const dir = tempDir();
+    const file = join(dir, "kernel.sqlite");
+    const backups = join(dir, "backups");
+    const handle = openKernelDatabase(file);
+    try {
+      await migrateKernelDatabase({ db: handle.raw, backupDir: backups });
+      setSchemaVersion(handle.raw, 4);
+      const failure = await migrateKernelDatabase({
+        db: handle.raw,
+        backupDir: backups,
+      }).then(
+        () => null,
+        (error: unknown) => error,
+      );
+      expect(failure).toBeInstanceOf(NewerDatabaseError);
+      expect((failure as NewerDatabaseError).currentVersion).toBe(4);
+      expect(getSchemaVersion(handle.raw)).toBe(4);
+      const names = tableNames(handle.raw);
+      for (const table of M1_TABLES) {
+        expect(names).toContain(table);
+      }
+    } finally {
+      closeKernelDatabase(handle);
+    }
   });
 });

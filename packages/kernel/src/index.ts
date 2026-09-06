@@ -39,6 +39,7 @@ export type {
   PipelineStepInfo,
   ToolBrokerBudgets,
   ToolBrokerOptions,
+  ToolDedupMode,
   ToolFreshness,
   ToolHandler,
   ToolHandlerContext,
@@ -94,13 +95,18 @@ export {
 export {
   BackupError,
   BackupRequiredError,
+  DatabaseStateInvalidError,
   IdempotencyConflictError,
+  InvalidReferenceError,
   KernelStorageError,
+  LinkGraphTooLargeError,
   MigrationFailedError,
   MigrationMissingError,
   NewerDatabaseError,
   PragmasError,
   QuickCheckError,
+  ReferenceNotFoundError,
+  ReferenceVersionConflictError,
   RepositoryNotFoundError,
   RepositoryValidationError,
   SessionBusyError,
@@ -119,6 +125,21 @@ export {
   successResult,
 } from "./fakes.js";
 export type {
+  CreateM1ToolRegistrationsOptions,
+  MarkdownConnectorBinding,
+  MarkdownConnectorPort,
+  MarkdownPortDocument,
+  MarkdownPortSearchHit,
+  MarkdownPortSearchResult,
+  MarkdownPortSkipped,
+  MarkdownPortStandardLink,
+  MarkdownPortWikiLink,
+} from "./markdown_tools.js";
+export {
+  createM1ReferenceTools,
+  createM1ToolRegistrations,
+} from "./markdown_tools.js";
+export type {
   BundledMigration,
   MigrateOptions,
   MigrateResult,
@@ -132,6 +153,31 @@ export {
   migrateKernelDatabase,
   setSchemaVersion,
 } from "./migrate.js";
+export type {
+  EnsureMarkdownConnectorOptions,
+  FreshnessKind,
+  MarkdownConnectorView,
+  ObservationLink,
+  PresentedReferenceView,
+  PresentObservationsResult,
+  PresentStoredResult,
+  ReferenceManager,
+  RelatedStoredView,
+  ResourceObservation,
+} from "./reference_manager.js";
+export {
+  createReferenceManager,
+  deriveSnippet,
+  RELATED_DEFAULT_LIMIT,
+  RELATED_MAX_LIMIT,
+} from "./reference_manager.js";
+export type {
+  ReferenceResolver,
+  ResolverOutcome,
+  ResolverReferenceView,
+  ResolveStringOptions,
+} from "./reference_resolver.js";
+export { createReferenceResolver } from "./reference_resolver.js";
 export type {
   AcceptedResponse,
   CreateSessionOptions,
@@ -147,10 +193,19 @@ export type {
 export { createKernelRepository } from "./repository.js";
 export {
   apiIdempotency,
+  connectorInstances,
+  evidenceGrants,
   kernelSchema,
+  referenceSetItems,
+  referenceSets,
+  resourceSnapshots,
+  resources,
   runEvents,
   runs,
+  sessionReferenceContext,
+  sessionReferences,
   sessions,
+  snapshotLinks,
   toolCalls,
   turnSelections,
   turns,

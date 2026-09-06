@@ -11,6 +11,8 @@ import { join } from "node:path";
 import {
   closeKernelDatabase,
   createKernelRepository,
+  createReferenceManager,
+  generateId,
   type KernelRepository,
   migrateKernelDatabase,
   openKernelDatabase,
@@ -934,6 +936,296 @@ describe("M0 review regressions", () => {
           body: "{}",
         });
         expect(post.status).toBe(404);
+      }
+    } finally {
+      f.close();
+    }
+  });
+});
+
+describe("M1 stored-only references", () => {
+  const T0 = 1790000000000;
+  async function seededRefs(f: Fixture): Promise<{
+    sessionId: string;
+    referenceId: string;
+    setId: string;
+    secret: string;
+  }> {
+    const sessionId = f.repo.createSession({
+      key: randomUUID(),
+      now: T0,
+    }).body.sessionId;
+    const posted = f.repo.postMessage(
+      sessionId,
+      { text: "q" },
+      { key: randomUUID(), now: T0 },
+    ).body;
+    f.repo.startRun(posted.run.id, { now: T0 + 1 });
+    const manager = createReferenceManager(
+      f.raw as unknown as Parameters<typeof createReferenceManager>[0],
+    );
+    const connector = manager.ensureMarkdownConnectorInstance("vault", 1, {
+      now: T0,
+    });
+    const secret = `stored-secret-${randomUUID()}`;
+    const presented = manager.presentObservations(
+      sessionId,
+      posted.run.id,
+      [
+        {
+          connectorInstanceId: connector.id,
+          canonicalKey: "notes/a.md",
+          title: "A",
+          text: secret,
+          sourceRevision: "rev-1",
+          observedAt: T0,
+        },
+      ],
+      { freshness: "normal", now: T0 + 2 },
+    );
+    if (!presented.applied || presented.setId === null) {
+      throw new Error("expected presentation to apply");
+    }
+    const referenceId = presented.references[0]?.referenceId;
+    if (referenceId === undefined) {
+      throw new Error("expected a presented reference");
+    }
+    return { sessionId, referenceId, setId: presented.setId, secret };
+  }
+
+  function getHeaders(): Record<string, string> {
+    return { host: "127.0.0.1" };
+  }
+
+  async function putContext(
+    app: CreatedServerApp["app"],
+    path: string,
+    body: unknown,
+  ): Promise<Response> {
+    return app.request(path, {
+      method: "PUT",
+      headers: { ...postHeaders() },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it("serves stored GETs with saved bodies and creates no events/grants", async () => {
+    const f = await makeApp();
+    try {
+      const { sessionId, referenceId, setId, secret } = await seededRefs(f);
+      const eventsBefore = count(f.db, "run_events");
+      const grantsBefore = count(f.db, "evidence_grants");
+      const list = await f.app.request(
+        `/api/sessions/${sessionId}/references`,
+        { headers: getHeaders() },
+      );
+      expect(list.status).toBe(200);
+      const listBody = (await list.json()) as {
+        items: Array<{ id: string; ordinal: number }>;
+      };
+      expect(listBody.items).toHaveLength(1);
+      expect(listBody.items[0]?.id).toBe(referenceId);
+      const detail = await f.app.request(
+        `/api/sessions/${sessionId}/references/${referenceId}`,
+        { headers: getHeaders() },
+      );
+      expect(detail.status).toBe(200);
+      const detailBody = (await detail.json()) as {
+        reference: { id: string; sessionId: string };
+        body: { version: number; text: string };
+      };
+      expect(detailBody.reference.id).toBe(referenceId);
+      expect(detailBody.reference.sessionId).toBe(sessionId);
+      expect(detailBody.body).toEqual({ version: 1, text: secret });
+      const set = await f.app.request(
+        `/api/sessions/${sessionId}/reference-sets/${setId}`,
+        { headers: getHeaders() },
+      );
+      expect(set.status).toBe(200);
+      const context = await f.app.request(
+        `/api/sessions/${sessionId}/reference-context`,
+        { headers: getHeaders() },
+      );
+      expect(context.status).toBe(200);
+      expect(await context.json()).toEqual({ version: 1, items: [] });
+      expect(count(f.db, "run_events")).toBe(eventsBefore);
+      expect(count(f.db, "evidence_grants")).toBe(grantsBefore);
+    } finally {
+      f.close();
+    }
+  });
+
+  it("updates reference-context via CAS and maps M1 errors without leaks", async () => {
+    const f = await makeApp();
+    try {
+      const { sessionId, referenceId, secret } = await seededRefs(f);
+      const path = `/api/sessions/${sessionId}/reference-context`;
+      const first = await putContext(f.app, path, {
+        version: 1,
+        items: [referenceId],
+      });
+      expect(first.status).toBe(200);
+      expect(await first.json()).toEqual({ version: 2, items: [referenceId] });
+      const conflict = await putContext(f.app, path, {
+        version: 1,
+        items: [],
+      });
+      expect(conflict.status).toBe(409);
+      expect(await conflict.json()).toEqual({
+        error: {
+          code: "reference_version_conflict",
+          message: "reference version conflict",
+        },
+      });
+      const foreign = generateId();
+      const invalid = await putContext(f.app, path, {
+        version: 2,
+        items: [foreign],
+      });
+      expect(invalid.status).toBe(400);
+      expect(await invalid.json()).toEqual({
+        error: { code: "invalid_reference", message: "invalid reference" },
+      });
+      const unknownRef = await f.app.request(
+        `/api/sessions/${sessionId}/references/${generateId()}`,
+        { headers: getHeaders() },
+      );
+      expect(unknownRef.status).toBe(404);
+      const unknownBody = (await unknownRef.json()) as {
+        error: { code: string; message: string };
+      };
+      expect(unknownBody).toEqual({
+        error: { code: "reference_not_found", message: "reference not found" },
+      });
+      expect(JSON.stringify(unknownBody)).not.toContain(secret);
+      const other = f.repo.createSession({
+        key: randomUUID(),
+        now: T0,
+      }).body.sessionId;
+      const cross = await f.app.request(
+        `/api/sessions/${other}/references/${referenceId}`,
+        { headers: getHeaders() },
+      );
+      expect(cross.status).toBe(404);
+      expect(
+        ((await cross.json()) as { error: { code: string } }).error.code,
+      ).toBe("reference_not_found");
+      const unknownSet = await f.app.request(
+        `/api/sessions/${sessionId}/reference-sets/${generateId()}`,
+        { headers: getHeaders() },
+      );
+      expect(unknownSet.status).toBe(404);
+      expect(
+        ((await unknownSet.json()) as { error: { code: string } }).error.code,
+      ).toBe("reference_not_found");
+    } finally {
+      f.close();
+    }
+  });
+
+  it("rejects bad UUIDs, query keys, and non-strict PUT bodies", async () => {
+    const f = await makeApp();
+    try {
+      const { sessionId, referenceId } = await seededRefs(f);
+      const badSession = await f.app.request(
+        `/api/sessions/not-a-uuid/references`,
+        { headers: getHeaders() },
+      );
+      expect(badSession.status).toBe(400);
+      const badRef = await f.app.request(
+        `/api/sessions/${sessionId}/references/nope`,
+        { headers: getHeaders() },
+      );
+      expect(badRef.status).toBe(400);
+      for (const target of [
+        `/api/sessions/${sessionId}/references?bogus=1`,
+        `/api/sessions/${sessionId}/references/${referenceId}?extra=1`,
+        `/api/sessions/${sessionId}/reference-context?x=1`,
+      ]) {
+        const res = await f.app.request(target, { headers: getHeaders() });
+        expect(res.status).toBe(400);
+      }
+      const dupLimited = await f.app.request(
+        `/api/sessions/${sessionId}/references?limit=10&limit=10`,
+        { headers: getHeaders() },
+      );
+      expect(dupLimited.status).toBe(400);
+      const path = `/api/sessions/${sessionId}/reference-context`;
+      for (const body of [
+        `[]`,
+        `5`,
+        `"x"`,
+        `null`,
+        `{"unknown":1}`,
+        `{}`,
+        `{"version":2}`,
+      ]) {
+        const res = await f.app.request(path, {
+          method: "PUT",
+          headers: postHeaders(),
+          body,
+        });
+        expect(res.status).toBe(400);
+      }
+      const dupItems = await putContext(f.app, path, {
+        version: 1,
+        items: [referenceId, referenceId],
+      });
+      expect(dupItems.status).toBe(400);
+      expect(
+        ((await dupItems.json()) as { error: { code: string } }).error.code,
+      ).toBe("invalid_reference");
+      const textType = await f.app.request(path, {
+        method: "PUT",
+        headers: { ...postHeaders(), "content-type": "text/plain" },
+        body: JSON.stringify({ version: 1, items: [] }),
+      });
+      expect(textType.status).toBe(400);
+      const withQuery = await putContext(f.app, `${path}?bogus=1`, {
+        version: 1,
+        items: [],
+      });
+      expect(withQuery.status).toBe(400);
+    } finally {
+      f.close();
+    }
+  });
+
+  it("exposes no direct POST search/open/refresh/related routes", async () => {
+    const f = await makeApp();
+    try {
+      const { sessionId, referenceId } = await seededRefs(f);
+      // No POST route exists for any search/open/refresh/related shape.
+      for (const target of [
+        `/api/sessions/${sessionId}/references/search`,
+        `/api/sessions/${sessionId}/references/${referenceId}/open`,
+        `/api/sessions/${sessionId}/references/${referenceId}/refresh`,
+        `/api/sessions/${sessionId}/references/${referenceId}/related`,
+        `/api/sessions/${sessionId}/references/open`,
+        `/api/sessions/${sessionId}/references/refresh`,
+        `/api/sessions/${sessionId}/references/related`,
+      ]) {
+        const post = await postJson(f.app, target, {});
+        expect(post.status).toBe(404);
+      }
+      // Non-UUID verbs under /references collide with :referenceId and fail
+      // UUID validation (400); deeper unknown subpaths match nothing (404).
+      for (const target of [
+        `/api/sessions/${sessionId}/references/search`,
+        `/api/sessions/${sessionId}/references/open`,
+        `/api/sessions/${sessionId}/references/refresh`,
+        `/api/sessions/${sessionId}/references/related`,
+      ]) {
+        const get = await f.app.request(target, { headers: getHeaders() });
+        expect(get.status).toBe(400);
+      }
+      for (const target of [
+        `/api/sessions/${sessionId}/references/${referenceId}/open`,
+        `/api/sessions/${sessionId}/references/${referenceId}/refresh`,
+        `/api/sessions/${sessionId}/references/${referenceId}/related`,
+      ]) {
+        const get = await f.app.request(target, { headers: getHeaders() });
+        expect(get.status).toBe(404);
       }
     } finally {
       f.close();

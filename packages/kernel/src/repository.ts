@@ -14,8 +14,6 @@ import {
   type CreateSessionResponse,
   CreateSessionResponseSchema,
   EventsQuerySchema,
-  type EventsResponse,
-  EventsResponseSchema,
   type FrozenContext,
   FrozenContextSchema,
   HistoryQuerySchema,
@@ -27,8 +25,11 @@ import {
   IdempotencyLookupResponseSchema,
   IdempotencyScopeSchema,
   isTerminalStatus,
+  LatestEventsResponseSchema,
+  type LatestRunEvent,
+  type LatestRunEventType,
+  LatestRunEventTypeSchema,
   type M0RunEventType,
-  M0RunEventTypeSchema,
   messageScope,
   PostMessageRequestSchema,
   type PostMessageResponse,
@@ -40,11 +41,22 @@ import {
   parseRunEventPayload,
   parseRunResult,
   parseTurnInput,
+  type ReferenceContextGetResponse,
+  ReferenceContextGetResponseSchema,
+  ReferenceContextPutRequestSchema,
+  type ReferenceContextPutResponse,
+  ReferenceContextPutResponseSchema,
+  type ReferenceDetailResponse,
+  ReferenceDetailResponseSchema,
+  type ReferenceListResponse,
+  ReferenceListResponseSchema,
+  type ReferenceSetDetailResponse,
+  ReferenceSetDetailResponseSchema,
   RUN_EVENT_SCHEMA_VERSION,
-  type RunEvent,
   type RunResult,
   type RunStatus,
   retryScope,
+  SnapshotBodySchema,
 } from "@companion/contracts";
 import type Database from "better-sqlite3";
 import {
@@ -55,8 +67,12 @@ import {
   requestHash,
 } from "./canonical.js";
 import {
+  DatabaseStateInvalidError,
   IdempotencyConflictError,
+  InvalidReferenceError,
   KernelStorageError,
+  ReferenceNotFoundError,
+  ReferenceVersionConflictError,
   RepositoryNotFoundError,
   RepositoryValidationError,
   SessionBusyError,
@@ -72,8 +88,12 @@ export {
   uuidVersion,
 } from "./canonical.js";
 export {
+  DatabaseStateInvalidError,
   IdempotencyConflictError,
+  InvalidReferenceError,
   KernelStorageError,
+  ReferenceNotFoundError,
+  ReferenceVersionConflictError,
   RepositoryNotFoundError,
   RepositoryValidationError,
   SessionBusyError,
@@ -339,12 +359,14 @@ function appendEventInTx(
   db: Database.Database,
   runId: string,
   expectedPrevSeq: number,
-  type: M0RunEventType,
+  type: M0RunEventType | LatestRunEventType,
   payload: unknown,
   now: number,
 ): number {
+  // Latest (M1) registry: exact M0 nine plus `reference.presented`.
+  // M0 callers keep passing M0 types unchanged; they validate here too.
   const validType = parseOrValidation(
-    () => M0RunEventTypeSchema.parse(type),
+    () => LatestRunEventTypeSchema.parse(type),
     "run event type",
   );
   const validPayload = parseOrValidation(
@@ -513,6 +535,11 @@ export function createKernelRepository(db: Database.Database) {
       db.prepare(
         "INSERT INTO sessions (id, created_at, last_active_at, next_turn_position) VALUES (?, ?, ?, 1)",
       ).run(id, now, now);
+      // M1: every session owns exactly one versioned reference context,
+      // initialized to `version = 1, items = []` in the same transaction.
+      db.prepare(
+        "INSERT INTO session_reference_context (session_id, version, items_json, updated_at) VALUES (?, 1, '[]', ?)",
+      ).run(id, now);
       const body = parseOrValidation(
         () =>
           CreateSessionResponseSchema.parse({ sessionId: id, createdAt: now }),
@@ -545,15 +572,7 @@ export function createKernelRepository(db: Database.Database) {
       throw new RepositoryValidationError("strategy must be 1..128 chars");
     }
     const selectOnSuccess = options.selectOnSuccess ?? true;
-    const frozen = parseOrValidation(
-      () =>
-        FrozenContextSchema.parse({
-          version: 1,
-          temporal: { now, timeZone: options.timeZone ?? "UTC" },
-          uiContext: parsed.uiContext,
-        }),
-      "post-message frozen context",
-    );
+    const timeZone = options.timeZone ?? "UTC";
     const turnInput = parseOrValidation(
       () =>
         parseTurnInput({ kind: "user_text", version: 1, text: parsed.text }),
@@ -595,6 +614,40 @@ export function createKernelRepository(db: Database.Database) {
       if (sessionRow === null) {
         throw new RepositoryNotFoundError(`session ${session} not found`);
       }
+      // M1: freeze the current ordered reference context into the new Turn.
+      // Retry reuses the original Turn row unchanged (no refreeze).
+      // Fail closed: createSession + 0002 backfill guarantee the row.
+      const contextRow = db
+        .prepare(
+          "SELECT version, items_json FROM session_reference_context WHERE session_id = ?",
+        )
+        .get(session) as { version: number; items_json: string } | undefined;
+      if (contextRow === undefined) {
+        throw new DatabaseStateInvalidError(
+          `reference context missing for session ${session}`,
+        );
+      }
+      const frozenItems = parseOrValidation(
+        () =>
+          ReferenceContextGetResponseSchema.parse({
+            version: contextRow.version,
+            items: JSON.parse(contextRow.items_json),
+          }),
+        "session reference context",
+      );
+      const frozen = parseOrValidation(
+        () =>
+          FrozenContextSchema.parse({
+            version: 1,
+            temporal: { now, timeZone },
+            uiContext: parsed.uiContext,
+            referenceContext: {
+              version: frozenItems.version,
+              items: frozenItems.items,
+            },
+          }),
+        "post-message frozen context",
+      );
       const seq = sessionRow.nextTurnPosition;
       const turnId = generateId();
       const runId = generateId();
@@ -1096,7 +1149,7 @@ export function createKernelRepository(db: Database.Database) {
     type: "tool.requested" | "tool.completed",
     payload: unknown,
     options: TransitionOptions = {},
-  ): RunEvent {
+  ): LatestRunEvent {
     const id = requireId(runId, "runId");
     const now = nowMs(options.now);
     if (type !== "tool.requested" && type !== "tool.completed") {
@@ -1237,7 +1290,12 @@ export function createKernelRepository(db: Database.Database) {
     sessionId: string,
     runId: string,
     query: { after?: number; limit?: number },
-  ): EventsResponse {
+  ): {
+    events: LatestRunEvent[];
+    nextAfter: number;
+    hasMore: boolean;
+    terminal: boolean;
+  } {
     const owned = requireOwnedRun(sessionId, runId);
     const parsed = parseOrValidation(
       () =>
@@ -1280,11 +1338,339 @@ export function createKernelRepository(db: Database.Database) {
         ? (page[page.length - 1] as { seq: number }).seq
         : parsed.after;
     const terminal = isTerminalStatus(owned.status as RunStatus);
+    // Latest (M1) page: same cursor semantics as M0, but the envelope
+    // registry understands `reference.presented`. The exact M0 schemas stay
+    // pinned in contracts for M0 assertions; only this read is upgraded.
     return parseOrValidation(
       () =>
-        EventsResponseSchema.parse({ events, nextAfter, hasMore, terminal }),
+        LatestEventsResponseSchema.parse({
+          events,
+          nextAfter,
+          hasMore,
+          terminal,
+        }),
       "events response",
     );
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* M1 stored-only reference reads + versioned context (§14.8).        */
+  /*                                                                     */
+  /* Stored-only: no connector calls, no grants, no events. Session      */
+  /* ownership is checked before every read; mismatches are 404.         */
+  /* ---------------------------------------------------------------- */
+
+  function listReferences(sessionId: string): ReferenceListResponse {
+    const session = requireId(sessionId, "sessionId");
+    if (readSession(db, session) === null) {
+      throw new RepositoryNotFoundError(`session ${session} not found`);
+    }
+    const rows = db
+      .prepare(
+        "SELECT id, ordinal, resource_id, snapshot_id FROM session_references WHERE session_id = ? ORDER BY ordinal ASC",
+      )
+      .all(session) as Array<{
+      id: string;
+      ordinal: number;
+      resource_id: string;
+      snapshot_id: string;
+    }>;
+    return parseOrValidation(
+      () =>
+        ReferenceListResponseSchema.parse({
+          items: rows.map((row) => ({
+            id: row.id,
+            ordinal: row.ordinal,
+            resourceId: row.resource_id,
+            snapshotId: row.snapshot_id,
+          })),
+        }),
+      "reference list response",
+    );
+  }
+
+  function getReferenceDetail(
+    sessionId: string,
+    referenceId: string,
+  ): ReferenceDetailResponse {
+    const session = requireId(sessionId, "sessionId");
+    const reference = requireId(referenceId, "referenceId");
+    if (readSession(db, session) === null) {
+      throw new RepositoryNotFoundError(`session ${session} not found`);
+    }
+    const row = db
+      .prepare(
+        `SELECT sr.id AS id, sr.ordinal AS ordinal, sr.resource_id AS resource_id,
+                sr.snapshot_id AS snapshot_id, sr.created_at AS created_at,
+                r.connector_instance_id AS connector_instance_id,
+                r.canonical_key AS canonical_key, r.title AS title,
+                r.next_revision AS next_revision, r.created_at AS resource_created_at,
+                s.revision AS revision, s.source_revision AS source_revision,
+                s.content_hash AS content_hash, s.size_bytes AS size_bytes,
+                s.observed_at AS observed_at, s.created_at AS snapshot_created_at,
+                s.body_json AS body_json
+           FROM session_references sr
+           JOIN resources r ON r.id = sr.resource_id
+           JOIN resource_snapshots s ON s.id = sr.snapshot_id
+          WHERE sr.session_id = ? AND sr.id = ?`,
+      )
+      .get(session, reference) as
+      | {
+          id: string;
+          ordinal: number;
+          resource_id: string;
+          snapshot_id: string;
+          created_at: number;
+          connector_instance_id: string;
+          canonical_key: string;
+          title: string | null;
+          next_revision: number;
+          resource_created_at: number;
+          revision: number;
+          source_revision: string | null;
+          content_hash: string;
+          size_bytes: number;
+          observed_at: number;
+          snapshot_created_at: number;
+          body_json: string;
+        }
+      | undefined;
+    if (row === undefined) {
+      throw new ReferenceNotFoundError(
+        `reference ${reference} not found in session ${session}`,
+      );
+    }
+    const body = parseOrValidation(
+      () => SnapshotBodySchema.parse(JSON.parse(row.body_json)),
+      "stored snapshot body",
+    );
+    return parseOrValidation(
+      () =>
+        ReferenceDetailResponseSchema.parse({
+          reference: {
+            sessionId: session,
+            id: row.id,
+            ordinal: row.ordinal,
+            resourceId: row.resource_id,
+            snapshotId: row.snapshot_id,
+            createdAt: row.created_at,
+          },
+          resource: {
+            id: row.resource_id,
+            canonicalKey: row.canonical_key,
+            title: row.title,
+          },
+          snapshot: {
+            id: row.snapshot_id,
+            resourceId: row.resource_id,
+            revision: row.revision,
+            sourceRevision: row.source_revision,
+            contentHash: row.content_hash,
+            sizeBytes: row.size_bytes,
+            observedAt: row.observed_at,
+          },
+          body,
+        }),
+      "reference detail response",
+    );
+  }
+
+  function getReferenceSet(
+    sessionId: string,
+    setId: string,
+  ): ReferenceSetDetailResponse {
+    const session = requireId(sessionId, "sessionId");
+    const set = requireId(setId, "setId");
+    if (readSession(db, session) === null) {
+      throw new RepositoryNotFoundError(`session ${session} not found`);
+    }
+    const setRow = db
+      .prepare(
+        "SELECT id, session_id, created_at FROM reference_sets WHERE id = ?",
+      )
+      .get(set) as
+      | { id: string; session_id: string; created_at: number }
+      | undefined;
+    if (setRow === undefined || setRow.session_id !== session) {
+      throw new ReferenceNotFoundError(
+        `reference set ${set} not found in session ${session}`,
+      );
+    }
+    const itemRows = db
+      .prepare(
+        "SELECT ordinal, reference_id FROM reference_set_items WHERE session_id = ? AND set_id = ? ORDER BY ordinal ASC",
+      )
+      .all(session, set) as Array<{ ordinal: number; reference_id: string }>;
+    const references = itemRows.map((item) => {
+      const ref = db
+        .prepare(
+          "SELECT id, ordinal, resource_id, snapshot_id FROM session_references WHERE session_id = ? AND id = ?",
+        )
+        .get(session, item.reference_id) as
+        | {
+            id: string;
+            ordinal: number;
+            resource_id: string;
+            snapshot_id: string;
+          }
+        | undefined;
+      if (ref === undefined) {
+        throw new ReferenceNotFoundError(
+          `reference ${item.reference_id} not found in session ${session}`,
+        );
+      }
+      return {
+        id: ref.id,
+        ordinal: ref.ordinal,
+        resourceId: ref.resource_id,
+        snapshotId: ref.snapshot_id,
+      };
+    });
+    return parseOrValidation(
+      () =>
+        ReferenceSetDetailResponseSchema.parse({
+          set: {
+            sessionId: session,
+            id: setRow.id,
+            createdAt: setRow.created_at,
+            items: itemRows.map((item) => ({
+              ordinal: item.ordinal,
+              referenceId: item.reference_id,
+            })),
+          },
+          references,
+        }),
+      "reference set response",
+    );
+  }
+
+  function getReferenceContext(sessionId: string): ReferenceContextGetResponse {
+    const session = requireId(sessionId, "sessionId");
+    if (readSession(db, session) === null) {
+      throw new RepositoryNotFoundError(`session ${session} not found`);
+    }
+    // Stored-only read: never mutates. createSession + 0002 backfill
+    // guarantee the row; a missing row is invalid DB state (fail closed).
+    const row = db
+      .prepare(
+        "SELECT version, items_json FROM session_reference_context WHERE session_id = ?",
+      )
+      .get(session) as { version: number; items_json: string } | undefined;
+    if (row === undefined) {
+      throw new DatabaseStateInvalidError(
+        `reference context missing for session ${session}`,
+      );
+    }
+    return parseOrValidation(
+      () =>
+        ReferenceContextGetResponseSchema.parse({
+          version: row.version,
+          items: JSON.parse(row.items_json),
+        }),
+      "reference context response",
+    );
+  }
+
+  function putReferenceContext(
+    sessionId: string,
+    request: { version: number; items: string[] },
+    options: TransitionOptions = {},
+  ): ReferenceContextPutResponse {
+    const session = requireId(sessionId, "sessionId");
+    const now = nowMs(options.now);
+    const parsed = parseOrValidation(
+      () => ReferenceContextPutRequestSchema.parse(request),
+      "reference context request",
+    );
+    if (new Set(parsed.items).size !== parsed.items.length) {
+      throw new InvalidReferenceError(
+        "duplicate reference id in context items",
+      );
+    }
+    return withImmediate(db, () => {
+      if (readSession(db, session) === null) {
+        throw new RepositoryNotFoundError(`session ${session} not found`);
+      }
+      const current = db
+        .prepare(
+          "SELECT version, items_json FROM session_reference_context WHERE session_id = ?",
+        )
+        .get(session) as { version: number; items_json: string } | undefined;
+      if (current === undefined) {
+        throw new DatabaseStateInvalidError(
+          `reference context missing for session ${session}`,
+        );
+      }
+      // Every item must belong to the path session (JSON cannot be a DB FK).
+      for (const id of parsed.items) {
+        const owned = db
+          .prepare(
+            "SELECT id FROM session_references WHERE session_id = ? AND id = ?",
+          )
+          .get(session, id) as { id: string } | undefined;
+        if (owned === undefined) {
+          throw new InvalidReferenceError(
+            `reference ${id} does not belong to session ${session}`,
+          );
+        }
+      }
+      // CAS: the request carries the expected CURRENT version; the commit
+      // stores exactly expected + 1. Anything else is a version conflict.
+      const nextVersion = parsed.version + 1;
+      const moved = db
+        .prepare(
+          "UPDATE session_reference_context SET version = ?, items_json = ?, updated_at = ? WHERE session_id = ? AND version = ?",
+        )
+        .run(
+          nextVersion,
+          JSON.stringify(parsed.items),
+          now,
+          session,
+          parsed.version,
+        );
+      if (moved.changes !== 1) {
+        const fresh = db
+          .prepare(
+            "SELECT version FROM session_reference_context WHERE session_id = ?",
+          )
+          .get(session) as { version: number } | undefined;
+        throw new ReferenceVersionConflictError(
+          parsed.version,
+          fresh?.version ?? -1,
+        );
+      }
+      return parseOrValidation(
+        () =>
+          ReferenceContextPutResponseSchema.parse({
+            version: nextVersion,
+            items: parsed.items,
+          }),
+        "reference context put response",
+      );
+    });
+  }
+
+  function backfillReferenceContexts(options: TransitionOptions = {}): {
+    backfilled: number;
+  } {
+    const now = nowMs(options.now);
+    return withImmediate(db, () => {
+      const before = (
+        db
+          .prepare("SELECT COUNT(*) AS n FROM session_reference_context")
+          .get() as { n: number }
+      ).n;
+      db.prepare(
+        `INSERT OR IGNORE INTO session_reference_context (session_id, version, items_json, updated_at)
+         SELECT id, 1, '[]', ? FROM sessions`,
+      ).run(now);
+      const after = (
+        db
+          .prepare("SELECT COUNT(*) AS n FROM session_reference_context")
+          .get() as { n: number }
+      ).n;
+      return { backfilled: after - before };
+    });
   }
 
   function lookupIdempotency(
@@ -1388,6 +1774,12 @@ export function createKernelRepository(db: Database.Database) {
     getSelection,
     getHistory,
     getEvents,
+    listReferences,
+    getReferenceDetail,
+    getReferenceSet,
+    getReferenceContext,
+    putReferenceContext,
+    backfillReferenceContexts,
     lookupIdempotency,
     lookupIdempotencyForSession,
     requireOwnedRun: (sessionId: string, runId: string): RunRow =>

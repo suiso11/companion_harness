@@ -35,6 +35,7 @@ a missing DB fails without creating any DB or backup files.
 | `COMPANION_PORT` | `3000` | `0` = ephemeral (tests only) |
 | `COMPANION_TIME_ZONE` | `UTC` | IANA name only (Intl membership) |
 | `COMPANION_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
+| `COMPANION_MARKDOWN_ROOTS_JSON` | `[]` | Strict JSON array of `{ path, alias? }` (see below); unset means no Markdown connector |
 
 Config is Zod-validated and frozen at startup (no hot reload).
 
@@ -102,8 +103,93 @@ There is **no session-level delete/export API** (no per-session physical
 deletion, no user export). Domain data is otherwise never auto-deleted
 (RunEvent/Snapshot/Reference/Receipt kept indefinitely).
 
-## Non-goals (explicit)
+## Markdown references (M1, read-only)
 
+Unset `COMPANION_MARKDOWN_ROOTS_JSON` (default `[]`) means no Markdown
+connector and no reference tools (M0 behaviour). When set, exactly one
+connector instance owns **all** configured roots.
+
+### Root configuration format
+
+- Exact format: a strict JSON array of objects with only `{ path, alias? }`.
+  Example (POSIX): `[{"path":"/srv/notes","alias":"notes"}]`. Example
+  (Windows generic): `[{"path":"C:/Notes","alias":"notes"}]`. Quoting for
+  the JSON env value is shell-dependent; pass one JSON document as a single
+  env value.
+- `path`: non-empty absolute path, max 4096 chars, no NUL byte.
+- `alias` (optional): `1-64` chars matching
+  `/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/`; duplicates rejected. Max 1024 roots.
+- Unknown keys, scalars, objects, non-absolute paths, and malformed JSON are
+  rejected fail-closed at startup with a fixed safe message (no paths
+  logged). The parsed roots are deep-frozen (no hot reload).
+
+### Fingerprint-bound connector (startup gate)
+
+- The connector identity fingerprint (derived from the resolved roots) is
+  persisted on the single connector instance row with the expected root
+  count. Changing roots, count, order, or aliases afterwards **fails
+  startup** (fixed `connector config fingerprint mismatch`-family error).
+- There is **no automatic rebinding**. Operators must either revert the
+  config to the previously accepted roots, or intentionally start from a
+  fresh store (see full-store deletion above) when a new root set is wanted.
+
+### Read-only bounds, safety, and skips
+
+- Markdown files are **never written**. There is no HTML rendering, no
+  semantic/fuzzy search, and no FTS: search is whole-query literal
+  substring only, under NFC normalization plus locale-independent
+  per-code-point case folding.
+- Exact bounds: **10000** files per vault (exceeding fails the whole
+  search), **1 MiB** per file (raw or NFC-normalized UTF-8 bytes),
+  query **1-256** code points, results **default 10 / max 20**, snippet max
+  **512** code points (first body hit, deterministic order: title exact,
+  then title substring, then body, canonical-key tie-break).
+- Oversize files are never truncated: they become explicit `skipped`
+  entries. Invalid UTF-8 is a fatal `invalid_utf8` skip (never replacement
+  text). Bodies are stored as saved full normalized (NFC) Snapshot text.
+- Safety: reads verify realpath containment inside the configured roots
+  before and after reading; external symlinks are rejected, internal
+  aliases fold to one canonical resource; reads use resolve+stat,
+  no-follow open where available, fstat identity comparison, and post-read
+  recheck.
+
+### Expanded link graph budget (M1, agreed)
+
+- One `markdown.search` / `reference.refresh` call may persist at most
+  **256KiB** of normalized link graph metadata. There is **no per-link
+  count cap**.
+- Over budget, the whole call fails with **`output_too_large`**: no
+  truncation, no partial writes. `reference.open` / `reference.related`
+  never expand the graph. Exact accounting is defined in the
+  implementation plan (§14.6).
+
+### Stored-only reference HTTP API
+
+- `GET /api/sessions/:sessionId/references` (saved reference list).
+- `GET /api/sessions/:sessionId/references/:referenceId` (saved detail;
+  returns the stored full normalized body, never rereads the external file).
+- `GET /api/sessions/:sessionId/reference-sets/:setId` (saved set detail).
+- `GET /api/sessions/:sessionId/reference-context` and
+  `PUT /api/sessions/:sessionId/reference-context` (frozen context
+  summary; optimistic version check).
+- There is **no HTTP search/open/refresh/related**: those paths return
+  validation/unknown-route errors. Reads create no events or grants.
+
+### Internal-only ToolBroker tools
+
+- Exact tool names: `markdown.search`, `reference.open` (stored-only),
+  `reference.refresh` (only reread path; always a new Snapshot + rN),
+  `reference.related` (saved link graph only). They are callable only from
+  inside a running Run via ToolBroker (ownership/budget/audit); there is no
+  direct POST endpoint for them.
+
+### M2 model not implemented
+
+- The M2 model/agent is **not implemented**. Production registers no model
+  strategy, so runs fail closed with a fixed code instead of producing fake
+  production LLM output.
+
+## Non-goals (explicit)
 Domain retention/GC (except newest-3 backup rotation), user export,
 session delete API, running-process deletion, auto-restore, DB/backup
 encryption, external telemetry, app-managed log files, installers,

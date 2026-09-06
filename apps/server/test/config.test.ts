@@ -10,6 +10,8 @@ import {
   defaultDbPath,
   isIanaTimeZone,
   loadServerConfig,
+  MAX_MARKDOWN_ROOTS,
+  parseMarkdownRoots,
   ServerConfigError,
 } from "../src/config.js";
 
@@ -121,5 +123,113 @@ describe("database symlink fail-closed", () => {
     const missing = join(dir, "sub", "db.sqlite");
     expect(() => assertDbPathHasNoSymlink(missing)).not.toThrow();
     expect(loadServerConfig(baseEnv(missing)).dbPath).toBe(missing);
+  });
+});
+
+describe("markdown roots config", () => {
+  it("defaults to a frozen empty array", () => {
+    const config = loadServerConfig(baseEnv(tempDbPath()));
+    expect(config.markdownRoots).toEqual([]);
+    expect(Object.isFrozen(config.markdownRoots)).toBe(true);
+    expect(Object.isFrozen(config)).toBe(true);
+  });
+
+  it("accepts valid roots and deep-freezes entries", () => {
+    const first = mkdtempSync(join(tmpdir(), "companion-vault-a-"));
+    const second = mkdtempSync(join(tmpdir(), "companion-vault-b-"));
+    const raw = JSON.stringify([
+      { path: first, alias: "vault-a" },
+      { path: second },
+    ]);
+    const config = loadServerConfig({
+      ...baseEnv(tempDbPath()),
+      COMPANION_MARKDOWN_ROOTS_JSON: raw,
+    });
+    expect(config.markdownRoots).toHaveLength(2);
+    expect(Object.isFrozen(config.markdownRoots)).toBe(true);
+    for (const entry of config.markdownRoots) {
+      expect(Object.isFrozen(entry)).toBe(true);
+    }
+    expect(parseMarkdownRoots("[]")).toEqual([]);
+  });
+
+  it("rejects scalar, object, unknown keys, and over-count roots", () => {
+    const vault = mkdtempSync(join(tmpdir(), "companion-vault-"));
+    for (const bad of [
+      '"just-a-string"',
+      "42",
+      '{"path":"x"}',
+      "null",
+      JSON.stringify([{ path: vault, alias: "a", extra: 1 }]),
+      JSON.stringify([{ path: vault }, "nope"] as unknown[]),
+    ]) {
+      expect(() =>
+        loadServerConfig({
+          ...baseEnv(tempDbPath()),
+          COMPANION_MARKDOWN_ROOTS_JSON: bad,
+        }),
+      ).toThrow(ServerConfigError);
+    }
+    const many = Array.from({ length: MAX_MARKDOWN_ROOTS + 1 }, (_, index) => ({
+      path: vault,
+      alias: `v${index}`,
+    }));
+    expect(() =>
+      loadServerConfig({
+        ...baseEnv(tempDbPath()),
+        COMPANION_MARKDOWN_ROOTS_JSON: JSON.stringify(many),
+      }),
+    ).toThrow(ServerConfigError);
+  });
+
+  it("rejects relative, empty, NUL, overlong, and bad/duplicate aliases", () => {
+    const vault = mkdtempSync(join(tmpdir(), "companion-vault-"));
+    const overlong = `/${"a".repeat(4097)}`;
+    const cases = [
+      JSON.stringify([{ path: "relative/path" }]),
+      JSON.stringify([{ path: "" }]),
+      JSON.stringify([{ path: `${vault}\0x` }]),
+      JSON.stringify([{ path: overlong }]),
+      JSON.stringify([{ path: vault, alias: "bad/alias" }]),
+      JSON.stringify([{ path: vault, alias: "" }]),
+      JSON.stringify([
+        { path: vault, alias: "ok" },
+        { path: vault, alias: "ok" },
+      ]),
+      JSON.stringify([{ alias: "only-alias" }]),
+    ];
+    for (const bad of cases) {
+      expect(() =>
+        loadServerConfig({
+          ...baseEnv(tempDbPath()),
+          COMPANION_MARKDOWN_ROOTS_JSON: bad,
+        }),
+      ).toThrow(ServerConfigError);
+    }
+  });
+
+  it("never exposes raw paths in markdown-roots errors", () => {
+    const vault = mkdtempSync(join(tmpdir(), "companion-secret-vault-"));
+    let message = "";
+    try {
+      loadServerConfig({
+        ...baseEnv(tempDbPath()),
+        COMPANION_MARKDOWN_ROOTS_JSON: JSON.stringify([
+          { path: "relative/path" },
+        ]),
+      });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message.length).toBeGreaterThan(0);
+    expect(message).not.toContain(vault);
+    expect(message).not.toContain("relative/path");
+    let relativeMessage = "";
+    try {
+      parseMarkdownRoots("not-json");
+    } catch (error) {
+      relativeMessage = (error as Error).message;
+    }
+    expect(relativeMessage).not.toContain("not-json");
   });
 });

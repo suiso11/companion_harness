@@ -2,17 +2,24 @@
 // transitions, cancel-first, recovery/drain, selection, history/events.
 
 import { randomUUID } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { messageScope } from "@companion/contracts";
 import { describe, expect, it } from "vitest";
 import {
   canonicalJson,
   closeKernelDatabase,
   createKernelRepository,
+  createReferenceManager,
   generateId,
   IdempotencyConflictError,
+  InvalidReferenceError,
   isUuidV4,
   migrateKernelDatabase,
   openKernelDatabase,
+  ReferenceNotFoundError,
+  ReferenceVersionConflictError,
   RepositoryNotFoundError,
   RepositoryValidationError,
   requestHash,
@@ -745,6 +752,277 @@ describe("history + events pagination + idempotency lookup", () => {
       ).toThrow(RepositoryNotFoundError);
     } finally {
       closeKernelDatabase(handle);
+    }
+  });
+});
+
+describe("m1 reference context + stored reads", () => {
+  it("initializes context on createSession and freezes it into new turns", async () => {
+    const { handle, repo } = await openRepo();
+    try {
+      const s = repo.createSession({ key: messageKey(), now: T0 }).body
+        .sessionId;
+      expect(repo.getReferenceContext(s)).toEqual({ version: 1, items: [] });
+      const first = repo.postMessage(
+        s,
+        { text: "q" },
+        { key: messageKey(), now: T0 },
+      );
+      const turn = repo.getTurn(first.body.turnId);
+      expect(turn.frozenContext.referenceContext).toEqual({
+        version: 1,
+        items: [],
+      });
+      // Retry reuses the original frozen turn context unchanged.
+      repo.startRun(first.body.run.id, { now: T0 + 1 });
+      await repo.completeRun(
+        first.body.run.id,
+        { version: 1, text: "ans" },
+        { now: T0 + 2 },
+      );
+      const retry = repo.postRetry(s, first.body.turnId, {
+        key: messageKey(),
+        now: T0 + 3,
+      });
+      expect(repo.getTurn(retry.body.turnId).frozenContext).toEqual(
+        turn.frozenContext,
+      );
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("freezes the current ordered context and enforces CAS membership", async () => {
+    const { handle, repo } = await openRepo();
+    const manager = createReferenceManager(handle.raw);
+    try {
+      const s = repo.createSession({ key: messageKey(), now: T0 }).body
+        .sessionId;
+      const connector = manager.ensureMarkdownConnectorInstance("vault", 1, {
+        now: T0,
+      });
+      const posted = repo.postMessage(
+        s,
+        { text: "q" },
+        { key: messageKey(), now: T0 },
+      );
+      repo.startRun(posted.body.run.id, { now: T0 + 1 });
+      const presented = manager.presentObservations(
+        s,
+        posted.body.run.id,
+        [
+          {
+            connectorInstanceId: connector.id,
+            canonicalKey: "notes/a.md",
+            title: "A",
+            text: "text a",
+            sourceRevision: "rev-1",
+            observedAt: T0,
+          },
+          {
+            connectorInstanceId: connector.id,
+            canonicalKey: "notes/b.md",
+            title: "B",
+            text: "text b",
+            sourceRevision: "rev-1",
+            observedAt: T0,
+          },
+        ],
+        { freshness: "normal", now: T0 + 2 },
+      );
+      if (!presented.applied) {
+        throw new Error("expected presentation to apply");
+      }
+      const ids = presented.references.map((r) => r.referenceId);
+      const put = repo.putReferenceContext(
+        s,
+        { version: 1, items: [ids[1] as string, ids[0] as string] },
+        { now: T0 + 3 },
+      );
+      expect(put).toEqual({ version: 2, items: [ids[1], ids[0]] });
+      expect(repo.getReferenceContext(s)).toEqual(put);
+      // New turns freeze the latest ordered context.
+      await repo.completeRun(
+        posted.body.run.id,
+        { version: 1, text: "ans" },
+        { now: T0 + 4 },
+      );
+      const next = repo.postMessage(
+        s,
+        { text: "q2" },
+        { key: messageKey(), now: T0 + 5 },
+      );
+      expect(
+        repo.getTurn(next.body.turnId).frozenContext.referenceContext,
+      ).toEqual(put);
+      // Stale versions conflict; duplicates and foreign ids are invalid.
+      expect(() =>
+        repo.putReferenceContext(s, { version: 1, items: [] }, { now: T0 + 6 }),
+      ).toThrow(ReferenceVersionConflictError);
+      expect(() =>
+        repo.putReferenceContext(
+          s,
+          { version: 2, items: [ids[0] as string, ids[0] as string] },
+          { now: T0 + 6 },
+        ),
+      ).toThrow(InvalidReferenceError);
+      expect(() =>
+        repo.putReferenceContext(
+          s,
+          { version: 2, items: [generateId()] },
+          { now: T0 + 6 },
+        ),
+      ).toThrow(InvalidReferenceError);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("serves stored-only list/detail/set reads without events", async () => {
+    const { handle, repo } = await openRepo();
+    const manager = createReferenceManager(handle.raw);
+    try {
+      const s = repo.createSession({ key: messageKey(), now: T0 }).body
+        .sessionId;
+      const connector = manager.ensureMarkdownConnectorInstance("vault", 1, {
+        now: T0,
+      });
+      const posted = repo.postMessage(
+        s,
+        { text: "q" },
+        { key: messageKey(), now: T0 },
+      );
+      repo.startRun(posted.body.run.id, { now: T0 + 1 });
+      const presented = manager.presentObservations(
+        s,
+        posted.body.run.id,
+        [
+          {
+            connectorInstanceId: connector.id,
+            canonicalKey: "notes/a.md",
+            title: "A",
+            text: "text a",
+            sourceRevision: "rev-1",
+            observedAt: T0,
+          },
+        ],
+        { freshness: "normal", now: T0 + 2 },
+      );
+      if (!presented.applied || presented.setId === null) {
+        throw new Error("expected presentation to apply");
+      }
+      const eventsBefore = (
+        handle.raw.prepare("SELECT COUNT(*) AS n FROM run_events").get() as {
+          n: number;
+        }
+      ).n;
+      const list = repo.listReferences(s);
+      expect(list.items).toHaveLength(1);
+      expect(list.items[0]?.ordinal).toBe(1);
+      const detail = repo.getReferenceDetail(s, list.items[0]?.id as string);
+      expect(detail.body).toEqual({ version: 1, text: "text a" });
+      expect(detail.resource.canonicalKey).toBe("notes/a.md");
+      const set = repo.getReferenceSet(s, presented.setId);
+      expect(set.set.items).toHaveLength(1);
+      expect(set.references).toHaveLength(1);
+      const eventsAfter = (
+        handle.raw.prepare("SELECT COUNT(*) AS n FROM run_events").get() as {
+          n: number;
+        }
+      ).n;
+      expect(eventsAfter).toBe(eventsBefore);
+      expect(() => repo.getReferenceDetail(s, generateId())).toThrow(
+        ReferenceNotFoundError,
+      );
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("reads reference.presented through the latest event registry", async () => {
+    const { handle, repo } = await openRepo();
+    const manager = createReferenceManager(handle.raw);
+    try {
+      const s = repo.createSession({ key: messageKey(), now: T0 }).body
+        .sessionId;
+      const connector = manager.ensureMarkdownConnectorInstance("vault", 1, {
+        now: T0,
+      });
+      const posted = repo.postMessage(
+        s,
+        { text: "q" },
+        { key: messageKey(), now: T0 },
+      );
+      repo.startRun(posted.body.run.id, { now: T0 + 1 });
+      const presented = manager.presentObservations(
+        s,
+        posted.body.run.id,
+        [
+          {
+            connectorInstanceId: connector.id,
+            canonicalKey: "notes/a.md",
+            title: null,
+            text: "text a",
+            sourceRevision: "rev-1",
+            observedAt: T0,
+          },
+        ],
+        { freshness: "normal", now: T0 + 2 },
+      );
+      if (!presented.applied) {
+        throw new Error("expected presentation to apply");
+      }
+      const page = repo.getEvents(s, posted.body.run.id, {
+        after: 0,
+        limit: 50,
+      });
+      const types = page.events.map((e) => e.type);
+      expect(types).toContain("reference.presented");
+      const last = page.events[page.events.length - 1];
+      expect(last?.type).toBe("reference.presented");
+      if (last?.type === "reference.presented") {
+        expect(Object.keys(last.payload).sort()).toEqual([
+          "ordinal",
+          "referenceId",
+          "resourceId",
+          "setId",
+          "snapshotId",
+        ]);
+      }
+      expect(page.terminal).toBe(false);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("backfills missing contexts and migrates v1 sessions via 0002", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "m1-backfill-"));
+    try {
+      const handle = openKernelDatabase(":memory:");
+      try {
+        await migrateKernelDatabase({ db: handle.raw, targetVersion: 1 });
+        const id = generateId();
+        handle.raw
+          .prepare(
+            "INSERT INTO sessions (id, created_at, last_active_at, next_turn_position) VALUES (?, ?, ?, 1)",
+          )
+          .run(id, T0, T0);
+        const backups = join(dir, "backups");
+        const migrated = await migrateKernelDatabase({
+          db: handle.raw,
+          backupDir: backups,
+        });
+        expect(migrated.applied).toContain(2);
+        const repo = createKernelRepository(handle.raw);
+        expect(repo.getReferenceContext(id)).toEqual({ version: 1, items: [] });
+        expect(repo.backfillReferenceContexts({ now: T0 })).toEqual({
+          backfilled: 0,
+        });
+      } finally {
+        closeKernelDatabase(handle);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

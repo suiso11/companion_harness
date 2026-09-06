@@ -17,10 +17,14 @@
 
 import { chmodSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { createMarkdownConnector } from "@companion/connector-markdown";
 import {
   BUNDLED_SCHEMA_VERSION,
   closeKernelDatabase,
   createKernelRepository,
+  createM1ToolRegistrations,
+  createReferenceManager,
+  createToolBroker,
   getSchemaVersion,
   type KernelDatabaseHandle,
   migrateKernelDatabase,
@@ -29,11 +33,13 @@ import {
   quickCheck,
   RunEngine,
   StrategyRegistry,
+  type ToolBroker,
 } from "@companion/kernel";
 import { serve } from "@hono/node-server";
 import { createApp, type EnginePort, type ServerControls } from "./app.js";
 import {
   assertDbPathHasNoSymlink,
+  DEFAULT_LOG_LEVEL,
   loadServerConfig,
   type ServerConfig,
   ServerConfigError,
@@ -68,7 +74,12 @@ export interface StartedServer {
   engine: EnginePort;
   port: number;
   shutdown: (reason?: string) => Promise<void>;
+  /** M1 ToolBroker when Markdown roots are configured, else null (M2 hook). */
+  toolBroker: ToolBroker | null;
 }
+
+/** Fixed path-free display name for the single M1 Markdown connector. */
+export const MARKDOWN_CONNECTOR_DISPLAY_NAME = "markdown-vault";
 
 function ensureDbDir(
   dbPath: string,
@@ -149,7 +160,26 @@ export function sanitizeStartupErrorStatus(error: unknown): string {
 export async function startServer(
   options: StartServerOptions = {},
 ): Promise<StartedServer> {
-  const config = loadServerConfig(options.env);
+  // Ownership: this function is the single owner of the sanitized
+  // `server.start_failed` log (exactly once per failure, fixed safe fields
+  // only). The `index.ts` top-level handler stays silent and only sets the
+  // exit code, so CLI and programmatic callers never double-log.
+  // Early config load: failures have no valid logLevel, so log exactly once
+  // through the injected logger or a safe default. Only the sanitized fixed
+  // status is emitted (never paths or raw values). Later startup failures
+  // are logged exactly once by the post-config catch below, which this
+  // early throw never reaches, so no double logging occurs.
+  let config: ServerConfig;
+  try {
+    config = loadServerConfig(options.env);
+  } catch (error) {
+    const earlyLogger =
+      options.logger ?? createStdServerLogger(DEFAULT_LOG_LEVEL);
+    earlyLogger.error("server.start_failed", {
+      status: sanitizeStartupErrorStatus(error),
+    });
+    throw error;
+  }
   const logger = options.logger ?? createStdServerLogger(config.logLevel);
   const now = options.now ?? Date.now;
   const drainMs = options.drainMs ?? SHUTDOWN_DRAIN_MS;
@@ -214,7 +244,52 @@ export async function startServer(
     });
     logger.info("server.migrated", { status: migrated.toVersion });
 
+    // Bound-roots guard: removing every Markdown root while a Markdown
+    // connector instance remains bound must fail closed before the engine
+    // or listener starts. Fixed path-free ServerConfigError, no DB writes.
+    if (config.markdownRoots.length === 0) {
+      const bound = handle.raw
+        .prepare(
+          "SELECT COUNT(*) AS n FROM connector_instances WHERE kind = 'markdown'",
+        )
+        .get() as { n: number };
+      if (bound.n > 0) {
+        throw new ServerConfigError(
+          "markdown roots must not be removed while bound",
+        );
+      }
+    }
+
     const repo = createKernelRepository(handle.raw);
+    // M1 (plan 14.1/14.5-14.6): after migration and before engine
+    // recovery/listen, when roots are configured create one connector
+    // owning all roots, ensure one fingerprint-bound instance, then the
+    // four M1 registrations and a ToolBroker on the same db/repo. No M2
+    // strategy and no invocation endpoint here. No roots => null (M0).
+    let toolBroker: ToolBroker | null = null;
+    if (config.markdownRoots.length > 0) {
+      const connector = await createMarkdownConnector(
+        config.markdownRoots.map((root) =>
+          root.alias === undefined
+            ? { path: root.path }
+            : { path: root.path, alias: root.alias },
+        ),
+      );
+      const referenceManager = createReferenceManager(handle.raw);
+      const instance = referenceManager.ensureMarkdownConnectorInstance(
+        MARKDOWN_CONNECTOR_DISPLAY_NAME,
+        config.markdownRoots.length,
+        { configFingerprint: connector.identityFingerprint },
+      );
+      const registrations = createM1ToolRegistrations({
+        db: handle.raw,
+        repo,
+        referenceManager,
+        bindings: [{ connectorInstanceId: instance.id, connector }],
+      });
+      toolBroker = createToolBroker({ db: handle.raw, repo, registrations });
+      logger.info("server.markdown_ready", { status: registrations.length });
+    }
     // M0 production registers no model strategy: without the M2 agent,
     // runs fail closed with a fixed code instead of pretending to be an LLM.
     engine = new RunEngine({
@@ -349,7 +424,14 @@ export async function startServer(
     process.on("SIGINT", onSigint);
     process.on("SIGTERM", onSigterm);
 
-    return { config, controls, engine: activeEngine, port, shutdown };
+    return {
+      config,
+      controls,
+      engine: activeEngine,
+      port,
+      shutdown,
+      toolBroker,
+    };
   } catch (error) {
     removeSignalHandlers();
     if (handle !== undefined) {

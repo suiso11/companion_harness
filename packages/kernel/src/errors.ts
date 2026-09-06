@@ -131,3 +131,70 @@ export class SessionBusyError extends KernelStorageError {
     this.sessionId = sessionId;
   }
 }
+
+/* ------------------------------------------------------------------ */
+/* M1 reference errors (§14.8, fixed lowercase codes).                  */
+/*                                                                     */
+/* Transport status mapping (404 / 409 / 400) is a server concern;      */
+/* kernel exposes the closed M1 vocabulary from contracts               */
+/* (`reference_not_found` / `reference_version_conflict` /              */
+/* `invalid_reference`) as typed errors.                                */
+/* ------------------------------------------------------------------ */
+
+/** Unknown reference/set id in this session (404 `reference_not_found`). */
+export class ReferenceNotFoundError extends KernelStorageError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("reference_not_found", message, options);
+  }
+}
+
+/** CAS version mismatch on reference-context PUT (409). */
+export class ReferenceVersionConflictError extends KernelStorageError {
+  readonly expectedVersion: number;
+  readonly currentVersion: number;
+
+  constructor(expectedVersion: number, currentVersion: number) {
+    super(
+      "reference_version_conflict",
+      `reference context version conflict: expected ${expectedVersion}, current ${currentVersion}`,
+    );
+    this.expectedVersion = expectedVersion;
+    this.currentVersion = currentVersion;
+  }
+}
+
+/** Context items fail membership/duplication rules (400). */
+export class InvalidReferenceError extends KernelStorageError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("invalid_reference", message, options);
+  }
+}
+
+/**
+ * Expanded link graph exceeds the agreed 256KiB per-call budget
+ * (fixed code `output_too_large`, never truncation/partial persistence).
+ * Thrown by ReferenceManager preflight before any normalization copy or
+ * DB transaction; M1 tool adapters map it (and the connector's
+ * `output_too_large`) to `ToolError("output_too_large")` with no raw
+ * args/errors/paths in outputs or audit.
+ */
+export class LinkGraphTooLargeError extends KernelStorageError {
+  constructor(
+    message = "expanded link graph exceeds 256KiB per-call budget",
+    options?: ErrorOptions,
+  ) {
+    super("output_too_large", message, options);
+  }
+}
+
+/**
+ * Required reference-context row is missing (M1 invariant violation).
+ * Fresh sessions gain the row in `createSession`; pre-M1 sessions gain it
+ * via the 0002 backfill. A missing row is corrupt DB state, never healed
+ * on a stored-only read: fail closed with this fixed safe code.
+ */
+export class DatabaseStateInvalidError extends KernelStorageError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("database_state_invalid", message, options);
+  }
+}

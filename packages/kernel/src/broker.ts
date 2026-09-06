@@ -97,6 +97,23 @@ export interface ToolSchema<T = unknown> {
 /** Freshness hint: `refresh` bypasses dedup and always executes. */
 export type ToolFreshness = "normal" | "refresh";
 
+/**
+ * Kernel-owned static dedup mode (exact closed type, default `normal`).
+ *
+ * - `normal` (default): `freshness: "refresh"` in the caller context bypasses
+ *   dedup; otherwise same-Run fingerprint reuse/coalescing applies.
+ * - `always_bypass`: every call bypasses dedup and executes (used by
+ *   `reference.refresh`, which always materializes a new Snapshot+rN).
+ * - `input_freshness`: the validated/defaulted input `freshness` field also
+ *   bypasses dedup (used by `markdown.search`, so input `freshness: "refresh"`
+ *   bypasses even when the caller context omitted it).
+ *
+ * The effective freshness is computed ONLY after input validation/defaulting
+ * and drives both the dedup lookup and `HandlerContext.freshness`. Caller
+ * `freshness: "refresh"` always bypasses regardless of mode (preserved).
+ */
+export type ToolDedupMode = "normal" | "always_bypass" | "input_freshness";
+
 /** Handler context: run/call identity plus the composed AbortSignal. */
 export interface ToolHandlerContext {
   readonly runId: string;
@@ -135,6 +152,12 @@ export interface ToolRegistration {
   readonly outputSchema: ToolSchema;
   readonly handler: ToolHandler;
   readonly normalize?: ToolNormalizer;
+  /**
+   * Static dedup mode (exact closed type). Omitted means `normal` (default
+   * behavior unchanged). `always_bypass` and `input_freshness` bypass dedup
+   * via the effective-freshness path computed after input validation.
+   */
+  readonly dedupMode?: ToolDedupMode;
 }
 
 /** Per-call invocation context (origin/caller/allowedTools/AbortSignal). */
@@ -617,12 +640,23 @@ export class ToolBroker {
           `tool ${descriptor.name} normalize must be a function`,
         );
       }
+      if (
+        reg.dedupMode !== undefined &&
+        reg.dedupMode !== "normal" &&
+        reg.dedupMode !== "always_bypass" &&
+        reg.dedupMode !== "input_freshness"
+      ) {
+        throw new RepositoryValidationError(
+          `tool ${descriptor.name} dedupMode must be normal|always_bypass|input_freshness`,
+        );
+      }
       this.registry.set(descriptor.name, {
         descriptor,
         inputSchema: reg.inputSchema,
         outputSchema: reg.outputSchema,
         handler: reg.handler,
         ...(reg.normalize === undefined ? {} : { normalize: reg.normalize }),
+        ...(reg.dedupMode === undefined ? {} : { dedupMode: reg.dedupMode }),
       });
     }
   }
@@ -835,9 +869,31 @@ export class ToolBroker {
     this.updateArgsHash(call.callId, argsHash);
 
     // ---- Step 4: dedup (same run, post-defaults fingerprint). ----
+    // Effective freshness is computed ONLY after validated/defaulted input:
+    // caller `refresh` always bypasses (preserved); `always_bypass` always
+    // bypasses; `input_freshness` bypasses when the defaulted input
+    // `freshness` is `refresh` even if the caller context omitted it.
+    // The effective value drives both the lookup below and HandlerContext.
     note("dedup");
     const key = `${auditTool}:${argsHash}`;
-    if (freshness !== "refresh") {
+    const dedupMode: ToolDedupMode = reg.dedupMode ?? "normal";
+    let inputFreshness: ToolFreshness = "normal";
+    if (
+      typeof input === "object" &&
+      input !== null &&
+      (input as { freshness?: unknown }).freshness === "refresh"
+    ) {
+      inputFreshness = "refresh";
+    }
+    const effectiveFreshness: ToolFreshness =
+      freshness === "refresh"
+        ? "refresh"
+        : dedupMode === "always_bypass"
+          ? "refresh"
+          : dedupMode === "input_freshness" && inputFreshness === "refresh"
+            ? "refresh"
+            : "normal";
+    if (effectiveFreshness !== "refresh") {
       const prior = this.dedup.get(runId)?.get(key);
       if (prior !== undefined && prior.status === "done") {
         // Running-only delivery: a run that left `running` while this
@@ -965,7 +1021,7 @@ export class ToolBroker {
       call,
       origin,
       caller,
-      freshness,
+      freshness: effectiveFreshness,
       callerSignal: context.signal,
       timeoutMs: effectiveTimeoutMs,
       dedupKey: key,

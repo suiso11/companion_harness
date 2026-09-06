@@ -1,0 +1,327 @@
+/**
+ * Deterministic vault discovery over initialized roots.
+ *
+ * CONTRACT (exact, plan 14.6):
+ * - Only files beneath configured roots are ever considered. Every candidate
+ *   is resolved with `realpath` and required to stay within the root real
+ *   path; any symlink (file or directory) resolving outside the root fails
+ *   the whole call with `markdown_path_unsafe`.
+ * - Internal aliases fold: file/directory symlinks that stay inside the root
+ *   resolve to the same realpath and therefore the same canonical key
+ *   (`<alias>/<realpath-relative posix>`). Deduplication is by realpath, so
+ *   traversal order cannot change the result.
+ * - Cycles cannot hang discovery: real directory paths are visited at most
+ *   once, so symlink loops terminate.
+ * - Directory metadata only: `readdir` + `realpath` + `stat`. No file
+ *   content is ever opened or buffered during discovery.
+ * - Vault bound enforced before any content byte: more than 10000 unique
+ *   real `.md` targets in one vault fails the whole call with
+ *   `markdown_vault_too_large` (10000 accepted, 10001 rejected).
+ * - Determinism: entries are visited in UTF-16 code-unit order and the
+ *   result is sorted by canonical key with explicit `<`/`>` comparison
+ *   (never locale-sensitive APIs).
+ * - POSIX permits `:` in relative filename segments; Windows never
+ *   discovers colon segments (drive/ADS ambiguity). Alias grammar stays
+ *   colon-free on all platforms.
+ * - Privacy: results and errors carry only alias-relative canonical keys or
+ *   the alias itself; absolute paths and raw OS errors never escape.
+ */
+
+import { promises as fs } from "node:fs";
+import * as path from "node:path";
+import { MarkdownConnectorError } from "./errors.js";
+import { type InitializedRoot, isWithinRealRoot } from "./roots.js";
+
+/** Maximum unique real `.md` files accepted per vault (exact, plan 14.6). */
+export const MAX_FILES_PER_VAULT = 10000;
+
+/**
+ * Maximum canonical-key length in UTF-16 code units. Single connector
+ * constant matching `CanonicalKeySchema` (`.max(512)`); discovery validates
+ * every derived key against it before count acceptance/output, and
+ * `readCanonical` rejects longer keys as `invalid_input` before discovery.
+ */
+export const MAX_CANONICAL_KEY_UTF16 = 512;
+
+/** Structural canonical-key grammar (mirrors CanonicalKeySchema minimum). */
+function isStructuralCanonicalKey(canonicalKey: string): boolean {
+  if (
+    canonicalKey.length < 1 ||
+    canonicalKey.length > MAX_CANONICAL_KEY_UTF16
+  ) {
+    return false;
+  }
+  if (canonicalKey.includes("\0") || canonicalKey.includes("\\")) {
+    return false;
+  }
+  if (canonicalKey.startsWith("/")) {
+    return false;
+  }
+  if (/^[A-Za-z]:(\/|$)/.test(canonicalKey)) {
+    return false;
+  }
+  const segments = canonicalKey.split("/");
+  if (segments.length < 2) {
+    return false;
+  }
+  for (const segment of segments) {
+    if (segment === "" || segment === "." || segment === "..") {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** A discovered Markdown file, identified only by its canonical key. */
+export interface DiscoveredFile {
+  readonly canonicalKey: string;
+}
+
+/** Minimal directory-entry view used by discovery (no content access). */
+export interface DiscoveryDirEntry {
+  readonly name: string;
+  readonly isDirectory: boolean;
+  readonly isFile: boolean;
+  readonly isSymbolicLink: boolean;
+}
+
+/** Minimal stat view used by discovery (directory metadata only). */
+export interface DiscoveryStat {
+  isDirectory(): boolean;
+  isFile(): boolean;
+}
+
+/**
+ * Deterministic injection hooks for tests (e.g. synthesize 10001 entries
+ * without creating 10001 disk files). Production passes no hooks, so the
+ * default filesystem behavior is never weakened.
+ *
+ * Cooperative cancellation: `signal` is checked before every potentially
+ * long traversal stage (each directory visit and each entry) and before the
+ * final sort/return. An abort throws an `AbortError` carrying no path or
+ * content; containment, identity, and vault-bound rules are never weakened
+ * (an abort discards partial state instead of returning it).
+ */
+export interface DiscoveryHooks {
+  readdir?: (dirAbs: string) => Promise<readonly DiscoveryDirEntry[]>;
+  realpath?: (candidateAbs: string) => Promise<string>;
+  stat?: (targetAbs: string) => Promise<DiscoveryStat>;
+  signal?: AbortSignal;
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    const error = new Error("operation aborted");
+    error.name = "AbortError";
+    throw error;
+  }
+}
+
+function compareCodeUnits(a: string, b: string): number {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
+
+/**
+ * Vault bound check (10000 accepted, 10001 rejected). Exported so tests can
+ * assert the exact boundary without creating 10001 files on disk; discovery
+ * itself calls this as unique real targets accumulate, before any content
+ * byte is read.
+ */
+export function enforceVaultFileLimit(
+  uniqueCount: number,
+  alias: string,
+): void {
+  if (uniqueCount > MAX_FILES_PER_VAULT) {
+    throw new MarkdownConnectorError("markdown_vault_too_large", alias);
+  }
+}
+
+function toCanonicalKey(
+  alias: string,
+  realRoot: string,
+  realFile: string,
+): string {
+  const relative = path.relative(realRoot, realFile);
+  const posix = relative.split(path.sep).join("/");
+  return `${alias}/${posix}`;
+}
+
+async function defaultReaddir(
+  dirAbs: string,
+): Promise<readonly DiscoveryDirEntry[]> {
+  const entries = await fs.readdir(dirAbs, { withFileTypes: true });
+  return entries.map((entry) => ({
+    name: entry.name,
+    isDirectory: entry.isDirectory(),
+    isFile: entry.isFile(),
+    isSymbolicLink: entry.isSymbolicLink(),
+  }));
+}
+
+/**
+ * Discover unique real `.md` files for one vault. Suffix match is exact
+ * lowercase `.md`; directories (including any named `*.md`) are traversed,
+ * never returned. Non-regular kinds (sockets, fifos, devices) are ignored.
+ */
+export async function discoverMarkdownFilesForRoot(
+  root: InitializedRoot,
+  hooks: DiscoveryHooks = {},
+): Promise<DiscoveredFile[]> {
+  const readdir = hooks.readdir ?? defaultReaddir;
+  const realpath = hooks.realpath ?? fs.realpath;
+  const stat = hooks.stat ?? fs.stat;
+  const signal = hooks.signal;
+  throwIfAborted(signal);
+
+  const seenDirs = new Set<string>([root.realPath]);
+  const seenFiles = new Set<string>();
+  const pending: string[] = [root.realPath];
+
+  const classify = async (
+    entryAbs: string,
+    entry: DiscoveryDirEntry,
+  ): Promise<{ real: string; isDir: boolean; isFile: boolean }> => {
+    let real: string;
+    try {
+      real = await realpath(entryAbs);
+    } catch {
+      throw new MarkdownConnectorError(
+        entry.isSymbolicLink ? "markdown_path_unsafe" : "markdown_read_failed",
+        root.alias,
+      );
+    }
+    if (!isWithinRealRoot(root.realPath, real)) {
+      throw new MarkdownConnectorError("markdown_path_unsafe", root.alias);
+    }
+    // Symlink branches already know the entry is a link; plain entries and
+    // unknown kinds (missing dirent type info) need a stat to classify.
+    if (!entry.isSymbolicLink && (entry.isDirectory || entry.isFile)) {
+      return {
+        real,
+        isDir: entry.isDirectory,
+        isFile: entry.isFile,
+      };
+    }
+    let target: DiscoveryStat;
+    try {
+      target = await stat(real);
+    } catch {
+      throw new MarkdownConnectorError("markdown_read_failed", root.alias);
+    }
+    return {
+      real,
+      isDir: target.isDirectory(),
+      isFile: target.isFile(),
+    };
+  };
+
+  while (pending.length > 0) {
+    throwIfAborted(signal);
+    const dir = pending.pop() as string;
+    let entries: readonly DiscoveryDirEntry[];
+    try {
+      entries = await readdir(dir);
+    } catch {
+      throw new MarkdownConnectorError("markdown_read_failed", root.alias);
+    }
+    throwIfAborted(signal);
+    const ordered = [...entries].sort((a, b) =>
+      compareCodeUnits(a.name, b.name),
+    );
+    for (const entry of ordered) {
+      throwIfAborted(signal);
+      if (entry.name === "" || entry.name === "." || entry.name === "..") {
+        continue;
+      }
+      // Windows never discovers colon segments (drive/ADS ambiguity);
+      // POSIX permits colon in relative filename segments.
+      if (process.platform === "win32" && entry.name.includes(":")) {
+        continue;
+      }
+      const entryAbs = path.join(dir, entry.name);
+      const classified = await classify(entryAbs, entry);
+      if (classified.isDir) {
+        if (!seenDirs.has(classified.real)) {
+          // Skip Windows colon directories derived via realpath as well.
+          if (process.platform === "win32") {
+            const dirRelative = path.relative(root.realPath, classified.real);
+            const dirPosix = dirRelative.split(path.sep).join("/");
+            if (dirPosix.split("/").some((segment) => segment.includes(":"))) {
+              continue;
+            }
+          }
+          seenDirs.add(classified.real);
+          pending.push(classified.real);
+        }
+        continue;
+      }
+      if (!classified.isFile) {
+        continue;
+      }
+      if (!classified.real.endsWith(".md")) {
+        continue;
+      }
+      // Windows ignores colon candidates derived via realpath (e.g. symlink
+      // targets); POSIX keeps them. Checked before count acceptance.
+      if (process.platform === "win32") {
+        const fileRelative = path.relative(root.realPath, classified.real);
+        const filePosix = fileRelative.split(path.sep).join("/");
+        if (filePosix.split("/").some((segment) => segment.includes(":"))) {
+          continue;
+        }
+      }
+      // Canonical-key bounds: validate the derived key's structural grammar
+      // and 512 UTF-16-unit max after realpath-relative derivation and
+      // before content reads/output/count acceptance. Any other invalid or
+      // overlong generated key fails the whole discovery with fixed
+      // `markdown_path_unsafe` carrying the alias only (never a raw path or
+      // later `execution_failed`); keys are never truncated and no new
+      // skipped reason is introduced.
+      {
+        const candidateKey = toCanonicalKey(
+          root.alias,
+          root.realPath,
+          classified.real,
+        );
+        if (!isStructuralCanonicalKey(candidateKey)) {
+          throw new MarkdownConnectorError("markdown_path_unsafe", root.alias);
+        }
+      }
+      if (!seenFiles.has(classified.real)) {
+        seenFiles.add(classified.real);
+        enforceVaultFileLimit(seenFiles.size, root.alias);
+      }
+    }
+  }
+
+  throwIfAborted(signal);
+  const keys = [...seenFiles]
+    .map((real) => toCanonicalKey(root.alias, root.realPath, real))
+    .sort(compareCodeUnits);
+  return keys.map((canonicalKey) => ({ canonicalKey }));
+}
+
+/**
+ * Discover across all initialized roots. The per-vault bound is enforced
+ * independently for each root; the aggregate is sorted by canonical key in
+ * code-unit order.
+ */
+export async function discoverMarkdownFiles(
+  roots: readonly InitializedRoot[],
+  hooks: DiscoveryHooks = {},
+): Promise<DiscoveredFile[]> {
+  throwIfAborted(hooks.signal);
+  const all: DiscoveredFile[] = [];
+  for (const root of roots) {
+    throwIfAborted(hooks.signal);
+    const found = await discoverMarkdownFilesForRoot(root, hooks);
+    for (const entry of found) {
+      all.push(entry);
+    }
+  }
+  throwIfAborted(hooks.signal);
+  all.sort((a, b) => compareCodeUnits(a.canonicalKey, b.canonicalKey));
+  return all;
+}
