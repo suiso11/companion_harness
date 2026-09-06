@@ -1,0 +1,25 @@
+-- Idempotency key lowercase normalization (PR #3 review fix).
+--
+-- Committed migration 0004: normalizes pre-existing `api_idempotency.key`
+-- values to lowercase. The repository now canonicalizes UUID
+-- Idempotency-Key values to lowercase on store and lookup
+-- (`requireKey` in src/repository.ts accepts mixed case via `isUuidV4`
+-- but persists/queries the lowercase form), so a legacy row stored with
+-- mixed/uppercase hex would otherwise become unreachable for replay and a
+-- retried request would duplicate the mutation.
+--
+-- Fail-closed collision rule: (scope, key) is the table PRIMARY KEY. When
+-- two rows in the same scope differ only by key case, lowering both would
+-- collide on the primary key. Such rows are never merged or deleted here:
+-- the UPDATE below aborts on the PK violation, the per-file transaction in
+-- src/migrate.ts rolls the file back, and the migration fails with the
+-- pre-upgrade backup kept. Fresh databases (no rows) and already-lowercase
+-- databases are a no-op for this statement.
+--
+-- Notes:
+-- - `lower()` is sufficient: UUID hex digits are ASCII.
+-- - The statement is idempotent: re-running it after success updates zero
+--   rows.
+-- - Table stays STRICT with default rowid behavior; no schema change.
+
+UPDATE api_idempotency SET "key" = lower("key") WHERE "key" != lower("key");

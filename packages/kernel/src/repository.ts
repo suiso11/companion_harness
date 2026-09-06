@@ -211,7 +211,9 @@ function requireKey(key: unknown): string {
   if (!isUuidV4(key)) {
     throw new RepositoryValidationError("Idempotency-Key must be a UUID v4");
   }
-  return key;
+  // Canonical form: lowercase. isUuidV4 accepts mixed case, so without this
+  // the same logical key in different cases would store/lookup distinct rows.
+  return key.toLowerCase();
 }
 
 function requireId(id: unknown, what: string): string {
@@ -734,6 +736,20 @@ export function createKernelRepository(db: Database.Database) {
       { sessionId: session, turnId: turn, strategy, selectOnSuccess },
     );
     return withImmediate(db, () => {
+      // Ownership first: session/turn binding is verified BEFORE any
+      // idempotency lookup so a foreign key can never replay (or probe)
+      // another session's stored response.
+      if (readSession(db, session) === null) {
+        throw new RepositoryNotFoundError(`session ${session} not found`);
+      }
+      const ownedTurnRow = db
+        .prepare("SELECT * FROM turns WHERE id = ?")
+        .get(turn) as RawTurn | undefined;
+      if (ownedTurnRow === undefined || ownedTurnRow.session_id !== session) {
+        throw new RepositoryNotFoundError(
+          `turn ${turn} not found in session ${session}`,
+        );
+      }
       const existing = toStoredResponse(db, scope, key);
       if (existing !== null) {
         if (existing.requestHash !== hash) {
@@ -748,17 +764,7 @@ export function createKernelRepository(db: Database.Database) {
         }
         return { status: existing.responseStatus, body, replayed: true };
       }
-      if (readSession(db, session) === null) {
-        throw new RepositoryNotFoundError(`session ${session} not found`);
-      }
-      const turnRow = db
-        .prepare("SELECT * FROM turns WHERE id = ?")
-        .get(turn) as RawTurn | undefined;
-      if (turnRow === undefined || turnRow.session_id !== session) {
-        throw new RepositoryNotFoundError(
-          `turn ${turn} not found in session ${session}`,
-        );
-      }
+      const turnRow = ownedTurnRow;
       // Retry reuses the original immutable input/frozen context: read + validate only.
       parseOrValidation(
         () => parseTurnInput(JSON.parse(turnRow.input_json)),

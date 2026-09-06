@@ -317,7 +317,11 @@ export class RunEngine {
   }
 
   private armWatchdog(runId: string): void {
-    this.clearWatchdog(runId);
+    // Repeated cancels must not extend the deadline: the watchdog is bound
+    // to the ORIGINAL cancel deadline, so an already-armed run keeps it.
+    if (this.watchdogs.has(runId)) {
+      return;
+    }
     const deadline = this.clock.now() + Math.max(this.cancelGraceMs, 0);
     this.scheduleWatchdog(runId, deadline);
   }
@@ -398,6 +402,18 @@ export class RunEngine {
     return false;
   }
 
+  /**
+   * Durably settle a running row orphaned by a post-pickup snapshot/read
+   * failure. Only `running` rows transition (cancel_requested/terminal rows
+   * are left for the watchdog/drain paths); transient storage failures are
+   * retried within the bounded lifecycle budget.
+   */
+  private settlePostPickupFailure(runId: string): void {
+    this.persistLifecycle(() =>
+      this.repo.failRun(runId, "execution_failed", { now: this.clock.now() }),
+    );
+  }
+
   private launch(runId: string): void {
     let snapshot: { run: RunRow; turn: TurnRow } | undefined;
     try {
@@ -405,6 +421,10 @@ export class RunEngine {
       const turn = this.repo.getTurn(run.turnId);
       snapshot = { run, turn };
     } catch {
+      // The pickup CAS already moved queued -> running, so a snapshot load
+      // failure must durably settle the orphaned running row instead of
+      // leaking it (fail-closed: recovery/drain sweep any persistent miss).
+      this.settlePostPickupFailure(runId);
       return;
     }
     if (isTerminalStatus(snapshot.run.status)) {
@@ -424,6 +444,9 @@ export class RunEngine {
         return;
       }
     } catch {
+      // Re-read failure after registration: settle the running row durably
+      // before releasing ownership so it is never leaked as running.
+      this.settlePostPickupFailure(runId);
       this.inFlight.delete(runId);
       return;
     }

@@ -26,6 +26,7 @@ import {
   openKernelDatabase,
   preMigrationBackupName,
   prunePreMigrationBackups,
+  RepositoryNotFoundError,
   RunEngine,
 } from "../src/index.js";
 
@@ -514,6 +515,303 @@ describe("per-file user_version retry", () => {
           .all() as Array<{ name: string }>
       ).map((r) => r.name);
       expect(tables).toEqual(["t1", "t2"]);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+});
+
+describe("kernel review round fixes (PR #1)", () => {
+  it("durably settles a post-pickup snapshot load failure instead of leaking running", async () => {
+    const { handle, repo } = await openRepo();
+    let engine: RunEngine | undefined;
+    try {
+      // Simulate a snapshot load failure after the pickup CAS already moved
+      // queued->running: getTurn throws, so launch must fail the run durably.
+      const wrapped = {
+        ...repo,
+        getTurn: (): never => {
+          throw new KernelStorageError("kernel_io", "turn snapshot missing");
+        },
+      };
+      engine = new RunEngine({
+        db: handle.raw,
+        repo: wrapped,
+        pollIntervalMs: 5,
+      });
+      engine.strategies.register("ok", immediateSuccess("done"));
+      const s = repo.createSession({ key: generateId(), now: T0 }).body
+        .sessionId;
+      const m = repo.postMessage(
+        s,
+        { text: "q" },
+        { key: generateId(), now: T0, strategy: "ok" },
+      );
+      // Simulate a missing turn row: pickup CAS still moves queued->running,
+      // then the snapshot load throws and must fail the run durably.
+      engine.start();
+      expect(engine.pump()).toBe(1);
+      await waitFor(() => {
+        const st = repo.getRun(m.body.run.id).status;
+        return st === "failed";
+      });
+      const run = repo.getRun(m.body.run.id);
+      expect(run.status).toBe("failed");
+      expect(run.errorCode).toBe("execution_failed");
+      expect(engine.inflightCount()).toBe(0);
+      const types = (
+        handle.raw
+          .prepare("SELECT type FROM run_events WHERE run_id = ? ORDER BY seq")
+          .all(m.body.run.id) as Array<{ type: string }>
+      ).map((r) => r.type);
+      expect(types).toEqual(["run.queued", "run.started", "run.failed"]);
+    } finally {
+      await engine?.shutdown({ drainMs: 0 }).catch(() => {});
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("canonicalizes UUID idempotency keys to lowercase across store and lookup", async () => {
+    const { handle, repo } = await openRepo();
+    try {
+      const s = repo.createSession({ key: generateId(), now: T0 }).body
+        .sessionId;
+      const upper = generateId().toUpperCase();
+      const first = repo.postMessage(
+        s,
+        { text: "hi" },
+        { key: upper, now: T0 },
+      );
+      expect(first.replayed).toBe(false);
+      const replay = repo.postMessage(
+        s,
+        { text: "hi" },
+        { key: upper.toLowerCase(), now: T0 + 1 },
+      );
+      expect(replay.replayed).toBe(true);
+      expect(replay.body).toEqual(first.body);
+      const stored = handle.raw
+        .prepare("SELECT key AS k FROM api_idempotency")
+        .all() as Array<{ k: string }>;
+      expect(stored.length).toBeGreaterThan(0);
+      for (const row of stored) {
+        expect(row.k).toBe(row.k.toLowerCase());
+      }
+      const turns = (
+        handle.raw.prepare("SELECT COUNT(*) AS n FROM turns").get() as {
+          n: number;
+        }
+      ).n;
+      expect(turns).toBe(1);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("checks retry ownership before the idempotency lookup (foreign key replays 404)", async () => {
+    const { handle, repo } = await openRepo();
+    try {
+      const a = repo.createSession({ key: generateId(), now: T0 }).body
+        .sessionId;
+      const b = repo.createSession({ key: generateId(), now: T0 }).body
+        .sessionId;
+      const m = repo.postMessage(
+        a,
+        { text: "q" },
+        { key: generateId(), now: T0 },
+      );
+      await repo.startRun(m.body.run.id, { now: T0 + 1 });
+      await repo.failRun(m.body.run.id, "execution_failed", { now: T0 + 2 });
+      const key = generateId();
+      const r1 = repo.postRetry(a, m.body.turnId, { key, now: T0 + 3 });
+      expect(r1.replayed).toBe(false);
+      // Same turn-scoped key presented under a foreign session must 404 on
+      // ownership, never replay (or conflict on) session A's stored body.
+      expect(() =>
+        repo.postRetry(b, m.body.turnId, { key, now: T0 + 4 }),
+      ).toThrow(RepositoryNotFoundError);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("does not extend the watchdog deadline on repeated cancel", async () => {
+    const { handle, repo } = await openRepo();
+    let engine: RunEngine | undefined;
+    try {
+      let now = T0 + 5000;
+      const timers = new Map<number, { at: number; fn: () => void }>();
+      let seq = 1;
+      const clock = {
+        now: () => now,
+        sleep: async (ms: number) => {
+          now += ms;
+        },
+        setTimeout: (fn: () => void, ms: number) => {
+          const id = seq;
+          seq += 1;
+          timers.set(id, { at: now + ms, fn });
+          return id;
+        },
+        clearTimeout: (h: unknown) => {
+          timers.delete(h as number);
+        },
+        advance: (ms: number) => {
+          now += ms;
+          for (const [id, t] of [...timers.entries()]
+            .filter(([, t]) => t.at <= now)
+            .sort((x, y) => x[1].at - y[1].at)) {
+            timers.delete(id);
+            t.fn();
+          }
+        },
+      };
+      engine = new RunEngine({
+        db: handle.raw,
+        repo,
+        clock,
+        pollIntervalMs: 5,
+        cancelGraceMs: 3000,
+      });
+      const eng = engine;
+      eng.strategies.register(
+        "hang",
+        neverResolving("H", { entered: [], aborted: [] }),
+      );
+      const s = repo.createSession({ key: generateId(), now: T0 }).body
+        .sessionId;
+      const m = repo.postMessage(
+        s,
+        { text: "q" },
+        { key: generateId(), now: T0, strategy: "hang" },
+      );
+      eng.start();
+      expect(eng.pump()).toBe(1);
+      await waitFor(() => eng.inflightCount() === 1);
+      expect(eng.cancel(s, m.body.run.id).status).toBe("cancel_requested");
+      clock.advance(2000);
+      // Repeated cancel stays idempotent but must not push the deadline out.
+      expect(eng.cancel(s, m.body.run.id).status).toBe("cancel_requested");
+      clock.advance(1000);
+      expect(repo.getRun(m.body.run.id).status).toBe("cancelled");
+    } finally {
+      await engine?.shutdown({ drainMs: 0 }).catch(() => {});
+      closeKernelDatabase(handle);
+    }
+  });
+});
+
+describe("idempotency key lowercase migration (PR #3)", () => {
+  it("normalizes a legacy mixed-case key and replays without duplicating the mutation", async () => {
+    const dir = tempDir();
+    const handle = openKernelDatabase(":memory:");
+    try {
+      // Old-schema DB (v3): repository rows are created, then the stored key
+      // is uppercased to simulate a pre-fix database holding mixed case.
+      await migrateKernelDatabase({ db: handle.raw, targetVersion: 3 });
+      const legacy = createKernelRepository(handle.raw);
+      const sessionId = legacy.createSession({ key: generateId(), now: T0 })
+        .body.sessionId;
+      const key = generateId();
+      const first = legacy.postMessage(
+        sessionId,
+        { text: "hi" },
+        { key, now: T0 },
+      );
+      const upper = key.toUpperCase();
+      expect(upper).not.toBe(key);
+      const scope = `session:${sessionId}:message`;
+      handle.raw
+        .prepare(
+          "UPDATE api_idempotency SET key = ? WHERE scope = ? AND key = ?",
+        )
+        .run(upper, scope, key);
+      expect(
+        (
+          handle.raw.prepare("SELECT COUNT(*) AS n FROM turns").get() as {
+            n: number;
+          }
+        ).n,
+      ).toBe(1);
+
+      // Upgrade the old DB: user tables exist, so a pre-upgrade backup applies.
+      const result = await migrateKernelDatabase({
+        db: handle.raw,
+        backupDir: join(dir, "backups"),
+      });
+      expect(result.applied).toContain(4);
+      expect(getSchemaVersion(handle.raw)).toBe(4);
+      const stored = handle.raw
+        .prepare("SELECT key AS k FROM api_idempotency")
+        .all() as Array<{ k: string }>;
+      expect(stored.length).toBeGreaterThan(0);
+      for (const row of stored) {
+        expect(row.k).toBe(row.k.toLowerCase());
+      }
+
+      // Either key case now replays the stored response via the repository,
+      // including the scoped lookup, without duplicating the mutation.
+      const repo = createKernelRepository(handle.raw);
+      const replay = repo.postMessage(
+        sessionId,
+        { text: "hi" },
+        { key: upper, now: T0 + 1 },
+      );
+      expect(replay.replayed).toBe(true);
+      expect(replay.body).toEqual(first.body);
+      const replayLower = repo.postMessage(
+        sessionId,
+        { text: "hi" },
+        { key: key.toLowerCase(), now: T0 + 2 },
+      );
+      expect(replayLower.replayed).toBe(true);
+      expect(replayLower.body).toEqual(first.body);
+      expect(
+        (
+          handle.raw.prepare("SELECT COUNT(*) AS n FROM turns").get() as {
+            n: number;
+          }
+        ).n,
+      ).toBe(1);
+      expect(repo.lookupIdempotencyForSession(sessionId, upper, scope)).toEqual(
+        { found: true, status: 202, body: first.body },
+      );
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("fails closed on a case-only PK collision without deleting rows", async () => {
+    const dir = tempDir();
+    const handle = openKernelDatabase(":memory:");
+    try {
+      await migrateKernelDatabase({ db: handle.raw, targetVersion: 3 });
+      // Same scope, keys differing only by case: lowering both would collide
+      // on PRIMARY KEY (scope, key). Inserted directly because the repository
+      // canonicalizes keys and can never create this state itself.
+      const scope = "sessions:create";
+      const lower = generateId();
+      const upper = lower.toUpperCase();
+      expect(upper).not.toBe(lower);
+      const insert = handle.raw.prepare(
+        "INSERT INTO api_idempotency (scope, key, request_hash, response_status, response_body, created_at) VALUES (?, ?, ?, 201, ?, ?)",
+      );
+      insert.run(scope, lower, "a".repeat(64), JSON.stringify({ n: 1 }), T0);
+      insert.run(scope, upper, "b".repeat(64), JSON.stringify({ n: 2 }), T0);
+
+      await expect(
+        migrateKernelDatabase({
+          db: handle.raw,
+          backupDir: join(dir, "backups"),
+        }),
+      ).rejects.toThrow(/migration 3 -> 4 failed/);
+      // Fail closed: version unchanged, both colliding rows preserved.
+      expect(getSchemaVersion(handle.raw)).toBe(3);
+      const rows = handle.raw
+        .prepare("SELECT key AS k FROM api_idempotency WHERE scope = ?")
+        .all(scope) as Array<{ k: string }>;
+      expect(rows).toHaveLength(2);
+      expect(new Set(rows.map((row) => row.k)).size).toBe(2);
     } finally {
       closeKernelDatabase(handle);
     }
