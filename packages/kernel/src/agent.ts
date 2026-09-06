@@ -945,59 +945,161 @@ export function createAgentStrategy(
 
     const wallStart = clock.now();
     const wallDeadline = wallStart + wallMs;
-    let repairUsed = false;
-
-    for (let step = 1; step <= maxSteps; step += 1) {
+    // Run-scoped wall signal shared by model steps and ToolBroker calls:
+    // timer expiry aborts queued/running connector work (broker detaches)
+    // before the Run fails, instead of racing without cancellation.
+    const wallController = new AbortController();
+    let wallExpired = false;
+    const expireWall = (): void => {
+      if (!wallExpired) {
+        wallExpired = true;
+        try {
+          wallController.abort();
+        } catch {
+          // Abort must never throw; the wall failure carries the fate.
+        }
+      }
+    };
+    const isWallExpired = (): boolean =>
+      wallExpired || clock.now() > wallDeadline;
+    const throwIfHalted = (): void => {
+      // Engine cancellation keeps priority so user cancellation is never
+      // misclassified as a wall failure when both fire together.
       if (ctx.signal.aborted) {
         throw new StrategyError("execution_cancelled");
       }
-      if (clock.now() > wallDeadline) {
+      if (isWallExpired()) {
+        expireWall();
         throw new StrategyError("execution_failed");
       }
-      if (!isRunActive(repo, runId)) {
-        throw new StrategyError("execution_cancelled");
+    };
+    let wallTimer: ReturnType<typeof setTimeout> | undefined = setTimeout(
+      expireWall,
+      Math.max(wallMs, 1),
+    );
+    if (
+      wallTimer !== undefined &&
+      typeof (wallTimer as unknown as { unref?: unknown }).unref === "function"
+    ) {
+      (wallTimer as unknown as { unref(): void }).unref();
+    }
+    const clearWallTimer = (): void => {
+      if (wallTimer !== undefined) {
+        clearTimeout(wallTimer);
+        wallTimer = undefined;
       }
-      // Keep the whole conversation within the gateway 128-message cap:
-      // drop the oldest projected history pairs first (latest win,
-      // chronological). Tool replay is never dropped here.
-      trimHistoryToCap(messages);
-      if (messages.length > MAX_MESSAGES_PER_REQUEST) {
-        throw new StrategyError("output_invalid");
-      }
-      const outcome = await runModelStep({
-        repo,
-        broker,
-        gateway,
-        model,
-        clock,
-        runId,
-        step,
-        messages,
-        toolDefinitions,
-        stepTimeoutMs,
-        wallDeadline,
-        signal: ctx.signal,
-      });
-      if (outcome.kind === "gateway_failed") {
-        // No retry, no fallback, no repair for transport/timeout/cancel:
-        // the step budget is consumed and the Run fails (or cancels) now.
-        throw outcome.strategyError;
-      }
-      const classification = classifyStep(outcome.result.toolCalls);
-      // Provider-correct multi-step replay: preserve the native assistant
-      // toolCalls message before any tool results / repair hint. Raw text
-      // and args stay in-memory only (never persisted or emitted).
-      if (outcome.result.toolCalls.length > 0) {
-        messages.push({
-          role: "assistant",
-          content: outcome.result.text,
-          toolCalls: outcome.result.toolCalls.map((call) => ({ ...call })),
+    };
+    let repairUsed = false;
+
+    try {
+      for (let step = 1; step <= maxSteps; step += 1) {
+        throwIfHalted();
+        if (!isRunActive(repo, runId)) {
+          throw new StrategyError("execution_cancelled");
+        }
+        // Keep the whole conversation within the gateway 128-message cap:
+        // drop the oldest projected history pairs first (latest win,
+        // chronological). Tool replay is never dropped here.
+        trimHistoryToCap(messages);
+        if (messages.length > MAX_MESSAGES_PER_REQUEST) {
+          throw new StrategyError("output_invalid");
+        }
+        const outcome = await runModelStep({
+          repo,
+          broker,
+          gateway,
+          model,
+          clock,
+          runId,
+          step,
+          messages,
+          toolDefinitions,
+          stepTimeoutMs,
+          wallDeadline,
+          signal: ctx.signal,
+          wallSignal: wallController.signal,
+          isWallExpired,
         });
-      }
-      if (classification.kind === "ordinary") {
-        // Valid ordinary-tool-only steps audit completed (tool results never
-        // flip the model-step verdict). Exactly one row + one terminal event.
-        const audited = finalizeDeliveredStep({
+        if (outcome.kind === "gateway_failed") {
+          // No retry, no fallback, no repair for transport/timeout/cancel:
+          // the step budget is consumed and the Run fails (or cancels) now.
+          throw outcome.strategyError;
+        }
+        const classification = classifyStep(outcome.result.toolCalls);
+        // Provider-correct multi-step replay: preserve the native assistant
+        // toolCalls message before any tool results / repair hint. Raw text
+        // and args stay in-memory only (never persisted or emitted).
+        if (outcome.result.toolCalls.length > 0) {
+          messages.push({
+            role: "assistant",
+            content: outcome.result.text,
+            toolCalls: outcome.result.toolCalls.map((call) => ({ ...call })),
+          });
+        }
+        if (classification.kind === "ordinary") {
+          // Valid ordinary-tool-only steps audit completed (tool results never
+          // flip the model-step verdict). Exactly one row + one terminal event.
+          const audited = finalizeDeliveredStep({
+            repo,
+            runId,
+            step,
+            adapter: outcome.adapter,
+            model,
+            durationMs: outcome.durationMs,
+            usage: outcome.usage,
+            errorCode: null,
+            clock,
+          });
+          if (!audited) {
+            throw new StrategyError("execution_cancelled");
+          }
+          const feedbacks = await executeOrdinaryTools({
+            db,
+            repo,
+            broker,
+            runId,
+            sessionId,
+            calls: classification.calls,
+            frozenOrdinalMap,
+            signal: ctx.signal,
+            wallSignal: wallController.signal,
+            expireWall,
+            isWallExpired,
+            clock,
+            wallDeadline,
+          });
+          // One provider-neutral role:tool message per ordinary call, in
+          // request order, each carrying its matching assistant toolCallId
+          // plus the originating toolName (Ollama `tool_name` wire field).
+          for (const feedback of feedbacks) {
+            messages.push({
+              role: "tool",
+              content: feedback.content,
+              toolCallId: feedback.toolCallId,
+              toolName: feedback.toolName,
+            });
+          }
+          continue;
+        }
+        // Terminal-protocol classes (single answer / mixed / duplicate /
+        // reserved / free-text) never reach the broker. Validation runs first;
+        // the single audit row/event below reflects its outcome, so an invalid
+        // step never records a contradictory completed+failed pair.
+        const terminal = handleAnswerClass({
+          db,
+          repo,
+          runId,
+          sessionId,
+          classification,
+          repairUsed,
+        });
+        const terminalErrorCode: M2ModelErrorCode | null =
+          terminal.kind === "succeeded"
+            ? null
+            : terminal.kind === "repaired"
+              ? repairReasonErrorCode(terminal.reason)
+              : terminal.errorCode;
+        const terminalAudited = finalizeDeliveredStep({
           repo,
           runId,
           step,
@@ -1005,99 +1107,46 @@ export function createAgentStrategy(
           model,
           durationMs: outcome.durationMs,
           usage: outcome.usage,
-          errorCode: null,
+          errorCode: terminalErrorCode,
           clock,
         });
-        if (!audited) {
+        if (!terminalAudited) {
           throw new StrategyError("execution_cancelled");
         }
-        const feedbacks = await executeOrdinaryTools({
-          db,
-          repo,
-          broker,
-          runId,
-          sessionId,
-          calls: classification.calls,
-          frozenOrdinalMap,
-          signal: ctx.signal,
-          clock,
-          wallDeadline,
-        });
-        // One provider-neutral role:tool message per ordinary call, in
-        // request order, each carrying its matching assistant toolCallId
-        // plus the originating toolName (Ollama `tool_name` wire field).
-        for (const feedback of feedbacks) {
+        if (terminal.kind === "repaired") {
+          repairUsed = true;
+          // Strict OpenAI-compatible repair replay: the retained assistant
+          // toolCalls message must be followed by exactly one fixed,
+          // non-sensitive role:tool response per toolCallId (in call order,
+          // each with its originating toolName for the Ollama `tool_name`
+          // wire field) before the user repair hint. Invalid calls are never
+          // executed and never consume ToolBroker budget; raw arguments/outputs
+          // are never echoed. Free-text repairs carry no toolCalls, so no synthesis.
+          for (const call of outcome.result.toolCalls) {
+            messages.push({
+              role: "tool",
+              content: AGENT_INVALID_TOOL_FEEDBACK_CONTENT,
+              toolCallId: call.id,
+              toolName: call.name,
+            });
+          }
           messages.push({
-            role: "tool",
-            content: feedback.content,
-            toolCallId: feedback.toolCallId,
-            toolName: feedback.toolName,
+            role: "user",
+            content: `Repair instruction:\n${AGENT_REPAIR_HINTS[terminal.reason]}`,
           });
+          continue;
         }
-        continue;
-      }
-      // Terminal-protocol classes (single answer / mixed / duplicate /
-      // reserved / free-text) never reach the broker. Validation runs first;
-      // the single audit row/event below reflects its outcome, so an invalid
-      // step never records a contradictory completed+failed pair.
-      const terminal = handleAnswerClass({
-        db,
-        repo,
-        runId,
-        sessionId,
-        classification,
-        repairUsed,
-      });
-      const terminalErrorCode: M2ModelErrorCode | null =
-        terminal.kind === "succeeded"
-          ? null
-          : terminal.kind === "repaired"
-            ? repairReasonErrorCode(terminal.reason)
-            : terminal.errorCode;
-      const terminalAudited = finalizeDeliveredStep({
-        repo,
-        runId,
-        step,
-        adapter: outcome.adapter,
-        model,
-        durationMs: outcome.durationMs,
-        usage: outcome.usage,
-        errorCode: terminalErrorCode,
-        clock,
-      });
-      if (!terminalAudited) {
-        throw new StrategyError("execution_cancelled");
-      }
-      if (terminal.kind === "repaired") {
-        repairUsed = true;
-        // Strict OpenAI-compatible repair replay: the retained assistant
-        // toolCalls message must be followed by exactly one fixed,
-        // non-sensitive role:tool response per toolCallId (in call order,
-        // each with its originating toolName for the Ollama `tool_name`
-        // wire field) before the user repair hint. Invalid calls are never
-        // executed and never consume ToolBroker budget; raw arguments/outputs
-        // are never echoed. Free-text repairs carry no toolCalls, so no synthesis.
-        for (const call of outcome.result.toolCalls) {
-          messages.push({
-            role: "tool",
-            content: AGENT_INVALID_TOOL_FEEDBACK_CONTENT,
-            toolCallId: call.id,
-            toolName: call.name,
-          });
+        if (terminal.kind === "succeeded") {
+          clearWallTimer();
+          return terminal.result;
         }
-        messages.push({
-          role: "user",
-          content: `Repair instruction:\n${AGENT_REPAIR_HINTS[terminal.reason]}`,
-        });
-        continue;
+        throw terminal.strategyError;
       }
-      if (terminal.kind === "succeeded") {
-        return terminal.result;
-      }
-      throw terminal.strategyError;
+      // Budget exhausted with no accepted answer (never a ninth call).
+      throw new StrategyError("output_invalid");
+    } finally {
+      clearWallTimer();
     }
-    // Budget exhausted with no accepted answer (never a ninth call).
-    throw new StrategyError("output_invalid");
   };
 }
 
@@ -1329,9 +1378,11 @@ function isEngineAbortRejection(error: unknown, signal: AbortSignal): boolean {
  * One bounded generateTurn call: exactly one gateway.chat attempt (no
  * retry/fallback) with the per-step AbortSignal forwarded so the
  * underlying fetch is actually cancelled (not a Promise.race alone).
- * The step deadline and the engine AbortSignal share one step controller:
- * deadline expiry aborts fetch and audits model_step_timeout/timeout,
- * engine cancellation aborts fetch and follows cancellation semantics.
+ * The step deadline, the Run wall signal, and the engine AbortSignal
+ * share one step controller: deadline or wall expiry aborts fetch and
+ * audits model_step_timeout/timeout (execution_failed), engine
+ * cancellation aborts fetch and follows cancellation semantics
+ * (execution_cancelled, never misclassified when both fire together).
  * Late/non-cooperative settlements are discarded. Every call consumes one
  * step of the model budget. Transport/timeout/cancel outcomes are audited
  * here (exactly one metadata-only model_calls row plus one terminal event);
@@ -1352,6 +1403,8 @@ async function runModelStep(args: {
   stepTimeoutMs: number;
   wallDeadline: number;
   signal: AbortSignal;
+  wallSignal: AbortSignal;
+  isWallExpired: () => boolean;
 }): Promise<StepOutcome> {
   const {
     repo,
@@ -1365,6 +1418,8 @@ async function runModelStep(args: {
     stepTimeoutMs,
     wallDeadline,
     signal,
+    wallSignal,
+    isWallExpired,
   } = args;
   const now = clock.now();
   const wallRemaining = Math.max(wallDeadline - now, 1);
@@ -1393,6 +1448,7 @@ async function runModelStep(args: {
     | { kind: "result"; result: ChatResult }
     | { kind: "error"; error: unknown }
     | { kind: "timeout" }
+    | { kind: "wall" }
     | { kind: "aborted" }
   >((resolve) => {
     let done = false;
@@ -1401,6 +1457,7 @@ async function runModelStep(args: {
         | { kind: "result"; result: ChatResult }
         | { kind: "error"; error: unknown }
         | { kind: "timeout" }
+        | { kind: "wall" }
         | { kind: "aborted" },
     ): void => {
       if (done) {
@@ -1411,6 +1468,7 @@ async function runModelStep(args: {
         clearTimeout(timer);
       }
       signal.removeEventListener("abort", onExternalAbort);
+      wallSignal.removeEventListener("abort", onWallAbort);
       resolve(value);
     };
     const onExternalAbort = (): void => {
@@ -1422,6 +1480,17 @@ async function runModelStep(args: {
         // Abort must never throw; cancellation carries the fate.
       }
       finish({ kind: "aborted" });
+    };
+    const onWallAbort = (): void => {
+      // Wall expiry aborts the fetch like a deadline: the Run fails
+      // (never misclassified as user cancellation). Engine cancel keeps
+      // priority via the `done` race and the checks below.
+      try {
+        stepController.abort();
+      } catch {
+        // Abort must never throw; the wall failure carries the fate.
+      }
+      finish({ kind: "wall" });
     };
     const onStepTimeout = (): void => {
       try {
@@ -1438,7 +1507,15 @@ async function runModelStep(args: {
       finish({ kind: "aborted" });
       return;
     }
+    if (wallSignal.aborted || isWallExpired()) {
+      try {
+        stepController.abort();
+      } catch {}
+      finish({ kind: "wall" });
+      return;
+    }
     signal.addEventListener("abort", onExternalAbort, { once: true });
+    wallSignal.addEventListener("abort", onWallAbort, { once: true });
     timer = setTimeout(onStepTimeout, effectiveTimeout);
     let chat: Promise<ChatResult>;
     try {
@@ -1446,6 +1523,8 @@ async function runModelStep(args: {
     } catch (error) {
       if (signal.aborted) {
         finish({ kind: "aborted" });
+      } else if (wallSignal.aborted || isWallExpired()) {
+        finish({ kind: "wall" });
       } else {
         finish({ kind: "error", error });
       }
@@ -1455,11 +1534,15 @@ async function runModelStep(args: {
       (result) => finish({ kind: "result", result }),
       (error: unknown) => {
         // No double classification: an already-settled deadline keeps
-        // timeout; engine cancellation wins otherwise. Cooperative
+        // timeout/wall; engine cancellation wins otherwise. Cooperative
         // abort rejections surface here when the timer/listener has not
         // yet settled the race.
         if (signal.aborted) {
           finish({ kind: "aborted" });
+          return;
+        }
+        if (wallSignal.aborted || isWallExpired()) {
+          finish({ kind: "wall" });
           return;
         }
         if (isAbortRejection(error) && stepController.signal.aborted) {
@@ -1507,7 +1590,7 @@ async function runModelStep(args: {
       auditOutcome: "cancelled",
     };
   }
-  if (settlement.kind === "timeout") {
+  if (settlement.kind === "timeout" || settlement.kind === "wall") {
     try {
       repo.recordModelCall(runId, {
         step,
@@ -1761,9 +1844,12 @@ export function classifyStep(
  * UUID-free `rN` projection. Returns one deterministic per-call feedback
  * payload in request order; the caller emits one provider-neutral
  * `role: tool` message per call with the matching `toolCallId` plus the
- * originating `toolName`. The
- * remaining wall budget bounds the tool phase as well as model phases:
- * expiry before/during/after tools fails the Run with a fixed code.
+ * originating `toolName`. The Run wall signal is shared with every broker
+ * invocation (composed with the engine signal): wall expiry aborts queued
+ * and running connector work (the broker detaches) before the Run fails
+ * with a fixed code, and no post-wall feedback, grants, or model steps
+ * are produced. Engine cancellation keeps priority so user cancellation
+ * is never misclassified as a wall failure.
  */
 async function executeOrdinaryTools(args: {
   db: Database.Database;
@@ -1774,6 +1860,9 @@ async function executeOrdinaryTools(args: {
   calls: readonly NormalizedToolCall[];
   frozenOrdinalMap: ReadonlyMap<number, string>;
   signal: AbortSignal;
+  wallSignal: AbortSignal;
+  expireWall: () => void;
+  isWallExpired: () => boolean;
   clock: { now(): number };
   wallDeadline: number;
 }): Promise<Array<{ toolCallId: string; toolName: string; content: string }>> {
@@ -1786,18 +1875,46 @@ async function executeOrdinaryTools(args: {
     calls,
     frozenOrdinalMap,
     signal,
+    wallSignal,
+    expireWall,
+    isWallExpired,
     clock,
     wallDeadline,
   } = args;
   if (calls.length === 0) {
     return [];
   }
-  if (clock.now() > wallDeadline) {
-    throw new StrategyError("execution_failed");
+  const halted = (): StrategyError | null => {
+    if (signal.aborted) {
+      return new StrategyError("execution_cancelled");
+    }
+    if (wallSignal.aborted || isWallExpired() || clock.now() > wallDeadline) {
+      // Abort/detach in-flight connector work before failing: the shared
+      // wall signal reaches queued/running broker calls, which detach and
+      // settle as cancelled; the wall failure below carries the Run fate.
+      expireWall();
+      return new StrategyError("execution_failed");
+    }
+    return null;
+  };
+  const initial = halted();
+  if (initial !== null) {
+    throw initial;
   }
-  if (signal.aborted) {
-    throw new StrategyError("execution_cancelled");
-  }
+  const composeToolSignal = (): AbortSignal => {
+    if (signal.aborted || wallSignal.aborted) {
+      const controller = new AbortController();
+      controller.abort();
+      return controller.signal;
+    }
+    try {
+      return AbortSignal.any([signal, wallSignal]);
+    } catch {
+      // Defensive fallback for runtimes without AbortSignal.any: prefer
+      // the engine signal (wall expiry is still enforced by halted()).
+      return signal;
+    }
+  };
   const limit = Math.min(AGENT_TOOL_CONCURRENCY, calls.length);
   const results: Array<{
     name: string;
@@ -1806,24 +1923,30 @@ async function executeOrdinaryTools(args: {
     data: unknown;
   }> = new Array(calls.length);
   let next = 0;
+  // Shared halt recorded by the first worker that observes it; workers
+  // never throw mid-phase so every in-flight broker call is awaited
+  // (aborted/detached) before the phase fails. Queued calls never start
+  // after the halt.
+  let phaseError: StrategyError | null = null;
   const workers: Array<Promise<void>> = [];
   for (let w = 0; w < limit; w += 1) {
     workers.push(
       (async () => {
         for (;;) {
+          if (phaseError !== null) {
+            return;
+          }
+          const before = halted();
+          if (before !== null) {
+            phaseError ??= before;
+            return;
+          }
           const index = next;
           next += 1;
           if (index >= calls.length) {
             return;
           }
           const call = calls[index] as NormalizedToolCall;
-          // Wall check before each physical execution.
-          if (clock.now() > wallDeadline) {
-            throw new StrategyError("execution_failed");
-          }
-          if (signal.aborted) {
-            throw new StrategyError("execution_cancelled");
-          }
           let entry: {
             name: string;
             ok: boolean;
@@ -1843,14 +1966,23 @@ async function executeOrdinaryTools(args: {
                 frozenOrdinalMap,
               ),
             };
-            const out = await invokeWithWall({
-              broker,
+            const out = await broker.invoke(
               runId,
-              call: translatedCall,
-              signal,
-              clock,
-              wallDeadline,
-            });
+              translatedCall.name,
+              translatedCall.arguments,
+              {
+                origin: AGENT_TOOL_ORIGIN,
+                caller: AGENT_TOOL_CALLER,
+                signal: composeToolSignal(),
+              },
+            );
+            // Wall/engine halt wins over a delivered broker result: no
+            // post-halt feedback, grants, or further steps.
+            const after = halted();
+            if (after !== null) {
+              phaseError ??= after;
+              return;
+            }
             const ok =
               out.result.disposition === "accepted" &&
               (out.result.actualOutcome === "succeeded" ||
@@ -1865,7 +1997,13 @@ async function executeOrdinaryTools(args: {
             // size is known: oversized omitted content never grants.
           } catch (error) {
             if (error instanceof StrategyError) {
-              throw error;
+              phaseError ??= error;
+              return;
+            }
+            const after = halted();
+            if (after !== null) {
+              phaseError ??= after;
+              return;
             }
             // Broker storage/cancel rejections are deterministic feedback,
             // never raw text: the next model step sees a fixed marker.
@@ -1883,12 +2021,14 @@ async function executeOrdinaryTools(args: {
   }
   await Promise.all(workers);
   // Wall check after the tool phase: tools that consumed the budget fail
-  // the Run even when every call reported success.
-  if (signal.aborted) {
-    throw new StrategyError("execution_cancelled");
+  // the Run even when every call reported success. All broker work has
+  // already settled (aborted/detached on halt) before throwing.
+  const terminal = halted();
+  if (terminal !== null) {
+    throw terminal;
   }
-  if (clock.now() > wallDeadline) {
-    throw new StrategyError("execution_failed");
+  if (phaseError !== null) {
+    throw phaseError;
   }
   // Deterministic per-call feedback in request order (untrusted data stays
   // data). Each entry maps 1:1 to its assistant tool call id. Feedback
@@ -1927,48 +2067,6 @@ async function executeOrdinaryTools(args: {
     }
     return { toolCallId, toolName, content: full };
   });
-}
-
-/**
- * Race one broker invocation against the remaining wall budget (and the
- * engine AbortSignal). Wall expiry throws a fixed StrategyError; broker
- * rejections propagate to the caller for deterministic per-call feedback.
- */
-async function invokeWithWall(args: {
-  broker: ToolBroker;
-  runId: string;
-  call: NormalizedToolCall;
-  signal: AbortSignal;
-  clock: { now(): number };
-  wallDeadline: number;
-}): Promise<Awaited<ReturnType<ToolBroker["invoke"]>>> {
-  const { broker, runId, call, signal, clock, wallDeadline } = args;
-  const wallRemaining = wallDeadline - clock.now();
-  if (!(wallRemaining > 0)) {
-    throw new StrategyError("execution_failed");
-  }
-  if (signal.aborted) {
-    throw new StrategyError("execution_cancelled");
-  }
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    const invoke = broker.invoke(runId, call.name, call.arguments, {
-      origin: AGENT_TOOL_ORIGIN,
-      caller: AGENT_TOOL_CALLER,
-      signal,
-    });
-    const wall = new Promise<never>((_, reject) => {
-      timer = setTimeout(
-        () => reject(new StrategyError("execution_failed")),
-        Math.max(wallRemaining, 1),
-      );
-    });
-    return await Promise.race([invoke, wall]);
-  } finally {
-    if (timer !== undefined) {
-      clearTimeout(timer);
-    }
-  }
 }
 
 /** Persist grants for delivered reference payloads (skip anything else). */
