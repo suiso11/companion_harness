@@ -1513,11 +1513,15 @@ function isEngineAbortRejection(error: unknown, signal: AbortSignal): boolean {
  * cancellation aborts fetch and follows cancellation semantics
  * (execution_cancelled, never misclassified when both fire together).
  * Late/non-cooperative settlements are discarded. Every call consumes one
- * step of the model budget. Transport/timeout/cancel outcomes are audited
- * here (exactly one metadata-only model_calls row plus one terminal event);
- * delivered responses are returned unaudited so the caller can finalize the
- * single row/event only after classification/answer/citation validation.
- * All timers/listeners are cleared on settle.
+ * step of the model budget. Transport/timeout outcomes are audited here
+ * with exactly one metadata-only model_calls row plus one matching
+ * model.step.failed event; cancellation records exactly one cancelled
+ * model_calls row (errorCode null) with NO model.step.failed event because
+ * the closed M2 error family carries no cancellation code and the RunEngine
+ * alone owns the terminal lifecycle. Delivered responses are returned
+ * unaudited so the caller can finalize the single row/event only after
+ * classification/answer/citation validation. All timers/listeners are
+ * cleared on settle.
  */
 async function runModelStep(args: {
   repo: KernelRepository;
@@ -1688,6 +1692,12 @@ async function runModelStep(args: {
   const adapter = gateway.provider;
 
   if (settlement.kind === "aborted") {
+    // User/engine cancellation: exactly one cancelled model_calls row
+    // (errorCode null) and deliberately NO model.step.failed event. The
+    // closed M2 error family has no cancellation code, so emitting
+    // model.step.failed/model_unavailable here would misattribute a
+    // transport failure; the RunEngine alone owns the terminal fate
+    // (execution_cancelled) via its CAS lifecycle.
     try {
       repo.recordModelCall(runId, {
         step,
@@ -1701,16 +1711,6 @@ async function runModelStep(args: {
       });
     } catch {
       // Metadata-only best effort; the cancellation itself carries the fate.
-    }
-    try {
-      repo.appendModelStepEvent(
-        runId,
-        "model.step.failed",
-        { step, errorCode: "model_unavailable", durationMs },
-        { now: clock.now() },
-      );
-    } catch {
-      // Terminal race: the engine CAS owns the final word.
     }
     return {
       kind: "gateway_failed",
@@ -1759,6 +1759,9 @@ async function runModelStep(args: {
     // cancellation never reaches this branch (settled as aborted above);
     // defensively, an aborted engine signal still cancels here.
     if (signal.aborted || isEngineAbortRejection(settlement.error, signal)) {
+      // Same cancellation coherence as the aborted race above: one
+      // cancelled row (errorCode null), no model.step.failed event (no
+      // valid M2 cancellation code; engine owns the terminal lifecycle).
       try {
         repo.recordModelCall(runId, {
           step,
@@ -1772,16 +1775,6 @@ async function runModelStep(args: {
         });
       } catch {
         // Metadata-only best effort; the cancellation carries the fate.
-      }
-      try {
-        repo.appendModelStepEvent(
-          runId,
-          "model.step.failed",
-          { step, errorCode: "model_unavailable", durationMs },
-          { now: clock.now() },
-        );
-      } catch {
-        // Terminal race: the engine CAS owns the final word.
       }
       return {
         kind: "gateway_failed",
