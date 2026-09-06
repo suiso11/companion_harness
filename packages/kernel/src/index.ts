@@ -18,6 +18,7 @@ export type {
   StepClassification,
 } from "./agent.js";
 export {
+  AGENT_HISTORY_USER_PREFIX,
   AGENT_INVALID_TOOL_FEEDBACK_CONTENT,
   AGENT_MARKDOWN_SEARCH_PARAMETERS,
   AGENT_MAX_HISTORY_ITEMS,
@@ -44,6 +45,7 @@ export {
   createAgentStrategy,
   extractGrantCandidates,
   formatReferenceOmittedMarker,
+  isProjectableHistoryItem,
   isToolFeedbackOversized,
   loadFrozenOrdinalMap,
   projectPrompt,

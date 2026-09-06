@@ -214,6 +214,37 @@ export function formatReferenceOmittedMarker(omitted: number): string {
 }
 
 /**
+ * Fixed framing prefix for projected history user messages. The projected
+ * user content is exactly `${AGENT_HISTORY_USER_PREFIX}${requestText}`;
+ * the assistant content is exactly the stored result text (never
+ * truncated).
+ */
+export const AGENT_HISTORY_USER_PREFIX = "Earlier request:\n" as const;
+
+/**
+ * True when a stored history item projects to two valid gateway messages:
+ * both the framed user content and the assistant content satisfy the
+ * shared per-message bound (`1..MAX_MESSAGE_CONTENT_LENGTH`, measured as
+ * gateway validation does with `content.length`). Whole over/under-bound
+ * pairs are omitted by `projectPrompt`; stored text is never truncated
+ * and half-pairs are never emitted.
+ */
+export function isProjectableHistoryItem(item: {
+  readonly requestText: string;
+  readonly resultText: string;
+}): boolean {
+  if (item.requestText.length < 1 || item.resultText.length < 1) {
+    return false;
+  }
+  const userContent = `${AGENT_HISTORY_USER_PREFIX}${item.requestText}`;
+  return (
+    userContent.length >= 1 &&
+    userContent.length <= MAX_MESSAGE_CONTENT_LENGTH &&
+    item.resultText.length <= MAX_MESSAGE_CONTENT_LENGTH
+  );
+}
+
+/**
  * Assemble the deterministic gateway ChatRequest: fixed system prompt,
  * selected-completed history only (user/assistant pairs in seq order),
  * frozen reference structural summary (rN plus title only, no bodies,
@@ -227,6 +258,12 @@ export function formatReferenceOmittedMarker(omitted: number): string {
  * content limit by deterministically omitting trailing frozen reference
  * summaries (ordinal order, earliest kept). The user request and framing
  * are never truncated; an omitted-count marker records the bound.
+ *
+ * History projection omits whole over/under-bound pairs (never truncated,
+ * never half-pairs): each item must project to a framed user message and
+ * an assistant message that each satisfy 1..MAX_MESSAGE_CONTENT_LENGTH.
+ * Omission is deterministic (input order preserved, latest valid items
+ * win up to AGENT_MAX_HISTORY_ITEMS) and carries no stored text.
  */
 export function projectPrompt(args: ProjectPromptArgs): ChatRequest {
   const system = args.systemPrompt ?? AGENT_SYSTEM_PROMPT;
@@ -234,13 +271,17 @@ export function projectPrompt(args: ProjectPromptArgs): ChatRequest {
     { role: "system", content: system },
   ];
   // Bound history so the initial request can never exceed the gateway
-  // 128-message cap. Selected-completed only; keep the latest entries in
-  // chronological order (deterministic).
-  const history = args.history.slice(-AGENT_MAX_HISTORY_ITEMS);
+  // 128-message cap. Selected-completed only; keep the latest projectable
+  // entries in chronological order (deterministic). Over/under-bound pairs
+  // are omitted whole: no truncation, no half-pairs, no sensitive content
+  // in the omission (the pair is simply absent).
+  const history = args.history
+    .filter(isProjectableHistoryItem)
+    .slice(-AGENT_MAX_HISTORY_ITEMS);
   for (const item of history) {
     messages.push({
       role: "user",
-      content: `Earlier request:\n${item.requestText}`,
+      content: `${AGENT_HISTORY_USER_PREFIX}${item.requestText}`,
     });
     messages.push({ role: "assistant", content: item.resultText });
   }
@@ -1219,12 +1260,13 @@ function loadHistory(
       if (typeof input.text !== "string" || typeof result.text !== "string") {
         continue;
       }
-      // Deterministic history cap at the 4KiB part scale; the
-      // selection-only rule is already applied by the JOIN above.
+      // No truncation here: stored conversation text is projected verbatim
+      // and whole over/under-bound pairs are omitted in projectPrompt, so a
+      // legal stored turn can never fail gateway validation via history.
       out.push({
         turnSeq: row.seq,
         requestText: input.text,
-        resultText: sliceCodePoints(result.text, 4000),
+        resultText: result.text,
       });
     } catch {}
   }
@@ -1247,21 +1289,13 @@ function trimHistoryToCap(messages: ChatRequest["messages"]): void {
       second === undefined ||
       second.role !== "user" ||
       typeof second.content !== "string" ||
-      !second.content.startsWith("Earlier request:\n")
+      !second.content.startsWith(AGENT_HISTORY_USER_PREFIX)
     ) {
       return;
     }
     // Remove the oldest history pair (user request + assistant result).
     messages.splice(1, 2);
   }
-}
-
-function sliceCodePoints(text: string, max: number): string {
-  const points = Array.from(text);
-  if (points.length <= max) {
-    return text;
-  }
-  return points.slice(0, max).join("");
 }
 
 function loadReferenceSummary(
