@@ -27,7 +27,7 @@ import {
   AGENT_REFERENCE_OPEN_PARAMETERS,
   AGENT_REFERENCE_REFRESH_PARAMETERS,
   AGENT_REFERENCE_RELATED_PARAMETERS,
-  AGENT_UUID_V4_PATTERN,
+  AGENT_RN_PATTERN,
   answerSubmitToolDefinition,
   buildAgentToolDefinitions,
   closeKernelDatabase,
@@ -194,7 +194,7 @@ describe("advertised ordinary tool definitions (exact closed schemas)", () => {
       expect(tools[1]?.parameters).toEqual({
         type: "object",
         properties: {
-          referenceId: { type: "string", pattern: AGENT_UUID_V4_PATTERN },
+          referenceId: { type: "string", pattern: AGENT_RN_PATTERN },
         },
         required: ["referenceId"],
         additionalProperties: false,
@@ -202,7 +202,7 @@ describe("advertised ordinary tool definitions (exact closed schemas)", () => {
       expect(tools[2]?.parameters).toEqual({
         type: "object",
         properties: {
-          referenceId: { type: "string", pattern: AGENT_UUID_V4_PATTERN },
+          referenceId: { type: "string", pattern: AGENT_RN_PATTERN },
         },
         required: ["referenceId"],
         additionalProperties: false,
@@ -210,7 +210,7 @@ describe("advertised ordinary tool definitions (exact closed schemas)", () => {
       expect(tools[3]?.parameters).toEqual({
         type: "object",
         properties: {
-          referenceId: { type: "string", pattern: AGENT_UUID_V4_PATTERN },
+          referenceId: { type: "string", pattern: AGENT_RN_PATTERN },
           limit: {
             type: "integer",
             minimum: 1,
@@ -311,7 +311,7 @@ describe("advertised ordinary tool definitions (exact closed schemas)", () => {
   });
 });
 
-describe("advertised schemas match accepted broker input (UUID contract retained)", () => {
+describe("advertised schemas match accepted broker input (rN advertised, UUID at broker)", () => {
   it("markdown.search: required/defaults/ranges/enums/closed match Zod", () => {
     // Minimal advertised input is accepted with broker defaults applied.
     expect(MarkdownSearchToolInputSchema.parse({ query: "vault" })).toEqual({
@@ -378,23 +378,32 @@ describe("advertised schemas match accepted broker input (UUID contract retained
     ).toThrow();
   });
 
-  it("advertised UUID pattern mirrors UuidSchema (v4 only, case-insensitive)", () => {
-    const pattern = new RegExp(AGENT_UUID_V4_PATTERN);
+  it("advertised rN pattern is ^r[1-9][0-9]*$ (UUIDs rejected, rN accepted)", () => {
+    expect(AGENT_RN_PATTERN).toBe("^r[1-9][0-9]*$");
+    const pattern = new RegExp(AGENT_RN_PATTERN);
     const v4 = randomUUID();
-    expect(pattern.test(v4)).toBe(true);
-    expect(() => UuidSchema.parse(v4)).not.toThrow();
-    expect(() => UuidSchema.parse(v4.toUpperCase())).not.toThrow();
-    expect(pattern.test(v4.toUpperCase())).toBe(true);
-    // UUID v1 / nil / rN identifiers are rejected by both.
+    // Model-facing rN identifiers are accepted by the advertised schema.
+    for (const good of ["r1", "r2", "r10", "r999"]) {
+      expect(pattern.test(good)).toBe(true);
+    }
+    // Raw UUIDs (even valid v4) and malformed rN are rejected model-side.
     for (const bad of [
+      v4,
+      v4.toUpperCase(),
       "6ec0bd7f-11c0-11d1-80de-00c04fd430c8",
       "00000000-0000-0000-0000-000000000000",
-      "r1",
+      "r0",
+      "r01",
+      "r",
+      "R1",
       "not-a-uuid",
+      "",
     ]) {
       expect(pattern.test(bad)).toBe(false);
-      expect(() => UuidSchema.parse(bad)).toThrow();
     }
+    // The broker-side Zod contract still requires UUIDs (translation target).
+    expect(() => UuidSchema.parse(v4)).not.toThrow();
+    expect(() => UuidSchema.parse("r1")).toThrow();
   });
 });
 

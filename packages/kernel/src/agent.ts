@@ -364,12 +364,42 @@ export function answerSubmitToolDefinition(): ToolDefinition {
 /**
  * UUID v4 JSON Schema pattern (case-insensitive hex, no flags). Mirrors the
  * contracts `UuidSchema` (`UUID_V4_REGEX`, case-insensitive): version nibble
- * `4`, variant `8/9/a/b`. Advertised schemas retain the existing UUID
- * contract for `referenceId` (the upcoming rN translation layer is separate;
- * see the factory note below).
+ * `4`, variant `8/9/a/b`. Retained for backward compatibility and for
+ * detecting smuggled raw-UUID model arguments (which must never reach the
+ * broker); advertised reference schemas use `AGENT_RN_PATTERN` instead.
  */
 export const AGENT_UUID_V4_PATTERN =
   "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$" as const;
+
+/**
+ * Model-facing reference identifier pattern. Frozen context exposes only
+ * `rN` ordinals (never UUIDs), so `reference.open` / `reference.refresh` /
+ * `reference.related` advertise this closed pattern. The strategy translates
+ * a valid current frozen-context `rN` to its UUID immediately before
+ * invoking ToolBroker; anything else fails safely through the ordinary
+ * ToolBroker path without leaking UUIDs.
+ */
+export const AGENT_RN_PATTERN = "^r[1-9][0-9]*$" as const;
+
+const RN_REGEX = /^r[1-9][0-9]*$/;
+
+/** Reference tools whose model-facing `referenceId` is an `rN` ordinal. */
+const REFERENCE_RN_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "reference.open",
+  "reference.refresh",
+  "reference.related",
+]);
+
+/**
+ * Fixed valid-v4 placeholder used when a model-supplied `referenceId` is a
+ * raw UUID (smuggled despite the advertised `rN` schema). Substituting
+ * blocks the smuggled UUID from ever reaching ToolBroker: the call still
+ * traverses the ordinary broker pipeline (budget first) and fails as
+ * `reference_not_found`/`invalid_input` with no UUID leak. The value is a
+ * valid v4 UUID that is never inserted as a real reference.
+ */
+export const AGENT_UNMAPPED_REFERENCE_ID =
+  "ffffffff-ffff-4fff-bfff-ffffffffffff" as const;
 
 /**
  * Explicit closed JSON parameter schema for `markdown.search`, matching
@@ -401,16 +431,17 @@ export const AGENT_MARKDOWN_SEARCH_PARAMETERS = Object.freeze({
 }) as unknown as Record<string, unknown>;
 
 /**
- * Explicit closed JSON parameter schema for `reference.open`, matching
- * `ReferenceOpenToolInputSchema` (strict): UUID `referenceId` required.
- * Retains the existing UUID contract; rN translation is a separate change.
+ * Explicit closed JSON parameter schema for `reference.open`: model-facing
+ * `referenceId` is an `rN` identifier (`AGENT_RN_PATTERN`), never a UUID.
+ * The broker-side Zod schema still requires a UUID; the strategy translates
+ * a valid frozen-context `rN` to its UUID immediately before the broker call.
  */
 export const AGENT_REFERENCE_OPEN_PARAMETERS = Object.freeze({
   type: "object",
   properties: Object.freeze({
     referenceId: Object.freeze({
       type: "string",
-      pattern: AGENT_UUID_V4_PATTERN,
+      pattern: AGENT_RN_PATTERN,
     }),
   }),
   required: Object.freeze(["referenceId"]),
@@ -418,16 +449,16 @@ export const AGENT_REFERENCE_OPEN_PARAMETERS = Object.freeze({
 }) as unknown as Record<string, unknown>;
 
 /**
- * Explicit closed JSON parameter schema for `reference.refresh`, matching
- * `ReferenceRefreshToolInputSchema` (strict): UUID `referenceId` required.
- * Retains the existing UUID contract; rN translation is a separate change.
+ * Explicit closed JSON parameter schema for `reference.refresh`: model-facing
+ * `referenceId` is an `rN` identifier, never a UUID. Translated to UUID
+ * immediately before the broker call.
  */
 export const AGENT_REFERENCE_REFRESH_PARAMETERS = Object.freeze({
   type: "object",
   properties: Object.freeze({
     referenceId: Object.freeze({
       type: "string",
-      pattern: AGENT_UUID_V4_PATTERN,
+      pattern: AGENT_RN_PATTERN,
     }),
   }),
   required: Object.freeze(["referenceId"]),
@@ -435,16 +466,16 @@ export const AGENT_REFERENCE_REFRESH_PARAMETERS = Object.freeze({
 }) as unknown as Record<string, unknown>;
 
 /**
- * Explicit closed JSON parameter schema for `reference.related`, matching
- * `ReferenceRelatedToolInputSchema` (strict): UUID `referenceId` required,
- * `limit` 1-20 default 10. Retains the existing UUID contract.
+ * Explicit closed JSON parameter schema for `reference.related`:
+ * model-facing `referenceId` is an `rN` identifier, never a UUID;
+ * `limit` 1-20 default 10. Translated to UUID immediately before the call.
  */
 export const AGENT_REFERENCE_RELATED_PARAMETERS = Object.freeze({
   type: "object",
   properties: Object.freeze({
     referenceId: Object.freeze({
       type: "string",
-      pattern: AGENT_UUID_V4_PATTERN,
+      pattern: AGENT_RN_PATTERN,
     }),
     limit: Object.freeze({
       type: "integer",
@@ -584,6 +615,187 @@ export function extractGrantCandidates(modelFacing: unknown): GrantCandidate[] {
 }
 
 /* ------------------------------------------------------------------ */
+/* rN translation + UUID-free feedback (PR #4 r3943430520)               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Load the frozen current-turn ordinal map: ordinal -> SessionReference UUID
+ * for ONLY the reference ids frozen into the current turn (`frozenIds`).
+ * This is the SOLE translation source for model-supplied `rN` identifiers:
+ * no semantic guessing, no vault/DB search, no full-session fallback. An
+ * `rN` whose ordinal is absent here (unknown, malformed, or valid in the
+ * session but out of the frozen context, including cross-session ordinals)
+ * never translates and fails safely through the ordinary broker path.
+ */
+export function loadFrozenOrdinalMap(
+  db: Database.Database,
+  sessionId: string,
+  frozenIds: readonly string[],
+): Map<number, string> {
+  const map = new Map<number, string>();
+  if (frozenIds.length === 0) {
+    return map;
+  }
+  try {
+    const placeholders = frozenIds.map(() => "?").join(",");
+    const rows = db
+      .prepare(
+        `SELECT ordinal, id FROM session_references WHERE session_id = ? AND id IN (${placeholders})`,
+      )
+      .all(sessionId, ...frozenIds) as Array<{
+      ordinal: number;
+      id: string;
+    }>;
+    for (const row of rows) {
+      if (
+        Number.isInteger(row.ordinal) &&
+        row.ordinal >= 1 &&
+        typeof row.id === "string" &&
+        isUuidV4(row.id) &&
+        !map.has(row.ordinal)
+      ) {
+        map.set(row.ordinal, row.id);
+      }
+    }
+  } catch {
+    // Fail closed: an unreadable map translates nothing.
+  }
+  return map;
+}
+
+/**
+ * Translate model-supplied reference-tool arguments from `rN` to UUID
+ * immediately before the ToolBroker call. Every model-caused ordinary call
+ * (including translation failures) must still traverse ToolBroker so the
+ * normal budget is consumed; this function only rewrites the arguments,
+ * never skips the broker invocation.
+ *
+ * - Valid frozen-context `rN` -> `{ ...args, referenceId: <uuid> }`.
+ * - Raw UUID `referenceId` (smuggled despite the advertised `rN` schema) ->
+ *   substituted with `AGENT_UNMAPPED_REFERENCE_ID` so the attacker UUID
+ *   never reaches the broker; the call still consumes budget and fails as
+ *   `reference_not_found` through the ordinary path.
+ * - Malformed / unknown / out-of-context `rN`, missing/non-object args ->
+ *   returned unchanged so the broker rejects them as `invalid_input`
+ *   (unknown tool args) through the ordinary path with no UUID leak.
+ */
+export function translateReferenceArgs(
+  tool: string,
+  args: unknown,
+  frozenOrdinalMap: ReadonlyMap<number, string>,
+): unknown {
+  if (!REFERENCE_RN_TOOL_NAMES.has(tool)) {
+    return args;
+  }
+  if (typeof args !== "object" || args === null || Array.isArray(args)) {
+    return args;
+  }
+  const record = args as Record<string, unknown>;
+  const raw = record.referenceId;
+  if (typeof raw !== "string") {
+    return args;
+  }
+  if (!RN_REGEX.test(raw)) {
+    if (isUuidV4(raw)) {
+      return { ...record, referenceId: AGENT_UNMAPPED_REFERENCE_ID };
+    }
+    return args;
+  }
+  const ordinal = Number(raw.slice(1));
+  const mapped = frozenOrdinalMap.get(ordinal);
+  if (mapped === undefined) {
+    return args;
+  }
+  return { ...record, referenceId: mapped };
+}
+
+/** Reverse session map UUID -> ordinal for UUID-free model feedback. */
+function loadUuidToOrdinal(
+  db: Database.Database,
+  sessionId: string,
+): Map<string, number> {
+  const map = new Map<string, number>();
+  try {
+    const rows = db
+      .prepare(
+        "SELECT id, ordinal FROM session_references WHERE session_id = ?",
+      )
+      .all(sessionId) as Array<{ id: string; ordinal: number }>;
+    for (const row of rows) {
+      if (typeof row.id === "string" && Number.isInteger(row.ordinal)) {
+        map.set(row.id, row.ordinal);
+        map.set(row.id.toLowerCase(), row.ordinal);
+        map.set(row.id.toUpperCase(), row.ordinal);
+      }
+    }
+  } catch {
+    // Fail closed below: unmapped UUIDs redact to a fixed marker.
+  }
+  return map;
+}
+
+/**
+ * Project delivered broker `modelFacing` to UUID-free model feedback.
+ * Structural `referenceId` UUIDs become their session `rN` (so the model can
+ * cite granted evidence without ever seeing a UUID); `snapshotId` /
+ * `resourceId` are omitted (the model has no use for them); any other
+ * structural UUID in a non-free-text position redacts to `[redacted]`.
+ * Free-text evidence fields (`snippet`, `text`, `title`, `canonicalKey`,
+ * `query`, `reason`) pass through untouched so document content is never
+ * corrupted. Grants are always derived from the ORIGINAL delivered payload,
+ * never from this projection.
+ */
+export function sanitizeModelFacingForFeedback(
+  value: unknown,
+  uuidToOrdinal: ReadonlyMap<string, number>,
+): unknown {
+  const FREE_TEXT_KEYS: ReadonlySet<string> = new Set([
+    "snippet",
+    "text",
+    "title",
+    "canonicalKey",
+    "query",
+    "reason",
+  ]);
+  const visit = (node: unknown): unknown => {
+    if (Array.isArray(node)) {
+      return node.map(visit);
+    }
+    if (typeof node !== "object" || node === null) {
+      return node;
+    }
+    const record = node as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(record)) {
+      if (key === "snapshotId" || key === "resourceId") {
+        continue;
+      }
+      if (key === "referenceId" && typeof entry === "string") {
+        if (isUuidV4(entry)) {
+          const ordinal = uuidToOrdinal.get(entry);
+          out[key] = ordinal === undefined ? "withheld" : `r${ordinal}`;
+        } else {
+          out[key] = entry;
+        }
+        continue;
+      }
+      if (FREE_TEXT_KEYS.has(key)) {
+        out[key] = entry;
+        continue;
+      }
+      if (typeof entry === "string" && isUuidV4(entry)) {
+        const ordinal = uuidToOrdinal.get(entry);
+        out[key] = ordinal === undefined ? "[redacted]" : `r${ordinal}`;
+        continue;
+      }
+      out[key] = visit(entry);
+    }
+    return out;
+  };
+  return visit(value);
+}
+
+/* ------------------------------------------------------------------ */
 /* Factory                                                             */
 /* ------------------------------------------------------------------ */
 
@@ -684,11 +896,11 @@ export function createAgentStrategy(
     const requestText =
       ctx.turn.input.kind === "user_text" ? ctx.turn.input.text : "";
     const history = loadHistory(db, sessionId, ctx.turn.seq);
-    const references = loadReferenceSummary(
-      db,
-      sessionId,
-      frozenReferenceIds(ctx),
-    );
+    const frozenIds = frozenReferenceIds(ctx);
+    const references = loadReferenceSummary(db, sessionId, frozenIds);
+    // Sole rN->UUID source: the frozen current-turn ordinal map. Fixed for
+    // the whole Run (frozen context never rewrites, including on Retry).
+    const frozenOrdinalMap = loadFrozenOrdinalMap(db, sessionId, frozenIds);
     const messages = projectPrompt({
       requestText,
       history,
@@ -750,11 +962,13 @@ export function createAgentStrategy(
       }
       if (classification.kind === "ordinary") {
         const feedbacks = await executeOrdinaryTools({
+          db,
           repo,
           broker,
           runId,
           sessionId,
           calls: classification.calls,
+          frozenOrdinalMap,
           signal: ctx.signal,
           clock,
           wallDeadline,
@@ -1406,26 +1620,42 @@ export function classifyStep(
 /**
  * Execute ordinary tool calls through ToolBroker with at most
  * AGENT_TOOL_CONCURRENCY physical executions, preserving request order
- * (never dropping for count alone). Successful reference payloads
- * create/upgrade current-run EvidenceGrants. Returns one deterministic
- * per-call feedback payload in request order; the caller emits one
- * provider-neutral `role: tool` message per call with the matching
- * `toolCallId`. The remaining wall budget bounds the tool phase as well
- * as model phases: expiry before/during/after tools fails the Run with
- * a fixed code.
+ * (never dropping for count alone). Reference `rN` arguments translate to
+ * UUIDs from the frozen current-turn ordinal map immediately before each
+ * broker call; every model-caused call (including translation failures)
+ * still traverses ToolBroker and consumes its normal budget. Successful
+ * reference payloads create/upgrade current-run EvidenceGrants from the
+ * ORIGINAL delivered payload, while model feedback carries only the
+ * UUID-free `rN` projection. Returns one deterministic per-call feedback
+ * payload in request order; the caller emits one provider-neutral
+ * `role: tool` message per call with the matching `toolCallId`. The
+ * remaining wall budget bounds the tool phase as well as model phases:
+ * expiry before/during/after tools fails the Run with a fixed code.
  */
 async function executeOrdinaryTools(args: {
+  db: Database.Database;
   repo: KernelRepository;
   broker: ToolBroker;
   runId: string;
   sessionId: string;
   calls: readonly NormalizedToolCall[];
+  frozenOrdinalMap: ReadonlyMap<number, string>;
   signal: AbortSignal;
   clock: { now(): number };
   wallDeadline: number;
 }): Promise<Array<{ toolCallId: string; content: string }>> {
-  const { repo, broker, runId, sessionId, calls, signal, clock, wallDeadline } =
-    args;
+  const {
+    db,
+    repo,
+    broker,
+    runId,
+    sessionId,
+    calls,
+    frozenOrdinalMap,
+    signal,
+    clock,
+    wallDeadline,
+  } = args;
   if (calls.length === 0) {
     return [];
   }
@@ -1468,10 +1698,22 @@ async function executeOrdinaryTools(args: {
             data: unknown;
           };
           try {
+            // rN->UUID translation immediately before the broker boundary.
+            // Translation failures still invoke the broker (budget consumed)
+            // with fail-safe arguments (never a smuggled UUID, never a leak).
+            const translatedCall: NormalizedToolCall = {
+              id: call.id,
+              name: call.name,
+              arguments: translateReferenceArgs(
+                call.name,
+                call.arguments,
+                frozenOrdinalMap,
+              ),
+            };
             const out = await invokeWithWall({
               broker,
               runId,
-              call,
+              call: translatedCall,
               signal,
               clock,
               wallDeadline,
@@ -1516,20 +1758,27 @@ async function executeOrdinaryTools(args: {
     throw new StrategyError("execution_failed");
   }
   // Deterministic per-call feedback in request order (untrusted data stays
-  // data). Each entry maps 1:1 to its assistant tool call id. The fully
-  // framed content (tool name, status, error code, JSON framing) is measured
-  // with gateway `.length` semantics: broker-accepted payloads that cannot
-  // fit are never truncated or sent oversized. Instead a fixed compact
-  // `output_too_large` failure is delivered, no EvidenceGrant is created for
-  // the omitted content, and the next model step proceeds. Broker
-  // accounting/audit is unchanged (the broker row stays as reported).
+  // data). Each entry maps 1:1 to its assistant tool call id. Feedback
+  // carries the UUID-free `rN` projection (never structural UUIDs); grants
+  // derive from the ORIGINAL delivered payload. The fully framed content
+  // (tool name, status, error code, JSON framing) is measured with gateway
+  // `.length` semantics: broker-accepted payloads that cannot fit are never
+  // truncated or sent oversized. Instead a fixed compact `output_too_large`
+  // failure is delivered, no EvidenceGrant is created for the omitted
+  // content, and the next model step proceeds. Broker accounting/audit is
+  // unchanged (the broker row stays as reported).
+  const uuidToOrdinal = loadUuidToOrdinal(db, sessionId);
   return results.map((entry, index) => {
     const toolCallId = (calls[index] as NormalizedToolCall).id;
+    const sanitized =
+      entry.ok && entry.data !== null && entry.data !== undefined
+        ? sanitizeModelFacingForFeedback(entry.data, uuidToOrdinal)
+        : null;
     const full = buildToolFeedbackContent(
       entry.name,
       entry.ok,
       entry.errorCode,
-      entry.data,
+      sanitized,
     );
     if (isToolFeedbackOversized(full)) {
       return {

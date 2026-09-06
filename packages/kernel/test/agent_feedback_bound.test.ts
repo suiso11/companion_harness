@@ -233,7 +233,9 @@ describe("framed role:tool boundary (gateway .length semantics)", () => {
         now: T0,
       }).body.sessionId;
       const refId = insertReference(handle.raw, sessionId, 1, T0);
-      const fitLen = textLenForTarget(refId, MAX_MESSAGE_CONTENT_LENGTH);
+      // Model feedback carries the UUID-free rN projection (referenceId
+      // UUID -> "r1"), so size the payload against the projected framing.
+      const fitLen = textLenForTarget("r1", MAX_MESSAGE_CONTENT_LENGTH);
       const broker = makeBroker(
         handle,
         repo,
@@ -269,6 +271,9 @@ describe("framed role:tool boundary (gateway .length semantics)", () => {
       const content = (tools[0] as { content: string }).content;
       expect(content.length).toBe(MAX_MESSAGE_CONTENT_LENGTH);
       expect(JSON.parse(content).output.body.text).toBe("x".repeat(fitLen));
+      // UUID-free feedback: model sees r1, never the hidden UUID.
+      expect(JSON.parse(content).output.referenceId).toBe("r1");
+      expect(content).not.toContain(refId);
       // Full exposure granted for delivered content.
       expect(
         repo.listEvidenceGrants(runId).map((g) => [g.referenceId, g.exposure]),
@@ -294,7 +299,8 @@ describe("framed role:tool boundary (gateway .length semantics)", () => {
         now: T0,
       }).body.sessionId;
       const refId = insertReference(handle.raw, sessionId, 1, T0);
-      const fitLen = textLenForTarget(refId, MAX_MESSAGE_CONTENT_LENGTH);
+      // Size against the UUID-free rN projection (see fit test above).
+      const fitLen = textLenForTarget("r1", MAX_MESSAGE_CONTENT_LENGTH);
       const broker = makeBroker(
         handle,
         repo,
@@ -363,10 +369,12 @@ describe("framed role:tool boundary (gateway .length semantics)", () => {
         now: T0,
       }).body.sessionId;
       const refId = insertReference(handle.raw, sessionId, 1, T0);
-      const fitLen = textLenForTarget(refId, MAX_MESSAGE_CONTENT_LENGTH);
+      // Size against the UUID-free rN projection (see fit test above).
+      const fitLen = textLenForTarget("r1", MAX_MESSAGE_CONTENT_LENGTH);
       const multiText = `${"x".repeat(fitLen - 1)}あx`;
+      // Unit check against the projected rN framing the model actually sees.
       const framed = buildToolFeedbackContent(TOOL, true, null, {
-        referenceId: refId,
+        referenceId: "r1",
         body: { version: 1, text: multiText },
       });
       expect(framed.length).toBe(MAX_MESSAGE_CONTENT_LENGTH + 1);
