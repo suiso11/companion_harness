@@ -268,8 +268,8 @@ describe("classifyStep (§15.4)", () => {
 
 describe("prompt projection and answer rendering", () => {
   it("builds a deterministic prompt with fixed system prompt and repair hint", () => {
-    const tools = buildAgentToolDefinitions(["test.read"]);
-    expect(tools.map((t) => t.name)).toEqual(["test.read", "answer.submit"]);
+    const tools = buildAgentToolDefinitions([]);
+    expect(tools.map((t) => t.name)).toEqual(["answer.submit"]);
     expect(answerSubmitToolDefinition().name).toBe("answer.submit");
     const args = {
       requestText: "q",

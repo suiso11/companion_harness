@@ -31,13 +31,16 @@
 import {
   ANSWER_SUBMIT_TOOL_NAME,
   CITATION_ID_REGEX,
+  DEFAULT_SEARCH_LIMIT,
   type FrozenContext,
   type M2ModelErrorCode,
   MAX_MODEL_STEPS_PER_RUN,
+  MAX_SEARCH_LIMIT,
   parseStructuredAnswer,
   RESERVED_ANSWER_NAMESPACE,
   SNAPSHOT_BODY_VERSION,
   type StructuredAnswer,
+  type ToolDescriptor,
 } from "@companion/contracts";
 import type {
   ChatRequest,
@@ -359,17 +362,151 @@ export function answerSubmitToolDefinition(): ToolDefinition {
 }
 
 /**
- * Build the advertised tool list: ordinary broker tools in registration
- * order plus the reserved `answer.submit` terminal protocol last.
+ * UUID v4 JSON Schema pattern (case-insensitive hex, no flags). Mirrors the
+ * contracts `UuidSchema` (`UUID_V4_REGEX`, case-insensitive): version nibble
+ * `4`, variant `8/9/a/b`. Advertised schemas retain the existing UUID
+ * contract for `referenceId` (the upcoming rN translation layer is separate;
+ * see the factory note below).
+ */
+export const AGENT_UUID_V4_PATTERN =
+  "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$" as const;
+
+/**
+ * Explicit closed JSON parameter schema for `markdown.search`, matching
+ * `MarkdownSearchToolInputSchema` (strict): `query` required (1-256 code
+ * points; `minLength`/`maxLength` is the closest JSON Schema expression,
+ * the broker Zod schema enforces exact code-point counts), `limit` 1-20
+ * default 10, `freshness` enum default `normal`. No Zod introspection is
+ * used: this literal is the advertised contract and tests assert it stays
+ * in sync with the Zod schema (accept/reject + defaults).
+ */
+export const AGENT_MARKDOWN_SEARCH_PARAMETERS = Object.freeze({
+  type: "object",
+  properties: Object.freeze({
+    query: Object.freeze({ type: "string", minLength: 1, maxLength: 256 }),
+    limit: Object.freeze({
+      type: "integer",
+      minimum: 1,
+      maximum: MAX_SEARCH_LIMIT,
+      default: DEFAULT_SEARCH_LIMIT,
+    }),
+    freshness: Object.freeze({
+      type: "string",
+      enum: Object.freeze(["normal", "refresh"]),
+      default: "normal",
+    }),
+  }),
+  required: Object.freeze(["query"]),
+  additionalProperties: false,
+}) as unknown as Record<string, unknown>;
+
+/**
+ * Explicit closed JSON parameter schema for `reference.open`, matching
+ * `ReferenceOpenToolInputSchema` (strict): UUID `referenceId` required.
+ * Retains the existing UUID contract; rN translation is a separate change.
+ */
+export const AGENT_REFERENCE_OPEN_PARAMETERS = Object.freeze({
+  type: "object",
+  properties: Object.freeze({
+    referenceId: Object.freeze({
+      type: "string",
+      pattern: AGENT_UUID_V4_PATTERN,
+    }),
+  }),
+  required: Object.freeze(["referenceId"]),
+  additionalProperties: false,
+}) as unknown as Record<string, unknown>;
+
+/**
+ * Explicit closed JSON parameter schema for `reference.refresh`, matching
+ * `ReferenceRefreshToolInputSchema` (strict): UUID `referenceId` required.
+ * Retains the existing UUID contract; rN translation is a separate change.
+ */
+export const AGENT_REFERENCE_REFRESH_PARAMETERS = Object.freeze({
+  type: "object",
+  properties: Object.freeze({
+    referenceId: Object.freeze({
+      type: "string",
+      pattern: AGENT_UUID_V4_PATTERN,
+    }),
+  }),
+  required: Object.freeze(["referenceId"]),
+  additionalProperties: false,
+}) as unknown as Record<string, unknown>;
+
+/**
+ * Explicit closed JSON parameter schema for `reference.related`, matching
+ * `ReferenceRelatedToolInputSchema` (strict): UUID `referenceId` required,
+ * `limit` 1-20 default 10. Retains the existing UUID contract.
+ */
+export const AGENT_REFERENCE_RELATED_PARAMETERS = Object.freeze({
+  type: "object",
+  properties: Object.freeze({
+    referenceId: Object.freeze({
+      type: "string",
+      pattern: AGENT_UUID_V4_PATTERN,
+    }),
+    limit: Object.freeze({
+      type: "integer",
+      minimum: 1,
+      maximum: MAX_SEARCH_LIMIT,
+      default: DEFAULT_SEARCH_LIMIT,
+    }),
+  }),
+  required: Object.freeze(["referenceId"]),
+  additionalProperties: false,
+}) as unknown as Record<string, unknown>;
+
+/**
+ * Broker-visible M1 tools the agent may advertise, each with its explicit
+ * closed parameter schema. Unknown/unregistered names are never advertised:
+ * `buildAgentToolDefinitions` skips descriptors outside this map.
+ */
+const AGENT_BROKER_TOOL_PARAMETERS: Readonly<
+  Record<string, Record<string, unknown>>
+> = {
+  "markdown.search": AGENT_MARKDOWN_SEARCH_PARAMETERS,
+  "reference.open": AGENT_REFERENCE_OPEN_PARAMETERS,
+  "reference.refresh": AGENT_REFERENCE_REFRESH_PARAMETERS,
+  "reference.related": AGENT_REFERENCE_RELATED_PARAMETERS,
+};
+
+/** Deep copy one advertised parameter schema (callers cannot mutate it). */
+function copyParameters(
+  schema: Record<string, unknown>,
+): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(schema)) as Record<string, unknown>;
+}
+
+/**
+ * Build the advertised tool list from immutable broker descriptor snapshots
+ * (see `ToolBroker.describeTools`) in registration order plus the reserved
+ * `answer.submit` terminal protocol last.
+ *
+ * - Descriptions come from the real `ToolDescriptor.description` (never a
+ *   generic `Kernel tool <name>` fallback).
+ * - Parameters are the explicit closed schemas above (never
+ *   `additionalProperties: true`): every advertised ordinary tool carries
+ *   `additionalProperties: false` with exact required/defaults/enums/ranges.
+ * - Unknown tools (no explicit schema) are skipped, never advertised.
+ * - `answer.submit` stays separately defined and non-Broker (terminal
+ *   protocol, bypasses ToolBroker and the tool budget).
  */
 export function buildAgentToolDefinitions(
-  ordinaryToolNames: readonly string[],
+  brokerTools: readonly ToolDescriptor[],
 ): ToolDefinition[] {
-  const tools: ToolDefinition[] = ordinaryToolNames.map((name) => ({
-    name,
-    description: `Kernel tool ${name}`,
-    parameters: { type: "object", additionalProperties: true },
-  }));
+  const tools: ToolDefinition[] = [];
+  for (const descriptor of brokerTools) {
+    const parameters = AGENT_BROKER_TOOL_PARAMETERS[descriptor.name];
+    if (parameters === undefined) {
+      continue;
+    }
+    tools.push({
+      name: descriptor.name,
+      description: descriptor.description,
+      parameters: copyParameters(parameters),
+    });
+  }
   tools.push(answerSubmitToolDefinition());
   return tools;
 }
@@ -536,7 +673,7 @@ export function createAgentStrategy(
       `maxSteps must not exceed ${AGENT_MAX_STEPS}`,
     );
   }
-  const toolDefinitions = buildAgentToolDefinitions([...broker.toolNames()]);
+  const toolDefinitions = buildAgentToolDefinitions(broker.describeTools());
 
   return async (ctx) => {
     if (ctx.signal.aborted) {
