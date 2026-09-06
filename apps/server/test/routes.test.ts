@@ -1232,3 +1232,210 @@ describe("M1 stored-only references", () => {
     }
   });
 });
+
+describe("drain re-check + idempotent replay", () => {
+  it("replays stored message responses during drain; fresh/conflict get 503", async () => {
+    const f = await makeApp();
+    try {
+      const sessionId = f.repo.createSession({
+        key: randomUUID(),
+        now: 1790000000000,
+      }).body.sessionId;
+      const key = randomUUID();
+      const headers = { ...postHeaders(), "idempotency-key": key };
+      const path = `/api/sessions/${sessionId}/messages`;
+      const first = await f.app.request(path, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ text: "hello" }),
+      });
+      expect(first.status).toBe(202);
+      const firstBody = await first.json();
+      const turnsBefore = count(f.db, "turns");
+      const idemBefore = count(f.db, "api_idempotency");
+      f.controls.markDraining();
+      // Stored replay wins over 503: exact status and body preserved.
+      const replay = await f.app.request(path, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ text: "hello" }),
+      });
+      expect(replay.status).toBe(first.status);
+      expect(await replay.json()).toEqual(firstBody);
+      expect(count(f.db, "turns")).toBe(turnsBefore);
+      expect(count(f.db, "api_idempotency")).toBe(idemBefore);
+      // Fresh key during drain: 503 with Retry-After, nothing persisted.
+      const fresh = await postJson(
+        f.app,
+        path,
+        { text: "late" },
+        { "idempotency-key": randomUUID() },
+      );
+      expect(fresh.status).toBe(503);
+      expect(fresh.headers.get("retry-after")).toBe("5");
+      expect(
+        ((await fresh.json()) as { error: { code: string } }).error.code,
+      ).toBe("server_shutting_down");
+      expect(count(f.db, "turns")).toBe(turnsBefore);
+      expect(count(f.db, "api_idempotency")).toBe(idemBefore);
+      // Same key but different body (request-hash mismatch): there is no
+      // stored response for this request, so 503 — never 409 and never a
+      // mismatched replay.
+      const conflict = await f.app.request(path, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ text: "different" }),
+      });
+      expect(conflict.status).toBe(503);
+      expect(count(f.db, "turns")).toBe(turnsBefore);
+      expect(count(f.db, "api_idempotency")).toBe(idemBefore);
+    } finally {
+      f.close();
+    }
+  });
+
+  it("replays stored retry responses during drain; fresh gets 503", async () => {
+    const f = await makeApp();
+    try {
+      const sessionId = f.repo.createSession({
+        key: randomUUID(),
+        now: 1790000000000,
+      }).body.sessionId;
+      const posted = f.repo.postMessage(
+        sessionId,
+        { text: "question" },
+        { key: randomUUID(), now: 1790000000000 },
+      ).body;
+      f.repo.startRun(posted.run.id, { now: 1790000000001 });
+      f.repo.completeRun(
+        posted.run.id,
+        { version: 1, text: "answer" },
+        { now: 1790000000002 },
+      );
+      const key = randomUUID();
+      const path = `/api/sessions/${sessionId}/turns/${posted.turnId}/retries`;
+      const headers = { ...postHeaders(), "idempotency-key": key };
+      const first = await f.app.request(path, {
+        method: "POST",
+        headers,
+        body: "{}",
+      });
+      expect(first.status).toBe(202);
+      const firstBody = await first.json();
+      const runsBefore = count(f.db, "runs");
+      const idemBefore = count(f.db, "api_idempotency");
+      f.controls.markDraining();
+      // Stored replay wins over 503: exact status and body preserved, and
+      // no second run is queued.
+      const replay = await f.app.request(path, {
+        method: "POST",
+        headers,
+        body: "{}",
+      });
+      expect(replay.status).toBe(first.status);
+      expect(await replay.json()).toEqual(firstBody);
+      expect(count(f.db, "runs")).toBe(runsBefore);
+      expect(count(f.db, "api_idempotency")).toBe(idemBefore);
+      // Fresh key during drain: 503, nothing queued or persisted.
+      const fresh = await postJson(
+        f.app,
+        path,
+        {},
+        { "idempotency-key": randomUUID() },
+      );
+      expect(fresh.status).toBe(503);
+      expect(fresh.headers.get("retry-after")).toBe("5");
+      expect(
+        ((await fresh.json()) as { error: { code: string } }).error.code,
+      ).toBe("server_shutting_down");
+      expect(count(f.db, "runs")).toBe(runsBefore);
+      expect(count(f.db, "api_idempotency")).toBe(idemBefore);
+    } finally {
+      f.close();
+    }
+  });
+
+  it("rejects a message whose body was still streaming when draining began", async () => {
+    const f = await makeApp();
+    try {
+      const sessionId = f.repo.createSession({
+        key: randomUUID(),
+        now: 1790000000000,
+      }).body.sessionId;
+      const idemBefore = count(f.db, "api_idempotency");
+      const stream = new TransformStream<Uint8Array, Uint8Array>();
+      const writer = stream.writable.getWriter();
+      const init = {
+        method: "POST",
+        headers: postHeaders({ "idempotency-key": randomUUID() }),
+        body: stream.readable,
+        duplex: "half",
+      } as unknown as RequestInit;
+      const pending = f.app.request(
+        `/api/sessions/${sessionId}/messages`,
+        init,
+      );
+      // Drain begins while the handler is parked awaiting the body: the
+      // post-validation re-check just before queueing must reject.
+      f.controls.markDraining();
+      await writer.write(
+        new TextEncoder().encode(JSON.stringify({ text: "late" })),
+      );
+      await writer.close();
+      const res = await pending;
+      expect(res.status).toBe(503);
+      expect(res.headers.get("retry-after")).toBe("5");
+      expect(count(f.db, "turns")).toBe(0);
+      expect(count(f.db, "api_idempotency")).toBe(idemBefore);
+    } finally {
+      f.close();
+    }
+  });
+
+  it("rejects a retry whose body was still streaming when draining began", async () => {
+    const f = await makeApp();
+    try {
+      const sessionId = f.repo.createSession({
+        key: randomUUID(),
+        now: 1790000000000,
+      }).body.sessionId;
+      const posted = f.repo.postMessage(
+        sessionId,
+        { text: "question" },
+        { key: randomUUID(), now: 1790000000000 },
+      ).body;
+      f.repo.startRun(posted.run.id, { now: 1790000000001 });
+      f.repo.completeRun(
+        posted.run.id,
+        { version: 1, text: "answer" },
+        { now: 1790000000002 },
+      );
+      const runsBefore = count(f.db, "runs");
+      const idemBefore = count(f.db, "api_idempotency");
+      const stream = new TransformStream<Uint8Array, Uint8Array>();
+      const writer = stream.writable.getWriter();
+      const init = {
+        method: "POST",
+        headers: postHeaders({ "idempotency-key": randomUUID() }),
+        body: stream.readable,
+        duplex: "half",
+      } as unknown as RequestInit;
+      const pending = f.app.request(
+        `/api/sessions/${sessionId}/turns/${posted.turnId}/retries`,
+        init,
+      );
+      // Drain begins while the handler is parked awaiting the body: the
+      // post-validation re-check just before queueing must reject.
+      f.controls.markDraining();
+      await writer.write(new TextEncoder().encode("{}"));
+      await writer.close();
+      const res = await pending;
+      expect(res.status).toBe(503);
+      expect(res.headers.get("retry-after")).toBe("5");
+      expect(count(f.db, "runs")).toBe(runsBefore);
+      expect(count(f.db, "api_idempotency")).toBe(idemBefore);
+    } finally {
+      f.close();
+    }
+  });
+});

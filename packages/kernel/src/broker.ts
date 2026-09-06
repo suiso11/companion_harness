@@ -473,6 +473,19 @@ function digestOf(value: unknown): string | null {
   }
 }
 
+/** Defensive copy so cached/delivered payloads never share references. */
+function cloneValue<T>(value: T): T {
+  try {
+    return structuredClone(value);
+  } catch {
+    try {
+      return JSON.parse(JSON.stringify(value)) as T;
+    } catch {
+      return value;
+    }
+  }
+}
+
 function defaultNormalizer(raw: unknown): NormalizedToolOutput {
   if (Array.isArray(raw)) {
     return { normalized: raw, observations: raw.length, modelFacing: raw };
@@ -805,11 +818,12 @@ export class ToolBroker {
         trace,
       );
     }
-    // Durable requested event before any classification/execution: a
-    // nonterminal persistence failure rejects here so physical work can
-    // never occur without the durable requested event. Only a run that
-    // left running (terminal/non-running audit-only) may omit events.
-    this.appendRequested(runId, auditTool, call, arrivalHash);
+    // Durable requested event with the post-Zod args hash: persistence
+    // failure rejects here so physical work can never occur without the
+    // durable requested event. Rejection/unknown/denied/invalid paths emit
+    // the requested event with the best-available hash (arrival hash before
+    // validation, post-Zod hash after) before their completed commit. Only
+    // a run that left running (non-running audit-only) may omit events.
 
     // ---- Step 2: classification (allowlist + read-only default-deny). ----
     // Invalid `namespace.verb` names are rejected here as fixed
@@ -817,6 +831,7 @@ export class ToolBroker {
     // names fall through to the unknown_tool path in validate.
     note("classify");
     if (!nameValid) {
+      this.appendRequested(runId, auditTool, call, arrivalHash);
       return this.finishFast(runId, auditTool, call, invalidOutcome(), trace);
     }
     const reg = this.registry.get(requestedTool);
@@ -824,15 +839,18 @@ export class ToolBroker {
       context.allowedTools !== undefined &&
       !context.allowedTools.includes(requestedTool)
     ) {
+      this.appendRequested(runId, auditTool, call, arrivalHash);
       return this.finishFast(runId, auditTool, call, deniedOutcome(), trace);
     }
     if (reg !== undefined && reg.descriptor.category !== "read") {
+      this.appendRequested(runId, auditTool, call, arrivalHash);
       return this.finishFast(runId, auditTool, call, deniedOutcome(), trace);
     }
 
     // ---- Step 3: descriptor + input validation. ----
     note("validate");
     if (reg === undefined) {
+      this.appendRequested(runId, auditTool, call, arrivalHash);
       return this.finishFast(
         runId,
         auditTool,
@@ -854,19 +872,24 @@ export class ToolBroker {
     try {
       input = reg.inputSchema.parse(args);
     } catch {
+      this.appendRequested(runId, auditTool, call, arrivalHash);
       return this.finishFast(runId, auditTool, call, invalidOutcome(), trace);
     }
     let canonicalInput: string;
     try {
       canonicalInput = canonicalJsonString(input);
     } catch {
+      this.appendRequested(runId, auditTool, call, arrivalHash);
       return this.finishFast(runId, auditTool, call, invalidOutcome(), trace);
     }
     if (byteLengthUtf8(canonicalInput) > this.budgets.maxInputBytesPerCall) {
+      this.appendRequested(runId, auditTool, call, arrivalHash);
       return this.finishFast(runId, auditTool, call, invalidOutcome(), trace);
     }
     const argsHash = sha256Hex(canonicalInput);
     this.updateArgsHash(call.callId, argsHash);
+    // Requested event carries the post-Zod canonical hash (never raw args).
+    this.appendRequested(runId, auditTool, call, argsHash);
 
     // ---- Step 4: dedup (same run, post-defaults fingerprint). ----
     // Effective freshness is computed ONLY after validated/defaulted input:
@@ -933,15 +956,28 @@ export class ToolBroker {
             errorCode: null,
             resultDigest: prior.resultDigest,
             reusedFromCallId: prior.leaderCallId,
-            normalized: prior.normalized,
-            modelFacing: prior.modelFacing,
+            normalized: cloneValue(prior.normalized),
+            modelFacing: cloneValue(prior.modelFacing),
           },
           trace,
         );
       }
       if (prior !== undefined && prior.status === "inflight") {
-        const leader = await this.awaitLeader(prior.promise, context.signal);
-        if (leader === null) {
+        const waited = await this.awaitLeader(
+          prior.promise,
+          context.signal,
+          this.effectiveTimeout(reg, context.timeoutMs),
+        );
+        if (waited.kind === "timeout") {
+          return this.finishFast(
+            runId,
+            auditTool,
+            call,
+            timeoutOutcome(),
+            trace,
+          );
+        }
+        if (waited.kind === "aborted") {
           return this.finishFast(
             runId,
             auditTool,
@@ -950,6 +986,7 @@ export class ToolBroker {
             trace,
           );
         }
+        const leader = waited.settlement;
         // A run that left `running` during coalesced wait never receives
         // the leader output.
         if (!this.isRunning(runId)) {
@@ -985,8 +1022,8 @@ export class ToolBroker {
               errorCode: null,
               resultDigest: leader.final.resultDigest,
               reusedFromCallId: prior.leaderCallId,
-              normalized: leader.final.normalized,
-              modelFacing: leader.final.modelFacing,
+              normalized: cloneValue(leader.final.normalized),
+              modelFacing: cloneValue(leader.final.modelFacing),
             },
             trace,
           );
@@ -1181,8 +1218,9 @@ export class ToolBroker {
   /**
    * Atomic final commit: the tool_calls finished update and the
    * tool.completed event commit or roll back together while the run is
-   * nonterminal. After an observed terminal status only the metadata
-   * audit update runs and no event is appended. A nonterminal storage
+   * running. After the run leaves `running` (queued / cancel_requested /
+   * terminal, including races observed mid-commit) only the metadata
+   * audit update runs and no event is appended. A running storage
    * failure (including exhausted event-seq conflict retries) never
    * falls back to audit-only completion: the row/event changes are
    * rolled back and a fixed KernelStorageError propagates.
@@ -1194,7 +1232,7 @@ export class ToolBroker {
     call: CallRef,
     final: FinalOutcome,
   ): void {
-    if (this.isTerminal(runId)) {
+    if (!this.isRunning(runId)) {
       this.updateRowFinished(call.callId, final);
       return;
     }
@@ -1218,7 +1256,7 @@ export class ToolBroker {
         if (row === undefined) {
           throw new RepositoryNotFoundError(`run ${runId} not found`);
         }
-        if (isTerminalStatus(row.status as RunStatus)) {
+        if (row.status !== "running") {
           this.db.exec("ROLLBACK");
           this.updateRowFinished(call.callId, final);
           return;
@@ -1283,8 +1321,8 @@ export class ToolBroker {
         } catch {
           // Best effort; the original error carries the failure.
         }
-        // Terminal observed after rollback: audit-only late update only.
-        if (this.isTerminal(runId)) {
+        // Non-running observed after rollback: audit-only late update only.
+        if (!this.isRunning(runId)) {
           this.updateRowFinished(call.callId, final);
           return;
         }
@@ -1330,7 +1368,7 @@ export class ToolBroker {
     }
     // Bounded retries exhausted while still nonterminal: propagate a
     // fixed conflict failure with row/event rolled back.
-    if (this.isTerminal(runId)) {
+    if (!this.isRunning(runId)) {
       this.updateRowFinished(call.callId, final);
       return;
     }
@@ -1361,24 +1399,48 @@ export class ToolBroker {
   private awaitLeader(
     promise: Promise<LeaderSettlement>,
     signal: AbortSignal | undefined,
-  ): Promise<LeaderSettlement | null> {
-    if (signal === undefined) {
-      return promise;
+    timeoutMs?: number,
+  ): Promise<
+    | { kind: "settled"; settlement: LeaderSettlement }
+    | { kind: "aborted" }
+    | { kind: "timeout" }
+  > {
+    if (signal === undefined && timeoutMs === undefined) {
+      return promise.then(
+        (settlement) => ({ kind: "settled" as const, settlement }),
+        () => ({ kind: "aborted" as const }),
+      );
     }
-    if (signal.aborted) {
-      return Promise.resolve(null);
+    if (signal?.aborted === true) {
+      return Promise.resolve({ kind: "aborted" as const });
     }
-    return new Promise<LeaderSettlement | null>((resolve) => {
-      const onAbort = (): void => resolve(null);
-      signal.addEventListener("abort", onAbort, { once: true });
+    return new Promise((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let done = false;
+      const finish = (
+        value:
+          | { kind: "settled"; settlement: LeaderSettlement }
+          | { kind: "aborted" }
+          | { kind: "timeout" },
+      ): void => {
+        if (done) return;
+        done = true;
+        if (timer !== undefined) clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+        resolve(value);
+      };
+      const onAbort = (): void => finish({ kind: "aborted" });
+      const onTimeout = (): void => finish({ kind: "timeout" });
+      if (timeoutMs !== undefined) {
+        timer = setTimeout(onTimeout, Math.max(1, timeoutMs));
+      }
+      signal?.addEventListener("abort", onAbort, { once: true });
       promise.then(
-        (value) => {
-          signal.removeEventListener("abort", onAbort);
-          resolve(value);
+        (settlement) => {
+          finish({ kind: "settled", settlement });
         },
         () => {
-          signal.removeEventListener("abort", onAbort);
-          resolve(null);
+          finish({ kind: "aborted" });
         },
       );
     });
@@ -1483,11 +1545,30 @@ export class ToolBroker {
       errorCode: null,
       resultDigest: pending.resultDigest,
       reusedFromCallId: null,
-      normalized: pending.normalized,
-      modelFacing: pending.modelFacing,
+      normalized: cloneValue(pending.normalized),
+      modelFacing: cloneValue(pending.modelFacing),
       modelBytesForBudget: pending.modelBytes,
       observationsForBudget: pending.observations,
     };
+    // Publish the dedup entry only after the durable audit commit succeeds:
+    // a failed commit must not leave reusable cache behind. commitFinished
+    // throws on running storage failure, so the publish below runs only on
+    // success; on throw the in-flight entry is dropped for hygiene.
+    args.note("audit");
+    try {
+      this.commitFinished(runId, tool, call, final);
+    } catch (error) {
+      const perRun = this.dedup.get(runId);
+      const current = perRun?.get(dedupKey);
+      if (
+        current !== undefined &&
+        current.status === "inflight" &&
+        current.leaderCallId === call.callId
+      ) {
+        perRun?.delete(dedupKey);
+      }
+      throw error;
+    }
     const perRun = this.dedup.get(runId);
     const current = perRun?.get(dedupKey);
     if (
@@ -1495,31 +1576,16 @@ export class ToolBroker {
       current.status === "inflight" &&
       current.leaderCallId === call.callId
     ) {
-      if (args.freshness === "refresh") {
-        perRun?.delete(dedupKey);
-        perRun?.set(dedupKey, {
-          status: "done",
-          leaderCallId: call.callId,
-          normalized: pending.normalized,
-          modelFacing: pending.modelFacing,
-          modelBytes: pending.modelBytes,
-          observations: pending.observations,
-          resultDigest: pending.resultDigest,
-        });
-      } else {
-        perRun?.set(dedupKey, {
-          status: "done",
-          leaderCallId: call.callId,
-          normalized: pending.normalized,
-          modelFacing: pending.modelFacing,
-          modelBytes: pending.modelBytes,
-          observations: pending.observations,
-          resultDigest: pending.resultDigest,
-        });
-      }
+      perRun?.set(dedupKey, {
+        status: "done",
+        leaderCallId: call.callId,
+        normalized: cloneValue(pending.normalized),
+        modelFacing: cloneValue(pending.modelFacing),
+        modelBytes: pending.modelBytes,
+        observations: pending.observations,
+        resultDigest: pending.resultDigest,
+      });
     }
-    args.note("audit");
-    this.commitFinished(runId, tool, call, final);
     return { accepted: true, final };
   }
 
@@ -1648,26 +1714,41 @@ export class ToolBroker {
       handlerPromise = Promise.reject(error);
     }
 
-    // Detachment: the broker stops awaiting non-cooperative handlers at
-    // timeout/cancel. Every late handler settlement (success, failure, or
-    // cancel) only updates the audit row as discarded, never events.
-    handlerPromise.then(
-      () => {
-        if (abortKind !== null) {
-          this.lateReport(call.callId, "succeeded", true);
-        }
-      },
-      (error: unknown) => {
-        if (abortKind !== null) {
-          const mapped = mapHandlerError(error);
-          this.lateReport(
-            call.callId,
-            mapped.cancelLike ? "cancelled" : "failed",
-            true,
-          );
-        }
-      },
-    );
+    // Detachment: slots stay held until the detached handler settles so
+    // physical concurrency caps account for abandoned work. Late handler
+    // reports are attached only on the detached path below and only fill
+    // an unset reported_outcome as discarded (never overwriting a
+    // cooperative report), never emitting events.
+    let slotsReleased = false;
+    const releaseSlots = (): void => {
+      if (slotsReleased) return;
+      slotsReleased = true;
+      perRunSlot.release();
+      this.processSlot.release();
+    };
+    const attachDetachedLateReport = (): void => {
+      handlerPromise.then(
+        () => {
+          try {
+            this.lateReport(call.callId, "succeeded", true);
+          } finally {
+            releaseSlots();
+          }
+        },
+        (error: unknown) => {
+          try {
+            const mapped = mapHandlerError(error);
+            this.lateReport(
+              call.callId,
+              mapped.cancelLike ? "cancelled" : "failed",
+              true,
+            );
+          } finally {
+            releaseSlots();
+          }
+        },
+      );
+    };
 
     const raced = await Promise.race<{
       settled: boolean;
@@ -1693,14 +1774,11 @@ export class ToolBroker {
       }),
     ]);
 
-    perRunSlot.release();
-    this.processSlot.release();
-
     if (!raced.settled || callController.signal.aborted) {
       args.note("normalize");
-      // Keep the composed deadline alive for the detached handler's late
-      // report, but the timer itself can be cleared: the late-report path
-      // no longer needs it. Normalize is skipped entirely.
+      // Detached: keep slots until the handler settles; the timer itself
+      // can be cleared. Normalize is skipped entirely.
+      attachDetachedLateReport();
       cleanupTimer();
       return {
         kind: "failed",
@@ -1712,6 +1790,7 @@ export class ToolBroker {
       const mapped = mapHandlerError(raced.error);
       args.note("normalize");
       cleanupTimer();
+      releaseSlots();
       if (mapped.cancelLike) {
         return { kind: "failed", final: cancelOutcome("cancelled") };
       }
@@ -1733,7 +1812,9 @@ export class ToolBroker {
     // ---- Step 6: normalization + strict output validation, still under
     // the composed timeout/cancel deadline. A non-cooperative async
     // normalizer is detached: the broker returns timeout/cancel without
-    // waiting for it.
+    // waiting for it, but slots stay held until it settles. The handler
+    // had produced a value, so the detached settlement preserves
+    // reported `succeeded` with disposition `discarded`.
     args.note("normalize");
     const raw = raced.value;
     let normalizedOutput: NormalizedToolOutput;
@@ -1741,12 +1822,6 @@ export class ToolBroker {
       const normalizer = reg.normalize ?? defaultNormalizer;
       const normalizerPromise: Promise<NormalizedToolOutput> =
         Promise.resolve().then(() => normalizer(raw, { input }));
-      // Late async normalizer settlement is detached (no audit write; the
-      // call already settled as timeout/cancel).
-      void normalizerPromise.then(
-        () => {},
-        () => {},
-      );
       const normRaced = await Promise.race<{
         settled: boolean;
         value?: NormalizedToolOutput;
@@ -1768,10 +1843,40 @@ export class ToolBroker {
         }),
       ]);
       if (!normRaced.settled || callController.signal.aborted) {
+        // Detached normalizer: hold slots until it settles (no audit
+        // write; the call already settled as timeout/cancel).
+        void normalizerPromise.then(
+          () => releaseSlots(),
+          () => releaseSlots(),
+        );
         cleanupTimer();
+        if (wasTimeout(abortKind)) {
+          return {
+            kind: "failed",
+            final: {
+              actualOutcome: "timed_out",
+              reportedOutcome: "succeeded",
+              disposition: "discarded",
+              errorCode: "execution_timeout",
+              resultDigest: null,
+              reusedFromCallId: null,
+              normalized: null,
+              modelFacing: null,
+            },
+          };
+        }
         return {
           kind: "failed",
-          final: wasTimeout(abortKind) ? timeoutOutcome() : cancelOutcome(null),
+          final: {
+            actualOutcome: "cancelled",
+            reportedOutcome: "succeeded",
+            disposition: "discarded",
+            errorCode: "execution_cancelled",
+            resultDigest: null,
+            reusedFromCallId: null,
+            normalized: null,
+            modelFacing: null,
+          },
         };
       }
       if (normRaced.value === undefined) {
@@ -1780,6 +1885,7 @@ export class ToolBroker {
       normalizedOutput = normRaced.value;
     } catch {
       cleanupTimer();
+      releaseSlots();
       return {
         kind: "failed",
         final: {
@@ -1794,12 +1900,38 @@ export class ToolBroker {
         },
       };
     }
-    // Abort that fired during normalization wins over a delivered value.
+    // Abort that fired during normalization wins over a delivered value,
+    // but the handler had succeeded: preserve reported `succeeded`.
     if (callController.signal.aborted) {
       cleanupTimer();
+      releaseSlots();
+      if (wasTimeout(abortKind)) {
+        return {
+          kind: "failed",
+          final: {
+            actualOutcome: "timed_out",
+            reportedOutcome: "succeeded",
+            disposition: "discarded",
+            errorCode: "execution_timeout",
+            resultDigest: null,
+            reusedFromCallId: null,
+            normalized: null,
+            modelFacing: null,
+          },
+        };
+      }
       return {
         kind: "failed",
-        final: wasTimeout(abortKind) ? timeoutOutcome() : cancelOutcome(null),
+        final: {
+          actualOutcome: "cancelled",
+          reportedOutcome: "succeeded",
+          disposition: "discarded",
+          errorCode: "execution_cancelled",
+          resultDigest: null,
+          reusedFromCallId: null,
+          normalized: null,
+          modelFacing: null,
+        },
       };
     }
     cleanupTimer();
@@ -1807,11 +1939,14 @@ export class ToolBroker {
       !Number.isInteger(normalizedOutput.observations) ||
       (normalizedOutput.observations as number) < 0
     ) {
+      releaseSlots();
       return { kind: "failed", final: outputInvalidOutcome("succeeded", null) };
     }
+    let parsedNormalized: unknown;
     try {
-      reg.outputSchema.parse(normalizedOutput.normalized);
+      parsedNormalized = reg.outputSchema.parse(normalizedOutput.normalized);
     } catch {
+      releaseSlots();
       return {
         kind: "failed",
         final: outputInvalidOutcome(
@@ -1820,40 +1955,50 @@ export class ToolBroker {
         ),
       };
     }
+    normalizedOutput = {
+      normalized: parsedNormalized,
+      observations: normalizedOutput.observations,
+      modelFacing: normalizedOutput.modelFacing,
+    };
     let canonicalNormalized: string;
     let canonicalModel: string;
     try {
       canonicalNormalized = canonicalJsonString(normalizedOutput.normalized);
       canonicalModel = canonicalJsonString(normalizedOutput.modelFacing);
     } catch {
+      releaseSlots();
       return { kind: "failed", final: outputInvalidOutcome("succeeded", null) };
     }
     const normalizedBytes = byteLengthUtf8(canonicalNormalized);
     const modelBytes = byteLengthUtf8(canonicalModel);
     const digest = sha256Hex(canonicalNormalized);
     if (normalizedBytes > this.budgets.maxNormalizedOutputBytesPerCall) {
+      releaseSlots();
       return {
         kind: "failed",
         final: outputTooLargeOutcome("succeeded", digest),
       };
     }
     if (modelBytes > this.budgets.maxModelFacingOutputBytesPerCall) {
+      releaseSlots();
       return {
         kind: "failed",
         final: outputTooLargeOutcome("succeeded", digest),
       };
     }
     if (normalizedOutput.observations > this.budgets.maxObservationsPerCall) {
+      releaseSlots();
       return {
         kind: "failed",
         final: outputInvalidOutcome("succeeded", digest),
       };
     }
+    releaseSlots();
     return {
       kind: "pending",
       pending: {
-        normalized: normalizedOutput.normalized,
-        modelFacing: normalizedOutput.modelFacing,
+        normalized: cloneValue(normalizedOutput.normalized),
+        modelFacing: cloneValue(normalizedOutput.modelFacing),
         observations: normalizedOutput.observations,
         modelBytes,
         resultDigest: digest,
@@ -1898,15 +2043,16 @@ export class ToolBroker {
     try {
       const now = this.clock.now();
       if (discarded) {
+        // Never overwrite a cooperative report: fill only unset rows.
         this.db
           .prepare(
-            "UPDATE tool_calls SET reported_outcome = ?, reported_at = ?, result_disposition = 'discarded' WHERE id = ?",
+            "UPDATE tool_calls SET reported_outcome = ?, reported_at = ?, result_disposition = 'discarded' WHERE id = ? AND reported_outcome IS NULL",
           )
           .run(reported, now, callId);
       } else {
         this.db
           .prepare(
-            "UPDATE tool_calls SET reported_outcome = ?, reported_at = ? WHERE id = ?",
+            "UPDATE tool_calls SET reported_outcome = ?, reported_at = ? WHERE id = ? AND reported_outcome IS NULL",
           )
           .run(reported, now, callId);
       }
@@ -1968,8 +2114,10 @@ export class ToolBroker {
     });
     return {
       result,
-      normalized: final.normalized,
-      modelFacing: final.modelFacing,
+      normalized:
+        final.normalized === null ? null : cloneValue(final.normalized),
+      modelFacing:
+        final.modelFacing === null ? null : cloneValue(final.modelFacing),
       pipeline: [...trace],
     };
   }

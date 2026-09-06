@@ -16,6 +16,7 @@ import {
   HistoryQuerySchema,
   IDEMPOTENCY_SCOPE_SESSIONS_CREATE,
   IdempotencyLookupQuerySchema,
+  messageScope,
   PostMessageRequestSchema,
   PostMessageResponseSchema,
   PostRetryRequestSchema,
@@ -25,6 +26,7 @@ import {
   ReferenceDetailResponseSchema,
   ReferenceListResponseSchema,
   ReferenceSetDetailResponseSchema,
+  retryScope,
 } from "@companion/contracts";
 import {
   IdempotencyConflictError,
@@ -455,6 +457,107 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
 
   app.notFound((c) => apiError(c, 404, "not_found", "resource not found"));
 
+  /**
+   * Draining replay for POST messages: returns the stored response verbatim
+   * (exact status/body) when this exact request was already accepted, else
+   * null so the caller rejects with 503. A lookup miss means the key is
+   * fresh and the kernel is never invoked (no persistence during drain). A
+   * lookup hit delegates hash verification to repo.postMessage, which
+   * replays without side effects on match and throws (no persistence) on
+   * request-hash mismatch; both non-replay outcomes map to null (→ 503).
+   * Fully synchronous: no await between the draining re-check and the
+   * queue call, so no drain can interleave.
+   */
+  function tryReplayStoredMessage(
+    c: Context,
+    sessionId: string,
+    key: string,
+    text: string,
+    uiContext: Record<string, unknown>,
+    started: number,
+  ): Response | null {
+    let stored: ReturnType<typeof repo.lookupIdempotencyForSession>;
+    try {
+      stored = repo.lookupIdempotencyForSession(
+        sessionId,
+        key,
+        messageScope(sessionId),
+      );
+    } catch {
+      return null;
+    }
+    if (!stored.found) {
+      return null;
+    }
+    try {
+      const out = repo.postMessage(
+        sessionId,
+        { text, uiContext },
+        { key, now: now(), timeZone: config.timeZone },
+      );
+      if (!out.replayed) {
+        return null;
+      }
+      const body = PostMessageResponseSchema.parse(out.body);
+      logger.info("http.sessions.messages", {
+        sessionId,
+        turnId: body.turnId,
+        status: out.status,
+        durationMs: Math.max(now() - started, 0),
+      });
+      return c.json(body, out.status as 202);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Draining replay for POST retries: same contract as
+   * tryReplayStoredMessage but scoped to `turn:{turnId}:retry` via
+   * repo.postRetry (which additionally enforces session/turn ownership on
+   * the stored body; drift maps to null → 503).
+   */
+  function tryReplayStoredRetry(
+    c: Context,
+    sessionId: string,
+    turnId: string,
+    key: string,
+    started: number,
+  ): Response | null {
+    let stored: ReturnType<typeof repo.lookupIdempotencyForSession>;
+    try {
+      stored = repo.lookupIdempotencyForSession(
+        sessionId,
+        key,
+        retryScope(turnId),
+      );
+    } catch {
+      return null;
+    }
+    if (!stored.found) {
+      return null;
+    }
+    try {
+      const out = repo.postRetry(sessionId, turnId, {
+        key,
+        now: now(),
+      });
+      if (!out.replayed) {
+        return null;
+      }
+      const body = PostMessageResponseSchema.parse(out.body);
+      logger.info("http.sessions.retries", {
+        sessionId,
+        turnId,
+        status: out.status,
+        durationMs: Math.max(now() - started, 0),
+      });
+      return c.json(body, out.status as 202);
+    } catch {
+      return null;
+    }
+  }
+
   /* ---------------- health (exact, §12.5) ---------------- */
 
   app.get("/health/live", (c) => c.json({ status: "live" }, 200));
@@ -498,10 +601,8 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
 
   app.post("/api/sessions/:sessionId/messages", async (c) => {
     const started = now();
-    if (draining) {
-      // Rejected before any domain work: never persisted for replay.
-      return shuttingDown(c);
-    }
+    // No early draining reject here: the admission gate runs after body
+    // await/validation so a stored idempotency replay wins over 503.
     const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
     if ("response" in session) {
       return session.response;
@@ -517,6 +618,25 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     const parsedBody = PostMessageRequestSchema.safeParse(raw.value);
     if (!parsedBody.success) {
       return validationError(c);
+    }
+    // Draining admission re-check immediately before queueing (no await
+    // between here and repo.postMessage, so a drain that begins mid-flight
+    // cannot slip a fresh mutation into the queue). A stored response for
+    // this exact request replays verbatim instead of 503; everything else
+    // is rejected without persisting.
+    if (draining) {
+      const replayed = tryReplayStoredMessage(
+        c,
+        session.id,
+        keyed.key,
+        parsedBody.data.text,
+        parsedBody.data.uiContext as Record<string, unknown>,
+        started,
+      );
+      if (replayed !== null) {
+        return replayed;
+      }
+      return shuttingDown(c);
     }
     try {
       const out = repo.postMessage(
@@ -545,9 +665,8 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
 
   app.post("/api/sessions/:sessionId/turns/:turnId/retries", async (c) => {
     const started = now();
-    if (draining) {
-      return shuttingDown(c);
-    }
+    // No early draining reject here: the admission gate runs after body
+    // await/validation so a stored idempotency replay wins over 503.
     const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
     if ("response" in session) {
       return session.response;
@@ -566,6 +685,24 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     }
     if (PostRetryRequestSchema.safeParse(raw.value).success !== true) {
       return validationError(c);
+    }
+    // Draining admission re-check immediately before queueing (no await
+    // between here and repo.postRetry, so a drain that begins mid-flight
+    // cannot slip a fresh mutation into the queue). A stored response for
+    // this exact request replays verbatim instead of 503; everything else
+    // is rejected without persisting.
+    if (draining) {
+      const replayed = tryReplayStoredRetry(
+        c,
+        session.id,
+        turn.id,
+        keyed.key,
+        started,
+      );
+      if (replayed !== null) {
+        return replayed;
+      }
+      return shuttingDown(c);
     }
     try {
       const out = repo.postRetry(session.id, turn.id, {

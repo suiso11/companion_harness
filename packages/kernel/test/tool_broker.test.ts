@@ -1918,3 +1918,306 @@ describe("final-m0-blockers: requested durability and safe tool-name audit", () 
     }
   });
 });
+
+describe("fix-broker-review-nine", () => {
+  it("holds slots until the detached handler settles", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const { runId } = newRunningRun(repo, T0);
+      const gate = deferred();
+      const broker = makeBroker(
+        handle,
+        repo,
+        [
+          echoReg({
+            handler: async (input: { q: string }) => {
+              await gate.promise;
+              return { text: input.q };
+            },
+          }),
+        ],
+        { budgets: { maxConcurrentPerRun: 1 } },
+      );
+      const out = await broker.invoke(
+        runId,
+        "test.read",
+        { q: "slow" },
+        { ...CTX, freshness: "refresh", timeoutMs: 25 },
+      );
+      expect(out.result.actualOutcome).toBe("timed_out");
+      // Detached work still holds its slots until it settles.
+      const usage = broker.getSlotUsage();
+      expect(usage.perRunActive[runId] ?? 0).toBe(1);
+      expect(usage.processActive).toBe(1);
+      gate.resolve();
+      const deadline = Date.now() + 2000;
+      for (;;) {
+        const u = broker.getSlotUsage();
+        if ((u.perRunActive[runId] ?? 0) === 0 && u.processActive === 0) break;
+        if (Date.now() > deadline) throw new Error("slots never released");
+        await sleep(5);
+      }
+    } finally {
+      handle.raw.close();
+    }
+  });
+
+  it("publishes dedup cache only after a successful audit commit", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const { runId } = newRunningRun(repo, T0);
+      let calls = 0;
+      const broker = makeBroker(handle, repo, [
+        echoReg({
+          handler: async (input: { q: string }) => {
+            calls += 1;
+            return { text: input.q };
+          },
+        }),
+      ]);
+      handle.raw.exec(
+        "CREATE TRIGGER inject_tool_completed_failure BEFORE INSERT ON run_events WHEN NEW.type = 'tool.completed' BEGIN SELECT RAISE(ABORT, 'injected_tool_completed_failure'); END",
+      );
+      let failure: unknown = null;
+      try {
+        await broker.invoke(runId, "test.read", { q: "k" }, CTX);
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toBeInstanceOf(KernelStorageError);
+      expect(calls).toBe(1);
+      handle.raw.exec("DROP TRIGGER IF EXISTS inject_tool_completed_failure");
+      const retry = await broker.invoke(runId, "test.read", { q: "k" }, CTX);
+      expect(retry.result.actualOutcome).toBe("succeeded");
+      expect(retry.result.reusedFromCallId).toBeNull();
+      expect(calls).toBe(2);
+    } finally {
+      try {
+        handle.raw.exec("DROP TRIGGER IF EXISTS inject_tool_completed_failure");
+      } catch {
+        // Best effort.
+      }
+      handle.raw.close();
+    }
+  });
+
+  it("emits tool.requested with the post-Zod canonical args hash", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const { runId } = newRunningRun(repo, T0);
+      const broker = makeBroker(handle, repo, [echoReg()]);
+      const out = await broker.invoke(runId, "test.read", {}, CTX);
+      expect(out.result.actualOutcome).toBe("succeeded");
+      const { createHash } = await import("node:crypto");
+      const expected = createHash("sha256")
+        .update('{"q":"hi"}', "utf8")
+        .digest("hex");
+      const rows = toolCalls(handle.raw, runId);
+      expect(rows[0]?.args_hash).toBe(expected);
+      const requested = runEvents(handle.raw, runId).find(
+        (e) => e.type === "tool.requested",
+      );
+      expect(requested).toBeDefined();
+      const payload = JSON.parse(requested?.payload as string) as Record<
+        string,
+        unknown
+      >;
+      expect(payload.argsHash).toBe(expected);
+    } finally {
+      handle.raw.close();
+    }
+  });
+
+  it("times out coalesced followers independently of the leader", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const { runId } = newRunningRun(repo, T0);
+      const gate = deferred();
+      const broker = makeBroker(handle, repo, [
+        echoReg({
+          handler: async (input: { q: string }) => {
+            await gate.promise;
+            return { text: input.q };
+          },
+        }),
+      ]);
+      const leader = broker.invoke(runId, "test.read", { q: "same" }, CTX);
+      await sleep(10);
+      const start = Date.now();
+      const follower = await broker.invoke(
+        runId,
+        "test.read",
+        { q: "same" },
+        { ...CTX, timeoutMs: 25 },
+      );
+      expect(Date.now() - start).toBeLessThan(2000);
+      expect(follower.result.actualOutcome).toBe("timed_out");
+      expect(follower.result.errorCode).toBe("execution_timeout");
+      expect(follower.normalized).toBeNull();
+      gate.resolve();
+      const r1 = await leader;
+      expect(r1.result.actualOutcome).toBe("succeeded");
+    } finally {
+      handle.raw.close();
+    }
+  });
+
+  it("never overwrites an existing report with a late detached report", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const { runId } = newRunningRun(repo, T0);
+      const broker = makeBroker(handle, repo, [
+        echoReg({
+          handler: async (input: { q: string }) => {
+            await sleep(120);
+            return { text: input.q };
+          },
+        }),
+      ]);
+      const controller = new AbortController();
+      const pending = broker.invoke(
+        runId,
+        "test.read",
+        { q: "slow" },
+        { ...CTX, signal: controller.signal },
+      );
+      await sleep(10);
+      controller.abort();
+      const out = await pending;
+      expect(out.result.actualOutcome).toBe("cancelled");
+      // Simulate a cooperative report winning the race before the late
+      // success lands: the late report must not overwrite it.
+      handle.raw
+        .prepare("UPDATE tool_calls SET reported_outcome = ? WHERE run_id = ?")
+        .run("failed", runId);
+      // The detached handler settles ~120ms after invoke; wait past it.
+      await sleep(300);
+      const rows = toolCalls(handle.raw, runId);
+      expect(rows[0]?.reported_outcome).toBe("failed");
+    } finally {
+      handle.raw.close();
+    }
+  });
+
+  it("records handler success on normalization timeout with discarded disposition", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const { runId } = newRunningRun(repo, T0);
+      const broker = makeBroker(handle, repo, [
+        echoReg({
+          handler: async () => ({ text: "ok" }),
+          normalize: () => new Promise<never>(() => {}),
+        }),
+      ]);
+      const out = await broker.invoke(
+        runId,
+        "test.read",
+        { q: "a" },
+        { ...CTX, timeoutMs: 25 },
+      );
+      expect(out.result.actualOutcome).toBe("timed_out");
+      expect(out.result.errorCode).toBe("execution_timeout");
+      expect(out.result.reportedOutcome).toBe("succeeded");
+      expect(out.result.disposition).toBe("discarded");
+      expect(out.normalized).toBeNull();
+    } finally {
+      handle.raw.close();
+    }
+  });
+
+  it("settles audit-only with no tool.completed event for cancel_requested runs", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const { sessionId, runId } = newRunningRun(repo, T0);
+      const gate = deferred();
+      const broker = makeBroker(handle, repo, [
+        echoReg({
+          handler: async (input: { q: string }) => {
+            await gate.promise;
+            return { text: input.q };
+          },
+        }),
+      ]);
+      const pending = broker.invoke(runId, "test.read", { q: "late" }, CTX);
+      await sleep(10);
+      repo.cancelRun(sessionId, runId, { now: T0 + 5 });
+      expect(repo.getRun(runId).status).toBe("cancel_requested");
+      const completedBefore = runEvents(handle.raw, runId).filter(
+        (e) => e.type === "tool.completed",
+      ).length;
+      gate.resolve();
+      const out = await pending;
+      expect(out.result.actualOutcome).toBe("cancelled");
+      expect(out.result.disposition).toBe("discarded");
+      const completedAfter = runEvents(handle.raw, runId).filter(
+        (e) => e.type === "tool.completed",
+      ).length;
+      expect(completedAfter).toBe(completedBefore);
+      const rows = toolCalls(handle.raw, runId);
+      expect(rows[0]?.actual_outcome).toBe("cancelled");
+      expect(rows[0]?.lifecycle_status).toBe("finished");
+    } finally {
+      handle.raw.close();
+    }
+  });
+
+  it("uses the outputSchema-parsed value for audit and delivery", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const { runId } = newRunningRun(repo, T0);
+      const broker = makeBroker(handle, repo, [
+        {
+          ...echoReg(),
+          inputSchema: z.strictObject({}),
+          outputSchema: z.strictObject({
+            text: z.string(),
+            flag: z.boolean().default(true),
+          }),
+          handler: async () => ({ text: "hi" }),
+        },
+      ]);
+      const out = await broker.invoke(runId, "test.read", {}, CTX);
+      expect(out.result.actualOutcome).toBe("succeeded");
+      expect(out.normalized).toEqual({ text: "hi", flag: true });
+      const { createHash } = await import("node:crypto");
+      const expectedDigest = createHash("sha256")
+        .update('{"flag":true,"text":"hi"}', "utf8")
+        .digest("hex");
+      expect(out.result.resultDigest).toBe(expectedDigest);
+      expect(toolCalls(handle.raw, runId)[0]?.result_digest).toBe(
+        expectedDigest,
+      );
+    } finally {
+      handle.raw.close();
+    }
+  });
+
+  it("defensively clones cached and returned payloads", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const { runId } = newRunningRun(repo, T0);
+      const broker = makeBroker(handle, repo, [
+        {
+          ...echoReg(),
+          inputSchema: z.strictObject({}),
+          outputSchema: z.strictObject({
+            text: z.string(),
+            items: z.array(z.number()),
+          }),
+          handler: async () => ({ text: "hi", items: [1] }),
+        },
+      ]);
+      const first = await broker.invoke(runId, "test.read", {}, CTX);
+      expect(first.result.actualOutcome).toBe("succeeded");
+      (first.normalized as { items: number[] }).items.push(999);
+      (first.modelFacing as { items: number[] }).items.push(999);
+      const second = await broker.invoke(runId, "test.read", {}, CTX);
+      expect(second.result.actualOutcome).toBe("deduplicated");
+      expect(second.normalized).toEqual({ text: "hi", items: [1] });
+      expect(second.modelFacing).toEqual({ text: "hi", items: [1] });
+      expect(second.normalized).not.toBe(first.normalized);
+    } finally {
+      handle.raw.close();
+    }
+  });
+});
