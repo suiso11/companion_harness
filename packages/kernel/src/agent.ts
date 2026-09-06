@@ -103,6 +103,50 @@ export const AGENT_INVALID_TOOL_FEEDBACK_CONTENT = JSON.stringify({
   output: null,
 });
 
+/**
+ * Existing safe code used when a broker-accepted model-facing payload cannot
+ * fit the fully framed `role: tool` message. The compact fallback keeps the
+ * ordinary feedback shape (`tool/ok/errorCode/output`) with a null output so
+ * one response per toolCallId is preserved without truncation or raw data.
+ */
+export const AGENT_TOOL_OUTPUT_TOO_LARGE_CODE = "output_too_large" as const;
+
+/**
+ * Build the fully framed ordinary `role: tool` content, including tool name,
+ * status, error code, and JSON framing. The returned string is the exact
+ * `ChatMessage.content` measured against the gateway per-message limit.
+ */
+export function buildToolFeedbackContent(
+  tool: string,
+  ok: boolean,
+  errorCode: string | null,
+  output: unknown,
+): string {
+  return JSON.stringify({ tool, ok, errorCode, output });
+}
+
+/**
+ * Fixed compact structural fallback for omitted oversized feedback. Varies
+ * only in the tool name; never carries raw output, truncation, or error text.
+ */
+export function buildOversizedToolFeedbackContent(tool: string): string {
+  return JSON.stringify({
+    tool,
+    ok: false,
+    errorCode: AGENT_TOOL_OUTPUT_TOO_LARGE_CODE,
+    output: null,
+  });
+}
+
+/**
+ * True when framed feedback cannot fit the gateway per-message limit. Uses
+ * the same semantics as gateway validation (`content.length`, UTF-16 code
+ * units), measured on the final framed content.
+ */
+export function isToolFeedbackOversized(content: string): boolean {
+  return content.length > MAX_MESSAGE_CONTENT_LENGTH;
+}
+
 /* ------------------------------------------------------------------ */
 /* Prompt projection (deterministic, §15.6)                              */
 /* ------------------------------------------------------------------ */
@@ -1305,13 +1349,8 @@ async function executeOrdinaryTools(args: {
               errorCode: out.result.errorCode,
               data: ok ? out.modelFacing : null,
             };
-            if (
-              ok &&
-              out.modelFacing !== null &&
-              out.modelFacing !== undefined
-            ) {
-              grantDeliveredReferences(repo, sessionId, runId, out.modelFacing);
-            }
+            // Evidence grants are deferred until the fully framed feedback
+            // size is known: oversized omitted content never grants.
           } catch (error) {
             if (error instanceof StrategyError) {
               throw error;
@@ -1340,16 +1379,32 @@ async function executeOrdinaryTools(args: {
     throw new StrategyError("execution_failed");
   }
   // Deterministic per-call feedback in request order (untrusted data stays
-  // data). Each entry maps 1:1 to its assistant tool call id.
-  return results.map((entry, index) => ({
-    toolCallId: (calls[index] as NormalizedToolCall).id,
-    content: JSON.stringify({
-      tool: entry.name,
-      ok: entry.ok,
-      errorCode: entry.errorCode,
-      output: entry.data,
-    }),
-  }));
+  // data). Each entry maps 1:1 to its assistant tool call id. The fully
+  // framed content (tool name, status, error code, JSON framing) is measured
+  // with gateway `.length` semantics: broker-accepted payloads that cannot
+  // fit are never truncated or sent oversized. Instead a fixed compact
+  // `output_too_large` failure is delivered, no EvidenceGrant is created for
+  // the omitted content, and the next model step proceeds. Broker
+  // accounting/audit is unchanged (the broker row stays as reported).
+  return results.map((entry, index) => {
+    const toolCallId = (calls[index] as NormalizedToolCall).id;
+    const full = buildToolFeedbackContent(
+      entry.name,
+      entry.ok,
+      entry.errorCode,
+      entry.data,
+    );
+    if (isToolFeedbackOversized(full)) {
+      return {
+        toolCallId,
+        content: buildOversizedToolFeedbackContent(entry.name),
+      };
+    }
+    if (entry.ok && entry.data !== null && entry.data !== undefined) {
+      grantDeliveredReferences(repo, sessionId, runId, entry.data);
+    }
+    return { toolCallId, content: full };
+  });
 }
 
 /**
