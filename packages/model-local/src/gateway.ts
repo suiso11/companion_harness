@@ -25,7 +25,15 @@ export interface ModelGateway {
   readonly baseUrl: string;
   /** Full chat-completions-style endpoint URL actually POSTed to. */
   readonly chatUrl: string;
-  chat(request: ChatRequest): Promise<ChatResult>;
+  /**
+   * Single chat attempt (no retry). The optional `signal` aborts the
+   * underlying fetch when present; gateways must forward it. Omitting the
+   * argument preserves backward compatibility.
+   */
+  chat(
+    request: ChatRequest,
+    options?: { signal?: AbortSignal },
+  ): Promise<ChatResult>;
 }
 
 /** Maximum sizes accepted on gateway inputs (generic, prompt-safe). */
@@ -266,7 +274,12 @@ export function resolveGatewayConfig(
 /**
  * POST a JSON body with `redirect: "error"` (redirects rejected, never
  * followed) exactly once (no retry). Returns the parsed JSON body.
- * All failures are redacted ModelLocalError instances.
+ * All failures are redacted ModelLocalError instances, except external
+ * cancellation: when `signal` aborts, the original abort rejection is
+ * rethrown untouched so callers can distinguish cancellation from a
+ * transport timeout. The signal actually aborts the underlying fetch
+ * (not a Promise.race alone) and is composed with the optional
+ * single-attempt transport `timeoutMs` guard.
  */
 export async function postJsonNoRedirect(options: {
   fetchImpl: FetchImpl;
@@ -274,7 +287,12 @@ export async function postJsonNoRedirect(options: {
   body: unknown;
   apiKey: string | undefined;
   timeoutMs: number | undefined;
+  signal?: AbortSignal;
 }): Promise<unknown> {
+  const externalSignal = options.signal;
+  if (isAborted(externalSignal)) {
+    throw toAbortRejection(externalSignal as AbortSignal);
+  }
   const headers: Record<string, string> = {
     "content-type": "application/json",
   };
@@ -282,6 +300,10 @@ export async function postJsonNoRedirect(options: {
     headers.authorization = `Bearer ${options.apiKey}`;
   }
   const controller = new AbortController();
+  const onExternalAbort = (): void => controller.abort();
+  if (externalSignal !== undefined) {
+    externalSignal.addEventListener("abort", onExternalAbort, { once: true });
+  }
   let timer: ReturnType<typeof setTimeout> | undefined;
   if (options.timeoutMs !== undefined) {
     timer = setTimeout(() => controller.abort(), options.timeoutMs);
@@ -296,13 +318,18 @@ export async function postJsonNoRedirect(options: {
       signal: controller.signal,
     });
   } catch (error) {
-    if (timer !== undefined) {
-      clearTimeout(timer);
+    if (isAborted(externalSignal)) {
+      // External cancellation: preserve the abort rejection (no timeout
+      // mapping, no double classification, no raw detail added).
+      throw error;
     }
     throw mapFetchRejection(error);
   } finally {
     if (timer !== undefined) {
       clearTimeout(timer);
+    }
+    if (externalSignal !== undefined) {
+      externalSignal.removeEventListener("abort", onExternalAbort);
     }
   }
   if (!response.ok) {
@@ -319,6 +346,23 @@ export async function postJsonNoRedirect(options: {
       "model returned an invalid response",
     );
   }
+}
+
+/** Preserve (or synthesize) the external abort rejection for cancellation. */
+function isAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
+}
+
+/** Preserve (or synthesize) the external abort rejection for cancellation. */
+function toAbortRejection(signal: AbortSignal): unknown {
+  const reason = (signal as { reason?: unknown }).reason;
+  if (reason instanceof Error) {
+    return reason;
+  }
+  if (reason !== undefined && reason !== null) {
+    return reason;
+  }
+  return new DOMException("The operation was aborted.", "AbortError");
 }
 
 /** Map fetch rejections to redacted codes (redirects are never followed). */

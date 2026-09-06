@@ -835,12 +835,32 @@ type StepOutcome =
       auditOutcome: "failed" | "timeout" | "cancelled";
     };
 
+/** True for DOM AbortError rejections from an actually-aborted fetch. */
+function isAbortRejection(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
+/**
+ * True when an AbortError rejection was caused by the engine signal rather
+ * than the step deadline. The step race already prefers the engine path,
+ * so this is a defensive check for cooperative gateways that reject with
+ * the external abort before the race listener settles.
+ */
+function isEngineAbortRejection(error: unknown, signal: AbortSignal): boolean {
+  return signal.aborted === true && isAbortRejection(error);
+}
+
 /**
  * One bounded generateTurn call: exactly one gateway.chat attempt (no
- * retry/fallback), raced against the step timeout, the wall deadline, and
- * the engine AbortSignal. Late gateway settlements are discarded. Every
- * call consumes one step of the model budget and writes exactly one
- * metadata-only model_calls row plus typed model.step.* events.
+ * retry/fallback) with the per-step AbortSignal forwarded so the
+ * underlying fetch is actually cancelled (not a Promise.race alone).
+ * The step deadline and the engine AbortSignal share one step controller:
+ * deadline expiry aborts fetch and audits model_step_timeout/timeout,
+ * engine cancellation aborts fetch and follows cancellation semantics.
+ * Late/non-cooperative settlements are discarded. Every call consumes one
+ * step of the model budget and writes exactly one metadata-only
+ * model_calls row plus typed model.step.* events. All timers/listeners are
+ * cleared on settle.
  */
 async function runModelStep(args: {
   repo: KernelRepository;
@@ -891,6 +911,7 @@ async function runModelStep(args: {
   };
 
   let timer: ReturnType<typeof setTimeout> | undefined;
+  const stepController = new AbortController();
   const settlement = await new Promise<
     | { kind: "result"; result: ChatResult }
     | { kind: "error"; error: unknown }
@@ -912,26 +933,66 @@ async function runModelStep(args: {
       if (timer !== undefined) {
         clearTimeout(timer);
       }
-      signal.removeEventListener("abort", onAbort);
+      signal.removeEventListener("abort", onExternalAbort);
       resolve(value);
     };
-    const onAbort = (): void => finish({ kind: "aborted" });
+    const onExternalAbort = (): void => {
+      // Cancel the underlying fetch, then settle as cancelled. Late
+      // gateway results remain discarded via `done`.
+      try {
+        stepController.abort();
+      } catch {
+        // Abort must never throw; cancellation carries the fate.
+      }
+      finish({ kind: "aborted" });
+    };
+    const onStepTimeout = (): void => {
+      try {
+        stepController.abort();
+      } catch {
+        // Abort must never throw; the timeout carries the fate.
+      }
+      finish({ kind: "timeout" });
+    };
     if (signal.aborted) {
+      try {
+        stepController.abort();
+      } catch {}
       finish({ kind: "aborted" });
       return;
     }
-    signal.addEventListener("abort", onAbort, { once: true });
-    timer = setTimeout(() => finish({ kind: "timeout" }), effectiveTimeout);
+    signal.addEventListener("abort", onExternalAbort, { once: true });
+    timer = setTimeout(onStepTimeout, effectiveTimeout);
     let chat: Promise<ChatResult>;
     try {
-      chat = gateway.chat(request);
+      chat = gateway.chat(request, { signal: stepController.signal });
     } catch (error) {
-      finish({ kind: "error", error });
+      if (signal.aborted) {
+        finish({ kind: "aborted" });
+      } else {
+        finish({ kind: "error", error });
+      }
       return;
     }
     chat.then(
       (result) => finish({ kind: "result", result }),
-      (error: unknown) => finish({ kind: "error", error }),
+      (error: unknown) => {
+        // No double classification: an already-settled deadline keeps
+        // timeout; engine cancellation wins otherwise. Cooperative
+        // abort rejections surface here when the timer/listener has not
+        // yet settled the race.
+        if (signal.aborted) {
+          finish({ kind: "aborted" });
+          return;
+        }
+        if (isAbortRejection(error) && stepController.signal.aborted) {
+          // Step-deadline abort reached fetch before the timer callback
+          // settled the race: still a deadline timeout, not cancellation.
+          finish({ kind: "timeout" });
+          return;
+        }
+        finish({ kind: "error", error });
+      },
     );
   });
   const durationMs = Math.max(clock.now() - startedAt, 0);
@@ -1002,11 +1063,48 @@ async function runModelStep(args: {
     };
   }
   if (settlement.kind === "error") {
-    // Distinct mapping: a provider timeout surfaces as ModelLocalError
-    // code "timeout" and audits as model_step_timeout/timeout (no retry).
+    // Distinct mapping (no double classification): provider timeout
+    // surfaces as ModelLocalError code "timeout" and audits as
+    // model_step_timeout/timeout (no retry). A cooperative step-deadline
+    // abort surfaces as an AbortError and audits the same way. Engine
+    // cancellation never reaches this branch (settled as aborted above);
+    // defensively, an aborted engine signal still cancels here.
+    if (signal.aborted || isEngineAbortRejection(settlement.error, signal)) {
+      try {
+        repo.recordModelCall(runId, {
+          step,
+          adapter,
+          model,
+          outcome: "cancelled",
+          errorCode: null,
+          durationMs,
+          usage: null,
+          now: clock.now(),
+        });
+      } catch {
+        // Metadata-only best effort; the cancellation carries the fate.
+      }
+      try {
+        repo.appendModelStepEvent(
+          runId,
+          "model.step.failed",
+          { step, errorCode: "model_unavailable", durationMs },
+          { now: clock.now() },
+        );
+      } catch {
+        // Terminal race: the engine CAS owns the final word.
+      }
+      return {
+        kind: "gateway_failed",
+        strategyError: new StrategyError("execution_cancelled"),
+        auditCode: null,
+        auditOutcome: "cancelled",
+      };
+    }
     const isTimeout =
-      settlement.error instanceof ModelLocalError &&
-      settlement.error.code === "timeout";
+      (settlement.error instanceof ModelLocalError &&
+        settlement.error.code === "timeout") ||
+      isAbortRejection(settlement.error);
     const code: M2ModelErrorCode = isTimeout
       ? "model_step_timeout"
       : settlement.error instanceof ModelLocalError &&

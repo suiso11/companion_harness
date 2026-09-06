@@ -207,7 +207,7 @@ export function createOpenAICompatibleGateway(
     capabilities: OPENAI_COMPATIBLE_CAPABILITIES,
     baseUrl: config.baseUrl,
     chatUrl,
-    async chat(request) {
+    async chat(request, options) {
       validateChatRequest(request);
       assertToolCallingCapability(
         OPENAI_COMPATIBLE_CAPABILITIES,
@@ -238,6 +238,7 @@ export function createOpenAICompatibleGateway(
         body,
         apiKey: config.apiKey,
         timeoutMs: config.timeoutMs,
+        ...(options?.signal === undefined ? {} : { signal: options.signal }),
       });
       return normalizeOpenAIResponse(raw, request.tools);
     },

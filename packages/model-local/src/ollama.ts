@@ -174,7 +174,7 @@ export function createOllamaGateway(options: GatewayOptions): ModelGateway {
     capabilities: OLLAMA_CAPABILITIES,
     baseUrl: config.baseUrl,
     chatUrl,
-    async chat(request) {
+    async chat(request, options) {
       validateChatRequest(request);
       assertToolCallingCapability(OLLAMA_CAPABILITIES, request.tools);
       const body: Record<string, unknown> = {
@@ -201,6 +201,7 @@ export function createOllamaGateway(options: GatewayOptions): ModelGateway {
         body,
         apiKey: config.apiKey,
         timeoutMs: config.timeoutMs,
+        ...(options?.signal === undefined ? {} : { signal: options.signal }),
       });
       return normalizeOllamaResponse(raw, request.tools);
     },
