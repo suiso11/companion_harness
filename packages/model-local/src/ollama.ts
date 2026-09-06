@@ -191,6 +191,11 @@ export function createOllamaGateway(options: GatewayOptions): ModelGateway {
     async chat(request, options) {
       validateChatRequest(request);
       assertToolCallingCapability(OLLAMA_CAPABILITIES, request.tools);
+      // Recompute the fetch target from the pinned base on every request
+      // (never reuse the exposed `chatUrl` property) so a mutated gateway
+      // field cannot redirect the request; postJsonNoRedirect revalidates
+      // the literal loopback target immediately before fetch.
+      const url = joinLoopbackPath(config.baseUrl, OLLAMA_CHAT_PATH);
       const body: Record<string, unknown> = {
         model: request.model,
         messages: request.messages.map(toOllamaMessage),
@@ -211,7 +216,7 @@ export function createOllamaGateway(options: GatewayOptions): ModelGateway {
       }
       const raw = await postJsonNoRedirect({
         fetchImpl: config.fetchImpl,
-        url: chatUrl,
+        url,
         body,
         apiKey: config.apiKey,
         timeoutMs: config.timeoutMs,

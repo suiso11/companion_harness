@@ -5,6 +5,7 @@ import {
   assertToolCallingCapability,
   extractModelUsage,
   MAX_MESSAGE_CONTENT_LENGTH,
+  postJsonNoRedirect,
   validateChatRequest,
 } from "../src/gateway.js";
 import {
@@ -61,12 +62,12 @@ function expectRedacted(error: unknown): ModelLocalError {
 }
 
 describe("loopback base URLs", () => {
-  it("accepts 127.0.0.1, localhost, and ::1 over http", () => {
+  it("accepts 127.0.0.1, localhost, and ::1 over http (localhost pinned)", () => {
     expect(normalizeLoopbackBaseUrl("http://127.0.0.1:11434")).toBe(
       "http://127.0.0.1:11434",
     );
     expect(normalizeLoopbackBaseUrl("http://localhost:11434/")).toBe(
-      "http://localhost:11434",
+      "http://127.0.0.1:11434",
     );
     expect(normalizeLoopbackBaseUrl("http://[::1]:11434")).toBe(
       "http://[::1]:11434",
@@ -413,11 +414,11 @@ describe("openai-compatible adapter", () => {
   });
 
   it("avoids doubling a /v1 base path", () => {
-    expect(resolveOpenAIChatUrl("http://localhost:8000/v1")).toBe(
-      "http://localhost:8000/v1/chat/completions",
+    expect(resolveOpenAIChatUrl("http://127.0.0.1:8000/v1")).toBe(
+      "http://127.0.0.1:8000/v1/chat/completions",
     );
-    expect(resolveOpenAIChatUrl("http://localhost:8000")).toBe(
-      "http://localhost:8000/v1/chat/completions",
+    expect(resolveOpenAIChatUrl("http://127.0.0.1:8000")).toBe(
+      "http://127.0.0.1:8000/v1/chat/completions",
     );
   });
 
@@ -1007,5 +1008,147 @@ describe("64KiB model-facing tool-result budget", () => {
       const err = expectRedacted(error);
       expect(err.code).toBe("invalid_request");
     }
+  });
+});
+
+describe("loopback revalidation before fetch (r3943583870)", () => {
+  it("pins localhost to literal 127.0.0.1 with ports and prefixes intact", () => {
+    expect(normalizeLoopbackBaseUrl("http://localhost:11434")).toBe(
+      "http://127.0.0.1:11434",
+    );
+    expect(normalizeLoopbackBaseUrl("http://localhost:11434/prefix/")).toBe(
+      "http://127.0.0.1:11434/prefix",
+    );
+    expect(normalizeLoopbackBaseUrl("http://LOCALHOST:11434")).toBe(
+      "http://127.0.0.1:11434",
+    );
+    // Explicit literals are preserved byte-for-byte (host spelling intact).
+    expect(normalizeLoopbackBaseUrl("http://127.0.0.1:11434/prefix/")).toBe(
+      "http://127.0.0.1:11434/prefix",
+    );
+    expect(normalizeLoopbackBaseUrl("http://[::1]:11434/prefix/")).toBe(
+      "http://[::1]:11434/prefix",
+    );
+  });
+
+  it("never lets a DNS-dependent hostname reach fetch", async () => {
+    const ollamaFetch = mockFetch(
+      jsonResponse({
+        message: { role: "assistant", content: "hi" },
+        done: true,
+        done_reason: "stop",
+      }),
+    );
+    const ollama = createOllamaGateway({
+      baseUrl: "http://localhost:11434",
+      fetchImpl: ollamaFetch.fetchImpl,
+    });
+    expect(ollama.baseUrl).toBe("http://127.0.0.1:11434");
+    expect(ollama.chatUrl).toBe("http://127.0.0.1:11434/api/chat");
+    await ollama.chat(baseRequest());
+    expect(ollamaFetch.calls).toHaveLength(1);
+    expect(ollamaFetch.calls[0]?.url).toBe(
+      "http://127.0.0.1:11434/api/chat",
+    );
+    expect(new URL(ollamaFetch.calls[0]?.url ?? "").hostname).toBe(
+      "127.0.0.1",
+    );
+    expect(ollamaFetch.calls[0]?.url).not.toContain("localhost");
+    expect(ollamaFetch.calls[0]?.init?.redirect).toBe("error");
+
+    const openaiFetch = mockFetch(
+      jsonResponse({
+        choices: [
+          {
+            message: { role: "assistant", content: "hello" },
+            finish_reason: "stop",
+          },
+        ],
+      }),
+    );
+    const openai = createOpenAICompatibleGateway({
+      baseUrl: "http://localhost:8000/prefix",
+      fetchImpl: openaiFetch.fetchImpl,
+    });
+    expect(openai.chatUrl).toBe(
+      "http://127.0.0.1:8000/prefix/v1/chat/completions",
+    );
+    await openai.chat(baseRequest());
+    expect(openaiFetch.calls[0]?.url).toBe(
+      "http://127.0.0.1:8000/prefix/v1/chat/completions",
+    );
+    expect(openaiFetch.calls[0]?.url).not.toContain("localhost");
+    expect(openaiFetch.calls[0]?.init?.redirect).toBe("error");
+  });
+
+  it("ignores mutated gateway target state and revalidates before fetch", async () => {
+    const { fetchImpl, calls } = mockFetch(
+      jsonResponse({
+        message: { role: "assistant", content: "hi" },
+        done: true,
+        done_reason: "stop",
+      }),
+    );
+    const gateway = createOllamaGateway({
+      baseUrl: "http://127.0.0.1:11434",
+      fetchImpl,
+    });
+    // Simulate mutation of the exposed target between construction and request.
+    (gateway as { chatUrl: string }).chatUrl =
+      "http://example.com:11434/api/chat";
+    await gateway.chat(baseRequest());
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe("http://127.0.0.1:11434/api/chat");
+  });
+
+  it("rejects non-pinned and non-loopback fetch targets without calling fetch", async () => {
+    const badUrls = [
+      "http://localhost:11434/api/chat",
+      "http://example.com:11434/api/chat",
+      "http://192.168.1.10:11434/api/chat",
+      "https://127.0.0.1:11434/api/chat",
+      "http://user:pass@127.0.0.1:11434/api/chat",
+      "http://127.0.0.1:11434/api/chat?q=1",
+      "http://127.0.0.1:11434/api/chat#frag",
+      "http://[::2]:11434/api/chat",
+      "not-a-url",
+    ];
+    for (const url of badUrls) {
+      const spy = vi.fn<FetchImpl>(async () => jsonResponse({}));
+      try {
+        await postJsonNoRedirect({
+          fetchImpl: spy,
+          url,
+          body: { marker: SECRET_BODY_MARKER },
+          apiKey: SECRET_TOKEN,
+          timeoutMs: undefined,
+        });
+        expect.unreachable(`should reject ${url}`);
+      } catch (error) {
+        const err = expectRedacted(error);
+        expect(err.code).toBe("invalid_base_url");
+        expect(err.message).not.toContain(url);
+      }
+      expect(spy).not.toHaveBeenCalled();
+    }
+    // Literal loopback targets still pass the fetch boundary.
+    const spy = vi.fn<FetchImpl>(async () => jsonResponse({ ok: true }));
+    await postJsonNoRedirect({
+      fetchImpl: spy,
+      url: "http://127.0.0.1:11434/api/chat",
+      body: {},
+      apiKey: undefined,
+      timeoutMs: undefined,
+    });
+    expect(spy).toHaveBeenCalledTimes(1);
+    const v6spy = vi.fn<FetchImpl>(async () => jsonResponse({ ok: true }));
+    await postJsonNoRedirect({
+      fetchImpl: v6spy,
+      url: "http://[::1]:11434/api/chat",
+      body: {},
+      apiKey: undefined,
+      timeoutMs: undefined,
+    });
+    expect(v6spy).toHaveBeenCalledTimes(1);
   });
 });

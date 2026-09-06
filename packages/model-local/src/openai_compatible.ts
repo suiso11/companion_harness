@@ -217,6 +217,10 @@ export function createOpenAICompatibleGateway(
         OPENAI_COMPATIBLE_CAPABILITIES,
         request.tools,
       );
+      // Recompute from the pinned base per request (see Ollama adapter):
+      // mutated `chatUrl` state is ignored and the fetch boundary
+      // revalidates the literal loopback target.
+      const url = resolveOpenAIChatUrl(config.baseUrl);
       const body: Record<string, unknown> = {
         model: request.model,
         messages: request.messages.map(toOpenAIMessage),
@@ -238,7 +242,7 @@ export function createOpenAICompatibleGateway(
       }
       const raw = await postJsonNoRedirect({
         fetchImpl: config.fetchImpl,
-        url: chatUrl,
+        url,
         body,
         apiKey: config.apiKey,
         timeoutMs: config.timeoutMs,

@@ -1,11 +1,14 @@
 // Provider-neutral ModelGateway contract plus shared request plumbing.
 //
-// Guarantees: loopback-only HTTP endpoints (see base_url.ts), fetch with
-// `redirect: "error"` (no redirect following), single attempt (no retry,
+// Guarantees: loopback-only HTTP endpoints (see base_url.ts; `localhost`
+// is pinned to literal `127.0.0.1` at parse time with no DNS lookup),
+// per-request revalidation of the concrete fetch URL immediately before
+// fetch (literal `127.0.0.1`/`::1` only, so mutated or unpinned targets
+// never reach fetch), fetch with `redirect: "error"` (no redirect following), single attempt (no retry,
 // no fallback, no router), and redacted failures (no auth token, raw
 // response/body, prompt, or reasoning in any error).
 
-import { normalizeLoopbackBaseUrl } from "./base_url.js";
+import { assertPinnedLoopbackFetchUrl, normalizeLoopbackBaseUrl } from "./base_url.js";
 import { ModelLocalError } from "./errors.js";
 import type {
   ChatMessage,
@@ -306,6 +309,11 @@ export async function postJsonNoRedirect(options: {
   timeoutMs: number | undefined;
   signal?: AbortSignal;
 }): Promise<unknown> {
+  // Revalidate the concrete fetch target immediately before use: construction-
+  // time validation alone leaves a bypass window if the stored URL is mutated
+  // or joined incorrectly. Only literal loopback (no `localhost`) passes, so
+  // no DNS lookup occurs here and no rebinding/hosts-file name reaches fetch.
+  const safeUrl = assertPinnedLoopbackFetchUrl(options.url);
   const externalSignal = options.signal;
   if (isAborted(externalSignal)) {
     throw toAbortRejection(externalSignal as AbortSignal);
@@ -327,7 +335,7 @@ export async function postJsonNoRedirect(options: {
   }
   let response: Response;
   try {
-    response = await options.fetchImpl(options.url, {
+    response = await options.fetchImpl(safeUrl, {
       method: "POST",
       headers,
       body: JSON.stringify(options.body),
