@@ -23,7 +23,11 @@ import {
 
 const T0 = 1790000000000;
 
-function toolCall(name: string, args: unknown = {}, id: string): NormalizedToolCall {
+function toolCall(
+  name: string,
+  args: unknown = {},
+  id: string,
+): NormalizedToolCall {
   return { id, name, arguments: args };
 }
 
@@ -162,10 +166,7 @@ describe("agent role:tool toolName ordering", () => {
       const tools = replayed.filter((m) => m.role === "tool");
       expect(tools).toHaveLength(2);
       expect(tools.map((m) => m.toolCallId)).toEqual(["c0", "c1"]);
-      expect(tools.map((m) => m.toolName)).toEqual([
-        "test.read",
-        "test.other",
-      ]);
+      expect(tools.map((m) => m.toolName)).toEqual(["test.read", "test.other"]);
       // Contiguous, in request order, immediately after the assistant replay.
       expect(replayed.indexOf(tools[0] as (typeof replayed)[number])).toBe(
         assistantIdx + 1,

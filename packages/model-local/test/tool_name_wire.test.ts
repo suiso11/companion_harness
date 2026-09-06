@@ -2,10 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { ModelLocalError } from "../src/errors.js";
 import { validateChatRequest } from "../src/gateway.js";
-import {
-  createOllamaGateway,
-  toOllamaMessage,
-} from "../src/ollama.js";
+import { createOllamaGateway, toOllamaMessage } from "../src/ollama.js";
 import {
   createOpenAICompatibleGateway,
   toOpenAIMessage,
@@ -211,9 +208,7 @@ describe("role:tool tool_name wire compatibility", () => {
     expect(() =>
       validateChatRequest(
         baseRequest({
-          messages: [
-            { role: "user", content: "hi", toolName: "notes.search" },
-          ],
+          messages: [{ role: "user", content: "hi", toolName: "notes.search" }],
         }),
       ),
     ).toThrowError(ModelLocalError);
