@@ -254,31 +254,63 @@ export function projectPrompt(args: ProjectPromptArgs): ChatRequest {
   const head = `User request:\n${args.requestText}\n`;
   const trailer =
     "Call ordinary tools for evidence when needed, then submit exactly one answer.submit call alone.";
-  const buildCurrent = (kept: number): string => {
-    const omitted = lines.length - kept;
-    let summary: string;
+  const header = "Session references (frozen structural summary):";
+  const noneSummary = `${header} none.`;
+  // Linear prefix lengths: each reference is formatted exactly once. The
+  // joined length of the first `kept` lines is
+  // prefixLengths[kept] + (kept - 1) newline separators (kept > 0).
+  const prefixLengths: number[] = new Array(lines.length + 1);
+  prefixLengths[0] = 0;
+  for (let i = 0; i < lines.length; i += 1) {
+    const lineLength = lines[i]?.length ?? 0;
+    prefixLengths[i + 1] = (prefixLengths[i] ?? 0) + lineLength;
+  }
+  // Exact final length without rebuilding strings: head + summary + "\n" +
+  // trailer + repairSuffix, with the omitted-count marker accounted exactly.
+  const framingTailLength = 1 + trailer.length + repairSuffix.length;
+  const totalLengthFor = (candidate: number): number => {
     if (lines.length === 0) {
-      summary = "Session references (frozen structural summary): none.";
-    } else if (omitted <= 0) {
-      summary = `Session references (frozen structural summary):\n${lines.join("\n")}`;
-    } else {
-      const marker = formatReferenceOmittedMarker(omitted);
-      const keptLines = lines.slice(0, kept);
-      summary =
-        keptLines.length === 0
-          ? `Session references (frozen structural summary):\n${marker}`
-          : `Session references (frozen structural summary):\n${keptLines.join("\n")}\n${marker}`;
+      return head.length + noneSummary.length + framingTailLength;
     }
-    return `${head}${summary}\n${trailer}${repairSuffix}`;
+    if (candidate >= lines.length) {
+      const joined =
+        (prefixLengths[lines.length] ?? 0) +
+        (lines.length > 0 ? lines.length - 1 : 0);
+      return head.length + header.length + 1 + joined + framingTailLength;
+    }
+    const markerLength = formatReferenceOmittedMarker(
+      lines.length - candidate,
+    ).length;
+    const joinedKept =
+      candidate === 0 ? 0 : (prefixLengths[candidate] ?? 0) + (candidate - 1);
+    const summaryLength =
+      header.length + 1 + (candidate === 0 ? 0 : joinedKept + 1) + markerLength;
+    return head.length + summaryLength + framingTailLength;
   };
   // Keep the largest deterministic prefix of reference summaries (ordinal
   // order) that fits the shared per-message content limit with the actual
-  // final framing. The user request is never truncated.
+  // final framing. The user request is never truncated. O(n) checks at O(1)
+  // each; the final message is built exactly once below.
   let kept = lines.length;
-  while (kept > 0 && buildCurrent(kept).length > MAX_MESSAGE_CONTENT_LENGTH) {
+  while (kept > 0 && totalLengthFor(kept) > MAX_MESSAGE_CONTENT_LENGTH) {
     kept -= 1;
   }
-  messages.push({ role: "user", content: buildCurrent(kept) });
+  let summary: string;
+  if (lines.length === 0) {
+    summary = noneSummary;
+  } else if (kept >= lines.length) {
+    summary = `${header}\n${lines.join("\n")}`;
+  } else {
+    const marker = formatReferenceOmittedMarker(lines.length - kept);
+    summary =
+      kept === 0
+        ? `${header}\n${marker}`
+        : `${header}\n${lines.slice(0, kept).join("\n")}\n${marker}`;
+  }
+  messages.push({
+    role: "user",
+    content: `${head}${summary}\n${trailer}${repairSuffix}`,
+  });
   return { model: args.model, messages, tools: [...args.tools] };
 }
 
