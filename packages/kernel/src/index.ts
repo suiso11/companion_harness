@@ -33,6 +33,7 @@ export {
   classifyStep,
   createAgentStrategy,
   extractGrantCandidates,
+  formatReferenceOmittedMarker,
   projectPrompt,
   renderAnswerText,
   verifyCitations,

@@ -47,6 +47,7 @@ import type {
   ToolDefinition,
 } from "@companion/model-local";
 import {
+  MAX_MESSAGE_CONTENT_LENGTH,
   MAX_MESSAGES_PER_REQUEST,
   ModelLocalError,
 } from "@companion/model-local";
@@ -156,11 +157,25 @@ export const AGENT_REPAIR_HINTS = {
 export type AgentRepairReason = keyof typeof AGENT_REPAIR_HINTS;
 
 /**
+ * Fixed omitted-count marker appended when frozen reference summaries are
+ * bounded to the gateway per-message content limit. Count only: no
+ * titles, keys, or bodies are exposed.
+ */
+export function formatReferenceOmittedMarker(omitted: number): string {
+  return `... and ${omitted} more omitted to fit model message limit.`;
+}
+
+/**
  * Assemble the deterministic gateway ChatRequest: fixed system prompt,
  * selected-completed history only (user/assistant pairs in seq order),
  * frozen reference structural summary (no bodies/snippets), the current
  * request, and at most one fixed repair hint. Data never becomes system
  * instructions; free text is never shaped into tool calls here.
+ *
+ * The current-user message is bounded to the shared gateway per-message
+ * content limit by deterministically omitting trailing frozen reference
+ * summaries (ordinal order, earliest kept). The user request and framing
+ * are never truncated; an omitted-count marker records the bound.
  */
 export function projectPrompt(args: ProjectPromptArgs): ChatRequest {
   const system = args.systemPrompt ?? AGENT_SYSTEM_PROMPT;
@@ -183,17 +198,38 @@ export function projectPrompt(args: ProjectPromptArgs): ChatRequest {
       ? `- r${ref.ordinal}: ${ref.canonicalKey}`
       : `- r${ref.ordinal}: ${ref.title} [${ref.canonicalKey}]`,
   );
-  const summary =
-    lines.length === 0
-      ? "Session references (frozen structural summary): none."
-      : `Session references (frozen structural summary):\n${lines.join("\n")}`;
-  let current =
-    `User request:\n${args.requestText}\n${summary}\n` +
+  const repairSuffix =
+    args.repairHint === undefined || args.repairHint === null
+      ? ""
+      : `\nRepair instruction:\n${args.repairHint}`;
+  const head = `User request:\n${args.requestText}\n`;
+  const trailer =
     "Call ordinary tools for evidence when needed, then submit exactly one answer.submit call alone.";
-  if (args.repairHint !== undefined && args.repairHint !== null) {
-    current += `\nRepair instruction:\n${args.repairHint}`;
+  const buildCurrent = (kept: number): string => {
+    const omitted = lines.length - kept;
+    let summary: string;
+    if (lines.length === 0) {
+      summary = "Session references (frozen structural summary): none.";
+    } else if (omitted <= 0) {
+      summary = `Session references (frozen structural summary):\n${lines.join("\n")}`;
+    } else {
+      const marker = formatReferenceOmittedMarker(omitted);
+      const keptLines = lines.slice(0, kept);
+      summary =
+        keptLines.length === 0
+          ? `Session references (frozen structural summary):\n${marker}`
+          : `Session references (frozen structural summary):\n${keptLines.join("\n")}\n${marker}`;
+    }
+    return `${head}${summary}\n${trailer}${repairSuffix}`;
+  };
+  // Keep the largest deterministic prefix of reference summaries (ordinal
+  // order) that fits the shared per-message content limit with the actual
+  // final framing. The user request is never truncated.
+  let kept = lines.length;
+  while (kept > 0 && buildCurrent(kept).length > MAX_MESSAGE_CONTENT_LENGTH) {
+    kept -= 1;
   }
-  messages.push({ role: "user", content: current });
+  messages.push({ role: "user", content: buildCurrent(kept) });
   return { model: args.model, messages, tools: [...args.tools] };
 }
 
@@ -563,6 +599,7 @@ export function createAgentStrategy(
         step,
         classification,
         repairUsed,
+        clock,
       });
       if (terminal.kind === "repaired") {
         repairUsed = true;
@@ -1296,17 +1333,28 @@ function handleAnswerClass(args: {
   step: number;
   classification: Exclude<StepClassification, { kind: "ordinary" }>;
   repairUsed: boolean;
+  clock: { now(): number };
 }): AnswerHandling {
-  const { db, repo, runId, sessionId, step, classification, repairUsed } = args;
+  const {
+    db,
+    repo,
+    runId,
+    sessionId,
+    step,
+    classification,
+    repairUsed,
+    clock,
+  } = args;
 
   const recordInvalid = (errorCode: M2ModelErrorCode): void => {
     // Attribute the shape failure to the delivering step (metadata only).
+    // Deterministic clock: never fall back to the wall clock here.
     try {
       repo.appendModelStepEvent(
         runId,
         "model.step.failed",
         { step, errorCode },
-        {},
+        { now: clock.now() },
       );
     } catch {
       // Terminal race: the engine CAS owns the final word.
