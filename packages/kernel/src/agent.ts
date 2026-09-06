@@ -963,6 +963,22 @@ export function createAgentStrategy(
         });
       }
       if (classification.kind === "ordinary") {
+        // Valid ordinary-tool-only steps audit completed (tool results never
+        // flip the model-step verdict). Exactly one row + one terminal event.
+        const audited = finalizeDeliveredStep({
+          repo,
+          runId,
+          step,
+          adapter: outcome.adapter,
+          model,
+          durationMs: outcome.durationMs,
+          usage: outcome.usage,
+          errorCode: null,
+          clock,
+        });
+        if (!audited) {
+          throw new StrategyError("execution_cancelled");
+        }
         const feedbacks = await executeOrdinaryTools({
           db,
           repo,
@@ -989,17 +1005,37 @@ export function createAgentStrategy(
         continue;
       }
       // Terminal-protocol classes (single answer / mixed / duplicate /
-      // reserved / free-text) never reach the broker.
+      // reserved / free-text) never reach the broker. Validation runs first;
+      // the single audit row/event below reflects its outcome, so an invalid
+      // step never records a contradictory completed+failed pair.
       const terminal = handleAnswerClass({
         db,
         repo,
         runId,
         sessionId,
-        step,
         classification,
         repairUsed,
+      });
+      const terminalErrorCode: M2ModelErrorCode | null =
+        terminal.kind === "succeeded"
+          ? null
+          : terminal.kind === "repaired"
+            ? repairReasonErrorCode(terminal.reason)
+            : terminal.errorCode;
+      const terminalAudited = finalizeDeliveredStep({
+        repo,
+        runId,
+        step,
+        adapter: outcome.adapter,
+        model,
+        durationMs: outcome.durationMs,
+        usage: outcome.usage,
+        errorCode: terminalErrorCode,
         clock,
       });
+      if (!terminalAudited) {
+        throw new StrategyError("execution_cancelled");
+      }
       if (terminal.kind === "repaired") {
         repairUsed = true;
         // Strict OpenAI-compatible repair replay: the retained assistant
@@ -1228,7 +1264,13 @@ function sanitizeModelUsage(
 }
 
 type StepOutcome =
-  | { kind: "answered"; result: ChatResult }
+  | {
+      kind: "delivered";
+      result: ChatResult;
+      adapter: string;
+      durationMs: number;
+      usage: { inputTokens: number; outputTokens: number } | null;
+    }
   | {
       kind: "gateway_failed";
       strategyError: StrategyError;
@@ -1259,9 +1301,11 @@ function isEngineAbortRejection(error: unknown, signal: AbortSignal): boolean {
  * deadline expiry aborts fetch and audits model_step_timeout/timeout,
  * engine cancellation aborts fetch and follows cancellation semantics.
  * Late/non-cooperative settlements are discarded. Every call consumes one
- * step of the model budget and writes exactly one metadata-only
- * model_calls row plus typed model.step.* events. All timers/listeners are
- * cleared on settle.
+ * step of the model budget. Transport/timeout/cancel outcomes are audited
+ * here (exactly one metadata-only model_calls row plus one terminal event);
+ * delivered responses are returned unaudited so the caller can finalize the
+ * single row/event only after classification/answer/citation validation.
+ * All timers/listeners are cleared on settle.
  */
 async function runModelStep(args: {
   repo: KernelRepository;
@@ -1544,38 +1588,88 @@ async function runModelStep(args: {
       auditOutcome: outcome,
     };
   }
-  // Persist/emit optional token-count usage only (never raw text/args).
+  // Delivered responses are NOT audited here. The caller finalizes exactly
+  // one model_calls row plus one matching model.step terminal event only
+  // after normalized classification + answer/citation validation, so an
+  // invalid answer never records a contradictory completed+failed pair.
+  // Token-count usage only (never raw text/args) travels with the outcome.
   const usage = sanitizeModelUsage(settlement.result.usage);
+  return {
+    kind: "delivered",
+    result: settlement.result,
+    adapter,
+    durationMs,
+    usage,
+  };
+}
+
+/**
+ * Finalize one delivered model step with exactly one metadata-only
+ * model_calls row plus one matching model.step terminal event.
+ * `errorCode` null records completed; otherwise failed with the fixed code
+ * (answer_invalid / citation_invalid). Usage carries token counts only.
+ * Returns false when the terminal event loses the engine CAS race (the
+ * caller treats it as cancellation, matching the pre-existing contract).
+ */
+function finalizeDeliveredStep(args: {
+  repo: KernelRepository;
+  runId: string;
+  step: number;
+  adapter: string;
+  model: string;
+  durationMs: number;
+  usage: { inputTokens: number; outputTokens: number } | null;
+  errorCode: M2ModelErrorCode | null;
+  clock: { now(): number };
+}): boolean {
+  const {
+    repo,
+    runId,
+    step,
+    adapter,
+    model,
+    durationMs,
+    usage,
+    errorCode,
+    clock,
+  } = args;
+  const outcome: "completed" | "failed" =
+    errorCode === null ? "completed" : "failed";
   try {
     repo.recordModelCall(runId, {
       step,
       adapter,
       model,
-      outcome: "completed",
-      errorCode: null,
+      outcome,
+      errorCode,
       durationMs,
       usage,
       now: clock.now(),
     });
   } catch {
-    // Metadata-only best effort; classification continues deterministically.
+    // Metadata-only best effort; the terminal event below still decides.
   }
   try {
-    repo.appendModelStepEvent(
-      runId,
-      "model.step.completed",
-      usage === null ? { step, durationMs } : { step, durationMs, usage },
-      { now: clock.now() },
-    );
+    if (outcome === "completed") {
+      repo.appendModelStepEvent(
+        runId,
+        "model.step.completed",
+        usage === null ? { step, durationMs } : { step, durationMs, usage },
+        { now: clock.now() },
+      );
+    } else {
+      repo.appendModelStepEvent(
+        runId,
+        "model.step.failed",
+        { step, errorCode: errorCode as M2ModelErrorCode, durationMs },
+        { now: clock.now() },
+      );
+    }
   } catch {
-    return {
-      kind: "gateway_failed",
-      strategyError: new StrategyError("execution_cancelled"),
-      auditCode: null,
-      auditOutcome: "cancelled",
-    };
+    // Terminal race: the engine CAS owns the final word.
+    return false;
   }
-  return { kind: "answered", result: settlement.result };
+  return true;
 }
 
 export type StepClassification =
@@ -1867,59 +1961,43 @@ function grantDeliveredReferences(
 type AnswerHandling =
   | { kind: "succeeded"; result: RunResultV2 }
   | { kind: "repaired"; reason: AgentRepairReason }
-  | { kind: "failed"; strategyError: StrategyError };
+  | {
+      kind: "failed";
+      strategyError: StrategyError;
+      errorCode: M2ModelErrorCode;
+    };
+
+/** Map a repair reason to its fixed audit error code (metadata only). */
+function repairReasonErrorCode(reason: AgentRepairReason): M2ModelErrorCode {
+  return reason === "citation_invalid" ? "citation_invalid" : "answer_invalid";
+}
 
 /**
- * Handle terminal-protocol classes without touching the broker: validate
- * the StructuredAnswer shape, run the structural citation gate, and apply
- * repair-once semantics (invalid -> one repair -> fixed failure).
+ * Validate terminal-protocol classes without touching the broker or the
+ * audit store: validate the StructuredAnswer shape, run the structural
+ * citation gate, and apply repair-once semantics (invalid -> one repair ->
+ * fixed failure). The caller writes exactly one model_calls row plus one
+ * matching model.step terminal event from the returned verdict, so audit
+ * finalization always observes classification/validation first.
  */
 function handleAnswerClass(args: {
   db: Database.Database;
   repo: KernelRepository;
   runId: string;
   sessionId: string;
-  step: number;
   classification: Exclude<StepClassification, { kind: "ordinary" }>;
   repairUsed: boolean;
-  clock: { now(): number };
 }): AnswerHandling {
-  const {
-    db,
-    repo,
-    runId,
-    sessionId,
-    step,
-    classification,
-    repairUsed,
-    clock,
-  } = args;
-
-  const recordInvalid = (errorCode: M2ModelErrorCode): void => {
-    // Attribute the shape failure to the delivering step (metadata only).
-    // Deterministic clock: never fall back to the wall clock here.
-    try {
-      repo.appendModelStepEvent(
-        runId,
-        "model.step.failed",
-        { step, errorCode },
-        { now: clock.now() },
-      );
-    } catch {
-      // Terminal race: the engine CAS owns the final word.
-    }
-  };
+  const { db, repo, runId, sessionId, classification, repairUsed } = args;
 
   const maybeRepair = (reason: AgentRepairReason): AnswerHandling => {
-    recordInvalid(
-      reason === "citation_invalid" ? "citation_invalid" : "answer_invalid",
-    );
     if (!repairUsed) {
       return { kind: "repaired", reason };
     }
     return {
       kind: "failed",
       strategyError: new StrategyError("output_invalid"),
+      errorCode: repairReasonErrorCode(reason),
     };
   };
 
