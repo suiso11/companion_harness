@@ -1955,10 +1955,13 @@ export class ToolBroker {
         ),
       };
     }
+    const usedDefaultNormalizer = reg.normalize === undefined;
     normalizedOutput = {
       normalized: parsedNormalized,
       observations: normalizedOutput.observations,
-      modelFacing: normalizedOutput.modelFacing,
+      modelFacing: usedDefaultNormalizer
+        ? parsedNormalized
+        : normalizedOutput.modelFacing,
     };
     let canonicalNormalized: string;
     let canonicalModel: string;

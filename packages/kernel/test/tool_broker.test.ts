@@ -2179,6 +2179,7 @@ describe("fix-broker-review-nine", () => {
       const out = await broker.invoke(runId, "test.read", {}, CTX);
       expect(out.result.actualOutcome).toBe("succeeded");
       expect(out.normalized).toEqual({ text: "hi", flag: true });
+      expect(out.modelFacing).toEqual({ text: "hi", flag: true });
       const { createHash } = await import("node:crypto");
       const expectedDigest = createHash("sha256")
         .update('{"flag":true,"text":"hi"}', "utf8")
@@ -2187,6 +2188,35 @@ describe("fix-broker-review-nine", () => {
       expect(toolCalls(handle.raw, runId)[0]?.result_digest).toBe(
         expectedDigest,
       );
+    } finally {
+      handle.raw.close();
+    }
+  });
+
+  it("preserves a custom modelFacing projection through outputSchema parsing", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const { runId } = newRunningRun(repo, T0);
+      const broker = makeBroker(handle, repo, [
+        {
+          ...echoReg(),
+          inputSchema: z.strictObject({}),
+          outputSchema: z.strictObject({
+            text: z.string(),
+            flag: z.boolean().default(true),
+          }),
+          handler: async () => ({ text: "hi" }),
+          normalize: (raw) => ({
+            normalized: raw,
+            observations: 0,
+            modelFacing: { preview: "custom" },
+          }),
+        },
+      ]);
+      const out = await broker.invoke(runId, "test.read", {}, CTX);
+      expect(out.result.actualOutcome).toBe("succeeded");
+      expect(out.normalized).toEqual({ text: "hi", flag: true });
+      expect(out.modelFacing).toEqual({ preview: "custom" });
     } finally {
       handle.raw.close();
     }
