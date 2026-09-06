@@ -700,3 +700,120 @@ describe("kernel review round fixes (PR #1)", () => {
     }
   });
 });
+
+describe("idempotency key lowercase migration (PR #3)", () => {
+  it("normalizes a legacy mixed-case key and replays without duplicating the mutation", async () => {
+    const dir = tempDir();
+    const handle = openKernelDatabase(":memory:");
+    try {
+      // Old-schema DB (v3): repository rows are created, then the stored key
+      // is uppercased to simulate a pre-fix database holding mixed case.
+      await migrateKernelDatabase({ db: handle.raw, targetVersion: 3 });
+      const legacy = createKernelRepository(handle.raw);
+      const sessionId = legacy.createSession({ key: generateId(), now: T0 })
+        .body.sessionId;
+      const key = generateId();
+      const first = legacy.postMessage(
+        sessionId,
+        { text: "hi" },
+        { key, now: T0 },
+      );
+      const upper = key.toUpperCase();
+      expect(upper).not.toBe(key);
+      const scope = `session:${sessionId}:message`;
+      handle.raw
+        .prepare(
+          "UPDATE api_idempotency SET key = ? WHERE scope = ? AND key = ?",
+        )
+        .run(upper, scope, key);
+      expect(
+        (
+          handle.raw.prepare("SELECT COUNT(*) AS n FROM turns").get() as {
+            n: number;
+          }
+        ).n,
+      ).toBe(1);
+
+      // Upgrade the old DB: user tables exist, so a pre-upgrade backup applies.
+      const result = await migrateKernelDatabase({
+        db: handle.raw,
+        backupDir: join(dir, "backups"),
+      });
+      expect(result.applied).toContain(4);
+      expect(getSchemaVersion(handle.raw)).toBe(4);
+      const stored = handle.raw
+        .prepare("SELECT key AS k FROM api_idempotency")
+        .all() as Array<{ k: string }>;
+      expect(stored.length).toBeGreaterThan(0);
+      for (const row of stored) {
+        expect(row.k).toBe(row.k.toLowerCase());
+      }
+
+      // Either key case now replays the stored response via the repository,
+      // including the scoped lookup, without duplicating the mutation.
+      const repo = createKernelRepository(handle.raw);
+      const replay = repo.postMessage(
+        sessionId,
+        { text: "hi" },
+        { key: upper, now: T0 + 1 },
+      );
+      expect(replay.replayed).toBe(true);
+      expect(replay.body).toEqual(first.body);
+      const replayLower = repo.postMessage(
+        sessionId,
+        { text: "hi" },
+        { key: key.toLowerCase(), now: T0 + 2 },
+      );
+      expect(replayLower.replayed).toBe(true);
+      expect(replayLower.body).toEqual(first.body);
+      expect(
+        (
+          handle.raw.prepare("SELECT COUNT(*) AS n FROM turns").get() as {
+            n: number;
+          }
+        ).n,
+      ).toBe(1);
+      expect(repo.lookupIdempotencyForSession(sessionId, upper, scope)).toEqual(
+        { found: true, status: 202, body: first.body },
+      );
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("fails closed on a case-only PK collision without deleting rows", async () => {
+    const dir = tempDir();
+    const handle = openKernelDatabase(":memory:");
+    try {
+      await migrateKernelDatabase({ db: handle.raw, targetVersion: 3 });
+      // Same scope, keys differing only by case: lowering both would collide
+      // on PRIMARY KEY (scope, key). Inserted directly because the repository
+      // canonicalizes keys and can never create this state itself.
+      const scope = "sessions:create";
+      const lower = generateId();
+      const upper = lower.toUpperCase();
+      expect(upper).not.toBe(lower);
+      const insert = handle.raw.prepare(
+        "INSERT INTO api_idempotency (scope, key, request_hash, response_status, response_body, created_at) VALUES (?, ?, ?, 201, ?, ?)",
+      );
+      insert.run(scope, lower, "a".repeat(64), JSON.stringify({ n: 1 }), T0);
+      insert.run(scope, upper, "b".repeat(64), JSON.stringify({ n: 2 }), T0);
+
+      await expect(
+        migrateKernelDatabase({
+          db: handle.raw,
+          backupDir: join(dir, "backups"),
+        }),
+      ).rejects.toThrow(/migration 3 -> 4 failed/);
+      // Fail closed: version unchanged, both colliding rows preserved.
+      expect(getSchemaVersion(handle.raw)).toBe(3);
+      const rows = handle.raw
+        .prepare("SELECT key AS k FROM api_idempotency WHERE scope = ?")
+        .all(scope) as Array<{ k: string }>;
+      expect(rows).toHaveLength(2);
+      expect(new Set(rows.map((row) => row.k)).size).toBe(2);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+});

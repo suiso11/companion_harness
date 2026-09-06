@@ -23,6 +23,13 @@
       "when": 1790000000002,
       "tag": "0003_m1_snapshot_links",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": 4,
+      "when": 1790000000003,
+      "tag": "0004_idempotency_key_lowercase",
+      "breakpoints": true
     }
   ]
 }
