@@ -32,7 +32,11 @@ function toolCall(name: string, args: unknown, id: string): NormalizedToolCall {
 }
 
 function chatResult(toolCalls: NormalizedToolCall[], text = ""): ChatResult {
-  return { text, toolCalls, stopReason: toolCalls.length > 0 ? "tool_calls" : "stop" };
+  return {
+    text,
+    toolCalls,
+    stopReason: toolCalls.length > 0 ? "tool_calls" : "stop",
+  };
 }
 
 function scriptGateway(script: Array<ChatResult | Error>): {
@@ -68,7 +72,9 @@ describe("frozen summary exposes rN plus title only", () => {
       tools: [],
       model: "m",
     });
-    const current = req.messages[req.messages.length - 1] as { content: string };
+    const current = req.messages[req.messages.length - 1] as {
+      content: string;
+    };
     expect(current.content).toContain("- r1: Doc A");
     expect(current.content).toContain("- r2");
     expect(current.content).toContain("- r3");
@@ -91,9 +97,16 @@ describe("feedback sanitizer drops keys and connector identifiers", () => {
         referenceId: refId,
         ordinal: 1,
         snapshotId: snapId,
+        snapshot_id: snapId,
         resourceId: resId,
+        resource_id: resId,
         connectorInstanceId: connectorId,
+        connector_instance_id: connectorId,
+        connectorId,
+        connector_id: connectorId,
         canonicalKey: "vault/secret.md",
+        canonical_key: "vault/secret.md",
+        path: "vault/secret.md",
         title: "Doc",
         snippet: "evidence",
         body: { version: 1, text: "full body" },
@@ -104,9 +117,16 @@ describe("feedback sanitizer drops keys and connector identifiers", () => {
     expect(out.title).toBe("Doc");
     expect(out.snippet).toBe("evidence");
     expect(out).not.toHaveProperty("canonicalKey");
+    expect(out).not.toHaveProperty("canonical_key");
+    expect(out).not.toHaveProperty("path");
     expect(out).not.toHaveProperty("snapshotId");
+    expect(out).not.toHaveProperty("snapshot_id");
     expect(out).not.toHaveProperty("resourceId");
+    expect(out).not.toHaveProperty("resource_id");
     expect(out).not.toHaveProperty("connectorInstanceId");
+    expect(out).not.toHaveProperty("connector_instance_id");
+    expect(out).not.toHaveProperty("connectorId");
+    expect(out).not.toHaveProperty("connector_id");
     const blob = JSON.stringify(out);
     expect(blob).not.toContain("vault/secret.md");
     expect(blob).not.toContain(snapId);
@@ -115,7 +135,9 @@ describe("feedback sanitizer drops keys and connector identifiers", () => {
     expect(blob).not.toContain(refId);
     // Skipped entries keep only the closed reason, never the path key.
     const skipped = sanitizeModelFacingForFeedback(
-      { skipped: [{ canonicalKey: "vault/skip.md", reason: "file_too_large" }] },
+      {
+        skipped: [{ canonicalKey: "vault/skip.md", reason: "file_too_large" }],
+      },
       new Map(),
     ) as { skipped: Array<Record<string, unknown>> };
     expect(skipped.skipped[0]).toEqual({ reason: "file_too_large" });
@@ -152,8 +174,13 @@ describe("end-to-end gateway secrecy with working rN resolution", () => {
           },
         ],
       });
-      const broker = createToolBroker({ db: handle.raw, repo, registrations: regs });
-      const sessionId = repo.createSession({ key: randomUUID(), now: T0 }).body.sessionId;
+      const broker = createToolBroker({
+        db: handle.raw,
+        repo,
+        registrations: regs,
+      });
+      const sessionId = repo.createSession({ key: randomUUID(), now: T0 }).body
+        .sessionId;
       const canonicalKey = "vault/a.md";
       const resId = randomUUID();
       const snapId = randomUUID();
@@ -181,20 +208,52 @@ describe("end-to-end gateway secrecy with working rN resolution", () => {
           "INSERT INTO session_references (id, session_id, ordinal, resource_id, snapshot_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .run(refId, sessionId, 1, resId, snapId, T0);
-      repo.putReferenceContext(sessionId, { version: 1, items: [refId] }, { now: T0 + 1 });
-      const posted = repo.postMessage(sessionId, { text: "open r1" }, { key: randomUUID(), now: T0 + 2 });
+      repo.putReferenceContext(
+        sessionId,
+        { version: 1, items: [refId] },
+        { now: T0 + 1 },
+      );
+      const posted = repo.postMessage(
+        sessionId,
+        { text: "open r1" },
+        { key: randomUUID(), now: T0 + 2 },
+      );
       const runId = posted.body.run.id;
       repo.startRun(runId, { now: T0 + 3 });
       const { gateway, calls } = scriptGateway([
         chatResult([toolCall("reference.open", { referenceId: "r1" }, "c0")]),
-        chatResult([toolCall("answer.submit", { version: 1, parts: [{ text: "cited", citations: ["r1"] }] }, "a1")]),
+        chatResult([
+          toolCall(
+            "answer.submit",
+            { version: 1, parts: [{ text: "cited", citations: ["r1"] }] },
+            "a1",
+          ),
+        ]),
       ]);
-      const strategy = createAgentStrategy({ db: handle.raw, repo, broker, gateway, model: "m" });
+      const strategy = createAgentStrategy({
+        db: handle.raw,
+        repo,
+        broker,
+        gateway,
+        model: "m",
+      });
       const run = repo.getRun(runId);
       const turn = repo.getTurn(run.turnId);
       const ctx = freezeStrategyContext(
-        { id: run.id, turnId: run.turnId, sessionId: run.sessionId, attempt: run.attempt, strategy: run.strategy },
-        { id: turn.id, sessionId: turn.sessionId, seq: turn.seq, input: turn.input, frozenContext: turn.frozenContext },
+        {
+          id: run.id,
+          turnId: run.turnId,
+          sessionId: run.sessionId,
+          attempt: run.attempt,
+          strategy: run.strategy,
+        },
+        {
+          id: turn.id,
+          sessionId: turn.sessionId,
+          seq: turn.seq,
+          input: turn.input,
+          frozenContext: turn.frozenContext,
+        },
         new AbortController().signal,
       );
       await expect(strategy(ctx)).resolves.toEqual({

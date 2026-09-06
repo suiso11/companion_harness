@@ -217,8 +217,9 @@ export function formatReferenceOmittedMarker(omitted: number): string {
  * Assemble the deterministic gateway ChatRequest: fixed system prompt,
  * selected-completed history only (user/assistant pairs in seq order),
  * frozen reference structural summary (rN plus title only, no bodies,
- * snippets, canonical keys, UUIDs, paths, or connector identifiers;
- * untitled references project as rN alone), the current
+ * snippets, canonical keys, paths, UUIDs, or connector identifiers;
+ * untitled references project as rN alone; titles ride in the user role as
+ * untrusted data, never as system instructions), the current
  * request, and at most one fixed repair hint. Data never becomes system
  * instructions; free text is never shaped into tool calls here.
  *
@@ -774,15 +775,18 @@ function loadUuidToOrdinal(
  * Project delivered broker `modelFacing` to identifier-free model feedback.
  * Structural `referenceId` UUIDs become their session `rN` (so the model can
  * cite granted evidence without ever seeing a UUID); `snapshotId` /
- * `resourceId` are omitted (the model has no use for them); `canonicalKey`
- * and raw connector identifiers (`connectorInstanceId`,
- * `connector_instance_id`) are omitted: the model addresses evidence by rN
- * plus title only, resolved internally via the frozen ordinal map. Any other
- * structural UUID in a non-free-text position redacts to `[redacted]`.
- * Free-text evidence fields (`snippet`, `text`, `title`, `query`, `reason`)
- * pass through untouched so document content is never corrupted. Grants are
- * always derived from the ORIGINAL delivered payload, never from this
- * projection. No semantic inference or fallback to canonicalKey.
+ * `resourceId` (either case) are omitted (the model has no use for them);
+ * `canonicalKey`/`canonical_key`, `path`, and raw connector identifiers
+ * (`connectorInstanceId`, `connector_instance_id`, `connectorId`,
+ * `connector_id`) are omitted: the model addresses evidence by rN plus title
+ * only, resolved internally via the frozen ordinal map. Titles stay untrusted
+ * user-role data (never system instructions); only free-text evidence passes
+ * through. Any other structural UUID in a non-free-text position redacts to
+ * `[redacted]`. Free-text evidence fields (`snippet`, `text`, `title`,
+ * `query`, `reason`) pass through untouched so document content is never
+ * corrupted. Grants are always derived from the ORIGINAL delivered payload,
+ * never from this projection. No semantic inference or fallback to
+ * canonicalKey/path.
  */
 export function sanitizeModelFacingForFeedback(
   value: unknown,
@@ -807,10 +811,16 @@ export function sanitizeModelFacingForFeedback(
     for (const [key, entry] of Object.entries(record)) {
       if (
         key === "snapshotId" ||
+        key === "snapshot_id" ||
         key === "resourceId" ||
+        key === "resource_id" ||
         key === "canonicalKey" ||
+        key === "canonical_key" ||
+        key === "path" ||
         key === "connectorInstanceId" ||
-        key === "connector_instance_id"
+        key === "connector_instance_id" ||
+        key === "connectorId" ||
+        key === "connector_id"
       ) {
         continue;
       }
