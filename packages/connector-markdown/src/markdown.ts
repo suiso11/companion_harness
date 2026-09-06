@@ -60,7 +60,7 @@ interface MdPosition {
   end?: { line?: unknown; column?: unknown; offset?: unknown };
 }
 
-interface MdNode {
+export interface MdNode {
   type: string;
   value?: unknown;
   url?: unknown;
@@ -73,25 +73,60 @@ function isMdNode(value: unknown): value is MdNode {
   return typeof value === "object" && value !== null && "type" in value;
 }
 
-function walk(
-  node: MdNode,
-  visit: (node: MdNode, ancestors: readonly MdNode[]) => void,
-  ancestors: readonly MdNode[] = [],
+function isExclusionNode(node: MdNode): boolean {
+  return (
+    node.type === "code" || node.type === "inlineCode" || node.type === "html"
+  );
+}
+
+/**
+ * Iterative pre-order DFS over an mdast subtree.
+ *
+ * Linear-space traversal: O(nodes + depth) time with an explicit stack
+ * (push/pop only, children visited in source order via a per-frame child
+ * index). Space is O(depth) frames — no recursion, no per-node ancestor
+ * array copies, and no shift/unshift. The `excluded` flag is true when any
+ * ancestor is `code`/`inlineCode`/`html`, maintained as a single boolean
+ * carried on each frame instead of a materialized ancestor list.
+ *
+ * Test-only hook as well: exported so regressions can drive synthetic ASTs
+ * deeper than any realistic Markdown source (e.g. >= 50k) without relying
+ * on the mdast parser's own nesting support.
+ */
+export function walkMarkdownTree(
+  root: MdNode,
+  visit: (node: MdNode, excluded: boolean) => void,
 ): void {
-  visit(node, ancestors);
-  const children = node.children;
-  if (Array.isArray(children)) {
-    for (const child of children) {
-      if (isMdNode(child)) walk(child, visit, [...ancestors, node]);
+  visit(root, false);
+  const stack: Array<{ node: MdNode; nextChild: number; excluded: boolean }> = [
+    { node: root, nextChild: 0, excluded: false },
+  ];
+  while (stack.length > 0) {
+    const frame = stack[stack.length - 1] as {
+      node: MdNode;
+      nextChild: number;
+      excluded: boolean;
+    };
+    const children = frame.node.children;
+    if (!Array.isArray(children) || frame.nextChild >= children.length) {
+      stack.pop();
+      continue;
     }
+    const child = children[frame.nextChild] as MdNode | undefined;
+    frame.nextChild += 1;
+    if (!isMdNode(child)) {
+      continue;
+    }
+    const childExcluded = frame.excluded || isExclusionNode(frame.node);
+    visit(child, childExcluded);
+    stack.push({ node: child, nextChild: 0, excluded: childExcluded });
   }
 }
 
 function collectHeadingText(heading: MdNode): string {
   const parts: string[] = [];
-  walk(heading, (node, ancestors) => {
+  walkMarkdownTree(heading, (node) => {
     if (node === heading) return;
-    void ancestors;
     if (node.type === "text" || node.type === "inlineCode") {
       if (typeof node.value === "string") parts.push(node.value);
     } else if (node.type === "image") {
@@ -311,7 +346,7 @@ export function parseMarkdown(content: string): ParsedMarkdown {
   const wikiLinks: WikiLink[] = [];
   const textRaws: string[] = [];
 
-  walk(root, (node, ancestors) => {
+  walkMarkdownTree(root, (node, excluded) => {
     if (!headingSeen && node.type === "heading") {
       headingSeen = true;
       const text = collectHeadingText(node);
@@ -322,16 +357,9 @@ export function parseMarkdown(content: string): ParsedMarkdown {
       if (parsed !== null) standardLinks.push(parsed);
     }
     // Wiki subset: literal source inside `text` nodes only (excludes
-    // code/inlineCode/html by type and by ancestor).
+    // code/inlineCode/html by type and by ancestor exclusion flag).
     if (node.type === "text" && typeof node.value === "string") {
-      if (
-        ancestors.some(
-          (parent) =>
-            parent.type === "code" ||
-            parent.type === "inlineCode" ||
-            parent.type === "html",
-        )
-      ) {
+      if (excluded) {
         return;
       }
       const raw = rawSliceFor(normalized, node);

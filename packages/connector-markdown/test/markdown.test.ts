@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   extractWikiCandidatesWithStats,
+  type MdNode,
   parseMarkdown,
+  walkMarkdownTree,
 } from "../src/markdown.js";
 
 describe("markdown parsing", () => {
@@ -233,5 +235,78 @@ describe("markdown parsing", () => {
     const lone = extractWikiCandidatesWithStats("[[foo\rbar]]");
     expect(lone.candidates).toEqual([]);
     expect(lone.inspected).toBeLessThanOrEqual("[[foo\rbar]]".length);
+  });
+});
+
+describe("iterative markdown traversal", () => {
+  it("walks a 50k-deep synthetic chain iteratively in order", () => {
+    const depth = 50_000;
+    let leaf: MdNode = { type: "text", value: "leaf" };
+    for (let i = 0; i < depth; i += 1) {
+      leaf = { type: "paragraph", children: [leaf] };
+    }
+    const root: MdNode = { type: "root", children: [leaf] };
+    const seen: string[] = [];
+    let textCount = 0;
+    walkMarkdownTree(root, (node, excluded) => {
+      expect(excluded).toBe(false);
+      seen.push(node.type);
+      if (node.type === "text") textCount += 1;
+    });
+    expect(textCount).toBe(1);
+    expect(seen).toHaveLength(depth + 2);
+    expect(seen[0]).toBe("root");
+    expect(seen[seen.length - 1]).toBe("text");
+  });
+
+  it("preserves pre-order child order with deterministic exclusion flags", () => {
+    const root: MdNode = {
+      type: "root",
+      children: [
+        { type: "paragraph", children: [{ type: "text", value: "keep" }] },
+        { type: "code", children: [{ type: "text", value: "skip" }] },
+        { type: "html", children: [{ type: "text", value: "skip-html" }] },
+        {
+          type: "blockquote",
+          children: [
+            { type: "paragraph", children: [{ type: "text", value: "keep2" }] },
+          ],
+        },
+      ],
+    };
+    const visits: Array<{ value: string; excluded: boolean }> = [];
+    const order: string[] = [];
+    walkMarkdownTree(root, (node, excluded) => {
+      order.push(node.type);
+      if (node.type === "text" && typeof node.value === "string") {
+        visits.push({ value: node.value, excluded });
+      }
+    });
+    expect(order).toEqual([
+      "root",
+      "paragraph",
+      "text",
+      "code",
+      "text",
+      "html",
+      "text",
+      "blockquote",
+      "paragraph",
+      "text",
+    ]);
+    expect(visits).toEqual([
+      { value: "keep", excluded: false },
+      { value: "skip", excluded: true },
+      { value: "skip-html", excluded: true },
+      { value: "keep2", excluded: false },
+    ]);
+  });
+
+  it("parses deeply nested blockquotes without throwing", () => {
+    const depth = 2000;
+    const source = `${"> ".repeat(depth)}[[DeepKeep]]`;
+    expect(source.length).toBeLessThan(1_048_576);
+    const parsed = parseMarkdown(source);
+    expect(parsed.wikiLinks.map((link) => link.target)).toEqual(["DeepKeep"]);
   });
 });
