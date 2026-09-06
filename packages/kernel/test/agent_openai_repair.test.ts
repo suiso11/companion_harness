@@ -222,8 +222,12 @@ describe("strict OpenAI-compatible repair replay", () => {
       });
       const { runId } = newRunningTurn(repo, T0);
       await expect(strategy(ctxFor(repo, runId))).resolves.toEqual({
-        version: 1,
+        version: 2,
         text: "recovered",
+        answer: {
+          version: 1,
+          parts: [{ text: "recovered", citations: [] }],
+        },
       });
       expect(executions).toBe(0);
       expect(
@@ -272,8 +276,9 @@ describe("strict OpenAI-compatible repair replay", () => {
       });
       const { runId } = newRunningTurn(repo, T0);
       await expect(strategy(ctxFor(repo, runId))).resolves.toEqual({
-        version: 1,
+        version: 2,
         text: "fixed",
+        answer: { version: 1, parts: [{ text: "fixed", citations: [] }] },
       });
       expect(
         handle.raw.prepare("SELECT COUNT(*) AS n FROM tool_calls").get(),
@@ -307,8 +312,9 @@ describe("strict OpenAI-compatible repair replay", () => {
       });
       const { runId } = newRunningTurn(repo, T0);
       await expect(strategy(ctxFor(repo, runId))).resolves.toEqual({
-        version: 1,
+        version: 2,
         text: "ok",
+        answer: { version: 1, parts: [{ text: "ok", citations: [] }] },
       });
       expect(
         handle.raw.prepare("SELECT COUNT(*) AS n FROM tool_calls").get(),
@@ -345,8 +351,9 @@ describe("strict OpenAI-compatible repair replay", () => {
       });
       const { runId } = newRunningTurn(repo, T0);
       await expect(strategy(ctxFor(repo, runId))).resolves.toEqual({
-        version: 1,
+        version: 2,
         text: "good",
+        answer: { version: 1, parts: [{ text: "good", citations: [] }] },
       });
       expectStrictRepairWire(calls, ["a-bad"], "structurally invalid");
       expect(AGENT_REPAIR_HINTS.answer_invalid).toContain("version 1");
@@ -381,8 +388,9 @@ describe("strict OpenAI-compatible repair replay", () => {
       });
       const { runId } = newRunningTurn(repo, T0);
       await expect(strategy(ctxFor(repo, runId))).resolves.toEqual({
-        version: 1,
+        version: 2,
         text: "clean",
+        answer: { version: 1, parts: [{ text: "clean", citations: [] }] },
       });
       expectStrictRepairWire(calls, ["a-cite-bad"], "not granted");
     } finally {

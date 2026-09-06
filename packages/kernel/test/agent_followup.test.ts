@@ -162,8 +162,9 @@ describe("gateway follow-up: replay, usage, timeout", () => {
       });
       const { runId } = newRunningTurn(repo, T0);
       await expect(strategy(ctxFor(repo, runId))).resolves.toEqual({
-        version: 1,
+        version: 2,
         text: "done",
+        answer: { version: 1, parts: [{ text: "done", citations: [] }] },
       });
       expect(calls).toHaveLength(2);
       const replayed = calls[1]?.messages ?? [];

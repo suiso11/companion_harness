@@ -249,8 +249,9 @@ describe("deterministic clock for invalid-answer repair events", () => {
         new AbortController().signal,
       );
       await expect(strategy(ctx)).resolves.toEqual({
-        version: 1,
+        version: 2,
         text: "ok",
+        answer: { version: 1, parts: [{ text: "ok", citations: [] }] },
       });
       expect(seen.length).toBeGreaterThan(0);
       const events = repo.getEvents(sessionId, runId, {}).events;

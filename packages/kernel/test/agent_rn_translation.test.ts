@@ -317,8 +317,9 @@ describe("rN translation end-to-end (open / refresh / related)", () => {
         model: "m",
       });
       await expect(strategy(ctxFor(repo, runId))).resolves.toEqual({
-        version: 1,
+        version: 2,
         text: "cited A",
+        answer: { version: 1, parts: [{ text: "cited A", citations: ["r1"] }] },
       });
       const feedbacks = toolFeedbacks(calls);
       expect(feedbacks).toHaveLength(1);
@@ -382,8 +383,12 @@ describe("rN translation end-to-end (open / refresh / related)", () => {
         model: "m",
       });
       await expect(strategy(ctxFor(repo, runId))).resolves.toEqual({
-        version: 1,
+        version: 2,
         text: "after refresh",
+        answer: {
+          version: 1,
+          parts: [{ text: "after refresh", citations: [] }],
+        },
       });
       expect(setup.readCalls).toEqual(["vault/a.md"]);
       const feedbacks = toolFeedbacks(calls);
@@ -458,8 +463,12 @@ describe("rN translation end-to-end (open / refresh / related)", () => {
         model: "m",
       });
       await expect(strategy(ctxFor(repo, runId))).resolves.toEqual({
-        version: 1,
+        version: 2,
         text: "neighbors",
+        answer: {
+          version: 1,
+          parts: [{ text: "neighbors", citations: [] }],
+        },
       });
       const feedbacks = toolFeedbacks(calls);
       expect(feedbacks).toHaveLength(1);
@@ -510,8 +519,12 @@ describe("rN failure isolation (unknown / malformed / out-of-context / UUID smug
         model: "m",
       });
       await expect(strategy(ctxFor(repo, runId))).resolves.toEqual({
-        version: 1,
+        version: 2,
         text: "recovered",
+        answer: {
+          version: 1,
+          parts: [{ text: "recovered", citations: [] }],
+        },
       });
       const feedbacks = toolFeedbacks(calls);
       expect(feedbacks).toHaveLength(1);
@@ -560,8 +573,12 @@ describe("rN failure isolation (unknown / malformed / out-of-context / UUID smug
         model: "m",
       });
       await expect(strategy(ctxFor(repo, runId))).resolves.toEqual({
-        version: 1,
+        version: 2,
         text: "recovered",
+        answer: {
+          version: 1,
+          parts: [{ text: "recovered", citations: [] }],
+        },
       });
       const feedbacks = toolFeedbacks(calls);
       expect(feedbacks).toHaveLength(3);
@@ -632,8 +649,12 @@ describe("rN failure isolation (unknown / malformed / out-of-context / UUID smug
         model: "m",
       });
       await expect(strategy(ctxFor(repo, runA))).resolves.toEqual({
-        version: 1,
+        version: 2,
         text: "recovered",
+        answer: {
+          version: 1,
+          parts: [{ text: "recovered", citations: [] }],
+        },
       });
       const feedbacks = toolFeedbacks(calls);
       expect(feedbacks).toHaveLength(1);
@@ -656,8 +677,12 @@ describe("rN failure isolation (unknown / malformed / out-of-context / UUID smug
         model: "m",
       });
       await expect(strategyB(ctxFor(repo, runB))).resolves.toEqual({
-        version: 1,
+        version: 2,
         text: "b cited",
+        answer: {
+          version: 1,
+          parts: [{ text: "b cited", citations: ["r1"] }],
+        },
       });
       const feedbacksB = toolFeedbacks(second.calls);
       expect(feedbacksB[0]?.body.ok).toBe(true);
@@ -703,8 +728,9 @@ describe("rN failure isolation (unknown / malformed / out-of-context / UUID smug
         model: "m",
       });
       await expect(strategy(ctxFor(repo, runId))).resolves.toEqual({
-        version: 1,
+        version: 2,
         text: "cited",
+        answer: { version: 1, parts: [{ text: "cited", citations: ["r1"] }] },
       });
       const feedbacks = toolFeedbacks(calls);
       expect(feedbacks).toHaveLength(2);

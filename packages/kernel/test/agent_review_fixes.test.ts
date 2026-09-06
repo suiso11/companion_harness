@@ -212,8 +212,9 @@ describe("related listings never grant", () => {
         model: "m",
       });
       await expect(strategy(ctxFor(repo, runId))).resolves.toEqual({
-        version: 1,
+        version: 2,
         text: "done",
+        answer: { version: 1, parts: [{ text: "done", citations: [] }] },
       });
       expect(repo.listEvidenceGrants(runId)).toEqual([]);
     } finally {
@@ -276,8 +277,9 @@ describe("per-call tool feedback mapping", () => {
       const runId = posted.body.run.id;
       repo.startRun(runId, { now: T0 + 1 });
       await expect(strategy(ctxFor(repo, runId))).resolves.toEqual({
-        version: 1,
+        version: 2,
         text: "done",
+        answer: { version: 1, parts: [{ text: "done", citations: [] }] },
       });
       const replayed = calls[1]?.messages ?? [];
       const assistantIdx = replayed.findIndex(
@@ -383,8 +385,9 @@ describe("bounded selected-completed history projection", () => {
         model: "m",
       });
       await expect(strategy(ctxFor(repo, runId))).resolves.toEqual({
-        version: 1,
+        version: 2,
         text: "done",
+        answer: { version: 1, parts: [{ text: "done", citations: [] }] },
       });
       const messages = calls[0]?.messages ?? [];
       expect(messages.length).toBeLessThanOrEqual(128);

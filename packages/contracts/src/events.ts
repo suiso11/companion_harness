@@ -7,7 +7,7 @@ import {
   ModelStepStartedPayloadSchema,
 } from "./model.js";
 import { ReferencePresentedPayloadSchema } from "./references.js";
-import { RunResultSchema } from "./run_result.js";
+import { RunResultSchema, RunResultV1Schema } from "./run_result.js";
 import {
   ActualOutcomeSchema,
   LatestToolErrorCodeSchema,
@@ -48,6 +48,23 @@ export const RunStartedPayloadSchema = z.strictObject({
 
 export const RunCancelRequestedPayloadSchema = z.strictObject({});
 
+/**
+ * Exact M0 `run.completed` payload: V1 RunResult only. Frozen: M0/M1
+ * assertions pin this acceptance (V2 M2 rows are rejected here).
+ */
+export const M0RunCompletedPayloadSchema = z.strictObject({
+  result: RunResultV1Schema,
+});
+
+/** Alias: M1 pins the same V1-only completed payload as M0. */
+export const M1RunCompletedPayloadSchema = M0RunCompletedPayloadSchema;
+
+/**
+ * Latest (M2) `run.completed` payload: V1 historical rows plus V2 M2 rows
+ * (durable StructuredAnswer persistence). Only `run.completed` carries a
+ * RunResult; durable/API data retains citations while history prompts
+ * project only the rendered text.
+ */
 export const RunCompletedPayloadSchema = z.strictObject({
   result: RunResultSchema,
 });
@@ -151,6 +168,13 @@ const RunCancelRequestedEventSchema = z.strictObject({
   type: z.literal("run.cancel_requested"),
   payload: RunCancelRequestedPayloadSchema,
 });
+const M0RunCompletedEventSchema = z.strictObject({
+  ...EnvelopeBase,
+  type: z.literal("run.completed"),
+  payload: M0RunCompletedPayloadSchema,
+});
+/** M1 pins the same V1-only completed envelope as M0. */
+const M1RunCompletedEventSchema = M0RunCompletedEventSchema;
 const RunCompletedEventSchema = z.strictObject({
   ...EnvelopeBase,
   type: z.literal("run.completed"),
@@ -195,7 +219,7 @@ export const RunEventSchema = z.discriminatedUnion("type", [
   RunQueuedEventSchema,
   RunStartedEventSchema,
   RunCancelRequestedEventSchema,
-  RunCompletedEventSchema,
+  M0RunCompletedEventSchema,
   RunFailedEventSchema,
   RunCancelledEventSchema,
   RunAbandonedEventSchema,
@@ -209,7 +233,7 @@ export const RUN_EVENT_PAYLOAD_SCHEMAS = {
   "run.queued": RunQueuedPayloadSchema,
   "run.started": RunStartedPayloadSchema,
   "run.cancel_requested": RunCancelRequestedPayloadSchema,
-  "run.completed": RunCompletedPayloadSchema,
+  "run.completed": M0RunCompletedPayloadSchema,
   "run.failed": RunFailedPayloadSchema,
   "run.cancelled": RunCancelledPayloadSchema,
   "run.abandoned": RunAbandonedPayloadSchema,
@@ -256,7 +280,7 @@ export const M1RunEventSchema = z.discriminatedUnion("type", [
   RunQueuedEventSchema,
   RunStartedEventSchema,
   RunCancelRequestedEventSchema,
-  RunCompletedEventSchema,
+  M1RunCompletedEventSchema,
   RunFailedEventSchema,
   RunCancelledEventSchema,
   RunAbandonedEventSchema,
@@ -268,10 +292,12 @@ export type M1RunEvent = z.infer<typeof M1RunEventSchema>;
 
 /**
  * Exact M1 per-type payload registry (M0 nine + reference.presented, with
- * `tool.completed` accepting the closed M0+M1 code union).
+ * `tool.completed` accepting the closed M0+M1 code union; `run.completed`
+ * stays V1-only so M1 assertions pin M0/M1 compatibility).
  */
 export const M1_RUN_EVENT_PAYLOAD_SCHEMAS = {
   ...RUN_EVENT_PAYLOAD_SCHEMAS,
+  "run.completed": M1RunCompletedPayloadSchema,
   "tool.completed": ToolCompletedPayloadSchema,
   "reference.presented": ReferencePresentedPayloadSchema,
 } as const;
@@ -352,10 +378,12 @@ export const LatestRunEventSchema = M2RunEventSchema;
 export type LatestRunEvent = M2RunEvent;
 
 /**
- * Latest (M2) per-type payload registry (M1 ten + the three model steps).
+ * Latest (M2) per-type payload registry (M1 ten + the three model steps,
+ * with `run.completed` accepting V1 historical rows and V2 M2 rows).
  */
 export const M2_RUN_EVENT_PAYLOAD_SCHEMAS = {
   ...M1_RUN_EVENT_PAYLOAD_SCHEMAS,
+  "run.completed": RunCompletedPayloadSchema,
   "model.step.started": ModelStepStartedPayloadSchema,
   "model.step.completed": ModelStepCompletedPayloadSchema,
   "model.step.failed": ModelStepFailedPayloadSchema,

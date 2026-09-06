@@ -444,7 +444,11 @@ describe("terminal protocol: answer.submit bypasses ToolBroker", () => {
       const strategy = makeStrategy(handle, repo, broker, gateway);
       const { sessionId, runId } = newRunningTurn(repo, T0);
       const result = await strategy(strategyCtx(repo, sessionId, runId));
-      expect(result).toEqual({ version: 1, text: "done" });
+      expect(result).toEqual({
+        version: 2,
+        text: "done",
+        answer: { version: 1, parts: [{ text: "done", citations: [] }] },
+      });
       expect(brokerSteps).toBe(0);
       expect(
         handle.raw.prepare("SELECT COUNT(*) AS n FROM tool_calls").get(),
@@ -479,7 +483,11 @@ describe("terminal protocol: answer.submit bypasses ToolBroker", () => {
       const strategy = makeStrategy(handle, repo, broker, gateway);
       const { sessionId, runId } = newRunningTurn(repo, T0);
       const result = await strategy(strategyCtx(repo, sessionId, runId));
-      expect(result).toEqual({ version: 1, text: "recovered" });
+      expect(result).toEqual({
+        version: 2,
+        text: "recovered",
+        answer: { version: 1, parts: [{ text: "recovered", citations: [] }] },
+      });
       expect(executions).toBe(0);
       expect(calls).toHaveLength(2);
       expect(JSON.stringify(calls[1])).toContain("never both");
@@ -550,8 +558,9 @@ describe("terminal protocol: answer.submit bypasses ToolBroker", () => {
       const strategy = makeStrategy(handle, repo, broker, gateway);
       const { sessionId, runId } = newRunningTurn(repo, T0);
       expect(await strategy(strategyCtx(repo, sessionId, runId))).toEqual({
-        version: 1,
+        version: 2,
         text: "ok",
+        answer: { version: 1, parts: [{ text: "ok", citations: [] }] },
       });
       expect(calls).toHaveLength(2);
     } finally {
@@ -588,8 +597,12 @@ describe("ordinary tools: broker concurrency and request order", () => {
       const strategy = makeStrategy(handle, repo, broker, gateway);
       const { sessionId, runId } = newRunningTurn(repo, T0);
       expect(await strategy(strategyCtx(repo, sessionId, runId))).toEqual({
-        version: 1,
+        version: 2,
         text: "after tools",
+        answer: {
+          version: 1,
+          parts: [{ text: "after tools", citations: [] }],
+        },
       });
       expect(maxActive).toBeLessThanOrEqual(AGENT_TOOL_CONCURRENCY);
       expect(maxActive).toBeGreaterThan(1);
@@ -717,7 +730,11 @@ describe("evidence grants and structural citations", () => {
         },
         new AbortController().signal,
       );
-      expect(await strategy(ctx)).toEqual({ version: 1, text: "cited" });
+      expect(await strategy(ctx)).toEqual({
+        version: 2,
+        text: "cited",
+        answer: { version: 1, parts: [{ text: "cited", citations: ["r1"] }] },
+      });
       const grants = repo.listEvidenceGrants(runId);
       expect(grants).toHaveLength(1);
       expect(grants[0]).toMatchObject({

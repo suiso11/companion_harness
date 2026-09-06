@@ -30,6 +30,7 @@
 
 import {
   ANSWER_SUBMIT_TOOL_NAME,
+  buildRunResultV2,
   CITATION_ID_REGEX,
   DEFAULT_SEARCH_LIMIT,
   type FrozenContext,
@@ -38,6 +39,7 @@ import {
   MAX_SEARCH_LIMIT,
   parseStructuredAnswer,
   RESERVED_ANSWER_NAMESPACE,
+  type RunResultV2,
   SNAPSHOT_BODY_VERSION,
   type StructuredAnswer,
   type ToolDescriptor,
@@ -1855,7 +1857,7 @@ function grantDeliveredReferences(
 }
 
 type AnswerHandling =
-  | { kind: "succeeded"; result: { version: 1; text: string } }
+  | { kind: "succeeded"; result: RunResultV2 }
   | { kind: "repaired"; reason: AgentRepairReason }
   | { kind: "failed"; strategyError: StrategyError };
 
@@ -1937,9 +1939,14 @@ function handleAnswerClass(args: {
       if (!verification.ok) {
         return maybeRepair("citation_invalid");
       }
+      // Durable structured persistence: the validated answer (exact
+      // part-to-citations mapping) is stored in the V2 RunResult; the
+      // rendered text deterministically equals the parts joined by blank
+      // lines. Citations are structural only (grant membership + exposure
+      // presence); never a semantic-verification claim.
       return {
         kind: "succeeded",
-        result: { version: 1, text: renderAnswerText(answer) },
+        result: buildRunResultV2(answer),
       };
     }
   }

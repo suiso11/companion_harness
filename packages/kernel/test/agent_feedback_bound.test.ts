@@ -262,8 +262,9 @@ describe("framed role:tool boundary (gateway .length semantics)", () => {
       const runId = posted.body.run.id;
       repo.startRun(runId, { now: T0 + 2 });
       await expect(strategy(ctxFor(repo, runId))).resolves.toEqual({
-        version: 1,
+        version: 2,
         text: "done",
+        answer: { version: 1, parts: [{ text: "done", citations: [] }] },
       });
       const tools = (calls[1]?.messages ?? []).filter((m) => m.role === "tool");
       expect(tools).toHaveLength(1);
@@ -327,8 +328,9 @@ describe("framed role:tool boundary (gateway .length semantics)", () => {
       const runId = posted.body.run.id;
       repo.startRun(runId, { now: T0 + 2 });
       await expect(strategy(ctxFor(repo, runId))).resolves.toEqual({
-        version: 1,
+        version: 2,
         text: "done",
+        answer: { version: 1, parts: [{ text: "done", citations: [] }] },
       });
       const tools = (calls[1]?.messages ?? []).filter((m) => m.role === "tool");
       expect(tools).toHaveLength(1);
@@ -404,8 +406,9 @@ describe("framed role:tool boundary (gateway .length semantics)", () => {
       const runId = posted.body.run.id;
       repo.startRun(runId, { now: T0 + 2 });
       await expect(strategy(ctxFor(repo, runId))).resolves.toEqual({
-        version: 1,
+        version: 2,
         text: "done",
+        answer: { version: 1, parts: [{ text: "done", citations: [] }] },
       });
       const tools = (calls[1]?.messages ?? []).filter((m) => m.role === "tool");
       expect(tools).toHaveLength(1);

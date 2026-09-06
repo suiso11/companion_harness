@@ -42,12 +42,14 @@ export {
   LatestRunEventTypeSchema,
   LatestToolCompletedPayloadSchema,
   M0_RUN_EVENT_TYPES,
+  M0RunCompletedPayloadSchema,
   M0RunEventSchema,
   M0RunEventTypeSchema,
   M0ToolCompletedPayloadSchema,
   M1_RUN_EVENT_PAYLOAD_SCHEMAS,
   M1_RUN_EVENT_TYPES,
   M1EventsResponseSchema,
+  M1RunCompletedPayloadSchema,
   M1RunEventSchema,
   M1RunEventTypeSchema,
   M1ToolCompletedPayloadSchema,
@@ -303,13 +305,18 @@ export {
   serializeExpandedLinkGraphEntry,
   utf8ByteLength,
 } from "./references.js";
-export type { RunResult, RunResultV1 } from "./run_result.js";
+export type { RunResult, RunResultV1, RunResultV2 } from "./run_result.js";
 export {
+  buildRunResultV2,
   MAX_ASSISTANT_TEXT_LENGTH,
+  parseM0RunResult,
   parseRunResult,
+  renderRunResultText,
   RUN_RESULT_REGISTRY,
+  RUN_RESULT_V2_VERSION,
   RunResultSchema,
   RunResultV1Schema,
+  RunResultV2Schema,
 } from "./run_result.js";
 export type { ActiveStatus, RunStatus, TerminalStatus } from "./run_status.js";
 export {
