@@ -165,7 +165,6 @@ export interface ProjectedHistoryItem {
 export interface ProjectedReferenceSummary {
   readonly ordinal: number;
   readonly title: string | null;
-  readonly canonicalKey: string;
 }
 
 export interface ProjectPromptArgs {
@@ -217,7 +216,9 @@ export function formatReferenceOmittedMarker(omitted: number): string {
 /**
  * Assemble the deterministic gateway ChatRequest: fixed system prompt,
  * selected-completed history only (user/assistant pairs in seq order),
- * frozen reference structural summary (no bodies/snippets), the current
+ * frozen reference structural summary (rN plus title only, no bodies,
+ * snippets, canonical keys, UUIDs, paths, or connector identifiers;
+ * untitled references project as rN alone), the current
  * request, and at most one fixed repair hint. Data never becomes system
  * instructions; free text is never shaped into tool calls here.
  *
@@ -244,8 +245,8 @@ export function projectPrompt(args: ProjectPromptArgs): ChatRequest {
   }
   const lines = args.references.map((ref) =>
     ref.title === null || ref.title.length === 0
-      ? `- r${ref.ordinal}: ${ref.canonicalKey}`
-      : `- r${ref.ordinal}: ${ref.title} [${ref.canonicalKey}]`,
+      ? `- r${ref.ordinal}`
+      : `- r${ref.ordinal}: ${ref.title}`,
   );
   const repairSuffix =
     args.repairHint === undefined || args.repairHint === null
@@ -613,9 +614,10 @@ function isDeliveredFullBody(value: unknown): boolean {
  *   was delivered (reference.open / reference.refresh);
  * - snippet exposure only when actual snippet content (`snippet` string)
  *   was delivered (markdown.search hits, open/refresh views);
- * - never from referenceId alone: title/canonicalKey-only
+ * - never from referenceId alone: title-only
  *   `reference.related` listings, frozen summaries, active membership, or
- *   prior citations yield nothing.
+ *   prior citations yield nothing. Canonical keys persist in M1 outputs for
+ *   grant derivation but never reach model feedback (see sanitizer).
  */
 export function extractGrantCandidates(modelFacing: unknown): GrantCandidate[] {
   const out: GrantCandidate[] = [];
@@ -769,15 +771,18 @@ function loadUuidToOrdinal(
 }
 
 /**
- * Project delivered broker `modelFacing` to UUID-free model feedback.
+ * Project delivered broker `modelFacing` to identifier-free model feedback.
  * Structural `referenceId` UUIDs become their session `rN` (so the model can
  * cite granted evidence without ever seeing a UUID); `snapshotId` /
- * `resourceId` are omitted (the model has no use for them); any other
+ * `resourceId` are omitted (the model has no use for them); `canonicalKey`
+ * and raw connector identifiers (`connectorInstanceId`,
+ * `connector_instance_id`) are omitted: the model addresses evidence by rN
+ * plus title only, resolved internally via the frozen ordinal map. Any other
  * structural UUID in a non-free-text position redacts to `[redacted]`.
- * Free-text evidence fields (`snippet`, `text`, `title`, `canonicalKey`,
- * `query`, `reason`) pass through untouched so document content is never
- * corrupted. Grants are always derived from the ORIGINAL delivered payload,
- * never from this projection.
+ * Free-text evidence fields (`snippet`, `text`, `title`, `query`, `reason`)
+ * pass through untouched so document content is never corrupted. Grants are
+ * always derived from the ORIGINAL delivered payload, never from this
+ * projection. No semantic inference or fallback to canonicalKey.
  */
 export function sanitizeModelFacingForFeedback(
   value: unknown,
@@ -787,7 +792,6 @@ export function sanitizeModelFacingForFeedback(
     "snippet",
     "text",
     "title",
-    "canonicalKey",
     "query",
     "reason",
   ]);
@@ -801,7 +805,13 @@ export function sanitizeModelFacingForFeedback(
     const record = node as Record<string, unknown>;
     const out: Record<string, unknown> = {};
     for (const [key, entry] of Object.entries(record)) {
-      if (key === "snapshotId" || key === "resourceId") {
+      if (
+        key === "snapshotId" ||
+        key === "resourceId" ||
+        key === "canonicalKey" ||
+        key === "connectorInstanceId" ||
+        key === "connector_instance_id"
+      ) {
         continue;
       }
       if (key === "referenceId" && typeof entry === "string") {
@@ -1253,22 +1263,23 @@ function loadReferenceSummary(
     return [];
   }
   // Deterministic: resolve frozen ids to ordinals in ordinal order; ids
-  // that no longer resolve are skipped (never invented).
+  // that no longer resolve are skipped (never invented). Model-facing
+  // projection is rN plus title only: canonical keys stay in persistence
+  // (M1) and never enter the gateway prompt; untitled rows project as rN
+  // alone. No semantic inference or fallback to canonicalKey.
   const placeholders = frozenIds.map(() => "?").join(",");
   let rows: Array<{
     ordinal: number;
     title: string | null;
-    canonical_key: string;
   }>;
   try {
     rows = db
       .prepare(
-        `SELECT sr.ordinal AS ordinal, r.title AS title, r.canonical_key AS canonical_key FROM session_references sr JOIN resources r ON r.id = sr.resource_id WHERE sr.session_id = ? AND sr.id IN (${placeholders}) ORDER BY sr.ordinal ASC`,
+        `SELECT sr.ordinal AS ordinal, r.title AS title FROM session_references sr JOIN resources r ON r.id = sr.resource_id WHERE sr.session_id = ? AND sr.id IN (${placeholders}) ORDER BY sr.ordinal ASC`,
       )
       .all(sessionId, ...frozenIds) as Array<{
       ordinal: number;
       title: string | null;
-      canonical_key: string;
     }>;
   } catch {
     return [];
@@ -1276,7 +1287,6 @@ function loadReferenceSummary(
   return rows.map((row) => ({
     ordinal: row.ordinal,
     title: row.title,
-    canonicalKey: row.canonical_key,
   }));
 }
 

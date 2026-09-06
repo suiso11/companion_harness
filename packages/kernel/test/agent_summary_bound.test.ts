@@ -111,7 +111,7 @@ describe("frozen-reference summary bound", () => {
     const req = projectPrompt({
       requestText: "q",
       history: [],
-      references: [{ ordinal: 1, title: "T", canonicalKey: "k" }],
+      references: [{ ordinal: 1, title: "T" }],
       tools: [],
       model: "m",
     });
@@ -122,7 +122,7 @@ describe("frozen-reference summary bound", () => {
       MAX_MESSAGE_CONTENT_LENGTH,
     );
     expect(current.content).not.toContain("omitted to fit model message limit");
-    expect(current.content).toContain("- r1: T [k]");
+    expect(current.content).toContain("- r1: T");
   });
 
   it("bounds many summaries under a maximum user request with deterministic omission", () => {
@@ -130,7 +130,6 @@ describe("frozen-reference summary bound", () => {
     const references = Array.from({ length: 1000 }, (_, i) => ({
       ordinal: i + 1,
       title: `Title ${i + 1} with padding text to grow each summary line`,
-      canonicalKey: `vault/doc-${i + 1}.md`,
     }));
     const first = projectPrompt({
       requestText,
@@ -170,10 +169,12 @@ describe("frozen-reference summary bound", () => {
     const omitted = Number((markerMatch as RegExpMatchArray)[1]);
     expect(omitted).toBeGreaterThan(0);
     expect(current.content).toContain(formatReferenceOmittedMarker(omitted));
-    // Omitted tail summaries contribute no titles/keys as data lines.
+    // Omitted tail summaries contribute no titles as data lines and no
+    // canonical keys / paths ever appear (rN plus title only).
     const lastOrdinal = references.length;
     expect(current.content).not.toContain(`- r${lastOrdinal}:`);
-    expect(current.content).not.toContain(`vault/doc-${lastOrdinal}.md`);
+    expect(current.content).not.toContain("vault/");
+    expect(current.content).not.toContain(".md");
     // Kept count + omitted count reconstructs the total deterministically.
     const keptLines = current.content
       .split("\n")

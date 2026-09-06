@@ -274,7 +274,7 @@ describe("prompt projection and answer rendering", () => {
     const args = {
       requestText: "q",
       history: [{ turnSeq: 1, requestText: "old", resultText: "res" }],
-      references: [{ ordinal: 1, title: "T", canonicalKey: "k" }],
+      references: [{ ordinal: 1, title: "T" }],
       tools,
       model: "m",
     };

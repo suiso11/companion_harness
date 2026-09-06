@@ -17,7 +17,6 @@ function makeRefs(count: number, pad = "x".repeat(40)) {
   return Array.from({ length: count }, (_, i) => ({
     ordinal: i + 1,
     title: `Title ${i + 1} ${pad}`,
-    canonicalKey: `vault/doc-${i + 1}.md`,
   }));
 }
 
@@ -58,17 +57,13 @@ describe("linear frozen-reference summary bounding", () => {
         .filter((line) => line.startsWith("- r"));
       expect(keptLines.length + omitted).toBe(references.length);
       // Deterministic ordinal order: earliest prefix kept.
-      expect(keptLines[0]).toBe(
-        `- r1: Title 1 ${"x".repeat(40)} [vault/doc-1.md]`,
-      );
+      expect(keptLines[0]).toBe(`- r1: Title 1 ${"x".repeat(40)}`);
       expect(keptLines[keptLines.length - 1]?.startsWith("- r")).toBe(true);
       const kept = keptLines.length;
       expect(content).not.toContain(`- r${references.length}:`);
       // Largest fitting prefix: kept fits, kept+1 (with its exact smaller
       // omitted marker) does not. Rebuild only these two candidates.
-      const lines = references.map(
-        (ref) => `- r${ref.ordinal}: ${ref.title} [${ref.canonicalKey}]`,
-      );
+      const lines = references.map((ref) => `- r${ref.ordinal}: ${ref.title}`);
       const head = `User request:\nlarge legal frozen context\n`;
       const trailer =
         "Call ordinary tools for evidence when needed, then submit exactly one answer.submit call alone.";
@@ -100,8 +95,8 @@ describe("linear frozen-reference summary bounding", () => {
     // space (otherwise even kept=0 stays oversized and no prefix can fit).
     const pad = "p".repeat(80);
     const references = [
-      { ordinal: 1, title: `A ${pad}`, canonicalKey: "vault/a.md" },
-      { ordinal: 2, title: `B ${pad}`, canonicalKey: "vault/b.md" },
+      { ordinal: 1, title: `A ${pad}` },
+      { ordinal: 2, title: `B ${pad}` },
     ];
     const probe = projectPrompt({
       requestText: "",
@@ -122,8 +117,8 @@ describe("linear frozen-reference summary bounding", () => {
     });
     const exact = currentContent(exactReq);
     expect(exact.length).toBe(MAX_MESSAGE_CONTENT_LENGTH);
-    expect(exact).toContain(`- r1: A ${pad} [vault/a.md]`);
-    expect(exact).toContain(`- r2: B ${pad} [vault/b.md]`);
+    expect(exact).toContain(`- r1: A ${pad}`);
+    expect(exact).toContain(`- r2: B ${pad}`);
     expect(exact).not.toContain("omitted to fit model message limit");
 
     const overReq = projectPrompt({
@@ -136,9 +131,8 @@ describe("linear frozen-reference summary bounding", () => {
     const over = currentContent(overReq);
     expect(over.length).toBeLessThanOrEqual(MAX_MESSAGE_CONTENT_LENGTH);
     expect(over).toContain("u".repeat(need + 1));
-    expect(over).toContain(`- r1: A ${pad} [vault/a.md]`);
+    expect(over).toContain(`- r1: A ${pad}`);
     expect(over).not.toContain("- r2:");
-    expect(over).not.toContain("vault/b.md");
     expect(over).toContain(formatReferenceOmittedMarker(1));
   });
 
@@ -149,14 +143,13 @@ describe("linear frozen-reference summary bounding", () => {
       // reference count until the bounded prefix leaves exactly the target
       // omitted count, tuning the request length.
       const total = omittedTarget + 3;
+      // Titled rN-plus-title lines only (no canonical keys): uniform short
+      // lines keep marker-width effects isolated.
       const references = Array.from({ length: total }, (_, i) => ({
         ordinal: i + 1,
-        title: null as string | null,
-        canonicalKey: `k${i + 1}`,
+        title: `t${i + 1}`,
       }));
-      const lines = references.map(
-        (ref) => `- r${ref.ordinal}: ${ref.canonicalKey}`,
-      );
+      const lines = references.map((ref) => `- r${ref.ordinal}: ${ref.title}`);
       const trailer =
         "Call ordinary tools for evidence when needed, then submit exactly one answer.submit call alone.";
       const header = "Session references (frozen structural summary):";

@@ -694,7 +694,9 @@ describe("rN failure isolation (unknown / malformed / out-of-context / UUID smug
       expect(feedbacksB[0]?.body.ok).toBe(true);
       const outputB = feedbacksB[0]?.body.output as Record<string, unknown>;
       expect(outputB.referenceId).toBe("r1");
-      expect(outputB.canonicalKey).toBe("vault/b1.md");
+      expect(outputB).not.toHaveProperty("canonicalKey");
+      expect(outputB).not.toHaveProperty("snapshotId");
+      expect(outputB).not.toHaveProperty("resourceId");
       expect(feedbacksB[0]?.raw).not.toContain(a1.refId);
       expect(feedbacksB[0]?.raw).not.toMatch(UUID_RE);
     } finally {
