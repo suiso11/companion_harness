@@ -60,20 +60,21 @@ function isMainModule(): boolean {
   }
 }
 
+/**
+ * Startup-failure ownership: `startServer`/`startServerFromEnv` in
+ * `bootstrap.ts` is the single owner of the sanitized `server.start_failed`
+ * log (exactly once per failure, config-parse and late bootstrap paths, no
+ * raw errors or paths). This top-level handler stays silent and only sets
+ * the exit code so programmatic callers and the CLI never double-log.
+ */
+export function handleStartupError(_error: unknown): void {
+  void _error;
+  process.exitCode = 1;
+}
+
 if (isMainModule()) {
   const { startServerFromEnv: start } = await import("./bootstrap.js");
   start().catch((error: unknown) => {
-    const status =
-      typeof error === "object" &&
-      error !== null &&
-      "code" in error &&
-      typeof (error as { code?: unknown }).code === "string" &&
-      /^[a-z0-9_]{1,64}$/.test((error as { code: string }).code)
-        ? (error as { code: string }).code
-        : "unknown";
-    process.stderr.write(
-      `${JSON.stringify({ level: "error", code: "server.start_failed", status })}\n`,
-    );
-    process.exitCode = 1;
+    handleStartupError(error);
   });
 }

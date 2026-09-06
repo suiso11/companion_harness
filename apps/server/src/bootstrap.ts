@@ -160,6 +160,10 @@ export function sanitizeStartupErrorStatus(error: unknown): string {
 export async function startServer(
   options: StartServerOptions = {},
 ): Promise<StartedServer> {
+  // Ownership: this function is the single owner of the sanitized
+  // `server.start_failed` log (exactly once per failure, fixed safe fields
+  // only). The `index.ts` top-level handler stays silent and only sets the
+  // exit code, so CLI and programmatic callers never double-log.
   // Early config load: failures have no valid logLevel, so log exactly once
   // through the injected logger or a safe default. Only the sanitized fixed
   // status is emitted (never paths or raw values). Later startup failures

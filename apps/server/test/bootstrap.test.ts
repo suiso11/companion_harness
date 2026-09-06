@@ -503,6 +503,81 @@ describe("bootstrap startup + graceful shutdown", () => {
     ).rejects.toThrow();
   });
 
+  it("logs each startup failure exactly once with fixed safe fields", async () => {
+    const countStderrStartFailed = (lines: string[]): number =>
+      lines.filter((line) => line.includes("server.start_failed")).length;
+    const originalWrite = process.stderr.write.bind(process.stderr);
+
+    // Early failure: invalid config with an injected logger stays in the
+    // logger (exactly once) and never duplicates on stderr.
+    {
+      const { env } = tempEnv();
+      const collecting = createCollectingLogger("debug");
+      const lines: string[] = [];
+      (
+        process.stderr as unknown as { write: (...args: never[]) => boolean }
+      ).write = ((chunk: unknown) => {
+        lines.push(String(chunk));
+        return true;
+      }) as (...args: never[]) => boolean;
+      try {
+        await expect(
+          startServer({
+            env: { ...env, COMPANION_MARKDOWN_ROOTS_JSON: "not-json" },
+            drainMs: 50,
+            logger: collecting.logger,
+          }),
+        ).rejects.toThrow();
+      } finally {
+        process.stderr.write = originalWrite as typeof process.stderr.write;
+      }
+      const failed = collecting.records.filter(
+        (record) => record.code === "server.start_failed",
+      );
+      expect(failed).toHaveLength(1);
+      expect(failed[0]?.status).toBe("server_config_invalid");
+      expect(countStderrStartFailed(lines)).toBe(0);
+      expect(JSON.stringify(failed[0])).not.toContain("not-json");
+      expect(JSON.stringify(collecting.records)).not.toContain("not-json");
+    }
+
+    // Late failure: post-config chmod failure with an injected logger also
+    // logs exactly once with fixed safe fields and no stderr duplicate.
+    {
+      const { env, dbPath } = tempEnv();
+      const collecting = createCollectingLogger("debug");
+      const lines: string[] = [];
+      (
+        process.stderr as unknown as { write: (...args: never[]) => boolean }
+      ).write = ((chunk: unknown) => {
+        lines.push(String(chunk));
+        return true;
+      }) as (...args: never[]) => boolean;
+      try {
+        await expect(
+          startServer({
+            env,
+            drainMs: 50,
+            logger: collecting.logger,
+            platform: "linux",
+            chmod: () => {
+              throw new Error("EACCES: permission denied");
+            },
+          }),
+        ).rejects.toThrow("database directory permissions failed");
+      } finally {
+        process.stderr.write = originalWrite as typeof process.stderr.write;
+      }
+      const failed = collecting.records.filter(
+        (record) => record.code === "server.start_failed",
+      );
+      expect(failed).toHaveLength(1);
+      expect(failed[0]?.status).toBe("server_config_invalid");
+      expect(countStderrStartFailed(lines)).toBe(0);
+      expect(JSON.stringify(failed[0])).not.toContain(dbPath);
+    }
+  });
+
   it("maps unknown startup codes to unknown (closed vocabulary)", async () => {
     expect(
       sanitizeStartupErrorStatus(
