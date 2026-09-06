@@ -1315,7 +1315,7 @@ function loadHistory(
   try {
     rows = db
       .prepare(
-        "SELECT t.seq AS seq, t.input_json AS input_json, r.result_json AS result_json FROM turns t JOIN turn_selections s ON s.turn_id = t.id JOIN runs r ON r.id = s.run_id WHERE t.session_id = ? AND t.seq < ? AND r.status = 'completed' AND r.result_json IS NOT NULL ORDER BY t.seq ASC",
+        `SELECT t.seq AS seq, t.input_json AS input_json, r.result_json AS result_json FROM turns t JOIN turn_selections s ON s.turn_id = t.id JOIN runs r ON r.id = s.run_id WHERE t.session_id = ? AND t.seq < ? AND r.status = 'completed' AND r.result_json IS NOT NULL ORDER BY t.seq DESC LIMIT ${AGENT_MAX_HISTORY_ITEMS}`,
       )
       .all(sessionId, beforeSeq) as Array<{
       seq: number;
@@ -1325,6 +1325,11 @@ function loadHistory(
   } catch {
     return [];
   }
+  // SQL-bounded to the latest history pairs: the DESC+LIMIT window selects
+  // at most AGENT_MAX_HISTORY_ITEMS rows before any JSON.parse, so excluded
+  // older rows are never loaded or parsed. Restore chronological order for
+  // prompt projection (oldest-to-newest replay).
+  rows.sort((a, b) => a.seq - b.seq);
   const out: ProjectedHistoryItem[] = [];
   for (const row of rows) {
     try {
@@ -1345,10 +1350,9 @@ function loadHistory(
       });
     } catch {}
   }
-  // Deterministic bound: selected-completed only, latest items win in
-  // chronological order so the gateway 128-message cap cannot be exceeded
-  // by history alone (2 per item + system + current <= 128).
-  return out.slice(-AGENT_MAX_HISTORY_ITEMS);
+  // Already SQL-bounded (DESC+LIMIT) and chronological; projectPrompt
+  // applies the final projectable filter and gateway 128-message cap.
+  return out;
 }
 
 /**
