@@ -8,7 +8,10 @@
 // no fallback, no router), and redacted failures (no auth token, raw
 // response/body, prompt, or reasoning in any error).
 
-import { assertPinnedLoopbackFetchUrl, normalizeLoopbackBaseUrl } from "./base_url.js";
+import {
+  assertPinnedLoopbackFetchUrl,
+  normalizeLoopbackBaseUrl,
+} from "./base_url.js";
 import { ModelLocalError } from "./errors.js";
 import type {
   ChatMessage,

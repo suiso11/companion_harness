@@ -1047,12 +1047,8 @@ describe("loopback revalidation before fetch (r3943583870)", () => {
     expect(ollama.chatUrl).toBe("http://127.0.0.1:11434/api/chat");
     await ollama.chat(baseRequest());
     expect(ollamaFetch.calls).toHaveLength(1);
-    expect(ollamaFetch.calls[0]?.url).toBe(
-      "http://127.0.0.1:11434/api/chat",
-    );
-    expect(new URL(ollamaFetch.calls[0]?.url ?? "").hostname).toBe(
-      "127.0.0.1",
-    );
+    expect(ollamaFetch.calls[0]?.url).toBe("http://127.0.0.1:11434/api/chat");
+    expect(new URL(ollamaFetch.calls[0]?.url ?? "").hostname).toBe("127.0.0.1");
     expect(ollamaFetch.calls[0]?.url).not.toContain("localhost");
     expect(ollamaFetch.calls[0]?.init?.redirect).toBe("error");
 

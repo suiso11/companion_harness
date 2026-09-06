@@ -5,7 +5,10 @@
 // calling only; no streaming, retry, fallback, routing, logs, or
 // persistence.
 
-export { assertPinnedLoopbackFetchUrl, normalizeLoopbackBaseUrl } from "./base_url.js";
+export {
+  assertPinnedLoopbackFetchUrl,
+  normalizeLoopbackBaseUrl,
+} from "./base_url.js";
 export {
   MODEL_LOCAL_ERROR_CODES,
   ModelLocalError,

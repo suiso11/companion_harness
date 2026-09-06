@@ -100,7 +100,7 @@ async function setupDyn(budgets?: Record<string, number>): Promise<DynSetup> {
   };
   const stubPort = {
     search: async (
-      input: { query: string; limit: number },
+      _input: { query: string; limit: number },
       _options?: { signal?: AbortSignal },
     ) => searchImpl.fn(),
     readCanonical: async (canonicalKey: string) => {
@@ -133,7 +133,15 @@ async function setupDyn(budgets?: Record<string, number>): Promise<DynSetup> {
     registrations: regs,
     ...(budgets === undefined ? {} : { budgets }),
   });
-  return { handle, repo, broker, connectorInstanceId, readCalls, docs, searchImpl };
+  return {
+    handle,
+    repo,
+    broker,
+    connectorInstanceId,
+    readCalls,
+    docs,
+    searchImpl,
+  };
 }
 
 function insertReference(
@@ -224,7 +232,12 @@ function ctxFor(repo: KernelRepository, runId: string) {
 function toolFeedbacks(calls: ChatRequest[]): Array<{
   toolCallId: string | undefined;
   toolName: string | undefined;
-  body: { tool: string; ok: boolean; errorCode: string | null; output: unknown };
+  body: {
+    tool: string;
+    ok: boolean;
+    errorCode: string | null;
+    output: unknown;
+  };
   raw: string;
 }> {
   // Gateway requests accumulate history: the same role:tool message appears
@@ -235,7 +248,12 @@ function toolFeedbacks(calls: ChatRequest[]): Array<{
     {
       toolCallId: string | undefined;
       toolName: string | undefined;
-      body: { tool: string; ok: boolean; errorCode: string | null; output: unknown };
+      body: {
+        tool: string;
+        ok: boolean;
+        errorCode: string | null;
+        output: unknown;
+      };
       raw: string;
     }
   >();
@@ -291,7 +309,13 @@ describe("dynamic rN chains (search/refresh/related -> open)", () => {
         ],
         skipped: [],
       });
-      const runId = freezeTurn(sessionId, [], "search then open", repo, T0 + 10);
+      const runId = freezeTurn(
+        sessionId,
+        [],
+        "search then open",
+        repo,
+        T0 + 10,
+      );
       const { gateway, calls } = scriptGateway([
         chatResult([toolCall("markdown.search", { query: "new" }, "c0")]),
         chatResult([toolCall("reference.open", { referenceId: "r1" }, "c1")]),
@@ -357,9 +381,17 @@ describe("dynamic rN chains (search/refresh/related -> open)", () => {
         text: "refreshed A v2",
         sourceRevision: "rev-2",
       });
-      const runId = freezeTurn(sessionId, [a.refId], "refresh then open", repo, T0 + 10);
+      const runId = freezeTurn(
+        sessionId,
+        [a.refId],
+        "refresh then open",
+        repo,
+        T0 + 10,
+      );
       const { gateway, calls } = scriptGateway([
-        chatResult([toolCall("reference.refresh", { referenceId: "r1" }, "c0")]),
+        chatResult([
+          toolCall("reference.refresh", { referenceId: "r1" }, "c0"),
+        ]),
         chatResult([toolCall("reference.open", { referenceId: "r2" }, "c1")]),
         chatResult([answerCall([{ text: "cited r2", citations: ["r2"] }])]),
       ]);
@@ -373,7 +405,10 @@ describe("dynamic rN chains (search/refresh/related -> open)", () => {
       await expect(strategy(ctxFor(repo, runId))).resolves.toEqual({
         version: 2,
         text: "cited r2",
-        answer: { version: 1, parts: [{ text: "cited r2", citations: ["r2"] }] },
+        answer: {
+          version: 1,
+          parts: [{ text: "cited r2", citations: ["r2"] }],
+        },
       });
       const feedbacks = toolFeedbacks(calls);
       expect(feedbacks).toHaveLength(2);
@@ -428,9 +463,17 @@ describe("dynamic rN chains (search/refresh/related -> open)", () => {
         )
         .run(a.snapId, b.resId, JSON.stringify(["vault/b.md"]));
       // Frozen context holds only r1; r2 is learned via related feedback.
-      const runId = freezeTurn(sessionId, [a.refId], "related then open", repo, T0 + 10);
+      const runId = freezeTurn(
+        sessionId,
+        [a.refId],
+        "related then open",
+        repo,
+        T0 + 10,
+      );
       const { gateway, calls } = scriptGateway([
-        chatResult([toolCall("reference.related", { referenceId: "r1" }, "c0")]),
+        chatResult([
+          toolCall("reference.related", { referenceId: "r1" }, "c0"),
+        ]),
         chatResult([toolCall("reference.open", { referenceId: "r2" }, "c1")]),
         chatResult([answerCall([{ text: "cited B", citations: ["r2"] }])]),
       ]);
@@ -498,10 +541,14 @@ describe("dynamic rN chains (search/refresh/related -> open)", () => {
         .run(a.snapId, b.resId, JSON.stringify(["vault/b.md"]));
       const runId = freezeTurn(sessionId, [a.refId], "no grant", repo, T0 + 10);
       const { gateway, calls } = scriptGateway([
-        chatResult([toolCall("reference.related", { referenceId: "r1" }, "c0")]),
+        chatResult([
+          toolCall("reference.related", { referenceId: "r1" }, "c0"),
+        ]),
         // Cite r2 immediately: title-only listing granted nothing, so this
         // step must repair with citation_invalid (one repair consumed).
-        chatResult([answerCall([{ text: "early cite", citations: ["r2"] }], "a0")]),
+        chatResult([
+          answerCall([{ text: "early cite", citations: ["r2"] }], "a0"),
+        ]),
         chatResult([answerCall([{ text: "recovered", citations: [] }], "a1")]),
       ]);
       const strategy = createAgentStrategy({
@@ -561,9 +608,17 @@ describe("dynamic rN chains (search/refresh/related -> open)", () => {
         text: "x".repeat(70_000),
         sourceRevision: "rev-huge",
       });
-      const runId = freezeTurn(sessionId, [a.refId], "oversized", repo, T0 + 10);
+      const runId = freezeTurn(
+        sessionId,
+        [a.refId],
+        "oversized",
+        repo,
+        T0 + 10,
+      );
       const { gateway, calls } = scriptGateway([
-        chatResult([toolCall("reference.refresh", { referenceId: "r1" }, "c0")]),
+        chatResult([
+          toolCall("reference.refresh", { referenceId: "r1" }, "c0"),
+        ]),
         chatResult([toolCall("reference.open", { referenceId: "r2" }, "c1")]),
         chatResult([answerCall([{ text: "recovered", citations: [] }])]),
       ]);
@@ -642,8 +697,8 @@ describe("dynamic rN chains (search/refresh/related -> open)", () => {
       expect(toolFeedbacks(gwA.calls)[1]?.body.ok).toBe(true);
 
       // Session B never saw the feedback: r1 must fail through the broker.
-      const sessionB = repo.createSession({ key: randomUUID(), now: T0 + 50 }).body
-        .sessionId;
+      const sessionB = repo.createSession({ key: randomUUID(), now: T0 + 50 })
+        .body.sessionId;
       const runB = freezeTurn(sessionB, [], "isolated B", repo, T0 + 60);
       const gwB = scriptGateway([
         chatResult([toolCall("reference.open", { referenceId: "r1" }, "c0")]),
