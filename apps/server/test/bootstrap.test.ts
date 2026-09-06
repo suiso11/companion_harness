@@ -6,10 +6,17 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BUNDLED_SCHEMA_VERSION } from "@companion/kernel";
+import { BUNDLED_SCHEMA_VERSION, RunEngine } from "@companion/kernel";
+import type {
+  ChatRequest,
+  FetchImpl,
+  ModelGateway,
+} from "@companion/model-local";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  AGENT_STRATEGY_NAME,
+  createModelGateway,
   type StartedServer,
   sanitizeStartupErrorStatus,
   startServer,
@@ -597,5 +604,270 @@ describe("bootstrap startup + graceful shutdown", () => {
       ),
     ).toBe("server_config_invalid");
     expect(sanitizeStartupErrorStatus(new Error("plain boom"))).toBe("unknown");
+  });
+});
+
+describe("bootstrap M2 model wiring", () => {
+  const MODEL_NAME = "test-model";
+  const MODEL_BASE = "http://127.0.0.1:11434";
+
+  function modelEnv(
+    env: NodeJS.ProcessEnv,
+    adapter = "ollama",
+  ): NodeJS.ProcessEnv {
+    return {
+      ...env,
+      COMPANION_MODEL_JSON: JSON.stringify({
+        adapter,
+        baseUrl: MODEL_BASE,
+        model: MODEL_NAME,
+      }),
+    };
+  }
+
+  function mockModelGateway(): ModelGateway {
+    return {
+      provider: "ollama",
+      capabilities: { toolCalling: true },
+      baseUrl: MODEL_BASE,
+      chatUrl: `${MODEL_BASE}/api/chat`,
+      chat: async () => ({ text: "mock", toolCalls: [], stopReason: "stop" }),
+    };
+  }
+
+  function strategiesOf(server: StartedServer): RunEngine["strategies"] {
+    return (server.engine as unknown as RunEngine).strategies;
+  }
+
+  it("registers no strategy without model config (fail-closed)", async () => {
+    const { env } = tempEnv();
+    const started = await startServer({ env, drainMs: 50 });
+    servers.push(started);
+    try {
+      expect(started.toolBroker).toBeNull();
+      expect(strategiesOf(started).has(AGENT_STRATEGY_NAME)).toBe(false);
+      expect(strategiesOf(started).names()).toEqual([]);
+      await started.shutdown("test");
+      servers.pop();
+    } finally {
+      const index = servers.indexOf(started);
+      if (index >= 0) {
+        servers.splice(index, 1);
+      }
+    }
+  });
+
+  it("constructs both adapters without network (mock fetch)", async () => {
+    const request: ChatRequest = {
+      model: MODEL_NAME,
+      messages: [{ role: "user", content: "hi" }],
+    };
+    const ollamaFetch: FetchImpl = async () =>
+      new Response(
+        JSON.stringify({
+          message: { content: "hello" },
+          done_reason: "stop",
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      );
+    const ollama = createModelGateway(
+      { adapter: "ollama", baseUrl: MODEL_BASE, model: MODEL_NAME },
+      ollamaFetch,
+    );
+    expect(ollama.provider).toBe("ollama");
+    expect(ollama.baseUrl).toBe(MODEL_BASE);
+    expect(ollama.chatUrl).toBe(`${MODEL_BASE}/api/chat`);
+    expect((await ollama.chat(request)).text).toBe("hello");
+
+    const openaiFetch: FetchImpl = async () =>
+      new Response(
+        JSON.stringify({
+          choices: [{ message: { content: "hello" }, finish_reason: "stop" }],
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      );
+    const openai = createModelGateway(
+      {
+        adapter: "openai-compatible",
+        baseUrl: MODEL_BASE,
+        model: MODEL_NAME,
+      },
+      openaiFetch,
+    );
+    expect(openai.provider).toBe("openai-compatible");
+    expect(openai.chatUrl).toBe(`${MODEL_BASE}/v1/chat/completions`);
+    expect((await openai.chat(request)).text).toBe("hello");
+  });
+
+  it("registers the agent with a mocked gateway and null toolBroker when no roots", async () => {
+    const { env } = tempEnv();
+    const started = await startServer({
+      env: modelEnv(env),
+      drainMs: 50,
+      modelGateway: mockModelGateway(),
+    });
+    servers.push(started);
+    try {
+      expect(started.toolBroker).toBeNull();
+      expect(strategiesOf(started).has(AGENT_STRATEGY_NAME)).toBe(true);
+      // The listener still serves health: registration preceded listen.
+      const base = `http://127.0.0.1:${started.port}`;
+      expect(await (await fetch(`${base}/health/ready`)).json()).toEqual({
+        status: "ready",
+      });
+      await started.shutdown("test");
+      servers.pop();
+    } finally {
+      const index = servers.indexOf(started);
+      if (index >= 0) {
+        servers.splice(index, 1);
+      }
+    }
+  });
+
+  it("builds the production gateway from config when only fetch is injected", async () => {
+    const { env } = tempEnv();
+    const fetchImpl: FetchImpl = async () =>
+      new Response(
+        JSON.stringify({
+          message: { content: "hi" },
+          done_reason: "stop",
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      );
+    const started = await startServer({
+      env: modelEnv(env),
+      drainMs: 50,
+      modelFetch: fetchImpl,
+    });
+    servers.push(started);
+    try {
+      expect(started.toolBroker).toBeNull();
+      expect(strategiesOf(started).has(AGENT_STRATEGY_NAME)).toBe(true);
+      await started.shutdown("test");
+      servers.pop();
+    } finally {
+      const index = servers.indexOf(started);
+      if (index >= 0) {
+        servers.splice(index, 1);
+      }
+    }
+  });
+
+  it("reuses the M1 broker when roots are configured", async () => {
+    const { env } = tempEnv();
+    const vault = mkdtempSync(join(tmpdir(), "companion-m2-vault-"));
+    tempDirs.push(vault);
+    writeFileSync(join(vault, "note.md"), "# Note\n\nHello vault.\n");
+    const started = await startServer({
+      env: {
+        ...modelEnv(env, "openai-compatible"),
+        COMPANION_MARKDOWN_ROOTS_JSON: JSON.stringify([{ path: vault }]),
+      },
+      drainMs: 50,
+      modelGateway: mockModelGateway(),
+    });
+    servers.push(started);
+    try {
+      expect(started.toolBroker).not.toBeNull();
+      expect([...(started.toolBroker?.toolNames() ?? [])].sort()).toEqual([
+        "markdown.search",
+        "reference.open",
+        "reference.refresh",
+        "reference.related",
+      ]);
+      expect(strategiesOf(started).has(AGENT_STRATEGY_NAME)).toBe(true);
+      await started.shutdown("test");
+      servers.pop();
+    } finally {
+      const index = servers.indexOf(started);
+      if (index >= 0) {
+        servers.splice(index, 1);
+      }
+    }
+  });
+
+  it("registers the agent before engine.start and listen (startup ordering)", async () => {
+    const { env } = tempEnv();
+    const seen: boolean[] = [];
+    const originalStart = RunEngine.prototype.start;
+    RunEngine.prototype.start = function (this: RunEngine) {
+      seen.push(this.strategies.has(AGENT_STRATEGY_NAME));
+      return originalStart.call(this);
+    };
+    try {
+      const started = await startServer({
+        env: modelEnv(env),
+        drainMs: 50,
+        modelGateway: mockModelGateway(),
+      });
+      servers.push(started);
+      try {
+        // Registration preceded engine.start (recovery) and the listener
+        // below only resolves after registration + start completed.
+        expect(seen).toEqual([true]);
+        const base = `http://127.0.0.1:${started.port}`;
+        expect(await (await fetch(`${base}/health/live`)).json()).toEqual({
+          status: "live",
+        });
+        await started.shutdown("test");
+        servers.pop();
+      } finally {
+        const index = servers.indexOf(started);
+        if (index >= 0) {
+          servers.splice(index, 1);
+        }
+      }
+    } finally {
+      RunEngine.prototype.start = originalStart;
+    }
+  });
+
+  it("never logs model config or secrets", async () => {
+    const { env } = tempEnv();
+    const secret = "sk-m2-test-secret-xyz";
+    const collecting = createCollectingLogger("debug");
+    const started = await startServer({
+      env: {
+        ...env,
+        COMPANION_MODEL_JSON: JSON.stringify({
+          adapter: "ollama",
+          baseUrl: "http://127.0.0.1:11439",
+          model: "super-secret-model-name",
+          apiKey: secret,
+        }),
+      },
+      drainMs: 50,
+      logger: collecting.logger,
+      modelGateway: mockModelGateway(),
+    });
+    servers.push(started);
+    try {
+      const dumped = JSON.stringify(collecting.records);
+      expect(dumped).not.toContain(secret);
+      expect(dumped).not.toContain("super-secret-model-name");
+      expect(dumped).not.toContain("11439");
+      expect(
+        collecting.records.filter(
+          (record) => record.code === "server.model_ready",
+        ),
+      ).toHaveLength(1);
+      await started.shutdown("test");
+      servers.pop();
+    } finally {
+      const index = servers.indexOf(started);
+      if (index >= 0) {
+        servers.splice(index, 1);
+      }
+    }
   });
 });

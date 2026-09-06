@@ -36,6 +36,7 @@ a missing DB fails without creating any DB or backup files.
 | `COMPANION_TIME_ZONE` | `UTC` | IANA name only (Intl membership) |
 | `COMPANION_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 | `COMPANION_MARKDOWN_ROOTS_JSON` | `[]` | Strict JSON array of `{ path, alias? }` (see below); unset means no Markdown connector |
+| `COMPANION_MODEL_JSON` | unset (no model) | Strict JSON object `{ adapter, baseUrl, model, apiKey? }` (see M2 below); unset registers no model strategy |
 
 Config is Zod-validated and frozen at startup (no hot reload).
 
@@ -183,11 +184,33 @@ connector instance owns **all** configured roots.
   inside a running Run via ToolBroker (ownership/budget/audit); there is no
   direct POST endpoint for them.
 
-### M2 model not implemented
+### M2 local model (strict opt-in)
 
-- The M2 model/agent is **not implemented**. Production registers no model
-  strategy, so runs fail closed with a fixed code instead of producing fake
-  production LLM output.
+- Unset `COMPANION_MODEL_JSON` (default) registers **no model strategy**:
+  runs fail closed with a fixed code instead of producing fake LLM output.
+- When set, the value must be a strict JSON object with only
+  `{ adapter, baseUrl, model, apiKey? }`. Example:
+  `{"adapter":"ollama","baseUrl":"http://127.0.0.1:11434","model":"llama3.1"}`.
+  `adapter` is `ollama` (POST `{base}/api/chat`) or `openai-compatible`
+  (POST `{base}/v1/chat/completions`, or `{base}/chat/completions` when the
+  base already ends in `/v1`). `baseUrl` must be plain `http` on a loopback
+  host (`127.0.0.1` / `localhost` / `::1`) with no credentials, query, or
+  fragment (normalized form is stored). `model` is `1-256` chars;
+  `apiKey`, when present, is a non-empty string up to `4096` chars.
+  Unknown keys, scalars, arrays, and malformed JSON are rejected
+  fail-closed at startup with a fixed safe message (no URLs, names, or
+  key material logged).
+- The server builds the gateway from the frozen config and registers the
+  M2 agent strategy under `m0-default` **before** engine recovery/start
+  and listen. The agent reuses the M1 ToolBroker when Markdown roots are
+  configured, otherwise a private empty-registration broker (no direct
+  model endpoint is ever added; `answer.submit` stays a reserved
+  non-broker terminal protocol).
+- Security limitations: model config values and keys are **never logged**
+  (only the tool count is logged) and never persisted; single attempt per
+  step (no retry, no fallback, no router, no redirects); per-step 120s
+  and 300s whole-run wall budgets with at most one repair inside max 8
+  steps; native tool calling only.
 
 ## Non-goals (explicit)
 Domain retention/GC (except newest-3 backup rotation), user export,

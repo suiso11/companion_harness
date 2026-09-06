@@ -9,6 +9,35 @@
 // HTTP lives in later milestones and is NOT part of this module.
 
 export type {
+  AgentRepairReason,
+  AgentStrategyOptions,
+  CitationVerification,
+  ProjectedHistoryItem,
+  ProjectedReferenceSummary,
+  ProjectPromptArgs,
+  StepClassification,
+} from "./agent.js";
+export {
+  AGENT_INVALID_TOOL_FEEDBACK_CONTENT,
+  AGENT_MAX_HISTORY_ITEMS,
+  AGENT_MAX_STEPS,
+  AGENT_REPAIR_HINTS,
+  AGENT_STEP_TIMEOUT_MS,
+  AGENT_SYSTEM_PROMPT,
+  AGENT_TOOL_CALLER,
+  AGENT_TOOL_CONCURRENCY,
+  AGENT_TOOL_ORIGIN,
+  AGENT_WALL_MS,
+  answerSubmitToolDefinition,
+  buildAgentToolDefinitions,
+  classifyStep,
+  createAgentStrategy,
+  extractGrantCandidates,
+  projectPrompt,
+  renderAnswerText,
+  verifyCitations,
+} from "./agent.js";
+export type {
   ManualBackupOptions,
   PreMigrationBackupOptions,
 } from "./backup.js";
@@ -181,9 +210,13 @@ export { createReferenceResolver } from "./reference_resolver.js";
 export type {
   AcceptedResponse,
   CreateSessionOptions,
+  EvidenceGrantRow,
   KernelRepository,
+  ModelCallOutcome,
+  ModelCallRow,
   PostMessageOptions,
   PostRetryOptions,
+  RecordModelCallOptions,
   RunRow,
   SessionRow,
   StoredIdempotencyRecord,
@@ -196,6 +229,7 @@ export {
   connectorInstances,
   evidenceGrants,
   kernelSchema,
+  modelCalls,
   referenceSetItems,
   referenceSets,
   resourceSnapshots,

@@ -1,5 +1,5 @@
 {
-  "name": "@companion/kernel",
+  "name": "@companion/model-local",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -9,18 +9,9 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "biome check src test"
   },
-  "dependencies": {
-    "@companion/contracts": "workspace:*",
-    "@companion/model-local": "workspace:*",
-    "better-sqlite3": "13.0.3",
-    "drizzle-orm": "0.45.2"
-  },
   "devDependencies": {
-    "@types/better-sqlite3": "9.6.0",
-    "@types/node": "24.12.4",
     "typescript": "5.9.3",
-    "vitest": "3.2.4",
-    "zod": "4.5.4"
+    "vitest": "3.2.4"
   },
   "engines": {
     "node": "24.12.0",

@@ -28,6 +28,8 @@ import {
   M1ToolErrorCodeNewSchema,
   M1ToolErrorCodeSchema,
   M1ToolNameSchema,
+  M2_RUN_EVENT_PAYLOAD_SCHEMAS,
+  M2_RUN_EVENT_TYPES,
   MAX_SEARCH_LIMIT,
   MAX_SNAPSHOT_BODY_BYTES,
   MAX_SNIPPET_CODE_POINTS,
@@ -170,15 +172,18 @@ describe("M0 registry stays exact (9 types, no reference.presented)", () => {
 });
 
 describe("latest registry extends with nonterminal reference.presented", () => {
-  it("latest is M0 nine + reference.presented (10, closed)", () => {
+  it("latest is M1 ten + M2 model steps (M2 is latest; M1 stays exact)", () => {
     expect(REFERENCE_PRESENTED_EVENT_TYPE).toBe("reference.presented");
     expect(M1_RUN_EVENT_TYPES).toHaveLength(10);
-    expect(LATEST_RUN_EVENT_TYPES).toEqual(M1_RUN_EVENT_TYPES);
     expect([...M1_RUN_EVENT_TYPES].sort()).toEqual(
       [...M0_RUN_EVENT_TYPES, "reference.presented"].sort(),
     );
     expect(Object.keys(M1_RUN_EVENT_PAYLOAD_SCHEMAS)).toHaveLength(10);
-    expect(Object.keys(LATEST_RUN_EVENT_PAYLOAD_SCHEMAS)).toHaveLength(10);
+    // Latest tracks M2 (13 closed types); M1 itself is unchanged.
+    expect(LATEST_RUN_EVENT_TYPES).toEqual(M2_RUN_EVENT_TYPES);
+    expect(M2_RUN_EVENT_TYPES).toHaveLength(13);
+    expect(Object.keys(LATEST_RUN_EVENT_PAYLOAD_SCHEMAS)).toHaveLength(13);
+    expect(LATEST_RUN_EVENT_PAYLOAD_SCHEMAS).toBe(M2_RUN_EVENT_PAYLOAD_SCHEMAS);
   });
 
   it("generic/latest parsers understand reference.presented", () => {

@@ -16,18 +16,27 @@ export type {
 export { createApp, hostNameOfHeader } from "./app.js";
 export type { StartedServer, StartServerOptions } from "./bootstrap.js";
 export {
+  AGENT_STRATEGY_NAME,
+  createModelGateway,
   SHUTDOWN_DRAIN_MS,
   sanitizeShutdownReason,
   sanitizeStartupErrorStatus,
   startServer,
   startServerFromEnv,
 } from "./bootstrap.js";
-export type { ServerConfig, ServerHost, ServerLogLevel } from "./config.js";
+export type {
+  ModelAdapter,
+  ModelConfig,
+  ServerConfig,
+  ServerHost,
+  ServerLogLevel,
+} from "./config.js";
 export {
   assertDbPathHasNoSymlink,
   defaultDbPath,
   isIanaTimeZone,
   loadServerConfig,
+  parseModelConfig,
   ServerConfigError,
 } from "./config.js";
 export type {

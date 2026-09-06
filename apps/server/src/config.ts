@@ -15,6 +15,7 @@
 import { lstatSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { normalizeLoopbackBaseUrl } from "@companion/model-local";
 import { z } from "zod";
 
 export const DEFAULT_HOST = "127.0.0.1" as const;
@@ -57,7 +58,26 @@ export interface ServerConfig {
   readonly logLevel: ServerLogLevel;
   /** Validated Markdown vault roots (deep-frozen, default empty). */
   readonly markdownRoots: readonly MarkdownRootConfig[];
+  /** Strict opt-in local model config; null (unset) means no model. */
+  readonly model: ModelConfig | null;
 }
+
+/** Local model adapter (loopback-only, strict opt-in). */
+export type ModelAdapter = "ollama" | "openai-compatible";
+
+/** Validated local model config (value-private at runtime, deep-frozen). */
+export interface ModelConfig {
+  readonly adapter: ModelAdapter;
+  /** Normalized loopback base URL (no trailing slash, no query/fragment). */
+  readonly baseUrl: string;
+  /** Model identifier sent with each chat request (1..256 chars). */
+  readonly model: string;
+  /** Optional bearer token (never logged, never persisted). */
+  readonly apiKey?: string;
+}
+
+export const MAX_MODEL_NAME_LENGTH = 256;
+export const MAX_MODEL_API_KEY_LENGTH = 4096;
 
 export class ServerConfigError extends Error {
   readonly code = "server_config_invalid" as const;
@@ -259,6 +279,93 @@ export function parseMarkdownRoots(
 }
 
 /**
+ * Strict local model parser (M2 server wiring).
+ *
+ * - Env COMPANION_MODEL_JSON is strict JSON only; unset means null (no model).
+ * - Must be an exact object with only { adapter, baseUrl, model, apiKey? }.
+ * - adapter must be 'ollama' or 'openai-compatible'.
+ * - baseUrl is validated with model-local's loopback URL rules (plain http,
+ *   127.0.0.1/localhost/::1, no credentials/query/fragment); the normalized
+ *   form is stored.
+ * - model must be 1..256 chars with no NUL byte.
+ * - apiKey when present must be a non-empty string up to 4096 chars.
+ * - Failures carry fixed messages only: no URL, model, or key material escapes.
+ * - The returned object is deep-frozen.
+ */
+export function parseModelConfig(raw: string | undefined): ModelConfig | null {
+  if (raw === undefined) {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw configError("model config must be a JSON object");
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw configError("model config must be a JSON object");
+  }
+  const keys = Object.keys(parsed);
+  for (const key of keys) {
+    if (
+      key !== "adapter" &&
+      key !== "baseUrl" &&
+      key !== "model" &&
+      key !== "apiKey"
+    ) {
+      throw configError("model config has an unknown key");
+    }
+  }
+  const record = parsed as {
+    adapter?: unknown;
+    baseUrl?: unknown;
+    model?: unknown;
+    apiKey?: unknown;
+  };
+  if (record.adapter !== "ollama" && record.adapter !== "openai-compatible") {
+    throw configError("model adapter is invalid");
+  }
+  let baseUrl: string;
+  try {
+    baseUrl = normalizeLoopbackBaseUrl(record.baseUrl);
+  } catch {
+    throw configError("model base URL is invalid");
+  }
+  if (
+    typeof record.model !== "string" ||
+    record.model.length === 0 ||
+    record.model.length > MAX_MODEL_NAME_LENGTH ||
+    record.model.includes("\0")
+  ) {
+    throw configError("model identifier is invalid");
+  }
+  if (record.apiKey !== undefined) {
+    if (
+      typeof record.apiKey !== "string" ||
+      record.apiKey.length === 0 ||
+      record.apiKey.length > MAX_MODEL_API_KEY_LENGTH ||
+      record.apiKey.includes("\0")
+    ) {
+      throw configError("model auth is invalid");
+    }
+  }
+  return Object.freeze(
+    record.apiKey === undefined
+      ? {
+          adapter: record.adapter,
+          baseUrl,
+          model: record.model as string,
+        }
+      : {
+          adapter: record.adapter,
+          baseUrl,
+          model: record.model as string,
+          apiKey: record.apiKey as string,
+        },
+  );
+}
+
+/**
  * Load + freeze the server config from the environment. Never logs paths,
  * secrets, or raw values: failures carry a fixed code only.
  */
@@ -295,6 +402,7 @@ export function loadServerConfig(
   const dbPath = isAbsolute(dbRaw) ? dbRaw : resolve(dbRaw);
   assertDbPathHasNoSymlink(dbPath);
   const markdownRoots = parseMarkdownRoots(env.COMPANION_MARKDOWN_ROOTS_JSON);
+  const model = parseModelConfig(env.COMPANION_MODEL_JSON);
   const parsed = ServerConfigSchema.safeParse({
     dbPath,
     host: host.data,
@@ -312,5 +420,6 @@ export function loadServerConfig(
     timeZone: parsed.data.timeZone,
     logLevel: parsed.data.logLevel,
     markdownRoots,
+    model,
   });
 }
