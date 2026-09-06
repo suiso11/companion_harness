@@ -25,20 +25,16 @@ import {
   createToolBroker,
   freezeStrategyContext,
   type KernelRepository,
-  type ToolBroker,
   migrateKernelDatabase,
   openKernelDatabase,
+  type ToolBroker,
 } from "../src/index.js";
 
 const T0 = 1790000000000;
 const UUID_RE =
   /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}/;
 
-function toolCall(
-  name: string,
-  args: unknown,
-  id: string,
-): NormalizedToolCall {
+function toolCall(name: string, args: unknown, id: string): NormalizedToolCall {
   return { id, name, arguments: args };
 }
 
@@ -172,10 +168,9 @@ function insertReference(
     .prepare("SELECT next_reference_ordinal FROM sessions WHERE id = ?")
     .get(sessionId) as { next_reference_ordinal: number } | undefined;
   if (cur !== undefined && cur.next_reference_ordinal <= ordinal) {
-    db.prepare("UPDATE sessions SET next_reference_ordinal = ? WHERE id = ?").run(
-      ordinal + 1,
-      sessionId,
-    );
+    db.prepare(
+      "UPDATE sessions SET next_reference_ordinal = ? WHERE id = ?",
+    ).run(ordinal + 1, sessionId);
   }
   return { refId, snapId, resId };
 }
@@ -227,7 +222,12 @@ function ctxFor(repo: KernelRepository, runId: string) {
 
 function toolFeedbacks(calls: ChatRequest[]): Array<{
   toolCallId: string | undefined;
-  body: { tool: string; ok: boolean; errorCode: string | null; output: unknown };
+  body: {
+    tool: string;
+    ok: boolean;
+    errorCode: string | null;
+    output: unknown;
+  };
   raw: string;
 }> {
   const out: Array<{
@@ -272,9 +272,7 @@ describe("advertised reference schemas use rN", () => {
     const setup = await setupM1();
     try {
       expect(AGENT_RN_PATTERN).toBe("^r[1-9][0-9]*$");
-      const tools = setup.broker
-        .describeTools()
-        .map((d) => d.name);
+      const tools = setup.broker.describeTools().map((d) => d.name);
       expect(tools).toEqual([
         "markdown.search",
         "reference.open",
@@ -370,9 +368,17 @@ describe("rN translation end-to-end (open / refresh / related)", () => {
         text: "refreshed body A v2",
         sourceRevision: "rev-2",
       });
-      const runId = freezeTurn(sessionId, [a.refId], "refresh r1", repo, T0 + 10);
+      const runId = freezeTurn(
+        sessionId,
+        [a.refId],
+        "refresh r1",
+        repo,
+        T0 + 10,
+      );
       const { gateway, calls } = scriptGateway([
-        chatResult([toolCall("reference.refresh", { referenceId: "r1" }, "c0")]),
+        chatResult([
+          toolCall("reference.refresh", { referenceId: "r1" }, "c0"),
+        ]),
         chatResult([answerCall([{ text: "after refresh", citations: [] }])]),
       ]);
       const strategy = createAgentStrategy({

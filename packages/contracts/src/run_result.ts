@@ -1,7 +1,7 @@
 import { z } from "zod";
 import {
-  StructuredAnswerSchema,
   type StructuredAnswer,
+  StructuredAnswerSchema,
 } from "./structured_answer.js";
 
 /**

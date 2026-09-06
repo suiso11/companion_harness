@@ -4,18 +4,18 @@ import {
   MAX_STRUCTURED_ANSWER_BYTES,
   parseM0RunEvent,
   parseM0RunEventPayload,
+  parseM0RunResult,
   parseM1RunEvent,
   parseM1RunEventPayload,
   parseM2RunEvent,
   parseM2RunEventPayload,
-  parseM0RunResult,
   parseRunEvent,
   parseRunEventPayload,
   parseRunResult,
-  renderRunResultText,
   RunResultSchema,
   RunResultV1Schema,
   RunResultV2Schema,
+  renderRunResultText,
 } from "../src/index.js";
 
 const UUID = "123e4567-e89b-42d3-a456-426614174000";
@@ -109,9 +109,7 @@ describe("RunResultV2 structured persistence (PR #4 r3943445771)", () => {
       }),
     ).toThrow();
     // Non-rN citation rejected.
-    expect(() =>
-      buildRunResultV2(answer("t", ["bogus"])),
-    ).toThrow();
+    expect(() => buildRunResultV2(answer("t", ["bogus"]))).toThrow();
     // 16KiB whole-answer cap enforced (16384 accepted at schema layer only
     // via exact byte measure; here assert oversize is rejected).
     const big = "x".repeat(4000);
@@ -122,9 +120,9 @@ describe("RunResultV2 structured persistence (PR #4 r3943445771)", () => {
         citations: [] as string[],
       })),
     };
-    expect(
-      JSON.stringify(oversize).length,
-    ).toBeGreaterThan(MAX_STRUCTURED_ANSWER_BYTES);
+    expect(JSON.stringify(oversize).length).toBeGreaterThan(
+      MAX_STRUCTURED_ANSWER_BYTES,
+    );
     expect(() =>
       RunResultV2Schema.parse({
         version: 2,
@@ -187,8 +185,8 @@ describe("RunResultV2 structured persistence (PR #4 r3943445771)", () => {
     expect(
       parseM2RunEvent(envelope("run.completed", { result: v2 })).type,
     ).toBe("run.completed");
-    expect(
-      parseRunEvent(envelope("run.completed", { result: v2 })).type,
-    ).toBe("run.completed");
+    expect(parseRunEvent(envelope("run.completed", { result: v2 })).type).toBe(
+      "run.completed",
+    );
   });
 });

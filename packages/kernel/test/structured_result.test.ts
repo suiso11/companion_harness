@@ -4,23 +4,23 @@
 // prompts project only the rendered text. No table rebuild, no migration:
 // `runs.result_json` stays a json_valid TEXT column holding V1 or V2.
 
+import { buildRunResultV2, parseRunResult } from "@companion/contracts";
 import type {
   ChatRequest,
   ChatResult,
   ModelGateway,
   NormalizedToolCall,
 } from "@companion/model-local";
-import { buildRunResultV2, parseRunResult } from "@companion/contracts";
 import { describe, expect, it } from "vitest";
 import {
   createAgentStrategy,
   createKernelRepository,
   createToolBroker,
   freezeStrategyContext,
+  type KernelRepository,
   migrateKernelDatabase,
   openKernelDatabase,
   projectPrompt,
-  type KernelRepository,
 } from "../src/index.js";
 
 const T0 = 1790000000000;
@@ -89,7 +89,11 @@ describe("structured result persistence (V2 RunResult)", () => {
   it("agent returns durable V2 with exact part-to-citations mapping", async () => {
     const { handle, repo } = await setup();
     try {
-      const broker = createToolBroker({ db: handle.raw, repo, registrations: [] });
+      const broker = createToolBroker({
+        db: handle.raw,
+        repo,
+        registrations: [],
+      });
       const gateway = scriptGateway([
         chatResult([
           answerCall([
