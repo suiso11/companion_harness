@@ -49,6 +49,18 @@ export const MAX_MODEL_NAME_LENGTH = 256;
 export const MAX_MESSAGE_CONTENT_LENGTH = 65_536;
 export const MAX_MESSAGES_PER_REQUEST = 128;
 export const MAX_TOOLS_PER_REQUEST = 32;
+/**
+ * Maximum provider HTTP response body accepted by `postJsonNoRedirect`
+ * (1 MiB, counted in UTF-8 bytes, not JS string characters).
+ *
+ * Both success and non-2xx bodies share this bound: an oversized
+ * `Content-Length` is rejected before reading, otherwise the body stream
+ * is read up to `MAX_RESPONSE_BYTES + 1` bytes (catching absent or
+ * dishonest lengths) and the reader is cancelled on overflow. Only bytes
+ * within the bound are decoded and `JSON.parse`d. Failures use fixed
+ * redacted messages (no body, URL, apiKey, or prompt).
+ */
+export const MAX_RESPONSE_BYTES = 1_048_576;
 /** Maximum prior native tool calls carried on one assistant message. */
 export const MAX_TOOL_CALLS_PER_MESSAGE = 32;
 /** Maximum tool-call id/name lengths for history validation. */
@@ -299,7 +311,10 @@ export function resolveGatewayConfig(
  * rethrown untouched so callers can distinguish cancellation from a
  * transport timeout. The signal actually aborts the underlying fetch
  * (not a Promise.race alone) and is composed with the optional
- * single-attempt transport `timeoutMs` guard.
+ * single-attempt transport `timeoutMs` guard, which also covers bounded
+ * body reading. Response bodies are bounded by `MAX_RESPONSE_BYTES`
+ * (byte length, never `response.json()` on unbounded data); see the
+ * constant for the exact reader behavior.
  */
 export async function postJsonNoRedirect(options: {
   fetchImpl: FetchImpl;
@@ -335,20 +350,81 @@ export async function postJsonNoRedirect(options: {
   }
   let response: Response;
   try {
-    response = await options.fetchImpl(safeUrl, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(options.body),
-      redirect: "error",
-      signal: controller.signal,
-    });
-  } catch (error) {
-    if (isAborted(externalSignal)) {
-      // External cancellation: preserve the abort rejection (no timeout
-      // mapping, no double classification, no raw detail added).
-      throw error;
+    try {
+      response = await options.fetchImpl(safeUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(options.body),
+        redirect: "error",
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (isAborted(externalSignal)) {
+        // External cancellation: preserve the abort rejection (no timeout
+        // mapping, no double classification, no raw detail added).
+        throw error;
+      }
+      throw mapFetchRejection(error);
     }
-    throw mapFetchRejection(error);
+    // Bound the response body before JSON parsing (success and error
+    // statuses share the bound; `response.json()` is never called on
+    // unbounded data). An oversized declared `Content-Length` is rejected
+    // before reading; otherwise the stream is read up to
+    // `MAX_RESPONSE_BYTES + 1` bytes so absent or dishonest lengths are
+    // still caught, and the reader is cancelled on overflow. Only bytes
+    // within the bound are decoded and parsed. Errors are fixed redacted
+    // messages (no body, URL, apiKey, or prompt).
+    const requestFailed = (status: number): ModelLocalError =>
+      new ModelLocalError(
+        "request_failed",
+        `model request failed with status ${status}`,
+      );
+    const declared = parseDeclaredContentLength(response);
+    if (declared !== undefined && declared > MAX_RESPONSE_BYTES) {
+      await cancelResponseBody(response);
+      if (!response.ok) {
+        throw requestFailed(response.status);
+      }
+      throw new ModelLocalError(
+        "invalid_response",
+        "model returned an oversized response",
+      );
+    }
+    if (!response.ok) {
+      // Drain the error body within the same bound (absent/dishonest
+      // lengths included) so a huge error payload cannot exhaust memory,
+      // then report only the fixed status failure.
+      await readBoundedBodyText(response, controller, externalSignal, {
+        tooLarge: () => requestFailed(response.status),
+        failed: () => requestFailed(response.status),
+      });
+      throw requestFailed(response.status);
+    }
+    const text = await readBoundedBodyText(
+      response,
+      controller,
+      externalSignal,
+      {
+        tooLarge: () =>
+          new ModelLocalError(
+            "invalid_response",
+            "model returned an oversized response",
+          ),
+        failed: () =>
+          new ModelLocalError(
+            "invalid_response",
+            "model returned an invalid response",
+          ),
+      },
+    );
+    try {
+      return JSON.parse(text) as unknown;
+    } catch {
+      throw new ModelLocalError(
+        "invalid_response",
+        "model returned an invalid response",
+      );
+    }
   } finally {
     if (timer !== undefined) {
       clearTimeout(timer);
@@ -357,19 +433,138 @@ export async function postJsonNoRedirect(options: {
       externalSignal.removeEventListener("abort", onExternalAbort);
     }
   }
-  if (!response.ok) {
-    throw new ModelLocalError(
-      "request_failed",
-      `model request failed with status ${response.status}`,
-    );
+}
+
+/**
+ * Minimal body-reader shape (avoids naming stream lib types directly).
+ * `Uint8Array` chunk reads mirror `ReadableStreamDefaultReader.read()`.
+ */
+interface BoundedBodyReader {
+  read(): Promise<{ done: boolean; value?: Uint8Array }>;
+  cancel(reason?: unknown): Promise<void>;
+  releaseLock(): void;
+}
+
+/** Parse a `Content-Length` header to a safe byte count, if well-formed. */
+function parseDeclaredContentLength(response: Response): number | undefined {
+  const raw = response.headers.get("content-length");
+  if (raw === null) {
+    return undefined;
   }
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    return undefined;
+  }
+  const value = Number(trimmed);
+  if (!Number.isSafeInteger(value) || value < 0) {
+    return undefined;
+  }
+  return value;
+}
+
+/** Best-effort release of an unread/rejected response stream. */
+async function cancelResponseBody(response: Response): Promise<void> {
   try {
-    return await response.json();
+    await response.body?.cancel();
   } catch {
-    throw new ModelLocalError(
-      "invalid_response",
-      "model returned an invalid response",
-    );
+    // Best effort: the fixed redacted error below carries no detail.
+  }
+}
+
+/**
+ * Read at most `MAX_RESPONSE_BYTES + 1` UTF-8 bytes from the response
+ * stream, cancel the reader on overflow, and decode only bytes within the
+ * bound (chunks are merged before a single `TextDecoder` pass so multibyte
+ * characters split across chunks survive). Byte length
+ * (`Uint8Array.byteLength`) is enforced, never JS string length.
+ * Aborting `controller` (external signal or timeout guard) cancels the
+ * reader; external cancellation rethrows the original abort rejection
+ * while timeout-guard aborts map to `timeout`. Other stream failures and
+ * overflows use the caller-supplied redacted factories. The reader lock is
+ * always released and the abort listener removed.
+ */
+async function readBoundedBodyText(
+  response: Response,
+  controller: AbortController,
+  externalSignal: AbortSignal | undefined,
+  failures: {
+    tooLarge: () => ModelLocalError;
+    failed: () => ModelLocalError;
+  },
+): Promise<string> {
+  if (isAborted(externalSignal)) {
+    throw toAbortRejection(externalSignal as AbortSignal);
+  }
+  const stream = response.body;
+  if (stream === null) {
+    return "";
+  }
+  const reader: BoundedBodyReader = stream.getReader();
+  const onControllerAbort = (): void => {
+    try {
+      void reader.cancel(
+        new DOMException("The operation was aborted.", "AbortError"),
+      );
+    } catch {
+      // Best effort: the abort mapping below reports the outcome.
+    }
+  };
+  controller.signal.addEventListener("abort", onControllerAbort, {
+    once: true,
+  });
+  try {
+    const chunks: Uint8Array[] = [];
+    let totalBytes = 0;
+    for (;;) {
+      let next: { done: boolean; value?: Uint8Array };
+      try {
+        next = await reader.read();
+      } catch {
+        if (isAborted(externalSignal)) {
+          throw toAbortRejection(externalSignal as AbortSignal);
+        }
+        if (controller.signal.aborted) {
+          throw new ModelLocalError("timeout", "model request timed out");
+        }
+        throw failures.failed();
+      }
+      if (next.done) {
+        break;
+      }
+      const value: Uint8Array | undefined = next.value;
+      if (value === undefined) {
+        break;
+      }
+      totalBytes += value.byteLength;
+      if (totalBytes > MAX_RESPONSE_BYTES) {
+        try {
+          await reader.cancel(
+            new DOMException("Response body exceeds limit.", "AbortError"),
+          );
+        } catch {
+          // Best effort: the redacted overflow error below is authoritative.
+        }
+        throw failures.tooLarge();
+      }
+      chunks.push(value);
+    }
+    if (isAborted(externalSignal)) {
+      throw toAbortRejection(externalSignal as AbortSignal);
+    }
+    const merged = new Uint8Array(totalBytes);
+    let offset = 0;
+    for (const chunk of chunks) {
+      merged.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return new TextDecoder().decode(merged);
+  } finally {
+    controller.signal.removeEventListener("abort", onControllerAbort);
+    try {
+      reader.releaseLock();
+    } catch {
+      // Best effort: the stream is already cancelled or consumed.
+    }
   }
 }
 
