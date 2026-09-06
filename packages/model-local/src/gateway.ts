@@ -136,6 +136,23 @@ function validateChatMessage(message: ChatMessage): void {
       "model message carries an invalid tool call id",
     );
   }
+  if (
+    message.toolName !== undefined &&
+    (typeof message.toolName !== "string" ||
+      message.toolName.length === 0 ||
+      message.toolName.length > MAX_TOOL_CALL_NAME_LENGTH)
+  ) {
+    throw new ModelLocalError(
+      "invalid_request",
+      "model message carries an invalid tool name",
+    );
+  }
+  if (message.toolName !== undefined && message.role !== "tool") {
+    throw new ModelLocalError(
+      "invalid_request",
+      "model message carries a tool name on a non-tool role",
+    );
+  }
   validateHistoryToolCalls(message);
 }
 

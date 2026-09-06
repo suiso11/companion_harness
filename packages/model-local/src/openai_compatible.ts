@@ -168,7 +168,9 @@ export function normalizeOpenAIResponse(
 /**
  * Serialize one provider-neutral message to OpenAI chat-completions shape.
  * Assistant history with prior native `toolCalls` replays as native
- * `tool_calls` (JSON-string arguments); tool results carry `tool_call_id`.
+ * `tool_calls` (JSON-string arguments); tool results carry `tool_call_id`
+ * only (`tool_name` is unsupported and never emitted, even when the
+ * provider-neutral message carries `toolName`).
  * No free-text parsing is performed.
  */
 export function toOpenAIMessage(message: ChatMessage): Record<string, unknown> {

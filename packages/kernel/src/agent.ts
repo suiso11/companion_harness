@@ -976,12 +976,14 @@ export function createAgentStrategy(
           wallDeadline,
         });
         // One provider-neutral role:tool message per ordinary call, in
-        // request order, each carrying its matching assistant toolCallId.
+        // request order, each carrying its matching assistant toolCallId
+        // plus the originating toolName (Ollama `tool_name` wire field).
         for (const feedback of feedbacks) {
           messages.push({
             role: "tool",
             content: feedback.content,
             toolCallId: feedback.toolCallId,
+            toolName: feedback.toolName,
           });
         }
         continue;
@@ -1002,15 +1004,17 @@ export function createAgentStrategy(
         repairUsed = true;
         // Strict OpenAI-compatible repair replay: the retained assistant
         // toolCalls message must be followed by exactly one fixed,
-        // non-sensitive role:tool response per toolCallId (in call order)
-        // before the user repair hint. Invalid calls are never executed and
-        // never consume ToolBroker budget; raw arguments/outputs are never
-        // echoed. Free-text repairs carry no toolCalls, so no synthesis.
+        // non-sensitive role:tool response per toolCallId (in call order,
+        // each with its originating toolName for the Ollama `tool_name`
+        // wire field) before the user repair hint. Invalid calls are never
+        // executed and never consume ToolBroker budget; raw arguments/outputs
+        // are never echoed. Free-text repairs carry no toolCalls, so no synthesis.
         for (const call of outcome.result.toolCalls) {
           messages.push({
             role: "tool",
             content: AGENT_INVALID_TOOL_FEEDBACK_CONTENT,
             toolCallId: call.id,
+            toolName: call.name,
           });
         }
         messages.push({
@@ -1630,7 +1634,8 @@ export function classifyStep(
  * ORIGINAL delivered payload, while model feedback carries only the
  * UUID-free `rN` projection. Returns one deterministic per-call feedback
  * payload in request order; the caller emits one provider-neutral
- * `role: tool` message per call with the matching `toolCallId`. The
+ * `role: tool` message per call with the matching `toolCallId` plus the
+ * originating `toolName`. The
  * remaining wall budget bounds the tool phase as well as model phases:
  * expiry before/during/after tools fails the Run with a fixed code.
  */
@@ -1645,7 +1650,7 @@ async function executeOrdinaryTools(args: {
   signal: AbortSignal;
   clock: { now(): number };
   wallDeadline: number;
-}): Promise<Array<{ toolCallId: string; content: string }>> {
+}): Promise<Array<{ toolCallId: string; toolName: string; content: string }>> {
   const {
     db,
     repo,
@@ -1771,7 +1776,9 @@ async function executeOrdinaryTools(args: {
   // unchanged (the broker row stays as reported).
   const uuidToOrdinal = loadUuidToOrdinal(db, sessionId);
   return results.map((entry, index) => {
-    const toolCallId = (calls[index] as NormalizedToolCall).id;
+    const call = calls[index] as NormalizedToolCall;
+    const toolCallId = call.id;
+    const toolName = call.name;
     const sanitized =
       entry.ok && entry.data !== null && entry.data !== undefined
         ? sanitizeModelFacingForFeedback(entry.data, uuidToOrdinal)
@@ -1785,13 +1792,14 @@ async function executeOrdinaryTools(args: {
     if (isToolFeedbackOversized(full)) {
       return {
         toolCallId,
+        toolName,
         content: buildOversizedToolFeedbackContent(entry.name),
       };
     }
     if (entry.ok && entry.data !== null && entry.data !== undefined) {
       grantDeliveredReferences(repo, sessionId, runId, entry.data);
     }
-    return { toolCallId, content: full };
+    return { toolCallId, toolName, content: full };
   });
 }
 

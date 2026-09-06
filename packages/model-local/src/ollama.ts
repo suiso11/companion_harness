@@ -137,8 +137,9 @@ export function normalizeOllamaResponse(
 /**
  * Serialize one provider-neutral message to Ollama `/api/chat` shape.
  * Assistant history with prior native `toolCalls` replays as native
- * `tool_calls`; tool results stay `{role:"tool",content}` (no id field
- * on the wire for this provider). No free-text parsing is performed.
+ * `tool_calls`; tool results stay `{role:"tool",content,tool_name}` (Ollama
+ * correlates via `tool_name`; `tool_call_id` is unsupported and never
+ * emitted). No free-text parsing is performed.
  */
 export function toOllamaMessage(message: ChatMessage): Record<string, unknown> {
   if (
@@ -154,6 +155,18 @@ export function toOllamaMessage(message: ChatMessage): Record<string, unknown> {
         function: { name: call.name, arguments: call.arguments ?? {} },
       })),
     };
+  }
+  if (message.role === "tool") {
+    // Ollama tool feedback correlates by originating tool name only.
+    // Never emit the OpenAI-style `tool_call_id` / `toolCallId` field.
+    if (message.toolName !== undefined) {
+      return {
+        role: message.role,
+        content: message.content,
+        tool_name: message.toolName,
+      };
+    }
+    return { role: message.role, content: message.content };
   }
   return { role: message.role, content: message.content };
 }

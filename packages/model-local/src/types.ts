@@ -9,11 +9,17 @@ export interface ModelUsage {
   outputTokens: number;
 }
 
-/** Single chat message. Tool results carry the originating `toolCallId`. */
+/** Single chat message. Tool results carry the originating `toolCallId` + `toolName`. */
 export interface ChatMessage {
   role: ChatRole;
   content: string;
   toolCallId?: string;
+  /**
+   * Originating tool name for `role: "tool"` feedback (ordinary or synthetic).
+   * Serialized provider-natively: Ollama `tool_name`, omitted on the
+   * OpenAI-compatible wire (which correlates via `tool_call_id` only).
+   */
+  toolName?: string;
   /**
    * Prior native assistant tool calls for multi-step replay.
    * Only valid on `assistant` messages; serialized provider-natively
