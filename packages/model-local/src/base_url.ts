@@ -7,8 +7,23 @@
 
 import { ModelLocalError } from "./errors.js";
 
-/** Hostnames allowed for local model endpoints (lowercase compare). */
-const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
+/** Hosts allowed for local model endpoints (lowercase, brackets stripped). */
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
+
+/**
+ * Canonicalize a URL hostname for allowlist comparison: lowercase and strip
+ * one pair of surrounding brackets from an IPv6 literal. URL implementations
+ * vary on whether `hostname` retains brackets (`[::1]` vs `::1`), so both
+ * spellings must compare equal. Brackets are stripped for comparison only;
+ * serialization below uses `host`, which preserves them.
+ */
+function canonicalLoopbackHostname(hostname: string): string {
+  const lower = hostname.toLowerCase();
+  if (lower.startsWith("[") && lower.endsWith("]") && lower.length > 2) {
+    return lower.slice(1, -1);
+  }
+  return lower;
+}
 
 /**
  * Validate `raw` as a loopback-only HTTP base URL and return its
@@ -41,7 +56,7 @@ export function normalizeLoopbackBaseUrl(raw: unknown): string {
       "model base URL must not contain credentials",
     );
   }
-  if (!LOOPBACK_HOSTS.has(parsed.hostname.toLowerCase())) {
+  if (!LOOPBACK_HOSTS.has(canonicalLoopbackHostname(parsed.hostname))) {
     throw new ModelLocalError(
       "invalid_base_url",
       "model base URL host must be 127.0.0.1, localhost, or ::1",
@@ -54,5 +69,8 @@ export function normalizeLoopbackBaseUrl(raw: unknown): string {
     );
   }
   const path = parsed.pathname.replace(/\/+$/, "");
+  // Serialize via `host` (not `hostname` + port): per the URL standard it
+  // preserves the bracketed IPv6 literal and port (`[::1]:11434`), so the
+  // normalized form stays a syntactically valid fetch URL.
   return `${parsed.protocol}//${parsed.host}${path}`;
 }

@@ -441,6 +441,24 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * Join a normalized loopback base URL with an absolute endpoint path.
+ * The join is serialized through the URL object (never `hostname` + port
+ * string surgery), so a bracketed IPv6 base such as `http://[::1]:11434`
+ * keeps standards-compliant brackets in the fetch URL. A base sub-path
+ * prefix is preserved (`{base}/prefix` + `/api/chat`).
+ */
+export function joinLoopbackPath(
+  normalizedBaseUrl: string,
+  path: string,
+): string {
+  const url = new URL(normalizedBaseUrl);
+  url.pathname = `${url.pathname.replace(/\/+$/, "")}${path}`;
+  url.search = "";
+  url.hash = "";
+  return url.href.replace(/\/+$/, "");
+}
+
+/**
  * Extract optional token-count usage (input/output only). Returns the
  * normalized summary when both counts are integers >= 0, otherwise
  * undefined (provider omitted or malformed counts are ignored, never

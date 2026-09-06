@@ -269,6 +269,22 @@ describe("model config", () => {
     }
   });
 
+  it("accepts a bracketed IPv6 loopback base URL frozen", () => {
+    const config = loadServerConfig(
+      modelEnv(
+        tempDbPath(),
+        JSON.stringify({
+          adapter: "ollama",
+          baseUrl: "http://[::1]:11434/",
+          model: "test-model",
+        }),
+      ),
+    );
+    expect(config.model?.baseUrl).toBe("http://[::1]:11434");
+    expect(Object.isFrozen(config.model)).toBe(true);
+    expect(Object.isFrozen(config)).toBe(true);
+  });
+
   it("accepts an optional apiKey and freezes it", () => {
     const config = loadServerConfig(
       modelEnv(
@@ -311,6 +327,11 @@ describe("model config", () => {
       JSON.stringify({
         adapter: "ollama",
         baseUrl: "http://example.com",
+        model: "m",
+      }),
+      JSON.stringify({
+        adapter: "ollama",
+        baseUrl: "http://[::2]:11434",
         model: "m",
       }),
       JSON.stringify({

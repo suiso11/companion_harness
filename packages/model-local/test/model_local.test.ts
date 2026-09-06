@@ -102,6 +102,101 @@ describe("loopback base URLs", () => {
   });
 });
 
+describe("bracketed IPv6 loopback serialization", () => {
+  it("preserves brackets with ports, paths, and no-port forms", () => {
+    expect(normalizeLoopbackBaseUrl("http://[::1]:11434")).toBe(
+      "http://[::1]:11434",
+    );
+    expect(normalizeLoopbackBaseUrl("http://[::1]")).toBe("http://[::1]");
+    expect(normalizeLoopbackBaseUrl("http://[::1]:11434/")).toBe(
+      "http://[::1]:11434",
+    );
+    expect(normalizeLoopbackBaseUrl("http://[::1]:11434/prefix/")).toBe(
+      "http://[::1]:11434/prefix",
+    );
+    // Every normalized form must re-parse to a bracketed IPv6 host.
+    for (const raw of ["http://[::1]:11434", "http://[::1]"]) {
+      const normalized = normalizeLoopbackBaseUrl(raw);
+      expect(new URL(normalized).hostname).toContain("::1");
+      expect(normalized).toContain("[::1]");
+    }
+  });
+
+  it.each([
+    "http://[::2]:11434",
+    "http://[fe80::1]:11434",
+    "http://[::ffff:127.0.0.1]:11434",
+    "https://[::1]:11434",
+    "http://user:pass@[::1]:11434",
+    "http://[::1]:11434/?q=1",
+    "http://[::1]:11434#frag",
+  ])("rejects %s", (raw) => {
+    expect(() => normalizeLoopbackBaseUrl(raw)).toThrowError(ModelLocalError);
+  });
+
+  it("builds exact bracketed Ollama fetch URLs with and without ports", async () => {
+    const { fetchImpl, calls } = mockFetch(
+      jsonResponse({
+        message: { role: "assistant", content: "hi" },
+        done: true,
+        done_reason: "stop",
+      }),
+    );
+    const gateway = createOllamaGateway({
+      baseUrl: "http://[::1]:11434",
+      fetchImpl,
+    });
+    expect(gateway.baseUrl).toBe("http://[::1]:11434");
+    expect(gateway.chatUrl).toBe("http://[::1]:11434/api/chat");
+    await gateway.chat(baseRequest());
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe("http://[::1]:11434/api/chat");
+
+    const noPort = createOllamaGateway({
+      baseUrl: "http://[::1]",
+      fetchImpl: mockFetch(
+        jsonResponse({
+          message: { role: "assistant", content: "hi" },
+          done: true,
+        }),
+      ).fetchImpl,
+    });
+    expect(noPort.chatUrl).toBe("http://[::1]/api/chat");
+  });
+
+  it("builds exact bracketed OpenAI fetch URLs with and without ports", async () => {
+    const { fetchImpl, calls } = mockFetch(
+      jsonResponse({
+        choices: [
+          {
+            message: { role: "assistant", content: "hello" },
+            finish_reason: "stop",
+          },
+        ],
+      }),
+    );
+    const gateway = createOpenAICompatibleGateway({
+      baseUrl: "http://[::1]:8000",
+      fetchImpl,
+    });
+    expect(gateway.baseUrl).toBe("http://[::1]:8000");
+    expect(gateway.chatUrl).toBe("http://[::1]:8000/v1/chat/completions");
+    await gateway.chat(baseRequest());
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe("http://[::1]:8000/v1/chat/completions");
+    expect(calls[0]?.init?.redirect).toBe("error");
+  });
+
+  it("keeps brackets for /v1 bases and no-port OpenAI bases", () => {
+    expect(resolveOpenAIChatUrl("http://[::1]:8000/v1")).toBe(
+      "http://[::1]:8000/v1/chat/completions",
+    );
+    expect(resolveOpenAIChatUrl("http://[::1]")).toBe(
+      "http://[::1]/v1/chat/completions",
+    );
+  });
+});
+
 describe("capabilities and request validation", () => {
   it("rejects tools when tool calling is unsupported", () => {
     try {

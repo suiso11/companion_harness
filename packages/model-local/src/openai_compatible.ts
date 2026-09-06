@@ -10,6 +10,7 @@ import {
   assertToolCallingCapability,
   extractModelUsage,
   isRecord,
+  joinLoopbackPath,
   type ModelGateway,
   postJsonNoRedirect,
   resolveGatewayConfig,
@@ -33,10 +34,11 @@ export const OPENAI_COMPATIBLE_CAPABILITIES: ModelCapabilities = {
 
 /** Resolve the chat-completions URL without doubling a `/v1` prefix. */
 export function resolveOpenAIChatUrl(normalizedBaseUrl: string): string {
-  if (normalizedBaseUrl === "/v1" || normalizedBaseUrl.endsWith("/v1")) {
-    return `${normalizedBaseUrl}/chat/completions`;
+  const basePath = new URL(normalizedBaseUrl).pathname.replace(/\/+$/, "");
+  if (basePath === "/v1" || basePath.endsWith("/v1")) {
+    return joinLoopbackPath(normalizedBaseUrl, "/chat/completions");
   }
-  return `${normalizedBaseUrl}/v1/chat/completions`;
+  return joinLoopbackPath(normalizedBaseUrl, "/v1/chat/completions");
 }
 
 function toolArgumentsFromNative(value: unknown): unknown {

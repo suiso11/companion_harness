@@ -8,6 +8,7 @@ import {
   assertToolCallingCapability,
   extractModelUsage,
   isRecord,
+  joinLoopbackPath,
   type ModelGateway,
   postJsonNoRedirect,
   resolveGatewayConfig,
@@ -181,7 +182,7 @@ function mapStopReason(doneReason: string): ChatResult["stopReason"] {
 /** Create an Ollama-backed gateway (loopback HTTP only). */
 export function createOllamaGateway(options: GatewayOptions): ModelGateway {
   const config = resolveGatewayConfig(options);
-  const chatUrl = `${config.baseUrl}${OLLAMA_CHAT_PATH}`;
+  const chatUrl = joinLoopbackPath(config.baseUrl, OLLAMA_CHAT_PATH);
   return {
     provider: OLLAMA_PROVIDER,
     capabilities: OLLAMA_CAPABILITIES,
