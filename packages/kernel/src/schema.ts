@@ -493,6 +493,53 @@ export const evidenceGrants = sqliteTable(
   ],
 );
 
+// M2 model-call audit (metadata-only, §15.10). Mirrors
+// packages/kernel/migrations/0005_m2_model_calls.sql, which is authoritative.
+// One row per AgentStrategy `generateTurn` call (repair included): step
+// ordinal, adapter/model identity, fixed outcome, fixed M2 error code,
+// timing, optional token-count usage, created_at. Prompt text, raw model
+// output, reasoning, and secrets are NEVER columns here. `run_events` is
+// untouched (typed `model.step.*` events validate via contracts only).
+
+export const modelCalls = sqliteTable(
+  "model_calls",
+  {
+    id: text("id").primaryKey(),
+    runId: text("run_id")
+      .notNull()
+      .references(() => runs.id),
+    step: integer("step").notNull(),
+    adapter: text("adapter").notNull(),
+    model: text("model").notNull(),
+    outcome: text("outcome").notNull(),
+    errorCode: text("error_code"),
+    durationMs: integer("duration_ms").notNull(),
+    usageJson: text("usage_json"),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [
+    unique("model_calls_run_step_unique").on(t.runId, t.step),
+    check("model_calls_step_check", sql`${t.step} >= 1 AND ${t.step} <= 8`),
+    check(
+      "model_calls_outcome_check",
+      sql`${t.outcome} IN ('completed','failed','timeout','cancelled')`,
+    ),
+    check(
+      "model_calls_error_code_check",
+      sql`${t.errorCode} IS NULL OR ${t.errorCode} IN ('model_unavailable','model_step_timeout','answer_invalid','citation_invalid')`,
+    ),
+    check("model_calls_duration_ms_check", sql`${t.durationMs} >= 0`),
+    check(
+      "model_calls_usage_json_check",
+      sql`${t.usageJson} IS NULL OR json_valid(${t.usageJson})`,
+    ),
+  ],
+);
+
+// NOTE: the per-run lookup index idx_model_calls_run is owned by the
+// committed migration SQL only (as with the M0 active-run partial index
+// and the M1 snapshot-links target index).
+
 export const kernelSchema = {
   sessions,
   turns,
@@ -510,4 +557,5 @@ export const kernelSchema = {
   referenceSetItems,
   sessionReferenceContext,
   evidenceGrants,
+  modelCalls,
 };

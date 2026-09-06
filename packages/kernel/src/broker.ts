@@ -679,6 +679,20 @@ export class ToolBroker {
     return [...this.registry.keys()];
   }
 
+  /**
+   * Immutable broker-visible tool metadata in registration order: frozen
+   * `ToolDescriptor` copies only (no input/output schemas, handlers,
+   * normalizers, DB paths, or connector identities). The static registry
+   * retains ownership; callers cannot mutate registrations through these
+   * snapshots. Used by the M2 AgentStrategy to advertise accurate
+   * descriptions for broker-visible tools.
+   */
+  describeTools(): readonly ToolDescriptor[] {
+    return [...this.registry.values()].map((entry) =>
+      Object.freeze({ ...entry.descriptor }),
+    );
+  }
+
   /** Effective budgets (read-only copy). */
   getBudgets(): ToolBrokerBudgets {
     return { ...this.budgets };

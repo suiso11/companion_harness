@@ -30,6 +30,10 @@ import {
   type LatestRunEventType,
   LatestRunEventTypeSchema,
   type M0RunEventType,
+  type M2ModelErrorCode,
+  M2ModelErrorCodeSchema,
+  type M2ModelStepEventType,
+  M2ModelStepEventTypeSchema,
   messageScope,
   PostMessageRequestSchema,
   type PostMessageResponse,
@@ -151,6 +155,42 @@ export interface AcceptedResponse<T> {
   status: number;
   body: T;
   replayed: boolean;
+}
+
+/** Closed M2 model-call audit outcome (metadata only, never content). */
+export type ModelCallOutcome = "completed" | "failed" | "timeout" | "cancelled";
+
+export interface RecordModelCallOptions {
+  step: number;
+  adapter: string;
+  model: string;
+  outcome: ModelCallOutcome;
+  errorCode?: M2ModelErrorCode | null;
+  durationMs: number;
+  /** Token counts only ({inputTokens, outputTokens}); null when unreported. */
+  usage?: { inputTokens: number; outputTokens: number } | null;
+  now?: number;
+}
+
+export interface ModelCallRow {
+  id: string;
+  runId: string;
+  step: number;
+  adapter: string;
+  model: string;
+  outcome: ModelCallOutcome;
+  errorCode: M2ModelErrorCode | null;
+  durationMs: number;
+  usage: { inputTokens: number; outputTokens: number } | null;
+  createdAt: number;
+}
+
+export interface EvidenceGrantRow {
+  sessionId: string;
+  runId: string;
+  referenceId: string;
+  exposure: "snippet" | "full";
+  createdAt: number;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1761,6 +1801,365 @@ export function createKernelRepository(db: Database.Database) {
       : { runId: row.run_id, selectedAt: row.selected_at };
   }
 
+  /* ---------------------------------------------------------------- */
+  /* M2 Agent audit: typed model-step events + metadata-only model_calls  */
+  /* + current-run EvidenceGrant persistence (§15.7, §15.10).              */
+  /*                                                                     */
+  /* - Model-step events (`model.step.started/completed/failed`) are      */
+  /*   non-final Agent-Run extensions validated by the latest contracts   */
+  /*   registry; payloads carry structural metadata only (step, timing,   */
+  /*   token counts, fixed codes). Prompts, raw output, reasoning, and    */
+  /*   secrets are never accepted here (strict schemas reject them).      */
+  /* - `model_calls` rows are metadata only (adapter/model/outcome/fixed  */
+  /*   code/timing/usage); terminal runs reject appends with the same     */
+  /*   stored-only rule as tool events.                                   */
+  /* - EvidenceGrants record only actual model-facing exposure            */
+  /*   (snippet/full) for the CURRENT run; frozen summaries, membership,  */
+  /*   or past-run citations never create rows. Exposure upgrades         */
+  /*   snippet -> full and never downgrades.                              */
+  /* ---------------------------------------------------------------- */
+
+  const MODEL_CALL_OUTCOMES = [
+    "completed",
+    "failed",
+    "timeout",
+    "cancelled",
+  ] as const;
+
+  function appendModelStepEvent(
+    runId: string,
+    type: M2ModelStepEventType,
+    payload: unknown,
+    options: TransitionOptions = {},
+  ): LatestRunEvent {
+    const id = requireId(runId, "runId");
+    const now = nowMs(options.now);
+    const validType = parseOrValidation(
+      () => M2ModelStepEventTypeSchema.parse(type),
+      "model step event type",
+    );
+    if (
+      validType !== "model.step.started" &&
+      validType !== "model.step.completed" &&
+      validType !== "model.step.failed"
+    ) {
+      throw new RepositoryValidationError(
+        "appendModelStepEvent accepts only model.step.started/model.step.completed/model.step.failed",
+      );
+    }
+    return withImmediate(db, () => {
+      const row = readRun(db, id);
+      if (row === null) {
+        throw new RepositoryNotFoundError(`run ${id} not found`);
+      }
+      if (isTerminalStatus(row.status as RunStatus)) {
+        throw new RepositoryValidationError(
+          "cannot append events to a terminal run",
+        );
+      }
+      const next = appendEventInTx(
+        db,
+        id,
+        row.event_seq,
+        validType,
+        payload,
+        now,
+      );
+      const stored = db
+        .prepare(
+          "SELECT run_id, seq, schema_version, type, payload, created_at FROM run_events WHERE run_id = ? AND seq = ?",
+        )
+        .get(id, next) as
+        | {
+            run_id: string;
+            seq: number;
+            schema_version: number;
+            type: string;
+            payload: string;
+            created_at: number;
+          }
+        | undefined;
+      if (stored === undefined) {
+        throw new RepositoryNotFoundError(
+          `event ${next} for run ${id} not found`,
+        );
+      }
+      return parseOrValidation(
+        () =>
+          parseRunEvent({
+            schemaVersion: stored.schema_version,
+            runId: stored.run_id,
+            seq: stored.seq,
+            createdAt: stored.created_at,
+            type: stored.type,
+            payload: JSON.parse(stored.payload),
+          }),
+        "model step event envelope",
+      );
+    });
+  }
+
+  function recordModelCall(
+    runId: string,
+    entry: RecordModelCallOptions,
+  ): ModelCallRow {
+    const id = requireId(runId, "runId");
+    const now = nowMs(entry.now);
+    if (!Number.isInteger(entry.step) || entry.step < 1 || entry.step > 8) {
+      throw new RepositoryValidationError("model step must be an integer 1..8");
+    }
+    if (
+      typeof entry.adapter !== "string" ||
+      entry.adapter.length < 1 ||
+      entry.adapter.length > 128
+    ) {
+      throw new RepositoryValidationError("adapter must be 1..128 chars");
+    }
+    if (
+      typeof entry.model !== "string" ||
+      entry.model.length < 1 ||
+      entry.model.length > 256
+    ) {
+      throw new RepositoryValidationError("model must be 1..256 chars");
+    }
+    if (!(MODEL_CALL_OUTCOMES as readonly string[]).includes(entry.outcome)) {
+      throw new RepositoryValidationError(
+        "outcome must be completed|failed|timeout|cancelled",
+      );
+    }
+    const errorCode =
+      entry.errorCode === undefined || entry.errorCode === null
+        ? null
+        : parseOrValidation(
+            () => M2ModelErrorCodeSchema.parse(entry.errorCode),
+            "model error_code",
+          );
+    if (
+      !Number.isInteger(entry.durationMs) ||
+      entry.durationMs < 0 ||
+      entry.durationMs > Number.MAX_SAFE_INTEGER
+    ) {
+      throw new RepositoryValidationError(
+        "durationMs must be an integer Unix-ms duration >= 0",
+      );
+    }
+    let usageJson: string | null = null;
+    let usage: ModelCallRow["usage"] = null;
+    if (entry.usage !== undefined && entry.usage !== null) {
+      const { inputTokens, outputTokens } = entry.usage as {
+        inputTokens: unknown;
+        outputTokens: unknown;
+      };
+      if (
+        !Number.isInteger(inputTokens) ||
+        (inputTokens as number) < 0 ||
+        !Number.isInteger(outputTokens) ||
+        (outputTokens as number) < 0
+      ) {
+        throw new RepositoryValidationError(
+          "usage must carry integer token counts >= 0",
+        );
+      }
+      usage = {
+        inputTokens: inputTokens as number,
+        outputTokens: outputTokens as number,
+      };
+      usageJson = JSON.stringify(usage);
+    }
+    return withImmediate(db, () => {
+      const run = readRun(db, id);
+      if (run === null) {
+        throw new RepositoryNotFoundError(`run ${id} not found`);
+      }
+      if (isTerminalStatus(run.status as RunStatus)) {
+        throw new RepositoryValidationError(
+          "cannot append events to a terminal run",
+        );
+      }
+      const callId = generateId();
+      try {
+        db.prepare(
+          "INSERT INTO model_calls (id, run_id, step, adapter, model, outcome, error_code, duration_ms, usage_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ).run(
+          callId,
+          id,
+          entry.step,
+          entry.adapter,
+          entry.model,
+          entry.outcome,
+          errorCode,
+          entry.durationMs,
+          usageJson,
+          now,
+        );
+      } catch (error) {
+        if (isBusyConstraint(error)) {
+          throw new RepositoryValidationError(
+            "duplicate model step for this run",
+          );
+        }
+        throw error;
+      }
+      return {
+        id: callId,
+        runId: id,
+        step: entry.step,
+        adapter: entry.adapter,
+        model: entry.model,
+        outcome: entry.outcome,
+        errorCode,
+        durationMs: entry.durationMs,
+        usage,
+        createdAt: now,
+      };
+    });
+  }
+
+  function listModelCalls(runId: string): ModelCallRow[] {
+    const id = requireId(runId, "runId");
+    if (readRun(db, id) === null) {
+      throw new RepositoryNotFoundError(`run ${id} not found`);
+    }
+    const rows = db
+      .prepare(
+        "SELECT id, run_id, step, adapter, model, outcome, error_code, duration_ms, usage_json, created_at FROM model_calls WHERE run_id = ? ORDER BY step ASC",
+      )
+      .all(id) as Array<{
+      id: string;
+      run_id: string;
+      step: number;
+      adapter: string;
+      model: string;
+      outcome: string;
+      error_code: string | null;
+      duration_ms: number;
+      usage_json: string | null;
+      created_at: number;
+    }>;
+    return rows.map((row) => ({
+      id: row.id,
+      runId: row.run_id,
+      step: row.step,
+      adapter: row.adapter,
+      model: row.model,
+      outcome: row.outcome as ModelCallOutcome,
+      errorCode: row.error_code as M2ModelErrorCode | null,
+      durationMs: row.duration_ms,
+      usage:
+        row.usage_json === null
+          ? null
+          : (parseOrValidation(
+              () => JSON.parse(row.usage_json as string),
+              "stored model usage",
+            ) as { inputTokens: number; outputTokens: number }),
+      createdAt: row.created_at,
+    }));
+  }
+
+  /**
+   * Persist (or upgrade snippet -> full, never downgrade) one current-run
+   * EvidenceGrant. Session ownership of both the run and the reference is
+   * verified first; mismatches are 404. Only actual model-facing exposure
+   * may call this (the agent calls it solely for delivered reference
+   * snippet/full payloads).
+   */
+  function upsertEvidenceGrant(
+    sessionId: string,
+    runId: string,
+    referenceId: string,
+    exposure: "snippet" | "full",
+    options: TransitionOptions = {},
+  ): EvidenceGrantRow {
+    const session = requireId(sessionId, "sessionId");
+    const run = requireId(runId, "runId");
+    const reference = requireId(referenceId, "referenceId");
+    if (exposure !== "snippet" && exposure !== "full") {
+      throw new RepositoryValidationError("exposure must be snippet|full");
+    }
+    const now = nowMs(options.now);
+    return withImmediate(db, () => {
+      const runRow = readRun(db, run);
+      if (runRow === null || runRow.session_id !== session) {
+        throw new RepositoryNotFoundError(
+          `run ${run} not found in session ${session}`,
+        );
+      }
+      const owned = db
+        .prepare(
+          "SELECT id FROM session_references WHERE session_id = ? AND id = ?",
+        )
+        .get(session, reference) as { id: string } | undefined;
+      if (owned === undefined) {
+        throw new ReferenceNotFoundError(
+          `reference ${reference} not found in session ${session}`,
+        );
+      }
+      const existing = db
+        .prepare(
+          "SELECT exposure, created_at FROM evidence_grants WHERE run_id = ? AND reference_id = ?",
+        )
+        .get(run, reference) as
+        | { exposure: string; created_at: number }
+        | undefined;
+      if (existing === undefined) {
+        db.prepare(
+          "INSERT INTO evidence_grants (session_id, run_id, reference_id, exposure, created_at) VALUES (?, ?, ?, ?, ?)",
+        ).run(session, run, reference, exposure, now);
+        return {
+          sessionId: session,
+          runId: run,
+          referenceId: reference,
+          exposure,
+          createdAt: now,
+        };
+      }
+      if (existing.exposure === "full" || exposure === "snippet") {
+        return {
+          sessionId: session,
+          runId: run,
+          referenceId: reference,
+          exposure: existing.exposure as "snippet" | "full",
+          createdAt: existing.created_at,
+        };
+      }
+      db.prepare(
+        "UPDATE evidence_grants SET exposure = 'full' WHERE run_id = ? AND reference_id = ?",
+      ).run(run, reference);
+      return {
+        sessionId: session,
+        runId: run,
+        referenceId: reference,
+        exposure: "full" as const,
+        createdAt: existing.created_at,
+      };
+    });
+  }
+
+  function listEvidenceGrants(runId: string): EvidenceGrantRow[] {
+    const id = requireId(runId, "runId");
+    if (readRun(db, id) === null) {
+      throw new RepositoryNotFoundError(`run ${id} not found`);
+    }
+    const rows = db
+      .prepare(
+        "SELECT session_id, run_id, reference_id, exposure, created_at FROM evidence_grants WHERE run_id = ? ORDER BY created_at ASC, reference_id ASC",
+      )
+      .all(id) as Array<{
+      session_id: string;
+      run_id: string;
+      reference_id: string;
+      exposure: string;
+      created_at: number;
+    }>;
+    return rows.map((row) => ({
+      sessionId: row.session_id,
+      runId: row.run_id,
+      referenceId: row.reference_id,
+      exposure: row.exposure as "snippet" | "full",
+      createdAt: row.created_at,
+    }));
+  }
+
   return {
     createSession,
     postMessage,
@@ -1773,6 +2172,11 @@ export function createKernelRepository(db: Database.Database) {
     recover,
     drain,
     appendToolEvent,
+    appendModelStepEvent,
+    recordModelCall,
+    listModelCalls,
+    upsertEvidenceGrant,
+    listEvidenceGrants,
     getSession,
     getTurn,
     getRun,

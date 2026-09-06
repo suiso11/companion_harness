@@ -12,6 +12,7 @@ import {
   loadServerConfig,
   MAX_MARKDOWN_ROOTS,
   parseMarkdownRoots,
+  parseModelConfig,
   ServerConfigError,
 } from "../src/config.js";
 
@@ -231,5 +232,160 @@ describe("markdown roots config", () => {
       relativeMessage = (error as Error).message;
     }
     expect(relativeMessage).not.toContain("not-json");
+  });
+});
+
+describe("model config", () => {
+  const SECRET = "sk-test-secret-value-abc123";
+
+  function modelEnv(dbPath: string, value: string): NodeJS.ProcessEnv {
+    return { ...baseEnv(dbPath), COMPANION_MODEL_JSON: value };
+  }
+
+  it("defaults to null (no model) with a frozen config", () => {
+    const config = loadServerConfig(baseEnv(tempDbPath()));
+    expect(config.model).toBeNull();
+    expect(Object.isFrozen(config)).toBe(true);
+    expect(parseModelConfig(undefined)).toBeNull();
+  });
+
+  it("accepts both adapters with a normalized loopback URL", () => {
+    for (const adapter of ["ollama", "openai-compatible"] as const) {
+      const config = loadServerConfig(
+        modelEnv(
+          tempDbPath(),
+          JSON.stringify({
+            adapter,
+            baseUrl: "http://127.0.0.1:11434/",
+            model: "test-model",
+          }),
+        ),
+      );
+      expect(config.model?.adapter).toBe(adapter);
+      expect(config.model?.baseUrl).toBe("http://127.0.0.1:11434");
+      expect(config.model?.model).toBe("test-model");
+      expect(config.model?.apiKey).toBeUndefined();
+      expect(Object.isFrozen(config.model)).toBe(true);
+    }
+  });
+
+  it("accepts a bracketed IPv6 loopback base URL frozen", () => {
+    const config = loadServerConfig(
+      modelEnv(
+        tempDbPath(),
+        JSON.stringify({
+          adapter: "ollama",
+          baseUrl: "http://[::1]:11434/",
+          model: "test-model",
+        }),
+      ),
+    );
+    expect(config.model?.baseUrl).toBe("http://[::1]:11434");
+    expect(Object.isFrozen(config.model)).toBe(true);
+    expect(Object.isFrozen(config)).toBe(true);
+  });
+
+  it("accepts an optional apiKey and freezes it", () => {
+    const config = loadServerConfig(
+      modelEnv(
+        tempDbPath(),
+        JSON.stringify({
+          adapter: "ollama",
+          baseUrl: "http://localhost:11434",
+          model: "m",
+          apiKey: SECRET,
+        }),
+      ),
+    );
+    expect(config.model?.apiKey).toBe(SECRET);
+    expect(Object.isFrozen(config.model)).toBe(true);
+  });
+
+  it("rejects malformed model configs fail-closed", () => {
+    const bad = [
+      "not-json",
+      '"just-a-string"',
+      "42",
+      "null",
+      "[]",
+      JSON.stringify({
+        adapter: "ollama",
+        baseUrl: "http://127.0.0.1:11434",
+        model: "m",
+        extra: 1,
+      }),
+      JSON.stringify({
+        adapter: "anthropic",
+        baseUrl: "http://127.0.0.1:11434",
+        model: "m",
+      }),
+      JSON.stringify({
+        adapter: "ollama",
+        baseUrl: "https://127.0.0.1:11434",
+        model: "m",
+      }),
+      JSON.stringify({
+        adapter: "ollama",
+        baseUrl: "http://example.com",
+        model: "m",
+      }),
+      JSON.stringify({
+        adapter: "ollama",
+        baseUrl: "http://[::2]:11434",
+        model: "m",
+      }),
+      JSON.stringify({
+        adapter: "ollama",
+        baseUrl: "http://127.0.0.1:11434/?q=1",
+        model: "m",
+      }),
+      JSON.stringify({
+        adapter: "ollama",
+        baseUrl: "http://127.0.0.1:11434",
+        model: "",
+      }),
+      JSON.stringify({
+        adapter: "ollama",
+        baseUrl: "http://127.0.0.1:11434",
+        model: "m",
+        apiKey: "",
+      }),
+      JSON.stringify({
+        adapter: "ollama",
+        baseUrl: "http://127.0.0.1:11434",
+      }),
+    ];
+    for (const raw of bad) {
+      expect(() => loadServerConfig(modelEnv(tempDbPath(), raw))).toThrow(
+        ServerConfigError,
+      );
+    }
+  });
+
+  it("never exposes model values or secrets in errors", () => {
+    const raw = JSON.stringify({
+      adapter: "ollama",
+      baseUrl: "http://127.0.0.1:9999/secret-path",
+      model: "m",
+      apiKey: SECRET,
+      extra: "boom",
+    });
+    let message = "";
+    try {
+      parseModelConfig(raw);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message.length).toBeGreaterThan(0);
+    expect(message).not.toContain(SECRET);
+    expect(message).not.toContain("secret-path");
+    expect(message).not.toContain("9999");
+    let malformed = "";
+    try {
+      parseModelConfig("{oops");
+    } catch (error) {
+      malformed = (error as Error).message;
+    }
+    expect(malformed).not.toContain("{oops");
   });
 });

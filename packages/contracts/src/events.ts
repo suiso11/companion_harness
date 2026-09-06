@@ -1,7 +1,13 @@
 import { z } from "zod";
 import { Sha256HexSchema, UnixMsSchema, UuidSchema } from "./ids.js";
+import {
+  M2_MODEL_STEP_EVENT_TYPES,
+  ModelStepCompletedPayloadSchema,
+  ModelStepFailedPayloadSchema,
+  ModelStepStartedPayloadSchema,
+} from "./model.js";
 import { ReferencePresentedPayloadSchema } from "./references.js";
-import { RunResultSchema } from "./run_result.js";
+import { RunResultSchema, RunResultV1Schema } from "./run_result.js";
 import {
   ActualOutcomeSchema,
   LatestToolErrorCodeSchema,
@@ -42,6 +48,23 @@ export const RunStartedPayloadSchema = z.strictObject({
 
 export const RunCancelRequestedPayloadSchema = z.strictObject({});
 
+/**
+ * Exact M0 `run.completed` payload: V1 RunResult only. Frozen: M0/M1
+ * assertions pin this acceptance (V2 M2 rows are rejected here).
+ */
+export const M0RunCompletedPayloadSchema = z.strictObject({
+  result: RunResultV1Schema,
+});
+
+/** Alias: M1 pins the same V1-only completed payload as M0. */
+export const M1RunCompletedPayloadSchema = M0RunCompletedPayloadSchema;
+
+/**
+ * Latest (M2) `run.completed` payload: V1 historical rows plus V2 M2 rows
+ * (durable StructuredAnswer persistence). Only `run.completed` carries a
+ * RunResult; durable/API data retains citations while history prompts
+ * project only the rendered text.
+ */
 export const RunCompletedPayloadSchema = z.strictObject({
   result: RunResultSchema,
 });
@@ -125,7 +148,7 @@ export type TerminalEventType = (typeof TERMINAL_EVENT_TYPES)[number];
 export const TerminalEventTypeSchema = z.enum(TERMINAL_EVENT_TYPES);
 
 export function isTerminalEventType(
-  type: M0RunEventType | M1RunEventType,
+  type: M0RunEventType | M1RunEventType | M2RunEventType,
 ): type is TerminalEventType {
   return (TERMINAL_EVENT_TYPES as readonly string[]).includes(type);
 }
@@ -145,6 +168,13 @@ const RunCancelRequestedEventSchema = z.strictObject({
   type: z.literal("run.cancel_requested"),
   payload: RunCancelRequestedPayloadSchema,
 });
+const M0RunCompletedEventSchema = z.strictObject({
+  ...EnvelopeBase,
+  type: z.literal("run.completed"),
+  payload: M0RunCompletedPayloadSchema,
+});
+/** M1 pins the same V1-only completed envelope as M0. */
+const M1RunCompletedEventSchema = M0RunCompletedEventSchema;
 const RunCompletedEventSchema = z.strictObject({
   ...EnvelopeBase,
   type: z.literal("run.completed"),
@@ -189,7 +219,7 @@ export const RunEventSchema = z.discriminatedUnion("type", [
   RunQueuedEventSchema,
   RunStartedEventSchema,
   RunCancelRequestedEventSchema,
-  RunCompletedEventSchema,
+  M0RunCompletedEventSchema,
   RunFailedEventSchema,
   RunCancelledEventSchema,
   RunAbandonedEventSchema,
@@ -203,7 +233,7 @@ export const RUN_EVENT_PAYLOAD_SCHEMAS = {
   "run.queued": RunQueuedPayloadSchema,
   "run.started": RunStartedPayloadSchema,
   "run.cancel_requested": RunCancelRequestedPayloadSchema,
-  "run.completed": RunCompletedPayloadSchema,
+  "run.completed": M0RunCompletedPayloadSchema,
   "run.failed": RunFailedPayloadSchema,
   "run.cancelled": RunCancelledPayloadSchema,
   "run.abandoned": RunAbandonedPayloadSchema,
@@ -231,11 +261,6 @@ export const M1_RUN_EVENT_TYPES = [
 export type M1RunEventType = (typeof M1_RUN_EVENT_TYPES)[number];
 export const M1RunEventTypeSchema = z.enum(M1_RUN_EVENT_TYPES);
 
-/** Alias: M1 is the latest schema version served. */
-export const LATEST_RUN_EVENT_TYPES = M1_RUN_EVENT_TYPES;
-export type LatestRunEventType = M1RunEventType;
-export const LatestRunEventTypeSchema = M1RunEventTypeSchema;
-
 const ReferencePresentedEventSchema = z.strictObject({
   ...EnvelopeBase,
   type: z.literal(REFERENCE_PRESENTED_EVENT_TYPE),
@@ -250,8 +275,88 @@ const ReferencePresentedEventSchema = z.strictObject({
 export const M0RunEventSchema = RunEventSchema;
 export type M0RunEvent = RunEvent;
 
-/** Latest RunEvent envelope registry (schemaVersion=1, M0 nine + M1 one). */
-export const LatestRunEventSchema = z.discriminatedUnion("type", [
+/** Exact M1 RunEvent envelope registry (M0 nine + reference.presented). */
+export const M1RunEventSchema = z.discriminatedUnion("type", [
+  RunQueuedEventSchema,
+  RunStartedEventSchema,
+  RunCancelRequestedEventSchema,
+  M1RunCompletedEventSchema,
+  RunFailedEventSchema,
+  RunCancelledEventSchema,
+  RunAbandonedEventSchema,
+  ToolRequestedEventSchema,
+  ToolCompletedEventSchema,
+  ReferencePresentedEventSchema,
+]);
+export type M1RunEvent = z.infer<typeof M1RunEventSchema>;
+
+/**
+ * Exact M1 per-type payload registry (M0 nine + reference.presented, with
+ * `tool.completed` accepting the closed M0+M1 code union; `run.completed`
+ * stays V1-only so M1 assertions pin M0/M1 compatibility).
+ */
+export const M1_RUN_EVENT_PAYLOAD_SCHEMAS = {
+  ...RUN_EVENT_PAYLOAD_SCHEMAS,
+  "run.completed": M1RunCompletedPayloadSchema,
+  "tool.completed": ToolCompletedPayloadSchema,
+  "reference.presented": ReferencePresentedPayloadSchema,
+} as const;
+
+/**
+ * Exact M1 events page: same cursor semantics as the M0 page, but events
+ * may include `reference.presented`. Rejects `model.step.*` (M2+).
+ */
+export const M1EventsResponseSchema = z.strictObject({
+  events: z.array(M1RunEventSchema),
+  nextAfter: z.number().int().min(0),
+  hasMore: z.boolean(),
+  terminal: z.boolean(),
+});
+export type M1EventsResponse = z.infer<typeof M1EventsResponseSchema>;
+
+/* ------------------------------------------------------------------ */
+/* M2: model.step.* (non-final extension, §15.10)                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * M2 non-final extension events. `model.step.started` / `model.step.completed`
+ * / `model.step.failed` are never terminal: exactly one terminal event still
+ * closes each Run, and nothing may follow it. All three belong to the Agent
+ * Run (never an Action Run). Payloads carry structural metadata only (step
+ * ordinals, timings, token-count summaries, fixed redacted error codes) —
+ * never prompts, raw model output, reasoning, secrets, or content.
+ */
+/** Latest (M2) event type list: the exact M1 ten plus the three model steps. */
+export const M2_RUN_EVENT_TYPES = [
+  ...M1_RUN_EVENT_TYPES,
+  ...M2_MODEL_STEP_EVENT_TYPES,
+] as const;
+export type M2RunEventType = (typeof M2_RUN_EVENT_TYPES)[number];
+export const M2RunEventTypeSchema = z.enum(M2_RUN_EVENT_TYPES);
+
+/** Alias: M2 is the latest schema version served. */
+export const LATEST_RUN_EVENT_TYPES = M2_RUN_EVENT_TYPES;
+export type LatestRunEventType = M2RunEventType;
+export const LatestRunEventTypeSchema = M2RunEventTypeSchema;
+
+const ModelStepStartedEventSchema = z.strictObject({
+  ...EnvelopeBase,
+  type: z.literal("model.step.started"),
+  payload: ModelStepStartedPayloadSchema,
+});
+const ModelStepCompletedEventSchema = z.strictObject({
+  ...EnvelopeBase,
+  type: z.literal("model.step.completed"),
+  payload: ModelStepCompletedPayloadSchema,
+});
+const ModelStepFailedEventSchema = z.strictObject({
+  ...EnvelopeBase,
+  type: z.literal("model.step.failed"),
+  payload: ModelStepFailedPayloadSchema,
+});
+
+/** Exact M2 RunEvent envelope registry (schemaVersion=1, 13 closed types). */
+export const M2RunEventSchema = z.discriminatedUnion("type", [
   RunQueuedEventSchema,
   RunStartedEventSchema,
   RunCancelRequestedEventSchema,
@@ -262,42 +367,62 @@ export const LatestRunEventSchema = z.discriminatedUnion("type", [
   ToolRequestedEventSchema,
   ToolCompletedEventSchema,
   ReferencePresentedEventSchema,
+  ModelStepStartedEventSchema,
+  ModelStepCompletedEventSchema,
+  ModelStepFailedEventSchema,
 ]);
-export type LatestRunEvent = z.infer<typeof LatestRunEventSchema>;
+export type M2RunEvent = z.infer<typeof M2RunEventSchema>;
 
-/** Alias: M1 is the latest schema version served. */
-export const M1RunEventSchema = LatestRunEventSchema;
-export type M1RunEvent = LatestRunEvent;
+/** Alias: M2 is the latest schema version served. */
+export const LatestRunEventSchema = M2RunEventSchema;
+export type LatestRunEvent = M2RunEvent;
 
 /**
- * Latest per-type payload registry (M0 nine + reference.presented, with
- * `tool.completed` accepting the closed M0+M1 code union).
+ * Latest (M2) per-type payload registry (M1 ten + the three model steps,
+ * with `run.completed` accepting V1 historical rows and V2 M2 rows).
  */
-export const LATEST_RUN_EVENT_PAYLOAD_SCHEMAS = {
-  ...RUN_EVENT_PAYLOAD_SCHEMAS,
-  "tool.completed": ToolCompletedPayloadSchema,
-  "reference.presented": ReferencePresentedPayloadSchema,
+export const M2_RUN_EVENT_PAYLOAD_SCHEMAS = {
+  ...M1_RUN_EVENT_PAYLOAD_SCHEMAS,
+  "run.completed": RunCompletedPayloadSchema,
+  "model.step.started": ModelStepStartedPayloadSchema,
+  "model.step.completed": ModelStepCompletedPayloadSchema,
+  "model.step.failed": ModelStepFailedPayloadSchema,
 } as const;
 
-/** Alias: M1 is the latest schema version served. */
-export const M1_RUN_EVENT_PAYLOAD_SCHEMAS = LATEST_RUN_EVENT_PAYLOAD_SCHEMAS;
+/** Alias: M2 is the latest schema version served. */
+export const LATEST_RUN_EVENT_PAYLOAD_SCHEMAS = M2_RUN_EVENT_PAYLOAD_SCHEMAS;
 
 /**
- * Latest events page: same cursor semantics as the M0 page, but events may
- * include `reference.presented`. The exact M0 page (`EventsResponseSchema`
- * in http.ts) is untouched.
+ * Latest (M2) events page: same cursor semantics as the M0/M1 pages, but
+ * events may include `reference.presented` and `model.step.*`. The exact
+ * M0 page (`M0EventsResponseSchema` in http.ts) and the exact M1 page
+ * (`M1EventsResponseSchema` above) are untouched.
  */
-export const LatestEventsResponseSchema = z.strictObject({
-  events: z.array(LatestRunEventSchema),
+export const M2EventsResponseSchema = z.strictObject({
+  events: z.array(M2RunEventSchema),
   nextAfter: z.number().int().min(0),
   hasMore: z.boolean(),
   terminal: z.boolean(),
 });
-export type LatestEventsResponse = z.infer<typeof LatestEventsResponseSchema>;
+export type M2EventsResponse = z.infer<typeof M2EventsResponseSchema>;
 
-/** Parse a full envelope with the latest registry (understands M1). */
+/** Alias: M2 is the latest schema version served. */
+export const LatestEventsResponseSchema = M2EventsResponseSchema;
+export type LatestEventsResponse = M2EventsResponse;
+
+/** Parse a full envelope with the latest registry (understands M2). */
 export function parseRunEvent(data: unknown): LatestRunEvent {
   return LatestRunEventSchema.parse(data);
+}
+
+/** Parse a full envelope with the exact M2 registry (rejects M3+ names). */
+export function parseM2RunEvent(data: unknown): M2RunEvent {
+  return M2RunEventSchema.parse(data);
+}
+
+/** Parse a full envelope with the exact M1 registry (rejects M2+ types). */
+export function parseM1RunEvent(data: unknown): M1RunEvent {
+  return M1RunEventSchema.parse(data);
 }
 
 /** Parse a full envelope with the exact M0 registry (rejects M1+ types). */
@@ -315,8 +440,28 @@ export function parseM0RunEventPayload<T extends M0RunEventType>(
   >;
 }
 
-/** Parse a bare payload for a known latest (M0+M1) type. */
-export function parseRunEventPayload<T extends M1RunEventType>(
+/** Parse a bare payload for a known M1 type (exact M1 registry). */
+export function parseM1RunEventPayload<T extends M1RunEventType>(
+  type: T,
+  data: unknown,
+): z.infer<(typeof M1_RUN_EVENT_PAYLOAD_SCHEMAS)[T]> {
+  return (M1_RUN_EVENT_PAYLOAD_SCHEMAS[type] as z.ZodType).parse(
+    data,
+  ) as z.infer<(typeof M1_RUN_EVENT_PAYLOAD_SCHEMAS)[T]>;
+}
+
+/** Parse a bare payload for a known M2 type (exact M2 registry). */
+export function parseM2RunEventPayload<T extends M2RunEventType>(
+  type: T,
+  data: unknown,
+): z.infer<(typeof M2_RUN_EVENT_PAYLOAD_SCHEMAS)[T]> {
+  return (M2_RUN_EVENT_PAYLOAD_SCHEMAS[type] as z.ZodType).parse(
+    data,
+  ) as z.infer<(typeof M2_RUN_EVENT_PAYLOAD_SCHEMAS)[T]>;
+}
+
+/** Parse a bare payload for a known latest (M2) type. */
+export function parseRunEventPayload<T extends M2RunEventType>(
   type: T,
   data: unknown,
 ): z.infer<(typeof LATEST_RUN_EVENT_PAYLOAD_SCHEMAS)[T]> {

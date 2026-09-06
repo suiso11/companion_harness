@@ -171,7 +171,7 @@ describe("m0 kernel pragmas and single connection", () => {
 });
 
 describe("m0 kernel DDL shape", () => {
-  it("creates exactly the seven M0 plus nine M1 tables, all STRICT, none WITHOUT ROWID", async () => {
+  it("creates exactly the seven M0 plus nine M1 plus one M2 tables, all STRICT, none WITHOUT ROWID", async () => {
     const handle = await openMigratedMemory();
     try {
       const rows = handle.raw
@@ -183,6 +183,7 @@ describe("m0 kernel DDL shape", () => {
         "api_idempotency",
         "connector_instances",
         "evidence_grants",
+        "model_calls",
         "reference_set_items",
         "reference_sets",
         "resource_snapshots",

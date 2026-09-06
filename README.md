@@ -19,8 +19,10 @@ Env: `COMPANION_DB_PATH` (default OS app-data
 `companion-harness/companion.sqlite`), `COMPANION_HOST` (loopback only),
 `COMPANION_PORT`, `COMPANION_TIME_ZONE` (IANA), `COMPANION_LOG_LEVEL`,
 `COMPANION_MARKDOWN_ROOTS_JSON` (default `[]`, strict JSON array of
-`{ path, alias? }`; unset means no Markdown connector).
-Config is validated and frozen at startup.
+`{ path, alias? }`; unset means no Markdown connector),
+`COMPANION_MODEL_JSON` (unset means no model; strict JSON object
+`{ adapter, baseUrl, model, apiKey? }` with `adapter` `ollama` or
+`openai-compatible`). Config is validated and frozen at startup.
 
 ## References (M1 Markdown, read-only)
 
@@ -34,8 +36,15 @@ search/open/refresh/related). Search/open/refresh/related run only as
 internal ToolBroker tools (`markdown.search`, `reference.open`,
 `reference.refresh`, `reference.related`). Root configuration is
 fingerprint-bound to the DB: changing it fails startup (revert config or
-use a fresh store). M2 model/agent is not implemented, so runs fail closed
-instead of producing fake LLM output. Full contract: `docs/operations.md`.
+use a fresh store). M2 local model is strict opt-in via
+`COMPANION_MODEL_JSON` (unset registers no strategy, so runs fail closed
+instead of producing fake LLM output); when set, the server builds a
+loopback-only Ollama (`{base}/api/chat`) or OpenAI-compatible
+(`{base}/v1/chat/completions`) gateway and registers the agent under
+`m0-default` before engine start/listen. Model base URLs must be plain
+`http` loopback (`127.0.0.1`/`localhost`/`::1`, no credentials/query);
+model config and keys are never logged, never persisted, and no direct
+model endpoint exists. Full contract: `docs/operations.md`.
 
 ## Data and permissions
 
