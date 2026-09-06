@@ -1041,3 +1041,123 @@ describe("migration 0005 model_calls (§15.10)", () => {
     }
   });
 });
+
+describe("recordModelCall terminal finality (PR r3943538936)", () => {
+  function validCall(step: number) {
+    return {
+      step,
+      adapter: "ollama",
+      model: "test-model",
+      outcome: "completed" as const,
+      durationMs: 5,
+    };
+  }
+
+  it("rejects late model_calls on all terminal states without persisting rows", async () => {
+    const { handle, repo } = await setup();
+    try {
+      // completed
+      {
+        const { runId } = newRunningTurn(repo, T0);
+        repo.completeRun(runId, { version: 1, text: "done" }, { now: T0 + 2 });
+        expect(() => repo.recordModelCall(runId, validCall(1))).toThrow(
+          /terminal/,
+        );
+        expect(repo.listModelCalls(runId)).toHaveLength(0);
+      }
+      // failed
+      {
+        const { runId } = newRunningTurn(repo, T0 + 10);
+        repo.failRun(runId, "execution_failed", { now: T0 + 12 });
+        expect(() => repo.recordModelCall(runId, validCall(1))).toThrow(
+          /terminal/,
+        );
+        expect(repo.listModelCalls(runId)).toHaveLength(0);
+      }
+      // cancelled (queued -> cancelled)
+      {
+        const sessionId = repo.createSession({
+          key: crypto.randomUUID(),
+          now: T0 + 20,
+        }).body.sessionId;
+        const posted = repo.postMessage(
+          sessionId,
+          { text: "q" },
+          { key: crypto.randomUUID(), now: T0 + 20 },
+        );
+        repo.cancelRun(sessionId, posted.body.run.id, { now: T0 + 21 });
+        expect(() =>
+          repo.recordModelCall(posted.body.run.id, validCall(1)),
+        ).toThrow(/terminal/);
+        expect(repo.listModelCalls(posted.body.run.id)).toHaveLength(0);
+      }
+      // abandoned (running -> drain)
+      {
+        const { runId } = newRunningTurn(repo, T0 + 30);
+        repo.drain({ now: T0 + 31 });
+        expect(repo.getRun(runId).status).toBe("abandoned");
+        expect(() => repo.recordModelCall(runId, validCall(1))).toThrow(
+          /terminal/,
+        );
+        expect(repo.listModelCalls(runId)).toHaveLength(0);
+      }
+    } finally {
+      const { closeKernelDatabase } = await import("../src/index.js");
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("preserves valid nonterminal audits and UNIQUE(run_id, step)", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const { sessionId, runId } = newRunningTurn(repo, T0);
+      // running accepts audits.
+      repo.recordModelCall(runId, validCall(1));
+      // cancel_requested still accepts audits (matches event append rules).
+      repo.cancelRun(sessionId, runId, { now: T0 + 2 });
+      expect(repo.getRun(runId).status).toBe("cancel_requested");
+      repo.recordModelCall(runId, validCall(2));
+      expect(repo.listModelCalls(runId).map((r) => r.step)).toEqual([1, 2]);
+      // UNIQUE(run_id, step) still enforced on nonterminal runs.
+      expect(() => repo.recordModelCall(runId, validCall(1))).toThrow(
+        /duplicate/,
+      );
+      expect(repo.listModelCalls(runId)).toHaveLength(2);
+    } finally {
+      const { closeKernelDatabase } = await import("../src/index.js");
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("drops a late AgentStrategy settlement after drain terminalization", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const { runId } = newRunningTurn(repo, T0);
+      // Strategy records its in-flight step audit while running.
+      repo.recordModelCall(runId, validCall(1));
+      // Late cancellation/drain terminalizes before the late settlement lands.
+      repo.drain({ now: T0 + 2 });
+      expect(repo.getRun(runId).status).toBe("abandoned");
+      // Late settlement (model output arriving after terminalization) must
+      // not create a row: fixed safe error, no raw output persistence.
+      expect(() =>
+        repo.recordModelCall(runId, {
+          ...validCall(2),
+          outcome: "cancelled",
+        }),
+      ).toThrow(/terminal/);
+      expect(() =>
+        repo.appendModelStepEvent(
+          runId,
+          "model.step.failed",
+          { step: 2, errorCode: "model_unavailable", durationMs: 1 },
+          { now: T0 + 3 },
+        ),
+      ).toThrow(/terminal/);
+      expect(repo.listModelCalls(runId).map((r) => r.step)).toEqual([1]);
+    } finally {
+      const { closeKernelDatabase } = await import("../src/index.js");
+      closeKernelDatabase(handle);
+    }
+  });
+});

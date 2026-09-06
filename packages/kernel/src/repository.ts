@@ -1967,8 +1967,14 @@ export function createKernelRepository(db: Database.Database) {
       usageJson = JSON.stringify(usage);
     }
     return withImmediate(db, () => {
-      if (readRun(db, id) === null) {
+      const run = readRun(db, id);
+      if (run === null) {
         throw new RepositoryNotFoundError(`run ${id} not found`);
+      }
+      if (isTerminalStatus(run.status as RunStatus)) {
+        throw new RepositoryValidationError(
+          "cannot append events to a terminal run",
+        );
       }
       const callId = generateId();
       try {
