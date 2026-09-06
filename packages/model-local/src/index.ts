@@ -12,12 +12,15 @@ export {
   type ModelLocalErrorCode,
 } from "./errors.js";
 export {
+  assertToolArgumentsByteLength,
   assertToolCallingCapability,
+  canonicalToolArgumentsJson,
   extractModelUsage,
   MAX_MESSAGE_CONTENT_LENGTH,
   MAX_MESSAGES_PER_REQUEST,
   MAX_MODEL_NAME_LENGTH,
   MAX_RESPONSE_BYTES,
+  MAX_TOOL_CALL_ARGUMENTS_BYTES,
   MAX_TOOL_CALL_ID_LENGTH,
   MAX_TOOL_CALL_NAME_LENGTH,
   MAX_TOOL_CALLS_PER_MESSAGE,
@@ -25,6 +28,7 @@ export {
   type ModelGateway,
   type ResolvedGatewayConfig,
   resolveGatewayConfig,
+  utf8ByteLength,
   validateChatRequest,
   validateNativeToolCalls,
 } from "./gateway.js";

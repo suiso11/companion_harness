@@ -5,13 +5,16 @@
 
 import { ModelLocalError } from "./errors.js";
 import {
+  assertToolArgumentsByteLength,
   assertToolCallingCapability,
+  canonicalToolArgumentsJson,
   extractModelUsage,
   isRecord,
   joinLoopbackPath,
   type ModelGateway,
   postJsonNoRedirect,
   resolveGatewayConfig,
+  utf8ByteLength,
   validateChatRequest,
   validateNativeToolCalls,
 } from "./gateway.js";
@@ -37,12 +40,21 @@ function toolArgumentsFromNative(value: unknown, index: number): unknown {
     return {};
   }
   if (isRecord(value)) {
+    // Object form: measure deterministic serialized UTF-8 bytes (never
+    // truncated, never echoed). Oversize rejects the whole response.
+    assertToolArgumentsByteLength(
+      utf8ByteLength(canonicalToolArgumentsJson(value)),
+    );
     return value;
   }
   if (typeof value === "string") {
     if (value.trim().length === 0) {
       return {};
     }
+    // Byte-check the raw string before JSON.parse (bytes, not characters),
+    // then validate the parsed JSON and re-check its deterministic
+    // serialized size. No free-text fallback.
+    assertToolArgumentsByteLength(utf8ByteLength(value));
     try {
       const parsed: unknown = JSON.parse(value);
       if (!isRecord(parsed)) {
@@ -51,6 +63,9 @@ function toolArgumentsFromNative(value: unknown, index: number): unknown {
           "model returned an invalid tool call",
         );
       }
+      assertToolArgumentsByteLength(
+        utf8ByteLength(canonicalToolArgumentsJson(parsed)),
+      );
       return parsed;
     } catch (error) {
       if (error instanceof ModelLocalError) {
@@ -98,6 +113,9 @@ export function normalizeOllamaResponse(
         "model returned an invalid response",
       );
     }
+    // Atomic: any oversize/invalid call throws before a ChatResult is
+    // built, so a response containing one oversize call is never
+    // partially accepted.
     message.tool_calls.forEach((entry: unknown, index: number) => {
       if (!isRecord(entry) || !isRecord(entry.function)) {
         throw new ModelLocalError(

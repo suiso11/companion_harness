@@ -63,6 +63,64 @@ export const MAX_TOOLS_PER_REQUEST = 32;
 export const MAX_RESPONSE_BYTES = 1_048_576;
 /** Maximum prior native tool calls carried on one assistant message. */
 export const MAX_TOOL_CALLS_PER_MESSAGE = 32;
+/**
+ * Maximum accepted native tool-call arguments payload per call (32KiB,
+ * counted in UTF-8 bytes, not JS string characters).
+ *
+ * Aligned with the kernel ToolBroker `maxInputBytesPerCall` budget (32KiB
+ * canonical input bytes): a provider arguments payload at or under this
+ * bound may still be rejected downstream by broker validation/reservation,
+ * which remains authoritative. Payloads over this bound are rejected here
+ * with fixed redacted `invalid_response` before accepting/normalizing, and
+ * are never truncated. The broker still validates/reserves every accepted
+ * ordinary call.
+ */
+export const MAX_TOOL_CALL_ARGUMENTS_BYTES = 32 * 1024;
+
+/** UTF-8 byte length of a string (never JS character count). */
+export function utf8ByteLength(text: string): number {
+  return new TextEncoder().encode(text).byteLength;
+}
+
+function canonicalizeForSize(value: unknown): unknown {
+  if (value === null || value === undefined) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => canonicalizeForSize(entry));
+  }
+  if (isRecord(value)) {
+    const sorted: Record<string, unknown> = {};
+    for (const key of Object.keys(value).sort()) {
+      sorted[key] = canonicalizeForSize(value[key]);
+    }
+    return sorted;
+  }
+  return value;
+}
+
+/**
+ * Deterministic (sorted-keys, no whitespace) JSON serialization for
+ * tool-call arguments size measurement. Key order does not affect the
+ * measured byte length; sorting keeps the measurement stable across
+ * providers. Mirrors the kernel canonical form for size alignment.
+ */
+export function canonicalToolArgumentsJson(value: unknown): string {
+  return JSON.stringify(canonicalizeForSize(value)) ?? "undefined";
+}
+
+/**
+ * Reject an oversize tool-call arguments payload with fixed redacted
+ * `invalid_response` (no raw arguments or provider body in the error).
+ */
+export function assertToolArgumentsByteLength(byteLength: number): void {
+  if (byteLength > MAX_TOOL_CALL_ARGUMENTS_BYTES) {
+    throw new ModelLocalError(
+      "invalid_response",
+      "model returned an invalid response",
+    );
+  }
+}
 /** Maximum tool-call id/name lengths for history validation. */
 export const MAX_TOOL_CALL_ID_LENGTH = 256;
 export const MAX_TOOL_CALL_NAME_LENGTH = 128;
