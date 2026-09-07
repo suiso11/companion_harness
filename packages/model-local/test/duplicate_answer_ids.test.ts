@@ -79,7 +79,10 @@ function expectCode(fn: () => unknown, code: string): void {
 describe("duplicate answer.submit ids pass native validation for repair", () => {
   it("openai duplicate answer ids are preserved for agent remap", () => {
     const result = normalizeOpenAIResponse(
-      openaiBody([openaiAnswerCall("dup-same", 0), openaiAnswerCall("dup-same", 1)]),
+      openaiBody([
+        openaiAnswerCall("dup-same", 0),
+        openaiAnswerCall("dup-same", 1),
+      ]),
       TOOLS,
     );
     expect(result.toolCalls.map((call) => call.id)).toEqual([
@@ -95,7 +98,10 @@ describe("duplicate answer.submit ids pass native validation for repair", () => 
 
   it("ollama duplicate answer ids are preserved for agent remap", () => {
     const result = normalizeOllamaResponse(
-      ollamaBody([ollamaAnswerCall("dup-same", 0), ollamaAnswerCall("dup-same", 1)]),
+      ollamaBody([
+        ollamaAnswerCall("dup-same", 0),
+        ollamaAnswerCall("dup-same", 1),
+      ]),
       TOOLS,
     );
     expect(result.toolCalls.map((call) => call.id)).toEqual([
@@ -122,12 +128,18 @@ describe("duplicate answer.submit ids pass native validation for repair", () => 
         function: { name: "notes.search", arguments: {} },
       },
     ];
-    expectCode(() => normalizeOpenAIResponse(openaiBody(openaiCalls), MIXED_TOOLS), "tool_call_invalid");
+    expectCode(
+      () => normalizeOpenAIResponse(openaiBody(openaiCalls), MIXED_TOOLS),
+      "tool_call_invalid",
+    );
     const ollamaCalls = [
       { id: "dup-ordinary", function: { name: "notes.search", arguments: {} } },
       { id: "dup-ordinary", function: { name: "notes.search", arguments: {} } },
     ];
-    expectCode(() => normalizeOllamaResponse(ollamaBody(ollamaCalls), MIXED_TOOLS), "tool_call_invalid");
+    expectCode(
+      () => normalizeOllamaResponse(ollamaBody(ollamaCalls), MIXED_TOOLS),
+      "tool_call_invalid",
+    );
   });
 
   it("mixed duplicate ids still reject atomically", () => {
@@ -139,7 +151,10 @@ describe("duplicate answer.submit ids pass native validation for repair", () => 
         function: { name: "notes.search", arguments: {} },
       },
     ];
-    expectCode(() => normalizeOpenAIResponse(openaiBody(openaiCalls), MIXED_TOOLS), "tool_call_invalid");
+    expectCode(
+      () => normalizeOpenAIResponse(openaiBody(openaiCalls), MIXED_TOOLS),
+      "tool_call_invalid",
+    );
     const ollamaCalls = [
       ollamaAnswerCall("dup-mixed", 0),
       {
@@ -147,7 +162,10 @@ describe("duplicate answer.submit ids pass native validation for repair", () => 
         function: { name: "notes.search", arguments: {} },
       },
     ];
-    expectCode(() => normalizeOllamaResponse(ollamaBody(ollamaCalls), MIXED_TOOLS), "tool_call_invalid");
+    expectCode(
+      () => normalizeOllamaResponse(ollamaBody(ollamaCalls), MIXED_TOOLS),
+      "tool_call_invalid",
+    );
   });
 
   it("oversize duplicate answer ids still reject as invalid_response", () => {
@@ -155,7 +173,10 @@ describe("duplicate answer.submit ids pass native validation for repair", () => 
     expectCode(
       () =>
         normalizeOpenAIResponse(
-          openaiBody([openaiAnswerCall(oversized, 0), openaiAnswerCall(oversized, 1)]),
+          openaiBody([
+            openaiAnswerCall(oversized, 0),
+            openaiAnswerCall(oversized, 1),
+          ]),
           TOOLS,
         ),
       "invalid_response",
@@ -163,7 +184,10 @@ describe("duplicate answer.submit ids pass native validation for repair", () => 
     expectCode(
       () =>
         normalizeOllamaResponse(
-          ollamaBody([ollamaAnswerCall(oversized, 0), ollamaAnswerCall(oversized, 1)]),
+          ollamaBody([
+            ollamaAnswerCall(oversized, 0),
+            ollamaAnswerCall(oversized, 1),
+          ]),
           TOOLS,
         ),
       "invalid_response",
