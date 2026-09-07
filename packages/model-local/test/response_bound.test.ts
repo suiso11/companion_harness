@@ -537,6 +537,293 @@ describe("abort and exact boundary", () => {
   });
 });
 
+describe("rejecting reader/body cancel", () => {
+  const CANCEL_BOOM = "cancel-boom-marker-9z27";
+
+  function trackUnhandled(): {
+    rejections: unknown[];
+    stop: () => void;
+  } {
+    const rejections: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      rejections.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    return {
+      rejections,
+      stop: (): void => {
+        process.off("unhandledRejection", onUnhandled);
+      },
+    };
+  }
+
+  /** Reader whose cancel unblocks the pending read yet rejects itself. */
+  function abortUnblockingRejectingReader(hooks: {
+    onCancel?: (() => void) | undefined;
+    onRelease?: (() => void) | undefined;
+  }): FakeReader {
+    let rejectRead: (error: unknown) => void = (): void => {};
+    return {
+      read: (): Promise<BodyStep> =>
+        new Promise<BodyStep>((_resolve, reject) => {
+          rejectRead = reject;
+        }),
+      cancel: (reason?: unknown): Promise<void> => {
+        hooks.onCancel?.();
+        rejectRead(
+          reason instanceof Error
+            ? reason
+            : new DOMException("The operation was aborted.", "AbortError"),
+        );
+        return Promise.reject(new Error(`cancel failed ${CANCEL_BOOM}`));
+      },
+      releaseLock: (): void => {
+        hooks.onRelease?.();
+      },
+    };
+  }
+
+  it("swallows a rejecting cancel on streaming overflow and keeps invalid_response", async () => {
+    const tracked = trackUnhandled();
+    try {
+      let cancels = 0;
+      const big = new Uint8Array(65_536);
+      big.fill(98);
+      const chunks: Uint8Array[] = [];
+      for (let i = 0; i < 17; i += 1) {
+        chunks.push(big);
+      }
+      let index = 0;
+      const fetchImpl = staticFetch(
+        fakeBodyResponse({
+          status: 200,
+          body: {
+            getReader: (): FakeReader => ({
+              read: async (): Promise<BodyStep> => {
+                const next: Uint8Array | undefined = chunks[index];
+                if (next === undefined) {
+                  return { done: true, value: undefined };
+                }
+                index += 1;
+                return { done: false, value: next };
+              },
+              cancel: async (): Promise<void> => {
+                cancels += 1;
+                throw new Error(`cancel failed ${CANCEL_BOOM}`);
+              },
+              releaseLock: (): void => {},
+            }),
+          },
+        }),
+      );
+      try {
+        await postJsonNoRedirect({
+          fetchImpl,
+          url: LOOPBACK_URL,
+          body: {},
+          apiKey: SECRET_TOKEN,
+          timeoutMs: undefined,
+        });
+        expect.unreachable();
+      } catch (error) {
+        const err = expectRedacted(error);
+        expect(err.code).toBe("invalid_response");
+        expect(err.message).toMatch(/oversized/i);
+        expect(err.message).not.toContain(CANCEL_BOOM);
+      }
+      expect(cancels).toBe(1);
+      // Let a floating cancel rejection surface if one exists.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(tracked.rejections).toEqual([]);
+    } finally {
+      tracked.stop();
+    }
+  });
+
+  it("never awaits a hanging cancel on streaming overflow", async () => {
+    let cancels = 0;
+    const big = new Uint8Array(65_536);
+    big.fill(98);
+    const chunks: Uint8Array[] = [];
+    for (let i = 0; i < 17; i += 1) {
+      chunks.push(big);
+    }
+    let index = 0;
+    const fetchImpl = staticFetch(
+      fakeBodyResponse({
+        status: 200,
+        body: {
+          getReader: (): FakeReader => ({
+            read: async (): Promise<BodyStep> => {
+              const next: Uint8Array | undefined = chunks[index];
+              if (next === undefined) {
+                return { done: true, value: undefined };
+              }
+              index += 1;
+              return { done: false, value: next };
+            },
+            cancel: (): Promise<void> => {
+              cancels += 1;
+              return new Promise<void>(() => {});
+            },
+            releaseLock: (): void => {},
+          }),
+        },
+      }),
+    );
+    try {
+      await postJsonNoRedirect({
+        fetchImpl,
+        url: LOOPBACK_URL,
+        body: {},
+        apiKey: SECRET_TOKEN,
+        timeoutMs: undefined,
+      });
+      expect.unreachable();
+    } catch (error) {
+      const err = expectRedacted(error);
+      expect(err.code).toBe("invalid_response");
+      expect(err.message).toMatch(/oversized/i);
+    }
+    expect(cancels).toBe(1);
+  });
+
+  it("swallows a rejecting body cancel on declared oversize", async () => {
+    const tracked = trackUnhandled();
+    try {
+      let cancels = 0;
+      const fetchImpl = staticFetch(
+        fakeBodyResponse({
+          status: 200,
+          headers: { "content-length": String(MAX_RESPONSE_BYTES + 1) },
+          body: {
+            getReader: (): never => {
+              throw new Error("must not read an oversized body");
+            },
+            cancel: async (): Promise<void> => {
+              cancels += 1;
+              throw new Error(`cancel failed ${CANCEL_BOOM}`);
+            },
+          },
+        }),
+      );
+      try {
+        await postJsonNoRedirect({
+          fetchImpl,
+          url: LOOPBACK_URL,
+          body: {},
+          apiKey: SECRET_TOKEN,
+          timeoutMs: undefined,
+        });
+        expect.unreachable();
+      } catch (error) {
+        const err = expectRedacted(error);
+        expect(err.code).toBe("invalid_response");
+        expect(err.message).toMatch(/oversized/i);
+        expect(err.message).not.toContain(CANCEL_BOOM);
+      }
+      expect(cancels).toBe(1);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(tracked.rejections).toEqual([]);
+    } finally {
+      tracked.stop();
+    }
+  });
+
+  it("swallows a rejecting cancel on timeout and keeps the timeout code", async () => {
+    vi.useFakeTimers();
+    const tracked = trackUnhandled();
+    try {
+      let cancels = 0;
+      let releases = 0;
+      const fetchImpl = staticFetch(
+        fakeBodyResponse({
+          status: 200,
+          body: {
+            getReader: (): FakeReader =>
+              abortUnblockingRejectingReader({
+                onCancel: () => {
+                  cancels += 1;
+                },
+                onRelease: () => {
+                  releases += 1;
+                },
+              }),
+          },
+        }),
+      );
+      const pending = postJsonNoRedirect({
+        fetchImpl,
+        url: LOOPBACK_URL,
+        body: {},
+        apiKey: undefined,
+        timeoutMs: 50,
+      });
+      const settled = pending.then(
+        (value: unknown) => ({ ok: true as const, value }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(50);
+      const outcome = await settled;
+      expect(outcome.ok).toBe(false);
+      const error = (outcome as { ok: false; error: unknown }).error;
+      expect(error).toBeInstanceOf(ModelLocalError);
+      expect((error as ModelLocalError).code).toBe("timeout");
+      expect((error as Error).message).not.toContain(CANCEL_BOOM);
+      expect(cancels).toBe(1);
+      expect(releases).toBe(1);
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(tracked.rejections).toEqual([]);
+    } finally {
+      tracked.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("swallows a rejecting cancel on external abort and keeps AbortError", async () => {
+    const tracked = trackUnhandled();
+    try {
+      let cancels = 0;
+      const fetchImpl = staticFetch(
+        fakeBodyResponse({
+          status: 200,
+          body: {
+            getReader: (): FakeReader =>
+              abortUnblockingRejectingReader({
+                onCancel: () => {
+                  cancels += 1;
+                },
+              }),
+          },
+        }),
+      );
+      const controller = new AbortController();
+      const pending = postJsonNoRedirect({
+        fetchImpl,
+        url: LOOPBACK_URL,
+        body: {},
+        apiKey: undefined,
+        timeoutMs: undefined,
+        signal: controller.signal,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      controller.abort();
+      const error = await pending.catch((error: unknown) => error);
+      expect(error).toBeInstanceOf(DOMException);
+      expect((error as DOMException).name).toBe("AbortError");
+      expect(error).not.toBeInstanceOf(ModelLocalError);
+      expect(String((error as Error).message)).not.toContain(CANCEL_BOOM);
+      expect(cancels).toBe(1);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(tracked.rejections).toEqual([]);
+    } finally {
+      tracked.stop();
+    }
+  });
+});
+
 describe("abort EOF (cancel surfaces as done=true)", () => {
   it("maps EOF after external abort to AbortError, not success", async () => {
     const payload = encoder.encode(`{"ok":true}`);

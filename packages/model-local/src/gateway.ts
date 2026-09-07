@@ -576,7 +576,7 @@ export async function postJsonNoRedirect(options: {
       );
     const declared = parseDeclaredContentLength(response);
     if (declared !== undefined && declared > MAX_RESPONSE_BYTES) {
-      await cancelResponseBody(response);
+      cancelResponseBody(response);
       if (!response.ok) {
         throw requestFailed(response.status);
       }
@@ -658,11 +658,43 @@ function parseDeclaredContentLength(response: Response): number | undefined {
 }
 
 /** Best-effort release of an unread/rejected response stream. */
-async function cancelResponseBody(response: Response): Promise<void> {
+function cancelResponseBody(response: Response): void {
+  let pending: Promise<void> | undefined;
   try {
-    await response.body?.cancel();
+    pending = response.body?.cancel();
   } catch {
     // Best effort: the fixed redacted error below carries no detail.
+    return;
+  }
+  if (pending !== undefined) {
+    // Attach the rejection handler synchronously and never await a
+    // hostile cancel: the fixed redacted error below stays authoritative
+    // and a rejecting/pending cancel cannot surface or hang the caller.
+    void pending.catch(() => {
+      // Best effort: cancel rejection is swallowed, never surfaced.
+    });
+  }
+}
+
+/**
+ * Best-effort reader cancel that can never produce an unhandled rejection,
+ * hang the caller, or replace the primary error. The rejection handler is
+ * attached synchronously (no `await` on a hostile cancel) and any
+ * synchronous throw is swallowed; callers throw their own authoritative
+ * redacted error or abort mapping afterwards.
+ */
+function cancelReaderQuietly(reader: BoundedBodyReader, reason: unknown): void {
+  let pending: Promise<void> | undefined;
+  try {
+    pending = reader.cancel(reason);
+  } catch {
+    // Best effort: the caller's primary error stays authoritative.
+    return;
+  }
+  if (pending !== undefined) {
+    void pending.catch(() => {
+      // Best effort: cancel rejection is swallowed, never surfaced.
+    });
   }
 }
 
@@ -696,13 +728,14 @@ async function readBoundedBodyText(
   }
   const reader: BoundedBodyReader = stream.getReader();
   const onControllerAbort = (): void => {
-    try {
-      void reader.cancel(
-        new DOMException("The operation was aborted.", "AbortError"),
-      );
-    } catch {
-      // Best effort: the abort mapping below reports the outcome.
-    }
+    // Timeout/external-abort cleanup: never await a hostile reader and
+    // never surface its outcome. The handler is attached synchronously so
+    // a rejecting cancel cannot become an unhandled rejection; the abort
+    // mapping below (AbortError vs timeout) stays authoritative.
+    cancelReaderQuietly(
+      reader,
+      new DOMException("The operation was aborted.", "AbortError"),
+    );
   };
   controller.signal.addEventListener("abort", onControllerAbort, {
     once: true,
@@ -748,13 +781,14 @@ async function readBoundedBodyText(
       }
       totalBytes += value.byteLength;
       if (totalBytes > MAX_RESPONSE_BYTES) {
-        try {
-          await reader.cancel(
-            new DOMException("Response body exceeds limit.", "AbortError"),
-          );
-        } catch {
-          // Best effort: the redacted overflow error below is authoritative.
-        }
+        // Overflow cleanup: fire-and-forget with a synchronous rejection
+        // handler (never await a hostile cancel). The redacted overflow
+        // error below is authoritative; a cancel rejection never replaces
+        // it or leaks into the output.
+        cancelReaderQuietly(
+          reader,
+          new DOMException("Response body exceeds limit.", "AbortError"),
+        );
         throw failures.tooLarge();
       }
       chunks.push(value);
