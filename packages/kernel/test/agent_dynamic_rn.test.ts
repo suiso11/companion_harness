@@ -348,7 +348,7 @@ describe("dynamic rN chains (search/refresh/related -> open)", () => {
       expect(feedbacks[1]?.body.tool).toBe("reference.open");
       expect(feedbacks[1]?.body.ok).toBe(true);
       expect(
-        (feedbacks[1]?.body.output as Record<string, unknown>).referenceId,
+        (feedbacks[1]?.body.output as Record<string, unknown>)?.referenceId,
       ).toBe("r1");
       for (const fb of feedbacks) expect(fb.raw).not.toMatch(UUID_RE);
       expect(toolRequestsUsed(handle.raw, runId)).toBe(2);
@@ -414,11 +414,11 @@ describe("dynamic rN chains (search/refresh/related -> open)", () => {
       expect(feedbacks).toHaveLength(2);
       expect(feedbacks[0]?.body.ok).toBe(true);
       expect(
-        (feedbacks[0]?.body.output as Record<string, unknown>).referenceId,
+        (feedbacks[0]?.body.output as Record<string, unknown>)?.referenceId,
       ).toBe("r2");
       expect(feedbacks[1]?.body.ok).toBe(true);
       expect(
-        (feedbacks[1]?.body.output as Record<string, unknown>).referenceId,
+        (feedbacks[1]?.body.output as Record<string, unknown>)?.referenceId,
       ).toBe("r2");
       for (const fb of feedbacks) expect(fb.raw).not.toMatch(UUID_RE);
       expect(toolRequestsUsed(handle.raw, runId)).toBe(2);
