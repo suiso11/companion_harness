@@ -135,7 +135,31 @@ export function normalizeOpenAIResponse(
     // built, so a response containing one oversize call is never
     // partially accepted.
     message.tool_calls.forEach((entry: unknown, index: number) => {
-      if (!isRecord(entry) || !isRecord(entry.function)) {
+      if (!isRecord(entry)) {
+        throw new ModelLocalError(
+          "tool_call_invalid",
+          "model returned an invalid tool call",
+        );
+      }
+      // Native calls only when entry.type is exactly "function" (case- and
+      // whitespace-sensitive, no coercion). An explicit non-function string
+      // type is an unsupported variant: reject as invalid_response without
+      // inspecting or executing any function-shaped payload. A missing or
+      // non-string type (or a missing/invalid function payload below)
+      // rejects as tool_call_invalid. Fixed redacted messages only.
+      if (entry.type !== "function") {
+        if (typeof entry.type === "string") {
+          throw new ModelLocalError(
+            "invalid_response",
+            "model returned an invalid response",
+          );
+        }
+        throw new ModelLocalError(
+          "tool_call_invalid",
+          "model returned an invalid tool call",
+        );
+      }
+      if (!isRecord(entry.function)) {
         throw new ModelLocalError(
           "tool_call_invalid",
           "model returned an invalid tool call",
