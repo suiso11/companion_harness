@@ -1318,14 +1318,18 @@ export function validateNativeToolCalls(options: {
  * non-object shapes). Never truncates, never echoes raw values, never
  * executes or grants anything (validation only).
  *
- * Detached snapshot (r3950152834): `text`/`stopReason`/`toolCalls` are each
- * captured once via own data descriptors (accessor descriptors reject without
- * invoking user code, so a stateful getter's second value is never executed),
- * each arguments object is cloned from its already-computed canonical JSON
- * string, and a new plain `ChatResult` with new call objects is returned.
- * Callers must use the returned snapshot (never the source result), so later
- * mutation cannot change what was validated. No nested references are shared
- * with the source result.
+ * Detached snapshot (r3950152834, r3950938866): `text`/`stopReason`/
+ * `toolCalls`/`usage` are each captured once via own data descriptors
+ * (accessor descriptors reject without invoking user code, so a stateful
+ * getter's second value is never executed), each arguments object is cloned
+ * from its already-computed canonical JSON string, optional `usage` is
+ * validated as token counts only ({inputTokens, outputTokens} nonnegative
+ * safe integers, no extra/raw fields) and cloned into a new plain object
+ * included only when present (absent usage is omitted for
+ * exactOptionalPropertyTypes), and a new plain `ChatResult` with new call
+ * objects is returned. Callers must use the returned snapshot (never the
+ * source result), so later mutation cannot change what was validated. No
+ * nested references are shared with the source result.
  */
 export function validateChatResult(
   result: unknown,
@@ -1489,6 +1493,133 @@ export function validateChatResult(
     names.push(name);
     snapshotCalls.push({ id, name, arguments: clonedArgs });
   }
+  // Optional usage snapshot (r3950938866): captured exactly once via its own
+  // data descriptor (accessor descriptors reject without invoking user code,
+  // so a stateful getter's second value is never executed). Absent (missing
+  // own property, undefined, or null) is omitted for
+  // exactOptionalPropertyTypes. When present, the object must carry exactly
+  // {inputTokens, outputTokens} as nonnegative safe integers with no
+  // extra/raw fields (no total_tokens, reasoning, or provider blobs); each
+  // count is read once via its own data descriptor and the snapshot is a new
+  // plain object sharing no references with the source.
+  const readUsageSnapshot = ():
+    | { inputTokens: number; outputTokens: number }
+    | undefined => {
+    let usageDescriptor: PropertyDescriptor | undefined;
+    try {
+      usageDescriptor = Object.getOwnPropertyDescriptor(source, "usage");
+    } catch {
+      throw new ModelLocalError(
+        "invalid_response",
+        "model returned an invalid response",
+      );
+    }
+    if (usageDescriptor === undefined) {
+      return undefined;
+    }
+    if (
+      usageDescriptor.get !== undefined ||
+      usageDescriptor.set !== undefined
+    ) {
+      throw new ModelLocalError(
+        "invalid_response",
+        "model returned an invalid response",
+      );
+    }
+    const rawUsage = usageDescriptor.value;
+    if (rawUsage === undefined || rawUsage === null) {
+      return undefined;
+    }
+    if (typeof rawUsage !== "object" || Array.isArray(rawUsage as unknown[])) {
+      throw new ModelLocalError(
+        "invalid_response",
+        "model returned an invalid response",
+      );
+    }
+    const usageNode = rawUsage as object;
+    let usageProto: unknown;
+    try {
+      usageProto = Object.getPrototypeOf(usageNode);
+    } catch {
+      throw new ModelLocalError(
+        "invalid_response",
+        "model returned an invalid response",
+      );
+    }
+    if (usageProto !== Object.prototype && usageProto !== null) {
+      throw new ModelLocalError(
+        "invalid_response",
+        "model returned an invalid response",
+      );
+    }
+    try {
+      if (Object.getOwnPropertySymbols(usageNode).length > 0) {
+        throw new ModelLocalError(
+          "invalid_response",
+          "model returned an invalid response",
+        );
+      }
+    } catch (error) {
+      if (error instanceof ModelLocalError) {
+        throw error;
+      }
+      throw new ModelLocalError(
+        "invalid_response",
+        "model returned an invalid response",
+      );
+    }
+    let inputDescriptor: PropertyDescriptor | undefined;
+    let outputDescriptor: PropertyDescriptor | undefined;
+    try {
+      inputDescriptor = Object.getOwnPropertyDescriptor(
+        usageNode,
+        "inputTokens",
+      );
+      outputDescriptor = Object.getOwnPropertyDescriptor(
+        usageNode,
+        "outputTokens",
+      );
+    } catch {
+      throw new ModelLocalError(
+        "invalid_response",
+        "model returned an invalid response",
+      );
+    }
+    if (
+      inputDescriptor === undefined ||
+      outputDescriptor === undefined ||
+      inputDescriptor.get !== undefined ||
+      inputDescriptor.set !== undefined ||
+      outputDescriptor.get !== undefined ||
+      outputDescriptor.set !== undefined
+    ) {
+      throw new ModelLocalError(
+        "invalid_response",
+        "model returned an invalid response",
+      );
+    }
+    const inputTokens = (inputDescriptor as { value?: unknown }).value;
+    const outputTokens = (outputDescriptor as { value?: unknown }).value;
+    if (!isSafeUsageCount(inputTokens) || !isSafeUsageCount(outputTokens)) {
+      throw new ModelLocalError(
+        "invalid_response",
+        "model returned an invalid response",
+      );
+    }
+    const keys = Object.keys(usageNode);
+    if (
+      keys.length !== 2 ||
+      !keys.includes("inputTokens") ||
+      !keys.includes("outputTokens")
+    ) {
+      throw new ModelLocalError(
+        "invalid_response",
+        "model returned an invalid response",
+      );
+    }
+    return { inputTokens, outputTokens };
+  };
+  const usageSnapshot = readUsageSnapshot();
   // Multiple answer.submit calls (same or distinct ids) classify as the
   // duplicate terminal protocol in AgentStrategy: skip the shared duplicate
   // gate and return the detached snapshot after the unsolicited check so
@@ -1507,6 +1638,7 @@ export function validateChatResult(
       text,
       toolCalls: snapshotCalls,
       stopReason: stopReason as ChatResult["stopReason"],
+      ...(usageSnapshot === undefined ? {} : { usage: usageSnapshot }),
     };
   }
   validateNativeToolCalls({
@@ -1517,6 +1649,7 @@ export function validateChatResult(
     text,
     toolCalls: snapshotCalls,
     stopReason: stopReason as ChatResult["stopReason"],
+    ...(usageSnapshot === undefined ? {} : { usage: usageSnapshot }),
   };
 }
 
