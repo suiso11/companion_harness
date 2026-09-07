@@ -1020,6 +1020,103 @@ describe("migration 0005 model_calls (§15.10)", () => {
       closeKernelDatabase(handle);
     }
   });
+  it("enforces model-call usage safe-integer boundaries exactly", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const { runId } = newRunningTurn(repo, T0);
+      // MAX_SAFE_INTEGER accepted with token-counts-only JSON.
+      const ok = repo.recordModelCall(runId, {
+        step: 1,
+        adapter: "a",
+        model: "m",
+        outcome: "completed",
+        durationMs: 3,
+        usage: {
+          inputTokens: Number.MAX_SAFE_INTEGER,
+          outputTokens: Number.MAX_SAFE_INTEGER,
+        },
+      });
+      expect(ok.usage).toEqual({
+        inputTokens: Number.MAX_SAFE_INTEGER,
+        outputTokens: Number.MAX_SAFE_INTEGER,
+      });
+      const stored = handle.raw
+        .prepare("SELECT usage_json FROM model_calls WHERE run_id = ?")
+        .get(runId) as { usage_json: string };
+      expect(JSON.parse(stored.usage_json)).toEqual({
+        inputTokens: Number.MAX_SAFE_INTEGER,
+        outputTokens: Number.MAX_SAFE_INTEGER,
+      });
+      // Optional absent usage remains supported.
+      const { runId: runId2 } = newRunningTurn(repo, T0 + 100);
+      const absent = repo.recordModelCall(runId2, {
+        step: 1,
+        adapter: "a",
+        model: "m",
+        outcome: "completed",
+        durationMs: 1,
+      });
+      expect(absent.usage).toBeNull();
+      const nulled = repo.recordModelCall(runId2, {
+        step: 2,
+        adapter: "a",
+        model: "m",
+        outcome: "completed",
+        durationMs: 1,
+        usage: null,
+      });
+      expect(nulled.usage).toBeNull();
+      // Present-but-invalid counts are rejected, never persisted.
+      const rounded = JSON.parse("9007199254740993") as number;
+      const invalidUsages: unknown[] = [
+        {
+          inputTokens: Number.MAX_SAFE_INTEGER + 1,
+          outputTokens: 1,
+        },
+        {
+          inputTokens: 1,
+          outputTokens: Number.MAX_SAFE_INTEGER + 1,
+        },
+        { inputTokens: rounded, outputTokens: 1 },
+        { inputTokens: 1, outputTokens: rounded },
+        { inputTokens: 1.5, outputTokens: 1 },
+        { inputTokens: 1, outputTokens: 1.5 },
+        { inputTokens: -1, outputTokens: 1 },
+        { inputTokens: 1, outputTokens: -1 },
+        { inputTokens: "1", outputTokens: 1 },
+      ];
+      const step = 3;
+      for (const usage of invalidUsages) {
+        expect(() =>
+          repo.recordModelCall(runId2, {
+            step,
+            adapter: "a",
+            model: "m",
+            outcome: "completed",
+            durationMs: 1,
+            usage: usage as { inputTokens: number; outputTokens: number },
+          }),
+        ).toThrow(/safe-integer/);
+      }
+      expect(
+        repo.listModelCalls(runId2).filter((row) => row.step >= 3),
+      ).toHaveLength(0);
+      // Unsafe stored JSON is never emitted.
+      handle.raw
+        .prepare("UPDATE model_calls SET usage_json = ? WHERE run_id = ?")
+        .run(
+          JSON.stringify({
+            inputTokens: Number.MAX_SAFE_INTEGER + 1,
+            outputTokens: 1,
+          }),
+          runId,
+        );
+      expect(() => repo.listModelCalls(runId)).toThrow(/stored model usage/);
+    } finally {
+      const { closeKernelDatabase } = await import("../src/index.js");
+      closeKernelDatabase(handle);
+    }
+  });
   it("rejects model-step events on terminal runs and exposes caller identity constants", async () => {
     const { handle, repo } = await setup();
     try {

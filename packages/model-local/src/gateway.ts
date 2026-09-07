@@ -880,23 +880,39 @@ export function joinLoopbackPath(
 
 /**
  * Extract optional token-count usage (input/output only). Returns the
- * normalized summary when both counts are integers >= 0, otherwise
- * undefined (provider omitted or malformed counts are ignored, never
- * surfaced as raw blobs). Never throws.
+ * normalized summary when both counts are safe integers >= 0, returns
+ * undefined only when the provider omits both counts (undefined/null),
+ * and throws fixed redacted `invalid_response` for any present-but-invalid
+ * count (wrong type, fraction, negative, or above MAX_SAFE_INTEGER,
+ * including JSON-rounded values). No coercion, clamping, or truncation;
+ * raw blobs are never surfaced.
  */
 export function extractModelUsage(
   inputTokens: unknown,
   outputTokens: unknown,
 ): { inputTokens: number; outputTokens: number } | undefined {
-  if (
-    typeof inputTokens !== "number" ||
-    !Number.isInteger(inputTokens) ||
-    inputTokens < 0 ||
-    typeof outputTokens !== "number" ||
-    !Number.isInteger(outputTokens) ||
-    outputTokens < 0
-  ) {
+  const absentInput = inputTokens === undefined || inputTokens === null;
+  const absentOutput = outputTokens === undefined || outputTokens === null;
+  if (absentInput && absentOutput) {
     return undefined;
   }
-  return { inputTokens, outputTokens };
+  if (!isSafeUsageCount(inputTokens) || !isSafeUsageCount(outputTokens)) {
+    throw new ModelLocalError(
+      "invalid_response",
+      "model returned an invalid response",
+    );
+  }
+  return {
+    inputTokens: inputTokens as number,
+    outputTokens: outputTokens as number,
+  };
+}
+
+/** True only for a nonnegative safe-integer token count (no coercion). */
+function isSafeUsageCount(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    (value as number) >= 0
+  );
 }

@@ -1472,8 +1472,10 @@ function isRunActive(repo: KernelRepository, runId: string): boolean {
 
 /**
  * Normalize optional ChatResult.usage to token counts only ({inputTokens,
- * outputTokens} integers >= 0) or null when absent/malformed. Never throws,
- * never passes through raw blobs, text, or args.
+ * outputTokens} safe integers >= 0) or null when absent/malformed. Never
+ * throws, never passes through raw blobs, text, or args. Unsafe counts
+ * (fraction, negative, or above MAX_SAFE_INTEGER) are dropped to null so
+ * they are never persisted or emitted.
  */
 function sanitizeModelUsage(
   usage: ChatResult["usage"],
@@ -1485,10 +1487,10 @@ function sanitizeModelUsage(
   const outputTokens = (usage as { outputTokens?: unknown }).outputTokens;
   if (
     typeof inputTokens !== "number" ||
-    !Number.isInteger(inputTokens) ||
+    !Number.isSafeInteger(inputTokens) ||
     inputTokens < 0 ||
     typeof outputTokens !== "number" ||
-    !Number.isInteger(outputTokens) ||
+    !Number.isSafeInteger(outputTokens) ||
     outputTokens < 0
   ) {
     return null;

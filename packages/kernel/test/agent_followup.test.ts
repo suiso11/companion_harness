@@ -234,6 +234,43 @@ describe("gateway follow-up: replay, usage, timeout", () => {
     }
   });
 
+  it("drops unsafe usage counts so they are never persisted or emitted", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const broker = makeBroker(handle, repo);
+      const unsafe = JSON.parse("9007199254740993") as number;
+      const { gateway } = scriptGateway([
+        chatResult([answerCall([{ text: "hi", citations: [] }])], "", {
+          inputTokens: unsafe,
+          outputTokens: 9,
+        } as unknown as { inputTokens: number; outputTokens: number }),
+      ]);
+      const strategy = createAgentStrategy({
+        db: handle.raw,
+        repo,
+        broker,
+        gateway,
+        model: "m",
+      });
+      const { sessionId, runId } = newRunningTurn(repo, T0);
+      await strategy(ctxFor(repo, runId));
+      expect(repo.listModelCalls(runId)[0]).toMatchObject({
+        outcome: "completed",
+        usage: null,
+      });
+      const events = repo.getEvents(sessionId, runId, {});
+      const completed = events.events.find(
+        (e) => e.type === "model.step.completed",
+      );
+      expect(completed?.payload).not.toMatchObject({
+        usage: expect.anything(),
+      });
+      expect(JSON.stringify(events.events)).not.toContain("9007199254740993");
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
   it("maps ModelLocalError timeout distinctly with no retry", async () => {
     const { handle, repo } = await setup();
     try {

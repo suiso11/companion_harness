@@ -162,14 +162,21 @@ export function normalizeOpenAIResponse(
   validateNativeToolCalls({ toolCalls, requestedTools });
   const finishReason =
     typeof choice.finish_reason === "string" ? choice.finish_reason : "";
-  const usageRecord = isRecord(body.usage) ? body.usage : undefined;
-  const usage =
-    usageRecord === undefined
-      ? undefined
-      : extractModelUsage(
-          usageRecord.prompt_tokens,
-          usageRecord.completion_tokens,
-        );
+  const rawUsage: unknown = body.usage;
+  let usage: { inputTokens: number; outputTokens: number } | undefined;
+  if (rawUsage === undefined || rawUsage === null) {
+    usage = undefined;
+  } else if (!isRecord(rawUsage)) {
+    throw new ModelLocalError(
+      "invalid_response",
+      "model returned an invalid response",
+    );
+  } else {
+    usage = extractModelUsage(
+      rawUsage.prompt_tokens,
+      rawUsage.completion_tokens,
+    );
+  }
   return {
     text,
     toolCalls,

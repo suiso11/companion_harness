@@ -247,6 +247,43 @@ function parseOrValidation<T>(fn: () => T, what: string): T {
   }
 }
 
+/**
+ * Validate stored `usage_json` as token counts only. Rejects fractions,
+ * negatives, non-numbers, and counts above MAX_SAFE_INTEGER (including
+ * JSON-rounded values) so unsafe rows are never emitted. Token counts only;
+ * no coercion, clamping, or truncation.
+ */
+function parseStoredModelUsage(
+  usageJson: string,
+): { inputTokens: number; outputTokens: number } {
+  const parsed = parseOrValidation(
+    () => JSON.parse(usageJson) as unknown,
+    "stored model usage",
+  );
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    Array.isArray(parsed)
+  ) {
+    throw new RepositoryValidationError("stored model usage is invalid");
+  }
+  const { inputTokens, outputTokens } = parsed as {
+    inputTokens: unknown;
+    outputTokens: unknown;
+  };
+  if (
+    typeof inputTokens !== "number" ||
+    !Number.isSafeInteger(inputTokens) ||
+    inputTokens < 0 ||
+    typeof outputTokens !== "number" ||
+    !Number.isSafeInteger(outputTokens) ||
+    outputTokens < 0
+  ) {
+    throw new RepositoryValidationError("stored model usage is invalid");
+  }
+  return { inputTokens, outputTokens };
+}
+
 function requireKey(key: unknown): string {
   if (!isUuidV4(key)) {
     throw new RepositoryValidationError("Idempotency-Key must be a UUID v4");
@@ -1951,13 +1988,15 @@ export function createKernelRepository(db: Database.Database) {
         outputTokens: unknown;
       };
       if (
-        !Number.isInteger(inputTokens) ||
+        typeof inputTokens !== "number" ||
+        !Number.isSafeInteger(inputTokens) ||
         (inputTokens as number) < 0 ||
-        !Number.isInteger(outputTokens) ||
+        typeof outputTokens !== "number" ||
+        !Number.isSafeInteger(outputTokens) ||
         (outputTokens as number) < 0
       ) {
         throw new RepositoryValidationError(
-          "usage must carry integer token counts >= 0",
+          "usage must carry safe-integer token counts >= 0",
         );
       }
       usage = {
@@ -2048,10 +2087,7 @@ export function createKernelRepository(db: Database.Database) {
       usage:
         row.usage_json === null
           ? null
-          : (parseOrValidation(
-              () => JSON.parse(row.usage_json as string),
-              "stored model usage",
-            ) as { inputTokens: number; outputTokens: number }),
+          : parseStoredModelUsage(row.usage_json as string),
       createdAt: row.created_at,
     }));
   }

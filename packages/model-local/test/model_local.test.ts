@@ -639,12 +639,39 @@ describe("provider usage extraction", () => {
       inputTokens: 10,
       outputTokens: 20,
     });
-    expect(extractModelUsage(undefined, 20)).toBeUndefined();
-    expect(extractModelUsage(10, undefined)).toBeUndefined();
-    expect(extractModelUsage(-1, 5)).toBeUndefined();
-    expect(extractModelUsage(1.5, 2)).toBeUndefined();
-    expect(extractModelUsage("10", "20")).toBeUndefined();
+    expect(extractModelUsage(undefined, undefined)).toBeUndefined();
     expect(extractModelUsage(null, null)).toBeUndefined();
+    for (const [input, output] of [
+      [undefined, 20],
+      [10, undefined],
+      [-1, 5],
+      [1.5, 2],
+      ["10", "20"],
+      [Number.MAX_SAFE_INTEGER + 1, 1],
+      [1, Number.MAX_SAFE_INTEGER + 1],
+    ] as Array<[unknown, unknown]>) {
+      expect(() => extractModelUsage(input, output)).toThrow(
+        expect.objectContaining({ code: "invalid_response" }),
+      );
+    }
+  });
+
+  it("accepts MAX_SAFE_INTEGER and rejects rounded MAX_SAFE_INTEGER+1 via helper", () => {
+    expect(
+      extractModelUsage(Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER),
+    ).toEqual({
+      inputTokens: Number.MAX_SAFE_INTEGER,
+      outputTokens: Number.MAX_SAFE_INTEGER,
+    });
+    // Provider JSON rounds 9007199254740993 to 9007199254740992 (> MAX_SAFE).
+    const rounded = JSON.parse("9007199254740993") as number;
+    expect(Number.isSafeInteger(rounded)).toBe(false);
+    expect(() => extractModelUsage(rounded, 1)).toThrow(
+      expect.objectContaining({ code: "invalid_response" }),
+    );
+    expect(() => extractModelUsage(1, rounded)).toThrow(
+      expect.objectContaining({ code: "invalid_response" }),
+    );
   });
 
   it("reads ollama prompt_eval_count/eval_count without raw blobs", () => {
@@ -662,23 +689,98 @@ describe("provider usage extraction", () => {
     expect(JSON.stringify(result)).not.toContain(SECRET_BODY_MARKER);
   });
 
-  it("omits ollama usage when counts are missing or malformed", () => {
+  it("omits ollama usage when counts are absent", () => {
     expect(
       normalizeOllamaResponse(
         { message: { role: "assistant", content: "hi" } },
         undefined,
       ).usage,
     ).toBeUndefined();
-    expect(
-      normalizeOllamaResponse(
-        {
-          message: { role: "assistant", content: "hi" },
-          prompt_eval_count: -1,
-          eval_count: 5,
-        },
-        undefined,
-      ).usage,
-    ).toBeUndefined();
+  });
+
+  it("rejects ollama usage with fixed invalid_response when present-but-invalid", () => {
+    for (const body of [
+      {
+        message: { role: "assistant", content: "hi" },
+        prompt_eval_count: -1,
+        eval_count: 5,
+      },
+      {
+        message: { role: "assistant", content: "hi" },
+        prompt_eval_count: 1.5,
+        eval_count: 2,
+      },
+      {
+        message: { role: "assistant", content: "hi" },
+        prompt_eval_count: "12",
+        eval_count: 34,
+      },
+      {
+        message: { role: "assistant", content: "hi" },
+        prompt_eval_count: 12,
+      },
+    ]) {
+      try {
+        normalizeOllamaResponse(body, undefined);
+        expect.unreachable();
+      } catch (error) {
+        expect(error).toBeInstanceOf(ModelLocalError);
+        expect((error as ModelLocalError).code).toBe("invalid_response");
+        expect((error as ModelLocalError).message).toBe(
+          "model returned an invalid response",
+        );
+      }
+    }
+  });
+
+  it("enforces ollama usage safe-integer boundaries exactly", () => {
+    const ok = normalizeOllamaResponse(
+      {
+        message: { role: "assistant", content: "hi" },
+        prompt_eval_count: Number.MAX_SAFE_INTEGER,
+        eval_count: Number.MAX_SAFE_INTEGER,
+      },
+      undefined,
+    );
+    expect(ok.usage).toEqual({
+      inputTokens: Number.MAX_SAFE_INTEGER,
+      outputTokens: Number.MAX_SAFE_INTEGER,
+    });
+    const rounded = JSON.parse("9007199254740993") as number;
+    for (const body of [
+      {
+        message: { role: "assistant", content: "hi" },
+        prompt_eval_count: Number.MAX_SAFE_INTEGER + 1,
+        eval_count: 1,
+      },
+      {
+        message: { role: "assistant", content: "hi" },
+        prompt_eval_count: 1,
+        eval_count: Number.MAX_SAFE_INTEGER + 1,
+      },
+      {
+        message: { role: "assistant", content: "hi" },
+        prompt_eval_count: rounded,
+        eval_count: 1,
+      },
+      {
+        message: { role: "assistant", content: "hi" },
+        prompt_eval_count: 1.5,
+        eval_count: 1,
+      },
+      {
+        message: { role: "assistant", content: "hi" },
+        prompt_eval_count: -1,
+        eval_count: 1,
+      },
+    ]) {
+      expect(() => normalizeOllamaResponse(body, undefined)).toThrow(
+        expect.objectContaining({
+          code: "invalid_response",
+          message: "model returned an invalid response",
+        }),
+      );
+    }
   });
 
   it("reads openai usage.prompt_tokens/completion_tokens only", () => {
@@ -703,7 +805,7 @@ describe("provider usage extraction", () => {
     expect(JSON.stringify(result)).not.toContain(SECRET_BODY_MARKER);
   });
 
-  it("omits openai usage when absent or malformed", () => {
+  it("omits openai usage when absent", () => {
     expect(
       normalizeOpenAIResponse(
         {
@@ -717,20 +819,73 @@ describe("provider usage extraction", () => {
         undefined,
       ).usage,
     ).toBeUndefined();
-    expect(
-      normalizeOpenAIResponse(
-        {
-          choices: [
-            {
-              message: { role: "assistant", content: "hi" },
-              finish_reason: "stop",
-            },
-          ],
-          usage: { prompt_tokens: "7", completion_tokens: 9 },
+  });
+
+  it("rejects openai usage with fixed invalid_response when present-but-invalid", () => {
+    const choice = {
+      message: { role: "assistant", content: "hi" },
+      finish_reason: "stop",
+    };
+    for (const usage of [
+      { prompt_tokens: "7", completion_tokens: 9 },
+      { prompt_tokens: -1, completion_tokens: 9 },
+      { prompt_tokens: 1.5, completion_tokens: 9 },
+      { prompt_tokens: 7 },
+      "not-an-object",
+    ]) {
+      expect(() =>
+        normalizeOpenAIResponse({ choices: [choice], usage }, undefined),
+      ).toThrow(
+        expect.objectContaining({
+          code: "invalid_response",
+          message: "model returned an invalid response",
+        }),
+      );
+    }
+  });
+
+  it("enforces openai usage safe-integer boundaries exactly", () => {
+    const choice = {
+      message: { role: "assistant", content: "hi" },
+      finish_reason: "stop",
+    };
+    const ok = normalizeOpenAIResponse(
+      {
+        choices: [choice],
+        usage: {
+          prompt_tokens: Number.MAX_SAFE_INTEGER,
+          completion_tokens: Number.MAX_SAFE_INTEGER,
         },
-        undefined,
-      ).usage,
-    ).toBeUndefined();
+      },
+      undefined,
+    );
+    expect(ok.usage).toEqual({
+      inputTokens: Number.MAX_SAFE_INTEGER,
+      outputTokens: Number.MAX_SAFE_INTEGER,
+    });
+    const rounded = JSON.parse("9007199254740993") as number;
+    for (const usage of [
+      {
+        prompt_tokens: Number.MAX_SAFE_INTEGER + 1,
+        completion_tokens: 1,
+      },
+      {
+        prompt_tokens: 1,
+        completion_tokens: Number.MAX_SAFE_INTEGER + 1,
+      },
+      { prompt_tokens: rounded, completion_tokens: 1 },
+      { prompt_tokens: 1.5, completion_tokens: 1 },
+      { prompt_tokens: -1, completion_tokens: 1 },
+    ]) {
+      expect(() =>
+        normalizeOpenAIResponse({ choices: [choice], usage }, undefined),
+      ).toThrow(
+        expect.objectContaining({
+          code: "invalid_response",
+          message: "model returned an invalid response",
+        }),
+      );
+    }
   });
 });
 
