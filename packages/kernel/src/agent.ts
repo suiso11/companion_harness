@@ -2230,6 +2230,23 @@ async function runModelStep(args: {
         settlement = { kind: "error", error };
       }
     }
+    // Post-validation deadline (r3950636369): synchronous validation consumes
+    // real budget, so a snapshot that was in-time at gateway resolve may be
+    // past budget by the time it returns. Re-run the authoritative
+    // late-success gate before the snapshot can reach success audit,
+    // classifyStep, answer acceptance, broker execution, or evidence grants:
+    // discard it with timeout/cancel semantics. Engine cancellation stays
+    // distinct and wins; ordering matches classifyLateSuccess.
+    if (settlement.kind === "result") {
+      const late = classifyLateSuccess();
+      if (late === "aborted") {
+        settlement = { kind: "aborted" };
+      } else if (late === "wall") {
+        settlement = { kind: "wall" };
+      } else if (late === "timeout") {
+        settlement = { kind: "timeout" };
+      }
+    }
   }
   const durationMs = Math.max(clock.now() - startedAt, 0);
   const adapter = gateway.provider;
