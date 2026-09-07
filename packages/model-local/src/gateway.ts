@@ -1253,7 +1253,11 @@ function mapFetchRejection(error: unknown): ModelLocalError {
  * JSON emulation is performed anywhere; content text is never parsed for
  * tool calls). Duplicate native ids reject atomically with fixed redacted
  * tool_call_invalid before conversation storage/execution, so trim logic
- * can never orphan a tool response. Unknown but well-formed ordinary names are NOT rejected
+ * can never orphan a tool response, except for the multi-answer terminal
+ * protocol: when the entire step consists of multiple answer.submit calls
+ * (count > 1, every name is answer.submit), duplicate ids pass through so
+ * AgentStrategy applies its deterministic-ID remap and duplicate-answer
+ * repair-once path (no Broker execution). Unknown but well-formed ordinary names are NOT rejected
  * here: they pass through so the AgentStrategy/ToolBroker applies the
  * authoritative unknown-tool budget/audit. Malformed ids/names reject
  * with fixed redacted codes (never truncated, never echoed).
@@ -1274,10 +1278,24 @@ export function validateNativeToolCalls(options: {
       "model returned tool calls without tools requested",
     );
   }
-  const seenIds = new Set<string>();
+  // Per-call bounds first: every original call (including a duplicate
+  // answer.submit) must carry a valid bounded id/name; failures reject
+  // atomically before any duplicate exception is considered.
   for (const call of options.toolCalls) {
     normalizeNativeToolCallId(call.id, 0);
     assertNativeToolCallName(call.name);
+  }
+  // Duplicate-answer exception: the whole step is multiple answer.submit
+  // calls (count > 1, all names answer.submit). Ordinary or mixed batches
+  // fall through to the atomic duplicate gate below.
+  if (
+    options.toolCalls.length > 1 &&
+    options.toolCalls.every((call) => call.name === ANSWER_SUBMIT_TOOL_NAME)
+  ) {
+    return;
+  }
+  const seenIds = new Set<string>();
+  for (const call of options.toolCalls) {
     if (seenIds.has(call.id)) {
       throw nativeToolCallInvalidError();
     }
