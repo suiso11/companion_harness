@@ -870,4 +870,71 @@ describe("bootstrap M2 model wiring", () => {
       }
     }
   });
+
+  it("rejects an illegal apiKey header value before listening", async () => {
+    const { env } = tempEnv();
+    const collecting = createCollectingLogger("debug");
+    await expect(
+      startServer({
+        env: {
+          ...env,
+          COMPANION_MODEL_JSON: JSON.stringify({
+            adapter: "ollama",
+            baseUrl: MODEL_BASE,
+            model: MODEL_NAME,
+            apiKey: "abc\r\nX-Injected: 1",
+          }),
+        },
+        drainMs: 50,
+        logger: collecting.logger,
+      }),
+    ).rejects.toThrow("model auth is invalid");
+    await expect(
+      startServer({
+        env: {
+          ...env,
+          COMPANION_MODEL_JSON: JSON.stringify({
+            adapter: "ollama",
+            baseUrl: MODEL_BASE,
+            model: MODEL_NAME,
+            apiKey: "sk-\u{1F600}-emoji",
+          }),
+        },
+        drainMs: 50,
+        logger: collecting.logger,
+      }),
+    ).rejects.toThrow("model auth is invalid");
+    const dumped = JSON.stringify(collecting.records);
+    expect(dumped).not.toContain("X-Injected");
+    expect(dumped).not.toContain("sk-");
+  });
+
+  it("builds the production gateway with a boundary Latin-1 apiKey", async () => {
+    const boundary = "a\u0020b\u007E\u00A0\u00FF";
+    let seenAuth: string | null = null;
+    const fetchImpl: FetchImpl = async (_url, init) => {
+      const headers = new Headers(init?.headers);
+      seenAuth = headers.get("authorization");
+      return new Response(
+        JSON.stringify({ message: { content: "hi" }, done_reason: "stop" }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+    const gateway = createModelGateway(
+      {
+        adapter: "ollama",
+        baseUrl: MODEL_BASE,
+        model: MODEL_NAME,
+        apiKey: boundary,
+      },
+      fetchImpl,
+    );
+    expect(gateway.provider).toBe("ollama");
+    const result = await gateway.chat({
+      model: MODEL_NAME,
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(result.text).toBe("hi");
+    expect(seenAuth).toBe(`Bearer ${boundary}`);
+  });
 });

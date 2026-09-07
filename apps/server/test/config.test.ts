@@ -362,6 +362,62 @@ describe("model config", () => {
     }
   });
 
+  it("rejects apiKey values that are not legal Authorization header values", () => {
+    function rawWithKey(apiKey: string): string {
+      return JSON.stringify({
+        adapter: "ollama",
+        baseUrl: "http://127.0.0.1:11434",
+        model: "m",
+        apiKey,
+      });
+    }
+    const rejected = [
+      "sk-\u{1F600}-emoji",
+      "key\u0000nul",
+      "key\u0001c0",
+      "key\u001Finvisible",
+      "key\twith-tab",
+      "abc\r\nX-Injected: 1",
+      "line1\nline2",
+      "line1\rline2",
+      "del\u007Fchar",
+      "c1\u0080pad",
+      "c1\u009Fapc",
+      "latin-beyond\u0100",
+      "cjk\u4E2Dkey",
+    ];
+    for (const apiKey of rejected) {
+      let message = "";
+      try {
+        parseModelConfig(rawWithKey(apiKey));
+      } catch (error) {
+        expect(error).toBeInstanceOf(ServerConfigError);
+        message = (error as Error).message;
+      }
+      expect(message).toBe("model auth is invalid");
+      expect(message).not.toContain(apiKey.slice(0, 8));
+      expect(() =>
+        loadServerConfig(modelEnv(tempDbPath(), rawWithKey(apiKey))),
+      ).toThrow("model auth is invalid");
+    }
+  });
+
+  it("accepts boundary Latin-1/ASCII apiKey values", () => {
+    const boundary = "a\u0020b\u007E\u00A0\u00FF";
+    const config = loadServerConfig(
+      modelEnv(
+        tempDbPath(),
+        JSON.stringify({
+          adapter: "ollama",
+          baseUrl: "http://127.0.0.1:11434",
+          model: "m",
+          apiKey: boundary,
+        }),
+      ),
+    );
+    expect(config.model?.apiKey).toBe(boundary);
+    expect(Object.isFrozen(config.model)).toBe(true);
+  });
   it("never exposes model values or secrets in errors", () => {
     const raw = JSON.stringify({
       adapter: "ollama",

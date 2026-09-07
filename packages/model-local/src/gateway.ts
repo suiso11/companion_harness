@@ -200,6 +200,34 @@ export const MAX_TOOL_CALL_ID_LENGTH = 256;
 export const MAX_TOOL_CALL_NAME_LENGTH = 128;
 
 /**
+ * True when an apiKey is a legal HTTP Authorization header value.
+ *
+ * Accepted per character (no normalization applied): printable ASCII
+ * U+0020..U+007E plus Latin-1 U+00A0..U+00FF. Rejected: C0 controls
+ * U+0000..U+001F (including CR/LF), DEL U+007F, C1 controls
+ * U+0080..U+009F, and anything above U+00FF (emoji and other
+ * non-Latin-1 code points that header conversion cannot represent).
+ */
+export function isValidApiKeyHeaderValue(value: string): boolean {
+  for (const char of value) {
+    const code = char.codePointAt(0) as number;
+    if (code < 0x20) {
+      return false;
+    }
+    if (code === 0x7f) {
+      return false;
+    }
+    if (code >= 0x80 && code <= 0x9f) {
+      return false;
+    }
+    if (code > 0xff) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
  * Validate advertised capabilities against a request: tools require
  * native tool calling. Throws `unsupported_capability`.
  */
@@ -448,7 +476,9 @@ export function resolveGatewayConfig(
   }
   if (
     options.apiKey !== undefined &&
-    (typeof options.apiKey !== "string" || options.apiKey.length === 0)
+    (typeof options.apiKey !== "string" ||
+      options.apiKey.length === 0 ||
+      !isValidApiKeyHeaderValue(options.apiKey))
   ) {
     throw new ModelLocalError("invalid_request", "model auth is invalid");
   }

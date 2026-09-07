@@ -23,6 +23,7 @@ export {
   canonicalToolArgumentsJson,
   extractModelUsage,
   isAnswerSubmitTool,
+  isValidApiKeyHeaderValue,
   MAX_MESSAGE_CONTENT_LENGTH,
   MAX_MESSAGES_PER_REQUEST,
   MAX_MODEL_NAME_LENGTH,

@@ -15,7 +15,10 @@
 import { lstatSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { normalizeLoopbackBaseUrl } from "@companion/model-local";
+import {
+  isValidApiKeyHeaderValue,
+  normalizeLoopbackBaseUrl,
+} from "@companion/model-local";
 import { z } from "zod";
 
 export const DEFAULT_HOST = "127.0.0.1" as const;
@@ -288,7 +291,10 @@ export function parseMarkdownRoots(
  *   127.0.0.1/localhost/::1, no credentials/query/fragment); the normalized
  *   form is stored.
  * - model must be 1..256 chars with no NUL byte.
- * - apiKey when present must be a non-empty string up to 4096 chars.
+ * - apiKey when present must be a non-empty string up to 4096 chars with
+ *   no NUL byte and a legal HTTP Authorization header value: printable
+ *   ASCII U+0020..U+007E plus Latin-1 U+00A0..U+00FF only (C0/C1
+ *   controls, DEL, CR/LF, and code points above U+00FF rejected).
  * - Failures carry fixed messages only: no URL, model, or key material escapes.
  * - The returned object is deep-frozen.
  */
@@ -344,7 +350,8 @@ export function parseModelConfig(raw: string | undefined): ModelConfig | null {
       typeof record.apiKey !== "string" ||
       record.apiKey.length === 0 ||
       record.apiKey.length > MAX_MODEL_API_KEY_LENGTH ||
-      record.apiKey.includes("\0")
+      record.apiKey.includes("\0") ||
+      !isValidApiKeyHeaderValue(record.apiKey)
     ) {
       throw configError("model auth is invalid");
     }
