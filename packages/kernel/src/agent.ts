@@ -1159,7 +1159,26 @@ export function createAgentStrategy(
         if (outcome.kind === "gateway_failed") {
           // No retry, no fallback, no repair for transport/timeout/cancel:
           // the step budget is consumed and the Run fails (or cancels) now.
+          // Ordinary malformed tool calls (tool_call_invalid/invalid_response)
+          // also end here without answer repair (unchanged).
           throw outcome.strategyError;
+        }
+        if (outcome.kind === "answer_normalization_failed") {
+          // Malformed native answer.submit arguments (already audited as
+          // failed/answer_invalid inside runModelStep): enter the existing
+          // one-time repair path. The invalid assistant tool-call message
+          // cannot be represented safely (raw id/args untrusted), so only
+          // the fixed repair hint is appended. A second malformed answer
+          // fails fixed answer_invalid (already audited) with no ninth call.
+          if (repairUsed) {
+            throw new StrategyError("output_invalid");
+          }
+          repairUsed = true;
+          messages.push({
+            role: "user",
+            content: `Repair instruction:\n${AGENT_REPAIR_HINTS.answer_invalid}`,
+          });
+          continue;
         }
         const classification = classifyStep(outcome.result.toolCalls);
         // Provider-correct multi-step replay: preserve the native assistant
@@ -1486,6 +1505,11 @@ type StepOutcome =
       usage: { inputTokens: number; outputTokens: number } | null;
     }
   | {
+      kind: "answer_normalization_failed";
+      adapter: string;
+      durationMs: number;
+    }
+  | {
       kind: "gateway_failed";
       strategyError: StrategyError;
       auditCode: M2ModelErrorCode | null;
@@ -1791,6 +1815,44 @@ async function runModelStep(args: {
       (settlement.error instanceof ModelLocalError &&
         settlement.error.code === "timeout") ||
       isAbortRejection(settlement.error);
+    // Native answer.submit normalization failure (malformed JSON, non-object,
+    // or oversized answer args): fixed answer_invalid audit, then the caller
+    // enters the existing one-time repair path. The raw id/args/body never
+    // persist (the gateway error carries only a fixed message) and the
+    // invalid assistant tool-call message is never replayed. Ordinary
+    // malformed calls (tool_call_invalid / invalid_response) keep the
+    // generic non-repairable path below and never gain answer repair.
+    if (
+      !isTimeout &&
+      settlement.error instanceof ModelLocalError &&
+      settlement.error.code === "answer_invalid"
+    ) {
+      try {
+        repo.recordModelCall(runId, {
+          step,
+          adapter,
+          model,
+          outcome: "failed",
+          errorCode: "answer_invalid",
+          durationMs,
+          usage: null,
+          now: clock.now(),
+        });
+      } catch {
+        // Metadata-only best effort; the failure itself carries the fate.
+      }
+      try {
+        repo.appendModelStepEvent(
+          runId,
+          "model.step.failed",
+          { step, errorCode: "answer_invalid", durationMs },
+          { now: clock.now() },
+        );
+      } catch {
+        // Terminal race: the engine CAS owns the final word.
+      }
+      return { kind: "answer_normalization_failed", adapter, durationMs };
+    }
     const code: M2ModelErrorCode = isTimeout
       ? "model_step_timeout"
       : settlement.error instanceof ModelLocalError &&

@@ -130,6 +130,71 @@ export function assertToolArgumentsByteLength(byteLength: number): void {
     );
   }
 }
+
+/**
+ * Reserved native terminal protocol identity. Used ONLY as a fixed
+ * structural classification for normalization failures (never persisted,
+ * never echoed): malformed `answer.submit` arguments reject as
+ * `answer_invalid` so the caller can repair, while every other tool keeps
+ * the generic `tool_call_invalid` / `invalid_response` path. Raw id, args,
+ * and provider body never enter the error.
+ */
+export const ANSWER_SUBMIT_TOOL_NAME = "answer.submit" as const;
+
+/** True only for the reserved `answer.submit` tool identity. */
+export function isAnswerSubmitTool(name: unknown): boolean {
+  return name === ANSWER_SUBMIT_TOOL_NAME;
+}
+
+/**
+ * Fixed redacted normalization failure for `answer.submit` arguments
+ * (malformed JSON, non-object, or oversized). No raw detail carried.
+ */
+export function answerArgsInvalidError(): ModelLocalError {
+  return new ModelLocalError(
+    "answer_invalid",
+    "model returned an invalid answer",
+  );
+}
+
+/**
+ * Fixed redacted normalization failure for non-answer tool-call arguments
+ * (malformed JSON shape or non-object). No raw detail carried.
+ */
+export function toolArgsInvalidError(): ModelLocalError {
+  return new ModelLocalError(
+    "tool_call_invalid",
+    "model returned an invalid tool call",
+  );
+}
+
+/** Throw the fixed per-tool normalization failure (answer vs ordinary). */
+export function throwInvalidToolArguments(toolName: string): never {
+  if (isAnswerSubmitTool(toolName)) {
+    throw answerArgsInvalidError();
+  }
+  throw toolArgsInvalidError();
+}
+
+/**
+ * Per-tool arguments size bound: `answer.submit` oversize rejects as fixed
+ * `answer_invalid` (repairable), every other tool as fixed `invalid_response`
+ * (generic, unchanged). Never truncates, never echoes raw payloads.
+ */
+export function assertToolArgumentsByteLengthForTool(
+  byteLength: number,
+  toolName: string,
+): void {
+  if (byteLength > MAX_TOOL_CALL_ARGUMENTS_BYTES) {
+    if (isAnswerSubmitTool(toolName)) {
+      throw answerArgsInvalidError();
+    }
+    throw new ModelLocalError(
+      "invalid_response",
+      "model returned an invalid response",
+    );
+  }
+}
 /** Maximum tool-call id/name lengths for history validation. */
 export const MAX_TOOL_CALL_ID_LENGTH = 256;
 export const MAX_TOOL_CALL_NAME_LENGTH = 128;

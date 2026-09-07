@@ -15,10 +15,14 @@ export {
   type ModelLocalErrorCode,
 } from "./errors.js";
 export {
+  ANSWER_SUBMIT_TOOL_NAME,
+  answerArgsInvalidError,
   assertToolArgumentsByteLength,
+  assertToolArgumentsByteLengthForTool,
   assertToolCallingCapability,
   canonicalToolArgumentsJson,
   extractModelUsage,
+  isAnswerSubmitTool,
   MAX_MESSAGE_CONTENT_LENGTH,
   MAX_MESSAGES_PER_REQUEST,
   MAX_MODEL_NAME_LENGTH,
@@ -31,6 +35,8 @@ export {
   type ModelGateway,
   type ResolvedGatewayConfig,
   resolveGatewayConfig,
+  throwInvalidToolArguments,
+  toolArgsInvalidError,
   utf8ByteLength,
   validateChatRequest,
   validateNativeToolCalls,

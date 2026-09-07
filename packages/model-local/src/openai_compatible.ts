@@ -7,7 +7,7 @@
 
 import { ModelLocalError } from "./errors.js";
 import {
-  assertToolArgumentsByteLength,
+  assertToolArgumentsByteLengthForTool,
   assertToolCallingCapability,
   canonicalToolArgumentsJson,
   extractModelUsage,
@@ -16,6 +16,7 @@ import {
   type ModelGateway,
   postJsonNoRedirect,
   resolveGatewayConfig,
+  throwInvalidToolArguments,
   utf8ByteLength,
   validateChatRequest,
   validateNativeToolCalls,
@@ -44,15 +45,17 @@ export function resolveOpenAIChatUrl(normalizedBaseUrl: string): string {
   return joinLoopbackPath(normalizedBaseUrl, "/v1/chat/completions");
 }
 
-function toolArgumentsFromNative(value: unknown): unknown {
+function toolArgumentsFromNative(value: unknown, toolName: string): unknown {
   if (value === undefined || value === null) {
     return {};
   }
   if (isRecord(value)) {
     // Object form: measure deterministic serialized UTF-8 bytes (never
-    // truncated, never echoed). Oversize rejects the whole response.
-    assertToolArgumentsByteLength(
+    // truncated, never echoed). Oversize rejects the whole response:
+    // answer.submit as fixed answer_invalid, ordinary as invalid_response.
+    assertToolArgumentsByteLengthForTool(
       utf8ByteLength(canonicalToolArgumentsJson(value)),
+      toolName,
     );
     return value;
   }
@@ -64,33 +67,27 @@ function toolArgumentsFromNative(value: unknown): unknown {
     // then validate the parsed JSON and re-check its deterministic
     // serialized size (catches whitespace/compression tricks and aligns
     // with the broker canonical-input measure). No free-text fallback.
-    assertToolArgumentsByteLength(utf8ByteLength(value));
+    // answer.submit failures use fixed answer_invalid; ordinary keeps
+    // tool_call_invalid.
+    assertToolArgumentsByteLengthForTool(utf8ByteLength(value), toolName);
     try {
       const parsed: unknown = JSON.parse(value);
       if (!isRecord(parsed)) {
-        throw new ModelLocalError(
-          "tool_call_invalid",
-          "model returned an invalid tool call",
-        );
+        throwInvalidToolArguments(toolName);
       }
-      assertToolArgumentsByteLength(
+      assertToolArgumentsByteLengthForTool(
         utf8ByteLength(canonicalToolArgumentsJson(parsed)),
+        toolName,
       );
       return parsed;
     } catch (error) {
       if (error instanceof ModelLocalError) {
         throw error;
       }
-      throw new ModelLocalError(
-        "tool_call_invalid",
-        "model returned an invalid tool call",
-      );
+      throwInvalidToolArguments(toolName);
     }
   }
-  throw new ModelLocalError(
-    "tool_call_invalid",
-    "model returned an invalid tool call",
-  );
+  throwInvalidToolArguments(toolName);
 }
 
 /** Normalize an OpenAI-compatible `/v1/chat/completions` JSON body. */
@@ -158,7 +155,7 @@ export function normalizeOpenAIResponse(
       toolCalls.push({
         id,
         name,
-        arguments: toolArgumentsFromNative(entry.function.arguments),
+        arguments: toolArgumentsFromNative(entry.function.arguments, name),
       });
     });
   }

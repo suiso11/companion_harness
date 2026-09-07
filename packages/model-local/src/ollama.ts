@@ -5,7 +5,7 @@
 
 import { ModelLocalError } from "./errors.js";
 import {
-  assertToolArgumentsByteLength,
+  assertToolArgumentsByteLengthForTool,
   assertToolCallingCapability,
   canonicalToolArgumentsJson,
   extractModelUsage,
@@ -14,6 +14,7 @@ import {
   type ModelGateway,
   postJsonNoRedirect,
   resolveGatewayConfig,
+  throwInvalidToolArguments,
   utf8ByteLength,
   validateChatRequest,
   validateNativeToolCalls,
@@ -34,16 +35,22 @@ export const OLLAMA_CAPABILITIES: ModelCapabilities = {
   toolCalling: true,
 };
 
-function toolArgumentsFromNative(value: unknown, index: number): unknown {
+function toolArgumentsFromNative(
+  value: unknown,
+  index: number,
+  toolName: string,
+): unknown {
   void index;
   if (value === undefined) {
     return {};
   }
   if (isRecord(value)) {
     // Object form: measure deterministic serialized UTF-8 bytes (never
-    // truncated, never echoed). Oversize rejects the whole response.
-    assertToolArgumentsByteLength(
+    // truncated, never echoed). Oversize rejects the whole response:
+    // answer.submit as fixed answer_invalid, ordinary as invalid_response.
+    assertToolArgumentsByteLengthForTool(
       utf8ByteLength(canonicalToolArgumentsJson(value)),
+      toolName,
     );
     return value;
   }
@@ -53,34 +60,27 @@ function toolArgumentsFromNative(value: unknown, index: number): unknown {
     }
     // Byte-check the raw string before JSON.parse (bytes, not characters),
     // then validate the parsed JSON and re-check its deterministic
-    // serialized size. No free-text fallback.
-    assertToolArgumentsByteLength(utf8ByteLength(value));
+    // serialized size. No free-text fallback. answer.submit failures use
+    // fixed answer_invalid; ordinary keeps tool_call_invalid.
+    assertToolArgumentsByteLengthForTool(utf8ByteLength(value), toolName);
     try {
       const parsed: unknown = JSON.parse(value);
       if (!isRecord(parsed)) {
-        throw new ModelLocalError(
-          "tool_call_invalid",
-          "model returned an invalid tool call",
-        );
+        throwInvalidToolArguments(toolName);
       }
-      assertToolArgumentsByteLength(
+      assertToolArgumentsByteLengthForTool(
         utf8ByteLength(canonicalToolArgumentsJson(parsed)),
+        toolName,
       );
       return parsed;
     } catch (error) {
       if (error instanceof ModelLocalError) {
         throw error;
       }
-      throw new ModelLocalError(
-        "tool_call_invalid",
-        "model returned an invalid tool call",
-      );
+      throwInvalidToolArguments(toolName);
     }
   }
-  throw new ModelLocalError(
-    "tool_call_invalid",
-    "model returned an invalid tool call",
-  );
+  throwInvalidToolArguments(toolName);
 }
 
 /** Normalize an Ollama `/api/chat` JSON body (native fields only). */
@@ -137,7 +137,11 @@ export function normalizeOllamaResponse(
       toolCalls.push({
         id,
         name,
-        arguments: toolArgumentsFromNative(entry.function.arguments, index),
+        arguments: toolArgumentsFromNative(
+          entry.function.arguments,
+          index,
+          name,
+        ),
       });
     });
   }

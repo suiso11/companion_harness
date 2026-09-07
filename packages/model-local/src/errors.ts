@@ -10,6 +10,7 @@ export const MODEL_LOCAL_ERROR_CODES = [
   "invalid_request",
   "invalid_response",
   "tool_call_invalid",
+  "answer_invalid",
   "request_failed",
   "transport_error",
   "timeout",
