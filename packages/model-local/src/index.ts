@@ -20,6 +20,7 @@ export {
   assertNativeToolCallName,
   assertToolArgumentsByteLength,
   assertToolArgumentsByteLengthForTool,
+  assertToolCallCountWithinBound,
   assertToolCallingCapability,
   canonicalToolArgumentsJson,
   extractModelUsage,

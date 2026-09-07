@@ -234,6 +234,22 @@ function nativeToolCallOversizeError(): ModelLocalError {
 }
 
 /**
+ * Enforce the shared per-message native tool-call count bound on normalized
+ * provider output (r3946739336). A response carrying more than
+ * MAX_TOOL_CALLS_PER_MESSAGE native calls rejects atomically with fixed
+ * redacted invalid_response (never truncated, never echoed) before
+ * AgentStrategy or ToolBroker sees any call, so none executes. The check
+ * runs before per-call argument parsing so an over-count batch containing a
+ * malformed answer.submit still fails as invalid_response (never
+ * answer_invalid, never repaired).
+ */
+export function assertToolCallCountWithinBound(count: number): void {
+  if (count > MAX_TOOL_CALLS_PER_MESSAGE) {
+    throw nativeToolCallOversizeError();
+  }
+}
+
+/**
  * Validate a provider-native tool-call name before accepting the ChatResult.
  * Accepts only non-empty namespace.verb names within the 128-char
  * contracts bound (covers answer.submit and ordinary broker tools).

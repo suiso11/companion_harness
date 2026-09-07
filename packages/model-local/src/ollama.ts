@@ -7,6 +7,7 @@ import { ModelLocalError } from "./errors.js";
 import {
   assertNativeToolCallName,
   assertToolArgumentsByteLengthForTool,
+  assertToolCallCountWithinBound,
   assertToolCallingCapability,
   canonicalToolArgumentsJson,
   extractModelUsage,
@@ -117,7 +118,10 @@ export function normalizeOllamaResponse(
     }
     // Atomic: any oversize/invalid call throws before a ChatResult is
     // built, so a response containing one oversize call is never
-    // partially accepted.
+    // partially accepted. The shared per-message count bound rejects
+    // before per-call argument parsing so an over-count batch containing
+    // a malformed answer.submit still fails as invalid_response.
+    assertToolCallCountWithinBound(message.tool_calls.length);
     message.tool_calls.forEach((entry: unknown, index: number) => {
       if (!isRecord(entry) || !isRecord(entry.function)) {
         throw new ModelLocalError(
