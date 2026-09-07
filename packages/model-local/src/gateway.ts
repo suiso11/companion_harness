@@ -1323,13 +1323,16 @@ export function validateNativeToolCalls(options: {
  * (accessor descriptors reject without invoking user code, so a stateful
  * getter's second value is never executed), each arguments object is cloned
  * from its already-computed canonical JSON string, optional `usage` is
- * validated as token counts only ({inputTokens, outputTokens} nonnegative
+ * snapped as token counts only ({inputTokens, outputTokens} nonnegative
  * safe integers, no extra/raw fields) and cloned into a new plain object
- * included only when present (absent usage is omitted for
- * exactOptionalPropertyTypes), and a new plain `ChatResult` with new call
- * objects is returned. Callers must use the returned snapshot (never the
- * source result), so later mutation cannot change what was validated. No
- * nested references are shared with the source result.
+ * included only when valid (absent or malformed/unsafe/custom/accessor/
+ * non-plain usage is omitted for exactOptionalPropertyTypes, matching
+ * AgentStrategy sanitizeModelUsage drop-to-null so answer validity never
+ * depends on optional usage metadata), and a new plain `ChatResult` with
+ * new call objects is returned. Callers must use the returned snapshot
+ * (never the source result), so later mutation cannot change what was
+ * validated. No nested references are shared with the source result. Usage
+ * getters and `toJSON` are never invoked.
  */
 export function validateChatResult(
   result: unknown,
@@ -1494,14 +1497,20 @@ export function validateChatResult(
     snapshotCalls.push({ id, name, arguments: clonedArgs });
   }
   // Optional usage snapshot (r3950938866): captured exactly once via its own
-  // data descriptor (accessor descriptors reject without invoking user code,
-  // so a stateful getter's second value is never executed). Absent (missing
-  // own property, undefined, or null) is omitted for
-  // exactOptionalPropertyTypes. When present, the object must carry exactly
-  // {inputTokens, outputTokens} as nonnegative safe integers with no
-  // extra/raw fields (no total_tokens, reasoning, or provider blobs); each
-  // count is read once via its own data descriptor and the snapshot is a new
-  // plain object sharing no references with the source.
+  // data descriptor (accessor descriptors are dropped without invoking user
+  // code, so a stateful getter's second value is never executed and getters
+  // are never invoked). Absent (missing own property, undefined, or null)
+  // is omitted for exactOptionalPropertyTypes. When present, only exactly
+  // {inputTokens, outputTokens} as nonnegative safe integers is cloned into
+  // a new plain object; any malformed/unsafe/custom/accessor/non-plain
+  // usage (wrong types, fractions, negatives, unsafe integers, missing
+  // counts, extra/raw fields such as total_tokens/reasoning/raw, symbol
+  // keys, custom toJSON, non-plain prototypes, arrays, non-objects, or
+  // unreadable descriptors) is dropped to absent instead of failing the
+  // whole response, matching AgentStrategy sanitizeModelUsage drop-to-null
+  // so answer/tool validity never depends on optional usage metadata.
+  // Never invokes getters or `toJSON`; never preserves or echoes invalid
+  // usage.
   const readUsageSnapshot = ():
     | { inputTokens: number; outputTokens: number }
     | undefined => {
@@ -1509,10 +1518,7 @@ export function validateChatResult(
     try {
       usageDescriptor = Object.getOwnPropertyDescriptor(source, "usage");
     } catch {
-      throw new ModelLocalError(
-        "invalid_response",
-        "model returned an invalid response",
-      );
+      return undefined;
     }
     if (usageDescriptor === undefined) {
       return undefined;
@@ -1521,52 +1527,35 @@ export function validateChatResult(
       usageDescriptor.get !== undefined ||
       usageDescriptor.set !== undefined
     ) {
-      throw new ModelLocalError(
-        "invalid_response",
-        "model returned an invalid response",
-      );
+      return undefined;
     }
     const rawUsage = usageDescriptor.value;
     if (rawUsage === undefined || rawUsage === null) {
       return undefined;
     }
     if (typeof rawUsage !== "object" || Array.isArray(rawUsage as unknown[])) {
-      throw new ModelLocalError(
-        "invalid_response",
-        "model returned an invalid response",
-      );
+      return undefined;
     }
     const usageNode = rawUsage as object;
     let usageProto: unknown;
     try {
       usageProto = Object.getPrototypeOf(usageNode);
     } catch {
-      throw new ModelLocalError(
-        "invalid_response",
-        "model returned an invalid response",
-      );
+      return undefined;
     }
     if (usageProto !== Object.prototype && usageProto !== null) {
-      throw new ModelLocalError(
-        "invalid_response",
-        "model returned an invalid response",
-      );
+      return undefined;
     }
     try {
       if (Object.getOwnPropertySymbols(usageNode).length > 0) {
-        throw new ModelLocalError(
-          "invalid_response",
-          "model returned an invalid response",
-        );
+        return undefined;
       }
-    } catch (error) {
-      if (error instanceof ModelLocalError) {
-        throw error;
+      // Custom toJSON (own) would change serialization; drop without invoking.
+      if (Object.getOwnPropertyDescriptor(usageNode, "toJSON") !== undefined) {
+        return undefined;
       }
-      throw new ModelLocalError(
-        "invalid_response",
-        "model returned an invalid response",
-      );
+    } catch {
+      return undefined;
     }
     let inputDescriptor: PropertyDescriptor | undefined;
     let outputDescriptor: PropertyDescriptor | undefined;
@@ -1580,10 +1569,7 @@ export function validateChatResult(
         "outputTokens",
       );
     } catch {
-      throw new ModelLocalError(
-        "invalid_response",
-        "model returned an invalid response",
-      );
+      return undefined;
     }
     if (
       inputDescriptor === undefined ||
@@ -1593,29 +1579,25 @@ export function validateChatResult(
       outputDescriptor.get !== undefined ||
       outputDescriptor.set !== undefined
     ) {
-      throw new ModelLocalError(
-        "invalid_response",
-        "model returned an invalid response",
-      );
+      return undefined;
     }
     const inputTokens = (inputDescriptor as { value?: unknown }).value;
     const outputTokens = (outputDescriptor as { value?: unknown }).value;
     if (!isSafeUsageCount(inputTokens) || !isSafeUsageCount(outputTokens)) {
-      throw new ModelLocalError(
-        "invalid_response",
-        "model returned an invalid response",
-      );
+      return undefined;
     }
-    const keys = Object.keys(usageNode);
+    let keys: string[];
+    try {
+      keys = Object.keys(usageNode);
+    } catch {
+      return undefined;
+    }
     if (
       keys.length !== 2 ||
       !keys.includes("inputTokens") ||
       !keys.includes("outputTokens")
     ) {
-      throw new ModelLocalError(
-        "invalid_response",
-        "model returned an invalid response",
-      );
+      return undefined;
     }
     return { inputTokens, outputTokens };
   };

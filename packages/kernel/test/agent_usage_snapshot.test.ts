@@ -1,8 +1,10 @@
 // Usage snapshot preservation (r3950938866): validateChatResult captures
-// optional usage exactly once (no getters), validates token counts only, and
-// AgentStrategy sanitizes/persists/emits the validated snapshot into
-// model_calls + model.step.completed. Invalid/stateful usage fails before
-// success audit.
+// optional usage exactly once (no getters/toJSON invocation), preserves
+// valid strict safe token counts detached, and drops malformed/unsafe/
+// custom/accessor/non-plain usage to absent (matching AgentStrategy
+// sanitizeModelUsage) so answer validity never depends on optional usage
+// metadata. Valid usage persists into model_calls + model.step.completed;
+// invalid usage completes with usage null and no usage event field.
 import type {
   ChatRequest,
   ChatResult,
@@ -229,7 +231,7 @@ describe("usage snapshot preservation (r3950938866)", () => {
     ["raw-blob", { inputTokens: 12, outputTokens: 34, raw: "x" }],
     ["reasoning", { inputTokens: 12, outputTokens: 34, reasoning: "r" }],
   ])(
-    "invalid custom usage %s fails before success audit",
+    "invalid custom usage %s drops to absent and still completes",
     async (_label, usage) => {
       const { handle, repo } = await setup();
       try {
@@ -249,30 +251,33 @@ describe("usage snapshot preservation (r3950938866)", () => {
           model: "m",
         });
         const { sessionId, runId } = newRunningTurn(repo, T0);
-        await expect(strategy(ctxFor(repo, runId))).rejects.toMatchObject({
-          errorCode: "execution_failed",
-        });
+        await strategy(ctxFor(repo, runId));
         const rows = repo.listModelCalls(runId);
         expect(rows).toHaveLength(1);
         expect(rows[0]).toMatchObject({
           step: 1,
-          outcome: "failed",
-          errorCode: "model_unavailable",
+          outcome: "completed",
+          errorCode: null,
+          usage: null,
         });
         const events = stepEvents(repo, sessionId, runId);
-        expect(
-          events.filter((e) => e.type === "model.step.completed"),
-        ).toHaveLength(0);
+        const completed = events.filter(
+          (e) => e.type === "model.step.completed",
+        );
+        expect(completed).toHaveLength(1);
+        expect(completed[0]?.payload).not.toMatchObject({
+          usage: expect.anything(),
+        });
         expect(
           events.filter((e) => e.type === "model.step.failed"),
-        ).toHaveLength(1);
+        ).toHaveLength(0);
       } finally {
         closeKernelDatabase(handle);
       }
     },
   );
 
-  it("stateful usage getter fails before success audit without a second read", async () => {
+  it("stateful usage getter drops to absent without invoking the getter", async () => {
     const { handle, repo } = await setup();
     try {
       const broker = createToolBroker({
@@ -317,21 +322,23 @@ describe("usage snapshot preservation (r3950938866)", () => {
         model: "m",
       });
       const { sessionId, runId } = newRunningTurn(repo, T0);
-      await expect(strategy(ctxFor(repo, runId))).rejects.toMatchObject({
-        errorCode: "execution_failed",
-      });
-      // Top-level accessor rejects without invoking a second value.
-      expect(usageReads).toBeLessThanOrEqual(1);
+      await strategy(ctxFor(repo, runId));
+      // Top-level accessor drops to absent without invoking the getter.
+      expect(usageReads).toBe(0);
       const rows = repo.listModelCalls(runId);
       expect(rows).toHaveLength(1);
       expect(rows[0]).toMatchObject({
-        outcome: "failed",
-        errorCode: "model_unavailable",
+        step: 1,
+        outcome: "completed",
+        errorCode: null,
+        usage: null,
       });
       const events = stepEvents(repo, sessionId, runId);
-      expect(
-        events.filter((e) => e.type === "model.step.completed"),
-      ).toHaveLength(0);
+      const completed = events.filter((e) => e.type === "model.step.completed");
+      expect(completed).toHaveLength(1);
+      expect(completed[0]?.payload).not.toMatchObject({
+        usage: expect.anything(),
+      });
     } finally {
       closeKernelDatabase(handle);
     }
