@@ -21,6 +21,7 @@ import {
   postJsonNoRedirect,
   resolveGatewayConfig,
   throwInvalidToolArguments,
+  toWireToolArgumentsJson,
   utf8ByteLength,
   validateChatRequest,
   validateNativeToolCalls,
@@ -57,10 +58,16 @@ function toolArgumentsFromNative(value: unknown, toolName: string): unknown {
     // Object form: measure deterministic serialized UTF-8 bytes (never
     // truncated, never echoed). Oversize rejects the whole response:
     // answer.submit as fixed answer_invalid, ordinary as invalid_response.
-    assertToolArgumentsByteLengthForTool(
-      utf8ByteLength(canonicalToolArgumentsJson(value)),
-      toolName,
-    );
+    // Non-plain-JSON object forms (custom toJSON, accessors, symbols,
+    // functions, non-plain prototypes, cycles, unsupported values) reject
+    // via the same per-tool path without invoking user code.
+    let serialized: string;
+    try {
+      serialized = canonicalToolArgumentsJson(value);
+    } catch {
+      throwInvalidToolArguments(toolName);
+    }
+    assertToolArgumentsByteLengthForTool(utf8ByteLength(serialized), toolName);
     return value;
   }
   if (typeof value === "string") {
@@ -267,14 +274,30 @@ export function toOpenAIMessage(message: ChatMessage): Record<string, unknown> {
     message.toolCalls !== undefined &&
     message.toolCalls.length > 0
   ) {
-    entry.tool_calls = message.toolCalls.map((call) => ({
-      id: call.id,
-      type: "function",
-      function: {
-        name: call.name,
-        arguments: JSON.stringify(call.arguments ?? {}),
-      },
-    }));
+    // Replay arguments serialize to the exact canonical representation
+    // measured during history validation (same bytes checked against the
+    // 32KiB bound). Non-plain-JSON replay rejects here with fixed redacted
+    // invalid_request without invoking user code, even if request
+    // validation was bypassed.
+    entry.tool_calls = message.toolCalls.map((call) => {
+      let wireArguments: string;
+      try {
+        wireArguments = toWireToolArgumentsJson(call.arguments);
+      } catch {
+        throw new ModelLocalError(
+          "invalid_request",
+          "model message carries invalid tool calls",
+        );
+      }
+      return {
+        id: call.id,
+        type: "function",
+        function: {
+          name: call.name,
+          arguments: wireArguments,
+        },
+      };
+    });
   }
   return entry;
 }

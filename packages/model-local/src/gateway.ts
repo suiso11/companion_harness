@@ -85,55 +85,203 @@ export function utf8ByteLength(text: string): number {
   return new TextEncoder().encode(text).byteLength;
 }
 
+/**
+ * Reject any `toJSON` found on the value or its prototype chain without
+ * invoking user code. Only `Object.getOwnPropertyDescriptor` (which never
+ * calls getters or `toJSON` itself) is used: a data descriptor, an accessor
+ * descriptor, or any inherited descriptor all reject. Plain JSON data from
+ * `JSON.parse` never carries `toJSON`, so provider-parsed objects stay valid.
+ */
+function assertNoCustomToJSON(node: object): void {
+  let current: unknown = node;
+  while (current !== null) {
+    const descriptor = Object.getOwnPropertyDescriptor(current, "toJSON");
+    if (descriptor !== undefined) {
+      throw new TypeError("custom toJSON in tool arguments");
+    }
+    current = Object.getPrototypeOf(current);
+  }
+}
+
+/**
+ * Strict structural clone for tool-call arguments size measurement.
+ *
+ * Accepted values are plain JSON data only: null, finite numbers, strings,
+ * booleans, plain objects (`Object.prototype` or `null` prototype), and
+ * plain arrays (`Array.prototype`). Rejected without invoking user code
+ * (no getter, setter, `toJSON`, or proxy-trap call beyond the inert
+ * `Object.*` structural reads): custom `toJSON` (own or inherited),
+ * accessor properties, symbol-keyed properties (enumerable or not),
+ * functions, symbols, `undefined`, `bigint`, non-finite numbers, objects
+ * with non-plain prototypes, arrays with holes or extra non-index keys,
+ * and cycles. Unsupported values throw `TypeError` (never echoing data);
+ * callers map the failure to their fixed redacted code.
+ *
+ * Object output uses a null-prototype sink with sorted keys so a
+ * provider-controlled `__proto__` key stays a plain own property (never
+ * invoking the `Object.prototype` setter, never dropped from the measured
+ * serialization). Legal JSON keys are never rejected by name.
+ */
 function canonicalizeForSize(value: unknown, seen?: WeakSet<object>): unknown {
-  if (value === null || value === undefined) {
+  if (value === null) {
+    return null;
+  }
+  const kind = typeof value;
+  if (kind === "string" || kind === "boolean") {
     return value;
   }
-  if (Array.isArray(value)) {
-    const active = seen ?? new WeakSet<object>();
-    if (active.has(value)) {
-      throw new TypeError("cyclic tool arguments");
+  if (kind === "number") {
+    if (!Number.isFinite(value)) {
+      throw new TypeError("unsupported number in tool arguments");
     }
-    active.add(value);
-    try {
-      return value.map((entry) => canonicalizeForSize(entry, active));
-    } finally {
-      active.delete(value);
-    }
+    return value;
   }
-  if (isRecord(value)) {
-    const active = seen ?? new WeakSet<object>();
-    if (active.has(value)) {
-      throw new TypeError("cyclic tool arguments");
+  if (
+    kind === "undefined" ||
+    kind === "function" ||
+    kind === "symbol" ||
+    kind === "bigint"
+  ) {
+    throw new TypeError("unsupported value in tool arguments");
+  }
+  if (kind !== "object") {
+    throw new TypeError("unsupported value in tool arguments");
+  }
+  const node = value as object;
+  assertNoCustomToJSON(node);
+  if (Object.getOwnPropertySymbols(node).length > 0) {
+    throw new TypeError("symbol key in tool arguments");
+  }
+  const active = seen ?? new WeakSet<object>();
+  if (active.has(node)) {
+    throw new TypeError("cyclic tool arguments");
+  }
+  if (Array.isArray(node)) {
+    if (Object.getPrototypeOf(node) !== Array.prototype) {
+      throw new TypeError("non-plain array in tool arguments");
     }
-    active.add(value);
+    active.add(node);
     try {
-      // Null-prototype sink: assigning provider-controlled keys such as
-      // `__proto__` creates a plain own property instead of invoking the
-      // `Object.prototype` setter (which would mutate the prototype and drop
-      // the key from serialization, undercounting size). Every enumerable
-      // own key is preserved and sorted for deterministic measurement;
-      // legal JSON keys are never rejected by name.
-      const sorted: Record<string, unknown> = Object.create(null);
-      for (const key of Object.keys(value).sort()) {
-        sorted[key] = canonicalizeForSize(value[key], active);
+      const arr = node as unknown[];
+      // Reject holes (missing index descriptors serialize as null and would
+      // miscount) and extra enumerable non-index keys (ignored by
+      // JSON.stringify, so accepting them would undercount). Descriptors
+      // are read once per index without re-reading through the property
+      // (which would invoke a getter if one raced in).
+      const keys = Object.keys(arr);
+      for (const key of keys) {
+        if (!/^(0|[1-9][0-9]*)$/.test(key)) {
+          throw new TypeError("extra key on array in tool arguments");
+        }
+        const numeric = Number(key);
+        if (!Number.isSafeInteger(numeric) || numeric >= arr.length) {
+          throw new TypeError("extra key on array in tool arguments");
+        }
       }
-      return sorted;
+      const out: unknown[] = new Array(arr.length);
+      for (let index = 0; index < arr.length; index += 1) {
+        const descriptor = Object.getOwnPropertyDescriptor(arr, String(index));
+        if (descriptor === undefined) {
+          throw new TypeError("holey array in tool arguments");
+        }
+        if (descriptor.get !== undefined || descriptor.set !== undefined) {
+          throw new TypeError("accessor in tool arguments");
+        }
+        out[index] = canonicalizeForSize(
+          (descriptor as { value?: unknown }).value,
+          active,
+        );
+      }
+      return out;
     } finally {
-      active.delete(value);
+      active.delete(node);
     }
   }
-  return value;
+  const proto = Object.getPrototypeOf(node);
+  if (proto !== Object.prototype && proto !== null) {
+    throw new TypeError("non-plain prototype in tool arguments");
+  }
+  active.add(node);
+  try {
+    // Null-prototype sink: assigning provider-controlled keys such as
+    // `__proto__` creates a plain own property instead of invoking the
+    // `Object.prototype` setter (which would mutate the prototype and drop
+    // the key from serialization, undercounting size). Every enumerable
+    // own key is preserved and sorted for deterministic measurement;
+    // legal JSON keys are never rejected by name. Descriptors are read via
+    // `getOwnPropertyDescriptor` so accessor getters are rejected without
+    // ever being invoked.
+    const sorted: Record<string, unknown> = Object.create(null);
+    for (const key of Object.keys(node).sort()) {
+      const descriptor = Object.getOwnPropertyDescriptor(node, key) as
+        | { value?: unknown; get?: unknown; set?: unknown }
+        | undefined;
+      if (
+        descriptor === undefined ||
+        descriptor.get !== undefined ||
+        descriptor.set !== undefined
+      ) {
+        throw new TypeError("accessor in tool arguments");
+      }
+      sorted[key] = canonicalizeForSize(descriptor.value, active);
+    }
+    return sorted;
+  } finally {
+    active.delete(node);
+  }
 }
 
 /**
  * Deterministic (sorted-keys, no whitespace) JSON serialization for
- * tool-call arguments size measurement. Key order does not affect the
- * measured byte length; sorting keeps the measurement stable across
- * providers. Mirrors the kernel canonical form for size alignment.
+ * tool-call arguments size measurement and wire encoding. Key order does
+ * not affect the measured byte length; sorting keeps the measurement
+ * stable across providers. Mirrors the kernel canonical form for size
+ * alignment.
+ *
+ * The input must be plain JSON data (see `canonicalizeForSize`): custom
+ * `toJSON`, accessors, symbols, functions, `undefined`, `bigint`,
+ * non-finite numbers, non-plain prototypes, array holes/extras, and
+ * cycles throw `TypeError` without invoking user code and without echoing
+ * data. `JSON.parse` output (plain objects/arrays/primitives) always
+ * remains valid.
+ *
+ * The returned string is the exact representation adapters send on the
+ * wire (OpenAI `arguments` string; parsed back to the object form for
+ * Ollama `tool_calls`, whose outer `JSON.stringify` then emits the same
+ * key order with no whitespace), so the UTF-8 byte length measured here
+ * is the length actually sent against the 32KiB bound.
  */
 export function canonicalToolArgumentsJson(value: unknown): string {
-  return JSON.stringify(canonicalizeForSize(value)) ?? "undefined";
+  const text = JSON.stringify(canonicalizeForSize(value));
+  if (text === undefined) {
+    throw new TypeError("unsupported tool arguments");
+  }
+  return text;
+}
+
+/**
+ * Exact wire encoding for one tool-call arguments payload: the canonical
+ * serialization adapters send (OpenAI `arguments` string directly; parsed
+ * back to the object form for Ollama `tool_calls`, whose outer
+ * `JSON.stringify` then emits the same key order with no whitespace).
+ * Throws `TypeError` for non-plain-JSON input without invoking user code;
+ * callers map the failure to their fixed redacted code. `null`/`undefined`
+ * encode as `{}` (matching adapter empty-arguments semantics).
+ */
+export function toWireToolArgumentsJson(args: unknown): string {
+  return canonicalToolArgumentsJson(args ?? {});
+}
+
+/**
+ * Object form of the exact wire encoding (for the Ollama `tool_calls`
+ * payload): reparsed from `toWireToolArgumentsJson`, so the outer request
+ * `JSON.stringify` emits exactly the measured bytes. Plain
+ * `Object.prototype` objects only (`__proto__` stays an own property via
+ * the `JSON.parse` round-trip). Throws `TypeError` for non-plain-JSON
+ * input without invoking user code.
+ */
+export function toWireToolArgumentsObject(args: unknown): unknown {
+  return JSON.parse(toWireToolArgumentsJson(args)) as unknown;
 }
 
 /**
@@ -550,8 +698,9 @@ function validateHistoryToolCalls(message: ChatMessage): void {
     // bound enforced on provider output. Measured here during history
     // validation — before either adapter JSON.stringify/request construction —
     // so an oversized replay rejects with fixed redacted invalid_request
-    // without allocating the wire body. Cyclic/non-serializable replay
-    // (canonical serialization throws, e.g. BigInt) rejects the same way.
+    // without allocating the wire body. Non-plain-JSON replay (custom
+    // toJSON, accessors, symbols, functions, non-plain prototypes, cycles,
+    // unsupported values) rejects the same way without invoking user code.
     // Never truncated, never echoes raw args, never touches ToolBroker
     // budget (validation only; the broker still reserves accepted calls).
     let serialized: string;

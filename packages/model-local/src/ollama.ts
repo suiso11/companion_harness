@@ -19,6 +19,7 @@ import {
   postJsonNoRedirect,
   resolveGatewayConfig,
   throwInvalidToolArguments,
+  toWireToolArgumentsObject,
   utf8ByteLength,
   validateChatRequest,
   validateNativeToolCalls,
@@ -52,10 +53,16 @@ function toolArgumentsFromNative(
     // Object form: measure deterministic serialized UTF-8 bytes (never
     // truncated, never echoed). Oversize rejects the whole response:
     // answer.submit as fixed answer_invalid, ordinary as invalid_response.
-    assertToolArgumentsByteLengthForTool(
-      utf8ByteLength(canonicalToolArgumentsJson(value)),
-      toolName,
-    );
+    // Non-plain-JSON object forms (custom toJSON, accessors, symbols,
+    // functions, non-plain prototypes, cycles, unsupported values) reject
+    // via the same per-tool path without invoking user code.
+    let serialized: string;
+    try {
+      serialized = canonicalToolArgumentsJson(value);
+    } catch {
+      throwInvalidToolArguments(toolName);
+    }
+    assertToolArgumentsByteLengthForTool(utf8ByteLength(serialized), toolName);
     return value;
   }
   if (typeof value === "string") {
@@ -182,13 +189,30 @@ export function toOllamaMessage(message: ChatMessage): Record<string, unknown> {
     message.toolCalls !== undefined &&
     message.toolCalls.length > 0
   ) {
+    // Replay arguments serialize to the exact canonical representation
+    // measured during history validation (the outer request JSON.stringify
+    // then emits the same key order with no whitespace, so the measured
+    // 32KiB bytes are the bytes sent). Non-plain-JSON replay rejects here
+    // with fixed redacted invalid_request without invoking user code,
+    // even if request validation was bypassed.
     return {
       role: message.role,
       content: message.content,
-      tool_calls: message.toolCalls.map((call) => ({
-        id: call.id,
-        function: { name: call.name, arguments: call.arguments ?? {} },
-      })),
+      tool_calls: message.toolCalls.map((call) => {
+        let wireArguments: unknown;
+        try {
+          wireArguments = toWireToolArgumentsObject(call.arguments);
+        } catch {
+          throw new ModelLocalError(
+            "invalid_request",
+            "model message carries invalid tool calls",
+          );
+        }
+        return {
+          id: call.id,
+          function: { name: call.name, arguments: wireArguments },
+        };
+      }),
     };
   }
   if (message.role === "tool") {

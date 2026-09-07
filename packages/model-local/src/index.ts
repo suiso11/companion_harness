@@ -43,6 +43,8 @@ export {
   resolveGatewayConfig,
   throwInvalidToolArguments,
   toolArgsInvalidError,
+  toWireToolArgumentsJson,
+  toWireToolArgumentsObject,
   utf8ByteLength,
   validateChatRequest,
   validateNativeToolCalls,
