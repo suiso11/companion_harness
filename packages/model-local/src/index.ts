@@ -17,6 +17,7 @@ export {
 export {
   ANSWER_SUBMIT_TOOL_NAME,
   answerArgsInvalidError,
+  assertNativeToolCallName,
   assertToolArgumentsByteLength,
   assertToolArgumentsByteLengthForTool,
   assertToolCallingCapability,
@@ -34,6 +35,8 @@ export {
   MAX_TOOL_CALLS_PER_MESSAGE,
   MAX_TOOLS_PER_REQUEST,
   type ModelGateway,
+  NATIVE_TOOL_NAME_PATTERN,
+  normalizeNativeToolCallId,
   type ResolvedGatewayConfig,
   resolveGatewayConfig,
   throwInvalidToolArguments,

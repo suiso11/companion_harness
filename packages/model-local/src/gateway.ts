@@ -197,6 +197,98 @@ export function assertToolArgumentsByteLengthForTool(
 }
 /** Maximum tool-call id/name lengths for history validation. */
 export const MAX_TOOL_CALL_ID_LENGTH = 256;
+/**
+ * Provider-native tool-name shape enforced before accepting a ChatResult.
+ * Mirrors contracts ToolNameSchema (namespace.verb, lowercase): the
+ * AgentStrategy expects broker tools in this shape, and the reserved
+ * answer.submit terminal protocol already satisfies it (preserved, never
+ * special-cased here). Unknown but well-formed ordinary names pass this
+ * check and reach ToolBroker for authoritative unknown-tool budget/audit.
+ */
+export const NATIVE_TOOL_NAME_PATTERN =
+  /^[a-z0-9]+(?:_[a-z0-9]+)*\.[a-z0-9]+(?:_[a-z0-9]+)*$/;
+
+/** True when a string carries ASCII control characters (never accepted). */
+function hasControlCharacters(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x1f || code === 0x7f) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function nativeToolCallInvalidError(): ModelLocalError {
+  return new ModelLocalError(
+    "tool_call_invalid",
+    "model returned an invalid tool call",
+  );
+}
+
+function nativeToolCallOversizeError(): ModelLocalError {
+  return new ModelLocalError(
+    "invalid_response",
+    "model returned an invalid response",
+  );
+}
+
+/**
+ * Validate a provider-native tool-call name before accepting the ChatResult.
+ * Accepts only non-empty namespace.verb names within the 128-char
+ * contracts bound (covers answer.submit and ordinary broker tools).
+ * Rejects empty/control-bearing/misshaped names as fixed redacted
+ * tool_call_invalid and oversize names as fixed redacted
+ * invalid_response. Never truncates, never echoes raw values.
+ */
+export function assertNativeToolCallName(name: unknown): string {
+  if (
+    typeof name !== "string" ||
+    name.length === 0 ||
+    hasControlCharacters(name)
+  ) {
+    throw nativeToolCallInvalidError();
+  }
+  const NAME_LIMIT = 128;
+  if (name.length > NAME_LIMIT) {
+    throw nativeToolCallOversizeError();
+  }
+  if (!NATIVE_TOOL_NAME_PATTERN.test(name)) {
+    throw nativeToolCallInvalidError();
+  }
+  return name;
+}
+
+/**
+ * Validate a provider-native tool-call id before accepting the ChatResult.
+ * Absent (undefined/null) ids synthesize the finite replay-safe
+ * call_<index> fallback (preserves Ollama responses that omit ids and
+ * keeps OpenAI tool_call_id replay correlation valid within the shared
+ * 256-char history bound). Any present id must be a non-empty string
+ * within 256 chars with no control characters: empty/non-string/
+ * control-bearing rejects as fixed redacted tool_call_invalid, oversize
+ * as fixed redacted invalid_response. Never truncates, never echoes.
+ */
+export function normalizeNativeToolCallId(
+  rawId: unknown,
+  index: number,
+): string {
+  if (rawId === undefined || rawId === null) {
+    return `call_${index}`;
+  }
+  if (
+    typeof rawId !== "string" ||
+    rawId.length === 0 ||
+    hasControlCharacters(rawId)
+  ) {
+    throw nativeToolCallInvalidError();
+  }
+  if (rawId.length > MAX_TOOL_CALL_ID_LENGTH) {
+    throw nativeToolCallOversizeError();
+  }
+  return rawId;
+}
+
 export const MAX_TOOL_CALL_NAME_LENGTH = 128;
 
 /**
@@ -872,9 +964,13 @@ function mapFetchRejection(error: unknown): ModelLocalError {
 }
 
 /**
- * Enforce strict native tool-call results: unsolicited calls or calls to
- * unknown tools are rejected (no free-text JSON emulation is performed
- * anywhere; content text is never parsed for tool calls).
+ * Enforce strict native tool-call results: unsolicited calls are rejected,
+ * and every accepted call carries a bounded valid id/name (no free-text
+ * JSON emulation is performed anywhere; content text is never parsed for
+ * tool calls). Unknown but well-formed ordinary names are NOT rejected
+ * here: they pass through so the AgentStrategy/ToolBroker applies the
+ * authoritative unknown-tool budget/audit. Malformed ids/names reject
+ * with fixed redacted codes (never truncated, never echoed).
  */
 export function validateNativeToolCalls(options: {
   toolCalls: { id: string; name: string; arguments: unknown }[];
@@ -892,14 +988,9 @@ export function validateNativeToolCalls(options: {
       "model returned tool calls without tools requested",
     );
   }
-  const known = new Set(options.requestedTools.map((tool) => tool.name));
   for (const call of options.toolCalls) {
-    if (!known.has(call.name)) {
-      throw new ModelLocalError(
-        "tool_call_invalid",
-        "model requested an unknown tool",
-      );
-    }
+    normalizeNativeToolCallId(call.id, 0);
+    assertNativeToolCallName(call.name);
   }
 }
 

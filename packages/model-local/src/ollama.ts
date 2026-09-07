@@ -5,6 +5,7 @@
 
 import { ModelLocalError } from "./errors.js";
 import {
+  assertNativeToolCallName,
   assertToolArgumentsByteLengthForTool,
   assertToolCallingCapability,
   canonicalToolArgumentsJson,
@@ -12,6 +13,7 @@ import {
   isRecord,
   joinLoopbackPath,
   type ModelGateway,
+  normalizeNativeToolCallId,
   postJsonNoRedirect,
   resolveGatewayConfig,
   throwInvalidToolArguments,
@@ -123,17 +125,8 @@ export function normalizeOllamaResponse(
           "model returned an invalid tool call",
         );
       }
-      const name = entry.function.name;
-      if (typeof name !== "string" || name.length === 0) {
-        throw new ModelLocalError(
-          "tool_call_invalid",
-          "model returned an invalid tool call",
-        );
-      }
-      const id =
-        typeof entry.id === "string" && entry.id.length > 0
-          ? entry.id
-          : `call_${index}`;
+      const name = assertNativeToolCallName(entry.function.name);
+      const id = normalizeNativeToolCallId(entry.id, index);
       toolCalls.push({
         id,
         name,
