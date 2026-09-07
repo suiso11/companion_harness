@@ -946,3 +946,198 @@ describe("abort EOF (cancel surfaces as done=true)", () => {
     }
   });
 });
+
+describe("fatal UTF-8 decoding", () => {
+  function byteChunks(bytes: Uint8Array, size = 1): Uint8Array[] {
+    const chunks: Uint8Array[] = [];
+    for (let i = 0; i < bytes.length; i += size) {
+      chunks.push(bytes.slice(i, i + size));
+    }
+    return chunks;
+  }
+
+  function concat(...parts: Uint8Array[]): Uint8Array {
+    const total = parts.reduce((sum, part) => sum + part.byteLength, 0);
+    const merged = new Uint8Array(total);
+    let offset = 0;
+    for (const part of parts) {
+      merged.set(part, offset);
+      offset += part.byteLength;
+    }
+    return merged;
+  }
+
+  async function expectInvalidResponse(
+    chunks: Uint8Array[],
+    status = 200,
+  ): Promise<ModelLocalError> {
+    try {
+      await postJsonNoRedirect({
+        fetchImpl: staticFetch(streamResponse(chunks, { status })),
+        url: LOOPBACK_URL,
+        body: {},
+        apiKey: SECRET_TOKEN,
+        timeoutMs: undefined,
+      });
+      expect.unreachable();
+    } catch (error) {
+      const err = expectRedacted(error);
+      expect(err.code).toBe("invalid_response");
+      expect(err.message).not.toContain(SECRET_BODY_MARKER);
+      return err;
+    }
+    throw new Error("unreachable");
+  }
+
+  it("accepts valid multibyte split across single-byte chunks (both adapters)", async () => {
+    const content = `héllo 🌍 ${SECRET_BODY_MARKER} tail`;
+    const ollamaBytes = encoder.encode(JSON.stringify(ollamaBody(content)));
+    const ollama = createOllamaGateway({
+      baseUrl: "http://127.0.0.1:11434",
+      fetchImpl: staticFetch(streamResponse(byteChunks(ollamaBytes))),
+    });
+    const ollamaResult = await ollama.chat({
+      model: "m",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(ollamaResult.text).toBe(content);
+
+    const openaiBytes = encoder.encode(JSON.stringify(openaiBody(content)));
+    const openai = createOpenAICompatibleGateway({
+      baseUrl: "http://127.0.0.1:8000",
+      fetchImpl: staticFetch(streamResponse(byteChunks(openaiBytes))),
+    });
+    const openaiResult = await openai.chat({
+      model: "m",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(openaiResult.text).toBe(content);
+  });
+
+  it("rejects a truncated (incomplete) multibyte sequence", async () => {
+    // Lead byte 0xC3 ("é") with no continuation, then EOF.
+    const bytes = concat(
+      encoder.encode(`{"marker":"${SECRET_BODY_MARKER}","pad":"`),
+      new Uint8Array([0xc3]),
+    );
+    await expectInvalidResponse(byteChunks(bytes));
+  });
+
+  it("rejects an overlong encoding split across chunks", async () => {
+    // Overlong "/" (C0 AF); bytes split so no single chunk holds the pair.
+    const bytes = concat(
+      encoder.encode(`{"marker":"${SECRET_BODY_MARKER}","pad":"`),
+      new Uint8Array([0xc0]),
+      new Uint8Array([0xaf]),
+      encoder.encode(`"}`),
+    );
+    await expectInvalidResponse(byteChunks(bytes, 1));
+  });
+
+  it("rejects a surrogate encoding split across chunks", async () => {
+    // CESU-8 U+D800 (ED A0 80) is never valid UTF-8.
+    const bytes = concat(
+      encoder.encode(`{"marker":"${SECRET_BODY_MARKER}","pad":"`),
+      new Uint8Array([0xed]),
+      new Uint8Array([0xa0, 0x80]),
+      encoder.encode(`"}`),
+    );
+    await expectInvalidResponse(byteChunks(bytes, 1));
+  });
+
+  it("rejects an invalid continuation byte split across chunks", async () => {
+    // E2 28 A6: second byte 0x28 is not a continuation byte.
+    const bytes = concat(
+      encoder.encode(`{"marker":"${SECRET_BODY_MARKER}","pad":"`),
+      new Uint8Array([0xe2]),
+      new Uint8Array([0x28, 0xa6]),
+      encoder.encode(`"}`),
+    );
+    await expectInvalidResponse(byteChunks(bytes, 1));
+  });
+
+  it("maps malformed bytes on non-2xx to invalid_response (both adapters)", async () => {
+    const bad = concat(
+      encoder.encode(`error ${SECRET_BODY_MARKER} `),
+      new Uint8Array([0xff]),
+    );
+    await expectInvalidResponse(byteChunks(bad), 500);
+
+    for (const gateway of [
+      createOllamaGateway({
+        baseUrl: "http://127.0.0.1:11434",
+        apiKey: SECRET_TOKEN,
+        fetchImpl: staticFetch(
+          streamResponse(byteChunks(bad), { status: 500 }),
+        ),
+      }),
+      createOpenAICompatibleGateway({
+        baseUrl: "http://127.0.0.1:8000",
+        apiKey: SECRET_TOKEN,
+        fetchImpl: staticFetch(
+          streamResponse(byteChunks(bad), { status: 500 }),
+        ),
+      }),
+    ]) {
+      try {
+        await gateway.chat({
+          model: "m",
+          messages: [{ role: "user", content: "hi" }],
+        });
+        expect.unreachable();
+      } catch (error) {
+        const err = expectRedacted(error);
+        expect(err.code).toBe("invalid_response");
+        expect(err.message).not.toContain("500");
+      }
+    }
+  });
+
+  it("rejects malformed UTF-8 at the exact byte boundary (cap unchanged)", async () => {
+    // Exactly MAX bytes ending in lone continuation byte 0x80: within the
+    // cap, so the failure must be a decode rejection, not oversized.
+    const prefix = encoder.encode(`{"ok":true,"pad":"`);
+    const suffix = encoder.encode(`"}`);
+    const fill = MAX_RESPONSE_BYTES - prefix.byteLength - suffix.byteLength - 1;
+    const bytes = concat(
+      prefix,
+      new Uint8Array(fill).fill(97),
+      new Uint8Array([0x80]),
+      suffix,
+    );
+    expect(bytes.byteLength).toBe(MAX_RESPONSE_BYTES);
+    const err = await expectInvalidResponse(byteChunks(bytes, 8192));
+    expect(err.message).not.toMatch(/oversized/i);
+  });
+
+  it("rejects malformed bodies in both adapters with redacted errors", async () => {
+    const bad = concat(
+      encoder.encode(`{"marker":"${SECRET_BODY_MARKER}","pad":"`),
+      new Uint8Array([0xc0, 0xaf]),
+      encoder.encode(`"}`),
+    );
+    for (const gateway of [
+      createOllamaGateway({
+        baseUrl: "http://127.0.0.1:11434",
+        apiKey: SECRET_TOKEN,
+        fetchImpl: staticFetch(streamResponse(byteChunks(bad, 1))),
+      }),
+      createOpenAICompatibleGateway({
+        baseUrl: "http://127.0.0.1:8000",
+        apiKey: SECRET_TOKEN,
+        fetchImpl: staticFetch(streamResponse(byteChunks(bad, 1))),
+      }),
+    ]) {
+      try {
+        await gateway.chat({
+          model: "m",
+          messages: [{ role: "user", content: "hi" }],
+        });
+        expect.unreachable();
+      } catch (error) {
+        const err = expectRedacted(error);
+        expect(err.code).toBe("invalid_response");
+      }
+    }
+  });
+});

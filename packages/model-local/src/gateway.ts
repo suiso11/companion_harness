@@ -701,8 +701,9 @@ function cancelReaderQuietly(reader: BoundedBodyReader, reason: unknown): void {
 /**
  * Read at most `MAX_RESPONSE_BYTES + 1` UTF-8 bytes from the response
  * stream, cancel the reader on overflow, and decode only bytes within the
- * bound (chunks are merged before a single `TextDecoder` pass so multibyte
- * characters split across chunks survive). Byte length
+ * bound (chunks are merged before a single fatal `TextDecoder` pass so
+ * valid multibyte characters split across chunks survive while malformed
+ * sequences are rejected instead of replaced with U+FFFD). Byte length
  * (`Uint8Array.byteLength`) is enforced, never JS string length.
  * Aborting `controller` (external signal or timeout guard) cancels the
  * reader; external cancellation rethrows the original abort rejection
@@ -808,7 +809,20 @@ async function readBoundedBodyText(
       merged.set(chunk, offset);
       offset += chunk.byteLength;
     }
-    return new TextDecoder().decode(merged);
+    // Fatal UTF-8: malformed sequences (truncated, overlong, surrogate,
+    // bad continuation) reject here before JSON parsing instead of
+    // surfacing as U+FFFD replacement characters. The error is fixed and
+    // redacted (no bytes, body, or URL) and always `invalid_response`,
+    // including on non-2xx drains whose status mapping cannot apply to an
+    // undecodable body.
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(merged);
+    } catch {
+      throw new ModelLocalError(
+        "invalid_response",
+        "model returned an invalid response",
+      );
+    }
   } finally {
     controller.signal.removeEventListener("abort", onControllerAbort);
     try {
