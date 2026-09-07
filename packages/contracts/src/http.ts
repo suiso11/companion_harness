@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { RunEventSchema } from "./events.js";
+import { LatestRunEventSchema, M0RunEventSchema } from "./events.js";
 import { IdempotencyScopeSchema, UnixMsSchema, UuidSchema } from "./ids.js";
 import { RunResultSchema } from "./run_result.js";
 import { ActiveStatusSchema, RunStatusSchema } from "./run_status.js";
@@ -178,12 +178,29 @@ export type EventsQuery = z.infer<typeof EventsQuerySchema>;
 export type EventsQueryInput = z.input<typeof EventsQuerySchema>;
 
 /**
- * Events page (§12.2): `nextAfter` is the max returned seq (or the request
- * `after` when empty); `terminal` derives from Run status, never from the
- * event list.
+ * Exact M0 events page (§12.2): `nextAfter` is the max returned seq (or the
+ * request `after` when empty); `terminal` derives from Run status, never
+ * from the event list. Frozen: validates the exact M0 envelope registry
+ * only (rejects `reference.presented`, M1 codes, and any M2+ names/rows).
+ */
+export const M0EventsResponseSchema = z.strictObject({
+  events: z.array(M0RunEventSchema),
+  nextAfter: z.number().int().min(0),
+  hasMore: z.boolean(),
+  terminal: z.boolean(),
+});
+export type M0EventsResponse = z.infer<typeof M0EventsResponseSchema>;
+
+/**
+ * Latest (M2) events page (§12.2): same cursor semantics as the exact M0
+ * page, but events validate the same `LatestRunEvent` registry returned by
+ * `KernelRepository.getEvents` — including `reference.presented`,
+ * `model.step.*` (structural metadata only, never raw model content), and
+ * V1 historical plus V2 durable `run.completed` rows. The closed 13-type
+ * registry still rejects unknown future event names.
  */
 export const EventsResponseSchema = z.strictObject({
-  events: z.array(RunEventSchema),
+  events: z.array(LatestRunEventSchema),
   nextAfter: z.number().int().min(0),
   hasMore: z.boolean(),
   terminal: z.boolean(),

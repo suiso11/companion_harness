@@ -8,8 +8,17 @@
  * details, reference-context CAS DTOs, stored-only API responses, Markdown
  * tool inputs/outputs with exact §14.6 bounds, freshness, reference error
  * codes, and the non-final `reference.presented` event. M0 registries stay
- * exact; `parseRunEvent` / `parseRunEventPayload` serve the latest (M1)
- * registry while `parseM0RunEvent` / `M0RunEventSchema` pin M0 assertions.
+ * exact; `parseRunEvent` / `parseRunEventPayload` serve the latest (M2)
+ * registry while `parseM0RunEvent` / `M0RunEventSchema` pin M0 assertions
+ * and `parseM1RunEvent` / `M1RunEventSchema` pin M1 assertions.
+ *
+ * M2 adds StructuredAnswer contracts (see `./structured_answer.js`): exact
+ * §15.8 part/text/citation/16KiB bounds with structural rN citations and
+ * the reserved `answer.submit` terminal protocol name, plus model-step
+ * contracts (see `./model.js`): the fixed redacted model/answer error
+ * vocabulary and the non-final `model.step.started` / `model.step.completed`
+ * / `model.step.failed` structural-metadata events. M0/M1 registries stay
+ * exact; `M2*` / `Latest*` serve the latest (M2) registry.
  */
 
 export type {
@@ -19,6 +28,8 @@ export type {
   M0RunEventType,
   M1RunEvent,
   M1RunEventType,
+  M2RunEvent,
+  M2RunEventType,
   RunEvent,
   TerminalEventType,
 } from "./events.js";
@@ -31,16 +42,28 @@ export {
   LatestRunEventTypeSchema,
   LatestToolCompletedPayloadSchema,
   M0_RUN_EVENT_TYPES,
+  M0RunCompletedPayloadSchema,
   M0RunEventSchema,
   M0RunEventTypeSchema,
   M0ToolCompletedPayloadSchema,
   M1_RUN_EVENT_PAYLOAD_SCHEMAS,
   M1_RUN_EVENT_TYPES,
+  M1EventsResponseSchema,
+  M1RunCompletedPayloadSchema,
   M1RunEventSchema,
   M1RunEventTypeSchema,
   M1ToolCompletedPayloadSchema,
+  M2_RUN_EVENT_PAYLOAD_SCHEMAS,
+  M2_RUN_EVENT_TYPES,
+  M2EventsResponseSchema,
+  M2RunEventSchema,
+  M2RunEventTypeSchema,
   parseM0RunEvent,
   parseM0RunEventPayload,
+  parseM1RunEvent,
+  parseM1RunEventPayload,
+  parseM2RunEvent,
+  parseM2RunEventPayload,
   parseRunEvent,
   parseRunEventPayload,
   REFERENCE_PRESENTED_EVENT_TYPE,
@@ -88,6 +111,7 @@ export type {
   HistoryResponse,
   IdempotencyLookupQuery,
   IdempotencyLookupResponse,
+  M0EventsResponse,
   PostMessageRequest,
   PostMessageResponse,
   PostRetryRequest,
@@ -113,6 +137,7 @@ export {
   HistoryResponseSchema,
   IdempotencyLookupQuerySchema,
   IdempotencyLookupResponseSchema,
+  M0EventsResponseSchema,
   PostMessageRequestSchema,
   PostMessageResponseSchema,
   PostRetryRequestSchema,
@@ -139,6 +164,33 @@ export {
   UUID_V4_REGEX,
   UuidSchema,
 } from "./ids.js";
+export type {
+  M2ModelErrorCode,
+  M2ModelErrorSchemaVersion,
+  M2ModelStepEventType,
+  ModelStepCompletedPayload,
+  ModelStepDurationMs,
+  ModelStepFailedPayload,
+  ModelStepNumber,
+  ModelStepStartedPayload,
+  ModelStepUsage,
+} from "./model.js";
+export {
+  KNOWN_M2_MODEL_ERROR_CODES,
+  M2_MODEL_ERROR_CODE_REGISTRY,
+  M2_MODEL_ERROR_CODES,
+  M2_MODEL_STEP_EVENT_TYPES,
+  M2ModelErrorCodeSchema,
+  M2ModelStepEventTypeSchema,
+  MAX_MODEL_STEPS_PER_RUN,
+  ModelStepCompletedPayloadSchema,
+  ModelStepDurationMsSchema,
+  ModelStepFailedPayloadSchema,
+  ModelStepNumberSchema,
+  ModelStepStartedPayloadSchema,
+  ModelStepUsageSchema,
+  parseM2ModelErrorCode,
+} from "./model.js";
 export type {
   CanonicalKey,
   CanonicalResourceDetail,
@@ -255,13 +307,18 @@ export {
   serializeExpandedLinkGraphEntry,
   utf8ByteLength,
 } from "./references.js";
-export type { RunResult, RunResultV1 } from "./run_result.js";
+export type { RunResult, RunResultV1, RunResultV2 } from "./run_result.js";
 export {
+  buildRunResultV2,
   MAX_ASSISTANT_TEXT_LENGTH,
+  parseM0RunResult,
   parseRunResult,
   RUN_RESULT_REGISTRY,
+  RUN_RESULT_V2_VERSION,
   RunResultSchema,
   RunResultV1Schema,
+  RunResultV2Schema,
+  renderRunResultText,
 } from "./run_result.js";
 export type { ActiveStatus, RunStatus, TerminalStatus } from "./run_status.js";
 export {
@@ -273,6 +330,32 @@ export {
   TERMINAL_STATUSES,
   TerminalStatusSchema,
 } from "./run_status.js";
+export type {
+  AnswerSubmitToolInput,
+  CitationId,
+  StructuredAnswer,
+  StructuredAnswerPart,
+  StructuredAnswerSchemaVersion,
+} from "./structured_answer.js";
+export {
+  ANSWER_SUBMIT_TOOL_NAME,
+  AnswerSubmitToolInputSchema,
+  CITATION_ID_REGEX,
+  CitationIdSchema,
+  MAX_CITATIONS_PER_PART,
+  MAX_PART_TEXT_CODE_POINTS,
+  MAX_STRUCTURED_ANSWER_BYTES,
+  MAX_STRUCTURED_ANSWER_PARTS,
+  MIN_PART_TEXT_CODE_POINTS,
+  MIN_STRUCTURED_ANSWER_PARTS,
+  measureStructuredAnswerBytes,
+  parseStructuredAnswer,
+  RESERVED_ANSWER_NAMESPACE,
+  STRUCTURED_ANSWER_REGISTRY,
+  STRUCTURED_ANSWER_VERSION,
+  StructuredAnswerPartSchema,
+  StructuredAnswerSchema,
+} from "./structured_answer.js";
 export type {
   ActualOutcome,
   LatestToolErrorCode,

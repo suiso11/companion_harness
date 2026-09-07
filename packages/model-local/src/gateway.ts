@@ -1,0 +1,966 @@
+// Provider-neutral ModelGateway contract plus shared request plumbing.
+//
+// Guarantees: loopback-only HTTP endpoints (see base_url.ts; `localhost`
+// is pinned to literal `127.0.0.1` at parse time with no DNS lookup),
+// per-request revalidation of the concrete fetch URL immediately before
+// fetch (literal `127.0.0.1`/`::1` only, so mutated or unpinned targets
+// never reach fetch), fetch with `redirect: "error"` (no redirect following), single attempt (no retry,
+// no fallback, no router), and redacted failures (no auth token, raw
+// response/body, prompt, or reasoning in any error).
+
+import {
+  assertPinnedLoopbackFetchUrl,
+  normalizeLoopbackBaseUrl,
+} from "./base_url.js";
+import { ModelLocalError } from "./errors.js";
+import type {
+  ChatMessage,
+  ChatRequest,
+  ChatResult,
+  FetchImpl,
+  GatewayOptions,
+  ModelCapabilities,
+  ToolDefinition,
+} from "./types.js";
+
+/** Provider-neutral local model gateway. */
+export interface ModelGateway {
+  readonly provider: "ollama" | "openai-compatible";
+  readonly capabilities: ModelCapabilities;
+  /** Normalized endpoint URL (no trailing slash, path prefix included). */
+  readonly baseUrl: string;
+  /** Full chat-completions-style endpoint URL actually POSTed to. */
+  readonly chatUrl: string;
+  /**
+   * Single chat attempt (no retry). The optional `signal` aborts the
+   * underlying fetch when present; gateways must forward it. Omitting the
+   * argument preserves backward compatibility.
+   */
+  chat(
+    request: ChatRequest,
+    options?: { signal?: AbortSignal },
+  ): Promise<ChatResult>;
+}
+
+/** Maximum sizes accepted on gateway inputs (generic, prompt-safe). */
+export const MAX_MODEL_NAME_LENGTH = 256;
+/**
+ * Maximum accepted chat message content length (65_536 chars == 64KiB).
+ * Aligned with the kernel per-call model-facing output budget so a legal
+ * <=64KiB tool result is never rejected by a lower arbitrary message cap.
+ */
+export const MAX_MESSAGE_CONTENT_LENGTH = 65_536;
+export const MAX_MESSAGES_PER_REQUEST = 128;
+export const MAX_TOOLS_PER_REQUEST = 32;
+/**
+ * Maximum provider HTTP response body accepted by `postJsonNoRedirect`
+ * (1 MiB, counted in UTF-8 bytes, not JS string characters).
+ *
+ * Both success and non-2xx bodies share this bound: an oversized
+ * `Content-Length` is rejected before reading, otherwise the body stream
+ * is read up to `MAX_RESPONSE_BYTES + 1` bytes (catching absent or
+ * dishonest lengths) and the reader is cancelled on overflow. Only bytes
+ * within the bound are decoded and `JSON.parse`d. Failures use fixed
+ * redacted messages (no body, URL, apiKey, or prompt).
+ */
+export const MAX_RESPONSE_BYTES = 1_048_576;
+/** Maximum prior native tool calls carried on one assistant message. */
+export const MAX_TOOL_CALLS_PER_MESSAGE = 32;
+/**
+ * Maximum accepted native tool-call arguments payload per call (32KiB,
+ * counted in UTF-8 bytes, not JS string characters).
+ *
+ * Aligned with the kernel ToolBroker `maxInputBytesPerCall` budget (32KiB
+ * canonical input bytes): a provider arguments payload at or under this
+ * bound may still be rejected downstream by broker validation/reservation,
+ * which remains authoritative. Payloads over this bound are rejected here
+ * with fixed redacted `invalid_response` before accepting/normalizing, and
+ * are never truncated. The broker still validates/reserves every accepted
+ * ordinary call.
+ */
+export const MAX_TOOL_CALL_ARGUMENTS_BYTES = 32 * 1024;
+
+/** UTF-8 byte length of a string (never JS character count). */
+export function utf8ByteLength(text: string): number {
+  return new TextEncoder().encode(text).byteLength;
+}
+
+function canonicalizeForSize(value: unknown): unknown {
+  if (value === null || value === undefined) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => canonicalizeForSize(entry));
+  }
+  if (isRecord(value)) {
+    // Null-prototype sink: assigning provider-controlled keys such as
+    // `__proto__` creates a plain own property instead of invoking the
+    // `Object.prototype` setter (which would mutate the prototype and drop
+    // the key from serialization, undercounting size). Every enumerable
+    // own key is preserved and sorted for deterministic measurement;
+    // legal JSON keys are never rejected by name.
+    const sorted: Record<string, unknown> = Object.create(null);
+    for (const key of Object.keys(value).sort()) {
+      sorted[key] = canonicalizeForSize(value[key]);
+    }
+    return sorted;
+  }
+  return value;
+}
+
+/**
+ * Deterministic (sorted-keys, no whitespace) JSON serialization for
+ * tool-call arguments size measurement. Key order does not affect the
+ * measured byte length; sorting keeps the measurement stable across
+ * providers. Mirrors the kernel canonical form for size alignment.
+ */
+export function canonicalToolArgumentsJson(value: unknown): string {
+  return JSON.stringify(canonicalizeForSize(value)) ?? "undefined";
+}
+
+/**
+ * Reject an oversize tool-call arguments payload with fixed redacted
+ * `invalid_response` (no raw arguments or provider body in the error).
+ */
+export function assertToolArgumentsByteLength(byteLength: number): void {
+  if (byteLength > MAX_TOOL_CALL_ARGUMENTS_BYTES) {
+    throw new ModelLocalError(
+      "invalid_response",
+      "model returned an invalid response",
+    );
+  }
+}
+
+/**
+ * Reserved native terminal protocol identity. Used ONLY as a fixed
+ * structural classification for normalization failures (never persisted,
+ * never echoed): malformed `answer.submit` arguments reject as
+ * `answer_invalid` so the caller can repair, while every other tool keeps
+ * the generic `tool_call_invalid` / `invalid_response` path. Raw id, args,
+ * and provider body never enter the error.
+ */
+export const ANSWER_SUBMIT_TOOL_NAME = "answer.submit" as const;
+
+/** True only for the reserved `answer.submit` tool identity. */
+export function isAnswerSubmitTool(name: unknown): boolean {
+  return name === ANSWER_SUBMIT_TOOL_NAME;
+}
+
+/**
+ * Fixed redacted normalization failure for `answer.submit` arguments
+ * (malformed JSON, non-object, or oversized). No raw detail carried.
+ */
+export function answerArgsInvalidError(): ModelLocalError {
+  return new ModelLocalError(
+    "answer_invalid",
+    "model returned an invalid answer",
+  );
+}
+
+/**
+ * Fixed redacted normalization failure for non-answer tool-call arguments
+ * (malformed JSON shape or non-object). No raw detail carried.
+ */
+export function toolArgsInvalidError(): ModelLocalError {
+  return new ModelLocalError(
+    "tool_call_invalid",
+    "model returned an invalid tool call",
+  );
+}
+
+/** Throw the fixed per-tool normalization failure (answer vs ordinary). */
+export function throwInvalidToolArguments(toolName: string): never {
+  if (isAnswerSubmitTool(toolName)) {
+    throw answerArgsInvalidError();
+  }
+  throw toolArgsInvalidError();
+}
+
+/**
+ * Per-tool arguments size bound: `answer.submit` oversize rejects as fixed
+ * `answer_invalid` (repairable), every other tool as fixed `invalid_response`
+ * (generic, unchanged). Never truncates, never echoes raw payloads.
+ */
+export function assertToolArgumentsByteLengthForTool(
+  byteLength: number,
+  toolName: string,
+): void {
+  if (byteLength > MAX_TOOL_CALL_ARGUMENTS_BYTES) {
+    if (isAnswerSubmitTool(toolName)) {
+      throw answerArgsInvalidError();
+    }
+    throw new ModelLocalError(
+      "invalid_response",
+      "model returned an invalid response",
+    );
+  }
+}
+/** Maximum tool-call id/name lengths for history validation. */
+export const MAX_TOOL_CALL_ID_LENGTH = 256;
+export const MAX_TOOL_CALL_NAME_LENGTH = 128;
+
+/**
+ * True when an apiKey is a legal HTTP Authorization header value.
+ *
+ * Accepted per character (no normalization applied): printable ASCII
+ * U+0020..U+007E plus Latin-1 U+00A0..U+00FF. Rejected: C0 controls
+ * U+0000..U+001F (including CR/LF), DEL U+007F, C1 controls
+ * U+0080..U+009F, and anything above U+00FF (emoji and other
+ * non-Latin-1 code points that header conversion cannot represent).
+ */
+export function isValidApiKeyHeaderValue(value: string): boolean {
+  for (const char of value) {
+    const code = char.codePointAt(0) as number;
+    if (code < 0x20) {
+      return false;
+    }
+    if (code === 0x7f) {
+      return false;
+    }
+    if (code >= 0x80 && code <= 0x9f) {
+      return false;
+    }
+    if (code > 0xff) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Validate advertised capabilities against a request: tools require
+ * native tool calling. Throws `unsupported_capability`.
+ */
+export function assertToolCallingCapability(
+  capabilities: ModelCapabilities,
+  tools: readonly ToolDefinition[] | undefined,
+): void {
+  if (tools !== undefined && tools.length > 0 && !capabilities.toolCalling) {
+    throw new ModelLocalError(
+      "unsupported_capability",
+      "model does not support native tool calling",
+    );
+  }
+}
+
+/** Validate a gateway chat request (generic messages, no prompt echo). */
+export function validateChatRequest(request: ChatRequest): void {
+  if (typeof request !== "object" || request === null) {
+    throw new ModelLocalError("invalid_request", "model request is invalid");
+  }
+  if (
+    typeof request.model !== "string" ||
+    request.model.length === 0 ||
+    request.model.length > MAX_MODEL_NAME_LENGTH
+  ) {
+    throw new ModelLocalError(
+      "invalid_request",
+      "model request carries an invalid model name",
+    );
+  }
+  if (
+    !Array.isArray(request.messages) ||
+    request.messages.length === 0 ||
+    request.messages.length > MAX_MESSAGES_PER_REQUEST
+  ) {
+    throw new ModelLocalError(
+      "invalid_request",
+      "model request must carry at least one message",
+    );
+  }
+  for (const message of request.messages) {
+    validateChatMessage(message);
+  }
+  if (request.tools !== undefined) {
+    validateToolDefinitions(request.tools);
+  }
+}
+
+function validateChatMessage(message: ChatMessage): void {
+  if (typeof message !== "object" || message === null) {
+    throw new ModelLocalError("invalid_request", "model message is invalid");
+  }
+  if (
+    message.role !== "system" &&
+    message.role !== "user" &&
+    message.role !== "assistant" &&
+    message.role !== "tool"
+  ) {
+    throw new ModelLocalError(
+      "invalid_request",
+      "model message carries an invalid role",
+    );
+  }
+  if (
+    typeof message.content !== "string" ||
+    message.content.length > MAX_MESSAGE_CONTENT_LENGTH
+  ) {
+    throw new ModelLocalError(
+      "invalid_request",
+      "model message carries invalid content",
+    );
+  }
+  if (
+    message.toolCallId !== undefined &&
+    (typeof message.toolCallId !== "string" ||
+      message.toolCallId.length === 0 ||
+      message.toolCallId.length > MAX_TOOL_CALL_ID_LENGTH)
+  ) {
+    throw new ModelLocalError(
+      "invalid_request",
+      "model message carries an invalid tool call id",
+    );
+  }
+  if (
+    message.toolName !== undefined &&
+    (typeof message.toolName !== "string" ||
+      message.toolName.length === 0 ||
+      message.toolName.length > MAX_TOOL_CALL_NAME_LENGTH)
+  ) {
+    throw new ModelLocalError(
+      "invalid_request",
+      "model message carries an invalid tool name",
+    );
+  }
+  if (message.toolName !== undefined && message.role !== "tool") {
+    throw new ModelLocalError(
+      "invalid_request",
+      "model message carries a tool name on a non-tool role",
+    );
+  }
+  if (message.toolCallId !== undefined && message.role !== "tool") {
+    throw new ModelLocalError(
+      "invalid_request",
+      "model message carries a tool call id on a non-tool role",
+    );
+  }
+  if (message.role === "tool") {
+    // Provider-neutral correlation: every tool result must carry both the
+    // originating call id and tool name (non-empty, bounded). Adapters
+    // serialize provider-natively (OpenAI `tool_call_id`, Ollama
+    // `tool_name`) but validation requires both so neither wire can emit
+    // an uncorrelated bare tool message. No ids are echoed in errors.
+    if (
+      typeof message.toolCallId !== "string" ||
+      message.toolCallId.length === 0 ||
+      message.toolCallId.length > MAX_TOOL_CALL_ID_LENGTH
+    ) {
+      throw new ModelLocalError(
+        "invalid_request",
+        "model message carries an invalid tool call id",
+      );
+    }
+    if (
+      typeof message.toolName !== "string" ||
+      message.toolName.length === 0 ||
+      message.toolName.length > MAX_TOOL_CALL_NAME_LENGTH
+    ) {
+      throw new ModelLocalError(
+        "invalid_request",
+        "model message carries an invalid tool name",
+      );
+    }
+  }
+  validateHistoryToolCalls(message);
+}
+
+function validateHistoryToolCalls(message: ChatMessage): void {
+  if (message.toolCalls === undefined) {
+    return;
+  }
+  if (message.role !== "assistant") {
+    throw new ModelLocalError(
+      "invalid_request",
+      "model message carries tool calls on a non-assistant role",
+    );
+  }
+  if (
+    !Array.isArray(message.toolCalls) ||
+    message.toolCalls.length > MAX_TOOL_CALLS_PER_MESSAGE
+  ) {
+    throw new ModelLocalError(
+      "invalid_request",
+      "model message carries invalid tool calls",
+    );
+  }
+  for (const call of message.toolCalls) {
+    if (
+      typeof call !== "object" ||
+      call === null ||
+      typeof (call as { id?: unknown }).id !== "string" ||
+      (call as { id: string }).id.length === 0 ||
+      (call as { id: string }).id.length > MAX_TOOL_CALL_ID_LENGTH ||
+      typeof (call as { name?: unknown }).name !== "string" ||
+      (call as { name: string }).name.length === 0 ||
+      (call as { name: string }).name.length > MAX_TOOL_CALL_NAME_LENGTH ||
+      !isRecord((call as { arguments?: unknown }).arguments)
+    ) {
+      throw new ModelLocalError(
+        "invalid_request",
+        "model message carries invalid tool calls",
+      );
+    }
+  }
+}
+
+function validateToolDefinitions(tools: ToolDefinition[]): void {
+  if (tools.length > MAX_TOOLS_PER_REQUEST) {
+    throw new ModelLocalError(
+      "invalid_request",
+      "model request carries too many tools",
+    );
+  }
+  const seen = new Set<string>();
+  for (const tool of tools) {
+    if (
+      typeof tool !== "object" ||
+      tool === null ||
+      typeof tool.name !== "string" ||
+      tool.name.length === 0 ||
+      tool.name.length > 128 ||
+      typeof tool.description !== "string" ||
+      tool.description.length === 0 ||
+      tool.description.length > 1024
+    ) {
+      throw new ModelLocalError(
+        "invalid_request",
+        "model request carries an invalid tool definition",
+      );
+    }
+    if (seen.has(tool.name)) {
+      throw new ModelLocalError(
+        "invalid_request",
+        "model request carries duplicate tool names",
+      );
+    }
+    seen.add(tool.name);
+    if (
+      tool.parameters !== undefined &&
+      (typeof tool.parameters !== "object" ||
+        tool.parameters === null ||
+        Array.isArray(tool.parameters))
+    ) {
+      throw new ModelLocalError(
+        "invalid_request",
+        "model request carries an invalid tool schema",
+      );
+    }
+  }
+}
+
+export interface ResolvedGatewayConfig {
+  baseUrl: string;
+  fetchImpl: FetchImpl;
+  apiKey: string | undefined;
+  timeoutMs: number | undefined;
+}
+
+/** Validate gateway options: loopback base URL, fetch impl, timeout. */
+export function resolveGatewayConfig(
+  options: GatewayOptions,
+): ResolvedGatewayConfig {
+  if (typeof options !== "object" || options === null) {
+    throw new ModelLocalError("invalid_request", "model options are invalid");
+  }
+  const baseUrl = normalizeLoopbackBaseUrl(options.baseUrl);
+  let fetchImpl = options.fetchImpl;
+  if (fetchImpl === undefined) {
+    const globalFetch = (globalThis as { fetch?: FetchImpl }).fetch;
+    if (typeof globalFetch !== "function") {
+      throw new ModelLocalError(
+        "transport_error",
+        "model transport is unavailable",
+      );
+    }
+    fetchImpl = globalFetch.bind(globalThis);
+  }
+  if (
+    options.apiKey !== undefined &&
+    (typeof options.apiKey !== "string" ||
+      options.apiKey.length === 0 ||
+      !isValidApiKeyHeaderValue(options.apiKey))
+  ) {
+    throw new ModelLocalError("invalid_request", "model auth is invalid");
+  }
+  if (
+    options.timeoutMs !== undefined &&
+    (!Number.isInteger(options.timeoutMs) ||
+      options.timeoutMs < 1 ||
+      options.timeoutMs > 120_000)
+  ) {
+    throw new ModelLocalError("invalid_request", "model timeout is invalid");
+  }
+  return {
+    baseUrl,
+    fetchImpl,
+    apiKey: options.apiKey,
+    timeoutMs: options.timeoutMs,
+  };
+}
+
+/**
+ * POST a JSON body with `redirect: "error"` (redirects rejected, never
+ * followed) exactly once (no retry). Returns the parsed JSON body.
+ * All failures are redacted ModelLocalError instances, except external
+ * cancellation: when `signal` aborts, the original abort rejection is
+ * rethrown untouched so callers can distinguish cancellation from a
+ * transport timeout. The signal actually aborts the underlying fetch
+ * (not a Promise.race alone) and is composed with the optional
+ * single-attempt transport `timeoutMs` guard, which also covers bounded
+ * body reading. Response bodies are bounded by `MAX_RESPONSE_BYTES`
+ * (byte length, never `response.json()` on unbounded data); see the
+ * constant for the exact reader behavior.
+ */
+export async function postJsonNoRedirect(options: {
+  fetchImpl: FetchImpl;
+  url: string;
+  body: unknown;
+  apiKey: string | undefined;
+  timeoutMs: number | undefined;
+  signal?: AbortSignal;
+}): Promise<unknown> {
+  // Revalidate the concrete fetch target immediately before use: construction-
+  // time validation alone leaves a bypass window if the stored URL is mutated
+  // or joined incorrectly. Only literal loopback (no `localhost`) passes, so
+  // no DNS lookup occurs here and no rebinding/hosts-file name reaches fetch.
+  const safeUrl = assertPinnedLoopbackFetchUrl(options.url);
+  const externalSignal = options.signal;
+  if (isAborted(externalSignal)) {
+    throw toAbortRejection(externalSignal as AbortSignal);
+  }
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+  };
+  if (options.apiKey !== undefined) {
+    headers.authorization = `Bearer ${options.apiKey}`;
+  }
+  const controller = new AbortController();
+  const onExternalAbort = (): void => controller.abort();
+  if (externalSignal !== undefined) {
+    externalSignal.addEventListener("abort", onExternalAbort, { once: true });
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  if (options.timeoutMs !== undefined) {
+    timer = setTimeout(() => controller.abort(), options.timeoutMs);
+  }
+  let response: Response;
+  try {
+    try {
+      response = await options.fetchImpl(safeUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(options.body),
+        redirect: "error",
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (isAborted(externalSignal)) {
+        // External cancellation: preserve the abort rejection (no timeout
+        // mapping, no double classification, no raw detail added).
+        throw error;
+      }
+      throw mapFetchRejection(error);
+    }
+    // Bound the response body before JSON parsing (success and error
+    // statuses share the bound; `response.json()` is never called on
+    // unbounded data). An oversized declared `Content-Length` is rejected
+    // before reading; otherwise the stream is read up to
+    // `MAX_RESPONSE_BYTES + 1` bytes so absent or dishonest lengths are
+    // still caught, and the reader is cancelled on overflow. Only bytes
+    // within the bound are decoded and parsed. Errors are fixed redacted
+    // messages (no body, URL, apiKey, or prompt).
+    const requestFailed = (status: number): ModelLocalError =>
+      new ModelLocalError(
+        "request_failed",
+        `model request failed with status ${status}`,
+      );
+    const declared = parseDeclaredContentLength(response);
+    if (declared !== undefined && declared > MAX_RESPONSE_BYTES) {
+      cancelResponseBody(response);
+      if (!response.ok) {
+        throw requestFailed(response.status);
+      }
+      throw new ModelLocalError(
+        "invalid_response",
+        "model returned an oversized response",
+      );
+    }
+    if (!response.ok) {
+      // Drain the error body within the same bound (absent/dishonest
+      // lengths included) so a huge error payload cannot exhaust memory,
+      // then report only the fixed status failure.
+      await readBoundedBodyText(response, controller, externalSignal, {
+        tooLarge: () => requestFailed(response.status),
+        failed: () => requestFailed(response.status),
+      });
+      throw requestFailed(response.status);
+    }
+    const text = await readBoundedBodyText(
+      response,
+      controller,
+      externalSignal,
+      {
+        tooLarge: () =>
+          new ModelLocalError(
+            "invalid_response",
+            "model returned an oversized response",
+          ),
+        failed: () =>
+          new ModelLocalError(
+            "invalid_response",
+            "model returned an invalid response",
+          ),
+      },
+    );
+    try {
+      return JSON.parse(text) as unknown;
+    } catch {
+      throw new ModelLocalError(
+        "invalid_response",
+        "model returned an invalid response",
+      );
+    }
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+    if (externalSignal !== undefined) {
+      externalSignal.removeEventListener("abort", onExternalAbort);
+    }
+  }
+}
+
+/**
+ * Minimal body-reader shape (avoids naming stream lib types directly).
+ * `Uint8Array` chunk reads mirror `ReadableStreamDefaultReader.read()`.
+ */
+interface BoundedBodyReader {
+  read(): Promise<{ done: boolean; value?: Uint8Array }>;
+  cancel(reason?: unknown): Promise<void>;
+  releaseLock(): void;
+}
+
+/** Parse a `Content-Length` header to a safe byte count, if well-formed. */
+function parseDeclaredContentLength(response: Response): number | undefined {
+  const raw = response.headers.get("content-length");
+  if (raw === null) {
+    return undefined;
+  }
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    return undefined;
+  }
+  const value = Number(trimmed);
+  if (!Number.isSafeInteger(value) || value < 0) {
+    return undefined;
+  }
+  return value;
+}
+
+/** Best-effort release of an unread/rejected response stream. */
+function cancelResponseBody(response: Response): void {
+  let pending: Promise<void> | undefined;
+  try {
+    pending = response.body?.cancel();
+  } catch {
+    // Best effort: the fixed redacted error below carries no detail.
+    return;
+  }
+  if (pending !== undefined) {
+    // Attach the rejection handler synchronously and never await a
+    // hostile cancel: the fixed redacted error below stays authoritative
+    // and a rejecting/pending cancel cannot surface or hang the caller.
+    void pending.catch(() => {
+      // Best effort: cancel rejection is swallowed, never surfaced.
+    });
+  }
+}
+
+/**
+ * Best-effort reader cancel that can never produce an unhandled rejection,
+ * hang the caller, or replace the primary error. The rejection handler is
+ * attached synchronously (no `await` on a hostile cancel) and any
+ * synchronous throw is swallowed; callers throw their own authoritative
+ * redacted error or abort mapping afterwards.
+ */
+function cancelReaderQuietly(reader: BoundedBodyReader, reason: unknown): void {
+  let pending: Promise<void> | undefined;
+  try {
+    pending = reader.cancel(reason);
+  } catch {
+    // Best effort: the caller's primary error stays authoritative.
+    return;
+  }
+  if (pending !== undefined) {
+    void pending.catch(() => {
+      // Best effort: cancel rejection is swallowed, never surfaced.
+    });
+  }
+}
+
+/**
+ * Read at most `MAX_RESPONSE_BYTES + 1` UTF-8 bytes from the response
+ * stream, cancel the reader on overflow, and decode only bytes within the
+ * bound (chunks are merged before a single fatal `TextDecoder` pass so
+ * valid multibyte characters split across chunks survive while malformed
+ * sequences are rejected instead of replaced with U+FFFD). Byte length
+ * (`Uint8Array.byteLength`) is enforced, never JS string length.
+ * Aborting `controller` (external signal or timeout guard) cancels the
+ * reader; external cancellation rethrows the original abort rejection
+ * while timeout-guard aborts map to `timeout`. Other stream failures and
+ * overflows use the caller-supplied redacted factories. The reader lock is
+ * always released and the abort listener removed.
+ */
+async function readBoundedBodyText(
+  response: Response,
+  controller: AbortController,
+  externalSignal: AbortSignal | undefined,
+  failures: {
+    tooLarge: () => ModelLocalError;
+    failed: () => ModelLocalError;
+  },
+): Promise<string> {
+  if (isAborted(externalSignal)) {
+    throw toAbortRejection(externalSignal as AbortSignal);
+  }
+  const stream = response.body;
+  if (stream === null) {
+    return "";
+  }
+  const reader: BoundedBodyReader = stream.getReader();
+  const onControllerAbort = (): void => {
+    // Timeout/external-abort cleanup: never await a hostile reader and
+    // never surface its outcome. The handler is attached synchronously so
+    // a rejecting cancel cannot become an unhandled rejection; the abort
+    // mapping below (AbortError vs timeout) stays authoritative.
+    cancelReaderQuietly(
+      reader,
+      new DOMException("The operation was aborted.", "AbortError"),
+    );
+  };
+  controller.signal.addEventListener("abort", onControllerAbort, {
+    once: true,
+  });
+  try {
+    const chunks: Uint8Array[] = [];
+    let totalBytes = 0;
+    for (;;) {
+      let next: { done: boolean; value?: Uint8Array };
+      try {
+        next = await reader.read();
+      } catch {
+        if (isAborted(externalSignal)) {
+          throw toAbortRejection(externalSignal as AbortSignal);
+        }
+        if (controller.signal.aborted) {
+          throw new ModelLocalError("timeout", "model request timed out");
+        }
+        throw failures.failed();
+      }
+      if (next.done) {
+        // A timeout or external abort can surface as `done=true` (reader
+        // cancelled) instead of a read rejection: never accept EOF while
+        // aborted. External cancellation keeps its abort rejection;
+        // timeout-guard aborts map to `timeout`.
+        if (isAborted(externalSignal)) {
+          throw toAbortRejection(externalSignal as AbortSignal);
+        }
+        if (controller.signal.aborted) {
+          throw new ModelLocalError("timeout", "model request timed out");
+        }
+        break;
+      }
+      const value: Uint8Array | undefined = next.value;
+      if (value === undefined) {
+        if (isAborted(externalSignal)) {
+          throw toAbortRejection(externalSignal as AbortSignal);
+        }
+        if (controller.signal.aborted) {
+          throw new ModelLocalError("timeout", "model request timed out");
+        }
+        break;
+      }
+      totalBytes += value.byteLength;
+      if (totalBytes > MAX_RESPONSE_BYTES) {
+        // Overflow cleanup: fire-and-forget with a synchronous rejection
+        // handler (never await a hostile cancel). The redacted overflow
+        // error below is authoritative; a cancel rejection never replaces
+        // it or leaks into the output.
+        cancelReaderQuietly(
+          reader,
+          new DOMException("Response body exceeds limit.", "AbortError"),
+        );
+        throw failures.tooLarge();
+      }
+      chunks.push(value);
+    }
+    // Never decode a partially or fully read body after an abort: a
+    // cancelled reader may have returned `done=true` above (handled), or
+    // the abort may have landed between the final read and decode.
+    if (isAborted(externalSignal)) {
+      throw toAbortRejection(externalSignal as AbortSignal);
+    }
+    if (controller.signal.aborted) {
+      throw new ModelLocalError("timeout", "model request timed out");
+    }
+    const merged = new Uint8Array(totalBytes);
+    let offset = 0;
+    for (const chunk of chunks) {
+      merged.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    // Fatal UTF-8: malformed sequences (truncated, overlong, surrogate,
+    // bad continuation) reject here before JSON parsing instead of
+    // surfacing as U+FFFD replacement characters. The error is fixed and
+    // redacted (no bytes, body, or URL) and always `invalid_response`,
+    // including on non-2xx drains whose status mapping cannot apply to an
+    // undecodable body.
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(merged);
+    } catch {
+      throw new ModelLocalError(
+        "invalid_response",
+        "model returned an invalid response",
+      );
+    }
+  } finally {
+    controller.signal.removeEventListener("abort", onControllerAbort);
+    try {
+      reader.releaseLock();
+    } catch {
+      // Best effort: the stream is already cancelled or consumed.
+    }
+  }
+}
+
+/** Preserve (or synthesize) the external abort rejection for cancellation. */
+function isAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
+}
+
+/** Preserve (or synthesize) the external abort rejection for cancellation. */
+function toAbortRejection(signal: AbortSignal): unknown {
+  const reason = (signal as { reason?: unknown }).reason;
+  if (reason instanceof Error) {
+    return reason;
+  }
+  if (reason !== undefined && reason !== null) {
+    return reason;
+  }
+  return new DOMException("The operation was aborted.", "AbortError");
+}
+
+/** Map fetch rejections to redacted codes (redirects are never followed). */
+function mapFetchRejection(error: unknown): ModelLocalError {
+  if (error instanceof ModelLocalError) {
+    return error;
+  }
+  const message = error instanceof Error ? error.message.toLowerCase() : "";
+  if (message.includes("redirect")) {
+    return new ModelLocalError(
+      "request_failed",
+      "model request was redirected; redirects are not allowed",
+    );
+  }
+  if (error instanceof Error && error.name === "AbortError") {
+    // The only AbortController in this module is the single-attempt
+    // timeout guard, so an abort here means the step timed out (fixed
+    // safe code, no raw detail echoed).
+    return new ModelLocalError("timeout", "model request timed out");
+  }
+  return new ModelLocalError("transport_error", "model transport failed");
+}
+
+/**
+ * Enforce strict native tool-call results: unsolicited calls or calls to
+ * unknown tools are rejected (no free-text JSON emulation is performed
+ * anywhere; content text is never parsed for tool calls).
+ */
+export function validateNativeToolCalls(options: {
+  toolCalls: { id: string; name: string; arguments: unknown }[];
+  requestedTools: readonly ToolDefinition[] | undefined;
+}): void {
+  if (options.toolCalls.length === 0) {
+    return;
+  }
+  if (
+    options.requestedTools === undefined ||
+    options.requestedTools.length === 0
+  ) {
+    throw new ModelLocalError(
+      "tool_call_invalid",
+      "model returned tool calls without tools requested",
+    );
+  }
+  const known = new Set(options.requestedTools.map((tool) => tool.name));
+  for (const call of options.toolCalls) {
+    if (!known.has(call.name)) {
+      throw new ModelLocalError(
+        "tool_call_invalid",
+        "model requested an unknown tool",
+      );
+    }
+  }
+}
+
+/** Plain-object guard for provider payloads. */
+export function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Join a normalized loopback base URL with an absolute endpoint path.
+ * The join is serialized through the URL object (never `hostname` + port
+ * string surgery), so a bracketed IPv6 base such as `http://[::1]:11434`
+ * keeps standards-compliant brackets in the fetch URL. A base sub-path
+ * prefix is preserved (`{base}/prefix` + `/api/chat`).
+ */
+export function joinLoopbackPath(
+  normalizedBaseUrl: string,
+  path: string,
+): string {
+  const url = new URL(normalizedBaseUrl);
+  url.pathname = `${url.pathname.replace(/\/+$/, "")}${path}`;
+  url.search = "";
+  url.hash = "";
+  return url.href.replace(/\/+$/, "");
+}
+
+/**
+ * Extract optional token-count usage (input/output only). Returns the
+ * normalized summary when both counts are safe integers >= 0, returns
+ * undefined only when the provider omits both counts (undefined/null),
+ * and throws fixed redacted `invalid_response` for any present-but-invalid
+ * count (wrong type, fraction, negative, or above MAX_SAFE_INTEGER,
+ * including JSON-rounded values). No coercion, clamping, or truncation;
+ * raw blobs are never surfaced.
+ */
+export function extractModelUsage(
+  inputTokens: unknown,
+  outputTokens: unknown,
+): { inputTokens: number; outputTokens: number } | undefined {
+  const absentInput = inputTokens === undefined || inputTokens === null;
+  const absentOutput = outputTokens === undefined || outputTokens === null;
+  if (absentInput && absentOutput) {
+    return undefined;
+  }
+  if (!isSafeUsageCount(inputTokens) || !isSafeUsageCount(outputTokens)) {
+    throw new ModelLocalError(
+      "invalid_response",
+      "model returned an invalid response",
+    );
+  }
+  return {
+    inputTokens: inputTokens as number,
+    outputTokens: outputTokens as number,
+  };
+}
+
+/** True only for a nonnegative safe-integer token count (no coercion). */
+function isSafeUsageCount(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    (value as number) >= 0
+  );
+}

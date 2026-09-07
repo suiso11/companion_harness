@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@companion/contracts": "workspace:*",
+    "@companion/model-local": "workspace:*",
     "better-sqlite3": "13.0.3",
     "drizzle-orm": "0.45.2"
   },

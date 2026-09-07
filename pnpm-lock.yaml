@@ -29,6 +29,9 @@ importers:
       '@companion/kernel':
         specifier: workspace:*
         version: link:../../packages/kernel
+      '@companion/model-local':
+        specifier: workspace:*
+        version: link:../../packages/model-local
       '@hono/node-server':
         specifier: 2.1.1
         version: 2.1.1(hono@4.13.5)
@@ -92,6 +95,9 @@ importers:
       '@companion/contracts':
         specifier: workspace:*
         version: link:../contracts
+      '@companion/model-local':
+        specifier: workspace:*
+        version: link:../model-local
       better-sqlite3:
         specifier: 13.0.3
         version: 13.0.3
@@ -114,6 +120,15 @@ importers:
       zod:
         specifier: 4.5.4
         version: 4.5.4
+
+  packages/model-local:
+    devDependencies:
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: 3.2.4
+        version: 3.2.4(@types/debug@4.1.13)(@types/node@24.12.4)(tsx@4.20.6)
 
 packages:
 

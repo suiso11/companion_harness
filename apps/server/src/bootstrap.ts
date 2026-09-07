@@ -21,6 +21,7 @@ import { createMarkdownConnector } from "@companion/connector-markdown";
 import {
   BUNDLED_SCHEMA_VERSION,
   closeKernelDatabase,
+  createAgentStrategy,
   createKernelRepository,
   createM1ToolRegistrations,
   createReferenceManager,
@@ -35,12 +36,19 @@ import {
   StrategyRegistry,
   type ToolBroker,
 } from "@companion/kernel";
+import {
+  createOllamaGateway,
+  createOpenAICompatibleGateway,
+  type FetchImpl,
+  type ModelGateway,
+} from "@companion/model-local";
 import { serve } from "@hono/node-server";
 import { createApp, type EnginePort, type ServerControls } from "./app.js";
 import {
   assertDbPathHasNoSymlink,
   DEFAULT_LOG_LEVEL,
   loadServerConfig,
+  type ModelConfig,
   type ServerConfig,
   ServerConfigError,
 } from "./config.js";
@@ -66,6 +74,19 @@ export interface StartServerOptions {
   platform?: string;
   /** Injectable chmod for the app-dir mode (tests). Defaults to chmodSync. */
   chmod?: (path: string, mode: number) => void;
+  /**
+   * Injectable model gateway (tests). `undefined` (default) builds the
+   * gateway from `config.model` via {@link createModelGateway}; an explicit
+   * `null` disables the agent even when `config.model` is set. Production
+   * never passes this field.
+   */
+  modelGateway?: ModelGateway | null;
+  /**
+   * Injectable fetch for gateway construction (tests). Only used when
+   * `modelGateway` is `undefined` and `config.model` is set. Production
+   * never passes this field (global fetch is used).
+   */
+  modelFetch?: FetchImpl;
 }
 
 export interface StartedServer {
@@ -80,6 +101,35 @@ export interface StartedServer {
 
 /** Fixed path-free display name for the single M1 Markdown connector. */
 export const MARKDOWN_CONNECTOR_DISPLAY_NAME = "markdown-vault";
+
+/**
+ * Engine strategy name the M2 agent registers under. Runs default to this
+ * strategy (repository default), so without a registration they fail
+ * closed with a fixed code instead of producing fake LLM output.
+ */
+export const AGENT_STRATEGY_NAME = "m0-default";
+
+/**
+ * Build the loopback-only model gateway for a validated model config.
+ * `ollama` targets `{base}/api/chat`; `openai-compatible` targets
+ * `{base}/v1/chat/completions` (or `{base}/chat/completions` when the base
+ * already ends in `/v1`). An optional fetch override exists for tests only;
+ * production uses the global fetch. Never logs its inputs.
+ */
+export function createModelGateway(
+  model: ModelConfig,
+  fetchImpl?: FetchImpl,
+): ModelGateway {
+  const options = {
+    baseUrl: model.baseUrl,
+    ...(model.apiKey !== undefined ? { apiKey: model.apiKey } : {}),
+    ...(fetchImpl !== undefined ? { fetchImpl } : {}),
+  };
+  if (model.adapter === "ollama") {
+    return createOllamaGateway(options);
+  }
+  return createOpenAICompatibleGateway(options);
+}
 
 function ensureDbDir(
   dbPath: string,
@@ -264,8 +314,8 @@ export async function startServer(
     // M1 (plan 14.1/14.5-14.6): after migration and before engine
     // recovery/listen, when roots are configured create one connector
     // owning all roots, ensure one fingerprint-bound instance, then the
-    // four M1 registrations and a ToolBroker on the same db/repo. No M2
-    // strategy and no invocation endpoint here. No roots => null (M0).
+    // four M1 registrations and a ToolBroker on the same db/repo. No
+    // invocation endpoint here. No roots => toolBroker stays null (M0).
     let toolBroker: ToolBroker | null = null;
     if (config.markdownRoots.length > 0) {
       const connector = await createMarkdownConnector(
@@ -290,12 +340,42 @@ export async function startServer(
       toolBroker = createToolBroker({ db: handle.raw, repo, registrations });
       logger.info("server.markdown_ready", { status: registrations.length });
     }
-    // M0 production registers no model strategy: without the M2 agent,
-    // runs fail closed with a fixed code instead of pretending to be an LLM.
+    // M2 (opt-in): when config.model is set, build the loopback gateway
+    // and register the agent under m0-default before engine.start/listen.
+    // The agent reuses the M1 ToolBroker, or a private empty-registration
+    // broker when no Markdown roots exist (toolBroker stays null without
+    // roots). No model config => empty registry: runs fail closed with a
+    // fixed code instead of producing fake LLM output. No direct model
+    // endpoint is added; only counts are logged (never URLs/keys).
+    const registry = new StrategyRegistry();
+    if (config.model !== null) {
+      const gateway =
+        options.modelGateway !== undefined
+          ? options.modelGateway
+          : createModelGateway(config.model, options.modelFetch);
+      if (gateway !== null) {
+        const agentBroker =
+          toolBroker ??
+          createToolBroker({ db: handle.raw, repo, registrations: [] });
+        registry.register(
+          AGENT_STRATEGY_NAME,
+          createAgentStrategy({
+            db: handle.raw,
+            repo,
+            broker: agentBroker,
+            gateway,
+            model: config.model.model,
+          }),
+        );
+        logger.info("server.model_ready", {
+          status: agentBroker.toolNames().length + 1,
+        });
+      }
+    }
     engine = new RunEngine({
       db: handle.raw,
       repo,
-      registry: new StrategyRegistry(),
+      registry,
     });
     const recovery = engine.start();
     logger.info("server.recovered", {

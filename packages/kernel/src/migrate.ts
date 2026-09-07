@@ -1,4 +1,4 @@
-// Schema migration / version management for the M0+M1 kernel store.
+// Schema migration / version management for the M0+M1+M2 kernel store.
 //
 // - Versions are tracked with `PRAGMA user_version`.
 // - The bundled version is BUNDLED_SCHEMA_VERSION (4 for M1).
@@ -25,8 +25,8 @@ import {
   NewerDatabaseError,
 } from "./errors.js";
 
-/** Bundled M1 schema version. Bump only with a new committed migration. */
-export const BUNDLED_SCHEMA_VERSION = 4;
+/** Bundled M2 schema version. Bump only with a new committed migration. */
+export const BUNDLED_SCHEMA_VERSION = 5;
 
 export interface BundledMigration {
   version: number;

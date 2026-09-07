@@ -16,6 +16,7 @@
     "@companion/connector-markdown": "workspace:*",
     "@companion/contracts": "workspace:*",
     "@companion/kernel": "workspace:*",
+    "@companion/model-local": "workspace:*",
     "@hono/node-server": "2.1.1",
     "hono": "4.13.5",
     "zod": "4.5.4"

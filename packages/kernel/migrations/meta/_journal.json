@@ -30,6 +30,13 @@
       "when": 1790000000003,
       "tag": "0004_idempotency_key_lowercase",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": 5,
+      "when": 1790000000004,
+      "tag": "0005_m2_model_calls",
+      "breakpoints": true
     }
   ]
 }

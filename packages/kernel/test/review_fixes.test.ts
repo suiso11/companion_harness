@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   BackupError,
+  BUNDLED_SCHEMA_VERSION,
   closeKernelDatabase,
   createKernelRepository,
   createPreMigrationBackup,
@@ -740,7 +741,7 @@ describe("idempotency key lowercase migration (PR #3)", () => {
         backupDir: join(dir, "backups"),
       });
       expect(result.applied).toContain(4);
-      expect(getSchemaVersion(handle.raw)).toBe(4);
+      expect(getSchemaVersion(handle.raw)).toBe(BUNDLED_SCHEMA_VERSION);
       const stored = handle.raw
         .prepare("SELECT key AS k FROM api_idempotency")
         .all() as Array<{ k: string }>;
@@ -804,7 +805,7 @@ describe("idempotency key lowercase migration (PR #3)", () => {
           db: handle.raw,
           backupDir: join(dir, "backups"),
         }),
-      ).rejects.toThrow(/migration 3 -> 4 failed/);
+      ).rejects.toThrow(/migration 3 -> 5 failed/);
       // Fail closed: version unchanged, both colliding rows preserved.
       expect(getSchemaVersion(handle.raw)).toBe(3);
       const rows = handle.raw
