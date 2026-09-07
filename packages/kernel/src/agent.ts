@@ -2178,6 +2178,35 @@ async function runModelStep(args: {
   // (model_unavailable, answer_invalid repair leg unchanged): no tools
   // execute, no evidence is granted.
   if (settlement.kind === "result") {
+    const calls = settlement.result.toolCalls;
+    if (
+      Array.isArray(calls) &&
+      calls.length > 1 &&
+      calls.every(
+        (call) =>
+          typeof call === "object" &&
+          call !== null &&
+          (call as { name?: unknown }).name === ANSWER_SUBMIT_TOOL_NAME,
+      ) &&
+      calls.every(
+        (call) =>
+          typeof (call as { id?: unknown }).id === "string",
+      ) &&
+      new Set(
+        calls.map((call) => (call as { id: string }).id),
+      ).size < calls.length
+    ) {
+      settlement = {
+        kind: "result",
+        result: {
+          ...settlement.result,
+          toolCalls: calls.map((call, index) => ({
+            ...(call as object),
+            id: `answer_submit_${index + 1}`,
+          })) as ChatResult["toolCalls"],
+        },
+      };
+    }
     try {
       validateChatResult(settlement.result, request.tools);
     } catch (error) {
