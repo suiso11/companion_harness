@@ -2189,12 +2189,10 @@ async function runModelStep(args: {
           (call as { name?: unknown }).name === ANSWER_SUBMIT_TOOL_NAME,
       ) &&
       calls.every(
-        (call) =>
-          typeof (call as { id?: unknown }).id === "string",
+        (call) => typeof (call as { id?: unknown }).id === "string",
       ) &&
-      new Set(
-        calls.map((call) => (call as { id: string }).id),
-      ).size < calls.length
+      new Set(calls.map((call) => (call as { id: string }).id)).size <
+        calls.length
     ) {
       settlement = {
         kind: "result",

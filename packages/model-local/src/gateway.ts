@@ -1276,7 +1276,8 @@ export function validateChatResult(
   const toolCalls = record.toolCalls as unknown[];
   // Count bound before per-call parsing (same ordering as adapters).
   assertToolCallCountWithinBound(toolCalls.length);
-  const seenIds = new Set<string>();
+  const seenIds = new Map<string, string>();
+  const names: string[] = [];
   for (let index = 0; index < toolCalls.length; index += 1) {
     const entry = toolCalls[index];
     if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
@@ -1306,10 +1307,35 @@ export function validateChatResult(
       throwInvalidToolArguments(name);
     }
     assertToolArgumentsByteLengthForTool(utf8ByteLength(serialized), name);
-    if (seenIds.has(id)) {
-      throw nativeToolCallInvalidError();
+    // Duplicate answer.submit ids defer to AgentStrategy classification so
+    // the terminal protocol repairs exactly once; any duplicate involving
+    // an ordinary tool rejects atomically here so nothing executes.
+    const prior = seenIds.get(id);
+    if (prior !== undefined) {
+      if (
+        !(prior === ANSWER_SUBMIT_TOOL_NAME && name === ANSWER_SUBMIT_TOOL_NAME)
+      ) {
+        throw nativeToolCallInvalidError();
+      }
+    } else {
+      seenIds.set(id, name);
     }
-    seenIds.add(id);
+    names.push(name);
+  }
+  // Multiple answer.submit calls (same or distinct ids) classify as the
+  // duplicate terminal protocol in AgentStrategy: skip the shared duplicate
+  // gate and return after the unsolicited check so repair-once applies.
+  if (names.filter((entry) => entry === ANSWER_SUBMIT_TOOL_NAME).length > 1) {
+    if (
+      toolCalls.length > 0 &&
+      (requestedTools === undefined || requestedTools.length === 0)
+    ) {
+      throw new ModelLocalError(
+        "tool_call_invalid",
+        "model returned tool calls without tools requested",
+      );
+    }
+    return;
   }
   validateNativeToolCalls({
     toolCalls: toolCalls as { id: string; name: string; arguments: unknown }[],
