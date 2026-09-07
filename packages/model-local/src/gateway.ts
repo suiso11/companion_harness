@@ -80,6 +80,16 @@ export const MAX_TOOL_CALLS_PER_MESSAGE = 32;
  */
 export const MAX_TOOL_CALL_ARGUMENTS_BYTES = 32 * 1024;
 
+/**
+ * Maximum array item count accepted by `canonicalizeForSize` (equals the
+ * 32KiB arguments byte budget: every array item costs at least one
+ * canonical byte, so a longer array always serializes over the bound).
+ * Enforced from the single captured `length` snapshot before traversal so
+ * a hostile `length` (huge sparse length, changing Proxy shape) rejects
+ * without a huge `new Array(n)` allocation or an unbounded loop.
+ */
+export const MAX_CANONICAL_ARRAY_ITEMS = MAX_TOOL_CALL_ARGUMENTS_BYTES;
+
 /** UTF-8 byte length of a string (never JS character count). */
 export function utf8ByteLength(text: string): number {
   return new TextEncoder().encode(text).byteLength;
@@ -203,24 +213,57 @@ function canonicalizeForSize(value: unknown, seen?: WeakSet<object>): unknown {
     active.add(node);
     try {
       const arr = node as unknown[];
+      // Snapshot `length` exactly once via its own data descriptor: never
+      // read `arr.length` (each read would invoke a hostile Proxy `get`
+      // trap, enabling changing lengths / unbounded loops). Accessor,
+      // missing, non-numeric, or over-bound lengths reject; the captured
+      // value drives every check and iteration below.
+      let lengthDescriptor: PropertyDescriptor | undefined;
+      try {
+        lengthDescriptor = Object.getOwnPropertyDescriptor(arr, "length");
+      } catch {
+        throw new TypeError("unreadable array length in tool arguments");
+      }
+      if (
+        lengthDescriptor === undefined ||
+        lengthDescriptor.get !== undefined ||
+        lengthDescriptor.set !== undefined ||
+        typeof lengthDescriptor.value !== "number" ||
+        !Number.isSafeInteger(lengthDescriptor.value) ||
+        (lengthDescriptor.value as number) < 0 ||
+        (lengthDescriptor.value as number) > MAX_CANONICAL_ARRAY_ITEMS
+      ) {
+        throw new TypeError("invalid array length in tool arguments");
+      }
+      const length = lengthDescriptor.value as number;
       // Reject holes (missing index descriptors serialize as null and would
       // miscount) and extra enumerable non-index keys (ignored by
       // JSON.stringify, so accepting them would undercount). Descriptors
       // are read once per index without re-reading through the property
       // (which would invoke a getter if one raced in).
-      const keys = Object.keys(arr);
+      let keys: string[];
+      try {
+        keys = Object.keys(arr);
+      } catch {
+        throw new TypeError("unreadable array keys in tool arguments");
+      }
       for (const key of keys) {
         if (!/^(0|[1-9][0-9]*)$/.test(key)) {
           throw new TypeError("extra key on array in tool arguments");
         }
         const numeric = Number(key);
-        if (!Number.isSafeInteger(numeric) || numeric >= arr.length) {
+        if (!Number.isSafeInteger(numeric) || numeric >= length) {
           throw new TypeError("extra key on array in tool arguments");
         }
       }
-      const out: unknown[] = new Array(arr.length);
-      for (let index = 0; index < arr.length; index += 1) {
-        const descriptor = Object.getOwnPropertyDescriptor(arr, String(index));
+      const out: unknown[] = new Array(length);
+      for (let index = 0; index < length; index += 1) {
+        let descriptor: PropertyDescriptor | undefined;
+        try {
+          descriptor = Object.getOwnPropertyDescriptor(arr, String(index));
+        } catch {
+          throw new TypeError("unreadable array item in tool arguments");
+        }
         if (descriptor === undefined) {
           throw new TypeError("holey array in tool arguments");
         }
