@@ -402,6 +402,114 @@ describe("model.step payloads are structural metadata only", () => {
     ).toThrow();
   });
 
+  it("usage requires nonnegative safe integers (r3946468429)", () => {
+    // Zero and ordinary counts are preserved.
+    expect(
+      ModelStepUsageSchema.parse({ inputTokens: 0, outputTokens: 0 }),
+    ).toEqual({ inputTokens: 0, outputTokens: 0 });
+    // Exact MAX_SAFE_INTEGER is accepted everywhere usage appears.
+    const max = {
+      inputTokens: Number.MAX_SAFE_INTEGER,
+      outputTokens: Number.MAX_SAFE_INTEGER,
+    };
+    expect(ModelStepUsageSchema.parse(max)).toEqual(max);
+    expect(
+      ModelStepCompletedPayloadSchema.parse({
+        step: 1,
+        durationMs: 1,
+        usage: max,
+      }).usage,
+    ).toEqual(max);
+    expect(
+      parseRunEventPayload("model.step.completed", {
+        step: 1,
+        durationMs: 1,
+        usage: max,
+      }),
+    ).toEqual({ step: 1, durationMs: 1, usage: max });
+    expect(
+      parseM2RunEventPayload("model.step.completed", {
+        step: 1,
+        durationMs: 1,
+        usage: max,
+      }),
+    ).toEqual({ step: 1, durationMs: 1, usage: max });
+    expect(
+      parseM2RunEvent(
+        envelope("model.step.completed", {
+          step: 1,
+          durationMs: 1,
+          usage: max,
+        }),
+      ).type,
+    ).toBe("model.step.completed");
+    // MAX_SAFE_INTEGER + 1 and JSON-rounded unsafe values are rejected,
+    // never coerced, clamped, or rounded.
+    const rounded = JSON.parse("9007199254740993") as number;
+    const invalidUsages: unknown[] = [
+      {
+        inputTokens: Number.MAX_SAFE_INTEGER + 1,
+        outputTokens: 1,
+      },
+      {
+        inputTokens: 1,
+        outputTokens: Number.MAX_SAFE_INTEGER + 1,
+      },
+      { inputTokens: rounded, outputTokens: 1 },
+      { inputTokens: 1, outputTokens: rounded },
+      { inputTokens: 1.5, outputTokens: 1 },
+      { inputTokens: 1, outputTokens: 1.5 },
+      { inputTokens: -1, outputTokens: 1 },
+      { inputTokens: 1, outputTokens: -1 },
+      { inputTokens: "1", outputTokens: 1 },
+    ];
+    for (const usage of invalidUsages) {
+      expect(() => ModelStepUsageSchema.parse(usage)).toThrow();
+      expect(() =>
+        ModelStepCompletedPayloadSchema.parse({
+          step: 1,
+          durationMs: 1,
+          usage,
+        }),
+      ).toThrow();
+      expect(() =>
+        parseM2RunEvent(
+          envelope("model.step.completed", {
+            step: 1,
+            durationMs: 1,
+            usage,
+          }),
+        ),
+      ).toThrow();
+      expect(() =>
+        parseRunEventPayload("model.step.completed", {
+          step: 1,
+          durationMs: 1,
+          usage,
+        }),
+      ).toThrow();
+    }
+    // Exact M0/M1 registries still reject model.step.* entirely.
+    expect(() =>
+      M0RunEventSchema.parse(
+        envelope("model.step.completed", {
+          step: 1,
+          durationMs: 1,
+          usage: max,
+        }),
+      ),
+    ).toThrow();
+    expect(() =>
+      M1RunEventSchema.parse(
+        envelope("model.step.completed", {
+          step: 1,
+          durationMs: 1,
+          usage: max,
+        }),
+      ),
+    ).toThrow();
+  });
+
   it("failed carries step + fixed code with optional timing", () => {
     expect(
       ModelStepFailedPayloadSchema.parse({

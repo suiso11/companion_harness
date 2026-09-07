@@ -1117,6 +1117,87 @@ describe("migration 0005 model_calls (§15.10)", () => {
       closeKernelDatabase(handle);
     }
   });
+  it("enforces model-step completed event usage safe-integer boundaries exactly", async () => {
+    const {
+      parseM2RunEvent,
+      parseM2RunEventPayload,
+      parseRunEvent,
+      parseRunEventPayload,
+    } = await import("@companion/contracts");
+    const { handle, repo } = await setup();
+    try {
+      const { runId } = newRunningTurn(repo, T0);
+      const envelope = (payload: unknown, seq: number) => ({
+        schemaVersion: 1 as const,
+        runId,
+        seq,
+        createdAt: T0,
+        type: "model.step.completed",
+        payload,
+      });
+      // Zero and exact MAX_SAFE_INTEGER parse everywhere.
+      const maxUsage = {
+        inputTokens: Number.MAX_SAFE_INTEGER,
+        outputTokens: Number.MAX_SAFE_INTEGER,
+      };
+      const maxPayload = { step: 1, durationMs: 1, usage: maxUsage };
+      expect(parseRunEventPayload("model.step.completed", maxPayload)).toEqual(
+        maxPayload,
+      );
+      expect(
+        parseM2RunEventPayload("model.step.completed", maxPayload),
+      ).toEqual(maxPayload);
+      expect(parseRunEvent(envelope(maxPayload, 1)).type).toBe(
+        "model.step.completed",
+      );
+      expect(parseM2RunEvent(envelope(maxPayload, 1)).type).toBe(
+        "model.step.completed",
+      );
+      // Repository event validation round-trips the boundary value.
+      const stored = repo.appendModelStepEvent(
+        runId,
+        "model.step.completed",
+        maxPayload,
+        { now: T0 + 2 },
+      );
+      expect(stored.type).toBe("model.step.completed");
+      expect(stored.payload).toEqual(maxPayload);
+      // MAX_SAFE_INTEGER + 1 and JSON-rounded unsafe values are rejected,
+      // never coerced, clamped, or rounded.
+      const rounded = JSON.parse("9007199254740993") as number;
+      const invalidUsages: unknown[] = [
+        { inputTokens: Number.MAX_SAFE_INTEGER + 1, outputTokens: 1 },
+        { inputTokens: 1, outputTokens: Number.MAX_SAFE_INTEGER + 1 },
+        { inputTokens: rounded, outputTokens: 1 },
+        { inputTokens: 1, outputTokens: rounded },
+        { inputTokens: 1.5, outputTokens: 1 },
+        { inputTokens: 1, outputTokens: 1.5 },
+        { inputTokens: -1, outputTokens: 1 },
+        { inputTokens: 1, outputTokens: -1 },
+      ];
+      let seq = 10;
+      for (const usage of invalidUsages) {
+        const payload = { step: 1, durationMs: 1, usage };
+        expect(() =>
+          parseRunEventPayload("model.step.completed", payload),
+        ).toThrow();
+        expect(() =>
+          parseM2RunEventPayload("model.step.completed", payload),
+        ).toThrow();
+        expect(() => parseRunEvent(envelope(payload, seq))).toThrow();
+        expect(() => parseM2RunEvent(envelope(payload, seq))).toThrow();
+        expect(() =>
+          repo.appendModelStepEvent(runId, "model.step.completed", payload, {
+            now: T0 + 3,
+          }),
+        ).toThrow();
+        seq += 1;
+      }
+    } finally {
+      const { closeKernelDatabase } = await import("../src/index.js");
+      closeKernelDatabase(handle);
+    }
+  });
   it("rejects model-step events on terminal runs and exposes caller identity constants", async () => {
     const { handle, repo } = await setup();
     try {

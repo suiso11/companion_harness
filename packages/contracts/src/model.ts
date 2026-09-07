@@ -76,11 +76,14 @@ export type ModelStepDurationMs = z.infer<typeof ModelStepDurationMsSchema>;
 
 /**
  * Optional provider usage summary (token counts only, when the provider
- * reports them). No prompts, completions, reasoning, or raw usage blobs.
+ * reports them). Counts are nonnegative safe integers; unsafe values
+ * (fractions, negatives, or above MAX_SAFE_INTEGER, including JSON-rounded
+ * values) are rejected, never coerced, clamped, or rounded. No prompts,
+ * completions, reasoning, or raw usage blobs.
  */
 export const ModelStepUsageSchema = z.strictObject({
-  inputTokens: z.number().int().min(0),
-  outputTokens: z.number().int().min(0),
+  inputTokens: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  outputTokens: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
 });
 export type ModelStepUsage = z.infer<typeof ModelStepUsageSchema>;
 
