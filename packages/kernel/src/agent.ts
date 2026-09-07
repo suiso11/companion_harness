@@ -1729,7 +1729,12 @@ function isEngineAbortRejection(error: unknown, signal: AbortSignal): boolean {
  * audits model_step_timeout/timeout (execution_failed), engine
  * cancellation aborts fetch and follows cancellation semantics
  * (execution_cancelled, never misclassified when both fire together).
- * Late/non-cooperative settlements are discarded. Every call consumes one
+ * Late/non-cooperative settlements are discarded. A gateway result that
+ * resolves at or past an abort or deadline is rechecked against the
+ * authoritative state (engine signal/Run liveness, wall signal/deadline,
+ * composed step deadline) both in the race success handler and after the
+ * await, so it audits as timeout/cancelled and never completes the Run
+ * past budget. Every call consumes one
  * step of the model budget. Transport/timeout outcomes are audited here
  * with exactly one metadata-only model_calls row plus one matching
  * model.step.failed event; cancellation records exactly one cancelled
@@ -1786,30 +1791,48 @@ async function runModelStep(args: {
     };
   }
   const startedAt = clock.now();
+  // Composed per-step deadline (authoritative for late-success rechecks):
+  // the race timer observes real time, but a fake clock or same-tick
+  // ordering can deliver a non-cooperative gateway result at or past
+  // this deadline without the timer firing first. At-or-past is past
+  // budget (fail-closed); just-before succeeds.
+  const stepDeadline = startedAt + effectiveTimeout;
+  // Authoritative late-success gate shared by the race success handler
+  // and the post-await recheck below. Engine cancellation wins where
+  // already committed (signal aborted or the Run no longer running: the
+  // RunEngine alone owns the terminal lifecycle); then the 300s wall
+  // budget (at-or-past the deadline); then the composed step deadline.
+  // A late non-cooperative result is discarded with timeout/cancel
+  // semantics and never completes the Run past budget.
+  const classifyLateSuccess = (): "aborted" | "wall" | "timeout" | null => {
+    if (signal.aborted || !isRunActive(repo, runId)) {
+      return "aborted";
+    }
+    if (wallSignal.aborted || isWallExpired() || clock.now() >= wallDeadline) {
+      return "wall";
+    }
+    if (clock.now() >= stepDeadline) {
+      return "timeout";
+    }
+    return null;
+  };
   const request: ChatRequest = {
     model,
     messages: messages.map((message) => ({ ...message })),
     tools: [...toolDefinitions],
   };
 
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const stepController = new AbortController();
-  const settlement = await new Promise<
+  type Settlement =
     | { kind: "result"; result: ChatResult }
     | { kind: "error"; error: unknown }
     | { kind: "timeout" }
     | { kind: "wall" }
-    | { kind: "aborted" }
-  >((resolve) => {
+    | { kind: "aborted" };
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const stepController = new AbortController();
+  let settlement: Settlement = await new Promise<Settlement>((resolve) => {
     let done = false;
-    const finish = (
-      value:
-        | { kind: "result"; result: ChatResult }
-        | { kind: "error"; error: unknown }
-        | { kind: "timeout" }
-        | { kind: "wall" }
-        | { kind: "aborted" },
-    ): void => {
+    const finish = (value: Settlement): void => {
       if (done) {
         return;
       }
@@ -1881,7 +1904,21 @@ async function runModelStep(args: {
       return;
     }
     chat.then(
-      (result) => finish({ kind: "result", result }),
+      (result) => {
+        // Late-success race: a non-cooperative gateway resolving at/after
+        // an abort or deadline must not win on callback ordering alone.
+        // The authoritative state decides before the step can succeed.
+        const late = classifyLateSuccess();
+        if (late === "aborted") {
+          finish({ kind: "aborted" });
+          return;
+        }
+        if (late === "wall" || late === "timeout") {
+          finish({ kind: late });
+          return;
+        }
+        finish({ kind: "result", result });
+      },
       (error: unknown) => {
         // No double classification: an already-settled deadline keeps
         // timeout/wall; engine cancellation wins otherwise. Cooperative
@@ -1905,6 +1942,21 @@ async function runModelStep(args: {
       },
     );
   });
+  // Post-await recheck: an abort or deadline that landed between the
+  // gateway resolve and this continuation (after `done` was already set)
+  // still discards the late result with timeout/cancel semantics, before
+  // the caller can treat the step as success or classify answer.submit.
+  // Engine cancellation wins where already committed.
+  if (settlement.kind === "result") {
+    const late = classifyLateSuccess();
+    if (late === "aborted") {
+      settlement = { kind: "aborted" };
+    } else if (late === "wall") {
+      settlement = { kind: "wall" };
+    } else if (late === "timeout") {
+      settlement = { kind: "timeout" };
+    }
+  }
   const durationMs = Math.max(clock.now() - startedAt, 0);
   const adapter = gateway.provider;
 
