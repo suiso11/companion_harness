@@ -12,10 +12,7 @@ import type {
   ModelGateway,
   NormalizedToolCall,
 } from "@companion/model-local";
-import {
-  toOpenAIMessage,
-  validateChatRequest,
-} from "@companion/model-local";
+import { toOpenAIMessage, validateChatRequest } from "@companion/model-local";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
@@ -56,9 +53,7 @@ function answerCall(id = "answer-final"): NormalizedToolCall {
 }
 
 function buildOverflowConversation(): ChatMessage[] {
-  const messages: ChatMessage[] = [
-    { role: "system", content: "sys" },
-  ];
+  const messages: ChatMessage[] = [{ role: "system", content: "sys" }];
   // 60 history pairs = 120 messages (latest win, chronological).
   for (let i = 1; i <= 60; i += 1) {
     messages.push({
@@ -100,7 +95,10 @@ function expectNoOrphans(messages: ChatMessage[]): void {
     if (m.role === "tool") {
       expect(typeof m.toolCallId).toBe("string");
       expect(typeof m.toolName).toBe("string");
-      toolIds.set(m.toolCallId as string, (toolIds.get(m.toolCallId as string) ?? 0) + 1);
+      toolIds.set(
+        m.toolCallId as string,
+        (toolIds.get(m.toolCallId as string) ?? 0) + 1,
+      );
     }
   }
   for (const count of toolIds.values()) {
@@ -191,9 +189,7 @@ describe("conversation 128-message cap", () => {
   });
 
   it("drops a repair group atomically, never orphaning tool_call_ids", () => {
-    const messages: ChatMessage[] = [
-      { role: "system", content: "sys" },
-    ];
+    const messages: ChatMessage[] = [{ role: "system", content: "sys" }];
     for (let i = 1; i <= 10; i += 1) {
       messages.push({
         role: "user",
@@ -371,10 +367,7 @@ describe("conversation 128-message cap", () => {
       // Seed one grant before the run: trimming prompt data later must not
       // remove it from persistence. The reference must exist in this
       // session (session_references row) for the grant to be accepted.
-      const insertReference = (
-        sessionId: string,
-        ordinal: number,
-      ): string => {
+      const insertReference = (sessionId: string, ordinal: number): string => {
         const conn = crypto.randomUUID();
         const res = crypto.randomUUID();
         const snap = crypto.randomUUID();
@@ -444,7 +437,11 @@ describe("conversation 128-message cap", () => {
             return {
               text: "mixed",
               toolCalls: [
-                { id: "repair-ordinary", name: "test.read", arguments: { q: "x" } },
+                {
+                  id: "repair-ordinary",
+                  name: "test.read",
+                  arguments: { q: "x" },
+                },
                 {
                   id: "repair-answer",
                   name: "answer.submit",
@@ -465,7 +462,11 @@ describe("conversation 128-message cap", () => {
               stopReason: "tool_calls",
             };
           }
-          return { text: "", toolCalls: [answerCall()], stopReason: "tool_calls" };
+          return {
+            text: "",
+            toolCalls: [answerCall()],
+            stopReason: "tool_calls",
+          };
         },
       };
       const strategy = createAgentStrategy({
@@ -512,9 +513,7 @@ describe("conversation 128-message cap", () => {
       // 2 mixed calls. Assert the volume and that latest ordering survives.
       const ordinaryGatewayCalls = captured
         .flatMap((r) => r.messages)
-        .filter(
-          (m) => m.role === "assistant" && Array.isArray(m.toolCalls),
-        )
+        .filter((m) => m.role === "assistant" && Array.isArray(m.toolCalls))
         .flatMap((m) => (m.toolCalls as NormalizedToolCall[]).map((c) => c.id));
       expect(ordinaryGatewayCalls.length).toBeGreaterThanOrEqual(20);
       const lastReq = captured[captured.length - 1] as ChatRequest;

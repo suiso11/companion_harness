@@ -1638,9 +1638,7 @@ function loadHistory(
  * survivors is preserved; no raw summary of omitted data is added; no half
  * group is ever dropped so tool_call_id correlations stay intact.
  */
-export function trimConversationToCap(
-  messages: ChatRequest["messages"],
-): void {
+export function trimConversationToCap(messages: ChatRequest["messages"]): void {
   if (messages.length <= MAX_MESSAGES_PER_REQUEST) {
     return;
   }
