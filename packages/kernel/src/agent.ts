@@ -2094,12 +2094,14 @@ async function runModelStep(args: {
       }
       return { kind: "answer_normalization_failed", adapter, durationMs };
     }
+    // Ordinary malformed native tool calls (tool_call_invalid for bad
+    // shape/non-object args, invalid_response for oversize/unknown shape)
+    // audit as a provider/model failure with fixed model_unavailable: never
+    // answer_invalid (reserved for malformed answer.submit arguments, which
+    // take the repairable path above) and never repaired as an answer.
     const code: M2ModelErrorCode = isTimeout
       ? "model_step_timeout"
-      : settlement.error instanceof ModelLocalError &&
-          settlement.error.code === "tool_call_invalid"
-        ? "answer_invalid"
-        : "model_unavailable";
+      : "model_unavailable";
     const outcome: "failed" | "timeout" = isTimeout ? "timeout" : "failed";
     try {
       repo.recordModelCall(runId, {

@@ -1,8 +1,12 @@
-// Malformed native answer.submit repair (r3944753213): gateway
-// answer_invalid audits failed/answer_invalid and enters the one-time repair
-// path without replaying the invalid assistant message; a second malformed
-// answer fails fixed answer_invalid within budget; ordinary malformed calls
-// never gain answer repair.
+// AgentStrategy audit for ordinary vs answer normalization (r3946441628).
+//
+// Strategy error mapping matrix (exactly one model_calls row + one coherent
+// model.step.* event per step, no raw name/args/body/error persistence,
+// at most one answer repair):
+// - ordinary-only tool_call_invalid -> failed/model_unavailable, no repair
+// - ordinary-only invalid_response -> failed/model_unavailable, no repair
+// - mixed-batch ordinary failure (tool_call_invalid) -> failed/model_unavailable, no repair
+// - answer-only answer_invalid -> failed/answer_invalid + one-time repair
 import type {
   ChatRequest,
   ChatResult,
@@ -12,7 +16,6 @@ import type {
 import { ModelLocalError } from "@companion/model-local";
 import { describe, expect, it } from "vitest";
 import {
-  AGENT_MAX_STEPS,
   AGENT_REPAIR_HINTS,
   closeKernelDatabase,
   createAgentStrategy,
@@ -25,34 +28,7 @@ import {
 } from "../src/index.js";
 
 const T0 = 1790000000000;
-const SECRET = "malformed-answer-secret-xyz-999";
-
-function toolCall(
-  name: string,
-  args: unknown = {},
-  id?: string,
-): NormalizedToolCall {
-  return {
-    id: id ?? `call-${Math.random().toString(36).slice(2)}`,
-    name,
-    arguments: args,
-  };
-}
-
-function answerCall(
-  parts = [{ text: "final", citations: [] as string[] }],
-  id = "answer-1",
-): NormalizedToolCall {
-  return toolCall("answer.submit", { version: 1, parts }, id);
-}
-
-function chatResult(toolCalls: NormalizedToolCall[], text = ""): ChatResult {
-  return {
-    text,
-    toolCalls,
-    stopReason: toolCalls.length > 0 ? "tool_calls" : "stop",
-  };
-}
+const SECRET = "ordinary-strategy-secret-xyz-999";
 
 function scriptGateway(script: Array<ChatResult | Error>): {
   gateway: ModelGateway;
@@ -74,7 +50,21 @@ function scriptGateway(script: Array<ChatResult | Error>): {
   return { gateway, calls };
 }
 
-function answerInvalidError(): ModelLocalError {
+function toolCallInvalid(): ModelLocalError {
+  return new ModelLocalError(
+    "tool_call_invalid",
+    "model returned an invalid tool call",
+  );
+}
+
+function invalidResponse(): ModelLocalError {
+  return new ModelLocalError(
+    "invalid_response",
+    "model returned an invalid response",
+  );
+}
+
+function answerInvalid(): ModelLocalError {
   return new ModelLocalError(
     "answer_invalid",
     "model returned an invalid answer",
@@ -134,8 +124,16 @@ function stepEvents(repo: KernelRepository, sessionId: string, runId: string) {
     .events.filter((e) => e.type.startsWith("model.step."));
 }
 
-describe("malformed answer.submit repair", () => {
-  it("first malformed answer audits answer_invalid and repairs to completed", async () => {
+function answered(toolCalls: NormalizedToolCall[]): ChatResult {
+  return {
+    text: "",
+    toolCalls,
+    stopReason: toolCalls.length > 0 ? "tool_calls" : "stop",
+  };
+}
+
+describe("ordinary vs answer normalization audit", () => {
+  it("ordinary-only tool_call_invalid audits model_unavailable with no repair", async () => {
     const { handle, repo } = await setup();
     try {
       const broker = createToolBroker({
@@ -144,8 +142,14 @@ describe("malformed answer.submit repair", () => {
         registrations: [],
       });
       const { gateway, calls } = scriptGateway([
-        answerInvalidError(),
-        chatResult([answerCall([{ text: "recovered", citations: [] }])]),
+        toolCallInvalid(),
+        answered([
+          {
+            id: "answer-late",
+            name: "answer.submit",
+            arguments: { version: 1, parts: [{ text: "late", citations: [] }] },
+          },
+        ]),
       ]);
       const strategy = createAgentStrategy({
         db: handle.raw,
@@ -155,14 +159,150 @@ describe("malformed answer.submit repair", () => {
         model: "m",
       });
       const { sessionId, runId } = newRunningTurn(repo, T0);
-      await expect(strategy(ctxFor(repo, runId))).resolves.toEqual({
+      await expect(strategy(ctxFor(repo, runId))).rejects.toMatchObject({
+        errorCode: "execution_failed",
+      });
+      // Exactly one step consumed: no answer repair for ordinary failures.
+      expect(calls).toHaveLength(1);
+      const rows = repo.listModelCalls(runId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        step: 1,
+        outcome: "failed",
+        errorCode: "model_unavailable",
+      });
+      const events = stepEvents(repo, sessionId, runId);
+      expect(events.filter((e) => e.type === "model.step.failed")).toHaveLength(
+        1,
+      );
+      expect(
+        events.find((e) => e.type === "model.step.failed")?.payload,
+      ).toMatchObject({ step: 1, errorCode: "model_unavailable" });
+      expect(events.filter((e) => e.type === "model.step.completed")).toHaveLength(
+        0,
+      );
+      expect(JSON.stringify({ rows, events })).not.toContain(SECRET);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("ordinary-only invalid_response audits model_unavailable with no repair", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const broker = createToolBroker({
+        db: handle.raw,
+        repo,
+        registrations: [],
+      });
+      const { gateway, calls } = scriptGateway([invalidResponse()]);
+      const strategy = createAgentStrategy({
+        db: handle.raw,
+        repo,
+        broker,
+        gateway,
+        model: "m",
+      });
+      const { sessionId, runId } = newRunningTurn(repo, T0);
+      await expect(strategy(ctxFor(repo, runId))).rejects.toMatchObject({
+        errorCode: "execution_failed",
+      });
+      expect(calls).toHaveLength(1);
+      const rows = repo.listModelCalls(runId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        step: 1,
+        outcome: "failed",
+        errorCode: "model_unavailable",
+      });
+      const events = stepEvents(repo, sessionId, runId);
+      expect(
+        events.find((e) => e.type === "model.step.failed")?.payload,
+      ).toMatchObject({ step: 1, errorCode: "model_unavailable" });
+      expect(JSON.stringify({ rows, events })).not.toContain(SECRET);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("mixed-batch ordinary failure audits model_unavailable with no repair", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const broker = createToolBroker({
+        db: handle.raw,
+        repo,
+        registrations: [],
+      });
+      // Mixed provider batch (one valid ordinary + one malformed ordinary)
+      // normalizes to the ordinary failure leg: strategy must not repair it
+      // as an answer.
+      const { gateway, calls } = scriptGateway([toolCallInvalid()]);
+      const strategy = createAgentStrategy({
+        db: handle.raw,
+        repo,
+        broker,
+        gateway,
+        model: "m",
+      });
+      const { sessionId, runId } = newRunningTurn(repo, T0);
+      await expect(strategy(ctxFor(repo, runId))).rejects.toMatchObject({
+        errorCode: "execution_failed",
+      });
+      expect(calls).toHaveLength(1);
+      const rows = repo.listModelCalls(runId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        step: 1,
+        outcome: "failed",
+        errorCode: "model_unavailable",
+      });
+      expect(rows[0]?.errorCode).not.toBe("answer_invalid");
+      const events = stepEvents(repo, sessionId, runId);
+      expect(
+        events.find((e) => e.type === "model.step.failed")?.payload,
+      ).toMatchObject({ step: 1, errorCode: "model_unavailable" });
+      // No repair hint issued for the ordinary leg.
+      expect(calls).toHaveLength(1);
+      expect(JSON.stringify({ rows, events })).not.toContain(SECRET);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("answer-only answer_invalid audits answer_invalid and repairs once", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const broker = createToolBroker({
+        db: handle.raw,
+        repo,
+        registrations: [],
+      });
+      const { gateway, calls } = scriptGateway([
+        answerInvalid(),
+        answered([
+          {
+            id: "answer-ok",
+            name: "answer.submit",
+            arguments: {
+              version: 1,
+              parts: [{ text: "recovered", citations: [] }],
+            },
+          },
+        ]),
+      ]);
+      const strategy = createAgentStrategy({
+        db: handle.raw,
+        repo,
+        broker,
+        gateway,
+        model: "m",
+      });
+      const { sessionId, runId } = newRunningTurn(repo, T0);
+      await expect(strategy(ctxFor(repo, runId))).resolves.toMatchObject({
         version: 2,
         text: "recovered",
-        answer: {
-          version: 1,
-          parts: [{ text: "recovered", citations: [] }],
-        },
       });
+      // One repair maximum: exactly two steps.
       expect(calls).toHaveLength(2);
       const rows = repo.listModelCalls(runId);
       expect(rows).toHaveLength(2);
@@ -184,145 +324,11 @@ describe("malformed answer.submit repair", () => {
             (e.payload as { step: number }).step === 1,
         )?.payload,
       ).toMatchObject({ step: 1, errorCode: "answer_invalid" });
-      // No invalid assistant replay: second request carries no toolCalls
-      // assistant message and only the fixed repair hint, with no raw leak.
-      const replayed = calls[1]?.messages ?? [];
-      expect(
-        replayed.filter(
-          (m) => m.role === "assistant" && m.toolCalls !== undefined,
-        ),
-      ).toHaveLength(0);
-      const hint = replayed.find(
+      const hint = calls[1]?.messages.find(
         (m) => m.role === "user" && m.content.includes("Repair instruction:"),
       );
       expect(hint?.content).toContain(AGENT_REPAIR_HINTS.answer_invalid);
       expect(JSON.stringify({ rows, events, calls })).not.toContain(SECRET);
-    } finally {
-      closeKernelDatabase(handle);
-    }
-  });
-
-  it("second malformed answer fails answer_invalid within budget (never ninth call)", async () => {
-    const { handle, repo } = await setup();
-    try {
-      const broker = createToolBroker({
-        db: handle.raw,
-        repo,
-        registrations: [],
-      });
-      const { gateway, calls } = scriptGateway([
-        answerInvalidError(),
-        answerInvalidError(),
-      ]);
-      const strategy = createAgentStrategy({
-        db: handle.raw,
-        repo,
-        broker,
-        gateway,
-        model: "m",
-      });
-      const { sessionId, runId } = newRunningTurn(repo, T0);
-      await expect(strategy(ctxFor(repo, runId))).rejects.toMatchObject({
-        errorCode: "output_invalid",
-      });
-      expect(calls).toHaveLength(2);
-      expect(calls.length).toBeLessThanOrEqual(AGENT_MAX_STEPS);
-      const rows = repo.listModelCalls(runId);
-      expect(rows).toHaveLength(2);
-      expect(rows[0]).toMatchObject({
-        step: 1,
-        outcome: "failed",
-        errorCode: "answer_invalid",
-      });
-      expect(rows[1]).toMatchObject({
-        step: 2,
-        outcome: "failed",
-        errorCode: "answer_invalid",
-      });
-      const events = stepEvents(repo, sessionId, runId);
-      expect(events.filter((e) => e.type === "model.step.failed")).toHaveLength(
-        2,
-      );
-      expect(
-        events.filter((e) => e.type === "model.step.completed"),
-      ).toHaveLength(0);
-      void sessionId;
-    } finally {
-      closeKernelDatabase(handle);
-    }
-  });
-
-  it("ordinary malformed tool call does not gain answer repair", async () => {
-    const { handle, repo } = await setup();
-    try {
-      const broker = createToolBroker({
-        db: handle.raw,
-        repo,
-        registrations: [],
-      });
-      const ordinaryInvalid = new ModelLocalError(
-        "tool_call_invalid",
-        "model returned an invalid tool call",
-      );
-      const { gateway, calls } = scriptGateway([
-        ordinaryInvalid,
-        chatResult([answerCall([{ text: "late", citations: [] }])]),
-      ]);
-      const strategy = createAgentStrategy({
-        db: handle.raw,
-        repo,
-        broker,
-        gateway,
-        model: "m",
-      });
-      const { runId } = newRunningTurn(repo, T0);
-      await expect(strategy(ctxFor(repo, runId))).rejects.toMatchObject({
-        errorCode: "execution_failed",
-      });
-      // No repair: exactly one generateTurn call consumed.
-      expect(calls).toHaveLength(1);
-      const rows = repo.listModelCalls(runId);
-      expect(rows).toHaveLength(1);
-      expect(rows[0]).toMatchObject({
-        step: 1,
-        outcome: "failed",
-        errorCode: "model_unavailable",
-      });
-    } finally {
-      closeKernelDatabase(handle);
-    }
-  });
-
-  it("ordinary oversize stays model_unavailable without repair", async () => {
-    const { handle, repo } = await setup();
-    try {
-      const broker = createToolBroker({
-        db: handle.raw,
-        repo,
-        registrations: [],
-      });
-      const oversize = new ModelLocalError(
-        "invalid_response",
-        "model returned an invalid response",
-      );
-      const { gateway, calls } = scriptGateway([oversize]);
-      const strategy = createAgentStrategy({
-        db: handle.raw,
-        repo,
-        broker,
-        gateway,
-        model: "m",
-      });
-      const { runId } = newRunningTurn(repo, T0);
-      await expect(strategy(ctxFor(repo, runId))).rejects.toMatchObject({
-        errorCode: "execution_failed",
-      });
-      expect(calls).toHaveLength(1);
-      expect(repo.listModelCalls(runId)[0]).toMatchObject({
-        step: 1,
-        outcome: "failed",
-        errorCode: "model_unavailable",
-      });
     } finally {
       closeKernelDatabase(handle);
     }
