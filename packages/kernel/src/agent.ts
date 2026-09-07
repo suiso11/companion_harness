@@ -2222,7 +2222,10 @@ async function runModelStep(args: {
     }
     if (settlement.kind === "result") {
       try {
-        validateChatResult(settlement.result, request.tools);
+        settlement = {
+          kind: "result",
+          result: validateChatResult(settlement.result, request.tools),
+        };
       } catch (error) {
         settlement = { kind: "error", error };
       }

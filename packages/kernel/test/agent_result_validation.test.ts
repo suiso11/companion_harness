@@ -119,4 +119,96 @@ describe("custom-gateway result validation", () => {
       closeKernelDatabase(handle);
     }
   });
+
+  it("stateful result getters never execute a second value", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const broker = createToolBroker({
+        db: handle.raw,
+        repo,
+        registrations: [],
+      });
+      let brokerCalls = 0;
+      const seenQueries: unknown[] = [];
+      const inner = broker.invoke.bind(broker);
+      broker.invoke = (async (...args: Parameters<typeof inner>) => {
+        brokerCalls += 1;
+        seenQueries.push((args[2] as { query?: unknown })?.query);
+        return inner(...args);
+      }) as typeof broker.invoke;
+      let textReads = 0;
+      let toolCallsReads = 0;
+      const duplicateFirst = [
+        { id: "dup-1", name: "markdown.search", arguments: { query: "hi" } },
+        { id: "dup-1", name: "markdown.search", arguments: { query: "hi" } },
+      ];
+      const evilSecond = [
+        {
+          id: "evil-1",
+          name: "markdown.search",
+          arguments: { query: "evil-second-read" },
+        },
+      ];
+      const hostile = {} as Record<string, unknown>;
+      Object.defineProperty(hostile, "text", {
+        enumerable: true,
+        configurable: true,
+        get() {
+          textReads += 1;
+          return textReads === 1 ? "" : "evil-second-text";
+        },
+      });
+      Object.defineProperty(hostile, "stopReason", {
+        enumerable: true,
+        configurable: true,
+        value: "tool_calls",
+        writable: true,
+      });
+      Object.defineProperty(hostile, "toolCalls", {
+        enumerable: true,
+        configurable: true,
+        get() {
+          toolCallsReads += 1;
+          return toolCallsReads === 1 ? duplicateFirst : evilSecond;
+        },
+      });
+      const gateway: ModelGateway = {
+        provider: "openai-compatible",
+        capabilities: { toolCalling: true },
+        baseUrl: "http://127.0.0.1:11434",
+        chatUrl: "http://127.0.0.1:11434/v1/chat/completions",
+        chat: async (): Promise<ChatResult> => hostile as unknown as ChatResult,
+      };
+      const strategy = createAgentStrategy({
+        db: handle.raw,
+        repo,
+        broker,
+        gateway,
+        model: "m",
+      });
+      const sessionId = repo.createSession({
+        key: crypto.randomUUID(),
+        now: T0,
+      }).body.sessionId;
+      const posted = repo.postMessage(
+        sessionId,
+        { text: "q" },
+        { key: crypto.randomUUID(), now: T0 },
+      );
+      const runId = posted.body.run.id;
+      repo.startRun(runId, { now: T0 + 1 });
+      await expect(strategy(ctxFor(repo, runId))).rejects.toMatchObject({
+        errorCode: "execution_failed",
+      });
+      // Malformed snapshot executes/grants nothing: the evil second value is
+      // never executed (zero broker calls, never seen as broker input).
+      expect(brokerCalls).toBe(0);
+      expect(seenQueries).not.toContain("evil-second-read");
+      expect(textReads).toBeLessThanOrEqual(1);
+      expect(toolCallsReads).toBeLessThanOrEqual(1);
+      expect(repo.listEvidenceGrants(runId)).toHaveLength(0);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
 });

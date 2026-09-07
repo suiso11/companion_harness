@@ -1271,9 +1271,9 @@ export function validateNativeToolCalls(options: {
 
 /**
  * Validate an injected/normalized ChatResult before execution or storage
- * (r3949581177/r3949352972). Custom gateways bypass provider normalization,
+ * (r3949581177/r3949352972, r3950152834). Custom gateways bypass provider normalization,
  * so AgentStrategy must apply every existing bound atomically here: assistant
- * text (character semantics), per-message tool-call count, per-call id/name
+ * text (character semantics), stopReason, per-message tool-call count, per-call id/name
  * shape and bounds, per-call plain-JSON arguments with the exact 32KiB
  * canonical UTF-8 bound, and duplicate ids. Unknown but well-formed ordinary
  * names still pass (authoritative unknown-tool budget/audit stays with the
@@ -1283,22 +1283,60 @@ export function validateNativeToolCalls(options: {
  * unsolicited calls, `invalid_response` for oversize text/count/ids/names or
  * non-object shapes). Never truncates, never echoes raw values, never
  * executes or grants anything (validation only).
+ *
+ * Detached snapshot (r3950152834): `text`/`stopReason`/`toolCalls` are each
+ * captured once via own data descriptors (accessor descriptors reject without
+ * invoking user code, so a stateful getter's second value is never executed),
+ * each arguments object is cloned from its already-computed canonical JSON
+ * string, and a new plain `ChatResult` with new call objects is returned.
+ * Callers must use the returned snapshot (never the source result), so later
+ * mutation cannot change what was validated. No nested references are shared
+ * with the source result.
  */
 export function validateChatResult(
   result: unknown,
   requestedTools?: readonly ToolDefinition[] | undefined,
-): asserts result is ChatResult {
+): ChatResult {
   if (typeof result !== "object" || result === null || Array.isArray(result)) {
     throw new ModelLocalError(
       "invalid_response",
       "model returned an invalid response",
     );
   }
-  const record = result as {
-    text?: unknown;
-    toolCalls?: unknown;
+  const source = result as object;
+  // Single capture per top-level field via own data descriptors: an accessor
+  // descriptor rejects without invoking the getter (zero executions, so a
+  // second getter value can never surface); a missing own property rejects
+  // as malformed. Plain `JSON.parse` / object-literal results always carry
+  // own data properties, so legal shapes stay valid.
+  const readTopField = (key: string): unknown => {
+    let descriptor: PropertyDescriptor | undefined;
+    try {
+      descriptor = Object.getOwnPropertyDescriptor(source, key);
+    } catch {
+      throw new ModelLocalError(
+        "invalid_response",
+        "model returned an invalid response",
+      );
+    }
+    if (descriptor === undefined) {
+      throw new ModelLocalError(
+        "invalid_response",
+        "model returned an invalid response",
+      );
+    }
+    if (descriptor.get !== undefined || descriptor.set !== undefined) {
+      throw new ModelLocalError(
+        "invalid_response",
+        "model returned an invalid response",
+      );
+    }
+    return descriptor.value;
   };
-  if (typeof record.text !== "string") {
+  const text = readTopField("text");
+  const stopReason = readTopField("stopReason");
+  const toolCallsValue = readTopField("toolCalls");
+  if (typeof text !== "string") {
     throw new ModelLocalError(
       "invalid_response",
       "model returned an invalid response",
@@ -1306,37 +1344,88 @@ export function validateChatResult(
   }
   // Text bound first so an oversize batch containing a malformed
   // answer.submit still fails as invalid_response (never repaired).
-  assertAssistantTextWithinBound(record.text);
-  if (!Array.isArray(record.toolCalls)) {
+  assertAssistantTextWithinBound(text);
+  if (
+    stopReason !== "stop" &&
+    stopReason !== "tool_calls" &&
+    stopReason !== "unknown"
+  ) {
     throw new ModelLocalError(
       "invalid_response",
       "model returned an invalid response",
     );
   }
-  const toolCalls = record.toolCalls as unknown[];
+  if (!Array.isArray(toolCallsValue)) {
+    throw new ModelLocalError(
+      "invalid_response",
+      "model returned an invalid response",
+    );
+  }
+  const toolCalls = toolCallsValue as unknown[];
   // Count bound before per-call parsing (same ordering as adapters).
   assertToolCallCountWithinBound(toolCalls.length);
   const seenIds = new Map<string, string>();
   const names: string[] = [];
+  const snapshotCalls: { id: string; name: string; arguments: unknown }[] = [];
   for (let index = 0; index < toolCalls.length; index += 1) {
-    const entry = toolCalls[index];
+    // Single capture per element: holes and accessor elements reject without
+    // invoking user code.
+    let elementDescriptor: PropertyDescriptor | undefined;
+    try {
+      elementDescriptor = Object.getOwnPropertyDescriptor(
+        toolCalls,
+        String(index),
+      );
+    } catch {
+      throw nativeToolCallInvalidError();
+    }
+    if (
+      elementDescriptor === undefined ||
+      elementDescriptor.get !== undefined ||
+      elementDescriptor.set !== undefined
+    ) {
+      throw nativeToolCallInvalidError();
+    }
+    const entry = elementDescriptor.value;
     if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
       throw nativeToolCallInvalidError();
     }
-    const call = entry as {
-      id?: unknown;
-      name?: unknown;
-      arguments?: unknown;
+    const callSource = entry as object;
+    const readCallField = (key: string): unknown => {
+      let descriptor: PropertyDescriptor | undefined;
+      try {
+        descriptor = Object.getOwnPropertyDescriptor(callSource, key);
+      } catch {
+        throw nativeToolCallInvalidError();
+      }
+      if (descriptor === undefined) {
+        return undefined;
+      }
+      if (descriptor.get !== undefined || descriptor.set !== undefined) {
+        if (key === "arguments") {
+          // Name is read below; defer precise per-tool error until after.
+          throw new TypeError("accessor in tool arguments");
+        }
+        throw nativeToolCallInvalidError();
+      }
+      return descriptor.value;
     };
     // Injected results must carry an explicit id: absent ids reject here
     // (provider adapters synthesize call_<index> only for omitted
     // provider-native ids, never for already-normalized results).
-    if (call.id === undefined || call.id === null) {
+    const rawId = readCallField("id");
+    if (rawId === undefined || rawId === null) {
       throw nativeToolCallInvalidError();
     }
-    const id = normalizeNativeToolCallId(call.id, index);
-    const name = assertNativeToolCallName(call.name);
-    const args = call.arguments;
+    const id = normalizeNativeToolCallId(rawId, index);
+    const rawName = readCallField("name");
+    const name = assertNativeToolCallName(rawName);
+    let args: unknown;
+    try {
+      args = readCallField("arguments");
+    } catch {
+      throwInvalidToolArguments(name);
+    }
     if (!isRecord(args)) {
       throwInvalidToolArguments(name);
     }
@@ -1347,6 +1436,9 @@ export function validateChatResult(
       throwInvalidToolArguments(name);
     }
     assertToolArgumentsByteLengthForTool(utf8ByteLength(serialized), name);
+    // Detached clone from the already-computed canonical string: plain
+    // `Object.prototype` data only, no shared references with the source.
+    const clonedArgs = JSON.parse(serialized) as unknown;
     // Duplicate answer.submit ids defer to AgentStrategy classification so
     // the terminal protocol repairs exactly once; any duplicate involving
     // an ordinary tool rejects atomically here so nothing executes.
@@ -1361,10 +1453,12 @@ export function validateChatResult(
       seenIds.set(id, name);
     }
     names.push(name);
+    snapshotCalls.push({ id, name, arguments: clonedArgs });
   }
   // Multiple answer.submit calls (same or distinct ids) classify as the
   // duplicate terminal protocol in AgentStrategy: skip the shared duplicate
-  // gate and return after the unsolicited check so repair-once applies.
+  // gate and return the detached snapshot after the unsolicited check so
+  // repair-once applies.
   if (names.filter((entry) => entry === ANSWER_SUBMIT_TOOL_NAME).length > 1) {
     if (
       toolCalls.length > 0 &&
@@ -1375,12 +1469,21 @@ export function validateChatResult(
         "model returned tool calls without tools requested",
       );
     }
-    return;
+    return {
+      text,
+      toolCalls: snapshotCalls,
+      stopReason: stopReason as ChatResult["stopReason"],
+    };
   }
   validateNativeToolCalls({
-    toolCalls: toolCalls as { id: string; name: string; arguments: unknown }[],
+    toolCalls: snapshotCalls,
     requestedTools,
   });
+  return {
+    text,
+    toolCalls: snapshotCalls,
+    stopReason: stopReason as ChatResult["stopReason"],
+  };
 }
 
 /** Plain-object guard for provider payloads. */
