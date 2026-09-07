@@ -59,6 +59,7 @@ export {
   renderAnswerText,
   sanitizeModelFacingForFeedback,
   translateReferenceArgs,
+  trimConversationToCap,
   verifyCitations,
 } from "./agent.js";
 export type {

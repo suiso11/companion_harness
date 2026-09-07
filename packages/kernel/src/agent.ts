@@ -1626,25 +1626,182 @@ function loadHistory(
 }
 
 /**
- * Drop the oldest projected history pairs (`Earlier request:` user +
- * following assistant) until the message list fits the gateway cap.
- * Latest entries are retained in chronological order; assistant tool-call
- * replay and tool feedback are never removed here.
+ * Trim the whole conversation to the gateway 128-message cap before every
+ * gateway call. Order: oldest selected-history pairs first (latest win,
+ * chronological), then oldest complete tool interaction groups. A tool
+ * group is one assistant message with native toolCalls plus every matching
+ * contiguous role:tool response plus any directly associated fixed repair
+ * hint (`Repair instruction:` user message immediately following the tools).
+ * A standalone repair hint (answer-normalization failure, no assistant) is
+ * its own single-message group. System (index 0) and the current user
+ * request (`User request:`) are indispensable and never removed; order of
+ * survivors is preserved; no raw summary of omitted data is added; no half
+ * group is ever dropped so tool_call_id correlations stay intact.
  */
-function trimHistoryToCap(messages: ChatRequest["messages"]): void {
-  while (messages.length > MAX_MESSAGES_PER_REQUEST) {
+export function trimConversationToCap(
+  messages: ChatRequest["messages"],
+): void {
+  if (messages.length <= MAX_MESSAGES_PER_REQUEST) {
+    return;
+  }
+  if (messages.length === 0) {
+    return;
+  }
+  // Locate the indispensable current user request (projected once by
+  // projectPrompt as `User request:\n...`). First occurrence wins; there
+  // is exactly one in the strategy flow.
+  let currentIdx = -1;
+  for (let i = 0; i < messages.length; i += 1) {
+    const candidate = messages[i];
+    if (
+      candidate !== undefined &&
+      candidate.role === "user" &&
+      typeof candidate.content === "string" &&
+      candidate.content.startsWith("User request:\n")
+    ) {
+      currentIdx = i;
+      break;
+    }
+  }
+  if (currentIdx === -1) {
+    // Unknown shape: fall back to legacy history-only trimming so an
+    // unexpected conversation never gains a new orphan; the caller still
+    // fails closed when the cap cannot be met.
+    while (messages.length > MAX_MESSAGES_PER_REQUEST) {
+      const second = messages[1];
+      if (
+        second === undefined ||
+        second.role !== "user" ||
+        typeof second.content !== "string" ||
+        !second.content.startsWith(AGENT_HISTORY_USER_PREFIX)
+      ) {
+        return;
+      }
+      messages.splice(1, 2);
+    }
+    return;
+  }
+  // Phase 1: oldest selected-history pairs first (region [1, currentIdx)).
+  while (messages.length > MAX_MESSAGES_PER_REQUEST && currentIdx > 1) {
     const second = messages[1];
+    const third = messages[2];
     if (
       second === undefined ||
       second.role !== "user" ||
       typeof second.content !== "string" ||
-      !second.content.startsWith(AGENT_HISTORY_USER_PREFIX)
+      !second.content.startsWith(AGENT_HISTORY_USER_PREFIX) ||
+      third === undefined ||
+      third.role !== "assistant" ||
+      (third.toolCalls !== undefined && third.toolCalls.length > 0)
     ) {
-      return;
+      break;
     }
     // Remove the oldest history pair (user request + assistant result).
     messages.splice(1, 2);
+    currentIdx -= 2;
   }
+  if (messages.length <= MAX_MESSAGES_PER_REQUEST) {
+    return;
+  }
+  // Phase 2: oldest complete tool interaction groups after the current
+  // request. The post-current segment partitions contiguously into groups
+  // so dropping the oldest k groups removes a message prefix and never
+  // splits a tool_call_id correlation.
+  interface TrimGroup {
+    readonly start: number;
+    readonly end: number;
+  }
+  const groups: TrimGroup[] = [];
+  let cursor = currentIdx + 1;
+  while (cursor < messages.length) {
+    const current = messages[cursor];
+    if (current === undefined) {
+      break;
+    }
+    if (
+      current.role === "assistant" &&
+      Array.isArray(current.toolCalls) &&
+      current.toolCalls.length > 0
+    ) {
+      const start = cursor;
+      const ids = new Set<string>();
+      for (const call of current.toolCalls) {
+        if (
+          typeof call === "object" &&
+          call !== null &&
+          typeof (call as { id?: unknown }).id === "string"
+        ) {
+          ids.add((call as { id: string }).id);
+        }
+      }
+      let end = cursor + 1;
+      const seen = new Set<string>();
+      while (end < messages.length) {
+        const tool = messages[end];
+        if (
+          tool === undefined ||
+          tool.role !== "tool" ||
+          typeof tool.toolCallId !== "string" ||
+          !ids.has(tool.toolCallId) ||
+          seen.has(tool.toolCallId)
+        ) {
+          break;
+        }
+        seen.add(tool.toolCallId);
+        end += 1;
+      }
+      // Directly associated fixed repair hint belongs to this group.
+      if (end < messages.length) {
+        const hint = messages[end];
+        if (
+          hint !== undefined &&
+          hint.role === "user" &&
+          typeof hint.content === "string" &&
+          hint.content.startsWith("Repair instruction:\n")
+        ) {
+          end += 1;
+        }
+      }
+      groups.push({ start, end });
+      cursor = end;
+      continue;
+    }
+    if (
+      current.role === "user" &&
+      typeof current.content === "string" &&
+      current.content.startsWith("Repair instruction:\n")
+    ) {
+      // Standalone repair (answer-normalization failure, no assistant).
+      groups.push({ start: cursor, end: cursor + 1 });
+      cursor += 1;
+      continue;
+    }
+    // Any other single message (including a stray role:tool already
+    // orphaned upstream): keep atomic so trimming never creates a split.
+    groups.push({ start: cursor, end: cursor + 1 });
+    cursor += 1;
+  }
+  let dropGroups = 0;
+  let dropMessages = 0;
+  while (
+    messages.length - dropMessages > MAX_MESSAGES_PER_REQUEST &&
+    dropGroups < groups.length
+  ) {
+    const group = groups[dropGroups];
+    if (group === undefined) {
+      break;
+    }
+    dropMessages += group.end - group.start;
+    dropGroups += 1;
+  }
+  if (dropMessages > 0) {
+    messages.splice(currentIdx + 1, dropMessages);
+  }
+}
+
+/** Legacy name retained for the in-loop call site (full conversation trim). */
+function trimHistoryToCap(messages: ChatRequest["messages"]): void {
+  trimConversationToCap(messages);
 }
 
 function loadReferenceSummary(
