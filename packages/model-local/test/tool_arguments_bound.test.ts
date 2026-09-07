@@ -14,7 +14,10 @@
 
 import { describe, expect, it } from "vitest";
 import { ModelLocalError } from "../src/errors.js";
-import { MAX_TOOL_CALL_ARGUMENTS_BYTES } from "../src/gateway.js";
+import {
+  canonicalToolArgumentsJson,
+  MAX_TOOL_CALL_ARGUMENTS_BYTES,
+} from "../src/gateway.js";
 import { normalizeOllamaResponse } from "../src/ollama.js";
 import { normalizeOpenAIResponse } from "../src/openai_compatible.js";
 
@@ -267,5 +270,90 @@ describe("ollama object/string arguments bound", () => {
       TOOLS,
     );
     expect(result.toolCalls).toEqual([]);
+  });
+});
+
+describe("ollama provider-controlled keys size (r3944854879)", () => {
+  it("counts __proto__/constructor/prototype keys without dropping or polluting", () => {
+    // Build via JSON.parse so __proto__ stays an own property (an object
+    // literal would invoke the prototype setter in the test itself).
+    const args = JSON.parse(
+      `{"__proto__":{"polluted":"${SECRET_MARKER}"},"constructor":{"x":1},"prototype":"v","a":1}`,
+    ) as Record<string, unknown>;
+    const canonical = canonicalToolArgumentsJson(args);
+    expect(canonical).toContain('"__proto__"');
+    expect(canonical).toContain('"constructor"');
+    expect(canonical).toContain('"prototype"');
+    expect(encoder.encode(canonical).byteLength).toBeGreaterThan(
+      encoder.encode(`{"a":1}`).byteLength,
+    );
+    // Deterministic: key order does not affect measured bytes.
+    expect(canonicalToolArgumentsJson({ b: 1, a: 1 })).toBe(
+      canonicalToolArgumentsJson({ a: 1, b: 1 }),
+    );
+    // Legal JSON keys are accepted (never rejected by name).
+    const ok = normalizeOllamaResponse(ollamaBody([ollamaCall(args)]), TOOLS);
+    expect(ok.toolCalls).toHaveLength(1);
+    const returned = ok.toolCalls[0]?.arguments as Record<string, unknown>;
+    expect(Object.hasOwn(returned, "__proto__")).toBe(true);
+    expect(Object.hasOwn(returned, "constructor")).toBe(true);
+    expect(Object.hasOwn(returned, "prototype")).toBe(true);
+    expect(
+      (Object.prototype as Record<string, unknown>).polluted,
+    ).toBeUndefined();
+    expect({}).not.toHaveProperty("polluted");
+
+    // Oversize bytes hidden inside __proto__ must reject (not undercount).
+    const over = JSON.parse(
+      `{"__proto__":{"pad":"${SECRET_MARKER}${"a".repeat(ASCII_PAD_AT_BOUND)}"}}`,
+    ) as Record<string, unknown>;
+    expect(
+      encoder.encode(canonicalToolArgumentsJson(over)).byteLength,
+    ).toBeGreaterThan(MAX_TOOL_CALL_ARGUMENTS_BYTES);
+    try {
+      normalizeOllamaResponse(ollamaBody([ollamaCall(over)]), TOOLS);
+      expect.unreachable();
+    } catch (error) {
+      const err = expectInvalidResponse(error);
+      expect(JSON.stringify(err)).not.toContain(SECRET_MARKER);
+    }
+    expect(
+      (Object.prototype as Record<string, unknown>).polluted,
+    ).toBeUndefined();
+  });
+
+  it("enforces exact boundary on nested __proto__ payload", () => {
+    const nestedOverhead = encoder.encode(
+      `{"__proto__":{"pad":""}}`,
+    ).byteLength;
+    const padAtBound = MAX_TOOL_CALL_ARGUMENTS_BYTES - nestedOverhead;
+    const exact = JSON.parse(
+      `{"__proto__":{"pad":"${"a".repeat(padAtBound)}"}}`,
+    ) as Record<string, unknown>;
+    expect(encoder.encode(canonicalToolArgumentsJson(exact)).byteLength).toBe(
+      MAX_TOOL_CALL_ARGUMENTS_BYTES,
+    );
+    const ok = normalizeOllamaResponse(ollamaBody([ollamaCall(exact)]), TOOLS);
+    expect(ok.toolCalls).toHaveLength(1);
+    expect(
+      (Object.prototype as Record<string, unknown>).polluted,
+    ).toBeUndefined();
+
+    const over = JSON.parse(
+      `{"__proto__":{"pad":"${"a".repeat(padAtBound + 1)}"}}`,
+    ) as Record<string, unknown>;
+    expect(encoder.encode(canonicalToolArgumentsJson(over)).byteLength).toBe(
+      MAX_TOOL_CALL_ARGUMENTS_BYTES + 1,
+    );
+    try {
+      normalizeOllamaResponse(ollamaBody([ollamaCall(over)]), TOOLS);
+      expect.unreachable();
+    } catch (error) {
+      const err = expectInvalidResponse(error);
+      expect(JSON.stringify(err)).not.toContain("aaaa");
+    }
+    expect(
+      (Object.prototype as Record<string, unknown>).polluted,
+    ).toBeUndefined();
   });
 });

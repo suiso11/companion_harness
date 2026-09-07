@@ -93,7 +93,13 @@ function canonicalizeForSize(value: unknown): unknown {
     return value.map((entry) => canonicalizeForSize(entry));
   }
   if (isRecord(value)) {
-    const sorted: Record<string, unknown> = {};
+    // Null-prototype sink: assigning provider-controlled keys such as
+    // `__proto__` creates a plain own property instead of invoking the
+    // `Object.prototype` setter (which would mutate the prototype and drop
+    // the key from serialization, undercounting size). Every enumerable
+    // own key is preserved and sorted for deterministic measurement;
+    // legal JSON keys are never rejected by name.
+    const sorted: Record<string, unknown> = Object.create(null);
     for (const key of Object.keys(value).sort()) {
       sorted[key] = canonicalizeForSize(value[key]);
     }
