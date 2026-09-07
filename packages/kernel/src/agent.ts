@@ -1405,6 +1405,32 @@ export function createAgentStrategy(
           });
           continue;
         }
+        // Defense in depth for gateways that bypass provider normalization:
+        // normalized assistant text longer than the shared gateway
+        // per-message bound (character semantics, `text.length`, same as
+        // ChatMessage validation) is rejected atomically before replay
+        // storage. Exactly one failed/model_unavailable audit; no tool
+        // executes, no evidence is created, nothing is truncated or echoed.
+        if (
+          typeof outcome.result.text !== "string" ||
+          outcome.result.text.length > MAX_MESSAGE_CONTENT_LENGTH
+        ) {
+          const oversizeAudited = finalizeDeliveredStep({
+            repo,
+            runId,
+            step,
+            adapter: outcome.adapter,
+            model,
+            durationMs: outcome.durationMs,
+            usage: outcome.usage,
+            errorCode: "model_unavailable",
+            clock,
+          });
+          if (!oversizeAudited) {
+            throw new StrategyError("execution_cancelled");
+          }
+          throw new StrategyError("execution_failed");
+        }
         const classification = classifyStep(outcome.result.toolCalls);
         // Provider-correct multi-step replay: preserve the native assistant
         // toolCalls message before any tool results / repair hint. Raw text

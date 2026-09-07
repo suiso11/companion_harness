@@ -7,6 +7,7 @@
 
 import { ModelLocalError } from "./errors.js";
 import {
+  assertAssistantTextWithinBound,
   assertNativeToolCallName,
   assertToolArgumentsByteLengthForTool,
   assertToolCallCountWithinBound,
@@ -126,6 +127,12 @@ export function normalizeOpenAIResponse(
     }
     text = message.content;
   }
+  // Text bound first (character semantics, same as ChatMessage
+  // validation): oversize text rejects the whole response as fixed
+  // invalid_response before any tool-call parsing, so an oversize batch
+  // containing a malformed answer.submit still fails as invalid_response
+  // (never answer_invalid, never repaired) and no tool executes.
+  assertAssistantTextWithinBound(text);
   const toolCalls: NormalizedToolCall[] = [];
   if (message.tool_calls !== undefined && message.tool_calls !== null) {
     if (!Array.isArray(message.tool_calls)) {

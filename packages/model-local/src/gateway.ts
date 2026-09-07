@@ -252,6 +252,25 @@ function nativeToolCallOversizeError(): ModelLocalError {
 }
 
 /**
+ * Enforce the shared per-message assistant-text bound on normalized
+ * provider output. Assistant `text` longer than MAX_MESSAGE_CONTENT_LENGTH
+ * rejects atomically with fixed redacted invalid_response (never truncated,
+ * never echoed) before AgentStrategy stores it for replay, so no tool
+ * executes and no evidence is created. Measured with the same character
+ * semantics as ChatMessage validation (`text.length`, UTF-16 code units),
+ * not UTF-8 bytes: multibyte characters count by length. Empty text stays
+ * valid (tool-call-only responses); the caller classifies free text.
+ */
+export function assertAssistantTextWithinBound(text: string): void {
+  if (text.length > MAX_MESSAGE_CONTENT_LENGTH) {
+    throw new ModelLocalError(
+      "invalid_response",
+      "model returned an invalid response",
+    );
+  }
+}
+
+/**
  * Enforce the shared per-message native tool-call count bound on normalized
  * provider output (r3946739336). A response carrying more than
  * MAX_TOOL_CALLS_PER_MESSAGE native calls rejects atomically with fixed

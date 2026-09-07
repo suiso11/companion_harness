@@ -17,6 +17,7 @@ export {
 export {
   ANSWER_SUBMIT_TOOL_NAME,
   answerArgsInvalidError,
+  assertAssistantTextWithinBound,
   assertNativeToolCallName,
   assertToolArgumentsByteLength,
   assertToolArgumentsByteLengthForTool,
