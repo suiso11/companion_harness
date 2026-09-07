@@ -2094,7 +2094,9 @@ export function createKernelRepository(db: Database.Database) {
    * EvidenceGrant. Session ownership of both the run and the reference is
    * verified first; mismatches are 404. Only actual model-facing exposure
    * may call this (the agent calls it solely for delivered reference
-   * snippet/full payloads).
+   * snippet/full payloads). Terminal runs (completed/failed/cancelled/
+   * abandoned) reject inside the same transaction before any insert or
+   * snippet -> full upgrade, so post-finalization grants never mutate rows.
    */
   function upsertEvidenceGrant(
     sessionId: string,
@@ -2125,6 +2127,16 @@ export function createKernelRepository(db: Database.Database) {
       if (owned === undefined) {
         throw new ReferenceNotFoundError(
           `reference ${reference} not found in session ${session}`,
+        );
+      }
+      // Finality: reject grants on terminal runs inside the same BEGIN
+      // IMMEDIATE transaction, before any insert/upgrade. Matches the
+      // stored-only rule for tool/model-step events and model_calls:
+      // completed/failed/cancelled/abandoned never mutate; running and
+      // cancel_requested still grant (late-output result rules are separate).
+      if (isTerminalStatus(runRow.status as RunStatus)) {
+        throw new RepositoryValidationError(
+          "cannot grant evidence to a terminal run",
         );
       }
       const existing = db
