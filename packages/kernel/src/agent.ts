@@ -693,6 +693,193 @@ export function extractGrantCandidates(modelFacing: unknown): GrantCandidate[] {
 }
 
 /* ------------------------------------------------------------------ */
+/* Bounded reference map (r3944854881) + dynamic rN addressability         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Max session_reference ids per bounded lookup chunk. Every
+ * `session_references` query in the tool-result path carries
+ * `session_id = ?` plus at most this many `IN` placeholders
+ * (≤51 variables total, far below the SQLite 999 limit).
+ */
+export const AGENT_REFERENCE_LOOKUP_CHUNK_SIZE = 50;
+
+/** Free-text evidence keys: pass through untouched, never identity-mapped. */
+const AGENT_FREE_TEXT_KEYS: ReadonlySet<string> = new Set([
+  "snippet",
+  "text",
+  "title",
+  "query",
+  "reason",
+]);
+
+/**
+ * Collect exact structural UUID v4 values present in a delivered broker
+ * `modelFacing` payload (r3944854881). Only exact string values in
+ * non-free-text positions are collected; UUID-like substrings embedded in
+ * free-text evidence (`snippet`/`text`/`title`/`query`/`reason`) are never
+ * interpreted as identities and are not collected. Deduped, insertion
+ * order preserved. Work scales with the payload, never the session.
+ */
+export function collectStructuralUuids(value: unknown): string[] {
+  const seen = new Set<string>();
+  const visit = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      for (const entry of node) {
+        visit(entry);
+      }
+      return;
+    }
+    if (typeof node !== "object" || node === null) {
+      return;
+    }
+    const record = node as Record<string, unknown>;
+    for (const [key, entry] of Object.entries(record)) {
+      if (AGENT_FREE_TEXT_KEYS.has(key)) {
+        continue;
+      }
+      if (typeof entry === "string") {
+        if (isUuidV4(entry) && !seen.has(entry)) {
+          seen.add(entry);
+        }
+        continue;
+      }
+      visit(entry);
+    }
+  };
+  visit(value);
+  return [...seen];
+}
+
+/**
+ * Bounded reverse map UUID -> ordinal for ONLY the given ids
+ * (r3944854881). Every chunk queries with current-session ownership
+ * (`session_id = ? AND id IN (...)`) in safe bounded chunks; ids that do
+ * not belong to this session return nothing. Fail-closed: unreadable
+ * chunks contribute nothing (callers redact to a fixed marker).
+ */
+export function loadBoundedUuidToOrdinal(
+  db: Database.Database,
+  sessionId: string,
+  ids: readonly string[],
+): Map<string, number> {
+  const map = new Map<string, number>();
+  const unique = [...new Set(ids)].filter((id) => isUuidV4(id));
+  for (
+    let offset = 0;
+    offset < unique.length;
+    offset += AGENT_REFERENCE_LOOKUP_CHUNK_SIZE
+  ) {
+    const chunk = unique.slice(
+      offset,
+      offset + AGENT_REFERENCE_LOOKUP_CHUNK_SIZE,
+    );
+    if (chunk.length === 0) {
+      continue;
+    }
+    try {
+      const placeholders = chunk.map(() => "?").join(",");
+      const rows = db
+        .prepare(
+          `SELECT id, ordinal FROM session_references WHERE session_id = ? AND id IN (${placeholders})`,
+        )
+        .all(sessionId, ...chunk) as Array<{ id: string; ordinal: number }>;
+      for (const row of rows) {
+        if (
+          typeof row.id === "string" &&
+          isUuidV4(row.id) &&
+          Number.isInteger(row.ordinal) &&
+          row.ordinal >= 1
+        ) {
+          map.set(row.id, row.ordinal);
+          map.set(row.id.toLowerCase(), row.ordinal);
+          map.set(row.id.toUpperCase(), row.ordinal);
+        }
+      }
+    } catch {
+      // Fail closed for this chunk: covered ids stay redacted.
+    }
+  }
+  return map;
+}
+
+/**
+ * Bounded forward map ordinal -> UUID for ONLY the given ordinals.
+ * Session-owned (`session_id = ? AND ordinal IN (...)`), chunked like the
+ * reverse map. Fail-closed: unreadable chunks invalidate those citations.
+ */
+export function loadBoundedOrdinalMap(
+  db: Database.Database,
+  sessionId: string,
+  ordinals: readonly number[],
+): Map<number, string> {
+  const map = new Map<number, string>();
+  const unique = [...new Set(ordinals)].filter(
+    (ordinal) => Number.isInteger(ordinal) && ordinal >= 1,
+  );
+  for (
+    let offset = 0;
+    offset < unique.length;
+    offset += AGENT_REFERENCE_LOOKUP_CHUNK_SIZE
+  ) {
+    const chunk = unique.slice(
+      offset,
+      offset + AGENT_REFERENCE_LOOKUP_CHUNK_SIZE,
+    );
+    if (chunk.length === 0) {
+      continue;
+    }
+    try {
+      const placeholders = chunk.map(() => "?").join(",");
+      const rows = db
+        .prepare(
+          `SELECT ordinal, id FROM session_references WHERE session_id = ? AND ordinal IN (${placeholders})`,
+        )
+        .all(sessionId, ...chunk) as Array<{ ordinal: number; id: string }>;
+      for (const row of rows) {
+        if (
+          Number.isInteger(row.ordinal) &&
+          row.ordinal >= 1 &&
+          typeof row.id === "string" &&
+          isUuidV4(row.id) &&
+          !map.has(row.ordinal)
+        ) {
+          map.set(row.ordinal, row.id);
+        }
+      }
+    } catch {
+      // Fail closed for this chunk.
+    }
+  }
+  return map;
+}
+
+/**
+ * Record verified delivered addressability into the per-run known ordinal
+ * map (r3944854881). Only `{ ordinal, referenceId }` pairs whose UUID is
+ * present in the bounded session-verified map AND whose ordinal matches
+ * the authoritative DB ordinal are learned; cross-session, forged-ordinal,
+ * or unverified pairs teach nothing. Only fills unknown ordinals, never
+ * overwrites, never touches EvidenceGrants.
+ */
+export function learnDeliveredOrdinalMappings(
+  target: Map<number, string>,
+  modelFacing: unknown,
+  verifiedUuidToOrdinal: ReadonlyMap<string, number>,
+): void {
+  for (const candidate of extractKnownOrdinalMappings(modelFacing)) {
+    if (target.has(candidate.ordinal)) {
+      continue;
+    }
+    const authoritative = verifiedUuidToOrdinal.get(candidate.referenceId);
+    if (authoritative === undefined || authoritative !== candidate.ordinal) {
+      continue;
+    }
+    target.set(candidate.ordinal, candidate.referenceId);
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* Dynamic rN addressability (r3943599549) + UUID-free feedback            */
 /* ------------------------------------------------------------------ */
 
@@ -780,32 +967,46 @@ export function loadFrozenOrdinalMap(
   frozenIds: readonly string[],
 ): Map<number, string> {
   const map = new Map<number, string>();
-  if (frozenIds.length === 0) {
+  const unique = [...new Set(frozenIds)].filter((id) => isUuidV4(id));
+  if (unique.length === 0) {
     return map;
   }
-  try {
-    const placeholders = frozenIds.map(() => "?").join(",");
-    const rows = db
-      .prepare(
-        `SELECT ordinal, id FROM session_references WHERE session_id = ? AND id IN (${placeholders})`,
-      )
-      .all(sessionId, ...frozenIds) as Array<{
-      ordinal: number;
-      id: string;
-    }>;
-    for (const row of rows) {
-      if (
-        Number.isInteger(row.ordinal) &&
-        row.ordinal >= 1 &&
-        typeof row.id === "string" &&
-        isUuidV4(row.id) &&
-        !map.has(row.ordinal)
-      ) {
-        map.set(row.ordinal, row.id);
-      }
+  for (
+    let offset = 0;
+    offset < unique.length;
+    offset += AGENT_REFERENCE_LOOKUP_CHUNK_SIZE
+  ) {
+    const chunk = unique.slice(
+      offset,
+      offset + AGENT_REFERENCE_LOOKUP_CHUNK_SIZE,
+    );
+    if (chunk.length === 0) {
+      continue;
     }
-  } catch {
-    // Fail closed: an unreadable map translates nothing.
+    try {
+      const placeholders = chunk.map(() => "?").join(",");
+      const rows = db
+        .prepare(
+          `SELECT ordinal, id FROM session_references WHERE session_id = ? AND id IN (${placeholders})`,
+        )
+        .all(sessionId, ...chunk) as Array<{
+        ordinal: number;
+        id: string;
+      }>;
+      for (const row of rows) {
+        if (
+          Number.isInteger(row.ordinal) &&
+          row.ordinal >= 1 &&
+          typeof row.id === "string" &&
+          isUuidV4(row.id) &&
+          !map.has(row.ordinal)
+        ) {
+          map.set(row.ordinal, row.id);
+        }
+      }
+    } catch {
+      // Fail closed: an unreadable chunk translates nothing.
+    }
   }
   return map;
 }
@@ -856,29 +1057,21 @@ export function translateReferenceArgs(
   return { ...record, referenceId: mapped };
 }
 
-/** Reverse session map UUID -> ordinal for UUID-free model feedback. */
-function loadUuidToOrdinal(
-  db: Database.Database,
-  sessionId: string,
-): Map<string, number> {
-  const map = new Map<string, number>();
-  try {
-    const rows = db
-      .prepare(
-        "SELECT id, ordinal FROM session_references WHERE session_id = ?",
-      )
-      .all(sessionId) as Array<{ id: string; ordinal: number }>;
-    for (const row of rows) {
-      if (typeof row.id === "string" && Number.isInteger(row.ordinal)) {
-        map.set(row.id, row.ordinal);
-        map.set(row.id.toLowerCase(), row.ordinal);
-        map.set(row.id.toUpperCase(), row.ordinal);
+/** Collect cited rN ordinals from a validated answer (bounded input). */
+function collectCitedOrdinals(answer: StructuredAnswer): number[] {
+  const out: number[] = [];
+  for (const part of answer.parts) {
+    for (const citation of part.citations) {
+      if (!CITATION_ID_REGEX.test(citation)) {
+        continue;
+      }
+      const ordinal = Number(citation.slice(1));
+      if (Number.isInteger(ordinal) && ordinal >= 1) {
+        out.push(ordinal);
       }
     }
-  } catch {
-    // Fail closed below: unmapped UUIDs redact to a fixed marker.
   }
-  return map;
+  return [...new Set(out)];
 }
 
 /**
@@ -1401,55 +1594,49 @@ function loadReferenceSummary(
   sessionId: string,
   frozenIds: readonly string[],
 ): ProjectedReferenceSummary[] {
-  if (frozenIds.length === 0) {
+  const unique = [...new Set(frozenIds)].filter((id) => isUuidV4(id));
+  if (unique.length === 0) {
     return [];
   }
   // Deterministic: resolve frozen ids to ordinals in ordinal order; ids
   // that no longer resolve are skipped (never invented). Model-facing
   // projection is rN plus title only: canonical keys stay in persistence
   // (M1) and never enter the gateway prompt; untitled rows project as rN
-  // alone. No semantic inference or fallback to canonicalKey.
-  const placeholders = frozenIds.map(() => "?").join(",");
-  let rows: Array<{
-    ordinal: number;
-    title: string | null;
-  }>;
-  try {
-    rows = db
-      .prepare(
-        `SELECT sr.ordinal AS ordinal, r.title AS title FROM session_references sr JOIN resources r ON r.id = sr.resource_id WHERE sr.session_id = ? AND sr.id IN (${placeholders}) ORDER BY sr.ordinal ASC`,
-      )
-      .all(sessionId, ...frozenIds) as Array<{
-      ordinal: number;
-      title: string | null;
-    }>;
-  } catch {
-    return [];
+  // alone. No semantic inference or fallback to canonicalKey. Chunked so
+  // placeholder counts stay bounded.
+  const collected: Array<{ ordinal: number; title: string | null }> = [];
+  for (
+    let offset = 0;
+    offset < unique.length;
+    offset += AGENT_REFERENCE_LOOKUP_CHUNK_SIZE
+  ) {
+    const chunk = unique.slice(
+      offset,
+      offset + AGENT_REFERENCE_LOOKUP_CHUNK_SIZE,
+    );
+    if (chunk.length === 0) {
+      continue;
+    }
+    try {
+      const placeholders = chunk.map(() => "?").join(",");
+      const rows = db
+        .prepare(
+          `SELECT sr.ordinal AS ordinal, r.title AS title FROM session_references sr JOIN resources r ON r.id = sr.resource_id WHERE sr.session_id = ? AND sr.id IN (${placeholders}) ORDER BY sr.ordinal ASC`,
+        )
+        .all(sessionId, ...chunk) as Array<{
+        ordinal: number;
+        title: string | null;
+      }>;
+      collected.push(...rows);
+    } catch {
+      return [];
+    }
   }
-  return rows.map((row) => ({
+  collected.sort((a, b) => a.ordinal - b.ordinal);
+  return collected.map((row) => ({
     ordinal: row.ordinal,
     title: row.title,
   }));
-}
-
-function loadOrdinalMap(
-  db: Database.Database,
-  sessionId: string,
-): Map<number, string> {
-  const map = new Map<number, string>();
-  try {
-    const rows = db
-      .prepare(
-        "SELECT ordinal, id FROM session_references WHERE session_id = ? ORDER BY ordinal ASC",
-      )
-      .all(sessionId) as Array<{ ordinal: number; id: string }>;
-    for (const row of rows) {
-      map.set(row.ordinal, row.id);
-    }
-  } catch {
-    // Fail closed below: an unreadable map invalidates every citation.
-  }
-  return map;
 }
 
 function loadGrantedIds(repo: KernelRepository, runId: string): Set<string> {
@@ -2235,7 +2422,30 @@ async function executeOrdinaryTools(args: {
   // failure is delivered, no EvidenceGrant is created for the omitted
   // content, and the next model step proceeds. Broker accounting/audit is
   // unchanged (the broker row stays as reported).
-  const uuidToOrdinal = loadUuidToOrdinal(db, sessionId);
+  // Bounded reference map (r3944854881): collect exact structural UUIDs
+  // from accepted payloads only, resolve them for this session in bounded
+  // chunks, then sanitize + learn solely from the delivered mapping.
+  // Unrelated session references are never queried; free-text evidence is
+  // never interpreted as identity; oversized/failed payloads teach nothing.
+  const acceptedPayloads: unknown[] = [];
+  for (const entry of results) {
+    if (entry.ok && entry.data !== null && entry.data !== undefined) {
+      acceptedPayloads.push(entry.data);
+    }
+  }
+  const structuralIds: string[] = [];
+  {
+    const seen = new Set<string>();
+    for (const payload of acceptedPayloads) {
+      for (const id of collectStructuralUuids(payload)) {
+        if (!seen.has(id)) {
+          seen.add(id);
+          structuralIds.push(id);
+        }
+      }
+    }
+  }
+  const uuidToOrdinal = loadBoundedUuidToOrdinal(db, sessionId, structuralIds);
   return results.map((entry, index) => {
     const call = calls[index] as NormalizedToolCall;
     const toolCallId = call.id;
@@ -2261,8 +2471,9 @@ async function executeOrdinaryTools(args: {
     if (entry.ok && entry.data !== null && entry.data !== undefined) {
       grantDeliveredReferences(repo, sessionId, runId, entry.data);
       // Addressability is distinct from evidence: newly exposed ordinals
-      // become resolvable for LATER steps only (this phase already ran).
-      learnKnownOrdinalMappings(knownOrdinalMap, entry.data);
+      // become resolvable for LATER steps only (this phase already ran),
+      // and only when verified against the bounded session-owned mapping.
+      learnDeliveredOrdinalMappings(knownOrdinalMap, entry.data, uuidToOrdinal);
     }
     return { toolCallId, toolName, content: full };
   });
@@ -2348,7 +2559,7 @@ function handleAnswerClass(args: {
       }
       const verification = verifyCitations(
         answer,
-        loadOrdinalMap(db, sessionId),
+        loadBoundedOrdinalMap(db, sessionId, collectCitedOrdinals(answer)),
         loadGrantedIds(repo, runId),
       );
       if (!verification.ok) {
