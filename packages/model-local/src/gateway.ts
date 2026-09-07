@@ -85,25 +85,43 @@ export function utf8ByteLength(text: string): number {
   return new TextEncoder().encode(text).byteLength;
 }
 
-function canonicalizeForSize(value: unknown): unknown {
+function canonicalizeForSize(value: unknown, seen?: WeakSet<object>): unknown {
   if (value === null || value === undefined) {
     return value;
   }
   if (Array.isArray(value)) {
-    return value.map((entry) => canonicalizeForSize(entry));
+    const active = seen ?? new WeakSet<object>();
+    if (active.has(value)) {
+      throw new TypeError("cyclic tool arguments");
+    }
+    active.add(value);
+    try {
+      return value.map((entry) => canonicalizeForSize(entry, active));
+    } finally {
+      active.delete(value);
+    }
   }
   if (isRecord(value)) {
-    // Null-prototype sink: assigning provider-controlled keys such as
-    // `__proto__` creates a plain own property instead of invoking the
-    // `Object.prototype` setter (which would mutate the prototype and drop
-    // the key from serialization, undercounting size). Every enumerable
-    // own key is preserved and sorted for deterministic measurement;
-    // legal JSON keys are never rejected by name.
-    const sorted: Record<string, unknown> = Object.create(null);
-    for (const key of Object.keys(value).sort()) {
-      sorted[key] = canonicalizeForSize(value[key]);
+    const active = seen ?? new WeakSet<object>();
+    if (active.has(value)) {
+      throw new TypeError("cyclic tool arguments");
     }
-    return sorted;
+    active.add(value);
+    try {
+      // Null-prototype sink: assigning provider-controlled keys such as
+      // `__proto__` creates a plain own property instead of invoking the
+      // `Object.prototype` setter (which would mutate the prototype and drop
+      // the key from serialization, undercounting size). Every enumerable
+      // own key is preserved and sorted for deterministic measurement;
+      // legal JSON keys are never rejected by name.
+      const sorted: Record<string, unknown> = Object.create(null);
+      for (const key of Object.keys(value).sort()) {
+        sorted[key] = canonicalizeForSize(value[key], active);
+      }
+      return sorted;
+    } finally {
+      active.delete(value);
+    }
   }
   return value;
 }
@@ -503,6 +521,32 @@ function validateHistoryToolCalls(message: ChatMessage): void {
       (call as { name: string }).name.length > MAX_TOOL_CALL_NAME_LENGTH ||
       !isRecord((call as { arguments?: unknown }).arguments)
     ) {
+      throw new ModelLocalError(
+        "invalid_request",
+        "model message carries invalid tool calls",
+      );
+    }
+    // Replay bound (r3946625239): every replayed assistant
+    // toolCalls[].arguments shares the 32KiB UTF-8 deterministic serialized
+    // bound enforced on provider output. Measured here during history
+    // validation — before either adapter JSON.stringify/request construction —
+    // so an oversized replay rejects with fixed redacted invalid_request
+    // without allocating the wire body. Cyclic/non-serializable replay
+    // (canonical serialization throws, e.g. BigInt) rejects the same way.
+    // Never truncated, never echoes raw args, never touches ToolBroker
+    // budget (validation only; the broker still reserves accepted calls).
+    let serialized: string;
+    try {
+      serialized = canonicalToolArgumentsJson(
+        (call as { arguments?: unknown }).arguments,
+      );
+    } catch {
+      throw new ModelLocalError(
+        "invalid_request",
+        "model message carries invalid tool calls",
+      );
+    }
+    if (utf8ByteLength(serialized) > MAX_TOOL_CALL_ARGUMENTS_BYTES) {
       throw new ModelLocalError(
         "invalid_request",
         "model message carries invalid tool calls",
