@@ -300,6 +300,39 @@ function validateChatMessage(message: ChatMessage): void {
       "model message carries a tool name on a non-tool role",
     );
   }
+  if (message.toolCallId !== undefined && message.role !== "tool") {
+    throw new ModelLocalError(
+      "invalid_request",
+      "model message carries a tool call id on a non-tool role",
+    );
+  }
+  if (message.role === "tool") {
+    // Provider-neutral correlation: every tool result must carry both the
+    // originating call id and tool name (non-empty, bounded). Adapters
+    // serialize provider-natively (OpenAI `tool_call_id`, Ollama
+    // `tool_name`) but validation requires both so neither wire can emit
+    // an uncorrelated bare tool message. No ids are echoed in errors.
+    if (
+      typeof message.toolCallId !== "string" ||
+      message.toolCallId.length === 0 ||
+      message.toolCallId.length > MAX_TOOL_CALL_ID_LENGTH
+    ) {
+      throw new ModelLocalError(
+        "invalid_request",
+        "model message carries an invalid tool call id",
+      );
+    }
+    if (
+      typeof message.toolName !== "string" ||
+      message.toolName.length === 0 ||
+      message.toolName.length > MAX_TOOL_CALL_NAME_LENGTH
+    ) {
+      throw new ModelLocalError(
+        "invalid_request",
+        "model message carries an invalid tool name",
+      );
+    }
+  }
   validateHistoryToolCalls(message);
 }
 

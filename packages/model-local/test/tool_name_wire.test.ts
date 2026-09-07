@@ -221,3 +221,238 @@ describe("role:tool tool_name wire compatibility", () => {
     ).toThrowError(ModelLocalError);
   });
 });
+
+describe("role:tool correlation required (r3944753217)", () => {
+  function expectInvalidRequest(fn: () => unknown, notLeak?: string): void {
+    try {
+      fn();
+      expect.unreachable("should reject uncorrelated tool message");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ModelLocalError);
+      const err = error as ModelLocalError;
+      expect(err.code).toBe("invalid_request");
+      expect(err.message).not.toContain("secret");
+      if (notLeak !== undefined) {
+        expect(err.message).not.toContain(notLeak);
+      }
+    }
+  }
+
+  it("requires both toolCallId and toolName on every role:tool message", () => {
+    // Fully correlated passes.
+    expect(() =>
+      validateChatRequest(
+        baseRequest({
+          messages: [
+            {
+              role: "tool",
+              content: "ok",
+              toolCallId: "call_1",
+              toolName: "notes.search",
+            },
+          ],
+        }),
+      ),
+    ).not.toThrow();
+    // Bare or half-correlated tool messages reject with fixed codes.
+    expectInvalidRequest(() =>
+      validateChatRequest(
+        baseRequest({ messages: [{ role: "tool", content: "bare" }] }),
+      ),
+    );
+    expectInvalidRequest(() =>
+      validateChatRequest(
+        baseRequest({
+          messages: [
+            { role: "tool", content: "no-name", toolCallId: "call_1" },
+          ],
+        }),
+      ),
+      "call_1",
+    );
+    expectInvalidRequest(() =>
+      validateChatRequest(
+        baseRequest({
+          messages: [
+            { role: "tool", content: "no-id", toolName: "notes.search" },
+          ],
+        }),
+      ),
+      "notes.search",
+    );
+    expectInvalidRequest(() =>
+      validateChatRequest(
+        baseRequest({
+          messages: [
+            {
+              role: "tool",
+              content: "empty",
+              toolCallId: "",
+              toolName: "notes.search",
+            },
+          ],
+        }),
+      ),
+    );
+    expectInvalidRequest(() =>
+      validateChatRequest(
+        baseRequest({
+          messages: [
+            {
+              role: "tool",
+              content: "empty",
+              toolCallId: "call_1",
+              toolName: "",
+            },
+          ],
+        }),
+      ),
+    );
+    expectInvalidRequest(() =>
+      validateChatRequest(
+        baseRequest({
+          messages: [
+            {
+              role: "tool",
+              content: "over",
+              toolCallId: "x".repeat(257),
+              toolName: "notes.search",
+            },
+          ],
+        }),
+      ),
+    );
+    expectInvalidRequest(() =>
+      validateChatRequest(
+        baseRequest({
+          messages: [
+            {
+              role: "tool",
+              content: "over",
+              toolCallId: "call_1",
+              toolName: "x".repeat(129),
+            },
+          ],
+        }),
+      ),
+    );
+  });
+
+  it("rejects top-level tool correlation smuggled on non-tool roles", () => {
+    for (const role of ["system", "user", "assistant"] as const) {
+      expectInvalidRequest(() =>
+        validateChatRequest(
+          baseRequest({
+            messages: [{ role, content: "hi", toolCallId: "call_1" }],
+          }),
+        ),
+        "call_1",
+      );
+      expectInvalidRequest(() =>
+        validateChatRequest(
+          baseRequest({
+            messages: [{ role, content: "hi", toolName: "notes.search" }],
+          }),
+        ),
+        "notes.search",
+      );
+    }
+    // Assistant native toolCalls replay stays valid without top-level ids.
+    expect(() =>
+      validateChatRequest(
+        baseRequest({
+          messages: [
+            {
+              role: "assistant",
+              content: "",
+              toolCalls: [{ id: "c0", name: "notes.search", arguments: {} }],
+            },
+          ],
+        }),
+      ),
+    ).not.toThrow();
+  });
+
+  it("serializers reject uncorrelated bare tool messages without emitting", () => {
+    expectInvalidRequest(() =>
+      toOllamaMessage({ role: "tool", content: "bare" }),
+    );
+    expectInvalidRequest(() =>
+      toOllamaMessage({
+        role: "tool",
+        content: "no-name",
+        toolCallId: "c0",
+      }),
+    );
+    expectInvalidRequest(() =>
+      toOllamaMessage({
+        role: "tool",
+        content: "no-id",
+        toolName: "notes.search",
+      }),
+    );
+    expectInvalidRequest(() =>
+      toOpenAIMessage({ role: "tool", content: "bare" }),
+    );
+    expectInvalidRequest(() =>
+      toOpenAIMessage({
+        role: "tool",
+        content: "no-name",
+        toolCallId: "c0",
+      }),
+    );
+    expectInvalidRequest(() =>
+      toOpenAIMessage({
+        role: "tool",
+        content: "no-id",
+        toolName: "notes.search",
+      }),
+    );
+    expectInvalidRequest(() =>
+      toOllamaMessage({ role: "user", content: "hi", toolCallId: "c0" }),
+    );
+    expectInvalidRequest(() =>
+      toOpenAIMessage({
+        role: "assistant",
+        content: "hi",
+        toolName: "notes.search",
+      }),
+    );
+  });
+
+  it("gateways reject bare tool requests before fetch", async () => {
+    for (const make of [createOllamaGateway, createOpenAICompatibleGateway]) {
+      const spy: FetchImpl = async () => {
+        throw new Error("fetch must not be called");
+      };
+      const gateway = make({
+        baseUrl: "http://localhost:11434",
+        fetchImpl: spy,
+      });
+      try {
+        await gateway.chat(
+          baseRequest({
+            messages: [{ role: "tool", content: "bare" }],
+          }),
+        );
+        expect.unreachable("should reject bare tool request");
+      } catch (error) {
+        expect(error).toBeInstanceOf(ModelLocalError);
+        expect((error as ModelLocalError).code).toBe("invalid_request");
+      }
+      try {
+        await gateway.chat(
+          baseRequest({
+            messages: [
+              { role: "tool", content: "half", toolCallId: "c0" },
+            ],
+          }),
+        );
+        expect.unreachable("should reject half-correlated tool request");
+      } catch (error) {
+        expect(error).toBeInstanceOf(ModelLocalError);
+        expect((error as ModelLocalError).code).toBe("invalid_request");
+      }
+    }
+  });
+});

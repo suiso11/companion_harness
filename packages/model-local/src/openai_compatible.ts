@@ -192,13 +192,41 @@ export function normalizeOpenAIResponse(
  * No free-text parsing is performed.
  */
 export function toOpenAIMessage(message: ChatMessage): Record<string, unknown> {
+  if (message.role !== "tool") {
+    if (message.toolCallId !== undefined || message.toolName !== undefined) {
+      throw new ModelLocalError(
+        "invalid_request",
+        "model message carries tool correlation on a non-tool role",
+      );
+    }
+  }
+  if (message.role === "tool") {
+    // OpenAI tool results correlate via `tool_call_id` only (`tool_name`
+    // is unsupported and never emitted, even when the provider-neutral
+    // message carries `toolName`). Require both provider-neutral fields so
+    // a bare uncorrelated tool message is rejected here even if request
+    // validation is bypassed.
+    if (
+      typeof message.toolCallId !== "string" ||
+      message.toolCallId.length === 0 ||
+      typeof message.toolName !== "string" ||
+      message.toolName.length === 0
+    ) {
+      throw new ModelLocalError(
+        "invalid_request",
+        "model message carries an invalid tool call id",
+      );
+    }
+    return {
+      role: message.role,
+      content: message.content,
+      tool_call_id: message.toolCallId,
+    };
+  }
   const entry: Record<string, unknown> = {
     role: message.role,
     content: message.content,
   };
-  if (message.role === "tool" && message.toolCallId !== undefined) {
-    entry.tool_call_id = message.toolCallId;
-  }
   if (
     message.role === "assistant" &&
     message.toolCalls !== undefined &&

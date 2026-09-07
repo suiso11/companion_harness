@@ -165,6 +165,14 @@ export function normalizeOllamaResponse(
  * emitted). No free-text parsing is performed.
  */
 export function toOllamaMessage(message: ChatMessage): Record<string, unknown> {
+  if (message.role !== "tool") {
+    if (message.toolCallId !== undefined || message.toolName !== undefined) {
+      throw new ModelLocalError(
+        "invalid_request",
+        "model message carries tool correlation on a non-tool role",
+      );
+    }
+  }
   if (
     message.role === "assistant" &&
     message.toolCalls !== undefined &&
@@ -182,14 +190,24 @@ export function toOllamaMessage(message: ChatMessage): Record<string, unknown> {
   if (message.role === "tool") {
     // Ollama tool feedback correlates by originating tool name only.
     // Never emit the OpenAI-style `tool_call_id` / `toolCallId` field.
-    if (message.toolName !== undefined) {
-      return {
-        role: message.role,
-        content: message.content,
-        tool_name: message.toolName,
-      };
+    // Require both provider-neutral fields so a bare uncorrelated tool
+    // message is rejected here even if request validation is bypassed.
+    if (
+      typeof message.toolCallId !== "string" ||
+      message.toolCallId.length === 0 ||
+      typeof message.toolName !== "string" ||
+      message.toolName.length === 0
+    ) {
+      throw new ModelLocalError(
+        "invalid_request",
+        "model message carries an invalid tool call id",
+      );
     }
-    return { role: message.role, content: message.content };
+    return {
+      role: message.role,
+      content: message.content,
+      tool_name: message.toolName,
+    };
   }
   return { role: message.role, content: message.content };
 }
