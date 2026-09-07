@@ -43,8 +43,10 @@ loopback-only Ollama (`{base}/api/chat`) or OpenAI-compatible
 (`{base}/v1/chat/completions`) gateway and registers the agent under
 `m0-default` before engine start/listen. Model base URLs must be plain
 `http` loopback (`127.0.0.1`/`localhost`/`::1`, no credentials/query);
-model config and keys are never logged, never persisted, and no direct
-model endpoint exists. Full contract: `docs/operations.md`.
+model config and keys are never logged, and no direct model endpoint
+exists. Adapter/model identifier metadata only is persisted in
+`model_calls`; `apiKey`, `baseUrl`, prompts, raw responses, reasoning,
+and secrets are never persisted or logged. Full contract: `docs/operations.md`.
 
 ## Data and permissions
 

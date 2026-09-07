@@ -207,7 +207,10 @@ connector instance owns **all** configured roots.
   model endpoint is ever added; `answer.submit` stays a reserved
   non-broker terminal protocol).
 - Security limitations: model config values and keys are **never logged**
-  (only the tool count is logged) and never persisted; single attempt per
+  (only the tool count is logged); `model_calls` persists adapter/model
+  identifier metadata only (adapter, model, outcome, error code, timing,
+  usage token counts). `apiKey`, `baseUrl`, prompts, raw responses,
+  reasoning, and secrets are never persisted or logged; single attempt per
   step (no retry, no fallback, no router, no redirects); per-step 120s
   and 300s whole-run wall budgets with at most one repair inside max 8
   steps; native tool calling only.
