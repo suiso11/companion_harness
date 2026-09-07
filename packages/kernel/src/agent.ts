@@ -55,6 +55,7 @@ import {
   MAX_MESSAGE_CONTENT_LENGTH,
   MAX_MESSAGES_PER_REQUEST,
   ModelLocalError,
+  validateChatResult,
 } from "@companion/model-local";
 import type Database from "better-sqlite3";
 import type { ToolBroker } from "./broker.js";
@@ -2168,6 +2169,19 @@ async function runModelStep(args: {
       settlement = { kind: "wall" };
     } else if (late === "timeout") {
       settlement = { kind: "timeout" };
+    }
+  }
+  // Custom-gateway defense in depth: provider adapters normalize, but an
+  // injected ChatResult bypasses them, so validate every bound atomically
+  // here (request.tools authorizes allowed definitions) before success
+  // audit/classification. Failures re-enter the fixed error audit below
+  // (model_unavailable, answer_invalid repair leg unchanged): no tools
+  // execute, no evidence is granted.
+  if (settlement.kind === "result") {
+    try {
+      validateChatResult(settlement.result, request.tools);
+    } catch (error) {
+      settlement = { kind: "error", error };
     }
   }
   const durationMs = Math.max(clock.now() - startedAt, 0);

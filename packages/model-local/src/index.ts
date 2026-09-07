@@ -47,6 +47,7 @@ export {
   toWireToolArgumentsObject,
   utf8ByteLength,
   validateChatRequest,
+  validateChatResult,
   validateNativeToolCalls,
 } from "./gateway.js";
 export {

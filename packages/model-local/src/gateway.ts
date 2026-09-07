@@ -1229,6 +1229,94 @@ export function validateNativeToolCalls(options: {
   }
 }
 
+/**
+ * Validate an injected/normalized ChatResult before execution or storage
+ * (r3949581177/r3949352972). Custom gateways bypass provider normalization,
+ * so AgentStrategy must apply every existing bound atomically here: assistant
+ * text (character semantics), per-message tool-call count, per-call id/name
+ * shape and bounds, per-call plain-JSON arguments with the exact 32KiB
+ * canonical UTF-8 bound, and duplicate ids. Unknown but well-formed ordinary
+ * names still pass (authoritative unknown-tool budget/audit stays with the
+ * ToolBroker). Throws the same fixed redacted codes as provider
+ * normalization (`answer_invalid` for malformed/oversize answer.submit
+ * arguments, `tool_call_invalid` for malformed ids/names/args/duplicates or
+ * unsolicited calls, `invalid_response` for oversize text/count/ids/names or
+ * non-object shapes). Never truncates, never echoes raw values, never
+ * executes or grants anything (validation only).
+ */
+export function validateChatResult(
+  result: unknown,
+  requestedTools?: readonly ToolDefinition[] | undefined,
+): asserts result is ChatResult {
+  if (typeof result !== "object" || result === null || Array.isArray(result)) {
+    throw new ModelLocalError(
+      "invalid_response",
+      "model returned an invalid response",
+    );
+  }
+  const record = result as {
+    text?: unknown;
+    toolCalls?: unknown;
+  };
+  if (typeof record.text !== "string") {
+    throw new ModelLocalError(
+      "invalid_response",
+      "model returned an invalid response",
+    );
+  }
+  // Text bound first so an oversize batch containing a malformed
+  // answer.submit still fails as invalid_response (never repaired).
+  assertAssistantTextWithinBound(record.text);
+  if (!Array.isArray(record.toolCalls)) {
+    throw new ModelLocalError(
+      "invalid_response",
+      "model returned an invalid response",
+    );
+  }
+  const toolCalls = record.toolCalls as unknown[];
+  // Count bound before per-call parsing (same ordering as adapters).
+  assertToolCallCountWithinBound(toolCalls.length);
+  const seenIds = new Set<string>();
+  for (let index = 0; index < toolCalls.length; index += 1) {
+    const entry = toolCalls[index];
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      throw nativeToolCallInvalidError();
+    }
+    const call = entry as {
+      id?: unknown;
+      name?: unknown;
+      arguments?: unknown;
+    };
+    // Injected results must carry an explicit id: absent ids reject here
+    // (provider adapters synthesize call_<index> only for omitted
+    // provider-native ids, never for already-normalized results).
+    if (call.id === undefined || call.id === null) {
+      throw nativeToolCallInvalidError();
+    }
+    const id = normalizeNativeToolCallId(call.id, index);
+    const name = assertNativeToolCallName(call.name);
+    const args = call.arguments;
+    if (!isRecord(args)) {
+      throwInvalidToolArguments(name);
+    }
+    let serialized: string;
+    try {
+      serialized = canonicalToolArgumentsJson(args);
+    } catch {
+      throwInvalidToolArguments(name);
+    }
+    assertToolArgumentsByteLengthForTool(utf8ByteLength(serialized), name);
+    if (seenIds.has(id)) {
+      throw nativeToolCallInvalidError();
+    }
+    seenIds.add(id);
+  }
+  validateNativeToolCalls({
+    toolCalls: toolCalls as { id: string; name: string; arguments: unknown }[],
+    requestedTools,
+  });
+}
+
 /** Plain-object guard for provider payloads. */
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
