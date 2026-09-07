@@ -425,7 +425,9 @@ describe("conversation 128-message cap", () => {
           captured.push({
             model: request.model,
             messages: request.messages.map((m) => ({ ...m })),
-            tools: request.tools?.map((t) => ({ ...t })),
+            ...(request.tools !== undefined
+              ? { tools: request.tools.map((t) => ({ ...t })) }
+              : {}),
           });
           // Strict validation on every gateway call.
           expect(request.messages.length).toBeLessThanOrEqual(128);
