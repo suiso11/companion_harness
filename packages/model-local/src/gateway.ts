@@ -307,18 +307,34 @@ export function canonicalToolArgumentsJson(value: unknown): string {
  * Throws `TypeError` for non-plain-JSON input without invoking user code;
  * callers map the failure to their fixed redacted code. `null`/`undefined`
  * encode as `{}` (matching adapter empty-arguments semantics).
+ *
+ * Final send-time bound: the canonical string is measured in UTF-8 bytes
+ * here, immediately before adapters send it, and payloads over
+ * `MAX_TOOL_CALL_ARGUMENTS_BYTES` (32KiB) reject with fixed redacted
+ * `invalid_request` (never truncated, never echoed). This catches stateful
+ * arguments that measured small during history validation but serialize
+ * large on the wire (TOCTOU), even when request validation was bypassed.
  */
 export function toWireToolArgumentsJson(args: unknown): string {
-  return canonicalToolArgumentsJson(args ?? {});
+  const text = canonicalToolArgumentsJson(args ?? {});
+  if (utf8ByteLength(text) > MAX_TOOL_CALL_ARGUMENTS_BYTES) {
+    throw new ModelLocalError(
+      "invalid_request",
+      "model message carries invalid tool calls",
+    );
+  }
+  return text;
 }
 
 /**
  * Object form of the exact wire encoding (for the Ollama `tool_calls`
  * payload): reparsed from `toWireToolArgumentsJson`, so the outer request
- * `JSON.stringify` emits exactly the measured bytes. Plain
- * `Object.prototype` objects only (`__proto__` stays an own property via
- * the `JSON.parse` round-trip). Throws `TypeError` for non-plain-JSON
- * input without invoking user code.
+ * `JSON.stringify` emits exactly the measured bytes. Derives only from the
+ * checked canonical string above (no independent serialization path), so
+ * the same 32KiB UTF-8 bound and the same fixed redacted `invalid_request`
+ * apply. Plain `Object.prototype` objects only (`__proto__` stays an own
+ * property via the `JSON.parse` round-trip). Throws `TypeError` for
+ * non-plain-JSON input without invoking user code.
  */
 export function toWireToolArgumentsObject(args: unknown): unknown {
   return JSON.parse(toWireToolArgumentsJson(args)) as unknown;
