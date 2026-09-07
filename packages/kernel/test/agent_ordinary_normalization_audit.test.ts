@@ -178,9 +178,9 @@ describe("ordinary vs answer normalization audit", () => {
       expect(
         events.find((e) => e.type === "model.step.failed")?.payload,
       ).toMatchObject({ step: 1, errorCode: "model_unavailable" });
-      expect(events.filter((e) => e.type === "model.step.completed")).toHaveLength(
-        0,
-      );
+      expect(
+        events.filter((e) => e.type === "model.step.completed"),
+      ).toHaveLength(0);
       expect(JSON.stringify({ rows, events })).not.toContain(SECRET);
     } finally {
       closeKernelDatabase(handle);

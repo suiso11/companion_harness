@@ -846,7 +846,7 @@ describe("metadata-only audit, fixed errors, timeouts, cancellation", () => {
       expect(calls).toHaveLength(1);
       expect(repo.listModelCalls(first.runId)[0]).toMatchObject({
         outcome: "failed",
-        errorCode: "answer_invalid",
+        errorCode: "model_unavailable",
       });
       const { gateway: gw2, calls: calls2 } = scriptGateway([
         new Error("boom"),

@@ -54,11 +54,7 @@ function ollamaBody(toolCalls: unknown[]): unknown {
   };
 }
 
-function openaiCall(
-  name: string,
-  args: unknown,
-  id: string,
-): unknown {
+function openaiCall(name: string, args: unknown, id: string): unknown {
   return { id, type: "function", function: { name, arguments: args } };
 }
 
@@ -242,11 +238,7 @@ describe("mixed ordinary + answer malformed normalization", () => {
       normalizeOllamaResponse(
         ollamaBody([
           ollamaCall("notes.search", `{broken ${SECRET}`, "call-ord-bad"),
-          ollamaCall(
-            "answer.submit",
-            { version: 1, parts: [] },
-            "call-ans-ok",
-          ),
+          ollamaCall("answer.submit", { version: 1, parts: [] }, "call-ans-ok"),
         ]),
         BOTH,
       );
