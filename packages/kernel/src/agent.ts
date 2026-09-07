@@ -2194,21 +2194,38 @@ async function runModelStep(args: {
       new Set(calls.map((call) => (call as { id: string }).id)).size <
         calls.length
     ) {
-      settlement = {
-        kind: "result",
-        result: {
-          ...settlement.result,
-          toolCalls: calls.map((call, index) => ({
-            ...(call as object),
-            id: `answer_submit_${index + 1}`,
-          })) as ChatResult["toolCalls"],
-        },
-      };
+      // Validate each original call individually (shared bounds, single-call
+      // scope bypasses only cross-call uniqueness for repair classification).
+      // Invalid original ids fail atomically here with no remap/repair.
+      try {
+        for (const call of calls) {
+          validateChatResult(
+            { ...settlement.result, toolCalls: [call] },
+            request.tools,
+          );
+        }
+      } catch (error) {
+        settlement = { kind: "error", error };
+      }
+      if (settlement.kind === "result") {
+        settlement = {
+          kind: "result",
+          result: {
+            ...settlement.result,
+            toolCalls: calls.map((call, index) => ({
+              ...(call as object),
+              id: `answer_submit_${index + 1}`,
+            })) as ChatResult["toolCalls"],
+          },
+        };
+      }
     }
-    try {
-      validateChatResult(settlement.result, request.tools);
-    } catch (error) {
-      settlement = { kind: "error", error };
+    if (settlement.kind === "result") {
+      try {
+        validateChatResult(settlement.result, request.tools);
+      } catch (error) {
+        settlement = { kind: "error", error };
+      }
     }
   }
   const durationMs = Math.max(clock.now() - startedAt, 0);
