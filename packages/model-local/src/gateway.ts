@@ -86,21 +86,61 @@ export function utf8ByteLength(text: string): number {
 }
 
 /**
+ * Maximum prototype links followed by `assertNoCustomToJSON` (bounds
+ * `Reflect.getPrototypeOf` calls). Plain JSON chains are at most two links
+ * (`value` -> `Object/Array.prototype` -> `null`), so this bound stays far
+ * above every legal shape while keeping a hostile `getPrototypeOf` trap
+ * finite: cycles and over-long chains reject with `TypeError`.
+ */
+export const MAX_PROTOTYPE_CHAIN_LINKS = 16;
+
+/**
  * Reject any `toJSON` found on the value or its prototype chain without
  * invoking user code. Only `Object.getOwnPropertyDescriptor` (which never
  * calls getters or `toJSON` itself) is used: a data descriptor, an accessor
  * descriptor, or any inherited descriptor all reject. Plain JSON data from
  * `JSON.parse` never carries `toJSON`, so provider-parsed objects stay valid.
+ *
+ * The walk is hardened against hostile `Proxy`/`getPrototypeOf` chains:
+ * visited prototype objects are tracked so self-cycles and multi-node
+ * cycles reject instead of looping forever, the number of
+ * `Object.getPrototypeOf` calls is bounded by
+ * `MAX_PROTOTYPE_CHAIN_LINKS`, and throwing traps reject with the same
+ * fixed `TypeError` (never leaking the trap error).
  */
 function assertNoCustomToJSON(node: object): void {
+  const seen = new Set<unknown>();
   let current: unknown = node;
-  while (current !== null) {
-    const descriptor = Object.getOwnPropertyDescriptor(current, "toJSON");
+  for (let depth = 0; depth <= MAX_PROTOTYPE_CHAIN_LINKS; depth += 1) {
+    if (current === null) {
+      return;
+    }
+    if (
+      (typeof current !== "object" && typeof current !== "function") ||
+      seen.has(current)
+    ) {
+      throw new TypeError("cyclic prototype in tool arguments");
+    }
+    seen.add(current);
+    let descriptor: PropertyDescriptor | undefined;
+    try {
+      descriptor = Object.getOwnPropertyDescriptor(current, "toJSON");
+    } catch {
+      throw new TypeError("unreadable prototype in tool arguments");
+    }
     if (descriptor !== undefined) {
       throw new TypeError("custom toJSON in tool arguments");
     }
-    current = Object.getPrototypeOf(current);
+    if (depth >= MAX_PROTOTYPE_CHAIN_LINKS) {
+      throw new TypeError("excessive prototype chain in tool arguments");
+    }
+    try {
+      current = Object.getPrototypeOf(current);
+    } catch {
+      throw new TypeError("unreadable prototype in tool arguments");
+    }
   }
+  throw new TypeError("excessive prototype chain in tool arguments");
 }
 
 /**
