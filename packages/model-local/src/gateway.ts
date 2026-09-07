@@ -596,10 +596,26 @@ async function readBoundedBodyText(
         throw failures.failed();
       }
       if (next.done) {
+        // A timeout or external abort can surface as `done=true` (reader
+        // cancelled) instead of a read rejection: never accept EOF while
+        // aborted. External cancellation keeps its abort rejection;
+        // timeout-guard aborts map to `timeout`.
+        if (isAborted(externalSignal)) {
+          throw toAbortRejection(externalSignal as AbortSignal);
+        }
+        if (controller.signal.aborted) {
+          throw new ModelLocalError("timeout", "model request timed out");
+        }
         break;
       }
       const value: Uint8Array | undefined = next.value;
       if (value === undefined) {
+        if (isAborted(externalSignal)) {
+          throw toAbortRejection(externalSignal as AbortSignal);
+        }
+        if (controller.signal.aborted) {
+          throw new ModelLocalError("timeout", "model request timed out");
+        }
         break;
       }
       totalBytes += value.byteLength;
@@ -615,8 +631,14 @@ async function readBoundedBodyText(
       }
       chunks.push(value);
     }
+    // Never decode a partially or fully read body after an abort: a
+    // cancelled reader may have returned `done=true` above (handled), or
+    // the abort may have landed between the final read and decode.
     if (isAborted(externalSignal)) {
       throw toAbortRejection(externalSignal as AbortSignal);
+    }
+    if (controller.signal.aborted) {
+      throw new ModelLocalError("timeout", "model request timed out");
     }
     const merged = new Uint8Array(totalBytes);
     let offset = 0;

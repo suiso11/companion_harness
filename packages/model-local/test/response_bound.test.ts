@@ -536,3 +536,126 @@ describe("abort and exact boundary", () => {
     }
   });
 });
+
+describe("abort EOF (cancel surfaces as done=true)", () => {
+  it("maps EOF after external abort to AbortError, not success", async () => {
+    const payload = encoder.encode(`{"ok":true}`);
+    let cancels = 0;
+    let releases = 0;
+    let resolveEof: (() => void) | undefined;
+    const fetchImpl = staticFetch(
+      fakeBodyResponse({
+        status: 200,
+        body: {
+          getReader: (): FakeReader => {
+            let calls = 0;
+            return {
+              read: async (): Promise<BodyStep> => {
+                calls += 1;
+                if (calls === 1) {
+                  return { done: false, value: payload };
+                }
+                // Second read pends until the gateway's abort listener
+                // cancels the reader; cancel resolves it as EOF.
+                await new Promise<void>((resolve) => {
+                  resolveEof = resolve;
+                });
+                return { done: true, value: undefined };
+              },
+              cancel: async (): Promise<void> => {
+                cancels += 1;
+                resolveEof?.();
+              },
+              releaseLock: (): void => {
+                releases += 1;
+              },
+            };
+          },
+        },
+      }),
+    );
+    const controller = new AbortController();
+    const pending = postJsonNoRedirect({
+      fetchImpl,
+      url: LOOPBACK_URL,
+      body: {},
+      apiKey: undefined,
+      timeoutMs: undefined,
+      signal: controller.signal,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    controller.abort();
+    const error = await pending.catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(DOMException);
+    expect((error as DOMException).name).toBe("AbortError");
+    expect(error).not.toBeInstanceOf(ModelLocalError);
+    expect(cancels).toBe(1);
+    expect(releases).toBe(1);
+  });
+
+  it("maps EOF after timeout to timeout, not success", async () => {
+    vi.useFakeTimers();
+    try {
+      const payload = encoder.encode(`{"ok":true}`);
+      let cancels = 0;
+      let releases = 0;
+      let resolveEof: (() => void) | undefined;
+      const fetchImpl = staticFetch(
+        fakeBodyResponse({
+          status: 200,
+          body: {
+            getReader: (): FakeReader => {
+              let calls = 0;
+              return {
+                read: async (): Promise<BodyStep> => {
+                  calls += 1;
+                  if (calls === 1) {
+                    return { done: false, value: payload };
+                  }
+                  await new Promise<void>((resolve) => {
+                    resolveEof = resolve;
+                  });
+                  return { done: true, value: undefined };
+                },
+                cancel: async (): Promise<void> => {
+                  cancels += 1;
+                  resolveEof?.();
+                },
+                releaseLock: (): void => {
+                  releases += 1;
+                },
+              };
+            },
+          },
+        }),
+      );
+      const pending = postJsonNoRedirect({
+        fetchImpl,
+        url: LOOPBACK_URL,
+        body: {},
+        apiKey: undefined,
+        timeoutMs: 50,
+      });
+      // Attach the settlement handler before advancing timers so the
+      // timeout rejection is never unhandled.
+      const settled = pending.then(
+        (value: unknown) => ({ ok: true as const, value }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+      // Let fetch resolve and the second read pend before the guard fires.
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(50);
+      const outcome = await settled;
+      expect(outcome.ok).toBe(false);
+      const error = (outcome as { ok: false; error: unknown }).error;
+      expect(error).toBeInstanceOf(ModelLocalError);
+      expect((error as ModelLocalError).code).toBe("timeout");
+      expect((error as Error).message).not.toContain("http://");
+      expect(cancels).toBe(1);
+      expect(releases).toBe(1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
