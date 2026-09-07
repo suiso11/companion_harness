@@ -28,7 +28,11 @@ function canonicalize(value: unknown): unknown {
     return value.map((entry) => canonicalize(entry));
   }
   if (isPlainObject(value)) {
-    const sorted: JsonObject = {};
+    // Null-prototype sink: assigning `sorted["__proto__"] = ...` on a
+    // plain `{}` would invoke the Object.prototype setter (mutating the
+    // prototype and dropping the key). defineProperty preserves an own
+    // enumerable `__proto__` key without side effects.
+    const sorted: JsonObject = Object.create(null);
     for (const key of Object.keys(value).sort()) {
       const entry = (value as JsonObject)[key];
       if (
@@ -38,7 +42,12 @@ function canonicalize(value: unknown): unknown {
       ) {
         continue;
       }
-      sorted[key] = canonicalize(entry);
+      Object.defineProperty(sorted, key, {
+        value: canonicalize(entry),
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
     }
     return sorted;
   }
