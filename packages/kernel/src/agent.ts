@@ -1260,30 +1260,11 @@ export function createAgentStrategy(
     if (ctx.signal.aborted) {
       throw new StrategyError("execution_cancelled");
     }
-    const runId = ctx.run.id;
-    const sessionId = ctx.run.sessionId;
-    const requestText =
-      ctx.turn.input.kind === "user_text" ? ctx.turn.input.text : "";
-    const history = loadHistory(db, sessionId, ctx.turn.seq);
-    const frozenIds = frozenReferenceIds(ctx);
-    const references = loadReferenceSummary(db, sessionId, frozenIds);
-    // Per-run known rN->UUID map (r3943599549): seeded ONLY from the frozen
-    // current-turn context (frozen context never rewrites, including on
-    // Retry), then extended across steps ONLY by structural
-    // `{ ordinal, referenceId }` pairs actually present in size-accepted
-    // delivered feedback (search / refresh / related newly expose rNs).
-    // The map is addressability only and never a grant; unknown, omitted,
-    // oversized, or undelivered rNs stay unresolved and fail via ToolBroker.
-    // No semantic lookup, no cross-session reuse. Scoped to this Run.
-    const knownOrdinalMap = loadFrozenOrdinalMap(db, sessionId, frozenIds);
-    const messages = projectPrompt({
-      requestText,
-      history,
-      references,
-      tools: toolDefinitions,
-      model,
-    }).messages;
-
+    // Wall budget starts at strategy invocation so synchronous preparation
+    // (loadHistory/loadReferenceSummary/ordinal-map/projectPrompt) counts
+    // toward the 300s whole-run deadline (r3946692097). The setTimeout below
+    // cannot fire during synchronous work, so the authoritative clock
+    // recheck after preparation (below) decides before any gateway call.
     const wallStart = clock.now();
     const wallDeadline = wallStart + wallMs;
     // Run-scoped wall signal shared by model steps and ToolBroker calls:
@@ -1333,6 +1314,45 @@ export function createAgentStrategy(
     let repairUsed = false;
 
     try {
+      const runId = ctx.run.id;
+      const sessionId = ctx.run.sessionId;
+      const requestText =
+        ctx.turn.input.kind === "user_text" ? ctx.turn.input.text : "";
+      const history = loadHistory(db, sessionId, ctx.turn.seq);
+      const frozenIds = frozenReferenceIds(ctx);
+      const references = loadReferenceSummary(db, sessionId, frozenIds);
+      // Per-run known rN->UUID map (r3943599549): seeded ONLY from the frozen
+      // current-turn context (frozen context never rewrites, including on
+      // Retry), then extended across steps ONLY by structural
+      // `{ ordinal, referenceId }` pairs actually present in size-accepted
+      // delivered feedback (search / refresh / related newly expose rNs).
+      // The map is addressability only and never a grant; unknown, omitted,
+      // oversized, or undelivered rNs stay unresolved and fail via ToolBroker.
+      // No semantic lookup, no cross-session reuse. Scoped to this Run.
+      const knownOrdinalMap = loadFrozenOrdinalMap(db, sessionId, frozenIds);
+      const messages = projectPrompt({
+        requestText,
+        history,
+        references,
+        tools: toolDefinitions,
+        model,
+      }).messages;
+      // Authoritative recheck after synchronous preparation and before the
+      // first gateway call: preparation that consumes/exceeds the wall budget
+      // fails here with no model or tool invocation (and therefore no
+      // model_calls row). At-or-past the deadline is past budget
+      // (fail-closed); engine cancellation keeps priority and stays distinct.
+      if (ctx.signal.aborted) {
+        throw new StrategyError("execution_cancelled");
+      }
+      if (
+        wallController.signal.aborted ||
+        isWallExpired() ||
+        clock.now() >= wallDeadline
+      ) {
+        expireWall();
+        throw new StrategyError("execution_failed");
+      }
       for (let step = 1; step <= maxSteps; step += 1) {
         throwIfHalted();
         if (!isRunActive(repo, runId)) {
