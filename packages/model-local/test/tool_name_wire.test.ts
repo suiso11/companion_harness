@@ -260,24 +260,26 @@ describe("role:tool correlation required (r3944753217)", () => {
         baseRequest({ messages: [{ role: "tool", content: "bare" }] }),
       ),
     );
-    expectInvalidRequest(() =>
-      validateChatRequest(
-        baseRequest({
-          messages: [
-            { role: "tool", content: "no-name", toolCallId: "call_1" },
-          ],
-        }),
-      ),
+    expectInvalidRequest(
+      () =>
+        validateChatRequest(
+          baseRequest({
+            messages: [
+              { role: "tool", content: "no-name", toolCallId: "call_1" },
+            ],
+          }),
+        ),
       "call_1",
     );
-    expectInvalidRequest(() =>
-      validateChatRequest(
-        baseRequest({
-          messages: [
-            { role: "tool", content: "no-id", toolName: "notes.search" },
-          ],
-        }),
-      ),
+    expectInvalidRequest(
+      () =>
+        validateChatRequest(
+          baseRequest({
+            messages: [
+              { role: "tool", content: "no-id", toolName: "notes.search" },
+            ],
+          }),
+        ),
       "notes.search",
     );
     expectInvalidRequest(() =>
@@ -340,20 +342,22 @@ describe("role:tool correlation required (r3944753217)", () => {
 
   it("rejects top-level tool correlation smuggled on non-tool roles", () => {
     for (const role of ["system", "user", "assistant"] as const) {
-      expectInvalidRequest(() =>
-        validateChatRequest(
-          baseRequest({
-            messages: [{ role, content: "hi", toolCallId: "call_1" }],
-          }),
-        ),
+      expectInvalidRequest(
+        () =>
+          validateChatRequest(
+            baseRequest({
+              messages: [{ role, content: "hi", toolCallId: "call_1" }],
+            }),
+          ),
         "call_1",
       );
-      expectInvalidRequest(() =>
-        validateChatRequest(
-          baseRequest({
-            messages: [{ role, content: "hi", toolName: "notes.search" }],
-          }),
-        ),
+      expectInvalidRequest(
+        () =>
+          validateChatRequest(
+            baseRequest({
+              messages: [{ role, content: "hi", toolName: "notes.search" }],
+            }),
+          ),
         "notes.search",
       );
     }
@@ -443,9 +447,7 @@ describe("role:tool correlation required (r3944753217)", () => {
       try {
         await gateway.chat(
           baseRequest({
-            messages: [
-              { role: "tool", content: "half", toolCallId: "c0" },
-            ],
+            messages: [{ role: "tool", content: "half", toolCallId: "c0" }],
           }),
         );
         expect.unreachable("should reject half-correlated tool request");

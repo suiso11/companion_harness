@@ -253,18 +253,15 @@ function parseOrValidation<T>(fn: () => T, what: string): T {
  * JSON-rounded values) so unsafe rows are never emitted. Token counts only;
  * no coercion, clamping, or truncation.
  */
-function parseStoredModelUsage(
-  usageJson: string,
-): { inputTokens: number; outputTokens: number } {
+function parseStoredModelUsage(usageJson: string): {
+  inputTokens: number;
+  outputTokens: number;
+} {
   const parsed = parseOrValidation(
     () => JSON.parse(usageJson) as unknown,
     "stored model usage",
   );
-  if (
-    typeof parsed !== "object" ||
-    parsed === null ||
-    Array.isArray(parsed)
-  ) {
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw new RepositoryValidationError("stored model usage is invalid");
   }
   const { inputTokens, outputTokens } = parsed as {

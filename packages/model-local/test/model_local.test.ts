@@ -923,7 +923,12 @@ describe("assistant tool-call history replay", () => {
         messages: [
           { role: "user", content: "go" },
           { role: "assistant", content: "", toolCalls: historyCalls },
-          { role: "tool", content: "feedback", toolCallId: "call_1", toolName: "notes.search" },
+          {
+            role: "tool",
+            content: "feedback",
+            toolCallId: "call_1",
+            toolName: "notes.search",
+          },
         ],
       }),
     );
@@ -976,7 +981,12 @@ describe("assistant tool-call history replay", () => {
         messages: [
           { role: "user", content: "go" },
           { role: "assistant", content: "", toolCalls: historyCalls },
-          { role: "tool", content: "feedback", toolCallId: "call_1", toolName: "notes.search" },
+          {
+            role: "tool",
+            content: "feedback",
+            toolCallId: "call_1",
+            toolName: "notes.search",
+          },
         ],
       }),
     );
@@ -1042,7 +1052,12 @@ describe("assistant tool-call history replay", () => {
         messages: [
           { role: "user", content: "go" },
           { role: "assistant", content: "", toolCalls: first.toolCalls },
-          { role: "tool", content: '{"hits":[]}', toolCallId: "call_1", toolName: "notes.search" },
+          {
+            role: "tool",
+            content: '{"hits":[]}',
+            toolCallId: "call_1",
+            toolName: "notes.search",
+          },
         ],
       }),
     );
@@ -1125,7 +1140,14 @@ describe("64KiB model-facing tool-result budget", () => {
     expect(() =>
       validateChatRequest(
         baseRequest({
-          messages: [{ role: "tool", content: fullBudget, toolCallId: "c1", toolName: "notes.search" }],
+          messages: [
+            {
+              role: "tool",
+              content: fullBudget,
+              toolCallId: "c1",
+              toolName: "notes.search",
+            },
+          ],
         }),
       ),
     ).not.toThrow();
@@ -1144,7 +1166,14 @@ describe("64KiB model-facing tool-result budget", () => {
       fetchImpl,
     }).chat(
       baseRequest({
-        messages: [{ role: "tool", content: fullBudget, toolCallId: "c1", toolName: "notes.search" }],
+        messages: [
+          {
+            role: "tool",
+            content: fullBudget,
+            toolCallId: "c1",
+            toolName: "notes.search",
+          },
+        ],
       }),
     );
     expect(result.text).toBe("ok");
@@ -1155,7 +1184,14 @@ describe("64KiB model-facing tool-result budget", () => {
     try {
       validateChatRequest(
         baseRequest({
-          messages: [{ role: "tool", content: over, toolCallId: "c1", toolName: "notes.search" }],
+          messages: [
+            {
+              role: "tool",
+              content: over,
+              toolCallId: "c1",
+              toolName: "notes.search",
+            },
+          ],
         }),
       );
       expect.unreachable();
