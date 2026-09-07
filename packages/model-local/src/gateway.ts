@@ -1195,7 +1195,9 @@ function mapFetchRejection(error: unknown): ModelLocalError {
  * Enforce strict native tool-call results: unsolicited calls are rejected,
  * and every accepted call carries a bounded valid id/name (no free-text
  * JSON emulation is performed anywhere; content text is never parsed for
- * tool calls). Unknown but well-formed ordinary names are NOT rejected
+ * tool calls). Duplicate native ids reject atomically with fixed redacted
+ * tool_call_invalid before conversation storage/execution, so trim logic
+ * can never orphan a tool response. Unknown but well-formed ordinary names are NOT rejected
  * here: they pass through so the AgentStrategy/ToolBroker applies the
  * authoritative unknown-tool budget/audit. Malformed ids/names reject
  * with fixed redacted codes (never truncated, never echoed).
@@ -1216,9 +1218,14 @@ export function validateNativeToolCalls(options: {
       "model returned tool calls without tools requested",
     );
   }
+  const seenIds = new Set<string>();
   for (const call of options.toolCalls) {
     normalizeNativeToolCallId(call.id, 0);
     assertNativeToolCallName(call.name);
+    if (seenIds.has(call.id)) {
+      throw nativeToolCallInvalidError();
+    }
+    seenIds.add(call.id);
   }
 }
 

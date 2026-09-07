@@ -7,6 +7,7 @@ import {
   MAX_MESSAGE_CONTENT_LENGTH,
   postJsonNoRedirect,
   validateChatRequest,
+  validateNativeToolCalls,
 } from "../src/gateway.js";
 import {
   createOllamaGateway,
@@ -234,6 +235,21 @@ describe("capabilities and request validation", () => {
         }),
       ),
     ).toThrowError(ModelLocalError);
+  });
+
+  it("rejects duplicate native tool-call ids", () => {
+    const requestedTools = [{ name: "notes.search", description: "a" }];
+    const toolCalls = [
+      { id: "call-1", name: "notes.search", arguments: {} },
+      { id: "call-1", name: "notes.search", arguments: {} },
+    ];
+    try {
+      validateNativeToolCalls({ toolCalls, requestedTools });
+      expect.unreachable();
+    } catch (error) {
+      expect(error).toBeInstanceOf(ModelLocalError);
+      expect((error as ModelLocalError).code).toBe("tool_call_invalid");
+    }
   });
 });
 
