@@ -804,9 +804,11 @@ export function loadBoundedUuidToOrdinal(
 }
 
 /**
- * Bounded forward map ordinal -> UUID for ONLY the given ordinals.
- * Session-owned (`session_id = ? AND ordinal IN (...)`), chunked like the
- * reverse map. Fail-closed: unreadable chunks invalidate those citations.
+ * Bounded forward map ordinal -> UUID for ONLY the given ordinals
+ * (r3944854881, r3946377098). Session-owned (`session_id = ? AND ordinal
+ * IN (...)` with bound parameters only, never string interpolation),
+ * chunked like the reverse map. Fail-closed: unreadable chunks invalidate
+ * those citations. Empty input performs no DB query at all.
  */
 export function loadBoundedOrdinalMap(
   db: Database.Database,
@@ -817,6 +819,9 @@ export function loadBoundedOrdinalMap(
   const unique = [...new Set(ordinals)].filter(
     (ordinal) => Number.isInteger(ordinal) && ordinal >= 1,
   );
+  if (unique.length === 0) {
+    return map;
+  }
   for (
     let offset = 0;
     offset < unique.length;
@@ -1057,7 +1062,14 @@ export function translateReferenceArgs(
   return { ...record, referenceId: mapped };
 }
 
-/** Collect cited rN ordinals from a validated answer (bounded input). */
+/**
+ * Collect cited rN ordinals from an already validated StructuredAnswer
+ * (r3946377098). Input is bounded by the contracts schema (at most 20
+ * parts x 8 citations = 160 raw ids before dedup), so the returned unique
+ * ordinal list is at most 160 entries and the citation map query below
+ * never scans the full session. Malformed ids are skipped here; the
+ * structural citation gate still rejects them as citation_invalid.
+ */
 function collectCitedOrdinals(answer: StructuredAnswer): number[] {
   const out: number[] = [];
   for (const part of answer.parts) {
@@ -2611,9 +2623,15 @@ function handleAnswerClass(args: {
       } catch {
         return maybeRepair("answer_invalid");
       }
+      const cited = collectCitedOrdinals(answer);
+      // r3946377098: empty citations perform no reference scan at all.
+      const ordinalMap =
+        cited.length === 0
+          ? new Map<number, string>()
+          : loadBoundedOrdinalMap(db, sessionId, cited);
       const verification = verifyCitations(
         answer,
-        loadBoundedOrdinalMap(db, sessionId, collectCitedOrdinals(answer)),
+        ordinalMap,
         loadGrantedIds(repo, runId),
       );
       if (!verification.ok) {
