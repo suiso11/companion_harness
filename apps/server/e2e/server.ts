@@ -37,8 +37,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import {
   createServer,
-  type IncomingMessage,
   request as httpRequest,
+  type IncomingMessage,
   type ServerResponse,
 } from "node:http";
 import { tmpdir } from "node:os";
@@ -308,7 +308,9 @@ function seedHistory(
   };
   const now = Date.now();
   const session = db
-    .prepare("SELECT id, next_turn_position AS nextTurn FROM sessions WHERE id = ?")
+    .prepare(
+      "SELECT id, next_turn_position AS nextTurn FROM sessions WHERE id = ?",
+    )
     .get(sessionId) as { id: string; nextTurn: number } | undefined;
   if (session === undefined) {
     throw new Error("session not found");
@@ -349,7 +351,15 @@ function seedHistory(
         result_json, error_code, event_seq, select_on_success,
         tool_requests_used, created_at, started_at, finished_at, cancel_requested_at)
        VALUES (?, ?, ?, 1, 'completed', 'm0-default', ?, NULL, 3, 1, 0, ?, ?, ?, NULL)`,
-    ).run(runId, turnId, sessionId, JSON.stringify({ version: 1, text: answer }), now, now, now);
+    ).run(
+      runId,
+      turnId,
+      sessionId,
+      JSON.stringify({ version: 1, text: answer }),
+      now,
+      now,
+      now,
+    );
     const events: Array<{ seq: number; type: string; payload: string }> = [
       { seq: 1, type: "run.queued", payload: JSON.stringify({ attempt: 1 }) },
       { seq: 2, type: "run.started", payload: JSON.stringify({ attempt: 1 }) },
@@ -380,9 +390,12 @@ function seedHistory(
 /* Loopback SSE fault proxy (observation + real transport faults only)  */
 /* ------------------------------------------------------------------ */
 
-const RUN_STREAM_RE = /\/api\/sessions\/[0-9a-f-]{36}\/runs\/([0-9a-f-]{36})\/events\/stream/;
-const RUN_EVENTS_PAGE_RE = /\/api\/sessions\/[0-9a-f-]{36}\/runs\/([0-9a-f-]{36})\/events(\?|$)/;
-const RUN_STATUS_RE = /\/api\/sessions\/[0-9a-f-]{36}\/runs\/([0-9a-f-]{36})\/status(\?|$)/;
+const RUN_STREAM_RE =
+  /\/api\/sessions\/[0-9a-f-]{36}\/runs\/([0-9a-f-]{36})\/events\/stream/;
+const RUN_EVENTS_PAGE_RE =
+  /\/api\/sessions\/[0-9a-f-]{36}\/runs\/([0-9a-f-]{36})\/events(\?|$)/;
+const RUN_STATUS_RE =
+  /\/api\/sessions\/[0-9a-f-]{36}\/runs\/([0-9a-f-]{36})\/status(\?|$)/;
 
 interface ProxyState {
   sseActive: number;
@@ -636,9 +649,9 @@ const control = createServer(
     }
     if (req.method === "POST" && url.pathname === "/seed-history") {
       const parsed = parseJsonBody();
-      const sessionId = parsed?.["sessionId"];
-      const count = parsed?.["count"];
-      const prefix = parsed?.["prefix"];
+      const sessionId = parsed?.sessionId;
+      const count = parsed?.count;
+      const prefix = parsed?.prefix;
       if (
         typeof sessionId !== "string" ||
         !UUID_V4_RE.test(sessionId) ||

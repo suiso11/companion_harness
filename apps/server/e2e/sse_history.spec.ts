@@ -11,7 +11,12 @@
 // catch-up after a dropped frame, (3) corrupt stored cursor active recovery,
 // (4) >50 seeded older-history turns render oldest-first with no duplicates.
 
-import { expect, type APIRequestContext, type Page, test } from "@playwright/test";
+import {
+  type APIRequestContext,
+  expect,
+  type Page,
+  test,
+} from "@playwright/test";
 import {
   E2E_APP_ORIGIN,
   E2E_CONTROL_ORIGIN,
@@ -36,7 +41,11 @@ async function control(
 
 async function proxy(
   request: APIRequestContext,
-  path: "/proxy/reset" | "/proxy/drop-sse" | "/proxy/arm-drop" | "/proxy/status",
+  path:
+    | "/proxy/reset"
+    | "/proxy/drop-sse"
+    | "/proxy/arm-drop"
+    | "/proxy/status",
   body?: unknown,
 ): Promise<import("@playwright/test").APIResponse> {
   // Proxy control endpoints live on the proxy origin itself (loopback-only).
@@ -157,9 +166,7 @@ test("dropped SSE frame recovers via JSON gap catch-up", async ({
 // impossible cursor for the upcoming run, then send; the client must detect
 // corruption against the authoritative run status eventSeq and resync from
 // history instead of wedging on a stream that can never converge.
-test("corrupt stored cursor recovers via history resync", async ({
-  page,
-}) => {
+test("corrupt stored cursor recovers via history resync", async ({ page }) => {
   await page.goto(`${E2E_APP_ORIGIN}/`);
   await expect(page.locator("#composer")).toBeVisible();
   // Plant corruption for every future run cursor before any run exists: any
@@ -179,7 +186,10 @@ test("corrupt stored cursor recovers via history resync", async ({
       const victims: string[] = [];
       for (let i = 0; i < localStorage.length; i += 1) {
         const key = localStorage.key(i);
-        if (key !== null && key.startsWith("ch.cursor.")) {
+        if (key === null) {
+          continue;
+        }
+        if (key.startsWith("ch.cursor.")) {
           victims.push(key);
         }
       }
