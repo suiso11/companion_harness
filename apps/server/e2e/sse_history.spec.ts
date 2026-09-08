@@ -382,9 +382,12 @@ for (const variant of ["ahead", "malformed"] as const) {
     );
     const cursor = await storedCursorOf(page, liveRunId as string);
     // After recovery the stored cursor (when present) is finite and within
-    // the authoritative eventSeq; the poisoned over-large value is gone.
+    // the authoritative eventSeq; the poisoned value is gone (normalization).
+    // Malformed cursors normalize to null and replay from 0, so the run
+    // still completes and renders exactly once (no status/history resync is
+    // expected on that path — only the ahead variant resyncs).
     if (cursor.raw !== null) {
-      expect(cursor.raw).not.toBe("999999999");
+      expect(cursor.raw).not.toBe(poisonValue);
       expect(cursor.parsed).not.toBeNull();
       expect(cursor.parsed as number).toBeLessThanOrEqual(
         authoritative.eventSeq,
