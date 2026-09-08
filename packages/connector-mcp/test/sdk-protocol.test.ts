@@ -24,6 +24,7 @@ afterEach(async () => {
 });
 
 async function fakePair() {
+  let searchCalls = 0;
   const server = new McpServer({
     name: "fake-calendar",
     version: "0.0.0-proposed.1",
@@ -35,10 +36,13 @@ async function fakePair() {
       inputSchema: { q: z.string(), maxResults: z.number().optional() },
       outputSchema: { totalCount: z.number() },
     },
-    async ({ q }) => ({
-      content: [{ type: "text" as const, text: `hits for ${q}` }],
-      structuredContent: { totalCount: 1 },
-    }),
+    async ({ q }) => {
+      searchCalls += 1;
+      return {
+        content: [{ type: "text" as const, text: `hits for ${q}` }],
+        structuredContent: { totalCount: 1 },
+      };
+    },
   );
   const [clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();
@@ -52,7 +56,7 @@ async function fakePair() {
     () => client.close(),
     () => server.close(),
   );
-  return { client };
+  return { client, searchCalls: () => searchCalls };
 }
 
 describe("official SDK protocol (fake server, 1.30.0)", () => {
@@ -73,10 +77,26 @@ describe("official SDK protocol (fake server, 1.30.0)", () => {
     expect(res.structuredContent).toEqual({ totalCount: 1 });
   });
 
-  it("tools/call rejects an unknown tool (no auto-exposure surface to rely on)", async () => {
-    const { client } = await fakePair();
-    await expect(
-      client.callTool({ name: "delete-event", arguments: {} }),
-    ).rejects.toThrow();
+  it("tools/call for an unregistered tool resolves a denied error result, never a write", async () => {
+    const { client, searchCalls } = await fakePair();
+    const listed = await client.listTools();
+    expect(listed.tools.some((t) => t.name === "delete-event")).toBe(false);
+    const res = (await client.callTool({
+      name: "delete-event",
+      arguments: {},
+    })) as {
+      isError?: boolean;
+      content?: Array<{ type: string; text?: string }>;
+    };
+    expect(res.isError).toBe(true);
+    const text = Array.isArray(res.content)
+      ? res.content
+          .filter((c) => c.type === "text")
+          .map((c) => c.text ?? "")
+          .join(" ")
+      : "";
+    expect(text).toMatch(/delete-event/i);
+    expect(text).toMatch(/unknown|not found|no such|missing/i);
+    expect(searchCalls()).toBe(0);
   });
 });
