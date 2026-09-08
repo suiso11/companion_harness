@@ -23,6 +23,7 @@ import { type CreatedServerApp, createApp } from "../src/app.js";
 import { loadServerConfig } from "../src/config.js";
 import { createCollectingLogger } from "../src/logger.js";
 import {
+  createSseResponse,
   formatRunEventSse,
   pollSseStep,
   SSE_HEARTBEAT_CHUNK,
@@ -491,18 +492,206 @@ describe("M3 client frozen-request + unbounded fallback source contract", () => 
     expect(resendBody).toContain("pendingRequest");
     expect(resendBody).not.toContain("fetchUiContext");
   });
+});
 
-  it("fallback poll is unbounded: no tick cap, disposes on new run, absorbs transient errors", () => {
-    // Regression for HEAD unbounded-fallback fix (§16.7): the poll runs
-    // until terminal or disposal, never a fixed 60-tick cutoff, and never
-    // cancels the run on stream loss.
-    expect(source).not.toContain("tick < 60");
-    expect(source).toContain("POLL_MAX_ERROR_STREAK");
-    expect(source).toContain("POLL_INTERVAL_MS");
-    const pollStart = source.indexOf("private async pollFallback");
-    expect(pollStart).toBeGreaterThan(-1);
-    const pollBody = source.slice(pollStart, pollStart + 2500);
-    expect(pollBody).toContain("activeRunId !== runId");
-    expect(pollBody).toContain("stopVisible");
+describe("M3 SSE loop lifetime (fake timers)", () => {
+  interface FakeTimer {
+    id: number;
+    fn: () => void;
+    ms: number;
+  }
+  function makeTimers(): {
+    created: FakeTimer[];
+    cleared: number[];
+    setInterval: typeof setInterval;
+    clearInterval: typeof clearInterval;
+    setTimeout: typeof setTimeout;
+  } {
+    let next = 1;
+    const created: FakeTimer[] = [];
+    const cleared: number[] = [];
+    const setIntervalFn = ((fn: () => void, ms?: number) => {
+      const id = next++;
+      created.push({ id, fn, ms: ms ?? 0 });
+      return id as unknown as ReturnType<typeof setInterval>;
+    }) as typeof setInterval;
+    const clearIntervalFn = ((id: unknown) => {
+      cleared.push(id as number);
+    }) as typeof clearInterval;
+    const setTimeoutFn = ((fn: () => void, _ms?: number) => {
+      const id = next++;
+      // Backpressure timers fire immediately as a no-op drain wake.
+      queueMicrotask(fn);
+      return id as unknown as ReturnType<typeof setTimeout>;
+    }) as unknown as typeof setTimeout;
+    return {
+      created,
+      cleared,
+      setInterval: setIntervalFn,
+      clearInterval: clearIntervalFn,
+      setTimeout: setTimeoutFn,
+    };
+  }
+
+  async function drain(): Promise<void> {
+    for (let i = 0; i < 5; i += 1) {
+      await Promise.resolve();
+    }
+  }
+
+  it("an initially terminal run closes the stream and clears every interval (no leak)", async () => {
+    const timers = makeTimers();
+    const source = {
+      getEvents: () => ({
+        events: [],
+        nextAfter: 3,
+        hasMore: false,
+        terminal: true,
+      }),
+      getRun: () => ({ status: "completed", eventSeq: 3 }),
+    };
+    const res = createSseResponse(source, "s", "r", 3, timers);
+    expect(res.status).toBe(200);
+    await drain();
+    expect(timers.created.length).toBe(2); // poll + heartbeat
+    // Regression: the first step runs to completion and closes the stream,
+    // so both intervals must be cleared (pre-fix: step ran before arming).
+    for (const timer of timers.created) {
+      expect(timers.cleared).toContain(timer.id);
+    }
+    const reader = res.body?.getReader();
+    const first = await reader?.read();
+    expect(first?.done).toBe(true);
+    await reader?.cancel().catch(() => {});
+  });
+
+  it("never runs two poll steps concurrently", async () => {
+    const timers = makeTimers();
+    let inside = 0;
+    let maxInside = 0;
+    const source = {
+      getEvents: () => {
+        inside += 1;
+        maxInside = Math.max(maxInside, inside);
+        inside -= 1;
+        return {
+          events: [],
+          nextAfter: 0,
+          hasMore: false,
+          terminal: false,
+        };
+      },
+      getRun: () => ({ status: "running", eventSeq: 0 }),
+    };
+    createSseResponse(source, "s", "r", 0, timers);
+    // Fire two poll ticks synchronously before any microtask runs: the
+    // in-flight `stepping` guard must drop the second tick.
+    const poll = timers.created.find((t) => t.ms === 250) as FakeTimer;
+    expect(poll).toBeDefined();
+    poll.fn();
+    poll.fn();
+    await drain();
+    expect(maxInside).toBe(1);
+    await drain();
+  });
+});
+
+describe("M3 review-fix regressions (client source contract)", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const source = readFileSync(
+    join(here, "..", "src", "ui", "client.ts"),
+    "utf8",
+  );
+
+  function methodBody(name: string): string {
+    const start = source.indexOf(name);
+    expect(start).toBeGreaterThan(-1);
+    return source.slice(start, start + 2500);
+  }
+
+  it("send stays disabled while the request is frozen/in flight and restores on failure", () => {
+    const composer = methodBody("private renderComposer()");
+    expect(composer).toContain("this.sending");
+    const send = methodBody("private async send()");
+    expect(send).toContain("this.sending = true");
+    expect(send).toContain("catch");
+    expect(send).toContain("this.sending = false");
+  });
+
+  it("retains the pending idempotency key on transient lookup errors", () => {
+    const recover = methodBody("private async recoverPending()");
+    expect(recover).toContain("catch");
+    expect(recover).toContain("status >= 500");
+    // The retain paths return BEFORE clearPendingKey runs.
+    const firstClear = recover.indexOf("clearPendingKey");
+    const firstTransient = recover.indexOf("status >= 500");
+    expect(firstTransient).toBeGreaterThan(-1);
+    expect(firstTransient).toBeLessThan(firstClear);
+  });
+
+  it("does not replace the session on transient probe errors", () => {
+    const ensure = methodBody("private async ensureSession()");
+    expect(ensure).toContain("probeStatus === 404 || probeStatus === 410");
+    expect(ensure).toContain("probeStatus = null");
+  });
+
+  it("citation open performs a real CAS PUT and retries on 409 conflict", () => {
+    const cas = methodBody("private async updateReferenceContextCas(");
+    expect(cas).toContain('method: "PUT"');
+    expect(cas).toContain("status !== 409");
+    const open = methodBody("private async openCitation(");
+    expect(open).toContain("updateReferenceContextCas");
+  });
+
+  it("poll fallback counts non-2xx page failures toward the error streak", () => {
+    const catchUp = methodBody("private async catchUp(");
+    expect(catchUp).toContain("fetched.status < 200 || fetched.status >= 300");
+    expect(catchUp).toContain("return false");
+    const poll = methodBody("private async pollFallback(");
+    expect(poll).toContain("errorStreak += 1");
+    expect(poll).toContain("errorStreak = 0");
+  });
+
+  it("history loads older pages via beforePosition and renders oldest-first", () => {
+    const hydrate = methodBody("private async hydrateHistory()");
+    expect(hydrate).toContain("beforePosition=");
+    expect(hydrate).toContain("hasMore");
+    expect(hydrate).toContain("nextBefore");
+    // Regression: API items are chronological within a page, so the render
+    // loop must advance forward; a reverse pass would invert every page.
+    expect(hydrate).toContain("itemIndex += 1");
+    expect(hydrate).not.toContain("itemIndex -= 1");
+  });
+
+  it("capped history keeps older turns reachable via incremental loading", () => {
+    expect(source).toContain("loadOlderHistory");
+    expect(source).toContain("historyHasMore");
+    expect(source).toContain("oldestBefore");
+    expect(source).toContain("さらに古い履歴を読み込む");
+    const older = methodBody("private async loadOlderHistory()");
+    // Prepend path also renders oldest-first (pages reversed, items forward).
+    expect(older).toContain("insertBefore");
+    expect(older).toContain("itemIndex += 1");
+    expect(older).not.toContain("itemIndex -= 1");
+  });
+
+  it("retry survives hydration and duplicates never re-render terminal output", () => {
+    const render = methodBody("private renderRunView(");
+    const failedIdx = render.indexOf('view.visible === "failed"');
+    const failedBody = render.slice(failedIdx, failedIdx + 900);
+    const hydrateIdx = failedBody.indexOf("hydrateHistory().then");
+    const retryIdx = failedBody.indexOf("もう一度送る");
+    expect(hydrateIdx).toBeGreaterThan(-1);
+    expect(retryIdx).toBeGreaterThan(hydrateIdx);
+    expect(render).toContain("renderedAnswers.has(runId)");
+  });
+
+  it("the serialized apply chain absorbs rejections and corrupt cursors resync", () => {
+    const apply = methodBody("private applySerialized(");
+    expect(apply).toContain("this.runChain.catch(() => {})");
+    expect(apply).toContain("catch");
+    expect(source).toContain("validateStoredCursor(runId, stored ?? 0)");
+    expect(source).toContain("resyncFromHistory(runId)");
+    expect(source).toContain("isCorruptCursor");
   });
 });

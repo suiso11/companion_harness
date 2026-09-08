@@ -124,6 +124,10 @@ class ConversationApp {
   } | null = null;
   private runChain: Promise<void> = Promise.resolve();
   private runViews = new Map<string, RunViewState>();
+  /** Runs whose terminal answer was already rendered (no duplicate output). */
+  private readonly renderedAnswers = new Set<string>();
+  /** True while a send/post round-trip is awaited (send stays disabled). */
+  private sending = false;
   /** Run -> Turn ownership for failure-only retry (§16.6 exact). */
   private readonly runTurns = new Map<string, string>();
   private sse: EventSource | null = null;
@@ -178,19 +182,43 @@ class ConversationApp {
 
   /** Auto session init (§16.2): reuse the stored id, else POST /api/sessions. */
   private async ensureSession(): Promise<void> {
+    let stored: string | null = null;
     try {
-      const stored = localStorage.getItem(LS_SESSION);
-      if (stored !== null && stored.length > 0) {
+      stored = localStorage.getItem(LS_SESSION);
+    } catch {
+      stored = null;
+    }
+    if (stored !== null && stored.length > 0) {
+      let probeStatus: number | null = null;
+      try {
         const check = await fetchJson(
           `/api/sessions/${encodeURIComponent(stored)}/history?limit=1`,
         );
-        if (check.status === 200) {
-          this.sessionId = stored;
-          return;
-        }
+        probeStatus = check.status;
+      } catch {
+        probeStatus = null;
       }
-    } catch {
-      // Fall through to session creation.
+      if (probeStatus === 200) {
+        this.sessionId = stored;
+        return;
+      }
+      // Replace the stored session only on a definitive miss (unknown id).
+      // Transient probe failures (network/5xx/429) keep the stored id so a
+      // healthy session is never orphaned by a blip.
+      if (probeStatus === 404 || probeStatus === 410) {
+        try {
+          localStorage.removeItem(LS_SESSION);
+        } catch {
+          // Best effort.
+        }
+      } else if (probeStatus !== null) {
+        this.sessionId = stored;
+        return;
+      } else {
+        // Network-level probe failure: keep the stored id for retry.
+        this.sessionId = stored;
+        return;
+      }
     }
     const key = crypto.randomUUID();
     const created = await postJson("/api/sessions", {}, key);
@@ -226,9 +254,21 @@ class ConversationApp {
       return;
     }
     const scope = `session:${this.sessionId}:message`;
-    const lookup = await fetchJson(
-      `/api/sessions/${encodeURIComponent(this.sessionId)}/idempotency/${encodeURIComponent(key)}?scope=${encodeURIComponent(scope)}`,
-    );
+    let lookup: { status: number; body: unknown };
+    try {
+      lookup = await fetchJson(
+        `/api/sessions/${encodeURIComponent(this.sessionId)}/idempotency/${encodeURIComponent(key)}?scope=${encodeURIComponent(scope)}`,
+      );
+    } catch {
+      // Transient network failure: retain the pending key for a later retry.
+      this.showNotice("送信できませんでした。もう一度お試しください");
+      return;
+    }
+    // Transient server states retain the pending key for same-key replay.
+    if (lookup.status === 429 || lookup.status === 503 || lookup.status >= 500) {
+      this.showNotice("送信できませんでした。もう一度お試しください");
+      return;
+    }
     const body = lookup.body as {
       found?: unknown;
       body?: { turnId?: unknown; run?: { id?: unknown } };
@@ -256,25 +296,146 @@ class ConversationApp {
     this.showNotice("送信を再入力してください");
   }
 
-  /** History hydration (§16.6 exact): latest page, chronological render. */
+  /**
+   * History hydration (§16.6 exact): paged via hasMore/nextBefore so older
+   * turns stay reachable, chronological render (oldest first). The initial
+   * pass is bounded to 20 pages x 50 items; when older turns remain, an
+   * explicit "older history" control loads them incrementally (never
+   * silently dropped). Every fetch is same-origin JSON, no bodies stored.
+   */
+  private oldestBefore: number | null = null;
+  private historyHasMore = false;
+  private loadingOlder = false;
+
   private async hydrateHistory(): Promise<void> {
     if (this.sessionId === null) {
       return;
     }
-    const page = await fetchJson(
-      `/api/sessions/${encodeURIComponent(this.sessionId)}/history?limit=50`,
-    );
-    const items = (page.body as { items?: unknown }).items;
+    const sessionId = this.sessionId;
+    const pages: HistoryItemView[][] = [];
+    let before: number | null = null;
+    let capped: { before: number } | null = null;
+    for (let round = 0; round < 20; round += 1) {
+      const query =
+        before === null
+          ? `/api/sessions/${encodeURIComponent(sessionId)}/history?limit=50`
+          : `/api/sessions/${encodeURIComponent(sessionId)}/history?limit=50&beforePosition=${before}`;
+      let page: { status: number; body: unknown };
+      try {
+        page = await fetchJson(query);
+      } catch {
+        return;
+      }
+      if (page.status !== 200) {
+        return;
+      }
+      const body = page.body as {
+        items?: unknown;
+        nextBefore?: unknown;
+        hasMore?: unknown;
+      };
+      if (!Array.isArray(body.items)) {
+        return;
+      }
+      pages.push(body.items as HistoryItemView[]);
+      if (body.hasMore !== true || typeof body.nextBefore !== "number") {
+        before = null;
+        break;
+      }
+      before = body.nextBefore;
+      if (round === 19) {
+        capped = { before };
+      }
+    }
+    this.oldestBefore = capped !== null ? capped.before : null;
+    this.historyHasMore = capped !== null;
     this.list.replaceChildren();
-    if (!Array.isArray(items)) {
+    // Server pages arrive latest-first but items within each page are
+    // already chronological (oldest first); render oldest-first overall.
+    for (let index = pages.length - 1; index >= 0; index -= 1) {
+      const items = (pages[index] ?? []) as HistoryItemView[];
+      for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
+        this.renderTurn(items[itemIndex] as HistoryItemView);
+      }
+    }
+    this.renderOlderButton();
+  }
+
+  /**
+   * Bounded incremental older-history loading: the 20-page cap never
+   * silently drops access — the control fetches the next (up to 20) older
+   * pages and prepends them chronologically. Plain button, no send queue
+   * interaction (§16.3: submit path untouched).
+   */
+  private async loadOlderHistory(): Promise<void> {
+    if (this.sessionId === null || this.oldestBefore === null || this.loadingOlder) {
       return;
     }
-    for (const item of items as HistoryItemView[]) {
-      this.renderTurn(item);
+    this.loadingOlder = true;
+    try {
+      const sessionId = this.sessionId;
+      const pages: HistoryItemView[][] = [];
+      let before: number | null = this.oldestBefore;
+      for (let round = 0; round < 20 && before !== null; round += 1) {
+        let page: { status: number; body: unknown };
+        try {
+          page = await fetchJson(
+            `/api/sessions/${encodeURIComponent(sessionId)}/history?limit=50&beforePosition=${before}`,
+          );
+        } catch {
+          return;
+        }
+        if (page.status !== 200 || !Array.isArray((page.body as { items?: unknown }).items)) {
+          return;
+        }
+        const body = page.body as { items?: unknown; nextBefore?: unknown; hasMore?: unknown };
+        pages.push(body.items as HistoryItemView[]);
+        if (body.hasMore === true && typeof body.nextBefore === "number") {
+          before = body.nextBefore;
+        } else {
+          before = null;
+        }
+      }
+      this.oldestBefore = before;
+      this.historyHasMore = before !== null;
+      // Prepend oldest-first: oldest page first, items forward within a page.
+      const anchor = this.list.firstChild;
+      for (let index = pages.length - 1; index >= 0; index -= 1) {
+        const items = (pages[index] ?? []) as HistoryItemView[];
+        for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
+          const node = this.buildTurn(items[itemIndex] as HistoryItemView);
+          this.list.insertBefore(node, anchor);
+        }
+      }
+    } finally {
+      this.loadingOlder = false;
+      this.renderOlderButton();
     }
   }
 
+  private renderOlderButton(): void {
+    const existing = document.getElementById("history-older");
+    if (existing !== null) {
+      existing.remove();
+    }
+    if (!this.historyHasMore || this.oldestBefore === null) {
+      return;
+    }
+    const button = document.createElement("button");
+    button.textContent = "さらに古い履歴を読み込む";
+    button.id = "history-older";
+    button.disabled = this.loadingOlder;
+    button.addEventListener("click", () => {
+      void this.loadOlderHistory();
+    });
+    this.list.prepend(button);
+  }
+
   private renderTurn(item: HistoryItemView): void {
+    this.list.appendChild(this.buildTurn(item));
+  }
+
+  private buildTurn(item: HistoryItemView): HTMLElement {
     const wrap = el("section");
     wrap.appendChild(el("p", typeof item.text === "string" ? item.text : ""));
     const run = item.selectedRun;
@@ -296,7 +457,7 @@ class ConversationApp {
       // appear in the history projection; retry is offered by the live view.
       wrap.appendChild(el("p", "応答なし"));
     }
-    this.list.appendChild(wrap);
+    return wrap;
   }
 
   /**
@@ -341,7 +502,7 @@ class ConversationApp {
    * posting; an explicit resend reuses that frozen request as-is.
    */
   private async send(): Promise<void> {
-    if (this.sessionId === null || this.activeRunId !== null) {
+    if (this.sessionId === null || this.activeRunId !== null || this.sending) {
       return;
     }
     if (this.pendingRequest === null) {
@@ -357,10 +518,16 @@ class ConversationApp {
       this.pendingRequest = request;
       this.list.appendChild(el("p", text));
       this.input.value = "";
+      this.sending = true;
       this.renderComposer();
-      // Freeze the context snapshot into the SAME request before posting;
-      // resends never refetch it (frozen body + key, §16.7 exact).
-      request.uiContext = await this.fetchUiContext();
+      try {
+        // Freeze the context snapshot into the SAME request before posting;
+        // resends never refetch it (frozen body + key, §16.7 exact).
+        request.uiContext = await this.fetchUiContext();
+      } finally {
+        this.sending = false;
+        this.renderComposer();
+      }
     }
     const request = this.pendingRequest;
     if (request === null) {
@@ -371,11 +538,24 @@ class ConversationApp {
     } catch {
       // Best effort.
     }
-    const posted = await postJson(
-      `/api/sessions/${encodeURIComponent(this.sessionId)}/messages`,
-      { text: request.text, uiContext: request.uiContext },
-      request.key,
-    );
+    this.sending = true;
+    this.renderComposer();
+    let posted: { status: number; body: unknown };
+    try {
+      posted = await postJson(
+        `/api/sessions/${encodeURIComponent(this.sessionId)}/messages`,
+        { text: request.text, uiContext: request.uiContext },
+        request.key,
+      );
+    } catch {
+      // Network failure: retryable notice, same frozen key/body kept both in
+      // memory and in localStorage for explicit same-key replay.
+      this.sending = false;
+      this.showNotice("送信できませんでした。もう一度お試しください");
+      this.renderComposer();
+      return;
+    }
+    this.sending = false;
     // Exact contracts `PostMessageResponse`: `{ turnId, run: { id } }`.
     const body = posted.body as {
       turnId?: unknown;
@@ -400,10 +580,12 @@ class ConversationApp {
     if (posted.status === 409) {
       this.clearPendingKey();
       this.showNotice("生成中のため送信できません");
+      this.renderComposer();
       await this.hydrateHistory();
       return;
     }
-    // No response: keep the frozen in-memory key/body for an explicit resend.
+    // No response (validation/transient): keep the frozen in-memory key/body
+    // for an explicit same-key resend; the notice invites a retry.
     this.showNotice("送信できませんでした。もう一度お試しください");
     this.renderComposer();
   }
@@ -486,6 +668,12 @@ class ConversationApp {
     this.renderComposer();
     const sessionId = this.sessionId;
     const stored = readStoredCursor(runId);
+    // Corrupt-cursor guard at subscribe time: a syntactically valid but
+    // impossible cursor (validated against the server eventSeq below) must
+    // resync from history instead of opening a stream that can never
+    // converge. Validation is async; the stream opens with a safe cursor
+    // (0 when corrupt) and resync replaces it once confirmed.
+    void this.validateStoredCursor(runId, stored ?? 0);
     const query = stored !== null && stored > 0 ? `?after=${stored}` : "";
     const url = `/api/sessions/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(runId)}/events/stream${query}`;
     let opened = false;
@@ -554,57 +742,145 @@ class ConversationApp {
     };
   }
 
+  /**
+   * Validate a stored cursor against the server's eventSeq: fetch one page
+   * past the cursor; a cursor beyond the run's eventSeq (empty page on a
+   * terminal run whose nextAfter <= cursor) is corrupt and resyncs from
+   * history. Only acts on the still-subscribed run.
+   */
+  private async validateStoredCursor(
+    runId: string,
+    cursor: number,
+  ): Promise<void> {
+    if (this.sessionId === null || cursor <= 0 || this.activeRunId !== runId) {
+      return;
+    }
+    let fetched: { status: number; body: unknown };
+    try {
+      fetched = await fetchJson(
+        `/api/sessions/${encodeURIComponent(this.sessionId as string)}/runs/${encodeURIComponent(runId)}/events?after=${cursor}&limit=50`,
+      );
+    } catch {
+      return;
+    }
+    if (this.activeRunId !== runId || fetched.status !== 200) {
+      return;
+    }
+    const body = fetched.body as {
+      events?: unknown;
+      nextAfter?: unknown;
+      terminal?: unknown;
+    };
+    if (!Array.isArray(body.events) || body.events.length > 0) {
+      return;
+    }
+    const nextAfter = typeof body.nextAfter === "number" ? body.nextAfter : 0;
+    // Empty page and the server already moved past the cursor (or the run
+    // is terminal with nothing more to deliver): the stored cursor can
+    // never converge, so drop it and rebuild from history.
+    if (body.terminal === true || nextAfter < cursor) {
+      await this.resyncFromHistory(runId);
+    }
+  }
+
   /** Serialized reducer application; cursor persisted only after apply. */
   private applySerialized(
     runId: string,
     event: { seq: number; type: string; payload: unknown },
   ): void {
-    this.runChain = this.runChain.then(async () => {
-      const current = this.runViews.get(runId) ?? INITIAL_RUN_VIEW;
-      const applied = applyRunEvent(current, event);
-      if (applied.outcome.kind === "needs-catchup") {
-        await this.catchUp(runId, current.cursor);
-        const resynced = this.runViews.get(runId) ?? INITIAL_RUN_VIEW;
-        const second = applyRunEvent(resynced, event);
-        if (second.outcome.kind === "needs-catchup") {
-          // The stored cursor never converges with the server stream (e.g.
-          // corrupted beyond `event_seq`, §16.7): stop reconnecting and
-          // resync from history instead.
-          await this.resyncFromHistory(runId);
+    // A rejected predecessor must never wedge the chain permanently: every
+    // link absorbs the previous rejection before appending its own step,
+    // and every step catches its own failure.
+    const link = this.runChain.catch(() => {}).then(async () => {
+      try {
+        const current = this.runViews.get(runId) ?? INITIAL_RUN_VIEW;
+        const applied = applyRunEvent(current, event);
+        if (applied.outcome.kind === "ignored-duplicate") {
+          // Duplicates: cursor unchanged, no store write, no re-render, so
+          // terminal output is never appended twice.
           return;
         }
-        // Catch-up converged: the re-applied event is applied (or safely
-        // ignored as duplicate/unknown), so persist the cursor after apply.
-        this.runViews.set(runId, second.state);
-        storeCursor(runId, second.state.cursor);
+        if (applied.outcome.kind === "ignored-unknown") {
+          // Unknown/future types already advanced the cursor: persist it
+          // but do not re-render (no output to duplicate).
+          this.runViews.set(runId, applied.state);
+          storeCursor(runId, applied.state.cursor);
+          return;
+        }
+        if (applied.outcome.kind === "needs-catchup") {
+          const ok = await this.catchUp(runId, current.cursor);
+          if (!ok) {
+            // Transient page failure: keep the chain alive; the next tick
+            // (SSE event or fallback poll) retries the gap.
+            return;
+          }
+          const resynced = this.runViews.get(runId) ?? INITIAL_RUN_VIEW;
+          const second = applyRunEvent(resynced, event);
+          if (second.outcome.kind === "needs-catchup") {
+            // The stored cursor never converges with the server stream (e.g.
+            // corrupted beyond `event_seq`, §16.7): stop reconnecting and
+            // resync from history instead.
+            await this.resyncFromHistory(runId);
+            return;
+          }
+          if (second.outcome.kind === "ignored-duplicate") {
+            return;
+          }
+          if (second.outcome.kind === "ignored-unknown") {
+            this.runViews.set(runId, second.state);
+            storeCursor(runId, second.state.cursor);
+            return;
+          }
+          // Catch-up converged: the re-applied event is applied, so persist
+          // the cursor after apply.
+          this.runViews.set(runId, second.state);
+          storeCursor(runId, second.state.cursor);
+          this.renderRunView(runId);
+          return;
+        }
+        this.runViews.set(runId, applied.state);
+        storeCursor(runId, applied.state.cursor);
         this.renderRunView(runId);
-        return;
+      } catch {
+        // One bad tick (I/O, DOM) must never wedge later events.
       }
-      this.runViews.set(runId, applied.state);
-      // Unknown types already advanced the cursor inside the reducer;
-      // duplicates leave it unchanged. Either way persist after apply.
-      storeCursor(runId, applied.state.cursor);
-      this.renderRunView(runId);
     });
+    // The chain itself never stays rejected: a failure above already
+    // resolved, and this guard absorbs out-of-band rejections.
+    this.runChain = link.catch(() => {});
   }
 
-  /** Gap catch-up via the M0 JSON pagination API (§16.4 exact). */
-  private async catchUp(runId: string, after: number): Promise<void> {
+  /**
+   * Gap catch-up via the M0 JSON pagination API (§16.4 exact). Returns true
+   * when the page fetch succeeded (even with zero events); false on any
+   * transport or non-2xx failure so callers count it as a failure.
+   */
+  private async catchUp(runId: string, after: number): Promise<boolean> {
     if (this.sessionId === null) {
-      return;
+      return true;
     }
     let cursor = after;
     for (let page = 0; page < 20; page += 1) {
-      const fetched = await fetchJson(
-        `/api/sessions/${encodeURIComponent(this.sessionId as string)}/runs/${encodeURIComponent(runId)}/events?after=${cursor}&limit=50`,
-      );
+      let fetched: { status: number; body: unknown };
+      try {
+        fetched = await fetchJson(
+          `/api/sessions/${encodeURIComponent(this.sessionId as string)}/runs/${encodeURIComponent(runId)}/events?after=${cursor}&limit=50`,
+        );
+      } catch {
+        return false;
+      }
+      // Every non-2xx page is a failure (counted by the caller); only 2xx
+      // with a well-formed event array advances the view.
+      if (fetched.status < 200 || fetched.status >= 300) {
+        return false;
+      }
       const body = fetched.body as {
         events?: Array<{ seq?: unknown; type?: unknown; payload?: unknown }>;
         nextAfter?: unknown;
         terminal?: unknown;
       };
-      if (fetched.status !== 200 || !Array.isArray(body.events)) {
-        return;
+      if (!Array.isArray(body.events)) {
+        return false;
       }
       for (const item of body.events) {
         if (typeof item.seq !== "number" || typeof item.type !== "string") {
@@ -617,16 +893,22 @@ class ConversationApp {
           payload: item.payload,
         });
         if (applied.outcome.kind === "needs-catchup") {
-          return;
+          return true;
+        }
+        // Duplicates from overlapping pages: advance nothing, render
+        // nothing; unknown types only advance the stored cursor.
+        if (applied.outcome.kind === "ignored-duplicate") {
+          continue;
         }
         this.runViews.set(runId, applied.state);
         storeCursor(runId, applied.state.cursor);
       }
       cursor = typeof body.nextAfter === "number" ? body.nextAfter : cursor + 1;
       if (body.events.length === 0) {
-        return;
+        return true;
       }
     }
+    return true;
   }
 
   /**
@@ -646,15 +928,22 @@ class ConversationApp {
       if (this.activeRunId !== runId) {
         return;
       }
+      let ok = false;
       try {
-        await this.catchUp(runId, readStoredCursor(runId) ?? after);
-        errorStreak = 0;
+        ok = await this.catchUp(runId, readStoredCursor(runId) ?? after);
       } catch {
+        ok = false;
+      }
+      // Non-2xx/transport failures count toward the bounded streak; only a
+      // successful page resets it.
+      if (!ok) {
         errorStreak += 1;
         if (errorStreak >= ConversationApp.POLL_MAX_ERROR_STREAK) {
           this.showNotice("状態の取得に失敗しました。再読み込みしてください");
           return;
         }
+      } else {
+        errorStreak = 0;
       }
       if (this.activeRunId !== runId) {
         return;
@@ -681,6 +970,14 @@ class ConversationApp {
       return;
     }
     if (view.visible === "answered") {
+      // Render each terminal answer exactly once: duplicates re-drive this
+      // path via the serialized chain, so guard with renderedAnswers instead
+      // of appending the same paragraphs/buttons again.
+      if (this.renderedAnswers.has(runId)) {
+        this.finishActiveRun();
+        return;
+      }
+      this.renderedAnswers.add(runId);
       for (const part of view.answer) {
         this.list.appendChild(el("p", part.text));
         for (const citation of part.citations) {
@@ -698,16 +995,20 @@ class ConversationApp {
       this.showNotice("生成に失敗しました");
       // Failure-only retry (§16.6 exact): offer one retry for the same Turn
       // (a fresh Run). Capture the Turn before finishActiveRun clears it.
+      // The retry control must survive the history refresh below, so hydrate
+      // first and append the button afterwards.
       const turnId = this.runTurns.get(runId) ?? this.activeTurnId;
+      const retryVisible = view.retryVisible;
       this.finishActiveRun();
-      if (view.retryVisible && turnId !== null) {
-        const retryButton = el("button", "もう一度送る");
-        retryButton.addEventListener("click", () => {
-          void this.retry(turnId);
-        });
-        this.list.appendChild(retryButton);
-      }
-      void this.hydrateHistory();
+      void this.hydrateHistory().then(() => {
+        if (retryVisible && turnId !== null && turnId !== undefined) {
+          const retryButton = el("button", "もう一度送る");
+          retryButton.addEventListener("click", () => {
+            void this.retry(turnId);
+          });
+          this.list.appendChild(retryButton);
+        }
+      });
       return;
     }
     if (view.visible === "stopped") {
@@ -719,6 +1020,71 @@ class ConversationApp {
     // `run.cancel_requested` shows「停止しました」while the run stays active.
     this.showNotice(view.notice);
     this.renderComposer();
+  }
+
+  /**
+   * Reference-context CAS update (§14.8, §16.5): opening a citation adds it
+   * to the session's implicit selection via a REAL conditional PUT —
+   * `{ version: expected, items }` against the stored version. A 409
+   * `reference_version_conflict` re-reads the stored context and retries a
+   * bounded number of times (lost-update handling); exhaustion or any other
+   * failure is non-fatal (the drawer still opens).
+   */
+  private static readonly REFERENCE_CONTEXT_CAS_ATTEMPTS = 3;
+
+  private async updateReferenceContextCas(
+    referenceId: string,
+  ): Promise<void> {
+    if (this.sessionId === null) {
+      return;
+    }
+    const base = `/api/sessions/${encodeURIComponent(this.sessionId)}/reference-context`;
+    for (let attempt = 0; attempt < ConversationApp.REFERENCE_CONTEXT_CAS_ATTEMPTS; attempt += 1) {
+      let current: { status: number; body: unknown };
+      try {
+        current = await fetchJson(base);
+      } catch {
+        return;
+      }
+      if (current.status !== 200) {
+        return;
+      }
+      const stored = current.body as { version?: unknown; items?: unknown };
+      if (
+        typeof stored.version !== "number" ||
+        !Number.isSafeInteger(stored.version) ||
+        stored.version < 1 ||
+        !Array.isArray(stored.items)
+      ) {
+        return;
+      }
+      const items = stored.items.filter(
+        (item): item is string =>
+          typeof item === "string" && item.length > 0 && item !== referenceId,
+      );
+      // Already selected: no CAS write needed (the PUT rejects duplicates).
+      if (items.length !== stored.items.length) {
+        return;
+      }
+      items.push(referenceId);
+      let put: { status: number; body: unknown };
+      try {
+        put = await fetchJson(base, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ version: stored.version, items }),
+        });
+      } catch {
+        return;
+      }
+      if (put.status >= 200 && put.status < 300) {
+        return;
+      }
+      if (put.status !== 409) {
+        return;
+      }
+      // Version conflict: loop re-reads the stored context and retries CAS.
+    }
   }
 
   /** Citation drawer (§16.5): stored snapshot as escaped plain text only. */
@@ -752,6 +1118,10 @@ class ConversationApp {
     if (referenceId === null) {
       return;
     }
+    // Open = implicit selection update (§14.8 CAS): add the reference to the
+    // session reference context via a real conditional PUT before showing it.
+    // Conflict/loss is non-fatal — the drawer still opens.
+    await this.updateReferenceContextCas(referenceId);
     const detail = await fetchJson(
       `/api/sessions/${encodeURIComponent(this.sessionId)}/references/${encodeURIComponent(referenceId)}`,
     );
@@ -773,7 +1143,10 @@ class ConversationApp {
 
   /** Type-while-active with submit disabled (§16.3): no message queue. */
   private renderComposer(): void {
-    const busy = this.activeRunId !== null;
+    // Submit is disabled while a run is active AND while a send/post
+    // round-trip (including the context freeze) is in flight; the input
+    // itself stays enabled (§16.3 type-while-active).
+    const busy = this.activeRunId !== null || this.sending;
     this.sendButton.disabled = busy;
     this.input.disabled = false;
     this.stopButton.hidden = !busy;

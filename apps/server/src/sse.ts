@@ -122,6 +122,7 @@ export function createSseResponse(
   const encoder = new TextEncoder();
   let current = cursor;
   let closed = false;
+  let stepping = false;
   let pollTimer: ReturnType<typeof setInterval> | undefined;
   let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   // waiters woken by `pull` when the consumer drains the queue.
@@ -201,37 +202,44 @@ export function createSseResponse(
         }
       };
       const step = async (): Promise<void> => {
-        if (closed) {
+        if (closed || stepping) {
           return;
         }
-        let chunks: string[];
-        let done: boolean;
+        stepping = true;
         try {
-          const out = pollSseStep(source, sessionId, runId, current);
-          chunks = [...out.chunks];
-          current = out.cursor;
-          done = out.done;
-        } catch {
-          cleanup();
-          return;
-        }
-        for (const chunk of chunks) {
-          const ok = await writeWithGrace(chunk);
-          if (!ok || closed) {
+          let chunks: string[];
+          let done: boolean;
+          try {
+            const out = pollSseStep(source, sessionId, runId, current);
+            chunks = [...out.chunks];
+            current = out.cursor;
+            done = out.done;
+          } catch {
+            cleanup();
             return;
           }
-        }
-        if (done) {
-          cleanup();
+          for (const chunk of chunks) {
+            const ok = await writeWithGrace(chunk);
+            if (!ok || closed) {
+              return;
+            }
+          }
+          if (done) {
+            cleanup();
+          }
+        } finally {
+          stepping = false;
         }
       };
-      void step();
+      // Timers are armed before the first tick so an initially terminal
+      // run (first step closes the stream) never leaks an interval.
       pollTimer = setIntervalFn(() => {
         void step();
       }, SSE_POLL_MS);
       heartbeatTimer = setIntervalFn(() => {
         void writeWithGrace(SSE_HEARTBEAT_CHUNK);
       }, SSE_HEARTBEAT_MS);
+      void step();
     },
     cancel() {
       closed = true;
