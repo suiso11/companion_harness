@@ -138,22 +138,25 @@ async function storedCursorOf(
   page: Page,
   runId: string,
 ): Promise<{ raw: string | null; parsed: number | null }> {
-  return page.evaluate((id: string): { raw: string | null; parsed: number | null } => {
-    let raw: string | null = null;
-    try {
-      raw = localStorage.getItem(`ch.cursor.${id}`);
-    } catch {
-      return { raw: null, parsed: null };
-    }
-    if (raw === null || raw.length === 0 || !/^\d+$/.test(raw.trim())) {
-      return { raw, parsed: null };
-    }
-    const value = Number(raw.trim());
-    return {
-      raw,
-      parsed: Number.isSafeInteger(value) && value >= 0 ? value : null,
-    };
-  }, runId);
+  return page.evaluate(
+    (id: string): { raw: string | null; parsed: number | null } => {
+      let raw: string | null = null;
+      try {
+        raw = localStorage.getItem(`ch.cursor.${id}`);
+      } catch {
+        return { raw: null, parsed: null };
+      }
+      if (raw === null || raw.length === 0 || !/^\d+$/.test(raw.trim())) {
+        return { raw, parsed: null };
+      }
+      const value = Number(raw.trim());
+      return {
+        raw,
+        parsed: Number.isSafeInteger(value) && value >= 0 ? value : null,
+      };
+    },
+    runId,
+  );
 }
 
 test.beforeEach(async ({ request }) => {
@@ -434,9 +437,11 @@ test("seeded older history renders oldest-first without duplicates", async ({
       break;
     }
     await older.first().click();
-    await expect(page.locator("#conversation")).toContainText(first, {
-      timeout: 20_000,
-    }).catch(() => undefined as void);
+    await expect(page.locator("#conversation"))
+      .toContainText(first, {
+        timeout: 20_000,
+      })
+      .catch(() => undefined as void);
     if (
       ((await page.locator("#conversation").innerText()) ?? "").includes(first)
     ) {
