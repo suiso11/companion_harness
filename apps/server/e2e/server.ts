@@ -83,9 +83,18 @@ const logger = createStdServerLogger("error");
 // Shared control state (single process, no persistence).
 let failArmed = false;
 let releaseHangers: Array<() => void> = [];
+let pendingReleases = 0;
 function releaseAll(): void {
   const pending = releaseHangers;
   releaseHangers = [];
+  if (pending.length === 0) {
+    // Sticky release: a /release that lands before the TEXT_HANG strategy
+    // registers its hanger must not be lost, otherwise the next hang waits
+    // forever (malformed-cursor race). The next hang consumes one credit
+    // and resolves immediately.
+    pendingReleases += 1;
+    return;
+  }
   for (const release of pending) {
     try {
       release();
@@ -104,7 +113,13 @@ function inputText(ctx: RunStrategyContext): string {
 const registry = new StrategyRegistry();
 registry.register("m0-default", async (ctx: RunStrategyContext) => {
   const text = inputText(ctx);
-  if (text.includes(TEXT_HANG)) {
+    if (text.includes(TEXT_HANG)) {
+    // Consume a sticky early release so a /release that raced ahead of
+    // strategy registration still unblocks this hang deterministically.
+    if (pendingReleases > 0) {
+      pendingReleases -= 1;
+      return { version: 1, text: `echo:${text}` };
+    }
     // Hang until released or aborted (cooperative cancel).
     await new Promise<void>((resolve, reject) => {
       if (ctx.signal.aborted) {
@@ -427,6 +442,11 @@ const proxyState: ProxyState = {
 let dropFrameSeq: number | null = null;
 const activeSseDownstreams = new Set<ServerResponse>();
 
+function resetControlState(): void {
+  failArmed = false;
+  releaseHangers = [];
+  pendingReleases = 0;
+}
 function resetProxyState(): void {
   for (const key of Object.keys(proxyState) as Array<keyof ProxyState>) {
     if (key === "lastLastEventId" || key === "lastStreamRunId") {
@@ -619,8 +639,7 @@ const control = createServer(
       return;
     }
     if (req.method === "POST" && url.pathname === "/reset") {
-      failArmed = false;
-      releaseAll();
+      resetControlState();
       json(200, { reset: true });
       return;
     }

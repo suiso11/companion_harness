@@ -896,6 +896,11 @@ class ConversationApp {
             return;
           }
           if (second.outcome.kind === "ignored-duplicate") {
+            // The triggering SSE frame was already applied via the JSON
+            // gap page (e.g. dropped seq bridged by catch-up): the terminal
+            // view is converged but never rendered on the catch-up path,
+            // so render it here (exactly-once guarded).
+            this.renderRunView(runId);
             return;
           }
           if (second.outcome.kind === "ignored-unknown") {

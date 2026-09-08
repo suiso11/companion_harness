@@ -420,6 +420,35 @@ describe("M3 client reducer contract", () => {
     expect(second.state.visible).toBe("answered");
   });
 
+  it("catch-up-applied terminal re-seen as duplicate stays answered", () => {
+    // Regression for the dropped-frame E2E: the JSON gap page already
+    // applied the terminal event, so the re-driven SSE frame is a duplicate
+    // — the converged answered view must be rendered, never dropped.
+    const s1 = applyRunEvent(INITIAL_RUN_VIEW, {
+      seq: 1,
+      type: "run.started",
+      payload: {},
+    }).state;
+    const filled = applyRunEvent(s1, {
+      seq: 2,
+      type: "model.step.started",
+      payload: {},
+    }).state;
+    const terminal = applyRunEvent(filled, {
+      seq: 3,
+      type: "run.completed",
+      payload: { result: { version: 1, text: "echo:ping" } },
+    }).state;
+    expect(terminal.visible).toBe("answered");
+    const reseen = applyRunEvent(terminal, {
+      seq: 3,
+      type: "run.completed",
+      payload: { result: { version: 1, text: "echo:ping" } },
+    });
+    expect(reseen.outcome.kind).toBe("ignored-duplicate");
+    expect(reseen.state.visible).toBe("answered");
+  });
+
   it("cancel_requested is non-terminal: stays active until run.cancelled", () => {
     // Regression for HEAD fix (§11.5/§16.2/§16.6 exact): cancel_requested
     // already shows「停止しました」but must NOT release the run — the view

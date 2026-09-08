@@ -337,7 +337,10 @@ for (const variant of ["ahead", "malformed"] as const) {
       }
       await route.fulfill({ response: real });
     });
+    const runWait = waitForMessagesRun(page);
     await send(page, TEXT_HANG);
+    const { runId } = await runWait;
+    const hangSessionId = await sessionIdOf(page);
     // Wait for the client to validate against the authoritative run status
     // (ahead) before releasing the hang: releasing first would mask resync.
     if (variant === "ahead") {
@@ -347,6 +350,24 @@ for (const variant of ["ahead", "malformed"] as const) {
       await expect
         .poll(() => Promise.resolve(seenHistory.length), { timeout: 15_000 })
         .toBeGreaterThan(0);
+    } else {
+      // Malformed cursors normalize to null (no status resync expected), so
+      // wait for the REAL strategy to be running server-side before
+      // releasing: an early /release would otherwise land before the hanger
+      // registers and the run would hang forever.
+      await expect
+        .poll(
+          async () =>
+            (
+              await runStatus(
+                request,
+                E2E_APP_ORIGIN,
+                hangSessionId,
+                runId,
+              )
+            ).status,
+          { timeout: 15_000 },
+        ).toMatch(/^(queued|running|cancel_requested)$/);
     }
     await control(request, "/release");
     await expect(page.locator("#conversation")).toContainText(
