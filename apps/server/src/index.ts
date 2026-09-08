@@ -19,6 +19,7 @@ export {
   AGENT_STRATEGY_NAME,
   createModelGateway,
   SHUTDOWN_DRAIN_MS,
+  loadUiAssets,
   sanitizeShutdownReason,
   sanitizeStartupErrorStatus,
   startServer,
@@ -51,6 +52,15 @@ export {
   sanitizeLogStatus,
 } from "./logger.js";
 export type { StoreSize } from "./maintenance.js";
+export { STRICT_CSP } from "./ui/page.js";
+export {
+  createSseResponse,
+  formatRunEventSse,
+  pollSseStep,
+  SSE_BACKPRESSURE_GRACE_MS,
+  SSE_HEARTBEAT_MS,
+  SSE_POLL_MS,
+} from "./sse.js";
 export {
   measureStoreSize,
   STORE_SIZE_WARN_BYTES,

@@ -6,8 +6,11 @@
   "main": "./src/index.ts",
   "scripts": {
     "start": "tsx src/index.ts",
+    "prestart": "node scripts/build-ui.mjs",
     "dev": "tsx watch src/index.ts",
+    "predev": "node scripts/build-ui.mjs",
     "backup": "tsx src/cli.ts backup",
+    "build:ui": "node scripts/build-ui.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "biome check src"
@@ -25,6 +28,7 @@
     "@types/better-sqlite3": "9.6.0",
     "@types/node": "24.12.4",
     "better-sqlite3": "13.0.3",
+    "esbuild": "0.28.2",
     "tsx": "4.20.6",
     "typescript": "5.9.3",
     "vitest": "3.2.4"
