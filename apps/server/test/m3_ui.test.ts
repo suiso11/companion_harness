@@ -5,9 +5,10 @@
 // reducer contract (dup/gap/unknown/failure-only retry/contextual stop).
 
 import { randomUUID } from "node:crypto";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { PostMessageResponseSchema } from "@companion/contracts";
 import {
   closeKernelDatabase,
@@ -419,5 +420,89 @@ describe("M3 client reducer contract", () => {
     expect(second.outcome.kind).toBe("applied");
     expect(second.state.cursor).toBe(3);
     expect(second.state.visible).toBe("answered");
+  });
+
+  it("cancel_requested is non-terminal: stays active until run.cancelled", () => {
+    // Regression for HEAD fix (§11.5/§16.2/§16.6 exact): cancel_requested
+    // already shows「停止しました」but must NOT release the run — the view
+    // stays generating with stop offered; only run.cancelled is terminal.
+    const s1 = applyRunEvent(INITIAL_RUN_VIEW, {
+      seq: 1,
+      type: "run.started",
+      payload: {},
+    }).state;
+    const requested = applyRunEvent(s1, {
+      seq: 2,
+      type: "run.cancel_requested",
+      payload: {},
+    });
+    expect(requested.outcome.kind).toBe("applied");
+    expect(requested.state.cursor).toBe(2);
+    expect(requested.state.visible).toBe("generating");
+    expect(requested.state.notice).toBe("停止しました");
+    expect(requested.state.stopVisible).toBe(true);
+    expect(requested.state.retryVisible).toBe(false);
+    // Fallback poll continuation invariant: stopVisible true means the run
+    // is still active, so the JSON status poll must keep polling (the
+    // terminal check is `!stopVisible`, never the notice text).
+    expect(requested.state.stopVisible).toBe(true);
+    const terminal = applyRunEvent(requested.state, {
+      seq: 3,
+      type: "run.cancelled",
+      payload: {},
+    });
+    expect(terminal.outcome.kind).toBe("applied");
+    expect(terminal.state.visible).toBe("stopped");
+    expect(terminal.state.notice).toBe("停止しました");
+    expect(terminal.state.stopVisible).toBe(false);
+    expect(terminal.state.retryVisible).toBe(false);
+  });
+
+  it("SSR shell exposes the composer live-region for cancel notices", async () => {
+    // Regression for HEAD page.ts fix: the client renders cancel notices
+    // into #composer-notice (aria-live polite); without that node the
+    //「停止しました」/「停止できませんでした」notice has no target.
+    const f = await makeApp();
+    try {
+      const res = await f.app.request("/", { headers: headers() });
+      expect(res.status).toBe(200);
+      const html = await res.text();
+      expect(html).toContain('id="composer-notice"');
+      expect(html).toContain("aria-live");
+    } finally {
+      f.close();
+    }
+  });
+});
+
+describe("M3 client frozen-request + unbounded fallback source contract", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const source = readFileSync(join(here, "..", "src", "ui", "client.ts"), "utf8");
+
+  it("freezes key+body once: resend reuses pendingRequest without refetch", () => {
+    // Regression for HEAD frozen-resend fix (§16.7/§9 exact): the reference
+    // context is fetched once into the frozen pendingRequest; resend() must
+    // reuse it as-is so the replay body hash stays stable.
+    expect(source).toContain("private pendingRequest");
+    expect(source).toContain("fetchUiContext");
+    const resendStart = source.indexOf("async resend()");
+    expect(resendStart).toBeGreaterThan(-1);
+    const resendBody = source.slice(resendStart, resendStart + 800);
+    expect(resendBody).toContain("pendingRequest");
+    expect(resendBody).not.toContain("fetchUiContext");
+  });
+
+  it("fallback poll is unbounded: no tick cap, disposes on new run, absorbs transient errors", () => {
+    // Regression for HEAD unbounded-fallback fix (§16.7): the poll runs
+    // until terminal or disposal, never a fixed 60-tick cutoff, and never
+    // cancels the run on stream loss.
+    expect(source).not.toContain("tick < 60");
+    expect(source).toContain("POLL_MAX_ERROR_STREAK");
+    expect(source).toContain("POLL_INTERVAL_MS");
+    const pollStart = source.indexOf("private async pollFallback");
+    expect(pollStart).toBeGreaterThan(-1);
+    const pollBody = source.slice(pollStart, pollStart + 2500);
+    expect(pollBody).toContain("activeRunId !== runId");
+    expect(pollBody).toContain("stopVisible");
   });
 });
