@@ -27,7 +27,7 @@ import {
   pollSseStep,
   SSE_HEARTBEAT_CHUNK,
 } from "../src/sse.js";
-import { shellHasNoInlineScript, STRICT_CSP } from "../src/ui/page.js";
+import { STRICT_CSP, shellHasNoInlineScript } from "../src/ui/page.js";
 import {
   applyRunEvent,
   effectiveCursor,
@@ -368,18 +368,15 @@ describe("M3 client reducer contract", () => {
         key: randomUUID(),
         now: 1790000000000,
       }).body.sessionId;
-      const res = await f.app.request(
-        `/api/sessions/${sessionId}/messages`,
-        {
-          method: "POST",
-          headers: {
-            ...headers(),
-            "content-type": "application/json",
-            "idempotency-key": randomUUID(),
-          },
-          body: JSON.stringify({ text: "hello" }),
+      const res = await f.app.request(`/api/sessions/${sessionId}/messages`, {
+        method: "POST",
+        headers: {
+          ...headers(),
+          "content-type": "application/json",
+          "idempotency-key": randomUUID(),
         },
-      );
+        body: JSON.stringify({ text: "hello" }),
+      });
       expect(res.status).toBe(202);
       const body = (await res.json()) as Record<string, unknown>;
       const parsed = PostMessageResponseSchema.safeParse(body);
@@ -477,7 +474,10 @@ describe("M3 client reducer contract", () => {
 
 describe("M3 client frozen-request + unbounded fallback source contract", () => {
   const here = dirname(fileURLToPath(import.meta.url));
-  const source = readFileSync(join(here, "..", "src", "ui", "client.ts"), "utf8");
+  const source = readFileSync(
+    join(here, "..", "src", "ui", "client.ts"),
+    "utf8",
+  );
 
   it("freezes key+body once: resend reuses pendingRequest without refetch", () => {
     // Regression for HEAD frozen-resend fix (§16.7/§9 exact): the reference

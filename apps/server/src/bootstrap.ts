@@ -183,11 +183,13 @@ export function sanitizeShutdownReason(reason: string): string {
  * only mean the asset routes serve 404, never a startup failure. Never logs
  * paths or file contents — only the loaded count.
  */
-export function loadUiAssets(
-  fromDir?: string,
-): { clientJs?: string; clientCss?: string } {
+export function loadUiAssets(fromDir?: string): {
+  clientJs?: string;
+  clientCss?: string;
+} {
   const dir =
-    fromDir ?? join(dirname(fileURLToPath(import.meta.url)), "..", "dist", "assets");
+    fromDir ??
+    join(dirname(fileURLToPath(import.meta.url)), "..", "dist", "assets");
   const assets: { clientJs?: string; clientCss?: string } = {};
   try {
     assets.clientJs = readFileSync(join(dir, "client.js"), "utf-8");

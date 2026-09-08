@@ -80,7 +80,11 @@ export function pollSseStep(
   sessionId: string,
   runId: string,
   cursor: number,
-): { readonly chunks: string[]; readonly cursor: number; readonly done: boolean } {
+): {
+  readonly chunks: string[];
+  readonly cursor: number;
+  readonly done: boolean;
+} {
   const page = source.getEvents(sessionId, runId, {
     after: cursor,
     limit: SSE_PAGE_LIMIT,

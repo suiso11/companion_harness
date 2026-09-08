@@ -9,11 +9,7 @@
 //   (never before); persistence is the caller's job via `persistCursor`.
 
 /** User-visible Run state (plan §16.2 fixed mapping, no tech vocabulary). */
-export type VisibleRunStatus =
-  | "generating"
-  | "answered"
-  | "failed"
-  | "stopped";
+export type VisibleRunStatus = "generating" | "answered" | "failed" | "stopped";
 
 export interface AnswerPartView {
   readonly text: string;
@@ -77,7 +73,11 @@ export function runResultToAnswerParts(result: unknown): AnswerPartView[] {
   if (typeof result !== "object" || result === null) {
     return [];
   }
-  const record = result as { version?: unknown; text?: unknown; answer?: unknown };
+  const record = result as {
+    version?: unknown;
+    text?: unknown;
+    answer?: unknown;
+  };
   if (record.version === 2) {
     const answer = record.answer as { parts?: unknown } | undefined;
     const parts = answer?.parts;
@@ -223,7 +223,10 @@ export function applyRunEvent(
         return { state: { ...state, cursor }, outcome: { kind: "applied" } };
       }
       // Unknown future non-final extension: advance the cursor only (§16.4).
-      return { state: { ...state, cursor }, outcome: { kind: "ignored-unknown" } };
+      return {
+        state: { ...state, cursor },
+        outcome: { kind: "ignored-unknown" },
+      };
   }
 }
 

@@ -30,9 +30,10 @@ const cursorKey = (runId: string): string => `ch.cursor.${runId}`;
 interface HistoryItemView {
   readonly turnId: string;
   readonly text: string;
-  readonly selectedRun:
-    | { readonly runId: string; readonly result: unknown }
-    | null;
+  readonly selectedRun: {
+    readonly runId: string;
+    readonly result: unknown;
+  } | null;
 }
 
 function el(tag: string, text?: string): HTMLElement {
@@ -139,8 +140,7 @@ class ConversationApp {
 
   constructor() {
     this.list = document.getElementById("conversation") ?? el("main");
-    this.notice =
-      document.getElementById("composer-notice") ?? el("p");
+    this.notice = document.getElementById("composer-notice") ?? el("p");
     this.form =
       (document.getElementById("composer") as HTMLFormElement | null) ??
       document.createElement("form");
@@ -622,8 +622,7 @@ class ConversationApp {
         this.runViews.set(runId, applied.state);
         storeCursor(runId, applied.state.cursor);
       }
-      cursor =
-        typeof body.nextAfter === "number" ? body.nextAfter : cursor + 1;
+      cursor = typeof body.nextAfter === "number" ? body.nextAfter : cursor + 1;
       if (body.events.length === 0) {
         return;
       }
