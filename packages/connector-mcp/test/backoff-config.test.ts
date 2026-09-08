@@ -87,6 +87,7 @@ describe("fixed error codes (§17.8)", () => {
       "mcp_unavailable",
       "mcp_binding_not_allowed",
       "mcp_schema_mismatch",
+      "mcp_env_not_allowed",
       "calendar_response_invalid",
       "calendar_upstream_error",
       "calendar_range_invalid",

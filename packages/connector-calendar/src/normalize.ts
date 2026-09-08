@@ -168,9 +168,7 @@ export async function normalizeEvent(
       ? parsed.description.slice(0, 8192)
       : undefined;
   const location =
-    parsed.location !== undefined
-      ? parsed.location.slice(0, 1024)
-      : undefined;
+    parsed.location !== undefined ? parsed.location.slice(0, 1024) : undefined;
   const snapshotForHash = {
     title,
     description: description ?? "",

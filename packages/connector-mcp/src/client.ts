@@ -7,9 +7,9 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { nextBackoffMs } from "./backoff.js";
 import {
+  canonicalSchemaHash,
   type McpConnectorConfig,
   STDERR_CAP_BYTES,
-  canonicalSchemaHash,
 } from "./config.js";
 import type { McpErrorCode } from "./errors.js";
 
@@ -17,15 +17,47 @@ import type { McpErrorCode } from "./errors.js";
 export type TransportFactory = (config: McpConnectorConfig) => Transport;
 
 /**
- * Known SDK 1.30.0 gap (§17.7, truthful): StdioClientTransport merges
- * `getDefaultEnvironment()` (DEFAULT_INHERITED_ENV_VARS) UNDER the explicit
- * `env` param. An exact explicit allowlist is NOT enforceable via this SDK
- * version — inherited defaults (PATH etc.) always reach the child. We pass
- * only allowlisted names explicitly and surface the inherited set here so
- * callers cannot falsely claim exact-env compliance.
+ * Known SDK 1.30.0 behavior (§17.7, verified against official source
+ * `dist/esm/client/stdio.js` via unpkg immutable version URL, no install):
+ * StdioClientTransport merges `getDefaultEnvironment()`
+ * (over `DEFAULT_INHERITED_ENV_VARS`) UNDER the explicit `env` param, and
+ * hardcodes `shell:false`. Fail-closed: EVERY effectively inherited default
+ * name must be explicitly present in the config `envAllowlist`, otherwise
+ * stdio config/call is rejected with `mcp_env_not_allowed` BEFORE spawn.
+ * Verified default sets (SDK 1.30.0):
+ * - win32: APPDATA, HOMEDRIVE, HOMEPATH, LOCALAPPDATA, PATH,
+ *   PROCESSOR_ARCHITECTURE, SYSTEMDRIVE, SYSTEMROOT, TEMP, USERNAME,
+ *   USERPROFILE, PROGRAMFILES
+ * - posix: HOME, LOGNAME, PATH, SHELL, TERM, USER
+ * The required set below is the live `DEFAULT_INHERITED_ENV_VARS` import
+ * (runtime-platform names), so the check tracks the actual SDK defaults.
+ * No env values are logged — only the fixed code and missing count/names.
  */
 export const STDIO_IMPLICIT_ENV_VARS: readonly string[] =
   DEFAULT_INHERITED_ENV_VARS;
+
+/**
+ * Names from the SDK stdio defaults that are NOT explicitly allowlisted.
+ * Empty means the stdio config is fail-closed compliant. Pure (no I/O).
+ */
+export function missingStdioEnvNames(
+  config: McpConnectorConfig,
+): readonly string[] {
+  const t = config.transport;
+  if (t.kind !== "stdio") return [];
+  const allowed = new Set(t.envAllowlist);
+  return DEFAULT_INHERITED_ENV_VARS.filter((name) => !allowed.has(name));
+}
+
+/** Fail-closed guard: throws a fixed-code error before any process spawn. */
+export function assertStdioEnvClosed(config: McpConnectorConfig): void {
+  const missing = missingStdioEnvNames(config);
+  if (missing.length > 0) {
+    throw new Error(
+      `mcp_env_not_allowed: stdio envAllowlist misses ${missing.length} required inherited name(s): ${missing.join(",")}`,
+    );
+  }
+}
 
 /** Loopback hosts permitted for Streamable HTTP (§17.7, exact). */
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
@@ -205,6 +237,12 @@ export class McpConnector {
     { ok: true } | { ok: false; code: McpErrorCode }
   > {
     if (this.connected && this.client !== undefined) return { ok: true };
+    // Fail-closed stdio env: reject BEFORE any transport creation/spawn.
+    if (this.config.transport.kind === "stdio") {
+      if (missingStdioEnvNames(this.config).length > 0) {
+        return { ok: false, code: "mcp_env_not_allowed" as const };
+      }
+    }
     if (this.consecutiveFailures > 0) {
       await sleep(nextBackoffMs(this.consecutiveFailures));
     }
@@ -297,7 +335,7 @@ export class McpConnector {
         const bytes =
           typeof chunk === "string"
             ? Buffer.byteLength(chunk)
-            : (chunk as { length?: number })?.length ?? 0;
+            : ((chunk as { length?: number })?.length ?? 0);
         this.noteStderr(bytes);
       });
     }
@@ -333,7 +371,8 @@ function sleep(ms: number): Promise<void> {
 
 /**
  * Production transport factory: real SDK transports only.
- * - stdio: shell=false (SDK hardcodes false; verified 1.30.0 source),
+ * - stdio: fail-closed env (assertStdioEnvClosed BEFORE spawn; no silent
+ *   broader env), shell=false (SDK hardcodes false; verified 1.30.0 source),
  *   config-only command (no interpolation), explicit env allowlist NOTE:
  *   SDK merges getDefaultEnvironment() underneath, so exact-allowlist is a
  *   known gap (see STDIO_IMPLICIT_ENV_VARS); stderr piped with 64KiB cap
@@ -347,6 +386,8 @@ function sleep(ms: number): Promise<void> {
 export function defaultTransportFactory(config: McpConnectorConfig): Transport {
   const t = config.transport;
   if (t.kind === "stdio") {
+    // Fail-closed: reject BEFORE StdioClientTransport construction/spawn.
+    assertStdioEnvClosed(config);
     const env: Record<string, string> = {};
     for (const name of t.envAllowlist) {
       const v = process.env[name];

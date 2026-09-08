@@ -180,3 +180,33 @@ against — (a) an alternative existing upstream with read-only auth +
 pagination + authoritative get, or (b) an explicitly approved scoped
 patch/fork? Without that selection, no SDK pin and no compatibility claim
 can be made. No broad OAuth grant and no fork is approved by this record.
+
+## Fail-closed stdio env (2026-09-09, verify-m4-ci-and-close-env-gap)
+
+- SDK 1.30.0 source verified via
+  `https://unpkg.com/@modelcontextprotocol/sdk@1.30.0/dist/esm/client/stdio.js`
+  (HTTP 200, no install): `DEFAULT_INHERITED_ENV_VARS` is win32
+  `[APPDATA,HOMEDRIVE,HOMEPATH,LOCALAPPDATA,PATH,PROCESSOR_ARCHITECTURE,
+  SYSTEMDRIVE,SYSTEMROOT,TEMP,USERNAME,USERPROFILE,PROGRAMFILES]` and posix
+  `[HOME,LOGNAME,PATH,SHELL,TERM,USER]`; `getDefaultEnvironment()` filters
+  `process.env` to those names and `StdioClientTransport.start()` merges it
+  UNDER explicit `env` with `shell:false`.
+- Connector is now fail-closed: the required set is the live
+  `DEFAULT_INHERITED_ENV_VARS` import (runtime-platform names, no invented
+  API); `missingStdioEnvNames`/`assertStdioEnvClosed` require EVERY
+  effectively inherited name explicitly in config `envAllowlist`, else
+  `defaultTransportFactory` throws and `ensureConnected`/`callTool` return
+  fixed `mcp_env_not_allowed` BEFORE any transport creation/spawn. No env
+  values logged (fixed code + missing count/names only).
+- Regression: `packages/connector-mcp/test/stdio-env-failclosed.test.ts`
+  (counting fake factory proves zero factory calls on rejection; full
+  allowlist passes the guard). Existing connected tests now use the explicit
+  full-default allowlist.
+- CI: prior run 34247502570 (b67f0ee) failed at Lint (Biome format +
+  organizeImports); fixed via real `biome check --write` on
+  `packages/connector-mcp|calendar`. Full `biome check .` exits 0 locally
+  (one pre-existing biome.json deprecation info only). tsc/vitest local run
+  still blocked (pruned node_modules, no installs); CI fresh-env run
+  re-verifies. M4 NOT complete: no upstream Calendar binding selected, no
+  live compatibility claim.
+

@@ -12,6 +12,7 @@ import { z } from "zod";
 import {
   assertLoopbackHttp,
   McpConnector,
+  STDIO_IMPLICIT_ENV_VARS,
 } from "../src/client.js";
 import { canonicalSchemaHash } from "../src/config.js";
 
@@ -25,7 +26,9 @@ afterEach(async () => {
 
 const HASH = "b".repeat(64);
 
-function baseConfig(bindings: Array<{ upstreamTool: string; canonicalSchemaHash: string }>) {
+function baseConfig(
+  bindings: Array<{ upstreamTool: string; canonicalSchemaHash: string }>,
+) {
   return {
     connectorInstanceId: "cal-1",
     serverId: "fake",
@@ -35,7 +38,7 @@ function baseConfig(bindings: Array<{ upstreamTool: string; canonicalSchemaHash:
       kind: "stdio" as const,
       command: "unused-injected",
       args: [] as string[],
-      envAllowlist: [] as string[],
+      envAllowlist: [...STDIO_IMPLICIT_ENV_VARS] as string[],
     },
     bindings,
   };
@@ -64,12 +67,14 @@ async function linkedServer(opts: { isErrorTool?: boolean } = {}) {
       };
     },
   );
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const [clientTransport, serverTransport] =
+    InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
   closables.push(() => server.close());
   return {
     calls: () => calls,
-    factory: (_config: unknown): Transport => clientTransport as unknown as Transport,
+    factory: (_config: unknown): Transport =>
+      clientTransport as unknown as Transport,
   };
 }
 
@@ -90,8 +95,13 @@ describe("McpConnector connected identity (in-memory SDK transport)", () => {
     );
     const [ct2, st2] = InMemoryTransport.createLinkedPair();
     await server2.connect(st2);
-    const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
-    const probe = new Client({ name: "probe", version: "0.0.0" }, { capabilities: {} });
+    const { Client } = await import(
+      "@modelcontextprotocol/sdk/client/index.js"
+    );
+    const probe = new Client(
+      { name: "probe", version: "0.0.0" },
+      { capabilities: {} },
+    );
     await probe.connect(ct2);
     const listed = await probe.listTools();
     const tool = listed.tools.find((t) => t.name === "search-events");
@@ -101,7 +111,9 @@ describe("McpConnector connected identity (in-memory SDK transport)", () => {
     await server2.close().catch(() => undefined);
 
     const connector = new McpConnector(
-      baseConfig([{ upstreamTool: "search-events", canonicalSchemaHash: realHash }]),
+      baseConfig([
+        { upstreamTool: "search-events", canonicalSchemaHash: realHash },
+      ]),
       factory as never,
     );
     closables.push(() => connector.shutdown());
@@ -117,7 +129,9 @@ describe("McpConnector connected identity (in-memory SDK transport)", () => {
   it("schema drift denies dispatch with mcp_schema_mismatch and no upstream call", async () => {
     const { factory, calls } = await linkedServer();
     const connector = new McpConnector(
-      baseConfig([{ upstreamTool: "search-events", canonicalSchemaHash: "0".repeat(64) }]),
+      baseConfig([
+        { upstreamTool: "search-events", canonicalSchemaHash: "0".repeat(64) },
+      ]),
       factory as never,
     );
     closables.push(() => connector.shutdown());
@@ -134,13 +148,21 @@ describe("McpConnector connected identity (in-memory SDK transport)", () => {
     const serverProbe = new McpServer({ name: "fake2", version: "0.0.0" });
     serverProbe.registerTool(
       "search-events",
-      { description: "x", inputSchema: { q: z.string(), maxResults: z.number().optional() } },
+      {
+        description: "x",
+        inputSchema: { q: z.string(), maxResults: z.number().optional() },
+      },
       async () => ({ content: [{ type: "text" as const, text: "x" }] }),
     );
     const [ct, st] = InMemoryTransport.createLinkedPair();
     await serverProbe.connect(st);
-    const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
-    const probe = new Client({ name: "probe", version: "0.0.0" }, { capabilities: {} });
+    const { Client } = await import(
+      "@modelcontextprotocol/sdk/client/index.js"
+    );
+    const probe = new Client(
+      { name: "probe", version: "0.0.0" },
+      { capabilities: {} },
+    );
     await probe.connect(ct);
     const listed = await probe.listTools();
     const realHash = await canonicalSchemaHash(
@@ -150,7 +172,9 @@ describe("McpConnector connected identity (in-memory SDK transport)", () => {
     await serverProbe.close().catch(() => undefined);
 
     const connector = new McpConnector(
-      baseConfig([{ upstreamTool: "search-events", canonicalSchemaHash: realHash }]),
+      baseConfig([
+        { upstreamTool: "search-events", canonicalSchemaHash: realHash },
+      ]),
       factory as never,
     );
     closables.push(() => connector.shutdown());
@@ -160,8 +184,12 @@ describe("McpConnector connected identity (in-memory SDK transport)", () => {
   });
 
   it("rejects non-loopback hosts at the runtime boundary", () => {
-    expect(() => assertLoopbackHttp(new URL("http://example.com/mcp"))).toThrow();
-    expect(() => assertLoopbackHttp(new URL("http://127.0.0.1:8377/mcp"))).not.toThrow();
+    expect(() =>
+      assertLoopbackHttp(new URL("http://example.com/mcp")),
+    ).toThrow();
+    expect(() =>
+      assertLoopbackHttp(new URL("http://127.0.0.1:8377/mcp")),
+    ).not.toThrow();
   });
 
   it("failed connect cleans up and reports mcp_unavailable", async () => {
@@ -169,7 +197,9 @@ describe("McpConnector connected identity (in-memory SDK transport)", () => {
       throw new Error("spawn ENOENT");
     };
     const connector = new McpConnector(
-      baseConfig([{ upstreamTool: "search-events", canonicalSchemaHash: HASH }]),
+      baseConfig([
+        { upstreamTool: "search-events", canonicalSchemaHash: HASH },
+      ]),
       failingFactory,
     );
     const res = await connector.ensureConnected();

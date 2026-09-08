@@ -1,11 +1,13 @@
 export { nextBackoffMs } from "./backoff.js";
 export {
+  assertLoopbackHttp,
+  assertStdioEnvClosed,
   type CallResult,
   type ConnectorStats,
   defaultTransportFactory,
   loopbackNoRedirectFetch,
-  assertLoopbackHttp,
   McpConnector,
+  missingStdioEnvNames,
   STDIO_IMPLICIT_ENV_VARS,
   type TransportFactory,
 } from "./client.js";

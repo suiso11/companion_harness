@@ -139,7 +139,11 @@ describe("event time validation + normalized-snapshot hash (§17.4)", () => {
     };
     await expect(
       normalizeEvent(
-        { ...base, start: "2026-09-10T10:00:00+09:00", end: "2026-09-10T09:00:00+09:00" },
+        {
+          ...base,
+          start: "2026-09-10T10:00:00+09:00",
+          end: "2026-09-10T09:00:00+09:00",
+        },
         { connectorInstanceId: "cal-1", nowIso: "2026-09-08T00:00:00Z" },
       ),
     ).rejects.toThrow();

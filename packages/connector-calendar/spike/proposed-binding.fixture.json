@@ -30,6 +30,11 @@
     "end": "2026-09-17T00:00:00+09:00",
     "limit": 10,
     "cursor": "opaque-page-2",
-    "mapsTo": { "timeMin": "start", "timeMax": "end", "maxResults": "limit", "pageToken": "cursor (single calendar only)" }
+    "mapsTo": {
+      "timeMin": "start",
+      "timeMax": "end",
+      "maxResults": "limit",
+      "pageToken": "cursor (single calendar only)"
+    }
   }
 }
