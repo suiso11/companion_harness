@@ -112,6 +112,8 @@ class ConversationApp {
   private pendingBody: { text: string } | null = null;
   private runChain: Promise<void> = Promise.resolve();
   private runViews = new Map<string, RunViewState>();
+  /** Run -> Turn ownership for failure-only retry (§16.6 exact). */
+  private readonly runTurns = new Map<string, string>();
   private sse: EventSource | null = null;
   private fallbackTimer: number | null = null;
 
@@ -217,14 +219,23 @@ class ConversationApp {
     );
     const body = lookup.body as {
       found?: unknown;
-      body?: { turnId?: unknown; runId?: unknown };
+      body?: { turnId?: unknown; run?: { id?: unknown } };
     };
     if (lookup.status === 200 && body.found === true) {
       this.clearPendingKey();
       await this.hydrateHistory();
+      // Exact contracts `PostMessageResponse`: `{ turnId, run: { id } }`.
+      const storedRun = body.body?.run;
       const runId =
-        typeof body.body?.runId === "string" ? body.body.runId : null;
-      if (runId !== null) {
+        typeof storedRun === "object" && storedRun !== null
+          ? (storedRun as { id?: unknown }).id
+          : null;
+      const turnId =
+        typeof body.body?.turnId === "string" ? body.body.turnId : null;
+      if (typeof runId === "string") {
+        if (turnId !== null) {
+          this.runTurns.set(runId, turnId);
+        }
         this.subscribe(runId);
       }
       return;
@@ -326,14 +337,26 @@ class ConversationApp {
       { text, uiContext },
       key,
     );
-    const body = posted.body as { turnId?: unknown; runId?: unknown };
-    if (posted.status === 202 && typeof body.runId === "string") {
+    // Exact contracts `PostMessageResponse`: `{ turnId, run: { id } }`.
+    const body = posted.body as {
+      turnId?: unknown;
+      run?: { id?: unknown };
+    };
+    const run = body.run;
+    const runId =
+      typeof run === "object" && run !== null
+        ? (run as { id?: unknown }).id
+        : null;
+    if (
+      posted.status === 202 &&
+      typeof body.turnId === "string" &&
+      typeof runId === "string"
+    ) {
       this.clearPendingKey();
       this.pendingBody = null;
-      this.activeTurnId =
-        typeof body.turnId === "string" ? body.turnId : null;
-      void this.activeTurnId;
-      this.subscribe(body.runId);
+      this.activeTurnId = body.turnId;
+      this.runTurns.set(runId, body.turnId);
+      this.subscribe(runId);
       return;
     }
     if (posted.status === 409) {
@@ -381,9 +404,21 @@ class ConversationApp {
       {},
       key,
     );
-    const body = posted.body as { runId?: unknown };
-    if (posted.status === 202 && typeof body.runId === "string") {
-      this.subscribe(body.runId);
+    // Exact contracts `PostRetryResponse` (= `PostMessageResponse`):
+    // `{ turnId, run: { id } }`.
+    const body = posted.body as {
+      turnId?: unknown;
+      run?: { id?: unknown };
+    };
+    const run = body.run;
+    const runId =
+      typeof run === "object" && run !== null
+        ? (run as { id?: unknown }).id
+        : null;
+    if (posted.status === 202 && typeof runId === "string") {
+      this.activeTurnId = turnId;
+      this.runTurns.set(runId, turnId);
+      this.subscribe(runId);
       return;
     }
     this.showNotice("再試行できませんでした");
@@ -403,7 +438,7 @@ class ConversationApp {
     const sessionId = this.sessionId;
     const stored = readStoredCursor(runId);
     const query = stored !== null && stored > 0 ? `?after=${stored}` : "";
-    let url = `/api/sessions/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(runId)}/events/stream${query}`;
+    const url = `/api/sessions/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(runId)}/events/stream${query}`;
     let opened = false;
     try {
       this.sse = new EventSource(url);
@@ -419,7 +454,6 @@ class ConversationApp {
     this.fallbackTimer = window.setTimeout(() => {
       if (!opened) {
         this.closeStream();
-        url = url;
         void this.pollFallback(runId, readStoredCursor(runId) ?? 0);
       }
     }, 5000);
@@ -469,8 +503,8 @@ class ConversationApp {
       const applied = applyRunEvent(current, event);
       if (applied.outcome.kind === "needs-catchup") {
         await this.catchUp(runId, current.cursor);
-        const retry = this.runViews.get(runId) ?? INITIAL_RUN_VIEW;
-        const second = applyRunEvent(retry, event);
+        const resynced = this.runViews.get(runId) ?? INITIAL_RUN_VIEW;
+        const second = applyRunEvent(resynced, event);
         if (second.outcome.kind === "needs-catchup") {
           // The stored cursor never converges with the server stream (e.g.
           // corrupted beyond `event_seq`, §16.7): stop reconnecting and
@@ -478,10 +512,10 @@ class ConversationApp {
           await this.resyncFromHistory(runId);
           return;
         }
+        // Catch-up converged: the re-applied event is applied (or safely
+        // ignored as duplicate/unknown), so persist the cursor after apply.
         this.runViews.set(runId, second.state);
-        if (second.outcome.kind !== "needs-catchup") {
-          storeCursor(runId, second.state.cursor);
-        }
+        storeCursor(runId, second.state.cursor);
         this.renderRunView(runId);
         return;
       }
@@ -574,7 +608,17 @@ class ConversationApp {
     }
     if (view.visible === "failed") {
       this.showNotice("生成に失敗しました");
+      // Failure-only retry (§16.6 exact): offer one retry for the same Turn
+      // (a fresh Run). Capture the Turn before finishActiveRun clears it.
+      const turnId = this.runTurns.get(runId) ?? this.activeTurnId;
       this.finishActiveRun();
+      if (view.retryVisible && turnId !== null) {
+        const retryButton = el("button", "もう一度送る");
+        retryButton.addEventListener("click", () => {
+          void this.retry(turnId);
+        });
+        this.list.appendChild(retryButton);
+      }
       void this.hydrateHistory();
       return;
     }

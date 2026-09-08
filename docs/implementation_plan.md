@@ -1166,7 +1166,7 @@ ModelGateway はプロバイダ応答を正規化し、1 モデルステップ�
 
 ## 16. M3 Conversation UI + SSE Plan（合意）
 
-> ラベル: **合意（agreed）**。M3（Conversation UI + SSE）の実装計画として合意した内容を記録する。合意事項（可視コントロール・SSE/履歴/Retry/Stop の exact 契約・リデューサ・リカバリ・セキュリティ方針）は実装時の調整対象ではない。調整対象は esbuild チューニング等の実装レベルのみ（§20）である。**実装状況（2026-09-08 検証時点・truthful / 未完）:** SSR シェル・SSE ルート配線（`apps/server/src/app.ts`）・`sse.ts`・UI（`src/ui/page.ts・reducer.ts・escape.ts・client.ts・client.css`）・esbuild バンドル（`scripts/build-ui.mjs`）・`test/m3_ui.test.ts`（11 件）まで作業ツリーに実装済み。検証: server 96 件合格（M3 11 件含む）、`build-ui.mjs` 成功。未完了: `tsc --noEmit` は失敗（`client.ts` 2 件＋`model-local/gateway.ts` 1 件）、Playwright E2E・本番ビルド検証・docs 整備は未実施。本節の契約が実装基準であることに変わりはない。
+> ラベル: **合意（agreed）**。M3（Conversation UI + SSE）の実装計画として合意した内容を記録する。合意事項（可視コントロール・SSE/履歴/Retry/Stop の exact 契約・リデューサ・リカバリ・セキュリティ方針）は実装時の調整対象ではない。調整対象は esbuild チューニング等の実装レベルのみ（§20）である。**実装状況（2026-09-08 検証時点・truthful / 未完）:** SSR シェル・SSE ルート配線（`apps/server/src/app.ts`）・`sse.ts`・UI（`src/ui/page.ts・reducer.ts・escape.ts・client.ts・client.css`）・esbuild バンドル（`scripts/build-ui.mjs`）・`test/m3_ui.test.ts`（13 件）まで作業ツリーに実装済み。検証: `tsc --noEmit` 合格、`biome check` 合格、`build-ui.mjs` 成功、server M3 13 件含む全スイート 1025 件合格・13 スキップ（`connector-markdown/graph_budget_integration` の 1 件のみフル並列時の 5s タイムアウトで失敗、同ファイル単体では合格の環境依存フレーク。M3 無関係）。未完了: Playwright E2E・本番ビルド検証は未実施。本節の契約が実装基準であることに変わりはない。
 
 ### 16.1 M3 のスコープと技術構成（合意）
 

@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PostMessageResponseSchema } from "@companion/contracts";
 import {
   closeKernelDatabase,
   createKernelRepository,
@@ -354,5 +355,69 @@ describe("M3 client reducer contract", () => {
         payload: { result: { version: 1, text: "legacy" } },
       }).state.answer,
     ).toEqual([{ text: "legacy", citations: [] }]);
+  });
+
+  it("accept response carries turnId + run.id (client retry/send contract)", async () => {
+    // Regression: the client parses the exact contracts `PostMessageResponse`
+    // `{ turnId, run: { id } }` (there is no top-level `runId`). A shape
+    // drift here silently breaks send/retry subscribe + Turn tracking.
+    const f = await makeApp();
+    try {
+      const sessionId = f.repo.createSession({
+        key: randomUUID(),
+        now: 1790000000000,
+      }).body.sessionId;
+      const res = await f.app.request(
+        `/api/sessions/${sessionId}/messages`,
+        {
+          method: "POST",
+          headers: {
+            ...headers(),
+            "content-type": "application/json",
+            "idempotency-key": randomUUID(),
+          },
+          body: JSON.stringify({ text: "hello" }),
+        },
+      );
+      expect(res.status).toBe(202);
+      const body = (await res.json()) as Record<string, unknown>;
+      const parsed = PostMessageResponseSchema.safeParse(body);
+      expect(parsed.success).toBe(true);
+      if (parsed.success) {
+        expect(parsed.data.sessionId).toBe(sessionId);
+        expect(typeof parsed.data.turnId).toBe("string");
+        expect(typeof parsed.data.run.id).toBe("string");
+        expect(parsed.data.run.status).toBe("queued");
+        // No top-level `runId`: the client reads `run.id` (exact contract).
+        expect("runId" in body).toBe(false);
+      }
+    } finally {
+      f.close();
+    }
+  });
+
+  it("gap catch-up converges: re-apply after fill advances the cursor", () => {
+    // Regression for the serialized gap path: a gap event reports
+    // needs-catchup without applying; once the missing seq is filled, the
+    // same event re-applies and the cursor advances (persist-after-apply).
+    const s1 = applyRunEvent(INITIAL_RUN_VIEW, {
+      seq: 1,
+      type: "run.started",
+      payload: {},
+    }).state;
+    const gapEvent = { seq: 3, type: "run.completed", payload: {} };
+    const gap = applyRunEvent(s1, gapEvent);
+    expect(gap.outcome.kind).toBe("needs-catchup");
+    expect(gap.state.cursor).toBe(1);
+    const filled = applyRunEvent(s1, {
+      seq: 2,
+      type: "model.step.started",
+      payload: {},
+    });
+    expect(filled.outcome.kind).toBe("applied");
+    const second = applyRunEvent(filled.state, gapEvent);
+    expect(second.outcome.kind).toBe("applied");
+    expect(second.state.cursor).toBe(3);
+    expect(second.state.visible).toBe("answered");
   });
 });

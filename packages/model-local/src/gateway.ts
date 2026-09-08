@@ -1052,9 +1052,13 @@ export async function postJsonNoRedirect(options: {
 /**
  * Minimal body-reader shape (avoids naming stream lib types directly).
  * `Uint8Array` chunk reads mirror `ReadableStreamDefaultReader.read()`.
+ * `value` explicitly includes `undefined`: with
+ * `exactOptionalPropertyTypes` a bare `value?` rejects the native
+ * done-result (`value` present as `undefined`), and newer DOM libs type
+ * chunks as `Uint8Array<ArrayBuffer>`.
  */
 interface BoundedBodyReader {
-  read(): Promise<{ done: boolean; value?: Uint8Array }>;
+  read(): Promise<{ done: boolean; value?: Uint8Array | undefined }>;
   cancel(reason?: unknown): Promise<void>;
   releaseLock(): void;
 }
@@ -1164,7 +1168,7 @@ async function readBoundedBodyText(
     const chunks: Uint8Array[] = [];
     let totalBytes = 0;
     for (;;) {
-      let next: { done: boolean; value?: Uint8Array };
+      let next: { done: boolean; value?: Uint8Array | undefined };
       try {
         next = await reader.read();
       } catch {
