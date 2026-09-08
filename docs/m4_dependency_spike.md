@@ -114,6 +114,20 @@ no `initialize`/`tools/list`, no live checks):
    exclusions (§17.4).
 6. Keep CI fake-only; live test stays opt-in read-only (§17.9).
 
+## Design follow-up (2026-09-08, user-approved design scope)
+
+Concrete readonly patch design delivered in
+`docs/google_calendar_readonly_binding_design.md` (design-only, no adoption):
+SHA-`7c788f5` actual paths verified (`src/auth/server.ts` broad `calendar`
+scope; `src/server.ts`; `src/tools/registry.ts` 12+1 tools; list/search/get
+handlers with no cursor/etag; `BaseToolHandler` 404/no-410 + timezone
+precedence; `structured-responses.ts` sensitive passthrough). Proposes external
+patch/fork deltas (readonly scopes, 4-tool surface, opaque pageToken, 404/410
+authoritative get, etag threading) + Companion mapping; SDK NOT ADOPTED,
+schema hashes unclaimed, M4 NOT implemented, §17 contracts unchanged.
+Remaining decision: §7 of the design (approve scoped patch/fork vs alternative
+upstream).
+
 ## Missing upstream question for orchestrator
 
 Which specific upstream Calendar MCP server/version/transport and which
