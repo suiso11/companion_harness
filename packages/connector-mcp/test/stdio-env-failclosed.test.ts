@@ -12,8 +12,8 @@ import {
   STDIO_IMPLICIT_ENV_VARS,
 } from "../src/client.js";
 import {
-  mcpConnectorConfigSchema,
   type McpConnectorConfig,
+  mcpConnectorConfigSchema,
 } from "../src/config.js";
 
 const HASH = "c".repeat(64);

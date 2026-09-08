@@ -14,8 +14,11 @@ import {
   McpConnector,
   STDIO_IMPLICIT_ENV_VARS,
 } from "../src/client.js";
-import { canonicalSchemaHash, mcpConnectorConfigSchema } from "../src/config.js";
 import type { McpConnectorConfig } from "../src/config.js";
+import {
+  canonicalSchemaHash,
+  mcpConnectorConfigSchema,
+} from "../src/config.js";
 
 const closables: Array<() => Promise<unknown>> = [];
 afterEach(async () => {
