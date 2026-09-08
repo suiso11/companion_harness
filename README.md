@@ -71,3 +71,36 @@ stdout/stderr with fixed codes and scalar fields only.
 - No telemetry, no app log files. No HTTP backup/restore/delete endpoints.
 
 Full sequence and limitations: `docs/operations.md`.
+
+## E2E smoke (plan §16 partial coverage, real browser; M3 NOT complete)
+
+Chromium-only Playwright smoke over the production UI/server/core
+(`apps/server/e2e/`, config `apps/server/playwright.config.ts`): the
+`webServer` builds the UI bundle then boots the real Hono app on
+loopback with a temp SQLite DB and a deterministic fake `RunStrategy`
+registered under `m0-default` (no real LLM; behavior chosen from input
+text only). Four smoke specs added: echo answer, type-while-active +
+stop-cancel, fail-then-retry, strict-CSP/minimal-localStorage. No API
+mocks.
+
+Status 2026-09-08 (this worker, truthful limits): Playwright executed
+count **0** — `pnpm install` crashes in this environment (exit
+`3221226505`) before `@playwright/test@1.63.0` resolves, so no browser
+run was possible here; Chromium binaries on disk were not driven.
+`pnpm typecheck` (root + `apps/server`) does NOT cover `e2e/` or
+`playwright.config.ts`; the dedicated config
+`apps/server/tsconfig.e2e.json` plus root `pnpm typecheck:e2e` exists
+for that and is exercised in CI (Ubuntu job: frozen install,
+`playwright install --with-deps chromium`, E2E typecheck, production
+`build:ui`, smoke run, failure-only artifacts). Dependency note: root
+`@playwright/test` resolves from descendant workspace modules via
+normal Node upward lookup (plus pnpm root `.bin` on the script PATH);
+no separate `@companion/server` declaration is required. The E2E abort
+path drops its stale releaser so `/release` cannot resolve an
+already-rejected hang.
+
+Not covered (outstanding §16 acceptance gaps): citation drawer /
+snapshot display, reference-context CAS, idempotent replay /
+resend-required and reload recovery, SSE reconnect incl. duplicate-seq,
+gap catch-up, corrupt-cursor stop, JSON status fallback, and older
+history pagination. CI runs the four smoke specs only.
