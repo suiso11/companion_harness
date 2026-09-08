@@ -855,60 +855,61 @@ class ConversationApp {
     // A rejected predecessor must never wedge the chain permanently: every
     // link absorbs the previous rejection before appending its own step,
     // and every step catches its own failure.
-    const link = this.runChain.catch(() => {}).then(async () => {
-        try {
-          const current = this.runViews.get(runId) ?? INITIAL_RUN_VIEW;
-          const applied = applyRunEvent(current, event);
-          if (applied.outcome.kind === "ignored-duplicate") {
-            // Duplicates: cursor unchanged, no store write, no re-render, so
-            // terminal output is never appended twice.
-            return;
-          }
-          if (applied.outcome.kind === "ignored-unknown") {
-            // Unknown/future types already advanced the cursor: persist it
-            // but do not re-render (no output to duplicate).
-            this.runViews.set(runId, applied.state);
-            storeCursor(runId, applied.state.cursor);
-            return;
-          }
-          if (applied.outcome.kind === "needs-catchup") {
-            const ok = await this.catchUp(runId, current.cursor);
-            if (!ok) {
-              // Transient page failure: keep the chain alive; the next tick
-              // (SSE event or fallback poll) retries the gap.
-              return;
-            }
-            const resynced = this.runViews.get(runId) ?? INITIAL_RUN_VIEW;
-            const second = applyRunEvent(resynced, event);
-            if (second.outcome.kind === "needs-catchup") {
-              // The stored cursor never converges with the server stream (e.g.
-              // corrupted beyond `event_seq`, §16.7): stop reconnecting and
-              // resync from history instead.
-              await this.resyncFromHistory(runId);
-              return;
-            }
-            if (second.outcome.kind === "ignored-duplicate") {
-              return;
-            }
-            if (second.outcome.kind === "ignored-unknown") {
-              this.runViews.set(runId, second.state);
-              storeCursor(runId, second.state.cursor);
-              return;
-            }
-            // Catch-up converged: the re-applied event is applied, so persist
-            // the cursor after apply.
-            this.runViews.set(runId, second.state);
-            storeCursor(runId, second.state.cursor);
-            this.renderRunView(runId);
-            return;
-          }
+    const absorbed = this.runChain.catch(() => {});
+    const link = absorbed.then(async () => {
+      try {
+        const current = this.runViews.get(runId) ?? INITIAL_RUN_VIEW;
+        const applied = applyRunEvent(current, event);
+        if (applied.outcome.kind === "ignored-duplicate") {
+          // Duplicates: cursor unchanged, no store write, no re-render, so
+          // terminal output is never appended twice.
+          return;
+        }
+        if (applied.outcome.kind === "ignored-unknown") {
+          // Unknown/future types already advanced the cursor: persist it
+          // but do not re-render (no output to duplicate).
           this.runViews.set(runId, applied.state);
           storeCursor(runId, applied.state.cursor);
-          this.renderRunView(runId);
-        } catch {
-          // One bad tick (I/O, DOM) must never wedge later events.
+          return;
         }
-      });
+        if (applied.outcome.kind === "needs-catchup") {
+          const ok = await this.catchUp(runId, current.cursor);
+          if (!ok) {
+            // Transient page failure: keep the chain alive; the next tick
+            // (SSE event or fallback poll) retries the gap.
+            return;
+          }
+          const resynced = this.runViews.get(runId) ?? INITIAL_RUN_VIEW;
+          const second = applyRunEvent(resynced, event);
+          if (second.outcome.kind === "needs-catchup") {
+            // The stored cursor never converges with the server stream (e.g.
+            // corrupted beyond `event_seq`, §16.7): stop reconnecting and
+            // resync from history instead.
+            await this.resyncFromHistory(runId);
+            return;
+          }
+          if (second.outcome.kind === "ignored-duplicate") {
+            return;
+          }
+          if (second.outcome.kind === "ignored-unknown") {
+            this.runViews.set(runId, second.state);
+            storeCursor(runId, second.state.cursor);
+            return;
+          }
+          // Catch-up converged: the re-applied event is applied, so persist
+          // the cursor after apply.
+          this.runViews.set(runId, second.state);
+          storeCursor(runId, second.state.cursor);
+          this.renderRunView(runId);
+          return;
+        }
+        this.runViews.set(runId, applied.state);
+        storeCursor(runId, applied.state.cursor);
+        this.renderRunView(runId);
+      } catch {
+        // One bad tick (I/O, DOM) must never wedge later events.
+      }
+    });
     // The chain itself never stays rejected: a failure above already
     // resolved, and this guard absorbs out-of-band rejections.
     this.runChain = link.catch(() => {});
