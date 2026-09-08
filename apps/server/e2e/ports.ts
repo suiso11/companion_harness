@@ -6,9 +6,12 @@
 
 export const E2E_APP_PORT = 4173;
 export const E2E_CONTROL_PORT = 4174;
+/** Loopback SSE-fault proxy: forwards 1:1 to the app, can drop streams/frames. */
+export const E2E_PROXY_PORT = 4175;
 
 export const E2E_APP_ORIGIN = `http://127.0.0.1:${E2E_APP_PORT}`;
 export const E2E_CONTROL_ORIGIN = `http://127.0.0.1:${E2E_CONTROL_PORT}`;
+export const E2E_PROXY_ORIGIN = `http://127.0.0.1:${E2E_PROXY_PORT}`;
 
 /** Input text that resolves immediately with the deterministic echo answer. */
 export const TEXT_OK = "ping";
@@ -25,3 +28,7 @@ export const TEXT_CITE = "cite-me";
  */
 export const CITATION_SNAPSHOT_TEXT =
   '<script>alert("e2e-xss")</script> & <b>bold</b> \'quotes\' "dq" r1-body';
+/** Fixture prefix for seeded older-history turns (`${prefix}-NNN`). */
+export const SEED_HISTORY_PREFIX = "seedhist";
+/** Turns seeded for the older-history spec (above the default page 50). */
+export const SEED_HISTORY_COUNT = 60;
