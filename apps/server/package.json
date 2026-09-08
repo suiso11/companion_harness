@@ -11,6 +11,8 @@
     "predev": "node scripts/build-ui.mjs",
     "backup": "tsx src/cli.ts backup",
     "build:ui": "node scripts/build-ui.mjs",
+    "e2e:serve": "node --import tsx e2e/server.ts",
+    "test:e2e": "playwright test --config playwright.config.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "biome check src"
