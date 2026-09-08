@@ -358,16 +358,11 @@ for (const variant of ["ahead", "malformed"] as const) {
       await expect
         .poll(
           async () =>
-            (
-              await runStatus(
-                request,
-                E2E_APP_ORIGIN,
-                hangSessionId,
-                runId,
-              )
-            ).status,
+            (await runStatus(request, E2E_APP_ORIGIN, hangSessionId, runId))
+              .status,
           { timeout: 15_000 },
-        ).toMatch(/^(queued|running|cancel_requested)$/);
+        )
+        .toMatch(/^(queued|running|cancel_requested)$/);
     }
     await control(request, "/release");
     await expect(page.locator("#conversation")).toContainText(
@@ -381,7 +376,7 @@ for (const variant of ["ahead", "malformed"] as const) {
         const keys: string[] = [];
         for (let i = 0; i < localStorage.length; i += 1) {
           const key = localStorage.key(i);
-          if (key !== null && key.startsWith("ch.cursor.")) {
+          if (key?.startsWith("ch.cursor.")) {
             keys.push(key);
           }
         }
@@ -465,7 +460,7 @@ test("seeded older history renders oldest-first without duplicates", async ({
       .toContainText(first, {
         timeout: 20_000,
       })
-      .catch(() => undefined as void);
+      .catch(() => undefined);
     if (
       ((await page.locator("#conversation").innerText()) ?? "").includes(first)
     ) {

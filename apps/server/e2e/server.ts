@@ -113,7 +113,7 @@ function inputText(ctx: RunStrategyContext): string {
 const registry = new StrategyRegistry();
 registry.register("m0-default", async (ctx: RunStrategyContext) => {
   const text = inputText(ctx);
-    if (text.includes(TEXT_HANG)) {
+  if (text.includes(TEXT_HANG)) {
     // Consume a sticky early release so a /release that raced ahead of
     // strategy registration still unblocks this hang deterministically.
     if (pendingReleases > 0) {
