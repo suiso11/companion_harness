@@ -122,8 +122,13 @@ SHA-`7c788f5` actual paths verified (`src/auth/server.ts` broad `calendar`
 scope; `src/server.ts`; `src/tools/registry.ts` 12+1 tools; list/search/get
 handlers with no cursor/etag; `BaseToolHandler` 404/no-410 + timezone
 precedence; `structured-responses.ts` sensitive passthrough). Proposes external
-patch/fork deltas (readonly scopes, 4-tool surface, opaque pageToken, 404/410
-authoritative get, etag threading) + Companion mapping; SDK NOT ADOPTED,
+patch/fork deltas (readonly scopes, 4-tool internal surface with single
+model-exposed `calendar.search`, single-calendar opaque pageToken with hard
+one-page `limit<=20` mapping, etag threading) + Companion mapping; deletion
+classifier explicitly UNRESOLVED (2026-09-09 correction: `events.get` has NO
+`showDeleted` — withdrawn; bare 404/410 or `cancelled` alone is NOT deletion
+proof; 410 = list sync-token resync; ambiguous errors → upstream_error);
+SDK NOT ADOPTED,
 schema hashes unclaimed, M4 NOT implemented, §17 contracts unchanged.
 Remaining decision: §7 of the design (approve scoped patch/fork vs alternative
 upstream).
