@@ -16,3 +16,12 @@ export const TEXT_OK = "ping";
 export const TEXT_FAIL = "fail";
 /** Input text whose strategy hangs until released or aborted. */
 export const TEXT_HANG = "hang";
+/** Input text whose strategy answers V2 with a structural r1 citation. */
+export const TEXT_CITE = "cite-me";
+/**
+ * Stored snapshot body text seeded for the citation drawer test. Contains
+ * markup-significant characters so the spec can prove escaped plain-text
+ * rendering (never HTML interpretation, never script execution).
+ */
+export const CITATION_SNAPSHOT_TEXT =
+  '<script>alert("e2e-xss")</script> & <b>bold</b> \'quotes\' "dq" r1-body';

@@ -13,10 +13,14 @@
 //   POST /arm-fail  -> the next TEXT_FAIL run throws execution_failed once
 //   POST /release   -> release hanging TEXT_HANG strategies (also on abort)
 //   POST /reset     -> clear armed failure + release hangers
+//   POST /seed-citation { sessionId } -> store one immutable snapshot +
+//     session reference (ordinal rN) for that session via direct SQL
+//     (fixture setup only; drawer/CAS/rendering stay on real routes/UI)
 //   GET  /health    -> { status: "ok" }
 //
 // Temp DB dir is removed on shutdown (SIGINT/SIGTERM included).
 
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import {
   createServer,
@@ -41,8 +45,10 @@ import { loadUiAssets } from "../src/bootstrap.js";
 import { loadServerConfig } from "../src/config.js";
 import { createStdServerLogger } from "../src/logger.js";
 import {
+  CITATION_SNAPSHOT_TEXT,
   E2E_APP_PORT,
   E2E_CONTROL_PORT,
+  TEXT_CITE,
   TEXT_FAIL,
   TEXT_HANG,
 } from "./ports.js";
@@ -113,6 +119,21 @@ registry.register("m0-default", async (ctx: RunStrategyContext) => {
     failArmed = false;
     throw new StrategyError("execution_failed");
   }
+  if (text.includes(TEXT_CITE)) {
+    // V2 structured answer with a structural r1 citation. The engine only
+    // schema-validates the candidate (no grant check for this fake), so the
+    // UI renders a real citation button; the stored r1 snapshot itself is
+    // seeded per-session via POST /seed-citation (test fixture setup, never
+    // a mocked API response). Text equals parts joined by blank lines.
+    return {
+      version: 2,
+      text: "cited answer",
+      answer: {
+        version: 1,
+        parts: [{ text: "cited answer", citations: ["r1"] }],
+      },
+    };
+  }
   return { version: 1, text: `echo:${text}` };
 });
 
@@ -143,18 +164,118 @@ const appServer = serve(
   },
 );
 
-function readBody(req: IncomingMessage): Promise<void> {
+function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve) => {
-    req.on("data", () => undefined);
-    req.on("end", () => resolve());
-    req.on("error", () => resolve());
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
+    req.on("error", () => resolve(""));
   });
+}
+
+const UUID_V4_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/**
+ * Test-fixture seed (narrow): store one immutable snapshot + session
+ * reference (ordinal rN) for the given session via direct SQL. This is
+ * fixture setup only — the drawer fetch, CAS PUT, and escaped rendering
+ * under test all run through the real production routes/UI. The snapshot
+ * body carries markup-significant characters to prove escaped rendering.
+ */
+function seedCitation(sessionId: string): {
+  referenceId: string;
+  ordinal: number;
+  snapshotId: string;
+} {
+  const db = handle.raw as unknown as {
+    prepare(sql: string): {
+      get(...params: unknown[]): Record<string, unknown> | undefined;
+      run(...params: unknown[]): { changes: number };
+    };
+  };
+  const now = Date.now();
+  const session = db
+    .prepare("SELECT id FROM sessions WHERE id = ?")
+    .get(sessionId) as { id: string } | undefined;
+  if (session === undefined) {
+    throw new Error("session not found");
+  }
+  let connector = db
+    .prepare("SELECT id FROM connector_instances WHERE kind = ?")
+    .get("e2e-fake") as { id: string } | undefined;
+  if (connector === undefined) {
+    const id = randomUUID();
+    db.prepare(
+      "INSERT INTO connector_instances (id, kind, display_name, config_json, created_at) VALUES (?, ?, ?, ?, ?)",
+    ).run(id, "e2e-fake", "e2e fake vault", '{"version":1,"rootCount":1}', now);
+    connector = { id };
+  }
+  const connectorId = connector.id;
+  let resource = db
+    .prepare(
+      "SELECT id FROM resources WHERE connector_instance_id = ? AND canonical_key = ?",
+    )
+    .get(connectorId, "e2e-citation-doc") as { id: string } | undefined;
+  if (resource === undefined) {
+    const id = randomUUID();
+    db.prepare(
+      "INSERT INTO resources (id, connector_instance_id, canonical_key, title, next_revision, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    ).run(id, connectorId, "e2e-citation-doc", "E2E citation doc", 2, now);
+    resource = { id };
+  }
+  const normalized = CITATION_SNAPSHOT_TEXT.normalize("NFC");
+  const contentHash = createHash("sha256")
+    .update(normalized, "utf8")
+    .digest("hex");
+  const sizeBytes = Buffer.byteLength(normalized, "utf8");
+  const snapshotId = randomUUID();
+  db.prepare(
+    "INSERT INTO resource_snapshots (id, resource_id, revision, source_revision, content_hash, body_json, size_bytes, observed_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  ).run(
+    snapshotId,
+    (resource as { id: string }).id,
+    1,
+    null,
+    contentHash,
+    JSON.stringify({ version: 1, text: CITATION_SNAPSHOT_TEXT }),
+    sizeBytes,
+    now,
+    now,
+  );
+  const maxRow = db
+    .prepare(
+      "SELECT COALESCE(MAX(ordinal), 0) AS maxOrdinal FROM session_references WHERE session_id = ?",
+    )
+    .get(sessionId) as { maxOrdinal: number } | undefined;
+  const ordinal = (maxRow?.maxOrdinal ?? 0) + 1;
+  const referenceId = randomUUID();
+  db.prepare(
+    "INSERT INTO session_references (id, session_id, ordinal, resource_id, snapshot_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+  ).run(
+    referenceId,
+    sessionId,
+    ordinal,
+    (resource as { id: string }).id,
+    snapshotId,
+    now,
+  );
+  try {
+    db.prepare(
+      "UPDATE sessions SET next_reference_ordinal = ? WHERE id = ?",
+    ).run(ordinal + 1, sessionId);
+  } catch {
+    // Column predates some DBs; the ordinal itself is authoritative.
+  }
+  return { referenceId, ordinal, snapshotId };
 }
 
 const control = createServer(
   async (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
-    await readBody(req);
+    const rawBody = await readBody(req);
     const json = (status: number, body: unknown): void => {
       res.writeHead(status, { "content-type": "application/json" });
       res.end(JSON.stringify(body));
@@ -177,6 +298,29 @@ const control = createServer(
       failArmed = false;
       releaseAll();
       json(200, { reset: true });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/seed-citation") {
+      let sessionId: unknown = null;
+      try {
+        sessionId = (
+          JSON.parse(rawBody === "" ? "{}" : rawBody) as {
+            sessionId?: unknown;
+          }
+        ).sessionId;
+      } catch {
+        json(400, { error: { code: "validation_error" } });
+        return;
+      }
+      if (typeof sessionId !== "string" || !UUID_V4_RE.test(sessionId)) {
+        json(400, { error: { code: "validation_error" } });
+        return;
+      }
+      try {
+        json(200, seedCitation(sessionId));
+      } catch {
+        json(404, { error: { code: "not_found" } });
+      }
       return;
     }
     json(404, { error: { code: "not_found", message: "resource not found" } });
