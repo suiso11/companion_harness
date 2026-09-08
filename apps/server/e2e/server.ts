@@ -17,8 +17,12 @@
 //
 // Temp DB dir is removed on shutdown (SIGINT/SIGTERM included).
 
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { mkdtempSync, rmSync } from "node:fs";
+import {
+  createServer,
+  type IncomingMessage,
+  type ServerResponse,
+} from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -27,9 +31,9 @@ import {
   migrateKernelDatabase,
   openKernelDatabase,
   RunEngine,
+  type RunStrategyContext,
   StrategyError,
   StrategyRegistry,
-  type RunStrategyContext,
 } from "@companion/kernel";
 import { serve } from "@hono/node-server";
 import { createApp } from "../src/app.js";
@@ -147,35 +151,37 @@ function readBody(req: IncomingMessage): Promise<void> {
   });
 }
 
-const control = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-  const url = new URL(req.url ?? "/", "http://127.0.0.1");
-  await readBody(req);
-  const json = (status: number, body: unknown): void => {
-    res.writeHead(status, { "content-type": "application/json" });
-    res.end(JSON.stringify(body));
-  };
-  if (req.method === "GET" && url.pathname === "/health") {
-    json(200, { status: "ok" });
-    return;
-  }
-  if (req.method === "POST" && url.pathname === "/arm-fail") {
-    failArmed = true;
-    json(200, { armed: true });
-    return;
-  }
-  if (req.method === "POST" && url.pathname === "/release") {
-    releaseAll();
-    json(200, { released: true });
-    return;
-  }
-  if (req.method === "POST" && url.pathname === "/reset") {
-    failArmed = false;
-    releaseAll();
-    json(200, { reset: true });
-    return;
-  }
-  json(404, { error: { code: "not_found", message: "resource not found" } });
-});
+const control = createServer(
+  async (req: IncomingMessage, res: ServerResponse) => {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    await readBody(req);
+    const json = (status: number, body: unknown): void => {
+      res.writeHead(status, { "content-type": "application/json" });
+      res.end(JSON.stringify(body));
+    };
+    if (req.method === "GET" && url.pathname === "/health") {
+      json(200, { status: "ok" });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/arm-fail") {
+      failArmed = true;
+      json(200, { armed: true });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/release") {
+      releaseAll();
+      json(200, { released: true });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/reset") {
+      failArmed = false;
+      releaseAll();
+      json(200, { reset: true });
+      return;
+    }
+    json(404, { error: { code: "not_found", message: "resource not found" } });
+  },
+);
 control.listen(E2E_CONTROL_PORT, "127.0.0.1", () => {
   // eslint-disable-next-line no-console
   console.log(`e2e-control-ready http://127.0.0.1:${E2E_CONTROL_PORT}`);

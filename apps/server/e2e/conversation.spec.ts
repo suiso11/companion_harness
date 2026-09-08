@@ -7,13 +7,8 @@
 // injection uses the loopback-only control server via the Node-side
 // `request` fixture (never page.fetch, never mocked responses).
 
-import { expect, test, type Page } from "@playwright/test";
-import {
-  E2E_CONTROL_ORIGIN,
-  TEXT_FAIL,
-  TEXT_HANG,
-  TEXT_OK,
-} from "./ports.js";
+import { expect, type Page, test } from "@playwright/test";
+import { E2E_CONTROL_ORIGIN, TEXT_FAIL, TEXT_HANG, TEXT_OK } from "./ports.js";
 
 async function control(
   request: import("@playwright/test").APIRequestContext,
@@ -44,10 +39,9 @@ test("send answers with the deterministic echo", async ({ page }) => {
   // Optimistic user bubble renders immediately.
   await expect(page.locator("#conversation")).toContainText(TEXT_OK);
   // Terminal answer from the fake strategy (no real LLM).
-  await expect(page.locator("#conversation")).toContainText(
-    `echo:${TEXT_OK}`,
-    { timeout: 15_000 },
-  );
+  await expect(page.locator("#conversation")).toContainText(`echo:${TEXT_OK}`, {
+    timeout: 15_000,
+  });
   // Composer is usable again once the run is terminal.
   await expect(page.locator("#composer-send")).toBeEnabled();
   await expect(page.locator("#composer-stop")).toBeHidden();
@@ -111,10 +105,9 @@ test("privacy: strict CSP, no inline script, minimal localStorage", async ({
   expect(html).not.toMatch(/\son\w+\s*=/i);
 
   await send(page, TEXT_OK);
-  await expect(page.locator("#conversation")).toContainText(
-    `echo:${TEXT_OK}`,
-    { timeout: 15_000 },
-  );
+  await expect(page.locator("#conversation")).toContainText(`echo:${TEXT_OK}`, {
+    timeout: 15_000,
+  });
 
   // Browser persistence is minimal: session id, per-run cursors, and the
   // pending idempotency key only. Bodies and answer text are never stored.
