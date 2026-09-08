@@ -55,6 +55,7 @@ import {
   MAX_MESSAGE_CONTENT_LENGTH,
   MAX_MESSAGES_PER_REQUEST,
   ModelLocalError,
+  validateChatResult,
 } from "@companion/model-local";
 import type Database from "better-sqlite3";
 import type { ToolBroker } from "./broker.js";
@@ -1260,30 +1261,11 @@ export function createAgentStrategy(
     if (ctx.signal.aborted) {
       throw new StrategyError("execution_cancelled");
     }
-    const runId = ctx.run.id;
-    const sessionId = ctx.run.sessionId;
-    const requestText =
-      ctx.turn.input.kind === "user_text" ? ctx.turn.input.text : "";
-    const history = loadHistory(db, sessionId, ctx.turn.seq);
-    const frozenIds = frozenReferenceIds(ctx);
-    const references = loadReferenceSummary(db, sessionId, frozenIds);
-    // Per-run known rN->UUID map (r3943599549): seeded ONLY from the frozen
-    // current-turn context (frozen context never rewrites, including on
-    // Retry), then extended across steps ONLY by structural
-    // `{ ordinal, referenceId }` pairs actually present in size-accepted
-    // delivered feedback (search / refresh / related newly expose rNs).
-    // The map is addressability only and never a grant; unknown, omitted,
-    // oversized, or undelivered rNs stay unresolved and fail via ToolBroker.
-    // No semantic lookup, no cross-session reuse. Scoped to this Run.
-    const knownOrdinalMap = loadFrozenOrdinalMap(db, sessionId, frozenIds);
-    const messages = projectPrompt({
-      requestText,
-      history,
-      references,
-      tools: toolDefinitions,
-      model,
-    }).messages;
-
+    // Wall budget starts at strategy invocation so synchronous preparation
+    // (loadHistory/loadReferenceSummary/ordinal-map/projectPrompt) counts
+    // toward the 300s whole-run deadline (r3946692097). The setTimeout below
+    // cannot fire during synchronous work, so the authoritative clock
+    // recheck after preparation (below) decides before any gateway call.
     const wallStart = clock.now();
     const wallDeadline = wallStart + wallMs;
     // Run-scoped wall signal shared by model steps and ToolBroker calls:
@@ -1333,6 +1315,45 @@ export function createAgentStrategy(
     let repairUsed = false;
 
     try {
+      const runId = ctx.run.id;
+      const sessionId = ctx.run.sessionId;
+      const requestText =
+        ctx.turn.input.kind === "user_text" ? ctx.turn.input.text : "";
+      const history = loadHistory(db, sessionId, ctx.turn.seq);
+      const frozenIds = frozenReferenceIds(ctx);
+      const references = loadReferenceSummary(db, sessionId, frozenIds);
+      // Per-run known rN->UUID map (r3943599549): seeded ONLY from the frozen
+      // current-turn context (frozen context never rewrites, including on
+      // Retry), then extended across steps ONLY by structural
+      // `{ ordinal, referenceId }` pairs actually present in size-accepted
+      // delivered feedback (search / refresh / related newly expose rNs).
+      // The map is addressability only and never a grant; unknown, omitted,
+      // oversized, or undelivered rNs stay unresolved and fail via ToolBroker.
+      // No semantic lookup, no cross-session reuse. Scoped to this Run.
+      const knownOrdinalMap = loadFrozenOrdinalMap(db, sessionId, frozenIds);
+      const messages = projectPrompt({
+        requestText,
+        history,
+        references,
+        tools: toolDefinitions,
+        model,
+      }).messages;
+      // Authoritative recheck after synchronous preparation and before the
+      // first gateway call: preparation that consumes/exceeds the wall budget
+      // fails here with no model or tool invocation (and therefore no
+      // model_calls row). At-or-past the deadline is past budget
+      // (fail-closed); engine cancellation keeps priority and stays distinct.
+      if (ctx.signal.aborted) {
+        throw new StrategyError("execution_cancelled");
+      }
+      if (
+        wallController.signal.aborted ||
+        isWallExpired() ||
+        clock.now() >= wallDeadline
+      ) {
+        expireWall();
+        throw new StrategyError("execution_failed");
+      }
       for (let step = 1; step <= maxSteps; step += 1) {
         throwIfHalted();
         if (!isRunActive(repo, runId)) {
@@ -1384,6 +1405,32 @@ export function createAgentStrategy(
             content: `Repair instruction:\n${AGENT_REPAIR_HINTS.answer_invalid}`,
           });
           continue;
+        }
+        // Defense in depth for gateways that bypass provider normalization:
+        // normalized assistant text longer than the shared gateway
+        // per-message bound (character semantics, `text.length`, same as
+        // ChatMessage validation) is rejected atomically before replay
+        // storage. Exactly one failed/model_unavailable audit; no tool
+        // executes, no evidence is created, nothing is truncated or echoed.
+        if (
+          typeof outcome.result.text !== "string" ||
+          outcome.result.text.length > MAX_MESSAGE_CONTENT_LENGTH
+        ) {
+          const oversizeAudited = finalizeDeliveredStep({
+            repo,
+            runId,
+            step,
+            adapter: outcome.adapter,
+            model,
+            durationMs: outcome.durationMs,
+            usage: outcome.usage,
+            errorCode: "model_unavailable",
+            clock,
+          });
+          if (!oversizeAudited) {
+            throw new StrategyError("execution_cancelled");
+          }
+          throw new StrategyError("execution_failed");
         }
         const classification = classifyStep(outcome.result.toolCalls);
         // Provider-correct multi-step replay: preserve the native assistant
@@ -1580,25 +1627,180 @@ function loadHistory(
 }
 
 /**
- * Drop the oldest projected history pairs (`Earlier request:` user +
- * following assistant) until the message list fits the gateway cap.
- * Latest entries are retained in chronological order; assistant tool-call
- * replay and tool feedback are never removed here.
+ * Trim the whole conversation to the gateway 128-message cap before every
+ * gateway call. Order: oldest selected-history pairs first (latest win,
+ * chronological), then oldest complete tool interaction groups. A tool
+ * group is one assistant message with native toolCalls plus every matching
+ * contiguous role:tool response plus any directly associated fixed repair
+ * hint (`Repair instruction:` user message immediately following the tools).
+ * A standalone repair hint (answer-normalization failure, no assistant) is
+ * its own single-message group. System (index 0) and the current user
+ * request (`User request:`) are indispensable and never removed; order of
+ * survivors is preserved; no raw summary of omitted data is added; no half
+ * group is ever dropped so tool_call_id correlations stay intact.
  */
-function trimHistoryToCap(messages: ChatRequest["messages"]): void {
-  while (messages.length > MAX_MESSAGES_PER_REQUEST) {
+export function trimConversationToCap(messages: ChatRequest["messages"]): void {
+  if (messages.length <= MAX_MESSAGES_PER_REQUEST) {
+    return;
+  }
+  if (messages.length === 0) {
+    return;
+  }
+  // Locate the indispensable current user request (projected once by
+  // projectPrompt as `User request:\n...`). First occurrence wins; there
+  // is exactly one in the strategy flow.
+  let currentIdx = -1;
+  for (let i = 0; i < messages.length; i += 1) {
+    const candidate = messages[i];
+    if (
+      candidate !== undefined &&
+      candidate.role === "user" &&
+      typeof candidate.content === "string" &&
+      candidate.content.startsWith("User request:\n")
+    ) {
+      currentIdx = i;
+      break;
+    }
+  }
+  if (currentIdx === -1) {
+    // Unknown shape: fall back to legacy history-only trimming so an
+    // unexpected conversation never gains a new orphan; the caller still
+    // fails closed when the cap cannot be met.
+    while (messages.length > MAX_MESSAGES_PER_REQUEST) {
+      const second = messages[1];
+      if (
+        second === undefined ||
+        second.role !== "user" ||
+        typeof second.content !== "string" ||
+        !second.content.startsWith(AGENT_HISTORY_USER_PREFIX)
+      ) {
+        return;
+      }
+      messages.splice(1, 2);
+    }
+    return;
+  }
+  // Phase 1: oldest selected-history pairs first (region [1, currentIdx)).
+  while (messages.length > MAX_MESSAGES_PER_REQUEST && currentIdx > 1) {
     const second = messages[1];
+    const third = messages[2];
     if (
       second === undefined ||
       second.role !== "user" ||
       typeof second.content !== "string" ||
-      !second.content.startsWith(AGENT_HISTORY_USER_PREFIX)
+      !second.content.startsWith(AGENT_HISTORY_USER_PREFIX) ||
+      third === undefined ||
+      third.role !== "assistant" ||
+      (third.toolCalls !== undefined && third.toolCalls.length > 0)
     ) {
-      return;
+      break;
     }
     // Remove the oldest history pair (user request + assistant result).
     messages.splice(1, 2);
+    currentIdx -= 2;
   }
+  if (messages.length <= MAX_MESSAGES_PER_REQUEST) {
+    return;
+  }
+  // Phase 2: oldest complete tool interaction groups after the current
+  // request. The post-current segment partitions contiguously into groups
+  // so dropping the oldest k groups removes a message prefix and never
+  // splits a tool_call_id correlation.
+  interface TrimGroup {
+    readonly start: number;
+    readonly end: number;
+  }
+  const groups: TrimGroup[] = [];
+  let cursor = currentIdx + 1;
+  while (cursor < messages.length) {
+    const current = messages[cursor];
+    if (current === undefined) {
+      break;
+    }
+    if (
+      current.role === "assistant" &&
+      Array.isArray(current.toolCalls) &&
+      current.toolCalls.length > 0
+    ) {
+      const start = cursor;
+      const ids = new Set<string>();
+      for (const call of current.toolCalls) {
+        if (
+          typeof call === "object" &&
+          call !== null &&
+          typeof (call as { id?: unknown }).id === "string"
+        ) {
+          ids.add((call as { id: string }).id);
+        }
+      }
+      let end = cursor + 1;
+      const seen = new Set<string>();
+      while (end < messages.length) {
+        const tool = messages[end];
+        if (
+          tool === undefined ||
+          tool.role !== "tool" ||
+          typeof tool.toolCallId !== "string" ||
+          !ids.has(tool.toolCallId) ||
+          seen.has(tool.toolCallId)
+        ) {
+          break;
+        }
+        seen.add(tool.toolCallId);
+        end += 1;
+      }
+      // Directly associated fixed repair hint belongs to this group.
+      if (end < messages.length) {
+        const hint = messages[end];
+        if (
+          hint !== undefined &&
+          hint.role === "user" &&
+          typeof hint.content === "string" &&
+          hint.content.startsWith("Repair instruction:\n")
+        ) {
+          end += 1;
+        }
+      }
+      groups.push({ start, end });
+      cursor = end;
+      continue;
+    }
+    if (
+      current.role === "user" &&
+      typeof current.content === "string" &&
+      current.content.startsWith("Repair instruction:\n")
+    ) {
+      // Standalone repair (answer-normalization failure, no assistant).
+      groups.push({ start: cursor, end: cursor + 1 });
+      cursor += 1;
+      continue;
+    }
+    // Any other single message (including a stray role:tool already
+    // orphaned upstream): keep atomic so trimming never creates a split.
+    groups.push({ start: cursor, end: cursor + 1 });
+    cursor += 1;
+  }
+  let dropGroups = 0;
+  let dropMessages = 0;
+  while (
+    messages.length - dropMessages > MAX_MESSAGES_PER_REQUEST &&
+    dropGroups < groups.length
+  ) {
+    const group = groups[dropGroups];
+    if (group === undefined) {
+      break;
+    }
+    dropMessages += group.end - group.start;
+    dropGroups += 1;
+  }
+  if (dropMessages > 0) {
+    messages.splice(currentIdx + 1, dropMessages);
+  }
+}
+
+/** Legacy name retained for the in-loop call site (full conversation trim). */
+function trimHistoryToCap(messages: ChatRequest["messages"]): void {
+  trimConversationToCap(messages);
 }
 
 function loadReferenceSummary(
@@ -1967,6 +2169,83 @@ async function runModelStep(args: {
       settlement = { kind: "wall" };
     } else if (late === "timeout") {
       settlement = { kind: "timeout" };
+    }
+  }
+  // Custom-gateway defense in depth: provider adapters normalize, but an
+  // injected ChatResult bypasses them, so validate every bound atomically
+  // here (request.tools authorizes allowed definitions) before success
+  // audit/classification. Failures re-enter the fixed error audit below
+  // (model_unavailable, answer_invalid repair leg unchanged): no tools
+  // execute, no evidence is granted.
+  if (settlement.kind === "result") {
+    const calls = settlement.result.toolCalls;
+    if (
+      Array.isArray(calls) &&
+      calls.length > 1 &&
+      calls.every(
+        (call) =>
+          typeof call === "object" &&
+          call !== null &&
+          (call as { name?: unknown }).name === ANSWER_SUBMIT_TOOL_NAME,
+      ) &&
+      calls.every(
+        (call) => typeof (call as { id?: unknown }).id === "string",
+      ) &&
+      new Set(calls.map((call) => (call as { id: string }).id)).size <
+        calls.length
+    ) {
+      // Validate each original call individually (shared bounds, single-call
+      // scope bypasses only cross-call uniqueness for repair classification).
+      // Invalid original ids fail atomically here with no remap/repair.
+      try {
+        for (const call of calls) {
+          validateChatResult(
+            { ...settlement.result, toolCalls: [call] },
+            request.tools,
+          );
+        }
+      } catch (error) {
+        settlement = { kind: "error", error };
+      }
+      if (settlement.kind === "result") {
+        settlement = {
+          kind: "result",
+          result: {
+            ...settlement.result,
+            toolCalls: calls.map((call, index) => ({
+              ...(call as object),
+              id: `answer_submit_${index + 1}`,
+            })) as ChatResult["toolCalls"],
+          },
+        };
+      }
+    }
+    if (settlement.kind === "result") {
+      try {
+        settlement = {
+          kind: "result",
+          result: validateChatResult(settlement.result, request.tools),
+        };
+      } catch (error) {
+        settlement = { kind: "error", error };
+      }
+    }
+    // Post-validation deadline (r3950636369): synchronous validation consumes
+    // real budget, so a snapshot that was in-time at gateway resolve may be
+    // past budget by the time it returns. Re-run the authoritative
+    // late-success gate before the snapshot can reach success audit,
+    // classifyStep, answer acceptance, broker execution, or evidence grants:
+    // discard it with timeout/cancel semantics. Engine cancellation stays
+    // distinct and wins; ordering matches classifyLateSuccess.
+    if (settlement.kind === "result") {
+      const late = classifyLateSuccess();
+      if (late === "aborted") {
+        settlement = { kind: "aborted" };
+      } else if (late === "wall") {
+        settlement = { kind: "wall" };
+      } else if (late === "timeout") {
+        settlement = { kind: "timeout" };
+      }
     }
   }
   const durationMs = Math.max(clock.now() - startedAt, 0);

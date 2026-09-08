@@ -80,42 +80,307 @@ export const MAX_TOOL_CALLS_PER_MESSAGE = 32;
  */
 export const MAX_TOOL_CALL_ARGUMENTS_BYTES = 32 * 1024;
 
+/**
+ * Maximum array item count accepted by `canonicalizeForSize` (equals the
+ * 32KiB arguments byte budget: every array item costs at least one
+ * canonical byte, so a longer array always serializes over the bound).
+ * Enforced from the single captured `length` snapshot before traversal so
+ * a hostile `length` (huge sparse length, changing Proxy shape) rejects
+ * without a huge `new Array(n)` allocation or an unbounded loop.
+ */
+export const MAX_CANONICAL_ARRAY_ITEMS = MAX_TOOL_CALL_ARGUMENTS_BYTES;
+
 /** UTF-8 byte length of a string (never JS character count). */
 export function utf8ByteLength(text: string): number {
   return new TextEncoder().encode(text).byteLength;
 }
 
-function canonicalizeForSize(value: unknown): unknown {
-  if (value === null || value === undefined) {
+/**
+ * Maximum prototype links followed by `assertNoCustomToJSON` (bounds
+ * `Reflect.getPrototypeOf` calls). Plain JSON chains are at most two links
+ * (`value` -> `Object/Array.prototype` -> `null`), so this bound stays far
+ * above every legal shape while keeping a hostile `getPrototypeOf` trap
+ * finite: cycles and over-long chains reject with `TypeError`.
+ */
+export const MAX_PROTOTYPE_CHAIN_LINKS = 16;
+
+/**
+ * Reject any `toJSON` found on the value or its prototype chain without
+ * invoking user code. Only `Object.getOwnPropertyDescriptor` (which never
+ * calls getters or `toJSON` itself) is used: a data descriptor, an accessor
+ * descriptor, or any inherited descriptor all reject. Plain JSON data from
+ * `JSON.parse` never carries `toJSON`, so provider-parsed objects stay valid.
+ *
+ * The walk is hardened against hostile `Proxy`/`getPrototypeOf` chains:
+ * visited prototype objects are tracked so self-cycles and multi-node
+ * cycles reject instead of looping forever, the number of
+ * `Object.getPrototypeOf` calls is bounded by
+ * `MAX_PROTOTYPE_CHAIN_LINKS`, and throwing traps reject with the same
+ * fixed `TypeError` (never leaking the trap error).
+ */
+function assertNoCustomToJSON(node: object): void {
+  const seen = new Set<unknown>();
+  let current: unknown = node;
+  for (let depth = 0; depth <= MAX_PROTOTYPE_CHAIN_LINKS; depth += 1) {
+    if (current === null) {
+      return;
+    }
+    if (
+      (typeof current !== "object" && typeof current !== "function") ||
+      seen.has(current)
+    ) {
+      throw new TypeError("cyclic prototype in tool arguments");
+    }
+    seen.add(current);
+    let descriptor: PropertyDescriptor | undefined;
+    try {
+      descriptor = Object.getOwnPropertyDescriptor(current, "toJSON");
+    } catch {
+      throw new TypeError("unreadable prototype in tool arguments");
+    }
+    if (descriptor !== undefined) {
+      throw new TypeError("custom toJSON in tool arguments");
+    }
+    if (depth >= MAX_PROTOTYPE_CHAIN_LINKS) {
+      throw new TypeError("excessive prototype chain in tool arguments");
+    }
+    try {
+      current = Object.getPrototypeOf(current);
+    } catch {
+      throw new TypeError("unreadable prototype in tool arguments");
+    }
+  }
+  throw new TypeError("excessive prototype chain in tool arguments");
+}
+
+/**
+ * Strict structural clone for tool-call arguments size measurement.
+ *
+ * Accepted values are plain JSON data only: null, finite numbers, strings,
+ * booleans, plain objects (`Object.prototype` or `null` prototype), and
+ * plain arrays (`Array.prototype`). Rejected without invoking user code
+ * (no getter, setter, `toJSON`, or proxy-trap call beyond the inert
+ * `Object.*` structural reads): custom `toJSON` (own or inherited),
+ * accessor properties, symbol-keyed properties (enumerable or not),
+ * functions, symbols, `undefined`, `bigint`, non-finite numbers, objects
+ * with non-plain prototypes, arrays with holes or extra non-index keys,
+ * and cycles. Unsupported values throw `TypeError` (never echoing data);
+ * callers map the failure to their fixed redacted code.
+ *
+ * Object output uses a null-prototype sink with sorted keys so a
+ * provider-controlled `__proto__` key stays a plain own property (never
+ * invoking the `Object.prototype` setter, never dropped from the measured
+ * serialization). Legal JSON keys are never rejected by name.
+ */
+function canonicalizeForSize(value: unknown, seen?: WeakSet<object>): unknown {
+  if (value === null) {
+    return null;
+  }
+  const kind = typeof value;
+  if (kind === "string" || kind === "boolean") {
     return value;
   }
-  if (Array.isArray(value)) {
-    return value.map((entry) => canonicalizeForSize(entry));
+  if (kind === "number") {
+    if (!Number.isFinite(value)) {
+      throw new TypeError("unsupported number in tool arguments");
+    }
+    return value;
   }
-  if (isRecord(value)) {
+  if (
+    kind === "undefined" ||
+    kind === "function" ||
+    kind === "symbol" ||
+    kind === "bigint"
+  ) {
+    throw new TypeError("unsupported value in tool arguments");
+  }
+  if (kind !== "object") {
+    throw new TypeError("unsupported value in tool arguments");
+  }
+  const node = value as object;
+  assertNoCustomToJSON(node);
+  if (Object.getOwnPropertySymbols(node).length > 0) {
+    throw new TypeError("symbol key in tool arguments");
+  }
+  const active = seen ?? new WeakSet<object>();
+  if (active.has(node)) {
+    throw new TypeError("cyclic tool arguments");
+  }
+  if (Array.isArray(node)) {
+    if (Object.getPrototypeOf(node) !== Array.prototype) {
+      throw new TypeError("non-plain array in tool arguments");
+    }
+    active.add(node);
+    try {
+      const arr = node as unknown[];
+      // Snapshot `length` exactly once via its own data descriptor: never
+      // read `arr.length` (each read would invoke a hostile Proxy `get`
+      // trap, enabling changing lengths / unbounded loops). Accessor,
+      // missing, non-numeric, or over-bound lengths reject; the captured
+      // value drives every check and iteration below.
+      let lengthDescriptor: PropertyDescriptor | undefined;
+      try {
+        lengthDescriptor = Object.getOwnPropertyDescriptor(arr, "length");
+      } catch {
+        throw new TypeError("unreadable array length in tool arguments");
+      }
+      if (
+        lengthDescriptor === undefined ||
+        lengthDescriptor.get !== undefined ||
+        lengthDescriptor.set !== undefined ||
+        typeof lengthDescriptor.value !== "number" ||
+        !Number.isSafeInteger(lengthDescriptor.value) ||
+        (lengthDescriptor.value as number) < 0 ||
+        (lengthDescriptor.value as number) > MAX_CANONICAL_ARRAY_ITEMS
+      ) {
+        throw new TypeError("invalid array length in tool arguments");
+      }
+      const length = lengthDescriptor.value as number;
+      // Reject holes (missing index descriptors serialize as null and would
+      // miscount) and extra enumerable non-index keys (ignored by
+      // JSON.stringify, so accepting them would undercount). Descriptors
+      // are read once per index without re-reading through the property
+      // (which would invoke a getter if one raced in).
+      let keys: string[];
+      try {
+        keys = Object.keys(arr);
+      } catch {
+        throw new TypeError("unreadable array keys in tool arguments");
+      }
+      for (const key of keys) {
+        if (!/^(0|[1-9][0-9]*)$/.test(key)) {
+          throw new TypeError("extra key on array in tool arguments");
+        }
+        const numeric = Number(key);
+        if (!Number.isSafeInteger(numeric) || numeric >= length) {
+          throw new TypeError("extra key on array in tool arguments");
+        }
+      }
+      const out: unknown[] = new Array(length);
+      for (let index = 0; index < length; index += 1) {
+        let descriptor: PropertyDescriptor | undefined;
+        try {
+          descriptor = Object.getOwnPropertyDescriptor(arr, String(index));
+        } catch {
+          throw new TypeError("unreadable array item in tool arguments");
+        }
+        if (descriptor === undefined) {
+          throw new TypeError("holey array in tool arguments");
+        }
+        if (descriptor.get !== undefined || descriptor.set !== undefined) {
+          throw new TypeError("accessor in tool arguments");
+        }
+        out[index] = canonicalizeForSize(
+          (descriptor as { value?: unknown }).value,
+          active,
+        );
+      }
+      return out;
+    } finally {
+      active.delete(node);
+    }
+  }
+  const proto = Object.getPrototypeOf(node);
+  if (proto !== Object.prototype && proto !== null) {
+    throw new TypeError("non-plain prototype in tool arguments");
+  }
+  active.add(node);
+  try {
     // Null-prototype sink: assigning provider-controlled keys such as
     // `__proto__` creates a plain own property instead of invoking the
     // `Object.prototype` setter (which would mutate the prototype and drop
     // the key from serialization, undercounting size). Every enumerable
     // own key is preserved and sorted for deterministic measurement;
-    // legal JSON keys are never rejected by name.
+    // legal JSON keys are never rejected by name. Descriptors are read via
+    // `getOwnPropertyDescriptor` so accessor getters are rejected without
+    // ever being invoked.
     const sorted: Record<string, unknown> = Object.create(null);
-    for (const key of Object.keys(value).sort()) {
-      sorted[key] = canonicalizeForSize(value[key]);
+    for (const key of Object.keys(node).sort()) {
+      const descriptor = Object.getOwnPropertyDescriptor(node, key) as
+        | { value?: unknown; get?: unknown; set?: unknown }
+        | undefined;
+      if (
+        descriptor === undefined ||
+        descriptor.get !== undefined ||
+        descriptor.set !== undefined
+      ) {
+        throw new TypeError("accessor in tool arguments");
+      }
+      sorted[key] = canonicalizeForSize(descriptor.value, active);
     }
     return sorted;
+  } finally {
+    active.delete(node);
   }
-  return value;
 }
 
 /**
  * Deterministic (sorted-keys, no whitespace) JSON serialization for
- * tool-call arguments size measurement. Key order does not affect the
- * measured byte length; sorting keeps the measurement stable across
- * providers. Mirrors the kernel canonical form for size alignment.
+ * tool-call arguments size measurement and wire encoding. Key order does
+ * not affect the measured byte length; sorting keeps the measurement
+ * stable across providers. Mirrors the kernel canonical form for size
+ * alignment.
+ *
+ * The input must be plain JSON data (see `canonicalizeForSize`): custom
+ * `toJSON`, accessors, symbols, functions, `undefined`, `bigint`,
+ * non-finite numbers, non-plain prototypes, array holes/extras, and
+ * cycles throw `TypeError` without invoking user code and without echoing
+ * data. `JSON.parse` output (plain objects/arrays/primitives) always
+ * remains valid.
+ *
+ * The returned string is the exact representation adapters send on the
+ * wire (OpenAI `arguments` string; parsed back to the object form for
+ * Ollama `tool_calls`, whose outer `JSON.stringify` then emits the same
+ * key order with no whitespace), so the UTF-8 byte length measured here
+ * is the length actually sent against the 32KiB bound.
  */
 export function canonicalToolArgumentsJson(value: unknown): string {
-  return JSON.stringify(canonicalizeForSize(value)) ?? "undefined";
+  const text = JSON.stringify(canonicalizeForSize(value));
+  if (text === undefined) {
+    throw new TypeError("unsupported tool arguments");
+  }
+  return text;
+}
+
+/**
+ * Exact wire encoding for one tool-call arguments payload: the canonical
+ * serialization adapters send (OpenAI `arguments` string directly; parsed
+ * back to the object form for Ollama `tool_calls`, whose outer
+ * `JSON.stringify` then emits the same key order with no whitespace).
+ * Throws `TypeError` for non-plain-JSON input without invoking user code;
+ * callers map the failure to their fixed redacted code. `null`/`undefined`
+ * encode as `{}` (matching adapter empty-arguments semantics).
+ *
+ * Final send-time bound: the canonical string is measured in UTF-8 bytes
+ * here, immediately before adapters send it, and payloads over
+ * `MAX_TOOL_CALL_ARGUMENTS_BYTES` (32KiB) reject with fixed redacted
+ * `invalid_request` (never truncated, never echoed). This catches stateful
+ * arguments that measured small during history validation but serialize
+ * large on the wire (TOCTOU), even when request validation was bypassed.
+ */
+export function toWireToolArgumentsJson(args: unknown): string {
+  const text = canonicalToolArgumentsJson(args ?? {});
+  if (utf8ByteLength(text) > MAX_TOOL_CALL_ARGUMENTS_BYTES) {
+    throw new ModelLocalError(
+      "invalid_request",
+      "model message carries invalid tool calls",
+    );
+  }
+  return text;
+}
+
+/**
+ * Object form of the exact wire encoding (for the Ollama `tool_calls`
+ * payload): reparsed from `toWireToolArgumentsJson`, so the outer request
+ * `JSON.stringify` emits exactly the measured bytes. Derives only from the
+ * checked canonical string above (no independent serialization path), so
+ * the same 32KiB UTF-8 bound and the same fixed redacted `invalid_request`
+ * apply. Plain `Object.prototype` objects only (`__proto__` stays an own
+ * property via the `JSON.parse` round-trip). Throws `TypeError` for
+ * non-plain-JSON input without invoking user code.
+ */
+export function toWireToolArgumentsObject(args: unknown): unknown {
+  return JSON.parse(toWireToolArgumentsJson(args)) as unknown;
 }
 
 /**
@@ -197,6 +462,133 @@ export function assertToolArgumentsByteLengthForTool(
 }
 /** Maximum tool-call id/name lengths for history validation. */
 export const MAX_TOOL_CALL_ID_LENGTH = 256;
+/**
+ * Provider-native tool-name shape enforced before accepting a ChatResult.
+ * Mirrors contracts ToolNameSchema (namespace.verb, lowercase): the
+ * AgentStrategy expects broker tools in this shape, and the reserved
+ * answer.submit terminal protocol already satisfies it (preserved, never
+ * special-cased here). Unknown but well-formed ordinary names pass this
+ * check and reach ToolBroker for authoritative unknown-tool budget/audit.
+ */
+export const NATIVE_TOOL_NAME_PATTERN =
+  /^[a-z0-9]+(?:_[a-z0-9]+)*\.[a-z0-9]+(?:_[a-z0-9]+)*$/;
+
+/** True when a string carries ASCII control characters (never accepted). */
+function hasControlCharacters(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x1f || code === 0x7f) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function nativeToolCallInvalidError(): ModelLocalError {
+  return new ModelLocalError(
+    "tool_call_invalid",
+    "model returned an invalid tool call",
+  );
+}
+
+function nativeToolCallOversizeError(): ModelLocalError {
+  return new ModelLocalError(
+    "invalid_response",
+    "model returned an invalid response",
+  );
+}
+
+/**
+ * Enforce the shared per-message assistant-text bound on normalized
+ * provider output. Assistant `text` longer than MAX_MESSAGE_CONTENT_LENGTH
+ * rejects atomically with fixed redacted invalid_response (never truncated,
+ * never echoed) before AgentStrategy stores it for replay, so no tool
+ * executes and no evidence is created. Measured with the same character
+ * semantics as ChatMessage validation (`text.length`, UTF-16 code units),
+ * not UTF-8 bytes: multibyte characters count by length. Empty text stays
+ * valid (tool-call-only responses); the caller classifies free text.
+ */
+export function assertAssistantTextWithinBound(text: string): void {
+  if (text.length > MAX_MESSAGE_CONTENT_LENGTH) {
+    throw new ModelLocalError(
+      "invalid_response",
+      "model returned an invalid response",
+    );
+  }
+}
+
+/**
+ * Enforce the shared per-message native tool-call count bound on normalized
+ * provider output (r3946739336). A response carrying more than
+ * MAX_TOOL_CALLS_PER_MESSAGE native calls rejects atomically with fixed
+ * redacted invalid_response (never truncated, never echoed) before
+ * AgentStrategy or ToolBroker sees any call, so none executes. The check
+ * runs before per-call argument parsing so an over-count batch containing a
+ * malformed answer.submit still fails as invalid_response (never
+ * answer_invalid, never repaired).
+ */
+export function assertToolCallCountWithinBound(count: number): void {
+  if (count > MAX_TOOL_CALLS_PER_MESSAGE) {
+    throw nativeToolCallOversizeError();
+  }
+}
+
+/**
+ * Validate a provider-native tool-call name before accepting the ChatResult.
+ * Accepts only non-empty namespace.verb names within the 128-char
+ * contracts bound (covers answer.submit and ordinary broker tools).
+ * Rejects empty/control-bearing/misshaped names as fixed redacted
+ * tool_call_invalid and oversize names as fixed redacted
+ * invalid_response. Never truncates, never echoes raw values.
+ */
+export function assertNativeToolCallName(name: unknown): string {
+  if (
+    typeof name !== "string" ||
+    name.length === 0 ||
+    hasControlCharacters(name)
+  ) {
+    throw nativeToolCallInvalidError();
+  }
+  const NAME_LIMIT = 128;
+  if (name.length > NAME_LIMIT) {
+    throw nativeToolCallOversizeError();
+  }
+  if (!NATIVE_TOOL_NAME_PATTERN.test(name)) {
+    throw nativeToolCallInvalidError();
+  }
+  return name;
+}
+
+/**
+ * Validate a provider-native tool-call id before accepting the ChatResult.
+ * Absent (undefined/null) ids synthesize the finite replay-safe
+ * call_<index> fallback (preserves Ollama responses that omit ids and
+ * keeps OpenAI tool_call_id replay correlation valid within the shared
+ * 256-char history bound). Any present id must be a non-empty string
+ * within 256 chars with no control characters: empty/non-string/
+ * control-bearing rejects as fixed redacted tool_call_invalid, oversize
+ * as fixed redacted invalid_response. Never truncates, never echoes.
+ */
+export function normalizeNativeToolCallId(
+  rawId: unknown,
+  index: number,
+): string {
+  if (rawId === undefined || rawId === null) {
+    return `call_${index}`;
+  }
+  if (
+    typeof rawId !== "string" ||
+    rawId.length === 0 ||
+    hasControlCharacters(rawId)
+  ) {
+    throw nativeToolCallInvalidError();
+  }
+  if (rawId.length > MAX_TOOL_CALL_ID_LENGTH) {
+    throw nativeToolCallOversizeError();
+  }
+  return rawId;
+}
+
 export const MAX_TOOL_CALL_NAME_LENGTH = 128;
 
 /**
@@ -395,6 +787,33 @@ function validateHistoryToolCalls(message: ChatMessage): void {
       (call as { name: string }).name.length > MAX_TOOL_CALL_NAME_LENGTH ||
       !isRecord((call as { arguments?: unknown }).arguments)
     ) {
+      throw new ModelLocalError(
+        "invalid_request",
+        "model message carries invalid tool calls",
+      );
+    }
+    // Replay bound (r3946625239): every replayed assistant
+    // toolCalls[].arguments shares the 32KiB UTF-8 deterministic serialized
+    // bound enforced on provider output. Measured here during history
+    // validation — before either adapter JSON.stringify/request construction —
+    // so an oversized replay rejects with fixed redacted invalid_request
+    // without allocating the wire body. Non-plain-JSON replay (custom
+    // toJSON, accessors, symbols, functions, non-plain prototypes, cycles,
+    // unsupported values) rejects the same way without invoking user code.
+    // Never truncated, never echoes raw args, never touches ToolBroker
+    // budget (validation only; the broker still reserves accepted calls).
+    let serialized: string;
+    try {
+      serialized = canonicalToolArgumentsJson(
+        (call as { arguments?: unknown }).arguments,
+      );
+    } catch {
+      throw new ModelLocalError(
+        "invalid_request",
+        "model message carries invalid tool calls",
+      );
+    }
+    if (utf8ByteLength(serialized) > MAX_TOOL_CALL_ARGUMENTS_BYTES) {
       throw new ModelLocalError(
         "invalid_request",
         "model message carries invalid tool calls",
@@ -872,9 +1291,19 @@ function mapFetchRejection(error: unknown): ModelLocalError {
 }
 
 /**
- * Enforce strict native tool-call results: unsolicited calls or calls to
- * unknown tools are rejected (no free-text JSON emulation is performed
- * anywhere; content text is never parsed for tool calls).
+ * Enforce strict native tool-call results: unsolicited calls are rejected,
+ * and every accepted call carries a bounded valid id/name (no free-text
+ * JSON emulation is performed anywhere; content text is never parsed for
+ * tool calls). Duplicate native ids reject atomically with fixed redacted
+ * tool_call_invalid before conversation storage/execution, so trim logic
+ * can never orphan a tool response, except for the multi-answer terminal
+ * protocol: when the entire step consists of multiple answer.submit calls
+ * (count > 1, every name is answer.submit), duplicate ids pass through so
+ * AgentStrategy applies its deterministic-ID remap and duplicate-answer
+ * repair-once path (no Broker execution). Unknown but well-formed ordinary names are NOT rejected
+ * here: they pass through so the AgentStrategy/ToolBroker applies the
+ * authoritative unknown-tool budget/audit. Malformed ids/names reject
+ * with fixed redacted codes (never truncated, never echoed).
  */
 export function validateNativeToolCalls(options: {
   toolCalls: { id: string; name: string; arguments: unknown }[];
@@ -892,15 +1321,361 @@ export function validateNativeToolCalls(options: {
       "model returned tool calls without tools requested",
     );
   }
-  const known = new Set(options.requestedTools.map((tool) => tool.name));
+  // Per-call bounds first: every original call (including a duplicate
+  // answer.submit) must carry a valid bounded id/name; failures reject
+  // atomically before any duplicate exception is considered.
   for (const call of options.toolCalls) {
-    if (!known.has(call.name)) {
+    normalizeNativeToolCallId(call.id, 0);
+    assertNativeToolCallName(call.name);
+  }
+  // Duplicate-answer exception: the whole step is multiple answer.submit
+  // calls (count > 1, all names answer.submit). Ordinary or mixed batches
+  // fall through to the atomic duplicate gate below.
+  if (
+    options.toolCalls.length > 1 &&
+    options.toolCalls.every((call) => call.name === ANSWER_SUBMIT_TOOL_NAME)
+  ) {
+    return;
+  }
+  const seenIds = new Set<string>();
+  for (const call of options.toolCalls) {
+    if (seenIds.has(call.id)) {
+      throw nativeToolCallInvalidError();
+    }
+    seenIds.add(call.id);
+  }
+}
+
+/**
+ * Validate an injected/normalized ChatResult before execution or storage
+ * (r3949581177/r3949352972, r3950152834). Custom gateways bypass provider normalization,
+ * so AgentStrategy must apply every existing bound atomically here: assistant
+ * text (character semantics), stopReason, per-message tool-call count, per-call id/name
+ * shape and bounds, per-call plain-JSON arguments with the exact 32KiB
+ * canonical UTF-8 bound, and duplicate ids. Unknown but well-formed ordinary
+ * names still pass (authoritative unknown-tool budget/audit stays with the
+ * ToolBroker). Throws the same fixed redacted codes as provider
+ * normalization (`answer_invalid` for malformed/oversize answer.submit
+ * arguments, `tool_call_invalid` for malformed ids/names/args/duplicates or
+ * unsolicited calls, `invalid_response` for oversize text/count/ids/names or
+ * non-object shapes). Never truncates, never echoes raw values, never
+ * executes or grants anything (validation only).
+ *
+ * Detached snapshot (r3950152834, r3950938866): `text`/`stopReason`/
+ * `toolCalls`/`usage` are each captured once via own data descriptors
+ * (accessor descriptors reject without invoking user code, so a stateful
+ * getter's second value is never executed), each arguments object is cloned
+ * from its already-computed canonical JSON string, optional `usage` is
+ * snapped as token counts only ({inputTokens, outputTokens} nonnegative
+ * safe integers, no extra/raw fields) and cloned into a new plain object
+ * included only when valid (absent or malformed/unsafe/custom/accessor/
+ * non-plain usage is omitted for exactOptionalPropertyTypes, matching
+ * AgentStrategy sanitizeModelUsage drop-to-null so answer validity never
+ * depends on optional usage metadata), and a new plain `ChatResult` with
+ * new call objects is returned. Callers must use the returned snapshot
+ * (never the source result), so later mutation cannot change what was
+ * validated. No nested references are shared with the source result. Usage
+ * getters and `toJSON` are never invoked.
+ */
+export function validateChatResult(
+  result: unknown,
+  requestedTools?: readonly ToolDefinition[] | undefined,
+): ChatResult {
+  if (typeof result !== "object" || result === null || Array.isArray(result)) {
+    throw new ModelLocalError(
+      "invalid_response",
+      "model returned an invalid response",
+    );
+  }
+  const source = result as object;
+  // Single capture per top-level field via own data descriptors: an accessor
+  // descriptor rejects without invoking the getter (zero executions, so a
+  // second getter value can never surface); a missing own property rejects
+  // as malformed. Plain `JSON.parse` / object-literal results always carry
+  // own data properties, so legal shapes stay valid.
+  const readTopField = (key: string): unknown => {
+    let descriptor: PropertyDescriptor | undefined;
+    try {
+      descriptor = Object.getOwnPropertyDescriptor(source, key);
+    } catch {
       throw new ModelLocalError(
-        "tool_call_invalid",
-        "model requested an unknown tool",
+        "invalid_response",
+        "model returned an invalid response",
       );
     }
+    if (descriptor === undefined) {
+      throw new ModelLocalError(
+        "invalid_response",
+        "model returned an invalid response",
+      );
+    }
+    if (descriptor.get !== undefined || descriptor.set !== undefined) {
+      throw new ModelLocalError(
+        "invalid_response",
+        "model returned an invalid response",
+      );
+    }
+    return descriptor.value;
+  };
+  const text = readTopField("text");
+  const stopReason = readTopField("stopReason");
+  const toolCallsValue = readTopField("toolCalls");
+  if (typeof text !== "string") {
+    throw new ModelLocalError(
+      "invalid_response",
+      "model returned an invalid response",
+    );
   }
+  // Text bound first so an oversize batch containing a malformed
+  // answer.submit still fails as invalid_response (never repaired).
+  assertAssistantTextWithinBound(text);
+  if (
+    stopReason !== "stop" &&
+    stopReason !== "tool_calls" &&
+    stopReason !== "unknown"
+  ) {
+    throw new ModelLocalError(
+      "invalid_response",
+      "model returned an invalid response",
+    );
+  }
+  if (!Array.isArray(toolCallsValue)) {
+    throw new ModelLocalError(
+      "invalid_response",
+      "model returned an invalid response",
+    );
+  }
+  const toolCalls = toolCallsValue as unknown[];
+  // Count bound before per-call parsing (same ordering as adapters).
+  assertToolCallCountWithinBound(toolCalls.length);
+  const seenIds = new Map<string, string>();
+  const names: string[] = [];
+  const snapshotCalls: { id: string; name: string; arguments: unknown }[] = [];
+  for (let index = 0; index < toolCalls.length; index += 1) {
+    // Single capture per element: holes and accessor elements reject without
+    // invoking user code.
+    let elementDescriptor: PropertyDescriptor | undefined;
+    try {
+      elementDescriptor = Object.getOwnPropertyDescriptor(
+        toolCalls,
+        String(index),
+      );
+    } catch {
+      throw nativeToolCallInvalidError();
+    }
+    if (
+      elementDescriptor === undefined ||
+      elementDescriptor.get !== undefined ||
+      elementDescriptor.set !== undefined
+    ) {
+      throw nativeToolCallInvalidError();
+    }
+    const entry = elementDescriptor.value;
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      throw nativeToolCallInvalidError();
+    }
+    const callSource = entry as object;
+    const readCallField = (key: string): unknown => {
+      let descriptor: PropertyDescriptor | undefined;
+      try {
+        descriptor = Object.getOwnPropertyDescriptor(callSource, key);
+      } catch {
+        throw nativeToolCallInvalidError();
+      }
+      if (descriptor === undefined) {
+        return undefined;
+      }
+      if (descriptor.get !== undefined || descriptor.set !== undefined) {
+        if (key === "arguments") {
+          // Name is read below; defer precise per-tool error until after.
+          throw new TypeError("accessor in tool arguments");
+        }
+        throw nativeToolCallInvalidError();
+      }
+      return descriptor.value;
+    };
+    // Injected results must carry an explicit id: absent ids reject here
+    // (provider adapters synthesize call_<index> only for omitted
+    // provider-native ids, never for already-normalized results).
+    const rawId = readCallField("id");
+    if (rawId === undefined || rawId === null) {
+      throw nativeToolCallInvalidError();
+    }
+    const id = normalizeNativeToolCallId(rawId, index);
+    const rawName = readCallField("name");
+    const name = assertNativeToolCallName(rawName);
+    let args: unknown;
+    try {
+      args = readCallField("arguments");
+    } catch {
+      throwInvalidToolArguments(name);
+    }
+    if (!isRecord(args)) {
+      throwInvalidToolArguments(name);
+    }
+    let serialized: string;
+    try {
+      serialized = canonicalToolArgumentsJson(args);
+    } catch {
+      throwInvalidToolArguments(name);
+    }
+    assertToolArgumentsByteLengthForTool(utf8ByteLength(serialized), name);
+    // Detached clone from the already-computed canonical string: plain
+    // `Object.prototype` data only, no shared references with the source.
+    const clonedArgs = JSON.parse(serialized) as unknown;
+    // Duplicate answer.submit ids defer to AgentStrategy classification so
+    // the terminal protocol repairs exactly once; any duplicate involving
+    // an ordinary tool rejects atomically here so nothing executes.
+    const prior = seenIds.get(id);
+    if (prior !== undefined) {
+      if (
+        !(prior === ANSWER_SUBMIT_TOOL_NAME && name === ANSWER_SUBMIT_TOOL_NAME)
+      ) {
+        throw nativeToolCallInvalidError();
+      }
+    } else {
+      seenIds.set(id, name);
+    }
+    names.push(name);
+    snapshotCalls.push({ id, name, arguments: clonedArgs });
+  }
+  // Optional usage snapshot (r3950938866): captured exactly once via its own
+  // data descriptor (accessor descriptors are dropped without invoking user
+  // code, so a stateful getter's second value is never executed and getters
+  // are never invoked). Absent (missing own property, undefined, or null)
+  // is omitted for exactOptionalPropertyTypes. When present, only exactly
+  // {inputTokens, outputTokens} as nonnegative safe integers is cloned into
+  // a new plain object; any malformed/unsafe/custom/accessor/non-plain
+  // usage (wrong types, fractions, negatives, unsafe integers, missing
+  // counts, extra/raw fields such as total_tokens/reasoning/raw, symbol
+  // keys, custom toJSON, non-plain prototypes, arrays, non-objects, or
+  // unreadable descriptors) is dropped to absent instead of failing the
+  // whole response, matching AgentStrategy sanitizeModelUsage drop-to-null
+  // so answer/tool validity never depends on optional usage metadata.
+  // Never invokes getters or `toJSON`; never preserves or echoes invalid
+  // usage.
+  const readUsageSnapshot = ():
+    | { inputTokens: number; outputTokens: number }
+    | undefined => {
+    let usageDescriptor: PropertyDescriptor | undefined;
+    try {
+      usageDescriptor = Object.getOwnPropertyDescriptor(source, "usage");
+    } catch {
+      return undefined;
+    }
+    if (usageDescriptor === undefined) {
+      return undefined;
+    }
+    if (
+      usageDescriptor.get !== undefined ||
+      usageDescriptor.set !== undefined
+    ) {
+      return undefined;
+    }
+    const rawUsage = usageDescriptor.value;
+    if (rawUsage === undefined || rawUsage === null) {
+      return undefined;
+    }
+    if (typeof rawUsage !== "object" || Array.isArray(rawUsage as unknown[])) {
+      return undefined;
+    }
+    const usageNode = rawUsage as object;
+    let usageProto: unknown;
+    try {
+      usageProto = Object.getPrototypeOf(usageNode);
+    } catch {
+      return undefined;
+    }
+    if (usageProto !== Object.prototype && usageProto !== null) {
+      return undefined;
+    }
+    try {
+      if (Object.getOwnPropertySymbols(usageNode).length > 0) {
+        return undefined;
+      }
+      // Custom toJSON (own) would change serialization; drop without invoking.
+      if (Object.getOwnPropertyDescriptor(usageNode, "toJSON") !== undefined) {
+        return undefined;
+      }
+    } catch {
+      return undefined;
+    }
+    let inputDescriptor: PropertyDescriptor | undefined;
+    let outputDescriptor: PropertyDescriptor | undefined;
+    try {
+      inputDescriptor = Object.getOwnPropertyDescriptor(
+        usageNode,
+        "inputTokens",
+      );
+      outputDescriptor = Object.getOwnPropertyDescriptor(
+        usageNode,
+        "outputTokens",
+      );
+    } catch {
+      return undefined;
+    }
+    if (
+      inputDescriptor === undefined ||
+      outputDescriptor === undefined ||
+      inputDescriptor.get !== undefined ||
+      inputDescriptor.set !== undefined ||
+      outputDescriptor.get !== undefined ||
+      outputDescriptor.set !== undefined
+    ) {
+      return undefined;
+    }
+    const inputTokens = (inputDescriptor as { value?: unknown }).value;
+    const outputTokens = (outputDescriptor as { value?: unknown }).value;
+    if (!isSafeUsageCount(inputTokens) || !isSafeUsageCount(outputTokens)) {
+      return undefined;
+    }
+    let keys: string[];
+    try {
+      keys = Object.keys(usageNode);
+    } catch {
+      return undefined;
+    }
+    if (
+      keys.length !== 2 ||
+      !keys.includes("inputTokens") ||
+      !keys.includes("outputTokens")
+    ) {
+      return undefined;
+    }
+    return { inputTokens, outputTokens };
+  };
+  const usageSnapshot = readUsageSnapshot();
+  // Multiple answer.submit calls (same or distinct ids) classify as the
+  // duplicate terminal protocol in AgentStrategy: skip the shared duplicate
+  // gate and return the detached snapshot after the unsolicited check so
+  // repair-once applies.
+  if (names.filter((entry) => entry === ANSWER_SUBMIT_TOOL_NAME).length > 1) {
+    if (
+      toolCalls.length > 0 &&
+      (requestedTools === undefined || requestedTools.length === 0)
+    ) {
+      throw new ModelLocalError(
+        "tool_call_invalid",
+        "model returned tool calls without tools requested",
+      );
+    }
+    return {
+      text,
+      toolCalls: snapshotCalls,
+      stopReason: stopReason as ChatResult["stopReason"],
+      ...(usageSnapshot === undefined ? {} : { usage: usageSnapshot }),
+    };
+  }
+  validateNativeToolCalls({
+    toolCalls: snapshotCalls,
+    requestedTools,
+  });
+  return {
+    text,
+    toolCalls: snapshotCalls,
+    stopReason: stopReason as ChatResult["stopReason"],
+    ...(usageSnapshot === undefined ? {} : { usage: usageSnapshot }),
+  };
 }
 
 /** Plain-object guard for provider payloads. */

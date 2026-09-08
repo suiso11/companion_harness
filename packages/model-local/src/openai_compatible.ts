@@ -7,16 +7,21 @@
 
 import { ModelLocalError } from "./errors.js";
 import {
+  assertAssistantTextWithinBound,
+  assertNativeToolCallName,
   assertToolArgumentsByteLengthForTool,
+  assertToolCallCountWithinBound,
   assertToolCallingCapability,
   canonicalToolArgumentsJson,
   extractModelUsage,
   isRecord,
   joinLoopbackPath,
   type ModelGateway,
+  normalizeNativeToolCallId,
   postJsonNoRedirect,
   resolveGatewayConfig,
   throwInvalidToolArguments,
+  toWireToolArgumentsJson,
   utf8ByteLength,
   validateChatRequest,
   validateNativeToolCalls,
@@ -53,10 +58,16 @@ function toolArgumentsFromNative(value: unknown, toolName: string): unknown {
     // Object form: measure deterministic serialized UTF-8 bytes (never
     // truncated, never echoed). Oversize rejects the whole response:
     // answer.submit as fixed answer_invalid, ordinary as invalid_response.
-    assertToolArgumentsByteLengthForTool(
-      utf8ByteLength(canonicalToolArgumentsJson(value)),
-      toolName,
-    );
+    // Non-plain-JSON object forms (custom toJSON, accessors, symbols,
+    // functions, non-plain prototypes, cycles, unsupported values) reject
+    // via the same per-tool path without invoking user code.
+    let serialized: string;
+    try {
+      serialized = canonicalToolArgumentsJson(value);
+    } catch {
+      throwInvalidToolArguments(toolName);
+    }
+    assertToolArgumentsByteLengthForTool(utf8ByteLength(serialized), toolName);
     return value;
   }
   if (typeof value === "string") {
@@ -123,6 +134,12 @@ export function normalizeOpenAIResponse(
     }
     text = message.content;
   }
+  // Text bound first (character semantics, same as ChatMessage
+  // validation): oversize text rejects the whole response as fixed
+  // invalid_response before any tool-call parsing, so an oversize batch
+  // containing a malformed answer.submit still fails as invalid_response
+  // (never answer_invalid, never repaired) and no tool executes.
+  assertAssistantTextWithinBound(text);
   const toolCalls: NormalizedToolCall[] = [];
   if (message.tool_calls !== undefined && message.tool_calls !== null) {
     if (!Array.isArray(message.tool_calls)) {
@@ -133,7 +150,10 @@ export function normalizeOpenAIResponse(
     }
     // Atomic: any oversize/invalid call throws before a ChatResult is
     // built, so a response containing one oversize call is never
-    // partially accepted.
+    // partially accepted. The shared per-message count bound rejects
+    // before per-call argument parsing so an over-count batch containing
+    // a malformed answer.submit still fails as invalid_response.
+    assertToolCallCountWithinBound(message.tool_calls.length);
     message.tool_calls.forEach((entry: unknown, index: number) => {
       if (!isRecord(entry)) {
         throw new ModelLocalError(
@@ -165,17 +185,8 @@ export function normalizeOpenAIResponse(
           "model returned an invalid tool call",
         );
       }
-      const name = entry.function.name;
-      if (typeof name !== "string" || name.length === 0) {
-        throw new ModelLocalError(
-          "tool_call_invalid",
-          "model returned an invalid tool call",
-        );
-      }
-      const id =
-        typeof entry.id === "string" && entry.id.length > 0
-          ? entry.id
-          : `call_${index}`;
+      const name = assertNativeToolCallName(entry.function.name);
+      const id = normalizeNativeToolCallId(entry.id, index);
       toolCalls.push({
         id,
         name,
@@ -263,14 +274,30 @@ export function toOpenAIMessage(message: ChatMessage): Record<string, unknown> {
     message.toolCalls !== undefined &&
     message.toolCalls.length > 0
   ) {
-    entry.tool_calls = message.toolCalls.map((call) => ({
-      id: call.id,
-      type: "function",
-      function: {
-        name: call.name,
-        arguments: JSON.stringify(call.arguments ?? {}),
-      },
-    }));
+    // Replay arguments serialize to the exact canonical representation
+    // measured during history validation (same bytes checked against the
+    // 32KiB bound). Non-plain-JSON replay rejects here with fixed redacted
+    // invalid_request without invoking user code, even if request
+    // validation was bypassed.
+    entry.tool_calls = message.toolCalls.map((call) => {
+      let wireArguments: string;
+      try {
+        wireArguments = toWireToolArgumentsJson(call.arguments);
+      } catch {
+        throw new ModelLocalError(
+          "invalid_request",
+          "model message carries invalid tool calls",
+        );
+      }
+      return {
+        id: call.id,
+        type: "function",
+        function: {
+          name: call.name,
+          arguments: wireArguments,
+        },
+      };
+    });
   }
   return entry;
 }

@@ -387,3 +387,255 @@ describe("late gateway success race", () => {
     }
   });
 });
+
+describe("post-validation deadline (r3950636369)", () => {
+  // Synchronous validateChatResult consumes real budget, so a snapshot that
+  // was in-time at gateway resolve may be past budget when validation
+  // returns. The step re-runs the authoritative late-success gate immediately
+  // after validation returns, before success audit, classifyStep, answer
+  // acceptance, broker execution, or evidence grants. Deterministic: the
+  // custom gateway returns a Proxy-wrapped ChatResult whose first validation
+  // descriptor read advances (or aborts) the fake clock mid-validation, so
+  // pre-validation rechecks pass while the post-validation recheck decides.
+  function validationTimebomb(
+    base: ChatResult,
+    onValidate: () => void,
+  ): ChatResult {
+    let fired = false;
+    return new Proxy(base, {
+      getOwnPropertyDescriptor(target, prop) {
+        if (
+          !fired &&
+          (prop === "text" || prop === "stopReason" || prop === "toolCalls")
+        ) {
+          fired = true;
+          onValidate();
+        }
+        return Reflect.getOwnPropertyDescriptor(target, prop);
+      },
+    });
+  }
+
+  it("discards a snapshot whose validation crosses the 120s step deadline", async () => {
+    expect(AGENT_STEP_TIMEOUT_MS).toBe(120_000);
+    const { handle, repo } = await setup();
+    try {
+      let now = T0;
+      const clock = { now: () => now };
+      const release: {
+        resolve: ((value: ChatResult) => void) | null;
+      } = { resolve: null };
+      const broker = createToolBroker({
+        db: handle.raw,
+        repo,
+        registrations: [],
+      });
+      const strategy = createAgentStrategy({
+        db: handle.raw,
+        repo,
+        broker,
+        gateway: deferredGateway(release),
+        model: "m",
+        clock,
+      });
+      const { sessionId, runId } = newRunningTurn(repo, T0);
+      const pending = strategy(ctxFor(repo, runId));
+      await flushToGateway();
+      expect(release.resolve).not.toBeNull();
+      // In-time at gateway resolve; validation consumes the remaining time
+      // and lands exactly on the step boundary (fail-closed).
+      const bomb = validationTimebomb(answerResult(), () => {
+        now = T0 + AGENT_STEP_TIMEOUT_MS;
+      });
+      (release.resolve as (value: ChatResult) => void)(bomb);
+      await expect(pending).rejects.toMatchObject({
+        name: "StrategyError",
+        errorCode: "execution_failed",
+      });
+      const rows = repo.listModelCalls(runId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        step: 1,
+        outcome: "timeout",
+        errorCode: "model_step_timeout",
+      });
+      const events = stepEvents(repo, sessionId, runId);
+      expect(
+        events.filter((e) => e.type === "model.step.completed"),
+      ).toHaveLength(0);
+      expect(events.filter((e) => e.type === "model.step.failed")).toHaveLength(
+        1,
+      );
+      expect(repo.getRun(runId).status).toBe("running");
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("discards a snapshot whose validation crosses the 300s wall deadline", async () => {
+    expect(AGENT_WALL_MS).toBe(300_000);
+    const { handle, repo } = await setup();
+    try {
+      let now = T0;
+      const clock = { now: () => now };
+      const release: {
+        resolve: ((value: ChatResult) => void) | null;
+      } = { resolve: null };
+      const broker = createToolBroker({
+        db: handle.raw,
+        repo,
+        registrations: [],
+      });
+      const strategy = createAgentStrategy({
+        db: handle.raw,
+        repo,
+        broker,
+        gateway: deferredGateway(release),
+        model: "m",
+        clock,
+        // Oversized step budget isolates the wall: only the wall recheck
+        // can discard this snapshot.
+        stepTimeoutMs: 600_000,
+      });
+      const { sessionId, runId } = newRunningTurn(repo, T0);
+      const pending = strategy(ctxFor(repo, runId));
+      await flushToGateway();
+      expect(release.resolve).not.toBeNull();
+      const bomb = validationTimebomb(answerResult(), () => {
+        now = T0 + AGENT_WALL_MS;
+      });
+      (release.resolve as (value: ChatResult) => void)(bomb);
+      await expect(pending).rejects.toMatchObject({
+        name: "StrategyError",
+        errorCode: "execution_failed",
+      });
+      const rows = repo.listModelCalls(runId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        step: 1,
+        outcome: "timeout",
+        errorCode: "model_step_timeout",
+      });
+      const events = stepEvents(repo, sessionId, runId);
+      expect(
+        events.filter((e) => e.type === "model.step.completed"),
+      ).toHaveLength(0);
+      expect(events.filter((e) => e.type === "model.step.failed")).toHaveLength(
+        1,
+      );
+      expect(repo.getRun(runId).status).toBe("running");
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("accepts a snapshot whose validation stays just before the step deadline", async () => {
+    const { handle, repo } = await setup();
+    try {
+      let now = T0;
+      const clock = { now: () => now };
+      const release: {
+        resolve: ((value: ChatResult) => void) | null;
+      } = { resolve: null };
+      const broker = createToolBroker({
+        db: handle.raw,
+        repo,
+        registrations: [],
+      });
+      const strategy = createAgentStrategy({
+        db: handle.raw,
+        repo,
+        broker,
+        gateway: deferredGateway(release),
+        model: "m",
+        clock,
+      });
+      const { sessionId, runId } = newRunningTurn(repo, T0);
+      const pending = strategy(ctxFor(repo, runId));
+      await flushToGateway();
+      expect(release.resolve).not.toBeNull();
+      // Validation consumes nearly all remaining time but lands 1ms inside
+      // budget: the post-validation recheck must not false-positive.
+      const bomb = validationTimebomb(answerResult(), () => {
+        now = T0 + AGENT_STEP_TIMEOUT_MS - 1;
+      });
+      (release.resolve as (value: ChatResult) => void)(bomb);
+      await expect(pending).resolves.toEqual({
+        version: 2,
+        text: "final",
+        answer: { version: 1, parts: [{ text: "final", citations: [] }] },
+      });
+      const rows = repo.listModelCalls(runId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        step: 1,
+        outcome: "completed",
+        errorCode: null,
+      });
+      const events = stepEvents(repo, sessionId, runId);
+      expect(
+        events.filter((e) => e.type === "model.step.completed"),
+      ).toHaveLength(1);
+      expect(events.filter((e) => e.type === "model.step.failed")).toHaveLength(
+        0,
+      );
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("engine abort during validation discards the snapshot as cancelled", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const now = T0;
+      const clock = { now: () => now };
+      const release: {
+        resolve: ((value: ChatResult) => void) | null;
+      } = { resolve: null };
+      const broker = createToolBroker({
+        db: handle.raw,
+        repo,
+        registrations: [],
+      });
+      const strategy = createAgentStrategy({
+        db: handle.raw,
+        repo,
+        broker,
+        gateway: deferredGateway(release),
+        model: "m",
+        clock,
+      });
+      const { sessionId, runId } = newRunningTurn(repo, T0);
+      const controller = new AbortController();
+      const pending = strategy(ctxFor(repo, runId, controller.signal));
+      await flushToGateway();
+      expect(release.resolve).not.toBeNull();
+      // Cancellation lands mid-validation while still in budget: it must win
+      // as cancelled (never timeout, never completed).
+      const bomb = validationTimebomb(answerResult(), () => {
+        controller.abort();
+      });
+      (release.resolve as (value: ChatResult) => void)(bomb);
+      await expect(pending).rejects.toMatchObject({
+        name: "StrategyError",
+        errorCode: "execution_cancelled",
+      });
+      const rows = repo.listModelCalls(runId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        step: 1,
+        outcome: "cancelled",
+        errorCode: null,
+      });
+      const events = stepEvents(repo, sessionId, runId);
+      expect(events.filter((e) => e.type === "model.step.failed")).toHaveLength(
+        0,
+      );
+      expect(
+        events.filter((e) => e.type === "model.step.completed"),
+      ).toHaveLength(0);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+});

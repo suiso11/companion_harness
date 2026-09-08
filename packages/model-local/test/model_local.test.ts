@@ -7,6 +7,7 @@ import {
   MAX_MESSAGE_CONTENT_LENGTH,
   postJsonNoRedirect,
   validateChatRequest,
+  validateNativeToolCalls,
 } from "../src/gateway.js";
 import {
   createOllamaGateway,
@@ -235,6 +236,21 @@ describe("capabilities and request validation", () => {
       ),
     ).toThrowError(ModelLocalError);
   });
+
+  it("rejects duplicate native tool-call ids", () => {
+    const requestedTools = [{ name: "notes.search", description: "a" }];
+    const toolCalls = [
+      { id: "call-1", name: "notes.search", arguments: {} },
+      { id: "call-1", name: "notes.search", arguments: {} },
+    ];
+    try {
+      validateNativeToolCalls({ toolCalls, requestedTools });
+      expect.unreachable();
+    } catch (error) {
+      expect(error).toBeInstanceOf(ModelLocalError);
+      expect((error as ModelLocalError).code).toBe("tool_call_invalid");
+    }
+  });
 });
 
 describe("ollama adapter", () => {
@@ -301,7 +317,7 @@ describe("ollama adapter", () => {
     ]);
   });
 
-  it("rejects unknown tool names without leaking the body", async () => {
+  it("passes unknown but well-formed tool names to the broker without leaking the body", async () => {
     const { fetchImpl } = mockFetch(
       jsonResponse({
         message: {
@@ -323,17 +339,17 @@ describe("ollama adapter", () => {
       baseUrl: "http://localhost:11434",
       fetchImpl,
     });
-    try {
-      await gateway.chat(
-        baseRequest({
-          tools: [{ name: "notes.search", description: "search" }],
-        }),
-      );
-      expect.unreachable();
-    } catch (error) {
-      const err = expectRedacted(error);
-      expect(err.code).toBe("tool_call_invalid");
-    }
+    const result = await gateway.chat(
+      baseRequest({
+        tools: [{ name: "notes.search", description: "search" }],
+      }),
+    );
+    // Gateway passes well-formed unknown names through; ToolBroker applies
+    // the authoritative unknown-tool budget/audit downstream.
+    expect(result.toolCalls).toHaveLength(1);
+    expect(result.toolCalls[0]?.name).toBe("evil.tool");
+    expect(JSON.stringify(result)).not.toContain(SECRET_TOKEN);
+    expect(JSON.stringify(result)).not.toContain(PROMPT_MARKER);
   });
 
   it("rejects unsolicited tool calls and malformed payloads", async () => {
