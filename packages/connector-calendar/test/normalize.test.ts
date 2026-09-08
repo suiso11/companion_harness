@@ -114,6 +114,82 @@ describe("deletion classifier (no tombstone from omission)", () => {
   });
 });
 
+describe("event time validation + normalized-snapshot hash (§17.4)", () => {
+  it("accepts all-day DATE ranges with exclusive end", async () => {
+    const out = await normalizeEvent(
+      {
+        id: "e2",
+        calendarId: "primary",
+        status: "confirmed",
+        summary: "Holiday",
+        start: "2026-09-10",
+        end: "2026-09-11",
+      },
+      { connectorInstanceId: "cal-1", nowIso: "2026-09-08T00:00:00Z" },
+    );
+    expect(out.allDayEndExclusive).toBe(true);
+  });
+
+  it("rejects end<=start, invalid ISO, and invalid all-day dates", async () => {
+    const base = {
+      id: "e3",
+      calendarId: "primary",
+      status: "confirmed",
+      summary: "Bad",
+    };
+    await expect(
+      normalizeEvent(
+        { ...base, start: "2026-09-10T10:00:00+09:00", end: "2026-09-10T09:00:00+09:00" },
+        { connectorInstanceId: "cal-1", nowIso: "2026-09-08T00:00:00Z" },
+      ),
+    ).rejects.toThrow();
+    await expect(
+      normalizeEvent(
+        { ...base, start: "not-a-time", end: "2026-09-10T09:00:00+09:00" },
+        { connectorInstanceId: "cal-1", nowIso: "2026-09-08T00:00:00Z" },
+      ),
+    ).rejects.toThrow();
+    await expect(
+      normalizeEvent(
+        { ...base, start: "2026-02-30", end: "2026-03-01" },
+        { connectorInstanceId: "cal-1", nowIso: "2026-09-08T00:00:00Z" },
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("hashes the truncated normalized snapshot, not the raw source", async () => {
+    const long = "x".repeat(9000);
+    const a = await normalizeEvent(
+      {
+        id: "e4",
+        calendarId: "primary",
+        status: "confirmed",
+        summary: "T",
+        description: `${long}AAA-tail`,
+        start: "2026-09-10T09:00:00+09:00",
+        end: "2026-09-10T09:30:00+09:00",
+      },
+      { connectorInstanceId: "cal-1", nowIso: "2026-09-08T00:00:00Z" },
+    );
+    const b = await normalizeEvent(
+      {
+        id: "e4",
+        calendarId: "primary",
+        status: "confirmed",
+        summary: "T",
+        description: `${long}BBB-tail`,
+        start: "2026-09-10T09:00:00+09:00",
+        end: "2026-09-10T09:30:00+09:00",
+      },
+      { connectorInstanceId: "cal-1", nowIso: "2026-09-08T00:00:00Z" },
+    );
+    // Both descriptions truncate to the same 8192-char snapshot prefix, so
+    // the snapshot hash must be identical (a raw-source hash would differ).
+    expect(a.revisionBasis).toBe("normalized-hash");
+    expect(a.sourceRevision).toBe(b.sourceRevision);
+  });
+});
+
 describe("proposed binding identity (NOT upstream compat)", () => {
   it("pins the single model tool and four internal operations", () => {
     expect(PROPOSED_BINDING.modelTool).toBe("calendar.search");

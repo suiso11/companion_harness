@@ -1,13 +1,69 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import {
+  DEFAULT_INHERITED_ENV_VARS,
+  StdioClientTransport,
+} from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { nextBackoffMs } from "./backoff.js";
-import { type McpConnectorConfig, STDERR_CAP_BYTES } from "./config.js";
+import {
+  type McpConnectorConfig,
+  STDERR_CAP_BYTES,
+  canonicalSchemaHash,
+} from "./config.js";
 import type { McpErrorCode } from "./errors.js";
 
 /** Creates the SDK transport for a config. Injectable in tests (fake only). */
 export type TransportFactory = (config: McpConnectorConfig) => Transport;
+
+/**
+ * Known SDK 1.30.0 gap (§17.7, truthful): StdioClientTransport merges
+ * `getDefaultEnvironment()` (DEFAULT_INHERITED_ENV_VARS) UNDER the explicit
+ * `env` param. An exact explicit allowlist is NOT enforceable via this SDK
+ * version — inherited defaults (PATH etc.) always reach the child. We pass
+ * only allowlisted names explicitly and surface the inherited set here so
+ * callers cannot falsely claim exact-env compliance.
+ */
+export const STDIO_IMPLICIT_ENV_VARS: readonly string[] =
+  DEFAULT_INHERITED_ENV_VARS;
+
+/** Loopback hosts permitted for Streamable HTTP (§17.7, exact). */
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
+
+export function assertLoopbackHttp(url: URL): void {
+  if (!LOOPBACK_HOSTS.has(url.hostname)) {
+    throw new Error(
+      `Streamable HTTP host must be loopback, got: ${url.hostname}`,
+    );
+  }
+}
+
+/**
+ * Fetch wrapper pinning manual redirects: any 3xx is refused as a fixed
+ * error (SDK 1.30.0 exposes no redirect:false option; default fetch would
+ * follow). Also re-checks loopback at the runtime boundary.
+ */
+export function loopbackNoRedirectFetch(
+  input: string | URL | Request,
+  init?: RequestInit,
+): Promise<Response> {
+  const url =
+    typeof input === "string"
+      ? new URL(input)
+      : input instanceof URL
+        ? input
+        : new URL((input as Request).url);
+  assertLoopbackHttp(url);
+  return fetch(input as unknown as string, {
+    ...init,
+    redirect: "manual",
+  }).then((res) => {
+    if (res.status >= 300 && res.status < 400) {
+      throw new Error(`redirect refused: HTTP ${res.status}`);
+    }
+    return res;
+  });
+}
 
 export type CallResult =
   | { ok: true; structuredContent?: unknown; text?: string }
@@ -92,19 +148,37 @@ export class McpConnector {
   async callTool(upstreamTool: string, args: unknown): Promise<CallResult> {
     return this.withMutex(async () => {
       if (!this.isAllowed(upstreamTool)) {
+        const configured = this.config.bindings.some(
+          (b) => b.upstreamTool === upstreamTool,
+        );
+        // Configured but identity-disabled (drift/missing): fixed mismatch,
+        // no upstream call. Unconfigured: not-allowed.
+        if (configured) {
+          return { ok: false, code: "mcp_schema_mismatch" as const };
+        }
         return { ok: false, code: "mcp_binding_not_allowed" as const };
       }
       const ensured = await this.ensureConnected();
       if (!ensured.ok) return ensured;
+      // Re-check identity after connect (drift between calls disables).
+      if (!this.isAllowed(upstreamTool)) {
+        return { ok: false, code: "mcp_schema_mismatch" as const };
+      }
       try {
         const client = this.client as Client;
         const res = (await client.callTool({
           name: upstreamTool,
           arguments: (args ?? {}) as Record<string, unknown>,
         })) as {
+          isError?: boolean;
           structuredContent?: unknown;
           content?: Array<{ type: string; text?: string }>;
         };
+        // MCP isError=true is a tool-level error: fixed code, never ok text.
+        // No raw error content leaves this package (§17.8 redaction).
+        if (res.isError === true) {
+          return { ok: false, code: "calendar_upstream_error" as const };
+        }
         const text = Array.isArray(res.content)
           ? res.content
               .filter((c) => c.type === "text")
@@ -113,13 +187,20 @@ export class McpConnector {
           : undefined;
         return { ok: true, structuredContent: res.structuredContent, text };
       } catch {
-        this.markFailure();
+        await this.markFailure();
         return { ok: false, code: "mcp_unavailable" as const };
       }
     });
   }
 
-  /** Lazy connect; demand reconnect applies the backoff before dialing. */
+  /**
+   * Lazy connect + binding-identity verification (§17.3): after the SDK
+   * handshake, tools/list is fetched and each configured binding's exact
+   * name + canonical input-schema SHA-256 is compared. Any missing/mismatch
+   * disables that binding; connect reports mcp_schema_mismatch only when
+   * NO binding verifies (partial drift still connects, drifted names stay
+   * disabled). Demand reconnect applies the backoff before dialing.
+   */
   async ensureConnected(): Promise<
     { ok: true } | { ok: false; code: McpErrorCode }
   > {
@@ -127,30 +208,58 @@ export class McpConnector {
     if (this.consecutiveFailures > 0) {
       await sleep(nextBackoffMs(this.consecutiveFailures));
     }
+    let transport: Transport | undefined;
+    let client: Client | undefined;
     try {
-      const transport = this.createTransport();
-      const client = new Client(
+      transport = this.createTransport();
+      this.drainStderr(transport);
+      client = new Client(
         { name: this.config.clientName, version: this.config.clientVersion },
         { capabilities: {} },
       );
       await client.connect(transport);
+      // Identity verification BEFORE enabling any call.
+      const listed = await client.listTools();
+      const snapshot: Array<{ name: string; inputSchemaHash: string }> = [];
+      for (const t of listed.tools ?? []) {
+        snapshot.push({
+          name: t.name,
+          inputSchemaHash: await canonicalSchemaHash(t.inputSchema),
+        });
+      }
+      const { enabled } = this.verifyBindingIdentity(snapshot);
       this.client = client;
       this.connected = true;
       this.consecutiveFailures = 0;
+      transport = undefined; // owned by client now
+      client = undefined;
+      if (enabled.length === 0) {
+        return { ok: false, code: "mcp_schema_mismatch" as const };
+      }
       return { ok: true };
     } catch {
-      this.markFailure();
+      // Failed connect: release the half-open transport/client (no leak).
+      await closeQuietly(client, transport);
+      await this.markFailure();
       return { ok: false, code: "mcp_unavailable" as const };
     }
   }
 
-  /** Safe shutdown: close the SDK client (stdio kill timeout lives in transport). */
+  /**
+   * Bounded safe shutdown: close the SDK client (stdio kill timeout lives
+   * in the SDK transport: stdin.end + 2s wait + SIGTERM + 2s + SIGKILL per
+   * verified 1.30.0 source), then enforce our own outer bound so shutdown
+   * can never hang the host.
+   */
   async shutdown(): Promise<void> {
     const client = this.client;
     this.client = undefined;
     this.connected = false;
     if (client !== undefined) {
-      await client.close().catch(() => undefined);
+      await Promise.race([
+        client.close().catch(() => undefined),
+        sleep(this.shutdownWaitMs()).then(() => undefined),
+      ]);
     }
   }
 
@@ -164,10 +273,39 @@ export class McpConnector {
     return { truncated: this.stderrTruncated, totalBytes: this.stderrBytes };
   }
 
-  private markFailure(): void {
+  private async markFailure(): Promise<void> {
     this.consecutiveFailures += 1;
     this.connected = false;
+    // Release the dropped client/transport so failed calls disconnect (§17.6).
+    const client = this.client;
     this.client = undefined;
+    await closeQuietly(client, undefined);
+  }
+
+  /**
+   * Attach continuous stderr drain at connect time (pipe only): data is
+   * counted toward the 64KiB cap and then discarded; never buffered
+   * unbounded, never blocks the child (§17.7).
+   */
+  private drainStderr(transport: Transport): void {
+    const maybe = transport as unknown as {
+      stderr?: { on?: (ev: string, fn: (c: unknown) => void) => void } | null;
+    };
+    const stream = maybe.stderr;
+    if (stream?.on) {
+      stream.on("data", (chunk: unknown) => {
+        const bytes =
+          typeof chunk === "string"
+            ? Buffer.byteLength(chunk)
+            : (chunk as { length?: number })?.length ?? 0;
+        this.noteStderr(bytes);
+      });
+    }
+  }
+
+  private shutdownWaitMs(): number {
+    const t = this.config.transport;
+    return t.kind === "stdio" ? t.shutdownWaitMs : 3000;
   }
 
   private createTransport(): Transport {
@@ -195,10 +333,16 @@ function sleep(ms: number): Promise<void> {
 
 /**
  * Production transport factory: real SDK transports only.
- * - stdio: shell=false (SDK spawns without a shell), config-only command
- *   (no interpolation), explicit env allowlist, stderr piped with 64KiB cap.
- * - Streamable HTTP: loopback only (config-validated), redirects refused
- *   (followRedirects is pinned false by the config schema).
+ * - stdio: shell=false (SDK hardcodes false; verified 1.30.0 source),
+ *   config-only command (no interpolation), explicit env allowlist NOTE:
+ *   SDK merges getDefaultEnvironment() underneath, so exact-allowlist is a
+ *   known gap (see STDIO_IMPLICIT_ENV_VARS); stderr piped with 64KiB cap
+ *   drained continuously by the connector; bounded kill lives in the SDK
+ *   transport close (2s + SIGTERM + 2s + SIGKILL, verified source).
+ * - Streamable HTTP: loopback re-checked at the runtime boundary (defends
+ *   against programmatic configs bypassing the zod schema) and redirects
+ *   refused via a manual-redirect fetch wrapper (SDK 1.30.0 has no
+ *   redirect option; default fetch would follow).
  */
 export function defaultTransportFactory(config: McpConnectorConfig): Transport {
   const t = config.transport;
@@ -215,7 +359,20 @@ export function defaultTransportFactory(config: McpConnectorConfig): Transport {
       stderr: "pipe",
     });
   }
-  return new StreamableHTTPClientTransport(
-    new URL(`http://${t.host}:${t.port}${t.path}`),
-  );
+  const url = new URL(`http://${t.host}:${t.port}${t.path}`);
+  assertLoopbackHttp(url);
+  return new StreamableHTTPClientTransport(url, {
+    fetch: loopbackNoRedirectFetch,
+  });
+}
+
+async function closeQuietly(
+  client: Client | undefined,
+  transport: Transport | undefined,
+): Promise<void> {
+  if (client !== undefined) {
+    await client.close().catch(() => undefined);
+  } else if (transport !== undefined) {
+    await transport.close?.().catch(() => undefined);
+  }
 }

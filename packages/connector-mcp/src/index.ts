@@ -3,7 +3,10 @@ export {
   type CallResult,
   type ConnectorStats,
   defaultTransportFactory,
+  loopbackNoRedirectFetch,
+  assertLoopbackHttp,
   McpConnector,
+  STDIO_IMPLICIT_ENV_VARS,
   type TransportFactory,
 } from "./client.js";
 export {

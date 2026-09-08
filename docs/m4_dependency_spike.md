@@ -145,6 +145,33 @@ upstream).
   no live Calendar/OAuth, no nspady/external compatibility claim.
   Gate open — CI fresh-env verification required.
 
+## Hardening pass (2026-09-09, harden-m4-mcp-foundation)
+
+- Verified SDK 1.30.0 source (unpkg immutable version URLs, no install):
+  `client/stdio.js` hardcodes `shell:false`; env is
+  `{...getDefaultEnvironment(), ...server.env}` — exact explicit allowlist
+  is NOT enforceable (inherited `DEFAULT_INHERITED_ENV_VARS` always leak;
+  surfaced as `STDIO_IMPLICIT_ENV_VARS`, no compliant claim). `close()`
+  already bounds shutdown (stdin.end + 2s + SIGTERM + 2s + SIGKILL);
+  `stderr:"pipe"` exposes a `PassThrough` immediately for continuous drain.
+  `client/streamableHttp.d.ts` (1.30.0) exposes NO redirect option —
+  redirects refused via a `redirect:"manual"` fetch wrapper + runtime
+  loopback re-check at the factory boundary.
+- Connector now verifies binding identity inside `ensureConnected`
+  (live `tools/list` + canonical-JSON SHA-256 vs configured names/hashes);
+  drift/missing yields `mcp_schema_mismatch` with no upstream call;
+  `isError:true` maps to redacted `calendar_upstream_error`; failed
+  connect/call disconnects (no leaked client); per-instance mutex kept.
+- Calendar normalize validates real ISO/all-day start/end with end>start
+  and hashes the truncated normalized snapshot (canonical JSON), not raw.
+- Tests are genuine connected in-memory SDK fixtures (initialize/list/call,
+  drift-denies-dispatch, isError redaction, close) + snapshot-hash/time
+  units. Fake-only; NO live upstream compat claim.
+- Remaining gaps: exact stdio env allowlist unenforceable with SDK 1.30.0
+  (fail-closed would mean dropping stdio until a pin/option allows exact
+  env); no live Calendar binding selected (orchestrator question above
+  still open); local runtime unverified on Windows (CI to verify).
+
 ## Missing upstream question for orchestrator
 
 Which specific upstream Calendar MCP server/version/transport and which

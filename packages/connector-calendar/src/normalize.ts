@@ -62,6 +62,45 @@ function allDayEndExclusive(start: string, end: string): boolean {
   return dateOnly.test(start) && dateOnly.test(end);
 }
 
+const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+function parseEventTime(value: string, field: "start" | "end"): number {
+  const dateOnly = DATE_ONLY.exec(value);
+  if (dateOnly) {
+    const year = Number(dateOnly[1]);
+    const month = Number(dateOnly[2]);
+    const day = Number(dateOnly[3]);
+    if (month < 1 || month > 12 || day < 1 || day > 31) {
+      throw new Error(`invalid all-day ${field}: ${value}`);
+    }
+    // Real calendar validation (rejects e.g. 2026-02-30 rollover).
+    const ms = Date.UTC(year, month - 1, day);
+    const check = new Date(ms);
+    if (
+      check.getUTCFullYear() !== year ||
+      check.getUTCMonth() !== month - 1 ||
+      check.getUTCDate() !== day
+    ) {
+      throw new Error(`invalid all-day ${field}: ${value}`);
+    }
+    return ms;
+  }
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms)) {
+    throw new Error(`invalid ISO ${field}: ${value}`);
+  }
+  return ms;
+}
+
+/** Validate start/end wire shapes (timed ISO dateTime or all-day DATE). */
+function validateEventRange(start: string, end: string): void {
+  const startMs = parseEventTime(start, "start");
+  const endMs = parseEventTime(end, "end");
+  if (!(endMs > startMs)) {
+    throw new Error("event end must be after start");
+  }
+}
+
 async function sha256Hex(text: string): Promise<string> {
   const digest = await crypto.subtle.digest(
     "SHA-256",
@@ -70,6 +109,18 @@ async function sha256Hex(text: string): Promise<string> {
   return [...new Uint8Array(digest)]
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
+}
+
+function canonicalJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(value).sort()) {
+      out[key] = canonicalJson((value as Record<string, unknown>)[key]);
+    }
+    return out;
+  }
+  return value;
 }
 
 /**
@@ -90,9 +141,12 @@ export interface NormalizeOptions {
 }
 
 /**
- * Strict versioned normalization: structured object first; privacy
- * exclusions (attendees/organizer/conference URLs/HTML links/raw payload)
- * are dropped. Revision precedence: etag > sourceUpdatedAt > content hash.
+ * Strict versioned normalization: structured object first; real ISO/all-day
+ * start/end validation with end>start (§17.4); privacy exclusions
+ * (attendees/organizer/conference URLs/HTML links/raw payload) are dropped.
+ * Revision precedence: etag > sourceUpdatedAt > content hash, where the
+ * hash covers the ACTUAL normalized snapshot (truncated title/description/
+ * location/start/end) — never the raw untruncated source.
  * `deleted` is never produced here — tombstones require authoritative
  * evidence via classifyDeletion (search omission creates none).
  */
@@ -102,11 +156,28 @@ export async function normalizeEvent(
 ): Promise<NormalizedEvent> {
   const parsed = proposedUpstreamEventSchema.parse(raw);
   void options.nowIso;
+  validateEventRange(parsed.start, parsed.end);
   const key = canonicalKey(
     options.connectorInstanceId,
     parsed.calendarId,
     parsed.id,
   );
+  const title = parsed.summary.slice(0, 1024);
+  const description =
+    parsed.description !== undefined
+      ? parsed.description.slice(0, 8192)
+      : undefined;
+  const location =
+    parsed.location !== undefined
+      ? parsed.location.slice(0, 1024)
+      : undefined;
+  const snapshotForHash = {
+    title,
+    description: description ?? "",
+    location: location ?? "",
+    start: parsed.start,
+    end: parsed.end,
+  };
   let sourceRevision: string;
   let basis: NormalizedEvent["revisionBasis"];
   if (parsed.etag !== undefined) {
@@ -117,13 +188,7 @@ export async function normalizeEvent(
     basis = "source-updated";
   } else {
     sourceRevision = await sha256Hex(
-      JSON.stringify([
-        parsed.summary,
-        parsed.description ?? "",
-        parsed.location ?? "",
-        parsed.start,
-        parsed.end,
-      ]),
+      JSON.stringify(canonicalJson(snapshotForHash)),
     );
     basis = "normalized-hash";
   }
@@ -131,13 +196,9 @@ export async function normalizeEvent(
     schemaVersion: 1,
     canonicalKey: key,
     status: parsed.status,
-    title: parsed.summary.slice(0, 1024),
-    ...(parsed.description !== undefined
-      ? { description: parsed.description.slice(0, 8192) }
-      : {}),
-    ...(parsed.location !== undefined
-      ? { location: parsed.location.slice(0, 1024) }
-      : {}),
+    title,
+    ...(description !== undefined ? { description } : {}),
+    ...(location !== undefined ? { location } : {}),
     start: parsed.start,
     end: parsed.end,
     allDayEndExclusive: allDayEndExclusive(parsed.start, parsed.end),
