@@ -12,6 +12,7 @@
 
 import {
   applyRunEvent,
+  claimTerminalHydration,
   INITIAL_RUN_VIEW,
   isCorruptCursor,
   type RunViewState,
@@ -126,6 +127,19 @@ class ConversationApp {
   private runViews = new Map<string, RunViewState>();
   /** Runs whose terminal answer was already rendered (no duplicate output). */
   private readonly renderedAnswers = new Set<string>();
+  /**
+   * Runs whose terminal history refresh was already claimed (single owner,
+   * §16.7): the serialized event path and the fallback poll path can both
+   * observe the same terminal view, but hydration (and the retry appended
+   * after it) must happen exactly once so a second refresh never wipes it.
+   */
+  private readonly terminalHydrated = new Set<string>();
+  /**
+   * Client-side send bound (mirrors contracts `MAX_USER_TEXT_LENGTH`):
+   * overlong input is rejected locally with a validation notice and never
+   * frozen/posted. The server schema stays authoritative.
+   */
+  private static readonly MAX_SEND_TEXT_LENGTH = 32_768;
   /** True while a send/post round-trip is awaited (send stays disabled). */
   private sending = false;
   /** Run -> Turn ownership for failure-only retry (§16.6 exact). */
@@ -265,7 +279,11 @@ class ConversationApp {
       return;
     }
     // Transient server states retain the pending key for same-key replay.
-    if (lookup.status === 429 || lookup.status === 503 || lookup.status >= 500) {
+    if (
+      lookup.status === 429 ||
+      lookup.status === 503 ||
+      lookup.status >= 500
+    ) {
       this.showNotice("送信できませんでした。もう一度お試しください");
       return;
     }
@@ -368,7 +386,11 @@ class ConversationApp {
    * interaction (§16.3: submit path untouched).
    */
   private async loadOlderHistory(): Promise<void> {
-    if (this.sessionId === null || this.oldestBefore === null || this.loadingOlder) {
+    if (
+      this.sessionId === null ||
+      this.oldestBefore === null ||
+      this.loadingOlder
+    ) {
       return;
     }
     this.loadingOlder = true;
@@ -385,10 +407,17 @@ class ConversationApp {
         } catch {
           return;
         }
-        if (page.status !== 200 || !Array.isArray((page.body as { items?: unknown }).items)) {
+        if (
+          page.status !== 200 ||
+          !Array.isArray((page.body as { items?: unknown }).items)
+        ) {
           return;
         }
-        const body = page.body as { items?: unknown; nextBefore?: unknown; hasMore?: unknown };
+        const body = page.body as {
+          items?: unknown;
+          nextBefore?: unknown;
+          hasMore?: unknown;
+        };
         pages.push(body.items as HistoryItemView[]);
         if (body.hasMore === true && typeof body.nextBefore === "number") {
           before = body.nextBefore;
@@ -510,6 +539,11 @@ class ConversationApp {
       if (text.trim().length === 0) {
         return;
       }
+      if (text.length > ConversationApp.MAX_SEND_TEXT_LENGTH) {
+        this.showNotice("入力を確認してください");
+        this.renderComposer();
+        return;
+      }
       const request = {
         key: crypto.randomUUID(),
         text,
@@ -577,14 +611,38 @@ class ConversationApp {
       this.subscribe(runId);
       return;
     }
-    if (posted.status === 409) {
-      this.clearPendingKey();
+    const errorCode =
+      typeof posted.body === "object" && posted.body !== null
+        ? (posted.body as { error?: { code?: unknown } }).error?.code
+        : undefined;
+    // Retryable busy: the frozen key/body was never accepted, so keep the
+    // same frozen request for an explicit same-key replay once free.
+    if (posted.status === 409 && errorCode === "session_busy") {
       this.showNotice("生成中のため送信できません");
       this.renderComposer();
       await this.hydrateHistory();
       return;
     }
-    // No response (validation/transient): keep the frozen in-memory key/body
+    // Definitive client rejection (validation/ownership/unknown, including
+    // overlong text): replaying the same frozen body would fail forever, so
+    // drop the frozen request/key, repopulate the input from memory (bodies
+    // are never persisted), and show a validation notice. Transient states
+    // (429/5xx/network) keep the frozen same-key replay below.
+    if (
+      posted.status >= 400 &&
+      posted.status < 500 &&
+      posted.status !== 408 &&
+      posted.status !== 425 &&
+      posted.status !== 429
+    ) {
+      const frozenText = request.text;
+      this.clearPendingKey();
+      this.input.value = frozenText;
+      this.showNotice("入力を確認してください");
+      this.renderComposer();
+      return;
+    }
+    // Transient (validation/transient): keep the frozen in-memory key/body
     // for an explicit same-key resend; the notice invites a retry.
     this.showNotice("送信できませんでした。もう一度お試しください");
     this.renderComposer();
@@ -743,10 +801,13 @@ class ConversationApp {
   }
 
   /**
-   * Validate a stored cursor against the server's eventSeq: fetch one page
-   * past the cursor; a cursor beyond the run's eventSeq (empty page on a
-   * terminal run whose nextAfter <= cursor) is corrupt and resyncs from
-   * history. Only acts on the still-subscribed run.
+   * Validate a stored cursor against the authoritative `runs.event_seq`
+   * (§16.7): the lightweight run status endpoint carries the server's
+   * `eventSeq`, so an over-large cursor is detected on ACTIVE runs too. The
+   * events page can never serve this: an empty page echoes the request
+   * `after` as `nextAfter`, making the over-large cursor invisible there —
+   * never infer corruption from `nextAfter`. Only acts on the
+   * still-subscribed run.
    */
   private async validateStoredCursor(
     runId: string,
@@ -758,7 +819,7 @@ class ConversationApp {
     let fetched: { status: number; body: unknown };
     try {
       fetched = await fetchJson(
-        `/api/sessions/${encodeURIComponent(this.sessionId as string)}/runs/${encodeURIComponent(runId)}/events?after=${cursor}&limit=50`,
+        `/api/sessions/${encodeURIComponent(this.sessionId as string)}/runs/${encodeURIComponent(runId)}/status`,
       );
     } catch {
       return;
@@ -766,19 +827,22 @@ class ConversationApp {
     if (this.activeRunId !== runId || fetched.status !== 200) {
       return;
     }
-    const body = fetched.body as {
-      events?: unknown;
-      nextAfter?: unknown;
-      terminal?: unknown;
-    };
-    if (!Array.isArray(body.events) || body.events.length > 0) {
+    const run = (
+      fetched.body as {
+        run?: { id?: unknown; status?: unknown; eventSeq?: unknown };
+      }
+    ).run;
+    if (
+      typeof run !== "object" ||
+      run === null ||
+      run.id !== runId ||
+      typeof run.eventSeq !== "number"
+    ) {
       return;
     }
-    const nextAfter = typeof body.nextAfter === "number" ? body.nextAfter : 0;
-    // Empty page and the server already moved past the cursor (or the run
-    // is terminal with nothing more to deliver): the stored cursor can
-    // never converge, so drop it and rebuild from history.
-    if (body.terminal === true || nextAfter < cursor) {
+    // Authoritative check: the stored cursor can never converge past the
+    // server's last issued seq, so drop it and rebuild from history.
+    if (isCorruptCursor(cursor, run.eventSeq)) {
       await this.resyncFromHistory(runId);
     }
   }
@@ -792,59 +856,59 @@ class ConversationApp {
     // link absorbs the previous rejection before appending its own step,
     // and every step catches its own failure.
     const link = this.runChain.catch(() => {}).then(async () => {
-      try {
-        const current = this.runViews.get(runId) ?? INITIAL_RUN_VIEW;
-        const applied = applyRunEvent(current, event);
-        if (applied.outcome.kind === "ignored-duplicate") {
-          // Duplicates: cursor unchanged, no store write, no re-render, so
-          // terminal output is never appended twice.
-          return;
-        }
-        if (applied.outcome.kind === "ignored-unknown") {
-          // Unknown/future types already advanced the cursor: persist it
-          // but do not re-render (no output to duplicate).
-          this.runViews.set(runId, applied.state);
-          storeCursor(runId, applied.state.cursor);
-          return;
-        }
-        if (applied.outcome.kind === "needs-catchup") {
-          const ok = await this.catchUp(runId, current.cursor);
-          if (!ok) {
-            // Transient page failure: keep the chain alive; the next tick
-            // (SSE event or fallback poll) retries the gap.
+        try {
+          const current = this.runViews.get(runId) ?? INITIAL_RUN_VIEW;
+          const applied = applyRunEvent(current, event);
+          if (applied.outcome.kind === "ignored-duplicate") {
+            // Duplicates: cursor unchanged, no store write, no re-render, so
+            // terminal output is never appended twice.
             return;
           }
-          const resynced = this.runViews.get(runId) ?? INITIAL_RUN_VIEW;
-          const second = applyRunEvent(resynced, event);
-          if (second.outcome.kind === "needs-catchup") {
-            // The stored cursor never converges with the server stream (e.g.
-            // corrupted beyond `event_seq`, §16.7): stop reconnecting and
-            // resync from history instead.
-            await this.resyncFromHistory(runId);
+          if (applied.outcome.kind === "ignored-unknown") {
+            // Unknown/future types already advanced the cursor: persist it
+            // but do not re-render (no output to duplicate).
+            this.runViews.set(runId, applied.state);
+            storeCursor(runId, applied.state.cursor);
             return;
           }
-          if (second.outcome.kind === "ignored-duplicate") {
-            return;
-          }
-          if (second.outcome.kind === "ignored-unknown") {
+          if (applied.outcome.kind === "needs-catchup") {
+            const ok = await this.catchUp(runId, current.cursor);
+            if (!ok) {
+              // Transient page failure: keep the chain alive; the next tick
+              // (SSE event or fallback poll) retries the gap.
+              return;
+            }
+            const resynced = this.runViews.get(runId) ?? INITIAL_RUN_VIEW;
+            const second = applyRunEvent(resynced, event);
+            if (second.outcome.kind === "needs-catchup") {
+              // The stored cursor never converges with the server stream (e.g.
+              // corrupted beyond `event_seq`, §16.7): stop reconnecting and
+              // resync from history instead.
+              await this.resyncFromHistory(runId);
+              return;
+            }
+            if (second.outcome.kind === "ignored-duplicate") {
+              return;
+            }
+            if (second.outcome.kind === "ignored-unknown") {
+              this.runViews.set(runId, second.state);
+              storeCursor(runId, second.state.cursor);
+              return;
+            }
+            // Catch-up converged: the re-applied event is applied, so persist
+            // the cursor after apply.
             this.runViews.set(runId, second.state);
             storeCursor(runId, second.state.cursor);
+            this.renderRunView(runId);
             return;
           }
-          // Catch-up converged: the re-applied event is applied, so persist
-          // the cursor after apply.
-          this.runViews.set(runId, second.state);
-          storeCursor(runId, second.state.cursor);
+          this.runViews.set(runId, applied.state);
+          storeCursor(runId, applied.state.cursor);
           this.renderRunView(runId);
-          return;
+        } catch {
+          // One bad tick (I/O, DOM) must never wedge later events.
         }
-        this.runViews.set(runId, applied.state);
-        storeCursor(runId, applied.state.cursor);
-        this.renderRunView(runId);
-      } catch {
-        // One bad tick (I/O, DOM) must never wedge later events.
-      }
-    });
+      });
     // The chain itself never stays rejected: a failure above already
     // resolved, and this guard absorbs out-of-band rejections.
     this.runChain = link.catch(() => {});
@@ -953,9 +1017,11 @@ class ConversationApp {
       if (view !== undefined && !view.stopVisible) {
         // Terminal (`run.completed`/`failed`/`cancelled`/`abandoned`):
         // `run.cancel_requested` keeps stopVisible true, so polling
-        // continues until the actual terminal event.
+        // continues until the actual terminal event. renderRunView already
+        // claimed the single terminal hydration (history refresh, retry
+        // appended after it for failures) — hydrating again here would wipe
+        // the retry, so just release the poll loop.
         this.finishActiveRun();
-        await this.hydrateHistory();
         return;
       }
       await new Promise((resolve) => {
@@ -989,6 +1055,11 @@ class ConversationApp {
         }
       }
       this.finishActiveRun();
+      // Single owner: claim the terminal hydration; a second observer of
+      // the same terminal view skips it so output is never duplicated.
+      if (claimTerminalHydration(this.terminalHydrated, runId)) {
+        void this.hydrateHistory();
+      }
       return;
     }
     if (view.visible === "failed") {
@@ -996,24 +1067,32 @@ class ConversationApp {
       // Failure-only retry (§16.6 exact): offer one retry for the same Turn
       // (a fresh Run). Capture the Turn before finishActiveRun clears it.
       // The retry control must survive the history refresh below, so hydrate
-      // first and append the button afterwards.
+      // first and append the button afterwards. Single owner: claim the
+      // terminal hydration so a second observer never wipes the retry.
       const turnId = this.runTurns.get(runId) ?? this.activeTurnId;
       const retryVisible = view.retryVisible;
       this.finishActiveRun();
-      void this.hydrateHistory().then(() => {
-        if (retryVisible && turnId !== null && turnId !== undefined) {
-          const retryButton = el("button", "もう一度送る");
-          retryButton.addEventListener("click", () => {
-            void this.retry(turnId);
-          });
-          this.list.appendChild(retryButton);
-        }
-      });
+      if (claimTerminalHydration(this.terminalHydrated, runId)) {
+        void this.hydrateHistory().then(() => {
+          if (retryVisible && turnId !== null && turnId !== undefined) {
+            const retryButton = el("button", "もう一度送る");
+            retryButton.addEventListener("click", () => {
+              void this.retry(turnId);
+            });
+            this.list.appendChild(retryButton);
+          }
+        });
+      }
       return;
     }
     if (view.visible === "stopped") {
       this.showNotice("停止しました");
       this.finishActiveRun();
+      // Single owner: claim the terminal hydration; a second observer of
+      // the same terminal view skips it.
+      if (claimTerminalHydration(this.terminalHydrated, runId)) {
+        void this.hydrateHistory();
+      }
       return;
     }
     // Active (generating) view: the reducer's notice drives the text, so
@@ -1032,14 +1111,16 @@ class ConversationApp {
    */
   private static readonly REFERENCE_CONTEXT_CAS_ATTEMPTS = 3;
 
-  private async updateReferenceContextCas(
-    referenceId: string,
-  ): Promise<void> {
+  private async updateReferenceContextCas(referenceId: string): Promise<void> {
     if (this.sessionId === null) {
       return;
     }
     const base = `/api/sessions/${encodeURIComponent(this.sessionId)}/reference-context`;
-    for (let attempt = 0; attempt < ConversationApp.REFERENCE_CONTEXT_CAS_ATTEMPTS; attempt += 1) {
+    for (
+      let attempt = 0;
+      attempt < ConversationApp.REFERENCE_CONTEXT_CAS_ATTEMPTS;
+      attempt += 1
+    ) {
       let current: { status: number; body: unknown };
       try {
         current = await fetchJson(base);
@@ -1202,8 +1283,8 @@ class ConversationApp {
   /**
    * History resync (§16.7): drop the per-run stream + view state and
    * rebuild from the history projection. Used both for explicitly corrupt
-   * cursors (event_seq known) and for catch-up that never converges (no
-   * client-visible `event_seq` endpoint exists yet).
+   * cursors (eventSeq from the run status endpoint) and for catch-up that
+   * never converges.
    */
   private async resyncFromHistory(runId: string): Promise<void> {
     this.closeStream();

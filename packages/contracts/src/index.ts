@@ -117,6 +117,7 @@ export type {
   PostRetryRequest,
   PostRetryResponse,
   RunParams,
+  RunStatusResponse,
   SessionParams,
   TurnParams,
 } from "./http.js";
@@ -143,6 +144,7 @@ export {
   PostRetryRequestSchema,
   PostRetryResponseSchema,
   RunParamsSchema,
+  RunStatusResponseSchema,
   SessionParamsSchema,
   TurnParamsSchema,
 } from "./http.js";

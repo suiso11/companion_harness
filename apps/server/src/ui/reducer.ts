@@ -231,6 +231,24 @@ export function applyRunEvent(
 }
 
 /**
+ * Terminal-hydration single-owner guard (§16.7): the first claim for a Run
+ * wins; later claims for the same Run are declined so the terminal history
+ * refresh (and the failure-only retry appended after it) happens exactly
+ * once even when both the serialized event path and the fallback poll path
+ * observe the same terminal view.
+ */
+export function claimTerminalHydration(
+  claimed: Set<string>,
+  runId: string,
+): boolean {
+  if (claimed.has(runId)) {
+    return false;
+  }
+  claimed.add(runId);
+  return true;
+}
+
+/**
  * Corrupt-cursor guard (§16.7): non-integers, negatives, and cursors far
  * beyond the server's `event_seq` stop infinite reconnect and switch to
  * history resync. `eventSeq` is `runs.event_seq` (last issued seq).

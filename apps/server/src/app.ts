@@ -26,6 +26,7 @@ import {
   ReferenceDetailResponseSchema,
   ReferenceListResponseSchema,
   ReferenceSetDetailResponseSchema,
+  RunStatusResponseSchema,
   retryScope,
 } from "@companion/contracts";
 import {
@@ -828,6 +829,39 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       const body = repo.getEvents(session.id, run.id, {
         after: parsed.data.after,
         limit: parsed.data.limit,
+      });
+      return c.json(body, 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  /* ---------------- run status (M3 cursor validation, §16.7) ---------------- */
+  // Lightweight validated run status: exposes the authoritative
+  // `runs.event_seq` (+ status) so the client can detect an over-large
+  // stored cursor on an ACTIVE run. The frozen events pages cannot serve
+  // this: an empty page echoes the request `after` as `nextAfter`, making
+  // the over-large cursor invisible there. Session ownership enforced
+  // (foreign runs are 404, never 403); strict empty query.
+  app.get("/api/sessions/:sessionId/runs/:runId/status", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const run = requireUuid(c, c.req.param("runId"), "runId");
+    if ("response" in run) {
+      return run.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      const owned = repo.getRun(run.id);
+      if (owned.sessionId !== session.id) {
+        return apiError(c, 404, "not_found", "resource not found");
+      }
+      const body = RunStatusResponseSchema.parse({
+        run: { id: owned.id, status: owned.status, eventSeq: owned.eventSeq },
       });
       return c.json(body, 200);
     } catch (error) {
