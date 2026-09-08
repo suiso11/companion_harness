@@ -11,11 +11,15 @@ import {
   missingStdioEnvNames,
   STDIO_IMPLICIT_ENV_VARS,
 } from "../src/client.js";
+import {
+  mcpConnectorConfigSchema,
+  type McpConnectorConfig,
+} from "../src/config.js";
 
 const HASH = "c".repeat(64);
 
-function stdioConfig(envAllowlist: string[]) {
-  return {
+function stdioConfig(envAllowlist: string[]): McpConnectorConfig {
+  return mcpConnectorConfigSchema.parse({
     connectorInstanceId: "cal-1",
     serverId: "fake",
     kind: "mcp" as const,
@@ -28,7 +32,7 @@ function stdioConfig(envAllowlist: string[]) {
       shutdownWaitMs: 3000,
     },
     bindings: [{ upstreamTool: "search-events", canonicalSchemaHash: HASH }],
-  };
+  });
 }
 
 describe("fail-closed stdio env allowlist", () => {

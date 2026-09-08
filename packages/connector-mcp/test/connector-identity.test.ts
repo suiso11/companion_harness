@@ -14,7 +14,8 @@ import {
   McpConnector,
   STDIO_IMPLICIT_ENV_VARS,
 } from "../src/client.js";
-import { canonicalSchemaHash } from "../src/config.js";
+import { canonicalSchemaHash, mcpConnectorConfigSchema } from "../src/config.js";
+import type { McpConnectorConfig } from "../src/config.js";
 
 const closables: Array<() => Promise<unknown>> = [];
 afterEach(async () => {
@@ -28,8 +29,8 @@ const HASH = "b".repeat(64);
 
 function baseConfig(
   bindings: Array<{ upstreamTool: string; canonicalSchemaHash: string }>,
-) {
-  return {
+): McpConnectorConfig {
+  return mcpConnectorConfigSchema.parse({
     connectorInstanceId: "cal-1",
     serverId: "fake",
     kind: "mcp" as const,
@@ -42,7 +43,7 @@ function baseConfig(
       shutdownWaitMs: 3000,
     },
     bindings,
-  };
+  });
 }
 
 async function linkedServer(opts: { isErrorTool?: boolean } = {}) {
