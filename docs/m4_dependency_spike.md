@@ -133,6 +133,18 @@ schema hashes unclaimed, M4 NOT implemented, §17 contracts unchanged.
 Remaining decision: §7 of the design (approve scoped patch/fork vs alternative
 upstream).
 
+## Verification attempt (2026-09-09, resolve-m4-dependencies-verify)
+
+- `pnpm install --lockfile-only` (exit 0): lockfile now coherent —
+  importers `packages/connector-mcp` + `packages/connector-calendar`,
+  `@modelcontextprotocol/sdk@1.30.0` resolved. Full `pnpm install`
+  (2 attempts) crashed on Windows (pnpm native exit -1073740791 during
+  fetch; node_modules pruned) so local tsc/Biome/vitest could NOT run —
+  runtime UNVERIFIED locally. No source fixes applied blind.
+- Foundation (commit 3f31fe4) remains: fake-only SDK protocol tests,
+  no live Calendar/OAuth, no nspady/external compatibility claim.
+  Gate open — CI fresh-env verification required.
+
 ## Missing upstream question for orchestrator
 
 Which specific upstream Calendar MCP server/version/transport and which
