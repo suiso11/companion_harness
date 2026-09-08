@@ -57,6 +57,7 @@ export function renderConversationShell(): HtmlEscapedString {
         { id: "drawer", hidden: true, role: "dialog", "aria-label": "引用" },
         jsx("pre", { id: "drawer-body" }),
       ),
+      jsx("p", { id: "composer-notice", "aria-live": "polite" }),
       jsx(
         "form",
         { id: "composer" },

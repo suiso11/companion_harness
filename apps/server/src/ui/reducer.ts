@@ -189,8 +189,24 @@ export function applyRunEvent(
         },
         outcome: { kind: "applied" },
       };
-    case "run.cancelled":
     case "run.cancel_requested":
+      // Non-terminal (§11.5): the Run stays active until `run.cancelled`
+      // settles. Keep the active view (stream open, submit disabled, stop
+      // still offered — contextual stop exact contract, §16.2/§16.6) while
+      // already displaying「停止しました」.
+      return {
+        state: {
+          ...state,
+          cursor,
+          visible: "generating",
+          retryVisible: false,
+          stopVisible: true,
+          notice: "停止しました",
+        },
+        outcome: { kind: "applied" },
+      };
+    case "run.cancelled":
+      // Terminal (§11.4): exactly one terminal event per Run.
       return {
         state: {
           cursor,

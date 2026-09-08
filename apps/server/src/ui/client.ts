@@ -108,8 +108,19 @@ class ConversationApp {
   private sessionId: string | null = null;
   private activeRunId: string | null = null;
   private activeTurnId: string | null = null;
-  private pendingKey: string | null = null;
-  private pendingBody: { text: string } | null = null;
+  /**
+   * Frozen pending request (§16.7 exact): the idempotency key AND the
+   * complete normalized body (text + the uiContext snapshot fetched once at
+   * submit time) are frozen in memory together. Every replay of the same
+   * key carries the identical body — refetching the reference context on
+   * resend would change the body hash and break the §9 replay contract.
+   * In memory only: bodies are never persisted to localStorage.
+   */
+  private pendingRequest: {
+    readonly key: string;
+    readonly text: string;
+    uiContext: unknown;
+  } | null = null;
   private runChain: Promise<void> = Promise.resolve();
   private runViews = new Map<string, RunViewState>();
   /** Run -> Turn ownership for failure-only retry (§16.6 exact). */
@@ -128,7 +139,8 @@ class ConversationApp {
 
   constructor() {
     this.list = document.getElementById("conversation") ?? el("main");
-    this.notice = el("p");
+    this.notice =
+      document.getElementById("composer-notice") ?? el("p");
     this.form =
       (document.getElementById("composer") as HTMLFormElement | null) ??
       document.createElement("form");
@@ -288,54 +300,81 @@ class ConversationApp {
   }
 
   /**
-   * Optimistic send (§16.2): reflect immediately, resend with the SAME key
-   * while the page lives (server replays key + normalized request, §9).
+   * Reference-context snapshot (§14.8 CAS): fetched exactly once per send
+   * and frozen into the pending request. Missing/unreadable context sends
+   * the default `{}` (never blocks sending).
+   */
+  private async fetchUiContext(): Promise<unknown> {
+    if (this.sessionId === null) {
+      return {};
+    }
+    try {
+      const context = await fetchJson(
+        `/api/sessions/${encodeURIComponent(this.sessionId)}/reference-context`,
+      );
+      const contextBody = context.body as {
+        version?: unknown;
+        items?: unknown;
+      };
+      if (
+        context.status === 200 &&
+        typeof contextBody.version === "number" &&
+        Array.isArray(contextBody.items)
+      ) {
+        return {
+          referenceContext: {
+            version: contextBody.version,
+            items: contextBody.items,
+          },
+        };
+      }
+    } catch {
+      // Fall through to the default empty context.
+    }
+    return {};
+  }
+
+  /**
+   * Optimistic send (§16.2): reflect immediately, resend the SAME frozen
+   * key + normalized body while the page lives (server replays key +
+   * request, §9). A fresh send freezes `{ key, text, uiContext }` before
+   * posting; an explicit resend reuses that frozen request as-is.
    */
   private async send(): Promise<void> {
     if (this.sessionId === null || this.activeRunId !== null) {
       return;
     }
-    const text = this.input.value;
-    if (text.trim().length === 0) {
+    if (this.pendingRequest === null) {
+      const text = this.input.value;
+      if (text.trim().length === 0) {
+        return;
+      }
+      const request = {
+        key: crypto.randomUUID(),
+        text,
+        uiContext: {} as unknown,
+      };
+      this.pendingRequest = request;
+      this.list.appendChild(el("p", text));
+      this.input.value = "";
+      this.renderComposer();
+      // Freeze the context snapshot into the SAME request before posting;
+      // resends never refetch it (frozen body + key, §16.7 exact).
+      request.uiContext = await this.fetchUiContext();
+    }
+    const request = this.pendingRequest;
+    if (request === null) {
       return;
     }
-    const key = this.pendingKey ?? crypto.randomUUID();
-    this.pendingKey = key;
-    this.pendingBody = { text };
     try {
-      localStorage.setItem(LS_PENDING_KEY, key);
+      localStorage.setItem(LS_PENDING_KEY, request.key);
     } catch {
       // Best effort.
     }
-    this.list.appendChild(el("p", text));
-    this.input.value = "";
-    this.renderComposer();
-    // Reference-context selection snapshot (§14.8 CAS): attach the current
-    // stored `{ version, items }` as opaque `uiContext` so the Run freezes
-    // which selection was visible at submit time. Missing/unreadable
-    // context sends the default `{}` (never blocks sending).
-    const context = await fetchJson(
-      `/api/sessions/${encodeURIComponent(this.sessionId)}/reference-context`,
-    );
-    const contextBody = context.body as {
-      version?: unknown;
-      items?: unknown;
-    };
-    const uiContext =
-      context.status === 200 &&
-      typeof contextBody.version === "number" &&
-      Array.isArray(contextBody.items)
-        ? {
-            referenceContext: {
-              version: contextBody.version,
-              items: contextBody.items,
-            },
-          }
-        : {};
     const posted = await postJson(
       `/api/sessions/${encodeURIComponent(this.sessionId)}/messages`,
-      { text, uiContext },
-      key,
+      { text: request.text, uiContext: request.uiContext },
+      request.key,
     );
     // Exact contracts `PostMessageResponse`: `{ turnId, run: { id } }`.
     const body = posted.body as {
@@ -353,7 +392,6 @@ class ConversationApp {
       typeof runId === "string"
     ) {
       this.clearPendingKey();
-      this.pendingBody = null;
       this.activeTurnId = body.turnId;
       this.runTurns.set(runId, body.turnId);
       this.subscribe(runId);
@@ -365,32 +403,43 @@ class ConversationApp {
       await this.hydrateHistory();
       return;
     }
-    // No response: keep the same in-memory key/body for an explicit resend.
+    // No response: keep the frozen in-memory key/body for an explicit resend.
     this.showNotice("送信できませんでした。もう一度お試しください");
     this.renderComposer();
   }
 
-  /** Explicit in-memory resend with the identical key (same page only). */
+  /**
+   * Explicit resend with the frozen in-memory request (same page only,
+   * §16.7 exact): identical key AND identical body — the reference context
+   * is never refetched, so the §9 replay hash stays stable.
+   */
   async resend(): Promise<void> {
-    if (this.pendingBody === null || this.pendingKey === null) {
+    if (this.pendingRequest === null) {
       return;
     }
-    this.input.value = this.pendingBody.text;
     await this.send();
   }
 
-  /** Contextual stop (§16.6 exact): only while a run is active. */
+  /**
+   * Contextual stop (§16.6 exact): only while a run is active. Posting the
+   * cancel does NOT finish the run — `run.cancel_requested` keeps the run
+   * active (stream open, submit disabled, stop visible) while displaying
+   *「停止しました」; only the terminal `run.cancelled` event releases it.
+   */
   private async stop(): Promise<void> {
     if (this.sessionId === null || this.activeRunId === null) {
       return;
     }
-    await postJson(
+    const posted = await postJson(
       `/api/sessions/${encodeURIComponent(this.sessionId)}/runs/${encodeURIComponent(this.activeRunId)}/cancel`,
       {},
       null,
     );
-    this.showNotice("停止しました");
-    this.finishActiveRun();
+    if (posted.status < 200 || posted.status >= 300) {
+      this.showNotice("停止できませんでした");
+    }
+    // 2xx: the run.cancel_requested event (stream or fallback poll) renders
+    // the「停止しました」notice and keeps the run active until terminal.
   }
 
   /** Failure-only retry (§16.6 exact): failed/abandoned views only. */
@@ -487,7 +536,19 @@ class ConversationApp {
     source.onerror = () => {
       // Native EventSource auto-reconnects with Last-Event-ID (§16.7);
       // a closed terminal stream arrives as an error after completion.
-      if (this.runViews.get(runId)?.visible === "answered") {
+      // Only a terminal view releases the run (never a bare disconnect —
+      // the Run is durable and must not be cancelled on stream loss), and
+      // only for the still-subscribed run so a newer run is never dropped.
+      if (this.activeRunId !== runId) {
+        return;
+      }
+      const view = this.runViews.get(runId);
+      if (
+        view !== undefined &&
+        (view.visible === "answered" ||
+          view.visible === "failed" ||
+          view.visible === "stopped")
+      ) {
         this.finishActiveRun();
       }
     };
@@ -569,21 +630,49 @@ class ConversationApp {
     }
   }
 
-  /** JSON status fallback poll (§16.7): events + history until terminal. */
+  /**
+   * JSON status fallback poll (§16.7): events + history. Bounded SEQUENTIAL
+   * polling with no tick cap: runs until the run is terminal or the client
+   * disposes the run (new run subscribed / resync). Long runs are never
+   * stranded. Transient fetch failures are absorbed (bounded consecutive
+   * error streak before giving up with a fixed notice; each success resets
+   * the streak). This path never cancels the Run.
+   */
+  private static readonly POLL_INTERVAL_MS = 1000;
+  private static readonly POLL_MAX_ERROR_STREAK = 5;
+
   private async pollFallback(runId: string, after: number): Promise<void> {
-    for (let tick = 0; tick < 60; tick += 1) {
+    let errorStreak = 0;
+    for (;;) {
       if (this.activeRunId !== runId) {
         return;
       }
-      await this.catchUp(runId, readStoredCursor(runId) ?? after);
+      try {
+        await this.catchUp(runId, readStoredCursor(runId) ?? after);
+        errorStreak = 0;
+      } catch {
+        errorStreak += 1;
+        if (errorStreak >= ConversationApp.POLL_MAX_ERROR_STREAK) {
+          this.showNotice("状態の取得に失敗しました。再読み込みしてください");
+          return;
+        }
+      }
+      if (this.activeRunId !== runId) {
+        return;
+      }
       this.renderRunView(runId);
       const view = this.runViews.get(runId);
       if (view !== undefined && !view.stopVisible) {
+        // Terminal (`run.completed`/`failed`/`cancelled`/`abandoned`):
+        // `run.cancel_requested` keeps stopVisible true, so polling
+        // continues until the actual terminal event.
         this.finishActiveRun();
         await this.hydrateHistory();
         return;
       }
-      await new Promise((resolve) => window.setTimeout(resolve, 1000));
+      await new Promise((resolve) => {
+        window.setTimeout(resolve, ConversationApp.POLL_INTERVAL_MS);
+      });
     }
   }
 
@@ -627,7 +716,9 @@ class ConversationApp {
       this.finishActiveRun();
       return;
     }
-    this.showNotice("生成中");
+    // Active (generating) view: the reducer's notice drives the text, so
+    // `run.cancel_requested` shows「停止しました」while the run stays active.
+    this.showNotice(view.notice);
     this.renderComposer();
   }
 
@@ -716,7 +807,9 @@ class ConversationApp {
   }
 
   private clearPendingKey(): void {
-    this.pendingKey = null;
+    // Drops BOTH the persisted key and the frozen in-memory request: once
+    // the key is accepted (or rejected as busy) no further replay happens.
+    this.pendingRequest = null;
     try {
       localStorage.removeItem(LS_PENDING_KEY);
     } catch {
