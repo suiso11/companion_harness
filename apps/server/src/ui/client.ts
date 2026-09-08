@@ -841,9 +841,16 @@ class ConversationApp {
       return;
     }
     // Authoritative check: the stored cursor can never converge past the
-    // server's last issued seq, so drop it and rebuild from history.
+    // server's last issued seq, so drop it and rebuild from history, then
+    // re-subscribe the still-live run with a safe cursor so the durable run
+    // still completes and renders (resync alone would orphan it: history at
+    // resync time cannot contain the in-flight answer). The re-subscribed
+    // validation is a no-op (cursor now null), so no infinite loop.
     if (isCorruptCursor(cursor, run.eventSeq)) {
       await this.resyncFromHistory(runId);
+      if (this.sessionId !== null) {
+        this.subscribe(runId);
+      }
     }
   }
 
@@ -889,6 +896,11 @@ class ConversationApp {
             return;
           }
           if (second.outcome.kind === "ignored-duplicate") {
+            // The triggering SSE frame was already applied via the JSON
+            // gap page (e.g. dropped seq bridged by catch-up): the terminal
+            // view is converged but never rendered on the catch-up path,
+            // so render it here (exactly-once guarded).
+            this.renderRunView(runId);
             return;
           }
           if (second.outcome.kind === "ignored-unknown") {

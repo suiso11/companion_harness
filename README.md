@@ -79,28 +79,38 @@ Chromium-only Playwright smoke over the production UI/server/core
 `webServer` builds the UI bundle then boots the real Hono app on
 loopback with a temp SQLite DB and a deterministic fake `RunStrategy`
 registered under `m0-default` (no real LLM; behavior chosen from input
-text only). Four smoke specs added: echo answer, type-while-active +
-stop-cancel, fail-then-retry, strict-CSP/minimal-localStorage. No API
-mocks.
+text only). Seven specs in source (config `testMatch` covers both
+files): four `conversation.spec.ts` (echo answer, type-while-active +
+stop-cancel, fail-then-retry, strict-CSP/minimal-localStorage) plus
+three `citation_recovery.spec.ts` (escaped citation drawer + CAS-select
+with stale-PUT 409, lost-delivery same-key replay + reload recovery,
+unknown-pending-key resend-required). No API mocks.
 
-Status 2026-09-08 (this worker, truthful limits): Playwright executed
-count **0** — `pnpm install` crashes in this environment (exit
-`3221226505`) before `@playwright/test@1.63.0` resolves, so no browser
-run was possible here; Chromium binaries on disk were not driven.
+Status 2026-09-08 (truthful limits): public CI run
+`34216072834` on HEAD `88097cb` (`feat/m3-e2e-acceptance`)
+**completed success** — `check (windows-latest)`, `check
+(ubuntu-latest)`, and `e2e` jobs all success (`e2e`: frozen install,
+`playwright install --with-deps chromium`, E2E typecheck, production
+`build:ui`, `test:e2e`; failure-only artifacts skipped). Per-test
+executed count is **unverified via unauthenticated public REST**
+(job/step conclusions only; logs need auth) — source count is 7 and
+the config runs both spec files. Locally this worker executed **0**
+(`pnpm install` crashes in this environment, exit `3221226505`,
+before `@playwright/test@1.63.0` resolves, so no browser run was
+possible here).
 `pnpm typecheck` (root + `apps/server`) does NOT cover `e2e/` or
 `playwright.config.ts`; the dedicated config
 `apps/server/tsconfig.e2e.json` plus root `pnpm typecheck:e2e` exists
-for that and is exercised in CI (Ubuntu job: frozen install,
-`playwright install --with-deps chromium`, E2E typecheck, production
-`build:ui`, smoke run, failure-only artifacts). Dependency note: root
+for that and is exercised in the CI `e2e` job (it is not equivalent
+to the full E2E run). Dependency note: root
 `@playwright/test` resolves from descendant workspace modules via
 normal Node upward lookup (plus pnpm root `.bin` on the script PATH);
 no separate `@companion/server` declaration is required. The E2E abort
 path drops its stale releaser so `/release` cannot resolve an
 already-rejected hang.
 
-Not covered (outstanding §16 acceptance gaps): citation drawer /
-snapshot display, reference-context CAS, idempotent replay /
-resend-required and reload recovery, SSE reconnect incl. duplicate-seq,
-gap catch-up, corrupt-cursor stop, JSON status fallback, and older
-history pagination. CI runs the four smoke specs only.
+Not covered (remaining §16 acceptance gaps): SSE reconnect incl.
+duplicate-seq, gap catch-up, corrupt-cursor stop, JSON status
+fallback, and older history pagination. Citation drawer / CAS-select /
+replay / reload recovery are covered by the three new specs (CI green
+as above).

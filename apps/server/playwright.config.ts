@@ -9,12 +9,17 @@ import { E2E_APP_ORIGIN } from "./e2e/ports.js";
 
 export default defineConfig({
   testDir: "./e2e",
-  testMatch: "conversation.spec.ts",
+  testMatch: [
+    "conversation.spec.ts",
+    "citation_recovery.spec.ts",
+    "sse_history.spec.ts",
+  ],
   timeout: 60_000,
   expect: { timeout: 15_000 },
   fullyParallel: false,
   workers: 1,
   retries: 0,
+  reporter: process.env.CI ? [["github"], ["list"]] : [["list"]],
   use: {
     baseURL: E2E_APP_ORIGIN,
   },
