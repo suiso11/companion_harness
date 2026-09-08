@@ -18,6 +18,7 @@ export type { StartedServer, StartServerOptions } from "./bootstrap.js";
 export {
   AGENT_STRATEGY_NAME,
   createModelGateway,
+  loadUiAssets,
   SHUTDOWN_DRAIN_MS,
   sanitizeShutdownReason,
   sanitizeStartupErrorStatus,
@@ -56,6 +57,15 @@ export {
   STORE_SIZE_WARN_BYTES,
   shouldWarnStoreSize,
 } from "./maintenance.js";
+export {
+  createSseResponse,
+  formatRunEventSse,
+  pollSseStep,
+  SSE_BACKPRESSURE_GRACE_MS,
+  SSE_HEARTBEAT_MS,
+  SSE_POLL_MS,
+} from "./sse.js";
+export { STRICT_CSP } from "./ui/page.js";
 
 function isMainModule(): boolean {
   const invoked = process.argv[1];

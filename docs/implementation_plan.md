@@ -1166,7 +1166,7 @@ ModelGateway はプロバイダ応答を正規化し、1 モデルステップ�
 
 ## 16. M3 Conversation UI + SSE Plan（合意）
 
-> ラベル: **合意（agreed）**。M3（Conversation UI + SSE）の実装計画として合意した内容を記録する。本書は計画のみのドラフトであり、M3 の実装・テストは **まだ行われていない**。可視コントロール・データ保持・描画方針・SSE/履歴/Retry/Stop の exact 契約・リデューサ・リカバリ・セキュリティ方針は合意事項であり、実装時の調整対象ではない。調整対象は esbuild チューニング等の実装レベルのみ（§20）である。
+> ラベル: **合意（agreed）**。M3（Conversation UI + SSE）の実装計画として合意した内容を記録する。合意事項（可視コントロール・SSE/履歴/Retry/Stop の exact 契約・リデューサ・リカバリ・セキュリティ方針）は実装時の調整対象ではない。調整対象は esbuild チューニング等の実装レベルのみ（§20）である。**実装状況（2026-09-08 検証時点・truthful / 未完）:** SSR シェル・SSE ルート配線（`apps/server/src/app.ts`）・`sse.ts`・UI（`src/ui/page.ts・reducer.ts・escape.ts・client.ts・client.css`）・esbuild バンドル（`scripts/build-ui.mjs`）・`test/m3_ui.test.ts`（13 件）まで作業ツリーに実装済み。検証: `tsc --noEmit` 合格、`biome check` 合格、`build-ui.mjs` 成功、server M3 13 件含む全スイート 1025 件合格・13 スキップ（`connector-markdown/graph_budget_integration` の 1 件のみフル並列時の 5s タイムアウトで失敗、同ファイル単体では合格の環境依存フレーク。M3 無関係）。未完了: Playwright E2E・本番ビルド検証は未実施。本節の契約が実装基準であることに変わりはない。
 
 ### 16.1 M3 のスコープと技術構成（合意）
 
@@ -1187,7 +1187,7 @@ ModelGateway はプロバイダ応答を正規化し、1 モデルステップ�
   - `tool.requested` / `tool.completed` → 可視変化なし（「生成中」継続）
   - `run.completed` → 回答表示 + 引用ボタン
   - `run.failed` / `run.abandoned` → 失敗表示 + failure-only retry
-  - `run.cancelled` / `cancel_requested` →「停止しました」（retry 提示なし）
+  - `run.cancelled` / `cancel_requested` →「停止しました」（retry 提示なし）。`cancel_requested` は **非 terminal** であり、表示は「停止しました」でも Run は **active のまま**（SSE 購読・submit 無効・contextual stop の提示を継続）とし、terminal の `run.cancelled` 到着で初めて解放する。`cancelled` は terminal で、同表示のまま解放する。
   - `reference.presented` / `model.step.*` → 可視変化なし（将来の非 final 拡張も同様。未知 type は無視、§16.4）
 - **セッションは自動初期化する。** ユーザーにセッション作成操作を見せず、クライアントが起動時に `POST /api/sessions`（検証済み Idempotency-Key、scope `sessions:create`、§9 ブロッカー 4）を自動発行する。
 - **ブラウザ側の永続化は最小限に限定する（合意・exact）:** 保存してよいのは **sessionId・per-run Run カーソル（seq）・pending（未送信）の Idempotency-Key のみ**（localStorage）。**会話本文・参照内容・モデル/ツール関連の状態はブラウザに保存しない。**
@@ -1227,7 +1227,7 @@ ModelGateway はプロバイダ応答を正規化し、1 モデルステップ�
 
 ### 16.7 SSE リカバリとセキュリティ・テスト（合意）
 
-- **再接続時のリカバリ（合意）:** **ネイティブ `EventSource` の自動再接続**（polyfill・ライブラリなし）では、保存済みカーソル（`Last-Event-ID` として送られる seq）から再購読し、欠番は JSON API catch-up（§16.4）で埋める。**加えて JSON status フォールバック** を持つ: SSE が確立しない場合は `GET .../runs/:runId/events` + history のポーリングで状態を復元する。**破損したカーソル（非整数・負・event_seq を大きく超過する等）を検出した場合は無限再接続を停止** し、履歴からの再同期に切り替える。サーバー再起動等で SSE が切れても **Run 自体は durable でありキャンセルされない**。abandoned への遷移（再起動時 recovery、§11.2）は失敗扱い表示 + retry として写像する。
+- **再接続時のリカバリ（合意）:** **ネイティブ `EventSource` の自動再接続**（polyfill・ライブラリなし）では、保存済みカーソル（`Last-Event-ID` として送られる seq）から再購読し、欠番は JSON API catch-up（§16.4）で埋める。**加えて JSON status フォールバック** を持つ: SSE が確立しない場合は `GET .../runs/:runId/events` + history のポーリングで状態を復元する（**有界な逐次ポーリング** であり、固定 tick 上限で打ち切らない: terminal または Run の dispose（再購読/再同期）まで継続し、一時的な取得エラーは吸収する。連続エラーが上限に達したときのみ固定表示で停止する）。**破損したカーソル（非整数・負・event_seq を大きく超過する等）を検出した場合は無限再接続を停止** し、履歴からの再同期に切り替える。サーバー再起動等で SSE が切れても **Run 自体は durable でありキャンセルされない**。abandoned への遷移（再起動時 recovery、§11.2）は失敗扱い表示 + retry として写像する。
 - **ブラウザリロード後の再送リカバリ（内容保存なし・合意・exact）:** ブラウザに保存してよいのは sessionId・Run カーソル・pending の Idempotency-Key のみであり、**本文・スナップショットを保存しない**。ページが生きている間は同一のメモリ内正規化 body/key で再送する（§9 ブロッカー 4 の replay）。リロード後は `GET /api/sessions/:sessionId/idempotency/:key?scope=`（Session スコープの lookup）に問い合わせ、受理済みなら保存済み status/body を返して履歴を再取得し、key 不在なら再作成せず固定の resend-required 表示（再入力を促す）とする。受入テスト: lookup の Session 所有権、受理時の status/body 再生 + 履歴 refresh、不在時の再作成なし + resend-required、本文/スナップショットの非保存。
 - **セキュリティ（合意・exact）:**
   - サーバーは **loopback バインドのみ**（§12.4 と整合）。

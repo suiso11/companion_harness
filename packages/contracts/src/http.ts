@@ -207,6 +207,24 @@ export const EventsResponseSchema = z.strictObject({
 });
 export type EventsResponse = z.infer<typeof EventsResponseSchema>;
 
+/**
+ * GET /api/sessions/:sessionId/runs/:runId/status response (M3, §16.7).
+ * Contract-compatible addition: the frozen events pages carry no
+ * `eventSeq`, and an empty page echoes the request `after` as `nextAfter`,
+ * so an over-large stored cursor on an ACTIVE run is invisible there. This
+ * lightweight validated endpoint exposes the authoritative
+ * `runs.event_seq` (+ status) for cursor validation. Existing DTOs stay
+ * frozen; this schema is additive only.
+ */
+export const RunStatusResponseSchema = z.strictObject({
+  run: z.strictObject({
+    id: UuidSchema,
+    status: RunStatusSchema,
+    eventSeq: z.number().int().min(0),
+  }),
+});
+export type RunStatusResponse = z.infer<typeof RunStatusResponseSchema>;
+
 /* ------------------------------------------------------------------ */
 /* Idempotency lookup                                                  */
 /* ------------------------------------------------------------------ */

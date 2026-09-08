@@ -26,6 +26,7 @@ import {
   ReferenceDetailResponseSchema,
   ReferenceListResponseSchema,
   ReferenceSetDetailResponseSchema,
+  RunStatusResponseSchema,
   retryScope,
 } from "@companion/contracts";
 import {
@@ -44,6 +45,9 @@ import { Hono } from "hono";
 import type { ServerConfig } from "./config.js";
 import { ServerConfigError } from "./config.js";
 import { createStdServerLogger, type ServerLogger } from "./logger.js";
+import { createSseResponse } from "./sse.js";
+import { renderConversationShell, STRICT_CSP } from "./ui/page.js";
+import { effectiveCursor } from "./ui/reducer.js";
 
 /** Minimal engine surface the routes need (RunEngine satisfies this). */
 export interface EnginePort {
@@ -59,6 +63,12 @@ export interface CreateAppDeps {
   engine: EnginePort;
   logger?: ServerLogger;
   now?: () => number;
+  /**
+   * M3 static UI assets (plan §16.1, §16.7). Populated by bootstrap from
+   * `dist/assets` (esbuild bundle); tests inject inline. Missing entries
+   * serve 404 while the SSR shell keeps working.
+   */
+  assets?: { clientJs?: string; clientCss?: string };
 }
 
 export interface ServerControls {
@@ -421,6 +431,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   const { config, repo, engine } = deps;
   const logger = deps.logger ?? createStdServerLogger(config.logLevel);
   const now = deps.now ?? Date.now;
+  const assets = deps.assets ?? {};
   let draining = false;
   const controls: ServerControls = {
     get draining() {
@@ -825,6 +836,39 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     }
   });
 
+  /* ---------------- run status (M3 cursor validation, §16.7) ---------------- */
+  // Lightweight validated run status: exposes the authoritative
+  // `runs.event_seq` (+ status) so the client can detect an over-large
+  // stored cursor on an ACTIVE run. The frozen events pages cannot serve
+  // this: an empty page echoes the request `after` as `nextAfter`, making
+  // the over-large cursor invisible there. Session ownership enforced
+  // (foreign runs are 404, never 403); strict empty query.
+  app.get("/api/sessions/:sessionId/runs/:runId/status", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const run = requireUuid(c, c.req.param("runId"), "runId");
+    if ("response" in run) {
+      return run.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      const owned = repo.getRun(run.id);
+      if (owned.sessionId !== session.id) {
+        return apiError(c, 404, "not_found", "resource not found");
+      }
+      const body = RunStatusResponseSchema.parse({
+        run: { id: owned.id, status: owned.status, eventSeq: owned.eventSeq },
+      });
+      return c.json(body, 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
   /* ---------------- idempotency lookup ---------------- */
 
   app.get("/api/sessions/:sessionId/idempotency/:key", (c) => {
@@ -872,6 +916,77 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         }
       }
       return c.json(found, 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  /* ---------------- M3 conversation UI + SSE (§16) ---------------- */
+  // SSR shell (Hono JSX, §16.1) with the strict CSP (§16.7 exact). The shell
+  // references only the self-hosted esbuild bundle; no inline scripts.
+
+  app.get("/", (c) => {
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    c.header("Content-Security-Policy", STRICT_CSP);
+    c.header("cache-control", "no-store");
+    return c.html(renderConversationShell().toString(), 200);
+  });
+
+  app.get("/assets/client.js", (c) => {
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    if (assets.clientJs === undefined) {
+      return apiError(c, 404, "not_found", "resource not found");
+    }
+    c.header("content-type", "text/javascript; charset=utf-8");
+    c.header("cache-control", "no-cache");
+    return c.body(assets.clientJs, 200);
+  });
+
+  app.get("/assets/client.css", (c) => {
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    if (assets.clientCss === undefined) {
+      return apiError(c, 404, "not_found", "resource not found");
+    }
+    c.header("content-type", "text/css; charset=utf-8");
+    c.header("cache-control", "no-cache");
+    return c.body(assets.clientCss, 200);
+  });
+
+  // SSE delivery (§16.4 exact): session ownership enforced (foreign runs are
+  // 404), effective cursor = max(valid ?after, valid Last-Event-ID), wire via
+  // sse.ts (id = seq, event = run-event, full DTO data, 250ms poll, 15s
+  // heartbeat, 5s backpressure grace, terminal + cursor >= event_seq close).
+  // Disconnect never cancels the Run (no engine call here).
+
+  app.get("/api/sessions/:sessionId/runs/:runId/events/stream", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const run = requireUuid(c, c.req.param("runId"), "runId");
+    if ("response" in run) {
+      return run.response;
+    }
+    const gated = strictQuery(c, ["after"]);
+    if (!gated.ok) {
+      return validationError(c);
+    }
+    const cursor = effectiveCursor(
+      gated.values.after,
+      c.req.header("last-event-id"),
+    );
+    try {
+      const owned = repo.getRun(run.id);
+      if (owned.sessionId !== session.id) {
+        return apiError(c, 404, "not_found", "resource not found");
+      }
+      return createSseResponse(repo, session.id, run.id, cursor);
     } catch (error) {
       return mapDomainError(c, error);
     }

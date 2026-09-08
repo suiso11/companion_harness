@@ -1,0 +1,38 @@
+/* M3 conversation stylesheet (plan §16.1). Self-hosted only, no external origins. */
+:root {
+  color-scheme: light;
+}
+body {
+  font-family: system-ui, sans-serif;
+  margin: 0 auto;
+  max-width: 48rem;
+  padding: 1rem;
+}
+#conversation section {
+  border-top: 1px solid #ccc;
+  padding: 0.5rem 0;
+}
+#conversation p {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+#composer {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+#composer-input {
+  flex: 1;
+}
+#drawer {
+  border: 1px solid #666;
+  padding: 1rem;
+  margin-top: 1rem;
+}
+#drawer-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+button:disabled {
+  opacity: 0.5;
+}

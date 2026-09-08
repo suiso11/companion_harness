@@ -15,8 +15,9 @@
 // bootstrap narrows the window with an immediate post-open recheck of the
 // configured DB path (fail closed) before any migration writes.
 
-import { chmodSync, mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createMarkdownConnector } from "@companion/connector-markdown";
 import {
   BUNDLED_SCHEMA_VERSION,
@@ -174,6 +175,33 @@ export function sanitizeShutdownReason(reason: string): string {
     return lowered;
   }
   return "unknown";
+}
+
+/**
+ * M3 static UI assets (plan §16.1, §16.7). Best-effort load of the esbuild
+ * bundle (`scripts/build-ui.mjs` output, `dist/assets/`): missing files
+ * only mean the asset routes serve 404, never a startup failure. Never logs
+ * paths or file contents — only the loaded count.
+ */
+export function loadUiAssets(fromDir?: string): {
+  clientJs?: string;
+  clientCss?: string;
+} {
+  const dir =
+    fromDir ??
+    join(dirname(fileURLToPath(import.meta.url)), "..", "dist", "assets");
+  const assets: { clientJs?: string; clientCss?: string } = {};
+  try {
+    assets.clientJs = readFileSync(join(dir, "client.js"), "utf-8");
+  } catch {
+    // Best effort: the route serves 404 when the bundle was not built.
+  }
+  try {
+    assets.clientCss = readFileSync(join(dir, "client.css"), "utf-8");
+  } catch {
+    // Best effort: the route serves 404 when the bundle was not built.
+  }
+  return assets;
 }
 
 /** Closed startup-error vocabulary: only known M0 codes pass, else "unknown". */
@@ -382,7 +410,14 @@ export async function startServer(
       status: recovery.abandoned + recovery.cancelled,
     });
 
-    const { app, controls } = createApp({ config, repo, engine, logger, now });
+    const { app, controls } = createApp({
+      config,
+      repo,
+      engine,
+      logger,
+      now,
+      assets: loadUiAssets(),
+    });
     const activeEngine = engine;
     const activeHandle = handle;
     let server: ListenerHandle;
