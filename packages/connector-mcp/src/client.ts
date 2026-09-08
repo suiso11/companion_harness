@@ -217,7 +217,13 @@ export class McpConnector {
               .map((c) => c.text ?? "")
               .join("")
           : undefined;
-        return { ok: true, structuredContent: res.structuredContent, text };
+        return {
+          ok: true as const,
+          ...(res.structuredContent !== undefined
+            ? { structuredContent: res.structuredContent }
+            : {}),
+          ...(text !== undefined ? { text } : {}),
+        };
       } catch {
         await this.markFailure();
         return { ok: false, code: "mcp_unavailable" as const };
@@ -402,9 +408,88 @@ export function defaultTransportFactory(config: McpConnectorConfig): Transport {
   }
   const url = new URL(`http://${t.host}:${t.port}${t.path}`);
   assertLoopbackHttp(url);
-  return new StreamableHTTPClientTransport(url, {
-    fetch: loopbackNoRedirectFetch,
-  });
+  return toTransport(
+    new StreamableHTTPClientTransport(url, {
+      fetch: loopbackNoRedirectFetch,
+    }),
+  );
+}
+
+/**
+ * Minimal Transport adapter for StreamableHTTPClientTransport.
+ *
+ * The official SDK 1.30.0 class declares `implements Transport`, but its
+ * `get sessionId(): string | undefined` accessor is not assignable to
+ * `Transport["sessionId"]?: string` under `exactOptionalPropertyTypes`
+ * (a present-but-undefined value is rejected). The adapter therefore
+ * exposes `sessionId` as a plain optional property, synced from the inner
+ * transport after `start()`/each `send()` (Client.connect reads
+ * `transport.sessionId` after start to detect reconnects, and calls
+ * `transport.setProtocolVersion` after initialize, so both are forwarded
+ * live). Callback writes (`onmessage`/`onclose`/`onerror`) are forwarded to
+ * the inner transport; reads-before-write yield `undefined`, which matches
+ * a fresh transport and is handled by the SDK's optional chaining. The
+ * generic `Transport["onmessage"]` handler is narrowed through a wrapper
+ * because the inner transport only ever delivers a single
+ * `JSONRPCMessage` argument (verified 1.30.0 source). `send()` forwards
+ * only the resumption fields the inner transport accepts.
+ */
+function toTransport(inner: StreamableHTTPClientTransport): Transport {
+  const adapter: Transport = {
+    start: () => {
+      return inner.start().then(() => {
+        syncSessionId(adapter, inner);
+      });
+    },
+    send: (message, options) => {
+      return inner
+        .send(
+          message,
+          options === undefined
+            ? undefined
+            : {
+                ...(options.resumptionToken !== undefined
+                  ? { resumptionToken: options.resumptionToken }
+                  : {}),
+                ...(options.onresumptiontoken !== undefined
+                  ? { onresumptiontoken: options.onresumptiontoken }
+                  : {}),
+              },
+        )
+        .then(() => {
+          syncSessionId(adapter, inner);
+        });
+    },
+    close: () => inner.close(),
+    setProtocolVersion: (version) => {
+      inner.setProtocolVersion(version);
+    },
+    set onclose(handler: () => void) {
+      inner.onclose = handler;
+    },
+    set onerror(handler: (error: Error) => void) {
+      inner.onerror = handler;
+    },
+    set onmessage(handler: NonNullable<Transport["onmessage"]>) {
+      inner.onmessage = (message) => {
+        handler(message);
+      };
+    },
+  };
+  return adapter;
+}
+
+/** Sync the live inner session id without ever assigning `undefined`. */
+function syncSessionId(
+  adapter: Transport,
+  inner: StreamableHTTPClientTransport,
+): void {
+  const sid = inner.sessionId;
+  if (sid !== undefined) {
+    adapter.sessionId = sid;
+  } else {
+    delete adapter.sessionId;
+  }
 }
 
 async function closeQuietly(

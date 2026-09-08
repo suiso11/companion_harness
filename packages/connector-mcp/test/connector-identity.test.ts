@@ -39,6 +39,7 @@ function baseConfig(
       command: "unused-injected",
       args: [] as string[],
       envAllowlist: [...STDIO_IMPLICIT_ENV_VARS] as string[],
+      shutdownWaitMs: 3000,
     },
     bindings,
   };

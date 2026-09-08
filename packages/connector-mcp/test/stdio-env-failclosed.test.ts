@@ -25,6 +25,7 @@ function stdioConfig(envAllowlist: string[]) {
       command: "unused",
       args: [] as string[],
       envAllowlist,
+      shutdownWaitMs: 3000,
     },
     bindings: [{ upstreamTool: "search-events", canonicalSchemaHash: HASH }],
   };
