@@ -5,13 +5,9 @@ export const STDERR_CAP_BYTES = 64 * 1024;
 
 const loopbackHost = z
   .string()
-  .refine(
-    (host) => host === "127.0.0.1" || host === "localhost",
-    {
-      message:
-        "Streamable HTTP host must be loopback (127.0.0.1/localhost)",
-    },
-  );
+  .refine((host) => host === "127.0.0.1" || host === "localhost", {
+    message: "Streamable HTTP host must be loopback (127.0.0.1/localhost)",
+  });
 
 const stdioTransport = z.object({
   kind: z.literal("stdio"),

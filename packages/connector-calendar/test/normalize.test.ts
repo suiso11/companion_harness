@@ -226,10 +226,7 @@ describe("event time validation + normalized-snapshot hash (§17.4)", () => {
     expect(confirmed.revisionBasis).toBe("normalized-hash");
     expect(cancelled.revisionBasis).toBe("normalized-hash");
     expect(confirmed.sourceRevision).not.toBe(cancelled.sourceRevision);
-    const absent = await normalizeEvent(
-      { ...base, status: "confirmed" },
-      opts,
-    );
+    const absent = await normalizeEvent({ ...base, status: "confirmed" }, opts);
     const empty = await normalizeEvent(
       { ...base, status: "confirmed", description: "" },
       opts,
