@@ -119,7 +119,7 @@ is satisfied. No new repo/fork/provider install/OAuth/live access in this task.
   owner): scope to a SINGLE configured `calendarId` per call; add optional
   input `pageToken: string` (opaque, passthrough only) and optional
   `pageSize` that MUST equal the Companion `limit` (hard one page,
-  `<=20`); pass to `events.list({maxResults=limit, pageToken})` on that one
+  `<=20`); pass to `events.list({maxResults: pageSize, pageToken})` on that one
   calendar; return `nextPageToken?: string` verbatim in
   `ListEventsResponse`/`SearchEventsResponse`. Companion maps
   `nextPageToken` → §17.4 `cursor` (opaque, single page per
@@ -146,7 +146,7 @@ is satisfied. No new repo/fork/provider install/OAuth/live access in this task.
   `query?/start(ISO,req)/end(ISO,req)/limit(default10,max20)/cursor?`,
   `start<end`, range ≤90d, **one page per call**. Mapping (future code):
   `start→timeMin`, `end→timeMax`, frozen Turn `timeZone` → upstream `timeZone`
-  (IANA only), `limit→maxResults` (exact equality, hard one page `<=20`),
+  (IANA only), `limit→pageSize` (exact equality, hard one page `<=20`),
   `cursor→pageToken` (single configured calendar only). WITHOUT adopted P3
   there is NO M4 paging substitute: client-side cap + truncation note is
   explicitly REMOVED as an acceptable alternative — the paging gap stays
