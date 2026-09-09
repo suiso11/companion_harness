@@ -126,13 +126,19 @@ function canonicalJson(value: unknown): unknown {
 /**
  * Canonical resource identity (§17.4, exact):
  * connectorInstanceId + calendarId + eventId, no URLs or absolute paths.
+ * Collision-safe: the exact tuple is JSON-serialized before hashing so
+ * embedded separators (e.g. ':') cannot merge distinct tuples.
+ * Opaque: only the `calendar:` prefix plus hex digest is exposed.
  */
-export function canonicalKey(
+export async function canonicalKey(
   connectorInstanceId: string,
   calendarId: string,
   eventId: string,
-): string {
-  return `calendar:${connectorInstanceId}:${calendarId}:${eventId}`;
+): Promise<string> {
+  const digest = await sha256Hex(
+    JSON.stringify([connectorInstanceId, calendarId, eventId]),
+  );
+  return `calendar:${digest}`;
 }
 
 export interface NormalizeOptions {
@@ -157,7 +163,7 @@ export async function normalizeEvent(
   const parsed = proposedUpstreamEventSchema.parse(raw);
   void options.nowIso;
   validateEventRange(parsed.start, parsed.end);
-  const key = canonicalKey(
+  const key = await canonicalKey(
     options.connectorInstanceId,
     parsed.calendarId,
     parsed.id,

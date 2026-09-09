@@ -58,13 +58,23 @@ describe("normalize (spike fixture, proposed fork shape only)", () => {
       connectorInstanceId: "cal-1",
       nowIso: "2026-09-08T00:00:00Z",
     });
-    expect(out.canonicalKey).toBe(canonicalKey("cal-1", "primary", "evt_123"));
+    expect(out.canonicalKey).toBe(
+      await canonicalKey("cal-1", "primary", "evt_123"),
+    );
     expect(out.revisionBasis).toBe("etag");
     expect(out.sourceRevision).toBe('"abc123"');
     expect(out).not.toHaveProperty("attendees");
     expect(out).not.toHaveProperty("organizer");
     expect(out).not.toHaveProperty("hangoutLink");
     expect(out).not.toHaveProperty("htmlLink");
+  });
+
+  it("disambiguates colon-joined tuples with a bounded opaque key", async () => {
+    const a = await canonicalKey("a", "b:c", "d");
+    const b = await canonicalKey("a:b", "c", "d");
+    expect(a).not.toBe(b);
+    expect(a).toMatch(/^calendar:[0-9a-f]{64}$/);
+    expect(b).toMatch(/^calendar:[0-9a-f]{64}$/);
   });
 
   it("falls back to content hash without etag/updated", async () => {
