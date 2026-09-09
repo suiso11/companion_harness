@@ -293,3 +293,36 @@ implementing P1+P2+P3+P6+P7 with readonly re-consent + version bump, owned
 outside Companion packages — or (b) alternative upstream already read-only
 with pagination + authoritative get. Until decided: no SDK pin, no binding
 identity, no implementation.
+
+## 8. Scoped fork protocol evidence (2026-09-09, record-fork-protocol-evidence)
+
+Status of this section: evidence record only. Design remains
+**NOT ADOPTED**; M4 remains not implemented; §17 contracts unchanged.
+
+- User decision: **option A scoped fork selected/approved** (design §7 path
+  (a); alternative-upstream path (b) not selected). Approval covers
+  protocol-compatibility evidence recording only — **NOT adoption**.
+- Candidate: fork `https://github.com/suiso11/google-calendar-mcp`, branch
+  `feat/readonly-mode`, verified head `97a3dc3` (short SHA; protocol-evidence
+  reference only — **not a release pin**).
+- Candidate version: private `3.0.0-readonly.1`. **No tag, no GitHub release,
+  no npm publication** — none claimed.
+- SDK parity (verified fact): both sides exact
+  `@modelcontextprotocol/sdk 1.30.0`.
+- Verified protocol facts (credential-free stdio; **no OAuth flow and no
+  Calendar tool call occurred**): stdio `initialize` + `tools/list` passed;
+  server name/version reported (version `3.0.0-readonly.1`); `tools/list`
+  returned exactly four tools: `get-event`, `list-calendars`, `list-events`,
+  `search-events`.
+- Deterministic canonical input-schema hashes (canonical JSON → SHA-256, per
+  §17.3 binding identity; verified protocol facts, not adoption):
+  - `get-event`: `f3212ecb17c3e45f69f7412b3a1e28cc4aaec770121925d23d31d4b699f73e89`
+  - `list-calendars`: `ae9285fc8b0632942517f82ff5819be9152a14feaec7d11098eb9476e9eeb398`
+  - `list-events`: `279887bf288ea036792c32c20a7a0b800d1a34cb371c8f161b546d12f683fcf3`
+  - `search-events`: `027de2d89db1284173509eae71808575412461caca0f53aeb1085b011fe63167`
+- Gates remaining (unresolved live/adoption claims): (a) fresh readonly
+  `calendarList` scope behavior and the §4 live checklist (items 1–7) have
+  NOT been run; (b) P6 deletion-semantics classifier remains UNRESOLVED —
+  no tombstone/deletion mapping is adopted here; (c) no OAuth/Calendar tool
+  call occurred, so **no live OAuth/Calendar compatibility is claimed**.
+  Likewise **no release/tag/npm compatibility is claimed**.

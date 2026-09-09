@@ -209,3 +209,34 @@ can be made. No broad OAuth grant and no fork is approved by this record.
   still blocked (pruned node_modules, no installs); CI fresh-env run
   re-verifies. M4 NOT complete: no upstream Calendar binding selected, no
   live compatibility claim.
+
+## Readonly fork protocol evidence (2026-09-09, record-fork-protocol-evidence)
+
+- User decision: **option A scoped fork selected/approved** (scoped
+  patch/fork path per design §7; alternative-upstream path not selected).
+  Approval covers protocol-compatibility evidence recording only — **NOT
+  adoption**.
+- Candidate: fork `https://github.com/suiso11/google-calendar-mcp`, branch
+  `feat/readonly-mode`, verified head `97a3dc3` (short SHA; protocol-evidence
+  reference only — **not a release pin**).
+- Candidate version: private `3.0.0-readonly.1`. **No tag, no GitHub release,
+  no npm publication** — none claimed.
+- SDK parity (verified fact): both sides exact
+  `@modelcontextprotocol/sdk 1.30.0`.
+- Verified protocol facts (credential-free stdio; **no OAuth flow and no
+  Calendar tool call occurred**): stdio `initialize` + `tools/list` passed;
+  server name/version reported (version `3.0.0-readonly.1`); `tools/list`
+  returned exactly four tools: `get-event`, `list-calendars`, `list-events`,
+  `search-events`.
+- Deterministic canonical input-schema hashes (canonical JSON → SHA-256, per
+  §17.3 binding identity; verified protocol facts, not adoption):
+  - `get-event`: `f3212ecb17c3e45f69f7412b3a1e28cc4aaec770121925d23d31d4b699f73e89`
+  - `list-calendars`: `ae9285fc8b0632942517f82ff5819be9152a14feaec7d11098eb9476e9eeb398`
+  - `list-events`: `279887bf288ea036792c32c20a7a0b800d1a34cb371c8f161b546d12f683fcf3`
+  - `search-events`: `027de2d89db1284173509eae71808575412461caca0f53aeb1085b011fe63167`
+- Status: **NOT ADOPTED**. Unresolved live/adoption claims (gates remain):
+  (a) fresh readonly `calendarList` scope behavior and the §4-style live
+  checklist (items 1–7) have NOT been run; (b) P6 deletion-semantics
+  classifier remains UNRESOLVED; (c) no OAuth/Calendar tool call occurred, so
+  **no live OAuth/Calendar compatibility is claimed**. Likewise **no
+  release/tag/npm compatibility is claimed**.
