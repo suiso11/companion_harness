@@ -60,7 +60,7 @@ export function assertStdioEnvClosed(config: McpConnectorConfig): void {
 }
 
 /** Loopback hosts permitted for Streamable HTTP (§17.7, exact). */
-const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost"]);
 
 export function assertLoopbackHttp(url: URL): void {
   if (!LOOPBACK_HOSTS.has(url.hostname)) {

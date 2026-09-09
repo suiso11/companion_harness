@@ -51,7 +51,7 @@ describe("connector config (§17.3, §17.7)", () => {
   });
 
   it("accepts loopback hosts and pins redirects off", () => {
-    for (const host of ["127.0.0.1", "localhost", "::1"]) {
+    for (const host of ["127.0.0.1", "localhost"]) {
       const parsed = mcpConnectorConfigSchema.parse(
         baseConfig({
           transport: { kind: "streamable-http", host, port: 8377 },
@@ -63,6 +63,13 @@ describe("connector config (§17.3, §17.7)", () => {
         expect.unreachable();
       }
     }
+  });
+
+  it("rejects ::1 Streamable HTTP host", () => {
+    const bad = baseConfig({
+      transport: { kind: "streamable-http", host: "::1", port: 8377 },
+    });
+    expect(() => mcpConnectorConfigSchema.parse(bad)).toThrow();
   });
 
   it("requires 64-hex canonical schema hashes for every binding", () => {
