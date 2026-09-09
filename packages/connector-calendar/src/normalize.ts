@@ -151,8 +151,9 @@ export interface NormalizeOptions {
  * start/end validation with end>start (§17.4); privacy exclusions
  * (attendees/organizer/conference URLs/HTML links/raw payload) are dropped.
  * Revision precedence: etag > sourceUpdatedAt > content hash, where the
- * hash covers the ACTUAL normalized snapshot (truncated title/description/
- * location/start/end) — never the raw untruncated source.
+ * hash covers the ACTUAL normalized snapshot (status/title/optional
+ * description/optional location/start/end/allDayEndExclusive, truncated) —
+ * never the raw untruncated source.
  * `deleted` is never produced here — tombstones require authoritative
  * evidence via classifyDeletion (search omission creates none).
  */
@@ -175,12 +176,15 @@ export async function normalizeEvent(
       : undefined;
   const location =
     parsed.location !== undefined ? parsed.location.slice(0, 1024) : undefined;
+  const allDay = allDayEndExclusive(parsed.start, parsed.end);
   const snapshotForHash = {
+    status: parsed.status,
     title,
-    description: description ?? "",
-    location: location ?? "",
+    ...(description !== undefined ? { description } : {}),
+    ...(location !== undefined ? { location } : {}),
     start: parsed.start,
     end: parsed.end,
+    allDayEndExclusive: allDay,
   };
   let sourceRevision: string;
   let basis: NormalizedEvent["revisionBasis"];
@@ -205,7 +209,7 @@ export async function normalizeEvent(
     ...(location !== undefined ? { location } : {}),
     start: parsed.start,
     end: parsed.end,
-    allDayEndExclusive: allDayEndExclusive(parsed.start, parsed.end),
+    allDayEndExclusive: allDay,
     ...(parsed.updated !== undefined
       ? { sourceUpdatedAt: parsed.updated }
       : {}),

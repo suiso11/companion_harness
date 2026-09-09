@@ -202,6 +202,40 @@ describe("event time validation + normalized-snapshot hash (§17.4)", () => {
     expect(a.revisionBasis).toBe("normalized-hash");
     expect(a.sourceRevision).toBe(b.sourceRevision);
   });
+
+  it("distinguishes status and absent-versus-empty description", async () => {
+    const opts = {
+      connectorInstanceId: "cal-1",
+      nowIso: "2026-09-08T00:00:00Z",
+    };
+    const base = {
+      id: "e5",
+      calendarId: "primary",
+      summary: "T",
+      start: "2026-09-10T09:00:00+09:00",
+      end: "2026-09-10T09:30:00+09:00",
+    };
+    const confirmed = await normalizeEvent(
+      { ...base, status: "confirmed" },
+      opts,
+    );
+    const cancelled = await normalizeEvent(
+      { ...base, status: "cancelled" },
+      opts,
+    );
+    expect(confirmed.revisionBasis).toBe("normalized-hash");
+    expect(cancelled.revisionBasis).toBe("normalized-hash");
+    expect(confirmed.sourceRevision).not.toBe(cancelled.sourceRevision);
+    const absent = await normalizeEvent(
+      { ...base, status: "confirmed" },
+      opts,
+    );
+    const empty = await normalizeEvent(
+      { ...base, status: "confirmed", description: "" },
+      opts,
+    );
+    expect(absent.sourceRevision).not.toBe(empty.sourceRevision);
+  });
 });
 
 describe("proposed binding identity (NOT upstream compat)", () => {
