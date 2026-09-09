@@ -239,9 +239,10 @@ export type DeletionVerdict =
 /**
  * Deletion classifier (§17.5 + 2026-09-09 correction): bare 404/410 or
  * `cancelled` alone is NOT deletion proof; search omission NEVER creates a
- * tombstone. Only operation-specific authoritative evidence for a
- * prior-known resource yields `deleted`; ambiguous errors map to
- * `calendar_upstream_error` with no deletion.
+ * tombstone. Until a verified adopted fork defines authoritative tombstone
+ * evidence, the proposed `get-tombstone` / `list-showDeleted-tombstone`
+ * labels are unverified and defer to `unknown` (`calendar_upstream_error`)
+ * with no deletion; ambiguous errors likewise map to `unknown`.
  */
 export function classifyDeletion(input: {
   priorKnown: boolean;
@@ -257,12 +258,10 @@ export function classifyDeletion(input: {
   switch (input.authoritativeRead) {
     case "get-tombstone":
     case "list-showDeleted-tombstone":
-      return { kind: "deleted", reason: "authoritative-tombstone" };
     case "ambiguous-error":
+      return { kind: "unknown", code: "calendar_upstream_error" };
     case "not-found":
     case "search-omission":
-      return input.authoritativeRead === "ambiguous-error"
-        ? { kind: "unknown", code: "calendar_upstream_error" }
-        : { kind: "not-deleted", reason: "no-authoritative-evidence" };
+      return { kind: "not-deleted", reason: "no-authoritative-evidence" };
   }
 }

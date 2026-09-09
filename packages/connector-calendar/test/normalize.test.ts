@@ -95,7 +95,7 @@ describe("normalize (spike fixture, proposed fork shape only)", () => {
   });
 });
 
-describe("deletion classifier (no tombstone from omission)", () => {
+describe("deletion classifier (unverified tombstones defer to unknown)", () => {
   it("search omission never deletes", () => {
     expect(
       classifyDeletion({
@@ -103,15 +103,39 @@ describe("deletion classifier (no tombstone from omission)", () => {
         authoritativeRead: "search-omission",
       }),
     ).toEqual({ kind: "not-deleted", reason: "no-authoritative-evidence" });
+    expect(
+      classifyDeletion({
+        priorKnown: false,
+        authoritativeRead: "search-omission",
+      }),
+    ).toEqual({ kind: "not-deleted", reason: "no-authoritative-evidence" });
   });
 
-  it("only operation-specific tombstones delete", () => {
+  it("proposed tombstone labels defer to unknown until a verified fork", () => {
     expect(
       classifyDeletion({
         priorKnown: true,
         authoritativeRead: "get-tombstone",
       }),
-    ).toEqual({ kind: "deleted", reason: "authoritative-tombstone" });
+    ).toEqual({ kind: "unknown", code: "calendar_upstream_error" });
+    expect(
+      classifyDeletion({
+        priorKnown: true,
+        authoritativeRead: "list-showDeleted-tombstone",
+      }),
+    ).toEqual({ kind: "unknown", code: "calendar_upstream_error" });
+    expect(
+      classifyDeletion({
+        priorKnown: false,
+        authoritativeRead: "get-tombstone",
+      }),
+    ).toEqual({ kind: "not-deleted", reason: "no-authoritative-evidence" });
+    expect(
+      classifyDeletion({
+        priorKnown: false,
+        authoritativeRead: "list-showDeleted-tombstone",
+      }),
+    ).toEqual({ kind: "not-deleted", reason: "no-authoritative-evidence" });
     expect(
       classifyDeletion({ priorKnown: true, authoritativeRead: "not-found" }),
     ).toEqual({ kind: "not-deleted", reason: "no-authoritative-evidence" });
