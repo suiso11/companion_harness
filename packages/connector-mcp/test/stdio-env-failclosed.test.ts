@@ -45,10 +45,8 @@ describe("fail-closed stdio env allowlist", () => {
     const partial = [...STDIO_IMPLICIT_ENV_VARS].slice(1);
     const config = stdioConfig(partial);
     expect(missingStdioEnvNames(config).length).toBeGreaterThan(0);
-    expect(() => assertStdioEnvClosed(config)).toThrow("mcp_env_not_allowed");
-    expect(() => defaultTransportFactory(config)).toThrow(
-      "mcp_env_not_allowed",
-    );
+    expect(() => assertStdioEnvClosed(config)).toThrow("mcp_unavailable");
+    expect(() => defaultTransportFactory(config)).toThrow("mcp_unavailable");
 
     let factoryCalls = 0;
     const countingFactory = (_c: unknown) => {
@@ -57,10 +55,10 @@ describe("fail-closed stdio env allowlist", () => {
     };
     const connector = new McpConnector(config, countingFactory as never);
     const ensured = await connector.ensureConnected();
-    expect(ensured).toEqual({ ok: false, code: "mcp_env_not_allowed" });
+    expect(ensured).toEqual({ ok: false, code: "mcp_unavailable" });
     expect(factoryCalls).toBe(0);
     const res = await connector.callTool("search-events", { q: "x" });
-    expect(res).toEqual({ ok: false, code: "mcp_env_not_allowed" });
+    expect(res).toEqual({ ok: false, code: "mcp_unavailable" });
     expect(factoryCalls).toBe(0);
     // Fixed code only: no env values in the thrown message.
     try {
@@ -68,7 +66,7 @@ describe("fail-closed stdio env allowlist", () => {
       expect.unreachable();
     } catch (err) {
       const msg = (err as Error).message;
-      expect(msg).toContain("mcp_env_not_allowed");
+      expect(msg).toContain("mcp_unavailable");
       for (const name of partial) {
         void name;
       }

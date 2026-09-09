@@ -23,7 +23,7 @@ export type TransportFactory = (config: McpConnectorConfig) => Transport;
  * (over `DEFAULT_INHERITED_ENV_VARS`) UNDER the explicit `env` param, and
  * hardcodes `shell:false`. Fail-closed: EVERY effectively inherited default
  * name must be explicitly present in the config `envAllowlist`, otherwise
- * stdio config/call is rejected with `mcp_env_not_allowed` BEFORE spawn.
+ * stdio config/call is rejected with `mcp_unavailable` BEFORE spawn.
  * Verified default sets (SDK 1.30.0):
  * - win32: APPDATA, HOMEDRIVE, HOMEPATH, LOCALAPPDATA, PATH,
  *   PROCESSOR_ARCHITECTURE, SYSTEMDRIVE, SYSTEMROOT, TEMP, USERNAME,
@@ -54,7 +54,7 @@ export function assertStdioEnvClosed(config: McpConnectorConfig): void {
   const missing = missingStdioEnvNames(config);
   if (missing.length > 0) {
     throw new Error(
-      `mcp_env_not_allowed: stdio envAllowlist misses ${missing.length} required inherited name(s): ${missing.join(",")}`,
+      `mcp_unavailable: stdio envAllowlist misses ${missing.length} required inherited name(s): ${missing.join(",")}`,
     );
   }
 }
@@ -276,7 +276,7 @@ export class McpConnector {
     // Fail-closed stdio env: reject BEFORE any transport creation/spawn.
     if (this.config.transport.kind === "stdio") {
       if (missingStdioEnvNames(this.config).length > 0) {
-        return { ok: false, code: "mcp_env_not_allowed" as const };
+        return { ok: false, code: "mcp_unavailable" as const };
       }
     }
     if (this.consecutiveFailures > 0) {
