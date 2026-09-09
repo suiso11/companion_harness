@@ -272,14 +272,18 @@ export class McpConnector {
         });
       }
       const { enabled } = this.verifyBindingIdentity(snapshot);
+      if (enabled.length === 0) {
+        await closeQuietly(client, transport);
+        transport = undefined;
+        client = undefined;
+        this.consecutiveFailures = 0;
+        return { ok: false, code: "mcp_schema_mismatch" as const };
+      }
       this.client = client;
       this.connected = true;
       this.consecutiveFailures = 0;
       transport = undefined; // owned by client now
       client = undefined;
-      if (enabled.length === 0) {
-        return { ok: false, code: "mcp_schema_mismatch" as const };
-      }
       return { ok: true };
     } catch {
       // Failed connect: release the half-open transport/client (no leak).

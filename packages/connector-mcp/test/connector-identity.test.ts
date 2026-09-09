@@ -146,6 +146,7 @@ describe("McpConnector connected identity (in-memory SDK transport)", () => {
     const res = await connector.callTool("search-events", { q: "standup" });
     expect(res).toEqual({ ok: false, code: "mcp_schema_mismatch" });
     expect(calls()).toBe(0);
+    expect(connector.stats().connected).toBe(false);
   });
 
   it("isError=true maps to a fixed redacted error, never ok text", async () => {
