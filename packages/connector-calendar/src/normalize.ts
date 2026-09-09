@@ -64,6 +64,8 @@ function allDayEndExclusive(start: string, end: string): boolean {
 
 const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
 
+const timedDateTimeSchema = z.string().datetime({ offset: true });
+
 function parseEventTime(value: string, field: "start" | "end"): number {
   const dateOnly = DATE_ONLY.exec(value);
   if (dateOnly) {
@@ -85,7 +87,11 @@ function parseEventTime(value: string, field: "start" | "end"): number {
     }
     return ms;
   }
-  const ms = Date.parse(value);
+  const timed = timedDateTimeSchema.safeParse(value);
+  if (!timed.success) {
+    throw new Error(`invalid ISO ${field}: ${value}`);
+  }
+  const ms = Date.parse(timed.data);
   if (!Number.isFinite(ms)) {
     throw new Error(`invalid ISO ${field}: ${value}`);
   }
@@ -94,6 +100,11 @@ function parseEventTime(value: string, field: "start" | "end"): number {
 
 /** Validate start/end wire shapes (timed ISO dateTime or all-day DATE). */
 function validateEventRange(start: string, end: string): void {
+  const startAllDay = DATE_ONLY.test(start);
+  const endAllDay = DATE_ONLY.test(end);
+  if (startAllDay !== endAllDay) {
+    throw new Error("mixed all-day DATE and timed datetime endpoints");
+  }
   const startMs = parseEventTime(start, "start");
   const endMs = parseEventTime(end, "end");
   if (!(endMs > startMs)) {

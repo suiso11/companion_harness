@@ -169,6 +169,56 @@ describe("event time validation + normalized-snapshot hash (§17.4)", () => {
         { connectorInstanceId: "cal-1", nowIso: "2026-09-08T00:00:00Z" },
       ),
     ).rejects.toThrow();
+    await expect(
+      normalizeEvent(
+        {
+          ...base,
+          start: "Wed, 10 Sep 2026 09:00:00 +0900",
+          end: "2026-09-10T09:30:00+09:00",
+        },
+        { connectorInstanceId: "cal-1", nowIso: "2026-09-08T00:00:00Z" },
+      ),
+    ).rejects.toThrow();
+    await expect(
+      normalizeEvent(
+        {
+          ...base,
+          start: "2026-09-10 09:00:00+09:00",
+          end: "2026-09-10T09:30:00+09:00",
+        },
+        { connectorInstanceId: "cal-1", nowIso: "2026-09-08T00:00:00Z" },
+      ),
+    ).rejects.toThrow();
+    await expect(
+      normalizeEvent(
+        {
+          ...base,
+          start: "2026-09-10T09:00:00",
+          end: "2026-09-10T09:30:00+09:00",
+        },
+        { connectorInstanceId: "cal-1", nowIso: "2026-09-08T00:00:00Z" },
+      ),
+    ).rejects.toThrow();
+    await expect(
+      normalizeEvent(
+        {
+          ...base,
+          start: "2026-09-10",
+          end: "2026-09-10T09:30:00+09:00",
+        },
+        { connectorInstanceId: "cal-1", nowIso: "2026-09-08T00:00:00Z" },
+      ),
+    ).rejects.toThrow();
+    await expect(
+      normalizeEvent(
+        {
+          ...base,
+          start: "2026-09-10T09:00:00+09:00",
+          end: "2026-09-11",
+        },
+        { connectorInstanceId: "cal-1", nowIso: "2026-09-08T00:00:00Z" },
+      ),
+    ).rejects.toThrow();
   });
 
   it("hashes the truncated normalized snapshot, not the raw source", async () => {
