@@ -176,8 +176,25 @@ export class McpConnector {
     return { enabled, disabled };
   }
 
-  /** Single logical call: exactly one attempt, never auto-resent (§17.6). */
-  async callTool(upstreamTool: string, args: unknown): Promise<CallResult> {
+  /**
+   * Single logical call: exactly one attempt, never auto-resent (§17.6).
+   *
+   * Cancellation is SDK-native (verified @modelcontextprotocol/sdk 1.30.0
+   * official source/types: `Client.callTool(params, resultSchema?,
+   * options?: RequestOptions)` forwards `options` to `Protocol.request`,
+   * where `RequestOptions.signal?: AbortSignal` throws if already aborted
+   * and rejects the in-flight request on abort after sending
+   * `notifications/cancelled`). The abort rejection is redacted to the
+   * existing fixed `mcp_unavailable` in the catch below: no new error code,
+   * no raw abort error, no automatic retry. The per-instance mutex is
+   * released by `withMutex`'s finally, so a queued call still proceeds.
+   * Omitting `signal` preserves the previous behavior exactly.
+   */
+  async callTool(
+    upstreamTool: string,
+    args: unknown,
+    signal?: AbortSignal,
+  ): Promise<CallResult> {
     return this.withMutex(async () => {
       if (!this.isAllowed(upstreamTool)) {
         const configured = this.config.bindings.some(
@@ -198,10 +215,14 @@ export class McpConnector {
       }
       try {
         const client = this.client as Client;
-        const res = (await client.callTool({
-          name: upstreamTool,
-          arguments: (args ?? {}) as Record<string, unknown>,
-        })) as {
+        const res = (await client.callTool(
+          {
+            name: upstreamTool,
+            arguments: (args ?? {}) as Record<string, unknown>,
+          },
+          undefined,
+          signal === undefined ? undefined : { signal },
+        )) as {
           isError?: boolean;
           structuredContent?: unknown;
           content?: Array<{ type: string; text?: string }>;
