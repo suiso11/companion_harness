@@ -108,6 +108,14 @@ export interface ConnectorStats {
 }
 
 /**
+ * Hard ceiling on tools/list pages followed during binding-identity
+ * verification. A malicious or buggy server could return a non-terminating
+ * nextCursor sequence and hang connect forever; after the cap the collected
+ * snapshot is verified as-is (unseen bindings stay disabled).
+ */
+const MAX_TOOL_LIST_PAGES = 10; // ponytail: deliberately small and fixed, never auto-raised
+
+/**
  * MCP connector transport lifecycle (§17.6–§17.7) over the official SDK.
  *
  * - Lazy persistent: connects on first allowed call, reuses the Client after.
@@ -254,11 +262,12 @@ export class McpConnector {
 
   /**
    * Lazy connect + binding-identity verification (§17.3): after the SDK
-   * handshake, tools/list is fetched and each configured binding's exact
-   * name + canonical input-schema SHA-256 is compared. Any missing/mismatch
-   * disables that binding; connect reports mcp_schema_mismatch only when
-   * NO binding verifies (partial drift still connects, drifted names stay
-   * disabled). Demand reconnect applies the backoff before dialing.
+   * handshake, tools/list pages are followed (bounded) and each configured
+   * binding's exact name + canonical input-schema SHA-256 is compared. Any
+   * missing/mismatch disables that binding; connect reports
+   * mcp_schema_mismatch only when NO binding verifies (partial drift still
+   * connects, drifted names stay disabled). Demand reconnect applies the
+   * backoff before dialing.
    */
   async ensureConnected(): Promise<
     { ok: true } | { ok: false; code: McpErrorCode }
@@ -283,14 +292,25 @@ export class McpConnector {
         { capabilities: {} },
       );
       await client.connect(transport);
-      // Identity verification BEFORE enabling any call.
-      const listed = await client.listTools();
+      // Identity verification BEFORE enabling any call: follow SDK 1.30.0
+      // tools/list pages via listTools({ cursor }) until no nextCursor, so
+      // bindings beyond page 1 still verify. Only configured bindings are
+      // ever enabled — discovered tools are never auto-exposed.
       const snapshot: Array<{ name: string; inputSchemaHash: string }> = [];
-      for (const t of listed.tools ?? []) {
-        snapshot.push({
-          name: t.name,
-          inputSchemaHash: await canonicalSchemaHash(t.inputSchema),
-        });
+      let cursor: string | undefined;
+      for (let page = 0; page < MAX_TOOL_LIST_PAGES; page += 1) {
+        const listed =
+          cursor === undefined
+            ? await client.listTools()
+            : await client.listTools({ cursor });
+        for (const t of listed.tools ?? []) {
+          snapshot.push({
+            name: t.name,
+            inputSchemaHash: await canonicalSchemaHash(t.inputSchema),
+          });
+        }
+        if (listed.nextCursor === undefined) break;
+        cursor = listed.nextCursor;
       }
       const { enabled } = this.verifyBindingIdentity(snapshot);
       if (enabled.length === 0) {
