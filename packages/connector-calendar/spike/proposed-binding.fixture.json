@@ -1,0 +1,40 @@
+{
+  "$comment": "SPIKE fixture: hand-written shape of the PROPOSED fork ListEvents/SearchEvents delta (P3+P7). Docs-only shape; NOT upstream evidence. nextPageToken/etag exist only post-patch.",
+  "proposedForkVersion": "0.0.0-proposed.1",
+  "baseUpstream": "nspady/google-calendar-mcp@7c788f58",
+  "operations": ["list-calendars", "list-events", "search-events", "get-event"],
+  "listEventsPage1": {
+    "events": [
+      {
+        "id": "evt_123",
+        "calendarId": "primary",
+        "status": "confirmed",
+        "summary": "Team standup",
+        "description": "Daily sync with lots of details",
+        "location": "Room A",
+        "start": "2026-09-10T09:00:00+09:00",
+        "end": "2026-09-10T09:30:00+09:00",
+        "updated": "2026-09-08T01:02:03.000Z",
+        "etag": "\"abc123\"",
+        "attendees": [{ "email": "someone@example.com" }],
+        "organizer": { "email": "org@example.com" },
+        "hangoutLink": "https://meet.example/xxx",
+        "htmlLink": "https://calendar.example/e/xxx"
+      }
+    ],
+    "totalCount": 2,
+    "nextPageToken": "opaque-page-2"
+  },
+  "calendarSearchMapping": {
+    "start": "2026-09-10T00:00:00+09:00",
+    "end": "2026-09-17T00:00:00+09:00",
+    "limit": 10,
+    "cursor": "opaque-page-2",
+    "mapsTo": {
+      "timeMin": "start",
+      "timeMax": "end",
+      "maxResults": "limit",
+      "pageToken": "cursor (single calendar only)"
+    }
+  }
+}
