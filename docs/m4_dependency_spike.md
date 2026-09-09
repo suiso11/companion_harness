@@ -196,7 +196,7 @@ can be made. No broad OAuth grant and no fork is approved by this record.
   API); `missingStdioEnvNames`/`assertStdioEnvClosed` require EVERY
   effectively inherited name explicitly in config `envAllowlist`, else
   `defaultTransportFactory` throws and `ensureConnected`/`callTool` return
-  fixed `mcp_env_not_allowed` BEFORE any transport creation/spawn. No env
+  fixed `mcp_unavailable` BEFORE any transport creation/spawn. No env
   values logged (fixed code + missing count/names only).
 - Regression: `packages/connector-mcp/test/stdio-env-failclosed.test.ts`
   (counting fake factory proves zero factory calls on rejection; full
