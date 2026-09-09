@@ -4,8 +4,10 @@
  * ensureConnected must follow nextCursor and enable a configured binding
  * that appears only on page 2. No network, no spawn, no timers.
  */
+
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it } from "vitest";
 import { McpConnector, STDIO_IMPLICIT_ENV_VARS } from "../src/client.js";
 import type { McpConnectorConfig } from "../src/config.js";
@@ -42,7 +44,7 @@ class PagedFakeTransport implements Transport {
     if (msg.id === undefined || msg.method === undefined) return;
     if (msg.method === "initialize") {
       this.reply(msg.id, {
-        protocolVersion: "2025-11-25",
+        protocolVersion: LATEST_PROTOCOL_VERSION,
         capabilities: { tools: {} },
         serverInfo: { name: "fake-paged", version: "0.0.0" },
       });
