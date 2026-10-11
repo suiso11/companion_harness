@@ -1,11 +1,18 @@
 # Google Calendar LOCAL readonly MCP binding — patch design (proposal, not adopted)
 
-Status: **design-only proposal**. No code changed, no SDK adopted, no upstream
-server/version/transport selected, no `initialize`/`tools-list` compatibility
-proof, no OAuth grant, no live access. M4 remains **not implemented**; §17
-contracts unchanged. Companion-side plan source: `docs/implementation_plan.md`
-§17 (agreed). Spike record: `docs/m4_dependency_spike.md` (research-only).
-Branch: `feat/m4-mcp-spike`.
+Status: **design-only proposal; C08 runtime evidence recorded (2026-10-11)**.
+No Companion code changed; no SDK package adopted; no OAuth grant and no live
+access. The pinned candidate fork `97a3dc3` now has a credential-free
+`initialize`/`tools-list` proof and an exact pin form (full SHA + lock
+digest), but **FORMAL ADOPTION = HOLD / NOT ADOPTED** and M4 remains **not
+implemented**; §17 contracts unchanged. Companion-side plan source:
+`docs/implementation_plan.md` §17 (agreed). Authoritative exact-hash table and
+full evidence: `docs/m4_dependency_spike.md` "C08 exact pinned binding +
+runtime evidence" (§ "C08-01..08 decision matrix", archive
+`.../tool-output/c08-probe/archive/c08-evidence/`). Prior branch/status lines
+below are historical and superseded by §8.
+
+Historical branch label: `feat/m4-mcp-spike`.
 
 Upstream inspected (working-tree HTTP inspection only, **not a release pin**):
 `nspady/google-calendar-mcp` immutable commit
@@ -57,10 +64,16 @@ Base: `https://raw.githubusercontent.com/nspady/google-calendar-mcp/7c788f58e8b0
   (attendees, organizer, links). `ListEventsResponse={events,totalCount,...}`;
   `SearchEventsResponse={events,totalCount,query,...}`; no cursor/etag fields.
 - `src/utils/response-builder.ts` + `field-mask-builder.ts` referenced by
-  handlers (not re-fetched; paths recorded from imports — do not quote API).
-  The `structuredContent-first` claim for these builders is **unverified**
-  (imports-only); Companion P4 MUST NOT cite it as evidence until the
-  builder bodies are re-fetched at the pinned SHA.
+  handlers of the nspady `7c788f5` tree (paths recorded from imports; bodies
+  not re-fetched for that SHA). The `structuredContent-first` claim for those
+  bodies stays **UNVERIFIED for `7c788f5`** — the original upstream source was
+  not newly executed. **C08 verification for the pinned fork SHA `97a3dc3`
+  (2026-10-11):** the fork builder body was executed and read at
+  `https://github.com/suiso11/google-calendar-mcp/blob/97a3dc36873b8f52870695d7706d182d5a8fc401/src/utils/response-builder.ts#L16-L23`
+  — `createStructuredResponse` returns
+  `content: [{type:"text", text: JSON.stringify(data)}]` with **no
+  `structuredContent`**, and all four real tool calls returned content text
+  JSON only. Do not generalize this fork result to `7c788f5`.
 
 ## 2. Patch spec (PROPOSED, external-server ownership — not applied)
 
@@ -293,3 +306,67 @@ implementing P1+P2+P3+P6+P7 with readonly re-consent + version bump, owned
 outside Companion packages — or (b) alternative upstream already read-only
 with pagination + authoritative get. Until decided: no SDK pin, no binding
 identity, no implementation.
+
+## 8. C08 exact fork runtime evidence (2026-10-11, c08-decision-docs)
+
+Status of this section: evidence record. Formal adoption remains **HOLD /
+NOT ADOPTED**. The prior 2026-09-09 "scoped fork protocol evidence" record
+(branch `feat/m4-readonly-fork-adoption`, `97a3dc3` recorded as a short-SHA
+protocol reference only) is **explicitly superseded** by this exact-pin +
+runtime record; the older `nspady@7c788f5` design remains historical and was
+not re-executed.
+
+- Candidate: fork `suiso11/google-calendar-mcp@97a3dc3` full SHA
+  `97a3dc36873b8f52870695d7706d182d5a8fc401`, tree `ae743a8bd7cc7002c2368618fbe098dba8af341e`,
+  private version `3.0.0-readonly.1`, exact SDK `1.30.0` at runtime. The
+  spike doc holds the **authoritative exact table** of the four canonical
+  input-schema hashes (all historical-match true) — linked, not repeated here.
+- Actual mapping (fork `97a3dc3` source line citations verified by execution):
+  `src/server.ts#L102-L103` `serverInfo` name/version;
+  `src/tools/registry.ts#L783/L791/L813/L821` four read tools;
+  `src/handlers/core/ListCalendarsHandler.ts#L94` `calendarList.list`;
+  `src/handlers/core/ListEventsHandler.ts#L78-L88` and
+  `src/handlers/core/SearchEventsHandler.ts#L79-L90` `calendar.events.list`
+  with `maxResults`/`pageToken` passthrough (the P3 pagination delta is
+  present: `nextPageToken` is returned);
+  `src/handlers/core/GetEventHandler.ts#L57` `calendar.events.get`;
+  `src/utils/response-builder.ts#L16-L23` content-text-only response.
+- Mapping to Companion `calendar.search` is therefore provable at the wire
+  level: `start→timeMin`, `end→timeMax`, frozen Turn IANA `timeZone→timeZone`,
+  `limit→pageSize` (observed `10`), `cursor→pageToken` with opaque-in →
+  opaque-out; one provider call per list/search, one page. `list-calendars` →
+  `{calendars,totalCount:1}`, `list-events` → `{events,totalCount:2,nextPageToken}`,
+  `search-events` → `{events,totalCount:2,query,calendarId,nextPageToken,timeRange}`,
+  `get-event` → `{event}` (single timed event). `etag` preserved; raw
+  `start`/`end` are objects (`{dateTime?,date?}`); privacy fields pass through
+  as the inert fixture returns them (no field-mask claim).
+- Consumer gap (current `main`, identical blob hash to the probe revision):
+  `packages/connector-calendar/src/normalize.ts` `proposedUpstreamEventSchema`
+  types `start`/`end` as strings and **rejects** the actual timed and all-day
+  object wire shapes; a control string event is accepted. A response adapter
+  is required before adoption.
+- Scope conflict (static, not observed live): official `calendarList.list`
+  authorization accepts `calendar.readonly`/`calendar`/`calendar.calendarlist`/
+  `calendar.calendarlist.readonly` but **not** `calendar.events.readonly`,
+  while fork `src/auth/scopes.ts#L2-L7` allows ONLY `calendar.events.readonly`
+  and rejects broader grants. Resolution needs a scoped fork follow-up /
+  narrow-call-strategy decision plus a separate read-only live opt-in; no
+  scope expansion is approved here.
+- `get-event` on a missing id returns a generic MCP error (`isError:true`,
+  `-32603`) — consistent with P6; it is **not** deletion evidence and C11 is
+  untouched.
+- C08-01..08 decision matrix and adoption gates: see the spike doc C08 section
+  (authoritative). Summary: 01–06 and 08 recorded complete; **C08-07 decision
+  selected** — the logical `serverId` is **not** the wire `serverInfo.name`;
+  the expected wire identity `{name: "google-calendar", version:
+  "3.0.0-readonly.1"}` (for full SHA `97a3dc3` + lock digest) must come from
+  the explicit trusted binding definition and be compared **before enable**,
+  with missing/any mismatch disabling all bindings of that connector instance.
+  The current connector enforces neither version nor expected wire identity
+  (runtime `ensureConnected ok:true` with wrong configured version and correct
+  tool hashes) — implementation gap assigned **C09**, no config/API/code change
+  here. Formal production adoption stays gated on C09 identity fail-closed, the
+  response adapter/strict fallback/privacy work, and scope compatibility, with
+  C11 deletion evidence as a separate gate. C09/C10 are not complete. Full
+  semantics live in the authoritative spike doc; this summary is brief and
+  non-authoritative.
