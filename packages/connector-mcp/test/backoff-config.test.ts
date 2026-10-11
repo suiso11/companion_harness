@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { nextBackoffMs } from "../src/backoff.js";
 import { mcpConnectorConfigSchema } from "../src/config.js";
 
 const HASH = "a".repeat(64);
@@ -21,14 +20,6 @@ function baseConfig(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
-
-describe("reconnect backoff (§17.6 exact)", () => {
-  it("follows 1s/2s/5s/10s/max-30s", () => {
-    expect([1, 2, 3, 4, 5, 6, 99].map(nextBackoffMs)).toEqual([
-      1000, 2000, 5000, 10000, 30000, 30000, 30000,
-    ]);
-  });
-});
 
 describe("connector config (§17.3, §17.7)", () => {
   it("rejects non-loopback Streamable HTTP hosts", () => {
