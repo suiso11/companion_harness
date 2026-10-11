@@ -8,9 +8,12 @@ digest), but **FORMAL ADOPTION = HOLD / NOT ADOPTED** and M4 remains **not
 implemented**; §17 contracts unchanged. Companion-side plan source:
 `docs/implementation_plan.md` §17 (agreed). Authoritative exact-hash table and
 full evidence: `docs/m4_dependency_spike.md` "C08 exact pinned binding +
-runtime evidence" (§ "C08-01..08 decision matrix", archive
-`.../tool-output/c08-probe/archive/c08-evidence/`). Prior branch/status lines
-below are historical and superseded by §8.
+runtime evidence" (§ "C08-01..08 decision matrix"; versioned, reproducible
+9-artifact snapshot
+[`docs/evidence/c08/2026-10-11/c08-evidence.tar.gz`](evidence/c08/2026-10-11/c08-evidence.tar.gz),
+archive SHA-256
+`52b63fee169394b74c8827a04022ca454d1fa82d8b5de935702c574914db0d94`). Prior
+branch/status lines below are historical and superseded by §8.
 
 Historical branch label: `feat/m4-mcp-spike`.
 

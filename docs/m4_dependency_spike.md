@@ -226,13 +226,60 @@ can be made. No broad OAuth grant and no fork is approved by this record.
 
 Status: **FORMAL ADOPTION = HOLD / NOT ADOPTED.** This records completed C08
 evidence only. No new package pin, no live binding activated, no OAuth and no
-live Google Calendar call. §17 contracts unchanged. Task: `c08-decision-docs`;
-the three C08 docs are the only files changed. Evidence archive (read by the
-parent, retained after cleanup):
-`/home/molmot/.local/share/opencode/tool-output/c08-probe/archive/c08-evidence/`
-(`client-report.json` 48 KB full wire capture, `consumer-mismatch.json`,
-`identity-gap.json`, `provenance.json`, `SOURCE_HASHES.txt`, `git-pins.txt`,
-`child-identity.json`, `fixture-calls.json`, `manifest.sha256`).
+live Google Calendar call. §17 contracts unchanged. The pin form remains the
+**full git SHA + lockfile digest** (below), and the C08-07 distinction between
+the logical `serverId` and the wire `serverInfo.name`/version is unchanged.
+Task: `c08-decision-docs`; the C08 docs plus the versioned evidence snapshot
+below. The raw fixture capture is a **credential-free protocol + handler-body
+probe, NOT a live Google/OAuth run**, and formal adoption remains HOLD.
+
+### Versioned, reproducible evidence snapshot
+
+The 9 wire-capture / provenance / manifest artifacts are committed as a
+deterministic, byte-preserving gzip-tar snapshot, so another developer or CI
+can audit the authoritative C08 hashes without the original host path:
+
+- Archive (canonical repository-relative link):
+  [`docs/evidence/c08/2026-10-11/c08-evidence.tar.gz`](evidence/c08/2026-10-11/c08-evidence.tar.gz)
+- Archive SHA-256:
+  `52b63fee169394b74c8827a04022ca454d1fa82d8b5de935702c574914db0d94`
+  (9,352 bytes; deterministic tar: mode 0644, uid/gid 0, empty uname/gname,
+  mtime 0, gzip mtime 0 + no gzip filename field; flat relative members only,
+  no symlinks/foreign files).
+- Members (9): `client-report.json` (48 KB full wire capture, primary phase),
+  `consumer-mismatch.json`, `identity-gap.json`, `provenance.json`,
+  `SOURCE_HASHES.txt`, `git-pins.txt`, `child-identity.json`,
+  `fixture-calls.json` (root file is the later identity-probe phase; the
+  complete PRIMARY-phase call counts are embedded at
+  `client-report.json["fixture-calls.json"]`), `manifest.sha256`.
+- Host paths inside `provenance.json`/`child-identity.json` are retained **raw
+  historical metadata** only; they are NOT required to locate or read the
+  archive. The canonical, durable location is the repository-relative link
+  above (the original host archive is left byte-for-byte untouched).
+
+**Reproduce / read:**
+
+```sh
+tmp="$(mktemp -d)"
+tar -xzf docs/evidence/c08/2026-10-11/c08-evidence.tar.gz -C "$tmp"
+( cd "$tmp" && sha256sum -c manifest.sha256 )   # 8 hashed data files: all OK
+# client-report.json -> toolsList.names / toolsList.schemaHashes /
+#   toolsList.toolMeta[*].inputSchema: recompute recursive-key-sort +
+#   JSON.stringify + SHA-256 and compare with both schemaHashes and
+#   expectedHistorical (the 4 canonical input-schema hashes, table below).
+# client-report.json -> toolCalls: the 4 successful calls
+#   (list-calendars / list-events / search-events / get-event) carry
+#   content-text ONLY (structuredContent ABSENT); start/end are objects.
+# consumer-mismatch.json -> get-event.timed + list-events.allDay are rejected
+#   on start/end object-vs-string; control.stringStartEnd is accepted.
+# identity-gap.json -> ensureConnected ok, list-calendars ok, unconfigured tool
+#   denied with mcp_binding_not_allowed (logical serverId != wire identity).
+```
+
+Verified at snapshot time from a fresh extraction: all 8 `manifest.sha256`
+entries match, and all 4 recomputed canonical input-schema hashes equal the
+recorded values (table below). The archive is a binary snapshot precisely so no
+JSON formatter can rewrite the raw cryptographic capture.
 
 ### C08 candidate + exact pin form
 
