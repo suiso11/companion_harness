@@ -1267,6 +1267,8 @@ ModelGateway はプロバイダ応答を正規化し、1 モデルステップ�
 - **MCP クライアント SDK は M4 冒頭の spike で選定する。** 対象は **公式の安定版 SDK のみ**。spike の成果物は (1) 採用する **安定版の公式 SDK の正確なパッケージ名・バージョン（exact pin）**、(2) **特定の上流 Calendar MCP バインディングとの互換性確認（upstream binding spike のみ）** である。本書では確定値を決定しない（§20 の #2）。
 - spike が公式 SDK の安定版と互換性を確認できない場合、M4 の着手を再協議する（独自 MCP 実装へ場当たり的に移行しない）。
 
+> **非規範メモ（2026-10-11, C08 記録）:** 本節は計画のまま変更しない。候補 fork に対する credential-free な `initialize`/`tools/list` と actual handler body evidence は `docs/m4_dependency_spike.md` の C08 節（正準の exact hash 表・C08-01..08 decision matrix）に記録した。exact pin 形態は full git SHA + lock digest のみで、**formal adoption は HOLD / NOT ADOPTED**。live OAuth・認証付き通常起動・live Google 互換は未実施。C08-07 の `serverInfo` name/version を含む fail-closed identity は未実装で C09 に割り当てる（本 note では修正しない）。C08-07 の決定: 論理 `serverId` は wire `serverInfo.name` と同一ではなく（`config.serverId === actual serverInfo.name` を素朴に要求しない）、期待 wire identity（本候補は `{name:'google-calendar', version:'3.0.0-readonly.1'}`）は明示的な trusted binding 定義から解決し、有効化前に比較して不一致なら instance の全 binding を無効化する。config 表現・caller 移行を含む実装は C09 の将来作業であり、本 note では config/API/code を変更しない（意味論の正準記録は spike 節）。C11 の権威ある削除 evidence は別 gate。詳細と adoption gate は spike 節を参照。
+
 ### 17.3 MCP サーバー定義と許可モデル（合意）
 
 - **MCP サーバー定義は config のみ**。実行時に動的に MCP サーバーを発見・追加する仕組みは持たない。
