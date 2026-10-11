@@ -87,7 +87,8 @@ function pagedConfig(targetHash: string): McpConnectorConfig {
     connectorInstanceId: "cal-1",
     serverId: "fake",
     kind: "mcp" as const,
-    version: "0.0.0-proposed.1",
+    expectedServerName: "fake-paged",
+    version: "0.0.0",
     transport: {
       kind: "stdio" as const,
       command: "unused-injected",

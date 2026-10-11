@@ -840,6 +840,15 @@ Schema hash matches?
 
 MCP server が更新されて Tool schema が変化した場合も、自動で新しい能力をモデルへ公開しません。
 
+接続時の identity 検証は 2 段階です。まず trusted config の
+`expectedServerName` / `version` を、実際の `initialize.serverInfo` の
+name / version と完全一致で照合します（wire identity gate）。一致した後に
+初めて `tools/list` の tool name + input schema hash を検証します。
+`serverId` は論理 ID であり wire 名とは比較しません。不一致は固定
+`mcp_schema_mismatch` で全 binding を fail closed とし、検証済み binding
+のみを有効にします（fallback なし）。C09 は server 有効化前であり、
+readonly binding registration / upstream fork pin / OAuth は未追加です。
+
 Transport:
 
 ```text

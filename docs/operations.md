@@ -215,6 +215,48 @@ connector instance owns **all** configured roots.
   and 300s whole-run wall budgets with at most one repair inside max 8
   steps; native tool calling only.
 
+### MCP library wire identity (C09; not server-enabled)
+
+- The connector's trusted config must carry an explicit `expectedServerName`
+  and `version`. Both are compared **exactly** (case-sensitive) against the
+  ACTUAL `initialize.serverInfo` `name`/`version` of the bound MCP server.
+  There is no default and no inference from `serverId` (a logical id) or the
+  actual response; a programmatic config that omits either fails closed.
+- The wire gate runs on **every real transport, before any `tools/list` and
+  before any binding is enabled**. A missing/mismatched identity disables ALL
+  configured bindings, closes the half-open child, and reports the existing
+  fixed `mcp_schema_mismatch` (no raw identity is surfaced). A malformed SDK
+  initialize that the SDK connect rejects or cannot parse stays the existing
+  fixed `mcp_unavailable`; a post-connect mismatched wire identity stays the
+  fixed `mcp_schema_mismatch`.
+- Only after the wire gate passes are `tools/list` pages followed (bounded)
+  and each binding verified by exact upstream tool name + canonical
+  input-schema SHA-256. Correct wire identity with one drifted tool is
+  partial drift: the matching tool stays callable, the drifted tool stays
+  denied with the same fixed `mcp_schema_mismatch`.
+- `isAllowed`/`stats().enabledBindings` advertise **only** bindings validated
+  on the current live connection; configured-but-drifted names stay lazy and
+  never trigger an upstream call. Shutdown or a failed logical call clears
+  them.
+- NOT added here: readonly-binding registration, upstream fork pinning,
+  OAuth, or server enablement. The formal status stays **HOLD**; other C09
+  lifecycle checks and the C10/C11 gates remain open.
+
+Config fragment (trusted fields only; **not** a production command, profile,
+or complete activate config):
+
+```json
+{
+  "kind": "mcp",
+  "serverId": "<logical id; never compared to the wire name>",
+  "expectedServerName": "<exact initialize.serverInfo.name>",
+  "version": "<exact initialize.serverInfo.version>",
+  "bindings": [
+    { "upstreamTool": "<exact tool name>", "canonicalSchemaHash": "<64 hex>" }
+  ]
+}
+```
+
 ## Non-goals (explicit)
 Domain retention/GC (except newest-3 backup rotation), user export,
 session delete API, running-process deletion, auto-restore, DB/backup
