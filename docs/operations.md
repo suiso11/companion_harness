@@ -257,6 +257,44 @@ or complete activate config):
 }
 ```
 
+### C09-02 / C09-03 demand lifecycle verification status
+
+- Verified **only** C09-02 (lazy-on-demand connect + exact backoff) and C09-03
+  (per-instance concurrency / no automatic resend / independent instances).
+- Lazy: the first configured demand dials immediately; construction and idle
+  time never create a transport. A valid live client/handshake is reused across
+  later demands (no new factory call).
+- Failure backoff follows exactly `1s, 2s, 5s, 10s, 30s, 30s` (max `30s`); a
+  successful connect resets the failure counter, so the next loss waits `1s`
+  again.
+- A failed in-flight logical call is never automatically resent. A distinct
+  new/queued call may dial a fresh connection after the reset backoff.
+- Per instance the connector serializes demand with true concurrency `1`
+  (FIFO queue); separate instances share no global mutex and stay independent.
+- CI-compatible regression coverage (committed regression,
+  `packages/connector-mcp/test/connection-lifecycle.test.ts`, 5 cases): the
+  REAL `@modelcontextprotocol/sdk` `Client` + `McpServer` linked by
+  `InMemoryTransport` under a deterministic fake clock
+  (`setTimeout`/`clearTimeout`/`Date` only) — a framework-level contract test.
+- Local non-CI proof additionally ran the same connector over a genuine SDK
+  **stdio fixture** process (actual spawn / spawn-ENOENT, same-PID reuse,
+  handler drop / FIFO gate). This is a fixture smoke only — it is **not**
+  evidence of the upstream fork, OAuth, or live Google compatibility.
+- Existing wire-gate / `serverId`-vs-`expectedServerName`+`version` semantics
+  are unchanged. The formal status stays **HOLD**; other C09 checks (notably 05
+  stderr-bounded termination and 06 shutdown kill timeout) and the C10/C11
+  gates remain open, and no Calendar-adoption decision is made here.
+- Graph-budget CI coverage note (same PR run): the real-vault
+  `packages/connector-markdown/test/graph_budget_integration.test.ts` (5 cases)
+  previously reported a **Windows CI** timeout at **6099ms** on the
+  ambiguous-link case, whose large same-basename fixture was the cost. It now
+  drives the REAL connector over a bounded **16-directory / 18-real-`.md`-file**
+  temp vault whose wide canonical candidate keys retain the 256KiB cap proof
+  (160 repeats ≈317653 bytes reject `output_too_large`; a 2-link control
+  ≈3969 bytes stays under cap) without the large filesystem setup. This is
+  **local proof only** (target file 5/5, root `tsc`, scoped Biome clean); it
+  does not raise the timeout, skip the case, or change the production budget.
+
 ## Non-goals (explicit)
 Domain retention/GC (except newest-3 backup rotation), user export,
 session delete API, running-process deletion, auto-restore, DB/backup
