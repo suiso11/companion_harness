@@ -1226,7 +1226,7 @@ Companion Harness では、LLM をシステムそのものとは考えません�
 
 # Current C04/C05/C06 Browser Resilience Acceptance (2026-10-11)
 
-This section records the current local acceptance for the active-run bootstrap/hydration contract and the C06 accepted-202 reload fix. It is evidence for the current local worktree only and does not assert completion of all Phase 1 / M3 work, Windows 11 x64 manual smoke, or remote Windows/Linux CI for these edits.
+This section records the current local acceptance for the active-run bootstrap/hydration contract and the C06 accepted-202 reload fix. It is evidence for the current local worktree only and does not assert completion of all Phase 1 / M3 work or Windows 11 x64 manual smoke. (Remote Windows/Linux CI for this review code is now confirmed and recorded in the C07 section below.)
 
 - **Active-run API contract**: `GET /api/sessions/:sessionId/active-run` returns `{ run: { id, turnId, status, eventSeq } }` for the single queued/running/cancel_requested run, or `{ run: null }` when there is genuinely no active run (session existence is checked first and returns 404).
 - **Product behaviour**: boot discovery re-subscribes to an existing active run and reuses history rendering; durable terminal delivery is deduplicated; the in-memory reducer cursor is reconstructed on reload (JSON fallback replay restarts from `0`) and is distinct from the saved resume hint `ch.cursor.<runId>`.
@@ -1239,4 +1239,24 @@ Evidence:
 - [Provisioned Chromium existing-browser baseline](docs/plan/provisioned_browser_baseline_2026-10-10.md)
 - [Execution progress / C06 reload acceptance](docs/plan/execution_progress_2026-10-10.md)
 
-Remaining gates not closed by this evidence: Phase 1/M3 as a whole, Windows 11 x64 manual smoke, and current remote Windows/Linux CI for these edits.
+Remaining gates not closed by this local evidence: Phase 1/M3 as a whole, Windows 11 x64 manual smoke, M4/Phase 4 live adoption, and remote Windows/Linux CI for any later HEAD. The remote Windows/Linux CI for the PR #11 review code (`56b7952a…`) is now confirmed green — see the current C07 aggregate CI evidence below; that confirmation does not extend to future HEADs.
+
+---
+
+# Current C07 Aggregate CI Evidence (2026-10-11)
+
+This is a **remote CI aggregate** for the C04/C05/C06 browser-resilience work, pinned to the exact tested revision. It does not reuse a historical CI green and does not assert CI for any later HEAD.
+
+- **Tested revision**: `56b7952a7e8adc2e0dcc4b5a4658feb589723cd1` (the PR #11 review head; merged as `e6b53536fa4cf8790a6dfa8a136d92cc01a47c76`).
+- **CI runs** (completed / success, same SHA):
+  - `pull_request` — [run 38106715359](https://github.com/suiso11/companion_harness/actions/runs/38106715359)
+  - `push` — [run 38106713796](https://github.com/suiso11/companion_harness/actions/runs/38106713796)
+- **Jobs**: `check (ubuntu-latest)`, `check (windows-latest)`, and `e2e` (one `e2e` job per run, i.e. two green `e2e` jobs).
+- **Unit tests**: Ubuntu **88 files / 1086 passed / 0 skipped**; Windows **88 files / 1084 passed / 2 skipped (1086 total)**. The 2 Windows skips are the two unconditional `win32` cases in `packages/connector-markdown/test/safe_read.test.ts`: `reads a POSIX colon filename (notes:2026.md)` (Windows cannot create colon filename segments) and `rejects a composed-key retarget to a decomposed internal target on POSIX` (this POSIX retarget case is explicitly skipped on win32; underlying filesystem rationale not established by this evidence). There is no blanket `1086 passed` on Windows.
+- **Browser E2E**: **23/23 passed** in each `e2e` job (real Chromium, 1 worker, ≈1.3 min). The current source defines **23 cases** across 4 spec files (22 static `test()` call sites; `sse_history.spec.ts:447` parameterizes one call site into 2 cases), and the executed count is taken from the run report, not inferred from the source count.
+- **Static checks** (root): Biome `check .` checked **185 files, no errors, 1 pre-existing info** (deprecated `recommended` field in `biome.json`); root `pnpm typecheck` (`tsc --noEmit -p tsconfig.json`, which covers `apps/server` src and test) exit 0. The dedicated `pnpm typecheck:e2e` (`tsc --noEmit -p apps/server/tsconfig.e2e.json`) runs as a separate `E2E typecheck (harness + spec + config)` step and is green; there is no separate server-only CI typecheck.
+- **Historical context preserved**: the local 21/21 then 23/23 browser runs and the earlier 12/17 figures remain historical local evidence — this section does not replace them and does not restate them as remote CI.
+
+Status matrix and per-item evidence: see [execution progress / current C07 CI evidence](docs/plan/execution_progress_2026-10-10.md).
+
+Remaining gates after this C07 aggregate: Phase 1/M3 as a whole, Windows 11 x64 manual smoke, M4/Phase 4 live adoption, and CI for HEADs later than the pinned SHA (this docs commit's own CI is pending until observed).
