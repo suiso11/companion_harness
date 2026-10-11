@@ -2,11 +2,11 @@
 
 ## Scope of this document
 
-This document records **only the current 2026-10-11 local acceptance for the C06 accepted-202 active-run reload fix** on the Companion worktree. Remind / R05 / Phase 0 / plan-checklist history is intentionally excluded; that material remains in the primary full progress document. C04/C05 real-browser acceptance evidence is in [browser resilience execution](browser_resilience_execution_2026-10-10.md); the prerequisite provisioned baseline is in [provisioned browser baseline](provisioned_browser_baseline_2026-10-10.md).
+This document records the **current 2026-10-11 C06 accepted-202 active-run reload fix local acceptance, the review-fix re-verification, and the C07 exact-head remote CI evidence** for the Companion worktree. Those three parts together are the current scope: the C06 local acceptance and review-run sections, plus the later C07 section that carries the remote CI aggregate for the exact tested revision. Where an earlier paragraph states that the document is C06-local-only or lists remote Windows/Linux CI as unfinished, that statement is **historical** and is **superseded by the C07 section** below. Remind / R05 / Phase 0 / plan-checklist history is intentionally excluded; that material remains in the primary full progress document. C04/C05 real-browser acceptance evidence is in [browser resilience execution](browser_resilience_execution_2026-10-10.md); the prerequisite provisioned baseline is in [provisioned browser baseline](provisioned_browser_baseline_2026-10-10.md).
 
 ## 2026-10-11 現行追記：C06 accepted-202 reload 修正実装と local acceptance
 
-**この節が C06 の現行状態であり、上記の「修正未実装」「提案のみ」記述は履歴として supersede される。** 計画・チェックリスト・元の履歴記述は書き換えていない。Companion の現行 local worktree（未commit の harness/tests/docs 変更を含む）に対する **local acceptance のみ**であり、現行 HEAD を主張しない。M3/Phase 1 全体・Windows manual・現行 remote CI は未完了のまま。
+**この節が C06 の現行状態であり、上記の「修正未実装」「提案のみ」記述は履歴として supersede される。** 計画・チェックリスト・元の履歴記述は書き換えていない。Companion の現行 local worktree（未commit の harness/tests/docs 変更を含む）に対する **local acceptance のみ**であり、現行 HEAD を主張しない。M3/Phase 1 全体・Windows manual・現行 remote CI は未完了のまま。**（2026-10-11 追記：この節の「local acceptance のみ」「現行 remote CI 未完了」という記述は当時の履歴であり、後述の C07 exact-head remote CI 節で supersede される。C07 が閉じるのは tested revision `56b7952a…` の remote CI のみで、現行 HEAD の CI green や Windows 11 x64 manual gate の完了は主張しない。）**
 
 | 項目 | 観測内容 |
 | --- | --- |
@@ -20,7 +20,7 @@ This document records **only the current 2026-10-11 local acceptance for the C06
 | 独立 review | 最終 read-only review 実施済み。残存 C06 defect なしと報告。review は test runtime とは別の独立実行であり、その pass を置き換えるものではない。 |
 | 副作用 cleanup | worker 所有の throwaway CDP launch script（repo root の `.tmp-cdp-version.cjs`）を削除（該当ファイル消失を再確認済み）。app 4173 / control 4174 / proxy 4175 は listener-free を実測（listener 再起動なし）。 |
 
-残り gate（2026-10-11 現在）：Phase 1/M3 全体、Windows 11 x64 manual smoke、uncommitted 変更への現行 Windows/Linux CI。C06 local acceptance はこれらを代替しない。
+残り gate（2026-10-11 当時の記述・履歴）：Phase 1/M3 全体、Windows 11 x64 manual smoke、uncommitted 変更への現行 Windows/Linux CI。C06 local acceptance はこれらを代替しない。**このうち「uncommitted 変更への現行 Windows/Linux CI」は後述の C07 exact-head remote CI 節で supersede される**：tested revision `56b7952a7e8adc2e0dcc4b5a4658feb589723cd1`、Windows **1084 pass / 2 skip (1086)**、Linux **1086 pass / 0 skip**、browser **23/23**。C07 は現行 HEAD の CI green や Windows 11 x64 manual smoke 完了を主張しない。
 
 ## 2026-10-11 追記：review 修正3件の再検証（current full-browser 23 run）
 
