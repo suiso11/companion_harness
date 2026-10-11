@@ -606,6 +606,12 @@ export function buildAgentToolDefinitions(
 ): ToolDefinition[] {
   const tools: ToolDefinition[] = [];
   for (const descriptor of brokerTools) {
+    // Trusted read-only exposure: any non-`read` category (write / sensitive /
+    // unclassified) is skipped BEFORE the known-schema lookup/copy, so it can
+    // never be advertised even when the broker would already deny execution.
+    if (descriptor.category !== "read") {
+      continue;
+    }
     const parameters = AGENT_BROKER_TOOL_PARAMETERS[descriptor.name];
     if (parameters === undefined) {
       continue;

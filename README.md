@@ -813,24 +813,32 @@ packages/connector-mcp
 
 MCP server が返す `tools/list` をそのまま LLM に公開する設計ではありません。
 
-事前に、
+能力をモデルへ公開するには、呼び出し元の **レビュー済み host code** が
+信頼済みの `McpBindingDefinition[]`（`readonly upstreamTool` /
+`canonicalSchemaHash` / `category`）を constructor の **必須 2 番目の引数**
+として渡す必要があります。これは production enable / registration ではなく、
+host code と同じ信頼レベルで供給される **sidecar provenance** です。
+definitions の default は存在せず、config JSON・`tools/list`・tool 名・
+`readOnlyHint`、caller 引数の `category` / `readOnlyHint` のいずれも read
+権限を付与できません。JSON の `category` やメタデータ単体は authority では
+ありません。よって host code を持たない caller にとっては **breaking な
+internal API 変更** です（C09 は server 有効化前であり、library は
+production registration されていません）。
 
 ```text
-upstream tool name
-+
-input schema hash
-```
-
-を登録します。
-
-```text
-MCP tools/list
+host-reviewed McpBindingDefinition[]        (trusted class + hash)
       │
       ▼
-Name matches?
+category == read  AND  definition hash == config hash?
+      │
+   ┌──┴──┐
+  YES    NO ──▶ deny (fixed code, no I/O)
+   │
+   ▼
+first allowed call → wire identity gate
       │
       ▼
-Schema hash matches?
+live tools/list canonical input-schema hash matches?
       │
    ┌──┴──┐
   YES    NO
@@ -838,15 +846,17 @@ Schema hash matches?
  enable disable
 ```
 
-MCP server が更新されて Tool schema が変化した場合も、自動で新しい能力をモデルへ公開しません。
-
 接続時の identity 検証は 2 段階です。まず trusted config の
 `expectedServerName` / `version` を、実際の `initialize.serverInfo` の
 name / version と完全一致で照合します（wire identity gate）。一致した後に
 初めて `tools/list` の tool name + input schema hash を検証します。
 `serverId` は論理 ID であり wire 名とは比較しません。不一致は固定
 `mcp_schema_mismatch` で全 binding を fail closed とし、検証済み binding
-のみを有効にします（fallback なし）。C09 は server 有効化前であり、
+のみを有効にします（fallback なし）。`read` 以外（write / sensitive /
+unclassified）や重複・曖昧な definition は handler 実行前にローカルで
+`mcp_binding_not_allowed` として拒否され、host code の category を caller
+引数が上書きすることはできません。`tools/list` で発見した tool を自動で
+モデルへ公開することもありません。C09 は server 有効化前であり、
 readonly binding registration / upstream fork pin / OAuth は未追加です。
 
 Transport:

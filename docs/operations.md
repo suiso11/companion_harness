@@ -240,7 +240,11 @@ connector instance owns **all** configured roots.
   them.
 - NOT added here: readonly-binding registration, upstream fork pinning,
   OAuth, or server enablement. The formal status stays **HOLD**; other C09
-  lifecycle checks and the C10/C11 gates remain open.
+  lifecycle checks and the C10/C11 gates remain open. The CURRENT constructor
+  additionally requires the reviewed host `McpBindingDefinition[]` second
+  argument (see "C09-01 / C09-04 / C09-07 / C09-08" below): the
+  `new McpConnector(cfg)` calls in the PR15/PR16 archives are the HISTORICAL
+  API, not a compatibility shim, and this phase still registers nothing.
 
 Config fragment (trusted fields only; **not** a production command, profile,
 or complete activate config):
@@ -307,8 +311,9 @@ or complete activate config):
   gone, exactly one actual production SIGKILL; S8 cooperative **3.918ms** /
   no kill; actual `finalOwnedPidsAlive=[]`.
 - Real loopback HTTP local non-test smoke (actual Node 24 + real SDK
-  `McpServer` + `StreamableHTTPServerTransport`, production
-  `new McpConnector(cfg)` default HTTP transport): **7/7 green** — positive
+  `McpServer` + `StreamableHTTPServerTransport`, historical PR16 API
+  `new McpConnector(cfg)` default HTTP transport — NOT the current
+  constructor and NOT a compatibility shim): **7/7 green** — positive
   `initialize`/`tools/list`/`tools/call`; pending-RPC shutdown with a
   preserved prior `onclose`; 3xx refusal for 301/302/303/307/308/304 with zero
   destination hits; post-connect `tools/call` 307 refusal with no resend;
@@ -342,6 +347,89 @@ or complete activate config):
   SDK fixture-typing failures) is preserved under `final-checks/`; the final
   full pass, which followed the OWNED workspace-resolved dependency borrow,
   is under `final-checks-with-deps/`.
+
+### C09-01 / C09-04 / C09-07 / C09-08 trusted read policy, model exposure & real stdio
+
+- This subsection records the CURRENT new-scope observed work: C09-07 trusted
+  read-only binding policy, C09-01 / C09-04 model-visible tool exposure, and
+  C09-08 the production DEFAULT stdio transport. It supersedes the remaining
+  "unverified" C09 naming as the current scope, but the historical PR15/PR16
+  counts and the earlier wire/transport subsections above remain historical
+  evidence and are NOT restated as this run. It is not a global live-Google /
+  Windows / production-registration claim, and no package pin changed
+  (`@modelcontextprotocol/sdk@1.30.0`, `zod@4.5.4`, provider pins unchanged).
+- CURRENT constructor is `new McpConnector(config, readonly
+  McpBindingDefinition[], factory?)`: the trusted `McpBindingDefinition[]`
+  (readonly `upstreamTool` / `canonicalSchemaHash` / `category`) is the
+  REQUIRED second argument; `factory` stays the optional third. `category`
+  reuses the contracts `ToolCategory` vocabulary (`read` / `write` /
+  `sensitive` / `unclassified`). This is an internal, breaking-library API
+  change; the `new McpConnector(cfg)` calls in the PR15/PR16 HTTP/stdio
+  archives are the HISTORICAL API (recorded as such), not a compatibility shim.
+- Real in-memory SDK BEFORE → AFTER policy (`before-policy/` and
+  `after-policy/` under the out-of-repo `c09-security-verify/`): BEFORE, an
+  unclassified fake writer with a neutral-looking `search` name was callable
+  and produced a provider effect (`providerEffects=1`), and the model surface
+  exposed non-read descriptors. AFTER, trusted `write` / `sensitive` /
+  `unclassified` definitions and missing definitions deny `callTool` AND
+  `ensureConnected` with fixed `mcp_binding_not_allowed`, `dials=0`,
+  `handlerCalls=0`, `providerEffects=0`, `enabledBindings=[]`; the model
+  advertisement of four KNOWN descriptors yields only `markdown.search` plus
+  the reserved `answer.submit` LAST. A caller-claimed `category:"read"` /
+  `readOnlyHint:true` cannot upgrade any class.
+- Valid READ-positive: the ORIGINAL `after-policy` read positive is
+  SUPERSEDED (its fixture incremented a writer counter; `providerEffects=1`)
+  and MUST NOT be cited as a read proof; its supersession note
+  (`SUPERSEDED-read-positive.txt`) is retained and the original artifacts are
+  unchanged. The corrected, source-distinct immutable-read proof is
+  `after-policy/corrected-read-positive/result.json`: `delete-event`
+  (`readOnlyHint:false`), config/trust/wire hash linked, `ensureConnected` /
+  `callTool` ok, `handlerCalls=1`, `providerEffects=0`, connector shut down
+  (`connectedAfterShutdown=false`), fixture server closed. The negative and
+  model halves of the original `after-policy` proof remain valid and were NOT
+  re-run here.
+- Real production DEFAULT stdio (Linux, Node 24.12, SDK 1.30.0 child) in
+  `after-stdio/{result,summary,commands}`: the allowed canary is present and
+  the excluded canary is ABSENT; the literal six injection-shaped args produce
+  no shell marker and no model marker; model-supplied command/args/env travel
+  only in the RPC payload (fixed transport), with the actual 2 calls sharing
+  one child PID. A missing live-SDK default env name yields fixed
+  `mcp_unavailable` with no START record and zero spawns. A direct real-SDK
+  ENOENT on the owned path is rejected with the path/canary present, while the
+  production connector returns the fixed redacted result with failure count 1.
+  Cleanup observed `ownedPidsObserved=2` / `finalOwnedPidsAlive=[]` via the
+  owned startup PID + `process.kill(pid, 0)` after shutdown. NO public
+  `onclose` claim, NO Windows physical proof, NO fork / OAuth / live Google /
+  production registration.
+- Default SDK env: EVERY effectively inherited SDK default name must be
+  explicitly allowlisted even when unset; there is no extra function-value
+  policy or filter. `shell=false` is the SDK pin behavior plus an actual
+  metacharacter proof. The PR16 transport bounds and actual `onclose` semantics
+  are unchanged.
+- Before/after actual-SDK archives (all under the out-of-repo
+  `c09-security-verify/`; source + commands + failure history retained there,
+  in-repo temporaries removed and not retained in the repo): `ambiguity`
+  (6 malformed host variants in both orders permitted before, denied locally
+  with zero I/O after; live conflict denied both orders `N` with 0 calls while
+  the unrelated `M` read actually succeeds and is the only enabled name),
+  `catalog` (before, an unfinished prefix authorized `N` with 1 call; after,
+  all bindings disabled, `mcp_schema_mismatch`, `listCount=10`, 0 calls;
+  complete tenth page actually succeeds; complete-catalog partial drift
+  preserved), and `catalog-shutdown` (before, shutdown during the real
+  final-page digest wrongly returned `mcp_schema_mismatch`; after,
+  `mcp_unavailable` with `enabled=[]` and 0 calls). These are actual
+  observations, not inflated case counts or upstream-compatibility claims.
+- Latest local full-battery result (OBSERVED, after this patch set; recorded under
+  the out-of-repo `c09-security-verify/final-checks/`): root `pnpm run
+  typecheck` exit 0, `pnpm run typecheck:e2e` exit 0, `pnpm test` **94 files /
+  1137 passed / 0 skipped** (Linux), and whole-repo `pnpm run lint`
+  (`biome check .`) **192 files, 0 errors / 0 warnings / 1 pre-existing info**
+  (the `biome.json` `recommended` deprecation is not a new warning). The first
+  lint run counted the temporary in-repo `.security-proof/` helpers (216 files,
+  33 errors / 60 warnings) which are NOT product code; they were archived
+  out-of-repo and removed from the repo, and the affected lint was re-run. This
+  is a local, owned-branch observation and not a future CI or head-SHA claim.
+  The historical PR16 baseline (1123 tests / 92 files) is NOT used to predict it.
 
 ## Non-goals (explicit)
 Domain retention/GC (except newest-3 backup rotation), user export,
