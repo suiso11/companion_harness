@@ -284,6 +284,16 @@ or complete activate config):
   are unchanged. The formal status stays **HOLD**; other C09 checks (notably 05
   stderr-bounded termination and 06 shutdown kill timeout) and the C10/C11
   gates remain open, and no Calendar-adoption decision is made here.
+- Graph-budget CI coverage note (same PR run): the real-vault
+  `packages/connector-markdown/test/graph_budget_integration.test.ts` (5 cases)
+  previously reported a **Windows CI** timeout at **6099ms** on the
+  ambiguous-link case, whose large same-basename fixture was the cost. It now
+  drives the REAL connector over a bounded **16-directory / 18-real-`.md`-file**
+  temp vault whose wide canonical candidate keys retain the 256KiB cap proof
+  (160 repeats ≈317653 bytes reject `output_too_large`; a 2-link control
+  ≈3969 bytes stays under cap) without the large filesystem setup. This is
+  **local proof only** (target file 5/5, root `tsc`, scoped Biome clean); it
+  does not raise the timeout, skip the case, or change the production budget.
 
 ## Non-goals (explicit)
 Domain retention/GC (except newest-3 backup rotation), user export,

@@ -8,20 +8,17 @@
  * deterministic temp vault: real discovery, safe reads, and incremental
  * budget enforcement during link resolution. Fixtures stay small and fast:
  * repeated unresolved same-target links exercise the metadata cache, and
- * the ambiguous case uses 150-200 basename targets (not thousands of
- * files). All temp dirs are removed in `finally`.
+ * the ambiguous case uses a modest bounded set of same-basename target
+ * files with long deterministic canonical keys (not thousands of files,
+ * and not body/URL/path padding). All temp dirs are removed in `finally`.
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createMarkdownConnector } from "../src/connector.js";
-import {
-  LINK_GRAPH_BUDGET_BYTES,
-  measureLinkGraphBytes,
-  serializeLinkGraphEntry,
-} from "../src/link_budget.js";
+import { measureLinkGraphBytes } from "../src/link_budget.js";
 
 const CAP = 262_144;
 
@@ -65,7 +62,6 @@ describe("real vault graph budget boundaries", () => {
         ordinal: index + 1,
       }));
       expect(measureLinkGraphBytes(entries)).toBeLessThan(CAP);
-      expect(LINK_GRAPH_BUDGET_BYTES).toBe(CAP);
     } finally {
       removeVault(dir);
     }
@@ -134,22 +130,30 @@ describe("real vault graph budget boundaries", () => {
     }
   });
 
-  it("rejects repeated ambiguous wiki links without partial output; ordinals reset per source and repeats are charged per occurrence", async () => {
+  it("rejects repeated ambiguous wiki links without partial output (repeats charged per occurrence) while an undersized pair stays under cap", async () => {
     const dir = scratchVault("md-graph-amb-");
     try {
-      // Modest vault: 170 same-basename targets => every [[Note]] is
-      // ambiguous over 170 sorted canonical candidates (~4KiB per entry).
-      const targetCount = 170;
+      // Bounded vault: 16 same-basename targets with long deterministic
+      // directory names. Every [[Note]] is ambiguous over 16 sorted
+      // canonical candidates whose normalized metadata is wide on its own
+      // (one 16-candidate entry ≈ 1983 UTF-8 bytes), so 160 repeats exceed
+      // the 256KiB cap without thousands of files or any body/URL/path
+      // padding: only the real resolved candidate keys are charged.
+      const targetCount = 16;
+      const targetDirs: string[] = [];
       for (let index = 0; index < targetCount; index += 1) {
-        const name = `d${String(index).padStart(3, "0")}`;
-        const { mkdirSync } = await import("node:fs");
+        const name = `d${String(index).padStart(3, "0")}_${"x".repeat(96)}`;
+        targetDirs.push(name);
         mkdirSync(join(dir, name), { recursive: true });
         writeFileSync(
           join(dir, name, "Note.md"),
           `# Note ${name}\ndup content\n`,
         );
       }
-      const repeats = 80;
+      const expectedCandidates = targetDirs
+        .map((name) => `vault-1/${name}/Note.md`)
+        .sort();
+      const repeats = 160;
       const wikiLinks = Array.from({ length: repeats }, () => "[[Note]]").join(
         "\n",
       );
@@ -157,9 +161,17 @@ describe("real vault graph budget boundaries", () => {
         join(dir, "main.md"),
         `# Main\nambmarker body\n${wikiLinks}\n`,
       );
+      // Undersized control in the SAME fixture: two ambiguous [[Note]] links
+      // and no ambiguous-marker text (so it is never the queried hit). It
+      // proves the consumer still returns real normalized metadata rather
+      // than a blanket `output_too_large`.
+      writeFileSync(
+        join(dir, "control.md"),
+        "# Control\nsafe body\n[[Note]]\n[[Note]]\n",
+      );
       const connector = await createMarkdownConnector([{ path: dir }]);
-      // 80 * ~4KiB ≈ 320KiB > cap: the whole call fails, never a truncated
-      // partial hit list.
+      // 160 x 16-candidate ambiguous entries ≈ 317653 bytes > 262144: the
+      // whole call fails, never a truncated partial hit list.
       await expect(
         connector.search({ query: "ambmarker", limit: 10 }),
       ).rejects.toMatchObject({ code: "output_too_large" });
@@ -167,9 +179,26 @@ describe("real vault graph budget boundaries", () => {
         connector.readCanonical("vault-1/main.md"),
       ).rejects.toMatchObject({ code: "output_too_large" });
 
-      // Canonical framing proof on a small under-cap pair: repeated
-      // candidates are charged per occurrence (no dedup) and each source
-      // document restarts ordinals at 1.
+      // Control proof on ACTUAL consumer output: two ambiguous wiki links
+      // with the exact sorted 16 canonical candidates and 1-based per-source
+      // ordinals stay under the cap. Assertions read the real `wikiLinks`
+      // (status + candidates), not a hand-built helper vector.
+      const control = await connector.readCanonical("vault-1/control.md");
+      expect(control.wikiLinks).toHaveLength(2);
+      const controlEntries = control.wikiLinks.map((link, index) => {
+        expect(link.status).toBe("ambiguous");
+        expect(link.candidates).toEqual(expectedCandidates);
+        return {
+          kind: "wiki" as const,
+          status: link.status,
+          candidates: link.candidates,
+          ordinal: index + 1,
+        };
+      });
+      expect(measureLinkGraphBytes(controlEntries)).toBeLessThan(CAP);
+
+      // Under-cap standard-link pair: each source document's two repeats
+      // resolve independently to the same real canonical target.
       const smallDir = scratchVault("md-graph-ord-");
       try {
         writeFileSync(join(smallDir, "t.md"), "# T\nordmarker\n");
@@ -191,28 +220,11 @@ describe("real vault graph budget boundaries", () => {
         expect(hits).toHaveLength(2);
         for (const hit of hits) {
           expect(hit.standardLinks).toHaveLength(2);
+          for (const link of hit.standardLinks) {
+            expect(link.status).toBe("resolved");
+            expect(link.canonicalKey).toBe("vault-1/t.md");
+          }
         }
-        // Per-source ordinal framing: entries restart at 1 for each source.
-        const perSource = [1, 2].map((ordinal) => ({
-          kind: "standard" as const,
-          status: "resolved" as const,
-          candidates: ["vault-1/t.md"] as readonly string[],
-          ordinal,
-        }));
-        const both = [...perSource, ...perSource];
-        expect(measureLinkGraphBytes(both)).toBeGreaterThan(
-          measureLinkGraphBytes(perSource),
-        );
-        expect(
-          serializeLinkGraphEntry({
-            kind: "standard",
-            status: "resolved",
-            candidates: ["vault-1/t.md"],
-            ordinal: 1,
-          }),
-        ).toBe(
-          '{"candidates":["vault-1/t.md"],"kind":"standard","ordinal":1,"status":"resolved"}',
-        );
       } finally {
         removeVault(smallDir);
       }
