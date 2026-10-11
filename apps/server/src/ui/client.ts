@@ -10,6 +10,7 @@
 
 /// <reference lib="dom" />
 
+import type { ActiveStatus } from "@companion/contracts";
 import {
   applyRunEvent,
   claimTerminalHydration,
@@ -22,6 +23,18 @@ import {
 const LS_SESSION = "ch.sessionId";
 const LS_PENDING_KEY = "ch.pendingKey";
 const cursorKey = (runId: string): string => `ch.cursor.${runId}`;
+/**
+ * Active statuses for discovery gating: compile-time anchored to the
+ * contracts `ActiveStatus` union (type-only import, so the browser bundle
+ * never pulls zod at runtime); membership matches contracts
+ * `isActiveStatus`. The server already validates discovery responses
+ * against `ActiveRunResponseSchema`, so this is a best-effort client gate.
+ */
+const ACTIVE_RUN_STATUSES: ReadonlySet<ActiveStatus> = new Set([
+  "queued",
+  "running",
+  "cancel_requested",
+]);
 
 /**
  * History DTO (exact contracts `HistoryItem`): `{ items, nextBefore,
@@ -35,6 +48,19 @@ interface HistoryItemView {
     readonly runId: string;
     readonly result: unknown;
   } | null;
+}
+
+/**
+ * Reload recovery descriptor (§16.7): the recovered run id/turn plus the
+ * discovered active status when known. `status` is `null` for an accepted
+ * idempotency replay (whose stored response carries no status) and a
+ * validated `ActiveStatus` for discovery; it only seeds the pre-subscription
+ * UI and never drives the reducer cursor or the stored resume hint.
+ */
+interface RecoveryDescriptor {
+  readonly runId: string;
+  readonly turnId: string | null;
+  readonly status: ActiveStatus | null;
 }
 
 function el(tag: string, text?: string): HTMLElement {
@@ -189,8 +215,37 @@ class ConversationApp {
       }
     });
     await this.ensureSession();
-    await this.recoverPending();
+    let descriptor = await this.recoverPending();
+    if (descriptor === null) {
+      descriptor = await this.discoverActiveRun();
+    }
+    // Mark the recovered run active and render the busy composer BEFORE the
+    // final history hydration: a held/slow hydration must never expose an
+    // enabled Send for a genuinely active Run (§16.3/§16.7). A discovered
+    // non-terminal `cancel_requested` status also seeds its「停止しました」
+    // notice here (reducer cursor 0, never the discovery `eventSeq`). The
+    // actual SSE subscription stays deferred until after hydration so the
+    // durable history (and its terminal dedup anchor) is registered first.
+    if (descriptor !== null) {
+      this.activeRunId = descriptor.runId;
+      this.activeTurnId = descriptor.turnId;
+      if (descriptor.turnId !== null) {
+        this.runTurns.set(descriptor.runId, descriptor.turnId);
+      }
+      this.seedActiveView(descriptor.runId, descriptor.status);
+      this.renderComposer();
+    }
+    // One final hydration owned by boot: durable history renders first so a
+    // completed selected Run is registered in renderedAnswers BEFORE any
+    // subscription replays its terminal — a captured-active reload that
+    // races completion can never append a second answer.
     await this.hydrateHistory();
+    // The captured run id is subscribed exactly once, even when the run has
+    // already completed meanwhile: the durable event backlog renders or
+    // dedups, and the terminal view releases the composer normally.
+    if (descriptor !== null) {
+      this.subscribe(descriptor.runId);
+    }
     this.renderComposer();
   }
 
@@ -251,12 +306,14 @@ class ConversationApp {
 
   /**
    * Reload recovery without stored bodies (§16.7 exact): only the pending
-   * key was kept. Accepted keys replay status/body + refresh history;
-   * unknown keys show a fixed resend-required prompt (never recreated).
+   * key was kept. Accepted keys are cleared here and produce a run/turn
+   * descriptor for the caller (boot owns exactly one history hydration and
+   * one subscription); unknown keys show a fixed resend-required prompt
+   * (never recreated). Retention on transient failures keeps the key.
    */
-  private async recoverPending(): Promise<void> {
+  private async recoverPending(): Promise<RecoveryDescriptor | null> {
     if (this.sessionId === null) {
-      return;
+      return null;
     }
     let key: string | null = null;
     try {
@@ -265,7 +322,7 @@ class ConversationApp {
       key = null;
     }
     if (key === null || key.length === 0) {
-      return;
+      return null;
     }
     const scope = `session:${this.sessionId}:message`;
     let lookup: { status: number; body: unknown };
@@ -276,7 +333,7 @@ class ConversationApp {
     } catch {
       // Transient network failure: retain the pending key for a later retry.
       this.showNotice("送信できませんでした。もう一度お試しください");
-      return;
+      return null;
     }
     // Transient server states retain the pending key for same-key replay.
     if (
@@ -285,7 +342,7 @@ class ConversationApp {
       lookup.status >= 500
     ) {
       this.showNotice("送信できませんでした。もう一度お試しください");
-      return;
+      return null;
     }
     const body = lookup.body as {
       found?: unknown;
@@ -293,7 +350,6 @@ class ConversationApp {
     };
     if (lookup.status === 200 && body.found === true) {
       this.clearPendingKey();
-      await this.hydrateHistory();
       // Exact contracts `PostMessageResponse`: `{ turnId, run: { id } }`.
       const storedRun = body.body?.run;
       const runId =
@@ -303,15 +359,91 @@ class ConversationApp {
       const turnId =
         typeof body.body?.turnId === "string" ? body.body.turnId : null;
       if (typeof runId === "string") {
-        if (turnId !== null) {
-          this.runTurns.set(runId, turnId);
-        }
-        this.subscribe(runId);
+        // The stored idempotency response carries no status; the accepted
+        // run is seeded only by live events/status after subscription.
+        return { runId, turnId, status: null };
       }
-      return;
+      return null;
     }
     this.clearPendingKey();
     this.showNotice("送信を再入力してください");
+    return null;
+  }
+
+  /**
+   * Active-run discovery for the accepted-202 reload (§16.7): the minimal
+   * additive `GET /api/sessions/:sessionId/active-run` read. A discovered
+   * active run yields a `{runId, turnId}` descriptor the caller maps and
+   * subscribes exactly once, even if the run completed meanwhile (durable
+   * history plus the existing status/events/SSE pipeline cover the
+   * terminal). A 404 session or a known session without an active run
+   * (200 `{run:null}`) yields none. The stream cursor is never initialized
+   * from the discovery `eventSeq`: the stored per-run cursor stays the
+   * resume authority.
+   */
+  private async discoverActiveRun(): Promise<RecoveryDescriptor | null> {
+    if (this.sessionId === null) {
+      return null;
+    }
+    let discovered: { status: number; body: unknown };
+    try {
+      discovered = await fetchJson(
+        `/api/sessions/${encodeURIComponent(this.sessionId)}/active-run`,
+      );
+    } catch {
+      return null;
+    }
+    if (discovered.status !== 200) {
+      return null;
+    }
+    const run = (discovered.body as { run?: unknown }).run;
+    const status =
+      typeof run === "object" && run !== null
+        ? (run as { status?: unknown }).status
+        : null;
+    const runId =
+      typeof run === "object" && run !== null
+        ? (run as { id?: unknown }).id
+        : null;
+    const turnId =
+      typeof run === "object" && run !== null
+        ? (run as { turnId?: unknown }).turnId
+        : null;
+    if (
+      typeof runId !== "string" ||
+      typeof status !== "string" ||
+      !ACTIVE_RUN_STATUSES.has(status as ActiveStatus)
+    ) {
+      return null;
+    }
+    return {
+      runId,
+      turnId: typeof turnId === "string" ? turnId : null,
+      status: status as ActiveStatus,
+    };
+  }
+
+  /**
+   * Seed a pre-subscription view for a discovered active Run (§16.7): a
+   * non-terminal `cancel_requested` Run must already render its
+   * 「停止しました」notice — Send disabled, Stop visible, input enabled —
+   * before the stream opens. The reducer cursor stays 0: the discovery
+   * `eventSeq` is never applied as a fabricated event and the stored resume
+   * cursor is never advanced from the snapshot. The real events/catch-up/
+   * status pipeline remains the authoritative terminal, and `subscribe`
+   * preserves this seeded view (`runViews` already holds the run).
+   * Unknown/optional statuses seed nothing.
+   */
+  private seedActiveView(runId: string, status: ActiveStatus | null): void {
+    if (status !== "cancel_requested") {
+      return;
+    }
+    const seeded: RunViewState = {
+      ...INITIAL_RUN_VIEW,
+      notice: "停止しました",
+    };
+    this.runViews.set(runId, seeded);
+    this.showNotice(seeded.notice);
   }
 
   /**
@@ -469,6 +601,13 @@ class ConversationApp {
     wrap.appendChild(el("p", typeof item.text === "string" ? item.text : ""));
     const run = item.selectedRun;
     if (run !== null && run !== undefined && typeof run === "object") {
+      // Durable terminal dedup anchor: a completed selected Run id is
+      // registered the moment history renders it, so a captured-active
+      // reload whose later subscription replays that same terminal answer
+      // is guarded against appending it twice (`renderRunView`).
+      if (typeof run.runId === "string" && run.runId.length > 0) {
+        this.renderedAnswers.add(run.runId);
+      }
       // Completed selected Run: V2 answer parts with citations, or the V1
       // rendered text without citations (runResultToAnswerParts handles both).
       for (const part of runResultToAnswerParts(run.result)) {
@@ -741,7 +880,7 @@ class ConversationApp {
       this.sse = null;
     }
     if (this.sse === null) {
-      void this.pollFallback(runId, stored ?? 0);
+      void this.pollFallback(runId);
       return;
     }
     const source = this.sse;
@@ -749,7 +888,7 @@ class ConversationApp {
     this.fallbackTimer = window.setTimeout(() => {
       if (!opened) {
         this.closeStream();
-        void this.pollFallback(runId, readStoredCursor(runId) ?? 0);
+        void this.pollFallback(runId);
       }
     }, 5000);
     source.addEventListener("run-event", (message) => {
@@ -995,11 +1134,22 @@ class ConversationApp {
    * stranded. Transient fetch failures are absorbed (bounded consecutive
    * error streak before giving up with a fixed notice; each success resets
    * the streak). This path never cancels the Run.
+   *
+   * Catch-up always starts from the IN-MEMORY reducer cursor of the run
+   * view, never from the persisted per-run cursor: after a reload the
+   * reducer view is `INITIAL_RUN_VIEW` (cursor 0) while the stored cursor
+   * (e.g. 2) is only the SSE resume hint — starting the JSON replay from
+   * the stored hint would leave the reducer stuck in a gap at cursor 0
+   * (queued/started never applied) and the run would never converge to
+   * its terminal. Replaying from the reducer cursor is safe mid-stream too:
+   * durable events at or below the reducer cursor are reducer dedups
+   * (no double render), and the persisted store still advances only after
+   * each apply.
    */
   private static readonly POLL_INTERVAL_MS = 1000;
   private static readonly POLL_MAX_ERROR_STREAK = 5;
 
-  private async pollFallback(runId: string, after: number): Promise<void> {
+  private async pollFallback(runId: string): Promise<void> {
     let errorStreak = 0;
     for (;;) {
       if (this.activeRunId !== runId) {
@@ -1007,7 +1157,8 @@ class ConversationApp {
       }
       let ok = false;
       try {
-        ok = await this.catchUp(runId, readStoredCursor(runId) ?? after);
+        const view = this.runViews.get(runId);
+        ok = await this.catchUp(runId, view?.cursor ?? 0);
       } catch {
         ok = false;
       }

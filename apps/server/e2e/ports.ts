@@ -6,7 +6,7 @@
 
 export const E2E_APP_PORT = 4173;
 export const E2E_CONTROL_PORT = 4174;
-/** Loopback SSE-fault proxy: forwards 1:1 to the app, can drop streams/frames. */
+/** Loopback transport-fault proxy: forwards real responses; holds/fails/drops/duplicates. */
 export const E2E_PROXY_PORT = 4175;
 
 export const E2E_APP_ORIGIN = `http://127.0.0.1:${E2E_APP_PORT}`;

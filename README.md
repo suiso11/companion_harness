@@ -1221,3 +1221,22 @@ Companion Harness では、LLM をシステムそのものとは考えません�
 は Harness 側に残ります。
 
 **Companion Harness は AI そのものではなく、AI が安全に会話し、調べ、行動するための土台です。**
+
+---
+
+# Current C04/C05/C06 Browser Resilience Acceptance (2026-10-11)
+
+This section records the current local acceptance for the active-run bootstrap/hydration contract and the C06 accepted-202 reload fix. It is evidence for the current local worktree only and does not assert completion of all Phase 1 / M3 work, Windows 11 x64 manual smoke, or remote Windows/Linux CI for these edits.
+
+- **Active-run API contract**: `GET /api/sessions/:sessionId/active-run` returns `{ run: { id, turnId, status, eventSeq } }` for the single queued/running/cancel_requested run, or `{ run: null }` when there is genuinely no active run (session existence is checked first and returns 404).
+- **Product behaviour**: boot discovery re-subscribes to an existing active run and reuses history rendering; durable terminal delivery is deduplicated; the in-memory reducer cursor is reconstructed on reload (JSON fallback replay restarts from `0`) and is distinct from the saved resume hint `ch.cursor.<runId>`.
+- **Browser acceptance**: **23/23** real Chromium browser cases pass (0 skipped, 0 flaky, 0 retries, duration ≈79.0s), including the 4 C06 reload cases plus 2 review regressions (held-history send guard; cancel_requested saved-cursor-3 reload snapshot then a real cancelled-4 terminal). The prior 21/21 run remains historical evidence: the first rebind run showed 4 failures because the spec compared the whole status projection with `toEqual`; the helper was minimally corrected to the declared projection, after which the authoritative run passed 21/21.
+- **Unit / static**: **88 files / 1086 tests** pass; root `tsc --noEmit` exit 0; E2E `tsc --noEmit` exit 0; Biome `check .` exit 0; an independent read-only review reported no remaining C06 defect.
+
+Evidence:
+
+- [C04/C05 real-browser resilience execution](docs/plan/browser_resilience_execution_2026-10-10.md)
+- [Provisioned Chromium existing-browser baseline](docs/plan/provisioned_browser_baseline_2026-10-10.md)
+- [Execution progress / C06 reload acceptance](docs/plan/execution_progress_2026-10-10.md)
+
+Remaining gates not closed by this evidence: Phase 1/M3 as a whole, Windows 11 x64 manual smoke, and current remote Windows/Linux CI for these edits.

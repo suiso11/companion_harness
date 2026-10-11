@@ -94,6 +94,7 @@ export {
 } from "./frozen_context.js";
 export type {
   AcceptedRun,
+  ActiveRunResponse,
   ApiError,
   ApiErrorCode,
   CancelRunRequest,
@@ -123,6 +124,7 @@ export type {
 } from "./http.js";
 export {
   AcceptedRunSchema,
+  ActiveRunResponseSchema,
   ApiErrorCodeSchema,
   ApiErrorSchema,
   CancelRunRequestSchema,

@@ -7,6 +7,7 @@
 // engine so the DB transition commits before any abort.
 
 import {
+  ActiveRunResponseSchema,
   type ApiErrorCode,
   CancelRunRequestSchema,
   CancelRunResponseSchema,
@@ -862,6 +863,41 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       }
       const body = RunStatusResponseSchema.parse({
         run: { id: owned.id, status: owned.status, eventSeq: owned.eventSeq },
+      });
+      return c.json(body, 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  /* ---------------- active run discovery (C06 reload recovery) ---------------- */
+  // Minimal additive read (§16.7): the session's single active Run
+  // (queued/running/cancel_requested) projected as `{ id, turnId, status,
+  // eventSeq }` for the browser's accepted-202 reload resubscription, or
+  // `{ run: null }` for a known session without one. Strict empty query,
+  // UUID path param; a missing session 404s before any projection read.
+  // Session isolation is inherent: getActiveRun is session-scoped.
+  app.get("/api/sessions/:sessionId/active-run", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      repo.getSession(session.id);
+      const active = repo.getActiveRun(session.id);
+      const body = ActiveRunResponseSchema.parse({
+        run:
+          active === null
+            ? null
+            : {
+                id: active.id,
+                turnId: active.turnId,
+                status: active.status,
+                eventSeq: active.eventSeq,
+              },
       });
       return c.json(body, 200);
     } catch (error) {
