@@ -29,7 +29,7 @@ import {
 
 async function control(
   request: import("@playwright/test").APIRequestContext,
-  path: "/arm-fail" | "/release" | "/reset",
+  path: "/arm-fail" | "/arm-cancel-hold" | "/release" | "/reset",
 ): Promise<void> {
   const res = await request.post(`${E2E_CONTROL_ORIGIN}${path}`);
   expect(res.ok()).toBe(true);
@@ -121,12 +121,15 @@ test("citation drawer shows the escaped stored snapshot and CAS-selects it (stal
   };
   expect(staleBody.error?.code).toBe("reference_version_conflict");
 
-  // Bodies and snapshot text are never kept in browser storage.
+  // Bodies and snapshot text are never kept in browser storage: assert the
+  // raw stored values directly against the seeded sensitive snapshot text.
+  // JSON.stringify would escape its embedded quotes and make the check
+  // vacuously true, so it must not be used here.
   const stored = await storedLocalStorage(page);
   for (const key of Object.keys(stored)) {
     expect(key).toMatch(/^(ch\.sessionId|ch\.pendingKey|ch\.cursor\.)/);
+    expect(stored[key] ?? "").not.toContain(CITATION_SNAPSHOT_TEXT);
   }
-  expect(JSON.stringify(stored)).not.toContain(`echo:${TEXT_HANG}`);
 });
 
 test("lost delivery replays the same frozen key and reload recovers the answer", async ({
@@ -761,5 +764,251 @@ test("C06: SSE-blocked reload falls back to a JSON replay from the reducer curso
       .unroute("**/api/sessions/*/runs/*/events/stream*")
       .catch(() => undefined);
     await request.post(`${E2E_CONTROL_ORIGIN}/release`).catch(() => undefined);
+  }
+});
+
+test("C06: recovered active run keeps the composer busy and rejects a submit while the final history is held", async ({
+  page,
+  request,
+}) => {
+  const { sessionId, runId } = await acceptedHangRun(page);
+  await expect
+    .poll(async () => canonicalRunStatus(request, sessionId, runId))
+    .toEqual({
+      run: { status: "running", eventSeq: 2 },
+      types: ["run.queued", "run.started"],
+    });
+
+  // Gate ONLY the boot history hydration (`limit=50`), never the
+  // ensureSession existence probe (`limit=1`): the recovered run must own
+  // the composer while the real final history response is still in flight.
+  let releaseHistory: () => void = () => {};
+  const historyHeld = new Promise<void>((resolve) => {
+    releaseHistory = resolve;
+  });
+  let hydrationRequests = 0;
+  await page.route("**/api/sessions/*/history*", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get("limit") === "50") {
+      hydrationRequests += 1;
+      await historyHeld;
+    }
+    await route.continue();
+  });
+  const mutations = observeMutations(page);
+  try {
+    await page.reload({ waitUntil: "domcontentloaded" });
+    // Discovery returned the genuine active descriptor; boot is now held on
+    // the real final history response.
+    await expect.poll(() => hydrationRequests).toBeGreaterThanOrEqual(1);
+    expect(await sessionIdOf(page)).toBe(sessionId);
+
+    // The recovered run already owns the composer: Send disabled, Stop
+    // visible, and the input stays enabled (§16.3 type-while-active).
+    await expect(page.locator("#composer-send")).toBeDisabled();
+    await expect(page.locator("#composer-stop")).toBeVisible();
+    await expect(page.locator("#composer-input")).toBeEnabled();
+
+    // A user submit attempt while history is held is rejected by the active
+    // run guard: no message/retry/cancel POST and no pending key appears.
+    await page.locator("#composer-input").fill(TEXT_HANG);
+    await page.locator("#composer-input").press("Enter");
+    await expect(page.locator("#composer-send")).toBeDisabled();
+    expect(mutations.requests).toEqual([]);
+    expect(
+      await page.evaluate((): string | null =>
+        localStorage.getItem("ch.pendingKey"),
+      ),
+    ).toBe(null);
+
+    // Release the genuine hydration gate; the run is still held, so the
+    // composer stays busy with no mutation fired.
+    releaseHistory();
+    await expect(page.locator("#composer-send")).toBeDisabled();
+    await expect(page.locator("#composer-stop")).toBeVisible();
+    expect(mutations.requests).toEqual([]);
+
+    // Release the actually held TEXT_HANG strategy: the deferred native
+    // subscription completes the run with exactly one answer and releases
+    // the composer.
+    await control(request, "/release");
+    await expect
+      .poll(async () => canonicalRunStatus(request, sessionId, runId))
+      .toEqual({
+        run: { status: "completed", eventSeq: 3 },
+        types: ["run.queued", "run.started", "run.completed"],
+      });
+    await expect(
+      page.locator("#conversation").getByText(TEXT_HANG, { exact: true }),
+    ).toHaveCount(1);
+    await expect(
+      page
+        .locator("#conversation")
+        .getByText(`echo:${TEXT_HANG}`, { exact: true }),
+    ).toHaveCount(1);
+    await expect(page.locator("#composer-send")).toBeEnabled();
+    await expect(page.locator("#composer-stop")).toBeHidden();
+    expect(mutations.requests).toEqual([]);
+
+    // No reload mutation POST/retry/cancel and no storage expansion, and the
+    // answer body never persists in browser storage.
+    const stored = await storedLocalStorage(page);
+    for (const key of Object.keys(stored)) {
+      expect(key).toMatch(/^(ch\.sessionId|ch\.pendingKey|ch\.cursor\.)/);
+    }
+    expect(JSON.stringify(stored)).not.toContain(`echo:${TEXT_HANG}`);
+  } finally {
+    // Release the gate (a no-op if the test body already did), unroute, and
+    // release the held strategy so no request is stranded.
+    releaseHistory();
+    await request.post(`${E2E_CONTROL_ORIGIN}/release`).catch(() => undefined);
+    await page.unroute("**/api/sessions/*/history*").catch(() => undefined);
+  }
+});
+
+test("C06: cancel_requested reload seeds the stop notice before the native terminal resumes", async ({
+  page,
+  request,
+}, testInfo) => {
+  await observeNativeRunDeliveries(page);
+  await control(request, "/arm-cancel-hold");
+  const { sessionId, runId } = await acceptedHangRun(page);
+  await expect
+    .poll(async () => canonicalRunStatus(request, sessionId, runId))
+    .toEqual({
+      run: { status: "running", eventSeq: 2 },
+      types: ["run.queued", "run.started"],
+    });
+
+  // Click Stop: a real cancel POST, then the non-terminal cancel_requested
+  // commits (seq 3) and the client stores the real resume cursor 3.
+  const cancelResponse = page.waitForResponse(
+    (response) =>
+      response.url().endsWith(`/runs/${runId}/cancel`) &&
+      response.request().method() === "POST",
+  );
+  await page.locator("#composer-stop").click();
+  expect((await cancelResponse).ok()).toBe(true);
+  await expect(page.locator("#composer-notice")).toContainText("停止しました");
+  await expect(page.locator("#composer-send")).toBeDisabled();
+  await expect(page.locator("#composer-stop")).toBeVisible();
+  await expect
+    .poll(async () => canonicalRunStatus(request, sessionId, runId))
+    .toEqual({
+      run: { status: "cancel_requested", eventSeq: 3 },
+      types: ["run.queued", "run.started", "run.cancel_requested"],
+    });
+  await expect
+    .poll(() =>
+      page.evaluate((id) => localStorage.getItem(`ch.cursor.${id}`), runId),
+    )
+    .toBe("3");
+
+  // Hold the boot history hydration so the seeded (pre-subscription) view is
+  // observable deterministically; the native stream stays deferred until the
+  // gate is released.
+  let releaseHistory: () => void = () => {};
+  const historyHeld = new Promise<void>((resolve) => {
+    releaseHistory = resolve;
+  });
+  let hydrationRequests = 0;
+  await page.route("**/api/sessions/*/history*", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get("limit") === "50") {
+      hydrationRequests += 1;
+      await historyHeld;
+    }
+    await route.continue();
+  });
+  const mutations = observeMutations(page);
+  try {
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await expect.poll(() => hydrationRequests).toBeGreaterThanOrEqual(1);
+    expect(await sessionIdOf(page)).toBe(sessionId);
+
+    // Discovery returned cancel_requested: the stop notice renders BEFORE
+    // any subscription, Send stays disabled, Stop stays visible, the input
+    // stays enabled, and the stored resume cursor is NOT advanced from the
+    // discovery eventSeq.
+    await expect(page.locator("#composer-notice")).toContainText(
+      "停止しました",
+    );
+    await expect(page.locator("#composer-send")).toBeDisabled();
+    await expect(page.locator("#composer-stop")).toBeVisible();
+    await expect(page.locator("#composer-input")).toBeEnabled();
+    expect(
+      await page.evaluate(
+        (id) => localStorage.getItem(`ch.cursor.${id}`),
+        runId,
+      ),
+    ).toBe("3");
+    expect(mutations.requests).toEqual([]);
+
+    // Release the history gate and the genuinely held strategy promptly
+    // (inside the production 3s cancellation watchdog): the native stream
+    // resumes from the stored cursor 3 (no cancel_requested replay) and
+    // delivers the authoritative terminal.
+    releaseHistory();
+    await control(request, "/release");
+    await expect
+      .poll(async () => canonicalRunStatus(request, sessionId, runId))
+      .toEqual({
+        run: { status: "cancelled", eventSeq: 4 },
+        types: [
+          "run.queued",
+          "run.started",
+          "run.cancel_requested",
+          "run.cancelled",
+        ],
+      });
+    await expect
+      .poll(async () => (await nativeRunDeliveries(page, runId)).length)
+      .toBeGreaterThan(0);
+    const deliveries = await nativeRunDeliveries(page, runId);
+    expect(
+      deliveries.some((delivery) => delivery.url.includes("after=3")),
+    ).toBe(true);
+    expect(deliveries.map((delivery) => deliveryType(delivery))).not.toContain(
+      "run.cancel_requested",
+    );
+
+    await expect(page.locator("#composer-notice")).toContainText(
+      "停止しました",
+    );
+    await expect(page.locator("#composer-send")).toBeEnabled();
+    await expect(page.locator("#composer-stop")).toBeHidden();
+    await expect
+      .poll(() =>
+        page.evaluate((id) => localStorage.getItem(`ch.cursor.${id}`), runId),
+      )
+      .toBe("4");
+    expect(mutations.requests).toEqual([]);
+
+    // No reload mutation POST/retry/cancel, no storage expansion, and no
+    // echo body (the run was cancelled, never completed).
+    const stored = await storedLocalStorage(page);
+    for (const key of Object.keys(stored)) {
+      expect(key).toMatch(/^(ch\.sessionId|ch\.pendingKey|ch\.cursor\.)/);
+    }
+    expect(JSON.stringify(stored)).not.toContain("echo:");
+    // Observable proof: canonical terminal + stored resume cursor + zero
+    // reload mutations.
+    await testInfo.attach("cancel-recovery-proof.json", {
+      body: JSON.stringify({
+        canonical: await canonical(request, sessionId, runId),
+        cursor: await page.evaluate(
+          (id) => localStorage.getItem(`ch.cursor.${id}`),
+          runId,
+        ),
+        mutations: mutations.requests,
+      }),
+      contentType: "application/json",
+    });
+  } finally {
+    // Release the gate (a no-op if the test body already did), unroute, and
+    // release the held strategy so no request is stranded.
+    releaseHistory();
+    await request.post(`${E2E_CONTROL_ORIGIN}/release`).catch(() => undefined);
+    await page.unroute("**/api/sessions/*/history*").catch(() => undefined);
   }
 });

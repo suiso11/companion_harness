@@ -50,6 +50,19 @@ interface HistoryItemView {
   } | null;
 }
 
+/**
+ * Reload recovery descriptor (§16.7): the recovered run id/turn plus the
+ * discovered active status when known. `status` is `null` for an accepted
+ * idempotency replay (whose stored response carries no status) and a
+ * validated `ActiveStatus` for discovery; it only seeds the pre-subscription
+ * UI and never drives the reducer cursor or the stored resume hint.
+ */
+interface RecoveryDescriptor {
+  readonly runId: string;
+  readonly turnId: string | null;
+  readonly status: ActiveStatus | null;
+}
+
 function el(tag: string, text?: string): HTMLElement {
   const node = document.createElement(tag);
   if (text !== undefined) {
@@ -206,11 +219,21 @@ class ConversationApp {
     if (descriptor === null) {
       descriptor = await this.discoverActiveRun();
     }
+    // Mark the recovered run active and render the busy composer BEFORE the
+    // final history hydration: a held/slow hydration must never expose an
+    // enabled Send for a genuinely active Run (§16.3/§16.7). A discovered
+    // non-terminal `cancel_requested` status also seeds its「停止しました」
+    // notice here (reducer cursor 0, never the discovery `eventSeq`). The
+    // actual SSE subscription stays deferred until after hydration so the
+    // durable history (and its terminal dedup anchor) is registered first.
     if (descriptor !== null) {
+      this.activeRunId = descriptor.runId;
       this.activeTurnId = descriptor.turnId;
       if (descriptor.turnId !== null) {
         this.runTurns.set(descriptor.runId, descriptor.turnId);
       }
+      this.seedActiveView(descriptor.runId, descriptor.status);
+      this.renderComposer();
     }
     // One final hydration owned by boot: durable history renders first so a
     // completed selected Run is registered in renderedAnswers BEFORE any
@@ -288,10 +311,7 @@ class ConversationApp {
    * one subscription); unknown keys show a fixed resend-required prompt
    * (never recreated). Retention on transient failures keeps the key.
    */
-  private async recoverPending(): Promise<{
-    runId: string;
-    turnId: string | null;
-  } | null> {
+  private async recoverPending(): Promise<RecoveryDescriptor | null> {
     if (this.sessionId === null) {
       return null;
     }
@@ -339,7 +359,9 @@ class ConversationApp {
       const turnId =
         typeof body.body?.turnId === "string" ? body.body.turnId : null;
       if (typeof runId === "string") {
-        return { runId, turnId };
+        // The stored idempotency response carries no status; the accepted
+        // run is seeded only by live events/status after subscription.
+        return { runId, turnId, status: null };
       }
       return null;
     }
@@ -359,10 +381,7 @@ class ConversationApp {
    * from the discovery `eventSeq`: the stored per-run cursor stays the
    * resume authority.
    */
-  private async discoverActiveRun(): Promise<{
-    runId: string;
-    turnId: string | null;
-  } | null> {
+  private async discoverActiveRun(): Promise<RecoveryDescriptor | null> {
     if (this.sessionId === null) {
       return null;
     }
@@ -400,7 +419,31 @@ class ConversationApp {
     return {
       runId,
       turnId: typeof turnId === "string" ? turnId : null,
+      status: status as ActiveStatus,
     };
+  }
+
+  /**
+   * Seed a pre-subscription view for a discovered active Run (§16.7): a
+   * non-terminal `cancel_requested` Run must already render its
+   * 「停止しました」notice — Send disabled, Stop visible, input enabled —
+   * before the stream opens. The reducer cursor stays 0: the discovery
+   * `eventSeq` is never applied as a fabricated event and the stored resume
+   * cursor is never advanced from the snapshot. The real events/catch-up/
+   * status pipeline remains the authoritative terminal, and `subscribe`
+   * preserves this seeded view (`runViews` already holds the run).
+   * Unknown/optional statuses seed nothing.
+   */
+  private seedActiveView(runId: string, status: ActiveStatus | null): void {
+    if (status !== "cancel_requested") {
+      return;
+    }
+    const seeded: RunViewState = {
+      ...INITIAL_RUN_VIEW,
+      notice: "停止しました",
+    };
+    this.runViews.set(runId, seeded);
+    this.showNotice(seeded.notice);
   }
 
   /**
