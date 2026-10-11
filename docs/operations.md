@@ -259,8 +259,9 @@ or complete activate config):
 
 ### C09-02 / C09-03 demand lifecycle verification status
 
-- Verified **only** C09-02 (lazy-on-demand connect + exact backoff) and C09-03
-  (per-instance concurrency / no automatic resend / independent instances).
+- This subsection records **only** C09-02 (lazy-on-demand connect + exact
+  backoff) and C09-03 (per-instance concurrency / no automatic resend /
+  independent instances); it is not a global "only these are verified" claim.
 - Lazy: the first configured demand dials immediately; construction and idle
   time never create a transport. A valid live client/handshake is reused across
   later demands (no new factory call).
@@ -281,9 +282,9 @@ or complete activate config):
   handler drop / FIFO gate). This is a fixture smoke only — it is **not**
   evidence of the upstream fork, OAuth, or live Google compatibility.
 - Existing wire-gate / `serverId`-vs-`expectedServerName`+`version` semantics
-  are unchanged. The formal status stays **HOLD**; other C09 checks (notably 05
-  stderr-bounded termination and 06 shutdown kill timeout) and the C10/C11
-  gates remain open, and no Calendar-adoption decision is made here.
+  are unchanged. The formal status stays **HOLD**; the remaining unverified
+  C09 gates and the C10/C11 gates stay open, and no Calendar-adoption decision
+  is made here (C09-02/03 and C09-05/06 scope are separated below).
 - Graph-budget CI coverage note (same PR run): the real-vault
   `packages/connector-markdown/test/graph_budget_integration.test.ts` (5 cases)
   previously reported a **Windows CI** timeout at **6099ms** on the
@@ -294,6 +295,53 @@ or complete activate config):
   ≈3969 bytes stays under cap) without the large filesystem setup. This is
   **local proof only** (target file 5/5, root `tsc`, scoped Biome clean); it
   does not raise the timeout, skip the case, or change the production budget.
+
+### C09-05 / C09-06 transport bounds & shutdown status
+
+- This subsection records **only** the local, owned-branch verification of
+  C09-05 (stdio stderr-bounded termination) and C09-06 (bounded shutdown /
+  kill timeout), plus the loopback-HTTP cleanup path.
+- Real STDIO local non-test smoke (actual Node 24 + real SDK 1.30.0 real
+  `StdioServerTransport` children): **8/8 green**. Latest archived real-stdio
+  stdout: S7 stubborn shutdown **111.528ms** with a real `onclose`, owned PID
+  gone, exactly one actual production SIGKILL; S8 cooperative **3.918ms** /
+  no kill; actual `finalOwnedPidsAlive=[]`.
+- Real loopback HTTP local non-test smoke (actual Node 24 + real SDK
+  `McpServer` + `StreamableHTTPServerTransport`, production
+  `new McpConnector(cfg)` default HTTP transport): **7/7 green** — positive
+  `initialize`/`tools/list`/`tools/call`; pending-RPC shutdown with a
+  preserved prior `onclose`; 3xx refusal for 301/302/303/307/308/304 with zero
+  destination hits; post-connect `tools/call` 307 refusal with no resend;
+  direct-fetch refusal for every input form; streaming-body cancel; and the
+  schema-bypass no-network tripwire (actual fetch count `0`).
+- Deterministic controlled-SDK unit coverage: **26 cases** (9
+  transport-bounds / stderr-cap, 12 shutdown-race, 5 HTTP redirect-cleanup)
+  inside the full **1123 tests / 92 files**; root + e2e typecheck clean;
+  Biome 190 files with 0 warnings (one pre-existing recommended-rule info).
+- Bounds: stdio stderr is COUNT-ONLY per connection, saturating at 64KiB;
+  byte 65537 aborts open/call/idle into fixed `mcp_unavailable`, synchronous
+  state clear, and bounded cleanup. `shutdownWaitMs` stays `100..10000`
+  (default `3000`) as the GRACE window, plus a fixed additional **2000ms**
+  force-close wait; the real owned positive public-SDK PID is captured before
+  `close()` clears the getter, and the exit proof is an actual close event,
+  not `close()` promise resolution. Generic/HTTP settle waits are HOST-bounded
+  and do NOT prove external process death; a numeric PID public API cannot
+  guarantee a durable OS identity or process tree.
+- Fixture/local evidence only: NOT upstream-fork / OAuth / auth,
+  ordinary-CLI, or live-Google proof. Commands and counts are typed observed
+  values, not future CI or head-SHA claims. The formal status for the
+  remaining C09/C10/C11 gates and Calendar adoption stays **HOLD**.
+- Retained archives live OUT-OF-REPO under
+  `/home/molmot/.local/share/opencode/tool-output/c09-transport-verify/`:
+  `after-http/` (`harness.ts`, `tsconfig.json`, `stdout.json`, `result.json`,
+  `records-result.json`, `commands.txt`, `fail-history.txt`) and the
+  `after-stdio/` archive; the earlier `before/` archive is unchanged. The
+  in-repo `.c09-proof/http-final` helper and its compiled output were
+  TEMPORARY and deleted after publication, so it is NOT a retained archive.
+  The prior root 54 env-load-failure full run (with the stale idle-trigger and
+  SDK fixture-typing failures) is preserved under `final-checks/`; the final
+  full pass, which followed the OWNED workspace-resolved dependency borrow,
+  is under `final-checks-with-deps/`.
 
 ## Non-goals (explicit)
 Domain retention/GC (except newest-3 backup rotation), user export,

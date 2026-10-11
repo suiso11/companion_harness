@@ -68,6 +68,8 @@ interface FakeServerOptions {
   serverVersion?: string;
   /** Also register a second readonly tool (`get-event`) with its own counter. */
   withGetEvent?: boolean;
+  /** REAL in-flight drop: close the SDK server from inside the handler. */
+  closeDuringSearch?: boolean;
 }
 
 /**
@@ -88,6 +90,11 @@ async function linkedServer(opts: FakeServerOptions = {}) {
     { description: "fake readonly search", inputSchema: SEARCH_INPUT_SCHEMA },
     async ({ q }) => {
       calls += 1;
+      if (opts.closeDuringSearch) {
+        // Drop the real underlying SDK link BEFORE this handler can publish a
+        // response, so the awaited logical call fails genuinely in flight.
+        await server.close();
+      }
       if (opts.isErrorTool) {
         return {
           content: [{ type: "text" as const, text: "secret-raw-failure" }],
@@ -466,7 +473,7 @@ describe("McpConnector connected identity (in-memory SDK transport)", () => {
 
   it("a failed logical call after connect clears enabled/allowed state", async () => {
     const realHash = await probeSearchHash();
-    const server = await linkedServer();
+    const server = await linkedServer({ closeDuringSearch: true });
     const connector = new McpConnector(
       baseConfig([
         { upstreamTool: "search-events", canonicalSchemaHash: realHash },
@@ -477,10 +484,15 @@ describe("McpConnector connected identity (in-memory SDK transport)", () => {
     const ensured = await connector.ensureConnected();
     expect(ensured).toEqual({ ok: true });
     expect(connector.isAllowed("search-events")).toBe(true);
-    // Kill the live upstream transport so the next logical call fails.
-    await server.transport.close();
+    // REAL in-flight failure: the upstream SDK handler drops the underlying
+    // link AFTER receiving the call, so its response can never be published.
+    // The idle transport is NOT pre-closed and no .send/transport mock is used;
+    // the single logical call reaches the handler exactly once and is never
+    // auto-resent, so this is one genuine connection failure (not a count
+    // double).
     const res = await connector.callTool("search-events", { q: "x" });
     expect(res).toEqual({ ok: false, code: "mcp_unavailable" });
+    expect(server.calls()).toBe(1);
     expect(connector.stats()).toEqual({
       connected: false,
       consecutiveFailures: 1,

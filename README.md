@@ -870,7 +870,33 @@ per-instance concurrency control
 loopback HTTP only
 redirect rejection
 stdio env allowlist
+stdio stderr count-only cap
+bounded shutdown / force-close wait
 ```
+
+Transport のライフサイクル境界（C09-05 / C09-06）:
+
+- stdio の stderr は接続ごとに **カウントのみ** を保持し 64KiB で飽和します。
+  65537 バイト目で open / call / idle を中断し、固定 `mcp_unavailable`、同期
+  state clear（connected / enabledBindings）、bounded cleanup に収束します。
+- stdio の `shutdownWaitMs` は既存の `100..10000`（既定 `3000`）で、これは
+  **GRACE** です。実際の child close event 待ちに加えて、固定の **追加
+  2000ms** の force close 待ちがあります。SIGKILL の対象は `close()` が
+  getter を消す前に捕捉した **実所有の正の public SDK PID** のみです。終了の
+  証明は実際の close event であり、`close()` Promise の解決ではありません。
+- generic / HTTP transport の待機は **HOST bounded** であり、外部プロセスの
+  死亡を証明しません。数値 PID は public API ですが、永続的な OS identity や
+  プロセスツリーを保証しません。
+- 1 つの owned connection（half-open を含む）を singleflight で共有し、各操作は
+  fresh controller を持ちます。明示 shutdown は epoch で fence し、pre-shutdown
+  に queue 済みの呼び出しと shutdown 中の呼び出しは固定 fail、完了後の **新規**
+  明示呼び出しのみ lazy 再接続できます。通常の failure 後の **別** の呼び出しは
+  queue されても回復し、replay せず backoff も不変です。
+- HTTP は `127.0.0.1` / `localhost` のみ。**すべての 3xx** を manual で拒否し、
+  拒否した response body は読み取らず安全に cancel します。
+
+深い検証記録（コマンド・件数・生データ）は
+[docs/operations.md](docs/operations.md) を参照してください。
 
 ---
 
