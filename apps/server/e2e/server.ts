@@ -12,7 +12,9 @@
 // fixture (never from the page, never mocked API responses):
 //   POST /arm-fail  -> the next TEXT_FAIL run throws execution_failed once
 //   POST /release   -> release hanging TEXT_HANG strategies (also on abort)
-//   POST /reset     -> clear armed failure + release hangers
+//   POST /arm-cancel-hold -> ignore cooperative abort until release; the
+//     real RunEngine's production 3s cancellation watchdog remains active
+//   POST /reset     -> clear controls + release hangers
 //   POST /seed-citation { sessionId } -> store one immutable snapshot +
 //     session reference (ordinal rN) for that session via direct SQL
 //     (fixture setup only; drawer/CAS/rendering stay on real routes/UI)
@@ -22,14 +24,16 @@
 //     only; pagination/rendering stay on the real history routes/UI)
 //   GET  /health    -> { status: "ok" }
 //
-// A third loopback-only SSE fault proxy (E2E_PROXY_PORT) forwards every
-// request 1:1 to the real app (no mocking); it only observes SSE streams
-// and can destroy them / drop one armed SSE frame so the page's NATIVE
-// EventSource exercises real reconnect + Last-Event-ID resume:
-//   POST /proxy/reset            -> clear counters + frame-drop arm
-//   POST /proxy/arm-drop { seq } -> drop the next SSE frame with `id: seq`
-//   POST /proxy/drop-sse         -> destroy all live proxied SSE sockets
-//   GET  /proxy/status           -> counters (connections/reconnects/ids)
+// A third loopback-only transport-fault proxy (E2E_PROXY_PORT) forwards
+// successful requests to the real app without fabricated DTOs:
+//   POST /proxy/reset -> release held transports/streams + clear controls
+//   POST /proxy/arm-drop { seq } -> drop one actual SSE frame
+//   POST /proxy/drop-sse -> destroy all live proxied SSE sockets
+//   POST /proxy/configure { unavailableSse?, holdPages?, failures?,
+//     duplicateSeqs? } -> bounded transport faults; failures is a boolean
+//     request schedule, duplicates resend the actual frame byte-for-byte
+//   POST /proxy/release-pages -> forward held genuine upstream responses
+//   GET /proxy/status -> counters and bounded page lifecycle timings
 //
 // Temp DB dir is removed on shutdown (SIGINT/SIGTERM included).
 
@@ -83,6 +87,7 @@ const logger = createStdServerLogger("error");
 // Shared control state (single process, no persistence).
 let failArmed = false;
 let releaseHangers: Array<() => void> = [];
+let holdCancel = false;
 let pendingReleases = 0;
 function releaseAll(): void {
   const pending = releaseHangers;
@@ -134,7 +139,13 @@ registry.register("m0-default", async (ctx: RunStrategyContext) => {
         // Drop the stale releaser so a later /release or /reset cannot
         // resolve an already-rejected hang (avoids a releaser leak).
         releaseHangers = releaseHangers.filter((fn) => fn !== onRelease);
-        reject(new StrategyError("execution_cancelled"));
+        if (!holdCancel) {
+          reject(new StrategyError("execution_cancelled"));
+        } else {
+          // Non-cooperative fake only: the real engine's production 3s
+          // watchdog still bounds cancellation; /release can settle sooner.
+          releaseHangers.push(onRelease);
+        }
       };
       releaseHangers.push(onRelease);
       ctx.signal.addEventListener("abort", onAbort, { once: true });
@@ -174,7 +185,7 @@ const engine = new RunEngine({
   db: handle.raw,
   repo,
   registry,
-  cancelGraceMs: 50,
+  cancelGraceMs: 3000,
 });
 engine.start();
 
@@ -424,6 +435,16 @@ interface ProxyState {
   droppedFrames: number;
   eventsPageRequests: number;
   statusRequests: number;
+  blockedSse: number;
+  duplicatedFrames: number;
+  failedPages: number;
+  pagesInFlight: number;
+  pagesFinished: number;
+  maxPagesInFlight: number;
+  heldPages: number;
+  historyRequests: number;
+  cancelRequests: number;
+  pageTimings: Array<{ start: number; finish: number | null; status: number }>;
 }
 
 const proxyState: ProxyState = {
@@ -436,20 +457,70 @@ const proxyState: ProxyState = {
   droppedFrames: 0,
   eventsPageRequests: 0,
   statusRequests: 0,
+  blockedSse: 0,
+  duplicatedFrames: 0,
+  failedPages: 0,
+  pagesInFlight: 0,
+  pagesFinished: 0,
+  maxPagesInFlight: 0,
+  heldPages: 0,
+  historyRequests: 0,
+  cancelRequests: 0,
+  pageTimings: [],
 };
 
 /** Armed frame seq to drop once (fault injection over real SSE bytes). */
 let dropFrameSeq: number | null = null;
 const activeSseDownstreams = new Set<ServerResponse>();
+let unavailableSse = false;
+let pageFailures: boolean[] = [];
+let holdPages = false;
+const duplicateSeqs = new Set<number>();
+const heldTransports = new Set<() => void>();
+let proxyGeneration = 0;
+
+function releaseTransports(): void {
+  for (const release of [...heldTransports]) {
+    release();
+  }
+}
+
+/** Every hold is bounded and released on reset/shutdown or socket close. */
+function holdTransport(res: ServerResponse, release: () => void): void {
+  const finish = (): void => {
+    if (!heldTransports.delete(finish)) {
+      return;
+    }
+    clearTimeout(timer);
+    res.removeListener("close", finish);
+    release();
+  };
+  const timer = setTimeout(finish, 15_000);
+  heldTransports.add(finish);
+  res.once("close", finish);
+}
 
 function resetControlState(): void {
   failArmed = false;
+  for (const release of releaseHangers) {
+    release();
+  }
   releaseHangers = [];
+  holdCancel = false;
   pendingReleases = 0;
 }
 function resetProxyState(): void {
+  proxyGeneration += 1;
+  unavailableSse = false;
+  holdPages = false;
+  pageFailures = [];
+  duplicateSeqs.clear();
+  releaseTransports();
+  dropAllSse();
   for (const key of Object.keys(proxyState) as Array<keyof ProxyState>) {
-    if (key === "lastLastEventId" || key === "lastStreamRunId") {
+    if (key === "pageTimings") {
+      proxyState.pageTimings = [];
+    } else if (key === "lastLastEventId" || key === "lastStreamRunId") {
       proxyState[key] = null;
     } else {
       proxyState[key] = 0;
@@ -481,6 +552,55 @@ const proxy = createServer((req, res) => {
     res.end(JSON.stringify({ ...proxyState }));
     return;
   }
+  if (req.method === "POST" && path === "/proxy/release-pages") {
+    holdPages = false;
+    releaseTransports();
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ released: true }));
+    return;
+  }
+  if (req.method === "POST" && path === "/proxy/configure") {
+    void readBody(req).then((raw) => {
+      try {
+        const body = JSON.parse(raw) as {
+          unavailableSse?: boolean;
+          holdPages?: boolean;
+          failures?: boolean[];
+          duplicateSeqs?: number[];
+        };
+        if (
+          (body.unavailableSse !== undefined &&
+            typeof body.unavailableSse !== "boolean") ||
+          (body.holdPages !== undefined &&
+            typeof body.holdPages !== "boolean") ||
+          (body.failures !== undefined &&
+            (!Array.isArray(body.failures) ||
+              body.failures.length > 20 ||
+              body.failures.some((item) => typeof item !== "boolean"))) ||
+          (body.duplicateSeqs !== undefined &&
+            (!Array.isArray(body.duplicateSeqs) ||
+              body.duplicateSeqs.length > 10 ||
+              body.duplicateSeqs.some(
+                (seq) => !Number.isSafeInteger(seq) || seq < 1,
+              )))
+        ) {
+          throw new Error("invalid control");
+        }
+        unavailableSse = body.unavailableSse ?? unavailableSse;
+        holdPages = body.holdPages ?? holdPages;
+        pageFailures = body.failures ?? pageFailures;
+        for (const seq of body.duplicateSeqs ?? []) {
+          duplicateSeqs.add(seq);
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ configured: true }));
+      } catch {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { code: "validation_error" } }));
+      }
+    });
+    return;
+  }
   if (req.method === "POST" && path === "/proxy/arm-drop") {
     void readBody(req).then((raw) => {
       let seq: unknown = null;
@@ -500,8 +620,50 @@ const proxy = createServer((req, res) => {
     });
     return;
   }
-  if (RUN_EVENTS_PAGE_RE.test(path)) {
+  if (RUN_STREAM_RE.test(path) && unavailableSse) {
+    proxyState.blockedSse += 1;
+    // Do not send headers: native EventSource never establishes.
+    holdTransport(res, () => res.destroy());
+    return;
+  }
+  const isPage = RUN_EVENTS_PAGE_RE.test(path);
+  if (isPage) {
     proxyState.eventsPageRequests += 1;
+    proxyState.pagesInFlight += 1;
+    proxyState.maxPagesInFlight = Math.max(
+      proxyState.maxPagesInFlight,
+      proxyState.pagesInFlight,
+    );
+    const timing = {
+      start: Date.now(),
+      finish: null as number | null,
+      status: 0,
+    };
+    const generation = proxyGeneration;
+    if (proxyState.pageTimings.length < 200) {
+      proxyState.pageTimings.push(timing);
+    }
+    res.once("close", () => {
+      if (generation !== proxyGeneration) {
+        return;
+      }
+      timing.finish = Date.now();
+      timing.status = res.statusCode;
+      proxyState.pagesInFlight = Math.max(0, proxyState.pagesInFlight - 1);
+      proxyState.pagesFinished += 1;
+    });
+    if (pageFailures.shift() === true) {
+      proxyState.failedPages += 1;
+      res.writeHead(503, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { code: "transport_fault" } }));
+      return;
+    }
+  }
+  if (/\/history(\?|$)/.test(path)) {
+    proxyState.historyRequests += 1;
+  }
+  if (req.method === "POST" && /\/cancel$/.test(path)) {
+    proxyState.cancelRequests += 1;
   }
   if (RUN_STATUS_RE.test(path)) {
     proxyState.statusRequests += 1;
@@ -532,8 +694,14 @@ const proxy = createServer((req, res) => {
           proxyState.lastLastEventId = lastEventId;
         }
         let buffer = "";
+        const generation = proxyGeneration;
         const cleanup = (): void => {
-          proxyState.sseActive = Math.max(0, proxyState.sseActive - 1);
+          if (!activeSseDownstreams.has(res)) {
+            return;
+          }
+          if (generation === proxyGeneration) {
+            proxyState.sseActive = Math.max(0, proxyState.sseActive - 1);
+          }
           activeSseDownstreams.delete(res);
           upRes.destroy();
         };
@@ -563,6 +731,11 @@ const proxy = createServer((req, res) => {
               proxyState.lastForwardedId = Number(idMatch[1]);
             }
             res.write(frame);
+            if (idMatch !== null && duplicateSeqs.delete(Number(idMatch[1]))) {
+              // Duplicate the actual complete frame, never a synthetic DTO.
+              res.write(frame);
+              proxyState.duplicatedFrames += 1;
+            }
           }
         });
         upRes.on("end", () => {
@@ -573,8 +746,21 @@ const proxy = createServer((req, res) => {
           cleanup();
         });
       } else {
-        res.writeHead(upRes.statusCode ?? 502, upRes.headers);
-        upRes.pipe(res);
+        const forward = (): void => {
+          if (!res.destroyed) {
+            res.writeHead(upRes.statusCode ?? 502, upRes.headers);
+            upRes.pipe(res);
+          } else {
+            upRes.destroy();
+          }
+        };
+        if (isPage && holdPages) {
+          proxyState.heldPages += 1;
+          upRes.pause();
+          holdTransport(res, forward);
+        } else {
+          forward();
+        }
       }
     },
   );
@@ -599,7 +785,6 @@ proxy.listen(E2E_PROXY_PORT, "127.0.0.1", () => {
 function dropAllSse(): number {
   const targets = [...activeSseDownstreams];
   for (const res of targets) {
-    activeSseDownstreams.delete(res);
     res.destroy();
   }
   return targets.length;
@@ -630,6 +815,11 @@ const control = createServer(
     }
     if (req.method === "POST" && url.pathname === "/arm-fail") {
       failArmed = true;
+      json(200, { armed: true });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/arm-cancel-hold") {
+      holdCancel = true;
       json(200, { armed: true });
       return;
     }
@@ -705,6 +895,12 @@ async function shutdown(): Promise<void> {
     return;
   }
   shuttingDown = true;
+  resetControlState();
+  resetProxyState();
+  await new Promise<void>((resolve) => {
+    proxy.close(() => resolve());
+    proxy.closeAllConnections();
+  });
   try {
     await engine.shutdown({ drainMs: 1000 });
   } catch {

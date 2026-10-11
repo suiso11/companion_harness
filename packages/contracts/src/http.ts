@@ -225,6 +225,28 @@ export const RunStatusResponseSchema = z.strictObject({
 });
 export type RunStatusResponse = z.infer<typeof RunStatusResponseSchema>;
 
+/**
+ * GET /api/sessions/:sessionId/active-run response (C06 accepted202 active
+ * reload recovery, §16.7): minimal additive projection of the session's
+ * single active Run for the recovering browser — `{ id, turnId, status,
+ * eventSeq }` under `run` when a Run is queued/running/cancel_requested,
+ * else `{ run: null }`. Existing DTOs stay frozen; the recovering client
+ * maps the captured id/turnId to the existing status/events/SSE pipeline
+ * and never seeds a stream cursor from the discovery `eventSeq` (the
+ * stored per-run cursor remains the resume authority).
+ */
+export const ActiveRunResponseSchema = z.strictObject({
+  run: z
+    .strictObject({
+      id: UuidSchema,
+      turnId: UuidSchema,
+      status: ActiveStatusSchema,
+      eventSeq: z.number().int().min(0),
+    })
+    .nullable(),
+});
+export type ActiveRunResponse = z.infer<typeof ActiveRunResponseSchema>;
+
 /* ------------------------------------------------------------------ */
 /* Idempotency lookup                                                  */
 /* ------------------------------------------------------------------ */
@@ -297,6 +319,3 @@ export const HealthReadyResponseSchema = z.discriminatedUnion("status", [
   }),
 ]);
 export type HealthReadyResponse = z.infer<typeof HealthReadyResponseSchema>;
-
-/** Re-export for route layers that validate the active-run guard. */
-export { ActiveStatusSchema };

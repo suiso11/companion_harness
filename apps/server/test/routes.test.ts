@@ -490,6 +490,157 @@ describe("retry + cancel + history + events + lookup", () => {
   });
 });
 
+describe("active-run discovery (C06 reload recovery)", () => {
+  async function activeConversation(): Promise<{
+    f: Fixture;
+    sessionId: string;
+    turnId: string;
+    runId: string;
+  }> {
+    const f = await makeApp();
+    const sessionId = f.repo.createSession({
+      key: randomUUID(),
+      now: 1790000000000,
+    }).body.sessionId;
+    const posted = f.repo.postMessage(
+      sessionId,
+      { text: "question" },
+      { key: randomUUID(), now: 1790000000000 },
+    ).body;
+    return { f, sessionId, turnId: posted.turnId, runId: posted.run.id };
+  }
+
+  async function readActiveRun(
+    f: Fixture,
+    sessionId: string,
+  ): Promise<{
+    run: {
+      id: string;
+      turnId: string;
+      status: string;
+      eventSeq: number;
+    } | null;
+  }> {
+    const res = await f.app.request(`/api/sessions/${sessionId}/active-run`, {
+      headers: { host: "127.0.0.1" },
+    });
+    expect(res.status).toBe(200);
+    return (await res.json()) as {
+      run: {
+        id: string;
+        turnId: string;
+        status: string;
+        eventSeq: number;
+      } | null;
+    };
+  }
+
+  it("projects all active statuses with run/turn identity and authoritative eventSeq", async () => {
+    const { f, sessionId, turnId, runId } = await activeConversation();
+    try {
+      const queued = await readActiveRun(f, sessionId);
+      expect(queued).toEqual({
+        run: { id: runId, turnId, status: "queued", eventSeq: 1 },
+      });
+      f.repo.startRun(runId, { now: 1790000000001 });
+      const running = await readActiveRun(f, sessionId);
+      expect(running).toEqual({
+        run: { id: runId, turnId, status: "running", eventSeq: 2 },
+      });
+      // The cancel route owns the transition; discovery mirrors the result.
+      const cancel = await postJson(
+        f.app,
+        `/api/sessions/${sessionId}/runs/${runId}/cancel`,
+        {},
+      );
+      expect(cancel.status).toBe(200);
+      const requested = await readActiveRun(f, sessionId);
+      expect(requested).toEqual({
+        run: { id: runId, turnId, status: "cancel_requested", eventSeq: 3 },
+      });
+    } finally {
+      f.close();
+    }
+  });
+
+  it("returns run:null for known empty and terminal sessions, isolating sessions", async () => {
+    const { f, sessionId, runId } = await activeConversation();
+    try {
+      // Known session without any run.
+      const fresh = f.repo.createSession({
+        key: randomUUID(),
+        now: 1790000000000,
+      }).body.sessionId;
+      expect(await readActiveRun(f, fresh)).toEqual({ run: null });
+      // Terminal Runs no longer count as active: the run left discovery.
+      f.repo.startRun(runId, { now: 1790000000001 });
+      f.repo.completeRun(
+        runId,
+        { version: 1, text: "answer" },
+        { now: 1790000000002 },
+      );
+      expect(await readActiveRun(f, sessionId)).toEqual({ run: null });
+      // A fresh active run in the other session never leaks here.
+      const otherPost = f.repo.postMessage(
+        fresh,
+        { text: "later" },
+        { key: randomUUID(), now: 1790000000003 },
+      ).body;
+      expect(await readActiveRun(f, sessionId)).toEqual({ run: null });
+      expect(await readActiveRun(f, fresh)).toEqual({
+        run: {
+          id: otherPost.run.id,
+          turnId: otherPost.turnId,
+          status: "queued",
+          eventSeq: 1,
+        },
+      });
+    } finally {
+      f.close();
+    }
+  });
+
+  it("404s a missing session before any projection read", async () => {
+    const f = await makeApp();
+    try {
+      const missing = await f.app.request(
+        `/api/sessions/${randomUUID()}/active-run`,
+        { headers: { host: "127.0.0.1" } },
+      );
+      expect(missing.status).toBe(404);
+      expect(
+        ((await missing.json()) as { error: { code: string } }).error.code,
+      ).toBe("not_found");
+    } finally {
+      f.close();
+    }
+  });
+
+  it("rejects invalid ids and unexpected/duplicate query keys", async () => {
+    const { f, sessionId } = await activeConversation();
+    try {
+      const badId = await f.app.request(`/api/sessions/not-a-uuid/active-run`, {
+        headers: { host: "127.0.0.1" },
+      });
+      expect(badId.status).toBe(400);
+      const unexpectedKey = await f.app.request(
+        `/api/sessions/${sessionId}/active-run?limit=1`,
+        { headers: { host: "127.0.0.1" } },
+      );
+      expect(unexpectedKey.status).toBe(400);
+      const duplicateKey = await f.app.request(
+        `/api/sessions/${sessionId}/active-run?after=0&after=1`,
+        { headers: { host: "127.0.0.1" } },
+      );
+      expect(duplicateKey.status).toBe(400);
+      // Rejections never disturb the stored projection.
+      expect((await readActiveRun(f, sessionId)).run).not.toBeNull();
+    } finally {
+      f.close();
+    }
+  });
+});
+
 describe("host, mutation security, health, drain", () => {
   it("enforces strict Host and same-origin mutations without CORS", async () => {
     const f = await makeApp();

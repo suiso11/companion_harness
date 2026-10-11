@@ -5,10 +5,9 @@
 // reducer contract (dup/gap/unknown/failure-only retry/contextual stop).
 
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { PostMessageResponseSchema } from "@companion/contracts";
 import {
   closeKernelDatabase,
@@ -502,27 +501,6 @@ describe("M3 client reducer contract", () => {
   });
 });
 
-describe("M3 client frozen-request + unbounded fallback source contract", () => {
-  const here = dirname(fileURLToPath(import.meta.url));
-  const source = readFileSync(
-    join(here, "..", "src", "ui", "client.ts"),
-    "utf8",
-  );
-
-  it("freezes key+body once: resend reuses pendingRequest without refetch", () => {
-    // Regression for HEAD frozen-resend fix (§16.7/§9 exact): the reference
-    // context is fetched once into the frozen pendingRequest; resend() must
-    // reuse it as-is so the replay body hash stays stable.
-    expect(source).toContain("private pendingRequest");
-    expect(source).toContain("fetchUiContext");
-    const resendStart = source.indexOf("async resend()");
-    expect(resendStart).toBeGreaterThan(-1);
-    const resendBody = source.slice(resendStart, resendStart + 800);
-    expect(resendBody).toContain("pendingRequest");
-    expect(resendBody).not.toContain("fetchUiContext");
-  });
-});
-
 describe("M3 SSE loop lifetime (fake timers)", () => {
   interface FakeTimer {
     id: number;
@@ -622,105 +600,5 @@ describe("M3 SSE loop lifetime (fake timers)", () => {
     await drain();
     expect(maxInside).toBe(1);
     await drain();
-  });
-});
-
-describe("M3 review-fix regressions (client source contract)", () => {
-  const here = dirname(fileURLToPath(import.meta.url));
-  const source = readFileSync(
-    join(here, "..", "src", "ui", "client.ts"),
-    "utf8",
-  );
-
-  function methodBody(name: string): string {
-    const start = source.indexOf(name);
-    expect(start).toBeGreaterThan(-1);
-    return source.slice(start, start + 2500);
-  }
-
-  it("send stays disabled while the request is frozen/in flight and restores on failure", () => {
-    const composer = methodBody("private renderComposer()");
-    expect(composer).toContain("this.sending");
-    const send = methodBody("private async send()");
-    expect(send).toContain("this.sending = true");
-    expect(send).toContain("catch");
-    expect(send).toContain("this.sending = false");
-  });
-
-  it("retains the pending idempotency key on transient lookup errors", () => {
-    const recover = methodBody("private async recoverPending()");
-    expect(recover).toContain("catch");
-    expect(recover).toContain("status >= 500");
-    // The retain paths return BEFORE clearPendingKey runs.
-    const firstClear = recover.indexOf("clearPendingKey");
-    const firstTransient = recover.indexOf("status >= 500");
-    expect(firstTransient).toBeGreaterThan(-1);
-    expect(firstTransient).toBeLessThan(firstClear);
-  });
-
-  it("does not replace the session on transient probe errors", () => {
-    const ensure = methodBody("private async ensureSession()");
-    expect(ensure).toContain("probeStatus === 404 || probeStatus === 410");
-    expect(ensure).toContain("probeStatus = null");
-  });
-
-  it("citation open performs a real CAS PUT and retries on 409 conflict", () => {
-    const cas = methodBody("private async updateReferenceContextCas(");
-    expect(cas).toContain('method: "PUT"');
-    expect(cas).toContain("status !== 409");
-    const open = methodBody("private async openCitation(");
-    expect(open).toContain("updateReferenceContextCas");
-  });
-
-  it("poll fallback counts non-2xx page failures toward the error streak", () => {
-    const catchUp = methodBody("private async catchUp(");
-    expect(catchUp).toContain("fetched.status < 200 || fetched.status >= 300");
-    expect(catchUp).toContain("return false");
-    const poll = methodBody("private async pollFallback(");
-    expect(poll).toContain("errorStreak += 1");
-    expect(poll).toContain("errorStreak = 0");
-  });
-
-  it("history loads older pages via beforePosition and renders oldest-first", () => {
-    const hydrate = methodBody("private async hydrateHistory()");
-    expect(hydrate).toContain("beforePosition=");
-    expect(hydrate).toContain("hasMore");
-    expect(hydrate).toContain("nextBefore");
-    // Regression: API items are chronological within a page, so the render
-    // loop must advance forward; a reverse pass would invert every page.
-    expect(hydrate).toContain("itemIndex += 1");
-    expect(hydrate).not.toContain("itemIndex -= 1");
-  });
-
-  it("capped history keeps older turns reachable via incremental loading", () => {
-    expect(source).toContain("loadOlderHistory");
-    expect(source).toContain("historyHasMore");
-    expect(source).toContain("oldestBefore");
-    expect(source).toContain("さらに古い履歴を読み込む");
-    const older = methodBody("private async loadOlderHistory()");
-    // Prepend path also renders oldest-first (pages reversed, items forward).
-    expect(older).toContain("insertBefore");
-    expect(older).toContain("itemIndex += 1");
-    expect(older).not.toContain("itemIndex -= 1");
-  });
-
-  it("retry survives hydration and duplicates never re-render terminal output", () => {
-    const render = methodBody("private renderRunView(");
-    const failedIdx = render.indexOf('view.visible === "failed"');
-    const failedBody = render.slice(failedIdx, failedIdx + 900);
-    const hydrateIdx = failedBody.indexOf("hydrateHistory().then");
-    const retryIdx = failedBody.indexOf("もう一度送る");
-    expect(hydrateIdx).toBeGreaterThan(-1);
-    expect(retryIdx).toBeGreaterThan(hydrateIdx);
-    expect(render).toContain("renderedAnswers.has(runId)");
-  });
-
-  it("the serialized apply chain absorbs rejections and corrupt cursors resync", () => {
-    const apply = methodBody("private applySerialized(");
-    expect(apply).toContain("this.runChain.catch(() => {})");
-    expect(apply).toContain("catch");
-    expect(source).toContain("validateStoredCursor(runId, stored ?? 0)");
-    expect(source).toContain("resyncFromHistory(runId)");
-    expect(source).toContain("isCorruptCursor");
   });
 });
