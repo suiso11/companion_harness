@@ -116,6 +116,24 @@ export interface ConnectorStats {
 const MAX_TOOL_LIST_PAGES = 10; // ponytail: deliberately small and fixed, never auto-raised
 
 /**
+ * True when the trusted wire-identity expectation is explicitly present.
+ * Runtime guard for programmatic configs that bypass the zod schema: a
+ * missing/empty `expectedServerName` or `version` must fail closed (fixed
+ * mismatch) rather than compare against `undefined`. Never infers from
+ * `serverId`/`clientName`/the actual server response and supplies no default.
+ */
+function hasWireIdentityExpectation(config: McpConnectorConfig): boolean {
+  const expectedName: unknown = config.expectedServerName;
+  const expectedVersion: unknown = config.version;
+  return (
+    typeof expectedName === "string" &&
+    expectedName.length > 0 &&
+    typeof expectedVersion === "string" &&
+    expectedVersion.length > 0
+  );
+}
+
+/**
  * MCP connector transport lifecycle (§17.6–§17.7) over the official SDK.
  *
  * - Lazy persistent: connects on first allowed call, reuses the Client after.
@@ -133,7 +151,13 @@ export class McpConnector {
   private client: Client | undefined;
   private connected = false;
   private consecutiveFailures = 0;
-  private disabledByMismatch: string[] = [];
+  /**
+   * Configured bindings that PASSED the wire-identity gate and the per-tool
+   * canonical-schema check on the current connection. Empty until a real
+   * connect validates; cleared on shutdown/failure. This is the ONLY source
+   * of `isAllowed`/`stats().enabledBindings` truth.
+   */
+  private enabledBindings: string[] = [];
   private mutex: Promise<void> = Promise.resolve();
   private stderrBytes = 0;
   private stderrTruncated = false;
@@ -144,22 +168,21 @@ export class McpConnector {
   ) {}
 
   stats(): ConnectorStats {
-    const allowlisted = this.config.bindings.map((b) => b.upstreamTool);
     return {
       connected: this.connected,
       consecutiveFailures: this.consecutiveFailures,
-      enabledBindings: allowlisted.filter(
-        (n) => !this.disabledByMismatch.includes(n),
-      ),
+      // Never advertise a callable binding before a validated connection.
+      enabledBindings: this.connected ? [...this.enabledBindings] : [],
     };
   }
 
-  /** Is an upstream tool name currently callable (allowlist + identity)? */
+  /**
+   * Is an upstream tool name currently callable? True only after a live
+   * connection passed both the wire-identity gate and this binding's
+   * canonical-schema check. Always false while disconnected/failed/mismatched.
+   */
   isAllowed(upstreamTool: string): boolean {
-    return (
-      this.config.bindings.some((b) => b.upstreamTool === upstreamTool) &&
-      !this.disabledByMismatch.includes(upstreamTool)
-    );
+    return this.connected && this.enabledBindings.includes(upstreamTool);
   }
 
   /**
@@ -180,7 +203,7 @@ export class McpConnector {
         disabled.push(b.upstreamTool);
       }
     }
-    this.disabledByMismatch = disabled;
+    this.enabledBindings = enabled;
     return { enabled, disabled };
   }
 
@@ -204,20 +227,21 @@ export class McpConnector {
     signal?: AbortSignal,
   ): Promise<CallResult> {
     return this.withMutex(async () => {
-      if (!this.isAllowed(upstreamTool)) {
-        const configured = this.config.bindings.some(
-          (b) => b.upstreamTool === upstreamTool,
-        );
-        // Configured but identity-disabled (drift/missing): fixed mismatch,
-        // no upstream call. Unconfigured: not-allowed.
-        if (configured) {
-          return { ok: false, code: "mcp_schema_mismatch" as const };
-        }
+      // Admit ONLY configured allowlist names; never spawn for an
+      // unconfigured name (no transport, no handshake).
+      const configured = this.config.bindings.some(
+        (b) => b.upstreamTool === upstreamTool,
+      );
+      if (!configured) {
         return { ok: false, code: "mcp_binding_not_allowed" as const };
       }
+      // Lazy connect. Wire identity + per-binding schema are (re)validated
+      // here on EVERY actual transport, so we cannot pre-check `isAllowed`
+      // before connecting without blocking the first valid call.
       const ensured = await this.ensureConnected();
       if (!ensured.ok) return ensured;
-      // Re-check identity after connect (drift between calls disables).
+      // Validated state for the live connection: wire-gate/mismatch-denied
+      // names stay denied. No automatic retry or resend happens here.
       if (!this.isAllowed(upstreamTool)) {
         return { ok: false, code: "mcp_schema_mismatch" as const };
       }
@@ -261,18 +285,34 @@ export class McpConnector {
   }
 
   /**
-   * Lazy connect + binding-identity verification (§17.3): after the SDK
-   * handshake, tools/list pages are followed (bounded) and each configured
-   * binding's exact name + canonical input-schema SHA-256 is compared. Any
-   * missing/mismatch disables that binding; connect reports
-   * mcp_schema_mismatch only when NO binding verifies (partial drift still
-   * connects, drifted names stay disabled). Demand reconnect applies the
-   * backoff before dialing.
+   * Lazy connect + fail-closed identity verification (§17.3, C09-07):
+   *
+   * 1. Wire gate: the REAL SDK handshake `initialize.serverInfo` (exact
+   *    `name`/`version`, case-sensitive) must match the trusted config
+   *    (`expectedServerName`/`version`). A missing/mismatched identity
+   *    disables ALL configured bindings and the half-open client/transport is
+   *    closed, returning the existing fixed `mcp_schema_mismatch`; NO
+   *    tools/list happens and no raw identity is leaked.
+   * 2. Then tools/list pages are followed (bounded) and each configured
+   *    binding's exact name + canonical input-schema SHA-256 is compared.
+   *    Any missing/mismatch disables that binding; connect reports
+   *    mcp_schema_mismatch only when NO binding verifies (partial drift still
+   *    connects, drifted names stay disabled).
+   *
+   * The gate runs on EVERY actual transport (never a cached identity).
+   * Demand reconnect applies the backoff before dialing.
    */
   async ensureConnected(): Promise<
     { ok: true } | { ok: false; code: McpErrorCode }
   > {
     if (this.connected && this.client !== undefined) return { ok: true };
+    // Runtime boundary for programmatic configs that bypass the zod schema:
+    // a missing/empty wire-identity expectation fails closed with the fixed
+    // mismatch BEFORE any transport creation/spawn or tools/list.
+    if (!hasWireIdentityExpectation(this.config)) {
+      this.enabledBindings = [];
+      return { ok: false, code: "mcp_schema_mismatch" as const };
+    }
     // Fail-closed stdio env: reject BEFORE any transport creation/spawn.
     if (this.config.transport.kind === "stdio") {
       if (missingStdioEnvNames(this.config).length > 0) {
@@ -292,10 +332,27 @@ export class McpConnector {
         { capabilities: {} },
       );
       await client.connect(transport);
-      // Identity verification BEFORE enabling any call: follow SDK 1.30.0
-      // tools/list pages via listTools({ cursor }) until no nextCursor, so
-      // bindings beyond page 1 still verify. Only configured bindings are
-      // ever enabled — discovered tools are never auto-exposed.
+      // Wire-identity gate BEFORE tools/list or enabling any binding. The
+      // ACTUAL initialize.serverInfo must equal the trusted config exactly.
+      // `serverId` is a logical id and is deliberately NOT compared here.
+      const wire = client.getServerVersion();
+      if (
+        wire === undefined ||
+        wire.name !== this.config.expectedServerName ||
+        wire.version !== this.config.version
+      ) {
+        // Disable ALL configured bindings for this instance.
+        this.enabledBindings = [];
+        await closeQuietly(client, transport);
+        transport = undefined;
+        client = undefined;
+        this.consecutiveFailures = 0;
+        return { ok: false, code: "mcp_schema_mismatch" as const };
+      }
+      // Per-binding identity verification BEFORE enabling any call: follow
+      // SDK 1.30.0 tools/list pages via listTools({ cursor }) until no
+      // nextCursor, so bindings beyond page 1 still verify. Only configured
+      // bindings are ever enabled — discovered tools are never auto-exposed.
       const snapshot: Array<{ name: string; inputSchemaHash: string }> = [];
       let cursor: string | undefined;
       for (let page = 0; page < MAX_TOOL_LIST_PAGES; page += 1) {
@@ -344,6 +401,7 @@ export class McpConnector {
     const client = this.client;
     this.client = undefined;
     this.connected = false;
+    this.enabledBindings = [];
     if (client !== undefined) {
       await Promise.race([
         client.close().catch(() => undefined),
@@ -365,6 +423,7 @@ export class McpConnector {
   private async markFailure(): Promise<void> {
     this.consecutiveFailures += 1;
     this.connected = false;
+    this.enabledBindings = [];
     // Release the dropped client/transport so failed calls disconnect (§17.6).
     const client = this.client;
     this.client = undefined;

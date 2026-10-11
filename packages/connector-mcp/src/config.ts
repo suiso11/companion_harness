@@ -38,9 +38,25 @@ const bindingSchema = z.object({
 export const mcpConnectorConfigSchema = z
   .object({
     connectorInstanceId: z.string().min(1).max(128),
+    /**
+     * LOGICAL binding identifier, trusted config only. It is never compared
+     * with the wire `initialize.serverInfo.name`; that check uses
+     * `expectedServerName` below.
+     */
     serverId: z.string().min(1).max(128),
     kind: z.literal("mcp"),
-    /** Version of the bound upstream surface (fork/release version). */
+    /**
+     * Trusted expected `initialize.serverInfo.name` from the bound upstream.
+     * Compared exactly (case-sensitive) to the actual handshake identity
+     * AFTER connect and BEFORE any tools/list or binding enable. No default,
+     * no inference from serverId/clientName/actual response.
+     */
+    expectedServerName: z.string().min(1).max(128),
+    /**
+     * Version of the bound upstream surface (fork/release version) AND the
+     * trusted expected `initialize.serverInfo.version`. Compared exactly
+     * (case-sensitive, no semver/prose normalization).
+     */
     version: z.string().min(1).max(64),
     transport: z.discriminatedUnion("kind", [stdioTransport, httpTransport]),
     /** Explicit allowlist only; tools/list is never auto-exposed (§17.3). */

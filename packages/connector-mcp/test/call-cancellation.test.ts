@@ -127,7 +127,8 @@ async function abortableConnector(state: FakeState): Promise<McpConnector> {
     connectorInstanceId: "cal-1",
     serverId: "fake",
     kind: "mcp" as const,
-    version: "0.0.0-proposed.1",
+    expectedServerName: "fake-calendar",
+    version: "0.0.0",
     transport: {
       kind: "stdio" as const,
       command: "unused-injected",
