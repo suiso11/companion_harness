@@ -37,6 +37,13 @@
       "when": 1790000000004,
       "tag": "0005_m2_model_calls",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": 6,
+      "when": 1790000000005,
+      "tag": "0006_m4_calendar_targets",
+      "breakpoints": true
     }
   ]
 }

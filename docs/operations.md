@@ -558,6 +558,100 @@ or complete activate config):
   same form as the connector-mcp link, read-only borrow) was added so the SDK
   resolves from the Calendar test source directory; no install/relink ran.
 
+### C12 internal Calendar pipeline (implemented end-to-end consumer; adoption HOLD)
+
+- This subsection records the CURRENT C12 scope: the internal pipeline that
+  wires the C10 normalized connector into the kernel's ReferenceManager
+  through a dependency-inverted port. It is a REAL-SDK, credential-free,
+  in-memory-transport consumer verification only — it is NOT an adoption,
+  live-Google, OAuth, pin (formal C08 stays **HOLD**) or provider claim. The
+  actual upstream HTTP transport and error statuses stay UNKNOWN.
+- Architecture (as implemented, `packages/kernel/src/calendar_tools.ts`):
+  `calendar.search` is a ToolBroker registration built over a
+  `CalendarConnectorBinding` (stored `connector_instances` row of kind
+  `calendar` + an already policy-validated `McpConnector` adapter). The kernel
+  owns the port shape and never imports the connector package. The frozen
+  IANA zone is resolved PER CALL from the Run's immutable Turn frozen context
+  (`turn.frozenContext.temporal.timeZone`), never from a construction state,
+  clock or env read; `get` needs no zone. Host-private upstream `get-event`
+  targets (calendarId/eventId/account) are returned by the adapter alongside
+  the decoded page and persisted by the kernel inside the SINGLE
+  `ReferenceManager.presentObservations` `BEGIN IMMEDIATE` transaction
+  (through the `onApplied` hook), AFTER the running-status/CAS recheck:
+  a cancelled/terminal/late observation writes no target and a committed
+  Snapshot/rN cannot exist without its target (`C12-07`).
+- Private storage: committed migration `0006_m4_calendar_targets.sql` adds the
+  STRICT, non-joined `calendar_get_targets` table (canonical_key PK, valid
+  JSON target, no secret/credential). The production server injects
+  `createDurableCalendarTargetStore(db)` (survives restart); the in-memory
+  store is a test-only default. Provider ids live ONLY in this private table —
+  never in the Snapshot body, model-facing output, public DTO, or a fixed
+  error (`C12-07`/provenance). The bodies carry an opaque
+  `calendar:<sha256>` canonicalKey; `calendar.search` output hits carry
+  structural ids + title + status + snippet only.
+- Reuse semantics (delegated entirely to the existing M1 ReferenceManager,
+  `C12-08`): normal presentation reuses the session's latest matching
+  Snapshot (revision NULL-safe exact + content hash) with the same rN; a
+  changed upstream revision (etag) with identical content materializes a NEW
+  Snapshot + new rN; a content change with the same revision also materializes
+  a new Snapshot; an explicit refresh always creates a new Snapshot + new rN.
+  `reference.open` is stored-only (no external request). A failed
+  (`calendar_upstream_error` / `mcp_unavailable` / `mcp_schema_mismatch` /
+  `calendar_response_invalid` / `calendar_range_invalid`, closed map) or an
+  empty page never erases or mutates an existing Snapshot: history retains
+  (`C12-06`). Missing private target on a calendar refresh yields the closed
+  `reference_not_found` — the kernel NEVER guesses provider ids.
+- Server composition: `apps/server/src/bootstrap.ts` exposes an injectable
+  `calendarBinding` seam. Injection is fail-closed: the stored row must exist,
+  be kind `calendar`, and its metadata-only `{version,calendarId,account?}`
+  selection must match the injected selection exactly
+  (`verifyCalendarBinding`); absent injection keeps the registry
+  network-disabled (Markdown-only). Per-call frozen-zone resolution and the
+  registration-validated bindings are exercised by the kernel regressions
+  (C12-08 binding-kind / missing-target / rollback cases).
+- Observed regressions (Vitest, this worktree, local runs): genuine-SDK
+  `packages/connector-calendar/test/c12-smoke.test.ts` (low-level SDK `Server`
+  + `InMemoryTransport` linked pair; inert synthetic provider; no HTTP/stdio/
+  OAuth/network) drives the real `McpConnector`, real adapter, real kernel
+  broker + ReferenceManager + SQLite: 10 passing cases covering one-page
+  frozen-zone materialization with verbatim cursor + durable private target,
+  same-revision reuse vs revision-change / content-change new Snapshot+rN,
+  stored-only `reference.open` (zero external calls), explicit refresh with
+  identical contents (new Snapshot + new rN, one `get-event`, zero
+  `search-events`), failed/empty follow-ups retaining old snapshots, a genuine
+  late-cancelled result writing no snapshot/rN/set/ref/event/target, opaque
+  provenance with provider ids excluded from `modelFacing` but present in the
+  private table, and a restart-durable refresh target (new process reuses
+  stored target, `get-event` only). Adapter-level cross-calendar get refusal
+  (`calendar_range_invalid`, zero upstream calls) is covered. The kernel
+  `packages/kernel/test/calendar_tools.test.ts` adds 11 C12-01..08 cases
+  including the throwing-target-write full rollback and binding validation.
+  Full observed suite/typecheck/lint results are recorded below in "C12 final
+  checks". C12-05 (durable private storage) is verified by the restart case
+  against real SQLite (migration 0006); formal gates stay separate: C08
+  **HOLD**, C10-08 **UNRESOLVED** (production mapping), C11-01 **BLOCKED**,
+  actual upstream HTTP status **UNKNOWN**.
+
+#### C12-01..08 gate table (implemented; no adoption claim)
+
+  | item | status | boundary / evidence |
+  | --- | --- | --- |
+  | C12-01 | IMPLEMENTED | One-page `calendar.search` with the per-Turn frozen zone, ONE upstream call, verbatim cursor; real adapter → real broker → SQLite resource/snapshot/rN/set/events; private target persisted in the SAME observation transaction. Kernel C12-01 + smoke case 1. |
+  | C12-02 | IMPLEMENTED | Same revision+content reuses session-latest Snapshot/rN; changed revision (etag) with identical content, or changed content with same revision, materializes new Snapshot+rN. Kernel C12-02 + smoke case 2 (etag + rename). |
+  | C12-03 | IMPLEMENTED | Explicit `reference.refresh` with identical contents always creates a new Snapshot+rN and rereads upstream via the private target (one `get-event`, no re-search). Kernel C12-03 + smoke case 4. |
+  | C12-04 | IMPLEMENTED | `reference.open` is stored-only: full body from SQLite, zero external requests. Kernel C12-04 + smoke case 4 open phase. |
+  | C12-05 | IMPLEMENTED (consumer) | Durable private `calendar_get_targets` (migration 0006) survives a real process restart; refresh reuses the stored target without any search. Smoke cases 5/8 against real SQLite. |
+  | C12-06 | IMPLEMENTED (consumer) | Failed (`calendar_upstream_error`) and empty-page observations retain prior Snapshots/history; no deletion is ever inferred; stored open still serves the retained body. Kernel C12-06 + smoke case 5. |
+  | C12-07 | IMPLEMENTED | A genuinely late-cancelled observation writes NO snapshot/rN/set/reference/target; a throwing target write rolls back the whole observation transaction; provenance stays opaque (rN + opaque key + structural ids) and provider ids are excluded from model-facing output while surviving only in the private table. Kernel C12-07 (x2) + smoke cases 7/9. |
+  | C12-08 | IMPLEMENTED | The pipeline allocates through the single existing ReferenceManager path only; `calendar.search` registers exclusively over a validated kind-`calendar` binding; per-call frozen zone; missing private target never guesses (`reference_not_found`); bootstrap seam validates injected bindings fail-closed. Kernel C12-08 (x2) + registration validation. |
+
+- C12 final checks (observed local run on this worktree, Node 24.12.0): full
+  Vitest suite green (after the C12 additions; includes the 10 genuine-SDK
+  smoke cases and 11 kernel C12 cases), root `tsc --noEmit` exit 0, and
+  `biome check .` clean apart from the pre-existing `recommended` info. These
+  are executed-code observations, not a future CI claim; the formal C08 / C10 /
+  C11 gates above are unchanged.
+
 ### C09-01 / C09-04 / C09-07 / C09-08 trusted read policy, model exposure & real stdio
 
 - This subsection records the CURRENT new-scope observed work: C09-07 trusted

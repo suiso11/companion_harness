@@ -366,6 +366,24 @@ export type NormalizeSearchResult =
   | { ok: true; events: NormalizedEvent[]; cursor?: string }
   | { ok: false; code: McpErrorCode };
 
+/**
+ * One-page decode plus the host-private upstream targets for the SAME decoded
+ * events. `targets` is provider-identity data and MUST NOT leave the host:
+ * it is never part of a Snapshot/body, model-facing output, public DTO or
+ * fixed error. It is produced from the SAME candidate parse as `events` (one
+ * parse, no second decode) so a target can never diverge from a normalized
+ * event or be fabricated for a rejected event.
+ */
+export interface NormalizeSearchPageResult {
+  events: NormalizedEvent[];
+  cursor?: string;
+  targets: Array<{ canonicalKey: string; calendarId: string; eventId: string }>;
+}
+
+export type NormalizeSearchPageOutcome =
+  | ({ ok: true } & NormalizeSearchPageResult)
+  | { ok: false; code: McpErrorCode };
+
 export type NormalizeGetResult =
   | { ok: true; event: NormalizedEvent }
   | { ok: false; code: McpErrorCode };
@@ -382,15 +400,15 @@ function isValidPageOptions(options: NormalizePageOptions): boolean {
 
 /**
  * Decode a `calendar.search` page result into normalized events plus an
- * opaque cursor. Page metadata is projected out. An incoming fixed MCP failure
- * code is preserved; every decode/validation failure is the fixed
- * `calendar_response_invalid`. Never slices/truncates an over-limit page and
- * never fetches a second page.
+ * opaque cursor and the host-private targets for the same events. Page
+ * metadata is projected out. An incoming fixed MCP failure code is preserved;
+ * every decode/validation failure is the fixed `calendar_response_invalid`.
+ * Never slices/truncates an over-limit page and never fetches a second page.
  */
-export async function normalizeSearchResult(
+export async function normalizeSearchPage(
   result: CallResult,
   options: NormalizePageOptions,
-): Promise<NormalizeSearchResult> {
+): Promise<NormalizeSearchPageOutcome> {
   if (!result.ok) return { ok: false, code: result.code };
   if (!isValidPageOptions(options)) {
     return { ok: false, code: "calendar_range_invalid" };
@@ -421,23 +439,46 @@ export async function normalizeSearchResult(
       throw new Error(REQUEST_INVALID);
     }
     const normalized: NormalizedEvent[] = [];
+    const targets: Array<{
+      canonicalKey: string;
+      calendarId: string;
+      eventId: string;
+    }> = [];
     for (const event of events) {
       if (event.calendarId !== options.calendarId) {
         throw new Error(REQUEST_INVALID);
       }
-      normalized.push(
-        await normalizeEvent(event, {
-          connectorInstanceId: options.connectorInstanceId,
-        }),
-      );
+      const decoded = await normalizeEvent(event, {
+        connectorInstanceId: options.connectorInstanceId,
+      });
+      normalized.push(decoded);
+      targets.push({
+        canonicalKey: decoded.canonicalKey,
+        calendarId: event.calendarId,
+        eventId: event.id,
+      });
     }
-    if (nextPageToken !== undefined) {
-      return { ok: true, events: normalized, cursor: nextPageToken };
-    }
-    return { ok: true, events: normalized };
+    return nextPageToken !== undefined
+      ? { ok: true, events: normalized, cursor: nextPageToken, targets }
+      : { ok: true, events: normalized, targets };
   } catch {
     return { ok: false, code: REQUEST_INVALID };
   }
+}
+
+/**
+ * Existing public page decoder: identical normalized events/cursor as
+ * {@link normalizeSearchPage}, with the host-private targets projected out.
+ */
+export async function normalizeSearchResult(
+  result: CallResult,
+  options: NormalizePageOptions,
+): Promise<NormalizeSearchResult> {
+  const page = await normalizeSearchPage(result, options);
+  if (!page.ok) return { ok: false, code: page.code };
+  return page.cursor !== undefined
+    ? { ok: true, events: page.events, cursor: page.cursor }
+    : { ok: true, events: page.events };
 }
 
 /**

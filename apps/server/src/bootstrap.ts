@@ -21,14 +21,19 @@ import { fileURLToPath } from "node:url";
 import { createMarkdownConnector } from "@companion/connector-markdown";
 import {
   BUNDLED_SCHEMA_VERSION,
+  type CalendarConnectorBinding,
+  type CalendarConnectorPort,
+  type CalendarTargetStore,
   closeKernelDatabase,
   createAgentStrategy,
+  createDurableCalendarTargetStore,
   createKernelRepository,
   createM1ToolRegistrations,
   createReferenceManager,
   createToolBroker,
   getSchemaVersion,
   type KernelDatabaseHandle,
+  type MarkdownConnectorBinding,
   migrateKernelDatabase,
   NewerDatabaseError,
   openKernelDatabase,
@@ -88,6 +93,28 @@ export interface StartServerOptions {
    * never passes this field (global fetch is used).
    */
   modelFetch?: FetchImpl;
+  /**
+   * Injectable Calendar composition seam (C12). Supplying an
+   * already-constructed adapter over a trusted/validated MCP binding wires
+   * `calendar.search` plus kind-dispatched `reference.refresh` over the DB's
+   * durable private target store. `null`/absent keeps the production registry
+   * network-disabled (no Calendar binding). The caller owns the MCP transport
+   * and the stored `connector_instances` row for `connectorInstanceId`.
+   */
+  calendarBinding?: CalendarServerBinding | null;
+}
+
+/** One trusted, already-validated Calendar binding injected by composition. */
+export interface CalendarServerBinding {
+  /** Stored `connector_instances.id` (kind `calendar`) the port is bound to. */
+  readonly connectorInstanceId: string;
+  /** Already-constructed, policy-validated Calendar adapter. */
+  readonly connector: CalendarConnectorPort;
+  /** Trusted single-calendar HOST selection (never model-controlled). */
+  readonly selection: {
+    readonly calendarId: string;
+    readonly account?: string;
+  };
 }
 
 export interface StartedServer {
@@ -157,6 +184,48 @@ function ensureDbDir(
     }
   }
   assertDbPathHasNoSymlink(dbPath);
+}
+
+/**
+ * Fail-closed check that an injected Calendar binding owns an existing
+ * `connector_instances` row of kind `calendar` whose metadata-only selection
+ * matches the trusted selection. Never logs or returns provider ids.
+ */
+function verifyCalendarBinding(
+  db: KernelDatabaseHandle["raw"],
+  binding: CalendarServerBinding,
+): void {
+  const row = db
+    .prepare("SELECT kind, config_json FROM connector_instances WHERE id = ?")
+    .get(binding.connectorInstanceId) as
+    | { kind: string; config_json: string }
+    | undefined;
+  if (row === undefined || row.kind !== "calendar") {
+    throw new ServerConfigError("calendar connector binding not provisioned");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(row.config_json);
+  } catch {
+    throw new ServerConfigError("calendar connector binding invalid");
+  }
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    (parsed as { version?: unknown }).version !== 1 ||
+    typeof (parsed as { calendarId?: unknown }).calendarId !== "string"
+  ) {
+    throw new ServerConfigError("calendar connector binding invalid");
+  }
+  const stored = parsed as { calendarId: string; account?: unknown };
+  if (stored.calendarId !== binding.selection.calendarId) {
+    throw new ServerConfigError("calendar connector selection mismatch");
+  }
+  if (
+    (stored.account ?? undefined) !== (binding.selection.account ?? undefined)
+  ) {
+    throw new ServerConfigError("calendar connector selection mismatch");
+  }
 }
 
 interface ListenerHandle {
@@ -345,28 +414,57 @@ export async function startServer(
     // four M1 registrations and a ToolBroker on the same db/repo. No
     // invocation endpoint here. No roots => toolBroker stays null (M0).
     let toolBroker: ToolBroker | null = null;
-    if (config.markdownRoots.length > 0) {
-      const connector = await createMarkdownConnector(
-        config.markdownRoots.map((root) =>
-          root.alias === undefined
-            ? { path: root.path }
-            : { path: root.path, alias: root.alias },
-        ),
-      );
+    const calendarBinding = options.calendarBinding ?? null;
+    if (config.markdownRoots.length > 0 || calendarBinding !== null) {
       const referenceManager = createReferenceManager(handle.raw);
-      const instance = referenceManager.ensureMarkdownConnectorInstance(
-        MARKDOWN_CONNECTOR_DISPLAY_NAME,
-        config.markdownRoots.length,
-        { configFingerprint: connector.identityFingerprint },
-      );
+      const markdownBindings: MarkdownConnectorBinding[] = [];
+      if (config.markdownRoots.length > 0) {
+        const connector = await createMarkdownConnector(
+          config.markdownRoots.map((root) =>
+            root.alias === undefined
+              ? { path: root.path }
+              : { path: root.path, alias: root.alias },
+          ),
+        );
+        const instance = referenceManager.ensureMarkdownConnectorInstance(
+          MARKDOWN_CONNECTOR_DISPLAY_NAME,
+          config.markdownRoots.length,
+          { configFingerprint: connector.identityFingerprint },
+        );
+        markdownBindings.push({
+          connectorInstanceId: instance.id,
+          connector,
+        });
+      }
+      let kernelCalendarBinding: CalendarConnectorBinding | undefined;
+      let calendarTargetStore: CalendarTargetStore | undefined;
+      if (calendarBinding !== null) {
+        // Fail closed: the injected binding must own an existing `calendar`
+        // instance whose private selection matches. The adapter itself is
+        // already policy-validated; only its stored identity is re-checked.
+        verifyCalendarBinding(handle.raw, calendarBinding);
+        kernelCalendarBinding = {
+          connectorInstanceId: calendarBinding.connectorInstanceId,
+          connector: calendarBinding.connector,
+        };
+        // Durable private get-target store: survives restart, never a public
+        // DTO. The kernel default in-memory store is NEVER used in production.
+        calendarTargetStore = createDurableCalendarTargetStore(handle.raw);
+      }
       const registrations = createM1ToolRegistrations({
         db: handle.raw,
         repo,
         referenceManager,
-        bindings: [{ connectorInstanceId: instance.id, connector }],
+        bindings: markdownBindings,
+        ...(kernelCalendarBinding !== undefined
+          ? { calendarBinding: kernelCalendarBinding }
+          : {}),
+        ...(calendarTargetStore !== undefined ? { calendarTargetStore } : {}),
       });
       toolBroker = createToolBroker({ db: handle.raw, repo, registrations });
-      logger.info("server.markdown_ready", { status: registrations.length });
+      logger.info("server.markdown_ready", {
+        status: registrations.length,
+      });
     }
     // M2 (opt-in): when config.model is set, build the loopback gateway
     // and register the agent under m0-default before engine.start/listen.

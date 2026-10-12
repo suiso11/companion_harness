@@ -52,6 +52,15 @@ import {
 } from "@companion/contracts";
 import type Database from "better-sqlite3";
 import { ToolError, type ToolRegistration } from "./broker.js";
+import {
+  type CalendarConnectorBinding,
+  type CalendarGetPortResult,
+  type CalendarTargetStore,
+  createCalendarSearchRegistration,
+  createInMemoryCalendarTargetStore,
+  mapCalendarCode,
+  toCalendarObservation,
+} from "./calendar_tools.js";
 import { isUuidV4 } from "./canonical.js";
 import { ReferenceNotFoundError, RepositoryValidationError } from "./errors.js";
 import type {
@@ -144,6 +153,18 @@ export interface CreateM1ToolRegistrationsOptions {
   readonly repo: KernelRepository;
   readonly referenceManager: ReferenceManager;
   readonly bindings: readonly MarkdownConnectorBinding[];
+  /**
+   * Optional single trusted Calendar binding (C12). When present a
+   * `calendar.search` registration is added and `reference.refresh` dispatches
+   * Calendar resources through the same single factory by stored connector
+   * kind. Absent => exact M1 Markdown-only behavior.
+   */
+  readonly calendarBinding?: CalendarConnectorBinding;
+  /**
+   * Private Calendar target resolution. Defaults to an in-memory store (tests
+   * only); the production server MUST inject the durable SQLite store.
+   */
+  readonly calendarTargetStore?: CalendarTargetStore;
   readonly clock?: { now(): number };
 }
 
@@ -278,10 +299,10 @@ export function createM1ToolRegistrations(
       "db, repo, and referenceManager are required",
     );
   }
-  const bindings = options.bindings;
-  if (!Array.isArray(bindings) || bindings.length !== 1) {
+  const bindings = options.bindings ?? [];
+  if (!Array.isArray(bindings) || bindings.length > 1) {
     throw new RepositoryValidationError(
-      "exactly one connector binding is required (one connector owns all roots)",
+      "exactly one markdown connector binding is allowed (one connector owns all roots)",
     );
   }
   const clock = options.clock ?? { now: () => Date.now() };
@@ -310,10 +331,52 @@ export function createM1ToolRegistrations(
     }
     byId.set(binding.connectorInstanceId, binding.connector);
   }
+  // Optional single Calendar binding (C12). Validated by id/kind only; the
+  // private per-event targets live in the injected store, never here.
+  const calendarBinding = options.calendarBinding;
+  if (calendarBinding !== undefined) {
+    if (!isUuidV4(calendarBinding.connectorInstanceId)) {
+      throw new RepositoryValidationError(
+        "calendar connectorInstanceId must be a UUID v4",
+      );
+    }
+    if (
+      typeof calendarBinding.connector !== "object" ||
+      calendarBinding.connector === null ||
+      typeof (calendarBinding.connector as { search?: unknown }).search !==
+        "function" ||
+      typeof (calendarBinding.connector as { get?: unknown }).get !== "function"
+    ) {
+      throw new RepositoryValidationError(
+        "calendar connector binding must expose search/get",
+      );
+    }
+    if (byId.has(calendarBinding.connectorInstanceId)) {
+      throw new RepositoryValidationError("duplicate connector binding");
+    }
+    const row = db
+      .prepare("SELECT kind FROM connector_instances WHERE id = ?")
+      .get(calendarBinding.connectorInstanceId) as { kind: string } | undefined;
+    if (row === undefined) {
+      throw new RepositoryValidationError("connector instance not found");
+    }
+    if (row.kind !== "calendar") {
+      throw new RepositoryValidationError(
+        "connector instance kind must be calendar",
+      );
+    }
+  }
+  if (bindings.length === 0 && calendarBinding === undefined) {
+    throw new RepositoryValidationError(
+      "exactly one connector binding is required (one connector owns all roots)",
+    );
+  }
+  const calendarTargetStore =
+    options.calendarTargetStore ?? createInMemoryCalendarTargetStore();
   // M1 uses the single binding as the search/default vault. The one
   // connector owns every configured root; multi-root fan-out inside the
   // connector stays deterministic with per-hit owning connectorInstanceId.
-  const defaultBinding = bindings[0] as MarkdownConnectorBinding;
+  const defaultBinding = bindings[0] as MarkdownConnectorBinding | undefined;
 
   function sessionOf(runId: string): string {
     try {
@@ -339,6 +402,10 @@ export function createM1ToolRegistrations(
     outputSchema: MarkdownSearchToolOutputSchema,
     dedupMode: "input_freshness",
     handler: (async (input: unknown, ctx) => {
+      const binding = defaultBinding;
+      if (binding === undefined) {
+        throw new ToolError("execution_failed");
+      }
       const parsed = input as {
         query: string;
         limit: number;
@@ -354,7 +421,7 @@ export function createM1ToolRegistrations(
       // non-cooperative connectors before any materialization.
       let result: MarkdownPortSearchResult;
       try {
-        result = await defaultBinding.connector.search(
+        result = await binding.connector.search(
           {
             query: parsed.query,
             limit: parsed.limit,
@@ -386,7 +453,7 @@ export function createM1ToolRegistrations(
             hit.wikiLinks ?? [],
           );
           observations.push({
-            connectorInstanceId: defaultBinding.connectorInstanceId,
+            connectorInstanceId: binding.connectorInstanceId,
             canonicalKey: hit.canonicalKey,
             title: hit.title,
             text: hit.text,
@@ -527,10 +594,11 @@ export function createM1ToolRegistrations(
       if (ctx.signal.aborted) {
         throw new ToolError("execution_cancelled");
       }
-      // Resolve the owned reference to connector/canonical key from stored DB
-      // metadata (ownership checked via getReferenceDetail first).
+      // Resolve the owned reference to connector/canonical key AND the stored
+      // connector kind so refresh dispatches to the right connector surface.
       let connectorInstanceId: string;
       let canonicalKey: string;
+      let kind: string;
       try {
         const detail = repo.getReferenceDetail(sessionId, parsed.referenceId);
         const row = db
@@ -545,49 +613,91 @@ export function createM1ToolRegistrations(
         }
         connectorInstanceId = row.connector_instance_id;
         canonicalKey = row.canonical_key;
+        const instance = db
+          .prepare("SELECT kind FROM connector_instances WHERE id = ?")
+          .get(connectorInstanceId) as { kind: string } | undefined;
+        if (instance === undefined) {
+          throw new ToolError("reference_not_found");
+        }
+        kind = instance.kind;
       } catch (error) {
         throw mapToToolError(error, ctx.signal);
-      }
-      const port = byId.get(connectorInstanceId);
-      if (port === undefined) {
-        throw new ToolError("reference_not_found");
-      }
-      // External readCanonical OUTSIDE any transaction, with cooperative
-      // cancellation via ctx.signal.
-      let doc: MarkdownPortDocument;
-      try {
-        doc = await port.readCanonical(canonicalKey, { signal: ctx.signal });
-      } catch (error) {
-        throw mapToToolError(error, ctx.signal);
-      }
-      if (ctx.signal.aborted) {
-        throw new ToolError("execution_cancelled");
       }
       const now = clock.now();
       let observation: ResourceObservation;
-      try {
+      if (kind === "calendar") {
+        // Calendar dispatch: private target from the non-public store, then an
+        // exact `get-event` read. open stays stored-only; only refresh reads.
+        const calendarPort = calendarBinding?.connector;
         if (
-          typeof doc.title !== "string" ||
-          typeof doc.text !== "string" ||
-          typeof doc.sourceRevision !== "string"
+          calendarPort === undefined ||
+          calendarBinding?.connectorInstanceId !== connectorInstanceId
         ) {
+          throw new ToolError("reference_not_found");
+        }
+        const target = calendarTargetStore.get(canonicalKey);
+        if (target === undefined) {
+          // Never guess provider ids: without the private target a Calendar
+          // reference cannot be re-read (stored open remains available).
+          throw new ToolError("reference_not_found");
+        }
+        let got: CalendarGetPortResult;
+        try {
+          got = await calendarPort.get(target, { signal: ctx.signal });
+        } catch (error) {
+          throw mapToToolError(error, ctx.signal);
+        }
+        if (!got.ok) {
+          throw mapCalendarCode(got.code);
+        }
+        if (ctx.signal.aborted) {
+          throw new ToolError("execution_cancelled");
+        }
+        observation = toCalendarObservation(
+          got.event,
+          connectorInstanceId,
+          now,
+        );
+      } else {
+        const port = byId.get(connectorInstanceId);
+        if (port === undefined) {
+          throw new ToolError("reference_not_found");
+        }
+        // External readCanonical OUTSIDE any transaction, with cooperative
+        // cancellation via ctx.signal.
+        let doc: MarkdownPortDocument;
+        try {
+          doc = await port.readCanonical(canonicalKey, { signal: ctx.signal });
+        } catch (error) {
+          throw mapToToolError(error, ctx.signal);
+        }
+        if (ctx.signal.aborted) {
+          throw new ToolError("execution_cancelled");
+        }
+        try {
+          if (
+            typeof doc.title !== "string" ||
+            typeof doc.text !== "string" ||
+            typeof doc.sourceRevision !== "string"
+          ) {
+            throw new ToolError("execution_failed");
+          }
+          observation = {
+            connectorInstanceId,
+            canonicalKey,
+            title: doc.title,
+            text: doc.text,
+            sourceRevision: doc.sourceRevision,
+            observedAt: now,
+            links: toObservationLinks(
+              doc.standardLinks ?? [],
+              doc.wikiLinks ?? [],
+            ),
+          };
+        } catch (error) {
+          if (error instanceof ToolError) throw error;
           throw new ToolError("execution_failed");
         }
-        observation = {
-          connectorInstanceId,
-          canonicalKey,
-          title: doc.title,
-          text: doc.text,
-          sourceRevision: doc.sourceRevision,
-          observedAt: now,
-          links: toObservationLinks(
-            doc.standardLinks ?? [],
-            doc.wikiLinks ?? [],
-          ),
-        };
-      } catch (error) {
-        if (error instanceof ToolError) throw error;
-        throw new ToolError("execution_failed");
       }
       // Freshness `refresh` so identical bytes still yield Snapshot+rN.
       let presented: Awaited<
@@ -618,7 +728,7 @@ export function createM1ToolRegistrations(
         canonicalKey: view.canonicalKey,
         title: view.title,
         snippet: view.snippet,
-        body: { version: 1, text: doc.text.normalize("NFC") },
+        body: { version: 1, text: observation.text.normalize("NFC") },
       };
     }) as ToolRegistration["handler"],
     normalize: (raw) => ({
@@ -692,7 +802,23 @@ export function createM1ToolRegistrations(
     },
   };
 
-  return [search, open, refresh, related];
+  const registrations: ToolRegistration[] = [];
+  if (defaultBinding !== undefined) {
+    registrations.push(search);
+  }
+  registrations.push(open, refresh, related);
+  if (calendarBinding !== undefined) {
+    registrations.push(
+      createCalendarSearchRegistration({
+        repo,
+        referenceManager,
+        binding: calendarBinding,
+        targetStore: calendarTargetStore,
+        ...(options.clock !== undefined ? { clock: options.clock } : {}),
+      }),
+    );
+  }
+  return registrations;
 }
 
 /** Alias for orchestrators expecting the `M1` prefix. */

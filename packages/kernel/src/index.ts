@@ -108,6 +108,27 @@ export {
   ToolBroker,
   ToolError,
 } from "./broker.js";
+export type {
+  CalendarCallOptions,
+  CalendarConnectorBinding,
+  CalendarConnectorPort,
+  CalendarGetPortResult,
+  CalendarGetTarget,
+  CalendarNormalizedEvent,
+  CalendarPrivateTarget,
+  CalendarSearchCallOptions,
+  CalendarSearchPortResult,
+  CalendarTargetStore,
+  CreateCalendarSearchRegistrationOptions,
+} from "./calendar_tools.js";
+export {
+  calendarEventBodyText,
+  createCalendarSearchRegistration,
+  createDurableCalendarTargetStore,
+  createInMemoryCalendarTargetStore,
+  mapCalendarCode,
+  toCalendarObservation,
+} from "./calendar_tools.js";
 export {
   canonicalJson,
   canonicalJsonString,
@@ -208,6 +229,7 @@ export {
   setSchemaVersion,
 } from "./migrate.js";
 export type {
+  CalendarConnectorView,
   EnsureMarkdownConnectorOptions,
   FreshnessKind,
   MarkdownConnectorView,

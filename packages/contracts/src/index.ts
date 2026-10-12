@@ -22,6 +22,21 @@
  */
 
 export type {
+  CalendarEventStatus,
+  CalendarGetTarget,
+  CalendarSearchHit,
+  CalendarSearchToolInput,
+  CalendarSearchToolInputInput,
+  CalendarSearchToolOutput,
+} from "./calendar.js";
+export {
+  CalendarEventStatusSchema,
+  CalendarGetTargetSchema,
+  CalendarSearchHitSchema,
+  CalendarSearchToolInputSchema,
+  CalendarSearchToolOutputSchema,
+} from "./calendar.js";
+export type {
   LatestRunEvent,
   LatestRunEventType,
   M0RunEvent,
@@ -371,6 +386,8 @@ export type {
   M1ToolErrorCodeNew,
   M1ToolErrorSchemaVersion,
   M1ToolResult,
+  M4ToolErrorCodeNew,
+  M4ToolErrorSchemaVersion,
   ReportedOutcome,
   ResultDisposition,
   RunErrorCode,
@@ -399,9 +416,13 @@ export {
   M1ToolErrorCodeNewSchema,
   M1ToolErrorCodeSchema,
   M1ToolResultSchema,
+  M4_TOOL_ERROR_CODE_REGISTRY,
+  M4_TOOL_ERROR_CODES,
+  M4ToolErrorCodeNewSchema,
   parseLatestToolErrorCode,
   parseM0ToolErrorCode,
   parseM1ToolErrorCode,
+  parseM4ToolErrorCode,
   parseRunErrorCode,
   parseToolErrorCode,
   ReportedOutcomeSchema,
