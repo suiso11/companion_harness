@@ -916,6 +916,16 @@ Transport のライフサイクル境界（C09-05 / C09-06）:
 - HTTP は `127.0.0.1` / `localhost` のみ。**すべての 3xx** を manual で拒否し、
   拒否した response body は読み取らず安全に cancel します。
 
+この REQUIRED な `McpBindingDefinition[]`（2 番目）と optional な factory（3 番目）
+の constructor は merged PR17（`71961c9`）の API です。PR15/PR16 archive の
+`new McpConnector(cfg)` / `new McpConnector(cfg, factory)` は **HISTORICAL API**
+であり、互換 shim はありません。merged PR17 上で PR16 helper を新 constructor
+へ適応して再実行した runtime 検証（P2 cancellable backoff / P1 default stdio
+detached cleanup / late-handoff generation / observed pre-handoff）はすべて
+AFTER VERIFIED（exit 0）で、local の full battery は `pnpm test` **94 files /
+1143 tests passed**、`typecheck` / `typecheck:e2e` / `lint` すべて exit 0 です
+（local owned-branch observation であり、future CI / head-SHA の主張ではありません）。
+
 深い検証記録（コマンド・件数・生データ）は
 [docs/operations.md](docs/operations.md) を参照してください。
 

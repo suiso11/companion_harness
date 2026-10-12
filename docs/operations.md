@@ -510,6 +510,83 @@ or complete activate config):
 - Scope: C09-05/06 transport bounds only. PR17 read-only/security policy and
   the unregistered Calendar adoption remain **HOLD** and unchanged.
 
+### PR17 merged runtime follow-up (observed on 71961c9)
+
+- This subsection records the merged PR17 runtime (`71961c9c29205b6f18c1bf49088214138886f287`,
+  merge of `8e87219` PR16-followup into `d3f1878` old-PR17) on branch
+  `fix/c09-remaining-security`. The merge-updated constructor is
+  `new McpConnector(config, readonly McpBindingDefinition[], factory?)`: the
+  trusted, source-reviewed `McpBindingDefinition[]` (`upstreamTool` /
+  `canonicalSchemaHash` / `category`) is the REQUIRED second argument and
+  `factory` stays the optional third. The PR15/PR16 archive calls
+  `new McpConnector(cfg)` / `new McpConnector(cfg, factory)` are the HISTORICAL
+  API; there is **no** two-arg compatibility shim, and no wire config, package
+  pin (`@modelcontextprotocol/sdk@1.30.0`, `zod@4.5.4`), or source behavior was
+  changed by this follow-up.
+- The verified PR16 OUT-archive runtime helpers were REUSED (not re-derived)
+  from `c09-review-response/{before-runtime,after-runtime-pr16,final-checks-pr16}`,
+  adapted ONLY for the constructor signature above. Every helper declares an
+  explicit source-reviewed READ definition (`upstreamTool` + probed
+  `canonicalSchemaHash` + `category:"read"`) from its fixture schema; the
+  definition is never inferred, defaulted, or approved from the connector
+  config. All four cases ran the actual merged production source (real SDK
+  `Client`), not a reimplementation.
+- P2 cancellable backoff (`after-runtime-pr17/backoff`, public observations
+  only): the first demand records one failure; the fenced old demand enters the
+  pre-construction `1000ms` backoff, and explicit shutdown aborts its
+  per-attempt controller so it settles fixed `mcp_unavailable` promptly with
+  the failure count preserved at `1` and the mutex released (no stale sleep);
+  the fresh post-shutdown demand owns its OWN full `1000ms` backoff (scheduled
+  at `+0ms`, before the old stale wait would have been due) and is the only
+  call that reaches the upstream handler (`handler_args=["fresh"]`, two
+  `1000ms` timers, no auto-replay, factory calls `2`). The merged `P2` run is
+  `FIX-VERIFIED`, exit 0.
+- P1 default stdio detached cleanup (`after-runtime-pr17/stdio`, public
+  `stats()` + `process.kill(pid,0)` on the fixture's OWNED startup-record PID):
+  the real default `defaultTransportFactory` spawns a genuine Node child; a
+  `tools/call` writes `65537` bytes to stderr and hangs, so the count-only
+  latch saturates at `65536`, the connection clears (`connected:false`,
+  `consecutiveFailures:1`, `enabledBindings:[]`) and the detached cleanup is
+  registered before it finishes. Explicit shutdown joins it: at return the
+  child is already dead from the connector's OWN production SIGKILL (exactly
+  one, at the original `300ms` grace, `+~308ms` shutdown duration), the
+  in-flight overflow call settles fixed `mcp_unavailable`, and
+  `final_owned_pids_alive=[]` with no helper safety kill. The merged `P1` run
+  is `FIX-VERIFIED`, exit 0.
+- Late-handoff generation / observed pre-handoff (`after-runtime-pr17/generation`
+  and `generation/observed`), generic controlled PUBLIC transport (no process,
+  no pid, no OS-death claim): AFTER the merged explicit `lateCleanupPhase`
+  renewal, a renewed generic bounded cleanup waits ONLY on its own matching
+  `rawClose` or the configured finite grace — never the superseded SDK
+  client-close memo or the already-resolved global close-observed latch. Both
+  cases observe that `shutdown()` stays pending while the matching close gate is
+  held and the host resource is still open, then settles after release; the
+  observed pre-handoff case issues the raw `onclose` with NO physical close
+  (`close_count=0`, generation 0), so `closeGeneration` stays a completion
+  identity guard only. Real-stdio candidate selection is unchanged. Both runs
+  are `VERIFIED`, exit 0.
+- Each helper run is archived OUT-OF-REPO under
+  `c09-review-response/after-runtime-pr17/` (per case: `stdout.txt`,
+  `stderr.txt`, `exit.txt`, `observation.json`, source + bundle + `command.txt`;
+  plus `versions.json`, `commands.txt`, `helpers/`, `history/`). The in-repo
+  `.review-proof/` scaffolding was TEMPORARY: it was archived first
+  (`c09-review-response/final-checks-pr17/` with a 12-file sha256 manifest and
+  `pr17-helper-reuse-paths.txt`), then deleted so it cannot pollute whole-repo
+  lint. No prior PR16 or `c09-security-verify` archive was overwritten.
+- Latest local full-battery result AFTER the merged runtime patch set (in-repo
+  scaffolding removed), 94 files / 1143 tests observed: `pnpm run typecheck`
+  exit 0; `pnpm run typecheck:e2e` exit 0; `pnpm test` (Vitest) **94 test files
+  / 1143 passed / 0 skipped** (Linux); whole-repo `pnpm run lint`
+  (`biome check .`) **192 files, 0 errors / 0 warnings / 1 pre-existing info**
+  (the `biome.json` `recommended` deprecation info). The historical PR17
+  security `final-checks` **1137 tests / 94 files**, PR16 **1129 / 92**, and
+  earlier **1123 / 92** remain HISTORICAL truth and are NOT restated as this
+  run. `pnpm` performed an implicit local relink of **191** workspace
+  `node_modules` entries from the local store (no network, no lockfile change)
+  during the run. These are local owned-branch observations, not a future CI or
+  head-SHA claim; the formal C09/C10/C11 gates and Calendar adoption stay
+  **HOLD**, and no source/test fix was needed (no observed machine failure).
+
 ## Non-goals (explicit)
 Domain retention/GC (except newest-3 backup rotation), user export,
 session delete API, running-process deletion, auto-restore, DB/backup
