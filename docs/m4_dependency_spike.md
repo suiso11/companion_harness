@@ -139,7 +139,8 @@ model-exposed `calendar.search`, single-calendar opaque pageToken with hard
 one-page `limit<=20` mapping, etag threading) + Companion mapping; deletion
 classifier explicitly UNRESOLVED (2026-09-09 correction: `events.get` has NO
 `showDeleted` — withdrawn; bare 404/410 or `cancelled` alone is NOT deletion
-proof; 410 = list sync-token resync; ambiguous errors → upstream_error);
+proof; 410 = list sync-token resync; ambiguous errors → upstream_error; the
+unverified stub itself was later REMOVED in C11 — see the C11 section below);
 SDK NOT ADOPTED,
 schema hashes unclaimed, M4 NOT implemented, §17 contracts unchanged.
 Remaining decision: §7 of the design (approve scoped patch/fork vs alternative
@@ -521,3 +522,89 @@ and add no new runtime, adoption, or live-readiness claim.
    The C09 identity guard and C10 consumer are implemented; **C10-08 production
    mapping, the external fork/pin adoption gate and C11 remain open**, so
    formal adoption stays **HOLD / NOT ADOPTED**.
+
+## C11 deletion-evidence boundary (2026-10-12, feat/c11-calendar-deletion-evidence)
+
+Status: **source patch complete; verification pending.** No package pin, no
+adoption, no live-Google/OAuth/fork/profile, no new provider. This records the
+CURRENT source-backed C11 boundary and the exact gate status. Plan source:
+C11-01..08 (`docs/plan/active_projects_tasks.md` §C11 on the plan tree; those
+plan docs are ABSENT from the C11 base and are NOT restored here). §17.5 is
+unchanged. The candidate `suiso11/google-calendar-mcp@97a3dc3` remains a
+read-only reviewed source; its provider is the retained inert fixture and no
+actual Google HTTP status was captured.
+
+Source-backed facts (read-only review; no new execution):
+
+- Candidate `GetEventHandler.getEvent` maps a Google 404 to `null` then throws
+  a generic not-found; `BaseToolHandler` has NO explicit 410 branch; and
+  `events.get` has NO `showDeleted` parameter (only `events.list` defines it).
+  A get miss on the inert provider surfaces as MCP `isError:true` with code
+  `-32603` on the fixture — it is NOT an actual Google HTTP 404/410.
+- `packages/connector-mcp/src/client.ts` `callTool`: any `res.isError===true`
+  → the fixed `calendar_upstream_error`; a THROWN SDK error → the distinct
+  fixed `mcp_unavailable`. The raw JSON-RPC code, HTTP status and error body
+  are discarded, so the Calendar consumer has no channel to observe the real
+  upstream HTTP status (no authoritative tombstone evidence available).
+- The consumer decoders reject a raw `deleted` status
+  (`calendar_response_invalid`), strip unknown `deleted`/`tombstone` hints,
+  keep `cancelled` as a status, and return a one-page omission as `events:[]`
+  + the opaque cursor verbatim. None creates a tombstone.
+- The earlier `classifyDeletion` / `DeletionVerdict` stub (proposed
+  `get-tombstone` / `list-showDeleted-tombstone` labels only; no producer, no
+  caller) was REMOVED from `normalize.ts`, its `src/index.ts` exports and the
+  old unit describe, with NO always-unknown / no-op / alias / deprecated
+  replacement. `normalizedEventSchema` still carries the normative `deleted`
+  status (§17.5).
+- Genuine-wire regression (NEW, test-only):
+  `packages/connector-calendar/test/deletion-boundary.test.ts` uses a genuine
+  lower-level SDK `Server` + `InMemoryTransport` and the real `McpConnector`
+  (dummy loopback config, injected in-memory transport, no HTTP/stdio/OAuth)
+  to exercise cancelled / `isError` 404-marker / thrown InternalError 410 /
+  one-page search omission / raw `deleted` / unknown tombstone flags. Six
+  negative invariants; no case creates a tombstone and no positive is
+  fabricated. This is a synthetic server fixture (NOT live Google) and the
+  SDK is a test-only `devDependency`; the SDK metadata names are fixture
+  values, not an actual-fork compatibility claim.
+
+### C11-01..08 gate table (source-backed; no wire execution in this patch)
+
+| item | status | boundary / evidence |
+| --- | --- | --- |
+| C11-01 | **BLOCKED** | No adopted operation-specific POSITIVE tombstone evidence. Candidate `get-event` has no `showDeleted` / deleted-semantics contract; candidate `97a3dc3` is read-only reviewed only. Positive gate not met → no `deleted` mapping. |
+| C11-02 | IMPLEMENTED (consumer) | `cancelled` decodes to normalized `cancelled` (same canonical key, new etag revision), never `deleted`; existing-snapshot retention is the unwired C12 pipeline. |
+| C11-03 | IMPLEMENTED (consumer) | Bare 404 (`isError:true`) → `calendar_upstream_error`; a THROWN RPC error → distinct `mcp_unavailable`; no tombstone. The retained C08 get-miss is an inert-provider `-32603` `isError`, NOT an actual Google HTTP 404/410. |
+| C11-04 | IMPLEMENTED (consumer) | A single empty search page returns `events:[]` + opaque cursor verbatim; one search call; omission is never deletion. |
+| C11-05 | PARTIAL | Uncertain results map to the fixed `calendar_upstream_error` / `mcp_unavailable` / `calendar_response_invalid`. "Never erase an existing snapshot" needs the unwired C12 pipeline. |
+| C11-06 | DOCUMENTED (no new policy) | Existing demand-driven backoff `1/2/5/10/max30` applies to the next logical call; NO automatic logical resend (C09). Explicit retry = a NEW Run on the SAME frozen Turn context. Stored-only open vs explicit refresh (success → newSnapshot/rN) is existing architecture NOT wired to Calendar. C13 owns retry budgets/UI. Failures are not observations/tombstones. |
+| C11-07 | DOCUMENTED (METADATA ONLY; HTTP status UNKNOWN) | See the record format below. No runtime logger/telemetry/status channel added; actual HTTP status NOT captured; synthetic 404/410 markers are NOT provider HTTP evidence. |
+| C11-08 | RESOLVED (documentation) | The spike's cancelled/404 limitations are NOT formal implementation evidence: formal C08 stays **HOLD**, C10-08 mapping stays **UNRESOLVED**, the candidate whole-second regex fraction gap persists, and no OAuth/live/fork/pin/profile exists. |
+
+Positive-proof prerequisites (source-reviewed; NOT sufficient as a Google
+contract, and NONE exists for candidate `97a3dc3`, so C11-01 stays BLOCKED):
+
+1. an ADOPTED operation-specific positive-evidence schema whose meaning is
+   verified against official semantics;
+2. a prior KNOWN target (exact connector / calendar / event), not a
+   caller-supplied `priorKnown` boolean;
+3. an accessible calendar/read-permission context;
+4. an actual positive observation matching the operation + exact target +
+   recurrence distinctions.
+
+Search omission, list `showDeleted`, `cancelled`, and bare 404/410 are NEVER
+positive evidence; `get` `showDeleted` does not exist (do not invent it). A
+positive / real HTTP status for C11-07 remains BLOCKED. Wire-test execution is
+not run by this patch, so the new regressions are **pending verification**; no
+pass/count/native-review claim is made.
+
+### C11-07 metadata-only evidence record format
+
+When evidence IS recorded (docs/ops only; no runtime diagnostic channel), the
+record carries: source kind (static candidate / retained inert provider / new
+synthetic SDK wire), immutable archive/candidate refs, the operation, the
+request field NAMES (never raw IDs, cursors, query text, emails or error
+body), the observed MCP envelope shape, and the fixed consumer error. The
+actual HTTP status stays **UNKNOWN / not captured**. Raw test fixtures may
+carry synthetic data, but new docs tables carry no raw PII or message IDs.
+This metadata format adds no logger, telemetry, status API or privacy
+weakening.

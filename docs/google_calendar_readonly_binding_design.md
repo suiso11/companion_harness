@@ -168,7 +168,7 @@ is satisfied. No new repo/fork/provider install/OAuth/live access in this task.
   explicitly REMOVED as an acceptable alternative — the paging gap stays
   open and no compatibility/gate claim may be made.
 
-### P6 — Authoritative get: NO showDeleted on get; deletion classifier UNRESOLVED
+### P6 — Authoritative get: NO showDeleted on get; deletion boundary (C11-01 BLOCKED)
 - Actual: `GetEventHandler.getEvent` catches 404 → `null` → "not found" throw;
   `BaseToolHandler` has **no 410 branch** (falls to generic error).
   No `showDeleted` in the handler.
@@ -189,8 +189,12 @@ is satisfied. No new repo/fork/provider install/OAuth/live access in this task.
 - UNSAFE mappings REMOVED: a bare 404/410 on get/refresh NEVER yields a
   tombstone. 404 can mean not-found OR inaccessible (no access, wrong
   calendar, never existed). 410 is a list sync-token-expiry recovery
-  signal, not per-event deletion evidence (and unhandled in
-  `BaseToolHandler`, so any 410 surfaces as `calendar_upstream_error`).
+  signal, not per-event deletion evidence; it is unhandled in
+  `BaseToolHandler`, so an upstream `isError` response for it collapses to
+  the consumer's fixed `calendar_upstream_error`, while a THROWN JSON-RPC
+  protocol error collapses to the distinct fixed `mcp_unavailable`. Neither
+  path is deletion proof and no actual upstream HTTP status is observable
+  through `CallResult`.
   `status:'cancelled'` alone — including via list `showDeleted` — is NOT
   deletion proof: cancelled recurring instances/exceptions need recurrence
   identity semantics before any Snapshot mapping.
@@ -200,11 +204,21 @@ is satisfied. No new repo/fork/provider install/OAuth/live access in this task.
   operation's documented deleted-visibility params). Ambiguous
   errors/missing entries map to fixed `calendar_upstream_error` with NO
   deletion. **Search omission NEVER creates a tombstone** (§17.5).
-- Deletion classifier: explicitly LEFT UNRESOLVED until verified against
-  the official deleted-visibility semantics + a fork that actually threads
-  them — NOT invented here. Upstream `status` strings
-  (`confirmed`/`tentative`/`cancelled`) map to Snapshot `status`
-  (`confirmed`/`tentative`/`cancelled`); `deleted` has NO mapping rule yet.
+- Deletion boundary (CURRENT, C11 `feat/c11-calendar-deletion-evidence`):
+  the earlier unverified `classifyDeletion` / `DeletionVerdict` stub — which
+  only switched on the proposed `get-tombstone` / `list-showDeleted-tombstone`
+  labels and was never reachable from any producer — was **REMOVED**, and no
+  always-unknown / no-op / alias / deprecated replacement API was added. The
+  boundary is now enforced directly by the consumer decoders
+  (`normalizeGetResult` / `normalizeSearchResult`): a raw `deleted` status is
+  rejected as `calendar_response_invalid`; unknown `deleted` / `tombstone`
+  hint flags are stripped; `cancelled` stays `cancelled`; a one-page search
+  omission returns the opaque cursor; and `isError` / thrown SDK errors
+  surface as the fixed redacted codes. None creates a tombstone. Upstream
+  `status` strings (`confirmed`/`tentative`/`cancelled`) map to Snapshot
+  `status` (`confirmed`/`tentative`/`cancelled`); `deleted` still has NO
+  operation-specific authoritative mapping rule and **C11-01 remains
+  BLOCKED** (no proven positive contract).
 
 ### P7 — Revision precedence `etag > updated > hash` (§17.5)
 - Actual gap: `StructuredEvent` exposes `updated` (`event.updated`) but
@@ -267,9 +281,11 @@ only after the gate. Hash values deliberately absent.
   fallback reject + no prose heuristics; exact `calendar.search` bounds
   (start<end, ≤90d, limit 10/20, one page); privacy exclusions; canonical key
   `connector+calendarId+eventId`; revision precedence with etag-missing
-     fallback; tombstone only on operation-specific authoritative evidence for a
-  prior-known resource (search-omission creates none; ambiguous errors →
-  `calendar_upstream_error`, no deletion; classifier otherwise unresolved); frozen temporal reuse across Retry; ToolBroker budget/dedup/
+  fallback; deletion boundary over the genuine SDK wire (cancelled stays a
+  status; `isError` → `calendar_upstream_error`; thrown RPC →
+  `mcp_unavailable`; one-page search omission returns the opaque cursor; raw
+  `deleted` → `calendar_response_invalid`; unknown tombstone flags stripped;
+  no case creates a tombstone); frozen temporal reuse across Retry; ToolBroker budget/dedup/
   timeout/audit + fixed codes.
 - Optional manual read-only verification checklist (requires SEPARATE user
   approval + dedicated test calendar + readonly grant; NOT run here):
