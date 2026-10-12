@@ -240,7 +240,11 @@ connector instance owns **all** configured roots.
   them.
 - NOT added here: readonly-binding registration, upstream fork pinning,
   OAuth, or server enablement. The formal status stays **HOLD**; other C09
-  lifecycle checks and the C10/C11 gates remain open.
+  lifecycle checks and the C10/C11 gates remain open. The CURRENT constructor
+  additionally requires the reviewed host `McpBindingDefinition[]` second
+  argument (see "C09-01 / C09-04 / C09-07 / C09-08" below): the
+  `new McpConnector(cfg)` calls in the PR15/PR16 archives are the HISTORICAL
+  API, not a compatibility shim, and this phase still registers nothing.
 
 Config fragment (trusted fields only; **not** a production command, profile,
 or complete activate config):
@@ -259,8 +263,9 @@ or complete activate config):
 
 ### C09-02 / C09-03 demand lifecycle verification status
 
-- Verified **only** C09-02 (lazy-on-demand connect + exact backoff) and C09-03
-  (per-instance concurrency / no automatic resend / independent instances).
+- This subsection records **only** C09-02 (lazy-on-demand connect + exact
+  backoff) and C09-03 (per-instance concurrency / no automatic resend /
+  independent instances); it is not a global "only these are verified" claim.
 - Lazy: the first configured demand dials immediately; construction and idle
   time never create a transport. A valid live client/handshake is reused across
   later demands (no new factory call).
@@ -281,9 +286,9 @@ or complete activate config):
   handler drop / FIFO gate). This is a fixture smoke only — it is **not**
   evidence of the upstream fork, OAuth, or live Google compatibility.
 - Existing wire-gate / `serverId`-vs-`expectedServerName`+`version` semantics
-  are unchanged. The formal status stays **HOLD**; other C09 checks (notably 05
-  stderr-bounded termination and 06 shutdown kill timeout) and the C10/C11
-  gates remain open, and no Calendar-adoption decision is made here.
+  are unchanged. The formal status stays **HOLD**; the remaining unverified
+  C09 gates and the C10/C11 gates stay open, and no Calendar-adoption decision
+  is made here (C09-02/03 and C09-05/06 scope are separated below).
 - Graph-budget CI coverage note (same PR run): the real-vault
   `packages/connector-markdown/test/graph_budget_integration.test.ts` (5 cases)
   previously reported a **Windows CI** timeout at **6099ms** on the
@@ -294,6 +299,293 @@ or complete activate config):
   ≈3969 bytes stays under cap) without the large filesystem setup. This is
   **local proof only** (target file 5/5, root `tsc`, scoped Biome clean); it
   does not raise the timeout, skip the case, or change the production budget.
+
+### C09-05 / C09-06 transport bounds & shutdown status
+
+- This subsection records **only** the local, owned-branch verification of
+  C09-05 (stdio stderr-bounded termination) and C09-06 (bounded shutdown /
+  kill timeout), plus the loopback-HTTP cleanup path.
+- Real STDIO local non-test smoke (actual Node 24 + real SDK 1.30.0 real
+  `StdioServerTransport` children): **8/8 green**. Latest archived real-stdio
+  stdout: S7 stubborn shutdown **111.528ms** with a real `onclose`, owned PID
+  gone, exactly one actual production SIGKILL; S8 cooperative **3.918ms** /
+  no kill; actual `finalOwnedPidsAlive=[]`.
+- Real loopback HTTP local non-test smoke (actual Node 24 + real SDK
+  `McpServer` + `StreamableHTTPServerTransport`, historical PR16 API
+  `new McpConnector(cfg)` default HTTP transport — NOT the current
+  constructor and NOT a compatibility shim): **7/7 green** — positive
+  `initialize`/`tools/list`/`tools/call`; pending-RPC shutdown with a
+  preserved prior `onclose`; 3xx refusal for 301/302/303/307/308/304 with zero
+  destination hits; post-connect `tools/call` 307 refusal with no resend;
+  direct-fetch refusal for every input form; streaming-body cancel; and the
+  schema-bypass no-network tripwire (actual fetch count `0`).
+- Deterministic controlled-SDK unit coverage: **26 cases** (9
+  transport-bounds / stderr-cap, 12 shutdown-race, 5 HTTP redirect-cleanup)
+  inside the full **1123 tests / 92 files**; root + e2e typecheck clean;
+  Biome 190 files with 0 warnings (one pre-existing recommended-rule info).
+- Bounds: stdio stderr is COUNT-ONLY per connection, saturating at 64KiB;
+  byte 65537 aborts open/call/idle into fixed `mcp_unavailable`, synchronous
+  state clear, and bounded cleanup. `shutdownWaitMs` stays `100..10000`
+  (default `3000`) as the GRACE window, plus a fixed additional **2000ms**
+  force-close wait; the real owned positive public-SDK PID is captured before
+  `close()` clears the getter, and the exit proof is an actual close event,
+  not `close()` promise resolution. Generic/HTTP settle waits are HOST-bounded
+  and do NOT prove external process death; a numeric PID public API cannot
+  guarantee a durable OS identity or process tree.
+- Fixture/local evidence only: NOT upstream-fork / OAuth / auth,
+  ordinary-CLI, or live-Google proof. Commands and counts are typed observed
+  values, not future CI or head-SHA claims. The formal status for the
+  remaining C09/C10/C11 gates and Calendar adoption stays **HOLD**.
+- Retained archives live OUT-OF-REPO under
+  `/home/molmot/.local/share/opencode/tool-output/c09-transport-verify/`:
+  `after-http/` (`harness.ts`, `tsconfig.json`, `stdout.json`, `result.json`,
+  `records-result.json`, `commands.txt`, `fail-history.txt`) and the
+  `after-stdio/` archive; the earlier `before/` archive is unchanged. The
+  in-repo `.c09-proof/http-final` helper and its compiled output were
+  TEMPORARY and deleted after publication, so it is NOT a retained archive.
+  The prior root 54 env-load-failure full run (with the stale idle-trigger and
+  SDK fixture-typing failures) is preserved under `final-checks/`; the final
+  full pass, which followed the OWNED workspace-resolved dependency borrow,
+  is under `final-checks-with-deps/`.
+
+### C09-01 / C09-04 / C09-07 / C09-08 trusted read policy, model exposure & real stdio
+
+- This subsection records the CURRENT new-scope observed work: C09-07 trusted
+  read-only binding policy, C09-01 / C09-04 model-visible tool exposure, and
+  C09-08 the production DEFAULT stdio transport. It supersedes the remaining
+  "unverified" C09 naming as the current scope, but the historical PR15/PR16
+  counts and the earlier wire/transport subsections above remain historical
+  evidence and are NOT restated as this run. It is not a global live-Google /
+  Windows / production-registration claim, and no package pin changed
+  (`@modelcontextprotocol/sdk@1.30.0`, `zod@4.5.4`, provider pins unchanged).
+- CURRENT constructor is `new McpConnector(config, readonly
+  McpBindingDefinition[], factory?)`: the trusted `McpBindingDefinition[]`
+  (readonly `upstreamTool` / `canonicalSchemaHash` / `category`) is the
+  REQUIRED second argument; `factory` stays the optional third. `category`
+  reuses the contracts `ToolCategory` vocabulary (`read` / `write` /
+  `sensitive` / `unclassified`). This is an internal, breaking-library API
+  change; the `new McpConnector(cfg)` calls in the PR15/PR16 HTTP/stdio
+  archives are the HISTORICAL API (recorded as such), not a compatibility shim.
+- Real in-memory SDK BEFORE → AFTER policy (`before-policy/` and
+  `after-policy/` under the out-of-repo `c09-security-verify/`): BEFORE, an
+  unclassified fake writer with a neutral-looking `search` name was callable
+  and produced a provider effect (`providerEffects=1`), and the model surface
+  exposed non-read descriptors. AFTER, trusted `write` / `sensitive` /
+  `unclassified` definitions and missing definitions deny `callTool` AND
+  `ensureConnected` with fixed `mcp_binding_not_allowed`, `dials=0`,
+  `handlerCalls=0`, `providerEffects=0`, `enabledBindings=[]`; the model
+  advertisement of four KNOWN descriptors yields only `markdown.search` plus
+  the reserved `answer.submit` LAST. A caller-claimed `category:"read"` /
+  `readOnlyHint:true` cannot upgrade any class.
+- Valid READ-positive: the ORIGINAL `after-policy` read positive is
+  SUPERSEDED (its fixture incremented a writer counter; `providerEffects=1`)
+  and MUST NOT be cited as a read proof; its supersession note
+  (`SUPERSEDED-read-positive.txt`) is retained and the original artifacts are
+  unchanged. The corrected, source-distinct immutable-read proof is
+  `after-policy/corrected-read-positive/result.json`: `delete-event`
+  (`readOnlyHint:false`), config/trust/wire hash linked, `ensureConnected` /
+  `callTool` ok, `handlerCalls=1`, `providerEffects=0`, connector shut down
+  (`connectedAfterShutdown=false`), fixture server closed. The negative and
+  model halves of the original `after-policy` proof remain valid and were NOT
+  re-run here.
+- Real production DEFAULT stdio (Linux, Node 24.12, SDK 1.30.0 child) in
+  `after-stdio/{result,summary,commands}`: the allowed canary is present and
+  the excluded canary is ABSENT; the literal six injection-shaped args produce
+  no shell marker and no model marker; model-supplied command/args/env travel
+  only in the RPC payload (fixed transport), with the actual 2 calls sharing
+  one child PID. A missing live-SDK default env name yields fixed
+  `mcp_unavailable` with no START record and zero spawns. A direct real-SDK
+  ENOENT on the owned path is rejected with the path/canary present, while the
+  production connector returns the fixed redacted result with failure count 1.
+  Cleanup observed `ownedPidsObserved=2` / `finalOwnedPidsAlive=[]` via the
+  owned startup PID + `process.kill(pid, 0)` after shutdown. NO public
+  `onclose` claim, NO Windows physical proof, NO fork / OAuth / live Google /
+  production registration.
+- Default SDK env: EVERY effectively inherited SDK default name must be
+  explicitly allowlisted even when unset; there is no extra function-value
+  policy or filter. `shell=false` is the SDK pin behavior plus an actual
+  metacharacter proof. The PR16 transport bounds and actual `onclose` semantics
+  are unchanged.
+- Before/after actual-SDK archives (all under the out-of-repo
+  `c09-security-verify/`; source + commands + failure history retained there,
+  in-repo temporaries removed and not retained in the repo): `ambiguity`
+  (6 malformed host variants in both orders permitted before, denied locally
+  with zero I/O after; live conflict denied both orders `N` with 0 calls while
+  the unrelated `M` read actually succeeds and is the only enabled name),
+  `catalog` (before, an unfinished prefix authorized `N` with 1 call; after,
+  all bindings disabled, `mcp_schema_mismatch`, `listCount=10`, 0 calls;
+  complete tenth page actually succeeds; complete-catalog partial drift
+  preserved), and `catalog-shutdown` (before, shutdown during the real
+  final-page digest wrongly returned `mcp_schema_mismatch`; after,
+  `mcp_unavailable` with `enabled=[]` and 0 calls). These are actual
+  observations, not inflated case counts or upstream-compatibility claims.
+- Latest local full-battery result (OBSERVED, after this patch set; recorded under
+  the out-of-repo `c09-security-verify/final-checks/`): root `pnpm run
+  typecheck` exit 0, `pnpm run typecheck:e2e` exit 0, `pnpm test` **94 files /
+  1137 passed / 0 skipped** (Linux), and whole-repo `pnpm run lint`
+  (`biome check .`) **192 files, 0 errors / 0 warnings / 1 pre-existing info**
+  (the `biome.json` `recommended` deprecation is not a new warning). The first
+  lint run counted the temporary in-repo `.security-proof/` helpers (216 files,
+  33 errors / 60 warnings) which are NOT product code; they were archived
+  out-of-repo and removed from the repo, and the affected lint was re-run. This
+  is a local, owned-branch observation and not a future CI or head-SHA claim.
+  The historical PR16 baseline (1123 tests / 92 files) is NOT used to predict it.
+
+### PR16 review followup: retired cleanup join & late-closure renewal
+
+- This followup records **only** the PR16 review-thread fixes on the C09-05/06
+  transport bounds. It does not widen scope: the C09 security PR17 read-only
+  policy (mandatory definitions / hints / readOnly sidecar) is **NOT** part of
+  PR16, the Calendar-adoption status stays **HOLD**, and no wire config, pin, or
+  public API changes. The 8/8 stdio smoke, 7/7 loopback-HTTP smoke, and root
+  1123 tests / 92 files above remain the HISTORICAL PR16 truth; the observed
+  final counts below are a separate, later section and do not replace them.
+- P1 shutdown join (thread `PRRT_kwDOUNdW7s6rYfGY`): an overflow-detached
+  bounded cleanup is registered centrally through
+  `OwnedConnectionHooks.onCleanupStarted`, and explicit shutdown joins every
+  STARTED cleanup until its ORIGINAL bounded deadline (no reset/restart).
+  Observed BEFORE (`before-runtime/`): shutdown returned while a fresh cleanup
+  was still unsettled (~997ms stale wait before the owned 1s). AFTER
+  (`after-runtime-pr16/`): shutdown ~314ms, the owned positive public-SDK PID
+  was gone at return, exactly one production SIGKILL at ~299ms (the original
+  300ms grace), no helper safety kill, final owned PIDs alive `[]`.
+- P2 cancellable backoff (thread `PRRT_kwDOUNdW7s6rYfGX`): each connect
+  singleflight entry owns a fresh `AbortController`; shutdown aborts it
+  synchronously so a fenced demand resolves fixed `mcp_unavailable` without
+  sleeping the stale delay or holding the mutex. Observed AFTER
+  (`after-runtime-pr16/`): the old fenced demand settles fixed-unavailable ~3ms
+  after shutdown with the failure count preserved at 1 and the stale timer
+  removed; the fresh post-shutdown demand owns its FULL fresh 1000ms backoff
+  (scheduled at +0ms) and is the only call that reaches upstream (two 1000ms
+  timers total, no auto-replay).
+- Late-closure renewal (native review, fixed in-session): a RENEWED generic
+  bounded cleanup must not settle on a superseded generation's SDK client-close
+  memo or the already-resolved global close-observed latch. A numeric
+  `closeGeneration > 1` guess missed the OBSERVED pre-handoff close (raw
+  `onclose` with no physical close, generation 0); the final fix is an explicit
+  private renewal PHASE (`lateCleanupPhase`, initial false, set true only in
+  `startLateCleanup` on the generic path) so a renewed generation waits ONLY on
+  its own matching `rawClose` or the configured finite grace. `closeGeneration`
+  remains solely the stale-memo completion identity guard, and the real stdio
+  path and its candidate selection are unchanged. Observed with the generic
+  late-closure helper over the production `McpConnector` and real SDK `Client`
+  (paths `generation/observed-close/{before,after}`): BEFORE shutdown settled
+  while the first close gate was held and the new resource was still open; AFTER
+  it stays pending until the matching renewed raw close, then settles.
+  Permanent regression: the `shutdown-race.test.ts` renewed-cleanup case FAILS
+  against the heuristic and PASSES against the phase; deterministic fake-clock
+  coverage consumes 123ms of the original grace before shutdown, stays pending
+  at 499ms, and settles at the original 500ms (never a restarted 623ms), plus
+  the max-30s lifecycle cases (cancel without advancing the old timer, queued
+  fence, fresh own full 30s).
+- PR17 remains OUT of PR16: the read-only / mandatory-definition / hints /
+  readOnly sidecar policy is not promoted into this document, and the
+  unregistered/adoption **HOLD** and wire config are unchanged. This followup
+  review touches only the C09-05/06 transport-bounds scope.
+- Evidence retention: exact BEFORE/AFTER commands and JSON proof are archived
+  OUT-OF-REPO under
+  `/home/molmot/.local/share/opencode/tool-output/c09-review-response/`
+  (`before-runtime/`, `after-runtime-pr16/`, `generation/{before,after}`,
+  `generation/observed-close/{before,after}`, and the final owned scaffolding
+  archive `final-checks-pr16/`). The in-repo `.review-proof/` helper scaffolding
+  was TEMPORARY: it was archived first, then deleted so it cannot pollute
+  whole-repo lint. Helper evidence is fixture/local only — no Windows
+  process-tree or durable-PID claim, and the generic path stays HOST bounded.
+
+### PR16 final checks (observed on base 026466a)
+
+- Battery run ONCE after the doc/comment patches and the format-only pass, on
+  the owned branch with no repo config change and no helper scaffolding present:
+  - `pnpm run typecheck` -> exit 0 (root `tsconfig.json`; strict +
+    `exactOptionalPropertyTypes` + `noUnusedLocals`/`noUnusedParameters`).
+  - `pnpm run typecheck:e2e` -> exit 0 (`apps/server/tsconfig.e2e.json`).
+  - `pnpm test` (Vitest) -> **92 test files passed, 1129 tests passed**.
+  - `pnpm run lint` (Biome `check .`) -> **190 files checked, 0 warnings**,
+    1 pre-existing recommended-field info, exit 0.
+- These are the ACTUAL observed values on this working tree; they are not a
+  prediction of any future CI run or head SHA. The earlier PR16 root **1123 /
+  92** above is preserved as historical truth; the +6 tests are the new
+  review-followup regression cases (backoff interruption, retired-cleanup join,
+  and the late-closure renewal).
+- Scope: C09-05/06 transport bounds only. PR17 read-only/security policy and
+  the unregistered Calendar adoption remain **HOLD** and unchanged.
+
+### PR17 merged runtime follow-up (observed on 71961c9)
+
+- This subsection records the merged PR17 runtime (`71961c9c29205b6f18c1bf49088214138886f287`,
+  merge of `8e87219` PR16-followup into `d3f1878` old-PR17) on branch
+  `fix/c09-remaining-security`. The merge-updated constructor is
+  `new McpConnector(config, readonly McpBindingDefinition[], factory?)`: the
+  trusted, source-reviewed `McpBindingDefinition[]` (`upstreamTool` /
+  `canonicalSchemaHash` / `category`) is the REQUIRED second argument and
+  `factory` stays the optional third. The PR15/PR16 archive calls
+  `new McpConnector(cfg)` / `new McpConnector(cfg, factory)` are the HISTORICAL
+  API; there is **no** two-arg compatibility shim, and no wire config, package
+  pin (`@modelcontextprotocol/sdk@1.30.0`, `zod@4.5.4`), or source behavior was
+  changed by this follow-up.
+- The verified PR16 OUT-archive runtime helpers were REUSED (not re-derived)
+  from `c09-review-response/{before-runtime,after-runtime-pr16,final-checks-pr16}`,
+  adapted ONLY for the constructor signature above. Every helper declares an
+  explicit source-reviewed READ definition (`upstreamTool` + probed
+  `canonicalSchemaHash` + `category:"read"`) from its fixture schema; the
+  definition is never inferred, defaulted, or approved from the connector
+  config. All four cases ran the actual merged production source (real SDK
+  `Client`), not a reimplementation.
+- P2 cancellable backoff (`after-runtime-pr17/backoff`, public observations
+  only): the first demand records one failure; the fenced old demand enters the
+  pre-construction `1000ms` backoff, and explicit shutdown aborts its
+  per-attempt controller so it settles fixed `mcp_unavailable` promptly with
+  the failure count preserved at `1` and the mutex released (no stale sleep);
+  the fresh post-shutdown demand owns its OWN full `1000ms` backoff (scheduled
+  at `+0ms`, before the old stale wait would have been due) and is the only
+  call that reaches the upstream handler (`handler_args=["fresh"]`, two
+  `1000ms` timers, no auto-replay, factory calls `2`). The merged `P2` run is
+  `FIX-VERIFIED`, exit 0.
+- P1 default stdio detached cleanup (`after-runtime-pr17/stdio`, public
+  `stats()` + `process.kill(pid,0)` on the fixture's OWNED startup-record PID):
+  the real default `defaultTransportFactory` spawns a genuine Node child; a
+  `tools/call` writes `65537` bytes to stderr and hangs, so the count-only
+  latch saturates at `65536`, the connection clears (`connected:false`,
+  `consecutiveFailures:1`, `enabledBindings:[]`) and the detached cleanup is
+  registered before it finishes. Explicit shutdown joins it: at return the
+  child is already dead from the connector's OWN production SIGKILL (exactly
+  one, at the original `300ms` grace, `+~308ms` shutdown duration), the
+  in-flight overflow call settles fixed `mcp_unavailable`, and
+  `final_owned_pids_alive=[]` with no helper safety kill. The merged `P1` run
+  is `FIX-VERIFIED`, exit 0.
+- Late-handoff generation / observed pre-handoff (`after-runtime-pr17/generation`
+  and `generation/observed`), generic controlled PUBLIC transport (no process,
+  no pid, no OS-death claim): AFTER the merged explicit `lateCleanupPhase`
+  renewal, a renewed generic bounded cleanup waits ONLY on its own matching
+  `rawClose` or the configured finite grace — never the superseded SDK
+  client-close memo or the already-resolved global close-observed latch. Both
+  cases observe that `shutdown()` stays pending while the matching close gate is
+  held and the host resource is still open, then settles after release; the
+  observed pre-handoff case issues the raw `onclose` with NO physical close
+  (`close_count=0`, generation 0), so `closeGeneration` stays a completion
+  identity guard only. Real-stdio candidate selection is unchanged. Both runs
+  are `VERIFIED`, exit 0.
+- Each helper run is archived OUT-OF-REPO under
+  `c09-review-response/after-runtime-pr17/` (per case: `stdout.txt`,
+  `stderr.txt`, `exit.txt`, `observation.json`, source + bundle + `command.txt`;
+  plus `versions.json`, `commands.txt`, `helpers/`, `history/`). The in-repo
+  `.review-proof/` scaffolding was TEMPORARY: it was archived first
+  (`c09-review-response/final-checks-pr17/` with a 12-file sha256 manifest and
+  `pr17-helper-reuse-paths.txt`), then deleted so it cannot pollute whole-repo
+  lint. No prior PR16 or `c09-security-verify` archive was overwritten.
+- Latest local full-battery result AFTER the merged runtime patch set (in-repo
+  scaffolding removed), 94 files / 1143 tests observed: `pnpm run typecheck`
+  exit 0; `pnpm run typecheck:e2e` exit 0; `pnpm test` (Vitest) **94 test files
+  / 1143 passed / 0 skipped** (Linux); whole-repo `pnpm run lint`
+  (`biome check .`) **192 files, 0 errors / 0 warnings / 1 pre-existing info**
+  (the `biome.json` `recommended` deprecation info). The historical PR17
+  security `final-checks` **1137 tests / 94 files**, PR16 **1129 / 92**, and
+  earlier **1123 / 92** remain HISTORICAL truth and are NOT restated as this
+  run. `pnpm` performed an implicit local relink of **191** workspace
+  `node_modules` entries from the local store (no network, no lockfile change)
+  during the run. These are local owned-branch observations, not a future CI or
+  head-SHA claim; the formal C09/C10/C11 gates and Calendar adoption stay
+  **HOLD**, and no source/test fix was needed (no observed machine failure).
 
 ## Non-goals (explicit)
 Domain retention/GC (except newest-3 backup rotation), user export,

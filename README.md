@@ -813,24 +813,32 @@ packages/connector-mcp
 
 MCP server が返す `tools/list` をそのまま LLM に公開する設計ではありません。
 
-事前に、
+能力をモデルへ公開するには、呼び出し元の **レビュー済み host code** が
+信頼済みの `McpBindingDefinition[]`（`readonly upstreamTool` /
+`canonicalSchemaHash` / `category`）を constructor の **必須 2 番目の引数**
+として渡す必要があります。これは production enable / registration ではなく、
+host code と同じ信頼レベルで供給される **sidecar provenance** です。
+definitions の default は存在せず、config JSON・`tools/list`・tool 名・
+`readOnlyHint`、caller 引数の `category` / `readOnlyHint` のいずれも read
+権限を付与できません。JSON の `category` やメタデータ単体は authority では
+ありません。よって host code を持たない caller にとっては **breaking な
+internal API 変更** です（C09 は server 有効化前であり、library は
+production registration されていません）。
 
 ```text
-upstream tool name
-+
-input schema hash
-```
-
-を登録します。
-
-```text
-MCP tools/list
+host-reviewed McpBindingDefinition[]        (trusted class + hash)
       │
       ▼
-Name matches?
+category == read  AND  definition hash == config hash?
+      │
+   ┌──┴──┐
+  YES    NO ──▶ deny (fixed code, no I/O)
+   │
+   ▼
+first allowed call → wire identity gate
       │
       ▼
-Schema hash matches?
+live tools/list canonical input-schema hash matches?
       │
    ┌──┴──┐
   YES    NO
@@ -838,15 +846,17 @@ Schema hash matches?
  enable disable
 ```
 
-MCP server が更新されて Tool schema が変化した場合も、自動で新しい能力をモデルへ公開しません。
-
 接続時の identity 検証は 2 段階です。まず trusted config の
 `expectedServerName` / `version` を、実際の `initialize.serverInfo` の
 name / version と完全一致で照合します（wire identity gate）。一致した後に
 初めて `tools/list` の tool name + input schema hash を検証します。
 `serverId` は論理 ID であり wire 名とは比較しません。不一致は固定
 `mcp_schema_mismatch` で全 binding を fail closed とし、検証済み binding
-のみを有効にします（fallback なし）。C09 は server 有効化前であり、
+のみを有効にします（fallback なし）。`read` 以外（write / sensitive /
+unclassified）や重複・曖昧な definition は handler 実行前にローカルで
+`mcp_binding_not_allowed` として拒否され、host code の category を caller
+引数が上書きすることはできません。`tools/list` で発見した tool を自動で
+モデルへ公開することもありません。C09 は server 有効化前であり、
 readonly binding registration / upstream fork pin / OAuth は未追加です。
 
 Transport:
@@ -870,7 +880,54 @@ per-instance concurrency control
 loopback HTTP only
 redirect rejection
 stdio env allowlist
+stdio stderr count-only cap
+bounded shutdown / force-close wait
 ```
+
+Transport のライフサイクル境界（C09-05 / C09-06）:
+
+- stdio の stderr は接続ごとに **カウントのみ** を保持し 64KiB で飽和します。
+  65537 バイト目で open / call / idle を中断し、固定 `mcp_unavailable`、同期
+  state clear（connected / enabledBindings）、bounded cleanup に収束します。
+- stdio の `shutdownWaitMs` は既存の `100..10000`（既定 `3000`）で、これは
+  **GRACE** です。実際の child close event 待ちに加えて、固定の **追加
+  2000ms** の force close 待ちがあります。SIGKILL の対象は `close()` が
+  getter を消す前に捕捉した **実所有の正の public SDK PID** のみです。終了の
+  証明は実際の close event であり、`close()` Promise の解決ではありません。
+- generic / HTTP transport の待機は **HOST bounded** であり、外部プロセスの
+  死亡を証明しません。数値 PID は public API ですが、永続的な OS identity や
+  プロセスツリーを保証しません。
+- 1 つの owned connection（half-open を含む）を singleflight で共有し、各操作は
+  fresh controller を持ちます。明示 shutdown は epoch で fence し、pre-shutdown
+  に queue 済みの呼び出しと shutdown 中の呼び出しは固定 fail、完了後の **新規**
+  明示呼び出しのみ lazy 再接続できます。通常の failure 後の **別** の呼び出しは
+  queue されても回復し、replay せず backoff も不変です。
+- 各 connect attempt は epoch ごとの **fresh AbortController** を共有し、明示
+  shutdown はそれを同期 abort します。fence された demand は
+  pre-construction backoff を sleep out せず即時固定 `mcp_unavailable` に戻り、
+  stale timer と abort listener は除去されて mutex も解放されます。failure 後の
+  fresh な demand は自分自身の **full** backoff を新規に所有し、古い残り時間を
+  継承しません（backoff の中断と再有効化の区別）。
+- shutdown は **開始済み** の bounded cleanup をすべて join しますが、その
+  bounded deadline は reset も restart もせず、元の boundary で収束します。
+  overflow 由来の detached cleanup も同じ join 対象です。join は host 側の
+  待機を bounded にするだけで、generic 経路では OS 死亡を証明しません
+  （retired cleanup join と backoff interruption の区別）。
+- HTTP は `127.0.0.1` / `localhost` のみ。**すべての 3xx** を manual で拒否し、
+  拒否した response body は読み取らず安全に cancel します。
+
+この REQUIRED な `McpBindingDefinition[]`（2 番目）と optional な factory（3 番目）
+の constructor は merged PR17（`71961c9`）の API です。PR15/PR16 archive の
+`new McpConnector(cfg)` / `new McpConnector(cfg, factory)` は **HISTORICAL API**
+であり、互換 shim はありません。merged PR17 上で PR16 helper を新 constructor
+へ適応して再実行した runtime 検証（P2 cancellable backoff / P1 default stdio
+detached cleanup / late-handoff generation / observed pre-handoff）はすべて
+AFTER VERIFIED（exit 0）で、local の full battery は `pnpm test` **94 files /
+1143 tests passed**、`typecheck` / `typecheck:e2e` / `lint` すべて exit 0 です
+（local owned-branch observation であり、future CI / head-SHA の主張ではありません）。
+
+深い検証記録（コマンド・件数・生データ）は
+[docs/operations.md](docs/operations.md) を参照してください。
 
 ---
 

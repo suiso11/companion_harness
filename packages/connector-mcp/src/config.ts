@@ -1,3 +1,4 @@
+import type { ToolCategory } from "@companion/contracts";
 import { z } from "zod";
 
 /** 64 KiB stderr cap (§17.7, exact). */
@@ -69,6 +70,30 @@ export const mcpConnectorConfigSchema = z
 export type McpConnectorConfig = z.infer<typeof mcpConnectorConfigSchema>;
 export type McpTransportConfig = McpConnectorConfig["transport"];
 export type McpBinding = McpConnectorConfig["bindings"][number];
+
+/**
+ * Trusted, reviewed read-only binding definition.
+ *
+ * These are supplied by host code — the owner of that SPECIFIC configured
+ * provider profile — with the same trust as `kernelToolRegistration`. They
+ * are NOT MCP `tools/list` data, model arguments, user config claims, or a
+ * PROPOSED_BINDING. The host must review this definition against the
+ * configured upstream name/version/pin before providing any read semantics;
+ * library metadata and schematics cannot prove read-only semantics. No
+ * adopted provider definitions exist here: only fixtures / a future adapter
+ * may gate on this.
+ *
+ * The trusted `canonicalSchemaHash` MUST link to both the config binding
+ * hash and the actual live `tools/list` input-schema hash, so a definition
+ * can never apply a different input contract. `category` reuses the
+ * contracts tool-category vocabulary (`read` / `write` / `sensitive` /
+ * `unclassified`); only `read` is ever callable or advertised.
+ */
+export interface McpBindingDefinition {
+  readonly upstreamTool: string;
+  readonly canonicalSchemaHash: string;
+  readonly category: ToolCategory;
+}
 
 /** Canonical JSON (recursive key sort) + SHA-256 hex for schema hashes (§17.3). */
 export async function canonicalSchemaHash(value: unknown): Promise<string> {

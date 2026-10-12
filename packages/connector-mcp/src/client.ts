@@ -1,4 +1,3 @@
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import {
   DEFAULT_INHERITED_ENV_VARS,
   StdioClientTransport,
@@ -8,13 +7,20 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { nextBackoffMs } from "./backoff.js";
 import {
   canonicalSchemaHash,
+  type McpBindingDefinition,
   type McpConnectorConfig,
-  STDERR_CAP_BYTES,
 } from "./config.js";
 import type { McpErrorCode } from "./errors.js";
+import { OwnedConnection } from "./session.js";
 
 /** Creates the SDK transport for a config. Injectable in tests (fake only). */
 export type TransportFactory = (config: McpConnectorConfig) => Transport;
+
+/**
+ * Fixed finite wait after SIGKILL for the SAME owned real-stdio close event.
+ * Not configurable: no extra config field, flag or error code (§C09-06).
+ */
+const FORCE_KILL_WAIT_MS = 2000;
 
 /**
  * Known SDK 1.30.0 behavior (§17.7, verified against official source
@@ -73,7 +79,9 @@ export function assertLoopbackHttp(url: URL): void {
 /**
  * Fetch wrapper pinning manual redirects: any 3xx is refused as a fixed
  * error (SDK 1.30.0 exposes no redirect:false option; default fetch would
- * follow). Also re-checks loopback at the runtime boundary.
+ * follow). Also re-checks loopback at the runtime boundary. The refused
+ * response body is CANCELLED (never read/logged) so the underlying socket is
+ * released without an unbounded stream await.
  */
 export function loopbackNoRedirectFetch(
   input: string | URL | Request,
@@ -91,6 +99,11 @@ export function loopbackNoRedirectFetch(
     redirect: "manual",
   }).then((res) => {
     if (res.status >= 300 && res.status < 400) {
+      const body = res.body;
+      if (body !== null && body !== undefined) {
+        // Fire-and-forget cancel; a rejected cancel must never escape or hang.
+        void Promise.resolve(body.cancel()).catch(() => undefined);
+      }
       throw new Error(`redirect refused: HTTP ${res.status}`);
     }
     return res;
@@ -110,10 +123,88 @@ export interface ConnectorStats {
 /**
  * Hard ceiling on tools/list pages followed during binding-identity
  * verification. A malicious or buggy server could return a non-terminating
- * nextCursor sequence and hang connect forever; after the cap the collected
- * snapshot is verified as-is (unseen bindings stay disabled).
+ * nextCursor sequence and hang connect forever. The cap is NOT a truncation
+ * point: if all pages are consumed while a `nextCursor` still remains, the
+ * catalog is UNFINISHED and connect fails closed with `mcp_schema_mismatch`
+ * (no binding enabled) rather than verifying the collected prefix as-is, since
+ * an uncatalogued duplicate/conflicting identity may exist beyond the cap.
  */
 const MAX_TOOL_LIST_PAGES = 10; // ponytail: deliberately small and fixed, never auto-raised
+
+type EnsureResult = { ok: true } | { ok: false; code: McpErrorCode };
+
+/**
+ * Immutable trusted-policy snapshot built ONCE at construction from the
+ * reviewed host-code `McpBindingDefinition[]`. Only primitive name / hash /
+ * category values are copied (caller-held objects/arrays are never retained).
+ * ANY repeated identifiable non-empty name is AMBIGUOUS and denied, even when
+ * the category/hash are identical or the duplicate record is itself malformed
+ * (never last-wins, never reactivated by a later record).
+ */
+interface TrustedPolicy {
+  readonly definitions: ReadonlyMap<string, McpBindingDefinition>;
+  readonly ambiguous: ReadonlySet<string>;
+}
+
+/**
+ * Runtime boundary for programmatic callers that bypass the TypeScript type:
+ * a missing/non-array `definitions`, or an entry with a missing/non-string
+ * name/hash or a category outside the contracts vocabulary, can never
+ * authorize a binding. No schema heuristics or generic validation framework:
+ * anything that is not an explicit, well-formed `read` category is denied by
+ * the fixed non-read policy path.
+ *
+ * AMBIGUITY IS DETECTED FIRST: every identifiable non-empty string name is
+ * recorded BEFORE its hash/category are validated, so a name that repeats —
+ * even when the duplicate record is itself malformed (missing hash, undefined
+ * or unknown category) — is permanently ambiguous and can never authorize a
+ * call. A malformed record can therefore never reactivate a grant, and it can
+ * never poison an unrelated valid definition.
+ */
+function buildTrustedPolicy(
+  definitions: readonly McpBindingDefinition[],
+): TrustedPolicy {
+  const byName = new Map<string, McpBindingDefinition>();
+  const seen = new Set<string>();
+  const ambiguous = new Set<string>();
+  const list = Array.isArray(definitions) ? definitions : [];
+  for (const raw of list as readonly unknown[]) {
+    if (raw === null || typeof raw !== "object") continue;
+    const entry = raw as {
+      upstreamTool?: unknown;
+      canonicalSchemaHash?: unknown;
+      category?: unknown;
+    };
+    const name = entry.upstreamTool;
+    if (typeof name !== "string" || name.length === 0) continue;
+    // FIRST, before ANY hash/category validation: a repeated identifiable name
+    // is ambiguous for good, regardless of how well-formed either record is.
+    if (seen.has(name)) {
+      byName.delete(name);
+      ambiguous.add(name);
+      continue;
+    }
+    seen.add(name);
+    const hash = entry.canonicalSchemaHash;
+    if (typeof hash !== "string" || hash.length === 0) continue;
+    const category = entry.category;
+    // Positive closed-vocabulary check: only the contracts tool categories are
+    // accepted, and TS narrows `category` to that union inside the branch.
+    if (
+      category === "read" ||
+      category === "write" ||
+      category === "sensitive" ||
+      category === "unclassified"
+    ) {
+      byName.set(name, {
+        upstreamTool: name,
+        canonicalSchemaHash: hash,
+        category,
+      });
+    }
+  }
+  return { definitions: byName, ambiguous };
+}
 
 /**
  * True when the trusted wire-identity expectation is explicitly present.
@@ -133,6 +224,62 @@ function hasWireIdentityExpectation(config: McpConnectorConfig): boolean {
   );
 }
 
+/** Forward a caller abort to a fresh per-operation controller (fixed reason). */
+function forwardAbort(
+  caller: AbortSignal | undefined,
+  controller: AbortController,
+): () => void {
+  if (caller === undefined) return () => undefined;
+  if (caller.aborted) {
+    controller.abort("cancelled");
+    return () => undefined;
+  }
+  const onAbort = () => {
+    controller.abort("cancelled");
+  };
+  caller.addEventListener("abort", onAbort, { once: true });
+  return () => caller.removeEventListener("abort", onAbort);
+}
+
+/**
+ * Race an owned SDK operation against a fresh per-operation abort signal.
+ *
+ * The SDK `connect(transport, { signal })` signal only covers the initialize
+ * request: `Transport.start()` and the `notifications/initialized` send carry
+ * no signal, so a hang there would leave `Client.connect` (and the connector
+ * mutex/singleflight) pending forever. This race rejects the caller promptly
+ * on abort with the fixed code, while still consuming the losing operation's
+ * late fulfilment/rejection so it can never surface as an unhandled rejection.
+ * The owned late-resource cleanup itself lives in the transport start guard.
+ */
+function raceOperation<T>(source: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    if (signal.aborted) {
+      // Consume a possibly never-settling source; the caller aborts promptly.
+      void source.then(
+        () => undefined,
+        () => undefined,
+      );
+      reject(new Error("mcp_unavailable"));
+      return;
+    }
+    const onAbort = () => {
+      reject(new Error("mcp_unavailable"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    source.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
 /**
  * MCP connector transport lifecycle (§17.6–§17.7) over the official SDK.
  *
@@ -145,27 +292,63 @@ function hasWireIdentityExpectation(config: McpConnectorConfig): boolean {
  *   is used solely for binding-identity verification, never auto-exposed.
  * - stdio: shell=false (SDK spawn without shell), config-only command (no
  *   interpolation), env allowlist filtering, stderr 64KiB cap, shutdown
- *   wait + kill timeout. HTTP: loopback only (config-validated), no redirects.
+ *   wait + bounded force kill. HTTP: loopback only, redirects refused.
+ *
+ * C09-05/06: one OWNED connection record owns the raw transport, the count-only
+ * stderr overflow latch, cancellable in-flight ops, and the bounded cleanup.
+ * Every mismatch/connect/call/overflow/idle/stop path routes through the same
+ * cleanup, except the unconfigured-name no-IO denial. Explicit shutdown is
+ * epoch-fenced so calls started before it never spawn late; a NEW explicit call
+ * after a completed shutdown may lazily connect fresh.
  */
 export class McpConnector {
-  private client: Client | undefined;
+  private session: OwnedConnection | undefined;
   private connected = false;
   private consecutiveFailures = 0;
   /**
-   * Configured bindings that PASSED the wire-identity gate and the per-tool
-   * canonical-schema check on the current connection. Empty until a real
-   * connect validates; cleared on shutdown/failure. This is the ONLY source
-   * of `isAllowed`/`stats().enabledBindings` truth.
+   * Configured bindings that PASSED the trusted reviewed-`read` policy, the
+   * local config/definition hash link, the wire-identity gate AND the live
+   * tools/list canonical-schema check on the current connection. Empty until a
+   * real connect validates; never contains a non-read binding; cleared
+   * synchronously on shutdown/failure/overflow.
    */
   private enabledBindings: string[] = [];
+  /** Immutable reviewed-host read-only policy, snapshotted at construction. */
+  private readonly policy: TrustedPolicy;
   private mutex: Promise<void> = Promise.resolve();
-  private stderrBytes = 0;
-  private stderrTruncated = false;
+  /** Increments ONLY on explicit shutdown; fences pre-shutdown demands. */
+  private shutdownEpoch = 0;
+  private shuttingDown = false;
+  private shutdownInFlight: Promise<void> | undefined;
+  /**
+   * One in-progress physical connect attempt per epoch. Every joiner shares the
+   * same entry, including its per-attempt AbortController; shutdown aborts that
+   * controller so a fenced demand stops waiting the pre-construction backoff
+   * (and releases the mutex) instead of sleeping out a stale delay.
+   */
+  private connectInFlight:
+    | {
+        epoch: number;
+        controller: AbortController;
+        promise: Promise<EnsureResult>;
+      }
+    | undefined;
+  /**
+   * Every bounded cleanup generation started by an owned connection, registered
+   * centrally through `OwnedConnectionHooks.onCleanupStarted`. Explicit
+   * shutdown joins only the cleanups already STARTED by the time it snapshots
+   * this set (see `shutdown`); a cleanup that starts after shutdown completes
+   * is outside this set. Pure bookkeeping only.
+   */
+  private readonly pendingCleanups = new Set<Promise<void>>();
 
   constructor(
     private readonly config: McpConnectorConfig,
+    definitions: readonly McpBindingDefinition[],
     private readonly transportFactory: TransportFactory = defaultTransportFactory,
-  ) {}
+  ) {
+    this.policy = buildTrustedPolicy(definitions);
+  }
 
   stats(): ConnectorStats {
     return {
@@ -186,25 +369,44 @@ export class McpConnector {
   }
 
   /**
-   * Verify binding identity against a tools/list snapshot: exact configured
-   * upstream names must be present and their canonical input-schema hashes
-   * must match. Any mismatch disables that binding (§17.3).
+   * The reviewed, non-ambiguous trusted `read` definition for a configured
+   * name, or `undefined` when the name can never be authorized: missing,
+   * duplicate/ambiguous, or a `write`/`sensitive`/`unclassified` category.
+   * Purely local (no I/O); the caller-supplied category can never alter it.
    */
-  verifyBindingIdentity(
-    listed: Array<{ name: string; inputSchemaHash: string }>,
-  ): { enabled: string[]; disabled: string[] } {
-    const byName = new Map(listed.map((t) => [t.name, t.inputSchemaHash]));
-    const enabled: string[] = [];
-    const disabled: string[] = [];
-    for (const b of this.config.bindings) {
-      if (byName.get(b.upstreamTool) === b.canonicalSchemaHash) {
-        enabled.push(b.upstreamTool);
-      } else {
-        disabled.push(b.upstreamTool);
+  private trustedReadDefinition(
+    upstreamTool: string,
+  ): McpBindingDefinition | undefined {
+    if (this.policy.ambiguous.has(upstreamTool)) return undefined;
+    const definition = this.policy.definitions.get(upstreamTool);
+    if (definition === undefined || definition.category !== "read") {
+      return undefined;
+    }
+    return definition;
+  }
+
+  /**
+   * Local (no-I/O) trusted-policy preflight over the CONFIGURED bindings.
+   * `anyTrustedRead` means at least one configured name has a reviewed
+   * non-ambiguous `read` definition; `anyEligible` additionally requires that
+   * definition hash to link to the config binding hash. Nothing else can
+   * authorize a connection.
+   */
+  private policyPreflight(): {
+    anyTrustedRead: boolean;
+    anyEligible: boolean;
+  } {
+    let anyTrustedRead = false;
+    let anyEligible = false;
+    for (const binding of this.config.bindings) {
+      const definition = this.trustedReadDefinition(binding.upstreamTool);
+      if (definition === undefined) continue;
+      anyTrustedRead = true;
+      if (definition.canonicalSchemaHash === binding.canonicalSchemaHash) {
+        anyEligible = true;
       }
     }
-    this.enabledBindings = enabled;
-    return { enabled, disabled };
+    return { anyTrustedRead, anyEligible };
   }
 
   /**
@@ -215,50 +417,92 @@ export class McpConnector {
    * options?: RequestOptions)` forwards `options` to `Protocol.request`,
    * where `RequestOptions.signal?: AbortSignal` throws if already aborted
    * and rejects the in-flight request on abort after sending
-   * `notifications/cancelled`). The abort rejection is redacted to the
-   * existing fixed `mcp_unavailable` in the catch below: no new error code,
-   * no raw abort error, no automatic retry. The per-instance mutex is
-   * released by `withMutex`'s finally, so a queued call still proceeds.
-   * Omitting `signal` preserves the previous behavior exactly.
+   * `notifications/cancelled`). Caller cancellations are forwarded to a fresh
+   * per-operation controller (fixed reason), whose forwarding listener and
+   * active-op entry are removed in `finally` so no successful-request cancel
+   * listener is retained. The abort rejection is redacted to the existing
+   * fixed `mcp_unavailable`: no new error code, no raw abort error, no retry.
    */
   async callTool(
     upstreamTool: string,
     args: unknown,
     signal?: AbortSignal,
   ): Promise<CallResult> {
+    // PURE admission AT INVOCATION: a binding is callable only when it is an
+    // explicitly CONFIGURED name AND has a reviewed, non-ambiguous trusted
+    // `read` definition whose hash links to this config binding. Unknown,
+    // missing, write/sensitive/unclassified and ambiguous names are denied
+    // with the fixed not-allowed code; a broken trusted/config hash link is
+    // denied with the fixed schema-mismatch code. Both are local: no I/O, no
+    // mutex, no factory/spawn, no SDK request and no failure/backoff count,
+    // regardless of shutdown or cross-epoch state. Caller-supplied
+    // args.category/readOnlyHint can never alter this policy.
+    const configBinding = this.config.bindings.find(
+      (b) => b.upstreamTool === upstreamTool,
+    );
+    if (configBinding === undefined) {
+      return { ok: false, code: "mcp_binding_not_allowed" as const };
+    }
+    const definition = this.trustedReadDefinition(upstreamTool);
+    if (definition === undefined) {
+      return { ok: false, code: "mcp_binding_not_allowed" as const };
+    }
+    if (definition.canonicalSchemaHash !== configBinding.canonicalSchemaHash) {
+      return { ok: false, code: "mcp_schema_mismatch" as const };
+    }
+    // Capture the epoch AND the during-shutdown state AT INVOCATION, before
+    // any mutex wait. A call submitted while shutdown is in progress must stay
+    // fixed-unavailable even if its queued closure later runs after the flag
+    // clears; a NEW call submitted after completion may lazy connect.
+    const epoch = this.shutdownEpoch;
+    const submissionShuttingDown = this.shuttingDown;
     return this.withMutex(async () => {
-      // Admit ONLY configured allowlist names; never spawn for an
-      // unconfigured name (no transport, no handshake).
-      const configured = this.config.bindings.some(
-        (b) => b.upstreamTool === upstreamTool,
-      );
-      if (!configured) {
-        return { ok: false, code: "mcp_binding_not_allowed" as const };
+      if (submissionShuttingDown || this.isStopped(epoch)) {
+        return { ok: false, code: "mcp_unavailable" as const };
       }
-      // Lazy connect. Wire identity + per-binding schema are (re)validated
-      // here on EVERY actual transport, so we cannot pre-check `isAllowed`
-      // before connecting without blocking the first valid call.
-      const ensured = await this.ensureConnected();
+      const ensured = await this.ensureConnectedForEpoch(epoch);
       if (!ensured.ok) return ensured;
-      // Validated state for the live connection: wire-gate/mismatch-denied
-      // names stay denied. No automatic retry or resend happens here.
+      if (this.isStopped(epoch)) {
+        return { ok: false, code: "mcp_unavailable" as const };
+      }
       if (!this.isAllowed(upstreamTool)) {
         return { ok: false, code: "mcp_schema_mismatch" as const };
       }
+      const session = this.session;
+      if (session === undefined) {
+        return { ok: false, code: "mcp_unavailable" as const };
+      }
+      if (!session.ready) {
+        // Transport loss observed between ensure and dispatch: route through
+        // the same bounded cleanup and count once unless already stopped.
+        await this.cleanupSession(session, { countFailure: !session.stop });
+        return { ok: false, code: "mcp_unavailable" as const };
+      }
+      const controller = new AbortController();
+      const detach = forwardAbort(signal, controller);
+      session.trackOp(controller);
       try {
-        const client = this.client as Client;
-        const res = (await client.callTool(
+        const res = (await session.client.callTool(
           {
             name: upstreamTool,
             arguments: (args ?? {}) as Record<string, unknown>,
           },
           undefined,
-          signal === undefined ? undefined : { signal },
+          { signal: controller.signal },
         )) as {
           isError?: boolean;
           structuredContent?: unknown;
           content?: Array<{ type: string; text?: string }>;
         };
+        // Overflow/shutdown observed BEFORE publication: never publish a
+        // success from a session that has stopped or been superseded.
+        if (
+          session.stop ||
+          this.isStopped(epoch) ||
+          this.isSuperseded(session)
+        ) {
+          return { ok: false, code: "mcp_unavailable" as const };
+        }
         // MCP isError=true is a tool-level error: fixed code, never ok text.
         // No raw error content leaves this package (§17.8 redaction).
         if (res.isError === true) {
@@ -278,8 +522,11 @@ export class McpConnector {
           ...(text !== undefined ? { text } : {}),
         };
       } catch {
-        await this.markFailure();
+        await this.cleanupSession(session, { countFailure: true });
         return { ok: false, code: "mcp_unavailable" as const };
+      } finally {
+        detach();
+        session.untrackOp(controller);
       }
     });
   }
@@ -287,25 +534,129 @@ export class McpConnector {
   /**
    * Lazy connect + fail-closed identity verification (§17.3, C09-07):
    *
+   * 0. Trusted-policy preflight (local, no I/O): a connection is opened only
+   *    when at least one configured binding is a reviewed, non-ambiguous
+   *    `read` definition whose hash links to its config binding. Empty /
+   *    non-read definitions report `mcp_binding_not_allowed`; reviewed `read`
+   *    definitions that ALL fail the local hash link report
+   *    `mcp_schema_mismatch`. A partial set of eligible read bindings stays
+   *    connectable.
    * 1. Wire gate: the REAL SDK handshake `initialize.serverInfo` (exact
    *    `name`/`version`, case-sensitive) must match the trusted config
-   *    (`expectedServerName`/`version`). A missing/mismatched identity
-   *    disables ALL configured bindings and the half-open client/transport is
-   *    closed, returning the existing fixed `mcp_schema_mismatch`; NO
-   *    tools/list happens and no raw identity is leaked.
+   *    (`expectedServerName`/`version`). A mismatch disables ALL bindings and
+   *    bounded-cleans the half-open client/transport (failure count stays zero).
    * 2. Then tools/list pages are followed (bounded) and each configured
-   *    binding's exact name + canonical input-schema SHA-256 is compared.
+   *    binding's exact name, trusted `read` classification, local config/
+   *    definition hash link and canonical input-schema SHA-256 are compared.
    *    Any missing/mismatch disables that binding; connect reports
-   *    mcp_schema_mismatch only when NO binding verifies (partial drift still
-   *    connects, drifted names stay disabled).
+   *    mcp_schema_mismatch only when NO binding verifies.
    *
-   * The gate runs on EVERY actual transport (never a cached identity).
-   * Demand reconnect applies the backoff before dialing.
+   * Concurrent calls share one in-progress owned attempt instead of orphaned
+   * clients. Every await is fenced by the owned session identity + stop flag.
    */
-  async ensureConnected(): Promise<
-    { ok: true } | { ok: false; code: McpErrorCode }
-  > {
-    if (this.connected && this.client !== undefined) return { ok: true };
+  async ensureConnected(): Promise<EnsureResult> {
+    const preflight = this.policyPreflight();
+    if (!preflight.anyTrustedRead) {
+      return { ok: false, code: "mcp_binding_not_allowed" as const };
+    }
+    if (!preflight.anyEligible) {
+      return { ok: false, code: "mcp_schema_mismatch" as const };
+    }
+    return this.ensureConnectedForEpoch(this.shutdownEpoch);
+  }
+
+  /**
+   * Bounded safe shutdown: one idempotent owned cleanup for all parallel
+   * callers. Stops synchronously, aborts every owned in-flight SDK operation,
+   * begins raw close, then awaits the actual stdio close event under the
+   * configured window; on timeout SIGKILLs ONLY the captured owned real-stdio
+   * pid and waits the fixed finite post-kill window. State is cleared
+   * synchronously so no stale enabled binding survives.
+   */
+  shutdown(): Promise<void> {
+    if (this.shutdownInFlight !== undefined) return this.shutdownInFlight;
+    this.shutdownEpoch += 1;
+    this.shuttingDown = true;
+    const session = this.session;
+    this.session = undefined;
+    this.connected = false;
+    this.enabledBindings = [];
+    // Retire AND abort any in-flight connect singleflight so a stopped attempt
+    // can never be joined by a fresh demand on the same epoch AND a demand
+    // currently waiting the pre-construction backoff stops immediately (its
+    // timer is cleared) rather than sleeping out the stale delay while holding
+    // the mutex. The identity-guarded `finally` in `ensureConnectedForEpoch`
+    // keeps this retired entry from clearing a NEW attempt.
+    const inflight = this.connectInFlight;
+    this.connectInFlight = undefined;
+    if (inflight !== undefined) inflight.controller.abort("cancelled");
+    // Synchronous owned stop BEFORE the singleflight body runs any await, so a
+    // shutdown invoked before a connect settles still fences that attempt.
+    if (session !== undefined) session.beginStop();
+    // Publish the singleflight promise BEFORE any body/finally can execute:
+    // an empty shutdown body otherwise resolves synchronously and the later
+    // assignment would permanently stale `shutdownInFlight`.
+    const promise: Promise<void> = Promise.resolve()
+      .then(async () => {
+        if (session !== undefined) {
+          await session.boundedClose(this.shutdownWaitMs(), FORCE_KILL_WAIT_MS);
+        }
+        // Join EVERY bounded cleanup generation registered centrally via the
+        // owned `onCleanupStarted` hook. This covers a detached overflow/close
+        // cleanup started before shutdown captured state (session undefined)
+        // and any additional generation — e.g. a late-start generic renewal —
+        // that starts WHILE an earlier one is still being awaited. Snapshot each
+        // round so a newly started generation is also drained; each generation
+        // is itself bounded by its grace + fixed post-kill window, so this
+        // terminates.
+        while (this.pendingCleanups.size > 0) {
+          await Promise.allSettled([...this.pendingCleanups]);
+        }
+      })
+      .finally(() => {
+        this.shuttingDown = false;
+        if (this.shutdownInFlight === promise)
+          this.shutdownInFlight = undefined;
+      });
+    this.shutdownInFlight = promise;
+    return promise;
+  }
+
+  private async ensureConnectedForEpoch(epoch: number): Promise<EnsureResult> {
+    if (this.isStopped(epoch)) {
+      return { ok: false, code: "mcp_unavailable" as const };
+    }
+    if (this.connected && this.session?.ready) {
+      return { ok: true };
+    }
+    const inflight = this.connectInFlight;
+    if (inflight !== undefined && inflight.epoch === epoch) {
+      return inflight.promise;
+    }
+    // One FRESH controller per physical connect attempt; every joiner of this
+    // epoch shares it so shutdown aborts the single shared backoff wait.
+    const controller = new AbortController();
+    const entry: {
+      epoch: number;
+      controller: AbortController;
+      promise: Promise<EnsureResult>;
+    } = {
+      epoch,
+      controller,
+      promise: Promise.resolve({ ok: true } as EnsureResult),
+    };
+    const promise = this.doConnect(epoch, controller.signal).finally(() => {
+      if (this.connectInFlight === entry) this.connectInFlight = undefined;
+    });
+    entry.promise = promise;
+    this.connectInFlight = entry;
+    return promise;
+  }
+
+  private async doConnect(
+    epoch: number,
+    signal: AbortSignal,
+  ): Promise<EnsureResult> {
     // Runtime boundary for programmatic configs that bypass the zod schema:
     // a missing/empty wire-identity expectation fails closed with the fixed
     // mismatch BEFORE any transport creation/spawn or tools/list.
@@ -314,141 +665,278 @@ export class McpConnector {
       return { ok: false, code: "mcp_schema_mismatch" as const };
     }
     // Fail-closed stdio env: reject BEFORE any transport creation/spawn.
-    if (this.config.transport.kind === "stdio") {
-      if (missingStdioEnvNames(this.config).length > 0) {
-        return { ok: false, code: "mcp_unavailable" as const };
-      }
+    if (
+      this.config.transport.kind === "stdio" &&
+      missingStdioEnvNames(this.config).length > 0
+    ) {
+      return { ok: false, code: "mcp_unavailable" as const };
     }
     if (this.consecutiveFailures > 0) {
-      await sleep(nextBackoffMs(this.consecutiveFailures));
+      // Cancellable demand backoff: a shutdown fence (or any abort of this
+      // attempt's controller) resolves the wait immediately and clears its
+      // timer, so a fenced demand never sleeps out a stale delay or holds the
+      // mutex while a fresh post-shutdown demand waits a FULL new delay.
+      await sleep(nextBackoffMs(this.consecutiveFailures), signal);
     }
-    let transport: Transport | undefined;
-    let client: Client | undefined;
+    if (this.isStopped(epoch) || signal.aborted) {
+      return { ok: false, code: "mcp_unavailable" as const };
+    }
+    let session: OwnedConnection | undefined;
     try {
-      transport = this.createTransport();
-      this.drainStderr(transport);
-      client = new Client(
+      const raw = this.createTransport();
+      // Record + count-only stderr drain are installed BEFORE any async dial
+      // and are visible to shutdown for the whole handshake.
+      session = new OwnedConnection(
+        raw,
         { name: this.config.clientName, version: this.config.clientVersion },
-        { capabilities: {} },
+        {
+          onOverflow: (s) => this.handleOverflow(s),
+          onClosed: (s, info) => this.handleClosed(s, info),
+          onCleanupStarted: (promise) => {
+            this.trackCleanup(promise);
+          },
+          shutdownWaitMs: this.shutdownWaitMs(),
+          forceKillWaitMs: FORCE_KILL_WAIT_MS,
+        },
       );
-      await client.connect(transport);
+      this.session = session;
+      // Owned opening fence: abort the WHOLE handshake on stop/overflow. The
+      // SDK `signal` only covers the initialize request, so `raw.start()` and
+      // the `notifications/initialized` send are raced against this fresh
+      // per-operation signal here: a hang there can no longer leave the mutex
+      // or the connect singleflight pending forever.
+      const connectOp = new AbortController();
+      session.trackOp(connectOp);
+      try {
+        await raceOperation(
+          session.client.connect(session, { signal: connectOp.signal }),
+          connectOp.signal,
+        );
+      } finally {
+        session.untrackOp(connectOp);
+      }
+      if (this.isStopped(epoch) || session.stop || this.isSuperseded(session)) {
+        await this.cleanupSession(session, { countFailure: false });
+        return { ok: false, code: "mcp_unavailable" as const };
+      }
       // Wire-identity gate BEFORE tools/list or enabling any binding. The
       // ACTUAL initialize.serverInfo must equal the trusted config exactly.
       // `serverId` is a logical id and is deliberately NOT compared here.
-      const wire = client.getServerVersion();
+      const wire = session.client.getServerVersion();
       if (
         wire === undefined ||
         wire.name !== this.config.expectedServerName ||
         wire.version !== this.config.version
       ) {
-        // Disable ALL configured bindings for this instance.
-        this.enabledBindings = [];
-        await closeQuietly(client, transport);
-        transport = undefined;
-        client = undefined;
-        this.consecutiveFailures = 0;
+        await this.cleanupSession(session, {
+          countFailure: false,
+          resetFailures: true,
+        });
         return { ok: false, code: "mcp_schema_mismatch" as const };
       }
       // Per-binding identity verification BEFORE enabling any call: follow
       // SDK 1.30.0 tools/list pages via listTools({ cursor }) until no
       // nextCursor, so bindings beyond page 1 still verify. Only configured
       // bindings are ever enabled — discovered tools are never auto-exposed.
+      // The catalog must be COMPLETE: the bounded budget is a hang ceiling, not
+      // a truncation point, so an exhausted page budget with a remaining cursor
+      // fails closed below instead of attesting identity from a prefix.
       const snapshot: Array<{ name: string; inputSchemaHash: string }> = [];
       let cursor: string | undefined;
+      let catalogComplete = false;
       for (let page = 0; page < MAX_TOOL_LIST_PAGES; page += 1) {
-        const listed =
-          cursor === undefined
-            ? await client.listTools()
-            : await client.listTools({ cursor });
-        for (const t of listed.tools ?? []) {
-          snapshot.push({
-            name: t.name,
-            inputSchemaHash: await canonicalSchemaHash(t.inputSchema),
+        const op = new AbortController();
+        session.trackOp(op);
+        try {
+          const params = cursor === undefined ? undefined : { cursor };
+          const listed = await session.client.listTools(params, {
+            signal: op.signal,
           });
+          if (
+            this.isStopped(epoch) ||
+            session.stop ||
+            this.isSuperseded(session)
+          ) {
+            await this.cleanupSession(session, { countFailure: false });
+            return { ok: false, code: "mcp_unavailable" as const };
+          }
+          for (const t of listed.tools ?? []) {
+            snapshot.push({
+              name: t.name,
+              inputSchemaHash: await canonicalSchemaHash(t.inputSchema),
+            });
+          }
+          if (listed.nextCursor === undefined) {
+            catalogComplete = true;
+            break;
+          }
+          cursor = listed.nextCursor;
+        } finally {
+          session.untrackOp(op);
         }
-        if (listed.nextCursor === undefined) break;
-        cursor = listed.nextCursor;
       }
-      const { enabled } = this.verifyBindingIdentity(snapshot);
-      if (enabled.length === 0) {
-        await closeQuietly(client, transport);
-        transport = undefined;
-        client = undefined;
-        this.consecutiveFailures = 0;
+      // Shutdown/ownership fence BEFORE the unfinished-catalog mismatch. The
+      // per-page readiness check above runs immediately after `listTools`
+      // settles, but the final page's `canonicalSchemaHash` is still awaited
+      // below; an explicit shutdown can change the owner/epoch during that
+      // digest. A stop observed here must take the fixed `mcp_unavailable`
+      // precedence over the catalog-completeness `mcp_schema_mismatch`, so the
+      // consumer never sees a schema verdict for an attempt that was actually
+      // interrupted. Reuses the single existing fence (no duplicate cleanup).
+      if (this.isStopped(epoch) || session.stop || this.isSuperseded(session)) {
+        await this.cleanupSession(session, { countFailure: false });
+        return { ok: false, code: "mcp_unavailable" as const };
+      }
+      // Fail closed on an UNFINISHED catalog: all MAX_TOOL_LIST_PAGES were used
+      // and the server still advertised a nextCursor. The prefix cannot attest
+      // live identity because an uncatalogued duplicate/conflicting page may
+      // exist beyond the cap, so disable ALL bindings (even an apparently
+      // matching configured name), publish nothing, make no tool call, and
+      // clean up the owned half-open session. Same fixed schema-mismatch cleanup
+      // as the wire/hash mismatch paths; the failure counter is NOT incremented.
+      if (!catalogComplete) {
+        await this.cleanupSession(session, {
+          countFailure: false,
+          resetFailures: true,
+        });
         return { ok: false, code: "mcp_schema_mismatch" as const };
       }
-      this.client = client;
+      const { enabled } = computeBindingIdentity(
+        this.config,
+        this.policy,
+        snapshot,
+      );
+      if (enabled.length === 0) {
+        await this.cleanupSession(session, {
+          countFailure: false,
+          resetFailures: true,
+        });
+        return { ok: false, code: "mcp_schema_mismatch" as const };
+      }
+      this.enabledBindings = enabled;
+      session.ready = true;
       this.connected = true;
       this.consecutiveFailures = 0;
-      transport = undefined; // owned by client now
-      client = undefined;
       return { ok: true };
     } catch {
-      // Failed connect: release the half-open transport/client (no leak).
-      await closeQuietly(client, transport);
-      await this.markFailure();
+      if (session !== undefined) {
+        await this.cleanupSession(session, { countFailure: true });
+      } else {
+        this.consecutiveFailures += 1;
+      }
       return { ok: false, code: "mcp_unavailable" as const };
     }
   }
 
-  /**
-   * Bounded safe shutdown: close the SDK client (stdio kill timeout lives
-   * in the SDK transport: stdin.end + 2s wait + SIGTERM + 2s + SIGKILL per
-   * verified 1.30.0 source), then enforce our own outer bound so shutdown
-   * can never hang the host.
-   */
-  async shutdown(): Promise<void> {
-    const client = this.client;
-    this.client = undefined;
+  /** Overflow: synchronous stop + clear, failure once, one bounded cleanup. */
+  private handleOverflow(session: OwnedConnection): void {
+    if (this.session !== session) return; // stale peer late chunk
+    session.beginStop();
+    this.session = undefined;
     this.connected = false;
     this.enabledBindings = [];
-    if (client !== undefined) {
-      await Promise.race([
-        client.close().catch(() => undefined),
-        sleep(this.shutdownWaitMs()).then(() => undefined),
-      ]);
-    }
+    // Retire the stopped attempt so a fresh demand cannot join a pending
+    // singleflight whose raw start/send never settles.
+    this.connectInFlight = undefined;
+    this.recordFailureOnce(session);
+    void session
+      .boundedClose(this.shutdownWaitMs(), FORCE_KILL_WAIT_MS)
+      .catch(() => undefined);
   }
 
-  /** Record a stderr chunk with the 64KiB cap (truncate + fixed code downstream). */
-  noteStderr(chunkBytes: number): { truncated: boolean; totalBytes: number } {
-    this.stderrBytes += chunkBytes;
-    if (this.stderrBytes > STDERR_CAP_BYTES) {
-      this.stderrTruncated = true;
-      this.stderrBytes = STDERR_CAP_BYTES;
+  /**
+   * Synchronous reaction to an OWNED raw close event (spontaneous loss or
+   * part of an already-requested cleanup). Identity-guarded: only the CURRENT
+   * session may invalidate the connector, so a stale old peer's late close can
+   * never poison a fresh post-shutdown/recovery peer or double-count a
+   * failure. Always routes the same bounded, idempotent owned cleanup.
+   */
+  private handleClosed(
+    session: OwnedConnection,
+    info: { intentional: boolean },
+  ): void {
+    if (this.session !== session) {
+      // Superseded peer: never touch fresh state; still guarantee a bounded
+      // (idempotent) physical cleanup.
+      void session
+        .boundedClose(this.shutdownWaitMs(), FORCE_KILL_WAIT_MS)
+        .catch(() => undefined);
+      return;
     }
-    return { truncated: this.stderrTruncated, totalBytes: this.stderrBytes };
+    this.session = undefined;
+    this.connected = false;
+    this.enabledBindings = [];
+    this.connectInFlight = undefined;
+    if (!info.intentional) {
+      this.recordFailureOnce(session);
+    }
+    void session
+      .boundedClose(this.shutdownWaitMs(), FORCE_KILL_WAIT_MS)
+      .catch(() => undefined);
   }
 
-  private async markFailure(): Promise<void> {
+  /**
+   * Single owned bounded cleanup for every failure/mismatch/stop path.
+   * Only touches public state when the session is still the current one, so
+   * late callbacks from a superseded peer cannot poison a fresh session's
+   * failure counter or enabled bindings.
+   */
+  private async cleanupSession(
+    session: OwnedConnection,
+    opts: { countFailure?: boolean; resetFailures?: boolean },
+  ): Promise<void> {
+    const current = this.session === session;
+    if (current) {
+      this.session = undefined;
+      this.connected = false;
+      this.enabledBindings = [];
+    }
+    if (current && opts.resetFailures === true) {
+      this.consecutiveFailures = 0;
+    }
+    if (current && opts.countFailure === true) {
+      this.recordFailureOnce(session);
+    }
+    session.beginStop();
+    await session.boundedClose(this.shutdownWaitMs(), FORCE_KILL_WAIT_MS);
+  }
+
+  /** Count a given session's failure at most once (no close+catch doubling). */
+  private recordFailureOnce(session: OwnedConnection): void {
+    if (session.failureRecorded) return;
+    session.failureRecorded = true;
     this.consecutiveFailures += 1;
-    this.connected = false;
-    this.enabledBindings = [];
-    // Release the dropped client/transport so failed calls disconnect (§17.6).
-    const client = this.client;
-    this.client = undefined;
-    await closeQuietly(client, undefined);
   }
 
   /**
-   * Attach continuous stderr drain at connect time (pipe only): data is
-   * counted toward the 64KiB cap and then discarded; never buffered
-   * unbounded, never blocks the child (§17.7).
+   * Central registration of one owned bounded-cleanup generation. The
+   * `onCleanupStarted` hook fires exactly once per NEW memoized cleanup (a
+   * repeat `boundedClose` returns the same promise without re-publishing), so
+   * shutdown can join every generation without manual tracking at each call
+   * site. Pure bookkeeping: the settlement handlers delete ONLY this promise,
+   * never throw, and have no state/failure/publication side effects, so they
+   * can never leak an unhandled rejection or delete a newer generation.
    */
-  private drainStderr(transport: Transport): void {
-    const maybe = transport as unknown as {
-      stderr?: { on?: (ev: string, fn: (c: unknown) => void) => void } | null;
-    };
-    const stream = maybe.stderr;
-    if (stream?.on) {
-      stream.on("data", (chunk: unknown) => {
-        const bytes =
-          typeof chunk === "string"
-            ? Buffer.byteLength(chunk)
-            : ((chunk as { length?: number })?.length ?? 0);
-        this.noteStderr(bytes);
-      });
-    }
+  private trackCleanup(promise: Promise<void>): void {
+    if (this.pendingCleanups.has(promise)) return;
+    this.pendingCleanups.add(promise);
+    promise.then(
+      () => {
+        this.pendingCleanups.delete(promise);
+      },
+      () => {
+        this.pendingCleanups.delete(promise);
+      },
+    );
+  }
+
+  private isStopped(epoch: number): boolean {
+    return this.shuttingDown || epoch !== this.shutdownEpoch;
+  }
+
+  /** True once `session` is no longer the connector's current owned peer. */
+  private isSuperseded(session: OwnedConnection): boolean {
+    return this.session !== session;
   }
 
   private shutdownWaitMs(): number {
@@ -475,23 +963,103 @@ export class McpConnector {
   }
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * Pure binding-identity comparison (no state mutation), called ONLY inside the
+ * live ensure/connect path. A configured binding is enabled only when ALL of:
+ * - it has a reviewed, non-ambiguous trusted `read` definition;
+ * - that definition's trusted hash links to the config binding hash;
+ * - the config binding hash equals the actual tools/list input-schema hash; and
+ * - the LIVE name is not repeated across the collected tools/list pages (a
+ *   repeated live name is an ambiguous schema identity and is never enabled,
+ *   in any page order).
+ * Non-read / untrusted / ambiguous / drifted bindings are never advertised,
+ * even when the wire hash matches. Unknown discovered tools are never added.
+ */
+function computeBindingIdentity(
+  config: McpConnectorConfig,
+  policy: TrustedPolicy,
+  listed: Array<{ name: string; inputSchemaHash: string }>,
+): { enabled: string[]; disabled: string[] } {
+  // Fail-closed live identity: an MCP tool name is unique. A repeated live name
+  // is an ambiguous schema identity, so it is removed from the snapshot
+  // entirely (never last-wins), regardless of whether the duplicate schemas
+  // happen to agree. This keeps the decision order-independent and independent
+  // of the order pages are returned in.
+  const byName = new Map<string, string>();
+  const repeatedLive = new Set<string>();
+  for (const tool of listed) {
+    if (byName.has(tool.name) || repeatedLive.has(tool.name)) {
+      byName.delete(tool.name);
+      repeatedLive.add(tool.name);
+      continue;
+    }
+    byName.set(tool.name, tool.inputSchemaHash);
+  }
+  const enabled: string[] = [];
+  const disabled: string[] = [];
+  for (const b of config.bindings) {
+    const definition = policy.ambiguous.has(b.upstreamTool)
+      ? undefined
+      : policy.definitions.get(b.upstreamTool);
+    const trustedRead =
+      definition !== undefined && definition.category === "read";
+    const hashLinked =
+      definition !== undefined &&
+      definition.canonicalSchemaHash === b.canonicalSchemaHash &&
+      byName.get(b.upstreamTool) === b.canonicalSchemaHash;
+    if (trustedRead && hashLinked) {
+      enabled.push(b.upstreamTool);
+    } else {
+      disabled.push(b.upstreamTool);
+    }
+  }
+  return { enabled, disabled };
+}
+
+/**
+ * Cancellable delay. Resolves when `ms` elapses OR when `signal` aborts
+ * (immediately, if already aborted). A single shared settlement clears the
+ * timeout and removes the once abort listener so no stale demand timer and no
+ * listener survive an aborted backoff. Required signal: every demand backoff is
+ * cancellable.
+ */
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      if (timer !== undefined) clearTimeout(timer);
+      signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    timer = setTimeout(finish, ms);
+    signal.addEventListener("abort", finish, { once: true });
+  });
 }
 
 /**
  * Production transport factory: real SDK transports only.
- * - stdio: fail-closed env (assertStdioEnvClosed BEFORE spawn; no silent
- *   broader env), shell=false (SDK hardcodes false; verified 1.30.0 source),
- *   config-only command (no interpolation), explicit env allowlist NOTE:
- *   SDK merges getDefaultEnvironment() underneath, so exact-allowlist is a
- *   known gap (see STDIO_IMPLICIT_ENV_VARS); stderr piped with 64KiB cap
- *   drained continuously by the connector; bounded kill lives in the SDK
- *   transport close (2s + SIGTERM + 2s + SIGKILL, verified source).
+ * - stdio: fail-closed env. SDK `StdioClientTransport` merges
+ *   `getDefaultEnvironment()` (over the live `DEFAULT_INHERITED_ENV_VARS`
+ *   import) UNDER the explicit `env`, so `assertStdioEnvClosed` requires EVERY
+ *   one of those SDK default names to be explicitly present in `envAllowlist`;
+ *   any missing name rejects with fixed `mcp_unavailable` BEFORE any transport
+ *   construction/spawn, so no variable is silently inherited. shell=false (SDK
+ *   hardcodes false; verified 1.30.0 source), config-only command (no
+ *   interpolation); stderr piped and drained by the OWNED connection record.
+ *   Bounded kill lives in the owned cleanup (SDK transport close plus owned
+ *   force-kill window, verified source).
  * - Streamable HTTP: loopback re-checked at the runtime boundary (defends
  *   against programmatic configs bypassing the zod schema) and redirects
  *   refused via a manual-redirect fetch wrapper (SDK 1.30.0 has no
- *   redirect option; default fetch would follow).
+ *   redirect option; default fetch would follow, and the refused body is
+ *   cancelled without being read).
  */
 export function defaultTransportFactory(config: McpConnectorConfig): Transport {
   const t = config.transport;
@@ -530,13 +1098,15 @@ export function defaultTransportFactory(config: McpConnectorConfig): Transport {
  * transport after `start()`/each `send()` (Client.connect reads
  * `transport.sessionId` after start to detect reconnects, and calls
  * `transport.setProtocolVersion` after initialize, so both are forwarded
- * live). Callback writes (`onmessage`/`onclose`/`onerror`) are forwarded to
- * the inner transport; reads-before-write yield `undefined`, which matches
- * a fresh transport and is handled by the SDK's optional chaining. The
- * generic `Transport["onmessage"]` handler is narrowed through a wrapper
- * because the inner transport only ever delivers a single
- * `JSONRPCMessage` argument (verified 1.30.0 source). `send()` forwards
- * only the resumption fields the inner transport accepts.
+ * live). Callbacks (`onmessage`/`onclose`/`onerror`) are BORING plain
+ * optional properties — genuinely readable and writable, never setter-only —
+ * so a preinstalled factory observer, the OwnedConnection wrapper and the SDK
+ * Protocol handler chain can all coexist. Inner SDK events are bridged to the
+ * adapter's CURRENT callback values (not a captured setter), which is what
+ * preserves the prior observer. The generic `Transport["onmessage"]` handler
+ * is narrowed through the bridge because the inner transport only ever
+ * delivers a single `JSONRPCMessage` argument (verified 1.30.0 source).
+ * `send()` forwards only the resumption fields the inner transport accepts.
  */
 function toTransport(inner: StreamableHTTPClientTransport): Transport {
   const adapter: Transport = {
@@ -568,17 +1138,23 @@ function toTransport(inner: StreamableHTTPClientTransport): Transport {
     setProtocolVersion: (version) => {
       inner.setProtocolVersion(version);
     },
-    set onclose(handler: () => void) {
-      inner.onclose = handler;
-    },
-    set onerror(handler: (error: Error) => void) {
-      inner.onerror = handler;
-    },
-    set onmessage(handler: NonNullable<Transport["onmessage"]>) {
-      inner.onmessage = (message) => {
-        handler(message);
-      };
-    },
+  };
+  // Bridge inner SDK events to the adapter's live callback values so callers
+  // can read and overwrite them like real optional properties.
+  const priorClose = inner.onclose;
+  inner.onclose = () => {
+    priorClose?.();
+    adapter.onclose?.();
+  };
+  const priorError = inner.onerror;
+  inner.onerror = (error) => {
+    priorError?.(error);
+    adapter.onerror?.(error);
+  };
+  const priorMessage = inner.onmessage;
+  inner.onmessage = (message) => {
+    priorMessage?.(message);
+    adapter.onmessage?.(message);
   };
   return adapter;
 }
@@ -593,16 +1169,5 @@ function syncSessionId(
     adapter.sessionId = sid;
   } else {
     delete adapter.sessionId;
-  }
-}
-
-async function closeQuietly(
-  client: Client | undefined,
-  transport: Transport | undefined,
-): Promise<void> {
-  if (client !== undefined) {
-    await client.close().catch(() => undefined);
-  } else if (transport !== undefined) {
-    await transport.close?.().catch(() => undefined);
   }
 }

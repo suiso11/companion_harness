@@ -184,6 +184,21 @@ upstream).
   env); no live Calendar binding selected (orchestrator question above
   still open); local runtime unverified on Windows (CI to verify).
 
+> **Clarification 2026-10-11 (current C09 scope; this does NOT rewrite the
+> historical record above).** The "exact explicit allowlist is NOT
+> enforceable" note at the start of this hardening pass is historical for that
+> pass and is now **SUPERSEDED** by the already-existing "Fail-closed stdio
+> env" section below (line ~196) plus the new real production-stdio physical
+> proof. The connector now requires EVERY effectively inherited SDK default
+> name (the live `DEFAULT_INHERITED_ENV_VARS` import) to be explicitly present
+> in `envAllowlist` and rejects with fixed `mcp_unavailable` BEFORE any
+> transport creation/spawn, so "gap unenforceable" no longer describes the
+> connector (no compliant claim is dropped, and no variable is silently
+> inherited). The `defaultTransportFactory` comment that called exact-allowlist
+> a "known gap" was corrected to the accurate explicit-SDK-default guard
+> description. Dates, counts, the C08 pin, and the evidence above are
+> unchanged.
+
 ## Missing upstream question for orchestrator
 
 Which specific upstream Calendar MCP server/version/transport and which

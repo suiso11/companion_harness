@@ -19,11 +19,29 @@ import {
   STDIO_IMPLICIT_ENV_VARS,
   type TransportFactory,
 } from "../src/client.js";
-import type { McpConnectorConfig } from "../src/config.js";
+import type {
+  McpBindingDefinition,
+  McpConnectorConfig,
+} from "../src/config.js";
 import {
   canonicalSchemaHash,
   mcpConnectorConfigSchema,
 } from "../src/config.js";
+
+/**
+ * SOURCE-REVIEWED host fixture definition. Every upstream tool registered by
+ * this file's real `McpServer` fixtures is a static read handler (see
+ * `linkedServer` / `probeSearchHash`), so the trusted host definition marks
+ * each explicitly `read` with an EXPLICITLY written hash — never inferred from
+ * the connector config. This is fixture-local test data, not production
+ * provider adoption.
+ */
+function readDefinition(
+  upstreamTool: string,
+  schemaHash: string,
+): McpBindingDefinition {
+  return { upstreamTool, canonicalSchemaHash: schemaHash, category: "read" };
+}
 
 const closables: Array<() => Promise<unknown>> = [];
 afterEach(async () => {
@@ -68,6 +86,8 @@ interface FakeServerOptions {
   serverVersion?: string;
   /** Also register a second readonly tool (`get-event`) with its own counter. */
   withGetEvent?: boolean;
+  /** REAL in-flight drop: close the SDK server from inside the handler. */
+  closeDuringSearch?: boolean;
 }
 
 /**
@@ -88,9 +108,21 @@ async function linkedServer(opts: FakeServerOptions = {}) {
     { description: "fake readonly search", inputSchema: SEARCH_INPUT_SCHEMA },
     async ({ q }) => {
       calls += 1;
+      if (opts.closeDuringSearch) {
+        // Drop the real underlying SDK link BEFORE this handler can publish a
+        // response, so the awaited logical call fails genuinely in flight.
+        await server.close();
+      }
       if (opts.isErrorTool) {
+        // Tool-level failure redaction: BOTH the text and the structured
+        // payload carry synthetic private markers that must never leave the
+        // connector as `calendar_upstream_error` (C09-07).
         return {
           content: [{ type: "text" as const, text: "secret-raw-failure" }],
+          structuredContent: {
+            secret: "sk-inert-iserror-structured-do-not-leak",
+            privatePath: "/etc/private-iserror-do-not-leak",
+          },
           isError: true,
         };
       }
@@ -175,6 +207,7 @@ describe("McpConnector connected identity (in-memory SDK transport)", () => {
       baseConfig([
         { upstreamTool: "search-events", canonicalSchemaHash: HASH },
       ]),
+      [readDefinition("search-events", HASH)],
       () => {
         dials += 1;
         return server.transport;
@@ -197,6 +230,7 @@ describe("McpConnector connected identity (in-memory SDK transport)", () => {
       baseConfig([
         { upstreamTool: "search-events", canonicalSchemaHash: HASH },
       ]),
+      [readDefinition("search-events", HASH)],
       () => {
         dials += 1;
         return server.transport;
@@ -223,6 +257,7 @@ describe("McpConnector connected identity (in-memory SDK transport)", () => {
         // Logical id deliberately unlike the wire name.
         { serverId: "logical-google-calendar-fork" },
       ),
+      [readDefinition("search-events", realHash)],
       queuedFactory([server.transport]),
     );
     closables.push(() => connector.shutdown());
@@ -251,6 +286,10 @@ describe("McpConnector connected identity (in-memory SDK transport)", () => {
         { upstreamTool: "search-events", canonicalSchemaHash: realHash },
         { upstreamTool: "get-event", canonicalSchemaHash: HASH },
       ]),
+      [
+        readDefinition("search-events", realHash),
+        readDefinition("get-event", HASH),
+      ],
       queuedFactory([server.transport]),
     );
     closables.push(() => connector.shutdown());
@@ -276,6 +315,7 @@ describe("McpConnector connected identity (in-memory SDK transport)", () => {
       baseConfig([
         { upstreamTool: "search-events", canonicalSchemaHash: realHash },
       ]),
+      [readDefinition("search-events", realHash)],
       queuedFactory([server.transport]),
     );
     closables.push(() => connector.shutdown());
@@ -303,6 +343,7 @@ describe("McpConnector connected identity (in-memory SDK transport)", () => {
       baseConfig([
         { upstreamTool: "search-events", canonicalSchemaHash: realHash },
       ]),
+      [readDefinition("search-events", realHash)],
       factory,
     );
     closables.push(() => connector.shutdown());
@@ -351,6 +392,7 @@ describe("McpConnector connected identity (in-memory SDK transport)", () => {
       let dials = 0;
       const connector = new McpConnector(
         bypass as unknown as McpConnectorConfig,
+        [readDefinition("search-events", HASH)],
         () => {
           dials += 1;
           throw new Error("must not create a transport");
@@ -371,6 +413,7 @@ describe("McpConnector connected identity (in-memory SDK transport)", () => {
       baseConfig([
         { upstreamTool: "search-events", canonicalSchemaHash: "0".repeat(64) },
       ]),
+      [readDefinition("search-events", "0".repeat(64))],
       queuedFactory([serverA.transport, serverB.transport]),
     );
     closables.push(() => connector.shutdown());
@@ -394,6 +437,10 @@ describe("McpConnector connected identity (in-memory SDK transport)", () => {
         // Drifted binding: correct name, wrong configured hash.
         { upstreamTool: "get-event", canonicalSchemaHash: "0".repeat(64) },
       ]),
+      [
+        readDefinition("search-events", realHash),
+        readDefinition("get-event", "0".repeat(64)),
+      ],
       queuedFactory([server.transport]),
     );
     closables.push(() => connector.shutdown());
@@ -427,12 +474,16 @@ describe("McpConnector connected identity (in-memory SDK transport)", () => {
       baseConfig([
         { upstreamTool: "search-events", canonicalSchemaHash: realHash },
       ]),
+      [readDefinition("search-events", realHash)],
       queuedFactory([server.transport]),
     );
     closables.push(() => connector.shutdown());
     const res = await connector.callTool("search-events", { q: "standup" });
     expect(res).toEqual({ ok: false, code: "calendar_upstream_error" });
-    expect(JSON.stringify(res)).not.toContain("secret-raw-failure");
+    const serialized = JSON.stringify(res);
+    expect(serialized).not.toContain("secret-raw-failure");
+    expect(serialized).not.toContain("sk-inert-iserror-structured-do-not-leak");
+    expect(serialized).not.toContain("/etc/private-iserror-do-not-leak");
   });
 
   it("rejects non-loopback hosts at the runtime boundary", () => {
@@ -452,6 +503,7 @@ describe("McpConnector connected identity (in-memory SDK transport)", () => {
       baseConfig([
         { upstreamTool: "search-events", canonicalSchemaHash: HASH },
       ]),
+      [readDefinition("search-events", HASH)],
       failingFactory,
     );
     const res = await connector.ensureConnected();
@@ -466,21 +518,27 @@ describe("McpConnector connected identity (in-memory SDK transport)", () => {
 
   it("a failed logical call after connect clears enabled/allowed state", async () => {
     const realHash = await probeSearchHash();
-    const server = await linkedServer();
+    const server = await linkedServer({ closeDuringSearch: true });
     const connector = new McpConnector(
       baseConfig([
         { upstreamTool: "search-events", canonicalSchemaHash: realHash },
       ]),
+      [readDefinition("search-events", realHash)],
       queuedFactory([server.transport]),
     );
     closables.push(() => connector.shutdown());
     const ensured = await connector.ensureConnected();
     expect(ensured).toEqual({ ok: true });
     expect(connector.isAllowed("search-events")).toBe(true);
-    // Kill the live upstream transport so the next logical call fails.
-    await server.transport.close();
+    // REAL in-flight failure: the upstream SDK handler drops the underlying
+    // link AFTER receiving the call, so its response can never be published.
+    // The idle transport is NOT pre-closed and no .send/transport mock is used;
+    // the single logical call reaches the handler exactly once and is never
+    // auto-resent, so this is one genuine connection failure (not a count
+    // double).
     const res = await connector.callTool("search-events", { q: "x" });
     expect(res).toEqual({ ok: false, code: "mcp_unavailable" });
+    expect(server.calls()).toBe(1);
     expect(connector.stats()).toEqual({
       connected: false,
       consecutiveFailures: 1,

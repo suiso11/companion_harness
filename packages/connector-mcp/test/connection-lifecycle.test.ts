@@ -39,7 +39,10 @@ import {
   STDIO_IMPLICIT_ENV_VARS,
   type TransportFactory,
 } from "../src/client.js";
-import type { McpConnectorConfig } from "../src/config.js";
+import type {
+  McpBindingDefinition,
+  McpConnectorConfig,
+} from "../src/config.js";
 import {
   canonicalSchemaHash,
   mcpConnectorConfigSchema,
@@ -260,7 +263,22 @@ function makeConfig(): McpConnectorConfig {
 }
 
 function makeConnector(producer: Producer): McpConnector {
-  const connector = new McpConnector(makeConfig(), producer.factory);
+  // SOURCE-REVIEWED host fixture definition: the producer's only registered
+  // upstream tool (`search-events`) is a static read handler, so the trusted
+  // definition marks it explicitly `read` with the explicitly probed hash —
+  // never inferred from the connector config.
+  const definitions: McpBindingDefinition[] = [
+    {
+      upstreamTool: "search-events",
+      canonicalSchemaHash: realHash,
+      category: "read",
+    },
+  ];
+  const connector = new McpConnector(
+    makeConfig(),
+    definitions,
+    producer.factory,
+  );
   producers.push(producer);
   connectors.push(connector);
   return connector;
@@ -557,5 +575,112 @@ describe("McpConnector demand lifecycle (fake clock, real in-memory SDK)", () =>
     expect(producerB.peakActive()).toBe(1);
     expect(producerA.attempted()).toBe(1);
     expect(producerB.attempted()).toBe(1);
+  });
+
+  it("P2: shutdown cancels a fenced backoff wait, frees the mutex, and removes the stale timer without replay", async () => {
+    const producer = createProducer();
+    // Every physical dial is refused at the factory boundary.
+    producer.refuseConnects(Number.POSITIVE_INFINITY);
+    const connector = makeConnector(producer);
+
+    // Five refused attempts: immediate, then exactly 1/2/5/10s.
+    const first = call(connector, "search-events", { q: "f1" });
+    await flush();
+    expect(producer.attempted()).toBe(1);
+    expect(await first).toEqual({ ok: false, code: "mcp_unavailable" });
+    for (const delay of [1000, 2000, 5000, 10000]) {
+      const before = producer.attempted();
+      const demand = call(connector, "search-events", { q: `f${delay}` });
+      await flush();
+      expect(producer.attempted()).toBe(before);
+      await vi.advanceTimersByTimeAsync(delay);
+      expect(producer.attempted()).toBe(before + 1);
+      expect(await demand).toEqual({ ok: false, code: "mcp_unavailable" });
+    }
+    expect(connector.stats().consecutiveFailures).toBe(5);
+
+    // Old demand parks on the max 30s backoff while holding the mutex; a second
+    // distinct demand queues behind it (no dial before the delay).
+    const oldA = call(connector, "search-events", { q: "old-a" });
+    await flush();
+    const oldB = call(connector, "search-events", { q: "old-b" });
+    await flush();
+    const attemptsBeforeShutdown = producer.attempted();
+    expect(attemptsBeforeShutdown).toBe(5);
+
+    // Shutdown fences + aborts the backoff SYNCHRONOUSLY: both old demands and a
+    // during-shutdown call/direct ensure are unavailable WITHOUT advancing the
+    // 30s timer, and the factory is never called again.
+    const shutdown = connector.shutdown();
+    const during = call(connector, "search-events", { q: "during" });
+    const duringEnsure = connector.ensureConnected();
+    expect(await during).toEqual({ ok: false, code: "mcp_unavailable" });
+    expect(await duringEnsure).toEqual({ ok: false, code: "mcp_unavailable" });
+    expect(await oldA).toEqual({ ok: false, code: "mcp_unavailable" });
+    expect(await oldB).toEqual({ ok: false, code: "mcp_unavailable" });
+    await shutdown;
+    expect(producer.attempted()).toBe(attemptsBeforeShutdown);
+    // Shutdown must NOT reset the failure counter (fresh demand owns its delay).
+    expect(connector.stats().consecutiveFailures).toBe(5);
+
+    // The stale 30s timer was REMOVED, not merely fenced: advancing the whole old
+    // delay dials nothing and never replays a failed logical call.
+    await vi.advanceTimersByTimeAsync(30000);
+    expect(producer.attempted()).toBe(attemptsBeforeShutdown);
+    expect(producer.entered).toEqual([]);
+    expect(connector.stats().consecutiveFailures).toBe(5);
+  });
+
+  it("P2: a fresh post-shutdown demand owns its FULL new max backoff, not the old remaining delay", async () => {
+    const producer = createProducer();
+    // Exactly five refused dials, so the sixth physical attempt is healthy.
+    producer.refuseConnects(5);
+    const connector = makeConnector(producer);
+
+    const first = call(connector, "search-events", { q: "f1" });
+    await flush();
+    expect(await first).toEqual({ ok: false, code: "mcp_unavailable" });
+    for (const delay of [1000, 2000, 5000, 10000]) {
+      const demand = call(connector, "search-events", { q: `f${delay}` });
+      await flush();
+      await vi.advanceTimersByTimeAsync(delay);
+      expect(await demand).toEqual({ ok: false, code: "mcp_unavailable" });
+    }
+    expect(connector.stats().consecutiveFailures).toBe(5);
+
+    // Old demand parks on a 30s backoff; consume only 123ms of it.
+    const old = call(connector, "search-events", { q: "old" });
+    await flush();
+    expect(producer.attempted()).toBe(5);
+    await vi.advanceTimersByTimeAsync(123);
+    expect(producer.attempted()).toBe(5);
+
+    // Shutdown aborts the stale wait; the old demand is immediately unavailable
+    // and the failure count is preserved for the fresh demand's OWN full delay.
+    await connector.shutdown();
+    expect(await old).toEqual({ ok: false, code: "mcp_unavailable" });
+    expect(connector.stats().consecutiveFailures).toBe(5);
+
+    const freshInvoke = Date.now();
+    const fresh = call(connector, "search-events", { q: "fresh" });
+    await flush();
+    expect(producer.attempted()).toBe(5);
+    await vi.advanceTimersByTimeAsync(29999);
+    expect(producer.attempted()).toBe(5);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(producer.attempted()).toBe(6);
+    expect(await fresh).toMatchObject({
+      ok: true,
+      structuredContent: { totalCount: 1 },
+    });
+    // Exactly one fresh physical dial, exactly 30s after its own invocation.
+    expect(producer.attemptTimes.at(-1)).toBe(freshInvoke + 30000);
+    // Only the fresh marker ever reached the real provider: no replay/resend.
+    expect(producer.entered).toEqual(["fresh"]);
+    expect(connector.stats()).toMatchObject({
+      connected: true,
+      consecutiveFailures: 0,
+      enabledBindings: ["search-events"],
+    });
   });
 });
