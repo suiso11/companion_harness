@@ -343,6 +343,85 @@ or complete activate config):
   full pass, which followed the OWNED workspace-resolved dependency borrow,
   is under `final-checks-with-deps/`.
 
+### PR16 review followup: retired cleanup join & late-closure renewal
+
+- This followup records **only** the PR16 review-thread fixes on the C09-05/06
+  transport bounds. It does not widen scope: the C09 security PR17 read-only
+  policy (mandatory definitions / hints / readOnly sidecar) is **NOT** part of
+  PR16, the Calendar-adoption status stays **HOLD**, and no wire config, pin, or
+  public API changes. The 8/8 stdio smoke, 7/7 loopback-HTTP smoke, and root
+  1123 tests / 92 files above remain the HISTORICAL PR16 truth; the observed
+  final counts below are a separate, later section and do not replace them.
+- P1 shutdown join (thread `PRRT_kwDOUNdW7s6rYfGY`): an overflow-detached
+  bounded cleanup is registered centrally through
+  `OwnedConnectionHooks.onCleanupStarted`, and explicit shutdown joins every
+  STARTED cleanup until its ORIGINAL bounded deadline (no reset/restart).
+  Observed BEFORE (`before-runtime/`): shutdown returned while a fresh cleanup
+  was still unsettled (~997ms stale wait before the owned 1s). AFTER
+  (`after-runtime-pr16/`): shutdown ~314ms, the owned positive public-SDK PID
+  was gone at return, exactly one production SIGKILL at ~299ms (the original
+  300ms grace), no helper safety kill, final owned PIDs alive `[]`.
+- P2 cancellable backoff (thread `PRRT_kwDOUNdW7s6rYfGX`): each connect
+  singleflight entry owns a fresh `AbortController`; shutdown aborts it
+  synchronously so a fenced demand resolves fixed `mcp_unavailable` without
+  sleeping the stale delay or holding the mutex. Observed AFTER
+  (`after-runtime-pr16/`): the old fenced demand settles fixed-unavailable ~3ms
+  after shutdown with the failure count preserved at 1 and the stale timer
+  removed; the fresh post-shutdown demand owns its FULL fresh 1000ms backoff
+  (scheduled at +0ms) and is the only call that reaches upstream (two 1000ms
+  timers total, no auto-replay).
+- Late-closure renewal (native review, fixed in-session): a RENEWED generic
+  bounded cleanup must not settle on a superseded generation's SDK client-close
+  memo or the already-resolved global close-observed latch. A numeric
+  `closeGeneration > 1` guess missed the OBSERVED pre-handoff close (raw
+  `onclose` with no physical close, generation 0); the final fix is an explicit
+  private renewal PHASE (`lateCleanupPhase`, initial false, set true only in
+  `startLateCleanup` on the generic path) so a renewed generation waits ONLY on
+  its own matching `rawClose` or the configured finite grace. `closeGeneration`
+  remains solely the stale-memo completion identity guard, and the real stdio
+  path and its candidate selection are unchanged. Observed with the generic
+  late-closure helper over the production `McpConnector` and real SDK `Client`
+  (paths `generation/observed-close/{before,after}`): BEFORE shutdown settled
+  while the first close gate was held and the new resource was still open; AFTER
+  it stays pending until the matching renewed raw close, then settles.
+  Permanent regression: the `shutdown-race.test.ts` renewed-cleanup case FAILS
+  against the heuristic and PASSES against the phase; deterministic fake-clock
+  coverage consumes 123ms of the original grace before shutdown, stays pending
+  at 499ms, and settles at the original 500ms (never a restarted 623ms), plus
+  the max-30s lifecycle cases (cancel without advancing the old timer, queued
+  fence, fresh own full 30s).
+- PR17 remains OUT of PR16: the read-only / mandatory-definition / hints /
+  readOnly sidecar policy is not promoted into this document, and the
+  unregistered/adoption **HOLD** and wire config are unchanged. This followup
+  review touches only the C09-05/06 transport-bounds scope.
+- Evidence retention: exact BEFORE/AFTER commands and JSON proof are archived
+  OUT-OF-REPO under
+  `/home/molmot/.local/share/opencode/tool-output/c09-review-response/`
+  (`before-runtime/`, `after-runtime-pr16/`, `generation/{before,after}`,
+  `generation/observed-close/{before,after}`, and the final owned scaffolding
+  archive `final-checks-pr16/`). The in-repo `.review-proof/` helper scaffolding
+  was TEMPORARY: it was archived first, then deleted so it cannot pollute
+  whole-repo lint. Helper evidence is fixture/local only — no Windows
+  process-tree or durable-PID claim, and the generic path stays HOST bounded.
+
+### PR16 final checks (observed on base 026466a)
+
+- Battery run ONCE after the doc/comment patches and the format-only pass, on
+  the owned branch with no repo config change and no helper scaffolding present:
+  - `pnpm run typecheck` -> exit 0 (root `tsconfig.json`; strict +
+    `exactOptionalPropertyTypes` + `noUnusedLocals`/`noUnusedParameters`).
+  - `pnpm run typecheck:e2e` -> exit 0 (`apps/server/tsconfig.e2e.json`).
+  - `pnpm test` (Vitest) -> **92 test files passed, 1129 tests passed**.
+  - `pnpm run lint` (Biome `check .`) -> **190 files checked, 0 warnings**,
+    1 pre-existing recommended-field info, exit 0.
+- These are the ACTUAL observed values on this working tree; they are not a
+  prediction of any future CI run or head SHA. The earlier PR16 root **1123 /
+  92** above is preserved as historical truth; the +6 tests are the new
+  review-followup regression cases (backoff interruption, retired-cleanup join,
+  and the late-closure renewal).
+- Scope: C09-05/06 transport bounds only. PR17 read-only/security policy and
+  the unregistered Calendar adoption remain **HOLD** and unchanged.
+
 ## Non-goals (explicit)
 Domain retention/GC (except newest-3 backup rotation), user export,
 session delete API, running-process deletion, auto-restore, DB/backup

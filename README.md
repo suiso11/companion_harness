@@ -892,6 +892,17 @@ Transport のライフサイクル境界（C09-05 / C09-06）:
   に queue 済みの呼び出しと shutdown 中の呼び出しは固定 fail、完了後の **新規**
   明示呼び出しのみ lazy 再接続できます。通常の failure 後の **別** の呼び出しは
   queue されても回復し、replay せず backoff も不変です。
+- 各 connect attempt は epoch ごとの **fresh AbortController** を共有し、明示
+  shutdown はそれを同期 abort します。fence された demand は
+  pre-construction backoff を sleep out せず即時固定 `mcp_unavailable` に戻り、
+  stale timer と abort listener は除去されて mutex も解放されます。failure 後の
+  fresh な demand は自分自身の **full** backoff を新規に所有し、古い残り時間を
+  継承しません（backoff の中断と再有効化の区別）。
+- shutdown は **開始済み** の bounded cleanup をすべて join しますが、その
+  bounded deadline は reset も restart もせず、元の boundary で収束します。
+  overflow 由来の detached cleanup も同じ join 対象です。join は host 側の
+  待機を bounded にするだけで、generic 経路では OS 死亡を証明しません
+  （retired cleanup join と backoff interruption の区別）。
 - HTTP は `127.0.0.1` / `localhost` のみ。**すべての 3xx** を manual で拒否し、
   拒否した response body は読み取らず安全に cancel します。
 
