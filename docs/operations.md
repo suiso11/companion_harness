@@ -613,7 +613,8 @@ or complete activate config):
   `packages/connector-calendar/test/c12-smoke.test.ts` (low-level SDK `Server`
   + `InMemoryTransport` linked pair; inert synthetic provider; no HTTP/stdio/
   OAuth/network) drives the real `McpConnector`, real adapter, real kernel
-  broker + ReferenceManager + SQLite: 10 passing cases covering one-page
+  broker + ReferenceManager + SQLite: 9 passing cases (8 pipeline + 1
+  adapter-level) covering one-page
   frozen-zone materialization with verbatim cursor + durable private target,
   same-revision reuse vs revision-change / content-change new Snapshot+rN,
   stored-only `reference.open` (zero external calls), explicit refresh with
@@ -645,12 +646,33 @@ or complete activate config):
   | C12-07 | IMPLEMENTED | A genuinely late-cancelled observation writes NO snapshot/rN/set/reference/target; a throwing target write rolls back the whole observation transaction; provenance stays opaque (rN + opaque key + structural ids) and provider ids are excluded from model-facing output while surviving only in the private table. Kernel C12-07 (x2) + smoke cases 7/9. |
   | C12-08 | IMPLEMENTED | The pipeline allocates through the single existing ReferenceManager path only; `calendar.search` registers exclusively over a validated kind-`calendar` binding; per-call frozen zone; missing private target never guesses (`reference_not_found`); bootstrap seam validates injected bindings fail-closed. Kernel C12-08 (x2) + registration validation. |
 
-- C12 final checks (observed local run on this worktree, Node 24.12.0): full
-  Vitest suite green (after the C12 additions; includes the 10 genuine-SDK
-  smoke cases and 11 kernel C12 cases), root `tsc --noEmit` exit 0, and
-  `biome check .` clean apart from the pre-existing `recommended` info. These
-  are executed-code observations, not a future CI claim; the formal C08 / C10 /
-  C11 gates above are unchanged.
+- C12 final checks (observed local run on this worktree, Node 24.12.0):
+  targeted Vitest runs show 9 genuine-SDK smoke cases, 11 kernel C12 cases,
+  21 migration cases, and 39 contracts cases green, and root
+  `tsc --noEmit` exits 0. Earlier claims of a full-suite and lint run in this
+  window were not re-observed for these final corrections and are explicitly
+  NOT claimed here; the formal C08 / C10 / C11 gates above are unchanged.
+  Additionally, an INDEPENDENT runtime smoke (not vitest: plain node script
+  via the repo's vite-node with `node:assert`, reusing the c12-smoke fixture
+  shape minus describe/it, inert synthetic provider, real SDK `Server` +
+  `McpConnector` + adapter + kernel broker + `ReferenceManager` + durable
+  SQLite, deleted after the run) observed end-to-end, in one sequence:
+  `calendar.search` succeeded with EXACTLY ONE upstream `search-events` call
+  and 1 hit; the private `calendar_get_targets` row carried the exact
+  host-side target (`calendarId`/`eventId`/`account`); `reference.open`
+  served the stored body with ZERO added upstream calls; an explicit
+  `reference.refresh` reread via exactly one `get-event` (no re-search),
+  materialized a NEW Snapshot + NEW reference id; and an upstream-failed
+  refresh observed `calendar_upstream_error` while the prior snapshot count
+  and stored body (retained via `reference.open`) stayed unchanged. Exact
+  observed ids (synthetic run): search slice reference
+  `9c537b00-eb03-41fc-90e2-ddb289ec89da` / snapshot
+  `93394e50-f075-4d4a-82a2-8c5e17ec4521` / canonicalKey
+  `calendar:9896429c…f6f8`; refresh snapshot
+  `a4e74081-2dd4-45b4-8eb6-b514f5e26cfc` / new reference
+  `d29a8066-f39d-4428-af0a-b07364d38e10`; all success booleans true except
+  the deliberately failed refresh (`calendar_upstream_error`). This
+  synthetic-only run makes NO live-Google/OAuth claim.
 
 ### C09-01 / C09-04 / C09-07 / C09-08 trusted read policy, model exposure & real stdio
 

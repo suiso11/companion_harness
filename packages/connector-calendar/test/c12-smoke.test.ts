@@ -139,12 +139,12 @@ function freshState(events: RawEvent[]): WireState {
   };
 }
 
-const closables: Array<() => Promise<unknown> | undefined> = [];
+const closables: Array<() => Promise<void>> = [];
 const tempDirs: string[] = [];
 afterEach(async () => {
   const pending = closables.splice(0);
   for (const close of pending) {
-    await Promise.resolve(close()).catch(() => undefined);
+    await close().catch(() => undefined);
   }
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
