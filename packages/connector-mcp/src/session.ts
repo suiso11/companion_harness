@@ -33,6 +33,15 @@ export interface OwnedConnectionHooks {
    * connector owns the state-invalidation/cleanup reaction.
    */
   onClosed: (session: OwnedConnection, info: { intentional: boolean }) => void;
+  /**
+   * Called SYNCHRONOUSLY exactly once per NEW memoized bounded-cleanup
+   * generation, with that generation's promise, so the owning connector can
+   * track and join every started cleanup. Idempotent/repeat `boundedClose`
+   * calls return the existing promise WITHOUT re-publishing. Pure tracking:
+   * implementations must not call back into the connection, start a recursive
+   * cleanup, or throw.
+   */
+  onCleanupStarted: (promise: Promise<void>) => void;
   /** Bounded grace window for a late-start owned cleanup. */
   shutdownWaitMs: number;
   /** Fixed post-SIGKILL window for a late-start owned cleanup. */
@@ -142,6 +151,16 @@ export class OwnedConnection implements Transport {
    * settlement (which may still be pending, or its finally never run).
    */
   private preHandoffClose = false;
+  /**
+   * RENEWAL PHASE, deliberately NOT a count and NOT derived from the numeric
+   * `closeGeneration`. Set true only when `startLateCleanup` drops a
+   * pre-handoff / settlement-fallback generic memo and issues ONE fresh owned
+   * raw close for a resource the late start creates afterwards, so the next
+   * `runBoundedClose` cannot settle on a superseded generation's settlement
+   * proxy. `closeGeneration` remains solely the stale-memo completion identity
+   * guard. Never set on the real stdio path.
+   */
+  private lateCleanupPhase = false;
   private stderrStream: ReadableStderr | undefined;
   private stderrListener: ((chunk: unknown) => void) | undefined;
   private readonly active = new Set<AbortController>();
@@ -263,8 +282,13 @@ export class OwnedConnection implements Transport {
    */
   boundedClose(graceMs: number, forceKillWaitMs: number): Promise<void> {
     if (this.boundedClosePromise !== undefined) return this.boundedClosePromise;
-    this.boundedClosePromise = this.runBoundedClose(graceMs, forceKillWaitMs);
-    return this.boundedClosePromise;
+    // Assign the memo BEFORE invoking the pure tracking hook so the hook can
+    // never re-enter into a second generation, and publish the EXACT memoized
+    // promise. A repeat call returns above without re-publishing.
+    const promise = this.runBoundedClose(graceMs, forceKillWaitMs);
+    this.boundedClosePromise = promise;
+    this.hooks.onCleanupStarted(promise);
+    return promise;
   }
 
   private async runBoundedClose(
@@ -279,11 +303,18 @@ export class OwnedConnection implements Transport {
     const clientClose = this.beginClientClose();
     if (!this.isRealStdio) {
       // No process-death claim is possible for an arbitrary transport; bound
-      // the host-side wait so a hanging close() can never strand shutdown.
-      await waitForSettle(
-        [this.closeObservedPromise, clientClose, rawClose],
-        graceMs,
-      );
+      // the host-side wait so a hanging close() can never strand shutdown. A
+      // RENEWED generic generation (an explicit late-reclamation PHASE, never
+      // a numeric generation guess) must NOT settle on the earlier
+      // generation's client close or the (possibly already resolved) global
+      // close-observed latch: those describe a resource this generation did
+      // not create. Bound it by its own matching raw close OR the configured
+      // grace deadline only. The FIRST generic generation keeps the full
+      // candidate set unchanged.
+      const candidates = this.lateCleanupPhase
+        ? [rawClose]
+        : [this.closeObservedPromise, clientClose, rawClose];
+      await waitForSettle(candidates, graceMs);
       return;
     }
     // Actual NODE child 'close' event is the only exit proof: `close()`
@@ -325,6 +356,10 @@ export class OwnedConnection implements Transport {
       this.boundedClosePromise = undefined;
       this.closeCompleted = false;
       this.preHandoffClose = false;
+      // Explicit renewal PHASE for the generic path only: the next
+      // `runBoundedClose` is a fresh generation for a late-created resource and
+      // must ignore every superseded generation's settlement proxy.
+      this.lateCleanupPhase = true;
     }
     await this.boundedClose(
       this.hooks.shutdownWaitMs,

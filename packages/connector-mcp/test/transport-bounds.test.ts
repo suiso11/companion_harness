@@ -93,6 +93,7 @@ class ControlledEmitter implements Transport {
   readonly initializeEntered = deferred<void>();
   readonly toolsListEntered = deferred<void>();
   readonly toolCallEntered = deferred<void>();
+  readonly closeEntered = deferred<void>();
   readonly resourceClosed = deferred<void>();
 
   private readonly pendingCalls: Array<string | number> = [];
@@ -106,6 +107,9 @@ class ControlledEmitter implements Transport {
 
   async close(): Promise<void> {
     this.closeCount += 1;
+    // Entered signal at the PHYSICAL close entry, BEFORE the hang branch, so a
+    // causal request-failure cleanup is observable even when close() hangs.
+    this.closeEntered.resolve();
     if (this.hangClose) return new Promise<void>(() => undefined);
     if (!this.hostResourceOpen) return;
     this.hostResourceOpen = false;
@@ -599,5 +603,132 @@ describe("C09-05 stderr bounds and owned cleanup", () => {
       consecutiveFailures: 0,
       enabledBindings: [TOOL],
     });
+  });
+
+  it("P1: explicit shutdown joins a DETACHED overflow cleanup until its ORIGINAL grace deadline (close once, decoy pid never killed)", async () => {
+    const transport = new ControlledEmitter();
+    const { connector, transports } = makeConnector([transport]);
+    expect(await track(connector.ensureConnected())).toEqual({ ok: true });
+
+    const killSpy = vi.spyOn(process, "kill");
+    transport.hangToolCall = true;
+    transport.hangClose = true;
+    const call = track(connector.callTool(TOOL, { q: "overflow-join" }));
+    await transport.toolCallEntered.promise;
+
+    await transport.emitStderr(CAP + 1);
+    // Overflow invalidated public state and started ONE detached bounded close.
+    expect(connector.stats()).toEqual({
+      connected: false,
+      consecutiveFailures: 1,
+      enabledBindings: [],
+    });
+    // The ORIGINAL deadline base is the cleanup generation's own physical close,
+    // observed causally (never inferred from a bare counter).
+    await transport.closeEntered.promise;
+    const t0 = Date.now();
+    expect(transport.closeCount).toBe(1);
+
+    // Consume a NONZERO piece of the ORIGINAL 500ms grace BEFORE shutdown.
+    await vi.advanceTimersByTimeAsync(123);
+    expect(Date.now() - t0).toBe(123);
+
+    // Explicit shutdown BEFORE the original grace elapses must JOIN the detached
+    // cleanup instead of returning while the owned close is still pending.
+    // Parallel shutdowns are the same promise.
+    const shutdownA = track(connector.shutdown());
+    expect(connector.shutdown()).toBe(shutdownA);
+    // Invoked WHILE shutting down: fenced at invocation, still unavailable even
+    // though it only reaches the mutex after the joined cleanup settles.
+    const during = track(connector.callTool(TOOL, { q: "during" }));
+    let shutdownSettled = false;
+    void shutdownA.then(() => {
+      shutdownSettled = true;
+    });
+    await flush();
+    // The original 500ms generic grace is neither reset NOR restarted by
+    // joining: settlement lands at the original boundary, not a second 623ms.
+    await vi.advanceTimersByTimeAsync(376);
+    expect(Date.now() - t0).toBe(499);
+    expect(shutdownSettled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(Date.now() - t0).toBe(500);
+    await shutdownA;
+    expect(shutdownSettled).toBe(true);
+
+    // Exactly one physical generic close; the bound is a host deadline, never an
+    // OS process claim: the decoy pid is never signalled.
+    expect(transport.closeCount).toBe(1);
+    expect(transport.pid).toBe(987654);
+    expect(killSpy).not.toHaveBeenCalled();
+    expect(transports.length).toBe(1);
+    // The gated logical call is unavailable, counted once, never replayed.
+    expect(await call).toEqual({ ok: false, code: "mcp_unavailable" });
+    expect(connector.stats().consecutiveFailures).toBe(1);
+    // The during-shutdown call queued behind the joined cleanup's mutex still
+    // settles fixed-unavailable and never dials a new peer.
+    expect(await during).toEqual({ ok: false, code: "mcp_unavailable" });
+    expect(transports.length).toBe(1);
+
+    killSpy.mockRestore();
+  });
+
+  it("P1: shutdown joins a REQUEST-FAILURE cleanupSession bound and counts one failure", async () => {
+    const transport = new ControlledEmitter();
+    const { connector, transports } = makeConnector([transport]);
+    expect(await track(connector.ensureConnected())).toEqual({ ok: true });
+
+    const killSpy = vi.spyOn(process, "kill");
+    transport.hangToolCall = true;
+    transport.hangClose = true;
+    const controller = new AbortController();
+    // Caller cancellation rejects the in-flight SDK request, routing through the
+    // request-failure `cleanupSession` path with a hanging generic close.
+    const call = track(
+      connector.callTool(TOOL, { q: "cancel-join" }, controller.signal),
+    );
+    await transport.toolCallEntered.promise;
+
+    controller.abort();
+    // Deterministic: the cleanup's physical raw close is invoked exactly when
+    // the request-failure cleanupSession path starts. Fake Date is unchanged by
+    // microtask progress, so this is the ORIGINAL bounded-close deadline base.
+    await transport.closeEntered.promise;
+    const t0 = Date.now();
+    expect(connector.stats()).toEqual({
+      connected: false,
+      consecutiveFailures: 1,
+      enabledBindings: [],
+    });
+    expect(transport.closeCount).toBe(1);
+
+    // Consume a NONZERO piece of the ORIGINAL 500ms grace BEFORE shutdown.
+    await vi.advanceTimersByTimeAsync(123);
+    expect(Date.now() - t0).toBe(123);
+
+    const shutdown = track(connector.shutdown());
+    let settled = false;
+    void shutdown.then(() => {
+      settled = true;
+    });
+    // Joining must NOT reset NOR restart the original deadline: the remaining
+    // 376ms lands at the original 500ms boundary, never a second 623ms.
+    await vi.advanceTimersByTimeAsync(376);
+    expect(Date.now() - t0).toBe(499);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(Date.now() - t0).toBe(500);
+    await shutdown;
+    expect(settled).toBe(true);
+
+    expect(await call).toEqual({ ok: false, code: "mcp_unavailable" });
+    // Failure counted exactly once (cleanup was not double-counted by the join).
+    expect(connector.stats().consecutiveFailures).toBe(1);
+    expect(transport.closeCount).toBe(1);
+    expect(transport.pid).toBe(987654);
+    expect(killSpy).not.toHaveBeenCalled();
+    expect(transports.length).toBe(1);
+
+    killSpy.mockRestore();
   });
 });

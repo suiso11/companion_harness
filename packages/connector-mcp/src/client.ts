@@ -320,9 +320,27 @@ export class McpConnector {
   private shutdownEpoch = 0;
   private shuttingDown = false;
   private shutdownInFlight: Promise<void> | undefined;
+  /**
+   * One in-progress physical connect attempt per epoch. Every joiner shares the
+   * same entry, including its per-attempt AbortController; shutdown aborts that
+   * controller so a fenced demand stops waiting the pre-construction backoff
+   * (and releases the mutex) instead of sleeping out a stale delay.
+   */
   private connectInFlight:
-    | { epoch: number; promise: Promise<EnsureResult> }
+    | {
+        epoch: number;
+        controller: AbortController;
+        promise: Promise<EnsureResult>;
+      }
     | undefined;
+  /**
+   * Every bounded cleanup generation started by an owned connection, registered
+   * centrally through `OwnedConnectionHooks.onCleanupStarted`. Explicit
+   * shutdown joins only the cleanups already STARTED by the time it snapshots
+   * this set (see `shutdown`); a cleanup that starts after shutdown completes
+   * is outside this set. Pure bookkeeping only.
+   */
+  private readonly pendingCleanups = new Set<Promise<void>>();
 
   constructor(
     private readonly config: McpConnectorConfig,
@@ -563,9 +581,15 @@ export class McpConnector {
     this.session = undefined;
     this.connected = false;
     this.enabledBindings = [];
-    // Retire any connect singleflight so a stopped attempt can never be joined
-    // by a fresh demand on the same epoch.
+    // Retire AND abort any in-flight connect singleflight so a stopped attempt
+    // can never be joined by a fresh demand on the same epoch AND a demand
+    // currently waiting the pre-construction backoff stops immediately (its
+    // timer is cleared) rather than sleeping out the stale delay while holding
+    // the mutex. The identity-guarded `finally` in `ensureConnectedForEpoch`
+    // keeps this retired entry from clearing a NEW attempt.
+    const inflight = this.connectInFlight;
     this.connectInFlight = undefined;
+    if (inflight !== undefined) inflight.controller.abort("cancelled");
     // Synchronous owned stop BEFORE the singleflight body runs any await, so a
     // shutdown invoked before a connect settles still fences that attempt.
     if (session !== undefined) session.beginStop();
@@ -576,6 +600,17 @@ export class McpConnector {
       .then(async () => {
         if (session !== undefined) {
           await session.boundedClose(this.shutdownWaitMs(), FORCE_KILL_WAIT_MS);
+        }
+        // Join EVERY bounded cleanup generation registered centrally via the
+        // owned `onCleanupStarted` hook. This covers a detached overflow/close
+        // cleanup started before shutdown captured state (session undefined)
+        // and any additional generation — e.g. a late-start generic renewal —
+        // that starts WHILE an earlier one is still being awaited. Snapshot each
+        // round so a newly started generation is also drained; each generation
+        // is itself bounded by its grace + fixed post-kill window, so this
+        // terminates.
+        while (this.pendingCleanups.size > 0) {
+          await Promise.allSettled([...this.pendingCleanups]);
         }
       })
       .finally(() => {
@@ -598,11 +633,19 @@ export class McpConnector {
     if (inflight !== undefined && inflight.epoch === epoch) {
       return inflight.promise;
     }
-    const entry: { epoch: number; promise: Promise<EnsureResult> } = {
+    // One FRESH controller per physical connect attempt; every joiner of this
+    // epoch shares it so shutdown aborts the single shared backoff wait.
+    const controller = new AbortController();
+    const entry: {
+      epoch: number;
+      controller: AbortController;
+      promise: Promise<EnsureResult>;
+    } = {
       epoch,
+      controller,
       promise: Promise.resolve({ ok: true } as EnsureResult),
     };
-    const promise = this.doConnect(epoch).finally(() => {
+    const promise = this.doConnect(epoch, controller.signal).finally(() => {
       if (this.connectInFlight === entry) this.connectInFlight = undefined;
     });
     entry.promise = promise;
@@ -610,7 +653,10 @@ export class McpConnector {
     return promise;
   }
 
-  private async doConnect(epoch: number): Promise<EnsureResult> {
+  private async doConnect(
+    epoch: number,
+    signal: AbortSignal,
+  ): Promise<EnsureResult> {
     // Runtime boundary for programmatic configs that bypass the zod schema:
     // a missing/empty wire-identity expectation fails closed with the fixed
     // mismatch BEFORE any transport creation/spawn or tools/list.
@@ -626,9 +672,13 @@ export class McpConnector {
       return { ok: false, code: "mcp_unavailable" as const };
     }
     if (this.consecutiveFailures > 0) {
-      await sleep(nextBackoffMs(this.consecutiveFailures));
+      // Cancellable demand backoff: a shutdown fence (or any abort of this
+      // attempt's controller) resolves the wait immediately and clears its
+      // timer, so a fenced demand never sleeps out a stale delay or holds the
+      // mutex while a fresh post-shutdown demand waits a FULL new delay.
+      await sleep(nextBackoffMs(this.consecutiveFailures), signal);
     }
-    if (this.isStopped(epoch)) {
+    if (this.isStopped(epoch) || signal.aborted) {
       return { ok: false, code: "mcp_unavailable" as const };
     }
     let session: OwnedConnection | undefined;
@@ -642,6 +692,9 @@ export class McpConnector {
         {
           onOverflow: (s) => this.handleOverflow(s),
           onClosed: (s, info) => this.handleClosed(s, info),
+          onCleanupStarted: (promise) => {
+            this.trackCleanup(promise);
+          },
           shutdownWaitMs: this.shutdownWaitMs(),
           forceKillWaitMs: FORCE_KILL_WAIT_MS,
         },
@@ -855,6 +908,28 @@ export class McpConnector {
     this.consecutiveFailures += 1;
   }
 
+  /**
+   * Central registration of one owned bounded-cleanup generation. The
+   * `onCleanupStarted` hook fires exactly once per NEW memoized cleanup (a
+   * repeat `boundedClose` returns the same promise without re-publishing), so
+   * shutdown can join every generation without manual tracking at each call
+   * site. Pure bookkeeping: the settlement handlers delete ONLY this promise,
+   * never throw, and have no state/failure/publication side effects, so they
+   * can never leak an unhandled rejection or delete a newer generation.
+   */
+  private trackCleanup(promise: Promise<void>): void {
+    if (this.pendingCleanups.has(promise)) return;
+    this.pendingCleanups.add(promise);
+    promise.then(
+      () => {
+        this.pendingCleanups.delete(promise);
+      },
+      () => {
+        this.pendingCleanups.delete(promise);
+      },
+    );
+  }
+
   private isStopped(epoch: number): boolean {
     return this.shuttingDown || epoch !== this.shutdownEpoch;
   }
@@ -941,8 +1016,31 @@ function computeBindingIdentity(
   return { enabled, disabled };
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * Cancellable delay. Resolves when `ms` elapses OR when `signal` aborts
+ * (immediately, if already aborted). A single shared settlement clears the
+ * timeout and removes the once abort listener so no stale demand timer and no
+ * listener survive an aborted backoff. Required signal: every demand backoff is
+ * cancellable.
+ */
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      if (timer !== undefined) clearTimeout(timer);
+      signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    timer = setTimeout(finish, ms);
+    signal.addEventListener("abort", finish, { once: true });
+  });
 }
 
 /**

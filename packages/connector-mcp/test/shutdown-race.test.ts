@@ -89,6 +89,20 @@ class ControlledTransport implements Transport {
   closeNeverSettles = false;
   /** When set, `start()` creates the resource and only THEN rejects. */
   rejectAfterStart = false;
+  /**
+   * When set and the close is at least the SECOND physical close, `close()`
+   * releases the host resource and fires `onclose` only AFTER this gate settles,
+   * modelling a real second cleanup generation that is finite but still pending
+   * while shutdown is joining an earlier generation.
+   */
+  secondCloseGate?: Deferred<void>;
+  /**
+   * When set, the FIRST physical `close()` releases the host resource
+   * and fires `onclose` only AFTER this gate settles. Used by the observed
+   * pre-handoff case, where the observed event issued no physical close so the
+   * renewed generation's own raw close is the first one.
+   */
+  firstCloseGate?: Deferred<void>;
 
   startGate?: Deferred<void>;
   initializeGate?: Deferred<void>;
@@ -97,6 +111,10 @@ class ControlledTransport implements Transport {
 
   readonly startEntered = deferred<void>();
   readonly closeEntered = deferred<void>();
+  /** Resolves when the FIRST physical close has been invoked. */
+  readonly close1Entered = deferred<void>();
+  /** Resolves when the SECOND physical close has been invoked. */
+  readonly close2Entered = deferred<void>();
   readonly initializeEntered = deferred<void>();
   readonly initializedEntered = deferred<void>();
   readonly toolsListEntered = deferred<void>();
@@ -116,14 +134,32 @@ class ControlledTransport implements Transport {
   async close(): Promise<void> {
     this.closeCount += 1;
     this.closeEntered.resolve();
+    if (this.closeCount === 1) this.close1Entered.resolve();
+    if (this.closeCount >= 2) this.close2Entered.resolve();
     if (this.releaseStartOnClose) this.startGate?.resolve();
     if (this.hangClose) return new Promise<void>(() => undefined);
+    if (this.firstCloseGate !== undefined && this.closeCount === 1) {
+      await this.firstCloseGate.promise;
+    }
+    if (this.secondCloseGate !== undefined && this.closeCount >= 2) {
+      await this.secondCloseGate.promise;
+    }
     if (this.hostResourceOpen) {
       this.hostResourceOpen = false;
       this.resourceClosed.resolve();
       this.onclose?.();
     }
     if (this.closeNeverSettles) return new Promise<void>(() => undefined);
+  }
+
+  /**
+   * Emit a real PUBLIC raw close event WITHOUT invoking `close()`: models an
+   * observed pre-handoff close (the peer transport closed itself) that never
+   * issued a physical `raw.close()`, so the owned raw-close generation stays at
+   * its initial value while the global close-observed latch resolves.
+   */
+  emitClose(): void {
+    this.onclose?.();
   }
 
   async send(
@@ -174,6 +210,8 @@ class ControlledTransport implements Transport {
 
   releaseAll(): void {
     this.startGate?.resolve();
+    this.firstCloseGate?.resolve();
+    this.secondCloseGate?.resolve();
     this.initializeGate?.resolve();
     this.initializedGate?.resolve();
     this.toolsListGate?.resolve();
@@ -582,7 +620,18 @@ describe("C09-06 explicit shutdown fencing", () => {
     // could not cover a resource that did not exist when it was invoked.
     expect(peer.closeCount).toBe(2);
     expect(await connect).toEqual({ ok: false, code: "mcp_unavailable" });
+    // The RENEWED generation's own raw close never settles, so its OWN finite
+    // grace bound (never the superseded generation's client-close / global
+    // close-observed latch) is what releases the joined shutdown.
+    let renewalSettled = false;
+    void shutdown.then(() => {
+      renewalSettled = true;
+    });
+    await vi.advanceTimersByTimeAsync(99);
+    expect(renewalSettled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
     await shutdown;
+    expect(renewalSettled).toBe(true);
     await flush();
 
     // A fresh explicit call connects while the OLD never-settling close memo is
@@ -722,5 +771,130 @@ describe("C09-06 explicit shutdown fencing", () => {
     expect(peer.initializeCount).toBe(1);
     expect(transports.length).toBe(1);
     expect(connector.isAllowed(TOOL)).toBe(true);
+  });
+
+  it("joins a SECOND cleanup generation that starts WHILE shutdown awaits the first (finite late-resource close)", async () => {
+    const peer = new ControlledTransport();
+    peer.startGate = deferred<void>();
+    // The first cleanup's close releases the raw start gate; the resumed start
+    // then creates its host resource and its late cleanup begins a SECOND
+    // generation. That second close is gated so it is genuinely pending.
+    peer.releaseStartOnClose = true;
+    peer.secondCloseGate = deferred<void>();
+    const { connector, transports } = makeConnector([peer]);
+
+    const connect = track(connector.callTool(TOOL, { q: "renew" }));
+    await peer.startEntered.promise;
+
+    const shutdown = track(connector.shutdown());
+    let settled = false;
+    void shutdown.then(() => {
+      settled = true;
+    });
+
+    // The first close runs, releases the start gate, and the late start renews
+    // the cleanup: a SECOND physical close is invoked while shutdown is still
+    // awaiting the first generation.
+    await peer.close2Entered.promise;
+    expect(peer.closeCount).toBe(2);
+    expect(peer.hostResourceOpen).toBe(true);
+
+    // Hold the second close gate THROUGH the first generation's client-close
+    // continuation and every SDK microtask (two native setImmediate turns with
+    // zero fake-time advance). A renewed generation that wrongly settled on the
+    // SUPERSEDED client close / global close-observed latch would complete
+    // shutdown and unregister here, so this is the causal hold: the first
+    // generation is done while the second is genuinely pending.
+    await flush();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await flush();
+
+    // The second generation is still pending, so shutdown must NOT complete yet.
+    expect(settled).toBe(false);
+    expect(peer.hostResourceOpen).toBe(true);
+    expect(peer.closeCount).toBe(2);
+
+    // Release the second (real) generation: the resource is actually closed.
+    peer.secondCloseGate?.resolve();
+    await peer.resourceClosed.promise;
+    expect(peer.hostResourceOpen).toBe(false);
+    await shutdown;
+    expect(settled).toBe(true);
+    expect(peer.closeCount).toBe(2);
+    expect(await connect).toEqual({ ok: false, code: "mcp_unavailable" });
+
+    // A fresh post-shutdown peer is unaffected and finite.
+    const fresh = track(connector.callTool(TOOL, { q: "fresh" }));
+    expect(await fresh).toMatchObject({ ok: true, text: "hits" });
+    expect(transports.length).toBe(2);
+    const freshPeer = transports[1] as ControlledTransport;
+    expect(freshPeer.closeCount).toBe(0);
+    expect(connector.stats()).toMatchObject({
+      connected: true,
+      consecutiveFailures: 0,
+      enabledBindings: [TOOL],
+    });
+  });
+
+  it("does not settle a renewed cleanup on the pre-handoff OBSERVED close latch (late resource)", async () => {
+    const peer = new ControlledTransport();
+    peer.startGate = deferred<void>();
+    // The renewed generation's own raw close is the FIRST physical close (the
+    // observed event issued no physical close); hold it so the renewed cleanup
+    // is genuinely pending while shutdown joins it.
+    peer.firstCloseGate = deferred<void>();
+    const { connector, transports } = makeConnector([peer]);
+
+    const connect = track(
+      connector.callTool(TOOL, { q: "observed-pre-handoff" }),
+    );
+    await peer.startEntered.promise;
+
+    // A real PUBLIC raw close is OBSERVED before the resource handoff. No
+    // physical raw.close() is invoked, so the owned raw-close generation is
+    // still at its initial value while the global close-observed latch
+    // resolves. The connector retires the connection and starts its own
+    // (already-settled) bounded cleanup.
+    peer.emitClose();
+    expect(await connect).toEqual({ ok: false, code: "mcp_unavailable" });
+    await flush();
+    expect(peer.closeCount).toBe(0);
+
+    // Release the held raw start: the resource is created only NOW, AFTER the
+    // observed close, so the late handoff renews the owned cleanup and its own
+    // physical raw close is held by the first-close gate.
+    peer.startGate.resolve();
+    await peer.close1Entered.promise;
+    expect(peer.hostResourceOpen).toBe(true);
+    expect(peer.closeCount).toBe(1);
+
+    // Explicit shutdown invoked AFTER the renewed generation has entered: it
+    // must JOIN the pending cleanup, never return on the stale global
+    // close-observed latch or the superseded SDK client close.
+    const shutdown = track(connector.shutdown());
+    let settled = false;
+    void shutdown.then(() => {
+      settled = true;
+    });
+    await flush();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await flush();
+
+    expect(settled).toBe(false);
+    expect(peer.hostResourceOpen).toBe(true);
+    expect(peer.closeCount).toBe(1);
+
+    // Release the matching renewed raw close: the new resource really closes.
+    peer.firstCloseGate?.resolve();
+    await peer.resourceClosed.promise;
+    expect(peer.hostResourceOpen).toBe(false);
+    await shutdown;
+    expect(settled).toBe(true);
+    expect(peer.closeCount).toBe(1);
+    expect(connector.stats()).toMatchObject({
+      connected: false,
+      enabledBindings: [],
+    });
+    expect(transports.length).toBe(1);
   });
 });
