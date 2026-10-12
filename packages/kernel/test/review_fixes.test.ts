@@ -805,7 +805,7 @@ describe("idempotency key lowercase migration (PR #3)", () => {
           db: handle.raw,
           backupDir: join(dir, "backups"),
         }),
-      ).rejects.toThrow(/migration 3 -> 5 failed/);
+      ).rejects.toThrow(/migration 3 -> \d+ failed/);
       // Fail closed: version unchanged, both colliding rows preserved.
       expect(getSchemaVersion(handle.raw)).toBe(3);
       const rows = handle.raw

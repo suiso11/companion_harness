@@ -171,7 +171,7 @@ describe("m0 kernel pragmas and single connection", () => {
 });
 
 describe("m0 kernel DDL shape", () => {
-  it("creates exactly the seven M0 plus nine M1 plus one M2 tables, all STRICT, none WITHOUT ROWID", async () => {
+  it("creates exactly the seven M0 plus nine M1 plus one M2 plus one M4 tables, all STRICT, none WITHOUT ROWID", async () => {
     const handle = await openMigratedMemory();
     try {
       const rows = handle.raw
@@ -181,6 +181,7 @@ describe("m0 kernel DDL shape", () => {
         .all() as Array<{ name: string; sql: string }>;
       expect(rows.map((row) => row.name)).toEqual([
         "api_idempotency",
+        "calendar_get_targets",
         "connector_instances",
         "evidence_grants",
         "model_calls",
