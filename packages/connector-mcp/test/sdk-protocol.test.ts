@@ -5,8 +5,8 @@
  *
  * Proves initialize → tools/list → tools/call with structuredContent through
  * the actual SDK. This does NOT prove compatibility with the unmodified
- * nspady upstream (adoption gate remains; see binding.ts in
- * @companion/connector-calendar).
+ * nspady upstream (adoption gate remains; see the Calendar consumer policy
+ * in @companion/connector-calendar).
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";

@@ -348,6 +348,124 @@ or complete activate config):
   full pass, which followed the OWNED workspace-resolved dependency borrow,
   is under `final-checks-with-deps/`.
 
+### C10 Calendar consumer normalization (implemented; adoption HOLD)
+
+- This subsection records the CURRENT C10 scope only. It is NOT a live-Google,
+  OAuth, fork-compatibility, profile-registration or adoption claim, and no
+  package pin changed (`@modelcontextprotocol/sdk@1.30.0`, `zod@4.5.4`). The
+  only new dependency edge is the owned workspace
+  `@companion/connector-mcp` (for the public `CallResult` / `McpErrorCode`
+  types), added to `packages/connector-calendar` with the exact pnpm-lock
+  importer entry (no external install/pin).
+- Consumer decoder (package-owned, no new provider framework, no retries,
+  logs, telemetry or dispatch): `normalizeSearchResult(result, options)` →
+  `{ok:true,events,cursor?}` / `{ok:false,code}` and `normalizeGetResult(result,
+  options)` → `{ok:true,event}` / `{ok:false,code}`, both over the merged
+  `CallResult`. `normalizeEvent(raw, {connectorInstanceId})` remains the
+  primitive and rejects with the fixed `Error("calendar_response_invalid")`
+  (no cause/raw value/Zod issue). `structuredContent` is selected by
+  OWN-PROPERTY presence; a present `null`/`undefined`/wrong-shaped value is the
+  only source and is never rescued by `text`. Only an ABSENT
+  `structuredContent` permits parsing the ENTIRE `text` as strict JSON (no
+  fences, prose, prefix/suffix scanning, event synthesis or auto-pagination).
+  An incoming fixed MCP failure code is preserved verbatim.
+  Transport seam (documented, not an end-to-end claim): the merged MCP client
+  omits `structuredContent` when its value is `undefined`, so a direct
+  own-property `undefined` is rejected at the Calendar boundary but an
+  upstream property-present `undefined` is indistinguishable from absence
+  after transport (illegal JSON cannot carry it).
+- Exact root envelopes: `list-events` and `search-events` pages
+  (`{events,totalCount,nextPageToken?}` plus each operation's source-proven
+  optional metadata) selected by an explicit `operation` option, and
+  `get-event` `{event}`. `totalCount` must equal the PAGE `events.length`; a
+  page with more than the requested `1..20` events is rejected (never sliced);
+  unknown root fields, wrong-operation envelopes and cross-calendar raw ids are
+  rejected; no id/calendarId is derived from the root.
+- Event projection: the REAL nested `{dateTime?,date?,timeZone?}` endpoint union
+  (exactly one of `date`/`dateTime`); all-day DATE values stay DATE strings with
+  an exclusive end; explicit-offset timed instants are canonicalized to UTC.
+  Required consumed fields (`id`, `calendarId`, `status`, `summary`, endpoints)
+  are strict CONSUMER policy (the candidate producer marks `summary`/`status`
+  optional) — no fabricated title/confirmed status. The seven privacy keys
+  (`creator`/`attendees`/`organizer`/`conferenceData`/`hangoutLink`/`htmlLink`/
+  `extendedProperties`) plus all unknown extras, `accountId`, page metadata and
+  source identifiers are stripped and excluded from the snapshot and hash.
+  Allowed `title`/`description`/`location` plaintext may itself contain
+  emails/URLs; no general free-text redaction is claimed.
+- Revision precedence unchanged: non-empty opaque `etag` (quotes preserved) >
+  canonical `updated` > normalized-projection hash (computed after temporal
+  canonicalization and truncation, excluding identity/revision/private fields).
+  `canonicalKey` stays `SHA-256(JSON([connectorInstanceId, calendarId,
+  eventId]))`. C11 deletion behavior is unchanged (untouched by C10).
+- Candidate compatibility gap (explicit): the candidate source regex accepts
+  only WHOLE-second `Z`/`±HH:MM` datetimes, while the agreed consumer input
+  keeps fractional-second ISO precision (the exact 90d+1ms boundary depends on
+  it). The mapper does not silently truncate/round/narrow, so this remains a
+  documented gap and an additional adoption HOLD; no full-fork-compatibility
+  claim is made.
+- **C10-08 production mapping gate (UNRESOLVED):** no adopted
+  `McpBindingDefinition`, pin, profile, OAuth flow or live-Google wiring
+  exists. The candidate mapping is proven only against the retained
+  synthetic-provider C08 archive (provider bodies are unadopted compatibility
+  targets). Calendar consumer-readiness ≠ profile-connected/adopted, and the
+  formal C08 adoption status stays **HOLD / NOT ADOPTED**. Test counts and
+  command results observed for this patch are recorded by the parent's
+  verification phase; no count is claimed here.
+- **Final verification (observed; full patch, each check run once):** direct Node
+  24.12 CLIs from the OWNED worktree node_modules (no pnpm exec/install/relink/
+  dlx/npx, no test filter). FIRST attempt: `tsc --noEmit -p
+  apps/server/tsconfig.e2e.json` PASS (exit 0); full `vitest run` PASS (exit 0,
+  94 test files / 1164 tests, 0 failed/skipped); `tsc --noEmit -p tsconfig.json`
+  FAIL (exit 2, 3× TS18048 `'zone' is possibly 'undefined'` at
+  `packages/connector-calendar/src/time.ts` lines 96/97/98); `biome check .` FAIL
+  (exit 1, 191 files, 1 error `assist/source/organizeImports` at
+  `packages/connector-calendar/src/index.ts:1`, 1 warning
+  `lint/suspicious/noPrototypeBuiltins` at
+  `packages/connector-calendar/src/normalize.ts:344`, 2 infos
+  `lint/complexity/noUselessUndefinedInitialization` at `normalize.ts:402` plus
+  the pre-existing `biome.json` deprecated-`recommended` config note).
+- **Bounded type/lint fix (CURRENT):** type-only mandatory-zone-capture assertion
+  in `time.ts` (no runtime change; offsets/normal path byte-identical),
+  `normalize.ts:344` own-property presence via `Object.hasOwn` (same semantics
+  incl. present null/undefined and prototype-safety), removal of the useless
+  `= undefined` initializer at `normalize.ts:402`, and an organizeImports reorder
+  in `index.ts`. Re-running ONLY the two previously-failed checks once each:
+  `tsc --noEmit -p tsconfig.json` PASS (exit 0, empty output); `biome check .`
+  PASS (exit 0, 191 files, 0 errors / 0 warnings, 1 info = the pre-existing
+  `biome.json` deprecated-`recommended` note). The changed presence branch was
+  smoked against the retained C08 bodies over the ACTUAL public decoders
+  (11/11 pass: own `structuredContent` priority, present null/undefined rejects,
+  absent -> strict text, inherited/shadow `hasOwnProperty` irrelevant); the
+  throwaway `.review-proof` was removed and archived at
+  `c10-calendar-verify/failed-check-fix/`. The earlier e2e typecheck PASS (exit 0)
+  and full 94 files / 1164 tests PASS are preserved and NOT rerun by this
+  type/lint-only patch; no new full-test run is claimed. The touched-TS
+  `biome format --write` run (7 files, 4 rewritten) was syntax-only and is not
+  rerun.
+- **time.ts native-review regression proof (archived out-of-repo):** the two
+  fixes (year-0000 leap-day construction; 3-digit bounded fractional ms) are
+  proven by actual Node 24.12.0 public/source-API probes at
+  `c10-calendar-verify/time-review/` (14 files, byte-hash verified); the worktree
+  `.review-proof` was removed after the copy. BEFORE the failure mode was split,
+  not a blanket rejection: the timed year-0000 leap-day and `+01:00` offset
+  normalizations returned `ok:true` with silently corrupted instants
+  (`0000-02-29` shifted to `0000-03-01`, and the offset start off by one day,
+  under the old `Date.UTC(0,…)` → 1900 non-leap rollover), and where a
+  `.999999999999999999` fraction was accepted it advanced to `09:00:01.000Z`
+  with a `sourceRevision` differing from `.999Z`; only the all-day year-0000
+  leap-day range and the long-fraction interval failed closed with
+  `calendar_response_invalid`. AFTER: `0000-02-29` parses as-is, `+01:00` offset
+  → `0000-02-28T23:00:00.000Z`, long fraction → `09:00:00.999Z` (no next-second
+  carry), and `.999Z` vs the long fraction give identical `sourceRevision`; the
+  normal path is byte-identical. esbuild used was `0.25.12` (root pnpm store
+  leaf; root also has `0.28.2`, which was NOT used).
+- The incidental unit test that echoed an incoming fixed failure code verbatim
+  (`preserves incoming fixed MCP failure codes without decoding`) was deleted; no
+  mock-echo/forwarding replacement was added. MCP failure-code propagation is
+  covered by the genuine SDK not-found runtime path, not by a unit echo. C11
+  deletion behavior and the formal C08 HOLD / C10-08 production mapping gate are
+  unchanged.
+
 ### C09-01 / C09-04 / C09-07 / C09-08 trusted read policy, model exposure & real stdio
 
 - This subsection records the CURRENT new-scope observed work: C09-07 trusted

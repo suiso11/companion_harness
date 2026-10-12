@@ -385,22 +385,32 @@ doc links to this table; do not re-list the four hashes elsewhere.
   `/home/molmot/.local/share/opencode/tool-output/c08-probe`, accepted by the
   parent as a safe operational path change.)
 
-### Producer/consumer mismatch (current `main` fact)
+### Producer/consumer mismatch (HISTORICAL C08 fact; fixed by C10)
 
-- The proposal's consumer `proposedUpstreamEventSchema` /
-  `normalizeEvent` in `packages/connector-calendar/src/normalize.ts`
-  (`start`/`end` typed as `z.string()`) **REJECTS** the actual timed event and
-  the actual all-day event: ZodError `invalid_type` at `path=start`/`end`,
-  expected `string`, received `object`.
-- A control event with **string** `start`/`end` is accepted (sourceRevision
+- Retained archive fact: at the C08 probe revision the consumer
+  `proposedUpstreamEventSchema` / `normalizeEvent` in
+  `packages/connector-calendar/src/normalize.ts` (`start`/`end` typed as
+  `z.string()`) **REJECTED** the actual timed event and the actual all-day
+  event: ZodError `invalid_type` at `path=start`/`end`, expected `string`,
+  received `object`.
+- A control event with **string** `start`/`end` was accepted (sourceRevision
   from `etag`, revisionBasis `etag`).
 - Currency check: the three C08 companion source files have **identical git
   blob hashes** at the probe revision and at `origin/master` `e6b5353`
   (`packages/connector-mcp/src/client.ts` `60f3db47…`, `config.ts` `0db183ce…`,
-  `packages/connector-calendar/src/normalize.ts` `39178153…`). The mismatch
-  and identity gaps are therefore **current-main** facts, not branch-only.
+  `packages/connector-calendar/src/normalize.ts` `39178153…`), so the mismatch
+  was a `e6b5353`-era fact.
+- **Superseded (this branch, C10):** the flat `proposedUpstreamEventSchema`
+  no longer exists. The consumer now validates the REAL nested
+  `{dateTime?,date?,timeZone?}` endpoints observed in the retained archive and
+  decodes the actual `{events,totalCount,nextPageToken?}` / `{event}` roots
+  (`normalizeSearchResult` / `normalizeGetResult`). Retained archive evidence
+  is unchanged; only the consumer code moved. Formal adoption remains **HOLD**;
+  the C10-08 production mapping gate is unresolved (no adopted binding, pin,
+  profile or live-Google wiring), and the candidate whole-second datetime regex
+  vs agreed fractional ISO input remains an explicit compatibility gap.
 
-### C08-07 identity decision (DONE — decision selected; C09 implementation gap)
+### C08-07 identity decision (DONE — decision selected; C09 guard implemented on merged master)
 
 **Decision (parent GIVEN, 2026-10-11):** `serverId` remains the logical
 configuration/binding identifier in the existing §17.3 tuple
@@ -419,7 +429,7 @@ SHA `97a3dc36873b8f52870695d7706d182d5a8fc401` + lock digest
 existing config documentation already means); for this candidate that expected
 upstream-surface version is `3.0.0-readonly.1`.
 
-**Required C09 behaviour (decision, not yet implemented):**
+**Required C09 behaviour (decision; NOW IMPLEMENTED on merged master PR16/PR17):**
 1. Resolve the expected wire identity **only** from the explicit trusted
    binding definition — never derive it from user text, and never guess it from
    the logical `serverId`; no fallback to "tool hash only".
@@ -430,25 +440,31 @@ upstream-surface version is `3.0.0-readonly.1`.
 4. Only after that, run the existing exact upstream tool-name + canonical
    input-schema hash verification.
 
-This is a **semantics / decision record**. It does **not** claim the current
-config accepts new fields or that the binding profile is implemented: the C09
-config representation and caller migration remain future work. **No config /
-API / code change is made here.**
+This is a **semantics / decision record**. The **current merged master**
+(`2fec798`, PR16/PR17) implements it: `mcpConnectorConfigSchema` requires the
+trusted `expectedServerName` + `version` (no default, no inference from
+`serverId`), and `client.ts` compares the REAL `initialize.serverInfo`
+name/version exactly, fail-closed (all bindings disabled on missing/mismatch),
+before any `tools/list`. This record does **not** claim a binding profile, pin,
+OAuth or live-Google adoption exists.
 
-**Raw probe result (retained, re-interpreted):** an actual Companion
-`McpConnector` was connected over real stdio to the actual pinned server using
-the logical test label `serverId = intentionally-wrong-server-id`, version
-`9.9.9-wrong-version`, and the correct four schema hashes. `ensureConnected`
-returned `ok: true`, all four bindings enabled, and `list-calendars` succeeded;
-an unconfigured `delete-event` was denied with `mcp_binding_not_allowed`. That
+**Raw probe result (retained, re-interpreted; HISTORICAL pre-PR16/17):** an
+actual Companion `McpConnector` was connected over real stdio to the actual
+pinned server using the logical test label
+`serverId = intentionally-wrong-server-id`, version `9.9.9-wrong-version`, and
+the correct four schema hashes. `ensureConnected` returned `ok: true`, all four
+bindings enabled, and `list-calendars` succeeded; an unconfigured
+`delete-event` was denied with `mcp_binding_not_allowed`. That
 `intentionally-wrong-server-id` string was only a **logical** test label;
 arbitrary logical IDs alone are **NOT** evidence of a wire mismatch. The real
-evidence gap is narrower and precise: the connector performs **no `serverInfo`
-name/version comparison at all** and there is **no expected wire identity** to
-compare against — the configured version `9.9.9-wrong-version` and the four
-correct tool hashes still succeeded. The connector verifies only exact upstream
-tool name + canonical input-schema hash. This runtime gap is **assigned to
-C09; no fix is in scope here**, and C09/C10 must not be claimed complete.
+evidence gap was narrower and precise: at that revision the connector performed
+**no `serverInfo` name/version comparison at all** and there was **no expected
+wire identity** to compare against — the configured version
+`9.9.9-wrong-version` and the four correct tool hashes still succeeded. That was
+the **C08-era gap, now closed by the merged C09 guard above**; it is retained
+here as provenance and must not be restated as current behavior. Formal
+adoption still depends on the external fork/pin gate and the unresolved C10-08
+production mapping gate.
 
 ### Live scope conflict (static documentation only)
 
@@ -471,10 +487,10 @@ C09; no fix is in scope here**, and C09/C10 must not be claimed complete.
 | C08-01 | 確認 | DONE — SDK `1.30.0` registry metadata kept separate from fork `97a3dc3`/`3.0.0-readonly.1` runtime evidence. |
 | C08-02 | 調査 | DONE — primary evidence fixes full immutable commit, server identity, runtime versions. |
 | C08-03 | 調査 | DONE — real `initialize`/`tools/list` responses captured; exact tool names. HTTP metadata not treated as protocol proof. |
-| C08-04 | 調査 | DONE — canonical input-schema hashes computed and tied to names; version binding still unenforced (→ C09). |
+| C08-04 | 調査 | DONE — canonical input-schema hashes computed and tied to names; the version/wire-identity binding was unenforced at C08 (→ C09), now implemented on merged master. |
 | C08-05 | 調査 | DONE — response mapping proven by actual bodies; `structuredContent` ABSENT; design imports-only claim resolved for this fork SHA. |
 | C08-06 | 決定 | DONE — exact pin form = full SHA + lock digest; formal adoption **HOLD / NOT ADOPTED**. |
-| C08-07 | 決定 | DONE — decision selected: logical `serverId` ≠ wire `serverInfo.name`; expected wire identity (`google-calendar`/`3.0.0-readonly.1`) resolved from explicit trusted binding definition and fail-closed before enable. Impl gap → C09 (no config/code here). |
+| C08-07 | 決定 | DONE — decision selected: logical `serverId` ≠ wire `serverInfo.name`; expected wire identity (`google-calendar`/`3.0.0-readonly.1`) resolved from explicit trusted binding definition and fail-closed before enable. Impl gap **CLOSED** by the merged C09 guard (PR16/PR17). |
 | C08-08 | 記録 | DONE — protocol evidence, formal adoption, live OAuth and live readiness recorded in separate columns; unexecuted items stated. |
 
 ### Independent review outcome (2026-10-11)
@@ -488,15 +504,20 @@ and add no new runtime, adoption, or live-readiness claim.
 
 ### Adoption gates (no formal production adoption until met)
 
-1. Implement the C09 fail-closed identity from the decision above: expected
-   `serverInfo` name/version resolved from the trusted binding definition (not
-   the logical `serverId`), compared before enable, plus exact tool/schema
-   hash.
+1. C09 fail-closed identity: expected `serverInfo` name/version resolved from
+   the trusted binding definition (not the logical `serverId`), compared before
+   enable, plus exact tool/schema hash. **IMPLEMENTED** on merged master
+   (PR16/PR17).
 2. Response adapter + strict contract-JSON fallback (and privacy exclusions)
-   for the real start/end object wire shape.
+   for the real start/end object wire shape. **IMPLEMENTED** as the C10
+   consumer (`normalizeSearchResult`/`normalizeGetResult`); the C10-08
+   production mapping gate (no adopted binding/pin/profile/OAuth/live wiring)
+   remains **UNRESOLVED**.
 3. Scope compatibility resolution (the `events.readonly` vs
    `calendarList` static conflict above) plus a separately approved read-only
    live opt-in.
 4. Authoritative deletion evidence remains a **separate gate (C11)**; a
    cancelled entry, a 404, or search omission must never be mapped to deleted.
-   C09/C10 are not complete.
+   The C09 identity guard and C10 consumer are implemented; **C10-08 production
+   mapping, the external fork/pin adoption gate and C11 remain open**, so
+   formal adoption stays **HOLD / NOT ADOPTED**.

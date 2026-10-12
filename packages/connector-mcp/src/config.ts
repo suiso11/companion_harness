@@ -76,8 +76,8 @@ export type McpBinding = McpConnectorConfig["bindings"][number];
  *
  * These are supplied by host code — the owner of that SPECIFIC configured
  * provider profile — with the same trust as `kernelToolRegistration`. They
- * are NOT MCP `tools/list` data, model arguments, user config claims, or a
- * PROPOSED_BINDING. The host must review this definition against the
+ * are NOT MCP `tools/list` data, model arguments, user config claims, or an
+ * unadopted proposal document. The host must review this definition against the
  * configured upstream name/version/pin before providing any read semantics;
  * library metadata and schematics cannot prove read-only semantics. No
  * adopted provider definitions exist here: only fixtures / a future adapter

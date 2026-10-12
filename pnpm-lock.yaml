@@ -69,6 +69,9 @@ importers:
 
   packages/connector-calendar:
     dependencies:
+      '@companion/connector-mcp':
+        specifier: workspace:*
+        version: link:../connector-mcp
       zod:
         specifier: 4.5.4
         version: 4.5.4

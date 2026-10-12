@@ -1,17 +1,28 @@
-export { PROPOSED_BINDING } from "./binding.js";
 export {
+  type CandidateEvent,
+  candidateEventEndpointSchema,
+  candidateEventSchema,
   canonicalKey,
   classifyDeletion,
   type DeletionVerdict,
+  getEventBodySchema,
+  listEventsPageSchema,
   type NormalizedEvent,
+  type NormalizeGetOptions,
+  type NormalizeGetResult,
   type NormalizeOptions,
+  type NormalizePageOptions,
+  type NormalizeSearchResult,
   normalizedEventSchema,
   normalizeEvent,
-  PROPOSED_UPSTREAM_EVENT_SCHEMA_VERSION,
-  type ProposedUpstreamEvent,
-  proposedUpstreamEventSchema,
+  normalizeGetResult,
+  normalizeSearchResult,
+  searchEventsPageSchema,
 } from "./normalize.js";
 export {
   type CalendarSearchInput,
+  type CalendarSearchRequest,
+  type CalendarSelection,
   calendarSearchInputSchema,
+  mapCalendarSearchRequest,
 } from "./searchInput.js";
