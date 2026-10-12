@@ -3,8 +3,6 @@ export {
   candidateEventEndpointSchema,
   candidateEventSchema,
   canonicalKey,
-  classifyDeletion,
-  type DeletionVerdict,
   getEventBodySchema,
   listEventsPageSchema,
   type NormalizedEvent,

@@ -2,7 +2,6 @@ import type { CallResult } from "@companion/connector-mcp";
 import { describe, expect, it } from "vitest";
 import {
   canonicalKey,
-  classifyDeletion,
   normalizeEvent,
   normalizeGetResult,
   normalizeSearchResult,
@@ -736,58 +735,5 @@ describe("normalizeSearchResult / normalizeGetResult (structured-first)", () => 
         calendarId: "",
       }),
     ).toEqual({ ok: false, code: "calendar_range_invalid" });
-  });
-});
-
-describe("deletion classifier (unverified tombstones defer to unknown)", () => {
-  it("search omission never deletes", () => {
-    expect(
-      classifyDeletion({
-        priorKnown: true,
-        authoritativeRead: "search-omission",
-      }),
-    ).toEqual({ kind: "not-deleted", reason: "no-authoritative-evidence" });
-    expect(
-      classifyDeletion({
-        priorKnown: false,
-        authoritativeRead: "search-omission",
-      }),
-    ).toEqual({ kind: "not-deleted", reason: "no-authoritative-evidence" });
-  });
-
-  it("proposed tombstone labels defer to unknown until a verified fork", () => {
-    expect(
-      classifyDeletion({
-        priorKnown: true,
-        authoritativeRead: "get-tombstone",
-      }),
-    ).toEqual({ kind: "unknown", code: "calendar_upstream_error" });
-    expect(
-      classifyDeletion({
-        priorKnown: true,
-        authoritativeRead: "list-showDeleted-tombstone",
-      }),
-    ).toEqual({ kind: "unknown", code: "calendar_upstream_error" });
-    expect(
-      classifyDeletion({
-        priorKnown: false,
-        authoritativeRead: "get-tombstone",
-      }),
-    ).toEqual({ kind: "not-deleted", reason: "no-authoritative-evidence" });
-    expect(
-      classifyDeletion({
-        priorKnown: false,
-        authoritativeRead: "list-showDeleted-tombstone",
-      }),
-    ).toEqual({ kind: "not-deleted", reason: "no-authoritative-evidence" });
-    expect(
-      classifyDeletion({ priorKnown: true, authoritativeRead: "not-found" }),
-    ).toEqual({ kind: "not-deleted", reason: "no-authoritative-evidence" });
-    expect(
-      classifyDeletion({
-        priorKnown: true,
-        authoritativeRead: "ambiguous-error",
-      }),
-    ).toEqual({ kind: "unknown", code: "calendar_upstream_error" });
   });
 });

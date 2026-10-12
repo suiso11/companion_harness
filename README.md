@@ -1013,6 +1013,20 @@ candidate の whole-second datetime regex と合意済み fractional ISO 入力�
 明示的な compatibility gap です。consumer が動くことは profile 接続・採用を
 意味しません。
 
+C11 の deletion boundary は consumer 側で明示的に固定しています（genuine な
+low-level SDK `Server` + `InMemoryTransport` fixture で `McpConnector` 経由の実際の
+wire を通した回帰テスト）。cancelled は status のまま（tombstone にしない）、
+`isError` は `calendar_upstream_error`、throw された RPC error は別経路の
+`mcp_unavailable`、1 ページの search omission は opaque cursor を返すだけで削除に
+しない、raw の `deleted` status は `calendar_response_invalid` で拒否、未知の
+`deleted` / `tombstone` hint flag は strip、のいずれも tombstone を生成しません。
+未検証の `classifyDeletion` / `DeletionVerdict` stub（proposed label のみ、producer
+なし）は削除し、always-unknown の代替 API は追加していません。positive な
+authoritative get-tombstone contract は未証明のため **C11-01 は BLOCKED**、実際の
+HTTP status は consumer から観測不能で **UNKNOWN**、正式 C08 adoption / C10-08
+production mapping gate は依然 HOLD / UNRESOLVED です。詳しい gate table は
+docs/m4_dependency_spike.md と docs/operations.md を参照してください。
+
 C10 の最終検証（cleanup + full source patch 後に各チェックを 1 回だけ実行）の**初回**実測は
 root typecheck と root lint が FAIL でした（e2e typecheck は PASS exit 0、full vitest は
 PASS exit 0、94 test files / 1164 tests、failed / skipped 0）。失敗内訳: root typecheck
@@ -1045,6 +1059,31 @@ time.ts の native-review fix の before/after 実測
 `.review-proof` は削除済み）に保存済みです。`0000-02-29` の `0000-03-01` rollover と
 long-fraction の次秒繰り上がりが BEFORE で再現し AFTER で解消、normal path は
 byte-identical です。
+
+C11 の検証（source patch complete 後に format を 1 回、続いて各チェックを 1 回）
+の実測: disposable な real-SDK runtime smoke（`.review-proof/c11-runtime.ts`、
+archive 後に削除、Node 24.12.0 / SDK 1.30.0 / esbuild 0.25.12）で genuine な
+low-level SDK `Server` + `InMemoryTransport` 経由の 6 negative invariant を実
+public API で確認し、6 distinct cases / 27 checks すべて pass。tombstone は一切
+生成されず、private 404/410 sentinel は出力に現れず、request count は case1
+get=2、case2/3/5/6 get=1、case4 get=1+search=1（implicit next page なし）。新規
+`test/deletion-boundary.test.ts` は full suite で 6/6 pass（95 files / 1168 tests、
+failed/skipped 0）。root typecheck は exit 0、e2e typecheck は exit 0。初回の
+`biome check .` は exit 1 で 1 error（`assist/source/organizeImports` =
+deletion-boundary.test.ts の import 名順、FIXABLE）+ 既存 `biome.json` の
+`recommended` info 1 件でした。その後、表示された safe fix どおりに named import を
+手動で並べ替え、root の
+`node node_modules/@biomejs/biome/bin/biome check .` を 1 回だけ再実行して
+**exit 0**（192 files、0 errors / 0 warnings、既存 `biome.json` の `recommended`
+info 1 のみ）を実測しました。new error / warning は 0 件です（import 名順の
+behaviour-neutral な並べ替えのみで runtime semantics は不変）。実際の upstream HTTP status は依然 UNKNOWN（synthetic な 404/410
+marker は provider HTTP evidence ではない）。C11-01 は BLOCKED、C11-05 の snapshot
+retention は C12 未配線、formal C08 HOLD / C10-08 production mapping は UNRESOLVED
+のままです。test-only の `packages/connector-calendar/node_modules/@modelcontextprotocol/sdk`
+symlink（raw target
+`../../../../node_modules/.pnpm/@modelcontextprotocol+sdk@1.30.0_zod@4.5.4/node_modules/@modelcontextprotocol/sdk`、
+connector-mcp と同一形式、read-only borrow）を SDK 解決のために追加し、install /
+relink は実行していません。
 
 ---
 

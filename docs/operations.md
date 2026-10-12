@@ -466,6 +466,98 @@ or complete activate config):
   deletion behavior and the formal C08 HOLD / C10-08 production mapping gate are
   unchanged.
 
+### C11 deletion-evidence boundary (consumer invariants; C11-01 BLOCKED)
+
+- This subsection records the CURRENT C11 scope and supersedes the earlier
+  design-time "deletion classifier" placeholder. It is NOT an adoption,
+  live-Google, OAuth, pin or positive-tombstone claim. No package pin changed
+  (`@modelcontextprotocol/sdk@1.30.0`, `zod@4.5.4`); `packages/connector-calendar`
+  adds the SDK ONLY as a test-only `devDependency` (the already-resolved
+  `1.30.0(zod@4.5.4)`) with the exact lockfile importer entry, no production
+  dependency, no provider adoption.
+- Removed dead stub: `classifyDeletion` / `DeletionVerdict` and their
+  `src/index.ts` exports were deleted. They switched only on the proposed
+  `get-tombstone` / `list-showDeleted-tombstone` labels and were never called
+  by any producer or runtime; no always-unknown / no-op / alias / deprecated
+  replacement API was added. The normative `normalizedEventSchema` keeps the
+  `deleted` status (§17.5); only the unverified classifier type was removed.
+- Genuine-wire consumer regression:
+  `packages/connector-calendar/test/deletion-boundary.test.ts` drives the real
+  `McpConnector` over a genuine lower-level SDK `Server` +
+  `InMemoryTransport` linked pair (dummy loopback config with an injected
+  in-memory transport, so no HTTP/stdio/OAuth is dialled) and runs the returned
+  `CallResult` through the real `normalizeGetResult` /
+  `normalizeSearchResult`. Six negative invariants: (1) a valid `confirmed`
+  then `cancelled` get for the SAME canonical key yields normalized
+  `cancelled` with a new etag revision, never `deleted`; the prior snapshot is
+  NOT asserted persisted (that is the unwired C12 pipeline). (2) an
+  `isError:true` body with a private synthetic 404 marker AND a conflicting
+  `structuredContent.event.status:"deleted"` yields the fixed
+  `calendar_upstream_error` with the marker absent and no Text rescue. (3) a
+  thrown SDK `McpError` (`ErrorCode.InternalError`) carrying a private
+  synthetic 410 marker is rejected by the genuine SDK to the fixed
+  `mcp_unavailable`, with exactly one dispatch (no logical auto-resend). (4)
+  a prior valid get followed by ONE empty search page with an opaque
+  non-empty continuation token yields `events:[]` plus the cursor verbatim,
+  with search-call count 1 (not an all-page omission proof, not a delete).
+  (5) a get SUCCESS whose raw consumed `status` is `deleted` is rejected as
+  `calendar_response_invalid` (the consumed enum cannot accept the future
+  normalized value). (6) a get `confirmed` body with unknown raw
+  `deleted:true` / `tombstone:true` / `get-tombstone` provenance text strips
+  the flags and keeps a valid `confirmed` event, trusting no extra heuristics.
+- C11 gate table (source-backed; the consumer regressions below were
+  subsequently exercised by a real-SDK wire smoke and the new vitest file, but
+  no formal gate PASS/adoption is claimed):
+
+  | item | status | boundary / evidence |
+  | --- | --- | --- |
+  | C11-01 | **BLOCKED** | No adopted operation-specific POSITIVE tombstone evidence exists. Candidate `get-event` has no `showDeleted` and no deleted-semantics contract; candidate `97a3dc3` source is read-only reviewed. Positive gate not met → no `deleted` mapping. |
+  | C11-02 | IMPLEMENTED (consumer) | `cancelled` decodes to normalized `cancelled` (same canonical key, new etag revision); never `deleted`. Regression (1). Existing-snapshot retention is C12 (unwired). |
+  | C11-03 | IMPLEMENTED (consumer) | Bare 404 (`isError:true`) → `calendar_upstream_error`; a THROWN RPC error → distinct `mcp_unavailable`; no tombstone. The retained C08 get-miss is an inert-provider `-32603` `isError`, NOT an actual Google HTTP 404/410. Regressions (2)(3). |
+  | C11-04 | IMPLEMENTED (consumer) | A single empty search page returns `events:[]` + opaque cursor verbatim; one search call; omission is never deletion. Regression (4). |
+  | C11-05 | PARTIAL | Uncertain results map to the fixed `calendar_upstream_error` / `mcp_unavailable` / `calendar_response_invalid`. "Never erase an existing snapshot" requires the C12 pipeline, which is unwired. |
+  | C11-06 | DOCUMENTED (no new policy) | Existing demand-driven backoff `1/2/5/10/max30` applies to the next logical call; NO automatic logical resend (C09). Explicit retry is a NEW Run on the SAME frozen Turn context. Stored-only open vs explicit refresh (success → newSnapshot/rN) is existing architecture NOT wired to Calendar. C13 owns retry budgets/UI. Failures are not observations/tombstones; a future C12 adapter must retain prior refs/storage, never map an accidental missing to `deleted`. |
+  | C11-07 | DOCUMENTED (METADATA ONLY; HTTP status UNKNOWN) | Record format: source kind (static candidate / retained inert provider / new synthetic SDK wire), immutable archive/candidate refs, operation, request field NAMES (not raw IDs/cursors/query/emails/error body), observed MCP envelope and the fixed consumer error. No runtime logger/telemetry/status-diagnostic channel was added and error privacy was not weakened. Actual HTTP status is NOT captured; synthetic 404/410 markers are NOT provider HTTP evidence. |
+  | C11-08 | RESOLVED (documentation) | The spike's cancelled/404 limitations are NOT formal implementation evidence: formal C08 stays **HOLD**, C10-08 production mapping stays **UNRESOLVED**, the candidate whole-second regex fraction gap persists, and no OAuth/live/fork/pin/profile exists. |
+- Positive-proof prerequisites (source-reviewed; NONE exists for candidate
+  `97a3dc3`, so C11-01 stays BLOCKED and is NOT sufficient as a Google
+  contract): an ADOPTED operation-specific positive-evidence schema with
+  verified official semantics; a prior KNOWN target (exact connector /
+  calendar / event), not a caller-supplied `priorKnown` boolean; an accessible
+  calendar/read-permission context; and an actual positive observation matching
+  the operation + exact target + recurrence distinctions. Search omission, list
+  `showDeleted`, `cancelled`, bare 404/410 are NEVER positive evidence; `get`
+  `showDeleted` does not exist (do not invent it). A positive / real HTTP status
+  for C11-07 remains BLOCKED and actual upstream HTTP status stays UNKNOWN.
+- Observed verification (this C11 verification run; evidence archived out of
+  repo, source unchanged): a disposable real-SDK runtime smoke
+  (`.review-proof/c11-runtime.ts`, deleted after archive) drove `McpConnector`
+  over a genuine low-level SDK `Server` + `InMemoryTransport` and exercised all
+  SIX negative invariants through the real public API with NO HTTP/stdio/OAuth:
+  6 distinct cases / 27 checks, all pass (Node 24.12.0, SDK 1.30.0, esbuild
+  0.25.12). No case produced a tombstone; the private 404/410 sentinels never
+  appeared; request counts were get=2 (case 1), get=1 (cases 2/3/5/6) and
+  get=1+search=1 (case 4, no implicit next page). The new
+  `packages/connector-calendar/test/deletion-boundary.test.ts` ran 6/6 in the
+  full suite (95 files / 1168 tests, 0 failed / 0 skipped); root typecheck exit 0
+  and e2e typecheck exit 0. The first `biome check .` exited 1 with ONE error
+  (`assist/source/organizeImports`, import-name order, in
+  deletion-boundary.test.ts) plus the pre-existing `biome.json` `recommended`
+  info. That FIXABLE ordering was then applied manually exactly as the reported
+  safe fix and the root `node node_modules/@biomejs/biome/bin/biome check .` was
+  re-run ONCE: **exit 0, 192 files checked, 0 errors / 0 warnings**, only the
+  pre-existing `recommended` info remains. No new error/warning is outstanding;
+  the reorder is behaviour-neutral and changes no runtime semantics. These are
+  consumer boundary verifications only: C11-01 remains **BLOCKED**, C11-05 retention
+  stays C12/unwired, C11-07 actual HTTP status stays UNKNOWN, and the formal C08
+  HOLD / C10-08 production-mapping gate is unchanged — no live-Google, OAuth,
+  pin, profile or adoption claim. The test-only
+  `packages/connector-calendar/node_modules/@modelcontextprotocol/sdk` symlink
+  (raw target
+  `../../../../node_modules/.pnpm/@modelcontextprotocol+sdk@1.30.0_zod@4.5.4/node_modules/@modelcontextprotocol/sdk`,
+  same form as the connector-mcp link, read-only borrow) was added so the SDK
+  resolves from the Calendar test source directory; no install/relink ran.
+
 ### C09-01 / C09-04 / C09-07 / C09-08 trusted read policy, model exposure & real stdio
 
 - This subsection records the CURRENT new-scope observed work: C09-07 trusted

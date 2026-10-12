@@ -238,8 +238,9 @@ export interface NormalizeOptions {
  * where the hash covers the ACTUAL normalized snapshot after temporal
  * canonicalization and truncation (status/title/optional description/optional
  * location/start/end/allDayEndExclusive) and excludes identity, revision and
- * private metadata. `deleted` is never produced here — tombstones require
- * authoritative evidence via `classifyDeletion`.
+ * private metadata. `deleted` is never produced here: this decoder passes
+ * through only the candidate consumed statuses and never synthesizes a
+ * tombstone.
  */
 export async function normalizeEvent(
   raw: unknown,
@@ -467,40 +468,5 @@ export async function normalizeGetResult(
     return { ok: true, event };
   } catch {
     return { ok: false, code: REQUEST_INVALID };
-  }
-}
-
-export type DeletionVerdict =
-  | { kind: "deleted"; reason: "authoritative-tombstone" }
-  | { kind: "not-deleted"; reason: "no-authoritative-evidence" }
-  | { kind: "unknown"; code: "calendar_upstream_error" };
-
-/**
- * Deletion classifier (§17.5 + 2026-09-09 correction): bare 404/410 or
- * `cancelled` alone is NOT deletion proof; search omission NEVER creates a
- * tombstone. Until a verified adopted fork defines authoritative tombstone
- * evidence, the proposed `get-tombstone` / `list-showDeleted-tombstone`
- * labels are unverified and defer to `unknown` (`calendar_upstream_error`)
- * with no deletion; ambiguous errors likewise map to `unknown`.
- */
-export function classifyDeletion(input: {
-  priorKnown: boolean;
-  authoritativeRead:
-    | "get-tombstone"
-    | "list-showDeleted-tombstone"
-    | "not-found"
-    | "ambiguous-error"
-    | "search-omission";
-}): DeletionVerdict {
-  if (!input.priorKnown)
-    return { kind: "not-deleted", reason: "no-authoritative-evidence" };
-  switch (input.authoritativeRead) {
-    case "get-tombstone":
-    case "list-showDeleted-tombstone":
-    case "ambiguous-error":
-      return { kind: "unknown", code: "calendar_upstream_error" };
-    case "not-found":
-    case "search-omission":
-      return { kind: "not-deleted", reason: "no-authoritative-evidence" };
   }
 }
