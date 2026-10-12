@@ -334,20 +334,26 @@ not re-executed.
   present: `nextPageToken` is returned);
   `src/handlers/core/GetEventHandler.ts#L57` `calendar.events.get`;
   `src/utils/response-builder.ts#L16-L23` content-text-only response.
-- Mapping to Companion `calendar.search` is therefore provable at the wire
-  level: `start→timeMin`, `end→timeMax`, frozen Turn IANA `timeZone→timeZone`,
-  `limit→pageSize` (observed `10`), `cursor→pageToken` with opaque-in →
-  opaque-out; one provider call per list/search, one page. `list-calendars` →
+- Mapping to Companion `calendar.search` at the candidate MCP layer:
+  `start→timeMin`, `end→timeMax`, frozen Turn IANA `timeZone→timeZone`,
+  `limit→pageSize`, `query→query`, `cursor→pageToken` with opaque-in →
+  opaque-out; one provider call per list/search, one page. The candidate
+  HANDLER (not Companion) translates `pageSize→Google maxResults` and
+  `query→Google q` — the observed provider parameter is `maxResults: 10`, and
+  Companion never emits `maxResults`/`q`. Proposed **Companion** mapping.
+  `list-calendars` →
   `{calendars,totalCount:1}`, `list-events` → `{events,totalCount:2,nextPageToken}`,
   `search-events` → `{events,totalCount:2,query,calendarId,nextPageToken,timeRange}`,
   `get-event` → `{event}` (single timed event). `etag` preserved; raw
   `start`/`end` are objects (`{dateTime?,date?}`); privacy fields pass through
   as the inert fixture returns them (no field-mask claim).
-- Consumer gap (current `main`, identical blob hash to the probe revision):
+- Consumer gap (HISTORICAL C08 fact, pre-C10): at the C08 probe revision
   `packages/connector-calendar/src/normalize.ts` `proposedUpstreamEventSchema`
-  types `start`/`end` as strings and **rejects** the actual timed and all-day
-  object wire shapes; a control string event is accepted. A response adapter
-  is required before adoption.
+  typed `start`/`end` as flat strings and **rejected** the actual timed and
+  all-day object wire shapes. Retained archive fact, superseded on this branch:
+  the C10 consumer now validates the REAL nested `{dateTime?,date?,timeZone?}`
+  endpoints and no longer contains that flat schema. See the C10 consumer
+  section below.
 - Scope conflict (static, not observed live): official `calendarList.list`
   authorization accepts `calendar.readonly`/`calendar`/`calendar.calendarlist`/
   `calendar.calendarlist.readonly` but **not** `calendar.events.readonly`,
@@ -365,11 +371,58 @@ not re-executed.
   "3.0.0-readonly.1"}` (for full SHA `97a3dc3` + lock digest) must come from
   the explicit trusted binding definition and be compared **before enable**,
   with missing/any mismatch disabling all bindings of that connector instance.
-  The current connector enforces neither version nor expected wire identity
-  (runtime `ensureConnected ok:true` with wrong configured version and correct
-  tool hashes) — implementation gap assigned **C09**, no config/API/code change
-  here. Formal production adoption stays gated on C09 identity fail-closed, the
-  response adapter/strict fallback/privacy work, and scope compatibility, with
-  C11 deletion evidence as a separate gate. C09/C10 are not complete. Full
-  semantics live in the authoritative spike doc; this summary is brief and
-  non-authoritative.
+  That C08 runtime observation ("the connector enforced neither version nor
+  expected wire identity") is a **HISTORICAL** pre-PR16/17 fact. The merged
+  master C09 guard **implements** it: `mcpConnectorConfigSchema` requires an
+  explicit trusted `expectedServerName` + `version`, and `client.ts` compares
+  the REAL `initialize.serverInfo` name/version exactly (fail-closed, all
+  bindings disabled on mismatch) before any `tools/list`. The C08 identity-gap
+  is no longer a current behavior. Formal production adoption stays gated on
+  the external versioned-fork/pin gate and the **C10-08 production mapping
+  gate**, with C11 deletion evidence as a separate gate. C09/C10 implementation
+  work does not equal adoption. Full semantics live in the spike doc; this
+  summary is brief and non-authoritative.
+
+## 9. C10 consumer implementation (this branch, adoption still HOLD)
+
+Status: **source patch complete; consumer behaviors implemented; formal C08
+adoption remains HOLD / NOT ADOPTED.** This records what the consumer code can
+now do against the retained candidate bodies — NOT a live-Google, fork
+compatibility or adoption claim.
+
+- Response seam: `packages/connector-calendar` owns
+  `normalizeSearchResult(result, options)` / `normalizeGetResult(result,
+  options)` over the merged `CallResult`. `structuredContent` is selected by
+  OWN-PROPERTY presence; a present (even `null`/`undefined`/wrong-shaped) value
+  is the ONLY source and is never rescued by `text`. Only an ABSENT
+  `structuredContent` permits parsing the ENTIRE `text` as strict JSON (no
+  fences, prose, prefix/suffix scanning). Incoming fixed MCP failure codes are
+  preserved; any decode failure is the fixed `calendar_response_invalid`.
+- Root envelopes are exact and strict per operation (`list-events` vs
+  `search-events` via an explicit `operation` option; `get-event` is `{event}`,
+  never a page). `totalCount` must equal the PAGE `events.length`; a page over
+  the requested limit (`1..20`) is rejected, never sliced. Cross-calendar raw
+  ids are rejected; no per-event id/calendarId is derived from the root.
+- Event projection: nested endpoint union `{dateTime?,date?,timeZone?}` with
+  exactly one of `date`/`dateTime`; all-day DATE strings are unchanged and
+  end-exclusive; explicit-offset timed instants are canonicalized to UTC. The
+  seven privacy keys (`creator`/`attendees`/`organizer`/`conferenceData`/
+  `hangoutLink`/`htmlLink`/`extendedProperties`) plus all unknown extras,
+  `accountId`, page metadata and source identifiers are stripped and never
+  enter the snapshot or hash. Allowed `title`/`description`/`location` plaintext
+  may itself contain emails/URLs — no general free-text redaction is claimed.
+- Revision precedence is unchanged: non-empty `etag` > canonical
+  `updated` > normalized-projection hash (post truncation/temporal
+  canonicalization). `canonicalKey` remains `SHA-256(JSON([connectorInstanceId,
+  calendarId, eventId]))`.
+- Candidate fraction gap (explicit): the candidate source regex accepts only
+  WHOLE-second `Z`/`±HH:MM` datetimes, while the agreed consumer input contract
+  keeps fractional-second ISO precision (the exact 90d+1ms boundary relies on
+  it). This mapper must NOT silently truncate/round/narrow, so this remains an
+  explicit **candidate compatibility gap and additional adoption HOLD** — no
+  full-fork-compatibility claim.
+- **C10-08 production mapping gate (UNRESOLVED):** no adopted
+  `McpBindingDefinition`/pin/profile/OAuth/live-Google wiring exists; the
+  candidate mapping is proven only against the retained synthetic-provider
+  archive, not against an adopted production binding. C10 consumer-readiness is
+  NOT profile-connected/adopted status.

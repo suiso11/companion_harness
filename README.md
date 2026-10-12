@@ -977,15 +977,25 @@ source revision
 一方、
 
 ```text
+creator
 attendees
 organizer
 conference data
 meeting URL
 HTML link
-raw payload
+extended properties
+raw payload / account id
 ```
 
-等は Snapshot から除外する設計です。
+等は Snapshot から除外する設計です（allowlist 外の未知フィールドもすべて除外）。
+
+Response は `structuredContent` を own-property で優先し、それが **存在しない**
+ときだけ text 全体を strict JSON として解釈します（prose / fence / 部分走査は
+しません）。実際の candidate は入れ子の `start`/`end`
+(`{dateTime?,date?,timeZone?}`) を返すため、consumer はその nested shape を検証し、
+all-day DATE は end-exclusive のまま、explicit-offset の timed 値は UTC ISO に
+正規化します。page は 1 ページのみ・opaque cursor をそのまま返し、auto-pagination
+は行いません。
 
 Model-facing tool は最小限にし、
 
@@ -995,7 +1005,46 @@ calendar.search
 
 だけを公開する方向で設計しています。
 
-現時点では Calendar MCP の upstream binding は正式採用前であり、M4 は foundation / design 段階です。
+現時点では Calendar MCP の upstream binding は正式採用前（**HOLD / NOT
+ADOPTED**）であり、M4 は foundation / design 段階です。C09 の wire identity guard と
+C10 consumer の normalization は実装済みですが、**C10-08 production mapping gate**
+（採用済み binding / pin / profile / OAuth / live Google 接続なし）は未解決であり、
+candidate の whole-second datetime regex と合意済み fractional ISO 入力の差も
+明示的な compatibility gap です。consumer が動くことは profile 接続・採用を
+意味しません。
+
+C10 の最終検証（cleanup + full source patch 後に各チェックを 1 回だけ実行）の**初回**実測は
+root typecheck と root lint が FAIL でした（e2e typecheck は PASS exit 0、full vitest は
+PASS exit 0、94 test files / 1164 tests、failed / skipped 0）。失敗内訳: root typecheck
+（`tsc --noEmit -p tsconfig.json`）FAIL（exit 2、`src/time.ts` 96–98 行の
+`'zone' is possibly 'undefined'` ×3）; root lint（`biome check .`）FAIL（191 files、
+error 1 = `assist/source/organizeImports`（`src/index.ts:1`）、warning 1 =
+`lint/suspicious/noPrototypeBuiltins`（`normalize.ts:344`）、info 2 =
+`lint/complexity/noUselessUndefinedInitialization`（`normalize.ts:402`）と既存
+`biome.json` の deprecated `recommended` 設定注記）。
+
+その後 bounded な type/lint fix（`time.ts` の mandatory zone capture に対する type-only
+assertion で TS18048 を解消、`normalize.ts:344` を own-property presence のまま
+`Object.hasOwn` に、`normalize.ts:402` の不要な `= undefined` 初期化を削除、`index.ts` を
+organizeImports 順に並べ替え）を適用し、同一の 2 チェックを 1 回ずつ再実行したところ root
+typecheck は PASS（exit 0、出力なし）、root lint も PASS（exit 0、191 files、error 0 /
+warning 0 / info 1 = 既存 `biome.json` deprecated `recommended` のみ）になりました。失敗
+2 件は解消済みです。e2e typecheck（exit 0）と full vitest（94 files / 1164 tests）は
+再実行しておらず、変更前の green をそのまま保持しています（新しい full-test run は主張
+しません）。
+
+presence 分岐の実測: own `structuredContent` 優先（null / undefined でも text で救済
+しない）、ABSENT のときのみ strict text JSON、inherited / shadow `hasOwnProperty` は
+無関係、を retained C08 body に対する throwaway smoke（11/11 pass、Node 24.12.0 /
+esbuild 0.25.12、worktree の `.review-proof` は削除済み、結果は out-of-repo
+`c10-calendar-verify/failed-check-fix/`）で確認しました。
+
+time.ts の native-review fix の before/after 実測
+（Node 24.12.0、esbuild 0.25.12）は out-of-repo
+`c10-calendar-verify/time-review/`（14 files、byte-hash verified、worktree の
+`.review-proof` は削除済み）に保存済みです。`0000-02-29` の `0000-03-01` rollover と
+long-fraction の次秒繰り上がりが BEFORE で再現し AFTER で解消、normal path は
+byte-identical です。
 
 ---
 
