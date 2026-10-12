@@ -273,7 +273,21 @@ function makeConnector(seed: ControlledEmitter[] = []): {
     gateReleasers.push(() => t.releaseAll());
     return t as Transport;
   };
-  const connector = new McpConnector(config(realHash), factory);
+  const connector = new McpConnector(
+    config(realHash),
+    // SOURCE-REVIEWED host fixture definition: the controlled emitter only
+    // advertises the static read handler `search-events`, so the trusted
+    // definition marks it explicitly `read` with the explicitly probed hash —
+    // never inferred from the connector config.
+    [
+      {
+        upstreamTool: TOOL,
+        canonicalSchemaHash: realHash,
+        category: "read",
+      },
+    ],
+    factory,
+  );
   shutdowns.push(() => connector.shutdown());
   return { connector, transports };
 }

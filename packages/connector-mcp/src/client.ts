@@ -5,7 +5,11 @@ import {
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { nextBackoffMs } from "./backoff.js";
-import { canonicalSchemaHash, type McpConnectorConfig } from "./config.js";
+import {
+  canonicalSchemaHash,
+  type McpBindingDefinition,
+  type McpConnectorConfig,
+} from "./config.js";
 import type { McpErrorCode } from "./errors.js";
 import { OwnedConnection } from "./session.js";
 
@@ -119,12 +123,88 @@ export interface ConnectorStats {
 /**
  * Hard ceiling on tools/list pages followed during binding-identity
  * verification. A malicious or buggy server could return a non-terminating
- * nextCursor sequence and hang connect forever; after the cap the collected
- * snapshot is verified as-is (unseen bindings stay disabled).
+ * nextCursor sequence and hang connect forever. The cap is NOT a truncation
+ * point: if all pages are consumed while a `nextCursor` still remains, the
+ * catalog is UNFINISHED and connect fails closed with `mcp_schema_mismatch`
+ * (no binding enabled) rather than verifying the collected prefix as-is, since
+ * an uncatalogued duplicate/conflicting identity may exist beyond the cap.
  */
 const MAX_TOOL_LIST_PAGES = 10; // ponytail: deliberately small and fixed, never auto-raised
 
 type EnsureResult = { ok: true } | { ok: false; code: McpErrorCode };
+
+/**
+ * Immutable trusted-policy snapshot built ONCE at construction from the
+ * reviewed host-code `McpBindingDefinition[]`. Only primitive name / hash /
+ * category values are copied (caller-held objects/arrays are never retained).
+ * ANY repeated identifiable non-empty name is AMBIGUOUS and denied, even when
+ * the category/hash are identical or the duplicate record is itself malformed
+ * (never last-wins, never reactivated by a later record).
+ */
+interface TrustedPolicy {
+  readonly definitions: ReadonlyMap<string, McpBindingDefinition>;
+  readonly ambiguous: ReadonlySet<string>;
+}
+
+/**
+ * Runtime boundary for programmatic callers that bypass the TypeScript type:
+ * a missing/non-array `definitions`, or an entry with a missing/non-string
+ * name/hash or a category outside the contracts vocabulary, can never
+ * authorize a binding. No schema heuristics or generic validation framework:
+ * anything that is not an explicit, well-formed `read` category is denied by
+ * the fixed non-read policy path.
+ *
+ * AMBIGUITY IS DETECTED FIRST: every identifiable non-empty string name is
+ * recorded BEFORE its hash/category are validated, so a name that repeats —
+ * even when the duplicate record is itself malformed (missing hash, undefined
+ * or unknown category) — is permanently ambiguous and can never authorize a
+ * call. A malformed record can therefore never reactivate a grant, and it can
+ * never poison an unrelated valid definition.
+ */
+function buildTrustedPolicy(
+  definitions: readonly McpBindingDefinition[],
+): TrustedPolicy {
+  const byName = new Map<string, McpBindingDefinition>();
+  const seen = new Set<string>();
+  const ambiguous = new Set<string>();
+  const list = Array.isArray(definitions) ? definitions : [];
+  for (const raw of list as readonly unknown[]) {
+    if (raw === null || typeof raw !== "object") continue;
+    const entry = raw as {
+      upstreamTool?: unknown;
+      canonicalSchemaHash?: unknown;
+      category?: unknown;
+    };
+    const name = entry.upstreamTool;
+    if (typeof name !== "string" || name.length === 0) continue;
+    // FIRST, before ANY hash/category validation: a repeated identifiable name
+    // is ambiguous for good, regardless of how well-formed either record is.
+    if (seen.has(name)) {
+      byName.delete(name);
+      ambiguous.add(name);
+      continue;
+    }
+    seen.add(name);
+    const hash = entry.canonicalSchemaHash;
+    if (typeof hash !== "string" || hash.length === 0) continue;
+    const category = entry.category;
+    // Positive closed-vocabulary check: only the contracts tool categories are
+    // accepted, and TS narrows `category` to that union inside the branch.
+    if (
+      category === "read" ||
+      category === "write" ||
+      category === "sensitive" ||
+      category === "unclassified"
+    ) {
+      byName.set(name, {
+        upstreamTool: name,
+        canonicalSchemaHash: hash,
+        category,
+      });
+    }
+  }
+  return { definitions: byName, ambiguous };
+}
 
 /**
  * True when the trusted wire-identity expectation is explicitly present.
@@ -226,11 +306,15 @@ export class McpConnector {
   private connected = false;
   private consecutiveFailures = 0;
   /**
-   * Configured bindings that PASSED the wire-identity gate and the per-tool
-   * canonical-schema check on the current connection. Empty until a real
-   * connect validates; cleared synchronously on shutdown/failure/overflow.
+   * Configured bindings that PASSED the trusted reviewed-`read` policy, the
+   * local config/definition hash link, the wire-identity gate AND the live
+   * tools/list canonical-schema check on the current connection. Empty until a
+   * real connect validates; never contains a non-read binding; cleared
+   * synchronously on shutdown/failure/overflow.
    */
   private enabledBindings: string[] = [];
+  /** Immutable reviewed-host read-only policy, snapshotted at construction. */
+  private readonly policy: TrustedPolicy;
   private mutex: Promise<void> = Promise.resolve();
   /** Increments ONLY on explicit shutdown; fences pre-shutdown demands. */
   private shutdownEpoch = 0;
@@ -260,8 +344,11 @@ export class McpConnector {
 
   constructor(
     private readonly config: McpConnectorConfig,
+    definitions: readonly McpBindingDefinition[],
     private readonly transportFactory: TransportFactory = defaultTransportFactory,
-  ) {}
+  ) {
+    this.policy = buildTrustedPolicy(definitions);
+  }
 
   stats(): ConnectorStats {
     return {
@@ -282,16 +369,44 @@ export class McpConnector {
   }
 
   /**
-   * Verify binding identity against a tools/list snapshot: exact configured
-   * upstream names must be present and their canonical input-schema hashes
-   * must match. Any mismatch disables that binding (§17.3).
+   * The reviewed, non-ambiguous trusted `read` definition for a configured
+   * name, or `undefined` when the name can never be authorized: missing,
+   * duplicate/ambiguous, or a `write`/`sensitive`/`unclassified` category.
+   * Purely local (no I/O); the caller-supplied category can never alter it.
    */
-  verifyBindingIdentity(
-    listed: Array<{ name: string; inputSchemaHash: string }>,
-  ): { enabled: string[]; disabled: string[] } {
-    const result = computeBindingIdentity(this.config, listed);
-    this.enabledBindings = result.enabled;
-    return result;
+  private trustedReadDefinition(
+    upstreamTool: string,
+  ): McpBindingDefinition | undefined {
+    if (this.policy.ambiguous.has(upstreamTool)) return undefined;
+    const definition = this.policy.definitions.get(upstreamTool);
+    if (definition === undefined || definition.category !== "read") {
+      return undefined;
+    }
+    return definition;
+  }
+
+  /**
+   * Local (no-I/O) trusted-policy preflight over the CONFIGURED bindings.
+   * `anyTrustedRead` means at least one configured name has a reviewed
+   * non-ambiguous `read` definition; `anyEligible` additionally requires that
+   * definition hash to link to the config binding hash. Nothing else can
+   * authorize a connection.
+   */
+  private policyPreflight(): {
+    anyTrustedRead: boolean;
+    anyEligible: boolean;
+  } {
+    let anyTrustedRead = false;
+    let anyEligible = false;
+    for (const binding of this.config.bindings) {
+      const definition = this.trustedReadDefinition(binding.upstreamTool);
+      if (definition === undefined) continue;
+      anyTrustedRead = true;
+      if (definition.canonicalSchemaHash === binding.canonicalSchemaHash) {
+        anyEligible = true;
+      }
+    }
+    return { anyTrustedRead, anyEligible };
   }
 
   /**
@@ -313,15 +428,27 @@ export class McpConnector {
     args: unknown,
     signal?: AbortSignal,
   ): Promise<CallResult> {
-    // PURE admission AT INVOCATION: an unconfigured name is denied with the
-    // fixed code, no I/O, no mutex and no lifecycle interaction, regardless of
-    // shutdown or cross-epoch state. This is never masked by an availability
-    // change such as a completed shutdown.
-    const configured = this.config.bindings.some(
+    // PURE admission AT INVOCATION: a binding is callable only when it is an
+    // explicitly CONFIGURED name AND has a reviewed, non-ambiguous trusted
+    // `read` definition whose hash links to this config binding. Unknown,
+    // missing, write/sensitive/unclassified and ambiguous names are denied
+    // with the fixed not-allowed code; a broken trusted/config hash link is
+    // denied with the fixed schema-mismatch code. Both are local: no I/O, no
+    // mutex, no factory/spawn, no SDK request and no failure/backoff count,
+    // regardless of shutdown or cross-epoch state. Caller-supplied
+    // args.category/readOnlyHint can never alter this policy.
+    const configBinding = this.config.bindings.find(
       (b) => b.upstreamTool === upstreamTool,
     );
-    if (!configured) {
+    if (configBinding === undefined) {
       return { ok: false, code: "mcp_binding_not_allowed" as const };
+    }
+    const definition = this.trustedReadDefinition(upstreamTool);
+    if (definition === undefined) {
+      return { ok: false, code: "mcp_binding_not_allowed" as const };
+    }
+    if (definition.canonicalSchemaHash !== configBinding.canonicalSchemaHash) {
+      return { ok: false, code: "mcp_schema_mismatch" as const };
     }
     // Capture the epoch AND the during-shutdown state AT INVOCATION, before
     // any mutex wait. A call submitted while shutdown is in progress must stay
@@ -407,12 +534,20 @@ export class McpConnector {
   /**
    * Lazy connect + fail-closed identity verification (§17.3, C09-07):
    *
+   * 0. Trusted-policy preflight (local, no I/O): a connection is opened only
+   *    when at least one configured binding is a reviewed, non-ambiguous
+   *    `read` definition whose hash links to its config binding. Empty /
+   *    non-read definitions report `mcp_binding_not_allowed`; reviewed `read`
+   *    definitions that ALL fail the local hash link report
+   *    `mcp_schema_mismatch`. A partial set of eligible read bindings stays
+   *    connectable.
    * 1. Wire gate: the REAL SDK handshake `initialize.serverInfo` (exact
    *    `name`/`version`, case-sensitive) must match the trusted config
    *    (`expectedServerName`/`version`). A mismatch disables ALL bindings and
    *    bounded-cleans the half-open client/transport (failure count stays zero).
    * 2. Then tools/list pages are followed (bounded) and each configured
-   *    binding's exact name + canonical input-schema SHA-256 is compared.
+   *    binding's exact name, trusted `read` classification, local config/
+   *    definition hash link and canonical input-schema SHA-256 are compared.
    *    Any missing/mismatch disables that binding; connect reports
    *    mcp_schema_mismatch only when NO binding verifies.
    *
@@ -420,6 +555,13 @@ export class McpConnector {
    * clients. Every await is fenced by the owned session identity + stop flag.
    */
   async ensureConnected(): Promise<EnsureResult> {
+    const preflight = this.policyPreflight();
+    if (!preflight.anyTrustedRead) {
+      return { ok: false, code: "mcp_binding_not_allowed" as const };
+    }
+    if (!preflight.anyEligible) {
+      return { ok: false, code: "mcp_schema_mismatch" as const };
+    }
     return this.ensureConnectedForEpoch(this.shutdownEpoch);
   }
 
@@ -596,8 +738,12 @@ export class McpConnector {
       // SDK 1.30.0 tools/list pages via listTools({ cursor }) until no
       // nextCursor, so bindings beyond page 1 still verify. Only configured
       // bindings are ever enabled — discovered tools are never auto-exposed.
+      // The catalog must be COMPLETE: the bounded budget is a hang ceiling, not
+      // a truncation point, so an exhausted page budget with a remaining cursor
+      // fails closed below instead of attesting identity from a prefix.
       const snapshot: Array<{ name: string; inputSchemaHash: string }> = [];
       let cursor: string | undefined;
+      let catalogComplete = false;
       for (let page = 0; page < MAX_TOOL_LIST_PAGES; page += 1) {
         const op = new AbortController();
         session.trackOp(op);
@@ -620,17 +766,46 @@ export class McpConnector {
               inputSchemaHash: await canonicalSchemaHash(t.inputSchema),
             });
           }
-          if (listed.nextCursor === undefined) break;
+          if (listed.nextCursor === undefined) {
+            catalogComplete = true;
+            break;
+          }
           cursor = listed.nextCursor;
         } finally {
           session.untrackOp(op);
         }
       }
-      const { enabled } = computeBindingIdentity(this.config, snapshot);
+      // Shutdown/ownership fence BEFORE the unfinished-catalog mismatch. The
+      // per-page readiness check above runs immediately after `listTools`
+      // settles, but the final page's `canonicalSchemaHash` is still awaited
+      // below; an explicit shutdown can change the owner/epoch during that
+      // digest. A stop observed here must take the fixed `mcp_unavailable`
+      // precedence over the catalog-completeness `mcp_schema_mismatch`, so the
+      // consumer never sees a schema verdict for an attempt that was actually
+      // interrupted. Reuses the single existing fence (no duplicate cleanup).
       if (this.isStopped(epoch) || session.stop || this.isSuperseded(session)) {
         await this.cleanupSession(session, { countFailure: false });
         return { ok: false, code: "mcp_unavailable" as const };
       }
+      // Fail closed on an UNFINISHED catalog: all MAX_TOOL_LIST_PAGES were used
+      // and the server still advertised a nextCursor. The prefix cannot attest
+      // live identity because an uncatalogued duplicate/conflicting page may
+      // exist beyond the cap, so disable ALL bindings (even an apparently
+      // matching configured name), publish nothing, make no tool call, and
+      // clean up the owned half-open session. Same fixed schema-mismatch cleanup
+      // as the wire/hash mismatch paths; the failure counter is NOT incremented.
+      if (!catalogComplete) {
+        await this.cleanupSession(session, {
+          countFailure: false,
+          resetFailures: true,
+        });
+        return { ok: false, code: "mcp_schema_mismatch" as const };
+      }
+      const { enabled } = computeBindingIdentity(
+        this.config,
+        this.policy,
+        snapshot,
+      );
       if (enabled.length === 0) {
         await this.cleanupSession(session, {
           countFailure: false,
@@ -788,16 +963,51 @@ export class McpConnector {
   }
 }
 
-/** Pure binding-identity comparison (no state mutation). */
+/**
+ * Pure binding-identity comparison (no state mutation), called ONLY inside the
+ * live ensure/connect path. A configured binding is enabled only when ALL of:
+ * - it has a reviewed, non-ambiguous trusted `read` definition;
+ * - that definition's trusted hash links to the config binding hash;
+ * - the config binding hash equals the actual tools/list input-schema hash; and
+ * - the LIVE name is not repeated across the collected tools/list pages (a
+ *   repeated live name is an ambiguous schema identity and is never enabled,
+ *   in any page order).
+ * Non-read / untrusted / ambiguous / drifted bindings are never advertised,
+ * even when the wire hash matches. Unknown discovered tools are never added.
+ */
 function computeBindingIdentity(
   config: McpConnectorConfig,
+  policy: TrustedPolicy,
   listed: Array<{ name: string; inputSchemaHash: string }>,
 ): { enabled: string[]; disabled: string[] } {
-  const byName = new Map(listed.map((t) => [t.name, t.inputSchemaHash]));
+  // Fail-closed live identity: an MCP tool name is unique. A repeated live name
+  // is an ambiguous schema identity, so it is removed from the snapshot
+  // entirely (never last-wins), regardless of whether the duplicate schemas
+  // happen to agree. This keeps the decision order-independent and independent
+  // of the order pages are returned in.
+  const byName = new Map<string, string>();
+  const repeatedLive = new Set<string>();
+  for (const tool of listed) {
+    if (byName.has(tool.name) || repeatedLive.has(tool.name)) {
+      byName.delete(tool.name);
+      repeatedLive.add(tool.name);
+      continue;
+    }
+    byName.set(tool.name, tool.inputSchemaHash);
+  }
   const enabled: string[] = [];
   const disabled: string[] = [];
   for (const b of config.bindings) {
-    if (byName.get(b.upstreamTool) === b.canonicalSchemaHash) {
+    const definition = policy.ambiguous.has(b.upstreamTool)
+      ? undefined
+      : policy.definitions.get(b.upstreamTool);
+    const trustedRead =
+      definition !== undefined && definition.category === "read";
+    const hashLinked =
+      definition !== undefined &&
+      definition.canonicalSchemaHash === b.canonicalSchemaHash &&
+      byName.get(b.upstreamTool) === b.canonicalSchemaHash;
+    if (trustedRead && hashLinked) {
       enabled.push(b.upstreamTool);
     } else {
       disabled.push(b.upstreamTool);
@@ -835,13 +1045,16 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
 
 /**
  * Production transport factory: real SDK transports only.
- * - stdio: fail-closed env (assertStdioEnvClosed BEFORE spawn; no silent
- *   broader env), shell=false (SDK hardcodes false; verified 1.30.0 source),
- *   config-only command (no interpolation), explicit env allowlist NOTE:
- *   SDK merges getDefaultEnvironment() underneath, so exact-allowlist is a
- *   known gap (see STDIO_IMPLICIT_ENV_VARS); stderr piped and drained by the
- *   OWNED connection record. Bounded kill lives in the owned cleanup (SDK
- *   transport close plus owned force-kill window, verified source).
+ * - stdio: fail-closed env. SDK `StdioClientTransport` merges
+ *   `getDefaultEnvironment()` (over the live `DEFAULT_INHERITED_ENV_VARS`
+ *   import) UNDER the explicit `env`, so `assertStdioEnvClosed` requires EVERY
+ *   one of those SDK default names to be explicitly present in `envAllowlist`;
+ *   any missing name rejects with fixed `mcp_unavailable` BEFORE any transport
+ *   construction/spawn, so no variable is silently inherited. shell=false (SDK
+ *   hardcodes false; verified 1.30.0 source), config-only command (no
+ *   interpolation); stderr piped and drained by the OWNED connection record.
+ *   Bounded kill lives in the owned cleanup (SDK transport close plus owned
+ *   force-kill window, verified source).
  * - Streamable HTTP: loopback re-checked at the runtime boundary (defends
  *   against programmatic configs bypassing the zod schema) and redirects
  *   refused via a manual-redirect fetch wrapper (SDK 1.30.0 has no

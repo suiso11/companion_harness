@@ -39,7 +39,10 @@ import {
   STDIO_IMPLICIT_ENV_VARS,
   type TransportFactory,
 } from "../src/client.js";
-import type { McpConnectorConfig } from "../src/config.js";
+import type {
+  McpBindingDefinition,
+  McpConnectorConfig,
+} from "../src/config.js";
 import {
   canonicalSchemaHash,
   mcpConnectorConfigSchema,
@@ -260,7 +263,22 @@ function makeConfig(): McpConnectorConfig {
 }
 
 function makeConnector(producer: Producer): McpConnector {
-  const connector = new McpConnector(makeConfig(), producer.factory);
+  // SOURCE-REVIEWED host fixture definition: the producer's only registered
+  // upstream tool (`search-events`) is a static read handler, so the trusted
+  // definition marks it explicitly `read` with the explicitly probed hash —
+  // never inferred from the connector config.
+  const definitions: McpBindingDefinition[] = [
+    {
+      upstreamTool: "search-events",
+      canonicalSchemaHash: realHash,
+      category: "read",
+    },
+  ];
+  const connector = new McpConnector(
+    makeConfig(),
+    definitions,
+    producer.factory,
+  );
   producers.push(producer);
   connectors.push(connector);
   return connector;

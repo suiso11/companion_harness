@@ -1,7 +1,8 @@
 /**
  * C09-06 Streamable HTTP cleanup regression against REAL loopback Node HTTP.
  *
- * - production `new McpConnector(cfg)` (no factory injection) does a genuine
+ * - production `new McpConnector(cfg, reviewedReadDefs)` (no factory
+ *   injection) does a genuine
  *   initialize/tools/list/tools/call against a real SDK McpServer over
  *   StreamableHTTPServerTransport;
  * - redirects (300–399) are refused with the fixed unavailable result and the
@@ -151,7 +152,14 @@ describe("C09-06 Streamable HTTP loopback lifecycle", () => {
     const server = await startMcpHttpServer();
     closers.push(server.close);
 
-    const connector = new McpConnector(httpConfig(server.port, hash));
+    const connector = new McpConnector(
+      httpConfig(server.port, hash),
+      // SOURCE-REVIEWED host fixture definition: the server registers only the
+      // static read handler `search-events`; the trusted definition marks it
+      // explicitly `read` with the explicitly probed hash — never inferred
+      // from the connector config.
+      [{ upstreamTool: TOOL, canonicalSchemaHash: hash, category: "read" }],
+    );
     closers.push(() => connector.shutdown());
     const res = await connector.callTool(TOOL, { q: "standup" });
     expect(res).toMatchObject({
@@ -201,6 +209,15 @@ describe("C09-06 Streamable HTTP loopback lifecycle", () => {
       try {
         const connector = new McpConnector(
           httpConfig(sourcePort, "f".repeat(64)),
+          // Reviewed host fixture read classification (static read handler);
+          // hash is explicit, matching the configured binding.
+          [
+            {
+              upstreamTool: TOOL,
+              canonicalSchemaHash: "f".repeat(64),
+              category: "read",
+            },
+          ],
         );
         const result = await connector.callTool(TOOL, { q: "x" });
         expect(result).toEqual({ ok: false, code: "mcp_unavailable" });
@@ -344,7 +361,16 @@ describe("C09-06 Streamable HTTP loopback lifecycle", () => {
       // mutate the transport AFTER parse (never schema.parse a bad URL) so the
       // runtime loopback re-check is the only gate.
       (cfg.transport as unknown as { host: string }).host = "example.invalid";
-      const connector = new McpConnector(cfg);
+      const connector = new McpConnector(cfg, [
+        // Reviewed host fixture read classification (static read handler); the
+        // local preflight passes, so the network loopback boundary is the only
+        // gate that can refuse this call.
+        {
+          upstreamTool: TOOL,
+          canonicalSchemaHash: "f".repeat(64),
+          category: "read",
+        },
+      ]);
       closers.push(() => connector.shutdown());
 
       const result = await connector.callTool(TOOL, { q: "no-network" });

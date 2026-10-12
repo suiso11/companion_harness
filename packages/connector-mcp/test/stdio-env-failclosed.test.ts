@@ -12,11 +12,25 @@ import {
   STDIO_IMPLICIT_ENV_VARS,
 } from "../src/client.js";
 import {
+  type McpBindingDefinition,
   type McpConnectorConfig,
   mcpConnectorConfigSchema,
 } from "../src/config.js";
 
 const HASH = "c".repeat(64);
+
+/**
+ * SOURCE-REVIEWED host fixture definition: the synthetic `search-events`
+ * binding in this file is a static read handler, so the trusted definition
+ * marks it explicitly `read` with an explicitly written hash — never inferred
+ * from the connector config.
+ */
+function readDefinition(
+  upstreamTool: string,
+  schemaHash: string,
+): McpBindingDefinition {
+  return { upstreamTool, canonicalSchemaHash: schemaHash, category: "read" };
+}
 
 function stdioConfig(envAllowlist: string[]): McpConnectorConfig {
   return mcpConnectorConfigSchema.parse({
@@ -54,7 +68,11 @@ describe("fail-closed stdio env allowlist", () => {
       factoryCalls += 1;
       throw new Error("must not be constructed");
     };
-    const connector = new McpConnector(config, countingFactory as never);
+    const connector = new McpConnector(
+      config,
+      [readDefinition("search-events", HASH)],
+      countingFactory as never,
+    );
     const ensured = await connector.ensureConnected();
     expect(ensured).toEqual({ ok: false, code: "mcp_unavailable" });
     expect(factoryCalls).toBe(0);
@@ -68,9 +86,6 @@ describe("fail-closed stdio env allowlist", () => {
     } catch (err) {
       const msg = (err as Error).message;
       expect(msg).toContain("mcp_unavailable");
-      for (const name of partial) {
-        void name;
-      }
       expect(msg).not.toContain("secret");
     }
   });

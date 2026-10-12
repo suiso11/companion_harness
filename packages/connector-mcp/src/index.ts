@@ -14,6 +14,7 @@ export {
 export {
   canonicalSchemaHash,
   type McpBinding,
+  type McpBindingDefinition,
   type McpConnectorConfig,
   type McpTransportConfig,
   mcpConnectorConfigSchema,
