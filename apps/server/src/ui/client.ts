@@ -918,6 +918,41 @@ class ConversationApp {
     if (this.sessionId === null) {
       return;
     }
+    // Authoritative non-pending ownership BEFORE the execution GET: a
+    // server-decided summary owns the local card even when the execution
+    // read below fails (lost approve/reject delivery). A rejected/expired
+    // summary retires on the real list state; an approved one becomes
+    // execution-owned with disabled decisions while preserving any known
+    // run. Read-only, bounded (existing watch/sync recover; no new poll).
+    const owned = this.actionCards.get(summary.proposalId);
+    if (
+      owned !== undefined &&
+      !owned.terminal &&
+      summary.status !== "pending" &&
+      owned.status === "pending" &&
+      owned.runId === null
+    ) {
+      owned.status = summary.status;
+      owned.deciding = false;
+      this.clearPendingExpiry(owned);
+      if (summary.status === "rejected" || summary.status === "expired") {
+        this.clearApproveKey(summary.proposalId);
+        this.removeActionCard(summary.proposalId);
+        await this.hydrateHistory();
+        return;
+      }
+      this.renderActionCard(
+        owned,
+        summary,
+        null,
+        this.cardModel(summary, null),
+        "",
+      );
+      // Bounded recovery only: the existing execution watch (deduped,
+      // TTL-bounded) retries the execution read below when it resumes.
+      // No new polling path is added.
+      void this.watchAction(summary.proposalId, summary);
+    }
     let fetched: { status: number; body: unknown };
     try {
       fetched = await fetchJson(
@@ -952,6 +987,18 @@ class ConversationApp {
           view.status !== "preflight" &&
           view.status !== "executing";
     const card = this.actionCards.get(view.proposalId);
+    if (actual.status === "rejected" || actual.status === "expired") {
+      // Decided without an execution (rejection/expiry): the card retires
+      // on the REAL summary and the deterministic history intent carries
+      // the lifecycle. Approved/history receipts keep their own path below.
+      this.clearApproveKey(view.proposalId);
+      if (card !== undefined) {
+        card.deciding = false;
+        this.removeActionCard(view.proposalId);
+      }
+      await this.hydrateHistory();
+      return;
+    }
     if (terminal && view.status !== null) {
       // Terminal: the REAL receipt (or the real fixed failure text) is
       // rendered ON the card the user was already looking at — the approval
@@ -1479,11 +1526,23 @@ class ConversationApp {
     card.deciding = true;
     card.approve.disabled = true;
     card.reject.disabled = true;
-    const posted = await postJson(
-      `/api/sessions/${encodeURIComponent(this.sessionId)}/proposals/${encodeURIComponent(card.proposalId)}/reject`,
-      { proposalHash: card.hash },
-      null,
-    );
+    let posted: { status: number; body: unknown };
+    try {
+      posted = await postJson(
+        `/api/sessions/${encodeURIComponent(this.sessionId)}/proposals/${encodeURIComponent(card.proposalId)}/reject`,
+        { proposalHash: card.hash },
+        null,
+      );
+    } catch {
+      // Transport failure BEFORE any authoritative answer: nothing is
+      // claimed rejected. Release decision ownership and reconcile the
+      // ACTUAL repository state — a still-pending summary restores the
+      // buttons/deadline via sync, an accepted rejection retires there.
+      card.deciding = false;
+      this.showNotice("却下できませんでした。もう一度お試しください");
+      this.scheduleActionSync();
+      return;
+    }
     card.deciding = false;
     if (posted.status === 200) {
       this.clearApproveKey(card.proposalId);
