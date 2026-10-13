@@ -588,6 +588,56 @@ export function createActionExecutionService(
     return proposal.preview_json;
   }
 
+  /**
+   * T6 ID-free rendered preview: the deterministic preview `summary`
+   * without the internal tool-name prefix and without any UUID. The stored
+   * `preview_json` contract is unchanged (the prefix strip happens only for
+   * rendered RunResult text); structured audit fields keep all IDs.
+   */
+  function renderedPreviewSummary(proposal: RawProposal): string {
+    let summary = "";
+    try {
+      const parsed = JSON.parse(proposal.preview_json) as unknown;
+      if (
+        typeof parsed === "object" &&
+        parsed !== null &&
+        "summary" in parsed &&
+        typeof (parsed as { summary: unknown }).summary === "string"
+      ) {
+        summary = (parsed as { summary: string }).summary;
+      }
+    } catch {
+      summary = "";
+    }
+    const withoutTool = summary.startsWith("calendar.reschedule:")
+      ? summary.slice("calendar.reschedule:".length).trim()
+      : summary.trim();
+    return withoutTool.length > 0 ? withoutTool : "schedule update";
+  }
+
+  /**
+   * T6 ID-free safe outcome fragment for rendered Action RunResult text.
+   * No tool name, no proposal/execution/run UUID — only the deterministic
+   * preview plus this human outcome. Internal IDs stay in structured
+   * fields/events only.
+   */
+  function safeActionOutcomeText(
+    outcome: ActionFinishOutcomeKind | "blocked_stale",
+  ): string {
+    switch (outcome) {
+      case "succeeded":
+        return "verified and confirmed";
+      case "succeeded_unverified":
+        return "finished but not verified — please check the external calendar";
+      case "blocked_stale":
+        return "not applied (source changed) — please check manually";
+      case "failed":
+        return "failed — please check manually";
+      case "unknown":
+        return "result unknown — please check the external calendar";
+    }
+  }
+
   function insertReceipt(part: {
     executionId: string;
     sessionId: string;
@@ -793,7 +843,7 @@ export function createActionExecutionService(
       );
       const safeResult = parseRunResult({
         version: 1,
-        text: `calendar.reschedule blocked (source changed; proposalId=${preflight.proposal.id})`,
+        text: `${renderedPreviewSummary(preflight.proposal)} — ${safeActionOutcomeText("blocked_stale")}`,
       });
       const movedRun = db
         .prepare(
@@ -1226,16 +1276,7 @@ export function createActionExecutionService(
     outcome: ActionFinishOutcomeKind,
     proposal: RawProposal,
   ): string {
-    switch (outcome) {
-      case "succeeded":
-        return `calendar.reschedule succeeded (verified; proposalId=${proposal.id})`;
-      case "succeeded_unverified":
-        return `calendar.reschedule finished but not verified — confirm on the external calendar (proposalId=${proposal.id})`;
-      case "failed":
-        return `calendar.reschedule failed (definite_failure; proposalId=${proposal.id})`;
-      case "unknown":
-        return `calendar.reschedule result unknown — confirm on the external calendar (proposalId=${proposal.id})`;
-    }
+    return `${renderedPreviewSummary(proposal)} — ${safeActionOutcomeText(outcome)}`;
   }
 
   function assertExecutingStage(id: string): {

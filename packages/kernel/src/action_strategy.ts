@@ -213,6 +213,60 @@ function readRunResultJson(
   return parseRunResult(JSON.parse(row.result_json) as unknown);
 }
 
+/**
+ * T6 ID-free fallback preview: the deterministic stored preview summary
+ * without the internal tool-name prefix and without any UUID. Used only
+ * when no persisted `result_json` exists (failed/unknown runs persist
+ * none); structured audit fields keep all IDs.
+ */
+function readRenderedPreviewForRun(
+  db: Database.Database,
+  runId: string,
+): string {
+  try {
+    const row = db
+      .prepare(
+        `SELECT ap.preview_json FROM action_executions ae
+         JOIN action_proposals ap ON ap.id = ae.proposal_id
+         WHERE ae.action_run_id = ?`,
+      )
+      .get(runId) as { preview_json: string } | undefined;
+    if (row === undefined) {
+      return "schedule update";
+    }
+    const parsed = JSON.parse(row.preview_json) as unknown;
+    const summary =
+      typeof parsed === "object" &&
+      parsed !== null &&
+      "summary" in parsed &&
+      typeof (parsed as { summary: unknown }).summary === "string"
+        ? (parsed as { summary: string }).summary
+        : "";
+    const withoutTool = summary.startsWith("calendar.reschedule:")
+      ? summary.slice("calendar.reschedule:".length).trim()
+      : summary.trim();
+    return withoutTool.length > 0 ? withoutTool : "schedule update";
+  } catch {
+    return "schedule update";
+  }
+}
+
+/** T6 ID-free safe outcome fragment for the in-memory fallback result. */
+function safeFallbackOutcomeText(outcome: string): string {
+  switch (outcome) {
+    case "succeeded":
+      return "verified and confirmed";
+    case "succeeded_unverified":
+      return "finished but not verified — please check the external calendar";
+    case "blocked_stale":
+      return "not applied (source changed) — please check manually";
+    case "unknown":
+      return "result unknown — please check the external calendar";
+    default:
+      return "failed — please check manually";
+  }
+}
+
 /** Normalized intended instants: NFC only (port owns instant grammar). */
 function normalizeInstant(value: string): string {
   return value.normalize("NFC");
@@ -468,13 +522,14 @@ export function createActionStrategy(
         return persisted;
       }
       // Failed runs persist no result_json: cite the ACTUAL outcome via the
-      // receipt view (real persisted state, not a fabricated success).
+      // receipt view (real persisted state, not a fabricated success) with
+      // ID-free rendered text (preview + safe outcome only).
       const view = service.getActionRunView(id);
       const outcome =
         view.receipt?.outcome ?? view.execution?.status ?? "failed";
       return parseRunResult({
         version: 1,
-        text: `calendar.reschedule ${outcome} (proposalId=${view.execution?.proposalId ?? "unknown"})`,
+        text: `${readRenderedPreviewForRun(db, id)} — ${safeFallbackOutcomeText(outcome)}`,
       });
     }
 
