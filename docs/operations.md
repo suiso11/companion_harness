@@ -1756,6 +1756,36 @@ the raw proposal UUID, rendered verbatim in conversation history.
   Same focused/lint/type evidence as T1. No push/resolve; thread IDs are
   for the parent to publish.
 
+## PR20 T1 follow-up: deduped active-approval terminal still hydrates (2026-10-13)
+
+Fixes the T1 independent-review follow-up on `feat/c12-calendar-snapshots`:
+T1 registers EVERY projected Action `runId` (incl. live
+queued/preflight/executing progress) in `renderedAnswers`, so a reload
+while the approval is active anchors the history — but the replayed
+`run.completed` then hit the `renderRunView` answered-dedup early return
+AFTER `finishActiveRun` and BEFORE the single-owner terminal hydration.
+The approved proposal renders no card, so no execution watch drove the
+update: visible progress stuck, terminal receipt/fresh rN missing.
+
+- `apps/server/src/ui/client.ts`: the answered-dedup branch keeps the
+  no-duplicate-answer guard but still claims `claimTerminalHydration`
+  and runs `hydrateHistory` + `scheduleActionSync` (existing single-owner
+  helper, no second watch/polling); already-hydrated terminals claim
+  once, regular completed runs render unchanged. Failed/cancelled SSE
+  branches additionally `scheduleActionSync` after hydration so live
+  Action cards reach the same real terminal (retry append order kept).
+- `apps/server/e2e/calendar/action.spec.ts`: the held post-marker
+  reload case now asserts the REAL visible transition without a second
+  reload — live progress after reload, verified receipt + fresh (non-r1)
+  rN citation after release, exactly one history item/receipt/citation,
+  no proposal/run UUID or tool name in visible text, composer released
+  with no stop claim, exactly one write.
+- Actual-runtime proof (`COMPANION_E2E_CALENDAR=1`, bounded): full
+  `e2e/calendar/action.spec.ts` 13/13 passed (incl. the amended case);
+  `apps/server` `tsc --noEmit` exit 0, e2e `tsc --noEmit` exit 0,
+  `action_ui` 8/8, owned `biome check` clean. No push/resolve; thread
+  IDs are for the parent to publish.
+
 ## Non-goals (explicit)
 Domain retention/GC (except newest-3 backup rotation), user export,
 session delete API, running-process deletion, auto-restore, DB/backup

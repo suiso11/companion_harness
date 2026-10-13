@@ -2122,6 +2122,17 @@ class ConversationApp {
       // of appending the same paragraphs/buttons again.
       if (this.renderedAnswers.has(runId)) {
         this.finishActiveRun();
+        // T1 follow-up: the durable history already rendered this terminal
+        // (e.g. an approval reloaded while queued/preflight/executing whose
+        // decided proposal has no card, so no watch drives the update). The
+        // answer itself must NOT append twice — but the single-owner
+        // terminal refresh still runs so the receipt + fresh citation land
+        // without a second reload.
+        if (claimTerminalHydration(this.terminalHydrated, runId)) {
+          void this.hydrateHistory().then(() => {
+            this.scheduleActionSync();
+          });
+        }
         return;
       }
       this.renderedAnswers.add(runId);
@@ -2164,6 +2175,10 @@ class ConversationApp {
             });
             this.list.appendChild(retryButton);
           }
+          // A failed Action run still carries its actual receipt in the
+          // history projection above; refresh live cards to the same real
+          // terminal (no-op when no card/proposal exists).
+          this.scheduleActionSync();
         });
       }
       return;
@@ -2172,9 +2187,12 @@ class ConversationApp {
       this.showNotice("停止しました");
       this.finishActiveRun();
       // Single owner: claim the terminal hydration; a second observer of
-      // the same terminal view skips it.
+      // the same terminal view skips it. Cancelled Action runs hydrate the
+      // same actual receipt/cards as the failed path above.
       if (claimTerminalHydration(this.terminalHydrated, runId)) {
-        void this.hydrateHistory();
+        void this.hydrateHistory().then(() => {
+          this.scheduleActionSync();
+        });
       }
       return;
     }

@@ -471,19 +471,50 @@ test("reload during held post-marker write hides every Stop and cancel API 409s"
   await expect(page.locator("#composer-notice")).not.toContainText(
     "停止しました",
   );
+  // The adopted still-executing approval renders its REAL live progress
+  // from the history projection (never a fake failure): the visible
+  // held-write state the release below must transition out of.
+  const history = page.locator(
+    "#conversation [data-action-history='action_approval']",
+  );
+  await expect(history).toHaveCount(1, { timeout: 30_000 });
+  await expect(history).toContainText("日程を更新しています", {
+    timeout: 30_000,
+  });
   // Releasing the held write lets the run verify to a real success.
   await control(request, "/release");
-  await expect
-    .poll(
-      async () =>
-        (
-          (await executionView(page, request)).receipt as {
-            outcome?: string;
-          } | null
-        )?.outcome ?? null,
-      { timeout: 60_000 },
-    )
-    .toBe("succeeded");
+  // VISIBLE terminal without a second reload: the replayed SSE terminal is
+  // deduped against the history anchor above (no second answer), yet the
+  // single-owner refresh still lands the REAL verified receipt and the
+  // fresh rN citation in the visible history (the approved proposal has no
+  // card, so no watch drives this update).
+  await expect(history).toContainText("日程を更新しました", {
+    timeout: 60_000,
+  });
+  await expect(page.locator("#composer-send")).toBeEnabled();
+  const citations = page.locator("#conversation [data-action-citation='true']");
+  await expect(citations.first()).toBeVisible({ timeout: 30_000 });
+  expect(await citations.first().textContent()).not.toBe("r1");
+  expect(await citations.first().textContent()).toMatch(/^r\d+$/);
+  // Exactly one history item, one receipt line, one citation: the terminal
+  // never duplicates the answer, and the verified text carries no internal
+  // IDs or tool name.
+  await expect(history).toHaveCount(1);
+  await expect(
+    page.locator("#conversation [data-action-receipt='true']"),
+  ).toHaveCount(1);
+  await expect(citations).toHaveCount(1);
+  const done = await executionView(page, request);
+  expect((done.receipt as { outcome?: string } | null)?.outcome).toBe(
+    "succeeded",
+  );
+  const text = (await history.textContent()) ?? "";
+  expect(text).not.toContain(done.proposalId as string);
+  expect(text).not.toContain(done.runId as string);
+  expect(text).not.toContain("calendar.reschedule");
+  await expect(page.locator("#composer-notice")).not.toContainText(
+    "停止しました",
+  );
   expect(await writeCalls(request)).toBe(1);
 });
 
