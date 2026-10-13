@@ -2,10 +2,11 @@
 
 Status: **design-only proposal; C08 runtime evidence recorded (2026-10-11)**.
 No Companion code changed; no SDK package adopted; no OAuth grant and no live
-access. The pinned candidate fork `97a3dc3` now has a credential-free
-`initialize`/`tools-list` proof and an exact pin form (full SHA + lock
-digest), but **FORMAL ADOPTION = HOLD / NOT ADOPTED** and M4 remains **not
-implemented**; §17 contracts unchanged. Companion-side plan source:
+access. The pinned candidate is now `6939311` / `3.0.0-readonly.2`
+(events-only; supersedes the `97a3dc3` / `3.0.0-readonly.1` 4-tool record,
+history retained) with a credential-free consumer probe (35/35 PASS) and an
+exact pin form (full SHA + lock digest), but **FORMAL ADOPTION = HOLD / NOT
+ADOPTED** and M4 remains **not implemented**; §17 contracts unchanged. Companion-side plan source:
 `docs/implementation_plan.md` §17 (agreed). Authoritative exact-hash table and
 full evidence: `docs/m4_dependency_spike.md` "C08 exact pinned binding +
 runtime evidence" (§ "C08-01..08 decision matrix"; versioned, reproducible
@@ -399,6 +400,14 @@ not re-executed.
   work does not equal adoption. Full semantics live in the spike doc; this
   summary is brief and non-authoritative.
 
+  Cutover (2026-10-13): the `97a3dc3` 4-tool record above is superseded by
+  candidate `6939311` / `3.0.0-readonly.2` (events-only, `list-calendars`
+  removed, no alias; fraction compat closed). Binding pin is the LIVE wire
+  hashes in `docs/evidence/calendar-readonly-candidate-pin.json`;
+  registry-direct bytes and the legacy tools-list probe are diagnostic only.
+  Scope stays events-readonly; live fresh-grant behavior UNKNOWN. C08 HOLD /
+  C10-08 UNRESOLVED / C11-01 BLOCKED unchanged.
+
 ## 9. C10 consumer implementation (this branch, adoption still HOLD)
 
 Status: **source patch complete; consumer behaviors implemented; formal C08
@@ -431,12 +440,12 @@ compatibility or adoption claim.
   `updated` > normalized-projection hash (post truncation/temporal
   canonicalization). `canonicalKey` remains `SHA-256(JSON([connectorInstanceId,
   calendarId, eventId]))`.
-- Candidate fraction gap (explicit): the candidate source regex accepts only
-  WHOLE-second `Z`/`±HH:MM` datetimes, while the agreed consumer input contract
-  keeps fractional-second ISO precision (the exact 90d+1ms boundary relies on
-  it). This mapper must NOT silently truncate/round/narrow, so this remains an
-  explicit **candidate compatibility gap and additional adoption HOLD** — no
-  full-fork-compatibility claim.
+- Candidate fraction gap (CLOSED by the `6939311` cutover): the pre-cutover
+  candidate source regex accepted only WHOLE-second `Z`/`±HH:MM` datetimes,
+  while the agreed consumer input contract keeps fractional-second ISO
+  precision. The cutover accepts fractional ISO and preserves explicit
+  offsets byte-for-byte (see the pin record); the mapper still never
+  truncates/rounds/narrows.
 - **C10-08 production mapping gate (UNRESOLVED):** no adopted
   `McpBindingDefinition`/pin/profile/OAuth/live-Google wiring exists; the
   candidate mapping is proven only against the retained synthetic-provider

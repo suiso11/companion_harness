@@ -1535,10 +1535,10 @@ evidence; no new docs/logs committed besides this section; no
 `test-results/`, `.verification-log/`, or `.review-proof/` residue in
 the tree at gate time.
 
-## Readonly candidate pin verification (2026-10-13, step2)
+## Readonly candidate pin verification (2026-10-13, step2; SUPERSEDED by cutover note below)
 
 Credential-free re-verification of the C08 readonly candidate on branch
-`feat/calendar-readonly-candidate-pin` (stacked on `814eac5`,
+`feat/calendar-readonly-compatibility` (stacked on `814eac5`,
 PR #20 base `feat/c12-calendar-snapshots`; no merge/cherrypick/reset).
 Machine record:
 [`docs/evidence/calendar-readonly-candidate-pin.json`](evidence/calendar-readonly-candidate-pin.json).
@@ -1589,6 +1589,25 @@ Google call; formal C08 stays **HOLD / NOT ADOPTED**, C10-08 stays
 - Scratch `.candidate-verify/` (clone + `node_modules` + probe) removed
   after the evidence capture; no source copy or `node_modules`
   committed.
+
+### Readonly candidate cutover (2026-10-13, 3.0.0-readonly.2)
+
+Supersedes the step2 `97a3dc3`/`3.0.0-readonly.1` record above (history
+retained). Current candidate `6939311fd3eae9846648e0a175e304c9500f578e`
+(tree `f01b5a7b608c4091906a52c0784b828c35963de9`,
+`3.0.0-readonly.2`, lock
+`63261d25992ee9c97136a60bbf4fe52a5485cadea28b34d6b8b6c685f38bd533`,
+deps unchanged 277 packages). Cutover `f03b03b`/`80987bf`/`6939311`.
+Repro: `.readonly-compat/evidence/probe-consumer-smoke.source.mts` +
+`consumer-smoke-3.0.0-readonly.2.result.json` (PASS 35/35,
+credential-free, network 0); machine pin:
+`docs/evidence/calendar-readonly-candidate-pin.json`. Binding pin is LIVE
+wire (`81222b89…`/`d48ba36e…`/`8c6736e2…`, protocol `2025-11-25`, SDK
+`1.30.0`); registry-direct bytes and the legacy tools-list probe are
+diagnostic only. `list-calendars` removed (no alias); scope stays
+events-readonly; fraction compat closed; live fresh-grant UNKNOWN. C08
+HOLD / C10-08 UNRESOLVED / C11-01 BLOCKED unchanged; no production export,
+config activation, or dep-lock change.
 
 ## Non-goals (explicit)
 Domain retention/GC (except newest-3 backup rotation), user export,

@@ -609,13 +609,13 @@ carry synthetic data, but new docs tables carry no raw PII or message IDs.
 This metadata format adds no logger, telemetry, status API or privacy
 weakening.
 
-## Readonly candidate pin verification (2026-10-13, step2)
+## Readonly candidate pin verification (2026-10-13, step2; SUPERSEDED by cutover below)
 
 Status: **FORMAL ADOPTION = HOLD / NOT ADOPTED** (unchanged). Step2
 re-verifies the C08 candidate identity/pin/mapping against the CURRENT
 consumer with a credential-free actual runtime probe. No package pin, no
 live binding, no OAuth, no live Google call, no fork patch. Branch
-`feat/calendar-readonly-candidate-pin` (stacked on `814eac5`; PR base
+`feat/calendar-readonly-compatibility` (stacked on `814eac5`; PR base
 `feat/c12-calendar-snapshots` while PR #20 is unmerged; no
 merge/cherrypick/reset). Machine record:
 `docs/evidence/calendar-readonly-candidate-pin.json`; ops record in
@@ -653,3 +653,34 @@ merge/cherrypick/reset). Machine record:
   consumer contract; C10-08 production mapping; C11-01 positive
   tombstone. Next step3: scoped fork/narrow-call decision + approved
   read-only live opt-in (out of scope here).
+
+### Readonly candidate cutover (2026-10-13, 3.0.0-readonly.2)
+
+Supersedes the step2 `97a3dc3`/`3.0.0-readonly.1` 4-tool record above
+(history retained). Current candidate: repo
+`https://github.com/suiso11/google-calendar-mcp`, full commit
+`6939311fd3eae9846648e0a175e304c9500f578e`, tree
+`f01b5a7b608c4091906a52c0784b828c35963de9`, package
+`@cocal/google-calendar-mcp` private `3.0.0-readonly.2`, lock digest
+`63261d25992ee9c97136a60bbf4fe52a5485cadea28b34d6b8b6c685f38bd533`
+(dependency tree UNCHANGED: 277 packages, sole diff root version
+`.1` → `.2`). Cutover commits `f03b03b` (fractional ISO,
+explicit-offset byte-for-byte), `80987bf` (events-only surface cut,
+zero MCP metadata), `6939311` (version). Branch
+`feat/calendar-readonly-compatibility`. Machine record:
+`docs/evidence/calendar-readonly-candidate-pin.json`; repro source +
+result: `.readonly-compat/evidence/probe-consumer-smoke.source.mts` +
+`consumer-smoke-3.0.0-readonly.2.result.json` (PASS 35/35, credential-free,
+network 0). Binding pin is the LIVE wire hashes (`list-events`
+`81222b89…`, `search-events` `d48ba36e…`, `get-event` `8c6736e2…`;
+protocol `2025-11-25`, SDK `1.30.0` from the actual result). Registry-direct
+bytes (`a0652774…`/`012e1907…`/`913e45ef…`) and the legacy minimal
+tools-list probe are diagnostic ONLY, not the binding pin. Selection change:
+version-breaking removal of unsupported `list-calendars` (no alias); scope
+stays events-readonly (not expanded); MCP re-read conflict closed by
+narrowing (exact calendarId, single account, zero calendarList/calendars
+I/O) with live fresh-grant behavior still UNKNOWN (out-of-band
+calendarList permission not claimed); fraction compat closed. Static
+readonly reviews: no findings. Formal C08 HOLD / C10-08 UNRESOLVED / C11-01
+BLOCKED unchanged; no production trusted-definition export, config
+activation, or dep-lock change.
