@@ -1462,6 +1462,79 @@ user request (C13–C22), so all 30 postfix diagnostics were IN SCOPE.
   working `.verification-log/` was removed before commit, so no logs are
   committed.
 
+## C12–C22 final integration gate (2026-10-13, c12-c22-final-integration)
+
+Final integration run ONCE after the core/Stop fixes and the all-lint
+close (`52d61ba`). The earlier root 1242-pass predates the core/Stop
+fixes, so this is NOT a mere confirm. Per scope, the already-green
+browser / new Stop cases / full browser / lint were NOT rerun. Model
+kept as configured (`opencode-go/muse-spark-1.3-contributor`), no
+override. No new feature/live/OAuth/pins/secrets.
+
+- `pnpm test` → exit 0, **103 test files passed, 1251 tests passed,
+  0 failed / 0 skipped** (Linux, Node 24.12.0, ~11.7s). Raw stdout
+  captured in local `.final-gate-tmp/test2.log` (removed after
+  evidence; summary lines `Test Files 103 passed (103)` /
+  `Tests 1251 passed (1251)`).
+- `pnpm run typecheck` (root `tsconfig.json`) → exit 0, empty output
+  (`.final-gate-tmp/typecheck.log`, removed after evidence).
+- `pnpm run typecheck:e2e` (`apps/server/tsconfig.e2e.json`) → exit 0,
+  empty output (`.final-gate-tmp/typecheck-e2e.log`, removed after
+  evidence).
+- Each command run ONCE (first `pnpm test` failed with 3 regressions, fixed below, then rerun ONCE green; the two typechecks
+  ran once each and passed first try). No browser/lint rerun.
+
+Gate fix (consumer root-cause only, no repin, no noop): the first
+`pnpm test` failed 3/3 cases in `apps/server/test/proposals.test.ts`
+(C18 proposal decisions) with `RepositoryValidationError: target
+snapshot body is not a stored SnapshotBody` at
+`packages/kernel/src/action_proposals.ts:252`. Root cause is a STALE
+test fixture, not production: the test seeded `resource_snapshots`
+via raw SQL with the raw calendar event object, while the stored
+contract (written by the real ReferenceManager since C17) is the
+`SnapshotBody` wrapper `{ version: 1, text }` with the normalized
+event produced by `calendarEventBodyText` inside `text`. The fix
+aligns the seed with the exact stored shape
+(`SnapshotBodySchema.parse({ version: 1, text:
+calendarEventBodyText({...}) })`, same pattern as the kernel
+`action_proposals.test.ts` fixture); no production code changed, no
+assertion wording/source/default counts repinned, no test deleted
+(the 3 C18 decision cases are real behavior coverage: keyed
+approve/replay, keyless reject, 409/404 conflicts). No semantics
+change, so no separate runtime script was required — the changed path
+(staging over the wrapper body) is exercised by the 3 fixed cases
+themselves (`apps/server/test/proposals.test.ts` 3/3 green in the
+final run).
+
+Current C12–C22 milestone table (honest status; implemented vs fake
+vs formal HOLD; no C24 scope inferred):
+
+| item | status | boundary / evidence |
+| --- | --- | --- |
+| C12 internal Calendar pipeline | IMPLEMENTED (consumer) | Real-SDK `c12-smoke` (9) + kernel `calendar_tools` (11) green in final 1251; durable private targets via migration 0006. Adoption HOLD. |
+| C13 broker exposure / frozen temporal | IMPLEMENTED (consumer) | `calendar.search` model-visible, frozen now/zone per Turn, budget/dedup/timeout via existing broker; cross-source stored-only open/related. |
+| C14 startup composition / opt-in config | IMPLEMENTED | Strict `COMPANION_CALENDAR_JSON` opt-in (default disabled), trusted-definition preflight, lazy connect, bounded shutdown; no provider profile adopted. |
+| C15 fake E2E harness | IMPLEMENTED (fake) | Real chromium scenarios incl. positive authoritative tombstone via the test-only `get-event-authoritative` gate; NOT a live/OAuth/production tombstone claim. |
+| C16–C20 engine/M2/UI slices | IMPLEMENTED | Covered by the final 103-file / 1251-test battery, root + e2e typecheck clean, whole-repo lint closed at `52d61ba` (216 files, 0 errors, 1 pre-existing info; NOT rerun here). |
+| C21 M5 Action composition | IMPLEMENTED (triple gate) | Config hints + dedicated write port + exact-instance match; disabled gate refuses staging / 409-before-repository; no production write binding selected. |
+| C22 action lifecycle E2E | IMPLEMENTED (fake) | Fake harness seams only; real-UI conversation→search→rN→refresh coverage via fakes, not live. |
+| C08 adoption / C10-08 production mapping / C11-01 positive tombstone | FORMAL HOLD / UNRESOLVED / BLOCKED | Unchanged: no adopted binding, pin, profile, OAuth, or live-Google wiring anywhere in this branch. |
+
+Review/PR linkage: PR #20 is published for this branch (see the
+resume-stop-finish section; it supersedes the pause-time publication
+blockers). The two remaining Stop review bugs are CLOSED by
+`c0327bc` (composer Stop gated on actual execution
+marker/cancellability) and `bf2b33e` (`cancelAction` claims stopped
+only on an actual cancelled terminal), with regressions in
+`apps/server/e2e/calendar/action.spec.ts` (2 browser cases) and
+`apps/server/test/action_ui.test.ts` (unit gate) — all green per the
+prior record and NOT rerun here per scope.
+
+Scaffolds: `.final-gate-tmp/` (local stdout capture) removed after
+evidence; no new docs/logs committed besides this section; no
+`test-results/`, `.verification-log/`, or `.review-proof/` residue in
+the tree at gate time.
+
 ## Non-goals (explicit)
 Domain retention/GC (except newest-3 backup rotation), user export,
 session delete API, running-process deletion, auto-restore, DB/backup
