@@ -158,6 +158,15 @@ export interface ToolRegistration {
    * via the effective-freshness path computed after input validation.
    */
   readonly dedupMode?: ToolDedupMode;
+  /**
+   * C17 proposal-only registration: a `write`-category registration whose
+   * handler STAGES a proposal and never performs any external action. This
+   * is the ONLY way a non-`read` category can pass classification; the
+   * handler is still responsible for its own origin check (staging is
+   * proposal-only from the normal agent origin). Dedicated Action
+   * execution remains unavailable.
+   */
+  readonly proposalOnly?: boolean;
 }
 
 /** Per-call invocation context (origin/caller/allowedTools/AbortSignal). */
@@ -670,6 +679,9 @@ export class ToolBroker {
         handler: reg.handler,
         ...(reg.normalize === undefined ? {} : { normalize: reg.normalize }),
         ...(reg.dedupMode === undefined ? {} : { dedupMode: reg.dedupMode }),
+        ...(reg.proposalOnly === undefined
+          ? {}
+          : { proposalOnly: reg.proposalOnly }),
       });
     }
   }
@@ -856,7 +868,15 @@ export class ToolBroker {
       this.appendRequested(runId, auditTool, call, arrivalHash);
       return this.finishFast(runId, auditTool, call, deniedOutcome(), trace);
     }
-    if (reg !== undefined && reg.descriptor.category !== "read") {
+    if (
+      reg !== undefined &&
+      reg.descriptor.category !== "read" &&
+      // C17: ONLY a proposal-only registration (its handler stages a
+      // proposal; no external write, no execution tool) may pass the
+      // read-only default-deny classification. Everything else stays
+      // denied exactly as before.
+      reg.proposalOnly !== true
+    ) {
       this.appendRequested(runId, auditTool, call, arrivalHash);
       return this.finishFast(runId, auditTool, call, deniedOutcome(), trace);
     }

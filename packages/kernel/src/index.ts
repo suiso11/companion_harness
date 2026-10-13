@@ -9,6 +9,60 @@
 // HTTP lives in later milestones and is NOT part of this module.
 
 export type {
+  ActionAuthoritativeObservation,
+  ActionCancelResult,
+  ActionExecutionService,
+  ActionExecutionServiceOptions,
+  ActionFinishRequest,
+  ActionFinishResult,
+  ActionGrantGate,
+  ActionPickupResult,
+  ActionPreflightBlockedTerminal,
+  ActionPreflightFailedTerminal,
+  ActionPreflightMaterializeResult,
+  ActionPreflightOutcome,
+  ActionPreflightRead,
+  ActionPreflightReadPort,
+  ActionPreflightTerminalBase,
+  ActionRecoveryCause,
+  ActionRecoverySummary,
+  ActionRunRecoveryResult,
+  CalendarActionReadPortOptions,
+  CalendarActionTargetResolverOptions,
+  CommittedGrantMeta,
+} from "./action_executions.js";
+export {
+  ActionAuthoritativeObservationSchema,
+  createActionExecutionService,
+  createCalendarActionReadPort,
+  createCalendarActionTargetResolver,
+} from "./action_executions.js";
+export type {
+  ActionProposalEventSink,
+  ActionProposalStager,
+  ActionProposalStagerOptions,
+  CalendarRescheduleAgentInput,
+  CalendarRescheduleAgentOutput,
+  CommittedProposal,
+  StagedProposedContent,
+} from "./action_proposals.js";
+export {
+  createActionProposalStager,
+  createCalendarRescheduleProposalRegistration,
+} from "./action_proposals.js";
+export type {
+  ActionStrategyOptions,
+  CalendarActionWriteCapability,
+  CalendarActionWritePort,
+  CalendarActionWriteRequest,
+  CalendarTargetResolver,
+  CalendarWriteOutcome,
+} from "./action_strategy.js";
+export {
+  CalendarActionWriteCapabilitySchema,
+  createActionStrategy,
+} from "./action_strategy.js";
+export type {
   AgentRepairReason,
   AgentStrategyOptions,
   CitationVerification,
@@ -18,6 +72,7 @@ export type {
   StepClassification,
 } from "./agent.js";
 export {
+  AGENT_CALENDAR_SEARCH_PARAMETERS,
   AGENT_HISTORY_USER_PREFIX,
   AGENT_INVALID_TOOL_FEEDBACK_CONTENT,
   AGENT_MARKDOWN_SEARCH_PARAMETERS,
@@ -108,6 +163,28 @@ export {
   ToolBroker,
   ToolError,
 } from "./broker.js";
+export type {
+  CalendarCallOptions,
+  CalendarConnectorBinding,
+  CalendarConnectorPort,
+  CalendarGetPortResult,
+  CalendarGetTarget,
+  CalendarNormalizedEvent,
+  CalendarPrivateTarget,
+  CalendarSearchCallOptions,
+  CalendarSearchPortResult,
+  CalendarTargetStore,
+  CreateCalendarSearchRegistrationOptions,
+} from "./calendar_tools.js";
+export {
+  calendarEventBodyText,
+  createCalendarSearchRegistration,
+  createDurableCalendarTargetStore,
+  createInMemoryCalendarTargetStore,
+  deriveCalendarRelatedQuery,
+  mapCalendarCode,
+  toCalendarObservation,
+} from "./calendar_tools.js";
 export {
   canonicalJson,
   canonicalJsonString,
@@ -147,6 +224,7 @@ export {
   RunEngine,
 } from "./engine.js";
 export {
+  ActionNotCancellableError,
   BackupError,
   BackupRequiredError,
   DatabaseStateInvalidError,
@@ -158,6 +236,8 @@ export {
   MigrationMissingError,
   NewerDatabaseError,
   PragmasError,
+  ProposalHashMismatchError,
+  ProposalStateConflictError,
   QuickCheckError,
   ReferenceNotFoundError,
   ReferenceVersionConflictError,
@@ -208,6 +288,7 @@ export {
   setSchemaVersion,
 } from "./migrate.js";
 export type {
+  CalendarConnectorView,
   EnsureMarkdownConnectorOptions,
   FreshnessKind,
   MarkdownConnectorView,
@@ -234,6 +315,8 @@ export type {
 export { createReferenceResolver } from "./reference_resolver.js";
 export type {
   AcceptedResponse,
+  ApproveProposalOptions,
+  CreateKernelRepositoryOptions,
   CreateSessionOptions,
   EvidenceGrantRow,
   KernelRepository,
@@ -242,6 +325,7 @@ export type {
   PostMessageOptions,
   PostRetryOptions,
   RecordModelCallOptions,
+  RejectProposalOptions,
   RunRow,
   SessionRow,
   StoredIdempotencyRecord,
@@ -250,6 +334,10 @@ export type {
 } from "./repository.js";
 export { createKernelRepository } from "./repository.js";
 export {
+  actionExecutionGrants,
+  actionExecutions,
+  actionProposals,
+  actionReceipts,
   apiIdempotency,
   connectorInstances,
   evidenceGrants,

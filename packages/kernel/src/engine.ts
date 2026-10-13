@@ -181,13 +181,25 @@ export class RunEngine {
     if (room <= 0) {
       return 0;
     }
+    // Pickup only strategies that are actually registered (C18): a queued
+    // run whose strategy has no runtime yet (e.g. the M5 `m5-action` run a
+    // decision created before the next slice registers its executor) is
+    // LEFT QUEUED — never started and never failed by pickup. §18.6 gives
+    // queued Action Runs exactly this semantics (same state on the next
+    // pass, a later scheduler attempt is the normal pickup, not a retry).
     let rows: Array<{ id: string }>;
     try {
-      rows = this.db
-        .prepare(
-          "SELECT id FROM runs WHERE status = 'queued' ORDER BY created_at ASC, id ASC LIMIT ?",
-        )
-        .all(room) as Array<{ id: string }>;
+      const names = this.registry.names();
+      if (names.length === 0) {
+        rows = [];
+      } else {
+        const placeholders = names.map(() => "?").join(",");
+        rows = this.db
+          .prepare(
+            `SELECT id FROM runs WHERE status = 'queued' AND strategy IN (${placeholders}) ORDER BY created_at ASC, id ASC LIMIT ?`,
+          )
+          .all(...names, room) as Array<{ id: string }>;
+      }
     } catch {
       return 0;
     }
@@ -407,10 +419,50 @@ export class RunEngine {
    * failure. Only `running` rows transition (cancel_requested/terminal rows
    * are left for the watchdog/drain paths); transient storage failures are
    * retried within the bounded lifecycle budget.
+   *
+   * C21: an `m5-action` Run is never generic-failed (that would destroy
+   * committed marker/receipt state and leave the execution dangling). The
+   * repository dispatches it to the action execution service, which applies
+   * the SAME pre/post-marker disposition as recovery/drain: a `failed`
+   * receipt + `abandoned` before the marker, an `unknown` receipt +
+   * `abandoned` after it. Never a retry.
    */
   private settlePostPickupFailure(runId: string): void {
     this.persistLifecycle(() =>
-      this.repo.failRun(runId, "execution_failed", { now: this.clock.now() }),
+      this.repo.settleAbandonedRunningRun(runId, {
+        now: this.clock.now(),
+        cause: "restart_recovery",
+      }),
+    );
+  }
+
+  /**
+   * C21: generic failure disposition of a `running` row (missing runtime,
+   * invalid output, thrown strategy error). An `m5-action` Run is never
+   * generic-failed — that would preserve a dangling execution and destroy
+   * its marker/receipt coherence — so it takes the SAME safe action
+   * disposition as recovery/drain (pre-marker failed receipt, post-marker
+   * unknown receipt, always `abandoned`, never a retry).
+   */
+  private isActionRun(runId: string): boolean {
+    try {
+      return this.repo.getRun(runId).strategy === "m5-action";
+    } catch {
+      return false;
+    }
+  }
+
+  private failRunningRun(runId: string, code: string): boolean {
+    if (this.isActionRun(runId)) {
+      return this.persistLifecycle(() =>
+        this.repo.settleAbandonedRunningRun(runId, {
+          now: this.clock.now(),
+          cause: "restart_recovery",
+        }),
+      );
+    }
+    return this.persistLifecycle(() =>
+      this.repo.failRun(runId, code, { now: this.clock.now() }),
     );
   }
 
@@ -476,23 +528,24 @@ export class RunEngine {
       let persistFailed = false;
       try {
         if (strategy === undefined) {
-          persistFailed = !this.persistLifecycle(() =>
-            this.repo.failRun(runId, "execution_failed", {
-              now: this.clock.now(),
-            }),
-          );
+          persistFailed = !this.failRunningRun(runId, "execution_failed");
           return;
         }
         const candidate = await strategy(ctx);
+        if (this.isActionRun(runId)) {
+          // C23: the `m5-action` strategy already terminalized the Run in
+          // the concrete action execution service's own transactions
+          // (receipt + events + terminal together). A generic
+          // `completeRun` would be rejected as terminally owned by that
+          // service and would retain in-flight ownership forever, so the
+          // action lifecycle ends here with nothing left to persist.
+          return;
+        }
         let valid: RunResult;
         try {
           valid = parseRunResult(candidate);
         } catch {
-          persistFailed = !this.persistLifecycle(() =>
-            this.repo.failRun(runId, "output_invalid", {
-              now: this.clock.now(),
-            }),
-          );
+          persistFailed = !this.failRunningRun(runId, "output_invalid");
           return;
         }
         persistFailed = !this.persistLifecycle(() =>
@@ -500,9 +553,7 @@ export class RunEngine {
         );
       } catch (error) {
         const code = toRunErrorCode(error, controller.signal);
-        persistFailed = !this.persistLifecycle(() =>
-          this.repo.failRun(runId, code, { now: this.clock.now() }),
-        );
+        persistFailed = !this.failRunningRun(runId, code);
       } finally {
         if (!persistFailed) {
           // Cooperative fast path: settle promptly instead of waiting out

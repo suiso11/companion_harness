@@ -23,9 +23,15 @@ importers:
 
   apps/server:
     dependencies:
+      '@companion/connector-calendar':
+        specifier: workspace:*
+        version: link:../../packages/connector-calendar
       '@companion/connector-markdown':
         specifier: workspace:*
         version: link:../../packages/connector-markdown
+      '@companion/connector-mcp':
+        specifier: workspace:*
+        version: link:../../packages/connector-mcp
       '@companion/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts

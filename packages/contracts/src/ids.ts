@@ -48,10 +48,10 @@ export function retryScope(turnId: string): string {
 }
 
 /**
- * Closed M0 idempotency scopes (exactly three shapes). Parent ids embedded
- * in `session:*` / `turn:*` scopes must be exact UUID v4 values
- * (case-insensitive); UUID v1/v7/nil and malformed ids are rejected.
- * Unknown scope strings are rejected.
+ * Closed idempotency scopes (M0 three shapes + the exact M5 approve scope,
+ * §18.4). Parent ids embedded in `session:*` / `turn:*` / `proposal:*`
+ * scopes must be exact UUID v4 values (case-insensitive); UUID v1/v7/nil
+ * and malformed ids are rejected. Unknown scope strings are rejected.
  */
 export const IdempotencyScopeSchema = z.union([
   z.literal(IDEMPOTENCY_SCOPE_SESSIONS_CREATE),
@@ -65,6 +65,12 @@ export const IdempotencyScopeSchema = z.union([
     .string()
     .regex(new RegExp(`^turn:${UUID_V4_CORE}:retry$`, "i"), {
       message: "turn scope id must be a UUID v4",
+    })
+    .max(320),
+  z
+    .string()
+    .regex(new RegExp(`^proposal:${UUID_V4_CORE}:approve$`, "i"), {
+      message: "proposal scope id must be a UUID v4",
     })
     .max(320),
 ]);

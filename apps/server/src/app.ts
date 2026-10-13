@@ -21,6 +21,13 @@ import {
   PostMessageRequestSchema,
   PostMessageResponseSchema,
   PostRetryRequestSchema,
+  ProposalApprove202ResponseSchema,
+  ProposalApproveRequestSchema,
+  ProposalExecutionViewSchema,
+  ProposalRejectRequestSchema,
+  ProposalRejectResponseSchema,
+  ProposalsListResponseSchema,
+  proposalApproveScope,
   ReferenceContextGetResponseSchema,
   ReferenceContextPutRequestSchema,
   ReferenceContextPutResponseSchema,
@@ -31,10 +38,13 @@ import {
   retryScope,
 } from "@companion/contracts";
 import {
+  ActionNotCancellableError,
   IdempotencyConflictError,
   InvalidReferenceError,
   isUuidV4,
   type KernelRepository,
+  ProposalHashMismatchError,
+  ProposalStateConflictError,
   ReferenceNotFoundError,
   ReferenceVersionConflictError,
   RepositoryNotFoundError,
@@ -70,6 +80,15 @@ export interface CreateAppDeps {
    * serve 404 while the SSR shell keeps working.
    */
   assets?: { clientJs?: string; clientCss?: string };
+  /**
+   * C21: true only when the M5 triple gate is open (config opt-in +
+   * writeEnabled + a dedicated trusted write binding on the active Calendar
+   * instance). While false, decision READS still list existing proposal
+   * state, but APPROVE is refused before any state change, so a disabled
+   * configuration can never stage or queue an external action. Default
+   * false (fail closed).
+   */
+  actionsEnabled?: boolean;
 }
 
 export interface ServerControls {
@@ -390,6 +409,44 @@ function mapDomainError(c: Context, error: unknown): Response {
       "session already has an active run",
     );
   }
+  // M5 proposal decision mapping (§18.4): both are 409 with fixed
+  // lowercase codes and fixed safe messages (same pattern as the M1
+  // reference codes; the codes live outside the frozen ApiErrorCode enum).
+  if (error instanceof ProposalStateConflictError) {
+    return c.json(
+      {
+        error: {
+          code: "proposal_state_conflict",
+          message: "proposal state conflict",
+        },
+      },
+      409,
+    );
+  }
+  if (error instanceof ProposalHashMismatchError) {
+    return c.json(
+      {
+        error: {
+          code: "proposal_hash_mismatch",
+          message: "proposal hash mismatch",
+        },
+      },
+      409,
+    );
+  }
+  // C21 cancellation boundary (§18.5): a committed external-call marker can
+  // never be "cancelled after the fact" — fixed 409 with a fixed safe message.
+  if (error instanceof ActionNotCancellableError) {
+    return c.json(
+      {
+        error: {
+          code: "action_not_cancellable",
+          message: "action run is no longer cancellable",
+        },
+      },
+      409,
+    );
+  }
   // M1 stored-only reference mapping (§14.8): fixed lowercase codes with
   // fixed safe messages. Domain messages/IDs/content never leak.
   if (error instanceof ReferenceNotFoundError) {
@@ -430,6 +487,7 @@ function mapDomainError(c: Context, error: unknown): Response {
 
 export function createApp(deps: CreateAppDeps): CreatedServerApp {
   const { config, repo, engine } = deps;
+  const actionsEnabled = deps.actionsEnabled === true;
   const logger = deps.logger ?? createStdServerLogger(config.logLevel);
   const now = deps.now ?? Date.now;
   const assets = deps.assets ?? {};
@@ -566,6 +624,69 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       });
       return c.json(body, out.status as 202);
     } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Draining replay for POST proposal approve: same contract as
+   * tryReplayStoredMessage but scoped to `proposal:{proposalId}:approve`
+   * via repo.approveProposal (which additionally enforces session/proposal
+   * ownership on the stored body; drift maps to null → 503).
+   *
+   * A stored key is authoritative: a permanent stored-key conflict (same
+   * committed key, different request hash) replays as the existing 409
+   * `idempotency_key_reused` via mapDomainError, and a session/proposal
+   * ownership drift replays as the existing 404. Only a fresh key (lookup
+   * miss, kernel never invoked, nothing persisted) or a transient failure
+   * falls through to null (→ 503).
+   */
+  function tryReplayStoredApprove(
+    c: Context,
+    sessionId: string,
+    proposalId: string,
+    proposalHash: string,
+    key: string,
+    started: number,
+  ): Response | null {
+    let stored: ReturnType<typeof repo.lookupIdempotencyForSession>;
+    try {
+      stored = repo.lookupIdempotencyForSession(
+        sessionId,
+        key,
+        proposalApproveScope(proposalId),
+      );
+    } catch {
+      return null;
+    }
+    if (!stored.found) {
+      return null;
+    }
+    try {
+      const out = repo.approveProposal(
+        sessionId,
+        proposalId,
+        { proposalHash },
+        { key, now: now() },
+      );
+      if (!out.replayed) {
+        return null;
+      }
+      const body = ProposalApprove202ResponseSchema.parse(out.body);
+      logger.info("http.proposals.approve", {
+        sessionId,
+        proposalId,
+        status: out.status,
+        durationMs: Math.max(now() - started, 0),
+      });
+      return c.json(body, out.status as 202);
+    } catch (error) {
+      if (
+        error instanceof IdempotencyConflictError ||
+        error instanceof RepositoryNotFoundError
+      ) {
+        return mapDomainError(c, error);
+      }
       return null;
     }
   }
@@ -771,6 +892,181 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       return mapDomainError(c, error);
     }
   });
+
+  /* ---------------- C18 proposals (§18.4) ---------------- */
+
+  // Bounded proposed-action list (session-scoped, ordered newest-first).
+  app.get("/api/sessions/:sessionId/proposals", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      const body = repo.listProposals(session.id);
+      ProposalsListResponseSchema.parse(body);
+      return c.json(body, 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  // Approve (keyed, exactly-once external write): strict `{ proposalHash }`
+  // body. No early draining reject: a stored idempotency replay wins over
+  // 503 (same admission pattern as messages/retries).
+  app.post(
+    "/api/sessions/:sessionId/proposals/:proposalId/approve",
+    async (c) => {
+      const started = now();
+      const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+      if ("response" in session) {
+        return session.response;
+      }
+      const proposal = requireUuid(c, c.req.param("proposalId"), "proposalId");
+      if ("response" in proposal) {
+        return proposal.response;
+      }
+      const keyed = requireIdempotencyKey(c);
+      if ("response" in keyed) {
+        return keyed.response;
+      }
+      const raw = await readJsonBody(c);
+      if (!raw.ok) {
+        return validationError(c);
+      }
+      const parsedBody = ProposalApproveRequestSchema.safeParse(raw.value);
+      if (!parsedBody.success) {
+        return validationError(c);
+      }
+      // C21 disabled composition: refuse BEFORE any repository call, so no
+      // proposal can be approved into a queued Action Run while the M5 write
+      // surface is gated off. Fixed 409 code, no ids or content in the body.
+      if (actionsEnabled !== true) {
+        return c.json(
+          {
+            error: {
+              code: "action_execution_disabled",
+              message: "action execution is disabled",
+            },
+          },
+          409,
+        );
+      }
+      // Draining admission re-check immediately before the repository call
+      // (no await between here and repo.approveProposal). A stored response
+      // for this exact request replays verbatim instead of 503; anything
+      // else is rejected without persisting.
+      if (draining) {
+        const replayed = tryReplayStoredApprove(
+          c,
+          session.id,
+          proposal.id,
+          parsedBody.data.proposalHash,
+          keyed.key,
+          started,
+        );
+        if (replayed !== null) {
+          return replayed;
+        }
+        return shuttingDown(c);
+      }
+      try {
+        const out = repo.approveProposal(
+          session.id,
+          proposal.id,
+          { proposalHash: parsedBody.data.proposalHash },
+          { key: keyed.key, now: now(), timeZone: config.timeZone },
+        );
+        const body = ProposalApprove202ResponseSchema.parse(out.body);
+        logger.info("http.proposals.approve", {
+          sessionId: session.id,
+          proposalId: proposal.id,
+          status: out.status,
+          bytes: raw.bytes,
+          durationMs: Math.max(now() - started, 0),
+        });
+        return c.json(body, out.status as 202);
+      } catch (error) {
+        return mapDomainError(c, error);
+      }
+    },
+  );
+
+  // Execution + receipt read for ONE session-owned proposal (C22): the real
+  // persisted execution status, the external-call marker (the exact Stop
+  // boundary), and the real receipt once terminal. Bounded read, no writes.
+  app.get("/api/sessions/:sessionId/proposals/:proposalId/execution", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const proposal = requireUuid(c, c.req.param("proposalId"), "proposalId");
+    if ("response" in proposal) {
+      return proposal.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      const body = ProposalExecutionViewSchema.parse(
+        repo.getProposalExecution(session.id, proposal.id),
+      );
+      return c.json(body, 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  // Reject (KEYLESS, state-idempotent): strict `{ proposalHash }` body;
+  // Idempotency-Key is deliberately not used (§18.4). No draining gate: a
+  // reject creates no Run and no queued work (same family as Cancel).
+  app.post(
+    "/api/sessions/:sessionId/proposals/:proposalId/reject",
+    async (c) => {
+      const started = now();
+      const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+      if ("response" in session) {
+        return session.response;
+      }
+      const proposal = requireUuid(c, c.req.param("proposalId"), "proposalId");
+      if ("response" in proposal) {
+        return proposal.response;
+      }
+      if (c.req.header("idempotency-key") !== undefined) {
+        // Keyless route: carrying a key is not this route's invention.
+        return validationError(c, "idempotency-key is not used for reject");
+      }
+      const raw = await readJsonBody(c);
+      if (!raw.ok) {
+        return validationError(c);
+      }
+      const parsedBody = ProposalRejectRequestSchema.safeParse(raw.value);
+      if (!parsedBody.success) {
+        return validationError(c);
+      }
+      try {
+        const out = repo.rejectProposal(
+          session.id,
+          proposal.id,
+          { proposalHash: parsedBody.data.proposalHash },
+          { now: now(), timeZone: config.timeZone },
+        );
+        const body = ProposalRejectResponseSchema.parse(out.body);
+        logger.info("http.proposals.reject", {
+          sessionId: session.id,
+          proposalId: proposal.id,
+          status: out.status,
+          bytes: raw.bytes,
+          durationMs: Math.max(now() - started, 0),
+        });
+        return c.json(body, 200);
+      } catch (error) {
+        return mapDomainError(c, error);
+      }
+    },
+  );
 
   /* ---------------- history ---------------- */
 

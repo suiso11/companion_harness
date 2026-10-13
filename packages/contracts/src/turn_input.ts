@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { Sha256HexSchema, UuidSchema } from "./ids.js";
 
 /**
  * Bounds for M0 `user_text` input.
@@ -24,11 +25,38 @@ export const UserTextTurnInputV1Schema = z.strictObject({
 export type UserTextTurnInputV1 = z.infer<typeof UserTextTurnInputV1Schema>;
 
 /**
- * M0 TurnInput union, version 1. Exactly one variant (`user_text`).
- * Do NOT add M1+ variants here.
+ * M5 decision TurnInput variants (§18.3, exact): both carry the proposal
+ * id plus its immutable content hash, so a decision is always bound to the
+ * exact hash the UI button was rendered with.
+ */
+export const ActionApprovalTurnInputV1Schema = z.strictObject({
+  kind: z.literal("action_approval"),
+  version: z.literal(1),
+  proposalId: UuidSchema,
+  proposalHash: Sha256HexSchema,
+});
+export type ActionApprovalTurnInputV1 = z.infer<
+  typeof ActionApprovalTurnInputV1Schema
+>;
+
+export const ActionRejectionTurnInputV1Schema = z.strictObject({
+  kind: z.literal("action_rejection"),
+  version: z.literal(1),
+  proposalId: UuidSchema,
+  proposalHash: Sha256HexSchema,
+});
+export type ActionRejectionTurnInputV1 = z.infer<
+  typeof ActionRejectionTurnInputV1Schema
+>;
+
+/**
+ * TurnInput union, version 1: `user_text` (M0) plus the two M5 decision
+ * variants (`action_approval` / `action_rejection`). No other variants.
  */
 export const TurnInputV1Schema = z.discriminatedUnion("kind", [
   UserTextTurnInputV1Schema,
+  ActionApprovalTurnInputV1Schema,
+  ActionRejectionTurnInputV1Schema,
 ]);
 export type TurnInputV1 = z.infer<typeof TurnInputV1Schema>;
 

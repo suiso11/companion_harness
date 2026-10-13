@@ -29,12 +29,18 @@ const httpTransport = z.object({
   followRedirects: z.literal(false).default(false),
 });
 
-const bindingSchema = z.object({
-  /** Exact upstream tool name as configured (e.g. `search-events`). */
-  upstreamTool: z.string().min(1).max(128),
-  /** Canonical input-schema SHA-256 hex (64 chars) for binding identity. */
-  canonicalSchemaHash: z.string().regex(/^[0-9a-f]{64}$/),
-});
+const bindingSchema = z
+  .object({
+    /** Exact upstream tool name as configured (e.g. `search-events`). */
+    upstreamTool: z.string().min(1).max(128),
+    /** Canonical input-schema SHA-256 hex (64 chars) for binding identity. */
+    canonicalSchemaHash: z.string().regex(/^[0-9a-f]{64}$/),
+  })
+  // STRICT: a binding is exactly { upstreamTool, canonicalSchemaHash }. Any
+  // extra key (notably a `category`/authorization claim) is REJECTED, never
+  // silently stripped, so a config hint can never appear to carry trusted
+  // read-only categorization (§17.3 definitions stay host-injected).
+  .strict();
 
 export const mcpConnectorConfigSchema = z
   .object({

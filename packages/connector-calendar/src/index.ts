@@ -1,4 +1,18 @@
 export {
+  type CalendarAdapterTools,
+  type CalendarCallOptions,
+  type CalendarConnector,
+  type CalendarConnectorOptions,
+  type CalendarConnectorPort,
+  type CalendarGetResult,
+  type CalendarGetTarget,
+  type CalendarPrivateTarget,
+  type CalendarSearchCallOptions,
+  type CalendarSearchResult,
+  createCalendarConnector,
+  DEFAULT_CALENDAR_ADAPTER_TOOLS,
+} from "./adapter.js";
+export {
   type CandidateEvent,
   candidateEventEndpointSchema,
   candidateEventSchema,
@@ -10,10 +24,13 @@ export {
   type NormalizeGetResult,
   type NormalizeOptions,
   type NormalizePageOptions,
+  type NormalizeSearchPageOutcome,
+  type NormalizeSearchPageResult,
   type NormalizeSearchResult,
   normalizedEventSchema,
   normalizeEvent,
   normalizeGetResult,
+  normalizeSearchPage,
   normalizeSearchResult,
   searchEventsPageSchema,
 } from "./normalize.js";

@@ -1329,6 +1329,87 @@ Markdown は読み取り専用です。
 
 ---
 
+# Calendar (opt-in, C14)
+
+Calendar は **明示的な opt-in 設定 + 信頼済みホスト側 binding 定義の注入** が揃った
+場合のみ有効になります。設定が存在しなければ何も登録されません（default disabled）。
+発見ベース / モデル定義ベースの登録は存在しません。
+
+設定は「config ヒント」に限定されます。書けるのは厳密な単一カレンダー選択
+(`calendarId` / `account`) と MCP 接続の identity / transport / binding 名と
+schema-hash だけで、**信頼済み read-only binding 定義 (`category`) をこの設定で
+与えることはできません**。定義 (category 含む) は必ず信頼されたホストコードから
+`startServer` に注入する必要があります。設定だけで有効化を要求した場合は
+起動に失敗します (fail-closed)。
+
+```bash
+COMPANION_CALENDAR_JSON='{
+  "selection": {
+    "calendarId": "primary",
+    "account": "me@example.com"
+  },
+  "connector": {
+    "serverId": "calendar-fake",
+    "kind": "mcp",
+    "expectedServerName": "fake-calendar",
+    "version": "0.0.0-test",
+    "transport": {
+      "kind": "stdio",
+      "command": "/path/to/calendar-mcp",
+      "envAllowlist": ["HOME", "LOGNAME", "PATH", "SHELL", "TERM", "USER"]
+    },
+    "bindings": [
+      { "upstreamTool": "list-events",   "canonicalSchemaHash": "...64hex..." },
+      { "upstreamTool": "search-events", "canonicalSchemaHash": "...64hex..." },
+      { "upstreamTool": "get-event",     "canonicalSchemaHash": "...64hex..." }
+    ]
+  }
+}'
+```
+
+挙動:
+
+- `connectorInstanceId` は設定には現れません。サーバー自身が登録した
+  connector instance の id を bootstrap で正確に結び付けます。
+- 接続は lazy です。起動は upstream が利用不可能でもブロックされません
+  (失敗は呼び出しごとの固定 `mcp_unavailable`)。
+- Markdown root が 0 でも Calendar は単独で利用できます
+  (`calendar.search` + stored reference tools のみの broker)。
+- drain 時には engine drain の後に owned connector の停止待ちが
+  上限付き (10 秒 backstop) で走ります。
+- upstream binding は今も **HOLD / NOT ADOPTED** です。上記の例は
+  構成ファイル形状の説明であり、provider 採用の主張ではありません。
+
+---
+
+# Actions (opt-in, triple-gated, C21)
+
+M5 の Action 実行 (`m5-action` / `calendar.reschedule`) は **3 つの条件を
+すべて満たした場合のみ** 登録されます。1 つでも欠ければ何も登録されません。
+
+1. `COMPANION_ACTIONS_JSON` の `optIn` (既定 `false`)
+2. 同設定の `writeEnabled` (既定 `false`)
+3. 信頼済みホストコードが注入した専用 `CalendarActionWritePort` が、
+   実際に有効な Calendar 接続 instance と**同一の instance** に束縛されている
+
+```bash
+COMPANION_ACTIONS_JSON='{ "optIn": true, "writeEnabled": true }'
+```
+
+- 設定はヒントに過ぎません。capability / category / connector instance id を
+  env から与えることはできず、書き込み port は必ず `startServer({
+  actionWriteBinding: { port, shutdown?, owned? } })` で注入します
+  (本コードベースには production の実書き込み binding は存在しません)。
+- 設定が有効で binding が active instance と一致しない場合は listen 前に
+  fail-closed します。設定が無効な場合、注入された port は一切使われません。
+- 無効時は staging できず、approve は repository 呼び出し前に固定
+  `409 action_execution_disabled` を返します (queue される孤立 Run を作りません)。
+  一覧 (decision read) は従来どおり状態を返します。
+- port の lifecycle は `owned: true` を明示した場合のみサーバーが close します
+  (caller 所有の port は閉じません)。
+
+---
+
 # Design Philosophy
 
 Companion Harness では、LLM をシステムそのものとは考えません。
@@ -1414,3 +1495,17 @@ This is a **remote CI aggregate** for the C04/C05/C06 browser-resilience work, p
 Status matrix and per-item evidence: see [execution progress / current C07 CI evidence](docs/plan/execution_progress_2026-10-10.md).
 
 Remaining gates after this C07 aggregate: Phase 1/M3 as a whole, Windows 11 x64 manual smoke, M4/Phase 4 live adoption, and CI for HEADs later than the pinned SHA (this docs commit's own CI is pending until observed).
+
+---
+
+# Current PR20 Integrated Verification (2026-10-13)
+
+This section records the FINAL integrated acceptance for PR #20 at HEAD `61b3573` (review threads fixed plus independent-review follow-ups). It does not rewrite the C04–C07 evidence above and does not close any formal release gate.
+
+- **Full suite (run once)**: `pnpm test` exit 0 — **106 files / 1270 tests passed, 0 failed / 0 skipped**; root `pnpm typecheck` exit 0; `pnpm typecheck:e2e` exit 0 (Linux, Node 24.12.0).
+- **Lint (post-cleanup recheck, run once)**: `pnpm lint` exit 0 — **219 files checked, 0 errors, 1 pre-existing info** (deprecated `recommended` field in `biome.json`); the earlier exit-1 ground truth was exactly 2 format diagnostics on own temporary `.review-plan-work/reviews-*.json` only, parsed then removed with the directory. All product/source files clean.
+- **Browser**: `e2e/calendar/action.spec.ts` **13/13 passed at `61b3573`** confirmed by record, not rerun.
+- **§19 source-run (actual, first on this branch)**: real `pnpm start` cold start (`migrated 7`, `recovered 0`, listening on loopback `127.0.0.1:44831` with a credential-stripped explicit env, no Calendar/model config, no Google/OAuth) → `GET /health/live` 200 + `GET /health/ready` 200 → stopped-server `pnpm --filter @companion/server backup` exit 0 (basename-only `companion-manual-<UTC>-<uuid>.sqlite`, file `0600`, dirs `0700`, `quick_check` ok) → stopped-only manual restore after simulated loss (temp copy + `quick_check` + atomic rename, 7/7 documented steps) → second cold start `ready` 200 with the pre-backup session resolving 200 (data survived) and an unknown id 404ing. Own smoke files removed afterwards.
+- **Residual gates (explicit, not closed)**: C08 HOLD, C10 production mapping UNRESOLVED, C11 authoritative positive BLOCKED (cancelled/404/410/omission never positive), Windows 11 manual smoke NOT executed, fresh OAuth a separate untouched decision, dedicated write binding / adoption + triple-gate live use NOT authorized, Remind I01–I05 unapproved (other repo, no C23/C24 invented), candidate PR21/22 stacked review-only (PR20 baseline pin gaps claim nothing newest).
+
+Deep verification record (commands, counters, residual map, §20 write-binding source facts): [docs/operations.md](docs/operations.md) ("PR20 integrated plan verification").

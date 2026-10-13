@@ -549,23 +549,24 @@ describe("kernel review round fixes (PR #1)", () => {
         { key: generateId(), now: T0, strategy: "ok" },
       );
       // Simulate a missing turn row: pickup CAS still moves queued->running,
-      // then the snapshot load throws and must fail the run durably.
+      // then the snapshot load throws and must settle the run durably (the
+      // safe abandoned disposition — never leaked as running, never retried).
       engine.start();
       expect(engine.pump()).toBe(1);
       await waitFor(() => {
         const st = repo.getRun(m.body.run.id).status;
-        return st === "failed";
+        return st !== "running";
       });
       const run = repo.getRun(m.body.run.id);
-      expect(run.status).toBe("failed");
-      expect(run.errorCode).toBe("execution_failed");
+      expect(run.status).toBe("abandoned");
+      expect(run.finishedAt).toBeGreaterThan(0);
       expect(engine.inflightCount()).toBe(0);
       const types = (
         handle.raw
           .prepare("SELECT type FROM run_events WHERE run_id = ? ORDER BY seq")
           .all(m.body.run.id) as Array<{ type: string }>
       ).map((r) => r.type);
-      expect(types).toEqual(["run.queued", "run.started", "run.failed"]);
+      expect(types).toEqual(["run.queued", "run.started", "run.abandoned"]);
     } finally {
       await engine?.shutdown({ drainMs: 0 }).catch(() => {});
       closeKernelDatabase(handle);
@@ -805,7 +806,7 @@ describe("idempotency key lowercase migration (PR #3)", () => {
           db: handle.raw,
           backupDir: join(dir, "backups"),
         }),
-      ).rejects.toThrow(/migration 3 -> 5 failed/);
+      ).rejects.toThrow(/migration 3 -> \d+ failed/);
       // Fail closed: version unchanged, both colliding rows preserved.
       expect(getSchemaVersion(handle.raw)).toBe(3);
       const rows = handle.raw
