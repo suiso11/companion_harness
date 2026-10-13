@@ -135,6 +135,16 @@ interface ActionCard {
   runId: string | null;
   /** Terminal execution observed: the card is final and stops polling. */
   terminal: boolean;
+  /**
+   * C22 bounded pending expiry (local reconciliation only; the server stays
+   * authoritative): the server deadline bound at card build, the last-seen
+   * proposal status, the one-shot timer id (at most one per card), and
+   * whether a real decision POST is currently awaited.
+   */
+  deadline: number;
+  status: ProposalStatus;
+  timer: number | null;
+  deciding: boolean;
 }
 
 /**
@@ -381,6 +391,14 @@ class ConversationApp {
     this.drawer.addEventListener("click", (event) => {
       if (event.target === this.drawer) {
         this.closeDrawer();
+      }
+    });
+    // Tab-resume reconciliation (local only, no polling/provider calls): a
+    // hidden page whose timers were throttled retires locally expired
+    // pending cards the moment it becomes visible again.
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") {
+        this.reconcilePendingExpiry();
       }
     });
     await this.ensureSession();
@@ -840,15 +858,49 @@ class ConversationApp {
     const summaries = proposals.filter((item): item is ProposalSummaryView =>
       isProposalSummary(item),
     );
-    // Drop cards whose proposal is no longer actionable/visible.
+    // Drop cards whose proposal is no longer actionable/visible — but never
+    // a card that left the pending state locally: an accepted card, a live
+    // execution (queued/preflight/executing), a terminal receipt, or a
+    // decision currently awaited from the real POST owns its lifecycle and
+    // must survive a stale pending list.
     const liveIds = new Set(summaries.map((item) => item.proposalId));
     for (const proposalId of [...this.actionCards.keys()]) {
       if (!liveIds.has(proposalId)) {
+        const card = this.actionCards.get(proposalId);
+        if (
+          card !== undefined &&
+          (card.terminal || card.runId !== null || card.deciding)
+        ) {
+          continue;
+        }
         this.removeActionCard(proposalId);
       }
     }
     for (const summary of summaries) {
-      if (summary.status === "pending" && summary.expiresAt > now) {
+      if (summary.status === "pending") {
+        if (summary.expiresAt <= now) {
+          // Locally expired pending: retire the still-pending card without
+          // touching any decision-in-flight/execution/receipt card.
+          const card = this.actionCards.get(summary.proposalId);
+          if (
+            card !== undefined &&
+            !card.terminal &&
+            card.runId === null &&
+            !card.deciding
+          ) {
+            this.removeActionCard(summary.proposalId);
+          }
+          continue;
+        }
+        const card = this.actionCards.get(summary.proposalId);
+        if (
+          card !== undefined &&
+          (card.terminal || card.runId !== null || card.deciding)
+        ) {
+          // Decision in flight (or already accepted): a stale pending list
+          // must not downgrade the card back to an actionable pending card.
+          continue;
+        }
         this.ensureActionCard(summary);
       }
     }
@@ -912,6 +964,9 @@ class ConversationApp {
       if (card !== undefined) {
         card.runId = view.runId ?? card.runId;
         card.terminal = true;
+        card.deciding = false;
+        card.status = actual.status;
+        this.clearPendingExpiry(card);
         this.renderActionCard(
           card,
           actual,
@@ -927,6 +982,13 @@ class ConversationApp {
       return;
     }
     card.runId = view.runId ?? card.runId;
+    card.deciding = false;
+    card.status = actual.status;
+    if (view.runId !== null || view.status !== null) {
+      // Execution-owned from here on: no pending timer may retire it, and a
+      // stale pending list must not downgrade it back to actionable.
+      this.clearPendingExpiry(card);
+    }
     this.renderActionCard(
       card,
       actual,
@@ -1056,10 +1118,26 @@ class ConversationApp {
    * string is set with `textContent` (escaped plain text, never HTML) and
    * carries NO technical id: preview, target event, start/end, and the
    * server deadline only.
+   *
+   * Each pending card owns at most ONE one-shot expiry timer bound to the
+   * exact (proposalId, hash, deadline, status) identity captured here. The
+   * timer only ever retires a still-pending local card; an accepted card, a
+   * live execution, a terminal receipt, or an awaited decision is never
+   * removed by an old timer.
    */
   private ensureActionCard(summary: ProposalSummaryView): void {
     const existing = this.actionCards.get(summary.proposalId);
     if (existing !== undefined) {
+      if (
+        existing.terminal ||
+        existing.runId !== null ||
+        existing.deciding ||
+        existing.hash !== summary.hash
+      ) {
+        return;
+      }
+      existing.deadline = summary.expiresAt;
+      existing.status = summary.status;
       this.renderActionCard(
         existing,
         summary,
@@ -1067,6 +1145,7 @@ class ConversationApp {
         this.cardModel(summary, null),
         "",
       );
+      this.schedulePendingExpiry(existing);
       return;
     }
     const node = el("section");
@@ -1121,6 +1200,10 @@ class ConversationApp {
       stop,
       runId: null,
       terminal: false,
+      deadline: summary.expiresAt,
+      status: summary.status,
+      timer: null,
+      deciding: false,
     };
     approve.addEventListener("click", () => {
       void this.approve(card);
@@ -1140,6 +1223,91 @@ class ConversationApp {
       this.cardModel(summary, null),
       "",
     );
+    this.schedulePendingExpiry(card);
+  }
+
+  /** Upper bound for one pending-expiry timer (the exact proposal TTL). */
+  private static readonly PENDING_EXPIRY_MAX_MS = 15 * 60 * 1000;
+
+  /**
+   * (Re)arm the card's single one-shot pending-expiry timer. Clears any
+   * previous timer first, so at most one timer exists per card. The callback
+   * captures the exact identity and re-checks it on fire: a card that has
+   * since been accepted, started executing, reached terminal, begun awaiting
+   * a real decision, or been rebuilt for another hash/deadline is never
+   * retired by this stale timer. Local reconciliation only — the server
+   * remains the decision authority (approve/reject re-read before POST).
+   */
+  private schedulePendingExpiry(card: ActionCard): void {
+    this.clearPendingExpiry(card);
+    if (card.status !== "pending" || card.terminal || card.runId !== null) {
+      return;
+    }
+    const proposalId = card.proposalId;
+    const hash = card.hash;
+    const deadline = card.deadline;
+    const status = card.status;
+    const delay = Math.min(
+      Math.max(deadline - Date.now(), 0),
+      ConversationApp.PENDING_EXPIRY_MAX_MS,
+    );
+    card.timer = window.setTimeout(() => {
+      const current = this.actionCards.get(proposalId);
+      if (current === undefined || current !== card) {
+        return;
+      }
+      if (
+        current.hash !== hash ||
+        current.deadline !== deadline ||
+        current.status !== status
+      ) {
+        return;
+      }
+      // Never retire a card that left the local pending state: accepted,
+      // live execution, terminal receipt, or an awaited real decision.
+      if (
+        current.terminal ||
+        current.runId !== null ||
+        current.deciding ||
+        current.status !== "pending"
+      ) {
+        return;
+      }
+      if (Date.now() < current.deadline) {
+        return;
+      }
+      this.removeActionCard(proposalId);
+    }, delay);
+  }
+
+  private clearPendingExpiry(card: ActionCard): void {
+    if (card.timer !== null) {
+      window.clearTimeout(card.timer);
+      card.timer = null;
+    }
+  }
+
+  /**
+   * Local tab-resume reconciliation (no network, no polling, no provider
+   * calls): when the page becomes visible again, retire every still-pending
+   * local card whose server deadline has passed. Execution/receipt/awaited
+   * cards are untouched; the server stays authoritative on next sync.
+   */
+  private reconcilePendingExpiry(): void {
+    const now = Date.now();
+    for (const card of [...this.actionCards.values()]) {
+      if (
+        card.terminal ||
+        card.runId !== null ||
+        card.deciding ||
+        card.status !== "pending"
+      ) {
+        continue;
+      }
+      if (now >= card.deadline) {
+        this.removeActionCard(card.proposalId);
+      }
+    }
   }
 
   /** Apply the pure model to the live card nodes (no HTML, text only). */
@@ -1182,6 +1350,7 @@ class ConversationApp {
     if (card === undefined) {
       return;
     }
+    this.clearPendingExpiry(card);
     card.node.remove();
     this.actionCards.delete(proposalId);
   }
@@ -1197,7 +1366,20 @@ class ConversationApp {
    * a stale card.
    */
   private async approve(card: ActionCard): Promise<void> {
-    if (this.sessionId === null || card.approve.disabled) {
+    if (
+      this.sessionId === null ||
+      card.approve.disabled ||
+      card.deciding ||
+      card.terminal
+    ) {
+      return;
+    }
+    // Local deadline precheck (server re-read below stays authoritative): a
+    // locally expired pending card is never executed from a stale click.
+    if (card.status !== "pending" || Date.now() >= card.deadline) {
+      this.showNotice("この変更は承認できません。内容を確認してください");
+      this.removeActionCard(card.proposalId);
+      this.scheduleActionSync();
       return;
     }
     const sessionId = this.sessionId;
@@ -1229,6 +1411,7 @@ class ConversationApp {
       return;
     }
     const key = this.approveKey(card.proposalId);
+    card.deciding = true;
     card.approve.disabled = true;
     card.reject.disabled = true;
     let posted: { status: number; body: unknown };
@@ -1240,12 +1423,17 @@ class ConversationApp {
       );
     } catch {
       // Transient: the SAME key + SAME body are replayed on the next click.
+      card.deciding = false;
       this.showNotice("承認できませんでした。もう一度お試しください");
       this.scheduleActionSync();
       return;
     }
     if (posted.status === 202) {
       // Accepted: the key has served its purpose (the decision is durable).
+      // The card is now execution-owned: the old pending timer must never
+      // retire it, and a stale pending list must not downgrade it.
+      this.clearPendingExpiry(card);
+      card.deciding = false;
       this.clearApproveKey(card.proposalId);
       const body = posted.body as { runId?: unknown };
       if (typeof body.runId === "string") {
@@ -1258,26 +1446,45 @@ class ConversationApp {
     // Definitive 4xx (state conflict / disabled / hash mismatch): drop the
     // key and re-read the real state; nothing was executed.
     if (posted.status === 409) {
+      card.deciding = false;
       this.clearApproveKey(card.proposalId);
       this.showNotice("この変更は承認できません。内容を確認してください");
       await this.hydrateHistory();
       this.scheduleActionSync();
       return;
     }
+    card.deciding = false;
     this.showNotice("承認できませんでした。もう一度お試しください");
     this.scheduleActionSync();
   }
 
   /** Reject: KEYLESS by contract — no Idempotency-Key is ever sent. */
   private async reject(card: ActionCard): Promise<void> {
-    if (this.sessionId === null || card.reject.disabled) {
+    if (
+      this.sessionId === null ||
+      card.reject.disabled ||
+      card.deciding ||
+      card.terminal
+    ) {
       return;
     }
+    // Local deadline precheck (server stays authoritative): a locally
+    // expired pending card is never decided from a stale click.
+    if (card.status !== "pending" || Date.now() >= card.deadline) {
+      this.showNotice("却下できませんでした。内容を確認してください");
+      this.removeActionCard(card.proposalId);
+      this.scheduleActionSync();
+      return;
+    }
+    card.deciding = true;
+    card.approve.disabled = true;
+    card.reject.disabled = true;
     const posted = await postJson(
       `/api/sessions/${encodeURIComponent(this.sessionId)}/proposals/${encodeURIComponent(card.proposalId)}/reject`,
       { proposalHash: card.hash },
       null,
     );
+    card.deciding = false;
     if (posted.status === 200) {
       this.clearApproveKey(card.proposalId);
       this.showNotice("却下しました");
