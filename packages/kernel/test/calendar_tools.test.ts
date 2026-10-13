@@ -1060,7 +1060,7 @@ describe("C13 broker exposure / frozen context / cross-source", () => {
     expect(repo.getTurn(turnId).frozenContext).toEqual(frozen);
   });
 
-  it("C13-06/07 mixed Calendar/Markdown references share one session sequence; Calendar-origin related/open are stored-only; a failed call adds no stale evidence", async () => {
+  it("C13-06/07 mixed Calendar/Markdown references share one session sequence; Calendar-related explores Markdown read-only from the stored title; a failed call adds no stale evidence", async () => {
     const { handle, repo, broker, port, markdownPort } = await setupMixedStack({
       events: [fakeEvent()],
       markdownFiles: {
@@ -1068,6 +1068,12 @@ describe("C13 broker exposure / frozen context / cross-source", () => {
           title: "Standup notes",
           text: "Notes for the calendar sync.",
           revision: "rev-a",
+        },
+        // Exact-key file for the Calendar-related derived query ("Standup").
+        Standup: {
+          title: "Standup",
+          text: "Cross-source notes linked from the calendar event.",
+          revision: "rev-c",
         },
         "retro minutes": {
           title: "Retro minutes",
@@ -1114,13 +1120,10 @@ describe("C13 broker exposure / frozen context / cross-source", () => {
     expect(md2Hit.ordinal).toBe(3);
     expect(calHit.status).toBe("confirmed");
     expect(calHit.referenceId).toMatch(/^[0-9a-f-]{36}$/);
-    const upstreamBefore =
-      port.searchCalls.length +
-      port.getCalls.length +
-      markdownPort.searchQueries.length +
-      markdownPort.readCalls.length;
     // Stored-only open across the mixed set: Calendar-origin reference opens
     // without any upstream read.
+    const calendarCallsBefore =
+      port.searchCalls.length + port.getCalls.length;
     const opened = await broker.invoke(
       r3.runId,
       "reference.open",
@@ -1134,24 +1137,66 @@ describe("C13 broker exposure / frozen context / cross-source", () => {
     expect((opened.normalized as { canonicalKey: string }).canonicalKey).toMatch(
       /^calendar:[0-9a-f]{64}$/,
     );
-    // Calendar-origin reference.related: deterministic stored link-graph read
-    // (calendar snapshots carry no links and invent no Markdown rNs).
+    // Calendar-origin reference.related: REAL deterministic read-only
+    // Markdown exploration derived from the stored normalized title
+    // (§17.8). The query sent to the Markdown port is exactly "Standup"
+    // (NFC + trim of the stored title) and the hit materializes as an rN
+    // reference through the ordinary search pathway.
     const related = await broker.invoke(
       r3.runId,
       "reference.related",
       { referenceId: calHit.referenceId, limit: 20 },
       CTX,
     );
-    expect((related.normalized as { references: unknown[] }).references).toEqual(
-      [],
+    expect(related.result.actualOutcome).toBe("succeeded");
+    expect(markdownPort.searchQueries).toContain("Standup");
+    const relatedList = (
+      related.normalized as {
+        references: Array<{
+          referenceId: string;
+          canonicalKey: string;
+          title: string;
+          ordinal: number;
+        }>;
+      }
+    ).references;
+    expect(relatedList).toHaveLength(1);
+    expect(relatedList[0].canonicalKey).toBe("vault/Standup.md");
+    expect(relatedList[0].title).toBe("Standup");
+    // The related hit shares the SAME session sequence (ordinal 4). The
+    // only upstream surface touched is ONE bounded Markdown search; the
+    // Calendar port is never read by this flow.
+    expect(relatedList[0].ordinal).toBe(4);
+    expect(markdownPort.searchQueries).toEqual([
+      "standup notes",
+      "retro minutes",
+      "Standup",
+    ]);
+    expect(markdownPort.readCalls).toHaveLength(0);
+    expect(port.searchCalls.length + port.getCalls.length).toBe(
+      calendarCallsBefore,
     );
-    // Neither stored-only flow read upstream.
+    // The fresh Markdown rN is openable reference.open-style (snapshot body).
+    const mdRelated = await broker.invoke(
+      r3.runId,
+      "reference.open",
+      { referenceId: relatedList[0].referenceId },
+      CTX,
+    );
+    expect(mdRelated.result.actualOutcome).toBe("succeeded");
     expect(
-      port.searchCalls.length +
-        port.getCalls.length +
-        markdownPort.searchQueries.length +
-        markdownPort.readCalls.length,
-    ).toBe(upstreamBefore);
+      (mdRelated.normalized as { body: { text: string } }).body.text,
+    ).toContain("calendar event");
+    // Markdown-origin reference.related of the new hit stays stored-only
+    // (generic same-connector graph path, unchanged): no extra query.
+    const mdNeoRelated = await broker.invoke(
+      r3.runId,
+      "reference.related",
+      { referenceId: relatedList[0].referenceId, limit: 10 },
+      CTX,
+    );
+    expect(mdNeoRelated.result.actualOutcome).toBe("succeeded");
+    expect(markdownPort.searchQueries).toHaveLength(3);
     // C13-07: a failed calendar call audits only the fixed code and never
     // adds stale/uncited references or rewrites prior evidence.
     const referencesBefore = counts(handle.raw).references;

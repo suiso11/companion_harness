@@ -24,8 +24,18 @@
 //   `presentObservations` with freshness `refresh` (same bytes always yield a
 //   new Snapshot+rN). Registration uses `dedupMode: "always_bypass"` so
 //   identical logical args always execute.
-// - related: `getRelatedStored` then `presentStored`; no connector read;
-//   returns the `references` contract.
+// - related: Markdown-origin references stay stored-only
+//   (`getRelatedStored` then `presentStored`; no connector read; the generic
+//   same-connector link-graph path is unchanged and never weakened).
+//   Calendar-origin references explore the cross-source flow instead
+//   (§17.8): a deterministic READ-ONLY Markdown search derived from the
+//   stored normalized Calendar title, mapped to observations and
+//   `presentObservations`ed with freshness `normal` so the hits materialize
+//   as real rN references through the ordinary M1 pathways. Zero hits, an
+//   underivable title, or a Calendar-only deployment (no Markdown binding)
+//   return an honest empty `references` (never a fake cross-source claim).
+//   No Markdown write ever happens and no link row is written
+//   cross-connector.
 //
 // NORMALIZERS count search hits / open one / refresh one / related refs as
 // observations and return ONLY the contract output as model-facing.
@@ -58,6 +68,7 @@ import {
   type CalendarTargetStore,
   createCalendarSearchRegistration,
   createInMemoryCalendarTargetStore,
+  deriveCalendarRelatedQuery,
   mapCalendarCode,
   toCalendarObservation,
 } from "./calendar_tools.js";
@@ -742,8 +753,9 @@ export function createM1ToolRegistrations(
     descriptor: {
       name: "reference.related",
       version: 1,
-      title: "Related stored references",
-      description: "Stored link-graph neighbors only (no external read)",
+      title: "Related references",
+      description:
+        "Markdown origin: stored link-graph neighbors only (no external read). Calendar origin: deterministic read-only Markdown search from the event title.",
       category: "read",
       defaultTimeoutMs: 15_000,
       maxTimeoutMs: 60_000,
@@ -757,24 +769,158 @@ export function createM1ToolRegistrations(
       if (ctx.signal.aborted) {
         throw new ToolError("execution_cancelled");
       }
-      // Stored-only graph read; no connector call by construction.
-      let stored: Awaited<ReturnType<ReferenceManager["getRelatedStored"]>>;
+      // Resolve the base reference's connector kind from stored metadata
+      // (never external I/O) so the two flows stay explicit and disjoint.
+      let baseKind: string;
+      let baseResourceId: string;
       try {
-        stored = referenceManager.getRelatedStored(
-          sessionId,
-          parsed.referenceId,
-          parsed.limit,
+        const base = db
+          .prepare(
+            `SELECT r.id AS resource_id, ci.kind AS kind
+               FROM session_references sr
+               JOIN resources r ON r.id = sr.resource_id
+               JOIN connector_instances ci ON ci.id = r.connector_instance_id
+              WHERE sr.session_id = ? AND sr.id = ?`,
+          )
+          .get(sessionId, parsed.referenceId) as
+          | { resource_id: string; kind: string }
+          | undefined;
+        if (base === undefined) {
+          throw new ToolError("reference_not_found");
+        }
+        baseKind = base.kind;
+        baseResourceId = base.resource_id;
+      } catch (error) {
+        throw mapToToolError(error, ctx.signal);
+      }
+
+      if (baseKind !== "calendar") {
+        // Generic SAME-CONNECTOR stored link-graph path (M1, unchanged).
+        // Stored-only graph read; no connector call by construction.
+        let stored: Awaited<ReturnType<ReferenceManager["getRelatedStored"]>>;
+        try {
+          stored = referenceManager.getRelatedStored(
+            sessionId,
+            parsed.referenceId,
+            parsed.limit,
+          );
+        } catch (error) {
+          throw mapToToolError(error, ctx.signal);
+        }
+        let presented: Awaited<ReturnType<ReferenceManager["presentStored"]>>;
+        try {
+          presented = referenceManager.presentStored(
+            sessionId,
+            ctx.runId,
+            stored.map((entry) => entry.referenceId),
+            { now: clock.now() },
+          );
+        } catch (error) {
+          throw mapToToolError(error, ctx.signal);
+        }
+        if (!presented.applied) {
+          throw new ToolError("execution_cancelled");
+        }
+        return {
+          references: stored.map((entry) => ({
+            referenceId: entry.referenceId,
+            ordinal: entry.ordinal,
+            snapshotId: entry.snapshotId,
+            resourceId: entry.resourceId,
+            canonicalKey: entry.canonicalKey,
+            title: entry.title,
+          })),
+        };
+      }
+
+      // Calendar-origin cross-source exploration (C13-06/07, §17.8):
+      // Calendar snapshots carry no link rows (ReferenceManager links are
+      // SAME-CONNECTOR by construction, so `getRelatedStored` is provably
+      // empty here), and a deterministic empty result is NOT cross-source
+      // exploration. The deliberate flow is a real, deterministic, bounded
+      // READ-ONLY Markdown search derived from the stored normalized
+      // Calendar title, materialized through the ordinary
+      // presentObservations/rN pathways. No Markdown writes; no link row is
+      // written cross-connector (same-connector identity is never weakened).
+      const markdownBinding = defaultBinding;
+      if (markdownBinding === undefined) {
+        // Calendar-only deployment: no configured Markdown binding means no
+        // exploration surface; the honest result is zero references.
+        return { references: [] };
+      }
+      let title: string | null;
+      try {
+        const row = db
+          .prepare("SELECT title FROM resources WHERE id = ?")
+          .get(baseResourceId) as { title: string | null } | undefined;
+        title = row?.title ?? null;
+      } catch (error) {
+        throw mapToToolError(error, ctx.signal);
+      }
+      const query = deriveCalendarRelatedQuery(title);
+      if (query === null) {
+        // No derivable bounded query (absent/blank title): honest empty.
+        return { references: [] };
+      }
+      if (ctx.signal.aborted) {
+        throw new ToolError("execution_cancelled");
+      }
+      // Existing Markdown search pathway with the bounded query semantics
+      // (query 1..256 code points via the derivation above, limit from the
+      // validated input). Cooperative cancellation via ctx.signal.
+      let result: MarkdownPortSearchResult;
+      try {
+        result = await markdownBinding.connector.search(
+          { query, limit: parsed.limit },
+          { signal: ctx.signal },
         );
       } catch (error) {
         throw mapToToolError(error, ctx.signal);
       }
-      let presented: Awaited<ReturnType<ReferenceManager["presentStored"]>>;
+      if (ctx.signal.aborted) {
+        throw new ToolError("execution_cancelled");
+      }
+      const now = clock.now();
+      const observations: ResourceObservation[] = [];
       try {
-        presented = referenceManager.presentStored(
+        for (const hit of result.hits ?? []) {
+          if (
+            typeof hit.canonicalKey !== "string" ||
+            typeof hit.title !== "string" ||
+            typeof hit.text !== "string" ||
+            typeof hit.sourceRevision !== "string"
+          ) {
+            throw new ToolError("execution_failed");
+          }
+          observations.push({
+            connectorInstanceId: markdownBinding.connectorInstanceId,
+            canonicalKey: hit.canonicalKey,
+            title: hit.title,
+            text: hit.text,
+            sourceRevision: hit.sourceRevision,
+            observedAt: now,
+            links: toObservationLinks(
+              hit.standardLinks ?? [],
+              hit.wikiLinks ?? [],
+            ),
+          });
+        }
+      } catch (error) {
+        if (error instanceof ToolError) throw error;
+        throw new ToolError("execution_failed");
+      }
+      // Freshness `normal`: repeated related calls on unchanged documents
+      // reuse the session snapshot (no snapshot inflation); changed content
+      // materializes a fresh Snapshot + rN through the ordinary pathway.
+      let presented: Awaited<
+        ReturnType<ReferenceManager["presentObservations"]>
+      >;
+      try {
+        presented = referenceManager.presentObservations(
           sessionId,
           ctx.runId,
-          stored.map((entry) => entry.referenceId),
-          { now: clock.now() },
+          observations,
+          { freshness: "normal", now },
         );
       } catch (error) {
         throw mapToToolError(error, ctx.signal);
@@ -783,13 +929,13 @@ export function createM1ToolRegistrations(
         throw new ToolError("execution_cancelled");
       }
       return {
-        references: stored.map((entry) => ({
-          referenceId: entry.referenceId,
-          ordinal: entry.ordinal,
-          snapshotId: entry.snapshotId,
-          resourceId: entry.resourceId,
-          canonicalKey: entry.canonicalKey,
-          title: entry.title,
+        references: presented.references.map((ref) => ({
+          referenceId: ref.referenceId,
+          ordinal: ref.ordinal,
+          snapshotId: ref.snapshotId,
+          resourceId: ref.resourceId,
+          canonicalKey: ref.canonicalKey,
+          title: ref.title,
         })),
       };
     }) as ToolRegistration["handler"],

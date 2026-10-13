@@ -127,6 +127,7 @@ export {
   createCalendarSearchRegistration,
   createDurableCalendarTargetStore,
   createInMemoryCalendarTargetStore,
+  deriveCalendarRelatedQuery,
   mapCalendarCode,
   toCalendarObservation,
 } from "./calendar_tools.js";

@@ -26,6 +26,7 @@
 import {
   CalendarSearchToolInputSchema,
   CalendarSearchToolOutputSchema,
+  MAX_SEARCH_QUERY_CODE_POINTS,
 } from "@companion/contracts";
 import type Database from "better-sqlite3";
 import { ToolError, type ToolRegistration } from "./broker.js";
@@ -270,6 +271,42 @@ export function toCalendarObservation(
     sourceRevision,
     observedAt,
   };
+}
+
+/* ------------------------------------------------------------------ */
+/* Calendar-origin related Markdown exploration (C13-06 fix)            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Deterministic bounded Markdown query derived from a stored normalized
+ * Calendar title (the stable canonical evidence, §17.8 cross-source flow).
+ *
+ * The stored `resources.title` is already NFC-normalized by the
+ * ReferenceManager; re-normalization is idempotent. The derivation is pure
+ * and deterministic: NFC, exact `String.trim()` of leading/trailing
+ * whitespace, then a code-point truncation to the EXACT Markdown search
+ * query bound (1..256 code points, `MAX_SEARCH_QUERY_CODE_POINTS`), so the
+ * result always satisfies the existing `SearchQuerySchema` semantics and no
+ * bounded query rule is invented here.
+ *
+ * `null` means "nothing derivable" (absent or whitespace-only title): the
+ * caller MUST NOT search and must return zero related references instead of
+ * guessing a query. No upstream/provider id, path or secret can enter the
+ * query: only the stored display title is used.
+ */
+export function deriveCalendarRelatedQuery(
+  title: string | null,
+): string | null {
+  if (typeof title !== "string" || title.length === 0) {
+    return null;
+  }
+  const trimmed = title.normalize("NFC").trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+  return Array.from(trimmed)
+    .slice(0, MAX_SEARCH_QUERY_CODE_POINTS)
+    .join("");
 }
 
 /* ------------------------------------------------------------------ */
