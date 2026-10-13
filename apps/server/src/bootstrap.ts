@@ -540,8 +540,15 @@ export async function startServer(
   // are logged exactly once by the post-config catch below, which this
   // early throw never reaches, so no double logging occurs.
   let config: ServerConfig;
+  // C14 profile selector freeze: capture the raw opt-in selector
+  // synchronously with the initial frozen startup config, BEFORE the first
+  // await below. `options.env` / `process.env` stay mutable, so a later
+  // read could observe a different decision; the captured const is the
+  // single decision used later.
+  let frozenCalendarProfile: string | undefined;
   try {
     config = loadServerConfig(options.env);
+    frozenCalendarProfile = (options.env ?? process.env)[CALENDAR_PROFILE_ENV];
   } catch (error) {
     const earlyLogger =
       options.logger ?? createStdServerLogger(DEFAULT_LOG_LEVEL);
@@ -671,8 +678,9 @@ export async function startServer(
     // (identity + stdio + 3 pinned live-wire hashes); any deviation fails
     // closed. Unset profile keeps the previous behavior: explicit
     // `mcpDefinitions` injection or an INCOMPLETE-opt-in failure.
-    const profileEnv = (options.env ?? process.env)[CALENDAR_PROFILE_ENV];
-    const calendarProfile = parseCalendarProfileName(profileEnv);
+    // Uses the selector captured synchronously at startup (see above):
+    // later mutations of options.env/process.env cannot change the decision.
+    const calendarProfile = parseCalendarProfileName(frozenCalendarProfile);
     let effectiveMcpDefinitions: readonly McpBindingDefinition[] | undefined =
       options.mcpDefinitions;
     if (calendarProfile !== null) {

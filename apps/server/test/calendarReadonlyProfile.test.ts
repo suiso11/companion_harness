@@ -290,4 +290,48 @@ describe("bootstrap normal composition with the pinned profile", () => {
       "reference.related",
     ]);
   });
+
+  it("freezes a missing profile against a later mutation (still incomplete opt-in)", async () => {
+    const env = { ...tempEnv(), COMPANION_CALENDAR_JSON: profileHint() };
+    const pending = startServer({ env, drainMs: 50 });
+    // Mutate the SAME env object synchronously after the call: the frozen
+    // startup decision must not observe it.
+    env[CALENDAR_PROFILE_ENV] = "google-readonly";
+    await expect(pending).rejects.toThrow(/host trusted binding definitions/);
+  });
+
+  it("freezes a present profile against later removal (retains the decision)", async () => {
+    const env = {
+      ...tempEnv(),
+      COMPANION_CALENDAR_JSON: profileHint(),
+      [CALENDAR_PROFILE_ENV]: "google-readonly",
+    };
+    let created = 0;
+    const pending = startServer({
+      env,
+      mcpTransportFactory: () => {
+        created += 1;
+        return {
+          start: async () => {
+            throw new Error("unavailable (test)");
+          },
+          send: async () => {},
+          close: async () => {},
+        } as never;
+      },
+      drainMs: 50,
+    });
+    // Remove the selector synchronously after the call: startup must still
+    // own the profile composition (lazy, zero dials).
+    delete env[CALENDAR_PROFILE_ENV];
+    const started = await pending;
+    servers.push(started);
+    expect(created).toBe(0);
+    expect([...(started.toolBroker?.toolNames() ?? [])].sort()).toEqual([
+      "calendar.search",
+      "reference.open",
+      "reference.refresh",
+      "reference.related",
+    ]);
+  });
 });
