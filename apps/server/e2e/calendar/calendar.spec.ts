@@ -50,6 +50,26 @@ async function send(page: Page, text: string): Promise<void> {
   await page.locator("#composer-send").click();
 }
 
+/**
+ * REAL user selection step: opening a citation is what adds the reference to
+ * the session reference context (§14.8 CAS PUT over the real HTTP app), and
+ * the next turn freezes that context as its rN addressability source. A
+ * follow-up turn can only address an rN the user actually selected, so any
+ * scenario that re-addresses a delivered rN in a LATER turn must perform this
+ * step through the real drawer — never by faking the selection server-side.
+ */
+async function selectCitation(page: Page, label: string): Promise<void> {
+  await page
+    .locator("#conversation button", { hasText: label })
+    .first()
+    .click();
+  await expect(page.locator("#drawer")).toBeVisible();
+  // Backdrop click closes the drawer (the drawer element itself is the
+  // click target in its padding, outside #drawer-body).
+  await page.locator("#drawer").click({ position: { x: 4, y: 4 } });
+  await expect(page.locator("#drawer")).toBeHidden();
+}
+
 test.beforeEach(async ({ page, request }) => {
   await control(request, "/reset");
   await page.goto("/");
@@ -117,6 +137,13 @@ test("refresh: real reference.refresh rematerializes a NEW rN over V1->V2", asyn
     ANSWER_SEARCH_TEXT,
     { timeout: 30_000 },
   );
+  await expect(
+    page.locator("#conversation button", { hasText: "r1" }),
+  ).toHaveCount(1);
+  // REAL selection: the user opens r1, so the next turn's frozen reference
+  // context can address r1 (reference.refresh r1 is otherwise rejected as
+  // invalid_input, exactly as for any unselected rN).
+  await selectCitation(page, "r1");
   await control(request, "/advance-title");
   await send(page, TEXT_REFRESH);
   // The refresh answer cites the newly materialized rN (r2).
@@ -148,6 +175,9 @@ test("tombstone: authoritative upstream deletion keeps the stored open, refresh 
     ANSWER_SEARCH_TEXT,
     { timeout: 30_000 },
   );
+  // REAL selection: r1 must be in the next turn's frozen context for
+  // reference.open / reference.refresh to address it.
+  await selectCitation(page, "r1");
   // Synthetic authoritative deletion IN THE FAKE UPSTREAM ONLY.
   await control(request, "/delete-event");
   await send(page, TEXT_DELETE);
@@ -168,7 +198,8 @@ test("tombstone: authoritative upstream deletion keeps the stored open, refresh 
   ).toHaveCount(2);
   // The stored open still works (retained snapshot; the deletion only
   // killed the UPSTREAM read, never the stored reference).
-  await page.locator("#conversation button", { hasText: "r1" }).click();
+  // Both turns cite r1, so target the LATEST turn's citation explicitly.
+  await page.locator("#conversation button", { hasText: "r1" }).last().click();
   await expect(page.locator("#drawer")).toBeVisible();
   const body = (await page.locator("#drawer-body").textContent()) ?? "";
   expect(body).toContain(EVENT_TITLE_V1);

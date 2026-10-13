@@ -842,6 +842,39 @@ or complete activate config):
   workspace dependencies on `@companion/connector-mcp` and
   `@companion/connector-calendar`.
 
+### C15 Calendar fake E2E harness fixes (observed: refresh + tombstone scenarios)
+
+- The two failing C15 browser scenarios were ROOT-CAUSED against the real
+  agent strategy, not worked around. `reference.refresh` was rejected by the
+  broker with `invalid_input` on BOTH scenarios: the model addressed `r1`,
+  but `translateReferenceArgs` seeds the per-run `rN` -> UUID map ONLY from
+  the turn's FROZEN reference context, and the session reference context is
+  written ONLY by the real §14.8 CAS `PUT` that the UI performs when the user
+  OPENS a citation. The refresh/tombstone scenarios re-addressed `r1` in a
+  later turn without ever opening it, so `r1` was legitimately not
+  addressable. The fix is in the harness, not in production semantics: the
+  scenarios now perform the REAL user selection step (click the delivered
+  `r1` citation, drawer opens, real conditional `PUT` runs) before the
+  follow-up turn. No selection is faked server-side and no UI path is
+  bypassed.
+- The scripted fake model (`apps/server/e2e/calendar/model.ts`) is now
+  STATELESS: the fixed plan is selected from the CURRENT turn request text
+  (the last user message framed `User request:`), the plan step is the count
+  of real tool feedbacks in that turn's own transcript, and the answer
+  citation is the highest `rN` ordinal those feedbacks actually delivered.
+  The previous gateway-global `GatewayState` (plan/turn/step/learnedOrdinal
+  reset via `userMessageCount`) could reset a plan or lose a delivered grant
+  on a turn change and leaked state across sessions sharing one gateway;
+  that shared state is gone. `Reference.refresh` itself needed no production
+  change — the observed `invalid_input` was correct behavior for an
+  unselected `rN`.
+- Observed verification (only the two previously failing scenarios were
+  re-run; the two passing scenarios were NOT re-run):
+  `COMPANION_E2E_CALENDAR=1 playwright test --grep 'refresh|tombstone'`
+  -> **2 passed** (`/tmp/calendar-refresh-fixed.log`), plus
+  `tsc --noEmit -p apps/server/tsconfig.e2e.json` exit 0 and
+  `biome check` on the two touched e2e files, 0 findings.
+
 ### C21 M5 Action composition (triple gate)
 
 - This subsection records the CURRENT C21 scope on top of C17-C20. The tests

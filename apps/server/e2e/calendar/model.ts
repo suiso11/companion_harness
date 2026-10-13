@@ -6,10 +6,13 @@
 // REAL ToolBroker (calendar.search / reference.open / reference.refresh),
 // and feeds every result back. No HTTP ever leaves the process.
 //
-// The script keys the fixed plan on the ORIGINAL turn input text only (the
-// TEXT_* constants in ports.ts) and derives its FINAL answer citations from
-// the rN labels actually delivered in the last real tool feedback, so the
-// answers always cite genuinely granted evidence for the current run.
+// The script is STATELESS: plan, step and final citations are derived from the
+// request the agent actually sends (current request text + that turn's real
+// tool feedback), so no shared/global turn state can reset a plan or lose an
+// already delivered evidence grant across turns or sessions. The plan keys on
+// the CURRENT turn input text only (the TEXT_* constants in ports.ts) and the
+// final answer citations come from the rN labels really delivered in this
+// turn's tool feedback, so answers only cite genuinely granted evidence.
 
 import type {
   ChatMessage,
@@ -27,6 +30,12 @@ import {
   TEXT_SEARCH,
 } from "./ports.js";
 
+/**
+ * Framing the REAL agent strategy puts on the CURRENT turn request
+ * (`projectPrompt`); distinguishes it from projected history user messages.
+ */
+const CURRENT_REQUEST_MARKER = "User request:";
+
 const SEARCH_RANGE = {
   start: "2026-10-01T00:00:00Z",
   end: "2026-10-31T00:00:00Z",
@@ -34,31 +43,50 @@ const SEARCH_RANGE = {
 
 type PlanName = "search" | "refresh" | "delete";
 
-interface GatewayState {
-  plan: PlanName | null;
-  /**
-   * Identity of the turn currently being scripted: the number of user
-   * messages in the request. A NEW turn (count change) always restarts the
-   * fixed plan, even when consecutive turns share the same plan name — the
-   * state is per-turn progress, never global across turns.
-   */
-  turn: number;
-  /** Step index inside the fixed plan (chat call number within the turn). */
-  step: number;
-  /** Highest rN ordinal delivered in the last real tool feedback of the turn. */
-  learnedOrdinal: number | null;
-}
-
-function lastToolFeedback(request: ChatRequest): string | null {
-  const messages: ChatMessage[] = request.messages;
+/**
+ * Index of the user message that carries the CURRENT turn request: the last
+ * projected user message framed as `User request:\n`. Everything after it
+ * is the current turn's own transcript (assistant tool calls + real tool
+ * feedback), so the plan, the step index and the delivered evidence are
+ * derived from the REQUEST ALONE — never from gateway-global mutable state.
+ * A repair-hint user message (also projected as a user message) can never
+ * displace the boundary.
+ */
+function currentRequestIndex(messages: readonly ChatMessage[]): number {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index] as ChatMessage | undefined;
-    if (message === undefined) continue;
-    if (message.role === "tool" && typeof message.content === "string") {
-      return message.content;
+    if (
+      message !== undefined &&
+      message.role === "user" &&
+      typeof message.content === "string" &&
+      message.content.includes(CURRENT_REQUEST_MARKER)
+    ) {
+      return index;
     }
   }
-  return null;
+  return -1;
+}
+
+/** Current-turn transcript: every message after the current request. */
+function currentTranscript(
+  request: ChatRequest,
+  from: number,
+): readonly ChatMessage[] {
+  return from < 0 ? [] : request.messages.slice(from + 1);
+}
+
+/** Real tool feedback delivered in THIS turn, oldest first. */
+function currentToolFeedback(
+  request: ChatRequest,
+  from: number,
+): readonly string[] {
+  const out: string[] = [];
+  for (const message of currentTranscript(request, from)) {
+    if (message.role === "tool" && typeof message.content === "string") {
+      out.push(message.content);
+    }
+  }
+  return out;
 }
 
 /** Highest `\"ordinal\":N` / `rN` label actually delivered (granted evidence). */
@@ -80,24 +108,6 @@ function learnDeliveredOrdinal(content: string): number | null {
     }
   }
   return best;
-}
-
-function userMessageCount(request: ChatRequest): number {
-  let count = 0;
-  for (const message of request.messages) {
-    if (message.role === "user") count += 1;
-  }
-  return count;
-}
-
-function requestText(request: ChatRequest): string {
-  let text = "";
-  for (const message of request.messages) {
-    if (message.role === "user" && typeof message.content === "string") {
-      text += `\n${message.content}`;
-    }
-  }
-  return text;
 }
 
 function selectPlan(requestTextValue: string): PlanName | null {
@@ -125,8 +135,8 @@ function answerSubmit(
   });
 }
 
-function citedAnswer(state: GatewayState, text: string): ChatResult {
-  const ordinal = state.learnedOrdinal;
+/** Cite the highest rN actually delivered in THIS turn's real feedback. */
+function citedAnswer(ordinal: number | null, text: string): ChatResult {
   const citations = ordinal !== null ? [`r${ordinal}`] : [];
   return answerResult([answerSubmit(text, citations)]);
 }
@@ -144,19 +154,28 @@ function answerResult(
  * reachable (the baseUrl is loopback-empty and never fetched).
  */
 export function createScriptedCalendarModelGateway(): ModelGateway {
-  const state: GatewayState = {
-    plan: null,
-    turn: -1,
-    step: 0,
-    learnedOrdinal: null,
-  };
   return {
     provider: "ollama",
     capabilities: { toolCalling: true },
     baseUrl: "http://127.0.0.1:1",
     chatUrl: "http://127.0.0.1:1/api/chat",
     async chat(request: ChatRequest): Promise<ChatResult> {
-      const plan = selectPlan(requestText(request));
+      // Everything below is DERIVED FROM THIS REQUEST ONLY: the plan from the
+      // current request text, the step from the current turn's real tool
+      // feedback count, the citation from the ordinals those very feedbacks
+      // delivered. No gateway-global mutable state exists, so neither a new
+      // turn, a cross-session interleaving, nor a history/tool-feedback
+      // combination can reset the plan or lose an already delivered grant.
+      const requestIndex = currentRequestIndex(request.messages);
+      const requestMessage =
+        requestIndex < 0
+          ? undefined
+          : (request.messages[requestIndex] as ChatMessage | undefined);
+      const plan =
+        requestMessage === undefined ||
+        typeof requestMessage.content !== "string"
+          ? null
+          : selectPlan(requestMessage.content);
       if (plan === null) {
         // Defensive default: never invent tool calls for foreign prompts.
         return {
@@ -165,20 +184,20 @@ export function createScriptedCalendarModelGateway(): ModelGateway {
           stopReason: "stop",
         };
       }
-      const turn = userMessageCount(request);
-      if (plan !== state.plan || turn !== state.turn) {
-        state.plan = plan;
-        state.turn = turn;
-        state.step = 0;
-        state.learnedOrdinal = null;
+      // Safe current-transcript tool count: one step per real tool feedback
+      // delivered in this turn, in request order.
+      const feedback = currentToolFeedback(request, requestIndex);
+      let learnedOrdinal: number | null = null;
+      for (const content of feedback) {
+        const learned = learnDeliveredOrdinal(content);
+        if (learned !== null) {
+          learnedOrdinal =
+            learnedOrdinal === null || learned > learnedOrdinal
+              ? learned
+              : learnedOrdinal;
+        }
       }
-      const feedback = lastToolFeedback(request);
-      if (feedback !== null) {
-        const learned = learnDeliveredOrdinal(feedback);
-        if (learned !== null) state.learnedOrdinal = learned;
-      }
-      const step = state.step;
-      state.step += 1;
+      const step = feedback.length;
       if (plan === "search") {
         // Plan: real calendar.search -> cite the delivered rN.
         if (step === 0) {
@@ -190,7 +209,7 @@ export function createScriptedCalendarModelGateway(): ModelGateway {
             }),
           );
         }
-        return citedAnswer(state, ANSWER_SEARCH_TEXT);
+        return citedAnswer(learnedOrdinal, ANSWER_SEARCH_TEXT);
       }
       if (plan === "refresh") {
         // Plan: refresh the delivered stored rN -> cite the newly
@@ -200,7 +219,7 @@ export function createScriptedCalendarModelGateway(): ModelGateway {
             toolCall("reference.refresh", { referenceId: "r1" }),
           );
         }
-        return citedAnswer(state, ANSWER_REFRESH_TEXT);
+        return citedAnswer(learnedOrdinal, ANSWER_REFRESH_TEXT);
       }
       // Delete plan: stored OPEN first (the model addresses the retained
       // stored reference), then refresh (fails via the fake deleted
@@ -214,7 +233,7 @@ export function createScriptedCalendarModelGateway(): ModelGateway {
           toolCall("reference.refresh", { referenceId: "r1" }),
         );
       }
-      return citedAnswer(state, ANSWER_TOMBSTONE_TEXT);
+      return citedAnswer(learnedOrdinal, ANSWER_TOMBSTONE_TEXT);
     },
   };
 }
