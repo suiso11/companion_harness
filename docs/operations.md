@@ -1208,6 +1208,86 @@ or complete activate config):
   head-SHA claim; the formal C09/C10/C11 gates and Calendar adoption stay
   **HOLD**, and no source/test fix was needed (no observed machine failure).
 
+## C24 action-core review fixes (verified)
+
+Four evidence-backed review bugs on the m5-action core, each fixed in its own
+commit with a focused regression test; all four reviewed ranges are the ONLY
+source touched (no scope broadening, no UI/server/browser changes).
+
+- **Fix 1 — expired pending proposal still occupied the session cap**
+  (`action_proposals.ts` `commitStaged`, before the one-pending-per-session
+  recheck; commit `1d736779c1351e3e5bc0273fa8043aeb6a7489b7`): Within the
+  caller's completion transaction, older pending rows with
+  `expires_at <= now` are expired FIRST (`status='expired'`,
+  `resolved_at=now`, `decision_turn_id=NULL`, satisfying the
+  `action_proposals` CHECK), so an unattended expiry no longer blocks a fresh
+  proposal in the same session. Boundary is EXACT 15min (`expires_at <= now`
+  matches the stager's `now >= entry.expiresAt`). A failed completion rolls
+  the sweep back with everything else (single transaction). Regression:
+  `packages/kernel/test/action_proposals.test.ts` "expires an unattended
+  pending proposal at commit time and frees the session cap (exact 15min
+  boundary)" — unattended expiry, then the new proposal commits, old row is
+  `expired/resolved@now/decision NULL`, and the forced-rollback restores the
+  un-swept pending row.
+
+- **Fix 2 — `resolveTarget === undefined` after the grant wrongly returned
+  `succeeded_unverified` with 0 writes**
+  (`action_strategy.ts` step 2; commit
+  `da951228a10952f0c8b467efd0c25c8d8df267c3`): The host-private target is
+  now resolved BEFORE `runActionPreflight` can consume the one-shot grant.
+  A missing target fails through the EXACT real preflight-failure terminal
+  (failed receipt + non-terminal `action.preflight_failed` + `run.failed`,
+  marker NULL, UNCONSUMED grant, zero writes); a success claim is never made
+  for an unattempted write. The later post-gate undefined-target
+  `succeeded_unverified` branch is removed; injection-binding defaults are
+  untouched. Regression: `action_scheduler_pickup.test.ts`
+  "fails closed through the REAL preflight-failure terminal when the host
+  cannot resolve the private target" — real RunEngine pickup, `writes: []`,
+  `consumed_at` NULL, `externalCallStartedAt` NULL, last event `run.failed`.
+
+- **Fix 4 — recovery sweep INNER JOIN excluded m5-action runs whose
+  execution row is missing** (`action_executions.ts`
+  `validateAndRecoverActionRuns`; commit
+  `043c0a211675192161e152839925ea5eaf2d59a6`): the sweep now queries ALL
+  `strategy='m5-action'` runs directly (the previous inner join silently
+  skipped a real orphan). The existing validation pass rejects a missing
+  execution with `DatabaseStateInvalidError` BEFORE any mutation, so the
+  whole sweep fails closed with zero writes. Regression:
+  `action_executions.test.ts` "fail-closes the WHOLE sweep when an
+  m5-action run has NO execution row (real orphan is never silently
+  skipped)" — a recoverable executing orphan plus an execution-less m5-action
+  run throw `/has no execution/` and BOTH pairs stay untouched.
+
+- **Fix 3 — recovery classifier rejected a valid post-marker
+  `definite_failure` terminal** (`action_executions.ts`
+  `classifyActionPair`; commit
+  `9582355843d4e47974014a7ba13d65d729aeb5a9`): `failed` is now legal in BOTH
+  marker states — pre-marker failure (preflight failure / pre-marker cancel,
+  marker NULL) AND post-marker `definite_failure` (marker + CONSUMED grant
+  + failed receipt both required by the unchanged follow-up checks). Invalid
+  combos still fail closed, including a consumed grant on a pre-marker
+  failed execution (never producible). Regression: "accepts an
+  ALREADY-terminal post-marker definite_failure pair as unchanged"
+  (startup/drain idempotency: `unchanged:1`) and "fails closed on a
+  pre-marker failed execution with a consumed grant".
+
+- Temporary scaffold deletions from the C15 commit `347dce3`
+  (tracked `tombstone-run.log` copies, `test-results/.last-run.json`, and
+  `logfile/tmp/*.log` action-browser-safety/approve scans — all authored by
+  agents, none user-owned) were deleted in commit
+  `c5b336c0f9827d32f456999cca5613a1c2f51f8c`, separate from the fixes.
+
+- Verification observed AFTER all edits (Linux, local): focused suites
+  `packages/kernel/test/{action_proposals,action_executions,
+  action_scheduler_pickup}.test.ts` **31 passed / 0 failed**; full kernel
+  battery **46 files / 474 passed / 0 failed**; `tsc --noEmit` for
+  `packages/kernel` exit 0. The missing-target and definite-failure-recovery
+  regressions run against REAL temp-dir SQLite databases, the REAL
+  `ActionExecutionService` and REAL `createActionStrategy`/`RunEngine`
+  pickup (no fixtures faking persistence). Whole-repo `biome check`
+  retains its pre-existing errors at HEAD (confirmed by stashing and
+  re-checking before the fixes).
+
 ## Non-goals (explicit)
 Domain retention/GC (except newest-3 backup rotation), user export,
 session delete API, running-process deletion, auto-restore, DB/backup
