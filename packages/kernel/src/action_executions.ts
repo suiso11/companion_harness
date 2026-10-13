@@ -72,18 +72,25 @@
 //   `startActionRun`, `runActionPreflight`, then the external write, and
 //   later the separate terminal-facility APIs.
 
+import type { RunResult, RunStatus } from "@companion/contracts";
 import {
+  buildRunResultV2,
   CalendarEventStatusSchema,
   CalendarRescheduleToolInputSchema,
-  SourceRevisionSchema,
-  UuidSchema,
-  buildRunResultV2,
   isTerminalStatus,
   parseRunResult,
+  SourceRevisionSchema,
+  UuidSchema,
 } from "@companion/contracts";
-import type { RunResult, RunStatus } from "@companion/contracts";
-import { z } from "zod";
 import type Database from "better-sqlite3";
+import { z } from "zod";
+import type {
+  CalendarConnectorPort,
+  CalendarGetPortResult,
+  CalendarGetTarget,
+  CalendarTargetStore,
+} from "./calendar_tools.js";
+import { toCalendarObservation } from "./calendar_tools.js";
 import { canonicalJsonString, sha256Hex } from "./canonical.js";
 import {
   ActionNotCancellableError,
@@ -94,13 +101,6 @@ import {
 } from "./errors.js";
 import type { ReferenceManager } from "./reference_manager.js";
 import { appendEventInTx, withImmediate } from "./repository.js";
-import type {
-  CalendarConnectorPort,
-  CalendarGetPortResult,
-  CalendarGetTarget,
-  CalendarTargetStore,
-} from "./calendar_tools.js";
-import { toCalendarObservation } from "./calendar_tools.js";
 
 /* ------------------------------------------------------------------ */
 /* Authoritative observation port (read-only, injected)                 */
@@ -199,7 +199,11 @@ const ACTION_RECOVERY_PRE_MARKER_ERROR_CODE =
 
 /** Exact per-run outcome of `recoverAbandonedActionRun`. */
 export type ActionRunRecoveryResult =
-  | { applied: true; runStatus: "abandoned"; executionStatus: "failed" | "unknown" }
+  | {
+      applied: true;
+      runStatus: "abandoned";
+      executionStatus: "failed" | "unknown";
+    }
   | { applied: false; runStatus: string };
 
 /** Aggregate, fail-closed result of `validateAndRecoverActionRuns`. */
@@ -258,12 +262,12 @@ export type ActionGrantGate =
   | { granted: true; grant: CommittedGrantMeta }
   | {
       granted: false;
-        reason:
-          | "run_not_running"
-          | "execution_not_preflight"
-          | "grant_consumed"
-          | "grant_missing"
-          | "proposal_not_approved";
+      reason:
+        | "run_not_running"
+        | "execution_not_preflight"
+        | "grant_consumed"
+        | "grant_missing"
+        | "proposal_not_approved";
     };
 
 /** Fixed safe redacted code for a connector `definite_failure` return. */
@@ -277,7 +281,8 @@ const ACTION_RUN_FAILED_ERROR_CODE = "execution_failed";
  * it was still BEFORE the committed `external_call_started_at` marker: the
  * external write was never issued, so nothing local may claim "stopped".
  */
-const ACTION_CANCELLED_BEFORE_WRITE_ERROR_CODE = "action_cancelled_before_write";
+const ACTION_CANCELLED_BEFORE_WRITE_ERROR_CODE =
+  "action_cancelled_before_write";
 
 /**
  * Exact outcome of the pre-marker cancellation boundary.
@@ -547,9 +552,11 @@ export function createActionExecutionService(
   /* preflight with no marker. Terminal state mutations fall out via     */
   /* CAS; any contradiction of the required pair fails closed.           */
   /* ---------------------------------------------------------------- */
-  function requirePreflightStage(
-    runId: string,
-  ): { run: RawActionRun; execution: RawExecution; proposal: RawProposal } {
+  function requirePreflightStage(runId: string): {
+    run: RawActionRun;
+    execution: RawExecution;
+    proposal: RawProposal;
+  } {
     const run = assertActionRun(runId);
     if (run.status !== "running") {
       throw new DatabaseStateInvalidError(
@@ -674,7 +681,10 @@ export function createActionExecutionService(
         id,
         run.event_seq,
         "action.preflight_failed",
-        { executionId: preflight.execution.id, errorCode: "action_preflight_failed" },
+        {
+          executionId: preflight.execution.id,
+          errorCode: "action_preflight_failed",
+        },
         now,
       );
       const movedRun = db
@@ -828,7 +838,14 @@ export function createActionExecutionService(
   /* ---------------------------------------------------------------- */
   function materializeActionPreflightSnapshot(
     runId: string,
-    observation: { connectorInstanceId: string; resourceCanonicalKey: string; title: string | null; text: string; sourceRevision: string | null; observedAt: number },
+    observation: {
+      connectorInstanceId: string;
+      resourceCanonicalKey: string;
+      title: string | null;
+      text: string;
+      sourceRevision: string | null;
+      observedAt: number;
+    },
     materialize: { now?: number } = {},
   ): ActionPreflightMaterializeResult {
     const id = requireId(runId, "runId");
@@ -948,7 +965,10 @@ export function createActionExecutionService(
           `action run ${id} has no execution (impossible state)`,
         );
       }
-      if (execution.status !== "preflight" || execution.external_call_started_at !== null) {
+      if (
+        execution.status !== "preflight" ||
+        execution.external_call_started_at !== null
+      ) {
         return {
           granted: false as const,
           reason: "execution_not_preflight" as const,
@@ -962,9 +982,7 @@ export function createActionExecutionService(
         };
       }
       const grant = db
-        .prepare(
-          "SELECT * FROM action_execution_grants WHERE execution_id = ?",
-        )
+        .prepare("SELECT * FROM action_execution_grants WHERE execution_id = ?")
         .get(execution.id) as
         | {
             execution_id: string;
@@ -1140,12 +1158,7 @@ export function createActionExecutionService(
            WHERE id = ? AND status IN ('queued', 'preflight')
              AND external_call_started_at IS NULL AND finished_at IS NULL`,
         )
-        .run(
-          ACTION_CANCELLED_BEFORE_WRITE_ERROR_CODE,
-          at,
-          at,
-          execution.id,
-        );
+        .run(ACTION_CANCELLED_BEFORE_WRITE_ERROR_CODE, at, at, execution.id);
       if (movedExecution.changes !== 1) {
         throw new KernelStorageError(
           "kernel_concurrent_conflict",
@@ -1225,9 +1238,10 @@ export function createActionExecutionService(
     }
   }
 
-  function assertExecutingStage(
-    id: string,
-  ): { execution: RawExecution; proposal: RawProposal } {
+  function assertExecutingStage(id: string): {
+    execution: RawExecution;
+    proposal: RawProposal;
+  } {
     const execution = readExecutionByRun(id);
     if (
       execution === null ||
@@ -1292,9 +1306,11 @@ export function createActionExecutionService(
         preflightSnapshotId,
         now,
       });
-      let seq = (db
-        .prepare("SELECT event_seq FROM runs WHERE id = ?")
-        .get(id) as { event_seq: number }).event_seq;
+      let seq = (
+        db.prepare("SELECT event_seq FROM runs WHERE id = ?").get(id) as {
+          event_seq: number;
+        }
+      ).event_seq;
       seq = appendEventInTx(
         db,
         id,
@@ -1352,9 +1368,11 @@ export function createActionExecutionService(
         observedRevision: null,
         resultSnapshotId: null,
         referenceId: null,
-        eventSeq: (db
-          .prepare("SELECT event_seq FROM runs WHERE id = ?")
-          .get(id) as { event_seq: number }).event_seq,
+        eventSeq: (
+          db.prepare("SELECT event_seq FROM runs WHERE id = ?").get(id) as {
+            event_seq: number;
+          }
+        ).event_seq,
         runResult,
       };
     });
@@ -1369,8 +1387,7 @@ export function createActionExecutionService(
   ): ActionFinishResult {
     let observation: z.infer<typeof ActionAuthoritativeObservationSchema>;
     try {
-      observation =
-        ActionAuthoritativeObservationSchema.parse(observationRaw);
+      observation = ActionAuthoritativeObservationSchema.parse(observationRaw);
     } catch {
       throw new RepositoryValidationError(
         "verified result observation does not parse (fail closed)",
@@ -1419,7 +1436,8 @@ export function createActionExecutionService(
       );
     }
     const observedKey =
-      observation.sourceRevision ?? sha256Hex(observation.text.normalize("NFC"));
+      observation.sourceRevision ??
+      sha256Hex(observation.text.normalize("NFC"));
     interface CommittedVerifiedTerminal {
       executionId: string;
       observedRevision: string;
@@ -1487,9 +1505,11 @@ export function createActionExecutionService(
             resultSnapshotId: fresh.snapshotId,
             now,
           });
-          let seq = (db
-            .prepare("SELECT event_seq FROM runs WHERE id = ?")
-            .get(id) as { event_seq: number }).event_seq;
+          let seq = (
+            db.prepare("SELECT event_seq FROM runs WHERE id = ?").get(id) as {
+              event_seq: number;
+            }
+          ).event_seq;
           seq = appendEventInTx(
             db,
             id,
@@ -1539,9 +1559,11 @@ export function createActionExecutionService(
             observedRevision: observedKey,
             resultSnapshotId: fresh.snapshotId,
             referenceId: fresh.referenceId,
-            eventSeq: (db
-              .prepare("SELECT event_seq FROM runs WHERE id = ?")
-              .get(id) as { event_seq: number }).event_seq,
+            eventSeq: (
+              db.prepare("SELECT event_seq FROM runs WHERE id = ?").get(id) as {
+                event_seq: number;
+              }
+            ).event_seq,
             runResult,
           };
         },
@@ -1695,7 +1717,9 @@ export function createActionExecutionService(
     // classification/terminal as a port schema failure).
     let observation: z.infer<typeof ActionAuthoritativeObservationSchema>;
     try {
-      observation = ActionAuthoritativeObservationSchema.parse(read.observation);
+      observation = ActionAuthoritativeObservationSchema.parse(
+        read.observation,
+      );
     } catch {
       return runPreflightFailedTerminal("schema_invalid", step, id);
     }
@@ -1719,12 +1743,14 @@ export function createActionExecutionService(
     if (!materialized.applied) {
       return {
         outcome: "skipped" as const,
-        status: materialized.reason === "run_not_running"
-          ? materialized.status
-          : `presentation_refused:${materialized.status as string}`,
-        runStatus: materialized.reason === "run_not_running"
-          ? materialized.status
-          : run.status,
+        status:
+          materialized.reason === "run_not_running"
+            ? materialized.status
+            : `presentation_refused:${materialized.status as string}`,
+        runStatus:
+          materialized.reason === "run_not_running"
+            ? materialized.status
+            : run.status,
       };
     }
     const gate = consumeActionGrant(id, { now: nowMs(step.now) });
@@ -1807,9 +1833,7 @@ export function createActionExecutionService(
     }
   }
 
-  function currentExecuteStatus(
-    execution: RawExecution | null,
-  ): string | null {
+  function currentExecuteStatus(execution: RawExecution | null): string | null {
     if (execution === null) {
       return null;
     }
@@ -1832,7 +1856,13 @@ export function createActionExecutionService(
       externalCallStartedAt: number | null;
       finishedAt: number | null;
     } | null;
-    grant: { proposalId: string; proposalHash: string; tool: string; inputHash: string; consumedAt: number | null } | null;
+    grant: {
+      proposalId: string;
+      proposalHash: string;
+      tool: string;
+      inputHash: string;
+      consumedAt: number | null;
+    } | null;
     receipt: {
       outcome: string;
       preflightRevision: string | null;
@@ -1844,38 +1874,45 @@ export function createActionExecutionService(
     const id = requireId(runId, "runId");
     const run = assertActionRun(id);
     const execution = readExecutionByRun(id);
-    const grant = execution === null ? null : (
-      db
-        .prepare(
-          "SELECT proposal_id, proposal_hash, tool, input_hash, consumed_at FROM action_execution_grants WHERE execution_id = ?",
-        )
-        .get(execution.id) as
-        | {
-            proposal_id: string;
-            proposal_hash: string;
-            tool: string;
-            input_hash: string;
-            consumed_at: number | null;
-          }
-        | undefined
-    );
-    const receipt = execution === null ? null : (
-      db
-        .prepare(
-          "SELECT outcome, preflight_revision, preflight_snapshot_id, observed_revision, result_snapshot_id FROM action_receipts WHERE execution_id = ?",
-        )
-        .get(execution.id) as
-        | {
-            outcome: string;
-            preflight_revision: string | null;
-            preflight_snapshot_id: string | null;
-            observed_revision: string | null;
-            result_snapshot_id: string | null;
-          }
-        | undefined
-    );
+    const grant =
+      execution === null
+        ? null
+        : (db
+            .prepare(
+              "SELECT proposal_id, proposal_hash, tool, input_hash, consumed_at FROM action_execution_grants WHERE execution_id = ?",
+            )
+            .get(execution.id) as
+            | {
+                proposal_id: string;
+                proposal_hash: string;
+                tool: string;
+                input_hash: string;
+                consumed_at: number | null;
+              }
+            | undefined);
+    const receipt =
+      execution === null
+        ? null
+        : (db
+            .prepare(
+              "SELECT outcome, preflight_revision, preflight_snapshot_id, observed_revision, result_snapshot_id FROM action_receipts WHERE execution_id = ?",
+            )
+            .get(execution.id) as
+            | {
+                outcome: string;
+                preflight_revision: string | null;
+                preflight_snapshot_id: string | null;
+                observed_revision: string | null;
+                result_snapshot_id: string | null;
+              }
+            | undefined);
     return {
-      run: { id: run.id, status: run.status, eventSeq: run.event_seq, sessionId: run.session_id },
+      run: {
+        id: run.id,
+        status: run.status,
+        eventSeq: run.event_seq,
+        sessionId: run.session_id,
+      },
       execution:
         execution === null
           ? null
@@ -2100,15 +2137,20 @@ export function createActionExecutionService(
       preflightSnapshotId: null,
       now,
     });
-    let seq = (db
-      .prepare("SELECT event_seq FROM runs WHERE id = ?")
-      .get(run.id) as { event_seq: number }).event_seq;
+    let seq = (
+      db.prepare("SELECT event_seq FROM runs WHERE id = ?").get(run.id) as {
+        event_seq: number;
+      }
+    ).event_seq;
     seq = appendEventInTx(
       db,
       run.id,
       seq,
       "action.execution_finished",
-      { executionId: execution.id, outcome, cause },
+      // The frozen `action.execution_finished` payload is exactly
+      // { executionId, outcome }; the recovery/drain cause is carried by the
+      // `run.abandoned` payload appended below (never smuggled in here).
+      { executionId: execution.id, outcome },
       now,
     );
     const movedRun = db
@@ -2149,7 +2191,11 @@ export function createActionExecutionService(
         )
         .all() as RawActionRun[];
       // Validation pass: NOTHING is written before every pair is proven.
-      const plans: Array<{ run: RawActionRun; execution: RawExecution; plan: RecoveryClassification }> = [];
+      const plans: Array<{
+        run: RawActionRun;
+        execution: RawExecution;
+        plan: RecoveryClassification;
+      }> = [];
       for (const run of pairs) {
         const execution = readExecutionByRun(run.id);
         if (execution === null) {
@@ -2217,9 +2263,10 @@ export function createActionExecutionService(
       return {
         applied: true as const,
         runStatus: "abandoned" as const,
-        executionStatus: plan.kind === "abandon_pre_marker"
-          ? ("failed" as const)
-          : ("unknown" as const),
+        executionStatus:
+          plan.kind === "abandon_pre_marker"
+            ? ("failed" as const)
+            : ("unknown" as const),
       };
     });
   }
@@ -2235,7 +2282,7 @@ export function createActionExecutionService(
     runActionPreflight,
     getActionRunView,
     validateAndRecoverActionRuns,
-    recoverAbandonedActionRun
+    recoverAbandonedActionRun,
   };
 }
 
@@ -2306,9 +2353,7 @@ export function createCalendarActionReadPort(
     async read(request, signal): Promise<ActionPreflightRead> {
       // Abort is respected BEFORE any upstream call (no read is issued).
       if (signal?.aborted === true) {
-        throw new RepositoryValidationError(
-          "calendar action read aborted",
-        );
+        throw new RepositoryValidationError("calendar action read aborted");
       }
       const row = db
         .prepare(
@@ -2361,7 +2406,9 @@ export function createCalendarActionReadPort(
           connectorInstanceId: binding.connectorInstanceId,
           resourceCanonicalKey: event.canonicalKey,
           title:
-            title === null ? null : title.slice(0, MAX_ACTION_OBSERVATION_TITLE),
+            title === null
+              ? null
+              : title.slice(0, MAX_ACTION_OBSERVATION_TITLE),
           text: observation.text.normalize("NFC"),
           sourceRevision: observation.sourceRevision ?? null,
           // Real upstream status, including a genuine `deleted` (which the
@@ -2392,9 +2439,7 @@ export function createCalendarActionTargetResolver(
     "SELECT 1 AS present FROM resources WHERE canonical_key = ? LIMIT 1",
   );
   return (canonicalKey: string): CalendarGetTarget | undefined => {
-    const row = statement.get(canonicalKey) as
-      | { present: number }
-      | undefined;
+    const row = statement.get(canonicalKey) as { present: number } | undefined;
     if (row === undefined) {
       return undefined;
     }

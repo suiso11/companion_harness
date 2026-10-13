@@ -3,18 +3,29 @@
 // webServer builds the production UI bundle first, then boots the real
 // Hono app on loopback with a temp SQLite DB + deterministic fake
 // RunStrategy (e2e/server.ts). Specs drive the REAL UI/API only.
+//
+// C15 dedicated Calendar fake harness mode: set COMPANION_E2E_CALENDAR=1
+// to run the OWNED Calendar composition instead (e2e/calendar/server.ts:
+// real C14 startServer seams, real MCP connector over the official SDK
+// inert transport, scripted fake MCP server + fake model, real agent/
+// broker pipeline, REAL UI — see docs/operations.md §Calendar E2E).
 
 import { defineConfig, devices } from "@playwright/test";
+import { CALENDAR_APP_ORIGIN } from "./e2e/calendar/ports.js";
 import { E2E_APP_ORIGIN } from "./e2e/ports.js";
+
+const CALENDAR_MODE = process.env.COMPANION_E2E_CALENDAR === "1";
 
 export default defineConfig({
   testDir: "./e2e",
-  testMatch: [
-    "conversation.spec.ts",
-    "citation_recovery.spec.ts",
-    "sse_history.spec.ts",
-    "polling.spec.ts",
-  ],
+  testMatch: CALENDAR_MODE
+    ? ["calendar/calendar.spec.ts"]
+    : [
+        "conversation.spec.ts",
+        "citation_recovery.spec.ts",
+        "sse_history.spec.ts",
+        "polling.spec.ts",
+      ],
   timeout: 60_000,
   expect: { timeout: 15_000 },
   fullyParallel: false,
@@ -22,7 +33,7 @@ export default defineConfig({
   retries: 0,
   reporter: process.env.CI ? [["github"], ["list"]] : [["list"]],
   use: {
-    baseURL: E2E_APP_ORIGIN,
+    baseURL: CALENDAR_MODE ? CALENDAR_APP_ORIGIN : E2E_APP_ORIGIN,
   },
   projects: [
     {
@@ -31,8 +42,10 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: "node scripts/build-ui.mjs && node --import tsx e2e/server.ts",
-    url: `${E2E_APP_ORIGIN}/health/live`,
+    command: CALENDAR_MODE
+      ? "node scripts/build-ui.mjs && node --import tsx e2e/calendar/server.ts"
+      : "node scripts/build-ui.mjs && node --import tsx e2e/server.ts",
+    url: `${CALENDAR_MODE ? CALENDAR_APP_ORIGIN : E2E_APP_ORIGIN}/health/live`,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
     stdout: "pipe",

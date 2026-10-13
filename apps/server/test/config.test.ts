@@ -11,8 +11,8 @@ import {
   isIanaTimeZone,
   loadServerConfig,
   MAX_MARKDOWN_ROOTS,
-  parseMarkdownRoots,
   parseCalendarConfig,
+  parseMarkdownRoots,
   parseModelConfig,
   ServerConfigError,
 } from "../src/config.js";
@@ -466,14 +466,7 @@ function validConnectorHint(): Record<string, unknown> {
       // transport factory. Env allowlist is deliberately absent so the
       // fail-closed parser leaves defaults in place.
       command: "/bin/false",
-      envAllowlist: [
-        "HOME",
-        "LOGNAME",
-        "PATH",
-        "SHELL",
-        "TERM",
-        "USER",
-      ],
+      envAllowlist: ["HOME", "LOGNAME", "PATH", "SHELL", "TERM", "USER"],
     },
     bindings: [
       { upstreamTool: "list-events", canonicalSchemaHash: HASH },
@@ -511,9 +504,7 @@ describe("calendar config (C14 strict opt-in, default disabled)", () => {
   });
 
   it("rejects malformed / unknown-key / bad-selection configs with fixed messages", () => {
-    expect(() =>
-      parseCalendarConfig("not-json"),
-    ).toThrow(ServerConfigError);
+    expect(() => parseCalendarConfig("not-json")).toThrow(ServerConfigError);
     expect(() => parseCalendarConfig("[]")).toThrow(
       "calendar config must be a JSON object",
     );
@@ -528,10 +519,7 @@ describe("calendar config (C14 strict opt-in, default disabled)", () => {
     ).toThrow("calendar config has an unknown key");
     expect(() =>
       parseCalendarConfig(
-        JSON.stringify({
-          selection: { calendarId: "", provider: "google" },
-          connector: validConnectorHint(),
-        }),
+        JSON.stringify({ selection: "cal", connector: validConnectorHint() }),
       ),
     ).toThrow("calendar selection is invalid");
     expect(() =>

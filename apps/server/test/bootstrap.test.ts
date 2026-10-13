@@ -6,7 +6,11 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { McpBindingDefinition, TransportFactory } from "@companion/connector-mcp";
+import type {
+  McpBindingDefinition,
+  McpConnector,
+  TransportFactory,
+} from "@companion/connector-mcp";
 import { BUNDLED_SCHEMA_VERSION, RunEngine } from "@companion/kernel";
 import type {
   ChatRequest,
@@ -24,7 +28,6 @@ import {
   sanitizeStartupErrorStatus,
   startServer,
 } from "../src/bootstrap.js";
-import type { McpConnector } from "@companion/connector-mcp";
 import { createCollectingLogger } from "../src/logger.js";
 import { STORE_SIZE_WARN_BYTES } from "../src/maintenance.js";
 
@@ -952,9 +955,21 @@ describe("bootstrap M2 model wiring", () => {
 
 const CAL_HASH = "b".repeat(64);
 const CALENDAR_HOST_DEFS: McpBindingDefinition[] = [
-  { upstreamTool: "list-events", canonicalSchemaHash: CAL_HASH, category: "read" },
-  { upstreamTool: "search-events", canonicalSchemaHash: CAL_HASH, category: "read" },
-  { upstreamTool: "get-event", canonicalSchemaHash: CAL_HASH, category: "read" },
+  {
+    upstreamTool: "list-events",
+    canonicalSchemaHash: CAL_HASH,
+    category: "read",
+  },
+  {
+    upstreamTool: "search-events",
+    canonicalSchemaHash: CAL_HASH,
+    category: "read",
+  },
+  {
+    upstreamTool: "get-event",
+    canonicalSchemaHash: CAL_HASH,
+    category: "read",
+  },
 ];
 
 /** Exact (unavailable-upstream) transport factory: construction only, no I/O. */

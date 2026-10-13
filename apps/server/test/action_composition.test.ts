@@ -116,6 +116,7 @@ async function approveProbe(
       headers: {
         "content-type": "application/json",
         "idempotency-key": randomUUID(),
+        origin: `http://127.0.0.1:${started.port}`,
       },
       body: JSON.stringify({ proposalHash: "a".repeat(64) }),
     },

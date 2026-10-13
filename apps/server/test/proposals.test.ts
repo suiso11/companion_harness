@@ -15,6 +15,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type Database from "better-sqlite3";
 import {
   canonicalJsonString,
   closeKernelDatabase,
@@ -37,7 +38,8 @@ const OPEN_RANGE = {
 
 interface Fixture extends CreatedServerApp {
   repo: KernelRepository;
-  raw: { close: () => void };
+  /** The real raw better-sqlite3 connection (needs prepare/close). */
+  raw: Database.Database;
   close: () => void;
 }
 
@@ -58,11 +60,11 @@ async function makeApp(): Promise<Fixture> {
     actionProposals: { writeEnabled: true },
   });
   const engine = new RunEngine({ db: handle.raw, repo, cancelGraceMs: 30 });
-  const created = createApp({ config, repo, engine });
+  const created = createApp({ config, repo, engine, actionsEnabled: true });
   return {
     ...created,
     repo,
-    raw: handle.raw as unknown as Fixture["raw"],
+    raw: handle.raw,
     close: () => closeKernelDatabase(handle),
   };
 }
