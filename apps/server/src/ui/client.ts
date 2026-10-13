@@ -12,16 +12,34 @@
 
 import type { ActiveStatus } from "@companion/contracts";
 import {
+  actionCardModel,
+  actionDecisionIntentText,
+  actionErrorCodeText,
+  type ActionCardModel,
+  type ActionErrorCode,
+  type ExecutionStatus,
   applyRunEvent,
   claimTerminalHydration,
   INITIAL_RUN_VIEW,
   isCorruptCursor,
+  type ProposalStatus,
+  type ReceiptOutcome,
   type RunViewState,
   runResultToAnswerParts,
 } from "./reducer.js";
 
 const LS_SESSION = "ch.sessionId";
 const LS_PENDING_KEY = "ch.pendingKey";
+/**
+ * C22 approve idempotency metadata: the ONLY approval-related thing kept in
+ * browser storage, exactly like the message pending key — one Idempotency-Key
+ * per proposal (technical metadata). Conversation text, preview content,
+ * proposal hashes, receipts, and any raw ids are NEVER persisted: the key
+ * alone lets a reload replay the same approve request safely (same scope,
+ * same `{ proposalHash }` body) without storing the body.
+ */
+const approveKeyStorageKey = (proposalId: string): string =>
+  `ch.pendingApprovalKey.${proposalId}`;
 const cursorKey = (runId: string): string => `ch.cursor.${runId}`;
 /**
  * Active statuses for discovery gating: compile-time anchored to the
@@ -43,11 +61,67 @@ const ACTIVE_RUN_STATUSES: ReadonlySet<ActiveStatus> = new Set([
  */
 interface HistoryItemView {
   readonly turnId: string;
-  readonly text: string;
+  readonly kind?: string;
+  readonly text?: string;
   readonly selectedRun: {
     readonly runId: string;
     readonly result: unknown;
+    readonly receipt?: {
+      readonly outcome?: ReceiptOutcome;
+      readonly summary?: { readonly summary?: string };
+    } | null;
   } | null;
+}
+
+/**
+ * C22 session-scoped proposal summary read from the ACTUAL
+ * `GET /api/sessions/:id/proposals` response (exact contracts
+ * `ProposalSummary`). Structural, immutable content plus mutable decision
+ * state; no provider ids ever appear here.
+ */
+interface ProposalSummaryView {
+  readonly proposalId: string;
+  readonly tool: string;
+  readonly input: { readonly start: string; readonly end: string };
+  readonly preview: { readonly summary: string };
+  readonly hash: string;
+  readonly status: ProposalStatus;
+  readonly createdAt: number;
+  readonly expiresAt: number;
+  readonly resolvedAt: number | null;
+}
+
+/** Exact `GET .../proposals/:id/execution` view (contracts). */
+interface ProposalExecutionView {
+  readonly proposalId: string;
+  readonly proposalStatus: ProposalStatus;
+  readonly runId: string | null;
+  readonly status: ExecutionStatus | null;
+  readonly markerCommitted: boolean;
+  readonly cancellable: boolean;
+  readonly errorCode: ActionErrorCode | null;
+  readonly receipt: {
+    readonly outcome: ReceiptOutcome;
+    readonly summary: { readonly summary: string };
+    readonly createdAt: number;
+  } | null;
+}
+
+/**
+ * One rendered approval card. The immutable `proposalHash` is captured once
+ * at build time and every control binds THAT hash — the card never
+ * re-derives the hash from any other source.
+ */
+interface ActionCard {
+  readonly proposalId: string;
+  readonly hash: string;
+  readonly node: HTMLElement;
+  readonly progress: HTMLElement;
+  readonly outcome: HTMLElement;
+  readonly approve: HTMLButtonElement;
+  readonly reject: HTMLButtonElement;
+  readonly stop: HTMLButtonElement;
+  runId: string | null;
 }
 
 /**
@@ -130,6 +204,56 @@ async function postJson(
     },
     body: JSON.stringify(payload),
   });
+}
+
+/**
+ * Structural guard for one `ProposalSummary` read from the ACTUAL list API:
+ * every field the card binds must have its exact expected primitive type, so
+ * a malformed body renders nothing rather than a partial card.
+ */
+function isProposalSummary(value: unknown): value is ProposalSummaryView {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const item = value as {
+    proposalId?: unknown;
+    tool?: unknown;
+    input?: { start?: unknown; end?: unknown };
+    preview?: { summary?: unknown };
+    hash?: unknown;
+    status?: unknown;
+    createdAt?: unknown;
+    expiresAt?: unknown;
+    resolvedAt?: unknown;
+  };
+  return (
+    typeof item.proposalId === "string" &&
+    item.tool === "calendar.reschedule" &&
+    typeof item.input?.start === "string" &&
+    typeof item.input?.end === "string" &&
+    typeof item.preview?.summary === "string" &&
+    typeof item.hash === "string" &&
+    (item.status === "pending" ||
+      item.status === "approved" ||
+      item.status === "rejected" ||
+      item.status === "expired") &&
+    typeof item.createdAt === "number" &&
+    typeof item.expiresAt === "number" &&
+    (item.resolvedAt === null || typeof item.resolvedAt === "number")
+  );
+}
+
+/** Plain-text local timestamp for the deadline line (no technical ids). */
+function formatInstant(ms: number): string {
+  const date = new Date(ms);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  const pad = (value: number): string => String(value).padStart(2, "0");
+  return (
+    `${date.getFullYear()}/${pad(date.getMonth() + 1)}/${pad(date.getDate())} ` +
+    `${pad(date.getHours())}:${pad(date.getMinutes())}`
+  );
 }
 
 class ConversationApp {
@@ -240,6 +364,10 @@ class ConversationApp {
     // subscription replays its terminal — a captured-active reload that
     // races completion can never append a second answer.
     await this.hydrateHistory();
+    // C22: read the actual pending proposals/executions after the durable
+    // history so a reload restores a still-pending approval card (and its
+    // real progress/receipt) without ever persisting proposal content.
+    this.scheduleActionSync();
     // The captured run id is subscribed exactly once, even when the run has
     // already completed meanwhile: the durable event backlog renders or
     // dedups, and the terminal view releases the composer normally.
@@ -592,12 +720,525 @@ class ConversationApp {
     this.list.prepend(button);
   }
 
+  /* ---------------------------------------------------------------- */
+  /* C22 actual approval UX: proposals, execution status, receipts      */
+  /* ---------------------------------------------------------------- */
+
+  private readonly actionCards = new Map<string, ActionCard>();
+  private actionSync: Promise<void> | null = null;
+  private static readonly ACTION_POLL_INTERVAL_MS = 1000;
+  /** Bounded execution watch (proposal TTL is exactly 15 minutes). */
+  private static readonly ACTION_POLL_MAX_TICKS = 16 * 60;
+
+  /**
+   * Serialized action sync (§18.4 reads): exactly one proposals +
+   * execution/receipt refresh at a time, so a card is never rendered from a
+   * half-updated read. Called after boot hydration, after a decision, and
+   * after a run terminal.
+   */
+  private scheduleActionSync(): void {
+    if (this.actionSync !== null) {
+      return;
+    }
+    const run = this.syncActions().finally(() => {
+      this.actionSync = null;
+    });
+    this.actionSync = run.catch(() => {});
+  }
+
+  /**
+   * Read the ACTUAL session proposals and each approved proposal's actual
+   * execution status + receipt. A pending, unexpired proposal renders one
+   * approval card; a decided/expired one renders no card (its deterministic
+   * intent and receipt come from the history projection).
+   */
+  private async syncActions(): Promise<void> {
+    if (this.sessionId === null) {
+      return;
+    }
+    const sessionId = this.sessionId;
+    let listed: { status: number; body: unknown };
+    try {
+      listed = await fetchJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/proposals`,
+      );
+    } catch {
+      return;
+    }
+    if (listed.status !== 200 || this.sessionId !== sessionId) {
+      return;
+    }
+    const proposals = (listed.body as { proposals?: unknown }).proposals;
+    if (!Array.isArray(proposals)) {
+      return;
+    }
+    const now = Date.now();
+    const summaries = proposals.filter(
+      (item): item is ProposalSummaryView => isProposalSummary(item),
+    );
+    // Drop cards whose proposal is no longer actionable/visible.
+    const liveIds = new Set(summaries.map((item) => item.proposalId));
+    for (const proposalId of [...this.actionCards.keys()]) {
+      if (!liveIds.has(proposalId)) {
+        this.removeActionCard(proposalId);
+      }
+    }
+    for (const summary of summaries) {
+      if (summary.status === "pending" && summary.expiresAt > now) {
+        this.ensureActionCard(summary);
+      }
+    }
+    // Execution + receipt reads for every decided/approved proposal.
+    for (const summary of summaries) {
+      if (summary.status === "pending") {
+        continue;
+      }
+      await this.syncExecution(summary);
+    }
+  }
+
+  /** Read the ACTUAL execution status + receipt and update/retire a card. */
+  private async syncExecution(summary: ProposalSummaryView): Promise<void> {
+    if (this.sessionId === null) {
+      return;
+    }
+    let fetched: { status: number; body: unknown };
+    try {
+      fetched = await fetchJson(
+        `/api/sessions/${encodeURIComponent(this.sessionId)}/proposals/${encodeURIComponent(summary.proposalId)}/execution`,
+      );
+    } catch {
+      return;
+    }
+    if (fetched.status !== 200) {
+      return;
+    }
+    const view = fetched.body as ProposalExecutionView;
+    if (typeof view.proposalId !== "string") {
+      return;
+    }
+    const terminal =
+      view.receipt !== null && view.receipt !== undefined
+        ? true
+        : view.status !== null &&
+          view.status !== "queued" &&
+          view.status !== "preflight" &&
+          view.status !== "executing";
+    if (terminal && view.status !== null) {
+      // Terminal: the deterministic intent + real receipt are rendered by the
+      // history projection, so retire the live card and refresh history.
+      this.removeActionCard(view.proposalId);
+      this.clearApproveKey(view.proposalId);
+      await this.hydrateHistory();
+      return;
+    }
+    const card = this.actionCards.get(view.proposalId);
+    if (card === undefined) {
+      return;
+    }
+    card.runId = view.runId ?? card.runId;
+    this.renderActionCard(
+      card,
+      summary,
+      view,
+      this.cardModel(summary, view),
+      actionErrorCodeText(view.errorCode ?? null),
+    );
+    if (
+      view.status !== null &&
+      (view.status === "queued" ||
+        view.status === "preflight" ||
+        view.status === "executing")
+    ) {
+      this.watchAction(view.proposalId, summary);
+    }
+  }
+
+  /** Pure card model for the actual API reads plus the client clock. */
+  private cardModel(
+    summary: ProposalSummaryView,
+    view: ProposalExecutionView | null,
+  ): ActionCardModel {
+    return actionCardModel({
+      status: summary.status,
+      preview: summary.preview.summary,
+      start: summary.input.start,
+      end: summary.input.end,
+      expiresAt: summary.expiresAt,
+      now: Date.now(),
+      executionStatus: view?.status ?? null,
+      markerCommitted: view?.markerCommitted ?? false,
+      cancellable: view?.cancellable ?? false,
+      receiptOutcome: view?.receipt?.outcome ?? null,
+      receiptSummary: view?.receipt?.summary.summary ?? null,
+    });
+  }
+
+  /**
+   * Build (once) the approval card for a pending, unexpired proposal. Every
+   * string is set with `textContent` (escaped plain text, never HTML) and
+   * carries NO technical id: preview, target event, start/end, and the
+   * server deadline only.
+   */
+  private ensureActionCard(summary: ProposalSummaryView): void {
+    const existing = this.actionCards.get(summary.proposalId);
+    if (existing !== undefined) {
+      this.renderActionCard(
+        existing,
+        summary,
+        null,
+        this.cardModel(summary, null),
+        "",
+      );
+      return;
+    }
+    const node = el("section");
+    node.id = `action-card-${summary.proposalId}`;
+    node.setAttribute("data-action-card", "true");
+    node.setAttribute("data-action-tool", summary.tool);
+    node.appendChild(el("h3", "日程変更の確認"));
+    const preview = el("p", summary.preview.summary);
+    preview.setAttribute("data-action-preview", "true");
+    node.appendChild(preview);
+    const startLine = el("p", `開始: ${summary.input.start}`);
+    startLine.setAttribute("data-action-start", "true");
+    node.appendChild(startLine);
+    const endLine = el("p", `終了: ${summary.input.end}`);
+    endLine.setAttribute("data-action-end", "true");
+    node.appendChild(endLine);
+    const deadline = el("p", `確認期限: ${formatInstant(summary.expiresAt)}`);
+    deadline.setAttribute("data-action-deadline", "true");
+    node.appendChild(deadline);
+    const progress = el("p");
+    progress.setAttribute("data-action-progress", "true");
+    node.appendChild(progress);
+    const outcome = el("p");
+    outcome.setAttribute("data-action-outcome", "true");
+    node.appendChild(outcome);
+    const approve = document.createElement("button");
+    approve.textContent = "承認";
+    approve.type = "button";
+    approve.id = "action-approve";
+    approve.setAttribute("data-action-approve", "true");
+    node.appendChild(approve);
+    const reject = document.createElement("button");
+    reject.textContent = "却下";
+    reject.type = "button";
+    reject.id = "action-reject";
+    reject.setAttribute("data-action-reject", "true");
+    node.appendChild(reject);
+    const stop = document.createElement("button");
+    stop.textContent = "中断";
+    stop.type = "button";
+    stop.hidden = true;
+    stop.setAttribute("data-action-stop", "true");
+    node.appendChild(stop);
+    const card: ActionCard = {
+      proposalId: summary.proposalId,
+      hash: summary.hash,
+      node,
+      progress,
+      outcome,
+      approve,
+      reject,
+      stop,
+      runId: null,
+    };
+    approve.addEventListener("click", () => {
+      void this.approve(card);
+    });
+    reject.addEventListener("click", () => {
+      void this.reject(card);
+    });
+    stop.addEventListener("click", () => {
+      void this.stopAction(card);
+    });
+    this.actionCards.set(summary.proposalId, card);
+    this.list.appendChild(node);
+    this.renderActionCard(card, summary, null, this.cardModel(summary, null), "");
+  }
+
+  /** Apply the pure model to the live card nodes (no HTML, text only). */
+  private renderActionCard(
+    card: ActionCard,
+    summary: ProposalSummaryView,
+    view: ProposalExecutionView | null,
+    model: ActionCardModel,
+    errorText: string,
+  ): void {
+    card.node.setAttribute(
+      "data-action-state",
+      model.expired
+        ? "expired"
+        : summary.status === "pending"
+          ? "pending"
+          : (view?.status ?? summary.status),
+    );
+    card.progress.textContent = model.progressText;
+    const outcomeText =
+      model.outcomeText !== "" ? model.outcomeText : errorText;
+    card.outcome.textContent = outcomeText;
+    card.approve.hidden = !model.decisionVisible;
+    card.reject.hidden = !model.decisionVisible;
+    card.approve.disabled = !model.decisionVisible;
+    card.reject.disabled = !model.decisionVisible;
+    // Contextual Stop: only a live execution BEFORE the committed external
+    // marker. After the marker (or terminal) it is hidden and disabled — the
+    // write can no longer be safely cancelled.
+    card.stop.hidden = !model.stopVisible;
+    card.stop.disabled = !model.stopVisible;
+    card.node.setAttribute(
+      "data-action-marker",
+      view?.markerCommitted === true ? "committed" : "uncommitted",
+    );
+  }
+
+  private removeActionCard(proposalId: string): void {
+    const card = this.actionCards.get(proposalId);
+    if (card === undefined) {
+      return;
+    }
+    card.node.remove();
+    this.actionCards.delete(proposalId);
+  }
+
+  /**
+   * Approve: binds the card's IMMUTABLE `proposalHash`, sends a body of
+   * exactly `{ proposalHash }`, and carries a STABLE Idempotency-Key (kept
+   * as technical metadata only) so a retry after a reload replays the same
+   * request instead of approving twice.
+   *
+   * Before the POST the ACTUAL server repository state is re-read: a
+   * proposal that is no longer `pending`/`unexpired` is never executed from
+   * a stale card.
+   */
+  private async approve(card: ActionCard): Promise<void> {
+    if (this.sessionId === null || card.approve.disabled) {
+      return;
+    }
+    const sessionId = this.sessionId;
+    let current: ProposalSummaryView | null = null;
+    try {
+      const listed = await fetchJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/proposals`,
+      );
+      const items = (listed.body as { proposals?: unknown }).proposals;
+      if (listed.status === 200 && Array.isArray(items)) {
+        current =
+          (items as unknown[]).find(
+            (item): item is ProposalSummaryView =>
+              isProposalSummary(item) && item.proposalId === card.proposalId,
+          ) ?? null;
+      }
+    } catch {
+      current = null;
+    }
+    if (
+      current === null ||
+      current.status !== "pending" ||
+      current.hash !== card.hash ||
+      current.expiresAt <= Date.now()
+    ) {
+      this.showNotice("この変更は承認できません。内容を確認してください");
+      this.removeActionCard(card.proposalId);
+      this.scheduleActionSync();
+      return;
+    }
+    const key = this.approveKey(card.proposalId);
+    card.approve.disabled = true;
+    card.reject.disabled = true;
+    let posted: { status: number; body: unknown };
+    try {
+      posted = await postJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/proposals/${encodeURIComponent(card.proposalId)}/approve`,
+        { proposalHash: card.hash },
+        key,
+      );
+    } catch {
+      // Transient: the SAME key + SAME body are replayed on the next click.
+      this.showNotice("承認できませんでした。もう一度お試しください");
+      this.scheduleActionSync();
+      return;
+    }
+    if (posted.status === 202) {
+      // Accepted: the key has served its purpose (the decision is durable).
+      this.clearApproveKey(card.proposalId);
+      const body = posted.body as { runId?: unknown };
+      if (typeof body.runId === "string") {
+        card.runId = body.runId;
+      }
+      this.showNotice("承認しました");
+      void this.watchAction(card.proposalId, current);
+      return;
+    }
+    // Definitive 4xx (state conflict / disabled / hash mismatch): drop the
+    // key and re-read the real state; nothing was executed.
+    if (posted.status === 409) {
+      this.clearApproveKey(card.proposalId);
+      this.showNotice("この変更は承認できません。内容を確認してください");
+      await this.hydrateHistory();
+      this.scheduleActionSync();
+      return;
+    }
+    this.showNotice("承認できませんでした。もう一度お試しください");
+    this.scheduleActionSync();
+  }
+
+  /** Reject: KEYLESS by contract — no Idempotency-Key is ever sent. */
+  private async reject(card: ActionCard): Promise<void> {
+    if (this.sessionId === null || card.reject.disabled) {
+      return;
+    }
+    const posted = await postJson(
+      `/api/sessions/${encodeURIComponent(this.sessionId)}/proposals/${encodeURIComponent(card.proposalId)}/reject`,
+      { proposalHash: card.hash },
+      null,
+    );
+    if (posted.status === 200) {
+      this.clearApproveKey(card.proposalId);
+      this.showNotice("却下しました");
+      this.removeActionCard(card.proposalId);
+      await this.hydrateHistory();
+      return;
+    }
+    this.showNotice("却下できませんでした。内容を確認してください");
+    this.scheduleActionSync();
+  }
+
+  /**
+   * Contextual Stop for a live Action execution. Only offered before the
+   * committed external-call marker; the server's terminal cancel answer
+   * (200) renders the ordinary「停止しました」notice, and the receipt's real
+   * fixed error code (never a fabricated success) is shown by the card.
+   */
+  private async stopAction(card: ActionCard): Promise<void> {
+    if (this.sessionId === null || card.runId === null || card.stop.disabled) {
+      return;
+    }
+    card.stop.disabled = true;
+    const posted = await postJson(
+      `/api/sessions/${encodeURIComponent(this.sessionId)}/runs/${encodeURIComponent(card.runId)}/cancel`,
+      {},
+      null,
+    );
+    if (posted.status === 200) {
+      this.showNotice("停止しました");
+      this.scheduleActionSync();
+      return;
+    }
+    // 409 `action_not_cancellable` (marker committed) or a transient state:
+    // re-read the ACTUAL execution view instead of guessing.
+    card.stop.disabled = false;
+    this.scheduleActionSync();
+  }
+
+  /**
+   * Bounded execution watch: polls the ACTUAL execution + receipt view until
+   * the execution is terminal. Never posts anything — read-only progress
+   * (queued / preflight / executing → real receipt).
+   */
+  private async watchAction(
+    proposalId: string,
+    summary: ProposalSummaryView,
+  ): Promise<void> {
+    const existing = this.actionWatches.get(proposalId);
+    if (existing !== undefined) {
+      return;
+    }
+    let resolveDone: () => void = () => {};
+    const done = new Promise<void>((resolve) => {
+      resolveDone = resolve;
+    });
+    this.actionWatches.set(proposalId, done);
+    try {
+      for (let tick = 0; tick < ConversationApp.ACTION_POLL_MAX_TICKS; tick += 1) {
+        const card = this.actionCards.get(proposalId);
+        if (card === undefined) {
+          return;
+        }
+        await this.syncExecution(summary);
+        if (!this.actionCards.has(proposalId)) {
+          return;
+        }
+        await new Promise((resolve) => {
+          window.setTimeout(resolve, ConversationApp.ACTION_POLL_INTERVAL_MS);
+        });
+      }
+    } finally {
+      this.actionWatches.delete(proposalId);
+      resolveDone();
+    }
+  }
+
+  private readonly actionWatches = new Map<string, Promise<void>>();
+
+  /** Stable per-proposal Idempotency-Key: metadata only, never a body. */
+  private approveKey(proposalId: string): string {
+    try {
+      const stored = localStorage.getItem(approveKeyStorageKey(proposalId));
+      if (stored !== null && stored.length > 0) {
+        return stored;
+      }
+    } catch {
+      // Fall through to a fresh key.
+    }
+    const key = crypto.randomUUID();
+    try {
+      localStorage.setItem(approveKeyStorageKey(proposalId), key);
+    } catch {
+      // Best effort: the in-page retry reuses the same frozen request.
+    }
+    return key;
+  }
+
+  private clearApproveKey(proposalId: string): void {
+    try {
+      localStorage.removeItem(approveKeyStorageKey(proposalId));
+    } catch {
+      // Best effort.
+    }
+  }
+
   private renderTurn(item: HistoryItemView): void {
     this.list.appendChild(this.buildTurn(item));
   }
 
   private buildTurn(item: HistoryItemView): HTMLElement {
     const wrap = el("section");
+    // C22: the two exact decision variants carry NO user text — render the
+    // deterministic intent derived from the real persisted decision plus the
+    // real receipt outcome (never a blank user-text line).
+    if (item.kind === "action_approval" || item.kind === "action_rejection") {
+      const receipt = item.selectedRun?.receipt ?? null;
+      const outcome =
+        receipt !== null && typeof receipt.outcome === "string"
+          ? receipt.outcome
+          : null;
+      wrap.setAttribute("data-action-history", item.kind);
+      wrap.appendChild(
+        el("p", actionDecisionIntentText(item.kind, outcome)),
+      );
+      const run = item.selectedRun;
+      if (run !== null && run !== undefined && typeof run === "object") {
+        if (typeof run.runId === "string" && run.runId.length > 0) {
+          this.renderedAnswers.add(run.runId);
+        }
+        // The real receipt summary + the real terminal result parts (the
+        // verified fresh rN citation) render here as escaped plain text.
+        for (const part of runResultToAnswerParts(run.result)) {
+          wrap.appendChild(el("p", part.text));
+          for (const citation of part.citations) {
+            const button = el("button", citation);
+            button.setAttribute("data-action-citation", "true");
+            button.addEventListener("click", () => {
+              void this.openCitation(citation);
+            });
+            wrap.appendChild(button);
+          }
+        }
+      }
+      return wrap;
+    }
     wrap.appendChild(el("p", typeof item.text === "string" ? item.text : ""));
     const run = item.selectedRun;
     if (run !== null && run !== undefined && typeof run === "object") {
@@ -1222,7 +1863,9 @@ class ConversationApp {
       // Single owner: claim the terminal hydration; a second observer of
       // the same terminal view skips it so output is never duplicated.
       if (claimTerminalHydration(this.terminalHydrated, runId)) {
-        void this.hydrateHistory();
+        void this.hydrateHistory().then(() => {
+          this.scheduleActionSync();
+        });
       }
       return;
     }

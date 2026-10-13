@@ -411,7 +411,15 @@ export function createActionStrategy(
       observation.eventStatus !== "deleted" &&
       boundariesMatch(observation.text, start, end);
     if (!verified) {
-      return plainFinish("unknown");
+      // The connector ITSELF reported `succeeded`, so the write left this
+      // process; only the authoritative read-back failed to confirm it. That
+      // is exactly `succeeded_unverified` (§18.7) — reporting `unknown` here
+      // would misread a committed write as a possibly-not-happened one and
+      // drive the readback into the wrong readback/notification branch.
+      // Only a connector-returned `unknown` (or a pre-write failure) may ever
+      // finish as `unknown`; a write the port already called `succeeded` is
+      // never downgraded.
+      return unverifiedFinish();
     }
     return finish({
       outcome: "succeeded",

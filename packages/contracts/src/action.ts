@@ -303,6 +303,51 @@ export const ProposalRejectResponseSchema = z.strictObject({
 export type ProposalRejectResponse = z.infer<typeof ProposalRejectResponseSchema>;
 
 /* ------------------------------------------------------------------ */
+/* Execution / receipt view (C22 approval UX reads, §18.5/§18.7)       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Safe receipt projection for the approval UX: the final outcome plus the
+ * deterministic safe summary ONLY. Observation fields (revision keys,
+ * snapshot ids) are deliberately absent — they are technical state the UI
+ * never needs and must never render.
+ */
+export const ActionReceiptViewSchema = z.strictObject({
+  outcome: ActionReceiptOutcomeSchema,
+  summary: ActionProposalPreviewSchema,
+  createdAt: UnixMsSchema,
+});
+export type ActionReceiptView = z.infer<typeof ActionReceiptViewSchema>;
+
+/**
+ * Session-scoped execution + receipt read for ONE proposal (C22). Carries
+ * the actual persisted execution status, whether the external-call marker is
+ * committed (the exact Stop boundary: cancel is only possible before it),
+ * and the receipt once terminal. A proposal that was never approved has
+ * `runId`/`status`/`receipt` null and `markerCommitted` false.
+ */
+export const ProposalExecutionViewSchema = z.strictObject({
+  proposalId: UuidSchema,
+  proposalStatus: ActionProposalStatusSchema,
+  runId: UuidSchema.nullable(),
+  status: ActionExecutionStatusSchema.nullable(),
+  /** True once `external_call_started_at` is committed (§18.5 marker). */
+  markerCommitted: z.boolean(),
+  /**
+   * True only while an execution is live AND the marker is not committed:
+   * the exact contextual-Stop boundary. Never true after the marker and
+   * never true for a terminal execution.
+   */
+  cancellable: z.boolean(),
+  /** Fixed safe redacted code when the execution failed; null otherwise. */
+  errorCode: M5ActionErrorCodeSchema.nullable(),
+  receipt: ActionReceiptViewSchema.nullable(),
+});
+export type ProposalExecutionView = z.infer<
+  typeof ProposalExecutionViewSchema
+>;
+
+/* ------------------------------------------------------------------ */
 /* M5 Action RunEvent payloads (§18.8, non-final extension)            */
 /* ------------------------------------------------------------------ */
 

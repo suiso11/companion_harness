@@ -71,6 +71,12 @@ import {
   CalendarRescheduleToolInputSchema,
   type ProposalSummary,
   ActionApprovedPayloadSchema,
+  ActionExecutionStatusSchema,
+  type ActionExecutionStatus,
+  ActionReceiptViewSchema,
+  type ActionReceiptView,
+  ProposalExecutionViewSchema,
+  type ProposalExecutionView,
   ProposalRejectRequestSchema,
   type ProposalsListResponse,
 } from "@companion/contracts";
@@ -1623,13 +1629,43 @@ export function createKernelRepository(
       db
         .prepare("SELECT run_id FROM turn_selections WHERE turn_id = ?")
         .get(turnId) as { run_id: string } | undefined;
+    /** C22: actual receipt view for a selected ACTION run only (null else). */
+    const receiptViewForRun = (runId: string): ActionReceiptView | null => {
+      const execution = db
+        .prepare("SELECT id FROM action_executions WHERE action_run_id = ?")
+        .get(runId) as { id: string } | undefined;
+      if (execution === undefined) {
+        return null;
+      }
+      const receipt = db
+        .prepare(
+          "SELECT outcome, summary_json, created_at FROM action_receipts WHERE execution_id = ?",
+        )
+        .get(execution.id) as
+        | { outcome: string; summary_json: string; created_at: number }
+        | undefined;
+      if (receipt === undefined) {
+        return null;
+      }
+      return parseOrValidation(
+        () =>
+          ActionReceiptViewSchema.parse({
+            outcome: receipt.outcome,
+            summary: JSON.parse(receipt.summary_json) as unknown,
+            createdAt: receipt.created_at,
+          }),
+        "action receipt view",
+      );
+    };
     const selectedRunWithResult = (
       turnId: string,
+      withReceipt: boolean,
     ): {
       runId: string;
       attempt: number;
       finishedAt: number;
       result: RunResult;
+      receipt: ActionReceiptView | null;
     } | null => {
       const selection = selectionOf(turnId);
       if (selection === undefined) {
@@ -1653,6 +1689,10 @@ export function createKernelRepository(
         attempt: runRow.attempt,
         finishedAt: runRow.finished_at,
         result,
+        // C22: the ACTUAL persisted receipt for a selected Action Run (null
+        // when the execution has none yet). Decision history therefore
+        // renders the real outcome instead of a blank/fabricated one.
+        receipt: withReceipt ? receiptViewForRun(runRow.id) : null,
       };
     };
     const items = page.map((row) => {
@@ -1670,7 +1710,7 @@ export function createKernelRepository(
           proposalId: turn.input.proposalId,
           proposalHash: turn.input.proposalHash,
           createdAt: row.created_at,
-          selectedRun: selectedRunWithResult(row.id),
+          selectedRun: selectedRunWithResult(row.id, true),
         };
       }
       if (turn.input.kind !== "user_text") {
@@ -2261,6 +2301,91 @@ export function createKernelRepository(
   }
 
 
+
+  /**
+   * Actual execution + receipt read for ONE session-owned proposal (C22).
+   * Bounded single-row joins, no writes: the approval UX polls this to show
+   * the real `queued`/`preflight`/`executing` progress, the real terminal
+   * receipt, and the exact Stop boundary (`markerCommitted`). A proposal
+   * that was never approved reads back nulls (never a fabricated run).
+   */
+  function getProposalExecution(
+    sessionId: string,
+    proposalId: string,
+  ): ProposalExecutionView {
+    const session = requireId(sessionId, "sessionId");
+    const proposal = requireId(proposalId, "proposalId");
+    if (readSession(db, session) === null) {
+      throw new RepositoryNotFoundError(`session ${session} not found`);
+    }
+    const row = loadProposal(proposal);
+    if (row === null || row.session_id !== session) {
+      throw new RepositoryNotFoundError(
+        `proposal ${proposal} not found in session ${session}`,
+      );
+    }
+    const execution = db
+      .prepare(
+        `SELECT id, action_run_id, status, external_call_started_at, error_code
+         FROM action_executions WHERE session_id = ? AND proposal_id = ?`,
+      )
+      .get(session, proposal) as
+      | {
+          id: string;
+          action_run_id: string;
+          status: string;
+          external_call_started_at: number | null;
+          error_code: string | null;
+        }
+      | undefined;
+    const receiptRow =
+      execution === undefined
+        ? undefined
+        : (db
+            .prepare(
+              "SELECT outcome, summary_json, created_at FROM action_receipts WHERE execution_id = ?",
+            )
+            .get(execution.id) as
+            | { outcome: string; summary_json: string; created_at: number }
+            | undefined);
+    const status =
+      execution === undefined
+        ? null
+        : (parseOrValidation(
+            () => ActionExecutionStatusSchema.parse(execution.status),
+            "execution status",
+          ) as ActionExecutionStatus);
+    const markerCommitted =
+      execution !== undefined && execution.external_call_started_at !== null;
+    const live =
+      status !== null &&
+      status !== "succeeded" &&
+      status !== "succeeded_unverified" &&
+      status !== "blocked_stale" &&
+      status !== "failed" &&
+      status !== "unknown";
+    return parseOrValidation(
+      () =>
+        ProposalExecutionViewSchema.parse({
+          proposalId: proposal,
+          proposalStatus: row.status,
+          runId: execution === undefined ? null : execution.action_run_id,
+          status,
+          markerCommitted,
+          cancellable: live && !markerCommitted,
+          errorCode: execution === undefined ? null : execution.error_code,
+          receipt:
+            receiptRow === undefined
+              ? null
+              : {
+                  outcome: receiptRow.outcome,
+                  summary: JSON.parse(receiptRow.summary_json) as unknown,
+                  createdAt: receiptRow.created_at,
+                },
+        }),
+      "proposal execution view",
+    );
+  }
 
   function approveProposal(
     sessionId: string,
@@ -3079,6 +3204,7 @@ export function createKernelRepository(
     getHistory,
     getEvents,
     listProposals,
+    getProposalExecution,
     approveProposal,
     rejectProposal,
     listReferences,

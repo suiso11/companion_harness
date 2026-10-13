@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ActionReceiptViewSchema } from "./action.js";
 import { LatestRunEventSchema, M0RunEventSchema } from "./events.js";
 import { IdempotencyScopeSchema, Sha256HexSchema, UnixMsSchema, UuidSchema } from "./ids.js";
 import { RunResultSchema } from "./run_result.js";
@@ -159,12 +160,21 @@ export const UserTextHistoryItemSchema = z.strictObject({
 });
 export type UserTextHistoryItem = z.infer<typeof UserTextHistoryItemSchema>;
 
-/** Selected Action Run summary carried by decision history items. */
+/**
+ * Selected Action Run summary carried by decision history items.
+ *
+ * C22: `receipt` carries the ACTUAL persisted ActionReceipt view (safe
+ * outcome + deterministic summary only) for the selected run, so history
+ * renders the real decision intent and real receipt outcome instead of a
+ * blank user text. Null when the execution has no receipt yet (never a
+ * fabricated outcome).
+ */
 export const ActionRunHistorySelectionSchema = z.strictObject({
   runId: UuidSchema,
   attempt: z.number().int().min(1),
   finishedAt: UnixMsSchema,
   result: RunResultSchema,
+  receipt: ActionReceiptViewSchema.nullable(),
 });
 export type ActionRunHistorySelection = z.infer<
   typeof ActionRunHistorySelectionSchema

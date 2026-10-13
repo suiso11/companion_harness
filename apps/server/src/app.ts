@@ -24,6 +24,7 @@ import {
   ProposalApprove202ResponseSchema,
   ProposalApproveRequestSchema,
   ProposalRejectRequestSchema,
+  ProposalExecutionViewSchema,
   ProposalRejectResponseSchema,
   ProposalsListResponseSchema,
   proposalApproveScope,
@@ -972,6 +973,32 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         durationMs: Math.max(now() - started, 0),
       });
       return c.json(body, out.status as 202);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+
+  // Execution + receipt read for ONE session-owned proposal (C22): the real
+  // persisted execution status, the external-call marker (the exact Stop
+  // boundary), and the real receipt once terminal. Bounded read, no writes.
+  app.get("/api/sessions/:sessionId/proposals/:proposalId/execution", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const proposal = requireUuid(c, c.req.param("proposalId"), "proposalId");
+    if ("response" in proposal) {
+      return proposal.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      const body = ProposalExecutionViewSchema.parse(
+        repo.getProposalExecution(session.id, proposal.id),
+      );
+      return c.json(body, 200);
     } catch (error) {
       return mapDomainError(c, error);
     }
