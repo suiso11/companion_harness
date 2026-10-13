@@ -836,6 +836,84 @@ describe("C19 Action execution boundaries", () => {
       }
     });
 
+    it("accepts an ALREADY-terminal post-marker definite_failure pair as unchanged (marker + consumed grant + failed receipt)", async () => {
+      const fx = await setupApprovedProposalFixture(() => 100);
+      try {
+        // The connector returned `definite_failure` AFTER the committed
+        // gate: execution failed WITH the marker + consumed grant.
+        await driveToExecuting(fx, readPort(fx));
+        expect(
+          fx.service.finishActionExecution(
+            fx.actionRunId,
+            { outcome: "failed" },
+            { now: 105 },
+          ),
+        ).toMatchObject({ applied: true, outcome: "failed" });
+        // Startup/drain sweep is IDEMPOTENT on this real terminal pair: no
+        // abandonment, no state change.
+        const summary = fx.service.validateAndRecoverActionRuns(
+          "restart_recovery",
+          120,
+        );
+        expect(summary).toMatchObject({
+          unchanged: 1,
+          recoveredPreMarker: 0,
+          recoveredPostMarker: 0,
+        });
+        const view = fx.service.getActionRunView(fx.actionRunId);
+        expect(view.run.status).toBe("failed");
+        expect(view.execution?.status).toBe("failed");
+        expect(view.receipt).toMatchObject({ outcome: "failed" });
+        expect(view.execution?.externalCallStartedAt).not.toBeNull();
+        expect(
+          fx.db
+            .prepare(
+              "SELECT consumed_at FROM action_execution_grants WHERE execution_id = ?",
+            )
+            .get(fx.executionId),
+        ).toEqual({ consumed_at: 101 });
+      } finally {
+        await closeKernelDatabase(fx.handle);
+      }
+    });
+
+    it("fails closed on a pre-marker failed execution with a consumed grant (impossible combo)", async () => {
+      const fx = await setupApprovedProposalFixture(() => 100);
+      try {
+        fx.service.startActionRun(fx.actionRunId, { now: 100 });
+        // Forge the impossible pair directly: failed, marker NULL, but the
+        // grant row CONSUMED (the consume CAS always commits the marker in
+        // the same transaction, so this can never be produced).
+        fx.db
+          .prepare(
+            `UPDATE action_executions SET status = 'failed',
+               error_code = 'action_preflight_failed', finished_at = 105,
+               updated_at = 105 WHERE id = ?`,
+          )
+          .run(fx.executionId);
+        fx.db
+          .prepare(
+            "UPDATE action_execution_grants SET consumed_at = 101 WHERE execution_id = ?",
+          )
+          .run(fx.executionId);
+        fx.db
+          .prepare(
+            "UPDATE runs SET status = 'failed', error_code = 'execution_failed', finished_at = 105 WHERE id = ?",
+          )
+          .run(fx.actionRunId);
+        expect(() =>
+          fx.service.validateAndRecoverActionRuns("restart_recovery", 120),
+        ).toThrow(DatabaseStateInvalidError);
+        // Fail closed: the forged rows are untouched (zero mutations).
+        const status = fx.db
+          .prepare("SELECT status FROM runs WHERE id = ?")
+          .get(fx.actionRunId) as { status: string };
+        expect(status.status).toBe("failed");
+      } finally {
+        await closeKernelDatabase(fx.handle);
+      }
+    });
+
     it("fail-closes the WHOLE sweep when an m5-action run has NO execution row (real orphan is never silently skipped)", async () => {
       const fx = await setupApprovedProposalFixture(() => 100);
       try {

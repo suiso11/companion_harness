@@ -2044,14 +2044,33 @@ export function createActionExecutionService(
           `terminal action run ${run.id} has non-terminal execution ${execution.id} (impossible state)`,
         );
       }
-      const markerRequired =
-        execution.status === "succeeded" ||
-        execution.status === "succeeded_unverified" ||
-        execution.status === "unknown";
-      if (markerRequired !== markered) {
-        throw new DatabaseStateInvalidError(
-          `execution ${execution.id} marker disagrees with terminal status ${execution.status} (impossible state)`,
-        );
+      // EXACT marker agreement: succeeded/succeeded_unverified/unknown are
+      // ALWAYS post-marker; `failed` is legal in BOTH marker states — a
+      // PRE-marker failure (preflight failure / pre-marker cancel) has
+      // marker NULL, and a POST-marker `definite_failure` (connector
+      // returned definite_failure after the committed gate) has marker +
+      // CONSUMED grant. Both are valid, already-terminal pairs.
+      if (execution.status === "failed") {
+        if (!markered) {
+          // A consumed grant WITHOUT the marker can never be produced: the
+          // consume CAS commits the marker in the same transaction.
+          const consumedAt = readGrantConsumedAt(execution.id);
+          if (typeof consumedAt === "number") {
+            throw new DatabaseStateInvalidError(
+              `pre-marker failed execution ${execution.id} has a consumed grant (impossible state)`,
+            );
+          }
+        }
+      } else {
+        const markerRequired =
+          execution.status === "succeeded" ||
+          execution.status === "succeeded_unverified" ||
+          execution.status === "unknown";
+        if (markerRequired !== markered) {
+          throw new DatabaseStateInvalidError(
+            `execution ${execution.id} marker disagrees with terminal status ${execution.status} (impossible state)`,
+          );
+        }
       }
       if (execution.error_code === null && execution.status === "failed") {
         throw new DatabaseStateInvalidError(
