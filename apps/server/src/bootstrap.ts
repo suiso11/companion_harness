@@ -578,6 +578,16 @@ export async function startServer(
       onSigterm = undefined;
     }
   };
+  // C21: an adopted owned write-port hook is single-use. It is CONSUMED
+  // (cleared) BEFORE invoke, so a sync throw or a rejected promise still
+  // counts as used and the listen-failure path (inner catch) plus the
+  // outer startup-failure catch can never close it twice. The injected
+  // hook itself is never required to be idempotent.
+  const takeOwnedActionShutdown = (): (() => Promise<void>) | undefined => {
+    const hook = ownedActionShutdown;
+    ownedActionShutdown = undefined;
+    return hook;
+  };
   try {
     ensureDbDir(config.dbPath, {
       ...(options.platform !== undefined ? { platform: options.platform } : {}),
@@ -1048,8 +1058,9 @@ export async function startServer(
       } catch {
         // Best effort: the listen error carries the startup failure.
       }
+      const ownedListenShutdown = takeOwnedActionShutdown();
       try {
-        await ownedActionShutdown?.();
+        await ownedListenShutdown?.();
       } catch {
         // Best effort.
       }
@@ -1115,7 +1126,10 @@ export async function startServer(
             });
           }
         }
-        await ownedActionShutdown?.();
+        // C21: the adopted hook is consumed before invoke (single-use even
+        // across a drain-failure retry: the retry re-enters shutdown only
+        // after the memo reset above, and the first pass never reached here).
+        await takeOwnedActionShutdown()?.();
         try {
           closeKernelDatabase(activeHandle);
         } catch {
@@ -1160,8 +1174,9 @@ export async function startServer(
         // Best effort: the original startup error carries the failure.
       }
     }
+    const ownedStartupShutdown = takeOwnedActionShutdown();
     try {
-      await ownedActionShutdown?.();
+      await ownedStartupShutdown?.();
     } catch {
       // Best effort: the original startup error carries the failure.
     }

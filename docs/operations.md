@@ -925,6 +925,29 @@ or complete activate config):
   mismatched-instance fail closed before listen with no listener leak) and
   root `tsc --noEmit -p tsconfig.json` exit 0. No full-suite rerun is claimed
   here.
+- Listen-failure follow-up (independent review
+  `ReviewReplayCompositionIdentity` on repair branch `99124aa`; ground truth
+  per task, not rerun pre-fix): the listen-failure catch invoked the adopted
+  enabled owned write-port hook and then the outer startup-failure catch
+  invoked the SAME hook again (2 closes; the injected hook is never required
+  to be idempotent). `apps/server/src/bootstrap.ts` now CONSUMES the adopted
+  hook (`takeOwnedActionShutdown`: cleared BEFORE invoke, so a sync throw or
+  rejected promise still counts as used) at every invoke site
+  (listen-failure catch, outer startup catch, post-drain shutdown), keeping
+  only enabled owned adoption (disabled never closed, caller-owned never
+  closed) with all failed-startup/drain cleanup paths exactly once and the
+  listener error still rethrown. Regression:
+  `apps/server/test/action_composition.test.ts` gains a REAL
+  occupied-loopback-port fixture (live holder server, second `startServer`
+  on the same port): genuine `EADDRINUSE` propagates, owned shutdown count
+  is exactly 1, SIGINT/SIGTERM counts are stable, the holder still serves
+  (disabled approve 409), and the same DB path restarts cleanly with a
+  further exactly-1 close. Actual-runtime proof: the same standalone smoke
+  (`.review-plan-work/smoke-replay-shutdown.ts` via repo tsx, removed after
+  the T2 note above; review JSON kept) 12/12 checks, incl.
+  `code=EADDRINUSE closed=1` with SIGINT/SIGTERM `1/1` stable. Focused
+  `action_composition` 10/10 green (9 prior + 1 new), owned `biome check`
+  clean. No push/resolve; thread IDs are for the parent to publish.
 - Config (strict opt-in, DEFAULT DISABLED on both flags):
   `COMPANION_ACTIONS_JSON` is an exact `{ optIn?, writeEnabled? }` object
   parsed by `parseActionConfig`; both flags default to `false` and the

@@ -392,6 +392,92 @@ describe("C21 M5 Action triple-gated composition", () => {
     await started.shutdown("test");
     expect(closed).toBe(0);
   });
+
+  it("listen failure on a real occupied loopback port closes an enabled owned port exactly once", async () => {
+    // Occupy a real loopback port with a live server (no synthetic throw:
+    // the second startServer must lose a genuine OS bind).
+    const holderEnv = tempEnv();
+    const holder = await startServer({
+      env: holderEnv.env,
+      drainMs: 50,
+      logger: createCollectingLogger("error").logger,
+    });
+    servers.push(holder);
+    expect(holder.port).toBeGreaterThan(0);
+
+    const { env, dbPath } = tempEnv();
+    const instanceId = await provisionCalendarInstance(dbPath);
+    const sigintBefore = process.listenerCount("SIGINT");
+    const sigtermBefore = process.listenerCount("SIGTERM");
+    let closed = 0;
+    const error = await startServer({
+      env: {
+        ...env,
+        COMPANION_PORT: String(holder.port),
+        COMPANION_ACTIONS_JSON: ENABLED_ACTIONS_JSON,
+      },
+      calendarBinding: {
+        connectorInstanceId: instanceId,
+        connector: fakeCalendarBinding(instanceId),
+        selection: { calendarId: "cal-primary", account: "ops@example" },
+      },
+      actionWriteBinding: {
+        port: fakeWritePort(instanceId),
+        owned: true,
+        shutdown: async () => {
+          closed += 1;
+        },
+      },
+      drainMs: 50,
+      logger: createCollectingLogger("error").logger,
+    }).then(
+      (started) => {
+        servers.push(started);
+        return null;
+      },
+      (failure: unknown) => failure,
+    );
+    // The real bind failure propagates (never suppressed or swallowed).
+    expect(error).toBeInstanceOf(Error);
+    expect(
+      (error as NodeJS.ErrnoException).code === "EADDRINUSE" ||
+        /address in use/i.test((error as Error).message),
+    ).toBe(true);
+    // The adopted owned hook ran exactly once across the listen-failure
+    // catch and the outer startup catch (consumed before invoke, so the
+    // injected hook is never required to be idempotent).
+    expect(closed).toBe(1);
+    // No listener allocated by the failed start, no signal-handler leak.
+    expect(process.listenerCount("SIGINT")).toBe(sigintBefore);
+    expect(process.listenerCount("SIGTERM")).toBe(sigtermBefore);
+    // The occupying listener is untouched and still serves.
+    const probe = await approveProbe(holder);
+    expect(probe.status).toBe(409);
+    expect(probe.body).toContain("action_execution_disabled");
+    // The failed start released its DB handle: the same path restarts
+    // cleanly on a free port and its owned hook closes exactly once.
+    let reopenedClosed = 0;
+    const reopened = await startServer({
+      env: { ...env, COMPANION_ACTIONS_JSON: ENABLED_ACTIONS_JSON },
+      calendarBinding: {
+        connectorInstanceId: instanceId,
+        connector: fakeCalendarBinding(instanceId),
+        selection: { calendarId: "cal-primary", account: "ops@example" },
+      },
+      actionWriteBinding: {
+        port: fakeWritePort(instanceId),
+        owned: true,
+        shutdown: async () => {
+          reopenedClosed += 1;
+        },
+      },
+      drainMs: 50,
+      logger: createCollectingLogger("error").logger,
+    });
+    servers.push(reopened);
+    await reopened.shutdown("test");
+    expect(reopenedClosed).toBe(1);
+  });
 });
 
 void (undefined as unknown as typeof CALENDAR_RESCHEDULE_TOOL_NAME);
