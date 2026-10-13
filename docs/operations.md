@@ -1821,16 +1821,16 @@ adoption, no Remind work, no dependencies, no stack rewrite.
 - `pnpm typecheck` (root `tsconfig.json`) → exit 0, empty output.
 - `pnpm typecheck:e2e` (`apps/server/tsconfig.e2e.json`) → exit 0,
   empty output.
-- `pnpm lint` (`biome check .`) → exit 1 with exactly **2 format
-  diagnostics, both on parent-owned preserved
+- `pnpm lint` (`biome check .`) → exit 0 on the post-cleanup
+  recheck (run ONCE after parsing and removing the own temporary
   `.review-plan-work/reviews-companion.json` /
-  `.review-plan-work/reviews-fork.json`** (untracked review evidence
-  placed by the parent; kept byte-identical until publication per
-  scope, not reformatted, not deleted). Every product/source file is
-  clean (0 errors on all owned paths). Ground truth, not suppressed:
-  whole-repo lint cannot go green while those two files are present;
-  closing it needs either formatting parent evidence or a Biome ignore
-  outside this worker's declared paths — reported, not fixed here.
+  `.review-plan-work/reviews-fork.json` plus the now-empty
+  `.review-plan-work/` directory): **219 files checked, 0 errors,
+  1 pre-existing info** (deprecated `recommended` field in
+  `biome.json`). Earlier exit-1 ground truth was exactly **2 format
+  diagnostics on those two own-temp files only**; every
+  product/source file was already clean. No ignore change, no
+  reformat-suppress, no unrelated change.
 - Browser: `apps/server/e2e/calendar/action.spec.ts` **13/13 passed at
   `61b3573`** per the T1 follow-up record above; confirmed only.
 
@@ -1893,7 +1893,8 @@ outside: host/port came from the explicit env above against the
   404 (no false positive).
 - Stop 2: draining → stopped, port closed. Own runtime files
   (smoke store, preserved copy, server logs, capture files) removed
-  after this evidence; `.review-plan-work/reviews-*.json` kept.
+  after this evidence; `.review-plan-work/reviews-*.json` parsed for
+  publication data, then removed (publication step).
 
 Smoke counters: cold starts 2/2 ready, health live 2/2, health ready
 2/2, marker sessions created 1/1, backups 1/1 (basename + 0600 +
@@ -1946,7 +1947,9 @@ worktree); plan execution is recorded in the existing docs only
 (operations here + README progress section).
 
 Scaffolds: `.review-plan-work/source-run-smoke/` removed after
-evidence; `.review-plan-work/reviews-*.json` kept until publication;
-no `test-results/`, `.verification-log/`, `.final-gate-tmp/`, or
+evidence; `.review-plan-work/reviews-*.json` parsed for publication
+data, then removed with the now-empty `.review-plan-work/` directory
+(publication cleanup; post-cleanup `pnpm lint` exit 0, 219 files,
+0 errors, 1 pre-existing info — see above); no `test-results/`, `.verification-log/`, `.final-gate-tmp/`, or
 `.review-proof/` residue; no test file touched by the lint ground
 truth above.
