@@ -2365,3 +2365,32 @@ Verification (this worker, Linux, Node 24.12.0, after all edits):
   No default-browser or full-1296 rerun (unchanged paths).
 - PR23/PR24 CI at push time: all checks SUCCESS (PR24 6/6 incl. e2e;
   PR23 6/6); no failed logs to repair.
+
+## C22 clock-skew pending-expiry rearm (2026-10-13, observed)
+
+Followup on the same PR24 branch (`fix/c22-approval-card-target-expiry`);
+independent-reviewer defect taken as ground truth, no before-fix rerun. No
+polling, provider/network, or authority change.
+
+- `apps/server/src/ui/client.ts` `schedulePendingExpiry()`: the capped
+  one-shot callback now calls `this.schedulePendingExpiry(current)` before
+  the `Date.now() < deadline` early return. A client wall clock >15min
+  behind the server (or rolled back after arming) no longer consumes the
+  only timer forever: the single bounded timer re-arms for the remainder
+  (still 1 timer, still 15min cap). Existing identity, accepted/decision,
+  and execution/terminal guards are unchanged; the server stays
+  authoritative.
+- `apps/server/e2e/calendar/action.spec.ts` (+1, real proposal + client
+  clock only): fake clock installed before goto, client set 20min behind
+  before the real staged proposal, first capped 15min `fastForward` keeps
+  the pending card with live controls, then advancing the actual remaining
+  `expiresAt` retires the card with 0 writes and no
+  visibility/network refresh. Real `expiresAt`, no DB mutation.
+
+Verification (this worker, Linux, Node 24.12.0, after all edits):
+
+- `pnpm run typecheck`, `pnpm run typecheck:e2e` -> exit 0.
+- `pnpm exec biome check` on the owned files -> exit 0.
+- Calendar action suite (Chromium, `COMPANION_E2E_CALENDAR=1`,
+  `action.spec.ts` only): **20/20 passed** (~48s). No
+  default-browser or full-suite rerun (unchanged paths).

@@ -670,6 +670,35 @@ test("pending expiry: controls live at deadline-1, card retires at deadline with
   expect(await writeCalls(request)).toBe(0);
 });
 
+test("clock skew: capped one-shot rearms and retires at the real deadline with 0 writes", async ({
+  page,
+  request,
+}) => {
+  await installClockAndLoad(page);
+  // Skew the client wall clock 20min behind the server BEFORE the real
+  // staged proposal, so the first capped 15min one-shot fires while the
+  // REAL server deadline is still in the future.
+  await page.clock.setSystemTime(Date.now() - 20 * 60 * 1000);
+  await stageProposal(page);
+  const meta = await realProposalMeta(page, request);
+  const clientNow = await page.evaluate(() => Date.now());
+  expect(meta.expiresAt - clientNow).toBeGreaterThan(15 * 60 * 1000);
+  // First capped timeout fires while the deadline is future: the rearmed
+  // card stays pending with live controls (no retire, no write).
+  await page.clock.fastForward(15 * 60 * 1000);
+  const card = page.locator('[data-action-card="true"]');
+  await expect(card).toBeVisible();
+  await expect(page.locator("#action-approve")).toBeEnabled();
+  await expect(page.locator("#action-reject")).toBeEnabled();
+  // Advance the actual remaining time to the REAL deadline: the rearmed
+  // one-shot retires the card locally with no visibility/network refresh.
+  const remaining = meta.expiresAt - (await page.evaluate(() => Date.now()));
+  expect(remaining).toBeGreaterThan(0);
+  await page.clock.fastForward(remaining + 1);
+  await expect(page.locator('[data-action-card="true"]')).toHaveCount(0);
+  expect(await writeCalls(request)).toBe(0);
+});
+
 test("tab resume retires the expired pending card with no new polling", async ({
   page,
   request,

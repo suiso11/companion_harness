@@ -1321,6 +1321,11 @@ class ConversationApp {
         return;
       }
       if (Date.now() < current.deadline) {
+        // Capped one-shot fired while the server deadline is still in the
+        // future (client wall clock behind the server, or rolled back after
+        // arming): re-arm the single bounded timer for the remainder instead
+        // of consuming it forever. One timer per card is preserved.
+        this.schedulePendingExpiry(current);
         return;
       }
       this.removeActionCard(proposalId);
