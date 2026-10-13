@@ -540,6 +540,283 @@ export const modelCalls = sqliteTable(
 // committed migration SQL only (as with the M0 active-run partial index
 // and the M1 snapshot-links target index).
 
+// M5 action storage (§18). Mirrors
+// packages/kernel/migrations/0007_m5_actions.sql, which is authoritative.
+// Four STRICT tables with the exact §18.3 compound FKs, the 4-column target
+// FK, decision-turn uniqueness, status/marker/receipt CHECKs, and grant
+// one-shot semantics. The pending-per-session partial unique index
+// idx_proposals_one_pending_per_session is owned by the committed SQL file
+// only (as with the M0 active-run partial index). Proposal content
+// (input/target/expectedRevision/preview/hash) is immutable; only
+// status / resolved_at / decision_turn_id may ever be written again.
+
+export const actionProposals = sqliteTable(
+  "action_proposals",
+  {
+    id: text("id").primaryKey(),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id),
+    sourceTurnId: text("source_turn_id").notNull(),
+    sourceRunId: text("source_run_id").notNull(),
+    decisionTurnId: text("decision_turn_id"),
+    tool: text("tool").notNull(),
+    connectorInstanceId: text("connector_instance_id")
+      .notNull()
+      .references(() => connectorInstances.id),
+    inputJson: text("input_json").notNull(),
+    targetRefId: text("target_ref_id").notNull(),
+    targetResourceId: text("target_resource_id").notNull(),
+    basedOnSnapshotId: text("based_on_snapshot_id").notNull(),
+    expectedRevision: text("expected_revision").notNull(),
+    previewJson: text("preview_json").notNull(),
+    hash: text("hash").notNull(),
+    status: text("status").notNull(),
+    createdAt: integer("created_at").notNull(),
+    expiresAt: integer("expires_at").notNull(),
+    resolvedAt: integer("resolved_at"),
+  },
+  (t) => [
+    unique("action_proposals_source_run_id_unique").on(t.sourceRunId, t.id),
+    unique("action_proposals_session_id_unique").on(t.sessionId, t.id),
+    unique("action_proposals_decision_turn_unique").on(t.decisionTurnId),
+    foreignKey({
+      name: "action_proposals_session_source_turn_fk",
+      columns: [t.sessionId, t.sourceTurnId],
+      foreignColumns: [turns.sessionId, turns.id],
+    }),
+    foreignKey({
+      name: "action_proposals_session_source_run_fk",
+      columns: [t.sessionId, t.sourceRunId],
+      foreignColumns: [runs.sessionId, runs.id],
+    }),
+    foreignKey({
+      name: "action_proposals_turn_run_fk",
+      columns: [t.sourceTurnId, t.sourceRunId],
+      foreignColumns: [runs.turnId, runs.id],
+    }),
+    foreignKey({
+      name: "action_proposals_decision_turn_fk",
+      columns: [t.sessionId, t.decisionTurnId],
+      foreignColumns: [turns.sessionId, turns.id],
+    }),
+    foreignKey({
+      name: "action_proposals_target_fk",
+      columns: [
+        t.sessionId,
+        t.targetRefId,
+        t.targetResourceId,
+        t.basedOnSnapshotId,
+      ],
+      foreignColumns: [
+        sessionReferences.sessionId,
+        sessionReferences.id,
+        sessionReferences.resourceId,
+        sessionReferences.snapshotId,
+      ],
+    }),
+    foreignKey({
+      name: "action_proposals_connector_resource_fk",
+      columns: [t.connectorInstanceId, t.targetResourceId],
+      foreignColumns: [resources.connectorInstanceId, resources.id],
+    }),
+    foreignKey({
+      name: "action_proposals_resource_snapshot_fk",
+      columns: [t.targetResourceId, t.basedOnSnapshotId],
+      foreignColumns: [resourceSnapshots.resourceId, resourceSnapshots.id],
+    }),
+    check(
+      "action_proposals_tool_check",
+      sql`${t.tool} = 'calendar.reschedule'`,
+    ),
+    check("action_proposals_input_json_check", sql`json_valid(${t.inputJson})`),
+    check(
+      "action_proposals_preview_json_check",
+      sql`json_valid(${t.previewJson})`,
+    ),
+    check("action_proposals_ttl_check", sql`${t.expiresAt} > ${t.createdAt}`),
+    check(
+      "action_proposals_status_check",
+      sql`${t.status} IN ('pending','approved','rejected','expired')`,
+    ),
+    check(
+      "action_proposals_lifecycle_check",
+      sql`(${t.status} = 'pending' AND ${t.resolvedAt} IS NULL AND ${t.decisionTurnId} IS NULL) OR
+        (${t.status} = 'approved' AND ${t.resolvedAt} IS NOT NULL AND ${t.decisionTurnId} IS NOT NULL) OR
+        (${t.status} = 'rejected' AND ${t.resolvedAt} IS NOT NULL AND ${t.decisionTurnId} IS NOT NULL) OR
+        (${t.status} = 'expired' AND ${t.resolvedAt} IS NOT NULL AND ${t.decisionTurnId} IS NULL)`,
+    ),
+  ],
+);
+
+export const actionExecutions = sqliteTable(
+  "action_executions",
+  {
+    id: text("id").primaryKey(),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id),
+    proposalId: text("proposal_id").notNull(),
+    approvalTurnId: text("approval_turn_id").notNull(),
+    actionRunId: text("action_run_id").notNull(),
+    status: text("status").notNull(),
+    externalCallStartedAt: integer("external_call_started_at"),
+    finishedAt: integer("finished_at"),
+    errorCode: text("error_code"),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (t) => [
+    unique("action_executions_proposal_unique").on(t.proposalId),
+    unique("action_executions_action_run_unique").on(t.actionRunId),
+    unique("action_executions_session_proposal_id_unique").on(
+      t.sessionId,
+      t.proposalId,
+      t.id,
+    ),
+    foreignKey({
+      name: "action_executions_session_proposal_fk",
+      columns: [t.sessionId, t.proposalId],
+      foreignColumns: [actionProposals.sessionId, actionProposals.id],
+    }),
+    foreignKey({
+      name: "action_executions_session_approval_turn_fk",
+      columns: [t.sessionId, t.approvalTurnId],
+      foreignColumns: [turns.sessionId, turns.id],
+    }),
+    foreignKey({
+      name: "action_executions_session_action_run_fk",
+      columns: [t.sessionId, t.actionRunId],
+      foreignColumns: [runs.sessionId, runs.id],
+    }),
+    foreignKey({
+      name: "action_executions_approval_turn_run_fk",
+      columns: [t.approvalTurnId, t.actionRunId],
+      foreignColumns: [runs.turnId, runs.id],
+    }),
+    check(
+      "action_executions_status_check",
+      sql`${t.status} IN ('queued','preflight','executing','succeeded','succeeded_unverified','blocked_stale','failed','unknown')`,
+    ),
+    check("action_executions_updated_at_check", sql`${t.updatedAt} >= ${t.createdAt}`),
+    check(
+      "action_executions_marker_terminal_check",
+      sql`(${t.status} = 'queued' AND ${t.externalCallStartedAt} IS NULL AND ${t.finishedAt} IS NULL AND ${t.errorCode} IS NULL) OR
+        (${t.status} = 'preflight' AND ${t.externalCallStartedAt} IS NULL AND ${t.finishedAt} IS NULL AND ${t.errorCode} IS NULL) OR
+        (${t.status} = 'executing' AND ${t.externalCallStartedAt} IS NOT NULL AND ${t.finishedAt} IS NULL AND ${t.errorCode} IS NULL) OR
+        (${t.status} = 'succeeded' AND ${t.externalCallStartedAt} IS NOT NULL AND ${t.finishedAt} IS NOT NULL AND ${t.errorCode} IS NULL) OR
+        (${t.status} = 'succeeded_unverified' AND ${t.externalCallStartedAt} IS NOT NULL AND ${t.finishedAt} IS NOT NULL AND ${t.errorCode} IS NULL) OR
+        (${t.status} = 'unknown' AND ${t.externalCallStartedAt} IS NOT NULL AND ${t.finishedAt} IS NOT NULL AND ${t.errorCode} IS NULL) OR
+        (${t.status} = 'blocked_stale' AND ${t.externalCallStartedAt} IS NULL AND ${t.finishedAt} IS NOT NULL AND ${t.errorCode} IS NULL) OR
+        (${t.status} = 'failed' AND ${t.finishedAt} IS NOT NULL AND ${t.errorCode} IS NOT NULL)`,
+    ),
+  ],
+);
+
+export const actionExecutionGrants = sqliteTable(
+  "action_execution_grants",
+  {
+    executionId: text("execution_id")
+      .primaryKey()
+      .references(() => actionExecutions.id),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id),
+    proposalId: text("proposal_id").notNull(),
+    proposalHash: text("proposal_hash").notNull(),
+    tool: text("tool").notNull(),
+    inputHash: text("input_hash").notNull(),
+    consumedAt: integer("consumed_at"),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [
+    foreignKey({
+      name: "action_execution_grants_execution_fk",
+      columns: [t.sessionId, t.proposalId, t.executionId],
+      foreignColumns: [
+        actionExecutions.sessionId,
+        actionExecutions.proposalId,
+        actionExecutions.id,
+      ],
+    }),
+    foreignKey({
+      name: "action_execution_grants_session_proposal_fk",
+      columns: [t.sessionId, t.proposalId],
+      foreignColumns: [actionProposals.sessionId, actionProposals.id],
+    }),
+    check(
+      "action_execution_grants_tool_check",
+      sql`${t.tool} = 'calendar.reschedule'`,
+    ),
+    check(
+      "action_execution_grants_consumed_check",
+      sql`(${t.consumedAt} IS NULL) OR (${t.consumedAt} IS NOT NULL)`,
+    ),
+  ],
+);
+
+export const actionReceipts = sqliteTable(
+  "action_receipts",
+  {
+    executionId: text("execution_id")
+      .primaryKey()
+      .references(() => actionExecutions.id),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id),
+    proposalId: text("proposal_id").notNull(),
+    proposalHash: text("proposal_hash").notNull(),
+    outcome: text("outcome").notNull(),
+    preflightRevision: text("preflight_revision"),
+    preflightSnapshotId: text("preflight_snapshot_id"),
+    observedRevision: text("observed_revision"),
+    resultSnapshotId: text("result_snapshot_id"),
+    summaryJson: text("summary_json").notNull(),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [
+    foreignKey({
+      name: "action_receipts_execution_fk",
+      columns: [t.sessionId, t.proposalId, t.executionId],
+      foreignColumns: [
+        actionExecutions.sessionId,
+        actionExecutions.proposalId,
+        actionExecutions.id,
+      ],
+    }),
+    foreignKey({
+      name: "action_receipts_session_proposal_fk",
+      columns: [t.sessionId, t.proposalId],
+      foreignColumns: [actionProposals.sessionId, actionProposals.id],
+    }),
+    foreignKey({
+      name: "action_receipts_preflight_snapshot_fk",
+      columns: [t.preflightSnapshotId],
+      foreignColumns: [resourceSnapshots.id],
+    }),
+    foreignKey({
+      name: "action_receipts_result_snapshot_fk",
+      columns: [t.resultSnapshotId],
+      foreignColumns: [resourceSnapshots.id],
+    }),
+    check(
+      "action_receipts_outcome_check",
+      sql`${t.outcome} IN ('succeeded','succeeded_unverified','blocked_stale','failed','unknown')`,
+    ),
+    check(
+      "action_receipts_summary_json_check",
+      sql`json_valid(${t.summaryJson})`,
+    ),
+    check(
+      "action_receipts_observation_check",
+      sql`(${t.outcome} = 'succeeded' AND ${t.observedRevision} IS NOT NULL AND ${t.resultSnapshotId} IS NOT NULL) OR
+        (${t.outcome} = 'succeeded_unverified' AND ${t.observedRevision} IS NULL AND ${t.resultSnapshotId} IS NULL) OR
+        (${t.outcome} = 'blocked_stale' AND ${t.preflightRevision} IS NOT NULL AND ${t.preflightSnapshotId} IS NOT NULL AND ${t.observedRevision} IS NULL AND ${t.resultSnapshotId} IS NULL) OR
+        (${t.outcome} IN ('failed','unknown') AND ${t.observedRevision} IS NULL AND ${t.resultSnapshotId} IS NULL)`,
+    ),
+  ],
+);
+
 export const kernelSchema = {
   sessions,
   turns,
@@ -558,4 +835,8 @@ export const kernelSchema = {
   sessionReferenceContext,
   evidenceGrants,
   modelCalls,
+  actionProposals,
+  actionExecutions,
+  actionExecutionGrants,
+  actionReceipts,
 };

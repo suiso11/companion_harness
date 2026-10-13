@@ -274,6 +274,10 @@ export type {
 } from "./repository.js";
 export { createKernelRepository } from "./repository.js";
 export {
+  actionExecutions,
+  actionExecutionGrants,
+  actionProposals,
+  actionReceipts,
   apiIdempotency,
   connectorInstances,
   evidenceGrants,

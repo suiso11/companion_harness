@@ -44,6 +44,13 @@
       "when": 1790000000005,
       "tag": "0006_m4_calendar_targets",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": 7,
+      "when": 1790000000006,
+      "tag": "0007_m5_actions",
+      "breakpoints": true
     }
   ]
 }

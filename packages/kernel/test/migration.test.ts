@@ -93,7 +93,10 @@ describe("m0 migration lifecycle", () => {
         migrated: true,
         fromVersion: 0,
         toVersion: BUNDLED_SCHEMA_VERSION,
-        applied: [1, 2, 3, 4, 5, 6],
+        applied: Array.from(
+          { length: BUNDLED_SCHEMA_VERSION },
+          (_, index) => index + 1,
+        ),
       });
       expect(result.backupPath).toBeUndefined();
       expect(getSchemaVersion(handle.raw)).toBe(BUNDLED_SCHEMA_VERSION);
@@ -559,8 +562,29 @@ describe("m0 storage helpers and provenance", () => {
     expect(m6).not.toMatch(/WITHOUT ROWID/);
     const m6Code = m6.replace(/--[^\n]*/g, "");
     expect(m6Code).not.toMatch(/calendar_id|event_id/i);
+    const m7 = readFileSync(
+      join(kernelDir, "migrations", "0007_m5_actions.sql"),
+      "utf8",
+    );
+    for (const table of [
+      "action_proposals",
+      "action_executions",
+      "action_execution_grants",
+      "action_receipts",
+    ]) {
+      expect(m7).toContain(`CREATE TABLE ${table}`);
+    }
+    // Exact §18.3 target binding: the 4-column compound FK is the only
+    // session/reference FK for proposals (no weak sibling FK exists).
+    expect(m7).toContain(
+      "FOREIGN KEY (session_id, target_ref_id, target_resource_id, based_on_snapshot_id)",
+    );
+    expect(m7).toContain("idx_proposals_one_pending_per_session");
+    expect(m7).toMatch(/STRICT/g);
+    const m7Code = m7.replace(/--[^\n]*/g, "");
+    expect(m7Code).not.toContain("WITHOUT ROWID");
     // The bundled version is the committed migration count, never a hand pin.
-    expect(BUNDLED_SCHEMA_VERSION).toBeGreaterThanOrEqual(6);
+    expect(BUNDLED_SCHEMA_VERSION).toBeGreaterThanOrEqual(7);
     const journal = JSON.parse(
       readFileSync(
         join(kernelDir, "migrations", "meta", "_journal.json"),
@@ -584,6 +608,9 @@ describe("m0 storage helpers and provenance", () => {
     );
     expect(journal.entries.map((entry) => entry.tag)).toContain(
       "0006_m4_calendar_targets",
+    );
+    expect(journal.entries.map((entry) => entry.tag)).toContain(
+      "0007_m5_actions",
     );
     const backupSrc = readFileSync(join(kernelDir, "src", "backup.ts"), "utf8");
     expect(backupSrc).toContain(".backup(");
