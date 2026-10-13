@@ -39,12 +39,12 @@
  *   list-events, search-events, get-event
  * (`list-calendars` is NOT registered and must be absent.)
  */
-import { createHash } from 'node:crypto';
-import { ToolRegistry } from '../../../.readonly-compat/fork/src/tools/registry.ts';
+import { createHash } from "node:crypto";
+import { ToolRegistry } from "../../../.readonly-compat/fork/src/tools/registry.ts";
 
 function sortKeys(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sortKeys);
-  if (value !== null && typeof value === 'object') {
+  if (value !== null && typeof value === "object") {
     const out: Record<string, unknown> = {};
     for (const key of Object.keys(value as object).sort()) {
       out[key] = sortKeys((value as Record<string, unknown>)[key]);
@@ -57,6 +57,6 @@ function sortKeys(value: unknown): unknown {
 const tools = ToolRegistry.getToolsWithSchemas();
 for (const tool of tools) {
   const canonical = JSON.stringify(sortKeys(tool.inputSchema));
-  const digest = createHash('sha256').update(canonical).digest('hex');
+  const digest = createHash("sha256").update(canonical).digest("hex");
   console.log(`${tool.name} ${digest}`);
 }
