@@ -590,9 +590,14 @@ export function createActionExecutionService(
 
   /**
    * T6 ID-free rendered preview: the deterministic preview `summary`
-   * without the internal tool-name prefix and without any UUID. The stored
-   * `preview_json` contract is unchanged (the prefix strip happens only for
-   * rendered RunResult text); structured audit fields keep all IDs.
+   * without the LEGACY internal tool-name prefix and without any UUID. The
+   * stored `preview_json` contract is unchanged (the prefix strip happens
+   * only for rendered RunResult text); structured audit fields keep all IDs.
+   *
+   * The strip targets historical rows only (legacy `calendar.reschedule: ...`
+   * previews). Current previews always open with the unambiguous
+   * `対象イベント: ` marker, so an arbitrary event title — even one beginning
+   * with `calendar.reschedule:` — is never at position 0 and is never cut.
    */
   function renderedPreviewSummary(proposal: RawProposal): string {
     let summary = "";

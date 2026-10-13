@@ -21,6 +21,7 @@ import {
   ANSWER_STAGE_TEXT,
   CALENDAR_APP_ORIGIN,
   CALENDAR_CONTROL_ORIGIN,
+  EVENT_TITLE_TOOL_PREFIXED,
   EVENT_TITLE_V1,
   STAGE_END,
   STAGE_START,
@@ -648,6 +649,47 @@ test("preview names the frozen event title and session rN, never the tool name",
     (await page.locator('[data-action-card="true"]').textContent()) ?? "";
   expect(cardText).not.toContain("calendar.reschedule");
   void request;
+});
+
+test("tool-prefixed title survives card, receipt and reloaded history in full (1 write)", async ({
+  page,
+  request,
+}) => {
+  // Test-only upstream title override (loopback control seam; the production
+  // normalizer is untouched): the fake upstream serves an event whose title
+  // begins with the legacy preview tool prefix. `/reset` (beforeEach) clears
+  // it per test like every other fixture field.
+  await control(request, "/set-title", { title: EVENT_TITLE_TOOL_PREFIXED });
+  await stageProposal(page);
+  // The initial card carries the WHOLE title behind the unambiguous marker:
+  // the legacy tool-prefix strip must not cut it.
+  const preview = page.locator("[data-action-preview='true']");
+  await expect(preview).toContainText(EVENT_TITLE_TOOL_PREFIXED);
+  // The REAL approve through the real UI: exactly one external write and
+  // the verified receipt, with the full title intact on the receipt card.
+  const approved = page.waitForResponse(
+    (res) =>
+      res.url().includes("/approve") && res.request().method() === "POST",
+  );
+  await page.locator("#action-approve").click();
+  expect((await approved).status()).toBe(202);
+  const card = page.locator('[data-action-card="true"]');
+  await expect(card).toContainText("日程を更新しました", { timeout: 60_000 });
+  await expect(card).toContainText(EVENT_TITLE_TOOL_PREFIXED);
+  expect(await writeCalls(request)).toBe(1);
+  // Durable history + reload: the receipt line keeps the whole title (no
+  // legacy-strip cut, no re-verification write).
+  await page.reload();
+  await expect(page.locator("#composer")).toBeVisible();
+  const history = page.locator(
+    "#conversation [data-action-history='action_approval']",
+  );
+  await expect(history).toHaveCount(1, { timeout: 30_000 });
+  await expect(history).toContainText(EVENT_TITLE_TOOL_PREFIXED, {
+    timeout: 30_000,
+  });
+  await page.waitForTimeout(2_000);
+  expect(await writeCalls(request)).toBe(1);
 });
 
 test("pending expiry: controls live at deadline-1, card retires at deadline with 0 writes", async ({

@@ -320,6 +320,21 @@ const control = createServer(async (req, res) => {
     json(200, { reset: true });
     return;
   }
+  // C22 fixture seam: test-only upstream title override (loopback control;
+  // never a production normalizer path). Lets a real search/stage/approve
+  // flow freeze an arbitrary title — including one beginning with
+  // `calendar.reschedule:`. Cleared by `/reset` like every fixture field.
+  if (req.method === "POST" && url.pathname === "/set-title") {
+    const parsed = parseBody(raw);
+    const title = typeof parsed?.title === "string" ? parsed.title : "";
+    if (title.length < 1 || title.length > 128) {
+      json(400, { error: { code: "invalid_title" } });
+      return;
+    }
+    state.titleOverride = title;
+    json(200, { titleOverride: state.titleOverride });
+    return;
+  }
   // C22 fixture seams (fake write behavior + barriers; no production path).
   if (req.method === "POST" && url.pathname === "/arm-write") {
     const parsed = parseBody(raw);
