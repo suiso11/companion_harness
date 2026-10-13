@@ -254,6 +254,51 @@ export function proposalApproveScope(proposalId: string): string {
 }
 
 /* ------------------------------------------------------------------ */
+/* Proposal list + rejection DTOs (C18 exact, §18.4)                   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Session-scoped proposal summary (GET /proposals item). Structural only:
+ * the exact immutable content the approval UI renders (hash-backed buttons,
+ * §18.9) plus the mutable decision state. Raw provider ids never appear
+ * (`preview` is the deterministic start/end-only summary line).
+ */
+export const ProposalSummarySchema = z.strictObject({
+  proposalId: UuidSchema,
+  tool: CalendarRescheduleToolNameSchema,
+  input: CalendarRescheduleToolInputSchema,
+  preview: ActionProposalPreviewSchema,
+  hash: Sha256HexSchema,
+  status: ActionProposalStatusSchema,
+  createdAt: UnixMsSchema,
+  expiresAt: UnixMsSchema,
+  resolvedAt: UnixMsSchema.nullable(),
+  decisionTurnId: UuidSchema.nullable(),
+});
+export type ProposalSummary = z.infer<typeof ProposalSummarySchema>;
+
+/** Max proposal summaries served in one list page (bounded read). */
+export const MAX_PROPOSAL_LIST_ITEMS = 100;
+
+export const ProposalsListResponseSchema = z.strictObject({
+  proposals: z.array(ProposalSummarySchema).max(MAX_PROPOSAL_LIST_ITEMS),
+});
+export type ProposalsListResponse = z.infer<typeof ProposalsListResponseSchema>;
+
+/**
+ * Exact reject response (keyless, state-idempotent): the deterministic
+ * rejected state. Repeat rejects return the SAME body (exactly one
+ * `action_rejection` Turn ever exists) with 200; a body never mutates.
+ */
+export const ProposalRejectResponseSchema = z.strictObject({
+  proposalId: UuidSchema,
+  status: z.literal("rejected"),
+  decisionTurnId: UuidSchema,
+  resolvedAt: UnixMsSchema,
+});
+export type ProposalRejectResponse = z.infer<typeof ProposalRejectResponseSchema>;
+
+/* ------------------------------------------------------------------ */
 /* M5 Action RunEvent payloads (§18.8, non-final extension)            */
 /* ------------------------------------------------------------------ */
 

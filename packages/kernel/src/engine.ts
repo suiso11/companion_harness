@@ -181,13 +181,25 @@ export class RunEngine {
     if (room <= 0) {
       return 0;
     }
+    // Pickup only strategies that are actually registered (C18): a queued
+    // run whose strategy has no runtime yet (e.g. the M5 `m5-action` run a
+    // decision created before the next slice registers its executor) is
+    // LEFT QUEUED — never started and never failed by pickup. §18.6 gives
+    // queued Action Runs exactly this semantics (same state on the next
+    // pass, a later scheduler attempt is the normal pickup, not a retry).
     let rows: Array<{ id: string }>;
     try {
-      rows = this.db
-        .prepare(
-          "SELECT id FROM runs WHERE status = 'queued' ORDER BY created_at ASC, id ASC LIMIT ?",
-        )
-        .all(room) as Array<{ id: string }>;
+      const names = this.registry.names();
+      if (names.length === 0) {
+        rows = [];
+      } else {
+        const placeholders = names.map(() => "?").join(",");
+        rows = this.db
+          .prepare(
+            `SELECT id FROM runs WHERE status = 'queued' AND strategy IN (${placeholders}) ORDER BY created_at ASC, id ASC LIMIT ?`,
+          )
+          .all(...names, room) as Array<{ id: string }>;
+      }
     } catch {
       return 0;
     }

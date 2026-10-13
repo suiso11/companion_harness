@@ -41,6 +41,7 @@ export interface ServerLogFields {
   readonly sessionId?: string;
   readonly turnId?: string;
   readonly runId?: string;
+  readonly proposalId?: string;
   readonly scope?: string;
   readonly status?: number | string;
   readonly bytes?: number;

@@ -46,7 +46,16 @@ export type {
   ProposalApprove202Response,
   ProposalApproveRequest,
   ProposalRejectRequest,
+  ProposalRejectResponse,
+  ProposalSummary,
+  ProposalsListResponse,
 } from "./action.js";
+export type {
+  ActionApprovalHistoryItem,
+  ActionRejectionHistoryItem,
+  ActionRunHistorySelection,
+  UserTextHistoryItem,
+} from "./http.js";
 export {
   ActionApprovedPayloadSchema,
   ActionExecutionFinishedPayloadSchema,
@@ -75,8 +84,18 @@ export {
   ProposalApprove202ResponseSchema,
   ProposalApproveRequestSchema,
   ProposalRejectRequestSchema,
+  ProposalRejectResponseSchema,
+  ProposalSummarySchema,
+  ProposalsListResponseSchema,
+  MAX_PROPOSAL_LIST_ITEMS,
   proposalApproveScope,
 } from "./action.js";
+export {
+  UserTextHistoryItemSchema,
+  ActionApprovalHistoryItemSchema,
+  ActionRejectionHistoryItemSchema,
+  ActionRunHistorySelectionSchema,
+} from "./http.js";
 export type {
   CalendarEventStatus,
   CalendarGetTarget,

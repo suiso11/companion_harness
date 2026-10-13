@@ -194,6 +194,8 @@ export {
   MigrationMissingError,
   NewerDatabaseError,
   PragmasError,
+  ProposalHashMismatchError,
+  ProposalStateConflictError,
   QuickCheckError,
   ReferenceNotFoundError,
   ReferenceVersionConflictError,
@@ -271,6 +273,7 @@ export type {
 export { createReferenceResolver } from "./reference_resolver.js";
 export type {
   AcceptedResponse,
+  ApproveProposalOptions,
   CreateKernelRepositoryOptions,
   CreateSessionOptions,
   EvidenceGrantRow,
@@ -279,6 +282,7 @@ export type {
   ModelCallRow,
   PostMessageOptions,
   PostRetryOptions,
+  RejectProposalOptions,
   RecordModelCallOptions,
   RunRow,
   SessionRow,

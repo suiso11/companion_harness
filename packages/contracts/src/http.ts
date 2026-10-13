@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { LatestRunEventSchema, M0RunEventSchema } from "./events.js";
-import { IdempotencyScopeSchema, UnixMsSchema, UuidSchema } from "./ids.js";
+import { IdempotencyScopeSchema, Sha256HexSchema, UnixMsSchema, UuidSchema } from "./ids.js";
 import { RunResultSchema } from "./run_result.js";
 import { ActiveStatusSchema, RunStatusSchema } from "./run_status.js";
 import { MAX_USER_TEXT_LENGTH } from "./turn_input.js";
@@ -134,8 +134,15 @@ export type HistoryQueryInput = z.input<typeof HistoryQuerySchema>;
  * History projection: Turn × selected Run (§11.6). Unselected / failed /
  * cancelled / abandoned Runs never appear; a Turn with no selection shows
  * a null `selectedRun` ("no response").
+ *
+ * C18 (§18.4): the two M5 decision kinds join the union as exact
+ * hash-bound projections:
+ * - `action_approval`: the deterministic approval intent plus the selected
+ *   Action Run when (and only when) it has completed; receipts compose in
+ *   a later slice.
+ * - `action_rejection`: the deterministic rejection intent with no Run.
  */
-export const HistoryItemSchema = z.strictObject({
+export const UserTextHistoryItemSchema = z.strictObject({
   turnId: UuidSchema,
   seq: z.number().int().min(1),
   kind: z.literal("user_text"),
@@ -150,6 +157,50 @@ export const HistoryItemSchema = z.strictObject({
     })
     .nullable(),
 });
+export type UserTextHistoryItem = z.infer<typeof UserTextHistoryItemSchema>;
+
+/** Selected Action Run summary carried by decision history items. */
+export const ActionRunHistorySelectionSchema = z.strictObject({
+  runId: UuidSchema,
+  attempt: z.number().int().min(1),
+  finishedAt: UnixMsSchema,
+  result: RunResultSchema,
+});
+export type ActionRunHistorySelection = z.infer<
+  typeof ActionRunHistorySelectionSchema
+>;
+
+export const ActionApprovalHistoryItemSchema = z.strictObject({
+  turnId: UuidSchema,
+  seq: z.number().int().min(1),
+  kind: z.literal("action_approval"),
+  proposalId: UuidSchema,
+  proposalHash: Sha256HexSchema,
+  createdAt: UnixMsSchema,
+  selectedRun: ActionRunHistorySelectionSchema.nullable(),
+});
+export type ActionApprovalHistoryItem = z.infer<
+  typeof ActionApprovalHistoryItemSchema
+>;
+
+export const ActionRejectionHistoryItemSchema = z.strictObject({
+  turnId: UuidSchema,
+  seq: z.number().int().min(1),
+  kind: z.literal("action_rejection"),
+  proposalId: UuidSchema,
+  proposalHash: Sha256HexSchema,
+  createdAt: UnixMsSchema,
+  selectedRun: ActionRunHistorySelectionSchema.nullable(),
+});
+export type ActionRejectionHistoryItem = z.infer<
+  typeof ActionRejectionHistoryItemSchema
+>;
+
+export const HistoryItemSchema = z.discriminatedUnion("kind", [
+  UserTextHistoryItemSchema,
+  ActionApprovalHistoryItemSchema,
+  ActionRejectionHistoryItemSchema,
+]);
 export type HistoryItem = z.infer<typeof HistoryItemSchema>;
 
 export const HistoryResponseSchema = z.strictObject({

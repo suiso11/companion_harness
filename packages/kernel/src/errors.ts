@@ -198,3 +198,35 @@ export class DatabaseStateInvalidError extends KernelStorageError {
     super("database_state_invalid", message, options);
   }
 }
+
+/* ------------------------------------------------------------------ */
+/* M5 proposal decision errors (§18.4, fixed lowercase codes).          */
+/* Transport mapping is a server concern (both map to 409).             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The proposal cannot be decided in its current state: a repeat decide of
+ * an already-approved proposal, a decide of rejected/expired, or a decide
+ * arriving after the safe pending-expired resolution has committed.
+ * Fixed code `proposal_state_conflict` (409 `proposal_state_conflict`).
+ */
+export class ProposalStateConflictError extends KernelStorageError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("proposal_state_conflict", message, options);
+  }
+}
+
+/**
+ * The request hash does not match the stored immutable proposal content
+ * hash: a decision is always bound to the exact hash the UI button was
+ * rendered with (§18.2). Fixed code `proposal_hash_mismatch` (409).
+ */
+export class ProposalHashMismatchError extends KernelStorageError {
+  constructor(options?: ErrorOptions) {
+    super(
+      "proposal_hash_mismatch",
+      "proposal hash does not match the stored proposal",
+      options,
+    );
+  }
+}

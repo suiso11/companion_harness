@@ -16,9 +16,9 @@ import {
   EventsQuerySchema,
   type FrozenContext,
   FrozenContextSchema,
-  HistoryQuerySchema,
   type HistoryResponse,
   HistoryResponseSchema,
+  HistoryQuerySchema,
   IDEMPOTENCY_SCOPE_SESSIONS_CREATE,
   IdempotencyLookupQuerySchema,
   type IdempotencyLookupResponse,
@@ -30,8 +30,7 @@ import {
   type LatestRunEventType,
   LatestRunEventTypeSchema,
   type M0RunEventType,
-  type M2ModelErrorCode,
-  M2ModelErrorCodeSchema,
+  type M2ModelErrorCode,  M2ModelErrorCodeSchema,
   type M2ModelStepEventType,
   M2ModelStepEventTypeSchema,
   messageScope,
@@ -40,6 +39,14 @@ import {
   PostMessageResponseSchema,
   PostRetryRequestSchema,
   type PostRetryResponse,
+  ProposalApprove202ResponseSchema,
+  ProposalApproveRequestSchema,
+  type ProposalApprove202Response,
+  type ProposalRejectResponse,
+  ProposalRejectResponseSchema,
+  ProposalSummarySchema,
+  proposalApproveScope,
+  ProposalsListResponseSchema,
   parseRunErrorCode,
   parseRunEvent,
   parseRunEventPayload,
@@ -61,8 +68,17 @@ import {
   type RunStatus,
   retryScope,
   SnapshotBodySchema,
+  CalendarRescheduleToolInputSchema,
+  type ProposalSummary,
+  ActionApprovedPayloadSchema,
+  ProposalRejectRequestSchema,
+  type ProposalsListResponse,
 } from "@companion/contracts";
 import type Database from "better-sqlite3";
+import {
+  canonicalJsonString,
+  sha256Hex,
+} from "./canonical.js";
 import {
   type ActionProposalStager,
   type CommittedProposal,
@@ -80,6 +96,8 @@ import {
   IdempotencyConflictError,
   InvalidReferenceError,
   KernelStorageError,
+  ProposalHashMismatchError,
+  ProposalStateConflictError,
   ReferenceNotFoundError,
   ReferenceVersionConflictError,
   RepositoryNotFoundError,
@@ -197,6 +215,34 @@ export interface EvidenceGrantRow {
   exposure: "snippet" | "full";
   createdAt: number;
 }
+
+/* ------------------------------------------------------------------ */
+/* C18 proposal decision types (§18.4).                                */
+/* ------------------------------------------------------------------ */
+
+export interface ApproveProposalOptions {
+  key: string;
+  now?: number;
+  timeZone?: string;
+}
+
+export interface RejectProposalOptions {
+  now?: number;
+  timeZone?: string;
+}
+
+type DecisionConflict = {
+  kind: "state_conflict";
+  reason: "approved" | "rejected" | "expired";
+  proposalId: string;
+};
+type DecisionBusy = { kind: "busy"; proposalId: string };
+type DecisionOk<T> = {
+  kind: "ok";
+  status: number;
+  body: T;
+  replayed: boolean;
+};
 
 /* ------------------------------------------------------------------ */
 /* Options                                                             */
@@ -1416,8 +1462,60 @@ export function createKernelRepository(
     const page = rows.slice(0, limit).reverse();
     const nextBefore =
       hasMore && page.length > 0 ? (page[0] as RawTurn).seq : null;
+    const selectionOf = (turnId: string) =>
+      db
+        .prepare("SELECT run_id FROM turn_selections WHERE turn_id = ?")
+        .get(turnId) as { run_id: string } | undefined;
+    const selectedRunWithResult = (
+      turnId: string,
+    ): {
+      runId: string;
+      attempt: number;
+      finishedAt: number;
+      result: RunResult;
+    } | null => {
+      const selection = selectionOf(turnId);
+      if (selection === undefined) {
+        return null;
+      }
+      const runRow = readRun(db, selection.run_id);
+      if (runRow === null || runRow.finished_at === null) {
+        return null;
+      }
+      const result = parseOrValidation(
+        () =>
+          runRow.result_json === null
+            ? (() => {
+                throw new Error("selected run has no result");
+              })()
+            : parseRunResult(JSON.parse(runRow.result_json)),
+        "history selected result",
+      );
+      return {
+        runId: runRow.id,
+        attempt: runRow.attempt,
+        finishedAt: runRow.finished_at,
+        result,
+      };
+    };
     const items = page.map((row) => {
       const turn = parseTurnRow(row);
+      // C18 (§18.4): the two M5 decision kinds project as exact
+      // hash-bound decision items; a rejection carries no Run ever.
+      if (
+        turn.input.kind === "action_approval" ||
+        turn.input.kind === "action_rejection"
+      ) {
+        return {
+          turnId: row.id,
+          seq: row.seq,
+          kind: turn.input.kind,
+          proposalId: turn.input.proposalId,
+          proposalHash: turn.input.proposalHash,
+          createdAt: row.created_at,
+          selectedRun: selectedRunWithResult(row.id),
+        };
+      }
       if (turn.input.kind !== "user_text") {
         throw new RepositoryValidationError(`unsupported turn kind in history`);
       }
@@ -1850,6 +1948,500 @@ export function createKernelRepository(
       ).n;
       return { backfilled: after - before };
     });
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* C18 proposal decisions (§18.4).                                    */
+  /*                                                                    */
+  /* Session-owned, single BEGIN IMMEDIATE per decision. approve is     */
+  /* keyed (scope `proposal:{id}:approve`) and idempotently replays     */
+  /* the exact stored 202; reject is keyless and state-idempotent       */
+  /* (at most one `action_rejection` Turn ever). No execution runtime   */
+  /* exists yet: the approved Action Run stays QUEUED (never started    */
+  /* by the engine until the C18+ strategy registers — pickup only      */
+  /* selects registered strategies), so no external write can happen.   */
+  /* ---------------------------------------------------------------- */
+
+  interface RawProposal {
+    id: string;
+    session_id: string;
+    source_turn_id: string;
+    source_run_id: string;
+    decision_turn_id: string | null;
+    tool: string;
+    input_json: string;
+    target_ref_id: string;
+    target_resource_id: string;
+    based_on_snapshot_id: string;
+    expected_revision: string;
+    preview_json: string;
+    hash: string;
+    status: string;
+    created_at: number;
+    expires_at: number;
+    resolved_at: number | null;
+  }
+
+  function loadProposal(proposalId: string): RawProposal | null {
+    const id = requireId(proposalId, "proposalId");
+    return (
+      (db
+        .prepare("SELECT * FROM action_proposals WHERE id = ?")
+        .get(id) as RawProposal | undefined) ?? null
+    );
+  }
+
+  function parseProposalSummary(
+    row: RawProposal,
+  ): ProposalSummary {
+    return parseOrValidation(
+      () =>
+        ProposalSummarySchema.parse({
+          proposalId: row.id,
+          tool: row.tool,
+          input: JSON.parse(row.input_json),
+          preview: JSON.parse(row.preview_json),
+          hash: row.hash,
+          status: row.status,
+          createdAt: row.created_at,
+          expiresAt: row.expires_at,
+          resolvedAt: row.resolved_at,
+          decisionTurnId: row.decision_turn_id,
+        }),
+      "proposal summary",
+    );
+  }
+
+  /**
+   * Freeze a decision Turn: the same immutable FrozenContext shape as an
+   * M0 message Turn (current ordering/sets of the session reference
+   * context + temporal now), with an empty UI context (decisions carry no
+   * UI payload). Missing context row is corrupt state (fail closed).
+   */
+  function freezeDecisionContext(
+    sessionId: string,
+    now: number,
+    timeZone: string,
+  ): FrozenContext {
+    const contextRow = db
+      .prepare(
+        "SELECT version, items_json FROM session_reference_context WHERE session_id = ?",
+      )
+      .get(sessionId) as
+      | { version: number; items_json: string }
+      | undefined;
+    if (contextRow === undefined) {
+      throw new DatabaseStateInvalidError(
+        `reference context missing for session ${sessionId}`,
+      );
+    }
+    return parseOrValidation(
+      () =>
+        FrozenContextSchema.parse({
+          version: 1,
+          temporal: { now, timeZone },
+          uiContext: {},
+          referenceContext: {
+            version: contextRow.version,
+            items: JSON.parse(contextRow.items_json) as unknown[],
+          },
+        }),
+      "decision frozen context",
+    );
+  }
+
+  /**
+   * Shared Turn-allocator CAS (`next_turn_position`): mirrors postMessage
+   * exactly so a concurrent decision/message in the same session cannot
+   * interleave sequencing.
+   */
+  function allocateDecisionTurn(
+    session: string,
+    inputJson: string,
+    frozen: FrozenContext,
+    now: number,
+  ): string {
+    const sessionRow = readSession(db, session);
+    if (sessionRow === null) {
+      throw new RepositoryNotFoundError(`session ${session} not found`);
+    }
+    const seq = sessionRow.nextTurnPosition;
+    const turnId = generateId();
+    db.prepare(
+      "INSERT INTO turns (id, session_id, seq, input_json, frozen_context, created_at, next_run_attempt) VALUES (?, ?, ?, ?, ?, ?, 1)",
+    ).run(turnId, session, seq, inputJson, JSON.stringify(frozen), now);
+    const moved = db
+      .prepare(
+        "UPDATE sessions SET next_turn_position = ?, last_active_at = ? WHERE id = ? AND next_turn_position = ?",
+      )
+      .run(seq + 1, now, session, seq);
+    if (moved.changes !== 1) {
+      throw new RepositoryValidationError(
+        "concurrent turn allocation conflict",
+      );
+    }
+    return turnId;
+  }
+
+  /** Ordered, already-completed proposals first (bounded read, no writes). */
+  function listProposals(sessionId: string): ProposalsListResponse {
+    const session = requireId(sessionId, "sessionId");
+    if (readSession(db, session) === null) {
+      throw new RepositoryNotFoundError(`session ${session} not found`);
+    }
+    const rows = db
+      .prepare(
+        "SELECT * FROM action_proposals WHERE session_id = ? ORDER BY created_at DESC, id DESC LIMIT ?",
+      )
+      .all(session, 100) as RawProposal[];
+    return parseOrValidation(
+      () =>
+        ProposalsListResponseSchema.parse({
+          proposals: rows.map((row) => parseProposalSummary(row)),
+        }),
+      "proposals list response",
+    );
+  }
+
+
+
+  function approveProposal(
+    sessionId: string,
+    proposalId: string,
+    request: { proposalHash: string },
+    options: ApproveProposalOptions,
+  ): AcceptedResponse<ProposalApprove202Response> {
+    const session = requireId(sessionId, "sessionId");
+    const proposal = requireId(proposalId, "proposalId");
+    const key = requireKey(options.key);
+    const now = nowMs(options.now);
+    const timeZone = options.timeZone ?? "UTC";
+    const parsed = parseOrValidation(
+      () => ProposalApproveRequestSchema.parse(request),
+      "approve request",
+    );
+    const scope = parseOrValidation(
+      () => IdempotencyScopeSchema.parse(proposalApproveScope(proposal)),
+      "approve scope",
+    );
+    const hash = requestHash(
+      IDEMPOTENCY_OPERATIONS.approveProposal.operation,
+      IDEMPOTENCY_OPERATIONS.approveProposal.schemaVersion,
+      { proposalId: proposal, proposalHash: parsed.proposalHash },
+    );
+    type ApproveOutcome =
+      | DecisionOk<ProposalApprove202Response>
+      | DecisionConflict
+      | DecisionBusy;
+    const outcome: ApproveOutcome = withImmediate(db, () => {
+      if (readSession(db, session) === null) {
+        throw new RepositoryNotFoundError(`session ${session} not found`);
+      }
+      // Ownership first: a foreign proposal id is 404, never a replay/probe.
+      const row = loadProposal(proposal);
+      if (row === null || row.session_id !== session) {
+        throw new RepositoryNotFoundError(
+          `proposal ${proposal} not found in session ${session}`,
+        );
+      }
+      // Keyed idempotency BEFORE any state check; the stored body must also
+      // carry THIS proposal (owner drift is a key misuse, not a replay).
+      const existing = toStoredResponse(db, scope, key);
+      if (existing !== null) {
+        if (existing.requestHash !== hash) {
+          throw new IdempotencyConflictError(scope);
+        }
+        const body = parseOrValidation(
+          () =>
+            ProposalApprove202ResponseSchema.parse(existing.responseBody),
+          "stored approve body",
+        );
+        if (body.proposalId !== proposal) {
+          throw new IdempotencyConflictError(scope);
+        }
+        return {
+          kind: "ok",
+          status: existing.responseStatus,
+          body,
+          replayed: true,
+        };
+      }
+      // Exact binding: the request must carry the stored immutable hash.
+      if (row.hash !== parsed.proposalHash) {
+        throw new ProposalHashMismatchError();
+      }
+      // Terminal states are conflicts (reject cannot approve and vice versa).
+      if (row.status !== "pending") {
+        return {
+          kind: "state_conflict",
+          reason: row.status as "approved" | "rejected" | "expired",
+          proposalId: proposal,
+        };
+      }
+      // Expired pending: resolve expired SAFELY inside this same
+      // transaction (CAS pending -> expired + resolved_at), then report a
+      // conflict AFTER commit so the resolution persists.
+      if (now >= row.expires_at) {
+        const expired = db
+          .prepare(
+            "UPDATE action_proposals SET status = 'expired', resolved_at = ? WHERE id = ? AND session_id = ? AND status = 'pending'",
+          )
+          .run(now, proposal, session);
+        if (expired.changes !== 1) {
+          throw new KernelStorageError(
+            "kernel_concurrent_conflict",
+            "concurrent proposal decision conflict; retry",
+          );
+        }
+        return { kind: "state_conflict", reason: "expired", proposalId: proposal };
+      }
+      // §18.4: no active Run may exist in the session at decision time.
+      const busy = db
+        .prepare(
+          `SELECT id FROM runs WHERE session_id = ? AND status IN ${ACTIVE_STATUSES_SQL} LIMIT 1`,
+        )
+        .get(session) as { id: string } | undefined;
+      if (busy !== undefined) {
+        return { kind: "busy", proposalId: proposal };
+      }
+      const frozen = freezeDecisionContext(session, now, timeZone);
+      // Exact action_approval TurnInput (contracts variant, version 1).
+      const turnInput = parseOrValidation(
+        () =>
+          parseTurnInput({
+            kind: "action_approval",
+            version: 1,
+            proposalId: proposal,
+            proposalHash: parsed.proposalHash,
+          }),
+        "approval turn input",
+      );
+      const decisionTurnId = allocateDecisionTurn(
+        session,
+        JSON.stringify(turnInput),
+        frozen,
+        now,
+      );
+      const runId = generateId();
+      const executionId = generateId();
+      // CAS the exact single transition BEFORE the execution/grant/runs.
+      const moved = db
+        .prepare(
+          "UPDATE action_proposals SET status = 'approved', resolved_at = ?, decision_turn_id = ? WHERE id = ? AND session_id = ? AND status = 'pending'",
+        )
+        .run(now, decisionTurnId, proposal, session);
+      if (moved.changes !== 1) {
+        throw new KernelStorageError(
+          "kernel_concurrent_conflict",
+          "concurrent proposal decision conflict; retry",
+        );
+      }
+      // Queued Action Run on the decision Turn; no execution runtime
+      // exists, so it stays queued (engine pickup only selects REGISTERED
+      // strategies) until the deterministic action strategy is wired.
+      db.prepare(
+        `INSERT INTO runs (id, turn_id, session_id, attempt, status, strategy,
+          result_json, error_code, event_seq, select_on_success,
+          tool_requests_used, created_at, started_at, finished_at, cancel_requested_at)
+         VALUES (?, ?, ?, 1, 'queued', 'm5-action', NULL, NULL, 0, 1, 0, ?, NULL, NULL, NULL)`,
+      ).run(runId, decisionTurnId, session, now);
+      appendEventInTx(db, runId, 0, "run.queued", { attempt: 1 }, now);
+      appendEventInTx(
+        db,
+        runId,
+        1,
+        "action.approved",
+        ActionApprovedPayloadSchema.parse({
+          proposalId: proposal,
+          proposalHash: parsed.proposalHash,
+          executionId,
+        }),
+        now,
+      );
+      db.prepare(
+        `INSERT INTO action_executions (id, session_id, proposal_id, approval_turn_id, action_run_id, status, external_call_started_at, finished_at, error_code, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'queued', NULL, NULL, NULL, ?, ?)`,
+      ).run(executionId, session, proposal, decisionTurnId, runId, now, now);
+      // One-shot exact grant: inputHash over the canonical proposed input.
+      const proposedInput = parseOrValidation(
+        () =>
+          CalendarRescheduleToolInputSchema.parse(JSON.parse(row.input_json)),
+        "proposal input",
+      );
+      db.prepare(
+        `INSERT INTO action_execution_grants (execution_id, session_id, proposal_id, proposal_hash, tool, input_hash, consumed_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, NULL, ?)`,
+      ).run(
+        executionId,
+        session,
+        proposal,
+        row.hash,
+        row.tool,
+        sha256Hex(canonicalJsonString(proposedInput)),
+        now,
+      );
+      const body = parseOrValidation(
+        () =>
+          ProposalApprove202ResponseSchema.parse({
+            proposalId: proposal,
+            executionId,
+            runId,
+            status: "queued",
+          }),
+        "approve response",
+      );
+      storeIdempotentResponse(db, scope, key, hash, 202, body, now);
+      return { kind: "ok", status: 202, body, replayed: false };
+    });
+    // Post-commit mapping so conflict-time state changes (the safe expired
+    // resolution) persist before the error is observed.
+    if (outcome.kind === "state_conflict") {
+      throw new ProposalStateConflictError(
+        `proposal ${outcome.proposalId} is ${outcome.reason}, not pending`,
+      );
+    }
+    if (outcome.kind === "busy") {
+      throw new SessionBusyError(session);
+    }
+    return {
+      status: outcome.status,
+      body: outcome.body,
+      replayed: outcome.replayed,
+    };
+  }
+
+  /**
+   * Reject is KEYLESS and state-idempotent (§18.4): exactly one
+   * `pending -> rejected` CAS per proposal plus at most ONE
+   * `action_rejection` Turn; repeat rejects return the same deterministic
+   * body without creating anything. No Run, no events, no external call.
+   */
+  function rejectProposal(
+    sessionId: string,
+    proposalId: string,
+    request: { proposalHash: string },
+    options: RejectProposalOptions = {},
+  ): { status: number; body: ProposalRejectResponse } {
+    const session = requireId(sessionId, "sessionId");
+    const proposal = requireId(proposalId, "proposalId");
+    const now = nowMs(options.now);
+    const timeZone = options.timeZone ?? "UTC";
+    const parsed = parseOrValidation(
+      () => ProposalRejectRequestSchema.parse(request),
+      "reject request",
+    );
+    type RejectOutcome =
+      | DecisionOk<ProposalRejectResponse>
+      | DecisionConflict;
+    const outcome: RejectOutcome = withImmediate(db, () => {
+      if (readSession(db, session) === null) {
+        throw new RepositoryNotFoundError(`session ${session} not found`);
+      }
+      const row = loadProposal(proposal);
+      if (row === null || row.session_id !== session) {
+        throw new RepositoryNotFoundError(
+          `proposal ${proposal} not found in session ${session}`,
+        );
+      }
+      // Keyless, so exact hash binding is the request's full integrity.
+      if (row.hash !== parsed.proposalHash) {
+        throw new ProposalHashMismatchError();
+      }
+      if (row.status === "rejected") {
+        // State-idempotent: the same deterministic state, nothing new.
+        return {
+          kind: "ok",
+          status: 200,
+          body: parseOrValidation(
+            () =>
+              ProposalRejectResponseSchema.parse({
+                proposalId: proposal,
+                status: "rejected",
+                decisionTurnId: row.decision_turn_id,
+                resolvedAt: row.resolved_at,
+              }),
+            "reject response",
+          ),
+          replayed: true,
+        };
+      }
+      if (row.status !== "pending") {
+        return {
+          kind: "state_conflict",
+          reason: row.status as "approved" | "expired",
+          proposalId: proposal,
+        };
+      }
+      // Expired pending: safe same-tx resolution (expired has NO decision
+      // Turn and NO rejection body), then a post-commit conflict.
+      if (now >= row.expires_at) {
+        const expired = db
+          .prepare(
+            "UPDATE action_proposals SET status = 'expired', resolved_at = ? WHERE id = ? AND session_id = ? AND status = 'pending'",
+          )
+          .run(now, proposal, session);
+        if (expired.changes !== 1) {
+          throw new KernelStorageError(
+            "kernel_concurrent_conflict",
+            "concurrent proposal decision conflict; retry",
+          );
+        }
+        return {
+          kind: "state_conflict",
+          reason: "expired",
+          proposalId: proposal,
+        };
+      }
+      const frozen = freezeDecisionContext(session, now, timeZone);
+      const turnInput = parseOrValidation(
+        () =>
+          parseTurnInput({
+            kind: "action_rejection",
+            version: 1,
+            proposalId: proposal,
+            proposalHash: parsed.proposalHash,
+          }),
+        "rejection turn input",
+      );
+      const decisionTurnId = allocateDecisionTurn(
+        session,
+        JSON.stringify(turnInput),
+        frozen,
+        now,
+      );
+      const moved = db
+        .prepare(
+          "UPDATE action_proposals SET status = 'rejected', resolved_at = ?, decision_turn_id = ? WHERE id = ? AND session_id = ? AND status = 'pending'",
+        )
+        .run(now, decisionTurnId, proposal, session);
+      if (moved.changes !== 1) {
+        throw new KernelStorageError(
+          "kernel_concurrent_conflict",
+          "concurrent proposal decision conflict; retry",
+        );
+      }
+      return {
+        kind: "ok",
+        status: 200,
+        body: parseOrValidation(
+          () =>
+            ProposalRejectResponseSchema.parse({
+              proposalId: proposal,
+              status: "rejected",
+              decisionTurnId,
+              resolvedAt: now,
+            }),
+          "reject response",
+        ),
+        replayed: false,
+      };
+    });
+    if (outcome.kind === "state_conflict") {
+      throw new ProposalStateConflictError(
+        `proposal ${outcome.proposalId} is ${outcome.reason}, not pending`,
+      );
+    }
+    return { status: outcome.status, body: outcome.body };
   }
 
   function lookupIdempotency(
@@ -2328,6 +2920,9 @@ export function createKernelRepository(
     getSelection,
     getHistory,
     getEvents,
+    listProposals,
+    approveProposal,
+    rejectProposal,
     listReferences,
     getReferenceDetail,
     getReferenceSet,
