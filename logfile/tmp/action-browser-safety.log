@@ -1,0 +1,18 @@
+$ playwright test --config playwright.config.ts --grep 'reject:|natural-language|stale preflight|deleted upstream|failed read-back|unknown write|Stop before|Stop after' --reporter=list
+
+Running 8 tests using 1 worker
+
+(node:1162381) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  1 [chromium] › e2e/calendar/action.spec.ts:124:1 › reject: hash-bound reject -> no external write at all (31.3s)
+(node:1162898) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  2 [chromium] › e2e/calendar/action.spec.ts:143:1 › natural-language assent approves nothing and writes nothing (3.6s)
+  ✓  3 [chromium] › e2e/calendar/action.spec.ts:163:1 › stale preflight: an advanced upstream blocks the write (0 writes) (2.1s)
+  ✘  4 [chromium] › e2e/calendar/action.spec.ts:179:1 › deleted upstream: the authoritative preflight blocks the write (0 writes) (1.0m)
+(node:1163925) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  5 [chromium] › e2e/calendar/action.spec.ts:193:1 › failed read-back: succeeded_unverified, no result reference (1.0m)
+(node:1164860) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+[ELIFECYCLE] Command failed.

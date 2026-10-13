@@ -1,0 +1,38 @@
+$ playwright test --config playwright.config.ts --grep 'Stop after' --reporter=list
+
+Running 1 test using 1 worker
+
+(node:1168062) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  1 [chromium] › e2e/calendar/action.spec.ts:245:1 › Stop after the write marker is disabled (409) and the write completes (1.0m)
+
+
+  1) [chromium] › e2e/calendar/action.spec.ts:245:1 › Stop after the write marker is disabled (409) and the write completes 
+
+    Test timeout of 60000ms exceeded.
+
+    Error: apiRequestContext.post: Request context disposed.
+    Call log:
+      - → POST http://127.0.0.1:4186/arm-write
+        - user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.8010.12 Safari/537.36
+        - accept: */*
+        - accept-encoding: gzip,deflate,br
+        - content-type: application/json
+        - content-length: 18
+
+
+      32 |     body === undefined
+      33 |       ? await request.post(`${CALENDAR_CONTROL_ORIGIN}${path}`)
+    > 34 |       : await request.post(`${CALENDAR_CONTROL_ORIGIN}${path}`, { data: body });
+         |                       ^
+      35 |   expect(res.ok(), `${path} -> ${res.status()}`).toBe(true);
+      36 |   return (await res.json()) as Record<string, unknown>;
+      37 | }
+        at control (/home/molmot/companion_harness/.c12-calendar/pr/apps/server/e2e/calendar/action.spec.ts:34:23)
+        at /home/molmot/companion_harness/.c12-calendar/pr/apps/server/e2e/calendar/action.spec.ts:249:9
+
+    Error Context: test-results/calendar-action-Stop-after-1e758-409-and-the-write-completes-chromium/error-context.md
+
+  1 failed
+    [chromium] › e2e/calendar/action.spec.ts:245:1 › Stop after the write marker is disabled (409) and the write completes 
+[ELIFECYCLE] Command failed with exit code 1.

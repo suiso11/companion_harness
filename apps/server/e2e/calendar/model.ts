@@ -22,12 +22,18 @@ import type {
   NormalizedToolCall,
 } from "@companion/model-local";
 import {
+  ANSWER_ASSENT_TEXT,
   ANSWER_REFRESH_TEXT,
   ANSWER_SEARCH_TEXT,
+  ANSWER_STAGE_TEXT,
   ANSWER_TOMBSTONE_TEXT,
+  STAGE_END,
+  STAGE_START,
+  TEXT_ASSENT,
   TEXT_DELETE,
   TEXT_REFRESH,
   TEXT_SEARCH,
+  TEXT_STAGE,
 } from "./ports.js";
 
 /**
@@ -41,7 +47,7 @@ const SEARCH_RANGE = {
   end: "2026-10-31T00:00:00Z",
 } as const;
 
-type PlanName = "search" | "refresh" | "delete";
+type PlanName = "search" | "refresh" | "delete" | "stage" | "assent";
 
 /**
  * Index of the user message that carries the CURRENT turn request: the last
@@ -113,6 +119,10 @@ function learnDeliveredOrdinal(content: string): number | null {
 function selectPlan(requestTextValue: string): PlanName | null {
   if (requestTextValue.includes(TEXT_DELETE)) return "delete";
   if (requestTextValue.includes(TEXT_REFRESH)) return "refresh";
+  // Assent is checked BEFORE stage: a turn whose text merely AGREES must
+  // never be able to look like a staging request.
+  if (requestTextValue.includes(TEXT_ASSENT)) return "assent";
+  if (requestTextValue.includes(TEXT_STAGE)) return "stage";
   if (requestTextValue.includes(TEXT_SEARCH)) return "search";
   return null;
 }
@@ -220,6 +230,27 @@ export function createScriptedCalendarModelGateway(): ModelGateway {
           );
         }
         return citedAnswer(learnedOrdinal, ANSWER_REFRESH_TEXT);
+      }
+      // C22 stage plan: PROPOSAL ONLY. The model proposes the reschedule for
+      // the REAL selected r1 (never a model approval) and then answers citing
+      // the rN really delivered. The write only ever happens after a HUMAN
+      // approval click in the real UI.
+      if (plan === "stage") {
+        if (step === 0) {
+          return answerResult(
+            toolCall("calendar.reschedule", {
+              referenceId: "r1",
+              start: STAGE_START,
+              end: STAGE_END,
+            }),
+          );
+        }
+        return citedAnswer(learnedOrdinal, ANSWER_STAGE_TEXT);
+      }
+      // C22 assent plan: natural-language agreement is ANSWERED, never
+      // turned into an approval: no tool call, no proposal, no write.
+      if (plan === "assent") {
+        return citedAnswer(learnedOrdinal, ANSWER_ASSENT_TEXT);
       }
       // Delete plan: stored OPEN first (the model addresses the retained
       // stored reference), then refresh (fails via the fake deleted

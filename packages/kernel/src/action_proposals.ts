@@ -56,6 +56,7 @@ import type { z } from "zod";
 type ActionProposedPayload = z.infer<typeof ActionProposedPayloadSchema>;
 
 import { canonicalJsonString, generateId, sha256Hex } from "./canonical.js";
+import { SnapshotBodySchema, type SnapshotBody } from "@companion/contracts";
 import {
   RepositoryNotFoundError,
   RepositoryValidationError,
@@ -239,12 +240,27 @@ function freshSnapshotRevision(target: TargetRow): {
   expected: string;
   eventStatus: string;
 } | null {
-  let body: unknown;
+  // The STORED row is the SnapshotBody wrapper ReferenceManager wrote
+  // (`{ version: 1, text }`); the normalized Calendar event is the strict
+  // JSON document INSIDE `text` (calendarEventBodyText). Parse the wrapper
+  // with its own contract first, then parse the text as strict JSON: no
+  // substring search, no guessing alternate stored shapes.
+  let wrapper: SnapshotBody;
   try {
-    body = JSON.parse(target.bodyJson) as unknown;
+    wrapper = SnapshotBodySchema.parse(
+      JSON.parse(target.bodyJson) as unknown,
+    );
   } catch {
     throw new RepositoryValidationError(
-      "target snapshot body is not valid normalized JSON",
+      "target snapshot body is not a stored SnapshotBody",
+    );
+  }
+  let body: unknown;
+  try {
+    body = JSON.parse(wrapper.text) as unknown;
+  } catch {
+    throw new RepositoryValidationError(
+      "target snapshot body text is not valid normalized JSON",
     );
   }
   if (
@@ -252,7 +268,11 @@ function freshSnapshotRevision(target: TargetRow): {
     typeof body !== "object" ||
     Array.isArray(body) ||
     !("status" in body) ||
-    typeof (body as { status: unknown }).status !== "string"
+    typeof (body as { status: unknown }).status !== "string" ||
+    !("start" in body) ||
+    typeof (body as { start: unknown }).start !== "string" ||
+    !("end" in body) ||
+    typeof (body as { end: unknown }).end !== "string"
   ) {
     throw new RepositoryValidationError(
       "target snapshot body is not a normalized Calendar event",

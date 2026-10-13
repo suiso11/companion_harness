@@ -875,6 +875,45 @@ or complete activate config):
   `tsc --noEmit -p apps/server/tsconfig.e2e.json` exit 0 and
   `biome check` on the two touched e2e files, 0 findings.
 
+#### C15 POSITIVE authoritative tombstone — final browser proof (observed)
+
+- The positive tombstone scenario
+  (`apps/server/e2e/calendar/tombstone.spec.ts`) is now GREEN in a real
+  chromium browser. Observed verification (FRESH harness, no reused state):
+  from `apps/server`, `COMPANION_E2E_CALENDAR=1 pnpm exec playwright test
+  --config playwright.config.ts --grep 'positive authoritative'` →
+  **1 passed (4.6s)**, full log retained at
+  `/tmp/calendar-authoritative-tombstone-final.log`. The harness's own
+  `_diagnose.ts` / `_drive-stage.mjs` root-cause probes were removed after
+  the proof.
+- Fixture binding root fix
+  (`apps/server/e2e/calendar/authoritativeBinding.ts`): the fixture's raw
+  `McpConnectorConfig` now carries the explicit root fields
+  `clientName: "companion-harness"` / `clientVersion: "0.0.0"` (no schema
+  inference). App C (port 4185) boots the REAL production Calendar adapter
+  over a REAL `McpConnector` on the official inert SDK
+  `InMemoryTransport`, whose scripted fake MCP server additionally
+  advertises the trusted read binding `get-event-authoritative`.
+- The tombstone is produced ONLY by the explicit host-trusted fixture gate:
+  the loopback control seam arms `authoritativeDeleted`; only then does
+  `get` perform a SEPARATE real wire `tools/call` of
+  `get-event-authoritative`, decoded by the UNCHANGED production
+  `normalizeGetResult` (exact synthetic revision + `etag` basis +
+  `cancelled`), and the fixture wrapper (never the production normalizer)
+  flips it to `status: "deleted"`. Anything else degrades to the ordinary
+  adapter read. This stays a test-only synthesis; it does NOT loosen the
+  C11-01 policy and is NOT a live/OAuth/production tombstone claim.
+- Observed scenario assertions (all through the REAL UI/API): turn 1
+  delivers r1 and the REAL citation click freezes r1 via the real §14.8
+  conditional `PUT`; the armed turn 2 `reference.refresh` over the real
+  adapter/broker materializes a NEW r2 citation whose drawer body carries
+  `"status":"deleted"`; the prior r1 drawer body still shows
+  `"status":"confirmed"` with the original title/start (history retained,
+  open prior rN); control status shows `tombstoneGetCalls=1` (exactly one
+  authoritative get, reached only after the gate was armed). No DB seeding,
+  no manual reference presentation, no UI bypass, no snapshot fabrication
+  outside the explicit gate.
+
 ### C21 M5 Action composition (triple gate)
 
 - This subsection records the CURRENT C21 scope on top of C17-C20. The tests

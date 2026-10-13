@@ -122,6 +122,8 @@ interface ActionCard {
   readonly reject: HTMLButtonElement;
   readonly stop: HTMLButtonElement;
   runId: string | null;
+  /** Terminal execution observed: the card is final and stops polling. */
+  terminal: boolean;
 }
 
 /**
@@ -637,6 +639,14 @@ class ConversationApp {
       }
     }
     this.renderOlderButton();
+    // Action cards are live DOM nodes owned by THIS client, and the history
+    // rebuild above replaces the whole list. Re-attach every still-live card
+    // (appendChild MOVES the node, so its rendered state — including a
+    // terminal receipt — survives). Without this a card rendered after the
+    // rebuild would be invisible while still present in actionCards.
+    for (const card of this.actionCards.values()) {
+      this.list.appendChild(card.node);
+    }
   }
 
   /**
@@ -817,6 +827,13 @@ class ConversationApp {
     if (typeof view.proposalId !== "string") {
       return;
     }
+    // The execution read is the AUTHORITATIVE proposal state: a watch started
+    // from the pre-approval (still `pending`) summary must never keep
+    // rendering a decided/executed proposal as an actionable pending card.
+    const actual: ProposalSummaryView =
+      typeof view.proposalStatus === "string"
+        ? { ...summary, status: view.proposalStatus }
+        : summary;
     const terminal =
       view.receipt !== null && view.receipt !== undefined
         ? true
@@ -824,24 +841,39 @@ class ConversationApp {
           view.status !== "queued" &&
           view.status !== "preflight" &&
           view.status !== "executing";
+    const card = this.actionCards.get(view.proposalId);
     if (terminal && view.status !== null) {
-      // Terminal: the deterministic intent + real receipt are rendered by the
-      // history projection, so retire the live card and refresh history.
-      this.removeActionCard(view.proposalId);
+      // Terminal: the REAL receipt (or the real fixed failure text) is
+      // rendered ON the card the user was already looking at — the approval
+      // card is never retired before the outcome is shown, so a succeeded
+      // execution always ends on a visible verified receipt and every other
+      // terminal on its real failure text. The deterministic decision intent
+      // and the fresh result citation additionally come from the history
+      // projection. No card (e.g. after a reload): nothing to render.
       this.clearApproveKey(view.proposalId);
+      if (card !== undefined) {
+        card.runId = view.runId ?? card.runId;
+        card.terminal = true;
+        this.renderActionCard(
+          card,
+          actual,
+          view,
+          this.cardModel(actual, view),
+          actionErrorCodeText(view.errorCode ?? null),
+        );
+      }
       await this.hydrateHistory();
       return;
     }
-    const card = this.actionCards.get(view.proposalId);
     if (card === undefined) {
       return;
     }
     card.runId = view.runId ?? card.runId;
     this.renderActionCard(
       card,
-      summary,
+      actual,
       view,
-      this.cardModel(summary, view),
+      this.cardModel(actual, view),
       actionErrorCodeText(view.errorCode ?? null),
     );
     if (
@@ -943,6 +975,7 @@ class ConversationApp {
       reject,
       stop,
       runId: null,
+      terminal: false,
     };
     approve.addEventListener("click", () => {
       void this.approve(card);
@@ -1153,7 +1186,7 @@ class ConversationApp {
     try {
       for (let tick = 0; tick < ConversationApp.ACTION_POLL_MAX_TICKS; tick += 1) {
         const card = this.actionCards.get(proposalId);
-        if (card === undefined) {
+        if (card === undefined || card.terminal) {
           return;
         }
         await this.syncExecution(summary);

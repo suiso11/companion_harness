@@ -193,8 +193,27 @@ export interface StartServerOptions {
  * happens only when `owned === true` and a `shutdown` function is supplied.
  */
 export interface ActionWriteBinding {
-  /** The exact trusted port (enabled capability, start/end fields only). */
-  readonly port: CalendarActionWritePort;
+  /**
+   * The exact trusted port (enabled capability, start/end fields only).
+   * Mutually exclusive with {@link ActionWriteBinding.derivePort}; exactly one
+   * of the two must be supplied.
+   */
+  readonly port?: CalendarActionWritePort;
+  /**
+   * C22 seam: derive the trusted port from the EXACT Calendar instance the
+   * server itself just registered, so a host that cannot know the stored
+   * `connector_instances.id` before `startServer` (the owned-composition
+   * case) can still bind hostside without weakening the match rule: the
+   * derived port's capability MUST name the id the server registered, and the
+   * existing exact-identity check below still fails closed on any mismatch.
+   * Invoked ONLY when `config.calendar` is configured (i.e. only after the
+   * owned instance exists) and exactly once.
+   */
+  readonly derivePort?: (active: {
+    readonly connectorInstanceId: string;
+    readonly calendarId: string;
+    readonly account?: string;
+  }) => CalendarActionWritePort;
   /** Optional close hook; used only together with `owned === true`. */
   readonly shutdown?: () => Promise<void>;
   /**
@@ -745,10 +764,39 @@ export async function startServer(
     const actionWrite = options.actionWriteBinding ?? null;
     const actionConfigEnabled =
       config.actions.optIn === true && config.actions.writeEnabled === true;
-    let actionsEnabled = false;
+    // C22 seam: a host that cannot know the owned instance id beforehand
+    // derives the trusted port from the identity the server just registered.
+    // Exactly one of `port` / `derivePort` is accepted; a binding supplying
+    // both or neither stays unusable and fails closed when the config opted
+    // in (never a silently half-enabled surface).
+    let actionWritePort: CalendarActionWritePort | null = null;
     if (actionWrite !== null) {
+      const suppliedPort = actionWrite.port !== undefined;
+      const deriveFn = actionWrite.derivePort;
+      // Exactly ONE of the two: supplying BOTH or NEITHER is an incomplete
+      // binding and stays unusable (fail closed below when config opted in).
+      if (suppliedPort === (deriveFn !== undefined)) {
+        actionWritePort = null;
+      } else if (suppliedPort) {
+        actionWritePort = actionWrite.port ?? null;
+      } else if (
+        deriveFn !== undefined &&
+        kernelCalendarBinding !== undefined &&
+        calendarConfig !== null
+      ) {
+        actionWritePort = deriveFn({
+          connectorInstanceId: kernelCalendarBinding.connectorInstanceId,
+          calendarId: calendarConfig.selection.calendarId,
+          ...(calendarConfig.selection.account === undefined
+            ? {}
+            : { account: calendarConfig.selection.account }),
+        });
+      }
+    }
+    let actionsEnabled = false;
+    if (actionWritePort !== null) {
       const capability = CalendarActionWriteCapabilitySchema.safeParse(
-        actionWrite.port.capability,
+        actionWritePort.capability,
       );
       const matchesActiveCalendar =
         kernelCalendarBinding !== undefined &&
@@ -873,11 +921,11 @@ export async function startServer(
     // never queue a Run with no strategy behind it.
     const activeActionBindings =
       actionsEnabled &&
-      actionWrite !== null &&
+      actionWritePort !== null &&
       kernelCalendarBinding !== undefined &&
       calendarTargetStore !== undefined
         ? {
-            port: actionWrite.port,
+            port: actionWritePort,
             binding: kernelCalendarBinding,
             targetStore: calendarTargetStore,
           }

@@ -1,0 +1,349 @@
+// C22 REAL browser fake-Action SAFETY acceptance.
+//
+// Drives the REAL UI, the REAL approval/reject/stop controls and the REAL
+// server APIs on the dedicated Calendar fake harness (e2e/calendar/server.ts):
+// the owned Calendar connector talks to the scripted fake MCP server over the
+// official SDK inert transport, the real agent stages the proposal-only
+// `calendar.reschedule` under the scripted fake model, and the ONLY external
+// write is the injected trusted fake write port — counted, scripted and
+// deterministic. No live provider, no OAuth, no model approval, no bypass of
+// any UI control.
+
+import { type APIRequestContext, expect, type Page, test } from "@playwright/test";
+import {
+  ANSWER_ASSENT_TEXT,
+  ANSWER_SEARCH_TEXT,
+  ANSWER_STAGE_TEXT,
+  CALENDAR_APP_ORIGIN,
+  CALENDAR_CONTROL_ORIGIN,
+  STAGE_END,
+  STAGE_START,
+  TEXT_ASSENT,
+  TEXT_SEARCH,
+  TEXT_STAGE,
+} from "./ports.js";
+
+async function control(
+  request: APIRequestContext,
+  path: string,
+  body?: unknown,
+): Promise<Record<string, unknown>> {
+  const res =
+    body === undefined
+      ? await request.post(`${CALENDAR_CONTROL_ORIGIN}${path}`)
+      : await request.post(`${CALENDAR_CONTROL_ORIGIN}${path}`, { data: body });
+  expect(res.ok(), `${path} -> ${res.status()}`).toBe(true);
+  return (await res.json()) as Record<string, unknown>;
+}
+
+async function status(
+  request: APIRequestContext,
+): Promise<Record<string, unknown>> {
+  const res = await request.get(`${CALENDAR_CONTROL_ORIGIN}/status`);
+  expect(res.ok()).toBe(true);
+  return (await res.json()) as Record<string, unknown>;
+}
+
+async function writeCalls(request: APIRequestContext): Promise<number> {
+  const value = (await status(request)).writeCalls;
+  expect(typeof value).toBe("number");
+  return value as number;
+}
+
+/** The REAL session this page owns (created by the real UI, not the test). */
+async function sessionIdOf(page: Page): Promise<string> {
+  const sessionId = await page.evaluate(
+    () => window.localStorage.getItem("ch.sessionId") ?? "",
+  );
+  expect(sessionId).not.toBe("");
+  return sessionId;
+}
+
+/** The ACTUAL execution + receipt read for this session's one proposal. */
+async function executionView(
+  page: Page,
+  request: APIRequestContext,
+): Promise<Record<string, unknown>> {
+  const sessionId = await sessionIdOf(page);
+  const list = await request.get(
+    `${CALENDAR_APP_ORIGIN}/api/sessions/${sessionId}/proposals`,
+  );
+  expect(list.ok()).toBe(true);
+  const proposals = (await list.json()) as {
+    proposals?: { proposalId?: string }[];
+  };
+  const proposalId = (proposals.proposals ?? [])[0]?.proposalId ?? "";
+  expect(proposalId).not.toBe("");
+  const execution = await request.get(
+    `${CALENDAR_APP_ORIGIN}/api/sessions/${sessionId}/proposals/${proposalId}/execution`,
+  );
+  expect(execution.ok()).toBe(true);
+  return (await execution.json()) as Record<string, unknown>;
+}
+
+async function send(page: Page, text: string): Promise<void> {
+  await page.locator("#composer-input").fill(text);
+  await page.locator("#composer-send").click();
+}
+
+/** REAL user selection: opening the delivered citation adds r1 to the session. */
+async function selectCitation(page: Page, label: string): Promise<void> {
+  await page.locator("#conversation button", { hasText: label }).first().click();
+  await expect(page.locator("#drawer")).toBeVisible();
+  await page.locator("#drawer").click({ position: { x: 4, y: 4 } });
+  await expect(page.locator("#drawer")).toBeHidden();
+}
+
+/**
+ * Real two-turn flow: search delivers r1, the user selects it through the real
+ * drawer, then the NEXT turn stages the reschedule proposal for that r1.
+ */
+async function stageProposal(page: Page): Promise<void> {
+  await send(page, TEXT_SEARCH);
+  await expect(page.locator("#conversation")).toContainText(ANSWER_SEARCH_TEXT, {
+    timeout: 30_000,
+  });
+  await selectCitation(page, "r1");
+  await send(page, TEXT_STAGE);
+  await expect(page.locator("#conversation")).toContainText(ANSWER_STAGE_TEXT, {
+    timeout: 30_000,
+  });
+  const card = page.locator('[data-action-card="true"]');
+  await expect(card).toBeVisible({ timeout: 30_000 });
+  await expect(card).toHaveAttribute("data-action-state", /pending/);
+  await expect(page.locator("#action-approve")).toBeVisible();
+  await expect(page.locator("#action-reject")).toBeVisible();
+}
+
+test.beforeEach(async ({ page, request }) => {
+  await control(request, "/reset");
+  await page.goto("/");
+  await expect(page.locator("#composer")).toBeVisible();
+  await expect(page.locator("#composer-send")).toBeEnabled();
+});
+
+test("approve: pending card -> hash-bound approve 202 -> one write + fresh verified receipt", async ({
+  page,
+  request,
+}) => {
+  await stageProposal(page);
+  const approved = page.waitForResponse(
+    (res) => res.url().includes("/approve") && res.request().method() === "POST",
+  );
+  await page.locator("#action-approve").click();
+  expect((await approved).status()).toBe(202);
+  // The real scheduler picks the run up automatically: exactly ONE external
+  // write and the real verified receipt.
+  await expect(page.locator('[data-action-card="true"]')).toContainText(
+    "日程を更新しました",
+    { timeout: 60_000 },
+  );
+  expect(await writeCalls(request)).toBe(1);
+  // The receipt cites a FRESH reference materialized by the authoritative
+  // read-back (a new rN, never the staged r1).
+  const citations = page.locator("#conversation [data-action-citation='true']");
+  await expect(citations.first()).toBeVisible({ timeout: 30_000 });
+  expect(await citations.first().textContent()).not.toBe("r1");
+  const receiptCitation = await citations.first().textContent();
+  expect(receiptCitation).toMatch(/^r\d+$/);
+  // The real upstream now serves the intended boundaries.
+  const after = await status(request);
+  expect(after.startOverride).toBe(STAGE_START);
+  expect(after.endOverride).toBe(STAGE_END);
+});
+
+test("reject: hash-bound reject -> durable rejection history, no run, no write", async ({
+  page,
+  request,
+}) => {
+  await stageProposal(page);
+  const rejected = page.waitForResponse(
+    (res) => res.url().includes("/reject") && res.request().method() === "POST",
+  );
+  await page.locator("#action-reject").click();
+  expect((await rejected).status()).toBe(200);
+  // The decision is durable and visible as a REJECTION history item: the
+  // consumer behaviour the user is left with after rejecting.
+  await expect(
+    page.locator("#conversation [data-action-history='action_rejection']"),
+  ).toHaveCount(1, { timeout: 30_000 });
+  // Approval cards exist only for a pending, unexpired proposal, so the
+  // rejected card legitimately disappears: no control can be re-used.
+  await expect(page.locator('[data-action-card="true"]')).toHaveCount(0, {
+    timeout: 30_000,
+  });
+  // The real execution read proves a rejection never created a Run.
+  const view = await executionView(page, request);
+  expect(view.proposalStatus).toBe("rejected");
+  expect(view.runId ?? null).toBeNull();
+  expect(view.status ?? null).toBeNull();
+  expect(view.markerCommitted).toBe(false);
+  expect(view.receipt ?? null).toBeNull();
+  await page.waitForTimeout(2_000);
+  expect(await writeCalls(request)).toBe(0);
+});
+
+test("natural-language assent approves nothing and writes nothing", async ({
+  page,
+  request,
+}) => {
+  await stageProposal(page);
+  await send(page, TEXT_ASSENT);
+  await expect(page.locator("#conversation")).toContainText(
+    ANSWER_ASSENT_TEXT,
+    { timeout: 30_000 },
+  );
+  // The pending card is untouched: assent is not approval.
+  await expect(page.locator('[data-action-card="true"]')).toHaveAttribute(
+    "data-action-state",
+    /pending/,
+  );
+  await expect(page.locator("#action-approve")).toBeVisible();
+  await page.waitForTimeout(2_000);
+  expect(await writeCalls(request)).toBe(0);
+});
+
+test("stale preflight: an advanced upstream blocks the write (0 writes)", async ({
+  page,
+  request,
+}) => {
+  await stageProposal(page);
+  // The upstream changes AFTER the staged snapshot: the authoritative
+  // preflight can no longer match the proposal's expected revision.
+  await control(request, "/advance-title");
+  await page.locator("#action-approve").click();
+  await expect(page.locator('[data-action-card="true"]')).toContainText(
+    "元の予定に変更があったため、更新しませんでした",
+    { timeout: 60_000 },
+  );
+  expect(await writeCalls(request)).toBe(0);
+});
+
+test("deleted upstream: the authoritative read fails closed (failed preflight, 0 writes)", async ({
+  page,
+  request,
+}) => {
+  await stageProposal(page);
+  await control(request, "/delete-event");
+  await page.locator("#action-approve").click();
+  // The upstream now answers a bare isError miss: per the C11 rule a bare
+  // miss can NOT be inferred as a deletion, so the authoritative preflight
+  // fails closed (no stale-vs-deleted guess) BEFORE any external write.
+  const card = page.locator('[data-action-card="true"]');
+  await expect(card).toHaveAttribute("data-action-state", "failed", {
+    timeout: 60_000,
+  });
+  const view = await executionView(page, request);
+  expect(view.status).toBe("failed");
+  expect(view.errorCode).toBe("action_preflight_failed");
+  expect(view.markerCommitted).toBe(false);
+  expect(view.cancellable).toBe(false);
+  expect((view.receipt as { outcome?: string } | null)?.outcome).toBe("failed");
+  expect(await writeCalls(request)).toBe(0);
+});
+
+test("failed read-back: succeeded_unverified, no result reference", async ({
+  page,
+  request,
+}) => {
+  await stageProposal(page);
+  // Armed AFTER staging so the arm is in force for exactly the write the
+  // approval triggers (the staging turn itself never writes).
+  await control(request, "/arm-write", { mode: "unverified" });
+  await page.locator("#action-approve").click();
+  const card = page.locator('[data-action-card="true"]');
+  await expect(card).toHaveAttribute("data-action-state", "succeeded_unverified", {
+    timeout: 60_000,
+  });
+  const view = await executionView(page, request);
+  expect(view.status).toBe("succeeded_unverified");
+  expect((view.receipt as { outcome?: string } | null)?.outcome).toBe(
+    "succeeded_unverified",
+  );
+  expect(await writeCalls(request)).toBe(1);
+  // No verified fresh citation is ever claimed.
+  await expect(page.locator("[data-action-citation='true']")).toHaveCount(0);
+});
+
+test("unknown write: manual check, exactly one attempt, no retry", async ({
+  page,
+  request,
+}) => {
+  await stageProposal(page);
+  await control(request, "/arm-write", { mode: "unknown" });
+  await page.locator("#action-approve").click();
+  await expect(page.locator('[data-action-card="true"]')).toHaveAttribute(
+    "data-action-state",
+    "unknown",
+    { timeout: 60_000 },
+  );
+  const view = await executionView(page, request);
+  expect(view.status).toBe("unknown");
+  expect((view.receipt as { outcome?: string } | null)?.outcome).toBe("unknown");
+  await page.waitForTimeout(3_000);
+  // Exactly one attempt, and the ambiguous outcome is never retried.
+  expect(await writeCalls(request)).toBe(1);
+  await expect(page.locator("[data-action-citation='true']")).toHaveCount(0);
+});
+
+test("Stop before the write marker cancels with 0 writes", async ({
+  page,
+  request,
+}) => {
+  await stageProposal(page);
+  // Armed AFTER staging: the barrier must hold the APPROVAL's authoritative
+  // preflight read, not the staging turn's own search.
+  await control(request, "/arm-read-barrier");
+  await page.locator("#action-approve").click();
+  // Real pre-marker window: the authoritative preflight read is held inside
+  // the real connector, so the real stop control is offered.
+  const stop = page.locator("[data-action-stop='true']");
+  await expect(stop).toBeVisible({ timeout: 60_000 });
+  await stop.click();
+  await control(request, "/release");
+  await expect(page.locator('[data-action-card="true"]')).toHaveAttribute(
+    "data-action-state",
+    "failed",
+    { timeout: 60_000 },
+  );
+  const view = await executionView(page, request);
+  expect(view.errorCode).toBe("action_cancelled_before_write");
+  expect(view.markerCommitted).toBe(false);
+  expect(view.cancellable).toBe(false);
+  expect((view.receipt as { outcome?: string } | null)?.outcome).toBe("failed");
+  await page.waitForTimeout(2_000);
+  expect(await writeCalls(request)).toBe(0);
+});
+
+test("Stop after the write marker is disabled (409) and the write completes", async ({
+  page,
+  request,
+}) => {
+  await stageProposal(page);
+  await control(request, "/arm-write", { mode: "barrier" });
+  await page.locator("#action-approve").click();
+  // The committed external-call marker makes the action non-cancellable:
+  // the real UI removes the stop control and the real API refuses (409).
+  const card = page.locator('[data-action-card="true"]');
+  await expect(card).toHaveAttribute("data-action-state", "executing", {
+    timeout: 60_000,
+  });
+  await expect(card).toHaveAttribute("data-action-marker", "committed");
+  await expect(page.locator("[data-action-stop='true']")).toBeHidden();
+  const view = await executionView(page, request);
+  expect(view.runId ?? "").not.toBe("");
+  expect(view.markerCommitted).toBe(true);
+  expect(view.cancellable).toBe(false);
+  const cancel = await request.post(
+    `${CALENDAR_APP_ORIGIN}/api/sessions/${await sessionIdOf(page)}/runs/${view.runId}/cancel`,
+    { data: {} },
+  );
+  expect(cancel.status()).toBe(409);
+  await control(request, "/release");
+  await expect(card).toHaveAttribute("data-action-state", "succeeded", {
+    timeout: 60_000,
+  });
+  const done = await executionView(page, request);
+  expect((done.receipt as { outcome?: string } | null)?.outcome).toBe("succeeded");
+  expect(await writeCalls(request)).toBe(1);
+});

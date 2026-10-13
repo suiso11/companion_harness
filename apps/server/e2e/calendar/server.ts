@@ -17,6 +17,17 @@
 // reference manager, durable target store) is the untouched production
 // composition, and the Playwright spec drives the REAL UI over HTTP.
 //
+// App C (CALENDAR_TOMBSTONE_APP_PORT 4185) boots a SECOND real server
+// through the EXISTING C12 `calendarBinding` seam in a throwaway DB with
+// its own `calendar` instance (registered through the existing
+// ReferenceManager/migration seams, never by seeding snapshots) and its own
+// trusted fixture binding: the REAL production adapter over a REAL
+// `McpConnector` on its own inert transport, wrapped by the EXPLICIT
+// authoritative synthetic get gate (see e2e/calendar/authoritativeBinding.ts).
+// Only that armed gate + a SEPARATE real wire `get-event-authoritative`
+// positive decode yields a `deleted` observation; the bare404 mode stays
+// `uncertain failed`. No production rule/schema/normalizer change.
+//
 // A loopback-only control server (CALENDAR_CONTROL_PORT 4186, Node-side
 // requests only, never page-fetch) mutates the fake upstream fixture state:
 //   POST /advance-title  -> fake upstream revision 2 (etag/title change)
@@ -34,6 +45,11 @@
 // constants live in e2e/calendar/ports.ts (isolated from the M3 harness).
 
 import { mkdtempSync, rmSync } from "node:fs";
+import {
+  createReferenceManager,
+  migrateKernelDatabase,
+  openKernelDatabase,
+} from "@companion/kernel";
 import { createServer, type Server as HttpServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -50,12 +66,17 @@ import {
   fakeToolSchemaHashes,
   resetFakeCalendarState,
 } from "./mcpFake.js";
+import { createAuthoritativeCalendarBinding } from "./authoritativeBinding.js";
+import { createFakeCalendarActionWritePort } from "./actionPort.js";
+import type { FakeWriteMode } from "./mcpFake.js";
 import { createScriptedCalendarModelGateway } from "./model.js";
 import {
   CALENDAR_APP_PORT,
   CALENDAR_CONTROL_ORIGIN,
   CALENDAR_CONTROL_PORT,
   CALENDAR_ID,
+  CALENDAR_TOMBSTONE_APP_PORT,
+  FAKE_BINDING_DISPLAY_NAME,
   FAKE_MCP_SERVER_NAME,
   FAKE_MCP_SERVER_VERSION,
 } from "./ports.js";
@@ -99,17 +120,24 @@ const mcpTransportFactory: TransportFactory = () => {
 
 const modelGateway: ModelGateway = createScriptedCalendarModelGateway();
 
+/** Fixture-owned authoritative binding for App C (created below). */
+let tombstoneBinding: ReturnType<typeof createAuthoritativeCalendarBinding>;
+
 const env: NodeJS.ProcessEnv = {
   COMPANION_DB_PATH: dbPath,
   COMPANION_HOST: "127.0.0.1",
   COMPANION_PORT: String(CALENDAR_APP_PORT),
   COMPANION_TIME_ZONE: "UTC",
-  COMPANION_LOG_LEVEL: "error",
+  COMPANION_LOG_LEVEL: (process.env.E2E_DEBUG_LOG === "1" ? "info" : "error") as "info" | "error",
   COMPANION_MODEL_JSON: JSON.stringify({
     adapter: "ollama",
     baseUrl: "http://127.0.0.1:1",
     model: "e2e-fake-calendar-model",
   }),
+  // C22: the ONLY action gate is the explicit host opt-in triple: config
+  // opt-in + writeEnabled + the injected trusted write port derived from the
+  // active Calendar instance below. Never derived from model output.
+  COMPANION_ACTIONS_JSON: JSON.stringify({ optIn: true, writeEnabled: true }),
   COMPANION_CALENDAR_JSON: JSON.stringify({
     selection: { calendarId: CALENDAR_ID },
     connector: {
@@ -131,11 +159,73 @@ const env: NodeJS.ProcessEnv = {
   }),
 };
 
+/* ------------------------------------------------------------------ */
+/* App C (tombstone app, port 4185): POSITIVE synthetic authoritative   */
+/* deletion over the C12 injected-binding seam.                        */
+/* ------------------------------------------------------------------ */
+
+// Its own throwaway DB + its OWN registered `calendar` instance (created
+// through the existing ReferenceManager/kernel migration seams, NOT by
+// writing snapshots or references by hand).
+const tombstoneDir = mkdtempSync(join(tmpdir(), "companion-calendar-tombstone-"));
+const tombstoneDbPath = join(tombstoneDir, "companion-calendar-tombstone.sqlite");
+const tombstoneState = createFakeCalendarState();
+{
+  const handle = openKernelDatabase(tombstoneDbPath);
+  await migrateKernelDatabase({ db: handle.raw, backupDir: tombstoneDir });
+  const instance = createReferenceManager(handle.raw).ensureCalendarConnectorInstance(
+    FAKE_BINDING_DISPLAY_NAME,
+    CALENDAR_ID,
+  );
+  handle.raw.close();
+  // Trusted fixture binding: the REAL production adapter over the fixture's
+  // OWN real MCP connector, wrapped by the explicit authoritative gate.
+  const binding = createAuthoritativeCalendarBinding({
+    connectorInstanceId: instance.id,
+    calendarId: CALENDAR_ID,
+    state: tombstoneState,
+    searchHash: hashes.search,
+    listHash: hashes.list,
+    getHash: hashes.get,
+  });
+  tombstoneBinding = binding;
+}
+
+const tombstoneStarted = await startServer({
+  env: {
+    COMPANION_DB_PATH: tombstoneDbPath,
+    COMPANION_HOST: "127.0.0.1",
+    COMPANION_PORT: String(CALENDAR_TOMBSTONE_APP_PORT),
+    COMPANION_TIME_ZONE: "UTC",
+    COMPANION_LOG_LEVEL: (process.env.E2E_DEBUG_LOG === "1" ? "info" : "error") as "info" | "error",
+    COMPANION_MODEL_JSON: JSON.stringify({
+      adapter: "ollama",
+      baseUrl: "http://127.0.0.1:1",
+      model: "e2e-fake-calendar-model",
+    }),
+    // NO calendar config: the C12 injected binding seam owns this app, so the
+    // C14 owned composition (App A) is never modified by this fixture.
+  },
+  modelGateway: createScriptedCalendarModelGateway(),
+  calendarBinding: {
+    connectorInstanceId: tombstoneBinding.connectorInstanceId,
+    selection: { calendarId: CALENDAR_ID },
+    connector: tombstoneBinding.connector,
+  },
+});
+
 const started = await startServer({
   env,
   modelGateway,
   mcpDefinitions,
   mcpTransportFactory,
+  // C22: the dedicated trusted fake write port, DERIVED from the Calendar
+  // instance the server itself just registered (the harness never knows the
+  // stored id). The production exact-identity match rule is unchanged.
+  actionWriteBinding: {
+    derivePort: ({ connectorInstanceId }: { connectorInstanceId: string }) =>
+      createFakeCalendarActionWritePort(state, connectorInstanceId),
+  },
   // Bounded outer MCP shutdown backstop for the harness process.
   mcpShutdownMs: 2000,
 });
@@ -153,6 +243,18 @@ function readBody(req: import("node:http").IncomingMessage): Promise<string> {
   });
 }
 
+/** Tiny JSON body parse for the control seam (fixture only). */
+function parseBody(raw: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 const control = createServer(async (req, res) => {
   res.on("error", () => {});
   req.on("error", () => {});
@@ -166,10 +268,20 @@ const control = createServer(async (req, res) => {
     return;
   }
   if (req.method === "GET" && url.pathname === "/status") {
-    json(200, { ...state });
+    json(200, {
+      ...state,
+      releaseRead: state.releaseRead === null,
+      releaseWrite: state.releaseWrite === null,
+      // Tombstone app (App C) gate + its real wire get count.
+      authoritativeDeleted: tombstoneState.authoritativeDeleted,
+      tombstoneGetCalls: tombstoneState.getCalls,
+    });
     return;
   }
-  await readBody(req);
+  // The body is read EXACTLY once: a second readBody() on an already-ended
+  // request stream never resolves, which used to hang every /arm-write call
+  // (and with it the whole action scenario) until the test timed out.
+  const raw = await readBody(req);
   if (req.method === "POST" && url.pathname === "/advance-title") {
     state.revision = 2;
     json(200, { revision: state.revision });
@@ -180,9 +292,54 @@ const control = createServer(async (req, res) => {
     json(200, { deleted: state.deleted });
     return;
   }
+  // C15 tombstone app (App C): arm ONLY its dedicated authoritative
+  // synthetic get mode. This gate is EXPLICIT and distinct from the bare404
+  // `/delete-event` miss above; nothing in production reads it.
+  if (req.method === "POST" && url.pathname === "/authoritative-delete") {
+    tombstoneState.authoritativeDeleted = true;
+    json(200, { authoritativeDeleted: tombstoneState.authoritativeDeleted });
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/reset-tombstone") {
+    resetFakeCalendarState(tombstoneState);
+    json(200, { reset: true });
+    return;
+  }
   if (req.method === "POST" && url.pathname === "/reset") {
     resetFakeCalendarState(state);
     json(200, { reset: true });
+    return;
+  }
+  // C22 fixture seams (fake write behavior + barriers; no production path).
+  if (req.method === "POST" && url.pathname === "/arm-write") {
+    const parsed = parseBody(raw);
+    const mode = typeof parsed?.mode === "string" ? parsed.mode : "";
+    if (
+      mode !== "success" &&
+      mode !== "unverified" &&
+      mode !== "unknown" &&
+      mode !== "failure" &&
+      mode !== "barrier"
+    ) {
+      json(400, { error: { code: "invalid_write_mode" } });
+      return;
+    }
+    state.writeMode = mode as FakeWriteMode;
+    json(200, { writeMode: state.writeMode });
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/arm-read-barrier") {
+    state.readBarrier = true;
+    json(200, { readBarrier: state.readBarrier });
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/release") {
+    state.releaseRead?.();
+    state.releaseRead = null;
+    state.readBarrier = false;
+    state.releaseWrite?.();
+    state.releaseWrite = null;
+    json(200, { released: true });
     return;
   }
   json(404, { error: { code: "not_found" } });
@@ -196,6 +353,10 @@ console.log(`calendar-e2e-control-ready ${CALENDAR_CONTROL_ORIGIN}`);
 
 // eslint-disable-next-line no-console
 console.log(`calendar-e2e-ready http://127.0.0.1:${started.port}`);
+// eslint-disable-next-line no-console
+console.log(
+  `calendar-e2e-tombstone-ready http://127.0.0.1:${tombstoneStarted.port}`,
+);
 
 let shuttingDown = false;
 async function shutdown(): Promise<void> {
@@ -205,11 +366,22 @@ async function shutdown(): Promise<void> {
     (control as HttpServer).close(() => resolve());
   });
   try {
+    await tombstoneBinding.shutdown();
+  } catch {
+    // Fixture-owned MCP cleanup is best effort.
+  }
+  try {
+    await tombstoneStarted.shutdown();
+  } catch {
+    // Best effort: still remove the temp dirs.
+  }
+  try {
     await started.shutdown();
   } catch {
     // Best effort: still remove the temp dir.
   }
   rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  rmSync(tombstoneDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }
 process.on("SIGINT", () => {
   void shutdown().then(() => process.exit(0));

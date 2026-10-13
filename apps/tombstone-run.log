@@ -1,0 +1,37 @@
+
+Running 1 test using 1 worker
+
+(node:1184148) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  1 [chromium] › e2e/calendar/tombstone.spec.ts:71:1 › tombstone: positive authoritative deletion materializes a new deleted rN while the prior rN stays open (17.0s)
+
+
+  1) [chromium] › e2e/calendar/tombstone.spec.ts:71:1 › tombstone: positive authoritative deletion materializes a new deleted rN while the prior rN stays open 
+
+    Error: expect(locator).toHaveCount(expected) failed
+
+    Locator:  locator('#conversation button').filter({ hasText: 'r1' })
+    Expected: 1
+    Received: 0
+    Timeout:  15000ms
+
+    Call log:
+      - Expect "toHaveCount" locator('#conversation button').filter({ hasText: 'r1' }) with timeout 15000ms
+      - waiting for locator('#conversation button').filter({ hasText: 'r1' })
+        34 × locator resolved to 0 elements
+           - unexpected value "0"
+
+
+      81 |   await expect(
+      82 |     page.locator("#conversation button", { hasText: "r1" }),
+    > 83 |   ).toHaveCount(1);
+         |     ^
+      84 |   await selectCitation(page, "r1");
+      85 |   const before = await status(request);
+      86 |   expect(before.authoritativeDeleted).toBe(false);
+        at /home/molmot/companion_harness/.c12-calendar/pr/apps/server/e2e/calendar/tombstone.spec.ts:83:5
+
+    Error Context: test-results/calendar-tombstone-tombsto-d8a8c-ile-the-prior-rN-stays-open-chromium/error-context.md
+
+  1 failed
+    [chromium] › e2e/calendar/tombstone.spec.ts:71:1 › tombstone: positive authoritative deletion materializes a new deleted rN while the prior rN stays open 

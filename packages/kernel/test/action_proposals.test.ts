@@ -13,11 +13,14 @@ import type Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ActionProposalEventSink } from "../src/action_proposals.js";
 import { createActionProposalStager } from "../src/action_proposals.js";
+import { calendarEventBodyText } from "../src/calendar_tools.js";
 import {
   canonicalJsonString,
   generateId,
   sha256Hex,
 } from "../src/canonical.js";
+import { createReferenceManager } from "../src/reference_manager.js";
+import { SnapshotBodySchema } from "@companion/contracts";
 import {
   RepositoryNotFoundError,
   RepositoryValidationError,
@@ -61,8 +64,11 @@ function makeSink(): ActionProposalEventSink & {
   };
 }
 
-const TEST_EVENT_BODY = {
-  schemaVersion: 1,
+/**
+ * Real normalized event text (the exact document ReferenceManager stores
+ * inside the SnapshotBody wrapper). Never hand-written JSON.
+ */
+const TEST_EVENT_TEXT = calendarEventBodyText({
   canonicalKey: "cal|cal1|evt1",
   status: "confirmed",
   title: "Event",
@@ -71,7 +77,23 @@ const TEST_EVENT_BODY = {
   allDayEndExclusive: true,
   sourceRevision: "src@1",
   revisionBasis: "etag",
-} as const;
+});
+
+const TEST_EVENT_DELETED_TEXT = calendarEventBodyText({
+  canonicalKey: "cal|cal1|evt1",
+  status: "deleted",
+  title: "Event",
+  start: "2026-01-01T10:00:00Z",
+  end: "2026-01-01T11:00:00Z",
+  allDayEndExclusive: true,
+  sourceRevision: "src@1",
+  revisionBasis: "etag",
+});
+
+/** The exact stored `body_json` shape ReferenceManager writes. */
+function snapshotBodyJson(text: string): string {
+  return canonicalJsonString(SnapshotBodySchema.parse({ version: 1, text }));
+}
 
 interface Fixture {
   readonly handle: ReturnType<typeof openKernelDatabase>;
@@ -101,10 +123,6 @@ async function setupFixture(): Promise<Fixture> {
   const sessionId = generateId();
   const turnId = generateId();
   const runId = generateId();
-  const connectorId = generateId();
-  const resourceId = generateId();
-  const snapshotId = generateId();
-  const refId = generateId();
   db.prepare(
     "INSERT INTO sessions (id, created_at, last_active_at, next_turn_position) VALUES (?, 1, 1, 1)",
   ).run(sessionId);
@@ -114,19 +132,46 @@ async function setupFixture(): Promise<Fixture> {
   db.prepare(
     "INSERT INTO runs (id, turn_id, session_id, attempt, status, strategy, event_seq, select_on_success, tool_requests_used, created_at, started_at) VALUES (?, ?, ?, 1, 'running', 's', 0, 1, 0, 1, 1)",
   ).run(runId, turnId, sessionId);
-  db.prepare(
-    "INSERT INTO connector_instances (id, kind, display_name, config_json, created_at) VALUES (?, 'calendar', 'c', '{}', 1)",
-  ).run(connectorId);
-  db.prepare(
-    "INSERT INTO resources (id, connector_instance_id, canonical_key, title, next_revision, created_at) VALUES (?, ?, 'cal|cal1|evt1', 'Event', 1, 1)",
-  ).run(resourceId, connectorId);
-  db.prepare(
-    "INSERT INTO resource_snapshots (id, resource_id, revision, source_revision, content_hash, body_json, size_bytes, observed_at, created_at) VALUES (?, ?, 1, 'src@1', 'hash@1', ?, 10, 1, 1)",
-  ).run(snapshotId, resourceId, canonicalJsonString(TEST_EVENT_BODY));
-  db.prepare(
-    "INSERT INTO session_references (id, session_id, ordinal, resource_id, snapshot_id, created_at) VALUES (?, ?, 1, ?, ?, 1)",
-  ).run(refId, sessionId, resourceId, snapshotId);
-  return { handle, db, sessionId, runId, refId, resourceId, snapshotId };
+  // REAL ReferenceManager observation: this is the exact write path that
+  // stores `resource_snapshots.body_json` as a SnapshotBody wrapper
+  // `{ version: 1, text }`. The fixture never hand-inserts a snapshot.
+  const referenceManager = createReferenceManager(db);
+  const connector = referenceManager.ensureCalendarConnectorInstance(
+    "c",
+    "cal1",
+    { now: 1 },
+  );
+  const presented = referenceManager.presentObservations(
+    sessionId,
+    runId,
+    [
+      {
+        connectorInstanceId: connector.id,
+        canonicalKey: "cal|cal1|evt1",
+        title: "Event",
+        text: TEST_EVENT_TEXT,
+        sourceRevision: "src@1",
+        observedAt: 1,
+      },
+    ],
+    { freshness: "normal", now: 1 },
+  );
+  if (!presented.applied || presented.references.length !== 1) {
+    throw new Error("reference observation was not applied");
+  }
+  const stored = presented.references[0];
+  if (stored === undefined) {
+    throw new Error("no presented reference");
+  }
+  return {
+    handle,
+    db,
+    sessionId,
+    runId,
+    refId: stored.referenceId,
+    resourceId: stored.resourceId,
+    snapshotId: stored.snapshotId,
+  };
 }
 
 const TIMED = { start: "2026-02-01T10:00:00Z", end: "2026-02-01T11:00:00Z" };
@@ -162,6 +207,43 @@ describe("action proposal stager", () => {
       ).toThrow(RepositoryValidationError);
     } finally {
       await closeKernelDatabase(fx.handle);
+    }
+  });
+
+  it("reads the stored SnapshotBody wrapper text produced by the real ReferenceManager", async () => {
+    const fx = await setupFixture();
+    try {
+      // The stored row is the SnapshotBody wrapper, NOT the raw event: the
+      // stager must unwrap `.text` and strictly parse that document.
+      const row = fx.db
+        .prepare("SELECT body_json FROM resource_snapshots WHERE id = ?")
+        .get(fx.snapshotId) as { body_json: string };
+      const wrapper = SnapshotBodySchema.parse(
+        JSON.parse(row.body_json) as unknown,
+      );
+      expect(JSON.parse(wrapper.text)).toMatchObject({
+        status: "confirmed",
+        start: "2026-01-01T10:00:00Z",
+        end: "2026-01-01T11:00:00Z",
+      });
+      const { stager } = makeStager(fx, () => 1000);
+      expect(
+        stager.stage(fx.runId, { targetRefId: fx.refId, ...TIMED }),
+      ).toMatchObject({
+        basedOnSnapshotId: fx.snapshotId,
+        expectedRevision: "src@1",
+      });
+      stager.removeStaged(fx.runId);
+      // A RAW event body stored where the wrapper belongs is rejected: no
+      // guessing of alternate stored shapes.
+      fx.db
+        .prepare("UPDATE resource_snapshots SET body_json = ? WHERE id = ?")
+        .run(canonicalJsonString(JSON.parse(wrapper.text) as object), fx.snapshotId);
+      expect(() =>
+        stager.stage(fx.runId, { targetRefId: fx.refId, ...TIMED }),
+      ).toThrow(/stored SnapshotBody/);
+    } finally {
+      closeKernelDatabase(fx.handle);
     }
   });
 
@@ -233,7 +315,7 @@ describe("action proposal stager", () => {
       fx.db
         .prepare("UPDATE resource_snapshots SET body_json = ? WHERE id = ?")
         .run(
-          canonicalJsonString({ ...TEST_EVENT_BODY, status: "deleted" }),
+          snapshotBodyJson(TEST_EVENT_DELETED_TEXT),
           fx.snapshotId,
         );
       expect(() =>
@@ -241,7 +323,7 @@ describe("action proposal stager", () => {
       ).toThrow(/deleted/);
       fx.db
         .prepare("UPDATE resource_snapshots SET body_json = ? WHERE id = ?")
-        .run(canonicalJsonString(TEST_EVENT_BODY), fx.snapshotId);
+        .run(snapshotBodyJson(TEST_EVENT_TEXT), fx.snapshotId);
       // Mixed boundary classes (all-day start vs timed end).
       expect(() =>
         stager.stage(fx.runId, {
