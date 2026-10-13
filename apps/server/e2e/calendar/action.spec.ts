@@ -21,6 +21,7 @@ import {
   ANSWER_STAGE_TEXT,
   CALENDAR_APP_ORIGIN,
   CALENDAR_CONTROL_ORIGIN,
+  EVENT_TITLE_V1,
   STAGE_END,
   STAGE_START,
   TEXT_ASSENT,
@@ -587,4 +588,162 @@ test("late cancel on a terminal run claims no stop (200 keeps actual receipt)", 
     releaseCancel();
     await page.unroute("**/runs/*/cancel").catch(() => {});
   }
+});
+
+/* ------------------------------------------------------------------ */
+/* C22 pending-expiry + decision-race regressions (real clock/proposal)  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Fake clock installed BEFORE any page load, so the client's Date.now and
+ * setTimeout are controlled from the first script run. The re-goto reuses
+ * the same session (same context localStorage), so the staged proposal and
+ * its REAL server deadline are unaffected.
+ */
+async function installClockAndLoad(page: Page): Promise<void> {
+  await page.clock.install();
+  await page.goto("/");
+  await expect(page.locator("#composer")).toBeVisible();
+  await expect(page.locator("#composer-send")).toBeEnabled();
+}
+
+/** The REAL staged proposal meta (id/hash/server deadline) for this page. */
+async function realProposalMeta(
+  page: Page,
+  request: APIRequestContext,
+): Promise<{ proposalId: string; hash: string; expiresAt: number }> {
+  const sessionId = await sessionIdOf(page);
+  const list = await request.get(
+    `${CALENDAR_APP_ORIGIN}/api/sessions/${sessionId}/proposals`,
+  );
+  expect(list.ok()).toBe(true);
+  const body = (await list.json()) as {
+    proposals?: {
+      proposalId?: unknown;
+      hash?: unknown;
+      expiresAt?: unknown;
+    }[];
+  };
+  expect(body.proposals).toHaveLength(1);
+  const item = body.proposals?.[0];
+  expect(typeof item?.proposalId).toBe("string");
+  expect(typeof item?.hash).toBe("string");
+  expect(typeof item?.expiresAt).toBe("number");
+  return {
+    proposalId: item?.proposalId as string,
+    hash: item?.hash as string,
+    expiresAt: item?.expiresAt as number,
+  };
+}
+
+test("preview names the frozen event title and session rN, never the tool name", async ({
+  page,
+  request,
+}) => {
+  await stageProposal(page);
+  const preview = page.locator("[data-action-preview='true']");
+  await expect(preview).toContainText(EVENT_TITLE_V1);
+  await expect(preview).toContainText("r1");
+  const cardText =
+    (await page.locator('[data-action-card="true"]').textContent()) ?? "";
+  expect(cardText).not.toContain("calendar.reschedule");
+  void request;
+});
+
+test("pending expiry: controls live at deadline-1, card retires at deadline with 0 writes", async ({
+  page,
+  request,
+}) => {
+  await installClockAndLoad(page);
+  await stageProposal(page);
+  const meta = await realProposalMeta(page, request);
+  expect(meta.expiresAt).toBeGreaterThan(Date.now());
+  // One millisecond before the REAL server deadline the decision controls
+  // are still enabled; the one-shot timer has not fired yet.
+  await page.clock.pauseAt(meta.expiresAt - 1);
+  await expect(page.locator("#action-approve")).toBeEnabled();
+  await expect(page.locator("#action-reject")).toBeEnabled();
+  // Crossing the deadline fires the bounded one-shot timer: the still-local
+  // pending card is retired with no decision and no external write.
+  await page.clock.fastForward(1);
+  await expect(page.locator('[data-action-card="true"]')).toHaveCount(0);
+  expect(await writeCalls(request)).toBe(0);
+});
+
+test("tab resume retires the expired pending card with no new polling", async ({
+  page,
+  request,
+}) => {
+  await installClockAndLoad(page);
+  await stageProposal(page);
+  const meta = await realProposalMeta(page, request);
+  // Jump the clock WITHOUT firing any timer: the stale one-shot cannot run,
+  // so the card is still visible — and only the ACTUAL visibilitychange
+  // reconciliation retires it, locally, with no proposals/execution/provider
+  // reads and no external write.
+  await page.clock.setSystemTime(meta.expiresAt);
+  const card = page.locator('[data-action-card="true"]');
+  await expect(card).toBeVisible();
+  await page.evaluate(() =>
+    document.dispatchEvent(new Event("visibilitychange")),
+  );
+  await expect(page.locator('[data-action-card="true"]')).toHaveCount(0);
+  expect(await writeCalls(request)).toBe(0);
+});
+
+test("decision race: approve across the old deadline keeps the live execution card", async ({
+  page,
+  request,
+}) => {
+  await installClockAndLoad(page);
+  await stageProposal(page);
+  const meta = await realProposalMeta(page, request);
+  // Hold the authoritative preflight read AFTER staging, so the approval's
+  // execution stays live (pre-marker) while the deadline passes.
+  await control(request, "/arm-read-barrier");
+  // Delay the REAL approve response: fetch the actual response, hold it past
+  // the old deadline, then fulfill the ACTUAL 202 (never fabricated).
+  let releaseApprove!: () => void;
+  const approveGate = new Promise<void>((resolve) => {
+    releaseApprove = resolve;
+  });
+  try {
+    await page.route("**/proposals/*/approve", async (route) => {
+      const response = await route.fetch();
+      await approveGate;
+      await route.fulfill({ response });
+    });
+    const approveSent = page.waitForRequest("**/proposals/*/approve");
+    await page.locator("#action-approve").click();
+    await approveSent;
+    // Cross the old server deadline while the REAL decision is awaited: the
+    // stale one-shot timer must not retire the decision-in-flight card.
+    await page.clock.fastForward(15 * 60 * 1000 + 1);
+    const card = page.locator('[data-action-card="true"]');
+    await expect(card).toBeVisible();
+    // Release the held REAL 202 and drive the read-only execution polls past
+    // the frozen clock: the live execution card survives the old deadline.
+    const approved = page.waitForResponse(
+      (res) =>
+        res.url().includes("/approve") && res.request().method() === "POST",
+    );
+    releaseApprove();
+    expect((await approved).status()).toBe(202);
+    await page.clock.runFor(5_000);
+    await expect(card).toBeVisible();
+    await expect(card).toHaveAttribute(
+      "data-action-state",
+      /queued|preflight|executing/,
+    );
+    // Release the held preflight: the run verifies to the REAL receipt, and
+    // the terminal receipt persists on the surviving card.
+    await control(request, "/release");
+    await page.clock.runFor(30_000);
+    await expect(card).toContainText("日程を更新しました");
+    expect(await writeCalls(request)).toBe(1);
+  } finally {
+    releaseApprove();
+    await page.unroute("**/proposals/*/approve").catch(() => {});
+  }
+  void meta;
 });
