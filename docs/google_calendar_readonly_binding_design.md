@@ -1,6 +1,18 @@
-# Google Calendar LOCAL readonly MCP binding — patch design (proposal, not adopted)
+# Google Calendar LOCAL readonly MCP binding — patch design (profile adopted; live acceptance pending)
 
-Status: **design-only proposal; C08 runtime evidence recorded (2026-10-11)**.
+Status (CURRENT): the host-owned pinned profile `google-readonly`
+(`apps/server/src/calendarReadonlyProfile.ts`, strict opt-in
+`COMPANION_CALENDAR_PROFILE`) ADOPTS the reviewed `3.0.0-readonly.2`
+candidate (`6939311…`) as the normal-startup composition. The §1–§7 design
+record below is HISTORICAL (proposal-era, `nspady@7c788f5` / `97a3dc3`);
+the CURRENT adoption pin, run/auth contract, and credential-free proof are
+`docs/operations.md` (C14 profile) and
+`docs/evidence/calendar-readonly-profile/smoke-profile.result.json`.
+Profile-adopted is NOT live-accepted: fresh user OAuth consent and live
+production verification are still pending, C11-01 stays BLOCKED, and no
+live-Google claim is made.
+
+Status (HISTORICAL): **design-only proposal; C08 runtime evidence recorded (2026-10-11)**.
 No Companion code changed; no SDK package adopted; no OAuth grant and no live
 access. The pinned candidate fork `97a3dc3` now has a credential-free
 `initialize`/`tools-list` proof and an exact pin form (full SHA + lock

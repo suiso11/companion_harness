@@ -38,6 +38,7 @@ a missing DB fails without creating any DB or backup files.
 | `COMPANION_MARKDOWN_ROOTS_JSON` | `[]` | Strict JSON array of `{ path, alias? }` (see below); unset means no Markdown connector |
 | `COMPANION_MODEL_JSON` | unset (no model) | Strict JSON object `{ adapter, baseUrl, model, apiKey? }` (see M2 below); unset registers no model strategy |
 | `COMPANION_CALENDAR_JSON` | unset (no Calendar) | Strict JSON object `{ selection, connector }` (see C14 below); unset registers no Calendar connector |
+| `COMPANION_CALENDAR_PROFILE` | unset (no profile) | Strict opt-in profile selector (see C14 profile below). Unset keeps the previous behavior (explicit host `mcpDefinitions` injection or fail-closed incomplete opt-in). Only `google-readonly` is accepted; any other value fails startup. Requires `COMPANION_CALENDAR_JSON` describing exactly the adopted candidate. |
 | `COMPANION_ACTIONS_JSON` | `{"optIn":false,"writeEnabled":false}` | Strict JSON object `{ optIn?, writeEnabled? }` (booleans, default false). HINT ONLY: never supplies a write capability, a category or a binding — see "C21 M5 Action composition" below |
 
 Config is Zod-validated and frozen at startup (no hot reload).
@@ -841,6 +842,71 @@ or complete activate config):
   factory; outer shutdown bound cap). Apps/server now also declares
   workspace dependencies on `@companion/connector-mcp` and
   `@companion/connector-calendar`.
+
+### C14 pinned google-readonly profile (CURRENT: adopted as host composition)
+
+- HISTORICAL (above in this section): no provider profile adopted. CURRENT:
+  the host-owned pinned profile `google-readonly`
+  (`apps/server/src/calendarReadonlyProfile.ts`, strict opt-in
+  `COMPANION_CALENDAR_PROFILE=google-readonly`) ADOPTS the reviewed
+  candidate as the normal-startup composition. It is NOT a rewrite of the
+  pipeline: the JSON hint, the owned registration, the lazy connector, the
+  adapter and the fail-closed gates are unchanged; the profile only supplies
+  the exact trusted definitions from host code and pins the hint to the
+  candidate. Profile-adopted is NOT live-accepted: fresh user OAuth consent
+  and live production verification are still pending (C11 positive BLOCKED,
+  manual Win11 missing).
+- Adoption pin (exact form, verified against a real fork checkout):
+  `suiso11/google-calendar-mcp`
+  commit `6939311fd3eae9846648e0a175e304c9500f578e`
+  (tree `f01b5a7b608c4091906a52c0784b828c35963de9`,
+  package `@cocal/google-calendar-mcp@3.0.0-readonly.2`, lock SHA-256
+  `63261d25…bd533`), wire identity `{name:"google-calendar",
+  version:"3.0.0-readonly.2"}`, exactly
+  `list-events`/`search-events`/`get-event` with the live-wire hashes
+  (`81222b89…`, `d48ba36e…`, `8c6736e2…` — SDK wire bytes, NOT the
+  registry-direct `a065/012e/913…` diagnostic bytes). Scope stays
+  `calendar.events.readonly` only; no `CalendarList` metadata lookup on the
+  MCP path; no writes; `list-calendars` absent (denied, never registered).
+- Selection rules (all fail closed with fixed messages, before listen):
+  unset profile keeps the previous behavior; an unknown profile name is
+  rejected; a set profile without `COMPANION_CALENDAR_JSON` is an incomplete
+  opt-in; profile + explicit `mcpDefinitions` injection conflict; the hint
+  must carry the exact pinned identity, stdio transport, and exactly the 3
+  pinned bindings (a substituted version/name, an HTTP transport, an added
+  `list-calendars`/write binding, a dropped binding, or a rehashed binding
+  all fail; an arbitrary user binding/hash can never grant read or write).
+- Explicit preparation / auth / run (user-operated, OUTSIDE the repo):
+  1. Provision the Google OAuth client OUTSIDE the repo (user-private app
+     dir, never committed): download `gcp-oauth.keys.json` and point
+     `GOOGLE_OAUTH_CREDENTIALS` at it. Tokens live OUTSIDE the repo at
+     `GOOGLE_CALENDAR_MCP_READONLY_TOKEN_PATH` (or
+     `~/.config/google-calendar-mcp-readonly/tokens.json`).
+  2. Build the exact candidate from a verified checkout
+     (`git fetch origin 6939311… && git checkout 6939311…`, verify
+     `git rev-parse HEAD` / `HEAD^{tree}` and the `package-lock.json`
+     SHA-256 against the pin above, then `npm ci --ignore-scripts` and
+     `npm run build`), and run the ONE interactive consent step with the
+     fork's own auth CLI: `node <fork>/build/index.js auth [account-id]`
+     (loopback `http://localhost:<3500-3505>/oauth2callback`, browser
+     consent on the user's machine). This worker never launches a browser,
+     OAuth consent, or a real Calendar RPC.
+  3. Run the normal composition with the verified build on stdio:
+     `COMPANION_CALENDAR_PROFILE=google-readonly COMPANION_CALENDAR_JSON='{…}`
+     `pnpm start`, where the hint's `transport.command` points at the
+     verified `node <fork>/build/index.js --enable-tools
+     list-events,search-events,get-event` and `envAllowlist` covers the SDK
+     implicit names plus `GOOGLE_OAUTH_CREDENTIALS`,
+     `GOOGLE_CALENDAR_MCP_READONLY_TOKEN_PATH`, `GOOGLE_ACCOUNT_MODE`.
+     Missing auth surfaces as the fixed `mcp_unavailable` per call (never
+     fake success); shutdown stays bounded and clean.
+  Credential-free runtime proof (no OAuth, no browser, no live Google):
+  `docs/evidence/calendar-readonly-profile/smoke-profile.result.json`
+  (22/22: pin reality, auth-gate source check, real SDK initialize/tools-list
+  over actual fork code via InMemory + fixture provider, profile 3/3 enable,
+  adapter search/get runnable, list-calendars denied with zero metadata I/O,
+  mismatch fail-closed, normal `startServer` ownership + lazy + error path,
+  zero network attempts).
 
 ### C15 Calendar fake E2E harness fixes (observed: refresh + tombstone scenarios)
 

@@ -1380,6 +1380,18 @@ COMPANION_CALENDAR_JSON='{
 - upstream binding は今も **HOLD / NOT ADOPTED** です。上記の例は
   構成ファイル形状の説明であり、provider 採用の主張ではありません。
 
+### Pinned google-readonly profile (CURRENT, opt-in)
+
+通常起動 (`pnpm start`) から採用済み candidate を選択できます。厳密な opt-in
+(`COMPANION_CALENDAR_PROFILE=google-readonly`) + 既存 `COMPANION_CALENDAR_JSON`
+ヒントが採用 candidate (`suiso11/google-calendar-mcp `6939311…`,
+`3.0.0-readonly.2`, `list-events`/`search-events`/`get-event` の live-wire hash)
+と完全一致した場合のみ、ホスト所有の信頼済み定義が注入されます。profile 未設定
+の既定動作は不変 (無効のまま)、未知 profile・不一致・任意 binding/hash は
+fail-closed です。profile 採用は live 受け入れではありません: 新規 OAuth 同意と
+live 本番検証は未了 (C11 positive BLOCKED) です。準備・認証・起動の明示手順と
+credential-free 実行証跡は docs/operations.md (C14 profile) を参照してください。
+
 ---
 
 # Actions (opt-in, triple-gated, C21)
