@@ -368,6 +368,69 @@ test("Stop after the write marker is disabled (409) and the write completes", as
   expect(await writeCalls(request)).toBe(1);
 });
 
+test("reload after unknown terminal keeps receipt manual outcome with no extra write", async ({
+  page,
+  request,
+}) => {
+  await stageProposal(page);
+  await control(request, "/arm-write", { mode: "unknown" });
+  await page.locator("#action-approve").click();
+  const card = page.locator('[data-action-card="true"]');
+  await expect(card).toHaveAttribute("data-action-state", "unknown", {
+    timeout: 60_000,
+  });
+  expect(await writeCalls(request)).toBe(1);
+  // Reload: the terminal receipt must survive via the history projection
+  // (no card needed), with the manual-check outcome and no stopped claim.
+  await page.reload();
+  await expect(page.locator("#composer")).toBeVisible();
+  const history = page.locator(
+    "#conversation [data-action-history='action_approval']",
+  );
+  await expect(history).toHaveCount(1, { timeout: 30_000 });
+  await expect(history).toContainText("承認", { timeout: 30_000 });
+  await expect(history).not.toContainText("停止しました");
+  await expect(page.locator("#composer-notice")).not.toContainText(
+    "停止しました",
+  );
+  await page.waitForTimeout(3_000);
+  expect(await writeCalls(request)).toBe(1);
+});
+
+test("completed verified history excludes internal IDs but keeps the fresh citation", async ({
+  page,
+  request,
+}) => {
+  await stageProposal(page);
+  await page.locator("#action-approve").click();
+  const card = page.locator('[data-action-card="true"]');
+  await expect(card).toContainText("日程を更新しました", { timeout: 60_000 });
+  expect(await writeCalls(request)).toBe(1);
+  const view = await executionView(page, request);
+  const proposalId = view.proposalId as string;
+  const runId = view.runId as string;
+  expect(proposalId).not.toBe("");
+  expect(runId).not.toBe("");
+  // Reload: the verified history must render with no internal IDs or tool
+  // name in visible text, while the fresh rN citation survives.
+  await page.reload();
+  await expect(page.locator("#composer")).toBeVisible();
+  const history = page.locator(
+    "#conversation [data-action-history='action_approval']",
+  );
+  await expect(history).toHaveCount(1, { timeout: 30_000 });
+  const text = (await history.textContent()) ?? "";
+  expect(text).not.toContain(proposalId);
+  expect(text).not.toContain(runId);
+  expect(text).not.toContain("calendar.reschedule");
+  const citations = page.locator("#conversation [data-action-citation='true']");
+  await expect(citations.first()).toBeVisible({ timeout: 30_000 });
+  expect(await citations.first().textContent()).not.toBe("r1");
+  expect(await citations.first().textContent()).toMatch(/^r\d+$/);
+  await page.waitForTimeout(2_000);
+  expect(await writeCalls(request)).toBe(1);
+});
+
 test("reload during held post-marker write hides every Stop and cancel API 409s", async ({
   page,
   request,

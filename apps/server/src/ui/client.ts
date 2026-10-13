@@ -12,6 +12,7 @@
 
 import type { ActiveStatus } from "@companion/contracts";
 import {
+  ACTION_PROGRESS_TEXT,
   type ActionCardModel,
   type ActionErrorCode,
   actionCardModel,
@@ -57,8 +58,13 @@ const ACTIVE_RUN_STATUSES: ReadonlySet<ActiveStatus> = new Set([
 
 /**
  * History DTO (exact contracts `HistoryItem`): `{ items, nextBefore,
- * hasMore }`; each item is a Turn plus its selected completed Run's durable
- * `RunResult` (V1 `{version,text}` / V2 `{version,text,answer}`) or null.
+ * hasMore }`. `user_text` carries the selected completed Run's durable
+ * `RunResult` or null; `action_approval` carries the ACTUAL owned Action
+ * execution/receipt projection independent of `turn_selections` (T1):
+ * completed runs carry their persisted ID-free result with the fresh rN
+ * citation, terminal non-completed runs carry `result: null` with the
+ * actual receipt, and active runs carry `receipt: null` with live
+ * statuses (frozen intent + progress, never a fake failure).
  */
 interface HistoryItemView {
   readonly turnId: string;
@@ -66,11 +72,15 @@ interface HistoryItemView {
   readonly text?: string;
   readonly selectedRun: {
     readonly runId: string;
+    readonly attempt?: number;
+    readonly runStatus?: string;
+    readonly finishedAt?: number | null;
     readonly result: unknown;
     readonly receipt?: {
       readonly outcome?: ReceiptOutcome;
       readonly summary?: { readonly summary?: string };
     } | null;
+    readonly executionStatus?: string | null;
   } | null;
 }
 
@@ -164,6 +174,24 @@ function el(tag: string, text?: string): HTMLElement {
 
 function loadText(value: unknown): string {
   return typeof value === "string" ? value : "";
+}
+
+/**
+ * T1 active-approval progress for history (no receipt yet): the actual
+ * live execution stage as frozen progress text, never a fake failure.
+ * Terminal/unknown stages render nothing here (the intent line already
+ * carries the terminal receipt outcome, or the frozen intent when the
+ * execution row itself is missing).
+ */
+function actionProgressText(executionStatus: string): string {
+  if (
+    executionStatus === "queued" ||
+    executionStatus === "preflight" ||
+    executionStatus === "executing"
+  ) {
+    return ACTION_PROGRESS_TEXT[executionStatus];
+  }
+  return "";
 }
 
 function readStoredCursor(runId: string): number | null {
@@ -1387,9 +1415,15 @@ class ConversationApp {
 
   private buildTurn(item: HistoryItemView): HTMLElement {
     const wrap = el("section");
-    // C22: the two exact decision variants carry NO user text — render the
+    // T1: the two exact decision variants carry NO user text — render the
     // deterministic intent derived from the real persisted decision plus the
-    // real receipt outcome (never a blank user-text line).
+    // ACTUAL receipt (terminal, incl. failed/unknown/cancelled/abandoned and
+    // recovered) or the live progress for an active approval (never a blank
+    // line, never a fake failure, never a "stopped" claim for a write that
+    // left the process). The outcome renders in ONE form (the intent line);
+    // the receipt summary renders once below it; result part TEXT is not
+    // re-rendered (it would duplicate the outcome/summary) — only its fresh
+    // rN citations are kept as buttons.
     if (item.kind === "action_approval" || item.kind === "action_rejection") {
       const receipt = item.selectedRun?.receipt ?? null;
       const outcome =
@@ -1400,20 +1434,59 @@ class ConversationApp {
       wrap.appendChild(el("p", actionDecisionIntentText(item.kind, outcome)));
       const run = item.selectedRun;
       if (run !== null && run !== undefined && typeof run === "object") {
+        // Durable dedup anchor: EVERY projected Action run id (incl. a
+        // receipt-only terminal with `result: null`) registers here, so a
+        // captured-active reload whose later subscription/SSE replays that
+        // same terminal never appends it twice (`renderRunView`). Internal
+        // ids live only in this set + DOM metadata, never in visible text.
         if (typeof run.runId === "string" && run.runId.length > 0) {
           this.renderedAnswers.add(run.runId);
+          wrap.setAttribute("data-action-run", run.runId);
         }
-        // The real receipt summary + the real terminal result parts (the
-        // verified fresh rN citation) render here as escaped plain text.
-        for (const part of runResultToAnswerParts(run.result)) {
-          wrap.appendChild(el("p", part.text));
-          for (const citation of part.citations) {
-            const button = el("button", citation);
-            button.setAttribute("data-action-citation", "true");
-            button.addEventListener("click", () => {
-              void this.openCitation(citation);
-            });
-            wrap.appendChild(button);
+        const rawSummary =
+          receipt !== null &&
+          typeof receipt.summary === "object" &&
+          receipt.summary !== null
+            ? (receipt.summary as { summary?: unknown }).summary
+            : null;
+        if (typeof rawSummary === "string" && rawSummary.length > 0) {
+          // Display-only tool-prefix strip (stored preview contract
+          // unchanged): the deterministic staged preview carries a
+          // `calendar.reschedule: ` prefix that must never reach visible
+          // text (T6); the stored `summary_json` keeps it.
+          const displaySummary = rawSummary.startsWith("calendar.reschedule:")
+            ? rawSummary.slice("calendar.reschedule:".length).trim()
+            : rawSummary;
+          if (displaySummary.length > 0) {
+            const line = el("p", displaySummary);
+            line.setAttribute("data-action-receipt", "true");
+            wrap.appendChild(line);
+          }
+        } else if (
+          receipt === null &&
+          typeof run.executionStatus === "string"
+        ) {
+          // Active approval with no terminal receipt: actual progress, never
+          // a fabricated failure.
+          const progress = actionProgressText(run.executionStatus);
+          if (progress.length > 0) {
+            const line = el("p", progress);
+            line.setAttribute("data-action-progress", "true");
+            wrap.appendChild(line);
+          }
+        }
+        // Citations only (no duplicated outcome/summary text): the verified
+        // fresh rN survives reloads with no extra external call.
+        if (run.result !== null && run.result !== undefined) {
+          for (const part of runResultToAnswerParts(run.result)) {
+            for (const citation of part.citations) {
+              const button = el("button", citation);
+              button.setAttribute("data-action-citation", "true");
+              button.addEventListener("click", () => {
+                void this.openCitation(citation);
+              });
+              wrap.appendChild(button);
+            }
           }
         }
       }

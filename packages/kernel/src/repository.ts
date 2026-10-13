@@ -78,6 +78,7 @@ import {
   RUN_EVENT_SCHEMA_VERSION,
   type RunResult,
   type RunStatus,
+  RunStatusSchema,
   retryScope,
   SnapshotBodySchema,
 } from "@companion/contracts";
@@ -1662,23 +1663,15 @@ export function createKernelRepository(
     const page = rows.slice(0, limit).reverse();
     const nextBefore =
       hasMore && page.length > 0 ? (page[0] as RawTurn).seq : null;
-    const selectionOf = (turnId: string) =>
-      db
-        .prepare("SELECT run_id FROM turn_selections WHERE turn_id = ?")
-        .get(turnId) as { run_id: string } | undefined;
-    /** C22: actual receipt view for a selected ACTION run only (null else). */
-    const receiptViewForRun = (runId: string): ActionReceiptView | null => {
-      const execution = db
-        .prepare("SELECT id FROM action_executions WHERE action_run_id = ?")
-        .get(runId) as { id: string } | undefined;
-      if (execution === undefined) {
-        return null;
-      }
+    /** T1: actual receipt view for an OWNED execution id (null else). */
+    const receiptViewForExecution = (
+      executionId: string,
+    ): ActionReceiptView | null => {
       const receipt = db
         .prepare(
           "SELECT outcome, summary_json, created_at FROM action_receipts WHERE execution_id = ?",
         )
-        .get(execution.id) as
+        .get(executionId) as
         | { outcome: string; summary_json: string; created_at: number }
         | undefined;
       if (receipt === undefined) {
@@ -1694,52 +1687,78 @@ export function createKernelRepository(
         "action receipt view",
       );
     };
-    const selectedRunWithResult = (
+    /**
+     * T1: ACTUAL owned Action execution + receipt projection for an
+     * approval Turn, INDEPENDENT of `turn_selections` (which stays
+     * completed-only for the `user_text` path). Exact FK ownership:
+     * execution.session_id = history session AND
+     * execution.approval_turn_id = this turn AND
+     * run.session_id = session AND run.turn_id = turn. Never fabricates a
+     * selection or success: non-completed terminals carry `result: null`
+     * with the actual receipt; active runs carry `receipt: null` with live
+     * statuses (frozen intent + progress, never a fake failure).
+     */
+    const approvalRunProjection = (
       turnId: string,
-      withReceipt: boolean,
     ): {
       runId: string;
       attempt: number;
-      finishedAt: number;
-      result: RunResult;
+      runStatus: RunStatus;
+      finishedAt: number | null;
+      result: RunResult | null;
       receipt: ActionReceiptView | null;
+      executionStatus: ActionExecutionStatus | null;
     } | null => {
-      const selection = selectionOf(turnId);
-      if (selection === undefined) {
+      const execution = db
+        .prepare(
+          `SELECT id, action_run_id, status FROM action_executions
+           WHERE session_id = ? AND approval_turn_id = ?`,
+        )
+        .get(session, turnId) as
+        | { id: string; action_run_id: string; status: string }
+        | undefined;
+      if (execution === undefined) {
         return null;
       }
-      const runRow = readRun(db, selection.run_id);
-      if (runRow === null || runRow.finished_at === null) {
+      const runRow = readRun(db, execution.action_run_id);
+      if (
+        runRow === null ||
+        runRow.session_id !== session ||
+        runRow.turn_id !== turnId
+      ) {
         return null;
       }
-      const result = parseOrValidation(
-        () =>
-          runRow.result_json === null
-            ? (() => {
-                throw new Error("selected run has no result");
-              })()
-            : parseRunResult(JSON.parse(runRow.result_json)),
-        "history selected result",
+      const runStatus = parseOrValidation(
+        () => RunStatusSchema.parse(runRow.status),
+        "history action run status",
       );
+      const executionStatus = parseOrValidation(
+        () => ActionExecutionStatusSchema.parse(execution.status),
+        "history action execution status",
+      );
+      const result =
+        runRow.result_json === null
+          ? null
+          : parseOrValidation(
+              () => parseRunResult(JSON.parse(runRow.result_json as string)),
+              "history selected result",
+            );
       return {
         runId: runRow.id,
         attempt: runRow.attempt,
+        runStatus,
         finishedAt: runRow.finished_at,
         result,
-        // C22: the ACTUAL persisted receipt for a selected Action Run (null
-        // when the execution has none yet). Decision history therefore
-        // renders the real outcome instead of a blank/fabricated one.
-        receipt: withReceipt ? receiptViewForRun(runRow.id) : null,
+        receipt: receiptViewForExecution(execution.id),
+        executionStatus,
       };
     };
     const items = page.map((row) => {
       const turn = parseTurnRow(row);
       // C18 (§18.4): the two M5 decision kinds project as exact
-      // hash-bound decision items; a rejection carries no Run ever.
-      if (
-        turn.input.kind === "action_approval" ||
-        turn.input.kind === "action_rejection"
-      ) {
+      // hash-bound decision items; a rejection carries no Run ever (the
+      // kind is the discriminant, selectedRun stays null).
+      if (turn.input.kind === "action_rejection") {
         return {
           turnId: row.id,
           seq: row.seq,
@@ -1747,7 +1766,18 @@ export function createKernelRepository(
           proposalId: turn.input.proposalId,
           proposalHash: turn.input.proposalHash,
           createdAt: row.created_at,
-          selectedRun: selectedRunWithResult(row.id, true),
+          selectedRun: null,
+        };
+      }
+      if (turn.input.kind === "action_approval") {
+        return {
+          turnId: row.id,
+          seq: row.seq,
+          kind: turn.input.kind,
+          proposalId: turn.input.proposalId,
+          proposalHash: turn.input.proposalHash,
+          createdAt: row.created_at,
+          selectedRun: approvalRunProjection(row.id),
         };
       }
       if (turn.input.kind !== "user_text") {

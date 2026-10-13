@@ -1614,6 +1614,94 @@ truth per task (not rerun to reproduce the pre-fix acceptance).
   54/54, root `tsc --noEmit` exit 0, owned `biome check` clean. No
   push/resolve; thread IDs are for the parent to publish.
 
+## PR20 T1 approval history owns its execution projection + reload dedup (2026-10-13)
+
+Fixes PR20 review `PRRC_kwDOUNdW7s79uYSV` (thread
+`PRRT_kwDOUNdW7s6ryb6i`) on `feat/c12-calendar-snapshots`: an approved
+action ending failed/unknown/cancelled/abandoned created no
+`turn_selections` row (completed-only by design), so history returned
+`selectedRun: null` and the UI showed only the approval intent with no
+receipt after reload.
+
+- `packages/contracts/src/http.ts`: `ActionRunHistorySelectionSchema`
+  now carries `runStatus` (required), `finishedAt` (nullable),
+  `result` (nullable; present only for completed runs with persisted
+  `result_json`), and `executionStatus` (nullable) alongside the existing
+  `runId`/`attempt`/`receipt`. Non-completed terminals carry
+  `result: null` with the actual receipt; active runs carry
+  `receipt: null` with live statuses (frozen intent + progress, never a
+  fake failure). `action_rejection` keeps `selectedRun: null` (kind is
+  the discriminant).
+- `packages/kernel/src/repository.ts`: `getHistory` projects approvals
+  via `approvalRunProjection` keyed ONLY on owned execution identity
+  (`action_executions.session_id` = history session AND
+  `approval_turn_id` = this turn AND run `session_id`/`turn_id` match).
+  Independent of `turn_selections` (which stays completed-only for the
+  `user_text` path); a regular failed `user_text` turn stays
+  `selectedRun: null`.
+- `apps/server/src/ui/client.ts`: approval turns render the actual
+  terminal receipt (incl. failed/unknown/cancelled/abandoned and
+  recovered) or live `ACTION_PROGRESS_TEXT` for active approvals; every
+  projected `runId` registers in `renderedAnswers` plus a
+  `data-action-run` anchor so a captured-active reload never duplicates
+  the terminal (`renderRunView`); result part TEXT is not re-rendered
+  (only fresh rN citation buttons).
+- Regression: `packages/kernel/test/action_history_receipt.test.ts`
+  (real SQLite service lifecycle, no mocks/seeds/UI bypass): failed,
+  unknown, pre-marker cancelled, recovered-abandoned pre/post-marker
+  (receipt retained, non-null selection, `result: null`, zero
+  `turn_selections` rows), blocked_stale/succeeded_unverified/verified
+  (ID-free text, fresh rN, completed selection intact), regular failed
+  `user_text` unselected.
+- Actual-runtime proof: standalone Hono/SQLite history smoke
+  (`.review-plan-work/smoke-history-t1t6.ts` via repo tsx, real TS APIs,
+  HTTP approve + HTTP history) 53/53 checks incl. abandoned
+  (`runStatus abandoned`, receipt `failed`, `result null`) and regular
+  failed (`user_text`, `selectedRun null`); log
+  `.review-plan-work/smoke-history-t1t6.log` (own log, removed after this
+  note; review JSON kept). NEW browser cases only
+  (`COMPANION_E2E_CALENDAR=1`, bounded): reload-after-unknown-terminal
+  keeps the manual-check receipt with no extra write and no stop claim,
+  2/2 passed; log `.review-plan-work/browser-t1t6.log` (own log, removed
+  after this note). Focused `action_history_receipt` 9/9,
+  `packages/kernel` `tsc --noEmit` exit 0, owned `biome check` on all
+  touched files clean; broader types/units retained green per the prior
+  session, not rerun. No push/resolve; thread IDs are for the parent to
+  publish.
+
+## PR20 T6 action rendered text carries no internal IDs (2026-10-13)
+
+Fixes PR20 review `PRRC_kwDOUNdW7s79uYTF` (thread
+`PRRT_kwDOUNdW7s6ryb7I`) on `feat/c12-calendar-snapshots`: completed
+verified/unverified `RunResult` text embedded `calendar.reschedule` and
+the raw proposal UUID, rendered verbatim in conversation history.
+
+- `packages/kernel/src/action_executions.ts`: persisted completed
+  results now render `${previewSummary} — ${safeOutcome}` (preview
+  summary minus the `calendar.reschedule:` prefix, safe human outcome
+  incl. manual-check guidance); stored `preview_json` contract
+  unchanged; structured audit fields keep all IDs.
+- `packages/kernel/src/action_strategy.ts`: the in-memory failed-run
+  fallback renders the same ID-free preview + safe outcome (receipt
+  outcome via the real view, never a fabricated success).
+- `apps/server/src/ui/client.ts`: history receipt summaries strip the
+  `calendar.reschedule:` prefix for display only (stored `summary_json`
+  unchanged); visible history text never contains proposal/execution/run
+  UUIDs or the tool name (IDs live only in structured fields/DOM
+  metadata).
+- Fixture wording pins deleted (behavior predicates only, e.g. outcome
+  non-empty and stop-claim-free): `apps/server/test/action_ui.test.ts`,
+  `packages/kernel/test/repository.test.ts`,
+  `packages/kernel/test/structured_result.test.ts` (completed-selection
+  type narrowing to the `user_text` variant).
+- Actual-runtime proof: same 53/53 smoke (blocked/verified cases assert
+  no tool name, no proposal/execution/run ID, V2 result with one fresh
+  rN citation); NEW browser case only: completed verified history shows
+  no internal IDs or tool name with the fresh citation surviving reload
+  and write count unchanged, 2/2 passed with the T1 browser case above.
+  Same focused/lint/type evidence as T1. No push/resolve; thread IDs are
+  for the parent to publish.
+
 ## Non-goals (explicit)
 Domain retention/GC (except newest-3 backup rotation), user export,
 session delete API, running-process deletion, auto-restore, DB/backup
