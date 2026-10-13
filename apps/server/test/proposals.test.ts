@@ -15,7 +15,9 @@ import { randomUUID } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SnapshotBodySchema } from "@companion/contracts";
 import {
+  calendarEventBodyText,
   canonicalJsonString,
   closeKernelDatabase,
   createKernelRepository,
@@ -99,8 +101,7 @@ async function getJson(
   return app.request(path, { headers: { host: "127.0.0.1" } });
 }
 
-const CALENDAR_EVENT_BODY = {
-  schemaVersion: 1,
+const CALENDAR_EVENT_BODY = calendarEventBodyText({
   canonicalKey: "cal|cal1|evt1",
   status: "confirmed",
   title: "Event",
@@ -109,7 +110,14 @@ const CALENDAR_EVENT_BODY = {
   allDayEndExclusive: true,
   sourceRevision: "src@1",
   revisionBasis: "etag",
-} as const;
+} as const);
+
+/** The exact stored `body_json` shape ReferenceManager writes (SnapshotBody wrapper). */
+function snapshotBodyJson(): string {
+  return canonicalJsonString(
+    SnapshotBodySchema.parse({ version: 1, text: CALENDAR_EVENT_BODY }),
+  );
+}
 
 /** Real Agent Run (running) that owns the proposal, via the public repo. */
 async function seedProposal(
@@ -144,7 +152,7 @@ async function seedProposal(
     .prepare(
       "INSERT INTO resource_snapshots (id, resource_id, revision, source_revision, content_hash, body_json, size_bytes, observed_at, created_at) VALUES (?, ?, 1, 'src@1', 'hash@1', ?, 10, 1, 1)",
     )
-    .run(snapshotId, resourceId, canonicalJsonString(CALENDAR_EVENT_BODY));
+    .run(snapshotId, resourceId, snapshotBodyJson());
   f.raw
     .prepare(
       "INSERT INTO session_references (id, session_id, ordinal, resource_id, snapshot_id, created_at) VALUES (?, ?, 1, ?, ?, 1)",
