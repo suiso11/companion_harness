@@ -1474,10 +1474,15 @@ class ConversationApp {
         key,
       );
     } catch {
-      // Transient: the SAME key + SAME body are replayed on the next click.
-      card.deciding = false;
+      // Transport failure AFTER a possibly-committed server decision: the
+      // approval may already be durable server-side (lost response). Hold
+      // decision ownership across ONE authoritative re-read instead of
+      // relying on the deduped background sync: that sync can be dropped
+      // while an older sync is still in flight with a stale pending view,
+      // which would leave a server-approved card on its live pending-expiry
+      // timer until the timer retires it.
       this.showNotice("承認できませんでした。もう一度お試しください");
-      this.scheduleActionSync();
+      await this.reconcileLostApprove(card);
       return;
     }
     if (posted.status === 202) {
@@ -1507,6 +1512,84 @@ class ConversationApp {
     }
     card.deciding = false;
     this.showNotice("承認できませんでした。もう一度お試しください");
+    this.scheduleActionSync();
+  }
+
+  /**
+   * Authoritative lost-approve reconciliation (approve POST transport
+   * failure with an unknown server outcome). Decision ownership
+   * (`deciding`) is held across the single proposals re-read, so the
+   * bounded pending-expiry timer and any stale pending list can neither
+   * retire nor downgrade the card while the server truth settles. A
+   * server-approved summary takes approved ownership immediately (timer
+   * cleared, decisions disabled, execution watch started — the same
+   * transition as the sync-path ownership block); a still-pending summary
+   * releases ownership with controls re-rendered and the bounded timer
+   * re-armed; an unreadable list releases ownership and falls back to the
+   * normal sync path.
+   */
+  private async reconcileLostApprove(card: ActionCard): Promise<void> {
+    if (this.actionCards.get(card.proposalId) !== card) {
+      return;
+    }
+    let current: ProposalSummaryView | null = null;
+    try {
+      const sessionId = this.sessionId;
+      if (sessionId !== null) {
+        const listed = await fetchJson(
+          `/api/sessions/${encodeURIComponent(sessionId)}/proposals`,
+        );
+        const items = (listed.body as { proposals?: unknown }).proposals;
+        if (listed.status === 200 && Array.isArray(items)) {
+          current =
+            (items as unknown[]).find(
+              (item): item is ProposalSummaryView =>
+                isProposalSummary(item) && item.proposalId === card.proposalId,
+            ) ?? null;
+        }
+      }
+    } catch {
+      current = null;
+    }
+    if (this.actionCards.get(card.proposalId) !== card) {
+      return;
+    }
+    if (current !== null && current.status === "approved") {
+      // The server committed the approval before the transport failed: the
+      // card is execution-owned from here — never retired by the old pending
+      // timer, never actionable again.
+      this.clearPendingExpiry(card);
+      card.deciding = false;
+      card.status = current.status;
+      this.renderActionCard(
+        card,
+        current,
+        null,
+        this.cardModel(current, null),
+        "",
+      );
+      // Bounded recovery only: the existing execution watch retries the
+      // execution read when it resumes. No new polling path is added.
+      void this.watchAction(card.proposalId, current);
+      return;
+    }
+    // Still pending (or the list was unreadable): release ownership and
+    // reconcile through the normal path. A live pending card gets its
+    // controls back with a fresh bounded timer; an unreadable list simply
+    // retries via sync.
+    card.deciding = false;
+    if (current !== null && current.status === "pending") {
+      card.deadline = current.expiresAt;
+      card.status = current.status;
+      this.renderActionCard(
+        card,
+        current,
+        null,
+        this.cardModel(current, null),
+        "",
+      );
+      this.schedulePendingExpiry(card);
+    }
     this.scheduleActionSync();
   }
 
@@ -1721,10 +1804,14 @@ class ConversationApp {
             ? (receipt.summary as { summary?: unknown }).summary
             : null;
         if (typeof rawSummary === "string" && rawSummary.length > 0) {
-          // Display-only tool-prefix strip (stored preview contract
-          // unchanged): the deterministic staged preview carries a
+          // Display-only LEGACY tool-prefix strip (stored preview contract
+          // unchanged): historical staged previews carry a
           // `calendar.reschedule: ` prefix that must never reach visible
-          // text (T6); the stored `summary_json` keeps it.
+          // text (T6); the stored `summary_json` keeps it. Current previews
+          // always open with the unambiguous `対象イベント: ` marker, so an
+          // arbitrary event title — even one beginning with
+          // `calendar.reschedule:` — is never at position 0 and is rendered
+          // in full here.
           const displaySummary = rawSummary.startsWith("calendar.reschedule:")
             ? rawSummary.slice("calendar.reschedule:".length).trim()
             : rawSummary;
