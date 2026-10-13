@@ -218,6 +218,87 @@ describe("C21 M5 Action triple-gated composition", () => {
     expect((error as Error).message).toMatch(/active calendar binding/);
   });
 
+  it("fails closed when enabled without any write binding (absent)", async () => {
+    const { env, dbPath } = tempEnv();
+    const instanceId = await provisionCalendarInstance(dbPath);
+    const before = process.listenerCount("SIGINT");
+    const error = await startServer({
+      env: { ...env, COMPANION_ACTIONS_JSON: ENABLED_ACTIONS_JSON },
+      calendarBinding: {
+        connectorInstanceId: instanceId,
+        connector: fakeCalendarBinding(instanceId),
+        selection: { calendarId: "cal-primary", account: "ops@example" },
+      },
+      drainMs: 50,
+    }).then(
+      (started) => {
+        servers.push(started);
+        return null;
+      },
+      (failure: unknown) => failure,
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/active calendar binding/);
+    expect(process.listenerCount("SIGINT")).toBe(before);
+  });
+
+  it("fails closed when enabled with both/neither port and derivePort", async () => {
+    const { env, dbPath } = tempEnv();
+    const instanceId = await provisionCalendarInstance(dbPath);
+    const binding = {
+      connectorInstanceId: instanceId,
+      connector: fakeCalendarBinding(instanceId),
+      selection: { calendarId: "cal-primary", account: "ops@example" },
+    } as const;
+    for (const actionWriteBinding of [
+      {
+        port: fakeWritePort(instanceId),
+        derivePort: () => fakeWritePort(instanceId),
+      },
+      {},
+    ]) {
+      const error = await startServer({
+        env: { ...env, COMPANION_ACTIONS_JSON: ENABLED_ACTIONS_JSON },
+        calendarBinding: binding,
+        actionWriteBinding,
+        drainMs: 50,
+      }).then(
+        (started) => {
+          servers.push(started);
+          return null;
+        },
+        (failure: unknown) => failure,
+      );
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toMatch(/active calendar binding/);
+    }
+  });
+
+  it("fails closed when enabled with an invalid capability", async () => {
+    const { env, dbPath } = tempEnv();
+    const instanceId = await provisionCalendarInstance(dbPath);
+    const bad = fakeWritePort(instanceId);
+    (bad.capability as { writeEnabled: boolean }).writeEnabled = false;
+    const error = await startServer({
+      env: { ...env, COMPANION_ACTIONS_JSON: ENABLED_ACTIONS_JSON },
+      calendarBinding: {
+        connectorInstanceId: instanceId,
+        connector: fakeCalendarBinding(instanceId),
+        selection: { calendarId: "cal-primary", account: "ops@example" },
+      },
+      actionWriteBinding: { port: bad },
+      drainMs: 50,
+    }).then(
+      (started) => {
+        servers.push(started);
+        return null;
+      },
+      (failure: unknown) => failure,
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/active calendar binding/);
+  });
+
   it("shuts down only an explicitly owned injected write port", async () => {
     const { env, dbPath } = tempEnv();
     const instanceId = await provisionCalendarInstance(dbPath);

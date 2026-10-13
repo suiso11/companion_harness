@@ -794,6 +794,14 @@ export async function startServer(
       }
     }
     let actionsEnabled = false;
+    if (actionConfigEnabled && actionWritePort === null) {
+      // Config opted in without a usable write binding (absent binding, or
+      // a binding supplying both/neither of port/derivePort): an incomplete
+      // opt-in and fails closed BEFORE listen (never a silent disable).
+      throw new ServerConfigError(
+        "action write binding does not match the active calendar binding",
+      );
+    }
     if (actionWritePort !== null) {
       const capability = CalendarActionWriteCapabilitySchema.safeParse(
         actionWritePort.capability,
