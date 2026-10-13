@@ -321,6 +321,23 @@ export function createActionStrategy(
       throw new StrategyError("execution_failed");
     }
 
+    // 2) HOSTSIDE TARGET RESOLUTION BEFORE the grant gate: the host-private
+    //    target reference is resolved (same durable `resolveTarget` store)
+    //    BEFORE `runActionPreflight` can consume the one-shot grant. A
+    //    missing target fails through the EXACT real preflight-failure
+    //    terminal (failed receipt + run.failed, no marker, UNCONSUMED grant,
+    //    zero writes) — the write is never attempted, so a success result is
+    //    never claimed for an unattempted write.
+    const targetCanonicalKey = readTargetCanonicalKey(db, proposal);
+    const resolvedTarget = resolveTarget(targetCanonicalKey);
+    if (resolvedTarget === undefined) {
+      const failed = service.recordActionPreflightFailure(runId);
+      if (failed.applied) {
+        return withPersisted(runId);
+      }
+      throw new StrategyError("execution_failed");
+    }
+
     // 3) Authoritative preflight + one-shot committed gate in one step.
     const preflight = await service.runActionPreflight(runId, {
       signal: ctx.signal,
@@ -344,15 +361,7 @@ export function createActionStrategy(
         "proposal start/end instants are empty (impossible state)",
       );
     }
-    const targetCanonicalKey = readTargetCanonicalKey(db, proposal);
-    const target = resolveTarget(targetCanonicalKey);
-    if (target === undefined) {
-      return finish({
-        outcome: "succeeded_unverified",
-        preflightRevision: unverifiedPreflightRevisionOf(proposal),
-        preflightSnapshotId: preflight.preflightSnapshotId,
-      });
-    }
+    const target = resolvedTarget;
 
     // 5) THE single external write, exactly once, after the marker commit;
     //    ONLY the port's own three-value return is classified — any

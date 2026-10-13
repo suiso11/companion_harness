@@ -367,4 +367,87 @@ describe("C23 automatic scheduler pickup of an approved Action Run", () => {
       await closeKernelDatabase(fx.handle);
     }
   });
+
+  it("fails closed through the REAL preflight-failure terminal when the host cannot resolve the private target (zero writes, unconsumed grant)", async () => {
+    const fx = await setupApprovedQueuedAction();
+    let now = 100;
+    try {
+      const readPort = readPortFor(fx);
+      const service: ActionExecutionService = createActionExecutionService({
+        db: fx.db,
+        referenceManager: createReferenceManager(fx.db),
+        preflightRead: readPort,
+        clock: () => now,
+      });
+      const writePort: CalendarActionWritePort = {
+        capability: {
+          tool: "calendar.reschedule",
+          editableFields: ["start", "end"],
+          connectorInstanceId: fx.connectorId,
+          writeEnabled: true,
+        },
+        update: async (): Promise<CalendarWriteOutcome> => {
+          fx.writes.push({ start: "x", end: "y" });
+          return { status: "succeeded" };
+        },
+      };
+      const registry = new StrategyRegistry();
+      registry.register(
+        "m5-action",
+        createActionStrategy({
+          db: fx.db,
+          service,
+          preflightRead: readPort,
+          writePort,
+          // Host CANNOT resolve the private target: missing host store entry.
+          resolveTarget: () => undefined,
+        }),
+      );
+      const engine = new RunEngine({
+        db: fx.db,
+        repo: createKernelRepository(fx.db),
+        registry,
+        pollIntervalMs: 3_600_000,
+        clock: {
+          now: () => (now += 1),
+          sleep: () => Promise.resolve(),
+          setTimeout: () => 0,
+          clearTimeout: () => undefined,
+        },
+      });
+      engine.start();
+      expect(engine.pump()).toBe(1);
+      for (let attempt = 0; attempt < 500; attempt += 1) {
+        if (engine.inflightCount() === 0) {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 2));
+      }
+      expect(engine.inflightCount()).toBe(0);
+      await engine.shutdown({ drainMs: 0 });
+
+      // The run is REALLY failed through the exact preflight-failure
+      // terminal — never `succeeded_unverified` for an unattempted write.
+      const view = service.getActionRunView(fx.actionRunId);
+      expect(view.run.status).toBe("failed");
+      expect(view.execution?.status).toBe("failed");
+      expect(view.receipt).toMatchObject({ outcome: "failed" });
+      expect(fx.writes).toEqual([]);
+      // Zero external writes and ZERO consumption: the gate was never
+      // reached, the marker was never set.
+      expect(view.execution?.externalCallStartedAt).toBeNull();
+      const grant = fx.db
+        .prepare(
+          "SELECT consumed_at FROM action_execution_grants WHERE execution_id = ?",
+        )
+        .get(fx.executionId) as { consumed_at: number | null };
+      expect(grant.consumed_at).toBeNull();
+      const types = eventTypes(fx.db, fx.actionRunId);
+      expect(types).not.toContain("action.execution_started");
+      expect(types).toContain("action.preflight_failed");
+      expect(types.at(-1)).toBe("run.failed");
+    } finally {
+      await closeKernelDatabase(fx.handle);
+    }
+  });
 });
