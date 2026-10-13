@@ -11,19 +11,23 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
+import type { ActionProposalEventSink } from "../src/action_proposals.js";
+import { createActionProposalStager } from "../src/action_proposals.js";
 import {
-  closeKernelDatabase,
-  BUNDLED_SCHEMA_VERSION,
-  migrateKernelDatabase,
-  openKernelDatabase,
-} from "../src/index.js";
+  canonicalJsonString,
+  generateId,
+  sha256Hex,
+} from "../src/canonical.js";
 import {
   RepositoryNotFoundError,
   RepositoryValidationError,
 } from "../src/errors.js";
-import { createActionProposalStager } from "../src/action_proposals.js";
-import type { ActionProposalEventSink } from "../src/action_proposals.js";
-import { canonicalJsonString, generateId, sha256Hex } from "../src/canonical.js";
+import {
+  BUNDLED_SCHEMA_VERSION,
+  closeKernelDatabase,
+  migrateKernelDatabase,
+  openKernelDatabase,
+} from "../src/index.js";
 
 const tempRoots: string[] = [];
 
@@ -130,7 +134,10 @@ const TIMED = { start: "2026-02-01T10:00:00Z", end: "2026-02-01T11:00:00Z" };
 function makeStager(
   fx: Fixture,
   clock: () => number,
-): { stager: ReturnType<typeof createActionProposalStager>; sink: ReturnType<typeof makeSink> } {
+): {
+  stager: ReturnType<typeof createActionProposalStager>;
+  sink: ReturnType<typeof makeSink>;
+} {
   const sink = makeSink();
   const stager = createActionProposalStager({
     db: fx.db,
@@ -288,8 +295,8 @@ describe("action proposal stager", () => {
       stager.stage(fx.runId, { targetRefId: fx.refId, ...TIMED });
       // Simulate a repository rollback of completeRun: commitStaged succeeds
       // inside the caller tx but the caller throws afterwards, so the whole
-      // transaction (row + event) is undone; the staged entry was consumed
-      // and re-staging is required for a retry.
+      // transaction (row + event) is undone. C17 rollback-safe lifecycle: the
+      // staged entry is NOT consumed, so a retry can commit it directly.
       const forcedRollback = fx.db.transaction(() => {
         stager.commitStaged(fx.runId, 2000);
         throw new Error("forced rollback");
@@ -299,21 +306,26 @@ describe("action proposal stager", () => {
       // append is not durable. Clear it; the durable DB state is what counts.
       sink.events.length = 0;
       const countAfterRollback = fx.db
-        .prepare("SELECT COUNT(*) AS n FROM action_proposals WHERE source_run_id = ?")
+        .prepare(
+          "SELECT COUNT(*) AS n FROM action_proposals WHERE source_run_id = ?",
+        )
         .get(fx.runId) as { n: number };
       expect(countAfterRollback.n).toBe(0);
       // Unknown run commit fails cleanly without persisting anything.
       expect(() =>
         fx.db.transaction(() => stager.commitStaged(generateId(), 2000))(),
       ).toThrow(RepositoryNotFoundError);
-      // Retry: re-stage and commit — exactly one row and one event.
-      stager.stage(fx.runId, { targetRefId: fx.refId, ...TIMED });
-      const committed =
-        fx.db.transaction(() => stager.commitStaged(fx.runId, 2000))();
+      // Retry: the staged entry survived the rollback — commit it directly,
+      // exactly one row and one event.
+      const committed = fx.db.transaction(() =>
+        stager.commitStaged(fx.runId, 2000),
+      )();
       expect(committed.status).toBe("pending");
       expect(sink.events.map((e) => e.type)).toEqual(["action.proposed"]);
       const rows = fx.db
-        .prepare("SELECT id, status FROM action_proposals WHERE source_run_id = ?")
+        .prepare(
+          "SELECT id, status FROM action_proposals WHERE source_run_id = ?",
+        )
         .all(fx.runId) as Array<{ id: string; status: string }>;
       expect(rows).toEqual([{ id: committed.proposalId, status: "pending" }]);
     } finally {
@@ -328,16 +340,18 @@ describe("action proposal stager", () => {
       const { stager } = makeStager(fx, () => now);
       stager.stage(fx.runId, { targetRefId: fx.refId, ...TIMED });
       fx.db.transaction(() => stager.commitStaged(fx.runId, now))();
-      // Re-stage (staged entry consumed) and hit the one-pending session rule.
-      stager.stage(fx.runId, { targetRefId: fx.refId, ...TIMED });
+      // C17: the committed staged entry stays staged until the outer commit
+      // acknowledges it; a second commit inside the tx hits the
+      // one-pending-per-session rule even though the entry is still staged.
       expect(() =>
         fx.db.transaction(() => stager.commitStaged(fx.runId, now))(),
       ).toThrow(/pending/);
       stager.removeStaged(fx.runId);
       stager.stage(fx.runId, { targetRefId: fx.refId, ...TIMED });
       now = 1000 + 15 * 60 * 1000 + 1;
-      expect(() => fx.db.transaction(() => stager.commitStaged(fx.runId, now))())
-        .toThrow(/expired/);
+      expect(() =>
+        fx.db.transaction(() => stager.commitStaged(fx.runId, now))(),
+      ).toThrow(/expired/);
     } finally {
       await closeKernelDatabase(fx.handle);
     }

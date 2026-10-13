@@ -64,6 +64,11 @@ import {
 } from "@companion/contracts";
 import type Database from "better-sqlite3";
 import {
+  type ActionProposalStager,
+  type CommittedProposal,
+  createActionProposalStager,
+} from "./action_proposals.js";
+import {
   assertUuidV4,
   generateId,
   IDEMPOTENCY_OPERATIONS,
@@ -528,7 +533,63 @@ function storeIdempotentResponse(
 /* Repository                                                          */
 /* ------------------------------------------------------------------ */
 
-export function createKernelRepository(db: Database.Database) {
+/**
+ * C17 composition options. `actionProposals.writeEnabled` is an EXPLICIT
+ * opt-in (never derived from any mutable state); the stager is created and
+ * owned by this repository instance so the broker/agent path, the completeRun
+ * commit hook, and the terminal cleanup share ONE staged map per process.
+ * `clock` is deterministic-test only.
+ */
+export interface CreateKernelRepositoryOptions {
+  readonly actionProposals?: {
+    readonly writeEnabled?: boolean;
+    readonly clock?: () => number;
+  };
+}
+
+export function createKernelRepository(
+  db: Database.Database,
+  options: CreateKernelRepositoryOptions = {},
+) {
+  // C17: repository-OWNED proposal stager (single shared instance). The
+  // repository supplies the action.proposed `appendEventInTx` sink, so the
+  // stager's commits address the exact same events/journal as every other
+  // RunEvent append (same CAS conflict semantics). `writeEnabled` defaults
+  // to FALSE: proposal staging is an explicit composition opt-in.
+  const stager: ActionProposalStager | undefined =
+    options.actionProposals === undefined
+      ? undefined
+      : createActionProposalStager({
+          db,
+          writeEnabled: options.actionProposals.writeEnabled === true,
+          ...(options.actionProposals.clock === undefined
+            ? {}
+            : { clock: options.actionProposals.clock }),
+          events: {
+            appendEventTx(runId, expectedPrevSeq, type, payload, now) {
+              return appendEventInTx(
+                db,
+                runId,
+                expectedPrevSeq,
+                type,
+                payload,
+                now,
+              );
+            },
+          },
+        });
+
+  /**
+   * Terminal cleanup is NOT part of the commit hook: apply only after the
+   * OUTER transaction of a terminal transition has committed successfully,
+   * so a rollback never loses a staged entry that a retry may still commit.
+   */
+  const clearStagedAfterTerminalCommit = (runId: string): void => {
+    if (stager !== undefined) {
+      stager.removeStaged(runId);
+    }
+  };
+
   function getSession(sessionId: string): SessionRow {
     const id = requireId(sessionId, "sessionId");
     const row = readSession(db, id);
@@ -962,7 +1023,13 @@ export function createKernelRepository(db: Database.Database) {
     const id = requireId(runId, "runId");
     const now = nowMs(options.now);
     const valid = parseOrValidation(() => parseRunResult(result), "run result");
-    return withImmediate(db, () => {
+    // C17: a staged proposal is committed INSIDE the same successful CAS
+    // transaction, BEFORE the terminal transition/event. commitStaged never
+    // persists on its own: any failure throws out of withImmediate and rolls
+    // back the whole completion, preserving the staged entry until a retry
+    // (or a failure/cancel cleaning it) — clear only after the outer commit.
+    let committedProposal: CommittedProposal | null = null;
+    const outcome = withImmediate(db, () => {
       const row = readRun(db, id);
       if (row === null) {
         throw new RepositoryNotFoundError(`run ${id} not found`);
@@ -973,22 +1040,26 @@ export function createKernelRepository(db: Database.Database) {
       if (row.status !== "running") {
         return { applied: false, run: parseRunRow(row) };
       }
+      if (stager !== undefined && stager.getStaged(id) !== null) {
+        committedProposal = stager.commitStaged(id, now);
+      }
       const moved = db
         .prepare(
           "UPDATE runs SET status = 'completed', result_json = ?, finished_at = ? WHERE id = ? AND status = 'running'",
         )
         .run(JSON.stringify(valid), now, id);
       if (moved.changes !== 1) {
-        const current = readRun(db, id);
-        if (current === null) {
-          throw new RepositoryNotFoundError(`run ${id} not found`);
-        }
-        return { applied: false, run: parseRunRow(current) };
+        // Fail CLOSED: a concurrent CAS loss must never leave the appended
+        // action.proposed event persisted while the run stays running.
+        throw new KernelStorageError(
+          "kernel_concurrent_conflict",
+          "concurrent completion conflict; retry the transition",
+        );
       }
       appendEventInTx(
         db,
         id,
-        row.event_seq,
+        committedProposal === null ? row.event_seq : committedProposal.eventSeq,
         "run.completed",
         { result: valid },
         now,
@@ -1009,6 +1080,13 @@ export function createKernelRepository(db: Database.Database) {
       }
       return { applied: true, run: parseRunRow(current) };
     });
+    // Post-COMMIT only: clear the acknowledged staged entry exactly when the
+    // proposal transaction committed. Nothing is cleared on failure paths.
+    if (outcome.applied && committedProposal !== null) {
+      clearStagedAfterTerminalCommit(id);
+    }
+    committedProposal = null;
+    return outcome;
   }
 
   function failRun(
@@ -1023,7 +1101,7 @@ export function createKernelRepository(db: Database.Database) {
       () => parseRunErrorCode(errorCode),
       "run error_code",
     );
-    return withImmediate(db, () => {
+    const outcome = withImmediate(db, () => {
       const row = readRun(db, id);
       if (row === null) {
         throw new RepositoryNotFoundError(`run ${id} not found`);
@@ -1057,6 +1135,11 @@ export function createKernelRepository(db: Database.Database) {
       }
       return { applied: true, run: parseRunRow(current) };
     });
+    // A failed run's staged proposal is dead: clean immediately (leak-free).
+    if (outcome.applied) {
+      clearStagedAfterTerminalCommit(id);
+    }
+    return outcome;
   }
 
   function cancelRun(
@@ -1065,7 +1148,7 @@ export function createKernelRepository(db: Database.Database) {
     options: TransitionOptions = {},
   ): { status: string; run: RunRow } {
     const now = nowMs(options.now);
-    return withImmediate(db, () => {
+    const outcome = withImmediate(db, () => {
       const row = requireOwnedRun(sessionId, runId);
       if (isTerminalStatus(row.status as RunStatus)) {
         return { status: row.status, run: parseRunRow(row) };
@@ -1122,6 +1205,15 @@ export function createKernelRepository(db: Database.Database) {
       // cancel_requested is state-idempotent: return current state, no new event.
       return { status: row.status, run: parseRunRow(row) };
     });
+    // Cancellation kills any staged proposal, including the cancel_requested
+    // intermediate (the run can never complete a proposal afterwards).
+    if (
+      outcome.status === "cancelled" ||
+      outcome.status === "cancel_requested"
+    ) {
+      clearStagedAfterTerminalCommit(runId);
+    }
+    return outcome;
   }
 
   function finalizeCancelRequested(
@@ -1130,7 +1222,7 @@ export function createKernelRepository(db: Database.Database) {
   ): { applied: boolean; run: RunRow } {
     const id = requireId(runId, "runId");
     const now = nowMs(options.now);
-    return withImmediate(db, () => {
+    const outcome = withImmediate(db, () => {
       const row = readRun(db, id);
       if (row === null) {
         throw new RepositoryNotFoundError(`run ${id} not found`);
@@ -1157,6 +1249,10 @@ export function createKernelRepository(db: Database.Database) {
       }
       return { applied: true, run: parseRunRow(current) };
     });
+    if (outcome.applied) {
+      clearStagedAfterTerminalCommit(id);
+    }
+    return outcome;
   }
 
   function sweepTerminals(
@@ -1190,6 +1286,8 @@ export function createKernelRepository(db: Database.Database) {
             { cause },
             now,
           );
+          // Abandonment kills any staged proposal (leak-free sweeps).
+          clearStagedAfterTerminalCommit(row.id);
           abandoned += 1;
         }
       }
@@ -1202,6 +1300,7 @@ export function createKernelRepository(db: Database.Database) {
           .run(now, row.id);
         if (moved.changes === 1) {
           appendEventInTx(db, row.id, row.event_seq, "run.cancelled", {}, now);
+          clearStagedAfterTerminalCommit(row.id);
           cancelled += 1;
         }
       }
@@ -2241,6 +2340,7 @@ export function createKernelRepository(db: Database.Database) {
       parseRunRow(requireOwnedRun(sessionId, runId)),
     requireOwnedTurn: (sessionId: string, turnId: string): TurnRow =>
       parseTurnRow(requireOwnedTurn(sessionId, turnId)),
+    actionProposalsStager: stager,
   };
 }
 

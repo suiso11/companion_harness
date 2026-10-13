@@ -9,6 +9,19 @@
 // HTTP lives in later milestones and is NOT part of this module.
 
 export type {
+  ActionProposalEventSink,
+  ActionProposalStager,
+  ActionProposalStagerOptions,
+  CalendarRescheduleAgentInput,
+  CalendarRescheduleAgentOutput,
+  CommittedProposal,
+  StagedProposedContent,
+} from "./action_proposals.js";
+export {
+  createActionProposalStager,
+  createCalendarRescheduleProposalRegistration,
+} from "./action_proposals.js";
+export type {
   AgentRepairReason,
   AgentStrategyOptions,
   CitationVerification,
@@ -258,6 +271,7 @@ export type {
 export { createReferenceResolver } from "./reference_resolver.js";
 export type {
   AcceptedResponse,
+  CreateKernelRepositoryOptions,
   CreateSessionOptions,
   EvidenceGrantRow,
   KernelRepository,
@@ -274,18 +288,8 @@ export type {
 } from "./repository.js";
 export { createKernelRepository } from "./repository.js";
 export {
-  createActionProposalStager,
-} from "./action_proposals.js";
-export type {
-  ActionProposalEventSink,
-  ActionProposalStager,
-  ActionProposalStagerOptions,
-  CommittedProposal,
-  StagedProposedContent,
-} from "./action_proposals.js";
-export {
-  actionExecutions,
   actionExecutionGrants,
+  actionExecutions,
   actionProposals,
   actionReceipts,
   apiIdempotency,

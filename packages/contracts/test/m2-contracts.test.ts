@@ -38,6 +38,8 @@ import {
   MAX_STRUCTURED_ANSWER_PARTS,
   MIN_PART_TEXT_CODE_POINTS,
   MIN_STRUCTURED_ANSWER_PARTS,
+  M5_RUN_EVENT_PAYLOAD_SCHEMAS,
+  M5_RUN_EVENT_TYPES,
   ModelStepCompletedPayloadSchema,
   ModelStepFailedPayloadSchema,
   ModelStepStartedPayloadSchema,
@@ -589,17 +591,31 @@ describe("M2/latest event registry (model.step.* non-terminal)", () => {
     ).toThrow();
   });
 
-  it("M2 is M1 ten + three steps (13, closed); M0/M1 stay exact", () => {
+  it("M2 is M1 ten + three steps (13, closed); M0/M1 stay exact; latest adds M5 actions", () => {
     expect(M0_RUN_EVENT_TYPES).toHaveLength(9);
     expect(M1_RUN_EVENT_TYPES).toHaveLength(10);
     expect(M2_RUN_EVENT_TYPES).toHaveLength(13);
     expect([...M2_RUN_EVENT_TYPES].sort()).toEqual(
       [...M1_RUN_EVENT_TYPES, ...M2_MODEL_STEP_EVENT_TYPES].sort(),
     );
-    expect(LATEST_RUN_EVENT_TYPES).toBe(M2_RUN_EVENT_TYPES);
+    // C16 (§18.8): seven action.* events are non-terminal registry extension.
+    // M2 itself is unchanged; latest is M2 + action.* (20 closed types).
+    expect(M2_RUN_EVENT_TYPES).not.toContain("action.proposed");
+    expect(LATEST_RUN_EVENT_TYPES).toBe(M5_RUN_EVENT_TYPES);
+    expect(
+      ([...LATEST_RUN_EVENT_TYPES] as string[]).every(
+        (type) =>
+          M2_RUN_EVENT_TYPES.includes(type as never) ||
+          M5_RUN_EVENT_TYPES.includes(type as never),
+      ),
+    ).toBe(true);
+    expect(LATEST_RUN_EVENT_TYPES).toHaveLength(20);
     expect(Object.keys(M1_RUN_EVENT_PAYLOAD_SCHEMAS)).toHaveLength(10);
     expect(Object.keys(M2_RUN_EVENT_PAYLOAD_SCHEMAS)).toHaveLength(13);
-    expect(LATEST_RUN_EVENT_PAYLOAD_SCHEMAS).toBe(M2_RUN_EVENT_PAYLOAD_SCHEMAS);
+    expect(LATEST_RUN_EVENT_PAYLOAD_SCHEMAS).toBe(
+      M5_RUN_EVENT_PAYLOAD_SCHEMAS,
+    );
+    expect(Object.keys(M5_RUN_EVENT_PAYLOAD_SCHEMAS)).toHaveLength(20);
   });
 
   it("latest/M2 parsers understand all three steps with exact payloads", () => {

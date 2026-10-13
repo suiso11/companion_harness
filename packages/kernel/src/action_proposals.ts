@@ -32,29 +32,30 @@
 //   construction (same signature as the repository `appendEventInTx`
 //   helper). The stager never opens its own transaction and is never its own
 //   terminal state: any failure throws before/without completing the caller's
-//   transaction, so a rollback leaves NO persisted proposal. `abort()` /
-//   `removeStaged()` discard staged content for failed/cancelled runs.
+//   transaction, so a rollback leaves NO persisted proposal. commitStaged
+//   never consumes the staged entry: the repository acknowledges it (via
+//   removeStaged) only AFTER the outer transaction commits, so a rollback
+//   preserves the stage and a committed completion clears it.
+//   `removeStaged()` also discards staged content for failed/cancelled runs.
 //
 // - `writeEnabled` defaults to FALSE and must be explicitly opted in via
 //   repository construction wiring; the stager refuses to stage or commit
 //   otherwise.
 
-import type Database from "better-sqlite3";
+import type { CalendarRescheduleToolInput } from "@companion/contracts";
 import {
   ActionProposedPayloadSchema,
   CALENDAR_RESCHEDULE_TOOL_NAME,
   CalendarRescheduleToolInputSchema,
   PROPOSAL_TTL_MS,
 } from "@companion/contracts";
-import type {
-  ActionProposedPayload,
-  CalendarRescheduleToolInput,
-} from "@companion/contracts";
-import {
-  canonicalJsonString,
-  generateId,
-  sha256Hex,
-} from "./canonical.js";
+import type Database from "better-sqlite3";
+import type { z } from "zod";
+
+/** Payload type mirroring the C16 strictObject schema (contracts export). */
+type ActionProposedPayload = z.infer<typeof ActionProposedPayloadSchema>;
+
+import { canonicalJsonString, generateId, sha256Hex } from "./canonical.js";
 import {
   RepositoryNotFoundError,
   RepositoryValidationError,
@@ -126,6 +127,11 @@ export interface ActionProposalStager {
    * COMMIT HOOK: call ONLY from within the repository `completeRun`
    * transaction. Revalidates and inserts the row + event; any failure throws
    * in the caller's transaction and a rollback persists nothing.
+   *
+   * C17 lifecycle fix: commitStaged does NOT consume the staged entry. The
+   * in-memory entry is acknowledged (removed) by the CALLER only after the
+   * OUTER transaction commits successfully, so a rollback preserves the
+   * stage for a retry and a committed completion clears it exactly once.
    */
   commitStaged(runId: string, now: number): CommittedProposal;
 }
@@ -154,9 +160,8 @@ function boundaryClass(value: string): "date" | "instant" {
 /** Parse a boundary into comparable ms. All-day: local midnight semantics. */
 function parseBoundaryMs(value: string, kind: "date" | "instant"): number {
   // Date-only strings keep whole-day semantics: compare as UTC midnight.
-  const ms = kind === "date"
-    ? Date.parse(`${value}T00:00:00Z`)
-    : Date.parse(value);
+  const ms =
+    kind === "date" ? Date.parse(`${value}T00:00:00Z`) : Date.parse(value);
   if (Number.isNaN(ms)) {
     throw new RepositoryValidationError(
       "start/end must be a valid instant or date-only range boundary",
@@ -282,9 +287,13 @@ export function createActionProposalStager(
     }
   }
 
-  function loadRun(
-    runId: string,
-  ): { id: string; sessionId: string; turnId: string; status: string; eventSeq: number } {
+  function loadRun(runId: string): {
+    id: string;
+    sessionId: string;
+    turnId: string;
+    status: string;
+    eventSeq: number;
+  } {
     const row = db
       .prepare(
         "SELECT id, session_id, turn_id, status, event_seq FROM runs WHERE id = ?",
@@ -420,7 +429,6 @@ export function createActionProposalStager(
           `no staged proposal for run ${runId}`,
         );
       }
-      requireWriteEnabled();
       if (now >= entry.expiresAt) {
         staged.delete(runId);
         throw new RepositoryValidationError("staged proposal expired");
@@ -432,7 +440,10 @@ export function createActionProposalStager(
           "action proposal commit requires a still-running run",
         );
       }
-      if (run.sessionId !== entry.sessionId || run.turnId !== entry.sourceTurnId) {
+      if (
+        run.sessionId !== entry.sessionId ||
+        run.turnId !== entry.sourceTurnId
+      ) {
         throw new RepositoryValidationError(
           "staged provenance no longer matches the run",
         );
@@ -508,9 +519,14 @@ export function createActionProposalStager(
         payload,
         now,
       );
-      // Commit consumed the staged entry: the stager is at most once per run
-      // unless explicitly re-staged after a rollback (map keeps immutability).
-      staged.delete(runId);
+      // ROLLBACK-SAFE LIFECYCLE (C17): the entry stays staged here. The
+      // repository caller acknowledges (removeStaged) ONLY after the outer
+      // transaction commits, so:
+      // - a rollback of completeRun preserves the stage for a retry, and
+      // - a committed completion clears it before any new stage().
+      // Double-commit inside one tx is still blocked by the exact
+      // one-pending-proposal-per-session recheck above (within the same
+      // caller transaction, the pending insert is visible to the check).
       return {
         ...entry,
         input: { ...entry.input },
@@ -542,3 +558,169 @@ function str(value: unknown): string {
   }
   return value;
 }
+
+// C17 second half: proposal-only `calendar.reschedule` ToolBroker
+// registration (broker + agent advertisement wiring).
+//
+/**
+ * PROPOSAL-ONLY registration (§18.1, C17): `calendar.reschedule` is a
+ * `write`-category tool whose sole model-reachable behavior STAGES a
+ * proposal. No external write, OAuth flow, adoption or provider API call
+ * ever happens here and dedicated Action execution stays unavailable.
+ *
+ * - Allowed ONLY from the normal agent origin (`AGENT_TOOL_ORIGIN`): any
+ *   other origin is denied with the fixed `tool_denied` code.
+ * - The stager is the single MAX-1-per-run cap and charges its budget
+ *   through the ordinary broker pipeline (budget_reserve first); a second
+ *   staged (or already-pending) proposal fails with the fixed
+ *   `action_preflight_failed` code. No raw validation text is returned to
+ *   the model.
+ * - The model-facing output is the deterministic, provider-id-free staged
+ *   shape `{ staged: true, start, end }`; the model can never spoof or
+ *   approve: no approve/reject tool exists for it, and the staged candidate
+ *   is committed only by the repository's own terminal CAS transaction.
+ * - Dedup is `always_bypass` on purpose: a repeat request re-enters the
+ *   handler and surfaces the concrete MAX-1 staging rejection instead of
+ *   silently reusing the first staged preview.
+ */
+import { AGENT_TOOL_ORIGIN } from "./agent.js";
+import {
+  ToolError,
+  type ToolHandlerContext,
+  type ToolRegistration,
+  type ToolSchema,
+} from "./broker.js";
+
+/**
+ * Build the proposal-only `calendar.reschedule` registration, FAIL CLOSED
+ * against a non-enabled stager: without explicit `writeEnabled` the
+ * descriptor can never be registered half-enabled (the factory asks the
+ * stager to enforce its own gate, and any later staging still rechecks it).
+ * The stager must be the caller's single shared instance (owned by the
+ * repository composition), never a per-call copy, so the MAX-1-per-run cap
+ * and the commit hook address the exact same staged entry.
+ */
+export function createCalendarRescheduleProposalRegistration(options: {
+  stager: ActionProposalStager;
+}): ToolRegistration {
+  const { stager } = options;
+  return {
+    descriptor: {
+      name: CALENDAR_RESCHEDULE_TOOL_NAME,
+      version: 1,
+      title: "Propose calendar event reschedule",
+      description:
+        "Propose (stage, never execute) a start/end-only reschedule of an already-found Calendar event; approval happens outside the model",
+      category: "write",
+      defaultTimeoutMs: 15_000,
+      maxTimeoutMs: 60_000,
+      supportsRefresh: false,
+    },
+    inputSchema: CalendarRescheduleAgentInputSchema,
+    outputSchema: CalendarRescheduleAgentOutputSchema,
+    dedupMode: "always_bypass",
+    proposalOnly: true,
+    handler: (async (
+      input: CalendarRescheduleAgentInput,
+      ctx: ToolHandlerContext,
+    ) => {
+      // Proposal-only from the normal agent origin; nothing else stages.
+      if (ctx.origin !== AGENT_TOOL_ORIGIN) {
+        throw new ToolError("tool_denied");
+      }
+      try {
+        stager.stage(ctx.runId, {
+          targetRefId: input.referenceId,
+          start: input.start,
+          end: input.end,
+        });
+      } catch (error) {
+        if (error instanceof ToolError) {
+          throw error;
+        }
+        // Raw validation text never reaches the model: fixed code only.
+        throw new ToolError("action_preflight_failed");
+      }
+      return { staged: true, start: input.start, end: input.end };
+    }) as ToolRegistration["handler"],
+    // Deterministic identity output: no ids, no content, no mutable status.
+    normalize: (raw) => ({
+      normalized: raw,
+      observations: 0,
+      modelFacing: raw,
+    }),
+  };
+}
+
+/** Closed agent input shape: rN-translated referenceId + start/end only. */
+export interface CalendarRescheduleAgentInput {
+  referenceId: string;
+  start: string;
+  end: string;
+}
+
+/** Closed agent output shape: staged marker + exact start/end echoes. */
+export interface CalendarRescheduleAgentOutput {
+  staged: true;
+  start: string;
+  end: string;
+}
+
+const CalendarRescheduleAgentInputSchema: ToolSchema<CalendarRescheduleAgentInput> =
+  {
+    parse(data: unknown): CalendarRescheduleAgentInput {
+      if (typeof data !== "object" || data === null || Array.isArray(data)) {
+        throw new Error("calendar.reschedule input must be an object");
+      }
+      const record = data as Record<string, unknown>;
+      const allowed = new Set(["referenceId", "start", "end"]);
+      for (const key of Object.keys(record)) {
+        if (!allowed.has(key)) {
+          throw new Error("unknown calendar.reschedule input field");
+        }
+      }
+      const sp = (value: unknown, what: string): string => {
+        if (
+          typeof value !== "string" ||
+          value.length < 1 ||
+          value.length > 128
+        ) {
+          throw new Error(`${what} must be a 1..128 character string`);
+        }
+        return value;
+      };
+      return {
+        referenceId: sp(record.referenceId, "referenceId"),
+        start: sp(record.start, "start"),
+        end: sp(record.end, "end"),
+      };
+    },
+  };
+
+const CalendarRescheduleAgentOutputSchema: ToolSchema<CalendarRescheduleAgentOutput> =
+  {
+    parse(data: unknown): CalendarRescheduleAgentOutput {
+      if (typeof data !== "object" || data === null || Array.isArray(data)) {
+        throw new Error("calendar.reschedule output must be an object");
+      }
+      const record = data as Record<string, unknown>;
+      if (record.staged !== true) {
+        throw new Error("calendar.reschedule output must be a staged marker");
+      }
+      const echo = (value: unknown, what: string): string => {
+        if (
+          typeof value !== "string" ||
+          value.length < 1 ||
+          value.length > 128
+        ) {
+          throw new Error(`staged ${what} echo invalid`);
+        }
+        return value;
+      };
+      return {
+        staged: true,
+        start: echo(record.start, "start"),
+        end: echo(record.end, "end"),
+      };
+    },
+  };
