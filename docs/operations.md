@@ -2394,3 +2394,66 @@ Verification (this worker, Linux, Node 24.12.0, after all edits):
 - Calendar action suite (Chromium, `COMPANION_E2E_CALENDAR=1`,
   `action.spec.ts` only): **20/20 passed** (~48s). No
   default-browser or full-suite rerun (unchanged paths).
+
+## C22 preview-ambiguity + CI failure followup (2026-10-13, observed)
+
+Followup on the same PR24 branch (`fix/c22-approval-card-target-expiry`);
+the new GitHub review thread (title ambiguity) and the two CI e2e failures
+on head `e4f6bf1` (PR run 38449588750: `action.spec.ts:841` lost-approve +
+`calendar.spec.ts:80` date assertion; push run 38449579628 SUCCESS) taken
+as ground truth, no failing-check rerun. No seeded proposals, fake HTTP
+success, wording pins, timeout/skip/retry changes, or provider/normalizer
+changes.
+
+- Kernel preview (`packages/kernel/src/action_proposals.ts`
+  `buildPreview`): new immutable previews now open with the unambiguous
+  human marker `対象イベント: <whole title> (rN): start=… end=…`. An
+  arbitrary normalized title beginning with `calendar.reschedule:` can no
+  longer sit at position 0, so the legacy tool-prefix strips in
+  `action_strategy.readRenderedPreviewForRun`,
+  `action_executions.renderedPreviewSummary`, and the client history
+  renderer never cut the real title. Reader logic is unchanged and still
+  renders historical (`calendar.reschedule: …`) stored previews correctly;
+  only their comments plus the stale client "staged preview carries the
+  tool prefix" claim were corrected.
+- `apps/server/src/ui/client.ts` `approve()`: a POST transport failure now
+  awaits `reconcileLostApprove()` with `deciding` held (timer + stale lists
+  cannot retire/downgrade the card mid-reconcile). A server-approved summary
+  takes approved ownership immediately (timer cleared, decisions disabled,
+  existing bounded watch started); still-pending re-renders controls with a
+  re-armed bounded timer; unreadable falls back to sync. Root cause of the
+  CI `action.spec.ts:841` failure: the fire-and-forget recovery sync could
+  be deduped while an older sync held a stale pending view, leaving a
+  server-approved card on its live expiry timer until `fastForward` retired
+  it (card gone at line 877). The same stale approved run (read barrier
+  never released) leaked into `calendar.spec.ts:80`: the next test's
+  `/reset` released the barrier, the orphan run's write landed 11:00/12:00
+  upstream mid-search, and the drawer showed the overwritten boundaries
+  instead of the fixture 09:00. Both failures share this single root cause;
+  no harness/test change was needed beyond the client fix.
+- E2E seam (`mcpFake.ts` `titleOverride` + `POST /set-title`, cleared by
+  `/reset`): `action.spec.ts` (+1, real
+  search/select/stage/approve/reload flow, exactly 1 write) freezes the
+  real title `calendar.reschedule: quarterly planning` and asserts it
+  survives the initial card, the execution receipt, and the reloaded
+  durable history in full.
+- Kernel regressions (no wording pins): `action_proposals.test.ts` stages
+  the adversarial title (marker prefix, full title, current rN, single
+  line, ≤1024 chars, never at position 0); `action_executions.test.ts`
+  drives a stored new-format preview through the real `blocked_stale`
+  terminal and asserts the RunResult text keeps the whole title while the
+  receipt `summary_json` is byte-preserved.
+
+Verification (this worker, Linux, Node 24.12.0, after all edits):
+
+- `pnpm test` -> exit 0, **107 files / 1298 tests passed** (+2 new), 0 failed.
+- `pnpm run typecheck`, `pnpm run typecheck:e2e`,
+  `pnpm --filter @companion/server typecheck`, root `tsc --noEmit` ->
+  exit 0.
+- `pnpm run lint` -> exit 0 (**224 files, 0 errors**, 1 pre-existing
+  `biome.json` recommended-deprecation info).
+- Default browser suite (Chromium): **23/23 passed**.
+- Calendar-mode suite (`COMPANION_E2E_CALENDAR=1`, Chromium):
+  **26/26 passed** (`action.spec.ts` 21/21 incl. the new title case,
+  `calendar.spec.ts` 4/4, `tombstone.spec.ts` 1/1), plus a second
+  consecutive 26/26 run.
