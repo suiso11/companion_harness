@@ -2323,3 +2323,45 @@ Final battery (this worker, Linux, Node 24.12.0, after all edits):
 - Calendar-mode suite (`COMPANION_E2E_CALENDAR=1`, Chromium):
   **22/22 passed** (`action.spec.ts` 17/17 incl. the 4 new cases,
   `calendar.spec.ts` 4/4, `tombstone.spec.ts` 1/1).
+
+## C22 independent-review lifecycle fixes (2026-10-13, observed)
+
+Followup on the same PR24 branch (`fix/c22-approval-card-target-expiry`);
+review observations taken as ground truth, no failing-before rerun. No
+mocked cards, DB seeding, new polling, or live provider/OAuth.
+
+- `apps/server/src/ui/client.ts` `reject()`: the real reject POST is now
+  `try/catch`. A transport abort before the server sees it releases
+  `deciding`, shows the fixed retry notice
+  (`却下できませんでした。もう一度お試しください`), and reconciles via
+  the real proposals read: still-pending restores buttons/deadline, an
+  accepted rejection retires on the real summary. Nothing is claimed
+  rejected.
+- `apps/server/src/ui/client.ts` `syncExecution()`: an authoritative
+  non-pending summary takes card ownership BEFORE the execution GET
+  (status transfer, `deciding=false`, pending timer cleared). Approved
+  renders disabled decisions (known run preserved) and arms the EXISTING
+  bounded execution watch for recovery when the GET resumes — no new
+  polling. Rejected/expired retire on the real summary (pre-GET and
+  post-GET paths) with history hydration; approved/terminal receipts keep
+  their existing lifecycle.
+- `apps/server/e2e/calendar/action.spec.ts` (+2, real UI/API only):
+  abort-first-reject recovers pending controls then the real reject lands
+  rejection history with 0 writes; real approve `route.fetch` + abort
+  delivery with execution-GET failed keeps the server-accepted card
+  (`approved`, controls disabled) across the original deadline, then
+  resume + preflight release verifies the real receipt with exactly
+  1 write.
+
+Verification (this worker, Linux, Node 24.12.0, after all edits):
+
+- `pnpm vitest run apps/server/test/action_ui.test.ts` -> exit 0,
+  **8/8 passed**.
+- `pnpm run typecheck`, `pnpm run typecheck:e2e` -> exit 0.
+- `pnpm run lint` -> exit 0 (**224 files**, 1 pre-existing
+  `biome.json` recommended-deprecation info).
+- Calendar action suite (Chromium, `COMPANION_E2E_CALENDAR=1`):
+  **19/19 passed** (`action.spec.ts` 17 existing + 2 new, ~48s).
+  No default-browser or full-1296 rerun (unchanged paths).
+- PR23/PR24 CI at push time: all checks SUCCESS (PR24 6/6 incl. e2e;
+  PR23 6/6); no failed logs to repair.
