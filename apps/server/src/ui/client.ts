@@ -127,6 +127,20 @@ interface ActionCard {
 }
 
 /**
+ * Action execution Stop state for ONE run, read from the ACTUAL
+ * `GET .../proposals/:id/execution` view (never localStorage, never a raw
+ * value). The generic composer consults this so a reloaded page never
+ * offers its ordinary Stop for an Action run that is already past the
+ * committed external-call marker (or terminal): only a live, pre-marker,
+ * cancellable Action execution keeps the composer Stop.
+ */
+interface ActionRunStopState {
+  readonly markerCommitted: boolean;
+  readonly cancellable: boolean;
+  readonly live: boolean;
+}
+
+/**
  * Reload recovery descriptor (§16.7): the recovered run id/turn plus the
  * discovered active status when known. `status` is `null` for an accepted
  * idempotency replay (whose stored response carries no status) and a
@@ -359,6 +373,10 @@ class ConversationApp {
         this.runTurns.set(descriptor.runId, descriptor.turnId);
       }
       this.seedActiveView(descriptor.runId, descriptor.status);
+      // A reload can adopt an m5-action Run as the generic active run. Read
+      // its ACTUAL execution marker/cancellability BEFORE the first composer
+      // paint so a post-marker (or terminal) Action never offers Stop.
+      await this.refreshActionRunStops();
       this.renderComposer();
     }
     // One final hydration owned by boot: durable history renders first so a
@@ -736,6 +754,13 @@ class ConversationApp {
 
   private readonly actionCards = new Map<string, ActionCard>();
   private actionSync: Promise<void> | null = null;
+  /**
+   * Actual Action execution Stop state by run id (`GET .../execution`
+   * reads only). Lets the generic composer hide/disable its Stop for a
+   * post-marker or terminal Action run adopted on reload, while an
+   * ordinary Run (no entry here) keeps the unchanged Stop behaviour.
+   */
+  private readonly actionRunStops = new Map<string, ActionRunStopState>();
   private static readonly ACTION_POLL_INTERVAL_MS = 1000;
   /** Bounded execution watch (proposal TTL is exactly 15 minutes). */
   private static readonly ACTION_POLL_MAX_TICKS = 16 * 60;
@@ -827,6 +852,10 @@ class ConversationApp {
     if (typeof view.proposalId !== "string") {
       return;
     }
+    // Every execution read refreshes the composer Stop routing for the
+    // owning run, so a marker that commits while the page lives hides the
+    // generic Stop without a reload.
+    this.trackActionExecutionView(view);
     // The execution read is the AUTHORITATIVE proposal state: a watch started
     // from the pre-approval (still `pending`) summary must never keep
     // rendering a decided/executed proposal as an actionable pending card.
@@ -884,6 +913,93 @@ class ConversationApp {
     ) {
       this.watchAction(view.proposalId, summary);
     }
+  }
+
+  /**
+   * Record the ACTUAL execution Stop state for the owning run (read-only,
+   * no DOM). The generic composer Stop consults this entry: a live,
+   * pre-marker, cancellable Action execution keeps the composer Stop, while
+   * a committed marker, a refused cancellability, or a terminal execution
+   * hides/disables it. Runs without an entry are ordinary Runs with the
+   * unchanged Stop behaviour.
+   */
+  private trackActionExecutionView(view: ProposalExecutionView): void {
+    if (view.runId === null) {
+      return;
+    }
+    const live =
+      view.status === "queued" ||
+      view.status === "preflight" ||
+      view.status === "executing";
+    this.actionRunStops.set(view.runId, {
+      markerCommitted: view.markerCommitted === true,
+      cancellable: view.cancellable === true,
+      live,
+    });
+    this.renderComposer();
+  }
+
+  /**
+   * Read-only refresh of every decided proposal's ACTUAL execution Stop
+   * state through the existing proposals/execution APIs (no DOM, no card
+   * side effects). Boot awaits this before the first composer paint so a
+   * reloaded post-marker Action cannot offer Stop even briefly.
+   */
+  private async refreshActionRunStops(): Promise<void> {
+    if (this.sessionId === null) {
+      return;
+    }
+    const sessionId = this.sessionId;
+    let listed: { status: number; body: unknown };
+    try {
+      listed = await fetchJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/proposals`,
+      );
+    } catch {
+      return;
+    }
+    if (listed.status !== 200 || this.sessionId !== sessionId) {
+      return;
+    }
+    const proposals = (listed.body as { proposals?: unknown }).proposals;
+    if (!Array.isArray(proposals)) {
+      return;
+    }
+    for (const item of proposals) {
+      if (!isProposalSummary(item) || item.status === "pending") {
+        continue;
+      }
+      let fetched: { status: number; body: unknown };
+      try {
+        fetched = await fetchJson(
+          `/api/sessions/${encodeURIComponent(sessionId)}/proposals/${encodeURIComponent(item.proposalId)}/execution`,
+        );
+      } catch {
+        continue;
+      }
+      if (fetched.status !== 200 || this.sessionId !== sessionId) {
+        continue;
+      }
+      const view = fetched.body as ProposalExecutionView;
+      if (typeof view.proposalId !== "string") {
+        continue;
+      }
+      this.trackActionExecutionView(view);
+    }
+  }
+
+  /**
+   * True when the run is a KNOWN Action execution whose generic composer
+   * Stop must stay hidden/disabled (committed marker, refused
+   * cancellability, or terminal execution). Unknown runs (ordinary Runs,
+   * or an Action not yet read) are never blocked here.
+   */
+  private isActionStopBlocked(runId: string): boolean {
+    const state = this.actionRunStops.get(runId);
+    if (state === undefined) {
+      return false;
+    }
+    return !state.live || state.markerCommitted || !state.cancellable;
   }
 
   /** Pure card model for the actual API reads plus the client clock. */
@@ -1483,6 +1599,14 @@ class ConversationApp {
     if (this.sessionId === null || this.activeRunId === null) {
       return;
     }
+    // A post-marker (or terminal) Action run adopted on reload must never
+    // be cancelled from the generic composer: re-read the actual state and
+    // leave the composer Stop hidden/disabled instead of posting.
+    if (this.isActionStopBlocked(this.activeRunId)) {
+      await this.refreshActionRunStops();
+      this.renderComposer();
+      return;
+    }
     const posted = await postJson(
       `/api/sessions/${encodeURIComponent(this.sessionId)}/runs/${encodeURIComponent(this.activeRunId)}/cancel`,
       {},
@@ -2068,9 +2192,17 @@ class ConversationApp {
     // round-trip (including the context freeze) is in flight; the input
     // itself stays enabled (§16.3 type-while-active).
     const busy = this.activeRunId !== null || this.sending;
+    // An adopted Action run keeps the composer busy (Send disabled), but
+    // its Stop follows the ACTUAL execution marker/cancellability: after
+    // the marker (or terminal) the generic Stop is hidden AND disabled —
+    // the write already left this process. Ordinary Runs are unchanged.
+    const actionBlocked =
+      this.activeRunId !== null && this.isActionStopBlocked(this.activeRunId);
+    const stopOffered = busy && !actionBlocked;
     this.sendButton.disabled = busy;
     this.input.disabled = false;
-    this.stopButton.hidden = !busy;
+    this.stopButton.hidden = !stopOffered;
+    this.stopButton.disabled = !stopOffered;
   }
 
   private finishActiveRun(): void {
