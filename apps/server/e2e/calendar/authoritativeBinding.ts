@@ -44,10 +44,10 @@ import {
 import { InMemoryTransport } from "@companion/connector-mcp";
 import {
   type CalendarCallOptions,
-  type CalendarGetPortResult,
+  type CalendarGetResult,
   type CalendarGetTarget,
   createCalendarConnector,
-  type CalendarSearchPortResult,
+  type CalendarSearchResult,
   normalizeGetResult,
 } from "@companion/connector-calendar";
 import {
@@ -136,13 +136,13 @@ export function createAuthoritativeCalendarBinding(
       search: async (
         input: unknown,
         callOptions: CalendarSearchCallOptions,
-      ): Promise<CalendarSearchPortResult> => {
+      ): Promise<CalendarSearchResult> => {
         return adapter.search(input, callOptions);
       },
       get: (
         target: CalendarGetTarget,
         callOptions?: CalendarCallOptions,
-      ): Promise<CalendarGetPortResult> =>
+      ): Promise<CalendarGetResult> =>
         authoritativeGet(adapter, mcp, options, target, callOptions),
     },
     shutdown: async () => {
@@ -163,13 +163,13 @@ async function authoritativeGet(
     get(
       target: CalendarGetTarget,
       options?: CalendarCallOptions,
-    ): Promise<CalendarGetPortResult>;
+    ): Promise<CalendarGetResult>;
   },
   mcp: McpConnector,
   options: AuthoritativeBindingOptions,
   target: CalendarGetTarget,
   callOptions?: CalendarCallOptions,
-): Promise<CalendarGetPortResult> {
+): Promise<CalendarGetResult> {
   if (options.state.authoritativeDeleted !== true) {
     return adapter.get(target, callOptions);
   }

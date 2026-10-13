@@ -343,7 +343,9 @@ export function createFakeCalendarMcpServer(
         content: [{ type: "text", text: "fake authoritative event" }],
         structuredContent: {
           event: {
-            ...fakeEvent(state),
+            // Type-only: `fakeEvent` builds the same object shape (typed
+            // `unknown` at the boundary); the spread is runtime-identical.
+            ...(fakeEvent(state) as Record<string, unknown>),
             // Provider-shaped positive deletion proof: a cancelled record
             // carrying the host-trusted synthetic revision. The fixture
             // wrapper requires BOTH the armed gate and this exact revision.
