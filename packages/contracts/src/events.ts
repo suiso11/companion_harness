@@ -1,3 +1,13 @@
+import {
+  ActionApprovedPayloadSchema,
+  ActionExecutionFinishedPayloadSchema,
+  ActionExecutionStartedPayloadSchema,
+  ActionPreflightBlockedPayloadSchema,
+  ActionPreflightFailedPayloadSchema,
+  ActionPreflightStartedPayloadSchema,
+  ActionProposedPayloadSchema,
+  M5_ACTION_EVENT_TYPES,
+} from "./action.js";
 import { z } from "zod";
 import { Sha256HexSchema, UnixMsSchema, UuidSchema } from "./ids.js";
 import {
@@ -148,7 +158,7 @@ export type TerminalEventType = (typeof TERMINAL_EVENT_TYPES)[number];
 export const TerminalEventTypeSchema = z.enum(TERMINAL_EVENT_TYPES);
 
 export function isTerminalEventType(
-  type: M0RunEventType | M1RunEventType | M2RunEventType,
+  type: M0RunEventType | M1RunEventType | M2RunEventType | M5RunEventType,
 ): type is TerminalEventType {
   return (TERMINAL_EVENT_TYPES as readonly string[]).includes(type);
 }
@@ -334,11 +344,6 @@ export const M2_RUN_EVENT_TYPES = [
 export type M2RunEventType = (typeof M2_RUN_EVENT_TYPES)[number];
 export const M2RunEventTypeSchema = z.enum(M2_RUN_EVENT_TYPES);
 
-/** Alias: M2 is the latest schema version served. */
-export const LATEST_RUN_EVENT_TYPES = M2_RUN_EVENT_TYPES;
-export type LatestRunEventType = M2RunEventType;
-export const LatestRunEventTypeSchema = M2RunEventTypeSchema;
-
 const ModelStepStartedEventSchema = z.strictObject({
   ...EnvelopeBase,
   type: z.literal("model.step.started"),
@@ -373,12 +378,8 @@ export const M2RunEventSchema = z.discriminatedUnion("type", [
 ]);
 export type M2RunEvent = z.infer<typeof M2RunEventSchema>;
 
-/** Alias: M2 is the latest schema version served. */
-export const LatestRunEventSchema = M2RunEventSchema;
-export type LatestRunEvent = M2RunEvent;
-
 /**
- * Latest (M2) per-type payload registry (M1 ten + the three model steps,
+ * Latest-at-M2 per-type payload registry (M1 ten + the three model steps,
  * with `run.completed` accepting V1 historical rows and V2 M2 rows).
  */
 export const M2_RUN_EVENT_PAYLOAD_SCHEMAS = {
@@ -389,11 +390,8 @@ export const M2_RUN_EVENT_PAYLOAD_SCHEMAS = {
   "model.step.failed": ModelStepFailedPayloadSchema,
 } as const;
 
-/** Alias: M2 is the latest schema version served. */
-export const LATEST_RUN_EVENT_PAYLOAD_SCHEMAS = M2_RUN_EVENT_PAYLOAD_SCHEMAS;
-
 /**
- * Latest (M2) events page: same cursor semantics as the M0/M1 pages, but
+ * M2 events page: same cursor semantics as the M0/M1 pages, but
  * events may include `reference.presented` and `model.step.*`. The exact
  * M0 page (`M0EventsResponseSchema` in http.ts) and the exact M1 page
  * (`M1EventsResponseSchema` above) are untouched.
@@ -406,11 +404,134 @@ export const M2EventsResponseSchema = z.strictObject({
 });
 export type M2EventsResponse = z.infer<typeof M2EventsResponseSchema>;
 
-/** Alias: M2 is the latest schema version served. */
-export const LatestEventsResponseSchema = M2EventsResponseSchema;
-export type LatestEventsResponse = M2EventsResponse;
+/* ------------------------------------------------------------------ */
+/* M5: action.* (non-final extension, §18.8)                            */
+/* ------------------------------------------------------------------ */
 
-/** Parse a full envelope with the latest registry (understands M2). */
+/**
+ * M5 non-final extension events: exactly seven action.* types (§18.8).
+ * `action.proposed` belongs to the originating Agent Run (pre-terminal);
+ * the other six belong to the deterministic Action Run. `action.rejected`
+ * deliberately does NOT exist — rejection is proposal state + the
+ * `action_rejection` Turn (§18.4). Payloads carry internal proposal /
+ * execution ids and summaries only; exactly one terminal run.* event still
+ * closes each Run and nothing may follow it. Also note the lifecycle
+ * precedence (§18.5/§18.6): `action.preflight_failed` is non-terminal and
+ * always precedes the terminal `run.failed`.
+ */
+export const M5_RUN_EVENT_TYPES = [
+  ...M2_RUN_EVENT_TYPES,
+  ...M5_ACTION_EVENT_TYPES,
+] as const;
+export type M5RunEventType = (typeof M5_RUN_EVENT_TYPES)[number];
+export const M5RunEventTypeSchema = z.enum(M5_RUN_EVENT_TYPES);
+
+const ActionProposedEventSchema = z.strictObject({
+  ...EnvelopeBase,
+  type: z.literal("action.proposed"),
+  payload: ActionProposedPayloadSchema,
+});
+const ActionApprovedEventSchema = z.strictObject({
+  ...EnvelopeBase,
+  type: z.literal("action.approved"),
+  payload: ActionApprovedPayloadSchema,
+});
+const ActionPreflightStartedEventSchema = z.strictObject({
+  ...EnvelopeBase,
+  type: z.literal("action.preflight_started"),
+  payload: ActionPreflightStartedPayloadSchema,
+});
+const ActionPreflightFailedEventSchema = z.strictObject({
+  ...EnvelopeBase,
+  type: z.literal("action.preflight_failed"),
+  payload: ActionPreflightFailedPayloadSchema,
+});
+const ActionPreflightBlockedEventSchema = z.strictObject({
+  ...EnvelopeBase,
+  type: z.literal("action.preflight_blocked"),
+  payload: ActionPreflightBlockedPayloadSchema,
+});
+const ActionExecutionStartedEventSchema = z.strictObject({
+  ...EnvelopeBase,
+  type: z.literal("action.execution_started"),
+  payload: ActionExecutionStartedPayloadSchema,
+});
+const ActionExecutionFinishedEventSchema = z.strictObject({
+  ...EnvelopeBase,
+  type: z.literal("action.execution_finished"),
+  payload: ActionExecutionFinishedPayloadSchema,
+});
+
+/** Exact M5 RunEvent envelope registry (schemaVersion=1, 20 closed types). */
+export const M5RunEventSchema = z.discriminatedUnion("type", [
+  RunQueuedEventSchema,
+  RunStartedEventSchema,
+  RunCancelRequestedEventSchema,
+  RunCompletedEventSchema,
+  RunFailedEventSchema,
+  RunCancelledEventSchema,
+  RunAbandonedEventSchema,
+  ToolRequestedEventSchema,
+  ToolCompletedEventSchema,
+  ReferencePresentedEventSchema,
+  ModelStepStartedEventSchema,
+  ModelStepCompletedEventSchema,
+  ModelStepFailedEventSchema,
+  ActionProposedEventSchema,
+  ActionApprovedEventSchema,
+  ActionPreflightStartedEventSchema,
+  ActionPreflightFailedEventSchema,
+  ActionPreflightBlockedEventSchema,
+  ActionExecutionStartedEventSchema,
+  ActionExecutionFinishedEventSchema,
+]);
+export type M5RunEvent = z.infer<typeof M5RunEventSchema>;
+
+/**
+ * Exact M5 per-type payload registry (M2 13 + the seven action events).
+ */
+export const M5_RUN_EVENT_PAYLOAD_SCHEMAS = {
+  ...M2_RUN_EVENT_PAYLOAD_SCHEMAS,
+  "action.proposed": ActionProposedPayloadSchema,
+  "action.approved": ActionApprovedPayloadSchema,
+  "action.preflight_started": ActionPreflightStartedPayloadSchema,
+  "action.preflight_failed": ActionPreflightFailedPayloadSchema,
+  "action.preflight_blocked": ActionPreflightBlockedPayloadSchema,
+  "action.execution_started": ActionExecutionStartedPayloadSchema,
+  "action.execution_finished": ActionExecutionFinishedPayloadSchema,
+} as const;
+
+/**
+ * Latest (M5) events page: same cursor semantics as the M0/M1/M2 pages, but
+ * events may additionally include the seven action.* types. Historical
+ * pages (`M0EventsResponseSchema`, `M1EventsResponseSchema`, and
+ * `M2EventsResponseSchema`) are untouched.
+ */
+export const M5EventsResponseSchema = z.strictObject({
+  events: z.array(M5RunEventSchema),
+  nextAfter: z.number().int().min(0),
+  hasMore: z.boolean(),
+  terminal: z.boolean(),
+});
+export type M5EventsResponse = z.infer<typeof M5EventsResponseSchema>;
+
+/** Alias: M5 is the latest schema version served. */
+export const LatestEventsResponseSchema = M5EventsResponseSchema;
+export type LatestEventsResponse = M5EventsResponse;
+
+/** Alias: M5 is the latest schema version served. */
+export const LATEST_RUN_EVENT_TYPES = M5_RUN_EVENT_TYPES;
+export type LatestRunEventType = M5RunEventType;
+export const LatestRunEventTypeSchema = M5RunEventTypeSchema;
+
+/** Alias: M5 is the latest schema version served. */
+export const LatestRunEventSchema = M5RunEventSchema;
+export type LatestRunEvent = M5RunEvent;
+
+/** Alias: M5 is the latest schema version served. */
+export const LATEST_RUN_EVENT_PAYLOAD_SCHEMAS = M5_RUN_EVENT_PAYLOAD_SCHEMAS;
+
+/** Parse a full envelope with the latest registry (understands M5). */
 export function parseRunEvent(data: unknown): LatestRunEvent {
   return LatestRunEventSchema.parse(data);
 }
@@ -460,8 +581,23 @@ export function parseM2RunEventPayload<T extends M2RunEventType>(
   ) as z.infer<(typeof M2_RUN_EVENT_PAYLOAD_SCHEMAS)[T]>;
 }
 
-/** Parse a bare payload for a known latest (M2) type. */
-export function parseRunEventPayload<T extends M2RunEventType>(
+/** Parse a full envelope with the exact M5 registry (rejects M6+ names). */
+export function parseM5RunEvent(data: unknown): M5RunEvent {
+  return M5RunEventSchema.parse(data);
+}
+
+/** Parse a bare payload for a known M5 type (exact M5 registry). */
+export function parseM5RunEventPayload<T extends M5RunEventType>(
+  type: T,
+  data: unknown,
+): z.infer<(typeof M5_RUN_EVENT_PAYLOAD_SCHEMAS)[T]> {
+  return (M5_RUN_EVENT_PAYLOAD_SCHEMAS[type] as z.ZodType).parse(
+    data,
+  ) as z.infer<(typeof M5_RUN_EVENT_PAYLOAD_SCHEMAS)[T]>;
+}
+
+/** Parse a bare payload for a known latest (M5) type. */
+export function parseRunEventPayload<T extends M5RunEventType>(
   type: T,
   data: unknown,
 ): z.infer<(typeof LATEST_RUN_EVENT_PAYLOAD_SCHEMAS)[T]> {

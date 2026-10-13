@@ -8,7 +8,7 @@
  * details, reference-context CAS DTOs, stored-only API responses, Markdown
  * tool inputs/outputs with exact §14.6 bounds, freshness, reference error
  * codes, and the non-final `reference.presented` event. M0 registries stay
- * exact; `parseRunEvent` / `parseRunEventPayload` serve the latest (M2)
+ * exact; `parseRunEvent` / `parseRunEventPayload` serve the latest (M5)
  * registry while `parseM0RunEvent` / `M0RunEventSchema` pin M0 assertions
  * and `parseM1RunEvent` / `M1RunEventSchema` pin M1 assertions.
  *
@@ -18,9 +18,65 @@
  * contracts (see `./model.js`): the fixed redacted model/answer error
  * vocabulary and the non-final `model.step.started` / `model.step.completed`
  * / `model.step.failed` structural-metadata events. M0/M1 registries stay
- * exact; `M2*` / `Latest*` serve the latest (M2) registry.
+ * exact; `M5*` / `Latest*` serve the latest (M5) registry.
+ *
+ * M5 adds the Action contracts (see `./action.js`): the immutable
+ * ActionProposal / ActionExecution / one-shot ActionExecutionGrant /
+ * ActionReceipt schemas, the exact `calendar.reschedule` input
+ * (start / end only), the strict `{ proposalHash }` approve/reject DTOs and
+ * the `202` queued response, the `action_approval` / `action_rejection`
+ * TurnInput variants, and the seven non-terminal `action.*` events
+ * (envelopes in `./events.js`). Historical M0/M1/M2 registries stay exact
+ * and untouched; `M5RunEvent*` / `Latest*` serve the M5 registry
+ * (there is deliberately no `action.rejected` RunEvent).
  */
 
+export type {
+  ActionExecution,
+  ActionExecutionGrant,
+  ActionExecutionStatus,
+  ActionProposal,
+  ActionProposalPreview,
+  ActionProposalStatus,
+  ActionReceipt,
+  ActionReceiptOutcome,
+  CalendarRescheduleToolInput,
+  M5ActionErrorCode,
+  M5ActionEventType,
+  ProposalApprove202Response,
+  ProposalApproveRequest,
+  ProposalRejectRequest,
+} from "./action.js";
+export {
+  ActionApprovedPayloadSchema,
+  ActionExecutionFinishedPayloadSchema,
+  ActionExecutionGrantSchema,
+  ActionExecutionSchema,
+  ActionExecutionStartedPayloadSchema,
+  ActionExecutionStatusSchema,
+  ActionPreflightBlockedPayloadSchema,
+  ActionPreflightFailedPayloadSchema,
+  ActionPreflightStartedPayloadSchema,
+  ActionProposalPreviewSchema,
+  ActionProposalSchema,
+  ActionProposalStatusSchema,
+  ActionProposedPayloadSchema,
+  ActionReceiptOutcomeSchema,
+  ActionReceiptSchema,
+  CALENDAR_RESCHEDULE_TOOL_NAME,
+  CalendarRescheduleToolInputSchema,
+  CalendarRescheduleToolNameSchema,
+  M5_ACTION_ERROR_CODES,
+  M5_ACTION_EVENT_TYPES,
+  M5ActionErrorCodeSchema,
+  M5ActionEventTypeSchema,
+  MAX_PENDING_PROPOSALS_PER_SESSION,
+  PROPOSAL_TTL_MS,
+  ProposalApprove202ResponseSchema,
+  ProposalApproveRequestSchema,
+  ProposalRejectRequestSchema,
+  proposalApproveScope,
+} from "./action.js";
 export type {
   CalendarEventStatus,
   CalendarGetTarget,
@@ -45,6 +101,8 @@ export type {
   M1RunEventType,
   M2RunEvent,
   M2RunEventType,
+  M5RunEvent,
+  M5RunEventType,
   RunEvent,
   TerminalEventType,
 } from "./events.js";
@@ -73,12 +131,19 @@ export {
   M2EventsResponseSchema,
   M2RunEventSchema,
   M2RunEventTypeSchema,
+  M5_RUN_EVENT_PAYLOAD_SCHEMAS,
+  M5_RUN_EVENT_TYPES,
+  M5EventsResponseSchema,
+  M5RunEventSchema,
+  M5RunEventTypeSchema,
   parseM0RunEvent,
   parseM0RunEventPayload,
   parseM1RunEvent,
   parseM1RunEventPayload,
   parseM2RunEvent,
   parseM2RunEventPayload,
+  parseM5RunEvent,
+  parseM5RunEventPayload,
   parseRunEvent,
   parseRunEventPayload,
   REFERENCE_PRESENTED_EVENT_TYPE,
@@ -438,11 +503,15 @@ export {
   ToolResultSchema,
 } from "./tools.js";
 export type {
+  ActionApprovalTurnInputV1,
+  ActionRejectionTurnInputV1,
   TurnInputSchemaVersion,
   TurnInputV1,
   UserTextTurnInputV1,
 } from "./turn_input.js";
 export {
+  ActionApprovalTurnInputV1Schema,
+  ActionRejectionTurnInputV1Schema,
   MAX_USER_TEXT_LENGTH,
   parseTurnInput,
   TURN_INPUT_REGISTRY,
