@@ -86,6 +86,12 @@ import {
   type ServerConfig,
   ServerConfigError,
 } from "./config.js";
+import {
+  assertGoogleReadonlyHintCompatible,
+  CALENDAR_PROFILE_ENV,
+  getGoogleReadonlyDefinitions,
+  parseCalendarProfileName,
+} from "./calendarReadonlyProfile.js";
 import { createStdServerLogger, type ServerLogger } from "./logger.js";
 import {
   measureStoreSize,
@@ -658,7 +664,37 @@ export async function startServer(
         "calendar config and an injected calendar binding are mutually exclusive",
       );
     }
-    if (calendarConfig !== null && options.mcpDefinitions === undefined) {
+    // Host-owned pinned readonly profile (normal `pnpm start` selection):
+    // COMPANION_CALENDAR_PROFILE=google-readonly supplies the exact
+    // reviewed definitions from trusted host code (never env/config). It
+    // requires the JSON hint to describe exactly the adopted candidate
+    // (identity + stdio + 3 pinned live-wire hashes); any deviation fails
+    // closed. Unset profile keeps the previous behavior: explicit
+    // `mcpDefinitions` injection or an INCOMPLETE-opt-in failure.
+    const profileEnv = (options.env ?? process.env)[CALENDAR_PROFILE_ENV];
+    const calendarProfile = parseCalendarProfileName(profileEnv);
+    let effectiveMcpDefinitions: readonly McpBindingDefinition[] | undefined =
+      options.mcpDefinitions;
+    if (calendarProfile !== null) {
+      if (calendarBinding !== null) {
+        throw new ServerConfigError(
+          "calendar profile and an injected calendar binding are mutually exclusive",
+        );
+      }
+      if (calendarConfig === null) {
+        throw new ServerConfigError(
+          "calendar profile requires calendar config",
+        );
+      }
+      if (options.mcpDefinitions !== undefined) {
+        throw new ServerConfigError(
+          "calendar profile and explicit binding definitions are mutually exclusive",
+        );
+      }
+      assertGoogleReadonlyHintCompatible(calendarConfig);
+      effectiveMcpDefinitions = getGoogleReadonlyDefinitions();
+    }
+    if (calendarConfig !== null && effectiveMcpDefinitions === undefined) {
       // An opt-in config without the separate host-trusted definitions is an
       // INCOMPLETE opt-in: fail closed (never a silent disable and never a
       // discovered/model-defined registration) BEFORE listen.
@@ -710,11 +746,11 @@ export async function startServer(
         calendarTargetStore = createDurableCalendarTargetStore(handle.raw);
       } else if (
         calendarConfig !== null &&
-        options.mcpDefinitions !== undefined
+        effectiveMcpDefinitions !== undefined
       ) {
         // C14 OWNED Calendar MCP lifecycle. Fail-closed preflight first (no
         // DB write for an incompatible, never-authorizable configuration).
-        assertCalendarMcpCompatibility(calendarConfig, options.mcpDefinitions);
+        assertCalendarMcpCompatibility(calendarConfig, effectiveMcpDefinitions);
         // Exact persisted registration: ONE metadata-only `calendar` instance
         // (kind/version/selection checked and reconciled by the kernel; a
         // changed selection fails closed). No provider ids beyond the
@@ -738,7 +774,7 @@ export async function startServer(
         // startup (lazy connect, per-call fixed `mcp_unavailable`).
         ownedMcp = new McpConnector(
           ownedConnectorConfig,
-          options.mcpDefinitions,
+          effectiveMcpDefinitions,
           options.mcpTransportFactory,
         );
         // Defense-in-depth exact-identity re-check of the stored row AFTER
