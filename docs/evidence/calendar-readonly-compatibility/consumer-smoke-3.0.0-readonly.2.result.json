@@ -221,7 +221,7 @@
     "fetch": 0
   },
   "credentialFree": {
-    "command": "env -i PATH=<allow> HOME=<owned-tmp> ./packages/connector-mcp/node_modules/.bin/tsx .readonly-compat/evidence/probe-consumer-smoke.source.mts",
+    "command": "env -i PATH=<allow> HOME=<owned-tmp> FORK_COMMIT=<sha> FORK_TREE=<tree> FORK_LOCK_DIGEST=<digest> ./packages/connector-mcp/node_modules/.bin/tsx docs/evidence/calendar-readonly-compatibility/probe-consumer-smoke.source.mts (FORK_* are operator-supplied replay inputs, not runtime-derived; pin separately verifies actual git/lock)",
     "limitations": "no OAuth/TokenManager/account index/CLI; no live Google HTTP; no GH/Google credentials in env; InMemory SDK transport only; fixture accounts + inert provider via ONLY BaseToolHandler.getCalendar seam",
     "liveClaims": "none (no OAuth, no live Google call, no HTTP status, no release claim)"
   },

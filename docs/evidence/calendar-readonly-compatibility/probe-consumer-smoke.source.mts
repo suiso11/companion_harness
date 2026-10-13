@@ -18,29 +18,41 @@
  * `McpConnector` (trusted 3 read bindings) + `createCalendarConnector`
  * adapter (search query/queryless, get, cursor, accounts, privacy).
  *
- * Run (repo root, allowlisted env, no credentials):
- *   env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$(mktemp -d)" \
- *     ./packages/connector-mcp/node_modules/.bin/tsx \
- *     .readonly-compat/evidence/probe-consumer-smoke.source.mts
- * Prints one JSON object to stdout (redirect to the result file). Reads only
- * the fork package.json version + package-lock digest inputs supplied by the
- * operator via env (FORK_COMMIT/TREE/LOCK_DIGEST); makes no network calls.
+ * Run (repo root, credential-stripped env, no Google/GH tokens, no OAuth):
+ *   Prerequisites (temporary exact fork checkout under .readonly-compat/fork,
+ *   not committed): git fetch origin
+ *   6939311fd3eae9846648e0a175e304c9500f578e && git checkout <that SHA>;
+ *   verify git rev-parse HEAD / HEAD^{tree} + package-lock.json sha256
+ *   against the pin; fork deps optional here (probe runs via Companion tsx;
+ *   if installed: env -i PATH=<allow> HOME=<owned-tmp> npm ci
+ *   --ignore-scripts --no-audit --no-fund --prefix .readonly-compat/fork).
+ *   Probe (FORK_* values below are operator-supplied replay inputs echoed
+ *   into the result identity block; the pin separately verifies them
+ *   against actual git/lock — they are NOT runtime-derived assertions):
+ *   env -i PATH=<allow> HOME=<owned-tmp>
+ *     FORK_COMMIT=6939311fd3eae9846648e0a175e304c9500f578e
+ *     FORK_TREE=f01b5a7b608c4091906a52c0784b828c35963de9
+ *     FORK_LOCK_DIGEST=63261d25992ee9c97136a60bbf4fe52a5485cadea28b34d6b8b6c685f38bd533
+ *     ./packages/connector-mcp/node_modules/.bin/tsx
+ *     docs/evidence/calendar-readonly-compatibility/probe-consumer-smoke.source.mts
+ * Prints one JSON object to stdout (redirect to the result file). Makes no
+ * network calls; stdlib http/https + fetch deny counters must stay 0.
  */
 import http from "node:http";
 import https from "node:https";
 import { createHash } from "node:crypto";
 
-import { ToolRegistry } from "../fork/src/tools/registry.ts";
-import { GoogleCalendarMcpServer } from "../fork/src/server.ts";
-import { BaseToolHandler } from "../fork/src/handlers/core/BaseToolHandler.ts";
+import { ToolRegistry } from "../../../.readonly-compat/fork/src/tools/registry.ts";
+import { GoogleCalendarMcpServer } from "../../../.readonly-compat/fork/src/server.ts";
+import { BaseToolHandler } from "../../../.readonly-compat/fork/src/handlers/core/BaseToolHandler.ts";
 import {
   McpConnector,
   type CallResult,
-} from "../../packages/connector-mcp/src/client.ts";
-import { canonicalSchemaHash } from "../../packages/connector-mcp/src/config.ts";
-import { createCalendarConnector } from "../../packages/connector-calendar/src/adapter.ts";
-import { InMemoryTransport } from "../../packages/connector-mcp/node_modules/@modelcontextprotocol/sdk/dist/esm/inMemory.js";
-import { Client } from "../../packages/connector-mcp/node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js";
+} from "../../../packages/connector-mcp/src/client.ts";
+import { canonicalSchemaHash } from "../../../packages/connector-mcp/src/config.ts";
+import { createCalendarConnector } from "../../../packages/connector-calendar/src/adapter.ts";
+import { InMemoryTransport } from "../../../packages/connector-mcp/node_modules/@modelcontextprotocol/sdk/dist/esm/inMemory.js";
+import { Client } from "../../../packages/connector-mcp/node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js";
 
 // ---- credential-free network denial (counters must stay 0) ----
 const netDeny = { httpRequest: 0, httpGet: 0, httpsRequest: 0, httpsGet: 0, fetch: 0 };
@@ -446,7 +458,7 @@ async function main() {
     },
     networkDeny: netDeny,
     credentialFree: {
-      command: "env -i PATH=<allow> HOME=<owned-tmp> ./packages/connector-mcp/node_modules/.bin/tsx .readonly-compat/evidence/probe-consumer-smoke.source.mts",
+      command: "env -i PATH=<allow> HOME=<owned-tmp> FORK_COMMIT=<sha> FORK_TREE=<tree> FORK_LOCK_DIGEST=<digest> ./packages/connector-mcp/node_modules/.bin/tsx docs/evidence/calendar-readonly-compatibility/probe-consumer-smoke.source.mts (FORK_* are operator-supplied replay inputs, not runtime-derived; pin separately verifies actual git/lock)",
       limitations: "no OAuth/TokenManager/account index/CLI; no live Google HTTP; no GH/Google credentials in env; InMemory SDK transport only; fixture accounts + inert provider via ONLY BaseToolHandler.getCalendar seam",
       liveClaims: "none (no OAuth, no live Google call, no HTTP status, no release claim)",
     },

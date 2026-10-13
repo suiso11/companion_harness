@@ -1598,10 +1598,28 @@ retained). Current candidate `6939311fd3eae9846648e0a175e304c9500f578e`
 `3.0.0-readonly.2`, lock
 `63261d25992ee9c97136a60bbf4fe52a5485cadea28b34d6b8b6c685f38bd533`,
 deps unchanged 277 packages). Cutover `f03b03b`/`80987bf`/`6939311`.
-Repro: `.readonly-compat/evidence/probe-consumer-smoke.source.mts` +
-`consumer-smoke-3.0.0-readonly.2.result.json` (PASS 35/35,
-credential-free, network 0); machine pin:
-`docs/evidence/calendar-readonly-candidate-pin.json`. Binding pin is LIVE
+Repro (published portable exact-checkout replay artifacts):
+`docs/evidence/calendar-readonly-compatibility/probe-consumer-smoke.source.mts` +
+`consumer-smoke-3.0.0-readonly.2.result.json` (actual rerun from the
+published path PASS 35/35, credential-free, network 0, metadata 0;
+liveWire 3/3 unchanged fail-closed); diagnostic
+`probe-tools-list.source.mts` +
+`candidate-3.0.0-readonly.2.result.json` (registry-direct only, NOT the
+binding pin); machine pin:
+`docs/evidence/calendar-readonly-candidate-pin.json`. Prerequisites
+(temporary exact fork checkout under `.readonly-compat/fork`, not
+committed): `git fetch origin
+6939311fd3eae9846648e0a175e304c9500f578e` + checkout that SHA, verify
+`rev-parse HEAD`/`HEAD^{tree}` + `package-lock.json` sha256 vs pin;
+optional fork deps `env -i PATH=<allow> HOME=<owned-tmp> npm ci
+--ignore-scripts --no-audit --no-fund --prefix <fork-dir>`. Probe
+`env -i PATH=<allow> HOME=<owned-tmp>
+FORK_COMMIT=<sha> FORK_TREE=<tree> FORK_LOCK_DIGEST=<digest>
+./packages/connector-mcp/node_modules/.bin/tsx
+docs/evidence/calendar-readonly-compatibility/probe-consumer-smoke.source.mts`
+(`FORK_*` are operator-supplied replay inputs echoed in the result, not
+runtime-derived; pin separately verifies actual git/lock; no Google/GH
+tokens, no OAuth, no live HTTP). Binding pin is LIVE
 wire (`81222b89…`/`d48ba36e…`/`8c6736e2…`, protocol `2025-11-25`, SDK
 `1.30.0`); registry-direct bytes and the legacy tools-list probe are
 diagnostic only. `list-calendars` removed (no alias); scope stays
