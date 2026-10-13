@@ -1288,6 +1288,100 @@ source touched (no scope broadening, no UI/server/browser changes).
   retains its pre-existing errors at HEAD (confirmed by stashing and
   re-checking before the fixes).
 
+## C24 action pause handoff (2026-10-13)
+
+Work is PAUSED at a clean boundary at the user's explicit request to change
+model configuration. No new feature/fix was implemented in this handoff and no
+checks were run.
+
+- HEAD at pause: `518636c563f6e157e5765d3494020e0efbd2135e`
+  (`518636c docs(operations): record C24 action-core review fixes …`);
+  `git status --short` was empty (clean tree) before this handoff commit.
+- The latest completed worker fixed 4 core m5-action review bugs in commits
+  `1d73677` (expired pending proposal / session cap), `da95122` (target
+  resolved before the grant gate), `043c0a2` (recovery sweep without the
+  inner join, fail-closed on a missing execution) and `9582355` (post-marker
+  `definite_failure` terminal accepted). Verification is the prior worker's
+  OBSERVED record only — 31 focused kernel cases and a 474-test kernel
+  battery — NOT a new run for this handoff (see the section above for full
+  hashes and regressions). Scaffold deletions out of C15 `347dce3` were
+  detected as out-of-scope but agent-authored and intentional, landed as
+  `c5b336c` beside the doc commit `518636c`.
+- Remaining review UI bugs (NOT started): (a) the generic composer's Stop,
+  after a reload, is still marked/routed as an in-flight Action; (b) the
+  `cancelAction` handler ignores the response's actual terminal status and
+  claims "stopped" on any 200 — it must claim cancelled ONLY when the
+  response actually terminalises as cancelled (fail-closed on other
+  outcomes).
+- Whole-repo lint is NOT closed at HEAD. A blanket "pre-existing errors"
+  claim is deliberately NOT made here: the prior worker's stash-based
+  baseline check (documented above as "confirmed by stashing and
+  re-checking") is unreliable because stashing is prohibited for
+  preservation of unrelated changes, so remaining errors must be re-observed
+  directly against HEAD by an allowed method.
+- Publication blockers (last actual push; no PR was created): the HTTPS
+  remote prompt had NO username supplied, the SSH public key was DENIED by
+  the host, and `gh` is NOT logged in. Consequently there is no PR and no
+  verified compare URL for this branch/pause state; publishing requires an
+  authenticated remote or a working credential before any C22 label is
+  applied.
+- Next concrete steps (for the resuming worker): 1) fix the composer Stop
+  post-reload marked-Action bug in the UI layer; 2) fix `cancelAction` to
+  honour the actual terminal status (cancelled only on a cancelled terminal,
+  never on a bare 200); 3) re-run whole-repo `biome check .` against HEAD
+  without stashing and close outstanding errors; 4) only after UI review
+  closes, re-run the full battery and record observed numbers. Do NOT call
+  C22 done while the two UI review bugs above remain open.
+
+## C24 action Stop-fix resume (2026-10-13, resume-stop-finish)
+
+Resumes the paused handoff above WITHOUT rewriting it. The two remaining UI
+review bugs are now FIXED, each committed separately (model kept as
+configured `opencode-go/muse-spark-1.3-contributor`, no override):
+
+- `c0327bc50714a745861cf44e351bd6affa041559` fix(ui): gate generic composer
+  Stop on actual Action execution marker/cancellability (composer tracks the
+  real execution view per run id; hides/disables Stop past the committed
+  marker, on refused cancellability, or on terminal execution).
+- `bf2b33eac12639c15c38ca064cd73ef158bc6518` fix(ui): claim action stop only
+  on actual cancelled terminal, refresh otherwise (`cancelAction` parses the
+  validated `run.status`; stopped notice ONLY on a cancelled terminal).
+
+Regressions + type-only drift fixes (working tree at resume, committed by
+this worker in coherent chunks — see hashes below):
+
+- `apps/server/e2e/calendar/action.spec.ts`: 2 new actual-browser cases —
+  reload-during-held-post-marker-write (no Stop anywhere, cancel API 409s,
+  release verifies success) and late-cancel-on-terminal (200 keeps actual
+  receipt, no stop claim).
+- `apps/server/test/action_ui.test.ts`: unit gate for `parseCancelRunStatus`
+  (cancelled only on cancelled; live/terminal-race statuses refresh;
+  malformed bodies fail closed to null).
+- Type-only (no runtime change): `authoritativeBinding.ts`
+  `CalendarGetPortResult`/`CalendarSearchPortResult` → `CalendarGetResult`/
+  `CalendarSearchResult`; `mcpFake.ts` spread cast to
+  `Record<string, unknown>`.
+
+Verification: per the declared prior-worker record, focused UI tests, types,
+and the 2 new browser cases were ALL GREEN before this resume; this worker
+ran NO passing checks again (no tests/build/browser rerun per scope). The
+retained log `/tmp/resume-action-stop.log` (and `/tmp/resume-action-*`) was
+NOT readable in this session (tool permission denial on `/tmp` outside
+`/tmp/opencode`), so exact green counts are NOT re-quoted here — see the
+prior evidence section above (31 focused kernel / 474 kernel battery) and
+the Stop-fix commits for the code change.
+
+Lint: no lint recheck was run here (explicit no-recheck scope); whole-repo
+`biome check .` therefore remains NOT closed, and remaining ROOT errors on
+touched files (if any) are still open — no lint/type fix beyond the retained
+type-only drift fixes above was applied.
+
+Publication: PR #20 is published for this branch, SUPERSEDING the pause
+handoff's historical "no PR / publication blockers" block above (SSH denied,
+HTTPS prompt, `gh` not logged in at pause time). History is not rewritten:
+the pause block stands as the observed state at pause; this note records
+that it is superseded.
+
 ## Non-goals (explicit)
 Domain retention/GC (except newest-3 backup rotation), user export,
 session delete API, running-process deletion, auto-restore, DB/backup
