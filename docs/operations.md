@@ -1801,3 +1801,152 @@ remote access/auth.
 - Backup prune re-verifies containment + non-symlink immediately before
   delete (best-effort TOCTOU narrowing).
 - POSIX permission bits are not meaningful on Windows (see above).
+
+## PR20 integrated plan verification (2026-10-13, pr20-integrated-plan-verification)
+
+FINAL integrated acceptance on HEAD `61b3573` (review6 threads fixed
+plus the independent-review follow-ups `93f197f`/`72e5b37`/`61b3573`).
+The C12–C22 gate (`814eac5`, 103 files / 1251 tests) predates the PR20
+fixes, so the root full suite + both typechecks + lint below were run
+ONCE against the new changes; the 13/13 browser action cases already
+green at `61b3573` are confirmed by the T1 follow-up record above and
+NOT rerun. Model kept as configured, no override. No new
+features/tests/scaffolding, no live OAuth, no provider writes, no
+adoption, no Remind work, no dependencies, no stack rewrite.
+
+### Final checks (each run ONCE; Linux, Node 24.12.0, pnpm 11.25.0)
+
+- `pnpm test` → exit 0, **106 test files passed, 1270 tests passed,
+  0 failed / 0 skipped** (~12s).
+- `pnpm typecheck` (root `tsconfig.json`) → exit 0, empty output.
+- `pnpm typecheck:e2e` (`apps/server/tsconfig.e2e.json`) → exit 0,
+  empty output.
+- `pnpm lint` (`biome check .`) → exit 1 with exactly **2 format
+  diagnostics, both on parent-owned preserved
+  `.review-plan-work/reviews-companion.json` /
+  `.review-plan-work/reviews-fork.json`** (untracked review evidence
+  placed by the parent; kept byte-identical until publication per
+  scope, not reformatted, not deleted). Every product/source file is
+  clean (0 errors on all owned paths). Ground truth, not suppressed:
+  whole-repo lint cannot go green while those two files are present;
+  closing it needs either formatting parent evidence or a Biome ignore
+  outside this worker's declared paths — reported, not fixed here.
+- Browser: `apps/server/e2e/calendar/action.spec.ts` **13/13 passed at
+  `61b3573`** per the T1 follow-up record above; confirmed only.
+
+### §19 source-run acceptance (actual OPERATIONS CLI, own disposable tempstore)
+
+First actual source-run of the documented §19.2/§19.5 path on this
+branch (not a unit mock echo): real `pnpm start` cold starts, real
+`GET /health/live` + `/health/ready`, real stopped-server
+`pnpm --filter @companion/server backup`, real stopped-only manual
+restore, real second cold start. Disposable store
+`.review-plan-work/source-run-smoke/store/` only (removed after
+evidence; review JSON kept). Environment was explicit and
+credential-stripped: `COMPANION_DB_PATH` = own store path,
+`COMPANION_HOST=127.0.0.1`, `COMPANION_PORT=44831` (probed free),
+`COMPANION_TIME_ZONE=UTC`, `COMPANION_LOG_LEVEL=info`, plus inherited
+`PATH`/`HOME` only; `COMPANION_MODEL_JSON` / `COMPANION_CALENDAR_JSON`
+/ `COMPANION_MARKDOWN_ROOTS_JSON` / `COMPANION_ACTIONS_JSON` all unset
+(verified absent beforehand), no Calendar/model config, no
+Google/OAuth, no non-loopback network. No port/host value assumed from
+outside: host/port came from the explicit env above against the
+`config.ts` contract (loopback-only `127.0.0.1`, DB symlink guards).
+
+- Cold start 1 (`pnpm start`): `server.starting port 44831`,
+  `server.migrated status 7`, `server.recovered status 0`,
+  `server.listening port 44831`. `GET /health/live` → 200
+  `{"status":"live"}` (1/1). `GET /health/ready` → 200
+  `{"status":"ready"}` (1/1). Marker session
+  `POST /api/sessions` (fresh `Idempotency-Key`) → 201, id
+  `d4685063-3e95-484f-ac57-b4c04c274161` (1/1).
+- Stop 1: SIGTERM to the node server process → `server.draining
+  status sigterm` → `server.stopped status sigterm`; port 44831
+  closed, no server process left (2/2 stops clean in this smoke).
+  Operational note: the signal must reach the node process — killing
+  the `pnpm`/`sh` wrapper alone leaves the listener up (observed once,
+  then corrected; no product change).
+- Manual backup (stopped server, documented command
+  `pnpm --filter @companion/server backup`): exit 0, stdout basename
+  only `companion-manual-20261013T114053Z-87b91b9a-7d33-4342-b24e-0fd5363f0324.sqlite`
+  (1/1, exact `companion-manual-<UTC>-<uuid>.sqlite` shape). Store and
+  `backups/` dirs `0700`, backup file `0600` (3/3). `PRAGMA
+  quick_check` of the backup copy → `ok` (1/1). Observation (product
+  behavior unchanged): the run leaves
+  `companion-manual-….sqlite.partial-shm` / `.partial-wal` residue in
+  `backups/`; the CLI contract (basename-only stdout, fixed safe
+  errors, stopped-only, no path flags) held.
+- Stopped-only manual restore (documented exact sequence, with loss):
+  (1) server stopped; (2) current db preserved aside (331776 B; the
+  `-wal`/`-shm` sidecars were already checkpointed away by the clean
+  drain); (3) live db removed to simulate loss; (4) verified backup
+  copied to `restore.tmp.sqlite` next to the DB; (5) `PRAGMA
+  quick_check` of the temp copy → `ok`; (6) atomic same-dir rename
+  onto the DB path (mode `0600`); (7) no stale `-wal`/`-shm`
+  while still stopped. (7/7 steps as documented.)
+- Cold start 2 on the restored store: `server.migrated status 7`
+  (no-op), `server.recovered status 0`, `server.listening port
+  44831`; `GET /health/ready` → 200 `{"status":"ready"}` (2/2 across
+  starts), `GET /health/live` → 200 (2/2). Marker session
+  `GET /api/sessions/<id>/active-run` → 200 `{"run":null}` (data
+  survived the loss+restore; not a fresh DB), unknown session id →
+  404 (no false positive).
+- Stop 2: draining → stopped, port closed. Own runtime files
+  (smoke store, preserved copy, server logs, capture files) removed
+  after this evidence; `.review-plan-work/reviews-*.json` kept.
+
+Smoke counters: cold starts 2/2 ready, health live 2/2, health ready
+2/2, marker sessions created 1/1, backups 1/1 (basename + 0600 +
+quick_check), restores 1/1 (7/7 documented steps), post-restore data
+proofs 2/2, clean stops 2/2.
+
+### Plan residual map (C01–C22 fake implementation/review proof vs formal release gates)
+
+Nothing below closes a formal gate or authorizes an unapproved
+decision. "IMPLEMENTED" means consumer/fake-harness implementation
+with review proof; formal release gates stay explicit.
+
+| item | status | boundary |
+| --- | --- | --- |
+| C01–C07 milestones / browser resilience / aggregate CI | HISTORICAL EVIDENCE (see README + C07) | 23/23 browser CI aggregate pinned to `56b7952a`; not re-asserted for this HEAD. |
+| C08 upstream adoption | **HOLD / NOT ADOPTED** | No adopted binding, pin, profile, or registration anywhere in this branch. |
+| C09 MCP library policy | IMPLEMENTED (library) / server enablement HOLD | Mandatory host definitions, read-only lattice, stdio/HTTP bounds proven by review smokes; production registration absent. |
+| C10 consumer normalization | IMPLEMENTED / C10-08 production mapping **UNRESOLVED** | Whole-second-regex vs fractional-ISO gap persists as an adoption hold. |
+| C11 deletion boundary | IMPLEMENTED (consumer negatives) / C11-01 **BLOCKED** | Cancelled / bare 404-410 / thrown RPC / search omission are never positive evidence; actual upstream HTTP status UNKNOWN. |
+| C12–C16 pipeline / broker / config / fake E2E | IMPLEMENTED (consumer/fake) | Real-SDK + fake-harness proofs only; adoption HOLD. |
+| C17–C20 engine / M2 / UI slices | IMPLEMENTED | Covered by the 106-file / 1270-test battery above. |
+| C21 M5 Action composition | IMPLEMENTED (triple gate) | Config hints + dedicated write port + exact-instance match; disabled gate refuses staging / 409-before-repository. **No production write binding selected; dedicated write binding / adoption + triple-gate live use NOT authorized.** |
+| C22 action lifecycle E2E | IMPLEMENTED (fake) | Fake seams + real chromium (13/13 at `61b3573`, confirmed not rerun); not live. |
+| Windows 11 x64 manual smoke | **NOT EXECUTED** | Linux-only evidence here; §19.6 support gate stays open. |
+| Fresh OAuth | **SEPARATE DECISION, untouched** | No flow, token, or status read here (`No authstatus/login/tokenread`). |
+| Remind I01–I05 | **UNAPPROVED, untouched** | Other repo; no C23/C24 invented, nothing solved here. |
+| Candidate PR21/22 | **STACKED REVIEW ONLY** | PR20 baseline pins have known gaps; the newest candidate is NOT claimed as the current binding. |
+
+§20 write-binding source facts (parent-read, directly relevant to the
+residual gate design only — SOURCE facts, not actual Google provider
+proof; no write binding implemented/adopted, no extra docs/spike
+tests created): fork `6939311` `UpdateEventHandler` is
+dormant/unregistered; it performs `getCalendarTimezone` /
+`detectEventType` plus broad-field and recurring-split paths; its
+`events.patch` calls lack `If-Match`; no approved narrow reschedule
+port exists. Google version-resources semantics: setting `If-Match`
+against a concurrent revision rejects with `412`. Gate-design
+consequence (still unapproved): any future narrow reschedule port
+must carry the exact revision in `If-Match` and treat `412` as the
+concurrency signal — recorded here only so the residual gate is
+designed against the source truth.
+
+Reachable-work check: every §19 agreed item reachable locally
+(source-run, backup/restore/health exact paths, full suite +
+typechecks) is observed above; all unapproved decisions (OAuth,
+adoption, write binding, Remind, Windows manual, C23/C24) are
+untouched. The authoritative `active_projects_plan.md` of the
+external parent repo was not copied or created (not present in this
+worktree); plan execution is recorded in the existing docs only
+(operations here + README progress section).
+
+Scaffolds: `.review-plan-work/source-run-smoke/` removed after
+evidence; `.review-plan-work/reviews-*.json` kept until publication;
+no `test-results/`, `.verification-log/`, `.final-gate-tmp/`, or
+`.review-proof/` residue; no test file touched by the lint ground
+truth above.
