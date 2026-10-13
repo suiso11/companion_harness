@@ -347,3 +347,122 @@ test("Stop after the write marker is disabled (409) and the write completes", as
   expect((done.receipt as { outcome?: string } | null)?.outcome).toBe("succeeded");
   expect(await writeCalls(request)).toBe(1);
 });
+
+test("reload during held post-marker write hides every Stop and cancel API 409s", async ({
+  page,
+  request,
+}) => {
+  await stageProposal(page);
+  await control(request, "/arm-write", { mode: "barrier" });
+  await page.locator("#action-approve").click();
+  // The write barrier holds the run AFTER the committed external-call
+  // marker: the real UI removes the card Stop before the reload.
+  const card = page.locator('[data-action-card="true"]');
+  await expect(card).toHaveAttribute("data-action-state", "executing", {
+    timeout: 60_000,
+  });
+  await expect(card).toHaveAttribute("data-action-marker", "committed");
+  await expect(page.locator("[data-action-stop='true']")).toBeHidden();
+  // Reload adopts the still-executing Action run as the generic active run:
+  // the composer stays busy (Send disabled) but must offer NO Stop, and no
+  // card Stop may exist either.
+  await page.reload();
+  await expect(page.locator("#composer")).toBeVisible();
+  await expect(page.locator("#composer-send")).toBeDisabled();
+  const composerStop = page.locator("#composer-stop");
+  await expect(composerStop).toBeHidden();
+  await expect(composerStop).toBeDisabled();
+  await expect(page.locator("[data-action-stop='true']")).toHaveCount(0);
+  // The committed marker refuses cancellation through the real API, and no
+  // stop is claimed for the refusal.
+  const sessionId = await sessionIdOf(page);
+  const view = await executionView(page, request);
+  expect(view.markerCommitted).toBe(true);
+  expect(view.cancellable).toBe(false);
+  expect(typeof view.runId).toBe("string");
+  const cancel = await request.post(
+    `${CALENDAR_APP_ORIGIN}/api/sessions/${sessionId}/runs/${view.runId as string}/cancel`,
+    { data: {} },
+  );
+  expect(cancel.status()).toBe(409);
+  await expect(page.locator("#composer-notice")).not.toContainText("停止しました");
+  // Releasing the held write lets the run verify to a real success.
+  await control(request, "/release");
+  await expect
+    .poll(
+      async () =>
+        (
+          (await executionView(page, request)).receipt as {
+            outcome?: string;
+          } | null
+        )?.outcome ?? null,
+      { timeout: 60_000 },
+    )
+    .toBe("succeeded");
+  expect(await writeCalls(request)).toBe(1);
+});
+
+test("late cancel on a terminal run claims no stop (200 keeps actual receipt)", async ({
+  page,
+  request,
+}) => {
+  await stageProposal(page);
+  // Hold the authoritative preflight read so the card Stop is offered on a
+  // stable pre-marker window; the write itself resolves ambiguous.
+  await control(request, "/arm-read-barrier");
+  await control(request, "/arm-write", { mode: "unknown" });
+  await page.locator("#action-approve").click();
+  const stop = page.locator("[data-action-stop='true']");
+  await expect(stop).toBeVisible({ timeout: 60_000 });
+  // Gate the REAL cancel POST (test-side timing only — the click, the
+  // request and the server are all real) so the run reaches its terminal
+  // BEFORE the cancel is processed: a deterministic late-cancel race.
+  let releaseCancel!: () => void;
+  const cancelGate = new Promise<void>((resolve) => {
+    releaseCancel = resolve;
+  });
+  try {
+    await page.route("**/runs/*/cancel", async (route) => {
+      await cancelGate;
+      await route.continue();
+    });
+    const card = page.locator('[data-action-card="true"]');
+    await stop.click();
+    // The held read now runs to its real terminal while cancel is gated.
+    await control(request, "/release");
+    await expect(card).toHaveAttribute("data-action-state", "unknown", {
+      timeout: 60_000,
+    });
+    const done = await executionView(page, request);
+    expect(done.status).toBe("unknown");
+    expect(done.markerCommitted).toBe(true);
+    // The late cancel lands on the terminal run: HTTP 200 with the actual
+    // terminal run status — never a stop claim, never a success rewrite.
+    const cancelWait = page.waitForResponse(
+      (res) => res.url().includes("/cancel") && res.request().method() === "POST",
+    );
+    const refreshed = page.waitForResponse(
+      (res) => res.url().includes("/execution") && res.request().method() === "GET",
+    );
+    releaseCancel();
+    const cancelRes = await cancelWait;
+    expect(cancelRes.status()).toBe(200);
+    const cancelBody = (await cancelRes.json()) as {
+      run?: { status?: unknown };
+    };
+    const terminal = cancelBody.run?.status;
+    expect(["completed", "failed", "abandoned"]).toContain(terminal);
+    expect(terminal).not.toBe("cancelled");
+    // The client processed the late 200 by refreshing the actual state...
+    await refreshed;
+    // ...and claimed no stop: the real ambiguous outcome stands.
+    await expect(page.locator("#composer-notice")).not.toContainText("停止しました");
+    await expect(card).toHaveAttribute("data-action-state", "unknown");
+    const view = await executionView(page, request);
+    expect((view.receipt as { outcome?: string } | null)?.outcome).toBe("unknown");
+    expect(await writeCalls(request)).toBe(1);
+  } finally {
+    releaseCancel();
+    await page.unroute("**/runs/*/cancel").catch(() => {});
+  }
+});

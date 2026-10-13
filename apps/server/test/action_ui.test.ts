@@ -13,6 +13,7 @@ import {
   actionDecisionIntentText,
   actionErrorCodeText,
   type ActionCardInput,
+  parseCancelRunStatus,
   receiptOutcomeText,
 } from "../src/ui/reducer.js";
 
@@ -145,5 +146,41 @@ describe("C22 action card model", () => {
     expect(actionDecisionIntentText("action_approval", "blocked_stale")).toContain(
       "更新しませんでした",
     );
+  });
+
+  it("parses the actual cancel run status for the stop-claim gate", () => {
+    // ONLY a `cancelled` terminal may claim the stop; every other real
+    // status (a live accept or a terminal race loss) must refresh instead.
+    expect(
+      parseCancelRunStatus({
+        run: { id: "00000000-0000-4000-8000-000000000000", status: "cancelled" },
+      }),
+    ).toBe("cancelled");
+    for (const status of [
+      "queued",
+      "running",
+      "cancel_requested",
+      "completed",
+      "failed",
+      "abandoned",
+    ]) {
+      expect(
+        parseCancelRunStatus({
+          run: { id: "00000000-0000-4000-8000-000000000000", status },
+        }),
+      ).toBe(status);
+    }
+    // Malformed bodies fail closed (null = refresh, never a stop claim).
+    for (const bad of [
+      null,
+      undefined,
+      {},
+      { run: null },
+      { run: { id: "00000000-0000-4000-8000-000000000000" } },
+      { run: { status: 200 } },
+      "cancelled",
+    ]) {
+      expect(parseCancelRunStatus(bad)).toBeNull();
+    }
   });
 });
