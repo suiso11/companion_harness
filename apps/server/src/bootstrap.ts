@@ -768,9 +768,11 @@ export async function startServer(
     // derives the trusted port from the identity the server just registered.
     // Exactly one of `port` / `derivePort` is accepted; a binding supplying
     // both or neither stays unusable and fails closed when the config opted
-    // in (never a silently half-enabled surface).
+    // in (never a silently half-enabled surface). When the config is
+    // disabled the binding is never adopted: no derive call, no capability
+    // read, no use, no owned shutdown.
     let actionWritePort: CalendarActionWritePort | null = null;
-    if (actionWrite !== null) {
+    if (actionConfigEnabled && actionWrite !== null) {
       const suppliedPort = actionWrite.port !== undefined;
       const deriveFn = actionWrite.derivePort;
       // Exactly ONE of the two: supplying BOTH or NEITHER is an incomplete
@@ -873,19 +875,24 @@ export async function startServer(
       logger.info("server.actions_ready", { status: 1 });
     }
 
-    // C21 lifecycle: ONLY an EXPLICITLY owned injected write port is shut
-    // down (after the engine drain, before the DB close). A caller-owned port
-    // (default) is never closed by the server.
-    ownedActionShutdown = async (): Promise<void> => {
-      if (actionWrite?.owned !== true || actionWrite.shutdown === undefined) {
-        return;
-      }
-      try {
-        await actionWrite.shutdown();
-      } catch {
-        // The port's own cleanup is the caller's; never fail shutdown.
-      }
-    };
+    // C21 lifecycle: ONLY an adopted (actionsEnabled) EXPLICITLY owned
+    // injected write port is shut down (after the engine drain, before the
+    // DB close). A caller-owned port (default) is never closed by the
+    // server, and a disabled composition never adopts the port at all.
+    if (
+      actionsEnabled &&
+      actionWrite?.owned === true &&
+      actionWrite.shutdown !== undefined
+    ) {
+      const shutdownFn = actionWrite.shutdown;
+      ownedActionShutdown = async (): Promise<void> => {
+        try {
+          await shutdownFn();
+        } catch {
+          // The port's own cleanup is the caller's; never fail shutdown.
+        }
+      };
+    }
     // M2 (opt-in): when config.model is set, build the loopback gateway
     // and register the agent under m0-default before engine.start/listen.
     // The agent reuses the M1 ToolBroker, or a private empty-registration

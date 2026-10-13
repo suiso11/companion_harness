@@ -132,6 +132,18 @@ describe("C21 M5 Action triple-gated composition", () => {
     const { env, dbPath } = tempEnv();
     const instanceId = await provisionCalendarInstance(dbPath);
     let updates = 0;
+    let closed = 0;
+    let capabilityReads = 0;
+    const inner = fakeWritePort(instanceId, () => {
+      updates += 1;
+    });
+    const port: CalendarActionWritePort = {
+      get capability() {
+        capabilityReads += 1;
+        return inner.capability;
+      },
+      update: inner.update,
+    };
     const started = await startServer({
       env,
       calendarBinding: {
@@ -141,12 +153,10 @@ describe("C21 M5 Action triple-gated composition", () => {
       },
       // Injected, but the config gates it off: never used, never closed.
       actionWriteBinding: {
-        port: fakeWritePort(instanceId, () => {
-          updates += 1;
-        }),
+        port,
         owned: true,
         shutdown: async () => {
-          throw new Error("must not shut down a disabled composition");
+          closed += 1;
         },
       },
       drainMs: 50,
@@ -164,6 +174,42 @@ describe("C21 M5 Action triple-gated composition", () => {
     expect(probe.body).toContain("action_execution_disabled");
     expect(updates).toBe(0);
     await started.shutdown("test");
+    // Disabled composition never adopts the port: no capability read, no
+    // use, no owned shutdown.
+    expect(capabilityReads).toBe(0);
+    expect(closed).toBe(0);
+  });
+
+  it("never derives or closes a disabled derived owned binding", async () => {
+    const { env, dbPath } = tempEnv();
+    const instanceId = await provisionCalendarInstance(dbPath);
+    let derived = 0;
+    let closed = 0;
+    const started = await startServer({
+      env,
+      calendarBinding: {
+        connectorInstanceId: instanceId,
+        connector: fakeCalendarBinding(instanceId),
+        selection: { calendarId: "cal-primary", account: "ops@example" },
+      },
+      actionWriteBinding: {
+        derivePort: () => {
+          derived += 1;
+          return fakeWritePort(instanceId);
+        },
+        owned: true,
+        shutdown: async () => {
+          closed += 1;
+        },
+      },
+      drainMs: 50,
+    });
+    servers.push(started);
+    const probe = await approveProbe(started);
+    expect(probe.status).toBe(409);
+    await started.shutdown("test");
+    expect(derived).toBe(0);
+    expect(closed).toBe(0);
   });
 
   it("registers the proposal-only tool when all three gate conditions hold", async () => {
@@ -321,6 +367,30 @@ describe("C21 M5 Action triple-gated composition", () => {
     });
     await started.shutdown("test");
     expect(closed).toBe(1);
+  });
+
+  it("never closes an enabled caller-owned write port", async () => {
+    const { env, dbPath } = tempEnv();
+    const instanceId = await provisionCalendarInstance(dbPath);
+    let closed = 0;
+    const started = await startServer({
+      env: { ...env, COMPANION_ACTIONS_JSON: ENABLED_ACTIONS_JSON },
+      calendarBinding: {
+        connectorInstanceId: instanceId,
+        connector: fakeCalendarBinding(instanceId),
+        selection: { calendarId: "cal-primary", account: "ops@example" },
+      },
+      actionWriteBinding: {
+        port: fakeWritePort(instanceId),
+        shutdown: async () => {
+          closed += 1;
+        },
+      },
+      drainMs: 50,
+    });
+    servers.push(started);
+    await started.shutdown("test");
+    expect(closed).toBe(0);
   });
 });
 
