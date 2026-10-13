@@ -20,7 +20,8 @@
 // - Staged content is hashed with the existing canonical helpers
 //   (`canonicalJsonString` + `sha256Hex`) over the EXACT immutable content
 //   (tool, input, target triple, expectedRevision, preview). The deterministic
-//   preview is a start/end-only summary line; provider ids never appear in
+//   preview is a target-aware human summary (immutable normalized event title
+//   + session rN + start/end); provider ids never appear in
 //   any staged preview returned or persisted.
 //
 // - `commitStaged(runId, now)` is public but ONLY safely callable inside the
@@ -139,6 +140,7 @@ export interface ActionProposalStager {
 
 interface TargetRow {
   readonly refId: string;
+  readonly ordinal: number;
   readonly resourceId: string;
   readonly snapshotId: string;
   readonly connectorInstanceId: string;
@@ -198,7 +200,7 @@ function loadTarget(
 ): TargetRow {
   const row = db
     .prepare(
-      `SELECT sr.id AS ref_id, sr.resource_id, sr.snapshot_id,
+      `SELECT sr.id AS ref_id, sr.ordinal AS ref_ordinal, sr.resource_id, sr.snapshot_id,
               r.connector_instance_id, ci.kind,
               rs.source_revision, rs.content_hash, rs.body_json
        FROM session_references sr
@@ -210,6 +212,7 @@ function loadTarget(
     .get(sessionId, targetRefId) as
     | {
         ref_id: string;
+        ref_ordinal: number;
         resource_id: string;
         snapshot_id: string;
         connector_instance_id: string;
@@ -224,8 +227,14 @@ function loadTarget(
       "target must be an exact Calendar session reference of this run's session",
     );
   }
+  if (!Number.isSafeInteger(row.ref_ordinal) || row.ref_ordinal < 1) {
+    throw new RepositoryValidationError(
+      "target must be an exact Calendar session reference of this run's session",
+    );
+  }
   return {
     refId: row.ref_id,
+    ordinal: row.ref_ordinal,
     resourceId: row.resource_id,
     snapshotId: row.snapshot_id,
     connectorInstanceId: row.connector_instance_id,
@@ -239,6 +248,8 @@ function loadTarget(
 function freshSnapshotRevision(target: TargetRow): {
   expected: string;
   eventStatus: string;
+  /** Immutable normalized event title (raw; sanitized at preview build). */
+  title: string;
 } | null {
   // The STORED row is the SnapshotBody wrapper ReferenceManager wrote
   // (`{ version: 1, text }`); the normalized Calendar event is the strict
@@ -267,6 +278,8 @@ function freshSnapshotRevision(target: TargetRow): {
     Array.isArray(body) ||
     !("status" in body) ||
     typeof (body as { status: unknown }).status !== "string" ||
+    !("title" in body) ||
+    typeof (body as { title: unknown }).title !== "string" ||
     !("start" in body) ||
     typeof (body as { start: unknown }).start !== "string" ||
     !("end" in body) ||
@@ -277,6 +290,7 @@ function freshSnapshotRevision(target: TargetRow): {
     );
   }
   const eventStatus = (body as { status: string }).status;
+  const title = (body as { title: string }).title;
   // Fresh snapshot: a deleted event snapshot can never back a reschedule.
   if (eventStatus === "deleted") {
     return null;
@@ -285,6 +299,40 @@ function freshSnapshotRevision(target: TargetRow): {
   return {
     expected: target.sourceRevision ?? target.contentHash,
     eventStatus,
+    title,
+  };
+}
+
+/**
+ * Deterministic human preview title: immutable normalized event title only,
+ * rendered as plain text (no markup, no provider ids). NFC, trimmed,
+ * internal whitespace collapsed to single spaces, code-point truncated well
+ * inside the 1024-char preview bound. Empty/blank titles fall back to the
+ * fixed neutral label (never empty, never guessed content).
+ */
+function previewTitle(raw: string): string {
+  const collapsed = raw.normalize("NFC").trim().replace(/\s+/g, " ");
+  if (collapsed.length === 0) {
+    return "calendar event";
+  }
+  return Array.from(collapsed).slice(0, 128).join("");
+}
+
+/**
+ * Deterministic target-aware human preview (C22 §18.9): immutable normalized
+ * event title plus the session rN citation plus the staged start/end. No
+ * tool name, no UUID/provider ids, no upstream reads — everything derives
+ * from the frozen staged triple (target row + normalized snapshot text +
+ * staged input). Same `{ summary }` seam, same hash coverage.
+ */
+function buildPreview(params: {
+  title: string;
+  ordinal: number;
+  start: string;
+  end: string;
+}): { summary: string } {
+  return {
+    summary: `${previewTitle(params.title)} (r${params.ordinal}): start=${params.start} end=${params.end}`,
   };
 }
 
@@ -379,10 +427,14 @@ export function createActionProposalStager(
           "target snapshot event is deleted; staging requires a fresh snapshot",
         );
       }
-      // Deterministic start/end-only preview (no provider ids, no content).
-      const preview = {
-        summary: `${CALENDAR_RESCHEDULE_TOOL_NAME}: start=${parsed.start} end=${parsed.end}`,
-      };
+      // Deterministic target-aware human preview (no provider ids, no
+      // tool name, no content beyond the immutable title + rN + range).
+      const preview = buildPreview({
+        title: fresh.title,
+        ordinal: target.ordinal,
+        start: parsed.start,
+        end: parsed.end,
+      });
       const expectedRevision = fresh.expected;
       // Exact immutable content hash via the canonical helpers.
       const hash = sha256Hex(
