@@ -1382,6 +1382,44 @@ HTTPS prompt, `gh` not logged in at pause time). History is not rewritten:
 the pause block stands as the observed state at pause; this note records
 that it is superseded.
 
+## C24 Stop-fix lint close (2026-10-13, resume-close-lint)
+
+Whole-repo lint was re-observed directly against the current tree (no stash,
+no revert, model kept as configured, no override). Full `pnpm run lint`
+(`biome check .`) was run ONCE pre-fix and ONCE post-fix; no
+passing tests/types/browser reruns were done for this lint-only slice.
+
+- PRE (HEAD `f64f169`, before fixes): `biome check .` exit 1 —
+  **217 files checked, 40 errors, 1 info** (the `biome.json`
+  `recommended`-deprecation info). Owned errors (ROOT, on files this
+  branch touches per `git diff origin/feat/c12-calendar-snapshots...HEAD`):
+  `action.spec.ts` format; `authoritativeBinding.ts` organizeImports +
+  format; `mcpFake.ts` format; `src/ui/client.ts` organizeImports +
+  format; `src/ui/reducer.ts` format; `test/action_ui.test.ts`
+  organizeImports + format (10 diagnostics). Raw output retained at
+  `.verification-log/resume-lint.log` (not committed).
+- FIX (no semantics, no mass format): `biome check --write` applied ONLY
+  to the 6 owned files above — import-name ordering plus formatter
+  rewraps; diff-verified as reorder/whitespace only. No enum/source/table
+  count test existed in the touched files, so nothing was deleted or
+  repinned. The untracked owned Playwright scaffold
+  `apps/server/test-results/.last-run.json` (empty `test-results/` dir,
+  `{"status":"passed","failedTests":[]}`, from the Stop-fix browser runs)
+  was deleted; no unknown files were touched.
+- POST (after fixes, formatter step done): `pnpm run lint` exit 1 —
+  **216 files checked, 30 errors, 1 info** (same pre-existing info).
+  All 6 owned files are clean (zero diagnostics). The remaining 30 errors
+  are all in files this branch does NOT touch (per the same base diff):
+  `e2e/calendar/actionPort.ts`, `e2e/calendar/server.ts`,
+  `e2e/calendar/tombstone.spec.ts`, `playwright.config.ts`,
+  `src/app.ts`, `src/bootstrap.ts`, `test/action_composition.test.ts`,
+  `test/proposals.test.ts`, `packages/contracts/*`,
+  `packages/kernel/*` (format + organizeImports only; full list truncated
+  by Biome's diagnostic cap — see `.verification-log/resume-lint-postfix.log`,
+  not committed). They are reported as unrelated blockers, not fixed here
+  per scope (no unrelated mass format). Whole-repo lint is therefore NOT
+  closed; owned lint is closed.
+
 ## Non-goals (explicit)
 Domain retention/GC (except newest-3 backup rotation), user export,
 session delete API, running-process deletion, auto-restore, DB/backup
