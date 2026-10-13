@@ -1079,6 +1079,31 @@ export function createKernelRepository(
   ): { applied: boolean; run: RunRow } {
     const id = requireId(runId, "runId");
     const now = nowMs(options.now);
+    // C23: an `m5-action` Run is dispatched to the SAME concrete
+    // ActionExecutionService that the strategy itself uses, so the generic
+    // scheduler pickup performs the REAL atomic pickup instead of throwing
+    // (which the engine's pump swallowed, leaving every approved Action
+    // queued forever). `startActionRun` moves the queued Run `-> running` AND
+    // the queued ActionExecution `-> preflight` and appends `run.started` +
+    // `action.preflight_started` in ONE transaction on this same connection.
+    // No `ReferenceManager` is needed for pickup, so the repository-owned
+    // lazy singleton (the cancel/recovery boundary) is reused as-is: one
+    // lifecycle owner, no cyclic import, no second state owner. The generic
+    // `{ applied, run }` result shape is preserved exactly. Terminalization
+    // still stays exclusively in the action service: completeRun/failRun
+    // below keep rejecting Action Runs outright.
+    const preflightRow = readRun(db, id);
+    if (preflightRow === null) {
+      throw new RepositoryNotFoundError(`run ${id} not found`);
+    }
+    if (preflightRow.strategy === "m5-action") {
+      const pickup = actionCancelService().startActionRun(id, { now });
+      const picked = readRun(db, id);
+      if (picked === null) {
+        throw new RepositoryNotFoundError(`run ${id} not found`);
+      }
+      return { applied: pickup.applied, run: parseRunRow(picked) };
+    }
     return withImmediate(db, () => {
       const row = readRun(db, id);
       if (row === null) {
@@ -1086,18 +1111,6 @@ export function createKernelRepository(
       }
       if (row.status !== "queued") {
         return { applied: false, run: parseRunRow(row) };
-      }
-      // C19: an m5-action Run is never picked by the generic generic pickup
-      // pair (start + later complete/fail): it is dispatched atomically to
-      // its dedicated execution service, which moves it to running together
-      // with its queued ActionExecution in ONE transaction and never lets
-      // the engine's generic lifecycle own a markered action terminal --
-      // the generic completeRun/failRun below reject any already
-      // terminalized (or cancel_requested) Action Run outright.
-      if (row.strategy === "m5-action") {
-        throw new ActionRunDispatchRequiredError(
-          `m5-action run ${id} must be picked up via the action execution service`,
-        );
       }
       const moved = db
         .prepare(

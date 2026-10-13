@@ -444,14 +444,16 @@ export class RunEngine {
    * disposition as recovery/drain (pre-marker failed receipt, post-marker
    * unknown receipt, always `abandoned`, never a retry).
    */
-  private failRunningRun(runId: string, code: string): boolean {
-    let action = false;
+  private isActionRun(runId: string): boolean {
     try {
-      action = this.repo.getRun(runId).strategy === "m5-action";
+      return this.repo.getRun(runId).strategy === "m5-action";
     } catch {
-      action = false;
+      return false;
     }
-    if (action) {
+  }
+
+  private failRunningRun(runId: string, code: string): boolean {
+    if (this.isActionRun(runId)) {
       return this.persistLifecycle(() =>
         this.repo.settleAbandonedRunningRun(runId, {
           now: this.clock.now(),
@@ -530,6 +532,15 @@ export class RunEngine {
           return;
         }
         const candidate = await strategy(ctx);
+        if (this.isActionRun(runId)) {
+          // C23: the `m5-action` strategy already terminalized the Run in
+          // the concrete action execution service's own transactions
+          // (receipt + events + terminal together). A generic
+          // `completeRun` would be rejected as terminally owned by that
+          // service and would retain in-flight ownership forever, so the
+          // action lifecycle ends here with nothing left to persist.
+          return;
+        }
         let valid: RunResult;
         try {
           valid = parseRunResult(candidate);

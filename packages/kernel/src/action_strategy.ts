@@ -274,9 +274,25 @@ export function createActionStrategy(
         "action strategy requires the injected preflight/read port",
       );
     }
+    // Pickup is ATOMIC and IDEMPOTENT from the strategy's point of view: the
+    // generic scheduler may already have performed the real pickup through
+    // `repository.startRun` (which dispatches to this same service) BEFORE
+    // launching the configured strategy. In that case `startActionRun`
+    // correctly reports `applied:false` (the pair already moved
+    // running + preflight) and the strategy MUST NOT pick up again nor
+    // abandon the run: it continues from the durable pickup. Only a pair
+    // that is genuinely not at the pickup stage (terminal, still queued, or
+    // no execution at all) returns the actual persisted state.
     const pickup = service.startActionRun(runId);
     if (!pickup.applied) {
-      return withPersisted(runId);
+      const view = service.getActionRunView(runId);
+      const alreadyPickedUp =
+        view.run.status === "running" &&
+        view.execution?.status === "preflight" &&
+        view.execution.externalCallStartedAt === null;
+      if (!alreadyPickedUp) {
+        return withPersisted(runId);
+      }
     }
 
     // 1) EXACT binding validation BEFORE preflight/gate: nothing is consumed
