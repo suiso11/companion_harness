@@ -2276,3 +2276,50 @@ browser or full-suite claim). Linux, Node 24.12.0, pnpm 11.25.0:
   pr23-final-proof.result.json` (commands + concise smoke JSON).
   Prior `smoke-profile.result.json` (22/22) and
   `cli-profile.result.json` (10/10) unchanged.
+
+## C22 approval-card target preview + bounded pending expiry (2026-10-13, observed)
+
+Stacked on PR23 (`feat/calendar-readonly-production-profile`); no
+OAuth/provider writes, no schema/policy expansion, no persisted-proposal
+mutation, no mocked UI/seeded proposals in E2E.
+
+- `packages/kernel/src/action_proposals.ts`: `loadTarget` now reads
+  `sr.ordinal`; `freshSnapshotRevision` also returns the immutable
+  normalized event title; the staged preview is a deterministic human
+  summary `{title} (rN): start= end=` (title NFC/trimmed/whitespace-
+  collapsed/128-code-point cap, blank falls back to `calendar event`).
+  No tool-name prefix, no UUID/provider IDs, no upstream reads; the
+  `{ summary }` seam, hash coverage, and DDL are unchanged. The legacy
+  `calendar.reschedule:` display-prefix strips (execution/history
+  rendering) stay as backward-compatible no-ops.
+- `packages/kernel/test/action_proposals.test.ts`: the wording-pinning
+  preview assertion is deleted; semantic cases assert target (title +
+  current rN, incl. r2 after a retitling observation), deterministic
+  hash, single-line plaintext, and privacy (no description/IDs).
+- `apps/server/src/ui/client.ts`: each pending card owns at most one
+  bounded one-shot expiry timer (identity-checked on fire, cleared on
+  removal/decision); execution-owned/receipt/awaiting cards are never
+  retired by an old timer. `syncActions` retires only still-local
+  pending cards and never downgrades decision-in-flight; approve/reject
+  recheck the local deadline, guard while the real POST is awaited, and
+  the server stays authoritative. `visibilitychange` reconciles locally
+  with no polling/provider calls.
+- `apps/server/e2e/calendar/action.spec.ts` (+4, clock installed
+  BEFORE goto): staged preview shows `E2E Standup` + r1 with no
+  `calendar.reschedule`; `pauseAt(deadline-1)` keeps controls enabled
+  and `fastForward(1)` retires the card with 0 writes; `setSystemTime`
+  (no timer fire) + real `visibilitychange` retires with 0 writes;
+  gated real approve-202 fulfilled across the old deadline keeps the
+  live execution card, release lands the verified receipt (1 write).
+
+Final battery (this worker, Linux, Node 24.12.0, after all edits):
+
+- `pnpm test` -> exit 0, **107 files / 1296 tests passed**, 0 failed.
+- `pnpm run typecheck`, `pnpm run typecheck:e2e`,
+  `pnpm --filter @companion/server typecheck` -> exit 0.
+- `pnpm run lint` -> exit 0 (**224 files, 0 errors**, 1 pre-existing
+  `biome.json` recommended-deprecation info).
+- Default browser suite (Chromium): **23/23 passed**.
+- Calendar-mode suite (`COMPANION_E2E_CALENDAR=1`, Chromium):
+  **22/22 passed** (`action.spec.ts` 17/17 incl. the 4 new cases,
+  `calendar.spec.ts` 4/4, `tombstone.spec.ts` 1/1).
