@@ -602,9 +602,54 @@ pass/count/native-review claim is made.
 When evidence IS recorded (docs/ops only; no runtime diagnostic channel), the
 record carries: source kind (static candidate / retained inert provider / new
 synthetic SDK wire), immutable archive/candidate refs, the operation, the
-request field NAMES (never raw IDs, cursors, query text, emails or error
+request field NAMES (not raw IDs, cursors, query text, emails or error
 body), the observed MCP envelope shape, and the fixed consumer error. The
 actual HTTP status stays **UNKNOWN / not captured**. Raw test fixtures may
 carry synthetic data, but new docs tables carry no raw PII or message IDs.
 This metadata format adds no logger, telemetry, status API or privacy
 weakening.
+
+## Readonly candidate pin verification (2026-10-13, step2)
+
+Status: **FORMAL ADOPTION = HOLD / NOT ADOPTED** (unchanged). Step2
+re-verifies the C08 candidate identity/pin/mapping against the CURRENT
+consumer with a credential-free actual runtime probe. No package pin, no
+live binding, no OAuth, no live Google call, no fork patch. Branch
+`feat/calendar-readonly-candidate-pin` (stacked on `814eac5`; PR base
+`feat/c12-calendar-snapshots` while PR #20 is unmerged; no
+merge/cherrypick/reset). Machine record:
+`docs/evidence/calendar-readonly-candidate-pin.json`; ops record in
+`docs/operations.md` ("Readonly candidate pin verification").
+
+- Exact pin (re-observed from the exact-SHA checkout): repo
+  `https://github.com/suiso11/google-calendar-mcp`, full commit
+  `97a3dc36873b8f52870695d7706d182d5a8fc401`, tree
+  `ae743a8bd7cc7002c2368618fbe098dba8af341e`, package
+  `@cocal/google-calendar-mcp` private `3.0.0-readonly.1`. Lock digest
+  `6afe76f90327d4b04c4dfc24161017c85f0910350fcbcf802c1b91c2e48bd523`.
+  License MIT (`LICENSE`, copyright 2025 nspady). Runtime deps on the
+  candidate lock: `@modelcontextprotocol/sdk 1.30.0`, `zod 4.3.6`,
+  `googleapis 171.4.0`, `google-auth-library 10.6.1`, `gaxios 7.1.3`
+  (scratch `npm ci --ignore-scripts` only; no Companion lock change).
+  Auth scopes (`src/auth/scopes.ts`): ONLY
+  `calendar.events.readonly`, fail-closed validator (static fact; the
+  `calendarList` conflict in the C08 section persists).
+- Wire (real SDK transport + real `ToolRegistry`/4 handlers + inert
+  fixture, network denied, no OAuth/CLI): protocol `2025-11-25`,
+  `serverInfo google-calendar/3.0.0-readonly.1`, exactly 4 tools; all 4
+  canonical input-schema hashes match the C08 table above (no drift).
+  Response mapping: `list-calendars` → `{calendars,totalCount}`;
+  `list-events`/`search-events` → `{events,totalCount,nextPageToken?}`
+  (+ search `query`/`calendarId`/`timeRange`); `get-event` → `{event}`;
+  content-text only, `structuredContent` absent; `start`/`end` objects.
+- Consumer (current code): `McpConnector` wire-identity + schema gate
+  passes; adapter search decodes timed + all-day (verbatim opaque
+  cursor, etag revisions, privacy stripped, targets host-side); get
+  decodes; 1 negative (wrong version → `mcp_schema_mismatch`); 0 live
+  network use. If any pinned hash had diverged the record would fail
+  closed here — it did not.
+- Unresolved (recorded, NOT fixed in step2): `events.readonly`-only
+  scope conflict; whole-second candidate regex vs fractional-second
+  consumer contract; C10-08 production mapping; C11-01 positive
+  tombstone. Next step3: scoped fork/narrow-call decision + approved
+  read-only live opt-in (out of scope here).

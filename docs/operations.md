@@ -1535,6 +1535,61 @@ evidence; no new docs/logs committed besides this section; no
 `test-results/`, `.verification-log/`, or `.review-proof/` residue in
 the tree at gate time.
 
+## Readonly candidate pin verification (2026-10-13, step2)
+
+Credential-free re-verification of the C08 readonly candidate on branch
+`feat/calendar-readonly-candidate-pin` (stacked on `814eac5`,
+PR #20 base `feat/c12-calendar-snapshots`; no merge/cherrypick/reset).
+Machine record:
+[`docs/evidence/calendar-readonly-candidate-pin.json`](evidence/calendar-readonly-candidate-pin.json).
+No production binding, profile, config activation, OAuth, or live
+Google call; formal C08 stays **HOLD / NOT ADOPTED**, C10-08 stays
+**UNRESOLVED**, C11-01 stays **BLOCKED**.
+
+- Pin (exact form = full git SHA + lock digest): repo
+  `https://github.com/suiso11/google-calendar-mcp`, commit
+  `97a3dc36873b8f52870695d7706d182d5a8fc401`, tree
+  `ae743a8bd7cc7002c2368618fbe098dba8af341e`, package
+  `@cocal/google-calendar-mcp` private `3.0.0-readonly.1`, lock
+  SHA-256 `6afe76f90327d4b04c4dfc24161017c85f0910350fcbcf802c1b91c2e48bd523`
+  (all re-observed from the exact-SHA checkout, not a branch head).
+  License MIT (`LICENSE`, copyright 2025 nspady). Runtime deps observed
+  on the candidate lock: SDK `1.30.0`, zod `4.3.6`, googleapis
+  `171.4.0`, google-auth-library `10.6.1`, gaxios `7.1.3`
+  (`npm ci --ignore-scripts` scratch-only; no Companion lock change).
+  Historical archive `docs/evidence/c08/2026-10-11/c08-evidence.tar.gz`
+  re-verified (`52b63fee…db0d94`, manifest 8/8 OK; history only).
+- Wire (real SDK `InMemoryTransport`, real candidate `ToolRegistry` +
+  4 handlers, stdlib http/https + fetch deny counters, inert fixture —
+  ordinary CLI/index/OAuth never run): `initialize` protocol
+  `2025-11-25`, `serverInfo` `google-calendar`/`3.0.0-readonly.1`;
+  `tools/list` exactly `list-calendars`, `list-events`,
+  `search-events`, `get-event`; all 4 canonical input-schema hashes
+  match the C08 table (get `f3212ecb…`, list-calendars `ae9285fc…`,
+  list-events `279887bf…`, search `027de2d8…`). Bodies are content-text
+  only (`structuredContent` absent); `start`/`end` are objects.
+- Consumer (current `McpConnector` + Calendar adapter over the same
+  fixture): search decodes 2 events (timed + all-day) with verbatim
+  cursor `opaque-in` → `opaque-out`, etag revisions retained, privacy
+  keys stripped, private get-targets host-side only; get decodes the
+  timed event; one negative (version `9.9.9-wrong`) denied with fixed
+  `mcp_schema_mismatch`; stdlib network counter `0` (observe-only, no
+  actual Google HTTP).
+- Response mapping: `list-calendars` → `{calendars,totalCount}`;
+  `list-events`/`search-events` → `{events,totalCount,nextPageToken?}`
+  (+ `query`/`calendarId`/`timeRange` on search); `get-event` →
+  `{event}`.
+- Known gaps RECORDED, not fixed: (1) candidate allows ONLY
+  `calendar.events.readonly` (static `calendarList` contract conflict
+  persists; no auth change approved in step2); (2) candidate
+  whole-second datetime regex vs agreed fractional-second ISO consumer
+  contract (mapper does not truncate). Next step3 scope: scoped
+  fork/narrow-call-strategy decision + separately approved read-only
+  live opt-in; C10-08 mapping; C11 positive evidence.
+- Scratch `.candidate-verify/` (clone + `node_modules` + probe) removed
+  after the evidence capture; no source copy or `node_modules`
+  committed.
+
 ## Non-goals (explicit)
 Domain retention/GC (except newest-3 backup rotation), user export,
 session delete API, running-process deletion, auto-restore, DB/backup
