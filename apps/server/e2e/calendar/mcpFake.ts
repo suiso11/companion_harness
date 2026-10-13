@@ -122,7 +122,10 @@ export function resetFakeCalendarState(state: FakeCalendarState): void {
 }
 
 /** Block until the control server releases the armed barrier (fixture only). */
-async function awaitRelease(state: FakeCalendarState, which: "read" | "write"): Promise<void> {
+async function awaitRelease(
+  state: FakeCalendarState,
+  which: "read" | "write",
+): Promise<void> {
   if (which === "read" ? !state.readBarrier : state.writeMode !== "barrier") {
     return;
   }
@@ -280,86 +283,89 @@ export function createFakeCalendarMcpServer(
   asServer.setRequestHandler(ListToolsRequestSchema, (_request: unknown) => ({
     tools,
   }));
-  asServer.setRequestHandler(CallToolRequestSchema, async (request: unknown) => {
-    const call = request as CallToolRequest;
-    const args = (call.params.arguments ?? {}) as Record<string, unknown>;
-    if (call.params.name === "search-events") {
-      state.searchCalls += 1;
-      // Exact strict search-events ROOT envelope: query (if present) plus
-      // calendarId and timeRange are source-REQUIRED here.
-      if (state.deleted) return deletedResult();
-      return {
-        content: [{ type: "text", text: "fake search page" }],
-        structuredContent: {
-          events: [fakeEvent(state)],
-          totalCount: 1,
-          ...(typeof args.query === "string" && args.query.length > 0
-            ? { query: args.query }
-            : {}),
-          calendarId: CALENDAR_ID,
-          timeRange: {
-            start:
-              typeof args.timeMin === "string"
-                ? args.timeMin
-                : "2026-10-13T00:00:00Z",
-            end:
-              typeof args.timeMax === "string"
-                ? args.timeMax
-                : "2026-10-31T00:00:00Z",
+  asServer.setRequestHandler(
+    CallToolRequestSchema,
+    async (request: unknown) => {
+      const call = request as CallToolRequest;
+      const args = (call.params.arguments ?? {}) as Record<string, unknown>;
+      if (call.params.name === "search-events") {
+        state.searchCalls += 1;
+        // Exact strict search-events ROOT envelope: query (if present) plus
+        // calendarId and timeRange are source-REQUIRED here.
+        if (state.deleted) return deletedResult();
+        return {
+          content: [{ type: "text", text: "fake search page" }],
+          structuredContent: {
+            events: [fakeEvent(state)],
+            totalCount: 1,
+            ...(typeof args.query === "string" && args.query.length > 0
+              ? { query: args.query }
+              : {}),
+            calendarId: CALENDAR_ID,
+            timeRange: {
+              start:
+                typeof args.timeMin === "string"
+                  ? args.timeMin
+                  : "2026-10-13T00:00:00Z",
+              end:
+                typeof args.timeMax === "string"
+                  ? args.timeMax
+                  : "2026-10-31T00:00:00Z",
+            },
           },
-        },
-      };
-    }
-    if (call.params.name === "list-events") {
-      state.listCalls += 1;
-      if (state.deleted) return deletedResult();
-      return {
-        content: [{ type: "text", text: "fake list page" }],
-        structuredContent: {
-          events: [fakeEvent(state)],
-          totalCount: 1,
-        },
-      };
-    }
-    if (call.params.name === "get-event") {
-      // C22 fixture seam: an armed read barrier holds the authoritative READ
-      // (preflight / read-back) inside the real connector so the browser spec
-      // can observe the real pre-marker window.
-      await awaitRelease(state, "read");
-      state.getCalls += 1;
-      if (state.deleted) return deletedResult();
-      return {
-        content: [{ type: "text", text: "fake event" }],
-        structuredContent: { event: fakeEvent(state) },
-      };
-    }
-    if (call.params.name === AUTHORITATIVE_GET_TOOL) {
-      // Only advertised when the fixture asked for it. POSITIVE evidence
-      // ONLY when the dedicated authoritative gate is armed; otherwise this
-      // separate operation is just a miss (never a silent tombstone).
-      state.getCalls += 1;
-      if (!state.authoritativeDeleted) return deletedResult();
-      return {
-        content: [{ type: "text", text: "fake authoritative event" }],
-        structuredContent: {
-          event: {
-            // Type-only: `fakeEvent` builds the same object shape (typed
-            // `unknown` at the boundary); the spread is runtime-identical.
-            ...(fakeEvent(state) as Record<string, unknown>),
-            // Provider-shaped positive deletion proof: a cancelled record
-            // carrying the host-trusted synthetic revision. The fixture
-            // wrapper requires BOTH the armed gate and this exact revision.
-            status: "cancelled",
-            etag: AUTHORITATIVE_DELETED_REVISION,
+        };
+      }
+      if (call.params.name === "list-events") {
+        state.listCalls += 1;
+        if (state.deleted) return deletedResult();
+        return {
+          content: [{ type: "text", text: "fake list page" }],
+          structuredContent: {
+            events: [fakeEvent(state)],
+            totalCount: 1,
           },
-        },
+        };
+      }
+      if (call.params.name === "get-event") {
+        // C22 fixture seam: an armed read barrier holds the authoritative READ
+        // (preflight / read-back) inside the real connector so the browser spec
+        // can observe the real pre-marker window.
+        await awaitRelease(state, "read");
+        state.getCalls += 1;
+        if (state.deleted) return deletedResult();
+        return {
+          content: [{ type: "text", text: "fake event" }],
+          structuredContent: { event: fakeEvent(state) },
+        };
+      }
+      if (call.params.name === AUTHORITATIVE_GET_TOOL) {
+        // Only advertised when the fixture asked for it. POSITIVE evidence
+        // ONLY when the dedicated authoritative gate is armed; otherwise this
+        // separate operation is just a miss (never a silent tombstone).
+        state.getCalls += 1;
+        if (!state.authoritativeDeleted) return deletedResult();
+        return {
+          content: [{ type: "text", text: "fake authoritative event" }],
+          structuredContent: {
+            event: {
+              // Type-only: `fakeEvent` builds the same object shape (typed
+              // `unknown` at the boundary); the spread is runtime-identical.
+              ...(fakeEvent(state) as Record<string, unknown>),
+              // Provider-shaped positive deletion proof: a cancelled record
+              // carrying the host-trusted synthetic revision. The fixture
+              // wrapper requires BOTH the armed gate and this exact revision.
+              status: "cancelled",
+              etag: AUTHORITATIVE_DELETED_REVISION,
+            },
+          },
+        };
+      }
+      return {
+        content: [{ type: "text", text: "unknown tool" }],
+        isError: true,
       };
-    }
-    return {
-      content: [{ type: "text", text: "unknown tool" }],
-      isError: true,
-    };
-  });
+    },
+  );
   return server;
 }
 

@@ -9,10 +9,10 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  type ActionCardInput,
   actionCardModel,
   actionDecisionIntentText,
   actionErrorCodeText,
-  type ActionCardInput,
   parseCancelRunStatus,
   receiptOutcomeText,
 } from "../src/ui/reducer.js";
@@ -37,12 +37,12 @@ describe("C22 action card model", () => {
   });
 
   it("hides the controls for a decided proposal", () => {
-    expect(actionCardModel({ ...BASE, status: "approved" }).decisionVisible).toBe(
-      false,
-    );
-    expect(actionCardModel({ ...BASE, status: "rejected" }).decisionVisible).toBe(
-      false,
-    );
+    expect(
+      actionCardModel({ ...BASE, status: "approved" }).decisionVisible,
+    ).toBe(false);
+    expect(
+      actionCardModel({ ...BASE, status: "rejected" }).decisionVisible,
+    ).toBe(false);
   });
 
   it("never executes an expired card (client deadline guard)", () => {
@@ -140,12 +140,12 @@ describe("C22 action card model", () => {
     expect(actionDecisionIntentText("action_approval", null)).toBe(
       "日程変更を承認しました",
     );
-    expect(actionDecisionIntentText("action_approval", "blocked_stale")).toContain(
-      "承認",
-    );
-    expect(actionDecisionIntentText("action_approval", "blocked_stale")).toContain(
-      "更新しませんでした",
-    );
+    expect(
+      actionDecisionIntentText("action_approval", "blocked_stale"),
+    ).toContain("承認");
+    expect(
+      actionDecisionIntentText("action_approval", "blocked_stale"),
+    ).toContain("更新しませんでした");
   });
 
   it("parses the actual cancel run status for the stop-claim gate", () => {
@@ -153,7 +153,10 @@ describe("C22 action card model", () => {
     // status (a live accept or a terminal race loss) must refresh instead.
     expect(
       parseCancelRunStatus({
-        run: { id: "00000000-0000-4000-8000-000000000000", status: "cancelled" },
+        run: {
+          id: "00000000-0000-4000-8000-000000000000",
+          status: "cancelled",
+        },
       }),
     ).toBe("cancelled");
     for (const status of [

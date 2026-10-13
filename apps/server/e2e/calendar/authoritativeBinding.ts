@@ -31,25 +31,25 @@
 // local delete inference, no DB seeding of snapshots, no manual
 // ReferenceManager presentation, no UI bypass.
 
-import type {
-  CalendarConnectorPort,
-  CalendarSearchCallOptions,
-} from "@companion/kernel";
-import {
-  type McpBindingDefinition,
-  type McpConnectorConfig,
-  McpConnector,
-  type TransportFactory,
-} from "@companion/connector-mcp";
-import { InMemoryTransport } from "@companion/connector-mcp";
 import {
   type CalendarCallOptions,
   type CalendarGetResult,
   type CalendarGetTarget,
-  createCalendarConnector,
   type CalendarSearchResult,
+  createCalendarConnector,
   normalizeGetResult,
 } from "@companion/connector-calendar";
+import {
+  InMemoryTransport,
+  type McpBindingDefinition,
+  McpConnector,
+  type McpConnectorConfig,
+  type TransportFactory,
+} from "@companion/connector-mcp";
+import type {
+  CalendarConnectorPort,
+  CalendarSearchCallOptions,
+} from "@companion/kernel";
 import {
   createFakeCalendarMcpServer,
   type FakeCalendarState,
@@ -87,9 +87,21 @@ export function createAuthoritativeCalendarBinding(
   options: AuthoritativeBindingOptions,
 ): AuthoritativeBinding {
   const definitions: readonly McpBindingDefinition[] = [
-    { upstreamTool: "search-events", canonicalSchemaHash: options.searchHash, category: "read" },
-    { upstreamTool: "list-events", canonicalSchemaHash: options.listHash, category: "read" },
-    { upstreamTool: "get-event", canonicalSchemaHash: options.getHash, category: "read" },
+    {
+      upstreamTool: "search-events",
+      canonicalSchemaHash: options.searchHash,
+      category: "read",
+    },
+    {
+      upstreamTool: "list-events",
+      canonicalSchemaHash: options.listHash,
+      category: "read",
+    },
+    {
+      upstreamTool: "get-event",
+      canonicalSchemaHash: options.getHash,
+      category: "read",
+    },
     {
       upstreamTool: AUTHORITATIVE_GET_TOOL,
       canonicalSchemaHash: options.getHash,

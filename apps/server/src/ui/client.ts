@@ -12,18 +12,18 @@
 
 import type { ActiveStatus } from "@companion/contracts";
 import {
+  type ActionCardModel,
+  type ActionErrorCode,
   actionCardModel,
   actionDecisionIntentText,
   actionErrorCodeText,
-  type ActionCardModel,
-  type ActionErrorCode,
-  type ExecutionStatus,
   applyRunEvent,
   claimTerminalHydration,
+  type ExecutionStatus,
   INITIAL_RUN_VIEW,
   isCorruptCursor,
-  parseCancelRunStatus,
   type ProposalStatus,
+  parseCancelRunStatus,
   type ReceiptOutcome,
   type RunViewState,
   runResultToAnswerParts,
@@ -809,8 +809,8 @@ class ConversationApp {
       return;
     }
     const now = Date.now();
-    const summaries = proposals.filter(
-      (item): item is ProposalSummaryView => isProposalSummary(item),
+    const summaries = proposals.filter((item): item is ProposalSummaryView =>
+      isProposalSummary(item),
     );
     // Drop cards whose proposal is no longer actionable/visible.
     const liveIds = new Set(summaries.map((item) => item.proposalId));
@@ -1105,7 +1105,13 @@ class ConversationApp {
     });
     this.actionCards.set(summary.proposalId, card);
     this.list.appendChild(node);
-    this.renderActionCard(card, summary, null, this.cardModel(summary, null), "");
+    this.renderActionCard(
+      card,
+      summary,
+      null,
+      this.cardModel(summary, null),
+      "",
+    );
   }
 
   /** Apply the pure model to the live card nodes (no HTML, text only). */
@@ -1323,7 +1329,11 @@ class ConversationApp {
     });
     this.actionWatches.set(proposalId, done);
     try {
-      for (let tick = 0; tick < ConversationApp.ACTION_POLL_MAX_TICKS; tick += 1) {
+      for (
+        let tick = 0;
+        tick < ConversationApp.ACTION_POLL_MAX_TICKS;
+        tick += 1
+      ) {
         const card = this.actionCards.get(proposalId);
         if (card === undefined || card.terminal) {
           return;
@@ -1387,9 +1397,7 @@ class ConversationApp {
           ? receipt.outcome
           : null;
       wrap.setAttribute("data-action-history", item.kind);
-      wrap.appendChild(
-        el("p", actionDecisionIntentText(item.kind, outcome)),
-      );
+      wrap.appendChild(el("p", actionDecisionIntentText(item.kind, outcome)));
       const run = item.selectedRun;
       if (run !== null && run !== undefined && typeof run === "object") {
         if (typeof run.runId === "string" && run.runId.length > 0) {

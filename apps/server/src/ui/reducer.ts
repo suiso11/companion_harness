@@ -365,7 +365,9 @@ export function actionCardModel(input: ActionCardInput): ActionCardModel {
     input.executionStatus === "preflight" ||
     input.executionStatus === "executing";
   const progressText = live
-    ? ACTION_PROGRESS_TEXT[input.executionStatus as "queued" | "preflight" | "executing"]
+    ? ACTION_PROGRESS_TEXT[
+        input.executionStatus as "queued" | "preflight" | "executing"
+      ]
     : "";
   const terminalOutcome: ReceiptOutcome | null =
     input.receiptOutcome ??

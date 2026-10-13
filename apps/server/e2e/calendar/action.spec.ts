@@ -9,7 +9,12 @@
 // deterministic. No live provider, no OAuth, no model approval, no bypass of
 // any UI control.
 
-import { type APIRequestContext, expect, type Page, test } from "@playwright/test";
+import {
+  type APIRequestContext,
+  expect,
+  type Page,
+  test,
+} from "@playwright/test";
 import {
   ANSWER_ASSENT_TEXT,
   ANSWER_SEARCH_TEXT,
@@ -88,7 +93,10 @@ async function send(page: Page, text: string): Promise<void> {
 
 /** REAL user selection: opening the delivered citation adds r1 to the session. */
 async function selectCitation(page: Page, label: string): Promise<void> {
-  await page.locator("#conversation button", { hasText: label }).first().click();
+  await page
+    .locator("#conversation button", { hasText: label })
+    .first()
+    .click();
   await expect(page.locator("#drawer")).toBeVisible();
   await page.locator("#drawer").click({ position: { x: 4, y: 4 } });
   await expect(page.locator("#drawer")).toBeHidden();
@@ -100,9 +108,12 @@ async function selectCitation(page: Page, label: string): Promise<void> {
  */
 async function stageProposal(page: Page): Promise<void> {
   await send(page, TEXT_SEARCH);
-  await expect(page.locator("#conversation")).toContainText(ANSWER_SEARCH_TEXT, {
-    timeout: 30_000,
-  });
+  await expect(page.locator("#conversation")).toContainText(
+    ANSWER_SEARCH_TEXT,
+    {
+      timeout: 30_000,
+    },
+  );
   await selectCitation(page, "r1");
   await send(page, TEXT_STAGE);
   await expect(page.locator("#conversation")).toContainText(ANSWER_STAGE_TEXT, {
@@ -128,7 +139,8 @@ test("approve: pending card -> hash-bound approve 202 -> one write + fresh verif
 }) => {
   await stageProposal(page);
   const approved = page.waitForResponse(
-    (res) => res.url().includes("/approve") && res.request().method() === "POST",
+    (res) =>
+      res.url().includes("/approve") && res.request().method() === "POST",
   );
   await page.locator("#action-approve").click();
   expect((await approved).status()).toBe(202);
@@ -252,9 +264,13 @@ test("failed read-back: succeeded_unverified, no result reference", async ({
   await control(request, "/arm-write", { mode: "unverified" });
   await page.locator("#action-approve").click();
   const card = page.locator('[data-action-card="true"]');
-  await expect(card).toHaveAttribute("data-action-state", "succeeded_unverified", {
-    timeout: 60_000,
-  });
+  await expect(card).toHaveAttribute(
+    "data-action-state",
+    "succeeded_unverified",
+    {
+      timeout: 60_000,
+    },
+  );
   const view = await executionView(page, request);
   expect(view.status).toBe("succeeded_unverified");
   expect((view.receipt as { outcome?: string } | null)?.outcome).toBe(
@@ -279,7 +295,9 @@ test("unknown write: manual check, exactly one attempt, no retry", async ({
   );
   const view = await executionView(page, request);
   expect(view.status).toBe("unknown");
-  expect((view.receipt as { outcome?: string } | null)?.outcome).toBe("unknown");
+  expect((view.receipt as { outcome?: string } | null)?.outcome).toBe(
+    "unknown",
+  );
   await page.waitForTimeout(3_000);
   // Exactly one attempt, and the ambiguous outcome is never retried.
   expect(await writeCalls(request)).toBe(1);
@@ -344,7 +362,9 @@ test("Stop after the write marker is disabled (409) and the write completes", as
     timeout: 60_000,
   });
   const done = await executionView(page, request);
-  expect((done.receipt as { outcome?: string } | null)?.outcome).toBe("succeeded");
+  expect((done.receipt as { outcome?: string } | null)?.outcome).toBe(
+    "succeeded",
+  );
   expect(await writeCalls(request)).toBe(1);
 });
 
@@ -385,7 +405,9 @@ test("reload during held post-marker write hides every Stop and cancel API 409s"
     { data: {} },
   );
   expect(cancel.status()).toBe(409);
-  await expect(page.locator("#composer-notice")).not.toContainText("停止しました");
+  await expect(page.locator("#composer-notice")).not.toContainText(
+    "停止しました",
+  );
   // Releasing the held write lets the run verify to a real success.
   await control(request, "/release");
   await expect
@@ -439,10 +461,12 @@ test("late cancel on a terminal run claims no stop (200 keeps actual receipt)", 
     // The late cancel lands on the terminal run: HTTP 200 with the actual
     // terminal run status — never a stop claim, never a success rewrite.
     const cancelWait = page.waitForResponse(
-      (res) => res.url().includes("/cancel") && res.request().method() === "POST",
+      (res) =>
+        res.url().includes("/cancel") && res.request().method() === "POST",
     );
     const refreshed = page.waitForResponse(
-      (res) => res.url().includes("/execution") && res.request().method() === "GET",
+      (res) =>
+        res.url().includes("/execution") && res.request().method() === "GET",
     );
     releaseCancel();
     const cancelRes = await cancelWait;
@@ -456,10 +480,14 @@ test("late cancel on a terminal run claims no stop (200 keeps actual receipt)", 
     // The client processed the late 200 by refreshing the actual state...
     await refreshed;
     // ...and claimed no stop: the real ambiguous outcome stands.
-    await expect(page.locator("#composer-notice")).not.toContainText("停止しました");
+    await expect(page.locator("#composer-notice")).not.toContainText(
+      "停止しました",
+    );
     await expect(card).toHaveAttribute("data-action-state", "unknown");
     const view = await executionView(page, request);
-    expect((view.receipt as { outcome?: string } | null)?.outcome).toBe("unknown");
+    expect((view.receipt as { outcome?: string } | null)?.outcome).toBe(
+      "unknown",
+    );
     expect(await writeCalls(request)).toBe(1);
   } finally {
     releaseCancel();
