@@ -1535,6 +1535,38 @@ evidence; no new docs/logs committed besides this section; no
 `test-results/`, `.verification-log/`, or `.review-proof/` residue in
 the tree at gate time.
 
+## PR20 T2 proposal approve idempotency lookup + draining replay (2026-10-13)
+
+Fixes PR20 review `PRRC_kwDOUNdW7s79uYSd` (thread
+`PRRT_kwDOUNdW7s6ryb6o`) on `feat/c12-calendar-snapshots` HEAD `814eac5`:
+`IdempotencyScopeSchema` accepts `proposal:<uuid>:approve` but
+`lookupIdempotencyForSession` recognised only session-message/turn-retry, so
+the public lookup 404d a stored approval and `tryReplayStoredApprove`
+returned 503 for a committed approval during drain. Ground truth per task
+(not rerun to reproduce).
+
+- `packages/kernel/src/repository.ts`: `lookupIdempotencyForSession` now
+  parses the closed `proposal:<uuid-v4>:approve` scope, requires the actual
+  proposal row owned by the same session (`requireOwnedProposal`; foreign or
+  missing proposal 404s before any lookup, same pattern as turns), then
+  delegates to the existing stored lookup. No unknown-scope fallthrough
+  change; hash/scope validation stays the exact existing approve path, so a
+  stored 202 replays during drain with same key/hash (no extra
+  Turn/Run/Grant/events), same-key hash mismatch stays 409 with no writes,
+  and fresh approvals during drain stay 503 without persisting.
+- Regressions: `packages/kernel/test/proposal_idempotency_lookup.test.ts`
+  (owned lookup found, foreign/missing 404, mismatch 409 with row counts
+  unchanged) and
+  `apps/server/test/proposal_approval_replay.test.ts` (real-SQLite Hono
+  smoke: approve 202 -> GET lookup same 202 -> drain same-key replay same
+  202 with 1 execution/grant -> fresh-key drain 503 with no persistence;
+  plus same-key mismatch 409 with no extra rows). No mocked forwarding, no
+  UI/browser needed for this path.
+- Observed final-once verification (Linux, Node 24.12.0): focused
+  `proposal_idempotency_lookup` 3/3, `proposal_approval_replay` +
+  `proposals` 5/5, root `tsc --noEmit` exit 0. No push/comment/resolve;
+  review thread IDs are for the parent to publish.
+
 ## Non-goals (explicit)
 Domain retention/GC (except newest-3 backup rotation), user export,
 session delete API, running-process deletion, auto-restore, DB/backup

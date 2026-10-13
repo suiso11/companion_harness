@@ -744,6 +744,24 @@ export function createKernelRepository(
     return row;
   }
 
+  function requireOwnedProposal(
+    sessionId: string,
+    proposalId: string,
+  ): {
+    id: string;
+    session_id: string;
+  } {
+    const session = requireId(sessionId, "sessionId");
+    const proposal = requireId(proposalId, "proposalId");
+    const row = loadProposal(proposal);
+    if (row === null || row.session_id !== session) {
+      throw new RepositoryNotFoundError(
+        `proposal ${proposal} not found in session ${session}`,
+      );
+    }
+    return row;
+  }
+
   function createSession(
     options: CreateSessionOptions,
   ): AcceptedResponse<CreateSessionResponse> {
@@ -2791,6 +2809,14 @@ export function createKernelRepository(
     const turnMatch = /^turn:([^:]+):retry$/.exec(validScope);
     if (turnMatch?.[1] !== undefined) {
       requireOwnedTurn(session, assertUuidV4(turnMatch[1], "turnId"));
+      return lookupIdempotency(validScope, validKey);
+    }
+    const proposalMatch = /^proposal:([^:]+):approve$/.exec(validScope);
+    if (proposalMatch?.[1] !== undefined) {
+      requireOwnedProposal(
+        session,
+        assertUuidV4(proposalMatch[1], "proposalId"),
+      );
       return lookupIdempotency(validScope, validKey);
     }
     throw new RepositoryNotFoundError(
