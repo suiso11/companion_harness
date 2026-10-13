@@ -916,10 +916,15 @@ or complete activate config):
 
 ### C21 M5 Action composition (triple gate)
 
-- This subsection records the CURRENT C21 scope on top of C17-C20. The tests
-  added here are recorded as **ADDED, NOT YET RUN**: the deferred final
-  verification suite has not been executed, and no executed-verification or
-  green-check claim is made here.
+- This subsection records the CURRENT C21 scope on top of C17-C20. Focused
+  verification observed on this worktree (Node 24.12.0):
+  `apps/server/test/action_composition.test.ts` 9/9 green over real
+  `startServer` + temp SQLite (disabled direct capability-reads 0 / close 0,
+  disabled derived factory 0 / close 0, enabled owned close exactly 1,
+  enabled caller-owned close 0, enabled absent/both/neither/invalid-capability/
+  mismatched-instance fail closed before listen with no listener leak) and
+  root `tsc --noEmit -p tsconfig.json` exit 0. No full-suite rerun is claimed
+  here.
 - Config (strict opt-in, DEFAULT DISABLED on both flags):
   `COMPANION_ACTIONS_JSON` is an exact `{ optIn?, writeEnabled? }` object
   parsed by `parseActionConfig`; both flags default to `false` and the
@@ -931,7 +936,8 @@ or complete activate config):
   `CalendarActionWritePort` is injected through
   `startServer({ actionWriteBinding: { port, shutdown?, owned? } })`. It is
   never read from env/config. `owned: true` (explicit) transfers the port's
-  lifecycle to the server, which then closes it after the engine drain and
+  lifecycle to the server ONLY when the triple gate actually opens, which
+  then closes it after the engine drain and
   before the DB close; a caller-owned port (the default) is never closed by
   the server and extra caller-owned ports are never closed arbitrarily.
 - TRIPLE gate: `m5-action` and the proposal-only `calendar.reschedule`
@@ -940,9 +946,11 @@ or complete activate config):
   enabled capability (`tool: calendar.reschedule`, editable fields exactly
   `["start","end"]`, `writeEnabled: true`) names the EXACT ACTIVE Calendar
   instance of the composed read binding — all three hold. When the config
-  opts in and the injected binding does not match, startup fails closed
+  opts in and the write binding is absent, unusable (both/neither of
+  port/derivePort), invalid, or does not match, startup fails closed
   (`server_config_invalid`, before listen); an injected port with the config
-  disabled is simply never used. There is deliberately NO production write
+  disabled is simply never adopted (no derive call, no capability read, no
+  use, no owned shutdown). There is deliberately NO production write
   binding selected in this codebase.
 - Wired composition when the gate is open: one existing `ReferenceManager`
   (same DB), one `ActionExecutionService`, the authoritative read port
