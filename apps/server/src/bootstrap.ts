@@ -822,9 +822,7 @@ export async function startServer(
     // so `writeEnabled` is exactly the triple-gated value above.
     const repo = createKernelRepository(
       handle.raw,
-      actionsEnabled
-        ? { actionProposals: { writeEnabled: true } }
-        : {},
+      actionsEnabled ? { actionProposals: { writeEnabled: true } } : {},
     );
 
     if (

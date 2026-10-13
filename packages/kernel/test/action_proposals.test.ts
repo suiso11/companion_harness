@@ -9,6 +9,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { SnapshotBodySchema } from "@companion/contracts";
 import type Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ActionProposalEventSink } from "../src/action_proposals.js";
@@ -19,8 +20,6 @@ import {
   generateId,
   sha256Hex,
 } from "../src/canonical.js";
-import { createReferenceManager } from "../src/reference_manager.js";
-import { SnapshotBodySchema } from "@companion/contracts";
 import {
   RepositoryNotFoundError,
   RepositoryValidationError,
@@ -31,6 +30,7 @@ import {
   migrateKernelDatabase,
   openKernelDatabase,
 } from "../src/index.js";
+import { createReferenceManager } from "../src/reference_manager.js";
 
 const tempRoots: string[] = [];
 
@@ -238,7 +238,10 @@ describe("action proposal stager", () => {
       // guessing of alternate stored shapes.
       fx.db
         .prepare("UPDATE resource_snapshots SET body_json = ? WHERE id = ?")
-        .run(canonicalJsonString(JSON.parse(wrapper.text) as object), fx.snapshotId);
+        .run(
+          canonicalJsonString(JSON.parse(wrapper.text) as object),
+          fx.snapshotId,
+        );
       expect(() =>
         stager.stage(fx.runId, { targetRefId: fx.refId, ...TIMED }),
       ).toThrow(/stored SnapshotBody/);
@@ -314,10 +317,7 @@ describe("action proposal stager", () => {
       // Deleted snapshot.
       fx.db
         .prepare("UPDATE resource_snapshots SET body_json = ? WHERE id = ?")
-        .run(
-          snapshotBodyJson(TEST_EVENT_DELETED_TEXT),
-          fx.snapshotId,
-        );
+        .run(snapshotBodyJson(TEST_EVENT_DELETED_TEXT), fx.snapshotId);
       expect(() =>
         stager.stage(fx.runId, { targetRefId: fx.refId, ...TIMED }),
       ).toThrow(/deleted/);

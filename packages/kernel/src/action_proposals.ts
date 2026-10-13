@@ -55,8 +55,8 @@ import type { z } from "zod";
 /** Payload type mirroring the C16 strictObject schema (contracts export). */
 type ActionProposedPayload = z.infer<typeof ActionProposedPayloadSchema>;
 
+import { type SnapshotBody, SnapshotBodySchema } from "@companion/contracts";
 import { canonicalJsonString, generateId, sha256Hex } from "./canonical.js";
-import { SnapshotBodySchema, type SnapshotBody } from "@companion/contracts";
 import {
   RepositoryNotFoundError,
   RepositoryValidationError,
@@ -247,9 +247,7 @@ function freshSnapshotRevision(target: TargetRow): {
   // substring search, no guessing alternate stored shapes.
   let wrapper: SnapshotBody;
   try {
-    wrapper = SnapshotBodySchema.parse(
-      JSON.parse(target.bodyJson) as unknown,
-    );
+    wrapper = SnapshotBodySchema.parse(JSON.parse(target.bodyJson) as unknown);
   } catch {
     throw new RepositoryValidationError(
       "target snapshot body is not a stored SnapshotBody",

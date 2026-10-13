@@ -28,10 +28,10 @@ import {
   M1ToolErrorCodeNewSchema,
   M1ToolErrorCodeSchema,
   M1ToolNameSchema,
-  M5_RUN_EVENT_PAYLOAD_SCHEMAS,
-  M5_RUN_EVENT_TYPES,
   M4_TOOL_ERROR_CODES,
   M4ToolErrorCodeNewSchema,
+  M5_RUN_EVENT_PAYLOAD_SCHEMAS,
+  M5_RUN_EVENT_TYPES,
   MAX_SEARCH_LIMIT,
   MAX_SNAPSHOT_BODY_BYTES,
   MAX_SNIPPET_CODE_POINTS,
@@ -186,9 +186,7 @@ describe("latest registry extends with nonterminal reference.presented", () => {
     expect(LATEST_RUN_EVENT_TYPES).toBe(M5_RUN_EVENT_TYPES);
     expect(LATEST_RUN_EVENT_TYPES).toHaveLength(20);
     expect(Object.keys(LATEST_RUN_EVENT_PAYLOAD_SCHEMAS)).toHaveLength(20);
-    expect(LATEST_RUN_EVENT_PAYLOAD_SCHEMAS).toBe(
-      M5_RUN_EVENT_PAYLOAD_SCHEMAS,
-    );
+    expect(LATEST_RUN_EVENT_PAYLOAD_SCHEMAS).toBe(M5_RUN_EVENT_PAYLOAD_SCHEMAS);
   });
 
   it("generic/latest parsers understand reference.presented", () => {

@@ -152,22 +152,22 @@ export interface ToolRegistration {
   readonly outputSchema: ToolSchema;
   readonly handler: ToolHandler;
   readonly normalize?: ToolNormalizer;
-    /**
-     * Static dedup mode (exact closed type). Omitted means `normal` (default
-     * behavior unchanged). `always_bypass` and `input_freshness` bypass dedup
-     * via the effective-freshness path computed after input validation.
-     */
-    readonly dedupMode?: ToolDedupMode;
-    /**
-     * C17 proposal-only registration: a `write`-category registration whose
-     * handler STAGES a proposal and never performs any external action. This
-     * is the ONLY way a non-`read` category can pass classification; the
-     * handler is still responsible for its own origin check (staging is
-     * proposal-only from the normal agent origin). Dedicated Action
-     * execution remains unavailable.
-     */
-    readonly proposalOnly?: boolean;
-  }
+  /**
+   * Static dedup mode (exact closed type). Omitted means `normal` (default
+   * behavior unchanged). `always_bypass` and `input_freshness` bypass dedup
+   * via the effective-freshness path computed after input validation.
+   */
+  readonly dedupMode?: ToolDedupMode;
+  /**
+   * C17 proposal-only registration: a `write`-category registration whose
+   * handler STAGES a proposal and never performs any external action. This
+   * is the ONLY way a non-`read` category can pass classification; the
+   * handler is still responsible for its own origin check (staging is
+   * proposal-only from the normal agent origin). Dedicated Action
+   * execution remains unavailable.
+   */
+  readonly proposalOnly?: boolean;
+}
 
 /** Per-call invocation context (origin/caller/allowedTools/AbortSignal). */
 export interface ToolInvokeContext {

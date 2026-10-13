@@ -9,6 +9,35 @@
 // HTTP lives in later milestones and is NOT part of this module.
 
 export type {
+  ActionAuthoritativeObservation,
+  ActionCancelResult,
+  ActionExecutionService,
+  ActionExecutionServiceOptions,
+  ActionFinishRequest,
+  ActionFinishResult,
+  ActionGrantGate,
+  ActionPickupResult,
+  ActionPreflightBlockedTerminal,
+  ActionPreflightFailedTerminal,
+  ActionPreflightMaterializeResult,
+  ActionPreflightOutcome,
+  ActionPreflightRead,
+  ActionPreflightReadPort,
+  ActionPreflightTerminalBase,
+  ActionRecoveryCause,
+  ActionRecoverySummary,
+  ActionRunRecoveryResult,
+  CalendarActionReadPortOptions,
+  CalendarActionTargetResolverOptions,
+  CommittedGrantMeta,
+} from "./action_executions.js";
+export {
+  ActionAuthoritativeObservationSchema,
+  createActionExecutionService,
+  createCalendarActionReadPort,
+  createCalendarActionTargetResolver,
+} from "./action_executions.js";
+export type {
   ActionProposalEventSink,
   ActionProposalStager,
   ActionProposalStagerOptions,
@@ -21,37 +50,6 @@ export {
   createActionProposalStager,
   createCalendarRescheduleProposalRegistration,
 } from "./action_proposals.js";
-export type {
-  ActionAuthoritativeObservation,
-  ActionCancelResult,
-  ActionExecutionService,
-  ActionExecutionServiceOptions,
-  ActionFinishRequest,
-  ActionFinishResult,
-  ActionGrantGate,
-  ActionPickupResult,
-  ActionPreflightMaterializeResult,
-  ActionRecoveryCause,
-  ActionRecoverySummary,
-  ActionRunRecoveryResult,
-  ActionPreflightOutcome,
-  ActionPreflightRead,
-  ActionPreflightReadPort,
-  ActionPreflightTerminalBase,
-  ActionPreflightFailedTerminal,
-  ActionPreflightBlockedTerminal,
-  CommittedGrantMeta,
-} from "./action_executions.js";
-export type {
-  CalendarActionReadPortOptions,
-  CalendarActionTargetResolverOptions,
-} from "./action_executions.js";
-export {
-  ActionAuthoritativeObservationSchema,
-  createActionExecutionService,
-  createCalendarActionReadPort,
-  createCalendarActionTargetResolver,
-} from "./action_executions.js";
 export type {
   ActionStrategyOptions,
   CalendarActionWriteCapability,
@@ -326,8 +324,8 @@ export type {
   ModelCallRow,
   PostMessageOptions,
   PostRetryOptions,
-  RejectProposalOptions,
   RecordModelCallOptions,
+  RejectProposalOptions,
   RunRow,
   SessionRow,
   StoredIdempotencyRecord,

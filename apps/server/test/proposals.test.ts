@@ -15,7 +15,6 @@ import { randomUUID } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type Database from "better-sqlite3";
 import {
   canonicalJsonString,
   closeKernelDatabase,
@@ -26,6 +25,7 @@ import {
   openKernelDatabase,
   RunEngine,
 } from "@companion/kernel";
+import type Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import { type CreatedServerApp, createApp } from "../src/app.js";
 import { loadServerConfig } from "../src/config.js";
@@ -69,7 +69,9 @@ async function makeApp(): Promise<Fixture> {
   };
 }
 
-function postHeaders(extra: Record<string, string> = {}): Record<string, string> {
+function postHeaders(
+  extra: Record<string, string> = {},
+): Record<string, string> {
   return {
     "content-type": "application/json",
     host: "127.0.0.1",
@@ -128,18 +130,26 @@ async function seedProposal(
   const resourceId = generateId();
   const snapshotId = generateId();
   const refId = generateId();
-  f.raw.prepare(
-    "INSERT INTO connector_instances (id, kind, display_name, config_json, created_at) VALUES (?, 'calendar', 'c', '{}', 1)",
-  ).run(connectorId);
-  f.raw.prepare(
-    "INSERT INTO resources (id, connector_instance_id, canonical_key, title, next_revision, created_at) VALUES (?, ?, 'cal|cal1|evt1', 'Event', 1, 1)",
-  ).run(resourceId, connectorId);
-  f.raw.prepare(
-    "INSERT INTO resource_snapshots (id, resource_id, revision, source_revision, content_hash, body_json, size_bytes, observed_at, created_at) VALUES (?, ?, 1, 'src@1', 'hash@1', ?, 10, 1, 1)",
-  ).run(snapshotId, resourceId, canonicalJsonString(CALENDAR_EVENT_BODY));
-  f.raw.prepare(
-    "INSERT INTO session_references (id, session_id, ordinal, resource_id, snapshot_id, created_at) VALUES (?, ?, 1, ?, ?, 1)",
-  ).run(refId, sessionId, resourceId, snapshotId);
+  f.raw
+    .prepare(
+      "INSERT INTO connector_instances (id, kind, display_name, config_json, created_at) VALUES (?, 'calendar', 'c', '{}', 1)",
+    )
+    .run(connectorId);
+  f.raw
+    .prepare(
+      "INSERT INTO resources (id, connector_instance_id, canonical_key, title, next_revision, created_at) VALUES (?, ?, 'cal|cal1|evt1', 'Event', 1, 1)",
+    )
+    .run(resourceId, connectorId);
+  f.raw
+    .prepare(
+      "INSERT INTO resource_snapshots (id, resource_id, revision, source_revision, content_hash, body_json, size_bytes, observed_at, created_at) VALUES (?, ?, 1, 'src@1', 'hash@1', ?, 10, 1, 1)",
+    )
+    .run(snapshotId, resourceId, canonicalJsonString(CALENDAR_EVENT_BODY));
+  f.raw
+    .prepare(
+      "INSERT INTO session_references (id, session_id, ordinal, resource_id, snapshot_id, created_at) VALUES (?, ?, 1, ?, ?, 1)",
+    )
+    .run(refId, sessionId, resourceId, snapshotId);
 
   const staged = f.repo.actionProposalsStager?.stage(posted.run.id, {
     targetRefId: refId,
@@ -157,9 +167,9 @@ async function seedProposal(
     after: 0,
     limit: 50,
   });
-  const proposed = events.events.find(
-    (e) => e.type === "action.proposed",
-  ) as { payload: { proposalId: string } } | undefined;
+  const proposed = events.events.find((e) => e.type === "action.proposed") as
+    | { payload: { proposalId: string } }
+    | undefined;
   if (proposed === undefined) {
     throw new Error("expected a committed proposal");
   }
@@ -275,13 +285,20 @@ describe("C18 proposal decisions", () => {
       );
       expect(mismatch.status).toBe(409);
       expect(await mismatch.json()).toEqual({
-        error: { code: "proposal_hash_mismatch", message: "proposal hash mismatch" },
+        error: {
+          code: "proposal_hash_mismatch",
+          message: "proposal hash mismatch",
+        },
       });
 
       // Reject first; then approve past-terminal → 409 proposal_state_conflict.
-      const rejected = await postJson(f.app, `/api/sessions/${sessionId}/proposals/${proposalId}/reject`, {
-        proposalHash: hash,
-      });
+      const rejected = await postJson(
+        f.app,
+        `/api/sessions/${sessionId}/proposals/${proposalId}/reject`,
+        {
+          proposalHash: hash,
+        },
+      );
       expect(rejected.status).toBe(200);
       const late = await postJson(
         f.app,

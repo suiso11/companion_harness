@@ -43,15 +43,15 @@
 // No `await` ever spans an open DB transaction: port reads/writes happen
 // strictly outside transactions, exactly like the preflight step.
 
+import type { RunResult } from "@companion/contracts";
 import {
   CALENDAR_RESCHEDULE_TOOL_NAME,
   CalendarRescheduleToolInputSchema,
   parseRunResult,
   UuidSchema,
 } from "@companion/contracts";
-import type { RunResult } from "@companion/contracts";
-import { z } from "zod";
 import type Database from "better-sqlite3";
+import { z } from "zod";
 import {
   ActionAuthoritativeObservationSchema,
   type ActionExecutionService,
@@ -60,13 +60,10 @@ import {
   type ActionPreflightReadPort,
   type CommittedGrantMeta,
 } from "./action_executions.js";
-import type {
-  RunStrategy,
-  RunStrategyContext,
-} from "./strategy.js";
-import { StrategyError } from "./strategy.js";
 import type { CalendarGetTarget } from "./calendar_tools.js";
 import { RepositoryValidationError } from "./errors.js";
+import type { RunStrategy, RunStrategyContext } from "./strategy.js";
+import { StrategyError } from "./strategy.js";
 
 /* ------------------------------------------------------------------ */
 /* Exact injected write port (capability + one classified update)        */
@@ -230,11 +227,7 @@ function normalizeInstant(value: string): string {
  * that merely contains the intended one, e.g. `"start":"2024-01-01T09:00"`).
  * Any parse/field failure yields false (unverified), never a partial claim.
  */
-function boundariesMatch(
-  text: string,
-  start: string,
-  end: string,
-): boolean {
+function boundariesMatch(text: string, start: string, end: string): boolean {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text) as unknown;
@@ -263,7 +256,9 @@ export function createActionStrategy(
 ): RunStrategy & { readonly strategyName: "m5-action" } {
   const { db, service, preflightRead, writePort, resolveTarget } = options;
 
-  const runStrategy: RunStrategy = async (ctx: RunStrategyContext): Promise<RunResult> => {
+  const runStrategy: RunStrategy = async (
+    ctx: RunStrategyContext,
+  ): Promise<RunResult> => {
     const runId = UuidSchema.parse(ctx.run.id);
 
     // 0) Pickup WITHOUT any consumption decision: the atomic pickup itself
@@ -392,7 +387,9 @@ export function createActionStrategy(
         preflightSnapshotId: preflight.preflightSnapshotId,
       });
     if (write.status !== "succeeded") {
-      return plainFinish(write.status === "definite_failure" ? "failed" : "unknown");
+      return plainFinish(
+        write.status === "definite_failure" ? "failed" : "unknown",
+      );
     }
 
     // 6) §18.7 authoritative read-back: SAME read port, SAME execution.
@@ -487,7 +484,7 @@ export function createActionStrategy(
       }
       return withPersisted(runId);
     }
-  }
+  };
 
   const strategy = runStrategy as RunStrategy & {
     readonly strategyName: "m5-action";

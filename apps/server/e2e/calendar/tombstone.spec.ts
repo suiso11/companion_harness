@@ -56,7 +56,10 @@ async function send(page: Page, text: string): Promise<void> {
 
 /** REAL selection: opening the citation is what freezes r1 for the next turn. */
 async function selectCitation(page: Page, label: string): Promise<void> {
-  await page.locator("#conversation button", { hasText: label }).first().click();
+  await page
+    .locator("#conversation button", { hasText: label })
+    .first()
+    .click();
   await expect(page.locator("#drawer")).toBeVisible();
   await page.locator("#drawer").click({ position: { x: 4, y: 4 } });
   await expect(page.locator("#drawer")).toBeHidden();

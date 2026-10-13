@@ -1420,6 +1420,48 @@ passing tests/types/browser reruns were done for this lint-only slice.
   per scope (no unrelated mass format). Whole-repo lint is therefore NOT
   closed; owned lint is closed.
 
+## C13–C22 all-lint finish (2026-10-13, c13-c22-all-lint-finish)
+
+SUPERSEDES the ownership claim in the section above: the "30 remaining
+errors are all in files this branch does NOT touch (per ... origin/feat/
+c12-calendar-snapshots)" line was an ownership mistake. That remote ref
+already contains our C13–C22 implementation, so it is the wrong base. The
+correct base is the known initial base `228c403`; per `git diff
+228c403...HEAD` the files `e2e/calendar/actionPort.ts`,
+`e2e/calendar/server.ts`, `e2e/calendar/tombstone.spec.ts`,
+`playwright.config.ts`, `src/app.ts`, `src/bootstrap.ts`,
+`test/action_composition.test.ts`, `test/proposals.test.ts`,
+`packages/contracts/*`, `packages/kernel/*` are ALL owned by the current
+user request (C13–C22), so all 30 postfix diagnostics were IN SCOPE.
+
+- PRE: retained `.verification-log/resume-lint-postfix.log` (not rerun to
+  confirm) — **216 files checked, 30 errors, 1 info** (same
+  `biome.json` `recommended`-deprecation info), format + organizeImports
+  only.
+- FIX (no semantics, no mass unrelated format, no behavior-contract
+  change): `biome check --write` applied ONLY to owned files —
+  `actionPort.ts`, `server.ts`, `tombstone.spec.ts`,
+  `playwright.config.ts`, `app.ts`, `bootstrap.ts`,
+  `action_composition.test.ts`, `proposals.test.ts`,
+  `contracts/src/action.ts`, `contracts/src/events.ts`,
+  `contracts/src/http.ts`, `contracts/src/index.ts`,
+  `kernel/src/action_proposals.ts`, `kernel/src/action_strategy.ts`,
+  plus the diagnostic-cap-hidden owned files `kernel/src/broker.ts`,
+  `kernel/src/index.ts`, `kernel/src/repository.ts`,
+  `kernel/src/schema.ts`, `contracts/test/m1-references.test.ts`,
+  `contracts/test/m2-contracts.test.ts`,
+  `kernel/test/action_proposals.test.ts` (import/export ordering plus
+  formatter rewraps; diff-verified reorder/whitespace only). Grep over
+  `packages` + `apps/server/test` found no incidental latest-enum/source/
+  table-count tests, so nothing was deleted or repinned.
+- POST (ONE final `pnpm run lint` after fixes; no passing
+  tests/types/browser reruns for this whitespace/import-format slice):
+  `biome check .` exit 0 — **216 files checked, 0 errors, 1 info**
+  (only the pre-existing recommended-deprecation info). Raw output was
+  retained accessibly at `/tmp/opencode/resume-lint-final.log`; the
+  working `.verification-log/` was removed before commit, so no logs are
+  committed.
+
 ## Non-goals (explicit)
 Domain retention/GC (except newest-3 backup rotation), user export,
 session delete API, running-process deletion, auto-restore, DB/backup

@@ -32,7 +32,12 @@ afterEach(async () => {
     }
   }
   for (const dir of tempDirs) {
-    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    rmSync(dir, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 100,
+    });
   }
   tempDirs = [];
 });
@@ -54,9 +59,7 @@ function tempEnv(): { env: NodeJS.ProcessEnv; dbPath: string } {
 
 /** Pre-provision the one owned Calendar instance so the fake write port can
  *  name the EXACT active instance id (fail-closed binding identity). */
-async function provisionCalendarInstance(
-  dbPath: string,
-): Promise<string> {
+async function provisionCalendarInstance(dbPath: string): Promise<string> {
   const handle = openKernelDatabase(dbPath);
   try {
     await migrateKernelDatabase({

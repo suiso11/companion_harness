@@ -45,11 +45,6 @@
 // constants live in e2e/calendar/ports.ts (isolated from the M3 harness).
 
 import { mkdtempSync, rmSync } from "node:fs";
-import {
-  createReferenceManager,
-  migrateKernelDatabase,
-  openKernelDatabase,
-} from "@companion/kernel";
 import { createServer, type Server as HttpServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -58,17 +53,22 @@ import type {
   TransportFactory,
 } from "@companion/connector-mcp";
 import { InMemoryTransport } from "@companion/connector-mcp";
+import {
+  createReferenceManager,
+  migrateKernelDatabase,
+  openKernelDatabase,
+} from "@companion/kernel";
 import type { ModelGateway } from "@companion/model-local";
 import { startServer } from "../../src/index.js";
+import { createFakeCalendarActionWritePort } from "./actionPort.js";
+import { createAuthoritativeCalendarBinding } from "./authoritativeBinding.js";
+import type { FakeWriteMode } from "./mcpFake.js";
 import {
   createFakeCalendarMcpServer,
   createFakeCalendarState,
   fakeToolSchemaHashes,
   resetFakeCalendarState,
 } from "./mcpFake.js";
-import { createAuthoritativeCalendarBinding } from "./authoritativeBinding.js";
-import { createFakeCalendarActionWritePort } from "./actionPort.js";
-import type { FakeWriteMode } from "./mcpFake.js";
 import { createScriptedCalendarModelGateway } from "./model.js";
 import {
   CALENDAR_APP_PORT,
@@ -128,7 +128,9 @@ const env: NodeJS.ProcessEnv = {
   COMPANION_HOST: "127.0.0.1",
   COMPANION_PORT: String(CALENDAR_APP_PORT),
   COMPANION_TIME_ZONE: "UTC",
-  COMPANION_LOG_LEVEL: (process.env.E2E_DEBUG_LOG === "1" ? "info" : "error") as "info" | "error",
+  COMPANION_LOG_LEVEL: (process.env.E2E_DEBUG_LOG === "1" ? "info" : "error") as
+    | "info"
+    | "error",
   COMPANION_MODEL_JSON: JSON.stringify({
     adapter: "ollama",
     baseUrl: "http://127.0.0.1:1",
@@ -167,16 +169,20 @@ const env: NodeJS.ProcessEnv = {
 // Its own throwaway DB + its OWN registered `calendar` instance (created
 // through the existing ReferenceManager/kernel migration seams, NOT by
 // writing snapshots or references by hand).
-const tombstoneDir = mkdtempSync(join(tmpdir(), "companion-calendar-tombstone-"));
-const tombstoneDbPath = join(tombstoneDir, "companion-calendar-tombstone.sqlite");
+const tombstoneDir = mkdtempSync(
+  join(tmpdir(), "companion-calendar-tombstone-"),
+);
+const tombstoneDbPath = join(
+  tombstoneDir,
+  "companion-calendar-tombstone.sqlite",
+);
 const tombstoneState = createFakeCalendarState();
 {
   const handle = openKernelDatabase(tombstoneDbPath);
   await migrateKernelDatabase({ db: handle.raw, backupDir: tombstoneDir });
-  const instance = createReferenceManager(handle.raw).ensureCalendarConnectorInstance(
-    FAKE_BINDING_DISPLAY_NAME,
-    CALENDAR_ID,
-  );
+  const instance = createReferenceManager(
+    handle.raw,
+  ).ensureCalendarConnectorInstance(FAKE_BINDING_DISPLAY_NAME, CALENDAR_ID);
   handle.raw.close();
   // Trusted fixture binding: the REAL production adapter over the fixture's
   // OWN real MCP connector, wrapped by the explicit authoritative gate.
@@ -197,7 +203,9 @@ const tombstoneStarted = await startServer({
     COMPANION_HOST: "127.0.0.1",
     COMPANION_PORT: String(CALENDAR_TOMBSTONE_APP_PORT),
     COMPANION_TIME_ZONE: "UTC",
-    COMPANION_LOG_LEVEL: (process.env.E2E_DEBUG_LOG === "1" ? "info" : "error") as "info" | "error",
+    COMPANION_LOG_LEVEL: (process.env.E2E_DEBUG_LOG === "1"
+      ? "info"
+      : "error") as "info" | "error",
     COMPANION_MODEL_JSON: JSON.stringify({
       adapter: "ollama",
       baseUrl: "http://127.0.0.1:1",
@@ -247,7 +255,9 @@ function readBody(req: import("node:http").IncomingMessage): Promise<string> {
 function parseBody(raw: string): Record<string, unknown> | null {
   try {
     const parsed = JSON.parse(raw) as unknown;
-    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+    return typeof parsed === "object" &&
+      parsed !== null &&
+      !Array.isArray(parsed)
       ? (parsed as Record<string, unknown>)
       : null;
   } catch {
@@ -381,7 +391,12 @@ async function shutdown(): Promise<void> {
     // Best effort: still remove the temp dir.
   }
   rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-  rmSync(tombstoneDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  rmSync(tombstoneDir, {
+    recursive: true,
+    force: true,
+    maxRetries: 5,
+    retryDelay: 100,
+  });
 }
 process.on("SIGINT", () => {
   void shutdown().then(() => process.exit(0));

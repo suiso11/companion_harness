@@ -19,7 +19,11 @@ const CALENDAR_MODE = process.env.COMPANION_E2E_CALENDAR === "1";
 export default defineConfig({
   testDir: "./e2e",
   testMatch: CALENDAR_MODE
-    ? ["calendar/calendar.spec.ts", "calendar/action.spec.ts", "calendar/tombstone.spec.ts"]
+    ? [
+        "calendar/calendar.spec.ts",
+        "calendar/action.spec.ts",
+        "calendar/tombstone.spec.ts",
+      ]
     : [
         "conversation.spec.ts",
         "citation_recovery.spec.ts",

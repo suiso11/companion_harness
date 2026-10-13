@@ -11,14 +11,20 @@
 
 import {
   type AcceptedRun,
+  ActionApprovedPayloadSchema,
+  type ActionExecutionStatus,
+  ActionExecutionStatusSchema,
+  type ActionReceiptView,
+  ActionReceiptViewSchema,
+  CalendarRescheduleToolInputSchema,
   type CreateSessionResponse,
   CreateSessionResponseSchema,
   EventsQuerySchema,
   type FrozenContext,
   FrozenContextSchema,
+  HistoryQuerySchema,
   type HistoryResponse,
   HistoryResponseSchema,
-  HistoryQuerySchema,
   IDEMPOTENCY_SCOPE_SESSIONS_CREATE,
   IdempotencyLookupQuerySchema,
   type IdempotencyLookupResponse,
@@ -30,7 +36,8 @@ import {
   type LatestRunEventType,
   LatestRunEventTypeSchema,
   type M0RunEventType,
-  type M2ModelErrorCode,  M2ModelErrorCodeSchema,
+  type M2ModelErrorCode,
+  M2ModelErrorCodeSchema,
   type M2ModelStepEventType,
   M2ModelStepEventTypeSchema,
   messageScope,
@@ -39,19 +46,24 @@ import {
   PostMessageResponseSchema,
   PostRetryRequestSchema,
   type PostRetryResponse,
+  type ProposalApprove202Response,
   ProposalApprove202ResponseSchema,
   ProposalApproveRequestSchema,
-  type ProposalApprove202Response,
+  type ProposalExecutionView,
+  ProposalExecutionViewSchema,
+  ProposalRejectRequestSchema,
   type ProposalRejectResponse,
   ProposalRejectResponseSchema,
+  type ProposalSummary,
   ProposalSummarySchema,
-  proposalApproveScope,
+  type ProposalsListResponse,
   ProposalsListResponseSchema,
   parseRunErrorCode,
   parseRunEvent,
   parseRunEventPayload,
   parseRunResult,
   parseTurnInput,
+  proposalApproveScope,
   type ReferenceContextGetResponse,
   ReferenceContextGetResponseSchema,
   ReferenceContextPutRequestSchema,
@@ -68,38 +80,25 @@ import {
   type RunStatus,
   retryScope,
   SnapshotBodySchema,
-  CalendarRescheduleToolInputSchema,
-  type ProposalSummary,
-  ActionApprovedPayloadSchema,
-  ActionExecutionStatusSchema,
-  type ActionExecutionStatus,
-  ActionReceiptViewSchema,
-  type ActionReceiptView,
-  ProposalExecutionViewSchema,
-  type ProposalExecutionView,
-  ProposalRejectRequestSchema,
-  type ProposalsListResponse,
 } from "@companion/contracts";
 import type Database from "better-sqlite3";
 import {
-  canonicalJsonString,
-  sha256Hex,
-} from "./canonical.js";
+  type ActionExecutionService,
+  createActionExecutionService,
+} from "./action_executions.js";
 import {
   type ActionProposalStager,
   type CommittedProposal,
   createActionProposalStager,
 } from "./action_proposals.js";
 import {
-  type ActionExecutionService,
-  createActionExecutionService,
-} from "./action_executions.js";
-import {
   assertUuidV4,
+  canonicalJsonString,
   generateId,
   IDEMPOTENCY_OPERATIONS,
   isUuidV4,
   requestHash,
+  sha256Hex,
 } from "./canonical.js";
 import {
   DatabaseStateInvalidError,
@@ -127,7 +126,7 @@ export class ActionRunDispatchRequiredError extends Error {
     super(message);
     this.name = "ActionRunDispatchRequiredError";
   }
-};
+}
 
 export {
   canonicalJson,
@@ -566,7 +565,7 @@ export const appendEventInTx: RunEventAppender = function appendEventInTx(
     now,
   );
   return next;
-}
+};
 
 function toStoredResponse(
   db: Database.Database,
@@ -1536,7 +1535,14 @@ export function createKernelRepository(
       if (moved.changes !== 1) {
         return { applied: false, status: "running" };
       }
-      appendEventInTx(db, id, current.event_seq, "run.abandoned", { cause }, now);
+      appendEventInTx(
+        db,
+        id,
+        current.event_seq,
+        "run.abandoned",
+        { cause },
+        now,
+      );
       return { applied: true, status: "abandoned" };
     });
     if (outcome.applied) {
@@ -2195,15 +2201,13 @@ export function createKernelRepository(
   function loadProposal(proposalId: string): RawProposal | null {
     const id = requireId(proposalId, "proposalId");
     return (
-      (db
-        .prepare("SELECT * FROM action_proposals WHERE id = ?")
-        .get(id) as RawProposal | undefined) ?? null
+      (db.prepare("SELECT * FROM action_proposals WHERE id = ?").get(id) as
+        | RawProposal
+        | undefined) ?? null
     );
   }
 
-  function parseProposalSummary(
-    row: RawProposal,
-  ): ProposalSummary {
+  function parseProposalSummary(row: RawProposal): ProposalSummary {
     return parseOrValidation(
       () =>
         ProposalSummarySchema.parse({
@@ -2237,9 +2241,7 @@ export function createKernelRepository(
       .prepare(
         "SELECT version, items_json FROM session_reference_context WHERE session_id = ?",
       )
-      .get(sessionId) as
-      | { version: number; items_json: string }
-      | undefined;
+      .get(sessionId) as { version: number; items_json: string } | undefined;
     if (contextRow === undefined) {
       throw new DatabaseStateInvalidError(
         `reference context missing for session ${sessionId}`,
@@ -2312,8 +2314,6 @@ export function createKernelRepository(
       "proposals list response",
     );
   }
-
-
 
   /**
    * Actual execution + receipt read for ONE session-owned proposal (C22).
@@ -2447,8 +2447,7 @@ export function createKernelRepository(
           throw new IdempotencyConflictError(scope);
         }
         const body = parseOrValidation(
-          () =>
-            ProposalApprove202ResponseSchema.parse(existing.responseBody),
+          () => ProposalApprove202ResponseSchema.parse(existing.responseBody),
           "stored approve body",
         );
         if (body.proposalId !== proposal) {
@@ -2488,7 +2487,11 @@ export function createKernelRepository(
             "concurrent proposal decision conflict; retry",
           );
         }
-        return { kind: "state_conflict", reason: "expired", proposalId: proposal };
+        return {
+          kind: "state_conflict",
+          reason: "expired",
+          proposalId: proposal,
+        };
       }
       // §18.4: no active Run may exist in the session at decision time.
       const busy = db
@@ -2625,9 +2628,7 @@ export function createKernelRepository(
       () => ProposalRejectRequestSchema.parse(request),
       "reject request",
     );
-    type RejectOutcome =
-      | DecisionOk<ProposalRejectResponse>
-      | DecisionConflict;
+    type RejectOutcome = DecisionOk<ProposalRejectResponse> | DecisionConflict;
     const outcome: RejectOutcome = withImmediate(db, () => {
       if (readSession(db, session) === null) {
         throw new RepositoryNotFoundError(`session ${session} not found`);

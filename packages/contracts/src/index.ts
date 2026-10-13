@@ -52,12 +52,6 @@ export type {
   ProposalSummary,
   ProposalsListResponse,
 } from "./action.js";
-export type {
-  ActionApprovalHistoryItem,
-  ActionRejectionHistoryItem,
-  ActionRunHistorySelection,
-  UserTextHistoryItem,
-} from "./http.js";
 export {
   ActionApprovedPayloadSchema,
   ActionExecutionFinishedPayloadSchema,
@@ -83,6 +77,7 @@ export {
   M5ActionErrorCodeSchema,
   M5ActionEventTypeSchema,
   MAX_PENDING_PROPOSALS_PER_SESSION,
+  MAX_PROPOSAL_LIST_ITEMS,
   PROPOSAL_TTL_MS,
   ProposalApprove202ResponseSchema,
   ProposalApproveRequestSchema,
@@ -91,15 +86,8 @@ export {
   ProposalRejectResponseSchema,
   ProposalSummarySchema,
   ProposalsListResponseSchema,
-  MAX_PROPOSAL_LIST_ITEMS,
   proposalApproveScope,
 } from "./action.js";
-export {
-  UserTextHistoryItemSchema,
-  ActionApprovalHistoryItemSchema,
-  ActionRejectionHistoryItemSchema,
-  ActionRunHistorySelectionSchema,
-} from "./http.js";
 export type {
   CalendarEventStatus,
   CalendarGetTarget,
@@ -197,6 +185,9 @@ export {
 } from "./frozen_context.js";
 export type {
   AcceptedRun,
+  ActionApprovalHistoryItem,
+  ActionRejectionHistoryItem,
+  ActionRunHistorySelection,
   ActiveRunResponse,
   ApiError,
   ApiErrorCode,
@@ -224,9 +215,13 @@ export type {
   RunStatusResponse,
   SessionParams,
   TurnParams,
+  UserTextHistoryItem,
 } from "./http.js";
 export {
   AcceptedRunSchema,
+  ActionApprovalHistoryItemSchema,
+  ActionRejectionHistoryItemSchema,
+  ActionRunHistorySelectionSchema,
   ActiveRunResponseSchema,
   ApiErrorCodeSchema,
   ApiErrorSchema,
@@ -252,6 +247,7 @@ export {
   RunStatusResponseSchema,
   SessionParamsSchema,
   TurnParamsSchema,
+  UserTextHistoryItemSchema,
 } from "./http.js";
 export type {
   IdempotencyKey,

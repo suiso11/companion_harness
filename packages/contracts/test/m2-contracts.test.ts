@@ -31,6 +31,8 @@ import {
   M2ModelErrorCodeSchema,
   M2ModelStepEventTypeSchema,
   M2RunEventSchema,
+  M5_RUN_EVENT_PAYLOAD_SCHEMAS,
+  M5_RUN_EVENT_TYPES,
   MAX_CITATIONS_PER_PART,
   MAX_MODEL_STEPS_PER_RUN,
   MAX_PART_TEXT_CODE_POINTS,
@@ -38,8 +40,6 @@ import {
   MAX_STRUCTURED_ANSWER_PARTS,
   MIN_PART_TEXT_CODE_POINTS,
   MIN_STRUCTURED_ANSWER_PARTS,
-  M5_RUN_EVENT_PAYLOAD_SCHEMAS,
-  M5_RUN_EVENT_TYPES,
   ModelStepCompletedPayloadSchema,
   ModelStepFailedPayloadSchema,
   ModelStepStartedPayloadSchema,
@@ -612,9 +612,7 @@ describe("M2/latest event registry (model.step.* non-terminal)", () => {
     expect(LATEST_RUN_EVENT_TYPES).toHaveLength(20);
     expect(Object.keys(M1_RUN_EVENT_PAYLOAD_SCHEMAS)).toHaveLength(10);
     expect(Object.keys(M2_RUN_EVENT_PAYLOAD_SCHEMAS)).toHaveLength(13);
-    expect(LATEST_RUN_EVENT_PAYLOAD_SCHEMAS).toBe(
-      M5_RUN_EVENT_PAYLOAD_SCHEMAS,
-    );
+    expect(LATEST_RUN_EVENT_PAYLOAD_SCHEMAS).toBe(M5_RUN_EVENT_PAYLOAD_SCHEMAS);
     expect(Object.keys(M5_RUN_EVENT_PAYLOAD_SCHEMAS)).toHaveLength(20);
   });
 

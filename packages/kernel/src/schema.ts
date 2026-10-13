@@ -698,7 +698,10 @@ export const actionExecutions = sqliteTable(
       "action_executions_status_check",
       sql`${t.status} IN ('queued','preflight','executing','succeeded','succeeded_unverified','blocked_stale','failed','unknown')`,
     ),
-    check("action_executions_updated_at_check", sql`${t.updatedAt} >= ${t.createdAt}`),
+    check(
+      "action_executions_updated_at_check",
+      sql`${t.updatedAt} >= ${t.createdAt}`,
+    ),
     check(
       "action_executions_marker_terminal_check",
       sql`(${t.status} = 'queued' AND ${t.externalCallStartedAt} IS NULL AND ${t.finishedAt} IS NULL AND ${t.errorCode} IS NULL) OR

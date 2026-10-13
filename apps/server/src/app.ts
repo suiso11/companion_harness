@@ -23,8 +23,8 @@ import {
   PostRetryRequestSchema,
   ProposalApprove202ResponseSchema,
   ProposalApproveRequestSchema,
-  ProposalRejectRequestSchema,
   ProposalExecutionViewSchema,
+  ProposalRejectRequestSchema,
   ProposalRejectResponseSchema,
   ProposalsListResponseSchema,
   proposalApproveScope,
@@ -903,81 +903,83 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   // Approve (keyed, exactly-once external write): strict `{ proposalHash }`
   // body. No early draining reject: a stored idempotency replay wins over
   // 503 (same admission pattern as messages/retries).
-  app.post("/api/sessions/:sessionId/proposals/:proposalId/approve", async (c) => {
-    const started = now();
-    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
-    if ("response" in session) {
-      return session.response;
-    }
-    const proposal = requireUuid(c, c.req.param("proposalId"), "proposalId");
-    if ("response" in proposal) {
-      return proposal.response;
-    }
-    const keyed = requireIdempotencyKey(c);
-    if ("response" in keyed) {
-      return keyed.response;
-    }
-    const raw = await readJsonBody(c);
-    if (!raw.ok) {
-      return validationError(c);
-    }
-    const parsedBody = ProposalApproveRequestSchema.safeParse(raw.value);
-    if (!parsedBody.success) {
-      return validationError(c);
-    }
-    // C21 disabled composition: refuse BEFORE any repository call, so no
-    // proposal can be approved into a queued Action Run while the M5 write
-    // surface is gated off. Fixed 409 code, no ids or content in the body.
-    if (actionsEnabled !== true) {
-      return c.json(
-        {
-          error: {
-            code: "action_execution_disabled",
-            message: "action execution is disabled",
-          },
-        },
-        409,
-      );
-    }
-    // Draining admission re-check immediately before the repository call
-    // (no await between here and repo.approveProposal). A stored response
-    // for this exact request replays verbatim instead of 503; anything
-    // else is rejected without persisting.
-    if (draining) {
-      const replayed = tryReplayStoredApprove(
-        c,
-        session.id,
-        proposal.id,
-        parsedBody.data.proposalHash,
-        keyed.key,
-        started,
-      );
-      if (replayed !== null) {
-        return replayed;
+  app.post(
+    "/api/sessions/:sessionId/proposals/:proposalId/approve",
+    async (c) => {
+      const started = now();
+      const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+      if ("response" in session) {
+        return session.response;
       }
-      return shuttingDown(c);
-    }
-    try {
-      const out = repo.approveProposal(
-        session.id,
-        proposal.id,
-        { proposalHash: parsedBody.data.proposalHash },
-        { key: keyed.key, now: now(), timeZone: config.timeZone },
-      );
-      const body = ProposalApprove202ResponseSchema.parse(out.body);
-      logger.info("http.proposals.approve", {
-        sessionId: session.id,
-        proposalId: proposal.id,
-        status: out.status,
-        bytes: raw.bytes,
-        durationMs: Math.max(now() - started, 0),
-      });
-      return c.json(body, out.status as 202);
-    } catch (error) {
-      return mapDomainError(c, error);
-    }
-  });
-
+      const proposal = requireUuid(c, c.req.param("proposalId"), "proposalId");
+      if ("response" in proposal) {
+        return proposal.response;
+      }
+      const keyed = requireIdempotencyKey(c);
+      if ("response" in keyed) {
+        return keyed.response;
+      }
+      const raw = await readJsonBody(c);
+      if (!raw.ok) {
+        return validationError(c);
+      }
+      const parsedBody = ProposalApproveRequestSchema.safeParse(raw.value);
+      if (!parsedBody.success) {
+        return validationError(c);
+      }
+      // C21 disabled composition: refuse BEFORE any repository call, so no
+      // proposal can be approved into a queued Action Run while the M5 write
+      // surface is gated off. Fixed 409 code, no ids or content in the body.
+      if (actionsEnabled !== true) {
+        return c.json(
+          {
+            error: {
+              code: "action_execution_disabled",
+              message: "action execution is disabled",
+            },
+          },
+          409,
+        );
+      }
+      // Draining admission re-check immediately before the repository call
+      // (no await between here and repo.approveProposal). A stored response
+      // for this exact request replays verbatim instead of 503; anything
+      // else is rejected without persisting.
+      if (draining) {
+        const replayed = tryReplayStoredApprove(
+          c,
+          session.id,
+          proposal.id,
+          parsedBody.data.proposalHash,
+          keyed.key,
+          started,
+        );
+        if (replayed !== null) {
+          return replayed;
+        }
+        return shuttingDown(c);
+      }
+      try {
+        const out = repo.approveProposal(
+          session.id,
+          proposal.id,
+          { proposalHash: parsedBody.data.proposalHash },
+          { key: keyed.key, now: now(), timeZone: config.timeZone },
+        );
+        const body = ProposalApprove202ResponseSchema.parse(out.body);
+        logger.info("http.proposals.approve", {
+          sessionId: session.id,
+          proposalId: proposal.id,
+          status: out.status,
+          bytes: raw.bytes,
+          durationMs: Math.max(now() - started, 0),
+        });
+        return c.json(body, out.status as 202);
+      } catch (error) {
+        return mapDomainError(c, error);
+      }
+    },
+  );
 
   // Execution + receipt read for ONE session-owned proposal (C22): the real
   // persisted execution status, the external-call marker (the exact Stop
@@ -1007,48 +1009,51 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   // Reject (KEYLESS, state-idempotent): strict `{ proposalHash }` body;
   // Idempotency-Key is deliberately not used (§18.4). No draining gate: a
   // reject creates no Run and no queued work (same family as Cancel).
-  app.post("/api/sessions/:sessionId/proposals/:proposalId/reject", async (c) => {
-    const started = now();
-    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
-    if ("response" in session) {
-      return session.response;
-    }
-    const proposal = requireUuid(c, c.req.param("proposalId"), "proposalId");
-    if ("response" in proposal) {
-      return proposal.response;
-    }
-    if (c.req.header("idempotency-key") !== undefined) {
-      // Keyless route: carrying a key is not this route's invention.
-      return validationError(c, "idempotency-key is not used for reject");
-    }
-    const raw = await readJsonBody(c);
-    if (!raw.ok) {
-      return validationError(c);
-    }
-    const parsedBody = ProposalRejectRequestSchema.safeParse(raw.value);
-    if (!parsedBody.success) {
-      return validationError(c);
-    }
-    try {
-      const out = repo.rejectProposal(
-        session.id,
-        proposal.id,
-        { proposalHash: parsedBody.data.proposalHash },
-        { now: now(), timeZone: config.timeZone },
-      );
-      const body = ProposalRejectResponseSchema.parse(out.body);
-      logger.info("http.proposals.reject", {
-        sessionId: session.id,
-        proposalId: proposal.id,
-        status: out.status,
-        bytes: raw.bytes,
-        durationMs: Math.max(now() - started, 0),
-      });
-      return c.json(body, 200);
-    } catch (error) {
-      return mapDomainError(c, error);
-    }
-  });
+  app.post(
+    "/api/sessions/:sessionId/proposals/:proposalId/reject",
+    async (c) => {
+      const started = now();
+      const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+      if ("response" in session) {
+        return session.response;
+      }
+      const proposal = requireUuid(c, c.req.param("proposalId"), "proposalId");
+      if ("response" in proposal) {
+        return proposal.response;
+      }
+      if (c.req.header("idempotency-key") !== undefined) {
+        // Keyless route: carrying a key is not this route's invention.
+        return validationError(c, "idempotency-key is not used for reject");
+      }
+      const raw = await readJsonBody(c);
+      if (!raw.ok) {
+        return validationError(c);
+      }
+      const parsedBody = ProposalRejectRequestSchema.safeParse(raw.value);
+      if (!parsedBody.success) {
+        return validationError(c);
+      }
+      try {
+        const out = repo.rejectProposal(
+          session.id,
+          proposal.id,
+          { proposalHash: parsedBody.data.proposalHash },
+          { now: now(), timeZone: config.timeZone },
+        );
+        const body = ProposalRejectResponseSchema.parse(out.body);
+        logger.info("http.proposals.reject", {
+          sessionId: session.id,
+          proposalId: proposal.id,
+          status: out.status,
+          bytes: raw.bytes,
+          durationMs: Math.max(now() - started, 0),
+        });
+        return c.json(body, 200);
+      } catch (error) {
+        return mapDomainError(c, error);
+      }
+    },
+  );
 
   /* ---------------- history ---------------- */
 

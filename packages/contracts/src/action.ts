@@ -20,8 +20,9 @@ import { SourceRevisionSchema } from "./references.js";
 
 /** The only write tool in M5 (§18.1). Editable fields: start / end only. */
 export const CALENDAR_RESCHEDULE_TOOL_NAME = "calendar.reschedule" as const;
-export const CalendarRescheduleToolNameSchema =
-  z.literal(CALENDAR_RESCHEDULE_TOOL_NAME);
+export const CalendarRescheduleToolNameSchema = z.literal(
+  CALENDAR_RESCHEDULE_TOOL_NAME,
+);
 
 /**
  * Exact `calendar.reschedule` input: start / end fields ONLY (§18.1).
@@ -237,9 +238,7 @@ export type ProposalApproveRequest = z.infer<
 export const ProposalRejectRequestSchema = z.strictObject({
   proposalHash: Sha256HexSchema,
 });
-export type ProposalRejectRequest = z.infer<
-  typeof ProposalRejectRequestSchema
->;
+export type ProposalRejectRequest = z.infer<typeof ProposalRejectRequestSchema>;
 
 /** Exact successful approve response: `202` + this strict body. */
 export const ProposalApprove202ResponseSchema = z.strictObject({
@@ -300,7 +299,9 @@ export const ProposalRejectResponseSchema = z.strictObject({
   decisionTurnId: UuidSchema,
   resolvedAt: UnixMsSchema,
 });
-export type ProposalRejectResponse = z.infer<typeof ProposalRejectResponseSchema>;
+export type ProposalRejectResponse = z.infer<
+  typeof ProposalRejectResponseSchema
+>;
 
 /* ------------------------------------------------------------------ */
 /* Execution / receipt view (C22 approval UX reads, §18.5/§18.7)       */
@@ -343,9 +344,7 @@ export const ProposalExecutionViewSchema = z.strictObject({
   errorCode: M5ActionErrorCodeSchema.nullable(),
   receipt: ActionReceiptViewSchema.nullable(),
 });
-export type ProposalExecutionView = z.infer<
-  typeof ProposalExecutionViewSchema
->;
+export type ProposalExecutionView = z.infer<typeof ProposalExecutionViewSchema>;
 
 /* ------------------------------------------------------------------ */
 /* M5 Action RunEvent payloads (§18.8, non-final extension)            */
