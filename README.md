@@ -1329,6 +1329,59 @@ Markdown は読み取り専用です。
 
 ---
 
+# Calendar (opt-in, C14)
+
+Calendar は **明示的な opt-in 設定 + 信頼済みホスト側 binding 定義の注入** が揃った
+場合のみ有効になります。設定が存在しなければ何も登録されません（default disabled）。
+発見ベース / モデル定義ベースの登録は存在しません。
+
+設定は「config ヒント」に限定されます。書けるのは厳密な単一カレンダー選択
+(`calendarId` / `account`) と MCP 接続の identity / transport / binding 名と
+schema-hash だけで、**信頼済み read-only binding 定義 (`category`) をこの設定で
+与えることはできません**。定義 (category 含む) は必ず信頼されたホストコードから
+`startServer` に注入する必要があります。設定だけで有効化を要求した場合は
+起動に失敗します (fail-closed)。
+
+```bash
+COMPANION_CALENDAR_JSON='{
+  "selection": {
+    "calendarId": "primary",
+    "account": "me@example.com"
+  },
+  "connector": {
+    "serverId": "calendar-fake",
+    "kind": "mcp",
+    "expectedServerName": "fake-calendar",
+    "version": "0.0.0-test",
+    "transport": {
+      "kind": "stdio",
+      "command": "/path/to/calendar-mcp",
+      "envAllowlist": ["HOME", "LOGNAME", "PATH", "SHELL", "TERM", "USER"]
+    },
+    "bindings": [
+      { "upstreamTool": "list-events",   "canonicalSchemaHash": "...64hex..." },
+      { "upstreamTool": "search-events", "canonicalSchemaHash": "...64hex..." },
+      { "upstreamTool": "get-event",     "canonicalSchemaHash": "...64hex..." }
+    ]
+  }
+}'
+```
+
+挙動:
+
+- `connectorInstanceId` は設定には現れません。サーバー自身が登録した
+  connector instance の id を bootstrap で正確に結び付けます。
+- 接続は lazy です。起動は upstream が利用不可能でもブロックされません
+  (失敗は呼び出しごとの固定 `mcp_unavailable`)。
+- Markdown root が 0 でも Calendar は単独で利用できます
+  (`calendar.search` + stored reference tools のみの broker)。
+- drain 時には engine drain の後に owned connector の停止待ちが
+  上限付き (10 秒 backstop) で走ります。
+- upstream binding は今も **HOLD / NOT ADOPTED** です。上記の例は
+  構成ファイル形状の説明であり、provider 採用の主張ではありません。
+
+---
+
 # Design Philosophy
 
 Companion Harness では、LLM をシステムそのものとは考えません。

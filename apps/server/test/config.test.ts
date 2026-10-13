@@ -12,6 +12,7 @@ import {
   loadServerConfig,
   MAX_MARKDOWN_ROOTS,
   parseMarkdownRoots,
+  parseCalendarConfig,
   parseModelConfig,
   ServerConfigError,
 } from "../src/config.js";
@@ -443,5 +444,146 @@ describe("model config", () => {
       malformed = (error as Error).message;
     }
     expect(malformed).not.toContain("{oops");
+  });
+});
+
+// NOTE (C14): added in the C14 composition commit and recorded ADDED, NOT YET
+// RUN — the C13–C15 verification pass is deliberately deferred to C15. No
+// executed-verification claim is made here.
+
+const HASH = "a".repeat(64);
+
+/** Minimal valid calendar connector hint (stdio, loopback-none). */
+function validConnectorHint(): Record<string, unknown> {
+  return {
+    serverId: "calendar-fake",
+    kind: "mcp",
+    expectedServerName: "fake-calendar",
+    version: "0.0.0-test",
+    transport: {
+      kind: "stdio",
+      // Real child is never spawned by config parsing; tests inject the
+      // transport factory. Env allowlist is deliberately absent so the
+      // fail-closed parser leaves defaults in place.
+      command: "/bin/false",
+      envAllowlist: [
+        "HOME",
+        "LOGNAME",
+        "PATH",
+        "SHELL",
+        "TERM",
+        "USER",
+      ],
+    },
+    bindings: [
+      { upstreamTool: "list-events", canonicalSchemaHash: HASH },
+      { upstreamTool: "search-events", canonicalSchemaHash: HASH },
+      { upstreamTool: "get-event", canonicalSchemaHash: HASH },
+    ],
+  };
+}
+
+describe("calendar config (C14 strict opt-in, default disabled)", () => {
+  it("stays disabled (null) when the env var is unset", () => {
+    const env = baseEnv(tempDbPath());
+    expect(loadServerConfig(env).calendar).toBeNull();
+  });
+
+  it("parses a valid config, applies connector defaults, and deep-freezes", () => {
+    const raw = JSON.stringify({
+      selection: { calendarId: "cal-primary", account: "ops@example" },
+      connector: validConnectorHint(),
+    });
+    const config = loadServerConfig({
+      ...baseEnv(tempDbPath()),
+      COMPANION_CALENDAR_JSON: raw,
+    });
+    expect(config.calendar).not.toBeNull();
+    expect(config.calendar?.selection).toEqual({
+      calendarId: "cal-primary",
+      account: "ops@example",
+    });
+    // Derived defaults are materialized and frozen.
+    expect(config.calendar?.connector.transport.kind).toBe("stdio");
+    expect(Object.isFrozen(config.calendar)).toBe(true);
+    expect(Object.isFrozen(config.calendar?.selection)).toBe(true);
+    expect(Object.isFrozen(config.calendar?.connector)).toBe(true);
+  });
+
+  it("rejects malformed / unknown-key / bad-selection configs with fixed messages", () => {
+    expect(() =>
+      parseCalendarConfig("not-json"),
+    ).toThrow(ServerConfigError);
+    expect(() => parseCalendarConfig("[]")).toThrow(
+      "calendar config must be a JSON object",
+    );
+    expect(() =>
+      parseCalendarConfig(
+        JSON.stringify({
+          selection: { calendarId: "cal" },
+          connector: validConnectorHint(),
+          adopted: true,
+        }),
+      ),
+    ).toThrow("calendar config has an unknown key");
+    expect(() =>
+      parseCalendarConfig(
+        JSON.stringify({
+          selection: { calendarId: "", provider: "google" },
+          connector: validConnectorHint(),
+        }),
+      ),
+    ).toThrow("calendar selection is invalid");
+    expect(() =>
+      parseCalendarConfig(
+        JSON.stringify({
+          selection: { calendarId: "cal", credential: "secret" },
+          connector: validConnectorHint(),
+        }),
+      ),
+    ).toThrow("calendar selection has an unknown key");
+    // No category/authorization field can ever enter through the config hint.
+    expect(() =>
+      parseCalendarConfig(
+        JSON.stringify({
+          selection: { calendarId: "cal" },
+          connector: {
+            ...validConnectorHint(),
+            bindings: [
+              {
+                upstreamTool: "list-events",
+                canonicalSchemaHash: HASH,
+                category: "read",
+              },
+            ],
+          },
+        }),
+      ),
+    ).toThrow("calendar connector config is invalid");
+  });
+
+  it("rejects a connector hint violating the shared MCP schema", () => {
+    expect(() =>
+      parseCalendarConfig(
+        JSON.stringify({
+          selection: { calendarId: "cal" },
+          connector: {
+            ...validConnectorHint(),
+            expectedServerName: undefined,
+          },
+        }),
+      ),
+    ).toThrow("calendar connector config is invalid");
+    expect(() =>
+      parseCalendarConfig(
+        JSON.stringify({
+          selection: { calendarId: "cal" },
+          connector: {
+            ...validConnectorHint(),
+            transport: { kind: "streamable-http", host: "evil.example" },
+          },
+        }),
+      ),
+    ).toThrow("calendar connector config is invalid");
   });
 });

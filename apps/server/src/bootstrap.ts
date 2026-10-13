@@ -5,6 +5,15 @@
 //   quick_check/migrate -> RunEngine recovery/start -> listen.
 // Recovery completes before the scheduler or HTTP accept anything.
 //
+// C14 Calendar/MCP composition: the strict opt-in
+// COMPANION_CALENDAR_JSON config hint, TOGETHER with host-trusted
+// read-only binding definitions injected as options (never env/config),
+// makes the server OWN one MCP connector + one Calendar adapter:
+// exact metadata-only instance registration before any connection,
+// lazy (never startup-blocking) connect, bounded outer shutdown bound.
+// Disabled (no config) and unavailable (dead upstream) never block
+// server start; Calendar is usable without any Markdown root.
+//
 // Graceful shutdown (§11.5, §19.4): mark draining (ready 503 / live 200,
 // new message/retry rejected with Retry-After and no idempotency
 // persistence), engine 10s drain, DB close, listener close last.
@@ -19,6 +28,16 @@ import { chmodSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createMarkdownConnector } from "@companion/connector-markdown";
+import {
+  DEFAULT_CALENDAR_ADAPTER_TOOLS,
+  createCalendarConnector,
+} from "@companion/connector-calendar";
+import {
+  McpConnector,
+  type McpBindingDefinition,
+  type McpConnectorConfig,
+  type TransportFactory,
+} from "@companion/connector-mcp";
 import {
   BUNDLED_SCHEMA_VERSION,
   type CalendarConnectorBinding,
@@ -53,6 +72,7 @@ import { createApp, type EnginePort, type ServerControls } from "./app.js";
 import {
   assertDbPathHasNoSymlink,
   DEFAULT_LOG_LEVEL,
+  type CalendarConfig,
   loadServerConfig,
   type ModelConfig,
   type ServerConfig,
@@ -67,6 +87,23 @@ import {
 
 /** Graceful-drain natural-completion budget (§11.5: max 10s). */
 export const SHUTDOWN_DRAIN_MS = 10_000;
+
+/**
+ * C14: outer bound for the ONE owned Calendar MCP connector's shutdown wait
+ * during server shutdown. The connector already enforces its own bounded
+ * stdio cleanup (config shutdownWaitMs + fixed force-kill window); this
+ * outer race only guarantees the NORMAL server shutdown path cannot hang on
+ * a pathological transport beyond this budget. Purely a backstop, never a
+ * truncation of the connector's own guarantees.
+ */
+export const MCP_SHUTDOWN_BOUND_MS = 10_000;
+
+/**
+ * Fixed path-free display name for the single C14 owned Calendar MCP
+ * connector instance (`connector_instances.kind = 'calendar'`). No path /
+ * separator characters: the kernel displayName rules reject them.
+ */
+export const CALENDAR_CONNECTOR_DISPLAY_NAME = "calendar-mcp";
 
 export interface StartServerOptions {
   env?: NodeJS.ProcessEnv;
@@ -102,6 +139,33 @@ export interface StartServerOptions {
    * and the stored `connector_instances` row for `connectorInstanceId`.
    */
   calendarBinding?: CalendarServerBinding | null;
+  /**
+   * C14: host-trusted MCP read-only binding definitions for the OWNED
+   * Calendar composition. These come ONLY from trusted host code — NEVER
+   * from env/config (no category flags as trusted authorization, no
+   * provider adoption/profile shipped with this codebase). When
+   * `config.calendar` is set, these definitions are REQUIRED (fail closed
+   * otherwise) and act as the enable gate on top of the config hint: a
+   * binding is compatible only when its configured name has exactly one
+   * non-ambiguous definition, category `read`, whose canonical schema hash
+   * links to the config hint hash AND the live tools/list hash (the latter
+   * enforced internally by the connector). Absent definitions keep the
+   * produced registry network-disabled only when Calendar is entirely
+   * unconfigured/uninjected; a set config without them is an incomplete
+   * opt-in and fails closed BEFORE listen.
+   */
+  mcpDefinitions?: readonly McpBindingDefinition[];
+  /**
+   * C14 (tests / fake E2E): injectable MCP transport factory used when
+   * constructing the owned Calendar connector. Production never passes this
+   * field (the real default stdio/loopback-HTTP factory is used).
+   */
+  mcpTransportFactory?: TransportFactory;
+  /**
+   * C14 (tests): outer bound override for the owned connector shutdown
+   * wait. Production uses {@link MCP_SHUTDOWN_BOUND_MS}.
+   */
+  mcpShutdownMs?: number;
 }
 
 /** One trusted, already-validated Calendar binding injected by composition. */
@@ -187,13 +251,13 @@ function ensureDbDir(
 }
 
 /**
- * Fail-closed check that an injected Calendar binding owns an existing
+ * Fail-closed check that a Calendar connector instance owns an existing
  * `connector_instances` row of kind `calendar` whose metadata-only selection
  * matches the trusted selection. Never logs or returns provider ids.
  */
 function verifyCalendarBinding(
   db: KernelDatabaseHandle["raw"],
-  binding: CalendarServerBinding,
+  binding: Pick<CalendarServerBinding, "connectorInstanceId" | "selection">,
 ): void {
   const row = db
     .prepare("SELECT kind, config_json FROM connector_instances WHERE id = ?")
@@ -232,6 +296,90 @@ interface ListenerHandle {
   address(): unknown;
   close(callback?: (error?: unknown) => void): void;
   on(event: "error", listener: (error: unknown) => void): void;
+}
+
+/**
+ * C14 fail-closed preflight for a COMPATIBLE configured binding: every exact
+ * upstream tool the Calendar adapter calls (`list-events`/`search-events`/
+ * `get-event` defaults) must be present in the config hint bindings AND
+ * linked to exactly one non-ambiguous host-trusted definition of category
+ * `read` whose canonical schema hash equals the config binding hash. This
+ * mirrors — and remains strictly narrower than — the connector's own
+ * connect-time policy (config/definition hash link + live tools/list schema
+ * hash + default-deny): it can only RESPOND to definitions the host already
+ * injected; it never authorizes anything by itself. No I/O, no registration,
+ * fixed path-free messages only.
+ */
+function assertCalendarMcpCompatibility(
+  calendar: CalendarConfig,
+  definitions: readonly McpBindingDefinition[],
+): void {
+  const names = Object.values(DEFAULT_CALENDAR_ADAPTER_TOOLS);
+  for (const name of names) {
+    const binding = calendar.connector.bindings.find(
+      (entry) => entry.upstreamTool === name,
+    );
+    if (binding === undefined) {
+      throw new ServerConfigError(
+        "calendar MCP config misses a required read binding",
+      );
+    }
+    const matching = definitions.filter(
+      (definition) => definition.upstreamTool === name,
+    );
+    if (matching.length !== 1) {
+      throw new ServerConfigError(
+        "calendar MCP binding has no exact trusted read definition",
+      );
+    }
+    const definition = matching[0] as McpBindingDefinition;
+    if (
+      definition.category !== "read" ||
+      definition.canonicalSchemaHash !== binding.canonicalSchemaHash
+    ) {
+      throw new ServerConfigError(
+        "calendar MCP binding is not linked to a trusted read definition",
+      );
+    }
+  }
+}
+
+/** Resolve the outer MCP shutdown bound (tests may shrink/raise within 60s). */
+function resolveMcpShutdownMs(value: number | undefined): number {
+  if (value !== undefined && Number.isInteger(value) && value > 0 && value <= 60000) {
+    return value;
+  }
+  return MCP_SHUTDOWN_BOUND_MS;
+}
+
+/**
+ * Race the owned connector's already-bounded shutdown against the outer
+ * backstop budget. The connector's cleanup continues in the background when
+ * the budget loses; the server-shutdown path never hangs on it. Returns true
+ * only when the connector shutdown completed inside the budget.
+ */
+export async function boundedMcpShutdown(
+  connector: McpConnector,
+  ms: number,
+): Promise<boolean> {
+  let completed = false;
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const timeout = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, ms);
+    });
+    await Promise.race([
+      connector.shutdown().then(() => {
+        completed = true;
+      }),
+      timeout,
+    ]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
+  return completed;
 }
 
 /**
@@ -330,12 +478,15 @@ export async function startServer(
   const logger = options.logger ?? createStdServerLogger(config.logLevel);
   const now = options.now ?? Date.now;
   const drainMs = options.drainMs ?? SHUTDOWN_DRAIN_MS;
+  const mcpShutdownMs = resolveMcpShutdownMs(options.mcpShutdownMs);
 
   logger.info("server.starting", { port: config.port });
 
   let handle: KernelDatabaseHandle | undefined;
   let engine: RunEngine | undefined;
   let startedListener: ListenerHandle | undefined;
+  /** C14: the ONE server-owned Calendar MCP connector (undefined = none). */
+  let ownedMcp: McpConnector | undefined;
   let onSigint: (() => void) | undefined;
   let onSigterm: (() => void) | undefined;
   const removeSignalHandlers = (): void => {
@@ -415,7 +566,31 @@ export async function startServer(
     // invocation endpoint here. No roots => toolBroker stays null (M0).
     let toolBroker: ToolBroker | null = null;
     const calendarBinding = options.calendarBinding ?? null;
-    if (config.markdownRoots.length > 0 || calendarBinding !== null) {
+    // C14 owned composition: the exact opt-in calendar config (with the
+    // separate host-trusted definitions) makes the SERVER itself own the
+    // MCP connector + adapter lifecycle. Mutually exclusive with the C12
+    // injected-adapter seam (fail closed on a conflicting composition).
+    let calendarConfig: CalendarConfig | null = null;
+    if (calendarBinding === null) {
+      calendarConfig = config.calendar;
+    } else if (config.calendar !== null) {
+      throw new ServerConfigError(
+        "calendar config and an injected calendar binding are mutually exclusive",
+      );
+    }
+    if (calendarConfig !== null && options.mcpDefinitions === undefined) {
+      // An opt-in config without the separate host-trusted definitions is an
+      // INCOMPLETE opt-in: fail closed (never a silent disable and never a
+      // discovered/model-defined registration) BEFORE listen.
+      throw new ServerConfigError(
+        "calendar config requires host trusted binding definitions",
+      );
+    }
+    if (
+      config.markdownRoots.length > 0 ||
+      calendarBinding !== null ||
+      calendarConfig !== null
+    ) {
       const referenceManager = createReferenceManager(handle.raw);
       const markdownBindings: MarkdownConnectorBinding[] = [];
       if (config.markdownRoots.length > 0) {
@@ -450,6 +625,52 @@ export async function startServer(
         // Durable private get-target store: survives restart, never a public
         // DTO. The kernel default in-memory store is NEVER used in production.
         calendarTargetStore = createDurableCalendarTargetStore(handle.raw);
+      } else if (calendarConfig !== null && options.mcpDefinitions !== undefined) {
+        // C14 OWNED Calendar MCP lifecycle. Fail-closed preflight first (no
+        // DB write for an incompatible, never-authorizable configuration).
+        assertCalendarMcpCompatibility(calendarConfig, options.mcpDefinitions);
+        // Exact persisted registration: ONE metadata-only `calendar` instance
+        // (kind/version/selection checked and reconciled by the kernel; a
+        // changed selection fails closed). No provider ids beyond the
+        // host-selected calendar id/account labels; no discovered or
+        // model-defined registration exists.
+        const calendarInstance =
+          referenceManager.ensureCalendarConnectorInstance(
+            CALENDAR_CONNECTOR_DISPLAY_NAME,
+            calendarConfig.selection.calendarId,
+            calendarConfig.selection.account === undefined
+              ? {}
+              : { account: calendarConfig.selection.account },
+          );
+        const ownedConnectorConfig = Object.freeze({
+          ...calendarConfig.connector,
+          // The server fills the exact id IT registered: an env hint can
+          // never claim a stored instance id it does not own.
+          connectorInstanceId: calendarInstance.id,
+        }) as McpConnectorConfig;
+        // Constructor does NO I/O: an unavailable upstream can never block
+        // startup (lazy connect, per-call fixed `mcp_unavailable`).
+        ownedMcp = new McpConnector(
+          ownedConnectorConfig,
+          options.mcpDefinitions,
+          options.mcpTransportFactory,
+        );
+        // Defense-in-depth exact-identity re-check of the stored row AFTER
+        // registration (read-only; the adapter is then bound to the same id).
+        verifyCalendarBinding(handle.raw, {
+          connectorInstanceId: calendarInstance.id,
+          selection: calendarConfig.selection,
+        });
+        const calendarAdapter = createCalendarConnector({
+          connectorInstanceId: calendarInstance.id,
+          connector: ownedMcp,
+          selection: calendarConfig.selection,
+        });
+        kernelCalendarBinding = {
+          connectorInstanceId: calendarInstance.id,
+          connector: calendarAdapter,
+        };
+        calendarTargetStore = createDurableCalendarTargetStore(handle.raw);
       }
       const registrations = createM1ToolRegistrations({
         db: handle.raw,
@@ -465,6 +686,10 @@ export async function startServer(
       logger.info("server.markdown_ready", {
         status: registrations.length,
       });
+      if (kernelCalendarBinding !== undefined) {
+        // Counts only: never an upstream URL, calendar id or account label.
+        logger.info("server.calendar_ready", { status: 1 });
+      }
     }
     // M2 (opt-in): when config.model is set, build the loopback gateway
     // and register the agent under m0-default before engine.start/listen.
@@ -555,12 +780,20 @@ export async function startServer(
         },
       );
     } catch (listenError) {
-      // Listen failed: drain the started engine, close any created
-      // listener, then close the DB (in that order). Handlers were not
-      // yet registered, but remove defensively before rethrowing.
+      // Listen failed: drain the started engine, stop the owned Calendar
+      // connector, close any created listener, then close the DB (in that
+      // order). Handlers were not yet registered, but remove defensively
+      // before rethrowing.
       try {
         if (engine !== undefined) {
           await engine.shutdown({ drainMs });
+        }
+      } catch {
+        // Best effort: the listen error carries the startup failure.
+      }
+      try {
+        if (ownedMcp !== undefined) {
+          await boundedMcpShutdown(ownedMcp, mcpShutdownMs);
         }
       } catch {
         // Best effort: the listen error carries the startup failure.
@@ -610,6 +843,23 @@ export async function startServer(
           shutdownPromise = undefined;
           throw new Error("server drain failed");
         }
+        // C14 bounded owned MCP shutdown: after the engine drain (no more
+        // incoming calendar calls), stop the owned connector inside the
+        // backstop budget before the DB close. A budget loss never blocks
+        // the shutdown path; the connector's own cleanup remains bounded.
+        if (ownedMcp !== undefined) {
+          let mcpStopped = false;
+          try {
+            mcpStopped = await boundedMcpShutdown(ownedMcp, mcpShutdownMs);
+          } catch {
+            // The connector's own cleanup is bounded; proceed with close.
+          }
+          if (!mcpStopped) {
+            logger.warn("server.calendar_mcp_shutdown_timeout", {
+              status: safeReason,
+            });
+          }
+        }
         try {
           closeKernelDatabase(activeHandle);
         } catch {
@@ -647,6 +897,13 @@ export async function startServer(
     };
   } catch (error) {
     removeSignalHandlers();
+    if (ownedMcp !== undefined) {
+      try {
+        await boundedMcpShutdown(ownedMcp, mcpShutdownMs);
+      } catch {
+        // Best effort: the original startup error carries the failure.
+      }
+    }
     if (handle !== undefined) {
       try {
         closeKernelDatabase(handle);

@@ -743,6 +743,103 @@ or complete activate config):
   the fake MCP + fake model + real UI conversation→search→rN→refresh /
   tombstone E2E and CI; the C13 tests above feed the deferred final suite.
 
+### C14 startup composition / strict opt-in Calendar-MCP config
+
+- This subsection records the CURRENT C14 scope on top of C12/C13. It does
+  NOT change the C12/C08/C10/C11 boundaries (adoption stays **HOLD / NOT
+  ADOPTED**: this build ships NO provider profile, NO adopted binding
+  definition and NO category data of its own) and adds NO kernel
+  schema/migration/contracts changes. Like C13, the C14 test additions below
+  are recorded as **ADDED, NOT YET RUN** — the C13–C15 verification pass is
+  deliberately deferred (single final suite after C15); no
+  executed-verification claim is made here.
+- `apps/server/src/config.ts` (strict opt-in, DEFAULT DISABLED): new frozen
+  `COMPANION_CALENDAR_JSON` config (`parseCalendarConfig`), unset ⇒
+  `calendar: null`. It must be an exact `{ selection, connector }` object.
+  `selection` is a metadata-only host choice (`calendarId` required 1..512,
+  optional `account`, no NUL bytes) persisted later ONLY as
+  `connector_instances` metadata — never a provider credential. `connector`
+  is validated against the shared connector-mcp schema WITHOUT its
+  `connectorInstanceId` field (the server itself must fill the exact id it
+  registers; an env hint can never claim a stored instance id it does not
+  own). Unknown keys, arrays and schema violations fail closed with fixed
+  path-free messages. Everything in this file is a CONFIG HINT bound to
+  exact identity/transport/binding-hash values.
+- Separation of trust (load-bearing invariant): the trusted read-only
+  binding definitions (`McpBindingDefinition[]` with their `category`
+  vocabulary) are NOT part of this config and CANNOT be expressed through
+  env. No env/config path can ever enable a call: the connector hint carries
+  no category field, and the parser rejects one if present. Definitions must
+  be injected separately by trusted host code; default deny and the exact
+  identity/schema-hash lattice (config hint hash ⇒ host definition hash ⇒
+  live tools/list hash) remain owned by the connector.
+- `apps/server/src/bootstrap.ts` (owned composition + lifecycle): when
+  `config.calendar` is set, the composition REQUIRES the separate host
+  trusted `mcpDefinitions` option (an opt-in without them is INCOMPLETE and
+  fails closed with a fixed `server_config_invalid` before listen — never a
+  silent disable and never a discovered/model-defined registration). The
+  C12 injected-adapter seam (`calendarBinding`) and the owned C14
+  composition are mutually exclusive (fail closed on the conflict). Before
+  any side effect, a fail-closed preflight requires every exact adapter
+  tool (`list-events`/`search-events`/`get-event` defaults) to be a
+  configured hint binding linked to exactly one non-ambiguous host
+  definition of category `read` with an EQUAL hash; an incompatible
+  configuration therefore never registers an instance, never attempts any
+  connection and never starts the listener. The preflight only responds to
+  already-injected host definitions; final enforcement stays inside the
+  connector (config/definition/live-hash gate + default deny).
+- Registered lifecycle (server-OWNED): after the preflight, ONE metadata
+  `calendar` connector instance is registered via the existing kernel
+  `ensureCalendarConnectorInstance` (display name
+  `CALENDAR_CONNECTOR_DISPLAY_NAME = "calendar-mcp"`, `version:1`, exact
+  selection reconciliation — a changed selection fails closed), the hint's
+  connector config is merged with the just-registered exact
+  `connectorInstanceId`, one `McpConnector` is constructed (NO I/O at
+  construction), the persisted row is re-verified (defense-in-depth exact
+  identity), and the already-validated `createCalendarConnector` adapter is
+  bound to that instance over the durable private target store. The
+  C13 seam (`calendarBinding`) stays available for out-of-server callers.
+- Non-blocking semantics: a DISABLED calendar (no env) never registers
+  anything, and an UNAVAILABLE upstream (dead MCP endpoint/child) can never
+  block server start — connection is lazy (first allowed call), failures
+  surface per-call as the fixed `mcp_unavailable`. Calendar is fully usable
+  WITHOUT any Markdown root: with no roots and an owned calendar, the
+  single ToolBroker carries exactly `calendar.search`,
+  `reference.open`, `reference.refresh`, `reference.related` (no
+  `markdown.search`); counts are logged via a fixed `server.calendar_ready`
+  event (never URLs/ids). The existing Markdown bound-roots guard is
+  unchanged.
+- Bounded shutdown (C14): on graceful drain, after the engine drain and
+  BEFORE the DB close, the ONE owned connector is shut down under an outer
+  backstop budget (`MCP_SHUTDOWN_BOUND_MS = 10_000`, exported
+  `boundedMcpShutdown`; `options.mcpShutdownMs` is a test override capped at
+  60 s). A budget loss only logs a fixed `server.calendar_mcp_shutdown_timeout`
+  warn and lets the shutdown continue — the connector keeps its own internal
+  stdio bounds (config `shutdownWaitMs` + fixed force-kill window). The
+  listener-failure and generic startup-failure paths stop the owned
+  connector best-effort as well (engine ⇒ connector ⇒ DB close order).
+- Fake E2E seam inventory (exact API used by C15): `startServer({
+  env: { ..., COMPANION_CALENDAR_JSON }, mcpDefinitions: readonly
+  McpBindingDefinition[], mcpTransportFactory?: TransportFactory,
+  mcpShutdownMs?: number, calendarBinding?: CalendarServerBinding | null,
+  modelGateway?: ModelGateway | null, modelFetch?: FetchImpl,
+  drainMs?: number, logger?, now?, stat?, platform?, chmod? })` — the fake
+  MCP path uses the config opt-in + host definitions + an injected
+  `mcpTransportFactory` (real SDK `Transport`, e.g. an in-memory pair) and
+  goes through the real owned registration/adapter/connector pipeline; the
+  deeper `calendarBinding` adapter seam stays for tests that build the
+  port themselves. No production path passes these test-only options.
+- Tests ADDED, NOT YET RUN: `apps/server/test/config.test.ts` (calendar
+  opt-in defaults/parsing/deep-freeze, unknown-key and category-in-hint
+  rejection, shared-schema violations, fixed-message boundaries) and
+  `apps/server/test/bootstrap.test.ts` (incomplete opt-in fail closed;
+  incompatible-definition fail closed with zero registration and zero
+  factory invocations; mutual-exclusion fail closed; exact single calendar
+  instance + four-tool broker with NO Markdown roots and a zero-dial lazy
+  factory; outer shutdown bound cap). Apps/server now also declares
+  workspace dependencies on `@companion/connector-mcp` and
+  `@companion/connector-calendar`.
+
 ### C09-01 / C09-04 / C09-07 / C09-08 trusted read policy, model exposure & real stdio
 
 - This subsection records the CURRENT new-scope observed work: C09-07 trusted

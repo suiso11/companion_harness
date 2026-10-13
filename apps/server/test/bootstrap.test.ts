@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { McpBindingDefinition, TransportFactory } from "@companion/connector-mcp";
 import { BUNDLED_SCHEMA_VERSION, RunEngine } from "@companion/kernel";
 import type {
   ChatRequest,
@@ -16,11 +17,14 @@ import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   AGENT_STRATEGY_NAME,
+  boundedMcpShutdown,
+  CALENDAR_CONNECTOR_DISPLAY_NAME,
   createModelGateway,
   type StartedServer,
   sanitizeStartupErrorStatus,
   startServer,
 } from "../src/bootstrap.js";
+import type { McpConnector } from "@companion/connector-mcp";
 import { createCollectingLogger } from "../src/logger.js";
 import { STORE_SIZE_WARN_BYTES } from "../src/maintenance.js";
 
@@ -936,5 +940,210 @@ describe("bootstrap M2 model wiring", () => {
     });
     expect(result.text).toBe("hi");
     expect(seenAuth).toBe(`Bearer ${boundary}`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C14 owned Calendar/MCP composition tests. ADDED, NOT YET RUN: the C13–C15
+// verification pass is deliberately deferred to a single final suite after
+// C15; no executed-verification claim is made here. Focused behavior only —
+// the real fake-MCP E2E conversation walkthroughs remain C15 scope.
+// ---------------------------------------------------------------------------
+
+const CAL_HASH = "b".repeat(64);
+const CALENDAR_HOST_DEFS: McpBindingDefinition[] = [
+  { upstreamTool: "list-events", canonicalSchemaHash: CAL_HASH, category: "read" },
+  { upstreamTool: "search-events", canonicalSchemaHash: CAL_HASH, category: "read" },
+  { upstreamTool: "get-event", canonicalSchemaHash: CAL_HASH, category: "read" },
+];
+
+/** Exact (unavailable-upstream) transport factory: construction only, no I/O. */
+function countingUnavailableFactory(): {
+  factory: TransportFactory;
+  count: () => number;
+} {
+  let created = 0;
+  const factory: TransportFactory = () => {
+    created += 1;
+    return {
+      start: async () => {
+        throw new Error("unavailable (test)");
+      },
+      send: async () => {},
+      close: async () => {},
+    } as unknown as ReturnType<TransportFactory>;
+  };
+  return { factory, count: () => created };
+}
+
+/** Minimal valid C14 config hint (transport/binding hashes only = HINTS). */
+function calendarConfigHint(): string {
+  return JSON.stringify({
+    selection: { calendarId: "cal-primary", account: "ops@example" },
+    connector: {
+      serverId: "calendar-fake",
+      kind: "mcp",
+      expectedServerName: "fake-calendar",
+      version: "0.0.0-test",
+      transport: {
+        kind: "stdio",
+        command: "/bin/false",
+        envAllowlist: ["HOME", "LOGNAME", "PATH", "SHELL", "TERM", "USER"],
+      },
+      bindings: [
+        { upstreamTool: "list-events", canonicalSchemaHash: CAL_HASH },
+        { upstreamTool: "search-events", canonicalSchemaHash: CAL_HASH },
+        { upstreamTool: "get-event", canonicalSchemaHash: CAL_HASH },
+      ],
+    },
+  });
+}
+
+describe("bootstrap C14 owned Calendar/MCP composition", () => {
+  it("fails closed when the config opts in without host trusted definitions", async () => {
+    const { env } = tempEnv();
+    const error = await startServer({
+      env: { ...env, COMPANION_CALENDAR_JSON: calendarConfigHint() },
+      drainMs: 50,
+    }).then(
+      (started) => {
+        servers.push(started);
+        return null;
+      },
+      (failure: unknown) => failure,
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(
+      /host trusted binding definitions/,
+    );
+    expect(sanitizeStartupErrorStatus(error)).toBe("server_config_invalid");
+  });
+
+  it("fails closed on an incompatible definition and registers nothing", async () => {
+    const { env, dbPath } = tempEnv();
+    const { factory } = countingUnavailableFactory();
+    const brokenDefs: McpBindingDefinition[] = CALENDAR_HOST_DEFS.map(
+      (definition) =>
+        definition.upstreamTool === "search-events"
+          ? { ...definition, canonicalSchemaHash: "c".repeat(64) }
+          : definition,
+    );
+    const error = await startServer({
+      env: { ...env, COMPANION_CALENDAR_JSON: calendarConfigHint() },
+      mcpDefinitions: brokenDefs,
+      mcpTransportFactory: factory,
+      drainMs: 50,
+    }).then(
+      (started) => {
+        servers.push(started);
+        return null;
+      },
+      (failure: unknown) => failure,
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/trusted read definition/);
+    // No connection attempt ever happened, and the DB holds no calendar row.
+    const probe = new Database(dbPath, { readonly: true });
+    try {
+      const rows = probe
+        .prepare(
+          "SELECT kind, display_name FROM connector_instances WHERE kind = 'calendar'",
+        )
+        .all() as { kind: string; display_name: string }[];
+      expect(rows).toHaveLength(0);
+    } finally {
+      probe.close();
+    }
+  });
+
+  it("rejects the mutually exclusive config + injected-binding composition", async () => {
+    const { env } = tempEnv();
+    const error = await startServer({
+      env: { ...env, COMPANION_CALENDAR_JSON: calendarConfigHint() },
+      mcpDefinitions: CALENDAR_HOST_DEFS,
+      calendarBinding: {
+        connectorInstanceId: randomUUID(),
+        connector: {
+          connectorInstanceId: "unused",
+        } as never,
+        selection: { calendarId: "cal-primary" },
+      },
+      drainMs: 50,
+    }).then(
+      (started) => {
+        servers.push(started);
+        return null;
+      },
+      (failure: unknown) => failure,
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/mutually exclusive/);
+  });
+
+  it("owns one exact calendar instance and calendar.search without Markdown roots", async () => {
+    const { env, dbPath } = tempEnv();
+    const { factory, count } = countingUnavailableFactory();
+    const started = await startServer({
+      env: { ...env, COMPANION_CALENDAR_JSON: calendarConfigHint() },
+      mcpDefinitions: CALENDAR_HOST_DEFS,
+      mcpTransportFactory: factory,
+      drainMs: 50,
+    });
+    servers.push(started);
+    try {
+      // Calendar alone (no Markdown roots) still owns a full ToolBroker.
+      expect(started.toolBroker).not.toBeNull();
+      expect([...(started.toolBroker?.toolNames() ?? [])].sort()).toEqual([
+        "calendar.search",
+        "reference.open",
+        "reference.refresh",
+        "reference.related",
+      ]);
+      // Lazy: construction must NOT have dialed the (unavailable) upstream.
+      expect(count()).toBe(0);
+      const probe = new Database(dbPath, { readonly: true });
+      try {
+        const rows = probe
+          .prepare(
+            "SELECT id, kind, display_name, config_json FROM connector_instances",
+          )
+          .all() as {
+          id: string;
+          kind: string;
+          display_name: string;
+          config_json: string;
+        }[];
+        expect(rows).toHaveLength(1);
+        expect(rows[0]?.kind).toBe("calendar");
+        expect(rows[0]?.display_name).toBe(CALENDAR_CONNECTOR_DISPLAY_NAME);
+        const stored = JSON.parse(rows[0]?.config_json ?? "{}") as Record<
+          string,
+          unknown
+        >;
+        expect(stored.version).toBe(1);
+        expect(stored.calendarId).toBe("cal-primary");
+        expect(stored.account).toBe("ops@example");
+        expect(JSON.stringify(stored)).not.toContain("/bin/false");
+      } finally {
+        probe.close();
+      }
+      await started.shutdown("test");
+      servers.pop();
+    } finally {
+      const index = servers.indexOf(started);
+      if (index >= 0) {
+        servers.splice(index, 1);
+      }
+    }
+  });
+
+  it("caps the ownership shutdown wait even when the connector hangs", async () => {
+    const hanging = {
+      shutdown: () => new Promise<void>(() => {}),
+    } as unknown as McpConnector;
+    const before = Date.now();
+    const completed = await boundedMcpShutdown(hanging, 25);
+    expect(completed).toBe(false);
+    expect(Date.now() - before).toBeLessThan(2_000);
   });
 });
