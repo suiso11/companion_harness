@@ -439,6 +439,68 @@ describe("action proposal stager", () => {
     }
   });
 
+  it("expires an unattended pending proposal at commit time and frees the session cap (exact 15min boundary)", async () => {
+    const TTL = 15 * 60 * 1000;
+    let now = 1000;
+    const fx = await setupFixture();
+    try {
+      const { stager } = makeStager(fx, () => now);
+      stager.stage(fx.runId, { targetRefId: fx.refId, ...TIMED });
+      const first = fx.db.transaction(() =>
+        stager.commitStaged(fx.runId, now),
+      )();
+      stager.removeStaged(fx.runId);
+
+      // A SECOND staging on the SAME run after the outer commit acked the
+      // staged entry: its commit is blocked by the one-pending-per-session
+      // cap while the first proposal is still pending — unless the old one
+      // has expired.
+      // EXACT 15-minute boundary: now === first.expires_at. The OLD pending
+      // row is expired (expires_at <= now) and the NEW staged entry (fresh
+      // TTL from the boundary `now`) commits successfully.
+      now = 1000 + TTL;
+      stager.stage(fx.runId, { targetRefId: fx.refId, ...TIMED });
+      const second = fx.db.transaction(() =>
+        stager.commitStaged(fx.runId, now),
+      )();
+      expect(second.status).toBe("pending");
+      const old = fx.db
+        .prepare(
+          "SELECT status, resolved_at, decision_turn_id FROM action_proposals WHERE id = ?",
+        )
+        .get(first.proposalId) as {
+        status: string;
+        resolved_at: number;
+        decision_turn_id: string | null;
+      };
+      expect(old).toEqual({
+        status: "expired",
+        resolved_at: now,
+        decision_turn_id: null,
+      });
+      // ROLLBACK-SAFETY: a failed completion rolls the sweep back too — the
+      // second pending row (now expired) is restored un-swept (nothing
+      // committed).
+      stager.removeStaged(fx.runId);
+      now += TTL;
+      stager.stage(fx.runId, { targetRefId: fx.refId, ...TIMED });
+      const forcedRollback = fx.db.transaction(() => {
+        stager.commitStaged(fx.runId, now);
+        throw new Error("forced rollback");
+      });
+      expect(() => forcedRollback()).toThrow(/forced rollback/);
+      const pendingRows = fx.db
+        .prepare(
+          "SELECT id FROM action_proposals WHERE session_id = ? AND status = 'pending'",
+        )
+        .all(fx.sessionId);
+      expect(pendingRows).toHaveLength(1);
+      expect(pendingRows[0]).toMatchObject({ id: second.proposalId });
+    } finally {
+      await closeKernelDatabase(fx.handle);
+    }
+  });
+
   it("removeStaged discards staged content for failed/cancelled runs (idempotent)", async () => {
     const fx = await setupFixture();
     try {

@@ -488,8 +488,20 @@ export function createActionProposalStager(
           "target snapshot event is deleted; commit requires a fresh snapshot",
         );
       }
+      // EXPIRE old pending proposals FIRST (within the caller tx): a pending
+      // row past its own `expires_at` (judged by the SAME clock that decided
+      // `now >= entry.expiresAt`, boundary inclusive) no longer occupies the
+      // one-pending-proposal-per-session cap. Exact lifecycle move:
+      // status -> 'expired', resolved_at -> now, decision_turn_id stays NULL
+      // (pending/expired proposals never carry a decision Turn).
+      db.prepare(
+        `UPDATE action_proposals
+           SET status = 'expired', resolved_at = ?, decision_turn_id = NULL
+         WHERE session_id = ? AND status = 'pending' AND expires_at <= ?`,
+      ).run(now, run.sessionId, now);
       // Revalidate one pending proposal per session (within the caller tx so a
-      // concurrent commit cannot slip between the check and the insert).
+      // concurrent commit cannot slip between the check and the insert) —
+      // AFTER the expiry sweep, so only genuinely unexpired pending rows count.
       const pending = db
         .prepare(
           "SELECT id FROM action_proposals WHERE session_id = ? AND status = 'pending'",
