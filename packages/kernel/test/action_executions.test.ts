@@ -835,5 +835,49 @@ describe("C19 Action execution boundaries", () => {
         await closeKernelDatabase(fx.handle);
       }
     });
+
+    it("fail-closes the WHOLE sweep when an m5-action run has NO execution row (real orphan is never silently skipped)", async () => {
+      const fx = await setupApprovedProposalFixture(() => 100);
+      try {
+        // Pair 1: a genuinely recoverable executing orphan.
+        await driveToExecuting(fx, readPort(fx));
+        // Pair 2: an m5-action run whose execution row is missing — the
+        // previous INNER JOIN never even saw it, so the sweep skipped the
+        // orphan while sweeping (and mutating) pair 1.
+        const orphanTurnId = generateId();
+        const orphanRunId = generateId();
+        const orphanSessionId = generateId();
+        fx.db
+          .prepare(
+            "INSERT INTO sessions (id, created_at, last_active_at, next_turn_position) VALUES (?, 2, 2, 1)",
+          )
+          .run(orphanSessionId);
+        fx.db
+          .prepare(
+            "INSERT INTO turns (id, session_id, seq, input_json, frozen_context, created_at, next_run_attempt) VALUES (?, ?, 1, '{}', '{}', 2, 1)",
+          )
+          .run(orphanTurnId, orphanSessionId);
+        fx.db
+          .prepare(
+            "INSERT INTO runs (id, turn_id, session_id, attempt, status, strategy, event_seq, select_on_success, tool_requests_used, created_at, started_at) VALUES (?, ?, ?, 1, 'running', 'm5-action', 0, 1, 0, 2, 2)",
+          )
+          .run(orphanRunId, orphanTurnId, orphanSessionId);
+        const before = fx.db
+          .prepare("SELECT status FROM runs WHERE id = ?")
+          .get(fx.actionRunId) as { status: string };
+        expect(() =>
+          fx.service.validateAndRecoverActionRuns("restart_recovery", 120),
+        ).toThrow(/has no execution/);
+        // Fail closed: ZERO mutations anywhere — the real orphan pair is
+        // left exactly as found.
+        const after = fx.db
+          .prepare("SELECT status FROM runs WHERE id = ?")
+          .get(fx.actionRunId) as { status: string };
+        expect(after.status).toBe(before.status);
+        expect(after.status).toBe("running");
+      } finally {
+        await closeKernelDatabase(fx.handle);
+      }
+    });
   });
 });

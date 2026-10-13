@@ -2180,12 +2180,16 @@ export function createActionExecutionService(
   ): ActionRecoverySummary {
     const at = nowMs(now);
     return withImmediate(db, () => {
+      // ALL m5-action runs, LEFT over executions: the previous INNER JOIN
+      // silently EXCLUDED an Action Run whose execution row is missing, so
+      // a real orphan was never validated. Every Action Run is read here;
+      // the validation pass below fails closed on a missing execution
+      // BEFORE any mutation.
       const pairs = db
         .prepare(
           `SELECT r.id, r.turn_id, r.session_id, r.attempt, r.status,
                   r.select_on_success, r.event_seq
              FROM runs r
-             JOIN action_executions e ON e.action_run_id = r.id
             WHERE r.strategy = 'm5-action'
             ORDER BY r.created_at ASC, r.id ASC`,
         )
