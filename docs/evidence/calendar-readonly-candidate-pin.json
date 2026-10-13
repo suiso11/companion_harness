@@ -2,33 +2,64 @@
   "adoption": "HOLD / NOT ADOPTED",
   "authScopeFile": "src/auth/scopes.ts",
   "base": "feat/c12-calendar-snapshots (PR20 unmerged; stacked PR base if 20 unmerged, else current-ancestry; no merge/cherrypick/reset performed)",
-  "branch": "feat/calendar-readonly-candidate-pin",
+  "branch": "feat/calendar-readonly-compatibility",
   "candidate": {
-    "commit": "97a3dc36873b8f52870695d7706d182d5a8fc401",
-    "lockDigestSha256": "6afe76f90327d4b04c4dfc24161017c85f0910350fcbcf802c1b91c2e48bd523",
+    "commit": "6939311fd3eae9846648e0a175e304c9500f578e",
+    "cutoverCommits": [
+      "f03b03b Accept fractional ISO datetimes; preserve explicit-offset bounds byte-for-byte",
+      "80987bf fix(readonly): cut events surface to exact-ID list/search/get with zero MCP metadata",
+      "6939311 chore(release): 3.0.0-readonly.2 events-only breaking cutover identity"
+    ],
+    "lockDigestSha256": "63261d25992ee9c97136a60bbf4fe52a5485cadea28b34d6b8b6c685f38bd533",
+    "lockTree": {
+      "differingPackageKeys": 277,
+      "method": "read-only JSON compare of package-lock.json vs git show 97a3dc3:package-lock.json; root version key excluded",
+      "packagesCount": 277,
+      "pkgKeysEqual": true,
+      "result": "dependency tree UNCHANGED; sole diff is root package version 3.0.0-readonly.1 -> 3.0.0-readonly.2",
+      "rootVersion": { "new": "3.0.0-readonly.2", "old": "3.0.0-readonly.1" }
+    },
     "package": "@cocal/google-calendar-mcp",
-    "privateVersion": "3.0.0-readonly.1",
+    "privateVersion": "3.0.0-readonly.2",
     "repo": "https://github.com/suiso11/google-calendar-mcp",
-    "tree": "ae743a8bd7cc7002c2368618fbe098dba8af341e"
+    "tree": "f01b5a7b608c4091906a52c0784b828c35963de9"
   },
   "consumerProof": {
-    "adapterGet": "ok (title Fixture Timed Event, start string, privacy stripped, no fixture PII in normalized JSON)",
-    "adapterSearch": "ok (2 events, cursor opaque-out verbatim, timed+allday decoded, etag revisions retained, private targets host-side only)",
+    "adapterGet": "ok (etag revision basis, privacy stripped organizer/attendees/htmlLink/rawIDs, normalized JSON scanned)",
+    "adapterSearch": "ok (2 events page 1, opaque cursor out opaque-cursor-1, fraction byte-for-byte, limit->pageSize 10, opaque calendarId verbatim, explicit account selects client, private targets host-side 2)",
+    "ambiguityDenied": "ambiguous + missing account fail with 0 provider I/O (eventsList+eventsGet delta 0)",
+    "bare404": "fixed calendar_upstream_error, never deleted, no tombstone",
+    "cancelled": "cancelled stays cancelled (no loosen)",
+    "counts": "35 checks PASS, 0 FAIL (retained result file, not rerun here)",
+    "cursor": "cursor->pageToken opaque passthrough, 1 call; second page 1 event no cursor",
     "envelope": "content-text only, structuredContent ABSENT (strict JSON fallback path exercised)",
-    "negative": "wrong version 9.9.9-wrong denied with fixed mcp_schema_mismatch (1 case, no upstream call)",
+    "listCalendarsDenied": "mcp_binding_not_allowed, 0 provider calls",
+    "metadataZero": "calendarList.get/list + calendars.get all 0",
+    "naiveBounds": "naive bounds deterministic UTC without metadata",
+    "negative": "wrong name + wrong version 9.9.9-wrong denied with fixed mcp_schema_mismatch, 0 provider calls; 1 bad schema hash gates that binding",
     "networkBlocked": 0,
     "providerCalls": {
       "calendarListGet": 0,
-      "calendarListList": 1,
+      "calendarListList": 0,
+      "calendarsGet": 0,
       "eventsGet": 2,
-      "eventsList": [
-        { "maxResults": 10, "pageToken": "opaque-in", "q": null },
-        { "maxResults": 10, "pageToken": "opaque-in", "q": "fixture" },
-        { "maxResults": 10, "pageToken": "opaque-in", "q": "fixture" }
-      ]
+      "eventsList": 5
+    },
+    "queryless": "queryless routes to list-events (no q key), opaque calendarId verbatim, explicit account selects client",
+    "source": ".readonly-compat/evidence/probe-consumer-smoke.source.mts + consumer-smoke-3.0.0-readonly.2.result.json"
+  },
+  "credentialFreeSeam": "real candidate ToolRegistry/handlers/schemas/builders via tsx + real SDK Client (InMemoryTransport) + current McpConnector (trusted 3 read bindings) + createCalendarConnector adapter; ONLY BaseToolHandler.prototype.getCalendar replaced with inert fixture; stdlib http/https + fetch deny counters; ordinary CLI/index/OAuth never run; no live Google HTTP",
+  "evidence": {
+    "command": "env -i PATH=<allow> HOME=<owned-tmp> ./packages/connector-mcp/node_modules/.bin/tsx .readonly-compat/evidence/probe-consumer-smoke.source.mts",
+    "limitations": "no OAuth/TokenManager/account index/CLI; no live Google HTTP; no GH/Google credentials in env; InMemory SDK transport only; fixture accounts + inert provider via ONLY BaseToolHandler.getCalendar seam",
+    "liveClaims": "none (no OAuth, no live Google call, no HTTP status, no release claim)",
+    "sha256": {
+      "candidate-3.0.0-readonly.2.result.json": "048d45ae500df0627765f3d3a75a5445118260a8fded04fa5adc591d7d6d809a",
+      "consumer-smoke-3.0.0-readonly.2.result.json": "701cbb669d8e0f3c33dc8a06cb2c174ab76142a47724edf44aded72d777fe4b3",
+      "probe-consumer-smoke.source.mts": "c464d8e8f6ae99bb2f8c4f46a07f2b6f6a2569582859899431f8368691b16050",
+      "probe-tools-list.source.mts": "e94f2f8034aa0d5ffe032bc94e7cd4a047f3a4faf7e5fe22a5aa18086c798209"
     }
   },
-  "credentialFreeSeam": "real candidate ToolRegistry/handlers/schemas/builders via tsx; ONLY BaseToolHandler.prototype.getCalendar replaced with inert fixture; stdlib http/https + fetch deny counters; ordinary CLI/index/OAuth never run; no live Google HTTP",
   "formalGates": {
     "C08": "HOLD / NOT ADOPTED (unchanged)",
     "C10-08": "UNRESOLVED production mapping (unchanged)",
@@ -41,37 +72,58 @@
     "status": "verified (manifest 8/8 OK; retained as history, not re-executed as current proof)"
   },
   "knownGapsUnresolved": [
-    "scope: candidate allows ONLY calendar.events.readonly; calendarList static contract conflict persists; no auth change approved in step2",
-    "input: candidate whole-second datetime regex vs agreed fractional-second ISO consumer contract; mapper does not truncate; gap recorded only"
+    "live fresh-grant behavior UNKNOWN (no live grant run here); out-of-band calendarList permission not claimed",
+    "scope: candidate allows ONLY calendar.events.readonly; calendarList metadata stays out-of-band only (no MCP tool); no auth change approved"
   ],
   "license": "MIT (Copyright (c) 2025 nspady; LICENSE file present)",
   "liveClaims": "none (no OAuth, no live Google call, no production binding/profile/config activation)",
-  "nextStep3Scope": "scoped fork follow-up / narrow-call-strategy decision + separately approved read-only live opt-in; C10-08 production mapping; C11 positive evidence (all out of scope for step2)",
+  "nextStep3Scope": "scoped fork follow-up / narrow-call-strategy decision + separately approved read-only live opt-in; C10-08 production mapping; C11 positive evidence (all out of scope here)",
   "pinForm": "full git SHA + candidate package-lock.json digest (not branch/short SHA/version/tag/release)",
+  "priorCandidateSuperseded": {
+    "commit": "97a3dc36873b8f52870695d7706d182d5a8fc401",
+    "note": "retained as history; 4-tool surface + whole-second-regex gap superseded by the breaking 3.0.0-readonly.2 cutover (list-calendars removed, fraction compat closed)",
+    "privateVersion": "3.0.0-readonly.1",
+    "tree": "ae743a8bd7cc7002c2368618fbe098dba8af341e"
+  },
   "probeDate": "2026-10-13",
   "protocol": "2025-11-25",
   "responseMapping": {
     "get-event": "{event}",
-    "list-calendars": "{calendars,totalCount}",
     "list-events": "{events,totalCount,nextPageToken?}",
     "search-events": "{events,totalCount,query?,calendarId,nextPageToken?,timeRange}"
   },
+  "retainedRuntimeTestBuildLint": "parent final gate per committed docs/operations.md: pnpm test 103 files/1251 passed exit 0; root + e2e typecheck exit 0; whole-repo lint 216 files 0 errors 1 pre-existing info (52d61ba, NOT rerun here). Fork suite/build/lint: NO retained logs found for 6939311; no counts claimed, no rerun performed per scope; fraction-period full 615 is pre-cutover oc77 fact only, not current.",
   "runtimeObserved": {
-    "gaxios": "7.1.3",
-    "googleAuthLibrary": "10.6.1",
-    "googleapis": "171.4.0",
+    "gaxios": "7.1.3 (fork lock retained, deps unchanged)",
+    "googleAuthLibrary": "10.6.1 (fork lock retained, deps unchanged)",
+    "googleapis": "171.4.0 (fork lock retained, deps unchanged)",
     "node": "24.12.0",
-    "open": "11.0.0",
+    "open": "11.0.0 (fork lock retained, deps unchanged)",
     "sdk": "1.30.0",
-    "zod": "4.3.6"
+    "sdkSource": "actual consumer result file sdk field + SDK package (no guess)",
+    "zod": "4.3.6 (fork lock retained, deps unchanged)"
   },
   "schemaHashes": {
-    "get-event": "f3212ecb17c3e45f69f7412b3a1e28cc4aaec770121925d23d31d4b699f73e89",
-    "list-calendars": "ae9285fc8b0632942517f82ff5819be9152a14feaec7d11098eb9476e9eeb398",
-    "list-events": "279887bf288ea036792c32c20a7a0b800d1a34cb371c8f161b546d12f683fcf3",
-    "search-events": "027de2d89db1284173509eae71808575412461caca0f53aeb1085b011fe63167"
+    "bindingPinLiveWire": {
+      "get-event": "8c6736e2a1f397d0735efa5c0881f5c350c300b21a0b026e80c112258b596bda",
+      "list-events": "81222b89482cba77b12a707c2097c66df383cab7929c14dca03cc303846d794c",
+      "search-events": "d48ba36e7f280d92eaba9550323e90aa7a6d7c758812932ad62012f4514558b7"
+    },
+    "registryDirectDiagnosticNotBinding": {
+      "get-event": "913e45efc06b9f7cce043626bcdb0f600f5085b4849120a0ad60765cbffa8612",
+      "list-events": "a06527743447147d806605104f86250ace87cb157670fdb63eb6507d1d970978",
+      "search-events": "012e190732a5b6fe09e1ec3574e81099513bdd7d490c4b874b43398085ee0cf8"
+    }
   },
-  "serverInfo": { "name": "google-calendar", "version": "3.0.0-readonly.1" },
-  "toolNames": ["list-calendars", "list-events", "search-events", "get-event"],
-  "verification": "credential-free actual runtime probe 2026-10-13: real initialize/tools-list hashes match historical 4/4; current McpConnector identity+schema gate + Calendar adapter search/get proven; 1 negative mismatch denial; stdlib network deny counter 0"
+  "schemaHashesNote": "Binding pin is liveWire (what the connector verifies over the real SDK wire). Registry-direct bytes use a different serializer and are recorded as diagnostic ONLY; the earlier pin interpretation that treated registry-direct bytes as wire identity is SUPERSEDED, history retained. Legacy minimal tools-list probe (.readonly-compat/evidence/probe-tools-list.source.mts) is diagnostic surface evidence, NOT the binding pin.",
+  "scopeClosed": [
+    "candidate selection changed explicitly: version-breaking removal of unsupported list-calendars (no alias/shim); surface exactly list-events/search-events/get-event",
+    "scope stays events-readonly, not expanded",
+    "MCP re-read path conflict closed by narrowing (exact calendarId verbatim, single account, zero calendarList/calendars I/O); live fresh-grant behavior still UNKNOWN",
+    "fraction compat closed: fractional ISO accepted, explicit Z/offset bounds byte-for-byte"
+  ],
+  "serverInfo": { "name": "google-calendar", "version": "3.0.0-readonly.2" },
+  "staticReviews": "both static readonly reviews returned no findings (no command executed, no live claim)",
+  "toolNames": ["list-events", "search-events", "get-event"],
+  "verification": "credential-free actual runtime consumer probe 2026-10-13 PASS 35/35: current McpConnector identity+schema gate + Calendar adapter search/get proven; liveWire hashes bind 3/3; 1-page cursor, opaque IDs, ambiguity denied with 0 I/O; stdlib network deny counter 0"
 }
