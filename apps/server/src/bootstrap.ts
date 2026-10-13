@@ -27,24 +27,32 @@
 import { chmodSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  createCalendarConnector,
+  DEFAULT_CALENDAR_ADAPTER_TOOLS,
+} from "@companion/connector-calendar";
 import { createMarkdownConnector } from "@companion/connector-markdown";
 import {
-  DEFAULT_CALENDAR_ADAPTER_TOOLS,
-  createCalendarConnector,
-} from "@companion/connector-calendar";
-import {
-  McpConnector,
   type McpBindingDefinition,
+  McpConnector,
   type McpConnectorConfig,
   type TransportFactory,
 } from "@companion/connector-mcp";
 import {
+  type ActionProposalStager,
   BUNDLED_SCHEMA_VERSION,
+  CalendarActionWriteCapabilitySchema,
+  type CalendarActionWritePort,
   type CalendarConnectorBinding,
   type CalendarConnectorPort,
   type CalendarTargetStore,
   closeKernelDatabase,
+  createActionExecutionService,
+  createActionStrategy,
   createAgentStrategy,
+  createCalendarActionReadPort,
+  createCalendarActionTargetResolver,
+  createCalendarRescheduleProposalRegistration,
   createDurableCalendarTargetStore,
   createKernelRepository,
   createM1ToolRegistrations,
@@ -71,8 +79,8 @@ import { serve } from "@hono/node-server";
 import { createApp, type EnginePort, type ServerControls } from "./app.js";
 import {
   assertDbPathHasNoSymlink,
-  DEFAULT_LOG_LEVEL,
   type CalendarConfig,
+  DEFAULT_LOG_LEVEL,
   loadServerConfig,
   type ModelConfig,
   type ServerConfig,
@@ -166,6 +174,35 @@ export interface StartServerOptions {
    * wait. Production uses {@link MCP_SHUTDOWN_BOUND_MS}.
    */
   mcpShutdownMs?: number;
+  /**
+   * C21: the DEDICATED trusted CalendarActionWritePort seam, injected ONLY by
+   * trusted host code — NEVER from env/config, which cannot carry a capability,
+   * a category or a connector instance id. It becomes live ONLY when
+   * `config.actions.optIn` AND `config.actions.writeEnabled` are both true AND
+   * its enabled capability names the EXACT active Calendar instance.
+   *
+   * There is no production write binding in this codebase; tests and the C22
+   * fake browser harness inject their own deterministic fake ports here.
+   */
+  actionWriteBinding?: ActionWriteBinding | null;
+}
+
+/**
+ * One injected dedicated write binding plus its EXPLICIT lifecycle
+ * ownership. A caller-owned port is never shut down by the server: shutdown
+ * happens only when `owned === true` and a `shutdown` function is supplied.
+ */
+export interface ActionWriteBinding {
+  /** The exact trusted port (enabled capability, start/end fields only). */
+  readonly port: CalendarActionWritePort;
+  /** Optional close hook; used only together with `owned === true`. */
+  readonly shutdown?: () => Promise<void>;
+  /**
+   * Explicit ownership transfer to the server. Default FALSE: the caller
+   * keeps ownership and the server never closes this port. Extra
+   * caller-owned ports passed alongside it are never closed arbitrarily.
+   */
+  readonly owned?: boolean;
 }
 
 /** One trusted, already-validated Calendar binding injected by composition. */
@@ -200,6 +237,14 @@ export const MARKDOWN_CONNECTOR_DISPLAY_NAME = "markdown-vault";
  * closed with a fixed code instead of producing fake LLM output.
  */
 export const AGENT_STRATEGY_NAME = "m0-default";
+
+/**
+ * C21: the M5 Action Run strategy name approved proposals are dispatched
+ * under. Registered ONLY when the triple gate is open; without it an
+ * approved proposal can never be queued, and a queued row would fail closed
+ * on the missing strategy instead of running anything.
+ */
+export const ACTION_STRATEGY_NAME = "m5-action";
 
 /**
  * Build the loopback-only model gateway for a validated model config.
@@ -346,7 +391,12 @@ function assertCalendarMcpCompatibility(
 
 /** Resolve the outer MCP shutdown bound (tests may shrink/raise within 60s). */
 function resolveMcpShutdownMs(value: number | undefined): number {
-  if (value !== undefined && Number.isInteger(value) && value > 0 && value <= 60000) {
+  if (
+    value !== undefined &&
+    Number.isInteger(value) &&
+    value > 0 &&
+    value <= 60000
+  ) {
     return value;
   }
   return MCP_SHUTDOWN_BOUND_MS;
@@ -487,6 +537,8 @@ export async function startServer(
   let startedListener: ListenerHandle | undefined;
   /** C14: the ONE server-owned Calendar MCP connector (undefined = none). */
   let ownedMcp: McpConnector | undefined;
+  /** C21: EXPLICITLY owned injected write-port close hook (see gate below). */
+  let ownedActionShutdown: (() => Promise<void>) | undefined;
   let onSigint: (() => void) | undefined;
   let onSigterm: (() => void) | undefined;
   const removeSignalHandlers = (): void => {
@@ -558,7 +610,6 @@ export async function startServer(
       }
     }
 
-    const repo = createKernelRepository(handle.raw);
     // M1 (plan 14.1/14.5-14.6): after migration and before engine
     // recovery/listen, when roots are configured create one connector
     // owning all roots, ensure one fingerprint-bound instance, then the
@@ -586,13 +637,18 @@ export async function startServer(
         "calendar config requires host trusted binding definitions",
       );
     }
+    // C21: the binding resolution runs BEFORE the repository is constructed,
+    // because the M5 triple gate depends on the ACTIVE Calendar instance id
+    // while the repository owns the shared proposal stager.
+    const referenceManager = createReferenceManager(handle.raw);
+    const markdownBindings: MarkdownConnectorBinding[] = [];
+    let kernelCalendarBinding: CalendarConnectorBinding | undefined;
+    let calendarTargetStore: CalendarTargetStore | undefined;
     if (
       config.markdownRoots.length > 0 ||
       calendarBinding !== null ||
       calendarConfig !== null
     ) {
-      const referenceManager = createReferenceManager(handle.raw);
-      const markdownBindings: MarkdownConnectorBinding[] = [];
       if (config.markdownRoots.length > 0) {
         const connector = await createMarkdownConnector(
           config.markdownRoots.map((root) =>
@@ -611,8 +667,6 @@ export async function startServer(
           connector,
         });
       }
-      let kernelCalendarBinding: CalendarConnectorBinding | undefined;
-      let calendarTargetStore: CalendarTargetStore | undefined;
       if (calendarBinding !== null) {
         // Fail closed: the injected binding must own an existing `calendar`
         // instance whose private selection matches. The adapter itself is
@@ -625,7 +679,10 @@ export async function startServer(
         // Durable private get-target store: survives restart, never a public
         // DTO. The kernel default in-memory store is NEVER used in production.
         calendarTargetStore = createDurableCalendarTargetStore(handle.raw);
-      } else if (calendarConfig !== null && options.mcpDefinitions !== undefined) {
+      } else if (
+        calendarConfig !== null &&
+        options.mcpDefinitions !== undefined
+      ) {
         // C14 OWNED Calendar MCP lifecycle. Fail-closed preflight first (no
         // DB write for an incompatible, never-authorizable configuration).
         assertCalendarMcpCompatibility(calendarConfig, options.mcpDefinitions);
@@ -672,16 +729,82 @@ export async function startServer(
         };
         calendarTargetStore = createDurableCalendarTargetStore(handle.raw);
       }
-      const registrations = createM1ToolRegistrations({
-        db: handle.raw,
-        repo,
-        referenceManager,
-        bindings: markdownBindings,
-        ...(kernelCalendarBinding !== undefined
-          ? { calendarBinding: kernelCalendarBinding }
-          : {}),
-        ...(calendarTargetStore !== undefined ? { calendarTargetStore } : {}),
-      });
+    }
+
+    // C21 M5 composition: TRIPLE gate. `m5-action` and the proposal-only
+    // `calendar.reschedule` registration exist ONLY when ALL of these hold:
+    //   1. config.actions.optIn        (strict env opt-in, default false),
+    //   2. config.actions.writeEnabled (staging + approval opt-in),
+    //   3. a DEDICATED trusted CalendarActionWritePort injected by host code
+    //      (never env/config) whose enabled capability binds the EXACT same
+    //      active Calendar instance as the read binding.
+    // There is deliberately NO production write binding in this codebase: the
+    // third condition is unreachable unless a trusted host injects one, and
+    // an injected port whose capability does not match the active instance is
+    // a fail-closed startup error (never a silently half-enabled surface).
+    const actionWrite = options.actionWriteBinding ?? null;
+    const actionConfigEnabled =
+      config.actions.optIn === true && config.actions.writeEnabled === true;
+    let actionsEnabled = false;
+    if (actionWrite !== null) {
+      const capability = CalendarActionWriteCapabilitySchema.safeParse(
+        actionWrite.port.capability,
+      );
+      const matchesActiveCalendar =
+        kernelCalendarBinding !== undefined &&
+        calendarTargetStore !== undefined &&
+        capability.success &&
+        capability.data.connectorInstanceId ===
+          kernelCalendarBinding.connectorInstanceId;
+      if (actionConfigEnabled) {
+        // Config opted in: an unusable/mismatched binding is an incomplete
+        // opt-in and fails closed BEFORE listen (never a silent disable).
+        if (!matchesActiveCalendar) {
+          throw new ServerConfigError(
+            "action write binding does not match the active calendar binding",
+          );
+        }
+        actionsEnabled = true;
+      }
+      // Config disabled: any injected port is simply never used (no staging,
+      // no approval, no strategy, no external write).
+    }
+
+    // Repository (with its SINGLE shared proposal stager) is constructed here
+    // so `writeEnabled` is exactly the triple-gated value above.
+    const repo = createKernelRepository(
+      handle.raw,
+      actionsEnabled
+        ? { actionProposals: { writeEnabled: true } }
+        : {},
+    );
+
+    if (
+      config.markdownRoots.length > 0 ||
+      calendarBinding !== null ||
+      calendarConfig !== null ||
+      actionsEnabled
+    ) {
+      const registrations = [
+        ...createM1ToolRegistrations({
+          db: handle.raw,
+          repo,
+          referenceManager,
+          bindings: markdownBindings,
+          ...(kernelCalendarBinding !== undefined
+            ? { calendarBinding: kernelCalendarBinding }
+            : {}),
+          ...(calendarTargetStore !== undefined ? { calendarTargetStore } : {}),
+        }),
+      ];
+      if (actionsEnabled) {
+        // Proposal-only: stages a proposal, never executes an external write.
+        registrations.push(
+          createCalendarRescheduleProposalRegistration({
+            stager: repo.actionProposalsStager as ActionProposalStager,
+          }),
+        );
+      }
       toolBroker = createToolBroker({ db: handle.raw, repo, registrations });
       logger.info("server.markdown_ready", {
         status: registrations.length,
@@ -691,6 +814,24 @@ export async function startServer(
         logger.info("server.calendar_ready", { status: 1 });
       }
     }
+    if (actionsEnabled) {
+      // Counts only: no provider id, capability or connector detail is logged.
+      logger.info("server.actions_ready", { status: 1 });
+    }
+
+    // C21 lifecycle: ONLY an EXPLICITLY owned injected write port is shut
+    // down (after the engine drain, before the DB close). A caller-owned port
+    // (default) is never closed by the server.
+    ownedActionShutdown = async (): Promise<void> => {
+      if (actionWrite?.owned !== true || actionWrite.shutdown === undefined) {
+        return;
+      }
+      try {
+        await actionWrite.shutdown();
+      } catch {
+        // The port's own cleanup is the caller's; never fail shutdown.
+      }
+    };
     // M2 (opt-in): when config.model is set, build the loopback gateway
     // and register the agent under m0-default before engine.start/listen.
     // The agent reuses the M1 ToolBroker, or a private empty-registration
@@ -723,6 +864,53 @@ export async function startServer(
         });
       }
     }
+    // C21: the deterministic M5 Action strategy over the SAME database:
+    // existing ReferenceManager + ActionExecutionService, the authoritative
+    // read port derived from the ACTIVE Calendar read binding + durable
+    // private target store, the injected dedicated write port, and the
+    // durable private target resolver. No model path, no placeholder port.
+    // Registered ONLY when the triple gate opened above, so an approval can
+    // never queue a Run with no strategy behind it.
+    const activeActionBindings =
+      actionsEnabled &&
+      actionWrite !== null &&
+      kernelCalendarBinding !== undefined &&
+      calendarTargetStore !== undefined
+        ? {
+            port: actionWrite.port,
+            binding: kernelCalendarBinding,
+            targetStore: calendarTargetStore,
+          }
+        : null;
+    if (activeActionBindings !== null) {
+      const { port, targetStore } = activeActionBindings;
+      const readPort = createCalendarActionReadPort({
+        db: handle.raw,
+        binding: activeActionBindings.binding.connector,
+        targetStore,
+        now,
+      });
+      const actionService = createActionExecutionService({
+        db: handle.raw,
+        referenceManager,
+        preflightRead: readPort,
+        clock: now,
+      });
+      registry.register(
+        ACTION_STRATEGY_NAME,
+        createActionStrategy({
+          db: handle.raw,
+          service: actionService,
+          preflightRead: readPort,
+          writePort: port,
+          resolveTarget: createCalendarActionTargetResolver({
+            db: handle.raw,
+            targetStore,
+          }),
+        }),
+      );
+    }
+
     engine = new RunEngine({
       db: handle.raw,
       repo,
@@ -740,6 +928,7 @@ export async function startServer(
       logger,
       now,
       assets: loadUiAssets(),
+      actionsEnabled,
     });
     const activeEngine = engine;
     const activeHandle = handle;
@@ -797,6 +986,11 @@ export async function startServer(
         }
       } catch {
         // Best effort: the listen error carries the startup failure.
+      }
+      try {
+        await ownedActionShutdown?.();
+      } catch {
+        // Best effort.
       }
       try {
         if (startedListener !== undefined) {
@@ -860,6 +1054,7 @@ export async function startServer(
             });
           }
         }
+        await ownedActionShutdown?.();
         try {
           closeKernelDatabase(activeHandle);
         } catch {
@@ -903,6 +1098,11 @@ export async function startServer(
       } catch {
         // Best effort: the original startup error carries the failure.
       }
+    }
+    try {
+      await ownedActionShutdown?.();
+    } catch {
+      // Best effort: the original startup error carries the failure.
     }
     if (handle !== undefined) {
       try {

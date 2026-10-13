@@ -419,10 +419,48 @@ export class RunEngine {
    * failure. Only `running` rows transition (cancel_requested/terminal rows
    * are left for the watchdog/drain paths); transient storage failures are
    * retried within the bounded lifecycle budget.
+   *
+   * C21: an `m5-action` Run is never generic-failed (that would destroy
+   * committed marker/receipt state and leave the execution dangling). The
+   * repository dispatches it to the action execution service, which applies
+   * the SAME pre/post-marker disposition as recovery/drain: a `failed`
+   * receipt + `abandoned` before the marker, an `unknown` receipt +
+   * `abandoned` after it. Never a retry.
    */
   private settlePostPickupFailure(runId: string): void {
     this.persistLifecycle(() =>
-      this.repo.failRun(runId, "execution_failed", { now: this.clock.now() }),
+      this.repo.settleAbandonedRunningRun(runId, {
+        now: this.clock.now(),
+        cause: "restart_recovery",
+      }),
+    );
+  }
+
+  /**
+   * C21: generic failure disposition of a `running` row (missing runtime,
+   * invalid output, thrown strategy error). An `m5-action` Run is never
+   * generic-failed — that would preserve a dangling execution and destroy
+   * its marker/receipt coherence — so it takes the SAME safe action
+   * disposition as recovery/drain (pre-marker failed receipt, post-marker
+   * unknown receipt, always `abandoned`, never a retry).
+   */
+  private failRunningRun(runId: string, code: string): boolean {
+    let action = false;
+    try {
+      action = this.repo.getRun(runId).strategy === "m5-action";
+    } catch {
+      action = false;
+    }
+    if (action) {
+      return this.persistLifecycle(() =>
+        this.repo.settleAbandonedRunningRun(runId, {
+          now: this.clock.now(),
+          cause: "restart_recovery",
+        }),
+      );
+    }
+    return this.persistLifecycle(() =>
+      this.repo.failRun(runId, code, { now: this.clock.now() }),
     );
   }
 
@@ -488,11 +526,7 @@ export class RunEngine {
       let persistFailed = false;
       try {
         if (strategy === undefined) {
-          persistFailed = !this.persistLifecycle(() =>
-            this.repo.failRun(runId, "execution_failed", {
-              now: this.clock.now(),
-            }),
-          );
+          persistFailed = !this.failRunningRun(runId, "execution_failed");
           return;
         }
         const candidate = await strategy(ctx);
@@ -500,11 +534,7 @@ export class RunEngine {
         try {
           valid = parseRunResult(candidate);
         } catch {
-          persistFailed = !this.persistLifecycle(() =>
-            this.repo.failRun(runId, "output_invalid", {
-              now: this.clock.now(),
-            }),
-          );
+          persistFailed = !this.failRunningRun(runId, "output_invalid");
           return;
         }
         persistFailed = !this.persistLifecycle(() =>
@@ -512,9 +542,7 @@ export class RunEngine {
         );
       } catch (error) {
         const code = toRunErrorCode(error, controller.signal);
-        persistFailed = !this.persistLifecycle(() =>
-          this.repo.failRun(runId, code, { now: this.clock.now() }),
-        );
+        persistFailed = !this.failRunningRun(runId, code);
       } finally {
         if (!persistFailed) {
           // Cooperative fast path: settle promptly instead of waiting out

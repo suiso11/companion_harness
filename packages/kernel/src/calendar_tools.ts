@@ -304,9 +304,7 @@ export function deriveCalendarRelatedQuery(
   if (trimmed.length === 0) {
     return null;
   }
-  return Array.from(trimmed)
-    .slice(0, MAX_SEARCH_QUERY_CODE_POINTS)
-    .join("");
+  return Array.from(trimmed).slice(0, MAX_SEARCH_QUERY_CODE_POINTS).join("");
 }
 
 /* ------------------------------------------------------------------ */

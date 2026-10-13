@@ -37,6 +37,8 @@ a missing DB fails without creating any DB or backup files.
 | `COMPANION_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 | `COMPANION_MARKDOWN_ROOTS_JSON` | `[]` | Strict JSON array of `{ path, alias? }` (see below); unset means no Markdown connector |
 | `COMPANION_MODEL_JSON` | unset (no model) | Strict JSON object `{ adapter, baseUrl, model, apiKey? }` (see M2 below); unset registers no model strategy |
+| `COMPANION_CALENDAR_JSON` | unset (no Calendar) | Strict JSON object `{ selection, connector }` (see C14 below); unset registers no Calendar connector |
+| `COMPANION_ACTIONS_JSON` | `{"optIn":false,"writeEnabled":false}` | Strict JSON object `{ optIn?, writeEnabled? }` (booleans, default false). HINT ONLY: never supplies a write capability, a category or a binding — see "C21 M5 Action composition" below |
 
 Config is Zod-validated and frozen at startup (no hot reload).
 
@@ -839,6 +841,61 @@ or complete activate config):
   factory; outer shutdown bound cap). Apps/server now also declares
   workspace dependencies on `@companion/connector-mcp` and
   `@companion/connector-calendar`.
+
+### C21 M5 Action composition (triple gate)
+
+- This subsection records the CURRENT C21 scope on top of C17-C20. The tests
+  added here are recorded as **ADDED, NOT YET RUN**: the deferred final
+  verification suite has not been executed, and no executed-verification or
+  green-check claim is made here.
+- Config (strict opt-in, DEFAULT DISABLED on both flags):
+  `COMPANION_ACTIONS_JSON` is an exact `{ optIn?, writeEnabled? }` object
+  parsed by `parseActionConfig`; both flags default to `false` and the
+  frozen result is exposed as `config.actions`. Unknown keys, non-boolean
+  values and non-objects fail closed with a fixed message. These flags are
+  HINTS ONLY: they can never carry a write capability, a category, a
+  connector instance id or any authorization decision.
+- Dedicated write binding (trusted host code ONLY): the exact
+  `CalendarActionWritePort` is injected through
+  `startServer({ actionWriteBinding: { port, shutdown?, owned? } })`. It is
+  never read from env/config. `owned: true` (explicit) transfers the port's
+  lifecycle to the server, which then closes it after the engine drain and
+  before the DB close; a caller-owned port (the default) is never closed by
+  the server and extra caller-owned ports are never closed arbitrarily.
+- TRIPLE gate: `m5-action` and the proposal-only `calendar.reschedule`
+  registration exist ONLY when (1) `config.actions.optIn`, (2)
+  `config.actions.writeEnabled`, and (3) a dedicated trusted write port whose
+  enabled capability (`tool: calendar.reschedule`, editable fields exactly
+  `["start","end"]`, `writeEnabled: true`) names the EXACT ACTIVE Calendar
+  instance of the composed read binding — all three hold. When the config
+  opts in and the injected binding does not match, startup fails closed
+  (`server_config_invalid`, before listen); an injected port with the config
+  disabled is simply never used. There is deliberately NO production write
+  binding selected in this codebase.
+- Wired composition when the gate is open: one existing `ReferenceManager`
+  (same DB), one `ActionExecutionService`, the authoritative read port
+  `createCalendarActionReadPort` over the EXISTING Calendar `get` binding +
+  the DURABLE private target store (real `deleted` observations pass
+  through; nothing is synthesized; abort is respected before any call), the
+  repository's SINGLE shared proposal stager with `writeEnabled: true`, the
+  `calendar.reschedule` proposal-only registration, and the deterministic
+  `m5-action` RunStrategy over `createActionStrategy`.
+- Disabled behaviour: with the gate closed nothing can be staged (the stager
+  refuses) and `POST .../proposals/:id/approve` returns a fixed
+  `409 action_execution_disabled` BEFORE any repository call, so no queued
+  Action Run (and therefore no orphan execution) can be created. Decision
+  READS (`GET .../proposals`) keep listing existing state unchanged, and
+  reject stays state-only.
+- Read-back: the strategy verifies the post-write observation by STRICT JSON
+  parsing of the canonical event body and exact `start`/`end` equality
+  against the normalized intended instants (no substring matching), plus the
+  same target identity and a non-deleted status; anything else is
+  `succeeded_unverified`/fail-closed.
+- Fake harness seam for C22 (exact API): inject deterministic fakes through
+  `actionWriteBinding` (write port) and the existing `calendarBinding`
+  (read/search port) seams; production passes neither. The write port must
+  be pre-bound to the Calendar instance id the harness provisions (the
+  server re-verifies it), and it must never retry `update`.
 
 ### C09-01 / C09-04 / C09-07 / C09-08 trusted read policy, model exposure & real stdio
 

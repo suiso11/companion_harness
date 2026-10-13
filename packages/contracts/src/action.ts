@@ -84,11 +84,15 @@ export type ActionReceiptOutcome = z.infer<typeof ActionReceiptOutcomeSchema>;
 /**
  * Fixed safe redacted Action error codes (§18.5/§18.6): preflight
  * authoritative-read failure, cancel accepted before the external marker,
+ * definite connector `definite_failure` write terminal, restart-recovery /
+ * drain abandonment of an execution that never reached the external marker,
  * and fail-closed impossible-state detection. No raw errors pass.
  */
 export const M5_ACTION_ERROR_CODES = [
   "action_preflight_failed",
   "action_cancelled_before_write",
+  "action_write_failed",
+  "action_recovery_abandoned_before_write",
   "database_state_invalid",
 ] as const;
 export type M5ActionErrorCode = (typeof M5_ACTION_ERROR_CODES)[number];

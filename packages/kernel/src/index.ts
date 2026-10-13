@@ -22,6 +22,49 @@ export {
   createCalendarRescheduleProposalRegistration,
 } from "./action_proposals.js";
 export type {
+  ActionAuthoritativeObservation,
+  ActionCancelResult,
+  ActionExecutionService,
+  ActionExecutionServiceOptions,
+  ActionFinishRequest,
+  ActionFinishResult,
+  ActionGrantGate,
+  ActionPickupResult,
+  ActionPreflightMaterializeResult,
+  ActionRecoveryCause,
+  ActionRecoverySummary,
+  ActionRunRecoveryResult,
+  ActionPreflightOutcome,
+  ActionPreflightRead,
+  ActionPreflightReadPort,
+  ActionPreflightTerminalBase,
+  ActionPreflightFailedTerminal,
+  ActionPreflightBlockedTerminal,
+  CommittedGrantMeta,
+} from "./action_executions.js";
+export type {
+  CalendarActionReadPortOptions,
+  CalendarActionTargetResolverOptions,
+} from "./action_executions.js";
+export {
+  ActionAuthoritativeObservationSchema,
+  createActionExecutionService,
+  createCalendarActionReadPort,
+  createCalendarActionTargetResolver,
+} from "./action_executions.js";
+export type {
+  ActionStrategyOptions,
+  CalendarActionWriteCapability,
+  CalendarActionWritePort,
+  CalendarActionWriteRequest,
+  CalendarTargetResolver,
+  CalendarWriteOutcome,
+} from "./action_strategy.js";
+export {
+  CalendarActionWriteCapabilitySchema,
+  createActionStrategy,
+} from "./action_strategy.js";
+export type {
   AgentRepairReason,
   AgentStrategyOptions,
   CitationVerification,
@@ -183,6 +226,7 @@ export {
   RunEngine,
 } from "./engine.js";
 export {
+  ActionNotCancellableError,
   BackupError,
   BackupRequiredError,
   DatabaseStateInvalidError,

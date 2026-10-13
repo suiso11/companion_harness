@@ -85,6 +85,10 @@ import {
   createActionProposalStager,
 } from "./action_proposals.js";
 import {
+  type ActionExecutionService,
+  createActionExecutionService,
+} from "./action_executions.js";
+import {
   assertUuidV4,
   generateId,
   IDEMPOTENCY_OPERATIONS,
@@ -104,6 +108,20 @@ import {
   RepositoryValidationError,
   SessionBusyError,
 } from "./errors.js";
+
+/**
+ * C19: fixed safe error thrown when a generic Run lifecycle transition
+ * (engine pickup, generic complete/fail) touches an `m5-action` Run. Such
+ * Runs are owned exclusively by the concrete action execution service
+ * (atomic terminal transactions); the engine never fails closed-through
+ * them and no watchdog may destroy committed marker/receipt state.
+ */
+export class ActionRunDispatchRequiredError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ActionRunDispatchRequiredError";
+  }
+};
 
 export {
   canonicalJson,
@@ -348,7 +366,11 @@ function requireId(id: unknown, what: string): string {
   return id;
 }
 
-function withImmediate<T>(db: Database.Database, fn: () => T): T {
+/**
+ * C19: exported so the Action execution boundary service reuses the exact
+ * same atomic transaction helper (same BEGIN IMMEDIATE semantics).
+ */
+export function withImmediate<T>(db: Database.Database, fn: () => T): T {
   db.exec("BEGIN IMMEDIATE");
   try {
     const out = fn();
@@ -482,7 +504,21 @@ function readRun(db: Database.Database, runId: string): RawRun | null {
   );
 }
 
-function appendEventInTx(
+/**
+ * C19: exported for the concrete Action execution boundary service
+ * (`action_executions.ts`), which is in-repo-only. The shared signature and
+ * SEMANTICS keep a single guarded event allocator across domain modules.
+ */
+export type RunEventAppender = (
+  db: Database.Database,
+  runId: string,
+  expectedPrevSeq: number,
+  type: M0RunEventType | LatestRunEventType,
+  payload: unknown,
+  now: number,
+) => number;
+
+export const appendEventInTx: RunEventAppender = function appendEventInTx(
   db: Database.Database,
   runId: string,
   expectedPrevSeq: number,
@@ -624,6 +660,18 @@ export function createKernelRepository(
             },
           },
         });
+
+  /**
+   * C21: lazily composed Action execution service. It owns the `m5-action`
+   * cancel boundary and the `m5-action` recovery/drain disposition. It shares
+   * THIS repository's single connection, so it opens its own
+   * `BEGIN IMMEDIATE` with the exact same CAS/event primitives.
+   */
+  let cancelBoundary: ActionExecutionService | null = null;
+  const actionCancelService = (): ActionExecutionService => {
+    cancelBoundary ??= createActionExecutionService({ db });
+    return cancelBoundary;
+  };
 
   /**
    * Terminal cleanup is NOT part of the commit hook: apply only after the
@@ -1033,6 +1081,18 @@ export function createKernelRepository(
       if (row.status !== "queued") {
         return { applied: false, run: parseRunRow(row) };
       }
+      // C19: an m5-action Run is never picked by the generic generic pickup
+      // pair (start + later complete/fail): it is dispatched atomically to
+      // its dedicated execution service, which moves it to running together
+      // with its queued ActionExecution in ONE transaction and never lets
+      // the engine's generic lifecycle own a markered action terminal --
+      // the generic completeRun/failRun below reject any already
+      // terminalized (or cancel_requested) Action Run outright.
+      if (row.strategy === "m5-action") {
+        throw new ActionRunDispatchRequiredError(
+          `m5-action run ${id} must be picked up via the action execution service`,
+        );
+      }
       const moved = db
         .prepare(
           "UPDATE runs SET status = 'running', started_at = ? WHERE id = ? AND status = 'queued'",
@@ -1079,6 +1139,15 @@ export function createKernelRepository(
       const row = readRun(db, id);
       if (row === null) {
         throw new RepositoryNotFoundError(`run ${id} not found`);
+      }
+      // C19: never generic-complete an Action Run — already terminalized
+      // action state is computed and committed atomically by the action
+      // execution service (receipt + events + Run terminal together), and
+      // any generic overwrite could contradict a committed marker.
+      if (row.strategy === "m5-action") {
+        throw new ActionRunDispatchRequiredError(
+          `m5-action run ${id} is terminally owned by the action execution service`,
+        );
       }
       // Cancel-first: only status='running' may complete. cancel_requested
       // (even within grace) and terminal states discard the result with no
@@ -1152,6 +1221,15 @@ export function createKernelRepository(
       if (row === null) {
         throw new RepositoryNotFoundError(`run ${id} not found`);
       }
+      // C19: an Action Run is never generic-failed. Its lifecycle is owned
+      // by the action execution service (atomic preflight/terminal
+      // transactions); the generic watchdog/abandon path must never destroy
+      // marker or receipt state.
+      if (row.strategy === "m5-action") {
+        throw new ActionRunDispatchRequiredError(
+          `m5-action run ${id} is terminally owned by the action execution service`,
+        );
+      }
       if (row.status !== "running") {
         return { applied: false, run: parseRunRow(row) };
       }
@@ -1194,6 +1272,25 @@ export function createKernelRepository(
     options: TransitionOptions = {},
   ): { status: string; run: RunRow } {
     const now = nowMs(options.now);
+    // C21 dispatch: an `m5-action` Run NEVER uses the generic cancel path.
+    // The concrete action execution service owns its cancellation boundary:
+    // ownership-first 404, terminal runs return their ACTUAL status unchanged,
+    // a committed `external_call_started_at` marker is a fixed
+    // `action_not_cancellable` 409 with ZERO writes, and only a queued /
+    // unmarkered-preflight run cancels atomically (grant left unconsumed, no
+    // external call). Dispatched OUTSIDE any transaction — the service opens
+    // its own single `BEGIN IMMEDIATE`.
+    const session = requireId(sessionId, "sessionId");
+    const dispatchId = requireId(runId, "runId");
+    const dispatchRow = readRun(db, dispatchId);
+    if (dispatchRow !== null && dispatchRow.strategy === "m5-action") {
+      const outcome = actionCancelService().cancelActionRun(
+        session,
+        dispatchId,
+        now,
+      );
+      return { status: outcome.runStatus, run: getRun(dispatchId) };
+    }
     const outcome = withImmediate(db, () => {
       const row = requireOwnedRun(sessionId, runId);
       if (isTerminalStatus(row.status as RunStatus)) {
@@ -1305,15 +1402,22 @@ export function createKernelRepository(
     cause: "restart_recovery" | "drain",
     now: number,
   ): { abandoned: number; cancelled: number } {
+    // C21: Action Runs NEVER use the generic sweep. An `m5-action` run is
+    // recovered by the action execution service (execution CAS + receipt +
+    // run abandoned, marker/receipt/grant coherent) in its OWN single
+    // transaction. It runs FIRST and fail-closed: an impossible Action pair
+    // throws before the generic sweep opens its transaction, so nothing is
+    // swept and no Action execution is left dangling.
+    actionCancelService().validateAndRecoverActionRuns(cause, now);
     return withImmediate(db, () => {
       const running = db
         .prepare(
-          `SELECT * FROM runs WHERE status = 'running' ORDER BY created_at ASC`,
+          `SELECT * FROM runs WHERE status = 'running' AND strategy <> 'm5-action' ORDER BY created_at ASC`,
         )
         .all() as RawRun[];
       const cancelling = db
         .prepare(
-          `SELECT * FROM runs WHERE status = 'cancel_requested' ORDER BY created_at ASC`,
+          `SELECT * FROM runs WHERE status = 'cancel_requested' AND strategy <> 'm5-action' ORDER BY created_at ASC`,
         )
         .all() as RawRun[];
       let abandoned = 0;
@@ -1367,6 +1471,59 @@ export function createKernelRepository(
     cancelled: number;
   } {
     return sweepTerminals("drain", nowMs(options.now));
+  }
+
+  /**
+   * C21: safe disposition of a run the engine orphaned while it was
+   * `running` (post-pickup snapshot/read failure, watchdog finalization).
+   * An `m5-action` Run is NEVER generically failed: it is dispatched to the
+   * action execution service, which applies the SAME pre/post-marker
+   * disposition as recovery/drain (failed receipt + abandoned, or unknown
+   * receipt + abandoned) so no dangling execution survives. Every other
+   * strategy keeps the generic `running -> abandoned` transition.
+   */
+  function settleAbandonedRunningRun(
+    runId: string,
+    options: TransitionOptions & { cause?: "restart_recovery" | "drain" } = {},
+  ): { applied: boolean; status: string } {
+    const id = requireId(runId, "runId");
+    const now = nowMs(options.now);
+    const cause = options.cause ?? "restart_recovery";
+    const row = readRun(db, id);
+    if (row === null) {
+      throw new RepositoryNotFoundError(`run ${id} not found`);
+    }
+    if (row.strategy === "m5-action") {
+      const outcome = actionCancelService().recoverAbandonedActionRun(
+        id,
+        cause,
+        now,
+      );
+      return { applied: outcome.applied, status: outcome.runStatus };
+    }
+    const outcome = withImmediate(db, () => {
+      const current = readRun(db, id);
+      if (current === null) {
+        throw new RepositoryNotFoundError(`run ${id} not found`);
+      }
+      if (current.status !== "running") {
+        return { applied: false, status: current.status };
+      }
+      const moved = db
+        .prepare(
+          "UPDATE runs SET status = 'abandoned', finished_at = ? WHERE id = ? AND status = 'running'",
+        )
+        .run(now, id);
+      if (moved.changes !== 1) {
+        return { applied: false, status: "running" };
+      }
+      appendEventInTx(db, id, current.event_seq, "run.abandoned", { cause }, now);
+      return { applied: true, status: "abandoned" };
+    });
+    if (outcome.applied) {
+      clearStagedAfterTerminalCommit(id);
+    }
+    return outcome;
   }
 
   function appendToolEvent(
@@ -2907,6 +3064,7 @@ export function createKernelRepository(
     finalizeCancelRequested,
     recover,
     drain,
+    settleAbandonedRunningRun,
     appendToolEvent,
     appendModelStepEvent,
     recordModelCall,

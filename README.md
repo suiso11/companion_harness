@@ -1382,6 +1382,34 @@ COMPANION_CALENDAR_JSON='{
 
 ---
 
+# Actions (opt-in, triple-gated, C21)
+
+M5 の Action 実行 (`m5-action` / `calendar.reschedule`) は **3 つの条件を
+すべて満たした場合のみ** 登録されます。1 つでも欠ければ何も登録されません。
+
+1. `COMPANION_ACTIONS_JSON` の `optIn` (既定 `false`)
+2. 同設定の `writeEnabled` (既定 `false`)
+3. 信頼済みホストコードが注入した専用 `CalendarActionWritePort` が、
+   実際に有効な Calendar 接続 instance と**同一の instance** に束縛されている
+
+```bash
+COMPANION_ACTIONS_JSON='{ "optIn": true, "writeEnabled": true }'
+```
+
+- 設定はヒントに過ぎません。capability / category / connector instance id を
+  env から与えることはできず、書き込み port は必ず `startServer({
+  actionWriteBinding: { port, shutdown?, owned? } })` で注入します
+  (本コードベースには production の実書き込み binding は存在しません)。
+- 設定が有効で binding が active instance と一致しない場合は listen 前に
+  fail-closed します。設定が無効な場合、注入された port は一切使われません。
+- 無効時は staging できず、approve は repository 呼び出し前に固定
+  `409 action_execution_disabled` を返します (queue される孤立 Run を作りません)。
+  一覧 (decision read) は従来どおり状態を返します。
+- port の lifecycle は `owned: true` を明示した場合のみサーバーが close します
+  (caller 所有の port は閉じません)。
+
+---
+
 # Design Philosophy
 
 Companion Harness では、LLM をシステムそのものとは考えません。

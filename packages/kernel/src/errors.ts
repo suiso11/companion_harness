@@ -217,6 +217,25 @@ export class ProposalStateConflictError extends KernelStorageError {
 }
 
 /**
+ * The Action Run can no longer be cancelled safely: its
+ * `external_call_started_at` marker is committed, so the external write may
+ * already have started and nothing local may be pretended to be "stopped".
+ * Fixed code `action_not_cancellable` (409 `action_not_cancellable`).
+ */
+export class ActionNotCancellableError extends KernelStorageError {
+  readonly runId: string;
+
+  constructor(runId: string, options?: ErrorOptions) {
+    super(
+      "action_not_cancellable",
+      "action run is no longer cancellable (external call already started)",
+      options,
+    );
+    this.runId = runId;
+  }
+}
+
+/**
  * The request hash does not match the stored immutable proposal content
  * hash: a decision is always bound to the exact hash the UI button was
  * rendered with (§18.2). Fixed code `proposal_hash_mismatch` (409).

@@ -20,8 +20,8 @@ import { lstatSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import {
-  mcpConnectorConfigSchema,
   type McpConnectorConfig,
+  mcpConnectorConfigSchema,
 } from "@companion/connector-mcp";
 import {
   isValidApiKeyHeaderValue,
@@ -97,6 +97,67 @@ const ServerConfigSchema = z.strictObject({
   logLevel: LogLevelSchema,
 });
 
+/**
+ * C21: strict opt-in M5 Action config (deep-frozen). DEFAULT DISABLED on
+ * both flags. These are HINTS only — they never authorize anything:
+ *
+ * - `optIn` (default false): the host opts into the M5 Action surface at
+ *   all (proposal-only `calendar.reschedule` registration + decision APIs).
+ * - `writeEnabled` (default false): the host additionally allows a queued
+ *   Action Run to be APPROVED (the repository stager is created with exactly
+ *   this flag, so staging/approval is an explicit composition opt-in).
+ *
+ * Neither flag can supply or select a real binding: the exact trusted
+ * `CalendarActionWritePort` is injected separately by trusted host code, and
+ * the server registers `m5-action` only when config flags AND a dedicated
+ * write binding matching the active owned Calendar instance are ALL present
+ * (triple gate). No env value can ever enable a category, a provider, a
+ * write capability or an OAuth/pin flow.
+ */
+export interface ActionConfig {
+  readonly optIn: boolean;
+  readonly writeEnabled: boolean;
+}
+
+/** Default M5 Action config: fully disabled (fail-closed). */
+export const DEFAULT_ACTION_CONFIG: ActionConfig = Object.freeze({
+  optIn: false,
+  writeEnabled: false,
+});
+
+/**
+ * Strict M5 Action opt-in parser: exact `{ optIn?, writeEnabled? }` object
+ * with optional booleans defaulting to FALSE. Any unknown key, non-boolean
+ * value or non-object input fails closed with a fixed message; the result is
+ * deep-frozen.
+ */
+export function parseActionConfig(raw: string | undefined): ActionConfig {
+  if (raw === undefined) {
+    return DEFAULT_ACTION_CONFIG;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw configError("action config must be a JSON object");
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw configError("action config must be a JSON object");
+  }
+  for (const key of Object.keys(parsed)) {
+    if (key !== "optIn" && key !== "writeEnabled") {
+      throw configError("action config has an unknown key");
+    }
+  }
+  const record = parsed as { optIn?: unknown; writeEnabled?: unknown };
+  const optIn = record.optIn ?? false;
+  const writeEnabled = record.writeEnabled ?? false;
+  if (typeof optIn !== "boolean" || typeof writeEnabled !== "boolean") {
+    throw configError("action config flags must be booleans");
+  }
+  return Object.freeze({ optIn, writeEnabled });
+}
+
 export interface ServerConfig {
   readonly dbPath: string;
   readonly host: ServerHost;
@@ -111,6 +172,8 @@ export interface ServerConfig {
   readonly model: ModelConfig | null;
   /** Strict opt-in Calendar/MCP config; null (unset) means disabled. */
   readonly calendar: CalendarConfig | null;
+  /** Strict opt-in M5 Action config (default fully disabled). */
+  readonly actions: ActionConfig;
 }
 
 /** Local model adapter (loopback-only, strict opt-in). */
@@ -441,7 +504,9 @@ export function parseModelConfig(raw: string | undefined): ModelConfig | null {
  * - Failures carry fixed messages only: no raw values escape.
  * - The returned object and its nested parts are deep-frozen.
  */
-export function parseCalendarConfig(raw: string | undefined): CalendarConfig | null {
+export function parseCalendarConfig(
+  raw: string | undefined,
+): CalendarConfig | null {
   if (raw === undefined) {
     return null;
   }
@@ -465,7 +530,11 @@ export function parseCalendarConfig(raw: string | undefined): CalendarConfig | n
     connector?: unknown;
   };
   const selectionRaw = record.selection;
-  if (typeof selectionRaw !== "object" || selectionRaw === null || Array.isArray(selectionRaw)) {
+  if (
+    typeof selectionRaw !== "object" ||
+    selectionRaw === null ||
+    Array.isArray(selectionRaw)
+  ) {
     throw configError("calendar selection is invalid");
   }
   const selectionKeys = Object.keys(selectionRaw);
@@ -501,16 +570,19 @@ export function parseCalendarConfig(raw: string | undefined): CalendarConfig | n
     selection = { calendarId, account };
   }
   const connectorRaw = record.connector;
-  if (typeof connectorRaw !== "object" || connectorRaw === null || Array.isArray(connectorRaw)) {
+  if (
+    typeof connectorRaw !== "object" ||
+    connectorRaw === null ||
+    Array.isArray(connectorRaw)
+  ) {
     throw configError("calendar connector config is invalid");
   }
   const connectorResult = CalendarMcpConnectorSchema.safeParse(connectorRaw);
   if (!connectorResult.success) {
     throw configError("calendar connector config is invalid");
   }
-  const connector = deepFreeze(
-    connectorResult.data,
-  ) as McpConnectorConfig & object;
+  const connector = deepFreeze(connectorResult.data) as McpConnectorConfig &
+    object;
   return Object.freeze({
     selection: Object.freeze(selection),
     connector,
@@ -567,6 +639,7 @@ export function loadServerConfig(
   const markdownRoots = parseMarkdownRoots(env.COMPANION_MARKDOWN_ROOTS_JSON);
   const model = parseModelConfig(env.COMPANION_MODEL_JSON);
   const calendar = parseCalendarConfig(env.COMPANION_CALENDAR_JSON);
+  const actions = parseActionConfig(env.COMPANION_ACTIONS_JSON);
   const parsed = ServerConfigSchema.safeParse({
     dbPath,
     host: host.data,
@@ -586,5 +659,6 @@ export function loadServerConfig(
     markdownRoots,
     model,
     calendar,
+    actions,
   });
 }

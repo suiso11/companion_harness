@@ -37,6 +37,7 @@ import {
   retryScope,
 } from "@companion/contracts";
 import {
+  ActionNotCancellableError,
   IdempotencyConflictError,
   InvalidReferenceError,
   isUuidV4,
@@ -78,6 +79,15 @@ export interface CreateAppDeps {
    * serve 404 while the SSR shell keeps working.
    */
   assets?: { clientJs?: string; clientCss?: string };
+  /**
+   * C21: true only when the M5 triple gate is open (config opt-in +
+   * writeEnabled + a dedicated trusted write binding on the active Calendar
+   * instance). While false, decision READS still list existing proposal
+   * state, but APPROVE is refused before any state change, so a disabled
+   * configuration can never stage or queue an external action. Default
+   * false (fail closed).
+   */
+  actionsEnabled?: boolean;
 }
 
 export interface ServerControls {
@@ -423,6 +433,19 @@ function mapDomainError(c: Context, error: unknown): Response {
       409,
     );
   }
+  // C21 cancellation boundary (§18.5): a committed external-call marker can
+  // never be "cancelled after the fact" — fixed 409 with a fixed safe message.
+  if (error instanceof ActionNotCancellableError) {
+    return c.json(
+      {
+        error: {
+          code: "action_not_cancellable",
+          message: "action run is no longer cancellable",
+        },
+      },
+      409,
+    );
+  }
   // M1 stored-only reference mapping (§14.8): fixed lowercase codes with
   // fixed safe messages. Domain messages/IDs/content never leak.
   if (error instanceof ReferenceNotFoundError) {
@@ -463,6 +486,7 @@ function mapDomainError(c: Context, error: unknown): Response {
 
 export function createApp(deps: CreateAppDeps): CreatedServerApp {
   const { config, repo, engine } = deps;
+  const actionsEnabled = deps.actionsEnabled === true;
   const logger = deps.logger ?? createStdServerLogger(config.logLevel);
   const now = deps.now ?? Date.now;
   const assets = deps.assets ?? {};
@@ -899,6 +923,20 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     const parsedBody = ProposalApproveRequestSchema.safeParse(raw.value);
     if (!parsedBody.success) {
       return validationError(c);
+    }
+    // C21 disabled composition: refuse BEFORE any repository call, so no
+    // proposal can be approved into a queued Action Run while the M5 write
+    // surface is gated off. Fixed 409 code, no ids or content in the body.
+    if (actionsEnabled !== true) {
+      return c.json(
+        {
+          error: {
+            code: "action_execution_disabled",
+            message: "action execution is disabled",
+          },
+        },
+        409,
+      );
     }
     // Draining admission re-check immediately before the repository call
     // (no await between here and repo.approveProposal). A stored response
