@@ -127,6 +127,10 @@ interface WireState {
   calls: string[];
   onSearch?: () => void;
   onGet?: () => void;
+  /** PR20 T5 fixture seam: answer a get for any requested id with this id's event. */
+  misdirectGetTo?: string | undefined;
+  /** PR20 T5 fixture seam: text payload sent alongside structuredContent. */
+  conflictText?: string | undefined;
 }
 
 function freshState(events: RawEvent[]): WireState {
@@ -177,7 +181,9 @@ async function createInertServer(state: WireState): Promise<{
     state.calls.push(tool);
     if (tool === GET_TOOL) {
       state.onGet?.();
-      const event = state.events.find((entry) => entry.id === args.eventId);
+      const lookupId =
+        state.misdirectGetTo ?? (args.eventId as string | undefined);
+      const event = state.events.find((entry) => entry.id === lookupId);
       if (event === undefined) {
         return {
           content: [{ type: "text", text: "not found" }],
@@ -185,7 +191,7 @@ async function createInertServer(state: WireState): Promise<{
         };
       }
       return {
-        content: [{ type: "text", text: "{}" }],
+        content: [{ type: "text", text: state.conflictText ?? "{}" }],
         structuredContent: { event },
       };
     }
@@ -543,6 +549,103 @@ describe("C12 genuine-SDK inert provider smoke", () => {
     expect(snapshotsAfter).toBe(snapshotsBefore + 1);
     // Exact get mapping from the durable private target.
     expect(state.searchArgs.length).toBeGreaterThan(0);
+  });
+
+  it("PR20 T5: a valid same-calendar wrong-event get is rejected; refresh creates nothing", async () => {
+    const evtA = rawEvent();
+    const evtB = rawEvent({
+      id: "evt-b",
+      summary: "Other Meeting",
+      etag: '"etag-b"',
+    });
+    const state = freshState([evtA]);
+    const stack = await createStack(tempDb("wrongid"), state);
+    closables.push(stack.close);
+    const { runId } = newRunningRun(stack.repo);
+    const searched = await stack.broker.invoke(
+      runId,
+      "calendar.search",
+      SEARCH_INPUT,
+      CTX,
+    );
+    expect(searched.result.actualOutcome).toBe("succeeded");
+    const hit = (
+      searched.normalized as { hits: Array<{ referenceId: string }> }
+    ).hits[0] as { referenceId: string };
+    // The provider now answers every get with a DIFFERENT valid event from
+    // the SAME trusted calendar.
+    state.events = [evtA, evtB];
+    state.misdirectGetTo = "evt-b";
+    const target = {
+      calendarId: CALENDAR_ID,
+      eventId: "evt-a",
+      account: ACCOUNT,
+    };
+    const wrong = await stack.adapter.get(target);
+    expect(wrong).toEqual({ ok: false, code: "calendar_response_invalid" });
+    expect(JSON.stringify(wrong)).not.toContain("evt-b");
+    expect(JSON.stringify(wrong)).not.toContain(CALENDAR_ID);
+    // Structured-first: a matching text body must NOT rescue a wrong
+    // structured event.
+    state.conflictText = JSON.stringify({ event: evtA });
+    const conflict = await stack.adapter.get(target);
+    expect(conflict).toEqual({ ok: false, code: "calendar_response_invalid" });
+    state.conflictText = undefined;
+    const count = (sql: string): number =>
+      (
+        stack.handle.raw.prepare(sql).get() as {
+          n: number;
+        }
+      ).n;
+    const before = {
+      resources: count("SELECT COUNT(*) AS n FROM resources"),
+      snapshots: count("SELECT COUNT(*) AS n FROM resource_snapshots"),
+      refs: count("SELECT COUNT(*) AS n FROM session_references"),
+      sets: count("SELECT COUNT(*) AS n FROM reference_sets"),
+      setItems: count("SELECT COUNT(*) AS n FROM reference_set_items"),
+      targets: count("SELECT COUNT(*) AS n FROM calendar_get_targets"),
+      links: count("SELECT COUNT(*) AS n FROM snapshot_links"),
+    };
+    const refreshed = await stack.broker.invoke(
+      runId,
+      "reference.refresh",
+      { referenceId: hit.referenceId },
+      CTX,
+    );
+    expect(refreshed.result.actualOutcome).toBe("failed");
+    expect(refreshed.result.errorCode).toBe("calendar_response_invalid");
+    expect(count("SELECT COUNT(*) AS n FROM resources")).toBe(before.resources);
+    expect(count("SELECT COUNT(*) AS n FROM resource_snapshots")).toBe(
+      before.snapshots,
+    );
+    expect(count("SELECT COUNT(*) AS n FROM session_references")).toBe(
+      before.refs,
+    );
+    expect(count("SELECT COUNT(*) AS n FROM reference_sets")).toBe(before.sets);
+    expect(count("SELECT COUNT(*) AS n FROM reference_set_items")).toBe(
+      before.setItems,
+    );
+    expect(count("SELECT COUNT(*) AS n FROM calendar_get_targets")).toBe(
+      before.targets,
+    );
+    expect(count("SELECT COUNT(*) AS n FROM snapshot_links")).toBe(
+      before.links,
+    );
+    // The stored prior reference/history is still open.
+    const opened = await stack.broker.invoke(
+      runId,
+      "reference.open",
+      { referenceId: hit.referenceId },
+      CTX,
+    );
+    expect(opened.result.actualOutcome).toBe("succeeded");
+    expect(
+      (opened.normalized as { body: { text: string } }).body.text,
+    ).toContain("Standup");
+    // A matching get keeps its exact prior behavior.
+    state.misdirectGetTo = undefined;
+    const good = await stack.adapter.get(target);
+    expect(good.ok).toBe(true);
   });
 
   it("failed and omitted follow-ups retain history; no deletion is inferred", async () => {

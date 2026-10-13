@@ -1575,6 +1575,45 @@ returned 503 for a committed approval during drain. Ground truth per task
   `proposals` 5/5, root `tsc --noEmit` exit 0. No push/comment/resolve;
   review thread IDs are for the parent to publish.
 
+## PR20 T5 calendar wrong-event get rejected, refresh closed (2026-10-13)
+
+Fixes PR20 review `PRRC_kwDOUNdW7s79uYS6` (thread
+`PRRT_kwDOUNdW7s6ryb6_`) on `feat/c12-calendar-snapshots`: a valid
+`get-event` result from the selected calendar with an ID different from
+`target.eventId` was accepted (normalization checked only the calendar
+ID), so `reference.refresh` could materialize an unrelated event. Ground
+truth per task (not rerun to reproduce the pre-fix acceptance).
+
+- `packages/connector-calendar/src/adapter.ts`: `get` now compares the
+  decoded opaque `canonicalKey` against the existing
+  `normalize.canonicalKey(connectorInstanceId, target.calendarId,
+  target.eventId)` helper (imported, no shim/new profile) and returns the
+  fixed `calendar_response_invalid` on mismatch (no IDs/raw payload in the
+  error). `normalizeGetResult` is unchanged, so strict
+  structured-first/text-fallback decoding, malformed/upstream error codes,
+  and matching-target behavior propagate exactly as before; no
+  tombstone/user/account validation extras.
+- Regression: `packages/connector-calendar/test/c12-smoke.test.ts` gains a
+  genuine-SDK case (real `Server` + `InMemoryTransport` + `McpConnector` +
+  broker over SQLite, deterministic zero-network fixture with a
+  misdirect seam, no echo/mock forwarding): wrong-event `get` ->
+  `calendar_response_invalid` with no provider ID in the error,
+  structured-wrong vs text-matching still invalid, `reference.refresh` ->
+  failed `calendar_response_invalid` with zero new
+  resource/snapshot/rN/target/set/link rows, stored prior ref still opens
+  with retained history, and a matching `get` still succeeds.
+- Actual-runtime proof (throwaway script inside `.review-plan-work/`, run
+  once via the repo tsx toolbin, removed after this note; 15/15 checks):
+  wrong-event `get` fixed code, conflict still invalid, refresh failed
+  closed with reference-table counts unchanged, prior open retained,
+  matching `get`/`refresh` succeed; plus the still-pending T3/T4 standalone
+  actual-`startServer` smoke (disabled injected owned port: `GET
+  /health/ready` 200 then stop with 0 capability reads / 0 closes; enabled
+  owned port: ready 200 then stop with exactly 1 close). Focused
+  `c12-smoke` 10/10 + `normalize`/`deletion-boundary`/`calendar_tools`
+  54/54, root `tsc --noEmit` exit 0, owned `biome check` clean. No
+  push/resolve; thread IDs are for the parent to publish.
+
 ## Non-goals (explicit)
 Domain retention/GC (except newest-3 backup rotation), user export,
 session delete API, running-process deletion, auto-restore, DB/backup

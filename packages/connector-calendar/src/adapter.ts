@@ -45,6 +45,7 @@ import type {
   McpErrorCode,
 } from "@companion/connector-mcp";
 import {
+  canonicalKey,
   type NormalizeGetResult,
   type NormalizeSearchPageResult,
   normalizeGetResult,
@@ -265,10 +266,28 @@ export function createCalendarConnector(
     } catch {
       return { ok: false, code: "mcp_unavailable" };
     }
-    return normalizeGetResult(call, {
+    const decoded = await normalizeGetResult(call, {
       connectorInstanceId,
       calendarId: target.calendarId,
     });
+    if (!decoded.ok) return decoded;
+    // PR20 T5: a valid event from the selected calendar with an ID different
+    // from the requested target must NOT be accepted (otherwise
+    // `reference.refresh` would materialize an unrelated resource). Compare
+    // the decoded opaque canonicalKey against the expected key for the exact
+    // requested (connectorInstanceId, calendarId, eventId) tuple via the
+    // existing helper; a mismatch is the fixed response code with no ids or
+    // raw payload. Structured-first/text-fallback decoding and all upstream
+    // / malformed error codes are unchanged inside `normalizeGetResult`.
+    const expected = await canonicalKey(
+      connectorInstanceId,
+      target.calendarId,
+      target.eventId,
+    );
+    if (decoded.event.canonicalKey !== expected) {
+      return { ok: false, code: "calendar_response_invalid" };
+    }
+    return decoded;
   }
 
   return {
