@@ -408,6 +408,25 @@ export function actionDecisionIntentText(
 }
 
 /**
+ * Validated parse of a cancel `200` response body (`CancelRunResponse`):
+ * returns the actual `run.status` string, or `null` when the body is not
+ * the exact `{ run: { id, status } }` shape. The caller claims a stop ONLY
+ * for the `cancelled` terminal; every other (or unparseable) outcome
+ * refreshes the actual execution/receipt state instead.
+ */
+export function parseCancelRunStatus(body: unknown): string | null {
+  if (typeof body !== "object" || body === null) {
+    return null;
+  }
+  const run = (body as { run?: unknown }).run;
+  if (typeof run !== "object" || run === null) {
+    return null;
+  }
+  const status = (run as { status?: unknown }).status;
+  return typeof status === "string" ? status : null;
+}
+
+/**
  * Terminal-hydration single-owner guard (§16.7): the first claim for a Run
  * wins; later claims for the same Run are declined so the terminal history
  * refresh (and the failure-only retry appended after it) happens exactly

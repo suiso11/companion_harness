@@ -22,6 +22,7 @@ import {
   claimTerminalHydration,
   INITIAL_RUN_VIEW,
   isCorruptCursor,
+  parseCancelRunStatus,
   type ProposalStatus,
   type ReceiptOutcome,
   type RunViewState,
@@ -1256,27 +1257,49 @@ class ConversationApp {
 
   /**
    * Contextual Stop for a live Action execution. Only offered before the
-   * committed external-call marker; the server's terminal cancel answer
-   * (200) renders the ordinary「停止しました」notice, and the receipt's real
-   * fixed error code (never a fabricated success) is shown by the card.
+   * committed external-call marker. The `200` body carries the ACTUAL
+   * resulting run status: the「停止しました」notice is shown ONLY when the
+   * run terminalised `cancelled`. Any other `200` (a `cancel_requested`
+   * accept, or a terminal `completed`/`failed`/`abandoned` that won the
+   * race) refreshes the ACTUAL receipt/execution and claims nothing; a
+   * `409` (`action_not_cancellable`, marker committed) or any other
+   * outcome re-reads the actual execution state instead of faking a stop
+   * or an unknown success.
    */
   private async stopAction(card: ActionCard): Promise<void> {
     if (this.sessionId === null || card.runId === null || card.stop.disabled) {
       return;
     }
     card.stop.disabled = true;
-    const posted = await postJson(
-      `/api/sessions/${encodeURIComponent(this.sessionId)}/runs/${encodeURIComponent(card.runId)}/cancel`,
-      {},
-      null,
-    );
-    if (posted.status === 200) {
-      this.showNotice("停止しました");
+    let posted: { status: number; body: unknown };
+    try {
+      posted = await postJson(
+        `/api/sessions/${encodeURIComponent(this.sessionId)}/runs/${encodeURIComponent(card.runId)}/cancel`,
+        {},
+        null,
+      );
+    } catch {
+      // Transport failure: nothing was cancelled — re-offer Stop and
+      // re-read the actual state instead of claiming anything.
+      card.stop.disabled = false;
+      this.showNotice("停止できませんでした");
       this.scheduleActionSync();
       return;
     }
-    // 409 `action_not_cancellable` (marker committed) or a transient state:
-    // re-read the ACTUAL execution view instead of guessing.
+    if (posted.status === 200) {
+      if (parseCancelRunStatus(posted.body) === "cancelled") {
+        this.showNotice("停止しました");
+        this.scheduleActionSync();
+        return;
+      }
+      // Accepted but NOT a cancelled terminal: never claim a stop —
+      // refresh the ACTUAL receipt/execution view instead.
+      card.stop.disabled = false;
+      this.scheduleActionSync();
+      return;
+    }
+    // 409 `action_not_cancellable` (marker committed) or any other
+    // non-2xx: re-read the ACTUAL execution view instead of guessing.
     card.stop.disabled = false;
     this.scheduleActionSync();
   }
@@ -1614,6 +1637,21 @@ class ConversationApp {
     );
     if (posted.status < 200 || posted.status >= 300) {
       this.showNotice("停止できませんでした");
+      return;
+    }
+    // An adopted LIVE Action execution reports its ACTUAL resulting run
+    // status in the 200 body: only a `cancelled` terminal may claim the
+    // stop here — any other outcome re-reads the actual execution state
+    // instead (the true `run.cancelled` terminal event, when it arrives,
+    // still renders the notice through the ordinary stream path).
+    if (this.actionRunStops.has(this.activeRunId)) {
+      if (parseCancelRunStatus(posted.body) === "cancelled") {
+        this.showNotice("停止しました");
+      }
+      await this.refreshActionRunStops();
+      this.scheduleActionSync();
+      this.renderComposer();
+      return;
     }
     // 2xx: the run.cancel_requested event (stream or fallback poll) renders
     // the「停止しました」notice and keeps the run active until terminal.
