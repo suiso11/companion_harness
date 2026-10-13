@@ -1392,7 +1392,17 @@ COMPANION_CALENDAR_JSON='{
 `3.0.0-readonly.2`, `list-events`/`search-events`/`get-event` の live-wire hash)
 と完全一致した場合のみ、ホスト所有の信頼済み定義が注入されます。profile 未設定
 の既定動作は不変 (無効のまま)、未知 profile・不一致・任意 binding/hash は
-fail-closed です。profile 採用は live 受け入れではありません: 新規 OAuth 同意と
+fail-closed です。`selection.account` を付ける場合は pinned fork 文法
+`^[a-z0-9_-]{1,64}$` (小文字 ASCII のみ; メール/大文字/超過/不正文字は
+`calendar profile account mismatch` で失敗、省略は有効) に従ってください。
+非 profile の汎用 account 契約は不変です。profile の解決
+(selector 凍結・完全性・注入競合・適合性) はすべて DB 副作用
+(`ensureDbDir`/open/migration) より前の同期 preflight で行われるため、失敗時は
+DB ファイルも親ディレクトリも作られず、既存の旧 DB はバイト同一のままです。
+profile は専用の永続 display 名 `calendar-mcp-google-readonly`
+(汎用 `calendar-mcp` とは別) で登録されるため、同一 selection の旧汎用行が
+再利用されることはなく、旧 target の refresh は新 provider に届きません
+(`reference_not_found`)。profile 採用は live 受け入れではありません: 新規 OAuth 同意と
 live 本番検証は未了 (C11 positive BLOCKED、manual Win11 未了) です。完全な
 copy-pastable 準備・認証・起動手順 (Desktop-app クライアント、前提検証、
 JSON 生成スクリプト) と credential-free 実行証跡は docs/operations.md

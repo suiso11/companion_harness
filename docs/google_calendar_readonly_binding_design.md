@@ -16,6 +16,17 @@ Profile-adopted is NOT live-accepted: fresh user OAuth consent and live
 production verification are still pending, C11-01 stays BLOCKED, and no
 live-Google claim is made.
 
+Status (CURRENT, PR23 review fixes): (1) the profile/config linkage
+(frozen selector, completeness, injected conflicts, exact hint
+compatibility) resolves synchronously BEFORE any DB side effect, so a
+failing profile creates no DB file/dir and leaves older DBs byte-identical;
+(2) the optional profile `selection.account` is pinned to
+`^[a-z0-9_-]{1,64}$` (omitted valid; generic non-profile contract
+unchanged); (3) the profile persists under the boring dedicated display
+name `calendar-mcp-google-readonly` (never generic `calendar-mcp`), so old
+generic rows/targets cannot be reused or refreshed via Google
+(`reference_not_found`). No kernel migration; no live-Google claim.
+
 Status (HISTORICAL): **design-only proposal; C08 runtime evidence recorded (2026-10-11)**.
 No Companion code changed; no SDK package adopted; no OAuth grant and no live
 access. The pinned candidate fork `97a3dc3` now has a credential-free

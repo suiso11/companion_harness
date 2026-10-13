@@ -1,0 +1,52 @@
+{
+ "artifact": "PR23 verify-publish proof (credential-free except pre-existing live check, no writes, no new consent)",
+ "observed_utc": "2026-10-13",
+ "commands": [
+  {
+   "command": "pnpm test",
+   "exit": 0,
+   "result": "107 files passed, 1295 tests passed, 0 failed"
+  },
+  {
+   "command": "pnpm run typecheck",
+   "exit": 0,
+   "result": "clean"
+  },
+  {
+   "command": "pnpm run typecheck:e2e",
+   "exit": 0,
+   "result": "clean"
+  },
+  {
+   "command": "pnpm run lint",
+   "exit": 0,
+   "result": "224 files, 0 errors, 1 pre-existing biome.json info"
+  },
+  {
+   "command": "npx playwright test --config apps/server/playwright.config.ts",
+   "exit": 0,
+   "result": "23/23 passed (default Chromium suite)"
+  },
+  {
+   "command": "COMPANION_E2E_CALENDAR=1 npx playwright test --config apps/server/playwright.config.ts",
+   "exit": 0,
+   "result": "18/18 passed, 0 unexpected/flaky/skipped (calendar browser mode)"
+  }
+ ],
+ "prior_smoke": {
+  "invalidProfileCreatesNoDbDir": true,
+  "invalidAccountCreatesNoDbDir": true,
+  "genericAndProfileDistinctInstanceIds": true,
+  "restartReusesProfileId": true,
+  "oldProviderRefreshBlocked": {
+   "errorCode": "reference_not_found",
+   "getCalls": 0
+  }
+ },
+ "live_google_readonly": {
+  "attempted": true,
+  "outcome": "not_run_no_provisioned_runtime",
+  "detail": "config/ absent; no provisioned credential/consent found via presence-only listing; no OAuth flow launched, no writes, no secret contents read"
+ },
+ "notes": "Covers prior focused 3-file/78-test, typecheck, lint plus full suite and both real Chromium suites. Prior smoke-profile and cli-profile artifacts unchanged."
+}

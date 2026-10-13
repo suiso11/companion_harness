@@ -80,6 +80,7 @@ import { createApp, type EnginePort, type ServerControls } from "./app.js";
 import {
   assertGoogleReadonlyHintCompatible,
   CALENDAR_PROFILE_ENV,
+  GOOGLE_READONLY_CONNECTOR_DISPLAY_NAME,
   getGoogleReadonlyDefinitions,
   parseCalendarProfileName,
 } from "./calendarReadonlyProfile.js";
@@ -324,18 +325,31 @@ function ensureDbDir(
  * Fail-closed check that a Calendar connector instance owns an existing
  * `connector_instances` row of kind `calendar` whose metadata-only selection
  * matches the trusted selection. Never logs or returns provider ids.
+ * When `expectedDisplayName` is supplied the stored `display_name` must
+ * equal it exactly: a legacy/mismatched row (e.g. a generic `calendar-mcp`
+ * row reused by the google-readonly profile, or vice versa) fails closed
+ * instead of being rebound.
  */
 function verifyCalendarBinding(
   db: KernelDatabaseHandle["raw"],
   binding: Pick<CalendarServerBinding, "connectorInstanceId" | "selection">,
+  expectedDisplayName?: string,
 ): void {
   const row = db
-    .prepare("SELECT kind, config_json FROM connector_instances WHERE id = ?")
+    .prepare(
+      "SELECT kind, display_name, config_json FROM connector_instances WHERE id = ?",
+    )
     .get(binding.connectorInstanceId) as
-    | { kind: string; config_json: string }
+    | { kind: string; display_name: string; config_json: string }
     | undefined;
   if (row === undefined || row.kind !== "calendar") {
     throw new ServerConfigError("calendar connector binding not provisioned");
+  }
+  if (
+    expectedDisplayName !== undefined &&
+    row.display_name !== expectedDisplayName
+  ) {
+    throw new ServerConfigError("calendar connector binding invalid");
   }
   let parsed: unknown;
   try {
@@ -602,6 +616,73 @@ export async function startServer(
     return hook;
   };
   try {
+    // Initial synchronous Calendar composition preflight: frozen selector,
+    // config completeness, injected binding/definitions conflicts, and exact
+    // profile compatibility — ALL before ensureDbDir/open/migrations or any
+    // DB side effect. Still synchronous (before the first await below), so
+    // the frozen selector decision cannot be mutated mid-flight. Failures
+    // carry fixed path-free ServerConfigError messages and are logged
+    // exactly once by the single startup-failure catch below.
+    const calendarBinding = options.calendarBinding ?? null;
+    // C14 owned composition: the exact opt-in calendar config (with the
+    // separate host-trusted definitions) makes the SERVER itself own the
+    // MCP connector + adapter lifecycle. Mutually exclusive with the C12
+    // injected-adapter seam (fail closed on a conflicting composition).
+    let calendarConfig: CalendarConfig | null = null;
+    if (calendarBinding === null) {
+      calendarConfig = config.calendar;
+    } else if (config.calendar !== null) {
+      throw new ServerConfigError(
+        "calendar config and an injected calendar binding are mutually exclusive",
+      );
+    }
+    // Host-owned pinned readonly profile (normal `pnpm start` selection):
+    // COMPANION_CALENDAR_PROFILE=google-readonly supplies the exact
+    // reviewed definitions from trusted host code (never env/config). It
+    // requires the JSON hint to describe exactly the adopted candidate
+    // (identity + stdio + 3 pinned live-wire hashes + profile account
+    // grammar); any deviation fails closed. Unset profile keeps the
+    // previous behavior: explicit `mcpDefinitions` injection or an
+    // INCOMPLETE-opt-in failure. Uses the selector captured synchronously
+    // at startup (see above): later mutations of options.env/process.env
+    // cannot change the decision.
+    const calendarProfile = parseCalendarProfileName(frozenCalendarProfile);
+    let effectiveMcpDefinitions: readonly McpBindingDefinition[] | undefined =
+      options.mcpDefinitions;
+    if (calendarProfile !== null) {
+      if (calendarBinding !== null) {
+        throw new ServerConfigError(
+          "calendar profile and an injected calendar binding are mutually exclusive",
+        );
+      }
+      if (calendarConfig === null) {
+        throw new ServerConfigError(
+          "calendar profile requires calendar config",
+        );
+      }
+      if (options.mcpDefinitions !== undefined) {
+        throw new ServerConfigError(
+          "calendar profile and explicit binding definitions are mutually exclusive",
+        );
+      }
+      assertGoogleReadonlyHintCompatible(calendarConfig);
+      effectiveMcpDefinitions = getGoogleReadonlyDefinitions();
+    }
+    if (calendarConfig !== null && effectiveMcpDefinitions === undefined) {
+      // An opt-in config without the separate host-trusted definitions is an
+      // INCOMPLETE opt-in: fail closed (never a silent disable and never a
+      // discovered/model-defined registration) BEFORE any DB side effect.
+      throw new ServerConfigError(
+        "calendar config requires host trusted binding definitions",
+      );
+    }
+    // Boring profile-specific persisted identity: the profile registers
+    // under its own display name so a previously host-injected generic
+    // `calendar-mcp` row with the same selection can never be reused.
+    const calendarDisplayName =
+      calendarProfile !== null
+        ? GOOGLE_READONLY_CONNECTOR_DISPLAY_NAME
+        : CALENDAR_CONNECTOR_DISPLAY_NAME;
     ensureDbDir(config.dbPath, {
       ...(options.platform !== undefined ? { platform: options.platform } : {}),
       ...(options.chmod !== undefined ? { chmod: options.chmod } : {}),
@@ -658,58 +739,9 @@ export async function startServer(
     // four M1 registrations and a ToolBroker on the same db/repo. No
     // invocation endpoint here. No roots => toolBroker stays null (M0).
     let toolBroker: ToolBroker | null = null;
-    const calendarBinding = options.calendarBinding ?? null;
-    // C14 owned composition: the exact opt-in calendar config (with the
-    // separate host-trusted definitions) makes the SERVER itself own the
-    // MCP connector + adapter lifecycle. Mutually exclusive with the C12
-    // injected-adapter seam (fail closed on a conflicting composition).
-    let calendarConfig: CalendarConfig | null = null;
-    if (calendarBinding === null) {
-      calendarConfig = config.calendar;
-    } else if (config.calendar !== null) {
-      throw new ServerConfigError(
-        "calendar config and an injected calendar binding are mutually exclusive",
-      );
-    }
-    // Host-owned pinned readonly profile (normal `pnpm start` selection):
-    // COMPANION_CALENDAR_PROFILE=google-readonly supplies the exact
-    // reviewed definitions from trusted host code (never env/config). It
-    // requires the JSON hint to describe exactly the adopted candidate
-    // (identity + stdio + 3 pinned live-wire hashes); any deviation fails
-    // closed. Unset profile keeps the previous behavior: explicit
-    // `mcpDefinitions` injection or an INCOMPLETE-opt-in failure.
-    // Uses the selector captured synchronously at startup (see above):
-    // later mutations of options.env/process.env cannot change the decision.
-    const calendarProfile = parseCalendarProfileName(frozenCalendarProfile);
-    let effectiveMcpDefinitions: readonly McpBindingDefinition[] | undefined =
-      options.mcpDefinitions;
-    if (calendarProfile !== null) {
-      if (calendarBinding !== null) {
-        throw new ServerConfigError(
-          "calendar profile and an injected calendar binding are mutually exclusive",
-        );
-      }
-      if (calendarConfig === null) {
-        throw new ServerConfigError(
-          "calendar profile requires calendar config",
-        );
-      }
-      if (options.mcpDefinitions !== undefined) {
-        throw new ServerConfigError(
-          "calendar profile and explicit binding definitions are mutually exclusive",
-        );
-      }
-      assertGoogleReadonlyHintCompatible(calendarConfig);
-      effectiveMcpDefinitions = getGoogleReadonlyDefinitions();
-    }
-    if (calendarConfig !== null && effectiveMcpDefinitions === undefined) {
-      // An opt-in config without the separate host-trusted definitions is an
-      // INCOMPLETE opt-in: fail closed (never a silent disable and never a
-      // discovered/model-defined registration) BEFORE listen.
-      throw new ServerConfigError(
-        "calendar config requires host trusted binding definitions",
-      );
-    }
+    // Calendar composition was fully resolved synchronously BEFORE any DB
+    // side effect above (frozen selector, completeness, conflicts, exact
+    // profile compatibility); reuse it here without re-reading env.
     // C21: the binding resolution runs BEFORE the repository is constructed,
     // because the M5 triple gate depends on the ACTIVE Calendar instance id
     // while the repository owns the shared proposal stager.
@@ -744,6 +776,10 @@ export async function startServer(
         // Fail closed: the injected binding must own an existing `calendar`
         // instance whose private selection matches. The adapter itself is
         // already policy-validated; only its stored identity is re-checked.
+        // The injected seam keeps its existing contract (any display name):
+        // narrowing it would break unprofiled composition callers, and the
+        // reuse isolation is enforced on the OWNED path below via the
+        // profile-specific display name.
         verifyCalendarBinding(handle.raw, calendarBinding);
         kernelCalendarBinding = {
           connectorInstanceId: calendarBinding.connectorInstanceId,
@@ -760,13 +796,14 @@ export async function startServer(
         // DB write for an incompatible, never-authorizable configuration).
         assertCalendarMcpCompatibility(calendarConfig, effectiveMcpDefinitions);
         // Exact persisted registration: ONE metadata-only `calendar` instance
-        // (kind/version/selection checked and reconciled by the kernel; a
-        // changed selection fails closed). No provider ids beyond the
+        // (kind/display-name/version/selection checked and reconciled by
+        // the kernel; a changed selection or a legacy/mismatched display
+        // name fails closed). No provider ids beyond the
         // host-selected calendar id/account labels; no discovered or
         // model-defined registration exists.
         const calendarInstance =
           referenceManager.ensureCalendarConnectorInstance(
-            CALENDAR_CONNECTOR_DISPLAY_NAME,
+            calendarDisplayName,
             calendarConfig.selection.calendarId,
             calendarConfig.selection.account === undefined
               ? {}
@@ -787,10 +824,16 @@ export async function startServer(
         );
         // Defense-in-depth exact-identity re-check of the stored row AFTER
         // registration (read-only; the adapter is then bound to the same id).
-        verifyCalendarBinding(handle.raw, {
-          connectorInstanceId: calendarInstance.id,
-          selection: calendarConfig.selection,
-        });
+        // The expected display name pins the profile/generic identity so a
+        // legacy row with the same selection but the other name fails closed.
+        verifyCalendarBinding(
+          handle.raw,
+          {
+            connectorInstanceId: calendarInstance.id,
+            selection: calendarConfig.selection,
+          },
+          calendarDisplayName,
+        );
         const calendarAdapter = createCalendarConnector({
           connectorInstanceId: calendarInstance.id,
           connector: ownedMcp,

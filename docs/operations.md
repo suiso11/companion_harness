@@ -794,7 +794,10 @@ or complete activate config):
 - Registered lifecycle (server-OWNED): after the preflight, ONE metadata
   `calendar` connector instance is registered via the existing kernel
   `ensureCalendarConnectorInstance` (display name
-  `CALENDAR_CONNECTOR_DISPLAY_NAME = "calendar-mcp"`, `version:1`, exact
+  `CALENDAR_CONNECTOR_DISPLAY_NAME = "calendar-mcp"` for the unprofiled
+  composition, `GOOGLE_READONLY_CONNECTOR_DISPLAY_NAME =
+  "calendar-mcp-google-readonly"` for the pinned profile — never shared, so
+  the two compositions cannot reuse each other's rows, `version:1`, exact
   selection reconciliation — a changed selection fails closed), the hint's
   connector config is merged with the just-registered exact
   `connectorInstanceId`, one `McpConnector` is constructed (NO I/O at
@@ -876,6 +879,20 @@ or complete activate config):
   pinned bindings (a substituted version/name, an HTTP transport, an added
   `list-calendars`/write binding, a dropped binding, or a rehashed binding
   all fail; an arbitrary user binding/hash can never grant read or write).
+  The optional `selection.account`, when present, must match the pinned fork
+  grammar `^[a-z0-9_-]{1,64}$` (lowercase ASCII; email/uppercase/overlength/
+  other characters fail as `calendar profile account mismatch`); omitted
+  stays valid. The generic non-profile account contract (1..512, no NUL) is
+  unchanged. All of the above — frozen selector, completeness, injected
+  conflicts, exact profile compatibility — resolve synchronously BEFORE
+  `ensureDbDir`/open/migrations, so a failing profile creates neither the DB
+  file nor its parent dir and leaves an existing older DB byte-identical.
+  The profile registers under its own boring persisted display name
+  `calendar-mcp-google-readonly` (never the generic `calendar-mcp`), so a
+  previously injected generic row with the same selection is never reused;
+  canonical keys (over the instance id) separate, and an old generic target
+  cannot refresh through the new provider (`reference_not_found`, no `get`
+  call). Legacy/mismatched display-name rows fail closed on re-verify.
 - Explicit preparation / auth / run (all USER-OPERATED, outside the repo;
   this worker never launches a browser, OAuth consent, or a real Calendar
   RPC; no secret is read or pasted anywhere below):
@@ -2166,3 +2183,96 @@ data, then removed with the now-empty `.review-plan-work/` directory
 0 errors, 1 pre-existing info — see above); no `test-results/`, `.verification-log/`, `.final-gate-tmp/`, or
 `.review-proof/` residue; no test file touched by the lint ground
 truth above.
+## resume-calendar-default (2026-10-13)
+
+Recovered checkpoint (observed, not asserted from docs): branch
+`feat/calendar-readonly-production-profile`, HEAD `f23e245`
+(`docs(operations, readme): fail-fast subshell fork-install guard …`),
+`git status --short` empty (clean tree). This branch is the
+google-readonly profile line stacked on the PR20 base: 7 commits since
+`origin/feat/c12-calendar-snapshots` (`b2deab7` profile composition,
+`094bc23` smoke evidence, `3a0d3de` CLI proof, `2b96350`/`202b476`
+profile-freeze fixes, `932a811`/`f23e245` setup-accuracy docs). The
+C24/C22 material above is history from the base line, not this
+branch's scope.
+
+Stale-claim supersession (no history rewrite): the C13 subsection's
+"whole C13–C15 verification pass is deliberately deferred … ADDED, NOT
+YET RUN" and the C14 subsection's matching "ADDED, NOT YET RUN" lines
+are superseded. The deferred suites they name
+(`packages/kernel/test/calendar_tools.test.ts` C13-01..07 exposure/
+budget/dedup/Retry/cross-source cases;
+`apps/server/test/config.test.ts` + `apps/server/test/bootstrap.test.ts`
+C14 opt-in/preflight/lifecycle cases) were executed by the later
+observed batteries on the base line: C12–C22 final integration
+(`52d61ba`: 103 files / 1251 tests, both typechecks exit 0) and the
+PR20 integrated verification (`61b3573`: 106 files / 1270 tests, both
+typechecks exit 0, lint 219 files 0 errors / 1 pre-existing info).
+Profile-branch additions (`calendarReadonlyProfile.test.ts`, 16 cases;
+`calendarReadonlyProfile.ts` freeze-before-first-await) are covered by
+this worker's final battery on this branch (observed once, Linux, Node
+24.12.0, after the docs edit above — no code changed since): `pnpm
+test` exit 0, **107 files / 1286 tests passed** (+1 file / +16 tests
+vs the PR20 106/1270 baseline, exactly the profile suite); root
+`pnpm run typecheck` exit 0; `pnpm run typecheck:e2e` exit 0; `pnpm
+run lint` exit 0 (**223 files, 0 errors, 1 pre-existing
+`biome.json` recommended-deprecation info**). No browser rerun for
+this docs-only slice (both browser suites already green above).
+
+Fresh credential-free harness evidence (this worker, Linux, Node
+24.12.0, installed Playwright 1.63.0 CLI direct, no pnpm exec, no
+OAuth, no live Google, no secrets — fake MCP over real SDK
+InMemoryTransport + scripted fake model + real UI/API, temp SQLite
+under owned `/tmp/opencode/calendar-resume-XFncqG`, traces on):
+
+- Default browser suite: **23/23 passed** (conversation 4,
+  citation_recovery 3, polling 4, sse_history 12 incl. 2 generated
+  corrupt-cursor cases; ~1.3m). Confirms the base-line browser
+  behavior unchanged on this branch.
+- Calendar-mode suite (`COMPANION_E2E_CALENDAR=1`): **18/18 passed,
+  0 unexpected / 0 flaky / 0 skipped** (JSON stats duration
+  ~45.8s): `action.spec.ts` 13/13 (approve/reject/assent/stale/
+  deleted/read-back/unknown/Stop-before/Stop-after/T1-reload/
+  T6-IDs/held-reload/late-cancel), `calendar.spec.ts` 4/4
+  (search→rN→open, reload, refresh V1→V2, tombstone-keeps-open),
+  `tombstone.spec.ts` 1/1 (positive authoritative deleted rN, prior
+  rN retained). JSON stats `expected:18`.
+- Post-run `ss` on 4173/4174/4175: no listeners (both runs).
+- Pinned-profile proof artifacts retained and accurate (runtime-side
+  only, no source-SHA re-verification, no live claims):
+  `docs/evidence/calendar-readonly-profile/smoke-profile.result.json`
+  (22/22) and `cli-profile.result.json` (actual `pnpm start`
+  missing-credential acceptance, 10/10).
+
+Branch-status note (CURRENT, supersedes the base-line residual table's
+"no profile anywhere in this branch" row for THIS branch only): the
+host-owned pinned `google-readonly` profile IS adopted here as normal-
+startup composition (exact pin/commit/tree/lock/wire-hashes in the C14
+profile subsection above). Profile-adopted is NOT live-accepted:
+fresh user OAuth consent, live production verification (C11-01 stays
+BLOCKED), and manual Windows 11 smoke remain open external gates and
+are untouched by this worker.
+
+## PR23 final proof (2026-10-13, observed)
+
+Focused verification only (no production change in this pass; no
+browser or full-suite claim). Linux, Node 24.12.0, pnpm 11.25.0:
+
+- `pnpm vitest run apps/server/test/calendarReadonlyProfile.test.ts
+  apps/server/test/bootstrap.test.ts apps/server/test/config.test.ts`
+  -> exit 0, **3 files / 78 tests passed** (profile 25, bootstrap 28,
+  config 25), 0 failed.
+- `pnpm run typecheck` -> exit 0; `pnpm run typecheck:e2e` -> exit 0.
+- `pnpm run lint` -> exit 0, **224 files, 0 errors**, 1 pre-existing
+  `biome.json` recommended-deprecation info.
+- Independent throwaway credential-free smoke (tsx, removed after the
+  run; no OAuth, no live Google, no secrets): invalid profile AND
+  invalid account each create **no DB file and no parent dir**;
+  generic `calendar-mcp` and profile `calendar-mcp-google-readonly`
+  rows get **distinct instance IDs**; **restart reuses the profile ID**
+  (still 2 rows); old generic target refresh through the new provider
+  fails `reference_not_found` with **0 `get` calls**.
+- Retained: `docs/evidence/calendar-readonly-profile/
+  pr23-final-proof.result.json` (commands + concise smoke JSON).
+  Prior `smoke-profile.result.json` (22/22) and
+  `cli-profile.result.json` (10/10) unchanged.

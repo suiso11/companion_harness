@@ -57,6 +57,28 @@ export const CALENDAR_PROFILE_ENV = "COMPANION_CALENDAR_PROFILE" as const;
 /** The single adopted profile name. Any other value is rejected. */
 export const GOOGLE_READONLY_PROFILE_NAME = "google-readonly" as const;
 
+/**
+ * Boring profile-specific persisted connector identity: the owned
+ * google-readonly composition registers under this display name (kind
+ * `calendar`), NEVER the generic `calendar-mcp`. A DB previously created by
+ * the host-injected generic composition with the same selection therefore
+ * cannot be reused, and old resources/targets (keyed by the old instance
+ * id) cannot be refreshed via the Google provider. The name is path-free
+ * per the kernel displayName rules.
+ */
+export const GOOGLE_READONLY_CONNECTOR_DISPLAY_NAME =
+  "calendar-mcp-google-readonly" as const;
+
+/**
+ * Pinned fork account grammar for the profile selection: lowercase ASCII
+ * `[a-z0-9_-]{1,64}` (the fork `auth [account-id]` / `GOOGLE_ACCOUNT_MODE`
+ * identity). Email addresses, uppercase, overlength, or other characters
+ * are rejected. Omitted account remains valid. This narrows ONLY the
+ * profile path; the generic non-profile `parseCalendarConfig` account
+ * contract (1..512, no NUL) is unchanged.
+ */
+export const GOOGLE_READONLY_ACCOUNT_PATTERN = /^[a-z0-9_-]{1,64}$/;
+
 /** Pinned fork identity (exact pin form: full SHA + lock digest). */
 export const GOOGLE_READONLY_FORK = Object.freeze({
   repo: "https://github.com/suiso11/google-calendar-mcp",
@@ -150,6 +172,10 @@ export function getGoogleReadonlyDefinitions(): readonly McpBindingDefinition[] 
 
 /** Minimal structural view of the calendar config hint for gating. */
 interface ProfileCalendarHint {
+  readonly selection?: {
+    readonly calendarId?: unknown;
+    readonly account?: unknown;
+  };
   readonly connector: {
     readonly expectedServerName?: unknown;
     readonly version?: unknown;
@@ -169,6 +195,15 @@ interface ProfileCalendarHint {
 export function assertGoogleReadonlyHintCompatible(
   calendar: ProfileCalendarHint,
 ): void {
+  const account = calendar.selection?.account;
+  if (account !== undefined) {
+    if (
+      typeof account !== "string" ||
+      !GOOGLE_READONLY_ACCOUNT_PATTERN.test(account)
+    ) {
+      throw profileError("calendar profile account mismatch");
+    }
+  }
   const connector = calendar.connector;
   if (
     connector.expectedServerName !== GOOGLE_READONLY_FORK.serverName ||
