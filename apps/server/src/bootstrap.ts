@@ -78,6 +78,12 @@ import {
 import { serve } from "@hono/node-server";
 import { createApp, type EnginePort, type ServerControls } from "./app.js";
 import {
+  assertGoogleReadonlyHintCompatible,
+  CALENDAR_PROFILE_ENV,
+  getGoogleReadonlyDefinitions,
+  parseCalendarProfileName,
+} from "./calendarReadonlyProfile.js";
+import {
   assertDbPathHasNoSymlink,
   type CalendarConfig,
   DEFAULT_LOG_LEVEL,
@@ -86,12 +92,6 @@ import {
   type ServerConfig,
   ServerConfigError,
 } from "./config.js";
-import {
-  assertGoogleReadonlyHintCompatible,
-  CALENDAR_PROFILE_ENV,
-  getGoogleReadonlyDefinitions,
-  parseCalendarProfileName,
-} from "./calendarReadonlyProfile.js";
 import { createStdServerLogger, type ServerLogger } from "./logger.js";
 import {
   measureStoreSize,

@@ -8,17 +8,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { McpBindingDefinition } from "@companion/connector-mcp";
 import { afterEach, describe, expect, it } from "vitest";
+import { type StartedServer, startServer } from "../src/bootstrap.js";
 import {
   assertGoogleReadonlyHintCompatible,
   CALENDAR_PROFILE_ENV,
-  getGoogleReadonlyDefinitions,
   GOOGLE_READONLY_FORK,
   GOOGLE_READONLY_TOOLS,
   GOOGLE_READONLY_WIRE_HASHES,
+  getGoogleReadonlyDefinitions,
   parseCalendarProfileName,
 } from "../src/calendarReadonlyProfile.js";
 import { ServerConfigError } from "../src/config.js";
-import { startServer, type StartedServer } from "../src/bootstrap.js";
 
 const servers: StartedServer[] = [];
 let tempDirs: string[] = [];
@@ -31,7 +31,12 @@ afterEach(async () => {
     }
   }
   for (const dir of tempDirs) {
-    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    rmSync(dir, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 100,
+    });
   }
   tempDirs = [];
 });
@@ -174,7 +179,9 @@ describe("assertGoogleReadonlyHintCompatible", () => {
     );
 
     const rehashed = JSON.parse(profileHint()) as {
-      connector: { bindings: { upstreamTool: string; canonicalSchemaHash: string }[] };
+      connector: {
+        bindings: { upstreamTool: string; canonicalSchemaHash: string }[];
+      };
     };
     const target = rehashed.connector.bindings.find(
       (b) => b.upstreamTool === "get-event",

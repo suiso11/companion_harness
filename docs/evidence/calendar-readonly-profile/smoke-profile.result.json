@@ -13,11 +13,7 @@
       "bin": {
         "google-calendar-mcp": "build/index.js"
       },
-      "files": [
-        "build/",
-        "README.md",
-        "LICENSE"
-      ],
+      "files": ["build/", "README.md", "LICENSE"],
       "keywords": [
         "mcp",
         "model-context-protocol",

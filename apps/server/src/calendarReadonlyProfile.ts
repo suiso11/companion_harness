@@ -154,10 +154,7 @@ interface ProfileCalendarHint {
     readonly expectedServerName?: unknown;
     readonly version?: unknown;
     readonly transport?: { readonly kind?: unknown };
-    readonly bindings?: readonly {
-      readonly upstreamTool?: unknown;
-      readonly canonicalSchemaHash?: unknown;
-    }[];
+    readonly bindings?: readonly unknown[];
   };
 }
 
@@ -187,7 +184,14 @@ export function assertGoogleReadonlyHintCompatible(
     throw profileError("calendar profile bindings mismatch");
   }
   const seen = new Set<string>();
-  for (const binding of bindings) {
+  for (const entry of bindings) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      throw profileError("calendar profile bindings mismatch");
+    }
+    const binding = entry as {
+      readonly upstreamTool?: unknown;
+      readonly canonicalSchemaHash?: unknown;
+    };
     const name = binding.upstreamTool;
     const hash = binding.canonicalSchemaHash;
     if (typeof name !== "string" || typeof hash !== "string") {
