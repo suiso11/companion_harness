@@ -480,6 +480,35 @@ export const AGENT_UNMAPPED_REFERENCE_ID =
   "ffffffff-ffff-4fff-bfff-ffffffffffff" as const;
 
 /**
+ * Explicit closed JSON parameter schema for `calendar.search` (C13), matching
+ * `CalendarSearchToolInputSchema` (strict): `query` optional (1-256 code
+ * points), `start`/`end` required (1-128; the port enforces the exact
+ * instant/90-day grammar with `calendar_range_invalid`), `limit` 1-20
+ * default 10, `cursor` optional opaque (1-2048). NO `freshness` field exists
+ * on the Calendar input contract, so none is advertised. This is the ONE
+ * model-visible Calendar descriptor: the upstream `list-events` /
+ * `search-events` / `get-event` tools stay connector-internal and are never
+ * advertised by any name.
+ */
+export const AGENT_CALENDAR_SEARCH_PARAMETERS = Object.freeze({
+  type: "object",
+  properties: Object.freeze({
+    query: Object.freeze({ type: "string", minLength: 1, maxLength: 256 }),
+    start: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+    end: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+    limit: Object.freeze({
+      type: "integer",
+      minimum: 1,
+      maximum: MAX_SEARCH_LIMIT,
+      default: DEFAULT_SEARCH_LIMIT,
+    }),
+    cursor: Object.freeze({ type: "string", minLength: 1, maxLength: 2048 }),
+  }),
+  required: Object.freeze(["start", "end"]),
+  additionalProperties: false,
+}) as unknown as Record<string, unknown>;
+
+/**
  * Explicit closed JSON parameter schema for `markdown.search`, matching
  * `MarkdownSearchToolInputSchema` (strict): `query` required (1-256 code
  * points; `minLength`/`maxLength` is the closest JSON Schema expression,
@@ -574,6 +603,7 @@ export const AGENT_REFERENCE_RELATED_PARAMETERS = Object.freeze({
 const AGENT_BROKER_TOOL_PARAMETERS: Readonly<
   Record<string, Record<string, unknown>>
 > = {
+  "calendar.search": AGENT_CALENDAR_SEARCH_PARAMETERS,
   "markdown.search": AGENT_MARKDOWN_SEARCH_PARAMETERS,
   "reference.open": AGENT_REFERENCE_OPEN_PARAMETERS,
   "reference.refresh": AGENT_REFERENCE_REFRESH_PARAMETERS,

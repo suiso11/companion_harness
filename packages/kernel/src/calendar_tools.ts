@@ -18,6 +18,11 @@
 // All observation/snapshot/rN allocation is delegated to the single existing
 // `ReferenceManager` (C12-08); this module never writes those tables.
 
+// C13: the search handler consumes the per-Turn frozen temporal context
+// (now + IANA timeZone) read from the immutable `turns.frozen_context` on
+// every call; Retry reuses the same frozen values (no recomputation) and the
+// connector port receives both fields unchanged (§17.4, §9 blockers 2/3).
+
 import {
   CalendarSearchToolInputSchema,
   CalendarSearchToolOutputSchema,
@@ -86,10 +91,16 @@ export type CalendarGetPortResult =
   | { readonly ok: true; readonly event: CalendarNormalizedEvent }
   | { readonly ok: false; readonly code: string };
 
-/** Per-call frozen zone: resolved from the immutable Turn frozen context. */
+/**
+ * Per-call frozen temporal context (§17.4): resolved from the immutable Turn
+ * frozen context. `timeZone` is the IANA zone and `now` is the frozen Turn
+ * instant; every `calendar.search` call carries both, and a Retry (new Run on
+ * the SAME Turn) reuses the original values without recomputation.
+ */
 export interface CalendarSearchCallOptions {
   readonly signal?: AbortSignal;
   readonly timeZone: string;
+  readonly now: number;
 }
 
 export interface CalendarCallOptions {
@@ -290,11 +301,12 @@ function requireCalendarPort(
 
 /**
  * Build the `calendar.search` registration over an already-validated binding.
- * The frozen zone is read per call from the Run's immutable Turn frozen
- * context, never from construction state. Host-private targets are persisted
- * through the `presentObservations` transaction itself (inside its running-
- * status/CAS recheck), so targets and their Snapshot/rN commit or roll back
- * together (cancelled/late/failed calls write none).
+ * The frozen temporal context (now + IANA timeZone) is read per call from the
+ * Run's immutable Turn frozen context, never from construction state; Retry
+ * on the same Turn reuses the original values (§17.4). Host-private targets
+ * are persisted through the `presentObservations` transaction itself (inside
+ * its running-status/CAS recheck), so targets and their Snapshot/rN commit or
+ * roll back together (cancelled/late/failed calls write none).
  */
 export function createCalendarSearchRegistration(
   options: CreateCalendarSearchRegistrationOptions,
@@ -304,11 +316,13 @@ export function createCalendarSearchRegistration(
   const clock = options.clock ?? { now: () => Date.now() };
   const connector = binding.connector;
 
-  function frozenTimeZone(runId: string): string {
+  function frozenTemporal(runId: string): { now: number; timeZone: string } {
     try {
       const run = repo.getRun(runId);
       const turn = repo.getTurn(run.turnId);
-      return turn.frozenContext.temporal.timeZone;
+      // Frozen at Turn creation; never recomputed, rewritten or defaulted
+      // per Run (Retry reuses this exact object through the stored row).
+      return turn.frozenContext.temporal;
     } catch (error) {
       if (error instanceof RepositoryNotFoundError) {
         throw new ToolError("execution_failed");
@@ -337,12 +351,13 @@ export function createCalendarSearchRegistration(
       if (ctx.signal.aborted) {
         throw new ToolError("execution_cancelled");
       }
-      const timeZone = frozenTimeZone(ctx.runId);
+      const temporal = frozenTemporal(ctx.runId);
       let result: CalendarSearchPortResult;
       try {
         result = await connector.search(input, {
           signal: ctx.signal,
-          timeZone,
+          timeZone: temporal.timeZone,
+          now: temporal.now,
         });
       } catch (error) {
         if (error instanceof ToolError) throw error;

@@ -674,6 +674,75 @@ or complete activate config):
   the deliberately failed refresh (`calendar_upstream_error`). This
   synthetic-only run makes NO live-Google/OAuth claim.
 
+### C13 calendar.search Broker exposure / frozen temporal context / cross-source
+
+- This subsection records the CURRENT C13 scope on top of the C12 pipeline
+  above. It does NOT change the C12/C08/C10/C11 boundaries (adoption stays
+  HOLD, tombstone rules unchanged) and adds NO contracts/schema/migration/
+  server changes. Because the whole C13–C15 verification pass is deliberately
+  deferred (single final suite after C13–C15), the C13 test additions below
+  are recorded as **ADDED, NOT YET RUN** — no executed-verification claim is
+  made here.
+- `packages/kernel/src/calendar_tools.ts`: the search registration now reads
+  the COMPLETE frozen temporal context (not only the zone):
+  `turn.frozenContext.temporal` is passed per call to the connector port as
+  both `timeZone` and `now` (`CalendarSearchCallOptions` gains the required
+  frozen `now`). Frozen values come ONLY from the immutable `turns`
+  `frozen_context` row (validated by the existing `FrozenContextSchema`);
+  nothing is recomputed, defaulted, clock-derived or rewritten per Run, so a
+  Retry (a NEW Run on the SAME Turn via the existing `postRetry`
+  next_run_attempt allocator) consumes the identical frozen now/zone.
+- `packages/kernel/src/agent.ts` (C13-01/C13-08): `calendar.search` is now a
+  model-visible tool. `AGENT_CALENDAR_SEARCH_PARAMETERS` (exported; closed
+  literal `additionalProperties:false` schema mirroring
+  `CalendarSearchToolInputSchema`: optional `query`, required `start`/`end`,
+  `limit` 1-20 default 10, optional opaque `cursor`; NO `freshness` field —
+  the Calendar contract has none) is advertised through
+  `AGENT_BROKER_TOOL_PARAMETERS`, so `buildAgentToolDefinitions` exposes the
+  ONE `calendar.search` descriptor (real `ToolDescriptor` description,
+  category `read`) and never the connector-internal
+  `list-events`/`search-events`/`get-event` tools. Grants/ordinals/mixed
+  references need no new paths: calendar hits flow through the same M1
+  delivered-output/grant extraction (`extractGrantCandidates`,
+  structural-UUID/rN translation) as Markdown hits.
+- C13-02/C13-03 (budget/dedup/timeout/audit): the registration already rides
+  the existing ToolBroker pipeline; this slice keeps `dedupMode: "normal"`
+  (same-Run same-fingerprint reuse consumes cumulative budgets; failed calls
+  clear their cache entry) and maps upstream failures through the closed
+  `mapCalendarCode` set. Audit stays metadata-only (fixed codes + digests,
+  ordered `budget_reserve -> classify -> validate -> dedup -> execute ->
+  normalize -> audit`). No budget/dedup code changed.
+- C13-06/C13-07 (cross-source): the shared `ReferenceManager` path is
+  UNCHANGED and source-agnostic — one session reference sequence covers
+  Markdown and Calendar resources; `reference.open` / `reference.related`
+  stay stored-only (Calendar-origin `reference.related` resolves the stored
+  link graph deterministically and invents no Markdown rNs, and upstream
+  Tombstone/deletion rules are untouched). A failed calendar call audits only
+  the fixed code and never adds stale/uncited references or mutates prior
+  evidence.
+- API surface changed (all add-only, no contracts/migration touched):
+  `CalendarSearchCallOptions.now` (required, frozen Turn instant), frozen
+  `AGENT_CALENDAR_SEARCH_PARAMETERS` export, one new
+  `AGENT_BROKER_TOOL_PARAMETERS` entry (`calendar.search`).
+- Focused consumer-visible tests ADDED (packages/kernel/test/
+  calendar_tools.test.ts, NOT YET RUN — verification deferred to the single
+  final C13-C15 pass): C13-01 exposure (one descriptor, closed parameters,
+  upstream tools never exposed, category `read`), C13-02 budget (reserve
+  before dedup/execute; dedup reuse still reserves; third call over budget
+  blocked with `budget_exceeded` and zero upstream calls), C13-03 dedup
+  reuse + stalled-call timeout (`execution_timeout`, nothing materialized),
+  C13-04/05 Retry (attempt 2 via `postRetry` reuses the identical frozen
+  zone+instant; immutable Turn row unchanged; exactly one upstream call per
+  Run, no auto resend), and C13-06/07 mixed-source session (Markdown+
+  Calendar one ordinal sequence; store-only `reference.open`/`related` on
+  the Calendar-origin reference with zero upstream reads; failed call keeps
+  prior references and adds none).
+- Remaining integration needs (NOT part of C13): C14 wires the frozen
+  instance config/opt-in bootstrap + lazy connection lifecycle (bootstrap.ts
+  already owns the validated `calendarBinding` injection seam), and C15 adds
+  the fake MCP + fake model + real UI conversation→search→rN→refresh /
+  tombstone E2E and CI; the C13 tests above feed the deferred final suite.
+
 ### C09-01 / C09-04 / C09-07 / C09-08 trusted read policy, model exposure & real stdio
 
 - This subsection records the CURRENT new-scope observed work: C09-07 trusted

@@ -17,7 +17,9 @@ import {
   type CalendarGetPortResult,
   type CalendarGetTarget,
   type CalendarNormalizedEvent,
+  type CalendarSearchPortResult,
   type CalendarTargetStore,
+  buildAgentToolDefinitions,
   closeKernelDatabase,
   createDurableCalendarTargetStore,
   createInMemoryCalendarTargetStore,
@@ -26,8 +28,10 @@ import {
   createReferenceManager,
   createToolBroker,
   type KernelRepository,
+  type MarkdownConnectorPort,
   migrateKernelDatabase,
   openKernelDatabase,
+  ToolError,
 } from "../src/index.js";
 
 const T0 = 1790000000000;
@@ -101,7 +105,11 @@ function normalized(
 }
 
 interface FakeCalendarPort extends CalendarConnectorPort {
-  readonly searchCalls: Array<{ input: unknown; timeZone: string }>;
+  readonly searchCalls: Array<{
+    input: unknown;
+    timeZone: string;
+    now: number;
+  }>;
   readonly getCalls: CalendarGetTarget[];
 }
 
@@ -113,7 +121,11 @@ function makeFakeCalendarPort(options: {
   getImpl?: (target: CalendarGetTarget) => CalendarGetPortResult;
 }): FakeCalendarPort {
   const { connectorInstanceId, events } = options;
-  const searchCalls: Array<{ input: unknown; timeZone: string }> = [];
+  const searchCalls: Array<{
+    input: unknown;
+    timeZone: string;
+    now: number;
+  }> = [];
   const getCalls: CalendarGetTarget[] = [];
   const byEventId = new Map(events.map((event) => [event.eventId, event]));
   return {
@@ -121,7 +133,11 @@ function makeFakeCalendarPort(options: {
     searchCalls,
     getCalls,
     async search(input, callOptions) {
-      searchCalls.push({ input, timeZone: callOptions.timeZone });
+      searchCalls.push({
+        input,
+        timeZone: callOptions.timeZone,
+        now: callOptions.now,
+      });
       const normalizedEvents = events.map((event) =>
         normalized(event, connectorInstanceId),
       );
@@ -173,6 +189,7 @@ async function setupCalendarStack(options: {
   portFactory?: PortFactory;
   targetStore?: CalendarTargetStore;
   now?: number;
+  budgets?: { maxToolRequestsPerRun?: number };
 }): Promise<{
   handle: ReturnType<typeof openKernelDatabase>;
   repo: KernelRepository;
@@ -209,6 +226,7 @@ async function setupCalendarStack(options: {
     db: handle.raw,
     repo,
     registrations: regs,
+    ...(options.budgets !== undefined ? { budgets: options.budgets } : {}),
   });
   return {
     handle,
@@ -787,5 +805,374 @@ describe("C12 private target durability and provenance", () => {
     expect(
       targetStore.get(calendarKey(connectorRowId, CALENDAR_ID, "evt-a")),
     ).toBeDefined();
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* C13 broker/exposure/frozen-time integration                          */
+/* ------------------------------------------------------------------ */
+
+/** Deterministic fake Markdown port for the mixed cross-source session. */
+function makeFakeMarkdownPort(
+  files: Readonly<Record<string, { title: string; text: string; revision: string }>>,
+): MarkdownConnectorPort & {
+  readonly searchQueries: string[];
+  readonly readCalls: string[];
+} {
+  const searchQueries: string[] = [];
+  const readCalls: string[] = [];
+  return {
+    searchQueries,
+    readCalls,
+    async search(input) {
+      const query = (input as { query: string }).query;
+      searchQueries.push(query);
+      const file = files[query];
+      if (file === undefined) {
+        return { hits: [], skipped: [] };
+      }
+      return {
+        hits: [
+          {
+            canonicalKey: `vault/${query}.md`,
+            title: file.title,
+            text: file.text,
+            sourceRevision: file.revision,
+            snippet: file.title,
+            standardLinks: [],
+            wikiLinks: [],
+          },
+        ],
+        skipped: [],
+      };
+    },
+    async readCanonical(canonicalKey) {
+      readCalls.push(canonicalKey);
+      // Not reached by these scenarios (open/related are stored-only).
+      throw new ToolError("execution_failed");
+    },
+  };
+}
+
+async function setupMixedStack(options: {
+  events: FakeEvent[];
+  markdownFiles: Record<
+    string,
+    { title: string; text: string; revision: string }
+  >;
+}): Promise<{
+  handle: ReturnType<typeof openKernelDatabase>;
+  repo: KernelRepository;
+  broker: ReturnType<typeof createToolBroker>;
+  port: FakeCalendarPort;
+  markdownPort: ReturnType<typeof makeFakeMarkdownPort>;
+}> {
+  const handle = openKernelDatabase(":memory:");
+  await migrateKernelDatabase({ db: handle.raw });
+  const repo = createKernelRepository(handle.raw);
+  const manager = createReferenceManager(handle.raw);
+  const markdownRow = manager.ensureMarkdownConnectorInstance("vault", 1, {
+    now: T0,
+  });
+  const calendarRow = manager.ensureCalendarConnectorInstance(
+    "host-calendar",
+    CALENDAR_ID,
+    { account: ACCOUNT, now: T0 },
+  );
+  const port = makeFakeCalendarPort({
+    connectorInstanceId: calendarRow.id,
+    events: options.events,
+  });
+  const markdownPort = makeFakeMarkdownPort(options.markdownFiles);
+  const regs = createM1ToolRegistrations({
+    db: handle.raw,
+    repo,
+    referenceManager: manager,
+    bindings: [{ connectorInstanceId: markdownRow.id, connector: markdownPort }],
+    calendarBinding: { connectorInstanceId: calendarRow.id, connector: port },
+    calendarTargetStore: createInMemoryCalendarTargetStore(),
+    clock: { now: () => T0 + 100 },
+  });
+  const broker = createToolBroker({
+    db: handle.raw,
+    repo,
+    registrations: regs,
+  });
+  return { handle, repo, broker, port, markdownPort };
+}
+
+describe("C13 broker exposure / frozen context / cross-source", () => {
+  it("C13-01 advertises exactly one model-visible calendar.search descriptor; individual upstream tools are never exposed (C13-08 read-only)", async () => {
+    const { handle, broker } = await setupCalendarStack({
+      events: [fakeEvent()],
+    });
+    cleanups.push(() => closeKernelDatabase(handle));
+    const descriptor = broker
+      .describeTools()
+      .find((d) => d.name === "calendar.search");
+    expect(descriptor).toBeDefined();
+    // C13-08: read-only category only; the connector-internal upstream tools
+    // (`list-events`/`search-events`/`get-event`) never become descriptors.
+    expect(descriptor?.category).toBe("read");
+    const tools = buildAgentToolDefinitions(broker.describeTools());
+    expect(tools.filter((t) => t.name === "calendar.search")).toHaveLength(1);
+    expect(
+      tools.some((t) =>
+        /(^|\.)(list-events|search-events|get-event)(\.|$)/.test(t.name),
+      ),
+    ).toBe(false);
+    const featured = tools.find((t) => t.name === "calendar.search");
+    expect(featured?.parameters).toEqual({
+      type: "object",
+      properties: {
+        query: { type: "string", minLength: 1, maxLength: 256 },
+        start: { type: "string", minLength: 1, maxLength: 128 },
+        end: { type: "string", minLength: 1, maxLength: 128 },
+        limit: { type: "integer", minimum: 1, maximum: 20, default: 10 },
+        cursor: { type: "string", minLength: 1, maxLength: 2048 },
+      },
+      required: ["start", "end"],
+      additionalProperties: false,
+    });
+    // The advertised parameters stay closed and without a freshness field:
+    // the Calendar input contract has none.
+    const params = featured?.parameters as
+      | { properties: Record<string, unknown> }
+      | undefined;
+    expect(params?.properties?.freshness).toBeUndefined();
+  });
+
+  it("C13-02 budget reserves first; dedup reuse still reserves; an over-budget call is blocked before classify/validate/execute", async () => {
+    const { handle, repo, broker, port } = await setupCalendarStack({
+      events: [fakeEvent()],
+      budgets: { maxToolRequestsPerRun: 2 },
+    });
+    cleanups.push(() => closeKernelDatabase(handle));
+    const { runId } = newRunningRun(repo);
+    const first = await broker.invoke(
+      runId,
+      "calendar.search",
+      SEARCH_INPUT,
+      CTX,
+    );
+    expect(first.result.actualOutcome).toBe("succeeded");
+    const second = await broker.invoke(
+      runId,
+      "calendar.search",
+      SEARCH_INPUT,
+      CTX,
+    );
+    // Same canonical query fingerprint in the same Run: dedup reuse...
+    expect(second.result.actualOutcome).toBe("deduplicated");
+    expect(second.result.reusedFromCallId).not.toBeNull();
+    // ...but the reservation happens before dedup (2/2 budget used).
+    expect(port.searchCalls).toHaveLength(1);
+    // The third request is exhausted exactly at budget_reserve: blocked
+    // before classify/dedup/execute with the fixed metadata-only code.
+    const third = await broker.invoke(
+      runId,
+      "calendar.search",
+      SEARCH_INPUT,
+      CTX,
+    );
+    expect(third.result.actualOutcome).toBe("failed");
+    expect(third.result.errorCode).toBe("budget_exceeded");
+    expect(third.pipeline[0]).toBe("budget_reserve");
+    expect(port.searchCalls).toHaveLength(1);
+  });
+
+  it("C13-03 a stalled upstream call times out with the fixed audit code and materializes nothing", async () => {
+    const { handle, repo, broker, port } = await setupCalendarStack({
+      events: [fakeEvent()],
+    });
+    cleanups.push(() => closeKernelDatabase(handle));
+    // Dedup reuse stays transparent (covered above); here a fresh Run calls
+    // upstream once and stalls: the broker composes timeout and detaches.
+    port.search = (_input, callOptions) =>
+      new Promise<CalendarSearchPortResult>((resolve) => {
+        callOptions.signal?.addEventListener(
+          "abort",
+          () => {
+            resolve({ ok: false, code: "mcp_unavailable" });
+          },
+          { once: true },
+        );
+      });
+    const { runId } = newRunningRun(repo, T0 + 300);
+    const before = counts(handle.raw).snapshots;
+    const timed = await broker.invoke(runId, "calendar.search", SEARCH_INPUT, {
+      ...CTX,
+      timeoutMs: 25,
+    });
+    expect(timed.result.actualOutcome).toBe("timed_out");
+    expect(timed.result.errorCode).toBe("execution_timeout");
+    // No Snapshot/rN/reference/target ever materialized for the stalled call.
+    expect(counts(handle.raw).snapshots).toBe(before);
+    expect(counts(handle.raw).targets).toBe(0);
+    // The port resolved only on the composed abort (no dangling handler).
+    expect(port.searchCalls).toHaveLength(1);
+  });
+
+  it("C13-04/05 a Retry reuses the SAME frozen Turn zone+instant without recomputation; only explicit new-Run retries call upstream", async () => {
+    const { handle, repo, broker, port } = await setupCalendarStack({
+      events: [fakeEvent()],
+    });
+    cleanups.push(() => closeKernelDatabase(handle));
+    const { sessionId, runId } = newRunningRun(repo, T0, "Asia/Tokyo");
+    const first = await broker.invoke(
+      runId,
+      "calendar.search",
+      SEARCH_INPUT,
+      CTX,
+    );
+    expect(first.result.actualOutcome).toBe("succeeded");
+    // Settle attempt 1 so the session is not busy for the explicit retry.
+    repo.failRun(runId, "execution_failed", { now: T0 + 10 });
+    const turnId = repo.getRun(runId).turnId;
+    const frozen = repo.getTurn(turnId).frozenContext;
+    expect(frozen.temporal.timeZone).toBe("Asia/Tokyo");
+    expect(frozen.temporal.now).toBe(T0);
+    // Explicit Retry (§17.4): a NEW Run on the immutable Turn; no automatic
+    // logical resend happened inside the first run (exactly one upstream call).
+    expect(port.searchCalls).toHaveLength(1);
+    const retry = repo.postRetry(sessionId, turnId, {
+      key: randomUUID(),
+      now: T0 + 600_000,
+    });
+    expect(retry.body.run.attempt).toBe(2);
+    repo.startRun(retry.body.run.id, { now: T0 + 600_001 });
+    const second = await broker.invoke(
+      retry.body.run.id,
+      "calendar.search",
+      SEARCH_INPUT,
+      CTX,
+    );
+    expect(second.result.actualOutcome).toBe("succeeded");
+    // Both attempts consumed the IDENTICAL frozen temporal context; the
+    // immutable Turn row was never recomputed or rewritten.
+    expect(port.searchCalls).toHaveLength(2);
+    expect(port.searchCalls[0]).toEqual({
+      input: SEARCH_INPUT,
+      timeZone: "Asia/Tokyo",
+      now: T0,
+    });
+    expect(port.searchCalls[1]).toEqual(port.searchCalls[0]);
+    expect(repo.getTurn(turnId).frozenContext).toEqual(frozen);
+  });
+
+  it("C13-06/07 mixed Calendar/Markdown references share one session sequence; Calendar-origin related/open are stored-only; a failed call adds no stale evidence", async () => {
+    const { handle, repo, broker, port, markdownPort } = await setupMixedStack({
+      events: [fakeEvent()],
+      markdownFiles: {
+        "standup notes": {
+          title: "Standup notes",
+          text: "Notes for the calendar sync.",
+          revision: "rev-a",
+        },
+        "retro minutes": {
+          title: "Retro minutes",
+          text: "Minutes of the retro.",
+          revision: "rev-b",
+        },
+      },
+    });
+    cleanups.push(() => closeKernelDatabase(handle));
+    // One session, three runs, three sources interleaved.
+    const r1 = newRunningRun(repo);
+    const md1 = await broker.invoke(
+      r1.runId,
+      "markdown.search",
+      { query: "standup notes", limit: 10, freshness: "normal" },
+      CTX,
+    );
+    const r2 = newRunningRun(repo, T0 + 200);
+    const cal = await broker.invoke(
+      r2.runId,
+      "calendar.search",
+      SEARCH_INPUT,
+      CTX,
+    );
+    const r3 = newRunningRun(repo, T0 + 400);
+    const md2 = await broker.invoke(
+      r3.runId,
+      "markdown.search",
+      { query: "retro minutes", limit: 10, freshness: "normal" },
+      CTX,
+    );
+    // Mixed Calendar/Markdown references share ONE ordered session sequence.
+    const md1Hit = (md1.normalized as { hits: Array<{ ordinal: number }> })
+      .hits[0] as { ordinal: number };
+    const calHit = (
+      cal.normalized as {
+        hits: Array<{ referenceId: string; ordinal: number; status: string }>;
+      }
+    ).hits[0] as { referenceId: string; ordinal: number; status: string };
+    const md2Hit = (md2.normalized as { hits: Array<{ ordinal: number }> })
+      .hits[0] as { ordinal: number };
+    expect(md1Hit.ordinal).toBe(1);
+    expect(calHit.ordinal).toBe(2);
+    expect(md2Hit.ordinal).toBe(3);
+    expect(calHit.status).toBe("confirmed");
+    expect(calHit.referenceId).toMatch(/^[0-9a-f-]{36}$/);
+    const upstreamBefore =
+      port.searchCalls.length +
+      port.getCalls.length +
+      markdownPort.searchQueries.length +
+      markdownPort.readCalls.length;
+    // Stored-only open across the mixed set: Calendar-origin reference opens
+    // without any upstream read.
+    const opened = await broker.invoke(
+      r3.runId,
+      "reference.open",
+      { referenceId: calHit.referenceId },
+      CTX,
+    );
+    expect(opened.result.actualOutcome).toBe("succeeded");
+    expect((opened.normalized as { body: { text: string } }).body.text).toContain(
+      "Standup",
+    );
+    expect((opened.normalized as { canonicalKey: string }).canonicalKey).toMatch(
+      /^calendar:[0-9a-f]{64}$/,
+    );
+    // Calendar-origin reference.related: deterministic stored link-graph read
+    // (calendar snapshots carry no links and invent no Markdown rNs).
+    const related = await broker.invoke(
+      r3.runId,
+      "reference.related",
+      { referenceId: calHit.referenceId, limit: 20 },
+      CTX,
+    );
+    expect((related.normalized as { references: unknown[] }).references).toEqual(
+      [],
+    );
+    // Neither stored-only flow read upstream.
+    expect(
+      port.searchCalls.length +
+        port.getCalls.length +
+        markdownPort.searchQueries.length +
+        markdownPort.readCalls.length,
+    ).toBe(upstreamBefore);
+    // C13-07: a failed calendar call audits only the fixed code and never
+    // adds stale/uncited references or rewrites prior evidence.
+    const referencesBefore = counts(handle.raw).references;
+    port.search = async () => ({ ok: false, code: "calendar_upstream_error" });
+    const r4 = newRunningRun(repo, T0 + 800);
+    const failed = await broker.invoke(
+      r4.runId,
+      "calendar.search",
+      SEARCH_INPUT,
+      CTX,
+    );
+    expect(failed.result.actualOutcome).toBe("failed");
+    expect(failed.result.errorCode).toBe("calendar_upstream_error");
+    expect(counts(handle.raw).references).toBe(referencesBefore);
+    // Prior references remain openable exactly as before the failure.
+    const stillOpen = await broker.invoke(
+      r4.runId,
+      "reference.open",
+      { referenceId: calHit.referenceId },
+      CTX,
+    );
+    expect(stillOpen.result.actualOutcome).toBe("succeeded");
   });
 });
