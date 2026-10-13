@@ -228,6 +228,73 @@ describe("proposal approval idempotency lookup + draining replay (T2)", () => {
     }
   });
 
+  it("draining same-key different valid hash is 409 with no new rows; same-hash still replays the same 202", async () => {
+    const f = await makeApp();
+    try {
+      const { sessionId, proposalId, hash } = await seedProposal(f);
+      const path = `/api/sessions/${sessionId}/proposals/${proposalId}/approve`;
+      const key = randomUUID();
+      const first = await postJson(
+        f.app,
+        path,
+        { proposalHash: hash },
+        { "idempotency-key": key },
+      );
+      expect(first.status).toBe(202);
+      const firstBody = await first.json();
+
+      f.controls.markDraining();
+      const before = {
+        turns: count(f.raw, "turns"),
+        runs: count(f.raw, "runs"),
+        idem: count(f.raw, "api_idempotency"),
+        executions: count(f.raw, "action_executions"),
+        grants: count(f.raw, "action_execution_grants"),
+        events: count(f.raw, "run_events"),
+      };
+
+      // Same committed key, different schema-valid hash: permanent stored-key
+      // conflict replays 409, not the 503 drain rejection.
+      const mismatch = await postJson(
+        f.app,
+        path,
+        { proposalHash: "f".repeat(64) },
+        { "idempotency-key": key },
+      );
+      expect(mismatch.status).toBe(409);
+      expect(await mismatch.json()).toEqual({
+        error: {
+          code: "idempotency_key_reused",
+          message: "idempotency key already used",
+        },
+      });
+      expect(count(f.raw, "turns")).toBe(before.turns);
+      expect(count(f.raw, "runs")).toBe(before.runs);
+      expect(count(f.raw, "api_idempotency")).toBe(before.idem);
+      expect(count(f.raw, "action_executions")).toBe(before.executions);
+      expect(count(f.raw, "action_execution_grants")).toBe(before.grants);
+      expect(count(f.raw, "run_events")).toBe(before.events);
+
+      // Same key + same hash still replays the stored 202 verbatim.
+      const replay = await postJson(
+        f.app,
+        path,
+        { proposalHash: hash },
+        { "idempotency-key": key },
+      );
+      expect(replay.status).toBe(202);
+      expect(await replay.json()).toEqual(firstBody);
+      expect(count(f.raw, "turns")).toBe(before.turns);
+      expect(count(f.raw, "runs")).toBe(before.runs);
+      expect(count(f.raw, "api_idempotency")).toBe(before.idem);
+      expect(count(f.raw, "action_executions")).toBe(before.executions);
+      expect(count(f.raw, "action_execution_grants")).toBe(before.grants);
+      expect(count(f.raw, "run_events")).toBe(before.events);
+    } finally {
+      f.close();
+    }
+  });
+
   it("create/stage/approve -> lookup -> drain replay keeps one execution/grant and the same 202; fresh drain approval is 503 without persistence", async () => {
     const f = await makeApp();
     try {

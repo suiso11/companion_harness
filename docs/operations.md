@@ -1575,6 +1575,37 @@ returned 503 for a committed approval during drain. Ground truth per task
   `proposals` 5/5, root `tsc --noEmit` exit 0. No push/comment/resolve;
   review thread IDs are for the parent to publish.
 
+## PR20 T2 follow-up: draining stored-key mismatch replays 409 (2026-10-13)
+
+Follow-up to the T2 section above (independent review
+`ReviewReplayCompositionIdentity` on repair branch `99124aa`; ground truth
+per task, not rerun pre-fix): `tryReplayStoredApprove`
+(`apps/server/src/app.ts`) swallowed `IdempotencyConflictError` while
+DRAINING, so a committed key retried with a different schema-valid
+`proposalHash` returned 503 instead of the required 409
+`idempotency_key_reused`.
+
+- `apps/server/src/app.ts`: the draining approve replay now returns the
+  existing `mapDomainError` for a stored-key permanent conflict
+  (`IdempotencyConflictError` -> 409) and for session/proposal ownership
+  drift (`RepositoryNotFoundError` -> 404). A fresh key (lookup miss, kernel
+  never invoked, nothing persisted) and transient failures still fall
+  through to the 503 drain rejection. No new approval scope.
+- Regression: `apps/server/test/proposal_approval_replay.test.ts` gains a
+  draining-mismatch case over real SQLite/Hono (approve 202 ->
+  `markDraining` -> same-key different valid hash 409
+  `idempotency_key_reused` with turns/runs/idempotency/executions/grants/
+  events unchanged -> same-key same-hash replays the identical 202 with
+  counts still unchanged).
+- Actual-runtime proof: standalone Hono/SQLite smoke
+  (`.review-plan-work/smoke-replay-shutdown.ts` via repo tsx, removed after
+  this note; review JSON kept) 12/12 checks, incl. draining mismatch 409
+  with row counts `turns=2 runs=2 api_idempotency=3 action_executions=1
+  action_execution_grants=1 run_events=6` unchanged and the identical-202
+  replay. Focused `proposal_approval_replay` 3/3 +
+  `action_composition` 10/10 green, owned `biome check` on all touched
+  files clean. No push/resolve; thread IDs are for the parent to publish.
+
 ## PR20 T5 calendar wrong-event get rejected, refresh closed (2026-10-13)
 
 Fixes PR20 review `PRRC_kwDOUNdW7s79uYS6` (thread

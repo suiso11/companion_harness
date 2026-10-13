@@ -633,6 +633,13 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
    * tryReplayStoredMessage but scoped to `proposal:{proposalId}:approve`
    * via repo.approveProposal (which additionally enforces session/proposal
    * ownership on the stored body; drift maps to null → 503).
+   *
+   * A stored key is authoritative: a permanent stored-key conflict (same
+   * committed key, different request hash) replays as the existing 409
+   * `idempotency_key_reused` via mapDomainError, and a session/proposal
+   * ownership drift replays as the existing 404. Only a fresh key (lookup
+   * miss, kernel never invoked, nothing persisted) or a transient failure
+   * falls through to null (→ 503).
    */
   function tryReplayStoredApprove(
     c: Context,
@@ -673,7 +680,13 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         durationMs: Math.max(now() - started, 0),
       });
       return c.json(body, out.status as 202);
-    } catch {
+    } catch (error) {
+      if (
+        error instanceof IdempotencyConflictError ||
+        error instanceof RepositoryNotFoundError
+      ) {
+        return mapDomainError(c, error);
+      }
       return null;
     }
   }
