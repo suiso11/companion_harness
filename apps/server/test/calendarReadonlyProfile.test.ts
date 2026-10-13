@@ -292,7 +292,10 @@ describe("bootstrap normal composition with the pinned profile", () => {
   });
 
   it("freezes a missing profile against a later mutation (still incomplete opt-in)", async () => {
-    const env = { ...tempEnv(), COMPANION_CALENDAR_JSON: profileHint() };
+    const env: NodeJS.ProcessEnv = {
+      ...tempEnv(),
+      COMPANION_CALENDAR_JSON: profileHint(),
+    };
     const pending = startServer({ env, drainMs: 50 });
     // Mutate the SAME env object synchronously after the call: the frozen
     // startup decision must not observe it.
@@ -301,7 +304,7 @@ describe("bootstrap normal composition with the pinned profile", () => {
   });
 
   it("freezes a present profile against later removal (retains the decision)", async () => {
-    const env = {
+    const env: NodeJS.ProcessEnv = {
       ...tempEnv(),
       COMPANION_CALENDAR_JSON: profileHint(),
       [CALENDAR_PROFILE_ENV]: "google-readonly",
