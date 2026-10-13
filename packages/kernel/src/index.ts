@@ -274,6 +274,16 @@ export type {
 } from "./repository.js";
 export { createKernelRepository } from "./repository.js";
 export {
+  createActionProposalStager,
+} from "./action_proposals.js";
+export type {
+  ActionProposalEventSink,
+  ActionProposalStager,
+  ActionProposalStagerOptions,
+  CommittedProposal,
+  StagedProposedContent,
+} from "./action_proposals.js";
+export {
   actionExecutions,
   actionExecutionGrants,
   actionProposals,
