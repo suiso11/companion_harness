@@ -902,23 +902,42 @@ or complete activate config):
      `@cocal/google-calendar-mcp@3.0.0-readonly.2`, `package-lock.json`
      SHA-256
      `63261d25992ee9c97136a60bbf4fe52a5485cadea28b34d6b8b6c685f38bd533`.
+     Run from the Companion checkout root (the directory containing
+     `pnpm-workspace.yaml`); record its absolute path FIRST so step 5 can
+     return to it. Requires the already-available exact engine `node
+     v24.12.0` (see Source run above; no installer is fetched here). The
+     whole clone/checkout/pin/install/build sequence runs in its OWN
+     subshell with `set -eu`, so a pasted `test` failure aborts BEFORE
+     `npm ci` / `npm run build` even in an interactive paste, without
+     leaking `set -e` into the user's interactive shell options, and the
+     outer Companion cwd is preserved (there is deliberately no bare
+     `cd "$FORK_DIR"` outside the subshell):
      ```bash
+     COMPANION_DIR="$PWD"  # absolute Companion checkout root (contains pnpm-workspace.yaml); keep for step 5
      FORK_DIR="$HOME/gcal-readonly"
      PIN_COMMIT="6939311fd3eae9846648e0a175e304c9500f578e"
      PIN_TREE="f01b5a7b608c4091906a52c0784b828c35963de9"
+     PIN_PKG="@cocal/google-calendar-mcp@3.0.0-readonly.2"
      PIN_LOCK="63261d25992ee9c97136a60bbf4fe52a5485cadea28b34d6b8b6c685f38bd533"
-     git clone https://github.com/suiso11/google-calendar-mcp.git "$FORK_DIR"
-     cd "$FORK_DIR"
-     git fetch origin "$PIN_COMMIT"
-     git checkout "$PIN_COMMIT"
-     test "$(git rev-parse HEAD)" = "$PIN_COMMIT"
-     test "$(git rev-parse 'HEAD^{tree}')" = "$PIN_TREE"
-     test "$(sha256sum package-lock.json | cut -d' ' -f1)" = "$PIN_LOCK"
-     npm ci --ignore-scripts
-     npm run build
-     node build/index.js version
+     test "$(node -p "process.version")" = "v24.12.0"
+     (
+       set -eu
+       git clone https://github.com/suiso11/google-calendar-mcp.git "$FORK_DIR"
+       cd "$FORK_DIR"
+       git fetch origin "$PIN_COMMIT"
+       git checkout "$PIN_COMMIT"
+       test "$(git rev-parse HEAD)" = "$PIN_COMMIT"
+       test "$(git rev-parse 'HEAD^{tree}')" = "$PIN_TREE"
+       test "$(node -p "require('./package.json').name + '@' + require('./package.json').version")" = "$PIN_PKG"
+       test "$(node -e "const fs=require('node:fs');const crypto=require('node:crypto');process.stdout.write(crypto.createHash('sha256').update(fs.readFileSync('package-lock.json')).digest('hex'))")" = "$PIN_LOCK"
+       npm ci --ignore-scripts
+       npm run build
+       node build/index.js version
+     )
      ```
-     The last line prints `Google Calendar MCP Server v3.0.0-readonly.2`
+     The lock digest above uses the required Node `crypto` (portable
+     Linux/macOS; no `sha256sum`/`Get-FileHash` needed). The last line
+     prints `Google Calendar MCP Server v3.0.0-readonly.2`
      (wire identity `{name:"google-calendar", version:"3.0.0-readonly.2"}`:
      the name is hardcoded in fork `src/server.ts`, the version is read from
      `package.json` at runtime at the pinned commit).
@@ -966,8 +985,11 @@ or complete activate config):
      implicit allowlist plus the three explicit `GOOGLE_*` names, and the
      three full pinned live-wire hashes (SDK wire bytes, NOT the
      registry-direct `a065/012e/913…` diagnostic bytes):
-     ```bash
-     FORK_DIR="$HOME/gcal-readonly"   # verified checkout from step 2
+      ```bash
+      # Absolute Companion checkout root recorded in step 2 (if this is a
+      # new shell, set it to that path first; it contains pnpm-workspace.yaml).
+      # Example: COMPANION_DIR="$HOME/companion_harness"
+      FORK_DIR="$HOME/gcal-readonly"   # verified checkout from step 2
      ACCT="normal"                    # local account id from step 4
      cat > /tmp/gen-calendar-json.mjs <<'EOF'
      import os from "node:os";
@@ -1000,10 +1022,10 @@ or complete activate config):
      process.stdout.write(JSON.stringify(doc));
      EOF
      export COMPANION_CALENDAR_PROFILE=google-readonly
-     export COMPANION_CALENDAR_JSON="$(node /tmp/gen-calendar-json.mjs "$FORK_DIR" "$ACCT")"
-     export GOOGLE_ACCOUNT_MODE="$ACCT"
-     pnpm start
-     ```
+      export COMPANION_CALENDAR_JSON="$(node /tmp/gen-calendar-json.mjs "$FORK_DIR" "$ACCT")"
+      export GOOGLE_ACCOUNT_MODE="$ACCT"
+      cd "$COMPANION_DIR" && pnpm start  # launches Companion (root pnpm start contract), NOT the fork; never run pnpm start inside $FORK_DIR
+      ```
      The SDK implicit names above are the live SDK 1.30.0
      `DEFAULT_INHERITED_ENV_VARS` (`dist/esm/client/stdio.js`: POSIX 6 /
      win32 12; `shell:false` at the spawn call site) — no other inherited
@@ -1011,12 +1033,13 @@ or complete activate config):
      because they are both exported here AND allowlisted there (strict
      allowlist: anything else is never passed to the child). Missing auth
      surfaces as the fixed `mcp_unavailable` per call (never fake success);
-     shutdown stays bounded and clean. PowerShell differences (not a full
-     Windows run): `export X="..."` is `$env:X="..."`, `$(...)` needs
-     `Get-FileHash -Algorithm SHA256` instead of `sha256sum`, and there is no
-     `chmod` guarantee (rely on the per-user profile ACL); the node generator
-     itself is cross-platform via `os.platform()`. Manual Windows 11 is still
-     pending.
+      shutdown stays bounded and clean. PowerShell differences (not a full
+      Windows run): `export X="..."` is `$env:X="..."`; the pin digest and
+      package-identity checks are the same portable `node` one-liners above
+      (no `sha256sum` / `Get-FileHash` needed), and there is no
+      `chmod` guarantee (rely on the per-user profile ACL); the node generator
+      itself is cross-platform via `os.platform()`. Manual Windows 11 is still
+      pending.
   Credential-free runtime proof (no OAuth, no browser, no live Google):
   `docs/evidence/calendar-readonly-profile/smoke-profile.result.json`
   (22/22: pin reality, auth-gate source check, real SDK initialize/tools-list
@@ -1027,8 +1050,8 @@ or complete activate config):
   `docs/evidence/calendar-readonly-profile/cli-profile.result.json` (actual
   normal-CLI `pnpm start` acceptance with missing credentials). What those
   artifacts prove is the RUNTIME side only — wire identity, the three
-  live-wire hashes, and behavior. They do NOT re-verify the source SHA: the
-  full commit/tree/lock verification in step 2 above is the prerequisite that
+   live-wire hashes, and behavior. They do NOT re-verify the source SHA: the
+   full commit/tree/package/lock verification in step 2 above is the prerequisite that
   must pass BEFORE `npm ci --ignore-scripts` + `npm run build`, and the
   runtime proof assumes that prerequisite was met.
 

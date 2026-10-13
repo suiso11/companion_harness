@@ -1398,7 +1398,7 @@ copy-pastable 準備・認証・起動手順 (Desktop-app クライアント、�
 JSON 生成スクリプト) と credential-free 実行証跡は docs/operations.md
 (C14 profile) を参照してください。実行証跡が示すのは runtime 側
 (wire identity + 3 live-wire hash + 挙動) のみであり、source SHA の再検証では
-ありません: `npm ci` 前の full commit/tree/lock 検証が前提条件です。
+ありません: `npm ci` 前の full commit/tree/package/lock 検証が前提条件です。
 
 ---
 
