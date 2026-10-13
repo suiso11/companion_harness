@@ -57,11 +57,16 @@
     "limitations": "no OAuth/TokenManager/account index/CLI; no live Google HTTP; no GH/Google credentials in env; InMemory SDK transport only; fixture accounts + inert provider via ONLY BaseToolHandler.getCalendar seam",
     "liveClaims": "none (no OAuth, no live Google call, no HTTP status, no release claim)",
     "sha256": {
-      "candidate-3.0.0-readonly.2.result.json": "048d45ae500df0627765f3d3a75a5445118260a8fded04fa5adc591d7d6d809a",
-      "consumer-smoke-3.0.0-readonly.2.result.json": "85fce643a4af5779cc6e22e7a93655d7681e6e67318a697ea5abb9f1831e7264",
+      "candidate-3.0.0-readonly.2.result.json": "10696aae8be53131e5dd5a8c84f8dbcd18881bcf7b8f4701983c871e6a229d2c",
+      "consumer-smoke-3.0.0-readonly.2.result.json": "730b6f215e75da213be3f76b80e9fe9f443065dbd43f7193ba7b5bb5d5fd7329",
       "probe-consumer-smoke.source.mts": "b7f1449199ed7ba8a508ef0b9a193902d3f6b6b64ae4bb6b391aec9ec337f159",
       "probe-tools-list.source.mts": "58f0217bf4d12c1f54bb63302e7169a0c51897321019c8aa89bea9c6fcdd15cb"
-    }
+    },
+    "rawResultSha256": {
+      "candidate-3.0.0-readonly.2.result.json": "048d45ae500df0627765f3d3a75a5445118260a8fded04fa5adc591d7d6d809a",
+      "consumer-smoke-3.0.0-readonly.2.result.json": "85fce643a4af5779cc6e22e7a93655d7681e6e67318a697ea5abb9f1831e7264"
+    },
+    "representation": "formatting-only: Biome format applied to the 2 result JSONs after manual edits; semantic parsed JSON unchanged (throwaway canonical-JSON assert matched before/after); rawResultSha256 preserves original RAW capture bytes, sha256 is the canonical published bytes"
   },
   "formalGates": {
     "C08": "HOLD / NOT ADOPTED (unchanged)",

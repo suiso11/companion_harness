@@ -8,11 +8,7 @@
       "name": "google-calendar",
       "version": "3.0.0-readonly.2"
     },
-    "toolNames": [
-      "get-event",
-      "list-events",
-      "search-events"
-    ]
+    "toolNames": ["get-event", "list-events", "search-events"]
   },
   "schemaHashes": {
     "registryDirect": {

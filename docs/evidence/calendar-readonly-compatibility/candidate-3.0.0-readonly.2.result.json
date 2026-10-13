@@ -1,1 +1,94 @@
-{"authScope":"calendar.events.readonly ONLY (src/auth/scopes.ts, unchanged from step2; static fact, not re-probed)","branch":"feat/calendar-readonly-compatibility (parent); fork branch feat/companion-readonly-compatibility","candidate":{"commit":"6939311fd3eae9846648e0a175e304c9500f578e","lockDigestSha256":"63261d25992ee9c97136a60bbf4fe52a5485cadea28b34d6b8b6c685f38bd533","package":"@cocal/google-calendar-mcp","repo":"https://github.com/suiso11/google-calendar-mcp","tree":"f01b5a7b608c4091906a52c0784b828c35963de9","version":"3.0.0-readonly.2"},"cutoverCommits":["f03b03b Accept fractional ISO datetimes; preserve explicit-offset bounds byte-for-byte","80987bf fix(readonly): cut events surface to exact-ID list/search/get with zero MCP metadata","6939311 chore(release): 3.0.0-readonly.2 events-only breaking cutover identity"],"diffStatVs97a3dc3":"25 files, 738 insertions, 1231 deletions","forkFilesChangedVs97a3dc3":["AGENTS.md","CHANGELOG.md","README.md","package-lock.json","package.json","src/config/TransportConfig.ts","src/handlers/core/GetEventHandler.ts","src/handlers/core/ListEventsHandler.ts","src/handlers/core/SearchEventsHandler.ts","src/index.ts","src/tests/unit/config/tool-filtering.test.ts","src/tests/unit/handlers/CalendarNameResolution.test.ts (deleted)","src/tests/unit/handlers/GetEventHandler.test.ts","src/tests/unit/handlers/ListCalendarsHandler.test.ts (deleted)","src/tests/unit/handlers/ListEventsHandler.test.ts","src/tests/unit/handlers/SearchEventsHandler.test.ts","src/tests/unit/handlers/datetime-utils.test.ts","src/tests/unit/handlers/list-events-registry.test.ts","src/tests/unit/handlers/search-events-registry.test.ts","src/tests/unit/index.test.ts (deleted)","src/tests/unit/schemas/schema-compatibility.test.ts","src/tests/unit/schemas/tool-registration.test.ts","src/tests/unit/tools/readonly-registry.test.ts","src/tools/registry.ts","src/utils/datetime.ts"],"formalGates":{"C08":"HOLD / NOT ADOPTED (unchanged)","C10-08":"UNRESOLVED production mapping (unchanged)","C11-01":"BLOCKED positive tombstone (unchanged)"},"liveClaims":"none (no OAuth, no live Google call, no production binding/profile/config activation)","lockTreeVs97a3dc3":{"differingPackageKeys":1,"differingKeys":[""],"method":"read-only JSON compare of package-lock.json vs git show 97a3dc3:package-lock.json; root version key excluded from tree comparison","packagesCount":277,"pkgKeysEqual":true,"result":"dependency tree UNCHANGED; sole diff is root package version 3.0.0-readonly.1 -> 3.0.0-readonly.2","rootVersion":{"new":"3.0.0-readonly.2","old":"3.0.0-readonly.1"}},"probe":{"credentialFree":true,"liveNetwork":0,"method":"minimal tools/list identity probe ONLY (ToolRegistry.getToolsWithSchemas + canonical key-sort SHA-256 per connector-mcp §17.3); bundled with esbuild --packages=external, run offline from fork dir, bundle deleted after; no transport/handlers/providers executed","result":"exactly 3 tools; list-calendars absent (no alias/shim)"},"probeDate":"2026-10-13","retainedRuntimeTestBuildLint":"parent final gate per committed docs/operations.md: pnpm test 103 files/1251 passed exit 0; root + e2e typecheck exit 0; whole-repo lint 216 files 0 errors 1 pre-existing info (52d61ba, NOT rerun here). Fork suite/build/lint counts: NO retained logs found; no numbers claimed, no rerun performed per scope.","runtimeObserved":{"node":"24.12.0"},"schemaHashes":{"get-event":"913e45efc06b9f7cce043626bcdb0f600f5085b4849120a0ad60765cbffa8612","list-events":"a06527743447147d806605104f86250ace87cb157670fdb63eb6507d1d970978","search-events":"012e190732a5b6fe09e1ec3574e81099513bdd7d490c4b874b43398085ee0cf8"},"scopeConflict":{"closedByCutover":["list-calendars removed from MCP surface; zero calendarList/calendars I/O and zero name resolution on MCP path (exact calendarId forwarded verbatim)","account selection exactly one account (explicit normalized ID or sole key); ambiguity/unknown rejected before provider I/O; no merge, no fan-out","fractional ISO datetimes accepted; explicit Z/offset bounds preserved byte-for-byte (closes whole-second-regex gap)"],"stillNotCompatible":["candidate auth scope still ONLY calendar.events.readonly; calendarList metadata stays OUT-OF-BAND only (provisioned via standalone auth command/local page, no MCP tool) per fork AGENTS.md","no production adoption/binding/profile/config activation; C10-08 mapping UNRESOLVED; C11-01 BLOCKED (unchanged)"]},"sourceReviewed":{"accountSelection":"exactly one account; no multi-account merge, no multi-calendar fan-out (registry + handlers diff)","calendarId":"opaque, forwarded verbatim; names not resolved","eventsReadonly":"unchanged (READ_ONLY_ANNOTATIONS on all 3 tools; no write/freebusy/color/time/respond tools)","metadataIO":"none on MCP path (no calendarList/calendars calls; timezone-naive bounds use explicit timeZone else deterministic UTC)","surface":"exactly list-events, search-events, get-event (registry.ts + ToolRegistry diff 97a3dc3..HEAD)","sustained":"fractional preserve via (\\.\\d+)? in ISO regex + fraction-verbatim fallback (registry.ts + utils/datetime.ts diff)"},"toolNames":["list-events","search-events","get-event"]}
+{
+  "authScope": "calendar.events.readonly ONLY (src/auth/scopes.ts, unchanged from step2; static fact, not re-probed)",
+  "branch": "feat/calendar-readonly-compatibility (parent); fork branch feat/companion-readonly-compatibility",
+  "candidate": {
+    "commit": "6939311fd3eae9846648e0a175e304c9500f578e",
+    "lockDigestSha256": "63261d25992ee9c97136a60bbf4fe52a5485cadea28b34d6b8b6c685f38bd533",
+    "package": "@cocal/google-calendar-mcp",
+    "repo": "https://github.com/suiso11/google-calendar-mcp",
+    "tree": "f01b5a7b608c4091906a52c0784b828c35963de9",
+    "version": "3.0.0-readonly.2"
+  },
+  "cutoverCommits": [
+    "f03b03b Accept fractional ISO datetimes; preserve explicit-offset bounds byte-for-byte",
+    "80987bf fix(readonly): cut events surface to exact-ID list/search/get with zero MCP metadata",
+    "6939311 chore(release): 3.0.0-readonly.2 events-only breaking cutover identity"
+  ],
+  "diffStatVs97a3dc3": "25 files, 738 insertions, 1231 deletions",
+  "forkFilesChangedVs97a3dc3": [
+    "AGENTS.md",
+    "CHANGELOG.md",
+    "README.md",
+    "package-lock.json",
+    "package.json",
+    "src/config/TransportConfig.ts",
+    "src/handlers/core/GetEventHandler.ts",
+    "src/handlers/core/ListEventsHandler.ts",
+    "src/handlers/core/SearchEventsHandler.ts",
+    "src/index.ts",
+    "src/tests/unit/config/tool-filtering.test.ts",
+    "src/tests/unit/handlers/CalendarNameResolution.test.ts (deleted)",
+    "src/tests/unit/handlers/GetEventHandler.test.ts",
+    "src/tests/unit/handlers/ListCalendarsHandler.test.ts (deleted)",
+    "src/tests/unit/handlers/ListEventsHandler.test.ts",
+    "src/tests/unit/handlers/SearchEventsHandler.test.ts",
+    "src/tests/unit/handlers/datetime-utils.test.ts",
+    "src/tests/unit/handlers/list-events-registry.test.ts",
+    "src/tests/unit/handlers/search-events-registry.test.ts",
+    "src/tests/unit/index.test.ts (deleted)",
+    "src/tests/unit/schemas/schema-compatibility.test.ts",
+    "src/tests/unit/schemas/tool-registration.test.ts",
+    "src/tests/unit/tools/readonly-registry.test.ts",
+    "src/tools/registry.ts",
+    "src/utils/datetime.ts"
+  ],
+  "formalGates": {
+    "C08": "HOLD / NOT ADOPTED (unchanged)",
+    "C10-08": "UNRESOLVED production mapping (unchanged)",
+    "C11-01": "BLOCKED positive tombstone (unchanged)"
+  },
+  "liveClaims": "none (no OAuth, no live Google call, no production binding/profile/config activation)",
+  "lockTreeVs97a3dc3": {
+    "differingPackageKeys": 1,
+    "differingKeys": [""],
+    "method": "read-only JSON compare of package-lock.json vs git show 97a3dc3:package-lock.json; root version key excluded from tree comparison",
+    "packagesCount": 277,
+    "pkgKeysEqual": true,
+    "result": "dependency tree UNCHANGED; sole diff is root package version 3.0.0-readonly.1 -> 3.0.0-readonly.2",
+    "rootVersion": { "new": "3.0.0-readonly.2", "old": "3.0.0-readonly.1" }
+  },
+  "probe": {
+    "credentialFree": true,
+    "liveNetwork": 0,
+    "method": "minimal tools/list identity probe ONLY (ToolRegistry.getToolsWithSchemas + canonical key-sort SHA-256 per connector-mcp §17.3); bundled with esbuild --packages=external, run offline from fork dir, bundle deleted after; no transport/handlers/providers executed",
+    "result": "exactly 3 tools; list-calendars absent (no alias/shim)"
+  },
+  "probeDate": "2026-10-13",
+  "retainedRuntimeTestBuildLint": "parent final gate per committed docs/operations.md: pnpm test 103 files/1251 passed exit 0; root + e2e typecheck exit 0; whole-repo lint 216 files 0 errors 1 pre-existing info (52d61ba, NOT rerun here). Fork suite/build/lint counts: NO retained logs found; no numbers claimed, no rerun performed per scope.",
+  "runtimeObserved": { "node": "24.12.0" },
+  "schemaHashes": {
+    "get-event": "913e45efc06b9f7cce043626bcdb0f600f5085b4849120a0ad60765cbffa8612",
+    "list-events": "a06527743447147d806605104f86250ace87cb157670fdb63eb6507d1d970978",
+    "search-events": "012e190732a5b6fe09e1ec3574e81099513bdd7d490c4b874b43398085ee0cf8"
+  },
+  "scopeConflict": {
+    "closedByCutover": [
+      "list-calendars removed from MCP surface; zero calendarList/calendars I/O and zero name resolution on MCP path (exact calendarId forwarded verbatim)",
+      "account selection exactly one account (explicit normalized ID or sole key); ambiguity/unknown rejected before provider I/O; no merge, no fan-out",
+      "fractional ISO datetimes accepted; explicit Z/offset bounds preserved byte-for-byte (closes whole-second-regex gap)"
+    ],
+    "stillNotCompatible": [
+      "candidate auth scope still ONLY calendar.events.readonly; calendarList metadata stays OUT-OF-BAND only (provisioned via standalone auth command/local page, no MCP tool) per fork AGENTS.md",
+      "no production adoption/binding/profile/config activation; C10-08 mapping UNRESOLVED; C11-01 BLOCKED (unchanged)"
+    ]
+  },
+  "sourceReviewed": {
+    "accountSelection": "exactly one account; no multi-account merge, no multi-calendar fan-out (registry + handlers diff)",
+    "calendarId": "opaque, forwarded verbatim; names not resolved",
+    "eventsReadonly": "unchanged (READ_ONLY_ANNOTATIONS on all 3 tools; no write/freebusy/color/time/respond tools)",
+    "metadataIO": "none on MCP path (no calendarList/calendars calls; timezone-naive bounds use explicit timeZone else deterministic UTC)",
+    "surface": "exactly list-events, search-events, get-event (registry.ts + ToolRegistry diff 97a3dc3..HEAD)",
+    "sustained": "fractional preserve via (\\.\\d+)? in ISO regex + fraction-verbatim fallback (registry.ts + utils/datetime.ts diff)"
+  },
+  "toolNames": ["list-events", "search-events", "get-event"]
+}
