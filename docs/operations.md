@@ -876,37 +876,161 @@ or complete activate config):
   pinned bindings (a substituted version/name, an HTTP transport, an added
   `list-calendars`/write binding, a dropped binding, or a rehashed binding
   all fail; an arbitrary user binding/hash can never grant read or write).
-- Explicit preparation / auth / run (user-operated, OUTSIDE the repo):
-  1. Provision the Google OAuth client OUTSIDE the repo (user-private app
-     dir, never committed): download `gcp-oauth.keys.json` and point
-     `GOOGLE_OAUTH_CREDENTIALS` at it. Tokens live OUTSIDE the repo at
-     `GOOGLE_CALENDAR_MCP_READONLY_TOKEN_PATH` (or
-     `~/.config/google-calendar-mcp-readonly/tokens.json`).
-  2. Build the exact candidate from a verified checkout
-     (`git fetch origin 6939311… && git checkout 6939311…`, verify
-     `git rev-parse HEAD` / `HEAD^{tree}` and the `package-lock.json`
-     SHA-256 against the pin above, then `npm ci --ignore-scripts` and
-     `npm run build`), and run the ONE interactive consent step with the
-     fork's own auth CLI: `node <fork>/build/index.js auth [account-id]`
-     (loopback `http://localhost:<3500-3505>/oauth2callback`, browser
-     consent on the user's machine). This worker never launches a browser,
-     OAuth consent, or a real Calendar RPC.
-  3. Run the normal composition with the verified build on stdio:
-     `COMPANION_CALENDAR_PROFILE=google-readonly COMPANION_CALENDAR_JSON='{…}`
-     `pnpm start`, where the hint's `transport.command` points at the
-     verified `node <fork>/build/index.js --enable-tools
-     list-events,search-events,get-event` and `envAllowlist` covers the SDK
-     implicit names plus `GOOGLE_OAUTH_CREDENTIALS`,
-     `GOOGLE_CALENDAR_MCP_READONLY_TOKEN_PATH`, `GOOGLE_ACCOUNT_MODE`.
-     Missing auth surfaces as the fixed `mcp_unavailable` per call (never
-     fake success); shutdown stays bounded and clean.
+- Explicit preparation / auth / run (all USER-OPERATED, outside the repo;
+  this worker never launches a browser, OAuth consent, or a real Calendar
+  RPC; no secret is read or pasted anywhere below):
+  1. Google Cloud prerequisites (user's own project, outside the repo):
+     create a project and enable the Google Calendar API (official guide
+     `https://developers.google.com/workspace/guides/create-project`);
+     configure the OAuth consent screen as user type External with publishing
+     status Testing and add your Google account as a test user (official
+     guide `https://developers.google.com/workspace/guides/configure-oauth-consent`;
+     Testing-mode grants expire and need re-consent — expected, unrelated to
+     the readonly scope); then create an OAuth client ID of application type
+     "Desktop app" and download its JSON (official guide
+     `https://developers.google.com/workspace/guides/create-credentials#oauth-client-id`).
+     The download carries a top-level "installed" object. A "Web application"
+     download (top-level "web") is UNSUPPORTED: the pinned fork's
+     `loadCredentialsFromFile` (`src/auth/client.ts` at the commit below)
+     accepts ONLY the "installed" shape (or direct `client_id`/`client_secret`
+     fields) and rejects anything else with `Invalid credentials file format`.
+  2. Fork checkout, verification, then build (exact pin form; verification
+     runs BEFORE any install/build):
+     repo `https://github.com/suiso11/google-calendar-mcp`, commit
+     `6939311fd3eae9846648e0a175e304c9500f578e`, tree
+     `f01b5a7b608c4091906a52c0784b828c35963de9`, package
+     `@cocal/google-calendar-mcp@3.0.0-readonly.2`, `package-lock.json`
+     SHA-256
+     `63261d25992ee9c97136a60bbf4fe52a5485cadea28b34d6b8b6c685f38bd533`.
+     ```bash
+     FORK_DIR="$HOME/gcal-readonly"
+     PIN_COMMIT="6939311fd3eae9846648e0a175e304c9500f578e"
+     PIN_TREE="f01b5a7b608c4091906a52c0784b828c35963de9"
+     PIN_LOCK="63261d25992ee9c97136a60bbf4fe52a5485cadea28b34d6b8b6c685f38bd533"
+     git clone https://github.com/suiso11/google-calendar-mcp.git "$FORK_DIR"
+     cd "$FORK_DIR"
+     git fetch origin "$PIN_COMMIT"
+     git checkout "$PIN_COMMIT"
+     test "$(git rev-parse HEAD)" = "$PIN_COMMIT"
+     test "$(git rev-parse 'HEAD^{tree}')" = "$PIN_TREE"
+     test "$(sha256sum package-lock.json | cut -d' ' -f1)" = "$PIN_LOCK"
+     npm ci --ignore-scripts
+     npm run build
+     node build/index.js version
+     ```
+     The last line prints `Google Calendar MCP Server v3.0.0-readonly.2`
+     (wire identity `{name:"google-calendar", version:"3.0.0-readonly.2"}`:
+     the name is hardcoded in fork `src/server.ts`, the version is read from
+     `package.json` at runtime at the pinned commit).
+  3. Secrets (user-private dir, OUTSIDE the repo, never committed):
+     ```bash
+     PRIV="$HOME/.config/companion-private"
+     mkdir -p "$PRIV"
+     chmod 700 "$PRIV"
+     cp /path/to/downloaded-desktop-client.json "$PRIV/gcp-oauth.keys.json"
+     chmod 600 "$PRIV/gcp-oauth.keys.json"
+     export GOOGLE_OAUTH_CREDENTIALS="$PRIV/gcp-oauth.keys.json"
+     export GOOGLE_CALENDAR_MCP_READONLY_TOKEN_PATH="$HOME/.config/google-calendar-mcp-readonly/tokens.json"
+     ```
+     Token-file resolution at the pin (`src/auth/paths.js`): the
+     `GOOGLE_CALENDAR_MCP_READONLY_TOKEN_PATH` env path first, else
+     `XDG_CONFIG_HOME`, else `~/.config/google-calendar-mcp-readonly/tokens.json`
+     (mode `0600`, written by the fork on consent). The broad-scope
+     `GOOGLE_CALENDAR_MCP_TOKEN_PATH` is intentionally IGNORED there, a legacy
+     single-account token file is REJECTED, and a stored grant whose scope is
+     not exactly `https://www.googleapis.com/auth/calendar.events.readonly`
+     is rejected (`src/auth/scopes.ts` `READONLY_CALENDAR_SCOPES`,
+     `src/auth/tokenManager.ts`): an old broader token can never be reused —
+     fresh readonly consent is required.
+  4. Consent (USER-INTERACTIVE on the user's machine; NEVER run by a worker):
+     ```bash
+     node "$FORK_DIR/build/index.js" auth
+     ```
+     consent for the default local account (mode `normal`), or
+     `node "$FORK_DIR/build/index.js" auth work` for a named LOCAL account id
+     (lowercase 1-64 `[a-z0-9_-]`, e.g. `work` — a local key, NOT a Google
+     account name or email; `src/auth/paths.js`
+     `getAccountMode`/`validateAccountId` at the pin). The fork serves the
+     loopback callback `http://localhost:<3500-3505>/oauth2callback`
+     (`src/auth/server.ts` at the pin) and opens the browser; consent shows
+     ONLY the `calendar.events.readonly` scope.
+  5. Normal run (POSIX snippet below is fully runnable on Linux/macOS;
+     PowerShell differences are listed after it; a manual Windows 11 run is
+     still pending). `calendarId` is the real user choice (`primary` works);
+     `account` is the LOCAL account id used at consent step 4 (`normal` when
+     `auth` ran without an id), or omit `account` for the default. The hint
+     JSON is GENERATED (never hand-edited): the absolute node command ONLY
+     (`process.execPath`; the SDK spawns with `shell:false`, so a shell
+     command line is never valid), the args array with the absolute fork entry
+     plus the explicit `--enable-tools` comma list, the OS-platform SDK
+     implicit allowlist plus the three explicit `GOOGLE_*` names, and the
+     three full pinned live-wire hashes (SDK wire bytes, NOT the
+     registry-direct `a065/012e/913…` diagnostic bytes):
+     ```bash
+     FORK_DIR="$HOME/gcal-readonly"   # verified checkout from step 2
+     ACCT="normal"                    # local account id from step 4
+     cat > /tmp/gen-calendar-json.mjs <<'EOF'
+     import os from "node:os";
+     import path from "node:path";
+     const forkDir = process.argv[2];
+     const account = process.argv[3] === "" ? undefined : process.argv[3];
+     const posixBase = ["HOME", "LOGNAME", "PATH", "SHELL", "TERM", "USER"];
+     const winBase = ["APPDATA", "HOMEDRIVE", "HOMEPATH", "LOCALAPPDATA", "PATH", "PROCESSOR_ARCHITECTURE", "SYSTEMDRIVE", "SYSTEMROOT", "TEMP", "USERNAME", "USERPROFILE", "PROGRAMFILES"];
+     const base = os.platform() === "win32" ? winBase : posixBase;
+     const doc = {
+       selection: account === undefined ? { calendarId: "primary" } : { calendarId: "primary", account },
+       connector: {
+         serverId: "calendar-readonly",
+         kind: "mcp",
+         expectedServerName: "google-calendar",
+         version: "3.0.0-readonly.2",
+         transport: {
+           kind: "stdio",
+           command: process.execPath,
+           args: [path.resolve(forkDir, "build", "index.js"), "--enable-tools", "list-events,search-events,get-event"],
+           envAllowlist: [...base, "GOOGLE_OAUTH_CREDENTIALS", "GOOGLE_CALENDAR_MCP_READONLY_TOKEN_PATH", "GOOGLE_ACCOUNT_MODE"],
+         },
+         bindings: [
+           { upstreamTool: "list-events", canonicalSchemaHash: "81222b89482cba77b12a707c2097c66df383cab7929c14dca03cc303846d794c" },
+           { upstreamTool: "search-events", canonicalSchemaHash: "d48ba36e7f280d92eaba9550323e90aa7a6d7c758812932ad62012f4514558b7" },
+           { upstreamTool: "get-event", canonicalSchemaHash: "8c6736e2a1f397d0735efa5c0881f5c350c300b21a0b026e80c112258b596bda" },
+         ],
+       },
+     };
+     process.stdout.write(JSON.stringify(doc));
+     EOF
+     export COMPANION_CALENDAR_PROFILE=google-readonly
+     export COMPANION_CALENDAR_JSON="$(node /tmp/gen-calendar-json.mjs "$FORK_DIR" "$ACCT")"
+     export GOOGLE_ACCOUNT_MODE="$ACCT"
+     pnpm start
+     ```
+     The SDK implicit names above are the live SDK 1.30.0
+     `DEFAULT_INHERITED_ENV_VARS` (`dist/esm/client/stdio.js`: POSIX 6 /
+     win32 12; `shell:false` at the spawn call site) — no other inherited
+     name is passed, and the three exported `GOOGLE_*` values travel ONLY
+     because they are both exported here AND allowlisted there (strict
+     allowlist: anything else is never passed to the child). Missing auth
+     surfaces as the fixed `mcp_unavailable` per call (never fake success);
+     shutdown stays bounded and clean. PowerShell differences (not a full
+     Windows run): `export X="..."` is `$env:X="..."`, `$(...)` needs
+     `Get-FileHash -Algorithm SHA256` instead of `sha256sum`, and there is no
+     `chmod` guarantee (rely on the per-user profile ACL); the node generator
+     itself is cross-platform via `os.platform()`. Manual Windows 11 is still
+     pending.
   Credential-free runtime proof (no OAuth, no browser, no live Google):
   `docs/evidence/calendar-readonly-profile/smoke-profile.result.json`
   (22/22: pin reality, auth-gate source check, real SDK initialize/tools-list
   over actual fork code via InMemory + fixture provider, profile 3/3 enable,
   adapter search/get runnable, list-calendars denied with zero metadata I/O,
   mismatch fail-closed, normal `startServer` ownership + lazy + error path,
-  zero network attempts).
+  zero network attempts) and
+  `docs/evidence/calendar-readonly-profile/cli-profile.result.json` (actual
+  normal-CLI `pnpm start` acceptance with missing credentials). What those
+  artifacts prove is the RUNTIME side only — wire identity, the three
+  live-wire hashes, and behavior. They do NOT re-verify the source SHA: the
+  full commit/tree/lock verification in step 2 above is the prerequisite that
+  must pass BEFORE `npm ci --ignore-scripts` + `npm run build`, and the
+  runtime proof assumes that prerequisite was met.
 
 ### C15 Calendar fake E2E harness fixes (observed: refresh + tombstone scenarios)
 

@@ -1343,6 +1343,10 @@ schema-hash だけで、**信頼済み read-only binding 定義 (`category`) を
 起動に失敗します (fail-closed)。
 
 ```bash
+# FAKE shape-only example (NOT a provider claim, NOT runnable as-is:
+# placeholder hashes, fake wire identity). Real complete runnable example:
+# docs/operations.md, C14 pinned google-readonly profile (copy-pastable
+# POSIX setup + node JSON generator with the full pinned live-wire hashes).
 COMPANION_CALENDAR_JSON='{
   "selection": {
     "calendarId": "primary",
@@ -1389,8 +1393,12 @@ COMPANION_CALENDAR_JSON='{
 と完全一致した場合のみ、ホスト所有の信頼済み定義が注入されます。profile 未設定
 の既定動作は不変 (無効のまま)、未知 profile・不一致・任意 binding/hash は
 fail-closed です。profile 採用は live 受け入れではありません: 新規 OAuth 同意と
-live 本番検証は未了 (C11 positive BLOCKED) です。準備・認証・起動の明示手順と
-credential-free 実行証跡は docs/operations.md (C14 profile) を参照してください。
+live 本番検証は未了 (C11 positive BLOCKED、manual Win11 未了) です。完全な
+copy-pastable 準備・認証・起動手順 (Desktop-app クライアント、前提検証、
+JSON 生成スクリプト) と credential-free 実行証跡は docs/operations.md
+(C14 profile) を参照してください。実行証跡が示すのは runtime 側
+(wire identity + 3 live-wire hash + 挙動) のみであり、source SHA の再検証では
+ありません: `npm ci` 前の full commit/tree/lock 検証が前提条件です。
 
 ---
 

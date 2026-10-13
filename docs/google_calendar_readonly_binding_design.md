@@ -8,6 +8,10 @@ record below is HISTORICAL (proposal-era, `nspady@7c788f5` / `97a3dc3`);
 the CURRENT adoption pin, run/auth contract, and credential-free proof are
 `docs/operations.md` (C14 profile) and
 `docs/evidence/calendar-readonly-profile/smoke-profile.result.json`.
+The proof artifacts cover the runtime side only (wire identity + live-wire
+hashes + behavior); the full commit/tree/lock verification before
+`npm ci --ignore-scripts` + `npm run build` is the documented installation
+prerequisite, not something the runtime re-verifies.
 Profile-adopted is NOT live-accepted: fresh user OAuth consent and live
 production verification are still pending, C11-01 stays BLOCKED, and no
 live-Google claim is made.
