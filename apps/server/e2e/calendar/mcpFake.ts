@@ -73,6 +73,14 @@ export interface FakeCalendarState {
   /** Applied write boundaries (null until a write really lands). */
   startOverride: string | null;
   endOverride: string | null;
+  /**
+   * Test-only upstream title override (loopback control seam; never a
+   * production normalizer path): when set, the fake upstream serves this
+   * summary so a real search/stage/approve flow can freeze an arbitrary
+   * title — including one beginning with `calendar.reschedule:`. Reset per
+   * test via `/reset` like every other fixture field.
+   */
+  titleOverride: string | null;
   /** Barrier releases (fixture seam only; never production code). */
   releaseRead: (() => void) | null;
   releaseWrite: (() => void) | null;
@@ -98,6 +106,7 @@ export function createFakeCalendarState(): FakeCalendarState {
     authoritativeDeleted: false,
     startOverride: null,
     endOverride: null,
+    titleOverride: null,
     releaseRead: null,
     releaseWrite: null,
   };
@@ -115,6 +124,7 @@ export function resetFakeCalendarState(state: FakeCalendarState): void {
   state.authoritativeDeleted = false;
   state.startOverride = null;
   state.endOverride = null;
+  state.titleOverride = null;
   state.releaseRead?.();
   state.releaseWrite?.();
   state.releaseRead = null;
@@ -199,7 +209,9 @@ export function fakeEvent(state: FakeCalendarState): unknown {
     id: EVENT_ID,
     calendarId: CALENDAR_ID,
     status: "confirmed",
-    summary: state.revision === 1 ? EVENT_TITLE_V1 : EVENT_TITLE_V2,
+    summary:
+      state.titleOverride ??
+      (state.revision === 1 ? EVENT_TITLE_V1 : EVENT_TITLE_V2),
     description: EVENT_DESCRIPTION,
     start: {
       dateTime: state.startOverride ?? EVENT_START_RENDERED,

@@ -2285,6 +2285,200 @@ browser or full-suite claim). Linux, Node 24.12.0, pnpm 11.25.0:
    `cli-profile.result.json` corrected separately (valid account
   `normal` rerun, see resume note above).
 
+## C22 approval-card target preview + bounded pending expiry (2026-10-13, observed)
+
+Stacked on PR23 (`feat/calendar-readonly-production-profile`); no
+OAuth/provider writes, no schema/policy expansion, no persisted-proposal
+mutation, no mocked UI/seeded proposals in E2E.
+
+- `packages/kernel/src/action_proposals.ts`: `loadTarget` now reads
+  `sr.ordinal`; `freshSnapshotRevision` also returns the immutable
+  normalized event title; the staged preview is a deterministic human
+  summary `{title} (rN): start= end=` (title NFC/trimmed/whitespace-
+  collapsed/128-code-point cap, blank falls back to `calendar event`).
+  No tool-name prefix, no UUID/provider IDs, no upstream reads; the
+  `{ summary }` seam, hash coverage, and DDL are unchanged. The legacy
+  `calendar.reschedule:` display-prefix strips (execution/history
+  rendering) stay as backward-compatible no-ops.
+- `packages/kernel/test/action_proposals.test.ts`: the wording-pinning
+  preview assertion is deleted; semantic cases assert target (title +
+  current rN, incl. r2 after a retitling observation), deterministic
+  hash, single-line plaintext, and privacy (no description/IDs).
+- `apps/server/src/ui/client.ts`: each pending card owns at most one
+  bounded one-shot expiry timer (identity-checked on fire, cleared on
+  removal/decision); execution-owned/receipt/awaiting cards are never
+  retired by an old timer. `syncActions` retires only still-local
+  pending cards and never downgrades decision-in-flight; approve/reject
+  recheck the local deadline, guard while the real POST is awaited, and
+  the server stays authoritative. `visibilitychange` reconciles locally
+  with no polling/provider calls.
+- `apps/server/e2e/calendar/action.spec.ts` (+4, clock installed
+  BEFORE goto): staged preview shows `E2E Standup` + r1 with no
+  `calendar.reschedule`; `pauseAt(deadline-1)` keeps controls enabled
+  and `fastForward(1)` retires the card with 0 writes; `setSystemTime`
+  (no timer fire) + real `visibilitychange` retires with 0 writes;
+  gated real approve-202 fulfilled across the old deadline keeps the
+  live execution card, release lands the verified receipt (1 write).
+
+Final battery (this worker, Linux, Node 24.12.0, after all edits):
+
+- `pnpm test` -> exit 0, **107 files / 1296 tests passed**, 0 failed.
+- `pnpm run typecheck`, `pnpm run typecheck:e2e`,
+  `pnpm --filter @companion/server typecheck` -> exit 0.
+- `pnpm run lint` -> exit 0 (**224 files, 0 errors**, 1 pre-existing
+  `biome.json` recommended-deprecation info).
+- Default browser suite (Chromium): **23/23 passed**.
+- Calendar-mode suite (`COMPANION_E2E_CALENDAR=1`, Chromium):
+  **22/22 passed** (`action.spec.ts` 17/17 incl. the 4 new cases,
+  `calendar.spec.ts` 4/4, `tombstone.spec.ts` 1/1).
+
+## C22 independent-review lifecycle fixes (2026-10-13, observed)
+
+Followup on the same PR24 branch (`fix/c22-approval-card-target-expiry`);
+review observations taken as ground truth, no failing-before rerun. No
+mocked cards, DB seeding, new polling, or live provider/OAuth.
+
+- `apps/server/src/ui/client.ts` `reject()`: the real reject POST is now
+  `try/catch`. A transport abort before the server sees it releases
+  `deciding`, shows the fixed retry notice
+  (`却下できませんでした。もう一度お試しください`), and reconciles via
+  the real proposals read: still-pending restores buttons/deadline, an
+  accepted rejection retires on the real summary. Nothing is claimed
+  rejected.
+- `apps/server/src/ui/client.ts` `syncExecution()`: an authoritative
+  non-pending summary takes card ownership BEFORE the execution GET
+  (status transfer, `deciding=false`, pending timer cleared). Approved
+  renders disabled decisions (known run preserved) and arms the EXISTING
+  bounded execution watch for recovery when the GET resumes — no new
+  polling. Rejected/expired retire on the real summary (pre-GET and
+  post-GET paths) with history hydration; approved/terminal receipts keep
+  their existing lifecycle.
+- `apps/server/e2e/calendar/action.spec.ts` (+2, real UI/API only):
+  abort-first-reject recovers pending controls then the real reject lands
+  rejection history with 0 writes; real approve `route.fetch` + abort
+  delivery with execution-GET failed keeps the server-accepted card
+  (`approved`, controls disabled) across the original deadline, then
+  resume + preflight release verifies the real receipt with exactly
+  1 write.
+
+Verification (this worker, Linux, Node 24.12.0, after all edits):
+
+- `pnpm vitest run apps/server/test/action_ui.test.ts` -> exit 0,
+  **8/8 passed**.
+- `pnpm run typecheck`, `pnpm run typecheck:e2e` -> exit 0.
+- `pnpm run lint` -> exit 0 (**224 files**, 1 pre-existing
+  `biome.json` recommended-deprecation info).
+- Calendar action suite (Chromium, `COMPANION_E2E_CALENDAR=1`):
+  **19/19 passed** (`action.spec.ts` 17 existing + 2 new, ~48s).
+  No default-browser or full-1296 rerun (unchanged paths).
+- PR23/PR24 CI at push time: all checks SUCCESS (PR24 6/6 incl. e2e;
+  PR23 6/6); no failed logs to repair.
+
+## C22 clock-skew pending-expiry rearm (2026-10-13, observed)
+
+Followup on the same PR24 branch (`fix/c22-approval-card-target-expiry`);
+independent-reviewer defect taken as ground truth, no before-fix rerun. No
+polling, provider/network, or authority change.
+
+- `apps/server/src/ui/client.ts` `schedulePendingExpiry()`: the capped
+  one-shot callback now calls `this.schedulePendingExpiry(current)` before
+  the `Date.now() < deadline` early return. A client wall clock >15min
+  behind the server (or rolled back after arming) no longer consumes the
+  only timer forever: the single bounded timer re-arms for the remainder
+  (still 1 timer, still 15min cap). Existing identity, accepted/decision,
+  and execution/terminal guards are unchanged; the server stays
+  authoritative.
+- `apps/server/e2e/calendar/action.spec.ts` (+1, real proposal + client
+  clock only): fake clock installed before goto, client set 20min behind
+  before the real staged proposal, first capped 15min `fastForward` keeps
+  the pending card with live controls, then advancing the actual remaining
+  `expiresAt` retires the card with 0 writes and no
+  visibility/network refresh. Real `expiresAt`, no DB mutation.
+
+Verification (this worker, Linux, Node 24.12.0, after all edits):
+
+- `pnpm run typecheck`, `pnpm run typecheck:e2e` -> exit 0.
+- `pnpm exec biome check` on the owned files -> exit 0.
+- Calendar action suite (Chromium, `COMPANION_E2E_CALENDAR=1`,
+  `action.spec.ts` only): **20/20 passed** (~48s). No
+  default-browser or full-suite rerun (unchanged paths).
+
+## C22 preview-ambiguity + CI failure followup (2026-10-13, observed)
+
+Followup on the same PR24 branch (`fix/c22-approval-card-target-expiry`);
+the new GitHub review thread (title ambiguity) and the two CI e2e failures
+on head `e4f6bf1` (PR run 38449588750: `action.spec.ts:841` lost-approve +
+`calendar.spec.ts:80` date assertion; push run 38449579628 SUCCESS) taken
+as ground truth, no failing-check rerun. No seeded proposals, fake HTTP
+success, wording pins, timeout/skip/retry changes, or provider/normalizer
+changes.
+
+- Kernel preview (`packages/kernel/src/action_proposals.ts`
+  `buildPreview`): new immutable previews now open with the unambiguous
+  human marker `対象イベント: <whole title> (rN): start=… end=…`. An
+  arbitrary normalized title beginning with `calendar.reschedule:` can no
+  longer sit at position 0, so the legacy tool-prefix strips in
+  `action_strategy.readRenderedPreviewForRun`,
+  `action_executions.renderedPreviewSummary`, and the client history
+  renderer never cut the real title. Reader logic is unchanged and still
+  renders historical (`calendar.reschedule: …`) stored previews correctly;
+  only their comments plus the stale client "staged preview carries the
+  tool prefix" claim were corrected.
+- `apps/server/src/ui/client.ts` `approve()`: a POST transport failure now
+  awaits `reconcileLostApprove()` with `deciding` held (timer + stale lists
+  cannot retire/downgrade the card mid-reconcile). A server-approved summary
+  takes approved ownership immediately (timer cleared, decisions disabled,
+  existing bounded watch started); still-pending re-renders controls with a
+  re-armed bounded timer; unreadable falls back to sync. Root cause of the
+  CI `action.spec.ts:841` failure: the fire-and-forget recovery sync could
+  be deduped while an older sync held a stale pending view, leaving a
+  server-approved card on its live expiry timer until `fastForward` retired
+  it (card gone at line 877). The same stale approved run (read barrier
+  never released) leaked into `calendar.spec.ts:80`: the next test's
+  `/reset` released the barrier, the orphan run's write landed 11:00/12:00
+  upstream mid-search, and the drawer showed the overwritten boundaries
+  instead of the fixture 09:00. Both failures share this single root cause;
+  no harness/test change was needed beyond the client fix.
+- E2E seam (`mcpFake.ts` `titleOverride` + `POST /set-title`, cleared by
+  `/reset`): `action.spec.ts` (+1, real
+  search/select/stage/approve/reload flow, exactly 1 write) freezes the
+  real title `calendar.reschedule: quarterly planning` and asserts it
+  survives the initial card, the execution receipt, and the reloaded
+  durable history in full.
+- Kernel regressions (no wording pins): `action_proposals.test.ts` stages
+  the adversarial title (marker prefix, full title, current rN, single
+  line, ≤1024 chars, never at position 0); `action_executions.test.ts`
+  drives a stored new-format preview through the real `blocked_stale`
+  terminal and asserts the RunResult text keeps the whole title while the
+  receipt `summary_json` is byte-preserved.
+
+Verification (this worker, Linux, Node 24.12.0, after all edits):
+
+- `pnpm test` -> exit 0, **107 files / 1298 tests passed** (+2 new), 0 failed.
+- `pnpm run typecheck`, `pnpm run typecheck:e2e`,
+  `pnpm --filter @companion/server typecheck`, root `tsc --noEmit` ->
+  exit 0.
+- `pnpm run lint` -> exit 0 (**224 files, 0 errors**, 1 pre-existing
+  `biome.json` recommended-deprecation info).
+- Default browser suite (Chromium): **23/23 passed**.
+- Calendar-mode suite (`COMPANION_E2E_CALENDAR=1`, Chromium):
+  **26/26 passed** (`action.spec.ts` 21/21 incl. the new title case,
+  `calendar.spec.ts` 4/4, `tombstone.spec.ts` 1/1), plus a second
+  consecutive 26/26 run.
+
+## C22 delivery-vs-gate (2026-10-14, delivery/c22-approval-flow)
+
+DELIVERED consumer code (this branch, fake transport only): target-aware
+frozen preview (title + session rN), bounded one-shot pending expiry with
+skew rearm + visibility reconcile, approve/reject error recovery with
+authoritative lost-approve reconcile, kernel + E2E regressions above.
+Production binding stays read-only (exact 3 tools); no write API invented.
+
+EXTERNALLY GATED (not code, needs upstream decision/proof): write-capable
+provider pin + tool-schema/API choice + OAuth scope selection, positive
+deletion contract adoption, fresh OAuth/live/manual verification. No
+guessed deletion positives or write capability claimed.
+
 ## M5 decision-turn retry denial (2026-10-14)
 
 Fixes the §18 review finding on `origin/master` (`2474572`):

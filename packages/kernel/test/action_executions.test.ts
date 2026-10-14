@@ -384,6 +384,50 @@ describe("C19 Action execution boundaries", () => {
       }
     });
 
+    it("renders a tool-prefixed event title in full: new preview survives the legacy strip", async () => {
+      const clockNow = 100;
+      const fx = await setupApprovedProposalFixture(() => clockNow);
+      try {
+        // Stored NEW-format preview whose event title itself begins with the
+        // legacy tool prefix: the rendered RunResult text and the durable
+        // receipt must keep the whole title (the unambiguous marker keeps
+        // the legacy strip from triggering).
+        const adversarialTitle = "calendar.reschedule: quarterly planning";
+        const summary =
+          `対象イベント: ${adversarialTitle} (r1): ` +
+          `start=${TIMED_INPUT.start} end=${TIMED_INPUT.end}`;
+        fx.db
+          .prepare("UPDATE action_proposals SET preview_json = ? WHERE id = ?")
+          .run(JSON.stringify({ summary }), fx.proposalId);
+        fx.service.startActionRun(fx.actionRunId, { now: 100 });
+        const blocked = fx.service.recordActionPreflightBlocked(
+          fx.actionRunId,
+          {
+            reason: "stale",
+            preflightRevision: "src@2",
+            now: 101,
+          },
+        );
+        expect(blocked.applied).toBe(true);
+        const stored = fx.db
+          .prepare("SELECT result_json FROM runs WHERE id = ?")
+          .get(fx.actionRunId) as { result_json: string };
+        const result = JSON.parse(stored.result_json) as { text: string };
+        expect(result.text).toContain(adversarialTitle);
+        expect(result.text.startsWith("calendar.reschedule:")).toBe(false);
+        const receipt = fx.db
+          .prepare(
+            "SELECT summary_json FROM action_receipts WHERE execution_id = ?",
+          )
+          .get(fx.executionId) as { summary_json: string };
+        expect(
+          (JSON.parse(receipt.summary_json) as { summary: string }).summary,
+        ).toBe(summary);
+      } finally {
+        await closeKernelDatabase(fx.handle);
+      }
+    });
+
     it("blocks a deleted authoritative event the same way", async () => {
       const fx = await setupApprovedProposalFixture(() => 100);
       try {
