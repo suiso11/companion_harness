@@ -255,18 +255,22 @@ function seedCitation(sessionId: string): {
     connector = { id };
   }
   const connectorId = connector.id;
-  let resource = db
-    .prepare(
-      "SELECT id FROM resources WHERE connector_instance_id = ? AND canonical_key = ?",
-    )
-    .get(connectorId, "e2e-citation-doc") as { id: string } | undefined;
-  if (resource === undefined) {
-    const id = randomUUID();
-    db.prepare(
-      "INSERT INTO resources (id, connector_instance_id, canonical_key, title, next_revision, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-    ).run(id, connectorId, "e2e-citation-doc", "E2E citation doc", 2, now);
-    resource = { id };
-  }
+  // One fresh resource per seed call (unique canonical key, revision 1):
+  // the shared-key form could seed only once per server lifetime
+  // (UNIQUE(resource_id, revision)), which blocks a second citation test in
+  // the same webServer run. Ordinals stay per-session via MAX(ordinal)+1.
+  const resourceId = randomUUID();
+  db.prepare(
+    "INSERT INTO resources (id, connector_instance_id, canonical_key, title, next_revision, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+  ).run(
+    resourceId,
+    connectorId,
+    `e2e-citation-doc-${resourceId}`,
+    "E2E citation doc",
+    2,
+    now,
+  );
+  const resource = { id: resourceId };
   const normalized = CITATION_SNAPSHOT_TEXT.normalize("NFC");
   const contentHash = createHash("sha256")
     .update(normalized, "utf8")

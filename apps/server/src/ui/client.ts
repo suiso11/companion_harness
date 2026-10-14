@@ -2169,7 +2169,7 @@ class ConversationApp {
       if (claimTerminalHydration(this.terminalHydrated, runId)) {
         void this.hydrateHistory().then(() => {
           if (retryVisible && turnId !== null && turnId !== undefined) {
-            const retryButton = el("button", "もう一度送る");
+            const retryButton = el("button", "もう一度生成");
             retryButton.addEventListener("click", () => {
               void this.retry(turnId);
             });
@@ -2265,6 +2265,9 @@ class ConversationApp {
       if (put.status !== 409) {
         return;
       }
+      // Version conflict (§16.5 exact): surface the conflict before
+      // re-reading the latest context and retrying the CAS.
+      this.showNotice("参照の更新で競合しました。最新の状態を取得しています");
       // Version conflict: loop re-reads the stored context and retries CAS.
     }
   }
