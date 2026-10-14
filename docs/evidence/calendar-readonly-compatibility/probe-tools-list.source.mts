@@ -13,10 +13,14 @@
  *
  * Reproduce (portable exact-checkout replay; credential-stripped, no tokens):
  *   Prerequisites (temporary exact fork checkout, not committed):
- *     git fetch origin 6939311fd3eae9846648e0a175e304c9500f578e
- *     git checkout 6939311fd3eae9846648e0a175e304c9500f578e -- <fork-dir>
- *     (verify: git rev-parse HEAD = FORK_COMMIT; git rev-parse HEAD^{tree}
- *     = FORK_TREE; sha256 of package-lock.json = FORK_LOCK_DIGEST)
+ *     git clone https://github.com/suiso11/google-calendar-mcp.git <fork-dir>
+ *     git -C <fork-dir> fetch origin 6939311fd3eae9846648e0a175e304c9500f578e
+ *     git -C <fork-dir> checkout --detach 6939311fd3eae9846648e0a175e304c9500f578e
+ *     (verify: git -C <fork-dir> rev-parse HEAD = FORK_COMMIT;
+ *     git -C <fork-dir> rev-parse 'HEAD^{tree}' = FORK_TREE; sha256 of
+ *     <fork-dir>/package-lock.json = FORK_LOCK_DIGEST. Never use
+ *     `git checkout <commit> -- <fork-dir>`: everything after `--` is a
+ *     pathspec in the current repository, not a checkout target.)
  *     env -i PATH=<allow> HOME=<owned-tmp> npm ci --ignore-scripts \
  *       --no-audit --no-fund --prefix <fork-dir>
  *     No Google/GH tokens, no OAuth, no network at probe time.

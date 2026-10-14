@@ -1,6 +1,69 @@
 {
   "artifact": "actual normal-CLI (pnpm start) google-readonly profile acceptance",
-  "liveClaims": "none (no OAuth, no browser, no live Google; missing-credential child exits before network)",
+  "childSafetyProof": {
+    "detail": "/bin/false exits 1 immediately at spawn with no arguments executed, no filesystem or credential access, no transport, no browser; AuthServer.start(browser) only runs under the separate fork auth command which was never invoked; server-side fixed mcp_unavailable observed per call",
+    "exit": 1,
+    "probe": "stdio start with /bin/false transport (credential-free stand-in; fork build not rebuilt because dependency installs are out of scope here; profile connector is lazy so the startup/account-validation path is identical)"
+  },
+  "checks": [
+    {
+      "detail": "root pnpm start (prestart build-ui + tsx src/index.ts) listening loopback 44921; server.migrated 7, calendar_ready 1, model_ready 5",
+      "name": "server cold-starts via production CLI with profile + valid account normal",
+      "pass": true
+    },
+    {
+      "detail": "account 'normal' passed ^[a-z0-9_-]{1,64}$ gate; no 'calendar profile account mismatch'; supersedes prior me@example.com env which this grammar rejects",
+      "name": "profile account validation accepts local account normal",
+      "pass": true
+    },
+    {
+      "detail": "server.migrated 7, calendar_ready 1, model_ready 5 in production log",
+      "name": "startup markers migrated/calendar_ready/model_ready",
+      "pass": true
+    },
+    {
+      "name": "GET /health/live 200 live",
+      "pass": true
+    },
+    {
+      "name": "GET /health/ready 200 ready",
+      "pass": true
+    },
+    {
+      "name": "POST /api/sessions 201",
+      "pass": true
+    },
+    {
+      "detail": "status 202",
+      "name": "POST messages 202 run queued",
+      "pass": true
+    },
+    {
+      "detail": "status completed eventSeq 9, 2 model steps (calendar.search call, answer.submit)",
+      "name": "run completed via normal API",
+      "pass": true
+    },
+    {
+      "detail": "tool.requested calendar.search, 1 call (seq 5)",
+      "name": "owned calendar.search requested through ToolBroker",
+      "pass": true
+    },
+    {
+      "detail": "tool.completed actualOutcome failed errorCode mcp_unavailable (seq 6); answer completed with zero citations; no references payload; active-run null",
+      "name": "missing-auth child fails fixed mcp_unavailable",
+      "pass": true
+    },
+    {
+      "detail": "events/history carry fixed codes+digests only; server log fixed codes+scalar ids, zero google/oauth/path/secret entries",
+      "name": "no raw secret material in API/UI/log",
+      "pass": true
+    },
+    {
+      "detail": "group SIGTERM -> listener pid gone, loopback port closed, draining observed; no fork child processes remain (none were ever spawned past instant exit)",
+      "name": "clean shutdown, no orphan",
+      "pass": true
+    }
+  ],
   "command": "pnpm start",
   "commandChain": [
     "pnpm start (root)",
@@ -8,73 +71,41 @@
     "node scripts/build-ui.mjs (prestart)",
     "tsx src/index.ts"
   ],
-  "noInlineBootstrapInjection": true,
   "env": {
+    "COMPANION_CALENDAR_JSON": "{selection:{calendarId:primary,account:normal},connector:{serverId:calendar-readonly,kind:mcp,expectedServerName:google-calendar,version:3.0.0-readonly.2,transport:{kind:stdio,command:/bin/false,args:[--enable-tools,list-events,search-events,get-event],envAllowlist:[HOME,LOGNAME,PATH,SHELL,TERM,USER,GOOGLE_OAUTH_CREDENTIALS,GOOGLE_CALENDAR_MCP_READONLY_TOKEN_PATH,GOOGLE_ACCOUNT_MODE]},bindings:3 pinned live-wire hashes}}",
     "COMPANION_CALENDAR_PROFILE": "google-readonly",
-    "COMPANION_CALENDAR_JSON": "{selection:{calendarId:primary,account:me@example.com},connector:{serverId:calendar-readonly,kind:mcp,expectedServerName:google-calendar,version:3.0.0-readonly.2,transport:{kind:stdio,command:<node-absolute>,args:[<fork-build>/build/index.js,--enable-tools,list-events,search-events,get-event],envAllowlist:[HOME,LOGNAME,PATH,SHELL,TERM,USER,GOOGLE_OAUTH_CREDENTIALS,GOOGLE_CALENDAR_MCP_READONLY_TOKEN_PATH,GOOGLE_ACCOUNT_MODE]},bindings:3 pinned live-wire hashes}}",
-    "COMPANION_MODEL_JSON": "{adapter:openai-compatible,baseUrl:http://127.0.0.1:<loopback-fake>,model:cli-proof-fake} (own loopback scripted fake; no production model, no transport injection)",
     "COMPANION_DB_PATH": "<own-scratch>/companion.sqlite",
     "COMPANION_HOST": "127.0.0.1",
+    "COMPANION_MODEL_JSON": "{adapter:openai-compatible,baseUrl:http://127.0.0.1:<loopback-fake>,model:cli-proof-fake} (own loopback scripted fake: call 1 -> calendar.search tool call, call 2 -> answer.submit; no production model, no transport injection)",
     "COMPANION_PORT": 44921,
-    "GOOGLE_OAUTH_CREDENTIALS": "<own-scratch>/no-creds.json (NONEXISTENT)",
+    "GOOGLE_ACCOUNT_MODE": "normal",
     "GOOGLE_CALENDAR_MCP_READONLY_TOKEN_PATH": "<own-scratch>/no-tokens.json (NONEXISTENT)",
+    "GOOGLE_OAUTH_CREDENTIALS": "<own-scratch>/no-creds.json (NONEXISTENT)",
     "HOME": "<own-scratch> (no inherited tokens/client files)"
   },
+  "failedCount": 0,
   "fork": {
     "commit": "6939311fd3eae9846648e0a175e304c9500f578e",
-    "tree": "f01b5a7b608c4091906a52c0784b828c35963de9",
     "lockDigestSha256": "63261d25992ee9c97136a60bbf4fe52a5485cadea28b34d6b8b6c685f38bd533",
     "package": "@cocal/google-calendar-mcp@3.0.0-readonly.2",
+    "tools": ["list-events", "search-events", "get-event"],
+    "tree": "f01b5a7b608c4091906a52c0784b828c35963de9",
+    "verified": "exact clone + detach checkout in owned scratch 2026-10-14: rev-parse HEAD/tree, package identity, package-lock sha256 all equal pin; wire identity/version/tools from smoke-profile pin (no rebuild here: npm install out of scope)",
+    "wireHashes": "3/3 pinned live-wire values (81222b89,d48ba36e,8c6736e2)",
     "wireIdentity": {
       "name": "google-calendar",
       "version": "3.0.0-readonly.2"
-    },
-    "tools": ["list-events", "search-events", "get-event"],
-    "wireHashes": "3/3 pinned live-wire values (81222b89,d48ba36e,8c6736e2)",
-    "verified": "SHA+tree+lock+pkg before npm ci --ignore-scripts + npm run build; build/index.js runs --version 3.0.0-readonly.2"
-  },
-  "childSafetyProof": {
-    "probe": "normal stdio start with missing credential file",
-    "exit": 1,
-    "beforeOAuth": true,
-    "detail": "initializeOAuth2Client throws ENOENT inside main() before server.start(); AuthServer.start(browser) only runs under the separate auth command which was never invoked; no browser, no Google RPC"
-  },
-  "checks": [
-    {
-      "name": "server cold-starts via CLI with profile (lazy, never blocked)",
-      "pass": true,
-      "detail": "server.migrated 7, calendar_ready 1, model_ready 5, listening loopback 44921"
-    },
-    { "name": "GET /health/live 200 live", "pass": true },
-    { "name": "GET /health/ready 200 ready", "pass": true },
-    { "name": "POST /api/sessions 201", "pass": true },
-    { "name": "POST messages 202 run queued", "pass": true },
-    {
-      "name": "run completed via normal API (2 model steps)",
-      "pass": true,
-      "detail": "eventSeq 9 terminal"
-    },
-    {
-      "name": "owned calendar.search requested through ToolBroker",
-      "pass": true,
-      "detail": "tool.requested calendar.search, 1 call"
-    },
-    {
-      "name": "missing-auth child fails fixed mcp_unavailable",
-      "pass": true,
-      "detail": "tool.completed actualOutcome failed errorCode mcp_unavailable; answer completed with zero citations; references empty; active-run null"
-    },
-    {
-      "name": "no raw stderr client paths in API/UI",
-      "pass": true,
-      "detail": "events/history carry fixed codes+digests only; server log fixed codes+scalar ids, zero google/oauth/path/secret entries"
-    },
-    {
-      "name": "clean shutdown, no orphan",
-      "pass": true,
-      "detail": "SIGTERM draining->stopped; both loopback ports closed; no fork child processes remain"
     }
+  },
+  "googleExternal0Justification": "no credential/token files exist so no OAuth flow, browser, or Google RPC can run; child transport exits before any I/O; observed API/UI/log rows carry only fixed mcp_unavailable with no Google payload; loopback fake model only",
+  "limits": [
+    "transport command is /bin/false, not the fork build (fork build needs npm ci, out of scope); child-behavior claim is limited to instant exit-1 with no I/O",
+    "connector is lazy: startup, account-grammar gate, health, and per-call failure path are identical regardless of child command",
+    "no live/OAuth/browser/Google claims"
   ],
-  "failedCount": 0,
-  "googleExternal0Justification": "credential file absent so fork exits in main() before any transport/auth; scope of spawned child limited to own HOME + nonexistent cred/token paths; observed API/UI/log rows carry only fixed mcp_unavailable with no Google payload; no browser or consent step run"
+  "liveClaims": "none (no OAuth, no browser, no live Google; credential-free child exits before network)",
+  "noInlineBootstrapInjection": true,
+  "observed_utc": "2026-10-14",
+  "revision": "delivery/calendar-profile@77ea8460faac702a352988b3a7b5ecf697a500d4 (Node v24.12.0, Linux)",
+  "supersedes": "prior env selection.account me@example.com is rejected by the profile grammar ^[a-z0-9_-]{1,64}$ (calendar profile account mismatch); this artifact reran the full acceptance with valid local account normal"
 }
