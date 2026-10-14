@@ -2786,6 +2786,39 @@ Prior oc17 static runs are NOT re-claimed here (no retained oc17 logs
 found; only its PR28-4 failure error-context survived and the capture was
 reworked above). Owned `apps/server/test-results/` removed; no owned
 servers/processes
-  left. One private temp artifact `/tmp/live-refresh-proof-LMZ0zi`
-  (owned 3 SQLite files) remains permission-blocked, no active process
-  (see ledger cleanup note above).
+   left. One private temp artifact `/tmp/live-refresh-proof-LMZ0zi`
+   (owned 3 SQLite files) remains permission-blocked, no active process
+   (see ledger cleanup note above).
+
+## PR29 Windows stall fix (2026-10-14, CI ground truth, no timeout masking)
+
+PR-event run `38608822921` (head `b04970b`) failed ONLY
+`check (windows-latest)`: 4 `Test timed out in 5000ms` with zero assertion
+failures — `apps/server/test/action_composition.test.ts:131`,
+`packages/kernel/test/action_history_receipt.test.ts:258`,
+`packages/kernel/test/action_scheduler_pickup.test.ts:239` and `:371`.
+Ubuntu `check` and `e2e` on the same run passed, and the same-head push run
+`38608803181` passed Windows: a load flake, not a logic regression. No
+check was rerun for confirmation and no timeout was raised or suppressed.
+Evidence for a concurrency/resource cause (not product behavior): the
+failing files' own passing siblings took 3.6–4.7s each (e.g. the no-op
+unapproved-bound pickup took 4669ms), total collect was 89.15s, and every
+timeout fired while the test body was still running — no error log, no
+receipt mismatch. Two avoidable contributors fixed minimally, behavioral
+assertions/contracts untouched:
+- `action_scheduler_pickup.test.ts`: the engine-idle poll slept
+  `setTimeout(..., 2)` up to 500 times, so a starved Windows event loop
+  stretched the wait itself past the 5s budget. It now yields via
+  `setImmediate` (no wall-clock sleep): the launched strategy only awaits
+  immediately-resolved ports, so it settles within a handful of yields,
+  and a genuinely stuck run fails fast on the existing `inflightCount`
+  assertion instead of timing out.
+- `vitest.config.ts`: `maxWorkers: 2` on CI only (`CI`/`GITHUB_ACTIONS`
+  env; local parallelism unchanged), so full parallel forks no longer
+  thrash synchronous better-sqlite3 plus real loopback servers on
+  Windows runners.
+Local proof after edits (Linux, Node 24.12.0, single pass, no midflight
+runs): focused `action_scheduler_pickup.test.ts` 3/3, full `vitest run`
+107 files / 1307 tests, root typecheck exit 0, `biome check .` exit 0
+(229 files, 0 errors, 1 pre-existing info). New-head CI observed after push (per-job conclusions in the
+delivery report, not claimed here).

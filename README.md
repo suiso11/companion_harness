@@ -1639,3 +1639,14 @@ calendar+tombstone 5/5 (real Chromium, exit 0); full units 107 files /
 files, 1 pre-existing info); default 24/24 is the prior observed value
 (not rerun — test-only change in `calendar/action.spec.ts`). Detail:
 `docs/operations.md` ("PR28 UI race fixes + permanent browser regressions").
+
+# PR29 Windows Stall Fix (2026-10-14)
+
+PR-event CI run `38608822921` (head `b04970b`) failed ONLY Windows
+`check` with 4 unit-test 5s timeouts (action composition ×1, action
+history receipt ×1, action scheduler pickup ×2; zero assertion failures)
+while Ubuntu/e2e and the same-head push run passed. Bounded fix, no
+timeout change, no behavior change: the scheduler tests' engine-idle poll
+now yields via `setImmediate` instead of wall-clock `setTimeout` sleeps,
+and `vitest.config.ts` caps `maxWorkers: 2` on CI only. Detail:
+`docs/operations.md` ("PR29 Windows stall fix").
