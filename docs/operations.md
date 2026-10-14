@@ -2457,3 +2457,16 @@ Verification (this worker, Linux, Node 24.12.0, after all edits):
   **26/26 passed** (`action.spec.ts` 21/21 incl. the new title case,
   `calendar.spec.ts` 4/4, `tombstone.spec.ts` 1/1), plus a second
   consecutive 26/26 run.
+
+## C22 delivery-vs-gate (2026-10-14, delivery/c22-approval-flow)
+
+DELIVERED consumer code (this branch, fake transport only): target-aware
+frozen preview (title + session rN), bounded one-shot pending expiry with
+skew rearm + visibility reconcile, approve/reject error recovery with
+authoritative lost-approve reconcile, kernel + E2E regressions above.
+Production binding stays read-only (exact 3 tools); no write API invented.
+
+EXTERNALLY GATED (not code, needs upstream decision/proof): write-capable
+provider pin + tool-schema/API choice + OAuth scope selection, positive
+deletion contract adoption, fresh OAuth/live/manual verification. No
+guessed deletion positives or write capability claimed.
