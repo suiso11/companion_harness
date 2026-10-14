@@ -2215,16 +2215,17 @@ class ConversationApp {
       if (claimTerminalHydration(this.terminalHydrated, runId)) {
         void this.hydrateHistory().then(() => {
           // M5 decision-turn denial (§18.4/§18.6): the retry control is
-          // appended only for `user_text` Turns. Hydration above refreshed
-          // the Turn kinds, so a failed/abandoned Action run renders its
-          // actual receipt from history with no retry control here.
+          // appended only for `user_text` Turns (M3 title retained).
+          // Hydration above refreshed the Turn kinds, so a failed/abandoned
+          // Action run renders its actual receipt from history with no
+          // retry control here.
           if (
             retryVisible &&
             turnId !== null &&
             turnId !== undefined &&
             isRetryableTurnKind(this.turnKinds.get(turnId))
           ) {
-            const retryButton = el("button", "もう一度送る");
+            const retryButton = el("button", "もう一度生成");
             retryButton.addEventListener("click", () => {
               void this.retry(turnId);
             });
@@ -2320,6 +2321,9 @@ class ConversationApp {
       if (put.status !== 409) {
         return;
       }
+      // Version conflict (§16.5 exact): surface the conflict before
+      // re-reading the latest context and retrying the CAS.
+      this.showNotice("参照の更新で競合しました。最新の状態を取得しています");
       // Version conflict: loop re-reads the stored context and retries CAS.
     }
   }

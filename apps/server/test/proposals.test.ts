@@ -395,7 +395,10 @@ describe("M5 decision-turn retry denial (§18.4/§18.6)", () => {
       const deniedQueued = await retryTurn(f, sessionId, approvalTurnId ?? "");
       expect(deniedQueued.status).toBe(400);
       expect(await deniedQueued.json()).toEqual({
-        error: { code: "validation_error", message: "request validation failed" },
+        error: {
+          code: "validation_error",
+          message: "request validation failed",
+        },
       });
       expect(rowCounts(f)).toEqual(beforeQueued);
 
@@ -405,10 +408,17 @@ describe("M5 decision-turn retry denial (§18.4/§18.6)", () => {
       // is never re-executed through the generic retry.
       f.repo.cancelRun(sessionId, approvedBody.runId, { now: Date.now() });
       const beforeTerminal = rowCounts(f);
-      const deniedTerminal = await retryTurn(f, sessionId, approvalTurnId ?? "");
+      const deniedTerminal = await retryTurn(
+        f,
+        sessionId,
+        approvalTurnId ?? "",
+      );
       expect(deniedTerminal.status).toBe(400);
       expect(await deniedTerminal.json()).toEqual({
-        error: { code: "validation_error", message: "request validation failed" },
+        error: {
+          code: "validation_error",
+          message: "request validation failed",
+        },
       });
       expect(rowCounts(f)).toEqual(beforeTerminal);
 
@@ -441,7 +451,10 @@ describe("M5 decision-turn retry denial (§18.4/§18.6)", () => {
       const denied = await retryTurn(f, sessionId, rejectedBody.decisionTurnId);
       expect(denied.status).toBe(400);
       expect(await denied.json()).toEqual({
-        error: { code: "validation_error", message: "request validation failed" },
+        error: {
+          code: "validation_error",
+          message: "request validation failed",
+        },
       });
       // A second key is denied the same way: the denial persists nothing to
       // replay, and the rejection stays exactly one Turn with no Run.

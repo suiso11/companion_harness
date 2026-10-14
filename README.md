@@ -1509,3 +1509,17 @@ This section records the FINAL integrated acceptance for PR #20 at HEAD `61b3573
 - **Residual gates (explicit, not closed)**: C08 HOLD, C10 production mapping UNRESOLVED, C11 authoritative positive BLOCKED (cancelled/404/410/omission never positive), Windows 11 manual smoke NOT executed, fresh OAuth a separate untouched decision, dedicated write binding / adoption + triple-gate live use NOT authorized, Remind I01–I05 unapproved (other repo, no C23/C24 invented), candidate PR21/22 stacked review-only (PR20 baseline pin gaps claim nothing newest).
 
 Deep verification record (commands, counters, residual map, §20 write-binding source facts): [docs/operations.md](docs/operations.md) ("PR20 integrated plan verification").
+
+---
+
+# Delivery M3 on Master (2026-10-14)
+
+This section records the recovery completion of the interrupted `deliver-m3-on-master` run: branch `delivery/m3-on-master` from `origin/master` (`2474572`), migrating only the 5 files of M3 behaviors/tests missing on master. It does not rewrite the C04–C07 or PR20 evidence above.
+
+- **Migrated files**: `apps/server/e2e/citation_recovery.spec.ts` (genuine concurrent-409 CAS recovery test), `apps/server/e2e/server.ts` (per-seed unique citation resource; fixes second-seed UNIQUE collision in one webServer run), `apps/server/src/ui/client.ts` (retry label `もう一度生成`, §16.5 conflict notice), `apps/server/e2e/conversation.spec.ts` (retry label alignment), `apps/server/test/m3_ui.test.ts` (M3 UI unit coverage).
+- **Prior-run recovered evidence**: unit **106 files / 1275 passed**, both typechecks green, citation full suite green after UNIQUE-collision fix and temp-debug removal (no temp debug remains on the branch).
+- **Current-run browser (actual production Chromium, owned temp stores, latest migrated code)**: default suite **24/24 passed** (≈1.3 min, 1 worker); Calendar/Action suite (`COMPANION_E2E_CALENDAR=1`) **18/18 passed** (≈45.8s). Total **42/42**, 0 skipped/flaky/retries.
+- **Lint**: `biome check` on the 5 migrated files — clean, no fixes.
+- **Cleanup**: owned `apps/server/test-results/` artifact removed; no owned child services left running; root dirty checkout and other worktrees untouched.
+
+Remaining gates not closed here: Windows 11 x64 manual smoke, remote CI for this branch/PR, M4 readonly adoption, M5 write actions.

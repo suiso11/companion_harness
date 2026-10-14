@@ -67,7 +67,7 @@ test("type while active keeps submit disabled, stop cancels the run", async ({
   // Terminal cancelled: composer released, no retry offered for cancels.
   await expect(page.locator("#composer-send")).toBeEnabled();
   await expect(page.locator("#composer-stop")).toBeHidden();
-  await expect(page.locator("#conversation")).not.toContainText("もう一度送る");
+  await expect(page.locator("#conversation")).not.toContainText("もう一度生成");
 });
 
 test("failure surfaces a retry that succeeds", async ({ page, request }) => {
@@ -78,10 +78,10 @@ test("failure surfaces a retry that succeeds", async ({ page, request }) => {
     "生成に失敗しました",
     { timeout: 15_000 },
   );
-  const retry = page.locator("#conversation", { hasText: "もう一度送る" });
+  const retry = page.locator("#conversation", { hasText: "もう一度生成" });
   await expect(retry).toBeVisible({ timeout: 15_000 });
   // The arm is consumed: the retry run succeeds deterministically.
-  await page.getByRole("button", { name: "もう一度送る" }).click();
+  await page.getByRole("button", { name: "もう一度生成" }).click();
   await expect(page.locator("#conversation")).toContainText(
     `echo:${TEXT_FAIL}`,
     { timeout: 15_000 },
