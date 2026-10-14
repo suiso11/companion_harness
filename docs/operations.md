@@ -2242,7 +2242,10 @@ under owned `/tmp/opencode/calendar-resume-XFncqG`, traces on):
   only, no source-SHA re-verification, no live claims):
   `docs/evidence/calendar-readonly-profile/smoke-profile.result.json`
   (22/22) and `cli-profile.result.json` (actual `pnpm start`
-  missing-credential acceptance, 10/10).
+  missing-credential acceptance; CORRECTED 2026-10-14: reran full
+  acceptance with valid local account `normal`, 12/12 — the prior
+  `me@example.com` env is rejected by the profile account grammar
+  `^[a-z0-9_-]{1,64}$`, so it could not have produced a cold start).
 
 Branch-status note (CURRENT, supersedes the base-line residual table's
 "no profile anywhere in this branch" row for THIS branch only): the
@@ -2273,9 +2276,14 @@ browser or full-suite claim). Linux, Node 24.12.0, pnpm 11.25.0:
   (still 2 rows); old generic target refresh through the new provider
   fails `reference_not_found` with **0 `get` calls**.
 - Retained: `docs/evidence/calendar-readonly-profile/
-  pr23-final-proof.result.json` (commands + concise smoke JSON).
-  Prior `smoke-profile.result.json` (22/22) and
-   `cli-profile.result.json` (10/10) unchanged.
+  pr23-final-proof.result.json` (focused commands + concise smoke JSON
+  + historical_reference; CORRECTED 2026-10-14: full `pnpm test` and both
+  Playwright suites were never run in this focused pass, so they are
+  recorded only as historical references to the resume-calendar-default
+  battery above, not as PR23 results).
+  Prior `smoke-profile.result.json` (22/22) unchanged;
+   `cli-profile.result.json` corrected separately (valid account
+  `normal` rerun, see resume note above).
 
 ## M5 decision-turn retry denial (2026-10-14)
 
