@@ -2470,3 +2470,65 @@ EXTERNALLY GATED (not code, needs upstream decision/proof): write-capable
 provider pin + tool-schema/API choice + OAuth scope selection, positive
 deletion contract adoption, fresh OAuth/live/manual verification. No
 guessed deletion positives or write capability claimed.
+
+## M5 decision-turn retry denial (2026-10-14)
+
+Fixes the §18 review finding on `origin/master` (`2474572`):
+`repository.postRetry` accepted `action_approval` / `action_rejection`
+Turns and queued a generic Run for them. A rejection Turn owns no Run
+and an approval Turn owns its Action Run, so the generic generation
+retry could duplicate or fabricate an external write; a terminal
+(failed/unknown/abandoned/cancelled) Action must never be re-executed
+through it. Pre-fix ground truth (throwaway repo/API smoke over real
+SQLite, removed after this note): retry on a rejection Turn was
+ACCEPTED (`202`, new queued generic Run), and retry on an approval Turn
+failed only by accident of `UNIQUE(turn_id, attempt)` surfacing as a
+misleading `409 session_busy`.
+
+Fixed externally visible contract: the generic retry
+(`POST /api/sessions/:sessionId/turns/:turnId/retries`) is
+**user_text-only**. A decision Turn is rejected with the existing fixed
+`400 validation_error` (`request validation failed`) with no new Run,
+no events, no execution/grant change, no allocator bump, and no
+idempotency persistence (a second key is denied identically; a stored
+pre-fix success never replays). Ordinary failed/abandoned `user_text`
+retry is unchanged (still `202`, same Turn, new queued Run).
+
+- `packages/kernel/src/repository.ts`: `postRetry` parses the owned
+  Turn's immutable `input_json` immediately after the session/turn
+  ownership check and throws the existing `RepositoryValidationError`
+  for any non-`user_text` kind — before the idempotency lookup, the
+  busy admission, the `next_run_attempt` CAS, and every insert. Both
+  `app.ts` call sites (live route + draining replay) inherit the denial
+  through the existing `validation_error` mapping; no new error code,
+  schema, or shim.
+- `packages/contracts/src/http.ts`: `PostRetryRequest` doc states the
+  exact user_text-only policy (schema unchanged).
+- `apps/server/src/ui/reducer.ts` + `apps/server/src/ui/client.ts`:
+  pure `isRetryableTurnKind` policy (unknown kinds fail closed) plus a
+  client Turn-kind map hydrated from the ACTUAL history projection (and
+  seeded `user_text` for fresh sends/retries). The failure-only retry
+  control is appended only for `user_text` Turns and `retry()` refuses a
+  known decision Turn locally with the same fixed notice; reloaded
+  action results already render no control (`buildTurn` early return)
+  and are unchanged.
+- Regressions: `apps/server/test/proposals.test.ts` gains the
+  decision-turn denial battery over real SQLite/Hono (approval retry
+  400 while queued AND after terminal pre-marker cancel with
+  turns/runs/events/executions/grants/idempotency unchanged + approval
+  projection intact; rejection retry 400 twice with counts unchanged +
+  single rejection Turn + null execution; `user_text` retry still 202
+  with one new queued Run); `apps/server/test/action_ui.test.ts` pins
+  `isRetryableTurnKind` (`user_text` only, both decision kinds and
+  unknown inputs denied).
+- Observed final-once verification (Linux, Node 24.12.0): focused
+  `proposals` 6/6 + `action_ui` 9/9 green; root `tsc --noEmit` exit 0;
+  real-chromium browser proof on the production UI bundle via the
+  existing Calendar fake harness (throwaway spec, removed after this
+  note) 2/2 — rejection retry 400 twice with 0 writes and no retry
+  control before/after reload, unknown-approval retry 400 with exactly
+  1 write and no retry control before/after reload; existing M3
+  `failure surfaces a retry that succeeds` 1/1 (ordinary text retry
+  preserved in the real browser). Throwaway smokes/specs and
+   `test-results/` removed; no `pnpm` dependency change (offline
+   store-link install only).

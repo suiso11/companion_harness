@@ -23,6 +23,7 @@ import {
   type ExecutionStatus,
   INITIAL_RUN_VIEW,
   isCorruptCursor,
+  isRetryableTurnKind,
   type ProposalStatus,
   parseCancelRunStatus,
   type ReceiptOutcome,
@@ -349,6 +350,14 @@ class ConversationApp {
   private sending = false;
   /** Run -> Turn ownership for failure-only retry (§16.6 exact). */
   private readonly runTurns = new Map<string, string>();
+  /**
+   * Turn -> history `kind` (`user_text` / `action_approval` /
+   * `action_rejection`), hydrated from the ACTUAL history projection.
+   * The failure-only retry control is offered only for `user_text` Turns
+   * (§18.4/§18.6): decision Turns never re-execute through the generic
+   * retry, so their failed/abandoned Action runs render no retry control.
+   */
+  private readonly turnKinds = new Map<string, string>();
   private sse: EventSource | null = null;
   private fallbackTimer: number | null = null;
 
@@ -652,6 +661,23 @@ class ConversationApp {
   private historyHasMore = false;
   private loadingOlder = false;
 
+  /**
+   * Record the ACTUAL history `kind` for a Turn so the failure-only retry
+   * gate can tell a `user_text` Turn from an M5 decision Turn (§18.4).
+   * The gate itself fails closed: only a recorded `user_text` kind ever
+   * enables the control.
+   */
+  private trackTurnKind(item: HistoryItemView): void {
+    if (
+      typeof item.turnId === "string" &&
+      item.turnId.length > 0 &&
+      typeof item.kind === "string" &&
+      item.kind.length > 0
+    ) {
+      this.turnKinds.set(item.turnId, item.kind);
+    }
+  }
+
   private async hydrateHistory(): Promise<void> {
     if (this.sessionId === null) {
       return;
@@ -700,7 +726,9 @@ class ConversationApp {
     for (let index = pages.length - 1; index >= 0; index -= 1) {
       const items = (pages[index] ?? []) as HistoryItemView[];
       for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
-        this.renderTurn(items[itemIndex] as HistoryItemView);
+        const item = items[itemIndex] as HistoryItemView;
+        this.trackTurnKind(item);
+        this.renderTurn(item);
       }
     }
     this.renderOlderButton();
@@ -767,7 +795,9 @@ class ConversationApp {
       for (let index = pages.length - 1; index >= 0; index -= 1) {
         const items = (pages[index] ?? []) as HistoryItemView[];
         for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
-          const node = this.buildTurn(items[itemIndex] as HistoryItemView);
+          const item = items[itemIndex] as HistoryItemView;
+          this.trackTurnKind(item);
+          const node = this.buildTurn(item);
           this.list.insertBefore(node, anchor);
         }
       }
@@ -1999,6 +2029,9 @@ class ConversationApp {
       this.clearPendingKey();
       this.activeTurnId = body.turnId;
       this.runTurns.set(runId, body.turnId);
+      // A fresh send always creates a `user_text` Turn (§12.2), so the
+      // failure-only retry gate knows its kind even before hydration.
+      this.turnKinds.set(body.turnId, "user_text");
       this.subscribe(runId);
       return;
     }
@@ -2096,9 +2129,19 @@ class ConversationApp {
     // the「停止しました」notice and keeps the run active until terminal.
   }
 
-  /** Failure-only retry (§16.6 exact): failed/abandoned views only. */
+  /**
+   * Failure-only retry (§16.6 exact): failed/abandoned views only, and
+   * `user_text` Turns only (§18.4/§18.6). A decision Turn is never posted:
+   * the server denies it with `400 validation_error`, so a locally known
+   * decision Turn is refused here with the same fixed notice as a denied
+   * retry instead of a wasted request.
+   */
   private async retry(turnId: string): Promise<void> {
     if (this.sessionId === null || this.activeRunId !== null) {
+      return;
+    }
+    if (!isRetryableTurnKind(this.turnKinds.get(turnId))) {
+      this.showNotice("再試行できませんでした");
       return;
     }
     const key = crypto.randomUUID();
@@ -2121,6 +2164,9 @@ class ConversationApp {
     if (posted.status === 202 && typeof runId === "string") {
       this.activeTurnId = turnId;
       this.runTurns.set(runId, turnId);
+      // A retried Turn is always `user_text` (the guard above + the server
+      // contract), so the next failure can offer the control again.
+      this.turnKinds.set(turnId, "user_text");
       this.subscribe(runId);
       return;
     }
@@ -2526,7 +2572,17 @@ class ConversationApp {
       this.finishActiveRun();
       if (claimTerminalHydration(this.terminalHydrated, runId)) {
         void this.hydrateHistory().then(() => {
-          if (retryVisible && turnId !== null && turnId !== undefined) {
+          // M5 decision-turn denial (§18.4/§18.6): the retry control is
+          // appended only for `user_text` Turns (M3 title retained).
+          // Hydration above refreshed the Turn kinds, so a failed/abandoned
+          // Action run renders its actual receipt from history with no
+          // retry control here.
+          if (
+            retryVisible &&
+            turnId !== null &&
+            turnId !== undefined &&
+            isRetryableTurnKind(this.turnKinds.get(turnId))
+          ) {
             const retryButton = el("button", "もう一度生成");
             retryButton.addEventListener("click", () => {
               void this.retry(turnId);
