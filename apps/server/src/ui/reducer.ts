@@ -410,6 +410,18 @@ export function actionDecisionIntentText(
 }
 
 /**
+ * M5 decision-turn retry denial (§18.4/§18.6, pure policy): the generic
+ * generation retry ("もう一度送る", failure-only per §16.6) is offered only
+ * for `user_text` Turns. Decision Turns never re-execute through it: an
+ * `action_rejection` Turn owns no Run and an `action_approval` Turn owns
+ * its Action Run, so retrying either could duplicate or fabricate an
+ * external write. Unknown kinds fail closed (no retry).
+ */
+export function isRetryableTurnKind(kind: unknown): boolean {
+  return kind === "user_text";
+}
+
+/**
  * Validated parse of a cancel `200` response body (`CancelRunResponse`):
  * returns the actual `run.status` string, or `null` when the body is not
  * the exact `{ run: { id, status } }` shape. The caller claims a stop ONLY

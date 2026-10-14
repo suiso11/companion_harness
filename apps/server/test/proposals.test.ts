@@ -336,3 +336,175 @@ describe("C18 proposal decisions", () => {
     }
   });
 });
+
+describe("M5 decision-turn retry denial (§18.4/§18.6)", () => {
+  function rowCounts(f: Fixture): Record<string, number> {
+    const count = (table: string): number =>
+      (
+        f.raw.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as {
+          n: number;
+        }
+      ).n;
+    return {
+      turns: count("turns"),
+      runs: count("runs"),
+      runEvents: count("run_events"),
+      executions: count("action_executions"),
+      grants: count("action_execution_grants"),
+      idempotency: count("api_idempotency"),
+    };
+  }
+
+  async function retryTurn(
+    f: Fixture,
+    sessionId: string,
+    turnId: string,
+  ): Promise<Response> {
+    return postJson(
+      f.app,
+      `/api/sessions/${sessionId}/turns/${turnId}/retries`,
+      {},
+      { "idempotency-key": randomUUID() },
+    );
+  }
+
+  it("retry on the approval Turn is 400 with no new Run/events/execution/grant, while queued and after terminal cancel", async () => {
+    const f = await makeApp();
+    try {
+      const { sessionId, proposalId, hash } = await seedProposal(f);
+      const approved = await postJson(
+        f.app,
+        `/api/sessions/${sessionId}/proposals/${proposalId}/approve`,
+        { proposalHash: hash },
+        { "idempotency-key": randomUUID() },
+      );
+      expect(approved.status).toBe(202);
+      const approvedBody = (await approved.json()) as { runId: string };
+      const approvalTurnId = (
+        f.repo
+          .getHistory(sessionId, { limit: 10 })
+          .items.find((i) => i.kind === "action_approval") as
+          | { turnId: string }
+          | undefined
+      )?.turnId;
+      expect(typeof approvalTurnId).toBe("string");
+
+      // While the Action Run is still queued: the kind denial fires before
+      // the session-busy admission, so no misleading 409 and no mutation.
+      const beforeQueued = rowCounts(f);
+      const deniedQueued = await retryTurn(f, sessionId, approvalTurnId ?? "");
+      expect(deniedQueued.status).toBe(400);
+      expect(await deniedQueued.json()).toEqual({
+        error: { code: "validation_error", message: "request validation failed" },
+      });
+      expect(rowCounts(f)).toEqual(beforeQueued);
+
+      // Settle the Action Run pre-marker (exact cancel boundary, zero
+      // writes), then retry the now-terminal approval: still 400, still no
+      // new Run/events/execution/grant — a failed/unknown/abandoned Action
+      // is never re-executed through the generic retry.
+      f.repo.cancelRun(sessionId, approvedBody.runId, { now: Date.now() });
+      const beforeTerminal = rowCounts(f);
+      const deniedTerminal = await retryTurn(f, sessionId, approvalTurnId ?? "");
+      expect(deniedTerminal.status).toBe(400);
+      expect(await deniedTerminal.json()).toEqual({
+        error: { code: "validation_error", message: "request validation failed" },
+      });
+      expect(rowCounts(f)).toEqual(beforeTerminal);
+
+      // The approval projection is untouched: one decision Turn, one Action
+      // Run, one execution + one unconsumed grant, zero external writes.
+      const items = f.repo.getHistory(sessionId, { limit: 10 }).items;
+      expect(items.filter((i) => i.kind === "action_approval").length).toBe(1);
+      const view = f.repo.getProposalExecution(sessionId, proposalId);
+      expect(view.runId).toBe(approvedBody.runId);
+    } finally {
+      f.close();
+    }
+  });
+
+  it("retry on the rejection Turn is 400 with no new Run and the rejection intact", async () => {
+    const f = await makeApp();
+    try {
+      const { sessionId, proposalId, hash } = await seedProposal(f);
+      const rejected = await postJson(
+        f.app,
+        `/api/sessions/${sessionId}/proposals/${proposalId}/reject`,
+        { proposalHash: hash },
+      );
+      expect(rejected.status).toBe(200);
+      const rejectedBody = (await rejected.json()) as {
+        decisionTurnId: string;
+      };
+
+      const before = rowCounts(f);
+      const denied = await retryTurn(f, sessionId, rejectedBody.decisionTurnId);
+      expect(denied.status).toBe(400);
+      expect(await denied.json()).toEqual({
+        error: { code: "validation_error", message: "request validation failed" },
+      });
+      // A second key is denied the same way: the denial persists nothing to
+      // replay, and the rejection stays exactly one Turn with no Run.
+      const deniedAgain = await retryTurn(
+        f,
+        sessionId,
+        rejectedBody.decisionTurnId,
+      );
+      expect(deniedAgain.status).toBe(400);
+      expect(rowCounts(f)).toEqual(before);
+
+      const items = f.repo.getHistory(sessionId, { limit: 10 }).items;
+      expect(items.filter((i) => i.kind === "action_rejection").length).toBe(1);
+      expect(items.some((i) => i.kind === "action_approval")).toBe(false);
+      const view = f.repo.getProposalExecution(sessionId, proposalId);
+      expect(view.runId).toBeNull();
+      expect(view.status).toBeNull();
+    } finally {
+      f.close();
+    }
+  });
+
+  it("user_text retry still queues a new Run on the same Turn", async () => {
+    const f = await makeApp();
+    try {
+      const sessionId = f.repo.createSession({ key: randomUUID(), now: T0 })
+        .body.sessionId;
+      const sent = await postJson(
+        f.app,
+        `/api/sessions/${sessionId}/messages`,
+        { text: "hello" },
+        { "idempotency-key": randomUUID() },
+      );
+      expect(sent.status).toBe(202);
+      const sentBody = (await sent.json()) as {
+        turnId: string;
+        run: { id: string };
+      };
+      await f.repo.startRun(sentBody.run.id, { now: T0 + 1 });
+      f.repo.completeRun(
+        sentBody.run.id,
+        { version: 1, text: "hi" },
+        { now: T0 + 2 },
+      );
+
+      const runsBefore = (
+        f.raw.prepare("SELECT COUNT(*) AS n FROM runs").get() as { n: number }
+      ).n;
+      const retried = await retryTurn(f, sessionId, sentBody.turnId);
+      expect(retried.status).toBe(202);
+      const retriedBody = (await retried.json()) as {
+        turnId: string;
+        run: { id: string; attempt: number; status: string };
+      };
+      expect(retriedBody.turnId).toBe(sentBody.turnId);
+      expect(retriedBody.run.status).toBe("queued");
+      expect(retriedBody.run.id).not.toBe(sentBody.run.id);
+      expect(
+        (f.raw.prepare("SELECT COUNT(*) AS n FROM runs").get() as { n: number })
+          .n,
+      ).toBe(runsBefore + 1);
+    } finally {
+      f.close();
+    }
+  });
+});

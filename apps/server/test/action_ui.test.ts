@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import {
   type ActionCardInput,
   actionCardModel,
+  isRetryableTurnKind,
   parseCancelRunStatus,
   receiptOutcomeText,
 } from "../src/ui/reducer.js";
@@ -118,6 +119,18 @@ describe("C22 action card model", () => {
       expect(text).not.toContain("停止");
     }
     expect(receiptOutcomeText(null)).toBe("");
+  });
+
+  it("offers the generic retry only for user_text Turns (decision Turns never re-execute)", () => {
+    // The failure-only retry control (§16.6) stays available for ordinary
+    // generation Turns, while both M5 decision kinds fail closed so a
+    // failed/abandoned Action run can never be re-driven through it.
+    expect(isRetryableTurnKind("user_text")).toBe(true);
+    expect(isRetryableTurnKind("action_approval")).toBe(false);
+    expect(isRetryableTurnKind("action_rejection")).toBe(false);
+    for (const unknown of [undefined, null, "", "completed", 1, {}]) {
+      expect(isRetryableTurnKind(unknown)).toBe(false);
+    }
   });
 
   it("parses the actual cancel run status for the stop-claim gate", () => {
