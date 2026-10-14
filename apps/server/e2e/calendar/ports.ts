@@ -58,6 +58,13 @@ export const FAKE_BINDING_DISPLAY_NAME = "calendar-fake-e2e";
 export const EVENT_ID = "e2e-event-1";
 export const EVENT_TITLE_V1 = "E2E Standup";
 export const EVENT_TITLE_V2 = "E2E Standup (moved 11:00)";
+/**
+ * Adversarial upstream title for the preview-ambiguity regression: it begins
+ * with the legacy stored-preview tool prefix, so only the unambiguous new
+ * preview marker keeps receipt/history renderers from cutting the real title.
+ */
+export const EVENT_TITLE_TOOL_PREFIXED =
+  "calendar.reschedule: quarterly planning";
 export const EVENT_DESCRIPTION = "notes: q3 planning";
 export const EVENT_START = "2026-10-13T09:00:00Z";
 /** Wire-normalized start (ISO with milliseconds) as the REAL adapter emits. */

@@ -319,11 +319,19 @@ function previewTitle(raw: string): string {
 }
 
 /**
- * Deterministic target-aware human preview (C22 §18.9): immutable normalized
- * event title plus the session rN citation plus the staged start/end. No
- * tool name, no UUID/provider ids, no upstream reads — everything derives
- * from the frozen staged triple (target row + normalized snapshot text +
- * staged input). Same `{ summary }` seam, same hash coverage.
+ * Deterministic target-aware human preview (C22 §18.9): the unambiguous
+ * `対象イベント: ` marker, then the immutable normalized event title in FULL
+ * (never truncated at the front, never dropped), plus the session rN
+ * citation plus the staged start/end. No tool name, no UUID/provider ids,
+ * no upstream reads — everything derives from the frozen staged triple
+ * (target row + normalized snapshot text + staged input). Same
+ * `{ summary }` seam, same hash coverage.
+ *
+ * The fixed leading marker is load-bearing: an arbitrary normalized title
+ * may itself begin with `calendar.reschedule:` (the LEGACY stored-preview
+ * prefix still stripped by the receipt/history renderers for historical
+ * rows), so the raw title must never sit at position 0 where it could be
+ * mistaken for that legacy prefix and cut from receipts/history.
  */
 function buildPreview(params: {
   title: string;
@@ -332,7 +340,7 @@ function buildPreview(params: {
   end: string;
 }): { summary: string } {
   return {
-    summary: `${previewTitle(params.title)} (r${params.ordinal}): start=${params.start} end=${params.end}`,
+    summary: `対象イベント: ${previewTitle(params.title)} (r${params.ordinal}): start=${params.start} end=${params.end}`,
   };
 }
 
