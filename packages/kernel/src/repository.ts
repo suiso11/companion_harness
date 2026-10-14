@@ -1003,6 +1003,26 @@ export function createKernelRepository(
           `turn ${turn} not found in session ${session}`,
         );
       }
+      const turnRow = ownedTurnRow;
+      // M5 decision-turn retry denial (§18.4/§18.6): the generic generation
+      // retry is user_text-only. A rejection Turn owns no Run and an
+      // approval Turn owns its Action Run; re-running either through this
+      // path could duplicate or fabricate an external write, so both are
+      // rejected BEFORE any idempotency lookup (no replay of a stored
+      // success), allocator CAS, Run/event insert, or grant side effect.
+      const turnInput = parseOrValidation(
+        () => parseTurnInput(JSON.parse(turnRow.input_json)),
+        "retry turn input_json",
+      );
+      if (turnInput.kind !== "user_text") {
+        throw new RepositoryValidationError(
+          "retry is only available for user_text turns",
+        );
+      }
+      parseOrValidation(
+        () => FrozenContextSchema.parse(JSON.parse(turnRow.frozen_context)),
+        "retry turn frozen_context",
+      );
       const existing = toStoredResponse(db, scope, key);
       if (existing !== null) {
         if (existing.requestHash !== hash) {
@@ -1017,16 +1037,6 @@ export function createKernelRepository(
         }
         return { status: existing.responseStatus, body, replayed: true };
       }
-      const turnRow = ownedTurnRow;
-      // Retry reuses the original immutable input/frozen context: read + validate only.
-      parseOrValidation(
-        () => parseTurnInput(JSON.parse(turnRow.input_json)),
-        "retry turn input_json",
-      );
-      parseOrValidation(
-        () => FrozenContextSchema.parse(JSON.parse(turnRow.frozen_context)),
-        "retry turn frozen_context",
-      );
       const busy = db
         .prepare(
           `SELECT id FROM runs WHERE session_id = ? AND status IN ${ACTIVE_STATUSES_SQL} LIMIT 1`,
