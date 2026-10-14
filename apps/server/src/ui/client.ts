@@ -925,28 +925,46 @@ class ConversationApp {
         const card = this.actionCards.get(summary.proposalId);
         if (
           card !== undefined &&
-          (card.terminal || card.runId !== null || card.deciding)
+          (card.terminal ||
+            card.runId !== null ||
+            card.deciding ||
+            card.status !== "pending")
         ) {
           // Decision in flight (or already accepted): a stale pending list
           // must not downgrade the card back to an actionable pending card.
+          // The status check keeps an authoritative approved card lacking a
+          // runId (lost-approve ownership) actionable-proof.
           continue;
         }
         this.ensureActionCard(summary);
       }
     }
-    // Execution + receipt reads for every decided/approved proposal.
+    // Execution + receipt reads for every decided proposal. History
+    // hydration is batched exactly once per sync: N historic
+    // rejected/expired proposals must not multiply the full history GET.
+    let needHistory = false;
     for (const summary of summaries) {
       if (summary.status === "pending") {
         continue;
       }
-      await this.syncExecution(summary);
+      if (await this.syncExecution(summary)) {
+        needHistory = true;
+      }
+    }
+    if (needHistory) {
+      await this.hydrateHistory();
     }
   }
 
-  /** Read the ACTUAL execution status + receipt and update/retire a card. */
-  private async syncExecution(summary: ProposalSummaryView): Promise<void> {
+  /**
+   * Read the ACTUAL execution status + receipt and update/retire a card.
+   * Returns true when the caller owns the single batched history hydration
+   * for this sync (retired rejection/expiry or a newly terminal receipt);
+   * never hydrates directly so historic rejections cannot multiply GETs.
+   */
+  private async syncExecution(summary: ProposalSummaryView): Promise<boolean> {
     if (this.sessionId === null) {
-      return;
+      return false;
     }
     // Authoritative non-pending ownership BEFORE the execution GET: a
     // server-decided summary owns the local card even when the execution
@@ -954,7 +972,10 @@ class ConversationApp {
     // summary retires on the real list state; an approved one becomes
     // execution-owned with disabled decisions while preserving any known
     // run. Read-only, bounded (existing watch/sync recover; no new poll).
+    // The watch is started only AFTER the current execution GET below, so
+    // this call never runs two concurrent execution reads for one proposal.
     const owned = this.actionCards.get(summary.proposalId);
+    let claimedApproved = false;
     if (
       owned !== undefined &&
       !owned.terminal &&
@@ -968,8 +989,7 @@ class ConversationApp {
       if (summary.status === "rejected" || summary.status === "expired") {
         this.clearApproveKey(summary.proposalId);
         this.removeActionCard(summary.proposalId);
-        await this.hydrateHistory();
-        return;
+        return true;
       }
       this.renderActionCard(
         owned,
@@ -978,10 +998,7 @@ class ConversationApp {
         this.cardModel(summary, null),
         "",
       );
-      // Bounded recovery only: the existing execution watch (deduped,
-      // TTL-bounded) retries the execution read below when it resumes.
-      // No new polling path is added.
-      void this.watchAction(summary.proposalId, summary);
+      claimedApproved = true;
     }
     let fetched: { status: number; body: unknown };
     try {
@@ -989,14 +1006,27 @@ class ConversationApp {
         `/api/sessions/${encodeURIComponent(this.sessionId)}/proposals/${encodeURIComponent(summary.proposalId)}/execution`,
       );
     } catch {
-      return;
+      if (claimedApproved) {
+        void this.watchAction(summary.proposalId, summary);
+      }
+      return false;
     }
     if (fetched.status !== 200) {
-      return;
+      if (claimedApproved) {
+        void this.watchAction(summary.proposalId, summary);
+      }
+      return false;
     }
     const view = fetched.body as ProposalExecutionView;
     if (typeof view.proposalId !== "string") {
-      return;
+      return false;
+    }
+    // A terminal receipt already rendered wins over any delayed live
+    // response: a stale live read must never overwrite the receipt or
+    // re-offer Stop ownership.
+    const preCard = this.actionCards.get(view.proposalId);
+    if (preCard?.terminal) {
+      return false;
     }
     // Every execution read refreshes the composer Stop routing for the
     // owning run, so a marker that commits while the page lives hides the
@@ -1021,13 +1051,15 @@ class ConversationApp {
       // Decided without an execution (rejection/expiry): the card retires
       // on the REAL summary and the deterministic history intent carries
       // the lifecycle. Approved/history receipts keep their own path below.
+      // Historic rejections with no local card report no history need, so a
+      // sync over N historic rejections hydrates at most once.
       this.clearApproveKey(view.proposalId);
       if (card !== undefined) {
         card.deciding = false;
         this.removeActionCard(view.proposalId);
+        return true;
       }
-      await this.hydrateHistory();
-      return;
+      return false;
     }
     if (terminal && view.status !== null) {
       // Terminal: the REAL receipt (or the real fixed failure text) is
@@ -1036,7 +1068,8 @@ class ConversationApp {
       // execution always ends on a visible verified receipt and every other
       // terminal on its real failure text. The deterministic decision intent
       // and the fresh result citation additionally come from the history
-      // projection. No card (e.g. after a reload): nothing to render.
+      // projection. No card (e.g. after a reload): nothing to render, but the
+      // single batched history refresh still lands the receipt/citation.
       this.clearApproveKey(view.proposalId);
       if (card !== undefined) {
         card.runId = view.runId ?? card.runId;
@@ -1052,11 +1085,10 @@ class ConversationApp {
           actionErrorCodeText(view.errorCode ?? null),
         );
       }
-      await this.hydrateHistory();
-      return;
+      return true;
     }
     if (card === undefined) {
-      return;
+      return false;
     }
     card.runId = view.runId ?? card.runId;
     card.deciding = false;
@@ -1081,6 +1113,7 @@ class ConversationApp {
     ) {
       this.watchAction(view.proposalId, summary);
     }
+    return false;
   }
 
   /**
@@ -1209,6 +1242,7 @@ class ConversationApp {
         existing.terminal ||
         existing.runId !== null ||
         existing.deciding ||
+        existing.status !== "pending" ||
         existing.hash !== summary.hash
       ) {
         return;
@@ -1652,13 +1686,13 @@ class ConversationApp {
         null,
       );
     } catch {
-      // Transport failure BEFORE any authoritative answer: nothing is
-      // claimed rejected. Release decision ownership and reconcile the
-      // ACTUAL repository state — a still-pending summary restores the
-      // buttons/deadline via sync, an accepted rejection retires there.
-      card.deciding = false;
+      // Transport failure with an unknown server outcome (the reject may
+      // already be durable server-side). Hold decision ownership across ONE
+      // authoritative re-read instead of relying on the deduped background
+      // sync: that sync is dropped while an older sync is still in flight,
+      // which would leave the buttons disabled and consume the pending timer.
       this.showNotice("却下できませんでした。もう一度お試しください");
-      this.scheduleActionSync();
+      await this.reconcileLostReject(card);
       return;
     }
     card.deciding = false;
@@ -1670,6 +1704,84 @@ class ConversationApp {
       return;
     }
     this.showNotice("却下できませんでした。内容を確認してください");
+    this.scheduleActionSync();
+  }
+
+  /**
+   * Authoritative lost-reject reconciliation (reject POST transport failure
+   * with an unknown server outcome). Decision ownership (`deciding`) is held
+   * across the single proposals re-read, so the bounded pending-expiry timer
+   * and any stale pending list can neither retire nor downgrade the card
+   * while the server truth settles, and the deduped background sync can never
+   * drop this recovery while an older sync is in flight. A server-rejected or
+   * expired summary retires on the real list state; a server-approved summary
+   * takes approved ownership immediately (timer cleared, decisions disabled);
+   * a still-pending summary restores controls with a fresh bounded timer; an
+   * unreadable list releases ownership and falls back to the normal sync.
+   */
+  private async reconcileLostReject(card: ActionCard): Promise<void> {
+    if (this.actionCards.get(card.proposalId) !== card) {
+      return;
+    }
+    let current: ProposalSummaryView | null = null;
+    try {
+      const sessionId = this.sessionId;
+      if (sessionId !== null) {
+        const listed = await fetchJson(
+          `/api/sessions/${encodeURIComponent(sessionId)}/proposals`,
+        );
+        const items = (listed.body as { proposals?: unknown }).proposals;
+        if (listed.status === 200 && Array.isArray(items)) {
+          current =
+            (items as unknown[]).find(
+              (item): item is ProposalSummaryView =>
+                isProposalSummary(item) && item.proposalId === card.proposalId,
+            ) ?? null;
+        }
+      }
+    } catch {
+      current = null;
+    }
+    if (this.actionCards.get(card.proposalId) !== card) {
+      return;
+    }
+    if (
+      current !== null &&
+      (current.status === "rejected" || current.status === "expired")
+    ) {
+      card.deciding = false;
+      this.clearApproveKey(card.proposalId);
+      this.removeActionCard(card.proposalId);
+      await this.hydrateHistory();
+      return;
+    }
+    if (current !== null && current.status === "approved") {
+      this.clearPendingExpiry(card);
+      card.deciding = false;
+      card.status = current.status;
+      this.renderActionCard(
+        card,
+        current,
+        null,
+        this.cardModel(current, null),
+        "",
+      );
+      void this.watchAction(card.proposalId, current);
+      return;
+    }
+    card.deciding = false;
+    if (current !== null && current.status === "pending") {
+      card.deadline = current.expiresAt;
+      card.status = current.status;
+      this.renderActionCard(
+        card,
+        current,
+        null,
+        this.cardModel(current, null),
+        "",
+      );
+      this.schedulePendingExpiry(card);
+    }
     this.scheduleActionSync();
   }
 
@@ -1750,7 +1862,10 @@ class ConversationApp {
         if (card === undefined || card.terminal) {
           return;
         }
-        await this.syncExecution(summary);
+        const needHistory = await this.syncExecution(summary);
+        if (needHistory) {
+          await this.hydrateHistory();
+        }
         if (!this.actionCards.has(proposalId)) {
           return;
         }

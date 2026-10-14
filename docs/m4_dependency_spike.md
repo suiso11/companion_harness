@@ -606,5 +606,29 @@ request field NAMES (never raw IDs, cursors, query text, emails or error
 body), the observed MCP envelope shape, and the fixed consumer error. The
 actual HTTP status stays **UNKNOWN / not captured**. Raw test fixtures may
 carry synthetic data, but new docs tables carry no raw PII or message IDs.
-This metadata format adds no logger, telemetry, status API or privacy
-weakening.
+ This metadata format adds no logger, telemetry, status API or privacy
+ weakening.
+
+## Spike conclusion — readonly write boundary (2026-10-14, source-only)
+
+Status: research conclusion only. No scopes broadened, no action enabled,
+no keys or policy changed, no live writes performed or authorized.
+
+- The existing readonly surface cannot write: the adopted
+  `3.0.0-readonly.2` candidate exposes exactly
+  `list-events`/`search-events`/`get-event` (live-wire hashes
+  `81222b89…`/`d48ba36e…`/`8c6736e2…`); `list-calendars` was deliberately
+  removed with the `calendarlist` scope and must not be restored to
+  satisfy the proposal-era checklist.
+- The dormant broad `UpdateEventHandler` (`src/handlers/core/
+  UpdateEventHandler.ts` at pinned fork commit `6939311`) contains no
+  `If-Match` / etag / 412 / precondition handling (verified by source
+  read at the pin; Companion-side grep for `If-Match`/`UpdateEvent` is
+  likewise empty, and this codebase ships no production write binding).
+- A dedicated narrow reschedule therefore needs: an exact-etag
+  conditional patch, 412-stale handling, no automatic resend, and a
+  post-write readback — none of which exists today.
+- Recurring-event semantics, scope/tool choice, and write consent remain
+  unresolved source-only decisions for the orchestrator/user.
+- 404/410/`cancelled`/omission remain errors/unknown: no
+  deletion-positive mapping is fabricated, and C11-01 stays BLOCKED.

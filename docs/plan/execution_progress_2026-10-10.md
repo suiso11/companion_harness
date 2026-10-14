@@ -61,3 +61,22 @@ This document records the **current 2026-10-11 C06 accepted-202 active-run reloa
 ### C07 残り gate
 
 Phase 1/M3 全体、Windows 11 x64 manual smoke、M4/Phase 4 live adoption は未完了のまま。本 C07 evidence が閉じるのは PR #11 review code（`56b7952a…`）の remote CI だけであり、`docs: record current C07 …` という本 docs commit 自体の CI は **未観測（pending until observed）**で、この remote CI を流用しない。本節は product/source/config/dep 変更を含まない docs-only 更新であり、green 後の product tests は再実行していない。
+
+## 2026-10-14 追記：live readonly acceptance ledger（current profile）
+
+C06/C07 の履歴 snapshot は保持し、本節の authority ではない。現行 accepted activation は host-owned pinned `google-readonly` profile（parent-verified merged provenance：original-stack PR23 `9e9bb94` + PR24 merged、merged DELIVERY successors PR27/PR28 が main へ carry、reconciled not erased）。No code changes。
+
+| 項目 | 観測内容 |
+| --- | --- |
+| Pin / schema | fork `6939311…` / `3.0.0-readonly.2`、wire identity `google-calendar/3.0.0-readonly.2`、scope `events.readonly` のみ、3 live-wire hash が現行 adapter と一致。`list-calendars` は設計上 absent。 |
+| 7-row mapping | 提案期 checklist に対し：1) static ACCEPTED + user OAuth COMPLETED・authenticated live reads OBSERVED（unobserved は consent 画面 scope 表示のみ、reconsent 強制なし）、2) 意図的 UNAVAILABLE（readonly.2 で削除、不復元）、3) ACCEPTED、4) ACCEPTED（live search 成功）、5) PARTIAL（miss は固定 error、positive は BLOCKED）、6) ACCEPTED、7) ACCEPTED。live refresh は 2026-10-14 に OBSERVED（list 10/`list-events` x1、refresh `get-event` x1 のみで snapshot 10->11・新 rN・revision 不変、旧 rN は 0 wire で再 open 可、privacy 除外 0、3 tools/3 calls、page2 succeeded）。 |
+| Live 観測 | live read-only conversation が end-to-end completed（`run.completed`、search 成功、`reference.presented` + `[r1]`、turn selected）。`:3000` の `/health/live` + `/health/ready` は共に 200（本 worker の非破壊 probe、server 稼働維持）。repo throwaway scaffold は削除済み；private `/tmp/live-refresh-proof-LMZ0zi`（owned 3 SQLite files）は permission-blocked で残存、active process なし。sanitized counts/codes のみ。 |
+| 流用 counts（oc10 PRE-PR28-code-change baseline、rerun なし・current full-suite 主張なし） | lint 229 files 0 errors + 1 pre-existing info、両 typecheck exit 0、units 107/1307、real default Chromium 24/24、fake Calendar 26/26（action 21 / calendar 4 / tombstone 1）。CURRENT final（oc21 実測、4 PR28 race fixes 後；reviewer oc22 が strengthened PR28-2/4 non-vacuous を確認）：default 24/24 は prior 値のまま不変（rerun なし、test-only 変更）・calendar 30/30（action 25 + calendar 4 + tombstone 1）；final units 107 files / 1307 pass、両 typecheck exit 0、biome 229 files exit 0（pre-existing info 1）。 |
+| Spike 結論 | readonly に write 不可。dormant broad `UpdateEventHandler` に `If-Match` なし（pin commit source 確認）。narrow reschedule は exact-etag conditional patch + 412 + no auto resend + readback が必要。recurring/scope/tool 選択・write consent は未解決 source-only。live write 非承認。 |
+| PR 処分 | PR23/PR24 merged（original stack）確認、merged DELIVERY successors PR27/PR28 が main へ carry（reconciled、not erased）。PR21/22 は evidence preserved を per-file 検証の上で comment + close（no merge/branch 削除/rebase）。fork PR2 は draft open のまま不触。 |
+
+残り genuine blocker：Windows 11 x64 manual smoke、positive deletion（C11-01 BLOCKED）、M5 live/write gates、fresh OAuth consent 画面 scope 表示のみ（OAuth COMPLETED・authenticated reads OBSERVED、別途 untouched decision、reconsent 強制なし）。詳細 ledger は `docs/operations.md`（"Live readonly acceptance ledger" + "PR21/PR22 superseded close"）。
+
+## 2026-10-14 追記：PR28-2/PR28-4 回帰の strengthening（test-only、再観測）
+
+review 指摘の通り PR28-2（stale route を approve 後に設置し list GET が続かず未発火）と PR28-4（reload で approved card が再生成されず guard 未到達）は vacuous だったため、`apps/server/e2e/calendar/action.spec.ts` のみを rework（production 無変更）：PR28-2 は pending 時の older list を hold し approved 所有（runId なし）後に stale 解放して downgrade なしを証明、PR28-4 は reload せず live card を維持し live execution read を hold して terminal render 後に stale 解放して receipt/Stop 安定を証明。いずれも deterministic request barrier + exact route hit 断言。再観測（test-only 変更後の final battery 一回）：units 107 files / 1307 pass、両 typecheck exit 0、biome 229 files exit 0（pre-existing info 1）、calendar browser 30/30（action 25 + calendar 4 + tombstone 1）；default 24/24 は prior 値で rerun なし。owned `apps/server/test-results/` 削除、port 4183–4186 listener なし。

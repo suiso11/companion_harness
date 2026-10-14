@@ -12,9 +12,12 @@ The proof artifacts cover the runtime side only (wire identity + live-wire
 hashes + behavior); the full commit/tree/lock verification before
 `npm ci --ignore-scripts` + `npm run build` is the documented installation
 prerequisite, not something the runtime re-verifies.
-Profile-adopted is NOT live-accepted: fresh user OAuth consent and live
-production verification are still pending, C11-01 stays BLOCKED, and no
-live-Google claim is made.
+Profile-adopted is the CURRENT accepted activation: a live read-only
+conversation completed end to end and live server health was observed on
+2026-10-14 (ledger in `docs/operations.md`, "Live readonly acceptance
+ledger"; sanitized counts/codes only). Still pending and NOT claimed:
+fresh consent-screen display re-observation, Windows 11 manual smoke,
+positive deletion evidence (C11-01 BLOCKED), and M5 live/write gates.
 
 Status (CURRENT, PR23 review fixes): (1) the profile/config linkage
 (frozen selector, completeness, injected conflicts, exact hint
@@ -320,6 +323,22 @@ only after the gate. Hash values deliberately absent.
   2) `list-calendars` ok; 3) `list-events` one page + `nextPageToken` round-trip;
   4) `search-events` q+window; 5) `get-event` 404 path; 6) write tool absent
   from `tools/list`; 7) stderr/log grep shows no tokens.
+
+  Current-profile mapping (2026-10-14; `readonly.2` deliberately removes the
+  `list-calendars` / `calendarlist` scope — row 2 is INTENTIONALLY
+  UNAVAILABLE and must not be restored to satisfy this proposal-era list):
+  1) static pin ACCEPTED (`calendar.events.readonly` only) + user OAuth
+  COMPLETED with authenticated live reads OBSERVED; only live
+  consent-screen scope display remains unobserved (never a missing-consent
+  claim, never force reconsent); 2) unavailable by design; 3) ACCEPTED
+  (one-page verbatim cursor); 4) ACCEPTED (live `calendar.search`
+  succeeded); 5) PARTIAL (miss → fixed `calendar_upstream_error`, never a
+  tombstone; positive BLOCKED); 6) ACCEPTED (events-only 3-tool surface,
+  actions disabled); 7) ACCEPTED by construction. Live
+  `reference.refresh` OBSERVED 2026-10-14 (real list 10 with cursor +
+  page2/query + real `get-event` refresh snapshot 10->11, new rN, prior
+  rN retained, privacy exclusions 0; fake-E2E-only status is HISTORICAL).
+  Full ledger: `docs/operations.md` ("Live readonly acceptance ledger").
 
 ## 5. Assumptions / evidence links
 

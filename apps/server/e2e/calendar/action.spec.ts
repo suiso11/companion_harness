@@ -934,3 +934,393 @@ test("lost approve response still retires the old timer and verifies (1 write)",
   }
   void meta;
 });
+
+/* ------------------------------------------------------------------ */
+/* PR28 review races (real UI + real fake seams, deterministic)        */
+/* ------------------------------------------------------------------ */
+
+test("PR28-1 lost reject during in-flight proposals sync recovers controls", async ({
+  page,
+  request,
+}) => {
+  await stageProposal(page);
+  // Hold every proposals list GET so a background sync stays in flight while
+  // the real reject POST aborts: the deduped sync alone must never own this
+  // recovery (it is dropped while in flight).
+  let releaseLists!: () => void;
+  const listGate = new Promise<void>((resolve) => {
+    releaseLists = resolve;
+  });
+  let holdLists = true;
+  try {
+    await page.route("**/proposals", async (route) => {
+      if (
+        holdLists &&
+        !route.request().url().includes("/approve") &&
+        !route.request().url().includes("/reject") &&
+        !route.request().url().includes("/execution")
+      ) {
+        await listGate;
+      }
+      await route.continue();
+    });
+    let firstReject = true;
+    await page.route("**/proposals/*/reject", async (route) => {
+      if (firstReject) {
+        firstReject = false;
+        await route.abort("failed");
+        return;
+      }
+      await route.continue();
+    });
+    await page.locator("#action-reject").click();
+    await expect(page.locator("#composer-notice")).toContainText(
+      "却下できませんでした",
+    );
+    // Release the held lists: the held decision ownership reconciles the real
+    // pending state with live controls and an intact timer.
+    holdLists = false;
+    releaseLists();
+    await expect(page.locator("#action-approve")).toBeEnabled({
+      timeout: 30_000,
+    });
+    await expect(page.locator("#action-reject")).toBeEnabled({
+      timeout: 30_000,
+    });
+    await expect(page.locator('[data-action-card="true"]')).toHaveAttribute(
+      "data-action-state",
+      /pending/,
+    );
+    // The retry is the real reject: durable history, no write.
+    const rejected = page.waitForResponse(
+      (res) =>
+        res.url().includes("/reject") && res.request().method() === "POST",
+    );
+    await page.locator("#action-reject").click();
+    expect((await rejected).status()).toBe(200);
+    await expect(
+      page.locator("#conversation [data-action-history='action_rejection']"),
+    ).toHaveCount(1, { timeout: 30_000 });
+    expect(await writeCalls(request)).toBe(0);
+  } finally {
+    try {
+      holdLists = false;
+      releaseLists();
+    } catch {
+      // Best effort.
+    }
+    await page.unroute("**/proposals").catch(() => {});
+    await page.unroute("**/proposals/*/reject").catch(() => {});
+  }
+});
+
+test("PR28-2 stale pending list cannot downgrade approved ownership without runId", async ({
+  page,
+  request,
+}) => {
+  await installClockAndLoad(page);
+  await stageProposal(page);
+  const meta = await realProposalMeta(page, request);
+  // Hold the authoritative preflight AFTER staging so the approved run stays
+  // live (pre-marker) and no runId can be supplied until the release below.
+  await control(request, "/arm-read-barrier");
+  // Hold the OLDER proposals list at the network: the next list GET (the
+  // real assent-terminal sync below, sent while the card is still pending)
+  // is fetched NOW while genuinely pending, but its delivery is gated until
+  // AFTER the server has approved and the client owns approved state.
+  let releaseOlder!: () => void;
+  const olderGate = new Promise<void>((resolve) => {
+    releaseOlder = resolve;
+  });
+  let markOlderSeen!: () => void;
+  const olderSeenAt = new Promise<void>((resolve) => {
+    markOlderSeen = resolve;
+  });
+  let olderCount = 0;
+  let listHits = 0;
+  let olderBody = "";
+  let olderFulfilled = false;
+  // Lost-approve delivery (the server commits; the client sees a transport
+  // failure) keeps the approved card WITHOUT a runId; execution reads fail
+  // so the bounded watch cannot supply one either.
+  let firstApprove = true;
+  try {
+    await page.route("**/proposals", async (route) => {
+      const url = route.request().url();
+      if (
+        route.request().method() !== "GET" ||
+        url.includes("/approve") ||
+        url.includes("/reject") ||
+        url.includes("/execution")
+      ) {
+        await route.continue();
+        return;
+      }
+      listHits += 1;
+      if (olderCount === 0) {
+        olderCount += 1;
+        const live = await route.fetch();
+        olderBody = await live.text();
+        markOlderSeen();
+        await olderGate;
+        olderFulfilled = true;
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: olderBody,
+        });
+        return;
+      }
+      await route.continue();
+    });
+    await page.route("**/proposals/*/approve", async (route) => {
+      if (firstApprove) {
+        firstApprove = false;
+        await route.fetch();
+        await route.abort("failed");
+        return;
+      }
+      await route.continue();
+    });
+    await page.route("**/proposals/*/execution", async (route) => {
+      await route.abort("failed");
+    });
+    // A REAL older sync in flight while pending: the assent turn answers
+    // (the pending card is untouched) and its terminal schedules the genuine
+    // proposals sync whose list delivery is now held at the network.
+    await send(page, TEXT_ASSENT);
+    await expect(page.locator("#conversation")).toContainText(
+      ANSWER_ASSENT_TEXT,
+      { timeout: 30_000 },
+    );
+    await olderSeenAt;
+    // The held body is genuinely the pending summary for this proposal
+    // (fetched from the real server while still pending).
+    expect(olderBody).toContain("pending");
+    expect(olderBody).toContain(meta.proposalId);
+    // The REAL approve commits server-side while the older list is held;
+    // its delivery aborts, so reconciliation must take approved ownership
+    // with no runId (timer cleared, decisions disabled, execution watch on).
+    await page.locator("#action-approve").click();
+    await expect(page.locator("#composer-notice")).toContainText(
+      "承認できませんでした",
+      { timeout: 30_000 },
+    );
+    const card = page.locator('[data-action-card="true"]');
+    await expect(card).toHaveAttribute("data-action-state", /approved/, {
+      timeout: 30_000,
+    });
+    await expect(page.locator("#action-approve")).toBeDisabled();
+    await expect(page.locator("#action-reject")).toBeDisabled();
+    // All three real lists flowed: the held older, the approve pre-read,
+    // and the lost-approve authoritative re-read.
+    expect(listHits).toBeGreaterThanOrEqual(3);
+    // Release the STALE pending summary AFTER authoritative approved
+    // ownership while the runId is still unavailable: the held sync resumes
+    // through the REAL sync path and must not downgrade the card.
+    releaseOlder();
+    await expect.poll(() => olderFulfilled, { timeout: 30_000 }).toBe(true);
+    await expect(card).toBeVisible();
+    await expect(card).toHaveAttribute("data-action-state", /approved/);
+    await expect(page.locator("#action-approve")).toBeDisabled();
+    await expect(page.locator("#action-reject")).toBeDisabled();
+    // The cleared timer (not the stale list) owns expiry: crossing the
+    // original deadline retires nothing.
+    await page.clock.fastForward(15 * 60 * 1000 + 1);
+    await expect(card).toBeVisible();
+    await expect(card).toHaveAttribute("data-action-state", /approved/);
+    await expect(page.locator("#action-approve")).toBeDisabled();
+    await expect(page.locator("#action-reject")).toBeDisabled();
+    await page.unroute("**/proposals").catch(() => {});
+    await page.unroute("**/proposals/*/execution").catch(() => {});
+    await control(request, "/release");
+    await page.clock.runFor(60_000);
+    await expect(card).toContainText("日程を更新しました", { timeout: 30_000 });
+    expect(await writeCalls(request)).toBe(1);
+  } finally {
+    try {
+      releaseOlder();
+    } catch {
+      // Best effort.
+    }
+    await page.unroute("**/proposals").catch(() => {});
+    await page.unroute("**/proposals/*/approve").catch(() => {});
+    await page.unroute("**/proposals/*/execution").catch(() => {});
+  }
+});
+
+test("PR28-3 repeated historic rejections hydrate history once", async ({
+  page,
+  request,
+}) => {
+  // Two real stage+reject cycles leave two historic rejected proposals.
+  await stageProposal(page);
+  let rejected = page.waitForResponse(
+    (res) => res.url().includes("/reject") && res.request().method() === "POST",
+  );
+  await page.locator("#action-reject").click();
+  expect((await rejected).status()).toBe(200);
+  await expect(
+    page.locator("#conversation [data-action-history='action_rejection']"),
+  ).toHaveCount(1, { timeout: 30_000 });
+  await send(page, TEXT_SEARCH);
+  await expect(page.locator("#conversation")).toContainText(
+    ANSWER_SEARCH_TEXT,
+    { timeout: 30_000 },
+  );
+  await selectCitation(page, "r1");
+  await send(page, TEXT_STAGE);
+  await expect(page.locator("#conversation")).toContainText(ANSWER_STAGE_TEXT, {
+    timeout: 30_000,
+  });
+  await expect(page.locator('[data-action-card="true"]')).toBeVisible({
+    timeout: 30_000,
+  });
+  rejected = page.waitForResponse(
+    (res) => res.url().includes("/reject") && res.request().method() === "POST",
+  );
+  await page.locator("#action-reject").click();
+  expect((await rejected).status()).toBe(200);
+  await expect(page.locator('[data-action-card="true"]')).toHaveCount(0, {
+    timeout: 30_000,
+  });
+  // Reload and count real history GETs: boot owns one hydration; the sync over
+  // two historic rejections must not add one hydration per proposal.
+  let historyGets = 0;
+  page.on("request", (req) => {
+    if (req.url().includes("/history?")) {
+      historyGets += 1;
+    }
+  });
+  await page.reload();
+  await expect(page.locator("#composer")).toBeVisible();
+  await expect(
+    page.locator("#conversation [data-action-history='action_rejection']"),
+  ).toHaveCount(2, { timeout: 30_000 });
+  await page.waitForTimeout(3_000);
+  expect(historyGets).toBeLessThanOrEqual(2);
+  expect(await writeCalls(request)).toBe(0);
+});
+
+test("PR28-4 delayed live execution cannot overwrite terminal receipt", async ({
+  page,
+  request,
+}) => {
+  await installClockAndLoad(page);
+  await stageProposal(page);
+  // Hold the authoritative preflight AFTER staging so the approved run stays
+  // live (pre-marker) with its real Stop control until the release below.
+  await control(request, "/arm-read-barrier");
+  await page.locator("#action-approve").click();
+  const card = page.locator('[data-action-card="true"]');
+  // The REAL execution watch renders the live card first (runId known).
+  await expect(card).toHaveAttribute(
+    "data-action-state",
+    /queued|preflight|executing/,
+    { timeout: 60_000 },
+  );
+  await expect(page.locator("[data-action-stop='true']")).toBeVisible({
+    timeout: 30_000,
+  });
+  const liveView = await executionView(page, request);
+  expect(liveView.runId ?? "").not.toBe("");
+  // Hold the NEXT live execution read at the network: fetch the REAL live
+  // body now (genuinely live, receipt-free) but gate its delivery until
+  // AFTER the authoritative terminal is rendered on the same live card.
+  let releaseStale!: () => void;
+  const staleGate = new Promise<void>((resolve) => {
+    releaseStale = resolve;
+  });
+  let markStaleSeen!: () => void;
+  const staleSeenAt = new Promise<void>((resolve) => {
+    markStaleSeen = resolve;
+  });
+  let staleCount = 0;
+  let execHits = 0;
+  let staleBody = "";
+  let staleFulfilled = false;
+  try {
+    await page.route("**/proposals/*/execution", async (route) => {
+      execHits += 1;
+      if (staleCount === 0) {
+        staleCount += 1;
+        const live = await route.fetch();
+        staleBody = await live.text();
+        markStaleSeen();
+        await staleGate;
+        staleFulfilled = true;
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: staleBody,
+        });
+        return;
+      }
+      await route.continue();
+    });
+    // Drive the clock-controlled watch to its next tick so the held read is
+    // genuinely the client's own execution poll (not a synthesized replay).
+    await page.clock.runFor(1_000);
+    await staleSeenAt;
+    // Genuine delayed-live race input: a live (non-terminal, receipt-free)
+    // execution read fetched from the real server while still live.
+    expect(staleBody).toMatch(/"status":"(queued|preflight|executing)"/);
+    expect(staleBody).toContain('"receipt":null');
+    // Release the server run to its REAL terminal while the stale live read
+    // stays held; the page watch is blocked on it, so observe the terminal
+    // through the real Node API (same server, no page reload).
+    await control(request, "/release");
+    await expect
+      .poll(
+        async () => {
+          const terminal = await executionView(page, request);
+          return (
+            (terminal.receipt as { outcome?: string } | null)?.outcome ?? ""
+          );
+        },
+        { timeout: 60_000 },
+      )
+      .toBe("succeeded");
+    expect(await writeCalls(request)).toBe(1);
+    // Render the authoritative terminal on the SAME live card through a real
+    // client sync (the assent terminal below schedules the genuine
+    // proposals+execution sync whose execution read continues fresh) while
+    // the stale live read stays held. No reload: the card never leaves.
+    await send(page, TEXT_ASSENT);
+    await expect(page.locator("#conversation")).toContainText(
+      ANSWER_ASSENT_TEXT,
+      { timeout: 30_000 },
+    );
+    await expect(card).toHaveAttribute("data-action-state", "succeeded", {
+      timeout: 60_000,
+    });
+    await expect(card).toContainText("日程を更新しました", {
+      timeout: 30_000,
+    });
+    await expect(page.locator("[data-action-stop='true']")).toBeHidden();
+    expect(execHits).toBeGreaterThanOrEqual(2);
+    // Release the STALE live read AFTER the terminal: the terminal-wins
+    // guard must drop it — receipt and Stop ownership stay terminal.
+    releaseStale();
+    await expect.poll(() => staleFulfilled, { timeout: 30_000 }).toBe(true);
+    await page.clock.runFor(5_000);
+    await expect(card).toHaveAttribute("data-action-state", "succeeded");
+    await expect(card).toContainText("日程を更新しました");
+    await expect(page.locator("[data-action-stop='true']")).toBeHidden();
+    await expect(page.locator("#composer-notice")).not.toContainText(
+      "停止しました",
+    );
+    const view = await executionView(page, request);
+    expect((view.receipt as { outcome?: string } | null)?.outcome).toBe(
+      "succeeded",
+    );
+    expect(await writeCalls(request)).toBe(1);
+  } finally {
+    try {
+      releaseStale();
+    } catch {
+      // Best effort.
+    }
+    await page.unroute("**/proposals/*/execution").catch(() => {});
+  }
+});

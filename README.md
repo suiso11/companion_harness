@@ -1402,8 +1402,10 @@ DB ファイルも親ディレクトリも作られず、既存の旧 DB はバ�
 profile は専用の永続 display 名 `calendar-mcp-google-readonly`
 (汎用 `calendar-mcp` とは別) で登録されるため、同一 selection の旧汎用行が
 再利用されることはなく、旧 target の refresh は新 provider に届きません
-(`reference_not_found`)。profile 採用は live 受け入れではありません: 新規 OAuth 同意と
-live 本番検証は未了 (C11 positive BLOCKED、manual Win11 未了) です。完全な
+(`reference_not_found`)。profile 採用は認証済み live 読みで受け入れ済み
+(ユーザ OAuth 完了、認証済み live 読み OBSERVED): 未了は新規 consent
+画面の scope 表示・live 本番検証 (C11 positive BLOCKED、manual Win11
+未了) のみであり、同意の欠落主張や強制 reconsent ではない。完全な
 copy-pastable 準備・認証・起動手順 (Desktop-app クライアント、前提検証、
 JSON 生成スクリプト) と credential-free 実行証跡は docs/operations.md
 (C14 profile) を参照してください。実行証跡が示すのは runtime 側
@@ -1553,3 +1555,87 @@ This section records the recovery completion of the interrupted `deliver-m3-on-m
 - **Cleanup**: owned `apps/server/test-results/` artifact removed; no owned child services left running; root dirty checkout and other worktrees untouched.
 
 Remaining gates not closed here: Windows 11 x64 manual smoke, remote CI for this branch/PR, M4 readonly adoption, M5 write actions.
+
+---
+
+# Live Readonly Acceptance Ledger (2026-10-14, current profile)
+
+Current accepted activation is the host-owned pinned `google-readonly`
+profile (`suiso11/google-calendar-mcp` @ `6939311…`,
+`3.0.0-readonly.2`, `calendar.events.readonly` only, 3 live-wire hashes;
+`list-calendars` deliberately absent — never restored to satisfy the
+proposal-era checklist). Observed live evidence (sanitized
+counts/codes/tool/reference transitions only; no events, tokens, or raw
+prompts): a live read-only conversation completed end to end
+(`run.completed`, one `calendar.search` succeeded/accepted, one
+`reference.presented` with snippet grant `[r1]` cited, turn selected),
+plus a live readonly refresh proof (2026-10-14, throwaway owned temp
+SQLite, real pinned google-readonly pipeline, fixed counting wrapper
+preserving the full call interface, no production change): list 10 hits
+(`list-events` x1, opaque cursor present), query mapping
+(`search-events` x1), stored-only open 0 new wire calls with non-empty
+body, explicit `reference.refresh` via `get-event` x1 only creating a new
+snapshot (10->11) and new rN (refs +1) with revision unchanged, prior rN
+re-openable with 0 new wire calls (`deduplicated`), fresh snapshot body
+keys `[text, version]` with 0 excluded privacy keys, 3 distinct upstream
+tools / 3 total wire calls, second page `succeeded` (1 hit),
+`proof=live_refresh_observed`, and loopback `:3000` returned `GET
+/health/live` 200 +
+`GET /health/ready` 200 with the server left running (UI freshness
+re-verified 2026-10-14 ~17:41 UTC: one safe `run-google-readonly.sh`
+restart after the served bundle was found predating current `client.ts`;
+served `/assets/client.js` now hash-matches the rebuilt dist and carries
+the PR28 fixes; health 200/200 re-probed; read-only/actions-disabled
+preserved). User OAuth is
+COMPLETED with authenticated live reads OBSERVED (only consent-screen
+scope display unobserved; never force reconsent). Reused automation is
+the oc10 PRE-PR28-CODE-CHANGE baseline only (not rerun, not a current
+full-suite claim): lint 229 files 0 errors + 1 pre-existing info, both
+typechecks exit 0, units 107 files / 1307 tests, real default Chromium
+24/24, fake Calendar 26/26 (action 21 / calendar 4 / tombstone 1).
+CURRENT browser actuals after the 4 PR28 race fixes (oc21 final
+observed; reviewer oc22 confirmed strengthened PR28-2/4 non-vacuous):
+default 24/24 prior value unchanged (not rerun — test-only change in
+`calendar/action.spec.ts`); calendar 30/30 (action 25 + calendar 4 +
+tombstone 1); final units 107 files / 1307 tests pass; both typechecks
+exit 0; `biome check .` exit 0 (229 files, 0 errors, 1 pre-existing
+info). Repository throwaway scaffolds removed; one private temp
+artifact `/tmp/live-refresh-proof-LMZ0zi` (owned 3 SQLite files) remains
+permission-blocked with no active process.
+Historical snapshots above (C04–C07, PR20, M3) are preserved and not
+restated as this run.
+
+Remaining genuine blockers: Windows 11 x64 manual smoke, positive
+deletion evidence (C11-01 BLOCKED — 404/410/`cancelled`/omission stay
+errors/unknown), M5 live/write gates (no production write binding;
+existing readonly cannot write and the dormant broad update path lacks
+`If-Match`), fresh OAuth consent-screen scope display as a separate
+decision (OAuth COMPLETED, live `reference.refresh` OBSERVED above, not
+pending). PR housekeeping (parent-verified): original-stack PR23/PR24
+merged, carried into main by merged DELIVERY successors PR27/PR28
+(reconciled, not erased); PR21/PR22 closed as superseded (comment +
+close only, no merge/deletion, branches retained, evidence verified
+preserved on `origin/master`); fork PR2 left draft-open untouched. Full ledger: `docs/operations.md` ("Live readonly
+acceptance ledger", "PR21/PR22 superseded close"); spike conclusion:
+`docs/m4_dependency_spike.md`; row mapping:
+`docs/google_calendar_readonly_binding_design.md`.
+
+---
+
+# PR28 UI Race Fixes (2026-10-14)
+
+Four approval-client races fixed in `apps/server/src/ui/client.ts`, each
+with one permanent real-browser regression (`apps/server/e2e/calendar/
+ action.spec.ts`, real UI + real fake seams): lost-reject recovery during an
+in-flight sync (new authoritative `reconcileLostReject`), stale pending
+lists no longer downgrading runId-less approved cards, one batched history
+hydration per sync over N historic rejections, and no duplicate watch read
+plus no late-live overwrite of a terminal receipt. The PR28-2/PR28-4
+regressions were strengthened 2026-10-14 (held older list / held live read
+released only after the authoritative state, exact route hits asserted —
+no vacuous replays). Measured: Calendar action 25/25,
+calendar+tombstone 5/5 (real Chromium, exit 0); full units 107 files /
+1307 tests pass; e2e + root typechecks exit 0; `biome check .` exit 0 (229
+files, 1 pre-existing info); default 24/24 is the prior observed value
+(not rerun — test-only change in `calendar/action.spec.ts`). Detail:
+`docs/operations.md` ("PR28 UI race fixes + permanent browser regressions").
