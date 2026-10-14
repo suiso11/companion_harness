@@ -132,6 +132,105 @@ test("citation drawer shows the escaped stored snapshot and CAS-selects it (stal
   }
 });
 
+test("citation drawer surfaces a genuine concurrent 409, refetches, and still opens the saved citation", async ({
+  page,
+  request,
+}) => {
+  const sessionId = await sessionIdOf(page);
+  const seedRes = await request.post(`${E2E_CONTROL_ORIGIN}/seed-citation`, {
+    data: { sessionId },
+  });
+  expect(seedRes.ok()).toBe(true);
+  const refA = (await seedRes.json()) as {
+    referenceId: string;
+    ordinal: number;
+  };
+  expect(refA.ordinal).toBe(1);
+
+  await page.locator("#composer-input").fill(TEXT_CITE);
+  await page.locator("#composer-send").click();
+  const citeButton = page.getByRole("button", { name: "r1" });
+  await expect(citeButton).toBeVisible({ timeout: 15_000 });
+
+  // Force a genuine stale PUT inside the drawer CAS: hold the browser's
+  // first conditional PUT, commit a concurrent real selection of the SAME
+  // citation (version 1 -> 2) via the Node-side API, then forward the held
+  // PUT unchanged so the real server answers 409
+  // reference_version_conflict. The recovery runs unintercepted against the
+  // real routes. No payload is fabricated.
+  let totalPuts = 0;
+  let firstPutHeld = false;
+  let observedConflict = 0;
+  await page.route("**/api/sessions/*/reference-context", async (route) => {
+    if (route.request().method() !== "PUT") {
+      await route.continue();
+      return;
+    }
+    totalPuts += 1;
+    if (firstPutHeld) {
+      await route.continue();
+      return;
+    }
+    firstPutHeld = true;
+    const bump = await request.put(
+      `${E2E_APP_ORIGIN}/api/sessions/${sessionId}/reference-context`,
+      { data: { version: 1, items: [refA.referenceId] } },
+    );
+    expect(bump.ok()).toBe(true);
+    const genuine = await route.fetch();
+    if (genuine.status() === 409) {
+      observedConflict += 1;
+    }
+    await route.fulfill({ response: genuine });
+  });
+  try {
+    await citeButton.click();
+
+    // The fixed conflict notice from the changed 409 branch is visible.
+    await expect(page.locator("#composer-notice")).toContainText(
+      "参照の更新で競合しました。最新の状態を取得しています",
+      { timeout: 15_000 },
+    );
+    // Recovery still opens the saved citation as escaped plain text.
+    const drawer = page.locator("#drawer");
+    await expect(drawer).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator("#drawer-body")).toHaveText(
+      CITATION_SNAPSHOT_TEXT,
+      { timeout: 15_000 },
+    );
+  } finally {
+    await page.unroute("**/api/sessions/*/reference-context");
+  }
+  // The held PUT genuinely conflicted exactly once on the real server.
+  expect(firstPutHeld).toBe(true);
+  expect(observedConflict).toBe(1);
+
+  // CAS recovery re-read and merged instead of losing the update: the
+  // latest context holds the single selected citation with no duplicates,
+  // committed past the conflicted version. Recovery issued no second PUT:
+  // the re-read found the citation already selected, so exactly one PUT
+  // (the conflicted one) ever reached the server.
+  const ctxRes = await request.get(
+    `${E2E_APP_ORIGIN}/api/sessions/${sessionId}/reference-context`,
+  );
+  expect(ctxRes.ok()).toBe(true);
+  const ctx = (await ctxRes.json()) as { version: number; items: string[] };
+  expect(ctx.version).toBeGreaterThanOrEqual(2);
+  expect(ctx.items).toEqual([refA.referenceId]);
+  expect(totalPuts).toBe(1);
+
+  // No duplicate citation rendering and no unsafe browser storage effects.
+  await expect(page.getByRole("button", { name: "r1" })).toHaveCount(1);
+  await expect(
+    page.locator("#conversation").getByText("cited answer", { exact: true }),
+  ).toHaveCount(1);
+  const storedAfter409 = await storedLocalStorage(page);
+  for (const key of Object.keys(storedAfter409)) {
+    expect(key).toMatch(/^(ch\.sessionId|ch\.pendingKey|ch\.cursor\.)/);
+    expect(storedAfter409[key] ?? "").not.toContain(CITATION_SNAPSHOT_TEXT);
+  }
+});
+
 test("lost delivery replays the same frozen key and reload recovers the answer", async ({
   page,
   request,
