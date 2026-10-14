@@ -1,0 +1,225 @@
+{
+  "fork": {
+    "version": "3.0.0-readonly.2",
+    "commit": "6939311fd3eae9846648e0a175e304c9500f578e",
+    "tree": "f01b5a7b608c4091906a52c0784b828c35963de9",
+    "lockDigestSha256": "63261d25992ee9c97136a60bbf4fe52a5485cadea28b34d6b8b6c685f38bd533",
+    "serverInfo": {
+      "name": "google-calendar",
+      "version": "3.0.0-readonly.2"
+    },
+    "toolNames": ["get-event", "list-events", "search-events"]
+  },
+  "schemaHashes": {
+    "registryDirect": {
+      "list-events": "a06527743447147d806605104f86250ace87cb157670fdb63eb6507d1d970978",
+      "search-events": "012e190732a5b6fe09e1ec3574e81099513bdd7d490c4b874b43398085ee0cf8",
+      "get-event": "913e45efc06b9f7cce043626bcdb0f600f5085b4849120a0ad60765cbffa8612"
+    },
+    "liveWire": {
+      "list-events": "81222b89482cba77b12a707c2097c66df383cab7929c14dca03cc303846d794c",
+      "search-events": "d48ba36e7f280d92eaba9550323e90aa7a6d7c758812932ad62012f4514558b7",
+      "get-event": "8c6736e2a1f397d0735efa5c0881f5c350c300b21a0b026e80c112258b596bda"
+    }
+  },
+  "liveHashes": {
+    "list-events": "81222b89482cba77b12a707c2097c66df383cab7929c14dca03cc303846d794c",
+    "search-events": "d48ba36e7f280d92eaba9550323e90aa7a6d7c758812932ad62012f4514558b7",
+    "get-event": "8c6736e2a1f397d0735efa5c0881f5c350c300b21a0b026e80c112258b596bda"
+  },
+  "sdk": "1.30.0",
+  "checks": [
+    {
+      "name": "registry exactly list-events/search-events/get-event",
+      "pass": true,
+      "detail": "get-event,list-events,search-events"
+    },
+    {
+      "name": "wire name google-calendar",
+      "pass": true,
+      "detail": "google-calendar"
+    },
+    {
+      "name": "wire version 3.0.0-readonly.2",
+      "pass": true,
+      "detail": "3.0.0-readonly.2"
+    },
+    {
+      "name": "live tools/list exactly 3, no list-calendars",
+      "pass": true,
+      "detail": "get-event,list-events,search-events"
+    },
+    {
+      "name": "live tools/list required-fields match registry per tool",
+      "pass": true,
+      "detail": "{\"list-events\":[\"calendarId\"],\"search-events\":[\"calendarId\",\"timeMax\",\"timeMin\"],\"get-event\":[\"calendarId\",\"eventId\"]}"
+    },
+    {
+      "name": "registry-direct vs live-wire hash bytes recorded (serializer differs)",
+      "pass": true,
+      "detail": "registry={\"list-events\":\"a06527743447147d806605104f86250ace87cb157670fdb63eb6507d1d970978\",\"search-events\":\"012e190732a5b6fe09e1ec3574e81099513bdd7d490c4b874b43398085ee0cf8\",\"get-event\":\"913e45efc06b9f7cce043626bcdb0f600f5085b4849120a0ad60765cbffa8612\"} live={\"list-events\":\"81222b89482cba77b12a707c2097c66df383cab7929c14dca03cc303846d794c\",\"search-events\":\"d48ba36e7f280d92eaba9550323e90aa7a6d7c758812932ad62012f4514558b7\",\"get-event\":\"8c6736e2a1f397d0735efa5c0881f5c350c300b21a0b026e80c112258b596bda\"}"
+    },
+    {
+      "name": "connector identity+schema gate enables 3/3 trusted read bindings",
+      "pass": true,
+      "detail": "[\"get-event\",\"list-events\",\"search-events\"]"
+    },
+    {
+      "name": "adapter search ok (2 events, opaque cursor out)",
+      "pass": true
+    },
+    {
+      "name": "search exactly 1 events.list call",
+      "pass": true,
+      "detail": "1"
+    },
+    {
+      "name": "search q passthrough",
+      "pass": true,
+      "detail": "\"fixture\""
+    },
+    {
+      "name": "fractional start/end byte-for-byte",
+      "pass": true,
+      "detail": "2026-03-10T10:00:00.123+01:00|2026-03-10T11:00:00.123+01:00"
+    },
+    {
+      "name": "limit->pageSize 10",
+      "pass": true,
+      "detail": "10"
+    },
+    {
+      "name": "calendarId opaque verbatim (email)",
+      "pass": true,
+      "detail": "user@example.com"
+    },
+    {
+      "name": "explicit account selects work client",
+      "pass": true
+    },
+    {
+      "name": "private targets host-side (2)",
+      "pass": true,
+      "detail": "2"
+    },
+    {
+      "name": "queryless routes to list-events (no q key)",
+      "pass": true,
+      "detail": "[\"calendarId\",\"timeMin\",\"timeMax\",\"singleEvents\",\"orderBy\",\"maxResults\"]"
+    },
+    {
+      "name": "opaque calendarId verbatim",
+      "pass": true,
+      "detail": "cal-opaque_ABC123"
+    },
+    {
+      "name": "explicit account selects personal client",
+      "pass": true
+    },
+    {
+      "name": "cursor->pageToken opaque passthrough, 1 call",
+      "pass": true,
+      "detail": "\"opaque-cursor-1\""
+    },
+    {
+      "name": "second page decoded (1 event, no cursor)",
+      "pass": true
+    },
+    {
+      "name": "cancelled stays cancelled (no loosen)",
+      "pass": true,
+      "detail": "\"cancelled\""
+    },
+    {
+      "name": "get exactly 1 events.get call",
+      "pass": true
+    },
+    {
+      "name": "get calendarId/eventId verbatim",
+      "pass": true,
+      "detail": "{\"calendarId\":\"primary\",\"eventId\":\"evt-timed-1\"}"
+    },
+    {
+      "name": "get etag revision basis",
+      "pass": true,
+      "detail": "{\"schemaVersion\":1,\"canonicalKey\":\"calendar:e194cca9ae9d589903e32822151619bb1f1317124bd70cd15fe719606d8b79e0\",\"status\":\"confirmed\",\"title\":\"Fixture Timed Planni"
+    },
+    {
+      "name": "get strips organizer/attendees/htmlLink/rawIDs",
+      "pass": true,
+      "detail": "normalized JSON scanned"
+    },
+    {
+      "name": "envelope text-JSON fallback (no structuredContent)",
+      "pass": true,
+      "detail": "{\"events\":[{\"id\":\"evt-timed-1\",\"etag\":\"e"
+    },
+    {
+      "name": "naive bounds deterministic UTC without metadata",
+      "pass": true,
+      "detail": "2026-03-10T10:00:00Z"
+    },
+    {
+      "name": "ambiguous+missing account fail with 0 provider I/O",
+      "pass": true,
+      "detail": "eventsList+eventsGet delta 0"
+    },
+    {
+      "name": "list-calendars denied, 0 provider calls",
+      "pass": true,
+      "detail": "{\"ok\":false,\"code\":\"mcp_binding_not_allowed\"}"
+    },
+    {
+      "name": "bare 404 no tombstone (fixed error, never deleted)",
+      "pass": true,
+      "detail": "{\"ok\":false,\"code\":\"calendar_upstream_error\"}"
+    },
+    {
+      "name": "identity guard denies (wrong name) with 0 provider calls",
+      "pass": true,
+      "detail": "{\"ok\":false,\"code\":\"mcp_schema_mismatch\"}"
+    },
+    {
+      "name": "identity guard denies (wrong version) with 0 provider calls",
+      "pass": true,
+      "detail": "{\"ok\":false,\"code\":\"mcp_schema_mismatch\"}"
+    },
+    {
+      "name": "schema-hash guard denies (1 bad of 3 still gates that binding; connect may partially enable)",
+      "pass": true,
+      "detail": "{\"res\":{\"ok\":true},\"enabled\":[\"list-events\",\"search-events\"]}"
+    },
+    {
+      "name": "stdlib http/https/fetch deny counters 0",
+      "pass": true,
+      "detail": "{\"httpRequest\":0,\"httpGet\":0,\"httpsRequest\":0,\"httpsGet\":0,\"fetch\":0}"
+    },
+    {
+      "name": "metadata calendarList.get/list + calendars.get 0",
+      "pass": true,
+      "detail": "{\"calendarListGet\":0,\"calendarListList\":0,\"calendarsGet\":0}"
+    }
+  ],
+  "passCount": 35,
+  "failCount": 0,
+  "providerCalls": {
+    "eventsList": 5,
+    "eventsGet": 2,
+    "calendarListGet": 0,
+    "calendarListList": 0,
+    "calendarsGet": 0
+  },
+  "networkDeny": {
+    "httpRequest": 0,
+    "httpGet": 0,
+    "httpsRequest": 0,
+    "httpsGet": 0,
+    "fetch": 0
+  },
+  "credentialFree": {
+    "command": "env -i PATH=<allow> HOME=<owned-tmp> FORK_COMMIT=<sha> FORK_TREE=<tree> FORK_LOCK_DIGEST=<digest> ./packages/connector-mcp/node_modules/.bin/tsx docs/evidence/calendar-readonly-compatibility/probe-consumer-smoke.source.mts (FORK_* are operator-supplied replay inputs, not runtime-derived; pin separately verifies actual git/lock)",
+    "limitations": "no OAuth/TokenManager/account index/CLI; no live Google HTTP; no GH/Google credentials in env; InMemory SDK transport only; fixture accounts + inert provider via ONLY BaseToolHandler.getCalendar seam",
+    "liveClaims": "none (no OAuth, no live Google call, no HTTP status, no release claim)"
+  },
+  "ok": true
+}

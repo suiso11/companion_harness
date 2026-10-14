@@ -98,6 +98,10 @@ export type PostMessageResponse = z.infer<typeof PostMessageResponseSchema>;
 /**
  * POST /api/sessions/:sessionId/turns/:turnId/retries request. Retry
  * reuses the Turn's frozen input, so the body is empty (strict).
+ *
+ * Retry is user_text-only (§18.4/§18.6): an `action_approval` /
+ * `action_rejection` Turn is rejected with `400 validation_error` and
+ * creates no Run, events, execution, or grant.
  */
 export const PostRetryRequestSchema = z.strictObject({});
 export type PostRetryRequest = z.infer<typeof PostRetryRequestSchema>;

@@ -1,0 +1,50 @@
+{
+  "artifact": "PR23 focused verification proof (no production change in this pass)",
+  "observed_utc": "2026-10-13",
+  "scope": "Focused verification only: 3-file vitest battery + both typechecks + lint + throwaway credential-free smoke. No browser or full-suite claim in THIS pass (see historical_reference for where full/browser evidence lives).",
+  "commands": [
+    {
+      "command": "pnpm vitest run apps/server/test/calendarReadonlyProfile.test.ts apps/server/test/bootstrap.test.ts apps/server/test/config.test.ts",
+      "exit": 0,
+      "result": "3 files / 78 tests passed (profile 25, bootstrap 28, config 25), 0 failed"
+    },
+    {
+      "command": "pnpm run typecheck",
+      "exit": 0,
+      "result": "clean"
+    },
+    {
+      "command": "pnpm run typecheck:e2e",
+      "exit": 0,
+      "result": "clean"
+    },
+    {
+      "command": "pnpm run lint",
+      "exit": 0,
+      "result": "224 files, 0 errors, 1 pre-existing biome.json info"
+    }
+  ],
+  "historical_reference": {
+    "note": "Full suite and both real-Chromium browser suites were NOT rerun in the PR23 focused pass; the numbers below are historical evidence from the cited revisions, not PR23 observations. Do not cite them as PR23 results.",
+    "full_suite": "resume-calendar-default battery on this branch line: pnpm test exit 0, 107 files / 1286 tests passed (Linux, Node 24.12.0)",
+    "browser_default": "23/23 passed (same battery; fake MCP over real SDK InMemoryTransport + scripted fake model + real UI/API, temp SQLite)",
+    "browser_calendar": "COMPANION_E2E_CALENDAR=1: 18/18 passed, 0 unexpected/flaky/skipped",
+    "see": "docs/operations.md resume-calendar-default section (2026-10-13)"
+  },
+  "prior_smoke": {
+    "invalidProfileCreatesNoDbDir": true,
+    "invalidAccountCreatesNoDbDir": true,
+    "genericAndProfileDistinctInstanceIds": true,
+    "restartReusesProfileId": true,
+    "oldProviderRefreshBlocked": {
+      "errorCode": "reference_not_found",
+      "getCalls": 0
+    }
+  },
+  "live_google_readonly": {
+    "attempted": true,
+    "outcome": "not_run_no_provisioned_runtime",
+    "detail": "config/ absent; no provisioned credential/consent found via presence-only listing; no OAuth flow launched, no writes, no secret contents read"
+  },
+  "notes": "Covers focused 3-file/78-test, typechecks, lint plus throwaway smoke. Full suite and both real Chromium suites are historical references above, not PR23 claims. Prior smoke-profile and cli-profile artifacts unchanged by this pass (cli-profile later corrected 2026-10-14 with valid account normal)."
+}

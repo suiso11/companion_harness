@@ -38,6 +38,7 @@ a missing DB fails without creating any DB or backup files.
 | `COMPANION_MARKDOWN_ROOTS_JSON` | `[]` | Strict JSON array of `{ path, alias? }` (see below); unset means no Markdown connector |
 | `COMPANION_MODEL_JSON` | unset (no model) | Strict JSON object `{ adapter, baseUrl, model, apiKey? }` (see M2 below); unset registers no model strategy |
 | `COMPANION_CALENDAR_JSON` | unset (no Calendar) | Strict JSON object `{ selection, connector }` (see C14 below); unset registers no Calendar connector |
+| `COMPANION_CALENDAR_PROFILE` | unset (no profile) | Strict opt-in profile selector (see C14 profile below). Unset keeps the previous behavior (explicit host `mcpDefinitions` injection or fail-closed incomplete opt-in). Only `google-readonly` is accepted; any other value fails startup. Requires `COMPANION_CALENDAR_JSON` describing exactly the adopted candidate. |
 | `COMPANION_ACTIONS_JSON` | `{"optIn":false,"writeEnabled":false}` | Strict JSON object `{ optIn?, writeEnabled? }` (booleans, default false). HINT ONLY: never supplies a write capability, a category or a binding — see "C21 M5 Action composition" below |
 
 Config is Zod-validated and frozen at startup (no hot reload).
@@ -793,7 +794,10 @@ or complete activate config):
 - Registered lifecycle (server-OWNED): after the preflight, ONE metadata
   `calendar` connector instance is registered via the existing kernel
   `ensureCalendarConnectorInstance` (display name
-  `CALENDAR_CONNECTOR_DISPLAY_NAME = "calendar-mcp"`, `version:1`, exact
+  `CALENDAR_CONNECTOR_DISPLAY_NAME = "calendar-mcp"` for the unprofiled
+  composition, `GOOGLE_READONLY_CONNECTOR_DISPLAY_NAME =
+  "calendar-mcp-google-readonly"` for the pinned profile — never shared, so
+  the two compositions cannot reuse each other's rows, `version:1`, exact
   selection reconciliation — a changed selection fails closed), the hint's
   connector config is merged with the just-registered exact
   `connectorInstanceId`, one `McpConnector` is constructed (NO I/O at
@@ -841,6 +845,232 @@ or complete activate config):
   factory; outer shutdown bound cap). Apps/server now also declares
   workspace dependencies on `@companion/connector-mcp` and
   `@companion/connector-calendar`.
+
+### C14 pinned google-readonly profile (CURRENT: adopted as host composition)
+
+- HISTORICAL (above in this section): no provider profile adopted. CURRENT:
+  the host-owned pinned profile `google-readonly`
+  (`apps/server/src/calendarReadonlyProfile.ts`, strict opt-in
+  `COMPANION_CALENDAR_PROFILE=google-readonly`) ADOPTS the reviewed
+  candidate as the normal-startup composition. It is NOT a rewrite of the
+  pipeline: the JSON hint, the owned registration, the lazy connector, the
+  adapter and the fail-closed gates are unchanged; the profile only supplies
+  the exact trusted definitions from host code and pins the hint to the
+  candidate. Profile-adopted is NOT live-accepted: fresh user OAuth consent
+  and live production verification are still pending (C11 positive BLOCKED,
+  manual Win11 missing).
+- Adoption pin (exact form, verified against a real fork checkout):
+  `suiso11/google-calendar-mcp`
+  commit `6939311fd3eae9846648e0a175e304c9500f578e`
+  (tree `f01b5a7b608c4091906a52c0784b828c35963de9`,
+  package `@cocal/google-calendar-mcp@3.0.0-readonly.2`, lock SHA-256
+  `63261d25…bd533`), wire identity `{name:"google-calendar",
+  version:"3.0.0-readonly.2"}`, exactly
+  `list-events`/`search-events`/`get-event` with the live-wire hashes
+  (`81222b89…`, `d48ba36e…`, `8c6736e2…` — SDK wire bytes, NOT the
+  registry-direct `a065/012e/913…` diagnostic bytes). Scope stays
+  `calendar.events.readonly` only; no `CalendarList` metadata lookup on the
+  MCP path; no writes; `list-calendars` absent (denied, never registered).
+- Selection rules (all fail closed with fixed messages, before listen):
+  unset profile keeps the previous behavior; an unknown profile name is
+  rejected; a set profile without `COMPANION_CALENDAR_JSON` is an incomplete
+  opt-in; profile + explicit `mcpDefinitions` injection conflict; the hint
+  must carry the exact pinned identity, stdio transport, and exactly the 3
+  pinned bindings (a substituted version/name, an HTTP transport, an added
+  `list-calendars`/write binding, a dropped binding, or a rehashed binding
+  all fail; an arbitrary user binding/hash can never grant read or write).
+  The optional `selection.account`, when present, must match the pinned fork
+  grammar `^[a-z0-9_-]{1,64}$` (lowercase ASCII; email/uppercase/overlength/
+  other characters fail as `calendar profile account mismatch`); omitted
+  stays valid. The generic non-profile account contract (1..512, no NUL) is
+  unchanged. All of the above — frozen selector, completeness, injected
+  conflicts, exact profile compatibility — resolve synchronously BEFORE
+  `ensureDbDir`/open/migrations, so a failing profile creates neither the DB
+  file nor its parent dir and leaves an existing older DB byte-identical.
+  The profile registers under its own boring persisted display name
+  `calendar-mcp-google-readonly` (never the generic `calendar-mcp`), so a
+  previously injected generic row with the same selection is never reused;
+  canonical keys (over the instance id) separate, and an old generic target
+  cannot refresh through the new provider (`reference_not_found`, no `get`
+  call). Legacy/mismatched display-name rows fail closed on re-verify.
+- Explicit preparation / auth / run (all USER-OPERATED, outside the repo;
+  this worker never launches a browser, OAuth consent, or a real Calendar
+  RPC; no secret is read or pasted anywhere below):
+  1. Google Cloud prerequisites (user's own project, outside the repo):
+     create a project and enable the Google Calendar API (official guide
+     `https://developers.google.com/workspace/guides/create-project`);
+     configure the OAuth consent screen as user type External with publishing
+     status Testing and add your Google account as a test user (official
+     guide `https://developers.google.com/workspace/guides/configure-oauth-consent`;
+     Testing-mode grants expire and need re-consent — expected, unrelated to
+     the readonly scope); then create an OAuth client ID of application type
+     "Desktop app" and download its JSON (official guide
+     `https://developers.google.com/workspace/guides/create-credentials#oauth-client-id`).
+     The download carries a top-level "installed" object. A "Web application"
+     download (top-level "web") is UNSUPPORTED: the pinned fork's
+     `loadCredentialsFromFile` (`src/auth/client.ts` at the commit below)
+     accepts ONLY the "installed" shape (or direct `client_id`/`client_secret`
+     fields) and rejects anything else with `Invalid credentials file format`.
+  2. Fork checkout, verification, then build (exact pin form; verification
+     runs BEFORE any install/build):
+     repo `https://github.com/suiso11/google-calendar-mcp`, commit
+     `6939311fd3eae9846648e0a175e304c9500f578e`, tree
+     `f01b5a7b608c4091906a52c0784b828c35963de9`, package
+     `@cocal/google-calendar-mcp@3.0.0-readonly.2`, `package-lock.json`
+     SHA-256
+     `63261d25992ee9c97136a60bbf4fe52a5485cadea28b34d6b8b6c685f38bd533`.
+     Run from the Companion checkout root (the directory containing
+     `pnpm-workspace.yaml`); record its absolute path FIRST so step 5 can
+     return to it. Requires the already-available exact engine `node
+     v24.12.0` (see Source run above; no installer is fetched here). The
+     whole clone/checkout/pin/install/build sequence runs in its OWN
+     subshell with `set -eu`, so a pasted `test` failure aborts BEFORE
+     `npm ci` / `npm run build` even in an interactive paste, without
+     leaking `set -e` into the user's interactive shell options, and the
+     outer Companion cwd is preserved (there is deliberately no bare
+     `cd "$FORK_DIR"` outside the subshell):
+     ```bash
+     COMPANION_DIR="$PWD"  # absolute Companion checkout root (contains pnpm-workspace.yaml); keep for step 5
+     FORK_DIR="$HOME/gcal-readonly"
+     PIN_COMMIT="6939311fd3eae9846648e0a175e304c9500f578e"
+     PIN_TREE="f01b5a7b608c4091906a52c0784b828c35963de9"
+     PIN_PKG="@cocal/google-calendar-mcp@3.0.0-readonly.2"
+     PIN_LOCK="63261d25992ee9c97136a60bbf4fe52a5485cadea28b34d6b8b6c685f38bd533"
+     test "$(node -p "process.version")" = "v24.12.0"
+     (
+       set -eu
+       git clone https://github.com/suiso11/google-calendar-mcp.git "$FORK_DIR"
+       cd "$FORK_DIR"
+       git fetch origin "$PIN_COMMIT"
+       git checkout "$PIN_COMMIT"
+       test "$(git rev-parse HEAD)" = "$PIN_COMMIT"
+       test "$(git rev-parse 'HEAD^{tree}')" = "$PIN_TREE"
+       test "$(node -p "require('./package.json').name + '@' + require('./package.json').version")" = "$PIN_PKG"
+       test "$(node -e "const fs=require('node:fs');const crypto=require('node:crypto');process.stdout.write(crypto.createHash('sha256').update(fs.readFileSync('package-lock.json')).digest('hex'))")" = "$PIN_LOCK"
+       npm ci --ignore-scripts
+       npm run build
+       node build/index.js version
+     )
+     ```
+     The lock digest above uses the required Node `crypto` (portable
+     Linux/macOS; no `sha256sum`/`Get-FileHash` needed). The last line
+     prints `Google Calendar MCP Server v3.0.0-readonly.2`
+     (wire identity `{name:"google-calendar", version:"3.0.0-readonly.2"}`:
+     the name is hardcoded in fork `src/server.ts`, the version is read from
+     `package.json` at runtime at the pinned commit).
+  3. Secrets (user-private dir, OUTSIDE the repo, never committed):
+     ```bash
+     PRIV="$HOME/.config/companion-private"
+     mkdir -p "$PRIV"
+     chmod 700 "$PRIV"
+     cp /path/to/downloaded-desktop-client.json "$PRIV/gcp-oauth.keys.json"
+     chmod 600 "$PRIV/gcp-oauth.keys.json"
+     export GOOGLE_OAUTH_CREDENTIALS="$PRIV/gcp-oauth.keys.json"
+     export GOOGLE_CALENDAR_MCP_READONLY_TOKEN_PATH="$HOME/.config/google-calendar-mcp-readonly/tokens.json"
+     ```
+     Token-file resolution at the pin (`src/auth/paths.js`): the
+     `GOOGLE_CALENDAR_MCP_READONLY_TOKEN_PATH` env path first, else
+     `XDG_CONFIG_HOME`, else `~/.config/google-calendar-mcp-readonly/tokens.json`
+     (mode `0600`, written by the fork on consent). The broad-scope
+     `GOOGLE_CALENDAR_MCP_TOKEN_PATH` is intentionally IGNORED there, a legacy
+     single-account token file is REJECTED, and a stored grant whose scope is
+     not exactly `https://www.googleapis.com/auth/calendar.events.readonly`
+     is rejected (`src/auth/scopes.ts` `READONLY_CALENDAR_SCOPES`,
+     `src/auth/tokenManager.ts`): an old broader token can never be reused —
+     fresh readonly consent is required.
+  4. Consent (USER-INTERACTIVE on the user's machine; NEVER run by a worker):
+     ```bash
+     node "$FORK_DIR/build/index.js" auth
+     ```
+     consent for the default local account (mode `normal`), or
+     `node "$FORK_DIR/build/index.js" auth work` for a named LOCAL account id
+     (lowercase 1-64 `[a-z0-9_-]`, e.g. `work` — a local key, NOT a Google
+     account name or email; `src/auth/paths.js`
+     `getAccountMode`/`validateAccountId` at the pin). The fork serves the
+     loopback callback `http://localhost:<3500-3505>/oauth2callback`
+     (`src/auth/server.ts` at the pin) and opens the browser; consent shows
+     ONLY the `calendar.events.readonly` scope.
+  5. Normal run (POSIX snippet below is fully runnable on Linux/macOS;
+     PowerShell differences are listed after it; a manual Windows 11 run is
+     still pending). `calendarId` is the real user choice (`primary` works);
+     `account` is the LOCAL account id used at consent step 4 (`normal` when
+     `auth` ran without an id), or omit `account` for the default. The hint
+     JSON is GENERATED (never hand-edited): the absolute node command ONLY
+     (`process.execPath`; the SDK spawns with `shell:false`, so a shell
+     command line is never valid), the args array with the absolute fork entry
+     plus the explicit `--enable-tools` comma list, the OS-platform SDK
+     implicit allowlist plus the three explicit `GOOGLE_*` names, and the
+     three full pinned live-wire hashes (SDK wire bytes, NOT the
+     registry-direct `a065/012e/913…` diagnostic bytes):
+      ```bash
+      # Absolute Companion checkout root recorded in step 2 (if this is a
+      # new shell, set it to that path first; it contains pnpm-workspace.yaml).
+      # Example: COMPANION_DIR="$HOME/companion_harness"
+      FORK_DIR="$HOME/gcal-readonly"   # verified checkout from step 2
+     ACCT="normal"                    # local account id from step 4
+     cat > /tmp/gen-calendar-json.mjs <<'EOF'
+     import os from "node:os";
+     import path from "node:path";
+     const forkDir = process.argv[2];
+     const account = process.argv[3] === "" ? undefined : process.argv[3];
+     const posixBase = ["HOME", "LOGNAME", "PATH", "SHELL", "TERM", "USER"];
+     const winBase = ["APPDATA", "HOMEDRIVE", "HOMEPATH", "LOCALAPPDATA", "PATH", "PROCESSOR_ARCHITECTURE", "SYSTEMDRIVE", "SYSTEMROOT", "TEMP", "USERNAME", "USERPROFILE", "PROGRAMFILES"];
+     const base = os.platform() === "win32" ? winBase : posixBase;
+     const doc = {
+       selection: account === undefined ? { calendarId: "primary" } : { calendarId: "primary", account },
+       connector: {
+         serverId: "calendar-readonly",
+         kind: "mcp",
+         expectedServerName: "google-calendar",
+         version: "3.0.0-readonly.2",
+         transport: {
+           kind: "stdio",
+           command: process.execPath,
+           args: [path.resolve(forkDir, "build", "index.js"), "--enable-tools", "list-events,search-events,get-event"],
+           envAllowlist: [...base, "GOOGLE_OAUTH_CREDENTIALS", "GOOGLE_CALENDAR_MCP_READONLY_TOKEN_PATH", "GOOGLE_ACCOUNT_MODE"],
+         },
+         bindings: [
+           { upstreamTool: "list-events", canonicalSchemaHash: "81222b89482cba77b12a707c2097c66df383cab7929c14dca03cc303846d794c" },
+           { upstreamTool: "search-events", canonicalSchemaHash: "d48ba36e7f280d92eaba9550323e90aa7a6d7c758812932ad62012f4514558b7" },
+           { upstreamTool: "get-event", canonicalSchemaHash: "8c6736e2a1f397d0735efa5c0881f5c350c300b21a0b026e80c112258b596bda" },
+         ],
+       },
+     };
+     process.stdout.write(JSON.stringify(doc));
+     EOF
+     export COMPANION_CALENDAR_PROFILE=google-readonly
+      export COMPANION_CALENDAR_JSON="$(node /tmp/gen-calendar-json.mjs "$FORK_DIR" "$ACCT")"
+      export GOOGLE_ACCOUNT_MODE="$ACCT"
+      cd "$COMPANION_DIR" && pnpm start  # launches Companion (root pnpm start contract), NOT the fork; never run pnpm start inside $FORK_DIR
+      ```
+     The SDK implicit names above are the live SDK 1.30.0
+     `DEFAULT_INHERITED_ENV_VARS` (`dist/esm/client/stdio.js`: POSIX 6 /
+     win32 12; `shell:false` at the spawn call site) — no other inherited
+     name is passed, and the three exported `GOOGLE_*` values travel ONLY
+     because they are both exported here AND allowlisted there (strict
+     allowlist: anything else is never passed to the child). Missing auth
+     surfaces as the fixed `mcp_unavailable` per call (never fake success);
+      shutdown stays bounded and clean. PowerShell differences (not a full
+      Windows run): `export X="..."` is `$env:X="..."`; the pin digest and
+      package-identity checks are the same portable `node` one-liners above
+      (no `sha256sum` / `Get-FileHash` needed), and there is no
+      `chmod` guarantee (rely on the per-user profile ACL); the node generator
+      itself is cross-platform via `os.platform()`. Manual Windows 11 is still
+      pending.
+  Credential-free runtime proof (no OAuth, no browser, no live Google):
+  `docs/evidence/calendar-readonly-profile/smoke-profile.result.json`
+  (22/22: pin reality, auth-gate source check, real SDK initialize/tools-list
+  over actual fork code via InMemory + fixture provider, profile 3/3 enable,
+  adapter search/get runnable, list-calendars denied with zero metadata I/O,
+  mismatch fail-closed, normal `startServer` ownership + lazy + error path,
+  zero network attempts) and
+  `docs/evidence/calendar-readonly-profile/cli-profile.result.json` (actual
+  normal-CLI `pnpm start` acceptance with missing credentials). What those
+  artifacts prove is the RUNTIME side only — wire identity, the three
+   live-wire hashes, and behavior. They do NOT re-verify the source SHA: the
+   full commit/tree/package/lock verification in step 2 above is the prerequisite that
+  must pass BEFORE `npm ci --ignore-scripts` + `npm run build`, and the
+  runtime proof assumes that prerequisite was met.
 
 ### C15 Calendar fake E2E harness fixes (observed: refresh + tombstone scenarios)
 
@@ -1953,3 +2183,166 @@ data, then removed with the now-empty `.review-plan-work/` directory
 0 errors, 1 pre-existing info — see above); no `test-results/`, `.verification-log/`, `.final-gate-tmp/`, or
 `.review-proof/` residue; no test file touched by the lint ground
 truth above.
+## resume-calendar-default (2026-10-13)
+
+Recovered checkpoint (observed, not asserted from docs): branch
+`feat/calendar-readonly-production-profile`, HEAD `f23e245`
+(`docs(operations, readme): fail-fast subshell fork-install guard …`),
+`git status --short` empty (clean tree). This branch is the
+google-readonly profile line stacked on the PR20 base: 7 commits since
+`origin/feat/c12-calendar-snapshots` (`b2deab7` profile composition,
+`094bc23` smoke evidence, `3a0d3de` CLI proof, `2b96350`/`202b476`
+profile-freeze fixes, `932a811`/`f23e245` setup-accuracy docs). The
+C24/C22 material above is history from the base line, not this
+branch's scope.
+
+Stale-claim supersession (no history rewrite): the C13 subsection's
+"whole C13–C15 verification pass is deliberately deferred … ADDED, NOT
+YET RUN" and the C14 subsection's matching "ADDED, NOT YET RUN" lines
+are superseded. The deferred suites they name
+(`packages/kernel/test/calendar_tools.test.ts` C13-01..07 exposure/
+budget/dedup/Retry/cross-source cases;
+`apps/server/test/config.test.ts` + `apps/server/test/bootstrap.test.ts`
+C14 opt-in/preflight/lifecycle cases) were executed by the later
+observed batteries on the base line: C12–C22 final integration
+(`52d61ba`: 103 files / 1251 tests, both typechecks exit 0) and the
+PR20 integrated verification (`61b3573`: 106 files / 1270 tests, both
+typechecks exit 0, lint 219 files 0 errors / 1 pre-existing info).
+Profile-branch additions (`calendarReadonlyProfile.test.ts`, 16 cases;
+`calendarReadonlyProfile.ts` freeze-before-first-await) are covered by
+this worker's final battery on this branch (observed once, Linux, Node
+24.12.0, after the docs edit above — no code changed since): `pnpm
+test` exit 0, **107 files / 1286 tests passed** (+1 file / +16 tests
+vs the PR20 106/1270 baseline, exactly the profile suite); root
+`pnpm run typecheck` exit 0; `pnpm run typecheck:e2e` exit 0; `pnpm
+run lint` exit 0 (**223 files, 0 errors, 1 pre-existing
+`biome.json` recommended-deprecation info**). No browser rerun for
+this docs-only slice (both browser suites already green above).
+
+Fresh credential-free harness evidence (this worker, Linux, Node
+24.12.0, installed Playwright 1.63.0 CLI direct, no pnpm exec, no
+OAuth, no live Google, no secrets — fake MCP over real SDK
+InMemoryTransport + scripted fake model + real UI/API, temp SQLite
+under owned `/tmp/opencode/calendar-resume-XFncqG`, traces on):
+
+- Default browser suite: **23/23 passed** (conversation 4,
+  citation_recovery 3, polling 4, sse_history 12 incl. 2 generated
+  corrupt-cursor cases; ~1.3m). Confirms the base-line browser
+  behavior unchanged on this branch.
+- Calendar-mode suite (`COMPANION_E2E_CALENDAR=1`): **18/18 passed,
+  0 unexpected / 0 flaky / 0 skipped** (JSON stats duration
+  ~45.8s): `action.spec.ts` 13/13 (approve/reject/assent/stale/
+  deleted/read-back/unknown/Stop-before/Stop-after/T1-reload/
+  T6-IDs/held-reload/late-cancel), `calendar.spec.ts` 4/4
+  (search→rN→open, reload, refresh V1→V2, tombstone-keeps-open),
+  `tombstone.spec.ts` 1/1 (positive authoritative deleted rN, prior
+  rN retained). JSON stats `expected:18`.
+- Post-run `ss` on 4173/4174/4175: no listeners (both runs).
+- Pinned-profile proof artifacts retained and accurate (runtime-side
+  only, no source-SHA re-verification, no live claims):
+  `docs/evidence/calendar-readonly-profile/smoke-profile.result.json`
+  (22/22) and `cli-profile.result.json` (actual `pnpm start`
+  missing-credential acceptance; CORRECTED 2026-10-14: reran full
+  acceptance with valid local account `normal`, 12/12 — the prior
+  `me@example.com` env is rejected by the profile account grammar
+  `^[a-z0-9_-]{1,64}$`, so it could not have produced a cold start).
+
+Branch-status note (CURRENT, supersedes the base-line residual table's
+"no profile anywhere in this branch" row for THIS branch only): the
+host-owned pinned `google-readonly` profile IS adopted here as normal-
+startup composition (exact pin/commit/tree/lock/wire-hashes in the C14
+profile subsection above). Profile-adopted is NOT live-accepted:
+fresh user OAuth consent, live production verification (C11-01 stays
+BLOCKED), and manual Windows 11 smoke remain open external gates and
+are untouched by this worker.
+
+## PR23 final proof (2026-10-13, observed)
+
+Focused verification only (no production change in this pass; no
+browser or full-suite claim). Linux, Node 24.12.0, pnpm 11.25.0:
+
+- `pnpm vitest run apps/server/test/calendarReadonlyProfile.test.ts
+  apps/server/test/bootstrap.test.ts apps/server/test/config.test.ts`
+  -> exit 0, **3 files / 78 tests passed** (profile 25, bootstrap 28,
+  config 25), 0 failed.
+- `pnpm run typecheck` -> exit 0; `pnpm run typecheck:e2e` -> exit 0.
+- `pnpm run lint` -> exit 0, **224 files, 0 errors**, 1 pre-existing
+  `biome.json` recommended-deprecation info.
+- Independent throwaway credential-free smoke (tsx, removed after the
+  run; no OAuth, no live Google, no secrets): invalid profile AND
+  invalid account each create **no DB file and no parent dir**;
+  generic `calendar-mcp` and profile `calendar-mcp-google-readonly`
+  rows get **distinct instance IDs**; **restart reuses the profile ID**
+  (still 2 rows); old generic target refresh through the new provider
+  fails `reference_not_found` with **0 `get` calls**.
+- Retained: `docs/evidence/calendar-readonly-profile/
+  pr23-final-proof.result.json` (focused commands + concise smoke JSON
+  + historical_reference; CORRECTED 2026-10-14: full `pnpm test` and both
+  Playwright suites were never run in this focused pass, so they are
+  recorded only as historical references to the resume-calendar-default
+  battery above, not as PR23 results).
+  Prior `smoke-profile.result.json` (22/22) unchanged;
+   `cli-profile.result.json` corrected separately (valid account
+  `normal` rerun, see resume note above).
+
+## M5 decision-turn retry denial (2026-10-14)
+
+Fixes the §18 review finding on `origin/master` (`2474572`):
+`repository.postRetry` accepted `action_approval` / `action_rejection`
+Turns and queued a generic Run for them. A rejection Turn owns no Run
+and an approval Turn owns its Action Run, so the generic generation
+retry could duplicate or fabricate an external write; a terminal
+(failed/unknown/abandoned/cancelled) Action must never be re-executed
+through it. Pre-fix ground truth (throwaway repo/API smoke over real
+SQLite, removed after this note): retry on a rejection Turn was
+ACCEPTED (`202`, new queued generic Run), and retry on an approval Turn
+failed only by accident of `UNIQUE(turn_id, attempt)` surfacing as a
+misleading `409 session_busy`.
+
+Fixed externally visible contract: the generic retry
+(`POST /api/sessions/:sessionId/turns/:turnId/retries`) is
+**user_text-only**. A decision Turn is rejected with the existing fixed
+`400 validation_error` (`request validation failed`) with no new Run,
+no events, no execution/grant change, no allocator bump, and no
+idempotency persistence (a second key is denied identically; a stored
+pre-fix success never replays). Ordinary failed/abandoned `user_text`
+retry is unchanged (still `202`, same Turn, new queued Run).
+
+- `packages/kernel/src/repository.ts`: `postRetry` parses the owned
+  Turn's immutable `input_json` immediately after the session/turn
+  ownership check and throws the existing `RepositoryValidationError`
+  for any non-`user_text` kind — before the idempotency lookup, the
+  busy admission, the `next_run_attempt` CAS, and every insert. Both
+  `app.ts` call sites (live route + draining replay) inherit the denial
+  through the existing `validation_error` mapping; no new error code,
+  schema, or shim.
+- `packages/contracts/src/http.ts`: `PostRetryRequest` doc states the
+  exact user_text-only policy (schema unchanged).
+- `apps/server/src/ui/reducer.ts` + `apps/server/src/ui/client.ts`:
+  pure `isRetryableTurnKind` policy (unknown kinds fail closed) plus a
+  client Turn-kind map hydrated from the ACTUAL history projection (and
+  seeded `user_text` for fresh sends/retries). The failure-only retry
+  control is appended only for `user_text` Turns and `retry()` refuses a
+  known decision Turn locally with the same fixed notice; reloaded
+  action results already render no control (`buildTurn` early return)
+  and are unchanged.
+- Regressions: `apps/server/test/proposals.test.ts` gains the
+  decision-turn denial battery over real SQLite/Hono (approval retry
+  400 while queued AND after terminal pre-marker cancel with
+  turns/runs/events/executions/grants/idempotency unchanged + approval
+  projection intact; rejection retry 400 twice with counts unchanged +
+  single rejection Turn + null execution; `user_text` retry still 202
+  with one new queued Run); `apps/server/test/action_ui.test.ts` pins
+  `isRetryableTurnKind` (`user_text` only, both decision kinds and
+  unknown inputs denied).
+- Observed final-once verification (Linux, Node 24.12.0): focused
+  `proposals` 6/6 + `action_ui` 9/9 green; root `tsc --noEmit` exit 0;
+  real-chromium browser proof on the production UI bundle via the
+  existing Calendar fake harness (throwaway spec, removed after this
+  note) 2/2 — rejection retry 400 twice with 0 writes and no retry
+  control before/after reload, unknown-approval retry 400 with exactly
+  1 write and no retry control before/after reload; existing M3
+  `failure surfaces a retry that succeeds` 1/1 (ordinary text retry
+  preserved in the real browser). Throwaway smokes/specs and
+   `test-results/` removed; no `pnpm` dependency change (offline
+   store-link install only).
