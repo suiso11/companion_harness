@@ -11,6 +11,12 @@
 // - repo: https://github.com/suiso11/google-calendar-mcp
 // - derived branch: feat/m5-reschedule-entrypoint-v2 (draft PR #3)
 // - base commit: 6939311fd3eae9846648e0a175e304c9500f578e (readonly cutover)
+// - source commit: 4f9c06dd9318c11ee9d352d61825c3f75f9ac8a6
+// - source tree: 9eec88aa21951e1ea9564a62e89a40eeb2bcceef
+// - package: @cocal/google-calendar-mcp, private version 3.0.0-readonly.2
+// - package-lock.json SHA-256:
+//   63261d25992ee9c97136a60bbf4fe52a5485cadea28b34d6b8b6c685f38bd533
+//   (unchanged from the readonly base: dependency tree identical)
 // - wire identity: serverInfo { name: "google-calendar-reschedule",
 //   version: "1.0.0-reschedule.1" } (fork src/reschedule/schema.ts +
 //   src/reschedule/server.ts; McpServer name/version, distinct from the
@@ -57,6 +63,12 @@ export const RESCHEDULE_WRITE_FORK = Object.freeze({
   repo: "https://github.com/suiso11/google-calendar-mcp",
   branch: "feat/m5-reschedule-entrypoint-v2",
   baseCommit: "6939311fd3eae9846648e0a175e304c9500f578e",
+  sourceCommit: "4f9c06dd9318c11ee9d352d61825c3f75f9ac8a6",
+  sourceTree: "9eec88aa21951e1ea9564a62e89a40eeb2bcceef",
+  package: "@cocal/google-calendar-mcp",
+  packageVersion: "3.0.0-readonly.2",
+  lockDigestSha256:
+    "63261d25992ee9c97136a60bbf4fe52a5485cadea28b34d6b8b6c685f38bd533",
   serverName: RESCHEDULE_WRITE_SERVER_NAME,
   version: RESCHEDULE_WRITE_SERVER_VERSION,
   scopes: ["https://www.googleapis.com/auth/calendar.events"],

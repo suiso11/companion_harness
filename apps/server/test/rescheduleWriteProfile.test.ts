@@ -14,7 +14,10 @@ import {
   GOOGLE_READONLY_TOOLS,
   getGoogleReadonlyDefinitions,
 } from "../src/calendarReadonlyProfile.js";
-import { createDedicatedWriteBinding } from "../src/rescheduleWriteBinding.js";
+import {
+  createCommittedGrantWriteBinding,
+  createDedicatedWriteBinding,
+} from "../src/rescheduleWriteBinding.js";
 import {
   getRescheduleWriteDefinitions,
   RESCHEDULE_WRITE_WIRE_HASH as PINNED_HASH,
@@ -35,6 +38,19 @@ describe("dedicated reschedule write host pin", () => {
     expect(RESCHEDULE_WRITE_FORK.scopes).toEqual([
       "https://www.googleapis.com/auth/calendar.events",
     ]);
+    // Exact write provenance pin (readonly pin untouched elsewhere).
+    expect(RESCHEDULE_WRITE_FORK.baseCommit).toBe(
+      "6939311fd3eae9846648e0a175e304c9500f578e",
+    );
+    expect(RESCHEDULE_WRITE_FORK.sourceCommit).toBe(
+      "4f9c06dd9318c11ee9d352d61825c3f75f9ac8a6",
+    );
+    expect(RESCHEDULE_WRITE_FORK.sourceTree).toBe(
+      "9eec88aa21951e1ea9564a62e89a40eeb2bcceef",
+    );
+    expect(RESCHEDULE_WRITE_FORK.lockDigestSha256).toBe(
+      "63261d25992ee9c97136a60bbf4fe52a5485cadea28b34d6b8b6c685f38bd533",
+    );
   });
 
   it("exports exactly one trusted write definition (dedicated gate only)", () => {
@@ -122,5 +138,83 @@ describe("dedicated reschedule write host pin", () => {
     });
     expect(refused).toEqual({ status: "definite_failure" });
     expect(dispatched).toBe(0);
+  });
+
+  it("committed-grant binding resolves the exact etag; unknown/hash-only revisions never dispatch", async () => {
+    const etag = '"etag-v1"';
+    const grantBase = {
+      executionId: "11111111-1111-4111-8111-111111111111",
+      proposalId: "22222222-2222-4222-8222-222222222222",
+      proposalHash: "a".repeat(64),
+    };
+    const key = `${grantBase.executionId}\n${grantBase.proposalId}\n${grantBase.proposalHash}`;
+    let dispatched = 0;
+    const binding = createCommittedGrantWriteBinding({
+      caller: {
+        async callTool() {
+          dispatched += 1;
+          return { ok: true, text: JSON.stringify({ status: "succeeded" }) };
+        },
+      },
+      committed: new Map([[key, etag]]),
+    });
+    const port = binding.derivePort?.({
+      connectorInstanceId: "33333333-3333-4333-8333-333333333333",
+      calendarId: "primary",
+    }) as unknown as {
+      update: (request: {
+        grant: {
+          executionId: string;
+          proposalId: string;
+          proposalHash: string;
+          tool: "calendar.reschedule";
+          inputHash: string;
+          expectedRevision: string;
+        };
+        connectorInstanceId: string;
+        tool: "calendar.reschedule";
+        start: string;
+        end: string;
+        targetResourceId: string;
+        targetCanonicalKey: string;
+        target: { calendarId: string; eventId: string };
+      }) => Promise<{ status: string }>;
+    };
+    const ok = await port?.update({
+      grant: {
+        ...grantBase,
+        tool: "calendar.reschedule",
+        inputHash: "b".repeat(64),
+        expectedRevision: etag,
+      },
+      connectorInstanceId: "33333333-3333-4333-8333-333333333333",
+      tool: "calendar.reschedule",
+      start: "2026-03-01T10:00:00Z",
+      end: "2026-03-01T11:00:00Z",
+      targetResourceId: "resource-1",
+      targetCanonicalKey: "canon-1",
+      target: { calendarId: "primary", eventId: "evt-1" },
+    });
+    expect(ok).toEqual({ status: "succeeded" });
+    expect(dispatched).toBe(1);
+    // Hash-only revision is rejected with no dispatch.
+    const hashRev = "c".repeat(64);
+    const refused = await port?.update({
+      grant: {
+        ...grantBase,
+        tool: "calendar.reschedule",
+        inputHash: "b".repeat(64),
+        expectedRevision: hashRev,
+      },
+      connectorInstanceId: "33333333-3333-4333-8333-333333333333",
+      tool: "calendar.reschedule",
+      start: "2026-03-01T10:00:00Z",
+      end: "2026-03-01T11:00:00Z",
+      targetResourceId: "resource-1",
+      targetCanonicalKey: "canon-1",
+      target: { calendarId: "primary", eventId: "evt-1" },
+    });
+    expect(refused).toEqual({ status: "definite_failure" });
+    expect(dispatched).toBe(1);
   });
 });

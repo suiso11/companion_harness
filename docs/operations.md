@@ -3106,3 +3106,62 @@ enters the read allowlist).
   PR #30 review/merge decision (not this worker); Windows 11 x64 manual
   smoke; C11-01 BLOCKED; M5 live/write gates (triple gate never opened
   live); §20 #1 UI phrasing.
+
+## M5 production boundary final (2026-10-15, oc40 fixes, no live writes)
+
+- POST-dispatch 3xx is `unknown` (fork `google.ts` + host mirror
+  `testWirePatch`): the PATCH was already received by the server
+  (`redirect: manual`, never followed), so no definite no-commit proof
+  exists; exactly one attempt, no resend. Fork
+  `googleReschedule.test.ts` + host `rescheduleWrite.test.ts` prove
+  server-received-PATCH-then-3xx -> `unknown` with patchCount 1.
+- Immutable production endpoint: shipped CLI (`src/reschedule/cli.ts`,
+  bin `calendar-reschedule-mcp`) reads NO `M5_RESCHEDULE_TEST_*` env and
+  never sets `endpointBase` (always the FIXED Google host). Fixture
+  injection lives ONLY in the unshipped test-only runner
+  (`src/tests/helpers/rescheduleTestRunner.ts` +
+  `rescheduleTestStdio.ts`, outside `bin`/`files`/`scripts/build.js`),
+  exercising the SAME production provider + MCP server factory
+  (import-identity asserted). Host `rescheduleProcess.test.ts` explicit
+  fork path now spawns that runner via tsx (never the shipped CLI with
+  bypass env); new host `rescheduleEndpointIsolation.test.ts` proves the
+  shipped CLI ignores test env + the committed-grant resolver contract
+  with no live Google calls.
+- Exact least-privilege scope: `WRITE_SCOPES` is
+  `calendar.events` ONLY (broad `calendar` refused). Refresh-response
+  `scope`/`scopes`, when the server reports one, must contain the exact
+  write scope or the refresh is refused (config alone never equals a
+  grant). Fork `productionBoundary.test.ts` covers exact/broad/readonly/
+  spoof + refresh-scope verify.
+- Write provenance pin (readonly pin untouched):
+  `apps/server/src/rescheduleWriteProfile.ts` now pins
+  branch `feat/m5-reschedule-entrypoint-v2`, base
+  `6939311fd3eae9846648e0a175e304c9500f578e`, source commit
+  `4f9c06dd9318c11ee9d352d61825c3f75f9ac8a6`, source tree
+  `9eec88aa21951e1ea9564a62e89a40eeb2bcceef`, package-lock SHA-256
+  `63261d25992ee9c97136a60bbf4fe52a5485cadea28b34d6b8b6c685f38bd533`
+  (deps unchanged from the readonly base).
+- Host vs fork CI scopes (no new flaky clone job added: host CI keeps no
+  fork-fetch pattern; fork CI is the actual provider proof):
+  fork default `npm test` (`vitest run src/tests/unit`) includes
+  `src/tests/unit/reschedule` (832/832 green incl. 3xx/scope/boundary);
+  fork `.github/workflows/ci.yml` now triggers on `feat/**` too so PR #3
+  runs build + `lint` (`tsc -p tsconfig.lint.json`) + `check:imports` +
+  unit tests with coverage. Host CI (`ci.yml` check + e2e) proves the
+  tracked-fixture mirrors, static gates, and full pipeline smoke only;
+  host `rescheduleProcess`/`rescheduleWrite` mirrors are NOT provider
+  proof (stated here, not substituted).
+- Concrete host resolver (closed contract, trusted-code-only, default
+  OFF): `createCommittedGrantResolver` (connector-calendar, re-exported
+  by `rescheduleWriteBinding.ts` + `createCommittedGrantWriteBinding`
+  helper) keyed by execution/proposal/hash -> immutable
+  `expectedRevision` with real source-etag basis; unknown/mismatched/
+  hash-only/updated-only -> null (safe definite rejection, no dispatch).
+  Nothing auto-wires: the host passes the resolver explicitly with its
+  committed-grant store. Resolver answers are equality-checked against
+  `grant.expectedRevision`; a throwing resolver pre-dispatch stays a
+  safe definite failure (no dispatch happened).
+- Verification (this worker, no live Google/OAuth/writes): fork
+  `npm run build` + `npm run lint` + `npm test` green; host units +
+  typecheck/lint + pipeline smoke re-run below. Fork commits pushed
+  ff-only on `feat/m5-reschedule-entrypoint-v2` (no merge, no force).

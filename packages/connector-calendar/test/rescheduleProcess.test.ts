@@ -4,15 +4,19 @@
 // (`test/helpers/rescheduleFixtureServer.mjs`, identity
 // `google-calendar-reschedule-test-fixture`) — no nested fork checkout, no
 // unpublished dependency, no skip. EXPLICIT setup: set
-// `M5_RESCHEDULE_FORK_CLI` to a built fork `build/reschedule-cli.js`
-// (derived branch `feat/m5-reschedule-entrypoint-v2`, draft PR
-// suiso11/google-calendar-mcp#3) to drive the REAL production entrypoint
+// `M5_RESCHEDULE_FORK_CLI` to the fork checkout root (or a built fork
+// `build/reschedule-cli.js`; derived branch
+// `feat/m5-reschedule-entrypoint-v2`, draft PR
+// suiso11/google-calendar-mcp#3) to drive the REAL production provider +
+// MCP server factory through the TEST-ONLY runner
+// (`src/tests/helpers/rescheduleTestStdio.ts`, unshipped, outside `bin`)
 // instead; a set-but-missing path is a HARD error (never a silent skip).
-// Either target is driven over the REAL MCP stdio wire (SDK Client +
-// StdioClientTransport) into a local Google-shaped loopback fixture.
-// Production CLI never sets the endpoint-override flag, so production
-// always uses the FIXED Google URL. No live Google, no OAuth, fixture
-// data only, no imports from any ignored nested repo.
+// The SHIPPED production CLI (`build/reschedule-cli.js`) is NEVER spawned
+// with test endpoint/auth bypass env: it ignores
+// `M5_RESCHEDULE_TEST_*` and always uses the immutable Google host, so only
+// the test-only runner (same provider + server factory, programmatic
+// endpoint injection) contacts the loopback fixture. No live Google, no
+// OAuth, fixture data only, no imports from any ignored nested repo.
 
 import { createServer, type Server } from "node:http";
 import { dirname, join } from "node:path";
@@ -136,32 +140,55 @@ function cleanEnv(input: NodeJS.ProcessEnv): Record<string, string> {
 }
 
 async function resolveStdioTarget(): Promise<StdioTarget> {
-  // Explicit real-fork setup: M5_RESCHEDULE_FORK_CLI points at a built fork
-  // `build/reschedule-cli.js`. Set-but-missing is a HARD error (never skip).
+  // Explicit real-fork setup: M5_RESCHEDULE_FORK_CLI points at the fork
+  // checkout root (or its built `build/reschedule-cli.js`). The test-only
+  // stdio runner (`src/tests/helpers/rescheduleTestStdio.ts`, unshipped)
+  // is spawned via tsx with ONLY `M5_RESCHEDULE_TEST_ENDPOINT_BASE`
+  // (programmatic endpoint injection of the SAME production provider +
+  // server factory). The SHIPPED CLI is never spawned with test bypass env:
+  // it ignores `M5_RESCHEDULE_TEST_*` and always uses the immutable Google
+  // host. Set-but-missing is a HARD error (never skip).
   const explicit = process.env.M5_RESCHEDULE_FORK_CLI ?? "";
   if (explicit.length > 0) {
     const { existsSync } = await import("node:fs");
-    if (!existsSync(explicit)) {
+    const { dirname } = await import("node:path");
+    const forkRoot = explicit.endsWith("reschedule-cli.js")
+      ? dirname(dirname(explicit))
+      : explicit;
+    const runner = join(
+      forkRoot,
+      "src",
+      "tests",
+      "helpers",
+      "rescheduleTestStdio.ts",
+    );
+    if (!existsSync(runner)) {
       throw new Error(
-        `explicit fork CLI missing: ${explicit} (build the derived fork branch feat/m5-reschedule-entrypoint-v2 first)`,
+        `explicit fork test runner missing: ${runner} (fork branch feat/m5-reschedule-entrypoint-v2 with test-only runner required)`,
       );
     }
+    // Resolve a tsx loader without importing the ignored nested repo: prefer
+    // the root-owned tsx binary, else node --experimental-strip-types.
+    const rootTsx = join(
+      dirname(fileURLToPath(import.meta.url)),
+      "..",
+      "..",
+      "..",
+      "packages",
+      "connector-mcp",
+      "node_modules",
+      ".bin",
+      "tsx",
+    );
+    const useTsx = existsSync(rootTsx);
     return {
-      command: process.execPath,
-      args: [explicit],
+      command: useTsx ? rootTsx : process.execPath,
+      args: useTsx ? [runner] : ["--experimental-strip-types", runner],
       env: {
         ...cleanEnv(process.env),
-        M5_RESCHEDULE_ACCOUNT: "test-account",
-        M5_RESCHEDULE_CLIENT_ID: "test-client",
-        M5_RESCHEDULE_CLIENT_SECRET: "test-secret",
-        M5_RESCHEDULE_REFRESH_TOKEN: "test-refresh",
-        M5_RESCHEDULE_GRANTED_SCOPE:
-          "https://www.googleapis.com/auth/calendar.events",
-        M5_RESCHEDULE_ACCESS_TOKEN: "fake-token-for-tests",
-        M5_RESCHEDULE_TEST_ALLOW_ENDPOINT_OVERRIDE: "1",
         M5_RESCHEDULE_TEST_ENDPOINT_BASE: fixtureBase,
       },
-      label: `explicit fork CLI ${explicit}`,
+      label: `fork test-only runner ${runner}`,
     };
   }
   // Default: TRACKED fixture server (clean-clone-safe, always runs).

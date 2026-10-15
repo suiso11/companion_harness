@@ -37,6 +37,7 @@ export {
 export {
   CALENDAR_RESCHEDULE_TOOL,
   type CreateRescheduleWritePortOptions,
+  createCommittedGrantResolver,
   createRescheduleWritePort,
   RESCHEDULE_WRITE_MCP_NAME,
   RESCHEDULE_WRITE_MCP_VERSION,

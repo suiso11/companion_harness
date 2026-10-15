@@ -297,7 +297,10 @@ function testWirePatch(input: {
       return { status: "definite_failure", code: "not_found" } as const;
     }
     if (res.status >= 300 && res.status < 400) {
-      return { status: "definite_failure", code: "invalid_input" } as const;
+      // POST-dispatch 3xx mirror of the production fork adapter: the PATCH
+      // was already received by the server (no redirect follow), so the
+      // outcome is UNKNOWN (never definite, no resend).
+      return { status: "unknown", code: "upstream_unknown" } as const;
     }
     if (!res.ok) {
       if (res.status >= 500)

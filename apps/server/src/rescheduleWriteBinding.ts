@@ -25,6 +25,7 @@
 //   AND its capability names the active Calendar instance (bootstrap gate).
 
 import {
+  createCommittedGrantResolver,
   createRescheduleWritePort,
   RESCHEDULE_WRITE_TOOL,
   type RescheduleWriteCaller,
@@ -34,7 +35,12 @@ import {
 import type { CalendarActionWritePort } from "@companion/kernel";
 import type { ActionWriteBinding } from "./bootstrap.js";
 
-export type { RescheduleWriteCaller, RescheduleWriteTarget };
+export type {
+  RescheduleWriteCaller,
+  RescheduleWriteTarget,
+  ResolveExpectedEtag,
+};
+export { createCommittedGrantResolver };
 
 export interface CreateDedicatedWriteBindingOptions {
   /**
@@ -80,4 +86,28 @@ export function createDedicatedWriteBinding(
       return port as unknown as CalendarActionWritePort;
     },
   };
+}
+
+/**
+ * Concrete committed-grant binding helper (trusted host code only, default
+ * OFF: the caller must explicitly pass its committed-grant store).
+ *
+ * Builds the same dedicated binding with `createCommittedGrantResolver`
+ * keyed by execution/proposal/hash -> immutable `expectedRevision` (real
+ * source-etag basis only). Hash/updated-only revisions and unknown grants
+ * resolve to null (safe definite rejection, no dispatch). Nothing is
+ * registered or enabled by importing this module.
+ */
+export function createCommittedGrantWriteBinding(options: {
+  readonly caller: RescheduleWriteCaller;
+  readonly committed: ReadonlyMap<string, string> | Record<string, string>;
+  readonly owned?: boolean;
+  readonly shutdown?: () => Promise<void>;
+}): ActionWriteBinding {
+  return createDedicatedWriteBinding({
+    caller: options.caller,
+    resolveExpectedEtag: createCommittedGrantResolver(options.committed),
+    ...(options.owned !== undefined ? { owned: options.owned } : {}),
+    ...(options.shutdown !== undefined ? { shutdown: options.shutdown } : {}),
+  });
 }

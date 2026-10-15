@@ -138,6 +138,34 @@ export type ResolveExpectedEtag = (
 ) => string | null;
 
 /**
+ * Concrete host resolver keyed by the committed grant (production default
+ * helper, trusted host code only, default OFF: nothing is auto-wired).
+ *
+ * The host builds this ONCE from its committed-grant store
+ * (execution/proposal/hash -> immutable `expectedRevision`) and passes the
+ * returned `ResolveExpectedEtag` into `createRescheduleWritePort`. Lookup
+ * is by the EXACT committed grant triple; the answer must equal
+ * `grant.expectedRevision` exactly and carry a real source-etag basis
+ * (`isSourceEtagBasis`), otherwise null (safe definite rejection, never a
+ * fresh-preflight substitution). Resolver throw pre-dispatch is caught by
+ * the port as `definite_failure` (safe: no dispatch happened).
+ */
+export function createCommittedGrantResolver(
+  committed: ReadonlyMap<string, string> | Record<string, string>,
+): ResolveExpectedEtag {
+  const store =
+    committed instanceof Map ? committed : new Map(Object.entries(committed));
+  return (grant: RescheduleWriteGrantRef): string | null => {
+    const key = `${grant.executionId}\n${grant.proposalId}\n${grant.proposalHash}`;
+    const revision = store.get(key);
+    if (revision === undefined) return null;
+    if (revision !== grant.expectedRevision) return null;
+    if (!isSourceEtagBasis(revision)) return null;
+    return revision;
+  };
+}
+
+/**
  * Source-etag basis proof: the approved `expectedRevision` is usable as a
  * conditional etag ONLY when it is a real source etag. A content-hash
  * fallback (64-hex SHA-256) or an `updated`-timestamp string is NOT an
