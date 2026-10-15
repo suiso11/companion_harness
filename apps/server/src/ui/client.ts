@@ -1326,3 +1326,15 @@ function boot(): void {
 }
 
 boot();
+    // Memory citations (mN) address recalled snippets, not stored
+    // references: no drawer and no reference-context update. Silent return
+    // keeps rN behavior unchanged when memory is disabled or unused.
+    if (/^m[1-9][0-9]*$/.test(citation)) {
+      return;
+    }
+    // Memory citations (mN) address recalled snippets, not stored
+    // references: no drawer and no reference-context update. Silent return
+    // keeps rN behavior unchanged when memory is disabled or unused.
+    if (/^m[1-9][0-9]*$/.test(citation)) {
+      return;
+    }

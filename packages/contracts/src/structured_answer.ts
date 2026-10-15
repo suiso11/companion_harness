@@ -58,12 +58,29 @@ export const MAX_STRUCTURED_ANSWER_BYTES = 16_384 as const;
  * (`r` + up to 10 digits) to keep the identifier bounded.
  */
 export const CITATION_ID_REGEX = /^r[1-9][0-9]*$/;
+/**
+ * Structural memory citation identifier: `m` followed by a positive integer
+ * with no leading zeros (`m1`, `m2`). Memory citations address the current
+ * run's recalled memory snippets only (see the memory integration contract
+ * in `docs/operations.md`): `mN` maps to the Nth snippet exposed to this
+ * run, never to a canonical UUID, path, or foreign-run record. `m0`, `m01`,
+ * bare numbers, and any other shape are rejected. Length capped at 11.
+ */
+export const MEMORY_CITATION_ID_REGEX = /^m[1-9][0-9]*$/;
+/** True for structural memory (`mN`) citations, false for `rN`/other. */
+export function isMemoryCitationId(id: string): boolean {
+  return MEMORY_CITATION_ID_REGEX.test(id);
+}
+/** True for structural reference (`rN`) citations, false otherwise. */
+export function isReferenceCitationId(id: string): boolean {
+  return CITATION_ID_REGEX.test(id);
+}
 export const CitationIdSchema = z
   .string()
   .min(2)
   .max(11)
-  .regex(CITATION_ID_REGEX, {
-    message: "citation must be a structural rN identifier (e.g. r1)",
+  .regex(/^([rm])[1-9][0-9]*$/, {
+    message: "citation must be a structural rN or mN identifier (e.g. r1, m1)",
   });
 export type CitationId = z.infer<typeof CitationIdSchema>;
 

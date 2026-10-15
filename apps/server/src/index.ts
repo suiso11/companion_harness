@@ -26,6 +26,7 @@ export {
   startServerFromEnv,
 } from "./bootstrap.js";
 export type {
+  MemoryConfig,
   ModelAdapter,
   ModelConfig,
   ServerConfig,
@@ -37,6 +38,7 @@ export {
   defaultDbPath,
   isIanaTimeZone,
   loadServerConfig,
+  parseMemoryConfig,
   parseModelConfig,
   ServerConfigError,
 } from "./config.js";
@@ -57,6 +59,22 @@ export {
   STORE_SIZE_WARN_BYTES,
   shouldWarnStoreSize,
 } from "./maintenance.js";
+export type {
+  MemoryCliAddress,
+  MemoryCliCallOptions,
+  MemoryCliEnvelope,
+  MemoryCliFailureCode,
+} from "./memory_cli.js";
+export { callMemoryCli, MemoryCliError } from "./memory_cli.js";
+export type { MemoryService, MemoryServiceOptions } from "./memory_service.js";
+export {
+  createMemoryService,
+  MEMORY_DISTILL_TIMEOUT_MS,
+  MEMORY_DRAIN_BATCH,
+  MEMORY_JOB_MAX_ATTEMPTS,
+  parseExtractionOutput,
+  stableMemoryJobKey,
+} from "./memory_service.js";
 export {
   createSseResponse,
   formatRunEventSse,

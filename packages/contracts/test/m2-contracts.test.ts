@@ -36,6 +36,7 @@ import {
   MAX_PART_TEXT_CODE_POINTS,
   MAX_STRUCTURED_ANSWER_BYTES,
   MAX_STRUCTURED_ANSWER_PARTS,
+  MEMORY_CITATION_ID_REGEX,
   MIN_PART_TEXT_CODE_POINTS,
   MIN_STRUCTURED_ANSWER_PARTS,
   ModelStepCompletedPayloadSchema,
@@ -174,11 +175,19 @@ describe("StructuredAnswer exact bounds (parts 1-20, text 1-4000, citations 0-8)
   });
 });
 
-describe("citations are structural rN identifiers only (grant checks are kernel)", () => {
+describe("citations are structural rN/mN identifiers only (grant checks are kernel)", () => {
   it("accepts canonical rN ids", () => {
     for (const id of ["r1", "r2", "r12", "r9999999999"]) {
       expect(CitationIdSchema.parse(id)).toBe(id);
       expect(CITATION_ID_REGEX.test(id)).toBe(true);
+    }
+  });
+
+  it("accepts canonical memory mN ids (grant checks are kernel)", () => {
+    for (const id of ["m1", "m2", "m12"]) {
+      expect(CitationIdSchema.parse(id)).toBe(id);
+      expect(MEMORY_CITATION_ID_REGEX.test(id)).toBe(true);
+      expect(CITATION_ID_REGEX.test(id)).toBe(false);
     }
   });
 

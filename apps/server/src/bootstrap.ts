@@ -19,6 +19,7 @@ import { chmodSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createMarkdownConnector } from "@companion/connector-markdown";
+import type { KernelRepository } from "@companion/kernel";
 import {
   BUNDLED_SCHEMA_VERSION,
   closeKernelDatabase,
@@ -49,6 +50,7 @@ import {
   assertDbPathHasNoSymlink,
   DEFAULT_LOG_LEVEL,
   loadServerConfig,
+  type MemoryConfig,
   type ModelConfig,
   type ServerConfig,
   ServerConfigError,
@@ -59,6 +61,7 @@ import {
   type StatFn,
   shouldWarnStoreSize,
 } from "./maintenance.js";
+import { createMemoryService, type MemoryService } from "./memory_service.js";
 
 /** Graceful-drain natural-completion budget (§11.5: max 10s). */
 export const SHUTDOWN_DRAIN_MS = 10_000;
@@ -98,6 +101,8 @@ export interface StartedServer {
   shutdown: (reason?: string) => Promise<void>;
   /** M1 ToolBroker when Markdown roots are configured, else null (M2 hook). */
   toolBroker: ToolBroker | null;
+  /** Conversation-memory service when COMPANION_MEMORY_JSON is set, else null. */
+  memory: MemoryService | null;
 }
 
 /** Fixed path-free display name for the single M1 Markdown connector. */
@@ -338,7 +343,77 @@ export async function startServer(
       }
     }
 
-    const repo = createKernelRepository(handle.raw);
+    const baseRepo = createKernelRepository(handle.raw);
+    // M2 gateway resolution first (opt-in): the memory service reuses the
+    // SAME loopback gateway for structured extraction (no new service, no
+    // provisioning). Null here means extraction conservatively yields no
+    // memory; recall/outbox still function.
+    let modelGateway: ModelGateway | null = null;
+    let modelName = "memory-extraction";
+    if (config.model !== null) {
+      const built =
+        options.modelGateway !== undefined
+          ? options.modelGateway
+          : createModelGateway(config.model, options.modelFetch);
+      if (built !== null) {
+        modelGateway = built;
+        modelName = config.model.model;
+      }
+    }
+    // Conversation memory (strict opt-in, default memoryless): when
+    // COMPANION_MEMORY_JSON is set, create the service BEFORE the engine
+    // and agent so every consumer shares one wrapped repo. The wrapper is
+    // the intake hook: fresh intakes and cancels preempt idle cultivation,
+    // and durably completed runs trigger authoritative cultivation. Without
+    // memory config the raw repo is shared unchanged (old behavior).
+    let repo: KernelRepository = baseRepo;
+    let memory: MemoryService | null = null;
+    if (config.memory !== null) {
+      const memoryConfig: MemoryConfig = config.memory;
+      memory = createMemoryService({
+        address: {
+          executable: memoryConfig.executable,
+          entry: memoryConfig.entry,
+          config: memoryConfig.config,
+          timeoutMs: memoryConfig.timeoutMs,
+          maxResponseBytes: memoryConfig.maxResponseBytes,
+        },
+        scope: memoryConfig.scope,
+        recallLimit: memoryConfig.recallLimit,
+        idleMs: memoryConfig.idleMs,
+        repo: baseRepo,
+        gateway: modelGateway,
+        model: modelName,
+        logger,
+      });
+      const service = memory;
+      repo = {
+        ...baseRepo,
+        postMessage: (...args) => {
+          const out = baseRepo.postMessage(...args);
+          service.notifyForeground();
+          return out;
+        },
+        postRetry: (...args) => {
+          const out = baseRepo.postRetry(...args);
+          service.notifyForeground();
+          return out;
+        },
+        completeRun: (...args) => {
+          const out = baseRepo.completeRun(...args);
+          if (out.applied) {
+            service.onRunCompleted(args[0]);
+          }
+          return out;
+        },
+        cancelRun: (...args) => {
+          const out = baseRepo.cancelRun(...args);
+          service.notifyForeground();
+          return out;
+        },
+      };
+      logger.info("server.memory_ready", { status: 1 });
+    }
     // M1 (plan 14.1/14.5-14.6): after migration and before engine
     // recovery/listen, when roots are configured create one connector
     // owning all roots, ensure one fingerprint-bound instance, then the
@@ -368,37 +443,34 @@ export async function startServer(
       toolBroker = createToolBroker({ db: handle.raw, repo, registrations });
       logger.info("server.markdown_ready", { status: registrations.length });
     }
-    // M2 (opt-in): when config.model is set, build the loopback gateway
-    // and register the agent under m0-default before engine.start/listen.
-    // The agent reuses the M1 ToolBroker, or a private empty-registration
-    // broker when no Markdown roots exist (toolBroker stays null without
-    // roots). No model config => empty registry: runs fail closed with a
-    // fixed code instead of producing fake LLM output. No direct model
-    // endpoint is added; only counts are logged (never URLs/keys).
+    // M2 (opt-in): when a gateway resolved above, register the agent under
+    // m0-default before engine.start/listen. The agent reuses the M1
+    // ToolBroker, or a private empty-registration broker when no Markdown
+    // roots exist (toolBroker stays null without roots). With memory
+    // configured the agent additionally gets the bounded pre-answer recall
+    // hook (fail-open memoryless otherwise). No model gateway => empty
+    // registry: runs fail closed with a fixed code instead of producing
+    // fake LLM output. No direct model endpoint is added; only counts are
+    // logged (never URLs/keys).
     const registry = new StrategyRegistry();
-    if (config.model !== null) {
-      const gateway =
-        options.modelGateway !== undefined
-          ? options.modelGateway
-          : createModelGateway(config.model, options.modelFetch);
-      if (gateway !== null) {
-        const agentBroker =
-          toolBroker ??
-          createToolBroker({ db: handle.raw, repo, registrations: [] });
-        registry.register(
-          AGENT_STRATEGY_NAME,
-          createAgentStrategy({
-            db: handle.raw,
-            repo,
-            broker: agentBroker,
-            gateway,
-            model: config.model.model,
-          }),
-        );
-        logger.info("server.model_ready", {
-          status: agentBroker.toolNames().length + 1,
-        });
-      }
+    if (modelGateway !== null) {
+      const agentBroker =
+        toolBroker ??
+        createToolBroker({ db: handle.raw, repo, registrations: [] });
+      registry.register(
+        AGENT_STRATEGY_NAME,
+        createAgentStrategy({
+          db: handle.raw,
+          repo,
+          broker: agentBroker,
+          gateway: modelGateway,
+          model: modelName,
+          ...(memory !== null ? { memory: memory.recallHook } : {}),
+        }),
+      );
+      logger.info("server.model_ready", {
+        status: agentBroker.toolNames().length + 1,
+      });
     }
     engine = new RunEngine({
       db: handle.raw,
@@ -409,6 +481,11 @@ export async function startServer(
     logger.info("server.recovered", {
       status: recovery.abandoned + recovery.cancelled,
     });
+    // Memory service starts after engine recovery: crash-recovered pending
+    // jobs drain with stable keys before the idle timer arms.
+    if (memory !== null) {
+      memory.start();
+    }
 
     const { app, controls } = createApp({
       config,
@@ -502,6 +579,16 @@ export async function startServer(
         controls.markDraining();
         const safeReason = sanitizeShutdownReason(reason);
         logger.info("server.draining", { status: safeReason });
+        // Stop memory first: the idle timer is cancelled, in-flight CLI
+        // children are hard-killed and awaited (no orphans), and no new
+        // cultivation starts while the engine drains.
+        if (memory !== null) {
+          try {
+            await memory.stop();
+          } catch {
+            // Best effort: the engine drain below still runs.
+          }
+        }
         try {
           await activeEngine.shutdown({ drainMs });
         } catch {
@@ -546,6 +633,7 @@ export async function startServer(
       port,
       shutdown,
       toolBroker,
+      memory,
     };
   } catch (error) {
     removeSignalHandlers();

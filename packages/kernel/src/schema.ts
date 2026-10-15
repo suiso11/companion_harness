@@ -540,6 +540,63 @@ export const modelCalls = sqliteTable(
 // committed migration SQL only (as with the M0 active-run partial index
 // and the M1 snapshot-links target index).
 
+// Conversation-memory outbox (remind CLI integration). Mirrors
+// packages/kernel/migrations/0006_memory_outbox.sql, which is authoritative.
+// Companion-owned durable queue + immutable recall-exposure snapshots +
+// per-run memory citation grants. Prompt text, raw model output, and
+// secrets are NEVER columns here; `last_error` carries a fixed code only.
+
+export const memoryOutbox = sqliteTable("memory_outbox", {
+  id: text("id").primaryKey(),
+  kind: text("kind").notNull(),
+  sessionId: text("session_id").notNull(),
+  runId: text("run_id").notNull(),
+  turnId: text("turn_id"),
+  eventId: text("event_id"),
+  scope: text("scope").notNull(),
+  idempotencyKey: text("idempotency_key").notNull().unique(),
+  requestJson: text("request_json").notNull(),
+  status: text("status").notNull().default("pending"),
+  attempts: integer("attempts").notNull().default(0),
+  nextDueAt: integer("next_due_at").notNull().default(0),
+  lastError: text("last_error"),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+});
+
+export const memoryExposures = sqliteTable(
+  "memory_exposures",
+  {
+    recallId: text("recall_id").notNull(),
+    recordId: text("record_id").notNull(),
+    sessionId: text("session_id").notNull(),
+    runId: text("run_id").notNull(),
+    scope: text("scope").notNull(),
+    citation: text("citation").notNull(),
+    snippet: text("snippet").notNull(),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.recallId, t.recordId] })],
+);
+
+export const memoryGrants = sqliteTable(
+  "memory_grants",
+  {
+    runId: text("run_id").notNull(),
+    citation: text("citation").notNull(),
+    recordId: text("record_id").notNull(),
+    recallId: text("recall_id").notNull(),
+    sessionId: text("session_id").notNull(),
+    scope: text("scope").notNull(),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.runId, t.citation] })],
+);
+
+// NOTE: the memory lookup indexes (idx_memory_outbox_due,
+// idx_memory_outbox_run, idx_memory_exposures_run, idx_memory_grants_run)
+// are owned by the committed migration SQL only.
+
 export const kernelSchema = {
   sessions,
   turns,
@@ -558,4 +615,7 @@ export const kernelSchema = {
   sessionReferenceContext,
   evidenceGrants,
   modelCalls,
+  memoryOutbox,
+  memoryExposures,
+  memoryGrants,
 };

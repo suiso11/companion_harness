@@ -70,7 +70,7 @@ function tableNames(db: Database.Database): string[] {
 }
 
 const BACKUP_NAME_PATTERN =
-  /^companion-pre-migration-v0-to-v5-\d{8}T\d{6}Z-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.sqlite$/;
+  /^companion-pre-migration-v0-to-v6-\d{8}T\d{6}Z-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.sqlite$/;
 
 function stripComments(src: string): string {
   return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|\s)\/\/.*$/gm, "$1");
@@ -91,7 +91,7 @@ describe("m0 migration lifecycle", () => {
         migrated: true,
         fromVersion: 0,
         toVersion: BUNDLED_SCHEMA_VERSION,
-        applied: [1, 2, 3, 4, 5],
+        applied: [1, 2, 3, 4, 5, 6],
       });
       expect(result.backupPath).toBeUndefined();
       expect(getSchemaVersion(handle.raw)).toBe(BUNDLED_SCHEMA_VERSION);
@@ -166,7 +166,7 @@ describe("m0 migration lifecycle", () => {
       });
       expect(result.migrated).toBe(true);
       expect(result.backupPath).toMatch(
-        /companion-pre-migration-v0-to-v5-.*\.sqlite$/,
+        /companion-pre-migration-v0-to-v6-.*\.sqlite$/,
       );
       const name = (result.backupPath as string).split(/[\\/]/).pop() as string;
       expect(name).toMatch(BACKUP_NAME_PATTERN);
@@ -543,7 +543,7 @@ describe("m0 storage helpers and provenance", () => {
     // Fail closed: no row is ever merged or deleted on a case collision.
     const m4Code = m4.replace(/--[^\n]*/g, "");
     expect(m4Code).not.toMatch(/DELETE/i);
-    expect(BUNDLED_SCHEMA_VERSION).toBe(5);
+    expect(BUNDLED_SCHEMA_VERSION).toBe(6);
     const journal = JSON.parse(
       readFileSync(
         join(kernelDir, "migrations", "meta", "_journal.json"),
@@ -564,6 +564,9 @@ describe("m0 storage helpers and provenance", () => {
     );
     expect(journal.entries.map((entry) => entry.tag)).toContain(
       "0005_m2_model_calls",
+    );
+    expect(journal.entries.map((entry) => entry.tag)).toContain(
+      "0006_memory_outbox",
     );
     const backupSrc = readFileSync(join(kernelDir, "src", "backup.ts"), "utf8");
     expect(backupSrc).toContain(".backup(");
@@ -599,7 +602,7 @@ describe("m1 reference storage migration", () => {
     "evidence_grants",
   ];
 
-  it("migrates fresh 0 -> 5 applying all migrations", async () => {
+  it("migrates fresh 0 -> 6 applying all migrations", async () => {
     const dir = tempDir();
     const file = join(dir, "kernel.sqlite");
     const backups = join(dir, "backups");
@@ -612,11 +615,11 @@ describe("m1 reference storage migration", () => {
       expect(result).toMatchObject({
         migrated: true,
         fromVersion: 0,
-        toVersion: 5,
-        applied: [1, 2, 3, 4, 5],
+        toVersion: 6,
+        applied: [1, 2, 3, 4, 5, 6],
       });
       expect(result.backupPath).toBeUndefined();
-      expect(getSchemaVersion(handle.raw)).toBe(5);
+      expect(getSchemaVersion(handle.raw)).toBe(6);
       const names = tableNames(handle.raw);
       for (const table of M1_TABLES) {
         expect(names).toContain(table);
@@ -635,7 +638,7 @@ describe("m1 reference storage migration", () => {
     }
   });
 
-  it("upgrades v1 -> 5 with a pre-upgrade backup preserving v1 data", async () => {
+  it("upgrades v1 -> 6 with a pre-upgrade backup preserving v1 data", async () => {
     const dir = tempDir();
     const file = join(dir, "kernel.sqlite");
     const backups = join(dir, "backups");
@@ -680,11 +683,11 @@ describe("m1 reference storage migration", () => {
       expect(result).toMatchObject({
         migrated: true,
         fromVersion: 1,
-        toVersion: 5,
-        applied: [2, 3, 4, 5],
+        toVersion: 6,
+        applied: [2, 3, 4, 5, 6],
       });
       expect(result.backupPath).toMatch(
-        /companion-pre-migration-v1-to-v5-.*\.sqlite$/,
+        /companion-pre-migration-v1-to-v6-.*\.sqlite$/,
       );
       expect(
         readdirSync(backups).filter((entry) => entry.endsWith(".partial")),
@@ -712,7 +715,7 @@ describe("m1 reference storage migration", () => {
         copy.close();
       }
       // Live DB keeps the v1 rows and gains the M1 tables plus the graph.
-      expect(getSchemaVersion(handle.raw)).toBe(5);
+      expect(getSchemaVersion(handle.raw)).toBe(6);
       const kept = handle.raw
         .prepare("SELECT id FROM runs WHERE id = ?")
         .get(runId) as { id: string } | undefined;
@@ -732,7 +735,7 @@ describe("m1 reference storage migration", () => {
     }
   });
 
-  it("upgrades v2 -> 5 with a pre-upgrade backup preserving v2 data", async () => {
+  it("upgrades v2 -> 6 with a pre-upgrade backup preserving v2 data", async () => {
     const dir = tempDir();
     const file = join(dir, "kernel.sqlite");
     const backups = join(dir, "backups");
@@ -765,11 +768,11 @@ describe("m1 reference storage migration", () => {
       expect(result).toMatchObject({
         migrated: true,
         fromVersion: 2,
-        toVersion: 5,
-        applied: [3, 4, 5],
+        toVersion: 6,
+        applied: [3, 4, 5, 6],
       });
       expect(result.backupPath).toMatch(
-        /companion-pre-migration-v2-to-v5-.*\.sqlite$/,
+        /companion-pre-migration-v2-to-v6-.*\.sqlite$/,
       );
       expect(
         readdirSync(backups).filter((entry) => entry.endsWith(".partial")),
@@ -791,8 +794,9 @@ describe("m1 reference storage migration", () => {
       } finally {
         copy.close();
       }
-      expect(getSchemaVersion(handle.raw)).toBe(5);
+      expect(getSchemaVersion(handle.raw)).toBe(6);
       expect(tableNames(handle.raw)).toContain("snapshot_links");
+      expect(tableNames(handle.raw)).toContain("memory_outbox");
       const kept = handle.raw
         .prepare("SELECT id FROM sessions WHERE id = ?")
         .get(sessionId) as { id: string } | undefined;
