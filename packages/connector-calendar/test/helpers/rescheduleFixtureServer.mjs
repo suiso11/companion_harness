@@ -1,0 +1,186 @@
+#!/usr/bin/env node
+// M5 TEST FIXTURE MCP server — tracked, clean-clone-safe, NEVER production.
+//
+// This is a minimal stdio MCP double used ONLY by
+// `packages/connector-calendar/test/rescheduleProcess.test.ts` so the root
+// suite passes on a clean clone with no nested fork checkout. It exposes the
+// same narrow contract as the real separate entrypoint (tool
+// `reschedule-event`, start/end-only + opaque selection + `expectedEtag`,
+// exactly ONE conditional PATCH with `If-Match`, 412 -> definite
+// `etag_mismatch`) against the loopback Google-shaped fixture whose base URL
+// arrives via `M5_RESCHEDULE_TEST_ENDPOINT_BASE` (required; the process
+// exits non-zero without it). No credential namespace, no OAuth, no live
+// Google, fixture data only.
+//
+// The REAL production entrypoint lives in the fork (derived branch
+// `feat/m5-reschedule-entrypoint-v2`, draft PR suiso11/google-calendar-mcp#3,
+// base commit 6939311): identity `google-calendar-reschedule` /
+// `1.0.0-reschedule.1`. THIS fixture intentionally reports its own identity
+// (`google-calendar-reschedule-test-fixture` / `0.0.0-fixture.1`) so it can
+// never be mistaken for production. To drive the test against the REAL fork
+// bundle instead, set `M5_RESCHEDULE_FORK_CLI` to a built
+// `build/reschedule-cli.js` (explicit setup; missing path is a hard error,
+// never a silent skip).
+
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { z } from "zod";
+
+const FIXTURE_MCP_NAME = "google-calendar-reschedule-test-fixture";
+const FIXTURE_MCP_VERSION = "0.0.0-fixture.1";
+const RESCHEDULE_TOOL_NAME = "reschedule-event";
+
+const IsoInstantSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .refine((value) => {
+    if (Number.isNaN(Date.parse(value))) return false;
+    return /T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/.test(value);
+  }, "start/end must be RFC3339 instants with an explicit offset");
+
+const RescheduleEventInputSchema = z
+  .strictObject({
+    calendarId: z.string().min(1).max(512),
+    eventId: z.string().min(1).max(1024),
+    account: z.string().min(1).max(512).optional(),
+    start: IsoInstantSchema,
+    end: IsoInstantSchema,
+    expectedEtag: z.string().min(1).max(256),
+  })
+  .superRefine((value, ctx) => {
+    const startMs = Date.parse(value.start);
+    const endMs = Date.parse(value.end);
+    if (Number.isNaN(startMs) || Number.isNaN(endMs) || !(endMs > startMs)) {
+      ctx.addIssue({
+        code: "custom",
+        message: "start must be before end",
+        path: ["start"],
+      });
+    }
+  });
+
+function definite(code) {
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify({ status: "definite_failure", code }),
+      },
+    ],
+  };
+}
+
+function eventUrl(base, calendarId, eventId) {
+  return `${base.replace(/\/$/, "")}/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`;
+}
+
+async function main() {
+  const base = process.env.M5_RESCHEDULE_TEST_ENDPOINT_BASE ?? "";
+  if (base.length === 0) {
+    console.error("fixture server: M5_RESCHEDULE_TEST_ENDPOINT_BASE not set");
+    process.exit(2);
+  }
+  const server = new McpServer(
+    { name: FIXTURE_MCP_NAME, version: FIXTURE_MCP_VERSION },
+    { capabilities: { tools: {} } },
+  );
+  server.registerTool(
+    RESCHEDULE_TOOL_NAME,
+    {
+      title: "Reschedule event fixture (start/end only, conditional etag)",
+      description:
+        "Test fixture mirroring the reschedule-event contract against a loopback fixture. Never production.",
+      inputSchema: {
+        calendarId: z.string().min(1).max(512),
+        eventId: z.string().min(1).max(1024),
+        account: z.string().min(1).max(512).optional(),
+        start: z.string().min(1).max(128),
+        end: z.string().min(1).max(128),
+        expectedEtag: z.string().min(1).max(256),
+      },
+    },
+    async (args, extra) => {
+      const parsed = RescheduleEventInputSchema.safeParse(args);
+      if (!parsed.success) return definite("invalid_input");
+      const input = parsed.data;
+      const url = eventUrl(base, input.calendarId, input.eventId);
+      let current;
+      try {
+        current = await fetch(url, {
+          method: "GET",
+          headers: { accept: "application/json" },
+          signal: extra?.signal,
+          redirect: "manual",
+        });
+      } catch {
+        return {
+          isError: true,
+          content: [{ type: "text", text: "transport_lost" }],
+        };
+      }
+      if (current.status === 404 || current.status === 410) {
+        return definite("not_found");
+      }
+      if (!current.ok) {
+        return {
+          isError: true,
+          content: [{ type: "text", text: "transport_lost" }],
+        };
+      }
+      let res;
+      try {
+        res = await fetch(url, {
+          method: "PATCH",
+          headers: {
+            "content-type": "application/json",
+            "If-Match": input.expectedEtag,
+          },
+          body: JSON.stringify({
+            start: { dateTime: input.start },
+            end: { dateTime: input.end },
+          }),
+          signal: extra?.signal,
+          redirect: "manual",
+        });
+      } catch {
+        return {
+          isError: true,
+          content: [{ type: "text", text: "transport_lost" }],
+        };
+      }
+      if (res.status === 412) return definite("etag_mismatch");
+      if (res.status === 404 || res.status === 410)
+        return definite("not_found");
+      if (!res.ok) {
+        return {
+          isError: true,
+          content: [{ type: "text", text: "transport_lost" }],
+        };
+      }
+      return {
+        content: [
+          { type: "text", text: JSON.stringify({ status: "succeeded" }) },
+        ],
+      };
+    },
+  );
+  const transport = new StdioServerTransport();
+  const close = async () => {
+    try {
+      await transport.close();
+    } catch {
+      // Best effort.
+    }
+    try {
+      await server.close();
+    } catch {
+      // Best effort.
+    }
+  };
+  process.on("SIGINT", () => void close());
+  process.on("SIGTERM", () => void close());
+  await server.connect(transport);
+}
+
+await main();
