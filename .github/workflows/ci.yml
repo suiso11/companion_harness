@@ -25,6 +25,14 @@ jobs:
         with:
           fetch-depth: 2
 
+      - name: Checkout pinned real remind CLI source (live-test dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: suiso11/remind
+          ref: fbc928686be9d6558f903e02494a043a434d1497
+          path: .ci/remind
+          persist-credentials: false
+
       - name: Static check (whitespace errors in HEAD patch)
         shell: bash
         run: |
@@ -46,6 +54,10 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Build pinned remind CLI (real dependency, no models)
+        run: npm ci --no-audit --no-fund && npm run build
+        working-directory: .ci/remind
+
       - name: Lint (Biome)
         run: pnpm lint
 
@@ -53,6 +65,9 @@ jobs:
         run: pnpm typecheck
 
       - name: Test
+        env:
+          COMPANION_MEMORY_TEST_ENTRY: ${{ github.workspace }}/.ci/remind/dist/src/cli.js
+          COMPANION_MEMORY_TEST_CONFIG_TEMPLATE: ${{ github.workspace }}/.ci/remind/memory.config.example.json
         run: pnpm test
 
   e2e:
@@ -60,6 +75,14 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+
+      - name: Checkout pinned real remind CLI source (live-test dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: suiso11/remind
+          ref: fbc928686be9d6558f903e02494a043a434d1497
+          path: .ci/remind
+          persist-credentials: false
 
       - uses: pnpm/action-setup@v4
         with:
@@ -72,6 +95,10 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Build pinned remind CLI (real dependency, no models)
+        run: npm ci --no-audit --no-fund && npm run build
+        working-directory: .ci/remind
 
       - name: Install Playwright chromium (with OS deps)
         run: pnpm exec playwright install --with-deps chromium
