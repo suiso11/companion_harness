@@ -3230,3 +3230,24 @@ comments on PR31 at observation time.
   `npm run build` + `npm run lint` + `npm test` green; host units +
   typecheck/lint + pipeline smoke re-run below. Fork commits pushed
   ff-only on `feat/m5-reschedule-entrypoint-v2` (no merge, no force).
+
+## PR30 integration head (PR31 merged 2026-10-15, no product change)
+
+Merge `36b4b63` (parents `9c7ef78` + `b59c700`; PR31 head is an
+ancestor, verified via `merge-base --is-ancestor`). Fork pin unchanged:
+`feat/m5-reschedule-entrypoint-v2 @ 4f9c06d` (matches fork PR #3 head
+via `ls-remote`; no repin). Test-count reconciliation: `1335 + 21` (new file
+`rescheduleWriteStartup.test.ts`: 15 in `a77cd1e`, +6 in `b59c700`)
+= `1356` root green.
+Merged-head CI (exact head `36b4b63`): push run `38725542758`
+success (check ubuntu/windows + e2e) and PR-event run `38725549293`
+success (same jobs); fork CI run `38686976091` success on the exact
+fork pin (test pass, tool-analysis skipped). Zero review threads on
+host PR #30 and fork PR #3. Observed on the merged head (owned
+worktree, no live Google/OAuth/writes, user `:3000` untouched):
+`rescheduleWriteStartup.test.ts` 21/21 green,
+`rescheduleWriteProfile.test.ts` 5/5 green, throwaway production CLI
+normal startup (owned temp store, default profile unselected)
+`GET /health/live` 200 `{"status":"live"}` +
+`GET /health/ready` 200 `{"status":"ready"}` with no write child
+spawned (only the tsx loader chain under the server pid).
