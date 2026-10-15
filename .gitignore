@@ -13,3 +13,5 @@ backups/
 .DS_Store
 Thumbs.db
 .pi/
+# CI-fetched real remind CLI dependency (pinned source, built in CI only).
+.ci/
