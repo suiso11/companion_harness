@@ -272,18 +272,24 @@ connector instance owns **all** configured roots.
   with the synthetic gateway above (honestly labeled, never a real model)
   and the REAL remind CLI (`dist/src/cli.js` via `COMPANION_MEMORY_TEST_ENTRY`
   or the sibling checkout, template `memory.config.example.json` patched at
-  runtime to temp `dbPath`/`vaultPath` with `vectors/llm.enabled=false`;
-  missing CLI/template fails with a prerequisite error, never a false pass).
-  Runnable: `pnpm exec vitest run apps/server/test/memory_live_http.test.ts`.
-  It asserts turn-1 `event.append` + `record.remember` `acked`, direct CLI
-  `record.recall` returning the snippet, turn-2 structural `citations: ["m1"]`
-  with a same-run `m1` grant and acked `record.feedback`, no grants/feedback
-  for the uncited first turn, idle `maintain.distill` `acked` (degraded
-  scheduling proof only), and graceful shutdown with a reaped child.
-  Verified 2026-10-15: 1/1 passed (~16s). Limits: synthetic gateway only
-  (no real-model result), foreground/shutdown preemption edges remain
-  covered by `memory_service.test.ts` unit regressions, Windows manual
-  smoke and current remote CI remain open.
+   runtime to temp `dbPath`/`vaultPath` with `vectors/llm.enabled=false`;
+   missing CLI/template fails with a prerequisite error, never a false pass).
+   Runnable: `pnpm exec vitest run apps/server/test/memory_live_http.test.ts`.
+   It asserts turn-1 `event.append` + `record.remember` `acked`, direct CLI
+   `record.recall` returning the snippet, turn-2 structural `citations: ["m1"]`
+   with a same-run `m1` grant and acked `record.feedback`, no grants/feedback
+   for the uncited first turn, idle `maintain.distill` `acked` (degraded
+   scheduling proof only), and graceful shutdown with a reaped child.
+   Verified 2026-10-15: 1/1 passed (~16s). CI provides the REAL CLI: the
+   workflow checks out the pinned remind source
+   (`suiso11/remind@fbc928686be9d6558f903e02494a043a434d1497`, reviewed
+   PR14 head) into `.ci/remind`, builds it (`npm ci` + `npm run build`,
+   no models), and sets `COMPANION_MEMORY_TEST_ENTRY` /
+   `COMPANION_MEMORY_TEST_CONFIG_TEMPLATE` to the built entry + template.
+   Limits: synthetic gateway only
+   (no real-model result), foreground/shutdown preemption edges remain
+   covered by `memory_service.test.ts` unit regressions; Windows manual
+   smoke remains open.
 - Explicit management (search / correct / retire / reactivate),
   2026-10-15 (local, temp stores only): `POST .../memory/search` is
   explicit user-directed only and returns opaque session-scoped `mN`
@@ -326,11 +332,13 @@ connector instance owns **all** configured roots.
   `e2e/memory/memory_manage.spec.ts` drives the REAL memory panel UI
   against the REAL Hono app + RunEngine + REAL remind CLI temp DB;
   synthetic scripted gateway cultivates one fact, never a real model).
-  Verified 2026-10-15: full Vitest **113 files / 1370 tests passed**,
-  real-browser memory spec GREEN, live HTTP/real-CLI GREEN, root +
-  e2e `tsc --noEmit` exit 0, `pnpm lint` GREEN. Limits: synthetic
-  gateway only (no real-model result), Windows manual smoke and
-  current remote CI remain open.
+   Verified 2026-10-15: full Vitest **113 files / 1370 tests passed**,
+   real-browser memory spec GREEN, live HTTP/real-CLI GREEN, root +
+   e2e `tsc --noEmit` exit 0, `pnpm lint` GREEN. The remote `e2e` job
+   runs the same real-browser memory spec with `COMPANION_E2E_MEMORY=1`
+   against the CI-built pinned remind CLI above. Limits: synthetic
+   gateway only (no real-model result); Windows manual smoke remains
+   open.
 - Not implemented (unchanged): memory perception, user export, and
   memory/session deletion APIs. There is no per-session memory
   delete/export endpoint.
