@@ -17,11 +17,14 @@
 //     with no logical resend, §17.6), then the closed three-outcome map.
 //
 // Expected etag (NO fresh preflight substitution): the conditional etag is
-// resolved hostside from the COMMITTED proposal (`expectedRevision`) through
-// the injected `resolveExpectedEtag`. A missing etag or a hash/updated-only
-// expected revision (no etag available) is SAFELY REJECTED as
-// `definite_failure` with NO patch dispatched — never a fresh read etag
-// substituted for the approved expected revision.
+// resolved hostside from the COMMITTED grant (`expectedRevision` carried in
+// the grant, keyed by execution/proposal/hash — never the current resource
+// alone) through the injected `resolveExpectedEtag`. The resolver answer
+// must equal the approved revision exactly and that revision must carry a
+// real source-etag basis: a missing etag or a hash/updated-only expected
+// revision (no etag available) is SAFELY REJECTED as `definite_failure`
+// with NO patch dispatched — never a fresh read etag substituted for the
+// approved expected revision.
 //
 // Outcome map (exact, §18.6):
 //   - MCP classified `{"status":"succeeded"}`            -> `succeeded`
@@ -38,6 +41,15 @@ export const RESCHEDULE_WRITE_MCP_NAME = "google-calendar-reschedule" as const;
 export const RESCHEDULE_WRITE_MCP_VERSION = "1.0.0-reschedule.1" as const;
 /** The ONLY tool on the dedicated write entrypoint. */
 export const RESCHEDULE_WRITE_TOOL = "reschedule-event" as const;
+/**
+ * Pinned LIVE-WIRE canonical input-schema hash for `reschedule-event`
+ * (SDK wire bytes: strict `additionalProperties: false` + the `$schema`
+ * annotation key). Probed 2026-10-15 over REAL stdio against BOTH the
+ * freshly built fork bundle and the tracked contract-mirror fixture
+ * (identical bytes).
+ */
+export const RESCHEDULE_WRITE_WIRE_HASH =
+  "9f59e35bf76bfec75a99546fc3c22348cd20e33e9414154ea321d414186d09b7" as const;
 /** The Harness-side write tool name (§18.1, start/end only). */
 export const CALENDAR_RESCHEDULE_TOOL = "calendar.reschedule" as const;
 
@@ -106,12 +118,42 @@ export interface RescheduleWriteTarget {
 }
 
 /**
- * Hostside committed-grant etag resolution: returns the EXACT opaque etag
- * from the committed proposal, or null when no etag exists (hash-only /
+ * Hostside committed-grant etag resolution: keyed by the EXACT committed
+ * grant (execution + proposal + hash), never by the target resource alone.
+ * Returns the EXACT opaque etag from the committed proposal's
+ * `expectedRevision`, or null when no etag exists (hash-only /
  * updated-only expected revision). Null is a safe definite rejection, never
  * a fresh-preflight substitution.
  */
-export type ResolveExpectedEtag = (targetResourceId: string) => string | null;
+export interface RescheduleWriteGrantRef {
+  readonly executionId: string;
+  readonly proposalId: string;
+  readonly proposalHash: string;
+  /** Immutable approved revision the grant was committed against. */
+  readonly expectedRevision: string;
+}
+
+export type ResolveExpectedEtag = (
+  grant: RescheduleWriteGrantRef,
+) => string | null;
+
+/**
+ * Source-etag basis proof: the approved `expectedRevision` is usable as a
+ * conditional etag ONLY when it is a real source etag. A content-hash
+ * fallback (64-hex SHA-256) or an `updated`-timestamp string is NOT an
+ * etag and is rejected — the port must never treat those as etags.
+ */
+export function isSourceEtagBasis(value: string): boolean {
+  if (value.length === 0 || value.length > 256) return false;
+  // Content-hash fallback (proposal `expectedRevision` when no
+  // `source_revision` exists): proves nothing about the live resource.
+  if (/^[0-9a-f]{64}$/i.test(value)) return false;
+  // `updated`-timestamp strings: wall-clock markers, not etags.
+  if (/^\d{4}-\d{2}-\d{2}T/.test(value) && !Number.isNaN(Date.parse(value))) {
+    return false;
+  }
+  return true;
+}
 
 /** Structural request (mirrors the kernel `CalendarActionWriteRequest`). */
 export interface RescheduleWriteRequest {
@@ -121,6 +163,8 @@ export interface RescheduleWriteRequest {
     readonly proposalHash: string;
     readonly tool: "calendar.reschedule";
     readonly inputHash: string;
+    /** Immutable approved revision the grant was committed against. */
+    readonly expectedRevision: string;
   };
   readonly connectorInstanceId: string;
   readonly tool: "calendar.reschedule";
@@ -194,10 +238,25 @@ export function createRescheduleWritePort(
     if (request.start.length === 0 || request.end.length === 0) {
       return { status: "definite_failure" };
     }
-    // Committed-grant etag ONLY: hash/updated-only revisions (no etag) are
-    // safely rejected with NO patch dispatched — never substituted.
-    const expectedEtag = options.resolveExpectedEtag(request.targetResourceId);
-    if (expectedEtag === null || expectedEtag.length === 0) {
+    // Committed-grant etag ONLY, tied to the EXACT approved revision:
+    // the resolver is keyed by execution/proposal/hash (never the current
+    // resource alone), its answer must equal `grant.expectedRevision`
+    // exactly (no substitution), and that revision must carry a real source
+    // etag basis (hash-only / updated-only revisions are safely rejected
+    // with NO patch dispatched — never substituted, never a fresh read).
+    const grantRef: RescheduleWriteGrantRef = {
+      executionId: request.grant.executionId,
+      proposalId: request.grant.proposalId,
+      proposalHash: request.grant.proposalHash,
+      expectedRevision: request.grant.expectedRevision,
+    };
+    const expectedEtag = options.resolveExpectedEtag(grantRef);
+    if (
+      expectedEtag === null ||
+      expectedEtag.length === 0 ||
+      expectedEtag !== request.grant.expectedRevision ||
+      !isSourceEtagBasis(request.grant.expectedRevision)
+    ) {
       return { status: "definite_failure" };
     }
     const args = RescheduleWriteMcpInputSchema.safeParse({

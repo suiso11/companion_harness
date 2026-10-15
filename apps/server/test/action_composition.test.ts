@@ -478,6 +478,38 @@ describe("C21 M5 Action triple-gated composition", () => {
     await reopened.shutdown("test");
     expect(reopenedClosed).toBe(1);
   });
+
+  it("a hanging adopted owned hook never stalls shutdown past the bound", async () => {
+    const { env, dbPath } = tempEnv();
+    const instanceId = await provisionCalendarInstance(dbPath);
+    const collecting = createCollectingLogger("warn");
+    const started = await startServer({
+      env: { ...env, COMPANION_ACTIONS_JSON: ENABLED_ACTIONS_JSON },
+      calendarBinding: {
+        connectorInstanceId: instanceId,
+        connector: fakeCalendarBinding(instanceId),
+        selection: { calendarId: "cal-primary", account: "ops@example" },
+      },
+      actionWriteBinding: {
+        port: fakeWritePort(instanceId),
+        owned: true,
+        // Never settles: shutdown must still complete inside the bound.
+        shutdown: () => new Promise<void>(() => {}),
+      },
+      drainMs: 50,
+      mcpShutdownMs: 200,
+      logger: collecting.logger,
+    });
+    servers.push(started);
+    const begin = Date.now();
+    await started.shutdown("test");
+    expect(Date.now() - begin).toBeLessThan(10_000);
+    expect(
+      collecting.records.some(
+        (record) => record.code === "server.action_write_shutdown_timeout",
+      ),
+    ).toBe(true);
+  });
 });
 
 void (undefined as unknown as typeof CALENDAR_RESCHEDULE_TOOL_NAME);

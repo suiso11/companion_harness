@@ -15,7 +15,8 @@
 // data only, no imports from any ignored nested repo.
 
 import { createServer, type Server } from "node:http";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -164,9 +165,12 @@ async function resolveStdioTarget(): Promise<StdioTarget> {
     };
   }
   // Default: TRACKED fixture server (clean-clone-safe, always runs).
+  // Resolved via import.meta.url (never process.cwd()) so the suite passes
+  // regardless of the invoking working directory.
   const helper = join(
-    process.cwd(),
-    "packages/connector-calendar/test/helpers/rescheduleFixtureServer.mjs",
+    dirname(fileURLToPath(import.meta.url)),
+    "helpers",
+    "rescheduleFixtureServer.mjs",
   );
   const { existsSync } = await import("node:fs");
   if (!existsSync(helper)) {

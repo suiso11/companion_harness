@@ -43,8 +43,10 @@ export interface CreateDedicatedWriteBindingOptions {
    */
   readonly caller: RescheduleWriteCaller;
   /**
-   * Committed-grant etag resolution (exact proposal `expectedRevision`
-   * etag, or null for hash/updated-only revisions).
+   * Committed-grant etag resolution, keyed by the EXACT committed grant
+   * (execution + proposal + hash + `expectedRevision`; never the current
+   * resource alone). Returns the exact proposal `expectedRevision` etag,
+   * or null for hash/updated-only revisions.
    */
   readonly resolveExpectedEtag: ResolveExpectedEtag;
   /**

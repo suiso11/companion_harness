@@ -472,6 +472,37 @@ export async function boundedMcpShutdown(
 }
 
 /**
+ * Race an adopted owned write-port close hook against the outer backstop
+ * budget (C21). The hook continues in the background when the budget loses;
+ * the server-shutdown path never hangs on it. Returns true only when the
+ * hook completed inside the budget. An absent hook trivially completes.
+ */
+export async function boundedActionShutdown(
+  hook: (() => Promise<void>) | undefined,
+  ms: number,
+): Promise<boolean> {
+  if (hook === undefined) return true;
+  let completed = false;
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const timeout = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, ms);
+    });
+    await Promise.race([
+      hook().then(() => {
+        completed = true;
+      }),
+      timeout,
+    ]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
+  return completed;
+}
+
+/**
  * Fixed shutdown-reason vocabulary. Arbitrary caller reasons never enter
  * logs verbatim (logger also enforces a pattern + "unknown" fallback).
  */
@@ -1147,7 +1178,7 @@ export async function startServer(
       }
       const ownedListenShutdown = takeOwnedActionShutdown();
       try {
-        await ownedListenShutdown?.();
+        await boundedActionShutdown(ownedListenShutdown, mcpShutdownMs);
       } catch {
         // Best effort.
       }
@@ -1216,7 +1247,23 @@ export async function startServer(
         // C21: the adopted hook is consumed before invoke (single-use even
         // across a drain-failure retry: the retry re-enters shutdown only
         // after the memo reset above, and the first pass never reached here).
-        await takeOwnedActionShutdown()?.();
+        // Bounded like the owned MCP connector: a hanging hook never stalls
+        // the shutdown path past the backstop budget.
+        const ownedNormalShutdown = takeOwnedActionShutdown();
+        let actionStopped = true;
+        try {
+          actionStopped = await boundedActionShutdown(
+            ownedNormalShutdown,
+            mcpShutdownMs,
+          );
+        } catch {
+          // The adopted wrapper never throws; proceed with close.
+        }
+        if (!actionStopped) {
+          logger.warn("server.action_write_shutdown_timeout", {
+            status: safeReason,
+          });
+        }
         try {
           closeKernelDatabase(activeHandle);
         } catch {
@@ -1263,7 +1310,7 @@ export async function startServer(
     }
     const ownedStartupShutdown = takeOwnedActionShutdown();
     try {
-      await ownedStartupShutdown?.();
+      await boundedActionShutdown(ownedStartupShutdown, mcpShutdownMs);
     } catch {
       // Best effort: the original startup error carries the failure.
     }

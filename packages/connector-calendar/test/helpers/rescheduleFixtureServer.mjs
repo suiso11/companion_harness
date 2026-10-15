@@ -85,20 +85,17 @@ async function main() {
     { name: FIXTURE_MCP_NAME, version: FIXTURE_MCP_VERSION },
     { capabilities: { tools: {} } },
   );
+  // The advertised JSON schema and the runtime validator are THE SAME
+  // strict schema object: `strictObject` advertises
+  // `additionalProperties: false` on the wire AND rejects unknown keys at
+  // runtime (mirrors the real fork entrypoint exactly).
   server.registerTool(
     RESCHEDULE_TOOL_NAME,
     {
       title: "Reschedule event fixture (start/end only, conditional etag)",
       description:
         "Test fixture mirroring the reschedule-event contract against a loopback fixture. Never production.",
-      inputSchema: {
-        calendarId: z.string().min(1).max(512),
-        eventId: z.string().min(1).max(1024),
-        account: z.string().min(1).max(512).optional(),
-        start: z.string().min(1).max(128),
-        end: z.string().min(1).max(128),
-        expectedEtag: z.string().min(1).max(256),
-      },
+      inputSchema: RescheduleEventInputSchema,
     },
     async (args, extra) => {
       const parsed = RescheduleEventInputSchema.safeParse(args);

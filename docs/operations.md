@@ -3041,3 +3041,68 @@ activation, no user service/DB/model changes, no user-branch deletion.
 - Remaining: fork PR #3 review/merge decision (not this worker); Windows 11
   x64 manual smoke; C11-01 BLOCKED; M5 live/write gates (triple gate never
   opened live); §20 #1 UI phrasing.
+
+## M5 reschedule hardening + wire-hash pin (2026-10-15, oc38 record, no live writes)
+
+SUPERSEDES nothing: implements the remaining hardening on top of the
+derived-PR record above. No live Google mutation, no OAuth consent/scope
+activation, no user service/DB changes. Readonly surface/scopes/pin
+untouched (zero write tools on the readonly entrypoint; this module never
+enters the read allowlist).
+
+- Fork (`feat/m5-reschedule-entrypoint-v2`, committed `0e61265`
+  `0e612655e7054130fe37601cbe80378f73f418ea`, normal ff push, NOT
+  merged): provider default-behavior hardening (`src/reschedule/google.ts`,
+  `auth.ts`, `cli.ts`, `provider.ts`) — ONE deadline spans headers AND
+  body (hang-safe abort), exact-account pre-check BEFORE any token or
+  provider I/O, refresh-BEFORE-every GET and PATCH, `read_transport_lost`
+  definite pre-dispatch, `unknown` only after possible dispatch (single
+  attempt, never resend); server advertises and validates with THE SAME
+  strict `RescheduleEventInputSchema` object (hand-written
+  `rescheduleInputJsonSchema` removed, cannot drift). Wire identity
+  unchanged (`google-calendar-reschedule` / `1.0.0-reschedule.1`, tool
+  `reschedule-event` ONLY). New permanent tests
+  `src/tests/unit/reschedule/googleReschedule.test.ts` (6 cases, injected
+  `fetch` only: body-deadline/abort, exact account, per-request refresh,
+  single-GET observation, after-dispatch unknown, pre-dispatch definite).
+- Host (this branch): owned-write bounded shutdown in
+  `apps/server/src/bootstrap.ts` (adopted owned-hook close paths bounded;
+  a hanging hook never stalls shutdown past the bound — new hang test in
+  `action_composition.test.ts`); committed-grant revision proof in
+  `rescheduleWrite.ts` + `rescheduleWriteBinding.ts` (resolver keyed by
+  the exact committed grant; content-hash/updated-timestamp fallbacks and
+  resolver substitution rejected with NO dispatch — 4 new cases in
+  `rescheduleWrite.test.ts`); `category: "write"` gate in
+  `connector-mcp/src/client.ts` (default readonly connector refuses
+  trusted `write` definitions with `mcp_binding_not_allowed` before any
+  dial; dedicated `["write"]` connector enables ONLY write — 4 cases in
+  `write-category-gate.test.ts`); host-owned wire-hash pin in new
+  `apps/server/src/rescheduleWriteProfile.ts` (+ 4 pin tests) and live-wire
+  stdio proof in `rescheduleWireHash.test.ts` (2 cases, tracked fixture —
+  clean-clone safe). Base pin `6939311` in the profile is the branch base
+  (unchanged and still exact); wire hash unchanged (no reprobe needed).
+- Wire-hash pin (probed oc37, recorded in `rescheduleWriteProfile.ts`):
+  live-wire canonical input-schema SHA-256
+  `9f59e35bf76bfec75a99546fc3c22348cd20e33e9414154ea321d414186d09b7`,
+  probed over REAL stdio against BOTH the freshly built fork bundle
+  (`build/reschedule-cli.js`) and the tracked contract-mirror fixture —
+  byte-identical STRICT schemas (`additionalProperties: false` + `$schema`
+  key). oc38 adopts that exact strict schema object fork-side, so the pin
+  stands without rebuild/reprobe.
+- Verification carried from the oc38 handoff (implementation + all gates
+  passed before the worker timed out at docs-recording; NOT rerun by this
+  worker per scope): fork provider behavior tests pass; bootstrap
+  owned-write bounded-shutdown all-paths + hang test pass; grant-revision
+  proof tests pass; Harness typecheck/lint clean; fork final gates + build
+  green; real-fork stdio smoke green; full Harness suite green; trusted
+  approval→grant→real-stdio→local-Google-fixture→readonly-readback→receipt
+  smoke PASS (temp removed); real UI approval suite all-green. Exact
+  per-suite log counts are UNKNOWN (oc38 logs not retained in-repo; only
+  structural counts are verifiable here: fork 6 + profile-pin 4 +
+  wire-hash 2 + write-gate 4 + grant-revision 4 + shutdown-hang 1 new
+  cases; retained `test-results/.last-run.json` read `passed`/zero-failed
+  and was then deleted as a generated artifact).
+- Remaining: fork PR #3 review/merge decision (not this worker); Harness
+  PR #30 review/merge decision (not this worker); Windows 11 x64 manual
+  smoke; C11-01 BLOCKED; M5 live/write gates (triple gate never opened
+  live); §20 #1 UI phrasing.

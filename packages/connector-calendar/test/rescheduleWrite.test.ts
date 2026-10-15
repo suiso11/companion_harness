@@ -17,6 +17,7 @@ import { createServer, type Server } from "node:http";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   createRescheduleWritePort,
+  isSourceEtagBasis,
   type RescheduleWriteCaller,
 } from "../src/rescheduleWrite.js";
 
@@ -181,6 +182,7 @@ const GRANT = {
   proposalHash: "a".repeat(64),
   tool: "calendar.reschedule" as const,
   inputHash: "b".repeat(64),
+  expectedRevision: ETAG_V1,
 };
 const CONNECTOR_ID = "33333333-3333-4333-8333-333333333333";
 
@@ -348,6 +350,13 @@ function portWith(caller: RescheduleWriteCaller, etag: string | null) {
   });
 }
 
+function requestWithRevision(expectedRevision: string) {
+  return {
+    ...baseRequest(),
+    grant: { ...GRANT, expectedRevision },
+  };
+}
+
 function baseRequest() {
   return {
     grant: GRANT,
@@ -381,8 +390,11 @@ describe("dedicated reschedule write path (real HTTP fixture)", () => {
   });
 
   it("etag mismatch (412) is definite_failure and applies NO patch", async () => {
+    // Committed stale revision: resolver answers the EXACT approved
+    // (stale) etag, so the single PATCH is dispatched with If-Match stale
+    // and the provider proves NO patch via 412.
     const port = portWith(realCaller(), '"stale-etag"');
-    const outcome = await port.update(baseRequest());
+    const outcome = await port.update(requestWithRevision('"stale-etag"'));
     expect(outcome).toEqual({ status: "definite_failure" });
     const record = store.get(key(CALENDAR_ID, EVENT_ID));
     expect(record?.start).toBe("2026-02-01T10:00:00Z");
@@ -424,6 +436,57 @@ describe("dedicated reschedule write path (real HTTP fixture)", () => {
     const outcome = await port.update(baseRequest());
     expect(outcome).toEqual({ status: "definite_failure" });
     expect(lastPatch).toBeNull();
+  });
+
+  it("content-hash fallback revision is rejected even when resolved (no source-etag basis)", async () => {
+    const hashRevision = "c".repeat(64);
+    const port = portWith(realCaller(), hashRevision);
+    const outcome = await port.update(requestWithRevision(hashRevision));
+    expect(outcome).toEqual({ status: "definite_failure" });
+    expect(lastPatch).toBeNull();
+    expect(isSourceEtagBasis(hashRevision)).toBe(false);
+  });
+
+  it("updated-timestamp revision is rejected even when resolved (no source-etag basis)", async () => {
+    const updatedRevision = "2026-02-01T10:00:00.000Z";
+    const port = portWith(realCaller(), updatedRevision);
+    const outcome = await port.update(requestWithRevision(updatedRevision));
+    expect(outcome).toEqual({ status: "definite_failure" });
+    expect(lastPatch).toBeNull();
+    expect(isSourceEtagBasis(updatedRevision)).toBe(false);
+  });
+
+  it("resolver substitution (answer !== approved revision) is rejected with NO dispatch", async () => {
+    const port = createRescheduleWritePort({
+      connectorInstanceId: CONNECTOR_ID,
+      caller: realCaller(),
+      // Fresh-read-style substitution: answers a live etag that is NOT the
+      // committed approved revision. Must never be used as If-Match.
+      resolveExpectedEtag: () => '"live-fresh-etag"',
+    });
+    const outcome = await port.update(baseRequest());
+    expect(outcome).toEqual({ status: "definite_failure" });
+    expect(lastPatch).toBeNull();
+  });
+
+  it("resolver is keyed by the exact committed grant (execution/proposal/hash/revision)", async () => {
+    let seen: unknown;
+    const port = createRescheduleWritePort({
+      connectorInstanceId: CONNECTOR_ID,
+      caller: realCaller(),
+      resolveExpectedEtag: (grant) => {
+        seen = { ...grant };
+        return grant.expectedRevision;
+      },
+    });
+    const outcome = await port.update(baseRequest());
+    expect(outcome).toEqual({ status: "succeeded" });
+    expect(seen).toEqual({
+      executionId: GRANT.executionId,
+      proposalId: GRANT.proposalId,
+      proposalHash: GRANT.proposalHash,
+      expectedRevision: ETAG_V1,
+    });
   });
 
   it("after-dispatch abort is unknown with exactly ONE attempt (no resend)", async () => {

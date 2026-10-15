@@ -29,6 +29,7 @@ export {
   defaultTransportFactory,
   loopbackNoRedirectFetch,
   McpConnector,
+  type McpConnectorPolicyOptions,
   missingStdioEnvNames,
   STDIO_IMPLICIT_ENV_VARS,
   type TransportFactory,
