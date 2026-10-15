@@ -250,17 +250,23 @@ describe("action proposal stager", () => {
     }
   });
 
-  it("stages with concrete prechecks, deterministic hash, and a safe provider-id-free preview", async () => {
+  it("stages with concrete prechecks, deterministic hash, and a target-aware provider-id-free preview", async () => {
     const fx = await setupFixture();
     try {
       const { stager } = makeStager(fx, () => 1000);
       const a = stager.stage(fx.runId, { targetRefId: fx.refId, ...TIMED });
       expect(a.tool).toBe("calendar.reschedule");
       expect(a.input).toEqual(TIMED);
-      // Deterministic start/end-only summary: no provider ids, no content.
-      expect(a.preview.summary).toMatch(
-        /^calendar\.reschedule: start=.+ end=.+$/,
-      );
+      // Target-aware human preview: immutable normalized title + session rN
+      // + staged range; no tool-name prefix, no raw ids.
+      expect(a.preview.summary).toContain("Event");
+      expect(a.preview.summary).toContain("(r1)");
+      expect(a.preview.summary).toContain(`start=${TIMED.start}`);
+      expect(a.preview.summary).toContain(`end=${TIMED.end}`);
+      expect(a.preview.summary).not.toContain("calendar.reschedule");
+      expect(a.preview.summary).not.toContain(fx.refId);
+      expect(a.preview.summary).not.toContain(fx.resourceId);
+      expect(a.preview.summary).not.toContain(fx.snapshotId);
       const expectedHash = sha256Hex(
         canonicalJsonString({
           tool: "calendar.reschedule",
@@ -277,6 +283,152 @@ describe("action proposal stager", () => {
       expect(a.hash).toBe(expectedHash);
       expect(a.expiresAt).toBe(a.createdAt + 15 * 60 * 1000);
       expect(stager.getStaged(fx.runId)).not.toBeNull();
+    } finally {
+      await closeKernelDatabase(fx.handle);
+    }
+  });
+
+  it("preview tracks the immutable normalized title and session rN, stays plaintext, and leaks no provider content", async () => {
+    const fx = await setupFixture();
+    try {
+      // Retitle the frozen normalized event (plus a description that must
+      // never leak) through a fresh observation on the SAME resource.
+      const referenceManager = createReferenceManager(fx.db);
+      const connector = referenceManager.ensureCalendarConnectorInstance(
+        "c",
+        "cal1",
+        { now: 2 },
+      );
+      const evilTitle = "Standup\n<b>bold</b>\troom";
+      const retitled = calendarEventBodyText({
+        canonicalKey: "cal|cal1|evt1",
+        status: "confirmed",
+        title: evilTitle,
+        start: "2026-01-01T10:00:00Z",
+        end: "2026-01-01T11:00:00Z",
+        allDayEndExclusive: true,
+        sourceRevision: "src@2",
+        revisionBasis: "etag",
+      });
+      const presented = referenceManager.presentObservations(
+        fx.sessionId,
+        fx.runId,
+        [
+          {
+            connectorInstanceId: connector.id,
+            canonicalKey: "cal|cal1|evt1",
+            title: evilTitle,
+            text: retitled,
+            sourceRevision: "src@2",
+            observedAt: 2,
+          },
+        ],
+        { freshness: "normal", now: 2 },
+      );
+      expect(presented.applied).toBe(true);
+      // A changed revision materializes a new snapshot + a new session rN.
+      const currentRefs = fx.db
+        .prepare(
+          "SELECT id, ordinal FROM session_references WHERE session_id = ? ORDER BY ordinal ASC",
+        )
+        .all(fx.sessionId) as Array<{ id: string; ordinal: number }>;
+      expect(currentRefs).toHaveLength(2);
+      const latest = currentRefs[currentRefs.length - 1] as {
+        id: string;
+        ordinal: number;
+      };
+      expect(latest.ordinal).toBe(2);
+      const refId = latest.id;
+      const { stager } = makeStager(fx, () => 3000);
+      const staged = stager.stage(fx.runId, {
+        targetRefId: refId,
+        ...TIMED,
+      });
+      // Plaintext single line: raw newlines/tabs collapse to spaces (the
+      // client renders via textContent, so any residual markup stays inert).
+      expect(staged.preview.summary).not.toMatch(/[\n\r\t]/);
+      // The session rN tracks the CURRENT ordinal, not a stale r1.
+      expect(staged.preview.summary).toContain("(r2)");
+      expect(staged.preview.summary).toContain("Standup");
+      expect(staged.preview.summary).toContain("bold");
+      // Privacy: description/location/provider ids never appear.
+      expect(staged.preview.summary).not.toContain("cal|cal1|evt1");
+      expect(staged.preview.summary).not.toContain("src@2");
+      expect(staged.preview.summary).not.toContain(staged.targetRefId);
+      expect(staged.preview.summary).not.toContain(staged.targetResourceId);
+      expect(staged.preview.summary).not.toContain(staged.basedOnSnapshotId);
+      expect(staged.preview.summary).not.toContain(staged.connectorInstanceId);
+      expect(staged.preview.summary.length).toBeLessThanOrEqual(1024);
+    } finally {
+      await closeKernelDatabase(fx.handle);
+    }
+  });
+
+  it("keeps a tool-prefixed event title whole: unambiguous marker defeats the legacy strip", async () => {
+    const fx = await setupFixture();
+    try {
+      // An adversarial normalized title that begins with the LEGACY stored-
+      // preview prefix: the new preview must still carry it in FULL, with the
+      // fixed marker at position 0 so receipt/history renderers never mistake
+      // it for the legacy prefix and cut the real title.
+      const adversarialTitle = "calendar.reschedule: quarterly planning";
+      const referenceManager = createReferenceManager(fx.db);
+      const connector = referenceManager.ensureCalendarConnectorInstance(
+        "c",
+        "cal1",
+        { now: 2 },
+      );
+      const retitled = calendarEventBodyText({
+        canonicalKey: "cal|cal1|evt1",
+        status: "confirmed",
+        title: adversarialTitle,
+        start: "2026-01-01T10:00:00Z",
+        end: "2026-01-01T11:00:00Z",
+        allDayEndExclusive: true,
+        sourceRevision: "src@2",
+        revisionBasis: "etag",
+      });
+      const presented = referenceManager.presentObservations(
+        fx.sessionId,
+        fx.runId,
+        [
+          {
+            connectorInstanceId: connector.id,
+            canonicalKey: "cal|cal1|evt1",
+            title: adversarialTitle,
+            text: retitled,
+            sourceRevision: "src@2",
+            observedAt: 2,
+          },
+        ],
+        { freshness: "normal", now: 2 },
+      );
+      expect(presented.applied).toBe(true);
+      const currentRefs = fx.db
+        .prepare(
+          "SELECT id, ordinal FROM session_references WHERE session_id = ? ORDER BY ordinal ASC",
+        )
+        .all(fx.sessionId) as Array<{ id: string; ordinal: number }>;
+      const latest = currentRefs[currentRefs.length - 1] as {
+        id: string;
+        ordinal: number;
+      };
+      expect(latest.ordinal).toBe(2);
+      const { stager } = makeStager(fx, () => 3000);
+      const staged = stager.stage(fx.runId, {
+        targetRefId: latest.id,
+        ...TIMED,
+      });
+      // The whole title survives verbatim, behind the unambiguous marker.
+      expect(staged.preview.summary.startsWith("対象イベント: ")).toBe(true);
+      expect(staged.preview.summary).toContain(adversarialTitle);
+      expect(staged.preview.summary).toContain("(r2)");
+      // Never at position 0: the legacy tool-prefix strip cannot trigger.
+      expect(staged.preview.summary.startsWith("calendar.reschedule:")).toBe(
+        false,
+      );
+      expect(staged.preview.summary).not.toMatch(/[\n\r\t]/);
+      expect(staged.preview.summary.length).toBeLessThanOrEqual(1024);
     } finally {
       await closeKernelDatabase(fx.handle);
     }

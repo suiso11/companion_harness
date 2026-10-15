@@ -856,9 +856,12 @@ or complete activate config):
   pipeline: the JSON hint, the owned registration, the lazy connector, the
   adapter and the fail-closed gates are unchanged; the profile only supplies
   the exact trusted definitions from host code and pins the hint to the
-  candidate. Profile-adopted is NOT live-accepted: fresh user OAuth consent
-  and live production verification are still pending (C11 positive BLOCKED,
-  manual Win11 missing).
+  candidate. Profile-adopted is live-accepted for authenticated reads:
+  user OAuth is COMPLETED and authenticated live reads are OBSERVED
+  (see "Live readonly acceptance ledger"); only fresh consent-screen
+  scope display remains unobserved (never a missing-consent claim, never
+  force reconsent). Still open: live production/C11 positive (BLOCKED)
+  and manual Win11 smoke.
 - Adoption pin (exact form, verified against a real fork checkout):
   `suiso11/google-calendar-mcp`
   commit `6939311fd3eae9846648e0a175e304c9500f578e`
@@ -1070,7 +1073,40 @@ or complete activate config):
    live-wire hashes, and behavior. They do NOT re-verify the source SHA: the
    full commit/tree/package/lock verification in step 2 above is the prerequisite that
   must pass BEFORE `npm ci --ignore-scripts` + `npm run build`, and the
-  runtime proof assumes that prerequisite was met.
+   runtime proof assumes that prerequisite was met.
+
+  Durable local run (checked-in launcher, env-only secrets):
+  `run-google-readonly.sh` (repo root, POSIX `sh`) generates
+  `COMPANION_CALENDAR_JSON` exactly per the step-5 generator above
+  (`primary`, account from `GOOGLE_ACCOUNT_MODE` default `normal`,
+  pinned wire identity + 3 live-wire hashes, explicit `GOOGLE_*`
+  allowlist) and execs `pnpm start` with
+  `COMPANION_CALENDAR_PROFILE=google-readonly` on loopback port
+  `COMPANION_PORT` (default `3000`). It embeds no secret: credentials
+  come from `GOOGLE_OAUTH_CREDENTIALS` (launcher actual default
+  `$HOME/gcal-readonly/gcp-oauth.keys.json`) and the token path env
+  (default `~/.config/google-calendar-mcp-readonly/tokens.json`).
+  The step-3 `$PRIV/gcp-oauth.keys.json` path above is a template only:
+  the current live path is the launcher default (overridable via
+  `GOOGLE_OAUTH_CREDENTIALS` env), keys are not moved.
+   Actions stay disabled (`COMPANION_ACTIONS_JSON` explicitly unset).
+  Model: an already-exported `COMPANION_MODEL_JSON` wins; otherwise the
+  launcher builds one from the private git-ignored runtime file
+  `.env.litellm` (0600, never committed/logged) against the existing local
+  LiteLLM proxy (`openai-compatible`, loopback, no new keys or policy
+  changes); with neither, runs fail closed while health + calendar
+  registration stay verifiable. Observed: model `qwen-local` via the
+  loopback proxy; a live read-only conversation completed end to end
+  (`run.completed`, one `calendar.search` succeeded/accepted, one
+  `reference.presented` with a snippet evidence grant = `[r1]` cited, turn
+  selected). Earlier unguided prompts failed closed after repeated
+  `calendar_range_invalid` (model-sent ranges without explicit offsets)
+  plus step/whole-run timeouts; the proving prompt carried an explicit
+  RFC3339 range (`2026-10-14T00:00:00Z` to `2026-10-15T00:00:00Z`). DB is the normal OS app-data
+  default; no migration beyond standard startup. Logs stay on
+  stdout/stderr (no app log files); for persistence run it under
+  `tmux new-session -d -s companion-cal ./run-google-readonly.sh` and
+  read back scrollback instead of a log file.
 
 ### C15 Calendar fake E2E harness fixes (observed: refresh + tombstone scenarios)
 
@@ -2251,10 +2287,11 @@ Branch-status note (CURRENT, supersedes the base-line residual table's
 "no profile anywhere in this branch" row for THIS branch only): the
 host-owned pinned `google-readonly` profile IS adopted here as normal-
 startup composition (exact pin/commit/tree/lock/wire-hashes in the C14
-profile subsection above). Profile-adopted is NOT live-accepted:
-fresh user OAuth consent, live production verification (C11-01 stays
-BLOCKED), and manual Windows 11 smoke remain open external gates and
-are untouched by this worker.
+profile subsection above). Authenticated live reads are OBSERVED (user
+OAuth COMPLETED; see "Live readonly acceptance ledger"): only fresh
+consent-screen scope display, live production/C11-01 (BLOCKED), and
+manual Windows 11 smoke remain open external gates and are untouched
+by this worker.
 
 ## PR23 final proof (2026-10-13, observed)
 
@@ -2284,6 +2321,200 @@ browser or full-suite claim). Linux, Node 24.12.0, pnpm 11.25.0:
   Prior `smoke-profile.result.json` (22/22) unchanged;
    `cli-profile.result.json` corrected separately (valid account
   `normal` rerun, see resume note above).
+
+## C22 approval-card target preview + bounded pending expiry (2026-10-13, observed)
+
+Stacked on PR23 (`feat/calendar-readonly-production-profile`); no
+OAuth/provider writes, no schema/policy expansion, no persisted-proposal
+mutation, no mocked UI/seeded proposals in E2E.
+
+- `packages/kernel/src/action_proposals.ts`: `loadTarget` now reads
+  `sr.ordinal`; `freshSnapshotRevision` also returns the immutable
+  normalized event title; the staged preview is a deterministic human
+  summary `{title} (rN): start= end=` (title NFC/trimmed/whitespace-
+  collapsed/128-code-point cap, blank falls back to `calendar event`).
+  No tool-name prefix, no UUID/provider IDs, no upstream reads; the
+  `{ summary }` seam, hash coverage, and DDL are unchanged. The legacy
+  `calendar.reschedule:` display-prefix strips (execution/history
+  rendering) stay as backward-compatible no-ops.
+- `packages/kernel/test/action_proposals.test.ts`: the wording-pinning
+  preview assertion is deleted; semantic cases assert target (title +
+  current rN, incl. r2 after a retitling observation), deterministic
+  hash, single-line plaintext, and privacy (no description/IDs).
+- `apps/server/src/ui/client.ts`: each pending card owns at most one
+  bounded one-shot expiry timer (identity-checked on fire, cleared on
+  removal/decision); execution-owned/receipt/awaiting cards are never
+  retired by an old timer. `syncActions` retires only still-local
+  pending cards and never downgrades decision-in-flight; approve/reject
+  recheck the local deadline, guard while the real POST is awaited, and
+  the server stays authoritative. `visibilitychange` reconciles locally
+  with no polling/provider calls.
+- `apps/server/e2e/calendar/action.spec.ts` (+4, clock installed
+  BEFORE goto): staged preview shows `E2E Standup` + r1 with no
+  `calendar.reschedule`; `pauseAt(deadline-1)` keeps controls enabled
+  and `fastForward(1)` retires the card with 0 writes; `setSystemTime`
+  (no timer fire) + real `visibilitychange` retires with 0 writes;
+  gated real approve-202 fulfilled across the old deadline keeps the
+  live execution card, release lands the verified receipt (1 write).
+
+Final battery (this worker, Linux, Node 24.12.0, after all edits):
+
+- `pnpm test` -> exit 0, **107 files / 1296 tests passed**, 0 failed.
+- `pnpm run typecheck`, `pnpm run typecheck:e2e`,
+  `pnpm --filter @companion/server typecheck` -> exit 0.
+- `pnpm run lint` -> exit 0 (**224 files, 0 errors**, 1 pre-existing
+  `biome.json` recommended-deprecation info).
+- Default browser suite (Chromium): **23/23 passed**.
+- Calendar-mode suite (`COMPANION_E2E_CALENDAR=1`, Chromium):
+  **22/22 passed** (`action.spec.ts` 17/17 incl. the 4 new cases,
+  `calendar.spec.ts` 4/4, `tombstone.spec.ts` 1/1).
+
+## C22 independent-review lifecycle fixes (2026-10-13, observed)
+
+Followup on the same PR24 branch (`fix/c22-approval-card-target-expiry`);
+review observations taken as ground truth, no failing-before rerun. No
+mocked cards, DB seeding, new polling, or live provider/OAuth.
+
+- `apps/server/src/ui/client.ts` `reject()`: the real reject POST is now
+  `try/catch`. A transport abort before the server sees it releases
+  `deciding`, shows the fixed retry notice
+  (`却下できませんでした。もう一度お試しください`), and reconciles via
+  the real proposals read: still-pending restores buttons/deadline, an
+  accepted rejection retires on the real summary. Nothing is claimed
+  rejected.
+- `apps/server/src/ui/client.ts` `syncExecution()`: an authoritative
+  non-pending summary takes card ownership BEFORE the execution GET
+  (status transfer, `deciding=false`, pending timer cleared). Approved
+  renders disabled decisions (known run preserved) and arms the EXISTING
+  bounded execution watch for recovery when the GET resumes — no new
+  polling. Rejected/expired retire on the real summary (pre-GET and
+  post-GET paths) with history hydration; approved/terminal receipts keep
+  their existing lifecycle.
+- `apps/server/e2e/calendar/action.spec.ts` (+2, real UI/API only):
+  abort-first-reject recovers pending controls then the real reject lands
+  rejection history with 0 writes; real approve `route.fetch` + abort
+  delivery with execution-GET failed keeps the server-accepted card
+  (`approved`, controls disabled) across the original deadline, then
+  resume + preflight release verifies the real receipt with exactly
+  1 write.
+
+Verification (this worker, Linux, Node 24.12.0, after all edits):
+
+- `pnpm vitest run apps/server/test/action_ui.test.ts` -> exit 0,
+  **8/8 passed**.
+- `pnpm run typecheck`, `pnpm run typecheck:e2e` -> exit 0.
+- `pnpm run lint` -> exit 0 (**224 files**, 1 pre-existing
+  `biome.json` recommended-deprecation info).
+- Calendar action suite (Chromium, `COMPANION_E2E_CALENDAR=1`):
+  **19/19 passed** (`action.spec.ts` 17 existing + 2 new, ~48s).
+  No default-browser or full-1296 rerun (unchanged paths).
+- PR23/PR24 CI at push time: all checks SUCCESS (PR24 6/6 incl. e2e;
+  PR23 6/6); no failed logs to repair.
+
+## C22 clock-skew pending-expiry rearm (2026-10-13, observed)
+
+Followup on the same PR24 branch (`fix/c22-approval-card-target-expiry`);
+independent-reviewer defect taken as ground truth, no before-fix rerun. No
+polling, provider/network, or authority change.
+
+- `apps/server/src/ui/client.ts` `schedulePendingExpiry()`: the capped
+  one-shot callback now calls `this.schedulePendingExpiry(current)` before
+  the `Date.now() < deadline` early return. A client wall clock >15min
+  behind the server (or rolled back after arming) no longer consumes the
+  only timer forever: the single bounded timer re-arms for the remainder
+  (still 1 timer, still 15min cap). Existing identity, accepted/decision,
+  and execution/terminal guards are unchanged; the server stays
+  authoritative.
+- `apps/server/e2e/calendar/action.spec.ts` (+1, real proposal + client
+  clock only): fake clock installed before goto, client set 20min behind
+  before the real staged proposal, first capped 15min `fastForward` keeps
+  the pending card with live controls, then advancing the actual remaining
+  `expiresAt` retires the card with 0 writes and no
+  visibility/network refresh. Real `expiresAt`, no DB mutation.
+
+Verification (this worker, Linux, Node 24.12.0, after all edits):
+
+- `pnpm run typecheck`, `pnpm run typecheck:e2e` -> exit 0.
+- `pnpm exec biome check` on the owned files -> exit 0.
+- Calendar action suite (Chromium, `COMPANION_E2E_CALENDAR=1`,
+  `action.spec.ts` only): **20/20 passed** (~48s). No
+  default-browser or full-suite rerun (unchanged paths).
+
+## C22 preview-ambiguity + CI failure followup (2026-10-13, observed)
+
+Followup on the same PR24 branch (`fix/c22-approval-card-target-expiry`);
+the new GitHub review thread (title ambiguity) and the two CI e2e failures
+on head `e4f6bf1` (PR run 38449588750: `action.spec.ts:841` lost-approve +
+`calendar.spec.ts:80` date assertion; push run 38449579628 SUCCESS) taken
+as ground truth, no failing-check rerun. No seeded proposals, fake HTTP
+success, wording pins, timeout/skip/retry changes, or provider/normalizer
+changes.
+
+- Kernel preview (`packages/kernel/src/action_proposals.ts`
+  `buildPreview`): new immutable previews now open with the unambiguous
+  human marker `対象イベント: <whole title> (rN): start=… end=…`. An
+  arbitrary normalized title beginning with `calendar.reschedule:` can no
+  longer sit at position 0, so the legacy tool-prefix strips in
+  `action_strategy.readRenderedPreviewForRun`,
+  `action_executions.renderedPreviewSummary`, and the client history
+  renderer never cut the real title. Reader logic is unchanged and still
+  renders historical (`calendar.reschedule: …`) stored previews correctly;
+  only their comments plus the stale client "staged preview carries the
+  tool prefix" claim were corrected.
+- `apps/server/src/ui/client.ts` `approve()`: a POST transport failure now
+  awaits `reconcileLostApprove()` with `deciding` held (timer + stale lists
+  cannot retire/downgrade the card mid-reconcile). A server-approved summary
+  takes approved ownership immediately (timer cleared, decisions disabled,
+  existing bounded watch started); still-pending re-renders controls with a
+  re-armed bounded timer; unreadable falls back to sync. Root cause of the
+  CI `action.spec.ts:841` failure: the fire-and-forget recovery sync could
+  be deduped while an older sync held a stale pending view, leaving a
+  server-approved card on its live expiry timer until `fastForward` retired
+  it (card gone at line 877). The same stale approved run (read barrier
+  never released) leaked into `calendar.spec.ts:80`: the next test's
+  `/reset` released the barrier, the orphan run's write landed 11:00/12:00
+  upstream mid-search, and the drawer showed the overwritten boundaries
+  instead of the fixture 09:00. Both failures share this single root cause;
+  no harness/test change was needed beyond the client fix.
+- E2E seam (`mcpFake.ts` `titleOverride` + `POST /set-title`, cleared by
+  `/reset`): `action.spec.ts` (+1, real
+  search/select/stage/approve/reload flow, exactly 1 write) freezes the
+  real title `calendar.reschedule: quarterly planning` and asserts it
+  survives the initial card, the execution receipt, and the reloaded
+  durable history in full.
+- Kernel regressions (no wording pins): `action_proposals.test.ts` stages
+  the adversarial title (marker prefix, full title, current rN, single
+  line, ≤1024 chars, never at position 0); `action_executions.test.ts`
+  drives a stored new-format preview through the real `blocked_stale`
+  terminal and asserts the RunResult text keeps the whole title while the
+  receipt `summary_json` is byte-preserved.
+
+Verification (this worker, Linux, Node 24.12.0, after all edits):
+
+- `pnpm test` -> exit 0, **107 files / 1298 tests passed** (+2 new), 0 failed.
+- `pnpm run typecheck`, `pnpm run typecheck:e2e`,
+  `pnpm --filter @companion/server typecheck`, root `tsc --noEmit` ->
+  exit 0.
+- `pnpm run lint` -> exit 0 (**224 files, 0 errors**, 1 pre-existing
+  `biome.json` recommended-deprecation info).
+- Default browser suite (Chromium): **23/23 passed**.
+- Calendar-mode suite (`COMPANION_E2E_CALENDAR=1`, Chromium):
+  **26/26 passed** (`action.spec.ts` 21/21 incl. the new title case,
+  `calendar.spec.ts` 4/4, `tombstone.spec.ts` 1/1), plus a second
+  consecutive 26/26 run.
+
+## C22 delivery-vs-gate (2026-10-14, delivery/c22-approval-flow)
+
+DELIVERED consumer code (this branch, fake transport only): target-aware
+frozen preview (title + session rN), bounded one-shot pending expiry with
+skew rearm + visibility reconcile, approve/reject error recovery with
+authoritative lost-approve reconcile, kernel + E2E regressions above.
+Production binding stays read-only (exact 3 tools); no write API invented.
+
+EXTERNALLY GATED (not code, needs upstream decision/proof): write-capable
+provider pin + tool-schema/API choice + OAuth scope selection, positive
+deletion contract adoption, fresh OAuth/live/manual verification. No
+guessed deletion positives or write capability claimed.
 
 ## M5 decision-turn retry denial (2026-10-14)
 
@@ -2346,3 +2577,248 @@ retry is unchanged (still `202`, same Turn, new queued Run).
   preserved in the real browser). Throwaway smokes/specs and
    `test-results/` removed; no `pnpm` dependency change (offline
    store-link install only).
+
+## Live readonly acceptance ledger (2026-10-14, current profile)
+
+Current accepted activation: the host-owned pinned profile
+`google-readonly` as the normal-startup composition (parent-verified
+merged provenance: original-stack PR23
+(`https://github.com/suiso11/companion_harness/pull/23`, head
+`9e9bb94`) + PR24 merged, carried into main by merged DELIVERY
+successors PR27 (`https://github.com/suiso11/companion_harness/pull/27`)
+and PR28 (`https://github.com/suiso11/companion_harness/pull/28`);
+PR27/28 preserved, not erased). C22 flow via PR28. Profile-adopted is the
+acceptance baseline below; it does not close the residual gates listed at
+the end. No code changed in this pass; prior uncommitted
+`run-google-readonly.sh` launcher notes above are preserved as-is.
+
+- Pin / schema mapping (verified this worker from actual candidate source
+  and the current adapter; no secrets read, no live mutation):
+  `suiso11/google-calendar-mcp` commit
+  `6939311fd3eae9846648e0a175e304c9500f578e`, package
+  `@cocal/google-calendar-mcp@3.0.0-readonly.2`, wire identity
+  `{name:"google-calendar", version:"3.0.0-readonly.2"}`, scope
+  `calendar.events.readonly` only, exactly the 3 live-wire hashes
+  (`81222b89…`, `d48ba36e…`, `8c6736e2…`) matching
+  `apps/server/src/calendarReadonlyProfile.ts`. `list-calendars` is
+  absent by design (denied, never registered). Deletion-positive was not
+  fabricated: 404/410/`cancelled`/omission remain errors/unknown and
+  C11-01 stays BLOCKED.
+- Proposal-era seven rows
+  (`docs/google_calendar_readonly_binding_design.md` §4, current
+  `readonly.2` deliberately removes the `list-calendars`/`calendarlist`
+  scope — not restored to satisfy the old checklist):
+  1) consent scope display — static pin ACCEPTED (events.readonly only,
+  exact-grant validator); fresh consent-screen re-observation NOT claimed
+  (live run reused the existing authorized grant, no new consent);
+  2) `list-calendars` ok — INTENTIONALLY UNAVAILABLE (removed in
+  readonly.2); 3) `list-events` one page + `nextPageToken` round-trip —
+  ACCEPTED (one-page verbatim opaque cursor); 4) `search-events` q+window
+  — ACCEPTED (live `calendar.search` succeeded/accepted);
+  5) `get-event` 404 path — PARTIAL (miss maps to fixed
+  `calendar_upstream_error`, never a tombstone; positive stays BLOCKED);
+  6) write tool absent — ACCEPTED (events-only 3-tool surface, actions
+  disabled); 7) stderr/log no tokens — ACCEPTED by construction (fixed
+  codes + scalar ids only, no secrets persisted).
+- Harness conversation / refresh: a live read-only conversation completed
+  end to end (`run.completed`, one `calendar.search` succeeded/accepted,
+  one `reference.presented` with snippet grant `[r1]` cited, turn
+  selected; see the durable-run paragraph above). Live
+  `reference.refresh` OBSERVED 2026-10-14 via a throwaway owned-temp
+  SQLite proof against the real pinned google-readonly pipeline (fixed
+  counting wrapper preserves the full call interface; no production
+  gate/code change): list 10 hits (`list-events` x1, opaque cursor
+  present), query mapping (`search-events` x1), stored-only open 0 new
+  wire calls with non-empty body, explicit refresh via `get-event` x1
+  only with a new snapshot (10->11) and new rN (refs +1, revision
+  unchanged), prior rN re-openable with 0 new wire calls
+  (`deduplicated`), fresh snapshot body keys `[text, version]` with 0
+  excluded privacy keys, 3 distinct upstream tools / 3 total wire calls,
+  second page `succeeded` (1 hit), `proof=live_refresh_observed`.
+  Throwaway repository scaffolds (`.live-proof-tmp/`,
+  `apps/server/.live-proof-tmp/`) removed; no owned repo scaffold DB
+  remains. One private temp artifact `/tmp/live-refresh-proof-LMZ0zi`
+  (owned 3 SQLite files) remains permission-blocked (tool
+  external-directory deny), with no active process; oc13 had no stale
+  proof process and live `:3000` was untouched.
+- Live server health (this worker, non-disruptive readonly probes only):
+  `GET /health/live` 200 + `GET /health/ready` 200 on loopback `:3000`;
+  server left running. UI freshness re-verified 2026-10-14 ~17:41 UTC:
+  the pre-restart served bundle predated current `client.ts` (no
+  `reconcileLostReject`), so the server was safely restarted once via
+  the existing `run-google-readonly.sh` (DB/model preserved, profile
+  `google-readonly`, `COMPANION_ACTIONS_JSON` unset, no Google calls);
+  `prestart` rebuilt `dist/assets/client.js` from current source and the
+  served `/assets/client.js` (40434 bytes) now hash-matches dist and
+  contains `reconcileLostReject`; `GET /` 200 references
+  `/assets/client.js`; health re-probed 200/200 after restart.
+  Report carries counts/codes/tool/reference transitions only — no events, tokens, or raw prompts.
+- Reused automation counts (oc10 record, PRE-PR28-CODE-CHANGE baseline,
+  labeled, NOT a current full-suite claim): lint 229 files 0 errors +
+  1 pre-existing info; both typechecks exit 0; units 107 files / 1307
+  tests; real default Chromium 24/24; fake Calendar 26/26 (action 21 /
+  calendar 4 / tombstone 1). CURRENT final (oc21 observed after the 4
+  PR28 race fixes; reviewer oc22 confirmed strengthened PR28-2/4
+  non-vacuous): default 24/24 prior value unchanged (not rerun,
+  test-only change in `calendar/action.spec.ts`); calendar 30/30
+  (action 25 + calendar 4 + tombstone 1); final units 107 files / 1307
+  tests pass; both typechecks exit 0; `biome check .` exit 0 (229 files,
+  0 errors, 1 pre-existing info).
+- Spike conclusion: the existing readonly surface cannot write; the
+  dormant broad `UpdateEventHandler` lacks `If-Match` (verified absent at
+  the pinned fork commit); a dedicated narrow reschedule needs an exact
+  etag conditional patch with 412-stale handling, no auto resend, and a
+  readback; recurring behavior, scope/tool choice, and write consent are
+  unresolved source-only decisions; no live writes authorized.
+- Remaining genuine blockers: Windows 11 x64 manual smoke; positive
+  deletion evidence (C11-01 BLOCKED); M5 live/write gates (no production
+  write binding, triple-gate never opened live); fresh OAuth
+  consent-screen scope display as a separate untouched decision (OAuth
+  itself COMPLETED, authenticated reads OBSERVED — never force
+  reconsent). PR21/22 superseded-close is DONE (see next section; fork PR2
+  left draft-open).
+
+## PR21/PR22 superseded close (2026-10-14, observed remote actions)
+
+Parent-verified baseline: PR23 + PR24 merged into the original stack;
+PR27/PR28 are merged DELIVERY successors carrying the changes/evidence
+into main (reconciled here, not erased). PR21/22 draft open at the
+time; fork PR2 draft open. Ancestry/preservation investigated via `git`/`gh`/API
+(read-only; no destructive commands, no source edits):
+
+- PR21 (`feat/calendar-readonly-candidate-pin` @ `9630b25`, base
+  `feat/c12-calendar-snapshots`, 3 files) is NOT an ancestor of
+  `origin/master`. Its unique pin JSON was superseded by PR22's updated
+  record (same path, now 6939311/readonly.2); its spike/operations text
+  is superseded by merged PR23 + follow-ups.
+- PR22 (`feat/calendar-readonly-compatibility` @ `6f219d8`, base
+  PR21's branch, 8 files) is NOT an ancestor of `origin/master`. Its
+  unique evidence files verified per-file against `origin/master`:
+  `calendar-readonly-candidate-pin.json`,
+  `candidate-3.0.0-readonly.2.result.json`,
+  `consumer-smoke-3.0.0-readonly.2.result.json`,
+  `probe-consumer-smoke.source.mts` all SAME; only
+  `probe-tools-list.source.mts` DIFFERS by the later `083453f`
+  fork-replay-checkout correction (clone + `git -C` detach). Design /
+  spike / operations text superseded by merged PR23 + follow-ups.
+- Performed (evidence-backed, non-destructive; no merges, no branch
+  deletion, no rebase): closed PR21
+  (`https://github.com/suiso11/companion_harness/pull/21`) and PR22
+  (`https://github.com/suiso11/companion_harness/pull/22`) with precise
+  superseded links + reasoning comments above, preservation verified
+  per-file in merged successors on `origin/master` (see bullets above).
+  Branches retained.
+- Fork `suiso11/google-calendar-mcp#2` (`feat/companion-readonly-
+  compatibility` → `feat/readonly-mode`, draft open, unmerged,
+  head `6939311fd3ea`) contains real code changes not necessarily merged;
+  left untouched — not ready-for-review evidence for Companion, no fork
+  merge, no external modification. Post-close `gh pr list --state open`
+   on companion_harness returns empty; fork PR2 (separate repo) stays open
+   by design.
+
+## PR28 UI race fixes + permanent browser regressions (2026-10-14, observed)
+
+Four ground-truth defects in the C22 approval client
+(`apps/server/src/ui/client.ts`), each fixed plus one permanent real-browser
+regression over the existing Calendar fake harness (real UI + real fake
+seams, no synthesized bodies, no source/incidental assertions):
+
+- PR28-1 lost reject dropped while an action sync is in flight: the reject
+  POST transport failure used to release decision ownership and rely on the
+  deduped background sync, which is dropped while an older sync runs —
+  leaving buttons disabled with the pending timer consumed. Fix: new
+  `reconcileLostReject` holds `deciding` across ONE authoritative proposals
+  re-read (rejected/expired retires, approved takes approved ownership,
+  pending restores controls + fresh bounded timer, unreadable falls back to
+  normal sync). Regression replays a held proposals list + aborted first
+  reject, then proves live controls and a real second reject (200, history
+  `action_rejection` x1, 0 writes).
+- PR28-2 stale pending list downgrades runId-less approved ownership: a
+  lost-approve card (approved, no runId yet, execution GET failed) was
+  reverted to actionable pending by a stale pending replay. Fix: pending
+  application and `ensureActionCard` now skip any card whose local status
+  already left `pending`. Regression (strengthened 2026-10-14; the first
+  version installed its stale route after approval with no ensuing list
+  GET, so it never fired): the next proposals list — the real
+  assent-terminal sync sent while the card is still pending — is fetched
+  while genuinely pending but its delivery is held past the server commit
+  and the lost-approve authoritative re-read; the held stale summary is
+  released only after approved ownership with no runId, and the test
+  proves the held delivery happened (exact route hits ≥3), the card stays
+  approved/disabled across the original deadline, and the real receipt
+  lands (1 write).
+- PR28-3 historic rejections multiply full-history hydrations: every
+  decided proposal's `syncExecution` hydrated history directly, so N
+  historic rejections cost N full history GETs. Fix: `syncExecution` returns
+  a history-need boolean and the caller hydrates exactly once per sync;
+  historic rejections with no local card report no need. Regression stages
+  two real reject cycles, reloads counting history GETs, and proves both
+  `action_rejection` rows render with at most 2 history GETs (boot + one
+  batch) and 0 writes.
+- PR28-4 duplicate watch read starts before the current execution GET and a
+  late live read overwrites the terminal receipt: the approved-ownership
+  path started `watchAction` before the current execution GET (two
+  concurrent reads), and a delayed live response could overwrite a rendered
+  receipt and re-offer Stop. Fix: the watch starts only after a failed
+  current execution GET, and any execution read arriving after
+  `card.terminal` is ignored. Regression (strengthened 2026-10-14; the first
+  version reloaded, which renders no approved card, so the terminal-wins
+  guard was never reached): no reload — the live card stays alive, the next
+  clock-driven watch poll is fetched while genuinely live (receipt-free)
+  but its delivery is held, the run is released to its real terminal
+  (Node-observed `succeeded`, 1 write), the terminal renders on the same
+  card through a real assent-terminal client sync while the stale read
+  stays held, and only then is the stale live read released: receipt,
+  hidden Stop, and no stop claim stay stable (exact execution route hits
+  ≥2).
+
+Measured evidence (this worker, Linux, Node 24.12.0, real Chromium, owned
+fake harness on loopback 4183–4186; user `:3000` service untouched):
+`calendar/action.spec.ts` 25/25, `calendar/calendar.spec.ts` +
+`calendar/tombstone.spec.ts` 5/5 — all exit 0, 0 retries (1.1m). Full unit
+`vitest run` 107 files / 1307 tests pass. Static once after final edits:
+e2e `tsc -p tsconfig.e2e.json` exit 0, root `tsc -p tsconfig.json` exit 0,
+`biome check .` exit 0 (229 files, 0 errors, 1 pre-existing `biome.json`
+info). The default suite (conversation/citation_recovery/sse_history/
+polling) 24/24 is the prior observed value, NOT rerun here (this change is
+test-only inside `calendar/action.spec.ts`, no production code touched).
+Prior oc17 static runs are NOT re-claimed here (no retained oc17 logs
+found; only its PR28-4 failure error-context survived and the capture was
+reworked above). Owned `apps/server/test-results/` removed; no owned
+servers/processes
+   left. One private temp artifact `/tmp/live-refresh-proof-LMZ0zi`
+   (owned 3 SQLite files) remains permission-blocked, no active process
+   (see ledger cleanup note above).
+
+## PR29 Windows stall fix (2026-10-14, CI ground truth, no timeout masking)
+
+PR-event run `38608822921` (head `b04970b`) failed ONLY
+`check (windows-latest)`: 4 `Test timed out in 5000ms` with zero assertion
+failures — `apps/server/test/action_composition.test.ts:131`,
+`packages/kernel/test/action_history_receipt.test.ts:258`,
+`packages/kernel/test/action_scheduler_pickup.test.ts:239` and `:371`.
+Ubuntu `check` and `e2e` on the same run passed, and the same-head push run
+`38608803181` passed Windows: a load flake, not a logic regression. No
+check was rerun for confirmation and no timeout was raised or suppressed.
+Evidence for a concurrency/resource cause (not product behavior): the
+failing files' own passing siblings took 3.6–4.7s each (e.g. the no-op
+unapproved-bound pickup took 4669ms), total collect was 89.15s, and every
+timeout fired while the test body was still running — no error log, no
+receipt mismatch. Two avoidable contributors fixed minimally, behavioral
+assertions/contracts untouched:
+- `action_scheduler_pickup.test.ts`: the engine-idle poll slept
+  `setTimeout(..., 2)` up to 500 times, so a starved Windows event loop
+  stretched the wait itself past the 5s budget. It now yields via
+  `setImmediate` (no wall-clock sleep): the launched strategy only awaits
+  immediately-resolved ports, so it settles within a handful of yields,
+  and a genuinely stuck run fails fast on the existing `inflightCount`
+  assertion instead of timing out.
+- `vitest.config.ts`: `maxWorkers: 2` on CI only (`CI`/`GITHUB_ACTIONS`
+  env; local parallelism unchanged), so full parallel forks no longer
+  thrash synchronous better-sqlite3 plus real loopback servers on
+  Windows runners.
+Local proof after edits (Linux, Node 24.12.0, single pass, no midflight
+runs): focused `action_scheduler_pickup.test.ts` 3/3, full `vitest run`
+107 files / 1307 tests, root typecheck exit 0, `biome check .` exit 0
+(229 files, 0 errors, 1 pre-existing info). New-head CI observed after push (per-job conclusions in the
+delivery report, not claimed here).

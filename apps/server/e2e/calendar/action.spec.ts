@@ -21,6 +21,8 @@ import {
   ANSWER_STAGE_TEXT,
   CALENDAR_APP_ORIGIN,
   CALENDAR_CONTROL_ORIGIN,
+  EVENT_TITLE_TOOL_PREFIXED,
+  EVENT_TITLE_V1,
   STAGE_END,
   STAGE_START,
   TEXT_ASSENT,
@@ -586,5 +588,739 @@ test("late cancel on a terminal run claims no stop (200 keeps actual receipt)", 
   } finally {
     releaseCancel();
     await page.unroute("**/runs/*/cancel").catch(() => {});
+  }
+});
+
+/* ------------------------------------------------------------------ */
+/* C22 pending-expiry + decision-race regressions (real clock/proposal)  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Fake clock installed BEFORE any page load, so the client's Date.now and
+ * setTimeout are controlled from the first script run. The re-goto reuses
+ * the same session (same context localStorage), so the staged proposal and
+ * its REAL server deadline are unaffected.
+ */
+async function installClockAndLoad(page: Page): Promise<void> {
+  await page.clock.install();
+  await page.goto("/");
+  await expect(page.locator("#composer")).toBeVisible();
+  await expect(page.locator("#composer-send")).toBeEnabled();
+}
+
+/** The REAL staged proposal meta (id/hash/server deadline) for this page. */
+async function realProposalMeta(
+  page: Page,
+  request: APIRequestContext,
+): Promise<{ proposalId: string; hash: string; expiresAt: number }> {
+  const sessionId = await sessionIdOf(page);
+  const list = await request.get(
+    `${CALENDAR_APP_ORIGIN}/api/sessions/${sessionId}/proposals`,
+  );
+  expect(list.ok()).toBe(true);
+  const body = (await list.json()) as {
+    proposals?: {
+      proposalId?: unknown;
+      hash?: unknown;
+      expiresAt?: unknown;
+    }[];
+  };
+  expect(body.proposals).toHaveLength(1);
+  const item = body.proposals?.[0];
+  expect(typeof item?.proposalId).toBe("string");
+  expect(typeof item?.hash).toBe("string");
+  expect(typeof item?.expiresAt).toBe("number");
+  return {
+    proposalId: item?.proposalId as string,
+    hash: item?.hash as string,
+    expiresAt: item?.expiresAt as number,
+  };
+}
+
+test("preview names the frozen event title and session rN, never the tool name", async ({
+  page,
+  request,
+}) => {
+  await stageProposal(page);
+  const preview = page.locator("[data-action-preview='true']");
+  await expect(preview).toContainText(EVENT_TITLE_V1);
+  await expect(preview).toContainText("r1");
+  const cardText =
+    (await page.locator('[data-action-card="true"]').textContent()) ?? "";
+  expect(cardText).not.toContain("calendar.reschedule");
+  void request;
+});
+
+test("tool-prefixed title survives card, receipt and reloaded history in full (1 write)", async ({
+  page,
+  request,
+}) => {
+  // Test-only upstream title override (loopback control seam; the production
+  // normalizer is untouched): the fake upstream serves an event whose title
+  // begins with the legacy preview tool prefix. `/reset` (beforeEach) clears
+  // it per test like every other fixture field.
+  await control(request, "/set-title", { title: EVENT_TITLE_TOOL_PREFIXED });
+  await stageProposal(page);
+  // The initial card carries the WHOLE title behind the unambiguous marker:
+  // the legacy tool-prefix strip must not cut it.
+  const preview = page.locator("[data-action-preview='true']");
+  await expect(preview).toContainText(EVENT_TITLE_TOOL_PREFIXED);
+  // The REAL approve through the real UI: exactly one external write and
+  // the verified receipt, with the full title intact on the receipt card.
+  const approved = page.waitForResponse(
+    (res) =>
+      res.url().includes("/approve") && res.request().method() === "POST",
+  );
+  await page.locator("#action-approve").click();
+  expect((await approved).status()).toBe(202);
+  const card = page.locator('[data-action-card="true"]');
+  await expect(card).toContainText("日程を更新しました", { timeout: 60_000 });
+  await expect(card).toContainText(EVENT_TITLE_TOOL_PREFIXED);
+  expect(await writeCalls(request)).toBe(1);
+  // Durable history + reload: the receipt line keeps the whole title (no
+  // legacy-strip cut, no re-verification write).
+  await page.reload();
+  await expect(page.locator("#composer")).toBeVisible();
+  const history = page.locator(
+    "#conversation [data-action-history='action_approval']",
+  );
+  await expect(history).toHaveCount(1, { timeout: 30_000 });
+  await expect(history).toContainText(EVENT_TITLE_TOOL_PREFIXED, {
+    timeout: 30_000,
+  });
+  await page.waitForTimeout(2_000);
+  expect(await writeCalls(request)).toBe(1);
+});
+
+test("pending expiry: controls live at deadline-1, card retires at deadline with 0 writes", async ({
+  page,
+  request,
+}) => {
+  await installClockAndLoad(page);
+  await stageProposal(page);
+  const meta = await realProposalMeta(page, request);
+  expect(meta.expiresAt).toBeGreaterThan(Date.now());
+  // One millisecond before the REAL server deadline the decision controls
+  // are still enabled; the one-shot timer has not fired yet.
+  await page.clock.pauseAt(meta.expiresAt - 1);
+  await expect(page.locator("#action-approve")).toBeEnabled();
+  await expect(page.locator("#action-reject")).toBeEnabled();
+  // Crossing the deadline fires the bounded one-shot timer: the still-local
+  // pending card is retired with no decision and no external write.
+  await page.clock.fastForward(1);
+  await expect(page.locator('[data-action-card="true"]')).toHaveCount(0);
+  expect(await writeCalls(request)).toBe(0);
+});
+
+test("clock skew: capped one-shot rearms and retires at the real deadline with 0 writes", async ({
+  page,
+  request,
+}) => {
+  await installClockAndLoad(page);
+  // Skew the client wall clock 20min behind the server BEFORE the real
+  // staged proposal, so the first capped 15min one-shot fires while the
+  // REAL server deadline is still in the future.
+  await page.clock.setSystemTime(Date.now() - 20 * 60 * 1000);
+  await stageProposal(page);
+  const meta = await realProposalMeta(page, request);
+  const clientNow = await page.evaluate(() => Date.now());
+  expect(meta.expiresAt - clientNow).toBeGreaterThan(15 * 60 * 1000);
+  // First capped timeout fires while the deadline is future: the rearmed
+  // card stays pending with live controls (no retire, no write).
+  await page.clock.fastForward(15 * 60 * 1000);
+  const card = page.locator('[data-action-card="true"]');
+  await expect(card).toBeVisible();
+  await expect(page.locator("#action-approve")).toBeEnabled();
+  await expect(page.locator("#action-reject")).toBeEnabled();
+  // Advance the actual remaining time to the REAL deadline: the rearmed
+  // one-shot retires the card locally with no visibility/network refresh.
+  const remaining = meta.expiresAt - (await page.evaluate(() => Date.now()));
+  expect(remaining).toBeGreaterThan(0);
+  await page.clock.fastForward(remaining + 1);
+  await expect(page.locator('[data-action-card="true"]')).toHaveCount(0);
+  expect(await writeCalls(request)).toBe(0);
+});
+
+test("tab resume retires the expired pending card with no new polling", async ({
+  page,
+  request,
+}) => {
+  await installClockAndLoad(page);
+  await stageProposal(page);
+  const meta = await realProposalMeta(page, request);
+  // Jump the clock WITHOUT firing any timer: the stale one-shot cannot run,
+  // so the card is still visible — and only the ACTUAL visibilitychange
+  // reconciliation retires it, locally, with no proposals/execution/provider
+  // reads and no external write.
+  await page.clock.setSystemTime(meta.expiresAt);
+  const card = page.locator('[data-action-card="true"]');
+  await expect(card).toBeVisible();
+  await page.evaluate(() =>
+    document.dispatchEvent(new Event("visibilitychange")),
+  );
+  await expect(page.locator('[data-action-card="true"]')).toHaveCount(0);
+  expect(await writeCalls(request)).toBe(0);
+});
+
+test("decision race: approve across the old deadline keeps the live execution card", async ({
+  page,
+  request,
+}) => {
+  await installClockAndLoad(page);
+  await stageProposal(page);
+  const meta = await realProposalMeta(page, request);
+  // Hold the authoritative preflight read AFTER staging, so the approval's
+  // execution stays live (pre-marker) while the deadline passes.
+  await control(request, "/arm-read-barrier");
+  // Delay the REAL approve response: fetch the actual response, hold it past
+  // the old deadline, then fulfill the ACTUAL 202 (never fabricated).
+  let releaseApprove!: () => void;
+  const approveGate = new Promise<void>((resolve) => {
+    releaseApprove = resolve;
+  });
+  try {
+    await page.route("**/proposals/*/approve", async (route) => {
+      const response = await route.fetch();
+      await approveGate;
+      await route.fulfill({ response });
+    });
+    const approveSent = page.waitForRequest("**/proposals/*/approve");
+    await page.locator("#action-approve").click();
+    await approveSent;
+    // Cross the old server deadline while the REAL decision is awaited: the
+    // stale one-shot timer must not retire the decision-in-flight card.
+    await page.clock.fastForward(15 * 60 * 1000 + 1);
+    const card = page.locator('[data-action-card="true"]');
+    await expect(card).toBeVisible();
+    // Release the held REAL 202 and drive the read-only execution polls past
+    // the frozen clock: the live execution card survives the old deadline.
+    const approved = page.waitForResponse(
+      (res) =>
+        res.url().includes("/approve") && res.request().method() === "POST",
+    );
+    releaseApprove();
+    expect((await approved).status()).toBe(202);
+    await page.clock.runFor(5_000);
+    await expect(card).toBeVisible();
+    await expect(card).toHaveAttribute(
+      "data-action-state",
+      /queued|preflight|executing/,
+    );
+    // Release the held preflight: the run verifies to the REAL receipt, and
+    // the terminal receipt persists on the surviving card.
+    await control(request, "/release");
+    await page.clock.runFor(30_000);
+    await expect(card).toContainText("日程を更新しました");
+    expect(await writeCalls(request)).toBe(1);
+  } finally {
+    releaseApprove();
+    await page.unroute("**/proposals/*/approve").catch(() => {});
+  }
+  void meta;
+});
+
+test("reject transport abort recovers pending controls, then real reject writes nothing", async ({
+  page,
+  request,
+}) => {
+  await stageProposal(page);
+  // Abort the FIRST real reject POST before the server sees it: the client
+  // must release decision ownership and reconcile, never wedge pending.
+  let firstReject = true;
+  try {
+    await page.route("**/proposals/*/reject", async (route) => {
+      if (firstReject) {
+        firstReject = false;
+        await route.abort("failed");
+        return;
+      }
+      await route.continue();
+    });
+    await page.locator("#action-reject").click();
+    // Fixed transport notice; nothing is claimed rejected.
+    await expect(page.locator("#composer-notice")).toContainText(
+      "却下できませんでした",
+    );
+    // The still-pending proposal reconciles from the REAL repository state:
+    // controls recover with the pending card intact.
+    await expect(page.locator("#action-approve")).toBeEnabled({
+      timeout: 30_000,
+    });
+    await expect(page.locator("#action-reject")).toBeEnabled({
+      timeout: 30_000,
+    });
+    await expect(page.locator('[data-action-card="true"]')).toHaveAttribute(
+      "data-action-state",
+      /pending/,
+    );
+    const sessionId = await sessionIdOf(page);
+    const list = await request.get(
+      `${CALENDAR_APP_ORIGIN}/api/sessions/${sessionId}/proposals`,
+    );
+    expect(list.ok()).toBe(true);
+    const body = (await list.json()) as { proposals?: { status?: unknown }[] };
+    expect(body.proposals?.[0]?.status).toBe("pending");
+    // The retry is the REAL reject: durable rejection history, 0 writes.
+    const rejected = page.waitForResponse(
+      (res) =>
+        res.url().includes("/reject") && res.request().method() === "POST",
+    );
+    await page.locator("#action-reject").click();
+    expect((await rejected).status()).toBe(200);
+    await expect(
+      page.locator("#conversation [data-action-history='action_rejection']"),
+    ).toHaveCount(1, { timeout: 30_000 });
+    await expect(page.locator('[data-action-card="true"]')).toHaveCount(0, {
+      timeout: 30_000,
+    });
+    await page.waitForTimeout(2_000);
+    expect(await writeCalls(request)).toBe(0);
+  } finally {
+    await page.unroute("**/proposals/*/reject").catch(() => {});
+  }
+});
+
+test("lost approve response still retires the old timer and verifies (1 write)", async ({
+  page,
+  request,
+}) => {
+  await installClockAndLoad(page);
+  await stageProposal(page);
+  const meta = await realProposalMeta(page, request);
+  // Hold the authoritative preflight AFTER staging so the approved run stays
+  // live (pre-marker) while the execution read below is failed.
+  await control(request, "/arm-read-barrier");
+  try {
+    // The REAL approve commits server-side (202) but its delivery aborts:
+    // the client sees a transport failure, never an approval claim.
+    let firstApprove = true;
+    await page.route("**/proposals/*/approve", async (route) => {
+      if (firstApprove) {
+        firstApprove = false;
+        await route.fetch();
+        await route.abort("failed");
+        return;
+      }
+      await route.continue();
+    });
+    // Fail ONLY the execution GET; the proposals GET stays real (approved).
+    await page.route("**/proposals/*/execution", async (route) => {
+      await route.abort("failed");
+    });
+    await page.locator("#action-approve").click();
+    await expect(page.locator("#composer-notice")).toContainText(
+      "承認できませんでした",
+    );
+    // Authoritative approved ownership BEFORE the failed execution read:
+    // cross the ORIGINAL deadline and the server-accepted card is retained
+    // with decisions disabled (no stale pending downgrade, no timer retire).
+    await page.clock.fastForward(15 * 60 * 1000 + 1);
+    const card = page.locator('[data-action-card="true"]');
+    await expect(card).toBeVisible();
+    await expect(card).toHaveAttribute("data-action-state", /approved/);
+    await expect(page.locator("#action-approve")).toBeDisabled();
+    await expect(page.locator("#action-reject")).toBeDisabled();
+    // Resume the REAL execution reads; the bounded existing watch recovers
+    // without any new polling path. Release the held preflight so the run
+    // verifies to the REAL receipt with exactly one external write.
+    await page.unroute("**/proposals/*/execution").catch(() => {});
+    await control(request, "/release");
+    await page.clock.runFor(60_000);
+    await expect(card).toContainText("日程を更新しました", { timeout: 30_000 });
+    expect(await writeCalls(request)).toBe(1);
+  } finally {
+    await page.unroute("**/proposals/*/approve").catch(() => {});
+    await page.unroute("**/proposals/*/execution").catch(() => {});
+  }
+  void meta;
+});
+
+/* ------------------------------------------------------------------ */
+/* PR28 review races (real UI + real fake seams, deterministic)        */
+/* ------------------------------------------------------------------ */
+
+test("PR28-1 lost reject during in-flight proposals sync recovers controls", async ({
+  page,
+  request,
+}) => {
+  await stageProposal(page);
+  // Hold every proposals list GET so a background sync stays in flight while
+  // the real reject POST aborts: the deduped sync alone must never own this
+  // recovery (it is dropped while in flight).
+  let releaseLists!: () => void;
+  const listGate = new Promise<void>((resolve) => {
+    releaseLists = resolve;
+  });
+  let holdLists = true;
+  try {
+    await page.route("**/proposals", async (route) => {
+      if (
+        holdLists &&
+        !route.request().url().includes("/approve") &&
+        !route.request().url().includes("/reject") &&
+        !route.request().url().includes("/execution")
+      ) {
+        await listGate;
+      }
+      await route.continue();
+    });
+    let firstReject = true;
+    await page.route("**/proposals/*/reject", async (route) => {
+      if (firstReject) {
+        firstReject = false;
+        await route.abort("failed");
+        return;
+      }
+      await route.continue();
+    });
+    await page.locator("#action-reject").click();
+    await expect(page.locator("#composer-notice")).toContainText(
+      "却下できませんでした",
+    );
+    // Release the held lists: the held decision ownership reconciles the real
+    // pending state with live controls and an intact timer.
+    holdLists = false;
+    releaseLists();
+    await expect(page.locator("#action-approve")).toBeEnabled({
+      timeout: 30_000,
+    });
+    await expect(page.locator("#action-reject")).toBeEnabled({
+      timeout: 30_000,
+    });
+    await expect(page.locator('[data-action-card="true"]')).toHaveAttribute(
+      "data-action-state",
+      /pending/,
+    );
+    // The retry is the real reject: durable history, no write.
+    const rejected = page.waitForResponse(
+      (res) =>
+        res.url().includes("/reject") && res.request().method() === "POST",
+    );
+    await page.locator("#action-reject").click();
+    expect((await rejected).status()).toBe(200);
+    await expect(
+      page.locator("#conversation [data-action-history='action_rejection']"),
+    ).toHaveCount(1, { timeout: 30_000 });
+    expect(await writeCalls(request)).toBe(0);
+  } finally {
+    try {
+      holdLists = false;
+      releaseLists();
+    } catch {
+      // Best effort.
+    }
+    await page.unroute("**/proposals").catch(() => {});
+    await page.unroute("**/proposals/*/reject").catch(() => {});
+  }
+});
+
+test("PR28-2 stale pending list cannot downgrade approved ownership without runId", async ({
+  page,
+  request,
+}) => {
+  await installClockAndLoad(page);
+  await stageProposal(page);
+  const meta = await realProposalMeta(page, request);
+  // Hold the authoritative preflight AFTER staging so the approved run stays
+  // live (pre-marker) and no runId can be supplied until the release below.
+  await control(request, "/arm-read-barrier");
+  // Hold the OLDER proposals list at the network: the next list GET (the
+  // real assent-terminal sync below, sent while the card is still pending)
+  // is fetched NOW while genuinely pending, but its delivery is gated until
+  // AFTER the server has approved and the client owns approved state.
+  let releaseOlder!: () => void;
+  const olderGate = new Promise<void>((resolve) => {
+    releaseOlder = resolve;
+  });
+  let markOlderSeen!: () => void;
+  const olderSeenAt = new Promise<void>((resolve) => {
+    markOlderSeen = resolve;
+  });
+  let olderCount = 0;
+  let listHits = 0;
+  let olderBody = "";
+  let olderFulfilled = false;
+  // Lost-approve delivery (the server commits; the client sees a transport
+  // failure) keeps the approved card WITHOUT a runId; execution reads fail
+  // so the bounded watch cannot supply one either.
+  let firstApprove = true;
+  try {
+    await page.route("**/proposals", async (route) => {
+      const url = route.request().url();
+      if (
+        route.request().method() !== "GET" ||
+        url.includes("/approve") ||
+        url.includes("/reject") ||
+        url.includes("/execution")
+      ) {
+        await route.continue();
+        return;
+      }
+      listHits += 1;
+      if (olderCount === 0) {
+        olderCount += 1;
+        const live = await route.fetch();
+        olderBody = await live.text();
+        markOlderSeen();
+        await olderGate;
+        olderFulfilled = true;
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: olderBody,
+        });
+        return;
+      }
+      await route.continue();
+    });
+    await page.route("**/proposals/*/approve", async (route) => {
+      if (firstApprove) {
+        firstApprove = false;
+        await route.fetch();
+        await route.abort("failed");
+        return;
+      }
+      await route.continue();
+    });
+    await page.route("**/proposals/*/execution", async (route) => {
+      await route.abort("failed");
+    });
+    // A REAL older sync in flight while pending: the assent turn answers
+    // (the pending card is untouched) and its terminal schedules the genuine
+    // proposals sync whose list delivery is now held at the network.
+    await send(page, TEXT_ASSENT);
+    await expect(page.locator("#conversation")).toContainText(
+      ANSWER_ASSENT_TEXT,
+      { timeout: 30_000 },
+    );
+    await olderSeenAt;
+    // The held body is genuinely the pending summary for this proposal
+    // (fetched from the real server while still pending).
+    expect(olderBody).toContain("pending");
+    expect(olderBody).toContain(meta.proposalId);
+    // The REAL approve commits server-side while the older list is held;
+    // its delivery aborts, so reconciliation must take approved ownership
+    // with no runId (timer cleared, decisions disabled, execution watch on).
+    await page.locator("#action-approve").click();
+    await expect(page.locator("#composer-notice")).toContainText(
+      "承認できませんでした",
+      { timeout: 30_000 },
+    );
+    const card = page.locator('[data-action-card="true"]');
+    await expect(card).toHaveAttribute("data-action-state", /approved/, {
+      timeout: 30_000,
+    });
+    await expect(page.locator("#action-approve")).toBeDisabled();
+    await expect(page.locator("#action-reject")).toBeDisabled();
+    // All three real lists flowed: the held older, the approve pre-read,
+    // and the lost-approve authoritative re-read.
+    expect(listHits).toBeGreaterThanOrEqual(3);
+    // Release the STALE pending summary AFTER authoritative approved
+    // ownership while the runId is still unavailable: the held sync resumes
+    // through the REAL sync path and must not downgrade the card.
+    releaseOlder();
+    await expect.poll(() => olderFulfilled, { timeout: 30_000 }).toBe(true);
+    await expect(card).toBeVisible();
+    await expect(card).toHaveAttribute("data-action-state", /approved/);
+    await expect(page.locator("#action-approve")).toBeDisabled();
+    await expect(page.locator("#action-reject")).toBeDisabled();
+    // The cleared timer (not the stale list) owns expiry: crossing the
+    // original deadline retires nothing.
+    await page.clock.fastForward(15 * 60 * 1000 + 1);
+    await expect(card).toBeVisible();
+    await expect(card).toHaveAttribute("data-action-state", /approved/);
+    await expect(page.locator("#action-approve")).toBeDisabled();
+    await expect(page.locator("#action-reject")).toBeDisabled();
+    await page.unroute("**/proposals").catch(() => {});
+    await page.unroute("**/proposals/*/execution").catch(() => {});
+    await control(request, "/release");
+    await page.clock.runFor(60_000);
+    await expect(card).toContainText("日程を更新しました", { timeout: 30_000 });
+    expect(await writeCalls(request)).toBe(1);
+  } finally {
+    try {
+      releaseOlder();
+    } catch {
+      // Best effort.
+    }
+    await page.unroute("**/proposals").catch(() => {});
+    await page.unroute("**/proposals/*/approve").catch(() => {});
+    await page.unroute("**/proposals/*/execution").catch(() => {});
+  }
+});
+
+test("PR28-3 repeated historic rejections hydrate history once", async ({
+  page,
+  request,
+}) => {
+  // Two real stage+reject cycles leave two historic rejected proposals.
+  await stageProposal(page);
+  let rejected = page.waitForResponse(
+    (res) => res.url().includes("/reject") && res.request().method() === "POST",
+  );
+  await page.locator("#action-reject").click();
+  expect((await rejected).status()).toBe(200);
+  await expect(
+    page.locator("#conversation [data-action-history='action_rejection']"),
+  ).toHaveCount(1, { timeout: 30_000 });
+  await send(page, TEXT_SEARCH);
+  await expect(page.locator("#conversation")).toContainText(
+    ANSWER_SEARCH_TEXT,
+    { timeout: 30_000 },
+  );
+  await selectCitation(page, "r1");
+  await send(page, TEXT_STAGE);
+  await expect(page.locator("#conversation")).toContainText(ANSWER_STAGE_TEXT, {
+    timeout: 30_000,
+  });
+  await expect(page.locator('[data-action-card="true"]')).toBeVisible({
+    timeout: 30_000,
+  });
+  rejected = page.waitForResponse(
+    (res) => res.url().includes("/reject") && res.request().method() === "POST",
+  );
+  await page.locator("#action-reject").click();
+  expect((await rejected).status()).toBe(200);
+  await expect(page.locator('[data-action-card="true"]')).toHaveCount(0, {
+    timeout: 30_000,
+  });
+  // Reload and count real history GETs: boot owns one hydration; the sync over
+  // two historic rejections must not add one hydration per proposal.
+  let historyGets = 0;
+  page.on("request", (req) => {
+    if (req.url().includes("/history?")) {
+      historyGets += 1;
+    }
+  });
+  await page.reload();
+  await expect(page.locator("#composer")).toBeVisible();
+  await expect(
+    page.locator("#conversation [data-action-history='action_rejection']"),
+  ).toHaveCount(2, { timeout: 30_000 });
+  await page.waitForTimeout(3_000);
+  expect(historyGets).toBeLessThanOrEqual(2);
+  expect(await writeCalls(request)).toBe(0);
+});
+
+test("PR28-4 delayed live execution cannot overwrite terminal receipt", async ({
+  page,
+  request,
+}) => {
+  await installClockAndLoad(page);
+  await stageProposal(page);
+  // Hold the authoritative preflight AFTER staging so the approved run stays
+  // live (pre-marker) with its real Stop control until the release below.
+  await control(request, "/arm-read-barrier");
+  await page.locator("#action-approve").click();
+  const card = page.locator('[data-action-card="true"]');
+  // The REAL execution watch renders the live card first (runId known).
+  await expect(card).toHaveAttribute(
+    "data-action-state",
+    /queued|preflight|executing/,
+    { timeout: 60_000 },
+  );
+  await expect(page.locator("[data-action-stop='true']")).toBeVisible({
+    timeout: 30_000,
+  });
+  const liveView = await executionView(page, request);
+  expect(liveView.runId ?? "").not.toBe("");
+  // Hold the NEXT live execution read at the network: fetch the REAL live
+  // body now (genuinely live, receipt-free) but gate its delivery until
+  // AFTER the authoritative terminal is rendered on the same live card.
+  let releaseStale!: () => void;
+  const staleGate = new Promise<void>((resolve) => {
+    releaseStale = resolve;
+  });
+  let markStaleSeen!: () => void;
+  const staleSeenAt = new Promise<void>((resolve) => {
+    markStaleSeen = resolve;
+  });
+  let staleCount = 0;
+  let execHits = 0;
+  let staleBody = "";
+  let staleFulfilled = false;
+  try {
+    await page.route("**/proposals/*/execution", async (route) => {
+      execHits += 1;
+      if (staleCount === 0) {
+        staleCount += 1;
+        const live = await route.fetch();
+        staleBody = await live.text();
+        markStaleSeen();
+        await staleGate;
+        staleFulfilled = true;
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: staleBody,
+        });
+        return;
+      }
+      await route.continue();
+    });
+    // Drive the clock-controlled watch to its next tick so the held read is
+    // genuinely the client's own execution poll (not a synthesized replay).
+    await page.clock.runFor(1_000);
+    await staleSeenAt;
+    // Genuine delayed-live race input: a live (non-terminal, receipt-free)
+    // execution read fetched from the real server while still live.
+    expect(staleBody).toMatch(/"status":"(queued|preflight|executing)"/);
+    expect(staleBody).toContain('"receipt":null');
+    // Release the server run to its REAL terminal while the stale live read
+    // stays held; the page watch is blocked on it, so observe the terminal
+    // through the real Node API (same server, no page reload).
+    await control(request, "/release");
+    await expect
+      .poll(
+        async () => {
+          const terminal = await executionView(page, request);
+          return (
+            (terminal.receipt as { outcome?: string } | null)?.outcome ?? ""
+          );
+        },
+        { timeout: 60_000 },
+      )
+      .toBe("succeeded");
+    expect(await writeCalls(request)).toBe(1);
+    // Render the authoritative terminal on the SAME live card through a real
+    // client sync (the assent terminal below schedules the genuine
+    // proposals+execution sync whose execution read continues fresh) while
+    // the stale live read stays held. No reload: the card never leaves.
+    await send(page, TEXT_ASSENT);
+    await expect(page.locator("#conversation")).toContainText(
+      ANSWER_ASSENT_TEXT,
+      { timeout: 30_000 },
+    );
+    await expect(card).toHaveAttribute("data-action-state", "succeeded", {
+      timeout: 60_000,
+    });
+    await expect(card).toContainText("日程を更新しました", {
+      timeout: 30_000,
+    });
+    await expect(page.locator("[data-action-stop='true']")).toBeHidden();
+    expect(execHits).toBeGreaterThanOrEqual(2);
+    // Release the STALE live read AFTER the terminal: the terminal-wins
+    // guard must drop it — receipt and Stop ownership stay terminal.
+    releaseStale();
+    await expect.poll(() => staleFulfilled, { timeout: 30_000 }).toBe(true);
+    await page.clock.runFor(5_000);
+    await expect(card).toHaveAttribute("data-action-state", "succeeded");
+    await expect(card).toContainText("日程を更新しました");
+    await expect(page.locator("[data-action-stop='true']")).toBeHidden();
+    await expect(page.locator("#composer-notice")).not.toContainText(
+      "停止しました",
+    );
+    const view = await executionView(page, request);
+    expect((view.receipt as { outcome?: string } | null)?.outcome).toBe(
+      "succeeded",
+    );
+    expect(await writeCalls(request)).toBe(1);
+  } finally {
+    try {
+      releaseStale();
+    } catch {
+      // Best effort.
+    }
+    await page.unroute("**/proposals/*/execution").catch(() => {});
   }
 });

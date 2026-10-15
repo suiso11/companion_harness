@@ -293,11 +293,16 @@ describe("C23 automatic scheduler pickup of an approved Action Run", () => {
 
       // REAL generic scheduler pickup — nothing else is called by hand.
       expect(engine.pump()).toBe(1);
+      // Deterministic idle wait: yield via setImmediate (no wall-clock
+      // sleep) so a loaded runner cannot stretch real timers past the test
+      // timeout. The launched strategy only awaits immediately-resolved
+      // ports, so it settles within a handful of yields; a genuinely stuck
+      // run fails fast on the assertion below instead of timing out.
       for (let attempt = 0; attempt < 500; attempt += 1) {
         if (engine.inflightCount() === 0) {
           break;
         }
-        await new Promise((resolve) => setTimeout(resolve, 2));
+        await new Promise((resolve) => setImmediate(resolve));
       }
       expect(engine.inflightCount()).toBe(0);
 
@@ -417,11 +422,16 @@ describe("C23 automatic scheduler pickup of an approved Action Run", () => {
       });
       engine.start();
       expect(engine.pump()).toBe(1);
+      // Deterministic idle wait: yield via setImmediate (no wall-clock
+      // sleep) so a loaded runner cannot stretch real timers past the test
+      // timeout. The launched strategy only awaits immediately-resolved
+      // ports, so it settles within a handful of yields; a genuinely stuck
+      // run fails fast on the assertion below instead of timing out.
       for (let attempt = 0; attempt < 500; attempt += 1) {
         if (engine.inflightCount() === 0) {
           break;
         }
-        await new Promise((resolve) => setTimeout(resolve, 2));
+        await new Promise((resolve) => setImmediate(resolve));
       }
       expect(engine.inflightCount()).toBe(0);
       await engine.shutdown({ drainMs: 0 });
