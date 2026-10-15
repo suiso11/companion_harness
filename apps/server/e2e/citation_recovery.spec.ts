@@ -36,6 +36,22 @@ async function control(
 }
 
 async function sessionIdOf(page: Page): Promise<string> {
+  // The composer is visible/enabled from the static HTML before the async
+  // boot finishes POST /api/sessions, so localStorage may still be empty on
+  // a cold start. Wait for the real session-establishment signal (the UI
+  // writing ch.sessionId) instead of asserting the immediate value.
+  await page.waitForFunction(
+    (): boolean => {
+      try {
+        const value = localStorage.getItem("ch.sessionId");
+        return value !== null && value.length > 0;
+      } catch {
+        return false;
+      }
+    },
+    undefined,
+    { timeout: 15_000 },
+  );
   const id = await page.evaluate((): string | null =>
     localStorage.getItem("ch.sessionId"),
   );

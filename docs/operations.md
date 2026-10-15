@@ -2920,6 +2920,31 @@ copied; the entrypoint is a standalone narrow surface with its own pin).
   fork `tsc` build clean (`dist/cli.js` present); port suite 8/8 +
   real-process stdio suite 1/1 green; root typecheck + full suite +
   biome re-run recorded below. No live writes/scopes.
+- Normal-startup write-profile proof (2026-10-15, default OFF unchanged):
+  `apps/server/test/rescheduleWriteStartup.test.ts` 21/21 — the prior
+  14/15 success case (`unknown` instead of `succeeded`) was a fixture-hint
+  cause only (E2E stdio hints omitted the mandatory SDK inherited
+  allowlist, so the fail-closed stdio guard denied before spawn); fixed by
+  adding the exact live `STDIO_IMPLICIT_ENV_VARS` to the three real-stdio
+  E2E hints. PR31 review findings (2026-10-15, same file +6): P1 —
+  production-factory hints now validate the platform implicit allowlist in
+  preflight (fixed `env allowlist is invalid`, no DB/child/patch; inert
+  `writeMcpTransportFactory` seams skip it); P2 — explicit
+  `actionWriteBinding: null` normalizes to absent (only non-null conflicts);
+  P2 — write commands accept absolute paths incl. Windows
+  `C:\Program Files\...\node.exe` and spaced POSIX paths (shell lines /
+  interpolation / NUL / controls still rejected; real spaced-binary
+  production spawn smoked). Production parsing still rejects `M5_RESCHEDULE_TEST_*`
+  (fixture endpoint travels in the options-injected CHILD env only, never
+  the hint). Success path verified end to end: staged HTTP approve ->
+  exactly ONE conditional PATCH (`If-Match` = committed etag, start/end
+  only) -> strategy readback -> `succeeded` receipt; stale grant ->
+  `blocked_stale` with 0 patches; drifted identity -> `unknown` with 0
+  patches; committed-grant resolver reads the exact stored hash+revision.
+  Final: root suite 114 files / 1350 tests green, `tsc --noEmit` exit 0,
+  `biome check .` clean, throwaway normal-startup `tsx` smoke
+  (`/health/live` -> `{"status":"live"}`, default profile unselected) OK.
+  No live Google/OAuth/user-DB writes; no production guard weakened.
 - Remaining: nested-fork push to suiso11/google-calendar-mcp SUCCEEDED
   (branch `feat/m5-reschedule-entrypoint`, commit `164cb83`, no merge);
   draft PR BLOCKED with the exact reason `branch has no history in common
@@ -3148,10 +3173,42 @@ enters the read allowlist).
   fork `.github/workflows/ci.yml` now triggers on `feat/**` too so PR #3
   runs build + `lint` (`tsc -p tsconfig.lint.json`) + `check:imports` +
   unit tests with coverage. Host CI (`ci.yml` check + e2e) proves the
-  tracked-fixture mirrors, static gates, and full pipeline smoke only;
-  host `rescheduleProcess`/`rescheduleWrite` mirrors are NOT provider
-  proof (stated here, not substituted).
-- Concrete host resolver (closed contract, trusted-code-only, default
+   tracked-fixture mirrors, static gates, and full pipeline smoke only;
+   host `rescheduleProcess`/`rescheduleWrite` mirrors are NOT provider
+   proof (stated here, not substituted).
+
+## PR31 citation CI race fix (2026-10-15, test sync only, no product change)
+
+CI ground truth: push run `38716307351` (head `a77cd1e`) failed ONLY
+`e2e` with 2 failures in `apps/server/e2e/citation_recovery.spec.ts`
+(stale-PUT CAS test `:71` + genuine-concurrent-409 test `:135`); both
+`check` jobs passed and the same-head PR-event run `38716314333`
+passed. Both failures are the identical line
+`sessionIdOf (.../citation_recovery.spec.ts:42)`:
+`expect(typeof id).toBe("string")` got `typeof null === "object"` —
+the page's `localStorage ch.sessionId` was still empty. No seed,
+409, expiry, collision, or route-capture behavior is implicated: the
+read happens before `/seed-citation` and before any route is
+installed. Root cause is a test/fixture race: `beforeEach` gates on
+`#composer` visible + `#composer-send` enabled, which the static HTML
+already satisfies before async `boot() -> ensureSession()` finishes
+`POST /api/sessions` and writes `ch.sessionId`. Cold CI starts lose
+the race (first two tests); warm runs win it (later tests +
+same-head rerun passed). Fix (test-only, assertions kept):
+`sessionIdOf` now `waitForFunction`s the real product signal
+(`ch.sessionId` non-empty, 15s budget matching the file's other
+waits) before reading/asserting. No M5 startup code touched, no
+`client.ts`/`app.ts` product change, no timeout/retry/suppression,
+readonly `:3000` service untouched. Local proof (Linux, real
+Chromium, owned temp harness): the 2 affected cases pass
+(`-g "citation drawer"`, 2/2, ~4s); `biome check` on the touched
+spec clean. New-head CI after push, head `5195fef`: push run
+`38717280204` success (e2e success, check ubuntu success, check
+windows success) and PR-event run `38717286888` success (e2e
+success, check ubuntu success, check windows success); zero review
+comments on PR31 at observation time.
+- HISTORICAL PR30 helper API (not the CURRENT normal-startup wiring):
+  Concrete host resolver (closed contract, trusted-code-only, default
   OFF): `createCommittedGrantResolver` (connector-calendar, re-exported
   by `rescheduleWriteBinding.ts` + `createCommittedGrantWriteBinding`
   helper) keyed by execution/proposal/hash -> immutable
@@ -3160,7 +3217,15 @@ enters the read allowlist).
   Nothing auto-wires: the host passes the resolver explicitly with its
   committed-grant store. Resolver answers are equality-checked against
   `grant.expectedRevision`; a throwing resolver pre-dispatch stays a
-  safe definite failure (no dispatch happened).
+  safe definite failure (no dispatch happened). HISTORICAL scope ends here:
+  in this helper the host passes the resolver explicitly. CURRENT PR31
+  normal-startup composition instead auto-wires a concrete DB resolver —
+  the frozen write profile (`M5_RESCHEDULE_WRITE_PROFILE=google-reschedule`
+  + strict `M5_RESCHEDULE_CONNECTOR_JSON` hints) builds an inline
+  `resolveExpectedEtag` over `repo.readCommittedGrantRevision`
+  (`apps/server/src/bootstrap.ts`), equality-checked against the committed
+  grant; see "M5 reschedule hardening + wire-hash pin" and the normal-startup
+  write-profile proof above.
 - Verification (this worker, no live Google/OAuth/writes): fork
   `npm run build` + `npm run lint` + `npm test` green; host units +
   typecheck/lint + pipeline smoke re-run below. Fork commits pushed

@@ -5,6 +5,17 @@
  * connector pipeline (handshake, tools/list identity, tools/call) runs
  * without any network, process spawn or OAuth surface.
  */
+
+/**
+ * M5 trusted-test stdio seam: the OFFICIAL SDK stdio client transport.
+ * Production code never uses it (production spawns through
+ * `defaultTransportFactory` from the validated hint command); the
+ * reschedule write-profile server tests use it ONLY inside the
+ * options-injected `writeMcpTransportFactory` to spawn the TRACKED fixture
+ * server over REAL stdio with fixture-only env set in the CHILD process.
+ * Never used by production code.
+ */
+export { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 export { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 /**
  * C15 fake-E2E seam (append): the SDK low-level `Server` and the exact wire

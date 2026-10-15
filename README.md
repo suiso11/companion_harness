@@ -1431,7 +1431,18 @@ COMPANION_ACTIONS_JSON='{ "optIn": true, "writeEnabled": true }'
 - 設定はヒントに過ぎません。capability / category / connector instance id を
   env から与えることはできず、書き込み port は必ず `startServer({
   actionWriteBinding: { port, shutdown?, owned? } })` で注入します
-  (本コードベースには production の実書き込み binding は存在しません)。
+  (通常起動のホスト所有 write profile
+  (`M5_RESCHEDULE_WRITE_PROFILE=google-reschedule` +
+  `M5_RESCHEDULE_CONNECTOR_JSON` stdio ヒント) を除き、本コードベースに
+  その他の production 実書き込み binding は存在しません; profile 未設定の
+  既定は無効のまま)。profile 選択時は注入 binding と相互排他であり、
+  `M5_RESCHEDULE_TEST_*` の allowlist 指定は fail-closed です
+  (fixture endpoint は options 注入の子プロセス env のみ)。
+  受け入れ証跡: `apps/server/test/rescheduleWriteStartup.test.ts` 21/21
+  (実 stdio E2E の HTTP approve 1 PATCH + readback receipt を含む; PR31
+  レビュー3件対応済み: production factory の implicit-env 事前検証、
+  `actionWriteBinding: null` の absent 扱い、Windows 絶対パス受容 +
+  space 含み実バイナリの production spawn)。
 - 設定が有効で binding が active instance と一致しない場合は listen 前に
   fail-closed します。設定が無効な場合、注入された port は一切使われません。
 - 無効時は staging できず、approve は repository 呼び出し前に固定
@@ -1650,3 +1661,16 @@ timeout change, no behavior change: the scheduler tests' engine-idle poll
 now yields via `setImmediate` instead of wall-clock `setTimeout` sleeps,
 and `vitest.config.ts` caps `maxWorkers: 2` on CI only. Detail:
 `docs/operations.md` ("PR29 Windows stall fix").
+
+# PR31 Citation CI Race Fix (2026-10-15)
+
+Push CI run `38716307351` (head `a77cd1e`) failed ONLY `e2e` with the
+same 2 `citation_recovery.spec.ts` failures at `sessionIdOf (:42)`:
+`typeof null === "object"` — `ch.sessionId` not yet written because
+`beforeEach`'s composer-visible/enabled gate is already true in the
+static HTML before async `ensureSession()` posts `/api/sessions`.
+Same-head PR run `38716314333` passed (warm timing won the race).
+Test-only sync fix, no product change: `sessionIdOf` waits for the
+real session signal (`ch.sessionId` non-empty) before asserting.
+Local proof: 2/2 affected browser cases pass; `biome check` clean.
+Detail: `docs/operations.md` ("PR31 citation CI race fix").
