@@ -230,6 +230,216 @@ export function applyRunEvent(
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* C22 actual approval UX (pure view mapping, no DOM/I/O)               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Exact server-side proposal status vocabulary (`ActionProposalStatus`,
+ * type-only import so the browser bundle never pulls zod).
+ */
+export type ProposalStatus = "pending" | "approved" | "rejected" | "expired";
+
+/** Exact execution status vocabulary (`ActionExecutionStatus`). */
+export type ExecutionStatus =
+  | "queued"
+  | "preflight"
+  | "executing"
+  | "succeeded"
+  | "succeeded_unverified"
+  | "blocked_stale"
+  | "failed"
+  | "unknown";
+
+/** Exact receipt outcome vocabulary (`ActionReceiptOutcome`). */
+export type ReceiptOutcome = ExecutionStatus;
+
+/**
+ * Everything the approval card needs, already read from the ACTUAL APIs
+ * (`GET .../proposals`, `GET .../proposals/:id/execution`) and the client
+ * clock. No technical id is ever carried into a rendered string.
+ */
+export interface ActionCardInput {
+  readonly status: ProposalStatus;
+  /** Deterministic safe preview summary from the proposal itself. */
+  readonly preview: string;
+  readonly start: string;
+  readonly end: string;
+  readonly expiresAt: number;
+  readonly now: number;
+  readonly executionStatus: ExecutionStatus | null;
+  readonly markerCommitted: boolean;
+  readonly cancellable: boolean;
+  readonly receiptOutcome: ReceiptOutcome | null;
+  readonly receiptSummary: string | null;
+}
+
+export interface ActionCardModel {
+  /**
+   * The Approve/Reject controls exist ONLY for a pending, unexpired
+   * proposal: an expired or already decided proposal renders no control, so
+   * a stale card can never reach an external write.
+   */
+  readonly decisionVisible: boolean;
+  readonly expired: boolean;
+  readonly progressText: string;
+  /** Contextual Stop: live execution AND the external marker NOT committed. */
+  readonly stopVisible: boolean;
+  readonly outcomeText: string;
+  readonly detailText: string;
+}
+
+/** Fixed safe redacted execution error codes (`M5_ACTION_ERROR_CODES`). */
+export type ActionErrorCode =
+  | "action_preflight_failed"
+  | "action_cancelled_before_write"
+  | "action_write_failed"
+  | "action_recovery_abandoned_before_write"
+  | "database_state_invalid";
+
+export const ACTION_PROGRESS_TEXT: Readonly<
+  Record<"queued" | "preflight" | "executing", string>
+> = {
+  queued: "承認を受け付けました。準備しています",
+  preflight: "変更前の内容を確認しています",
+  executing: "日程を更新しています",
+};
+
+/**
+ * Receipt outcome -> fixed plain text (§18.7). Never "停止しました": a
+ * cancel is NOT a receipt outcome, and an unverified/failed/unknown write
+ * requires a manual check rather than any stop vocabulary.
+ */
+export function receiptOutcomeText(outcome: ReceiptOutcome | null): string {
+  switch (outcome) {
+    case "succeeded":
+      return "日程を更新しました";
+    case "succeeded_unverified":
+      return "更新しましたが結果を確認できませんでした。内容を手動で確認してください";
+    case "blocked_stale":
+      return "元の予定に変更があったため、更新しませんでした。内容を手動で確認してください";
+    case "failed":
+      return "更新できませんでした。内容を手動で確認してください";
+    case "unknown":
+      return "更新の結果が不明です。内容を手動で確認してください";
+    default:
+      return "";
+  }
+}
+
+/**
+ * Fixed safe execution error-code text (§18.5). `action_cancelled_before_write`
+ * keeps the external write NOT performed — it is the pre-marker cancel
+ * outcome, distinct from any "stopped" receipt.
+ */
+export function actionErrorCodeText(code: ActionErrorCode | null): string {
+  switch (code) {
+    case "action_cancelled_before_write":
+      return "更新は実施していません";
+    case "action_preflight_failed":
+      return "変更前の内容を確認できませんでした。内容を手動で確認してください";
+    case "action_write_failed":
+      return "更新できませんでした。内容を手動で確認してください";
+    case "action_recovery_abandoned_before_write":
+      return "更新は実施していません。内容を手動で確認してください";
+    case "database_state_invalid":
+      return "状態が不正です。内容を手動で確認してください";
+    default:
+      return "";
+  }
+}
+
+/**
+ * Pure mapping from the actual API reads to the rendered card. Deterministic
+ * and total: an unknown/terminal-lost execution renders its real status and
+ * never a fabricated success.
+ */
+export function actionCardModel(input: ActionCardInput): ActionCardModel {
+  // Client deadline guard: the card is only actionable while the server
+  // validity window is still open per the CLIENT clock as well; the server
+  // repository state remains authoritative and is re-read on approve.
+  const expired = input.now >= input.expiresAt;
+  const pendingOpen = input.status === "pending" && !expired;
+  const live =
+    input.executionStatus === "queued" ||
+    input.executionStatus === "preflight" ||
+    input.executionStatus === "executing";
+  const progressText = live
+    ? ACTION_PROGRESS_TEXT[
+        input.executionStatus as "queued" | "preflight" | "executing"
+      ]
+    : "";
+  const terminalOutcome: ReceiptOutcome | null =
+    input.receiptOutcome ??
+    (input.executionStatus !== null && !live ? input.executionStatus : null);
+  const outcomeText = receiptOutcomeText(terminalOutcome);
+  return {
+    decisionVisible: pendingOpen,
+    expired: expired && input.status === "pending",
+    progressText,
+    // The external-call marker is a committed, irreversible boundary: Stop
+    // exists only before it, and is hidden for a terminal execution.
+    stopVisible: live && !input.markerCommitted && input.cancellable,
+    outcomeText:
+      outcomeText !== ""
+        ? outcomeText
+        : expired && input.status === "pending"
+          ? "確認の期限が過ぎました。新しく依頼してください"
+          : "",
+    detailText: input.receiptSummary ?? input.preview,
+  };
+}
+
+/**
+ * Deterministic history intent text for the two exact decision history
+ * variants (§18.4). These items carry NO user text: the intent is derived
+ * from the real persisted decision plus its real receipt outcome, never
+ * rendered blank.
+ */
+export function actionDecisionIntentText(
+  kind: "action_approval" | "action_rejection",
+  outcome: ReceiptOutcome | null,
+): string {
+  if (kind === "action_rejection") {
+    return "日程変更の案を却下しました";
+  }
+  if (outcome === null) {
+    return "日程変更を承認しました";
+  }
+  return `日程変更を承認しました（${receiptOutcomeText(outcome)}）`;
+}
+
+/**
+ * M5 decision-turn retry denial (§18.4/§18.6, pure policy): the generic
+ * generation retry ("もう一度送る", failure-only per §16.6) is offered only
+ * for `user_text` Turns. Decision Turns never re-execute through it: an
+ * `action_rejection` Turn owns no Run and an `action_approval` Turn owns
+ * its Action Run, so retrying either could duplicate or fabricate an
+ * external write. Unknown kinds fail closed (no retry).
+ */
+export function isRetryableTurnKind(kind: unknown): boolean {
+  return kind === "user_text";
+}
+
+/**
+ * Validated parse of a cancel `200` response body (`CancelRunResponse`):
+ * returns the actual `run.status` string, or `null` when the body is not
+ * the exact `{ run: { id, status } }` shape. The caller claims a stop ONLY
+ * for the `cancelled` terminal; every other (or unparseable) outcome
+ * refreshes the actual execution/receipt state instead.
+ */
+export function parseCancelRunStatus(body: unknown): string | null {
+  if (typeof body !== "object" || body === null) {
+    return null;
+  }
+  const run = (body as { run?: unknown }).run;
+  if (typeof run !== "object" || run === null) {
+    return null;
+  }
+  const status = (run as { status?: unknown }).status;
+  return typeof status === "string" ? status : null;
+}
+
 /**
  * Terminal-hydration single-owner guard (§16.7): the first claim for a Run
  * wins; later claims for the same Run are declined so the terminal history

@@ -10,6 +10,7 @@
     "lint": "biome check src test"
   },
   "dependencies": {
+    "@companion/contracts": "workspace:*",
     "@modelcontextprotocol/sdk": "1.30.0",
     "zod": "4.5.4"
   },

@@ -12,6 +12,9 @@ import {
   ReferenceOpenToolInputSchema,
   ReferenceRefreshToolInputSchema,
   ReferenceRelatedToolInputSchema,
+  type ToolCategory,
+  type ToolDescriptor,
+  ToolDescriptorSchema,
   UuidSchema,
 } from "@companion/contracts";
 import type {
@@ -308,6 +311,43 @@ describe("advertised ordinary tool definitions (exact closed schemas)", () => {
     } finally {
       closeKernelDatabase(handle);
     }
+  });
+});
+
+describe("model-visible tool output respects the trusted tool category", () => {
+  function brokerDescriptor(
+    name: string,
+    category: ToolCategory,
+  ): ToolDescriptor {
+    return ToolDescriptorSchema.parse({
+      name,
+      version: 1,
+      title: `Fixture ${name}`,
+      description: `Fixture descriptor for ${name}`,
+      category,
+    });
+  }
+
+  it("advertises only the reviewed read tool plus answer.submit from four known tools", () => {
+    // FOUR KNOWN broker tool names, each with its explicit trusted category:
+    // markdown.search is read; reference.open is write; reference.refresh is
+    // sensitive; reference.related is unclassified. The ACTUAL model-visible
+    // output must contain only the read tool and the terminal protocol.
+    const descriptors: ToolDescriptor[] = [
+      brokerDescriptor("markdown.search", "read"),
+      brokerDescriptor("reference.open", "write"),
+      brokerDescriptor("reference.refresh", "sensitive"),
+      brokerDescriptor("reference.related", "unclassified"),
+    ];
+    const tools = buildAgentToolDefinitions(descriptors);
+    expect(tools.map((t) => t.name)).toEqual([
+      "markdown.search",
+      "answer.submit",
+    ]);
+    // The one advertised ordinary tool keeps its explicit closed schema.
+    expect(tools[0]?.parameters).toEqual(AGENT_MARKDOWN_SEARCH_PARAMETERS);
+    // The terminal protocol is unchanged and stays last.
+    expect(tools[1]).toEqual(answerSubmitToolDefinition());
   });
 });
 

@@ -10,31 +10,169 @@
 
 /// <reference lib="dom" />
 
+import type { ActiveStatus } from "@companion/contracts";
 import {
+  ACTION_PROGRESS_TEXT,
+  type ActionCardModel,
+  type ActionErrorCode,
+  actionCardModel,
+  actionDecisionIntentText,
+  actionErrorCodeText,
   applyRunEvent,
   claimTerminalHydration,
+  type ExecutionStatus,
   INITIAL_RUN_VIEW,
   isCorruptCursor,
+  isRetryableTurnKind,
+  type ProposalStatus,
+  parseCancelRunStatus,
+  type ReceiptOutcome,
   type RunViewState,
   runResultToAnswerParts,
 } from "./reducer.js";
 
 const LS_SESSION = "ch.sessionId";
 const LS_PENDING_KEY = "ch.pendingKey";
+/**
+ * C22 approve idempotency metadata: the ONLY approval-related thing kept in
+ * browser storage, exactly like the message pending key — one Idempotency-Key
+ * per proposal (technical metadata). Conversation text, preview content,
+ * proposal hashes, receipts, and any raw ids are NEVER persisted: the key
+ * alone lets a reload replay the same approve request safely (same scope,
+ * same `{ proposalHash }` body) without storing the body.
+ */
+const approveKeyStorageKey = (proposalId: string): string =>
+  `ch.pendingApprovalKey.${proposalId}`;
 const cursorKey = (runId: string): string => `ch.cursor.${runId}`;
+/**
+ * Active statuses for discovery gating: compile-time anchored to the
+ * contracts `ActiveStatus` union (type-only import, so the browser bundle
+ * never pulls zod at runtime); membership matches contracts
+ * `isActiveStatus`. The server already validates discovery responses
+ * against `ActiveRunResponseSchema`, so this is a best-effort client gate.
+ */
+const ACTIVE_RUN_STATUSES: ReadonlySet<ActiveStatus> = new Set([
+  "queued",
+  "running",
+  "cancel_requested",
+]);
 
 /**
  * History DTO (exact contracts `HistoryItem`): `{ items, nextBefore,
- * hasMore }`; each item is a Turn plus its selected completed Run's durable
- * `RunResult` (V1 `{version,text}` / V2 `{version,text,answer}`) or null.
+ * hasMore }`. `user_text` carries the selected completed Run's durable
+ * `RunResult` or null; `action_approval` carries the ACTUAL owned Action
+ * execution/receipt projection independent of `turn_selections` (T1):
+ * completed runs carry their persisted ID-free result with the fresh rN
+ * citation, terminal non-completed runs carry `result: null` with the
+ * actual receipt, and active runs carry `receipt: null` with live
+ * statuses (frozen intent + progress, never a fake failure).
  */
 interface HistoryItemView {
   readonly turnId: string;
-  readonly text: string;
+  readonly kind?: string;
+  readonly text?: string;
   readonly selectedRun: {
     readonly runId: string;
+    readonly attempt?: number;
+    readonly runStatus?: string;
+    readonly finishedAt?: number | null;
     readonly result: unknown;
+    readonly receipt?: {
+      readonly outcome?: ReceiptOutcome;
+      readonly summary?: { readonly summary?: string };
+    } | null;
+    readonly executionStatus?: string | null;
   } | null;
+}
+
+/**
+ * C22 session-scoped proposal summary read from the ACTUAL
+ * `GET /api/sessions/:id/proposals` response (exact contracts
+ * `ProposalSummary`). Structural, immutable content plus mutable decision
+ * state; no provider ids ever appear here.
+ */
+interface ProposalSummaryView {
+  readonly proposalId: string;
+  readonly tool: string;
+  readonly input: { readonly start: string; readonly end: string };
+  readonly preview: { readonly summary: string };
+  readonly hash: string;
+  readonly status: ProposalStatus;
+  readonly createdAt: number;
+  readonly expiresAt: number;
+  readonly resolvedAt: number | null;
+}
+
+/** Exact `GET .../proposals/:id/execution` view (contracts). */
+interface ProposalExecutionView {
+  readonly proposalId: string;
+  readonly proposalStatus: ProposalStatus;
+  readonly runId: string | null;
+  readonly status: ExecutionStatus | null;
+  readonly markerCommitted: boolean;
+  readonly cancellable: boolean;
+  readonly errorCode: ActionErrorCode | null;
+  readonly receipt: {
+    readonly outcome: ReceiptOutcome;
+    readonly summary: { readonly summary: string };
+    readonly createdAt: number;
+  } | null;
+}
+
+/**
+ * One rendered approval card. The immutable `proposalHash` is captured once
+ * at build time and every control binds THAT hash — the card never
+ * re-derives the hash from any other source.
+ */
+interface ActionCard {
+  readonly proposalId: string;
+  readonly hash: string;
+  readonly node: HTMLElement;
+  readonly progress: HTMLElement;
+  readonly outcome: HTMLElement;
+  readonly approve: HTMLButtonElement;
+  readonly reject: HTMLButtonElement;
+  readonly stop: HTMLButtonElement;
+  runId: string | null;
+  /** Terminal execution observed: the card is final and stops polling. */
+  terminal: boolean;
+  /**
+   * C22 bounded pending expiry (local reconciliation only; the server stays
+   * authoritative): the server deadline bound at card build, the last-seen
+   * proposal status, the one-shot timer id (at most one per card), and
+   * whether a real decision POST is currently awaited.
+   */
+  deadline: number;
+  status: ProposalStatus;
+  timer: number | null;
+  deciding: boolean;
+}
+
+/**
+ * Action execution Stop state for ONE run, read from the ACTUAL
+ * `GET .../proposals/:id/execution` view (never localStorage, never a raw
+ * value). The generic composer consults this so a reloaded page never
+ * offers its ordinary Stop for an Action run that is already past the
+ * committed external-call marker (or terminal): only a live, pre-marker,
+ * cancellable Action execution keeps the composer Stop.
+ */
+interface ActionRunStopState {
+  readonly markerCommitted: boolean;
+  readonly cancellable: boolean;
+  readonly live: boolean;
+}
+
+/**
+ * Reload recovery descriptor (§16.7): the recovered run id/turn plus the
+ * discovered active status when known. `status` is `null` for an accepted
+ * idempotency replay (whose stored response carries no status) and a
+ * validated `ActiveStatus` for discovery; it only seeds the pre-subscription
+ * UI and never drives the reducer cursor or the stored resume hint.
+ */
+interface RecoveryDescriptor {
+  readonly runId: string;
+  readonly turnId: string | null;
+  readonly status: ActiveStatus | null;
 }
 
 function el(tag: string, text?: string): HTMLElement {
@@ -47,6 +185,24 @@ function el(tag: string, text?: string): HTMLElement {
 
 function loadText(value: unknown): string {
   return typeof value === "string" ? value : "";
+}
+
+/**
+ * T1 active-approval progress for history (no receipt yet): the actual
+ * live execution stage as frozen progress text, never a fake failure.
+ * Terminal/unknown stages render nothing here (the intent line already
+ * carries the terminal receipt outcome, or the frozen intent when the
+ * execution row itself is missing).
+ */
+function actionProgressText(executionStatus: string): string {
+  if (
+    executionStatus === "queued" ||
+    executionStatus === "preflight" ||
+    executionStatus === "executing"
+  ) {
+    return ACTION_PROGRESS_TEXT[executionStatus];
+  }
+  return "";
 }
 
 function readStoredCursor(runId: string): number | null {
@@ -106,6 +262,56 @@ async function postJson(
   });
 }
 
+/**
+ * Structural guard for one `ProposalSummary` read from the ACTUAL list API:
+ * every field the card binds must have its exact expected primitive type, so
+ * a malformed body renders nothing rather than a partial card.
+ */
+function isProposalSummary(value: unknown): value is ProposalSummaryView {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const item = value as {
+    proposalId?: unknown;
+    tool?: unknown;
+    input?: { start?: unknown; end?: unknown };
+    preview?: { summary?: unknown };
+    hash?: unknown;
+    status?: unknown;
+    createdAt?: unknown;
+    expiresAt?: unknown;
+    resolvedAt?: unknown;
+  };
+  return (
+    typeof item.proposalId === "string" &&
+    item.tool === "calendar.reschedule" &&
+    typeof item.input?.start === "string" &&
+    typeof item.input?.end === "string" &&
+    typeof item.preview?.summary === "string" &&
+    typeof item.hash === "string" &&
+    (item.status === "pending" ||
+      item.status === "approved" ||
+      item.status === "rejected" ||
+      item.status === "expired") &&
+    typeof item.createdAt === "number" &&
+    typeof item.expiresAt === "number" &&
+    (item.resolvedAt === null || typeof item.resolvedAt === "number")
+  );
+}
+
+/** Plain-text local timestamp for the deadline line (no technical ids). */
+function formatInstant(ms: number): string {
+  const date = new Date(ms);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  const pad = (value: number): string => String(value).padStart(2, "0");
+  return (
+    `${date.getFullYear()}/${pad(date.getMonth() + 1)}/${pad(date.getDate())} ` +
+    `${pad(date.getHours())}:${pad(date.getMinutes())}`
+  );
+}
+
 class ConversationApp {
   private sessionId: string | null = null;
   private activeRunId: string | null = null;
@@ -144,6 +350,14 @@ class ConversationApp {
   private sending = false;
   /** Run -> Turn ownership for failure-only retry (§16.6 exact). */
   private readonly runTurns = new Map<string, string>();
+  /**
+   * Turn -> history `kind` (`user_text` / `action_approval` /
+   * `action_rejection`), hydrated from the ACTUAL history projection.
+   * The failure-only retry control is offered only for `user_text` Turns
+   * (§18.4/§18.6): decision Turns never re-execute through the generic
+   * retry, so their failed/abandoned Action runs render no retry control.
+   */
+  private readonly turnKinds = new Map<string, string>();
   private sse: EventSource | null = null;
   private fallbackTimer: number | null = null;
 
@@ -188,9 +402,54 @@ class ConversationApp {
         this.closeDrawer();
       }
     });
+    // Tab-resume reconciliation (local only, no polling/provider calls): a
+    // hidden page whose timers were throttled retires locally expired
+    // pending cards the moment it becomes visible again.
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") {
+        this.reconcilePendingExpiry();
+      }
+    });
     await this.ensureSession();
-    await this.recoverPending();
+    let descriptor = await this.recoverPending();
+    if (descriptor === null) {
+      descriptor = await this.discoverActiveRun();
+    }
+    // Mark the recovered run active and render the busy composer BEFORE the
+    // final history hydration: a held/slow hydration must never expose an
+    // enabled Send for a genuinely active Run (§16.3/§16.7). A discovered
+    // non-terminal `cancel_requested` status also seeds its「停止しました」
+    // notice here (reducer cursor 0, never the discovery `eventSeq`). The
+    // actual SSE subscription stays deferred until after hydration so the
+    // durable history (and its terminal dedup anchor) is registered first.
+    if (descriptor !== null) {
+      this.activeRunId = descriptor.runId;
+      this.activeTurnId = descriptor.turnId;
+      if (descriptor.turnId !== null) {
+        this.runTurns.set(descriptor.runId, descriptor.turnId);
+      }
+      this.seedActiveView(descriptor.runId, descriptor.status);
+      // A reload can adopt an m5-action Run as the generic active run. Read
+      // its ACTUAL execution marker/cancellability BEFORE the first composer
+      // paint so a post-marker (or terminal) Action never offers Stop.
+      await this.refreshActionRunStops();
+      this.renderComposer();
+    }
+    // One final hydration owned by boot: durable history renders first so a
+    // completed selected Run is registered in renderedAnswers BEFORE any
+    // subscription replays its terminal — a captured-active reload that
+    // races completion can never append a second answer.
     await this.hydrateHistory();
+    // C22: read the actual pending proposals/executions after the durable
+    // history so a reload restores a still-pending approval card (and its
+    // real progress/receipt) without ever persisting proposal content.
+    this.scheduleActionSync();
+    // The captured run id is subscribed exactly once, even when the run has
+    // already completed meanwhile: the durable event backlog renders or
+    // dedups, and the terminal view releases the composer normally.
+    if (descriptor !== null) {
+      this.subscribe(descriptor.runId);
+    }
     this.renderComposer();
   }
 
@@ -251,12 +510,14 @@ class ConversationApp {
 
   /**
    * Reload recovery without stored bodies (§16.7 exact): only the pending
-   * key was kept. Accepted keys replay status/body + refresh history;
-   * unknown keys show a fixed resend-required prompt (never recreated).
+   * key was kept. Accepted keys are cleared here and produce a run/turn
+   * descriptor for the caller (boot owns exactly one history hydration and
+   * one subscription); unknown keys show a fixed resend-required prompt
+   * (never recreated). Retention on transient failures keeps the key.
    */
-  private async recoverPending(): Promise<void> {
+  private async recoverPending(): Promise<RecoveryDescriptor | null> {
     if (this.sessionId === null) {
-      return;
+      return null;
     }
     let key: string | null = null;
     try {
@@ -265,7 +526,7 @@ class ConversationApp {
       key = null;
     }
     if (key === null || key.length === 0) {
-      return;
+      return null;
     }
     const scope = `session:${this.sessionId}:message`;
     let lookup: { status: number; body: unknown };
@@ -276,7 +537,7 @@ class ConversationApp {
     } catch {
       // Transient network failure: retain the pending key for a later retry.
       this.showNotice("送信できませんでした。もう一度お試しください");
-      return;
+      return null;
     }
     // Transient server states retain the pending key for same-key replay.
     if (
@@ -285,7 +546,7 @@ class ConversationApp {
       lookup.status >= 500
     ) {
       this.showNotice("送信できませんでした。もう一度お試しください");
-      return;
+      return null;
     }
     const body = lookup.body as {
       found?: unknown;
@@ -293,7 +554,6 @@ class ConversationApp {
     };
     if (lookup.status === 200 && body.found === true) {
       this.clearPendingKey();
-      await this.hydrateHistory();
       // Exact contracts `PostMessageResponse`: `{ turnId, run: { id } }`.
       const storedRun = body.body?.run;
       const runId =
@@ -303,15 +563,91 @@ class ConversationApp {
       const turnId =
         typeof body.body?.turnId === "string" ? body.body.turnId : null;
       if (typeof runId === "string") {
-        if (turnId !== null) {
-          this.runTurns.set(runId, turnId);
-        }
-        this.subscribe(runId);
+        // The stored idempotency response carries no status; the accepted
+        // run is seeded only by live events/status after subscription.
+        return { runId, turnId, status: null };
       }
-      return;
+      return null;
     }
     this.clearPendingKey();
     this.showNotice("送信を再入力してください");
+    return null;
+  }
+
+  /**
+   * Active-run discovery for the accepted-202 reload (§16.7): the minimal
+   * additive `GET /api/sessions/:sessionId/active-run` read. A discovered
+   * active run yields a `{runId, turnId}` descriptor the caller maps and
+   * subscribes exactly once, even if the run completed meanwhile (durable
+   * history plus the existing status/events/SSE pipeline cover the
+   * terminal). A 404 session or a known session without an active run
+   * (200 `{run:null}`) yields none. The stream cursor is never initialized
+   * from the discovery `eventSeq`: the stored per-run cursor stays the
+   * resume authority.
+   */
+  private async discoverActiveRun(): Promise<RecoveryDescriptor | null> {
+    if (this.sessionId === null) {
+      return null;
+    }
+    let discovered: { status: number; body: unknown };
+    try {
+      discovered = await fetchJson(
+        `/api/sessions/${encodeURIComponent(this.sessionId)}/active-run`,
+      );
+    } catch {
+      return null;
+    }
+    if (discovered.status !== 200) {
+      return null;
+    }
+    const run = (discovered.body as { run?: unknown }).run;
+    const status =
+      typeof run === "object" && run !== null
+        ? (run as { status?: unknown }).status
+        : null;
+    const runId =
+      typeof run === "object" && run !== null
+        ? (run as { id?: unknown }).id
+        : null;
+    const turnId =
+      typeof run === "object" && run !== null
+        ? (run as { turnId?: unknown }).turnId
+        : null;
+    if (
+      typeof runId !== "string" ||
+      typeof status !== "string" ||
+      !ACTIVE_RUN_STATUSES.has(status as ActiveStatus)
+    ) {
+      return null;
+    }
+    return {
+      runId,
+      turnId: typeof turnId === "string" ? turnId : null,
+      status: status as ActiveStatus,
+    };
+  }
+
+  /**
+   * Seed a pre-subscription view for a discovered active Run (§16.7): a
+   * non-terminal `cancel_requested` Run must already render its
+   * 「停止しました」notice — Send disabled, Stop visible, input enabled —
+   * before the stream opens. The reducer cursor stays 0: the discovery
+   * `eventSeq` is never applied as a fabricated event and the stored resume
+   * cursor is never advanced from the snapshot. The real events/catch-up/
+   * status pipeline remains the authoritative terminal, and `subscribe`
+   * preserves this seeded view (`runViews` already holds the run).
+   * Unknown/optional statuses seed nothing.
+   */
+  private seedActiveView(runId: string, status: ActiveStatus | null): void {
+    if (status !== "cancel_requested") {
+      return;
+    }
+    const seeded: RunViewState = {
+      ...INITIAL_RUN_VIEW,
+      notice: "停止しました",
+    };
+    this.runViews.set(runId, seeded);
+    this.showNotice(seeded.notice);
   }
 
   /**
@@ -324,6 +660,23 @@ class ConversationApp {
   private oldestBefore: number | null = null;
   private historyHasMore = false;
   private loadingOlder = false;
+
+  /**
+   * Record the ACTUAL history `kind` for a Turn so the failure-only retry
+   * gate can tell a `user_text` Turn from an M5 decision Turn (§18.4).
+   * The gate itself fails closed: only a recorded `user_text` kind ever
+   * enables the control.
+   */
+  private trackTurnKind(item: HistoryItemView): void {
+    if (
+      typeof item.turnId === "string" &&
+      item.turnId.length > 0 &&
+      typeof item.kind === "string" &&
+      item.kind.length > 0
+    ) {
+      this.turnKinds.set(item.turnId, item.kind);
+    }
+  }
 
   private async hydrateHistory(): Promise<void> {
     if (this.sessionId === null) {
@@ -373,10 +726,20 @@ class ConversationApp {
     for (let index = pages.length - 1; index >= 0; index -= 1) {
       const items = (pages[index] ?? []) as HistoryItemView[];
       for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
-        this.renderTurn(items[itemIndex] as HistoryItemView);
+        const item = items[itemIndex] as HistoryItemView;
+        this.trackTurnKind(item);
+        this.renderTurn(item);
       }
     }
     this.renderOlderButton();
+    // Action cards are live DOM nodes owned by THIS client, and the history
+    // rebuild above replaces the whole list. Re-attach every still-live card
+    // (appendChild MOVES the node, so its rendered state — including a
+    // terminal receipt — survives). Without this a card rendered after the
+    // rebuild would be invisible while still present in actionCards.
+    for (const card of this.actionCards.values()) {
+      this.list.appendChild(card.node);
+    }
   }
 
   /**
@@ -432,7 +795,9 @@ class ConversationApp {
       for (let index = pages.length - 1; index >= 0; index -= 1) {
         const items = (pages[index] ?? []) as HistoryItemView[];
         for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
-          const node = this.buildTurn(items[itemIndex] as HistoryItemView);
+          const item = items[itemIndex] as HistoryItemView;
+          this.trackTurnKind(item);
+          const node = this.buildTurn(item);
           this.list.insertBefore(node, anchor);
         }
       }
@@ -460,15 +825,1186 @@ class ConversationApp {
     this.list.prepend(button);
   }
 
+  /* ---------------------------------------------------------------- */
+  /* C22 actual approval UX: proposals, execution status, receipts      */
+  /* ---------------------------------------------------------------- */
+
+  private readonly actionCards = new Map<string, ActionCard>();
+  private actionSync: Promise<void> | null = null;
+  /**
+   * Actual Action execution Stop state by run id (`GET .../execution`
+   * reads only). Lets the generic composer hide/disable its Stop for a
+   * post-marker or terminal Action run adopted on reload, while an
+   * ordinary Run (no entry here) keeps the unchanged Stop behaviour.
+   */
+  private readonly actionRunStops = new Map<string, ActionRunStopState>();
+  private static readonly ACTION_POLL_INTERVAL_MS = 1000;
+  /** Bounded execution watch (proposal TTL is exactly 15 minutes). */
+  private static readonly ACTION_POLL_MAX_TICKS = 16 * 60;
+
+  /**
+   * Serialized action sync (§18.4 reads): exactly one proposals +
+   * execution/receipt refresh at a time, so a card is never rendered from a
+   * half-updated read. Called after boot hydration, after a decision, and
+   * after a run terminal.
+   */
+  private scheduleActionSync(): void {
+    if (this.actionSync !== null) {
+      return;
+    }
+    const run = this.syncActions().finally(() => {
+      this.actionSync = null;
+    });
+    this.actionSync = run.catch(() => {});
+  }
+
+  /**
+   * Read the ACTUAL session proposals and each approved proposal's actual
+   * execution status + receipt. A pending, unexpired proposal renders one
+   * approval card; a decided/expired one renders no card (its deterministic
+   * intent and receipt come from the history projection).
+   */
+  private async syncActions(): Promise<void> {
+    if (this.sessionId === null) {
+      return;
+    }
+    const sessionId = this.sessionId;
+    let listed: { status: number; body: unknown };
+    try {
+      listed = await fetchJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/proposals`,
+      );
+    } catch {
+      return;
+    }
+    if (listed.status !== 200 || this.sessionId !== sessionId) {
+      return;
+    }
+    const proposals = (listed.body as { proposals?: unknown }).proposals;
+    if (!Array.isArray(proposals)) {
+      return;
+    }
+    const now = Date.now();
+    const summaries = proposals.filter((item): item is ProposalSummaryView =>
+      isProposalSummary(item),
+    );
+    // Drop cards whose proposal is no longer actionable/visible — but never
+    // a card that left the pending state locally: an accepted card, a live
+    // execution (queued/preflight/executing), a terminal receipt, or a
+    // decision currently awaited from the real POST owns its lifecycle and
+    // must survive a stale pending list.
+    const liveIds = new Set(summaries.map((item) => item.proposalId));
+    for (const proposalId of [...this.actionCards.keys()]) {
+      if (!liveIds.has(proposalId)) {
+        const card = this.actionCards.get(proposalId);
+        if (
+          card !== undefined &&
+          (card.terminal || card.runId !== null || card.deciding)
+        ) {
+          continue;
+        }
+        this.removeActionCard(proposalId);
+      }
+    }
+    for (const summary of summaries) {
+      if (summary.status === "pending") {
+        if (summary.expiresAt <= now) {
+          // Locally expired pending: retire the still-pending card without
+          // touching any decision-in-flight/execution/receipt card.
+          const card = this.actionCards.get(summary.proposalId);
+          if (
+            card !== undefined &&
+            !card.terminal &&
+            card.runId === null &&
+            !card.deciding
+          ) {
+            this.removeActionCard(summary.proposalId);
+          }
+          continue;
+        }
+        const card = this.actionCards.get(summary.proposalId);
+        if (
+          card !== undefined &&
+          (card.terminal ||
+            card.runId !== null ||
+            card.deciding ||
+            card.status !== "pending")
+        ) {
+          // Decision in flight (or already accepted): a stale pending list
+          // must not downgrade the card back to an actionable pending card.
+          // The status check keeps an authoritative approved card lacking a
+          // runId (lost-approve ownership) actionable-proof.
+          continue;
+        }
+        this.ensureActionCard(summary);
+      }
+    }
+    // Execution + receipt reads for every decided proposal. History
+    // hydration is batched exactly once per sync: N historic
+    // rejected/expired proposals must not multiply the full history GET.
+    let needHistory = false;
+    for (const summary of summaries) {
+      if (summary.status === "pending") {
+        continue;
+      }
+      if (await this.syncExecution(summary)) {
+        needHistory = true;
+      }
+    }
+    if (needHistory) {
+      await this.hydrateHistory();
+    }
+  }
+
+  /**
+   * Read the ACTUAL execution status + receipt and update/retire a card.
+   * Returns true when the caller owns the single batched history hydration
+   * for this sync (retired rejection/expiry or a newly terminal receipt);
+   * never hydrates directly so historic rejections cannot multiply GETs.
+   */
+  private async syncExecution(summary: ProposalSummaryView): Promise<boolean> {
+    if (this.sessionId === null) {
+      return false;
+    }
+    // Authoritative non-pending ownership BEFORE the execution GET: a
+    // server-decided summary owns the local card even when the execution
+    // read below fails (lost approve/reject delivery). A rejected/expired
+    // summary retires on the real list state; an approved one becomes
+    // execution-owned with disabled decisions while preserving any known
+    // run. Read-only, bounded (existing watch/sync recover; no new poll).
+    // The watch is started only AFTER the current execution GET below, so
+    // this call never runs two concurrent execution reads for one proposal.
+    const owned = this.actionCards.get(summary.proposalId);
+    let claimedApproved = false;
+    if (
+      owned !== undefined &&
+      !owned.terminal &&
+      summary.status !== "pending" &&
+      owned.status === "pending" &&
+      owned.runId === null
+    ) {
+      owned.status = summary.status;
+      owned.deciding = false;
+      this.clearPendingExpiry(owned);
+      if (summary.status === "rejected" || summary.status === "expired") {
+        this.clearApproveKey(summary.proposalId);
+        this.removeActionCard(summary.proposalId);
+        return true;
+      }
+      this.renderActionCard(
+        owned,
+        summary,
+        null,
+        this.cardModel(summary, null),
+        "",
+      );
+      claimedApproved = true;
+    }
+    let fetched: { status: number; body: unknown };
+    try {
+      fetched = await fetchJson(
+        `/api/sessions/${encodeURIComponent(this.sessionId)}/proposals/${encodeURIComponent(summary.proposalId)}/execution`,
+      );
+    } catch {
+      if (claimedApproved) {
+        void this.watchAction(summary.proposalId, summary);
+      }
+      return false;
+    }
+    if (fetched.status !== 200) {
+      if (claimedApproved) {
+        void this.watchAction(summary.proposalId, summary);
+      }
+      return false;
+    }
+    const view = fetched.body as ProposalExecutionView;
+    if (typeof view.proposalId !== "string") {
+      return false;
+    }
+    // A terminal receipt already rendered wins over any delayed live
+    // response: a stale live read must never overwrite the receipt or
+    // re-offer Stop ownership.
+    const preCard = this.actionCards.get(view.proposalId);
+    if (preCard?.terminal) {
+      return false;
+    }
+    // Every execution read refreshes the composer Stop routing for the
+    // owning run, so a marker that commits while the page lives hides the
+    // generic Stop without a reload.
+    this.trackActionExecutionView(view);
+    // The execution read is the AUTHORITATIVE proposal state: a watch started
+    // from the pre-approval (still `pending`) summary must never keep
+    // rendering a decided/executed proposal as an actionable pending card.
+    const actual: ProposalSummaryView =
+      typeof view.proposalStatus === "string"
+        ? { ...summary, status: view.proposalStatus }
+        : summary;
+    const terminal =
+      view.receipt !== null && view.receipt !== undefined
+        ? true
+        : view.status !== null &&
+          view.status !== "queued" &&
+          view.status !== "preflight" &&
+          view.status !== "executing";
+    const card = this.actionCards.get(view.proposalId);
+    if (actual.status === "rejected" || actual.status === "expired") {
+      // Decided without an execution (rejection/expiry): the card retires
+      // on the REAL summary and the deterministic history intent carries
+      // the lifecycle. Approved/history receipts keep their own path below.
+      // Historic rejections with no local card report no history need, so a
+      // sync over N historic rejections hydrates at most once.
+      this.clearApproveKey(view.proposalId);
+      if (card !== undefined) {
+        card.deciding = false;
+        this.removeActionCard(view.proposalId);
+        return true;
+      }
+      return false;
+    }
+    if (terminal && view.status !== null) {
+      // Terminal: the REAL receipt (or the real fixed failure text) is
+      // rendered ON the card the user was already looking at — the approval
+      // card is never retired before the outcome is shown, so a succeeded
+      // execution always ends on a visible verified receipt and every other
+      // terminal on its real failure text. The deterministic decision intent
+      // and the fresh result citation additionally come from the history
+      // projection. No card (e.g. after a reload): nothing to render, but the
+      // single batched history refresh still lands the receipt/citation.
+      this.clearApproveKey(view.proposalId);
+      if (card !== undefined) {
+        card.runId = view.runId ?? card.runId;
+        card.terminal = true;
+        card.deciding = false;
+        card.status = actual.status;
+        this.clearPendingExpiry(card);
+        this.renderActionCard(
+          card,
+          actual,
+          view,
+          this.cardModel(actual, view),
+          actionErrorCodeText(view.errorCode ?? null),
+        );
+      }
+      return true;
+    }
+    if (card === undefined) {
+      return false;
+    }
+    card.runId = view.runId ?? card.runId;
+    card.deciding = false;
+    card.status = actual.status;
+    if (view.runId !== null || view.status !== null) {
+      // Execution-owned from here on: no pending timer may retire it, and a
+      // stale pending list must not downgrade it back to actionable.
+      this.clearPendingExpiry(card);
+    }
+    this.renderActionCard(
+      card,
+      actual,
+      view,
+      this.cardModel(actual, view),
+      actionErrorCodeText(view.errorCode ?? null),
+    );
+    if (
+      view.status !== null &&
+      (view.status === "queued" ||
+        view.status === "preflight" ||
+        view.status === "executing")
+    ) {
+      this.watchAction(view.proposalId, summary);
+    }
+    return false;
+  }
+
+  /**
+   * Record the ACTUAL execution Stop state for the owning run (read-only,
+   * no DOM). The generic composer Stop consults this entry: a live,
+   * pre-marker, cancellable Action execution keeps the composer Stop, while
+   * a committed marker, a refused cancellability, or a terminal execution
+   * hides/disables it. Runs without an entry are ordinary Runs with the
+   * unchanged Stop behaviour.
+   */
+  private trackActionExecutionView(view: ProposalExecutionView): void {
+    if (view.runId === null) {
+      return;
+    }
+    const live =
+      view.status === "queued" ||
+      view.status === "preflight" ||
+      view.status === "executing";
+    this.actionRunStops.set(view.runId, {
+      markerCommitted: view.markerCommitted === true,
+      cancellable: view.cancellable === true,
+      live,
+    });
+    this.renderComposer();
+  }
+
+  /**
+   * Read-only refresh of every decided proposal's ACTUAL execution Stop
+   * state through the existing proposals/execution APIs (no DOM, no card
+   * side effects). Boot awaits this before the first composer paint so a
+   * reloaded post-marker Action cannot offer Stop even briefly.
+   */
+  private async refreshActionRunStops(): Promise<void> {
+    if (this.sessionId === null) {
+      return;
+    }
+    const sessionId = this.sessionId;
+    let listed: { status: number; body: unknown };
+    try {
+      listed = await fetchJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/proposals`,
+      );
+    } catch {
+      return;
+    }
+    if (listed.status !== 200 || this.sessionId !== sessionId) {
+      return;
+    }
+    const proposals = (listed.body as { proposals?: unknown }).proposals;
+    if (!Array.isArray(proposals)) {
+      return;
+    }
+    for (const item of proposals) {
+      if (!isProposalSummary(item) || item.status === "pending") {
+        continue;
+      }
+      let fetched: { status: number; body: unknown };
+      try {
+        fetched = await fetchJson(
+          `/api/sessions/${encodeURIComponent(sessionId)}/proposals/${encodeURIComponent(item.proposalId)}/execution`,
+        );
+      } catch {
+        continue;
+      }
+      if (fetched.status !== 200 || this.sessionId !== sessionId) {
+        continue;
+      }
+      const view = fetched.body as ProposalExecutionView;
+      if (typeof view.proposalId !== "string") {
+        continue;
+      }
+      this.trackActionExecutionView(view);
+    }
+  }
+
+  /**
+   * True when the run is a KNOWN Action execution whose generic composer
+   * Stop must stay hidden/disabled (committed marker, refused
+   * cancellability, or terminal execution). Unknown runs (ordinary Runs,
+   * or an Action not yet read) are never blocked here.
+   */
+  private isActionStopBlocked(runId: string): boolean {
+    const state = this.actionRunStops.get(runId);
+    if (state === undefined) {
+      return false;
+    }
+    return !state.live || state.markerCommitted || !state.cancellable;
+  }
+
+  /** Pure card model for the actual API reads plus the client clock. */
+  private cardModel(
+    summary: ProposalSummaryView,
+    view: ProposalExecutionView | null,
+  ): ActionCardModel {
+    return actionCardModel({
+      status: summary.status,
+      preview: summary.preview.summary,
+      start: summary.input.start,
+      end: summary.input.end,
+      expiresAt: summary.expiresAt,
+      now: Date.now(),
+      executionStatus: view?.status ?? null,
+      markerCommitted: view?.markerCommitted ?? false,
+      cancellable: view?.cancellable ?? false,
+      receiptOutcome: view?.receipt?.outcome ?? null,
+      receiptSummary: view?.receipt?.summary.summary ?? null,
+    });
+  }
+
+  /**
+   * Build (once) the approval card for a pending, unexpired proposal. Every
+   * string is set with `textContent` (escaped plain text, never HTML) and
+   * carries NO technical id: preview, target event, start/end, and the
+   * server deadline only.
+   *
+   * Each pending card owns at most ONE one-shot expiry timer bound to the
+   * exact (proposalId, hash, deadline, status) identity captured here. The
+   * timer only ever retires a still-pending local card; an accepted card, a
+   * live execution, a terminal receipt, or an awaited decision is never
+   * removed by an old timer.
+   */
+  private ensureActionCard(summary: ProposalSummaryView): void {
+    const existing = this.actionCards.get(summary.proposalId);
+    if (existing !== undefined) {
+      if (
+        existing.terminal ||
+        existing.runId !== null ||
+        existing.deciding ||
+        existing.status !== "pending" ||
+        existing.hash !== summary.hash
+      ) {
+        return;
+      }
+      existing.deadline = summary.expiresAt;
+      existing.status = summary.status;
+      this.renderActionCard(
+        existing,
+        summary,
+        null,
+        this.cardModel(summary, null),
+        "",
+      );
+      this.schedulePendingExpiry(existing);
+      return;
+    }
+    const node = el("section");
+    node.id = `action-card-${summary.proposalId}`;
+    node.setAttribute("data-action-card", "true");
+    node.setAttribute("data-action-tool", summary.tool);
+    node.appendChild(el("h3", "日程変更の確認"));
+    const preview = el("p", summary.preview.summary);
+    preview.setAttribute("data-action-preview", "true");
+    node.appendChild(preview);
+    const startLine = el("p", `開始: ${summary.input.start}`);
+    startLine.setAttribute("data-action-start", "true");
+    node.appendChild(startLine);
+    const endLine = el("p", `終了: ${summary.input.end}`);
+    endLine.setAttribute("data-action-end", "true");
+    node.appendChild(endLine);
+    const deadline = el("p", `確認期限: ${formatInstant(summary.expiresAt)}`);
+    deadline.setAttribute("data-action-deadline", "true");
+    node.appendChild(deadline);
+    const progress = el("p");
+    progress.setAttribute("data-action-progress", "true");
+    node.appendChild(progress);
+    const outcome = el("p");
+    outcome.setAttribute("data-action-outcome", "true");
+    node.appendChild(outcome);
+    const approve = document.createElement("button");
+    approve.textContent = "承認";
+    approve.type = "button";
+    approve.id = "action-approve";
+    approve.setAttribute("data-action-approve", "true");
+    node.appendChild(approve);
+    const reject = document.createElement("button");
+    reject.textContent = "却下";
+    reject.type = "button";
+    reject.id = "action-reject";
+    reject.setAttribute("data-action-reject", "true");
+    node.appendChild(reject);
+    const stop = document.createElement("button");
+    stop.textContent = "中断";
+    stop.type = "button";
+    stop.hidden = true;
+    stop.setAttribute("data-action-stop", "true");
+    node.appendChild(stop);
+    const card: ActionCard = {
+      proposalId: summary.proposalId,
+      hash: summary.hash,
+      node,
+      progress,
+      outcome,
+      approve,
+      reject,
+      stop,
+      runId: null,
+      terminal: false,
+      deadline: summary.expiresAt,
+      status: summary.status,
+      timer: null,
+      deciding: false,
+    };
+    approve.addEventListener("click", () => {
+      void this.approve(card);
+    });
+    reject.addEventListener("click", () => {
+      void this.reject(card);
+    });
+    stop.addEventListener("click", () => {
+      void this.stopAction(card);
+    });
+    this.actionCards.set(summary.proposalId, card);
+    this.list.appendChild(node);
+    this.renderActionCard(
+      card,
+      summary,
+      null,
+      this.cardModel(summary, null),
+      "",
+    );
+    this.schedulePendingExpiry(card);
+  }
+
+  /** Upper bound for one pending-expiry timer (the exact proposal TTL). */
+  private static readonly PENDING_EXPIRY_MAX_MS = 15 * 60 * 1000;
+
+  /**
+   * (Re)arm the card's single one-shot pending-expiry timer. Clears any
+   * previous timer first, so at most one timer exists per card. The callback
+   * captures the exact identity and re-checks it on fire: a card that has
+   * since been accepted, started executing, reached terminal, begun awaiting
+   * a real decision, or been rebuilt for another hash/deadline is never
+   * retired by this stale timer. Local reconciliation only — the server
+   * remains the decision authority (approve/reject re-read before POST).
+   */
+  private schedulePendingExpiry(card: ActionCard): void {
+    this.clearPendingExpiry(card);
+    if (card.status !== "pending" || card.terminal || card.runId !== null) {
+      return;
+    }
+    const proposalId = card.proposalId;
+    const hash = card.hash;
+    const deadline = card.deadline;
+    const status = card.status;
+    const delay = Math.min(
+      Math.max(deadline - Date.now(), 0),
+      ConversationApp.PENDING_EXPIRY_MAX_MS,
+    );
+    card.timer = window.setTimeout(() => {
+      const current = this.actionCards.get(proposalId);
+      if (current === undefined || current !== card) {
+        return;
+      }
+      if (
+        current.hash !== hash ||
+        current.deadline !== deadline ||
+        current.status !== status
+      ) {
+        return;
+      }
+      // Never retire a card that left the local pending state: accepted,
+      // live execution, terminal receipt, or an awaited real decision.
+      if (
+        current.terminal ||
+        current.runId !== null ||
+        current.deciding ||
+        current.status !== "pending"
+      ) {
+        return;
+      }
+      if (Date.now() < current.deadline) {
+        // Capped one-shot fired while the server deadline is still in the
+        // future (client wall clock behind the server, or rolled back after
+        // arming): re-arm the single bounded timer for the remainder instead
+        // of consuming it forever. One timer per card is preserved.
+        this.schedulePendingExpiry(current);
+        return;
+      }
+      this.removeActionCard(proposalId);
+    }, delay);
+  }
+
+  private clearPendingExpiry(card: ActionCard): void {
+    if (card.timer !== null) {
+      window.clearTimeout(card.timer);
+      card.timer = null;
+    }
+  }
+
+  /**
+   * Local tab-resume reconciliation (no network, no polling, no provider
+   * calls): when the page becomes visible again, retire every still-pending
+   * local card whose server deadline has passed. Execution/receipt/awaited
+   * cards are untouched; the server stays authoritative on next sync.
+   */
+  private reconcilePendingExpiry(): void {
+    const now = Date.now();
+    for (const card of [...this.actionCards.values()]) {
+      if (
+        card.terminal ||
+        card.runId !== null ||
+        card.deciding ||
+        card.status !== "pending"
+      ) {
+        continue;
+      }
+      if (now >= card.deadline) {
+        this.removeActionCard(card.proposalId);
+      }
+    }
+  }
+
+  /** Apply the pure model to the live card nodes (no HTML, text only). */
+  private renderActionCard(
+    card: ActionCard,
+    summary: ProposalSummaryView,
+    view: ProposalExecutionView | null,
+    model: ActionCardModel,
+    errorText: string,
+  ): void {
+    card.node.setAttribute(
+      "data-action-state",
+      model.expired
+        ? "expired"
+        : summary.status === "pending"
+          ? "pending"
+          : (view?.status ?? summary.status),
+    );
+    card.progress.textContent = model.progressText;
+    const outcomeText =
+      model.outcomeText !== "" ? model.outcomeText : errorText;
+    card.outcome.textContent = outcomeText;
+    card.approve.hidden = !model.decisionVisible;
+    card.reject.hidden = !model.decisionVisible;
+    card.approve.disabled = !model.decisionVisible;
+    card.reject.disabled = !model.decisionVisible;
+    // Contextual Stop: only a live execution BEFORE the committed external
+    // marker. After the marker (or terminal) it is hidden and disabled — the
+    // write can no longer be safely cancelled.
+    card.stop.hidden = !model.stopVisible;
+    card.stop.disabled = !model.stopVisible;
+    card.node.setAttribute(
+      "data-action-marker",
+      view?.markerCommitted === true ? "committed" : "uncommitted",
+    );
+  }
+
+  private removeActionCard(proposalId: string): void {
+    const card = this.actionCards.get(proposalId);
+    if (card === undefined) {
+      return;
+    }
+    this.clearPendingExpiry(card);
+    card.node.remove();
+    this.actionCards.delete(proposalId);
+  }
+
+  /**
+   * Approve: binds the card's IMMUTABLE `proposalHash`, sends a body of
+   * exactly `{ proposalHash }`, and carries a STABLE Idempotency-Key (kept
+   * as technical metadata only) so a retry after a reload replays the same
+   * request instead of approving twice.
+   *
+   * Before the POST the ACTUAL server repository state is re-read: a
+   * proposal that is no longer `pending`/`unexpired` is never executed from
+   * a stale card.
+   */
+  private async approve(card: ActionCard): Promise<void> {
+    if (
+      this.sessionId === null ||
+      card.approve.disabled ||
+      card.deciding ||
+      card.terminal
+    ) {
+      return;
+    }
+    // Local deadline precheck (server re-read below stays authoritative): a
+    // locally expired pending card is never executed from a stale click.
+    if (card.status !== "pending" || Date.now() >= card.deadline) {
+      this.showNotice("この変更は承認できません。内容を確認してください");
+      this.removeActionCard(card.proposalId);
+      this.scheduleActionSync();
+      return;
+    }
+    const sessionId = this.sessionId;
+    let current: ProposalSummaryView | null = null;
+    try {
+      const listed = await fetchJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/proposals`,
+      );
+      const items = (listed.body as { proposals?: unknown }).proposals;
+      if (listed.status === 200 && Array.isArray(items)) {
+        current =
+          (items as unknown[]).find(
+            (item): item is ProposalSummaryView =>
+              isProposalSummary(item) && item.proposalId === card.proposalId,
+          ) ?? null;
+      }
+    } catch {
+      current = null;
+    }
+    if (
+      current === null ||
+      current.status !== "pending" ||
+      current.hash !== card.hash ||
+      current.expiresAt <= Date.now()
+    ) {
+      this.showNotice("この変更は承認できません。内容を確認してください");
+      this.removeActionCard(card.proposalId);
+      this.scheduleActionSync();
+      return;
+    }
+    const key = this.approveKey(card.proposalId);
+    card.deciding = true;
+    card.approve.disabled = true;
+    card.reject.disabled = true;
+    let posted: { status: number; body: unknown };
+    try {
+      posted = await postJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/proposals/${encodeURIComponent(card.proposalId)}/approve`,
+        { proposalHash: card.hash },
+        key,
+      );
+    } catch {
+      // Transport failure AFTER a possibly-committed server decision: the
+      // approval may already be durable server-side (lost response). Hold
+      // decision ownership across ONE authoritative re-read instead of
+      // relying on the deduped background sync: that sync can be dropped
+      // while an older sync is still in flight with a stale pending view,
+      // which would leave a server-approved card on its live pending-expiry
+      // timer until the timer retires it.
+      this.showNotice("承認できませんでした。もう一度お試しください");
+      await this.reconcileLostApprove(card);
+      return;
+    }
+    if (posted.status === 202) {
+      // Accepted: the key has served its purpose (the decision is durable).
+      // The card is now execution-owned: the old pending timer must never
+      // retire it, and a stale pending list must not downgrade it.
+      this.clearPendingExpiry(card);
+      card.deciding = false;
+      this.clearApproveKey(card.proposalId);
+      const body = posted.body as { runId?: unknown };
+      if (typeof body.runId === "string") {
+        card.runId = body.runId;
+      }
+      this.showNotice("承認しました");
+      void this.watchAction(card.proposalId, current);
+      return;
+    }
+    // Definitive 4xx (state conflict / disabled / hash mismatch): drop the
+    // key and re-read the real state; nothing was executed.
+    if (posted.status === 409) {
+      card.deciding = false;
+      this.clearApproveKey(card.proposalId);
+      this.showNotice("この変更は承認できません。内容を確認してください");
+      await this.hydrateHistory();
+      this.scheduleActionSync();
+      return;
+    }
+    card.deciding = false;
+    this.showNotice("承認できませんでした。もう一度お試しください");
+    this.scheduleActionSync();
+  }
+
+  /**
+   * Authoritative lost-approve reconciliation (approve POST transport
+   * failure with an unknown server outcome). Decision ownership
+   * (`deciding`) is held across the single proposals re-read, so the
+   * bounded pending-expiry timer and any stale pending list can neither
+   * retire nor downgrade the card while the server truth settles. A
+   * server-approved summary takes approved ownership immediately (timer
+   * cleared, decisions disabled, execution watch started — the same
+   * transition as the sync-path ownership block); a still-pending summary
+   * releases ownership with controls re-rendered and the bounded timer
+   * re-armed; an unreadable list releases ownership and falls back to the
+   * normal sync path.
+   */
+  private async reconcileLostApprove(card: ActionCard): Promise<void> {
+    if (this.actionCards.get(card.proposalId) !== card) {
+      return;
+    }
+    let current: ProposalSummaryView | null = null;
+    try {
+      const sessionId = this.sessionId;
+      if (sessionId !== null) {
+        const listed = await fetchJson(
+          `/api/sessions/${encodeURIComponent(sessionId)}/proposals`,
+        );
+        const items = (listed.body as { proposals?: unknown }).proposals;
+        if (listed.status === 200 && Array.isArray(items)) {
+          current =
+            (items as unknown[]).find(
+              (item): item is ProposalSummaryView =>
+                isProposalSummary(item) && item.proposalId === card.proposalId,
+            ) ?? null;
+        }
+      }
+    } catch {
+      current = null;
+    }
+    if (this.actionCards.get(card.proposalId) !== card) {
+      return;
+    }
+    if (current !== null && current.status === "approved") {
+      // The server committed the approval before the transport failed: the
+      // card is execution-owned from here — never retired by the old pending
+      // timer, never actionable again.
+      this.clearPendingExpiry(card);
+      card.deciding = false;
+      card.status = current.status;
+      this.renderActionCard(
+        card,
+        current,
+        null,
+        this.cardModel(current, null),
+        "",
+      );
+      // Bounded recovery only: the existing execution watch retries the
+      // execution read when it resumes. No new polling path is added.
+      void this.watchAction(card.proposalId, current);
+      return;
+    }
+    // Still pending (or the list was unreadable): release ownership and
+    // reconcile through the normal path. A live pending card gets its
+    // controls back with a fresh bounded timer; an unreadable list simply
+    // retries via sync.
+    card.deciding = false;
+    if (current !== null && current.status === "pending") {
+      card.deadline = current.expiresAt;
+      card.status = current.status;
+      this.renderActionCard(
+        card,
+        current,
+        null,
+        this.cardModel(current, null),
+        "",
+      );
+      this.schedulePendingExpiry(card);
+    }
+    this.scheduleActionSync();
+  }
+
+  /** Reject: KEYLESS by contract — no Idempotency-Key is ever sent. */
+  private async reject(card: ActionCard): Promise<void> {
+    if (
+      this.sessionId === null ||
+      card.reject.disabled ||
+      card.deciding ||
+      card.terminal
+    ) {
+      return;
+    }
+    // Local deadline precheck (server stays authoritative): a locally
+    // expired pending card is never decided from a stale click.
+    if (card.status !== "pending" || Date.now() >= card.deadline) {
+      this.showNotice("却下できませんでした。内容を確認してください");
+      this.removeActionCard(card.proposalId);
+      this.scheduleActionSync();
+      return;
+    }
+    card.deciding = true;
+    card.approve.disabled = true;
+    card.reject.disabled = true;
+    let posted: { status: number; body: unknown };
+    try {
+      posted = await postJson(
+        `/api/sessions/${encodeURIComponent(this.sessionId)}/proposals/${encodeURIComponent(card.proposalId)}/reject`,
+        { proposalHash: card.hash },
+        null,
+      );
+    } catch {
+      // Transport failure with an unknown server outcome (the reject may
+      // already be durable server-side). Hold decision ownership across ONE
+      // authoritative re-read instead of relying on the deduped background
+      // sync: that sync is dropped while an older sync is still in flight,
+      // which would leave the buttons disabled and consume the pending timer.
+      this.showNotice("却下できませんでした。もう一度お試しください");
+      await this.reconcileLostReject(card);
+      return;
+    }
+    card.deciding = false;
+    if (posted.status === 200) {
+      this.clearApproveKey(card.proposalId);
+      this.showNotice("却下しました");
+      this.removeActionCard(card.proposalId);
+      await this.hydrateHistory();
+      return;
+    }
+    this.showNotice("却下できませんでした。内容を確認してください");
+    this.scheduleActionSync();
+  }
+
+  /**
+   * Authoritative lost-reject reconciliation (reject POST transport failure
+   * with an unknown server outcome). Decision ownership (`deciding`) is held
+   * across the single proposals re-read, so the bounded pending-expiry timer
+   * and any stale pending list can neither retire nor downgrade the card
+   * while the server truth settles, and the deduped background sync can never
+   * drop this recovery while an older sync is in flight. A server-rejected or
+   * expired summary retires on the real list state; a server-approved summary
+   * takes approved ownership immediately (timer cleared, decisions disabled);
+   * a still-pending summary restores controls with a fresh bounded timer; an
+   * unreadable list releases ownership and falls back to the normal sync.
+   */
+  private async reconcileLostReject(card: ActionCard): Promise<void> {
+    if (this.actionCards.get(card.proposalId) !== card) {
+      return;
+    }
+    let current: ProposalSummaryView | null = null;
+    try {
+      const sessionId = this.sessionId;
+      if (sessionId !== null) {
+        const listed = await fetchJson(
+          `/api/sessions/${encodeURIComponent(sessionId)}/proposals`,
+        );
+        const items = (listed.body as { proposals?: unknown }).proposals;
+        if (listed.status === 200 && Array.isArray(items)) {
+          current =
+            (items as unknown[]).find(
+              (item): item is ProposalSummaryView =>
+                isProposalSummary(item) && item.proposalId === card.proposalId,
+            ) ?? null;
+        }
+      }
+    } catch {
+      current = null;
+    }
+    if (this.actionCards.get(card.proposalId) !== card) {
+      return;
+    }
+    if (
+      current !== null &&
+      (current.status === "rejected" || current.status === "expired")
+    ) {
+      card.deciding = false;
+      this.clearApproveKey(card.proposalId);
+      this.removeActionCard(card.proposalId);
+      await this.hydrateHistory();
+      return;
+    }
+    if (current !== null && current.status === "approved") {
+      this.clearPendingExpiry(card);
+      card.deciding = false;
+      card.status = current.status;
+      this.renderActionCard(
+        card,
+        current,
+        null,
+        this.cardModel(current, null),
+        "",
+      );
+      void this.watchAction(card.proposalId, current);
+      return;
+    }
+    card.deciding = false;
+    if (current !== null && current.status === "pending") {
+      card.deadline = current.expiresAt;
+      card.status = current.status;
+      this.renderActionCard(
+        card,
+        current,
+        null,
+        this.cardModel(current, null),
+        "",
+      );
+      this.schedulePendingExpiry(card);
+    }
+    this.scheduleActionSync();
+  }
+
+  /**
+   * Contextual Stop for a live Action execution. Only offered before the
+   * committed external-call marker. The `200` body carries the ACTUAL
+   * resulting run status: the「停止しました」notice is shown ONLY when the
+   * run terminalised `cancelled`. Any other `200` (a `cancel_requested`
+   * accept, or a terminal `completed`/`failed`/`abandoned` that won the
+   * race) refreshes the ACTUAL receipt/execution and claims nothing; a
+   * `409` (`action_not_cancellable`, marker committed) or any other
+   * outcome re-reads the actual execution state instead of faking a stop
+   * or an unknown success.
+   */
+  private async stopAction(card: ActionCard): Promise<void> {
+    if (this.sessionId === null || card.runId === null || card.stop.disabled) {
+      return;
+    }
+    card.stop.disabled = true;
+    let posted: { status: number; body: unknown };
+    try {
+      posted = await postJson(
+        `/api/sessions/${encodeURIComponent(this.sessionId)}/runs/${encodeURIComponent(card.runId)}/cancel`,
+        {},
+        null,
+      );
+    } catch {
+      // Transport failure: nothing was cancelled — re-offer Stop and
+      // re-read the actual state instead of claiming anything.
+      card.stop.disabled = false;
+      this.showNotice("停止できませんでした");
+      this.scheduleActionSync();
+      return;
+    }
+    if (posted.status === 200) {
+      if (parseCancelRunStatus(posted.body) === "cancelled") {
+        this.showNotice("停止しました");
+        this.scheduleActionSync();
+        return;
+      }
+      // Accepted but NOT a cancelled terminal: never claim a stop —
+      // refresh the ACTUAL receipt/execution view instead.
+      card.stop.disabled = false;
+      this.scheduleActionSync();
+      return;
+    }
+    // 409 `action_not_cancellable` (marker committed) or any other
+    // non-2xx: re-read the ACTUAL execution view instead of guessing.
+    card.stop.disabled = false;
+    this.scheduleActionSync();
+  }
+
+  /**
+   * Bounded execution watch: polls the ACTUAL execution + receipt view until
+   * the execution is terminal. Never posts anything — read-only progress
+   * (queued / preflight / executing → real receipt).
+   */
+  private async watchAction(
+    proposalId: string,
+    summary: ProposalSummaryView,
+  ): Promise<void> {
+    const existing = this.actionWatches.get(proposalId);
+    if (existing !== undefined) {
+      return;
+    }
+    let resolveDone: () => void = () => {};
+    const done = new Promise<void>((resolve) => {
+      resolveDone = resolve;
+    });
+    this.actionWatches.set(proposalId, done);
+    try {
+      for (
+        let tick = 0;
+        tick < ConversationApp.ACTION_POLL_MAX_TICKS;
+        tick += 1
+      ) {
+        const card = this.actionCards.get(proposalId);
+        if (card === undefined || card.terminal) {
+          return;
+        }
+        const needHistory = await this.syncExecution(summary);
+        if (needHistory) {
+          await this.hydrateHistory();
+        }
+        if (!this.actionCards.has(proposalId)) {
+          return;
+        }
+        await new Promise((resolve) => {
+          window.setTimeout(resolve, ConversationApp.ACTION_POLL_INTERVAL_MS);
+        });
+      }
+    } finally {
+      this.actionWatches.delete(proposalId);
+      resolveDone();
+    }
+  }
+
+  private readonly actionWatches = new Map<string, Promise<void>>();
+
+  /** Stable per-proposal Idempotency-Key: metadata only, never a body. */
+  private approveKey(proposalId: string): string {
+    try {
+      const stored = localStorage.getItem(approveKeyStorageKey(proposalId));
+      if (stored !== null && stored.length > 0) {
+        return stored;
+      }
+    } catch {
+      // Fall through to a fresh key.
+    }
+    const key = crypto.randomUUID();
+    try {
+      localStorage.setItem(approveKeyStorageKey(proposalId), key);
+    } catch {
+      // Best effort: the in-page retry reuses the same frozen request.
+    }
+    return key;
+  }
+
+  private clearApproveKey(proposalId: string): void {
+    try {
+      localStorage.removeItem(approveKeyStorageKey(proposalId));
+    } catch {
+      // Best effort.
+    }
+  }
+
   private renderTurn(item: HistoryItemView): void {
     this.list.appendChild(this.buildTurn(item));
   }
 
   private buildTurn(item: HistoryItemView): HTMLElement {
     const wrap = el("section");
+    // T1: the two exact decision variants carry NO user text — render the
+    // deterministic intent derived from the real persisted decision plus the
+    // ACTUAL receipt (terminal, incl. failed/unknown/cancelled/abandoned and
+    // recovered) or the live progress for an active approval (never a blank
+    // line, never a fake failure, never a "stopped" claim for a write that
+    // left the process). The outcome renders in ONE form (the intent line);
+    // the receipt summary renders once below it; result part TEXT is not
+    // re-rendered (it would duplicate the outcome/summary) — only its fresh
+    // rN citations are kept as buttons.
+    if (item.kind === "action_approval" || item.kind === "action_rejection") {
+      const receipt = item.selectedRun?.receipt ?? null;
+      const outcome =
+        receipt !== null && typeof receipt.outcome === "string"
+          ? receipt.outcome
+          : null;
+      wrap.setAttribute("data-action-history", item.kind);
+      wrap.appendChild(el("p", actionDecisionIntentText(item.kind, outcome)));
+      const run = item.selectedRun;
+      if (run !== null && run !== undefined && typeof run === "object") {
+        // Durable dedup anchor: EVERY projected Action run id (incl. a
+        // receipt-only terminal with `result: null`) registers here, so a
+        // captured-active reload whose later subscription/SSE replays that
+        // same terminal never appends it twice (`renderRunView`). Internal
+        // ids live only in this set + DOM metadata, never in visible text.
+        if (typeof run.runId === "string" && run.runId.length > 0) {
+          this.renderedAnswers.add(run.runId);
+          wrap.setAttribute("data-action-run", run.runId);
+        }
+        const rawSummary =
+          receipt !== null &&
+          typeof receipt.summary === "object" &&
+          receipt.summary !== null
+            ? (receipt.summary as { summary?: unknown }).summary
+            : null;
+        if (typeof rawSummary === "string" && rawSummary.length > 0) {
+          // Display-only LEGACY tool-prefix strip (stored preview contract
+          // unchanged): historical staged previews carry a
+          // `calendar.reschedule: ` prefix that must never reach visible
+          // text (T6); the stored `summary_json` keeps it. Current previews
+          // always open with the unambiguous `対象イベント: ` marker, so an
+          // arbitrary event title — even one beginning with
+          // `calendar.reschedule:` — is never at position 0 and is rendered
+          // in full here.
+          const displaySummary = rawSummary.startsWith("calendar.reschedule:")
+            ? rawSummary.slice("calendar.reschedule:".length).trim()
+            : rawSummary;
+          if (displaySummary.length > 0) {
+            const line = el("p", displaySummary);
+            line.setAttribute("data-action-receipt", "true");
+            wrap.appendChild(line);
+          }
+        } else if (
+          receipt === null &&
+          typeof run.executionStatus === "string"
+        ) {
+          // Active approval with no terminal receipt: actual progress, never
+          // a fabricated failure.
+          const progress = actionProgressText(run.executionStatus);
+          if (progress.length > 0) {
+            const line = el("p", progress);
+            line.setAttribute("data-action-progress", "true");
+            wrap.appendChild(line);
+          }
+        }
+        // Citations only (no duplicated outcome/summary text): the verified
+        // fresh rN survives reloads with no extra external call.
+        if (run.result !== null && run.result !== undefined) {
+          for (const part of runResultToAnswerParts(run.result)) {
+            for (const citation of part.citations) {
+              const button = el("button", citation);
+              button.setAttribute("data-action-citation", "true");
+              button.addEventListener("click", () => {
+                void this.openCitation(citation);
+              });
+              wrap.appendChild(button);
+            }
+          }
+        }
+      }
+      return wrap;
+    }
     wrap.appendChild(el("p", typeof item.text === "string" ? item.text : ""));
     const run = item.selectedRun;
     if (run !== null && run !== undefined && typeof run === "object") {
+      // Durable terminal dedup anchor: a completed selected Run id is
+      // registered the moment history renders it, so a captured-active
+      // reload whose later subscription replays that same terminal answer
+      // is guarded against appending it twice (`renderRunView`).
+      if (typeof run.runId === "string" && run.runId.length > 0) {
+        this.renderedAnswers.add(run.runId);
+      }
       // Completed selected Run: V2 answer parts with citations, or the V1
       // rendered text without citations (runResultToAnswerParts handles both).
       for (const part of runResultToAnswerParts(run.result)) {
@@ -608,6 +2144,9 @@ class ConversationApp {
       this.clearPendingKey();
       this.activeTurnId = body.turnId;
       this.runTurns.set(runId, body.turnId);
+      // A fresh send always creates a `user_text` Turn (§12.2), so the
+      // failure-only retry gate knows its kind even before hydration.
+      this.turnKinds.set(body.turnId, "user_text");
       this.subscribe(runId);
       return;
     }
@@ -670,6 +2209,14 @@ class ConversationApp {
     if (this.sessionId === null || this.activeRunId === null) {
       return;
     }
+    // A post-marker (or terminal) Action run adopted on reload must never
+    // be cancelled from the generic composer: re-read the actual state and
+    // leave the composer Stop hidden/disabled instead of posting.
+    if (this.isActionStopBlocked(this.activeRunId)) {
+      await this.refreshActionRunStops();
+      this.renderComposer();
+      return;
+    }
     const posted = await postJson(
       `/api/sessions/${encodeURIComponent(this.sessionId)}/runs/${encodeURIComponent(this.activeRunId)}/cancel`,
       {},
@@ -677,14 +2224,39 @@ class ConversationApp {
     );
     if (posted.status < 200 || posted.status >= 300) {
       this.showNotice("停止できませんでした");
+      return;
+    }
+    // An adopted LIVE Action execution reports its ACTUAL resulting run
+    // status in the 200 body: only a `cancelled` terminal may claim the
+    // stop here — any other outcome re-reads the actual execution state
+    // instead (the true `run.cancelled` terminal event, when it arrives,
+    // still renders the notice through the ordinary stream path).
+    if (this.actionRunStops.has(this.activeRunId)) {
+      if (parseCancelRunStatus(posted.body) === "cancelled") {
+        this.showNotice("停止しました");
+      }
+      await this.refreshActionRunStops();
+      this.scheduleActionSync();
+      this.renderComposer();
+      return;
     }
     // 2xx: the run.cancel_requested event (stream or fallback poll) renders
     // the「停止しました」notice and keeps the run active until terminal.
   }
 
-  /** Failure-only retry (§16.6 exact): failed/abandoned views only. */
+  /**
+   * Failure-only retry (§16.6 exact): failed/abandoned views only, and
+   * `user_text` Turns only (§18.4/§18.6). A decision Turn is never posted:
+   * the server denies it with `400 validation_error`, so a locally known
+   * decision Turn is refused here with the same fixed notice as a denied
+   * retry instead of a wasted request.
+   */
   private async retry(turnId: string): Promise<void> {
     if (this.sessionId === null || this.activeRunId !== null) {
+      return;
+    }
+    if (!isRetryableTurnKind(this.turnKinds.get(turnId))) {
+      this.showNotice("再試行できませんでした");
       return;
     }
     const key = crypto.randomUUID();
@@ -707,6 +2279,9 @@ class ConversationApp {
     if (posted.status === 202 && typeof runId === "string") {
       this.activeTurnId = turnId;
       this.runTurns.set(runId, turnId);
+      // A retried Turn is always `user_text` (the guard above + the server
+      // contract), so the next failure can offer the control again.
+      this.turnKinds.set(turnId, "user_text");
       this.subscribe(runId);
       return;
     }
@@ -741,7 +2316,7 @@ class ConversationApp {
       this.sse = null;
     }
     if (this.sse === null) {
-      void this.pollFallback(runId, stored ?? 0);
+      void this.pollFallback(runId);
       return;
     }
     const source = this.sse;
@@ -749,7 +2324,7 @@ class ConversationApp {
     this.fallbackTimer = window.setTimeout(() => {
       if (!opened) {
         this.closeStream();
-        void this.pollFallback(runId, readStoredCursor(runId) ?? 0);
+        void this.pollFallback(runId);
       }
     }, 5000);
     source.addEventListener("run-event", (message) => {
@@ -995,11 +2570,22 @@ class ConversationApp {
    * stranded. Transient fetch failures are absorbed (bounded consecutive
    * error streak before giving up with a fixed notice; each success resets
    * the streak). This path never cancels the Run.
+   *
+   * Catch-up always starts from the IN-MEMORY reducer cursor of the run
+   * view, never from the persisted per-run cursor: after a reload the
+   * reducer view is `INITIAL_RUN_VIEW` (cursor 0) while the stored cursor
+   * (e.g. 2) is only the SSE resume hint — starting the JSON replay from
+   * the stored hint would leave the reducer stuck in a gap at cursor 0
+   * (queued/started never applied) and the run would never converge to
+   * its terminal. Replaying from the reducer cursor is safe mid-stream too:
+   * durable events at or below the reducer cursor are reducer dedups
+   * (no double render), and the persisted store still advances only after
+   * each apply.
    */
   private static readonly POLL_INTERVAL_MS = 1000;
   private static readonly POLL_MAX_ERROR_STREAK = 5;
 
-  private async pollFallback(runId: string, after: number): Promise<void> {
+  private async pollFallback(runId: string): Promise<void> {
     let errorStreak = 0;
     for (;;) {
       if (this.activeRunId !== runId) {
@@ -1007,7 +2593,8 @@ class ConversationApp {
       }
       let ok = false;
       try {
-        ok = await this.catchUp(runId, readStoredCursor(runId) ?? after);
+        const view = this.runViews.get(runId);
+        ok = await this.catchUp(runId, view?.cursor ?? 0);
       } catch {
         ok = false;
       }
@@ -1054,6 +2641,17 @@ class ConversationApp {
       // of appending the same paragraphs/buttons again.
       if (this.renderedAnswers.has(runId)) {
         this.finishActiveRun();
+        // T1 follow-up: the durable history already rendered this terminal
+        // (e.g. an approval reloaded while queued/preflight/executing whose
+        // decided proposal has no card, so no watch drives the update). The
+        // answer itself must NOT append twice — but the single-owner
+        // terminal refresh still runs so the receipt + fresh citation land
+        // without a second reload.
+        if (claimTerminalHydration(this.terminalHydrated, runId)) {
+          void this.hydrateHistory().then(() => {
+            this.scheduleActionSync();
+          });
+        }
         return;
       }
       this.renderedAnswers.add(runId);
@@ -1071,7 +2669,9 @@ class ConversationApp {
       // Single owner: claim the terminal hydration; a second observer of
       // the same terminal view skips it so output is never duplicated.
       if (claimTerminalHydration(this.terminalHydrated, runId)) {
-        void this.hydrateHistory();
+        void this.hydrateHistory().then(() => {
+          this.scheduleActionSync();
+        });
       }
       return;
     }
@@ -1087,13 +2687,27 @@ class ConversationApp {
       this.finishActiveRun();
       if (claimTerminalHydration(this.terminalHydrated, runId)) {
         void this.hydrateHistory().then(() => {
-          if (retryVisible && turnId !== null && turnId !== undefined) {
-            const retryButton = el("button", "もう一度送る");
+          // M5 decision-turn denial (§18.4/§18.6): the retry control is
+          // appended only for `user_text` Turns (M3 title retained).
+          // Hydration above refreshed the Turn kinds, so a failed/abandoned
+          // Action run renders its actual receipt from history with no
+          // retry control here.
+          if (
+            retryVisible &&
+            turnId !== null &&
+            turnId !== undefined &&
+            isRetryableTurnKind(this.turnKinds.get(turnId))
+          ) {
+            const retryButton = el("button", "もう一度生成");
             retryButton.addEventListener("click", () => {
               void this.retry(turnId);
             });
             this.list.appendChild(retryButton);
           }
+          // A failed Action run still carries its actual receipt in the
+          // history projection above; refresh live cards to the same real
+          // terminal (no-op when no card/proposal exists).
+          this.scheduleActionSync();
         });
       }
       return;
@@ -1102,9 +2716,12 @@ class ConversationApp {
       this.showNotice("停止しました");
       this.finishActiveRun();
       // Single owner: claim the terminal hydration; a second observer of
-      // the same terminal view skips it.
+      // the same terminal view skips it. Cancelled Action runs hydrate the
+      // same actual receipt/cards as the failed path above.
       if (claimTerminalHydration(this.terminalHydrated, runId)) {
-        void this.hydrateHistory();
+        void this.hydrateHistory().then(() => {
+          this.scheduleActionSync();
+        });
       }
       return;
     }
@@ -1177,12 +2794,21 @@ class ConversationApp {
       if (put.status !== 409) {
         return;
       }
+      // Version conflict (§16.5 exact): surface the conflict before
+      // re-reading the latest context and retrying the CAS.
+      this.showNotice("参照の更新で競合しました。最新の状態を取得しています");
       // Version conflict: loop re-reads the stored context and retries CAS.
     }
   }
 
   /** Citation drawer (§16.5): stored snapshot as escaped plain text only. */
   private async openCitation(citation: string): Promise<void> {
+    // Memory citations (mN) address recalled snippets, not stored
+    // references: no drawer and no reference-context update. Silent return
+    // keeps rN behavior unchanged when memory is disabled or unused.
+    if (/^m[1-9][0-9]*$/.test(citation)) {
+      return;
+    }
     if (this.sessionId === null) {
       return;
     }
@@ -1241,9 +2867,17 @@ class ConversationApp {
     // round-trip (including the context freeze) is in flight; the input
     // itself stays enabled (§16.3 type-while-active).
     const busy = this.activeRunId !== null || this.sending;
+    // An adopted Action run keeps the composer busy (Send disabled), but
+    // its Stop follows the ACTUAL execution marker/cancellability: after
+    // the marker (or terminal) the generic Stop is hidden AND disabled —
+    // the write already left this process. Ordinary Runs are unchanged.
+    const actionBlocked =
+      this.activeRunId !== null && this.isActionStopBlocked(this.activeRunId);
+    const stopOffered = busy && !actionBlocked;
     this.sendButton.disabled = busy;
     this.input.disabled = false;
-    this.stopButton.hidden = !busy;
+    this.stopButton.hidden = !stopOffered;
+    this.stopButton.disabled = !stopOffered;
   }
 
   private finishActiveRun(): void {
@@ -1326,15 +2960,3 @@ function boot(): void {
 }
 
 boot();
-    // Memory citations (mN) address recalled snippets, not stored
-    // references: no drawer and no reference-context update. Silent return
-    // keeps rN behavior unchanged when memory is disabled or unused.
-    if (/^m[1-9][0-9]*$/.test(citation)) {
-      return;
-    }
-    // Memory citations (mN) address recalled snippets, not stored
-    // references: no drawer and no reference-context update. Silent return
-    // keeps rN behavior unchanged when memory is disabled or unused.
-    if (/^m[1-9][0-9]*$/.test(citation)) {
-      return;
-    }

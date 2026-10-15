@@ -100,11 +100,12 @@ export function requestHash(
   );
 }
 
-/** Operation ids + schema versions used for M0 idempotency hashing. */
+/** Operation ids + schema versions used for idempotency hashing. */
 export const IDEMPOTENCY_OPERATIONS = {
   createSession: { operation: "create_session", schemaVersion: 1 },
   postMessage: { operation: "post_message", schemaVersion: 1 },
   postRetry: { operation: "post_retry", schemaVersion: 1 },
+  approveProposal: { operation: "approve_proposal", schemaVersion: 1 },
 } as const;
 
 /** Generate a new UUID v4 harness id. */

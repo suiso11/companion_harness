@@ -31,6 +31,7 @@
 import {
   ANSWER_SUBMIT_TOOL_NAME,
   buildRunResultV2,
+  CALENDAR_RESCHEDULE_TOOL_NAME,
   CITATION_ID_REGEX,
   DEFAULT_SEARCH_LIMIT,
   type FrozenContext,
@@ -578,6 +579,12 @@ const REFERENCE_RN_TOOL_NAMES: ReadonlySet<string> = new Set([
   "reference.open",
   "reference.refresh",
   "reference.related",
+  // C17: the proposal-only `calendar.reschedule` addresses its target with
+  // the current frozen-context `rN` too; a mapped ordinal translates to the
+  // exact session reference UUID immediately before the broker call, and a
+  // smuggled/unmapped UUID is fail-safely substituted (same path as the
+  // read-only reference tools suggest).
+  CALENDAR_RESCHEDULE_TOOL_NAME,
 ]);
 
 /**
@@ -590,6 +597,35 @@ const REFERENCE_RN_TOOL_NAMES: ReadonlySet<string> = new Set([
  */
 export const AGENT_UNMAPPED_REFERENCE_ID =
   "ffffffff-ffff-4fff-bfff-ffffffffffff" as const;
+
+/**
+ * Explicit closed JSON parameter schema for `calendar.search` (C13), matching
+ * `CalendarSearchToolInputSchema` (strict): `query` optional (1-256 code
+ * points), `start`/`end` required (1-128; the port enforces the exact
+ * instant/90-day grammar with `calendar_range_invalid`), `limit` 1-20
+ * default 10, `cursor` optional opaque (1-2048). NO `freshness` field exists
+ * on the Calendar input contract, so none is advertised. This is the ONE
+ * model-visible Calendar descriptor: the upstream `list-events` /
+ * `search-events` / `get-event` tools stay connector-internal and are never
+ * advertised by any name.
+ */
+export const AGENT_CALENDAR_SEARCH_PARAMETERS = Object.freeze({
+  type: "object",
+  properties: Object.freeze({
+    query: Object.freeze({ type: "string", minLength: 1, maxLength: 256 }),
+    start: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+    end: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+    limit: Object.freeze({
+      type: "integer",
+      minimum: 1,
+      maximum: MAX_SEARCH_LIMIT,
+      default: DEFAULT_SEARCH_LIMIT,
+    }),
+    cursor: Object.freeze({ type: "string", minLength: 1, maxLength: 2048 }),
+  }),
+  required: Object.freeze(["start", "end"]),
+  additionalProperties: false,
+}) as unknown as Record<string, unknown>;
 
 /**
  * Explicit closed JSON parameter schema for `markdown.search`, matching
@@ -679,6 +715,27 @@ export const AGENT_REFERENCE_RELATED_PARAMETERS = Object.freeze({
 }) as unknown as Record<string, unknown>;
 
 /**
+ * Explicit closed JSON parameter schema for the proposal-only
+ * `calendar.reschedule` (C17): model-facing `referenceId` is an `rN`
+ * identifier (never a UUID), `start`/`end` are opaque bounded strings.
+ * No create/delete/title/attendee fields exist, and no approval field can
+ * ever reach the model — approval happens strictly outside it.
+ */
+export const AGENT_CALENDAR_RESCHEDULE_PARAMETERS = Object.freeze({
+  type: "object",
+  properties: Object.freeze({
+    referenceId: Object.freeze({
+      type: "string",
+      pattern: AGENT_RN_PATTERN,
+    }),
+    start: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+    end: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+  }),
+  required: Object.freeze(["referenceId", "start", "end"]),
+  additionalProperties: false,
+}) as unknown as Record<string, unknown>;
+
+/**
  * Broker-visible M1 tools the agent may advertise, each with its explicit
  * closed parameter schema. Unknown/unregistered names are never advertised:
  * `buildAgentToolDefinitions` skips descriptors outside this map.
@@ -686,10 +743,25 @@ export const AGENT_REFERENCE_RELATED_PARAMETERS = Object.freeze({
 const AGENT_BROKER_TOOL_PARAMETERS: Readonly<
   Record<string, Record<string, unknown>>
 > = {
+  "calendar.search": AGENT_CALENDAR_SEARCH_PARAMETERS,
   "markdown.search": AGENT_MARKDOWN_SEARCH_PARAMETERS,
   "reference.open": AGENT_REFERENCE_OPEN_PARAMETERS,
   "reference.refresh": AGENT_REFERENCE_REFRESH_PARAMETERS,
   "reference.related": AGENT_REFERENCE_RELATED_PARAMETERS,
+};
+
+/**
+ * C17 proposal-only write tools the agent may advertise, each with an
+ * explicit closed parameter schema. Membership here is the closed allowlist
+ * of exactly the configured proposal descriptors: a `write`-category broker
+ * descriptor with no entry in this map is NEVER advertised, and dedicated
+ * Action execution tools do not exist at all. Currently exactly the
+ * `calendar.reschedule` proposal-only staging contract.
+ */
+const AGENT_PROPOSAL_TOOL_PARAMETERS: Readonly<
+  Record<string, Record<string, unknown>>
+> = {
+  [CALENDAR_RESCHEDULE_TOOL_NAME]: AGENT_CALENDAR_RESCHEDULE_PARAMETERS,
 };
 
 /** Deep copy one advertised parameter schema (callers cannot mutate it). */
@@ -718,7 +790,16 @@ export function buildAgentToolDefinitions(
 ): ToolDefinition[] {
   const tools: ToolDefinition[] = [];
   for (const descriptor of brokerTools) {
-    const parameters = AGENT_BROKER_TOOL_PARAMETERS[descriptor.name];
+    // Trusted exposure gate:
+    // - any `read` tool requires an explicit closed parameter schema;
+    // - C17: a non-`read` category is advertised ONLY when it is a
+    //   configured proposal-only descriptor (staging, never execution).
+    //   No write/sensitive/unclassified tool outside the proposal map can
+    //   ever be advertised, even when the broker would deny execution.
+    const parameters =
+      descriptor.category === "read"
+        ? AGENT_BROKER_TOOL_PARAMETERS[descriptor.name]
+        : AGENT_PROPOSAL_TOOL_PARAMETERS[descriptor.name];
     if (parameters === undefined) {
       continue;
     }

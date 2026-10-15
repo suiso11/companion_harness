@@ -23,9 +23,15 @@ importers:
 
   apps/server:
     dependencies:
+      '@companion/connector-calendar':
+        specifier: workspace:*
+        version: link:../../packages/connector-calendar
       '@companion/connector-markdown':
         specifier: workspace:*
         version: link:../../packages/connector-markdown
+      '@companion/connector-mcp':
+        specifier: workspace:*
+        version: link:../../packages/connector-mcp
       '@companion/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
@@ -69,10 +75,16 @@ importers:
 
   packages/connector-calendar:
     dependencies:
+      '@companion/connector-mcp':
+        specifier: workspace:*
+        version: link:../connector-mcp
       zod:
         specifier: 4.5.4
         version: 4.5.4
     devDependencies:
+      '@modelcontextprotocol/sdk':
+        specifier: 1.30.0
+        version: 1.30.0(zod@4.5.4)
       '@types/node':
         specifier: 24.12.4
         version: 24.12.4
@@ -101,6 +113,9 @@ importers:
 
   packages/connector-mcp:
     dependencies:
+      '@companion/contracts':
+        specifier: workspace:*
+        version: link:../contracts
       '@modelcontextprotocol/sdk':
         specifier: 1.30.0
         version: 1.30.0(zod@4.5.4)

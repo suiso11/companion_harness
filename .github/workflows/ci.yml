@@ -85,6 +85,11 @@ jobs:
       - name: Smoke E2E (chromium, real browser, temp DB only)
         run: pnpm --filter @companion/server test:e2e
 
+      - name: Calendar + fake Action safety E2E (chromium, temp DB only)
+        env:
+          COMPANION_E2E_CALENDAR: "1"
+        run: pnpm --filter @companion/server test:e2e
+
       - name: Upload E2E failure artifacts (no production data)
         if: failure()
         uses: actions/upload-artifact@v4

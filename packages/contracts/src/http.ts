@@ -1,6 +1,15 @@
 import { z } from "zod";
+import {
+  ActionExecutionStatusSchema,
+  ActionReceiptViewSchema,
+} from "./action.js";
 import { LatestRunEventSchema, M0RunEventSchema } from "./events.js";
-import { IdempotencyScopeSchema, UnixMsSchema, UuidSchema } from "./ids.js";
+import {
+  IdempotencyScopeSchema,
+  Sha256HexSchema,
+  UnixMsSchema,
+  UuidSchema,
+} from "./ids.js";
 import { RunResultSchema } from "./run_result.js";
 import { ActiveStatusSchema, RunStatusSchema } from "./run_status.js";
 import { MAX_USER_TEXT_LENGTH } from "./turn_input.js";
@@ -89,6 +98,10 @@ export type PostMessageResponse = z.infer<typeof PostMessageResponseSchema>;
 /**
  * POST /api/sessions/:sessionId/turns/:turnId/retries request. Retry
  * reuses the Turn's frozen input, so the body is empty (strict).
+ *
+ * Retry is user_text-only (§18.4/§18.6): an `action_approval` /
+ * `action_rejection` Turn is rejected with `400 validation_error` and
+ * creates no Run, events, execution, or grant.
  */
 export const PostRetryRequestSchema = z.strictObject({});
 export type PostRetryRequest = z.infer<typeof PostRetryRequestSchema>;
@@ -134,8 +147,17 @@ export type HistoryQueryInput = z.input<typeof HistoryQuerySchema>;
  * History projection: Turn × selected Run (§11.6). Unselected / failed /
  * cancelled / abandoned Runs never appear; a Turn with no selection shows
  * a null `selectedRun` ("no response").
+ *
+ * C18 (§18.4): the two M5 decision kinds join the union as exact
+ * hash-bound projections:
+ * - `action_approval`: the deterministic approval intent plus the ACTUAL
+ *   owned Action execution/receipt projection (independent of
+ *   `turn_selections`; completed runs additionally carry their persisted
+ *   ID-free result with the fresh rN citation).
+ * - `action_rejection`: the deterministic rejection intent with no Run
+ *   (selectedRun always null; kind is the discriminant).
  */
-export const HistoryItemSchema = z.strictObject({
+export const UserTextHistoryItemSchema = z.strictObject({
   turnId: UuidSchema,
   seq: z.number().int().min(1),
   kind: z.literal("user_text"),
@@ -150,6 +172,66 @@ export const HistoryItemSchema = z.strictObject({
     })
     .nullable(),
 });
+export type UserTextHistoryItem = z.infer<typeof UserTextHistoryItemSchema>;
+
+/**
+ * Selected Action Run summary carried by decision history items.
+ *
+ * C22/T1: for `action_approval` this is the ACTUAL owned Action
+ * execution + receipt projection INDEPENDENT of `turn_selections`
+ * (completed-only selection stays in the table + `user_text` path and is
+ * never fabricated here). `result` is present only for completed runs
+ * with a persisted `result_json` (verified/unverified/blocked); terminal
+ * non-completed runs (failed/unknown/cancelled/abandoned, incl. recovered)
+ * carry `result: null` with the actual `receipt`. Active runs carry
+ * `receipt: null` with the live `runStatus`/`executionStatus` (frozen intent
+ * + progress, never a fake failure). No internal IDs appear in rendered
+ * text; IDs live only in these structured fields.
+ */
+export const ActionRunHistorySelectionSchema = z.strictObject({
+  runId: UuidSchema,
+  attempt: z.number().int().min(1),
+  runStatus: RunStatusSchema,
+  finishedAt: UnixMsSchema.nullable(),
+  result: RunResultSchema.nullable(),
+  receipt: ActionReceiptViewSchema.nullable(),
+  executionStatus: ActionExecutionStatusSchema.nullable(),
+});
+export type ActionRunHistorySelection = z.infer<
+  typeof ActionRunHistorySelectionSchema
+>;
+
+export const ActionApprovalHistoryItemSchema = z.strictObject({
+  turnId: UuidSchema,
+  seq: z.number().int().min(1),
+  kind: z.literal("action_approval"),
+  proposalId: UuidSchema,
+  proposalHash: Sha256HexSchema,
+  createdAt: UnixMsSchema,
+  selectedRun: ActionRunHistorySelectionSchema.nullable(),
+});
+export type ActionApprovalHistoryItem = z.infer<
+  typeof ActionApprovalHistoryItemSchema
+>;
+
+export const ActionRejectionHistoryItemSchema = z.strictObject({
+  turnId: UuidSchema,
+  seq: z.number().int().min(1),
+  kind: z.literal("action_rejection"),
+  proposalId: UuidSchema,
+  proposalHash: Sha256HexSchema,
+  createdAt: UnixMsSchema,
+  selectedRun: ActionRunHistorySelectionSchema.nullable(),
+});
+export type ActionRejectionHistoryItem = z.infer<
+  typeof ActionRejectionHistoryItemSchema
+>;
+
+export const HistoryItemSchema = z.discriminatedUnion("kind", [
+  UserTextHistoryItemSchema,
+  ActionApprovalHistoryItemSchema,
+  ActionRejectionHistoryItemSchema,
+]);
 export type HistoryItem = z.infer<typeof HistoryItemSchema>;
 
 export const HistoryResponseSchema = z.strictObject({
@@ -225,6 +307,28 @@ export const RunStatusResponseSchema = z.strictObject({
 });
 export type RunStatusResponse = z.infer<typeof RunStatusResponseSchema>;
 
+/**
+ * GET /api/sessions/:sessionId/active-run response (C06 accepted202 active
+ * reload recovery, §16.7): minimal additive projection of the session's
+ * single active Run for the recovering browser — `{ id, turnId, status,
+ * eventSeq }` under `run` when a Run is queued/running/cancel_requested,
+ * else `{ run: null }`. Existing DTOs stay frozen; the recovering client
+ * maps the captured id/turnId to the existing status/events/SSE pipeline
+ * and never seeds a stream cursor from the discovery `eventSeq` (the
+ * stored per-run cursor remains the resume authority).
+ */
+export const ActiveRunResponseSchema = z.strictObject({
+  run: z
+    .strictObject({
+      id: UuidSchema,
+      turnId: UuidSchema,
+      status: ActiveStatusSchema,
+      eventSeq: z.number().int().min(0),
+    })
+    .nullable(),
+});
+export type ActiveRunResponse = z.infer<typeof ActiveRunResponseSchema>;
+
 /* ------------------------------------------------------------------ */
 /* Idempotency lookup                                                  */
 /* ------------------------------------------------------------------ */
@@ -297,6 +401,3 @@ export const HealthReadyResponseSchema = z.discriminatedUnion("status", [
   }),
 ]);
 export type HealthReadyResponse = z.infer<typeof HealthReadyResponseSchema>;
-
-/** Re-export for route layers that validate the active-run guard. */
-export { ActiveStatusSchema };

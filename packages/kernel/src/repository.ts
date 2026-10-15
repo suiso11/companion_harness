@@ -11,6 +11,12 @@
 
 import {
   type AcceptedRun,
+  ActionApprovedPayloadSchema,
+  type ActionExecutionStatus,
+  ActionExecutionStatusSchema,
+  type ActionReceiptView,
+  ActionReceiptViewSchema,
+  CalendarRescheduleToolInputSchema,
   type CreateSessionResponse,
   CreateSessionResponseSchema,
   EventsQuerySchema,
@@ -40,11 +46,24 @@ import {
   PostMessageResponseSchema,
   PostRetryRequestSchema,
   type PostRetryResponse,
+  type ProposalApprove202Response,
+  ProposalApprove202ResponseSchema,
+  ProposalApproveRequestSchema,
+  type ProposalExecutionView,
+  ProposalExecutionViewSchema,
+  ProposalRejectRequestSchema,
+  type ProposalRejectResponse,
+  ProposalRejectResponseSchema,
+  type ProposalSummary,
+  ProposalSummarySchema,
+  type ProposalsListResponse,
+  ProposalsListResponseSchema,
   parseRunErrorCode,
   parseRunEvent,
   parseRunEventPayload,
   parseRunResult,
   parseTurnInput,
+  proposalApproveScope,
   type ReferenceContextGetResponse,
   ReferenceContextGetResponseSchema,
   ReferenceContextPutRequestSchema,
@@ -59,28 +78,56 @@ import {
   RUN_EVENT_SCHEMA_VERSION,
   type RunResult,
   type RunStatus,
+  RunStatusSchema,
   retryScope,
   SnapshotBodySchema,
 } from "@companion/contracts";
 import type Database from "better-sqlite3";
 import {
+  type ActionExecutionService,
+  createActionExecutionService,
+} from "./action_executions.js";
+import {
+  type ActionProposalStager,
+  type CommittedProposal,
+  createActionProposalStager,
+} from "./action_proposals.js";
+import {
   assertUuidV4,
+  canonicalJsonString,
   generateId,
   IDEMPOTENCY_OPERATIONS,
   isUuidV4,
   requestHash,
+  sha256Hex,
 } from "./canonical.js";
 import {
   DatabaseStateInvalidError,
   IdempotencyConflictError,
   InvalidReferenceError,
   KernelStorageError,
+  ProposalHashMismatchError,
+  ProposalStateConflictError,
   ReferenceNotFoundError,
   ReferenceVersionConflictError,
   RepositoryNotFoundError,
   RepositoryValidationError,
   SessionBusyError,
 } from "./errors.js";
+
+/**
+ * C19: fixed safe error thrown when a generic Run lifecycle transition
+ * (engine pickup, generic complete/fail) touches an `m5-action` Run. Such
+ * Runs are owned exclusively by the concrete action execution service
+ * (atomic terminal transactions); the engine never fails closed-through
+ * them and no watchdog may destroy committed marker/receipt state.
+ */
+export class ActionRunDispatchRequiredError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ActionRunDispatchRequiredError";
+  }
+}
 
 export {
   canonicalJson,
@@ -288,6 +335,34 @@ interface RawMemoryJob {
 }
 
 /* ------------------------------------------------------------------ */
+/* C18 proposal decision types (§18.4).                                */
+/* ------------------------------------------------------------------ */
+
+export interface ApproveProposalOptions {
+  key: string;
+  now?: number;
+  timeZone?: string;
+}
+
+export interface RejectProposalOptions {
+  now?: number;
+  timeZone?: string;
+}
+
+type DecisionConflict = {
+  kind: "state_conflict";
+  reason: "approved" | "rejected" | "expired";
+  proposalId: string;
+};
+type DecisionBusy = { kind: "busy"; proposalId: string };
+type DecisionOk<T> = {
+  kind: "ok";
+  status: number;
+  body: T;
+  replayed: boolean;
+};
+
+/* ------------------------------------------------------------------ */
 /* Options                                                             */
 /* ------------------------------------------------------------------ */
 
@@ -391,7 +466,11 @@ function requireId(id: unknown, what: string): string {
   return id;
 }
 
-function withImmediate<T>(db: Database.Database, fn: () => T): T {
+/**
+ * C19: exported so the Action execution boundary service reuses the exact
+ * same atomic transaction helper (same BEGIN IMMEDIATE semantics).
+ */
+export function withImmediate<T>(db: Database.Database, fn: () => T): T {
   db.exec("BEGIN IMMEDIATE");
   try {
     const out = fn();
@@ -525,7 +604,21 @@ function readRun(db: Database.Database, runId: string): RawRun | null {
   );
 }
 
-function appendEventInTx(
+/**
+ * C19: exported for the concrete Action execution boundary service
+ * (`action_executions.ts`), which is in-repo-only. The shared signature and
+ * SEMANTICS keep a single guarded event allocator across domain modules.
+ */
+export type RunEventAppender = (
+  db: Database.Database,
+  runId: string,
+  expectedPrevSeq: number,
+  type: M0RunEventType | LatestRunEventType,
+  payload: unknown,
+  now: number,
+) => number;
+
+export const appendEventInTx: RunEventAppender = function appendEventInTx(
   db: Database.Database,
   runId: string,
   expectedPrevSeq: number,
@@ -567,7 +660,7 @@ function appendEventInTx(
     now,
   );
   return next;
-}
+};
 
 function toStoredResponse(
   db: Database.Database,
@@ -622,7 +715,75 @@ function storeIdempotentResponse(
 /* Repository                                                          */
 /* ------------------------------------------------------------------ */
 
-export function createKernelRepository(db: Database.Database) {
+/**
+ * C17 composition options. `actionProposals.writeEnabled` is an EXPLICIT
+ * opt-in (never derived from any mutable state); the stager is created and
+ * owned by this repository instance so the broker/agent path, the completeRun
+ * commit hook, and the terminal cleanup share ONE staged map per process.
+ * `clock` is deterministic-test only.
+ */
+export interface CreateKernelRepositoryOptions {
+  readonly actionProposals?: {
+    readonly writeEnabled?: boolean;
+    readonly clock?: () => number;
+  };
+}
+
+export function createKernelRepository(
+  db: Database.Database,
+  options: CreateKernelRepositoryOptions = {},
+) {
+  // C17: repository-OWNED proposal stager (single shared instance). The
+  // repository supplies the action.proposed `appendEventInTx` sink, so the
+  // stager's commits address the exact same events/journal as every other
+  // RunEvent append (same CAS conflict semantics). `writeEnabled` defaults
+  // to FALSE: proposal staging is an explicit composition opt-in.
+  const stager: ActionProposalStager | undefined =
+    options.actionProposals === undefined
+      ? undefined
+      : createActionProposalStager({
+          db,
+          writeEnabled: options.actionProposals.writeEnabled === true,
+          ...(options.actionProposals.clock === undefined
+            ? {}
+            : { clock: options.actionProposals.clock }),
+          events: {
+            appendEventTx(runId, expectedPrevSeq, type, payload, now) {
+              return appendEventInTx(
+                db,
+                runId,
+                expectedPrevSeq,
+                type,
+                payload,
+                now,
+              );
+            },
+          },
+        });
+
+  /**
+   * C21: lazily composed Action execution service. It owns the `m5-action`
+   * cancel boundary and the `m5-action` recovery/drain disposition. It shares
+   * THIS repository's single connection, so it opens its own
+   * `BEGIN IMMEDIATE` with the exact same CAS/event primitives.
+   */
+  let cancelBoundary: ActionExecutionService | null = null;
+  const actionCancelService = (): ActionExecutionService => {
+    cancelBoundary ??= createActionExecutionService({ db });
+    return cancelBoundary;
+  };
+
+  /**
+   * Terminal cleanup is NOT part of the commit hook: apply only after the
+   * OUTER transaction of a terminal transition has committed successfully,
+   * so a rollback never loses a staged entry that a retry may still commit.
+   */
+  const clearStagedAfterTerminalCommit = (runId: string): void => {
+    if (stager !== undefined) {
+      stager.removeStaged(runId);
+    }
+  };
+
   function getSession(sessionId: string): SessionRow {
     const id = requireId(sessionId, "sessionId");
     const row = readSession(db, id);
@@ -673,6 +834,24 @@ export function createKernelRepository(db: Database.Database) {
     if (row === undefined || row.session_id !== session) {
       throw new RepositoryNotFoundError(
         `turn ${turn} not found in session ${session}`,
+      );
+    }
+    return row;
+  }
+
+  function requireOwnedProposal(
+    sessionId: string,
+    proposalId: string,
+  ): {
+    id: string;
+    session_id: string;
+  } {
+    const session = requireId(sessionId, "sessionId");
+    const proposal = requireId(proposalId, "proposalId");
+    const row = loadProposal(proposal);
+    if (row === null || row.session_id !== session) {
+      throw new RepositoryNotFoundError(
+        `proposal ${proposal} not found in session ${session}`,
       );
     }
     return row;
@@ -918,6 +1097,26 @@ export function createKernelRepository(db: Database.Database) {
           `turn ${turn} not found in session ${session}`,
         );
       }
+      const turnRow = ownedTurnRow;
+      // M5 decision-turn retry denial (§18.4/§18.6): the generic generation
+      // retry is user_text-only. A rejection Turn owns no Run and an
+      // approval Turn owns its Action Run; re-running either through this
+      // path could duplicate or fabricate an external write, so both are
+      // rejected BEFORE any idempotency lookup (no replay of a stored
+      // success), allocator CAS, Run/event insert, or grant side effect.
+      const turnInput = parseOrValidation(
+        () => parseTurnInput(JSON.parse(turnRow.input_json)),
+        "retry turn input_json",
+      );
+      if (turnInput.kind !== "user_text") {
+        throw new RepositoryValidationError(
+          "retry is only available for user_text turns",
+        );
+      }
+      parseOrValidation(
+        () => FrozenContextSchema.parse(JSON.parse(turnRow.frozen_context)),
+        "retry turn frozen_context",
+      );
       const existing = toStoredResponse(db, scope, key);
       if (existing !== null) {
         if (existing.requestHash !== hash) {
@@ -932,16 +1131,6 @@ export function createKernelRepository(db: Database.Database) {
         }
         return { status: existing.responseStatus, body, replayed: true };
       }
-      const turnRow = ownedTurnRow;
-      // Retry reuses the original immutable input/frozen context: read + validate only.
-      parseOrValidation(
-        () => parseTurnInput(JSON.parse(turnRow.input_json)),
-        "retry turn input_json",
-      );
-      parseOrValidation(
-        () => FrozenContextSchema.parse(JSON.parse(turnRow.frozen_context)),
-        "retry turn frozen_context",
-      );
       const busy = db
         .prepare(
           `SELECT id FROM runs WHERE session_id = ? AND status IN ${ACTIVE_STATUSES_SQL} LIMIT 1`,
@@ -1012,6 +1201,31 @@ export function createKernelRepository(db: Database.Database) {
   ): { applied: boolean; run: RunRow } {
     const id = requireId(runId, "runId");
     const now = nowMs(options.now);
+    // C23: an `m5-action` Run is dispatched to the SAME concrete
+    // ActionExecutionService that the strategy itself uses, so the generic
+    // scheduler pickup performs the REAL atomic pickup instead of throwing
+    // (which the engine's pump swallowed, leaving every approved Action
+    // queued forever). `startActionRun` moves the queued Run `-> running` AND
+    // the queued ActionExecution `-> preflight` and appends `run.started` +
+    // `action.preflight_started` in ONE transaction on this same connection.
+    // No `ReferenceManager` is needed for pickup, so the repository-owned
+    // lazy singleton (the cancel/recovery boundary) is reused as-is: one
+    // lifecycle owner, no cyclic import, no second state owner. The generic
+    // `{ applied, run }` result shape is preserved exactly. Terminalization
+    // still stays exclusively in the action service: completeRun/failRun
+    // below keep rejecting Action Runs outright.
+    const preflightRow = readRun(db, id);
+    if (preflightRow === null) {
+      throw new RepositoryNotFoundError(`run ${id} not found`);
+    }
+    if (preflightRow.strategy === "m5-action") {
+      const pickup = actionCancelService().startActionRun(id, { now });
+      const picked = readRun(db, id);
+      if (picked === null) {
+        throw new RepositoryNotFoundError(`run ${id} not found`);
+      }
+      return { applied: pickup.applied, run: parseRunRow(picked) };
+    }
     return withImmediate(db, () => {
       const row = readRun(db, id);
       if (row === null) {
@@ -1056,10 +1270,25 @@ export function createKernelRepository(db: Database.Database) {
     const id = requireId(runId, "runId");
     const now = nowMs(options.now);
     const valid = parseOrValidation(() => parseRunResult(result), "run result");
-    return withImmediate(db, () => {
+    // C17: a staged proposal is committed INSIDE the same successful CAS
+    // transaction, BEFORE the terminal transition/event. commitStaged never
+    // persists on its own: any failure throws out of withImmediate and rolls
+    // back the whole completion, preserving the staged entry until a retry
+    // (or a failure/cancel cleaning it) — clear only after the outer commit.
+    let committedProposal: CommittedProposal | null = null;
+    const outcome = withImmediate(db, () => {
       const row = readRun(db, id);
       if (row === null) {
         throw new RepositoryNotFoundError(`run ${id} not found`);
+      }
+      // C19: never generic-complete an Action Run — already terminalized
+      // action state is computed and committed atomically by the action
+      // execution service (receipt + events + Run terminal together), and
+      // any generic overwrite could contradict a committed marker.
+      if (row.strategy === "m5-action") {
+        throw new ActionRunDispatchRequiredError(
+          `m5-action run ${id} is terminally owned by the action execution service`,
+        );
       }
       // Cancel-first: only status='running' may complete. cancel_requested
       // (even within grace) and terminal states discard the result with no
@@ -1067,22 +1296,26 @@ export function createKernelRepository(db: Database.Database) {
       if (row.status !== "running") {
         return { applied: false, run: parseRunRow(row) };
       }
+      if (stager !== undefined && stager.getStaged(id) !== null) {
+        committedProposal = stager.commitStaged(id, now);
+      }
       const moved = db
         .prepare(
           "UPDATE runs SET status = 'completed', result_json = ?, finished_at = ? WHERE id = ? AND status = 'running'",
         )
         .run(JSON.stringify(valid), now, id);
       if (moved.changes !== 1) {
-        const current = readRun(db, id);
-        if (current === null) {
-          throw new RepositoryNotFoundError(`run ${id} not found`);
-        }
-        return { applied: false, run: parseRunRow(current) };
+        // Fail CLOSED: a concurrent CAS loss must never leave the appended
+        // action.proposed event persisted while the run stays running.
+        throw new KernelStorageError(
+          "kernel_concurrent_conflict",
+          "concurrent completion conflict; retry the transition",
+        );
       }
       appendEventInTx(
         db,
         id,
-        row.event_seq,
+        committedProposal === null ? row.event_seq : committedProposal.eventSeq,
         "run.completed",
         { result: valid },
         now,
@@ -1103,6 +1336,13 @@ export function createKernelRepository(db: Database.Database) {
       }
       return { applied: true, run: parseRunRow(current) };
     });
+    // Post-COMMIT only: clear the acknowledged staged entry exactly when the
+    // proposal transaction committed. Nothing is cleared on failure paths.
+    if (outcome.applied && committedProposal !== null) {
+      clearStagedAfterTerminalCommit(id);
+    }
+    committedProposal = null;
+    return outcome;
   }
 
   function failRun(
@@ -1117,10 +1357,19 @@ export function createKernelRepository(db: Database.Database) {
       () => parseRunErrorCode(errorCode),
       "run error_code",
     );
-    return withImmediate(db, () => {
+    const outcome = withImmediate(db, () => {
       const row = readRun(db, id);
       if (row === null) {
         throw new RepositoryNotFoundError(`run ${id} not found`);
+      }
+      // C19: an Action Run is never generic-failed. Its lifecycle is owned
+      // by the action execution service (atomic preflight/terminal
+      // transactions); the generic watchdog/abandon path must never destroy
+      // marker or receipt state.
+      if (row.strategy === "m5-action") {
+        throw new ActionRunDispatchRequiredError(
+          `m5-action run ${id} is terminally owned by the action execution service`,
+        );
       }
       if (row.status !== "running") {
         return { applied: false, run: parseRunRow(row) };
@@ -1151,6 +1400,11 @@ export function createKernelRepository(db: Database.Database) {
       }
       return { applied: true, run: parseRunRow(current) };
     });
+    // A failed run's staged proposal is dead: clean immediately (leak-free).
+    if (outcome.applied) {
+      clearStagedAfterTerminalCommit(id);
+    }
+    return outcome;
   }
 
   function cancelRun(
@@ -1159,7 +1413,26 @@ export function createKernelRepository(db: Database.Database) {
     options: TransitionOptions = {},
   ): { status: string; run: RunRow } {
     const now = nowMs(options.now);
-    return withImmediate(db, () => {
+    // C21 dispatch: an `m5-action` Run NEVER uses the generic cancel path.
+    // The concrete action execution service owns its cancellation boundary:
+    // ownership-first 404, terminal runs return their ACTUAL status unchanged,
+    // a committed `external_call_started_at` marker is a fixed
+    // `action_not_cancellable` 409 with ZERO writes, and only a queued /
+    // unmarkered-preflight run cancels atomically (grant left unconsumed, no
+    // external call). Dispatched OUTSIDE any transaction — the service opens
+    // its own single `BEGIN IMMEDIATE`.
+    const session = requireId(sessionId, "sessionId");
+    const dispatchId = requireId(runId, "runId");
+    const dispatchRow = readRun(db, dispatchId);
+    if (dispatchRow !== null && dispatchRow.strategy === "m5-action") {
+      const outcome = actionCancelService().cancelActionRun(
+        session,
+        dispatchId,
+        now,
+      );
+      return { status: outcome.runStatus, run: getRun(dispatchId) };
+    }
+    const outcome = withImmediate(db, () => {
       const row = requireOwnedRun(sessionId, runId);
       if (isTerminalStatus(row.status as RunStatus)) {
         return { status: row.status, run: parseRunRow(row) };
@@ -1216,6 +1489,15 @@ export function createKernelRepository(db: Database.Database) {
       // cancel_requested is state-idempotent: return current state, no new event.
       return { status: row.status, run: parseRunRow(row) };
     });
+    // Cancellation kills any staged proposal, including the cancel_requested
+    // intermediate (the run can never complete a proposal afterwards).
+    if (
+      outcome.status === "cancelled" ||
+      outcome.status === "cancel_requested"
+    ) {
+      clearStagedAfterTerminalCommit(runId);
+    }
+    return outcome;
   }
 
   function finalizeCancelRequested(
@@ -1224,7 +1506,7 @@ export function createKernelRepository(db: Database.Database) {
   ): { applied: boolean; run: RunRow } {
     const id = requireId(runId, "runId");
     const now = nowMs(options.now);
-    return withImmediate(db, () => {
+    const outcome = withImmediate(db, () => {
       const row = readRun(db, id);
       if (row === null) {
         throw new RepositoryNotFoundError(`run ${id} not found`);
@@ -1251,21 +1533,32 @@ export function createKernelRepository(db: Database.Database) {
       }
       return { applied: true, run: parseRunRow(current) };
     });
+    if (outcome.applied) {
+      clearStagedAfterTerminalCommit(id);
+    }
+    return outcome;
   }
 
   function sweepTerminals(
     cause: "restart_recovery" | "drain",
     now: number,
   ): { abandoned: number; cancelled: number } {
+    // C21: Action Runs NEVER use the generic sweep. An `m5-action` run is
+    // recovered by the action execution service (execution CAS + receipt +
+    // run abandoned, marker/receipt/grant coherent) in its OWN single
+    // transaction. It runs FIRST and fail-closed: an impossible Action pair
+    // throws before the generic sweep opens its transaction, so nothing is
+    // swept and no Action execution is left dangling.
+    actionCancelService().validateAndRecoverActionRuns(cause, now);
     return withImmediate(db, () => {
       const running = db
         .prepare(
-          `SELECT * FROM runs WHERE status = 'running' ORDER BY created_at ASC`,
+          `SELECT * FROM runs WHERE status = 'running' AND strategy <> 'm5-action' ORDER BY created_at ASC`,
         )
         .all() as RawRun[];
       const cancelling = db
         .prepare(
-          `SELECT * FROM runs WHERE status = 'cancel_requested' ORDER BY created_at ASC`,
+          `SELECT * FROM runs WHERE status = 'cancel_requested' AND strategy <> 'm5-action' ORDER BY created_at ASC`,
         )
         .all() as RawRun[];
       let abandoned = 0;
@@ -1284,6 +1577,8 @@ export function createKernelRepository(db: Database.Database) {
             { cause },
             now,
           );
+          // Abandonment kills any staged proposal (leak-free sweeps).
+          clearStagedAfterTerminalCommit(row.id);
           abandoned += 1;
         }
       }
@@ -1296,6 +1591,7 @@ export function createKernelRepository(db: Database.Database) {
           .run(now, row.id);
         if (moved.changes === 1) {
           appendEventInTx(db, row.id, row.event_seq, "run.cancelled", {}, now);
+          clearStagedAfterTerminalCommit(row.id);
           cancelled += 1;
         }
       }
@@ -1316,6 +1612,66 @@ export function createKernelRepository(db: Database.Database) {
     cancelled: number;
   } {
     return sweepTerminals("drain", nowMs(options.now));
+  }
+
+  /**
+   * C21: safe disposition of a run the engine orphaned while it was
+   * `running` (post-pickup snapshot/read failure, watchdog finalization).
+   * An `m5-action` Run is NEVER generically failed: it is dispatched to the
+   * action execution service, which applies the SAME pre/post-marker
+   * disposition as recovery/drain (failed receipt + abandoned, or unknown
+   * receipt + abandoned) so no dangling execution survives. Every other
+   * strategy keeps the generic `running -> abandoned` transition.
+   */
+  function settleAbandonedRunningRun(
+    runId: string,
+    options: TransitionOptions & { cause?: "restart_recovery" | "drain" } = {},
+  ): { applied: boolean; status: string } {
+    const id = requireId(runId, "runId");
+    const now = nowMs(options.now);
+    const cause = options.cause ?? "restart_recovery";
+    const row = readRun(db, id);
+    if (row === null) {
+      throw new RepositoryNotFoundError(`run ${id} not found`);
+    }
+    if (row.strategy === "m5-action") {
+      const outcome = actionCancelService().recoverAbandonedActionRun(
+        id,
+        cause,
+        now,
+      );
+      return { applied: outcome.applied, status: outcome.runStatus };
+    }
+    const outcome = withImmediate(db, () => {
+      const current = readRun(db, id);
+      if (current === null) {
+        throw new RepositoryNotFoundError(`run ${id} not found`);
+      }
+      if (current.status !== "running") {
+        return { applied: false, status: current.status };
+      }
+      const moved = db
+        .prepare(
+          "UPDATE runs SET status = 'abandoned', finished_at = ? WHERE id = ? AND status = 'running'",
+        )
+        .run(now, id);
+      if (moved.changes !== 1) {
+        return { applied: false, status: "running" };
+      }
+      appendEventInTx(
+        db,
+        id,
+        current.event_seq,
+        "run.abandoned",
+        { cause },
+        now,
+      );
+      return { applied: true, status: "abandoned" };
+    });
+    if (outcome.applied) {
+      clearStagedAfterTerminalCommit(id);
+    }
+    return outcome;
   }
 
   function appendToolEvent(
@@ -1411,8 +1767,123 @@ export function createKernelRepository(db: Database.Database) {
     const page = rows.slice(0, limit).reverse();
     const nextBefore =
       hasMore && page.length > 0 ? (page[0] as RawTurn).seq : null;
+    /** T1: actual receipt view for an OWNED execution id (null else). */
+    const receiptViewForExecution = (
+      executionId: string,
+    ): ActionReceiptView | null => {
+      const receipt = db
+        .prepare(
+          "SELECT outcome, summary_json, created_at FROM action_receipts WHERE execution_id = ?",
+        )
+        .get(executionId) as
+        | { outcome: string; summary_json: string; created_at: number }
+        | undefined;
+      if (receipt === undefined) {
+        return null;
+      }
+      return parseOrValidation(
+        () =>
+          ActionReceiptViewSchema.parse({
+            outcome: receipt.outcome,
+            summary: JSON.parse(receipt.summary_json) as unknown,
+            createdAt: receipt.created_at,
+          }),
+        "action receipt view",
+      );
+    };
+    /**
+     * T1: ACTUAL owned Action execution + receipt projection for an
+     * approval Turn, INDEPENDENT of `turn_selections` (which stays
+     * completed-only for the `user_text` path). Exact FK ownership:
+     * execution.session_id = history session AND
+     * execution.approval_turn_id = this turn AND
+     * run.session_id = session AND run.turn_id = turn. Never fabricates a
+     * selection or success: non-completed terminals carry `result: null`
+     * with the actual receipt; active runs carry `receipt: null` with live
+     * statuses (frozen intent + progress, never a fake failure).
+     */
+    const approvalRunProjection = (
+      turnId: string,
+    ): {
+      runId: string;
+      attempt: number;
+      runStatus: RunStatus;
+      finishedAt: number | null;
+      result: RunResult | null;
+      receipt: ActionReceiptView | null;
+      executionStatus: ActionExecutionStatus | null;
+    } | null => {
+      const execution = db
+        .prepare(
+          `SELECT id, action_run_id, status FROM action_executions
+           WHERE session_id = ? AND approval_turn_id = ?`,
+        )
+        .get(session, turnId) as
+        | { id: string; action_run_id: string; status: string }
+        | undefined;
+      if (execution === undefined) {
+        return null;
+      }
+      const runRow = readRun(db, execution.action_run_id);
+      if (
+        runRow === null ||
+        runRow.session_id !== session ||
+        runRow.turn_id !== turnId
+      ) {
+        return null;
+      }
+      const runStatus = parseOrValidation(
+        () => RunStatusSchema.parse(runRow.status),
+        "history action run status",
+      );
+      const executionStatus = parseOrValidation(
+        () => ActionExecutionStatusSchema.parse(execution.status),
+        "history action execution status",
+      );
+      const result =
+        runRow.result_json === null
+          ? null
+          : parseOrValidation(
+              () => parseRunResult(JSON.parse(runRow.result_json as string)),
+              "history selected result",
+            );
+      return {
+        runId: runRow.id,
+        attempt: runRow.attempt,
+        runStatus,
+        finishedAt: runRow.finished_at,
+        result,
+        receipt: receiptViewForExecution(execution.id),
+        executionStatus,
+      };
+    };
     const items = page.map((row) => {
       const turn = parseTurnRow(row);
+      // C18 (§18.4): the two M5 decision kinds project as exact
+      // hash-bound decision items; a rejection carries no Run ever (the
+      // kind is the discriminant, selectedRun stays null).
+      if (turn.input.kind === "action_rejection") {
+        return {
+          turnId: row.id,
+          seq: row.seq,
+          kind: turn.input.kind,
+          proposalId: turn.input.proposalId,
+          proposalHash: turn.input.proposalHash,
+          createdAt: row.created_at,
+          selectedRun: null,
+        };
+      }
+      if (turn.input.kind === "action_approval") {
+        return {
+          turnId: row.id,
+          seq: row.seq,
+          kind: turn.input.kind,
+          proposalId: turn.input.proposalId,
+          proposalHash: turn.input.proposalHash,
+          createdAt: row.created_at,
+          selectedRun: approvalRunProjection(row.id),
+        };
+      }
       if (turn.input.kind !== "user_text") {
         throw new RepositoryValidationError(`unsupported turn kind in history`);
       }
@@ -1847,6 +2318,580 @@ export function createKernelRepository(db: Database.Database) {
     });
   }
 
+  /* ---------------------------------------------------------------- */
+  /* C18 proposal decisions (§18.4).                                    */
+  /*                                                                    */
+  /* Session-owned, single BEGIN IMMEDIATE per decision. approve is     */
+  /* keyed (scope `proposal:{id}:approve`) and idempotently replays     */
+  /* the exact stored 202; reject is keyless and state-idempotent       */
+  /* (at most one `action_rejection` Turn ever). No execution runtime   */
+  /* exists yet: the approved Action Run stays QUEUED (never started    */
+  /* by the engine until the C18+ strategy registers — pickup only      */
+  /* selects registered strategies), so no external write can happen.   */
+  /* ---------------------------------------------------------------- */
+
+  interface RawProposal {
+    id: string;
+    session_id: string;
+    source_turn_id: string;
+    source_run_id: string;
+    decision_turn_id: string | null;
+    tool: string;
+    input_json: string;
+    target_ref_id: string;
+    target_resource_id: string;
+    based_on_snapshot_id: string;
+    expected_revision: string;
+    preview_json: string;
+    hash: string;
+    status: string;
+    created_at: number;
+    expires_at: number;
+    resolved_at: number | null;
+  }
+
+  function loadProposal(proposalId: string): RawProposal | null {
+    const id = requireId(proposalId, "proposalId");
+    return (
+      (db.prepare("SELECT * FROM action_proposals WHERE id = ?").get(id) as
+        | RawProposal
+        | undefined) ?? null
+    );
+  }
+
+  function parseProposalSummary(row: RawProposal): ProposalSummary {
+    return parseOrValidation(
+      () =>
+        ProposalSummarySchema.parse({
+          proposalId: row.id,
+          tool: row.tool,
+          input: JSON.parse(row.input_json),
+          preview: JSON.parse(row.preview_json),
+          hash: row.hash,
+          status: row.status,
+          createdAt: row.created_at,
+          expiresAt: row.expires_at,
+          resolvedAt: row.resolved_at,
+          decisionTurnId: row.decision_turn_id,
+        }),
+      "proposal summary",
+    );
+  }
+
+  /**
+   * Freeze a decision Turn: the same immutable FrozenContext shape as an
+   * M0 message Turn (current ordering/sets of the session reference
+   * context + temporal now), with an empty UI context (decisions carry no
+   * UI payload). Missing context row is corrupt state (fail closed).
+   */
+  function freezeDecisionContext(
+    sessionId: string,
+    now: number,
+    timeZone: string,
+  ): FrozenContext {
+    const contextRow = db
+      .prepare(
+        "SELECT version, items_json FROM session_reference_context WHERE session_id = ?",
+      )
+      .get(sessionId) as { version: number; items_json: string } | undefined;
+    if (contextRow === undefined) {
+      throw new DatabaseStateInvalidError(
+        `reference context missing for session ${sessionId}`,
+      );
+    }
+    return parseOrValidation(
+      () =>
+        FrozenContextSchema.parse({
+          version: 1,
+          temporal: { now, timeZone },
+          uiContext: {},
+          referenceContext: {
+            version: contextRow.version,
+            items: JSON.parse(contextRow.items_json) as unknown[],
+          },
+        }),
+      "decision frozen context",
+    );
+  }
+
+  /**
+   * Shared Turn-allocator CAS (`next_turn_position`): mirrors postMessage
+   * exactly so a concurrent decision/message in the same session cannot
+   * interleave sequencing.
+   */
+  function allocateDecisionTurn(
+    session: string,
+    inputJson: string,
+    frozen: FrozenContext,
+    now: number,
+  ): string {
+    const sessionRow = readSession(db, session);
+    if (sessionRow === null) {
+      throw new RepositoryNotFoundError(`session ${session} not found`);
+    }
+    const seq = sessionRow.nextTurnPosition;
+    const turnId = generateId();
+    db.prepare(
+      "INSERT INTO turns (id, session_id, seq, input_json, frozen_context, created_at, next_run_attempt) VALUES (?, ?, ?, ?, ?, ?, 1)",
+    ).run(turnId, session, seq, inputJson, JSON.stringify(frozen), now);
+    const moved = db
+      .prepare(
+        "UPDATE sessions SET next_turn_position = ?, last_active_at = ? WHERE id = ? AND next_turn_position = ?",
+      )
+      .run(seq + 1, now, session, seq);
+    if (moved.changes !== 1) {
+      throw new RepositoryValidationError(
+        "concurrent turn allocation conflict",
+      );
+    }
+    return turnId;
+  }
+
+  /** Ordered, already-completed proposals first (bounded read, no writes). */
+  function listProposals(sessionId: string): ProposalsListResponse {
+    const session = requireId(sessionId, "sessionId");
+    if (readSession(db, session) === null) {
+      throw new RepositoryNotFoundError(`session ${session} not found`);
+    }
+    const rows = db
+      .prepare(
+        "SELECT * FROM action_proposals WHERE session_id = ? ORDER BY created_at DESC, id DESC LIMIT ?",
+      )
+      .all(session, 100) as RawProposal[];
+    return parseOrValidation(
+      () =>
+        ProposalsListResponseSchema.parse({
+          proposals: rows.map((row) => parseProposalSummary(row)),
+        }),
+      "proposals list response",
+    );
+  }
+
+  /**
+   * Actual execution + receipt read for ONE session-owned proposal (C22).
+   * Bounded single-row joins, no writes: the approval UX polls this to show
+   * the real `queued`/`preflight`/`executing` progress, the real terminal
+   * receipt, and the exact Stop boundary (`markerCommitted`). A proposal
+   * that was never approved reads back nulls (never a fabricated run).
+   */
+  function getProposalExecution(
+    sessionId: string,
+    proposalId: string,
+  ): ProposalExecutionView {
+    const session = requireId(sessionId, "sessionId");
+    const proposal = requireId(proposalId, "proposalId");
+    if (readSession(db, session) === null) {
+      throw new RepositoryNotFoundError(`session ${session} not found`);
+    }
+    const row = loadProposal(proposal);
+    if (row === null || row.session_id !== session) {
+      throw new RepositoryNotFoundError(
+        `proposal ${proposal} not found in session ${session}`,
+      );
+    }
+    const execution = db
+      .prepare(
+        `SELECT id, action_run_id, status, external_call_started_at, error_code
+         FROM action_executions WHERE session_id = ? AND proposal_id = ?`,
+      )
+      .get(session, proposal) as
+      | {
+          id: string;
+          action_run_id: string;
+          status: string;
+          external_call_started_at: number | null;
+          error_code: string | null;
+        }
+      | undefined;
+    const receiptRow =
+      execution === undefined
+        ? undefined
+        : (db
+            .prepare(
+              "SELECT outcome, summary_json, created_at FROM action_receipts WHERE execution_id = ?",
+            )
+            .get(execution.id) as
+            | { outcome: string; summary_json: string; created_at: number }
+            | undefined);
+    const status =
+      execution === undefined
+        ? null
+        : (parseOrValidation(
+            () => ActionExecutionStatusSchema.parse(execution.status),
+            "execution status",
+          ) as ActionExecutionStatus);
+    const markerCommitted =
+      execution !== undefined && execution.external_call_started_at !== null;
+    const live =
+      status !== null &&
+      status !== "succeeded" &&
+      status !== "succeeded_unverified" &&
+      status !== "blocked_stale" &&
+      status !== "failed" &&
+      status !== "unknown";
+    return parseOrValidation(
+      () =>
+        ProposalExecutionViewSchema.parse({
+          proposalId: proposal,
+          proposalStatus: row.status,
+          runId: execution === undefined ? null : execution.action_run_id,
+          status,
+          markerCommitted,
+          cancellable: live && !markerCommitted,
+          errorCode: execution === undefined ? null : execution.error_code,
+          receipt:
+            receiptRow === undefined
+              ? null
+              : {
+                  outcome: receiptRow.outcome,
+                  summary: JSON.parse(receiptRow.summary_json) as unknown,
+                  createdAt: receiptRow.created_at,
+                },
+        }),
+      "proposal execution view",
+    );
+  }
+
+  function approveProposal(
+    sessionId: string,
+    proposalId: string,
+    request: { proposalHash: string },
+    options: ApproveProposalOptions,
+  ): AcceptedResponse<ProposalApprove202Response> {
+    const session = requireId(sessionId, "sessionId");
+    const proposal = requireId(proposalId, "proposalId");
+    const key = requireKey(options.key);
+    const now = nowMs(options.now);
+    const timeZone = options.timeZone ?? "UTC";
+    const parsed = parseOrValidation(
+      () => ProposalApproveRequestSchema.parse(request),
+      "approve request",
+    );
+    const scope = parseOrValidation(
+      () => IdempotencyScopeSchema.parse(proposalApproveScope(proposal)),
+      "approve scope",
+    );
+    const hash = requestHash(
+      IDEMPOTENCY_OPERATIONS.approveProposal.operation,
+      IDEMPOTENCY_OPERATIONS.approveProposal.schemaVersion,
+      { proposalId: proposal, proposalHash: parsed.proposalHash },
+    );
+    type ApproveOutcome =
+      | DecisionOk<ProposalApprove202Response>
+      | DecisionConflict
+      | DecisionBusy;
+    const outcome: ApproveOutcome = withImmediate(db, () => {
+      if (readSession(db, session) === null) {
+        throw new RepositoryNotFoundError(`session ${session} not found`);
+      }
+      // Ownership first: a foreign proposal id is 404, never a replay/probe.
+      const row = loadProposal(proposal);
+      if (row === null || row.session_id !== session) {
+        throw new RepositoryNotFoundError(
+          `proposal ${proposal} not found in session ${session}`,
+        );
+      }
+      // Keyed idempotency BEFORE any state check; the stored body must also
+      // carry THIS proposal (owner drift is a key misuse, not a replay).
+      const existing = toStoredResponse(db, scope, key);
+      if (existing !== null) {
+        if (existing.requestHash !== hash) {
+          throw new IdempotencyConflictError(scope);
+        }
+        const body = parseOrValidation(
+          () => ProposalApprove202ResponseSchema.parse(existing.responseBody),
+          "stored approve body",
+        );
+        if (body.proposalId !== proposal) {
+          throw new IdempotencyConflictError(scope);
+        }
+        return {
+          kind: "ok",
+          status: existing.responseStatus,
+          body,
+          replayed: true,
+        };
+      }
+      // Exact binding: the request must carry the stored immutable hash.
+      if (row.hash !== parsed.proposalHash) {
+        throw new ProposalHashMismatchError();
+      }
+      // Terminal states are conflicts (reject cannot approve and vice versa).
+      if (row.status !== "pending") {
+        return {
+          kind: "state_conflict",
+          reason: row.status as "approved" | "rejected" | "expired",
+          proposalId: proposal,
+        };
+      }
+      // Expired pending: resolve expired SAFELY inside this same
+      // transaction (CAS pending -> expired + resolved_at), then report a
+      // conflict AFTER commit so the resolution persists.
+      if (now >= row.expires_at) {
+        const expired = db
+          .prepare(
+            "UPDATE action_proposals SET status = 'expired', resolved_at = ? WHERE id = ? AND session_id = ? AND status = 'pending'",
+          )
+          .run(now, proposal, session);
+        if (expired.changes !== 1) {
+          throw new KernelStorageError(
+            "kernel_concurrent_conflict",
+            "concurrent proposal decision conflict; retry",
+          );
+        }
+        return {
+          kind: "state_conflict",
+          reason: "expired",
+          proposalId: proposal,
+        };
+      }
+      // §18.4: no active Run may exist in the session at decision time.
+      const busy = db
+        .prepare(
+          `SELECT id FROM runs WHERE session_id = ? AND status IN ${ACTIVE_STATUSES_SQL} LIMIT 1`,
+        )
+        .get(session) as { id: string } | undefined;
+      if (busy !== undefined) {
+        return { kind: "busy", proposalId: proposal };
+      }
+      const frozen = freezeDecisionContext(session, now, timeZone);
+      // Exact action_approval TurnInput (contracts variant, version 1).
+      const turnInput = parseOrValidation(
+        () =>
+          parseTurnInput({
+            kind: "action_approval",
+            version: 1,
+            proposalId: proposal,
+            proposalHash: parsed.proposalHash,
+          }),
+        "approval turn input",
+      );
+      const decisionTurnId = allocateDecisionTurn(
+        session,
+        JSON.stringify(turnInput),
+        frozen,
+        now,
+      );
+      const runId = generateId();
+      const executionId = generateId();
+      // CAS the exact single transition BEFORE the execution/grant/runs.
+      const moved = db
+        .prepare(
+          "UPDATE action_proposals SET status = 'approved', resolved_at = ?, decision_turn_id = ? WHERE id = ? AND session_id = ? AND status = 'pending'",
+        )
+        .run(now, decisionTurnId, proposal, session);
+      if (moved.changes !== 1) {
+        throw new KernelStorageError(
+          "kernel_concurrent_conflict",
+          "concurrent proposal decision conflict; retry",
+        );
+      }
+      // Queued Action Run on the decision Turn; no execution runtime
+      // exists, so it stays queued (engine pickup only selects REGISTERED
+      // strategies) until the deterministic action strategy is wired.
+      db.prepare(
+        `INSERT INTO runs (id, turn_id, session_id, attempt, status, strategy,
+          result_json, error_code, event_seq, select_on_success,
+          tool_requests_used, created_at, started_at, finished_at, cancel_requested_at)
+         VALUES (?, ?, ?, 1, 'queued', 'm5-action', NULL, NULL, 0, 1, 0, ?, NULL, NULL, NULL)`,
+      ).run(runId, decisionTurnId, session, now);
+      appendEventInTx(db, runId, 0, "run.queued", { attempt: 1 }, now);
+      appendEventInTx(
+        db,
+        runId,
+        1,
+        "action.approved",
+        ActionApprovedPayloadSchema.parse({
+          proposalId: proposal,
+          proposalHash: parsed.proposalHash,
+          executionId,
+        }),
+        now,
+      );
+      db.prepare(
+        `INSERT INTO action_executions (id, session_id, proposal_id, approval_turn_id, action_run_id, status, external_call_started_at, finished_at, error_code, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'queued', NULL, NULL, NULL, ?, ?)`,
+      ).run(executionId, session, proposal, decisionTurnId, runId, now, now);
+      // One-shot exact grant: inputHash over the canonical proposed input.
+      const proposedInput = parseOrValidation(
+        () =>
+          CalendarRescheduleToolInputSchema.parse(JSON.parse(row.input_json)),
+        "proposal input",
+      );
+      db.prepare(
+        `INSERT INTO action_execution_grants (execution_id, session_id, proposal_id, proposal_hash, tool, input_hash, consumed_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, NULL, ?)`,
+      ).run(
+        executionId,
+        session,
+        proposal,
+        row.hash,
+        row.tool,
+        sha256Hex(canonicalJsonString(proposedInput)),
+        now,
+      );
+      const body = parseOrValidation(
+        () =>
+          ProposalApprove202ResponseSchema.parse({
+            proposalId: proposal,
+            executionId,
+            runId,
+            status: "queued",
+          }),
+        "approve response",
+      );
+      storeIdempotentResponse(db, scope, key, hash, 202, body, now);
+      return { kind: "ok", status: 202, body, replayed: false };
+    });
+    // Post-commit mapping so conflict-time state changes (the safe expired
+    // resolution) persist before the error is observed.
+    if (outcome.kind === "state_conflict") {
+      throw new ProposalStateConflictError(
+        `proposal ${outcome.proposalId} is ${outcome.reason}, not pending`,
+      );
+    }
+    if (outcome.kind === "busy") {
+      throw new SessionBusyError(session);
+    }
+    return {
+      status: outcome.status,
+      body: outcome.body,
+      replayed: outcome.replayed,
+    };
+  }
+
+  /**
+   * Reject is KEYLESS and state-idempotent (§18.4): exactly one
+   * `pending -> rejected` CAS per proposal plus at most ONE
+   * `action_rejection` Turn; repeat rejects return the same deterministic
+   * body without creating anything. No Run, no events, no external call.
+   */
+  function rejectProposal(
+    sessionId: string,
+    proposalId: string,
+    request: { proposalHash: string },
+    options: RejectProposalOptions = {},
+  ): { status: number; body: ProposalRejectResponse } {
+    const session = requireId(sessionId, "sessionId");
+    const proposal = requireId(proposalId, "proposalId");
+    const now = nowMs(options.now);
+    const timeZone = options.timeZone ?? "UTC";
+    const parsed = parseOrValidation(
+      () => ProposalRejectRequestSchema.parse(request),
+      "reject request",
+    );
+    type RejectOutcome = DecisionOk<ProposalRejectResponse> | DecisionConflict;
+    const outcome: RejectOutcome = withImmediate(db, () => {
+      if (readSession(db, session) === null) {
+        throw new RepositoryNotFoundError(`session ${session} not found`);
+      }
+      const row = loadProposal(proposal);
+      if (row === null || row.session_id !== session) {
+        throw new RepositoryNotFoundError(
+          `proposal ${proposal} not found in session ${session}`,
+        );
+      }
+      // Keyless, so exact hash binding is the request's full integrity.
+      if (row.hash !== parsed.proposalHash) {
+        throw new ProposalHashMismatchError();
+      }
+      if (row.status === "rejected") {
+        // State-idempotent: the same deterministic state, nothing new.
+        return {
+          kind: "ok",
+          status: 200,
+          body: parseOrValidation(
+            () =>
+              ProposalRejectResponseSchema.parse({
+                proposalId: proposal,
+                status: "rejected",
+                decisionTurnId: row.decision_turn_id,
+                resolvedAt: row.resolved_at,
+              }),
+            "reject response",
+          ),
+          replayed: true,
+        };
+      }
+      if (row.status !== "pending") {
+        return {
+          kind: "state_conflict",
+          reason: row.status as "approved" | "expired",
+          proposalId: proposal,
+        };
+      }
+      // Expired pending: safe same-tx resolution (expired has NO decision
+      // Turn and NO rejection body), then a post-commit conflict.
+      if (now >= row.expires_at) {
+        const expired = db
+          .prepare(
+            "UPDATE action_proposals SET status = 'expired', resolved_at = ? WHERE id = ? AND session_id = ? AND status = 'pending'",
+          )
+          .run(now, proposal, session);
+        if (expired.changes !== 1) {
+          throw new KernelStorageError(
+            "kernel_concurrent_conflict",
+            "concurrent proposal decision conflict; retry",
+          );
+        }
+        return {
+          kind: "state_conflict",
+          reason: "expired",
+          proposalId: proposal,
+        };
+      }
+      const frozen = freezeDecisionContext(session, now, timeZone);
+      const turnInput = parseOrValidation(
+        () =>
+          parseTurnInput({
+            kind: "action_rejection",
+            version: 1,
+            proposalId: proposal,
+            proposalHash: parsed.proposalHash,
+          }),
+        "rejection turn input",
+      );
+      const decisionTurnId = allocateDecisionTurn(
+        session,
+        JSON.stringify(turnInput),
+        frozen,
+        now,
+      );
+      const moved = db
+        .prepare(
+          "UPDATE action_proposals SET status = 'rejected', resolved_at = ?, decision_turn_id = ? WHERE id = ? AND session_id = ? AND status = 'pending'",
+        )
+        .run(now, decisionTurnId, proposal, session);
+      if (moved.changes !== 1) {
+        throw new KernelStorageError(
+          "kernel_concurrent_conflict",
+          "concurrent proposal decision conflict; retry",
+        );
+      }
+      return {
+        kind: "ok",
+        status: 200,
+        body: parseOrValidation(
+          () =>
+            ProposalRejectResponseSchema.parse({
+              proposalId: proposal,
+              status: "rejected",
+              decisionTurnId,
+              resolvedAt: now,
+            }),
+          "reject response",
+        ),
+        replayed: false,
+      };
+    });
+    if (outcome.kind === "state_conflict") {
+      throw new ProposalStateConflictError(
+        `proposal ${outcome.proposalId} is ${outcome.reason}, not pending`,
+      );
+    }
+    return { status: outcome.status, body: outcome.body };
+  }
+
   function lookupIdempotency(
     scope: string,
     key: string,
@@ -1898,6 +2943,14 @@ export function createKernelRepository(db: Database.Database) {
     const turnMatch = /^turn:([^:]+):retry$/.exec(validScope);
     if (turnMatch?.[1] !== undefined) {
       requireOwnedTurn(session, assertUuidV4(turnMatch[1], "turnId"));
+      return lookupIdempotency(validScope, validKey);
+    }
+    const proposalMatch = /^proposal:([^:]+):approve$/.exec(validScope);
+    if (proposalMatch?.[1] !== undefined) {
+      requireOwnedProposal(
+        session,
+        assertUuidV4(proposalMatch[1], "proposalId"),
+      );
       return lookupIdempotency(validScope, validKey);
     }
     throw new RepositoryNotFoundError(
@@ -2300,7 +3353,7 @@ export function createKernelRepository(db: Database.Database) {
   }
 
   /* ---------------------------------------------------------------- */
-  /* Conversation-memory outbox (remind CLI integration, migration 0006) */
+  /* Conversation-memory outbox (remind CLI integration, migration 0008) */
   /* ---------------------------------------------------------------- */
   //
   // Companion-owned durable queue only: remind stays a separate
@@ -2662,6 +3715,7 @@ export function createKernelRepository(db: Database.Database) {
     finalizeCancelRequested,
     recover,
     drain,
+    settleAbandonedRunningRun,
     appendToolEvent,
     appendModelStepEvent,
     recordModelCall,
@@ -2685,6 +3739,10 @@ export function createKernelRepository(db: Database.Database) {
     getSelection,
     getHistory,
     getEvents,
+    listProposals,
+    getProposalExecution,
+    approveProposal,
+    rejectProposal,
     listReferences,
     getReferenceDetail,
     getReferenceSet,
@@ -2697,6 +3755,7 @@ export function createKernelRepository(db: Database.Database) {
       parseRunRow(requireOwnedRun(sessionId, runId)),
     requireOwnedTurn: (sessionId: string, turnId: string): TurnRow =>
       parseTurnRow(requireOwnedTurn(sessionId, turnId)),
+    actionProposalsStager: stager,
   };
 }
 

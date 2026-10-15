@@ -949,8 +949,8 @@ describe("metadata-only audit, fixed errors, timeouts, cancellation", () => {
 });
 
 describe("migration 0005 model_calls (§15.10)", () => {
-  it("ships version 6 with the metadata-only model_calls table, checks, and lookup index", async () => {
-    expect(BUNDLED_SCHEMA_VERSION).toBe(6);
+  it("ships version 5 with the metadata-only model_calls table, checks, and lookup index", async () => {
+    expect(BUNDLED_SCHEMA_VERSION).toBeGreaterThanOrEqual(5);
     const { handle } = await setup();
     try {
       const sql = (

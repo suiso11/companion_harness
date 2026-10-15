@@ -198,7 +198,10 @@ describe("structured result persistence (V2 RunResult)", () => {
       // Selected-completed history retains citations in durable/API data…
       const history = repo.getHistory(v2.sessionId, {});
       const item = history.items.find((entry) => entry.turnId === v2.turnId);
-      expect(item?.selectedRun?.result).toEqual(durable);
+      expect(item?.kind).toBe("user_text");
+      const selectedResult =
+        item?.kind === "user_text" ? item.selectedRun?.result : undefined;
+      expect(selectedResult).toEqual(durable);
 
       // …while the prompt projection receives rendered text only (never
       // the raw answer JSON, tool events, or provider output).
@@ -209,9 +212,7 @@ describe("structured result persistence (V2 RunResult)", () => {
             turnSeq: item?.seq ?? 1,
             requestText: "research this",
             resultText:
-              item?.selectedRun?.result.version === 2
-                ? item.selectedRun.result.text
-                : "legacy",
+              selectedResult?.version === 2 ? selectedResult.text : "legacy",
           },
         ],
         references: [],

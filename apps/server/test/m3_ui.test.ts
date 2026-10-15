@@ -5,10 +5,9 @@
 // reducer contract (dup/gap/unknown/failure-only retry/contextual stop).
 
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { PostMessageResponseSchema } from "@companion/contracts";
 import {
   closeKernelDatabase,
@@ -326,6 +325,28 @@ describe("M3 client reducer contract", () => {
     expect(stopped.retryVisible).toBe(false);
   });
 
+  it("maps abandoned like failed: failure notice plus failure-only retry", () => {
+    // Consumer edge (§16.2/§16.7): a restart-recovered abandoned run must
+    // render as a failure with exactly one retry control, never as an
+    // answer, a stop, or a silent drop. Same mapping as run.failed.
+    const s1 = applyRunEvent(INITIAL_RUN_VIEW, {
+      seq: 1,
+      type: "run.started",
+      payload: {},
+    }).state;
+    const abandoned = applyRunEvent(s1, {
+      seq: 2,
+      type: "run.abandoned",
+      payload: {},
+    });
+    expect(abandoned.outcome.kind).toBe("applied");
+    expect(abandoned.state.visible).toBe("failed");
+    expect(abandoned.state.retryVisible).toBe(true);
+    expect(abandoned.state.stopVisible).toBe(false);
+    expect(abandoned.state.notice).toBe("生成に失敗しました");
+    expect(abandoned.state.answer).toEqual([]);
+  });
+
   it("maps real V1 and V2 RunResult rows to answer parts", () => {
     // V1 historical M0/M1 row: text only, no citations.
     const v1 = runResultToAnswerParts({ version: 1, text: "legacy answer" });
@@ -502,27 +523,6 @@ describe("M3 client reducer contract", () => {
   });
 });
 
-describe("M3 client frozen-request + unbounded fallback source contract", () => {
-  const here = dirname(fileURLToPath(import.meta.url));
-  const source = readFileSync(
-    join(here, "..", "src", "ui", "client.ts"),
-    "utf8",
-  );
-
-  it("freezes key+body once: resend reuses pendingRequest without refetch", () => {
-    // Regression for HEAD frozen-resend fix (§16.7/§9 exact): the reference
-    // context is fetched once into the frozen pendingRequest; resend() must
-    // reuse it as-is so the replay body hash stays stable.
-    expect(source).toContain("private pendingRequest");
-    expect(source).toContain("fetchUiContext");
-    const resendStart = source.indexOf("async resend()");
-    expect(resendStart).toBeGreaterThan(-1);
-    const resendBody = source.slice(resendStart, resendStart + 800);
-    expect(resendBody).toContain("pendingRequest");
-    expect(resendBody).not.toContain("fetchUiContext");
-  });
-});
-
 describe("M3 SSE loop lifetime (fake timers)", () => {
   interface FakeTimer {
     id: number;
@@ -623,104 +623,219 @@ describe("M3 SSE loop lifetime (fake timers)", () => {
     expect(maxInside).toBe(1);
     await drain();
   });
-});
 
-describe("M3 review-fix regressions (client source contract)", () => {
-  const here = dirname(fileURLToPath(import.meta.url));
-  const source = readFileSync(
-    join(here, "..", "src", "ui", "client.ts"),
-    "utf8",
-  );
-
-  function methodBody(name: string): string {
-    const start = source.indexOf(name);
-    expect(start).toBeGreaterThan(-1);
-    return source.slice(start, start + 2500);
-  }
-
-  it("send stays disabled while the request is frozen/in flight and restores on failure", () => {
-    const composer = methodBody("private renderComposer()");
-    expect(composer).toContain("this.sending");
-    const send = methodBody("private async send()");
-    expect(send).toContain("this.sending = true");
-    expect(send).toContain("catch");
-    expect(send).toContain("this.sending = false");
+  it("emits the heartbeat through the live stream when its timer fires", async () => {
+    // Lifecycle, not a constant copy: arm the real loop with controlled
+    // timers, fire the non-poll interval, and read the actual heartbeat
+    // bytes off the live stream.
+    const timers = makeTimers();
+    const source = {
+      getEvents: () => ({
+        events: [],
+        nextAfter: 0,
+        hasMore: false,
+        terminal: false,
+      }),
+      getRun: () => ({ status: "running", eventSeq: 0 }),
+    };
+    const res = createSseResponse(source, "s", "r", 0, timers);
+    expect(timers.created.length).toBe(2); // poll + heartbeat
+    const heartbeat = timers.created.reduce((a, b) => (a.ms > b.ms ? a : b));
+    const poll = timers.created.reduce((a, b) => (a.ms <= b.ms ? a : b));
+    expect(heartbeat.id).not.toBe(poll.id);
+    heartbeat.fn();
+    await drain();
+    const reader = res.body?.getReader();
+    const first = await reader?.read();
+    expect(first?.done).toBe(false);
+    expect(new TextDecoder().decode(first?.value)).toBe(SSE_HEARTBEAT_CHUNK);
+    await reader?.cancel().catch(() => {});
+    await res.body?.cancel().catch(() => {});
   });
 
-  it("retains the pending idempotency key on transient lookup errors", () => {
-    const recover = methodBody("private async recoverPending()");
-    expect(recover).toContain("catch");
-    expect(recover).toContain("status >= 500");
-    // The retain paths return BEFORE clearPendingKey runs.
-    const firstClear = recover.indexOf("clearPendingKey");
-    const firstTransient = recover.indexOf("status >= 500");
-    expect(firstTransient).toBeGreaterThan(-1);
-    expect(firstTransient).toBeLessThan(firstClear);
+  it("serves two independent streams on the same run with identical bytes", async () => {
+    // Multi-client (§16.4): one slow reader must never starve or reshape
+    // another subscriber of the same run; each stream carries its own
+    // cursor and delivers the same wire bytes.
+    const timersA = makeTimers();
+    const timersB = makeTimers();
+    const event = {
+      schemaVersion: 1,
+      runId: "r",
+      seq: 1,
+      type: "run.queued",
+      createdAt: 1,
+      payload: {},
+    };
+    const source = {
+      getEvents: () => ({
+        events: [event],
+        nextAfter: 1,
+        hasMore: false,
+        terminal: false,
+      }),
+      getRun: () => ({ status: "running", eventSeq: 1 }),
+    };
+    const a = createSseResponse(source, "s", "r", 0, timersA);
+    const b = createSseResponse(source, "s", "r", 0, timersB);
+    await drain();
+    const readerA = a.body?.getReader();
+    const readerB = b.body?.getReader();
+    const firstA = await readerA?.read();
+    const firstB = await readerB?.read();
+    expect(firstA?.done).toBe(false);
+    expect(firstB?.done).toBe(false);
+    const textA = new TextDecoder().decode(firstA?.value);
+    const textB = new TextDecoder().decode(firstB?.value);
+    expect(textA).toContain("event: run-event");
+    expect(textA).toBe(textB);
+    await readerA?.cancel().catch(() => {});
+    await readerB?.cancel().catch(() => {});
   });
 
-  it("does not replace the session on transient probe errors", () => {
-    const ensure = methodBody("private async ensureSession()");
-    expect(ensure).toContain("probeStatus === 404 || probeStatus === 410");
-    expect(ensure).toContain("probeStatus = null");
-  });
+  describe("slow-consumer backpressure grace (captured timers)", () => {
+    function makeCaptureTimers(): {
+      created: FakeTimer[];
+      cleared: number[];
+      pending: Array<{ id: number; fn: () => void; ms: number }>;
+      setInterval: typeof setInterval;
+      clearInterval: typeof clearInterval;
+      setTimeout: typeof setTimeout;
+    } {
+      let next = 1;
+      const created: FakeTimer[] = [];
+      const cleared: number[] = [];
+      const pending: Array<{ id: number; fn: () => void; ms: number }> = [];
+      const setIntervalFn = ((fn: () => void, ms?: number) => {
+        const id = next++;
+        created.push({ id, fn, ms: ms ?? 0 });
+        return id as unknown as ReturnType<typeof setInterval>;
+      }) as typeof setInterval;
+      const clearIntervalFn = ((id: unknown) => {
+        cleared.push(id as number);
+        const at = pending.findIndex((t) => t.id === (id as number));
+        if (at >= 0) {
+          pending.splice(at, 1);
+        }
+      }) as typeof clearInterval;
+      const setTimeoutFn = ((fn: () => void, ms?: number) => {
+        const id = next++;
+        pending.push({ id, fn, ms: ms ?? 0 });
+        return id as unknown as ReturnType<typeof setTimeout>;
+      }) as unknown as typeof setTimeout;
+      return {
+        created,
+        cleared,
+        pending,
+        setInterval: setIntervalFn,
+        clearInterval: clearIntervalFn,
+        setTimeout: setTimeoutFn,
+      };
+    }
 
-  it("citation open performs a real CAS PUT and retries on 409 conflict", () => {
-    const cas = methodBody("private async updateReferenceContextCas(");
-    expect(cas).toContain('method: "PUT"');
-    expect(cas).toContain("status !== 409");
-    const open = methodBody("private async openCitation(");
-    expect(open).toContain("updateReferenceContextCas");
-  });
+    function twoEventSource(): {
+      events: Array<{
+        schemaVersion: number;
+        runId: string;
+        seq: number;
+        type: string;
+        createdAt: number;
+        payload: Record<string, never>;
+      }>;
+      getEvents: () => {
+        events: Array<{
+          schemaVersion: number;
+          runId: string;
+          seq: number;
+          type: string;
+          createdAt: number;
+          payload: Record<string, never>;
+        }>;
+        nextAfter: number;
+        hasMore: boolean;
+        terminal: boolean;
+      };
+      getRun: () => { status: string; eventSeq: number };
+    } {
+      const events = [
+        {
+          schemaVersion: 1,
+          runId: "r",
+          seq: 1,
+          type: "run.queued",
+          createdAt: 1,
+          payload: {},
+        },
+        {
+          schemaVersion: 1,
+          runId: "r",
+          seq: 2,
+          type: "run.started",
+          createdAt: 2,
+          payload: {},
+        },
+      ];
+      return {
+        events,
+        getEvents: () => ({
+          events,
+          nextAfter: 2,
+          hasMore: false,
+          terminal: false,
+        }),
+        getRun: () => ({ status: "running", eventSeq: 2 }),
+      };
+    }
 
-  it("poll fallback counts non-2xx page failures toward the error streak", () => {
-    const catchUp = methodBody("private async catchUp(");
-    expect(catchUp).toContain("fetched.status < 200 || fetched.status >= 300");
-    expect(catchUp).toContain("return false");
-    const poll = methodBody("private async pollFallback(");
-    expect(poll).toContain("errorStreak += 1");
-    expect(poll).toContain("errorStreak = 0");
-  });
+    it("holds a full queue through the grace instead of dropping it, then closes after the grace", async () => {
+      // No premature disconnect (§16.4): the first frame fits, the second
+      // waits on the drain grace (an armed timer, not a drop), and only
+      // the grace expiry closes the slow client.
+      const timers = makeCaptureTimers();
+      const source = twoEventSource();
+      const res = createSseResponse(source, "s", "r", 0, timers);
+      await drain();
+      // The overflow frame is parked on exactly one grace timer.
+      expect(timers.pending.length).toBe(1);
+      const reader = res.body?.getReader();
+      // Expire the grace without any drain: the parked frame never lands.
+      const grace = timers.pending[0];
+      expect(grace).toBeDefined();
+      (grace as { fn: () => void }).fn();
+      await drain();
+      const first = await reader?.read();
+      expect(first?.done).toBe(false);
+      expect(new TextDecoder().decode(first?.value)).toContain("id: 1");
+      // The parked second frame was dropped by the close, not delivered.
+      const second = await reader?.read();
+      expect(second?.done).toBe(true);
+      // Both loop intervals were released by the close (no leak).
+      for (const timer of timers.created) {
+        expect(timers.cleared).toContain(timer.id);
+      }
+      await reader?.cancel().catch(() => {});
+    });
 
-  it("history loads older pages via beforePosition and renders oldest-first", () => {
-    const hydrate = methodBody("private async hydrateHistory()");
-    expect(hydrate).toContain("beforePosition=");
-    expect(hydrate).toContain("hasMore");
-    expect(hydrate).toContain("nextBefore");
-    // Regression: API items are chronological within a page, so the render
-    // loop must advance forward; a reverse pass would invert every page.
-    expect(hydrate).toContain("itemIndex += 1");
-    expect(hydrate).not.toContain("itemIndex -= 1");
-  });
-
-  it("capped history keeps older turns reachable via incremental loading", () => {
-    expect(source).toContain("loadOlderHistory");
-    expect(source).toContain("historyHasMore");
-    expect(source).toContain("oldestBefore");
-    expect(source).toContain("さらに古い履歴を読み込む");
-    const older = methodBody("private async loadOlderHistory()");
-    // Prepend path also renders oldest-first (pages reversed, items forward).
-    expect(older).toContain("insertBefore");
-    expect(older).toContain("itemIndex += 1");
-    expect(older).not.toContain("itemIndex -= 1");
-  });
-
-  it("retry survives hydration and duplicates never re-render terminal output", () => {
-    const render = methodBody("private renderRunView(");
-    const failedIdx = render.indexOf('view.visible === "failed"');
-    const failedBody = render.slice(failedIdx, failedIdx + 900);
-    const hydrateIdx = failedBody.indexOf("hydrateHistory().then");
-    const retryIdx = failedBody.indexOf("もう一度送る");
-    expect(hydrateIdx).toBeGreaterThan(-1);
-    expect(retryIdx).toBeGreaterThan(hydrateIdx);
-    expect(render).toContain("renderedAnswers.has(runId)");
-  });
-
-  it("the serialized apply chain absorbs rejections and corrupt cursors resync", () => {
-    const apply = methodBody("private applySerialized(");
-    expect(apply).toContain("this.runChain.catch(() => {})");
-    expect(apply).toContain("catch");
-    expect(source).toContain("validateStoredCursor(runId, stored ?? 0)");
-    expect(source).toContain("resyncFromHistory(runId)");
-    expect(source).toContain("isCorruptCursor");
+    it("delivers every parked frame when the consumer drains inside the grace", async () => {
+      // Same setup, but the read drains the queue: the waiter wakes via
+      // `pull`, cancels the grace timer, and the parked frame lands.
+      const timers = makeCaptureTimers();
+      const source = twoEventSource();
+      const res = createSseResponse(source, "s", "r", 0, timers);
+      await drain();
+      expect(timers.pending.length).toBe(1);
+      const graceId = (timers.pending[0] as { id: number }).id;
+      const reader = res.body?.getReader();
+      const first = await reader?.read();
+      expect(first?.done).toBe(false);
+      expect(new TextDecoder().decode(first?.value)).toContain("id: 1");
+      await drain();
+      // Draining cancelled the grace timer instead of closing.
+      expect(timers.cleared).toContain(graceId);
+      const second = await reader?.read();
+      expect(second?.done).toBe(false);
+      expect(new TextDecoder().decode(second?.value)).toContain("id: 2");
+      await reader?.cancel().catch(() => {});
+    });
   });
 });

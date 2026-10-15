@@ -343,7 +343,7 @@ describe("parallel sessions with bounded concurrency", () => {
 });
 
 describe("completion/failure through CAS only", () => {
-  it("fails runs for unknown strategies and invalid results without raw text", async () => {
+  it("leaves unregistered-strategy runs queued and fails invalid/throw results without raw text", async () => {
     const { handle, repo } = await openRepo();
     const engine = new RunEngine({ db: handle.raw, repo, pollIntervalMs: 5 });
     try {
@@ -380,14 +380,19 @@ describe("completion/failure through CAS only", () => {
         strategy: "fake-throw",
       });
       engine.start();
-      expect(engine.pump()).toBe(3);
+      // C18 pickup semantics: only REGISTERED strategies are launched. The
+      // `missing`-strategy run is never started and never failed by pickup —
+      // it stays queued so a later registration can pick it up (§18.6).
+      expect(engine.pump()).toBe(2);
       await settle(engine);
-      expect(repo.getRun(m1.body.run.id).status).toBe("failed");
-      expect(repo.getRun(m1.body.run.id).errorCode).toBe("execution_failed");
+      expect(repo.getRun(m1.body.run.id).status).toBe("queued");
+      expect(repo.getRun(m1.body.run.id).errorCode).toBeNull();
+      expect(eventTypes(handle, m1.body.run.id)).toEqual(["run.queued"]);
+      expect(repo.getSelection(m1.body.turnId)).toBeNull();
+      expect(repo.getRun(m2.body.run.id).status).toBe("failed");
       expect(repo.getRun(m2.body.run.id).errorCode).toBe("output_invalid");
       expect(repo.getRun(m3.body.run.id).errorCode).toBe("execution_failed");
-      expect(repo.getSelection(m1.body.turnId)).toBeNull();
-      expect(eventTypes(handle, m1.body.run.id)).toEqual([
+      expect(eventTypes(handle, m2.body.run.id)).toEqual([
         "run.queued",
         "run.started",
         "run.failed",

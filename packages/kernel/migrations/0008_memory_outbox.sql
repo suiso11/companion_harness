@@ -1,6 +1,6 @@
 -- Companion conversation-memory outbox (remind CLI integration).
 --
--- Committed migration 0006: adds Companion-owned durable memory tables for
+-- Committed migration 0008: adds Companion-owned durable memory tables for
 -- the CLI-based remind integration (docs/operations.md "Conversation
 -- memory"). Remind remains a separate process/database: these tables only
 -- stage Companion-side jobs, immutable recall-exposure snapshots, and

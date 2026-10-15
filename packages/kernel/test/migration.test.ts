@@ -69,8 +69,10 @@ function tableNames(db: Database.Database): string[] {
   ).map((row) => row.name);
 }
 
-const BACKUP_NAME_PATTERN =
-  /^companion-pre-migration-v0-to-v6-\d{8}T\d{6}Z-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.sqlite$/;
+const BACKUP_NAME_PATTERN = (version: number) =>
+  new RegExp(
+    `^companion-pre-migration-v0-to-v${version}-\\d{8}T\\d{6}Z-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.sqlite$`,
+  );
 
 function stripComments(src: string): string {
   return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|\s)\/\/.*$/gm, "$1");
@@ -91,7 +93,10 @@ describe("m0 migration lifecycle", () => {
         migrated: true,
         fromVersion: 0,
         toVersion: BUNDLED_SCHEMA_VERSION,
-        applied: [1, 2, 3, 4, 5, 6],
+        applied: Array.from(
+          { length: BUNDLED_SCHEMA_VERSION },
+          (_, index) => index + 1,
+        ),
       });
       expect(result.backupPath).toBeUndefined();
       expect(getSchemaVersion(handle.raw)).toBe(BUNDLED_SCHEMA_VERSION);
@@ -166,10 +171,12 @@ describe("m0 migration lifecycle", () => {
       });
       expect(result.migrated).toBe(true);
       expect(result.backupPath).toMatch(
-        /companion-pre-migration-v0-to-v6-.*\.sqlite$/,
+        new RegExp(
+          `companion-pre-migration-v0-to-v${BUNDLED_SCHEMA_VERSION}-.*\\.sqlite$`,
+        ),
       );
       const name = (result.backupPath as string).split(/[\\/]/).pop() as string;
-      expect(name).toMatch(BACKUP_NAME_PATTERN);
+      expect(name).toMatch(BACKUP_NAME_PATTERN(BUNDLED_SCHEMA_VERSION));
       // No .partial residue next to the final backup.
       expect(
         readdirSync(backups).filter((entry) => entry.endsWith(".partial")),
@@ -543,7 +550,57 @@ describe("m0 storage helpers and provenance", () => {
     // Fail closed: no row is ever merged or deleted on a case collision.
     const m4Code = m4.replace(/--[^\n]*/g, "");
     expect(m4Code).not.toMatch(/DELETE/i);
-    expect(BUNDLED_SCHEMA_VERSION).toBe(6);
+    const m6 = readFileSync(
+      join(kernelDir, "migrations", "0006_m4_calendar_targets.sql"),
+      "utf8",
+    );
+    // Private Calendar get-target store: exactly one non-public table, STRICT,
+    // JSON-validated target payload, no provider-id columns.
+    expect(m6).toContain("CREATE TABLE calendar_get_targets");
+    expect(m6).toContain("json_valid(target_json)");
+    expect(m6).toMatch(/STRICT/);
+    expect(m6).not.toMatch(/WITHOUT ROWID/);
+    const m6Code = m6.replace(/--[^\n]*/g, "");
+    expect(m6Code).not.toMatch(/calendar_id|event_id/i);
+    const m7 = readFileSync(
+      join(kernelDir, "migrations", "0007_m5_actions.sql"),
+      "utf8",
+    );
+    for (const table of [
+      "action_proposals",
+      "action_executions",
+      "action_execution_grants",
+      "action_receipts",
+    ]) {
+      expect(m7).toContain(`CREATE TABLE ${table}`);
+    }
+    // Exact §18.3 target binding: the 4-column compound FK is the only
+    // session/reference FK for proposals (no weak sibling FK exists).
+    expect(m7).toContain(
+      "FOREIGN KEY (session_id, target_ref_id, target_resource_id, based_on_snapshot_id)",
+    );
+    expect(m7).toContain("idx_proposals_one_pending_per_session");
+    expect(m7).toMatch(/STRICT/g);
+    const m7Code = m7.replace(/--[^\n]*/g, "");
+    expect(m7Code).not.toContain("WITHOUT ROWID");
+    const m8 = readFileSync(
+      join(kernelDir, "migrations", "0008_memory_outbox.sql"),
+      "utf8",
+    );
+    // Conversation-memory outbox: Companion-owned durable queue plus
+    // immutable recall-exposure snapshots and per-run citation grants.
+    for (const table of [
+      "memory_outbox",
+      "memory_exposures",
+      "memory_grants",
+    ]) {
+      expect(m8).toContain(`CREATE TABLE ${table}`);
+    }
+    expect(m8).toMatch(/STRICT/g);
+    const m8Code = m8.replace(/--[^\n]*/g, "");
+    expect(m8Code).not.toContain("WITHOUT ROWID");
+    // The bundled version is the committed migration count, never a hand pin.
+    expect(BUNDLED_SCHEMA_VERSION).toBeGreaterThanOrEqual(7);
     const journal = JSON.parse(
       readFileSync(
         join(kernelDir, "migrations", "meta", "_journal.json"),
@@ -566,7 +623,13 @@ describe("m0 storage helpers and provenance", () => {
       "0005_m2_model_calls",
     );
     expect(journal.entries.map((entry) => entry.tag)).toContain(
-      "0006_memory_outbox",
+      "0006_m4_calendar_targets",
+    );
+    expect(journal.entries.map((entry) => entry.tag)).toContain(
+      "0007_m5_actions",
+    );
+    expect(journal.entries.map((entry) => entry.tag)).toContain(
+      "0008_memory_outbox",
     );
     const backupSrc = readFileSync(join(kernelDir, "src", "backup.ts"), "utf8");
     expect(backupSrc).toContain(".backup(");
@@ -602,7 +665,7 @@ describe("m1 reference storage migration", () => {
     "evidence_grants",
   ];
 
-  it("migrates fresh 0 -> 6 applying all migrations", async () => {
+  it("migrates a fresh DB to the bundled version applying all migrations", async () => {
     const dir = tempDir();
     const file = join(dir, "kernel.sqlite");
     const backups = join(dir, "backups");
@@ -615,11 +678,14 @@ describe("m1 reference storage migration", () => {
       expect(result).toMatchObject({
         migrated: true,
         fromVersion: 0,
-        toVersion: 6,
-        applied: [1, 2, 3, 4, 5, 6],
+        toVersion: BUNDLED_SCHEMA_VERSION,
+        applied: Array.from(
+          { length: BUNDLED_SCHEMA_VERSION },
+          (_, index) => index + 1,
+        ),
       });
       expect(result.backupPath).toBeUndefined();
-      expect(getSchemaVersion(handle.raw)).toBe(6);
+      expect(getSchemaVersion(handle.raw)).toBe(BUNDLED_SCHEMA_VERSION);
       const names = tableNames(handle.raw);
       for (const table of M1_TABLES) {
         expect(names).toContain(table);
@@ -638,7 +704,7 @@ describe("m1 reference storage migration", () => {
     }
   });
 
-  it("upgrades v1 -> 6 with a pre-upgrade backup preserving v1 data", async () => {
+  it("upgrades v1 to the bundled version with a pre-upgrade backup preserving v1 data", async () => {
     const dir = tempDir();
     const file = join(dir, "kernel.sqlite");
     const backups = join(dir, "backups");
@@ -683,11 +749,16 @@ describe("m1 reference storage migration", () => {
       expect(result).toMatchObject({
         migrated: true,
         fromVersion: 1,
-        toVersion: 6,
-        applied: [2, 3, 4, 5, 6],
+        toVersion: BUNDLED_SCHEMA_VERSION,
+        applied: Array.from(
+          { length: BUNDLED_SCHEMA_VERSION - 1 },
+          (_, index) => index + 2,
+        ),
       });
       expect(result.backupPath).toMatch(
-        /companion-pre-migration-v1-to-v6-.*\.sqlite$/,
+        new RegExp(
+          `companion-pre-migration-v1-to-v${BUNDLED_SCHEMA_VERSION}-.*\\.sqlite$`,
+        ),
       );
       expect(
         readdirSync(backups).filter((entry) => entry.endsWith(".partial")),
@@ -715,7 +786,7 @@ describe("m1 reference storage migration", () => {
         copy.close();
       }
       // Live DB keeps the v1 rows and gains the M1 tables plus the graph.
-      expect(getSchemaVersion(handle.raw)).toBe(6);
+      expect(getSchemaVersion(handle.raw)).toBe(BUNDLED_SCHEMA_VERSION);
       const kept = handle.raw
         .prepare("SELECT id FROM runs WHERE id = ?")
         .get(runId) as { id: string } | undefined;
@@ -735,7 +806,7 @@ describe("m1 reference storage migration", () => {
     }
   });
 
-  it("upgrades v2 -> 6 with a pre-upgrade backup preserving v2 data", async () => {
+  it("upgrades v2 to the bundled version with a pre-upgrade backup preserving v2 data", async () => {
     const dir = tempDir();
     const file = join(dir, "kernel.sqlite");
     const backups = join(dir, "backups");
@@ -768,11 +839,16 @@ describe("m1 reference storage migration", () => {
       expect(result).toMatchObject({
         migrated: true,
         fromVersion: 2,
-        toVersion: 6,
-        applied: [3, 4, 5, 6],
+        toVersion: BUNDLED_SCHEMA_VERSION,
+        applied: Array.from(
+          { length: BUNDLED_SCHEMA_VERSION - 2 },
+          (_, index) => index + 3,
+        ),
       });
       expect(result.backupPath).toMatch(
-        /companion-pre-migration-v2-to-v6-.*\.sqlite$/,
+        new RegExp(
+          `companion-pre-migration-v2-to-v${BUNDLED_SCHEMA_VERSION}-.*\\.sqlite$`,
+        ),
       );
       expect(
         readdirSync(backups).filter((entry) => entry.endsWith(".partial")),
@@ -794,7 +870,7 @@ describe("m1 reference storage migration", () => {
       } finally {
         copy.close();
       }
-      expect(getSchemaVersion(handle.raw)).toBe(6);
+      expect(getSchemaVersion(handle.raw)).toBe(BUNDLED_SCHEMA_VERSION);
       expect(tableNames(handle.raw)).toContain("snapshot_links");
       expect(tableNames(handle.raw)).toContain("memory_outbox");
       const kept = handle.raw

@@ -1,3 +1,4 @@
+import type { ToolCategory } from "@companion/contracts";
 import { z } from "zod";
 
 /** 64 KiB stderr cap (§17.7, exact). */
@@ -28,19 +29,41 @@ const httpTransport = z.object({
   followRedirects: z.literal(false).default(false),
 });
 
-const bindingSchema = z.object({
-  /** Exact upstream tool name as configured (e.g. `search-events`). */
-  upstreamTool: z.string().min(1).max(128),
-  /** Canonical input-schema SHA-256 hex (64 chars) for binding identity. */
-  canonicalSchemaHash: z.string().regex(/^[0-9a-f]{64}$/),
-});
+const bindingSchema = z
+  .object({
+    /** Exact upstream tool name as configured (e.g. `search-events`). */
+    upstreamTool: z.string().min(1).max(128),
+    /** Canonical input-schema SHA-256 hex (64 chars) for binding identity. */
+    canonicalSchemaHash: z.string().regex(/^[0-9a-f]{64}$/),
+  })
+  // STRICT: a binding is exactly { upstreamTool, canonicalSchemaHash }. Any
+  // extra key (notably a `category`/authorization claim) is REJECTED, never
+  // silently stripped, so a config hint can never appear to carry trusted
+  // read-only categorization (§17.3 definitions stay host-injected).
+  .strict();
 
 export const mcpConnectorConfigSchema = z
   .object({
     connectorInstanceId: z.string().min(1).max(128),
+    /**
+     * LOGICAL binding identifier, trusted config only. It is never compared
+     * with the wire `initialize.serverInfo.name`; that check uses
+     * `expectedServerName` below.
+     */
     serverId: z.string().min(1).max(128),
     kind: z.literal("mcp"),
-    /** Version of the bound upstream surface (fork/release version). */
+    /**
+     * Trusted expected `initialize.serverInfo.name` from the bound upstream.
+     * Compared exactly (case-sensitive) to the actual handshake identity
+     * AFTER connect and BEFORE any tools/list or binding enable. No default,
+     * no inference from serverId/clientName/actual response.
+     */
+    expectedServerName: z.string().min(1).max(128),
+    /**
+     * Version of the bound upstream surface (fork/release version) AND the
+     * trusted expected `initialize.serverInfo.version`. Compared exactly
+     * (case-sensitive, no semver/prose normalization).
+     */
     version: z.string().min(1).max(64),
     transport: z.discriminatedUnion("kind", [stdioTransport, httpTransport]),
     /** Explicit allowlist only; tools/list is never auto-exposed (§17.3). */
@@ -53,6 +76,30 @@ export const mcpConnectorConfigSchema = z
 export type McpConnectorConfig = z.infer<typeof mcpConnectorConfigSchema>;
 export type McpTransportConfig = McpConnectorConfig["transport"];
 export type McpBinding = McpConnectorConfig["bindings"][number];
+
+/**
+ * Trusted, reviewed read-only binding definition.
+ *
+ * These are supplied by host code — the owner of that SPECIFIC configured
+ * provider profile — with the same trust as `kernelToolRegistration`. They
+ * are NOT MCP `tools/list` data, model arguments, user config claims, or an
+ * unadopted proposal document. The host must review this definition against the
+ * configured upstream name/version/pin before providing any read semantics;
+ * library metadata and schematics cannot prove read-only semantics. No
+ * adopted provider definitions exist here: only fixtures / a future adapter
+ * may gate on this.
+ *
+ * The trusted `canonicalSchemaHash` MUST link to both the config binding
+ * hash and the actual live `tools/list` input-schema hash, so a definition
+ * can never apply a different input contract. `category` reuses the
+ * contracts tool-category vocabulary (`read` / `write` / `sensitive` /
+ * `unclassified`); only `read` is ever callable or advertised.
+ */
+export interface McpBindingDefinition {
+  readonly upstreamTool: string;
+  readonly canonicalSchemaHash: string;
+  readonly category: ToolCategory;
+}
 
 /** Canonical JSON (recursive key sort) + SHA-256 hex for schema hashes (§17.3). */
 export async function canonicalSchemaHash(value: unknown): Promise<string> {

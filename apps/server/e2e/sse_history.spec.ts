@@ -24,8 +24,17 @@ import {
   SEED_HISTORY_COUNT,
   SEED_HISTORY_PREFIX,
   TEXT_HANG,
-  TEXT_OK,
 } from "./ports.js";
+import {
+  canonical,
+  cursorWrites,
+  fault,
+  faultStatus,
+  nativeRunDeliveries,
+  observeCursorWrites,
+  observeNativeRunDeliveries,
+  startHangingRun,
+} from "./resilience.js";
 
 async function control(
   request: APIRequestContext,
@@ -216,6 +225,14 @@ test("native SSE reconnect resumes and answers once", async ({
     .toBeGreaterThan(0);
   const after = await proxyStatus(request);
   expect(after.lastLastEventId).not.toBeNull();
+  const final = await canonical(request, sessionId, runId);
+  expect(final.run.status).toBe("completed");
+  expect(final.events.map((event) => event.type)).toEqual([
+    "run.queued",
+    "run.started",
+    "run.completed",
+  ]);
+  expect((await storedCursorOf(page, runId)).parsed).toBe(final.run.eventSeq);
   expect(String(after.lastLastEventId)).toMatch(/^\d+$/);
   const matches = await page
     .locator("#conversation")
@@ -227,10 +244,13 @@ test("native SSE reconnect resumes and answers once", async ({
 
 // (2) JSON gap catch-up: drop one armed SSE frame; the client must bridge the
 // gap via the real JSON events pagination API and render the answer once.
-test("dropped SSE frame recovers via JSON gap catch-up", async ({
+test("dropped SSE frame holds JSON catch-up while duplicate terminal callbacks arrive across reconnect", async ({
   page,
   request,
-}) => {
+}, testInfo) => {
+  await observeCursorWrites(page);
+  await observeNativeRunDeliveries(page);
+  await fault(request, "configure", { holdPages: true, duplicateSeqs: [3] });
   await page.goto(`${E2E_PROXY_ORIGIN}/`);
   await expect(page.locator("#composer")).toBeVisible();
   // Arm BEFORE send: otherwise the race lets the frame pass before the arm
@@ -244,12 +264,60 @@ test("dropped SSE frame recovers via JSON gap catch-up", async ({
     }
   });
   const runWait = waitForMessagesRun(page);
-  await send(page, TEXT_OK);
+  await send(page, TEXT_HANG);
   const { runId } = await runWait;
   const sessionId = await sessionIdOf(page);
-  await expect(page.locator("#conversation")).toContainText(`echo:${TEXT_OK}`, {
-    timeout: 20_000,
-  });
+  await expect
+    .poll(async () => (await storedCursorOf(page, runId)).parsed)
+    .toBe(1);
+  await control(request, "/release");
+  await expect.poll(async () => (await faultStatus(request)).heldPages).toBe(1);
+  await expect
+    .poll(
+      async () =>
+        (await nativeRunDeliveries(page, runId)).filter(
+          (delivery) => JSON.parse(delivery.data).type === "run.completed",
+        ).length,
+    )
+    .toBe(2);
+  const terminalBeforeRelease = (await nativeRunDeliveries(page, runId)).filter(
+    (delivery) => JSON.parse(delivery.data).type === "run.completed",
+  );
+  expect(terminalBeforeRelease.map((delivery) => delivery.lastEventId)).toEqual(
+    ["3", "3"],
+  );
+  expect(
+    new Set(terminalBeforeRelease.map((delivery) => delivery.sourceId)).size,
+  ).toBe(1);
+  expect(
+    terminalBeforeRelease.every(
+      (delivery) => delivery.sameNativeTarget && delivery.readyState === 1,
+    ),
+  ).toBe(true);
+  const historyBeforeRelease = (await faultStatus(request)).historyRequests;
+  expect((await storedCursorOf(page, runId)).parsed).toBe(1);
+  const heldCursorWrites = await cursorWrites(page, runId);
+  expect(heldCursorWrites).toEqual([1]);
+  await expect(page.locator("#conversation")).not.toContainText(
+    `echo:${TEXT_HANG}`,
+  );
+  await expect(page.locator("#composer-send")).toBeDisabled();
+  // Both genuine terminal frames dispatched on the same native source while
+  // serialized application awaits the missing event in the held real page.
+  // Native wire Last-Event-ID is NOT the persisted application cursor.
+  const held = await faultStatus(request);
+  await expect
+    .poll(async () => (await proxyStatus(request)).sseReconnects)
+    .toBeGreaterThan(0);
+  expect((await storedCursorOf(page, runId)).parsed).toBe(1);
+  expect(await cursorWrites(page, runId)).toEqual([1]);
+  await fault(request, "release-pages");
+  await expect(page.locator("#conversation")).toContainText(
+    `echo:${TEXT_HANG}`,
+    {
+      timeout: 20_000,
+    },
+  );
   const status = await proxyStatus(request);
   expect(status.droppedFrames).toBeGreaterThanOrEqual(1);
   // The missing seq must have been bridged by a REAL JSON pagination fetch,
@@ -266,15 +334,109 @@ test("dropped SSE frame recovers via JSON gap catch-up", async ({
     runId,
   );
   const cursor = await storedCursorOf(page, runId);
-  expect(cursor.parsed).not.toBeNull();
-  expect(Number.isFinite(cursor.parsed as number)).toBe(true);
-  expect(cursor.parsed as number).toBeLessThanOrEqual(authoritative.eventSeq);
+  expect(cursor.parsed).toBe(authoritative.eventSeq);
+  expect(await cursorWrites(page, runId)).toEqual([1, 2, 3]);
+  const final = await canonical(request, sessionId, runId);
+  expect(final.events.map((event) => event.type)).toEqual([
+    "run.queued",
+    "run.started",
+    "run.completed",
+  ]);
   const matches = await page
     .locator("#conversation")
-    .getByText(`echo:${TEXT_OK}`, { exact: false })
+    .getByText(`echo:${TEXT_HANG}`, { exact: true })
     .count();
   expect(matches).toBe(1);
   await expect(page.locator("#composer-send")).toBeEnabled();
+  await expect
+    .poll(async () => (await faultStatus(request)).historyRequests)
+    .toBe(historyBeforeRelease + 1);
+  await page.waitForTimeout(1200);
+  expect((await faultStatus(request)).historyRequests).toBe(
+    historyBeforeRelease + 1,
+  );
+  expect(await cursorWrites(page, runId)).toEqual([1, 2, 3]);
+  await expect(
+    page
+      .locator("#conversation")
+      .getByText(`echo:${TEXT_HANG}`, { exact: true }),
+  ).toHaveCount(1);
+  await testInfo.attach("held-gap-reconnect-proof.json", {
+    body: JSON.stringify({
+      held,
+      terminalBeforeRelease,
+      heldCursorWrites,
+      historyBeforeRelease,
+      historyAfter: (await faultStatus(request)).historyRequests,
+      canonical: final,
+      proxy: await proxyStatus(request),
+      cursorWrites: await cursorWrites(page, runId),
+    }),
+    contentType: "application/json",
+  });
+});
+
+test("actual preterminal duplicate SSE frames apply answer and history effect once", async ({
+  page,
+  request,
+}, testInfo) => {
+  await observeCursorWrites(page);
+  await fault(request, "configure", { duplicateSeqs: [1, 2] });
+  const { sessionId, runId } = await startHangingRun(page);
+  await expect
+    .poll(async () => (await faultStatus(request)).duplicatedFrames)
+    .toBe(2);
+  await expect
+    .poll(async () => await cursorWrites(page, runId))
+    .toEqual([1, 2]);
+  await expect(page.locator("#composer-notice")).toHaveText("生成中");
+  await expect(
+    page.locator("#conversation").getByText(TEXT_HANG, { exact: true }),
+  ).toHaveCount(1);
+  const before = await faultStatus(request);
+  await control(request, "/release");
+  await expect(
+    page
+      .locator("#conversation")
+      .getByText(`echo:${TEXT_HANG}`, { exact: true }),
+  ).toHaveCount(1);
+  await expect(page.locator("#composer-send")).toBeEnabled();
+  await expect
+    .poll(async () => (await faultStatus(request)).duplicatedFrames)
+    .toBe(2);
+  await expect
+    .poll(async () => await cursorWrites(page, runId))
+    .toEqual([1, 2, 3]);
+  await expect
+    .poll(async () => (await faultStatus(request)).historyRequests)
+    .toBe(before.historyRequests + 1);
+  // Observe absence of a late second terminal effect for one poll interval.
+  await page.waitForTimeout(1200);
+  const after = await faultStatus(request);
+  expect(after.historyRequests).toBe(before.historyRequests + 1);
+  expect(await cursorWrites(page, runId)).toEqual([1, 2, 3]);
+  await expect(
+    page
+      .locator("#conversation")
+      .getByText(`echo:${TEXT_HANG}`, { exact: true }),
+  ).toHaveCount(1);
+  const final = await canonical(request, sessionId, runId);
+  expect(final.run.status).toBe("completed");
+  expect(final.events.map((event) => event.type)).toEqual([
+    "run.queued",
+    "run.started",
+    "run.completed",
+  ]);
+  expect((await storedCursorOf(page, runId)).parsed).toBe(final.run.eventSeq);
+  await testInfo.attach("duplicate-application-proof.json", {
+    body: JSON.stringify({
+      canonical: final,
+      cursorWrites: await cursorWrites(page, runId),
+      historyBefore: before.historyRequests,
+      proxy: after,
+    }),
+    contentType: "application/json",
+  });
 });
 
 // (3) Corrupt stored cursor active recovery: intercept the REAL accepted

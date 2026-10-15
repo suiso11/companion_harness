@@ -666,8 +666,15 @@ describe("history + events pagination + idempotency lookup", () => {
       await repo.failRun(m2.body.run.id, "execution_failed", { now: T0 + 5 });
 
       const full = repo.getHistory(s, { limit: 50 });
-      expect(full.items.map((i) => i.text)).toEqual(["first", "second"]);
-      expect(full.items[0]?.selectedRun?.result.text).toBe("ans1");
+      expect(
+        full.items.map((i) => (i.kind === "user_text" ? i.text : "")),
+      ).toEqual(["first", "second"]);
+      expect(full.items[0]?.kind).toBe("user_text");
+      expect(
+        full.items[0]?.kind === "user_text"
+          ? full.items[0].selectedRun?.result.text
+          : undefined,
+      ).toBe("ans1");
       expect(full.items[1]?.selectedRun).toBeNull();
       expect(full.hasMore).toBe(false);
 
@@ -679,7 +686,9 @@ describe("history + events pagination + idempotency lookup", () => {
         beforePosition: page1.nextBefore ?? 1,
         limit: 10,
       });
-      expect(page2.items.map((i) => i.text)).toEqual(["first"]);
+      expect(
+        page2.items.map((i) => (i.kind === "user_text" ? i.text : "")),
+      ).toEqual(["first"]);
     } finally {
       closeKernelDatabase(handle);
     }

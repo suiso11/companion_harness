@@ -28,8 +28,10 @@ import {
   M1ToolErrorCodeNewSchema,
   M1ToolErrorCodeSchema,
   M1ToolNameSchema,
-  M2_RUN_EVENT_PAYLOAD_SCHEMAS,
-  M2_RUN_EVENT_TYPES,
+  M4_TOOL_ERROR_CODES,
+  M4ToolErrorCodeNewSchema,
+  M5_RUN_EVENT_PAYLOAD_SCHEMAS,
+  M5_RUN_EVENT_TYPES,
   MAX_SEARCH_LIMIT,
   MAX_SNAPSHOT_BODY_BYTES,
   MAX_SNIPPET_CODE_POINTS,
@@ -43,6 +45,7 @@ import {
   parseM0RunEvent,
   parseM0RunEventPayload,
   parseM0ToolErrorCode,
+  parseM4ToolErrorCode,
   parseRunEvent,
   parseRunEventPayload,
   parseToolErrorCode,
@@ -179,11 +182,11 @@ describe("latest registry extends with nonterminal reference.presented", () => {
       [...M0_RUN_EVENT_TYPES, "reference.presented"].sort(),
     );
     expect(Object.keys(M1_RUN_EVENT_PAYLOAD_SCHEMAS)).toHaveLength(10);
-    // Latest tracks M2 (13 closed types); M1 itself is unchanged.
-    expect(LATEST_RUN_EVENT_TYPES).toEqual(M2_RUN_EVENT_TYPES);
-    expect(M2_RUN_EVENT_TYPES).toHaveLength(13);
-    expect(Object.keys(LATEST_RUN_EVENT_PAYLOAD_SCHEMAS)).toHaveLength(13);
-    expect(LATEST_RUN_EVENT_PAYLOAD_SCHEMAS).toBe(M2_RUN_EVENT_PAYLOAD_SCHEMAS);
+    // Latest tracks M5 (M2 13 + seven §18.8 action.* = 20 closed types).
+    expect(LATEST_RUN_EVENT_TYPES).toBe(M5_RUN_EVENT_TYPES);
+    expect(LATEST_RUN_EVENT_TYPES).toHaveLength(20);
+    expect(Object.keys(LATEST_RUN_EVENT_PAYLOAD_SCHEMAS)).toHaveLength(20);
+    expect(LATEST_RUN_EVENT_PAYLOAD_SCHEMAS).toBe(M5_RUN_EVENT_PAYLOAD_SCHEMAS);
   });
 
   it("generic/latest parsers understand reference.presented", () => {
@@ -760,7 +763,7 @@ describe("M1 tool names closed; no M2+ contracts", () => {
 });
 
 describe("M1 tool error registry (connector/reference handlers)", () => {
-  it("fixes exactly the five M1 additions; latest is M0 nine + M1 five (14, closed)", () => {
+  it("fixes exactly the five M1 additions and the six M4 additions", () => {
     expect([...M1_TOOL_ERROR_CODES].sort()).toEqual(
       [
         "markdown_path_unsafe",
@@ -770,23 +773,41 @@ describe("M1 tool error registry (connector/reference handlers)", () => {
         "reference_not_found",
       ].sort(),
     );
-    expect(M1_TOOL_ERROR_CODES).toHaveLength(5);
-    expect(M0_TOOL_ERROR_CODES).toHaveLength(9);
-    expect(LATEST_TOOL_ERROR_CODES).toHaveLength(14);
-    expect([...LATEST_TOOL_ERROR_CODES].sort()).toEqual(
-      [...M0_TOOL_ERROR_CODES, ...M1_TOOL_ERROR_CODES].sort(),
+    expect([...M4_TOOL_ERROR_CODES].sort()).toEqual(
+      [
+        "calendar_range_invalid",
+        "calendar_response_invalid",
+        "calendar_upstream_error",
+        "mcp_binding_not_allowed",
+        "mcp_schema_mismatch",
+        "mcp_unavailable",
+      ].sort(),
     );
-    for (const code of M1_TOOL_ERROR_CODES) {
-      expect(M1ToolErrorCodeNewSchema.parse(code)).toBe(code);
+    // Behavior, not a pinned union size: every M1/M4 code is recognized by the
+    // latest/generic surfaces and by its own exact schema, while the exact M0
+    // schema keeps accepting only the original nine.
+    for (const code of [...M1_TOOL_ERROR_CODES, ...M4_TOOL_ERROR_CODES]) {
       expect(M1ToolErrorCodeSchema.parse(code)).toBe(code);
       expect(LatestToolErrorCodeSchema.parse(code)).toBe(code);
       expect(ToolErrorCodeSchema.parse(code)).toBe(code);
       expect(parseToolErrorCode(code)).toBe(code);
       expect(parseLatestToolErrorCode(code)).toBe(code);
+      expect(LATEST_TOOL_ERROR_CODES).toContain(code);
+    }
+    for (const code of M1_TOOL_ERROR_CODES) {
+      expect(M1ToolErrorCodeNewSchema.parse(code)).toBe(code);
+    }
+    for (const code of M4_TOOL_ERROR_CODES) {
+      expect(M4ToolErrorCodeNewSchema.parse(code)).toBe(code);
+      expect(parseM4ToolErrorCode(code)).toBe(code);
+      // Exact earlier vocabularies never widen to M4 codes.
+      expect(() => M0ToolErrorCodeSchema.parse(code)).toThrow();
+      expect(() => M1ToolErrorCodeNewSchema.parse(code)).toThrow();
     }
     for (const code of M0_TOOL_ERROR_CODES) {
       expect(M1ToolErrorCodeSchema.parse(code)).toBe(code);
       expect(ToolErrorCodeSchema.parse(code)).toBe(code);
+      expect(() => M4ToolErrorCodeNewSchema.parse(code)).toThrow();
     }
   });
 

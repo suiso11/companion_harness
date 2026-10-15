@@ -1,4 +1,4 @@
-// Conversation-memory durable state (migration 0006): outbox queue
+// Conversation-memory durable state (migration 0008): outbox queue
 // transitions, stable-key dedup, exposure snapshots, citation grants.
 //
 // Every assertion reads actual SQL rows back through the repository (or a

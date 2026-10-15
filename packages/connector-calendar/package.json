@@ -10,9 +10,11 @@
     "lint": "biome check src test"
   },
   "dependencies": {
+    "@companion/connector-mcp": "workspace:*",
     "zod": "4.5.4"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
     "@types/node": "24.12.4",
     "typescript": "5.9.3",
     "vitest": "3.2.4"

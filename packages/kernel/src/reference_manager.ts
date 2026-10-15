@@ -119,6 +119,26 @@ export type PresentObservationsResult =
     }
   | { applied: false; status: string; setId: null; references: [] };
 
+export interface PresentObservationsOptions {
+  freshness: FreshnessKind;
+  now?: number;
+  /**
+   * Optional host-private side effect executed INSIDE the same
+   * `BEGIN IMMEDIATE` observation transaction, AFTER the running-status CAS
+   * succeeds and every public row (resources/snapshots/refs/set/events) is
+   * written but BEFORE COMMIT. It receives exactly the references that will be
+   * committed. A throwing callback rolls the WHOLE transaction back, so a
+   * cancelled/terminal/failed observation can never persist a private target
+   * and a committed observation can never commit without its targets. This is
+   * how the C12 Calendar private get-target store stays atomic with the
+   * Snapshot/rN it belongs to (never written after the public commit).
+   */
+  onApplied?: (presented: {
+    setId: string | null;
+    references: readonly PresentedReferenceView[];
+  }) => void;
+}
+
 export type PresentStoredResult =
   | {
       applied: true;
@@ -132,6 +152,16 @@ export interface MarkdownConnectorView {
   kind: string;
   displayName: string;
   rootCount: number;
+  createdAt: number;
+}
+
+/** Calendar connector instance view (private selection; never provider ids). */
+export interface CalendarConnectorView {
+  id: string;
+  kind: string;
+  displayName: string;
+  calendarId: string;
+  account?: string;
   createdAt: number;
 }
 
@@ -682,11 +712,136 @@ export function createReferenceManager(db: Database.Database) {
     });
   }
 
+  /**
+   * Ensure one Calendar connector instance (`kind = 'calendar'`) carrying the
+   * trusted single-calendar HOST selection as metadata-only
+   * `{version:1, calendarId, account?}`. No path/secret is ever stored; the
+   * private per-event `get-event` targets live in the separate
+   * `calendar_get_targets` table, never here. A changed selection must never
+   * silently reuse an existing instance (fail closed on mismatch).
+   */
+  function ensureCalendarConnectorInstance(
+    displayName: string,
+    calendarId: string,
+    options: { account?: string; now?: number } = {},
+  ): CalendarConnectorView {
+    if (
+      typeof displayName !== "string" ||
+      displayName.length < 1 ||
+      displayName.length > 128
+    ) {
+      throw new RepositoryValidationError("displayName must be 1..128 chars");
+    }
+    if (
+      displayName.includes("/") ||
+      displayName.includes("\\") ||
+      displayName.includes("\0") ||
+      /^[A-Za-z]:/.test(displayName)
+    ) {
+      throw new RepositoryValidationError(
+        "displayName must not contain paths or separators",
+      );
+    }
+    if (
+      typeof calendarId !== "string" ||
+      calendarId.length < 1 ||
+      calendarId.length > 512
+    ) {
+      throw new RepositoryValidationError("calendarId must be 1..512 chars");
+    }
+    const account = options.account;
+    if (
+      account !== undefined &&
+      (typeof account !== "string" ||
+        account.length < 1 ||
+        account.length > 512)
+    ) {
+      throw new RepositoryValidationError("account must be 1..512 chars");
+    }
+    const now = nowMs(options.now);
+    return withImmediate(db, () => {
+      const existing = db
+        .prepare(
+          "SELECT id, kind, display_name, config_json, created_at FROM connector_instances WHERE kind = 'calendar' AND display_name = ?",
+        )
+        .get(displayName) as
+        | {
+            id: string;
+            kind: string;
+            display_name: string;
+            config_json: string;
+            created_at: number;
+          }
+        | undefined;
+      if (existing !== undefined) {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(existing.config_json);
+        } catch {
+          throw new RepositoryValidationError(
+            "stored connector config invalid",
+          );
+        }
+        if (
+          typeof parsed !== "object" ||
+          parsed === null ||
+          (parsed as { version?: unknown }).version !==
+            CONNECTOR_CONFIG_VERSION ||
+          typeof (parsed as { calendarId?: unknown }).calendarId !== "string"
+        ) {
+          throw new RepositoryValidationError(
+            "stored connector config invalid",
+          );
+        }
+        const storedCalendarId = (parsed as { calendarId: string }).calendarId;
+        const storedAccount = (parsed as { account?: unknown }).account;
+        if (storedCalendarId !== calendarId) {
+          throw new RepositoryValidationError("connector calendar mismatch");
+        }
+        if (storedAccount !== undefined && typeof storedAccount !== "string") {
+          throw new RepositoryValidationError(
+            "stored connector config invalid",
+          );
+        }
+        if ((storedAccount ?? undefined) !== (account ?? undefined)) {
+          throw new RepositoryValidationError("connector account mismatch");
+        }
+        return {
+          id: existing.id,
+          kind: existing.kind,
+          displayName: existing.display_name,
+          calendarId: storedCalendarId,
+          ...(storedAccount !== undefined
+            ? { account: storedAccount as string }
+            : {}),
+          createdAt: existing.created_at,
+        };
+      }
+      const id = generateId();
+      const configJson = JSON.stringify({
+        version: CONNECTOR_CONFIG_VERSION,
+        calendarId,
+        ...(account !== undefined ? { account } : {}),
+      });
+      db.prepare(
+        "INSERT INTO connector_instances (id, kind, display_name, config_json, created_at) VALUES (?, 'calendar', ?, ?, ?)",
+      ).run(id, displayName, configJson, now);
+      return {
+        id,
+        kind: "calendar",
+        displayName,
+        calendarId,
+        ...(account !== undefined ? { account } : {}),
+        createdAt: now,
+      };
+    });
+  }
+
   function presentObservations(
     sessionId: string,
     runId: string,
     observations: readonly ResourceObservation[],
-    options: { freshness: FreshnessKind; now?: number },
+    options: PresentObservationsOptions,
   ): PresentObservationsResult {
     const session = requireId(sessionId, "sessionId");
     const run = requireId(runId, "runId");
@@ -744,6 +899,7 @@ export function createReferenceManager(db: Database.Database) {
       }
       if (normalized.length === 0) {
         // Zero-hit: no empty set/event.
+        options.onApplied?.({ setId: null, references: [] });
         return { applied: true as const, setId: null, references: [] };
       }
       let eventSeq = row.event_seq;
@@ -1050,6 +1206,9 @@ export function createReferenceManager(db: Database.Database) {
           now,
         );
       }
+      // Private host side effects (C12 Calendar targets) commit atomically
+      // with the public presentation: same transaction, same running CAS.
+      options.onApplied?.({ setId, references: ordered });
       return { applied: true as const, setId, references: ordered };
     });
   }
@@ -1386,6 +1545,7 @@ export function createReferenceManager(db: Database.Database) {
 
   return {
     ensureMarkdownConnectorInstance,
+    ensureCalendarConnectorInstance,
     presentObservations,
     presentStored,
     getRelatedStored,

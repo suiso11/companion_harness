@@ -123,32 +123,54 @@ export type M1ToolErrorCodeNew = (typeof M1_TOOL_ERROR_CODES)[number];
 export const M1ToolErrorCodeNewSchema = z.enum(M1_TOOL_ERROR_CODES);
 
 /**
- * Closed M1 tool error vocabulary: the exact M0 nine plus the exact M1
- * five (14 total, explicit closed union, never regex/free text; no M2+
- * codes). Generic/latest validation accepts all fourteen; exact M0
- * validation accepts only the nine above.
+ * Exact M4 additions only (Calendar/MCP connector codes, §17.8/§17.9). These
+ * are the fixed redacted codes the dependency-inverted Calendar port and the
+ * `connector-mcp` transport surface. They carry NO raw error text, upstream
+ * response, provider id, path or token. The ToolBroker may persist any of
+ * them as `tool_calls.error_code` for `calendar.search` / `reference.refresh`.
+ */
+export const M4_TOOL_ERROR_CODES = [
+  "mcp_unavailable",
+  "mcp_binding_not_allowed",
+  "mcp_schema_mismatch",
+  "calendar_response_invalid",
+  "calendar_upstream_error",
+  "calendar_range_invalid",
+] as const;
+export type M4ToolErrorCodeNew = (typeof M4_TOOL_ERROR_CODES)[number];
+export const M4ToolErrorCodeNewSchema = z.enum(M4_TOOL_ERROR_CODES);
+
+/**
+ * Closed latest tool error vocabulary: the exact M0 nine plus the exact M1
+ * five plus the exact M4 six (20 total, explicit closed union, never
+ * regex/free text). Generic/latest validation accepts all twenty; exact M0
+ * validation accepts only the nine above and exact M1 validation the five.
  */
 export const LATEST_TOOL_ERROR_CODES = [
   ...M0_TOOL_ERROR_CODES,
   ...M1_TOOL_ERROR_CODES,
+  ...M4_TOOL_ERROR_CODES,
 ] as const;
 export type LatestToolErrorCode = (typeof LATEST_TOOL_ERROR_CODES)[number];
 
-/** Latest (M1) tool error-code schema: closed M0+M1 union (14 codes). */
+/**
+ * Latest tool error-code schema: closed M0+M1+M4 union (20 codes). The M1
+ * alias is retained for backwards-compatible importers; M4 is now latest.
+ */
 export const M1ToolErrorCodeSchema = z.enum(LATEST_TOOL_ERROR_CODES);
 export type M1ToolErrorCode = z.infer<typeof M1ToolErrorCodeSchema>;
 
-/** Alias: M1 is the latest schema version served. */
+/** Alias: M4 (MCP/Calendar) is the latest schema version served. */
 export const LatestToolErrorCodeSchema = M1ToolErrorCodeSchema;
 export type ToolErrorCode = z.infer<typeof LatestToolErrorCodeSchema>;
 
-/** Generic tool error-code schema: latest (M0+M1, 14 codes). */
+/** Generic tool error-code schema: latest (M0+M1+M4, 20 codes). */
 export const ToolErrorCodeSchema = LatestToolErrorCodeSchema;
 
 /** Known M0 tool error codes (alias of the closed M0 vocabulary). */
 export const KNOWN_M0_TOOL_ERROR_CODES = M0_TOOL_ERROR_CODES;
 
-/** Known latest (M0+M1) tool error codes (closed 14-code vocabulary). */
+/** Known latest (M0+M1+M4) tool error codes (closed 20-code vocabulary). */
 export const KNOWN_LATEST_TOOL_ERROR_CODES = LATEST_TOOL_ERROR_CODES;
 
 /** Exact M0 schema-versioned tool error-code registry (version 1 only). */
@@ -163,7 +185,13 @@ export const M1_TOOL_ERROR_CODE_REGISTRY = {
 } as const;
 export type M1ToolErrorSchemaVersion = keyof typeof M1_TOOL_ERROR_CODE_REGISTRY;
 
-/** Alias: M1 is the latest schema version served. */
+/** Exact M4 schema-versioned tool error-code registry (version 1 only). */
+export const M4_TOOL_ERROR_CODE_REGISTRY = {
+  1: M4ToolErrorCodeNewSchema,
+} as const;
+export type M4ToolErrorSchemaVersion = keyof typeof M4_TOOL_ERROR_CODE_REGISTRY;
+
+/** Alias: M4 is the latest schema version served. */
 export const LATEST_TOOL_ERROR_CODE_REGISTRY = M1_TOOL_ERROR_CODE_REGISTRY;
 export type LatestToolErrorSchemaVersion = M1ToolErrorSchemaVersion;
 
@@ -172,15 +200,20 @@ export function parseM0ToolErrorCode(data: unknown): M0ToolErrorCode {
   return TOOL_ERROR_CODE_REGISTRY[1].parse(data);
 }
 
-/** Parse a tool error code with the latest (M0+M1) registry. */
+/** Parse a tool error code with the M1 (M0+M1) registry. */
 export function parseM1ToolErrorCode(data: unknown): M1ToolErrorCode {
   return M1_TOOL_ERROR_CODE_REGISTRY[1].parse(data);
 }
 
-/** Alias: M1 is the latest schema version served. */
+/** Parse a tool error code with the exact M4 registry (rejects others). */
+export function parseM4ToolErrorCode(data: unknown): M4ToolErrorCodeNew {
+  return M4_TOOL_ERROR_CODE_REGISTRY[1].parse(data);
+}
+
+/** Alias: M4 is the latest schema version served. */
 export const parseLatestToolErrorCode = parseM1ToolErrorCode;
 
-/** Parse a tool error code for the latest schema version (M0+M1). */
+/** Parse a tool error code for the latest schema version (M0+M1+M4). */
 export function parseToolErrorCode(data: unknown): ToolErrorCode {
   return LATEST_TOOL_ERROR_CODE_REGISTRY[1].parse(data);
 }

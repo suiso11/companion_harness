@@ -42,7 +42,21 @@
       "idx": 5,
       "version": 6,
       "when": 1790000000005,
-      "tag": "0006_memory_outbox",
+      "tag": "0006_m4_calendar_targets",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": 7,
+      "when": 1790000000006,
+      "tag": "0007_m5_actions",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": 8,
+      "when": 1790000000007,
+      "tag": "0008_memory_outbox",
       "breakpoints": true
     }
   ]

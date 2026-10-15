@@ -1,38 +1,127 @@
+import type { CallResult, McpErrorCode } from "@companion/connector-mcp";
 import { z } from "zod";
+import {
+  canonicalUtcIso,
+  isIanaTimeZone,
+  parseDateOnly,
+  parseTimedInstant,
+} from "./time.js";
 
 /**
- * Versioned upstream event shape for the PROPOSED readonly fork surface
- * (docs/google_calendar_readonly_binding_design.md P3/P7 deltas).
- * NOT a claim about the unmodified upstream: `nextPageToken` and `etag`
- * exist only after the external patch; without it there is no paging or
- * etag binding (adoption gate, see binding.ts).
+ * Consumer-owned decoder for the candidate readonly fork surface
+ * (`@cocal/google-calendar-mcp`, unadopted). It interprets the real nested
+ * event envelope observed in the tracked C08 archive:
+ * `start`/`end` are objects (`{dateTime?, date?, timeZone?}`), NOT flat
+ * strings. The candidate producer also emits many rare fields, so the event
+ * schema validates only the CONSUMED fields and strips everything else; the
+ * strictness lives in the exact operation ROOT envelopes and the endpoint
+ * union.
+ *
+ * Strictness note: the candidate TS interface makes `summary`/`status`
+ * optional. Rejecting a missing summary/status is an explicit CONSUMER policy
+ * (never fabricate an empty title or a "confirmed" status); it is NOT an
+ * upstream guarantee and is not an adoption claim.
  */
-export const PROPOSED_UPSTREAM_EVENT_SCHEMA_VERSION = 1;
 
-export const proposedUpstreamEventSchema = z
-  .object({
-    id: z.string().min(1).max(1024),
-    calendarId: z.string().min(1).max(512),
-    status: z.enum(["confirmed", "tentative", "cancelled"]),
-    summary: z.string().max(4096),
-    description: z.string().max(16384).optional(),
-    location: z.string().max(4096).optional(),
-    start: z.string().min(1).max(128),
-    end: z.string().min(1).max(128),
-    updated: z.string().datetime({ offset: true }).optional(),
-    etag: z.string().min(1).max(512).optional(),
-    // Sensitive passthrough fields are accepted here so the normalizer can
-    // provably DROP them; they never reach the Snapshot.
-    attendees: z.unknown().optional(),
-    organizer: z.unknown().optional(),
-    conferenceData: z.unknown().optional(),
-    hangoutLink: z.unknown().optional(),
-    htmlLink: z.unknown().optional(),
+const REQUEST_INVALID = "calendar_response_invalid";
+
+const dateOnlySchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/u)
+  .refine((value) => parseDateOnly(value) !== undefined, {
+    message: "all-day value must be a real calendar date",
+  });
+
+const timedSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .refine((value) => parseTimedInstant(value) !== undefined, {
+    message: "datetime must be RFC3339 with an explicit offset",
+  });
+
+const ianaSchema = z.string().min(1).max(128).refine(isIanaTimeZone, {
+  message: "timeZone must be an IANA-shaped name or UTC",
+});
+
+/** Strict nested endpoint: exactly one of `date` or `dateTime`. */
+export const candidateEventEndpointSchema = z
+  .strictObject({
+    date: dateOnlySchema.optional(),
+    dateTime: timedSchema.optional(),
+    timeZone: ianaSchema.optional(),
   })
-  .strict()
-  .catchall(z.unknown());
+  .superRefine((v, ctx) => {
+    const hasDate = v.date !== undefined;
+    const hasDateTime = v.dateTime !== undefined;
+    if (hasDate === hasDateTime) {
+      ctx.addIssue({
+        code: "custom",
+        message: "endpoint must specify exactly one of date or dateTime",
+        path: ["date"],
+      });
+    }
+  });
 
-export type ProposedUpstreamEvent = z.infer<typeof proposedUpstreamEventSchema>;
+/**
+ * Nested candidate event: validates the consumed fields and the endpoint
+ * union. Unknown converter extras (organizer, attendees, recurrence, source,
+ * attachments, ...) are stripped, never rejected or passed through.
+ */
+export const candidateEventSchema = z.object({
+  id: z.string().min(1).max(1024),
+  calendarId: z.string().min(1).max(512),
+  status: z.enum(["confirmed", "tentative", "cancelled"]),
+  summary: z.string().min(1).max(4096),
+  description: z.string().max(16384).optional(),
+  location: z.string().max(4096).optional(),
+  start: candidateEventEndpointSchema,
+  end: candidateEventEndpointSchema,
+  updated: timedSchema.optional(),
+  etag: z.string().min(1).max(512).optional(),
+});
+
+export type CandidateEvent = z.infer<typeof candidateEventSchema>;
+
+const nextPageTokenSchema = z.string().min(1).max(2048);
+
+/**
+ * Actual `list-events` root. The broad candidate TS interface permits
+ * `calendars`/`accounts`/`note`/`warnings`/`partialFailures`; they are
+ * enumerated here and projected out (never returned to the consumer).
+ */
+export const listEventsPageSchema = z.strictObject({
+  events: z.array(candidateEventSchema),
+  totalCount: z.number().int().min(0),
+  nextPageToken: nextPageTokenSchema.optional(),
+  calendars: z.array(z.string()).optional(),
+  accounts: z.array(z.string()).optional(),
+  note: z.string().optional(),
+  warnings: z.array(z.string()).optional(),
+  partialFailures: z
+    .array(z.strictObject({ accountId: z.string(), reason: z.string() }))
+    .optional(),
+});
+
+/**
+ * Actual `search-events` root: distinct from the list envelope. The actual
+ * candidate handler always emits `calendarId` and `timeRange` (the broad TS
+ * interface labels them optional); `query` is emitted iff the search input
+ * carried one. These are source-proven REQUIRED/Optional distinctions.
+ */
+export const searchEventsPageSchema = z.strictObject({
+  events: z.array(candidateEventSchema),
+  totalCount: z.number().int().min(0),
+  nextPageToken: nextPageTokenSchema.optional(),
+  query: z.string().min(1).optional(),
+  calendarId: z.string().min(1),
+  timeRange: z.strictObject({ start: timedSchema, end: timedSchema }),
+});
+
+/** Actual `get-event` root: exactly `{event}`, not a page. */
+export const getEventBodySchema = z.strictObject({
+  event: candidateEventSchema,
+});
 
 /** Normalized Snapshot event (§17.4, exact): privacy exclusions applied. */
 export const normalizedEventSchema = z
@@ -54,63 +143,6 @@ export const normalizedEventSchema = z
   .strict();
 
 export type NormalizedEvent = z.infer<typeof normalizedEventSchema>;
-
-function allDayEndExclusive(start: string, end: string): boolean {
-  // All-day Google events use DATE (YYYY-MM-DD) forms; timed use dateTime.
-  // Heuristic-free structural check on the wire shape only.
-  const dateOnly = /^\d{4}-\d{2}-\d{2}$/;
-  return dateOnly.test(start) && dateOnly.test(end);
-}
-
-const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
-
-const timedDateTimeSchema = z.string().datetime({ offset: true });
-
-function parseEventTime(value: string, field: "start" | "end"): number {
-  const dateOnly = DATE_ONLY.exec(value);
-  if (dateOnly) {
-    const year = Number(dateOnly[1]);
-    const month = Number(dateOnly[2]);
-    const day = Number(dateOnly[3]);
-    if (month < 1 || month > 12 || day < 1 || day > 31) {
-      throw new Error(`invalid all-day ${field}: ${value}`);
-    }
-    // Real calendar validation (rejects e.g. 2026-02-30 rollover).
-    const ms = Date.UTC(year, month - 1, day);
-    const check = new Date(ms);
-    if (
-      check.getUTCFullYear() !== year ||
-      check.getUTCMonth() !== month - 1 ||
-      check.getUTCDate() !== day
-    ) {
-      throw new Error(`invalid all-day ${field}: ${value}`);
-    }
-    return ms;
-  }
-  const timed = timedDateTimeSchema.safeParse(value);
-  if (!timed.success) {
-    throw new Error(`invalid ISO ${field}: ${value}`);
-  }
-  const ms = Date.parse(timed.data);
-  if (!Number.isFinite(ms)) {
-    throw new Error(`invalid ISO ${field}: ${value}`);
-  }
-  return ms;
-}
-
-/** Validate start/end wire shapes (timed ISO dateTime or all-day DATE). */
-function validateEventRange(start: string, end: string): void {
-  const startAllDay = DATE_ONLY.test(start);
-  const endAllDay = DATE_ONLY.test(end);
-  if (startAllDay !== endAllDay) {
-    throw new Error("mixed all-day DATE and timed datetime endpoints");
-  }
-  const startMs = parseEventTime(start, "start");
-  const endMs = parseEventTime(end, "end");
-  if (!(endMs > startMs)) {
-    throw new Error("event end must be after start");
-  }
-}
 
 async function sha256Hex(text: string): Promise<string> {
   const digest = await crypto.subtle.digest(
@@ -152,31 +184,96 @@ export async function canonicalKey(
   return `calendar:${digest}`;
 }
 
-export interface NormalizeOptions {
-  connectorInstanceId: string;
-  nowIso: string;
+interface ResolvedEndpoints {
+  allDay: boolean;
+  startOut: string;
+  endOut: string;
 }
 
 /**
- * Strict versioned normalization: structured object first; real ISO/all-day
- * start/end validation with end>start (§17.4); privacy exclusions
- * (attendees/organizer/conference URLs/HTML links/raw payload) are dropped.
- * Revision precedence: etag > sourceUpdatedAt > content hash, where the
- * hash covers the ACTUAL normalized snapshot (status/title/optional
- * description/optional location/start/end/allDayEndExclusive, truncated) —
- * never the raw untruncated source.
- * `deleted` is never produced here — tombstones require authoritative
- * evidence via classifyDeletion (search omission creates none).
+ * Validate the endpoint pair and canonicalize it. All-day DATE strings are
+ * unchanged (exclusive end); timed instants become UTC ISO. Mixed kinds,
+ * reversed/equal order and impossible calendar values are rejected.
+ */
+function resolveEndpoints(
+  start: CandidateEvent["start"],
+  end: CandidateEvent["end"],
+): ResolvedEndpoints {
+  if (start.date !== undefined) {
+    if (end.date === undefined) throw new Error("mixed endpoint kinds");
+    const startMs = parseDateOnly(start.date);
+    const endMs = parseDateOnly(end.date);
+    if (startMs === undefined || endMs === undefined || !(endMs > startMs)) {
+      throw new Error("invalid all-day range");
+    }
+    return { allDay: true, startOut: start.date, endOut: end.date };
+  }
+  if (start.dateTime === undefined || end.dateTime === undefined) {
+    throw new Error("mixed endpoint kinds");
+  }
+  const startMs = parseTimedInstant(start.dateTime);
+  const endMs = parseTimedInstant(end.dateTime);
+  if (startMs === undefined || endMs === undefined || !(endMs > startMs)) {
+    throw new Error("invalid timed range");
+  }
+  return {
+    allDay: false,
+    startOut: canonicalUtcIso(startMs),
+    endOut: canonicalUtcIso(endMs),
+  };
+}
+
+export interface NormalizeOptions {
+  connectorInstanceId: string;
+}
+
+/**
+ * Strict normalization of a validated nested candidate event.
+ *
+ * Failure (schema/endpoint/time/hash) rejects with the fixed
+ * `Error("calendar_response_invalid")` carrying NO cause, raw value or Zod
+ * issue. No clock, no `now`, no environment reads.
+ *
+ * Revision precedence: etag > canonical source-updated > normalized-hash,
+ * where the hash covers the ACTUAL normalized snapshot after temporal
+ * canonicalization and truncation (status/title/optional description/optional
+ * location/start/end/allDayEndExclusive) and excludes identity, revision and
+ * private metadata. `deleted` is never produced here: this decoder passes
+ * through only the candidate consumed statuses and never synthesizes a
+ * tombstone.
  */
 export async function normalizeEvent(
   raw: unknown,
   options: NormalizeOptions,
 ): Promise<NormalizedEvent> {
-  const parsed = proposedUpstreamEventSchema.parse(raw);
-  void options.nowIso;
-  validateEventRange(parsed.start, parsed.end);
+  try {
+    return await normalizeEventStrict(raw, options.connectorInstanceId);
+  } catch {
+    throw new Error("calendar_response_invalid");
+  }
+}
+
+async function normalizeEventStrict(
+  raw: unknown,
+  connectorInstanceId: string,
+): Promise<NormalizedEvent> {
+  const parsed = candidateEventSchema.parse(raw);
+  const { allDay, startOut, endOut } = resolveEndpoints(
+    parsed.start,
+    parsed.end,
+  );
+
+  // `updated` is validated by the schema even when a higher-priority etag wins,
+  // so a malformed timestamp can never become sourceUpdatedAt.
+  let sourceUpdatedAt: string | undefined;
+  if (parsed.updated !== undefined) {
+    const updatedMs = parseTimedInstant(parsed.updated);
+    if (updatedMs === undefined) throw new Error("invalid updated");
+    sourceUpdatedAt = canonicalUtcIso(updatedMs);
+  }
+
   const key = await canonicalKey(
-    options.connectorInstanceId,
+    connectorInstanceId,
     parsed.calendarId,
     parsed.id,
   );
@@ -187,14 +284,13 @@ export async function normalizeEvent(
       : undefined;
   const location =
     parsed.location !== undefined ? parsed.location.slice(0, 1024) : undefined;
-  const allDay = allDayEndExclusive(parsed.start, parsed.end);
   const snapshotForHash = {
     status: parsed.status,
     title,
     ...(description !== undefined ? { description } : {}),
     ...(location !== undefined ? { location } : {}),
-    start: parsed.start,
-    end: parsed.end,
+    start: startOut,
+    end: endOut,
     allDayEndExclusive: allDay,
   };
   let sourceRevision: string;
@@ -202,8 +298,8 @@ export async function normalizeEvent(
   if (parsed.etag !== undefined) {
     sourceRevision = parsed.etag;
     basis = "etag";
-  } else if (parsed.updated !== undefined) {
-    sourceRevision = parsed.updated;
+  } else if (sourceUpdatedAt !== undefined) {
+    sourceRevision = sourceUpdatedAt;
     basis = "source-updated";
   } else {
     sourceRevision = await sha256Hex(
@@ -218,12 +314,10 @@ export async function normalizeEvent(
     title,
     ...(description !== undefined ? { description } : {}),
     ...(location !== undefined ? { location } : {}),
-    start: parsed.start,
-    end: parsed.end,
+    start: startOut,
+    end: endOut,
     allDayEndExclusive: allDay,
-    ...(parsed.updated !== undefined
-      ? { sourceUpdatedAt: parsed.updated }
-      : {}),
+    ...(sourceUpdatedAt !== undefined ? { sourceUpdatedAt } : {}),
     sourceRevision,
     revisionBasis: basis,
     sensitivity: "personal",
@@ -231,37 +325,189 @@ export async function normalizeEvent(
   return normalizedEventSchema.parse(out);
 }
 
-export type DeletionVerdict =
-  | { kind: "deleted"; reason: "authoritative-tombstone" }
-  | { kind: "not-deleted"; reason: "no-authoritative-evidence" }
-  | { kind: "unknown"; code: "calendar_upstream_error" };
+/**
+ * structuredContent-first selection using OWN-PROPERTY presence. A present
+ * `structuredContent` (even null/undefined/wrong-shaped) is the ONLY source
+ * and is never rescued by text. Only when the property is ABSENT is the ENTIRE
+ * `text` parsed as strict JSON (no fences, prose, prefix/suffix scanning or
+ * event synthesis).
+ *
+ * Transport seam: the merged MCP client omits `structuredContent` when its
+ * value is `undefined`, so an upstream property-present `undefined` is
+ * indistinguishable from absence after the transport. Legal JSON cannot carry
+ * `undefined`, so this only matters for injected direct objects; the Calendar
+ * boundary still rejects an explicit own-property `undefined` it does receive.
+ */
+function selectBody(result: {
+  structuredContent?: unknown;
+  text?: string;
+}): unknown {
+  if (Object.hasOwn(result, "structuredContent")) {
+    return result.structuredContent;
+  }
+  if (typeof result.text !== "string") throw new Error(REQUEST_INVALID);
+  return JSON.parse(result.text) as unknown;
+}
+
+export interface NormalizePageOptions {
+  connectorInstanceId: string;
+  calendarId: string;
+  requestedLimit: number;
+  /** Explicit upstream operation: list and search roots are not interchangeable. */
+  operation: "list-events" | "search-events";
+}
+
+export interface NormalizeGetOptions {
+  connectorInstanceId: string;
+  calendarId: string;
+}
+
+export type NormalizeSearchResult =
+  | { ok: true; events: NormalizedEvent[]; cursor?: string }
+  | { ok: false; code: McpErrorCode };
 
 /**
- * Deletion classifier (§17.5 + 2026-09-09 correction): bare 404/410 or
- * `cancelled` alone is NOT deletion proof; search omission NEVER creates a
- * tombstone. Until a verified adopted fork defines authoritative tombstone
- * evidence, the proposed `get-tombstone` / `list-showDeleted-tombstone`
- * labels are unverified and defer to `unknown` (`calendar_upstream_error`)
- * with no deletion; ambiguous errors likewise map to `unknown`.
+ * One-page decode plus the host-private upstream targets for the SAME decoded
+ * events. `targets` is provider-identity data and MUST NOT leave the host:
+ * it is never part of a Snapshot/body, model-facing output, public DTO or
+ * fixed error. It is produced from the SAME candidate parse as `events` (one
+ * parse, no second decode) so a target can never diverge from a normalized
+ * event or be fabricated for a rejected event.
  */
-export function classifyDeletion(input: {
-  priorKnown: boolean;
-  authoritativeRead:
-    | "get-tombstone"
-    | "list-showDeleted-tombstone"
-    | "not-found"
-    | "ambiguous-error"
-    | "search-omission";
-}): DeletionVerdict {
-  if (!input.priorKnown)
-    return { kind: "not-deleted", reason: "no-authoritative-evidence" };
-  switch (input.authoritativeRead) {
-    case "get-tombstone":
-    case "list-showDeleted-tombstone":
-    case "ambiguous-error":
-      return { kind: "unknown", code: "calendar_upstream_error" };
-    case "not-found":
-    case "search-omission":
-      return { kind: "not-deleted", reason: "no-authoritative-evidence" };
+export interface NormalizeSearchPageResult {
+  events: NormalizedEvent[];
+  cursor?: string;
+  targets: Array<{ canonicalKey: string; calendarId: string; eventId: string }>;
+}
+
+export type NormalizeSearchPageOutcome =
+  | ({ ok: true } & NormalizeSearchPageResult)
+  | { ok: false; code: McpErrorCode };
+
+export type NormalizeGetResult =
+  | { ok: true; event: NormalizedEvent }
+  | { ok: false; code: McpErrorCode };
+
+function isValidPageOptions(options: NormalizePageOptions): boolean {
+  return (
+    typeof options.calendarId === "string" &&
+    options.calendarId.length > 0 &&
+    Number.isInteger(options.requestedLimit) &&
+    options.requestedLimit >= 1 &&
+    options.requestedLimit <= 20
+  );
+}
+
+/**
+ * Decode a `calendar.search` page result into normalized events plus an
+ * opaque cursor and the host-private targets for the same events. Page
+ * metadata is projected out. An incoming fixed MCP failure code is preserved;
+ * every decode/validation failure is the fixed `calendar_response_invalid`.
+ * Never slices/truncates an over-limit page and never fetches a second page.
+ */
+export async function normalizeSearchPage(
+  result: CallResult,
+  options: NormalizePageOptions,
+): Promise<NormalizeSearchPageOutcome> {
+  if (!result.ok) return { ok: false, code: result.code };
+  if (!isValidPageOptions(options)) {
+    return { ok: false, code: "calendar_range_invalid" };
+  }
+  try {
+    const raw = selectBody(result);
+    let events: CandidateEvent[];
+    let totalCount: number;
+    let nextPageToken: string | undefined;
+    let rootCalendarId: string | undefined;
+    if (options.operation === "search-events") {
+      const body = searchEventsPageSchema.parse(raw);
+      events = body.events;
+      totalCount = body.totalCount;
+      nextPageToken = body.nextPageToken;
+      rootCalendarId = body.calendarId;
+    } else {
+      const body = listEventsPageSchema.parse(raw);
+      events = body.events;
+      totalCount = body.totalCount;
+      nextPageToken = body.nextPageToken;
+    }
+    // Producer totalCount is the PAGE count; never a live query total.
+    if (totalCount !== events.length) throw new Error(REQUEST_INVALID);
+    if (events.length > options.requestedLimit)
+      throw new Error(REQUEST_INVALID);
+    if (rootCalendarId !== undefined && rootCalendarId !== options.calendarId) {
+      throw new Error(REQUEST_INVALID);
+    }
+    const normalized: NormalizedEvent[] = [];
+    const targets: Array<{
+      canonicalKey: string;
+      calendarId: string;
+      eventId: string;
+    }> = [];
+    for (const event of events) {
+      if (event.calendarId !== options.calendarId) {
+        throw new Error(REQUEST_INVALID);
+      }
+      const decoded = await normalizeEvent(event, {
+        connectorInstanceId: options.connectorInstanceId,
+      });
+      normalized.push(decoded);
+      targets.push({
+        canonicalKey: decoded.canonicalKey,
+        calendarId: event.calendarId,
+        eventId: event.id,
+      });
+    }
+    return nextPageToken !== undefined
+      ? { ok: true, events: normalized, cursor: nextPageToken, targets }
+      : { ok: true, events: normalized, targets };
+  } catch {
+    return { ok: false, code: REQUEST_INVALID };
+  }
+}
+
+/**
+ * Existing public page decoder: identical normalized events/cursor as
+ * {@link normalizeSearchPage}, with the host-private targets projected out.
+ */
+export async function normalizeSearchResult(
+  result: CallResult,
+  options: NormalizePageOptions,
+): Promise<NormalizeSearchResult> {
+  const page = await normalizeSearchPage(result, options);
+  if (!page.ok) return { ok: false, code: page.code };
+  return page.cursor !== undefined
+    ? { ok: true, events: page.events, cursor: page.cursor }
+    : { ok: true, events: page.events };
+}
+
+/**
+ * Decode a `get-event` result. Root must be exactly `{event}` (a page root is
+ * rejected) and the event must belong to the trusted HOST calendar. This is a
+ * read, NOT deletion proof.
+ */
+export async function normalizeGetResult(
+  result: CallResult,
+  options: NormalizeGetOptions,
+): Promise<NormalizeGetResult> {
+  if (!result.ok) return { ok: false, code: result.code };
+  if (
+    typeof options.calendarId !== "string" ||
+    options.calendarId.length === 0
+  ) {
+    return { ok: false, code: "calendar_range_invalid" };
+  }
+  try {
+    const raw = selectBody(result);
+    const body = getEventBodySchema.parse(raw);
+    if (body.event.calendarId !== options.calendarId) {
+      throw new Error(REQUEST_INVALID);
+    }
+    const event = await normalizeEvent(body.event, {
+      connectorInstanceId: options.connectorInstanceId,
+    });
+    return { ok: true, event };
+  } catch {
+    return { ok: false, code: REQUEST_INVALID };
   }
 }
