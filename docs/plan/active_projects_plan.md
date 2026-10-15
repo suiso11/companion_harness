@@ -297,3 +297,6 @@
 - 将来判断 5: M5 write binding。
 - 決定済みポリシーを再質問しない。全判断を一括回答しなくても Phase 1 は進められる（ただし shell/dirty 解決が先）。
 - remind の通常記憶書込に承認・TTY を復活させない。M5 Calendar 外部副作用の人手承認は別境界である。
+
+## 現況追記（2026-10-15、履歴保持・上記分類は書き換えない）
+- Companion explicit memory management 実装＋検証済み（I02/I03/I04 の管理面の完成、I01 正式採用判断・Windows manual・現行 CI は未完維持）: (1) native `memory.search` は明示検索のみ・active＋retired を opaque `mN` で返し heat/reactivate/feedback なし（immutable snapshot `memory_searches/items`）。(2) confirm UI は live current と immutable citation snapshot を対比してから mutation を stage。(3) `record.correct` は REAL source `event.append`＋`record.correct` の durable chain（安定冪等キー、同一 key+body は stored operation replay、key+drift body は 409）。(4) `record.retire`/`record.reactivate` は可逆引退であり削除/非表示ではない（retired は検索可・CLI recall のみ除外）。UI race は同期的 search/target invalidation＋generation guard、新 operation の pending reset＋poll identity、stale ack 非再利用で閉鎖。7 integrity edges（ambiguous refusal・atomic op/outbox/followup・replay-first・terminal failure・cancellation）は単体回帰で cover。証拠: full Vitest 113 files/1370 tests passed、real-browser memory spec GREEN、live HTTP/real-CLI GREEN、root＋e2e tsc exit 0、lint GREEN（gateway は synthetic であり real-model ではない）。perception/export/deletion は未実装維持。

@@ -57,11 +57,15 @@ import {
   createDurableCalendarTargetStore,
   createKernelRepository,
   createM1ToolRegistrations,
+  createMemorySearchRegistration,
+  createMemoryStageRegistrations,
   createReferenceManager,
   createToolBroker,
   getSchemaVersion,
   type KernelDatabaseHandle,
   type MarkdownConnectorBinding,
+  type MemoryManagePort,
+  type MemoryManageStageResult,
   migrateKernelDatabase,
   NewerDatabaseError,
   openKernelDatabase,
@@ -69,6 +73,7 @@ import {
   RunEngine,
   StrategyRegistry,
   type ToolBroker,
+  ToolError,
 } from "@companion/kernel";
 import {
   createOllamaGateway,
@@ -1021,24 +1026,28 @@ export async function startServer(
       repo = gatedRepo;
     }
 
-    if (
+    const needsMarkdownTools =
       config.markdownRoots.length > 0 ||
       calendarBinding !== null ||
       calendarConfig !== null ||
-      actionsEnabled
-    ) {
-      const registrations = [
-        ...createM1ToolRegistrations({
-          db: handle.raw,
-          repo,
-          referenceManager,
-          bindings: markdownBindings,
-          ...(kernelCalendarBinding !== undefined
-            ? { calendarBinding: kernelCalendarBinding }
-            : {}),
-          ...(calendarTargetStore !== undefined ? { calendarTargetStore } : {}),
-        }),
-      ];
+      actionsEnabled;
+    if (needsMarkdownTools || memory !== null) {
+      const registrations = needsMarkdownTools
+        ? [
+            ...createM1ToolRegistrations({
+              db: handle.raw,
+              repo,
+              referenceManager,
+              bindings: markdownBindings,
+              ...(kernelCalendarBinding !== undefined
+                ? { calendarBinding: kernelCalendarBinding }
+                : {}),
+              ...(calendarTargetStore !== undefined
+                ? { calendarTargetStore }
+                : {}),
+            }),
+          ]
+        : [];
       if (actionsEnabled) {
         // Proposal-only: stages a proposal, never executes an external write.
         registrations.push(
@@ -1046,6 +1055,85 @@ export async function startServer(
             stager: repo.actionProposalsStager as ActionProposalStager,
           }),
         );
+      }
+      if (memory !== null) {
+        // Explicit memory management tools (staging-only, no external-write
+        // widening): the shared broker keeps the existing budgets; the
+        // server-owned port stages mutations ONLY as durable outbox +
+        // operation rows (the broker handler never performs a CLI mutation).
+        const activeMemory = memory;
+        const port: MemoryManagePort = {
+          search: (input, options) =>
+            activeMemory.searchMemories({
+              sessionId: input.sessionId,
+              runId: input.runId,
+              query: input.query,
+              limit: input.limit,
+              ...(options?.signal !== undefined
+                ? { signal: options.signal }
+                : {}),
+            }),
+          stage: async (input, options): Promise<MemoryManageStageResult> => {
+            let out: Awaited<
+              ReturnType<typeof activeMemory.stageMemoryMutation>
+            >;
+            try {
+              out = await activeMemory.stageMemoryMutation({
+                sessionId: input.sessionId,
+                runId: input.runId,
+                kind: input.kind,
+                searchId: input.searchId,
+                ...(input.handle !== undefined ? { handle: input.handle } : {}),
+                ...(input.correctionBody !== undefined
+                  ? { correctionBody: input.correctionBody }
+                  : {}),
+                idempotencyKey: input.idempotencyKey,
+                // Server-known model origin: the kernel handler hardcodes
+                // false and model args carry no such field, so this can
+                // never be smuggled to true from the model side.
+                trustedSelection: false,
+                ...(options?.signal !== undefined
+                  ? { signal: options.signal }
+                  : {}),
+              });
+            } catch (error) {
+              if (
+                typeof error === "object" &&
+                error !== null &&
+                (error as { name?: unknown }).name === "MemoryManageCancelled"
+              ) {
+                throw new ToolError("execution_cancelled");
+              }
+              throw error;
+            }
+            if (out.ok) {
+              return {
+                status: "staged",
+                operationId: out.operationId,
+                operationStatus: out.status,
+              };
+            }
+            if (
+              out.code === "needs_clarification" ||
+              out.code === "target_not_found" ||
+              out.code === "state_conflict"
+            ) {
+              return {
+                status: out.code,
+                candidates: [...(out.candidates ?? [])],
+              };
+            }
+            if (out.code === "validation_error") {
+              throw new ToolError("execution_failed");
+            }
+            if (out.code === "service_unavailable") {
+              throw new ToolError("execution_failed");
+            }
+            throw new ToolError("execution_failed");
+          },
+        };
+        registrations.push(createMemorySearchRegistration({ repo, port }));
+        registrations.push(...createMemoryStageRegistrations({ repo, port }));
       }
       toolBroker = createToolBroker({ db: handle.raw, repo, registrations });
       logger.info("server.markdown_ready", {
@@ -1178,6 +1266,7 @@ export async function startServer(
       now,
       assets: loadUiAssets(),
       actionsEnabled,
+      ...(memory !== null ? { memory } : {}),
     });
     const activeEngine = engine;
     const activeHandle = handle;

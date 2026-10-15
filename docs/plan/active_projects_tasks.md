@@ -599,3 +599,6 @@
 - 参照したのは上記正本と計画/operations/spike/designの必要箇所、および `active_projects_plan.md`。rootにREADME/docsはなく、remind正本はnested `.tmp-t6`。
 - 全体readでG/R/C/Iの47見出しとID連番を照合し、各親の連番個数を集計した: G18、R150、C01–C15 120、C16–C22 72、I46、計406（既存scope 360、追加I scope 46）。checkbox ID重複・番号欠けなし。shellからの機械集計はWSL `/bin/bash` 起動失敗で未実施。テスト/CI/OAuth/network/installも未実行。shell失敗はtest未実行でありソース不具合ではない。
 - Branch/commit/status/dirty/integration/runtime/current CI/test successは実測していない。計画にある参照SHA/過去CIは現在の事実として主張しない。
+
+## 現況追記（2026-10-15、履歴保持・checkbox/ID/件数不変）
+- Companion explicit memory management（I02/I03 管理面＋I04 確認契約の範囲）: search（retired 含む・no-heat）・current-vs-snapshot confirm・source event→real correct chain・retire/reactivate（削除/非表示ではない）を実装。UI 同期 invalidation/generation guard・pending reset＋poll identity・stale ack 非再利用、7 integrity 回帰を含む。full Vitest 113 files/1370・browser GREEN・live GREEN・typecheck＋lint GREEN（synthetic gateway の限定付き）。perception/export/deletion 未実装維持。I01/I04 正式採用判断・Windows manual・現行 CI は未完維持。

@@ -268,6 +268,29 @@ export {
   UuidSchema,
 } from "./ids.js";
 export type {
+  MemoryDetailResponse,
+  MemoryErrorCode,
+  MemoryHandle,
+  MemoryHit,
+  MemoryMutationRequest,
+  MemoryMutationResponse,
+  MemoryOperationResponse,
+  MemorySearchRequest,
+  MemorySearchResponse,
+} from "./memory.js";
+export {
+  MEMORY_ERROR_CODES,
+  MemoryDetailResponseSchema,
+  MemoryErrorCodeSchema,
+  MemoryHandleSchema,
+  MemoryHitSchema,
+  MemoryMutationRequestSchema,
+  MemoryMutationResponseSchema,
+  MemoryOperationResponseSchema,
+  MemorySearchRequestSchema,
+  MemorySearchResponseSchema,
+} from "./memory.js";
+export type {
   M2ModelErrorCode,
   M2ModelErrorSchemaVersion,
   M2ModelStepEventType,

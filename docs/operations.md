@@ -284,9 +284,56 @@ connector instance owns **all** configured roots.
   (no real-model result), foreground/shutdown preemption edges remain
   covered by `memory_service.test.ts` unit regressions, Windows manual
   smoke and current remote CI remain open.
-- Not implemented (unchanged): memory perception/reactivation/
-  retirement, user export, and memory/session deletion APIs. There is no
-  per-session memory delete/export endpoint.
+- Explicit management (search / correct / retire / reactivate),
+  2026-10-15 (local, temp stores only): `POST .../memory/search` is
+  explicit user-directed only and returns opaque session-scoped `mN`
+  handles for active AND retired records (never archived/superseded);
+  a search never heats, reactivates, or grants feedback (zero
+  `record.feedback` jobs from search). `GET .../memory/detail` keeps
+  the immutable cited snapshot distinct from the live current record
+  (provenance source `companion:conversation`); the UI confirm panel
+  shows current vs snapshot before staging a mutation. `record.correct`
+  stages a REAL `event.append` (raw source carrying the user's
+  replacement) followed by `record.correct`, both `acked` in the
+  Companion outbox under one stable idempotency key; same key+body
+  replays the stored operation, same key+drifted body is 409 (no
+  silent rebind). `record.retire` excludes the record from REAL CLI
+  `record.recall` while a fresh explicit search still returns the
+  handle with status `retired`; `record.reactivate` restores it
+  (search shows active again, CLI recall returns the snippet). This
+  is reversible retirement, not deletion/hiding: no delete/export/
+  perception surface exists. UI races are closed synchronously:
+  search/target invalidation with monotonic generation guards (stale
+  responses never apply), new-operation staging resets pending state
+  and binds poll identity to the fresh operation (no stale ack reuse).
+  Integrity edges are covered by unit regressions: ambiguous-model
+  refusal, atomic op/outbox/followup staging, replay-first state
+  recovery, terminal-failure marking, and cancellation.
+- Permanent regressions (temp stores only, no user DB writes):
+  `pnpm exec vitest run apps/server/test/memory_manage.test.ts`
+  (unit: guards, idempotent replay + partial-chain recovery, no-heat
+  search, retire/search/reactivate lifecycle, immutable citations,
+  native tool-flow budgets; real migrated `:memory:` kernel DB +
+  injected fake CLI);
+  `pnpm --filter @companion/server exec vitest run
+  test/memory_manage_live.test.ts` (live: real HTTP + synthetic
+  gateway, honestly labeled NOT a real model, + REAL remind CLI temp
+  DB; proves search-incl-retired/no-heat, snapshot-vs-current detail,
+  real correct chain acked + stored-operation replay, retire/reactivate
+  against REAL CLI recall);
+  `COMPANION_E2E_MEMORY=1 pnpm --filter @companion/server exec
+  playwright test --config playwright.config.ts` (real browser:
+  `e2e/memory/memory_manage.spec.ts` drives the REAL memory panel UI
+  against the REAL Hono app + RunEngine + REAL remind CLI temp DB;
+  synthetic scripted gateway cultivates one fact, never a real model).
+  Verified 2026-10-15: full Vitest **113 files / 1370 tests passed**,
+  real-browser memory spec GREEN, live HTTP/real-CLI GREEN, root +
+  e2e `tsc --noEmit` exit 0, `pnpm lint` GREEN. Limits: synthetic
+  gateway only (no real-model result), Windows manual smoke and
+  current remote CI remain open.
+- Not implemented (unchanged): memory perception, user export, and
+  memory/session deletion APIs. There is no per-session memory
+  delete/export endpoint.
 
 ### MCP library wire identity (C09; not server-enabled)
 

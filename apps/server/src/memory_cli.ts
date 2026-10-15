@@ -54,6 +54,11 @@ const ALLOWED_OPS: ReadonlySet<string> = new Set([
   "record.recall",
   "record.feedback",
   "maintain.distill",
+  "record.search",
+  "record.get",
+  "record.correct",
+  "record.retire",
+  "record.reactivate",
 ]);
 
 /** Write ops require a caller-supplied stable idempotency key. */
@@ -62,6 +67,9 @@ const WRITE_OPS: ReadonlySet<string> = new Set([
   "record.remember",
   "record.feedback",
   "maintain.distill",
+  "record.correct",
+  "record.retire",
+  "record.reactivate",
 ]);
 
 /** Fixed client-side failure codes (never carry values). */
