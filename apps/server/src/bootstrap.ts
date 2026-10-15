@@ -29,7 +29,9 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   createCalendarConnector,
+  createRescheduleWritePort,
   DEFAULT_CALENDAR_ADAPTER_TOOLS,
+  isSourceEtagBasis,
 } from "@companion/connector-calendar";
 import { createMarkdownConnector } from "@companion/connector-markdown";
 import {
@@ -99,6 +101,16 @@ import {
   type StatFn,
   shouldWarnStoreSize,
 } from "./maintenance.js";
+import {
+  assertRescheduleWriteHintCompatible,
+  buildRescheduleWriteConnectorConfig,
+  getRescheduleWriteDefinitions,
+  parseRescheduleWriteConnectorHint,
+  parseRescheduleWriteProfileName,
+  RESCHEDULE_WRITE_CONNECTOR_ENV,
+  RESCHEDULE_WRITE_PROFILE_ENV,
+  type RescheduleWriteConnectorHint,
+} from "./rescheduleWriteProfile.js";
 
 /** Graceful-drain natural-completion budget (§11.5: max 10s). */
 export const SHUTDOWN_DRAIN_MS = 10_000;
@@ -182,14 +194,36 @@ export interface StartServerOptions {
    */
   mcpShutdownMs?: number;
   /**
+   * M5 (tests / trusted harness): injectable DEDICATED write MCP transport
+   * factory used ONLY when the host-owned reschedule write profile
+   * (`M5_RESCHEDULE_WRITE_PROFILE`) is selected. Production never passes
+   * this field (the real default stdio factory spawns the pinned fork CLI).
+   * This is the explicit trusted test seam: fixture transports arrive only
+   * through this option, never through production endpoint env bypass.
+   */
+  writeMcpTransportFactory?: TransportFactory;
+  /**
+   * M5 (tests only): explicit trusted test-seam wire identity override for
+   * the dedicated write connector (e.g. the tracked fixture server name/
+   * version). Options-injected only, never env. Production never passes
+   * this field (the pinned fork identity always applies).
+   */
+  writeTestIdentity?: {
+    readonly expectedServerName: string;
+    readonly version: string;
+  };
+  /**
    * C21: the DEDICATED trusted CalendarActionWritePort seam, injected ONLY by
    * trusted host code — NEVER from env/config, which cannot carry a capability,
    * a category or a connector instance id. It becomes live ONLY when
    * `config.actions.optIn` AND `config.actions.writeEnabled` are both true AND
    * its enabled capability names the EXACT active Calendar instance.
    *
-   * There is no production write binding in this codebase; tests and the C22
-   * fake browser harness inject their own deterministic fake ports here.
+   * There is no other production write binding in this codebase beyond the
+   * host-owned write profile (`M5_RESCHEDULE_WRITE_PROFILE`, composed by the
+   * server itself with no injection); tests and the C22 fake browser harness
+   * inject their own deterministic fake ports here (mutually exclusive with
+   * the profile).
    */
   actionWriteBinding?: ActionWriteBinding | null;
 }
@@ -589,11 +623,20 @@ export async function startServer(
   // synchronously with the initial frozen startup config, BEFORE the first
   // await below. `options.env` / `process.env` stay mutable, so a later
   // read could observe a different decision; the captured const is the
-  // single decision used later.
+  // single decision used later. The M5 dedicated write selector + connector
+  // hints freeze the same way (same rationale, same single decision).
   let frozenCalendarProfile: string | undefined;
+  let frozenWriteProfile: string | undefined;
+  let frozenWriteConnectorHint: string | undefined;
   try {
     config = loadServerConfig(options.env);
     frozenCalendarProfile = (options.env ?? process.env)[CALENDAR_PROFILE_ENV];
+    frozenWriteProfile = (options.env ?? process.env)[
+      RESCHEDULE_WRITE_PROFILE_ENV
+    ];
+    frozenWriteConnectorHint = (options.env ?? process.env)[
+      RESCHEDULE_WRITE_CONNECTOR_ENV
+    ];
   } catch (error) {
     const earlyLogger =
       options.logger ?? createStdServerLogger(DEFAULT_LOG_LEVEL);
@@ -614,6 +657,15 @@ export async function startServer(
   let startedListener: ListenerHandle | undefined;
   /** C14: the ONE server-owned Calendar MCP connector (undefined = none). */
   let ownedMcp: McpConnector | undefined;
+  /**
+   * M5: the ONE server-owned DEDICATED reschedule write MCP connector
+   * (undefined = none). Separate transport identity from the readonly
+   * connector above; shares the active Calendar instance id in its
+   * capability only. Constructed lazily (no I/O); shut down bounded exactly
+   * like the owned read connector on every startup/shutdown path, and only
+   * when adopted (actions triple gate open with the write profile selected).
+   */
+  let ownedWriteMcp: McpConnector | undefined;
   /** C21: EXPLICITLY owned injected write-port close hook (see gate below). */
   let ownedActionShutdown: (() => Promise<void>) | undefined;
   let onSigint: (() => void) | undefined;
@@ -705,6 +757,60 @@ export async function startServer(
       // discovered/model-defined registration) BEFORE any DB side effect.
       throw new ServerConfigError(
         "calendar config requires host trusted binding definitions",
+      );
+    }
+    // M5 host-owned dedicated write profile (normal `pnpm start`
+    // selection): `M5_RESCHEDULE_WRITE_PROFILE=google-reschedule` together
+    // with `M5_RESCHEDULE_CONNECTOR_JSON` stdio hints composes the SEPARATE
+    // write entrypoint hostside. Unset profile keeps the previous behavior
+    // unchanged (injected `actionWriteBinding` seam or fail-closed
+    // incomplete opt-in). Selected profile requires: no competing injected
+    // write binding, an active Calendar composition (owned config or
+    // injected binding — the capability names that exact instance), the
+    // existing actions opt-in + writeEnabled pair, and strict valid hints.
+    // Identity/schema/category authority stays host-pinned (never the
+    // hint); TEST-namespace env names are rejected. ALL fail closed here,
+    // BEFORE ensureDbDir/open/migrations or any DB side effect. Uses the
+    // frozen values captured synchronously at startup (see above).
+    const writeProfile = parseRescheduleWriteProfileName(frozenWriteProfile);
+    let writeConnectorHint: RescheduleWriteConnectorHint | null = null;
+    if (writeProfile !== null) {
+      if (options.actionWriteBinding !== undefined) {
+        throw new ServerConfigError(
+          "reschedule write profile and an injected write binding are mutually exclusive",
+        );
+      }
+      if (calendarConfig === null && calendarBinding === null) {
+        throw new ServerConfigError(
+          "reschedule write profile requires calendar config",
+        );
+      }
+      if (
+        config.actions.optIn !== true ||
+        config.actions.writeEnabled !== true
+      ) {
+        throw new ServerConfigError(
+          "reschedule write profile requires action write opt-in",
+        );
+      }
+      writeConnectorHint = parseRescheduleWriteConnectorHint(
+        frozenWriteConnectorHint,
+      );
+      assertRescheduleWriteHintCompatible(writeConnectorHint);
+      if (
+        options.writeTestIdentity !== undefined &&
+        (options.writeTestIdentity.expectedServerName.length === 0 ||
+          options.writeTestIdentity.version.length === 0)
+      ) {
+        throw new ServerConfigError(
+          "reschedule write connector hints are invalid",
+        );
+      }
+    } else if (frozenWriteConnectorHint !== undefined) {
+      // Hints without the profile selector are never silently adopted or
+      // ignored: fail closed (no connection, no credential read).
+      throw new ServerConfigError(
+        "reschedule write connector hints require a write profile",
       );
     }
     // Boring profile-specific persisted identity: the profile registers
@@ -876,19 +982,53 @@ export async function startServer(
         };
         calendarTargetStore = createDurableCalendarTargetStore(handle.raw);
       }
+      // M5 host-owned dedicated write MCP lifecycle (normal startup). Built
+      // ONLY when the write profile is selected (validated pre-DB above):
+      // a SEPARATE stdio transport to the pinned dedicated entrypoint under
+      // the exact `["write"]` category gate with the host-pinned `write`
+      // definition, bound to the SAME active Calendar instance id as the
+      // read binding above. Constructor does NO I/O (lazy connect, per-call
+      // fixed errors, no resend); the readonly connector/profile above is
+      // never widened, rebound, or replaced.
+      if (writeProfile !== null && writeConnectorHint !== null) {
+        if (
+          kernelCalendarBinding === undefined ||
+          calendarTargetStore === undefined
+        ) {
+          throw new ServerConfigError(
+            "action write binding does not match the active calendar binding",
+          );
+        }
+        ownedWriteMcp = new McpConnector(
+          buildRescheduleWriteConnectorConfig({
+            connectorInstanceId: kernelCalendarBinding.connectorInstanceId,
+            hint: writeConnectorHint,
+            ...(options.writeTestIdentity !== undefined
+              ? { testIdentity: options.writeTestIdentity }
+              : {}),
+          }),
+          getRescheduleWriteDefinitions(),
+          options.writeMcpTransportFactory,
+          { permittedCategories: ["write"] },
+        );
+      }
     }
 
     // C21 M5 composition: TRIPLE gate. `m5-action` and the proposal-only
     // `calendar.reschedule` registration exist ONLY when ALL of these hold:
     //   1. config.actions.optIn        (strict env opt-in, default false),
     //   2. config.actions.writeEnabled (staging + approval opt-in),
-    //   3. a DEDICATED trusted CalendarActionWritePort injected by host code
-    //      (never env/config) whose enabled capability binds the EXACT same
-    //      active Calendar instance as the read binding.
-    // There is deliberately NO production write binding in this codebase: the
-    // third condition is unreachable unless a trusted host injects one, and
-    // an injected port whose capability does not match the active instance is
-    // a fail-closed startup error (never a silently half-enabled surface).
+    //   3. a DEDICATED trusted CalendarActionWritePort — either injected by
+    //      host code (never env/config) whose enabled capability binds the
+    //      EXACT same active Calendar instance as the read binding, or the
+    //      host-owned write profile (`M5_RESCHEDULE_WRITE_PROFILE`, composed
+    //      below from the pinned provider + the repository-immutable
+    //      committed-grant resolver, capability on the same active
+    //      instance).
+    // There is deliberately NO caller-supplied production write binding in
+    // this codebase beyond these two seams: an injected port whose
+    // capability does not match the active instance is a fail-closed startup
+    // error (never a silently half-enabled surface).
     const actionWrite = options.actionWriteBinding ?? null;
     const actionConfigEnabled =
       config.actions.optIn === true && config.actions.writeEnabled === true;
@@ -924,7 +1064,11 @@ export async function startServer(
       }
     }
     let actionsEnabled = false;
-    if (actionConfigEnabled && actionWritePort === null) {
+    if (
+      actionConfigEnabled &&
+      actionWritePort === null &&
+      writeProfile === null
+    ) {
       // Config opted in without a usable write binding (absent binding, or
       // a binding supplying both/neither of port/derivePort): an incomplete
       // opt-in and fails closed BEFORE listen (never a silent disable).
@@ -957,11 +1101,96 @@ export async function startServer(
     }
 
     // Repository (with its SINGLE shared proposal stager) is constructed here
-    // so `writeEnabled` is exactly the triple-gated value above.
+    // so `writeEnabled` is exactly the triple-gated value above. A selected
+    // host-owned write profile implies the config pair already (enforced in
+    // the pre-DB preflight), so the stager is enabled for it here; the
+    // dedicated port itself is composed immutably from the repository below.
     const repo = createKernelRepository(
       handle.raw,
-      actionsEnabled ? { actionProposals: { writeEnabled: true } } : {},
+      actionsEnabled || writeProfile !== null
+        ? { actionProposals: { writeEnabled: true } }
+        : {},
     );
+
+    // M5 host-owned dedicated port (normal startup, no injection). The
+    // conditional etag resolves concretely from the REPOSITORY-immutable
+    // committed grant (execution/proposal/hash -> `expected_revision` read
+    // back here, never the latest resource and never a host-prepared map):
+    // the stored triple must equal the grant triple exactly and the stored
+    // revision must carry a real source-etag basis, otherwise null — a safe
+    // definite rejection with NO dispatch. Single owned write MCP lifecycle
+    // (lazy, no resend, `["write"]` only); the readonly connector/profile
+    // above is never widened or rebound.
+    if (writeProfile !== null) {
+      const writeConnector = ownedWriteMcp;
+      if (
+        writeConnector === undefined ||
+        kernelCalendarBinding === undefined ||
+        calendarTargetStore === undefined
+      ) {
+        throw new ServerConfigError(
+          "action write binding does not match the active calendar binding",
+        );
+      }
+      const activeInstanceId = kernelCalendarBinding.connectorInstanceId;
+      const resolveExpectedEtag = (grant: {
+        readonly executionId: string;
+        readonly proposalId: string;
+        readonly proposalHash: string;
+        readonly expectedRevision: string;
+      }): string | null => {
+        let stored: {
+          proposalHash: string;
+          expectedRevision: string;
+        } | null;
+        try {
+          stored = repo.readCommittedGrantRevision(
+            grant.executionId,
+            grant.proposalId,
+          );
+        } catch {
+          return null;
+        }
+        if (stored === null) {
+          return null;
+        }
+        if (stored.proposalHash !== grant.proposalHash) {
+          return null;
+        }
+        if (stored.expectedRevision !== grant.expectedRevision) {
+          return null;
+        }
+        if (!isSourceEtagBasis(stored.expectedRevision)) {
+          return null;
+        }
+        return stored.expectedRevision;
+      };
+      const hostPort = createRescheduleWritePort({
+        connectorInstanceId: activeInstanceId,
+        caller: {
+          callTool: (
+            upstreamTool: string,
+            args: unknown,
+            signal?: AbortSignal,
+          ) => writeConnector.callTool(upstreamTool, args, signal),
+        },
+        upstreamTool: "reschedule-event",
+        resolveExpectedEtag,
+      });
+      const hostCapability = CalendarActionWriteCapabilitySchema.safeParse(
+        hostPort.capability,
+      );
+      if (
+        !hostCapability.success ||
+        hostCapability.data.connectorInstanceId !== activeInstanceId
+      ) {
+        throw new ServerConfigError(
+          "action write binding does not match the active calendar binding",
+        );
+      }
+      actionWritePort = hostPort as unknown as CalendarActionWritePort;
+      actionsEnabled = true;
+    }
 
     if (
       config.markdownRoots.length > 0 ||
@@ -1176,6 +1405,13 @@ export async function startServer(
       } catch {
         // Best effort: the listen error carries the startup failure.
       }
+      try {
+        if (ownedWriteMcp !== undefined) {
+          await boundedMcpShutdown(ownedWriteMcp, mcpShutdownMs);
+        }
+      } catch {
+        // Best effort: the listen error carries the startup failure.
+      }
       const ownedListenShutdown = takeOwnedActionShutdown();
       try {
         await boundedActionShutdown(ownedListenShutdown, mcpShutdownMs);
@@ -1244,6 +1480,27 @@ export async function startServer(
             });
           }
         }
+        // M5: the adopted owned dedicated write connector shuts down
+        // bounded exactly like the read connector above (after the engine
+        // drain, before the DB close). A budget loss never blocks shutdown.
+        // Unadopted/disabled compositions never construct it, so there is
+        // nothing to own or close for them.
+        if (ownedWriteMcp !== undefined) {
+          let writeStopped = false;
+          try {
+            writeStopped = await boundedMcpShutdown(
+              ownedWriteMcp,
+              mcpShutdownMs,
+            );
+          } catch {
+            // The connector's own cleanup is bounded; proceed with close.
+          }
+          if (!writeStopped) {
+            logger.warn("server.reschedule_write_shutdown_timeout", {
+              status: safeReason,
+            });
+          }
+        }
         // C21: the adopted hook is consumed before invoke (single-use even
         // across a drain-failure retry: the retry re-enters shutdown only
         // after the memo reset above, and the first pass never reached here).
@@ -1304,6 +1561,13 @@ export async function startServer(
     if (ownedMcp !== undefined) {
       try {
         await boundedMcpShutdown(ownedMcp, mcpShutdownMs);
+      } catch {
+        // Best effort: the original startup error carries the failure.
+      }
+    }
+    if (ownedWriteMcp !== undefined) {
+      try {
+        await boundedMcpShutdown(ownedWriteMcp, mcpShutdownMs);
       } catch {
         // Best effort: the original startup error carries the failure.
       }

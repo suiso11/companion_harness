@@ -39,6 +39,7 @@ export {
   type CreateRescheduleWritePortOptions,
   createCommittedGrantResolver,
   createRescheduleWritePort,
+  isSourceEtagBasis,
   RESCHEDULE_WRITE_MCP_NAME,
   RESCHEDULE_WRITE_MCP_VERSION,
   RESCHEDULE_WRITE_TOOL,

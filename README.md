@@ -1431,7 +1431,15 @@ COMPANION_ACTIONS_JSON='{ "optIn": true, "writeEnabled": true }'
 - 設定はヒントに過ぎません。capability / category / connector instance id を
   env から与えることはできず、書き込み port は必ず `startServer({
   actionWriteBinding: { port, shutdown?, owned? } })` で注入します
-  (本コードベースには production の実書き込み binding は存在しません)。
+  (通常起動のホスト所有 write profile
+  (`M5_RESCHEDULE_WRITE_PROFILE=google-reschedule` +
+  `M5_RESCHEDULE_CONNECTOR_JSON` stdio ヒント) を除き、本コードベースに
+  その他の production 実書き込み binding は存在しません; profile 未設定の
+  既定は無効のまま)。profile 選択時は注入 binding と相互排他であり、
+  `M5_RESCHEDULE_TEST_*` の allowlist 指定は fail-closed です
+  (fixture endpoint は options 注入の子プロセス env のみ)。
+  受け入れ証跡: `apps/server/test/rescheduleWriteStartup.test.ts` 15/15
+  (実 stdio E2E の HTTP approve 1 PATCH + readback receipt を含む)。
 - 設定が有効で binding が active instance と一致しない場合は listen 前に
   fail-closed します。設定が無効な場合、注入された port は一切使われません。
 - 無効時は staging できず、approve は repository 呼び出し前に固定

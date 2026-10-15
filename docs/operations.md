@@ -2920,6 +2920,23 @@ copied; the entrypoint is a standalone narrow surface with its own pin).
   fork `tsc` build clean (`dist/cli.js` present); port suite 8/8 +
   real-process stdio suite 1/1 green; root typecheck + full suite +
   biome re-run recorded below. No live writes/scopes.
+- Normal-startup write-profile proof (2026-10-15, default OFF unchanged):
+  `apps/server/test/rescheduleWriteStartup.test.ts` 15/15 — the prior
+  14/15 success case (`unknown` instead of `succeeded`) was a fixture-hint
+  cause only (E2E stdio hints omitted the mandatory SDK inherited
+  allowlist, so the fail-closed stdio guard denied before spawn); fixed by
+  adding the exact live `STDIO_IMPLICIT_ENV_VARS` to the three real-stdio
+  E2E hints. Production parsing still rejects `M5_RESCHEDULE_TEST_*`
+  (fixture endpoint travels in the options-injected CHILD env only, never
+  the hint). Success path verified end to end: staged HTTP approve ->
+  exactly ONE conditional PATCH (`If-Match` = committed etag, start/end
+  only) -> strategy readback -> `succeeded` receipt; stale grant ->
+  `blocked_stale` with 0 patches; drifted identity -> `unknown` with 0
+  patches; committed-grant resolver reads the exact stored hash+revision.
+  Final: root suite 114 files / 1350 tests green, `tsc --noEmit` exit 0,
+  `biome check .` clean, throwaway normal-startup `tsx` smoke
+  (`/health/live` -> `{"status":"live"}`, default profile unselected) OK.
+  No live Google/OAuth/user-DB writes; no production guard weakened.
 - Remaining: nested-fork push to suiso11/google-calendar-mcp SUCCEEDED
   (branch `feat/m5-reschedule-entrypoint`, commit `164cb83`, no merge);
   draft PR BLOCKED with the exact reason `branch has no history in common
