@@ -1658,3 +1658,16 @@ timeout change, no behavior change: the scheduler tests' engine-idle poll
 now yields via `setImmediate` instead of wall-clock `setTimeout` sleeps,
 and `vitest.config.ts` caps `maxWorkers: 2` on CI only. Detail:
 `docs/operations.md` ("PR29 Windows stall fix").
+
+# PR31 Citation CI Race Fix (2026-10-15)
+
+Push CI run `38716307351` (head `a77cd1e`) failed ONLY `e2e` with the
+same 2 `citation_recovery.spec.ts` failures at `sessionIdOf (:42)`:
+`typeof null === "object"` — `ch.sessionId` not yet written because
+`beforeEach`'s composer-visible/enabled gate is already true in the
+static HTML before async `ensureSession()` posts `/api/sessions`.
+Same-head PR run `38716314333` passed (warm timing won the race).
+Test-only sync fix, no product change: `sessionIdOf` waits for the
+real session signal (`ch.sessionId` non-empty) before asserting.
+Local proof: 2/2 affected browser cases pass; `biome check` clean.
+Detail: `docs/operations.md` ("PR31 citation CI race fix").

@@ -3165,9 +3165,37 @@ enters the read allowlist).
   fork `.github/workflows/ci.yml` now triggers on `feat/**` too so PR #3
   runs build + `lint` (`tsc -p tsconfig.lint.json`) + `check:imports` +
   unit tests with coverage. Host CI (`ci.yml` check + e2e) proves the
-  tracked-fixture mirrors, static gates, and full pipeline smoke only;
-  host `rescheduleProcess`/`rescheduleWrite` mirrors are NOT provider
-  proof (stated here, not substituted).
+   tracked-fixture mirrors, static gates, and full pipeline smoke only;
+   host `rescheduleProcess`/`rescheduleWrite` mirrors are NOT provider
+   proof (stated here, not substituted).
+
+## PR31 citation CI race fix (2026-10-15, test sync only, no product change)
+
+CI ground truth: push run `38716307351` (head `a77cd1e`) failed ONLY
+`e2e` with 2 failures in `apps/server/e2e/citation_recovery.spec.ts`
+(stale-PUT CAS test `:71` + genuine-concurrent-409 test `:135`); both
+`check` jobs passed and the same-head PR-event run `38716314333`
+passed. Both failures are the identical line
+`sessionIdOf (.../citation_recovery.spec.ts:42)`:
+`expect(typeof id).toBe("string")` got `typeof null === "object"` —
+the page's `localStorage ch.sessionId` was still empty. No seed,
+409, expiry, collision, or route-capture behavior is implicated: the
+read happens before `/seed-citation` and before any route is
+installed. Root cause is a test/fixture race: `beforeEach` gates on
+`#composer` visible + `#composer-send` enabled, which the static HTML
+already satisfies before async `boot() -> ensureSession()` finishes
+`POST /api/sessions` and writes `ch.sessionId`. Cold CI starts lose
+the race (first two tests); warm runs win it (later tests +
+same-head rerun passed). Fix (test-only, assertions kept):
+`sessionIdOf` now `waitForFunction`s the real product signal
+(`ch.sessionId` non-empty, 15s budget matching the file's other
+waits) before reading/asserting. No M5 startup code touched, no
+`client.ts`/`app.ts` product change, no timeout/retry/suppression,
+readonly `:3000` service untouched. Local proof (Linux, real
+Chromium, owned temp harness): the 2 affected cases pass
+(`-g "citation drawer"`, 2/2, ~4s); `biome check` on the touched
+spec clean. New-head CI outcome recorded in the PR31 CI line below
+after push.
 - Concrete host resolver (closed contract, trusted-code-only, default
   OFF): `createCommittedGrantResolver` (connector-calendar, re-exported
   by `rescheduleWriteBinding.ts` + `createCommittedGrantWriteBinding`
