@@ -10,7 +10,11 @@
 // `etag_mismatch`) against the loopback Google-shaped fixture whose base URL
 // arrives via `M5_RESCHEDULE_TEST_ENDPOINT_BASE` (required; the process
 // exits non-zero without it). No credential namespace, no OAuth, no live
-// Google, fixture data only.
+// Google, fixture data only. All-day conversion mirror: a valid all-day
+// loopback source (strict YYYY-MM-DD bounds, exclusive end > start)
+// converts to timed with `date: null` clearing + new `dateTime` (exactly
+// like the real provider); malformed bounds are `invalid_input` with NO
+// patch. Timed sources keep dateTime-only bodies.
 //
 // The REAL production entrypoint lives in the fork (derived branch
 // `feat/m5-reschedule-entrypoint-v2`, draft PR suiso11/google-calendar-mcp#3,
@@ -99,6 +103,55 @@ const RescheduleEventInputSchema = z
     }
   });
 
+// Strict YYYY-MM-DD mirror of the fork `isStrictCalendarDate` contract
+// (no rollover: `2026-02-30` is rejected). Wire schema unchanged.
+function isStrictCalendarDate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const year = Number(value.slice(0, 4));
+  const month = Number(value.slice(5, 7));
+  const day = Number(value.slice(8, 10));
+  if (month < 1 || month > 12) return false;
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth =
+    [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1] ??
+    0;
+  return day >= 1 && day <= daysInMonth;
+}
+
+function isTimedEndpoint(value) {
+  if (typeof value !== "object" || value === null) return false;
+  return typeof value.dateTime === "string" && value.date === undefined;
+}
+
+function isDateEndpoint(value) {
+  if (typeof value !== "object" || value === null) return false;
+  return (
+    typeof value.date === "string" &&
+    value.dateTime === undefined &&
+    isStrictCalendarDate(value.date)
+  );
+}
+
+// Classify the loopback GET observation exactly like the real provider:
+// timed (both dateTime), valid all-day (both strict YYYY-MM-DD date with
+// exclusive end > start), or malformed (mixed/bad/reversed → invalid_input
+// with NO patch, mirroring `normalizeGoogleObservation`).
+function classifySource(body) {
+  if (typeof body !== "object" || body === null) return { kind: "malformed" };
+  const { start, end } = body;
+  if (isTimedEndpoint(start) && isTimedEndpoint(end)) {
+    return { kind: "timed" };
+  }
+  if (isDateEndpoint(start) && isDateEndpoint(end)) {
+    const startMs = Date.parse(`${start.date}T00:00:00Z`);
+    const endMs = Date.parse(`${end.date}T00:00:00Z`);
+    if (!Number.isNaN(startMs) && !Number.isNaN(endMs) && endMs > startMs) {
+      return { kind: "allDay", startDate: start.date, endDate: end.date };
+    }
+  }
+  return { kind: "malformed" };
+}
+
 function definite(code) {
   return {
     content: [
@@ -164,6 +217,28 @@ async function main() {
           content: [{ type: "text", text: "transport_lost" }],
         };
       }
+      // Mirror the real provider: classify the source BEFORE any PATCH.
+      // Valid all-day converts (PATCH clears `date: null` + new `dateTime`,
+      // exactly like UpdateEventHandler/RecurringEventHelpers timed writes);
+      // malformed all-day (bad/mixed/reversed bounds) is `invalid_input`
+      // with NO patch dispatched. Timed sources keep dateTime-only bodies.
+      let source = { kind: "malformed" };
+      try {
+        source = classifySource(await current.json());
+      } catch {
+        return definite("invalid_input");
+      }
+      if (source.kind === "malformed") return definite("invalid_input");
+      const patchBody =
+        source.kind === "allDay"
+          ? {
+              start: { date: null, dateTime: input.start },
+              end: { date: null, dateTime: input.end },
+            }
+          : {
+              start: { dateTime: input.start },
+              end: { dateTime: input.end },
+            };
       let res;
       try {
         res = await fetch(url, {
@@ -172,10 +247,7 @@ async function main() {
             "content-type": "application/json",
             "If-Match": input.expectedEtag,
           },
-          body: JSON.stringify({
-            start: { dateTime: input.start },
-            end: { dateTime: input.end },
-          }),
+          body: JSON.stringify(patchBody),
           signal: extra?.signal,
           redirect: "manual",
         });

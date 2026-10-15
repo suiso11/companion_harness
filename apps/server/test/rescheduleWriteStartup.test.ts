@@ -1344,3 +1344,416 @@ describe("write-command absolute paths (Windows + spaces)", () => {
     await spawned.close();
   }, 30_000);
 });
+
+// ---------------------------------------------------------------------------
+// All-day → timed conversion pipeline: all-day snapshot, TIMED stage,
+// local-fixture approve, exactly ONE conditional PATCH with `date: null`
+// clearing, timed readback into a new snapshot/rN while the old all-day rN
+// stays valid. Stager/canonical/revision constraints are NOT loosened: the
+// staged request carries both timed instants (15:00-16:00+09:00), the
+// original all-day snapshot + expected revision are preserved, and no real
+// (non-fixture) approval ever happens. No live Google, no OAuth.
+// ---------------------------------------------------------------------------
+
+const ALLDAY_EVENT_ID = "evt-allday-1";
+const ALLDAY_CANONICAL_KEY = `cal|${E2E_CALENDAR_ID}|${ALLDAY_EVENT_ID}`;
+const ALLDAY_ETAG_V1 = '"etag-allday-1"';
+const ALLDAY_ETAG_V2 = '"etag-allday-2"';
+const ALLDAY_START_DATE = "2026-10-16";
+const ALLDAY_END_DATE = "2026-10-17";
+const ALLDAY_START_NEW = "2026-10-16T15:00:00+09:00";
+const ALLDAY_END_NEW = "2026-10-16T16:00:00+09:00";
+
+/** Local Google-shaped fixture serving an ALL-DAY event until converted. */
+async function startGoogleFixtureAllDay(): Promise<
+  E2EFixtureState & {
+    lastPatchBody: () => Record<string, unknown> | undefined;
+    eventEnd: () => string;
+  }
+> {
+  let etag = ALLDAY_ETAG_V1;
+  let mode: "allDay" | "timed" = "allDay";
+  const eventStart = ALLDAY_START_NEW;
+  const eventEnd = ALLDAY_END_NEW;
+  let patchCount = 0;
+  let lastIfMatch: string | undefined;
+  let lastBodyKeys: string[] = [];
+  let lastPatchBody: Record<string, unknown> | undefined;
+  fixture = createServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    const match = /^\/calendar\/v3\/calendars\/([^/]+)\/events\/([^/]+)$/.exec(
+      url.pathname,
+    );
+    if (match === null || match[2] !== ALLDAY_EVENT_ID) {
+      res.writeHead(404).end();
+      return;
+    }
+    if (req.method === "GET") {
+      const body =
+        mode === "allDay"
+          ? {
+              id: ALLDAY_EVENT_ID,
+              etag,
+              status: "confirmed",
+              start: { date: ALLDAY_START_DATE },
+              end: { date: ALLDAY_END_DATE },
+            }
+          : {
+              id: ALLDAY_EVENT_ID,
+              etag,
+              status: "confirmed",
+              start: { dateTime: eventStart },
+              end: { dateTime: eventEnd },
+            };
+      res
+        .writeHead(200, { "content-type": "application/json" })
+        .end(JSON.stringify(body));
+      return;
+    }
+    if (req.method === "PATCH") {
+      let raw = "";
+      req.on("data", (chunk: Buffer) => {
+        raw += chunk.toString("utf-8");
+      });
+      req.on("end", () => {
+        lastIfMatch = req.headers["if-match"] as string | undefined;
+        try {
+          const parsed = JSON.parse(raw) as Record<string, unknown>;
+          lastBodyKeys = Object.keys(parsed).sort();
+          lastPatchBody = parsed;
+          if (req.headers["if-match"] !== etag) {
+            res.writeHead(412).end();
+            return;
+          }
+          // All-day → timed conversion MUST clear the stale `date` field
+          // (`date: null` + new `dateTime`, the real provider contract).
+          const s = parsed.start as { date?: unknown; dateTime?: unknown };
+          const e = parsed.end as { date?: unknown; dateTime?: unknown };
+          if (
+            s?.date !== null ||
+            e?.date !== null ||
+            s?.dateTime !== ALLDAY_START_NEW ||
+            e?.dateTime !== ALLDAY_END_NEW
+          ) {
+            res.writeHead(400).end();
+            return;
+          }
+          mode = "timed";
+          etag = ALLDAY_ETAG_V2;
+          patchCount += 1;
+          res.writeHead(200, { "content-type": "application/json" }).end("{}");
+        } catch {
+          res.writeHead(400).end();
+        }
+      });
+      return;
+    }
+    res.writeHead(405).end();
+  });
+  await new Promise<void>((resolve) => {
+    fixture?.listen(0, "127.0.0.1", () => resolve());
+  });
+  const address = fixture?.address();
+  if (typeof address !== "object" || address === null) {
+    throw new Error("fixture did not listen");
+  }
+  const base = `http://127.0.0.1:${(address as { port: number }).port}`;
+  return {
+    base,
+    patchCount: () => patchCount,
+    lastIfMatch: () => lastIfMatch,
+    lastBodyKeys: () => [...lastBodyKeys],
+    lastPatchBody: () => lastPatchBody,
+    eventStart: () => eventStart,
+    eventEnd: () => eventEnd,
+    setEtag: (next: string) => {
+      etag = next;
+    },
+  };
+}
+
+/**
+ * Injected READ binding backing BOTH the strategy preflight (all-day
+ * observation) AND its §18.7 readback (timed observation) from the live
+ * loopback state. Date-only endpoints map to date-only normalized bounds.
+ */
+function fixtureBackedCalendarBindingAllDay(
+  connectorInstanceId: string,
+  getBase: () => string,
+): CalendarConnectorPort {
+  return {
+    connectorInstanceId,
+    search: async () => ({ ok: false as const, code: "mcp_unavailable" }),
+    get: async (target) => {
+      let response: Response;
+      try {
+        response = await fetch(
+          `${getBase()}/calendar/v3/calendars/${encodeURIComponent(target.calendarId)}/events/${encodeURIComponent(target.eventId)}`,
+          { redirect: "manual" },
+        );
+      } catch {
+        return { ok: false as const, code: "mcp_unavailable" };
+      }
+      if (!response.ok) {
+        return { ok: false as const, code: "mcp_unavailable" };
+      }
+      const body = (await response.json()) as {
+        etag?: unknown;
+        status?: unknown;
+        start?: { date?: unknown; dateTime?: unknown };
+        end?: { date?: unknown; dateTime?: unknown };
+      };
+      if (typeof body.etag !== "string") {
+        return { ok: false as const, code: "mcp_unavailable" };
+      }
+      const start =
+        typeof body.start?.dateTime === "string"
+          ? body.start.dateTime
+          : typeof body.start?.date === "string"
+            ? body.start.date
+            : null;
+      const end =
+        typeof body.end?.dateTime === "string"
+          ? body.end.dateTime
+          : typeof body.end?.date === "string"
+            ? body.end.date
+            : null;
+      if (start === null || end === null) {
+        return { ok: false as const, code: "mcp_unavailable" };
+      }
+      return {
+        ok: true as const,
+        event: {
+          canonicalKey: ALLDAY_CANONICAL_KEY,
+          status: "confirmed" as const,
+          title: "Fixture Event",
+          start,
+          end,
+          allDayEndExclusive: true,
+          sourceRevision: body.etag,
+          revisionBasis: "etag" as const,
+        },
+      };
+    },
+  };
+}
+
+function alldaySnapshotBodyJson(): string {
+  const text = calendarEventBodyText({
+    canonicalKey: ALLDAY_CANONICAL_KEY,
+    status: "confirmed",
+    title: "Fixture Event",
+    start: ALLDAY_START_DATE,
+    end: ALLDAY_END_DATE,
+    allDayEndExclusive: true,
+    sourceRevision: ALLDAY_ETAG_V1,
+    revisionBasis: "etag",
+  } as const);
+  return canonicalJsonString(SnapshotBodySchema.parse({ version: 1, text }));
+}
+
+/** Stage a TIMED reschedule against the stored ALL-DAY snapshot. */
+async function seedStagedProposalAllDay(
+  dbPath: string,
+  instanceId: string,
+): Promise<{
+  sessionId: string;
+  proposalId: string;
+  hash: string;
+  snapshotId: string;
+  expectedRevision: string;
+}> {
+  const handle = openKernelDatabase(dbPath);
+  try {
+    const repo = createKernelRepository(handle.raw, {
+      actionProposals: { writeEnabled: true },
+    });
+    const resourceId = generateId();
+    const snapshotId = generateId();
+    const refId = generateId();
+    handle.raw
+      .prepare(
+        "INSERT INTO resources (id, connector_instance_id, canonical_key, title, next_revision, created_at) VALUES (?, ?, ?, 'Fixture Event', 2, 1)",
+      )
+      .run(resourceId, instanceId, ALLDAY_CANONICAL_KEY);
+    handle.raw
+      .prepare(
+        "INSERT INTO resource_snapshots (id, resource_id, revision, source_revision, content_hash, body_json, size_bytes, observed_at, created_at) VALUES (?, ?, 1, ?, 'hash@1', ?, 10, 1, 1)",
+      )
+      .run(snapshotId, resourceId, ALLDAY_ETAG_V1, alldaySnapshotBodyJson());
+    handle.raw
+      .prepare(
+        "INSERT INTO calendar_get_targets (canonical_key, target_json, updated_at) VALUES (?, ?, ?)",
+      )
+      .run(
+        ALLDAY_CANONICAL_KEY,
+        JSON.stringify({
+          calendarId: E2E_CALENDAR_ID,
+          eventId: ALLDAY_EVENT_ID,
+        }),
+        Date.now(),
+      );
+    const sessionId = repo.createSession({ key: randomUUID(), now: E2E_T0 })
+      .body.sessionId;
+    handle.raw
+      .prepare(
+        "INSERT INTO session_references (id, session_id, ordinal, resource_id, snapshot_id, created_at) VALUES (?, ?, 1, ?, ?, 1)",
+      )
+      .run(refId, sessionId, resourceId, snapshotId);
+    handle.raw
+      .prepare("UPDATE sessions SET next_reference_ordinal = 2 WHERE id = ?")
+      .run(sessionId);
+    const posted = repo.postMessage(
+      sessionId,
+      { text: "reschedule please" },
+      { key: randomUUID(), now: E2E_T0 },
+    ).body;
+    await repo.startRun(posted.run.id, { now: E2E_T0 + 1 });
+    // TIMED request boundaries against the ALL-DAY snapshot: the stager
+    // validates the request pair only (both instants), so source-class
+    // conversion stages without loosening any canonical/revision rule.
+    const staged = repo.actionProposalsStager?.stage(posted.run.id, {
+      targetRefId: refId,
+      start: ALLDAY_START_NEW,
+      end: ALLDAY_END_NEW,
+    });
+    if (staged === undefined) {
+      throw new Error("staging unavailable");
+    }
+    expect(staged.expectedRevision).toBe(ALLDAY_ETAG_V1);
+    expect(staged.basedOnSnapshotId).toBe(snapshotId);
+    repo.completeRun(
+      posted.run.id,
+      { version: 1, text: "here is the plan" },
+      { now: E2E_T0 + 2 },
+    );
+    const events = repo.getEvents(sessionId, posted.run.id, {
+      after: 0,
+      limit: 50,
+    });
+    const proposed = events.events.find((e) => e.type === "action.proposed") as
+      | { payload: { proposalId: string } }
+      | undefined;
+    if (proposed === undefined) {
+      throw new Error("expected a committed proposal");
+    }
+    return {
+      sessionId,
+      proposalId: proposed.payload.proposalId,
+      hash: staged.hash,
+      snapshotId,
+      expectedRevision: staged.expectedRevision,
+    };
+  } finally {
+    closeKernelDatabase(handle);
+  }
+}
+
+describe("all-day → timed conversion pipeline (local fixture only)", () => {
+  it("staged TIMED approve performs exactly ONE date-clearing PATCH; timed readback mints a new rN while the all-day rN stays valid", async () => {
+    const { env, dbPath } = tempEnv();
+    const fx = await startGoogleFixtureAllDay();
+    const instanceId = await provisionCalendarInstance(dbPath);
+    const { sessionId, proposalId, hash, snapshotId, expectedRevision } =
+      await seedStagedProposalAllDay(dbPath, instanceId);
+    expect(expectedRevision).toBe(ALLDAY_ETAG_V1);
+    const helper = fixtureHelperPath();
+    const started = await startServer({
+      env: {
+        ...env,
+        COMPANION_ACTIONS_JSON: ENABLED_ACTIONS_JSON,
+        [RESCHEDULE_WRITE_PROFILE_ENV]: "google-reschedule",
+        [RESCHEDULE_WRITE_CONNECTOR_ENV]: e2eConnectorHintJson(helper),
+      },
+      calendarBinding: {
+        connectorInstanceId: instanceId,
+        connector: fixtureBackedCalendarBindingAllDay(
+          instanceId,
+          () => fx.base,
+        ),
+        selection: { calendarId: "primary", account: "ops@example" },
+      },
+      writeMcpTransportFactory: testWriteTransportFactory(fx.base),
+      writeTestIdentity: { ...FIXTURE_IDENTITY },
+      drainMs: 50,
+    });
+    servers.push(started);
+    // Local-fixture approval only (queued strategy run, no real approval).
+    await approveProposalHttp(started.port, sessionId, proposalId, hash);
+    const view = await waitForTerminalReceipt(
+      started.port,
+      sessionId,
+      proposalId,
+    );
+    expect(view.markerCommitted).toBe(true);
+    expect(view.receipt?.outcome).toBe("succeeded");
+    // Exactly ONE conditional PATCH with the committed etag, start/end only,
+    // carrying the `date: null` clearing contract for the conversion.
+    expect(fx.patchCount()).toBe(1);
+    expect(fx.lastIfMatch()).toBe(ALLDAY_ETAG_V1);
+    expect(fx.lastBodyKeys()).toEqual(["end", "start"]);
+    expect(fx.lastPatchBody()?.start).toEqual({
+      date: null,
+      dateTime: ALLDAY_START_NEW,
+    });
+    expect(fx.lastPatchBody()?.end).toEqual({
+      date: null,
+      dateTime: ALLDAY_END_NEW,
+    });
+    // Loopback readback is now timed with the rotated etag.
+    expect(fx.eventStart()).toBe(ALLDAY_START_NEW);
+    expect(fx.eventEnd()).toBe(ALLDAY_END_NEW);
+    // Snapshot lineage: the ORIGINAL all-day snapshot is preserved as the
+    // grant basis, r1 still resolves to it, and the timed readback minted a
+    // NEW snapshot under a NEW rN.
+    const handle = openKernelDatabase(dbPath);
+    try {
+      const proposal = handle.raw
+        .prepare(
+          "SELECT expected_revision, based_on_snapshot_id FROM action_proposals WHERE id = ?",
+        )
+        .get(proposalId) as
+        | { expected_revision: string; based_on_snapshot_id: string }
+        | undefined;
+      expect(proposal?.expected_revision).toBe(ALLDAY_ETAG_V1);
+      expect(proposal?.based_on_snapshot_id).toBe(snapshotId);
+      const refs = handle.raw
+        .prepare(
+          `SELECT sr.ordinal AS ordinal, rs.body_json AS body_json
+             FROM session_references sr
+             JOIN resource_snapshots rs ON rs.id = sr.snapshot_id
+            WHERE sr.session_id = ?
+            ORDER BY sr.ordinal ASC`,
+        )
+        .all(sessionId) as Array<{ ordinal: number; body_json: string }>;
+      expect(refs.length).toBeGreaterThanOrEqual(2);
+      const first = refs[0] as { ordinal: number; body_json: string };
+      expect(first.ordinal).toBe(1);
+      const firstText = (
+        SnapshotBodySchema.parse(JSON.parse(first.body_json)) as {
+          text: string;
+        }
+      ).text;
+      expect(JSON.parse(firstText)).toMatchObject({
+        start: ALLDAY_START_DATE,
+        end: ALLDAY_END_DATE,
+      });
+      const last = refs[refs.length - 1] as {
+        ordinal: number;
+        body_json: string;
+      };
+      expect(last.ordinal).toBeGreaterThan(1);
+      const lastText = (
+        SnapshotBodySchema.parse(JSON.parse(last.body_json)) as {
+          text: string;
+        }
+      ).text;
+      expect(JSON.parse(lastText)).toMatchObject({
+        start: ALLDAY_START_NEW,
+        end: ALLDAY_END_NEW,
+      });
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  }, 60_000);
+});

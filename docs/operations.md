@@ -3266,5 +3266,32 @@ Focused host fixes for PR #30 threads `4282825244` (throwing grant resolver
 -> definite_failure pre-dispatch, 0 calls) and `4282825247` (frozen startup
 snapshot feeds the lazy write child via `startupEnvTransportFactory`).
 Proof after repin: profile 5/5 + wire-hash 2/2 + startup 22/22 + focused
-reschedule/stdio-env 18/18 = 47/47 green, biome clean; no live Google/OAuth,
-readonly `:3000` untouched, `.m5-integration-review/` worktree preserved.
+  reschedule/stdio-env 18/18 = 47/47 green, biome clean; no live Google/OAuth,
+  readonly `:3000` untouched, `.m5-integration-review/` worktree preserved.
+
+## M5 all-day → timed conversion (2026-10-15, no live writes)
+
+  Valid all-day sources CONVERT to timed (strict YYYY-MM-DD bounds retained,
+  exclusive end > start; malformed/mixed bounds are `invalid_input` with NO
+  patch, `allday_unsupported` removed). The conditional PATCH sends
+  start/end ONLY with exact `If-Match`; conversions clear the stale field
+  (`date: null` + new `dateTime`, timed sources keep `dateTime`-only).
+  Etag/recurrence/cancelled/412/unknown guards unchanged. Stager untouched:
+  staged requests stay both-instants (all-day snapshot + TIMED 15:00-16:00
+  stages without loosening canonical/revision rules). Tracked fixture
+  mirror classifies the loopback source identically; new full-pipeline
+  regression (all-day snapshot → TIMED stage → local-fixture approve →
+  ONE date-clearing PATCH → timed readback into a new rN, old all-day rN
+  still valid) lives in `rescheduleWriteStartup.test.ts`; fork
+  `alldayConversion.test.ts` pins the provider/server contract. Wire
+  identity/schema hash unchanged (refines are runtime-only). Port-level
+  mirror (`rescheduleWrite.test.ts`) converts valid all-day (ONE `date:
+  null` PATCH, exact `If-Match`) and rejects malformed bounds
+  (`invalid_input`, NO patch); timed bodies stay `dateTime`-only.
+
+  Fork landed as `33483f458979d1d5a436d1a1047eb0f2a4d79dd7`
+  (tree `83e72c3dc10e601b4dab25a88a2a88170fe19d73`, fork PR #4; base
+  `6939311` + lock digest unchanged, readonly untouched). Host write
+  profile repinned to the new source SHA/tree; live-wire input-schema
+  hash re-probed over REAL stdio against the fork runner at `33483f4`:
+  `9f59e35b…8609d7`, byte-identical, pin unchanged.

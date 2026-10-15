@@ -11,8 +11,9 @@
 // - repo: https://github.com/suiso11/google-calendar-mcp
 // - derived branch: feat/m5-reschedule-entrypoint-v2 (draft PR #3)
 // - base commit: 6939311fd3eae9846648e0a175e304c9500f578e (readonly cutover)
-// - source commit: f196558e7d768effd969cf70ada2721d7d504b23
-// - source tree: b50f74550a5269ec1af4e57c6d4cc03e76a9aebd
+// - source commit: 33483f458979d1d5a436d1a1047eb0f2a4d79dd7
+//   (all-day → timed conversion; focused branch feat/m5-allday-conversion)
+// - source tree: 83e72c3dc10e601b4dab25a88a2a88170fe19d73
 // - package: @cocal/google-calendar-mcp, private version 3.0.0-readonly.2
 // - package-lock.json SHA-256:
 //   63261d25992ee9c97136a60bbf4fe52a5485cadea28b34d6b8b6c685f38bd533
@@ -38,6 +39,8 @@
 // both advertise byte-identical STRICT input schemas
 // (`additionalProperties: false` + `$schema` key) with hash
 // `9f59e35b…8609d7` (strict-date refines are runtime-only, wire unchanged).
+// Re-probed again at fork `33483f4` (all-day conversion): identical hash,
+// wire unchanged (conversion touches observation output + PATCH body only).
 // The fork's removed hand-written `rescheduleInputJsonSchema()` (neither
 // strict nor `$schema`) MUST NOT be used here.
 
@@ -68,8 +71,8 @@ export const RESCHEDULE_WRITE_FORK = Object.freeze({
   repo: "https://github.com/suiso11/google-calendar-mcp",
   branch: "feat/m5-reschedule-entrypoint-v2",
   baseCommit: "6939311fd3eae9846648e0a175e304c9500f578e",
-  sourceCommit: "f196558e7d768effd969cf70ada2721d7d504b23",
-  sourceTree: "b50f74550a5269ec1af4e57c6d4cc03e76a9aebd",
+  sourceCommit: "33483f458979d1d5a436d1a1047eb0f2a4d79dd7",
+  sourceTree: "83e72c3dc10e601b4dab25a88a2a88170fe19d73",
   package: "@cocal/google-calendar-mcp",
   packageVersion: "3.0.0-readonly.2",
   lockDigestSha256:

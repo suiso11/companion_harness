@@ -30,7 +30,11 @@ type FixtureEventRecord = {
   allDay: boolean;
 };
 
-type StoredEvent = FixtureEventRecord & { patchCount: number };
+type StoredEvent = FixtureEventRecord & {
+  patchCount: number;
+  wireStartOverride?: unknown;
+  wireEndOverride?: unknown;
+};
 
 const CALENDAR_ID = "primary";
 const EVENT_ID = "evt-timed-1";
@@ -68,12 +72,24 @@ function freshStore(): Map<string, StoredEvent> {
 }
 
 function toGoogleBody(record: StoredEvent): unknown {
+  const start =
+    record.wireStartOverride !== undefined
+      ? record.wireStartOverride
+      : record.allDay
+        ? { date: "2026-02-01" }
+        : { dateTime: record.start };
+  const end =
+    record.wireEndOverride !== undefined
+      ? record.wireEndOverride
+      : record.allDay
+        ? { date: "2026-02-02" }
+        : { dateTime: record.end };
   return {
     id: EVENT_ID,
     etag: record.etag,
     status: record.status,
-    start: record.allDay ? { date: "2026-02-01" } : { dateTime: record.start },
-    end: record.allDay ? { date: "2026-02-02" } : { dateTime: record.end },
+    start,
+    end,
     ...(record.recurring ? { recurrence: ["RRULE:FREQ=DAILY"] } : {}),
   };
 }
@@ -130,20 +146,36 @@ async function startFixture(): Promise<string> {
           return;
         }
         const patch = parsed as { start?: unknown; end?: unknown };
-        const startDt =
+        const startObj =
           typeof patch.start === "object" && patch.start !== null
-            ? (patch.start as { dateTime?: unknown }).dateTime
+            ? (patch.start as Record<string, unknown>)
             : undefined;
-        const endDt =
+        const endObj =
           typeof patch.end === "object" && patch.end !== null
-            ? (patch.end as { dateTime?: unknown }).dateTime
+            ? (patch.end as Record<string, unknown>)
             : undefined;
+        const startDt = startObj?.dateTime;
+        const endDt = endObj?.dateTime;
         if (typeof startDt !== "string" || typeof endDt !== "string") {
+          res.writeHead(400).end();
+          return;
+        }
+        if (record.allDay) {
+          // Conversion must clear the stale `date` field explicitly.
+          if (startObj?.date !== null || endObj?.date !== null) {
+            res.writeHead(400).end();
+            return;
+          }
+        } else if (
+          "date" in (startObj as Record<string, unknown>) ||
+          "date" in (endObj as Record<string, unknown>)
+        ) {
           res.writeHead(400).end();
           return;
         }
         record.start = startDt;
         record.end = endDt;
+        record.allDay = false;
         record.patchCount += 1;
         res.writeHead(200, { "content-type": "application/json" }).end("{}");
       });
@@ -190,7 +222,10 @@ const CONNECTOR_ID = "33333333-3333-4333-8333-333333333333";
  * Test-local Google-shaped wire provider: single GET read with strict
  * shape normalization + exactly ONE conditional PATCH (If-Match exact,
  * 412 mapping, no retry, no redirect follow). Mirrors the production
- * fork adapter semantics without importing the ignored nested repo.
+ * fork adapter semantics without importing the ignored nested repo:
+ * valid all-day sources CONVERT to timed (PATCH clears `date: null` +
+ * new `dateTime`); malformed all-day bounds are `invalid_input` with NO
+ * patch. Timed sources keep `dateTime`-only bodies.
  */
 function testWirePatch(input: {
   calendarId: string;
@@ -206,7 +241,34 @@ function testWirePatch(input: {
 > {
   return (async () => {
     const url = `${baseUrl}/events/${encodeURIComponent(input.calendarId)}/${encodeURIComponent(input.eventId)}`;
-    let current: FixtureEventRecord;
+    let current: FixtureEventRecord & {
+      startDate?: string;
+      endDate?: string;
+    };
+    const isStrictCalendarDate = (value: string): boolean => {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+      const year = Number(value.slice(0, 4));
+      const month = Number(value.slice(5, 7));
+      const day = Number(value.slice(8, 10));
+      if (month < 1 || month > 12) return false;
+      const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+      const daysInMonth =
+        [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][
+          month - 1
+        ] ?? 0;
+      return day >= 1 && day <= daysInMonth;
+    };
+    const isTimedEndpoint = (v: unknown): v is { dateTime: string } =>
+      typeof v === "object" &&
+      v !== null &&
+      typeof (v as { dateTime?: unknown }).dateTime === "string" &&
+      (v as { date?: unknown }).date === undefined;
+    const isDateEndpoint = (v: unknown): v is { date: string } =>
+      typeof v === "object" &&
+      v !== null &&
+      typeof (v as { date?: unknown }).date === "string" &&
+      (v as { dateTime?: unknown }).dateTime === undefined &&
+      isStrictCalendarDate((v as { date: string }).date);
     try {
       const res = await fetch(url, { method: "GET", redirect: "manual" });
       if (res.status === 404) {
@@ -221,25 +283,49 @@ function testWirePatch(input: {
         end?: unknown;
         recurrence?: unknown;
       };
-      const isTimed = (v: unknown): v is { dateTime: string } =>
-        typeof v === "object" &&
-        v !== null &&
-        typeof (v as { dateTime?: unknown }).dateTime === "string" &&
-        (v as { date?: unknown }).date === undefined;
-      const allDay = !isTimed(body.start) || !isTimed(body.end);
-      current = {
-        etag: typeof body.etag === "string" ? body.etag : "",
-        status:
-          body.status === "confirmed" || body.status === "tentative"
-            ? body.status
-            : body.status === "cancelled"
-              ? "cancelled"
-              : "deleted",
-        start: isTimed(body.start) ? body.start.dateTime : "",
-        end: isTimed(body.end) ? body.end.dateTime : "",
-        recurring: body.recurrence !== undefined,
-        allDay,
-      };
+      const isTimed = isTimedEndpoint;
+      if (isTimed(body.start) && isTimed(body.end)) {
+        current = {
+          etag: typeof body.etag === "string" ? body.etag : "",
+          status:
+            body.status === "confirmed" || body.status === "tentative"
+              ? body.status
+              : body.status === "cancelled"
+                ? "cancelled"
+                : "deleted",
+          start: body.start.dateTime,
+          end: body.end.dateTime,
+          recurring: body.recurrence !== undefined,
+          allDay: false,
+        };
+      } else if (isDateEndpoint(body.start) && isDateEndpoint(body.end)) {
+        const startMs = Date.parse(`${body.start.date}T00:00:00Z`);
+        const endMs = Date.parse(`${body.end.date}T00:00:00Z`);
+        if (
+          Number.isNaN(startMs) ||
+          Number.isNaN(endMs) ||
+          !(endMs > startMs)
+        ) {
+          return { status: "definite_failure", code: "invalid_input" } as const;
+        }
+        current = {
+          etag: typeof body.etag === "string" ? body.etag : "",
+          status:
+            body.status === "confirmed" || body.status === "tentative"
+              ? body.status
+              : body.status === "cancelled"
+                ? "cancelled"
+                : "deleted",
+          start: "",
+          end: "",
+          recurring: body.recurrence !== undefined,
+          allDay: true,
+          startDate: body.start.date,
+          endDate: body.end.date,
+        };
+      } else {
+        return { status: "definite_failure", code: "invalid_input" } as const;
+      }
     } catch {
       return { status: "unknown", code: "read_transport_lost" } as const;
     }
@@ -268,11 +354,24 @@ function testWirePatch(input: {
       } as const;
     }
     if (current.allDay) {
-      return {
-        status: "definite_failure",
-        code: "allday_unsupported",
-      } as const;
+      // Valid all-day converts (strict bounds already proven above); a
+      // malformed source never reaches here (invalid_input with NO patch).
+      if (current.start !== "" || current.end !== "") {
+        return {
+          status: "definite_failure",
+          code: "invalid_input",
+        } as const;
+      }
     }
+    const patchJson = current.allDay
+      ? {
+          start: { date: null, dateTime: input.start },
+          end: { date: null, dateTime: input.end },
+        }
+      : {
+          start: { dateTime: input.start },
+          end: { dateTime: input.end },
+        };
     let res: Response;
     try {
       res = await fetch(url, {
@@ -281,10 +380,7 @@ function testWirePatch(input: {
           "content-type": "application/json",
           "If-Match": input.expectedEtag,
         },
-        body: JSON.stringify({
-          start: { dateTime: input.start },
-          end: { dateTime: input.end },
-        }),
+        body: JSON.stringify(patchJson),
         redirect: "manual",
       });
     } catch {
@@ -414,11 +510,10 @@ describe("dedicated reschedule write path (real HTTP fixture)", () => {
     expect(record?.patchCount).toBe(0);
   });
 
-  it("cancelled / deleted / all-day events are rejected with NO patch", async () => {
+  it("cancelled / deleted events are rejected with NO patch", async () => {
     for (const shape of [
       { status: "cancelled", allDay: false },
       { status: "deleted", allDay: false },
-      { status: "confirmed", allDay: true },
     ] as const) {
       store = freshStore();
       lastPatch = null;
@@ -431,6 +526,61 @@ describe("dedicated reschedule write path (real HTTP fixture)", () => {
       const outcome = await port.update(baseRequest());
       expect(outcome).toEqual({ status: "definite_failure" });
       expect(lastPatch).toBeNull();
+    }
+  });
+
+  it("valid all-day converts: ONE date-clearing PATCH with exact If-Match", async () => {
+    store = freshStore();
+    lastPatch = null;
+    const record = store.get(key(CALENDAR_ID, EVENT_ID));
+    if (record !== undefined) record.allDay = true;
+    const port = portWith(realCaller(), ETAG_V1);
+    const outcome = await port.update(baseRequest());
+    expect(outcome).toEqual({ status: "succeeded" });
+    expect(record?.patchCount).toBe(1);
+    const sentPatch = lastPatch as unknown as {
+      headers: Record<string, string | undefined>;
+      body: string;
+    } | null;
+    expect(sentPatch?.headers["if-match"]).toBe(ETAG_V1);
+    const parsed = JSON.parse(sentPatch?.body ?? "{}") as {
+      start?: unknown;
+      end?: unknown;
+    };
+    expect(Object.keys(parsed).sort()).toEqual(["end", "start"]);
+    expect(parsed.start).toEqual({ date: null, dateTime: START_NEW });
+    expect(parsed.end).toEqual({ date: null, dateTime: END_NEW });
+    expect(record?.allDay).toBe(false);
+    expect(record?.start).toBe(START_NEW);
+    expect(record?.end).toBe(END_NEW);
+  });
+
+  it("malformed all-day bounds are invalid_input with NO patch", async () => {
+    const shapes: Array<{ start: unknown; end: unknown }> = [
+      // Rollover date (Feb 30) is not a strict calendar date.
+      { start: { date: "2026-02-30" }, end: { date: "2026-03-01" } },
+      // Mixed timed/date endpoints.
+      {
+        start: { date: "2026-02-01" },
+        end: { dateTime: "2026-02-02T10:00:00Z" },
+      },
+      // Reversed exclusive end (end <= start).
+      { start: { date: "2026-02-02" }, end: { date: "2026-02-01" } },
+    ];
+    for (const shape of shapes) {
+      store = freshStore();
+      lastPatch = null;
+      const record = store.get(key(CALENDAR_ID, EVENT_ID));
+      if (record !== undefined) {
+        record.allDay = true;
+        record.wireStartOverride = shape.start;
+        record.wireEndOverride = shape.end;
+      }
+      const port = portWith(realCaller(), ETAG_V1);
+      const outcome = await port.update(baseRequest());
+      expect(outcome).toEqual({ status: "definite_failure" });
+      expect(lastPatch).toBeNull();
+      expect(record?.patchCount).toBe(0);
     }
   });
 
