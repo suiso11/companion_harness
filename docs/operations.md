@@ -3194,8 +3194,11 @@ waits) before reading/asserting. No M5 startup code touched, no
 readonly `:3000` service untouched. Local proof (Linux, real
 Chromium, owned temp harness): the 2 affected cases pass
 (`-g "citation drawer"`, 2/2, ~4s); `biome check` on the touched
-spec clean. New-head CI outcome recorded in the PR31 CI line below
-after push.
+spec clean. New-head CI after push, head `5195fef`: push run
+`38717280204` success (e2e success, check ubuntu success, check
+windows success) and PR-event run `38717286888` success (e2e
+success, check ubuntu success, check windows success); zero review
+comments on PR31 at observation time.
 - Concrete host resolver (closed contract, trusted-code-only, default
   OFF): `createCommittedGrantResolver` (connector-calendar, re-exported
   by `rescheduleWriteBinding.ts` + `createCommittedGrantWriteBinding`
