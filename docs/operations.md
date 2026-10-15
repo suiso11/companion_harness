@@ -3250,4 +3250,21 @@ worktree, no live Google/OAuth/writes, user `:3000` untouched):
 normal startup (owned temp store, default profile unselected)
 `GET /health/live` 200 `{"status":"live"}` +
 `GET /health/ready` 200 `{"status":"ready"}` with no write child
-spawned (only the tsx loader chain under the server pid).
+ spawned (only the tsx loader chain under the server pid).
+
+## PR30 repin to fork f196558 + review-thread fixes (2026-10-15)
+
+Fork PR #3 review fixes landed as `f196558e7d768effd969cf70ada2721d7d504b23`
+(tree `b50f74550a5269ec1af4e57c6d4cc03e76a9aebd`, lock digest unchanged
+`63261d25…533`); host write pin repinned from `4f9c06d` (hash unchanged).
+Fresh REAL-stdio wire probe (trusted TEST-ONLY runner bundle — same
+production provider + server factory, fixture credentials, loopback endpoint
+unused by tools/list; production CLI cannot launch without credentials):
+`reschedule-event` hash `9f59e35b…8609d7`, identical to the pin and the
+tracked fixture mirror (strict-date refines are runtime-only, wire unchanged).
+Focused host fixes for PR #30 threads `4282825244` (throwing grant resolver
+-> definite_failure pre-dispatch, 0 calls) and `4282825247` (frozen startup
+snapshot feeds the lazy write child via `startupEnvTransportFactory`).
+Proof after repin: profile 5/5 + wire-hash 2/2 + startup 22/22 + focused
+reschedule/stdio-env 18/18 = 47/47 green, biome clean; no live Google/OAuth,
+readonly `:3000` untouched, `.m5-integration-review/` worktree preserved.

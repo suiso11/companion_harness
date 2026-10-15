@@ -30,14 +30,53 @@ const FIXTURE_MCP_NAME = "google-calendar-reschedule-test-fixture";
 const FIXTURE_MCP_VERSION = "0.0.0-fixture.1";
 const RESCHEDULE_TOOL_NAME = "reschedule-event";
 
+const ISO_INSTANT_PATTERN =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?(Z|[+-](\d{2}):(\d{2}))$/;
+
+function isLeapYear(year) {
+  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+}
+
+function daysInMonth(year, month) {
+  if (month === 2) return isLeapYear(year) ? 29 : 28;
+  if (month === 4 || month === 6 || month === 9 || month === 11) return 30;
+  return 31;
+}
+
+// Strict calendar-date mirror of the fork `isStrictCalendarInstant`
+// contract (no `Date.parse` rollover: `2023-02-30` is rejected). Refines are
+// invisible to the advertised JSON schema, so the pinned live-wire hash is
+// unchanged.
+function isStrictCalendarInstant(value) {
+  if (value.length === 0 || value.length > 128) return false;
+  const m = ISO_INSTANT_PATTERN.exec(value);
+  if (m === null) return false;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  const hour = Number(m[4]);
+  const minute = Number(m[5]);
+  const second = m[6] === undefined ? 0 : Number(m[6]);
+  const zone = m[8] ?? "";
+  if (month < 1 || month > 12) return false;
+  if (day < 1 || day > daysInMonth(year, month)) return false;
+  if (hour > 23 || minute > 59 || second > 59) return false;
+  if (zone !== "Z") {
+    const offHour = Number(m[9]);
+    const offMinute = Number(m[10]);
+    if (offHour > 23 || offMinute > 59) return false;
+  }
+  return !Number.isNaN(Date.parse(value));
+}
+
 const IsoInstantSchema = z
   .string()
   .min(1)
   .max(128)
-  .refine((value) => {
-    if (Number.isNaN(Date.parse(value))) return false;
-    return /T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/.test(value);
-  }, "start/end must be RFC3339 instants with an explicit offset");
+  .refine(
+    (value) => isStrictCalendarInstant(value),
+    "start/end must be RFC3339 instants with an explicit offset",
+  );
 
 const RescheduleEventInputSchema = z
   .strictObject({

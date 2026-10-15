@@ -35,6 +35,7 @@
 //     (never a resend, never a cancel, never definite_failure on loss)
 
 import { z } from "zod";
+import { daysInMonth, parseTimedInstant } from "./time.js";
 
 /** Dedicated write MCP identity (never the readonly entrypoint). */
 export const RESCHEDULE_WRITE_MCP_NAME = "google-calendar-reschedule" as const;
@@ -53,15 +54,49 @@ export const RESCHEDULE_WRITE_WIRE_HASH =
 /** The Harness-side write tool name (§18.1, start/end only). */
 export const CALENDAR_RESCHEDULE_TOOL = "calendar.reschedule" as const;
 
+/**
+ * Strict RFC3339 instant grammar with real calendar validation (matches the
+ * fork `isStrictCalendarInstant` wire contract): `Date.parse` rollover
+ * (`2023-02-30` -> March 2) is rejected instead of accepted. Month lengths,
+ * leap years, time ranges, and numeric offsets are enforced.
+ *
+ * Reuses the existing strict helper (`parseTimedInstant` from `./time.js`,
+ * explicit calendar validation, no `Date.parse` permissiveness) for the
+ * seconds-precision form; the fork wire contract additionally allows
+ * minute-precision (`THH:MM`), which is validated strictly here with the
+ * same shared `daysInMonth` table.
+ */
+const ISO_MINUTE_INSTANT_PATTERN =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(Z|[+-](\d{2}):(\d{2}))$/;
+
+export function isStrictCalendarInstant(value: string): boolean {
+  if (value.length === 0 || value.length > 128) return false;
+  if (parseTimedInstant(value) !== undefined) return true;
+  const m = ISO_MINUTE_INSTANT_PATTERN.exec(value);
+  if (m === null) return false;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  const hour = Number(m[4]);
+  const minute = Number(m[5]);
+  if (month < 1 || month > 12) return false;
+  if (day < 1 || day > daysInMonth(year, month)) return false;
+  if (hour > 23 || minute > 59) return false;
+  const offHour = Number(m[7]);
+  const offMinute = Number(m[8]);
+  if (m[6] !== "Z" && (offHour > 23 || offMinute > 59)) return false;
+  return !Number.isNaN(Date.parse(value));
+}
+
 /** Strict RFC3339-with-offset instant (explicit offset, no bare dates). */
 const IsoInstantSchema = z
   .string()
   .min(1)
   .max(128)
-  .refine((value) => {
-    if (Number.isNaN(Date.parse(value))) return false;
-    return /T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/.test(value);
-  }, "start/end must be RFC3339 instants with an explicit offset");
+  .refine(
+    (value) => isStrictCalendarInstant(value),
+    "start/end must be RFC3339 instants with an explicit offset",
+  );
 
 /** Exact `reschedule-event` MCP input (start/end only + opaque selection). */
 export const RescheduleWriteMcpInputSchema = z
@@ -278,7 +313,17 @@ export function createRescheduleWritePort(
       proposalHash: request.grant.proposalHash,
       expectedRevision: request.grant.expectedRevision,
     };
-    const expectedEtag = options.resolveExpectedEtag(grantRef);
+    // Resolver exceptions (e.g. a temporarily unreadable committed-grant
+    // store) happen BEFORE any MCP call is dispatched, so the no-commit
+    // proof is intact: definite_failure, never `unknown` (the strategy maps
+    // a throw to unknown-commit, which would falsely claim a write may have
+    // occurred).
+    let expectedEtag: string | null;
+    try {
+      expectedEtag = options.resolveExpectedEtag(grantRef);
+    } catch {
+      return { status: "definite_failure" };
+    }
     if (
       expectedEtag === null ||
       expectedEtag.length === 0 ||

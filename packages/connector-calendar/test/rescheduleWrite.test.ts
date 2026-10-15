@@ -541,4 +541,56 @@ describe("dedicated reschedule write path (real HTTP fixture)", () => {
     expect(wrongInstance).toEqual({ status: "definite_failure" });
     expect(lastPatch).toBeNull();
   });
+
+  it("throwing committed-grant resolver is definite_failure with NO dispatch", async () => {
+    // The grant store is unreadable BEFORE any MCP call: the no-commit proof
+    // is intact, so the port classifies definite (never unknown-commit).
+    let calls = 0;
+    const caller: RescheduleWriteCaller = {
+      async callTool() {
+        calls += 1;
+        return { ok: true, text: JSON.stringify({ status: "succeeded" }) };
+      },
+    };
+    const port = createRescheduleWritePort({
+      connectorInstanceId: CONNECTOR_ID,
+      caller,
+      resolveExpectedEtag: () => {
+        throw new Error("grant store unreadable");
+      },
+    });
+    expect(await port.update(baseRequest())).toEqual({
+      status: "definite_failure",
+    });
+    expect(calls).toBe(0);
+    expect(lastPatch).toBeNull();
+  });
+
+  it("strict host date mirror: Feb 30 rejected, leap Feb 29 accepted", async () => {
+    const { isStrictCalendarInstant, RescheduleWriteMcpInputSchema } =
+      await import("../src/rescheduleWrite.js");
+    expect(isStrictCalendarInstant("2023-02-30T10:00:00Z")).toBe(false);
+    expect(isStrictCalendarInstant("2023-02-29T10:00:00Z")).toBe(false);
+    expect(isStrictCalendarInstant("2023-04-31T10:00:00+02:00")).toBe(false);
+    expect(isStrictCalendarInstant("2024-02-29T10:00:00Z")).toBe(true);
+    expect(isStrictCalendarInstant("2024-02-29T10:00:00.5+05:30")).toBe(true);
+    expect(
+      RescheduleWriteMcpInputSchema.safeParse({
+        calendarId: CALENDAR_ID,
+        eventId: EVENT_ID,
+        start: "2023-02-30T10:00:00Z",
+        end: "2023-02-30T11:00:00Z",
+        expectedEtag: ETAG_V1,
+      }).success,
+    ).toBe(false);
+    expect(
+      RescheduleWriteMcpInputSchema.safeParse({
+        calendarId: CALENDAR_ID,
+        eventId: EVENT_ID,
+        start: "2024-02-29T10:00:00Z",
+        end: "2024-02-29T11:00:00Z",
+        expectedEtag: ETAG_V1,
+      }).success,
+    ).toBe(true);
+  });
 });

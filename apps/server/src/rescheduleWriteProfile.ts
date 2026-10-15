@@ -11,8 +11,8 @@
 // - repo: https://github.com/suiso11/google-calendar-mcp
 // - derived branch: feat/m5-reschedule-entrypoint-v2 (draft PR #3)
 // - base commit: 6939311fd3eae9846648e0a175e304c9500f578e (readonly cutover)
-// - source commit: 4f9c06dd9318c11ee9d352d61825c3f75f9ac8a6
-// - source tree: 9eec88aa21951e1ea9564a62e89a40eeb2bcceef
+// - source commit: f196558e7d768effd969cf70ada2721d7d504b23
+// - source tree: b50f74550a5269ec1af4e57c6d4cc03e76a9aebd
 // - package: @cocal/google-calendar-mcp, private version 3.0.0-readonly.2
 // - package-lock.json SHA-256:
 //   63261d25992ee9c97136a60bbf4fe52a5485cadea28b34d6b8b6c685f38bd533
@@ -30,16 +30,16 @@
 //
 // Binding pin: the hash below is the LIVE-WIRE canonical input-schema
 // SHA-256 (what the connector verifies over the real SDK wire via
-// tools/list, `canonicalSchemaHash`). Probed 2026-10-15 over REAL stdio
-// against BOTH the freshly built fork bundle
-// (`.m5-write-fork-derived/build/reschedule-cli.js`) and the tracked
-// contract-mirror fixture
+// tools/list, `canonicalSchemaHash`). Re-probed 2026-10-15 over REAL stdio
+// against the trusted TEST-ONLY runner (same production provider + MCP
+// server factory, fixture credentials, loopback endpoint unused by
+// tools/list) at fork `f196558` AND the tracked contract-mirror fixture
 // (`packages/connector-calendar/test/helpers/rescheduleFixtureServer.mjs`):
 // both advertise byte-identical STRICT input schemas
 // (`additionalProperties: false` + `$schema` key) with hash
-// `9f59e35b…8609d7`. The fork's removed hand-written
-// `rescheduleInputJsonSchema()` (neither strict nor `$schema`) MUST NOT be
-// used here.
+// `9f59e35b…8609d7` (strict-date refines are runtime-only, wire unchanged).
+// The fork's removed hand-written `rescheduleInputJsonSchema()` (neither
+// strict nor `$schema`) MUST NOT be used here.
 
 import { posix as posixPath, win32 as win32Path } from "node:path";
 import type {
@@ -68,8 +68,8 @@ export const RESCHEDULE_WRITE_FORK = Object.freeze({
   repo: "https://github.com/suiso11/google-calendar-mcp",
   branch: "feat/m5-reschedule-entrypoint-v2",
   baseCommit: "6939311fd3eae9846648e0a175e304c9500f578e",
-  sourceCommit: "4f9c06dd9318c11ee9d352d61825c3f75f9ac8a6",
-  sourceTree: "9eec88aa21951e1ea9564a62e89a40eeb2bcceef",
+  sourceCommit: "f196558e7d768effd969cf70ada2721d7d504b23",
+  sourceTree: "b50f74550a5269ec1af4e57c6d4cc03e76a9aebd",
   package: "@cocal/google-calendar-mcp",
   packageVersion: "3.0.0-readonly.2",
   lockDigestSha256:

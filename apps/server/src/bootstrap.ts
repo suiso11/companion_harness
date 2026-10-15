@@ -39,6 +39,7 @@ import {
   type McpBindingDefinition,
   McpConnector,
   type McpConnectorConfig,
+  startupEnvTransportFactory,
   type TransportFactory,
 } from "@companion/connector-mcp";
 import {
@@ -629,8 +630,16 @@ export async function startServer(
   let frozenCalendarProfile: string | undefined;
   let frozenWriteProfile: string | undefined;
   let frozenWriteConnectorHint: string | undefined;
+  // M5 write-child env fix: freeze the WHOLE startup environment snapshot
+  // synchronously with the selectors above (same rationale — `options.env` /
+  // `process.env` stay mutable). The lazy dedicated write child is spawned
+  // from THIS snapshot (never a later live read), so an embedding that
+  // passes `M5_RESCHEDULE_*` credentials via `startServer({ env })` runs the
+  // first approved execution under the same account it configured.
+  let frozenStartupEnv: Readonly<Record<string, string | undefined>>;
   try {
     config = loadServerConfig(options.env);
+    frozenStartupEnv = Object.freeze({ ...(options.env ?? process.env) });
     frozenCalendarProfile = (options.env ?? process.env)[CALENDAR_PROFILE_ENV];
     frozenWriteProfile = (options.env ?? process.env)[
       RESCHEDULE_WRITE_PROFILE_ENV
@@ -1039,7 +1048,13 @@ export async function startServer(
               : {}),
           }),
           getRescheduleWriteDefinitions(),
-          options.writeMcpTransportFactory,
+          // Default write transport reads child env from the FROZEN startup
+          // snapshot captured above — never the live `process.env` — so the
+          // write child always inherits the same environment the profile and
+          // hints were selected from. An explicitly injected
+          // `writeMcpTransportFactory` (trusted test seam) still wins.
+          options.writeMcpTransportFactory ??
+            startupEnvTransportFactory(frozenStartupEnv),
           { permittedCategories: ["write"] },
         );
       }

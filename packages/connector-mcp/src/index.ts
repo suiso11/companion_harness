@@ -43,6 +43,7 @@ export {
   type McpConnectorPolicyOptions,
   missingStdioEnvNames,
   STDIO_IMPLICIT_ENV_VARS,
+  startupEnvTransportFactory,
   type TransportFactory,
 } from "./client.js";
 export {

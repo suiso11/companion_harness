@@ -36,6 +36,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
@@ -1133,6 +1134,100 @@ describe("real-process end to end (tracked fixture over real stdio)", () => {
     );
     expect(view.receipt?.outcome).toBe("unknown");
     expect(fx.patchCount()).toBe(0);
+  }, 60_000);
+});
+
+describe("normal-startup write-child env (frozen snapshot, no seam)", () => {
+  it("spawns the write child from the frozen startServer env, not live process.env", async () => {
+    // Host PR30 finding 4282825247: an embedding passes `M5_RESCHEDULE_*`
+    // credential values via `startServer({ env })`. The lazy write child must
+    // inherit THAT frozen snapshot — never a later live read of
+    // `process.env`. No injected transport seam: the production default
+    // factory path spawns a probe child whose allowlisted env is dumped to
+    // the workspace-owned fixture store and read back here.
+    const { env, dbPath } = tempEnv();
+    const fx = await startGoogleFixture();
+    const instanceId = await provisionCalendarInstance(dbPath);
+    const { sessionId, proposalId, hash } = await seedStagedProposal(
+      dbPath,
+      instanceId,
+    );
+    const store = join(
+      dirname(fileURLToPath(import.meta.url)),
+      "..",
+      "test-results",
+      "write-child-env-probe",
+    );
+    mkdirSync(store, { recursive: true });
+    const probePath = join(store, "probe.mjs");
+    const outPath = join(store, `env-dump-${randomUUID()}.json`);
+    writeFileSync(
+      probePath,
+      'import { writeFileSync } from "node:fs";\n' +
+        "writeFileSync(process.env.PROBE_OUT, JSON.stringify({ marker: process.env.M5_RESCHEDULE_SMOKE_MARKER ?? null }));\n",
+    );
+    const previous = process.env.M5_RESCHEDULE_SMOKE_MARKER;
+    delete process.env.M5_RESCHEDULE_SMOKE_MARKER;
+    try {
+      const started = await startServer({
+        env: {
+          ...env,
+          COMPANION_ACTIONS_JSON: ENABLED_ACTIONS_JSON,
+          [RESCHEDULE_WRITE_PROFILE_ENV]: "google-reschedule",
+          [RESCHEDULE_WRITE_CONNECTOR_ENV]: JSON.stringify({
+            command: "node",
+            args: [probePath],
+            envAllowlist: [
+              ...STDIO_IMPLICIT_ENV_VARS,
+              "PROBE_OUT",
+              "M5_RESCHEDULE_SMOKE_MARKER",
+            ],
+          }),
+          PROBE_OUT: outPath,
+          M5_RESCHEDULE_SMOKE_MARKER: "frozen-snapshot-value",
+        },
+        calendarBinding: {
+          connectorInstanceId: instanceId,
+          connector: fixtureBackedCalendarBinding(instanceId, () => fx.base),
+          selection: { calendarId: "primary", account: "ops@example" },
+        },
+        drainMs: 50,
+      });
+      servers.push(started);
+      await approveProposalHttp(started.port, sessionId, proposalId, hash);
+      const deadline = Date.now() + 25_000;
+      for (;;) {
+        if (existsSync(outPath)) break;
+        if (Date.now() > deadline) {
+          throw new Error("write child never spawned");
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      const dump = JSON.parse(readFileSync(outPath, "utf8")) as {
+        marker: unknown;
+      };
+      // The child saw the startServer snapshot value although the live
+      // process env held no such entry at spawn time.
+      expect(dump.marker).toBe("frozen-snapshot-value");
+      // The probe is not an MCP server, so the execution itself cannot
+      // succeed — but the spawn (the env under test) happened first, and no
+      // conditional PATCH was ever dispatched.
+      const view = await waitForTerminalReceipt(
+        started.port,
+        sessionId,
+        proposalId,
+      );
+      expect(view.receipt).not.toBeNull();
+      expect(fx.patchCount()).toBe(0);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.M5_RESCHEDULE_SMOKE_MARKER;
+      } else {
+        process.env.M5_RESCHEDULE_SMOKE_MARKER = previous;
+      }
+      rmSync(outPath, { force: true });
+      rmSync(probePath, { force: true });
+    }
   }, 60_000);
 });
 

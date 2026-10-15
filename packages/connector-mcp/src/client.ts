@@ -1115,29 +1115,49 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
  *   cancelled without being read).
  */
 export function defaultTransportFactory(config: McpConnectorConfig): Transport {
-  const t = config.transport;
-  if (t.kind === "stdio") {
-    // Fail-closed: reject BEFORE StdioClientTransport construction/spawn.
-    assertStdioEnvClosed(config);
-    const env: Record<string, string> = {};
-    for (const name of t.envAllowlist) {
-      const v = process.env[name];
-      if (v !== undefined) env[name] = v;
+  return startupEnvTransportFactory(process.env)(config);
+}
+
+/**
+ * Startup-environment transport factory (M5 write-child fix): identical to
+ * `defaultTransportFactory` except stdio child env values are read from the
+ * explicitly supplied startup snapshot instead of the live `process.env`.
+ * The snapshot must be frozen synchronously at startup from
+ * `options.env ?? process.env`, so the profile/hint selection and the lazy
+ * write child's credentials always come from the SAME environment — an
+ * embedding that passes `M5_RESCHEDULE_*` values via `startServer({ env })`
+ * no longer silently falls back to a different account (or missing
+ * credentials) on first approved execution. Fail-closed env rules
+ * (`assertStdioEnvClosed`, explicit allowlist only) are unchanged.
+ */
+export function startupEnvTransportFactory(
+  env: Readonly<Record<string, string | undefined>>,
+): TransportFactory {
+  return (config: McpConnectorConfig): Transport => {
+    const t = config.transport;
+    if (t.kind === "stdio") {
+      // Fail-closed: reject BEFORE StdioClientTransport construction/spawn.
+      assertStdioEnvClosed(config);
+      const childEnv: Record<string, string> = {};
+      for (const name of t.envAllowlist) {
+        const v = env[name];
+        if (v !== undefined) childEnv[name] = v;
+      }
+      return new StdioClientTransport({
+        command: t.command,
+        args: [...t.args],
+        env: childEnv,
+        stderr: "pipe",
+      });
     }
-    return new StdioClientTransport({
-      command: t.command,
-      args: [...t.args],
-      env,
-      stderr: "pipe",
-    });
-  }
-  const url = new URL(`http://${t.host}:${t.port}${t.path}`);
-  assertLoopbackHttp(url);
-  return toTransport(
-    new StreamableHTTPClientTransport(url, {
-      fetch: loopbackNoRedirectFetch,
-    }),
-  );
+    const url = new URL(`http://${t.host}:${t.port}${t.path}`);
+    assertLoopbackHttp(url);
+    return toTransport(
+      new StreamableHTTPClientTransport(url, {
+        fetch: loopbackNoRedirectFetch,
+      }),
+    );
+  };
 }
 
 /**
