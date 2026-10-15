@@ -1438,8 +1438,11 @@ COMPANION_ACTIONS_JSON='{ "optIn": true, "writeEnabled": true }'
   既定は無効のまま)。profile 選択時は注入 binding と相互排他であり、
   `M5_RESCHEDULE_TEST_*` の allowlist 指定は fail-closed です
   (fixture endpoint は options 注入の子プロセス env のみ)。
-  受け入れ証跡: `apps/server/test/rescheduleWriteStartup.test.ts` 15/15
-  (実 stdio E2E の HTTP approve 1 PATCH + readback receipt を含む)。
+  受け入れ証跡: `apps/server/test/rescheduleWriteStartup.test.ts` 21/21
+  (実 stdio E2E の HTTP approve 1 PATCH + readback receipt を含む; PR31
+  レビュー3件対応済み: production factory の implicit-env 事前検証、
+  `actionWriteBinding: null` の absent 扱い、Windows 絶対パス受容 +
+  space 含み実バイナリの production spawn)。
 - 設定が有効で binding が active instance と一致しない場合は listen 前に
   fail-closed します。設定が無効な場合、注入された port は一切使われません。
 - 無効時は staging できず、approve は repository 呼び出し前に固定

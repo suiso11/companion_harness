@@ -28,12 +28,21 @@
 // checkout: the tracked helper resolves via import.meta.url.
 
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  defaultTransportFactory,
   type McpConnectorConfig,
   STDIO_IMPLICIT_ENV_VARS,
   StdioClientTransport,
@@ -56,6 +65,8 @@ import {
 import { afterEach, describe, expect, it } from "vitest";
 import { type StartedServer, startServer } from "../src/bootstrap.js";
 import {
+  buildRescheduleWriteConnectorConfig,
+  parseRescheduleWriteConnectorHint,
   RESCHEDULE_WRITE_CONNECTOR_ENV,
   RESCHEDULE_WRITE_PROFILE_ENV,
 } from "../src/rescheduleWriteProfile.js";
@@ -272,6 +283,64 @@ describe("write-profile preflight fails closed before any DB side effect", () =>
       }),
     ).rejects.toThrow(/requires calendar config/);
     expect(existsSync(dbPath)).toBe(false);
+  });
+
+  it("rejects a production-factory hint missing the platform implicit env before any DB side effect", async () => {
+    // P1: `{"command":"node"}` defaults `envAllowlist` to `[]`, which the
+    // production default factory deterministically rejects before spawn
+    // (first approval would otherwise commit a grant then land `unknown`
+    // with no write dispatched). No injected factory here, so the
+    // production path is validated in preflight: fixed redacted message, no
+    // DB file, no child.
+    const { env, dbPath } = tempEnv();
+    const instanceId = randomUUID();
+    await expect(
+      startServer({
+        env: {
+          ...env,
+          COMPANION_ACTIONS_JSON: ENABLED_ACTIONS_JSON,
+          ...WRITE_PROFILE_ENV,
+        },
+        calendarBinding: {
+          connectorInstanceId: instanceId,
+          connector: fakeCalendarBinding(instanceId),
+          selection: { calendarId: "primary", account: "ops@example" },
+        },
+        drainMs: 50,
+      }),
+    ).rejects.toThrow(/env allowlist is invalid/);
+    expect(existsSync(dbPath)).toBe(false);
+  });
+
+  it("leaves an existing DB byte-identical on a production-factory env allowlist rejection", async () => {
+    const { env, dbPath } = tempEnv();
+    const handle = openKernelDatabase(dbPath);
+    try {
+      await migrateKernelDatabase({
+        db: handle.raw,
+        backupDir: join(dbPath, "..", "backups"),
+      });
+    } finally {
+      closeKernelDatabase(handle);
+    }
+    const before = readFileSync(dbPath);
+    const instanceId = randomUUID();
+    await expect(
+      startServer({
+        env: {
+          ...env,
+          COMPANION_ACTIONS_JSON: ENABLED_ACTIONS_JSON,
+          ...WRITE_PROFILE_ENV,
+        },
+        calendarBinding: {
+          connectorInstanceId: instanceId,
+          connector: fakeCalendarBinding(instanceId),
+          selection: { calendarId: "primary", account: "ops@example" },
+        },
+        drainMs: 50,
+      }),
+    ).rejects.toThrow(/env allowlist is invalid/);
+    expect(readFileSync(dbPath).equals(before)).toBe(true);
   });
 });
 
@@ -846,6 +915,58 @@ describe("write-profile selected composition without an injected write binding",
     expect(await response.text()).not.toContain("action_execution_disabled");
     expect(writeChildren).toBe(0);
   });
+
+  it("treats an explicit null write binding as absent (same gate as undefined)", async () => {
+    // P2: `actionWriteBinding: null` is the documented absent value
+    // (`StartServerOptions` permits `null`, the rest of bootstrap normalizes
+    // with `?? null`); only a NON-NULL binding conflicts with the profile.
+    const { env: nullEnv, dbPath: nullDb } = tempEnv();
+    const realId = await provisionCalendarInstance(nullDb);
+    let writeChildren = 0;
+    const started = await startServer({
+      env: {
+        ...nullEnv,
+        COMPANION_ACTIONS_JSON: ENABLED_ACTIONS_JSON,
+        ...WRITE_PROFILE_ENV,
+      },
+      calendarBinding: {
+        connectorInstanceId: realId,
+        connector: fakeCalendarBinding(realId),
+        selection: { calendarId: "primary", account: "ops@example" },
+      },
+      actionWriteBinding: null,
+      // Lazy lifecycle: selected but never constructed until first use.
+      writeMcpTransportFactory: () => {
+        writeChildren += 1;
+        throw new Error("no write call expected in this composition probe");
+      },
+      drainMs: 50,
+    });
+    servers.push(started);
+    expect(writeChildren).toBe(0);
+    expect([...(started.toolBroker?.toolNames() ?? [])].sort()).toEqual([
+      "calendar.reschedule",
+      "calendar.search",
+      "reference.open",
+      "reference.refresh",
+      "reference.related",
+    ]);
+    const response = await fetch(
+      `http://127.0.0.1:${started.port}/api/sessions/${randomUUID()}/proposals/${randomUUID()}/approve`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": randomUUID(),
+          origin: `http://127.0.0.1:${started.port}`,
+        },
+        body: JSON.stringify({ proposalHash: "a".repeat(64) }),
+      },
+    );
+    expect(response.status).toBe(404);
+    expect(await response.text()).not.toContain("action_execution_disabled");
+    expect(writeChildren).toBe(0);
+  });
 });
 
 describe("committed-grant revision resolver (concrete, immutable)", () => {
@@ -1013,4 +1134,118 @@ describe("real-process end to end (tracked fixture over real stdio)", () => {
     expect(view.receipt?.outcome).toBe("unknown");
     expect(fx.patchCount()).toBe(0);
   }, 60_000);
+});
+
+describe("write-command absolute paths (Windows + spaces)", () => {
+  it("accepts a Windows absolute executable at startup (strict parse, no child)", async () => {
+    // P2 (review): the stdio transport spawns with `shell: false`, so the
+    // colon, backslashes and spaces in
+    // `C:\Program Files\nodejs\node.exe` need no shell interpolation.
+    // `path.win32.isAbsolute` accepts this deterministically on any CI
+    // platform; startup validation (not a parser copy) proves it, with an
+    // injected inert factory so no child is ever constructed.
+    const { env, dbPath } = tempEnv();
+    const instanceId = await provisionCalendarInstance(dbPath);
+    let writeChildren = 0;
+    const started = await startServer({
+      env: {
+        ...env,
+        COMPANION_ACTIONS_JSON: ENABLED_ACTIONS_JSON,
+        [RESCHEDULE_WRITE_PROFILE_ENV]: "google-reschedule",
+        [RESCHEDULE_WRITE_CONNECTOR_ENV]: JSON.stringify({
+          command: "C:\\Program Files\\nodejs\\node.exe",
+        }),
+      },
+      calendarBinding: {
+        connectorInstanceId: instanceId,
+        connector: fakeCalendarBinding(instanceId),
+        selection: { calendarId: "primary", account: "ops@example" },
+      },
+      writeMcpTransportFactory: () => {
+        writeChildren += 1;
+        throw new Error("no write call expected in this parse probe");
+      },
+      drainMs: 50,
+    });
+    servers.push(started);
+    expect(writeChildren).toBe(0);
+    expect([...(started.toolBroker?.toolNames() ?? [])]).toContain(
+      "calendar.reschedule",
+    );
+  });
+
+  it("rejects a shell command line as the command before any DB side effect", async () => {
+    // The hint command is ONE executable (args stay an array): command
+    // lines, interpolation and quoting never pass, even though `shell:false`
+    // means this is a shape rejection, not a shell-injection claim.
+    for (const command of [
+      "node foo; rm -rf /",
+      "node $(evil)",
+      "node `evil`",
+      "node --flag | tee",
+    ]) {
+      const { env, dbPath } = tempEnv();
+      const instanceId = randomUUID();
+      await expect(
+        startServer({
+          env: {
+            ...env,
+            COMPANION_ACTIONS_JSON: ENABLED_ACTIONS_JSON,
+            [RESCHEDULE_WRITE_PROFILE_ENV]: "google-reschedule",
+            [RESCHEDULE_WRITE_CONNECTOR_ENV]: JSON.stringify({ command }),
+          },
+          calendarBinding: {
+            connectorInstanceId: instanceId,
+            connector: fakeCalendarBinding(instanceId),
+            selection: { calendarId: "primary", account: "ops@example" },
+          },
+          writeMcpTransportFactory: () => {
+            throw new Error("must never be constructed on invalid hints");
+          },
+          drainMs: 50,
+        }),
+      ).rejects.toThrow(/connector hints are invalid/);
+      expect(existsSync(dbPath)).toBe(false);
+    }
+  });
+
+  it("spawns the production stdio transport from a space-containing absolute binary path", async () => {
+    // Throwaway copy of the REAL current binary into `dir with space`: the
+    // strict parser accepts the spaced absolute path, the built dedicated
+    // config passes the PRODUCTION factory guard, and a real child spawns
+    // from that path (no fixture, no Google calls). On Windows CI this is a
+    // genuine `C:\...\dir with space\node.exe` invocation.
+    const dir = mkdtempSync(join(tmpdir(), "companion-write-space-"));
+    tempDirs.push(dir);
+    const spacedDir = join(dir, "dir with space");
+    mkdirSync(spacedDir, { recursive: true });
+    const dest = join(
+      spacedDir,
+      process.execPath.endsWith(".exe") ? "node.exe" : "node",
+    );
+    copyFileSync(process.execPath, dest);
+    if (process.platform !== "win32") {
+      chmodSync(dest, 0o755);
+    }
+    const hint = parseRescheduleWriteConnectorHint(
+      JSON.stringify({
+        command: dest,
+        envAllowlist: [...STDIO_IMPLICIT_ENV_VARS],
+      }),
+    );
+    expect(hint.command).toBe(dest);
+    const built = buildRescheduleWriteConnectorConfig({
+      connectorInstanceId: "preflight",
+      hint,
+    });
+    expect(() => defaultTransportFactory(built)).not.toThrow();
+    const spawned = new StdioClientTransport({
+      command: dest,
+      args: ["--version"],
+      env: {},
+      stderr: "pipe",
+    });
+    await spawned.start();
+    await spawned.close();
+  }, 30_000);
 });

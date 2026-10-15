@@ -2921,12 +2921,20 @@ copied; the entrypoint is a standalone narrow surface with its own pin).
   real-process stdio suite 1/1 green; root typecheck + full suite +
   biome re-run recorded below. No live writes/scopes.
 - Normal-startup write-profile proof (2026-10-15, default OFF unchanged):
-  `apps/server/test/rescheduleWriteStartup.test.ts` 15/15 — the prior
+  `apps/server/test/rescheduleWriteStartup.test.ts` 21/21 — the prior
   14/15 success case (`unknown` instead of `succeeded`) was a fixture-hint
   cause only (E2E stdio hints omitted the mandatory SDK inherited
   allowlist, so the fail-closed stdio guard denied before spawn); fixed by
   adding the exact live `STDIO_IMPLICIT_ENV_VARS` to the three real-stdio
-  E2E hints. Production parsing still rejects `M5_RESCHEDULE_TEST_*`
+  E2E hints. PR31 review findings (2026-10-15, same file +6): P1 —
+  production-factory hints now validate the platform implicit allowlist in
+  preflight (fixed `env allowlist is invalid`, no DB/child/patch; inert
+  `writeMcpTransportFactory` seams skip it); P2 — explicit
+  `actionWriteBinding: null` normalizes to absent (only non-null conflicts);
+  P2 — write commands accept absolute paths incl. Windows
+  `C:\Program Files\...\node.exe` and spaced POSIX paths (shell lines /
+  interpolation / NUL / controls still rejected; real spaced-binary
+  production spawn smoked). Production parsing still rejects `M5_RESCHEDULE_TEST_*`
   (fixture endpoint travels in the options-injected CHILD env only, never
   the hint). Success path verified end to end: staged HTTP approve ->
   exactly ONE conditional PATCH (`If-Match` = committed etag, start/end
@@ -3199,7 +3207,8 @@ spec clean. New-head CI after push, head `5195fef`: push run
 windows success) and PR-event run `38717286888` success (e2e
 success, check ubuntu success, check windows success); zero review
 comments on PR31 at observation time.
-- Concrete host resolver (closed contract, trusted-code-only, default
+- HISTORICAL PR30 helper API (not the CURRENT normal-startup wiring):
+  Concrete host resolver (closed contract, trusted-code-only, default
   OFF): `createCommittedGrantResolver` (connector-calendar, re-exported
   by `rescheduleWriteBinding.ts` + `createCommittedGrantWriteBinding`
   helper) keyed by execution/proposal/hash -> immutable
@@ -3208,7 +3217,15 @@ comments on PR31 at observation time.
   Nothing auto-wires: the host passes the resolver explicitly with its
   committed-grant store. Resolver answers are equality-checked against
   `grant.expectedRevision`; a throwing resolver pre-dispatch stays a
-  safe definite failure (no dispatch happened).
+  safe definite failure (no dispatch happened). HISTORICAL scope ends here:
+  in this helper the host passes the resolver explicitly. CURRENT PR31
+  normal-startup composition instead auto-wires a concrete DB resolver —
+  the frozen write profile (`M5_RESCHEDULE_WRITE_PROFILE=google-reschedule`
+  + strict `M5_RESCHEDULE_CONNECTOR_JSON` hints) builds an inline
+  `resolveExpectedEtag` over `repo.readCommittedGrantRevision`
+  (`apps/server/src/bootstrap.ts`), equality-checked against the committed
+  grant; see "M5 reschedule hardening + wire-hash pin" and the normal-startup
+  write-profile proof above.
 - Verification (this worker, no live Google/OAuth/writes): fork
   `npm run build` + `npm run lint` + `npm test` green; host units +
   typecheck/lint + pipeline smoke re-run below. Fork commits pushed

@@ -35,6 +35,7 @@ import {
 } from "@companion/connector-calendar";
 import { createMarkdownConnector } from "@companion/connector-markdown";
 import {
+  assertStdioEnvClosed,
   type McpBindingDefinition,
   McpConnector,
   type McpConnectorConfig,
@@ -775,7 +776,7 @@ export async function startServer(
     const writeProfile = parseRescheduleWriteProfileName(frozenWriteProfile);
     let writeConnectorHint: RescheduleWriteConnectorHint | null = null;
     if (writeProfile !== null) {
-      if (options.actionWriteBinding !== undefined) {
+      if ((options.actionWriteBinding ?? null) !== null) {
         throw new ServerConfigError(
           "reschedule write profile and an injected write binding are mutually exclusive",
         );
@@ -797,6 +798,36 @@ export async function startServer(
         frozenWriteConnectorHint,
       );
       assertRescheduleWriteHintCompatible(writeConnectorHint);
+      // P1: the production default stdio factory deterministically requires
+      // every platform SDK implicit env name (`STDIO_IMPLICIT_ENV_VARS`) in
+      // the hint allowlist (`assertStdioEnvClosed` rejects before spawn, and
+      // the first approved action would otherwise commit a grant then land a
+      // deterministic `unknown` with no write dispatched). Reject the unusable
+      // production configuration here, BEFORE any DB side effect or write
+      // adoption. Explicit inert-transport test seams
+      // (`writeMcpTransportFactory` injected) skip this: fixtures need no OS
+      // env and production is never weakened for them. Fixed redacted message
+      // only (no env values).
+      if (options.writeMcpTransportFactory === undefined) {
+        try {
+          assertStdioEnvClosed(
+            buildRescheduleWriteConnectorConfig({
+              connectorInstanceId: "preflight",
+              hint: writeConnectorHint,
+              ...(options.writeTestIdentity !== undefined
+                ? { testIdentity: options.writeTestIdentity }
+                : {}),
+            }),
+          );
+        } catch (error) {
+          if (error instanceof ServerConfigError) {
+            throw error;
+          }
+          throw new ServerConfigError(
+            "reschedule write connector env allowlist is invalid",
+          );
+        }
+      }
       if (
         options.writeTestIdentity !== undefined &&
         (options.writeTestIdentity.expectedServerName.length === 0 ||

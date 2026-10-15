@@ -41,6 +41,7 @@
 // `rescheduleInputJsonSchema()` (neither strict nor `$schema`) MUST NOT be
 // used here.
 
+import { posix as posixPath, win32 as win32Path } from "node:path";
 import type {
   McpBindingDefinition,
   McpConnectorConfig,
@@ -162,14 +163,55 @@ export interface RescheduleWriteConnectorHint {
 
 const WRITE_COMMAND_PATTERN =
   /^([A-Za-z0-9_.-]+|[A-Za-z0-9_./-][A-Za-z0-9_./-]*)$/;
+/**
+ * Single-executable shape guard for absolute command paths (the stdio
+ * transport spawns with `shell: false`, so no shell splitting/quoting ever
+ * applies): an absolute path may contain platform separators, a drive colon
+ * and spaces (`C:\Program Files\...\node.exe`, `/opt/my tools/node`), but a
+ * shell command line never passes — `;`, `&`, `|`, `$`, backtick,
+ * redirection (`>`, `<`) and quoting (`"`, `'`) are rejected, as are NUL and
+ * C0/C1 control characters (including newlines). Parentheses are allowed
+ * (`Program Files (x86)`). Bare names and relative shapes keep the existing
+ * pattern above.
+ */
+const WRITE_COMMAND_SHELL_CHARS = /[;&|$`><"']/;
+/** NUL and C0/C1 controls (incl. newlines) never appear in one executable. */
+function hasWriteCommandControlChar(command: string): boolean {
+  for (let index = 0; index < command.length; index += 1) {
+    const code = command.charCodeAt(index);
+    if (code <= 0x1f || code === 0x7f) {
+      return true;
+    }
+  }
+  return false;
+}
+function isWriteCommandShape(command: string): boolean {
+  if (
+    WRITE_COMMAND_SHELL_CHARS.test(command) ||
+    hasWriteCommandControlChar(command)
+  ) {
+    return false;
+  }
+  if (win32Path.isAbsolute(command) || posixPath.isAbsolute(command)) {
+    return true;
+  }
+  return WRITE_COMMAND_PATTERN.test(command);
+}
 const WRITE_ENV_NAME_PATTERN = /^[A-Z][A-Z0-9_]{0,127}$/;
 const WRITE_TEST_ENV_PREFIX = "M5_RESCHEDULE_TEST_";
 
 /**
  * Strict connection-hint parser (shape only, never credential values).
  * Exact `{ command, args?, envAllowlist? }`: unknown keys rejected,
- * command is a 1..512 non-NUL absolute-or-bare name, args at most 16
- * entries of at most 1024 chars, envAllowlist at most 32 UPPER_SNAKE names.
+ * command is a 1..512 single executable — a bare binary name, a relative
+ * shape (existing contract), or an absolute path on the actual platform
+ * (`path.posix`/`path.win32` absolute, spaces allowed, e.g. Windows
+ * `C:\Program Files\...\node.exe`); shell command lines, interpolation
+ * (`;`, `&`, `|`, `$`, backtick, `>`, `<`, quotes), NUL and control
+ * characters are rejected (the stdio transport uses `shell: false`, so no
+ * command splitting/quoting ever applies and args stay an array), args at
+ * most 16 entries of at most 1024 chars, envAllowlist at most 32 UPPER_SNAKE
+ * names.
  * `M5_RESCHEDULE_TEST_*` names (the fixture-only bypass) are rejected: the
  * production child never inherits test-endpoint overrides. Missing input
  * fails closed (a selected profile without hints is incomplete). The result
@@ -208,7 +250,7 @@ export function parseRescheduleWriteConnectorHint(
     command.length === 0 ||
     command.length > 512 ||
     command.includes("\0") ||
-    !WRITE_COMMAND_PATTERN.test(command)
+    !isWriteCommandShape(command)
   ) {
     throw writeProfileError("reschedule write connector hints are invalid");
   }
