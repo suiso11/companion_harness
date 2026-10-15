@@ -10,6 +10,7 @@ import {
   McpConnector,
   missingStdioEnvNames,
   STDIO_IMPLICIT_ENV_VARS,
+  startupEnvTransportFactory,
 } from "../src/client.js";
 import {
   type McpBindingDefinition,
@@ -94,5 +95,29 @@ describe("fail-closed stdio env allowlist", () => {
     const config = stdioConfig([...STDIO_IMPLICIT_ENV_VARS]);
     expect(missingStdioEnvNames(config)).toEqual([]);
     expect(() => assertStdioEnvClosed(config)).not.toThrow();
+  });
+
+  it("startup snapshot factory sources child env from the snapshot, not live process.env", () => {
+    const marker = "COMPANION_WRITE_CHILD_MARKER";
+    const config = stdioConfig([...STDIO_IMPLICIT_ENV_VARS, marker]);
+    const previous = process.env[marker];
+    process.env[marker] = "live-process-value";
+    try {
+      const fromSnapshot = startupEnvTransportFactory({
+        [marker]: "startup-snapshot-value",
+      })(config) as unknown as {
+        _serverParams: { env: Record<string, string> };
+      };
+      expect(fromSnapshot._serverParams.env[marker]).toBe(
+        "startup-snapshot-value",
+      );
+      const absent = startupEnvTransportFactory({})(config) as unknown as {
+        _serverParams: { env: Record<string, string> };
+      };
+      expect(marker in absent._serverParams.env).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env[marker];
+      else process.env[marker] = previous;
+    }
   });
 });

@@ -2820,5 +2820,451 @@ assertions/contracts untouched:
 Local proof after edits (Linux, Node 24.12.0, single pass, no midflight
 runs): focused `action_scheduler_pickup.test.ts` 3/3, full `vitest run`
 107 files / 1307 tests, root typecheck exit 0, `biome check .` exit 0
-(229 files, 0 errors, 1 pre-existing info). New-head CI observed after push (per-job conclusions in the
-delivery report, not claimed here).
+(229 files, 0 errors, 1 pre-existing info). New-head CI observed after push,
+head `7cf085b`: PR-required run `38610182826` success — `check
+(ubuntu-latest)` success, `check (windows-latest)` success, `e2e` success;
+same-head push run `38610174325` success (ubuntu success, windows success,
+e2e success). PR29 required context is the PR-event run.
+
+## M5 dedicated write binding — continued §20 #1 spike decision (2026-10-15, source-only, no implementation)
+
+Continuation after the live readonly acceptance ledger. No code changed, no
+live writes, no OAuth/scope/key changes, no userDB/service interruption. The
+readonly fork was not modified (not even re-read from its external checkout:
+this worker's tool boundary denies external directories, so the fork source
+facts below reuse the recorded pin-commit evidence at `m4_dependency_spike.md`
+L623-629 + operations L2192-2204, and this worker re-verified everything
+reachable in-repo). The running readonly user service was untouched.
+
+- In-repo verification (this worker, reached paths only):
+  `packages/connector-calendar/src` contains no update/patch/`If-Match`/write
+  path (only the read-side etag revision basis in `normalize.ts`); the C21
+  triple gate + `CalendarActionWritePort` contract in
+  `packages/kernel/src/action_strategy.ts` + `apps/server/src/bootstrap.ts`
+  are unchanged (exact `["start","end"]` capability, one-shot `update`, exact
+  three-value outcome, no retry); no production write binding is selected
+  anywhere. Kernel side is ready; the independent provider side is missing.
+- Exact missing independent write-provider contract (decision-ready):
+  1) Narrow tool: fork `6939311` `UpdateEventHandler`
+  (`src/handlers/core/UpdateEventHandler.ts`) is dormant/unregistered and
+  broad-field (`getCalendarTimezone`/`detectEventType` + broad-field +
+  recurring-split paths); its `events.patch` calls lack `If-Match`, so
+  `expectedRevision` cannot be carried. No approved narrow start/end-only
+  reschedule port exists.
+  2) Conditional mutation: exact-etag `If-Match` + `412`-as-stale is recorded
+  design-only (Google version-resources semantics), never provider-proven for
+  this fork path; a preflight-to-write race `412` has no agreed port mapping
+  beyond the closed three-value return.
+  3) Idempotency capability (§20 #1 open item): kernel gives at-most-once per
+  committed grant with no auto resend, but whether upstream offers update
+  tokens/etag idempotency signals against duplicate delivery is unconfirmed.
+  4) Scope/consent: any write needs scope beyond `calendar.events.readonly`
+  plus an explicit user write-consent decision; current authorization covers
+  implementation, NOT live writes or OAuth broadening.
+- Smallest safe choice (user decision, no guessing): keep the triple gate
+  closed; next step is a fork-side narrow-tool proposal (start/end-only,
+  exact-etag `If-Match`, `412` propagation, no recurring split) + a
+  write-capable pin decision + a scope/consent decision, BEFORE any binding
+  code. Adopting the dormant broad handler as-is is REJECTED (violates §18.1
+  start/end-only + §18.5 exact-revision preflight; it would invent an
+  incompatible API). The fake-harness browser approval→receipt path (exactly
+  1 fake write) already proves the kernel side; rerunning it proves nothing
+  new and was not rerun.
+- Genuine remaining gates (unchanged): Windows 11 x64 manual smoke; C11-01
+  BLOCKED; M5 live/write gates (no production binding, triple gate never
+  opened live); fresh OAuth consent-screen scope display as a separate
+  untouched decision; §20 #1 UI phrasing still open.
+
+## M5 isolated reschedule binding — real runtime (2026-10-15, no live writes)
+
+SUPERSEDES the "fixture-only" note above: the fork-side SEPARATE
+ENTRYPOINT is now a REAL production runtime (defaults disabled, no live
+Google mutation, no OAuth consent/scope activation, readonly checkout
+untouched — external reads were boundary-denied, so no readonly code was
+copied; the entrypoint is a standalone narrow surface with its own pin).
+
+- Real Google adapter (fork `src/google.ts`): exact events.get/patch
+  shape normalization, recurring/instance/cancelled/deleted/all-day
+  rejects, GET 404/410 no-write definite (never deletion proof), PATCH
+  start/end ONLY with `If-Match` exact etag, 412 definite `etag_mismatch`,
+  5xx/timeout/abort/disconnect/malformed-2xx after dispatch `unknown`
+  (never resend); single fetch each, bounded timeout/abort/response-size,
+  `redirect: manual` (never follows; no credential leak).
+- Real auth (fork `src/auth.ts`, separate `M5_RESCHEDULE_*` namespace):
+  exact-whitespace scope tokens (prior substring match removed, so
+  `calendar.events.foo` cannot pass), exact account selection, no
+  readonly token reuse, refresh-BEFORE-dispatch only (single RFC6749
+  grant, no interactive flow, no scope broadening), separate 0600 token
+  persistence. No live OAuth/Google invocation (fake token endpoint in
+  tests only).
+- Executable CLI (fork `src/cli.ts`, bin `calendar-reschedule-mcp`,
+  `start` runs `dist/cli.js`; build/start are distinct commands);
+  production Google URL FIXED (test endpoint only via the explicit
+  `M5_RESCHEDULE_TEST_ALLOW_ENDPOINT_OVERRIDE=1` seam, never set in
+  production); strict tool schema (`additionalProperties: false`, exact
+  ISO `start < end`, opaque etag); SDK signal cancellation; real bounded
+  stdio shutdown race (not a comment).
+- Production fixture provider REMOVED from production (fixtures live in
+  tests only). Harness `rescheduleWrite.test.ts` is self-contained (no
+  relative import from the ignored nested repo); new
+  `rescheduleProcess.test.ts` drives the ACTUAL built executable over
+  real stdio MCP into a local Google-shaped fixture (success exact
+  fields/If-Match, stale-etag definite, zero PATCH on rejects). Fork is a
+  workspace member with the same durable pins (SDK 1.30.0, zod 4.5.4).
+- Harness side unchanged in trust: `createRescheduleWritePort` (exact
+  `reschedule-event`/instance binding, committed-grant etag only, one
+  call, loss -> unknown) + `createDedicatedWriteBinding` into the
+  existing triple-gate seam (all defaults disabled; readonly
+  entrypoint/tools/scopes/pin untouched).
+- Verification (Linux, Node 24.12.0 — each run ONCE, 2026-10-15):
+  fork `tsc` build clean (`dist/cli.js` present); port suite 8/8 +
+  real-process stdio suite 1/1 green; root typecheck + full suite +
+  biome re-run recorded below. No live writes/scopes.
+- Normal-startup write-profile proof (2026-10-15, default OFF unchanged):
+  `apps/server/test/rescheduleWriteStartup.test.ts` 21/21 — the prior
+  14/15 success case (`unknown` instead of `succeeded`) was a fixture-hint
+  cause only (E2E stdio hints omitted the mandatory SDK inherited
+  allowlist, so the fail-closed stdio guard denied before spawn); fixed by
+  adding the exact live `STDIO_IMPLICIT_ENV_VARS` to the three real-stdio
+  E2E hints. PR31 review findings (2026-10-15, same file +6): P1 —
+  production-factory hints now validate the platform implicit allowlist in
+  preflight (fixed `env allowlist is invalid`, no DB/child/patch; inert
+  `writeMcpTransportFactory` seams skip it); P2 — explicit
+  `actionWriteBinding: null` normalizes to absent (only non-null conflicts);
+  P2 — write commands accept absolute paths incl. Windows
+  `C:\Program Files\...\node.exe` and spaced POSIX paths (shell lines /
+  interpolation / NUL / controls still rejected; real spaced-binary
+  production spawn smoked). Production parsing still rejects `M5_RESCHEDULE_TEST_*`
+  (fixture endpoint travels in the options-injected CHILD env only, never
+  the hint). Success path verified end to end: staged HTTP approve ->
+  exactly ONE conditional PATCH (`If-Match` = committed etag, start/end
+  only) -> strategy readback -> `succeeded` receipt; stale grant ->
+  `blocked_stale` with 0 patches; drifted identity -> `unknown` with 0
+  patches; committed-grant resolver reads the exact stored hash+revision.
+  Final: root suite 114 files / 1350 tests green, `tsc --noEmit` exit 0,
+  `biome check .` clean, throwaway normal-startup `tsx` smoke
+  (`/health/live` -> `{"status":"live"}`, default profile unselected) OK.
+  No live Google/OAuth/user-DB writes; no production guard weakened.
+- Remaining: nested-fork push to suiso11/google-calendar-mcp SUCCEEDED
+  (branch `feat/m5-reschedule-entrypoint`, commit `164cb83`, no merge);
+  draft PR BLOCKED with the exact reason `branch has no history in common
+  with main` (the nested repo was built standalone because the external
+  readonly clone was boundary-denied, so no shared history exists);
+  actual fork-readonly-code checkout BLOCKED by external-directory read
+  denial (no code copied, original untouched by construction); Windows 11 x64
+  manual smoke; C11-01 BLOCKED; M5 live/write gates (triple gate never
+  opened live).
+
+## Prior M5 fixture-only record (2026-10-15, superseded — kept for history)
+
+SUPERSEDES the "no implementation" note above: the fork-side SEPARATE
+ENTRYPOINT is now implemented end-to-end against a local real-HTTP fixture
+(no live Google mutation, no OAuth consent/scope activation, readonly
+`6939311` checkout untouched — external reads were boundary-denied, so the
+fork was built in-repo from the recorded contract and never re-read).
+
+- Separate entrypoint (nested fork `.m5-write-fork`, own branch
+  `feat/m5-reschedule-entrypoint`, parent tracks sources but ignores nested
+  `.git` via `.gitignore`): identity `google-calendar-reschedule` /
+  `1.0.0-reschedule.1` (distinct from readonly `google-calendar` /
+  `3.0.0-readonly.2`); tool `reschedule-event` ONLY (strict start/end +
+  opaque calendar/event/account + committed-grant `expectedEtag`; unknown
+  keys rejected); injectable provider boundary (fixture HTTP provider +
+  documented Google `events.patch` mapping); read-before-patch rejects
+  recurrence/instances, cancelled/deleted, all-day, missing etag with NO
+  patch; exactly ONE conditional PATCH with `If-Match` (retry:false, no
+  redirect follow, no recurring split); HTTP 412 -> `definite_failure`
+  (`etag_mismatch`, provider proves NO patch); transport loss after possible
+  dispatch -> `unknown` (never resend, never cancel); classified outcomes as
+  non-error payloads, `isError` only for lost responses (never definite on
+  loss); separate `M5_RESCHEDULE_*` credential namespace + write-scope
+  validation, no OAuth flow, no scope broadening.
+- Harness side: `packages/connector-calendar/src/rescheduleWrite.ts`
+  (`createRescheduleWritePort`, structural `CalendarActionWritePort`;
+  committed-grant etag ONLY via `resolveExpectedEtag`, hash/updated-only
+  revisions safely rejected with NO dispatch, exact 412 -> definite_failure,
+  loss -> unknown, one call per update) +
+  `apps/server/src/rescheduleWriteBinding.ts`
+  (`createDedicatedWriteBinding` -> existing `derivePort` triple-gate seam;
+  all defaults disabled). Readonly entrypoint/tools/scopes/pin unchanged
+  (no write tool registered there; `calendarReadonlyProfile.ts` untouched).
+- Verification (Linux, Node 24.12.0, pnpm 11.25.0 — each run ONCE, 2026-10-15):
+  typecheck clean (`connector-calendar`, `server`); `biome check .` clean;
+  new `rescheduleWrite.test.ts` 8/8 over a real loopback HTTP fixture
+  exercising the real wire adapter + port (success exact fields/If-Match,
+  412 definite with no patch, recurring/cancelled/deleted/all-day with zero
+  dispatch, hash-only revision rejected undispatched, abort -> unknown with
+  exactly 1 attempt, lost/unparseable -> unknown never definite, wrong
+  tool/instance refused); throwaway full-pipeline smoke PASSED then deleted
+  (dedicated MCP identity `google-calendar-reschedule`/`1.0.0-reschedule.1`
+  + sole `reschedule-event` tool over the real SDK wire, direct success +
+  stale-etag definite_failure, then approval -> committed grant -> MCP ->
+  fixture PATCH -> readback -> `succeeded` receipt via the real scheduler);
+  focused regression 134/134 across connector-calendar + kernel action +
+  server action/bootstrap suites; readonly-unchanged proof: modified tracked
+  files are only `.gitignore` (nested `.git` ignore), `docs/operations.md`,
+  `connector-calendar/src/index.ts` (additive exports); readonly profile,
+  bootstrap gates, kernel, connector-mcp untouched.
+- Remaining: nested-fork push/draft-PR blocked (no remote configured; worker
+  does not invent push targets); Windows 11 x64 manual smoke; C11-01
+  BLOCKED; M5 live/write gates (triple gate never opened live); §20 #1 UI
+  phrasing.
+
+## M5 fork-history recovery — proper derived PR (2026-10-15, no live writes)
+
+SUPERSEDES the two blocked-PR notes above (standalone history problem is
+RESOLVED; history sections kept). No live Google mutation, no OAuth
+activation, no user service/DB/model changes, no user-branch deletion.
+
+- Derived checkout: `.m5-write-fork-derived` cloned from the KNOWN
+  accessible GitHub remote (`https://github.com/suiso11/google-calendar-mcp.git`,
+  branch `feat/companion-readonly-compatibility`, HEAD exactly
+  `6939311fd3eae9846648e0a175e304c9500f578e` — no external-filesystem
+  reads needed). New branch `feat/m5-reschedule-entrypoint-v2` (no
+  force-push; orphan `feat/m5-reschedule-entrypoint` / `164cb83` retained
+  on the remote for reference, superseded, never deleted).
+- Separate entrypoint with TRUE ancestry (commit `f1dcde8` on top of
+  `6939311`): `src/reschedule/*` ported byte-identical from `164cb83`
+  (sha256-verified per file) + entry `src/reschedule-cli.ts` ->
+  `build/reschedule-cli.js` (bin `calendar-reschedule-mcp`, identity
+  `google-calendar-reschedule` / `1.0.0-reschedule.1`, tool
+  `reschedule-event` ONLY). Readonly byte/behavior unchanged: only
+  `package.json` (bin + additive `build:reschedule`/`start:reschedule`
+  scripts) and `scripts/build.js` (additive bundle) modified; `src/index.ts`,
+  `src/server.ts`, auth, handlers, tools, name/version
+  `3.0.0-readonly.2` untouched (diff proof: 2 files, +39/-2; all else new
+  files). `RESCHEDULE.md` records provenance + pin.
+- Fork verification (Linux, Node 24.12.0): `npm run lint` exit 0,
+  `check:imports` clean, full `npm run build` green, unit suite 821/821
+  pass, real stdio smoke of `build/reschedule-cli.js` vs loopback fixture
+  PASS (identity exact, one tool, success exact If-Match start/end-only,
+  stale etag definite `etag_mismatch` with zero extra PATCH, no-credential
+  exit 2). No live writes/scopes.
+- Draft fork PR (NOT merged): suiso11/google-calendar-mcp#3
+  (`feat/m5-reschedule-entrypoint-v2` -> `feat/companion-readonly-compatibility`,
+  true ancestry, diff confined to the additive reschedule surface).
+- Harness clean-clone durability (this worktree): `.m5-write-fork`
+  standalone scaffold DELETED (directory + `pnpm-workspace.yaml` member +
+  lock importer pruned via `pnpm install`); no test imports any ignored
+  repo. `rescheduleProcess.test.ts` now spawns a REAL child-process MCP
+  server over REAL stdio: TRACKED fixture
+  (`test/helpers/rescheduleFixtureServer.mjs`, own
+  `*-test-fixture` identity) by DEFAULT — always runs, never skips — and
+  the REAL fork bundle only under explicit `M5_RESCHEDULE_FORK_CLI`
+  (set-but-missing is a hard error). `rescheduleWrite.test.ts` header
+  updated; `.gitignore` now ignores only
+  `.m5-write-fork-derived/.git`. Single production implementation (fork
+  branch); Harness keeps only the binding port + fixture provider in tests.
+- Harness verification after final edits (Linux, Node 24.12.0, pnpm
+  11.25.0 — each run ONCE, 2026-10-15): port suite 8/8 + real-process
+  suite 1/1 green on the DEFAULT fixture path; explicit-fork path 1/1
+  green against `build/reschedule-cli.js` (`f1dcde8`); explicit-missing
+  path hard-fails (no silent skip); root typecheck + full `vitest run` +
+  `biome check .` re-run recorded below. Readonly entrypoint/tools/scopes/
+  pin untouched (`calendarReadonlyProfile.ts`, bootstrap gates, kernel,
+  connector-mcp unchanged).
+- Remaining: fork PR #3 review/merge decision (not this worker); Windows 11
+  x64 manual smoke; C11-01 BLOCKED; M5 live/write gates (triple gate never
+  opened live); §20 #1 UI phrasing.
+
+## M5 reschedule hardening + wire-hash pin (2026-10-15, oc38 record, no live writes)
+
+SUPERSEDES nothing: implements the remaining hardening on top of the
+derived-PR record above. No live Google mutation, no OAuth consent/scope
+activation, no user service/DB changes. Readonly surface/scopes/pin
+untouched (zero write tools on the readonly entrypoint; this module never
+enters the read allowlist).
+
+- Fork (`feat/m5-reschedule-entrypoint-v2`, committed `0e61265`
+  `0e612655e7054130fe37601cbe80378f73f418ea`, normal ff push, NOT
+  merged): provider default-behavior hardening (`src/reschedule/google.ts`,
+  `auth.ts`, `cli.ts`, `provider.ts`) — ONE deadline spans headers AND
+  body (hang-safe abort), exact-account pre-check BEFORE any token or
+  provider I/O, refresh-BEFORE-every GET and PATCH, `read_transport_lost`
+  definite pre-dispatch, `unknown` only after possible dispatch (single
+  attempt, never resend); server advertises and validates with THE SAME
+  strict `RescheduleEventInputSchema` object (hand-written
+  `rescheduleInputJsonSchema` removed, cannot drift). Wire identity
+  unchanged (`google-calendar-reschedule` / `1.0.0-reschedule.1`, tool
+  `reschedule-event` ONLY). New permanent tests
+  `src/tests/unit/reschedule/googleReschedule.test.ts` (6 cases, injected
+  `fetch` only: body-deadline/abort, exact account, per-request refresh,
+  single-GET observation, after-dispatch unknown, pre-dispatch definite).
+- Host (this branch): owned-write bounded shutdown in
+  `apps/server/src/bootstrap.ts` (adopted owned-hook close paths bounded;
+  a hanging hook never stalls shutdown past the bound — new hang test in
+  `action_composition.test.ts`); committed-grant revision proof in
+  `rescheduleWrite.ts` + `rescheduleWriteBinding.ts` (resolver keyed by
+  the exact committed grant; content-hash/updated-timestamp fallbacks and
+  resolver substitution rejected with NO dispatch — 4 new cases in
+  `rescheduleWrite.test.ts`); `category: "write"` gate in
+  `connector-mcp/src/client.ts` (default readonly connector refuses
+  trusted `write` definitions with `mcp_binding_not_allowed` before any
+  dial; dedicated `["write"]` connector enables ONLY write — 4 cases in
+  `write-category-gate.test.ts`); host-owned wire-hash pin in new
+  `apps/server/src/rescheduleWriteProfile.ts` (+ 4 pin tests) and live-wire
+  stdio proof in `rescheduleWireHash.test.ts` (2 cases, tracked fixture —
+  clean-clone safe). Base pin `6939311` in the profile is the branch base
+  (unchanged and still exact); wire hash unchanged (no reprobe needed).
+- Wire-hash pin (probed oc37, recorded in `rescheduleWriteProfile.ts`):
+  live-wire canonical input-schema SHA-256
+  `9f59e35bf76bfec75a99546fc3c22348cd20e33e9414154ea321d414186d09b7`,
+  probed over REAL stdio against BOTH the freshly built fork bundle
+  (`build/reschedule-cli.js`) and the tracked contract-mirror fixture —
+  byte-identical STRICT schemas (`additionalProperties: false` + `$schema`
+  key). oc38 adopts that exact strict schema object fork-side, so the pin
+  stands without rebuild/reprobe.
+- Verification carried from the oc38 handoff (implementation + all gates
+  passed before the worker timed out at docs-recording; NOT rerun by this
+  worker per scope): fork provider behavior tests pass; bootstrap
+  owned-write bounded-shutdown all-paths + hang test pass; grant-revision
+  proof tests pass; Harness typecheck/lint clean; fork final gates + build
+  green; real-fork stdio smoke green; full Harness suite green; trusted
+  approval→grant→real-stdio→local-Google-fixture→readonly-readback→receipt
+  smoke PASS (temp removed); real UI approval suite all-green. Exact
+  per-suite log counts are UNKNOWN (oc38 logs not retained in-repo; only
+  structural counts are verifiable here: fork 6 + profile-pin 4 +
+  wire-hash 2 + write-gate 4 + grant-revision 4 + shutdown-hang 1 new
+  cases; retained `test-results/.last-run.json` read `passed`/zero-failed
+  and was then deleted as a generated artifact).
+- Remaining: fork PR #3 review/merge decision (not this worker); Harness
+  PR #30 review/merge decision (not this worker); Windows 11 x64 manual
+  smoke; C11-01 BLOCKED; M5 live/write gates (triple gate never opened
+  live); §20 #1 UI phrasing.
+
+## M5 production boundary final (2026-10-15, oc40 fixes, no live writes)
+
+- POST-dispatch 3xx is `unknown` (fork `google.ts` + host mirror
+  `testWirePatch`): the PATCH was already received by the server
+  (`redirect: manual`, never followed), so no definite no-commit proof
+  exists; exactly one attempt, no resend. Fork
+  `googleReschedule.test.ts` + host `rescheduleWrite.test.ts` prove
+  server-received-PATCH-then-3xx -> `unknown` with patchCount 1.
+- Immutable production endpoint: shipped CLI (`src/reschedule/cli.ts`,
+  bin `calendar-reschedule-mcp`) reads NO `M5_RESCHEDULE_TEST_*` env and
+  never sets `endpointBase` (always the FIXED Google host). Fixture
+  injection lives ONLY in the unshipped test-only runner
+  (`src/tests/helpers/rescheduleTestRunner.ts` +
+  `rescheduleTestStdio.ts`, outside `bin`/`files`/`scripts/build.js`),
+  exercising the SAME production provider + MCP server factory
+  (import-identity asserted). Host `rescheduleProcess.test.ts` explicit
+  fork path now spawns that runner via tsx (never the shipped CLI with
+  bypass env); new host `rescheduleEndpointIsolation.test.ts` proves the
+  shipped CLI ignores test env + the committed-grant resolver contract
+  with no live Google calls.
+- Exact least-privilege scope: `WRITE_SCOPES` is
+  `calendar.events` ONLY (broad `calendar` refused). Refresh-response
+  `scope`/`scopes`, when the server reports one, must contain the exact
+  write scope or the refresh is refused (config alone never equals a
+  grant). Fork `productionBoundary.test.ts` covers exact/broad/readonly/
+  spoof + refresh-scope verify.
+- Write provenance pin (readonly pin untouched):
+  `apps/server/src/rescheduleWriteProfile.ts` now pins
+  branch `feat/m5-reschedule-entrypoint-v2`, base
+  `6939311fd3eae9846648e0a175e304c9500f578e`, source commit
+  `4f9c06dd9318c11ee9d352d61825c3f75f9ac8a6`, source tree
+  `9eec88aa21951e1ea9564a62e89a40eeb2bcceef`, package-lock SHA-256
+  `63261d25992ee9c97136a60bbf4fe52a5485cadea28b34d6b8b6c685f38bd533`
+  (deps unchanged from the readonly base).
+- Host vs fork CI scopes (no new flaky clone job added: host CI keeps no
+  fork-fetch pattern; fork CI is the actual provider proof):
+  fork default `npm test` (`vitest run src/tests/unit`) includes
+  `src/tests/unit/reschedule` (832/832 green incl. 3xx/scope/boundary);
+  fork `.github/workflows/ci.yml` now triggers on `feat/**` too so PR #3
+  runs build + `lint` (`tsc -p tsconfig.lint.json`) + `check:imports` +
+  unit tests with coverage. Host CI (`ci.yml` check + e2e) proves the
+   tracked-fixture mirrors, static gates, and full pipeline smoke only;
+   host `rescheduleProcess`/`rescheduleWrite` mirrors are NOT provider
+   proof (stated here, not substituted).
+
+## PR31 citation CI race fix (2026-10-15, test sync only, no product change)
+
+CI ground truth: push run `38716307351` (head `a77cd1e`) failed ONLY
+`e2e` with 2 failures in `apps/server/e2e/citation_recovery.spec.ts`
+(stale-PUT CAS test `:71` + genuine-concurrent-409 test `:135`); both
+`check` jobs passed and the same-head PR-event run `38716314333`
+passed. Both failures are the identical line
+`sessionIdOf (.../citation_recovery.spec.ts:42)`:
+`expect(typeof id).toBe("string")` got `typeof null === "object"` —
+the page's `localStorage ch.sessionId` was still empty. No seed,
+409, expiry, collision, or route-capture behavior is implicated: the
+read happens before `/seed-citation` and before any route is
+installed. Root cause is a test/fixture race: `beforeEach` gates on
+`#composer` visible + `#composer-send` enabled, which the static HTML
+already satisfies before async `boot() -> ensureSession()` finishes
+`POST /api/sessions` and writes `ch.sessionId`. Cold CI starts lose
+the race (first two tests); warm runs win it (later tests +
+same-head rerun passed). Fix (test-only, assertions kept):
+`sessionIdOf` now `waitForFunction`s the real product signal
+(`ch.sessionId` non-empty, 15s budget matching the file's other
+waits) before reading/asserting. No M5 startup code touched, no
+`client.ts`/`app.ts` product change, no timeout/retry/suppression,
+readonly `:3000` service untouched. Local proof (Linux, real
+Chromium, owned temp harness): the 2 affected cases pass
+(`-g "citation drawer"`, 2/2, ~4s); `biome check` on the touched
+spec clean. New-head CI after push, head `5195fef`: push run
+`38717280204` success (e2e success, check ubuntu success, check
+windows success) and PR-event run `38717286888` success (e2e
+success, check ubuntu success, check windows success); zero review
+comments on PR31 at observation time.
+- HISTORICAL PR30 helper API (not the CURRENT normal-startup wiring):
+  Concrete host resolver (closed contract, trusted-code-only, default
+  OFF): `createCommittedGrantResolver` (connector-calendar, re-exported
+  by `rescheduleWriteBinding.ts` + `createCommittedGrantWriteBinding`
+  helper) keyed by execution/proposal/hash -> immutable
+  `expectedRevision` with real source-etag basis; unknown/mismatched/
+  hash-only/updated-only -> null (safe definite rejection, no dispatch).
+  Nothing auto-wires: the host passes the resolver explicitly with its
+  committed-grant store. Resolver answers are equality-checked against
+  `grant.expectedRevision`; a throwing resolver pre-dispatch stays a
+  safe definite failure (no dispatch happened). HISTORICAL scope ends here:
+  in this helper the host passes the resolver explicitly. CURRENT PR31
+  normal-startup composition instead auto-wires a concrete DB resolver —
+  the frozen write profile (`M5_RESCHEDULE_WRITE_PROFILE=google-reschedule`
+  + strict `M5_RESCHEDULE_CONNECTOR_JSON` hints) builds an inline
+  `resolveExpectedEtag` over `repo.readCommittedGrantRevision`
+  (`apps/server/src/bootstrap.ts`), equality-checked against the committed
+  grant; see "M5 reschedule hardening + wire-hash pin" and the normal-startup
+  write-profile proof above.
+- Verification (this worker, no live Google/OAuth/writes): fork
+  `npm run build` + `npm run lint` + `npm test` green; host units +
+  typecheck/lint + pipeline smoke re-run below. Fork commits pushed
+  ff-only on `feat/m5-reschedule-entrypoint-v2` (no merge, no force).
+
+## PR30 integration head (PR31 merged 2026-10-15, no product change)
+
+Merge `36b4b63` (parents `9c7ef78` + `b59c700`; PR31 head is an
+ancestor, verified via `merge-base --is-ancestor`). Fork pin unchanged:
+`feat/m5-reschedule-entrypoint-v2 @ 4f9c06d` (matches fork PR #3 head
+via `ls-remote`; no repin). Test-count reconciliation: `1335 + 21` (new file
+`rescheduleWriteStartup.test.ts`: 15 in `a77cd1e`, +6 in `b59c700`)
+= `1356` root green.
+Merged-head CI (exact head `36b4b63`): push run `38725542758`
+success (check ubuntu/windows + e2e) and PR-event run `38725549293`
+success (same jobs); fork CI run `38686976091` success on the exact
+fork pin (test pass, tool-analysis skipped). Zero review threads on
+host PR #30 and fork PR #3. Observed on the merged head (owned
+worktree, no live Google/OAuth/writes, user `:3000` untouched):
+`rescheduleWriteStartup.test.ts` 21/21 green,
+`rescheduleWriteProfile.test.ts` 5/5 green, throwaway production CLI
+normal startup (owned temp store, default profile unselected)
+`GET /health/live` 200 `{"status":"live"}` +
+`GET /health/ready` 200 `{"status":"ready"}` with no write child
+ spawned (only the tsx loader chain under the server pid).
+
+## PR30 repin to fork f196558 + review-thread fixes (2026-10-15)
+
+Fork PR #3 review fixes landed as `f196558e7d768effd969cf70ada2721d7d504b23`
+(tree `b50f74550a5269ec1af4e57c6d4cc03e76a9aebd`, lock digest unchanged
+`63261d25…533`); host write pin repinned from `4f9c06d` (hash unchanged).
+Fresh REAL-stdio wire probe (trusted TEST-ONLY runner bundle — same
+production provider + server factory, fixture credentials, loopback endpoint
+unused by tools/list; production CLI cannot launch without credentials):
+`reschedule-event` hash `9f59e35b…8609d7`, identical to the pin and the
+tracked fixture mirror (strict-date refines are runtime-only, wire unchanged).
+Focused host fixes for PR #30 threads `4282825244` (throwing grant resolver
+-> definite_failure pre-dispatch, 0 calls) and `4282825247` (frozen startup
+snapshot feeds the lazy write child via `startupEnvTransportFactory`).
+Proof after repin: profile 5/5 + wire-hash 2/2 + startup 22/22 + focused
+reschedule/stdio-env 18/18 = 47/47 green, biome clean; no live Google/OAuth,
+readonly `:3000` untouched, `.m5-integration-review/` worktree preserved.

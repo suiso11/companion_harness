@@ -35,6 +35,25 @@ export {
   searchEventsPageSchema,
 } from "./normalize.js";
 export {
+  CALENDAR_RESCHEDULE_TOOL,
+  type CreateRescheduleWritePortOptions,
+  createCommittedGrantResolver,
+  createRescheduleWritePort,
+  isSourceEtagBasis,
+  RESCHEDULE_WRITE_MCP_NAME,
+  RESCHEDULE_WRITE_MCP_VERSION,
+  RESCHEDULE_WRITE_TOOL,
+  RESCHEDULE_WRITE_WIRE_HASH,
+  type RescheduleWriteCaller,
+  RescheduleWriteMcpInputSchema,
+  type RescheduleWriteOutcome,
+  RescheduleWriteOutcomePayloadSchema,
+  type RescheduleWritePort,
+  type RescheduleWriteRequest,
+  type RescheduleWriteTarget,
+  type ResolveExpectedEtag,
+} from "./rescheduleWrite.js";
+export {
   type CalendarSearchInput,
   type CalendarSearchRequest,
   type CalendarSelection,

@@ -13,3 +13,9 @@ backups/
 .DS_Store
 Thumbs.db
 .pi/
+# M5 fork-derived checkout (foreign repo; review via fork PR #3, not here).
+# Fully ignored so Harness git/biome/test never depend on it; explicit
+# real-fork tests opt in via M5_RESCHEDULE_FORK_CLI. Superseded standalone
+# scaffold `.m5-write-fork` was removed (remote orphan branch retained for
+# reference, never deleted).
+.m5-write-fork-derived/
