@@ -34,7 +34,7 @@ function baseRequest() {
     start: START,
     end: END,
     stableEventId: STABLE,
-    target: { calendarId: "primary" },
+    calendarId: "primary",
   };
 }
 
@@ -63,10 +63,10 @@ describe("create write port (M6)", () => {
         .sort()
         .filter((k) => k !== "account" || "account" in args),
     );
-    expect(args["id"]).toBe(STABLE);
-    expect(args["summary"]).toBe(TITLE);
-    expect(args["start"]).toBe(START);
-    expect(args["end"]).toBe(END);
+    expect(args.id).toBe(STABLE);
+    expect(args.summary).toBe(TITLE);
+    expect(args.start).toBe(START);
+    expect(args.end).toBe(END);
     expect("description" in args).toBe(false);
     expect("attendees" in args).toBe(false);
     expect("recurrence" in args).toBe(false);

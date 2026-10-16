@@ -195,6 +195,19 @@ export interface CreateAppDeps {
    */
   actionsEnabled?: boolean;
   /**
+   * M6: true only when the explicit create gate is open (config opt-in +
+   * writeEnabled + createEnabled + a dedicated trusted create binding on
+   * the active Calendar instance). While BOTH this and actionsEnabled are
+   * false, APPROVE is refused before any state change. When either is
+   * true the approval reaches the repository, where the per-tool kernel
+   * gates (writeEnabled for reschedule, writeEnabled + createEnabled for
+   * calendar.create) and the per-tool strategy bindings enforce the exact
+   * surface: a valid create approves in create-only mode, a reschedule
+   * without its trusted binding still fails closed. Default false (fail
+   * closed).
+   */
+  createEnabled?: boolean;
+  /**
    * Explicit memory management service (server-owned). Null (default)
    * preserves the existing memory-disabled behavior: every
    * `/memory/*` route answers 404 without touching the repository.
@@ -599,6 +612,7 @@ function mapDomainError(c: Context, error: unknown): Response {
 export function createApp(deps: CreateAppDeps): CreatedServerApp {
   const { config, repo, engine } = deps;
   const actionsEnabled = deps.actionsEnabled === true;
+  const createEnabled = deps.createEnabled === true;
   const memory = deps.memory ?? null;
   const logger = deps.logger ?? createStdServerLogger(config.logLevel);
   const now = deps.now ?? Date.now;
@@ -1053,9 +1067,12 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         return validationError(c);
       }
       // C21 disabled composition: refuse BEFORE any repository call, so no
-      // proposal can be approved into a queued Action Run while the M5 write
-      // surface is gated off. Fixed 409 code, no ids or content in the body.
-      if (actionsEnabled !== true) {
+      // proposal can be approved into a queued Action Run while BOTH the M5
+      // write surface and the M6 create surface are gated off. Fixed 409
+      // code, no ids or content in the body. When either surface is
+      // enabled the approval reaches the repository, where the per-tool
+      // kernel gates and strategy bindings enforce the exact surface.
+      if (actionsEnabled !== true && createEnabled !== true) {
         return c.json(
           {
             error: {

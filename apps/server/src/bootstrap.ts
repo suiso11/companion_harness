@@ -1078,7 +1078,7 @@ export async function startServer(
             ? calendarConfig.selection
             : calendarBinding?.selection;
         assertCreateWriteAccountCompatible(
-          frozenStartupEnv.M6_CREATE_ACCOUNT,
+          frozenStartupEnv.M5_RESCHEDULE_ACCOUNT,
           createSelection?.account,
         );
         assertCreateWriteReadonlyPathVisible(
@@ -1468,10 +1468,24 @@ export async function startServer(
       }
     }
     let actionsEnabled = false;
+    // M6 create-only normal start: a genuinely configured create path (the
+    // selected host-owned create profile, validated above, or an injected
+    // create binding together with the explicit config triple) satisfies
+    // the write opt-in WITHOUT a separate reschedule binding. A bare
+    // createEnabled flag with no usable binding is not intent and keeps the
+    // old fail-closed behavior below; reschedule-only compositions without
+    // any create intent are unchanged.
+    const createIntent =
+      createProfile !== null ||
+      (config.actions.optIn === true &&
+        config.actions.writeEnabled === true &&
+        config.actions.createEnabled === true &&
+        (options.actionCreateBinding ?? null) !== null);
     if (
       actionConfigEnabled &&
       actionWritePort === null &&
-      writeProfile === null
+      writeProfile === null &&
+      !createIntent
     ) {
       // Config opted in without a usable write binding (absent binding, or
       // a binding supplying both/neither of port/derivePort): an incomplete
@@ -1949,8 +1963,12 @@ export async function startServer(
     // read port derived from the ACTIVE Calendar read binding + durable
     // private target store, the injected dedicated write port, and the
     // durable private target resolver. No model path, no placeholder port.
-    // Registered ONLY when the triple gate opened above, so an approval can
-    // never queue a Run with no strategy behind it.
+    // Registered when the reschedule triple gate opened above OR when the
+    // M6 create gate opened (create-only normal start has no reschedule
+    // binding: reschedule runs then fail closed through the real
+    // preflight-failure terminal while create runs take the dedicated
+    // flow), so an approval can never queue a Run with no strategy behind
+    // it.
     const activeActionBindings =
       actionsEnabled &&
       actionWritePort !== null &&
@@ -1962,11 +1980,43 @@ export async function startServer(
             targetStore: calendarTargetStore,
           }
         : null;
-    if (activeActionBindings !== null) {
-      const { port, targetStore } = activeActionBindings;
+    // M6 create seams: live ONLY when the explicit create gate opened
+    // above (config triple + trusted create binding on the active
+    // instance). The authoritative create read-back is a GET by the
+    // stable insert id through the ACTIVE read binding (never a POST
+    // fallback, never a resend); the selection is the host-owned active
+    // calendar/account (never model input). Reschedule-only compositions
+    // pass no create seams and create runs fail closed.
+    const activeCreateSelection =
+      calendarConfig !== null
+        ? calendarConfig.selection
+        : calendarBinding?.selection;
+    const activeCreateBindings =
+      createEnabled &&
+      actionCreatePort !== null &&
+      activeCreateSelection !== undefined &&
+      kernelCalendarBinding !== undefined &&
+      calendarTargetStore !== undefined
+        ? {
+            createPort: actionCreatePort,
+            selection: {
+              calendarId: activeCreateSelection.calendarId,
+              ...(activeCreateSelection.account !== undefined
+                ? { account: activeCreateSelection.account }
+                : {}),
+            },
+          }
+        : null;
+    if (
+      (activeActionBindings !== null || activeCreateBindings !== null) &&
+      kernelCalendarBinding !== undefined &&
+      calendarTargetStore !== undefined
+    ) {
+      const activeBinding = kernelCalendarBinding;
+      const targetStore = calendarTargetStore;
       const readPort = createCalendarActionReadPort({
         db: handle.raw,
-        binding: activeActionBindings.binding.connector,
+        binding: activeBinding.connector,
         targetStore,
         now,
       });
@@ -1977,31 +2027,6 @@ export async function startServer(
         targetStore,
         clock: now,
       });
-      // M6 create seams: live ONLY when the explicit create gate opened
-      // above (config triple + trusted create binding on the active
-      // instance). The authoritative create read-back is a GET by the
-      // stable insert id through the ACTIVE read binding (never a POST
-      // fallback, never a resend); the selection is the host-owned active
-      // calendar/account (never model input). Reschedule-only compositions
-      // pass no create seams and create runs fail closed.
-      const activeCreateSelection =
-        calendarConfig !== null
-          ? calendarConfig.selection
-          : calendarBinding?.selection;
-      const activeCreateBindings =
-        createEnabled &&
-        actionCreatePort !== null &&
-        activeCreateSelection !== undefined
-          ? {
-              createPort: actionCreatePort,
-              selection: {
-                calendarId: activeCreateSelection.calendarId,
-                ...(activeCreateSelection.account !== undefined
-                  ? { account: activeCreateSelection.account }
-                  : {}),
-              },
-            }
-          : null;
       const createRead: ActionCreateReadPort | undefined =
         activeCreateBindings === null
           ? undefined
@@ -2012,15 +2037,15 @@ export async function startServer(
                 }
                 if (
                   request.connectorInstanceId !==
-                  activeActionBindings.binding.connectorInstanceId
+                  activeBinding.connectorInstanceId
                 ) {
                   return { status: "schema_invalid" };
                 }
                 let getResult: Awaited<
-                  ReturnType<typeof activeActionBindings.binding.connector.get>
+                  ReturnType<typeof activeBinding.connector.get>
                 >;
                 try {
-                  getResult = await activeActionBindings.binding.connector.get(
+                  getResult = await activeBinding.connector.get(
                     {
                       calendarId: request.calendarId,
                       eventId: request.stableEventId,
@@ -2046,15 +2071,14 @@ export async function startServer(
                 }
                 const observation = toCalendarObservation(
                   getResult.event,
-                  activeActionBindings.binding.connectorInstanceId,
+                  activeBinding.connectorInstanceId,
                   now(),
                 );
                 const title = observation.title;
                 return {
                   status: "ok",
                   observation: {
-                    connectorInstanceId:
-                      activeActionBindings.binding.connectorInstanceId,
+                    connectorInstanceId: activeBinding.connectorInstanceId,
                     resourceCanonicalKey: getResult.event.canonicalKey,
                     title: title === null ? null : title.slice(0, 128),
                     text: observation.text.normalize("NFC"),
@@ -2071,11 +2095,15 @@ export async function startServer(
           db: handle.raw,
           service: actionService,
           preflightRead: readPort,
-          writePort: port,
-          resolveTarget: createCalendarActionTargetResolver({
-            db: handle.raw,
-            targetStore,
-          }),
+          ...(activeActionBindings !== null
+            ? {
+                writePort: activeActionBindings.port,
+                resolveTarget: createCalendarActionTargetResolver({
+                  db: handle.raw,
+                  targetStore,
+                }),
+              }
+            : {}),
           ...(activeCreateBindings !== null && createRead !== undefined
             ? {
                 createWritePort: activeCreateBindings.createPort,
@@ -2114,6 +2142,7 @@ export async function startServer(
       now,
       assets: loadUiAssets(),
       actionsEnabled,
+      createEnabled,
       ...(memory !== null ? { memory } : {}),
     });
     const activeEngine = engine;

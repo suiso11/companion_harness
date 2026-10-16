@@ -6,25 +6,33 @@
 // tool `create-event` ONLY). It is SEPARATE from the readonly profile AND
 // the reschedule profile: the readonly surface keeps zero write tools, the
 // reschedule binding is unchanged, and this module never enters the read
-// allowlist.
+// allowlist. The create child authorizes from the SHARED persisted write
+// grant (SAME `M5_RESCHEDULE_*` namespace + grant file + OAuth client as
+// reschedule — scope-identical, no separate `M6_CREATE_*` credential
+// namespace), so enabling create never provisions a second credential.
 //
 // Candidate provenance: DEDICATED fork `src/create/*` (schema/server/
 // google provider/cli) + `build/create-cli.js`, tool `create-event` ONLY,
-// scope ONLY https://www.googleapis.com/auth/calendar.events, separate
-// `M6_CREATE_*` credential namespace (readonly/reschedule tokens never
-// reused). Wire hash + source commit/tree/lock are finalized AFTER the fork
-// code lands; the immutable pin is recorded in
+// scope ONLY https://www.googleapis.com/auth/calendar.events, SHARED
+// persisted write-grant runtime (the SAME `M5_RESCHEDULE_*` credential
+// namespace + per-account grant file + existing OAuth client registration
+// as reschedule — scope-identical, no `M6_CREATE_*` credential namespace;
+// readonly/reschedule tokens never reused across surfaces). Wire hash +
+// source commit/tree/lock are finalized AFTER the fork code lands; the
+// immutable pin is recorded in
 // `.m6-calendar-create-proof/PROGRESS.log` BEFORE the host commit. Until the
 // finalized hash is pinned, production composition fails closed (a selected
 // profile without a finalized pin is an incomplete opt-in, never a silent
 // disable).
 //
 // Launch entry: <fork>/build/create-cli.js (separate stdio process).
-// Write runtime auth reuses the M5 persisted-grant loader namespace
-// explicitly (`M6_CREATE_*` client/account/path), never the readonly grant.
-// The RECOMMENDED child allowlist is file-only: client file path, create
-// token file path, account selector, and the readonly token path name (for
-// the fork's resolved collision guard) plus mandatory SDK inherited names.
+// Write runtime auth reuses the M5 persisted-grant loader explicitly
+// (`M5_RESCHEDULE_ACCOUNT` selector, `M5_RESCHEDULE_WRITE_TOKEN_PATH`
+// grant file, `GOOGLE_OAUTH_CREDENTIALS` client file), never the readonly
+// grant and never manual env secret copies. The RECOMMENDED child
+// allowlist is file-only: client file path, write token file path,
+// account selector, and the readonly token path name (for the fork's
+// resolved collision guard) plus mandatory SDK inherited names.
 // `M6_CREATE_TEST_*` names stay rejected: the production CLI ignores test
 // endpoint overrides and always uses the immutable Google host.
 
@@ -48,7 +56,8 @@ export const CREATE_WRITE_TOOL_NAME = "create-event" as const;
  *
  * Probed over REAL stdio tools/list against the shipped production CLI
  * (`build/create-cli.js`, fork commit 1a53cde; test-only consumer-edge
- * addition at 8dc4cdf leaves the input schema unchanged) with fixture credentials
+ * addition at 8dc4cdf and shared-grant runtime at ecc8f29 leave the input
+ * schema unchanged) with fixture credentials
  * (loopback endpoint unused by tools/list): exactly 1 tool, strict schema
  * ($schema + additionalProperties:false).
  */
@@ -60,8 +69,8 @@ export const CREATE_WRITE_FORK = Object.freeze({
   repo: "https://github.com/suiso11/google-calendar-mcp",
   branch: "feat/m6-calendar-create",
   baseCommit: "cefb63c24f062ef6a49889d7b635330dee884f63",
-  sourceCommit: "8dc4cdf7b439c1685f16e64d32350cd5dba7c640",
-  sourceTree: "c9584f2f9e809b94cb7c3a6658662e68a36d0b8f",
+  sourceCommit: "ecc8f29be79630ff9acfd5166abfa62caa5492f8",
+  sourceTree: "7f63a048b2c857924a0cb90fb24cfdb742cd55ef",
   package: "@cocal/google-calendar-mcp",
   packageVersion: "3.0.0-readonly.2",
   lockDigestSha256:
@@ -97,9 +106,10 @@ export const CREATE_WRITE_PROFILE_NAME = "google-create" as const;
 
 /**
  * Pinned fork account grammar for the configured create selector
- * (`M6_CREATE_ACCOUNT`, fork `validateAccountId`): lowercase ASCII
- * `[a-z0-9_-]{1,64}` — never a display name or email. Reserved device names
- * refused exactly like the provider. Case-sensitive, no normalization.
+ * (SHARED `M5_RESCHEDULE_ACCOUNT`, fork `validateAccountId`): lowercase
+ * ASCII `[a-z0-9_-]{1,64}` — never a display name or email. Reserved
+ * device names refused exactly like the provider. Case-sensitive, no
+ * normalization.
  */
 export const CREATE_WRITE_ACCOUNT_PATTERN = /^[a-z0-9_-]{1,64}$/;
 const CREATE_WRITE_RESERVED_ACCOUNTS: ReadonlySet<string> = new Set([
@@ -117,6 +127,21 @@ const CREATE_WRITE_RESERVED_ACCOUNTS: ReadonlySet<string> = new Set([
   "lpt2",
   "lpt3",
 ]);
+
+/**
+ * Reused SHARED write-grant wiring names (SAME namespace + grant file +
+ * OAuth client as the reschedule profile — scope-identical, no separate
+ * `M6_CREATE_*` credential namespace). The create child allowlist carries
+ * these file-path/selector names (never secret VALUES, so no manual env
+ * secret copy is ever needed):
+ * - `GOOGLE_OAUTH_CREDENTIALS`: existing OAuth client file path;
+ * - `M5_RESCHEDULE_WRITE_TOKEN_PATH`: persisted-grant file path;
+ * - `M5_RESCHEDULE_ACCOUNT`: exact account selector.
+ */
+export const CREATE_WRITE_CLIENT_ENV = "GOOGLE_OAUTH_CREDENTIALS" as const;
+export const CREATE_WRITE_TOKEN_PATH_ENV =
+  "M5_RESCHEDULE_WRITE_TOKEN_PATH" as const;
+export const CREATE_WRITE_ACCOUNT_ENV = "M5_RESCHEDULE_ACCOUNT" as const;
 
 /**
  * Env name carrying the custom readonly token path (same collision-guard

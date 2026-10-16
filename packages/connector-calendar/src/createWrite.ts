@@ -147,7 +147,13 @@ export interface CreateWriteTarget {
   readonly account?: string;
 }
 
-/** Structural request (mirrors the kernel `CalendarCreateWriteRequest`). */
+/**
+ * Structural request (EXACT kernel `CalendarCreateWriteRequest` shape: the
+ * kernel owns that type and this package never imports `@companion/kernel`
+ * to keep the M4 dependency direction intact — calendar/account selection
+ * is TOP-LEVEL, never a nested `target`). A nested `target` from any caller
+ * is a contract violation and fails closed below (never dispatched).
+ */
 export interface CreateWriteRequest {
   readonly grant: {
     readonly executionId: string;
@@ -165,7 +171,9 @@ export interface CreateWriteRequest {
   readonly end: string;
   /** Stable insert id derived from the immutable execution id. */
   readonly stableEventId: string;
-  readonly target: CreateWriteTarget;
+  /** Host-owned calendar/account selection, TOP-LEVEL (kernel shape). */
+  readonly calendarId: string;
+  readonly account?: string | undefined;
   readonly signal?: AbortSignal | undefined;
 }
 
@@ -220,12 +228,24 @@ export function createCreateWritePort(
     signal?: AbortSignal,
   ): Promise<CreateWriteOutcome> {
     // Exact binding: grant-bound tool + instance must match the capability,
-    // and create grants never carry an expected revision.
+    // and create grants never carry an expected revision. The selection is
+    // the kernel's TOP-LEVEL calendarId/account (a nested `target` object is
+    // a contract violation and fails closed with zero calls).
+    const selection =
+      typeof request.calendarId === "string" && request.calendarId.length > 0
+        ? {
+            calendarId: request.calendarId,
+            ...(request.account !== undefined
+              ? { account: request.account }
+              : {}),
+          }
+        : null;
     if (
       request.tool !== CALENDAR_CREATE_TOOL ||
       request.connectorInstanceId !== options.connectorInstanceId ||
       request.grant.tool !== CALENDAR_CREATE_TOOL ||
-      request.grant.expectedRevision !== null
+      request.grant.expectedRevision !== null ||
+      selection === null
     ) {
       return { status: "definite_failure" };
     }
@@ -236,10 +256,7 @@ export function createCreateWritePort(
       return { status: "definite_failure" };
     }
     const args = CreateWriteMcpInputSchema.safeParse({
-      calendarId: request.target.calendarId,
-      ...(request.target.account !== undefined
-        ? { account: request.target.account }
-        : {}),
+      ...selection,
       id: request.stableEventId,
       summary: request.title,
       start: request.start,

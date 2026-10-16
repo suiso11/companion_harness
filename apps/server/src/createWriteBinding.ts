@@ -20,9 +20,11 @@
 //   id (32 lowercase hex, never model input); one consumed grant performs
 //   exactly one insert with it. A 409/already-exists is a definite failure
 //   with NO overwrite, NO retry, NO resend.
-// - Separate credential/token namespace: only `M6_CREATE_*` credentials may
-//   back the dedicated caller; readonly/reschedule tokens are never reused.
-//   No OAuth flow is invoked here and no scope is broadened at runtime.
+// - Shared persisted write-grant namespace: the dedicated caller
+//   authorizes from the SAME `M5_RESCHEDULE_*` grant file + account +
+//   OAuth client as reschedule (scope-identical, no separate `M6_CREATE_*`
+//   credential namespace); readonly tokens are never reused. No OAuth
+//   flow is invoked here and no scope is broadened at runtime.
 // - All defaults disabled: merely importing this module enables nothing.
 //   The port becomes live only when the host passes it as
 //   `actionCreateBinding` AND `config.actions.optIn` + `writeEnabled` +
