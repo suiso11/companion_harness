@@ -120,6 +120,7 @@ export {
   projectPrompt,
   renderAnswerText,
   sanitizeModelFacingForFeedback,
+  selectProjectedMemorySnippets,
   translateReferenceArgs,
   trimConversationToCap,
   verifyCitations,

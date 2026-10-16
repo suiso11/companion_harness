@@ -289,7 +289,10 @@ connector instance owns **all** configured roots.
    Limits: synthetic gateway only
    (no real-model result), foreground/shutdown preemption edges remain
    covered by `memory_service.test.ts` unit regressions; Windows manual
-   smoke remains open.
+   smoke remains open. Re-verified 2026-10-16 on the baseline branch with
+   the pinned `.ci/remind` CLI: 1/1 passed (~16s); baseline-worktree full
+   suite 112 files / 1362 tests green, `tsc --noEmit` exit 0,
+   `biome check .` clean.
 - Explicit management (search / correct / retire / reactivate),
   2026-10-15 (local, temp stores only): `POST .../memory/search` is
   explicit user-directed only and returns opaque session-scoped `mN`
@@ -342,6 +345,26 @@ connector instance owns **all** configured roots.
 - Not implemented (unchanged): memory perception, user export, and
   memory/session deletion APIs. There is no per-session memory
   delete/export endpoint.
+- Shutdown/job bounds (verified 2026-10-16 on the baseline branch;
+  baseline-worktree evidence: live real-CLI regression 1/1, full suite
+  112 files / 1362 tests green, `tsc --noEmit` exit 0, `biome check .`
+  clean):
+  `memory.stop()` runs FIRST on every teardown path (graceful shutdown,
+  listen-failure catch, outer startup-failure catch) — idle timer
+  cancelled, then every active drain tick's own `AbortController` aborted
+  (recovery, foreground, and idle ticks alike) and the in-flight tick
+  awaited, so no CLI child outlives a rejected startup or touches the
+  repo/DB after close. Each drain tick executes at most
+  `MEMORY_DRAIN_BATCH = 5` jobs TOTAL (claim bound shrinks with the
+  remaining budget; follow-up chains continue on a later drain). CLI stdin
+  failures (EPIPE/write) kill and settle only at the `close` reap, never
+  overlapping a retry with a live child. Deterministic regression:
+  `bootstrap.test.ts` "stops memory before DB close when listen fails on
+  an occupied port" defers the REAL `EADDRINUSE` bind (test-only
+  `net.Server.listen` wrapper, no production hook) until the recovery
+  child observably started, then asserts the rejection reaped it
+  (`kill(pid, 0)` throws), signal counts restored, DB reopens, and a free
+  port retry succeeds.
 
 ### MCP library wire identity (C09; not server-enabled)
 
@@ -949,6 +972,12 @@ or complete activate config):
   stdio bounds (config `shutdownWaitMs` + fixed force-kill window). The
   listener-failure and generic startup-failure paths stop the owned
   connector best-effort as well (engine ⇒ connector ⇒ DB close order).
+  With conversation memory configured, BOTH failure paths additionally
+  stop the memory service FIRST (CLI children reaped and tick awaited
+  before the engine drain and DB close); a rejected startup never leaves
+  its crash-recovery CLI/timer alive. Verified 2026-10-16: full suite
+  112 files / 1362 tests green including the deterministic occupied-port
+  memory-cleanup regression (see "Conversation memory").
 - Fake E2E seam inventory (exact API used by C15): `startServer({
   env: { ..., COMPANION_CALENDAR_JSON }, mcpDefinitions: readonly
   McpBindingDefinition[], mcpTransportFactory?: TransportFactory,

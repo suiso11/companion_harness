@@ -287,6 +287,8 @@ export async function callMemoryCli(
     let child: ReturnType<typeof spawn>;
     let timedOut = false;
     let abortFired = false;
+    /** Recorded stdin failure (EPIPE/write): kill requested, settle on close. */
+    let stdinFailure: MemoryCliFailureCode | null = null;
     try {
       // No shell, no lookup, exact argv: [entry, --config, config].
       child = spawn(
@@ -364,8 +366,10 @@ export async function callMemoryCli(
       if (timedOut || abortFired) {
         return;
       }
+      // Record only: settlement waits for the `close` reap below, so the
+      // caller never finishes (and never overlaps a retry) while the child
+      // lifetime is unresolved. The armed timeout below stays the backstop.
       spawnFailed = true;
-      settleFail("cli_unavailable");
     });
     child.stdout?.on("data", (chunk: Buffer) => {
       const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
@@ -390,13 +394,23 @@ export async function callMemoryCli(
       }
     });
     child.on("close", (code) => {
-      if (spawnFailed) {
-        return;
-      }
       // Deadline/abort always settle as timeout AFTER the reap, so the next
       // drain cannot overlap a killed-but-running previous child.
       if (timedOut || abortFired || signal?.aborted === true) {
         settleFail("cli_timeout");
+        return;
+      }
+      if (spawnFailed) {
+        // The process never existed (or died before stdio): no stdout can
+        // be trusted, and the close reap above proves no child survives.
+        settleFail("cli_unavailable");
+        return;
+      }
+      if (stdinFailure !== null) {
+        // The request never reached the child (EPIPE/write failure): the
+        // kill was requested at record time and this close reap proves the
+        // child lifetime ended before settling (no orphan overlaps retry).
+        settleFail(stdinFailure);
         return;
       }
       if (stdoutOver) {
@@ -419,23 +433,31 @@ export async function callMemoryCli(
     });
     // Async stdin failures (EPIPE when the child exits early) never throw
     // synchronously: observe them explicitly instead of only try/catch.
+    // Record the failure and request termination; settlement waits for the
+    // `close` reap (like the timeout/abort paths), while the still-armed
+    // timeout above stays the backstop if the reap never arrives.
     child.stdin?.on("error", () => {
-      if (timedOut || abortFired) {
+      if (timedOut || abortFired || stdinFailure !== null) {
         return;
       }
+      stdinFailure = "cli_unavailable";
       try {
         child.kill("SIGKILL");
       } catch {
         // Best effort: close still settles.
       }
-      settleFail("cli_unavailable");
     });
     try {
       child.stdin?.write(line, "utf8");
       child.stdin?.end();
     } catch {
-      if (!timedOut && !abortFired) {
-        settleFail("cli_unavailable");
+      if (!timedOut && !abortFired && stdinFailure === null) {
+        stdinFailure = "cli_unavailable";
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // Best effort: close still settles.
+        }
       }
     }
   });

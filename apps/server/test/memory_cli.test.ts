@@ -5,7 +5,7 @@
 // stdout validation, byte caps, timeout kill, and abort behavior. Temp
 // scripts live under an owned TMPDIR and are removed afterwards.
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -320,6 +320,71 @@ describe("memory CLI client", () => {
       undefined,
     );
     expect(envelope.ok).toBe(true);
+  });
+
+  it("settles an EPIPE stdin failure only after the child close (no orphan)", async () => {
+    // Actual child lifetime proof: the real stub records its pid, destroys
+    // stdin, then exits promptly. The test blocks the loop so the child is
+    // fully gone (read end closed) before the queued parent write flushes,
+    // making EPIPE deterministic: a small write to a sleeping child with a
+    // merely-destroyed stdin still fits the pipe buffer and never errors.
+    // Settlement must observe the close reap: when the call rejects, the
+    // child is already reaped (kill(pid, 0) throws) instead of merely
+    // signalled-but-alive.
+    const dir = tempDir();
+    const pidFile = join(dir, "child.pid");
+    const entry = writeScript(
+      dir,
+      "epipe.mjs",
+      `import fs from "node:fs";
+fs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
+process.stdin.destroy();
+setTimeout(() => process.exit(3), 100);`,
+    );
+    const pending = callMemoryCli(
+      addressOf(entry, { timeoutMs: 10000 }),
+      "record.recall",
+      { query: "q" },
+      undefined,
+    );
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
+    await expect(pending).rejects.toMatchObject({
+      cliCode: "cli_unavailable",
+    });
+    const pid = Number(readFileSync(pidFile, "utf-8"));
+    expect(Number.isInteger(pid) && pid > 0).toBe(true);
+    // Reaped, not orphaned: settling before the close reap would leave the
+    // sleeping child alive here.
+    expect(() => process.kill(pid, 0)).toThrow();
+    // The reaped stdio accepts a fresh call (no orphan held).
+    const okEntry = writeScript(dir, "ok.mjs", ENVELOPE_SCRIPT);
+    const envelope = await callMemoryCli(
+      addressOf(okEntry),
+      "record.recall",
+      { query: "q" },
+      undefined,
+    );
+    expect(envelope.ok).toBe(true);
+  });
+
+  it("settles a spawn failure after the close reap (never hangs)", async () => {
+    // Nonexistent executable: the `error` event records the failure and the
+    // `close` reap settles it (the process never existed, so no orphan can
+    // survive; the call still rejects instead of hanging).
+    await expect(
+      callMemoryCli(
+        {
+          executable: "/nonexistent-companion-memory-cli",
+          entry: "/cli.js",
+          config: join(tempDir(), "memory.config.json"),
+          timeoutMs: 5000,
+          maxResponseBytes: 65536,
+        },
+        "record.recall",
+        { query: "q" },
+        undefined,
+      ),
+    ).rejects.toMatchObject({ cliCode: "cli_unavailable" });
   });
 });
 

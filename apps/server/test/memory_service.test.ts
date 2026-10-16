@@ -1053,3 +1053,168 @@ describe("foreground preemption and shutdown", () => {
     }
   });
 });
+
+describe("baseline regression contracts", () => {
+  function rememberJob(i: number): {
+    kind: "record.remember";
+    requestJson: string;
+    key: string;
+  } {
+    return {
+      kind: "record.remember",
+      requestJson: JSON.stringify({
+        op: "record.remember",
+        params: { body: `fact ${i}`, kind: "user_fact" },
+      }),
+      key: stableMemoryJobKey("batch-bound", i),
+    };
+  }
+
+  it("executes at most 5 jobs per drain tick and continues on the next tick", async () => {
+    const f = await openRepo();
+    try {
+      const cliCall: CliCall = async () => okEnvelope(null);
+      const service = makeService(f.repo, cliCall);
+      const sessionId = generateId();
+      const runId = generateId();
+      for (let i = 0; i < 7; i += 1) {
+        const job = rememberJob(i);
+        f.repo.enqueueMemoryJob(
+          job.kind,
+          sessionId,
+          runId,
+          SCOPE,
+          job.key,
+          job.requestJson,
+          { now: T0 },
+        );
+      }
+      const first = await service.drainOnce();
+      expect(first.executed).toBe(5);
+      // The remainder (including any follow-up chain) stays pending for a
+      // later scheduled drain instead of stranding behind an over-wide tick.
+      expect(f.repo.countPendingMemoryJobs(Date.now())).toBe(2);
+      const second = await service.drainOnce();
+      expect(second.executed).toBe(2);
+      expect(f.repo.countPendingMemoryJobs(Date.now())).toBe(0);
+    } finally {
+      f.close();
+    }
+  });
+
+  it("stop aborts an in-flight foreground drain tick with no loss", async () => {
+    const f = await openRepo();
+    try {
+      let entered = false;
+      const cliCall: CliCall = async (_address, _op, _params, _key, options) =>
+        new Promise<MemoryCliEnvelope>((_resolve, reject) => {
+          entered = true;
+          const signal = options?.signal;
+          if (signal?.aborted === true) {
+            reject(new MemoryCliError("cli_timeout"));
+            return;
+          }
+          signal?.addEventListener(
+            "abort",
+            () => reject(new MemoryCliError("cli_timeout")),
+            { once: true },
+          );
+        });
+      const service = makeService(f.repo, cliCall);
+      const { row } = f.repo.enqueueMemoryJob(
+        "record.remember",
+        generateId(),
+        generateId(),
+        SCOPE,
+        stableMemoryJobKey("foreground-stop", generateId()),
+        JSON.stringify({ op: "record.remember", params: {} }),
+        { now: T0 },
+      );
+      // Foreground (caller-driven, non-idle) tick: stop must abort it even
+      // though no idle controller owns it.
+      const pending = service.drainOnce();
+      await waitFor(() => entered);
+      await service.stop();
+      await pending;
+      const job = f.repo.getMemoryJob(row.id);
+      expect(job?.status).toBe("pending");
+      expect(job?.lastError).toBe("cli_preempted");
+    } finally {
+      f.close();
+    }
+  });
+
+  it("idle drains startup backlog with no completed run yet", async () => {
+    const f = await openRepo();
+    try {
+      const ops: string[] = [];
+      const cliCall: CliCall = async (_address, op) => {
+        ops.push(op);
+        return okEnvelope(null);
+      };
+      const service = makeService(f.repo, cliCall, { idleMs: 50 });
+      service.start();
+      // Let the startup recovery tick finish empty, so only the idle path
+      // can drain what follows (no run has completed: no distill anchor).
+      await sleep(120);
+      const job = rememberJob(0);
+      f.repo.enqueueMemoryJob(
+        job.kind,
+        generateId(),
+        generateId(),
+        SCOPE,
+        job.key,
+        job.requestJson,
+        { now: T0 },
+      );
+      await waitFor(() => ops.includes("record.remember"), 5000);
+      expect(f.repo.countPendingMemoryJobs(Date.now())).toBe(0);
+    } finally {
+      f.close();
+    }
+  });
+
+  it("idle retries a due distill after transient failure without another completion", async () => {
+    const f = await openRepo();
+    try {
+      let nowValue = T0;
+      let distillCalls = 0;
+      const cliCall: CliCall = async (_address, op) => {
+        if (op !== "maintain.distill") {
+          return okEnvelope(null);
+        }
+        distillCalls += 1;
+        if (distillCalls === 1) {
+          throw new MemoryCliError("cli_timeout");
+        }
+        return okEnvelope({ cursor: null });
+      };
+      const service = makeService(f.repo, cliCall, {
+        idleMs: 50,
+        now: () => nowValue,
+      });
+      service.start();
+      const run = completeV2Run(f.repo, [{ text: "answered", citations: [] }]);
+      service.onRunCompleted(run.runId);
+      // First distill attempt fails transiently: still pending with backoff.
+      await waitFor(() => distillCalls >= 1, 5000);
+      await waitFor(() => {
+        const rows = f.db
+          .prepare(
+            "SELECT status FROM memory_outbox WHERE kind = ? AND status = ?",
+          )
+          .all("maintain.distill", "pending") as Array<{ status: string }>;
+        return rows.length === 1;
+      }, 5000);
+      expect(distillCalls).toBe(1);
+      // The backoff (2s after the first attempt) expires with no further
+      // foreground completion: the idle tick retries the same pending
+      // distill on its own instead of rearming forever.
+      nowValue += 10_000;
+      await waitFor(() => distillCalls >= 2, 5000);
+      await waitFor(() => f.repo.countPendingMemoryJobs(nowValue) === 0, 5000);
+    } finally {
+      f.close();
+    }
+  });
+});
