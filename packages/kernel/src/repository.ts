@@ -2461,8 +2461,7 @@ export function createKernelRepository(
       );
     }
     return parseOrValidation(
-      () =>
-        ActionTargetCitationSchema.parse(`r${reference.ordinal}`),
+      () => ActionTargetCitationSchema.parse(`r${reference.ordinal}`),
       "proposal target citation",
     );
   }

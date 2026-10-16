@@ -241,7 +241,9 @@ function driveVerifiedSucceeded(fx: EvidenceFixture): void {
       },
       preflightRevision: "src@1",
       preflightSnapshotId: (
-        fx.handle.raw.prepare("SELECT id FROM resource_snapshots LIMIT 1").get() as {
+        fx.handle.raw
+          .prepare("SELECT id FROM resource_snapshots LIMIT 1")
+          .get() as {
           id: string;
         }
       ).id,
@@ -263,9 +265,9 @@ describe("action evidence navigation (original BEFORE label)", () => {
       expect(view.targetCitation).toBe("r1");
       // No rewrite: the durable proposal hash is byte-identical.
       const listed = fx.repo.listProposals(fx.sessionId);
-      expect(listed.proposals.find((p) => p.proposalId === fx.proposalId)?.hash).toBe(
-        fx.proposalHash,
-      );
+      expect(
+        listed.proposals.find((p) => p.proposalId === fx.proposalId)?.hash,
+      ).toBe(fx.proposalHash);
     } finally {
       fx.close();
     }
@@ -318,9 +320,9 @@ describe("action evidence navigation (original BEFORE label)", () => {
       expect(fx.service.startActionRun(fx.runId, { now: T0 + 4 }).applied).toBe(
         true,
       );
-      expect(fx.service.consumeActionGrant(fx.runId, { now: T0 + 5 }).granted).toBe(
-        true,
-      );
+      expect(
+        fx.service.consumeActionGrant(fx.runId, { now: T0 + 5 }).granted,
+      ).toBe(true);
       expect(
         fx.service.finishActionExecution(
           fx.runId,
@@ -343,9 +345,9 @@ describe("action evidence navigation (original BEFORE label)", () => {
       expect(fx.service.startActionRun(fx.runId, { now: T0 + 4 }).applied).toBe(
         true,
       );
-      expect(fx.service.consumeActionGrant(fx.runId, { now: T0 + 5 }).granted).toBe(
-        true,
-      );
+      expect(
+        fx.service.consumeActionGrant(fx.runId, { now: T0 + 5 }).granted,
+      ).toBe(true);
       expect(
         fx.service.finishActionExecution(
           fx.runId,
@@ -404,8 +406,7 @@ describe("action evidence navigation (original BEFORE label)", () => {
         answer?: { parts: Array<{ text: string; citations: string[] }> };
       } | null;
       expect(result?.version).toBe(2);
-      const after =
-        result?.answer?.parts.flatMap((p) => p.citations) ?? [];
+      const after = result?.answer?.parts.flatMap((p) => p.citations) ?? [];
       expect(after.length).toBe(1);
       expect(after[0]).toMatch(/^r[1-9][0-9]*$/);
       expect(after[0]).not.toBe("r1");

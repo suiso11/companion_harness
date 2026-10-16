@@ -135,8 +135,7 @@ describe("C22 action card model", () => {
     }
   });
 
-    it("parses the actual cancel run status for the stop-claim gate", () => {
-
+  it("parses the actual cancel run status for the stop-claim gate", () => {
     // ONLY a `cancelled` terminal may claim the stop; every other real
     // status (a live accept or a terminal race loss) must refresh instead.
     expect(

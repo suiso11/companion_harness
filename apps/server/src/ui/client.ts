@@ -1606,9 +1606,7 @@ class ConversationApp {
     if (view !== null && view !== undefined) {
       const cardEvidence = actionEvidenceButtons({
         targetCitation:
-          typeof view.targetCitation === "string"
-            ? view.targetCitation
-            : null,
+          typeof view.targetCitation === "string" ? view.targetCitation : null,
         outcome: null,
         result: null,
       });
