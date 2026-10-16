@@ -19,7 +19,8 @@
 //   old row (no rollback path exists to test),
 // - one pending spans both tools (cross-tool boundary),
 // - create read-back edges: wrong title -> succeeded_unverified with no
-//   new rN; wrong-resource key -> fail-closed rejection with no new rN.
+//   new rN; wrong-resource key -> succeeded_unverified with no new rN
+//   through the strategy (the direct terminal fail-closes with a throw).
 //
 // Direct SQL appears ONLY for old-schema v9 fixture INSERTs (valid rows the
 // old DDL accepts) and for row comparisons — never in production code.
@@ -40,10 +41,11 @@ import {
   createActionStrategy,
 } from "../src/action_strategy.js";
 import { calendarEventBodyText } from "../src/calendar_tools.js";
-import { generateId } from "../src/canonical.js";
+import { generateId, sha256Hex } from "../src/canonical.js";
 import { RepositoryValidationError } from "../src/errors.js";
 import {
   closeKernelDatabase,
+  createDurableCalendarTargetStore,
   createKernelRepository,
   createReferenceManager,
   migrateKernelDatabase,
@@ -344,7 +346,10 @@ function createPorts(
         status: "ok" as const,
         observation: {
           connectorInstanceId: connectorId,
-          resourceCanonicalKey: `calendar:${request.stableEventId}${"0".repeat(32)}`,
+          resourceCanonicalKey: expectedCreateKey(
+            connectorId,
+            request.stableEventId,
+          ),
           eventStatus: "confirmed" as const,
           title: observationTitle,
           text,
@@ -357,14 +362,30 @@ function createPorts(
   return { createWritePort, createRead };
 }
 
-function createObservationText(stableEventId: string, title: string): string {
+/**
+ * Authentic verified read-back identity under the existing
+ * normalization/hash convention: `calendar:` + SHA-256 hex of the JSON
+ * tuple [connectorInstanceId, calendarId, stableEventId] for the
+ * strategy's host-selected `cal1` calendar.
+ */
+function expectedCreateKey(connectorId: string, stableEventId: string): string {
+  return `calendar:${sha256Hex(
+    JSON.stringify([connectorId, "cal1", stableEventId]),
+  )}`;
+}
+
+function createObservationText(
+  connectorId: string,
+  stableEventId: string,
+  title: string,
+): string {
   return calendarEventBodyText({
-    canonicalKey: `calendar:${stableEventId}${"0".repeat(32)}`,
+    canonicalKey: expectedCreateKey(connectorId, stableEventId),
     status: "confirmed",
     title,
     start: CREATE_START,
     end: CREATE_END,
-    allDayEndExclusive: true,
+    allDayEndExclusive: false,
     sourceRevision: stableEventId,
     revisionBasis: "etag",
   });
@@ -397,6 +418,7 @@ async function driveCreate(
   const service = createActionExecutionService({
     db,
     referenceManager: createReferenceManager(db),
+    targetStore: createDurableCalendarTargetStore(db),
     preflightRead: noGetPort,
     clock: () => now,
   });
@@ -665,7 +687,8 @@ describe("M6 migration 0009 -> 0010 preserves reschedule and enables create", ()
         connectorId,
         cApproved.actionRunId,
         inserts,
-        (stableEventId) => createObservationText(stableEventId, CREATE_TITLE),
+        (stableEventId) =>
+          createObservationText(connectorId, stableEventId, CREATE_TITLE),
         T0 + 120,
       );
       expect(cView.receipt?.outcome).toBe("succeeded");
@@ -841,7 +864,7 @@ describe("M6 migration 0009 -> 0010 preserves reschedule and enables create", ()
         approved.actionRunId,
         inserts,
         (stableEventId) =>
-          createObservationText(stableEventId, "Drifted title"),
+          createObservationText(connector.id, stableEventId, "Drifted title"),
         T0 + 20,
         "Drifted title",
       );
@@ -902,8 +925,9 @@ describe("M6 migration 0009 -> 0010 preserves reschedule and enables create", ()
       );
       // Wrong-resource key: not the `calendar:<64hex>` derivation the
       // verified terminal binds to. Title AND bounds match on purpose so
-      // the strategy pre-verify passes and the verified terminal itself
-      // fail-closes on identity (the ground-truth rejection site).
+      // only the identity check fails: the strategy stays unverified with
+      // no materialization (the direct terminal fail-closes with a throw,
+      // covered in action_create_review_fixes.test.ts).
       const badRead = {
         read: async () => ({
           status: "ok" as const,
@@ -951,16 +975,14 @@ describe("M6 migration 0009 -> 0010 preserves reschedule and enables create", ()
           c: number;
         }
       ).c;
-      await expect(
-        strategy({
-          run: { id: approved.actionRunId },
-          signal: new AbortController().signal,
-        } as unknown as Parameters<typeof strategy>[0]),
-      ).rejects.toThrow(RepositoryValidationError);
-      // No receipt, no new reference, exactly one insert: the wrong
-      // resource never verifies.
+      await strategy({
+        run: { id: approved.actionRunId },
+        signal: new AbortController().signal,
+      } as unknown as Parameters<typeof strategy>[0]);
+      // Unverified receipt, no new reference, exactly one insert: the
+      // wrong resource never verifies and nothing materializes.
       const view = service.getActionRunView(approved.actionRunId);
-      expect(view.receipt).toBeNull();
+      expect(view.receipt?.outcome).toBe("succeeded_unverified");
       expect(inserts).toHaveLength(1);
       expect(
         (
