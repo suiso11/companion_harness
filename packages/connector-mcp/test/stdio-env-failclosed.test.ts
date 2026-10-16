@@ -225,8 +225,8 @@ describe("fail-closed stdio env allowlist", () => {
   });
 
   it("resolves Windows env casing to the single canonical inherited name", () => {
-    // `process.platform` is configurable in this runtime: stub win32, prove
-    // the case-insensitive freeze, then restore (finally, no leaks).
+    // `process.platform` is configurable in this runtime: stub posix then
+    // win32, prove each freeze branch, then restore (finally, no leaks).
     const descriptor = Object.getOwnPropertyDescriptor(
       process,
       "platform",
@@ -237,10 +237,23 @@ describe("fail-closed stdio env allowlist", () => {
       frozen[name === "PATH" ? "path" : name] = `frozen-${name}`;
     }
     const config = stdioConfig([...STDIO_IMPLICIT_ENV_VARS]);
-    // posix: exact case required, so the lowercase snapshot rejects.
-    expect(() => startupEnvTransportFactory(frozen)(config)).toThrow(
-      /mcp_unavailable: stdio startup env misses/,
-    );
+    // posix: exact case required, so the lowercase snapshot rejects. The
+    // runner itself may be win32 (case-insensitive env block), so stub a
+    // posix platform explicitly instead of relying on the host platform.
+    Object.defineProperty(process, "platform", {
+      value: "linux",
+      configurable: true,
+    });
+    try {
+      expect(() => startupEnvTransportFactory(frozen)(config)).toThrow(
+        /mcp_unavailable: stdio startup env misses/,
+      );
+    } finally {
+      Object.defineProperty(process, "platform", {
+        value: descriptor.value,
+        configurable: true,
+      });
+    }
     Object.defineProperty(process, "platform", {
       value: "win32",
       configurable: true,
@@ -270,6 +283,6 @@ describe("fail-closed stdio env allowlist", () => {
         configurable: true,
       });
     }
-    expect(process.platform).not.toBe("win32");
+    expect(process.platform).toBe(descriptor.value);
   });
 });
