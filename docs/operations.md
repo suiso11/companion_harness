@@ -3665,3 +3665,38 @@ Google mutation, no new consent, no reconsent, no deploy changes; readonly
   superseded literals rejected, skips cleanly when unset) +
   `calendarReadonlyProfile.test.ts` cutover boundaries (superseded
   6939311 hashes and the old array `account` form both fail closed).
+
+## AV autonomy base (2026-10-16, base-only, `feat/av-autonomy-continuation`)
+
+Scope: durable purposes + explicit local tasks + global stop control
+(schema 11) with HTTP/UI/control/fence wiring. Recorded `permission`
+rows are claims only (no grant/capability/external write anywhere);
+tasks never become calendar events; deadlines/validity windows are never
+inferred (absent stays NULL, present must be strict explicit-offset
+RFC3339, `validUntil` after `validFrom`). Two independent review bugs
+fixed with behavior regressions (no source assertions): (1)
+correction idempotency now presence-flags `validFrom`/`validUntil`
+(omission=preserve vs explicit null=clear per field; same key + changed
+command is `IdempotencyConflictError`; exact terminal replay stays
+verbatim after later state changes; owner lookup before cache); (2)
+purpose/task histories are bounded lossless pages (`afterSeq`+`limit`
+default 50/max 200, `seq > cursor ORDER BY seq LIMIT limit+1`,
+`events <= 200` + `nextAfterSeq: number | null`) across contracts,
+kernel, facade, strict HTTP query routes (unknown/invalid queries are
+400; ownership before history), and UI Load more with session/target/
+generation stale-response guards; all audit rows immutable. Verified on
+temp stores only (throwaways removed): contracts/kernel/server/root/e2e
+`tsc --noEmit` exit 0 with genuinely green output (exact frozen offline
+relink restored `@types/better-sqlite3`; no declaration-any,
+suppressions, or tsconfig narrowing); focused Vitest 21/21
+(`autonomy_slice` 15, `migration_create_0010` 3, `autonomy_http` 3,
+incl. >=201-event consecutive-page exactness both layers and both
+null-vs-omission directions/bounds); temp app-request smoke
+(custom scope, explicit goal+validity, correction-vs-original
+history/pagination, hold with separate reason/trigger, revoked parent
+blocks resume until a NEW active same-scope parent, Stop/reopen paused
+while chat 202, proposals 0); real-Chromium `e2e/autonomy.spec.ts` 2/2
+(base lifecycle incl. guarded resume + 201-event UI Load more).
+Limits: base-only (no v12 executions / pi bridge); history pages cap
+200, lists cap 100; control gates only new autonomous background work.
+Prior pin7b40/M6 fixes and historical records elsewhere are preserved.

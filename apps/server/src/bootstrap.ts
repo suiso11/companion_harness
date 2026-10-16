@@ -47,6 +47,7 @@ import type { KernelRepository } from "@companion/kernel";
 import {
   type ActionCreateReadPort,
   type ActionProposalStager,
+  applyAutonomyRestartFence,
   BUNDLED_SCHEMA_VERSION,
   CalendarActionWriteCapabilitySchema,
   type CalendarActionWritePort,
@@ -1161,6 +1162,16 @@ export async function startServer(
       backupDir: join(dirname(config.dbPath), "backups"),
     });
     logger.info("server.migrated", { status: migrated.toVersion });
+
+    // AV autonomy restart fence: runs on EVERY start AFTER the full
+    // migration (schema 11). A previously UNPAUSED control flips back to
+    // PAUSED (version advance + restart reason) in the same transaction that
+    // appends `restart_fence` + `interrupted_note` history rows; an
+    // already-paused control stays paused with no version change. No
+    // broad-catch masking and no `no such table` fallback: migration has
+    // completed, so a corrupted autonomy slice (>= 11) fails normal startup
+    // loudly instead of silently resuming background work.
+    applyAutonomyRestartFence(handle.raw, now());
 
     // Bound-roots guard: removing every Markdown root while a Markdown
     // connector instance remains bound must fail closed before the engine

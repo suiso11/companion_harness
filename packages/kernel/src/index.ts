@@ -73,6 +73,7 @@ export {
   CalendarActionWriteCapabilitySchema,
   CalendarCreateWriteCapabilitySchema,
   createActionStrategy,
+  parseStrictInstantMs,
 } from "./action_strategy.js";
 export type {
   AgentMemoryRecall,
@@ -137,6 +138,20 @@ export {
   trimConversationToCap,
   verifyCitations,
 } from "./agent.js";
+export {
+  AutonomyStateConflictError,
+  AutonomyVersionConflictError,
+  applyAutonomyRestartFence,
+  createAutonomyQueryPort,
+  getAutonomyControl,
+  isAutonomousWorkAllowed,
+  isPurposeApplicableAt,
+  isStrictAutonomyDeadline,
+  listAutonomyActivity,
+  listPurposeEvents,
+  listTaskEvents,
+  recordPurposeConflict,
+} from "./autonomy.js";
 export type {
   ManualBackupOptions,
   PreMigrationBackupOptions,
@@ -389,6 +404,13 @@ export {
   actionProposals,
   actionReceipts,
   apiIdempotency,
+  autonomyActivity,
+  autonomyControl,
+  autonomyPurposeConflicts,
+  autonomyPurposeEvents,
+  autonomyPurposes,
+  autonomyTaskEvents,
+  autonomyTasks,
   connectorInstances,
   evidenceGrants,
   kernelSchema,
