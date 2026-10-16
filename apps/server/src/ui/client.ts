@@ -305,8 +305,7 @@ function isProposalSummary(value: unknown): value is ProposalSummaryView {
   const inputOk =
     typeof item.input?.start === "string" &&
     typeof item.input?.end === "string" &&
-    (item.tool !== "calendar.create" ||
-      typeof item.input?.title === "string");
+    (item.tool !== "calendar.create" || typeof item.input?.title === "string");
   return (
     typeof item.proposalId === "string" &&
     toolOk &&
@@ -1391,12 +1390,20 @@ class ConversationApp {
     node.setAttribute("data-action-card", "true");
     node.setAttribute("data-action-tool", summary.tool);
     node.appendChild(
-      el("h3", summary.tool === "calendar.create" ? "予定作成の確認" : "日程変更の確認"),
+      el(
+        "h3",
+        summary.tool === "calendar.create"
+          ? "予定作成の確認"
+          : "日程変更の確認",
+      ),
     );
     const preview = el("p", summary.preview.summary);
     preview.setAttribute("data-action-preview", "true");
     node.appendChild(preview);
-    if (summary.tool === "calendar.create" && summary.input.title !== undefined) {
+    if (
+      summary.tool === "calendar.create" &&
+      summary.input.title !== undefined
+    ) {
       const titleLine = el("p", `件名: ${summary.input.title}`);
       titleLine.setAttribute("data-action-title", "true");
       node.appendChild(titleLine);

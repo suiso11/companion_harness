@@ -52,8 +52,8 @@ import {
   type CalendarActionWritePort,
   type CalendarConnectorBinding,
   type CalendarConnectorPort,
-  type CalendarCreateWritePort,
   CalendarCreateWriteCapabilitySchema,
+  type CalendarCreateWritePort,
   type CalendarTargetStore,
   closeKernelDatabase,
   createActionExecutionService,
@@ -70,7 +70,6 @@ import {
   createMemoryStageRegistrations,
   createReferenceManager,
   createToolBroker,
-  toCalendarObservation,
   getSchemaVersion,
   type KernelDatabaseHandle,
   type MarkdownConnectorBinding,
@@ -84,6 +83,7 @@ import {
   StrategyRegistry,
   type ToolBroker,
   ToolError,
+  toCalendarObservation,
 } from "@companion/kernel";
 import {
   createOllamaGateway,
@@ -110,6 +110,18 @@ import {
   type ServerConfig,
   ServerConfigError,
 } from "./config.js";
+import {
+  assertCreateWriteAccountCompatible,
+  assertCreateWriteHintCompatible,
+  assertCreateWriteReadonlyPathVisible,
+  buildCreateWriteConnectorConfig,
+  CREATE_WRITE_CONNECTOR_ENV,
+  CREATE_WRITE_PROFILE_ENV,
+  type CreateWriteConnectorHint,
+  getCreateWriteDefinitions,
+  parseCreateWriteConnectorHint,
+  parseCreateWriteProfileName,
+} from "./createWriteProfile.js";
 import { createStdServerLogger, type ServerLogger } from "./logger.js";
 import {
   measureStoreSize,
@@ -129,18 +141,6 @@ import {
   RESCHEDULE_WRITE_PROFILE_ENV,
   type RescheduleWriteConnectorHint,
 } from "./rescheduleWriteProfile.js";
-import {
-  assertCreateWriteAccountCompatible,
-  assertCreateWriteHintCompatible,
-  assertCreateWriteReadonlyPathVisible,
-  buildCreateWriteConnectorConfig,
-  CREATE_WRITE_CONNECTOR_ENV,
-  CREATE_WRITE_PROFILE_ENV,
-  type CreateWriteConnectorHint,
-  getCreateWriteDefinitions,
-  parseCreateWriteConnectorHint,
-  parseCreateWriteProfileName,
-} from "./createWriteProfile.js";
 
 /** Graceful-drain natural-completion budget (§11.5: max 10s). */
 export const SHUTDOWN_DRAIN_MS = 10_000;
@@ -1612,8 +1612,7 @@ export async function startServer(
           "action create binding does not match the active calendar binding",
         );
       }
-      actionCreatePort =
-        hostCreatePort as unknown as CalendarCreateWritePort;
+      actionCreatePort = hostCreatePort as unknown as CalendarCreateWritePort;
       createEnabled = true;
     }
 
@@ -1634,7 +1633,9 @@ export async function startServer(
               ...(actionsEnabled || writeProfile !== null
                 ? { writeEnabled: true }
                 : {}),
-              ...(createEnabled ? { writeEnabled: true, createEnabled: true } : {}),
+              ...(createEnabled
+                ? { writeEnabled: true, createEnabled: true }
+                : {}),
             },
           }
         : {},
@@ -2016,22 +2017,19 @@ export async function startServer(
                   return { status: "schema_invalid" };
                 }
                 let getResult: Awaited<
-                  ReturnType<
-                    typeof activeActionBindings.binding.connector.get
-                  >
+                  ReturnType<typeof activeActionBindings.binding.connector.get>
                 >;
                 try {
-                  getResult =
-                    await activeActionBindings.binding.connector.get(
-                      {
-                        calendarId: request.calendarId,
-                        eventId: request.stableEventId,
-                        ...(request.account !== undefined
-                          ? { account: request.account }
-                          : {}),
-                      },
-                      signal === undefined ? undefined : { signal },
-                    );
+                  getResult = await activeActionBindings.binding.connector.get(
+                    {
+                      calendarId: request.calendarId,
+                      eventId: request.stableEventId,
+                      ...(request.account !== undefined
+                        ? { account: request.account }
+                        : {}),
+                    },
+                    signal === undefined ? undefined : { signal },
+                  );
                 } catch {
                   return { status: "unavailable" };
                 }
@@ -2058,8 +2056,7 @@ export async function startServer(
                     connectorInstanceId:
                       activeActionBindings.binding.connectorInstanceId,
                     resourceCanonicalKey: getResult.event.canonicalKey,
-                    title:
-                      title === null ? null : title.slice(0, 128),
+                    title: title === null ? null : title.slice(0, 128),
                     text: observation.text.normalize("NFC"),
                     sourceRevision: observation.sourceRevision ?? null,
                     eventStatus: getResult.event.status,

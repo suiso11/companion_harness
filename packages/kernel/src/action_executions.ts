@@ -1872,7 +1872,9 @@ export function createActionExecutionService(
     if (observedTitle !== intendedTitle) {
       return finishPlainTerminal(id, "succeeded_unverified", null, null, now);
     }
-    if (!createBoundariesMatch(observation.text, intended.start, intended.end)) {
+    if (
+      !createBoundariesMatch(observation.text, intended.start, intended.end)
+    ) {
       return finishPlainTerminal(id, "succeeded_unverified", null, null, now);
     }
     const observedKey =
@@ -2788,7 +2790,9 @@ export function createActionExecutionService(
       return Number.isFinite(epoch) ? epoch : undefined;
     }
     const minutes =
-      /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(Z|[+-]\d{2}:\d{2})$/.exec(value);
+      /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(Z|[+-]\d{2}:\d{2})$/.exec(
+        value,
+      );
     if (minutes === null) return undefined;
     const year = Number(minutes[1]);
     const month = Number(minutes[2]);
@@ -2835,7 +2839,11 @@ export function createActionExecutionService(
     } catch {
       return false;
     }
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
       return false;
     }
     const body = parsed as { start?: unknown; end?: unknown };

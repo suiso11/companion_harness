@@ -71,21 +71,18 @@ const CreateTitleSchema = z
   .min(1)
   .max(256)
   .refine((value) => !value.includes("\0"), "title must not contain NUL")
-  .refine(
-    (value) => {
-      for (const unit of value) {
-        const code = unit.codePointAt(0) ?? 0;
-        if (
-          (code >= 0x00 && code <= 0x1f) ||
-          (code >= 0x7f && code <= 0x9f && code !== 0x85)
-        ) {
-          return false;
-        }
+  .refine((value) => {
+    for (const unit of value) {
+      const code = unit.codePointAt(0) ?? 0;
+      if (
+        (code >= 0x00 && code <= 0x1f) ||
+        (code >= 0x7f && code <= 0x9f && code !== 0x85)
+      ) {
+        return false;
       }
-      return true;
-    },
-    "title must not contain control characters",
-  )
+    }
+    return true;
+  }, "title must not contain control characters")
   .refine((value) => value.trim().length > 0, "title must not be blank");
 
 /** Stable insert id: 32 lowercase hex from the execution UUID (no dashes). */
@@ -277,9 +274,7 @@ export function createCreateWritePort(
     let payload: z.infer<typeof CreateWriteOutcomePayloadSchema>;
     if (Object.hasOwn(call, "structuredContent")) {
       try {
-        payload = CreateWriteOutcomePayloadSchema.parse(
-          call.structuredContent,
-        );
+        payload = CreateWriteOutcomePayloadSchema.parse(call.structuredContent);
       } catch {
         return { status: "unknown" };
       }

@@ -46,7 +46,10 @@ describe("create write port (M6)", () => {
       caller: {
         callTool: async (upstreamTool: string, args: unknown) => {
           calls.push({ tool: upstreamTool, args });
-          return { ok: true as const, structuredContent: { status: "succeeded" } };
+          return {
+            ok: true as const,
+            structuredContent: { status: "succeeded" },
+          };
         },
       },
     });
@@ -56,7 +59,9 @@ describe("create write port (M6)", () => {
     expect(calls[0]?.tool).toBe(CREATE_WRITE_TOOL);
     const args = calls[0]?.args as Record<string, unknown>;
     expect(Object.keys(args).sort()).toEqual(
-      ["account", "calendarId", "end", "id", "start", "summary"].sort().filter((k) => k !== "account" || "account" in args),
+      ["account", "calendarId", "end", "id", "start", "summary"]
+        .sort()
+        .filter((k) => k !== "account" || "account" in args),
     );
     expect(args["id"]).toBe(STABLE);
     expect(args["summary"]).toBe(TITLE);
@@ -76,7 +81,10 @@ describe("create write port (M6)", () => {
           calls += 1;
           return {
             ok: true as const,
-            structuredContent: { status: "definite_failure", code: "already_exists" },
+            structuredContent: {
+              status: "definite_failure",
+              code: "already_exists",
+            },
           };
         },
       },
@@ -121,12 +129,17 @@ describe("create write port (M6)", () => {
       caller: {
         callTool: async () => {
           calls += 1;
-          return { ok: true as const, structuredContent: { status: "succeeded" } };
+          return {
+            ok: true as const,
+            structuredContent: { status: "succeeded" },
+          };
         },
       },
     });
     const badInstance = { ...baseRequest(), connectorInstanceId: "other" };
-    expect(await port.insert(badInstance)).toEqual({ status: "definite_failure" });
+    expect(await port.insert(badInstance)).toEqual({
+      status: "definite_failure",
+    });
     const badId = { ...baseRequest(), stableEventId: "NOTHEX!!" };
     expect(await port.insert(badId)).toEqual({ status: "definite_failure" });
     const badGrant = {
@@ -134,7 +147,9 @@ describe("create write port (M6)", () => {
       grant: { ...baseRequest().grant, tool: "calendar.reschedule" as const },
     };
     expect(
-      await port.insert(badGrant as unknown as Parameters<typeof port.insert>[0]),
+      await port.insert(
+        badGrant as unknown as Parameters<typeof port.insert>[0],
+      ),
     ).toEqual({ status: "definite_failure" });
     expect(calls).toBe(0);
   });

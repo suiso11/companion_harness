@@ -319,12 +319,7 @@ function daysInCreateMonth(year: number, month: number): number {
     const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
     return leap ? 29 : 28;
   }
-  if (
-    month === 4 ||
-    month === 6 ||
-    month === 9 ||
-    month === 11
-  ) {
+  if (month === 4 || month === 6 || month === 9 || month === 11) {
     return 30;
   }
   return 31;
@@ -1293,11 +1288,7 @@ const CalendarCreateAgentInputSchema: ToolSchema<CalendarCreateAgentInput> = {
       }
     }
     const bounded = (value: unknown, what: string, max: number): string => {
-      if (
-        typeof value !== "string" ||
-        value.length < 1 ||
-        value.length > max
-      ) {
+      if (typeof value !== "string" || value.length < 1 || value.length > max) {
         throw new Error(`${what} must be a 1..${max} character string`);
       }
       return value;

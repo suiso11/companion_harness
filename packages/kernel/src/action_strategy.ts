@@ -810,7 +810,10 @@ export function createActionStrategy(
       const preflight = await service.runActionPreflight(runId, {
         signal: ctx.signal,
       });
-      if (preflight.outcome !== "granted" || preflight.grant.tool !== CALENDAR_CREATE_TOOL_NAME) {
+      if (
+        preflight.outcome !== "granted" ||
+        preflight.grant.tool !== CALENDAR_CREATE_TOOL_NAME
+      ) {
         return withPersisted(runId);
       }
       const grant = preflight.grant;
@@ -881,7 +884,8 @@ export function createActionStrategy(
       };
       if (inserted.status !== "succeeded") {
         return finishCreate({
-          outcome: inserted.status === "definite_failure" ? "failed" : "unknown",
+          outcome:
+            inserted.status === "definite_failure" ? "failed" : "unknown",
         });
       }
       // §18.7-equivalent authoritative read-back: GET the EXACT stable id

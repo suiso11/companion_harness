@@ -222,8 +222,7 @@ export const ActionProposalSchema = z
       ) {
         ctx.addIssue({
           code: "custom",
-          message:
-            "calendar.create proposals carry no existing-event target",
+          message: "calendar.create proposals carry no existing-event target",
         });
       }
     }
