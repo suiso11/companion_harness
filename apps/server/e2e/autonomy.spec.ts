@@ -45,6 +45,20 @@ interface ApiResult {
   body: unknown;
 }
 
+/**
+ * Typed hold/release gate reusing the existing e2e route-hold pattern: the
+ * route handler awaits `gate` (armed before the click) and both the explicit
+ * release and the `finally` release resolve it (resolving twice is a no-op),
+ * so no nullable callback slot and no control-flow narrowing are involved.
+ */
+function deferred(): { gate: Promise<void>; release: () => void } {
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { gate, release };
+}
+
 /** Real same-origin HTTP from the page (real Origin, real JSON routes). */
 async function api(
   page: Page,
@@ -71,7 +85,11 @@ async function api(
         headers["content-type"] = "application/json";
         payload = JSON.stringify(body);
       }
-      const response = await fetch(path, { method, headers, body: payload });
+      const response = await fetch(path, {
+        method,
+        headers,
+        body: payload ?? null,
+      });
       let parsed: unknown = null;
       try {
         parsed = await response.json();
@@ -304,7 +322,9 @@ test("selection clears drafts and late detail responses never restore them", asy
     (purposes.body as { items: Record<string, unknown>[] }).items ?? []
   ).find((row) => row.statement === "ui draft A")?.id as string;
   expect(typeof idA).toBe("string");
-  let held: import("@playwright/test").Route | null = null;
+  // Hold the real GET detail for A; B must still win, late A must not clobber.
+  // The gate is armed before the click; every exit path releases it.
+  const holdA = deferred();
   try {
     await page.route("**/api/sessions/*/purposes/*", async (route) => {
       const url = new URL(route.request().url());
@@ -312,8 +332,8 @@ test("selection clears drafts and late detail responses never restore them", asy
         route.request().method() === "GET" &&
         url.pathname.endsWith(`/purposes/${idA}`)
       ) {
-        held = route;
-        return; // Deliberately hold the real A detail response.
+        // Deliberately hold the real A detail response until released below.
+        await holdA.gate;
       }
       await route.continue();
     });
@@ -325,7 +345,10 @@ test("selection clears drafts and late detail responses never restore them", asy
         new URL(request.url()).pathname.endsWith(`/purposes/${idA}`),
       { timeout: 15_000 },
     );
-    await page.locator("#autonomy-purpose-list").getByText("ui draft A").click();
+    await page
+      .locator("#autonomy-purpose-list")
+      .getByText("ui draft A")
+      .click();
     // Deterministic hold: the real A detail GET must be intercepted first.
     await awaitHeldA;
     expect(
@@ -340,9 +363,7 @@ test("selection clears drafts and late detail responses never restore them", asy
       await page.locator("#autonomy-purpose-correct-input").inputValue(),
     ).toBe("");
     // Release the late A response: it must not restore A's detail or draft.
-    const frozen = held;
-    held = null;
-    await frozen?.continue();
+    holdA.release();
     await page.waitForTimeout(500);
     await expect(page.locator("#autonomy-purpose-detail-body")).toContainText(
       "ui draft B",
@@ -354,11 +375,9 @@ test("selection clears drafts and late detail responses never restore them", asy
       await page.locator("#autonomy-purpose-correct-input").inputValue(),
     ).toBe("");
   } finally {
+    // Release every held request, then drop the interception.
+    holdA.release();
     await page.unroute("**/api/sessions/*/purposes/*");
-    if (held !== null) {
-      await held.continue().catch(() => {});
-      held = null;
-    }
   }
 
   // Same guard for task hold/resume drafts.
@@ -386,7 +405,8 @@ test("selection clears drafts and late detail responses never restore them", asy
   const idX = (
     (tasks.body as { items: Record<string, unknown>[] }).items ?? []
   ).find((row) => row.title === "ui task X")?.id as string;
-  let heldTask: import("@playwright/test").Route | null = null;
+  // Same guard for task hold/resume drafts; the gate is armed before the click.
+  const holdX = deferred();
   try {
     await page.route("**/api/sessions/*/tasks/*", async (route) => {
       const url = new URL(route.request().url());
@@ -394,8 +414,8 @@ test("selection clears drafts and late detail responses never restore them", asy
         route.request().method() === "GET" &&
         url.pathname.endsWith(`/tasks/${idX}`)
       ) {
-        heldTask = route;
-        return;
+        // Deliberately hold the real X detail response until released below.
+        await holdX.gate;
       }
       await route.continue();
     });
@@ -417,9 +437,8 @@ test("selection clears drafts and late detail responses never restore them", asy
     expect(await page.locator("#autonomy-task-hold-input").inputValue()).toBe(
       "",
     );
-    const frozenTask = heldTask;
-    heldTask = null;
-    await frozenTask?.continue();
+    // Release the late X response: it must not restore X's detail or drafts.
+    holdX.release();
     await page.waitForTimeout(500);
     await expect(page.locator("#autonomy-task-detail-body")).toContainText(
       "ui task Y",
@@ -428,11 +447,9 @@ test("selection clears drafts and late detail responses never restore them", asy
       "",
     );
   } finally {
+    // Release every held request, then drop the interception.
+    holdX.release();
     await page.unroute("**/api/sessions/*/tasks/*");
-    if (heldTask !== null) {
-      await heldTask.continue().catch(() => {});
-      heldTask = null;
-    }
   }
 });
 
