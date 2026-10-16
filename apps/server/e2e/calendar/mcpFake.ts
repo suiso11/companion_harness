@@ -74,6 +74,13 @@ export interface FakeCalendarState {
   startOverride: string | null;
   endOverride: string | null;
   /**
+   * Test-only all-day source seam (loopback control; never a production
+   * normalizer path): when true and no write has landed yet, the fake
+   * upstream serves date-only bounds so a real search/stage/approve flow
+   * freezes an all-day snapshot (exclusive end). Reset per test via `/reset`.
+   */
+  allDay: boolean;
+  /**
    * Test-only upstream title override (loopback control seam; never a
    * production normalizer path): when set, the fake upstream serves this
    * summary so a real search/stage/approve flow can freeze an arbitrary
@@ -107,6 +114,7 @@ export function createFakeCalendarState(): FakeCalendarState {
     startOverride: null,
     endOverride: null,
     titleOverride: null,
+    allDay: false,
     releaseRead: null,
     releaseWrite: null,
   };
@@ -125,6 +133,7 @@ export function resetFakeCalendarState(state: FakeCalendarState): void {
   state.startOverride = null;
   state.endOverride = null;
   state.titleOverride = null;
+  state.allDay = false;
   state.releaseRead?.();
   state.releaseWrite?.();
   state.releaseRead = null;
@@ -205,6 +214,28 @@ export const FAKE_GET_TOOL_INPUT_SCHEMA = {
 
 /** Deterministic candidate event the scripted fake upstream serves. */
 export function fakeEvent(state: FakeCalendarState): unknown {
+  // All-day seam: before any write lands, serve date-only bounds (exclusive
+  // end) so the real normalizer freezes an all-day snapshot. After a write
+  // lands, the timed overrides take over (the conversion target).
+  if (
+    state.allDay &&
+    state.startOverride === null &&
+    state.endOverride === null
+  ) {
+    return {
+      id: EVENT_ID,
+      calendarId: CALENDAR_ID,
+      status: "confirmed",
+      summary:
+        state.titleOverride ??
+        (state.revision === 1 ? EVENT_TITLE_V1 : EVENT_TITLE_V2),
+      description: EVENT_DESCRIPTION,
+      start: { date: "2026-10-13" },
+      end: { date: "2026-10-14" },
+      updated: "2026-10-13T00:00:00Z",
+      etag: state.revision === 1 ? "rev-1" : "rev-2",
+    };
+  }
   return {
     id: EVENT_ID,
     calendarId: CALENDAR_ID,

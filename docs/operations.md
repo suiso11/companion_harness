@@ -3486,3 +3486,29 @@ Proof after repin: profile 5/5 + wire-hash 2/2 + startup 22/22 + focused
   `action_readback_instant.test.ts` 9/9 plus the pipeline test, whose
   read binding now decodes the provider-shaped fixture GET through the
   REAL `normalizeEvent`, asserting canonical-UTC read-back bounds).
+
+## M5 approval before→after preview (2026-10-16, no live writes)
+
+  Approval cards show the frozen BEFORE range beside the proposed AFTER
+  range in one deterministic kernel summary (same `{ summary }` seam,
+  same hash coverage, still ≤1024 chars, single line, `textContent` only).
+  BEFORE comes from THE SAME based-on immutable snapshot validated for
+  staging (title/rN/start/end/all-day); no upstream re-read, no hash
+  rewrite of historical rows, no new DB columns/API/deps. Timed bounds
+  stay verbatim (original offset/UTC, never browser-local); all-day
+  bounds stay date-only with the exclusive end denoted (never an invented
+  midnight); all-day→timed is visible from the two kind labels. The card
+  renders only this summary block (duplicate raw start/end rows removed);
+  receipts/history already persist the stored summary, so old rows render
+  unchanged and old hashes still approve. Limits: BEFORE is the observed
+  source at proposal time, not a live upstream claim (preflight still
+  checks); the UI never parses prose back into times/identity.
+
+  Tested facts (this worker, Chromium, real app + temp DB): timed card
+  shows source + proposed offsets and approves to 1 write + verified
+  receipt with a fresh rN; all-day fixture card shows `2026-10-13` →
+  `2026-10-14` exclusive-end dates plus the timed conversion and approves
+  once with old r1 retained. Kernel adds frozen-source, all-day, and
+  upstream-advance invariants; `action_proposals` 15/15,
+  `action_executions` 20/20 pass. Full unit has only the 2 pre-existing
+  live-memory CLI prerequisite failures (ground truth, unrelated).
