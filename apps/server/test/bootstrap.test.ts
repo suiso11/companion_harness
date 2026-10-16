@@ -3,7 +3,14 @@
 // always closed; no test leaves a listener or DB handle open.
 
 import { randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -11,7 +18,14 @@ import type {
   McpConnector,
   TransportFactory,
 } from "@companion/connector-mcp";
-import { BUNDLED_SCHEMA_VERSION, RunEngine } from "@companion/kernel";
+import {
+  BUNDLED_SCHEMA_VERSION,
+  closeKernelDatabase,
+  createKernelRepository,
+  migrateKernelDatabase,
+  openKernelDatabase,
+  RunEngine,
+} from "@companion/kernel";
 import type {
   ChatRequest,
   FetchImpl,
@@ -434,6 +448,161 @@ describe("bootstrap startup + graceful shutdown", () => {
     expect(JSON.stringify(invalidJsonFailed[0])).not.toContain("not-json");
     expect(JSON.stringify(invalidJsonFailed[0])).not.toContain(dbPath);
     expect(JSON.stringify(retryLogger.records)).not.toContain("not-json");
+  });
+
+  it("stops memory before DB close when listen fails on an occupied port", async () => {
+    const { env, dir, dbPath } = tempEnv();
+    // Seed a crash-recovery backlog: one due remember job the startup
+    // recovery drain must pick up (proving the memory service really ran).
+    const seed = openKernelDatabase(dbPath);
+    try {
+      await migrateKernelDatabase({ db: seed.raw });
+      createKernelRepository(seed.raw).enqueueMemoryJob(
+        "record.remember",
+        randomUUID(),
+        randomUUID(),
+        "test-scope",
+        randomUUID(),
+        JSON.stringify({ op: "record.remember", params: {} }),
+        { now: Date.now() - 60_000 },
+      );
+    } finally {
+      closeKernelDatabase(seed);
+    }
+    // Hanging stub CLI: records its pid, then sleeps without answering, so
+    // the recovery drain stays in-flight until the failed startup stops it.
+    const pidFile = join(dir, "stub.pid");
+    const stubEntry = join(dir, "stub.mjs");
+    writeFileSync(
+      stubEntry,
+      `import fs from "node:fs";\nfs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\nsetTimeout(() => {}, 60000);\n`,
+    );
+    const stubConfig = join(dir, "memory.config.json");
+    writeFileSync(stubConfig, "{}");
+    // Occupy a loopback port so the real listen fails AFTER memory.start().
+    // Deterministic rendezvous (no production hook): the bootstrap HTTP
+    // listener (net.Server.listen under @hono/node-server) is wrapped in
+    // the test only to defer the REAL bind until the recovery child has
+    // observably started (pid marker written by the real spawned script).
+    // Without the wrapper the EADDRINUSE rejection can win before Node
+    // even runs the child script, so a missing pid would be valid fast
+    // cleanup rather than a hang.
+    const occupied = createServer();
+    await new Promise<void>((resolve, reject) => {
+      occupied.once("error", reject);
+      occupied.listen(0, "127.0.0.1", () => {
+        occupied.removeListener("error", reject);
+        resolve();
+      });
+    });
+    const occupiedPort = (occupied.address() as { port: number }).port;
+    const beforeInt = process.listenerCount("SIGINT");
+    const beforeTerm = process.listenerCount("SIGTERM");
+    const failing = createCollectingLogger("debug");
+    const net = await import("node:net");
+    const originalListen = net.Server.prototype.listen;
+    let listenPatched = true;
+    let listenIntercepted = false;
+    // Defer only the bootstrap bind: poll for the real child pid marker,
+    // then perform the REAL listen on the already-occupied port (EADDRINUSE).
+    (net.Server.prototype as unknown as Record<string, unknown>).listen =
+      function (this: unknown, ...args: unknown[]) {
+        const self = this as {
+          _bootstrapListenDeferred?: boolean;
+        };
+        if (self._bootstrapListenDeferred === true) {
+          return (originalListen as (...a: unknown[]) => unknown).apply(
+            this,
+            args,
+          );
+        }
+        self._bootstrapListenDeferred = true;
+        listenIntercepted = true;
+        const invokeRealListen = (): void => {
+          try {
+            (originalListen as (...a: unknown[]) => unknown).apply(this, args);
+          } catch {
+            // The real listen error surfaces via the 'error' event below.
+          }
+        };
+        const startedAt = Date.now();
+        const pollForChild = (): void => {
+          let childStarted = false;
+          try {
+            const raw = readFileSync(pidFile, "utf-8");
+            const seen = Number(raw);
+            childStarted = Number.isInteger(seen) && seen > 0;
+          } catch {
+            childStarted = false;
+          }
+          if (childStarted || Date.now() - startedAt > 10_000) {
+            invokeRealListen();
+            return;
+          }
+          setTimeout(pollForChild, 10);
+        };
+        pollForChild();
+        return this;
+      };
+    try {
+      await expect(
+        startServer({
+          env: {
+            ...env,
+            COMPANION_PORT: String(occupiedPort),
+            COMPANION_MEMORY_JSON: JSON.stringify({
+              executable: process.execPath,
+              entry: stubEntry,
+              config: stubConfig,
+              scope: "test-scope",
+              timeoutMs: 2000,
+              maxResponseBytes: 65536,
+              recallLimit: 5,
+              idleMs: 5000,
+            }),
+          },
+          drainMs: 50,
+          logger: failing.logger,
+        }),
+      ).rejects.toThrow();
+    } finally {
+      if (listenPatched) {
+        net.Server.prototype.listen =
+          originalListen as typeof net.Server.prototype.listen;
+        listenPatched = false;
+      }
+      occupied.close();
+    }
+    expect(process.listenerCount("SIGINT")).toBe(beforeInt);
+    expect(process.listenerCount("SIGTERM")).toBe(beforeTerm);
+    // The wrapper must have engaged: otherwise this would be the old
+    // racy assertion, not the deterministic rendezvous.
+    expect(listenIntercepted).toBe(true);
+    // Rendezvous guarantees the recovery drain spawned the real stub before
+    // the listen rejection, so the pid marker MUST exist here; the failed
+    // startup must have reaped it (stop/await before DB close): no orphan.
+    const pid = Number(readFileSync(pidFile, "utf-8"));
+    expect(Number.isInteger(pid) && pid > 0).toBe(true);
+    const reapStarted = Date.now();
+    for (;;) {
+      try {
+        process.kill(pid, 0);
+      } catch {
+        break;
+      }
+      if (Date.now() - reapStarted > 5000) {
+        throw new Error("recovery child survived the rejected startup");
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    // The DB closed cleanly (probe opens) and a retry on a free port
+    // succeeds: the failed startup left nothing behind.
+    const probe = new Database(dbPath, { readonly: true });
+    probe.close();
+    const retry = await startServer({ env, drainMs: 50 });
+    servers.push(retry);
+    await retry.shutdown("test");
+    servers.pop();
   });
 
   it("rejects removal of bound Markdown roots with DB unchanged and restore succeeding", async () => {

@@ -308,7 +308,14 @@ export function createMemoryService(
   let stopped = false;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   let drainInFlight: Promise<{ executed: number }> | null = null;
-  let idleDrainAbort: AbortController | null = null;
+  /**
+   * Every active drain tick owns a controller (startup recovery,
+   * foreground completion, AND idle distill): stop() aborts all of them so
+   * no CLI child outlives shutdown, however the tick was launched.
+   */
+  const drainControllers = new Set<AbortController>();
+  /** True while the in-flight tick belongs to idle distill (preemptible). */
+  let idleDrainActive = false;
   /** Last completed run anchoring run-agnostic idle distill (real ids only). */
   let lastCompletedRun: {
     sessionId: string;
@@ -360,14 +367,17 @@ export function createMemoryService(
 
   function notifyForeground(): void {
     // Foreground preemption: abort an in-flight idle drain so recall and
-    // completion work take priority. Aborted jobs are NOT acked: they stay
-    // pending with bounded backoff (durable retry, never infinite).
-    const inFlight = idleDrainAbort;
-    if (inFlight !== null) {
-      try {
-        inFlight.abort();
-      } catch {
-        // Best effort.
+    // completion work take priority. Only the idle-owned tick is aborted:
+    // a foreground drain keeps running (single flight shares it). Aborted
+    // jobs are NOT acked: they stay pending with bounded backoff (durable
+    // retry, never infinite).
+    if (idleDrainActive) {
+      for (const controller of [...drainControllers]) {
+        try {
+          controller.abort();
+        } catch {
+          // Best effort.
+        }
       }
     }
     armIdleTimer();
@@ -600,49 +610,85 @@ export function createMemoryService(
   /**
    * One bounded drain tick over due jobs (single flight: concurrent callers
    * share the in-flight tick). Aborts between jobs on preemption/shutdown.
+   * The tick owns its abort controller (registered for stop()/preemption)
+   * and executes at most MEMORY_DRAIN_BATCH jobs TOTAL per tick: the claim
+   * bound shrinks with the remaining budget, so follow-up chains (remember
+   * fan-out, correction chains, retries) continue on a later scheduled
+   * drain instead of stranding behind an over-wide tick.
    */
   function drainOnce(signal?: AbortSignal): Promise<{ executed: number }> {
     if (drainInFlight !== null) {
       return drainInFlight;
     }
     const tick = (async (): Promise<{ executed: number }> => {
-      let executed = 0;
-      for (let round = 0; round < MEMORY_DRAIN_BATCH; round += 1) {
-        if (stopped || isAborted(signal)) {
-          break;
-        }
-        let due: Array<{
-          id: string;
-          kind: string;
-          requestJson: string;
-          attempts: number;
-        }>;
+      const controller = new AbortController();
+      drainControllers.add(controller);
+      // An incoming preemption/shutdown signal aborts this tick's
+      // controller, so the signal reaching each CLI call below always
+      // reflects BOTH the caller and the tick lifetime (stop() aborts the
+      // tick controller directly, even for caller-less recovery drains).
+      const forwardAbort = (): void => {
         try {
-          due = repo
-            .claimDueMemoryJobs(MEMORY_DRAIN_BATCH, now())
-            .map((job) => ({
+          controller.abort();
+        } catch {
+          // Best effort.
+        }
+      };
+      if (signal !== undefined) {
+        if (signal.aborted) {
+          forwardAbort();
+        } else {
+          signal.addEventListener("abort", forwardAbort, { once: true });
+        }
+      }
+      const tickSignal = controller.signal;
+      let executed = 0;
+      try {
+        while (executed < MEMORY_DRAIN_BATCH) {
+          if (stopped || tickSignal.aborted) {
+            break;
+          }
+          const requested = MEMORY_DRAIN_BATCH - executed;
+          let due: Array<{
+            id: string;
+            kind: string;
+            requestJson: string;
+            attempts: number;
+          }>;
+          try {
+            due = repo.claimDueMemoryJobs(requested, now()).map((job) => ({
               id: job.id,
               kind: job.kind,
               requestJson: job.requestJson,
               attempts: job.attempts,
             }));
-        } catch {
-          break;
-        }
-        if (due.length === 0) {
-          break;
-        }
-        for (const job of due) {
-          if (stopped || isAborted(signal)) {
+          } catch {
             break;
           }
-          const settled = await executeJob(job, signal);
-          void settled;
-          executed += 1;
+          if (due.length === 0) {
+            break;
+          }
+          for (const job of due) {
+            if (
+              stopped ||
+              tickSignal.aborted ||
+              executed >= MEMORY_DRAIN_BATCH
+            ) {
+              break;
+            }
+            const settled = await executeJob(job, tickSignal);
+            void settled;
+            executed += 1;
+          }
+          if (due.length < requested) {
+            break;
+          }
         }
-        if (due.length < MEMORY_DRAIN_BATCH) {
-          break;
+      } finally {
+        if (signal !== undefined) {
+          signal.removeEventListener("abort", forwardAbort);
         }
+        drainControllers.delete(controller);
       }
       return { executed };
     })();
@@ -657,40 +703,48 @@ export function createMemoryService(
   }
 
   /**
-   * One bounded idle cultivation batch (single flight): when no foreground
-   * backlog is due and no distill is pending, enqueue one `maintain.distill`
-   * anchored to the last completed run (real ids only; skipped with no run
-   * context yet), then drain. A degraded (model-unavailable) distill answer
-   * acks normally with zero writes: cultivation degrades, answering never
-   * fails.
+   * One bounded idle cultivation batch (single flight). Ordering per tick:
+   * 1. A still-pending distill job whose backoff expired is drained (a
+   *    transiently failed/preempted distill retries WITHOUT another
+   *    foreground completion or restart); a not-yet-due one only rearms.
+   * 2. Any other due foreground backlog drains first (even with no run
+   *    context yet, so crash-recovered or externally enqueued work never
+   *    strands behind a missing anchor). Foreground priority holds: the
+   *    next foreground activity preempts this tick via notifyForeground.
+   * 3. Only with no due backlog and a completed-run anchor is one
+   *    `maintain.distill` enqueued, then drained. A degraded
+   *    (model-unavailable) distill answer acks normally with zero writes:
+   *    cultivation degrades, answering never fails.
    */
   async function runIdleDistill(): Promise<void> {
     if (!started || stopped) {
       return;
     }
-    if (idleDrainAbort !== null) {
+    if (idleDrainActive) {
       return;
     }
     if (pendingDistillJobId !== null) {
+      let nextDueAt: number | null = null;
       try {
         const pending = repo.getMemoryJob(pendingDistillJobId);
         if (pending !== null && pending.status === "pending") {
-          // Single flight: a distill is already pending. Rearm the one-shot
-          // timer so the queue keeps being polled after this early return.
-          armIdleTimer();
-          return;
+          nextDueAt = pending.nextDueAt;
         }
       } catch {
         armIdleTimer();
         return;
       }
-      pendingDistillJobId = null;
-    }
-    const anchor = lastCompletedRun;
-    if (anchor === null) {
-      // No run context yet: rearm so a later completion still cultivates.
-      armIdleTimer();
-      return;
+      if (nextDueAt === null) {
+        pendingDistillJobId = null;
+      } else if (nextDueAt > now()) {
+        // Single flight: a distill is already pending but its bounded
+        // backoff has not expired yet. Rearm the one-shot timer so the
+        // queue keeps being polled after this early return (no busy loop).
+        armIdleTimer();
+        return;
+      }
+      // Else: the pending distill is due — fall through and drain it below
+      // instead of rearming forever.
     }
     let pending = 0;
     try {
@@ -700,8 +754,20 @@ export function createMemoryService(
       return;
     }
     if (pending > 0) {
-      // Foreground backlog first: drain it instead of cultivating.
-      await drainOnce().catch(() => undefined);
+      // Foreground backlog first (even without a run anchor): drain it
+      // instead of cultivating.
+      idleDrainActive = true;
+      try {
+        await drainOnce().catch(() => undefined);
+      } finally {
+        idleDrainActive = false;
+        armIdleTimer();
+      }
+      return;
+    }
+    const anchor = lastCompletedRun;
+    if (anchor === null) {
+      // No run context yet: rearm so a later completion still cultivates.
       armIdleTimer();
       return;
     }
@@ -730,12 +796,11 @@ export function createMemoryService(
       return;
     }
     pendingDistillJobId = enqueuedId;
-    const controller = new AbortController();
-    idleDrainAbort = controller;
+    idleDrainActive = true;
     try {
-      await drainOnce(controller.signal).catch(() => undefined);
+      await drainOnce().catch(() => undefined);
     } finally {
-      idleDrainAbort = null;
+      idleDrainActive = false;
       armIdleTimer();
     }
   }
@@ -1121,13 +1186,15 @@ export function createMemoryService(
       clearTimeout(idleTimer);
       idleTimer = undefined;
     }
-    // Abort an in-flight idle drain and await its termination: no orphaned
-    // child survives shutdown. Foreground completion drains (unabortable)
-    // finish naturally since drainOnce always settles.
-    const inFlight = idleDrainAbort;
-    if (inFlight !== null) {
+    // Abort EVERY active drain tick (recovery, foreground, and idle alike):
+    // each tick owns a controller, so in-flight CLI children are hard-killed
+    // here instead of running to their own timeout (up to 120s for distill).
+    // Aborted jobs stay pending with bounded backoff (never acked, never
+    // lost), and the in-flight tick is awaited below so no orphan survives.
+    idleDrainActive = false;
+    for (const controller of [...drainControllers]) {
       try {
-        inFlight.abort();
+        controller.abort();
       } catch {
         // Best effort.
       }

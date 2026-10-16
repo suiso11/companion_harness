@@ -592,6 +592,8 @@ export async function startServer(
   let ownedActionShutdown: (() => Promise<void>) | undefined;
   let onSigint: (() => void) | undefined;
   let onSigterm: (() => void) | undefined;
+  /** Conversation-memory service (null = memoryless; set inside try). */
+  let memory: MemoryService | null = null;
   const removeSignalHandlers = (): void => {
     if (onSigint !== undefined) {
       try {
@@ -762,7 +764,8 @@ export async function startServer(
     // and durably completed runs trigger authoritative cultivation. Without
     // memory config the raw repo is shared unchanged (old behavior).
     let repo: KernelRepository = baseRepo;
-    let memory: MemoryService | null = null;
+    // (Service instance assigned to the outer `memory` binding so every
+    // post-start failure path can stop/await it before the DB close.)
     // Intake-hook wrapper (shared by the pre-gate memory setup below and
     // the post-gate repository rebuild, so the memory hooks always wrap the
     // final gated repo and never a stale pre-gate instance).
@@ -1218,10 +1221,21 @@ export async function startServer(
         },
       );
     } catch (listenError) {
-      // Listen failed: drain the started engine, stop the owned Calendar
-      // connector, close any created listener, then close the DB (in that
-      // order). Handlers were not yet registered, but remove defensively
-      // before rethrowing.
+      // Listen failed: stop the memory service FIRST (its crash-recovered
+      // CLI children and timer must not outlive the rejected startup or
+      // touch the repo/DB after close), then drain the started engine,
+      // stop the owned Calendar connector, close any created listener, and
+      // finally close the DB (in that order). Handlers were not yet
+      // registered, but remove defensively before rethrowing. Every step is
+      // best-effort: the listen error carries the startup failure even when
+      // a cleanup step also fails.
+      try {
+        if (memory !== null) {
+          await memory.stop();
+        }
+      } catch {
+        // Best effort: the listen error carries the startup failure.
+      }
       try {
         if (engine !== undefined) {
           await engine.shutdown({ drainMs });
@@ -1356,6 +1370,17 @@ export async function startServer(
     };
   } catch (error) {
     removeSignalHandlers();
+    // Any post-start failure path (including memory started above) stops
+    // and awaits the memory service BEFORE the DB close below: a rejected
+    // startup must never leave its crash-recovery CLI/timer alive. The
+    // original error still carries the failure.
+    if (memory !== null) {
+      try {
+        await memory.stop();
+      } catch {
+        // Best effort: the original startup error carries the failure.
+      }
+    }
     if (ownedMcp !== undefined) {
       try {
         await boundedMcpShutdown(ownedMcp, mcpShutdownMs);
