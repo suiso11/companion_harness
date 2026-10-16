@@ -149,6 +149,16 @@ test("verified: BEFORE + AFTER open exact different stored bodies, reload retain
   expect(beforeLabel).toContain("r1");
   expect(afterLabel).toMatch(/r[1-9][0-9]*/);
   expect(afterLabel).not.toContain("r1");
+  // Receipt-button contract: the verified AFTER keeps the bare `rN` text
+  // (existing calendar action E2E asserts [data-action-citation] matches
+  // /^r\d+$/); the BEFORE/AFTER distinction rides data-action-evidence +
+  // aria-label, never a text prefix on the receipt button.
+  await expect(afterBtn).toHaveAttribute("data-action-citation", "true");
+  expect(afterLabel).toMatch(/^r[1-9][0-9]*$/);
+  await expect(afterBtn).toHaveAttribute(
+    "aria-label",
+    /確認済みの変更後 r[1-9][0-9]*/,
+  );
   // Dedup: one Run never renders four evidence buttons (card BEFORE at most
   // one + history BEFORE/AFTER = at most three total nodes).
   const totalBefore = await page

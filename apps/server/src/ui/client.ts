@@ -2166,9 +2166,14 @@ class ConversationApp {
         }
         if (evidence.after.length > 0) {
           for (const citation of evidence.after) {
-            const button = el("button", `確認済みの変更後 ${citation}`);
+            // Verified AFTER keeps the bare `rN` button text: the
+            // [data-action-citation] receipt contract (existing calendar
+            // action E2E expects /^r\d+$/) stays intact. The BEFORE/AFTER
+            // distinction rides data-action-evidence="after" + aria-label.
+            const button = el("button", citation);
             button.setAttribute("data-action-citation", "true");
             button.setAttribute("data-action-evidence", "after");
+            button.setAttribute("aria-label", `確認済みの変更後 ${citation}`);
             const citationRunId =
               typeof run.runId === "string" ? run.runId : undefined;
             button.addEventListener("click", () => {
