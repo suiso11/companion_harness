@@ -137,6 +137,18 @@ export {
   trimConversationToCap,
   verifyCitations,
 } from "./agent.js";
+export {
+  AutonomyStateConflictError,
+  AutonomyVersionConflictError,
+  applyAutonomyRestartFence,
+  createAutonomyQueryPort,
+  getAutonomyControl,
+  isAutonomousWorkAllowed,
+  isPurposeApplicableAt,
+  isStrictAutonomyDeadline,
+  listAutonomyActivity,
+  recordPurposeConflict,
+} from "./autonomy.js";
 export type {
   ManualBackupOptions,
   PreMigrationBackupOptions,
@@ -389,6 +401,12 @@ export {
   actionProposals,
   actionReceipts,
   apiIdempotency,
+  autonomyActivity,
+  autonomyControl,
+  autonomyPurposeEvents,
+  autonomyPurposes,
+  autonomyTaskEvents,
+  autonomyTasks,
   connectorInstances,
   evidenceGrants,
   kernelSchema,

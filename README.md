@@ -1783,3 +1783,19 @@ e2e `tsc --noEmit` exit 0, Biome on changed files clean. Full unit
 (113 files/1370) + live HTTP/REAL CLI already green per oc-19 and not
 re-run (no production change since). Remote CI for the fix commit is
 pending at push time — see PR body.
+
+AV autonomy foundation (AV01/AV03/local+global stop, 2026-10-16):
+session-owned purposes (create/correct preserving kind/scope/
+interpretation/window with the original kept superseded, revoke/achieve,
+explicit pair conflicts only) + explicit tasks (standalone/attached,
+start/hold/resume-with-evidence + explicit replacement parent only,
+complete/cancel, parent transitions hold dependents, blind resume 409s,
+permission purposes are claims granting nothing) + durable global stop
+control (CAS, defaults paused, restart fence re-pauses with version+1).
+Verified: permanent real-browser `autonomy.spec.ts` **4/4 passed**
+(fresh bundle, real HTTP), full default e2e **28 passed**,
+`autonomy_http` 3/3 + `autonomy_slice` 11/11, Biome clean, root `tsc`
+0 non-environment errors. Remaining NOT claimed: AV02 shadow, AV04
+learning, AV05 notification, AV06 priority, AV07 supervisor/reconcile,
+AV08 maintenance/handoff. Full contract: `docs/operations.md`
+("AV autonomy foundation").

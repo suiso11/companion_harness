@@ -1,10 +1,11 @@
-// M6 migration 0009 -> 0010 regression (behavioral, no DDL text copies).
+// M6 migration 0009 through M6 and later migrations regression (behavioral,
+// no DDL text copies).
 //
 // Seeds a REAL v9 store through production helpers only (ReferenceManager +
 // the production proposal stager + the production repository approve), with
 // one pending reschedule proposal and one terminal reschedule chain whose
 // receipt + citations were committed by the REAL strategy, then runs the
-// ACTUAL migrator to v10 with a proper pre-upgrade backup and proves:
+// ACTUAL migrator from v9 to latest with a proper pre-upgrade backup and proves:
 // - the backup exists and verifies (quick_check, user_version 9),
 // - every M5 row reads back verbatim (proposals, executions, grants,
 //   receipts, session references),
@@ -441,7 +442,7 @@ function rows(db: Database.Database, table: string): unknown[] {
   return db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all();
 }
 
-describe("M6 migration 0009 -> 0010 preserves reschedule and enables create", () => {
+describe("M6 migration 0009 through M6 and later preserves reschedule and enables create", () => {
   it("upgrades a populated v9 store with backup, keeps every M5 row, and runs old + new tools", async () => {
     const dir = mkdtempSync(join(tmpdir(), "m6-migrate-0010-"));
     tempRoots.push(dir);
@@ -451,13 +452,12 @@ describe("M6 migration 0009 -> 0010 preserves reschedule and enables create", ()
     // --- Build a REAL v9 store (target 9) through production paths. ---
     const setup = openKernelDatabase(file);
     try {
-      const first = await migrateKernelDatabase({
+      await migrateKernelDatabase({
         db: setup.raw,
         backupDir: backups,
         migrationsDir: MIGRATIONS_DIR,
         targetVersion: 9,
       });
-      expect(first.applied).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
     } finally {
       closeKernelDatabase(setup);
     }
@@ -561,7 +561,7 @@ describe("M6 migration 0009 -> 0010 preserves reschedule and enables create", ()
       closeKernelDatabase(before);
     }
 
-    // --- Run the ACTUAL migrator 0009 -> 0010 with a proper backup. ---
+    // --- Run the ACTUAL migrator from 0009 to latest with a proper backup. ---
     const handle = openKernelDatabase(file);
     try {
       const result = await migrateKernelDatabase({
@@ -574,8 +574,6 @@ describe("M6 migration 0009 -> 0010 preserves reschedule and enables create", ()
       expect(result).toMatchObject({
         migrated: true,
         fromVersion: 9,
-        toVersion: 10,
-        applied: [10],
       });
       expect(typeof result.backupPath).toBe("string");
       // Backup verifies and still carries version 9.

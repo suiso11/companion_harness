@@ -932,8 +932,234 @@ export const actionReceipts = sqliteTable(
     ),
   ],
 );
+// AV autonomy slice (purposes + tasks + stop control). Mirrors
+// packages/kernel/migrations/0011_autonomy.sql, which is authoritative.
+// Purposes carry the immutable ORIGINAL statement plus a SEPARATE nullable
+// interpretation; only status / version / updated_at / superseded_by are
+// ever rewritten. Tasks are explicit LOCAL entities with no calendar /
+// provider / scheduling columns. The stop control is a singleton seeded
+// paused; the activity log is append-only with a closed kind set.
+
+export const autonomyPurposes = sqliteTable(
+  "autonomy_purposes",
+  {
+    id: text("id").primaryKey(),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id),
+    scope: text("scope").notNull(),
+    kind: text("kind").notNull(),
+    isExplicit: integer("is_explicit").notNull(),
+    sourceKind: text("source_kind").notNull(),
+    sourceTurnId: text("source_turn_id"),
+    statement: text("statement").notNull(),
+    interpretation: text("interpretation"),
+    status: text("status").notNull(),
+    version: integer("version").notNull(),
+    supersededBy: text("superseded_by"),
+    validFrom: text("valid_from"),
+    validUntil: text("valid_until"),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (t) => [
+    unique("autonomy_purposes_session_id_unique").on(t.sessionId, t.id),
+    foreignKey({
+      name: "autonomy_purposes_session_source_turn_fk",
+      columns: [t.sessionId, t.sourceTurnId],
+      foreignColumns: [turns.sessionId, turns.id],
+    }),
+    check(
+      "autonomy_purposes_kind_check",
+      sql`${t.kind} IN ('goal','preference','constraint','permission','wish','temporary_state')`,
+    ),
+    check("autonomy_purposes_is_explicit_check", sql`${t.isExplicit} IN (0,1)`),
+    check(
+      "autonomy_purposes_source_kind_check",
+      sql`${t.sourceKind} IN ('user','self','external')`,
+    ),
+    check("autonomy_purposes_version_check", sql`${t.version} >= 1`),
+    check(
+      "autonomy_purposes_status_check",
+      sql`${t.status} IN ('active','superseded','revoked','achieved')`,
+    ),
+  ],
+);
+
+export const autonomyPurposeEvents = sqliteTable(
+  "autonomy_purpose_events",
+  {
+    id: text("id").primaryKey(),
+    purposeId: text("purpose_id").notNull(),
+    sessionId: text("session_id").notNull(),
+    seq: integer("seq").notNull(),
+    event: text("event").notNull(),
+    fromStatus: text("from_status"),
+    toStatus: text("to_status").notNull(),
+    statement: text("statement").notNull(),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [
+    unique("autonomy_purpose_events_purpose_seq_unique").on(t.purposeId, t.seq),
+    foreignKey({
+      name: "autonomy_purpose_events_session_purpose_fk",
+      columns: [t.sessionId, t.purposeId],
+      foreignColumns: [autonomyPurposes.sessionId, autonomyPurposes.id],
+    }),
+    check("autonomy_purpose_events_seq_check", sql`${t.seq} >= 1`),
+    check(
+      "autonomy_purpose_events_event_check",
+      sql`${t.event} IN ('created','corrected','superseded','revoked','achieved')`,
+    ),
+  ],
+);
+
+export const autonomyTasks = sqliteTable(
+  "autonomy_tasks",
+  {
+    id: text("id").primaryKey(),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id),
+    scope: text("scope").notNull(),
+    title: text("title").notNull(),
+    body: text("body"),
+    kind: text("kind").notNull(),
+    speaker: text("speaker").notNull(),
+    deadline: text("deadline"),
+    parentPurposeId: text("parent_purpose_id"),
+    status: text("status").notNull(),
+    version: integer("version").notNull(),
+    holdReason: text("hold_reason"),
+    reconsiderTrigger: text("reconsider_trigger"),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (t) => [
+    unique("autonomy_tasks_session_id_unique").on(t.sessionId, t.id),
+    foreignKey({
+      name: "autonomy_tasks_session_parent_fk",
+      columns: [t.sessionId, t.parentPurposeId],
+      foreignColumns: [autonomyPurposes.sessionId, autonomyPurposes.id],
+    }),
+    check(
+      "autonomy_tasks_kind_check",
+      sql`${t.kind} IN ('chat','wish','problem','task')`,
+    ),
+    check(
+      "autonomy_tasks_speaker_check",
+      sql`${t.speaker} IN ('user','self','external')`,
+    ),
+    check(
+      "autonomy_tasks_status_check",
+      sql`${t.status} IN ('open','in_progress','held','completed','cancelled')`,
+    ),
+    check("autonomy_tasks_version_check", sql`${t.version} >= 1`),
+    check(
+      "autonomy_tasks_hold_check",
+      sql`(${t.status} = 'held' AND ${t.holdReason} IS NOT NULL AND ${t.reconsiderTrigger} IS NOT NULL) OR (${t.status} != 'held' AND ${t.holdReason} IS NULL AND ${t.reconsiderTrigger} IS NULL)`,
+    ),
+  ],
+);
+
+export const autonomyPurposeConflicts = sqliteTable(
+  "autonomy_purpose_conflicts",
+  {
+    id: text("id").primaryKey(),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id),
+    purposeAId: text("purpose_a_id").notNull(),
+    purposeBId: text("purpose_b_id").notNull(),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [
+    unique("autonomy_purpose_conflicts_session_pair_unique").on(
+      t.sessionId,
+      t.purposeAId,
+      t.purposeBId,
+    ),
+    foreignKey({
+      name: "autonomy_purpose_conflicts_session_a_fk",
+      columns: [t.sessionId, t.purposeAId],
+      foreignColumns: [autonomyPurposes.sessionId, autonomyPurposes.id],
+    }),
+    foreignKey({
+      name: "autonomy_purpose_conflicts_session_b_fk",
+      columns: [t.sessionId, t.purposeBId],
+      foreignColumns: [autonomyPurposes.sessionId, autonomyPurposes.id],
+    }),
+    check(
+      "autonomy_purpose_conflicts_distinct_check",
+      sql`${t.purposeAId} != ${t.purposeBId}`,
+    ),
+  ],
+);
+
+export const autonomyTaskEvents = sqliteTable(
+  "autonomy_task_events",
+  {
+    id: text("id").primaryKey(),
+    taskId: text("task_id").notNull(),
+    sessionId: text("session_id").notNull(),
+    seq: integer("seq").notNull(),
+    event: text("event").notNull(),
+    fromStatus: text("from_status"),
+    toStatus: text("to_status").notNull(),
+    note: text("note"),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [
+    unique("autonomy_task_events_task_seq_unique").on(t.taskId, t.seq),
+    foreignKey({
+      name: "autonomy_task_events_session_task_fk",
+      columns: [t.sessionId, t.taskId],
+      foreignColumns: [autonomyTasks.sessionId, autonomyTasks.id],
+    }),
+    check("autonomy_task_events_seq_check", sql`${t.seq} >= 1`),
+    check(
+      "autonomy_task_events_event_check",
+      sql`${t.event} IN ('created','started','held','resumed','completed','cancelled','parent_held')`,
+    ),
+  ],
+);
+
+export const autonomyControl = sqliteTable(
+  "autonomy_control",
+  {
+    id: text("id").primaryKey(),
+    paused: integer("paused").notNull(),
+    version: integer("version").notNull(),
+    reason: text("reason"),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (t) => [
+    check("autonomy_control_id_check", sql`${t.id} = 'global'`),
+    check("autonomy_control_paused_check", sql`${t.paused} IN (0,1)`),
+    check("autonomy_control_version_check", sql`${t.version} >= 1`),
+  ],
+);
+
+export const autonomyActivity = sqliteTable(
+  "autonomy_activity",
+  {
+    id: text("id").primaryKey(),
+    kind: text("kind").notNull(),
+    sessionId: text("session_id"),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [
+    check(
+      "autonomy_activity_kind_check",
+      sql`${t.kind} IN ('user_message','autonomy_stopped','autonomy_resumed','restart_fence','interrupted_note')`,
+    ),
+  ],
+);
+
 export const kernelSchema = {
   sessions,
+  autonomyPurposes,
+  autonomyPurposeConflicts,
   turns,
   runs,
   turnSelections,

@@ -1162,6 +1162,21 @@ export async function startServer(
     });
     logger.info("server.migrated", { status: migrated.toVersion });
 
+    // AV autonomy restart fence: runs on every start AFTER migration. When
+    // the control was left UNPAUSED it flips back to PAUSED with a version
+    // advance and appends `restart_fence` + `interrupted_note` activity rows
+    // recording that background intent does NOT resume implicitly; an
+    // already-paused control stays untouched. Best-effort on pre-0011
+    // databases: a missing autonomy slice must never block startup.
+    try {
+      const { applyAutonomyRestartFence } = await import("@companion/kernel");
+      applyAutonomyRestartFence(handle.raw, now());
+    } catch (error) {
+      if (!(error instanceof Error) || !/no such table/i.test(error.message)) {
+        throw error;
+      }
+    }
+
     // Bound-roots guard: removing every Markdown root while a Markdown
     // connector instance remains bound must fail closed before the engine
     // or listener starts. Fixed path-free ServerConfigError, no DB writes.
