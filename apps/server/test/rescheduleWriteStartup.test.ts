@@ -684,7 +684,10 @@ function fixtureBackedCalendarBinding(
   };
 }
 
-async function provisionCalendarInstance(dbPath: string): Promise<string> {
+async function provisionCalendarInstance(
+  dbPath: string,
+  account = "ops@example",
+): Promise<string> {
   const handle = openKernelDatabase(dbPath);
   try {
     await migrateKernelDatabase({
@@ -694,7 +697,7 @@ async function provisionCalendarInstance(dbPath: string): Promise<string> {
     return createReferenceManager(handle.raw).ensureCalendarConnectorInstance(
       "calendar-fake-binding",
       "primary",
-      { account: "ops@example" },
+      { account },
     ).id;
   } finally {
     closeKernelDatabase(handle);
@@ -715,10 +718,16 @@ function e2eSnapshotBodyJson(): string {
   return canonicalJsonString(SnapshotBodySchema.parse({ version: 1, text }));
 }
 
-/** Stage a reschedule proposal against the live-shaped snapshot (pre-start). */
+/**
+ * Stage a reschedule proposal against the live-shaped snapshot (pre-start).
+ * An explicit `targetAccount` is stored in the durable target (the
+ * selection-derived account the provider gate sees); omitted keeps the
+ * legacy account-free target.
+ */
 async function seedStagedProposal(
   dbPath: string,
   instanceId: string,
+  targetAccount?: string,
 ): Promise<{ sessionId: string; proposalId: string; hash: string }> {
   const handle = openKernelDatabase(dbPath);
   try {
@@ -753,6 +762,7 @@ async function seedStagedProposal(
         JSON.stringify({
           calendarId: E2E_CALENDAR_ID,
           eventId: E2E_EVENT_ID,
+          ...(targetAccount !== undefined ? { account: targetAccount } : {}),
         }),
         Date.now(),
       );
@@ -1933,50 +1943,81 @@ describe("canonical write identity is validated before any DB side effect", () =
 });
 
 // ---------------------------------------------------------------------------
-// Persisted-grant file-only operator wiring (local fixture pipeline).
+// Persisted-grant file-only operator wiring through the NORMAL startup path.
 //
 // The RECOMMENDED production wiring needs NO manual env secret copy: the
 // write child allowlist carries ONLY the client file path, the persisted
-// write-token file path, and the exact account selector (plus the mandatory
-// SDK inherited names). No `M5_RESCHEDULE_CLIENT_*` /
-// `M5_RESCHEDULE_REFRESH_TOKEN` / `M5_RESCHEDULE_GRANTED_SCOPE` /
-// `M5_RESCHEDULE_ACCESS_TOKEN` value appears anywhere in the startup env —
-// the test asserts their absence up front, so a future regression that
-// requires a secret copy fails here.
+// write-token file path, the exact account selector, and the readonly token
+// path NAME (plus the mandatory SDK inherited names). No
+// `M5_RESCHEDULE_CLIENT_*` / `M5_RESCHEDULE_REFRESH_TOKEN` /
+// `M5_RESCHEDULE_GRANTED_SCOPE` / `M5_RESCHEDULE_ACCESS_TOKEN` value appears
+// anywhere in the startup env — every test below asserts their absence up
+// front, so a future regression that requires a secret copy fails here.
 //
-// The write child itself still arrives through the options-injected trusted
-// test seam (the shipped production CLI ignores test endpoint overrides by
-// design and always uses the immutable Google host, so it can never back a
-// loopback pipeline). What this proves end to end, over REAL stdio to the
-// TRACKED fixture server: normal startup ACCEPTS the file-only operator
-// configuration (frozen env + strict hint parse + triple gate) and the
-// staged approve -> ONE conditional PATCH -> strategy readback -> verified
-// `succeeded` receipt pipeline performs exactly as with any other wiring —
-// while the persisted grant file on disk stays byte-identical (the harness
-// never copies, mints, or rewrites credential material; refresh
-// persistence is the fork CLI's own atomic per-account merge, covered by
-// `reschedulePersistedGrant.test.ts` at auth-parse level with 0 Google
-// writes). No live Google, no OAuth, fixture data only.
+// Scope labels (honest): the write child here is the TRACKED contract-mirror
+// fixture (`rescheduleFixtureServer.mjs --file-auth`), NOT the shipped fork
+// CLI — the shipped production CLI ignores test endpoint overrides by design
+// and always uses the immutable Google host, so it can never back a
+// loopback pipeline (its proof is the auth-parse suite
+// `reschedulePersistedGrant.test.ts` + the fork's own refresh tests, 0
+// Google writes). What THIS suite proves, with NO injected transport seam
+// (the default production `startupEnvTransportFactory` spawns from the
+// FROZEN startup snapshot, so the allowlist and all three file-only values
+// are really exercised): the fixture enforces the REAL credential contract
+// against TEMP files only — account grammar, resolved write/readonly path
+// collision BEFORE any file read, no partial-env fallthrough, client
+// registration + per-account exact-scope grant, and the explicit-target
+// account gate — while the loopback endpoint travels as a child argv
+// parameter (test-only transport wiring, never a credential). Dropping any
+// wiring variable, mutating the live env post-start, mismatching the
+// configured account, hiding the custom readonly path, or colliding the
+// grant with the readonly file all fail with NO successful action and NO
+// patch. No live Google, no OAuth, fixture data only.
 // ---------------------------------------------------------------------------
 
 const FILE_ONLY_ACCOUNT = "proof-acct";
 const FILE_ONLY_WRITE_SCOPE = "https://www.googleapis.com/auth/calendar.events";
+const FILE_ONLY_READONLY_ENV = "GOOGLE_CALENDAR_MCP_READONLY_TOKEN_PATH";
 
-/** Exact file-only operator allowlist: SDK defaults + 3 wiring names. */
-function fileOnlyConnectorHintJson(helper: string): string {
+/**
+ * Exact file-only operator hint: SDK defaults + the 4 wiring names. The
+ * loopback endpoint travels as argv (`--endpoint-base`, test-only transport
+ * wiring); every credential travels via the frozen-env allowlist exactly
+ * like production. `extraArgs`/`allowlist` overrides exist ONLY for the
+ * negative startup cases below.
+ */
+function fileOnlyConnectorHintJson(
+  helper: string,
+  endpointBase: string,
+  overrides: {
+    readonly extraArgs?: readonly string[];
+    readonly allowlist?: readonly string[];
+  } = {},
+): string {
   return JSON.stringify({
     command: "node",
-    args: [helper],
-    envAllowlist: [
+    args: [
+      helper,
+      "--endpoint-base",
+      endpointBase,
+      "--file-auth",
+      ...(overrides.extraArgs ?? []),
+    ],
+    envAllowlist: overrides.allowlist ?? [
       ...STDIO_IMPLICIT_ENV_VARS,
-      "M5_RESCHEDULE_ACCOUNT",
-      "M5_RESCHEDULE_WRITE_TOKEN_PATH",
       "GOOGLE_OAUTH_CREDENTIALS",
+      "M5_RESCHEDULE_WRITE_TOKEN_PATH",
+      "M5_RESCHEDULE_ACCOUNT",
+      FILE_ONLY_READONLY_ENV,
     ],
   });
 }
 
-function writeFileOnlyOperatorFiles(dir: string): {
+function writeFileOnlyOperatorFiles(
+  dir: string,
+  account = FILE_ONLY_ACCOUNT,
+  tokenName = "write-tokens.json",
+): {
   clientFile: string;
   tokenFile: string;
 } {
@@ -1989,14 +2030,15 @@ function writeFileOnlyOperatorFiles(dir: string): {
       redirect_uris: ["http://localhost:3000/oauth2callback"],
     }),
   );
-  // Well-formed exact-scope persisted grant for the selected account (the
-  // production file format `{ [account]: { refresh_token, scope, ... } }`;
-  // the fixture child never reads it — the harness must not need to).
-  const tokenFile = join(dir, "write-tokens.json");
+  // Well-formed exact-scope persisted grant for the account (the production
+  // file format `{ [account]: { refresh_token, scope, ... } }`). The
+  // file-auth fixture child READS and validates this (account, scope,
+  // collision) — the harness itself never copies, mints, or rewrites it.
+  const tokenFile = join(dir, tokenName);
   writeFileSync(
     tokenFile,
     JSON.stringify({
-      [FILE_ONLY_ACCOUNT]: {
+      [account]: {
         refresh_token: "file-only-proof-refresh",
         scope: FILE_ONLY_WRITE_SCOPE,
         access_token: "file-only-proof-access",
@@ -2007,46 +2049,70 @@ function writeFileOnlyOperatorFiles(dir: string): {
   return { clientFile, tokenFile };
 }
 
-describe("persisted-grant file-only operator wiring (local fixture pipeline)", () => {
+/** Assert the file-only env carries paths/selectors only — never secrets. */
+function expectNoSecretCredentialValues(env: NodeJS.ProcessEnv): void {
+  for (const key of Object.keys(env)) {
+    expect(key).not.toBe("M5_RESCHEDULE_CLIENT_ID");
+    expect(key).not.toBe("M5_RESCHEDULE_CLIENT_SECRET");
+    expect(key).not.toBe("M5_RESCHEDULE_REFRESH_TOKEN");
+    expect(key).not.toBe("M5_RESCHEDULE_GRANTED_SCOPE");
+    expect(key).not.toBe("M5_RESCHEDULE_ACCESS_TOKEN");
+  }
+}
+
+describe("persisted-grant file-only operator wiring (normal startup, default factory)", () => {
   it("staged approve performs exactly ONE conditional PATCH and lands a verified succeeded receipt with zero secret values in env", async () => {
     const { env, dbPath } = tempEnv();
     const fx = await startGoogleFixture();
-    const instanceId = await provisionCalendarInstance(dbPath);
+    // The configured write account EQUALS the active selection account
+    // (fork `^[a-z0-9_-]{1,64}$` grammar on both sides): the documented
+    // usable configuration, not a falsified mismatch.
+    const instanceId = await provisionCalendarInstance(
+      dbPath,
+      FILE_ONLY_ACCOUNT,
+    );
     const { sessionId, proposalId, hash } = await seedStagedProposal(
       dbPath,
       instanceId,
+      FILE_ONLY_ACCOUNT,
     );
     const dir = mkdtempSync(join(tmpdir(), "companion-write-file-only-"));
     tempDirs.push(dir);
     const { clientFile, tokenFile } = writeFileOnlyOperatorFiles(dir);
     const grantBefore = readFileSync(tokenFile, "utf-8");
+    // Distinct custom readonly path (never created): proves the host forwards
+    // the visibility without reading, and the collision guard passes.
+    const readonlyFile = join(dir, "readonly-tokens.json");
     const helper = fixtureHelperPath();
-    const startupEnv = {
+    const startupEnv: NodeJS.ProcessEnv = {
       ...env,
+      ...completeFrozenEnv(),
       COMPANION_ACTIONS_JSON: ENABLED_ACTIONS_JSON,
       [RESCHEDULE_WRITE_PROFILE_ENV]: "google-reschedule",
-      [RESCHEDULE_WRITE_CONNECTOR_ENV]: fileOnlyConnectorHintJson(helper),
+      [RESCHEDULE_WRITE_CONNECTOR_ENV]: fileOnlyConnectorHintJson(
+        helper,
+        fx.base,
+      ),
       M5_RESCHEDULE_ACCOUNT: FILE_ONLY_ACCOUNT,
       M5_RESCHEDULE_WRITE_TOKEN_PATH: tokenFile,
       GOOGLE_OAUTH_CREDENTIALS: clientFile,
+      [FILE_ONLY_READONLY_ENV]: readonlyFile,
     };
     // File-only proof: no secret-carrying write-credential value may appear
     // in the startup env the profile freezes and the child inherits.
-    for (const key of Object.keys(startupEnv)) {
-      expect(key).not.toBe("M5_RESCHEDULE_CLIENT_ID");
-      expect(key).not.toBe("M5_RESCHEDULE_CLIENT_SECRET");
-      expect(key).not.toBe("M5_RESCHEDULE_REFRESH_TOKEN");
-      expect(key).not.toBe("M5_RESCHEDULE_GRANTED_SCOPE");
-      expect(key).not.toBe("M5_RESCHEDULE_ACCESS_TOKEN");
-    }
+    expectNoSecretCredentialValues(startupEnv);
+    // NORMAL startup path: NO injected transport factory — the default
+    // production `startupEnvTransportFactory` spawns the child from the
+    // frozen snapshot under the allowlist above. `writeTestIdentity` only
+    // permits the TRACKED fixture identity (never production pin weakening:
+    // options-injected, never env).
     const started = await startServer({
       env: startupEnv,
       calendarBinding: {
         connectorInstanceId: instanceId,
         connector: fixtureBackedCalendarBinding(instanceId, () => fx.base),
-        selection: { calendarId: "primary", account: "ops@example" },
+        selection: { calendarId: "primary", account: FILE_ONLY_ACCOUNT },
       },
-      writeMcpTransportFactory: testWriteTransportFactory(fx.base),
       writeTestIdentity: { ...FIXTURE_IDENTITY },
       drainMs: 50,
     });
@@ -2064,7 +2130,290 @@ describe("persisted-grant file-only operator wiring (local fixture pipeline)", (
     expect(fx.lastIfMatch()).toBe(E2E_ETAG_V1);
     expect(fx.lastBodyKeys()).toEqual(["end", "start"]);
     expect(fx.eventStart()).toBe(E2E_START_NEW);
-    // The harness never touches the persisted grant: byte-identical.
+    // The harness never touches the persisted grant: byte-identical, and the
+    // readonly path was never created or read.
+    expect(readFileSync(tokenFile, "utf-8")).toBe(grantBefore);
+    expect(existsSync(readonlyFile)).toBe(false);
+  }, 60_000);
+
+  it.each([
+    "M5_RESCHEDULE_ACCOUNT",
+    "M5_RESCHEDULE_WRITE_TOKEN_PATH",
+    "GOOGLE_OAUTH_CREDENTIALS",
+  ])(
+    "omitting %s from the frozen startup env yields NO successful action and NO patch",
+    async (omitted) => {
+      // Each omission removes one leg of the real host-to-child path (env
+      // value, not just the allowlist): the file-auth child must refuse
+      // BEFORE listening, so the execution cannot succeed and no PATCH is
+      // ever dispatched. Grant files present stay byte-identical.
+      const { env, dbPath } = tempEnv();
+      const fx = await startGoogleFixture();
+      const instanceId = await provisionCalendarInstance(
+        dbPath,
+        FILE_ONLY_ACCOUNT,
+      );
+      const { sessionId, proposalId, hash } = await seedStagedProposal(
+        dbPath,
+        instanceId,
+        FILE_ONLY_ACCOUNT,
+      );
+      const dir = mkdtempSync(join(tmpdir(), "companion-write-file-only-"));
+      tempDirs.push(dir);
+      const { clientFile, tokenFile } = writeFileOnlyOperatorFiles(dir);
+      const grantBefore = readFileSync(tokenFile, "utf-8");
+      const readonlyFile = join(dir, "readonly-tokens.json");
+      const helper = fixtureHelperPath();
+      const startupEnv: NodeJS.ProcessEnv = {
+        ...env,
+        ...completeFrozenEnv(),
+        COMPANION_ACTIONS_JSON: ENABLED_ACTIONS_JSON,
+        [RESCHEDULE_WRITE_PROFILE_ENV]: "google-reschedule",
+        [RESCHEDULE_WRITE_CONNECTOR_ENV]: fileOnlyConnectorHintJson(
+          helper,
+          fx.base,
+        ),
+        M5_RESCHEDULE_ACCOUNT: FILE_ONLY_ACCOUNT,
+        M5_RESCHEDULE_WRITE_TOKEN_PATH: tokenFile,
+        GOOGLE_OAUTH_CREDENTIALS: clientFile,
+        [FILE_ONLY_READONLY_ENV]: readonlyFile,
+      };
+      delete startupEnv[omitted];
+      expectNoSecretCredentialValues(startupEnv);
+      const started = await startServer({
+        env: startupEnv,
+        calendarBinding: {
+          connectorInstanceId: instanceId,
+          connector: fixtureBackedCalendarBinding(instanceId, () => fx.base),
+          selection: { calendarId: "primary", account: FILE_ONLY_ACCOUNT },
+        },
+        writeTestIdentity: { ...FIXTURE_IDENTITY },
+        drainMs: 50,
+      });
+      servers.push(started);
+      await approveProposalHttp(started.port, sessionId, proposalId, hash);
+      const view = await waitForTerminalReceipt(
+        started.port,
+        sessionId,
+        proposalId,
+      );
+      expect(view.receipt?.outcome).not.toBe("succeeded");
+      expect(fx.patchCount()).toBe(0);
+      expect(readFileSync(tokenFile, "utf-8")).toBe(grantBefore);
+    },
+    60_000,
+  );
+
+  it("a post-start live-env mutation cannot change the frozen write-child values", async () => {
+    // The lazy write child spawns on first approved execution — AFTER this
+    // mutation — but the default factory closes over the FROZEN startup
+    // snapshot. The alternative files are fully VALID for a DIFFERENT
+    // account, so a live-env read would configure `other-acct` against the
+    // `proof-acct` target and the provider gate would refuse (`failed`, no
+    // patch). Success + exactly ONE patch therefore proves the frozen
+    // values won — an outcome assertion, not a forwarded-value echo.
+    const { env, dbPath } = tempEnv();
+    const fx = await startGoogleFixture();
+    const instanceId = await provisionCalendarInstance(
+      dbPath,
+      FILE_ONLY_ACCOUNT,
+    );
+    const { sessionId, proposalId, hash } = await seedStagedProposal(
+      dbPath,
+      instanceId,
+      FILE_ONLY_ACCOUNT,
+    );
+    const dir = mkdtempSync(join(tmpdir(), "companion-write-file-only-"));
+    tempDirs.push(dir);
+    const { clientFile, tokenFile } = writeFileOnlyOperatorFiles(dir);
+    const grantBefore = readFileSync(tokenFile, "utf-8");
+    const altDir = mkdtempSync(join(tmpdir(), "companion-write-file-alt-"));
+    tempDirs.push(altDir);
+    const alt = writeFileOnlyOperatorFiles(altDir, "other-acct", "alt.json");
+    const readonlyFile = join(dir, "readonly-tokens.json");
+    const helper = fixtureHelperPath();
+    const liveEnv: NodeJS.ProcessEnv = {
+      ...env,
+      ...completeFrozenEnv(),
+      COMPANION_ACTIONS_JSON: ENABLED_ACTIONS_JSON,
+      [RESCHEDULE_WRITE_PROFILE_ENV]: "google-reschedule",
+      [RESCHEDULE_WRITE_CONNECTOR_ENV]: fileOnlyConnectorHintJson(
+        helper,
+        fx.base,
+      ),
+      M5_RESCHEDULE_ACCOUNT: FILE_ONLY_ACCOUNT,
+      M5_RESCHEDULE_WRITE_TOKEN_PATH: tokenFile,
+      GOOGLE_OAUTH_CREDENTIALS: clientFile,
+      [FILE_ONLY_READONLY_ENV]: readonlyFile,
+    };
+    expectNoSecretCredentialValues(liveEnv);
+    const pending = startServer({
+      env: liveEnv,
+      calendarBinding: {
+        connectorInstanceId: instanceId,
+        connector: fixtureBackedCalendarBinding(instanceId, () => fx.base),
+        selection: { calendarId: "primary", account: FILE_ONLY_ACCOUNT },
+      },
+      writeTestIdentity: { ...FIXTURE_IDENTITY },
+      drainMs: 50,
+    });
+    // Mutate the SAME object synchronously after the call: the frozen
+    // snapshot was already captured, so the child must never see these.
+    liveEnv.M5_RESCHEDULE_ACCOUNT = "other-acct";
+    liveEnv.M5_RESCHEDULE_WRITE_TOKEN_PATH = alt.tokenFile;
+    liveEnv.GOOGLE_OAUTH_CREDENTIALS = alt.clientFile;
+    const started = await pending;
+    servers.push(started);
+    await approveProposalHttp(started.port, sessionId, proposalId, hash);
+    const view = await waitForTerminalReceipt(
+      started.port,
+      sessionId,
+      proposalId,
+    );
+    expect(view.markerCommitted).toBe(true);
+    expect(view.receipt?.outcome).toBe("succeeded");
+    expect(fx.patchCount()).toBe(1);
+    expect(fx.lastIfMatch()).toBe(E2E_ETAG_V1);
+    // Frozen values won: the original grant is untouched and the
+    // never-configured alternative files were never read or refreshed.
+    expect(readFileSync(tokenFile, "utf-8")).toBe(grantBefore);
+  }, 60_000);
+
+  it("a configured write account mismatching the active selection is rejected before any DB side effect", async () => {
+    // A different configured account would make every approved action fail
+    // the provider exact-account precheck AFTER the grant commit (late
+    // failure behind green readiness): fail closed at startup instead, with
+    // no DB file created.
+    const { env, dbPath } = tempEnv();
+    const instanceId = randomUUID();
+    const helper = fixtureHelperPath();
+    await expect(
+      startServer({
+        env: {
+          ...env,
+          ...completeFrozenEnv(),
+          COMPANION_ACTIONS_JSON: ENABLED_ACTIONS_JSON,
+          [RESCHEDULE_WRITE_PROFILE_ENV]: "google-reschedule",
+          [RESCHEDULE_WRITE_CONNECTOR_ENV]: fileOnlyConnectorHintJson(
+            helper,
+            "http://127.0.0.1:9",
+          ),
+          M5_RESCHEDULE_ACCOUNT: "other-acct",
+          M5_RESCHEDULE_WRITE_TOKEN_PATH: join("write-tokens.json"),
+          GOOGLE_OAUTH_CREDENTIALS: join("gcp-oauth.keys.json"),
+          [FILE_ONLY_READONLY_ENV]: join("readonly-tokens.json"),
+        },
+        calendarBinding: {
+          connectorInstanceId: instanceId,
+          connector: fakeCalendarBinding(instanceId),
+          selection: { calendarId: "primary", account: FILE_ONLY_ACCOUNT },
+        },
+        writeTestIdentity: { ...FIXTURE_IDENTITY },
+        drainMs: 50,
+      }),
+    ).rejects.toThrow(/does not match the active calendar selection/);
+    expect(existsSync(dbPath)).toBe(false);
+  });
+
+  it("a custom readonly path hidden from the allowlist is rejected before any DB side effect", async () => {
+    // The fork resolves its collision guard against the CUSTOM readonly
+    // path only when the child can see it: configured-but-unallowlisted is
+    // a fail-closed host configuration (never a documentation-only rule).
+    const { env, dbPath } = tempEnv();
+    const instanceId = randomUUID();
+    const helper = fixtureHelperPath();
+    await expect(
+      startServer({
+        env: {
+          ...env,
+          ...completeFrozenEnv(),
+          COMPANION_ACTIONS_JSON: ENABLED_ACTIONS_JSON,
+          [RESCHEDULE_WRITE_PROFILE_ENV]: "google-reschedule",
+          [RESCHEDULE_WRITE_CONNECTOR_ENV]: fileOnlyConnectorHintJson(
+            helper,
+            "http://127.0.0.1:9",
+            {
+              allowlist: [
+                ...STDIO_IMPLICIT_ENV_VARS,
+                "GOOGLE_OAUTH_CREDENTIALS",
+                "M5_RESCHEDULE_WRITE_TOKEN_PATH",
+                "M5_RESCHEDULE_ACCOUNT",
+              ],
+            },
+          ),
+          M5_RESCHEDULE_ACCOUNT: FILE_ONLY_ACCOUNT,
+          M5_RESCHEDULE_WRITE_TOKEN_PATH: join("write-tokens.json"),
+          GOOGLE_OAUTH_CREDENTIALS: join("gcp-oauth.keys.json"),
+          [FILE_ONLY_READONLY_ENV]: join("readonly-tokens.json"),
+        },
+        calendarBinding: {
+          connectorInstanceId: instanceId,
+          connector: fakeCalendarBinding(instanceId),
+          selection: { calendarId: "primary", account: FILE_ONLY_ACCOUNT },
+        },
+        writeTestIdentity: { ...FIXTURE_IDENTITY },
+        drainMs: 50,
+      }),
+    ).rejects.toThrow(/env allowlist is invalid/);
+    expect(existsSync(dbPath)).toBe(false);
+  });
+
+  it("a write grant colliding with the custom readonly path is refused with NO patch and unchanged files", async () => {
+    // Normal-host collision regression through the DEFAULT factory: the
+    // write token path EQUALS the custom readonly path (temp files, never
+    // real credentials). The child refuses BEFORE token load/refresh, so no
+    // PATCH is dispatched and the grant file stays byte-identical.
+    const { env, dbPath } = tempEnv();
+    const fx = await startGoogleFixture();
+    const instanceId = await provisionCalendarInstance(
+      dbPath,
+      FILE_ONLY_ACCOUNT,
+    );
+    const { sessionId, proposalId, hash } = await seedStagedProposal(
+      dbPath,
+      instanceId,
+      FILE_ONLY_ACCOUNT,
+    );
+    const dir = mkdtempSync(join(tmpdir(), "companion-write-file-only-"));
+    tempDirs.push(dir);
+    const { clientFile, tokenFile } = writeFileOnlyOperatorFiles(dir);
+    const grantBefore = readFileSync(tokenFile, "utf-8");
+    const helper = fixtureHelperPath();
+    const startupEnv: NodeJS.ProcessEnv = {
+      ...env,
+      ...completeFrozenEnv(),
+      COMPANION_ACTIONS_JSON: ENABLED_ACTIONS_JSON,
+      [RESCHEDULE_WRITE_PROFILE_ENV]: "google-reschedule",
+      [RESCHEDULE_WRITE_CONNECTOR_ENV]: fileOnlyConnectorHintJson(
+        helper,
+        fx.base,
+      ),
+      M5_RESCHEDULE_ACCOUNT: FILE_ONLY_ACCOUNT,
+      M5_RESCHEDULE_WRITE_TOKEN_PATH: tokenFile,
+      GOOGLE_OAUTH_CREDENTIALS: clientFile,
+      // Collision: the custom readonly path IS the write grant file.
+      [FILE_ONLY_READONLY_ENV]: tokenFile,
+    };
+    expectNoSecretCredentialValues(startupEnv);
+    const started = await startServer({
+      env: startupEnv,
+      calendarBinding: {
+        connectorInstanceId: instanceId,
+        connector: fixtureBackedCalendarBinding(instanceId, () => fx.base),
+        selection: { calendarId: "primary", account: FILE_ONLY_ACCOUNT },
+      },
+      writeTestIdentity: { ...FIXTURE_IDENTITY },
+      drainMs: 50,
+    });
+    servers.push(started);
+    await approveProposalHttp(started.port, sessionId, proposalId, hash);
+    const view = await waitForTerminalReceipt(
+      started.port,
+      sessionId,
+      proposalId,
+    );
+    expect(view.receipt?.outcome).not.toBe("succeeded");
+    expect(fx.patchCount()).toBe(0);
     expect(readFileSync(tokenFile, "utf-8")).toBe(grantBefore);
   }, 60_000);
 });

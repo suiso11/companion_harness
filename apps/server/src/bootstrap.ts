@@ -112,7 +112,9 @@ import {
 } from "./maintenance.js";
 import { createMemoryService, type MemoryService } from "./memory_service.js";
 import {
+  assertRescheduleWriteAccountCompatible,
   assertRescheduleWriteHintCompatible,
+  assertRescheduleWriteReadonlyPathVisible,
   buildRescheduleWriteConnectorConfig,
   getRescheduleWriteDefinitions,
   parseRescheduleWriteConnectorHint,
@@ -870,6 +872,28 @@ export async function startServer(
             "reschedule write connector env allowlist is invalid",
           );
         }
+      }
+      // Fail-closed write-account/selection consistency + custom
+      // readonly-path visibility, BEFORE any DB side effect. Pure string
+      // checks over the frozen startup snapshot and the active selection
+      // (owned config or injected binding): no grant/token file is loaded,
+      // no credential value is inspected, and the manual-env-credential
+      // fork mode needs no new wiring. A mismatch or an invisible custom
+      // readonly path would otherwise surface only as a late per-action
+      // refusal (or a missed collision) behind green readiness.
+      {
+        const writeSelection =
+          calendarConfig !== null
+            ? calendarConfig.selection
+            : calendarBinding?.selection;
+        assertRescheduleWriteAccountCompatible(
+          frozenStartupEnv.M5_RESCHEDULE_ACCOUNT,
+          writeSelection?.account,
+        );
+        assertRescheduleWriteReadonlyPathVisible(
+          writeConnectorHint,
+          frozenStartupEnv,
+        );
       }
     } else if (frozenWriteConnectorHint !== undefined) {
       // Hints without the profile selector are never silently adopted or

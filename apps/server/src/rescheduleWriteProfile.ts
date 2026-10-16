@@ -48,8 +48,12 @@
 //   accounts preserved, 0600) — the single-token supplier format is never
 //   written over it. The RECOMMENDED host flow is file-only: the write
 //   child allowlist carries ONLY the client file path, the write token
-//   file path, and the account selector (plus the mandatory SDK inherited
-//   names) — no `M5_RESCHEDULE_CLIENT_*` / `M5_RESCHEDULE_REFRESH_TOKEN` /
+//   file path, the account selector, and the readonly token path name
+//   (`GOOGLE_CALENDAR_MCP_READONLY_TOKEN_PATH`, so the fork always sees the
+//   actual custom readonly path for its resolved collision guard — REQUIRED
+//   in the allowlist whenever a custom readonly path is configured, enforced
+//   fail-closed at startup; plus the mandatory SDK inherited names) — no
+//   `M5_RESCHEDULE_CLIENT_*` / `M5_RESCHEDULE_REFRESH_TOKEN` /
 //   `M5_RESCHEDULE_GRANTED_SCOPE` / `M5_RESCHEDULE_ACCESS_TOKEN` values, so
 //   no manual env secret copy is ever needed. `M5_RESCHEDULE_TEST_*` names
 //   stay rejected: the production CLI ignores test endpoint overrides and
@@ -178,6 +182,39 @@ export const RESCHEDULE_WRITE_CONNECTOR_ENV =
 
 /** The single adopted dedicated write profile name. */
 export const RESCHEDULE_WRITE_PROFILE_NAME = "google-reschedule" as const;
+
+/**
+ * Pinned fork account grammar for the configured write selector
+ * (`M5_RESCHEDULE_ACCOUNT`, fork `validateAccountId`): lowercase ASCII
+ * `[a-z0-9_-]{1,64}` — never a display name or email. Reserved device names
+ * are refused exactly like the provider. Case-sensitive, no normalization,
+ * no default guess. Pure shape check (no I/O, no grant load).
+ */
+export const RESCHEDULE_WRITE_ACCOUNT_PATTERN = /^[a-z0-9_-]{1,64}$/;
+const RESCHEDULE_WRITE_RESERVED_ACCOUNTS: ReadonlySet<string> = new Set([
+  ".",
+  "..",
+  "con",
+  "prn",
+  "aux",
+  "nul",
+  "com1",
+  "com2",
+  "com3",
+  "com4",
+  "lpt1",
+  "lpt2",
+  "lpt3",
+]);
+
+/**
+ * Env name carrying the custom readonly token path. The fork resolves the
+ * write/readonly path collision against THIS override when set (else its
+ * isolated default); when a custom path is configured but the write child
+ * cannot see it, the fork compares against the wrong default instead.
+ */
+export const RESCHEDULE_WRITE_READONLY_TOKEN_ENV =
+  "GOOGLE_CALENDAR_MCP_READONLY_TOKEN_PATH" as const;
 
 /** Logical (config-only) server id for the dedicated write connector. */
 export const RESCHEDULE_WRITE_SERVER_ID = "reschedule-write" as const;
@@ -341,6 +378,68 @@ export function parseRescheduleWriteConnectorHint(
     envAllowlist = Object.freeze([...(record.envAllowlist as string[])]);
   }
   return Object.freeze({ command, args, envAllowlist });
+}
+
+/**
+ * Fail-closed configured-account / active-selection consistency (no I/O,
+ * before any DB side effect): an EXPLICITLY configured `M5_RESCHEDULE_ACCOUNT`
+ * must satisfy the fork account grammar and — whenever the active Calendar
+ * selection carries an account — equal it EXACTLY (case-sensitive). A
+ * different value would make every approved action fail the provider's
+ * exact-account precheck AFTER the grant commit (late failure behind a green
+ * readiness), so the mismatch fails closed here instead. Unset stays
+ * unconfigured (the runtime refuses safely without a write); an absent
+ * selection account imposes no constraint. Fixed path-free messages only
+ * (never account values).
+ */
+export function assertRescheduleWriteAccountCompatible(
+  configuredAccount: string | undefined,
+  selectionAccount: string | undefined,
+): void {
+  if (configuredAccount === undefined || configuredAccount.length === 0) {
+    return;
+  }
+  if (
+    !RESCHEDULE_WRITE_ACCOUNT_PATTERN.test(configuredAccount) ||
+    RESCHEDULE_WRITE_RESERVED_ACCOUNTS.has(configuredAccount)
+  ) {
+    throw writeProfileError("reschedule write account is invalid");
+  }
+  if (
+    selectionAccount !== undefined &&
+    configuredAccount !== selectionAccount
+  ) {
+    throw writeProfileError(
+      "reschedule write account does not match the active calendar selection",
+    );
+  }
+}
+
+/**
+ * Fail-closed custom readonly-path visibility (no I/O, before any DB side
+ * effect): when the frozen startup env configures an explicit custom
+ * readonly token path, the write-child env allowlist MUST carry
+ * `GOOGLE_CALENDAR_MCP_READONLY_TOKEN_PATH` so the fork sees the ACTUAL
+ * custom path for its resolved write/readonly collision guard. Without it
+ * the fork compares against its default instead and may load or refresh a
+ * collided shared file rather than refusing — so the omission fails closed
+ * here instead of being a documentation-only rule. Unset custom path needs
+ * no allowlist entry (the fork default applies on both sides). Fixed
+ * path-free message only (never paths).
+ */
+export function assertRescheduleWriteReadonlyPathVisible(
+  hint: RescheduleWriteConnectorHint,
+  frozenEnv: Readonly<Record<string, string | undefined>>,
+): void {
+  const custom = frozenEnv[RESCHEDULE_WRITE_READONLY_TOKEN_ENV];
+  if (custom === undefined || custom.length === 0) {
+    return;
+  }
+  if (!hint.envAllowlist.includes(RESCHEDULE_WRITE_READONLY_TOKEN_ENV)) {
+    throw writeProfileError(
+      "reschedule write connector env allowlist is invalid",
+    );
+  }
 }
 
 /**

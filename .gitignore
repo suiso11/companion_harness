@@ -30,3 +30,6 @@ Thumbs.db
 # M5 persisted write-grant proof (private throwaway: local real-CLI stdio
 # smoke logs + sanitized aggregate facts only, never credentials/fixtures).
 .m5-persisted-write-proof/
+# PR35 auth-review proof (private throwaway: local smoke logs + sanitized
+# aggregate facts only, never credentials/fixtures/real grants).
+.m5-pr35-review-proof/

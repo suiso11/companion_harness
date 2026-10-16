@@ -1018,14 +1018,20 @@ or complete activate config):
   and manual Win11 smoke.
 - Adoption pin (exact form, verified against a real fork checkout):
   `suiso11/google-calendar-mcp`
-  commit `6939311fd3eae9846648e0a175e304c9500f578e`
-  (tree `f01b5a7b608c4091906a52c0784b828c35963de9`,
+  commit `cefb63c24f062ef6a49889d7b635330dee884f63`
+  (reviewed fork PR4 head: persisted-grant runtime + bounded pageSize +
+  single-account string; base `6939311` in ancestry;
+  tree `624968c65f499f5d30141f4d936aca66d016b531`,
   package `@cocal/google-calendar-mcp@3.0.0-readonly.2`, lock SHA-256
   `63261d25…bd533`), wire identity `{name:"google-calendar",
   version:"3.0.0-readonly.2"}`, exactly
   `list-events`/`search-events`/`get-event` with the live-wire hashes
-  (`81222b89…`, `d48ba36e…`, `8c6736e2…` — SDK wire bytes, NOT the
-  registry-direct `a065/012e/913…` diagnostic bytes). Scope stays
+  (`01c3d647…`, `d94166b7…`, `8c6736e2…` — SDK wire bytes, NOT the
+  registry-direct `a065/012e/913…` diagnostic bytes). The list/search
+  rotation vs the superseded 6939311 hashes (`81222b89…`, `d48ba36e…`)
+  is the reviewed single optional `account` string (arrays refused) plus
+  `pageSize` 1..20 honored with `maxResults` default 20; `get-event` is
+  byte-identical. Scope stays
   `calendar.events.readonly` only; no `CalendarList` metadata lookup on the
   MCP path; no writes; `list-calendars` absent (denied, never registered).
 - Selection rules (all fail closed with fixed messages, before listen):
@@ -1071,8 +1077,8 @@ or complete activate config):
   2. Fork checkout, verification, then build (exact pin form; verification
      runs BEFORE any install/build):
      repo `https://github.com/suiso11/google-calendar-mcp`, commit
-     `6939311fd3eae9846648e0a175e304c9500f578e`, tree
-     `f01b5a7b608c4091906a52c0784b828c35963de9`, package
+     `cefb63c24f062ef6a49889d7b635330dee884f63`, tree
+     `624968c65f499f5d30141f4d936aca66d016b531`, package
      `@cocal/google-calendar-mcp@3.0.0-readonly.2`, `package-lock.json`
      SHA-256
      `63261d25992ee9c97136a60bbf4fe52a5485cadea28b34d6b8b6c685f38bd533`.
@@ -1089,8 +1095,8 @@ or complete activate config):
      ```bash
      COMPANION_DIR="$PWD"  # absolute Companion checkout root (contains pnpm-workspace.yaml); keep for step 5
      FORK_DIR="$HOME/gcal-readonly"
-     PIN_COMMIT="6939311fd3eae9846648e0a175e304c9500f578e"
-     PIN_TREE="f01b5a7b608c4091906a52c0784b828c35963de9"
+     PIN_COMMIT="cefb63c24f062ef6a49889d7b635330dee884f63"
+     PIN_TREE="624968c65f499f5d30141f4d936aca66d016b531"
      PIN_PKG="@cocal/google-calendar-mcp@3.0.0-readonly.2"
      PIN_LOCK="63261d25992ee9c97136a60bbf4fe52a5485cadea28b34d6b8b6c685f38bd533"
      test "$(node -p "process.version")" = "v24.12.0"
@@ -1187,8 +1193,8 @@ or complete activate config):
            envAllowlist: [...base, "GOOGLE_OAUTH_CREDENTIALS", "GOOGLE_CALENDAR_MCP_READONLY_TOKEN_PATH", "GOOGLE_ACCOUNT_MODE"],
          },
          bindings: [
-           { upstreamTool: "list-events", canonicalSchemaHash: "81222b89482cba77b12a707c2097c66df383cab7929c14dca03cc303846d794c" },
-           { upstreamTool: "search-events", canonicalSchemaHash: "d48ba36e7f280d92eaba9550323e90aa7a6d7c758812932ad62012f4514558b7" },
+           { upstreamTool: "list-events", canonicalSchemaHash: "01c3d647c272fdbd0de1028f73c76cd8baab931f177733146cd6287b9683d1fe" },
+           { upstreamTool: "search-events", canonicalSchemaHash: "d94166b755b694710c925fcc96e6ecff1016ea53f470264428494656791be7f6" },
            { upstreamTool: "get-event", canonicalSchemaHash: "8c6736e2a1f397d0735efa5c0881f5c350c300b21a0b026e80c112258b596bda" },
          ],
        },
@@ -3498,7 +3504,11 @@ Google mutation, no new consent, no reconsent, no deploy changes; readonly
 - Fork landed as `cefb63c24f062ef6a49889d7b635330dee884f63`
   (tree `624968c65f499f5d30141f4d936aca66d016b531`, fork PR #4
   `feat/m5-allday-conversion` -> `main`; base `6939311` in ancestry, lock
-  digest unchanged `63261d25…533`, readonly surface untouched). Host write
+  digest unchanged `63261d25…533`, write wire unchanged). The same reviewed
+  head also rotates the readonly list/search schemas (single optional
+  `account` string, bounded `pageSize`/`maxResults` default 20) — the host
+  readonly pin is repinned alongside (see "read-only repin" below), so the
+  write adoption and the readonly adoption agree on one fork commit. Host write
   pin repinned to the new source SHA/tree (branch + provenance comments
   updated; wire hash + identity + scope constants unchanged).
 - Runtime auth (fork `src/reschedule/cli.ts`
@@ -3522,44 +3532,105 @@ Google mutation, no new consent, no reconsent, no deploy changes; readonly
   exact-scope persisted grant + temp Desktop client file and file-only
   child env: `reschedule-event` hash `9f59e35b…8609d7`, byte-identical,
   pin unchanged (auth work touches credential resolution only).
-- Recommended file-only operator setup (copy-pastable; secrets stay in
-  files, never in env/DB/model messages):
-  1. Prerequisites: a Google Cloud Desktop-app OAuth client JSON (kept as
-     a file, `chmod 600`) and the fork checkout built (`npm run
-     build:reschedule`, entry `build/reschedule-cli.js`).
+- Recommended file-only operator setup (copy-pastable from the Companion
+  checkout; secrets stay in files, never in env/DB/model messages — bind
+  these once, then reuse verbatim): `WRITE_FORK` (a NEW dedicated
+  clone/worktree path, e.g. `WRITE_FORK="$HOME/google-calendar-mcp-write"`
+  — never `git checkout` a dirty working tree to reach the pin),
+  `WRITE_ACCT` (the EXACT active Calendar selection `account`, e.g.
+  `WRITE_ACCT="ops-write"` — must match `^[a-z0-9_-]{1,64}$`),
+  `WRITE_CLIENT` (Google Cloud Desktop-app OAuth client JSON, `chmod 600`),
+  `WRITE_TOKENS` (grant file, e.g.
+  `WRITE_TOKENS="$HOME/.config/google-calendar-mcp-write/tokens.json"`,
+  override `M5_RESCHEDULE_WRITE_TOKEN_PATH`; 0600; never the readonly token
+  file — equal resolved paths refuse in the write child before any token
+  load), `READONLY_TOKENS` (the custom readonly token path, only when one
+  is configured).
+  0. Verify the fork BEFORE `npm ci`/build/consent (the runtime only
+     authenticates name/version/schema hash, so it cannot tell `cefb63c`
+     from a stale or modified checkout — an unverified build could hand
+     write-scope credentials to unreviewed code). Provision the dedicated
+     path, then detach the exact pin (no destructive checkout of any
+     existing tree, no force, no discarding user files):
+     `git clone https://github.com/suiso11/google-calendar-mcp "$WRITE_FORK"`
+     (or `git worktree add "$WRITE_FORK"` from an existing clone), then in
+     `$WRITE_FORK`: `git fetch origin`, `git checkout --detach
+     cefb63c24f062ef6a49889d7b635330dee884f63` (exact source commit),
+     `test "$(git rev-parse HEAD)" =
+     "cefb63c24f062ef6a49889d7b635330dee884f63"` (HEAD is the pin),
+     `git merge-base --is-ancestor
+     6939311fd3eae9846648e0a175e304c9500f578e HEAD` (readonly base in
+     ancestry), `test "$(git rev-parse 'HEAD^{tree}')" =
+     "624968c65f499f5d30141f4d936aca66d016b531"` (exact tree),
+     `test -z "$(git status --porcelain)"` (no modifications — a dirty
+     tree keeps the same commit id, so only a clean status proves the
+     build matches the review), `node -e
+     "const p=require('./package.json');if(p.name!=='@cocal/google-calendar-mcp'||p.version!=='3.0.0-readonly.2')process.exit(1)"`
+     (package identity) and `sha256sum package-lock.json` starting with
+     `63261d25` and ending `533` (full digest
+     `63261d25…533`, unchanged from the readonly base). Only then `npm ci`
+     (locked, reproducible — hooks run only AFTER the verification above)
+     and `npm run build` (produces `build/reschedule-cli.js` AND
+     `build/write-auth-server.js`; never reuse a stale ignored `build/` —
+     remove this checkout's OWN `build/` first or build fresh).
+  1. Prerequisites: the `$WRITE_CLIENT` file (`chmod 600`) plus the
+     verified fork built above.
   2. Separate narrow consent (out of band, exact scope only, no
-     calendar reads/writes, no write flags enabled):
-     `npm run auth:write -- --account <acct> --port 3500 --ttl-minutes 12 --no-browser`
-     (`<acct>` must match `^[a-z0-9_-]{1,64}$`). Output: the per-account
-     grant merged into `~/.config/google-calendar-mcp-write/tokens.json`
-     (override `M5_RESCHEDULE_WRITE_TOKEN_PATH`; 0600; never the readonly
-     token file — equal paths refuse at startup).
+     calendar reads/writes, no write flags enabled) FROM THE FORK CHECKOUT
+     — this repository's root `package.json` has NO `auth:write` script, so
+     a bare `npm run auth:write` here fails before creating any grant:
+     `npm --prefix "$WRITE_FORK" run auth:write -- --account "$WRITE_ACCT" --port 3500 --ttl-minutes 12 --no-browser`.
+     Output: the per-account grant merged into `$WRITE_TOKENS` (0600).
+     Routing smoke with NO OAuth server/network: `npm --prefix
+     "$WRITE_FORK" run auth:write -- --help` refuses immediately
+     (`write-auth: invalid account or arguments`, no listener, no network)
+     — proving the script resolves in the fork package, not the root.
   3. Normal startup (defaults OFF unchanged): `COMPANION_ACTIONS_JSON`
      `{ "optIn": true, "writeEnabled": true }` (triple gate: opt-in pair +
      dedicated port on the ACTIVE Calendar instance) plus
      `M5_RESCHEDULE_WRITE_PROFILE=google-reschedule` and
      `M5_RESCHEDULE_CONNECTOR_JSON` with `{ "command": "node", "args":
-     ["<fork>/build/reschedule-cli.js"], "envAllowlist": [<SDK inherited
-     names>, "GOOGLE_OAUTH_CREDENTIALS", "M5_RESCHEDULE_WRITE_TOKEN_PATH",
-     "M5_RESCHEDULE_ACCOUNT"] }`, with `GOOGLE_OAUTH_CREDENTIALS` (client
-     file path), `M5_RESCHEDULE_WRITE_TOKEN_PATH` (grant file path), and
-     `M5_RESCHEDULE_ACCOUNT` (`<acct>`) in the frozen startup env. No
-     `M5_RESCHEDULE_CLIENT_*` / `M5_RESCHEDULE_REFRESH_TOKEN` /
+     ["$WRITE_FORK/build/reschedule-cli.js"], "envAllowlist": [<SDK
+     inherited names>, "GOOGLE_OAUTH_CREDENTIALS",
+     "M5_RESCHEDULE_WRITE_TOKEN_PATH", "M5_RESCHEDULE_ACCOUNT",
+     "GOOGLE_CALENDAR_MCP_READONLY_TOKEN_PATH"] }`, with
+     `GOOGLE_OAUTH_CREDENTIALS` (`$WRITE_CLIENT`),
+     `M5_RESCHEDULE_WRITE_TOKEN_PATH` (`$WRITE_TOKENS`), and
+     `M5_RESCHEDULE_ACCOUNT` (`$WRITE_ACCT`) in the frozen startup env.
+     `$WRITE_ACCT` MUST equal the active Calendar selection `account`
+     whenever the selection carries one (exact, case-sensitive — host
+     startup fails closed on mismatch, otherwise every approved action
+     would fail the provider precheck AFTER the grant commit). The
+     readonly-path name MUST be allowlisted whenever a custom readonly
+     path is configured (`$READONLY_TOKENS` visible to the child — host
+     startup fails closed when it is configured-but-hidden, otherwise the
+     fork compares against the wrong default and can miss the collision).
+     No `M5_RESCHEDULE_CLIENT_*` / `M5_RESCHEDULE_REFRESH_TOKEN` /
      `M5_RESCHEDULE_GRANTED_SCOPE` / `M5_RESCHEDULE_ACCESS_TOKEN` values
      anywhere. Explicit env credentials remain a SUPPORTED fork mode when
      fully valid; the host simply never needs them.
-- Verification (Linux, Node 24.12.0 — scope labels accurate): AUTH-PARSE
-  via the real CLI (`reschedulePersistedGrant.test.ts` 7/7 under explicit
+- Verification (Linux — scope labels accurate): AUTH-PARSE via the real
+  CLI (`reschedulePersistedGrant.test.ts` 7/7 under explicit
   `M5_RESCHEDULE_FORK_CLI`: 1 file-only `tools/list` with pinned identity
   + hash, 6 refusals — missing account, readonly-only scope, broad scope
   alongside the exact token, foreign account, partial env WITH a valid
   grant file, write/readonly path collision — each exit 2 `auth_refused`
   with the grant file byte-identical; `tools/list` only, no refresh
-  network, 0 Google writes) + PIPELINE via the local fixture
-  (`rescheduleWriteStartup.test.ts` file-only E2E 1/1: zero secret values
-  in startup env, staged approve -> exactly ONE conditional PATCH
+  network, 0 Google writes) + NORMAL-HOST PIPELINE via the tracked
+  contract-mirror fixture (`rescheduleWriteStartup.test.ts` file-only
+  8/8, NO injected transport seam — the default production frozen-env
+  factory spawns the `--file-auth` fixture child: 1 positive (zero secret
+  values in startup env, staged approve -> exactly ONE conditional PATCH
   (`If-Match` = committed etag, start/end only) -> strategy readback ->
-  verified `succeeded` receipt, grant file byte-identical). Refresh
+  verified `succeeded` receipt, grant file byte-identical, configured
+  account == selection account), 3 omissions (account / grant path /
+  client path each refuse with 0 patches, files unchanged), 1 frozen-env
+  proof (post-start live mutation with valid alternative files cannot
+  change the child values), 1 startup mismatch refusal (configured !=
+  selection, no DB), 1 startup hidden-readonly-path refusal (no DB), 1
+  host-level write/readonly collision refusal (0 patches, file unchanged).
+  The fixture is a contract mirror, not the shipped CLI — labelled as
+  such in the test header. Refresh
   persistence (bounded, same-file atomic merge) is covered by the fork's
   own suite (873 passed at `cefb63c`); the shipped CLI takes no test
   endpoint override, so no refresh/pipeline runs against production here
@@ -3567,3 +3638,16 @@ Google mutation, no new consent, no reconsent, no deploy changes; readonly
   No user IDs/secrets in logs or tracked files; throwaway temp
   clients/grants/DBs removed after proof (sanitized aggregate PROOF.log
   only, ignored).
+- Read-only repin to the same reviewed head (no new surface, no write
+  from readonly): `apps/server/src/calendarReadonlyProfile.ts` now pins
+  commit `cefb63c…` / tree `624968c…` (package, lock, wire identity, and
+  scope unchanged) with live-wire hashes `01c3d647…` / `d94166b7…` /
+  `8c6736e2…` (get-event byte-identical). Re-probed 2026-10-16 over REAL
+  stdio against the real `build/index.js` with a temp readonly grant +
+  temp client file and file-only child env (`tools/list` only, 0 Google
+  writes, grant byte-identical). Permanent proof:
+  `calendarReadonlyWireProbe.test.ts` 1/1 under explicit
+  `M5_RESCHEDULE_FORK_CLI` (real entry, real `canonicalSchemaHash`,
+  superseded literals rejected, skips cleanly when unset) +
+  `calendarReadonlyProfile.test.ts` cutover boundaries (superseded
+  6939311 hashes and the old array `account` form both fail closed).

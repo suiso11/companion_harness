@@ -1423,7 +1423,7 @@ COMPANION_CALENDAR_JSON='{
 
 通常起動 (`pnpm start`) から採用済み candidate を選択できます。厳密な opt-in
 (`COMPANION_CALENDAR_PROFILE=google-readonly`) + 既存 `COMPANION_CALENDAR_JSON`
-ヒントが採用 candidate (`suiso11/google-calendar-mcp `6939311…`,
+ヒントが採用 candidate (`suiso11/google-calendar-mcp `cefb63c…`,
 `3.0.0-readonly.2`, `list-events`/`search-events`/`get-event` の live-wire hash)
 と完全一致した場合のみ、ホスト所有の信頼済み定義が注入されます。profile 未設定
 の既定動作は不変 (無効のまま)、未知 profile・不一致・任意 binding/hash は
@@ -1490,17 +1490,25 @@ COMPANION_ACTIONS_JSON='{ "optIn": true, "writeEnabled": true }'
   ファイルから認証し、env secret の手動コピーは不要。推奨は file-only —
   allowlist は SDK 継承名 + `GOOGLE_OAUTH_CREDENTIALS` (Desktop クライ
   アントファイルパス) + `M5_RESCHEDULE_WRITE_TOKEN_PATH` (grant ファイル
-  パス) + `M5_RESCHEDULE_ACCOUNT` (正確な account 選択子) のみ
+  パス) + `M5_RESCHEDULE_ACCOUNT` (正確な account 選択子) +
+  `GOOGLE_CALENDAR_MCP_READONLY_TOKEN_PATH` (衝突 guard 可視性; custom
+  readonly 設定時は必須) のみ
   (`M5_RESCHEDULE_CLIENT_*` / `REFRESH_TOKEN` / `GRANTED_SCOPE` /
   `ACCESS_TOKEN` の値は不要; 部分 env credential はファイル fallback なし
-  に拒否)。分離 consent (out-of-band, exact scope のみ):
-  fork 側 `npm run auth:write -- --account <acct> --port 3500
-  --ttl-minutes 12 --no-browser` (`<acct>` は `^[a-z0-9_-]{1,64}$`;
-  出力 `~/.config/google-calendar-mcp-write/tokens.json`,
-  0600, readonly とは別ファイル)。証跡:
+  に拒否)。設定 account は selection `account` と完全一致が必須
+  (不一致は DB 副作用前に起動拒否)。分離 consent (out-of-band, exact
+  scope のみ): fork checkout 側で `npm --prefix "$WRITE_FORK" run
+  auth:write -- --account "$WRITE_ACCT" --port 3500
+  --ttl-minutes 12 --no-browser (root には同 script なし; `$WRITE_ACCT` は
+  `^[a-z0-9_-]{1,64}$`; 出力
+  `~/.config/google-calendar-mcp-write/tokens.json`,
+  0600, readonly とは別ファイル)。build/consent 前に fork の exact pin
+  検証が必須 (commit/tree/package/lock digest + clean 状態)。証跡:
   `packages/connector-calendar/test/reschedulePersistedGrant.test.ts` 7/7
-  (実出荷 CLI の `tools/list` + 6 拒否境界、Google 0 件) + file-only 起動
-  E2E (secret 値ゼロで approve → 1 PATCH → verified receipt、grant 不変)。
+  (実出荷 CLI の `tools/list` + 6 拒否境界、Google 0 件) + file-only 通常
+  起動 8/8 (production frozen-env factory + 追跡 fixture の file-auth 契約
+  ミラー: 1 正常 1 PATCH verified、3 省略拒否、frozen 証明、account 不一致
+  起動拒否、readonly 隠蔽の起動拒否、衝突拒否 0 PATCH)。
   詳細な手順・検証数は docs/operations.md (M5 persisted write-grant auth)
   を参照。
 - 設定が有効で binding が active instance と一致しない場合は listen 前に
@@ -1632,7 +1640,7 @@ Remaining gates not closed here: Windows 11 x64 manual smoke, remote CI for this
 # Live Readonly Acceptance Ledger (2026-10-14, current profile)
 
 Current accepted activation is the host-owned pinned `google-readonly`
-profile (`suiso11/google-calendar-mcp` @ `6939311…`,
+profile (`suiso11/google-calendar-mcp` @ `cefb63c…`,
 `3.0.0-readonly.2`, `calendar.events.readonly` only, 3 live-wire hashes;
 `list-calendars` deliberately absent — never restored to satisfy the
 proposal-era checklist). Observed live evidence (sanitized

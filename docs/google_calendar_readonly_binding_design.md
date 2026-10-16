@@ -3,7 +3,7 @@
 Status (CURRENT): the host-owned pinned profile `google-readonly`
 (`apps/server/src/calendarReadonlyProfile.ts`, strict opt-in
 `COMPANION_CALENDAR_PROFILE`) ADOPTS the reviewed `3.0.0-readonly.2`
-candidate (`6939311…`) as the normal-startup composition. The §1–§7 design
+candidate (`cefb63c…`) as the normal-startup composition. The §1–§7 design
 record below is HISTORICAL (proposal-era, `nspady@7c788f5` / `97a3dc3`);
 the CURRENT adoption pin, run/auth contract, and credential-free proof are
 `docs/operations.md` (C14 profile) and
