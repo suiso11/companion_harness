@@ -65,6 +65,7 @@ import {
   type CommittedGrantMeta,
 } from "./action_executions.js";
 import type { CalendarGetTarget } from "./calendar_tools.js";
+import { authoritativeCreateTitleMatches } from "./calendar_tools.js";
 import { RepositoryValidationError } from "./errors.js";
 import type { RunStrategy, RunStrategyContext } from "./strategy.js";
 import { StrategyError } from "./strategy.js";
@@ -921,14 +922,14 @@ export function createActionStrategy(
         return finishCreate({ outcome: "succeeded_unverified" });
       }
       // Pre-verify before the terminal owns it (the terminal re-verifies
-      // fail-closed): same identity, non-deleted, actual title + timed
-      // bounds. Mismatch -> unverified, never unknown, never a resend.
+      // fail-closed): same identity, non-deleted, FULL authoritative title
+      // from the canonical JSON text (never the 128-bounded display title)
+      // + timed bounds. Mismatch -> unverified, never unknown, never a resend.
       const verified =
         observation.connectorInstanceId ===
           createCapability.connectorInstanceId &&
         observation.eventStatus !== "deleted" &&
-        observation.title !== null &&
-        observation.title.normalize("NFC") === title &&
+        authoritativeCreateTitleMatches(observation.text, title) &&
         boundariesMatch(observation.text, start, end);
       if (!verified) {
         return finishCreate({ outcome: "succeeded_unverified" });

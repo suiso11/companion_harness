@@ -1995,7 +1995,7 @@ vs formal HOLD; no C24 scope inferred):
 | C16–C20 engine/M2/UI slices | IMPLEMENTED | Covered by the final 103-file / 1251-test battery, root + e2e typecheck clean, whole-repo lint closed at `52d61ba` (216 files, 0 errors, 1 pre-existing info; NOT rerun here). |
 | C21 M5 Action composition | IMPLEMENTED (triple gate) | Config hints + dedicated write port + exact-instance match; disabled gate refuses staging / 409-before-repository; no production write binding selected. |
 | C22 action lifecycle E2E | IMPLEMENTED (fake) | Fake harness seams only; real-UI conversation→search→rN→refresh coverage via fakes, not live. |
-| M6 calendar.create extension (agreed, M5 non-goal exception) | IMPLEMENTED (opt-in, create-only safe) | `calendar.create` (TIMED title/start/end only) on the same approval flow; targetless rows, 1 grant -> 1 `create-event` POST (`{id,summary,start,end}` only), verified-only new rN. Fork `google-calendar-create@1.0.0-create.1` pinned at `ecc8f29`/tree `7f63a04`/lock `63261d25` (wire hash `983c1548…5234e` unchanged; auth/runner-only change, no schema delta); create runtime reuses the SHARED `M5_RESCHEDULE_*` grant namespace (no `M6_CREATE_*` credentials). Host profile `M6_CALENDAR_CREATE_PROFILE=google-create` + `M6_CREATE_CONNECTOR_JSON`; explicit `createEnabled` triple; create-only startup needs no reschedule binding (`createWriteStartup.test.ts` 3/3). Proof: B-result stdio REAL 1-POST/1-GET/receipt `succeeded`/r1/0-extra (liveGoogleCalls 0) + browser create 3/3 + action 26/26 + migration 24/24. |
+| M6 calendar.create extension (agreed, M5 non-goal exception) | IMPLEMENTED (opt-in, create-only safe) | `calendar.create` (TIMED title/start/end only) on the same approval flow; targetless rows, 1 grant -> 1 `create-event` POST (`{id,summary,start,end}` only), verified-only new rN. Fork `google-calendar-create@1.0.0-create.1` pinned at `5f07029`/tree `9a232e2`/lock `63261d25` (wire hash `983c1548…5234e` unchanged; exact-id 2xx proof fix, no schema delta); create runtime reuses the SHARED `M5_RESCHEDULE_*` grant namespace (no `M6_CREATE_*` credentials). Host profile `M6_CALENDAR_CREATE_PROFILE=google-create` + `M6_CREATE_CONNECTOR_JSON`; explicit `createEnabled` triple; create-only startup needs no reschedule binding (`createWriteStartup.test.ts` 3/3). Proof: B-result stdio REAL 1-POST/1-GET/receipt `succeeded`/r1/0-extra (liveGoogleCalls 0) + browser create 3/3 + action 26/26 + migration 24/24. |
 | C08 adoption / C10-08 production mapping / C11-01 positive tombstone | FORMAL HOLD / UNRESOLVED / BLOCKED | Unchanged: no adopted binding, pin, profile, OAuth, or live-Google wiring anywhere in this branch. |
 
 Review/PR linkage: PR #20 is published for this branch (see the
@@ -3493,6 +3493,19 @@ Proof after repin: profile 5/5 + wire-hash 2/2 + startup 22/22 + focused
   `action_readback_instant.test.ts` 9/9 plus the pipeline test, whose
   read binding now decodes the provider-shaped fixture GET through the
   REAL `normalizeEvent`, asserting canonical-UTC read-back bounds).
+
+  Create verifies the FULL authoritative title, not the bounded display
+  (2026-10-16 fix): `observation.title` stays 128-bounded for display, but
+  both the strategy pre-verify and the terminal re-verify compare the FULL
+  normalized title parsed from the canonical JSON `observation.text`
+  (`authoritativeCreateTitleMatches` in `packages/kernel/src/calendar_tools.ts`;
+  missing/malformed/non-string text titles fail closed, never a truncation
+  fallback). A correct 129-char title now verifies; a same-128-prefix wrong
+  suffix stays `succeeded_unverified` (pinned by
+  `action_create_long_title.test.ts` 4/4 plus browser `create.spec.ts` 3/3).
+  Provider side, a 2xx insert body that is empty or a JSON non-event
+  (null/array/`{}`/wrong id) is `unknown` — only the exact requested stable
+  id proves the commit (pinned by fork `googleCreate.test.ts`).
 
 ## M5 persisted write-grant auth (2026-10-16, no live writes)
 

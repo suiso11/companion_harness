@@ -1187,7 +1187,7 @@ Companion Harness は milestone 単位で構築しています。
 | M3        | Conversation UI / SSE                  | Implemented / hardening |
 | M4        | MCP / Calendar                         | Foundation / design     |
 | M5        | Write Actions / Approval               | Planned                 |
-| M6        | Calendar create extension (agreed)     | Implemented (opt-in, `calendar.create` TIMED title/start/end only; fork `google-calendar-create@1.0.0-create.1` pinned `ecc8f29`; shared `M5_RESCHEDULE_*` grant, no new credential namespace) |
+| M6        | Calendar create extension (agreed)     | Implemented (opt-in, `calendar.create` TIMED title/start/end only; fork `google-calendar-create@1.0.0-create.1` pinned `5f07029`; shared `M5_RESCHEDULE_*` grant, no new credential namespace) |
 
 v0.1 は M0〜M4 を対象とし、基本的に **read-only** です。
 

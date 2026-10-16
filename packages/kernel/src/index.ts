@@ -197,6 +197,7 @@ export type {
   CreateCalendarSearchRegistrationOptions,
 } from "./calendar_tools.js";
 export {
+  authoritativeCreateTitleMatches,
   calendarEventBodyText,
   createCalendarSearchRegistration,
   createDurableCalendarTargetStore,

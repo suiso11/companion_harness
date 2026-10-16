@@ -93,7 +93,10 @@ import type {
   CalendarGetTarget,
   CalendarTargetStore,
 } from "./calendar_tools.js";
-import { toCalendarObservation } from "./calendar_tools.js";
+import {
+  authoritativeCreateTitleMatches,
+  toCalendarObservation,
+} from "./calendar_tools.js";
 import { canonicalJsonString, sha256Hex } from "./canonical.js";
 import {
   ActionNotCancellableError,
@@ -1862,14 +1865,16 @@ export function createActionExecutionService(
       return finishPlainTerminal(id, "succeeded_unverified", null, null, now);
     }
     // Intended content verification BEFORE any fresh materialization:
-    // actual title + timed bounds, same identity. Any mismatch yields
-    // succeeded_unverified via the plain terminal (never a partial claim).
+    // FULL authoritative title from the canonical JSON text (never the
+    // 128-bounded display title) + timed bounds, same identity. Any
+    // mismatch yields succeeded_unverified via the plain terminal (never
+    // a partial claim). Missing/malformed/non-string text titles fail
+    // closed here (no display-title fallback).
     const intended = CalendarCreateToolInputSchema.parse(
       JSON.parse(proposal.input_json) as unknown,
     );
     const intendedTitle = intended.title.normalize("NFC");
-    const observedTitle = (observation.title ?? "").normalize("NFC");
-    if (observedTitle !== intendedTitle) {
+    if (!authoritativeCreateTitleMatches(observation.text, intendedTitle)) {
       return finishPlainTerminal(id, "succeeded_unverified", null, null, now);
     }
     if (
