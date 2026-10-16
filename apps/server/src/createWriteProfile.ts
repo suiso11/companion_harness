@@ -47,7 +47,8 @@ export const CREATE_WRITE_TOOL_NAME = "create-event" as const;
  * bytes, including the `$schema` annotation key).
  *
  * Probed over REAL stdio tools/list against the shipped production CLI
- * (`build/create-cli.js`, fork commit 1a53cde) with fixture credentials
+ * (`build/create-cli.js`, fork commit 1a53cde; test-only consumer-edge
+ * addition at 8dc4cdf leaves the input schema unchanged) with fixture credentials
  * (loopback endpoint unused by tools/list): exactly 1 tool, strict schema
  * ($schema + additionalProperties:false).
  */
@@ -59,8 +60,8 @@ export const CREATE_WRITE_FORK = Object.freeze({
   repo: "https://github.com/suiso11/google-calendar-mcp",
   branch: "feat/m6-calendar-create",
   baseCommit: "cefb63c24f062ef6a49889d7b635330dee884f63",
-  sourceCommit: "1a53cdef4131cf11ed0bf4c7184d83a65ccf77b4",
-  sourceTree: "b19eda3985462a091a86f36229b02c23734eee0a",
+  sourceCommit: "8dc4cdf7b439c1685f16e64d32350cd5dba7c640",
+  sourceTree: "c9584f2f9e809b94cb7c3a6658662e68a36d0b8f",
   package: "@cocal/google-calendar-mcp",
   packageVersion: "3.0.0-readonly.2",
   lockDigestSha256:
