@@ -2130,7 +2130,10 @@ class ConversationApp {
         wrap.appendChild(el("p", part.text));
         for (const citation of part.citations) {
           const button = el("button", citation);
-          button.setAttribute("data-action-citation", "true");
+          // Normal conversation citations are NOT action receipts: they carry
+          // no data-action-citation marker (reserved for the action
+          // approval/rejection receipt branch above). The per-run binding is
+          // still preserved so memory (mN) citations resolve to this run.
           const historyRunId =
             typeof run.runId === "string" ? run.runId : undefined;
           button.addEventListener("click", () => {
@@ -2781,7 +2784,8 @@ class ConversationApp {
         this.list.appendChild(el("p", part.text));
         for (const citation of part.citations) {
           const button = el("button", citation);
-          button.setAttribute("data-action-citation", "true");
+          // Live generic answer citations are NOT action receipts either:
+          // no data-action-citation marker here. Per-run binding preserved.
           const liveRunId = runId;
           button.addEventListener("click", () => {
             void this.openCitation(citation, liveRunId);
