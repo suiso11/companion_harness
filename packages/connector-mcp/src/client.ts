@@ -1,3 +1,4 @@
+import type { ToolCategory } from "@companion/contracts";
 import {
   DEFAULT_INHERITED_ENV_VARS,
   StdioClientTransport,
@@ -43,16 +44,86 @@ export const STDIO_IMPLICIT_ENV_VARS: readonly string[] =
   DEFAULT_INHERITED_ENV_VARS;
 
 /**
+ * Allowlist membership for one SDK-inherited name. Exact on posix; on win32
+ * the OS env block is case-insensitive, so `Path` covers the SDK default
+ * `PATH` (and vice versa) instead of failing closed on casing.
+ */
+function allowlistCoversInheritedName(
+  envAllowlist: readonly string[],
+  name: string,
+): boolean {
+  if (process.platform !== "win32") {
+    return envAllowlist.includes(name);
+  }
+  const want = name.toLowerCase();
+  return envAllowlist.some((entry) => entry.toLowerCase() === want);
+}
+
+/**
+ * Read one name from a frozen startup snapshot. Exact on posix; on win32 the
+ * lookup is case-insensitive (first exact hit wins, else the first
+ * case-insensitive hit), mirroring the OS env-block semantics.
+ */
+function readFrozenEnvValue(
+  env: Readonly<Record<string, string | undefined>>,
+  name: string,
+): string | undefined {
+  const direct = env[name];
+  if (direct !== undefined || process.platform !== "win32") {
+    return direct;
+  }
+  const want = name.toLowerCase();
+  for (const key of Object.keys(env)) {
+    if (key.toLowerCase() === want) {
+      return env[key];
+    }
+  }
+  return undefined;
+}
+
+/**
+ * A frozen value is inheritable only when the SDK itself would inherit it:
+ * `getDefaultEnvironment()` skips absent values AND shell-function exports
+ * (`()...`, a code-injection vector). Anything else must never be passed
+ * through explicitly — and must never fall back to the live environment.
+ */
+function isInheritableFrozenValue(value: string | undefined): value is string {
+  return value !== undefined && !value.startsWith("()");
+}
+
+/**
+ * Canonical child-env key for an allowlisted name. On win32 an allowlist
+ * entry in non-SDK casing (`Path`) still maps to the single canonical SDK
+ * name (`PATH`), so the merged child env carries exactly one key and the
+ * explicit frozen value always overrides the live SDK default (never both
+ * keys, never the live value).
+ */
+function canonicalChildEnvKey(name: string): string {
+  if (process.platform !== "win32") {
+    return name;
+  }
+  const want = name.toLowerCase();
+  for (const inherited of DEFAULT_INHERITED_ENV_VARS) {
+    if (inherited.toLowerCase() === want) {
+      return inherited;
+    }
+  }
+  return name;
+}
+
+/**
  * Names from the SDK stdio defaults that are NOT explicitly allowlisted.
  * Empty means the stdio config is fail-closed compliant. Pure (no I/O).
+ * Membership is case-insensitive on win32 (OS env-block semantics).
  */
 export function missingStdioEnvNames(
   config: McpConnectorConfig,
 ): readonly string[] {
   const t = config.transport;
   if (t.kind !== "stdio") return [];
-  const allowed = new Set(t.envAllowlist);
-  return DEFAULT_INHERITED_ENV_VARS.filter((name) => !allowed.has(name));
+  return DEFAULT_INHERITED_ENV_VARS.filter(
+    (name) => !allowlistCoversInheritedName(t.envAllowlist, name),
+  );
 }
 
 /** Fail-closed guard: throws a fixed-code error before any process spawn. */
@@ -207,6 +278,42 @@ function buildTrustedPolicy(
 }
 
 /**
+ * Connector category gate: which trusted definition categories this
+ * connector instance may ever enable/call. Default `["read"]` (all existing
+ * readonly callers unchanged). A DEDICATED write connector is constructed
+ * with exactly `["write"]` through a host-owned dedicated gate (never the
+ * readonly profile): it can then enable ONLY reviewed `write` definitions.
+ * Mixed `["read", "write"]` is rejected at construction (fail closed) so no
+ * single connector ever straddles the readonly/write boundary.
+ */
+export interface McpConnectorPolicyOptions {
+  readonly permittedCategories?: readonly ToolCategory[];
+}
+
+const DEFAULT_PERMITTED_CATEGORIES: readonly ToolCategory[] = ["read"];
+
+function resolvePermittedCategories(
+  options: McpConnectorPolicyOptions | undefined,
+): readonly ToolCategory[] {
+  const permitted =
+    options?.permittedCategories ?? DEFAULT_PERMITTED_CATEGORIES;
+  if (permitted.length === 0) {
+    throw new Error("mcp_unavailable: write gate requires a category");
+  }
+  const hasRead = permitted.includes("read");
+  const hasWrite = permitted.includes("write");
+  // A connector is either a readonly connector or a dedicated write
+  // connector — never both. `sensitive`/`unclassified` are never callable.
+  if (
+    (hasRead && hasWrite) ||
+    permitted.some((c) => c !== "read" && c !== "write")
+  ) {
+    throw new Error("mcp_unavailable: write gate requires a category");
+  }
+  return [...permitted];
+}
+
+/**
  * True when the trusted wire-identity expectation is explicitly present.
  * Runtime guard for programmatic configs that bypass the zod schema: a
  * missing/empty `expectedServerName` or `version` must fail closed (fixed
@@ -315,6 +422,8 @@ export class McpConnector {
   private enabledBindings: string[] = [];
   /** Immutable reviewed-host read-only policy, snapshotted at construction. */
   private readonly policy: TrustedPolicy;
+  /** Categories this connector may ever enable/call (default read-only). */
+  private readonly permittedCategories: readonly ToolCategory[];
   private mutex: Promise<void> = Promise.resolve();
   /** Increments ONLY on explicit shutdown; fences pre-shutdown demands. */
   private shutdownEpoch = 0;
@@ -346,8 +455,10 @@ export class McpConnector {
     private readonly config: McpConnectorConfig,
     definitions: readonly McpBindingDefinition[],
     private readonly transportFactory: TransportFactory = defaultTransportFactory,
+    policyOptions?: McpConnectorPolicyOptions,
   ) {
     this.policy = buildTrustedPolicy(definitions);
+    this.permittedCategories = resolvePermittedCategories(policyOptions);
   }
 
   stats(): ConnectorStats {
@@ -369,17 +480,23 @@ export class McpConnector {
   }
 
   /**
-   * The reviewed, non-ambiguous trusted `read` definition for a configured
-   * name, or `undefined` when the name can never be authorized: missing,
-   * duplicate/ambiguous, or a `write`/`sensitive`/`unclassified` category.
+   * The reviewed, non-ambiguous trusted definition for a configured
+   * name whose category this connector is permitted to call, or
+   * `undefined` when the name can never be authorized: missing,
+   * duplicate/ambiguous, or a category outside this connector's gate.
    * Purely local (no I/O); the caller-supplied category can never alter it.
+   * A default readonly connector authorizes only `read`; a dedicated write
+   * connector (exactly `["write"]`) authorizes only `write`.
    */
-  private trustedReadDefinition(
+  private trustedDefinition(
     upstreamTool: string,
   ): McpBindingDefinition | undefined {
     if (this.policy.ambiguous.has(upstreamTool)) return undefined;
     const definition = this.policy.definitions.get(upstreamTool);
-    if (definition === undefined || definition.category !== "read") {
+    if (
+      definition === undefined ||
+      !this.permittedCategories.includes(definition.category)
+    ) {
       return undefined;
     }
     return definition;
@@ -387,10 +504,10 @@ export class McpConnector {
 
   /**
    * Local (no-I/O) trusted-policy preflight over the CONFIGURED bindings.
-   * `anyTrustedRead` means at least one configured name has a reviewed
-   * non-ambiguous `read` definition; `anyEligible` additionally requires that
-   * definition hash to link to the config binding hash. Nothing else can
-   * authorize a connection.
+   * `anyTrusted` means at least one configured name has a reviewed
+   * non-ambiguous definition in a permitted category; `anyEligible`
+   * additionally requires that definition hash to link to the config binding
+   * hash. Nothing else can authorize a connection.
    */
   private policyPreflight(): {
     anyTrustedRead: boolean;
@@ -399,7 +516,7 @@ export class McpConnector {
     let anyTrustedRead = false;
     let anyEligible = false;
     for (const binding of this.config.bindings) {
-      const definition = this.trustedReadDefinition(binding.upstreamTool);
+      const definition = this.trustedDefinition(binding.upstreamTool);
       if (definition === undefined) continue;
       anyTrustedRead = true;
       if (definition.canonicalSchemaHash === binding.canonicalSchemaHash) {
@@ -430,20 +547,22 @@ export class McpConnector {
   ): Promise<CallResult> {
     // PURE admission AT INVOCATION: a binding is callable only when it is an
     // explicitly CONFIGURED name AND has a reviewed, non-ambiguous trusted
-    // `read` definition whose hash links to this config binding. Unknown,
-    // missing, write/sensitive/unclassified and ambiguous names are denied
-    // with the fixed not-allowed code; a broken trusted/config hash link is
-    // denied with the fixed schema-mismatch code. Both are local: no I/O, no
-    // mutex, no factory/spawn, no SDK request and no failure/backoff count,
-    // regardless of shutdown or cross-epoch state. Caller-supplied
-    // args.category/readOnlyHint can never alter this policy.
+    // definition in a category this connector is permitted to call (default
+    // `read`; a dedicated write connector `write`) whose hash links to this
+    // config binding. Unknown, missing, unpermitted-category and ambiguous
+    // names are denied with the fixed not-allowed code; a broken
+    // trusted/config hash link is denied with the fixed schema-mismatch
+    // code. Both are local: no I/O, no mutex, no factory/spawn, no SDK
+    // request and no failure/backoff count, regardless of shutdown or
+    // cross-epoch state. Caller-supplied args.category/readOnlyHint can
+    // never alter this policy.
     const configBinding = this.config.bindings.find(
       (b) => b.upstreamTool === upstreamTool,
     );
     if (configBinding === undefined) {
       return { ok: false, code: "mcp_binding_not_allowed" as const };
     }
-    const definition = this.trustedReadDefinition(upstreamTool);
+    const definition = this.trustedDefinition(upstreamTool);
     if (definition === undefined) {
       return { ok: false, code: "mcp_binding_not_allowed" as const };
     }
@@ -805,6 +924,7 @@ export class McpConnector {
         this.config,
         this.policy,
         snapshot,
+        this.permittedCategories,
       );
       if (enabled.length === 0) {
         await this.cleanupSession(session, {
@@ -966,19 +1086,21 @@ export class McpConnector {
 /**
  * Pure binding-identity comparison (no state mutation), called ONLY inside the
  * live ensure/connect path. A configured binding is enabled only when ALL of:
- * - it has a reviewed, non-ambiguous trusted `read` definition;
+ * - it has a reviewed, non-ambiguous trusted definition in a category this
+ *   connector is permitted to call (default `read`; dedicated gate `write`);
  * - that definition's trusted hash links to the config binding hash;
  * - the config binding hash equals the actual tools/list input-schema hash; and
  * - the LIVE name is not repeated across the collected tools/list pages (a
  *   repeated live name is an ambiguous schema identity and is never enabled,
  *   in any page order).
- * Non-read / untrusted / ambiguous / drifted bindings are never advertised,
+ * Unpermitted / untrusted / ambiguous / drifted bindings are never advertised,
  * even when the wire hash matches. Unknown discovered tools are never added.
  */
 function computeBindingIdentity(
   config: McpConnectorConfig,
   policy: TrustedPolicy,
   listed: Array<{ name: string; inputSchemaHash: string }>,
+  permittedCategories: readonly ToolCategory[],
 ): { enabled: string[]; disabled: string[] } {
   // Fail-closed live identity: an MCP tool name is unique. A repeated live name
   // is an ambiguous schema identity, so it is removed from the snapshot
@@ -1001,13 +1123,14 @@ function computeBindingIdentity(
     const definition = policy.ambiguous.has(b.upstreamTool)
       ? undefined
       : policy.definitions.get(b.upstreamTool);
-    const trustedRead =
-      definition !== undefined && definition.category === "read";
+    const trustedPermitted =
+      definition !== undefined &&
+      permittedCategories.includes(definition.category);
     const hashLinked =
       definition !== undefined &&
       definition.canonicalSchemaHash === b.canonicalSchemaHash &&
       byName.get(b.upstreamTool) === b.canonicalSchemaHash;
-    if (trustedRead && hashLinked) {
+    if (trustedPermitted && hashLinked) {
       enabled.push(b.upstreamTool);
     } else {
       disabled.push(b.upstreamTool);
@@ -1062,29 +1185,71 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
  *   cancelled without being read).
  */
 export function defaultTransportFactory(config: McpConnectorConfig): Transport {
-  const t = config.transport;
-  if (t.kind === "stdio") {
-    // Fail-closed: reject BEFORE StdioClientTransport construction/spawn.
-    assertStdioEnvClosed(config);
-    const env: Record<string, string> = {};
-    for (const name of t.envAllowlist) {
-      const v = process.env[name];
-      if (v !== undefined) env[name] = v;
+  return startupEnvTransportFactory(process.env)(config);
+}
+
+/**
+ * Startup-environment transport factory (M5 write-child fix): identical to
+ * `defaultTransportFactory` except stdio child env values are read from the
+ * explicitly supplied startup snapshot instead of the live `process.env`.
+ * The snapshot must be frozen synchronously at startup from
+ * `options.env ?? process.env`, so the profile/hint selection and the lazy
+ * write child's credentials always come from the SAME environment — an
+ * embedding that passes `M5_RESCHEDULE_*` values via `startServer({ env })`
+ * no longer silently falls back to a different account (or missing
+ * credentials) on first approved execution. Fail-closed env rules
+ * (`assertStdioEnvClosed`, explicit allowlist only) are unchanged, PLUS the
+ * frozen-inherited freeze below: the SDK merges its live
+ * `getDefaultEnvironment()` UNDER the explicit `env` at SPAWN time, so every
+ * SDK-inherited allowlisted name is pinned to its FROZEN value here. A frozen
+ * snapshot missing (or holding only a shell-function export for) such a name
+ * rejects with fixed `mcp_unavailable` BEFORE transport construction — never
+ * a live-`process.env` fallback (a post-startup `PATH` mutation could select
+ * a different executable), never an invented empty `PATH`.
+ */
+export function startupEnvTransportFactory(
+  env: Readonly<Record<string, string | undefined>>,
+): TransportFactory {
+  return (config: McpConnectorConfig): Transport => {
+    const t = config.transport;
+    if (t.kind === "stdio") {
+      // Fail-closed: reject BEFORE StdioClientTransport construction/spawn.
+      assertStdioEnvClosed(config);
+      // Freeze the SDK-inherited surface: EVERY inherited allowlisted name
+      // must resolve to a frozen value (win32: case-insensitive, canonical
+      // key). Missing/uninheritable rejects before any child side effect.
+      const missingFrozen = DEFAULT_INHERITED_ENV_VARS.filter(
+        (name) =>
+          allowlistCoversInheritedName(t.envAllowlist, name) &&
+          !isInheritableFrozenValue(readFrozenEnvValue(env, name)),
+      );
+      if (missingFrozen.length > 0) {
+        throw new Error(
+          `mcp_unavailable: stdio startup env misses ${missingFrozen.length} frozen inherited value(s): ${missingFrozen.join(",")}`,
+        );
+      }
+      const childEnv: Record<string, string> = {};
+      for (const name of t.envAllowlist) {
+        const v = readFrozenEnvValue(env, name);
+        if (isInheritableFrozenValue(v)) {
+          childEnv[canonicalChildEnvKey(name)] = v;
+        }
+      }
+      return new StdioClientTransport({
+        command: t.command,
+        args: [...t.args],
+        env: childEnv,
+        stderr: "pipe",
+      });
     }
-    return new StdioClientTransport({
-      command: t.command,
-      args: [...t.args],
-      env,
-      stderr: "pipe",
-    });
-  }
-  const url = new URL(`http://${t.host}:${t.port}${t.path}`);
-  assertLoopbackHttp(url);
-  return toTransport(
-    new StreamableHTTPClientTransport(url, {
-      fetch: loopbackNoRedirectFetch,
-    }),
-  );
+    const url = new URL(`http://${t.host}:${t.port}${t.path}`);
+    assertLoopbackHttp(url);
+    return toTransport(
+      new StreamableHTTPClientTransport(url, {
+        fetch: loopbackNoRedirectFetch,
+      }),
+    );
+  };
 }
 
 /**

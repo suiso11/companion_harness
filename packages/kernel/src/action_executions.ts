@@ -254,6 +254,13 @@ export interface CommittedGrantMeta {
   proposalHash: string;
   tool: "calendar.reschedule";
   inputHash: string;
+  /**
+   * Immutable approved revision the grant was committed against (the
+   * proposal's `expected_revision` at consume time). The write port MUST
+   * resolve its conditional etag from THIS value — never from a fresh
+   * preflight read of the current resource.
+   */
+  expectedRevision: string;
   consumedAt: number;
 }
 
@@ -1110,6 +1117,7 @@ export function createActionExecutionService(
           proposalHash: proposal.hash,
           tool: proposal.tool as "calendar.reschedule",
           inputHash: grant.input_hash,
+          expectedRevision: proposal.expected_revision,
           consumedAt: now,
         },
       };

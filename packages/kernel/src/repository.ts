@@ -2994,6 +2994,47 @@ export function createKernelRepository(
     );
   }
 
+  /**
+   * M5 normal-startup host-owned resolver basis (§18.6): read-only lookup of
+   * the IMMUTABLE committed grant (execution + proposal + hash +
+   * `expected_revision`). Returns the stored proposal hash and expected
+   * revision for an approved execution's grant, or null when no such
+   * committed grant exists. Pure SELECT (no writes, no transactions); exposes
+   * only the opaque revision + hash the write port must equality-check —
+   * never provider ids, credentials, or resource bodies. The caller still
+   * equality-checks all three grant fields and applies the source-etag proof.
+   */
+  function readCommittedGrantRevision(
+    executionId: string,
+    proposalId: string,
+  ): { proposalHash: string; expectedRevision: string } | null {
+    const execution = requireId(executionId, "executionId");
+    const proposal = requireId(proposalId, "proposalId");
+    const grant = db
+      .prepare(
+        "SELECT proposal_hash FROM action_execution_grants WHERE execution_id = ? AND proposal_id = ?",
+      )
+      .get(execution, proposal) as { proposal_hash: string } | undefined;
+    if (grant === undefined) {
+      return null;
+    }
+    const row = db
+      .prepare(
+        "SELECT hash, expected_revision FROM action_proposals WHERE id = ?",
+      )
+      .get(proposal) as { hash: string; expected_revision: string } | undefined;
+    if (row === undefined) {
+      return null;
+    }
+    if (
+      typeof row.hash !== "string" ||
+      typeof row.expected_revision !== "string"
+    ) {
+      return null;
+    }
+    return { proposalHash: row.hash, expectedRevision: row.expected_revision };
+  }
+
   function getActiveRun(sessionId: string): RunRow | null {
     const session = requireId(sessionId, "sessionId");
     const row = db
@@ -4616,6 +4657,7 @@ export function createKernelRepository(
     getEvents,
     listProposals,
     getProposalExecution,
+    readCommittedGrantRevision,
     approveProposal,
     rejectProposal,
     listReferences,
