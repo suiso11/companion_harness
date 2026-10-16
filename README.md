@@ -1473,7 +1473,7 @@ COMPANION_ACTIONS_JSON='{ "optIn": true, "writeEnabled": true }'
   既定は無効のまま)。profile 選択時は注入 binding と相互排他であり、
   `M5_RESCHEDULE_TEST_*` の allowlist 指定は fail-closed です
   (fixture endpoint は options 注入の子プロセス env のみ)。
-  受け入れ証跡: `apps/server/test/rescheduleWriteStartup.test.ts` 21/21
+  受け入れ証跡: `apps/server/test/rescheduleWriteStartup.test.ts`
   (実 stdio E2E の HTTP approve 1 PATCH + readback receipt を含む; PR31
   レビュー3件対応済み: production factory の implicit-env 事前検証、
   `actionWriteBinding: null` の absent 扱い、Windows 絶対パス受容 +
@@ -1486,6 +1486,23 @@ COMPANION_ACTIONS_JSON='{ "optIn": true, "writeEnabled": true }'
   (末尾ゼロ `.123000` 可、真の `.1234` は stage/write 前に拒否) で readback は
   同一 instant (等価 offset 可) を比較、write 応答は `structuredContent` が
   own-property 存在時に authoritative (text は absent 時のみ strict JSON fallback)。
+  Persisted-grant 統合 (fork `cefb63c`, PR #4): write 子は永続 grant
+  ファイルから認証し、env secret の手動コピーは不要。推奨は file-only —
+  allowlist は SDK 継承名 + `GOOGLE_OAUTH_CREDENTIALS` (Desktop クライ
+  アントファイルパス) + `M5_RESCHEDULE_WRITE_TOKEN_PATH` (grant ファイル
+  パス) + `M5_RESCHEDULE_ACCOUNT` (正確な account 選択子) のみ
+  (`M5_RESCHEDULE_CLIENT_*` / `REFRESH_TOKEN` / `GRANTED_SCOPE` /
+  `ACCESS_TOKEN` の値は不要; 部分 env credential はファイル fallback なし
+  に拒否)。分離 consent (out-of-band, exact scope のみ):
+  fork 側 `npm run auth:write -- --account <acct> --port 3500
+  --ttl-minutes 12 --no-browser` (`<acct>` は `^[a-z0-9_-]{1,64}$`;
+  出力 `~/.config/google-calendar-mcp-write/tokens.json`,
+  0600, readonly とは別ファイル)。証跡:
+  `packages/connector-calendar/test/reschedulePersistedGrant.test.ts` 7/7
+  (実出荷 CLI の `tools/list` + 6 拒否境界、Google 0 件) + file-only 起動
+  E2E (secret 値ゼロで approve → 1 PATCH → verified receipt、grant 不変)。
+  詳細な手順・検証数は docs/operations.md (M5 persisted write-grant auth)
+  を参照。
 - 設定が有効で binding が active instance と一致しない場合は listen 前に
   fail-closed します。設定が無効な場合、注入された port は一切使われません。
 - 無効時は staging できず、approve は repository 呼び出し前に固定

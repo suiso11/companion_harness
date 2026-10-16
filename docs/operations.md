@@ -3486,3 +3486,84 @@ Proof after repin: profile 5/5 + wire-hash 2/2 + startup 22/22 + focused
   `action_readback_instant.test.ts` 9/9 plus the pipeline test, whose
   read binding now decodes the provider-shaped fixture GET through the
   REAL `normalizeEvent`, asserting canonical-UTC read-back bounds).
+
+## M5 persisted write-grant auth (2026-10-16, no live writes)
+
+Adopts the fork persisted-grant runtime (fork PR #4 review fixes) as the
+recommended host flow: the normal-startup write child authorizes from the
+out-of-band persisted grant file, with NO manual env secret copy. No live
+Google mutation, no new consent, no reconsent, no deploy changes; readonly
+`:3000` and the own `:3001`/launcher/store/creds paths unchanged.
+
+- Fork landed as `cefb63c24f062ef6a49889d7b635330dee884f63`
+  (tree `624968c65f499f5d30141f4d936aca66d016b531`, fork PR #4
+  `feat/m5-allday-conversion` -> `main`; base `6939311` in ancestry, lock
+  digest unchanged `63261d25…533`, readonly surface untouched). Host write
+  pin repinned to the new source SHA/tree (branch + provenance comments
+  updated; wire hash + identity + scope constants unchanged).
+- Runtime auth (fork `src/reschedule/cli.ts`
+  `resolveWriteRuntimeCredential` + `src/reschedule/writeTokenStore.ts`
+  `loadWriteStoredGrant` / `updateWriteStoredAccessToken`): the account
+  selector is EXACT `M5_RESCHEDULE_ACCOUNT` (fork `^[a-z0-9_-]{1,64}$`
+  grammar — this codebase has no `M5_RESCHEDULE_ACCOUNT_ID`; display
+  names/emails are refused). Explicit `M5_RESCHEDULE_*` env mode wins only
+  when fully valid; ANY partial env credential refuses WITHOUT file
+  fallthrough. Otherwise the per-account persisted grant (exact
+  `https://www.googleapis.com/auth/calendar.events` scope + refresh
+  token, written by the separate `auth:write` consent CLI) combines with
+  the existing OAuth client registration (`loadCredentials`, client file
+  via `GOOGLE_OAUTH_CREDENTIALS`). Missing/ambiguous/readonly-only/broad
+  (`.../auth/calendar` anywhere)/mismatch grants refuse with NO readonly
+  fallback; refreshed access tokens persist back atomically into the SAME
+  per-account file (other accounts preserved, 0600). Production endpoint
+  immutable: the shipped CLI never reads `M5_RESCHEDULE_TEST_*`.
+- Live-wire re-probe 2026-10-16 at `cefb63c` against the REAL shipped
+  production CLI (`build/reschedule-cli.js`) over REAL stdio with a temp
+  exact-scope persisted grant + temp Desktop client file and file-only
+  child env: `reschedule-event` hash `9f59e35b…8609d7`, byte-identical,
+  pin unchanged (auth work touches credential resolution only).
+- Recommended file-only operator setup (copy-pastable; secrets stay in
+  files, never in env/DB/model messages):
+  1. Prerequisites: a Google Cloud Desktop-app OAuth client JSON (kept as
+     a file, `chmod 600`) and the fork checkout built (`npm run
+     build:reschedule`, entry `build/reschedule-cli.js`).
+  2. Separate narrow consent (out of band, exact scope only, no
+     calendar reads/writes, no write flags enabled):
+     `npm run auth:write -- --account <acct> --port 3500 --ttl-minutes 12 --no-browser`
+     (`<acct>` must match `^[a-z0-9_-]{1,64}$`). Output: the per-account
+     grant merged into `~/.config/google-calendar-mcp-write/tokens.json`
+     (override `M5_RESCHEDULE_WRITE_TOKEN_PATH`; 0600; never the readonly
+     token file — equal paths refuse at startup).
+  3. Normal startup (defaults OFF unchanged): `COMPANION_ACTIONS_JSON`
+     `{ "optIn": true, "writeEnabled": true }` (triple gate: opt-in pair +
+     dedicated port on the ACTIVE Calendar instance) plus
+     `M5_RESCHEDULE_WRITE_PROFILE=google-reschedule` and
+     `M5_RESCHEDULE_CONNECTOR_JSON` with `{ "command": "node", "args":
+     ["<fork>/build/reschedule-cli.js"], "envAllowlist": [<SDK inherited
+     names>, "GOOGLE_OAUTH_CREDENTIALS", "M5_RESCHEDULE_WRITE_TOKEN_PATH",
+     "M5_RESCHEDULE_ACCOUNT"] }`, with `GOOGLE_OAUTH_CREDENTIALS` (client
+     file path), `M5_RESCHEDULE_WRITE_TOKEN_PATH` (grant file path), and
+     `M5_RESCHEDULE_ACCOUNT` (`<acct>`) in the frozen startup env. No
+     `M5_RESCHEDULE_CLIENT_*` / `M5_RESCHEDULE_REFRESH_TOKEN` /
+     `M5_RESCHEDULE_GRANTED_SCOPE` / `M5_RESCHEDULE_ACCESS_TOKEN` values
+     anywhere. Explicit env credentials remain a SUPPORTED fork mode when
+     fully valid; the host simply never needs them.
+- Verification (Linux, Node 24.12.0 — scope labels accurate): AUTH-PARSE
+  via the real CLI (`reschedulePersistedGrant.test.ts` 7/7 under explicit
+  `M5_RESCHEDULE_FORK_CLI`: 1 file-only `tools/list` with pinned identity
+  + hash, 6 refusals — missing account, readonly-only scope, broad scope
+  alongside the exact token, foreign account, partial env WITH a valid
+  grant file, write/readonly path collision — each exit 2 `auth_refused`
+  with the grant file byte-identical; `tools/list` only, no refresh
+  network, 0 Google writes) + PIPELINE via the local fixture
+  (`rescheduleWriteStartup.test.ts` file-only E2E 1/1: zero secret values
+  in startup env, staged approve -> exactly ONE conditional PATCH
+  (`If-Match` = committed etag, start/end only) -> strategy readback ->
+  verified `succeeded` receipt, grant file byte-identical). Refresh
+  persistence (bounded, same-file atomic merge) is covered by the fork's
+  own suite (873 passed at `cefb63c`); the shipped CLI takes no test
+  endpoint override, so no refresh/pipeline runs against production here
+  by design. Full host gates re-run after the repin (record below).
+  No user IDs/secrets in logs or tracked files; throwaway temp
+  clients/grants/DBs removed after proof (sanitized aggregate PROOF.log
+  only, ignored).

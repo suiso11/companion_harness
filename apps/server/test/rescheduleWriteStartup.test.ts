@@ -1931,3 +1931,140 @@ describe("canonical write identity is validated before any DB side effect", () =
     expect(factoryCalls).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Persisted-grant file-only operator wiring (local fixture pipeline).
+//
+// The RECOMMENDED production wiring needs NO manual env secret copy: the
+// write child allowlist carries ONLY the client file path, the persisted
+// write-token file path, and the exact account selector (plus the mandatory
+// SDK inherited names). No `M5_RESCHEDULE_CLIENT_*` /
+// `M5_RESCHEDULE_REFRESH_TOKEN` / `M5_RESCHEDULE_GRANTED_SCOPE` /
+// `M5_RESCHEDULE_ACCESS_TOKEN` value appears anywhere in the startup env —
+// the test asserts their absence up front, so a future regression that
+// requires a secret copy fails here.
+//
+// The write child itself still arrives through the options-injected trusted
+// test seam (the shipped production CLI ignores test endpoint overrides by
+// design and always uses the immutable Google host, so it can never back a
+// loopback pipeline). What this proves end to end, over REAL stdio to the
+// TRACKED fixture server: normal startup ACCEPTS the file-only operator
+// configuration (frozen env + strict hint parse + triple gate) and the
+// staged approve -> ONE conditional PATCH -> strategy readback -> verified
+// `succeeded` receipt pipeline performs exactly as with any other wiring —
+// while the persisted grant file on disk stays byte-identical (the harness
+// never copies, mints, or rewrites credential material; refresh
+// persistence is the fork CLI's own atomic per-account merge, covered by
+// `reschedulePersistedGrant.test.ts` at auth-parse level with 0 Google
+// writes). No live Google, no OAuth, fixture data only.
+// ---------------------------------------------------------------------------
+
+const FILE_ONLY_ACCOUNT = "proof-acct";
+const FILE_ONLY_WRITE_SCOPE = "https://www.googleapis.com/auth/calendar.events";
+
+/** Exact file-only operator allowlist: SDK defaults + 3 wiring names. */
+function fileOnlyConnectorHintJson(helper: string): string {
+  return JSON.stringify({
+    command: "node",
+    args: [helper],
+    envAllowlist: [
+      ...STDIO_IMPLICIT_ENV_VARS,
+      "M5_RESCHEDULE_ACCOUNT",
+      "M5_RESCHEDULE_WRITE_TOKEN_PATH",
+      "GOOGLE_OAUTH_CREDENTIALS",
+    ],
+  });
+}
+
+function writeFileOnlyOperatorFiles(dir: string): {
+  clientFile: string;
+  tokenFile: string;
+} {
+  const clientFile = join(dir, "gcp-oauth.keys.json");
+  writeFileSync(
+    clientFile,
+    JSON.stringify({
+      client_id: "file-only-proof-client",
+      client_secret: "file-only-proof-secret",
+      redirect_uris: ["http://localhost:3000/oauth2callback"],
+    }),
+  );
+  // Well-formed exact-scope persisted grant for the selected account (the
+  // production file format `{ [account]: { refresh_token, scope, ... } }`;
+  // the fixture child never reads it — the harness must not need to).
+  const tokenFile = join(dir, "write-tokens.json");
+  writeFileSync(
+    tokenFile,
+    JSON.stringify({
+      [FILE_ONLY_ACCOUNT]: {
+        refresh_token: "file-only-proof-refresh",
+        scope: FILE_ONLY_WRITE_SCOPE,
+        access_token: "file-only-proof-access",
+        expiry_date: Date.now() + 3_600_000,
+      },
+    }),
+  );
+  return { clientFile, tokenFile };
+}
+
+describe("persisted-grant file-only operator wiring (local fixture pipeline)", () => {
+  it("staged approve performs exactly ONE conditional PATCH and lands a verified succeeded receipt with zero secret values in env", async () => {
+    const { env, dbPath } = tempEnv();
+    const fx = await startGoogleFixture();
+    const instanceId = await provisionCalendarInstance(dbPath);
+    const { sessionId, proposalId, hash } = await seedStagedProposal(
+      dbPath,
+      instanceId,
+    );
+    const dir = mkdtempSync(join(tmpdir(), "companion-write-file-only-"));
+    tempDirs.push(dir);
+    const { clientFile, tokenFile } = writeFileOnlyOperatorFiles(dir);
+    const grantBefore = readFileSync(tokenFile, "utf-8");
+    const helper = fixtureHelperPath();
+    const startupEnv = {
+      ...env,
+      COMPANION_ACTIONS_JSON: ENABLED_ACTIONS_JSON,
+      [RESCHEDULE_WRITE_PROFILE_ENV]: "google-reschedule",
+      [RESCHEDULE_WRITE_CONNECTOR_ENV]: fileOnlyConnectorHintJson(helper),
+      M5_RESCHEDULE_ACCOUNT: FILE_ONLY_ACCOUNT,
+      M5_RESCHEDULE_WRITE_TOKEN_PATH: tokenFile,
+      GOOGLE_OAUTH_CREDENTIALS: clientFile,
+    };
+    // File-only proof: no secret-carrying write-credential value may appear
+    // in the startup env the profile freezes and the child inherits.
+    for (const key of Object.keys(startupEnv)) {
+      expect(key).not.toBe("M5_RESCHEDULE_CLIENT_ID");
+      expect(key).not.toBe("M5_RESCHEDULE_CLIENT_SECRET");
+      expect(key).not.toBe("M5_RESCHEDULE_REFRESH_TOKEN");
+      expect(key).not.toBe("M5_RESCHEDULE_GRANTED_SCOPE");
+      expect(key).not.toBe("M5_RESCHEDULE_ACCESS_TOKEN");
+    }
+    const started = await startServer({
+      env: startupEnv,
+      calendarBinding: {
+        connectorInstanceId: instanceId,
+        connector: fixtureBackedCalendarBinding(instanceId, () => fx.base),
+        selection: { calendarId: "primary", account: "ops@example" },
+      },
+      writeMcpTransportFactory: testWriteTransportFactory(fx.base),
+      writeTestIdentity: { ...FIXTURE_IDENTITY },
+      drainMs: 50,
+    });
+    servers.push(started);
+    await approveProposalHttp(started.port, sessionId, proposalId, hash);
+    const view = await waitForTerminalReceipt(
+      started.port,
+      sessionId,
+      proposalId,
+    );
+    expect(view.markerCommitted).toBe(true);
+    expect(view.receipt?.outcome).toBe("succeeded");
+    // Exactly ONE conditional PATCH with the committed etag, start/end only.
+    expect(fx.patchCount()).toBe(1);
+    expect(fx.lastIfMatch()).toBe(E2E_ETAG_V1);
+    expect(fx.lastBodyKeys()).toEqual(["end", "start"]);
+    expect(fx.eventStart()).toBe(E2E_START_NEW);
+    // The harness never touches the persisted grant: byte-identical.
+    expect(readFileSync(tokenFile, "utf-8")).toBe(grantBefore);
+  }, 60_000);
+});

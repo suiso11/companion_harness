@@ -43,10 +43,10 @@ describe("dedicated reschedule write host pin", () => {
       "6939311fd3eae9846648e0a175e304c9500f578e",
     );
     expect(RESCHEDULE_WRITE_FORK.sourceCommit).toBe(
-      "33483f458979d1d5a436d1a1047eb0f2a4d79dd7",
+      "cefb63c24f062ef6a49889d7b635330dee884f63",
     );
     expect(RESCHEDULE_WRITE_FORK.sourceTree).toBe(
-      "83e72c3dc10e601b4dab25a88a2a88170fe19d73",
+      "624968c65f499f5d30141f4d936aca66d016b531",
     );
     expect(RESCHEDULE_WRITE_FORK.lockDigestSha256).toBe(
       "63261d25992ee9c97136a60bbf4fe52a5485cadea28b34d6b8b6c685f38bd533",

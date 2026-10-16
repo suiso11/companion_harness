@@ -16,8 +16,8 @@
 // like the real provider); malformed bounds are `invalid_input` with NO
 // patch. Timed sources keep dateTime-only bodies.
 //
-// The REAL production entrypoint lives in the fork (derived branch
-// `feat/m5-reschedule-entrypoint-v2`, draft PR suiso11/google-calendar-mcp#3,
+// The REAL production entrypoint lives in the fork (branch
+// `feat/m5-allday-conversion`, fork PR suiso11/google-calendar-mcp#4,
 // base commit 6939311): identity `google-calendar-reschedule` /
 // `1.0.0-reschedule.1`. THIS fixture intentionally reports its own identity
 // (`google-calendar-reschedule-test-fixture` / `0.0.0-fixture.1`) so it can

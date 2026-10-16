@@ -19,7 +19,7 @@ Thumbs.db
 .m5-allday-approval/
 # PR33 review proof (private throwaway: local smoke logs only, never fixtures).
 .m5-pr33-review-proof/
-# M5 fork-derived checkout (foreign repo; review via fork PR #3, not here).
+# M5 fork-derived checkout (foreign repo; review via fork PR #4, not here).
 # Fully ignored so Harness git/biome/test never depend on it; explicit
 # real-fork tests opt in via M5_RESCHEDULE_FORK_CLI. Superseded standalone
 # scaffold `.m5-write-fork` was removed (remote orphan branch retained for
@@ -27,3 +27,6 @@ Thumbs.db
 .m5-write-fork-derived/
 # CI-fetched real remind CLI dependency (pinned source, built in CI only).
 .ci/
+# M5 persisted write-grant proof (private throwaway: local real-CLI stdio
+# smoke logs + sanitized aggregate facts only, never credentials/fixtures).
+.m5-persisted-write-proof/

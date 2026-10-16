@@ -9,11 +9,13 @@
 //
 // Candidate provenance (verified by exact wire probe, never guessed):
 // - repo: https://github.com/suiso11/google-calendar-mcp
-// - derived branch: feat/m5-reschedule-entrypoint-v2 (draft PR #3)
+// - derived branch: feat/m5-allday-conversion (fork PR #4, base `main`)
 // - base commit: 6939311fd3eae9846648e0a175e304c9500f578e (readonly cutover)
-// - source commit: 33483f458979d1d5a436d1a1047eb0f2a4d79dd7
-//   (all-day → timed conversion; focused branch feat/m5-allday-conversion)
-// - source tree: 83e72c3dc10e601b4dab25a88a2a88170fe19d73
+// - source commit: cefb63c24f062ef6a49889d7b635330dee884f63
+//   (persisted write-grant runtime: `resolveWriteRuntimeCredential` /
+//   `loadWriteStoredGrant` / `updateWriteStoredAccessToken`; focused fork
+//   PR4 review fixes on top of the all-day conversion)
+// - source tree: 624968c65f499f5d30141f4d936aca66d016b531
 // - package: @cocal/google-calendar-mcp, private version 3.0.0-readonly.2
 // - package-lock.json SHA-256:
 //   63261d25992ee9c97136a60bbf4fe52a5485cadea28b34d6b8b6c685f38bd533
@@ -28,6 +30,30 @@
 //   (separate `M5_RESCHEDULE_*` credential namespace; readonly tokens and
 //   the readonly `calendar.events.readonly` scope are never reused).
 // - launch entry: <fork>/build/reschedule-cli.js (separate stdio process).
+// - write runtime auth (fork `src/reschedule/cli.ts`
+//   `resolveWriteRuntimeCredential`, `src/reschedule/writeTokenStore.ts`
+//   `loadWriteStoredGrant` / `updateWriteStoredAccessToken`): the selected
+//   account is EXACT (`M5_RESCHEDULE_ACCOUNT`, fork `^[a-z0-9_-]{1,64}$`
+//   grammar — never a display name or email). Two credential modes, no
+//   mixing: a fully-valid explicit `M5_RESCHEDULE_*` env credential wins,
+//   and ANY partial env credential refuses WITHOUT file fallthrough;
+//   otherwise the per-account persisted grant (written out of band by the
+//   separate `auth:write` consent CLI via `saveWriteCredentials` into
+//   `M5_RESCHEDULE_WRITE_TOKEN_PATH`, default
+//   `~/.config/google-calendar-mcp-write/tokens.json`) combines with the
+//   existing OAuth client registration (`loadCredentials`, client file via
+//   `GOOGLE_OAUTH_CREDENTIALS`). Missing/ambiguous/readonly/broad/mismatch
+//   grants refuse with NO fallback to readonly tokens; refreshed access
+//   tokens persist back atomically into the SAME per-account file (other
+//   accounts preserved, 0600) — the single-token supplier format is never
+//   written over it. The RECOMMENDED host flow is file-only: the write
+//   child allowlist carries ONLY the client file path, the write token
+//   file path, and the account selector (plus the mandatory SDK inherited
+//   names) — no `M5_RESCHEDULE_CLIENT_*` / `M5_RESCHEDULE_REFRESH_TOKEN` /
+//   `M5_RESCHEDULE_GRANTED_SCOPE` / `M5_RESCHEDULE_ACCESS_TOKEN` values, so
+//   no manual env secret copy is ever needed. `M5_RESCHEDULE_TEST_*` names
+//   stay rejected: the production CLI ignores test endpoint overrides and
+//   always uses the immutable Google host.
 //
 // Binding pin: the hash below is the LIVE-WIRE canonical input-schema
 // SHA-256 (what the connector verifies over the real SDK wire via
@@ -41,6 +67,13 @@
 // `9f59e35b…8609d7` (strict-date refines are runtime-only, wire unchanged).
 // Re-probed again at fork `33483f4` (all-day conversion): identical hash,
 // wire unchanged (conversion touches observation output + PATCH body only).
+// Re-probed 2026-10-16 at fork `cefb63c` (persisted-grant runtime) against
+// the REAL shipped production CLI (`build/reschedule-cli.js`) over REAL
+// stdio with a temp exact-scope persisted grant + temp Desktop client file
+// and file-only child env (no secret values): identical hash, wire
+// unchanged (auth work touches credential resolution only). Proof:
+// `packages/connector-calendar/test/reschedulePersistedGrant.test.ts` (1
+// file-only tools/list + 6 refusal boundaries, 0 Google writes).
 // The fork's removed hand-written `rescheduleInputJsonSchema()` (neither
 // strict nor `$schema`) MUST NOT be used here.
 
@@ -69,10 +102,10 @@ export const RESCHEDULE_WRITE_WIRE_HASH =
 /** Pinned fork provenance for the dedicated write entrypoint. */
 export const RESCHEDULE_WRITE_FORK = Object.freeze({
   repo: "https://github.com/suiso11/google-calendar-mcp",
-  branch: "feat/m5-reschedule-entrypoint-v2",
+  branch: "feat/m5-allday-conversion",
   baseCommit: "6939311fd3eae9846648e0a175e304c9500f578e",
-  sourceCommit: "33483f458979d1d5a436d1a1047eb0f2a4d79dd7",
-  sourceTree: "83e72c3dc10e601b4dab25a88a2a88170fe19d73",
+  sourceCommit: "cefb63c24f062ef6a49889d7b635330dee884f63",
+  sourceTree: "624968c65f499f5d30141f4d936aca66d016b531",
   package: "@cocal/google-calendar-mcp",
   packageVersion: "3.0.0-readonly.2",
   lockDigestSha256:
@@ -114,7 +147,20 @@ export function getRescheduleWriteDefinitions(): readonly McpBindingDefinition[]
 //   host-owned (pinned below / the active Calendar instance id the server
 //   registered itself). Unknown keys, non-stdio shapes, or TEST-namespace
 //   env names (`M5_RESCHEDULE_TEST_*`, the fixture-only bypass) fail closed.
-//   Token/credential VALUES are never read here — shape only.
+//   Token/credential VALUES are never read here — shape only. The
+//   RECOMMENDED allowlist is file-only: the mandatory SDK inherited names
+//   plus exactly `GOOGLE_OAUTH_CREDENTIALS` (Desktop client file path),
+//   `M5_RESCHEDULE_WRITE_TOKEN_PATH` (persisted-grant file path), and
+//   `M5_RESCHEDULE_ACCOUNT` (exact account selector) — no
+//   `M5_RESCHEDULE_CLIENT_*` / `M5_RESCHEDULE_REFRESH_TOKEN` /
+//   `M5_RESCHEDULE_GRANTED_SCOPE` / `M5_RESCHEDULE_ACCESS_TOKEN` values, so
+//   the write child authorizes from the persisted grant with no manual env
+//   secret copy (proven by
+//   `packages/connector-calendar/test/reschedulePersistedGrant.test.ts` +
+//   the file-only startup E2E in `rescheduleWriteStartup.test.ts`).
+//   Explicit `M5_RESCHEDULE_*` env credentials remain a SUPPORTED fork mode
+//   when fully valid (any partial env credential refuses without file
+//   fallthrough); the host simply never needs them.
 // - The write capability always names the SAME active Calendar instance as
 //   the read binding (same connectorInstanceId + calendarId/account); the
 //   write MCP transport identity (command/pinned server name+version+hash)
