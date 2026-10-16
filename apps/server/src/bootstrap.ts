@@ -29,6 +29,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   createCalendarConnector,
+  createCreateWritePort,
   createRescheduleWritePort,
   DEFAULT_CALENDAR_ADAPTER_TOOLS,
   isSourceEtagBasis,
@@ -44,12 +45,15 @@ import {
 } from "@companion/connector-mcp";
 import type { KernelRepository } from "@companion/kernel";
 import {
+  type ActionCreateReadPort,
   type ActionProposalStager,
   BUNDLED_SCHEMA_VERSION,
   CalendarActionWriteCapabilitySchema,
   type CalendarActionWritePort,
   type CalendarConnectorBinding,
   type CalendarConnectorPort,
+  type CalendarCreateWritePort,
+  CalendarCreateWriteCapabilitySchema,
   type CalendarTargetStore,
   closeKernelDatabase,
   createActionExecutionService,
@@ -57,6 +61,7 @@ import {
   createAgentStrategy,
   createCalendarActionReadPort,
   createCalendarActionTargetResolver,
+  createCalendarCreateProposalRegistration,
   createCalendarRescheduleProposalRegistration,
   createDurableCalendarTargetStore,
   createKernelRepository,
@@ -65,6 +70,7 @@ import {
   createMemoryStageRegistrations,
   createReferenceManager,
   createToolBroker,
+  toCalendarObservation,
   getSchemaVersion,
   type KernelDatabaseHandle,
   type MarkdownConnectorBinding,
@@ -123,6 +129,18 @@ import {
   RESCHEDULE_WRITE_PROFILE_ENV,
   type RescheduleWriteConnectorHint,
 } from "./rescheduleWriteProfile.js";
+import {
+  assertCreateWriteAccountCompatible,
+  assertCreateWriteHintCompatible,
+  assertCreateWriteReadonlyPathVisible,
+  buildCreateWriteConnectorConfig,
+  CREATE_WRITE_CONNECTOR_ENV,
+  CREATE_WRITE_PROFILE_ENV,
+  type CreateWriteConnectorHint,
+  getCreateWriteDefinitions,
+  parseCreateWriteConnectorHint,
+  parseCreateWriteProfileName,
+} from "./createWriteProfile.js";
 
 /** Graceful-drain natural-completion budget (§11.5: max 10s). */
 export const SHUTDOWN_DRAIN_MS = 10_000;
@@ -225,6 +243,23 @@ export interface StartServerOptions {
     readonly version: string;
   };
   /**
+   * M6 (tests / trusted harness): injectable DEDICATED create MCP transport
+   * factory used ONLY when the host-owned create profile
+   * (`M6_CALENDAR_CREATE_PROFILE`) is selected. Production never passes
+   * this field. Fixture transports arrive only through this option, never
+   * through production endpoint env bypass.
+   */
+  createMcpTransportFactory?: TransportFactory;
+  /**
+   * M6 (tests only): explicit trusted test-seam wire identity override for
+   * the dedicated create connector. Options-injected only, never env.
+   * Production never passes this field.
+   */
+  createTestIdentity?: {
+    readonly expectedServerName: string;
+    readonly version: string;
+  };
+  /**
    * C21: the DEDICATED trusted CalendarActionWritePort seam, injected ONLY by
    * trusted host code — NEVER from env/config, which cannot carry a capability,
    * a category or a connector instance id. It becomes live ONLY when
@@ -238,6 +273,21 @@ export interface StartServerOptions {
    * the profile).
    */
   actionWriteBinding?: ActionWriteBinding | null;
+  /**
+   * M6: the DEDICATED trusted CalendarCreateWritePort seam, injected ONLY by
+   * trusted host code — NEVER from env/config. It becomes live ONLY when
+   * `config.actions.optIn` AND `config.actions.writeEnabled` AND the
+   * explicit `config.actions.createEnabled` are all true AND its enabled
+   * capability names the EXACT active Calendar instance AND an active
+   * Calendar composition exists. Old reschedule-only compositions (no
+   * `createEnabled`, no binding here) never autocreate: without this seam
+   * no `calendar.create` registration, strategy seam, or external insert
+   * exists. Tests and harnesses inject their own deterministic fake ports
+   * here; the env-profile transport (`M6_CALENDAR_CREATE_PROFILE`, fork
+   * `google-calendar-create` entrypoint) composes separately once the fork
+   * CLI + wire pin land.
+   */
+  actionCreateBinding?: ActionCreateBinding | null;
 }
 
 /**
@@ -273,6 +323,40 @@ export interface ActionWriteBinding {
    * Explicit ownership transfer to the server. Default FALSE: the caller
    * keeps ownership and the server never closes this port. Extra
    * caller-owned ports passed alongside it are never closed arbitrarily.
+   */
+  readonly owned?: boolean;
+}
+
+/**
+ * One injected dedicated create binding plus its EXPLICIT lifecycle
+ * ownership. Mirrors {@link ActionWriteBinding}: a caller-owned port is
+ * never shut down by the server; shutdown happens only when `owned === true`
+ * and a `shutdown` function is supplied. Exactly one of `port` /
+ * `derivePort` must be supplied; both/neither stays unusable and fails
+ * closed when the create gate is open (never a silently half-enabled
+ * surface).
+ */
+export interface ActionCreateBinding {
+  /** The exact trusted port (enabled capability, title/start/end only). */
+  readonly port?: CalendarCreateWritePort;
+  /**
+   * Derive the trusted port from the EXACT Calendar instance the server
+   * itself just registered (owned-composition hosts that cannot know the
+   * stored `connector_instances.id` beforehand). Invoked ONLY when a
+   * Calendar composition is active and exactly once. The derived capability
+   * MUST name the registered id; the exact-identity check still fails
+   * closed on any mismatch.
+   */
+  readonly derivePort?: (active: {
+    readonly connectorInstanceId: string;
+    readonly calendarId: string;
+    readonly account?: string;
+  }) => CalendarCreateWritePort;
+  /** Optional close hook; used only together with `owned === true`. */
+  readonly shutdown?: () => Promise<void>;
+  /**
+   * Explicit ownership transfer to the server. Default FALSE: the caller
+   * keeps ownership and the server never closes this port.
    */
   readonly owned?: boolean;
 }
@@ -642,6 +726,8 @@ export async function startServer(
   let frozenCalendarProfile: string | undefined;
   let frozenWriteProfile: string | undefined;
   let frozenWriteConnectorHint: string | undefined;
+  let frozenCreateProfile: string | undefined;
+  let frozenCreateConnectorHint: string | undefined;
   // M5 write-child env fix: freeze the WHOLE startup environment snapshot
   // synchronously with the selectors above (same rationale — `options.env` /
   // `process.env` stay mutable). The lazy dedicated write child is spawned
@@ -658,6 +744,12 @@ export async function startServer(
     ];
     frozenWriteConnectorHint = (options.env ?? process.env)[
       RESCHEDULE_WRITE_CONNECTOR_ENV
+    ];
+    frozenCreateProfile = (options.env ?? process.env)[
+      CREATE_WRITE_PROFILE_ENV
+    ];
+    frozenCreateConnectorHint = (options.env ?? process.env)[
+      CREATE_WRITE_CONNECTOR_ENV
     ];
   } catch (error) {
     const earlyLogger =
@@ -688,6 +780,14 @@ export async function startServer(
    * when adopted (actions triple gate open with the write profile selected).
    */
   let ownedWriteMcp: McpConnector | undefined;
+  /**
+   * M6: the ONE server-owned DEDICATED create MCP connector (undefined =
+   * none). Separate transport identity (`google-calendar-create` /
+   * `1.0.0-create.1`, tool `create-event` only); shares the active Calendar
+   * instance id in its capability only. Old reschedule-only compositions
+   * never construct it.
+   */
+  let ownedCreateMcp: McpConnector | undefined;
   /** C21: EXPLICITLY owned injected write-port close hook (see gate below). */
   let ownedActionShutdown: (() => Promise<void>) | undefined;
   let onSigint: (() => void) | undefined;
@@ -900,6 +1000,95 @@ export async function startServer(
       // ignored: fail closed (no connection, no credential read).
       throw new ServerConfigError(
         "reschedule write connector hints require a write profile",
+      );
+    }
+    // M6 host-owned dedicated create profile (normal `pnpm start`
+    // selection): `M6_CALENDAR_CREATE_PROFILE=google-create` together with
+    // `M6_CREATE_CONNECTOR_JSON` stdio hints composes the SEPARATE create
+    // entrypoint hostside. Unset profile keeps previous behavior unchanged
+    // (injected `actionCreateBinding` seam or fail-closed incomplete
+    // opt-in). Selected profile requires: no competing injected create
+    // binding, an active Calendar composition, and the explicit config
+    // triple (optIn + writeEnabled + createEnabled). Old reschedule-only
+    // compositions (no createEnabled, no binding) never reach here. ALL
+    // fail closed BEFORE any DB side effect.
+    const createProfile = parseCreateWriteProfileName(frozenCreateProfile);
+    let createConnectorHint: CreateWriteConnectorHint | null = null;
+    if (createProfile !== null) {
+      if ((options.actionCreateBinding ?? null) !== null) {
+        throw new ServerConfigError(
+          "create write profile and an injected create binding are mutually exclusive",
+        );
+      }
+      if (calendarConfig === null && calendarBinding === null) {
+        throw new ServerConfigError(
+          "create write profile requires calendar config",
+        );
+      }
+      if (
+        config.actions.optIn !== true ||
+        config.actions.writeEnabled !== true ||
+        config.actions.createEnabled !== true
+      ) {
+        throw new ServerConfigError(
+          "create write profile requires action create opt-in",
+        );
+      }
+      createConnectorHint = parseCreateWriteConnectorHint(
+        frozenCreateConnectorHint,
+      );
+      assertCreateWriteHintCompatible(createConnectorHint);
+      try {
+        buildCreateWriteConnectorConfig({
+          connectorInstanceId: "preflight",
+          hint: createConnectorHint,
+          ...(options.createTestIdentity !== undefined
+            ? { testIdentity: options.createTestIdentity }
+            : {}),
+        });
+      } catch (error) {
+        if (error instanceof ServerConfigError) {
+          throw error;
+        }
+        throw new ServerConfigError("create write connector hints are invalid");
+      }
+      if (options.createMcpTransportFactory === undefined) {
+        try {
+          assertStdioEnvClosed(
+            buildCreateWriteConnectorConfig({
+              connectorInstanceId: "preflight",
+              hint: createConnectorHint,
+              ...(options.createTestIdentity !== undefined
+                ? { testIdentity: options.createTestIdentity }
+                : {}),
+            }),
+          );
+        } catch (error) {
+          if (error instanceof ServerConfigError) {
+            throw error;
+          }
+          throw new ServerConfigError(
+            "create write connector env allowlist is invalid",
+          );
+        }
+      }
+      {
+        const createSelection =
+          calendarConfig !== null
+            ? calendarConfig.selection
+            : calendarBinding?.selection;
+        assertCreateWriteAccountCompatible(
+          frozenStartupEnv.M6_CREATE_ACCOUNT,
+          createSelection?.account,
+        );
+        assertCreateWriteReadonlyPathVisible(
+          createConnectorHint,
+          frozenStartupEnv,
+        );
+      }
+    } else if (frozenCreateConnectorHint !== undefined) {
+      throw new ServerConfigError(
+        "create write connector hints require a create profile",
       );
     }
     // Boring profile-specific persisted identity: the profile registers
@@ -1185,6 +1374,36 @@ export async function startServer(
           { permittedCategories: ["write"] },
         );
       }
+      // M6 host-owned dedicated create MCP lifecycle (normal startup). Built
+      // ONLY when the create profile is selected (validated pre-DB above):
+      // a SEPARATE stdio transport to the pinned dedicated create
+      // entrypoint under the exact `["write"]` category gate with the
+      // host-pinned `write` definition, bound to the SAME active Calendar
+      // instance id as the read binding above. Never widens/rebinds the
+      // readonly or reschedule connectors.
+      if (createProfile !== null && createConnectorHint !== null) {
+        if (
+          kernelCalendarBinding === undefined ||
+          calendarTargetStore === undefined
+        ) {
+          throw new ServerConfigError(
+            "action create binding does not match the active calendar binding",
+          );
+        }
+        ownedCreateMcp = new McpConnector(
+          buildCreateWriteConnectorConfig({
+            connectorInstanceId: kernelCalendarBinding.connectorInstanceId,
+            hint: createConnectorHint,
+            ...(options.createTestIdentity !== undefined
+              ? { testIdentity: options.createTestIdentity }
+              : {}),
+          }),
+          getCreateWriteDefinitions(),
+          options.createMcpTransportFactory ??
+            startupEnvTransportFactory(frozenStartupEnv),
+          { permittedCategories: ["write"] },
+        );
+      }
     }
 
     // C21 M5 composition: TRIPLE gate. `m5-action` and the proposal-only
@@ -1285,8 +1504,122 @@ export async function startServer(
       // no approval, no strategy, no external write).
     }
 
+    // M6 create gate (explicit `createEnabled` AND the reschedule pair AND
+    // a trusted create binding on the active Calendar instance — never
+    // implied by the old flags). Disabled compositions never adopt the
+    // binding below: no derive call, no capability read, no use.
+    const actionCreate = options.actionCreateBinding ?? null;
+    const createConfigAllowed =
+      config.actions.optIn === true &&
+      config.actions.writeEnabled === true &&
+      config.actions.createEnabled === true;
+    let actionCreatePort: CalendarCreateWritePort | null = null;
+    if (createConfigAllowed && actionCreate !== null) {
+      const suppliedCreatePort = actionCreate.port !== undefined;
+      const deriveCreateFn = actionCreate.derivePort;
+      // Exactly ONE of the two: supplying BOTH or NEITHER stays unusable.
+      if (suppliedCreatePort === (deriveCreateFn !== undefined)) {
+        actionCreatePort = null;
+      } else if (suppliedCreatePort) {
+        actionCreatePort = actionCreate.port ?? null;
+      } else if (
+        deriveCreateFn !== undefined &&
+        kernelCalendarBinding !== undefined &&
+        (calendarConfig !== null || calendarBinding !== null)
+      ) {
+        const selection =
+          calendarConfig !== null
+            ? calendarConfig.selection
+            : calendarBinding?.selection;
+        if (selection !== undefined) {
+          actionCreatePort = deriveCreateFn({
+            connectorInstanceId: kernelCalendarBinding.connectorInstanceId,
+            calendarId: selection.calendarId,
+            ...(selection.account === undefined
+              ? {}
+              : { account: selection.account }),
+          });
+        }
+      }
+    }
+    let createEnabled = false;
+    if (actionCreatePort !== null) {
+      const createCapability = CalendarCreateWriteCapabilitySchema.safeParse(
+        actionCreatePort.capability,
+      );
+      const createMatchesActiveCalendar =
+        kernelCalendarBinding !== undefined &&
+        calendarTargetStore !== undefined &&
+        createCapability.success &&
+        createCapability.data.connectorInstanceId ===
+          kernelCalendarBinding.connectorInstanceId;
+      if (createConfigAllowed) {
+        // Create opted in: an unusable/mismatched binding is an incomplete
+        // opt-in and fails closed BEFORE listen (never a silent disable,
+        // never a fallback to the reschedule binding).
+        if (!createMatchesActiveCalendar) {
+          throw new ServerConfigError(
+            "action create binding does not match the active calendar binding",
+          );
+        }
+        createEnabled = true;
+      }
+      // Create disabled: any injected create port is simply never used (no
+      // staging, no approval, no strategy, no external insert).
+    }
+
+    // M6 host-owned dedicated create port (normal startup, no injection).
+    // Composes the DEDICATED create port from the owned create connector
+    // above (single `create-event` call per consumed grant, no retry). The
+    // readonly and reschedule connectors are never widened or rebound.
+    if (createProfile !== null) {
+      const createConnector = ownedCreateMcp;
+      if (
+        createConnector === undefined ||
+        kernelCalendarBinding === undefined ||
+        calendarTargetStore === undefined
+      ) {
+        throw new ServerConfigError(
+          "action create binding does not match the active calendar binding",
+        );
+      }
+      if (!createConfigAllowed) {
+        throw new ServerConfigError(
+          "create write profile requires action create opt-in",
+        );
+      }
+      const activeInstanceId = kernelCalendarBinding.connectorInstanceId;
+      const hostCreatePort = createCreateWritePort({
+        connectorInstanceId: activeInstanceId,
+        caller: {
+          callTool: (
+            upstreamTool: string,
+            args: unknown,
+            signal?: AbortSignal,
+          ) => createConnector.callTool(upstreamTool, args, signal),
+        },
+        upstreamTool: "create-event",
+      });
+      const hostCreateCapability =
+        CalendarCreateWriteCapabilitySchema.safeParse(
+          hostCreatePort.capability,
+        );
+      if (
+        !hostCreateCapability.success ||
+        hostCreateCapability.data.connectorInstanceId !== activeInstanceId
+      ) {
+        throw new ServerConfigError(
+          "action create binding does not match the active calendar binding",
+        );
+      }
+      actionCreatePort =
+        hostCreatePort as unknown as CalendarCreateWritePort;
+      createEnabled = true;
+    }
+
     // Repository (with its SINGLE shared proposal stager) is constructed here
-    // so `writeEnabled` is exactly the triple-gated value above. When memory
+    // so `writeEnabled` is exactly the triple-gated value above and
+    // `createEnabled` is exactly the M6 create-gated value above. When memory
     // is configured the intake hooks re-wrap THIS gated repo (the pre-gate
     // baseRepo wrapper above is superseded here, never shared onward). A
     // selected host-owned write profile implies the config pair already
@@ -1295,8 +1628,15 @@ export async function startServer(
     // repository below.
     const gatedRepo = createKernelRepository(
       handle.raw,
-      actionsEnabled || writeProfile !== null
-        ? { actionProposals: { writeEnabled: true } }
+      actionsEnabled || writeProfile !== null || createEnabled
+        ? {
+            actionProposals: {
+              ...(actionsEnabled || writeProfile !== null
+                ? { writeEnabled: true }
+                : {}),
+              ...(createEnabled ? { writeEnabled: true, createEnabled: true } : {}),
+            },
+          }
         : {},
     );
     if (memory !== null) {
@@ -1389,7 +1729,8 @@ export async function startServer(
       config.markdownRoots.length > 0 ||
       calendarBinding !== null ||
       calendarConfig !== null ||
-      actionsEnabled;
+      actionsEnabled ||
+      createEnabled;
     if (needsMarkdownTools || memory !== null) {
       const registrations = needsMarkdownTools
         ? [
@@ -1414,6 +1755,27 @@ export async function startServer(
             stager: repo.actionProposalsStager as ActionProposalStager,
           }),
         );
+      }
+      if (createEnabled) {
+        // M6 proposal-only `calendar.create`: stages a targetless creation
+        // on the host-owned active Calendar instance (never model input),
+        // never executes an external insert. Requires the explicit
+        // `createEnabled` gate above; reschedule-only hosts never reach here.
+        const createSelection =
+          calendarConfig !== null
+            ? calendarConfig.selection
+            : calendarBinding?.selection;
+        if (
+          kernelCalendarBinding !== undefined &&
+          createSelection !== undefined
+        ) {
+          registrations.push(
+            createCalendarCreateProposalRegistration({
+              stager: repo.actionProposalsStager as ActionProposalStager,
+              connectorInstanceId: kernelCalendarBinding.connectorInstanceId,
+            }),
+          );
+        }
       }
       if (memory !== null) {
         // Explicit memory management tools (staging-only, no external-write
@@ -1526,6 +1888,32 @@ export async function startServer(
         }
       };
     }
+    // M6 lifecycle: ONLY an adopted (createEnabled) EXPLICITLY owned
+    // injected create port is shut down, same single-use semantics as the
+    // write hook above. Caller-owned (default) or disabled compositions
+    // are never closed by the server.
+    if (
+      createEnabled &&
+      actionCreate?.owned === true &&
+      actionCreate.shutdown !== undefined
+    ) {
+      const shutdownFn = actionCreate.shutdown;
+      const prevHook = ownedActionShutdown;
+      ownedActionShutdown = async (): Promise<void> => {
+        try {
+          if (prevHook !== undefined) {
+            await prevHook();
+          }
+        } catch {
+          // Best effort; continue with the create hook below.
+        }
+        try {
+          await shutdownFn();
+        } catch {
+          // The port's own cleanup is the caller's; never fail shutdown.
+        }
+      };
+    }
     // M2 (opt-in): when a gateway resolved above, register the agent under
     // m0-default before engine.start/listen. The agent reuses the M1
     // ToolBroker, or a private empty-registration broker when no Markdown
@@ -1585,8 +1973,101 @@ export async function startServer(
         db: handle.raw,
         referenceManager,
         preflightRead: readPort,
+        targetStore,
         clock: now,
       });
+      // M6 create seams: live ONLY when the explicit create gate opened
+      // above (config triple + trusted create binding on the active
+      // instance). The authoritative create read-back is a GET by the
+      // stable insert id through the ACTIVE read binding (never a POST
+      // fallback, never a resend); the selection is the host-owned active
+      // calendar/account (never model input). Reschedule-only compositions
+      // pass no create seams and create runs fail closed.
+      const activeCreateSelection =
+        calendarConfig !== null
+          ? calendarConfig.selection
+          : calendarBinding?.selection;
+      const activeCreateBindings =
+        createEnabled &&
+        actionCreatePort !== null &&
+        activeCreateSelection !== undefined
+          ? {
+              createPort: actionCreatePort,
+              selection: {
+                calendarId: activeCreateSelection.calendarId,
+                ...(activeCreateSelection.account !== undefined
+                  ? { account: activeCreateSelection.account }
+                  : {}),
+              },
+            }
+          : null;
+      const createRead: ActionCreateReadPort | undefined =
+        activeCreateBindings === null
+          ? undefined
+          : {
+              read: async (request, signal) => {
+                if (signal?.aborted === true) {
+                  throw new Error("calendar create read aborted");
+                }
+                if (
+                  request.connectorInstanceId !==
+                  activeActionBindings.binding.connectorInstanceId
+                ) {
+                  return { status: "schema_invalid" };
+                }
+                let getResult: Awaited<
+                  ReturnType<
+                    typeof activeActionBindings.binding.connector.get
+                  >
+                >;
+                try {
+                  getResult =
+                    await activeActionBindings.binding.connector.get(
+                      {
+                        calendarId: request.calendarId,
+                        eventId: request.stableEventId,
+                        ...(request.account !== undefined
+                          ? { account: request.account }
+                          : {}),
+                      },
+                      signal === undefined ? undefined : { signal },
+                    );
+                } catch {
+                  return { status: "unavailable" };
+                }
+                if (!getResult.ok) {
+                  const code = getResult.code;
+                  if (
+                    code === "mcp_schema_mismatch" ||
+                    code === "calendar_response_invalid" ||
+                    code === "calendar_range_invalid"
+                  ) {
+                    return { status: "schema_invalid" };
+                  }
+                  return { status: "unavailable" };
+                }
+                const observation = toCalendarObservation(
+                  getResult.event,
+                  activeActionBindings.binding.connectorInstanceId,
+                  now(),
+                );
+                const title = observation.title;
+                return {
+                  status: "ok",
+                  observation: {
+                    connectorInstanceId:
+                      activeActionBindings.binding.connectorInstanceId,
+                    resourceCanonicalKey: getResult.event.canonicalKey,
+                    title:
+                      title === null ? null : title.slice(0, 128),
+                    text: observation.text.normalize("NFC"),
+                    sourceRevision: observation.sourceRevision ?? null,
+                    eventStatus: getResult.event.status,
+                    observedAt: observation.observedAt,
+                  },
+                };
+              },
+            };
       registry.register(
         ACTION_STRATEGY_NAME,
         createActionStrategy({
@@ -1598,8 +2079,19 @@ export async function startServer(
             db: handle.raw,
             targetStore,
           }),
+          ...(activeCreateBindings !== null && createRead !== undefined
+            ? {
+                createWritePort: activeCreateBindings.createPort,
+                createRead,
+                createSelection: activeCreateBindings.selection,
+              }
+            : {}),
         }),
       );
+      if (activeCreateBindings !== null) {
+        // Counts only: no provider id, capability or connector detail logged.
+        logger.info("server.create_ready", { status: 1 });
+      }
     }
 
     engine = new RunEngine({
@@ -1698,6 +2190,13 @@ export async function startServer(
       try {
         if (ownedWriteMcp !== undefined) {
           await boundedMcpShutdown(ownedWriteMcp, mcpShutdownMs);
+        }
+      } catch {
+        // Best effort: the listen error carries the startup failure.
+      }
+      try {
+        if (ownedCreateMcp !== undefined) {
+          await boundedMcpShutdown(ownedCreateMcp, mcpShutdownMs);
         }
       } catch {
         // Best effort: the listen error carries the startup failure.
@@ -1801,6 +2300,22 @@ export async function startServer(
             });
           }
         }
+        if (ownedCreateMcp !== undefined) {
+          let createStopped = false;
+          try {
+            createStopped = await boundedMcpShutdown(
+              ownedCreateMcp,
+              mcpShutdownMs,
+            );
+          } catch {
+            // The connector's own cleanup is bounded; proceed with close.
+          }
+          if (!createStopped) {
+            logger.warn("server.create_write_shutdown_timeout", {
+              status: safeReason,
+            });
+          }
+        }
         // C21: the adopted hook is consumed before invoke (single-use even
         // across a drain-failure retry: the retry re-enters shutdown only
         // after the memo reset above, and the first pass never reached here).
@@ -1880,6 +2395,13 @@ export async function startServer(
     if (ownedWriteMcp !== undefined) {
       try {
         await boundedMcpShutdown(ownedWriteMcp, mcpShutdownMs);
+      } catch {
+        // Best effort: the original startup error carries the failure.
+      }
+    }
+    if (ownedCreateMcp !== undefined) {
+      try {
+        await boundedMcpShutdown(ownedCreateMcp, mcpShutdownMs);
       } catch {
         // Best effort: the original startup error carries the failure.
       }

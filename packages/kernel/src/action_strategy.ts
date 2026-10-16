@@ -45,7 +45,9 @@
 
 import type { RunResult } from "@companion/contracts";
 import {
+  CALENDAR_CREATE_TOOL_NAME,
   CALENDAR_RESCHEDULE_TOOL_NAME,
+  CalendarCreateToolInputSchema,
   CalendarRescheduleToolInputSchema,
   parseRunResult,
   UuidSchema,
@@ -54,6 +56,8 @@ import type Database from "better-sqlite3";
 import { z } from "zod";
 import {
   ActionAuthoritativeObservationSchema,
+  type ActionCreateFinishRequest,
+  type ActionCreateReadPort,
   type ActionExecutionService,
   type ActionFinishRequest,
   type ActionFinishResult,
@@ -126,6 +130,67 @@ export interface CalendarActionWritePort {
 /* Strategy options                                                      */
 /* ------------------------------------------------------------------ */
 
+/** Exact injected create capability: title/start/end ONLY, enabled binding. */
+export const CalendarCreateWriteCapabilitySchema = z
+  .strictObject({
+    tool: z.literal(CALENDAR_CREATE_TOOL_NAME),
+    /** Exactly these three editable fields, in this order — nothing else. */
+    editableFields: z.tuple([
+      z.literal("title"),
+      z.literal("start"),
+      z.literal("end"),
+    ]),
+    connectorInstanceId: UuidSchema,
+    writeEnabled: z.literal(true),
+  })
+  .refine(
+    (value) =>
+      value.writeEnabled === true && value.connectorInstanceId.length === 36,
+    { message: "create capability must be explicitly enabled" },
+  );
+export type CalendarCreateWriteCapability = z.infer<
+  typeof CalendarCreateWriteCapabilitySchema
+>;
+
+export type CalendarCreateWriteRequest = {
+  /** The EXACT committed gate meta returned by `consumeActionGrant`. */
+  readonly grant: CommittedGrantMeta;
+  /** Must equal `grant`-bound proposal tool + connector instance. */
+  readonly connectorInstanceId: string;
+  readonly tool: typeof CALENDAR_CREATE_TOOL_NAME;
+  /** Immutable approved title (verbatim user semantics, NFC transport). */
+  readonly title: string;
+  /** Normalized (NFC) intended start/end instants, timed fields ONLY. */
+  readonly start: string;
+  readonly end: string;
+  /** Stable insert id derived from the immutable execution id. */
+  readonly stableEventId: string;
+  /** Host-owned calendar/account selection (never model input). */
+  readonly calendarId: string;
+  readonly account?: string | undefined;
+  readonly signal?: AbortSignal | undefined;
+};
+
+/** Exact three-value connector return for ONE insert. No partial success. */
+export type CalendarCreateWriteOutcome =
+  | { readonly status: "succeeded" }
+  | { readonly status: "definite_failure" }
+  | { readonly status: "unknown" };
+
+/**
+ * The exact injected CalendarCreateWritePort. The host chose the connector
+ * implementation; the kernel consumes nothing until the committed grant gate.
+ * `insert` MUST be called at most once per executes/grant and MUST NOT retry
+ * (no redirect follow, no timeout resend, no 409 overwrite).
+ */
+export interface CalendarCreateWritePort {
+  readonly capability: CalendarCreateWriteCapability;
+  insert(
+    request: CalendarCreateWriteRequest,
+    signal?: AbortSignal,
+  ): Promise<CalendarCreateWriteOutcome>;
+}
+
 /** Host-private canonicalKey -> `get`-target resolution (same-DB store). */
 export type CalendarTargetResolver = (
   canonicalKey: string,
@@ -136,10 +201,30 @@ export interface ActionStrategyOptions {
   readonly service: ActionExecutionService;
   /** Required §18.5 read port (preflight AND §18.7 read-back). */
   readonly preflightRead: ActionPreflightReadPort;
-  /** Required explicit write port; disabled/unknown bindings are refused. */
-  readonly writePort: CalendarActionWritePort;
+  /**
+   * Reschedule write port + target resolver. Optional ONLY for
+   * create-only compositions (no reschedule binding): reschedule runs
+   * then fail closed through the real preflight-failure terminal (the
+   * capability parses to null and nothing is consumed). Compositions with
+   * a reschedule binding pass both, exactly as in M5.
+   */
+  readonly writePort?: CalendarActionWritePort;
   /** Durable host-private target resolver (calendar_get_targets store). */
-  readonly resolveTarget: CalendarTargetResolver;
+  readonly resolveTarget?: CalendarTargetResolver;
+  /**
+   * M6 create seams (ALL required together for `calendar.create` runs;
+   * reschedule-only compositions omit all three and create runs fail
+   * closed through the real preflight-failure terminal):
+   * - `createWritePort`: dedicated `calendar.create` insert port,
+   * - `createRead`: authoritative GET by stable id (read-back only),
+   * - `createSelection`: host-owned calendar/account selection.
+   */
+  readonly createWritePort?: CalendarCreateWritePort;
+  readonly createRead?: ActionCreateReadPort;
+  readonly createSelection?: {
+    readonly calendarId: string;
+    readonly account?: string;
+  };
 }
 
 interface RawProposalForStrategy {
@@ -148,10 +233,10 @@ interface RawProposalForStrategy {
   tool: string;
   connector_instance_id: string;
   input_json: string;
-  target_resource_id: string;
-  target_ref_id: string;
-  based_on_snapshot_id: string;
-  expected_revision: string;
+  target_resource_id: string | null;
+  target_ref_id: string | null;
+  based_on_snapshot_id: string | null;
+  expected_revision: string | null;
   status: string;
 }
 
@@ -185,6 +270,13 @@ function readTargetCanonicalKey(
   db: Database.Database,
   proposal: RawProposalForStrategy,
 ): string {
+  // Reschedule only: create proposals carry a NULL target (the M6 dispatch
+  // above routes them to runCreateFlow before this is ever reached).
+  if (proposal.target_resource_id === null) {
+    throw new RepositoryValidationError(
+      "proposal target resource binding missing (impossible state)",
+    );
+  }
   const row = db
     .prepare(
       "SELECT canonical_key FROM resources WHERE id = ? AND connector_instance_id = ?",
@@ -481,14 +573,24 @@ export function createActionStrategy(
     //    run.failed, zero consumption, zero writes) — never a synthetic noop.
     const capability = (() => {
       try {
+        if (writePort === undefined) return null;
         return CalendarActionWriteCapabilitySchema.parse(writePort.capability);
       } catch {
         return null;
       }
     })();
     const proposal = readProposalForRun(db, runId);
+    // M6 dispatch: targetless `calendar.create` runs take the dedicated
+    // create flow (authority preflight, one insert, stable-id read-back,
+    // NEW-resource verified terminal). The reschedule flow below is the
+    // exact M5 path, unchanged.
+    if (proposal.tool === CALENDAR_CREATE_TOOL_NAME) {
+      return runCreateFlow();
+    }
     const bindingExact =
       capability !== null &&
+      resolveTarget !== undefined &&
+      writePort !== undefined &&
       proposal.status === "approved" &&
       proposal.tool === CALENDAR_RESCHEDULE_TOOL_NAME &&
       proposal.connector_instance_id === capability.connectorInstanceId;
@@ -508,7 +610,8 @@ export function createActionStrategy(
     //    zero writes) — the write is never attempted, so a success result is
     //    never claimed for an unattempted write.
     const targetCanonicalKey = readTargetCanonicalKey(db, proposal);
-    const resolvedTarget = resolveTarget(targetCanonicalKey);
+    const resolveTargetFn = resolveTarget as CalendarTargetResolver;
+    const resolvedTarget = resolveTargetFn(targetCanonicalKey);
     if (resolvedTarget === undefined) {
       const failed = service.recordActionPreflightFailure(runId);
       if (failed.applied) {
@@ -545,16 +648,37 @@ export function createActionStrategy(
     // 5) THE single external write, exactly once, after the marker commit;
     //    ONLY the port's own three-value return is classified — any
     //    rejection/throw after the gate maps to `unknown`.
+    //    Reschedule only: the target triple is NON-NULL (create dispatched
+    //    above); a NULL here is an impossible state, fail closed.
+    if (
+      proposal.target_resource_id === null ||
+      proposal.based_on_snapshot_id === null ||
+      proposal.expected_revision === null
+    ) {
+      throw new RepositoryValidationError(
+        "calendar.reschedule proposal requires a full existing-event target (impossible state)",
+      );
+    }
+    const rescheduleTargetResourceId: string = proposal.target_resource_id;
+    const rescheduleBasedOnSnapshotId: string = proposal.based_on_snapshot_id;
+    const rescheduleExpectedRevision: string = proposal.expected_revision;
+    const reschedulePreflightSnapshotId: string | null =
+      preflight.preflightSnapshotId;
+    if (reschedulePreflightSnapshotId === null) {
+      throw new RepositoryValidationError(
+        "calendar.reschedule preflight snapshot missing (impossible state)",
+      );
+    }
     let write: CalendarWriteOutcome;
     try {
-      write = await writePort.update(
+      write = await (writePort as CalendarActionWritePort).update(
         {
           grant,
           connectorInstanceId: capability.connectorInstanceId,
           tool: CALENDAR_RESCHEDULE_TOOL_NAME,
           start,
           end,
-          targetResourceId: proposal.target_resource_id,
+          targetResourceId: rescheduleTargetResourceId,
           targetCanonicalKey,
           target,
           signal: ctx.signal,
@@ -568,7 +692,7 @@ export function createActionStrategy(
       finish({
         outcome,
         preflightRevision: unverifiedPreflightRevisionOf(proposal),
-        preflightSnapshotId: preflight.preflightSnapshotId,
+        preflightSnapshotId: reschedulePreflightSnapshotId,
       });
     if (write.status !== "succeeded") {
       return plainFinish(
@@ -584,16 +708,16 @@ export function createActionStrategy(
     const unverifiedFinish = (): RunResult =>
       finish({
         outcome: "succeeded_unverified",
-        preflightRevision: proposal.expected_revision,
-        preflightSnapshotId: preflight.preflightSnapshotId,
+        preflightRevision: rescheduleExpectedRevision,
+        preflightSnapshotId: reschedulePreflightSnapshotId,
       });
     let readback: Awaited<ReturnType<ActionPreflightReadPort["read"]>>;
     try {
       readback = await preflightRead.read(
         {
           connectorInstanceId: capability.connectorInstanceId,
-          targetResourceId: proposal.target_resource_id,
-          basedOnSnapshotId: proposal.based_on_snapshot_id,
+          targetResourceId: rescheduleTargetResourceId,
+          basedOnSnapshotId: rescheduleBasedOnSnapshotId,
         },
         ctx.signal,
       );
@@ -633,11 +757,188 @@ export function createActionStrategy(
       // The committed preflight materialization happened only after the
       // observed-revision key matched, so the preflight revision is exactly
       // the proposal's expected_revision.
-      preflightRevision: proposal.expected_revision,
-      preflightSnapshotId: preflight.preflightSnapshotId,
+      preflightRevision: rescheduleExpectedRevision,
+      preflightSnapshotId: reschedulePreflightSnapshotId,
     });
 
     /* ----- helpers ----- */
+
+    /**
+     * M6 create flow (targetless creation, no etag, no preflight snapshot):
+     * authority preflight (service branch) -> one insert after the committed
+     * marker -> authoritative GET by the stable insert id -> verified NEW
+     * resource terminal. Wrong/deleted/missing read-backs finish
+     * `succeeded_unverified`; an `unknown` insert NEVER reads-to-resolve and
+     * finishes plain `unknown` with no retry and no resend.
+     */
+    async function runCreateFlow(): Promise<RunResult> {
+      const createCapability = (() => {
+        try {
+          return options.createWritePort === undefined
+            ? null
+            : CalendarCreateWriteCapabilitySchema.parse(
+                options.createWritePort.capability,
+              );
+        } catch {
+          return null;
+        }
+      })();
+      const createProposal = readProposalForRun(db, runId);
+      const selection = options.createSelection;
+      const createBindingExact =
+        createCapability !== null &&
+        createProposal.status === "approved" &&
+        createProposal.tool === CALENDAR_CREATE_TOOL_NAME &&
+        createProposal.connector_instance_id ===
+          createCapability.connectorInstanceId &&
+        createProposal.target_resource_id === null &&
+        createProposal.target_ref_id === null &&
+        createProposal.based_on_snapshot_id === null &&
+        createProposal.expected_revision === null &&
+        selection !== undefined &&
+        options.createWritePort !== undefined &&
+        options.createRead !== undefined;
+      if (!createBindingExact) {
+        const failed = service.recordActionPreflightFailure(runId);
+        if (failed.applied) {
+          return withPersisted(runId);
+        }
+        throw new StrategyError("execution_failed");
+      }
+      // Authority preflight + one-shot committed gate in one step (the
+      // service create branch performs NO event GET here).
+      const preflight = await service.runActionPreflight(runId, {
+        signal: ctx.signal,
+      });
+      if (preflight.outcome !== "granted" || preflight.grant.tool !== CALENDAR_CREATE_TOOL_NAME) {
+        return withPersisted(runId);
+      }
+      const grant = preflight.grant;
+      if (grant.expectedRevision !== null) {
+        throw new RepositoryValidationError(
+          "calendar.create grant carries no expected revision (impossible state)",
+        );
+      }
+      const stableEventId = preflight.stableEventId;
+      if (stableEventId === null || !/^[0-9a-f]{32}$/.test(stableEventId)) {
+        throw new RepositoryValidationError(
+          "calendar.create grant has no stable insert id (impossible state)",
+        );
+      }
+      const intended = CalendarCreateToolInputSchema.parse(
+        JSON.parse(createProposal.input_json) as unknown,
+      );
+      const title = intended.title.normalize("NFC");
+      const start = normalizeInstant(intended.start);
+      const end = normalizeInstant(intended.end);
+      if (title.length === 0 || start.length === 0 || end.length === 0) {
+        throw new RepositoryValidationError(
+          "proposal title/start/end are empty (impossible state)",
+        );
+      }
+      const createPort = options.createWritePort as CalendarCreateWritePort;
+      const createRead = options.createRead as ActionCreateReadPort;
+      const activeSelection = selection as {
+        readonly calendarId: string;
+        readonly account?: string;
+      };
+      // THE single insert, exactly once, after the marker commit; ONLY the
+      // port's own three-value return is classified — any rejection/throw
+      // after the gate maps to `unknown`.
+      let inserted: CalendarCreateWriteOutcome;
+      try {
+        inserted = await createPort.insert(
+          {
+            grant: {
+              executionId: grant.executionId,
+              proposalId: grant.proposalId,
+              proposalHash: grant.proposalHash,
+              tool: CALENDAR_CREATE_TOOL_NAME,
+              inputHash: grant.inputHash,
+              expectedRevision: null,
+              consumedAt: grant.consumedAt,
+            },
+            connectorInstanceId: createCapability.connectorInstanceId,
+            tool: CALENDAR_CREATE_TOOL_NAME,
+            title,
+            start,
+            end,
+            stableEventId,
+            calendarId: activeSelection.calendarId,
+            ...(activeSelection.account !== undefined
+              ? { account: activeSelection.account }
+              : {}),
+            signal: ctx.signal,
+          },
+          ctx.signal,
+        );
+      } catch {
+        inserted = { status: "unknown" } as const;
+      }
+      const finishCreate = (request: ActionCreateFinishRequest): RunResult => {
+        const finished = service.finishCreateExecution(runId, request);
+        return resultOf(finished);
+      };
+      if (inserted.status !== "succeeded") {
+        return finishCreate({
+          outcome: inserted.status === "definite_failure" ? "failed" : "unknown",
+        });
+      }
+      // §18.7-equivalent authoritative read-back: GET the EXACT stable id
+      // just inserted (never a POST fallback). Any port failure, rejection,
+      // unparseable observation, or content mismatch is
+      // `succeeded_unverified` — never a fabricated verified claim, never a
+      // resend, never a retry. An `unknown` insert never reaches here.
+      let readback: Awaited<ReturnType<ActionCreateReadPort["read"]>>;
+      try {
+        readback = await createRead.read(
+          {
+            connectorInstanceId: createCapability.connectorInstanceId,
+            calendarId: activeSelection.calendarId,
+            stableEventId,
+            ...(activeSelection.account !== undefined
+              ? { account: activeSelection.account }
+              : {}),
+          },
+          ctx.signal,
+        );
+      } catch {
+        return finishCreate({ outcome: "succeeded_unverified" });
+      }
+      if (readback.status !== "ok") {
+        return finishCreate({ outcome: "succeeded_unverified" });
+      }
+      let observation: z.infer<typeof ActionAuthoritativeObservationSchema>;
+      try {
+        observation = ActionAuthoritativeObservationSchema.parse(
+          readback.observation,
+        );
+      } catch {
+        return finishCreate({ outcome: "succeeded_unverified" });
+      }
+      // Pre-verify before the terminal owns it (the terminal re-verifies
+      // fail-closed): same identity, non-deleted, actual title + timed
+      // bounds. Mismatch -> unverified, never unknown, never a resend.
+      const verified =
+        observation.connectorInstanceId ===
+          createCapability.connectorInstanceId &&
+        observation.eventStatus !== "deleted" &&
+        observation.title !== null &&
+        observation.title.normalize("NFC") === title &&
+        boundariesMatch(observation.text, start, end);
+      if (!verified) {
+        return finishCreate({ outcome: "succeeded_unverified" });
+      }
+      return finishCreate({
+        outcome: "succeeded",
+        observation,
+        calendarId: activeSelection.calendarId,
+        ...(activeSelection.account !== undefined
+          ? { account: activeSelection.account }
+          : {}),
+        stableEventId,
+      });
+    }
 
     /** Finish through the ONE concrete terminal facility; verbatim result. */
     function finish(request: ActionFinishRequest): RunResult {
@@ -689,5 +990,12 @@ export function createActionStrategy(
 function unverifiedPreflightRevisionOf(
   proposal: RawProposalForStrategy,
 ): string {
+  // Reschedule only (create terminals carry NULL preflight refs); the M6
+  // dispatch above guarantees NON-NULL here.
+  if (proposal.expected_revision === null) {
+    throw new RepositoryValidationError(
+      "calendar.reschedule proposal requires an expected revision (impossible state)",
+    );
+  }
   return proposal.expected_revision;
 }

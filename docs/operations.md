@@ -1995,6 +1995,7 @@ vs formal HOLD; no C24 scope inferred):
 | C16–C20 engine/M2/UI slices | IMPLEMENTED | Covered by the final 103-file / 1251-test battery, root + e2e typecheck clean, whole-repo lint closed at `52d61ba` (216 files, 0 errors, 1 pre-existing info; NOT rerun here). |
 | C21 M5 Action composition | IMPLEMENTED (triple gate) | Config hints + dedicated write port + exact-instance match; disabled gate refuses staging / 409-before-repository; no production write binding selected. |
 | C22 action lifecycle E2E | IMPLEMENTED (fake) | Fake harness seams only; real-UI conversation→search→rN→refresh coverage via fakes, not live. |
+| M6 calendar.create extension (agreed, M5 non-goal exception) | IN PROGRESS | `calendar.create` (TIMED title/start/end only) on the same approval flow; targetless rows, 1 grant -> 1 `create-event` POST (`{id,summary,start,end}` only), verified-only new rN. Old M5 non-goal text stays historical; fork `google-calendar-create@1.0.0-create.1` pin finalizes before host commit. |
 | C08 adoption / C10-08 production mapping / C11-01 positive tombstone | FORMAL HOLD / UNRESOLVED / BLOCKED | Unchanged: no adopted binding, pin, profile, OAuth, or live-Google wiring anywhere in this branch. |
 
 Review/PR linkage: PR #20 is published for this branch (see the

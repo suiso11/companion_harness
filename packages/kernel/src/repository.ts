@@ -16,7 +16,7 @@ import {
   ActionExecutionStatusSchema,
   type ActionReceiptView,
   ActionReceiptViewSchema,
-  CalendarRescheduleToolInputSchema,
+  ActionToolInputSchema,
   type CreateSessionResponse,
   CreateSessionResponseSchema,
   EventsQuerySchema,
@@ -761,6 +761,11 @@ function storeIdempotentResponse(
 export interface CreateKernelRepositoryOptions {
   readonly actionProposals?: {
     readonly writeEnabled?: boolean;
+    /**
+     * M6 create gate (default FALSE, never implied by `writeEnabled`):
+     * `calendar.create` staging/commits require this explicit opt-in.
+     */
+    readonly createEnabled?: boolean;
     readonly clock?: () => number;
   };
 }
@@ -780,6 +785,7 @@ export function createKernelRepository(
       : createActionProposalStager({
           db,
           writeEnabled: options.actionProposals.writeEnabled === true,
+          createEnabled: options.actionProposals.createEnabled === true,
           ...(options.actionProposals.clock === undefined
             ? {}
             : { clock: options.actionProposals.clock }),
@@ -2748,10 +2754,10 @@ export function createKernelRepository(
         `INSERT INTO action_executions (id, session_id, proposal_id, approval_turn_id, action_run_id, status, external_call_started_at, finished_at, error_code, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, 'queued', NULL, NULL, NULL, ?, ?)`,
       ).run(executionId, session, proposal, decisionTurnId, runId, now, now);
-      // One-shot exact grant: inputHash over the canonical proposed input.
+      // One-shot exact grant: inputHash over the canonical proposed input
+      // (per-tool exact shape: reschedule start/end or create title/start/end).
       const proposedInput = parseOrValidation(
-        () =>
-          CalendarRescheduleToolInputSchema.parse(JSON.parse(row.input_json)),
+        () => ActionToolInputSchema.parse(JSON.parse(row.input_json)),
         "proposal input",
       );
       db.prepare(

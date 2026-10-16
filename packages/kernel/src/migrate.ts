@@ -25,8 +25,8 @@ import {
   NewerDatabaseError,
 } from "./errors.js";
 
-/** Bundled M5 + memory-integration schema version. Bump only with a new committed migration. */
-export const BUNDLED_SCHEMA_VERSION = 9;
+/** Bundled M5 + memory-integration + M6 create schema version. Bump only with a new committed migration. */
+export const BUNDLED_SCHEMA_VERSION = 10;
 
 export interface BundledMigration {
   version: number;

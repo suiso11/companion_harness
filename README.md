@@ -1187,6 +1187,7 @@ Companion Harness は milestone 単位で構築しています。
 | M3        | Conversation UI / SSE                  | Implemented / hardening |
 | M4        | MCP / Calendar                         | Foundation / design     |
 | M5        | Write Actions / Approval               | Planned                 |
+| M6        | Calendar create extension (agreed)     | In progress (opt-in, `calendar.create` TIMED title/start/end only; old M5 non-goal text stays historical) |
 
 v0.1 は M0〜M4 を対象とし、基本的に **read-only** です。
 

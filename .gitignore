@@ -33,3 +33,10 @@ Thumbs.db
 # PR35 auth-review proof (private throwaway: local smoke logs + sanitized
 # aggregate facts only, never credentials/fixtures/real grants).
 .m5-pr35-review-proof/
+# Release acceptance proof (private throwaway: sanitized PROOF.log + local
+# server logs only, never credentials/private content/user DB).
+.m5-release-acceptance/
+# M6 calendar.create proof (private throwaway: sanitized PROGRESS.log +
+# local stdio/browser smoke logs only, never credentials/fixtures/real
+# grants/events).
+.m6-calendar-create-proof/

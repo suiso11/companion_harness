@@ -98,38 +98,45 @@ const ServerConfigSchema = z.strictObject({
 });
 
 /**
- * C21: strict opt-in M5 Action config (deep-frozen). DEFAULT DISABLED on
- * both flags. These are HINTS only — they never authorize anything:
+ * C21: strict opt-in M5 Action config + M6 opt-in creation extension
+ * (deep-frozen). DEFAULT DISABLED on all flags. These are HINTS only —
+ * they never authorize anything:
  *
  * - `optIn` (default false): the host opts into the M5 Action surface at
  *   all (proposal-only `calendar.reschedule` registration + decision APIs).
  * - `writeEnabled` (default false): the host additionally allows a queued
  *   Action Run to be APPROVED (the repository stager is created with exactly
  *   this flag, so staging/approval is an explicit composition opt-in).
+ * - `createEnabled` (default false, M6): the host additionally allows
+ *   `calendar.create` staging/commits on top of the two flags above. An old
+ *   `writeEnabled === true` composition NEVER implicitly authorizes
+ *   creation: reschedule-only hosts keep working with zero behavior change
+ *   and no new registration appears.
  *
- * Neither flag can supply or select a real binding: the exact trusted
- * `CalendarActionWritePort` is injected separately by trusted host code, and
- * the server registers `m5-action` only when config flags AND a dedicated
- * write binding matching the active owned Calendar instance are ALL present
- * (triple gate). No env value can ever enable a category, a provider, a
- * write capability or an OAuth/pin flow.
+ * No flag can supply or select a real binding: the exact trusted write ports
+ * are injected separately by trusted host code, and the server registers
+ * `m5-action` only when config flags AND dedicated write bindings matching
+ * the active owned Calendar instance are ALL present. No env value can ever
+ * enable a category, a provider, a write capability or an OAuth/pin flow.
  */
 export interface ActionConfig {
   readonly optIn: boolean;
   readonly writeEnabled: boolean;
+  readonly createEnabled: boolean;
 }
 
 /** Default M5 Action config: fully disabled (fail-closed). */
 export const DEFAULT_ACTION_CONFIG: ActionConfig = Object.freeze({
   optIn: false,
   writeEnabled: false,
+  createEnabled: false,
 });
 
 /**
- * Strict M5 Action opt-in parser: exact `{ optIn?, writeEnabled? }` object
- * with optional booleans defaulting to FALSE. Any unknown key, non-boolean
- * value or non-object input fails closed with a fixed message; the result is
- * deep-frozen.
+ * Strict M5 Action opt-in parser: exact
+ * `{ optIn?, writeEnabled?, createEnabled? }` object with optional booleans
+ * defaulting to FALSE. Any unknown key, non-boolean value or non-object
+ * input fails closed with a fixed message; the result is deep-frozen.
  */
 export function parseActionConfig(raw: string | undefined): ActionConfig {
   if (raw === undefined) {
@@ -145,17 +152,26 @@ export function parseActionConfig(raw: string | undefined): ActionConfig {
     throw configError("action config must be a JSON object");
   }
   for (const key of Object.keys(parsed)) {
-    if (key !== "optIn" && key !== "writeEnabled") {
+    if (key !== "optIn" && key !== "writeEnabled" && key !== "createEnabled") {
       throw configError("action config has an unknown key");
     }
   }
-  const record = parsed as { optIn?: unknown; writeEnabled?: unknown };
+  const record = parsed as {
+    optIn?: unknown;
+    writeEnabled?: unknown;
+    createEnabled?: unknown;
+  };
   const optIn = record.optIn ?? false;
   const writeEnabled = record.writeEnabled ?? false;
-  if (typeof optIn !== "boolean" || typeof writeEnabled !== "boolean") {
+  const createEnabled = record.createEnabled ?? false;
+  if (
+    typeof optIn !== "boolean" ||
+    typeof writeEnabled !== "boolean" ||
+    typeof createEnabled !== "boolean"
+  ) {
     throw configError("action config flags must be booleans");
   }
-  return Object.freeze({ optIn, writeEnabled });
+  return Object.freeze({ optIn, writeEnabled, createEnabled });
 }
 
 export interface ServerConfig {

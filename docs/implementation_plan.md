@@ -1581,6 +1581,12 @@ CREATE TABLE action_receipts (
 
 > 本節は計画であり、上記テストは **まだ実装・実行されていない**。
 
+### 18.12 M6 calendar.create 拡張（合意・M5 非目標の例外的追加）
+
+- M5 §18.11 の「create を含むすべての書き込みは非目標」は **M5 時点の歴史的事実として残し**、本節が **合意された例外的追加** として `calendar.create`（通常 TIMED・title/start/end のみ）のみを M5 と同一の承認フロー上に拡張する。delete / title 以外の編集・説明・参加者・繰り返し・一括作成・双方向同期は引き続き非目標。
+- create 行は既存イベント対象を持たない（target 4 列すべて NULL・expectedRevision NULL・偽プレースホルダなし）。reschedule 行は従来どおり 4 列すべて NOT NULL。1 セッション 1 pending 制約は両ツールをまたいで共有する。
+- 外部 insert は grant ごとに正確に 1 回（`create-event` 単一試行、body は `{ id, summary, start:{dateTime}, end:{dateTime} }` のみ）。409 は上書きなしの確定失敗、送信後 timeout/切断/2xx 不正は unknown で再送・取消・自動解決なし。verified は同一 calendar/安定 ID の GET 再取得で title+時刻+ID が完全一致したときのみ。新規 materialize は verified 観測の後に限り新しい rN として記録する（古い rN を書き換えない）。
+
 ---
 
 ## 19. クロスカット運用・リリース計画（合意）

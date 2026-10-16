@@ -1863,7 +1863,7 @@ describe("injected calendar binding derives the write port from the active selec
                   method: "PATCH",
                   headers: {
                     "content-type": "application/json",
-                    "if-match": request.grant.expectedRevision,
+                    "if-match": request.grant.expectedRevision ?? "",
                   },
                   body: JSON.stringify({
                     start: { dateTime: request.start },
