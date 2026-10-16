@@ -117,6 +117,13 @@ jobs:
           COMPANION_E2E_CALENDAR: "1"
         run: pnpm --filter @companion/server test:e2e
 
+      - name: Memory management browser E2E (chromium, temp DB only)
+        env:
+          COMPANION_E2E_MEMORY: "1"
+          COMPANION_MEMORY_TEST_ENTRY: ${{ github.workspace }}/.ci/remind/dist/src/cli.js
+          COMPANION_MEMORY_TEST_CONFIG_TEMPLATE: ${{ github.workspace }}/.ci/remind/memory.config.example.json
+        run: pnpm --filter @companion/server test:e2e
+
       - name: Upload E2E failure artifacts (no production data)
         if: failure()
         uses: actions/upload-artifact@v4

@@ -1685,3 +1685,43 @@ timeout change, no behavior change: the scheduler tests' engine-idle poll
 now yields via `setImmediate` instead of wall-clock `setTimeout` sleeps,
 and `vitest.config.ts` caps `maxWorkers: 2` on CI only. Detail:
 `docs/operations.md` ("PR29 Windows stall fix").
+
+Memory management (explicit search/correct/retire/reactivate),
+2026-10-15 (local, temp stores only): native `memory.search` returns
+opaque session `mN` handles for active AND retired records and never
+heats/reactivates/grants; the confirm UI shows the live current record
+against the immutable citation snapshot before staging; `correct`
+stages a REAL source `event.append` + `record.correct` durable chain
+(stable idempotency key, same key+body replays the stored operation,
+key+drifted body is 409); `retire`/`reactivate` are reversible, never
+deletion/hiding (retired stays searchable, excluded only from CLI
+recall). UI races closed synchronously (search/target invalidation +
+generation guards, new-operation pending reset + poll identity, no
+stale ack reuse). Runnable: `pnpm exec vitest run
+apps/server/test/memory_manage.test.ts`, `pnpm --filter
+@companion/server exec vitest run test/memory_manage_live.test.ts`
+(real HTTP + synthetic gateway, NOT a real model, + REAL remind CLI
+temp DB), `COMPANION_E2E_MEMORY=1 pnpm --filter @companion/server exec
+playwright test --config playwright.config.ts` (real browser memory
+panel vs REAL app/CLI temp DB). Verified: full Vitest **113 files /
+1370 tests passed**, browser GREEN, live GREEN, root + e2e `tsc`
+exit 0, lint GREEN. Limits: synthetic gateway only; Windows manual
+smoke and current remote CI remain open. Full contract:
+`docs/operations.md` ("Conversation memory").
+
+PR34 review fixes (10 inline threads on `215f852`, local, temp stores
+only): atomic ack+operation mirror, run-specific recall citation
+endpoint + run-bound `mN` drawer, immutable-hash draining replay 409,
+pending-remaining bounded poll (never false-failed), terminal failure
+requires a fresh action/key (no same-key retry), correction draft bound
+to the exact `(searchId, handle)` and cleared on target change,
+search-header owner identity collision refusal, per-tool input schemas
+(`correct` requires body, others forbid it), code-point bounds on
+requests/responses, and 503-retryable/404-disabled memory errors.
+Verified after edits: affected unit `memory_manage.test.ts` **23/23
+passed**, real-browser `memory_manage.spec.ts` **2/2 passed**
+(production UI build, temp SQLite/RunEngine, loopback), root + server +
+e2e `tsc --noEmit` exit 0, Biome on changed files clean. Full unit
+(113 files/1370) + live HTTP/REAL CLI already green per oc-19 and not
+re-run (no production change since). Remote CI for the fix commit is
+pending at push time — see PR body.

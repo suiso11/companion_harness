@@ -282,6 +282,24 @@ export {
   createM1ToolRegistrations,
 } from "./markdown_tools.js";
 export type {
+  MemoryManagePort,
+  MemoryManageSearchHit,
+  MemoryManageSearchResult,
+  MemoryManageStageResult,
+  MemoryToolsOptions,
+} from "./memory_tools.js";
+export {
+  createMemorySearchRegistration,
+  createMemoryStageRegistrations,
+  MemoryCorrectToolInputSchema,
+  MemoryRetireToolInputSchema,
+  MemorySearchToolInputSchema,
+  MemorySearchToolOutputSchema,
+  MemoryStageToolInputSchema,
+  MemoryStageToolOutputSchema,
+  mapMemoryPortCode,
+} from "./memory_tools.js";
+export type {
   BundledMigration,
   MigrateOptions,
   MigrateResult,
@@ -336,6 +354,9 @@ export type {
   MemoryGrantRow,
   MemoryJobKind,
   MemoryJobRow,
+  MemoryOperationKind,
+  MemoryOperationRow,
+  MemorySearchItemRow,
   ModelCallOutcome,
   ModelCallRow,
   PostMessageOptions,

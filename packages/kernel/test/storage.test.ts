@@ -171,7 +171,7 @@ describe("m0 kernel pragmas and single connection", () => {
 });
 
 describe("m0 kernel DDL shape", () => {
-  it("creates exactly the seven M0 plus nine M1 plus one M2 plus one M4 plus four M5 action plus three memory tables, all STRICT, none WITHOUT ROWID", async () => {
+  it("creates exactly the seven M0 plus nine M1 plus one M2 plus one M4 plus four M5 action plus six memory tables, all STRICT, none WITHOUT ROWID", async () => {
     const handle = await openMigratedMemory();
     try {
       const rows = handle.raw
@@ -190,7 +190,10 @@ describe("m0 kernel DDL shape", () => {
         "evidence_grants",
         "memory_exposures",
         "memory_grants",
+        "memory_operations",
         "memory_outbox",
+        "memory_search_items",
+        "memory_searches",
         "model_calls",
         "reference_set_items",
         "reference_sets",

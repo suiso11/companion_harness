@@ -760,6 +760,66 @@ export const AGENT_CALENDAR_RESCHEDULE_PARAMETERS = Object.freeze({
 }) as unknown as Record<string, unknown>;
 
 /**
+ * Explicit closed JSON parameter schema for `memory.search`: model-facing
+ * `query` is required (1-500 code points), `limit` 1-8 default 5.
+ * Output carries opaque session-scoped `mN` handles only, never raw ids.
+ */
+export const AGENT_MEMORY_SEARCH_PARAMETERS = Object.freeze({
+  type: "object",
+  properties: Object.freeze({
+    query: Object.freeze({ type: "string", minLength: 1, maxLength: 500 }),
+    limit: Object.freeze({
+      type: "integer",
+      minimum: 1,
+      maximum: 8,
+      default: 5,
+    }),
+  }),
+  required: Object.freeze(["query"]),
+  additionalProperties: false,
+}) as unknown as Record<string, unknown>;
+
+/**
+ * Explicit closed JSON parameter schema for `memory.correct`: model-facing
+ * `searchId` plus an optional explicit `mN` `handle`, with the user's
+ * actual replacement text REQUIRED (1-2000 chars). Raw record ids are never
+ * accepted. A missing handle binds only when the referenced search holds
+ * exactly one candidate; multiple candidates without an explicit handle
+ * return `needs_clarification` and stage nothing.
+ */
+export const AGENT_MEMORY_CORRECT_PARAMETERS = Object.freeze({
+  type: "object",
+  properties: Object.freeze({
+    searchId: Object.freeze({ type: "string", minLength: 1, maxLength: 256 }),
+    handle: Object.freeze({ type: "string", pattern: "^m[1-9][0-9]*$" }),
+    correctionBody: Object.freeze({
+      type: "string",
+      minLength: 1,
+      maxLength: 2000,
+    }),
+  }),
+  required: Object.freeze(["searchId", "correctionBody"]),
+  additionalProperties: false,
+}) as unknown as Record<string, unknown>;
+
+/**
+ * Explicit closed JSON parameter schema for `memory.retire` /
+ * `memory.reactivate`: model-facing `searchId` plus an optional explicit
+ * `mN` `handle`. `correctionBody` is NOT a property, so the closed schema
+ * (`additionalProperties: false`) rejects it instead of advertising an
+ * argument these tools cannot accept.
+ */
+export const AGENT_MEMORY_RETIRE_PARAMETERS = Object.freeze({
+  type: "object",
+  properties: Object.freeze({
+    searchId: Object.freeze({ type: "string", minLength: 1, maxLength: 256 }),
+    handle: Object.freeze({ type: "string", pattern: "^m[1-9][0-9]*$" }),
+  }),
+  required: Object.freeze(["searchId"]),
+  additionalProperties: false,
+}) as unknown as Record<string, unknown>;
+
+/**
  * Broker-visible M1 tools the agent may advertise, each with its explicit
  * closed parameter schema. Unknown/unregistered names are never advertised:
  * `buildAgentToolDefinitions` skips descriptors outside this map.
@@ -772,6 +832,7 @@ const AGENT_BROKER_TOOL_PARAMETERS: Readonly<
   "reference.open": AGENT_REFERENCE_OPEN_PARAMETERS,
   "reference.refresh": AGENT_REFERENCE_REFRESH_PARAMETERS,
   "reference.related": AGENT_REFERENCE_RELATED_PARAMETERS,
+  "memory.search": AGENT_MEMORY_SEARCH_PARAMETERS,
 };
 
 /**
@@ -786,6 +847,9 @@ const AGENT_PROPOSAL_TOOL_PARAMETERS: Readonly<
   Record<string, Record<string, unknown>>
 > = {
   [CALENDAR_RESCHEDULE_TOOL_NAME]: AGENT_CALENDAR_RESCHEDULE_PARAMETERS,
+  "memory.correct": AGENT_MEMORY_CORRECT_PARAMETERS,
+  "memory.retire": AGENT_MEMORY_RETIRE_PARAMETERS,
+  "memory.reactivate": AGENT_MEMORY_RETIRE_PARAMETERS,
 };
 
 /** Deep copy one advertised parameter schema (callers cannot mutate it). */
