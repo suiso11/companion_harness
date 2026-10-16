@@ -1,7 +1,7 @@
 -- AV autonomy slice: durable PURPOSE records + explicit TASK lifecycle +
 -- persistent global autonomous-work stop control.
 --
--- Committed migration 0011: creates SIX new STRICT tables. It touches NO
+-- Committed migration 0011: creates SEVEN new STRICT tables. It touches NO
 -- existing table (0007 M5 action tables, 0008/0009 memory tables, and the M6
 -- 0010 rebuild are preserved byte-for-byte), so it cannot collide with the
 -- M6 migration 0010 reserved on the stacked base.
