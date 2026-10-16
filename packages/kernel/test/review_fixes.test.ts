@@ -801,12 +801,15 @@ describe("idempotency key lowercase migration (PR #3)", () => {
       insert.run(scope, lower, "a".repeat(64), JSON.stringify({ n: 1 }), T0);
       insert.run(scope, upper, "b".repeat(64), JSON.stringify({ n: 2 }), T0);
 
+      // Fail-closed invariant: the target version is intentionally NOT pinned
+      // here (it advances with each new bundled migration); what matters is
+      // that the upgrade rejects, the version stays at 3, and rows survive.
       await expect(
         migrateKernelDatabase({
           db: handle.raw,
           backupDir: join(dir, "backups"),
         }),
-      ).rejects.toThrow(/migration 3 -> \d+ failed/);
+      ).rejects.toThrow(/migration 3 -> \d+ failed after applying \[/);
       // Fail closed: version unchanged, both colliding rows preserved.
       expect(getSchemaVersion(handle.raw)).toBe(3);
       const rows = handle.raw

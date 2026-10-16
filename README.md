@@ -1310,6 +1310,41 @@ Model config が存在しない場合、偽の回答を生成する fallback は
 
 ---
 
+Not covered (remaining §16 acceptance gaps, not full closure):
+dedicated JSON status fallback and duplicate-seq E2E remain outside
+the current 12-test green; the historical green above does not close
+§16 acceptance.
+## Conversation memory (strict opt-in remind CLI)
+
+Unset `COMPANION_MEMORY_JSON` (default) means fully memoryless. When
+set, it must be a strict JSON object with only `{ executable, entry,
+config, scope, timeoutMs?, maxResponseBytes?, recallLimit?, idleMs? }`
+(all paths absolute; `scope` 1-256 chars, no controls;
+`timeoutMs` 500-30000 default 5000; `maxResponseBytes` 4096-1048576
+default 65536; `recallLimit` 1-8 default 5; `idleMs` 5000-300000
+default 30000). The remind CLI child is the only remind interface
+(`shell: false`, exact `[entry, --config, config]`); Companion never
+opens the remind DB. Durable state lives in Companion-owned
+`memory_outbox`/`memory_exposures`/`memory_grants` with stable
+idempotency keys. Recall is fail-open; extraction reuses the existing
+local model gateway only (unset model means no extraction);
+feedback is granted only for structural `mN` citations in the accepted
+answer. Memory perception/reactivation/retirement, export, and
+deletion APIs are not implemented. Full contract: `docs/operations.md`.
+
+Live HTTP smoke, 2026-10-15 (local, temp stores only, uncommitted):
+real server + synthetic loopback gateway (scripted `answer.submit` +
+extraction JSON; no real model) + REAL remind CLI temp DB
+(`allowedScopes ["personal","default"]`, LLM/vectors disabled).
+Turn 1 completed with `event.append` + `record.remember` acked
+(attempts 0) and CLI `record.recall` returning 1 snippet; turn 2
+recalled and answered with structural `citations: ["m1"]`, and
+`record.feedback` acked with a same-run `m1` grant; idle
+`maintain.distill` auto-enqueued and acked (degraded, LLM disabled:
+scheduling proof only). Preemption/start/stop edges are covered by
+existing unit regressions. This is not a real-model result and does
+not complete Windows manual smoke or current remote CI.
+
 # Markdown References
 
 Markdown vault を利用する場合:

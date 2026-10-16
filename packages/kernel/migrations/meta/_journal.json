@@ -51,6 +51,13 @@
       "when": 1790000000006,
       "tag": "0007_m5_actions",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": 8,
+      "when": 1790000000007,
+      "tag": "0008_memory_outbox",
+      "breakpoints": true
     }
   ]
 }

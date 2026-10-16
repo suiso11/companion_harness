@@ -174,6 +174,8 @@ export interface ServerConfig {
   readonly calendar: CalendarConfig | null;
   /** Strict opt-in M5 Action config (default fully disabled). */
   readonly actions: ActionConfig;
+  /** Strict opt-in remind memory config; null (unset) means memoryless. */
+  readonly memory: MemoryConfig | null;
 }
 
 /** Local model adapter (loopback-only, strict opt-in). */
@@ -601,6 +603,190 @@ function deepFreeze<T>(value: T): T {
 }
 
 /**
+ * Strict remind memory integration config (conversation memory + bounded
+ * automatic cultivation). Trusted startup opt-in only: unset (default)
+ * means fully memoryless and preserves current behavior.
+ *
+ * - Env `COMPANION_MEMORY_JSON` is strict JSON only; unset means null.
+ * - Must be an exact object with only `{ executable, entry, config,
+ *   scope, timeoutMs?, maxResponseBytes?, recallLimit?, idleMs? }`.
+ * - `executable`: absolute path to the child-process binary (usually the
+ *   Node.js binary that runs the remind CLI). `entry`: absolute path to
+ *   the remind CLI script. `config`: absolute path to the remind startup
+ *   config file the CLI opens. No shell is ever used; the child is
+ *   spawned with `shell: false` and exactly `[entry, --config, config]`.
+ * - `scope`: remind scope (1..256 chars, no control characters). All
+ *   Companion CLI calls carry this scope; cross-scope records are
+ *   rejected (FORBIDDEN_SCOPE) and never surfaced.
+ * - `timeoutMs` (default 5000, bounds 500..30000): per-CLI-call deadline
+ *   with hard kill afterwards. `maxResponseBytes` (default 65536, bounds
+ *   4096..1048576): stdout byte cap. `recallLimit` (default 5, bounds
+ *   1..8): pre-answer recall item cap. `idleMs` (default 30000, bounds
+ *   5000..300000): idle delay before one bounded cultivation batch.
+ * - Failures carry fixed messages only: no paths, scopes, or values escape.
+ * - The returned object is deep-frozen.
+ */
+export interface MemoryConfig {
+  /** Absolute path to the child-process binary (no shell, no lookup). */
+  readonly executable: string;
+  /** Absolute path to the remind CLI entry script. */
+  readonly entry: string;
+  /** Absolute path to the remind startup config file. */
+  readonly config: string;
+  /** Remind scope for every Companion CLI call. */
+  readonly scope: string;
+  /** Per-CLI-call deadline in ms (default 5000). */
+  readonly timeoutMs: number;
+  /** Stdout byte cap per CLI call (default 65536). */
+  readonly maxResponseBytes: number;
+  /** Pre-answer recall item cap (default 5, never above 8). */
+  readonly recallLimit: number;
+  /** Idle delay in ms before one bounded cultivation batch (default 30000). */
+  readonly idleMs: number;
+}
+
+export const DEFAULT_MEMORY_TIMEOUT_MS = 5000;
+export const MIN_MEMORY_TIMEOUT_MS = 500;
+export const MAX_MEMORY_TIMEOUT_MS = 30000;
+export const DEFAULT_MEMORY_MAX_RESPONSE_BYTES = 65536;
+export const MIN_MEMORY_MAX_RESPONSE_BYTES = 4096;
+export const MAX_MEMORY_MAX_RESPONSE_BYTES = 1048576;
+export const DEFAULT_MEMORY_RECALL_LIMIT = 5;
+export const MAX_MEMORY_RECALL_LIMIT = 8;
+export const DEFAULT_MEMORY_IDLE_MS = 30000;
+export const MIN_MEMORY_IDLE_MS = 5000;
+export const MAX_MEMORY_IDLE_MS = 300000;
+
+function requireAbsolutePath(value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > 4096 ||
+    value.includes(" ") ||
+    !isAbsolute(value)
+  ) {
+    throw configError("memory executable/entry/config must be absolute paths");
+  }
+  return value;
+}
+
+function requireMemoryScope(value: unknown): string {
+  if (typeof value !== "string" || value.length < 1 || value.length > 256) {
+    throw configError("memory scope must be 1..256 chars");
+  }
+  for (const unit of value) {
+    const code = unit.codePointAt(0) ?? 0;
+    if ((code >= 0x00 && code <= 0x1f) || (code >= 0x7f && code <= 0x9f)) {
+      throw configError("memory scope must not contain controls");
+    }
+  }
+  return value;
+}
+
+function requireBoundedInt(
+  value: unknown,
+  fallback: number,
+  min: number,
+  max: number,
+  what: string,
+): number {
+  if (value === undefined) {
+    return fallback;
+  }
+  if (typeof value !== "number" || !Number.isInteger(value)) {
+    throw configError(`${what} must be an integer`);
+  }
+  if (value < min || value > max) {
+    throw configError(`${what} is out of bounds`);
+  }
+  return value;
+}
+
+export function parseMemoryConfig(
+  raw: string | undefined,
+): MemoryConfig | null {
+  if (raw === undefined) {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw configError("memory config must be a JSON object");
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw configError("memory config must be a JSON object");
+  }
+  const keys = Object.keys(parsed);
+  for (const key of keys) {
+    if (
+      key !== "executable" &&
+      key !== "entry" &&
+      key !== "config" &&
+      key !== "scope" &&
+      key !== "timeoutMs" &&
+      key !== "maxResponseBytes" &&
+      key !== "recallLimit" &&
+      key !== "idleMs"
+    ) {
+      throw configError("memory config has an unknown key");
+    }
+  }
+  const record = parsed as {
+    executable?: unknown;
+    entry?: unknown;
+    config?: unknown;
+    scope?: unknown;
+    timeoutMs?: unknown;
+    maxResponseBytes?: unknown;
+    recallLimit?: unknown;
+    idleMs?: unknown;
+  };
+  const executable = requireAbsolutePath(record.executable);
+  const entry = requireAbsolutePath(record.entry);
+  const configPath = requireAbsolutePath(record.config);
+  const scope = requireMemoryScope(record.scope);
+  const timeoutMs = requireBoundedInt(
+    record.timeoutMs,
+    DEFAULT_MEMORY_TIMEOUT_MS,
+    MIN_MEMORY_TIMEOUT_MS,
+    MAX_MEMORY_TIMEOUT_MS,
+    "memory timeoutMs",
+  );
+  const maxResponseBytes = requireBoundedInt(
+    record.maxResponseBytes,
+    DEFAULT_MEMORY_MAX_RESPONSE_BYTES,
+    MIN_MEMORY_MAX_RESPONSE_BYTES,
+    MAX_MEMORY_MAX_RESPONSE_BYTES,
+    "memory maxResponseBytes",
+  );
+  const recallLimit = requireBoundedInt(
+    record.recallLimit,
+    DEFAULT_MEMORY_RECALL_LIMIT,
+    1,
+    MAX_MEMORY_RECALL_LIMIT,
+    "memory recallLimit",
+  );
+  const idleMs = requireBoundedInt(
+    record.idleMs,
+    DEFAULT_MEMORY_IDLE_MS,
+    MIN_MEMORY_IDLE_MS,
+    MAX_MEMORY_IDLE_MS,
+    "memory idleMs",
+  );
+  return Object.freeze({
+    executable,
+    entry,
+    config: configPath,
+    scope,
+    timeoutMs,
+    maxResponseBytes,
+    recallLimit,
+    idleMs,
+  });
+}
+
+/**
  * Load + freeze the server config from the environment. Never logs paths,
  * secrets, or raw values: failures carry a fixed code only.
  */
@@ -640,6 +826,7 @@ export function loadServerConfig(
   const model = parseModelConfig(env.COMPANION_MODEL_JSON);
   const calendar = parseCalendarConfig(env.COMPANION_CALENDAR_JSON);
   const actions = parseActionConfig(env.COMPANION_ACTIONS_JSON);
+  const memory = parseMemoryConfig(env.COMPANION_MEMORY_JSON);
   const parsed = ServerConfigSchema.safeParse({
     dbPath,
     host: host.data,
@@ -660,5 +847,6 @@ export function loadServerConfig(
     model,
     calendar,
     actions,
+    memory,
   });
 }
