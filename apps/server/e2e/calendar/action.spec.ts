@@ -135,6 +135,29 @@ test.beforeEach(async ({ page, request }) => {
   await expect(page.locator("#composer-send")).toBeEnabled();
 });
 
+test("staging search citation is a normal citation, not an action receipt", async ({
+  page,
+}) => {
+  await send(page, TEXT_SEARCH);
+  await expect(page.locator("#conversation")).toContainText(
+    ANSWER_SEARCH_TEXT,
+    {
+      timeout: 30_000,
+    },
+  );
+  // The normal staging citation renders as a plain conversation button...
+  await expect(
+    page.locator("#conversation button", { hasText: "r1" }).first(),
+  ).toBeVisible({ timeout: 30_000 });
+  // ...but claims NO action-receipt marker: only a real verified receipt
+  // from an approved action may carry [data-action-citation].
+  await expect(
+    page.locator("#conversation [data-action-citation='true']"),
+  ).toHaveCount(0);
+  // The normal citation still opens the drawer (per-run binding intact).
+  await selectCitation(page, "r1");
+});
+
 test("approve: pending card -> hash-bound approve 202 -> one write + fresh verified receipt", async ({
   page,
   request,

@@ -25,3 +25,5 @@ Thumbs.db
 # scaffold `.m5-write-fork` was removed (remote orphan branch retained for
 # reference, never deleted).
 .m5-write-fork-derived/
+# CI-fetched real remind CLI dependency (pinned source, built in CI only).
+.ci/

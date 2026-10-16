@@ -187,6 +187,20 @@ function loadText(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
+function randomUuid(): string {
+  try {
+    return crypto.randomUUID();
+  } catch {
+    return "00000000-0000-4000-8000-000000000000";
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
 /**
  * T1 active-approval progress for history (no receipt yet): the actual
  * live execution stage as frozen progress text, never a fake failure.
@@ -369,6 +383,55 @@ class ConversationApp {
   private readonly stopButton: HTMLButtonElement;
   private readonly drawer: HTMLElement;
   private readonly drawerBody: HTMLElement;
+  /** Explicit memory management panel (opt-in; hidden when disabled). */
+  private readonly memoryForm: HTMLFormElement;
+  private readonly memoryInput: HTMLInputElement;
+  private readonly memorySearchButton: HTMLButtonElement;
+  private readonly memoryList: HTMLElement;
+  private readonly memoryDetail: HTMLElement;
+  private readonly memoryDetailBody: HTMLElement;
+  private readonly memoryCorrectInput: HTMLTextAreaElement;
+  private readonly memoryCorrectButton: HTMLButtonElement;
+  private readonly memoryRetireButton: HTMLButtonElement;
+  private readonly memoryReactivateButton: HTMLButtonElement;
+  private readonly memoryRetryButton: HTMLButtonElement;
+  private readonly memoryOpStatus: HTMLElement;
+  /**
+   * Last explicit search scope: binds every mN handle to its originating
+   * (sessionId, searchId, runId). Handles never cross sessions; a session
+   * change clears the scope (stale request/session guard).
+   */
+  private memoryScope: {
+    readonly sessionId: string;
+    readonly searchId: string;
+    readonly runId: string;
+  } | null = null;
+  private memorySelected: {
+    readonly searchId: string;
+    readonly handle: string;
+  } | null = null;
+  /**
+   * Frozen mutation request (same pattern as the message pending request):
+   * the idempotency key AND the complete normalized mutation body are
+   * frozen in memory together. Retries reuse the identical key+body, so a
+   * redelivered 202 replays the stored operation instead of staging a
+   * duplicate. Duplicate clicks are ignored while a mutation is in flight.
+   */
+  private memoryPending: {
+    readonly key: string;
+    readonly body: Record<string, unknown>;
+  } | null = null;
+  private memoryMutating = false;
+  private memoryDisabled = false;
+  /**
+   * Monotonic generations (no framework): every new search/detail/mutation
+   * synchronously bumps its generation. Awaited responses apply only when
+   * their generation is still current AND the session matches, so an older
+   * out-of-order response can never overwrite newer DOM/state.
+   */
+  private memorySearchSeq = 0;
+  private memoryDetailSeq = 0;
+  private memoryOpSeq = 0;
 
   constructor() {
     this.list = document.getElementById("conversation") ?? el("main");
@@ -387,6 +450,44 @@ class ConversationApp {
       document.createElement("button");
     this.drawer = document.getElementById("drawer") ?? el("div");
     this.drawerBody = document.getElementById("drawer-body") ?? el("pre");
+    this.memoryForm =
+      (document.getElementById(
+        "memory-search-form",
+      ) as HTMLFormElement | null) ?? document.createElement("form");
+    this.memoryInput =
+      (document.getElementById(
+        "memory-search-input",
+      ) as HTMLInputElement | null) ?? document.createElement("input");
+    this.memorySearchButton =
+      (document.getElementById(
+        "memory-search-button",
+      ) as HTMLButtonElement | null) ?? document.createElement("button");
+    this.memoryList = document.getElementById("memory-list") ?? el("ul");
+    this.memoryDetail = document.getElementById("memory-detail") ?? el("div");
+    this.memoryDetailBody =
+      document.getElementById("memory-detail-body") ?? el("pre");
+    this.memoryCorrectInput =
+      (document.getElementById(
+        "memory-correct-input",
+      ) as HTMLTextAreaElement | null) ?? document.createElement("textarea");
+    this.memoryCorrectButton =
+      (document.getElementById(
+        "memory-correct-button",
+      ) as HTMLButtonElement | null) ?? document.createElement("button");
+    this.memoryRetireButton =
+      (document.getElementById(
+        "memory-retire-button",
+      ) as HTMLButtonElement | null) ?? document.createElement("button");
+    this.memoryReactivateButton =
+      (document.getElementById(
+        "memory-reactivate-button",
+      ) as HTMLButtonElement | null) ?? document.createElement("button");
+    this.memoryRetryButton =
+      (document.getElementById(
+        "memory-retry-button",
+      ) as HTMLButtonElement | null) ?? document.createElement("button");
+    this.memoryOpStatus =
+      document.getElementById("memory-op-status") ?? el("p");
   }
 
   async boot(): Promise<void> {
@@ -401,6 +502,22 @@ class ConversationApp {
       if (event.target === this.drawer) {
         this.closeDrawer();
       }
+    });
+    this.memoryForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      void this.searchMemories();
+    });
+    this.memoryCorrectButton.addEventListener("click", () => {
+      void this.stageMemoryMutation("record.correct");
+    });
+    this.memoryRetireButton.addEventListener("click", () => {
+      void this.stageMemoryMutation("record.retire");
+    });
+    this.memoryReactivateButton.addEventListener("click", () => {
+      void this.stageMemoryMutation("record.reactivate");
+    });
+    this.memoryRetryButton.addEventListener("click", () => {
+      void this.retryMemoryMutation();
     });
     // Tab-resume reconciliation (local only, no polling/provider calls): a
     // hidden page whose timers were throttled retires locally expired
@@ -1985,8 +2102,10 @@ class ConversationApp {
             for (const citation of part.citations) {
               const button = el("button", citation);
               button.setAttribute("data-action-citation", "true");
+              const citationRunId =
+                typeof run.runId === "string" ? run.runId : undefined;
               button.addEventListener("click", () => {
-                void this.openCitation(citation);
+                void this.openCitation(citation, citationRunId);
               });
               wrap.appendChild(button);
             }
@@ -2011,8 +2130,14 @@ class ConversationApp {
         wrap.appendChild(el("p", part.text));
         for (const citation of part.citations) {
           const button = el("button", citation);
+          // Normal conversation citations are NOT action receipts: they carry
+          // no data-action-citation marker (reserved for the action
+          // approval/rejection receipt branch above). The per-run binding is
+          // still preserved so memory (mN) citations resolve to this run.
+          const historyRunId =
+            typeof run.runId === "string" ? run.runId : undefined;
           button.addEventListener("click", () => {
-            void this.openCitation(citation);
+            void this.openCitation(citation, historyRunId);
           });
           wrap.appendChild(button);
         }
@@ -2659,8 +2784,11 @@ class ConversationApp {
         this.list.appendChild(el("p", part.text));
         for (const citation of part.citations) {
           const button = el("button", citation);
+          // Live generic answer citations are NOT action receipts either:
+          // no data-action-citation marker here. Per-run binding preserved.
+          const liveRunId = runId;
           button.addEventListener("click", () => {
-            void this.openCitation(citation);
+            void this.openCitation(citation, liveRunId);
           });
           this.list.appendChild(button);
         }
@@ -2802,7 +2930,15 @@ class ConversationApp {
   }
 
   /** Citation drawer (§16.5): stored snapshot as escaped plain text only. */
-  private async openCitation(citation: string): Promise<void> {
+  private async openCitation(citation: string, runId?: string): Promise<void> {
+    // Memory citations (mN) bind to their originating run's recall exposure,
+    // never to the latest explicit management search: an older answer's `m1`
+    // must open the snippet the model saw in THAT run even after an unrelated
+    // newer search minted a different `m1`.
+    if (/^m[1-9][0-9]*$/.test(citation)) {
+      await this.openMemoryCitation(citation, runId);
+      return;
+    }
     if (this.sessionId === null) {
       return;
     }
@@ -2848,6 +2984,706 @@ class ConversationApp {
         : snapshot;
     this.drawerBody.textContent = loadText(snapshotText);
     this.drawer.hidden = false;
+  }
+
+  /**
+   * Explicit memory search over active+retired (no heat/reactivation).
+   * Binds every returned mN handle to the originating run+session; the
+   * originating run is the active run, else the latest rendered run.
+   *
+   * Stale-state race fix: the prior result list, selection, detail, and
+   * operation status are invalidated SYNCHRONOUSLY (before the first
+   * await) and every awaited response applies only when its generation
+   * is still current and the session matches. The old list stays neither
+   * clickable-actionable nor countable while the new search is pending:
+   * mutation buttons stay disabled until an authoritative fresh response
+   * (or a fresh detail selection) re-enables them.
+   */
+  private async searchMemories(): Promise<void> {
+    if (this.sessionId === null) {
+      return;
+    }
+    if (this.memoryDisabled) {
+      this.showNotice("記憶は無効です");
+      return;
+    }
+    const sessionId = this.sessionId;
+    const query = this.memoryInput.value.trim();
+    if (query.length === 0) {
+      this.showNotice("検索語を入力してください");
+      return;
+    }
+    const runId = this.activeRunId ?? this.latestRenderedRunId();
+    if (runId === null) {
+      this.showNotice("メッセージを送信して Run を作ってから検索してください");
+      return;
+    }
+    this.memorySearchSeq += 1;
+    const seq = this.memorySearchSeq;
+    // Synchronous invalidation BEFORE the first await: no stale list item
+    // remains selectable/countable while the new search is in flight.
+    // The correction draft belongs to the previous (searchId, handle): clear
+    // it here so a stale draft can never apply to the next target.
+    this.memorySelected = null;
+    this.memoryCorrectInput.value = "";
+    this.memoryList.textContent = "";
+    this.memoryDetail.hidden = true;
+    this.memoryDetailBody.textContent = "";
+    this.memoryRetryButton.hidden = true;
+    this.memoryOpStatus.textContent = "searching: 検索中";
+    this.memorySearchButton.disabled = true;
+    this.setMemoryButtonsDisabled(true);
+    let res: { status: number; body: unknown };
+    try {
+      res = await postJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/memory/search`,
+        { query, limit: 5, runId },
+        null,
+      );
+    } catch {
+      if (this.sessionId !== sessionId || seq !== this.memorySearchSeq) {
+        return;
+      }
+      // Network failure: fixed visible error, no stale mutation target.
+      this.memorySelected = null;
+      this.memoryDetail.hidden = true;
+      this.memoryOpStatus.textContent = "error: 検索に失敗しました";
+      this.setMemoryButtonsDisabled(true);
+      this.showNotice("記憶の検索に失敗しました");
+      return;
+    } finally {
+      if (this.sessionId === sessionId && seq === this.memorySearchSeq) {
+        this.memorySearchButton.disabled = false;
+      }
+    }
+    if (this.sessionId !== sessionId || seq !== this.memorySearchSeq) {
+      return;
+    }
+    const failSearch = (notice: string, statusText: string): void => {
+      // Failure keeps the invalidated (empty, unselectable) state: the
+      // previous selection is NOT restored, so no stale target survives.
+      this.memorySelected = null;
+      this.memoryDetail.hidden = true;
+      this.memoryOpStatus.textContent = statusText;
+      this.setMemoryButtonsDisabled(true);
+      this.showNotice(notice);
+    };
+    if (res.status === 404) {
+      // Only the disabled 404 latches: a transient 503 stays retryable and a
+      // recovered search works without reload (frozen keys untouched).
+      const code = (res.body as { error?: { code?: unknown } }).error?.code;
+      if (code === "memory_unavailable") {
+        this.memoryDisabled = true;
+        failSearch("記憶は無効です", "error: 記憶は無効です");
+        return;
+      }
+      failSearch("記憶の検索に失敗しました", "error: 検索に失敗しました");
+      return;
+    }
+    if (res.status !== 200) {
+      failSearch("記憶の検索に失敗しました", "error: 検索に失敗しました");
+      return;
+    }
+    const body = res.body as { searchId?: unknown; hits?: unknown };
+    if (typeof body.searchId !== "string" || !Array.isArray(body.hits)) {
+      failSearch("記憶の検索に失敗しました", "error: 検索に失敗しました");
+      return;
+    }
+    if (this.sessionId !== sessionId || seq !== this.memorySearchSeq) {
+      return;
+    }
+    this.memoryScope = { sessionId, searchId: body.searchId, runId };
+    this.memorySelected = null;
+    // A new search invalidates any draft typed for the previous target.
+    this.memoryCorrectInput.value = "";
+    this.memoryDetail.hidden = true;
+    this.memoryRetryButton.hidden = true;
+    this.memoryOpStatus.textContent = "";
+    this.memoryOpStatus.dataset.searchId = body.searchId;
+    this.memoryList.textContent = "";
+    // Mutation buttons stay disabled until a fresh detail selection
+    // re-enables them: a bare search result is never directly actionable.
+    this.setMemoryButtonsDisabled(true);
+    for (const hit of body.hits as Array<{
+      handle?: unknown;
+      snippet?: unknown;
+      status?: unknown;
+    }>) {
+      if (
+        typeof hit.handle !== "string" ||
+        !/^m[1-9][0-9]*$/.test(hit.handle) ||
+        typeof hit.snippet !== "string" ||
+        (hit.status !== "active" && hit.status !== "retired")
+      ) {
+        continue;
+      }
+      const item = el("li");
+      const button = el(
+        "button",
+        `${hit.handle} [${hit.status}] ${hit.snippet}`,
+      );
+      const handle = hit.handle;
+      const searchId = body.searchId;
+      button.addEventListener("click", () => {
+        void this.openMemoryDetail(searchId, handle);
+      });
+      item.append(button);
+      this.memoryList.append(item);
+    }
+  }
+
+  /** Latest rendered run id (originating-run fallback when idle). */
+  private latestRenderedRunId(): string | null {
+    let latest: string | null = null;
+    for (const runId of this.renderedAnswers) {
+      latest = runId;
+    }
+    if (latest !== null) {
+      return latest;
+    }
+    for (const runId of this.runViews.keys()) {
+      latest = runId;
+    }
+    return latest;
+  }
+
+  /** Answer-body mN citation: resolve through the originating run's recall exposure. */
+  private async openMemoryCitation(
+    handle: string,
+    runId?: string,
+  ): Promise<void> {
+    if (this.sessionId === null) {
+      return;
+    }
+    const sessionId = this.sessionId;
+    // Answer citations REQUIRE their originating run: without it the handle
+    // is ambiguous across searches, so fail closed instead of opening the
+    // latest management search's unrelated snapshot.
+    if (runId === undefined || runId.length === 0) {
+      this.showNotice("先に「記憶を検索」で対象を探してください");
+      return;
+    }
+    let res: { status: number; body: unknown };
+    try {
+      res = await fetchJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/memory/recall/${encodeURIComponent(runId)}/items/${encodeURIComponent(handle)}`,
+      );
+    } catch {
+      this.showNotice("記憶の引用取得に失敗しました");
+      return;
+    }
+    if (res.status === 404) {
+      const code = (res.body as { error?: { code?: unknown } }).error?.code;
+      if (code === "memory_unavailable") {
+        this.memoryDisabled = true;
+        this.showNotice("記憶は無効です");
+        return;
+      }
+      this.showNotice("引用が見つかりません。再検索してください");
+      return;
+    }
+    if (res.status !== 200) {
+      this.showNotice("記憶の引用取得に失敗しました");
+      return;
+    }
+    const body = res.body as { snippet?: unknown; citation?: unknown };
+    const snippet = typeof body.snippet === "string" ? body.snippet : "";
+    if (snippet.length === 0) {
+      this.showNotice("引用が見つかりません。再検索してください");
+      return;
+    }
+    // Immutable cited snapshot for THIS run (never rebound to the latest
+    // explicit search): the drawer shows exactly what the model saw as `mN`.
+    this.drawerBody.textContent = `引用 ${handle}\n${snippet}`;
+    this.drawer.hidden = false;
+  }
+
+  /**
+   * Confirmation drawer for one bound handle: the immutable cited snapshot
+   * versus the CURRENT content/provenance/status, plus the stale guard.
+   * Never rebinds a historical snapshot to latest memory.
+   *
+   * Out-of-order guard: actions are disabled synchronously while the fresh
+   * detail is pending, and the awaited response applies only when its
+   * generation is still current and the (session, searchId) target still
+   * matches. Network/detail failure leaves a fixed visible error with no
+   * stale mutation target (selection cleared, actions disabled).
+   */
+  private async openMemoryDetail(
+    searchId: string,
+    handle: string,
+  ): Promise<void> {
+    if (this.sessionId === null) {
+      return;
+    }
+    const sessionId = this.sessionId;
+    const scope = this.memoryScope;
+    if (
+      scope === null ||
+      scope.sessionId !== sessionId ||
+      scope.searchId !== searchId
+    ) {
+      this.showNotice("古い検索結果です。再検索してください");
+      return;
+    }
+    this.memoryDetailSeq += 1;
+    const seq = this.memoryDetailSeq;
+    // Disable actions until the authoritative fresh detail arrives: the
+    // previously selected target is not actionable while loading.
+    this.setMemoryButtonsDisabled(true);
+    let res: { status: number; body: unknown };
+    try {
+      res = await fetchJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/memory/searches/${encodeURIComponent(searchId)}/items/${encodeURIComponent(handle)}`,
+      );
+    } catch {
+      if (
+        this.sessionId !== sessionId ||
+        seq !== this.memoryDetailSeq ||
+        this.memoryScope?.searchId !== searchId
+      ) {
+        return;
+      }
+      this.memorySelected = null;
+      this.memoryDetail.hidden = true;
+      this.memoryOpStatus.textContent = "error: 詳細の取得に失敗しました";
+      this.setMemoryButtonsDisabled(true);
+      this.showNotice("記憶の詳細取得に失敗しました");
+      return;
+    }
+    if (
+      this.sessionId !== sessionId ||
+      seq !== this.memoryDetailSeq ||
+      this.memoryScope?.searchId !== searchId
+    ) {
+      return;
+    }
+    const failDetail = (notice: string, statusText: string): void => {
+      this.memorySelected = null;
+      this.memoryDetail.hidden = true;
+      this.memoryOpStatus.textContent = statusText;
+      this.setMemoryButtonsDisabled(true);
+      this.showNotice(notice);
+    };
+    if (res.status === 404) {
+      const code = (res.body as { error?: { code?: unknown } }).error?.code;
+      if (code === "memory_unavailable") {
+        this.memoryDisabled = true;
+        failDetail("記憶は無効です", "error: 記憶は無効です");
+        return;
+      }
+      failDetail(
+        "対象が見つかりません。再検索してください",
+        "error: 対象が見つかりません",
+      );
+      return;
+    }
+    if (res.status !== 200) {
+      failDetail(
+        "記憶の詳細取得に失敗しました",
+        "error: 詳細の取得に失敗しました",
+      );
+      return;
+    }
+    const body = res.body as {
+      snapshot?: { snippet?: unknown; status?: unknown };
+      current?: {
+        body?: unknown;
+        kind?: unknown;
+        status?: unknown;
+        revision?: unknown;
+        source?: unknown;
+      };
+      stale?: unknown;
+    };
+    const snapshotSnippet =
+      typeof body.snapshot?.snippet === "string" ? body.snapshot.snippet : "";
+    const snapshotStatus =
+      body.snapshot?.status === "retired" ? "retired" : "active";
+    const currentBody =
+      typeof body.current?.body === "string" ? body.current.body : "";
+    const currentStatus =
+      typeof body.current?.status === "string" ? body.current.status : "";
+    const currentRevision =
+      typeof body.current?.revision === "number" ? body.current.revision : 0;
+    const currentKind =
+      typeof body.current?.kind === "string" ? body.current.kind : "";
+    const currentSource =
+      typeof body.current?.source === "string" ? body.current.source : "";
+    const stale = body.stale === true;
+    if (
+      this.sessionId !== sessionId ||
+      seq !== this.memoryDetailSeq ||
+      this.memoryScope?.searchId !== searchId
+    ) {
+      return;
+    }
+    // Bind the draft to the exact (searchId, handle): a draft typed for a
+    // previous target is cleared before the new target becomes actionable.
+    // Stale async responses returned above without touching the input.
+    if (
+      this.memorySelected === null ||
+      this.memorySelected.searchId !== searchId ||
+      this.memorySelected.handle !== handle
+    ) {
+      this.memoryCorrectInput.value = "";
+    }
+    this.memorySelected = { searchId, handle };
+    this.memoryDetail.hidden = false;
+    this.memoryDetailBody.textContent =
+      `引用スナップショット ${handle} [${snapshotStatus}]\n${snapshotSnippet}\n---\n` +
+      `現在 [${currentStatus} rev.${currentRevision} ${currentKind} ${currentSource}]\n${currentBody}` +
+      (stale ? "\n---\n状態が変わっています。再検索してください" : "");
+    this.memoryOpStatus.textContent = stale
+      ? "stale: 引用時から状態が変化"
+      : "";
+    const actionable = !stale;
+    this.memoryCorrectButton.disabled = !actionable;
+    this.memoryRetireButton.disabled = !actionable;
+    this.memoryReactivateButton.disabled = !actionable;
+  }
+
+  /**
+   * Stage one explicit mutation for the selected target (queued 202, never
+   * applied here). Duplicate clicks are ignored; the frozen request/key is
+   * kept for the same-key retry button.
+   *
+   * Old-ack race fix: the NEW pending status is set SYNCHRONOUSLY before
+   * the first await, replacing any prior operation text, so a wait for
+   * `acked` can only succeed on the NEW operation. Every later status
+   * write is bound to (generation, operationId, session, selection): an
+   * older poll can never overwrite a newer action. The frozen key+body
+   * retry semantics are unchanged.
+   */
+  private async stageMemoryMutation(
+    kind: "record.correct" | "record.retire" | "record.reactivate",
+  ): Promise<void> {
+    if (
+      this.sessionId === null ||
+      this.memorySelected === null ||
+      this.memoryScope === null ||
+      this.memoryMutating
+    ) {
+      return;
+    }
+    if (this.memoryScope.sessionId !== this.sessionId) {
+      this.showNotice("セッションが変わりました。再検索してください");
+      return;
+    }
+    const sessionId = this.sessionId;
+    const { searchId, handle } = this.memorySelected;
+    const target = { searchId, handle };
+    const runId = this.memoryScope.runId;
+    const payload: Record<string, unknown> = {
+      kind,
+      searchId,
+      handle,
+      runId,
+    };
+    if (kind === "record.correct") {
+      const replacement = this.memoryCorrectInput.value.trim();
+      if (replacement.length === 0) {
+        this.showNotice("訂正内容を入力してください");
+        return;
+      }
+      payload["correctionBody"] = replacement;
+    }
+    this.memoryOpSeq += 1;
+    const opSeq = this.memoryOpSeq;
+    this.memoryMutating = true;
+    this.memorySearchButton.disabled = true;
+    this.setMemoryButtonsDisabled(true);
+    // Synchronous NEW-operation pending state BEFORE the first await: the
+    // prior `acked` text is gone, so only the new ack can satisfy a wait.
+    // The in-flight key+body is frozen for the same-key retry button; an
+    // older poll that is still awaiting its outcome keeps its own
+    // generation and can no longer overwrite this status (checked below).
+    this.memoryRetryButton.hidden = true;
+    this.memoryOpStatus.textContent = "queued: 送信中";
+    this.memoryOpStatus.dataset.operation = "pending";
+    const key = randomUuid();
+    this.memoryPending = { key, body: payload };
+    try {
+      await this.postMemoryMutation(sessionId, key, payload, opSeq, target);
+    } catch {
+      if (this.sessionId === sessionId && opSeq === this.memoryOpSeq) {
+        this.memoryRetryButton.hidden = false;
+        this.memoryOpStatus.textContent = "error: 失敗しました (再送できます)";
+        this.memoryOpStatus.dataset.operation = "failed";
+        this.showNotice("記憶の更新に失敗しました");
+      }
+    } finally {
+      if (this.sessionId === sessionId && opSeq === this.memoryOpSeq) {
+        this.memoryMutating = false;
+        this.memorySearchButton.disabled = false;
+        // Keep mutation buttons disabled until a fresh detail/search
+        // re-enables them; re-enabling here would make a stale selection
+        // actionable before its authoritative outcome is known.
+      } else if (this.sessionId === sessionId) {
+        // Superseded by a newer search/mutation: leave the newer status
+        // and control state untouched; the durable server operation still
+        // holds the older outcome (never silently discarded server-side).
+        if (!this.memoryMutating) {
+          this.memorySearchButton.disabled = false;
+        }
+      } else {
+        this.memoryMutating = false;
+      }
+    }
+  }
+
+  /** Same frozen request/key retry (no new key, no drifted body). */
+  private async retryMemoryMutation(): Promise<void> {
+    if (
+      this.sessionId === null ||
+      this.memoryPending === null ||
+      this.memoryMutating
+    ) {
+      return;
+    }
+    const sessionId = this.sessionId;
+    const { key, body } = this.memoryPending;
+    const selected = this.memorySelected;
+    const target =
+      selected !== null
+        ? { searchId: selected.searchId, handle: selected.handle }
+        : null;
+    this.memoryOpSeq += 1;
+    const opSeq = this.memoryOpSeq;
+    this.memoryMutating = true;
+    this.memorySearchButton.disabled = true;
+    this.setMemoryButtonsDisabled(true);
+    this.memoryRetryButton.hidden = true;
+    this.memoryOpStatus.textContent = "queued: 送信中";
+    this.memoryOpStatus.dataset.operation = "pending";
+    try {
+      await this.postMemoryMutation(sessionId, key, body, opSeq, target);
+    } catch {
+      if (this.sessionId === sessionId && opSeq === this.memoryOpSeq) {
+        this.memoryRetryButton.hidden = false;
+        this.memoryOpStatus.textContent = "error: 失敗しました (再送できます)";
+        this.memoryOpStatus.dataset.operation = "failed";
+        this.showNotice("記憶の更新に失敗しました");
+      }
+    } finally {
+      if (this.sessionId === sessionId && opSeq === this.memoryOpSeq) {
+        this.memoryMutating = false;
+        this.memorySearchButton.disabled = false;
+      } else if (this.sessionId === sessionId) {
+        if (!this.memoryMutating) {
+          this.memorySearchButton.disabled = false;
+        }
+      } else {
+        this.memoryMutating = false;
+      }
+    }
+  }
+
+  private async postMemoryMutation(
+    sessionId: string,
+    key: string,
+    payload: Record<string, unknown>,
+    opSeq: number,
+    target: { readonly searchId: string; readonly handle: string } | null,
+  ): Promise<void> {
+    const current = (): boolean => {
+      if (this.sessionId !== sessionId || opSeq !== this.memoryOpSeq) {
+        return false;
+      }
+      if (target !== null && this.memorySelected !== null) {
+        if (
+          this.memorySelected.searchId !== target.searchId ||
+          this.memorySelected.handle !== target.handle
+        ) {
+          return false;
+        }
+      }
+      return true;
+    };
+    let res: { status: number; body: unknown };
+    try {
+      res = await postJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/memory/mutations`,
+        payload,
+        key,
+      );
+    } catch {
+      throw new Error("memory mutation network failure");
+    }
+    if (!current()) {
+      return;
+    }
+    if (res.status === 202) {
+      const body = res.body as {
+        operationId?: unknown;
+        status?: unknown;
+        deduplicated?: unknown;
+      };
+      if (typeof body.operationId !== "string") {
+        this.memoryRetryButton.hidden = false;
+        this.memoryOpStatus.textContent = "error: 失敗しました (再送できます)";
+        this.memoryOpStatus.dataset.operation = "failed";
+        this.showNotice("記憶の更新受付に失敗しました");
+        return;
+      }
+      const operationId = body.operationId;
+      this.memoryRetryButton.hidden = true;
+      const status =
+        body.status === "acked"
+          ? "acked"
+          : body.status === "failed"
+            ? "failed"
+            : "pending";
+      if (status === "acked") {
+        this.memoryOpStatus.textContent = "acked: 適用済み";
+        this.memoryOpStatus.dataset.operation = operationId;
+        return;
+      }
+      if (status === "failed") {
+        // Terminal 202 failure: same-key retry can never recover, so clear
+        // the frozen request and hide the retry; a fresh search/target/key
+        // is required. Transport unknown-outcome (catch below) keeps it.
+        this.memoryPending = null;
+        this.memoryRetryButton.hidden = true;
+        this.memoryOpStatus.textContent =
+          "error: 失敗しました (再検索してください)";
+        this.memoryOpStatus.dataset.operation = operationId;
+        this.showNotice("記憶の更新に失敗しました。再検索してください");
+        return;
+      }
+      this.memoryOpStatus.textContent = "queued: 適用待ち";
+      this.memoryOpStatus.dataset.operation = operationId;
+      await this.pollMemoryOperation(sessionId, operationId, opSeq, target);
+      return;
+    }
+    const code = (res.body as { error?: { code?: unknown } }).error?.code;
+    if (!current()) {
+      return;
+    }
+    if (res.status === 409 && code === "idempotency_key_reused") {
+      // Duplicate-click guard: same key was already accepted — offer the
+      // same frozen request/key retry instead of minting a new operation.
+      this.memoryRetryButton.hidden = false;
+      this.memoryOpStatus.textContent = "queued: 送信済み (再送できます)";
+      this.memoryOpStatus.dataset.operation = "pending";
+      this.showNotice("既に送信済みです");
+      return;
+    }
+    if (res.status === 409 && code === "needs_clarification") {
+      this.memoryOpStatus.textContent = "対象を一つに絞ってください";
+      this.memoryOpStatus.dataset.operation = "failed";
+      this.showNotice("対象を一つに絞ってください");
+      return;
+    }
+    if (code === "target_not_found") {
+      this.memorySelected = null;
+      this.memoryDetail.hidden = true;
+      this.setMemoryButtonsDisabled(true);
+      this.memoryOpStatus.textContent = "対象が見つかりません";
+      this.memoryOpStatus.dataset.operation = "failed";
+      this.showNotice("対象が見つかりません。再検索してください");
+      return;
+    }
+    if (code === "state_conflict") {
+      this.memorySelected = null;
+      this.memoryDetail.hidden = true;
+      this.setMemoryButtonsDisabled(true);
+      this.memoryOpStatus.textContent = "error: 状態が変わりました";
+      this.memoryOpStatus.dataset.operation = "failed";
+      this.showNotice("状態が変わりました。再検索してください");
+      return;
+    }
+    if (code === "memory_unavailable" && res.status === 404) {
+      // Only the disabled 404 latches: a transient 503 with the same code
+      // stays retryable with the frozen same-key request preserved.
+      this.memoryDisabled = true;
+      this.memoryOpStatus.textContent = "error: 記憶は無効です";
+      this.memoryOpStatus.dataset.operation = "failed";
+      this.showNotice("記憶は無効です");
+      return;
+    }
+    this.memoryRetryButton.hidden = false;
+    this.memoryOpStatus.textContent = "error: 失敗しました (再送できます)";
+    this.memoryOpStatus.dataset.operation = "failed";
+    this.showNotice("記憶の更新に失敗しました");
+  }
+
+  /**
+   * Bounded operation polling: queued -> acked/failed (no busy loop, no
+   * endless refresh). Supported queue delays reach 300s idleMs plus chained
+   * CLI calls, so a 45s bound expiry is NOT a failure: a still-valid pending
+   * operation stays VISIBLY pending at the bound with its operation id for
+   * an explicit status refresh, never labelled failed. Every write is bound
+   * to (generation, operationId, session, selection): a superseded or
+   * re-targeted poll returns without touching current status. Stale handles
+   * are cancelled via the generation/selection guards above.
+   */
+  private async pollMemoryOperation(
+    sessionId: string,
+    operationId: string,
+    opSeq: number,
+    target: { readonly searchId: string; readonly handle: string } | null,
+  ): Promise<void> {
+    for (let attempt = 0; attempt < 90; attempt += 1) {
+      await sleep(500);
+      if (this.sessionId !== sessionId || opSeq !== this.memoryOpSeq) {
+        return;
+      }
+      if (
+        target !== null &&
+        this.memorySelected !== null &&
+        (this.memorySelected.searchId !== target.searchId ||
+          this.memorySelected.handle !== target.handle)
+      ) {
+        return;
+      }
+      let res: { status: number; body: unknown };
+      try {
+        res = await fetchJson(
+          `/api/sessions/${encodeURIComponent(sessionId)}/memory/operations/${encodeURIComponent(operationId)}`,
+        );
+      } catch {
+        continue;
+      }
+      if (this.sessionId !== sessionId || opSeq !== this.memoryOpSeq) {
+        return;
+      }
+      if (res.status !== 200) {
+        continue;
+      }
+      const status = (res.body as { status?: unknown }).status;
+      if (status === "acked") {
+        this.memoryOpStatus.textContent = "acked: 適用済み";
+        this.memoryOpStatus.dataset.operation = operationId;
+        return;
+      }
+      if (status === "failed") {
+        // Terminal poll failure: same-key retry can never recover; require a
+        // fresh search/target/key and clear the frozen pending.
+        this.memoryPending = null;
+        this.memoryRetryButton.hidden = true;
+        this.memoryOpStatus.textContent =
+          "error: 失敗しました (再検索してください)";
+        this.memoryOpStatus.dataset.operation = operationId;
+        this.showNotice("記憶の更新に失敗しました。再検索してください");
+        return;
+      }
+    }
+    // Poll-bound expiry with the operation still pending: keep it VISIBLY
+    // pending (never label failed, never offer a failure retry). The
+    // operation id stays for an explicit refresh (re-select the detail or
+    // re-stage); no endless busy loop follows.
+    if (this.sessionId === sessionId && opSeq === this.memoryOpSeq) {
+      this.memoryRetryButton.hidden = true;
+      this.memoryOpStatus.textContent = "queued: 適用待ち (確認中)";
+      this.memoryOpStatus.dataset.operation = operationId;
+    }
+  }
+
+  private setMemoryButtonsDisabled(disabled: boolean): void {
+    this.memoryCorrectButton.disabled = disabled;
+    this.memoryRetireButton.disabled = disabled;
+    this.memoryReactivateButton.disabled = disabled;
   }
 
   private closeDrawer(): void {

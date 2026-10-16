@@ -1310,6 +1310,41 @@ Model config が存在しない場合、偽の回答を生成する fallback は
 
 ---
 
+Not covered (remaining §16 acceptance gaps, not full closure):
+dedicated JSON status fallback and duplicate-seq E2E remain outside
+the current 12-test green; the historical green above does not close
+§16 acceptance.
+## Conversation memory (strict opt-in remind CLI)
+
+Unset `COMPANION_MEMORY_JSON` (default) means fully memoryless. When
+set, it must be a strict JSON object with only `{ executable, entry,
+config, scope, timeoutMs?, maxResponseBytes?, recallLimit?, idleMs? }`
+(all paths absolute; `scope` 1-256 chars, no controls;
+`timeoutMs` 500-30000 default 5000; `maxResponseBytes` 4096-1048576
+default 65536; `recallLimit` 1-8 default 5; `idleMs` 5000-300000
+default 30000). The remind CLI child is the only remind interface
+(`shell: false`, exact `[entry, --config, config]`); Companion never
+opens the remind DB. Durable state lives in Companion-owned
+`memory_outbox`/`memory_exposures`/`memory_grants` with stable
+idempotency keys. Recall is fail-open; extraction reuses the existing
+local model gateway only (unset model means no extraction);
+feedback is granted only for structural `mN` citations in the accepted
+answer. Memory perception/reactivation/retirement, export, and
+deletion APIs are not implemented. Full contract: `docs/operations.md`.
+
+Live HTTP smoke, 2026-10-15 (local, temp stores only, uncommitted):
+real server + synthetic loopback gateway (scripted `answer.submit` +
+extraction JSON; no real model) + REAL remind CLI temp DB
+(`allowedScopes ["personal","default"]`, LLM/vectors disabled).
+Turn 1 completed with `event.append` + `record.remember` acked
+(attempts 0) and CLI `record.recall` returning 1 snippet; turn 2
+recalled and answered with structural `citations: ["m1"]`, and
+`record.feedback` acked with a same-run `m1` grant; idle
+`maintain.distill` auto-enqueued and acked (degraded, LLM disabled:
+scheduling proof only). Preemption/start/stop edges are covered by
+existing unit regressions. This is not a real-model result and does
+not complete Windows manual smoke or current remote CI.
+
 # Markdown References
 
 Markdown vault を利用する場合:
@@ -1682,3 +1717,43 @@ Test-only sync fix, no product change: `sessionIdOf` waits for the
 real session signal (`ch.sessionId` non-empty) before asserting.
 Local proof: 2/2 affected browser cases pass; `biome check` clean.
 Detail: `docs/operations.md` ("PR31 citation CI race fix").
+
+Memory management (explicit search/correct/retire/reactivate),
+2026-10-15 (local, temp stores only): native `memory.search` returns
+opaque session `mN` handles for active AND retired records and never
+heats/reactivates/grants; the confirm UI shows the live current record
+against the immutable citation snapshot before staging; `correct`
+stages a REAL source `event.append` + `record.correct` durable chain
+(stable idempotency key, same key+body replays the stored operation,
+key+drifted body is 409); `retire`/`reactivate` are reversible, never
+deletion/hiding (retired stays searchable, excluded only from CLI
+recall). UI races closed synchronously (search/target invalidation +
+generation guards, new-operation pending reset + poll identity, no
+stale ack reuse). Runnable: `pnpm exec vitest run
+apps/server/test/memory_manage.test.ts`, `pnpm --filter
+@companion/server exec vitest run test/memory_manage_live.test.ts`
+(real HTTP + synthetic gateway, NOT a real model, + REAL remind CLI
+temp DB), `COMPANION_E2E_MEMORY=1 pnpm --filter @companion/server exec
+playwright test --config playwright.config.ts` (real browser memory
+panel vs REAL app/CLI temp DB). Verified: full Vitest **113 files /
+1370 tests passed**, browser GREEN, live GREEN, root + e2e `tsc`
+exit 0, lint GREEN. Limits: synthetic gateway only; Windows manual
+smoke and current remote CI remain open. Full contract:
+`docs/operations.md` ("Conversation memory").
+
+PR34 review fixes (10 inline threads on `215f852`, local, temp stores
+only): atomic ack+operation mirror, run-specific recall citation
+endpoint + run-bound `mN` drawer, immutable-hash draining replay 409,
+pending-remaining bounded poll (never false-failed), terminal failure
+requires a fresh action/key (no same-key retry), correction draft bound
+to the exact `(searchId, handle)` and cleared on target change,
+search-header owner identity collision refusal, per-tool input schemas
+(`correct` requires body, others forbid it), code-point bounds on
+requests/responses, and 503-retryable/404-disabled memory errors.
+Verified after edits: affected unit `memory_manage.test.ts` **23/23
+passed**, real-browser `memory_manage.spec.ts` **2/2 passed**
+(production UI build, temp SQLite/RunEngine, loopback), root + server +
+e2e `tsc --noEmit` exit 0, Biome on changed files clean. Full unit
+(113 files/1370) + live HTTP/REAL CLI already green per oc-19 and not
+re-run (no production change since). Remote CI for the fix commit is
+pending at push time — see PR body.

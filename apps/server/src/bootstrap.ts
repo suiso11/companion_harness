@@ -42,6 +42,7 @@ import {
   startupEnvTransportFactory,
   type TransportFactory,
 } from "@companion/connector-mcp";
+import type { KernelRepository } from "@companion/kernel";
 import {
   type ActionProposalStager,
   BUNDLED_SCHEMA_VERSION,
@@ -60,11 +61,15 @@ import {
   createDurableCalendarTargetStore,
   createKernelRepository,
   createM1ToolRegistrations,
+  createMemorySearchRegistration,
+  createMemoryStageRegistrations,
   createReferenceManager,
   createToolBroker,
   getSchemaVersion,
   type KernelDatabaseHandle,
   type MarkdownConnectorBinding,
+  type MemoryManagePort,
+  type MemoryManageStageResult,
   migrateKernelDatabase,
   NewerDatabaseError,
   openKernelDatabase,
@@ -72,6 +77,7 @@ import {
   RunEngine,
   StrategyRegistry,
   type ToolBroker,
+  ToolError,
 } from "@companion/kernel";
 import {
   createOllamaGateway,
@@ -93,6 +99,7 @@ import {
   type CalendarConfig,
   DEFAULT_LOG_LEVEL,
   loadServerConfig,
+  type MemoryConfig,
   type ModelConfig,
   type ServerConfig,
   ServerConfigError,
@@ -103,6 +110,7 @@ import {
   type StatFn,
   shouldWarnStoreSize,
 } from "./maintenance.js";
+import { createMemoryService, type MemoryService } from "./memory_service.js";
 import {
   assertRescheduleWriteHintCompatible,
   buildRescheduleWriteConnectorConfig,
@@ -288,6 +296,8 @@ export interface StartedServer {
   shutdown: (reason?: string) => Promise<void>;
   /** M1 ToolBroker when Markdown roots are configured, else null (M2 hook). */
   toolBroker: ToolBroker | null;
+  /** Conversation-memory service when COMPANION_MEMORY_JSON is set, else null. */
+  memory: MemoryService | null;
 }
 
 /** Fixed path-free display name for the single M1 Markdown connector. */
@@ -680,6 +690,8 @@ export async function startServer(
   let ownedActionShutdown: (() => Promise<void>) | undefined;
   let onSigint: (() => void) | undefined;
   let onSigterm: (() => void) | undefined;
+  /** Conversation-memory service (null = memoryless; set inside try). */
+  let memory: MemoryService | null = null;
   const removeSignalHandlers = (): void => {
     if (onSigint !== undefined) {
       try {
@@ -923,6 +935,84 @@ export async function startServer(
       }
     }
 
+    const baseRepo = createKernelRepository(handle.raw);
+    // M2 gateway resolution first (opt-in): the memory service reuses the
+    // SAME loopback gateway for structured extraction (no new service, no
+    // provisioning). Null here means extraction conservatively yields no
+    // memory; recall/outbox still function.
+    let modelGateway: ModelGateway | null = null;
+    let modelName = "memory-extraction";
+    if (config.model !== null) {
+      const built =
+        options.modelGateway !== undefined
+          ? options.modelGateway
+          : createModelGateway(config.model, options.modelFetch);
+      if (built !== null) {
+        modelGateway = built;
+        modelName = config.model.model;
+      }
+    }
+    // Conversation memory (strict opt-in, default memoryless): when
+    // COMPANION_MEMORY_JSON is set, create the service BEFORE the engine
+    // and agent so every consumer shares one wrapped repo. The wrapper is
+    // the intake hook: fresh intakes and cancels preempt idle cultivation,
+    // and durably completed runs trigger authoritative cultivation. Without
+    // memory config the raw repo is shared unchanged (old behavior).
+    let repo: KernelRepository = baseRepo;
+    // (Service instance assigned to the outer `memory` binding so every
+    // post-start failure path can stop/await it before the DB close.)
+    // Intake-hook wrapper (shared by the pre-gate memory setup below and
+    // the post-gate repository rebuild, so the memory hooks always wrap the
+    // final gated repo and never a stale pre-gate instance).
+    const wrapRepoWithMemoryIntake = (
+      inner: KernelRepository,
+      service: MemoryService,
+    ): KernelRepository => ({
+      ...inner,
+      postMessage: (...args) => {
+        const out = inner.postMessage(...args);
+        service.notifyForeground();
+        return out;
+      },
+      postRetry: (...args) => {
+        const out = inner.postRetry(...args);
+        service.notifyForeground();
+        return out;
+      },
+      completeRun: (...args) => {
+        const out = inner.completeRun(...args);
+        if (out.applied) {
+          service.onRunCompleted(args[0]);
+        }
+        return out;
+      },
+      cancelRun: (...args) => {
+        const out = inner.cancelRun(...args);
+        service.notifyForeground();
+        return out;
+      },
+    });
+    if (config.memory !== null) {
+      const memoryConfig: MemoryConfig = config.memory;
+      memory = createMemoryService({
+        address: {
+          executable: memoryConfig.executable,
+          entry: memoryConfig.entry,
+          config: memoryConfig.config,
+          timeoutMs: memoryConfig.timeoutMs,
+          maxResponseBytes: memoryConfig.maxResponseBytes,
+        },
+        scope: memoryConfig.scope,
+        recallLimit: memoryConfig.recallLimit,
+        idleMs: memoryConfig.idleMs,
+        repo: baseRepo,
+        gateway: modelGateway,
+        model: modelName,
+        logger,
+      });
+      repo = wrapRepoWithMemoryIntake(baseRepo, memory);
+      logger.info("server.memory_ready", { status: 1 });
+    }
     // M1 (plan 14.1/14.5-14.6): after migration and before engine
     // recovery/listen, when roots are configured create one connector
     // owning all roots, ensure one fingerprint-bound instance, then the
@@ -1172,16 +1262,24 @@ export async function startServer(
     }
 
     // Repository (with its SINGLE shared proposal stager) is constructed here
-    // so `writeEnabled` is exactly the triple-gated value above. A selected
-    // host-owned write profile implies the config pair already (enforced in
-    // the pre-DB preflight), so the stager is enabled for it here; the
-    // dedicated port itself is composed immutably from the repository below.
-    const repo = createKernelRepository(
+    // so `writeEnabled` is exactly the triple-gated value above. When memory
+    // is configured the intake hooks re-wrap THIS gated repo (the pre-gate
+    // baseRepo wrapper above is superseded here, never shared onward). A
+    // selected host-owned write profile implies the config pair already
+    // (enforced in the pre-DB preflight), so the stager is enabled for it
+    // here; the dedicated port itself is composed immutably from this
+    // repository below.
+    const gatedRepo = createKernelRepository(
       handle.raw,
       actionsEnabled || writeProfile !== null
         ? { actionProposals: { writeEnabled: true } }
         : {},
     );
+    if (memory !== null) {
+      repo = wrapRepoWithMemoryIntake(gatedRepo, memory);
+    } else {
+      repo = gatedRepo;
+    }
 
     // M5 host-owned dedicated port (normal startup, no injection). The
     // conditional etag resolves concretely from the REPOSITORY-immutable
@@ -1263,24 +1361,28 @@ export async function startServer(
       actionsEnabled = true;
     }
 
-    if (
+    const needsMarkdownTools =
       config.markdownRoots.length > 0 ||
       calendarBinding !== null ||
       calendarConfig !== null ||
-      actionsEnabled
-    ) {
-      const registrations = [
-        ...createM1ToolRegistrations({
-          db: handle.raw,
-          repo,
-          referenceManager,
-          bindings: markdownBindings,
-          ...(kernelCalendarBinding !== undefined
-            ? { calendarBinding: kernelCalendarBinding }
-            : {}),
-          ...(calendarTargetStore !== undefined ? { calendarTargetStore } : {}),
-        }),
-      ];
+      actionsEnabled;
+    if (needsMarkdownTools || memory !== null) {
+      const registrations = needsMarkdownTools
+        ? [
+            ...createM1ToolRegistrations({
+              db: handle.raw,
+              repo,
+              referenceManager,
+              bindings: markdownBindings,
+              ...(kernelCalendarBinding !== undefined
+                ? { calendarBinding: kernelCalendarBinding }
+                : {}),
+              ...(calendarTargetStore !== undefined
+                ? { calendarTargetStore }
+                : {}),
+            }),
+          ]
+        : [];
       if (actionsEnabled) {
         // Proposal-only: stages a proposal, never executes an external write.
         registrations.push(
@@ -1288,6 +1390,85 @@ export async function startServer(
             stager: repo.actionProposalsStager as ActionProposalStager,
           }),
         );
+      }
+      if (memory !== null) {
+        // Explicit memory management tools (staging-only, no external-write
+        // widening): the shared broker keeps the existing budgets; the
+        // server-owned port stages mutations ONLY as durable outbox +
+        // operation rows (the broker handler never performs a CLI mutation).
+        const activeMemory = memory;
+        const port: MemoryManagePort = {
+          search: (input, options) =>
+            activeMemory.searchMemories({
+              sessionId: input.sessionId,
+              runId: input.runId,
+              query: input.query,
+              limit: input.limit,
+              ...(options?.signal !== undefined
+                ? { signal: options.signal }
+                : {}),
+            }),
+          stage: async (input, options): Promise<MemoryManageStageResult> => {
+            let out: Awaited<
+              ReturnType<typeof activeMemory.stageMemoryMutation>
+            >;
+            try {
+              out = await activeMemory.stageMemoryMutation({
+                sessionId: input.sessionId,
+                runId: input.runId,
+                kind: input.kind,
+                searchId: input.searchId,
+                ...(input.handle !== undefined ? { handle: input.handle } : {}),
+                ...(input.correctionBody !== undefined
+                  ? { correctionBody: input.correctionBody }
+                  : {}),
+                idempotencyKey: input.idempotencyKey,
+                // Server-known model origin: the kernel handler hardcodes
+                // false and model args carry no such field, so this can
+                // never be smuggled to true from the model side.
+                trustedSelection: false,
+                ...(options?.signal !== undefined
+                  ? { signal: options.signal }
+                  : {}),
+              });
+            } catch (error) {
+              if (
+                typeof error === "object" &&
+                error !== null &&
+                (error as { name?: unknown }).name === "MemoryManageCancelled"
+              ) {
+                throw new ToolError("execution_cancelled");
+              }
+              throw error;
+            }
+            if (out.ok) {
+              return {
+                status: "staged",
+                operationId: out.operationId,
+                operationStatus: out.status,
+              };
+            }
+            if (
+              out.code === "needs_clarification" ||
+              out.code === "target_not_found" ||
+              out.code === "state_conflict"
+            ) {
+              return {
+                status: out.code,
+                candidates: [...(out.candidates ?? [])],
+              };
+            }
+            if (out.code === "validation_error") {
+              throw new ToolError("execution_failed");
+            }
+            if (out.code === "service_unavailable") {
+              throw new ToolError("execution_failed");
+            }
+            throw new ToolError("execution_failed");
+          },
+        };
+        registrations.push(createMemorySearchRegistration({ repo, port }));
+        registrations.push(...createMemoryStageRegistrations({ repo, port }));
       }
       toolBroker = createToolBroker({ db: handle.raw, repo, registrations });
       logger.info("server.markdown_ready", {
@@ -1321,37 +1502,34 @@ export async function startServer(
         }
       };
     }
-    // M2 (opt-in): when config.model is set, build the loopback gateway
-    // and register the agent under m0-default before engine.start/listen.
-    // The agent reuses the M1 ToolBroker, or a private empty-registration
-    // broker when no Markdown roots exist (toolBroker stays null without
-    // roots). No model config => empty registry: runs fail closed with a
-    // fixed code instead of producing fake LLM output. No direct model
-    // endpoint is added; only counts are logged (never URLs/keys).
+    // M2 (opt-in): when a gateway resolved above, register the agent under
+    // m0-default before engine.start/listen. The agent reuses the M1
+    // ToolBroker, or a private empty-registration broker when no Markdown
+    // roots exist (toolBroker stays null without roots). With memory
+    // configured the agent additionally gets the bounded pre-answer recall
+    // hook (fail-open memoryless otherwise). No model gateway => empty
+    // registry: runs fail closed with a fixed code instead of producing
+    // fake LLM output. No direct model endpoint is added; only counts are
+    // logged (never URLs/keys).
     const registry = new StrategyRegistry();
-    if (config.model !== null) {
-      const gateway =
-        options.modelGateway !== undefined
-          ? options.modelGateway
-          : createModelGateway(config.model, options.modelFetch);
-      if (gateway !== null) {
-        const agentBroker =
-          toolBroker ??
-          createToolBroker({ db: handle.raw, repo, registrations: [] });
-        registry.register(
-          AGENT_STRATEGY_NAME,
-          createAgentStrategy({
-            db: handle.raw,
-            repo,
-            broker: agentBroker,
-            gateway,
-            model: config.model.model,
-          }),
-        );
-        logger.info("server.model_ready", {
-          status: agentBroker.toolNames().length + 1,
-        });
-      }
+    if (modelGateway !== null) {
+      const agentBroker =
+        toolBroker ??
+        createToolBroker({ db: handle.raw, repo, registrations: [] });
+      registry.register(
+        AGENT_STRATEGY_NAME,
+        createAgentStrategy({
+          db: handle.raw,
+          repo,
+          broker: agentBroker,
+          gateway: modelGateway,
+          model: modelName,
+          ...(memory !== null ? { memory: memory.recallHook } : {}),
+        }),
+      );
+      logger.info("server.model_ready", {
+        status: agentBroker.toolNames().length + 1,
+      });
     }
     // C21: the deterministic M5 Action strategy over the SAME database:
     // existing ReferenceManager + ActionExecutionService, the authoritative
@@ -1409,6 +1587,11 @@ export async function startServer(
     logger.info("server.recovered", {
       status: recovery.abandoned + recovery.cancelled,
     });
+    // Memory service starts after engine recovery: crash-recovered pending
+    // jobs drain with stable keys before the idle timer arms.
+    if (memory !== null) {
+      memory.start();
+    }
 
     const { app, controls } = createApp({
       config,
@@ -1418,6 +1601,7 @@ export async function startServer(
       now,
       assets: loadUiAssets(),
       actionsEnabled,
+      ...(memory !== null ? { memory } : {}),
     });
     const activeEngine = engine;
     const activeHandle = handle;
@@ -1458,10 +1642,21 @@ export async function startServer(
         },
       );
     } catch (listenError) {
-      // Listen failed: drain the started engine, stop the owned Calendar
-      // connector, close any created listener, then close the DB (in that
-      // order). Handlers were not yet registered, but remove defensively
-      // before rethrowing.
+      // Listen failed: stop the memory service FIRST (its crash-recovered
+      // CLI children and timer must not outlive the rejected startup or
+      // touch the repo/DB after close), then drain the started engine,
+      // stop the owned Calendar connector, close any created listener, and
+      // finally close the DB (in that order). Handlers were not yet
+      // registered, but remove defensively before rethrowing. Every step is
+      // best-effort: the listen error carries the startup failure even when
+      // a cleanup step also fails.
+      try {
+        if (memory !== null) {
+          await memory.stop();
+        }
+      } catch {
+        // Best effort: the listen error carries the startup failure.
+      }
       try {
         if (engine !== undefined) {
           await engine.shutdown({ drainMs });
@@ -1524,6 +1719,16 @@ export async function startServer(
         controls.markDraining();
         const safeReason = sanitizeShutdownReason(reason);
         logger.info("server.draining", { status: safeReason });
+        // Stop memory first: the idle timer is cancelled, in-flight CLI
+        // children are hard-killed and awaited (no orphans), and no new
+        // cultivation starts while the engine drains.
+        if (memory !== null) {
+          try {
+            await memory.stop();
+          } catch {
+            // Best effort: the engine drain below still runs.
+          }
+        }
         try {
           await activeEngine.shutdown({ drainMs });
         } catch {
@@ -1626,9 +1831,21 @@ export async function startServer(
       port,
       shutdown,
       toolBroker,
+      memory,
     };
   } catch (error) {
     removeSignalHandlers();
+    // Any post-start failure path (including memory started above) stops
+    // and awaits the memory service BEFORE the DB close below: a rejected
+    // startup must never leave its crash-recovery CLI/timer alive. The
+    // original error still carries the failure.
+    if (memory !== null) {
+      try {
+        await memory.stop();
+      } catch {
+        // Best effort: the original startup error carries the failure.
+      }
+    }
     if (ownedMcp !== undefined) {
       try {
         await boundedMcpShutdown(ownedMcp, mcpShutdownMs);

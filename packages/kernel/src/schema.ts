@@ -540,6 +540,110 @@ export const modelCalls = sqliteTable(
 // committed migration SQL only (as with the M0 active-run partial index
 // and the M1 snapshot-links target index).
 
+// Conversation-memory outbox (remind CLI integration). Mirrors
+// packages/kernel/migrations/0008_memory_outbox.sql, which is authoritative.
+// Companion-owned durable queue + immutable recall-exposure snapshots +
+// per-run memory citation grants. Prompt text, raw model output, and
+// secrets are NEVER columns here; `last_error` carries a fixed code only.
+
+export const memoryOutbox = sqliteTable("memory_outbox", {
+  id: text("id").primaryKey(),
+  kind: text("kind").notNull(),
+  sessionId: text("session_id").notNull(),
+  runId: text("run_id").notNull(),
+  turnId: text("turn_id"),
+  eventId: text("event_id"),
+  scope: text("scope").notNull(),
+  idempotencyKey: text("idempotency_key").notNull().unique(),
+  requestJson: text("request_json").notNull(),
+  status: text("status").notNull().default("pending"),
+  attempts: integer("attempts").notNull().default(0),
+  nextDueAt: integer("next_due_at").notNull().default(0),
+  lastError: text("last_error"),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+});
+
+export const memoryExposures = sqliteTable(
+  "memory_exposures",
+  {
+    recallId: text("recall_id").notNull(),
+    recordId: text("record_id").notNull(),
+    sessionId: text("session_id").notNull(),
+    runId: text("run_id").notNull(),
+    scope: text("scope").notNull(),
+    citation: text("citation").notNull(),
+    snippet: text("snippet").notNull(),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.recallId, t.recordId] })],
+);
+
+export const memoryGrants = sqliteTable(
+  "memory_grants",
+  {
+    runId: text("run_id").notNull(),
+    citation: text("citation").notNull(),
+    recordId: text("record_id").notNull(),
+    recallId: text("recall_id").notNull(),
+    sessionId: text("session_id").notNull(),
+    scope: text("scope").notNull(),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.runId, t.citation] })],
+);
+
+// NOTE: the memory lookup indexes (idx_memory_outbox_due,
+// idx_memory_outbox_run, idx_memory_exposures_run, idx_memory_grants_run,
+// idx_memory_searches_session, idx_memory_search_items_record,
+// idx_memory_operations_session, idx_memory_operations_job)
+// are owned by the committed migration SQL only.
+
+// Explicit management snapshots (migration 0009, authoritative SQL).
+// One explicit `record.search` (active+retired, no heat/reactivation) plus
+// its immutable per-handle snapshot rows, plus the durable 202-ack status
+// for one staged correct/retire/reactivate mutation.
+
+export const memorySearches = sqliteTable("memory_searches", {
+  searchId: text("search_id").primaryKey(),
+  sessionId: text("session_id").notNull(),
+  runId: text("run_id").notNull(),
+  scope: text("scope").notNull(),
+  query: text("query").notNull(),
+  createdAt: integer("created_at").notNull(),
+});
+
+export const memorySearchItems = sqliteTable(
+  "memory_search_items",
+  {
+    searchId: text("search_id").notNull(),
+    handle: text("handle").notNull(),
+    recordId: text("record_id").notNull(),
+    revision: integer("revision"),
+    status: text("status").notNull(),
+    snippet: text("snippet").notNull(),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.searchId, t.handle] })],
+);
+
+export const memoryOperations = sqliteTable("memory_operations", {
+  id: text("id").primaryKey(),
+  kind: text("kind").notNull(),
+  sessionId: text("session_id").notNull(),
+  runId: text("run_id").notNull(),
+  searchId: text("search_id"),
+  handle: text("handle"),
+  recordId: text("record_id").notNull(),
+  revision: integer("revision"),
+  jobId: text("job_id").notNull(),
+  idempotencyKey: text("idempotency_key").notNull().unique(),
+  requestHash: text("request_hash").notNull(),
+  status: text("status").notNull().default("pending"),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+});
+
 // M5 action storage (§18). Mirrors
 // packages/kernel/migrations/0007_m5_actions.sql, which is authoritative.
 // Four STRICT tables with the exact §18.3 compound FKs, the 4-column target
@@ -819,7 +923,6 @@ export const actionReceipts = sqliteTable(
     ),
   ],
 );
-
 export const kernelSchema = {
   sessions,
   turns,
@@ -838,6 +941,12 @@ export const kernelSchema = {
   sessionReferenceContext,
   evidenceGrants,
   modelCalls,
+  memoryOutbox,
+  memoryExposures,
+  memoryGrants,
+  memorySearches,
+  memorySearchItems,
+  memoryOperations,
   actionProposals,
   actionExecutions,
   actionExecutionGrants,

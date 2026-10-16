@@ -583,6 +583,22 @@ describe("m0 storage helpers and provenance", () => {
     expect(m7).toMatch(/STRICT/g);
     const m7Code = m7.replace(/--[^\n]*/g, "");
     expect(m7Code).not.toContain("WITHOUT ROWID");
+    const m8 = readFileSync(
+      join(kernelDir, "migrations", "0008_memory_outbox.sql"),
+      "utf8",
+    );
+    // Conversation-memory outbox: Companion-owned durable queue plus
+    // immutable recall-exposure snapshots and per-run citation grants.
+    for (const table of [
+      "memory_outbox",
+      "memory_exposures",
+      "memory_grants",
+    ]) {
+      expect(m8).toContain(`CREATE TABLE ${table}`);
+    }
+    expect(m8).toMatch(/STRICT/g);
+    const m8Code = m8.replace(/--[^\n]*/g, "");
+    expect(m8Code).not.toContain("WITHOUT ROWID");
     // The bundled version is the committed migration count, never a hand pin.
     expect(BUNDLED_SCHEMA_VERSION).toBeGreaterThanOrEqual(7);
     const journal = JSON.parse(
@@ -611,6 +627,9 @@ describe("m0 storage helpers and provenance", () => {
     );
     expect(journal.entries.map((entry) => entry.tag)).toContain(
       "0007_m5_actions",
+    );
+    expect(journal.entries.map((entry) => entry.tag)).toContain(
+      "0008_memory_outbox",
     );
     const backupSrc = readFileSync(join(kernelDir, "src", "backup.ts"), "utf8");
     expect(backupSrc).toContain(".backup(");
@@ -853,6 +872,7 @@ describe("m1 reference storage migration", () => {
       }
       expect(getSchemaVersion(handle.raw)).toBe(BUNDLED_SCHEMA_VERSION);
       expect(tableNames(handle.raw)).toContain("snapshot_links");
+      expect(tableNames(handle.raw)).toContain("memory_outbox");
       const kept = handle.raw
         .prepare("SELECT id FROM sessions WHERE id = ?")
         .get(sessionId) as { id: string } | undefined;

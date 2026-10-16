@@ -218,6 +218,154 @@ connector instance owns **all** configured roots.
   and 300s whole-run wall budgets with at most one repair inside max 8
   steps; native tool calling only.
 
+### Conversation memory (strict opt-in remind CLI)
+
+- Unset `COMPANION_MEMORY_JSON` (default) means fully memoryless: no
+  service, no recall hook, no outbox jobs, no timers (M0/M1/M2 behavior
+  preserved exactly).
+- When set, the value must be a strict JSON object with only
+  `{ executable, entry, config, scope, timeoutMs?, maxResponseBytes?,
+  recallLimit?, idleMs? }`. Example:
+  `{"executable":"/usr/bin/node","entry":"/srv/remind/dist/src/cli.js","config":"/srv/remind/mem.json","scope":"personal"}`.
+  `executable`/`entry`/`config` must be absolute paths (no shell, no
+  lookup: the child is spawned with `shell: false` and exactly
+  `[entry, --config, config]` plus one LF-framed JSON line on stdin).
+  `scope` is `1-256` chars with no control characters; every CLI call
+  carries it and cross-scope records are never surfaced.
+  `timeoutMs` default `5000` (bounds `500..30000`),
+  `maxResponseBytes` default `65536` (bounds `4096..1048576`),
+  `recallLimit` default `5` (bounds `1..8`),
+  `idleMs` default `30000` (bounds `5000..300000`).
+  Unknown keys, scalars, and malformed JSON are rejected fail-closed at
+  startup with a fixed safe message (no paths, scopes, or values logged).
+- The remind CLI child is the ONLY remind interface: Companion never
+  opens, imports, or reads the remind DB. All durable Companion-side
+  state lives in `memory_outbox` / `memory_exposures` / `memory_grants`;
+  the CLI idempotency key always equals the outbox job's stable key, so
+  crash replays reuse the same key and never duplicate a write.
+- Pre-answer recall is fail-open (any failure yields a memoryless
+  response; the run never fails for memory). Structured extraction runs
+  only through the EXISTING local model gateway: without
+  `COMPANION_MODEL_JSON` there is no extraction (recall/outbox still
+  function); invalid extraction output conservatively yields no memory.
+  Feedback is granted ONLY for structural `mN` citations present in the
+  ACCEPTED completed answer's citation arrays (never prose, never mere
+  exposure). Idle `maintain.distill` runs one bounded batch per idle
+  period anchored to the last completed run; a model-unavailable
+  (LLM-disabled) distill answer acks normally with zero writes.
+- Live HTTP smoke, 2026-10-15 (local, temp stores only): real Companion
+  server + synthetic loopback Ollama gateway (scripted `answer.submit`
+  plus `{"memories":[...]}` extraction) + REAL remind CLI against a
+  temporary DB (`allowedScopes ["personal","default"]`, LLM/vectors
+  disabled). Turn 1 (`I like green tea.`) completed with durable
+  `event.append` + `record.remember` both `acked` (attempts 0) and a
+  direct CLI `record.recall` returning 1 item with the snippet; turn 2
+  (`What did you note about green tea?`) recalled and answered with
+  structural `citations: ["m1"]`, and `record.feedback` acked with a
+  same-run `m1` grant row; idle `maintain.distill` auto-enqueued and
+  acked (degraded: LLM disabled, zero writes — scheduling proof only,
+  not a model result). Foreground/start/stop preemption is covered by
+  existing unit regressions, not re-demonstrated here. No fake
+  real-model claims: the gateway is synthetic and labelled as such.
+- Permanent live regression (real HTTP + real CLI, temp stores only):
+  `apps/server/test/memory_live_http.test.ts` runs a real loopback server
+  with the synthetic gateway above (honestly labeled, never a real model)
+  and the REAL remind CLI (`dist/src/cli.js` via `COMPANION_MEMORY_TEST_ENTRY`
+  or the sibling checkout, template `memory.config.example.json` patched at
+   runtime to temp `dbPath`/`vaultPath` with `vectors/llm.enabled=false`;
+   missing CLI/template fails with a prerequisite error, never a false pass).
+   Runnable: `pnpm exec vitest run apps/server/test/memory_live_http.test.ts`.
+   It asserts turn-1 `event.append` + `record.remember` `acked`, direct CLI
+   `record.recall` returning the snippet, turn-2 structural `citations: ["m1"]`
+   with a same-run `m1` grant and acked `record.feedback`, no grants/feedback
+   for the uncited first turn, idle `maintain.distill` `acked` (degraded
+   scheduling proof only), and graceful shutdown with a reaped child.
+   Verified 2026-10-15: 1/1 passed (~16s). CI provides the REAL CLI: the
+   workflow checks out the pinned remind source
+   (`suiso11/remind@fbc928686be9d6558f903e02494a043a434d1497`, reviewed
+   PR14 head) into `.ci/remind`, builds it (`npm ci` + `npm run build`,
+   no models), and sets `COMPANION_MEMORY_TEST_ENTRY` /
+   `COMPANION_MEMORY_TEST_CONFIG_TEMPLATE` to the built entry + template.
+   Limits: synthetic gateway only
+   (no real-model result), foreground/shutdown preemption edges remain
+   covered by `memory_service.test.ts` unit regressions; Windows manual
+   smoke remains open. Re-verified 2026-10-16 on the baseline branch with
+   the pinned `.ci/remind` CLI: 1/1 passed (~16s); baseline-worktree full
+   suite 112 files / 1362 tests green, `tsc --noEmit` exit 0,
+   `biome check .` clean.
+- Explicit management (search / correct / retire / reactivate),
+  2026-10-15 (local, temp stores only): `POST .../memory/search` is
+  explicit user-directed only and returns opaque session-scoped `mN`
+  handles for active AND retired records (never archived/superseded);
+  a search never heats, reactivates, or grants feedback (zero
+  `record.feedback` jobs from search). `GET .../memory/detail` keeps
+  the immutable cited snapshot distinct from the live current record
+  (provenance source `companion:conversation`); the UI confirm panel
+  shows current vs snapshot before staging a mutation. `record.correct`
+  stages a REAL `event.append` (raw source carrying the user's
+  replacement) followed by `record.correct`, both `acked` in the
+  Companion outbox under one stable idempotency key; same key+body
+  replays the stored operation, same key+drifted body is 409 (no
+  silent rebind). `record.retire` excludes the record from REAL CLI
+  `record.recall` while a fresh explicit search still returns the
+  handle with status `retired`; `record.reactivate` restores it
+  (search shows active again, CLI recall returns the snippet). This
+  is reversible retirement, not deletion/hiding: no delete/export/
+  perception surface exists. UI races are closed synchronously:
+  search/target invalidation with monotonic generation guards (stale
+  responses never apply), new-operation staging resets pending state
+  and binds poll identity to the fresh operation (no stale ack reuse).
+  Integrity edges are covered by unit regressions: ambiguous-model
+  refusal, atomic op/outbox/followup staging, replay-first state
+  recovery, terminal-failure marking, and cancellation.
+- Permanent regressions (temp stores only, no user DB writes):
+  `pnpm exec vitest run apps/server/test/memory_manage.test.ts`
+  (unit: guards, idempotent replay + partial-chain recovery, no-heat
+  search, retire/search/reactivate lifecycle, immutable citations,
+  native tool-flow budgets; real migrated `:memory:` kernel DB +
+  injected fake CLI);
+  `pnpm --filter @companion/server exec vitest run
+  test/memory_manage_live.test.ts` (live: real HTTP + synthetic
+  gateway, honestly labeled NOT a real model, + REAL remind CLI temp
+  DB; proves search-incl-retired/no-heat, snapshot-vs-current detail,
+  real correct chain acked + stored-operation replay, retire/reactivate
+  against REAL CLI recall);
+  `COMPANION_E2E_MEMORY=1 pnpm --filter @companion/server exec
+  playwright test --config playwright.config.ts` (real browser:
+  `e2e/memory/memory_manage.spec.ts` drives the REAL memory panel UI
+  against the REAL Hono app + RunEngine + REAL remind CLI temp DB;
+  synthetic scripted gateway cultivates one fact, never a real model).
+   Verified 2026-10-15: full Vitest **113 files / 1370 tests passed**,
+   real-browser memory spec GREEN, live HTTP/real-CLI GREEN, root +
+   e2e `tsc --noEmit` exit 0, `pnpm lint` GREEN. The remote `e2e` job
+   runs the same real-browser memory spec with `COMPANION_E2E_MEMORY=1`
+   against the CI-built pinned remind CLI above. Limits: synthetic
+   gateway only (no real-model result); Windows manual smoke remains
+   open.
+- Not implemented (unchanged): memory perception, user export, and
+  memory/session deletion APIs. There is no per-session memory
+  delete/export endpoint.
+- Shutdown/job bounds (verified 2026-10-16 on the baseline branch;
+  baseline-worktree evidence: live real-CLI regression 1/1, full suite
+  112 files / 1362 tests green, `tsc --noEmit` exit 0, `biome check .`
+  clean):
+  `memory.stop()` runs FIRST on every teardown path (graceful shutdown,
+  listen-failure catch, outer startup-failure catch) — idle timer
+  cancelled, then every active drain tick's own `AbortController` aborted
+  (recovery, foreground, and idle ticks alike) and the in-flight tick
+  awaited, so no CLI child outlives a rejected startup or touches the
+  repo/DB after close. Each drain tick executes at most
+  `MEMORY_DRAIN_BATCH = 5` jobs TOTAL (claim bound shrinks with the
+  remaining budget; follow-up chains continue on a later drain). CLI stdin
+  failures (EPIPE/write) kill and settle only at the `close` reap, never
+  overlapping a retry with a live child. Deterministic regression:
+  `bootstrap.test.ts` "stops memory before DB close when listen fails on
+  an occupied port" defers the REAL `EADDRINUSE` bind (test-only
+  `net.Server.listen` wrapper, no production hook) until the recovery
+  child observably started, then asserts the rejection reaped it
+  (`kill(pid, 0)` throws), signal counts restored, DB reopens, and a free
+  port retry succeeds.
+
 ### MCP library wire identity (C09; not server-enabled)
 
 - The connector's trusted config must carry an explicit `expectedServerName`
@@ -824,6 +972,12 @@ or complete activate config):
   stdio bounds (config `shutdownWaitMs` + fixed force-kill window). The
   listener-failure and generic startup-failure paths stop the owned
   connector best-effort as well (engine ⇒ connector ⇒ DB close order).
+  With conversation memory configured, BOTH failure paths additionally
+  stop the memory service FIRST (CLI children reaped and tick awaited
+  before the engine drain and DB close); a rejected startup never leaves
+  its crash-recovery CLI/timer alive. Verified 2026-10-16: full suite
+  112 files / 1362 tests green including the deterministic occupied-port
+  memory-cleanup regression (see "Conversation memory").
 - Fake E2E seam inventory (exact API used by C15): `startServer({
   env: { ..., COMPANION_CALENDAR_JSON }, mcpDefinitions: readonly
   McpBindingDefinition[], mcpTransportFactory?: TransportFactory,

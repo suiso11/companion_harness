@@ -17,6 +17,13 @@ import {
   HistoryQuerySchema,
   IDEMPOTENCY_SCOPE_SESSIONS_CREATE,
   IdempotencyLookupQuerySchema,
+  MemoryDetailResponseSchema,
+  MemoryMutationRequestSchema,
+  MemoryMutationResponseSchema,
+  MemoryOperationResponseSchema,
+  MemoryRecallExposureResponseSchema,
+  MemorySearchRequestSchema,
+  MemorySearchResponseSchema,
   messageScope,
   PostMessageRequestSchema,
   PostMessageResponseSchema,
@@ -68,6 +75,104 @@ export interface EnginePort {
   }): Promise<{ abandoned: number; cancelled: number }>;
 }
 
+/**
+ * Minimal server-owned memory management surface the HTTP routes need.
+ * Satisfied by the Companion memory service when COMPANION_MEMORY_JSON
+ * is set; null keeps the existing memory-disabled behavior (404).
+ */
+export interface MemoryHttpPort {
+  searchMemories(input: {
+    sessionId: string;
+    runId: string;
+    query: string;
+    limit?: number;
+    signal?: AbortSignal;
+  }): Promise<{
+    searchId: string;
+    hits: readonly {
+      handle: string;
+      snippet: string;
+      status: "active" | "retired";
+    }[];
+  }>;
+  getMemoryDetail(input: {
+    sessionId: string;
+    searchId: string;
+    handle: string;
+  }): Promise<{
+    snapshot: {
+      searchId: string;
+      handle: string;
+      snippet: string;
+      status: "active" | "retired";
+    };
+    current: {
+      body: string;
+      kind: string;
+      status: string;
+      revision: number;
+      source: string;
+      observedAt: string;
+      createdAt: string;
+    };
+    stale: boolean;
+  }>;
+  stageMemoryMutation(input: {
+    sessionId: string;
+    runId: string;
+    kind: "record.correct" | "record.retire" | "record.reactivate";
+    searchId: string;
+    handle?: string;
+    correctionBody?: string;
+    idempotencyKey: string;
+    signal?: AbortSignal;
+    trustedSelection?: boolean;
+  }): Promise<
+    | {
+        ok: true;
+        operationId: string;
+        status: "pending" | "acked" | "failed";
+        deduplicated: boolean;
+      }
+    | {
+        ok: false;
+        code:
+          | "needs_clarification"
+          | "target_not_found"
+          | "state_conflict"
+          | "validation_error"
+          | "service_unavailable"
+          | "idempotency_conflict";
+        candidates?: readonly {
+          handle: string;
+          snippet: string;
+          status: "active" | "retired";
+        }[];
+      }
+  >;
+  getMemoryOperation(
+    sessionId: string,
+    operationId: string,
+  ): {
+    operationId: string;
+    kind: "record.correct" | "record.retire" | "record.reactivate";
+    recordRevision: number | null;
+    status: "pending" | "acked" | "failed";
+  } | null;
+  getMemoryRecallExposure(input: {
+    sessionId: string;
+    runId: string;
+    citation: string;
+  }): { runId: string; citation: string; snippet: string } | null;
+  hashDrainingReplay(input: {
+    kind: "record.correct" | "record.retire" | "record.reactivate";
+    sessionId: string;
+    searchId: string;
+    handle?: string;
+    correctionBody?: string;
+  }): { requestHash: string; recordId: string } | null;
+}
+
 export interface CreateAppDeps {
   config: ServerConfig;
   repo: KernelRepository;
@@ -89,6 +194,12 @@ export interface CreateAppDeps {
    * false (fail closed).
    */
   actionsEnabled?: boolean;
+  /**
+   * Explicit memory management service (server-owned). Null (default)
+   * preserves the existing memory-disabled behavior: every
+   * `/memory/*` route answers 404 without touching the repository.
+   */
+  memory?: MemoryHttpPort;
 }
 
 export interface ServerControls {
@@ -488,6 +599,7 @@ function mapDomainError(c: Context, error: unknown): Response {
 export function createApp(deps: CreateAppDeps): CreatedServerApp {
   const { config, repo, engine } = deps;
   const actionsEnabled = deps.actionsEnabled === true;
+  const memory = deps.memory ?? null;
   const logger = deps.logger ?? createStdServerLogger(config.logLevel);
   const now = deps.now ?? Date.now;
   const assets = deps.assets ?? {};
@@ -1322,6 +1434,461 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     } catch (error) {
       return mapDomainError(c, error);
     }
+  });
+
+  /* ---------------- explicit memory management (opt-in) ---------------- */
+  // Closed explicit management surface over active+retired (archived /
+  // superseded excluded by remind `record.search`). Reads never heat,
+  // reactivate, or grant feedback; mutations stage EXACTLY ONE durable
+  // outbox operation (queued 202, never applied here) for a single
+  // explicit mN target (or exactly one same-scope search candidate).
+  // Raw canonical ids never cross this boundary; historical mN snapshots
+  // are never rebound. While `memory` is null every route 404s (existing
+  // memory-disabled behavior preserved).
+
+  function memoryUnavailable(c: Context): Response {
+    return c.json(
+      { error: { code: "memory_unavailable", message: "memory is disabled" } },
+      404,
+    );
+  }
+
+  function memoryRouteError(
+    c: Context,
+    code:
+      | "needs_clarification"
+      | "target_not_found"
+      | "state_conflict"
+      | "idempotency_conflict"
+      | "validation_error"
+      | "service_unavailable",
+    candidates?: readonly { handle: string; snippet: string; status: string }[],
+  ): Response {
+    switch (code) {
+      case "needs_clarification":
+        return c.json(
+          {
+            error: {
+              code: "needs_clarification",
+              message: "ambiguous memory target",
+            },
+            candidates: (candidates ?? []).map((hit) => ({
+              handle: hit.handle,
+              snippet: hit.snippet,
+              status: hit.status,
+            })),
+          },
+          409,
+        );
+      case "target_not_found":
+        return c.json(
+          { error: { code: "target_not_found", message: "memory not found" } },
+          404,
+        );
+      case "state_conflict":
+        return c.json(
+          {
+            error: { code: "state_conflict", message: "memory state conflict" },
+          },
+          409,
+        );
+      case "idempotency_conflict":
+        return apiError(
+          c,
+          409,
+          "idempotency_key_reused",
+          "idempotency key already used",
+        );
+      case "service_unavailable":
+        return c.json(
+          {
+            error: {
+              code: "memory_unavailable",
+              message: "memory unavailable",
+            },
+          },
+          503,
+        );
+      default:
+        return validationError(c);
+    }
+  }
+
+  /** Originating run+session binding: the run must belong to the session. */
+  function requireOwnedRun(
+    c: Context,
+    sessionId: string,
+    runId: string,
+  ): { ok: true } | { ok: false; response: Response } {
+    let run: { sessionId: string };
+    try {
+      run = repo.getRun(runId);
+    } catch {
+      return { ok: false, response: memoryRouteError(c, "target_not_found") };
+    }
+    if (run.sessionId !== sessionId) {
+      return { ok: false, response: memoryRouteError(c, "target_not_found") };
+    }
+    return { ok: true };
+  }
+
+  function validSearchId(value: string): boolean {
+    return value.length >= 1 && value.length <= 256;
+  }
+
+  function validHandle(value: string): boolean {
+    return /^m[1-9][0-9]*$/.test(value);
+  }
+
+  // Explicit search (read, no idempotency key, allowed while draining:
+  // reads never stage and never heat). Body carries the originating runId
+  // so hits bind to their (sessionId, searchId) scope.
+  app.post("/api/sessions/:sessionId/memory/search", async (c) => {
+    if (memory === null) {
+      return memoryUnavailable(c);
+    }
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const raw = await readJsonBody(c);
+    if (!raw.ok) {
+      return validationError(c);
+    }
+    const parsed = MemorySearchRequestSchema.safeParse(raw.value);
+    if (!parsed.success) {
+      return validationError(c);
+    }
+    const owned = requireOwnedRun(c, session.id, parsed.data.runId);
+    if (!owned.ok) {
+      return owned.response;
+    }
+    try {
+      repo.getSession(session.id);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+    try {
+      const out = await memory.searchMemories({
+        sessionId: session.id,
+        runId: parsed.data.runId,
+        query: parsed.data.query,
+        limit: parsed.data.limit,
+      });
+      const body = MemorySearchResponseSchema.parse({
+        searchId: out.searchId,
+        hits: out.hits.map((hit) => ({ ...hit })),
+      });
+      return c.json(body, 200);
+    } catch (error) {
+      const code =
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        typeof (error as { code?: unknown }).code === "string"
+          ? ((error as { code: string }).code as
+              | "validation_error"
+              | "service_unavailable")
+          : "service_unavailable";
+      if (
+        error !== null &&
+        typeof error === "object" &&
+        "name" in error &&
+        (error as { name?: unknown }).name === "MemoryManageError"
+      ) {
+        return memoryRouteError(
+          c,
+          code === "validation_error"
+            ? "validation_error"
+            : "service_unavailable",
+        );
+      }
+      return memoryRouteError(c, "service_unavailable");
+    }
+  });
+
+  // Confirmation detail: immutable cited snapshot vs live current record.
+  app.get(
+    "/api/sessions/:sessionId/memory/searches/:searchId/items/:handle",
+    async (c) => {
+      if (memory === null) {
+        return memoryUnavailable(c);
+      }
+      const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+      if ("response" in session) {
+        return session.response;
+      }
+      const searchId = c.req.param("searchId");
+      const handle = c.req.param("handle");
+      if (!validSearchId(searchId) || !validHandle(handle)) {
+        return validationError(c);
+      }
+      if (!strictQuery(c, []).ok) {
+        return validationError(c);
+      }
+      try {
+        repo.getSession(session.id);
+      } catch (error) {
+        return mapDomainError(c, error);
+      }
+      try {
+        const out = await memory.getMemoryDetail({
+          sessionId: session.id,
+          searchId,
+          handle,
+        });
+        const body = MemoryDetailResponseSchema.parse({
+          snapshot: { ...out.snapshot },
+          current: { ...out.current },
+          stale: out.stale,
+        });
+        return c.json(body, 200);
+      } catch (error) {
+        if (
+          error !== null &&
+          typeof error === "object" &&
+          "name" in error &&
+          (error as { name?: unknown }).name === "MemoryManageError"
+        ) {
+          const code =
+            "code" in error &&
+            typeof (error as { code?: unknown }).code === "string"
+              ? ((error as { code: string }).code as
+                  | "target_not_found"
+                  | "service_unavailable"
+                  | "validation_error")
+              : "service_unavailable";
+          if (code === "target_not_found") {
+            return memoryRouteError(c, "target_not_found");
+          }
+          if (code === "validation_error") {
+            return memoryRouteError(c, "validation_error");
+          }
+          return memoryRouteError(c, "service_unavailable");
+        }
+        return memoryRouteError(c, "service_unavailable");
+      }
+    },
+  );
+
+  // Per-run recall exposure for answer citations (read-only, allowed
+  // while draining): returns the exact snippet the model saw as `mN`
+  // during ONE run. Answer citations bind to their own run's recall
+  // exposure, never to the latest explicit management search.
+  app.get(
+    "/api/sessions/:sessionId/memory/recall/:runId/items/:citation",
+    async (c) => {
+      if (memory === null) {
+        return memoryUnavailable(c);
+      }
+      const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+      if ("response" in session) {
+        return session.response;
+      }
+      const runId = c.req.param("runId");
+      const citation = c.req.param("citation");
+      if (!validHandle(citation)) {
+        return validationError(c);
+      }
+      if (!strictQuery(c, []).ok) {
+        return validationError(c);
+      }
+      const owned = requireOwnedRun(c, session.id, runId);
+      if (!owned.ok) {
+        return owned.response;
+      }
+      try {
+        repo.getSession(session.id);
+      } catch (error) {
+        return mapDomainError(c, error);
+      }
+      const out = memory.getMemoryRecallExposure({
+        sessionId: session.id,
+        runId,
+        citation,
+      });
+      if (out === null) {
+        return memoryRouteError(c, "target_not_found");
+      }
+      const body = MemoryRecallExposureResponseSchema.parse({
+        runId: out.runId,
+        citation: out.citation,
+        snippet: out.snippet,
+      });
+      return c.json(body, 200);
+    },
+  );
+
+  // Stage one mutation (keyed 202, draining-aware: a stored operation for
+  // the same key replays verbatim instead of 503; fresh keys get 503
+  // without staging anything).
+  app.post("/api/sessions/:sessionId/memory/mutations", async (c) => {
+    const started = now();
+    if (memory === null) {
+      return memoryUnavailable(c);
+    }
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const keyed = requireIdempotencyKey(c);
+    if ("response" in keyed) {
+      return keyed.response;
+    }
+    const raw = await readJsonBody(c);
+    if (!raw.ok) {
+      return validationError(c);
+    }
+    const parsed = MemoryMutationRequestSchema.safeParse(raw.value);
+    if (!parsed.success) {
+      return validationError(c);
+    }
+    if (
+      parsed.data.kind === "record.correct" &&
+      parsed.data.correctionBody === undefined
+    ) {
+      return validationError(c);
+    }
+    if (
+      parsed.data.kind !== "record.correct" &&
+      parsed.data.correctionBody !== undefined
+    ) {
+      return validationError(c);
+    }
+    const owned = requireOwnedRun(c, session.id, parsed.data.runId);
+    if (!owned.ok) {
+      return owned.response;
+    }
+    try {
+      repo.getSession(session.id);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+    if (draining) {
+      // No staging while draining: replay the stored operation for this
+      // exact key (same frozen request/key retry wins over 503), else 503
+      // without persisting anything. The immutable request hash is
+      // recomputed for the incoming (kind/body/target): a same-key request
+      // with drifted content is a 409 `idempotency_key_reused` here exactly
+      // as on the normal path, never a silent "deduplicated" replay of a
+      // different mutation.
+      try {
+        const existing = repo.getMemoryOperationByKey(keyed.key.toLowerCase());
+        if (existing !== null && existing.sessionId === session.id) {
+          const replay = memory.hashDrainingReplay({
+            kind: parsed.data.kind,
+            sessionId: session.id,
+            searchId: parsed.data.searchId,
+            ...(parsed.data.handle !== undefined
+              ? { handle: parsed.data.handle }
+              : {}),
+            ...(parsed.data.correctionBody !== undefined
+              ? { correctionBody: parsed.data.correctionBody }
+              : {}),
+          });
+          if (replay === null) {
+            return shuttingDown(c);
+          }
+          if (
+            replay.requestHash !== existing.requestHash ||
+            existing.kind !== parsed.data.kind ||
+            existing.recordId !== replay.recordId
+          ) {
+            return memoryRouteError(c, "idempotency_conflict");
+          }
+          const body = MemoryMutationResponseSchema.parse({
+            operationId: existing.id,
+            status: existing.status,
+            deduplicated: true,
+          });
+          logger.info("http.memory.mutations", {
+            sessionId: session.id,
+            status: 202,
+            durationMs: Math.max(now() - started, 0),
+          });
+          return c.json(body, 202);
+        }
+      } catch {
+        // Fall through to 503 below.
+      }
+      return shuttingDown(c);
+    }
+    try {
+      const out = await memory.stageMemoryMutation({
+        sessionId: session.id,
+        runId: parsed.data.runId,
+        kind: parsed.data.kind,
+        searchId: parsed.data.searchId,
+        ...(parsed.data.handle !== undefined
+          ? { handle: parsed.data.handle }
+          : {}),
+        ...(parsed.data.correctionBody !== undefined
+          ? { correctionBody: parsed.data.correctionBody }
+          : {}),
+        idempotencyKey: keyed.key,
+        // Trusted USER UI selection: hardcoded server-side for the HTTP
+        // user path only. The model tool path hardcodes false instead.
+        trustedSelection: true,
+      });
+      if (!out.ok) {
+        return memoryRouteError(c, out.code, out.candidates);
+      }
+      const body = MemoryMutationResponseSchema.parse({
+        operationId: out.operationId,
+        status: out.status,
+        deduplicated: out.deduplicated,
+      });
+      logger.info("http.memory.mutations", {
+        sessionId: session.id,
+        status: 202,
+        durationMs: Math.max(now() - started, 0),
+      });
+      return c.json(body, 202);
+    } catch (error) {
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "name" in error &&
+        (error as { name?: unknown }).name === "MemoryManageCancelled"
+      ) {
+        return shuttingDown(c);
+      }
+      return memoryRouteError(c, "service_unavailable");
+    }
+  });
+
+  // Durable operation status (queued vs acked/error; session-guarded).
+  app.get("/api/sessions/:sessionId/memory/operations/:operationId", (c) => {
+    if (memory === null) {
+      return memoryUnavailable(c);
+    }
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const operation = requireUuid(c, c.req.param("operationId"), "operationId");
+    if ("response" in operation) {
+      return operation.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      repo.getSession(session.id);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+    const out = memory.getMemoryOperation(session.id, operation.id);
+    if (out === null) {
+      return apiError(c, 404, "not_found", "resource not found");
+    }
+    const body = MemoryOperationResponseSchema.parse({
+      operationId: out.operationId,
+      kind: out.kind,
+      recordRevision: out.recordRevision,
+      status: out.status,
+    });
+    return c.json(body, 200);
   });
 
   /* ---------------- M1 stored-only references (§14.8) ---------------- */

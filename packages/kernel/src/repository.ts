@@ -240,6 +240,136 @@ export interface EvidenceGrantRow {
   createdAt: number;
 }
 
+/** Closed conversation-memory outbox job kind (remind CLI op). */
+export type MemoryJobKind =
+  | "event.append"
+  | "record.remember"
+  | "record.feedback"
+  | "maintain.distill"
+  | "record.correct"
+  | "record.retire"
+  | "record.reactivate";
+
+/** Closed explicit management operation kind (durable 202 ack). */
+export type MemoryOperationKind =
+  | "record.correct"
+  | "record.retire"
+  | "record.reactivate";
+
+export interface MemoryOperationRow {
+  id: string;
+  kind: MemoryOperationKind;
+  sessionId: string;
+  runId: string;
+  searchId: string | null;
+  handle: string | null;
+  recordId: string;
+  revision: number | null;
+  jobId: string;
+  idempotencyKey: string;
+  requestHash: string;
+  status: "pending" | "acked" | "failed";
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface MemorySearchItemRow {
+  searchId: string;
+  handle: string;
+  recordId: string;
+  revision: number | null;
+  status: string;
+  snippet: string;
+  createdAt: number;
+}
+
+export interface MemoryJobRow {
+  id: string;
+  kind: MemoryJobKind;
+  sessionId: string;
+  runId: string;
+  turnId: string | null;
+  eventId: string | null;
+  scope: string;
+  idempotencyKey: string;
+  requestJson: string;
+  status: "pending" | "acked" | "failed";
+  attempts: number;
+  nextDueAt: number;
+  lastError: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface EnqueueMemoryJobOptions {
+  turnId?: string;
+  eventId?: string;
+  now?: number;
+}
+
+export interface FailMemoryJobOptions {
+  maxAttempts?: number;
+  now?: number;
+}
+
+export interface MemoryExposureInput {
+  recallId: string;
+  recordId: string;
+  sessionId: string;
+  runId: string;
+  scope: string;
+  citation: string;
+  snippet: string;
+}
+
+export interface MemoryExposureRow {
+  recallId: string;
+  recordId: string;
+  sessionId: string;
+  runId: string;
+  scope: string;
+  citation: string;
+  snippet: string;
+  createdAt: number;
+}
+
+export interface MemoryGrantInput {
+  runId: string;
+  citation: string;
+  recordId: string;
+  recallId: string;
+  sessionId: string;
+  scope: string;
+}
+
+export interface MemoryGrantRow {
+  runId: string;
+  citation: string;
+  recordId: string;
+  recallId: string;
+  sessionId: string;
+  scope: string;
+  createdAt: number;
+}
+
+interface RawMemoryJob {
+  id: string;
+  kind: string;
+  session_id: string;
+  run_id: string;
+  turn_id: string | null;
+  event_id: string | null;
+  scope: string;
+  idempotency_key: string;
+  request_json: string;
+  status: string;
+  attempts: number;
+  next_due_at: number;
+  last_error: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
 /* ------------------------------------------------------------------ */
 /* C18 proposal decision types (§18.4).                                */
 /* ------------------------------------------------------------------ */
@@ -3299,6 +3429,1183 @@ export function createKernelRepository(
     }));
   }
 
+  /* ---------------------------------------------------------------- */
+  /* Conversation-memory outbox (remind CLI integration, migration 0008) */
+  /* ---------------------------------------------------------------- */
+  //
+  // Companion-owned durable queue only: remind stays a separate
+  // process/database and is never imported or opened here. Crash/unknown
+  // outcome replay reuses the stable idempotency key, so the same logical
+  // write never mints a duplicate CLI request.
+
+  function requireMemoryToken(value: unknown, what: string): string {
+    if (typeof value !== "string" || value.length < 1 || value.length > 256) {
+      throw new RepositoryValidationError(`${what} must be 1..256 chars`);
+    }
+    for (const unit of value) {
+      const code = unit.codePointAt(0) ?? 0;
+      if ((code >= 0x00 && code <= 0x1f) || (code >= 0x7f && code <= 0x9f)) {
+        throw new RepositoryValidationError(
+          `${what} must not contain controls`,
+        );
+      }
+    }
+    return value;
+  }
+
+  function requireMemoryScope(value: unknown): string {
+    return requireMemoryToken(value, "scope");
+  }
+
+  function requireMemoryCitation(value: unknown): string {
+    if (typeof value !== "string" || !/^m[1-9][0-9]*$/.test(value)) {
+      throw new RepositoryValidationError(
+        "citation must be a structural mN identifier",
+      );
+    }
+    return value;
+  }
+
+  function requireMemoryKind(value: unknown): MemoryJobKind {
+    if (
+      value !== "event.append" &&
+      value !== "record.remember" &&
+      value !== "record.feedback" &&
+      value !== "maintain.distill" &&
+      value !== "record.correct" &&
+      value !== "record.retire" &&
+      value !== "record.reactivate"
+    ) {
+      throw new RepositoryValidationError("memory job kind is invalid");
+    }
+    return value;
+  }
+
+  function parseMemoryJobRow(row: RawMemoryJob): MemoryJobRow {
+    return {
+      id: row.id,
+      kind: row.kind as MemoryJobKind,
+      sessionId: row.session_id,
+      runId: row.run_id,
+      turnId: row.turn_id,
+      eventId: row.event_id,
+      scope: row.scope,
+      idempotencyKey: row.idempotency_key,
+      requestJson: row.request_json,
+      status: row.status as "pending" | "acked" | "failed",
+      attempts: row.attempts,
+      nextDueAt: row.next_due_at,
+      lastError: row.last_error,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  function enqueueMemoryJob(
+    kind: unknown,
+    sessionId: string,
+    runId: string,
+    scope: unknown,
+    idempotencyKey: string,
+    requestJson: string,
+    options: EnqueueMemoryJobOptions = {},
+  ): { row: MemoryJobRow; deduplicated: boolean } {
+    const validKind = requireMemoryKind(kind);
+    const session = requireId(sessionId, "sessionId");
+    const run = requireId(runId, "runId");
+    const validScope = requireMemoryScope(scope);
+    const key = requireKey(idempotencyKey);
+    if (typeof requestJson !== "string" || requestJson.length < 1) {
+      throw new RepositoryValidationError("requestJson must be non-empty");
+    }
+    parseOrValidation(
+      () => JSON.parse(requestJson) as unknown,
+      "memory requestJson",
+    );
+    const turnId =
+      options.turnId === undefined ? null : requireId(options.turnId, "turnId");
+    const eventId =
+      options.eventId === undefined
+        ? null
+        : requireMemoryToken(options.eventId, "eventId");
+    const now = nowMs(options.now);
+    return withImmediate(db, () => {
+      const existing = db
+        .prepare("SELECT * FROM memory_outbox WHERE idempotency_key = ?")
+        .get(key) as RawMemoryJob | undefined;
+      if (existing !== undefined) {
+        return { row: parseMemoryJobRow(existing), deduplicated: true };
+      }
+      const id = generateId();
+      db.prepare(
+        "INSERT INTO memory_outbox (id, kind, session_id, run_id, turn_id, event_id, scope, idempotency_key, request_json, status, attempts, next_due_at, last_error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, NULL, ?, ?)",
+      ).run(
+        id,
+        validKind,
+        session,
+        run,
+        turnId,
+        eventId,
+        validScope,
+        key,
+        requestJson,
+        now,
+        now,
+        now,
+      );
+      const row = db
+        .prepare("SELECT * FROM memory_outbox WHERE id = ?")
+        .get(id) as RawMemoryJob;
+      return { row: parseMemoryJobRow(row), deduplicated: false };
+    });
+  }
+
+  function getMemoryJob(id: string): MemoryJobRow | null {
+    const row = db
+      .prepare("SELECT * FROM memory_outbox WHERE id = ?")
+      .get(requireId(id, "id")) as RawMemoryJob | undefined;
+    return row === undefined ? null : parseMemoryJobRow(row);
+  }
+
+  function claimDueMemoryJobs(limit: number, now?: number): MemoryJobRow[] {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+      throw new RepositoryValidationError("limit must be 1..100");
+    }
+    const at = nowMs(now);
+    const rows = db
+      .prepare(
+        "SELECT * FROM memory_outbox WHERE status = 'pending' AND next_due_at <= ? ORDER BY next_due_at ASC, id ASC LIMIT ?",
+      )
+      .all(at, limit) as RawMemoryJob[];
+    return rows.map(parseMemoryJobRow);
+  }
+
+  function ackMemoryJob(id: string, options: TransitionOptions = {}): void {
+    const now = nowMs(options.now);
+    withImmediate(db, () => {
+      const moved = db
+        .prepare(
+          "UPDATE memory_outbox SET status = 'acked', updated_at = ? WHERE id = ? AND status = 'pending'",
+        )
+        .run(now, requireId(id, "id"));
+      if (moved.changes !== 1) {
+        const row = db
+          .prepare("SELECT status FROM memory_outbox WHERE id = ?")
+          .get(id) as { status: string } | undefined;
+        if (row === undefined) {
+          throw new RepositoryNotFoundError(`memory job ${id} not found`);
+        }
+        // Already acked/failed: state-idempotent no-op (replay safe).
+      }
+    });
+  }
+
+  function failMemoryJob(
+    id: string,
+    errorCode: string,
+    options: FailMemoryJobOptions = {},
+  ): { status: "pending" | "failed" } {
+    if (
+      typeof errorCode !== "string" ||
+      !/^[a-z][a-z0-9_]{0,63}$/.test(errorCode)
+    ) {
+      throw new RepositoryValidationError("errorCode must be a fixed code");
+    }
+    const maxAttempts =
+      options.maxAttempts === undefined ? 8 : options.maxAttempts;
+    if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
+      throw new RepositoryValidationError("maxAttempts must be >= 1");
+    }
+    const now = nowMs(options.now);
+    return withImmediate(db, () => {
+      const row = db
+        .prepare("SELECT * FROM memory_outbox WHERE id = ?")
+        .get(requireId(id, "id")) as RawMemoryJob | undefined;
+      if (row === undefined) {
+        throw new RepositoryNotFoundError(`memory job ${id} not found`);
+      }
+      if (row.status !== "pending") {
+        return { status: row.status as "pending" | "failed" };
+      }
+      const attempts = row.attempts + 1;
+      if (attempts >= maxAttempts) {
+        db.prepare(
+          "UPDATE memory_outbox SET status = 'failed', attempts = ?, last_error = ?, updated_at = ? WHERE id = ?",
+        ).run(attempts, errorCode, now, id);
+        return { status: "failed" as const };
+      }
+      const delay = Math.min(1000 * 2 ** Math.min(attempts, 6), 60_000);
+      db.prepare(
+        "UPDATE memory_outbox SET attempts = ?, next_due_at = ?, last_error = ?, updated_at = ? WHERE id = ?",
+      ).run(attempts, now + delay, errorCode, now, id);
+      return { status: "pending" as const };
+    });
+  }
+
+  function countPendingMemoryJobs(now?: number): number {
+    const at = nowMs(now);
+    const row = db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM memory_outbox WHERE status = 'pending' AND next_due_at <= ?",
+      )
+      .get(at) as { n: number };
+    return row.n;
+  }
+
+  /**
+   * Immutable recall-exposure snapshot: one row per actually exposed
+   * (recallId, recordId). INSERT OR IGNORE keeps replays idempotent and
+   * never updates an existing snapshot row.
+   */
+  function recordMemoryExposure(
+    exposure: MemoryExposureInput,
+    options: TransitionOptions = {},
+  ): void {
+    const recallId = requireMemoryToken(exposure.recallId, "recallId");
+    const recordId = requireMemoryToken(exposure.recordId, "recordId");
+    const sessionId = requireId(exposure.sessionId, "sessionId");
+    const runId = requireId(exposure.runId, "runId");
+    const scope = requireMemoryScope(exposure.scope);
+    const citation = requireMemoryCitation(exposure.citation);
+    if (
+      typeof exposure.snippet !== "string" ||
+      exposure.snippet.length < 1 ||
+      Array.from(exposure.snippet).length > 512
+    ) {
+      throw new RepositoryValidationError("snippet must be 1..512 code points");
+    }
+    const now = nowMs(options.now);
+    db.prepare(
+      "INSERT OR IGNORE INTO memory_exposures (recall_id, record_id, session_id, run_id, scope, citation, snippet, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run(
+      recallId,
+      recordId,
+      sessionId,
+      runId,
+      scope,
+      citation,
+      exposure.snippet,
+      now,
+    );
+  }
+
+  function listMemoryExposures(runId: string): MemoryExposureRow[] {
+    const rows = db
+      .prepare(
+        "SELECT recall_id, record_id, session_id, run_id, scope, citation, snippet, created_at FROM memory_exposures WHERE run_id = ? ORDER BY citation ASC, record_id ASC",
+      )
+      .all(requireId(runId, "runId")) as Array<{
+      recall_id: string;
+      record_id: string;
+      session_id: string;
+      run_id: string;
+      scope: string;
+      citation: string;
+      snippet: string;
+      created_at: number;
+    }>;
+    return rows.map((row) => ({
+      recallId: row.recall_id,
+      recordId: row.record_id,
+      sessionId: row.session_id,
+      runId: row.run_id,
+      scope: row.scope,
+      citation: row.citation,
+      snippet: row.snippet,
+      createdAt: row.created_at,
+    }));
+  }
+
+  /**
+   * Bind an accepted completed run's cited `mN` to its exposed record.
+   * Only citations present in the accepted answer's citation arrays may
+   * call this (the service parses citation arrays, never prose): mere
+   * recall exposure or textual mentions never insert here. Scope must
+   * equal the exposure scope (cross-scope grants rejected). INSERT OR
+   * IGNORE keeps completion replays idempotent.
+   */
+  function grantMemoryCitation(
+    grant: MemoryGrantInput,
+    options: TransitionOptions = {},
+  ): void {
+    const runId = requireId(grant.runId, "runId");
+    const citation = requireMemoryCitation(grant.citation);
+    const recordId = requireMemoryToken(grant.recordId, "recordId");
+    const recallId = requireMemoryToken(grant.recallId, "recallId");
+    const sessionId = requireId(grant.sessionId, "sessionId");
+    const scope = requireMemoryScope(grant.scope);
+    const now = nowMs(options.now);
+    withImmediate(db, () => {
+      const exposure = db
+        .prepare(
+          "SELECT scope FROM memory_exposures WHERE recall_id = ? AND record_id = ? AND run_id = ? AND citation = ?",
+        )
+        .get(recallId, recordId, runId, citation) as
+        | { scope: string }
+        | undefined;
+      if (exposure === undefined) {
+        throw new RepositoryValidationError(
+          "memory grant requires a matching exposure",
+        );
+      }
+      if (exposure.scope !== scope) {
+        throw new RepositoryValidationError(
+          "memory grant scope must match the exposure scope",
+        );
+      }
+      db.prepare(
+        "INSERT OR IGNORE INTO memory_grants (run_id, citation, record_id, recall_id, session_id, scope, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      ).run(runId, citation, recordId, recallId, sessionId, scope, now);
+    });
+  }
+
+  function listMemoryGrants(runId: string): MemoryGrantRow[] {
+    const rows = db
+      .prepare(
+        "SELECT run_id, citation, record_id, recall_id, session_id, scope, created_at FROM memory_grants WHERE run_id = ? ORDER BY citation ASC",
+      )
+      .all(requireId(runId, "runId")) as Array<{
+      run_id: string;
+      citation: string;
+      record_id: string;
+      recall_id: string;
+      session_id: string;
+      scope: string;
+      created_at: number;
+    }>;
+    return rows.map((row) => ({
+      runId: row.run_id,
+      citation: row.citation,
+      recordId: row.record_id,
+      recallId: row.recall_id,
+      sessionId: row.session_id,
+      scope: row.scope,
+      createdAt: row.created_at,
+    }));
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Explicit memory management (migration 0009): immutable search     */
+  /* snapshots + durable operation status. Search snapshots are never */
+  /* rewritten; operations mirror their outbox job ack/fail.          */
+  /* ---------------------------------------------------------------- */
+
+  function requireMemoryOperationKind(value: unknown): MemoryOperationKind {
+    if (
+      value !== "record.correct" &&
+      value !== "record.retire" &&
+      value !== "record.reactivate"
+    ) {
+      throw new RepositoryValidationError("memory operation kind is invalid");
+    }
+    return value;
+  }
+
+  function requireMemoryRevision(value: unknown): number {
+    if (
+      typeof value !== "number" ||
+      !Number.isInteger(value) ||
+      value < 1 ||
+      value > 1_000_000
+    ) {
+      throw new RepositoryValidationError("revision must be an integer >= 1");
+    }
+    return value;
+  }
+
+  /**
+   * Persist one explicit search and its immutable per-handle snapshot rows.
+   * INSERT OR IGNORE: replays never rewrite a historical snapshot, and a
+   * redelivered search id keeps the FIRST snapshot rows.
+   */
+  function recordMemorySearch(
+    input: {
+      searchId: string;
+      sessionId: string;
+      runId: string;
+      scope: string;
+      query: string;
+      items: Array<{
+        handle: string;
+        recordId: string;
+        revision: number | null;
+        status: string;
+        snippet: string;
+      }>;
+    },
+    options: TransitionOptions = {},
+  ): void {
+    const searchId = requireMemoryToken(input.searchId, "searchId");
+    const sessionId = requireId(input.sessionId, "sessionId");
+    const runId = requireId(input.runId, "runId");
+    const scope = requireMemoryScope(input.scope);
+    if (
+      typeof input.query !== "string" ||
+      input.query.length < 1 ||
+      Array.from(input.query).length > 500
+    ) {
+      throw new RepositoryValidationError("query must be 1..500 code points");
+    }
+    if (!Array.isArray(input.items) || input.items.length > 8) {
+      throw new RepositoryValidationError("items must be 0..8 entries");
+    }
+    const now = nowMs(options.now);
+    withImmediate(db, () => {
+      db.prepare(
+        "INSERT OR IGNORE INTO memory_searches (search_id, session_id, run_id, scope, query, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      ).run(searchId, sessionId, runId, scope, input.query, now);
+      for (const item of input.items) {
+        const handle = requireMemoryCitation(item.handle);
+        const recordId = requireMemoryToken(item.recordId, "recordId");
+        if (item.status !== "active" && item.status !== "retired") {
+          throw new RepositoryValidationError(
+            "search item status must be active or retired",
+          );
+        }
+        if (
+          typeof item.snippet !== "string" ||
+          item.snippet.length < 1 ||
+          Array.from(item.snippet).length > 512
+        ) {
+          throw new RepositoryValidationError(
+            "snippet must be 1..512 code points",
+          );
+        }
+        const revision =
+          item.revision === null ? null : requireMemoryRevision(item.revision);
+        if (revision === null) {
+          db.prepare(
+            "INSERT OR IGNORE INTO memory_search_items (search_id, handle, record_id, revision, status, snippet, created_at) VALUES (?, ?, ?, NULL, ?, ?, ?)",
+          ).run(searchId, handle, recordId, item.status, item.snippet, now);
+        } else {
+          db.prepare(
+            "INSERT OR IGNORE INTO memory_search_items (search_id, handle, record_id, revision, status, snippet, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          ).run(
+            searchId,
+            handle,
+            recordId,
+            revision,
+            item.status,
+            item.snippet,
+            now,
+          );
+        }
+      }
+    });
+  }
+
+  function getMemorySearch(searchId: string): {
+    searchId: string;
+    sessionId: string;
+    runId: string;
+    scope: string;
+    query: string;
+    createdAt: number;
+  } | null {
+    const row = db
+      .prepare(
+        "SELECT search_id, session_id, run_id, scope, query, created_at FROM memory_searches WHERE search_id = ?",
+      )
+      .get(requireMemoryToken(searchId, "searchId")) as
+      | {
+          search_id: string;
+          session_id: string;
+          run_id: string;
+          scope: string;
+          query: string;
+          created_at: number;
+        }
+      | undefined;
+    return row === undefined
+      ? null
+      : {
+          searchId: row.search_id,
+          sessionId: row.session_id,
+          runId: row.run_id,
+          scope: row.scope,
+          query: row.query,
+          createdAt: row.created_at,
+        };
+  }
+
+  function listMemorySearchItems(searchId: string): MemorySearchItemRow[] {
+    const rows = db
+      .prepare(
+        "SELECT search_id, handle, record_id, revision, status, snippet, created_at FROM memory_search_items WHERE search_id = ? ORDER BY handle ASC",
+      )
+      .all(requireMemoryToken(searchId, "searchId")) as Array<{
+      search_id: string;
+      handle: string;
+      record_id: string;
+      revision: number | null;
+      status: string;
+      snippet: string;
+      created_at: number;
+    }>;
+    return rows.map((row) => ({
+      searchId: row.search_id,
+      handle: row.handle,
+      recordId: row.record_id,
+      revision: row.revision,
+      status: row.status,
+      snippet: row.snippet,
+      createdAt: row.created_at,
+    }));
+  }
+
+  function getMemorySearchItem(
+    searchId: string,
+    handle: string,
+  ): MemorySearchItemRow | null {
+    const row = db
+      .prepare(
+        "SELECT search_id, handle, record_id, revision, status, snippet, created_at FROM memory_search_items WHERE search_id = ? AND handle = ?",
+      )
+      .get(
+        requireMemoryToken(searchId, "searchId"),
+        requireMemoryCitation(handle),
+      ) as
+      | {
+          search_id: string;
+          handle: string;
+          record_id: string;
+          revision: number | null;
+          status: string;
+          snippet: string;
+          created_at: number;
+        }
+      | undefined;
+    return row === undefined
+      ? null
+      : {
+          searchId: row.search_id,
+          handle: row.handle,
+          recordId: row.record_id,
+          revision: row.revision,
+          status: row.status,
+          snippet: row.snippet,
+          createdAt: row.created_at,
+        };
+  }
+
+  function parseMemoryOperationRow(row: {
+    id: string;
+    kind: string;
+    session_id: string;
+    run_id: string;
+    search_id: string | null;
+    handle: string | null;
+    record_id: string;
+    revision: number | null;
+    job_id: string;
+    idempotency_key: string;
+    request_hash: string;
+    status: string;
+    created_at: number;
+    updated_at: number;
+  }): MemoryOperationRow {
+    return {
+      id: row.id,
+      kind: row.kind as MemoryOperationKind,
+      sessionId: row.session_id,
+      runId: row.run_id,
+      searchId: row.search_id,
+      handle: row.handle,
+      recordId: row.record_id,
+      revision: row.revision,
+      jobId: row.job_id,
+      idempotencyKey: row.idempotency_key,
+      requestHash: row.request_hash,
+      status: row.status as "pending" | "acked" | "failed",
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  /**
+   * Stage one management operation durably (202 ack, never "applied" while
+   * queued). Same key + same request hash replays the stored row; same key
+   * + drifted body throws IdempotencyConflictError (409, no silent rebind).
+   */
+  function createMemoryOperation(
+    input: {
+      kind: unknown;
+      sessionId: string;
+      runId: string;
+      searchId?: string | null;
+      handle?: string | null;
+      recordId: string;
+      revision?: number | null;
+      jobId: string;
+      idempotencyKey: string;
+      requestHash: string;
+    },
+    options: TransitionOptions = {},
+  ): { row: MemoryOperationRow; deduplicated: boolean } {
+    const kind = requireMemoryOperationKind(input.kind);
+    const sessionId = requireId(input.sessionId, "sessionId");
+    const runId = requireId(input.runId, "runId");
+    const searchId =
+      input.searchId === undefined || input.searchId === null
+        ? null
+        : requireMemoryToken(input.searchId, "searchId");
+    const handle =
+      input.handle === undefined || input.handle === null
+        ? null
+        : requireMemoryCitation(input.handle);
+    const recordId = requireMemoryToken(input.recordId, "recordId");
+    const revision =
+      input.revision === undefined || input.revision === null
+        ? null
+        : requireMemoryRevision(input.revision);
+    const jobId = requireId(input.jobId, "jobId");
+    const key = requireKey(input.idempotencyKey);
+    if (
+      typeof input.requestHash !== "string" ||
+      input.requestHash.length < 1 ||
+      input.requestHash.length > 512
+    ) {
+      throw new RepositoryValidationError("requestHash must be non-empty");
+    }
+    const now = nowMs(options.now);
+    return withImmediate(db, () => {
+      const existing = db
+        .prepare("SELECT * FROM memory_operations WHERE idempotency_key = ?")
+        .get(key) as
+        | {
+            id: string;
+            kind: string;
+            session_id: string;
+            run_id: string;
+            search_id: string | null;
+            handle: string | null;
+            record_id: string;
+            revision: number | null;
+            job_id: string;
+            idempotency_key: string;
+            request_hash: string;
+            status: string;
+            created_at: number;
+            updated_at: number;
+          }
+        | undefined;
+      if (existing !== undefined) {
+        if (existing.request_hash !== input.requestHash) {
+          throw new IdempotencyConflictError(`memory-operation:${existing.id}`);
+        }
+        return {
+          row: parseMemoryOperationRow(existing),
+          deduplicated: true,
+        };
+      }
+      const id = generateId();
+      db.prepare(
+        "INSERT INTO memory_operations (id, kind, session_id, run_id, search_id, handle, record_id, revision, job_id, idempotency_key, request_hash, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
+      ).run(
+        id,
+        kind,
+        sessionId,
+        runId,
+        searchId,
+        handle,
+        recordId,
+        revision,
+        jobId,
+        key,
+        input.requestHash,
+        now,
+        now,
+      );
+      const row = db
+        .prepare("SELECT * FROM memory_operations WHERE id = ?")
+        .get(id) as {
+        id: string;
+        kind: string;
+        session_id: string;
+        run_id: string;
+        search_id: string | null;
+        handle: string | null;
+        record_id: string;
+        revision: number | null;
+        job_id: string;
+        idempotency_key: string;
+        request_hash: string;
+        status: string;
+        created_at: number;
+        updated_at: number;
+      };
+      return { row: parseMemoryOperationRow(row), deduplicated: false };
+    });
+  }
+
+  function getMemoryOperation(id: string): MemoryOperationRow | null {
+    const row = db
+      .prepare("SELECT * FROM memory_operations WHERE id = ?")
+      .get(requireId(id, "id")) as
+      | {
+          id: string;
+          kind: string;
+          session_id: string;
+          run_id: string;
+          search_id: string | null;
+          handle: string | null;
+          record_id: string;
+          revision: number | null;
+          job_id: string;
+          idempotency_key: string;
+          request_hash: string;
+          status: string;
+          created_at: number;
+          updated_at: number;
+        }
+      | undefined;
+    return row === undefined ? null : parseMemoryOperationRow(row);
+  }
+
+  function getMemoryOperationByKey(
+    idempotencyKey: string,
+  ): MemoryOperationRow | null {
+    const row = db
+      .prepare("SELECT * FROM memory_operations WHERE idempotency_key = ?")
+      .get(requireKey(idempotencyKey)) as
+      | {
+          id: string;
+          kind: string;
+          session_id: string;
+          run_id: string;
+          search_id: string | null;
+          handle: string | null;
+          record_id: string;
+          revision: number | null;
+          job_id: string;
+          idempotency_key: string;
+          request_hash: string;
+          status: string;
+          created_at: number;
+          updated_at: number;
+        }
+      | undefined;
+    return row === undefined ? null : parseMemoryOperationRow(row);
+  }
+
+  /** Mirror an outbox job ack/fail onto its management operation row. */
+  function setMemoryOperationStatus(
+    id: string,
+    status: "pending" | "acked" | "failed",
+    options: TransitionOptions = {},
+  ): void {
+    if (status !== "pending" && status !== "acked" && status !== "failed") {
+      throw new RepositoryValidationError("operation status is invalid");
+    }
+    const now = nowMs(options.now);
+    withImmediate(db, () => {
+      const moved = db
+        .prepare(
+          "UPDATE memory_operations SET status = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(status, now, requireId(id, "id"));
+      if (moved.changes !== 1) {
+        throw new RepositoryNotFoundError(`memory operation ${id} not found`);
+      }
+    });
+  }
+
+  function setMemoryOperationStatusByJob(
+    jobId: string,
+    status: "pending" | "acked" | "failed",
+    options: TransitionOptions = {},
+  ): void {
+    const now = nowMs(options.now);
+    db.prepare(
+      "UPDATE memory_operations SET status = ?, updated_at = ? WHERE job_id = ?",
+    ).run(status, now, requireId(jobId, "jobId"));
+  }
+
+  /** Rebind an operation to its follow-up job (correction event -> correct). */
+  function setMemoryOperationJob(
+    id: string,
+    jobId: string,
+    options: TransitionOptions = {},
+  ): void {
+    const now = nowMs(options.now);
+    withImmediate(db, () => {
+      const moved = db
+        .prepare(
+          "UPDATE memory_operations SET job_id = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(requireId(jobId, "jobId"), now, requireId(id, "id"));
+      if (moved.changes !== 1) {
+        throw new RepositoryNotFoundError(`memory operation ${id} not found`);
+      }
+    });
+  }
+
+  /**
+   * Atomic stage of one management mutation: the initial outbox job row and
+   * its durable operation row commit in ONE transaction. A preexisting job
+   * key with a DIFFERENT request payload is an idempotency conflict (never
+   * silently rebound); a preexisting operation key with a drifted request
+   * hash is likewise a conflict. No runnable orphan job and no operation
+   * bound to the wrong body can survive a crash between the two inserts.
+   */
+  function stageMemoryMutationAtomic(
+    input: {
+      jobKind: unknown;
+      jobSessionId: string;
+      jobRunId: string;
+      jobScope: unknown;
+      jobKey: string;
+      requestJson: string;
+      jobTurnId?: string;
+      operation: {
+        kind: unknown;
+        sessionId: string;
+        runId: string;
+        searchId?: string | null;
+        handle?: string | null;
+        recordId: string;
+        revision?: number | null;
+        idempotencyKey: string;
+        requestHash: string;
+      };
+    },
+    options: TransitionOptions = {},
+  ): {
+    job: MemoryJobRow;
+    operation: MemoryOperationRow;
+    deduplicated: boolean;
+  } {
+    const validKind = requireMemoryKind(input.jobKind);
+    const jobSession = requireId(input.jobSessionId, "sessionId");
+    const jobRun = requireId(input.jobRunId, "runId");
+    const validScope = requireMemoryScope(input.jobScope);
+    const jobKey = requireKey(input.jobKey);
+    if (typeof input.requestJson !== "string" || input.requestJson.length < 1) {
+      throw new RepositoryValidationError("requestJson must be non-empty");
+    }
+    parseOrValidation(
+      () => JSON.parse(input.requestJson) as unknown,
+      "memory requestJson",
+    );
+    const jobTurnId =
+      input.jobTurnId === undefined
+        ? null
+        : requireId(input.jobTurnId, "turnId");
+    const opKind = requireMemoryOperationKind(input.operation.kind);
+    const opSession = requireId(input.operation.sessionId, "sessionId");
+    const opRun = requireId(input.operation.runId, "runId");
+    const opSearch =
+      input.operation.searchId === undefined ||
+      input.operation.searchId === null
+        ? null
+        : requireMemoryToken(input.operation.searchId, "searchId");
+    const opHandle =
+      input.operation.handle === undefined || input.operation.handle === null
+        ? null
+        : requireMemoryCitation(input.operation.handle);
+    const opRecord = requireMemoryToken(input.operation.recordId, "recordId");
+    const opRevision =
+      input.operation.revision === undefined ||
+      input.operation.revision === null
+        ? null
+        : requireMemoryRevision(input.operation.revision);
+    const opKey = requireKey(input.operation.idempotencyKey);
+    if (
+      typeof input.operation.requestHash !== "string" ||
+      input.operation.requestHash.length < 1 ||
+      input.operation.requestHash.length > 512
+    ) {
+      throw new RepositoryValidationError("requestHash must be non-empty");
+    }
+    const now = nowMs(options.now);
+    return withImmediate(db, () => {
+      const existingOp = db
+        .prepare("SELECT * FROM memory_operations WHERE idempotency_key = ?")
+        .get(opKey) as
+        | {
+            id: string;
+            kind: string;
+            session_id: string;
+            run_id: string;
+            search_id: string | null;
+            handle: string | null;
+            record_id: string;
+            revision: number | null;
+            job_id: string;
+            idempotency_key: string;
+            request_hash: string;
+            status: string;
+            created_at: number;
+            updated_at: number;
+          }
+        | undefined;
+      if (existingOp !== undefined) {
+        if (existingOp.request_hash !== input.operation.requestHash) {
+          throw new IdempotencyConflictError(
+            `memory-operation:${existingOp.id}`,
+          );
+        }
+        const boundJob = db
+          .prepare("SELECT * FROM memory_outbox WHERE id = ?")
+          .get(existingOp.job_id) as RawMemoryJob | undefined;
+        if (boundJob === undefined) {
+          throw new DatabaseStateInvalidError(
+            `memory operation ${existingOp.id} has no bound job`,
+          );
+        }
+        return {
+          job: parseMemoryJobRow(boundJob),
+          operation: parseMemoryOperationRow(existingOp),
+          deduplicated: true,
+        };
+      }
+      const existingJob = db
+        .prepare("SELECT * FROM memory_outbox WHERE idempotency_key = ?")
+        .get(jobKey) as RawMemoryJob | undefined;
+      let jobRow: RawMemoryJob;
+      if (existingJob !== undefined) {
+        if (existingJob.request_json !== input.requestJson) {
+          throw new IdempotencyConflictError(`memory-job:${existingJob.id}`);
+        }
+        jobRow = existingJob;
+      } else {
+        const jobId = generateId();
+        db.prepare(
+          "INSERT INTO memory_outbox (id, kind, session_id, run_id, turn_id, event_id, scope, idempotency_key, request_json, status, attempts, next_due_at, last_error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, 'pending', 0, ?, NULL, ?, ?)",
+        ).run(
+          jobId,
+          validKind,
+          jobSession,
+          jobRun,
+          jobTurnId,
+          validScope,
+          jobKey,
+          input.requestJson,
+          now,
+          now,
+          now,
+        );
+        jobRow = db
+          .prepare("SELECT * FROM memory_outbox WHERE id = ?")
+          .get(jobId) as RawMemoryJob;
+      }
+      const opId = generateId();
+      db.prepare(
+        "INSERT INTO memory_operations (id, kind, session_id, run_id, search_id, handle, record_id, revision, job_id, idempotency_key, request_hash, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
+      ).run(
+        opId,
+        opKind,
+        opSession,
+        opRun,
+        opSearch,
+        opHandle,
+        opRecord,
+        opRevision,
+        jobRow.id,
+        opKey,
+        input.operation.requestHash,
+        now,
+        now,
+      );
+      const opRow = db
+        .prepare("SELECT * FROM memory_operations WHERE id = ?")
+        .get(opId) as {
+        id: string;
+        kind: string;
+        session_id: string;
+        run_id: string;
+        search_id: string | null;
+        handle: string | null;
+        record_id: string;
+        revision: number | null;
+        job_id: string;
+        idempotency_key: string;
+        request_hash: string;
+        status: string;
+        created_at: number;
+        updated_at: number;
+      };
+      return {
+        job: parseMemoryJobRow(jobRow),
+        operation: parseMemoryOperationRow(opRow),
+        deduplicated: existingJob !== undefined,
+      };
+    });
+  }
+
+  /**
+   * Atomic correction-chain follow-up: enqueue (or reuse) the real
+   * `record.correct` job AND rebind the staged operation to it in ONE
+   * transaction. Throws on any failure so the caller never acks the source
+   * event while its follow-up is lost. Idempotent: replaying the same
+   * source event reuses the same correct job and rebinds again.
+   */
+  function bindCorrectionFollowupAtomic(
+    input: {
+      sessionId: string;
+      runId: string;
+      scope: unknown;
+      correctJobKey: string;
+      correctRequestJson: string;
+      turnId?: string;
+      clientKey: string;
+    },
+    options: TransitionOptions = {},
+  ): { correctJobId: string; deduplicated: boolean } {
+    const session = requireId(input.sessionId, "sessionId");
+    const run = requireId(input.runId, "runId");
+    const validScope = requireMemoryScope(input.scope);
+    const correctKey = requireKey(input.correctJobKey);
+    if (
+      typeof input.correctRequestJson !== "string" ||
+      input.correctRequestJson.length < 1
+    ) {
+      throw new RepositoryValidationError("requestJson must be non-empty");
+    }
+    parseOrValidation(
+      () => JSON.parse(input.correctRequestJson) as unknown,
+      "memory requestJson",
+    );
+    const turnId =
+      input.turnId === undefined ? null : requireId(input.turnId, "turnId");
+    const clientKey = requireKey(input.clientKey);
+    const now = nowMs(options.now);
+    return withImmediate(db, () => {
+      const existing = db
+        .prepare("SELECT * FROM memory_outbox WHERE idempotency_key = ?")
+        .get(correctKey) as RawMemoryJob | undefined;
+      let correctJobId: string;
+      let deduplicated = false;
+      if (existing !== undefined) {
+        if (existing.request_json !== input.correctRequestJson) {
+          throw new IdempotencyConflictError(`memory-job:${existing.id}`);
+        }
+        correctJobId = existing.id;
+        deduplicated = true;
+      } else {
+        correctJobId = generateId();
+        db.prepare(
+          "INSERT INTO memory_outbox (id, kind, session_id, run_id, turn_id, event_id, scope, idempotency_key, request_json, status, attempts, next_due_at, last_error, created_at, updated_at) VALUES (?, 'record.correct', ?, ?, ?, NULL, ?, ?, ?, 'pending', 0, ?, NULL, ?, ?)",
+        ).run(
+          correctJobId,
+          session,
+          run,
+          turnId,
+          validScope,
+          correctKey,
+          input.correctRequestJson,
+          now,
+          now,
+          now,
+        );
+      }
+      const operation = db
+        .prepare("SELECT * FROM memory_operations WHERE idempotency_key = ?")
+        .get(clientKey) as { id: string } | undefined;
+      if (operation === undefined) {
+        throw new RepositoryNotFoundError(
+          `memory operation for key ${clientKey} not found`,
+        );
+      }
+      const moved = db
+        .prepare(
+          "UPDATE memory_operations SET job_id = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(correctJobId, now, operation.id);
+      if (moved.changes !== 1) {
+        throw new RepositoryNotFoundError(
+          `memory operation ${operation.id} not found`,
+        );
+      }
+      return { correctJobId, deduplicated };
+    });
+  }
+
+  /**
+   * Atomic job failure + operation mirror: the outbox attempts/status bump
+   * and the bound operation's terminal `failed` flip commit together, so an
+   * exhausted transient (8 attempts) or a terminal domain rejection can
+   * never leave the operation polling `pending` forever. Non-terminal
+   * backoff rearms commit without touching the operation. Zero bound rows
+   * is a no-op (event/remember/feedback/distill jobs own no operation).
+   */
+  function failMemoryJobWithOperationMirror(
+    id: string,
+    errorCode: string,
+    options: FailMemoryJobOptions = {},
+  ): { status: "pending" | "failed" } {
+    if (
+      typeof errorCode !== "string" ||
+      !/^[a-z][a-z0-9_]{0,63}$/.test(errorCode)
+    ) {
+      throw new RepositoryValidationError("errorCode must be a fixed code");
+    }
+    const maxAttempts =
+      options.maxAttempts === undefined ? 8 : options.maxAttempts;
+    if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
+      throw new RepositoryValidationError("maxAttempts must be >= 1");
+    }
+    const now = nowMs(options.now);
+    return withImmediate(db, () => {
+      const row = db
+        .prepare("SELECT * FROM memory_outbox WHERE id = ?")
+        .get(requireId(id, "id")) as RawMemoryJob | undefined;
+      if (row === undefined) {
+        throw new RepositoryNotFoundError(`memory job ${id} not found`);
+      }
+      if (row.status !== "pending") {
+        return { status: row.status as "pending" | "failed" };
+      }
+      const attempts = row.attempts + 1;
+      if (attempts >= maxAttempts) {
+        db.prepare(
+          "UPDATE memory_outbox SET status = 'failed', attempts = ?, last_error = ?, updated_at = ? WHERE id = ?",
+        ).run(attempts, errorCode, now, id);
+        db.prepare(
+          "UPDATE memory_operations SET status = 'failed', updated_at = ? WHERE job_id = ? AND status = 'pending'",
+        ).run(now, id);
+        return { status: "failed" as const };
+      }
+      const delay = Math.min(1000 * 2 ** Math.min(attempts, 6), 60_000);
+      db.prepare(
+        "UPDATE memory_outbox SET attempts = ?, next_due_at = ?, last_error = ?, updated_at = ? WHERE id = ?",
+      ).run(attempts, now + delay, errorCode, now, id);
+      return { status: "pending" as const };
+    });
+  }
+
+  /**
+   * Atomic job ack + operation mirror: the outbox `pending -> acked` flip
+   * and the bound operation's `acked` flip commit together (management
+   * writes only; other kinds match zero operation rows). Already-settled
+   * jobs are state-idempotent no-ops.
+   */
+  function ackMemoryJobWithOperationMirror(
+    id: string,
+    options: TransitionOptions = {},
+  ): void {
+    const now = nowMs(options.now);
+    withImmediate(db, () => {
+      const moved = db
+        .prepare(
+          "UPDATE memory_outbox SET status = 'acked', updated_at = ? WHERE id = ? AND status = 'pending'",
+        )
+        .run(now, requireId(id, "id"));
+      if (moved.changes !== 1) {
+        const row = db
+          .prepare("SELECT status FROM memory_outbox WHERE id = ?")
+          .get(id) as { status: string } | undefined;
+        if (row === undefined) {
+          throw new RepositoryNotFoundError(`memory job ${id} not found`);
+        }
+        return;
+      }
+      db.prepare(
+        "UPDATE memory_operations SET status = 'acked', updated_at = ? WHERE job_id = ? AND status = 'pending'",
+      ).run(now, id);
+    });
+  }
+
   return {
     createSession,
     postMessage,
@@ -3317,6 +4624,30 @@ export function createKernelRepository(
     listModelCalls,
     upsertEvidenceGrant,
     listEvidenceGrants,
+    enqueueMemoryJob,
+    getMemoryJob,
+    claimDueMemoryJobs,
+    ackMemoryJob,
+    failMemoryJob,
+    countPendingMemoryJobs,
+    recordMemoryExposure,
+    listMemoryExposures,
+    grantMemoryCitation,
+    listMemoryGrants,
+    recordMemorySearch,
+    getMemorySearch,
+    listMemorySearchItems,
+    getMemorySearchItem,
+    createMemoryOperation,
+    getMemoryOperation,
+    getMemoryOperationByKey,
+    setMemoryOperationStatus,
+    setMemoryOperationStatusByJob,
+    setMemoryOperationJob,
+    stageMemoryMutationAtomic,
+    bindCorrectionFollowupAtomic,
+    failMemoryJobWithOperationMirror,
+    ackMemoryJobWithOperationMirror,
     getSession,
     getTurn,
     getRun,

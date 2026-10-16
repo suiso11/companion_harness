@@ -12,9 +12,17 @@
 
 import { defineConfig, devices } from "@playwright/test";
 import { CALENDAR_APP_ORIGIN } from "./e2e/calendar/ports.js";
+import { MEMORY_APP_ORIGIN } from "./e2e/memory/ports.js";
 import { E2E_APP_ORIGIN } from "./e2e/ports.js";
 
 const CALENDAR_MODE = process.env.COMPANION_E2E_CALENDAR === "1";
+const MEMORY_MODE = process.env.COMPANION_E2E_MEMORY === "1";
+
+const APP_ORIGIN = CALENDAR_MODE
+  ? CALENDAR_APP_ORIGIN
+  : MEMORY_MODE
+    ? MEMORY_APP_ORIGIN
+    : E2E_APP_ORIGIN;
 
 export default defineConfig({
   testDir: "./e2e",
@@ -24,12 +32,14 @@ export default defineConfig({
         "calendar/action.spec.ts",
         "calendar/tombstone.spec.ts",
       ]
-    : [
-        "conversation.spec.ts",
-        "citation_recovery.spec.ts",
-        "sse_history.spec.ts",
-        "polling.spec.ts",
-      ],
+    : MEMORY_MODE
+      ? ["memory/memory_manage.spec.ts"]
+      : [
+          "conversation.spec.ts",
+          "citation_recovery.spec.ts",
+          "sse_history.spec.ts",
+          "polling.spec.ts",
+        ],
   timeout: 60_000,
   expect: { timeout: 15_000 },
   fullyParallel: false,
@@ -37,7 +47,7 @@ export default defineConfig({
   retries: 0,
   reporter: process.env.CI ? [["github"], ["list"]] : [["list"]],
   use: {
-    baseURL: CALENDAR_MODE ? CALENDAR_APP_ORIGIN : E2E_APP_ORIGIN,
+    baseURL: APP_ORIGIN,
   },
   projects: [
     {
@@ -48,8 +58,10 @@ export default defineConfig({
   webServer: {
     command: CALENDAR_MODE
       ? "node scripts/build-ui.mjs && node --import tsx e2e/calendar/server.ts"
-      : "node scripts/build-ui.mjs && node --import tsx e2e/server.ts",
-    url: `${CALENDAR_MODE ? CALENDAR_APP_ORIGIN : E2E_APP_ORIGIN}/health/live`,
+      : MEMORY_MODE
+        ? "node scripts/build-ui.mjs && node --import tsx e2e/memory/server.ts"
+        : "node scripts/build-ui.mjs && node --import tsx e2e/server.ts",
+    url: `${APP_ORIGIN}/health/live`,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
     stdout: "pipe",

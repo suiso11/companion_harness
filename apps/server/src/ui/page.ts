@@ -53,6 +53,53 @@ export function renderConversationShell(): HtmlEscapedString {
         jsx("p", {}, "読み込み中…"),
       ),
       jsx(
+        "section",
+        { id: "memory", "aria-label": "記憶の管理" },
+        jsx("h2", {}, "記憶の管理"),
+        jsx(
+          "form",
+          { id: "memory-search-form" },
+          jsx("input", {
+            id: "memory-search-input",
+            type: "text",
+            autocomplete: "off",
+          }),
+          jsx(
+            "button",
+            { id: "memory-search-button", type: "submit" },
+            "記憶を検索",
+          ),
+        ),
+        jsx("ul", { id: "memory-list" }),
+        jsx(
+          "div",
+          { id: "memory-detail", hidden: true },
+          jsx("pre", { id: "memory-detail-body" }),
+          jsx("textarea", { id: "memory-correct-input" }),
+          jsx(
+            "button",
+            { id: "memory-correct-button", type: "button" },
+            "訂正をキュー",
+          ),
+          jsx(
+            "button",
+            { id: "memory-retire-button", type: "button" },
+            "引退をキュー",
+          ),
+          jsx(
+            "button",
+            { id: "memory-reactivate-button", type: "button" },
+            "再活性をキュー",
+          ),
+          jsx(
+            "button",
+            { id: "memory-retry-button", type: "button", hidden: true },
+            "同じ内容で再送",
+          ),
+          jsx("p", { id: "memory-op-status", "aria-live": "polite" }),
+        ),
+      ),
+      jsx(
         "div",
         { id: "drawer", hidden: true, role: "dialog", "aria-label": "引用" },
         jsx("pre", { id: "drawer-body" }),
