@@ -272,14 +272,123 @@ function normalizeInstant(value: string): string {
   return value.normalize("NFC");
 }
 
+// Strict RFC3339 instant grammar shared with the readonly normalization
+// (`packages/connector-calendar/src/time.ts` `parseTimedInstant` plus the
+// minute-precision form the dedicated write port accepts in
+// `rescheduleWrite.ts` `isStrictCalendarInstant`): explicit `Z`/`±HH:MM`
+// offset only, real calendar validation (leap years, month lengths,
+// component and offset bounds), NO `Date.parse` permissiveness (rollover
+// like `2023-02-30` -> March 2 must reject, never verify). The kernel owns
+// this copy so the dependency-inverted direction stays intact
+// (kernel never imports `@companion/connector-*`); the convention —
+// same instant, strict grammar, invalid fails closed — is defined once in
+// the connector and mirrored exactly here.
+const STRICT_INSTANT_SECONDS =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+const STRICT_INSTANT_MINUTES =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(Z|[+-]\d{2}:\d{2})$/;
+
+function strictDaysInMonth(year: number, month: number): number {
+  if (month === 2) {
+    const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+    return leap ? 29 : 28;
+  }
+  if (month === 4 || month === 6 || month === 9 || month === 11) return 30;
+  return 31;
+}
+
+/** Year-safe UTC epoch ms (`Date.UTC` maps years 0..99 to 1900..1999). */
+function strictUtcMs(
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+  second: number,
+  ms: number,
+): number {
+  if (year >= 100) {
+    return Date.UTC(year, month - 1, day, hour, minute, second, ms);
+  }
+  const fixed = new Date(0);
+  fixed.setUTCFullYear(year, month - 1, day);
+  fixed.setUTCHours(hour, minute, second, ms);
+  return fixed.getTime();
+}
+
+/**
+ * Strict explicit-offset RFC3339 instant to epoch ms, or `undefined`.
+ * All-day DATE strings, offset-less strings and impossible calendar values
+ * are all `undefined` (fail closed) — never parsed loosely.
+ */
+function parseStrictInstantMs(value: string): number | undefined {
+  const seconds = STRICT_INSTANT_SECONDS.exec(value);
+  if (seconds !== null) {
+    const year = Number(seconds[1]);
+    const month = Number(seconds[2]);
+    const day = Number(seconds[3]);
+    const hour = Number(seconds[4]);
+    const minute = Number(seconds[5]);
+    const second = Number(seconds[6]);
+    if (month < 1 || month > 12) return undefined;
+    if (day < 1 || day > strictDaysInMonth(year, month)) return undefined;
+    if (hour > 23 || minute > 59 || second > 59) return undefined;
+    // Milliseconds are exactly the first three decimal digits,
+    // right-padded (float parsing could round up into the next second).
+    const fraction = seconds[7] as string | undefined;
+    const ms =
+      fraction !== undefined ? Number(fraction.slice(1, 4).padEnd(3, "0")) : 0;
+    const zone = seconds[8] as string;
+    let offsetMs = 0;
+    if (zone !== "Z") {
+      const sign = zone.startsWith("-") ? -1 : 1;
+      const offsetHour = Number(zone.slice(1, 3));
+      const offsetMinute = Number(zone.slice(4, 6));
+      if (offsetHour > 23 || offsetMinute > 59) return undefined;
+      offsetMs = sign * (offsetHour * 60 + offsetMinute) * 60_000;
+    }
+    const epochMs =
+      strictUtcMs(year, month, day, hour, minute, second, ms) - offsetMs;
+    return Number.isFinite(epochMs) ? epochMs : undefined;
+  }
+  const minutes = STRICT_INSTANT_MINUTES.exec(value);
+  if (minutes === null) return undefined;
+  const year = Number(minutes[1]);
+  const month = Number(minutes[2]);
+  const day = Number(minutes[3]);
+  const hour = Number(minutes[4]);
+  const minute = Number(minutes[5]);
+  if (month < 1 || month > 12) return undefined;
+  if (day < 1 || day > strictDaysInMonth(year, month)) return undefined;
+  if (hour > 23 || minute > 59) return undefined;
+  const zone = minutes[6] as string;
+  let offsetMs = 0;
+  if (zone !== "Z") {
+    const sign = zone.startsWith("-") ? -1 : 1;
+    const offsetHour = Number(zone.slice(1, 3));
+    const offsetMinute = Number(zone.slice(4, 6));
+    if (offsetHour > 23 || offsetMinute > 59) return undefined;
+    offsetMs = sign * (offsetHour * 60 + offsetMinute) * 60_000;
+  }
+  const epochMs = strictUtcMs(year, month, day, hour, minute, 0, 0) - offsetMs;
+  return Number.isFinite(epochMs) ? epochMs : undefined;
+}
+
 /**
  * Exact normalized-boundary comparison of the intended start/end against the
  * observed canonical event body. The observation body is the SAME canonical
  * JSON the kernel materializes (`calendarEventBodyText`), so it is parsed as
- * STRICT JSON and the two boundary fields are compared as whole EXACT values
- * — never as substrings (a substring test could match a different field value
+ * STRICT JSON and the two boundary fields are compared as whole values —
+ * never as substrings (a substring test could match a different field value
  * that merely contains the intended one, e.g. `"start":"2024-01-01T09:00"`).
- * Any parse/field failure yields false (unverified), never a partial claim.
+ *
+ * Representation-independent: the approved proposal stores the intended
+ * instants exactly as staged (e.g. `2026-10-16T15:00:00+09:00`) while the
+ * readonly normalization canonicalizes timed bounds to UTC
+ * (`2026-10-16T06:00:00.000Z`), so the comparison is SAME-INSTANT (epoch
+ * ms) under the strict grammar above — an offset/millis representation
+ * difference is NOT a content mismatch. Any parse/field failure yields
+ * false (unverified), never a partial claim.
  */
 function boundariesMatch(text: string, start: string, end: string): boolean {
   let parsed: unknown;
@@ -292,7 +401,25 @@ function boundariesMatch(text: string, start: string, end: string): boolean {
     return false;
   }
   const body = parsed as { start?: unknown; end?: unknown };
-  return body.start === start && body.end === end;
+  if (typeof body.start !== "string" || typeof body.end !== "string") {
+    return false;
+  }
+  if (body.start === start && body.end === end) {
+    return true;
+  }
+  const observedStart = parseStrictInstantMs(body.start);
+  const observedEnd = parseStrictInstantMs(body.end);
+  const intendedStart = parseStrictInstantMs(start);
+  const intendedEnd = parseStrictInstantMs(end);
+  if (
+    observedStart === undefined ||
+    observedEnd === undefined ||
+    intendedStart === undefined ||
+    intendedEnd === undefined
+  ) {
+    return false;
+  }
+  return observedStart === intendedStart && observedEnd === intendedEnd;
 }
 
 /* ------------------------------------------------------------------ */

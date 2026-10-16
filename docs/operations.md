@@ -3295,3 +3295,20 @@ Proof after repin: profile 5/5 + wire-hash 2/2 + startup 22/22 + focused
   profile repinned to the new source SHA/tree; live-wire input-schema
   hash re-probed over REAL stdio against the fork runner at `33483f4`:
   `9f59e35b…8609d7`, byte-identical, pin unchanged.
+
+  Read-back verification is same-INSTANT, not same-string (2026-10-16 fix):
+  the approved proposal stores the intended bounds exactly as staged
+  (`+09:00`, no millis) while the readonly normalization canonicalizes
+  timed bounds to UTC (`…Z` with millis), so an exact-string compare could
+  never verify a landed conversion and every real write finished
+  `succeeded_unverified`. `boundariesMatch`
+  (`packages/kernel/src/action_strategy.ts`) now compares epoch instants
+  under the existing strict RFC3339 convention (explicit offset, real
+  calendar validation, no `Date.parse`; invalid fails closed), with the
+  exact-string case kept as a fast path. Identity/deletion/revision/unknown
+  gates are unchanged: wrong date/start/end, stale all-day bodies, deleted
+  events, key mismatches and read failures still finish
+  `succeeded_unverified` with no resend (pinned by
+  `action_readback_instant.test.ts` 9/9 plus the pipeline test, whose
+  read binding now decodes the provider-shaped fixture GET through the
+  REAL `normalizeEvent`, asserting canonical-UTC read-back bounds).

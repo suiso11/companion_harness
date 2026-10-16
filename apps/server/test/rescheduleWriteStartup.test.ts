@@ -42,6 +42,7 @@ import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { canonicalKey, normalizeEvent } from "@companion/connector-calendar";
 import {
   defaultTransportFactory,
   type McpConnectorConfig,
@@ -1356,13 +1357,23 @@ describe("write-command absolute paths (Windows + spaces)", () => {
 // ---------------------------------------------------------------------------
 
 const ALLDAY_EVENT_ID = "evt-allday-1";
-const ALLDAY_CANONICAL_KEY = `cal|${E2E_CALENDAR_ID}|${ALLDAY_EVENT_ID}`;
+/** Real opaque canonical key over (instance, calendar, event) — computed per run. */
+async function alldayCanonicalKey(instanceId: string): Promise<string> {
+  return canonicalKey(instanceId, E2E_CALENDAR_ID, ALLDAY_EVENT_ID);
+}
 const ALLDAY_ETAG_V1 = '"etag-allday-1"';
 const ALLDAY_ETAG_V2 = '"etag-allday-2"';
 const ALLDAY_START_DATE = "2026-10-16";
 const ALLDAY_END_DATE = "2026-10-17";
 const ALLDAY_START_NEW = "2026-10-16T15:00:00+09:00";
 const ALLDAY_END_NEW = "2026-10-16T16:00:00+09:00";
+// Real readonly normalization canonicalizes provider `dateTime` bounds to
+// UTC: these are the exact `canonicalUtcIso` images of the requested bounds
+// above (never hand-tailored to the request — the binding below derives
+// them through the REAL `normalizeEvent`, and these constants only assert
+// the stored read-back result).
+const ALLDAY_START_UTC = "2026-10-16T06:00:00.000Z";
+const ALLDAY_END_UTC = "2026-10-16T07:00:00.000Z";
 
 /** Local Google-shaped fixture serving an ALL-DAY event until converted. */
 async function startGoogleFixtureAllDay(): Promise<
@@ -1393,15 +1404,19 @@ async function startGoogleFixtureAllDay(): Promise<
         mode === "allDay"
           ? {
               id: ALLDAY_EVENT_ID,
+              calendarId: E2E_CALENDAR_ID,
               etag,
               status: "confirmed",
+              summary: "Fixture Event",
               start: { date: ALLDAY_START_DATE },
               end: { date: ALLDAY_END_DATE },
             }
           : {
               id: ALLDAY_EVENT_ID,
+              calendarId: E2E_CALENDAR_ID,
               etag,
               status: "confirmed",
+              summary: "Fixture Event",
               start: { dateTime: eventStart },
               end: { dateTime: eventEnd },
             };
@@ -1475,7 +1490,10 @@ async function startGoogleFixtureAllDay(): Promise<
 /**
  * Injected READ binding backing BOTH the strategy preflight (all-day
  * observation) AND its §18.7 readback (timed observation) from the live
- * loopback state. Date-only endpoints map to date-only normalized bounds.
+ * loopback state. The provider-shaped GET body is decoded through the REAL
+ * readonly `normalizeEvent` (UTC canonicalization, all-day flag, opaque
+ * canonical key, etag revision basis) — never hand-built to match the
+ * request — so the read-back carries the genuine upstream serialization.
  */
 function fixtureBackedCalendarBindingAllDay(
   connectorInstanceId: string,
@@ -1498,49 +1516,44 @@ function fixtureBackedCalendarBindingAllDay(
         return { ok: false as const, code: "mcp_unavailable" };
       }
       const body = (await response.json()) as {
+        id?: unknown;
+        calendarId?: unknown;
         etag?: unknown;
         status?: unknown;
+        summary?: unknown;
         start?: { date?: unknown; dateTime?: unknown };
         end?: { date?: unknown; dateTime?: unknown };
       };
-      if (typeof body.etag !== "string") {
-        return { ok: false as const, code: "mcp_unavailable" };
-      }
-      const start =
-        typeof body.start?.dateTime === "string"
-          ? body.start.dateTime
-          : typeof body.start?.date === "string"
-            ? body.start.date
-            : null;
-      const end =
-        typeof body.end?.dateTime === "string"
-          ? body.end.dateTime
-          : typeof body.end?.date === "string"
-            ? body.end.date
-            : null;
-      if (start === null || end === null) {
-        return { ok: false as const, code: "mcp_unavailable" };
+      let decoded: Awaited<ReturnType<typeof normalizeEvent>>;
+      try {
+        decoded = await normalizeEvent(
+          {
+            id: body.id,
+            calendarId: target.calendarId,
+            status: body.status,
+            summary: body.summary,
+            description: undefined,
+            location: undefined,
+            start: body.start,
+            end: body.end,
+            etag: body.etag,
+          },
+          { connectorInstanceId },
+        );
+      } catch {
+        return { ok: false as const, code: "calendar_response_invalid" };
       }
       return {
         ok: true as const,
-        event: {
-          canonicalKey: ALLDAY_CANONICAL_KEY,
-          status: "confirmed" as const,
-          title: "Fixture Event",
-          start,
-          end,
-          allDayEndExclusive: true,
-          sourceRevision: body.etag,
-          revisionBasis: "etag" as const,
-        },
+        event: decoded,
       };
     },
   };
 }
 
-function alldaySnapshotBodyJson(): string {
+function alldaySnapshotBodyJson(canonicalKeyValue: string): string {
   const text = calendarEventBodyText({
-    canonicalKey: ALLDAY_CANONICAL_KEY,
+    canonicalKey: canonicalKeyValue,
     status: "confirmed",
     title: "Fixture Event",
     start: ALLDAY_START_DATE,
@@ -1562,12 +1575,14 @@ async function seedStagedProposalAllDay(
   hash: string;
   snapshotId: string;
   expectedRevision: string;
+  canonicalKey: string;
 }> {
   const handle = openKernelDatabase(dbPath);
   try {
     const repo = createKernelRepository(handle.raw, {
       actionProposals: { writeEnabled: true },
     });
+    const canonicalKeyValue = await alldayCanonicalKey(instanceId);
     const resourceId = generateId();
     const snapshotId = generateId();
     const refId = generateId();
@@ -1575,18 +1590,23 @@ async function seedStagedProposalAllDay(
       .prepare(
         "INSERT INTO resources (id, connector_instance_id, canonical_key, title, next_revision, created_at) VALUES (?, ?, ?, 'Fixture Event', 2, 1)",
       )
-      .run(resourceId, instanceId, ALLDAY_CANONICAL_KEY);
+      .run(resourceId, instanceId, canonicalKeyValue);
     handle.raw
       .prepare(
         "INSERT INTO resource_snapshots (id, resource_id, revision, source_revision, content_hash, body_json, size_bytes, observed_at, created_at) VALUES (?, ?, 1, ?, 'hash@1', ?, 10, 1, 1)",
       )
-      .run(snapshotId, resourceId, ALLDAY_ETAG_V1, alldaySnapshotBodyJson());
+      .run(
+        snapshotId,
+        resourceId,
+        ALLDAY_ETAG_V1,
+        alldaySnapshotBodyJson(canonicalKeyValue),
+      );
     handle.raw
       .prepare(
         "INSERT INTO calendar_get_targets (canonical_key, target_json, updated_at) VALUES (?, ?, ?)",
       )
       .run(
-        ALLDAY_CANONICAL_KEY,
+        canonicalKeyValue,
         JSON.stringify({
           calendarId: E2E_CALENDAR_ID,
           eventId: ALLDAY_EVENT_ID,
@@ -1643,6 +1663,7 @@ async function seedStagedProposalAllDay(
       hash: staged.hash,
       snapshotId,
       expectedRevision: staged.expectedRevision,
+      canonicalKey: canonicalKeyValue,
     };
   } finally {
     closeKernelDatabase(handle);
@@ -1737,6 +1758,7 @@ describe("all-day → timed conversion pipeline (local fixture only)", () => {
       expect(JSON.parse(firstText)).toMatchObject({
         start: ALLDAY_START_DATE,
         end: ALLDAY_END_DATE,
+        allDayEndExclusive: true,
       });
       const last = refs[refs.length - 1] as {
         ordinal: number;
@@ -1749,8 +1771,12 @@ describe("all-day → timed conversion pipeline (local fixture only)", () => {
         }
       ).text;
       expect(JSON.parse(lastText)).toMatchObject({
-        start: ALLDAY_START_NEW,
-        end: ALLDAY_END_NEW,
+        // Read-back bounds are the REAL normalized Google serialization
+        // (canonical UTC), not the staged `+09:00` representation — the
+        // strategy verified them as the same instant.
+        start: ALLDAY_START_UTC,
+        end: ALLDAY_END_UTC,
+        allDayEndExclusive: false,
       });
     } finally {
       closeKernelDatabase(handle);
