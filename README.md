@@ -1443,6 +1443,14 @@ COMPANION_ACTIONS_JSON='{ "optIn": true, "writeEnabled": true }'
   レビュー3件対応済み: production factory の implicit-env 事前検証、
   `actionWriteBinding: null` の absent 扱い、Windows 絶対パス受容 +
   space 含み実バイナリの production spawn)。
+  PR33 レビュー5件対応済み (ソース `753046f`): 凍結 SDK 継承 env の欠落は
+  spawn 前に fail-closed (live-env fallback なし; win32 は canonical key へ
+  case-insensitive 解決)、write TestIdentity は canonical 128/64 を DB 副作用
+  前に検証 (任意 factory)、`derivePort` は設定済み・注入済み calendar 構成の
+  双方で動作、write 提案/port はミリ秒表現可能な instant のみ
+  (末尾ゼロ `.123000` 可、真の `.1234` は stage/write 前に拒否) で readback は
+  同一 instant (等価 offset 可) を比較、write 応答は `structuredContent` が
+  own-property 存在時に authoritative (text は absent 時のみ strict JSON fallback)。
 - 設定が有効で binding が active instance と一致しない場合は listen 前に
   fail-closed します。設定が無効な場合、注入された port は一切使われません。
 - 無効時は staging できず、approve は repository 呼び出し前に固定

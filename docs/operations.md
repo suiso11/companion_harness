@@ -1229,6 +1229,9 @@ or complete activate config):
   then closes it after the engine drain and
   before the DB close; a caller-owned port (the default) is never closed by
   the server and extra caller-owned ports are never closed arbitrarily.
+  `derivePort` fires for BOTH compositions: the owned `config.calendar`
+  selection and the injected `calendarBinding` selection (active selection +
+  server-registered instance id, exact-identity match still fail-closed).
 - TRIPLE gate: `m5-action` and the proposal-only `calendar.reschedule`
   registration exist ONLY when (1) `config.actions.optIn`, (2)
   `config.actions.writeEnabled`, and (3) a dedicated trusted write port whose
@@ -1240,7 +1243,11 @@ or complete activate config):
   (`server_config_invalid`, before listen); an injected port with the config
   disabled is simply never adopted (no derive call, no capability read, no
   use, no owned shutdown). There is deliberately NO production write
-  binding selected in this codebase.
+  binding selected in this codebase. The canonical write-connector identity
+  (non-empty server name <= 128 / version <= 64, same rule as the normal
+  composition) is validated in the pure preflight BEFORE any DB side effect,
+  with any factory (explicit inert-transport test seams skip only the
+  OS-env allowlist gate, never the identity rule).
 - Wired composition when the gate is open: one existing `ReferenceManager`
   (same DB), one `ActionExecutionService`, the authoritative read port
   `createCalendarActionReadPort` over the EXISTING Calendar `get` binding +
@@ -1259,7 +1266,15 @@ or complete activate config):
   parsing of the canonical event body and exact `start`/`end` equality
   against the normalized intended instants (no substring matching), plus the
   same target identity and a non-deleted status; anything else is
-  `succeeded_unverified`/fail-closed.
+  `succeeded_unverified`/fail-closed. Write proposal/port instants must be
+  millisecond-representable: genuine sub-ms (nonzero past the ms position,
+  e.g. `.1234`) is rejected at staging and by the write port before any
+  dispatch, while ms-expressible fractions (`.12`, `.123`, `.123000` all-zero
+  tail = same ms) stage normally; read-back compares the same instant
+  (equivalent offsets accepted), never the same string. The write receipt is
+  classified from `structuredContent` when own-property present (present
+  null/wrong-shaped fails closed to `unknown`, never rescued by text); strict
+  JSON `text` is the fallback ONLY when `structuredContent` is absent.
 - Fake harness seam for C22 (exact API): inject deterministic fakes through
   `actionWriteBinding` (write port) and the existing `calendarBinding`
   (read/search port) seams; production passes neither. The write port must
@@ -1323,7 +1338,12 @@ or complete activate config):
   explicitly allowlisted even when unset; there is no extra function-value
   policy or filter. `shell=false` is the SDK pin behavior plus an actual
   metacharacter proof. The PR16 transport bounds and actual `onclose` semantics
-  are unchanged.
+  are unchanged. Frozen startup snapshot: every allowlisted inherited name
+  must resolve to a frozen inheritable value (shell-function `()...` exports
+  never inheritable); a missing/uninheritable frozen value rejects pre-spawn
+  with fixed `mcp_unavailable` (no live-env fallback, no spawn, no invented
+  empty PATH). Win32 is case-insensitive: allowlist membership, frozen lookup
+  and child-env key all resolve to the canonical SDK name (exactly one key).
 - Before/after actual-SDK archives (all under the out-of-repo
   `c09-security-verify/`; source + commands + failure history retained there,
   in-repo temporaries removed and not retained in the repo): `ambiguity`
