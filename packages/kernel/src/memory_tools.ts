@@ -122,8 +122,17 @@ export interface MemoryToolsOptions {
 
 const HANDLE_PATTERN = /^m[1-9][0-9]*$/;
 
+/**
+ * User-facing text bound in Unicode code points (not UTF-16 units): Zod
+ * `.max()` counts UTF-16 code units and would reject valid astral-plane
+ * input. Server storage enforces the same code-point budgets.
+ */
+function codePointsMax(maxCp: number): (value: string) => boolean {
+  return (value: string): boolean => Array.from(value).length <= maxCp;
+}
+
 export const MemorySearchToolInputSchema = z.strictObject({
-  query: z.string().min(1).max(500),
+  query: z.string().min(1).refine(codePointsMax(500)),
   limit: z.number().int().min(1).max(8).default(5),
   searchId: z.string().min(1).max(256).optional(),
 });
@@ -134,17 +143,36 @@ export const MemorySearchToolOutputSchema = z.strictObject({
     .array(
       z.strictObject({
         handle: z.string().regex(HANDLE_PATTERN),
-        snippet: z.string().min(1).max(512),
+        snippet: z.string().min(1).refine(codePointsMax(512)),
         status: z.enum(["active", "retired"]),
       }),
     )
     .max(8),
 });
 
+/**
+ * Closed per-tool staging schemas (runtime enforcement mirrors the
+ * advertised agent schemas): `memory.correct` REQUIRES `correctionBody`
+ * (1..2000 code points); `memory.retire`/`memory.reactivate` MUST NOT
+ * accept it (strict object without the property, so a supplied body is
+ * rejected before staging).
+ */
+export const MemoryCorrectToolInputSchema = z.strictObject({
+  searchId: z.string().min(1).max(256),
+  handle: z.string().regex(HANDLE_PATTERN).optional(),
+  correctionBody: z.string().min(1).refine(codePointsMax(2000)),
+});
+
+export const MemoryRetireToolInputSchema = z.strictObject({
+  searchId: z.string().min(1).max(256),
+  handle: z.string().regex(HANDLE_PATTERN).optional(),
+});
+
+/** Legacy shared staging schema (retained for compatibility checks). */
 export const MemoryStageToolInputSchema = z.strictObject({
   searchId: z.string().min(1).max(256),
   handle: z.string().regex(HANDLE_PATTERN).optional(),
-  correctionBody: z.string().min(1).max(2000).optional(),
+  correctionBody: z.string().min(1).refine(codePointsMax(2000)).optional(),
 });
 
 export const MemoryStageToolOutputSchema = z.strictObject({
@@ -160,7 +188,7 @@ export const MemoryStageToolOutputSchema = z.strictObject({
     .array(
       z.strictObject({
         handle: z.string().regex(HANDLE_PATTERN),
-        snippet: z.string().min(1).max(512),
+        snippet: z.string().min(1).refine(codePointsMax(512)),
         status: z.enum(["active", "retired"]),
       }),
     )
@@ -271,6 +299,12 @@ function createMemoryStageRegistration(
       : kind === "record.retire"
         ? "memory.retire"
         : "memory.reactivate";
+  // Per-tool runtime schema: correct REQUIRES correctionBody, retire/
+  // reactivate REJECT it (no such property under strictObject).
+  const inputSchema =
+    kind === "record.correct"
+      ? MemoryCorrectToolInputSchema
+      : MemoryRetireToolInputSchema;
   return {
     descriptor: {
       name: toolName,
@@ -282,7 +316,7 @@ function createMemoryStageRegistration(
       maxTimeoutMs: 60_000,
       supportsRefresh: false,
     },
-    inputSchema: MemoryStageToolInputSchema,
+    inputSchema,
     outputSchema: MemoryStageToolOutputSchema,
     // Staging-only (same family as the C17 proposal-only mechanism): the
     // handler stages a durable outbox operation and never performs any
@@ -292,7 +326,16 @@ function createMemoryStageRegistration(
     proposalOnly: true,
     dedupMode: "normal",
     handler: (async (input: unknown, ctx) => {
-      const parsed = MemoryStageToolInputSchema.parse(input);
+      // Per-tool strict parsing: correct without correctionBody throws
+      // here; retire/reactivate WITH correctionBody throws here (unknown
+      // key under strictObject). Handler guards below are defense-in-depth.
+      const parsed = (inputSchema as typeof MemoryCorrectToolInputSchema).parse(
+        input,
+      ) as {
+        searchId: string;
+        handle?: string;
+        correctionBody?: string;
+      };
       if (ctx.signal.aborted) {
         throw new ToolError("execution_cancelled");
       }

@@ -1,6 +1,16 @@
 import { z } from "zod";
 import { UuidSchema } from "./ids.js";
 
+/**
+ * User-facing text bound in Unicode code points (not UTF-16 units): Zod
+ * `.max()` counts UTF-16 code units and would reject valid astral-plane
+ * input (e.g. 300 emoji against a 500-code-point limit). Server storage
+ * enforces the same code-point budgets.
+ */
+function codePointsMax(maxCp: number): (value: string) => boolean {
+  return (value: string): boolean => Array.from(value).length <= maxCp;
+}
+
 /** Opaque session-scoped memory handle (`m1..mN`, never a raw record id). */
 export const MemoryHandleSchema = z
   .string()
@@ -10,14 +20,20 @@ export type MemoryHandle = z.infer<typeof MemoryHandleSchema>;
 
 export const MemoryHitSchema = z.strictObject({
   handle: MemoryHandleSchema,
-  snippet: z.string().min(1).max(512),
+  snippet: z
+    .string()
+    .min(1)
+    .refine(codePointsMax(512), { message: "snippet over 512 code points" }),
   status: z.enum(["active", "retired"]),
 });
 export type MemoryHit = z.infer<typeof MemoryHitSchema>;
 
 /** POST .../memory/search request: explicit user-directed query only. */
 export const MemorySearchRequestSchema = z.strictObject({
-  query: z.string().min(1).max(500),
+  query: z
+    .string()
+    .min(1)
+    .refine(codePointsMax(500), { message: "query over 500 code points" }),
   limit: z.number().int().min(1).max(8).optional().default(5),
   runId: UuidSchema,
 });
@@ -34,7 +50,10 @@ export const MemoryDetailResponseSchema = z.strictObject({
   snapshot: z.strictObject({
     searchId: z.string().min(1).max(256),
     handle: MemoryHandleSchema,
-    snippet: z.string().min(1).max(512),
+    snippet: z
+      .string()
+      .min(1)
+      .refine(codePointsMax(512), { message: "snippet over 512 code points" }),
     status: z.enum(["active", "retired"]),
   }),
   current: z.strictObject({
@@ -55,7 +74,13 @@ export const MemoryMutationRequestSchema = z.strictObject({
   kind: z.enum(["record.correct", "record.retire", "record.reactivate"]),
   searchId: z.string().min(1).max(256),
   handle: MemoryHandleSchema.optional(),
-  correctionBody: z.string().min(1).max(2000).optional(),
+  correctionBody: z
+    .string()
+    .min(1)
+    .refine(codePointsMax(2000), {
+      message: "correctionBody over 2000 code points",
+    })
+    .optional(),
   runId: UuidSchema,
 });
 export type MemoryMutationRequest = z.infer<typeof MemoryMutationRequestSchema>;
@@ -78,6 +103,23 @@ export const MemoryOperationResponseSchema = z.strictObject({
 });
 export type MemoryOperationResponse = z.infer<
   typeof MemoryOperationResponseSchema
+>;
+
+/**
+ * GET per-run recall exposure: the exact snippet the model saw as `mN`
+ * during one run (answer-citation drawer). Raw record/recall ids never
+ * cross this boundary.
+ */
+export const MemoryRecallExposureResponseSchema = z.strictObject({
+  runId: UuidSchema,
+  citation: MemoryHandleSchema,
+  snippet: z
+    .string()
+    .min(1)
+    .refine(codePointsMax(512), { message: "snippet over 512 code points" }),
+});
+export type MemoryRecallExposureResponse = z.infer<
+  typeof MemoryRecallExposureResponseSchema
 >;
 
 /** Fixed memory route error codes (lowercase, no values leak). */

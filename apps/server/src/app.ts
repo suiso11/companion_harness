@@ -21,6 +21,7 @@ import {
   MemoryMutationRequestSchema,
   MemoryMutationResponseSchema,
   MemoryOperationResponseSchema,
+  MemoryRecallExposureResponseSchema,
   MemorySearchRequestSchema,
   MemorySearchResponseSchema,
   messageScope,
@@ -158,6 +159,18 @@ export interface MemoryHttpPort {
     recordRevision: number | null;
     status: "pending" | "acked" | "failed";
   } | null;
+  getMemoryRecallExposure(input: {
+    sessionId: string;
+    runId: string;
+    citation: string;
+  }): { runId: string; citation: string; snippet: string } | null;
+  hashDrainingReplay(input: {
+    kind: "record.correct" | "record.retire" | "record.reactivate";
+    sessionId: string;
+    searchId: string;
+    handle?: string;
+    correctionBody?: string;
+  }): { requestHash: string; recordId: string } | null;
 }
 
 export interface CreateAppDeps {
@@ -1658,6 +1671,54 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     },
   );
 
+  // Per-run recall exposure for answer citations (read-only, allowed
+  // while draining): returns the exact snippet the model saw as `mN`
+  // during ONE run. Answer citations bind to their own run's recall
+  // exposure, never to the latest explicit management search.
+  app.get(
+    "/api/sessions/:sessionId/memory/recall/:runId/items/:citation",
+    async (c) => {
+      if (memory === null) {
+        return memoryUnavailable(c);
+      }
+      const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+      if ("response" in session) {
+        return session.response;
+      }
+      const runId = c.req.param("runId");
+      const citation = c.req.param("citation");
+      if (!validHandle(citation)) {
+        return validationError(c);
+      }
+      if (!strictQuery(c, []).ok) {
+        return validationError(c);
+      }
+      const owned = requireOwnedRun(c, session.id, runId);
+      if (!owned.ok) {
+        return owned.response;
+      }
+      try {
+        repo.getSession(session.id);
+      } catch (error) {
+        return mapDomainError(c, error);
+      }
+      const out = memory.getMemoryRecallExposure({
+        sessionId: session.id,
+        runId,
+        citation,
+      });
+      if (out === null) {
+        return memoryRouteError(c, "target_not_found");
+      }
+      const body = MemoryRecallExposureResponseSchema.parse({
+        runId: out.runId,
+        citation: out.citation,
+        snippet: out.snippet,
+      });
+      return c.json(body, 200);
+    },
+  );
+
   // Stage one mutation (keyed 202, draining-aware: a stored operation for
   // the same key replays verbatim instead of 503; fresh keys get 503
   // without staging anything).
@@ -1706,10 +1767,35 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     if (draining) {
       // No staging while draining: replay the stored operation for this
       // exact key (same frozen request/key retry wins over 503), else 503
-      // without persisting anything.
+      // without persisting anything. The immutable request hash is
+      // recomputed for the incoming (kind/body/target): a same-key request
+      // with drifted content is a 409 `idempotency_key_reused` here exactly
+      // as on the normal path, never a silent "deduplicated" replay of a
+      // different mutation.
       try {
         const existing = repo.getMemoryOperationByKey(keyed.key.toLowerCase());
         if (existing !== null && existing.sessionId === session.id) {
+          const replay = memory.hashDrainingReplay({
+            kind: parsed.data.kind,
+            sessionId: session.id,
+            searchId: parsed.data.searchId,
+            ...(parsed.data.handle !== undefined
+              ? { handle: parsed.data.handle }
+              : {}),
+            ...(parsed.data.correctionBody !== undefined
+              ? { correctionBody: parsed.data.correctionBody }
+              : {}),
+          });
+          if (replay === null) {
+            return shuttingDown(c);
+          }
+          if (
+            replay.requestHash !== existing.requestHash ||
+            existing.kind !== parsed.data.kind ||
+            existing.recordId !== replay.recordId
+          ) {
+            return memoryRouteError(c, "idempotency_conflict");
+          }
           const body = MemoryMutationResponseSchema.parse({
             operationId: existing.id,
             status: existing.status,

@@ -291,6 +291,8 @@ export type {
 export {
   createMemorySearchRegistration,
   createMemoryStageRegistrations,
+  MemoryCorrectToolInputSchema,
+  MemoryRetireToolInputSchema,
   MemorySearchToolInputSchema,
   MemorySearchToolOutputSchema,
   MemoryStageToolInputSchema,

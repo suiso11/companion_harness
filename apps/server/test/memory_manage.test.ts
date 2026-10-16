@@ -1150,3 +1150,341 @@ describe("review boundary: real snapshots, trusted origin, replay identity", () 
     }
   });
 });
+
+describe("codex review 215f852: atomic ack, draining identity, owner, schemas, code points, recall", () => {
+  it("F1 atomic ack trigger failure commits neither job nor operation", async () => {
+    const handle = openKernelDatabase(":memory:");
+    await migrateKernelDatabase({ db: handle.raw });
+    const repo = createKernelRepository(handle.raw);
+    try {
+      const { sessionId, runId } = completeRun(repo);
+      const staged = repo.stageMemoryMutationAtomic(
+        {
+          jobKind: "record.retire",
+          jobSessionId: sessionId,
+          jobRunId: runId,
+          jobScope: SCOPE,
+          jobKey: randomUUID(),
+          requestJson: JSON.stringify({ op: "record.retire", params: {} }),
+          operation: {
+            kind: "record.retire",
+            sessionId,
+            runId,
+            recordId: "rec-atomic",
+            idempotencyKey: randomUUID(),
+            requestHash: "hash-atomic",
+          },
+        },
+        { now: T0 + 100 },
+      );
+      // Real SQL failure inside the mirror transaction: abort the operation
+      // flip so the job flip must roll back too (neither commits).
+      handle.raw.exec(
+        `CREATE TRIGGER fail_memory_op_mirror BEFORE UPDATE ON memory_operations BEGIN SELECT RAISE(ABORT, 'mirror-fail'); END;`,
+      );
+      try {
+        expect(() =>
+          repo.ackMemoryJobWithOperationMirror(staged.job.id, {
+            now: T0 + 101,
+          }),
+        ).toThrow();
+        expect(repo.getMemoryJob(staged.job.id)?.status).toBe("pending");
+        expect(repo.getMemoryOperation(staged.operation.id)?.status).toBe(
+          "pending",
+        );
+      } finally {
+        handle.raw.exec(`DROP TRIGGER fail_memory_op_mirror;`);
+      }
+      // Without the failing trigger the same atomic path commits both.
+      repo.ackMemoryJobWithOperationMirror(staged.job.id, { now: T0 + 102 });
+      expect(repo.getMemoryJob(staged.job.id)?.status).toBe("acked");
+      expect(repo.getMemoryOperation(staged.operation.id)?.status).toBe(
+        "acked",
+      );
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("F3 draining replay shares immutable identity: exact matches, drift nulls", async () => {
+    const f = await openRepo();
+    try {
+      const ledger: FakeLedger = {
+        ops: [],
+        liveStatus: new Map([["rec-a", "active"]]),
+      };
+      const service = makeService(
+        f.repo,
+        makeCli(ledger, [{ id: "rec-a", snippet: "alpha", status: "active" }]),
+      );
+      const { sessionId, runId } = completeRun(f.repo);
+      const search = await service.searchMemories({
+        sessionId,
+        runId,
+        query: "q",
+      });
+      const key = randomUUID();
+      const staged = await service.stageMemoryMutation({
+        sessionId,
+        runId,
+        kind: "record.retire",
+        searchId: search.searchId,
+        handle: "m1",
+        idempotencyKey: key,
+      });
+      expect(staged.ok).toBe(true);
+      if (!staged.ok) throw new Error("stage failed");
+      const stored = f.repo.getMemoryOperationByKey(key.toLowerCase());
+      expect(stored).not.toBeNull();
+      // Exact same request recomputes the identical immutable hash/record.
+      const exact = service.hashDrainingReplay({
+        kind: "record.retire",
+        sessionId,
+        searchId: search.searchId,
+        handle: "m1",
+      });
+      expect(exact).not.toBeNull();
+      expect(exact?.requestHash).toBe(stored?.requestHash);
+      expect(exact?.recordId).toBe(stored?.recordId);
+      // Drifted kind/body/target yields a different identity (route 409).
+      const driftKind = service.hashDrainingReplay({
+        kind: "record.reactivate",
+        sessionId,
+        searchId: search.searchId,
+        handle: "m1",
+      });
+      expect(driftKind?.requestHash).not.toBe(stored?.requestHash);
+      const driftBody = service.hashDrainingReplay({
+        kind: "record.correct",
+        sessionId,
+        searchId: search.searchId,
+        handle: "m1",
+        correctionBody: "other",
+      });
+      expect(driftBody?.requestHash).not.toBe(stored?.requestHash);
+      // Unverifiable target (unknown handle) is null (route falls to 503).
+      expect(
+        service.hashDrainingReplay({
+          kind: "record.retire",
+          sessionId,
+          searchId: search.searchId,
+          handle: "m9",
+        }),
+      ).toBeNull();
+    } finally {
+      f.close();
+    }
+  });
+
+  it("F7 redelivered searchId for another owner with same count fails closed", async () => {
+    const f = await openRepo();
+    try {
+      const ledger: FakeLedger = { ops: [], liveStatus: new Map() };
+      let call = 0;
+      const cli: CliCall = async (_address, op) => {
+        ledger.ops.push(op);
+        if (op === "record.search") {
+          call += 1;
+          return okEnvelope({
+            searchId: "search-collide",
+            items:
+              call === 1
+                ? [
+                    {
+                      id: "rec-owner-a",
+                      snippet: "owner-a-snip",
+                      status: "active",
+                    },
+                  ]
+                : [
+                    {
+                      id: "rec-owner-b",
+                      snippet: "owner-b-snip",
+                      status: "active",
+                    },
+                  ],
+          });
+        }
+        return {
+          ok: false,
+          code: "BAD_REQUEST",
+          data: null,
+          deduplicated: false,
+        };
+      };
+      const service = makeService(f.repo, cli);
+      const first = completeRun(f.repo);
+      const outA = await service.searchMemories({
+        sessionId: first.sessionId,
+        runId: first.runId,
+        query: "same-query",
+      });
+      expect(outA.hits[0]?.snippet).toBe("owner-a-snip");
+      // Different session/run, same count (1): must NOT receive owner A's row.
+      const second = completeRun(f.repo);
+      await expect(
+        service.searchMemories({
+          sessionId: second.sessionId,
+          runId: second.runId,
+          query: "same-query",
+        }),
+      ).rejects.toBeInstanceOf(MemoryManageError);
+      // First owner's stored snapshot is untouched (never rebound).
+      expect(f.repo.listMemorySearchItems("search-collide")[0]?.snippet).toBe(
+        "owner-a-snip",
+      );
+    } finally {
+      f.close();
+    }
+  });
+
+  it("F8 per-tool schemas enforce correctionBody required/forbidden (behavior)", async () => {
+    const { buildAgentToolDefinitions } = await import("@companion/kernel");
+    const { MemoryCorrectToolInputSchema, MemoryRetireToolInputSchema } =
+      await import("@companion/kernel");
+    // Runtime Zod behavior: correct requires the body, retire rejects it.
+    expect(
+      MemoryCorrectToolInputSchema.safeParse({
+        searchId: "s1",
+        handle: "m1",
+        correctionBody: "fix",
+      }).success,
+    ).toBe(true);
+    expect(
+      MemoryCorrectToolInputSchema.safeParse({ searchId: "s1", handle: "m1" })
+        .success,
+    ).toBe(false);
+    expect(
+      MemoryRetireToolInputSchema.safeParse({ searchId: "s1", handle: "m1" })
+        .success,
+    ).toBe(true);
+    expect(
+      MemoryRetireToolInputSchema.safeParse({
+        searchId: "s1",
+        handle: "m1",
+        correctionBody: "fix",
+      }).success,
+    ).toBe(false);
+    // Advertised agent schemas stay consistent with the runtime gate.
+    const tools = buildAgentToolDefinitions([
+      { name: "memory.correct", description: "c", category: "write" },
+      { name: "memory.retire", description: "r", category: "write" },
+      { name: "memory.reactivate", description: "ra", category: "write" },
+    ] as never);
+    const byName = new Map(tools.map((tool) => [tool.name, tool.parameters]));
+    const correctParams = byName.get("memory.correct") as {
+      required?: string[];
+      properties?: Record<string, unknown>;
+    };
+    const retireParams = byName.get("memory.retire") as {
+      required?: string[];
+      properties?: Record<string, unknown>;
+    };
+    const reactivateParams = byName.get("memory.reactivate") as {
+      required?: string[];
+      properties?: Record<string, unknown>;
+    };
+    expect(correctParams.required).toContain("correctionBody");
+    expect("correctionBody" in (correctParams.properties ?? {})).toBe(true);
+    expect("correctionBody" in (retireParams.properties ?? {})).toBe(false);
+    expect("correctionBody" in (reactivateParams.properties ?? {})).toBe(false);
+  });
+
+  it("F9 code-point budgets accept astral input at the boundary and reject over", async () => {
+    const {
+      MemorySearchRequestSchema,
+      MemoryMutationRequestSchema,
+      MemoryHitSchema,
+    } = await import("@companion/contracts");
+    const runId = randomUUID();
+    const emoji = (count: number): string => "😀".repeat(count);
+    // 300 emoji (300 code points, 600 UTF-16 units) is valid for a 500 budget.
+    expect(
+      MemorySearchRequestSchema.safeParse({ query: emoji(300), runId }).success,
+    ).toBe(true);
+    expect(
+      MemorySearchRequestSchema.safeParse({ query: emoji(501), runId }).success,
+    ).toBe(false);
+    expect(
+      MemoryMutationRequestSchema.safeParse({
+        kind: "record.correct",
+        searchId: "s1",
+        handle: "m1",
+        correctionBody: emoji(2000),
+        runId,
+      }).success,
+    ).toBe(true);
+    expect(
+      MemoryMutationRequestSchema.safeParse({
+        kind: "record.correct",
+        searchId: "s1",
+        handle: "m1",
+        correctionBody: emoji(2001),
+        runId,
+      }).success,
+    ).toBe(false);
+    expect(
+      MemoryHitSchema.safeParse({
+        handle: "m1",
+        snippet: emoji(512),
+        status: "active",
+      }).success,
+    ).toBe(true);
+    expect(
+      MemoryHitSchema.safeParse({
+        handle: "m1",
+        snippet: emoji(513),
+        status: "active",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("F2 recall exposure binds the originating run (no cross-run/search remap)", async () => {
+    const f = await openRepo();
+    try {
+      const ledger: FakeLedger = { ops: [], liveStatus: new Map() };
+      const service = makeService(f.repo, makeCli(ledger, []));
+      const first = completeRun(f.repo);
+      const second = completeRun(f.repo);
+      f.repo.recordMemoryExposure({
+        recallId: "recall-first",
+        recordId: "rec-first",
+        sessionId: first.sessionId,
+        runId: first.runId,
+        scope: SCOPE,
+        citation: "m1",
+        snippet: "first-run-snippet",
+      });
+      // Same run+session+handle resolves to the exact immutable snippet.
+      expect(
+        service.getMemoryRecallExposure({
+          sessionId: first.sessionId,
+          runId: first.runId,
+          citation: "m1",
+        }),
+      ).toEqual({
+        runId: first.runId,
+        citation: "m1",
+        snippet: "first-run-snippet",
+      });
+      // Another run's same ordinal never resolves through this run.
+      expect(
+        service.getMemoryRecallExposure({
+          sessionId: second.sessionId,
+          runId: second.runId,
+          citation: "m1",
+        }),
+      ).toBeNull();
+      // Cross-session use of the same run never resolves.
+      expect(
+        service.getMemoryRecallExposure({
+          sessionId: second.sessionId,
+          runId: first.runId,
+          citation: "m1",
+        }),
+      ).toBeNull();
+    } finally {
+      f.close();
+    }
+  });
+});

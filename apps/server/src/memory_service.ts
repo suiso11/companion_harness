@@ -201,6 +201,27 @@ export interface MemoryService {
     sessionId: string,
     operationId: string,
   ): MemoryOperationStatus | null;
+  /**
+   * Per-run recall exposure for answer citations (`mN`): the exact snippet
+   * the model saw during ONE run, or null when the citation is not bound
+   * to that run's exposure in this session.
+   */
+  getMemoryRecallExposure(input: {
+    sessionId: string;
+    runId: string;
+    citation: string;
+  }): { runId: string; citation: string; snippet: string } | null;
+  /**
+   * Draining replay identity: recompute the immutable request hash for an
+   * incoming same-key mutation without staging, or null when unverifiable.
+   */
+  hashDrainingReplay(input: {
+    kind: "record.correct" | "record.retire" | "record.reactivate";
+    sessionId: string;
+    searchId: string;
+    handle?: string;
+    correctionBody?: string;
+  }): { requestHash: string; recordId: string } | null;
 }
 
 /** One opaque search hit: handle + snippet + status (no raw ids). */
@@ -616,7 +637,10 @@ export function createMemoryService(
       // attempt worth counting twice — bounded backoff rearm, still pending.
       if (isAborted(signal)) {
         try {
-          repo.failMemoryJob(job.id, "cli_preempted", {
+          // Atomic mirror path (consistent with every other drain outcome):
+          // a non-terminal rearm touches no operation row, so answer-citation
+          // polling stays `pending` instead of stranding on a half-write.
+          repo.failMemoryJobWithOperationMirror(job.id, "cli_preempted", {
             maxAttempts: MEMORY_JOB_MAX_ATTEMPTS,
             now: now(),
           });
@@ -664,31 +688,21 @@ export function createMemoryService(
         return false;
       }
       try {
-        repo.ackMemoryJob(job.id, { now: now() });
+        // Atomic ack + operation mirror in ONE transaction: the job and any
+        // operation row still bound to it flip to `acked` together, so a
+        // crash can never leave an acked job with a permanently `pending`
+        // operation (pollers read the operation row). Rows already rebound
+        // to a follow-up job (correction event -> real `record.correct`)
+        // are untouched: the operation flips only when its real
+        // correct/retire/reactivate job acks. Likewise a terminal `failed`
+        // operation is never overwritten back to `acked`.
+        repo.ackMemoryJobWithOperationMirror(job.id, { now: now() });
         if (pendingDistillJobId === job.id) {
           pendingDistillJobId = null;
         }
-        // Mirror durable 202-ack operation status for management writes
-        // only: event/remember/feedback/distill jobs own no operation row,
-        // and a correction's event job must NOT mark its operation acked
-        // (the operation flips only when its real correct/retire/reactivate
-        // job acks; the event->correct rebinding happens in the follow-up).
-        if (
-          op === "record.correct" ||
-          op === "record.retire" ||
-          op === "record.reactivate"
-        ) {
-          try {
-            repo.setMemoryOperationStatusByJob(job.id, "acked", {
-              now: now(),
-            });
-          } catch {
-            // Best effort: the next status read still sees the acked job.
-          }
-        }
       } catch {
-        // Ack/follow-up failure keeps the job pending: the next tick
-        // replays with the same stable key (remind dedups, no duplicate).
+        // Ack failure keeps the job pending: the next tick replays with
+        // the same stable key (remind dedups, no duplicate).
         return false;
       }
       log("info", "memory.job_acked", { durationMs });
@@ -1914,6 +1928,25 @@ export function createMemoryService(
     } catch {
       throw new MemoryManageError("service_unavailable");
     }
+    // Snapshot-ownership check: a redelivered searchId for another session,
+    // run, scope, or query must NEVER return the first owner's rows (the
+    // count can coincidentally match). Fail closed with the same fixed
+    // code instead of leaking another owner's snippets.
+    let header: ReturnType<typeof repo.getMemorySearch>;
+    try {
+      header = repo.getMemorySearch(parsed.searchId);
+    } catch {
+      throw new MemoryManageError("service_unavailable");
+    }
+    if (
+      header === null ||
+      header.sessionId !== input.sessionId ||
+      header.runId !== input.runId ||
+      header.scope !== scope ||
+      header.query !== trimmed
+    ) {
+      throw new MemoryManageError("service_unavailable");
+    }
     throwIfStagingCancelled(input.signal);
     if (stored.length !== hits.length) {
       throw new MemoryManageError("service_unavailable");
@@ -1970,6 +2003,83 @@ export function createMemoryService(
     };
   }
 
+  /**
+   * Shared request-identity prefix for staging AND draining replays: body
+   * validation + trusted snapshot resolution + the immutable request hash
+   * (session/scope/action/target/body, no mutable live fields). The
+   * draining path reuses this exact computation so a same-key request with
+   * drifted content is a 409 there too, never a silent "deduplicated"
+   * replay of a different mutation.
+   */
+  function resolveStagingIdentity(input: {
+    kind: "record.correct" | "record.retire" | "record.reactivate";
+    sessionId: string;
+    searchId: string;
+    handle?: string;
+    correctionBody?: string;
+    trustedSelection?: boolean;
+  }):
+    | {
+        readonly ok: true;
+        readonly recordId: string;
+        readonly requestHash: string;
+      }
+    | {
+        readonly ok: false;
+        readonly code:
+          | "validation_error"
+          | "needs_clarification"
+          | "target_not_found";
+        readonly candidates?: readonly MemorySearchHit[];
+      } {
+    if (
+      input.kind === "record.correct" &&
+      (input.correctionBody === undefined ||
+        countCodePoints(input.correctionBody) < 1 ||
+        countCodePoints(input.correctionBody) > MEMORY_CORRECTION_BODY_MAX_CP)
+    ) {
+      return { ok: false, code: "validation_error" };
+    }
+    if (input.kind !== "record.correct" && input.correctionBody !== undefined) {
+      return { ok: false, code: "validation_error" };
+    }
+    const resolved = resolveManagementTarget(
+      input.sessionId,
+      input.searchId,
+      input.handle,
+      input.trustedSelection === true,
+    );
+    if ("refused" in resolved) {
+      return resolved.refused === "needs_clarification"
+        ? {
+            ok: false,
+            code: "needs_clarification",
+            candidates: resolved.candidates ?? [],
+          }
+        : { ok: false, code: "target_not_found" };
+    }
+    const reasonCode =
+      input.kind === "record.retire"
+        ? MEMORY_RETIRE_REASON
+        : input.kind === "record.reactivate"
+          ? MEMORY_REACTIVATE_REASON
+          : undefined;
+    return {
+      ok: true,
+      recordId: resolved.bound.recordId,
+      requestHash: requestHashForManagement({
+        kind: input.kind,
+        sessionId: input.sessionId,
+        scope,
+        recordId: resolved.bound.recordId,
+        ...(input.correctionBody !== undefined
+          ? { body: input.correctionBody }
+          : {}),
+        ...(reasonCode !== undefined ? { reasonCode } : {}),
+      }),
+    };
+  }
+
   async function stageMemoryMutation(input: {
     sessionId: string;
     runId: string;
@@ -1989,34 +2099,24 @@ export function createMemoryService(
         return { ok: false, code: "validation_error" };
       }
       const key = input.idempotencyKey.toLowerCase();
-      if (
-        input.kind === "record.correct" &&
-        (input.correctionBody === undefined ||
-          countCodePoints(input.correctionBody) < 1 ||
-          countCodePoints(input.correctionBody) > MEMORY_CORRECTION_BODY_MAX_CP)
-      ) {
-        return { ok: false, code: "validation_error" };
-      }
-      if (
-        input.kind !== "record.correct" &&
-        input.correctionBody !== undefined
-      ) {
-        return { ok: false, code: "validation_error" };
-      }
-      const resolved = resolveManagementTarget(
-        input.sessionId,
-        input.searchId,
-        input.handle,
-        trusted,
-      );
-      if ("refused" in resolved) {
-        return resolved.refused === "needs_clarification"
+      const identity = resolveStagingIdentity({
+        kind: input.kind,
+        sessionId: input.sessionId,
+        searchId: input.searchId,
+        ...(input.handle !== undefined ? { handle: input.handle } : {}),
+        ...(input.correctionBody !== undefined
+          ? { correctionBody: input.correctionBody }
+          : {}),
+        trustedSelection: trusted,
+      });
+      if (!identity.ok) {
+        return identity.code === "needs_clarification"
           ? {
               ok: false,
-              code: "needs_clarification",
-              candidates: resolved.candidates ?? [],
+              code: identity.code,
+              candidates: identity.candidates ?? [],
             }
-          : { ok: false, code: "target_not_found" };
+          : { ok: false, code: identity.code };
       }
       // Immutable request identity (session/scope/action/target/body — NO
       // mutable live fields such as the fresh revision): the same key with
@@ -2024,22 +2124,7 @@ export function createMemoryService(
       // target state moved on; a drifted body is a 409. This lookup runs
       // BEFORE the live `record.get` + actionability gate so an exact
       // replay after a successful correct can never fail as superseded.
-      const reasonCode =
-        input.kind === "record.retire"
-          ? MEMORY_RETIRE_REASON
-          : input.kind === "record.reactivate"
-            ? MEMORY_REACTIVATE_REASON
-            : undefined;
-      const requestHash = requestHashForManagement({
-        kind: input.kind,
-        sessionId: input.sessionId,
-        scope,
-        recordId: resolved.bound.recordId,
-        ...(input.correctionBody !== undefined
-          ? { body: input.correctionBody }
-          : {}),
-        ...(reasonCode !== undefined ? { reasonCode } : {}),
-      });
+      const requestHash = identity.requestHash;
       try {
         const existing = repo.getMemoryOperationByKey(key);
         if (existing !== null) {
@@ -2049,7 +2134,7 @@ export function createMemoryService(
           if (
             existing.sessionId !== input.sessionId ||
             existing.kind !== input.kind ||
-            existing.recordId !== resolved.bound.recordId
+            existing.recordId !== identity.recordId
           ) {
             return { ok: false, code: "idempotency_conflict" };
           }
@@ -2068,10 +2153,7 @@ export function createMemoryService(
       // targets for NEW keys only; replays above already returned.
       let fresh: Awaited<ReturnType<typeof freshRecordForStaging>>;
       try {
-        fresh = await freshRecordForStaging(
-          resolved.bound.recordId,
-          input.signal,
-        );
+        fresh = await freshRecordForStaging(identity.recordId, input.signal);
       } catch {
         return { ok: false, code: "service_unavailable" };
       }
@@ -2148,7 +2230,7 @@ export function createMemoryService(
           return await stageCorrection({
             sessionId: input.sessionId,
             runId: input.runId,
-            recordId: resolved.bound.recordId,
+            recordId: identity.recordId,
             body: input.correctionBody as string,
             revision: current.revision,
             key,
@@ -2159,14 +2241,18 @@ export function createMemoryService(
             ...(input.signal !== undefined ? { signal: input.signal } : {}),
           });
         }
+        const reasonCode =
+          input.kind === "record.retire"
+            ? MEMORY_RETIRE_REASON
+            : MEMORY_REACTIVATE_REASON;
         const jobKey =
           input.kind === "record.retire"
             ? stableMemoryJobKey("retire", key)
             : stableMemoryJobKey("reactivate", key);
         const params =
           input.kind === "record.retire"
-            ? { id: resolved.bound.recordId, scope, reasonCode }
-            : { id: resolved.bound.recordId, scope, reasonCode };
+            ? { id: identity.recordId, scope, reasonCode }
+            : { id: identity.recordId, scope, reasonCode };
         const requestJson = JSON.stringify({ op: input.kind, params });
         const staged = repo.stageMemoryMutationAtomic(
           {
@@ -2182,7 +2268,7 @@ export function createMemoryService(
               runId: input.runId,
               searchId: input.searchId,
               handle: input.handle ?? null,
-              recordId: resolved.bound.recordId,
+              recordId: identity.recordId,
               revision: current.revision,
               idempotencyKey: key,
               requestHash,
@@ -2352,6 +2438,80 @@ export function createMemoryService(
     };
   }
 
+  /**
+   * Per-run recall exposure for answer citations (`mN`): the exact snippet
+   * the model saw during ONE run. Session-bound (the exposure's session
+   * must match the request); cross-run/cross-session citations resolve to
+   * null so the UI fails closed instead of opening an unrelated explicit
+   * search's snapshot. Raw record/recall ids never leave this boundary.
+   */
+  function getMemoryRecallExposure(input: {
+    sessionId: string;
+    runId: string;
+    citation: string;
+  }): { runId: string; citation: string; snippet: string } | null {
+    if (!/^m[1-9][0-9]*$/.test(input.citation)) {
+      return null;
+    }
+    let exposures: ReturnType<typeof repo.listMemoryExposures>;
+    try {
+      exposures = repo.listMemoryExposures(input.runId);
+    } catch {
+      return null;
+    }
+    const match = exposures.find(
+      (entry) =>
+        entry.citation === input.citation &&
+        entry.sessionId === input.sessionId,
+    );
+    if (match === undefined) {
+      return null;
+    }
+    return {
+      runId: input.runId,
+      citation: match.citation,
+      snippet: match.snippet,
+    };
+  }
+
+  /**
+   * Draining replay identity for one stored idempotency key: recompute the
+   * immutable request hash for the incoming (kind/body/target) with NO
+   * live read and NO staging, so the route replays only an exact match and
+   * answers 409 `idempotency_key_reused` on drifted content. Null when the
+   * request cannot be verified (validation/target failure): the route
+   * falls back to 503 without persisting anything.
+   */
+  function hashDrainingReplay(input: {
+    kind: "record.correct" | "record.retire" | "record.reactivate";
+    sessionId: string;
+    searchId: string;
+    handle?: string;
+    correctionBody?: string;
+  }): { requestHash: string; recordId: string } | null {
+    try {
+      const identity = resolveStagingIdentity({
+        kind: input.kind,
+        sessionId: input.sessionId,
+        searchId: input.searchId,
+        ...(input.handle !== undefined ? { handle: input.handle } : {}),
+        ...(input.correctionBody !== undefined
+          ? { correctionBody: input.correctionBody }
+          : {}),
+        trustedSelection: true,
+      });
+      if (!identity.ok) {
+        return null;
+      }
+      return {
+        requestHash: identity.requestHash,
+        recordId: identity.recordId,
+      };
+    } catch {
+      return null;
+    }
+  }
+
   function start(): void {
     if (started) {
       return;
@@ -2410,5 +2570,7 @@ export function createMemoryService(
     getMemoryDetail,
     stageMemoryMutation,
     getMemoryOperation,
+    getMemoryRecallExposure,
+    hashDrainingReplay,
   };
 }

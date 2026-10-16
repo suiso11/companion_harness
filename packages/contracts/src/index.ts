@@ -275,6 +275,7 @@ export type {
   MemoryMutationRequest,
   MemoryMutationResponse,
   MemoryOperationResponse,
+  MemoryRecallExposureResponse,
   MemorySearchRequest,
   MemorySearchResponse,
 } from "./memory.js";
@@ -287,6 +288,7 @@ export {
   MemoryMutationRequestSchema,
   MemoryMutationResponseSchema,
   MemoryOperationResponseSchema,
+  MemoryRecallExposureResponseSchema,
   MemorySearchRequestSchema,
   MemorySearchResponseSchema,
 } from "./memory.js";

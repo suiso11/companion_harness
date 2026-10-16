@@ -2102,8 +2102,10 @@ class ConversationApp {
             for (const citation of part.citations) {
               const button = el("button", citation);
               button.setAttribute("data-action-citation", "true");
+              const citationRunId =
+                typeof run.runId === "string" ? run.runId : undefined;
               button.addEventListener("click", () => {
-                void this.openCitation(citation);
+                void this.openCitation(citation, citationRunId);
               });
               wrap.appendChild(button);
             }
@@ -2128,8 +2130,11 @@ class ConversationApp {
         wrap.appendChild(el("p", part.text));
         for (const citation of part.citations) {
           const button = el("button", citation);
+          button.setAttribute("data-action-citation", "true");
+          const historyRunId =
+            typeof run.runId === "string" ? run.runId : undefined;
           button.addEventListener("click", () => {
-            void this.openCitation(citation);
+            void this.openCitation(citation, historyRunId);
           });
           wrap.appendChild(button);
         }
@@ -2776,8 +2781,10 @@ class ConversationApp {
         this.list.appendChild(el("p", part.text));
         for (const citation of part.citations) {
           const button = el("button", citation);
+          button.setAttribute("data-action-citation", "true");
+          const liveRunId = runId;
           button.addEventListener("click", () => {
-            void this.openCitation(citation);
+            void this.openCitation(citation, liveRunId);
           });
           this.list.appendChild(button);
         }
@@ -2919,13 +2926,13 @@ class ConversationApp {
   }
 
   /** Citation drawer (§16.5): stored snapshot as escaped plain text only. */
-  private async openCitation(citation: string): Promise<void> {
-    // Memory citations (mN) address explicit-search snapshots, not stored
-    // references: open the memory confirmation drawer bound to the
-    // originating run+session instead of the rN drawer. rN behavior is
-    // unchanged when memory is disabled or unused.
+  private async openCitation(citation: string, runId?: string): Promise<void> {
+    // Memory citations (mN) bind to their originating run's recall exposure,
+    // never to the latest explicit management search: an older answer's `m1`
+    // must open the snippet the model saw in THAT run even after an unrelated
+    // newer search minted a different `m1`.
     if (/^m[1-9][0-9]*$/.test(citation)) {
-      await this.openMemoryCitation(citation);
+      await this.openMemoryCitation(citation, runId);
       return;
     }
     if (this.sessionId === null) {
@@ -3011,7 +3018,10 @@ class ConversationApp {
     const seq = this.memorySearchSeq;
     // Synchronous invalidation BEFORE the first await: no stale list item
     // remains selectable/countable while the new search is in flight.
+    // The correction draft belongs to the previous (searchId, handle): clear
+    // it here so a stale draft can never apply to the next target.
     this.memorySelected = null;
+    this.memoryCorrectInput.value = "";
     this.memoryList.textContent = "";
     this.memoryDetail.hidden = true;
     this.memoryDetailBody.textContent = "";
@@ -3055,8 +3065,15 @@ class ConversationApp {
       this.showNotice(notice);
     };
     if (res.status === 404) {
-      this.memoryDisabled = true;
-      failSearch("記憶は無効です", "error: 記憶は無効です");
+      // Only the disabled 404 latches: a transient 503 stays retryable and a
+      // recovered search works without reload (frozen keys untouched).
+      const code = (res.body as { error?: { code?: unknown } }).error?.code;
+      if (code === "memory_unavailable") {
+        this.memoryDisabled = true;
+        failSearch("記憶は無効です", "error: 記憶は無効です");
+        return;
+      }
+      failSearch("記憶の検索に失敗しました", "error: 検索に失敗しました");
       return;
     }
     if (res.status !== 200) {
@@ -3073,6 +3090,8 @@ class ConversationApp {
     }
     this.memoryScope = { sessionId, searchId: body.searchId, runId };
     this.memorySelected = null;
+    // A new search invalidates any draft typed for the previous target.
+    this.memoryCorrectInput.value = "";
     this.memoryDetail.hidden = true;
     this.memoryRetryButton.hidden = true;
     this.memoryOpStatus.textContent = "";
@@ -3124,17 +3143,55 @@ class ConversationApp {
     return latest;
   }
 
-  /** Answer-body mN citation: resolve through the last search scope. */
-  private async openMemoryCitation(handle: string): Promise<void> {
+  /** Answer-body mN citation: resolve through the originating run's recall exposure. */
+  private async openMemoryCitation(
+    handle: string,
+    runId?: string,
+  ): Promise<void> {
     if (this.sessionId === null) {
       return;
     }
-    const scope = this.memoryScope;
-    if (scope === null || scope.sessionId !== this.sessionId) {
+    const sessionId = this.sessionId;
+    // Answer citations REQUIRE their originating run: without it the handle
+    // is ambiguous across searches, so fail closed instead of opening the
+    // latest management search's unrelated snapshot.
+    if (runId === undefined || runId.length === 0) {
       this.showNotice("先に「記憶を検索」で対象を探してください");
       return;
     }
-    await this.openMemoryDetail(scope.searchId, handle);
+    let res: { status: number; body: unknown };
+    try {
+      res = await fetchJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/memory/recall/${encodeURIComponent(runId)}/items/${encodeURIComponent(handle)}`,
+      );
+    } catch {
+      this.showNotice("記憶の引用取得に失敗しました");
+      return;
+    }
+    if (res.status === 404) {
+      const code = (res.body as { error?: { code?: unknown } }).error?.code;
+      if (code === "memory_unavailable") {
+        this.memoryDisabled = true;
+        this.showNotice("記憶は無効です");
+        return;
+      }
+      this.showNotice("引用が見つかりません。再検索してください");
+      return;
+    }
+    if (res.status !== 200) {
+      this.showNotice("記憶の引用取得に失敗しました");
+      return;
+    }
+    const body = res.body as { snippet?: unknown; citation?: unknown };
+    const snippet = typeof body.snippet === "string" ? body.snippet : "";
+    if (snippet.length === 0) {
+      this.showNotice("引用が見つかりません。再検索してください");
+      return;
+    }
+    // Immutable cited snapshot for THIS run (never rebound to the latest
+    // explicit search): the drawer shows exactly what the model saw as `mN`.
+    this.drawerBody.textContent = `引用 ${handle}\n${snippet}`;
+    this.drawer.hidden = false;
   }
 
   /**
@@ -3256,6 +3313,16 @@ class ConversationApp {
       this.memoryScope?.searchId !== searchId
     ) {
       return;
+    }
+    // Bind the draft to the exact (searchId, handle): a draft typed for a
+    // previous target is cleared before the new target becomes actionable.
+    // Stale async responses returned above without touching the input.
+    if (
+      this.memorySelected === null ||
+      this.memorySelected.searchId !== searchId ||
+      this.memorySelected.handle !== handle
+    ) {
+      this.memoryCorrectInput.value = "";
     }
     this.memorySelected = { searchId, handle };
     this.memoryDetail.hidden = false;
@@ -3469,9 +3536,15 @@ class ConversationApp {
         return;
       }
       if (status === "failed") {
-        this.memoryRetryButton.hidden = false;
-        this.memoryOpStatus.textContent = "error: 失敗しました (再送できます)";
+        // Terminal 202 failure: same-key retry can never recover, so clear
+        // the frozen request and hide the retry; a fresh search/target/key
+        // is required. Transport unknown-outcome (catch below) keeps it.
+        this.memoryPending = null;
+        this.memoryRetryButton.hidden = true;
+        this.memoryOpStatus.textContent =
+          "error: 失敗しました (再検索してください)";
         this.memoryOpStatus.dataset.operation = operationId;
+        this.showNotice("記憶の更新に失敗しました。再検索してください");
         return;
       }
       this.memoryOpStatus.textContent = "queued: 適用待ち";
@@ -3516,7 +3589,9 @@ class ConversationApp {
       this.showNotice("状態が変わりました。再検索してください");
       return;
     }
-    if (code === "memory_unavailable") {
+    if (code === "memory_unavailable" && res.status === 404) {
+      // Only the disabled 404 latches: a transient 503 with the same code
+      // stays retryable with the frozen same-key request preserved.
       this.memoryDisabled = true;
       this.memoryOpStatus.textContent = "error: 記憶は無効です";
       this.memoryOpStatus.dataset.operation = "failed";
@@ -3530,12 +3605,14 @@ class ConversationApp {
   }
 
   /**
-   * Bounded operation polling: queued -> acked/error (no busy loop).
-   * The window (45s) covers the server idle drain (idleMs) plus the
-   * chained real-CLI execution (correct = event.append then record.correct),
-   * mirroring the live regression wait budget. Every write is bound to
-   * (generation, operationId, session, selection): a superseded or
-   * re-targeted poll returns without touching current status.
+   * Bounded operation polling: queued -> acked/failed (no busy loop, no
+   * endless refresh). Supported queue delays reach 300s idleMs plus chained
+   * CLI calls, so a 45s bound expiry is NOT a failure: a still-valid pending
+   * operation stays VISIBLY pending at the bound with its operation id for
+   * an explicit status refresh, never labelled failed. Every write is bound
+   * to (generation, operationId, session, selection): a superseded or
+   * re-targeted poll returns without touching current status. Stale handles
+   * are cancelled via the generation/selection guards above.
    */
   private async pollMemoryOperation(
     sessionId: string,
@@ -3577,18 +3654,25 @@ class ConversationApp {
         return;
       }
       if (status === "failed") {
-        this.memoryRetryButton.hidden = false;
-        this.memoryOpStatus.textContent = "error: 失敗しました (再送できます)";
+        // Terminal poll failure: same-key retry can never recover; require a
+        // fresh search/target/key and clear the frozen pending.
+        this.memoryPending = null;
+        this.memoryRetryButton.hidden = true;
+        this.memoryOpStatus.textContent =
+          "error: 失敗しました (再検索してください)";
         this.memoryOpStatus.dataset.operation = operationId;
+        this.showNotice("記憶の更新に失敗しました。再検索してください");
         return;
       }
     }
-    // Timeout: keep the frozen retry (same key+body) instead of silently
-    // marking success or failure; the durable operation outcome stays
-    // queryable server-side.
+    // Poll-bound expiry with the operation still pending: keep it VISIBLY
+    // pending (never label failed, never offer a failure retry). The
+    // operation id stays for an explicit refresh (re-select the detail or
+    // re-stage); no endless busy loop follows.
     if (this.sessionId === sessionId && opSeq === this.memoryOpSeq) {
-      this.memoryRetryButton.hidden = false;
-      this.memoryOpStatus.textContent = "error: 失敗しました (再送できます)";
+      this.memoryRetryButton.hidden = true;
+      this.memoryOpStatus.textContent = "queued: 適用待ち (確認中)";
+      this.memoryOpStatus.dataset.operation = operationId;
     }
   }
 

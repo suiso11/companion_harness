@@ -234,3 +234,58 @@ test("memory panel search/detail/correct/retire/reactivate lifecycle", async ({
     "[active]",
   );
 });
+
+test("memory correction draft binds to the exact target (F6) and pending stays pending (F4)", async ({
+  page,
+}) => {
+  test.setTimeout(180_000);
+  await send(page, MEMORY_TURN_TEXT);
+  await expect(page.locator("#conversation")).toContainText(
+    "Noted green tea.",
+    {
+      timeout: 30_000,
+    },
+  );
+  await expect(page.locator("#composer-send")).toBeEnabled();
+
+  await searchFresh(page, "green tea", 90_000);
+  await selectFirstHit(page);
+  await expect(page.locator("#memory-detail")).toBeVisible();
+  // Type a draft for the current target, then start a new search: the draft
+  // must clear synchronously so it can never apply to the next target.
+  await page.locator("#memory-correct-input").fill("draft-for-first-target");
+  await expect(page.locator("#memory-correct-input")).toHaveValue(
+    "draft-for-first-target",
+  );
+  await searchFresh(page, "green tea", 45_000);
+  await expect(page.locator("#memory-correct-input")).toHaveValue("");
+  // A bare search result is never directly actionable (stale target guard).
+  await expect(page.locator("#memory-correct-button")).toBeDisabled();
+  await selectFirstHit(page);
+  // Fresh detail for the new target starts with an empty draft.
+  await expect(page.locator("#memory-correct-input")).toHaveValue("");
+
+  // Stage a correction through the REAL UI: the operation reports queued or
+  // acked, and a still-pending operation stays visibly pending (never failed
+  // at the poll bound with a failure retry).
+  await page.locator("#memory-correct-input").fill(MEMORY_CORRECTED_BODY);
+  const status = page.locator("#memory-op-status");
+  const responsePromise = page.waitForResponse(
+    (response) =>
+      response.url().includes("/memory/mutations") &&
+      response.request().method() === "POST",
+    { timeout: 15_000 },
+  );
+  await page.locator("#memory-correct-button").click();
+  const response = await responsePromise;
+  expect(response.status()).toBe(202);
+  const body = (await response.json()) as {
+    operationId?: unknown;
+    status?: unknown;
+  };
+  expect(typeof body.operationId).toBe("string");
+  await expect(status).toContainText(/queued|acked/, { timeout: 15_000 });
+  const statusText = await status.textContent();
+  // Terminal-failure copy is never shown for a staged (non-failed) op.
+  expect(statusText).not.toContain("再検索してください");
+});

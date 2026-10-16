@@ -780,16 +780,14 @@ export const AGENT_MEMORY_SEARCH_PARAMETERS = Object.freeze({
 }) as unknown as Record<string, unknown>;
 
 /**
- * Explicit closed JSON parameter schema for the staging-only memory
- * mutations (`memory.correct` / `memory.retire` / `memory.reactivate`):
- * model-facing `searchId` plus an optional explicit `mN` `handle`.
- * Raw record ids are never accepted. `correctionBody` (the user's actual
- * replacement text, 1-2000 chars) is required for correct and forbidden
- * otherwise. A missing handle binds only when the referenced search holds
+ * Explicit closed JSON parameter schema for `memory.correct`: model-facing
+ * `searchId` plus an optional explicit `mN` `handle`, with the user's
+ * actual replacement text REQUIRED (1-2000 chars). Raw record ids are never
+ * accepted. A missing handle binds only when the referenced search holds
  * exactly one candidate; multiple candidates without an explicit handle
  * return `needs_clarification` and stage nothing.
  */
-export const AGENT_MEMORY_STAGE_PARAMETERS = Object.freeze({
+export const AGENT_MEMORY_CORRECT_PARAMETERS = Object.freeze({
   type: "object",
   properties: Object.freeze({
     searchId: Object.freeze({ type: "string", minLength: 1, maxLength: 256 }),
@@ -799,6 +797,23 @@ export const AGENT_MEMORY_STAGE_PARAMETERS = Object.freeze({
       minLength: 1,
       maxLength: 2000,
     }),
+  }),
+  required: Object.freeze(["searchId", "correctionBody"]),
+  additionalProperties: false,
+}) as unknown as Record<string, unknown>;
+
+/**
+ * Explicit closed JSON parameter schema for `memory.retire` /
+ * `memory.reactivate`: model-facing `searchId` plus an optional explicit
+ * `mN` `handle`. `correctionBody` is NOT a property, so the closed schema
+ * (`additionalProperties: false`) rejects it instead of advertising an
+ * argument these tools cannot accept.
+ */
+export const AGENT_MEMORY_RETIRE_PARAMETERS = Object.freeze({
+  type: "object",
+  properties: Object.freeze({
+    searchId: Object.freeze({ type: "string", minLength: 1, maxLength: 256 }),
+    handle: Object.freeze({ type: "string", pattern: "^m[1-9][0-9]*$" }),
   }),
   required: Object.freeze(["searchId"]),
   additionalProperties: false,
@@ -832,9 +847,9 @@ const AGENT_PROPOSAL_TOOL_PARAMETERS: Readonly<
   Record<string, Record<string, unknown>>
 > = {
   [CALENDAR_RESCHEDULE_TOOL_NAME]: AGENT_CALENDAR_RESCHEDULE_PARAMETERS,
-  "memory.correct": AGENT_MEMORY_STAGE_PARAMETERS,
-  "memory.retire": AGENT_MEMORY_STAGE_PARAMETERS,
-  "memory.reactivate": AGENT_MEMORY_STAGE_PARAMETERS,
+  "memory.correct": AGENT_MEMORY_CORRECT_PARAMETERS,
+  "memory.retire": AGENT_MEMORY_RETIRE_PARAMETERS,
+  "memory.reactivate": AGENT_MEMORY_RETIRE_PARAMETERS,
 };
 
 /** Deep copy one advertised parameter schema (callers cannot mutate it). */
