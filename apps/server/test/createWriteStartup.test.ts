@@ -16,10 +16,13 @@
 // edges, with a dummy create caller that never touches any transport.
 
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { CalendarConnectorPort } from "@companion/kernel";
+import type {
+  CalendarConnectorPort,
+  CalendarCreateWritePort,
+} from "@companion/kernel";
 import {
   closeKernelDatabase,
   createReferenceManager,
@@ -197,6 +200,129 @@ describe("create-only startup composition", () => {
       drainMs: 50,
     });
     servers.push(started);
+    const { status, body } = await approveStatus(started.port);
+    expect(status).toBe(409);
+    expect(body).toContain("action_execution_disabled");
+  });
+});
+
+describe("create binding shape fail-closed", () => {
+  function validPort(instanceId: string): CalendarCreateWritePort {
+    return {
+      capability: {
+        tool: "calendar.create" as const,
+        editableFields: ["title", "start", "end"] as const,
+        connectorInstanceId: instanceId,
+        writeEnabled: true as const,
+      },
+      insert: async () => ({ status: "definite_failure" as const }),
+    };
+  }
+
+  it("rejects a both-port-and-derive binding BEFORE any DB side effect", async () => {
+    const { env, dbPath } = tempEnv({
+      optIn: true,
+      writeEnabled: true,
+      createEnabled: true,
+    });
+    const instanceId = seedInstance(dbPath);
+    // Fresh DB path: the shape is validatable from options alone, so the
+    // incomplete opt-in must fail before ensureDbDir/open/migrations.
+    const freshDir = mkdtempSync(join(tmpdir(), "companion-create-shape-"));
+    tempDirs.push(freshDir);
+    const freshDb = join(freshDir, "companion.sqlite");
+    const freshEnv: NodeJS.ProcessEnv = {
+      ...env,
+      COMPANION_DB_PATH: freshDb,
+    };
+    await expect(
+      startServer({
+        env: freshEnv,
+        calendarBinding: {
+          connectorInstanceId: instanceId,
+          connector: fakeCalendarBinding(instanceId),
+          selection: { calendarId: "primary", account: "ops@example" },
+        },
+        actionCreateBinding: {
+          port: validPort(instanceId),
+          derivePort: () => validPort(instanceId),
+        },
+        drainMs: 50,
+      }),
+    ).rejects.toThrow(/action create binding does not match/);
+    expect(existsSync(freshDb)).toBe(false);
+  });
+
+  it("rejects a neither-port-nor-derive binding BEFORE any DB side effect", async () => {
+    const { env } = tempEnv({
+      optIn: true,
+      writeEnabled: true,
+      createEnabled: true,
+    });
+    const freshDir = mkdtempSync(join(tmpdir(), "companion-create-shape-"));
+    tempDirs.push(freshDir);
+    const freshDb = join(freshDir, "companion.sqlite");
+    await expect(
+      startServer({
+        env: { ...env, COMPANION_DB_PATH: freshDb },
+        drainMs: 50,
+        actionCreateBinding: {},
+      }),
+    ).rejects.toThrow(/action create binding does not match/);
+    expect(existsSync(freshDb)).toBe(false);
+  });
+
+  it("rejects a derivePort that resolves to null BEFORE listen", async () => {
+    const { env, dbPath } = tempEnv({
+      optIn: true,
+      writeEnabled: true,
+      createEnabled: true,
+    });
+    const instanceId = seedInstance(dbPath);
+    await expect(
+      startServer({
+        env,
+        calendarBinding: {
+          connectorInstanceId: instanceId,
+          connector: fakeCalendarBinding(instanceId),
+          selection: { calendarId: "primary", account: "ops@example" },
+        },
+        actionCreateBinding: {
+          derivePort: () => null as unknown as CalendarCreateWritePort,
+        },
+        drainMs: 50,
+      }),
+    ).rejects.toThrow(/action create binding does not match/);
+  });
+
+  it("ignores an invalid binding when the create gate is off (no new opt requirement)", async () => {
+    const { env, dbPath } = tempEnv({
+      optIn: false,
+      writeEnabled: false,
+      createEnabled: false,
+    });
+    const instanceId = seedInstance(dbPath);
+    let derived = false;
+    const started = await startServer({
+      env,
+      calendarBinding: {
+        connectorInstanceId: instanceId,
+        connector: fakeCalendarBinding(instanceId),
+        selection: { calendarId: "primary", account: "ops@example" },
+      },
+      // Both/neither shape with the gate off: never adopted, never
+      // derived, never read — startup stays on the read-only defaults.
+      actionCreateBinding: {
+        port: validPort(instanceId),
+        derivePort: () => {
+          derived = true;
+          return validPort(instanceId);
+        },
+      },
+      drainMs: 50,
+    });
+    servers.push(started);
+    expect(derived).toBe(false);
     const { status, body } = await approveStatus(started.port);
     expect(status).toBe(409);
     expect(body).toContain("action_execution_disabled");

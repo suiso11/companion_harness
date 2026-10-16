@@ -213,6 +213,16 @@ export const ActionProposalSchema = z
             "calendar.reschedule proposals require a full existing-event target",
         });
       }
+      // Tool/input coupling: a reschedule row must carry the exact
+      // reschedule input shape (a create `{ title, start, end }` input is
+      // rejected by the strict reschedule schema's unknown-key rule).
+      if (!CalendarRescheduleToolInputSchema.safeParse(value.input).success) {
+        ctx.addIssue({
+          code: "custom",
+          message: "calendar.reschedule proposals require a start/end input",
+          path: ["input"],
+        });
+      }
     } else {
       if (
         value.targetRefId !== null ||
@@ -223,6 +233,16 @@ export const ActionProposalSchema = z
         ctx.addIssue({
           code: "custom",
           message: "calendar.create proposals carry no existing-event target",
+        });
+      }
+      // Tool/input coupling: a create row must carry the exact create
+      // input shape (a reschedule `{ start, end }` input is rejected by
+      // the strict create schema's missing-title rule).
+      if (!CalendarCreateToolInputSchema.safeParse(value.input).success) {
+        ctx.addIssue({
+          code: "custom",
+          message: "calendar.create proposals require a title/start/end input",
+          path: ["input"],
         });
       }
     }
@@ -354,18 +374,38 @@ export function proposalApproveScope(proposalId: string): string {
  * §18.9) plus the mutable decision state. Raw provider ids never appear
  * (`preview` is the deterministic start/end-only summary line).
  */
-export const ProposalSummarySchema = z.strictObject({
-  proposalId: UuidSchema,
-  tool: ActionToolNameSchema,
-  input: ActionToolInputSchema,
-  preview: ActionProposalPreviewSchema,
-  hash: Sha256HexSchema,
-  status: ActionProposalStatusSchema,
-  createdAt: UnixMsSchema,
-  expiresAt: UnixMsSchema,
-  resolvedAt: UnixMsSchema.nullable(),
-  decisionTurnId: UuidSchema.nullable(),
-});
+export const ProposalSummarySchema = z
+  .strictObject({
+    proposalId: UuidSchema,
+    tool: ActionToolNameSchema,
+    input: ActionToolInputSchema,
+    preview: ActionProposalPreviewSchema,
+    hash: Sha256HexSchema,
+    status: ActionProposalStatusSchema,
+    createdAt: UnixMsSchema,
+    expiresAt: UnixMsSchema,
+    resolvedAt: UnixMsSchema.nullable(),
+    decisionTurnId: UuidSchema.nullable(),
+  })
+  .superRefine((value, ctx) => {
+    // Tool/input coupling (same rule as `ActionProposalSchema`): the
+    // summary must carry the exact per-tool input shape, so contract
+    // consumers can never accept an impossible tool/input combination.
+    const expected =
+      value.tool === CALENDAR_RESCHEDULE_TOOL_NAME
+        ? CalendarRescheduleToolInputSchema.safeParse(value.input)
+        : CalendarCreateToolInputSchema.safeParse(value.input);
+    if (!expected.success) {
+      ctx.addIssue({
+        code: "custom",
+        message:
+          value.tool === CALENDAR_RESCHEDULE_TOOL_NAME
+            ? "calendar.reschedule proposals require a start/end input"
+            : "calendar.create proposals require a title/start/end input",
+        path: ["input"],
+      });
+    }
+  });
 export type ProposalSummary = z.infer<typeof ProposalSummarySchema>;
 
 /** Max proposal summaries served in one list page (bounded read). */

@@ -1091,6 +1091,36 @@ export async function startServer(
         "create write connector hints require a create profile",
       );
     }
+    // M6 injected create-binding static shape preflight: when the explicit
+    // config triple (optIn + writeEnabled + createEnabled) is on, a
+    // non-null `actionCreateBinding` must supply EXACTLY ONE of a `port` or
+    // a function `derivePort` — both/neither (or a non-function derive) is
+    // never intent and fails closed here, BEFORE ensureDbDir/open/
+    // migrations or any DB side effect (the shape is validatable from the
+    // options object alone; no instance id is needed). When the triple is
+    // off the binding is ignored entirely (existing disabled-composition
+    // policy: no derive call, no capability read, no new opt requirement).
+    // A missing binding stays on the existing post-DB incomplete-opt-in
+    // path (same as reschedule); a derive that resolves to null is
+    // rejected post-DB before listen (same contract).
+    {
+      const injectedCreateBinding = options.actionCreateBinding ?? null;
+      if (
+        config.actions.optIn === true &&
+        config.actions.writeEnabled === true &&
+        config.actions.createEnabled === true &&
+        injectedCreateBinding !== null
+      ) {
+        const hasPort = injectedCreateBinding.port !== undefined;
+        const hasDerive =
+          typeof injectedCreateBinding.derivePort === "function";
+        if (hasPort === hasDerive) {
+          throw new ServerConfigError(
+            "action create binding does not match the active calendar binding",
+          );
+        }
+      }
+    }
     // Boring profile-specific persisted identity: the profile registers
     // under its own display name so a previously host-injected generic
     // `calendar-mcp` row with the same selection can never be reused.
@@ -1530,8 +1560,13 @@ export async function startServer(
     let actionCreatePort: CalendarCreateWritePort | null = null;
     if (createConfigAllowed && actionCreate !== null) {
       const suppliedCreatePort = actionCreate.port !== undefined;
-      const deriveCreateFn = actionCreate.derivePort;
-      // Exactly ONE of the two: supplying BOTH or NEITHER stays unusable.
+      const deriveCreateFn =
+        typeof actionCreate.derivePort === "function"
+          ? actionCreate.derivePort
+          : undefined;
+      // Exactly ONE of the two: supplying BOTH or NEITHER stays unusable
+      // (NEITHER/BOTH already fail closed in the pre-DB preflight above;
+      // this keeps the post-DB gate total under the same rule).
       if (suppliedCreatePort === (deriveCreateFn !== undefined)) {
         actionCreatePort = null;
       } else if (suppliedCreatePort) {
@@ -1580,6 +1615,20 @@ export async function startServer(
       }
       // Create disabled: any injected create port is simply never used (no
       // staging, no approval, no strategy, no external insert).
+    }
+    if (
+      createConfigAllowed &&
+      actionCreate !== null &&
+      actionCreatePort === null
+    ) {
+      // Create opted in with an injected binding that resolved to no usable
+      // port (a `derivePort` that returned null, or an explicit null port):
+      // an incomplete opt-in — fail closed BEFORE listen, never a silently
+      // disabled create surface. A non-null port with a null/invalid
+      // capability already fails closed above.
+      throw new ServerConfigError(
+        "action create binding does not match the active calendar binding",
+      );
     }
 
     // M6 host-owned dedicated create port (normal startup, no injection).
