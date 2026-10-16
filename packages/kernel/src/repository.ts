@@ -17,6 +17,12 @@ import {
   type ActionReceiptView,
   ActionReceiptViewSchema,
   ActionToolInputSchema,
+  type AutonomyActivityListResponse,
+  AutonomyActivityListResponseSchema,
+  AutonomyControlSetRequestSchema,
+  type AutonomyControlView,
+  AutonomyControlViewSchema,
+  AutonomyListQuerySchema,
   type CreateSessionResponse,
   CreateSessionResponseSchema,
   EventsQuerySchema,
@@ -58,6 +64,21 @@ import {
   ProposalSummarySchema,
   type ProposalsListResponse,
   ProposalsListResponseSchema,
+  type PurposeConflictListResponse,
+  PurposeConflictListResponseSchema,
+  type PurposeConflictRecord,
+  PurposeConflictRecordRequestSchema,
+  PurposeConflictRecordSchema,
+  PurposeCorrectRequestSchema,
+  type PurposeCorrectResponse,
+  PurposeCorrectResponseSchema,
+  PurposeCreateRequestSchema,
+  type PurposeCreateResponse,
+  type PurposeListResponse,
+  PurposeListResponseSchema,
+  PurposeTransitionRequestSchema,
+  type PurposeView,
+  PurposeViewSchema,
   parseRunErrorCode,
   parseRunEvent,
   parseRunEventPayload,
@@ -81,6 +102,14 @@ import {
   RunStatusSchema,
   retryScope,
   SnapshotBodySchema,
+  TaskCreateRequestSchema,
+  type TaskCreateResponse,
+  TaskHoldRequestSchema,
+  type TaskListResponse,
+  TaskListResponseSchema,
+  TaskResumeRequestSchema,
+  TaskTransitionRequestSchema,
+  type TaskView,
 } from "@companion/contracts";
 import type Database from "better-sqlite3";
 import {
@@ -92,6 +121,30 @@ import {
   type CommittedProposal,
   createActionProposalStager,
 } from "./action_proposals.js";
+import {
+  type AutonomyKeyOptions,
+  applyAutonomyRestartFence,
+  achievePurpose as autonomyAchievePurpose,
+  cancelTask as autonomyCancelTask,
+  completeTask as autonomyCompleteTask,
+  correctPurpose as autonomyCorrectPurpose,
+  createPurpose as autonomyCreatePurpose,
+  createTask as autonomyCreateTask,
+  getAutonomyControl as autonomyGetControl,
+  getPurpose as autonomyGetPurpose,
+  getTask as autonomyGetTask,
+  holdTask as autonomyHoldTask,
+  listAutonomyActivity as autonomyListActivity,
+  listPurposeConflicts as autonomyListConflicts,
+  listPurposes as autonomyListPurposes,
+  listTasks as autonomyListTasks,
+  recordPurposeConflict as autonomyRecordConflict,
+  resumeTask as autonomyResumeTask,
+  revokePurpose as autonomyRevokePurpose,
+  setAutonomyControl as autonomySetControl,
+  startTask as autonomyStartTask,
+  recordUserActivityInTx,
+} from "./autonomy.js";
 import {
   assertUuidV4,
   canonicalJsonString,
@@ -881,6 +934,35 @@ export function createKernelRepository(
     return row;
   }
 
+  function requireOwnedAutonomyPurpose(
+    sessionId: string,
+    purposeId: string,
+  ): void {
+    const session = requireId(sessionId, "sessionId");
+    const purpose = requireId(purposeId, "purposeId");
+    const row = db
+      .prepare("SELECT session_id FROM autonomy_purposes WHERE id = ?")
+      .get(purpose) as { session_id: string } | undefined;
+    if (row === undefined || row.session_id !== session) {
+      throw new RepositoryNotFoundError(
+        `purpose ${purpose} not found in session ${session}`,
+      );
+    }
+  }
+
+  function requireOwnedAutonomyTask(sessionId: string, taskId: string): void {
+    const session = requireId(sessionId, "sessionId");
+    const task = requireId(taskId, "taskId");
+    const row = db
+      .prepare("SELECT session_id FROM autonomy_tasks WHERE id = ?")
+      .get(task) as { session_id: string } | undefined;
+    if (row === undefined || row.session_id !== session) {
+      throw new RepositoryNotFoundError(
+        `task ${task} not found in session ${session}`,
+      );
+    }
+  }
+
   function requireOwnedProposal(
     sessionId: string,
     proposalId: string,
@@ -1091,6 +1173,20 @@ export function createKernelRepository(
           }),
         "post-message response",
       );
+      // AV autonomy: accepted (non-replayed) user activity is recorded in
+      // the SAME transaction. Replayed/rejected requests never reach here.
+      // Best-effort on pre-0011 databases (missing table): the conversation
+      // must never break because the autonomy slice is absent.
+      try {
+        recordUserActivityInTx(db, session, now);
+      } catch (error) {
+        if (
+          !(error instanceof Error) ||
+          !/no such table/i.test(error.message)
+        ) {
+          throw error;
+        }
+      }
       storeIdempotentResponse(db, scope, key, hash, 202, body, now);
       return { status: 202, body, replayed: false };
     });
@@ -1232,6 +1328,16 @@ export function createKernelRepository(
           }),
         "post-retry response",
       );
+      try {
+        recordUserActivityInTx(db, session, now);
+      } catch (error) {
+        if (
+          !(error instanceof Error) ||
+          !/no such table/i.test(error.message)
+        ) {
+          throw error;
+        }
+      }
       storeIdempotentResponse(db, scope, key, hash, 202, body, now);
       return { status: 202, body, replayed: false };
     });
@@ -2995,6 +3101,72 @@ export function createKernelRepository(
       );
       return lookupIdempotency(validScope, validKey);
     }
+    // AV autonomy session-create/entity scopes: the embedded session must
+    // equal the path session (foreign sessions are 404, never 403), and the
+    // session must exist. Global `autonomy:control` is NEVER exposed here:
+    // control retry reuses the same POST key (no foreign-session lookup).
+    const purposeCreateMatch = /^session:([^:]+):purpose$/.exec(validScope);
+    if (purposeCreateMatch?.[1] !== undefined) {
+      const embedded = assertUuidV4(purposeCreateMatch[1], "sessionId");
+      if (embedded.toLowerCase() !== session.toLowerCase()) {
+        throw new RepositoryNotFoundError(
+          `scope ${validScope} not found in session ${session}`,
+        );
+      }
+      if (readSession(db, session) === null) {
+        throw new RepositoryNotFoundError(`session ${session} not found`);
+      }
+      return lookupIdempotency(validScope, validKey);
+    }
+    const taskCreateMatch = /^session:([^:]+):task$/.exec(validScope);
+    if (taskCreateMatch?.[1] !== undefined) {
+      const embedded = assertUuidV4(taskCreateMatch[1], "sessionId");
+      if (embedded.toLowerCase() !== session.toLowerCase()) {
+        throw new RepositoryNotFoundError(
+          `scope ${validScope} not found in session ${session}`,
+        );
+      }
+      if (readSession(db, session) === null) {
+        throw new RepositoryNotFoundError(`session ${session} not found`);
+      }
+      return lookupIdempotency(validScope, validKey);
+    }
+    const purposeOpMatch = /^purpose:([^:]+):(correct|revoke|achieve)$/.exec(
+      validScope,
+    );
+    if (purposeOpMatch?.[1] !== undefined) {
+      requireOwnedAutonomyPurpose(
+        session,
+        assertUuidV4(purposeOpMatch[1], "purposeId"),
+      );
+      return lookupIdempotency(validScope, validKey);
+    }
+    const taskOpMatch =
+      /^task:([^:]+):(start|hold|resume|complete|cancel)$/.exec(validScope);
+    if (taskOpMatch?.[1] !== undefined) {
+      requireOwnedAutonomyTask(session, assertUuidV4(taskOpMatch[1], "taskId"));
+      return lookupIdempotency(validScope, validKey);
+    }
+    const conflictMatch = /^session:([^:]+):conflict:([^:]+):([^:]+)$/.exec(
+      validScope,
+    );
+    if (conflictMatch?.[1] !== undefined) {
+      const embedded = assertUuidV4(conflictMatch[1], "sessionId");
+      if (embedded.toLowerCase() !== session.toLowerCase()) {
+        throw new RepositoryNotFoundError(
+          `scope ${validScope} not found in session ${session}`,
+        );
+      }
+      requireOwnedAutonomyPurpose(
+        session,
+        assertUuidV4(conflictMatch[2] as string, "purposeAId"),
+      );
+      requireOwnedAutonomyPurpose(
+        session,
+        assertUuidV4(conflictMatch[3] as string, "purposeBId"),
+      );
+      return lookupIdempotency(validScope, validKey);
+    }
     throw new RepositoryNotFoundError(
       `scope ${validScope} not found in session ${session}`,
     );
@@ -4612,6 +4784,413 @@ export function createKernelRepository(
     });
   }
 
+  /* ---------------------------------------------------------------- */
+  /* AV autonomy facade (purposes + tasks + stop control).              */
+  /*                                                                  */
+  /* Ownership: every method below delegates to `autonomy.ts`, the     */
+  /* ONLY writer of the autonomy tables. This facade adds the HTTP-    */
+  /* facing strict Zod boundary (request schemas, list-query bounds,   */
+  /* UUID checks) and returns the kernel `{ status, body, replayed }`  */
+  /* shape so routes can replay verbatim. No calendar / scheduling /   */
+  /* permission-grant behavior lives here.                             */
+  /* ---------------------------------------------------------------- */
+
+  function createAutonomyPurpose(
+    sessionId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: PurposeCreateResponse; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => PurposeCreateRequestSchema.parse(request),
+      "purpose create request",
+    );
+    return autonomyCreatePurpose(
+      db,
+      sessionId,
+      {
+        scope: parsed.scope,
+        statement: parsed.statement,
+        kind: parsed.kind,
+        explicit: parsed.explicit,
+        sourceKind: parsed.sourceKind,
+        ...(parsed.sourceTurnId !== undefined
+          ? { sourceTurnId: parsed.sourceTurnId }
+          : {}),
+        ...(parsed.interpretation !== undefined
+          ? { interpretation: parsed.interpretation }
+          : {}),
+        ...(parsed.validFrom !== undefined
+          ? { validFrom: parsed.validFrom }
+          : {}),
+        ...(parsed.validUntil !== undefined
+          ? { validUntil: parsed.validUntil }
+          : {}),
+      },
+      options,
+    );
+  }
+
+  function listAutonomyPurposes(
+    sessionId: string,
+    query: unknown = {},
+  ): PurposeListResponse {
+    const parsed = parseOrValidation(
+      () => AutonomyListQuerySchema.parse(query ?? {}),
+      "purpose list query",
+    );
+    const out = autonomyListPurposes(db, sessionId, parsed.limit);
+    return parseOrValidation(
+      () => PurposeListResponseSchema.parse(out),
+      "purpose list response",
+    );
+  }
+
+  function getAutonomyPurpose(
+    sessionId: string,
+    purposeId: string,
+  ): PurposeView {
+    return parseOrValidation(
+      () =>
+        PurposeViewSchema.parse(autonomyGetPurpose(db, sessionId, purposeId)),
+      "purpose response",
+    );
+  }
+
+  function correctAutonomyPurpose(
+    sessionId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): {
+    status: number;
+    body: PurposeCorrectResponse;
+    replayed: boolean;
+  } {
+    const parsed = parseOrValidation(
+      () => PurposeCorrectRequestSchema.parse(request),
+      "purpose correct request",
+    );
+    const out = autonomyCorrectPurpose(
+      db,
+      sessionId,
+      {
+        scope: parsed.scope,
+        statement: parsed.statement,
+        kind: parsed.kind,
+        explicit: parsed.explicit,
+        sourceKind: parsed.sourceKind,
+        purposeId: parsed.purposeId,
+        expectedVersion: parsed.expectedVersion,
+        ...(parsed.sourceTurnId !== undefined
+          ? { sourceTurnId: parsed.sourceTurnId }
+          : {}),
+        ...(parsed.interpretation !== undefined
+          ? { interpretation: parsed.interpretation }
+          : {}),
+        ...(parsed.validFrom !== undefined
+          ? { validFrom: parsed.validFrom }
+          : {}),
+        ...(parsed.validUntil !== undefined
+          ? { validUntil: parsed.validUntil }
+          : {}),
+      },
+      options,
+    );
+    const body = parseOrValidation(
+      () => PurposeCorrectResponseSchema.parse(out.body),
+      "purpose correct response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function revokeAutonomyPurpose(
+    sessionId: string,
+    purposeId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: PurposeView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => PurposeTransitionRequestSchema.parse(request),
+      "purpose revoke request",
+    );
+    const out = autonomyRevokePurpose(
+      db,
+      sessionId,
+      purposeId,
+      parsed.expectedVersion,
+      options,
+    );
+    const body = parseOrValidation(
+      () => PurposeViewSchema.parse(out.body),
+      "purpose response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function achieveAutonomyPurpose(
+    sessionId: string,
+    purposeId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: PurposeView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => PurposeTransitionRequestSchema.parse(request),
+      "purpose achieve request",
+    );
+    const out = autonomyAchievePurpose(
+      db,
+      sessionId,
+      purposeId,
+      parsed.expectedVersion,
+      options,
+    );
+    const body = parseOrValidation(
+      () => PurposeViewSchema.parse(out.body),
+      "purpose response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function listAutonomyPurposeConflicts(
+    sessionId: string,
+  ): PurposeConflictListResponse {
+    const out = autonomyListConflicts(db, sessionId);
+    return parseOrValidation(
+      () => PurposeConflictListResponseSchema.parse(out),
+      "purpose conflict response",
+    );
+  }
+
+  function recordAutonomyPurposeConflict(
+    sessionId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): {
+    status: number;
+    body: PurposeConflictRecord;
+    replayed: boolean;
+  } {
+    const parsed = parseOrValidation(
+      () => PurposeConflictRecordRequestSchema.parse(request),
+      "purpose conflict record request",
+    );
+    const out = autonomyRecordConflict(
+      db,
+      sessionId,
+      { purposeAId: parsed.purposeAId, purposeBId: parsed.purposeBId },
+      options,
+    );
+    const body = parseOrValidation(
+      () => PurposeConflictRecordSchema.parse(out.body),
+      "purpose conflict record response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function createAutonomyTask(
+    sessionId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: TaskCreateResponse; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => TaskCreateRequestSchema.parse(request),
+      "task create request",
+    );
+    const out = autonomyCreateTask(
+      db,
+      sessionId,
+      {
+        scope: parsed.scope,
+        title: parsed.title,
+        ...(parsed.body !== undefined ? { body: parsed.body } : {}),
+        kind: parsed.kind,
+        speaker: parsed.speaker,
+        ...(parsed.deadline !== undefined ? { deadline: parsed.deadline } : {}),
+        ...(parsed.parentPurposeId !== undefined
+          ? { parentPurposeId: parsed.parentPurposeId }
+          : {}),
+      },
+      options,
+    );
+    return { status: out.status, body: out.body, replayed: out.replayed };
+  }
+
+  function listAutonomyTasks(
+    sessionId: string,
+    query: unknown = {},
+  ): TaskListResponse {
+    const parsed = parseOrValidation(
+      () => AutonomyListQuerySchema.parse(query ?? {}),
+      "task list query",
+    );
+    const out = autonomyListTasks(db, sessionId, parsed.limit);
+    return parseOrValidation(
+      () => TaskListResponseSchema.parse(out),
+      "task list response",
+    );
+  }
+
+  function getAutonomyTask(sessionId: string, taskId: string): TaskView {
+    return autonomyGetTask(db, sessionId, taskId);
+  }
+
+  function startAutonomyTask(
+    sessionId: string,
+    taskId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: TaskView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => TaskTransitionRequestSchema.parse(request),
+      "task start request",
+    );
+    return autonomyStartTask(
+      db,
+      sessionId,
+      taskId,
+      parsed.expectedVersion,
+      options,
+    );
+  }
+
+  function holdAutonomyTask(
+    sessionId: string,
+    taskId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: TaskView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => TaskHoldRequestSchema.parse(request),
+      "task hold request",
+    );
+    return autonomyHoldTask(
+      db,
+      sessionId,
+      taskId,
+      {
+        expectedVersion: parsed.expectedVersion,
+        reason: parsed.reason,
+        reconsiderTrigger: parsed.reconsiderTrigger,
+      },
+      options,
+    );
+  }
+
+  function resumeAutonomyTask(
+    sessionId: string,
+    taskId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: TaskView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => TaskResumeRequestSchema.parse(request),
+      "task resume request",
+    );
+    return autonomyResumeTask(
+      db,
+      sessionId,
+      taskId,
+      {
+        expectedVersion: parsed.expectedVersion,
+        evidenceKind: parsed.evidenceKind,
+        evidence: parsed.evidence,
+        ...(parsed.newParentPurposeId !== undefined
+          ? { newParentPurposeId: parsed.newParentPurposeId }
+          : {}),
+      },
+      options,
+    );
+  }
+
+  function completeAutonomyTask(
+    sessionId: string,
+    taskId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: TaskView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => TaskTransitionRequestSchema.parse(request),
+      "task complete request",
+    );
+    return autonomyCompleteTask(
+      db,
+      sessionId,
+      taskId,
+      parsed.expectedVersion,
+      options,
+    );
+  }
+
+  function cancelAutonomyTask(
+    sessionId: string,
+    taskId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: TaskView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => TaskTransitionRequestSchema.parse(request),
+      "task cancel request",
+    );
+    return autonomyCancelTask(
+      db,
+      sessionId,
+      taskId,
+      parsed.expectedVersion,
+      options,
+    );
+  }
+
+  function getAutonomyControlState(): AutonomyControlView {
+    return parseOrValidation(
+      () => AutonomyControlViewSchema.parse(autonomyGetControl(db)),
+      "autonomy control response",
+    );
+  }
+
+  function setAutonomyControlState(
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: AutonomyControlView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => AutonomyControlSetRequestSchema.parse(request),
+      "autonomy control request",
+    );
+    const out = autonomySetControl(
+      db,
+      {
+        paused: parsed.paused,
+        expectedVersion: parsed.expectedVersion,
+        ...(parsed.reason !== undefined ? { reason: parsed.reason } : {}),
+      },
+      options,
+    );
+    const body = parseOrValidation(
+      () => AutonomyControlViewSchema.parse(out.body),
+      "autonomy control response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function listAutonomyActivityLog(
+    query: unknown = {},
+  ): AutonomyActivityListResponse {
+    const parsed = parseOrValidation(
+      () => AutonomyListQuerySchema.parse(query ?? {}),
+      "activity list query",
+    );
+    const out = autonomyListActivity(db, parsed.limit);
+    return parseOrValidation(
+      () => AutonomyActivityListResponseSchema.parse({ items: out.items }),
+      "activity list response",
+    );
+  }
+
+  function applyAutonomyRestartFenceNow(now?: number): {
+    paused: boolean;
+    version: number;
+  } {
+    return applyAutonomyRestartFence(db, now);
+  }
+
   return {
     createSession,
     postMessage,
@@ -4679,6 +5258,26 @@ export function createKernelRepository(
     requireOwnedTurn: (sessionId: string, turnId: string): TurnRow =>
       parseTurnRow(requireOwnedTurn(sessionId, turnId)),
     actionProposalsStager: stager,
+    createAutonomyPurpose,
+    listAutonomyPurposes,
+    getAutonomyPurpose,
+    correctAutonomyPurpose,
+    revokeAutonomyPurpose,
+    achieveAutonomyPurpose,
+    listAutonomyPurposeConflicts,
+    recordAutonomyPurposeConflict,
+    createAutonomyTask,
+    listAutonomyTasks,
+    getAutonomyTask,
+    startAutonomyTask,
+    holdAutonomyTask,
+    resumeAutonomyTask,
+    completeAutonomyTask,
+    cancelAutonomyTask,
+    getAutonomyControlState,
+    setAutonomyControlState,
+    listAutonomyActivityLog,
+    applyAutonomyRestartFenceNow,
   };
 }
 

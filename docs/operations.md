@@ -3665,3 +3665,63 @@ Google mutation, no new consent, no reconsent, no deploy changes; readonly
   superseded literals rejected, skips cleanly when unset) +
   `calendarReadonlyProfile.test.ts` cutover boundaries (superseded
   6939311 hashes and the old array `account` form both fail closed).
+
+## AV autonomy foundation — purposes/tasks/stop control + consumer UI boundaries (2026-10-16, observed)
+
+Implements the AV01/AV03/local+global-stop foundation only (NOT all of
+autonomy): session-owned purposes (create with scope/kind/provenance/
+interpretation/applicability window, explicit correction appending a new
+record while the original is preserved + superseded, revoke/achieve,
+explicit pair conflict record — same-kind goals never auto-conflict),
+explicit tasks (standalone or attached with scope inheritance, null
+deadline default, start/hold with reason/resume with evidence + optional
+explicit replacement parent/complete/cancel, revoke/correct/achieve of a
+parent holds non-terminal dependents, blind resume 409s, permission
+purposes are claims only and grant nothing), the durable global stop
+control (CAS version, defaults paused, production restart fence re-pauses
+a resumed control with version+1 and logs `restart_fence`), and the
+consumer UI boundaries (statement-only correction preserves
+kind/scope/interpretation/window from the selected record; task resume
+reparents ONLY via the explicit replacement checkbox + evidence; purpose/
+task selection clears drafts synchronously, late detail GETs are discarded
+by selection generation, and every mutation CAS uses the captured
+selected-view version so a backend mutation + refresh invalidates stale
+drafts instead of applying them to the new version).
+
+- Owned new sources: `packages/contracts/src/autonomy.ts` (DTO/error/
+  scope-key contracts), `packages/kernel/src/autonomy.ts` +
+  `packages/kernel/migrations/0011_autonomy.sql` (tables
+  `autonomy_purposes/_events/_conflicts`, `autonomy_tasks/_events`,
+  `autonomy_control`, `autonomy_activity`; CAS/versioned transitions),
+  `packages/kernel/test/autonomy_slice.test.ts`,
+  `apps/server/test/autonomy_http.test.ts`,
+  `apps/server/e2e/autonomy.spec.ts` (permanent browser regressions),
+  routes + UI in `apps/server/src/app.ts` /
+  `apps/server/src/ui/client.ts` (`AutonomyPanel`) / `page.ts`.
+- Next-worker interfaces (shadow + notification stages): repo surface
+  `createPurpose/correctPurpose/revokePurpose/achievePurpose/
+  recordPurposeConflict/createTask/startTask/holdTask/resumeTask/
+  completeTask/cancelTask/getAutonomyControl/setAutonomyControl/
+  applyAutonomyRestartFence/listAutonomyActivity/isAutonomousWorkAllowed`;
+  idempotency scopes `purposeCreateScope/taskCreateScope/purposeOpScope/
+  taskOpScope` + `IDEMPOTENCY_SCOPE_AUTONOMY_CONTROL`; resume DTO
+  `TaskResumeRequest{expectedVersion, evidenceKind, evidence,
+  newParentPurposeId?}`; activity kinds `user_message/autonomy_stopped/
+  autonomy_resumed/restart_fence/interrupted_note`; HTTP `GET+POST
+  /api/autonomy/control {paused, expectedVersion}` (global, versioned),
+  session `purposes|tasks|purpose-conflicts` CRUD + `correct|revoke|
+  achieve|start|hold|resume|complete|cancel` transitions (all CAS 409 on
+  `autonomy_version_conflict`, illegal lifecycle 409 on
+  `autonomy_state_conflict`).
+- Verified 2026-10-16: permanent `autonomy.spec.ts` 4/4 over REAL Chromium
+  + REAL HTTP with a freshly built bundle (statement-preserve, explicit
+  reparent, late-response draft guard purposes+tasks, stale-draft
+  invalidation purposes+tasks); full default e2e 28 passed;
+  `autonomy_http.test.ts` 3/3 + `autonomy_slice.test.ts` 11/11; Biome
+  clean on changed files; root `tsc` shows only the pre-existing
+  worktree `better-sqlite3` TS7016 environment noise (0 other errors).
+  The earlier temporary `autonomy-proof.local.ts` harness (HTTP/Chromium/
+  restart lifecycle) was deleted before commit; its log stays in tmp only.
+- Remaining (NOT claimed): AV02 shadow, AV04 learning, AV05
+  notification, AV06 priority, AV07 supervisor/reconcile, AV08
+  maintenance/handoff.

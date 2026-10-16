@@ -1690,3 +1690,6 @@ CREATE TABLE action_receipts (
   - **層状のツールポリシー**（能力へのアクセスを一元パイプラインで統制する発想）。
 - Companion Harness 固有の部分（OpenClaw にはない独自設計）:
   - **Reference / ResourceSnapshot / Citation の 3 層同一性モデル**（§4）。不変スナップショットと rN による参照は本プロダクトの独自要素である。
+
+## 現況追記（2026-10-16、AV autonomy foundationのみ・履歴保持・合意/未解決の書き換えなし）
+- AV01 purpose + AV03 task + persist/stop foundationのみ（全AV完成は主張しない）。session-owned purposes＋explicit tasks＋durable global stop（CAS/default paused/restart fence version+1）＋ consumer UI境界4回帰（`apps/server/e2e/autonomy.spec.ts` 4/4、full default e2e 28 passedはGREEN再実行なし）。`autonomy_http` 3/3・`autonomy_slice` 11/11、Biome clean、root tscは既存better-sqlite3 TS7016のみ。no-runtime-permission（実OAuth/Google/secret DB/device/user listener/runtime grant/Calendar書込なし）。残件: AV02 shadow、AV04 learning、AV05 notify、AV06 priority、AV07 supervisor/reconcile、AV08 maintenance/handoff。詳細は `docs/operations.md`（AV autonomy foundation）。

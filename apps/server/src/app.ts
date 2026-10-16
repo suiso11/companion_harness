@@ -9,6 +9,7 @@
 import {
   ActiveRunResponseSchema,
   type ApiErrorCode,
+  AutonomyControlSetRequestSchema,
   CancelRunRequestSchema,
   CancelRunResponseSchema,
   CreateSessionRequestSchema,
@@ -34,6 +35,10 @@ import {
   ProposalRejectRequestSchema,
   ProposalRejectResponseSchema,
   ProposalsListResponseSchema,
+  PurposeConflictRecordRequestSchema,
+  PurposeCorrectRequestSchema,
+  PurposeCreateRequestSchema,
+  PurposeTransitionRequestSchema,
   proposalApproveScope,
   ReferenceContextGetResponseSchema,
   ReferenceContextPutRequestSchema,
@@ -43,9 +48,15 @@ import {
   ReferenceSetDetailResponseSchema,
   RunStatusResponseSchema,
   retryScope,
+  TaskCreateRequestSchema,
+  TaskHoldRequestSchema,
+  TaskResumeRequestSchema,
+  TaskTransitionRequestSchema,
 } from "@companion/contracts";
 import {
   ActionNotCancellableError,
+  AutonomyStateConflictError,
+  AutonomyVersionConflictError,
   IdempotencyConflictError,
   InvalidReferenceError,
   isUuidV4,
@@ -596,6 +607,31 @@ function mapDomainError(c: Context, error: unknown): Response {
     return c.json(
       { error: { code: "invalid_reference", message: "invalid reference" } },
       400,
+    );
+  }
+  // AV autonomy slice: CAS version conflicts and illegal lifecycle
+  // transitions map to fixed 409 codes (same shape as the M5 proposal
+  // codes above; outside the frozen ApiErrorCode enum).
+  if (error instanceof AutonomyVersionConflictError) {
+    return c.json(
+      {
+        error: {
+          code: "autonomy_version_conflict",
+          message: "autonomy version conflict",
+        },
+      },
+      409,
+    );
+  }
+  if (error instanceof AutonomyStateConflictError) {
+    return c.json(
+      {
+        error: {
+          code: "autonomy_state_conflict",
+          message: "autonomy state conflict",
+        },
+      },
+      409,
     );
   }
   if (
@@ -2019,6 +2055,546 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         ),
       );
       return c.json(body, 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  /* ---------------- AV autonomy: purposes + tasks + stop control -------- */
+  // Session-owned durable purpose/task records plus the global stop
+  // control. Strict Zod bodies, UUID ids, Idempotency-Key on every
+  // mutation, exact query gates, ownership-first 404s, CAS 409s. Recorded
+  // `permission` purposes are claims only: no route here creates a grant,
+  // a capability write, or an external action.
+
+  app.post("/api/sessions/:sessionId/purposes", async (c) => {
+    const started = now();
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const keyed = requireIdempotencyKey(c);
+    if ("response" in keyed) {
+      return keyed.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    const raw = await readJsonBody(c);
+    if (!raw.ok) {
+      return validationError(c);
+    }
+    if (PurposeCreateRequestSchema.safeParse(raw.value).success !== true) {
+      return validationError(c);
+    }
+    if (draining) {
+      return shuttingDown(c);
+    }
+    try {
+      const out = repo.createAutonomyPurpose(session.id, raw.value, {
+        key: keyed.key,
+        now: now(),
+      });
+      logger.info("http.autonomy.purposes.create", {
+        sessionId: session.id,
+        status: out.status,
+        durationMs: Math.max(now() - started, 0),
+      });
+      return c.json(out.body, out.status as 201);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get("/api/sessions/:sessionId/purposes", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const query = strictQuery(c, ["limit"]);
+    if (!query.ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(
+        repo.listAutonomyPurposes(session.id, {
+          ...(query.values.limit !== undefined
+            ? { limit: query.values.limit }
+            : {}),
+        }),
+        200,
+      );
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get("/api/sessions/:sessionId/purposes/:purposeId", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const purpose = requireUuid(c, c.req.param("purposeId"), "purposeId");
+    if ("response" in purpose) {
+      return purpose.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(repo.getAutonomyPurpose(session.id, purpose.id), 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.post(
+    "/api/sessions/:sessionId/purposes/:purposeId/correct",
+    async (c) => {
+      const started = now();
+      const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+      if ("response" in session) {
+        return session.response;
+      }
+      const purpose = requireUuid(c, c.req.param("purposeId"), "purposeId");
+      if ("response" in purpose) {
+        return purpose.response;
+      }
+      const keyed = requireIdempotencyKey(c);
+      if ("response" in keyed) {
+        return keyed.response;
+      }
+      if (!strictQuery(c, []).ok) {
+        return validationError(c);
+      }
+      const raw = await readJsonBody(c);
+      if (!raw.ok) {
+        return validationError(c);
+      }
+      // The path id is authoritative: the body carries the new statement but
+      // never selects a different record (no latest-wins rebinding).
+      const withId =
+        typeof raw.value === "object" && raw.value !== null
+          ? { ...(raw.value as Record<string, unknown>), purposeId: purpose.id }
+          : raw.value;
+      if (PurposeCorrectRequestSchema.safeParse(withId).success !== true) {
+        return validationError(c);
+      }
+      if (draining) {
+        return shuttingDown(c);
+      }
+      try {
+        const out = repo.correctAutonomyPurpose(session.id, withId, {
+          key: keyed.key,
+          now: now(),
+        });
+        logger.info("http.autonomy.purposes.correct", {
+          sessionId: session.id,
+          status: out.status,
+          durationMs: Math.max(now() - started, 0),
+        });
+        return c.json(out.body, out.status as 201);
+      } catch (error) {
+        return mapDomainError(c, error);
+      }
+    },
+  );
+
+  app.post("/api/sessions/:sessionId/purposes/:purposeId/revoke", async (c) => {
+    const started = now();
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const purpose = requireUuid(c, c.req.param("purposeId"), "purposeId");
+    if ("response" in purpose) {
+      return purpose.response;
+    }
+    const keyed = requireIdempotencyKey(c);
+    if ("response" in keyed) {
+      return keyed.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    const raw = await readJsonBody(c);
+    if (!raw.ok) {
+      return validationError(c);
+    }
+    if (PurposeTransitionRequestSchema.safeParse(raw.value).success !== true) {
+      return validationError(c);
+    }
+    if (draining) {
+      return shuttingDown(c);
+    }
+    try {
+      const out = repo.revokeAutonomyPurpose(
+        session.id,
+        purpose.id,
+        raw.value,
+        { key: keyed.key, now: now() },
+      );
+      logger.info("http.autonomy.purposes.revoke", {
+        sessionId: session.id,
+        status: out.status,
+        durationMs: Math.max(now() - started, 0),
+      });
+      return c.json(out.body, out.status as 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.post(
+    "/api/sessions/:sessionId/purposes/:purposeId/achieve",
+    async (c) => {
+      const started = now();
+      const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+      if ("response" in session) {
+        return session.response;
+      }
+      const purpose = requireUuid(c, c.req.param("purposeId"), "purposeId");
+      if ("response" in purpose) {
+        return purpose.response;
+      }
+      const keyed = requireIdempotencyKey(c);
+      if ("response" in keyed) {
+        return keyed.response;
+      }
+      if (!strictQuery(c, []).ok) {
+        return validationError(c);
+      }
+      const raw = await readJsonBody(c);
+      if (!raw.ok) {
+        return validationError(c);
+      }
+      if (
+        PurposeTransitionRequestSchema.safeParse(raw.value).success !== true
+      ) {
+        return validationError(c);
+      }
+      if (draining) {
+        return shuttingDown(c);
+      }
+      try {
+        const out = repo.achieveAutonomyPurpose(
+          session.id,
+          purpose.id,
+          raw.value,
+          { key: keyed.key, now: now() },
+        );
+        logger.info("http.autonomy.purposes.achieve", {
+          sessionId: session.id,
+          status: out.status,
+          durationMs: Math.max(now() - started, 0),
+        });
+        return c.json(out.body, out.status as 200);
+      } catch (error) {
+        return mapDomainError(c, error);
+      }
+    },
+  );
+
+  app.get("/api/sessions/:sessionId/purpose-conflicts", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(repo.listAutonomyPurposeConflicts(session.id), 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  // Explicit conflict record (idempotent, versioned via CAS on members at
+  // use time, never derived): same-session/scope owned active pair only.
+  // Cross-session ids are 404; scope mismatch / inactive members are 400 /
+  // 409; recording grants no authority and never auto-resolves anything.
+  app.post("/api/sessions/:sessionId/purpose-conflicts", async (c) => {
+    const started = now();
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const keyed = requireIdempotencyKey(c);
+    if ("response" in keyed) {
+      return keyed.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    const raw = await readJsonBody(c);
+    if (!raw.ok) {
+      return validationError(c);
+    }
+    if (
+      PurposeConflictRecordRequestSchema.safeParse(raw.value).success !== true
+    ) {
+      return validationError(c);
+    }
+    if (draining) {
+      return shuttingDown(c);
+    }
+    try {
+      const out = repo.recordAutonomyPurposeConflict(session.id, raw.value, {
+        key: keyed.key,
+        now: now(),
+      });
+      logger.info("http.autonomy.purposes.conflict.record", {
+        sessionId: session.id,
+        status: out.status,
+        durationMs: Math.max(now() - started, 0),
+      });
+      return c.json(out.body, out.status as 201);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.post("/api/sessions/:sessionId/tasks", async (c) => {
+    const started = now();
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const keyed = requireIdempotencyKey(c);
+    if ("response" in keyed) {
+      return keyed.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    const raw = await readJsonBody(c);
+    if (!raw.ok) {
+      return validationError(c);
+    }
+    if (TaskCreateRequestSchema.safeParse(raw.value).success !== true) {
+      return validationError(c);
+    }
+    if (draining) {
+      return shuttingDown(c);
+    }
+    try {
+      const out = repo.createAutonomyTask(session.id, raw.value, {
+        key: keyed.key,
+        now: now(),
+      });
+      logger.info("http.autonomy.tasks.create", {
+        sessionId: session.id,
+        status: out.status,
+        durationMs: Math.max(now() - started, 0),
+      });
+      return c.json(out.body, out.status as 201);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get("/api/sessions/:sessionId/tasks", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const query = strictQuery(c, ["limit"]);
+    if (!query.ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(
+        repo.listAutonomyTasks(session.id, {
+          ...(query.values.limit !== undefined
+            ? { limit: query.values.limit }
+            : {}),
+        }),
+        200,
+      );
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get("/api/sessions/:sessionId/tasks/:taskId", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const task = requireUuid(c, c.req.param("taskId"), "taskId");
+    if ("response" in task) {
+      return task.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(repo.getAutonomyTask(session.id, task.id), 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  function autonomyTaskTransition(
+    op: "start" | "hold" | "resume" | "complete" | "cancel",
+  ): (c: Context) => Promise<Response> {
+    const schema =
+      op === "hold"
+        ? TaskHoldRequestSchema
+        : op === "resume"
+          ? TaskResumeRequestSchema
+          : TaskTransitionRequestSchema;
+    return async (c) => {
+      const started = now();
+      const session = requireUuid(
+        c,
+        c.req.param("sessionId") ?? "",
+        "sessionId",
+      );
+      if ("response" in session) {
+        return session.response;
+      }
+      const task = requireUuid(c, c.req.param("taskId") ?? "", "taskId");
+      if ("response" in task) {
+        return task.response;
+      }
+      const keyed = requireIdempotencyKey(c);
+      if ("response" in keyed) {
+        return keyed.response;
+      }
+      if (!strictQuery(c, []).ok) {
+        return validationError(c);
+      }
+      const raw = await readJsonBody(c);
+      if (!raw.ok) {
+        return validationError(c);
+      }
+      if (schema.safeParse(raw.value).success !== true) {
+        return validationError(c);
+      }
+      if (draining) {
+        return shuttingDown(c);
+      }
+      try {
+        const options = { key: keyed.key, now: now() };
+        const out =
+          op === "start"
+            ? repo.startAutonomyTask(session.id, task.id, raw.value, options)
+            : op === "hold"
+              ? repo.holdAutonomyTask(session.id, task.id, raw.value, options)
+              : op === "resume"
+                ? repo.resumeAutonomyTask(
+                    session.id,
+                    task.id,
+                    raw.value,
+                    options,
+                  )
+                : op === "complete"
+                  ? repo.completeAutonomyTask(
+                      session.id,
+                      task.id,
+                      raw.value,
+                      options,
+                    )
+                  : repo.cancelAutonomyTask(
+                      session.id,
+                      task.id,
+                      raw.value,
+                      options,
+                    );
+        logger.info("http.autonomy.tasks.transition", {
+          sessionId: session.id,
+          status: out.status,
+          durationMs: Math.max(now() - started, 0),
+        });
+        return c.json(out.body, out.status as 200);
+      } catch (error) {
+        return mapDomainError(c, error);
+      }
+    };
+  }
+
+  app.post(
+    "/api/sessions/:sessionId/tasks/:taskId/start",
+    autonomyTaskTransition("start"),
+  );
+  app.post(
+    "/api/sessions/:sessionId/tasks/:taskId/hold",
+    autonomyTaskTransition("hold"),
+  );
+  app.post(
+    "/api/sessions/:sessionId/tasks/:taskId/resume",
+    autonomyTaskTransition("resume"),
+  );
+  app.post(
+    "/api/sessions/:sessionId/tasks/:taskId/complete",
+    autonomyTaskTransition("complete"),
+  );
+  app.post(
+    "/api/sessions/:sessionId/tasks/:taskId/cancel",
+    autonomyTaskTransition("cancel"),
+  );
+
+  app.get("/api/autonomy/control", (c) => {
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(repo.getAutonomyControlState(), 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.post("/api/autonomy/control", async (c) => {
+    const started = now();
+    const keyed = requireIdempotencyKey(c);
+    if ("response" in keyed) {
+      return keyed.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    const raw = await readJsonBody(c);
+    if (!raw.ok) {
+      return validationError(c);
+    }
+    if (AutonomyControlSetRequestSchema.safeParse(raw.value).success !== true) {
+      return validationError(c);
+    }
+    if (draining) {
+      return shuttingDown(c);
+    }
+    try {
+      const out = repo.setAutonomyControlState(raw.value, {
+        key: keyed.key,
+        now: now(),
+      });
+      logger.info("http.autonomy.control", {
+        status: out.status,
+        durationMs: Math.max(now() - started, 0),
+      });
+      return c.json(out.body, out.status as 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get("/api/autonomy/activity", (c) => {
+    const query = strictQuery(c, ["limit"]);
+    if (!query.ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(
+        repo.listAutonomyActivityLog({
+          ...(query.values.limit !== undefined
+            ? { limit: query.values.limit }
+            : {}),
+        }),
+        200,
+      );
     } catch (error) {
       return mapDomainError(c, error);
     }

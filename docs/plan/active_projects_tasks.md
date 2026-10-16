@@ -602,3 +602,6 @@
 
 ## 現況追記（2026-10-15、履歴保持・checkbox/ID/件数不変）
 - Companion explicit memory management（I02/I03 管理面＋I04 確認契約の範囲）: search（retired 含む・no-heat）・current-vs-snapshot confirm・source event→real correct chain・retire/reactivate（削除/非表示ではない）を実装。UI 同期 invalidation/generation guard・pending reset＋poll identity・stale ack 非再利用、7 integrity 回帰を含む。full Vitest 113 files/1370・browser GREEN・live GREEN・typecheck＋lint GREEN（synthetic gateway の限定付き）。perception/export/deletion 未実装維持。I01/I04 正式採用判断・Windows manual・現行 CI は未完維持。
+
+## 現況追記（2026-10-16、AV autonomy foundationのみ・履歴保持・checkbox/ID/件数不変）
+- AV01/AV03/persist+stop foundationのみ（全AV完成は主張しない）: purposes（scope/kind/provenance/interpretation/window、訂正は新record+原文superseded保持、revoke/achieve、explicit pair conflictのみ）＋ tasks（standalone/attached、start/hold/resume+evidence・explicit replacement parentのみ・blind 409、parent遷移は依存held化、null deadline既定、permissionはclaimのみ）＋ global stop（CAS、default paused、restart fence version+1 re-pause）。永久browser `autonomy.spec.ts` 4/4（metadata/scope/time保持・explicit新parent resume・late A/B draft破棄・version refresh無効化）＋ full default e2e 28 passed（GREEN再実行なし）＋ `autonomy_http` 3/3・`autonomy_slice` 11/11、Biome clean、root tscは既存better-sqlite3 TS7016のみ。no-runtime-permission。残件: AV02 shadow、AV04 learning、AV05 notify、AV06 priority、AV07 supervisor、AV08 maintenance/handoff。

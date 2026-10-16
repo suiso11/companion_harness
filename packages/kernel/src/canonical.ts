@@ -106,6 +106,21 @@ export const IDEMPOTENCY_OPERATIONS = {
   postMessage: { operation: "post_message", schemaVersion: 1 },
   postRetry: { operation: "post_retry", schemaVersion: 1 },
   approveProposal: { operation: "approve_proposal", schemaVersion: 1 },
+  createPurpose: { operation: "autonomy_create_purpose", schemaVersion: 1 },
+  correctPurpose: { operation: "autonomy_correct_purpose", schemaVersion: 2 },
+  revokePurpose: { operation: "autonomy_revoke_purpose", schemaVersion: 1 },
+  achievePurpose: { operation: "autonomy_achieve_purpose", schemaVersion: 1 },
+  createTask: { operation: "autonomy_create_task", schemaVersion: 1 },
+  startTask: { operation: "autonomy_start_task", schemaVersion: 1 },
+  holdTask: { operation: "autonomy_hold_task", schemaVersion: 1 },
+  resumeTask: { operation: "autonomy_resume_task", schemaVersion: 1 },
+  completeTask: { operation: "autonomy_complete_task", schemaVersion: 1 },
+  cancelTask: { operation: "autonomy_cancel_task", schemaVersion: 1 },
+  setAutonomyControl: { operation: "autonomy_set_control", schemaVersion: 1 },
+  recordPurposeConflict: {
+    operation: "autonomy_record_conflict",
+    schemaVersion: 1,
+  },
 } as const;
 
 /** Generate a new UUID v4 harness id. */
