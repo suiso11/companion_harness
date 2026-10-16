@@ -1850,7 +1850,7 @@ export function createKernelRepository(
       result: RunResult | null;
       receipt: ActionReceiptView | null;
       executionStatus: ActionExecutionStatus | null;
-      targetCitation: ActionTargetCitation;
+      targetCitation: ActionTargetCitation | null;
     } | null => {
       const execution = db
         .prepare(
@@ -2391,10 +2391,10 @@ export function createKernelRepository(
     decision_turn_id: string | null;
     tool: string;
     input_json: string;
-    target_ref_id: string;
-    target_resource_id: string;
-    based_on_snapshot_id: string;
-    expected_revision: string;
+    target_ref_id: string | null;
+    target_resource_id: string | null;
+    based_on_snapshot_id: string | null;
+    expected_revision: string | null;
     preview_json: string;
     hash: string;
     status: string;
@@ -2435,20 +2435,26 @@ export function createKernelRepository(
    * ORIGINAL-only session citation label (BEFORE evidence navigation) for a
    * session-owned proposal: the `rN` ordinal of the exact source
    * SessionReference the proposal's immutable `target_ref_id` points at.
-   * Display metadata only — never a verified AFTER claim, never parsed from
-   * preview prose, never a new read of the current upstream. The composite
-   * DB FK (`action_proposals_target_fk`) guarantees the owned reference row
+   * NULL ONLY for targetless `calendar.create` proposals (no source event
+   * exists, so there is no BEFORE — never a fabricated label). Display
+   * metadata only — never a verified AFTER claim, never parsed from
+   * preview prose, never a new read of the current upstream. For
+   * target-carrying proposals the composite DB FK
+   * (`action_proposals_target_fk`) guarantees the owned reference row
    * exists; a missing row is impossible state and fails closed (no
    * fabricated label, no cross-session info).
    */
   function targetCitationForProposal(
     session: string,
     proposal: RawProposal,
-  ): ActionTargetCitation {
+  ): ActionTargetCitation | null {
     if (proposal.session_id !== session) {
       throw new RepositoryNotFoundError(
         `proposal ${proposal.id} not found in session ${session}`,
       );
+    }
+    if (proposal.target_ref_id === null) {
+      return null;
     }
     const reference = db
       .prepare(
@@ -3075,7 +3081,9 @@ export function createKernelRepository(
       .prepare(
         "SELECT hash, expected_revision FROM action_proposals WHERE id = ?",
       )
-      .get(proposal) as { hash: string; expected_revision: string } | undefined;
+      .get(proposal) as
+      | { hash: string; expected_revision: string | null }
+      | undefined;
     if (row === undefined) {
       return null;
     }

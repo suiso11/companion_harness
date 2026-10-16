@@ -2810,6 +2810,33 @@ snapshot, and non-action `user_text` history omits the field entirely.
   with identical counters, reload retains BEFORE-only with 0 extra
   writes. `test-results/` removed; no dependency change.
 
+### Follow-up: nullable ORIGINAL citation for targetless `calendar.create` (this branch)
+
+PR37 views assumed every proposal carries an owned `target_ref_id`; M6
+create proposals carry NULL (no source event, no BEFORE — migration 0010
+on PR38 `feat/m6-calendar-create-host` head `4ff6096` makes the target
+columns nullable with a CHECK constraining NULL to `calendar.create`
+only). Fail-before (observed on the combined integration branch
+`int/combined-35-39-own` head `cf1ef34`, merging PR35 `e16735b` + PR36
+`008e270` + PR37 `ce2da00` + PR38 `4ff6096` + PR39 `282b661`): any
+execution/history read for a create row threw `DatabaseStateInvalidError`
+`proposal <id> has no owned target reference (impossible state)`, because
+the NULL key never matches a `session_references` row. This branch makes
+`targetCitation` nullable on `ProposalExecutionView` /
+`ActionRunHistorySelection` (contracts) and returns NULL early for
+`target_ref_id IS NULL` in `targetCitationForProposal` (kernel); DB
+ownership constraints and the reschedule fail-closed paths are unchanged
+(missing/cross-session reschedule originals still throw, never a
+fabricated label). Depends on PR38 for actual NULL rows (this schema at
+PR37 cannot store them); no migration here. Observed verification:
+`targetless_citation_compat` 4/4 (null accepted, owned `rN` kept,
+non-`rN` rejected) + existing `action_evidence_navigation` 9/9 unchanged
+on this branch; full service-lifecycle create regression
+(`action_evidence_targetless_create`: pending/live null BEFORE,
+unknown terminal null BEFORE + null result, succeeded null BEFORE +
+actual fresh AFTER `rN`) 3/3 on the combined branch, plus
+connector `createWrite` 6/6 and kernel `action_create` 2/2 there.
+
 ## Live readonly acceptance ledger (2026-10-14, current profile)
 
 Current accepted activation: the host-owned pinned profile
