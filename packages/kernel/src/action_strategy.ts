@@ -335,6 +335,9 @@ function parseStrictInstantMs(value: string): number | undefined {
     if (hour > 23 || minute > 59 || second > 59) return undefined;
     // Milliseconds are exactly the first three decimal digits,
     // right-padded (float parsing could round up into the next second).
+    // Truncation here is exact: genuinely sub-millisecond instants are
+    // rejected at staging and by the write port, so a surviving approved
+    // fraction is always millisecond-expressible.
     const fraction = seconds[7] as string | undefined;
     const ms =
       fraction !== undefined ? Number(fraction.slice(1, 4).padEnd(3, "0")) : 0;

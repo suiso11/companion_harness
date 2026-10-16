@@ -249,8 +249,8 @@ export interface ActionWriteBinding {
    * case) can still bind hostside without weakening the match rule: the
    * derived port's capability MUST name the id the server registered, and the
    * existing exact-identity check below still fails closed on any mismatch.
-   * Invoked ONLY when `config.calendar` is configured (i.e. only after the
-   * owned instance exists) and exactly once.
+   * Invoked ONLY when a Calendar composition is active (owned config OR
+   * injected binding) and exactly once.
    */
   readonly derivePort?: (active: {
     readonly connectorInstanceId: string;
@@ -807,6 +807,36 @@ export async function startServer(
         frozenWriteConnectorHint,
       );
       assertRescheduleWriteHintCompatible(writeConnectorHint);
+      // Canonical write-connector validation BEFORE any DB side effect. The
+      // build below is pure (no I/O) and owns the EXACT identity rules
+      // (non-empty serverName <= 128 / version <= 64 — the same validation
+      // the normal composition runs at line ~1043, never a second divergent
+      // rule), so an overlong TEST identity fails here regardless of the
+      // transport factory. The production env-allowlist gate
+      // (`assertStdioEnvClosed`, which rejects before spawn) additionally
+      // runs ONLY for the default factory: explicit inert-transport test
+      // seams (`writeMcpTransportFactory` injected) need no OS env and
+      // production is never weakened for them. Fixed redacted messages only
+      // (no env values).
+      let preflightWriteConfig: ReturnType<
+        typeof buildRescheduleWriteConnectorConfig
+      >;
+      try {
+        preflightWriteConfig = buildRescheduleWriteConnectorConfig({
+          connectorInstanceId: "preflight",
+          hint: writeConnectorHint,
+          ...(options.writeTestIdentity !== undefined
+            ? { testIdentity: options.writeTestIdentity }
+            : {}),
+        });
+      } catch (error) {
+        if (error instanceof ServerConfigError) {
+          throw error;
+        }
+        throw new ServerConfigError(
+          "reschedule write connector hints are invalid",
+        );
+      }
       // P1: the production default stdio factory deterministically requires
       // every platform SDK implicit env name (`STDIO_IMPLICIT_ENV_VARS`) in
       // the hint allowlist (`assertStdioEnvClosed` rejects before spawn, and
@@ -819,15 +849,7 @@ export async function startServer(
       // only (no env values).
       if (options.writeMcpTransportFactory === undefined) {
         try {
-          assertStdioEnvClosed(
-            buildRescheduleWriteConnectorConfig({
-              connectorInstanceId: "preflight",
-              hint: writeConnectorHint,
-              ...(options.writeTestIdentity !== undefined
-                ? { testIdentity: options.writeTestIdentity }
-                : {}),
-            }),
-          );
+          assertStdioEnvClosed(preflightWriteConfig);
         } catch (error) {
           if (error instanceof ServerConfigError) {
             throw error;
@@ -836,15 +858,6 @@ export async function startServer(
             "reschedule write connector env allowlist is invalid",
           );
         }
-      }
-      if (
-        options.writeTestIdentity !== undefined &&
-        (options.writeTestIdentity.expectedServerName.length === 0 ||
-          options.writeTestIdentity.version.length === 0)
-      ) {
-        throw new ServerConfigError(
-          "reschedule write connector hints are invalid",
-        );
       }
     } else if (frozenWriteConnectorHint !== undefined) {
       // Hints without the profile selector are never silently adopted or
@@ -1098,15 +1111,27 @@ export async function startServer(
       } else if (
         deriveFn !== undefined &&
         kernelCalendarBinding !== undefined &&
-        calendarConfig !== null
+        (calendarConfig !== null || calendarBinding !== null)
       ) {
-        actionWritePort = deriveFn({
-          connectorInstanceId: kernelCalendarBinding.connectorInstanceId,
-          calendarId: calendarConfig.selection.calendarId,
-          ...(calendarConfig.selection.account === undefined
-            ? {}
-            : { account: calendarConfig.selection.account }),
-        });
+        // Owned AND injected compositions both expose the active selection:
+        // the owned config selection or the injected binding selection. The
+        // derived capability MUST name the server-registered instance id
+        // (`kernelCalendarBinding`, verified above for injected bindings and
+        // registered here for owned ones); the exact-identity check below
+        // still fails closed on any mismatch.
+        const selection =
+          calendarConfig !== null
+            ? calendarConfig.selection
+            : calendarBinding?.selection;
+        if (selection !== undefined) {
+          actionWritePort = deriveFn({
+            connectorInstanceId: kernelCalendarBinding.connectorInstanceId,
+            calendarId: selection.calendarId,
+            ...(selection.account === undefined
+              ? {}
+              : { account: selection.account }),
+          });
+        }
       }
     }
     let actionsEnabled = false;

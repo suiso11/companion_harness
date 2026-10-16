@@ -716,6 +716,83 @@ describe("dedicated reschedule write path (real HTTP fixture)", () => {
     expect(lastPatch).toBeNull();
   });
 
+  it("sub-millisecond instants are rejected before any dispatch; ms-expressible fractions accepted", async () => {
+    const { isStrictCalendarInstant, RescheduleWriteMcpInputSchema } =
+      await import("../src/rescheduleWrite.js");
+    // Genuine sub-ms precision (nonzero past the ms position) is rejected.
+    expect(isStrictCalendarInstant("2026-03-01T10:00:00.1234Z")).toBe(false);
+    expect(isStrictCalendarInstant("2026-03-01T10:00:00.1230001Z")).toBe(false);
+    // Millisecond-expressible fractions name the same ms: accepted.
+    expect(isStrictCalendarInstant("2026-03-01T10:00:00.123Z")).toBe(true);
+    expect(isStrictCalendarInstant("2026-03-01T10:00:00.123000Z")).toBe(true);
+    expect(isStrictCalendarInstant("2026-03-01T10:00:00.12Z")).toBe(true);
+    expect(
+      RescheduleWriteMcpInputSchema.safeParse({
+        calendarId: CALENDAR_ID,
+        eventId: EVENT_ID,
+        start: "2026-03-01T10:00:00.1234Z",
+        end: "2026-03-01T11:00:00Z",
+        expectedEtag: ETAG_V1,
+      }).success,
+    ).toBe(false);
+    // The port refuses sub-ms input BEFORE dispatch: no MCP call, no PATCH.
+    let calls = 0;
+    const caller: RescheduleWriteCaller = {
+      async callTool() {
+        calls += 1;
+        return { ok: true, text: JSON.stringify({ status: "succeeded" }) };
+      },
+    };
+    const outcome = await portWith(caller, ETAG_V1).update({
+      ...baseRequest(),
+      start: "2026-03-01T10:00:00.1234Z",
+      end: "2026-03-01T11:00:00Z",
+    });
+    expect(outcome).toEqual({ status: "definite_failure" });
+    expect(calls).toBe(0);
+    expect(lastPatch).toBeNull();
+  });
+
+  it("structuredContent is authoritative when present; strict text only when absent", async () => {
+    // Present-but-malformed structuredContent is NEVER rescued by valid
+    // text (a fallback could forge a verified receipt the provider did not
+    // classify).
+    const malformed: RescheduleWriteCaller = {
+      async callTool() {
+        return {
+          ok: true,
+          text: JSON.stringify({ status: "succeeded" }),
+          structuredContent: { status: "bogus" },
+        };
+      },
+    };
+    expect(await portWith(malformed, ETAG_V1).update(baseRequest())).toEqual({
+      status: "unknown",
+    });
+    // Present-valid structuredContent wins over conflicting text.
+    const authoritative: RescheduleWriteCaller = {
+      async callTool() {
+        return {
+          ok: true,
+          text: JSON.stringify({ status: "unknown" }),
+          structuredContent: { status: "succeeded" },
+        };
+      },
+    };
+    expect(
+      await portWith(authoritative, ETAG_V1).update(baseRequest()),
+    ).toEqual({ status: "succeeded" });
+    // Absent structuredContent preserves the strict-text fallback.
+    const textOnly: RescheduleWriteCaller = {
+      async callTool() {
+        return { ok: true, text: JSON.stringify({ status: "succeeded" }) };
+      },
+    };
+    expect(await portWith(textOnly, ETAG_V1).update(baseRequest())).toEqual({
+      status: "succeeded",
+    });
+  });
+
   it("strict host date mirror: Feb 30 rejected, leap Feb 29 accepted", async () => {
     const { isStrictCalendarInstant, RescheduleWriteMcpInputSchema } =
       await import("../src/rescheduleWrite.js");

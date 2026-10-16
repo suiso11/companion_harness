@@ -69,8 +69,26 @@ export const CALENDAR_RESCHEDULE_TOOL = "calendar.reschedule" as const;
 const ISO_MINUTE_INSTANT_PATTERN =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(Z|[+-](\d{2}):(\d{2}))$/;
 
+/**
+ * True when an instant carries genuine sub-millisecond precision: a nonzero
+ * digit past the millisecond position (e.g. `.1234`). Millisecond-expressible
+ * fractions (`.12`, `.123`, `.123000`) are NOT sub-millisecond — a trailing
+ * all-zero tail names the same ms. The write contract rejects genuine sub-ms
+ * input so the ms-truncating instant parsers (`parseTimedInstant` here, the
+ * kernel read-back comparison mirroring it) can never verify a boundary the
+ * approval did not preserve.
+ */
+const SUBSECOND_FRACTION_PATTERN = /T\d{2}:\d{2}:\d{2}\.(\d+)/;
+function hasSubMillisecondPrecision(value: string): boolean {
+  const match = SUBSECOND_FRACTION_PATTERN.exec(value);
+  if (match === null) return false;
+  const digits = match[1] as string;
+  return digits.length > 3 && /[^0]/.test(digits.slice(3));
+}
+
 export function isStrictCalendarInstant(value: string): boolean {
   if (value.length === 0 || value.length > 128) return false;
+  if (hasSubMillisecondPrecision(value)) return false;
   if (parseTimedInstant(value) !== undefined) return true;
   const m = ISO_MINUTE_INSTANT_PATTERN.exec(value);
   if (m === null) return false;
@@ -361,14 +379,33 @@ export function createRescheduleWritePort(
       // lost, so definite failure must never be claimed.
       return { status: "unknown" };
     }
-    // Strict classified payload only; anything unparseable means the proof
-    // was lost in transit -> unknown (never definite on loss).
+    // Strict classified payload only, structuredContent FIRST per the MCP
+    // response contract (`docs/implementation_plan.md`: structuredContent is
+    // authoritative when present; strict JSON text is a fallback ONLY when it
+    // is absent). Own-property presence decides — the same policy as the
+    // readonly decoder (`./normalize.ts` `selectBody`): a present value, even
+    // null/wrong-shaped, is the ONLY source and is never rescued by text
+    // (falling back to a valid text would risk a false verified receipt for
+    // a response the provider did not actually classify). Only when the
+    // property is ABSENT is the ENTIRE text parsed as strict JSON.
+    // Anything unparseable means the proof was lost in transit -> unknown
+    // (never definite on loss, never a fallback claim).
     let payload: z.infer<typeof RescheduleWriteOutcomePayloadSchema>;
-    try {
-      const text = call.text ?? "";
-      payload = RescheduleWriteOutcomePayloadSchema.parse(JSON.parse(text));
-    } catch {
-      return { status: "unknown" };
+    if (Object.hasOwn(call, "structuredContent")) {
+      try {
+        payload = RescheduleWriteOutcomePayloadSchema.parse(
+          call.structuredContent,
+        );
+      } catch {
+        return { status: "unknown" };
+      }
+    } else {
+      try {
+        const text = call.text ?? "";
+        payload = RescheduleWriteOutcomePayloadSchema.parse(JSON.parse(text));
+      } catch {
+        return { status: "unknown" };
+      }
     }
     if (payload.status === "succeeded") {
       return { status: "succeeded" };

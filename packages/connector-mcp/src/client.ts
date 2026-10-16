@@ -44,16 +44,86 @@ export const STDIO_IMPLICIT_ENV_VARS: readonly string[] =
   DEFAULT_INHERITED_ENV_VARS;
 
 /**
+ * Allowlist membership for one SDK-inherited name. Exact on posix; on win32
+ * the OS env block is case-insensitive, so `Path` covers the SDK default
+ * `PATH` (and vice versa) instead of failing closed on casing.
+ */
+function allowlistCoversInheritedName(
+  envAllowlist: readonly string[],
+  name: string,
+): boolean {
+  if (process.platform !== "win32") {
+    return envAllowlist.includes(name);
+  }
+  const want = name.toLowerCase();
+  return envAllowlist.some((entry) => entry.toLowerCase() === want);
+}
+
+/**
+ * Read one name from a frozen startup snapshot. Exact on posix; on win32 the
+ * lookup is case-insensitive (first exact hit wins, else the first
+ * case-insensitive hit), mirroring the OS env-block semantics.
+ */
+function readFrozenEnvValue(
+  env: Readonly<Record<string, string | undefined>>,
+  name: string,
+): string | undefined {
+  const direct = env[name];
+  if (direct !== undefined || process.platform !== "win32") {
+    return direct;
+  }
+  const want = name.toLowerCase();
+  for (const key of Object.keys(env)) {
+    if (key.toLowerCase() === want) {
+      return env[key];
+    }
+  }
+  return undefined;
+}
+
+/**
+ * A frozen value is inheritable only when the SDK itself would inherit it:
+ * `getDefaultEnvironment()` skips absent values AND shell-function exports
+ * (`()...`, a code-injection vector). Anything else must never be passed
+ * through explicitly — and must never fall back to the live environment.
+ */
+function isInheritableFrozenValue(value: string | undefined): value is string {
+  return value !== undefined && !value.startsWith("()");
+}
+
+/**
+ * Canonical child-env key for an allowlisted name. On win32 an allowlist
+ * entry in non-SDK casing (`Path`) still maps to the single canonical SDK
+ * name (`PATH`), so the merged child env carries exactly one key and the
+ * explicit frozen value always overrides the live SDK default (never both
+ * keys, never the live value).
+ */
+function canonicalChildEnvKey(name: string): string {
+  if (process.platform !== "win32") {
+    return name;
+  }
+  const want = name.toLowerCase();
+  for (const inherited of DEFAULT_INHERITED_ENV_VARS) {
+    if (inherited.toLowerCase() === want) {
+      return inherited;
+    }
+  }
+  return name;
+}
+
+/**
  * Names from the SDK stdio defaults that are NOT explicitly allowlisted.
  * Empty means the stdio config is fail-closed compliant. Pure (no I/O).
+ * Membership is case-insensitive on win32 (OS env-block semantics).
  */
 export function missingStdioEnvNames(
   config: McpConnectorConfig,
 ): readonly string[] {
   const t = config.transport;
   if (t.kind !== "stdio") return [];
-  const allowed = new Set(t.envAllowlist);
-  return DEFAULT_INHERITED_ENV_VARS.filter((name) => !allowed.has(name));
+  return DEFAULT_INHERITED_ENV_VARS.filter(
+    (name) => !allowlistCoversInheritedName(t.envAllowlist, name),
+  );
 }
 
 /** Fail-closed guard: throws a fixed-code error before any process spawn. */
@@ -1128,7 +1198,14 @@ export function defaultTransportFactory(config: McpConnectorConfig): Transport {
  * embedding that passes `M5_RESCHEDULE_*` values via `startServer({ env })`
  * no longer silently falls back to a different account (or missing
  * credentials) on first approved execution. Fail-closed env rules
- * (`assertStdioEnvClosed`, explicit allowlist only) are unchanged.
+ * (`assertStdioEnvClosed`, explicit allowlist only) are unchanged, PLUS the
+ * frozen-inherited freeze below: the SDK merges its live
+ * `getDefaultEnvironment()` UNDER the explicit `env` at SPAWN time, so every
+ * SDK-inherited allowlisted name is pinned to its FROZEN value here. A frozen
+ * snapshot missing (or holding only a shell-function export for) such a name
+ * rejects with fixed `mcp_unavailable` BEFORE transport construction — never
+ * a live-`process.env` fallback (a post-startup `PATH` mutation could select
+ * a different executable), never an invented empty `PATH`.
  */
 export function startupEnvTransportFactory(
   env: Readonly<Record<string, string | undefined>>,
@@ -1138,10 +1215,25 @@ export function startupEnvTransportFactory(
     if (t.kind === "stdio") {
       // Fail-closed: reject BEFORE StdioClientTransport construction/spawn.
       assertStdioEnvClosed(config);
+      // Freeze the SDK-inherited surface: EVERY inherited allowlisted name
+      // must resolve to a frozen value (win32: case-insensitive, canonical
+      // key). Missing/uninheritable rejects before any child side effect.
+      const missingFrozen = DEFAULT_INHERITED_ENV_VARS.filter(
+        (name) =>
+          allowlistCoversInheritedName(t.envAllowlist, name) &&
+          !isInheritableFrozenValue(readFrozenEnvValue(env, name)),
+      );
+      if (missingFrozen.length > 0) {
+        throw new Error(
+          `mcp_unavailable: stdio startup env misses ${missingFrozen.length} frozen inherited value(s): ${missingFrozen.join(",")}`,
+        );
+      }
       const childEnv: Record<string, string> = {};
       for (const name of t.envAllowlist) {
-        const v = env[name];
-        if (v !== undefined) childEnv[name] = v;
+        const v = readFrozenEnvValue(env, name);
+        if (isInheritableFrozenValue(v)) {
+          childEnv[canonicalChildEnvKey(name)] = v;
+        }
       }
       return new StdioClientTransport({
         command: t.command,

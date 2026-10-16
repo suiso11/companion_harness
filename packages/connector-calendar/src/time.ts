@@ -88,6 +88,9 @@ export function parseTimedInstant(value: string): number | undefined {
   // Milliseconds are exactly the first three decimal digits, right-padded.
   // Parsing `0.<fraction>` as a float can round up to the next second (e.g.
   // `.999999999999999999`), so take the digits as a bounded small integer.
+  // Truncation here is exact: the write contract (`isStrictCalendarInstant`
+  // in `rescheduleWrite.ts`) rejects genuine sub-millisecond precision, so a
+  // surviving fraction is always millisecond-expressible.
   const ms =
     fraction !== undefined ? Number(fraction.slice(1, 4).padEnd(3, "0")) : 0;
   // Group 8 `(Z|[+-]\d{2}:\d{2})` is mandatory, so the capture is always a string.

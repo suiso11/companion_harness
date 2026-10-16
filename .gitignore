@@ -15,6 +15,10 @@ Thumbs.db
 .pi/
 # M5 prepared write-consent launch profile (private, disabled by default).
 .m5-write-consent/
+# M5 real-test approval instance (private runtime: owned DB, logs, metadata).
+.m5-allday-approval/
+# PR33 review proof (private throwaway: local smoke logs only, never fixtures).
+.m5-pr33-review-proof/
 # M5 fork-derived checkout (foreign repo; review via fork PR #3, not here).
 # Fully ignored so Harness git/biome/test never depend on it; explicit
 # real-fork tests opt in via M5_RESCHEDULE_FORK_CLI. Superseded standalone

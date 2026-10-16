@@ -653,6 +653,32 @@ describe("action proposal stager", () => {
     }
   });
 
+  it("rejects sub-millisecond boundaries before staging; ms-expressible fractions stage", async () => {
+    // The ms-truncating read-back can never verify a boundary the approval
+    // did not preserve, so genuine sub-ms precision fails at staging (well
+    // before approval or any write) while `.123000` (same ms) stages.
+    const fx = await setupFixture();
+    try {
+      const { stager } = makeStager(fx, () => 1000);
+      expect(() =>
+        stager.stage(fx.runId, {
+          targetRefId: fx.refId,
+          start: "2026-02-01T10:00:00.1234Z",
+          end: "2026-02-01T11:00:00Z",
+        }),
+      ).toThrow(RepositoryValidationError);
+      expect(stager.getStaged(fx.runId)).toBeNull();
+      const staged = stager.stage(fx.runId, {
+        targetRefId: fx.refId,
+        start: "2026-02-01T10:00:00.123000Z",
+        end: "2026-02-01T11:00:00Z",
+      });
+      expect(staged.input.start).toBe("2026-02-01T10:00:00.123000Z");
+    } finally {
+      await closeKernelDatabase(fx.handle);
+    }
+  });
+
   it("removeStaged discards staged content for failed/cancelled runs (idempotent)", async () => {
     const fx = await setupFixture();
     try {

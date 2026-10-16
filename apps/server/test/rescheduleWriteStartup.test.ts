@@ -44,7 +44,6 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { canonicalKey, normalizeEvent } from "@companion/connector-calendar";
 import {
-  defaultTransportFactory,
   type McpConnectorConfig,
   STDIO_IMPLICIT_ENV_VARS,
   StdioClientTransport,
@@ -114,6 +113,22 @@ function tempEnv(): { env: NodeJS.ProcessEnv; dbPath: string } {
     },
     dbPath: join(dir, "companion.sqlite"),
   };
+}
+
+/** Complete frozen snapshot for the inherited allowlist: live values when
+ * inheritable, else a fixed stand-in (minimal CI envs may lack e.g. USER;
+ * shell-function exports are never inheritable). Mirrors the production
+ * freeze without re-pinning SDK defaults. */
+function completeFrozenEnv(
+  extra: Record<string, string> = {},
+): Record<string, string> {
+  const frozen: Record<string, string> = {};
+  for (const name of STDIO_IMPLICIT_ENV_VARS) {
+    const live = process.env[name];
+    frozen[name] =
+      live !== undefined && !live.startsWith("()") ? live : `frozen-${name}`;
+  }
+  return { ...frozen, ...extra };
 }
 
 /** Strip undefined entries (child-process env must be string-valued). */
@@ -1173,6 +1188,7 @@ describe("normal-startup write-child env (frozen snapshot, no seam)", () => {
       const started = await startServer({
         env: {
           ...env,
+          ...completeFrozenEnv(),
           COMPANION_ACTIONS_JSON: ENABLED_ACTIONS_JSON,
           [RESCHEDULE_WRITE_PROFILE_ENV]: "google-reschedule",
           [RESCHEDULE_WRITE_CONNECTOR_ENV]: JSON.stringify({
@@ -1334,7 +1350,17 @@ describe("write-command absolute paths (Windows + spaces)", () => {
       connectorInstanceId: "preflight",
       hint,
     });
-    expect(() => defaultTransportFactory(built)).not.toThrow();
+    // Production factory path with a COMPLETE frozen snapshot (this harness
+    // env may lack genuinely-optional Unix names like USER/SHELL/LOGNAME, so
+    // the live `process.env` cannot serve as the snapshot here; the factory
+    // under test is identical — `defaultTransportFactory` delegates to
+    // `startupEnvTransportFactory(process.env)`).
+    const { startupEnvTransportFactory } = await import(
+      "@companion/connector-mcp"
+    );
+    expect(() =>
+      startupEnvTransportFactory(completeFrozenEnv())(built),
+    ).not.toThrow();
     const spawned = new StdioClientTransport({
       command: dest,
       args: ["--version"],
@@ -1782,4 +1808,126 @@ describe("all-day → timed conversion pipeline (local fixture only)", () => {
       closeKernelDatabase(handle);
     }
   }, 60_000);
+});
+
+describe("injected calendar binding derives the write port from the active selection", () => {
+  it("derivePort receives the injected selection and the full approval pipeline succeeds", async () => {
+    // Fix 4291463481: `derivePort` must fire for the INJECTED binding (no
+    // `calendarConfig`), carrying the injected selection — and the proof is
+    // the FULL local pipeline (HTTP approve -> scheduler -> port.update ->
+    // REAL fixture PATCH -> read-back -> terminal succeeded receipt), not a
+    // mock echo.
+    const { env, dbPath } = tempEnv();
+    const fx = await startGoogleFixture();
+    const instanceId = await provisionCalendarInstance(dbPath);
+    const { sessionId, proposalId, hash } = await seedStagedProposal(
+      dbPath,
+      instanceId,
+    );
+    const seen: Array<{
+      connectorInstanceId: string;
+      calendarId: string;
+      account?: string;
+    }> = [];
+    const started = await startServer({
+      env: { ...env, COMPANION_ACTIONS_JSON: ENABLED_ACTIONS_JSON },
+      calendarBinding: {
+        connectorInstanceId: instanceId,
+        connector: fixtureBackedCalendarBinding(instanceId, () => fx.base),
+        selection: { calendarId: "primary", account: "ops@example" },
+      },
+      actionWriteBinding: {
+        derivePort: (active) => {
+          seen.push({ ...active });
+          return {
+            capability: {
+              tool: "calendar.reschedule",
+              editableFields: ["start", "end"],
+              connectorInstanceId: active.connectorInstanceId,
+              writeEnabled: true,
+            },
+            update: async (request) => {
+              const response = await fetch(
+                `${fx.base}/calendar/v3/calendars/${encodeURIComponent(request.target.calendarId)}/events/${encodeURIComponent(request.target.eventId)}`,
+                {
+                  method: "PATCH",
+                  headers: {
+                    "content-type": "application/json",
+                    "if-match": request.grant.expectedRevision,
+                  },
+                  body: JSON.stringify({
+                    start: { dateTime: request.start },
+                    end: { dateTime: request.end },
+                  }),
+                },
+              );
+              if (!response.ok) return { status: "unknown" as const };
+              return { status: "succeeded" as const };
+            },
+          };
+        },
+      },
+      drainMs: 50,
+    });
+    servers.push(started);
+    await approveProposalHttp(started.port, sessionId, proposalId, hash);
+    const view = await waitForTerminalReceipt(
+      started.port,
+      sessionId,
+      proposalId,
+    );
+    expect(view.markerCommitted).toBe(true);
+    expect(view.receipt?.outcome).toBe("succeeded");
+    // derivePort fired exactly once with the INJECTED selection.
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toEqual({
+      connectorInstanceId: instanceId,
+      calendarId: "primary",
+      account: "ops@example",
+    });
+    // Exactly ONE conditional PATCH with the committed etag moved the event.
+    expect(fx.patchCount()).toBe(1);
+    expect(fx.lastIfMatch()).toBe(E2E_ETAG_V1);
+    expect(fx.eventStart()).toBe(E2E_START_NEW);
+  }, 60_000);
+});
+
+describe("canonical write identity is validated before any DB side effect", () => {
+  it("rejects overlong test identities even with an injected factory (no DB, no transport)", async () => {
+    // Fix 4291463486: the canonical 128/64 identity rule runs in the pure
+    // preflight build BEFORE any store touch — regardless of transport
+    // factory. A 129-char name / 65-char version fails closed here.
+    let factoryCalls = 0;
+    for (const writeTestIdentity of [
+      { expectedServerName: "n".repeat(129), version: "0.0.0-fixture.1" },
+      { expectedServerName: "n".repeat(128), version: "v".repeat(65) },
+    ]) {
+      const { env, dbPath } = tempEnv();
+      const instanceId = randomUUID();
+      const helper = fixtureHelperPath();
+      await expect(
+        startServer({
+          env: {
+            ...env,
+            COMPANION_ACTIONS_JSON: ENABLED_ACTIONS_JSON,
+            [RESCHEDULE_WRITE_PROFILE_ENV]: "google-reschedule",
+            [RESCHEDULE_WRITE_CONNECTOR_ENV]: e2eConnectorHintJson(helper),
+          },
+          calendarBinding: {
+            connectorInstanceId: instanceId,
+            connector: fakeCalendarBinding(instanceId),
+            selection: { calendarId: "primary", account: "ops@example" },
+          },
+          writeMcpTransportFactory: () => {
+            factoryCalls += 1;
+            throw new Error("must never be constructed on invalid identity");
+          },
+          writeTestIdentity,
+          drainMs: 50,
+        }),
+      ).rejects.toThrow(/reschedule write connector hints are invalid/);
+      expect(existsSync(dbPath)).toBe(false);
+    }
+    expect(factoryCalls).toBe(0);
+  });
 });

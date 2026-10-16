@@ -152,6 +152,24 @@ interface TargetRow {
 
 const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}(?![T\s+/])/;
 
+/**
+ * Millisecond boundary, mirrored EXACTLY with the connector write contract
+ * (`isStrictCalendarInstant` in
+ * `packages/connector-calendar/src/rescheduleWrite.ts`): genuine
+ * sub-millisecond precision (a nonzero digit past the millisecond position,
+ * e.g. `.1234`) can never be staged — let alone approved — so the
+ * ms-truncating read-back comparison can never verify a boundary the
+ * approval did not preserve. Millisecond-expressible fractions (`.12`,
+ * `.123`, `.123000`) stage normally: an all-zero tail names the same ms.
+ */
+const SUBSECOND_FRACTION_PATTERN = /T\d{2}:\d{2}:\d{2}\.(\d+)/;
+function hasSubMillisecondPrecision(value: string): boolean {
+  const match = SUBSECOND_FRACTION_PATTERN.exec(value);
+  if (match === null) return false;
+  const digits = match[1] as string;
+  return digits.length > 3 && /[^0]/.test(digits.slice(3));
+}
+
 /** Classify a proposed boundary string: all-day (`date`) or timed (`instant`). */
 function boundaryClass(value: string): "date" | "instant" {
   if (DATE_ONLY_RE.test(value)) {
@@ -185,6 +203,17 @@ function validateRange(start: string, end: string): void {
     throw new RepositoryValidationError(
       "start/end boundary classes must match (both date-only (all-day) or both instants (timed))",
     );
+  }
+  if (startClass === "instant") {
+    // Reject BEFORE staging (hence before approval and before any write):
+    // see `hasSubMillisecondPrecision` above.
+    for (const value of [start, end] as const) {
+      if (hasSubMillisecondPrecision(value)) {
+        throw new RepositoryValidationError(
+          "start/end must not carry sub-millisecond precision",
+        );
+      }
+    }
   }
   const startMs = parseBoundaryMs(start, startClass);
   const endMs = parseBoundaryMs(end, endClass);
