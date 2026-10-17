@@ -29,7 +29,7 @@ import {
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   applyCrash,
@@ -63,7 +63,11 @@ const nodeBin = process.execPath;
 // Bare `--import tsx` does NOT resolve from the repo root on CI.
 const serverRequire = createRequire(join(here, "..", "package.json"));
 const tsxLoader = serverRequire.resolve("tsx");
-const helperBaseArgs = ["--import", tsxLoader, helper];
+// `--import` requires a resolvable spec: a raw Windows drive-letter path
+// (D:\...\loader.mjs) is not a valid module specifier and makes the child
+// exit 1 with no stdout on win32. A file:// URL works on every platform.
+const tsxLoaderUrl = pathToFileURL(tsxLoader).href;
+const helperBaseArgs = ["--import", tsxLoaderUrl, helper];
 
 let dirs: string[] = [];
 let children: ChildProcess[] = [];
