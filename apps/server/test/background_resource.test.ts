@@ -698,3 +698,307 @@ describe("background contention across actual callsites", () => {
     }
   });
 });
+
+describe("P1 review fixes: automatic-distill admission boundary", () => {
+  function parkingCli(state: {
+    parked: boolean;
+    calls: string[];
+    releases: Array<() => void>;
+  }): CliCall {
+    return async (_address, op, _params, _key, options) => {
+      state.calls.push(op);
+      if (op === "maintain.distill" && state.parked) {
+        await new Promise<void>((resolve, reject) => {
+          const signal = options?.signal;
+          if (signal?.aborted === true) {
+            reject(abortError());
+            return;
+          }
+          signal?.addEventListener(
+            "abort",
+            () => {
+              reject(abortError());
+            },
+            { once: true },
+          );
+          state.releases.push(() => resolve());
+        });
+      }
+      return okEnvelope(null);
+    };
+  }
+
+  function enqueueDistill(repo: KernelRepository): string {
+    const sessionId = repo.createSession({ key: randomUUID(), now: T0 }).body
+      .sessionId;
+    const posted = repo.postMessage(
+      sessionId,
+      { text: "tea" },
+      { key: randomUUID(), now: T0 + 1 },
+    );
+    const runId = posted.body.run.id;
+    const { row } = repo.enqueueMemoryJob(
+      "maintain.distill",
+      sessionId,
+      runId,
+      SCOPE,
+      randomUUID(),
+      JSON.stringify({
+        op: "maintain.distill",
+        params: { scope: SCOPE, cursor: null, limit: 20, runId: null },
+      }),
+      { now: T0 + 2 },
+    );
+    return row.id;
+  }
+
+  function enqueueRetire(repo: KernelRepository): string {
+    const sessionId = repo.createSession({ key: randomUUID(), now: T0 }).body
+      .sessionId;
+    const posted = repo.postMessage(
+      sessionId,
+      { text: "tea" },
+      { key: randomUUID(), now: T0 + 1 },
+    );
+    const runId = posted.body.run.id;
+    const { row } = repo.enqueueMemoryJob(
+      "record.retire",
+      sessionId,
+      runId,
+      SCOPE,
+      randomUUID(),
+      JSON.stringify({
+        op: "record.retire",
+        params: { id: "rec-1", scope: SCOPE, reasonCode: "USER_REQUESTED" },
+      }),
+      { now: T0 + 2 },
+    );
+    return row.id;
+  }
+
+  it("BEFORE (reported fault): STOP while a distill CLI child is parked must abort it and keep it durable", async () => {
+    const memory = await openRepo();
+    try {
+      const gate = createBackgroundResourceGate();
+      const parking = {
+        parked: true,
+        calls: [] as string[],
+        releases: [] as Array<() => void>,
+      };
+      const memoryService = makeMemoryService(
+        memory.repo,
+        parkingCli(parking),
+        {
+          idleMs: 300_000,
+          background: gate,
+        },
+      );
+      const distillId = enqueueDistill(memory.repo);
+      const tick = memoryService.drainOnce();
+      await waitFor(() => parking.calls.includes("maintain.distill"));
+      // STOP with no other chat anywhere: aborts the background-owned CLI
+      // child (not the whole tick) and closes admission.
+      pauseControl(memory.repo);
+      memoryService.notifyControl();
+      expect(gate.closed).toBe(true);
+      await tick;
+      const distill = memory.repo.getMemoryJob(distillId);
+      // Durable pending (existing preempted path), never acked, never failed.
+      expect(distill?.status).toBe("pending");
+    } finally {
+      memory.close();
+    }
+  });
+
+  it("AFTER: explicit work drains while STOP-closed; distill skips untouched (no attempt poisoning, no head-of-line)", async () => {
+    const memory = await openRepo();
+    try {
+      const gate = createBackgroundResourceGate();
+      const parking = {
+        parked: false,
+        calls: [] as string[],
+        releases: [] as Array<() => void>,
+      };
+      const memoryService = makeMemoryService(
+        memory.repo,
+        parkingCli(parking),
+        {
+          idleMs: 300_000,
+          background: gate,
+        },
+      );
+      const distillId = enqueueDistill(memory.repo);
+      const retireId = enqueueRetire(memory.repo);
+      // STOP BEFORE the drain: the whole tick used to strand everything.
+      pauseControl(memory.repo);
+      memoryService.notifyControl();
+      expect(gate.closed).toBe(true);
+      const out = await memoryService.drainOnce();
+      // The explicit retire executed in the SAME tick the distill skipped.
+      expect(out.executed).toBe(1);
+      expect(parking.calls).toEqual(["record.retire"]);
+      expect(memory.repo.getMemoryJob(retireId)?.status).toBe("acked");
+      // The automatic distill is skipped WITHOUT a state touch: still
+      // pending with attempts unchanged (no busy-fail, no backoff poison).
+      const distill = memory.repo.getMemoryJob(distillId);
+      expect(distill?.status).toBe("pending");
+      expect(distill?.attempts).toBe(0);
+      // Resume reopens: the SAME distill id drains normally (no duplicate).
+      unpauseControl(memory.repo);
+      memoryService.notifyControl();
+      expect(gate.closed).toBe(false);
+      await memoryService.drainOnce();
+      expect(memory.repo.getMemoryJob(distillId)?.status).toBe("acked");
+      expect(parking.calls).toEqual(["record.retire", "maintain.distill"]);
+    } finally {
+      memory.close();
+    }
+  });
+
+  it("AFTER: a held gate defers distill but never the explicit job behind it (busy path)", async () => {
+    const memory = await openRepo();
+    try {
+      const gate = createBackgroundResourceGate();
+      const parking = {
+        parked: false,
+        calls: [] as string[],
+        releases: [] as Array<() => void>,
+      };
+      const memoryService = makeMemoryService(
+        memory.repo,
+        parkingCli(parking),
+        {
+          idleMs: 300_000,
+          background: gate,
+        },
+      );
+      const distillId = enqueueDistill(memory.repo);
+      const retireId = enqueueRetire(memory.repo);
+      const held = gate.tryAcquire(BACKGROUND_OWNER_SHADOW);
+      expect(held).not.toBeNull();
+      const out = await memoryService.drainOnce();
+      expect(out.executed).toBe(1);
+      expect(parking.calls).toEqual(["record.retire"]);
+      expect(memory.repo.getMemoryJob(retireId)?.status).toBe("acked");
+      const distill = memory.repo.getMemoryJob(distillId);
+      expect(distill?.status).toBe("pending");
+      expect(distill?.attempts).toBe(0);
+      gate.release(held as NonNullable<typeof held>);
+      await memoryService.drainOnce();
+      expect(memory.repo.getMemoryJob(distillId)?.status).toBe("acked");
+    } finally {
+      memory.close();
+    }
+  });
+
+  it("AFTER: foreground activity aborts a parked distill from ANY drain origin without touching explicit calls", async () => {
+    const memory = await openRepo();
+    try {
+      const gate = createBackgroundResourceGate();
+      const parking = {
+        parked: true,
+        calls: [] as string[],
+        releases: [] as Array<() => void>,
+      };
+      const memoryService = makeMemoryService(
+        memory.repo,
+        parkingCli(parking),
+        {
+          idleMs: 300_000,
+          background: gate,
+        },
+      );
+      const distillId = enqueueDistill(memory.repo);
+      const tick = memoryService.drainOnce();
+      await waitFor(() => parking.calls.includes("maintain.distill"));
+      // Foreground intent preempts the automatic child (completion-origin
+      // ticks included: the abort tracks the actual background controller,
+      // not an idle-origin flag) without authorizing autonomous distill.
+      memoryService.notifyForeground();
+      await tick;
+      expect(memory.repo.getMemoryJob(distillId)?.status).toBe("pending");
+    } finally {
+      memory.close();
+    }
+  });
+
+  it("AFTER: an explicit staged retire reaches terminal done while STOPped with a due distill pending", async () => {
+    const memory = await openRepo();
+    try {
+      const gate = createBackgroundResourceGate();
+      const ledger = { liveStatus: new Map([["rec-stop", "active"]]) };
+      const calls: string[] = [];
+      const cliCall: CliCall = async (_address, op, params) => {
+        calls.push(op);
+        if (op === "record.search") {
+          return okEnvelope({
+            searchId: `search-${randomUUID()}`,
+            items: [{ id: "rec-stop", snippet: "stop me", status: "active" }],
+          });
+        }
+        if (op === "record.get") {
+          const id = String((params as { id?: unknown }).id ?? "");
+          return okEnvelope({
+            record: {
+              id,
+              body: `body-of-${id}`,
+              kind: "user_fact",
+              status: ledger.liveStatus.get(id) ?? "active",
+              revision: 3,
+              source: "companion:conversation",
+              observedAt: new Date(T0).toISOString(),
+              createdAt: new Date(T0).toISOString(),
+              scope: SCOPE,
+            },
+          });
+        }
+        return okEnvelope({ ok: true });
+      };
+      const memoryService = makeMemoryService(memory.repo, cliCall, {
+        idleMs: 60_000,
+        background: gate,
+      });
+      const { sessionId, runId } = completeV2Run(memory.repo);
+      memoryService.start();
+      // STOP with no completion/chat in flight: closes admission.
+      pauseControl(memory.repo);
+      memoryService.notifyControl();
+      expect(gate.closed).toBe(true);
+      // Explicit user-authorized staging still works while STOPped.
+      const search = await memoryService.searchMemories({
+        sessionId,
+        runId,
+        query: "stop",
+      });
+      const staged = await memoryService.stageMemoryMutation({
+        sessionId,
+        runId,
+        kind: "record.retire",
+        searchId: search.searchId,
+        handle: "m1",
+        idempotencyKey: randomUUID(),
+        trustedSelection: true,
+      });
+      expect(staged.ok).toBe(true);
+      if (!staged.ok) {
+        throw new Error("explicit retire stage failed while STOPped");
+      }
+      // A due automatic distill is pending beside the explicit job.
+      const distillId = enqueueDistill(memory.repo);
+      // Idle ticks fire while STOPped: no whole-batch block anymore.
+      await memoryService.drainOnce();
+      const status = memoryService.getMemoryOperation(
+        sessionId,
+        staged.operationId,
+      );
+      expect(status?.status).toBe("acked");
+      // The automatic distill stayed durable pending, attempts untouched.
+      const distill = memory.repo.getMemoryJob(distillId);
+      expect(distill?.status).toBe("pending");
+      expect(distill?.attempts).toBe(0);
+      expect(calls).not.toContain("maintain.distill");
+    } finally {
+      memory.close();
+    }
+  });
+});

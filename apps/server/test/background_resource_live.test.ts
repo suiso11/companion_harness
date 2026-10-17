@@ -223,6 +223,7 @@ async function startSyntheticModel(): Promise<{
     max: number;
     calls: number;
     shadowCalls: number;
+    extractCalls: number;
     aborted: ParkKind[];
     parked: ParkedResponder[];
     parkExtract: boolean;
@@ -234,6 +235,7 @@ async function startSyntheticModel(): Promise<{
     max: 0,
     calls: 0,
     shadowCalls: 0,
+    extractCalls: 0,
     aborted: [] as ParkKind[],
     parked: [] as ParkedResponder[],
     parkExtract: false,
@@ -293,6 +295,9 @@ async function startSyntheticModel(): Promise<{
       state.calls += 1;
       if (kind === "shadow") {
         state.shadowCalls += 1;
+      }
+      if (kind === "extract") {
+        state.extractCalls += 1;
       }
       state.current += 1;
       state.max = Math.max(state.max, state.current);
@@ -488,6 +493,223 @@ function queryOutboxKinds(
 }
 
 describe("background resource live proof (production server + real sockets)", () => {
+  it("restart keeps STOP closed until explicit resume; explicit manage completes STOPped", async () => {
+    const { entry, template } = resolveCliPaths();
+    const root = mkdtempSync(join(tmpdir(), "companion-live-bg-restart-"));
+    // The remind home is REUSED across the restart below: staged records
+    // persist, so post-restart management acts on the same real data.
+    const remindDir = mkdtempSync(join(tmpdir(), "remind-live-bg-restart-"));
+    const model = await startSyntheticModel();
+    let started: StartedServer | null = null;
+    try {
+      const remindConfig = patchRemindConfig(template, remindDir);
+      const dbPath = join(root, "companion.sqlite");
+      const buildEnv = (): NodeJS.ProcessEnv => ({
+        COMPANION_DB_PATH: dbPath,
+        COMPANION_HOST: "127.0.0.1",
+        COMPANION_PORT: "0",
+        COMPANION_TIME_ZONE: "UTC",
+        COMPANION_LOG_LEVEL: "error",
+        COMPANION_MODEL_JSON: JSON.stringify({
+          adapter: "openai-compatible",
+          baseUrl: model.url,
+          model: MODEL_NAME,
+        }),
+        COMPANION_MEMORY_JSON: JSON.stringify({
+          executable: process.execPath,
+          entry,
+          config: remindConfig,
+          scope: TEST_SCOPE,
+          timeoutMs: 15000,
+          maxResponseBytes: 65536,
+          recallLimit: 5,
+          idleMs: 5000,
+        }),
+      });
+      const countExtractCalls = (): number => model.state.extractCalls;
+
+      started = await startServer({ env: buildEnv(), drainMs: 200 });
+      let base = `http://127.0.0.1:${String(started.port)}`;
+      const session = await postJson(base, "/api/sessions", {});
+      expect(session.status).toBe(201);
+      const sessionId = (session.body as { sessionId: string }).sessionId;
+      const control = await getJson(base, "/api/autonomy/control");
+      expect(control.status).toBe(200);
+      const unpause = await postJson(base, "/api/autonomy/control", {
+        paused: false,
+        expectedVersion: (control.body as { version: number }).version,
+      });
+      expect(unpause.status).toBe(200);
+
+      // Baseline: ordinary chat cultivates (extraction writes land).
+      const extractBaseline = countExtractCalls();
+      const first = await postJson(
+        base,
+        `/api/sessions/${sessionId}/messages`,
+        {
+          text: "I like green tea.",
+        },
+      );
+      expect(first.status).toBe(202);
+      const turn1 = await waitForHistoryResult(base, sessionId, 1);
+      await waitFor(
+        () =>
+          queryOutboxKinds(dbPath, turn1.runId).some(
+            (row) => row.kind === "event.append" && row.status === "acked",
+          ),
+        30_000,
+        "extraction did not cultivate the first turn",
+      );
+      expect(countExtractCalls()).toBeGreaterThan(extractBaseline);
+
+      // STOP with no chat in flight. Idle ticks keep firing (idleMs 5000):
+      // the automatic distill stays durable pending while the gate is
+      // closed, and explicit management below still drains without
+      // another chat anywhere.
+      const pausing = await getJson(base, "/api/autonomy/control");
+      const stopped = await postJson(base, "/api/autonomy/control", {
+        paused: true,
+        expectedVersion: (pausing.body as { version: number }).version,
+      });
+      expect(stopped.status).toBe(200);
+      await waitFor(
+        () => {
+          const db = new Database(dbPath, { readonly: true });
+          try {
+            const rows = db
+              .prepare(
+                "SELECT COUNT(*) AS n FROM memory_outbox WHERE kind = 'maintain.distill' AND status = 'pending'",
+              )
+              .get() as { n: number };
+            return rows.n >= 1;
+          } finally {
+            db.close();
+          }
+        },
+        30_000,
+        "no due automatic distill pending while STOPped",
+      );
+
+      const searchOnce = async (): Promise<{
+        searchId: string;
+        handle: string;
+      }> => {
+        const res = await postJson(
+          base,
+          `/api/sessions/${sessionId}/memory/search`,
+          { query: "green tea", runId: turn1.runId },
+        );
+        expect(res.status).toBe(200);
+        const hits = (res.body as { hits: Array<{ handle: string }> }).hits;
+        expect(hits.length).toBeGreaterThan(0);
+        return {
+          searchId: (res.body as { searchId: string }).searchId,
+          handle: (hits[0] as { handle: string }).handle,
+        };
+      };
+      const stageAndAwait = async (
+        kind: "record.retire" | "record.reactivate" | "record.correct",
+        extra?: Record<string, unknown>,
+      ): Promise<void> => {
+        const target = await searchOnce();
+        const res = await postJson(
+          base,
+          `/api/sessions/${sessionId}/memory/mutations`,
+          {
+            kind,
+            searchId: target.searchId,
+            handle: target.handle,
+            runId: turn1.runId,
+            ...(extra ?? {}),
+          },
+        );
+        expect(res.status).toBe(202);
+        const operationId = (res.body as { operationId: string }).operationId;
+        const deadline = Date.now() + 30_000;
+        for (;;) {
+          const polled = await getJson(
+            base,
+            `/api/sessions/${sessionId}/memory/operations/${operationId}`,
+          );
+          expect(polled.status).toBe(200);
+          const opStatus = (polled.body as { status: string }).status;
+          if (opStatus === "acked") {
+            return;
+          }
+          expect(opStatus).toBe("pending");
+          if (Date.now() > deadline) {
+            throw new Error(
+              `${kind} never reached terminal done while STOPped`,
+            );
+          }
+          await new Promise((resolve) => setTimeout(resolve, 200));
+        }
+      };
+
+      // Each explicit management kind reaches terminal done while STOPped,
+      // with the due automatic distill still pending beside it.
+      await stageAndAwait("record.retire");
+      await stageAndAwait("record.reactivate");
+      await stageAndAwait("record.correct", {
+        correctionBody: "The user prefers oolong tea in the evening.",
+      });
+
+      // Restart with the control STILL paused: the fence keeps it paused and
+      // admission must initialize CLOSED — the first ordinary chat on the
+      // fresh process starts zero background extraction until an explicit
+      // current-version resume.
+      await started.shutdown("test-restart");
+      started = null;
+      const extractBeforeRestart = countExtractCalls();
+      started = await startServer({ env: buildEnv(), drainMs: 200 });
+      base = `http://127.0.0.1:${String(started.port)}`;
+      const controlAfter = await getJson(base, "/api/autonomy/control");
+      expect(controlAfter.status).toBe(200);
+      expect((controlAfter.body as { paused: boolean }).paused).toBe(true);
+      const second = await postJson(
+        base,
+        `/api/sessions/${sessionId}/messages`,
+        { text: "Are you still there?" },
+      );
+      expect(second.status).toBe(202);
+      const turn2 = await waitForHistoryResult(base, sessionId, 2, 30_000);
+      expect(turn2.text.length).toBeGreaterThan(0);
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      expect(countExtractCalls()).toBe(extractBeforeRestart);
+      expect(queryOutboxKinds(dbPath, turn2.runId)).toHaveLength(0);
+
+      // An explicit current-version resume reopens admission: the next
+      // ordinary chat cultivates again.
+      const resuming = await getJson(base, "/api/autonomy/control");
+      const resumed = await postJson(base, "/api/autonomy/control", {
+        paused: false,
+        expectedVersion: (resuming.body as { version: number }).version,
+      });
+      expect(resumed.status).toBe(200);
+      const third = await postJson(
+        base,
+        `/api/sessions/${sessionId}/messages`,
+        { text: "Remember oolong too." },
+      );
+      expect(third.status).toBe(202);
+      const turn3 = await waitForHistoryResult(base, sessionId, 3, 30_000);
+      await waitFor(
+        () =>
+          queryOutboxKinds(dbPath, turn3.runId).some(
+            (row) => row.kind === "event.append" && row.status === "acked",
+          ),
+        30_000,
+        "extraction did not resume after explicit resume",
+      );
+    } finally {
+      if (started !== null) {
+        await started.shutdown("test-teardown").catch(() => undefined);
+      }
+      await model.close().catch(() => undefined);
+      rmSync(root, { recursive: true, force: true, maxRetries: 5 });
+      rmSync(remindDir, { recursive: true, force: true, maxRetries: 5 });
+    }
+  }, 180_000);
   it("contends at max 1, foreground preempts, STOP aborts with no late writes", async () => {
     const { entry, template } = resolveCliPaths();
     const root = mkdtempSync(join(tmpdir(), "companion-live-bg-"));

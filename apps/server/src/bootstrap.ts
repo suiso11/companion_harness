@@ -1201,6 +1201,24 @@ export async function startServer(
     applyAutonomyRestartFence(handle.raw, now());
     reconcileShadowRestartInTx(handle.raw, now());
 
+    // Gate admission starts from the ACTUAL persisted control state AFTER
+    // the fence above (never optimistically open): a fence-paused control
+    // (or an already-paused one) closes admission BEFORE any service starts,
+    // so a fresh restart's first ordinary chat cannot launch background
+    // extraction until an explicit current-version resume reopens it.
+    // Ordinary foreground chat and explicit memory management stay
+    // available while paused; they never consult this gate.
+    try {
+      const persisted = handle.raw
+        .prepare("SELECT paused FROM autonomy_control WHERE id = 'global'")
+        .get() as { paused: number } | undefined;
+      if (persisted === undefined || persisted.paused === 1) {
+        backgroundResource.close();
+      }
+    } catch {
+      backgroundResource.close();
+    }
+
     // Bound-roots guard: removing every Markdown root while a Markdown
     // connector instance remains bound must fail closed before the engine
     // or listener starts. Fixed path-free ServerConfigError, no DB writes.

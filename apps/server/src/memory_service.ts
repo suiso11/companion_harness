@@ -134,11 +134,14 @@ export interface MemoryServiceOptions {
   readonly distillTimeoutMs?: number;
   /**
    * Shared background admission (server-owned, bootstrap-injected). When
-   * present, post-completion extraction and idle-distill drains admit ONE
-   * unit at a time against the shadow worker; when busy/closed they skip
-   * with an honest fixed diagnostic (already-durable outbox still drains).
-   * Absent (default) preserves the legacy ungated behavior. Foreground
-   * paths (recall/search/stage) never consult this gate.
+   * present, post-completion extraction admits ONE unit at a time against
+   * the shadow worker, and each automatic `maintain.distill` execution
+   * admits the same unit at its own boundary inside `drainOnce` — whatever
+   * tick launched it (completion, recovery, idle). Busy/closed skips ONLY
+   * the automatic execution with an honest fixed diagnostic (durable
+   * pending, attempts unchanged); explicit user-authorized manage work
+   * always drains. Absent (default) preserves the legacy ungated behavior.
+   * Foreground paths (recall/search/stage) never consult this gate.
    */
   readonly background?: BackgroundResourceGate | null;
 }
@@ -510,6 +513,18 @@ export function createMemoryService(
    */
   const drainControllers = new Set<AbortController>();
   /**
+   * Controllers for in-flight AUTOMATIC model-heavy CLI calls only
+   * (`maintain.distill`, the one outbox op that launches the remind local
+   * LLM): foreground activity and STOP abort exactly these — never an
+   * explicit user-authorized manage/foreground-recall call. Each entry is
+   * a per-job controller (scoped to one `executeJob`), so aborting it ends
+   * only that CLI child; the tick continues with explicit jobs. Released
+   * only after the guarded call settles (no late-child overlap).
+   */
+  const backgroundJobControllers = new Set<AbortController>();
+  /** Outbox kind for automatic cultivation (the only local-LLM job). */
+  const AUTOMATIC_DISTILL_KIND = "maintain.distill";
+  /**
    * Every in-flight post-completion extraction owns a controller here (its
    * OWN gateway call only, never the global gateway): foreground activity
    * and STOP/shutdown abort it so a parked extraction socket cannot outlive
@@ -582,12 +597,18 @@ export function createMemoryService(
   }
 
   function notifyForeground(): void {
-    // Foreground preemption: abort an in-flight idle drain so recall and
-    // completion work take priority. Only the idle-owned tick is aborted:
-    // a foreground drain keeps running (single flight shares it). Aborted
-    // jobs are NOT acked: they stay pending with bounded backoff (durable
-    // retry, never infinite).
-    if (idleDrainActive) {
+    // Foreground preemption: abort OUR OWN parked extraction call plus any
+    // in-flight AUTOMATIC distill CLI child (tracked background controllers
+    // only, whatever tick launched them — idle, completion, or recovery).
+    // Explicit user-authorized manage calls and foreground recall are NEVER
+    // aborted here: only extractionControllers (our own gateway call) plus
+    // background-owned distill children. The tick itself keeps running so
+    // explicit jobs still complete.
+    //
+    // Legacy ungated services (background null) track no background
+    // controllers: preserve the previous whole-idle-tick preemption so a
+    // parked automatic child cannot outlive foreground activity there.
+    if (background === null && idleDrainActive) {
       for (const controller of [...drainControllers]) {
         try {
           controller.abort();
@@ -596,11 +617,14 @@ export function createMemoryService(
         }
       }
     }
-    // A newly starting foreground prompt also aborts OUR OWN parked
-    // extraction call (never the global gateway, never an ordinary run):
-    // the late output is discarded by the post-await guard, so no memory
-    // write lands from a superseded extraction.
     for (const controller of [...extractionControllers]) {
+      try {
+        controller.abort();
+      } catch {
+        // Best effort.
+      }
+    }
+    for (const controller of [...backgroundJobControllers]) {
       try {
         controller.abort();
       } catch {
@@ -612,15 +636,27 @@ export function createMemoryService(
 
   /**
    * Committed control change: read the ACTUAL control state (never a stored
-   * reply). A pause aborts OUR OWN in-flight extraction and closes shared
-   * background admission (no new extraction/idle-distill starts even with
-   * no foreground chat anywhere); a resume reopens admission. Never throws.
+   * reply). A pause aborts OUR OWN in-flight extraction call plus any
+   * in-flight AUTOMATIC distill CLI child (tracked background controllers
+   * only — never explicit manage/foreground-recall calls) and closes shared
+   * background admission (no new extraction/distill starts even with no
+   * foreground chat anywhere); a resume reopens admission. Closing the gate
+   * is NOT an abort by itself: an already-parked automatic child is aborted
+   * through its own controller and its lease releases only after that call
+   * settles, so no late child overlaps the next admission. Never throws.
    */
   function notifyControl(): void {
     try {
       const paused = repo.getAutonomyControlState().paused === true;
       if (paused) {
         for (const controller of [...extractionControllers]) {
+          try {
+            controller.abort();
+          } catch {
+            // Best effort.
+          }
+        }
+        for (const controller of [...backgroundJobControllers]) {
           try {
             controller.abort();
           } catch {
@@ -1015,11 +1051,23 @@ export function createMemoryService(
   /**
    * One bounded drain tick over due jobs (single flight: concurrent callers
    * share the in-flight tick). Aborts between jobs on preemption/shutdown.
-   * The tick owns its abort controller (registered for stop()/preemption)
+   * The tick owns an abort controller (registered for stop()/preemption)
    * and executes at most MEMORY_DRAIN_BATCH jobs TOTAL per tick: the claim
    * bound shrinks with the remaining budget, so follow-up chains (remember
    * fan-out, correction chains, retries) continue on a later scheduled
    * drain instead of stranding behind an over-wide tick.
+   *
+   * AUTOMATIC JOB boundary (not batch boundary): a due `maintain.distill`
+   * job — the one outbox op that launches the remind local LLM — admits the
+   * shared background unit for its own execution only. A busy/closed gate
+   * SKIPS that job with an honest diagnostic and NO state touch (still
+   * pending, attempts unchanged: no busy-fail, no backoff poisoning), and
+   * the tick continues with the next eligible job (no head-of-line
+   * starvation), so explicit user-authorized manage work (`record.retire`,
+   * `record.reactivate`, correction `event.append`/`record.correct`) always
+   * progresses — even while STOPped. The `claimDueMemoryJobs` read below is
+   * a read-only due selection (no status mutation), so a skipped automatic
+   * job needs no unclaim: nothing was claimed before the admission check.
    */
   function drainOnce(signal?: AbortSignal): Promise<{ executed: number }> {
     if (drainInFlight !== null) {
@@ -1081,6 +1129,57 @@ export function createMemoryService(
             ) {
               break;
             }
+            // AUTOMATIC JOB boundary: a due distill admits the shared unit
+            // for its own execution only. Busy/closed skips it untouched
+            // (durable pending, attempts unchanged) and the tick moves on to
+            // the next eligible job — explicit manage work is never blocked
+            // behind an automatic job, on any caller path (completion,
+            // recovery, idle).
+            if (job.kind === AUTOMATIC_DISTILL_KIND && background !== null) {
+              const lease = background.tryAcquire(
+                BACKGROUND_OWNER_MEMORY_IDLE_DISTILL,
+              );
+              if (lease === null) {
+                log(
+                  "info",
+                  background.closed
+                    ? "memory.distill_skipped_closed"
+                    : "memory.distill_skipped_busy",
+                );
+                continue;
+              }
+              // Per-job controller: STOP/foreground abort ends ONLY this
+              // automatic CLI child (existing preempted path: stays pending
+              // with bounded backoff). The lease releases only after the
+              // guarded call settles, so no late child overlaps the next
+              // admission. Explicit jobs reuse the tick signal directly.
+              const jobController = new AbortController();
+              backgroundJobControllers.add(jobController);
+              const forwardJobAbort = (): void => {
+                try {
+                  jobController.abort();
+                } catch {
+                  // Best effort.
+                }
+              };
+              if (tickSignal.aborted) {
+                forwardJobAbort();
+              } else {
+                tickSignal.addEventListener("abort", forwardJobAbort, {
+                  once: true,
+                });
+              }
+              try {
+                const settled = await executeJob(job, jobController.signal);
+                void settled;
+                executed += 1;
+              } finally {
+                tickSignal.removeEventListener("abort", forwardJobAbort);
+                backgroundJobControllers.delete(jobController);
+                background.release(lease);
+              }
+              continue;
+            }
             const settled = await executeJob(job, tickSignal);
             void settled;
             executed += 1;
@@ -1108,14 +1207,19 @@ export function createMemoryService(
   }
 
   /**
-   * One bounded idle cultivation batch (single flight). Ordering per tick:
+   * One bounded idle cultivation batch (single flight). The gate lives at
+   * the AUTOMATIC JOB boundary inside `drainOnce` — never around this whole
+   * batch — so explicit user-authorized manage work always progresses, even
+   * while STOPped. Ordering per tick:
    * 1. A still-pending distill job whose backoff expired is drained (a
    *    transiently failed/preempted distill retries WITHOUT another
    *    foreground completion or restart); a not-yet-due one only rearms.
+   *    A busy/closed gate skips ONLY the distill execution (durable pending,
+   *    attempts unchanged) while explicit jobs in the same tick still run.
    * 2. Any other due foreground backlog drains first (even with no run
    *    context yet, so crash-recovered or externally enqueued work never
-   *    strands behind a missing anchor). Foreground priority holds: the
-   *    next foreground activity preempts this tick via notifyForeground.
+   *    strands behind a missing anchor). Explicit manage jobs never consult
+   *    the gate: they complete while STOPped.
    * 3. Only with no due backlog and a completed-run anchor is one
    *    `maintain.distill` enqueued, then drained. A degraded
    *    (model-unavailable) distill answer acks normally with zero writes:
@@ -1160,31 +1264,15 @@ export function createMemoryService(
     }
     if (pending > 0) {
       // Foreground backlog first (even without a run anchor): drain it
-      // instead of cultivating. Idle-owned, so admit the shared background
-      // unit first: when another background unit holds it (or STOP closed
-      // admission), rearm and return — the backlog stays durable pending
-      // and the next idle tick or foreground drain picks it up (no loss,
-      // no spin, no catchup queue).
-      const lease =
-        background?.tryAcquire(BACKGROUND_OWNER_MEMORY_IDLE_DISTILL) ?? null;
-      if (background !== null && lease === null) {
-        log(
-          "info",
-          background.closed
-            ? "memory.idle_skipped_closed"
-            : "memory.idle_skipped_busy",
-        );
-        armIdleTimer();
-        return;
-      }
+      // instead of cultivating. NO batch-level admission: the automatic-job
+      // boundary inside `drainOnce` skips only distill executions while
+      // explicit manage jobs in the same tick still run — even while STOP
+      // closed the gate (no starvation, no loss, no spin).
       idleDrainActive = true;
       try {
         await drainOnce().catch(() => undefined);
       } finally {
         idleDrainActive = false;
-        if (lease !== null) {
-          background?.release(lease);
-        }
         armIdleTimer();
       }
       return;
@@ -1220,30 +1308,15 @@ export function createMemoryService(
       return;
     }
     pendingDistillJobId = enqueuedId;
-    // Idle-owned cultivation drain: admit the shared background unit first.
-    // A busy/closed gate skips with an honest diagnostic — the distill job
-    // stays durable pending under its stable key and a later tick retries
-    // it after backoff (never duplicated, never mass-caught-up).
-    const distillLease =
-      background?.tryAcquire(BACKGROUND_OWNER_MEMORY_IDLE_DISTILL) ?? null;
-    if (background !== null && distillLease === null) {
-      log(
-        "info",
-        background.closed
-          ? "memory.idle_skipped_closed"
-          : "memory.idle_skipped_busy",
-      );
-      armIdleTimer();
-      return;
-    }
+    // No batch-level admission here either: the distill execution admits
+    // the shared unit at its own boundary inside `drainOnce`, so a
+    // busy/closed gate skips only the distill (durable pending under its
+    // stable key, retried by a later tick) without blocking explicit work.
     idleDrainActive = true;
     try {
       await drainOnce().catch(() => undefined);
     } finally {
       idleDrainActive = false;
-      if (distillLease !== null) {
-        background?.release(distillLease);
-      }
       armIdleTimer();
     }
   }
@@ -1387,9 +1460,11 @@ export function createMemoryService(
       // at a time. When the gate is held (shadow/idle-distill in flight) or
       // closed (STOP), extraction SKIPS with an honest fixed diagnostic —
       // but the completed-run anchor above and the feedback jobs already
-      // enqueued stay durable: the outbox still drains below (nothing
+      // enqueued stay durable: the outbox below still drains, and the
+      // automatic-job boundary inside `drainOnce` admits-or-skips ONLY the
+      // distill execution itself (explicit jobs always run), so nothing
       // already-durable is lost, no catchup invented, no auto-revive of
-      // this skipped extraction on release).
+      // this skipped extraction on release.
       const extractionLease =
         background?.tryAcquire(BACKGROUND_OWNER_MEMORY_EXTRACTION) ?? null;
       if (background !== null && extractionLease === null) {

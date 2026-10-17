@@ -17,14 +17,17 @@
 // source/selection checks stay code-authoritative after every async gap.
 //
 // Honest limits (not covered, by design):
-// - Foreground-triggered memory drains (post-completion outbox,
-//   crash-recovery) stay ungated foreground-priority work: they are
-//   bounded batches and preemptible, and already-durable outbox must never
-//   be lost behind admission.
+// - The admission check lives at the AUTOMATIC JOB execution boundary
+//   (each `maintain.distill` CLI execution, whatever drain launched it —
+//   completion, recovery, or idle), never around a whole drain batch:
+//   explicit user-authorized manage work in the same tick always runs, even
+//   while STOP closed the gate. The outbox `claimDueMemoryJobs` selection is
+//   a read-only due read (no status mutation), so a skipped automatic job
+//   needs no unclaim — attempts and backoff untouched, durable pending.
 // - The remind CLI child may use local compute (embeddings/vectors) that
 //   this process cannot observe: the gate serializes our calls INTO the
-//   CLI (plus every gateway call), but claims no GPU/resource coverage
-//   beyond that non-overlap.
+//   CLI for distill (plus every gateway call), but claims no GPU/resource
+//   coverage beyond that non-overlap.
 // - Notifications carry zero LLM work and never acquire the gate.
 //
 // Mechanics: identity-token reservation. `tryAcquire` returns a
