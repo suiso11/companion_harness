@@ -459,3 +459,171 @@ export const AutonomyRequestHashSchema = z.strictObject({
   requestHash: Sha256HexSchema,
 });
 export type AutonomyRequestHash = z.infer<typeof AutonomyRequestHashSchema>;
+
+/* ------------------------------------------------------------------ */
+/* Conversation-proposal DTOs (AV03 proposal-only staging core)        */
+/*                                                                     */
+/* A proposal is a durable INFERRED draft staged by the model-only      */
+/* tools `purpose.propose` / `task.propose`. Staging creates NO         */
+/* purpose, NO task, NO grant, NO calendar write, and never resumes    */
+/* the stop control. Only the explicit trusted human adoption API       */
+/* creates the actual purpose/task, atomically with the accept          */
+/* decision. A recorded `permission` purpose-kind proposal is ONLY a   */
+/* claim (never an executable grant). Model tools accept NO deadline / */
+/* window fields at all: task drafts adopt with a NULL deadline and    */
+/* purpose drafts with a NULL window unless the human supplies an      */
+/* explicit strict-RFC3339 value at accept time. Source identity       */
+/* (session/run/turn/quote) is ALWAYS server-derived from the calling  */
+/* run's CURRENT ordinary `user_text` turn — never model input.        */
+/* ------------------------------------------------------------------ */
+
+/** Adoption shape selected by the staging tool. */
+export const ConversationProposalTargetSchema = z.enum(["purpose", "task"]);
+export type ConversationProposalTarget = z.infer<
+  typeof ConversationProposalTargetSchema
+>;
+
+/**
+ * Explicit draft kind: a casual remark stays casual (no mandatory
+ * taskization). A model do-nothing stages nothing.
+ */
+export const ConversationDraftKindSchema = z.enum([
+  "casual",
+  "wish",
+  "problem",
+  "task",
+  "deadline",
+]);
+export type ConversationDraftKind = z.infer<typeof ConversationDraftKindSchema>;
+
+/** Proposal lifecycle (terminal: accepted / rejected, never revived). */
+export const ConversationProposalStatusSchema = z.enum([
+  "pending",
+  "accepted",
+  "rejected",
+]);
+export type ConversationProposalStatus = z.infer<
+  typeof ConversationProposalStatusSchema
+>;
+
+/** Immutable original quote: exact verbatim substring of the source body. */
+export const ConversationSourceQuoteSchema = z
+  .string()
+  .min(1)
+  .refine(codePointsMax(2000), { message: "quote over 2000 code points" });
+export type ConversationSourceQuote = z.infer<
+  typeof ConversationSourceQuoteSchema
+>;
+
+/** Task-draft quote bound (borrowed title cap: adoption title is the quote). */
+export const ConversationTaskQuoteSchema = z.string().min(1).max(256);
+export type ConversationTaskQuote = z.infer<typeof ConversationTaskQuoteSchema>;
+
+/** Inference provenance is hardcoded `model` (never user instruction). */
+export const ConversationProposalSourceKindSchema = z.literal("model");
+export type ConversationProposalSourceKind = z.infer<
+  typeof ConversationProposalSourceKindSchema
+>;
+
+/**
+ * Model-side `purpose.propose` draft input. Carries NO source identity and
+ * NO dates: scope/kind/quote/interpretation only. The parent is never a
+ * purpose-proposal field.
+ */
+export const PurposeProposeRequestSchema = z.strictObject({
+  scope: AutonomyScopeSchema,
+  draftKind: ConversationDraftKindSchema,
+  purposeKind: PurposeKindSchema,
+  sourceQuote: ConversationSourceQuoteSchema,
+  interpretation: PurposeInterpretationSchema,
+});
+export type PurposeProposeRequest = z.infer<typeof PurposeProposeRequestSchema>;
+
+/**
+ * Model-side `task.propose` draft input. An EXPLICIT parent purpose
+ * (id + expected version, same session/scope, active) is REQUIRED: the
+ * model can never auto-pick a parent, and task drafts carry NO deadline
+ * (NULL until a human adopts with an explicit strict instant).
+ */
+export const TaskProposeRequestSchema = z.strictObject({
+  scope: AutonomyScopeSchema,
+  draftKind: ConversationDraftKindSchema,
+  taskKind: TaskKindSchema,
+  sourceQuote: ConversationTaskQuoteSchema,
+  interpretation: PurposeInterpretationSchema,
+  parentPurposeId: UuidSchema,
+  expectedParentVersion: z.number().int().min(1),
+});
+export type TaskProposeRequest = z.infer<typeof TaskProposeRequestSchema>;
+
+export const ConversationProposalViewSchema = z.strictObject({
+  id: UuidSchema,
+  sessionId: UuidSchema,
+  scope: AutonomyScopeSchema,
+  target: ConversationProposalTargetSchema,
+  draftKind: ConversationDraftKindSchema,
+  purposeKind: PurposeKindSchema.nullable(),
+  taskKind: TaskKindSchema.nullable(),
+  sourceQuote: z.string().min(1),
+  interpretation: z.string().min(1),
+  sourceKind: ConversationProposalSourceKindSchema,
+  sourceTurnId: UuidSchema,
+  sourceRunId: UuidSchema,
+  parentPurposeId: UuidSchema.nullable(),
+  expectedParentVersion: z.number().int().min(1).nullable(),
+  status: ConversationProposalStatusSchema,
+  version: z.number().int().min(1),
+  acceptedTargetId: UuidSchema.nullable(),
+  createdAt: UnixMsSchema,
+  updatedAt: UnixMsSchema,
+});
+export type ConversationProposalView = z.infer<
+  typeof ConversationProposalViewSchema
+>;
+
+export const ConversationProposalListResponseSchema = z.strictObject({
+  items: z.array(ConversationProposalViewSchema).max(100),
+});
+export type ConversationProposalListResponse = z.infer<
+  typeof ConversationProposalListResponseSchema
+>;
+
+/**
+ * Trusted human adoption: CAS on the expected proposal version. The human
+ * MAY supply an explicit strict-RFC3339 deadline (task target) or window
+ * (purpose target); absent stays NULL and is never inferred. Replays with
+ * the same key + same body; parent drift/revocation/scope mismatch fails
+ * WITHOUT creating anything.
+ */
+export const ConversationProposalAcceptRequestSchema = z.strictObject({
+  expectedVersion: z.number().int().min(1),
+  deadline: z.string().min(1).max(128).optional(),
+  validFrom: z.string().min(1).max(128).optional(),
+  validUntil: z.string().min(1).max(128).optional(),
+});
+export type ConversationProposalAcceptRequest = z.infer<
+  typeof ConversationProposalAcceptRequestSchema
+>;
+
+export const ConversationProposalAcceptResponseSchema = z.strictObject({
+  proposal: ConversationProposalViewSchema,
+  purpose: PurposeViewSchema.nullable(),
+  task: TaskViewSchema.nullable(),
+});
+export type ConversationProposalAcceptResponse = z.infer<
+  typeof ConversationProposalAcceptResponseSchema
+>;
+
+/** Trusted human rejection: CAS on the expected version; creates nothing. */
+export const ConversationProposalRejectRequestSchema = z.strictObject({
+  expectedVersion: z.number().int().min(1),
+});
+export type ConversationProposalRejectRequest = z.infer<
+  typeof ConversationProposalRejectRequestSchema
+>;
+
+export const ConversationProposalRejectResponseSchema =
+  ConversationProposalViewSchema;
+export type ConversationProposalRejectResponse = z.infer<
+  typeof ConversationProposalRejectResponseSchema
+>;

@@ -65,6 +65,7 @@ import {
   createCalendarActionTargetResolver,
   createCalendarCreateProposalRegistration,
   createCalendarRescheduleProposalRegistration,
+  createConversationProposalRegistrations,
   createDurableCalendarTargetStore,
   createKernelRepository,
   createM1ToolRegistrations,
@@ -2167,12 +2168,16 @@ export async function startServer(
       // AV autonomy read tools: SELECT-only over the runtime session's
       // owned records (session derived from the calling run, never model
       // input). Same existing broker budgets, no widening, no mutations.
+      // AV03 proposal tools: proposal-only staging of inferred drafts
+      // (purpose.propose / task.propose); the model stages but never
+      // creates, and approval lives outside it. Same budgets, no new step.
       const agentBroker = createToolBroker({
         db: handle.raw,
         repo,
         registrations: [
           ...agentBaseRegistrations,
           ...createAutonomyReadRegistrations({ repo }),
+          ...createConversationProposalRegistrations({ repo }),
         ],
       });
       registry.register(

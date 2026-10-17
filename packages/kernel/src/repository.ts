@@ -25,6 +25,16 @@ import {
   AutonomyListQuerySchema,
   type BuildDeadlineScheduleResponse,
   BuildDeadlineScheduleResponseSchema,
+  ConversationProposalAcceptRequestSchema,
+  type ConversationProposalAcceptResponse,
+  ConversationProposalAcceptResponseSchema,
+  type ConversationProposalListResponse,
+  ConversationProposalListResponseSchema,
+  ConversationProposalRejectRequestSchema,
+  type ConversationProposalRejectResponse,
+  ConversationProposalRejectResponseSchema,
+  type ConversationProposalView,
+  ConversationProposalViewSchema,
   type CreateSessionResponse,
   CreateSessionResponseSchema,
   DeadlineScheduleViewSchema,
@@ -98,6 +108,7 @@ import {
   type PurposeCreateResponse,
   type PurposeListResponse,
   PurposeListResponseSchema,
+  PurposeProposeRequestSchema,
   PurposeTransitionRequestSchema,
   type PurposeView,
   PurposeViewSchema,
@@ -145,6 +156,7 @@ import {
   TaskHoldRequestSchema,
   type TaskListResponse,
   TaskListResponseSchema,
+  TaskProposeRequestSchema,
   TaskResumeRequestSchema,
   TaskTransitionRequestSchema,
   type TaskView,
@@ -162,6 +174,7 @@ import {
 import {
   type AutonomyKeyOptions,
   applyAutonomyRestartFence,
+  acceptConversationProposal as autonomyAcceptProposal,
   achievePurpose as autonomyAchievePurpose,
   cancelTask as autonomyCancelTask,
   completeTask as autonomyCompleteTask,
@@ -169,6 +182,7 @@ import {
   createPurpose as autonomyCreatePurpose,
   createTask as autonomyCreateTask,
   getAutonomyControl as autonomyGetControl,
+  getConversationProposal as autonomyGetProposal,
   getPurpose as autonomyGetPurpose,
   getTask as autonomyGetTask,
   holdTask as autonomyHoldTask,
@@ -176,14 +190,18 @@ import {
   listAutonomyActivity as autonomyListActivity,
   listConflictPairsInScope as autonomyListConflictPairsInScope,
   listPurposeConflicts as autonomyListConflicts,
+  listConversationProposalEvents as autonomyListProposalEvents,
+  listConversationProposals as autonomyListProposals,
   listPurposes as autonomyListPurposes,
   listPurposesInScope as autonomyListPurposesInScope,
   listTasks as autonomyListTasks,
   listTasksInScope as autonomyListTasksInScope,
   recordPurposeConflict as autonomyRecordConflict,
+  rejectConversationProposal as autonomyRejectProposal,
   resumeTask as autonomyResumeTask,
   revokePurpose as autonomyRevokePurpose,
   setAutonomyControl as autonomySetControl,
+  stageConversationProposal as autonomyStageProposal,
   startTask as autonomyStartTask,
   isStrictAutonomyDeadline,
   recordUserActivityInTx,
@@ -5261,6 +5279,221 @@ export function createKernelRepository(
     );
   }
 
+  /* ---------------------------------------------------------------- */
+  /* AV03 conversation-proposal facade (durable inferred drafts).       */
+  /*                                                                  */
+  /* Ownership: every method below delegates to `autonomy.ts`, the     */
+  /* ONLY writer of the proposal tables. Staging is model-origin ONLY */
+  /* via `stageConversationProposalFromModel` (source derived          */
+  /* server-side from the calling run's CURRENT ordinary `user_text`   */
+  /* turn — never model input). Accept/reject are the trusted-human    */
+  /* kernel API used by the NEXT HTTP/UI worker; this slice ships the  */
+  /* bounded owned list/get readers and the atomic adoption core ONLY  */
+  /* (no HTTP routes in this slice). No calendar / scheduling /        */
+  /* permission-grant behavior lives here.                            */
+  /* ---------------------------------------------------------------- */
+
+  function stageConversationProposalFromModel(
+    runId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): {
+    status: number;
+    body: ConversationProposalView;
+    replayed: boolean;
+  } {
+    const run = getRun(runId);
+    const turn = getTurn(run.turnId);
+    if (run.sessionId !== turn.sessionId) {
+      throw new RepositoryValidationError("run/turn session mismatch");
+    }
+    if (turn.input.kind !== "user_text") {
+      // Only CURRENT ordinary user_text is an eligible source: action
+      // approval/rejection decisions (or any non-text turn) can never be
+      // quoted as a user instruction.
+      throw new RepositoryValidationError(
+        "only ordinary user_text turns can source a proposal",
+      );
+    }
+    const userText = turn.input.text;
+    const target =
+      typeof request === "object" && request !== null
+        ? (request as { target?: unknown }).target
+        : undefined;
+    // Strip the dispatch discriminator before strict validation (the
+    // model-facing tool schemas never carry a target field; the
+    // registration name fixes it).
+    const { target: _discarded, ...rest } =
+      typeof request === "object" && request !== null
+        ? (request as Record<string, unknown>)
+        : {};
+    void _discarded;
+    if (target === "purpose") {
+      const parsed = parseOrValidation(
+        () => PurposeProposeRequestSchema.parse(rest),
+        "purpose propose request",
+      );
+      const out = autonomyStageProposal(
+        db,
+        run.sessionId,
+        {
+          scope: parsed.scope,
+          target: "purpose",
+          draftKind: parsed.draftKind,
+          purposeKind: parsed.purposeKind,
+          sourceQuote: parsed.sourceQuote,
+          interpretation: parsed.interpretation,
+        },
+        { sourceRunId: run.id, sourceTurnId: turn.id, userText },
+        options,
+      );
+      const body = parseOrValidation(
+        () => ConversationProposalViewSchema.parse(out.body),
+        "proposal stage response",
+      );
+      return { status: out.status, body, replayed: out.replayed };
+    }
+    if (target === "task") {
+      const parsed = parseOrValidation(
+        () => TaskProposeRequestSchema.parse(rest),
+        "task propose request",
+      );
+      const out = autonomyStageProposal(
+        db,
+        run.sessionId,
+        {
+          scope: parsed.scope,
+          target: "task",
+          draftKind: parsed.draftKind,
+          taskKind: parsed.taskKind,
+          sourceQuote: parsed.sourceQuote,
+          interpretation: parsed.interpretation,
+          parentPurposeId: parsed.parentPurposeId,
+          expectedParentVersion: parsed.expectedParentVersion,
+        },
+        { sourceRunId: run.id, sourceTurnId: turn.id, userText },
+        options,
+      );
+      const body = parseOrValidation(
+        () => ConversationProposalViewSchema.parse(out.body),
+        "proposal stage response",
+      );
+      return { status: out.status, body, replayed: out.replayed };
+    }
+    throw new RepositoryValidationError(
+      "proposal target must be purpose or task",
+    );
+  }
+
+  function listConversationProposals(
+    sessionId: string,
+    query: unknown = {},
+  ): ConversationProposalListResponse {
+    const parsed = parseOrValidation(
+      () => AutonomyListQuerySchema.parse(query ?? {}),
+      "proposal list query",
+    );
+    const out = autonomyListProposals(db, sessionId, parsed.limit);
+    return parseOrValidation(
+      () => ConversationProposalListResponseSchema.parse(out),
+      "proposal list response",
+    );
+  }
+
+  function getConversationProposal(
+    sessionId: string,
+    proposalId: string,
+  ): ConversationProposalView {
+    return parseOrValidation(
+      () =>
+        ConversationProposalViewSchema.parse(
+          autonomyGetProposal(db, sessionId, proposalId),
+        ),
+      "proposal response",
+    );
+  }
+
+  function listConversationProposalEvents(
+    sessionId: string,
+    proposalId: string,
+  ): {
+    proposalId: string;
+    events: {
+      seq: number;
+      event: string;
+      fromStatus: string | null;
+      toStatus: string;
+      createdAt: number;
+    }[];
+  } {
+    return autonomyListProposalEvents(db, sessionId, proposalId);
+  }
+
+  function acceptConversationProposal(
+    sessionId: string,
+    proposalId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): {
+    status: number;
+    body: ConversationProposalAcceptResponse;
+    replayed: boolean;
+  } {
+    const parsed = parseOrValidation(
+      () => ConversationProposalAcceptRequestSchema.parse(request),
+      "proposal accept request",
+    );
+    const out = autonomyAcceptProposal(
+      db,
+      sessionId,
+      proposalId,
+      {
+        expectedVersion: parsed.expectedVersion,
+        ...(parsed.deadline !== undefined ? { deadline: parsed.deadline } : {}),
+        ...(parsed.validFrom !== undefined
+          ? { validFrom: parsed.validFrom }
+          : {}),
+        ...(parsed.validUntil !== undefined
+          ? { validUntil: parsed.validUntil }
+          : {}),
+      },
+      options,
+    );
+    const body = parseOrValidation(
+      () => ConversationProposalAcceptResponseSchema.parse(out.body),
+      "proposal accept response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function rejectConversationProposal(
+    sessionId: string,
+    proposalId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): {
+    status: number;
+    body: ConversationProposalRejectResponse;
+    replayed: boolean;
+  } {
+    const parsed = parseOrValidation(
+      () => ConversationProposalRejectRequestSchema.parse(request),
+      "proposal reject request",
+    );
+    const out = autonomyRejectProposal(
+      db,
+      sessionId,
+      proposalId,
+      parsed.expectedVersion,
+      options,
+    );
+    const body = parseOrValidation(
+      () => ConversationProposalRejectResponseSchema.parse(out.body),
+      "proposal reject response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
   function setAutonomyControlState(
     request: unknown,
     options: AutonomyKeyOptions,
@@ -5951,6 +6184,12 @@ export function createKernelRepository(
     setAutonomyControlState,
     listAutonomyActivityLog,
     applyAutonomyRestartFenceNow,
+    stageConversationProposalFromModel,
+    listConversationProposals,
+    getConversationProposal,
+    listConversationProposalEvents,
+    acceptConversationProposal,
+    rejectConversationProposal,
     requestShadowDeliberation,
     listShadowJobs,
     getShadowJob,
