@@ -162,6 +162,10 @@ function readHasMore(body: unknown): boolean {
   return body.hasMore === true;
 }
 
+/** Strict UUID v4 shape (client-side pre-freeze validation only). */
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 const KIND_TEXT: Record<string, string> = {
   method: "方法",
   hypothesis: "仮説",
@@ -211,6 +215,7 @@ export class LearningPanel {
   private detail: HTMLElement | null = null;
   private detailBody: HTMLElement | null = null;
   private evidenceList: HTMLElement | null = null;
+  private evidenceMoreButton: HTMLButtonElement | null = null;
   private polaritySelect: HTMLSelectElement | null = null;
   private sourceKindSelect: HTMLSelectElement | null = null;
   private sourceIdInput: HTMLInputElement | null = null;
@@ -219,6 +224,7 @@ export class LearningPanel {
   private supportButton: HTMLButtonElement | null = null;
   private refuteButton: HTMLButtonElement | null = null;
   private retireButton: HTMLButtonElement | null = null;
+  private reaffirmButton: HTMLButtonElement | null = null;
   private acceptButton: HTMLButtonElement | null = null;
   private rejectButton: HTMLButtonElement | null = null;
   private retryButton: HTMLButtonElement | null = null;
@@ -230,6 +236,9 @@ export class LearningPanel {
   /** Newest-history keyset: opaque cursor + truthful older-page flag. */
   private historyCursor: string | null = null;
   private historyHasMore = false;
+  /** Oldest-first evidence keyset for the OPEN selection. */
+  private evidenceCursor: string | null = null;
+  private evidenceHasMore = false;
   private readonly items = new Map<string, HypothesisView>();
   private readonly evidence = new Map<string, EvidenceView[]>();
   /** Explicitly selected hypothesis id (drawer content). */
@@ -269,6 +278,9 @@ export class LearningPanel {
     this.detail = required<HTMLElement>("learning-detail");
     this.detailBody = required<HTMLElement>("learning-detail-body");
     this.evidenceList = required<HTMLElement>("learning-evidence-list");
+    this.evidenceMoreButton = required<HTMLButtonElement>(
+      "learning-evidence-more",
+    );
     this.polaritySelect = required<HTMLSelectElement>(
       "learning-evidence-polarity",
     );
@@ -283,6 +295,7 @@ export class LearningPanel {
     this.supportButton = required<HTMLButtonElement>("learning-support");
     this.refuteButton = required<HTMLButtonElement>("learning-refute");
     this.retireButton = required<HTMLButtonElement>("learning-retire");
+    this.reaffirmButton = required<HTMLButtonElement>("learning-reaffirm");
     this.acceptButton = required<HTMLButtonElement>("learning-accept");
     this.rejectButton = required<HTMLButtonElement>("learning-reject");
     this.retryButton = required<HTMLButtonElement>("learning-retry");
@@ -296,6 +309,9 @@ export class LearningPanel {
     this.moreButton.addEventListener("click", () => {
       void this.loadOlderHistory();
     });
+    this.evidenceMoreButton.addEventListener("click", () => {
+      void this.loadMoreEvidence();
+    });
     this.attachButton.addEventListener("click", () => {
       void this.commitEvidence();
     });
@@ -307,6 +323,9 @@ export class LearningPanel {
     });
     this.retireButton.addEventListener("click", () => {
       void this.commitTransition("retire");
+    });
+    this.reaffirmButton.addEventListener("click", () => {
+      void this.commitReaffirm();
     });
     this.acceptButton.addEventListener("click", () => {
       void this.commitDecision("accept");
@@ -329,6 +348,8 @@ export class LearningPanel {
     this.opInFlight = false;
     this.historyCursor = null;
     this.historyHasMore = false;
+    this.evidenceCursor = null;
+    this.evidenceHasMore = false;
     if (this.detail !== null) this.detail.hidden = true;
     if (this.retryButton !== null) this.retryButton.hidden = true;
     this.renderAll();
@@ -389,6 +410,47 @@ export class LearningPanel {
     if (this.selectedId !== null) this.renderDetail(false);
   }
 
+  /** Read one oldest-first evidence page behind the selection cursor. */
+  private async loadMoreEvidence(): Promise<void> {
+    const sessionId = this.deps.getSessionId();
+    const selected = this.selectedId;
+    const cursor = this.evidenceCursor;
+    if (
+      sessionId === null ||
+      this.destroyed ||
+      selected === null ||
+      cursor === null
+    ) {
+      return;
+    }
+    const current = this.items.get(selected);
+    if (current === undefined) return;
+    const session = this.sessionSeq;
+    let res: { status: number; body: unknown };
+    try {
+      res = await this.deps.http.get(
+        `/api/sessions/${sessionId}/learning/hypotheses/${selected}/evidence?limit=50&cursor=${encodeURIComponent(cursor)}`,
+      );
+    } catch {
+      if (session === this.sessionSeq && this.selectedId === selected) {
+        this.setStatus("古い証拠の読み込みに失敗しました");
+      }
+      return;
+    }
+    if (session !== this.sessionSeq || this.selectedId !== selected) return;
+    if (res.status !== 200) {
+      this.setStatus("古い証拠の読み込みに失敗しました");
+      return;
+    }
+    const rows = this.evidence.get(selected) ?? [];
+    for (const row of readEvidence(res.body)) rows.push(row);
+    this.evidence.set(selected, rows);
+    this.evidenceCursor = readCursor(res.body);
+    this.evidenceHasMore = readHasMore(res.body);
+    const shown = this.items.get(selected);
+    if (shown !== undefined) this.renderEvidence(shown);
+  }
+
   private async refresh(): Promise<void> {
     const sessionId = this.deps.getSessionId();
     if (sessionId === null || this.destroyed) return;
@@ -411,18 +473,40 @@ export class LearningPanel {
       this.setStatus("学びの読み込みに失敗しました");
       return;
     }
-    this.items.clear();
+    // Merge the newest page into the map (never clear): older pages loaded
+    // via "古い履歴を読み込む" stay reachable, and a 409 re-read never
+    // drops the older-page row behind the frozen op.
     for (const item of readItems(res.body)) {
       if (item.sessionId === sessionId) this.items.set(item.id, item);
     }
     this.historyCursor = readCursor(res.body);
     this.historyHasMore = readHasMore(res.body);
-    // A selected hypothesis that vanished closes the drawer; an unresolved
-    // frozen op keeps its drawer pinned.
+    // A selected hypothesis missing from the newest page is NOT gone: it
+    // may live on an older page. Fetch it directly; close the drawer only
+    // when the server says it is gone (404). An unresolved frozen op keeps
+    // its drawer pinned without any fetch.
     if (this.pendingOp === null && this.selectedId !== null) {
       if (!this.items.has(this.selectedId)) {
-        this.selectedId = null;
-        if (this.detail !== null) this.detail.hidden = true;
+        const missing = this.selectedId;
+        try {
+          const single = await this.deps.http.get(
+            `/api/sessions/${sessionId}/learning/hypotheses/${missing}`,
+          );
+          if (session !== this.sessionSeq || seen !== this.listSeq) return;
+          if (
+            single.status === 200 &&
+            isHypothesisView(single.body) &&
+            (single.body as HypothesisView).sessionId === sessionId
+          ) {
+            this.items.set(missing, single.body as HypothesisView);
+          } else if (single.status === 404) {
+            this.selectedId = null;
+            if (this.detail !== null) this.detail.hidden = true;
+          }
+        } catch {
+          // Network loss: keep the stale selection (never close on a
+          // failed read); the next refresh retries.
+        }
       }
     }
     this.renderAll();
@@ -475,6 +559,9 @@ export class LearningPanel {
     this.selectedId = id;
     if (this.detail !== null) this.detail.hidden = false;
     if (this.retryButton !== null) this.retryButton.hidden = true;
+    // A new selection starts evidence paging from the newest page.
+    this.evidenceCursor = null;
+    this.evidenceHasMore = false;
     this.renderDetail(true);
     void this.loadEvidence(item);
   }
@@ -514,8 +601,12 @@ export class LearningPanel {
     const terminal = item.status === "retired";
     const staged = item.staged;
     // Explicit transitions need a non-staged, non-terminal record; staged
-    // records take accept/reject; retired records take nothing.
+    // records take accept/reject; retired records take nothing. Reaffirm
+    // keeps the status and clears the reevaluation notice, so it needs the
+    // notice set (the server rejects a reaffirm without one).
     const decidable = !terminal && !staged && !locked;
+    const reaffirmAble =
+      !terminal && !staged && !locked && item.needsReevaluation;
     const stagedDecidable = staged && !locked;
     const evidenceAble = !terminal && !staged && !locked;
     if (this.supportButton !== null) {
@@ -526,6 +617,9 @@ export class LearningPanel {
         !decidable || (item.status !== "open" && item.status !== "supported");
     }
     if (this.retireButton !== null) this.retireButton.disabled = !decidable;
+    if (this.reaffirmButton !== null) {
+      this.reaffirmButton.disabled = !reaffirmAble;
+    }
     if (this.acceptButton !== null) {
       this.acceptButton.disabled = !stagedDecidable;
     }
@@ -544,7 +638,6 @@ export class LearningPanel {
       const empty = document.createElement("li");
       empty.textContent = "証拠はまだありません";
       this.evidenceList.appendChild(empty);
-      return;
     }
     for (const row of rows) {
       const line = document.createElement("li");
@@ -573,6 +666,11 @@ export class LearningPanel {
       line.append(label, open);
       this.evidenceList.appendChild(line);
     }
+    // Older evidence pages stay behind the explicit affordance (the drawer
+    // never materializes the full history on open).
+    if (this.evidenceMoreButton !== null) {
+      this.evidenceMoreButton.hidden = !this.evidenceHasMore;
+    }
   }
 
   private async loadEvidence(item: HypothesisView): Promise<void> {
@@ -580,7 +678,7 @@ export class LearningPanel {
     const selected = this.selectedId;
     try {
       const res = await this.deps.http.get(
-        `/api/sessions/${item.sessionId}/learning/hypotheses/${item.id}/evidence`,
+        `/api/sessions/${item.sessionId}/learning/hypotheses/${item.id}/evidence?limit=50`,
       );
       if (session !== this.sessionSeq) return;
       if (this.selectedId !== selected) return;
@@ -589,6 +687,8 @@ export class LearningPanel {
         return;
       }
       this.evidence.set(item.id, readEvidence(res.body));
+      this.evidenceCursor = readCursor(res.body);
+      this.evidenceHasMore = readHasMore(res.body);
       // Selection-bound: a late reply for a previous selection never
       // overwrites the shown hypothesis's evidence.
       const current = this.items.get(item.id);
@@ -702,6 +802,37 @@ export class LearningPanel {
     await this.sendPendingOp();
   }
 
+  private async commitReaffirm(): Promise<void> {
+    const item =
+      this.selectedId === null ? undefined : this.items.get(this.selectedId);
+    const sessionId = this.deps.getSessionId();
+    if (this.pendingOp !== null) {
+      this.setStatus("未確定の操作があります。同じ内容で再送してください");
+      return;
+    }
+    if (
+      item === undefined ||
+      sessionId === null ||
+      this.opInFlight ||
+      item.staged ||
+      item.status === "retired" ||
+      !item.needsReevaluation
+    ) {
+      return;
+    }
+    const key = this.newKey();
+    this.pendingOp = {
+      hypothesisId: item.id,
+      ownerSession: sessionId,
+      endpoint: `/api/sessions/${sessionId}/learning/hypotheses/${item.id}/reaffirm`,
+      key,
+      body: { expectedVersion: item.version },
+    };
+    this.opInFlight = true;
+    this.renderDetail(false);
+    await this.sendPendingOp();
+  }
+
   private async commitEvidence(): Promise<void> {
     const item =
       this.selectedId === null ? undefined : this.items.get(this.selectedId);
@@ -728,6 +859,12 @@ export class LearningPanel {
     const note = this.noteInput === null ? "" : this.noteInput.value.trim();
     if (sourceId.length === 0) {
       this.setStatus("参照IDを入力してください");
+      return;
+    }
+    // Client-side UUID validation BEFORE freezing: an ill-shaped source id
+    // can never succeed server-side, so it must not pin the panel.
+    if (!UUID_RE.test(sourceId)) {
+      this.setStatus("参照IDはUUID形式で入力してください");
       return;
     }
     if (
@@ -823,49 +960,83 @@ export class LearningPanel {
       return;
     }
     if (res.status === 409) {
-      // Re-read the truth first: the frozen op clears ONLY on a
-      // diagnostically definitive terminal outcome. Otherwise the frozen op
-      // survives for the explicit same-key retry.
+      // Definitive conflict (version mismatch, lifecycle conflict, or key
+      // reuse): re-read the truth, then CLEAR the frozen op — retrying the
+      // identical frozen body could never succeed, so keeping it would pin
+      // the panel forever. The human re-commits fresh (new key, new
+      // version) after reading the honest message. Only network loss and
+      // 5xx/503 keep the frozen op (handled above/below).
       this.opInFlight = false;
       await this.refresh();
       if (session !== this.sessionSeq) return;
+      this.pendingOp = null;
+      if (this.retryButton !== null) this.retryButton.hidden = true;
       if (op.hypothesisId === "") {
-        if (this.retryButton !== null) this.retryButton.hidden = false;
         this.setStatus(
-          "競合しました（キーの再利用）。内容を確認して再送してください",
+          "競合しました（キーの再利用）。内容を確認して入力し直してください",
         );
         return;
       }
       const current = this.items.get(op.hypothesisId);
-      if (current === undefined || current.status === "retired") {
-        this.pendingOp = null;
-        if (this.retryButton !== null) this.retryButton.hidden = true;
-        if (current === undefined) {
-          this.setStatus("仮説が見つかりません（別セッションの可能性）");
-          this.selectedId = null;
-          if (this.detail !== null) this.detail.hidden = true;
-        } else {
-          this.setStatus("引退しています（履歴を確認してください）");
-        }
+      if (current === undefined) {
+        this.setStatus("仮説が見つかりません（別セッションの可能性）");
+        this.selectedId = null;
+        if (this.detail !== null) this.detail.hidden = true;
         this.renderAll();
-        if (this.selectedId !== null) this.renderDetail(false);
         return;
       }
-      if (this.retryButton !== null) this.retryButton.hidden = false;
-      this.setStatus(
-        "競合しました（版ずれ・キーの再利用）。内容を確認して再送してください",
-      );
+      if (current.status === "retired") {
+        this.setStatus("引退しています（履歴を確認してください）");
+      } else {
+        this.setStatus(
+          "競合しました（版ずれ・キーの再利用）。一覧を確認して入力し直してください",
+        );
+      }
+      this.renderAll();
+      if (this.selectedId !== null) this.renderDetail(false);
+      return;
+    }
+    if (res.status === 400) {
+      // Definitive validation rejection: the identical body can never
+      // succeed, so clear the frozen op and keep the selection + typed
+      // inputs for correction (never pin the panel).
+      this.pendingOp = null;
+      this.opInFlight = false;
+      if (this.retryButton !== null) this.retryButton.hidden = true;
+      this.setStatus("入力が不正です（内容を確認して入力し直してください）");
       if (this.selectedId !== null) this.renderDetail(false);
       return;
     }
     if (res.status === 404) {
+      this.opInFlight = false;
+      await this.refresh();
+      if (session !== this.sessionSeq) return;
+      const isEvidenceOp =
+        op.hypothesisId !== "" && op.endpoint.endsWith("/evidence");
+      if (isEvidenceOp && this.items.has(op.hypothesisId)) {
+        // The hypothesis is still there: the 404 names the UNKNOWN SOURCE
+        // anchor, not the hypothesis. Keep the selection + typed inputs,
+        // clear the doomed op (the identical unknown source can never
+        // succeed), and say so honestly. Close only when the refresh
+        // shows the hypothesis itself is gone (below).
+        this.pendingOp = null;
+        if (this.retryButton !== null) this.retryButton.hidden = true;
+        this.selectedId = op.hypothesisId;
+        if (this.detail !== null) this.detail.hidden = false;
+        this.setStatus(
+          "参照元が見つかりません（試行・候補・記録のIDを確認してください）",
+        );
+        this.renderAll();
+        this.renderDetail(false);
+        return;
+      }
       this.pendingOp = null;
       this.opInFlight = false;
       if (this.retryButton !== null) this.retryButton.hidden = true;
       this.setStatus("仮説が見つかりません（別セッションの可能性）");
       this.selectedId = null;
       if (this.detail !== null) this.detail.hidden = true;
-      await this.refresh();
+      this.renderAll();
       return;
     }
     this.opInFlight = false;

@@ -42,7 +42,8 @@
 --   purpose): when a parent purpose is revoked/superseded, hypotheses in
 --   the same scope are flagged in the SAME transaction (never auto-
 --   cancelled, never auto-resumed). Clearing happens only via an explicit
---   human transition. No notification rows are written for routine
+--   human transition (status change OR explicit reaffirm, both CAS-checked
+--   and both audited). No notification rows are written for routine
 --   learning (no make-work notifications).
 -- - Every hypothesis lifecycle row is append-only history in
 --   `learning_hypothesis_events`; rows are never updated or deleted.
@@ -113,7 +114,7 @@ CREATE TABLE learning_hypothesis_events (
   session_id    TEXT NOT NULL,
   seq           INTEGER NOT NULL CHECK (seq >= 1),
   event         TEXT NOT NULL
-                CHECK (event IN ('created','proposed','accepted','rejected','evidence_attached','supported','refuted','retired','reevaluation_flagged','reevaluation_cleared')),
+                CHECK (event IN ('created','proposed','accepted','rejected','evidence_attached','supported','refuted','retired','reaffirmed','reevaluation_flagged','reevaluation_cleared')),
   from_status   TEXT,
   to_status     TEXT NOT NULL
                 CHECK (to_status IN ('open','supported','refuted','retired')),

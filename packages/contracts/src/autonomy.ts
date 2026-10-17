@@ -714,6 +714,7 @@ export const LearningHypothesisTransitionSchema = z.enum([
   "support",
   "refute",
   "retire",
+  "reaffirm",
 ]);
 export type LearningHypothesisTransition = z.infer<
   typeof LearningHypothesisTransitionSchema
@@ -811,6 +812,7 @@ export type LearningEvidenceAttachRequest = z.infer<
 export const LearningHypothesisListQuerySchema = z.strictObject({
   limit: z.coerce.number().int().min(1).max(100).default(50),
   cursor: z.string().min(1).max(2048).optional(),
+  scope: AutonomyScopeSchema.optional(),
   status: LearningHypothesisStatusSchema.optional(),
   kind: LearningHypothesisKindSchema.optional(),
 });
@@ -835,9 +837,25 @@ export type LearningHypothesisListResponse = z.infer<
 export const LearningEvidenceListResponseSchema = z.strictObject({
   hypothesisId: UuidSchema,
   items: z.array(LearningEvidenceViewSchema).max(100),
+  /** Opaque keyset cursor for the next older page; null when exhausted. */
+  nextCursor: z.string().min(1).max(2048).nullable(),
+  /** True when an older page remains (LIMIT+1 probe, never truncated). */
+  hasMore: z.boolean(),
 });
 export type LearningEvidenceListResponse = z.infer<
   typeof LearningEvidenceListResponseSchema
+>;
+
+/** Bounded evidence list query (keyset cursor, oldest-first). */
+export const LearningEvidenceListQuerySchema = z.strictObject({
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  cursor: z.string().min(1).max(2048).optional(),
+});
+export type LearningEvidenceListQuery = z.infer<
+  typeof LearningEvidenceListQuerySchema
+>;
+export type LearningEvidenceListQueryInput = z.input<
+  typeof LearningEvidenceListQuerySchema
 >;
 
 /**

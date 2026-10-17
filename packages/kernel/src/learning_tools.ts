@@ -187,13 +187,21 @@ export function createLearningRegistrations(
         throw new ToolError("execution_cancelled");
       }
       const owned = requireOwnedRun(repo, ctx.runId);
-      let rows: LearningHypothesisView[];
+      // Scope/status/kind ALL push into the kernel SQL (covered by
+      // idx_learning_hypotheses_scope): an older row in the requested scope
+      // is never hidden behind 100 newer other-scope rows. The kernel
+      // LIMIT+1 probe yields the truthful hasMore (never truncated).
+      let page: LearningHypothesisView[];
+      let hasMore: boolean;
       try {
-        rows = repo.listLearningHypotheses(owned.sessionId, {
-          limit: 100,
+        const out = repo.listLearningHypotheses(owned.sessionId, {
+          limit: parsed.limit,
+          ...(parsed.scope !== undefined ? { scope: parsed.scope } : {}),
           ...(parsed.status !== undefined ? { status: parsed.status } : {}),
           ...(parsed.kind !== undefined ? { kind: parsed.kind } : {}),
-        }).items;
+        });
+        page = out.items;
+        hasMore = out.hasMore;
       } catch (error) {
         if (error instanceof ToolError) throw error;
         throw new ToolError("execution_failed");
@@ -201,16 +209,8 @@ export function createLearningRegistrations(
       if (ctx.signal.aborted) {
         throw new ToolError("execution_cancelled");
       }
-      const filtered = rows.filter(
-        (row) =>
-          (parsed.scope === undefined || row.scope === parsed.scope) &&
-          (parsed.status === undefined || row.status === parsed.status) &&
-          (parsed.kind === undefined || row.kind === parsed.kind),
-      );
-      const window = filtered.slice(0, parsed.limit + 1);
-      const hasMore = window.length > parsed.limit;
       return {
-        items: window.slice(0, parsed.limit).map((row) => {
+        items: page.map((row) => {
           const cut = snippetOf(row.statement, SNIPPET_CP);
           return {
             hypothesisId: row.id,

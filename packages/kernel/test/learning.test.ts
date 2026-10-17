@@ -514,6 +514,18 @@ describe("learning hypotheses", () => {
       const flagged = repo.getLearningHypothesis(sessionId, inScope.body.id);
       expect(flagged.needsReevaluation).toBe(true);
       expect(flagged.status).toBe("open");
+      // The flag bumps the version under CAS: a stale loaded version can
+      // no longer transition over the notice (it 409s instead of silently
+      // clearing it).
+      expect(flagged.version).toBe(2);
+      expect(() =>
+        repo.transitionLearningHypothesis(
+          sessionId,
+          inScope.body.id,
+          { expectedVersion: 1, transition: "support" },
+          { key: randomUUID(), now: T0 + 34 },
+        ),
+      ).toThrow(LearningVersionConflictError);
       // Out-of-scope hypothesis untouched; no rows were cancelled/retired.
       expect(
         repo.getLearningHypothesis(sessionId, otherScope.body.id)
@@ -533,7 +545,7 @@ describe("learning hypotheses", () => {
       const supported = repo.transitionLearningHypothesis(
         sessionId,
         inScope.body.id,
-        { expectedVersion: 1, transition: "support" },
+        { expectedVersion: flagged.version, transition: "support" },
         { key: randomUUID(), now: T0 + 35 },
       );
       expect(supported.body.status).toBe("supported");

@@ -341,6 +341,7 @@ function appendHypothesisEventInTx(
     | "supported"
     | "refuted"
     | "retired"
+    | "reaffirmed"
     | "reevaluation_flagged"
     | "reevaluation_cleared",
   fromStatus: string | null,
@@ -619,6 +620,7 @@ function decodeLearningCursor(cursor: string): {
 export interface ListHypothesesQuery {
   limit?: number;
   cursor?: string;
+  scope?: string;
   status?: "open" | "supported" | "refuted" | "retired";
   kind?: LearningHypothesisKind;
 }
@@ -646,6 +648,20 @@ export function listHypotheses(
       "hypothesis status must be open, supported, refuted, or retired",
     );
   }
+  if (query.scope !== undefined) {
+    // Pushed into SQL (covered by idx_learning_hypotheses_scope): fetching
+    // only the requested scope means an older row in that scope is never
+    // hidden behind a newer other-scope page.
+    if (
+      typeof query.scope !== "string" ||
+      query.scope.length === 0 ||
+      query.scope.length > 128
+    ) {
+      throw new RepositoryValidationError(
+        "hypothesis scope must be 1..128 characters",
+      );
+    }
+  }
   if (
     query.kind !== undefined &&
     query.kind !== "method" &&
@@ -659,6 +675,10 @@ export function listHypotheses(
     query.cursor === undefined ? null : decodeLearningCursor(query.cursor);
   const clauses = ["session_id = ?"];
   const args: (string | number)[] = [session];
+  if (query.scope !== undefined) {
+    clauses.push("scope = ?");
+    args.push(query.scope);
+  }
   if (query.status !== undefined) {
     clauses.push("status = ?");
     args.push(query.status);
@@ -701,10 +721,16 @@ export function getHypothesis(
   return toHypothesisView(owned, readEvidenceCounts(db, owned.id));
 }
 
+export interface ListEvidenceQuery {
+  limit?: number;
+  cursor?: string;
+}
+
 export function listHypothesisEvidence(
   db: Database.Database,
   sessionId: string,
   hypothesisId: string,
+  query: ListEvidenceQuery = {},
 ): {
   hypothesisId: string;
   items: {
@@ -717,13 +743,25 @@ export function listHypothesisEvidence(
     note: string | null;
     createdAt: number;
   }[];
+  nextCursor: string | null;
+  hasMore: boolean;
 } {
   const owned = assertOwnedHypothesis(db, sessionId, hypothesisId);
+  const capped = Math.min(Math.max(query.limit ?? 50, 1), 100);
+  const bound =
+    query.cursor === undefined ? null : decodeLearningCursor(query.cursor);
+  const clauses = ["hypothesis_id = ?"];
+  const args: (string | number)[] = [owned.id];
+  if (bound !== null) {
+    // Oldest-first keyset: strictly after (created_at, id).
+    clauses.push("(created_at > ? OR (created_at = ? AND id > ?))");
+    args.push(bound.createdAt, bound.createdAt, bound.id);
+  }
   const rows = db
     .prepare(
-      "SELECT * FROM learning_evidence WHERE hypothesis_id = ? ORDER BY created_at ASC, id ASC LIMIT 100",
+      `SELECT * FROM learning_evidence WHERE ${clauses.join(" AND ")} ORDER BY created_at ASC, id ASC LIMIT ?`,
     )
-    .all(owned.id) as {
+    .all(...args, capped + 1) as {
     id: string;
     hypothesis_id: string;
     session_id: string;
@@ -733,9 +771,12 @@ export function listHypothesisEvidence(
     note: string | null;
     created_at: number;
   }[];
+  const hasMore = rows.length > capped;
+  const page = hasMore ? rows.slice(0, capped) : rows;
+  const last = page[page.length - 1];
   return {
     hypothesisId: owned.id,
-    items: rows.map((row) =>
+    items: page.map((row) =>
       parseOrValidation(
         () =>
           LearningEvidenceViewSchema.parse({
@@ -751,6 +792,11 @@ export function listHypothesisEvidence(
         "stored evidence",
       ),
     ),
+    nextCursor:
+      hasMore && last !== undefined
+        ? encodeLearningCursor(last.created_at, last.id)
+        : null,
+    hasMore,
   };
 }
 
@@ -796,18 +842,22 @@ export function listHypothesisEvents(
 /* Human transitions (support / refute / retire — CAS, no promotion)   */
 /* ------------------------------------------------------------------ */
 
-export type HypothesisTransition = "support" | "refute" | "retire";
+export type HypothesisTransition = "support" | "refute" | "retire" | "reaffirm";
 
 const TRANSITION_EVENT: Record<
   HypothesisTransition,
-  "supported" | "refuted" | "retired"
+  "supported" | "refuted" | "retired" | "reaffirmed"
 > = {
   support: "supported",
   refute: "refuted",
   retire: "retired",
+  reaffirm: "reaffirmed",
 };
 
-const TRANSITION_TARGET: Record<HypothesisTransition, string> = {
+const TRANSITION_TARGET: Record<
+  Exclude<HypothesisTransition, "reaffirm">,
+  string
+> = {
   support: "supported",
   refute: "refuted",
   retire: "retired",
@@ -817,6 +867,11 @@ function allowedTransition(
   from: string,
   transition: HypothesisTransition,
 ): boolean {
+  if (transition === "reaffirm") {
+    // Keeps the current status; the needs_reevaluation=1 requirement is
+    // checked separately (a reaffirm without a pending notice is rejected).
+    return from === "open" || from === "supported" || from === "refuted";
+  }
   if (transition === "support") {
     return from === "open";
   }
@@ -883,7 +938,17 @@ export function transitionHypothesis(
         `hypothesis ${row.id} is ${row.status} and cannot be ${transition}ed`,
       );
     }
-    const target = TRANSITION_TARGET[transition] as string;
+    // Explicit human reaffirm: keeps the current status, clears a pending
+    // `needs_reevaluation` notice (CAS-checked like every transition), and
+    // is allowed ONLY while the notice is set. Never mutates purposes,
+    // tasks, controls, grants, or notifications.
+    if (transition === "reaffirm" && row.needs_reevaluation !== 1) {
+      throw new LearningStateConflictError(
+        `hypothesis ${row.id} has no pending reevaluation to reaffirm`,
+      );
+    }
+    const target =
+      transition === "reaffirm" ? row.status : TRANSITION_TARGET[transition];
     const event = TRANSITION_EVENT[transition];
     const wasFlagged = row.needs_reevaluation === 1;
     const moved = db
@@ -904,7 +969,9 @@ export function transitionHypothesis(
       null,
       now,
     );
-    if (wasFlagged) {
+    // A reaffirm's own event already records the explicit human clearing;
+    // other transitions that clear a pending notice append the audit event.
+    if (wasFlagged && transition !== "reaffirm") {
       appendHypothesisEventInTx(
         db,
         row.id,
@@ -1286,6 +1353,12 @@ export function attachEvidence(
  * the parent transition + dependent task holds), so the flag and the parent
  * state change are atomic (idempotent: already-flagged rows are skipped).
  *
+ * The flag ALSO bumps `version` under a CAS guard (`AND version = ? AND
+ * needs_reevaluation = 0`): a human holding a stale loaded version can no
+ * longer transition over the notice — the stale CAS fails with
+ * `LearningVersionConflictError` instead of silently clearing the notice
+ * (the transition path clears the flag only when it wins the CAS).
+ *
  * This NEVER mutates a purpose, NEVER cancels/resumes a task, NEVER writes
  * a notification, and NEVER touches the stop control: it is a visible
  * notice only (human decides). Callers MUST treat a missing-table error as
@@ -1301,13 +1374,18 @@ export function flagLearningReevaluationInTx(
 ): void {
   const rows = db
     .prepare(
-      "SELECT id, status FROM learning_hypotheses WHERE session_id = ? AND scope = ? AND status IN ('open','supported') AND needs_reevaluation = 0",
+      "SELECT id, status, version FROM learning_hypotheses WHERE session_id = ? AND scope = ? AND status IN ('open','supported') AND needs_reevaluation = 0",
     )
-    .all(sessionId, scope) as { id: string; status: string }[];
+    .all(sessionId, scope) as { id: string; status: string; version: number }[];
   for (const row of rows) {
-    db.prepare(
-      "UPDATE learning_hypotheses SET needs_reevaluation = 1, updated_at = ? WHERE id = ? AND needs_reevaluation = 0",
-    ).run(now, row.id);
+    const moved = db
+      .prepare(
+        "UPDATE learning_hypotheses SET needs_reevaluation = 1, version = version + 1, updated_at = ? WHERE id = ? AND version = ? AND needs_reevaluation = 0",
+      )
+      .run(now, row.id, row.version);
+    if (moved.changes !== 1) {
+      continue;
+    }
     appendHypothesisEventInTx(
       db,
       row.id,

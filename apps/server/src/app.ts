@@ -2885,7 +2885,13 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     if ("response" in session) {
       return session.response;
     }
-    const query = strictQuery(c, ["limit", "cursor", "status", "kind"]);
+    const query = strictQuery(c, [
+      "limit",
+      "cursor",
+      "scope",
+      "status",
+      "kind",
+    ]);
     if (!query.ok) {
       return validationError(c);
     }
@@ -2897,6 +2903,9 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
             : {}),
           ...(query.values.cursor !== undefined
             ? { cursor: query.values.cursor }
+            : {}),
+          ...(query.values.scope !== undefined
+            ? { scope: query.values.scope }
             : {}),
           ...(query.values.status !== undefined
             ? { status: query.values.status }
@@ -2992,12 +3001,20 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       if ("response" in hypothesis) {
         return hypothesis.response;
       }
-      if (!strictQuery(c, []).ok) {
+      const listQuery = strictQuery(c, ["limit", "cursor"]);
+      if (!listQuery.ok) {
         return validationError(c);
       }
       try {
         return c.json(
-          repo.listLearningHypothesisEvidence(session.id, hypothesis.id),
+          repo.listLearningHypothesisEvidence(session.id, hypothesis.id, {
+            ...(listQuery.values.limit !== undefined
+              ? { limit: listQuery.values.limit }
+              : {}),
+            ...(listQuery.values.cursor !== undefined
+              ? { cursor: listQuery.values.cursor }
+              : {}),
+          }),
           200,
         );
       } catch (error) {
@@ -3080,6 +3097,16 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     "transition",
     (sessionId, hypothesisId, body, options) =>
       repo.transitionLearningHypothesis(sessionId, hypothesisId, body, options),
+  );
+  // Explicit human reaffirm: keeps the status, clears a pending
+  // `needs_reevaluation` notice (CAS on the expected version, allowed only
+  // while the notice is set). Decision-shaped body (no status fields).
+  learningHypothesisMutation(
+    "reaffirm",
+    "http.learning.hypotheses.reaffirm",
+    "decision",
+    (sessionId, hypothesisId, body, options) =>
+      repo.reaffirmLearningHypothesis(sessionId, hypothesisId, body, options),
   );
   learningHypothesisMutation(
     "evidence",

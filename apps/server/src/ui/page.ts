@@ -393,13 +393,17 @@ export function renderConversationShell(): HtmlEscapedString {
           }),
           jsx("button", { id: "proposal-accept", type: "button" }, "採用する"),
           jsx("button", { id: "proposal-reject", type: "button" }, "見送る"),
-          jsx(
-            "button",
-            { id: "proposal-retry", type: "button", hidden: true },
-            "同じ内容で再送",
-          ),
-          jsx("p", { id: "proposal-status", "aria-live": "polite" }),
         ),
+        // The frozen-request retry + op status belong to the section, NOT
+        // the detail drawer: the drawer stays hidden until a draft is
+        // selected, so a retry nested inside it could never be pressed
+        // after an uncertain POST with no selection.
+        jsx(
+          "button",
+          { id: "proposal-retry", type: "button", hidden: true },
+          "同じ内容で再送",
+        ),
+        jsx("p", { id: "proposal-status", "aria-live": "polite" }),
       ),
       jsx(
         "section",
@@ -444,6 +448,11 @@ export function renderConversationShell(): HtmlEscapedString {
           jsx("div", { id: "learning-detail-body" }),
           jsx("ul", { id: "learning-evidence-list" }),
           jsx(
+            "button",
+            { id: "learning-evidence-more", type: "button", hidden: true },
+            "古い証拠を読み込む",
+          ),
+          jsx(
             "select",
             { id: "learning-evidence-polarity" },
             jsx("option", { value: "supports" }, "支持"),
@@ -476,15 +485,25 @@ export function renderConversationShell(): HtmlEscapedString {
           jsx("button", { id: "learning-support", type: "button" }, "支持する"),
           jsx("button", { id: "learning-refute", type: "button" }, "反証する"),
           jsx("button", { id: "learning-retire", type: "button" }, "引退する"),
-          jsx("button", { id: "learning-accept", type: "button" }, "採用する"),
-          jsx("button", { id: "learning-reject", type: "button" }, "見送る"),
           jsx(
             "button",
-            { id: "learning-retry", type: "button", hidden: true },
-            "同じ内容で再送",
+            { id: "learning-reaffirm", type: "button" },
+            "再確認する",
           ),
-          jsx("p", { id: "learning-status", "aria-live": "polite" }),
+          jsx("button", { id: "learning-accept", type: "button" }, "採用する"),
+          jsx("button", { id: "learning-reject", type: "button" }, "見送る"),
         ),
+        // The frozen-request retry + op status belong to the section, NOT
+        // the detail drawer: the drawer stays hidden until a hypothesis is
+        // selected, so a retry nested inside it could never be pressed
+        // after an uncertain POST with no selection (same pattern as the
+        // shadow retry above).
+        jsx(
+          "button",
+          { id: "learning-retry", type: "button", hidden: true },
+          "同じ内容で再送",
+        ),
+        jsx("p", { id: "learning-status", "aria-live": "polite" }),
       ),
       jsx(
         "div",

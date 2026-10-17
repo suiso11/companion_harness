@@ -918,6 +918,50 @@ export const AGENT_TASK_OPEN_PARAMETERS = Object.freeze({
 }) as unknown as Record<string, unknown>;
 
 /**
+ * Explicit closed JSON parameter schemas for the readonly learning tools
+ * (`learning.list` / `learning.open`). The owned session is derived
+ * server-side from the calling run: the model supplies only filters
+ * (scope/status/kind/limit) or one owned hypothesis id, never a session
+ * id. Lists are snippets-only server-side; `open` returns the full
+ * original statement plus the explicit hypothesis label. Records are
+ * context, never capability (see the system prompt boundary).
+ */
+export const AGENT_LEARNING_LIST_PARAMETERS = Object.freeze({
+  type: "object",
+  properties: Object.freeze({
+    scope: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+    status: Object.freeze({
+      type: "string",
+      enum: Object.freeze(["open", "supported", "refuted", "retired"]),
+    }),
+    kind: Object.freeze({
+      type: "string",
+      enum: Object.freeze(["method", "hypothesis"]),
+    }),
+    limit: Object.freeze({
+      type: "integer",
+      minimum: 1,
+      maximum: MAX_SEARCH_LIMIT,
+      default: DEFAULT_SEARCH_LIMIT,
+    }),
+  }),
+  required: Object.freeze([]),
+  additionalProperties: false,
+}) as unknown as Record<string, unknown>;
+
+export const AGENT_LEARNING_OPEN_PARAMETERS = Object.freeze({
+  type: "object",
+  properties: Object.freeze({
+    hypothesisId: Object.freeze({
+      type: "string",
+      pattern: AGENT_UUID_PATTERN,
+    }),
+  }),
+  required: Object.freeze(["hypothesisId"]),
+  additionalProperties: false,
+}) as unknown as Record<string, unknown>;
+
+/**
  * Explicit closed JSON parameter schemas for the proposal-only
  * `purpose.propose` / `task.propose` (AV03): the model supplies only the
  * strict draft input (scope/draft-kind/kind/quote/interpretation, plus the
@@ -1010,6 +1054,33 @@ export const AGENT_TASK_PROPOSE_PARAMETERS = Object.freeze({
 }) as unknown as Record<string, unknown>;
 
 /**
+ * Explicit closed JSON parameter schema for the proposal-only
+ * `learning.propose` (AV04): the model supplies only the strict draft
+ * input (scope/kind/statement). Source identity (session/run/turn) is
+ * ALWAYS server-derived from the calling run — no session/run/turn/source
+ * fields exist — and NO status/source fields exist at all (strict objects
+ * reject them before anything stages). Staged records are `open` + pending
+ * and REQUIRE explicit human accept/reject.
+ */
+export const AGENT_LEARNING_PROPOSE_PARAMETERS = Object.freeze({
+  type: "object",
+  properties: Object.freeze({
+    scope: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+    kind: Object.freeze({
+      type: "string",
+      enum: Object.freeze(["method", "hypothesis"]),
+    }),
+    statement: Object.freeze({
+      type: "string",
+      minLength: 1,
+      maxLength: 2000,
+    }),
+  }),
+  required: Object.freeze(["scope", "kind", "statement"]),
+  additionalProperties: false,
+}) as unknown as Record<string, unknown>;
+
+/**
  * Broker-visible M1 tools the agent may advertise, each with its explicit
  * closed parameter schema. Unknown/unregistered names are never advertised:
  * `buildAgentToolDefinitions` skips descriptors outside this map.
@@ -1027,6 +1098,8 @@ const AGENT_BROKER_TOOL_PARAMETERS: Readonly<
   "purpose.open": AGENT_PURPOSE_OPEN_PARAMETERS,
   "task.list": AGENT_TASK_LIST_PARAMETERS,
   "task.open": AGENT_TASK_OPEN_PARAMETERS,
+  "learning.list": AGENT_LEARNING_LIST_PARAMETERS,
+  "learning.open": AGENT_LEARNING_OPEN_PARAMETERS,
 };
 
 /**
@@ -1046,6 +1119,7 @@ const AGENT_PROPOSAL_TOOL_PARAMETERS: Readonly<
   "memory.reactivate": AGENT_MEMORY_RETIRE_PARAMETERS,
   "purpose.propose": AGENT_PURPOSE_PROPOSE_PARAMETERS,
   "task.propose": AGENT_TASK_PROPOSE_PARAMETERS,
+  "learning.propose": AGENT_LEARNING_PROPOSE_PARAMETERS,
 };
 
 /** Deep copy one advertised parameter schema (callers cannot mutate it). */

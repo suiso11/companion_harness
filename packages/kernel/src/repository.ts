@@ -58,6 +58,7 @@ import {
   type LatestRunEventType,
   LatestRunEventTypeSchema,
   LearningEvidenceAttachRequestSchema,
+  LearningEvidenceListQuerySchema,
   type LearningEvidenceListResponse,
   LearningEvidenceListResponseSchema,
   type LearningEvidenceView,
@@ -5619,6 +5620,7 @@ export function createKernelRepository(
     const out = learningListHypotheses(db, sessionId, {
       limit: parsed.limit,
       ...(parsed.cursor !== undefined ? { cursor: parsed.cursor } : {}),
+      ...(parsed.scope !== undefined ? { scope: parsed.scope } : {}),
       ...(parsed.status !== undefined ? { status: parsed.status } : {}),
       ...(parsed.kind !== undefined ? { kind: parsed.kind } : {}),
     });
@@ -5644,8 +5646,16 @@ export function createKernelRepository(
   function listLearningHypothesisEvidence(
     sessionId: string,
     hypothesisId: string,
+    query: unknown = {},
   ): LearningEvidenceListResponse {
-    const out = learningListEvidence(db, sessionId, hypothesisId);
+    const parsed = parseOrValidation(
+      () => LearningEvidenceListQuerySchema.parse(query ?? {}),
+      "learning evidence list query",
+    );
+    const out = learningListEvidence(db, sessionId, hypothesisId, {
+      limit: parsed.limit,
+      ...(parsed.cursor !== undefined ? { cursor: parsed.cursor } : {}),
+    });
     return parseOrValidation(
       () => LearningEvidenceListResponseSchema.parse(out),
       "learning evidence response",
@@ -5689,6 +5699,34 @@ export function createKernelRepository(
     const body = parseOrValidation(
       () => LearningHypothesisViewSchema.parse(out.body),
       "learning transition response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function reaffirmLearningHypothesis(
+    sessionId: string,
+    hypothesisId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: LearningHypothesisView; replayed: boolean } {
+    // Explicit human reaffirm: same CAS-checked transition core with the
+    // fixed `reaffirm` transition (keeps status, clears the reevaluation
+    // notice, allowed only while the notice is set).
+    const parsed = parseOrValidation(
+      () => LearningHypothesisDecisionRequestSchema.parse(request),
+      "learning reaffirm request",
+    );
+    const out = learningTransition(
+      db,
+      sessionId,
+      hypothesisId,
+      "reaffirm",
+      parsed.expectedVersion,
+      options,
+    );
+    const body = parseOrValidation(
+      () => LearningHypothesisViewSchema.parse(out.body),
+      "learning reaffirm response",
     );
     return { status: out.status, body, replayed: out.replayed };
   }
@@ -6473,6 +6511,7 @@ export function createKernelRepository(
     listLearningHypothesisEvidence,
     listLearningHypothesisEvents,
     transitionLearningHypothesis,
+    reaffirmLearningHypothesis,
     acceptLearningHypothesis,
     rejectLearningHypothesis,
     attachLearningEvidence,

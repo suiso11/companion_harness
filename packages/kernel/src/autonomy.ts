@@ -1266,15 +1266,27 @@ export function correctPurpose(
     );
     // Same-TX durable reevaluation NOTICE for in-scope hypotheses (AV04):
     // flags only (never a purpose/task mutation, never auto-cancel, never
-    // a notification). Best-effort on pre-0016 databases (missing tables).
+    // a notification). A correction can MOVE the scope: the hypotheses that
+    // anchored to the OLD scope must be flagged (they reference the
+    // superseded statement), and when the new scope differs it is flagged
+    // too. Best-effort on pre-0016 databases (missing tables).
     try {
       flagLearningReevaluationInTx(
         db,
         session,
-        input.scope,
+        oldRow.scope,
         "purpose_superseded",
         now,
       );
+      if (input.scope !== oldRow.scope) {
+        flagLearningReevaluationInTx(
+          db,
+          session,
+          input.scope,
+          "purpose_superseded",
+          now,
+        );
+      }
     } catch (error) {
       if (!(error instanceof Error && /no such table/i.test(error.message))) {
         throw error;
