@@ -15,6 +15,12 @@
 //      transaction (no auto-cancel); dispatch is disabled while the notice
 //      is set, cancel stays enabled, and an explicit reaffirm clears the
 //      notice and re-arms dispatch.
+//   3. older-page lifecycle: a handoff that lives ONLY on an older page
+//      (beyond the newest 50-item page) still dispatches→reports WITHOUT
+//      a 409: the panel applies the 200-returned view immediately and the
+//      refresh re-reads the off-page row, so the second human commit
+//      always carries the version the server holds — the map's stale
+//      copy never wins.
 
 import { expect, type Page, test } from "@playwright/test";
 import { E2E_CONTROL_ORIGIN } from "./ports.js";
@@ -210,4 +216,82 @@ test("revocation flags the handoff; dispatch blocked, cancel kept, reaffirm clea
   );
   await expect(page.locator("#handoff-dispatch")).toBeEnabled();
   await expect(page.locator("#handoff-reaffirm")).toBeDisabled();
+});
+
+// Regression: a handoff that lives ONLY on an older page (beyond the
+// newest 50-item page) survives the full dispatch→report lifecycle WITHOUT
+// a stale-version 409. The panel applies each 200-returned view to the map
+// immediately and the refresh re-reads the off-page row, so the second
+// human commit always carries the version the server holds.
+test("older-page handoff dispatches→reports without a stale-version 409", async ({
+  page,
+}) => {
+  const sessionId = (await page.evaluate(() =>
+    localStorage.getItem("ch.sessionId"),
+  )) as string;
+  const base = `/api/sessions/${sessionId}`;
+  const { taskId } = await seedTask(page, sessionId);
+
+  // The target is created FIRST: 51 fillers push it onto the OLDER page
+  // (item 52 of 52, newest-first). Its boundary flag makes its list row
+  // uniquely identifiable (`［要承認:支払い］`).
+  const target = await api(page, "POST", `${base}/handoffs`, {
+    taskId,
+    target: "e2e older-page handoff",
+    acceptanceCriteria: ["e2e older page flows without loss"],
+    opScope: "implement",
+    boundaries: ["payment"],
+  });
+  expect(target.status).toBe(201);
+  for (let i = 0; i < 51; i += 1) {
+    const filler = await api(page, "POST", `${base}/handoffs`, {
+      taskId,
+      target: `e2e older-page filler ${i}`,
+      acceptanceCriteria: ["e2e older page filler"],
+      opScope: "implement",
+    });
+    expect(filler.status).toBe(201);
+  }
+
+  // Refresh loads the newest 50 page; the target is NOT on it — the row
+  // only appears after「古い履歴を読み込む」merges the older page.
+  await page.locator("#handoff-refresh").click();
+  await expect(page.locator("#handoff-more")).toBeVisible({
+    timeout: 15_000,
+  });
+  const row = page
+    .locator("#handoff-list button")
+    .filter({ hasText: "要承認:支払い" });
+  await expect(row).toHaveCount(0);
+  await page.locator("#handoff-more").click();
+  await expect(row).toBeVisible({ timeout: 15_000 });
+
+  // Dispatch off-page: the 200-returned view lands in the map before the
+  // page fetch finishes, and the refresh re-reads the off-page row — the
+  // committed truth (dispatched) replaces the stale copy, never a 409.
+  await row.click();
+  await expect(page.locator("#handoff-detail")).toBeVisible();
+  await expect(page.locator("#handoff-detail-body")).toContainText("準備中");
+  await page.locator("#handoff-dispatch").click();
+  await expect(page.locator("#handoff-status")).toContainText(
+    "操作を反映しました",
+    { timeout: 15_000 },
+  );
+  await expect(page.locator("#handoff-detail-body")).toContainText("送付済");
+  await expect(page.locator("#handoff-detail-body")).toContainText("版 2");
+
+  // Report off-page: the second commit carries the SERVER version (版 2),
+  // so the CAS check passes — 報告あり・版 3, never a stale-version 409.
+  await page.locator("#handoff-report-env").selectOption("sandbox");
+  await page.locator("#handoff-report-summary").fill("e2e older-page report");
+  await page.locator("#handoff-report").click();
+  await expect(page.locator("#handoff-status")).toContainText(
+    "操作を反映しました",
+    { timeout: 15_000 },
+  );
+  await expect(page.locator("#handoff-detail-body")).toContainText("報告あり");
+  await expect(page.locator("#handoff-detail-body")).toContainText("版 3");
+  await expect(page.locator("#handoff-status")).not.toContainText(
+    "競合しました",
+  );
 });

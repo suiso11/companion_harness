@@ -441,9 +441,10 @@ export class HandoffPanel {
     // Merge the newest page into the map (never clear): older pages loaded
     // via "古い履歴を読み込む" stay reachable, and a 409 re-read never
     // drops the older-page row behind the frozen op.
-    for (const item of readItems(res.body)) {
-      if (item.sessionId === sessionId) this.items.set(item.id, item);
-    }
+    const newest = readItems(res.body).filter(
+      (item) => item.sessionId === sessionId,
+    );
+    for (const item of newest) this.items.set(item.id, item);
     this.historyCursor = readCursor(res.body);
     this.historyHasMore = readHasMore(res.body);
     const active = readActiveCount(res.body);
@@ -455,12 +456,12 @@ export class HandoffPanel {
           ? "実行中の記録数: 不明"
           : `実行中の記録数: ${active}（上限なし・追跡のみ）`;
     }
-    // A selected handoff missing from the newest page is NOT gone: it
-    // may live on an older page. Fetch it directly; close the drawer only
-    // when the server says it is gone (404). An unresolved frozen op keeps
-    // its drawer pinned without any fetch.
+    // The newest page, not the map, decides: a selected handoff that
+    // lives only on an OLDER page stays in the map but may be stale or
+    // superseded — re-fetch it directly anyway. An unresolved frozen op
+    // keeps its drawer pinned without any fetch.
     if (this.pendingOp === null && this.selectedId !== null) {
-      if (!this.items.has(this.selectedId)) {
+      if (!newest.some((item) => item.id === this.selectedId)) {
         const missing = this.selectedId;
         try {
           const single = await this.deps.http.get(
@@ -637,7 +638,8 @@ export class HandoffPanel {
         item.status === "dispatched" ||
         item.status === "reported" ||
         item.status === "failed") &&
-      !item.needsReevaluation;
+      !item.needsReevaluation &&
+      item.supersededBy === null;
     // Cancel is ALWAYS allowed (even under a reevaluation notice).
     const cancellable =
       !locked &&
@@ -658,7 +660,11 @@ export class HandoffPanel {
     }
     if (this.abnormalButton !== null) this.abnormalButton.disabled = !active;
     if (this.attemptButton !== null) {
-      this.attemptButton.disabled = !(retryable || item.status === "failed");
+      // Kernel-aligned: an attempt works on any non-terminal state
+      // (including `failed`, whose retry RETURNS TO prepared); a pending
+      // reevaluation notice and an already-superseded record refuse — so
+      // the button stays disabled until reaffirm/the successor row.
+      this.attemptButton.disabled = !retryable;
     }
     if (this.reaffirmButton !== null) {
       this.reaffirmButton.disabled = !reaffirmAble;
@@ -711,6 +717,17 @@ export class HandoffPanel {
   private async loadHistory(item: HandoffView): Promise<void> {
     const session = this.sessionSeq;
     const selected = this.selectedId;
+    // Clear BOTH lists IMMEDIATELY: a switch to a new selection never
+    // leaves the previous selection's history rows lingering (no stale
+    // drawer content while the fetch is in flight).
+    const resetHistory = (node: HTMLElement | null): void => {
+      if (node === null) return;
+      while (node.firstChild !== null) {
+        node.removeChild(node.firstChild);
+      }
+    };
+    resetHistory(this.eventsList);
+    resetHistory(this.attemptsList);
     try {
       const [events, attempts] = await Promise.all([
         this.deps.http.get(
@@ -722,10 +739,18 @@ export class HandoffPanel {
       ]);
       if (session !== this.sessionSeq) return;
       if (this.selectedId !== selected) return;
-      if (this.eventsList !== null) {
-        while (this.eventsList.firstChild !== null) {
-          this.eventsList.removeChild(this.eventsList.firstChild);
+      // Non-200 (404/409/fallback) is a FAILURE, never silent emptiness:
+      // an empty list after a failed read would lie that nothing exists.
+      if (events.status !== 200 || attempts.status !== 200) {
+        if (this.eventsList !== null) {
+          const line = document.createElement("li");
+          line.textContent = "履歴の読み込みに失敗しました";
+          this.eventsList.appendChild(line);
         }
+        this.setStatus("履歴の読み込みに失敗しました");
+        return;
+      }
+      if (this.eventsList !== null) {
         const rows =
           isRecord(events.body) && Array.isArray(events.body.events)
             ? (events.body.events as unknown[])
@@ -1101,6 +1126,12 @@ export class HandoffPanel {
       this.setStatus(
         op.handoffId === "" ? "引継ぎを記録しました" : "操作を反映しました",
       );
+      // Apply the deterministic returned view BEFORE the refresh: the
+      // map (and the open drawer) shows the committed truth even while
+      // the page fetch is in flight. Only a view owned by THIS session.
+      if (isHandoffView(res.body) && res.body.sessionId === op.ownerSession) {
+        this.items.set(res.body.id, res.body);
+      }
       await this.refresh();
       if (session !== this.sessionSeq) return;
       // Selection-bound: the created/updated record opens only when it is
@@ -1134,6 +1165,27 @@ export class HandoffPanel {
       this.opInFlight = false;
       await this.refresh();
       if (session !== this.sessionSeq) return;
+      if (op.handoffId !== "") {
+        // The 409 names THIS handoff: re-read it DIRECTLY (not just via
+        // the newest page — it may live on an older page or have been
+        // superseded) so the drawer evaluates against the committed truth.
+        try {
+          const single = await this.deps.http.get(
+            `/api/sessions/${op.ownerSession}/handoffs/${op.handoffId}`,
+          );
+          if (session !== this.sessionSeq) return;
+          if (
+            single.status === 200 &&
+            isHandoffView(single.body) &&
+            (single.body as HandoffView).sessionId === op.ownerSession
+          ) {
+            this.items.set(op.handoffId, single.body as HandoffView);
+          }
+        } catch {
+          // Network loss on the re-read: the refresh above still ran; the
+          // drawer keeps whatever truth it has.
+        }
+      }
       this.pendingOp = null;
       if (this.retryButton !== null) this.retryButton.hidden = true;
       if (op.handoffId === "") {
@@ -1145,8 +1197,10 @@ export class HandoffPanel {
       const current = this.items.get(op.handoffId);
       if (current === undefined) {
         this.setStatus("引継ぎが見つかりません（別セッションの可能性）");
-        this.selectedId = null;
-        if (this.detail !== null) this.detail.hidden = true;
+        if (op.handoffId === this.selectedId) {
+          this.selectedId = null;
+          if (this.detail !== null) this.detail.hidden = true;
+        }
         this.renderAll();
         return;
       }
@@ -1180,10 +1234,23 @@ export class HandoffPanel {
       this.pendingOp = null;
       this.opInFlight = false;
       if (this.retryButton !== null) this.retryButton.hidden = true;
+      if (op.handoffId === "") {
+        // CREATE against a vanished task/inherit-source: the drawer (and
+        // every typed input) stays open — only the JSON body was wrong,
+        // so the human can correct one field and re-commit fresh.
+        this.setStatus("作業または継承元が見つかりません");
+        return;
+      }
       this.setStatus("引継ぎが見つかりません（別セッションの可能性）");
-      this.selectedId = null;
-      if (this.detail !== null) this.detail.hidden = true;
+      // Close the drawer ONLY when the 404 names the open selection: a
+      // 404 for a background/older record must not clear the human's
+      // current drawer.
+      if (op.handoffId === this.selectedId) {
+        this.selectedId = null;
+        if (this.detail !== null) this.detail.hidden = true;
+      }
       this.renderAll();
+      if (this.selectedId !== null) this.renderDetail(false);
       return;
     }
     this.opInFlight = false;
