@@ -190,7 +190,9 @@ export type UserTextHistoryItem = z.infer<typeof UserTextHistoryItemSchema>;
  *  text; IDs live only in these structured fields.
  *  `targetCitation` is the ORIGINAL-only session `rN` label (BEFORE
  *  evidence) resolved from the owning proposal's immutable `target_ref_id`;
- *  it is display metadata, not a verified AFTER claim. `user_text` items
+ *  it is display metadata, not a verified AFTER claim. It is NULL ONLY for
+ *  targetless `calendar.create` proposals (no source event, hence no
+ *  BEFORE — never a fabricated label). `user_text` items
  *  carry no such field (the discriminated union omits it there entirely —
  *  never a null legacy shim). The verified AFTER citation (if any) comes
  *  only from the authoritative `result` via `runResultToAnswerParts` when
@@ -204,7 +206,7 @@ export const ActionRunHistorySelectionSchema = z.strictObject({
   result: RunResultSchema.nullable(),
   receipt: ActionReceiptViewSchema.nullable(),
   executionStatus: ActionExecutionStatusSchema.nullable(),
-  targetCitation: ActionTargetCitationSchema,
+  targetCitation: ActionTargetCitationSchema.nullable(),
 });
 export type ActionRunHistorySelection = z.infer<
   typeof ActionRunHistorySelectionSchema
