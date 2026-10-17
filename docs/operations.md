@@ -3777,3 +3777,18 @@ branch until that lands.
   vertical STILL in progress (gateway/service/HTTP unstarted).
 - Remaining (NOT claimed): model gateway, shadow service, HTTP routes,
   UI; then feature publication.
+- Service+HTTP LIVE (2026-10-17, branch feat/av-shadow-deliberation):
+  actual `startServer` + temp-DB + real HTTP app + real configured gateway
+  to a synthetic loopback provider (NOT a real model): resume -> purpose ->
+  1 native call -> stored MODEL execute -> CODE `missing_grant`, zero
+  action_executions/proposals/memory-outbox; foreground chat preempts
+  (`aborted_foreground`, ordinary `answer.submit` still completes); restart
+  re-pauses with zero catchup/replay, fresh resume + new purpose deliberates
+  exactly once. Production fixes: deliberation tool renamed to
+  `autonomy_deliberation.submit` (two-dot name failed the shared
+  `namespace.verb` gateway gate -> every real round trip `model_error`);
+  bootstrap re-applies the shadow-priority repo wrapper after the gated
+  rebuild (foreground notify/settlement wake were lost). Focused unit:
+  `shadow_service_http.test.ts` 12/12 incl. wire-normalization regression;
+  Biome clean; root `tsc` only pre-existing better-sqlite3 TS7016. Whole
+  feature UI STILL IN PROGRESS (service/HTTP done, UI unstarted).

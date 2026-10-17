@@ -48,6 +48,8 @@ import {
   ReferenceSetDetailResponseSchema,
   RunStatusResponseSchema,
   retryScope,
+  ShadowExplicitRequestSchema,
+  shadowRequestScope,
   TaskCreateRequestSchema,
   TaskHoldRequestSchema,
   TaskResumeRequestSchema,
@@ -68,6 +70,9 @@ import {
   RepositoryNotFoundError,
   RepositoryValidationError,
   SessionBusyError,
+  ShadowLeaseConflictError,
+  ShadowStateConflictError,
+  ShadowVersionConflictError,
 } from "@companion/kernel";
 import type { Context } from "hono";
 import { Hono } from "hono";
@@ -224,6 +229,14 @@ export interface CreateAppDeps {
    * `/memory/*` route answers 404 without touching the repository.
    */
   memory?: MemoryHttpPort;
+  /**
+   * AV shadow worker wake hook (server-owned). Called synchronously AFTER a
+   * committed autonomy mutation / control change / explicit shadow request
+   * so meaningful new state re-drives the worker. Never throws back into
+   * the committed command (the app guards every call); absent (default)
+   * keeps the existing no-worker behavior.
+   */
+  shadowWake?: () => void;
 }
 
 export interface ServerControls {
@@ -634,6 +647,43 @@ function mapDomainError(c: Context, error: unknown): Response {
       409,
     );
   }
+  // AV shadow slice: CAS version conflicts, illegal lifecycle transitions,
+  // and lease races map to fixed 409 codes (same shape as the autonomy
+  // codes above; outside the frozen ApiErrorCode enum). No 500 swallows a
+  // security-relevant conflict; ownership failures stay 404 above.
+  if (error instanceof ShadowVersionConflictError) {
+    return c.json(
+      {
+        error: {
+          code: "shadow_version_conflict",
+          message: "shadow version conflict",
+        },
+      },
+      409,
+    );
+  }
+  if (error instanceof ShadowStateConflictError) {
+    return c.json(
+      {
+        error: {
+          code: "shadow_state_conflict",
+          message: "shadow state conflict",
+        },
+      },
+      409,
+    );
+  }
+  if (error instanceof ShadowLeaseConflictError) {
+    return c.json(
+      {
+        error: {
+          code: "shadow_lease_conflict",
+          message: "shadow lease conflict",
+        },
+      },
+      409,
+    );
+  }
   if (
     typeof error === "object" &&
     error !== null &&
@@ -650,6 +700,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   const actionsEnabled = deps.actionsEnabled === true;
   const createEnabled = deps.createEnabled === true;
   const memory = deps.memory ?? null;
+  const shadowWake = deps.shadowWake;
   const logger = deps.logger ?? createStdServerLogger(config.logLevel);
   const now = deps.now ?? Date.now;
   const assets = deps.assets ?? {};
@@ -661,6 +712,18 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     markDraining: () => {
       draining = true;
     },
+  };
+  /**
+   * Wake the shadow worker after a COMMITTED state change. Synchronous and
+   * throw-guarded: a wake failure can never unwind a committed user command
+   * (or a committed control/explicit-request write).
+   */
+  const wakeShadow = (): void => {
+    try {
+      shadowWake?.();
+    } catch {
+      // Best effort: the mutation already committed.
+    }
   };
 
   const app = new Hono();
@@ -2100,6 +2163,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         status: out.status,
         durationMs: Math.max(now() - started, 0),
       });
+      wakeShadow();
       return c.json(out.body, out.status as 201);
     } catch (error) {
       return mapDomainError(c, error);
@@ -2193,6 +2257,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
           status: out.status,
           durationMs: Math.max(now() - started, 0),
         });
+        wakeShadow();
         return c.json(out.body, out.status as 201);
       } catch (error) {
         return mapDomainError(c, error);
@@ -2239,6 +2304,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         status: out.status,
         durationMs: Math.max(now() - started, 0),
       });
+      wakeShadow();
       return c.json(out.body, out.status as 200);
     } catch (error) {
       return mapDomainError(c, error);
@@ -2288,6 +2354,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
           status: out.status,
           durationMs: Math.max(now() - started, 0),
         });
+        wakeShadow();
         return c.json(out.body, out.status as 200);
       } catch (error) {
         return mapDomainError(c, error);
@@ -2349,6 +2416,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         status: out.status,
         durationMs: Math.max(now() - started, 0),
       });
+      wakeShadow();
       return c.json(out.body, out.status as 201);
     } catch (error) {
       return mapDomainError(c, error);
@@ -2388,6 +2456,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         status: out.status,
         durationMs: Math.max(now() - started, 0),
       });
+      wakeShadow();
       return c.json(out.body, out.status as 201);
     } catch (error) {
       return mapDomainError(c, error);
@@ -2508,6 +2577,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
           status: out.status,
           durationMs: Math.max(now() - started, 0),
         });
+        wakeShadow();
         return c.json(out.body, out.status as 200);
       } catch (error) {
         return mapDomainError(c, error);
@@ -2575,6 +2645,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         status: out.status,
         durationMs: Math.max(now() - started, 0),
       });
+      wakeShadow();
       return c.json(out.body, out.status as 200);
     } catch (error) {
       return mapDomainError(c, error);
@@ -2595,6 +2666,154 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         }),
         200,
       );
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  /* ---------------- AV shadow: explicit requests + read-only views ------- */
+  // Session-owned explicit deliberation requests plus read-only job views.
+  // Strict Zod bodies, UUID ids, Idempotency-Key on every POST, exact query
+  // gates, ownership-first 404s, CAS 409s. Claim/complete/fail/lease-owner/
+  // model-grant surfaces are TRUSTED runtime-only and are NEVER exposed
+  // here (no such route exists). GET list/detail/events reads carry NO ack
+  // side effect. A successful explicit request wakes the worker (same
+  // throw-guarded semantics as the autonomy mutations above).
+
+  app.post("/api/sessions/:sessionId/shadow-jobs", async (c) => {
+    const started = now();
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const keyed = requireIdempotencyKey(c);
+    if ("response" in keyed) {
+      return keyed.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    const raw = await readJsonBody(c);
+    if (!raw.ok) {
+      return validationError(c);
+    }
+    if (ShadowExplicitRequestSchema.safeParse(raw.value).success !== true) {
+      return validationError(c);
+    }
+    if (draining) {
+      // Draining replay-first (consistent with message/retry admission):
+      // an already-ACCEPTED key replays its stored response verbatim; a
+      // fresh key is rejected with 503 and persists nothing.
+      try {
+        const stored = repo.lookupIdempotencyForSession(
+          session.id,
+          keyed.key,
+          shadowRequestScope(session.id),
+        );
+        if (stored.found) {
+          const out = repo.requestShadowDeliberation(session.id, raw.value, {
+            key: keyed.key,
+            now: now(),
+          });
+          return c.json(out.body, out.status as 201);
+        }
+      } catch {
+        // Lookup/replay failure while draining still rejects below.
+      }
+      return shuttingDown(c);
+    }
+    try {
+      const out = repo.requestShadowDeliberation(session.id, raw.value, {
+        key: keyed.key,
+        now: now(),
+      });
+      logger.info("http.shadow.jobs.request", {
+        sessionId: session.id,
+        status: out.status,
+        durationMs: Math.max(now() - started, 0),
+      });
+      wakeShadow();
+      return c.json(out.body, out.status as 201);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get("/api/sessions/:sessionId/shadow-jobs", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const query = strictQuery(c, ["limit"]);
+    if (!query.ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(
+        repo.listShadowJobs(session.id, {
+          ...(query.values.limit !== undefined
+            ? { limit: query.values.limit }
+            : {}),
+        }),
+        200,
+      );
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get("/api/sessions/:sessionId/shadow-jobs/:jobId", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const job = requireUuid(c, c.req.param("jobId"), "jobId");
+    if ("response" in job) {
+      return job.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(repo.getShadowJob(session.id, job.id), 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get("/api/sessions/:sessionId/shadow-jobs/:jobId/events", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const job = requireUuid(c, c.req.param("jobId"), "jobId");
+    if ("response" in job) {
+      return job.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(repo.listShadowJobEvents(session.id, job.id), 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get("/api/sessions/:sessionId/shadow-jobs/:jobId/context", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const job = requireUuid(c, c.req.param("jobId"), "jobId");
+    if ("response" in job) {
+      return job.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(repo.getShadowJobContext(session.id, job.id), 200);
     } catch (error) {
       return mapDomainError(c, error);
     }

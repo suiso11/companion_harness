@@ -47,6 +47,7 @@ import type { KernelRepository } from "@companion/kernel";
 import {
   type ActionCreateReadPort,
   type ActionProposalStager,
+  applyAutonomyRestartFence,
   BUNDLED_SCHEMA_VERSION,
   CalendarActionWriteCapabilitySchema,
   type CalendarActionWritePort,
@@ -80,6 +81,7 @@ import {
   openKernelDatabase,
   quickCheck,
   RunEngine,
+  reconcileShadowRestartInTx,
   StrategyRegistry,
   type ToolBroker,
   ToolError,
@@ -141,6 +143,7 @@ import {
   RESCHEDULE_WRITE_PROFILE_ENV,
   type RescheduleWriteConnectorHint,
 } from "./rescheduleWriteProfile.js";
+import { createShadowService, type ShadowService } from "./shadow_service.js";
 
 /** Graceful-drain natural-completion budget (§11.5: max 10s). */
 export const SHUTDOWN_DRAIN_MS = 10_000;
@@ -384,6 +387,8 @@ export interface StartedServer {
   toolBroker: ToolBroker | null;
   /** Conversation-memory service when COMPANION_MEMORY_JSON is set, else null. */
   memory: MemoryService | null;
+  /** Shadow-deliberation worker when a model gateway resolved, else null. */
+  shadow: ShadowService | null;
 }
 
 /** Fixed path-free display name for the single M1 Markdown connector. */
@@ -794,6 +799,8 @@ export async function startServer(
   let onSigterm: (() => void) | undefined;
   /** Conversation-memory service (null = memoryless; set inside try). */
   let memory: MemoryService | null = null;
+  /** Shadow-deliberation worker (null = no gateway; set inside try). */
+  let shadow: ShadowService | null = null;
   const removeSignalHandlers = (): void => {
     if (onSigint !== undefined) {
       try {
@@ -1166,16 +1173,16 @@ export async function startServer(
     // the control was left UNPAUSED it flips back to PAUSED with a version
     // advance and appends `restart_fence` + `interrupted_note` activity rows
     // recording that background intent does NOT resume implicitly; an
-    // already-paused control stays untouched. Best-effort on pre-0011
-    // databases: a missing autonomy slice must never block startup.
-    try {
-      const { applyAutonomyRestartFence } = await import("@companion/kernel");
-      applyAutonomyRestartFence(handle.raw, now());
-    } catch (error) {
-      if (!(error instanceof Error) || !/no such table/i.test(error.message)) {
-        throw error;
-      }
-    }
+    // already-paused control stays untouched. Migration 0012 (the latest
+    // committed migration) REQUIRES the autonomy + shadow tables: a missing
+    // slice fails closed here (no legacy best-effort suppression — a
+    // partially-migrated database must never start unsafe). Shadow restart
+    // reconciliation then holds every pending/claimed job
+    // (`restart_interrupted`, terminal for those jobs): a restart never
+    // resumes or replays old work, and the paused control admits no new
+    // claims until meaningful new state arrives.
+    applyAutonomyRestartFence(handle.raw, now());
+    reconcileShadowRestartInTx(handle.raw, now());
 
     // Bound-roots guard: removing every Markdown root while a Markdown
     // connector instance remains bound must fail closed before the engine
@@ -1250,6 +1257,74 @@ export async function startServer(
         return out;
       },
     });
+    /**
+     * Shadow priority wrapper (server-owned): accepted foreground work
+     * (userMessage/retry/cancel) aborts the shadow's OWN call
+     * synchronously; actual run settlement (any terminal outcome) re-wakes
+     * eligible pending shadow jobs. Every hook is throw-guarded: a shadow
+     * wake/abort can never unwind a committed user command. Composes OUTSIDE
+     * the memory wrapper so both observe every call.
+     */
+    const wrapRepoWithShadowPriority = (
+      inner: KernelRepository,
+      service: ShadowService,
+    ): KernelRepository => ({
+      ...inner,
+      postMessage: (...args) => {
+        const out = inner.postMessage(...args);
+        try {
+          service.notifyForeground();
+        } catch {
+          // Best effort: the message already committed.
+        }
+        return out;
+      },
+      postRetry: (...args) => {
+        const out = inner.postRetry(...args);
+        try {
+          service.notifyForeground();
+        } catch {
+          // Best effort: the retry already committed.
+        }
+        return out;
+      },
+      cancelRun: (...args) => {
+        const out = inner.cancelRun(...args);
+        try {
+          service.notifyForeground();
+        } catch {
+          // Best effort: the cancel already committed.
+        }
+        return out;
+      },
+      completeRun: (...args) => {
+        const out = inner.completeRun(...args);
+        try {
+          service.onRunSettled();
+        } catch {
+          // Best effort: the completion already committed.
+        }
+        return out;
+      },
+      failRun: (...args) => {
+        const out = inner.failRun(...args);
+        try {
+          service.onRunSettled();
+        } catch {
+          // Best effort: the failure already committed.
+        }
+        return out;
+      },
+      finalizeCancelRequested: (...args) => {
+        const out = inner.finalizeCancelRequested(...args);
+        try {
+          service.onRunSettled();
+        } catch {
+          // Best effort: the settlement already committed.
+        }
+        return out;
+      },
+    });
     if (config.memory !== null) {
       const memoryConfig: MemoryConfig = config.memory;
       memory = createMemoryService({
@@ -1270,6 +1345,27 @@ export async function startServer(
       });
       repo = wrapRepoWithMemoryIntake(baseRepo, memory);
       logger.info("server.memory_ready", { status: 1 });
+    }
+    // AV shadow worker (model-gated): uses the EXACT SAME configured
+    // gateway/modelName as the ordinary agent above (no model selection,
+    // download, provider, or fake response) plus the SAME bounded memory
+    // recall scope when memory is configured (recall only: no feedback,
+    // heat, or mutation from shadow). Null gateway (or null model config)
+    // means NO worker: pending jobs honestly wait (claim fences paused
+    // work; completions fail closed) instead of producing fake output.
+    if (modelGateway !== null) {
+      shadow = createShadowService({
+        repo,
+        gateway: modelGateway,
+        model: modelName,
+        recall: memory !== null ? memory.recallHook : null,
+        logger,
+        now,
+      });
+      // Priority composition OUTSIDE the memory intake wrapper: accepted
+      // foreground work aborts shadow's OWN call; run settlement re-wakes.
+      repo = wrapRepoWithShadowPriority(repo, shadow);
+      logger.info("server.shadow_ready", { status: 1 });
     }
     // M1 (plan 14.1/14.5-14.6): after migration and before engine
     // recovery/listen, when roots are configured create one connector
@@ -1722,6 +1818,18 @@ export async function startServer(
       repo = wrapRepoWithMemoryIntake(gatedRepo, memory);
     } else {
       repo = gatedRepo;
+    }
+    // AV shadow priority composition (server-owned): the gated rebuild above
+    // supersedes the pre-gate repo object, so re-apply the foreground-abort
+    // + settlement-wake wrapper HERE, outside the memory intake wrapper, on
+    // the repo the app/engine actually share. Without this, accepted
+    // foreground work never aborts the shadow's OWN call and run settlement
+    // never re-wakes eligible pending jobs (the worker only wakes on explicit
+    // requests). The shadow service itself keeps operating on the same
+    // database through its creation-time repo reference.
+    if (shadow !== null) {
+      const activeShadow = shadow;
+      repo = wrapRepoWithShadowPriority(repo, activeShadow);
     }
 
     // M5 host-owned dedicated port (normal startup, no injection). The
@@ -2197,7 +2305,14 @@ export async function startServer(
     if (memory !== null) {
       memory.start();
     }
+    // Shadow worker starts after engine recovery (reconciled restart state
+    // is already paused + held above): NO automatic job pickup — only
+    // meaningful new state (or a new explicit request) wakes it.
+    if (shadow !== null) {
+      shadow.start();
+    }
 
+    const activeShadowWake = shadow;
     const { app, controls } = createApp({
       config,
       repo,
@@ -2208,6 +2323,17 @@ export async function startServer(
       actionsEnabled,
       createEnabled,
       ...(memory !== null ? { memory } : {}),
+      ...(activeShadowWake !== null
+        ? {
+            shadowWake: (): void => {
+              try {
+                activeShadowWake.wake();
+              } catch {
+                // Best effort: wake never throws into the caller.
+              }
+            },
+          }
+        : {}),
     });
     const activeEngine = engine;
     const activeHandle = handle;
@@ -2248,14 +2374,22 @@ export async function startServer(
         },
       );
     } catch (listenError) {
-      // Listen failed: stop the memory service FIRST (its crash-recovered
-      // CLI children and timer must not outlive the rejected startup or
-      // touch the repo/DB after close), then drain the started engine,
-      // stop the owned Calendar connector, close any created listener, and
-      // finally close the DB (in that order). Handlers were not yet
-      // registered, but remove defensively before rethrowing. Every step is
-      // best-effort: the listen error carries the startup failure even when
-      // a cleanup step also fails.
+      // Listen failed: stop the shadow worker FIRST (its in-flight gateway
+      // call aborts and is awaited: no orphan model calls), then the memory
+      // service (its crash-recovered CLI children and timer must not outlive
+      // the rejected startup or touch the repo/DB after close), then drain
+      // the started engine, stop the owned Calendar connector, close any
+      // created listener, and finally close the DB (in that order). Handlers
+      // were not yet registered, but remove defensively before rethrowing.
+      // Every step is best-effort: the listen error carries the startup
+      // failure even when a cleanup step also fails.
+      try {
+        if (shadow !== null) {
+          await shadow.stop();
+        }
+      } catch {
+        // Best effort: the listen error carries the startup failure.
+      }
       try {
         if (memory !== null) {
           await memory.stop();
@@ -2332,7 +2466,16 @@ export async function startServer(
         controls.markDraining();
         const safeReason = sanitizeShutdownReason(reason);
         logger.info("server.draining", { status: safeReason });
-        // Stop memory first: the idle timer is cancelled, in-flight CLI
+        // Stop shadow first: the in-flight gateway call aborts and is
+        // awaited (no orphan model calls) before memory/engine/DB teardown.
+        if (shadow !== null) {
+          try {
+            await shadow.stop();
+          } catch {
+            // Best effort: the engine drain below still runs.
+          }
+        }
+        // Stop memory second: the idle timer is cancelled, in-flight CLI
         // children are hard-killed and awaited (no orphans), and no new
         // cultivation starts while the engine drains.
         if (memory !== null) {
@@ -2461,9 +2604,21 @@ export async function startServer(
       shutdown,
       toolBroker,
       memory,
+      shadow,
     };
   } catch (error) {
     removeSignalHandlers();
+    // Any post-start failure path stops the shadow worker FIRST (abort +
+    // await in-flight gateway work: no orphan model calls), then the memory
+    // service (crash-recovery CLI/timer must not outlive startup), BEFORE
+    // the DB close below. The original error still carries the failure.
+    if (shadow !== null) {
+      try {
+        await shadow.stop();
+      } catch {
+        // Best effort: the original startup error carries the failure.
+      }
+    }
     // Any post-start failure path (including memory started above) stops
     // and awaits the memory service BEFORE the DB close below: a rejected
     // startup must never leave its crash-recovery CLI/timer alive. The

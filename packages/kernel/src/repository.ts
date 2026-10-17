@@ -194,10 +194,12 @@ import {
   failShadowJob as shadowFailJob,
   getShadowJobContext as shadowGetContext,
   getShadowJob as shadowGetJob,
+  hasActiveUserRuns as shadowHasActiveRuns,
   holdShadowJob as shadowHoldJob,
   listShadowJobEvents as shadowListEvents,
   listShadowInbox as shadowListInbox,
   listShadowJobs as shadowListJobs,
+  readPendingShadowJob as shadowReadPendingJob,
   requestShadowDeliberation as shadowRequest,
 } from "./shadow.js";
 
@@ -3200,6 +3202,25 @@ export function createKernelRepository(
       );
       return lookupIdempotency(validScope, validKey);
     }
+    // AV shadow explicit-request scope: the embedded session must equal the
+    // path session (foreign sessions are 404, never 403), and the session
+    // must exist. The stored job ownership is re-verified on replay inside
+    // `requestShadowDeliberation` (stored session must still match).
+    const shadowRequestMatch = /^session:([^:]+):shadow-request$/.exec(
+      validScope,
+    );
+    if (shadowRequestMatch?.[1] !== undefined) {
+      const embedded = assertUuidV4(shadowRequestMatch[1], "sessionId");
+      if (embedded.toLowerCase() !== session.toLowerCase()) {
+        throw new RepositoryNotFoundError(
+          `scope ${validScope} not found in session ${session}`,
+        );
+      }
+      if (readSession(db, session) === null) {
+        throw new RepositoryNotFoundError(`session ${session} not found`);
+      }
+      return lookupIdempotency(validScope, validKey);
+    }
     throw new RepositoryNotFoundError(
       `scope ${validScope} not found in session ${session}`,
     );
@@ -5390,6 +5411,7 @@ export function createKernelRepository(
       owner?: unknown;
       expectedVersion?: unknown;
       leaseMs?: unknown;
+      memories?: unknown;
     };
     if (
       typeof candidate.owner !== "string" ||
@@ -5410,12 +5432,25 @@ export function createKernelRepository(
     }
     const owner = candidate.owner as string;
     const expectedVersion = candidate.expectedVersion as number;
+    // Trusted server-only memory freeze: valid snippet entries only; any
+    // other shape is dropped (never a validation throw into the claim).
+    const memories =
+      Array.isArray(candidate.memories) &&
+      candidate.memories.every(
+        (entry) =>
+          typeof entry === "object" &&
+          entry !== null &&
+          typeof (entry as { snippet?: unknown }).snippet === "string",
+      )
+        ? (candidate.memories as Array<{ snippet: string }>)
+        : undefined;
     const out = shadowClaimJob(db, sessionId, jobId, shadowPolicyReader, {
       owner,
       expectedVersion,
       ...(candidate.leaseMs !== undefined
         ? { leaseMs: candidate.leaseMs as number }
         : {}),
+      ...(memories !== undefined ? { memories } : {}),
       ...(options.now !== undefined ? { now: options.now } : {}),
     });
     const job = parseOrValidation(
@@ -5544,6 +5579,27 @@ export function createKernelRepository(
     );
   }
 
+  /**
+   * Narrow trusted global pending selector for the runtime shadow worker
+   * ONLY (never called from HTTP): oldest pending job across sessions in
+   * one bounded SQL statement. Null when the queue is empty.
+   */
+  function readPendingShadowJob(): {
+    sessionId: string;
+    jobId: string;
+    version: number;
+  } | null {
+    return shadowReadPendingJob(db);
+  }
+
+  /**
+   * Trusted foreground-activity read for the runtime shadow worker ONLY:
+   * true while ANY user run is queued/running/cancel_requested.
+   */
+  function hasActiveShadowBlock(): boolean {
+    return shadowHasActiveRuns(db);
+  }
+
   return {
     createSession,
     postMessage,
@@ -5642,6 +5698,8 @@ export function createKernelRepository(
     holdShadowJob,
     failShadowJob,
     cancelShadowJob,
+    readPendingShadowJob,
+    hasActiveShadowBlock,
   };
 }
 

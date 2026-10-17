@@ -119,12 +119,14 @@ export type ShadowDecision = z.infer<typeof ShadowDecisionSchema>;
 /**
  * Frozen job-context evidence label. Namespaces are disjoint from normal
  * conversation references (`rN`/`mN`): `sP` = purpose records, `sT` = task
- * records, `sM` = permission-claim excerpts, `sF` = prior failure codes.
+ * records, `sM` = permission-claim excerpts, `sF` = prior failure codes,
+ * `sR` = REAL retrieved memory snippets frozen at claim (never a claim of
+ * "no memory exists": `[]` from recall means no available evidence).
  * Arbitrary source ids / foreign-session ids / free-form citations are
  * rejected: evidence MUST be one of the labels frozen into the job context.
  */
-export const ShadowEvidenceIdSchema = z.string().regex(/^s[PTMF][1-9]\d*$/, {
-  message: "evidence id must be sP/sT/sM/sF + N",
+export const ShadowEvidenceIdSchema = z.string().regex(/^s[PTMFR][1-9]\d*$/, {
+  message: "evidence id must be sP/sT/sM/sF/sR + N",
 });
 export type ShadowEvidenceId = z.infer<typeof ShadowEvidenceIdSchema>;
 
@@ -281,6 +283,19 @@ export const ShadowContextFailureSchema = z.strictObject({
 export type ShadowContextFailure = z.infer<typeof ShadowContextFailureSchema>;
 
 /**
+ * One frozen REAL retrieved-memory snippet (bounded server-side
+ * provenance; canonical record ids never cross the model/UI boundary).
+ * Constructed ONLY by the server at claim from `recallHook` output.
+ */
+export const ShadowContextMemorySchema = z.strictObject({
+  label: ShadowEvidenceIdSchema,
+  snippet: z.string().min(1).refine(codePointsMax(512), {
+    message: "memory snippet over 512 code points",
+  }),
+});
+export type ShadowContextMemory = z.infer<typeof ShadowContextMemorySchema>;
+
+/**
  * Frozen full job context: every active policy record (or an HONEST
  * `context_too_large` hold instead of silently dropping permissions /
  * constraints), explicit deadlines verbatim, conflict pairs, control +
@@ -299,6 +314,13 @@ export const ShadowJobContextSchema = z.strictObject({
   /** EXPLICIT TASK deadlines only (applicability windows are never deadlines; drafts must cite the task). */
   explicitDeadlines: z.array(z.string().min(1).max(128)),
   priorFailures: z.array(ShadowContextFailureSchema),
+  /**
+   * REAL retrieved-memory snippets frozen at claim (server-constructed
+   * `sR` labels only). Defaults to `[]` so pre-memory stored contexts
+   * still parse: `[]` means no available evidence, never "no memory
+   * exists". No feedback/heat/mutation ever derives from this list.
+   */
+  memories: z.array(ShadowContextMemorySchema).max(8).default([]),
   claimControlVersion: z.number().int().min(1),
   claimScopeEpoch: z.number().int().min(1),
   capturedAt: UnixMsSchema,

@@ -213,6 +213,11 @@ const SHADOW_CONTEXT_RECORD_CAP = 100;
 export const SHADOW_CLAIM_LEASE_DEFAULT_MS = 300_000;
 const SHADOW_CLAIM_LEASE_MAX_MS = 3_600_000;
 
+/** Max REAL retrieved-memory snippets frozen per claim (recall-limit family). */
+export const SHADOW_MEMORY_SNIPPET_CAP = 8;
+/** Max memory snippet size (code points; borrowed from recall snippet bound). */
+export const SHADOW_MEMORY_SNIPPET_MAX_CP = 512;
+
 function nowMs(input?: number): number {
   const now = input ?? Date.now();
   if (!Number.isInteger(now) || now < 0 || now > Number.MAX_SAFE_INTEGER) {
@@ -847,6 +852,19 @@ export function requestShadowDeliberation(
       if (body.sessionId !== session) {
         throw new IdempotencyConflictError(idemScope);
       }
+      // Replay returns the CURRENT lifecycle view of the SAME job under the
+      // STORED status code (never a state mutation): after a stop/resume
+      // epoch the replay shows HELD, never a revived pending — old work is
+      // never revived by replaying an old key. Falls back to the stored
+      // snapshot only when the job row is gone (never expected).
+      const current = readJob(db, body.id);
+      if (current !== null && current.session_id === session) {
+        return {
+          status: existing.responseStatus,
+          body: toJobView(current),
+          replayed: true,
+        };
+      }
       return { status: existing.responseStatus, body, replayed: true };
     }
     requireSession(db, session);
@@ -910,6 +928,49 @@ export function requestShadowDeliberation(
     storeIdempotentResponse(db, idemScope, key, hash, 201, body, now);
     return { status: 201, body, replayed: false };
   });
+}
+
+/* ------------------------------------------------------------------ */
+/* Runtime queue reads (service-only, never HTTP-exposed)                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Narrow trusted global pending selector for the runtime worker ONLY
+ * (never exposed over HTTP, never a foreign-session read): the single
+ * oldest `pending` job across ALL sessions in one bounded SQL statement
+ * (no per-session iteration, no truncation). Returns null when the queue
+ * is empty. Callers still claim under CAS + the global live-lease fence,
+ * so a concurrent claimer wins exactly once.
+ */
+export function readPendingShadowJob(db: Database.Database): {
+  sessionId: string;
+  jobId: string;
+  version: number;
+} | null {
+  const row = db
+    .prepare(
+      "SELECT id, session_id, version FROM shadow_jobs WHERE status = 'pending' ORDER BY created_at ASC, id ASC LIMIT 1",
+    )
+    .get() as { id: string; session_id: string; version: number } | undefined;
+  if (row === undefined) {
+    return null;
+  }
+  return { sessionId: row.session_id, jobId: row.id, version: row.version };
+}
+
+/**
+ * Trusted foreground-activity read for the runtime worker ONLY: true
+ * while ANY user run is queued/running/cancel_requested (global, one
+ * bounded SQL statement). While true the shadow worker must not start
+ * new work; it defers (no polling loop — the settlement path wakes it).
+ */
+export function hasActiveUserRuns(db: Database.Database): boolean {
+  const row = db
+    .prepare(
+      "SELECT id FROM runs WHERE status IN ('queued','running','cancel_requested') LIMIT 1",
+    )
+    .get() as { id: string } | undefined;
+  return row !== undefined;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1067,6 +1128,15 @@ export interface ClaimShadowJobOptions {
   leaseMs?: number;
   /** CAS on the job version (prevents double-claim races). */
   expectedVersion: number;
+  /**
+   * REAL retrieved-memory snippets to freeze atomically at claim
+   * (server-constructed `sR` labels, snippet-only provenance: canonical
+   * record ids never enter the frozen context). `[]`/absent means no
+   * available evidence, never "no memory exists". At most
+   * `SHADOW_MEMORY_SNIPPET_CAP` valid snippets are kept; invalid entries
+   * are dropped (never repaired).
+   */
+  memories?: ReadonlyArray<{ snippet: string }>;
   now?: number;
 }
 
@@ -1122,9 +1192,24 @@ export function claimShadowJob(
         "autonomous work is paused; shadow jobs cannot be claimed",
       );
     }
+    // NOTE: no global live-lease fence here by design (parent kernel
+    // contract): per-job CAS + lease ownership already serialize SAME-job
+    // races inside this transaction, and concurrent claims of DIFFERENT
+    // jobs are legal at this layer (covered by the frozen core tests).
+    // GLOBAL one-claimed-job-at-once is a SERVICE discipline instead: the
+    // runtime worker is the ONLY production claimer (claim/complete/fail
+    // are trusted runtime-only, never HTTP-exposed), it drives jobs
+    // strictly serially (singleflight), and every post-claim path lands
+    // the job terminal (complete/hold/fail) before the next claim — so at
+    // most one live service lease ever exists. A second claimer still
+    // cannot steal a job (CAS version + lease-owner fences hold).
     let context: ShadowJobContext;
     try {
-      context = buildShadowContext(db, reader, session, row.scope, now);
+      context = buildShadowContext(db, reader, session, row.scope, now, {
+        ...(options.memories !== undefined
+          ? { memories: options.memories }
+          : {}),
+      });
     } catch (error) {
       if (error instanceof ShadowContextTooLargeError) {
         const held = holdJobInTx(db, row, "context_too_large", now);
@@ -1189,6 +1274,9 @@ export function buildShadowContext(
   sessionId: string,
   scope: string,
   now: number,
+  options: {
+    memories?: ReadonlyArray<{ snippet: string }>;
+  } = {},
 ): ShadowJobContext {
   const at = nowMs(now);
   const purposes = reader.listScopePurposes(sessionId, scope);
@@ -1288,6 +1376,23 @@ export function buildShadowContext(
   const conflictPairs = reader
     .listScopeConflictPairs(sessionId, scope)
     .map(([a, b]) => [a, b] as [string, string]);
+  // Server-frozen REAL memory evidence: valid snippets only (1..512 code
+  // points), first-valid order, capped. Canonical record ids never enter.
+  const memories = (options.memories ?? [])
+    .filter(
+      (entry): entry is { snippet: string } =>
+        typeof entry === "object" &&
+        entry !== null &&
+        typeof (entry as { snippet?: unknown }).snippet === "string",
+    )
+    .map((entry) => entry.snippet)
+    .filter(
+      (snippet) =>
+        snippet.length >= 1 &&
+        Array.from(snippet).length <= SHADOW_MEMORY_SNIPPET_MAX_CP,
+    )
+    .slice(0, SHADOW_MEMORY_SNIPPET_CAP)
+    .map((snippet, index) => ({ label: `sR${index + 1}`, snippet }));
   return parseOrValidation(
     () =>
       ShadowJobContextSchema.parse({
@@ -1300,6 +1405,7 @@ export function buildShadowContext(
         permissionClaims,
         explicitDeadlines,
         priorFailures,
+        memories,
         claimControlVersion: control.version,
         claimScopeEpoch: epoch,
         capturedAt: at,
@@ -1493,6 +1599,7 @@ function validateEvidenceAndDraft(
   for (const t of context.tasks) labels.add(t.label);
   for (const c of context.permissionClaims) labels.add(c.label);
   for (const f of context.priorFailures) labels.add(f.label);
+  for (const m of context.memories) labels.add(m.label);
   for (const id of parsed.evidenceIds) {
     if (!labels.has(id)) {
       throw new RepositoryValidationError(
@@ -1617,6 +1724,12 @@ export function deriveShadowPolicyCode(
       kind: "permission",
       provenance: owner?.source ?? "user",
     });
+  }
+  // REAL retrieved memory is untrusted external text data (never a
+  // permission, never authority): `execute` evidence touching it maps to
+  // `external_no_authority` like any other external provenance.
+  for (const memory of context.memories) {
+    byLabel.set(memory.label, { kind: "memory", provenance: "external" });
   }
   const evidence = evidenceIds
     .map((id) => byLabel.get(id))
