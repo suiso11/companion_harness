@@ -100,7 +100,11 @@ interface HistoryItemView {
 interface ProposalSummaryView {
   readonly proposalId: string;
   readonly tool: string;
-  readonly input: { readonly start: string; readonly end: string };
+  readonly input: {
+    readonly title?: string;
+    readonly start: string;
+    readonly end: string;
+  };
   readonly preview: { readonly summary: string };
   readonly hash: string;
   readonly status: ProposalStatus;
@@ -305,7 +309,7 @@ function isProposalSummary(value: unknown): value is ProposalSummaryView {
   const item = value as {
     proposalId?: unknown;
     tool?: unknown;
-    input?: { start?: unknown; end?: unknown };
+    input?: { title?: unknown; start?: unknown; end?: unknown };
     preview?: { summary?: unknown };
     hash?: unknown;
     status?: unknown;
@@ -313,11 +317,16 @@ function isProposalSummary(value: unknown): value is ProposalSummaryView {
     expiresAt?: unknown;
     resolvedAt?: unknown;
   };
-  return (
-    typeof item.proposalId === "string" &&
-    item.tool === "calendar.reschedule" &&
+  const toolOk =
+    item.tool === "calendar.reschedule" || item.tool === "calendar.create";
+  const inputOk =
     typeof item.input?.start === "string" &&
     typeof item.input?.end === "string" &&
+    (item.tool !== "calendar.create" || typeof item.input?.title === "string");
+  return (
+    typeof item.proposalId === "string" &&
+    toolOk &&
+    inputOk &&
     typeof item.preview?.summary === "string" &&
     typeof item.hash === "string" &&
     (item.status === "pending" ||
@@ -1397,10 +1406,25 @@ class ConversationApp {
     node.id = `action-card-${summary.proposalId}`;
     node.setAttribute("data-action-card", "true");
     node.setAttribute("data-action-tool", summary.tool);
-    node.appendChild(el("h3", "日程変更の確認"));
+    node.appendChild(
+      el(
+        "h3",
+        summary.tool === "calendar.create"
+          ? "予定作成の確認"
+          : "日程変更の確認",
+      ),
+    );
     const preview = el("p", summary.preview.summary);
     preview.setAttribute("data-action-preview", "true");
     node.appendChild(preview);
+    if (
+      summary.tool === "calendar.create" &&
+      summary.input.title !== undefined
+    ) {
+      const titleLine = el("p", `件名: ${summary.input.title}`);
+      titleLine.setAttribute("data-action-title", "true");
+      node.appendChild(titleLine);
+    }
     const startLine = el("p", `開始: ${summary.input.start}`);
     startLine.setAttribute("data-action-start", "true");
     node.appendChild(startLine);

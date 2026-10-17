@@ -75,8 +75,11 @@
 import type { RunResult, RunStatus } from "@companion/contracts";
 import {
   buildRunResultV2,
+  CALENDAR_CREATE_TOOL_NAME,
+  CalendarCreateToolInputSchema,
   CalendarEventStatusSchema,
   CalendarRescheduleToolInputSchema,
+  deriveCreateEventId,
   isTerminalStatus,
   parseRunResult,
   SourceRevisionSchema,
@@ -90,7 +93,10 @@ import type {
   CalendarGetTarget,
   CalendarTargetStore,
 } from "./calendar_tools.js";
-import { toCalendarObservation } from "./calendar_tools.js";
+import {
+  authoritativeCreateTitleMatches,
+  toCalendarObservation,
+} from "./calendar_tools.js";
 import { canonicalJsonString, sha256Hex } from "./canonical.js";
 import {
   ActionNotCancellableError,
@@ -176,6 +182,31 @@ export interface ActionExecutionServiceOptions {
   readonly clock?: () => number;
   /** Required for `runActionPreflight`; the other APIs work without it. */
   readonly preflightRead?: ActionPreflightReadPort;
+  /**
+   * M6 create: durable host-private canonicalKey -> get-target store. Used
+   * ONLY by the verified-create terminal to persist the NEW resource target
+   * atomically inside the terminal transaction (same onApplied pattern as
+   * the search path). Reschedule terminals never touch it.
+   */
+  readonly targetStore?: CalendarTargetStore;
+}
+
+/**
+ * M6 create read-back port: authoritative GET of the NEW resource by its
+ * stable insert id (never a POST fallback, never a resend). The host owns
+ * the calendar/account selection + the derived stable id; the model never
+ * chooses either. Failures classify exactly like the preflight read.
+ */
+export interface ActionCreateReadPort {
+  read(
+    request: {
+      connectorInstanceId: string;
+      calendarId: string;
+      stableEventId: string;
+      account?: string;
+    },
+    signal?: AbortSignal,
+  ): Promise<ActionPreflightRead>;
 }
 
 /* ------------------------------------------------------------------ */
@@ -252,15 +283,16 @@ export interface CommittedGrantMeta {
   executionId: string;
   proposalId: string;
   proposalHash: string;
-  tool: "calendar.reschedule";
+  tool: "calendar.reschedule" | "calendar.create";
   inputHash: string;
   /**
    * Immutable approved revision the grant was committed against (the
-   * proposal's `expected_revision` at consume time). The write port MUST
-   * resolve its conditional etag from THIS value — never from a fresh
-   * preflight read of the current resource.
+   * proposal's `expected_revision` at consume time). Reschedule only: the
+   * write port MUST resolve its conditional etag from THIS value — never
+   * from a fresh preflight read of the current resource. Create rows carry
+   * NULL (no source event, no etag — never a fake placeholder).
    */
-  expectedRevision: string;
+  expectedRevision: string | null;
   consumedAt: number;
 }
 
@@ -347,6 +379,26 @@ export type ActionFinishRequest =
       preflightSnapshotId?: string | null;
     };
 
+/**
+ * M6 create terminal request: `succeeded` MUST carry the actual verified
+ * post-insert authoritative observation (GET by the stable insert id) plus
+ * the host-owned selection (calendar/account) and the stable id the insert
+ * used. Wrong/deleted/missing observations are finished by the CALLER as
+ * `succeeded_unverified`; an `unknown` insert response NEVER reads-to-resolve
+ * and finishes plain `unknown` with no retry and no resend.
+ */
+export type ActionCreateFinishRequest =
+  | {
+      outcome: "succeeded";
+      observation: ActionAuthoritativeObservation;
+      calendarId: string;
+      account?: string;
+      stableEventId: string;
+    }
+  | {
+      outcome: "succeeded_unverified" | "failed" | "unknown";
+    };
+
 export type ActionFinishResult =
   | {
       applied: true;
@@ -370,8 +422,20 @@ export type ActionPreflightOutcome =
   | {
       outcome: "granted";
       grant: CommittedGrantMeta;
-      preflightReferenceId: string;
-      preflightSnapshotId: string;
+      /**
+       * Reschedule: fresh preflight rN/snapshot from the matching
+       * authoritative observation. Create: NULL (no source event exists —
+       * never a fake placeholder; the verified-create terminal materializes
+       * the NEW resource only after the authoritative read-back verifies).
+       */
+      preflightReferenceId: string | null;
+      preflightSnapshotId: string | null;
+      /**
+       * Create only: stable insert id derived deterministically from the
+       * immutable execution id (32 lowercase hex, Google base32hex-legal).
+       * Reschedule: null.
+       */
+      stableEventId: string | null;
     }
   | {
       outcome: "blocked_stale";
@@ -430,10 +494,10 @@ interface RawProposal {
   tool: string;
   connector_instance_id: string;
   input_json: string;
-  target_ref_id: string;
-  target_resource_id: string;
-  based_on_snapshot_id: string;
-  expected_revision: string;
+  target_ref_id: string | null;
+  target_resource_id: string | null;
+  based_on_snapshot_id: string | null;
+  expected_revision: string | null;
   preview_json: string;
   hash: string;
   status: string;
@@ -806,6 +870,11 @@ export function createActionExecutionService(
       }
       const preflight = requirePreflightStage(id);
       const blockedSnapshotId = preflight.proposal.based_on_snapshot_id;
+      if (blockedSnapshotId === null) {
+        throw new RepositoryValidationError(
+          "blocked preflight requires an existing-event snapshot",
+        );
+      }
       const moved = db
         .prepare(
           `UPDATE action_executions SET status = 'blocked_stale',
@@ -930,6 +999,13 @@ export function createActionExecutionService(
     if (proposal === null || proposal.status !== "approved") {
       throw new DatabaseStateInvalidError(
         `execution ${execution.id} has no approved proposal (impossible state)`,
+      );
+    }
+    // Create executions never materialize a preflight snapshot: there is no
+    // source event to observe (fail closed, never a fake placeholder).
+    if (proposal.tool === CALENDAR_CREATE_TOOL_NAME) {
+      throw new DatabaseStateInvalidError(
+        `calendar.create execution ${execution.id} has no preflight snapshot to materialize (impossible state)`,
       );
     }
     const resource = db
@@ -1068,9 +1144,14 @@ export function createActionExecutionService(
           "grant provenance does not match the execution/proposal (fail closed)",
         );
       }
-      const proposedInput = CalendarRescheduleToolInputSchema.parse(
-        JSON.parse(proposal.input_json) as unknown,
-      );
+      const proposedInput =
+        proposal.tool === CALENDAR_CREATE_TOOL_NAME
+          ? CalendarCreateToolInputSchema.parse(
+              JSON.parse(proposal.input_json) as unknown,
+            )
+          : CalendarRescheduleToolInputSchema.parse(
+              JSON.parse(proposal.input_json) as unknown,
+            );
       const inputHash = sha256Hex(canonicalJsonString(proposedInput));
       if (inputHash !== grant.input_hash) {
         throw new DatabaseStateInvalidError(
@@ -1115,7 +1196,7 @@ export function createActionExecutionService(
           executionId: execution.id,
           proposalId: proposal.id,
           proposalHash: proposal.hash,
-          tool: proposal.tool as "calendar.reschedule",
+          tool: proposal.tool as "calendar.reschedule" | "calendar.create",
           inputHash: grant.input_hash,
           expectedRevision: proposal.expected_revision,
           consumedAt: now,
@@ -1434,6 +1515,18 @@ export function createActionExecutionService(
     preflightSnapshotId: string | null,
     now: number,
   ): ActionFinishResult {
+    // Create executions must use finishCreateExecution (targetless NEW
+    // resource path); the reschedule verified terminal requires the full
+    // existing-event target below.
+    const earlyStage = readExecutionByRun(id);
+    if (earlyStage !== null) {
+      const earlyProposal = readProposal(earlyStage.proposal_id);
+      if (earlyProposal?.tool === CALENDAR_CREATE_TOOL_NAME) {
+        throw new DatabaseStateInvalidError(
+          `calendar.create execution ${earlyStage.id} must finish through finishCreateExecution (impossible state)`,
+        );
+      }
+    }
     let observation: z.infer<typeof ActionAuthoritativeObservationSchema>;
     try {
       observation = ActionAuthoritativeObservationSchema.parse(observationRaw);
@@ -1679,6 +1772,303 @@ export function createActionExecutionService(
     );
   }
 
+  /**
+   * M6 create terminal API (targetless creation, no etag, no preflight
+   * snapshot). The caller's single insert already happened OUTSIDE any
+   * transaction (DB-commit-first); only its classified result enters here.
+   * Each outcome is exactly one transaction. Verified `succeeded` ONLY:
+   * the authoritative read-back observation (GET by the stable insert id,
+   * never a POST fallback) binds the same connector instance, carries the
+   * intended title + timed bounds (same-instant) and a non-deleted event;
+   * wrong/deleted/missing observations map to `succeeded_unverified` by the
+   * CALLER (this boundary fails closed on a deleted observation the same
+   * way). An `unknown` insert response NEVER reads-to-resolve here: the
+   * caller finishes it plain `unknown` with no retry and no resend.
+   */
+  function finishCreateExecution(
+    runId: string,
+    result: ActionCreateFinishRequest,
+    transition: { now?: number } = {},
+  ): ActionFinishResult {
+    const id = requireId(runId, "runId");
+    const now = nowMs(transition.now);
+    if (result.outcome !== "succeeded") {
+      return finishPlainTerminal(id, result.outcome, null, null, now);
+    }
+    return finishCreateVerifiedTerminal(
+      id,
+      result.observation,
+      result.calendarId,
+      result.account,
+      result.stableEventId,
+      now,
+    );
+  }
+
+  function finishCreateVerifiedTerminal(
+    id: string,
+    observationRaw: ActionAuthoritativeObservation,
+    calendarId: string,
+    account: string | undefined,
+    stableEventId: string,
+    now: number,
+  ): ActionFinishResult {
+    let observation: z.infer<typeof ActionAuthoritativeObservationSchema>;
+    try {
+      observation = ActionAuthoritativeObservationSchema.parse(observationRaw);
+    } catch {
+      throw new RepositoryValidationError(
+        "verified create observation does not parse (fail closed)",
+      );
+    }
+    const run = assertActionRun(id);
+    if (run.status !== "running") {
+      return { applied: false as const, reason: "run_not_running" as const };
+    }
+    const stage = assertExecutingStage(id);
+    const proposal = stage.proposal;
+    // Create-only boundary: reschedule rows must use finishActionExecution.
+    if (proposal.tool !== CALENDAR_CREATE_TOOL_NAME) {
+      throw new DatabaseStateInvalidError(
+        `action run ${id} is not a calendar.create execution (impossible state)`,
+      );
+    }
+    if (
+      proposal.target_resource_id !== null ||
+      proposal.target_ref_id !== null ||
+      proposal.based_on_snapshot_id !== null ||
+      proposal.expected_revision !== null
+    ) {
+      throw new DatabaseStateInvalidError(
+        "calendar.create proposal carries no existing-event target (fail closed)",
+      );
+    }
+    // Stable id agreement: the read-back target MUST be the one derived
+    // from THIS immutable execution id (never a guessed or model id).
+    if (stableEventId !== deriveCreateEventId(stage.execution.id)) {
+      throw new RepositoryValidationError(
+        "create read-back stable id does not derive from the execution (fail closed)",
+      );
+    }
+    if (
+      observation.connectorInstanceId !== proposal.connector_instance_id ||
+      observation.resourceCanonicalKey !==
+        expectedCreateCanonicalKey(
+          proposal.connector_instance_id,
+          calendarId,
+          stableEventId,
+        )
+    ) {
+      throw new RepositoryValidationError(
+        "verified create observation does not bind the proposal target (fail closed)",
+      );
+    }
+    // A post-write authoritative read showing the event deleted does NOT
+    // verify the creation; it maps to succeeded_unverified (never a fake
+    // verified claim, never a retry).
+    if (observation.eventStatus === "deleted") {
+      return finishPlainTerminal(id, "succeeded_unverified", null, null, now);
+    }
+    // Intended content verification BEFORE any fresh materialization:
+    // FULL authoritative title from the canonical JSON text (never the
+    // 128-bounded display title) + timed bounds, same identity. Any
+    // mismatch yields succeeded_unverified via the plain terminal (never
+    // a partial claim). Missing/malformed/non-string text titles fail
+    // closed here (no display-title fallback).
+    const intended = CalendarCreateToolInputSchema.parse(
+      JSON.parse(proposal.input_json) as unknown,
+    );
+    const intendedTitle = intended.title.normalize("NFC");
+    // Timed-only: the canonical body MUST carry allDayEndExclusive === false.
+    // Missing/true/wrong-type observations verify nothing (unverified, never
+    // a partial claim). Checked in the strategy precheck AND here so direct
+    // terminal callers are equally protected.
+    if (!createBodyIsTimed(observation.text)) {
+      return finishPlainTerminal(id, "succeeded_unverified", null, null, now);
+    }
+    if (!authoritativeCreateTitleMatches(observation.text, intendedTitle)) {
+      return finishPlainTerminal(id, "succeeded_unverified", null, null, now);
+    }
+    if (
+      !createBoundariesMatch(observation.text, intended.start, intended.end)
+    ) {
+      return finishPlainTerminal(id, "succeeded_unverified", null, null, now);
+    }
+    const observedKey =
+      observation.sourceRevision ??
+      sha256Hex(observation.text.normalize("NFC"));
+    interface CommittedCreateTerminal {
+      executionId: string;
+      observedRevision: string;
+      resultSnapshotId: string;
+      referenceId: string;
+      eventSeq: number;
+      runResult: RunResult;
+    }
+    const box: { value?: CommittedCreateTerminal } = {};
+    if (referenceManager === undefined) {
+      throw new RepositoryValidationError(
+        "this boundary requires an injected referenceManager",
+      );
+    }
+    // Fail closed BEFORE any create materialization (snapshot/resource/ref/
+    // success receipt): a verified create without a durable target store
+    // would mint an unrefreshable rN. Reschedule-only compositions (no
+    // targetStore) are unaffected — only this create terminal requires it.
+    if (options.targetStore === undefined) {
+      throw new RepositoryValidationError(
+        "verified create requires a durable target store (fail closed)",
+      );
+    }
+    const presented = referenceManager.presentObservations(
+      run.session_id,
+      id,
+      [
+        {
+          connectorInstanceId: observation.connectorInstanceId,
+          canonicalKey: observation.resourceCanonicalKey,
+          title: observation.title,
+          text: observation.text,
+          sourceRevision: observation.sourceRevision,
+          observedAt: now,
+        },
+      ],
+      {
+        freshness: "refresh",
+        now,
+        onApplied: (presentedRefs) => {
+          if (presentedRefs.references.length !== 1) {
+            throw new DatabaseStateInvalidError(
+              "verified create did not materialize exactly one fresh rN (impossible state)",
+            );
+          }
+          const fresh = presentedRefs.references[0];
+          if (fresh === undefined) {
+            throw new DatabaseStateInvalidError(
+              "verified create did not materialize exactly one fresh rN (impossible state)",
+            );
+          }
+          // Persist the NEW resource target atomically inside the terminal
+          // transaction (host-private provider id stays in this private
+          // store, never in a DTO). A throw here rolls back everything.
+          if (options.targetStore !== undefined) {
+            options.targetStore.put(observation.resourceCanonicalKey, {
+              calendarId,
+              eventId: stableEventId,
+              ...(account !== undefined ? { account } : {}),
+            });
+          }
+          const committedStage = assertExecutingStage(id);
+          const moved = db
+            .prepare(
+              `UPDATE action_executions SET status = 'succeeded',
+                 finished_at = ?, updated_at = ?
+               WHERE id = ? AND status = 'executing' AND external_call_started_at IS NOT NULL AND finished_at IS NULL`,
+            )
+            .run(now, now, committedStage.execution.id);
+          if (moved.changes !== 1) {
+            throw new DatabaseStateInvalidError(
+              "executing CAS lost inside the create terminal (impossible state)",
+            );
+          }
+          insertReceipt({
+            executionId: committedStage.execution.id,
+            sessionId: committedStage.execution.session_id,
+            proposal: committedStage.proposal,
+            outcome: "succeeded",
+            preflightRevision: null,
+            preflightSnapshotId: null,
+            observedRevision: observedKey,
+            resultSnapshotId: fresh.snapshotId,
+            now,
+          });
+          let seq = (
+            db.prepare("SELECT event_seq FROM runs WHERE id = ?").get(id) as {
+              event_seq: number;
+            }
+          ).event_seq;
+          seq = appendEventInTx(
+            db,
+            id,
+            seq,
+            "action.execution_finished",
+            { executionId: committedStage.execution.id, outcome: "succeeded" },
+            now,
+          );
+          const runResult = buildRunResultV2({
+            version: 1,
+            parts: [
+              {
+                text: actionRunResultText("succeeded", committedStage.proposal),
+                citations: [`r${fresh.ordinal}`],
+              },
+            ],
+          });
+          const movedRun = db
+            .prepare(
+              "UPDATE runs SET status = 'completed', result_json = ?, error_code = NULL, finished_at = ? WHERE id = ? AND status = 'running'",
+            )
+            .run(JSON.stringify(runResult), now, id);
+          if (movedRun.changes !== 1) {
+            throw new KernelStorageError(
+              "kernel_concurrent_conflict",
+              "concurrent terminal conflict; retry the transition",
+            );
+          }
+          appendEventInTx(
+            db,
+            id,
+            seq,
+            "run.completed",
+            { result: runResult },
+            now,
+          );
+          if (run.select_on_success === 1) {
+            db.prepare(
+              "INSERT INTO turn_selections (turn_id, run_id, selected_at) VALUES (?, ?, ?) ON CONFLICT(turn_id) DO UPDATE SET run_id = excluded.run_id, selected_at = excluded.selected_at",
+            ).run(run.turn_id, id, now);
+          }
+          box.value = {
+            executionId: committedStage.execution.id,
+            observedRevision: observedKey,
+            resultSnapshotId: fresh.snapshotId,
+            referenceId: fresh.referenceId,
+            eventSeq: (
+              db.prepare("SELECT event_seq FROM runs WHERE id = ?").get(id) as {
+                event_seq: number;
+              }
+            ).event_seq,
+            runResult,
+          };
+        },
+      },
+    );
+    if (!presented.applied) {
+      return {
+        applied: false as const,
+        reason: "run_not_running" as const,
+      };
+    }
+    if (box.value === undefined) {
+      throw new DatabaseStateInvalidError(
+        "verified create committed without its stage (fail closed)",
+      );
+    }
+    const committed: CommittedCreateTerminal = box.value;
+    return {
+      applied: true as const,
+      executionId: committed.executionId,
+      outcome: "succeeded",
+      executionStatus: "succeeded",
+      runStatus: "completed",
+      observedRevision: committed.observedRevision,
+      resultSnapshotId: committed.resultSnapshotId,
+      referenceId: committed.referenceId,
+      eventSeq: committed.eventSeq,
+      runResult: committed.runResult,
+    };
+  }
+
   /* ---------------------------------------------------------------- */
   /* 4) ORCHESTRATOR: one preflight step with the exact §18.5 order      */
   /*    (compare BEFORE materialize). No transaction is held across the  */
@@ -1743,7 +2133,56 @@ export function createActionExecutionService(
         "execution has no approved proposal (impossible state)",
       );
     }
+    // M6 create preflight: authority binding ONLY (selected account +
+    // calendar). There is deliberately NO nonexistent-event GET here: the
+    // proposal carries no target, no etag, no snapshot. The host-owned
+    // active Calendar instance must still exist; then the exact one-shot
+    // grant gate commits the marker. The stable insert id derives
+    // deterministically from the immutable execution id (never model input).
+    if (proposal.tool === CALENDAR_CREATE_TOOL_NAME) {
+      if (
+        proposal.target_resource_id !== null ||
+        proposal.target_ref_id !== null ||
+        proposal.based_on_snapshot_id !== null ||
+        proposal.expected_revision !== null
+      ) {
+        throw new DatabaseStateInvalidError(
+          "calendar.create proposal carries no existing-event target (fail closed)",
+        );
+      }
+      const authority = db
+        .prepare("SELECT id FROM connector_instances WHERE id = ?")
+        .get(proposal.connector_instance_id) as { id: string } | undefined;
+      if (authority === undefined) {
+        return runPreflightFailedTerminal("schema_invalid", step, id);
+      }
+      const gate = consumeActionGrant(id, { now: nowMs(step.now) });
+      if (!gate.granted) {
+        return {
+          outcome: "skipped" as const,
+          status: `grant_denied:${gate.reason}`,
+          runStatus: "NOT_RUN",
+        };
+      }
+      return {
+        outcome: "granted" as const,
+        grant: gate.grant,
+        preflightReferenceId: null,
+        preflightSnapshotId: null,
+        stableEventId: deriveCreateEventId(execution.id),
+      };
+    }
     // Async authoritative read OUTSIDE any transaction; signal propagated.
+    // Reschedule only (create returned above): the target triple is
+    // NON-NULL here by the M6 per-tool CHECK; a NULL here is impossible.
+    if (
+      proposal.target_resource_id === null ||
+      proposal.based_on_snapshot_id === null
+    ) {
+      throw new DatabaseStateInvalidError(
+        "calendar.reschedule proposal requires a full existing-event target (impossible state)",
+      );
+    }
     let read: ActionPreflightRead;
     try {
       read = await port.read(
@@ -1815,6 +2254,7 @@ export function createActionExecutionService(
       grant: gate.grant,
       preflightReferenceId: materialized.referenceId,
       preflightSnapshotId: materialized.snapshotId,
+      stableEventId: null,
     };
 
     function finishBlocked(
@@ -2343,6 +2783,197 @@ export function createActionExecutionService(
     });
   }
 
+  // Strict explicit-offset RFC3339 instant to epoch ms (create verify copy
+  // of the strategy's strict grammar: seconds + minute precision, real
+  // calendar validation, full millisecond precision, year-safe UTC epoch
+  // (Date.UTC maps years 00..99 to 1900..1999), no Date.parse rollover
+  // acceptance). All-day DATE strings and offset-less strings are undefined
+  // (fail closed). Mirrors `action_strategy.ts` `parseStrictInstantMs` exactly
+  // (same instant, strict grammar, invalid fails closed).
+  function createStrictUtcMs(
+    year: number,
+    month: number,
+    day: number,
+    hour: number,
+    minute: number,
+    second: number,
+    ms: number,
+  ): number {
+    if (year >= 100) {
+      return Date.UTC(year, month - 1, day, hour, minute, second, ms);
+    }
+    const fixed = new Date(0);
+    fixed.setUTCFullYear(year, month - 1, day);
+    fixed.setUTCHours(hour, minute, second, ms);
+    return fixed.getTime();
+  }
+
+  function createStrictInstantMs(value: string): number | undefined {
+    const seconds =
+      /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2})$/.exec(
+        value,
+      );
+    if (seconds !== null) {
+      const year = Number(seconds[1]);
+      const month = Number(seconds[2]);
+      const day = Number(seconds[3]);
+      const hour = Number(seconds[4]);
+      const minute = Number(seconds[5]);
+      const second = Number(seconds[6]);
+      if (month < 1 || month > 12) return undefined;
+      if (day < 1 || day > strictDaysInMonth(year, month)) return undefined;
+      if (hour > 23 || minute > 59 || second > 59) return undefined;
+      // Milliseconds are exactly the first three decimal digits,
+      // right-padded (float parsing could round up into the next second).
+      const fraction = seconds[7] as string | undefined;
+      const millis =
+        fraction !== undefined
+          ? Number(fraction.slice(1, 4).padEnd(3, "0"))
+          : 0;
+      const zone = seconds[8] as string;
+      let offsetMs = 0;
+      if (zone !== "Z") {
+        const sign = zone.startsWith("-") ? -1 : 1;
+        const oh = Number(zone.slice(1, 3));
+        const om = Number(zone.slice(4, 6));
+        if (oh > 23 || om > 59) return undefined;
+        offsetMs = sign * (oh * 60 + om) * 60_000;
+      }
+      const ms = createStrictUtcMs(
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+        millis,
+      );
+      const epoch = ms - offsetMs;
+      return Number.isFinite(epoch) ? epoch : undefined;
+    }
+    const minutes =
+      /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(Z|[+-]\d{2}:\d{2})$/.exec(
+        value,
+      );
+    if (minutes === null) return undefined;
+    const year = Number(minutes[1]);
+    const month = Number(minutes[2]);
+    const day = Number(minutes[3]);
+    const hour = Number(minutes[4]);
+    const minute = Number(minutes[5]);
+    if (month < 1 || month > 12) return undefined;
+    if (day < 1 || day > strictDaysInMonth(year, month)) return undefined;
+    if (hour > 23 || minute > 59) return undefined;
+    const zone = minutes[6] as string;
+    let offsetMs = 0;
+    if (zone !== "Z") {
+      const sign = zone.startsWith("-") ? -1 : 1;
+      const oh = Number(zone.slice(1, 3));
+      const om = Number(zone.slice(4, 6));
+      if (oh > 23 || om > 59) return undefined;
+      offsetMs = sign * (oh * 60 + om) * 60_000;
+    }
+    const epoch =
+      createStrictUtcMs(year, month, day, hour, minute, 0, 0) - offsetMs;
+    return Number.isFinite(epoch) ? epoch : undefined;
+  }
+
+  function strictDaysInMonth(year: number, month: number): number {
+    if (month === 2) {
+      const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+      return leap ? 29 : 28;
+    }
+    if (month === 4 || month === 6 || month === 9 || month === 11) return 30;
+    return 31;
+  }
+
+  /**
+   * Expected canonical key for a verified create read-back, derived from the
+   * TRUSTED triple (connectorInstanceId, host-selected calendarId,
+   * execution-derived stableEventId) under the existing normalization/hash
+   * convention (`calendar:` + SHA-256 hex of the JSON tuple — the same
+   * convention as `packages/connector-calendar/src/normalize.ts`
+   * `canonicalKey`, re-expressed here with the kernel-owned `sha256Hex` so
+   * the dependency-inverted direction stays intact; no second algorithm).
+   */
+  function expectedCreateCanonicalKey(
+    connectorInstanceId: string,
+    calendarId: string,
+    stableEventId: string,
+  ): string {
+    return `calendar:${sha256Hex(
+      JSON.stringify([connectorInstanceId, calendarId, stableEventId]),
+    )}`;
+  }
+
+  /**
+   * Timed-only body check over the canonical event text: the parsed body
+   * MUST carry `allDayEndExclusive === false`. Missing/true/wrong-type
+   * values return false (unverified), never a partial claim.
+   */
+  function createBodyIsTimed(text: string): boolean {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text) as unknown;
+    } catch {
+      return false;
+    }
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      return false;
+    }
+    return (
+      (parsed as { allDayEndExclusive?: unknown }).allDayEndExclusive === false
+    );
+  }
+
+  // Same-instant timed-bounds comparison over the canonical event body
+  // (STRICT JSON, whole values — never substrings). Representation
+  // differences (offset/millis forms naming the same instant) verify;
+  // any parse failure yields false (unverified), never a partial claim.
+  function createBoundariesMatch(
+    text: string,
+    start: string,
+    end: string,
+  ): boolean {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text) as unknown;
+    } catch {
+      return false;
+    }
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      return false;
+    }
+    const body = parsed as { start?: unknown; end?: unknown };
+    if (typeof body.start !== "string" || typeof body.end !== "string") {
+      return false;
+    }
+    if (body.start === start && body.end === end) {
+      return true;
+    }
+    const os = createStrictInstantMs(body.start);
+    const oe = createStrictInstantMs(body.end);
+    const is = createStrictInstantMs(start);
+    const ie = createStrictInstantMs(end);
+    if (
+      os === undefined ||
+      oe === undefined ||
+      is === undefined ||
+      ie === undefined
+    ) {
+      return false;
+    }
+    return os === is && oe === ie;
+  }
+
   return {
     startActionRun,
     recordActionPreflightFailure,
@@ -2351,6 +2982,7 @@ export function createActionExecutionService(
     consumeActionGrant,
     cancelActionRun,
     finishActionExecution,
+    finishCreateExecution,
     runActionPreflight,
     getActionRunView,
     validateAndRecoverActionRuns,

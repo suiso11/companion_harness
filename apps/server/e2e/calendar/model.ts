@@ -23,13 +23,18 @@ import type {
 } from "@companion/model-local";
 import {
   ANSWER_ASSENT_TEXT,
+  ANSWER_CREATE_TEXT,
   ANSWER_REFRESH_TEXT,
   ANSWER_SEARCH_TEXT,
   ANSWER_STAGE_TEXT,
   ANSWER_TOMBSTONE_TEXT,
+  CREATE_END,
+  CREATE_START,
+  CREATE_TITLE,
   STAGE_END,
   STAGE_START,
   TEXT_ASSENT,
+  TEXT_CREATE,
   TEXT_DELETE,
   TEXT_REFRESH,
   TEXT_SEARCH,
@@ -47,7 +52,7 @@ const SEARCH_RANGE = {
   end: "2026-10-31T00:00:00Z",
 } as const;
 
-type PlanName = "search" | "refresh" | "delete" | "stage" | "assent";
+type PlanName = "search" | "refresh" | "delete" | "stage" | "assent" | "create";
 
 /**
  * Index of the user message that carries the CURRENT turn request: the last
@@ -122,6 +127,10 @@ function selectPlan(requestTextValue: string): PlanName | null {
   // Assent is checked BEFORE stage: a turn whose text merely AGREES must
   // never be able to look like a staging request.
   if (requestTextValue.includes(TEXT_ASSENT)) return "assent";
+  // Create is targetless and checked before the reschedule texts: the fixed
+  // creation prompt shares no substring with the move prompt, but the order
+  // keeps a future overlap from ever staging the wrong tool.
+  if (requestTextValue.includes(TEXT_CREATE)) return "create";
   if (requestTextValue.includes(TEXT_STAGE)) return "stage";
   if (requestTextValue.includes(TEXT_SEARCH)) return "search";
   return null;
@@ -251,6 +260,23 @@ export function createScriptedCalendarModelGateway(): ModelGateway {
       // turned into an approval: no tool call, no proposal, no write.
       if (plan === "assent") {
         return citedAnswer(learnedOrdinal, ANSWER_ASSENT_TEXT);
+      }
+      // M6 create plan: PROPOSAL ONLY. The model proposes the targetless
+      // creation with the fixed immutable title/bounds (never a model-chosen
+      // provider id) and then answers with NO citation: there is no source
+      // event, so no rN exists to cite. The write only ever happens after a
+      // HUMAN approval click in the real UI.
+      if (plan === "create") {
+        if (step === 0) {
+          return answerResult(
+            toolCall("calendar.create", {
+              title: CREATE_TITLE,
+              start: CREATE_START,
+              end: CREATE_END,
+            }),
+          );
+        }
+        return answerResult(answerSubmit(ANSWER_CREATE_TEXT, []));
       }
       // Delete plan: stored OPEN first (the model addresses the retained
       // stored reference), then refresh (fails via the fake deleted
