@@ -125,6 +125,18 @@ export const IDEMPOTENCY_OPERATIONS = {
     operation: "shadow_request_deliberation",
     schemaVersion: 1,
   },
+  stageConversationProposal: {
+    operation: "conv_proposal_stage",
+    schemaVersion: 1,
+  },
+  acceptConversationProposal: {
+    operation: "conv_proposal_accept",
+    schemaVersion: 1,
+  },
+  rejectConversationProposal: {
+    operation: "conv_proposal_reject",
+    schemaVersion: 1,
+  },
   ackNotification: { operation: "notification_ack", schemaVersion: 1 },
 } as const;
 

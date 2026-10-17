@@ -43,6 +43,7 @@ export default defineConfig({
           "autonomy.spec.ts",
           "shadow.spec.ts",
           "notifications.spec.ts",
+          "conversation_proposals.spec.ts",
         ],
   timeout: 60_000,
   expect: { timeout: 15_000 },
