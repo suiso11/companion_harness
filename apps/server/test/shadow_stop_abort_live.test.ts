@@ -325,5 +325,8 @@ describe("shadow live safety proof (real HTTP loopback, throwaway DB)", () => {
       });
       closeKernelDatabase(handle);
     }
-  });
+    // Real loopback server + internal 8s poll budgets exceed the 5s default
+    // on loaded Windows CI (push-run 39033555615 ground truth), so carry an
+    // explicit budget like the other live suites. No assertion is relaxed.
+  }, 60_000);
 });
