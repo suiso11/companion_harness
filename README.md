@@ -1423,7 +1423,7 @@ COMPANION_CALENDAR_JSON='{
 
 通常起動 (`pnpm start`) から採用済み candidate を選択できます。厳密な opt-in
 (`COMPANION_CALENDAR_PROFILE=google-readonly`) + 既存 `COMPANION_CALENDAR_JSON`
-ヒントが採用 candidate (`suiso11/google-calendar-mcp `6939311…`,
+ヒントが採用 candidate (`suiso11/google-calendar-mcp `cefb63c…`,
 `3.0.0-readonly.2`, `list-events`/`search-events`/`get-event` の live-wire hash)
 と完全一致した場合のみ、ホスト所有の信頼済み定義が注入されます。profile 未設定
 の既定動作は不変 (無効のまま)、未知 profile・不一致・任意 binding/hash は
@@ -1473,7 +1473,7 @@ COMPANION_ACTIONS_JSON='{ "optIn": true, "writeEnabled": true }'
   既定は無効のまま)。profile 選択時は注入 binding と相互排他であり、
   `M5_RESCHEDULE_TEST_*` の allowlist 指定は fail-closed です
   (fixture endpoint は options 注入の子プロセス env のみ)。
-  受け入れ証跡: `apps/server/test/rescheduleWriteStartup.test.ts` 21/21
+  受け入れ証跡: `apps/server/test/rescheduleWriteStartup.test.ts`
   (実 stdio E2E の HTTP approve 1 PATCH + readback receipt を含む; PR31
   レビュー3件対応済み: production factory の implicit-env 事前検証、
   `actionWriteBinding: null` の absent 扱い、Windows 絶対パス受容 +
@@ -1486,6 +1486,31 @@ COMPANION_ACTIONS_JSON='{ "optIn": true, "writeEnabled": true }'
   (末尾ゼロ `.123000` 可、真の `.1234` は stage/write 前に拒否) で readback は
   同一 instant (等価 offset 可) を比較、write 応答は `structuredContent` が
   own-property 存在時に authoritative (text は absent 時のみ strict JSON fallback)。
+  Persisted-grant 統合 (fork `cefb63c`, PR #4): write 子は永続 grant
+  ファイルから認証し、env secret の手動コピーは不要。推奨は file-only —
+  allowlist は SDK 継承名 + `GOOGLE_OAUTH_CREDENTIALS` (Desktop クライ
+  アントファイルパス) + `M5_RESCHEDULE_WRITE_TOKEN_PATH` (grant ファイル
+  パス) + `M5_RESCHEDULE_ACCOUNT` (正確な account 選択子) +
+  `GOOGLE_CALENDAR_MCP_READONLY_TOKEN_PATH` (衝突 guard 可視性; custom
+  readonly 設定時は必須) のみ
+  (`M5_RESCHEDULE_CLIENT_*` / `REFRESH_TOKEN` / `GRANTED_SCOPE` /
+  `ACCESS_TOKEN` の値は不要; 部分 env credential はファイル fallback なし
+  に拒否)。設定 account は selection `account` と完全一致が必須
+  (不一致は DB 副作用前に起動拒否)。分離 consent (out-of-band, exact
+  scope のみ): fork checkout 側で `npm --prefix "$WRITE_FORK" run
+  auth:write -- --account "$WRITE_ACCT" --port 3500
+  --ttl-minutes 12 --no-browser (root には同 script なし; `$WRITE_ACCT` は
+  `^[a-z0-9_-]{1,64}$`; 出力
+  `~/.config/google-calendar-mcp-write/tokens.json`,
+  0600, readonly とは別ファイル)。build/consent 前に fork の exact pin
+  検証が必須 (commit/tree/package/lock digest + clean 状態)。証跡:
+  `packages/connector-calendar/test/reschedulePersistedGrant.test.ts` 7/7
+  (実出荷 CLI の `tools/list` + 6 拒否境界、Google 0 件) + file-only 通常
+  起動 8/8 (production frozen-env factory + 追跡 fixture の file-auth 契約
+  ミラー: 1 正常 1 PATCH verified、3 省略拒否、frozen 証明、account 不一致
+  起動拒否、readonly 隠蔽の起動拒否、衝突拒否 0 PATCH)。
+  詳細な手順・検証数は docs/operations.md (M5 persisted write-grant auth)
+  を参照。
 - 設定が有効で binding が active instance と一致しない場合は listen 前に
   fail-closed します。設定が無効な場合、注入された port は一切使われません。
 - 無効時は staging できず、approve は repository 呼び出し前に固定
@@ -1493,6 +1518,13 @@ COMPANION_ACTIONS_JSON='{ "optIn": true, "writeEnabled": true }'
   一覧 (decision read) は従来どおり状態を返します。
 - port の lifecycle は `owned: true` を明示した場合のみサーバーが close します
   (caller 所有の port は閉じません)。
+- 証跡ナビゲーション (stored-only, 上流 I/O なし):
+  承認カードと履歴は所有プロポーザルの不変 target 由来の BEFORE (`rN`)
+  ボタンを持ち、検証済み AFTER は receipt `succeeded` かつ権威ある
+  `run.result` の実引用がある場合のみ履歴に表示します
+  (`succeeded_unverified` の preflight 引用は AFTER 化しません)。
+  どちらのボタンも既存の引用ドロワーの保存済みスナップショット本文のみを開き、
+  開封で外部 GET/PATCH は発生しません。リロード後も両リンクは保持されます。
 
 ---
 
@@ -1615,7 +1647,7 @@ Remaining gates not closed here: Windows 11 x64 manual smoke, remote CI for this
 # Live Readonly Acceptance Ledger (2026-10-14, current profile)
 
 Current accepted activation is the host-owned pinned `google-readonly`
-profile (`suiso11/google-calendar-mcp` @ `6939311…`,
+profile (`suiso11/google-calendar-mcp` @ `cefb63c…`,
 `3.0.0-readonly.2`, `calendar.events.readonly` only, 3 live-wire hashes;
 `list-calendars` deliberately absent — never restored to satisfy the
 proposal-era checklist). Observed live evidence (sanitized

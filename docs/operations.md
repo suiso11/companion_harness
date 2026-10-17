@@ -1018,14 +1018,20 @@ or complete activate config):
   and manual Win11 smoke.
 - Adoption pin (exact form, verified against a real fork checkout):
   `suiso11/google-calendar-mcp`
-  commit `6939311fd3eae9846648e0a175e304c9500f578e`
-  (tree `f01b5a7b608c4091906a52c0784b828c35963de9`,
+  commit `cefb63c24f062ef6a49889d7b635330dee884f63`
+  (reviewed fork PR4 head: persisted-grant runtime + bounded pageSize +
+  single-account string; base `6939311` in ancestry;
+  tree `624968c65f499f5d30141f4d936aca66d016b531`,
   package `@cocal/google-calendar-mcp@3.0.0-readonly.2`, lock SHA-256
   `63261d25…bd533`), wire identity `{name:"google-calendar",
   version:"3.0.0-readonly.2"}`, exactly
   `list-events`/`search-events`/`get-event` with the live-wire hashes
-  (`81222b89…`, `d48ba36e…`, `8c6736e2…` — SDK wire bytes, NOT the
-  registry-direct `a065/012e/913…` diagnostic bytes). Scope stays
+  (`01c3d647…`, `d94166b7…`, `8c6736e2…` — SDK wire bytes, NOT the
+  registry-direct `a065/012e/913…` diagnostic bytes). The list/search
+  rotation vs the superseded 6939311 hashes (`81222b89…`, `d48ba36e…`)
+  is the reviewed single optional `account` string (arrays refused) plus
+  `pageSize` 1..20 honored with `maxResults` default 20; `get-event` is
+  byte-identical. Scope stays
   `calendar.events.readonly` only; no `CalendarList` metadata lookup on the
   MCP path; no writes; `list-calendars` absent (denied, never registered).
 - Selection rules (all fail closed with fixed messages, before listen):
@@ -1071,8 +1077,8 @@ or complete activate config):
   2. Fork checkout, verification, then build (exact pin form; verification
      runs BEFORE any install/build):
      repo `https://github.com/suiso11/google-calendar-mcp`, commit
-     `6939311fd3eae9846648e0a175e304c9500f578e`, tree
-     `f01b5a7b608c4091906a52c0784b828c35963de9`, package
+     `cefb63c24f062ef6a49889d7b635330dee884f63`, tree
+     `624968c65f499f5d30141f4d936aca66d016b531`, package
      `@cocal/google-calendar-mcp@3.0.0-readonly.2`, `package-lock.json`
      SHA-256
      `63261d25992ee9c97136a60bbf4fe52a5485cadea28b34d6b8b6c685f38bd533`.
@@ -1089,8 +1095,8 @@ or complete activate config):
      ```bash
      COMPANION_DIR="$PWD"  # absolute Companion checkout root (contains pnpm-workspace.yaml); keep for step 5
      FORK_DIR="$HOME/gcal-readonly"
-     PIN_COMMIT="6939311fd3eae9846648e0a175e304c9500f578e"
-     PIN_TREE="f01b5a7b608c4091906a52c0784b828c35963de9"
+     PIN_COMMIT="cefb63c24f062ef6a49889d7b635330dee884f63"
+     PIN_TREE="624968c65f499f5d30141f4d936aca66d016b531"
      PIN_PKG="@cocal/google-calendar-mcp@3.0.0-readonly.2"
      PIN_LOCK="63261d25992ee9c97136a60bbf4fe52a5485cadea28b34d6b8b6c685f38bd533"
      test "$(node -p "process.version")" = "v24.12.0"
@@ -1187,8 +1193,8 @@ or complete activate config):
            envAllowlist: [...base, "GOOGLE_OAUTH_CREDENTIALS", "GOOGLE_CALENDAR_MCP_READONLY_TOKEN_PATH", "GOOGLE_ACCOUNT_MODE"],
          },
          bindings: [
-           { upstreamTool: "list-events", canonicalSchemaHash: "81222b89482cba77b12a707c2097c66df383cab7929c14dca03cc303846d794c" },
-           { upstreamTool: "search-events", canonicalSchemaHash: "d48ba36e7f280d92eaba9550323e90aa7a6d7c758812932ad62012f4514558b7" },
+           { upstreamTool: "list-events", canonicalSchemaHash: "01c3d647c272fdbd0de1028f73c76cd8baab931f177733146cd6287b9683d1fe" },
+           { upstreamTool: "search-events", canonicalSchemaHash: "d94166b755b694710c925fcc96e6ecff1016ea53f470264428494656791be7f6" },
            { upstreamTool: "get-event", canonicalSchemaHash: "8c6736e2a1f397d0735efa5c0881f5c350c300b21a0b026e80c112258b596bda" },
          ],
        },
@@ -2752,6 +2758,64 @@ retry is unchanged (still `202`, same Turn, new queued Run).
    `test-results/` removed; no `pnpm` dependency change (offline
    store-link install only).
 
+## M5 action evidence navigation (BEFORE/AFTER stored-only, 2026-10-16, observed)
+
+Action result/receipt history and the live card carry distinct evidence
+buttons: BEFORE (the ORIGINAL staged snapshot) is display metadata resolved
+from the owning proposal's immutable `target_ref_id` plus session ownership
+(the staged source reference's `rN` ordinal) and rides both the
+server-owned execution view (`GET .../proposals/:id/execution`
+`targetCitation`) and the action history projection (`selectedRun`
+`targetCitation`); AFTER (the verified new snapshot) comes ONLY from the
+authoritative `run.result` via `runResultToAnswerParts` when the receipt
+outcome is exactly `succeeded` with actual result citations. Every other
+outcome (`unknown` / `succeeded_unverified` / `failed` / `blocked_stale` /
+live `null`) yields BEFORE alone — a `succeeded_unverified` V1 text result
+(which by construction carries no structured citations, and even a result
+that happened to carry preflight citations) is never presented as verified
+AFTER. Opening either button reuses the existing stored-only citation
+drawer (exact stored `SnapshotBody` text, `textContent` only): no
+Google/upstream GET/PATCH after opening, no automatic refresh/retry, no
+`rN` derived from preview prose or the current latest resource. History
+reload retains both buttons; one Run never renders four evidence buttons
+(card BEFORE at most one + history BEFORE/AFTER). No durable receipt /
+`RunResult` / grant / proposal-hash / DB-schema change: the label is
+metadata on the existing safe execution and history views (no N+1, no
+async stale races); old proposals resolve without rewriting hash/preview/
+snapshot, and non-action `user_text` history omits the field entirely.
+
+- Contracts/kernel (`packages/contracts/src/action.ts`,
+  `packages/contracts/src/http.ts`, `packages/kernel/src/repository.ts`):
+  `ActionTargetCitationSchema` (`rN`) + required `targetCitation` on
+  `ProposalExecutionView` and `ActionRunHistorySelection` (`user_text`
+  omits it); `targetCitationForProposal` resolves the owned ordinal and
+  fails closed cross-session (no citation info leaked).
+- Client (`apps/server/src/ui/reducer.ts` pure `actionEvidenceButtons`
+  + `apps/server/src/ui/client.ts`): card renders stored BEFORE only;
+  history renders BEFORE plus verified AFTER only; both open via the
+  existing `openCitation` stored path.
+- Observed final verification (Linux, Node 24.12.0, this worktree):
+  kernel `action_evidence_navigation` 9/9 (real SQLite service lifecycle:
+  pending/live/failed/unknown/unverified/blocked keep BEFORE alone,
+  verified succeeded keeps BEFORE + distinct fresh AFTER, wrong-session
+  fails closed, `user_text` omits the field); server `proposals` 9/9
+  (execution BEFORE for pending/approved + foreign 404 with no evidence,
+  history live BEFORE-only, history verified BEFORE + fresh AFTER,
+  history unverified BEFORE + citation-less V1, cross-session history
+  leaks nothing) + `action_ui` 13/13 (pure BEFORE/AFTER policy);
+  `tsc --noEmit` exit 0 (server/kernel/contracts); owned `biome check`
+  clean on touched files (one pre-existing `useLiteralKeys` in untouched
+  memory code left as-is). Real-Chromium browser proof via the existing
+  Calendar fake harness (`apps/server/e2e/calendar/evidence.spec.ts`,
+  kept) 2/2: verified run shows BEFORE r1 + distinct AFTER, both open
+  the EXACT different stored bodies (09:00 vs 11:00), fixture counters
+  (`searchCalls`/`listCalls`/`getCalls`/`writeCalls`) byte-identical
+  across both opens and across reload (exactly 1 write total, 0 extra
+  upstream GET/PATCH); unverified run shows BEFORE alone with the real
+  manual-check outcome, 0 AFTER/citation nodes, stored original opens
+  with identical counters, reload retains BEFORE-only with 0 extra
+  writes. `test-results/` removed; no dependency change.
+
 ## Live readonly acceptance ledger (2026-10-14, current profile)
 
 Current accepted activation: the host-owned pinned profile
@@ -3512,3 +3576,162 @@ Proof after repin: profile 5/5 + wire-hash 2/2 + startup 22/22 + focused
   upstream-advance invariants; `action_proposals` 15/15,
   `action_executions` 20/20 pass. Full unit has only the 2 pre-existing
   live-memory CLI prerequisite failures (ground truth, unrelated).
+
+## M5 persisted write-grant auth (2026-10-16, no live writes)
+
+Adopts the fork persisted-grant runtime (fork PR #4 review fixes) as the
+recommended host flow: the normal-startup write child authorizes from the
+out-of-band persisted grant file, with NO manual env secret copy. No live
+Google mutation, no new consent, no reconsent, no deploy changes; readonly
+`:3000` and the own `:3001`/launcher/store/creds paths unchanged.
+
+- Fork landed as `cefb63c24f062ef6a49889d7b635330dee884f63`
+  (tree `624968c65f499f5d30141f4d936aca66d016b531`, fork PR #4
+  `feat/m5-allday-conversion` -> `main`; base `6939311` in ancestry, lock
+  digest unchanged `63261d25…533`, write wire unchanged). The same reviewed
+  head also rotates the readonly list/search schemas (single optional
+  `account` string, bounded `pageSize`/`maxResults` default 20) — the host
+  readonly pin is repinned alongside (see "read-only repin" below), so the
+  write adoption and the readonly adoption agree on one fork commit. Host write
+  pin repinned to the new source SHA/tree (branch + provenance comments
+  updated; wire hash + identity + scope constants unchanged).
+- Runtime auth (fork `src/reschedule/cli.ts`
+  `resolveWriteRuntimeCredential` + `src/reschedule/writeTokenStore.ts`
+  `loadWriteStoredGrant` / `updateWriteStoredAccessToken`): the account
+  selector is EXACT `M5_RESCHEDULE_ACCOUNT` (fork `^[a-z0-9_-]{1,64}$`
+  grammar — this codebase has no `M5_RESCHEDULE_ACCOUNT_ID`; display
+  names/emails are refused). Explicit `M5_RESCHEDULE_*` env mode wins only
+  when fully valid; ANY partial env credential refuses WITHOUT file
+  fallthrough. Otherwise the per-account persisted grant (exact
+  `https://www.googleapis.com/auth/calendar.events` scope + refresh
+  token, written by the separate `auth:write` consent CLI) combines with
+  the existing OAuth client registration (`loadCredentials`, client file
+  via `GOOGLE_OAUTH_CREDENTIALS`). Missing/ambiguous/readonly-only/broad
+  (`.../auth/calendar` anywhere)/mismatch grants refuse with NO readonly
+  fallback; refreshed access tokens persist back atomically into the SAME
+  per-account file (other accounts preserved, 0600). Production endpoint
+  immutable: the shipped CLI never reads `M5_RESCHEDULE_TEST_*`.
+- Live-wire re-probe 2026-10-16 at `cefb63c` against the REAL shipped
+  production CLI (`build/reschedule-cli.js`) over REAL stdio with a temp
+  exact-scope persisted grant + temp Desktop client file and file-only
+  child env: `reschedule-event` hash `9f59e35b…8609d7`, byte-identical,
+  pin unchanged (auth work touches credential resolution only).
+- Recommended file-only operator setup (copy-pastable from the Companion
+  checkout; secrets stay in files, never in env/DB/model messages — bind
+  these once, then reuse verbatim): `WRITE_FORK` (a NEW dedicated
+  clone/worktree path, e.g. `WRITE_FORK="$HOME/google-calendar-mcp-write"`
+  — never `git checkout` a dirty working tree to reach the pin),
+  `WRITE_ACCT` (the EXACT active Calendar selection `account`, e.g.
+  `WRITE_ACCT="ops-write"` — must match `^[a-z0-9_-]{1,64}$`),
+  `WRITE_CLIENT` (Google Cloud Desktop-app OAuth client JSON, `chmod 600`),
+  `WRITE_TOKENS` (grant file, e.g.
+  `WRITE_TOKENS="$HOME/.config/google-calendar-mcp-write/tokens.json"`,
+  override `M5_RESCHEDULE_WRITE_TOKEN_PATH`; 0600; never the readonly token
+  file — equal resolved paths refuse in the write child before any token
+  load), `READONLY_TOKENS` (the custom readonly token path, only when one
+  is configured).
+  0. Verify the fork BEFORE `npm ci`/build/consent (the runtime only
+     authenticates name/version/schema hash, so it cannot tell `cefb63c`
+     from a stale or modified checkout — an unverified build could hand
+     write-scope credentials to unreviewed code). Provision the dedicated
+     path, then detach the exact pin (no destructive checkout of any
+     existing tree, no force, no discarding user files):
+     `git clone https://github.com/suiso11/google-calendar-mcp "$WRITE_FORK"`
+     (or `git worktree add "$WRITE_FORK"` from an existing clone), then in
+     `$WRITE_FORK`: `git fetch origin`, `git checkout --detach
+     cefb63c24f062ef6a49889d7b635330dee884f63` (exact source commit),
+     `test "$(git rev-parse HEAD)" =
+     "cefb63c24f062ef6a49889d7b635330dee884f63"` (HEAD is the pin),
+     `git merge-base --is-ancestor
+     6939311fd3eae9846648e0a175e304c9500f578e HEAD` (readonly base in
+     ancestry), `test "$(git rev-parse 'HEAD^{tree}')" =
+     "624968c65f499f5d30141f4d936aca66d016b531"` (exact tree),
+     `test -z "$(git status --porcelain)"` (no modifications — a dirty
+     tree keeps the same commit id, so only a clean status proves the
+     build matches the review), `node -e
+     "const p=require('./package.json');if(p.name!=='@cocal/google-calendar-mcp'||p.version!=='3.0.0-readonly.2')process.exit(1)"`
+     (package identity) and `sha256sum package-lock.json` starting with
+     `63261d25` and ending `533` (full digest
+     `63261d25…533`, unchanged from the readonly base). Only then `npm ci`
+     (locked, reproducible — hooks run only AFTER the verification above)
+     and `npm run build` (produces `build/reschedule-cli.js` AND
+     `build/write-auth-server.js`; never reuse a stale ignored `build/` —
+     remove this checkout's OWN `build/` first or build fresh).
+  1. Prerequisites: the `$WRITE_CLIENT` file (`chmod 600`) plus the
+     verified fork built above.
+  2. Separate narrow consent (out of band, exact scope only, no
+     calendar reads/writes, no write flags enabled) FROM THE FORK CHECKOUT
+     — this repository's root `package.json` has NO `auth:write` script, so
+     a bare `npm run auth:write` here fails before creating any grant:
+     `npm --prefix "$WRITE_FORK" run auth:write -- --account "$WRITE_ACCT" --port 3500 --ttl-minutes 12 --no-browser`.
+     Output: the per-account grant merged into `$WRITE_TOKENS` (0600).
+     Routing smoke with NO OAuth server/network: `npm --prefix
+     "$WRITE_FORK" run auth:write -- --help` refuses immediately
+     (`write-auth: invalid account or arguments`, no listener, no network)
+     — proving the script resolves in the fork package, not the root.
+  3. Normal startup (defaults OFF unchanged): `COMPANION_ACTIONS_JSON`
+     `{ "optIn": true, "writeEnabled": true }` (triple gate: opt-in pair +
+     dedicated port on the ACTIVE Calendar instance) plus
+     `M5_RESCHEDULE_WRITE_PROFILE=google-reschedule` and
+     `M5_RESCHEDULE_CONNECTOR_JSON` with `{ "command": "node", "args":
+     ["$WRITE_FORK/build/reschedule-cli.js"], "envAllowlist": [<SDK
+     inherited names>, "GOOGLE_OAUTH_CREDENTIALS",
+     "M5_RESCHEDULE_WRITE_TOKEN_PATH", "M5_RESCHEDULE_ACCOUNT",
+     "GOOGLE_CALENDAR_MCP_READONLY_TOKEN_PATH"] }`, with
+     `GOOGLE_OAUTH_CREDENTIALS` (`$WRITE_CLIENT`),
+     `M5_RESCHEDULE_WRITE_TOKEN_PATH` (`$WRITE_TOKENS`), and
+     `M5_RESCHEDULE_ACCOUNT` (`$WRITE_ACCT`) in the frozen startup env.
+     `$WRITE_ACCT` MUST equal the active Calendar selection `account`
+     whenever the selection carries one (exact, case-sensitive — host
+     startup fails closed on mismatch, otherwise every approved action
+     would fail the provider precheck AFTER the grant commit). The
+     readonly-path name MUST be allowlisted whenever a custom readonly
+     path is configured (`$READONLY_TOKENS` visible to the child — host
+     startup fails closed when it is configured-but-hidden, otherwise the
+     fork compares against the wrong default and can miss the collision).
+     No `M5_RESCHEDULE_CLIENT_*` / `M5_RESCHEDULE_REFRESH_TOKEN` /
+     `M5_RESCHEDULE_GRANTED_SCOPE` / `M5_RESCHEDULE_ACCESS_TOKEN` values
+     anywhere. Explicit env credentials remain a SUPPORTED fork mode when
+     fully valid; the host simply never needs them.
+- Verification (Linux — scope labels accurate): AUTH-PARSE via the real
+  CLI (`reschedulePersistedGrant.test.ts` 7/7 under explicit
+  `M5_RESCHEDULE_FORK_CLI`: 1 file-only `tools/list` with pinned identity
+  + hash, 6 refusals — missing account, readonly-only scope, broad scope
+  alongside the exact token, foreign account, partial env WITH a valid
+  grant file, write/readonly path collision — each exit 2 `auth_refused`
+  with the grant file byte-identical; `tools/list` only, no refresh
+  network, 0 Google writes) + NORMAL-HOST PIPELINE via the tracked
+  contract-mirror fixture (`rescheduleWriteStartup.test.ts` file-only
+  8/8, NO injected transport seam — the default production frozen-env
+  factory spawns the `--file-auth` fixture child: 1 positive (zero secret
+  values in startup env, staged approve -> exactly ONE conditional PATCH
+  (`If-Match` = committed etag, start/end only) -> strategy readback ->
+  verified `succeeded` receipt, grant file byte-identical, configured
+  account == selection account), 3 omissions (account / grant path /
+  client path each refuse with 0 patches, files unchanged), 1 frozen-env
+  proof (post-start live mutation with valid alternative files cannot
+  change the child values), 1 startup mismatch refusal (configured !=
+  selection, no DB), 1 startup hidden-readonly-path refusal (no DB), 1
+  host-level write/readonly collision refusal (0 patches, file unchanged).
+  The fixture is a contract mirror, not the shipped CLI — labelled as
+  such in the test header. Refresh
+  persistence (bounded, same-file atomic merge) is covered by the fork's
+  own suite (873 passed at `cefb63c`); the shipped CLI takes no test
+  endpoint override, so no refresh/pipeline runs against production here
+  by design. Full host gates re-run after the repin (record below).
+  No user IDs/secrets in logs or tracked files; throwaway temp
+  clients/grants/DBs removed after proof (sanitized aggregate PROOF.log
+  only, ignored).
+- Read-only repin to the same reviewed head (no new surface, no write
+  from readonly): `apps/server/src/calendarReadonlyProfile.ts` now pins
+  commit `cefb63c…` / tree `624968c…` (package, lock, wire identity, and
+  scope unchanged) with live-wire hashes `01c3d647…` / `d94166b7…` /
+  `8c6736e2…` (get-event byte-identical). Re-probed 2026-10-16 over REAL
+  stdio against the real `build/index.js` with a temp readonly grant +
+  temp client file and file-only child env (`tools/list` only, 0 Google
+  writes, grant byte-identical). Permanent proof:
+  `calendarReadonlyWireProbe.test.ts` 1/1 under explicit
+  `M5_RESCHEDULE_FORK_CLI` (real entry, real `canonicalSchemaHash`,
+  superseded literals rejected, skips cleanly when unset) +
+  `calendarReadonlyProfile.test.ts` cutover boundaries (superseded
+  6939311 hashes and the old array `account` form both fail closed).

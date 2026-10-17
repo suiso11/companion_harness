@@ -200,6 +200,35 @@ describe("assertGoogleReadonlyHintCompatible", () => {
       /bindings mismatch/,
     );
   });
+
+  it("rejects the superseded 6939311 list/search hashes (clean cutover)", () => {
+    // Hardcoded superseded literals (documented in the profile provenance):
+    // the guard must no longer accept the old multi-account schemas.
+    const oldHashes: Record<string, string> = {
+      "list-events":
+        "81222b89482cba77b12a707c2097c66df383cab7929c14dca03cc303846d794c",
+      "search-events":
+        "d48ba36e7f280d92eaba9550323e90aa7a6d7c758812932ad62012f4514558b7",
+    };
+    for (const [tool, oldHash] of Object.entries(oldHashes)) {
+      expect(oldHash).not.toBe(GOOGLE_READONLY_WIRE_HASHES[tool] as string);
+      const stale = JSON.parse(profileHint()) as {
+        connector: {
+          bindings: { upstreamTool: string; canonicalSchemaHash: string }[];
+        };
+      };
+      const entry = stale.connector.bindings.find(
+        (b) => b.upstreamTool === tool,
+      );
+      expect(entry).toBeDefined();
+      if (entry !== undefined) {
+        entry.canonicalSchemaHash = oldHash;
+      }
+      expect(() => assertGoogleReadonlyHintCompatible(stale)).toThrow(
+        /bindings mismatch/,
+      );
+    }
+  });
 });
 
 describe("bootstrap normal composition with the pinned profile", () => {
@@ -436,6 +465,16 @@ describe("profile account grammar (pinned fork identity)", () => {
       "a.b",
       "",
     ]) {
+      expect(() =>
+        assertGoogleReadonlyHintCompatible(hintWithAccount(account)),
+      ).toThrow(/account mismatch/);
+    }
+  });
+
+  it("rejects the superseded multi-account array form", () => {
+    // The 6939311 wire schema accepted `account` arrays; the adopted fork
+    // takes exactly one account string, and so does the host guard.
+    for (const account of [["work"], ["a", "b"], []]) {
       expect(() =>
         assertGoogleReadonlyHintCompatible(hintWithAccount(account)),
       ).toThrow(/account mismatch/);

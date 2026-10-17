@@ -20,7 +20,9 @@ import {
   calendarEventBodyText,
   canonicalJsonString,
   closeKernelDatabase,
+  createActionExecutionService,
   createKernelRepository,
+  createReferenceManager,
   generateId,
   type KernelRepository,
   migrateKernelDatabase,
@@ -145,7 +147,7 @@ async function seedProposal(
     .run(connectorId);
   f.raw
     .prepare(
-      "INSERT INTO resources (id, connector_instance_id, canonical_key, title, next_revision, created_at) VALUES (?, ?, 'cal|cal1|evt1', 'Event', 1, 1)",
+      "INSERT INTO resources (id, connector_instance_id, canonical_key, title, next_revision, created_at) VALUES (?, ?, 'cal|cal1|evt1', 'Event', 2, 1)",
     )
     .run(resourceId, connectorId);
   f.raw
@@ -158,6 +160,9 @@ async function seedProposal(
       "INSERT INTO session_references (id, session_id, ordinal, resource_id, snapshot_id, created_at) VALUES (?, ?, 1, ?, ?, 1)",
     )
     .run(refId, sessionId, resourceId, snapshotId);
+  f.raw
+    .prepare("UPDATE sessions SET next_reference_ordinal = 2 WHERE id = ?")
+    .run(sessionId);
 
   const staged = f.repo.actionProposalsStager?.stage(posted.run.id, {
     targetRefId: refId,
@@ -280,6 +285,273 @@ describe("C18 proposal decisions", () => {
     }
   });
 
+  it("execution view carries the original BEFORE label for pending and approved proposals, never for foreign sessions", async () => {
+    const f = await makeApp();
+    try {
+      const { sessionId, proposalId, hash } = await seedProposal(f);
+      const path = `/api/sessions/${sessionId}/proposals/${proposalId}/execution`;
+
+      // Pending (never approved): proposal metadata already resolves the
+      // ORIGINAL label; no run, no receipt, no fabricated AFTER.
+      const pending = await getJson(f.app, path);
+      expect(pending.status).toBe(200);
+      const pendingBody = (await pending.json()) as {
+        runId: unknown;
+        status: unknown;
+        receipt: unknown;
+        targetCitation: unknown;
+      };
+      expect(pendingBody.runId).toBeNull();
+      expect(pendingBody.status).toBeNull();
+      expect(pendingBody.receipt).toBeNull();
+      expect(pendingBody.targetCitation).toBe("r1");
+
+      // Approved: the same owned original label, now with the queued run.
+      const approved = await postJson(
+        f.app,
+        `/api/sessions/${sessionId}/proposals/${proposalId}/approve`,
+        { proposalHash: hash },
+        { "idempotency-key": randomUUID() },
+      );
+      expect(approved.status).toBe(202);
+      const live = await getJson(f.app, path);
+      expect(live.status).toBe(200);
+      const liveBody = (await live.json()) as {
+        runId: unknown;
+        targetCitation: unknown;
+      };
+      expect(typeof liveBody.runId).toBe("string");
+      expect(liveBody.targetCitation).toBe("r1");
+
+      // Foreign session path never probes: 404 with no evidence info.
+      const otherSession = f.repo.createSession({ key: randomUUID(), now: T0 })
+        .body.sessionId;
+      const foreign = await getJson(
+        f.app,
+        `/api/sessions/${otherSession}/proposals/${proposalId}/execution`,
+      );
+      expect(foreign.status).toBe(404);
+      const foreignText = await foreign.text();
+      expect(foreignText).not.toContain("r1");
+      expect(foreignText).not.toContain("targetCitation");
+    } finally {
+      f.close();
+    }
+  });
+
+  it("history projection keeps the owned BEFORE label live, verified AFTER only for succeeded, and leaks nothing cross-session", async () => {
+    const f = await makeApp();
+    try {
+      const { sessionId, proposalId, hash } = await seedProposal(f);
+      const approved = await postJson(
+        f.app,
+        `/api/sessions/${sessionId}/proposals/${proposalId}/approve`,
+        { proposalHash: hash },
+        { "idempotency-key": randomUUID() },
+      );
+      expect(approved.status).toBe(202);
+      const approvedBody = (await approved.json()) as { runId: string };
+      const service = createActionExecutionService({
+        db: f.raw,
+        referenceManager: createReferenceManager(f.raw),
+      });
+
+      // Live (queued, no receipt): the owned BEFORE label is already present
+      // with no fabricated AFTER.
+      const liveHistory = await getJson(
+        f.app,
+        `/api/sessions/${sessionId}/history?limit=10`,
+      );
+      expect(liveHistory.status).toBe(200);
+      const liveItems = (
+        (await liveHistory.json()) as {
+          items: Array<{
+            kind: string;
+            selectedRun: {
+              runId: string;
+              receipt: unknown;
+              result: unknown;
+              targetCitation: unknown;
+            } | null;
+          }>;
+        }
+      ).items;
+      const liveApproval = liveItems.find((i) => i.kind === "action_approval");
+      expect(liveApproval?.selectedRun?.runId).toBe(approvedBody.runId);
+      expect(liveApproval?.selectedRun?.receipt).toBeNull();
+      expect(liveApproval?.selectedRun?.result).toBeNull();
+      expect(liveApproval?.selectedRun?.targetCitation).toBe("r1");
+
+      // Drive the authoritative verified success through the REAL service
+      // (same lifecycle as production: start -> grant -> verified finish
+      // with a post-write observation that materializes a fresh rN).
+      // Wall-clock times: the HTTP approval above stamps real Date.now(),
+      // so T0 offsets would violate updated_at >= created_at.
+      const wallBase = Date.now();
+      expect(
+        service.startActionRun(approvedBody.runId, { now: wallBase + 1 })
+          .applied,
+      ).toBe(true);
+      expect(
+        service.consumeActionGrant(approvedBody.runId, { now: wallBase + 2 })
+          .granted,
+      ).toBe(true);
+      const connectorId = (
+        f.raw
+          .prepare("SELECT connector_instance_id AS id FROM resources LIMIT 1")
+          .get() as { id: string }
+      ).id;
+      const preflightSnapshotId = (
+        f.raw.prepare("SELECT id FROM resource_snapshots LIMIT 1").get() as {
+          id: string;
+        }
+      ).id;
+      const finished = service.finishActionExecution(
+        approvedBody.runId,
+        {
+          outcome: "succeeded",
+          observation: {
+            connectorInstanceId: connectorId,
+            resourceCanonicalKey: "cal|cal1|evt1",
+            title: "Event",
+            text: calendarEventBodyText({
+              canonicalKey: "cal|cal1|evt1",
+              status: "confirmed",
+              title: "Event",
+              start: OPEN_RANGE.start,
+              end: OPEN_RANGE.end,
+              allDayEndExclusive: true,
+              sourceRevision: "src@2",
+              revisionBasis: "etag",
+            } as const),
+            sourceRevision: "src@2",
+            eventStatus: "confirmed",
+            observedAt: wallBase + 3,
+          },
+          preflightRevision: "src@1",
+          preflightSnapshotId,
+        },
+        { now: wallBase + 4 },
+      );
+      expect(finished.applied).toBe(true);
+
+      // Verified history: BEFORE preserved, receipt succeeded, and the
+      // authoritative result carries a physically distinct fresh AFTER rN.
+      const verifiedHistory = await getJson(
+        f.app,
+        `/api/sessions/${sessionId}/history?limit=10`,
+      );
+      expect(verifiedHistory.status).toBe(200);
+      const verifiedItems = (
+        (await verifiedHistory.json()) as {
+          items: Array<{
+            kind: string;
+            selectedRun: {
+              receipt: { outcome: string } | null;
+              result: {
+                version: number;
+                answer?: { parts: Array<{ citations: string[] }> };
+              } | null;
+              targetCitation: unknown;
+            } | null;
+          }>;
+        }
+      ).items;
+      const verified = verifiedItems.find((i) => i.kind === "action_approval");
+      expect(verified?.selectedRun?.receipt?.outcome).toBe("succeeded");
+      expect(verified?.selectedRun?.targetCitation).toBe("r1");
+      const after =
+        verified?.selectedRun?.result?.answer?.parts.flatMap(
+          (p) => p.citations,
+        ) ?? [];
+      expect(after.length).toBe(1);
+      expect(after[0]).toMatch(/^r[1-9][0-9]*$/);
+      expect(after[0]).not.toBe("r1");
+
+      // Cross-session history leaks nothing: no approval item, no rN label.
+      const otherSession = f.repo.createSession({ key: randomUUID(), now: T0 })
+        .body.sessionId;
+      const foreignHistory = await getJson(
+        f.app,
+        `/api/sessions/${otherSession}/history?limit=10`,
+      );
+      expect(foreignHistory.status).toBe(200);
+      const foreignText = await foreignHistory.text();
+      expect(foreignText).not.toContain("action_approval");
+      expect(foreignText).not.toContain("targetCitation");
+    } finally {
+      f.close();
+    }
+  });
+
+  it("history projection for an unverified terminal keeps BEFORE alone with a citation-less result", async () => {
+    const f = await makeApp();
+    try {
+      const { sessionId, proposalId, hash } = await seedProposal(f);
+      const approved = await postJson(
+        f.app,
+        `/api/sessions/${sessionId}/proposals/${proposalId}/approve`,
+        { proposalHash: hash },
+        { "idempotency-key": randomUUID() },
+      );
+      expect(approved.status).toBe(202);
+      const approvedBody = (await approved.json()) as { runId: string };
+      const service = createActionExecutionService({
+        db: f.raw,
+        referenceManager: createReferenceManager(f.raw),
+      });
+      // Wall-clock times (see above): the HTTP approval stamps Date.now().
+      // succeeded_unverified through the REAL service: run completes with a
+      // V1 text result that carries no verifiable AFTER citation.
+      const unverifiedBase = Date.now();
+      expect(
+        service.startActionRun(approvedBody.runId, { now: unverifiedBase + 1 })
+          .applied,
+      ).toBe(true);
+      expect(
+        service.consumeActionGrant(approvedBody.runId, {
+          now: unverifiedBase + 2,
+        }).granted,
+      ).toBe(true);
+      // succeeded_unverified through the REAL service: run completes with a
+      // V1 text result that carries no verifiable AFTER citation.
+      expect(
+        service.finishActionExecution(
+          approvedBody.runId,
+          { outcome: "succeeded_unverified" },
+          { now: unverifiedBase + 3 },
+        ).applied,
+      ).toBe(true);
+      const history = await getJson(
+        f.app,
+        `/api/sessions/${sessionId}/history?limit=10`,
+      );
+      expect(history.status).toBe(200);
+      const items = (
+        (await history.json()) as {
+          items: Array<{
+            kind: string;
+            selectedRun: {
+              receipt: { outcome: string } | null;
+              result: { version?: number; answer?: unknown } | null;
+              targetCitation: unknown;
+            } | null;
+          }>;
+        }
+      ).items;
+      const approval = items.find((i) => i.kind === "action_approval");
+      expect(approval?.selectedRun?.receipt?.outcome).toBe(
+        "succeeded_unverified",
+      );
+      expect(approval?.selectedRun?.targetCitation).toBe("r1");
+      // V1 result by construction: no structured answer, hence no AFTER to
+      // present as verified evidence.
+      expect(approval?.selectedRun?.result?.version).toBe(1);
+      expect(approval?.selectedRun?.result?.answer).toBeUndefined();
+    } finally {
+      f.close();
+    }
+  });
   it("hash mismatch, terminal replay conflicts and foreign-session ownership are fixed 409/404", async () => {
     const f = await makeApp();
     try {

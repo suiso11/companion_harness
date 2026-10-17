@@ -18,6 +18,7 @@ import {
   actionCardModel,
   actionDecisionIntentText,
   actionErrorCodeText,
+  actionEvidenceButtons,
   applyRunEvent,
   claimTerminalHydration,
   type ExecutionStatus,
@@ -82,6 +83,11 @@ interface HistoryItemView {
       readonly summary?: { readonly summary?: string };
     } | null;
     readonly executionStatus?: string | null;
+    /**
+     * ORIGINAL-only session `rN` label (BEFORE evidence) from the owning
+     * proposal's immutable target. Server-owned; validated before render.
+     */
+    readonly targetCitation?: unknown;
   } | null;
 }
 
@@ -117,6 +123,11 @@ interface ProposalExecutionView {
     readonly summary: { readonly summary: string };
     readonly createdAt: number;
   } | null;
+  /**
+   * ORIGINAL-only session `rN` label (BEFORE evidence) from the proposal's
+   * immutable target. Server-owned; validated before render.
+   */
+  readonly targetCitation?: unknown;
 }
 
 /**
@@ -133,6 +144,12 @@ interface ActionCard {
   readonly approve: HTMLButtonElement;
   readonly reject: HTMLButtonElement;
   readonly stop: HTMLButtonElement;
+  /**
+   * Stored-only evidence container: the ORIGINAL BEFORE button from the
+   * server-owned execution view. Rebuilt on every card render (never
+   * appended twice); the verified AFTER lives in the history projection.
+   */
+  readonly evidence: HTMLElement;
   runId: string | null;
   /** Terminal execution observed: the card is final and stops polling. */
   terminal: boolean;
@@ -1398,6 +1415,9 @@ class ConversationApp {
     const outcome = el("p");
     outcome.setAttribute("data-action-outcome", "true");
     node.appendChild(outcome);
+    const evidence = el("p");
+    evidence.setAttribute("data-action-evidence", "card");
+    node.appendChild(evidence);
     const approve = document.createElement("button");
     approve.textContent = "承認";
     approve.type = "button";
@@ -1425,6 +1445,7 @@ class ConversationApp {
       approve,
       reject,
       stop,
+      evidence,
       runId: null,
       terminal: false,
       deadline: summary.expiresAt,
@@ -1575,6 +1596,30 @@ class ConversationApp {
       "data-action-marker",
       view?.markerCommitted === true ? "committed" : "uncommitted",
     );
+    // Stored-only BEFORE evidence on execution-owned cards (no per-card
+    // fetch, no upstream I/O): the ORIGINAL snapshot button from the
+    // server-owned view. Rebuilt every render so a stale label can never
+    // linger and a button is never appended twice. The verified AFTER lives
+    // in the history projection, which owns the authoritative run result.
+    card.evidence.replaceChildren();
+    if (view !== null && view !== undefined) {
+      const cardEvidence = actionEvidenceButtons({
+        targetCitation:
+          typeof view.targetCitation === "string" ? view.targetCitation : null,
+        outcome: null,
+        result: null,
+      });
+      if (cardEvidence.before !== null) {
+        const beforeCitation = cardEvidence.before;
+        const before = el("button", `変更前 ${beforeCitation}`);
+        before.setAttribute("data-action-evidence", "before");
+        const runId = typeof view.runId === "string" ? view.runId : undefined;
+        before.addEventListener("click", () => {
+          void this.openCitation(beforeCitation, runId);
+        });
+        card.evidence.appendChild(before);
+      }
+    }
   }
 
   private removeActionCard(proposalId: string): void {
@@ -2094,20 +2139,46 @@ class ConversationApp {
             wrap.appendChild(line);
           }
         }
-        // Citations only (no duplicated outcome/summary text): the verified
-        // fresh rN survives reloads with no extra external call.
-        if (run.result !== null && run.result !== undefined) {
-          for (const part of runResultToAnswerParts(run.result)) {
-            for (const citation of part.citations) {
-              const button = el("button", citation);
-              button.setAttribute("data-action-citation", "true");
-              const citationRunId =
-                typeof run.runId === "string" ? run.runId : undefined;
-              button.addEventListener("click", () => {
-                void this.openCitation(citation, citationRunId);
-              });
-              wrap.appendChild(button);
-            }
+        // Evidence navigation (stored-only, no upstream I/O): the ORIGINAL
+        // BEFORE snapshot button whenever the server-owned projection
+        // carries the proposal's immutable target label, plus the VERIFIED
+        // AFTER button(s) ONLY for a succeeded receipt with actual
+        // authoritative result citations. Unknown / unverified / failed /
+        // blocked outcomes render the BEFORE button alone with their
+        // accurate existing outcome text above — never a fabricated AFTER.
+        const evidence = actionEvidenceButtons({
+          targetCitation:
+            typeof run.targetCitation === "string" ? run.targetCitation : null,
+          outcome,
+          result: run.result,
+        });
+        if (evidence.before !== null) {
+          const beforeCitation = evidence.before;
+          const before = el("button", `変更前 ${beforeCitation}`);
+          before.setAttribute("data-action-evidence", "before");
+          const beforeRunId =
+            typeof run.runId === "string" ? run.runId : undefined;
+          before.addEventListener("click", () => {
+            void this.openCitation(beforeCitation, beforeRunId);
+          });
+          wrap.appendChild(before);
+        }
+        if (evidence.after.length > 0) {
+          for (const citation of evidence.after) {
+            // Verified AFTER keeps the bare `rN` button text: the
+            // [data-action-citation] receipt contract (existing calendar
+            // action E2E expects /^r\d+$/) stays intact. The BEFORE/AFTER
+            // distinction rides data-action-evidence="after" + aria-label.
+            const button = el("button", citation);
+            button.setAttribute("data-action-citation", "true");
+            button.setAttribute("data-action-evidence", "after");
+            button.setAttribute("aria-label", `確認済みの変更後 ${citation}`);
+            const citationRunId =
+              typeof run.runId === "string" ? run.runId : undefined;
+            button.addEventListener("click", () => {
+              void this.openCitation(citation, citationRunId);
+            });
+            wrap.appendChild(button);
           }
         }
       }

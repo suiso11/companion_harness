@@ -12,9 +12,12 @@
 // Candidate provenance (verified by exact fork checkout in owned scratch,
 // never guessed; commit/tree/package-lock digest re-verified at inspection):
 // - repo: https://github.com/suiso11/google-calendar-mcp
-// - commit: 6939311fd3eae9846648e0a175e304c9500f578e
-// - tree: f01b5a7b608c4091906a52c0784b828c35963de9
+// - commit: cefb63c24f062ef6a49889d7b635330dee884f63
+//   (reviewed fork PR4 head: persisted-grant runtime + bounded pageSize +
+//   single-account string; base 6939311 in ancestry)
+// - tree: 624968c65f499f5d30141f4d936aca66d016b531
 // - package: @cocal/google-calendar-mcp, private version 3.0.0-readonly.2
+//   (unchanged from the 6939311 base: dependency tree identical)
 // - package-lock.json SHA-256:
 //   63261d25992ee9c97136a60bbf4fe52a5485cadea28b34d6b8b6c685f38bd533
 // - wire identity: serverInfo { name: "google-calendar",
@@ -45,6 +48,13 @@
 // SHA-256 values (what the connector verifies over the real SDK wire via
 // tools/list), NOT the registry-direct diagnostic bytes (a065/012e/913…,
 // different serializer, recorded in PR22 evidence as diagnostic only).
+// Re-probed 2026-10-16 over REAL stdio against the exact `cefb63c` build
+// (`build/index.js`) with a temp exact-scope readonly grant + temp client
+// file (tools/list only, 0 Google writes): list-events/search-events hashes
+// rotate (single optional `account` string, `pageSize` 1..20 honored with
+// `maxResults` default 20) while get-event is byte-identical (unchanged).
+// The superseded 6939311 hashes (`81222b89…`, `d48ba36e…`) are rejected by
+// the guard below (covered by `calendarReadonlyProfile.test.ts`).
 // Source: PR22 docs/evidence/calendar-readonly-candidate-pin.json
 // (provenance read via `git show`, never copied as code).
 
@@ -82,8 +92,8 @@ export const GOOGLE_READONLY_ACCOUNT_PATTERN = /^[a-z0-9_-]{1,64}$/;
 /** Pinned fork identity (exact pin form: full SHA + lock digest). */
 export const GOOGLE_READONLY_FORK = Object.freeze({
   repo: "https://github.com/suiso11/google-calendar-mcp",
-  commit: "6939311fd3eae9846648e0a175e304c9500f578e",
-  tree: "f01b5a7b608c4091906a52c0784b828c35963de9",
+  commit: "cefb63c24f062ef6a49889d7b635330dee884f63",
+  tree: "624968c65f499f5d30141f4d936aca66d016b531",
   package: "@cocal/google-calendar-mcp",
   version: "3.0.0-readonly.2",
   lockDigestSha256:
@@ -100,16 +110,18 @@ export const GOOGLE_READONLY_TOOLS: readonly string[] = Object.freeze([
 ]);
 
 /**
- * Pinned LIVE-WIRE canonical input-schema hashes (SDK wire bytes).
+ * Pinned LIVE-WIRE canonical input-schema hashes (SDK wire bytes, fork
+ * `cefb63c`: single optional `account` string on all three tools).
  * Registry-direct bytes (a065…/012e…/913e…) are a different serializer
- * and MUST NOT be used here.
+ * and MUST NOT be used here, nor the superseded 6939311 list/search
+ * hashes (`81222b89…`/`d48ba36e…`).
  */
 export const GOOGLE_READONLY_WIRE_HASHES: Readonly<Record<string, string>> =
   Object.freeze({
     "list-events":
-      "81222b89482cba77b12a707c2097c66df383cab7929c14dca03cc303846d794c",
+      "01c3d647c272fdbd0de1028f73c76cd8baab931f177733146cd6287b9683d1fe",
     "search-events":
-      "d48ba36e7f280d92eaba9550323e90aa7a6d7c758812932ad62012f4514558b7",
+      "d94166b755b694710c925fcc96e6ecff1016ea53f470264428494656791be7f6",
     "get-event":
       "8c6736e2a1f397d0735efa5c0881f5c350c300b21a0b026e80c112258b596bda",
   });

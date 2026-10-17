@@ -47,7 +47,12 @@ export const RESCHEDULE_WRITE_TOOL = "reschedule-event" as const;
  * (SDK wire bytes: strict `additionalProperties: false` + the `$schema`
  * annotation key). Probed 2026-10-15 over REAL stdio against BOTH the
  * freshly built fork bundle and the tracked contract-mirror fixture
- * (identical bytes).
+ * (identical bytes); re-probed 2026-10-16 against the REAL shipped
+ * persisted-grant CLI (`build/reschedule-cli.js` at fork `cefb63c`) with a
+ * temp exact-scope persisted grant + temp Desktop client file and
+ * file-only child env — identical bytes, wire unchanged by the auth work.
+ * Proof: `test/reschedulePersistedGrant.test.ts` (auth-parse level,
+ * `tools/list` only, 0 Google writes).
  */
 export const RESCHEDULE_WRITE_WIRE_HASH =
   "9f59e35bf76bfec75a99546fc3c22348cd20e33e9414154ea321d414186d09b7" as const;
