@@ -25,24 +25,27 @@ import { SHUTDOWN_DRAIN_MS } from "./bootstrap.js";
 import { loadServerConfig } from "./config.js";
 import {
   acquireSupervisorLock,
-  applyCrash,
   applyOperatorResume,
   applyOperatorStop,
   applyPlannedRestartRequest,
-  applyReady,
   type ChildToSupervisor,
   childFailedStatusForError,
   crashBackoffMs,
   crashReasonForChildStatus,
+  describePlannedRestartOutcome,
   describeSpawnDecision,
   MAX_CRASH_RESTARTS,
+  markSupervisorReadyAtomically,
+  persistSupervisorCrashAtomically,
+  persistSupervisorDrainHoldAtomically,
+  persistSupervisorStopAtomically,
   readSupervisorState,
   releaseSupervisorLock,
   type SupervisorLock,
   type SupervisorState,
   type SupervisorToChild,
   supervisorPathsForDb,
-  writeSupervisorState,
+  updateSupervisorStateAtomically,
 } from "./supervisor.js";
 
 const STARTUP_READY_TIMEOUT_MS = 30_000;
@@ -240,21 +243,38 @@ async function runSupervisor(): Promise<void> {
   let stopping = false;
   let child: ChildProcess | null = null;
 
-  const persistStopFirst = (reason: string): void => {
-    // Operator stop MUST persist BEFORE child termination.
+  /**
+   * Operator stop MUST durably persist BEFORE any shutdown, termination, or
+   * ownership release. Returns true only after commit; on failure the RAM
+   * state is left untouched, the existing child is HELD alive, the lock is
+   * kept, and a fixed diagnostic is reported. The caller must NOT proceed
+   * to terminate/release when this returns false.
+   */
+  const persistStopFirst = (reason: string): boolean => {
     try {
-      state = applyOperatorStop(state, Date.now());
-      writeSupervisorState(paths, state);
+      state = persistSupervisorStopAtomically(paths, Date.now(), nonce);
       process.stderr.write(`${reason}\n`);
+      return true;
     } catch {
-      process.stderr.write("supervisor failed: state unreadable\n");
+      process.stderr.write(
+        "supervisor failed: state unreadable (stop not persisted, child held)\n",
+      );
+      return false;
     }
   };
 
   const onSignal = (signal: string): void => {
     if (stopping) return;
+    // Durable STOP first: a disk-full (or otherwise failed) write means the
+    // runnable state on disk still allows starts, so terminating the child
+    // now would let it auto-start later with no resume. Hold instead.
+    // This handler never silently exits without a committed stop; an
+    // operator-forced SIGKILL is external and unavoidable (honest).
+    if (!persistStopFirst("supervisor stopped by operator")) {
+      void signal;
+      return;
+    }
     stopping = true;
-    persistStopFirst("supervisor stopped by operator");
     void (async (): Promise<void> => {
       if (child !== null) {
         sendShutdown(child, "stop");
@@ -282,25 +302,46 @@ async function runSupervisor(): Promise<void> {
       stdinBuffer = stdinBuffer.slice(index + 1);
       index = stdinBuffer.indexOf("\n");
       if (line === "stop") {
-        persistStopFirst("supervisor stopped by operator");
-        if (child !== null) {
-          sendShutdown(child, "stop");
+        // Durable STOP first: only message the child after commit, so a
+        // failed write keeps the existing child alive instead of stopping
+        // it while the on-disk state still permits auto-start.
+        if (persistStopFirst("supervisor stopped by operator")) {
+          if (child !== null) {
+            sendShutdown(child, "stop");
+          }
         }
       } else if (line === "resume") {
         try {
-          state = applyOperatorResume(state, Date.now());
-          writeSupervisorState(paths, state);
+          state = updateSupervisorStateAtomically(
+            paths,
+            Date.now(),
+            nonce,
+            (latest) => applyOperatorResume(latest, Date.now()),
+          );
           process.stderr.write("supervisor resumed by operator\n");
         } catch {
           process.stderr.write("supervisor failed: state unreadable\n");
         }
       } else if (line === "restart") {
         try {
-          state = applyPlannedRestartRequest(state, Date.now());
-          writeSupervisorState(paths, state);
+          state = updateSupervisorStateAtomically(
+            paths,
+            Date.now(),
+            nonce,
+            (latest) => {
+              if (latest.operatorStop) {
+                throw new Error("stopped");
+              }
+              return applyPlannedRestartRequest(latest, Date.now());
+            },
+          );
           process.stderr.write("supervisor planned restart requested\n");
-        } catch {
-          process.stderr.write("supervisor failed: state unreadable\n");
+        } catch (error) {
+          process.stderr.write(
+            error instanceof Error && error.message === "stopped"
+              ? "supervisor failed: stopped (resume required)\n"
+              : "supervisor failed: state unreadable\n",
+          );
         }
       } else if (line === "status") {
         printStatus(state);
@@ -333,6 +374,19 @@ async function runSupervisor(): Promise<void> {
     }
     const decision = describeSpawnDecision(state);
     if (decision !== "spawn") {
+      if (decision === "held_drain_failed") {
+        // Drain-failure hold: the failed child stays ALIVE and held in
+        // DRAINING (never force-killed, never auto-retried). Only an
+        // explicit operator resume/reset clears this hold.
+        const held =
+          "supervisor held: planned restart cannot drain safely (resume required)";
+        if (held !== lastHeld) {
+          process.stderr.write(`${held}\n`);
+          lastHeld = held;
+        }
+        await new Promise((resolve) => setTimeout(resolve, EXTERNAL_POLL_MS));
+        continue;
+      }
       if (child !== null) {
         sendShutdown(child, "stop");
         await terminateOwnChild(child, PLANNED_DRAIN_WAIT_MS);
@@ -353,6 +407,15 @@ async function runSupervisor(): Promise<void> {
       continue;
     }
     lastHeld = null;
+    // A leftover held drain-failed child is ours: after an explicit resume
+    // cleared the hold, shut it down (bounded, own child only) BEFORE any
+    // new spawn so the next child can bind the same port/DB.
+    if (child !== null) {
+      sendShutdown(child, "stop");
+      await terminateOwnChild(child, PLANNED_DRAIN_WAIT_MS);
+      child = null;
+      if (stopping) return;
+    }
     // Spawn ONLY the fixed own entry.
     child = spawnServerChild(process.env);
     const current = child;
@@ -379,6 +442,10 @@ async function runSupervisor(): Promise<void> {
       failedStatus = childFailedStatusForError(error);
     });
     // Wait for genuine ready (never assume any existing port is ours).
+    // An external operator STOP (or hold) written during this startup wait
+    // is observed PROMPTLY instead of waiting out the full ready timeout:
+    // the stale pre-spawn snapshot is never used for bookkeeping again.
+    let startupHeld: SupervisorState | null = null;
     const readyDeadline = Date.now() + STARTUP_READY_TIMEOUT_MS;
     while (
       readyPort === null &&
@@ -389,6 +456,26 @@ async function runSupervisor(): Promise<void> {
       !stopping
     ) {
       await new Promise((resolve) => setTimeout(resolve, 50));
+      try {
+        const latest = readSupervisorState(paths, Date.now(), nonce);
+        if (latest.operatorStop || describeSpawnDecision(latest) !== "spawn") {
+          startupHeld = latest;
+          break;
+        }
+      } catch {
+        // Transient read failure: keep waiting for ready.
+      }
+    }
+    if (startupHeld !== null) {
+      // External stop/hold landed mid-startup: it is already durable (the
+      // CLI committed it inside the mutex), so terminate ONLY our starting
+      // child and hold. The stale pre-spawn state is discarded, never
+      // written back over the operator's command.
+      state = startupHeld;
+      sendShutdown(current, "stop");
+      await terminateOwnChild(current, 5_000);
+      child = null;
+      continue;
     }
     if (stopping) {
       await terminateOwnChild(current, PLANNED_DRAIN_WAIT_MS);
@@ -396,11 +483,45 @@ async function runSupervisor(): Promise<void> {
       return;
     }
     if (readyPort !== null) {
-      state = applyReady(state, Date.now());
+      // Commit ready against the LATEST state inside the mutex: a
+      // concurrent CLI stop that landed during startup is preserved (ready
+      // never clears STOP) instead of being overwritten by applyReady on
+      // the stale pre-spawn snapshot.
       try {
-        writeSupervisorState(paths, state);
+        state = markSupervisorReadyAtomically(paths, Date.now(), nonce);
       } catch {
-        process.stderr.write("supervisor failed: state unreadable\n");
+        // Ready observed but the commit failed: HOLD with the live child
+        // kept (never silently continue unaccounted, never respawn).
+        process.stderr.write(
+          "supervisor failed: state unreadable (ready not committed, child held)\n",
+        );
+        for (;;) {
+          if (stopping) break;
+          try {
+            const live = readSupervisorState(paths, Date.now(), nonce);
+            state = live;
+            state = markSupervisorReadyAtomically(paths, Date.now(), nonce);
+            break;
+          } catch {
+            await new Promise((resolve) =>
+              setTimeout(resolve, EXTERNAL_POLL_MS),
+            );
+          }
+        }
+        if (stopping) {
+          sendShutdown(current, "stop");
+          await terminateOwnChild(current, PLANNED_DRAIN_WAIT_MS);
+          child = null;
+          return;
+        }
+      }
+      if (state.operatorStop) {
+        // An external stop won the race with readiness: shut down the
+        // just-ready child and hold (no supervise, no restart request).
+        sendShutdown(current, "stop");
+        await terminateOwnChild(current, PLANNED_DRAIN_WAIT_MS);
+        child = null;
+        continue;
       }
       process.stderr.write(`supervisor: server ready on ${readyPort}\n`);
       // Supervise until exit or operator request.
@@ -430,6 +551,14 @@ async function runSupervisor(): Promise<void> {
       }
       if (restartRequested) {
         // Planned restart: graceful shutdown ONLY at a safe boundary.
+        // Respawn REQUIRES affirmative `companion-drained`: an exit (even
+        // code 0), a timeout, a lost child, or a disconnect without the ack
+        // all mean durable HOLD, never terminate+respawn past the boundary.
+        let disconnected = false;
+        current.once("disconnect", () => {
+          disconnected = true;
+        });
+        if (current.connected === false) disconnected = true;
         sendShutdown(current, "planned-restart");
         const drainDeadline = Date.now() + PLANNED_DRAIN_WAIT_MS;
         while (
@@ -441,23 +570,40 @@ async function runSupervisor(): Promise<void> {
         ) {
           await new Promise((resolve) => setTimeout(resolve, 50));
         }
-        if (drainFailed) {
-          // Cannot drain safely: HOLD, never force an unsafe restart.
+        const childGone =
+          current.exitCode !== null || current.signalCode !== null;
+        const timedOut =
+          !drained && !drainFailed && !childGone && Date.now() >= drainDeadline;
+        if (current.connected === false) disconnected = true;
+        const outcome = describePlannedRestartOutcome({
+          drained,
+          drainFailed,
+          childGone,
+          timedOut,
+          disconnected,
+        });
+        if (outcome !== "respawn") {
+          // Cannot confirm the safe boundary: enter the persistent
+          // drain-failure hold (cleared ONLY by explicit operator
+          // resume/reset) and KEEP the live child held in DRAINING when it
+          // is still alive — never force-kill, never auto-retry into the
+          // unknown. The failed handoff keeps DB/listener open by design.
           try {
-            state = {
-              ...state,
-              lastReason: "drain_failed",
-              updatedAt: Date.now(),
-            };
-            writeSupervisorState(paths, state);
+            state = persistSupervisorDrainHoldAtomically(
+              paths,
+              Date.now(),
+              nonce,
+            );
           } catch {
-            // Best effort.
+            process.stderr.write(
+              "supervisor failed: state unreadable (drain hold not committed, child held)\n",
+            );
           }
           process.stderr.write(
-            "supervisor held: planned restart cannot drain safely\n",
+            "supervisor held: planned restart cannot drain safely (resume required)\n",
           );
-          await terminateOwnChild(current, 0);
-          child = null;
+          // child deliberately kept (no terminateOwnChild): the hold branch
+          // supervises it without respawning until the operator decides.
           await new Promise((resolve) => setTimeout(resolve, EXTERNAL_POLL_MS));
           continue;
         }
@@ -467,16 +613,41 @@ async function runSupervisor(): Promise<void> {
         // paused by the server restart fence; unknown commits never retried).
         continue;
       }
-      // Unexpected exit or late failure: bounded crash restart.
+      // Unexpected exit or late failure: commit the crash budget BEFORE any
+      // retry spawn. On commit failure HOLD (never loop with a stale
+      // in-memory count that reloads 0 and retries every second).
       const exit = await waitForExit(current);
       child = null;
       void exit;
       const reason = crashReasonForChildStatus(failedStatus ?? "crash");
-      state = applyCrash(state, Date.now(), reason);
       try {
-        writeSupervisorState(paths, state);
+        state = persistSupervisorCrashAtomically(
+          paths,
+          Date.now(),
+          nonce,
+          reason,
+        );
       } catch {
-        process.stderr.write("supervisor failed: state unreadable\n");
+        process.stderr.write(
+          "supervisor failed: state unreadable (crash budget not committed, held)\n",
+        );
+        for (;;) {
+          if (stopping) return;
+          try {
+            state = persistSupervisorCrashAtomically(
+              paths,
+              Date.now(),
+              nonce,
+              reason,
+            );
+            break;
+          } catch {
+            await new Promise((resolve) =>
+              setTimeout(resolve, EXTERNAL_POLL_MS),
+            );
+          }
+        }
+        if (stopping) return;
       }
       if (state.lastReason === "exhausted") {
         process.stderr.write(
@@ -487,6 +658,12 @@ async function runSupervisor(): Promise<void> {
       if (state.lastReason === "newer_database") {
         process.stderr.write(
           "supervisor held: newer database (db preserved, no restore)\n",
+        );
+        continue;
+      }
+      if (state.lastReason === "drain_failed") {
+        process.stderr.write(
+          "supervisor held: planned restart cannot drain safely (resume required)\n",
         );
         continue;
       }
@@ -508,11 +685,34 @@ async function runSupervisor(): Promise<void> {
     child = null;
     if (stopping) return;
     const reason = crashReasonForChildStatus(status);
-    state = applyCrash(state, Date.now(), reason);
     try {
-      writeSupervisorState(paths, state);
+      state = persistSupervisorCrashAtomically(
+        paths,
+        Date.now(),
+        nonce,
+        reason,
+      );
     } catch {
-      process.stderr.write("supervisor failed: state unreadable\n");
+      // Budget commit failed: HOLD and retry the COMMIT (not the child)
+      // until it lands, instead of looping spawns on a stale count.
+      process.stderr.write(
+        "supervisor failed: state unreadable (crash budget not committed, held)\n",
+      );
+      for (;;) {
+        if (stopping) return;
+        try {
+          state = persistSupervisorCrashAtomically(
+            paths,
+            Date.now(),
+            nonce,
+            reason,
+          );
+          break;
+        } catch {
+          await new Promise((resolve) => setTimeout(resolve, EXTERNAL_POLL_MS));
+        }
+      }
+      if (stopping) return;
     }
     if (state.lastReason === "exhausted") {
       process.stderr.write(
@@ -523,6 +723,12 @@ async function runSupervisor(): Promise<void> {
     if (state.lastReason === "newer_database") {
       process.stderr.write(
         "supervisor held: newer database (db preserved, no restore)\n",
+      );
+      continue;
+    }
+    if (state.lastReason === "drain_failed") {
+      process.stderr.write(
+        "supervisor held: planned restart cannot drain safely (resume required)\n",
       );
       continue;
     }
@@ -592,27 +798,29 @@ export async function runSupervisorCli(
     return;
   }
   if (command === "stop" || command === "resume" || command === "restart") {
+    // Every operator command commits INSIDE the OS-backed mutex on the
+    // LATEST state: a CLI stop racing loop bookkeeping (ready/crash/drain)
+    // can never be lost to a concurrent read-modify-write.
     const paths = dbPaths();
-    let state: SupervisorState;
+    const nonce = randomUUID();
     try {
-      state = readSupervisorState(paths, Date.now(), randomUUID());
-    } catch {
-      fail("supervisor failed: state unreadable");
-    }
-    const now = Date.now();
-    if (command === "stop") {
-      state = applyOperatorStop(state, now);
-    } else if (command === "resume") {
-      state = applyOperatorResume(state, now);
-    } else {
-      if (state.operatorStop) {
+      updateSupervisorStateAtomically(paths, Date.now(), nonce, (latest) => {
+        const now = Date.now();
+        if (command === "stop") {
+          return applyOperatorStop(latest, now);
+        }
+        if (command === "resume") {
+          return applyOperatorResume(latest, now);
+        }
+        if (latest.operatorStop) {
+          throw new Error("stopped");
+        }
+        return applyPlannedRestartRequest(latest, now);
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message === "stopped") {
         fail("supervisor failed: stopped (resume required)");
       }
-      state = applyPlannedRestartRequest(state, now);
-    }
-    try {
-      writeSupervisorState(paths, state);
-    } catch {
       fail("supervisor failed: state unreadable");
     }
     process.stderr.write(
