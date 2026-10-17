@@ -1799,3 +1799,22 @@ Verified: permanent real-browser `autonomy.spec.ts` **4/4 passed**
 learning, AV05 notification, AV06 priority, AV07 supervisor/reconcile,
 AV08 maintenance/handoff. Full contract: `docs/operations.md`
 ("AV autonomy foundation").
+
+AV02 shadow-deliberation full vertical (2026-10-17): durable shadow
+queue (persistent requests, input-complete fences, foreground/STOP/
+restart preservation with no catchup/replay) + model-gated deliberation
+(one bounded `autonomy_deliberation.submit` call over FROZEN context;
+memory is untrusted evidence; CODE `missing_grant` never executes,
+claim != grant) + read-only HTTP (purpose/task list/open without
+Markdown/memory connectors) + `ShadowPanel` UI (latest-intent list/
+detail, stable retry, inert `textContent`, composer preserved).
+Verified: full unit **136 files / 1557 passed** (8 skipped, real remind
+CLI, LLM/vectors disabled), full default browser **32 passed** (28 +
+new shadow 4), prior production smoke 17/17 real HTTP loopback with a
+configured synthetic provider (NOT a real model), root + e2e `tsc`
+exit 0, root Biome exit 0. Remaining NOT claimed: AV05 notifications,
+AV06 shared resources, AV07 external supervisor/recovery, AV04 methods
+learning, AV03 conversation task-proposals + actual pi-orch handoff,
+AV08 maintenance, unresolved device/standing/external rollout. No real
+model, GPU performance, Google writes, OAuth, user DB, or grants
+claimed. Full contract: `docs/operations.md` ("AV02 FULL VERTICAL").

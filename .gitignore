@@ -40,3 +40,6 @@ Thumbs.db
 # local stdio/browser smoke logs only, never credentials/fixtures/real
 # grants/events).
 .m6-calendar-create-proof/
+# Standard Playwright generated output (local runs only, never committed).
+test-results/
+playwright-report/

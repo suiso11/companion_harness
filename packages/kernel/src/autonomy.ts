@@ -80,6 +80,12 @@ import {
   RepositoryNotFoundError,
   RepositoryValidationError,
 } from "./errors.js";
+import {
+  enqueueShadowSourceInTx,
+  holdPendingShadowJobsInTx,
+  reconcileShadowRestartInTx,
+  skipRecordedInboxInTx,
+} from "./shadow.js";
 
 /** CAS version mismatch on a purpose / task / control mutation (409). */
 export class AutonomyVersionConflictError extends KernelStorageError {
@@ -212,6 +218,52 @@ function requireSession(db: Database.Database, sessionId: string): void {
   if (row === undefined) {
     throw new RepositoryNotFoundError(`session ${id} not found`);
   }
+}
+
+/**
+ * Shadow-durability bridge (AV02): run a shadow-table write inside the
+ * caller's autonomy transaction, best-effort on pre-0012 databases (missing
+ * tables): the conversation / autonomy path must never break because the
+ * shadow slice is absent. On migrated databases the write is atomic with
+ * the state change (no enqueue-after-commit crash window). Shadow's OWN
+ * writes never route here (no jobs from own job/log writes), and ordinary
+ * user chat never routes here (no every-chat taskization).
+ */
+function shadowBestEffort(fn: () => void): void {
+  try {
+    fn();
+  } catch (error) {
+    if (error instanceof Error && /no such table/i.test(error.message)) {
+      return;
+    }
+    throw error;
+  }
+}
+
+/** Queue one durable shadow source in-TX (paused controls record, not queue). */
+function enqueueShadowPolicyChangeInTx(
+  db: Database.Database,
+  sessionId: string,
+  scope: string,
+  source: "purpose" | "task" | "conflict",
+  sourceId: string,
+  triggerEvent: string,
+  now: number,
+): void {
+  shadowBestEffort(() => {
+    enqueueShadowSourceInTx(
+      db,
+      {
+        sessionId,
+        scope,
+        source,
+        sourceId,
+        triggerEvent,
+        kind: "policy_change",
+      },
+      now,
+    );
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -722,6 +774,16 @@ export function createPurpose(
       input.statement,
       now,
     );
+    // Same-TX durable shadow source (paused controls record, not queue).
+    enqueueShadowPolicyChangeInTx(
+      db,
+      session,
+      input.scope,
+      "purpose",
+      id,
+      "purpose.created",
+      now,
+    );
     const row = readPurpose(db, id);
     if (row === null) {
       throw new RepositoryNotFoundError(`purpose ${id} not found`);
@@ -754,6 +816,35 @@ export function getPurpose(
   purposeId: string,
 ): ReturnType<typeof toPurposeView> {
   return toPurposeView(assertOwnedPurpose(db, sessionId, purposeId));
+}
+
+/**
+ * Scope-filtered internal reader for the shadow port (NOT a public list
+ * DTO): SQL filters `(session, scope)` BEFORE the limit and reads up to
+ * `limit` rows (callers pass 101) so the builder detects REAL overflow
+ * instead of silently dropping in-scope constraints / permission claims
+ * hidden behind newest-first truncation of other-scope records. Reuses the
+ * exact `toPurposeView` mapper + session/scope validation (no second
+ * projection, no unbounded reads).
+ */
+export function listPurposesInScope(
+  db: Database.Database,
+  sessionId: string,
+  scope: string,
+  limit = 101,
+): { items: ReturnType<typeof toPurposeView>[] } {
+  const session = requireId(sessionId, "sessionId");
+  if (scope.length === 0 || scope.length > 128) {
+    throw new RepositoryValidationError("scope must be 1..128 chars");
+  }
+  requireSession(db, session);
+  const capped = Math.min(Math.max(limit, 1), 101);
+  const rows = db
+    .prepare(
+      "SELECT * FROM autonomy_purposes WHERE session_id = ? AND scope = ? ORDER BY created_at DESC, id ASC LIMIT ?",
+    )
+    .all(session, scope, capped) as RawPurpose[];
+  return { items: rows.map(toPurposeView) };
 }
 
 export function listPurposeEvents(
@@ -817,6 +908,32 @@ export function listPurposeConflicts(
       purposeIds: [row.a, row.b],
     })),
   };
+}
+
+/**
+ * Scope-filtered internal conflict reader for the shadow port: SQL filters
+ * `(session, scope)` BEFORE the limit (up to 101) so an in-scope explicit
+ * pair is never hidden behind other-scope truncation. Active-membership
+ * semantics are unchanged (both members still active).
+ */
+export function listConflictPairsInScope(
+  db: Database.Database,
+  sessionId: string,
+  scope: string,
+  limit = 101,
+): [string, string][] {
+  const session = requireId(sessionId, "sessionId");
+  if (scope.length === 0 || scope.length > 128) {
+    throw new RepositoryValidationError("scope must be 1..128 chars");
+  }
+  requireSession(db, session);
+  const capped = Math.min(Math.max(limit, 1), 101);
+  const rows = db
+    .prepare(
+      "SELECT c.purpose_a_id AS a, c.purpose_b_id AS b FROM autonomy_purpose_conflicts c JOIN autonomy_purposes pa ON pa.id = c.purpose_a_id JOIN autonomy_purposes pb ON pb.id = c.purpose_b_id WHERE c.session_id = ? AND pa.scope = ? AND pa.status = 'active' AND pb.status = 'active' ORDER BY c.created_at ASC, c.id ASC LIMIT ?",
+    )
+    .all(session, scope, capped) as { a: string; b: string }[];
+  return rows.map((row) => [row.a, row.b] as [string, string]);
 }
 
 export interface RecordConflictInput {
@@ -921,6 +1038,17 @@ export function recordPurposeConflict(
     db.prepare(
       "INSERT INTO autonomy_purpose_conflicts (id, session_id, purpose_a_id, purpose_b_id, created_at) VALUES (?, ?, ?, ?, ?)",
     ).run(id, session, first, second, now);
+    // Same-TX durable shadow source: an explicit conflict invalidates old
+    // deliberation candidates for the scope.
+    enqueueShadowPolicyChangeInTx(
+      db,
+      session,
+      a.scope,
+      "conflict",
+      id,
+      "conflict.recorded",
+      now,
+    );
     const body = {
       id,
       sessionId: session,
@@ -1083,6 +1211,17 @@ export function correctPurpose(
       "active",
       "superseded",
       oldRow.statement,
+      now,
+    );
+    // Same-TX durable shadow source: one deliberation unit covers the
+    // correction + supersession + dependent holds (same scope epoch).
+    enqueueShadowPolicyChangeInTx(
+      db,
+      session,
+      input.scope,
+      "purpose",
+      newId,
+      "purpose.corrected",
       now,
     );
     // The superseded parent is non-active: hold every dependent
@@ -1295,6 +1434,16 @@ function transitionPurpose(
       operation === "revoke" ? "purpose_revoked" : "purpose_achieved",
       now,
     );
+    // Same-TX durable shadow source (covers the dependent holds too).
+    enqueueShadowPolicyChangeInTx(
+      db,
+      session,
+      row.scope,
+      "purpose",
+      row.id,
+      operation === "revoke" ? "purpose.revoked" : "purpose.achieved",
+      now,
+    );
     const current = readPurpose(db, row.id);
     if (current === null) {
       throw new RepositoryNotFoundError(`purpose ${row.id} not found`);
@@ -1443,6 +1592,16 @@ export function createTask(
       now,
     );
     appendTaskEventInTx(db, id, session, "created", null, "open", null, now);
+    // Same-TX durable shadow source (paused controls record, not queue).
+    enqueueShadowPolicyChangeInTx(
+      db,
+      session,
+      input.scope,
+      "task",
+      id,
+      "task.created",
+      now,
+    );
     const row = readTask(db, id);
     if (row === null) {
       throw new RepositoryNotFoundError(`task ${id} not found`);
@@ -1466,6 +1625,32 @@ export function listTasks(
       "SELECT * FROM autonomy_tasks WHERE session_id = ? ORDER BY created_at DESC, id ASC LIMIT ?",
     )
     .all(session, capped) as RawTask[];
+  return { items: rows.map(toTaskView) };
+}
+
+/**
+ * Scope-filtered internal reader for the shadow port (NOT a public list
+ * DTO): SQL filters `(session, scope)` BEFORE the limit and reads up to
+ * `limit` rows (callers pass 101) so the builder detects REAL overflow.
+ * Reuses the exact `toTaskView` mapper (no second projection).
+ */
+export function listTasksInScope(
+  db: Database.Database,
+  sessionId: string,
+  scope: string,
+  limit = 101,
+): { items: ReturnType<typeof toTaskView>[] } {
+  const session = requireId(sessionId, "sessionId");
+  if (scope.length === 0 || scope.length > 128) {
+    throw new RepositoryValidationError("scope must be 1..128 chars");
+  }
+  requireSession(db, session);
+  const capped = Math.min(Math.max(limit, 1), 101);
+  const rows = db
+    .prepare(
+      "SELECT * FROM autonomy_tasks WHERE session_id = ? AND scope = ? ORDER BY created_at DESC, id ASC LIMIT ?",
+    )
+    .all(session, scope, capped) as RawTask[];
   return { items: rows.map(toTaskView) };
 }
 
@@ -1632,6 +1817,20 @@ function transitionTask(
       from,
       to,
       null,
+      now,
+    );
+    // Same-TX durable shadow source (paused controls record, not queue).
+    enqueueShadowPolicyChangeInTx(
+      db,
+      session,
+      row.scope,
+      "task",
+      row.id,
+      operation === "start"
+        ? "task.started"
+        : operation === "complete"
+          ? "task.completed"
+          : "task.cancelled",
       now,
     );
     const current = readTask(db, row.id);
@@ -1801,6 +2000,16 @@ export function holdTask(
       row.status,
       "held",
       input.reason,
+      now,
+    );
+    // Same-TX durable shadow source (paused controls record, not queue).
+    enqueueShadowPolicyChangeInTx(
+      db,
+      session,
+      row.scope,
+      "task",
+      row.id,
+      "task.held",
       now,
     );
     const current = readTask(db, row.id);
@@ -2015,6 +2224,17 @@ export function resumeTask(
       `${input.evidenceKind}: ${input.evidence}`,
       now,
     );
+    // Same-TX durable shadow source: resume needs new meaningful state, so
+    // a resumed task re-enters deliberation (no catchup for paused time).
+    enqueueShadowPolicyChangeInTx(
+      db,
+      session,
+      row.scope,
+      "task",
+      row.id,
+      "task.resumed",
+      now,
+    );
     const current = readTask(db, row.id);
     if (current === null) {
       throw new RepositoryNotFoundError(`task ${row.id} not found`);
@@ -2170,6 +2390,17 @@ export function setAutonomyControl(
         now,
       );
     }
+    // Same-TX shadow transition: pausing holds every live pending job
+    // globally (never bulk-replayed); resuming marks paused-time inbox rows
+    // skipped (NO catchup — new meaningful state or a new explicit request
+    // is required to deliberate).
+    shadowBestEffort(() => {
+      if (input.paused) {
+        holdPendingShadowJobsInTx(db, "control_paused", now);
+      } else {
+        skipRecordedInboxInTx(db, now);
+      }
+    });
     const body = getAutonomyControl(db);
     storeIdempotentResponse(db, scope, key, hash, 200, body, now);
     return { status: 200, body, replayed: false };
@@ -2258,6 +2489,11 @@ export function applyAutonomyRestartFence(
         throw new AutonomyVersionConflictError(row.version, row.version);
       }
     }
+    // Same-TX shadow reconcile: leases die with the restart — hold every
+    // pending/claimed job (old outputs must re-fence, never continue).
+    shadowBestEffort(() => {
+      reconcileShadowRestartInTx(db, at);
+    });
     recordActivityInTx(db, "restart_fence", null, at);
     recordActivityInTx(db, "interrupted_note", null, at);
     const current = readControlRow(db);

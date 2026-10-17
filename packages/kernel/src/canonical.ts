@@ -121,6 +121,10 @@ export const IDEMPOTENCY_OPERATIONS = {
     operation: "autonomy_record_conflict",
     schemaVersion: 1,
   },
+  requestShadowDeliberation: {
+    operation: "shadow_request_deliberation",
+    schemaVersion: 1,
+  },
 } as const;
 
 /** Generate a new UUID v4 harness id. */
