@@ -507,6 +507,12 @@ class ConversationApp {
   }
 
   async boot(): Promise<void> {
+    // The session is not ready yet: keep Send disabled until ensureSession
+    // resolves so an early click can never be silently dropped (send()
+    // returns early while sessionId is null). renderComposer() re-enables
+    // once the session exists; the existing beforeEach toBeEnabled() then
+    // correctly waits for session readiness as an event gate.
+    this.sendButton.disabled = true;
     this.form.addEventListener("submit", (event) => {
       event.preventDefault();
       void this.send();
@@ -544,6 +550,10 @@ class ConversationApp {
       }
     });
     await this.ensureSession();
+    // Session outcome is known now: repaint the composer so Send is
+    // enabled exactly when a session exists (event gate for the test and
+    // for early user clicks), still disabled when creation failed.
+    this.renderComposer();
     // AV autonomy panel: usable without any model (plain DOM + HTTP).
     // Fail-open locally: a missing section never breaks the conversation.
     let shadow: ShadowPanel | null = null;
@@ -2327,7 +2337,15 @@ class ConversationApp {
    * posting; an explicit resend reuses that frozen request as-is.
    */
   private async send(): Promise<void> {
-    if (this.sessionId === null || this.activeRunId !== null || this.sending) {
+    if (this.sessionId === null) {
+      // Session not ready (or creation failed): never silently drop the
+      // typed text — keep it and surface a notice so an early submit
+      // (e.g. Enter before boot finished) is retryable, not lost.
+      this.showNotice("セッションを開始できませんでした");
+      this.renderComposer();
+      return;
+    }
+    if (this.activeRunId !== null || this.sending) {
       return;
     }
     if (this.pendingRequest === null) {
@@ -3830,8 +3848,11 @@ class ConversationApp {
   private renderComposer(): void {
     // Submit is disabled while a run is active AND while a send/post
     // round-trip (including the context freeze) is in flight; the input
-    // itself stays enabled (§16.3 type-while-active).
-    const busy = this.activeRunId !== null || this.sending;
+    // itself stays enabled (§16.3 type-while-active). A missing session
+    // (boot still resolving ensureSession, or session creation failed)
+    // also disables Send so an early submit can never be silently dropped.
+    const busy =
+      this.activeRunId !== null || this.sending || this.sessionId === null;
     // An adopted Action run keeps the composer busy (Send disabled), but
     // its Stop follows the ACTUAL execution marker/cancellability: after
     // the marker (or terminal) the generic Stop is hidden AND disabled —

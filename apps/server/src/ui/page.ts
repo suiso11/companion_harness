@@ -415,7 +415,11 @@ export function renderConversationShell(): HtmlEscapedString {
           type: "text",
           autocomplete: "off",
         }),
-        jsx("button", { id: "composer-send", type: "submit" }, "送信"),
+        jsx(
+          "button",
+          { id: "composer-send", type: "submit", disabled: true },
+          "送信",
+        ),
         jsx(
           "button",
           { id: "composer-stop", type: "button", hidden: true },
