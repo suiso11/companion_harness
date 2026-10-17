@@ -51,6 +51,11 @@ import {
   type KernelRepository,
 } from "@companion/kernel";
 import type { ChatResult, ModelGateway } from "@companion/model-local";
+import {
+  BACKGROUND_OWNER_MEMORY_EXTRACTION,
+  BACKGROUND_OWNER_MEMORY_IDLE_DISTILL,
+  type BackgroundResourceGate,
+} from "./background_resource.js";
 import type { ServerLogger } from "./logger.js";
 import {
   callMemoryCli,
@@ -127,6 +132,15 @@ export interface MemoryServiceOptions {
   readonly cliCall?: typeof callMemoryCli;
   /** Injectable distill deadline (tests). Defaults to MEMORY_DISTILL_TIMEOUT_MS. */
   readonly distillTimeoutMs?: number;
+  /**
+   * Shared background admission (server-owned, bootstrap-injected). When
+   * present, post-completion extraction and idle-distill drains admit ONE
+   * unit at a time against the shadow worker; when busy/closed they skip
+   * with an honest fixed diagnostic (already-durable outbox still drains).
+   * Absent (default) preserves the legacy ungated behavior. Foreground
+   * paths (recall/search/stage) never consult this gate.
+   */
+  readonly background?: BackgroundResourceGate | null;
 }
 
 export interface MemoryService {
@@ -142,6 +156,15 @@ export interface MemoryService {
   };
   /** Foreground activity: preempts an in-flight idle drain. */
   notifyForeground(): void;
+  /**
+   * Committed control change (pause OR resume): reads the ACTUAL control
+   * state; a pause aborts the OWN in-flight extraction call and closes
+   * background admission (no new extraction/distill starts), a resume
+   * reopens admission. Never throws into the caller. Foreground paths
+   * (recall/search/stage) are unaffected: an explicit user-authorized
+   * memory path is never STOP-blocked.
+   */
+  notifyControl(): void;
   /** Post-settlement hook: only completed + currently-selected runs cultivate. */
   onRunCompleted(runId: string): void;
   start(): void;
@@ -486,6 +509,16 @@ export function createMemoryService(
    * no CLI child outlives shutdown, however the tick was launched.
    */
   const drainControllers = new Set<AbortController>();
+  /**
+   * Every in-flight post-completion extraction owns a controller here (its
+   * OWN gateway call only, never the global gateway): foreground activity
+   * and STOP/shutdown abort it so a parked extraction socket cannot outlive
+   * the state that requested it. Late provider output after an abort is
+   * discarded (never enqueued).
+   */
+  const extractionControllers = new Set<AbortController>();
+  /** Shared background admission (null = legacy ungated behavior). */
+  const background = options.background ?? null;
   /** True while the in-flight tick belongs to idle distill (preemptible). */
   let idleDrainActive = false;
   /** Last completed run anchoring run-agnostic idle distill (real ids only). */
@@ -563,7 +596,44 @@ export function createMemoryService(
         }
       }
     }
+    // A newly starting foreground prompt also aborts OUR OWN parked
+    // extraction call (never the global gateway, never an ordinary run):
+    // the late output is discarded by the post-await guard, so no memory
+    // write lands from a superseded extraction.
+    for (const controller of [...extractionControllers]) {
+      try {
+        controller.abort();
+      } catch {
+        // Best effort.
+      }
+    }
     armIdleTimer();
+  }
+
+  /**
+   * Committed control change: read the ACTUAL control state (never a stored
+   * reply). A pause aborts OUR OWN in-flight extraction and closes shared
+   * background admission (no new extraction/idle-distill starts even with
+   * no foreground chat anywhere); a resume reopens admission. Never throws.
+   */
+  function notifyControl(): void {
+    try {
+      const paused = repo.getAutonomyControlState().paused === true;
+      if (paused) {
+        for (const controller of [...extractionControllers]) {
+          try {
+            controller.abort();
+          } catch {
+            // Best effort.
+          }
+        }
+        background?.close();
+        return;
+      }
+      background?.reopen();
+    } catch {
+      // Best effort: notify never throws into a committed command.
+    }
   }
 
   /**
@@ -1090,12 +1160,31 @@ export function createMemoryService(
     }
     if (pending > 0) {
       // Foreground backlog first (even without a run anchor): drain it
-      // instead of cultivating.
+      // instead of cultivating. Idle-owned, so admit the shared background
+      // unit first: when another background unit holds it (or STOP closed
+      // admission), rearm and return — the backlog stays durable pending
+      // and the next idle tick or foreground drain picks it up (no loss,
+      // no spin, no catchup queue).
+      const lease =
+        background?.tryAcquire(BACKGROUND_OWNER_MEMORY_IDLE_DISTILL) ?? null;
+      if (background !== null && lease === null) {
+        log(
+          "info",
+          background.closed
+            ? "memory.idle_skipped_closed"
+            : "memory.idle_skipped_busy",
+        );
+        armIdleTimer();
+        return;
+      }
       idleDrainActive = true;
       try {
         await drainOnce().catch(() => undefined);
       } finally {
         idleDrainActive = false;
+        if (lease !== null) {
+          background?.release(lease);
+        }
         armIdleTimer();
       }
       return;
@@ -1131,11 +1220,30 @@ export function createMemoryService(
       return;
     }
     pendingDistillJobId = enqueuedId;
+    // Idle-owned cultivation drain: admit the shared background unit first.
+    // A busy/closed gate skips with an honest diagnostic — the distill job
+    // stays durable pending under its stable key and a later tick retries
+    // it after backoff (never duplicated, never mass-caught-up).
+    const distillLease =
+      background?.tryAcquire(BACKGROUND_OWNER_MEMORY_IDLE_DISTILL) ?? null;
+    if (background !== null && distillLease === null) {
+      log(
+        "info",
+        background.closed
+          ? "memory.idle_skipped_closed"
+          : "memory.idle_skipped_busy",
+      );
+      armIdleTimer();
+      return;
+    }
     idleDrainActive = true;
     try {
       await drainOnce().catch(() => undefined);
     } finally {
       idleDrainActive = false;
+      if (distillLease !== null) {
+        background?.release(distillLease);
+      }
       armIdleTimer();
     }
   }
@@ -1152,6 +1260,7 @@ export function createMemoryService(
       `User: ${sliceCodePoints(input.turnText, MEMORY_EXTRACT_INPUT_MAX_CP)}\n` +
       `Assistant: ${sliceCodePoints(input.answerText, MEMORY_EXTRACT_INPUT_MAX_CP)}`;
     const controller = new AbortController();
+    extractionControllers.add(controller);
     const timer = setTimeout(
       () => {
         try {
@@ -1174,6 +1283,12 @@ export function createMemoryService(
         },
         { signal: controller.signal },
       );
+      // Guard AFTER the await: a foreground preemption, STOP, or shutdown
+      // that aborted OUR OWN call discards even a late provider result that
+      // ignored the abort — no memory write lands from it.
+      if (controller.signal.aborted || stopped) {
+        return [];
+      }
       const text = result.text;
       if (typeof text !== "string" || text.length === 0) {
         return [];
@@ -1184,6 +1299,7 @@ export function createMemoryService(
       return [];
     } finally {
       clearTimeout(timer);
+      extractionControllers.delete(controller);
     }
   }
 
@@ -1267,10 +1383,37 @@ export function createMemoryService(
         // Best effort: feedback never fails completion.
       }
       // Structured extraction (gateway-dependent, conservative noop).
-      const memories = await extractViaGateway({
-        turnText,
-        answerText,
-      });
+      // Background admission: at most ONE model-heavy background unit runs
+      // at a time. When the gate is held (shadow/idle-distill in flight) or
+      // closed (STOP), extraction SKIPS with an honest fixed diagnostic —
+      // but the completed-run anchor above and the feedback jobs already
+      // enqueued stay durable: the outbox still drains below (nothing
+      // already-durable is lost, no catchup invented, no auto-revive of
+      // this skipped extraction on release).
+      const extractionLease =
+        background?.tryAcquire(BACKGROUND_OWNER_MEMORY_EXTRACTION) ?? null;
+      if (background !== null && extractionLease === null) {
+        log(
+          "info",
+          background.closed
+            ? "memory.extract_skipped_closed"
+            : "memory.extract_skipped_busy",
+          { runId: run.id },
+        );
+        await drainOnce().catch(() => undefined);
+        return;
+      }
+      let memories: ExtractedMemory[];
+      try {
+        memories = await extractViaGateway({
+          turnText,
+          answerText,
+        });
+      } finally {
+        if (extractionLease !== null) {
+          background?.release(extractionLease);
+        }
+      }
       if (memories.length === 0) {
         log("info", "memory.extract_empty", { runId: run.id });
         await drainOnce().catch(() => undefined);
@@ -2532,6 +2675,24 @@ export function createMemoryService(
       clearTimeout(idleTimer);
       idleTimer = undefined;
     }
+    // No new background admissions from here (STOP/shutdown preemption is
+    // precise: OUR OWN calls abort; foreground recall/search/stage paths
+    // were never gated and stay usable until this stop lands).
+    try {
+      background?.close();
+    } catch {
+      // Best effort.
+    }
+    // Abort OUR OWN in-flight extraction calls (never the global gateway):
+    // a parked extraction socket closes here instead of running to its own
+    // timeout, and the post-await guard discards any late output.
+    for (const controller of [...extractionControllers]) {
+      try {
+        controller.abort();
+      } catch {
+        // Best effort.
+      }
+    }
     // Abort EVERY active drain tick (recovery, foreground, and idle alike):
     // each tick owns a controller, so in-flight CLI children are hard-killed
     // here instead of running to their own timeout (up to 120s for distill).
@@ -2562,6 +2723,7 @@ export function createMemoryService(
   return {
     recallHook,
     notifyForeground,
+    notifyControl,
     onRunCompleted,
     start,
     stop,

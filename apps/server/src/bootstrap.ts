@@ -98,6 +98,7 @@ import {
 } from "@companion/model-local";
 import { serve } from "@hono/node-server";
 import { createApp, type EnginePort, type ServerControls } from "./app.js";
+import { createBackgroundResourceGate } from "./background_resource.js";
 import {
   assertGoogleReadonlyHintCompatible,
   CALENDAR_PROFILE_ENV,
@@ -813,6 +814,10 @@ export async function startServer(
   let shadow: ShadowService | null = null;
   /** Notification projector (always on; set inside try). */
   let notifications: NotificationService | null = null;
+  // Shared background admission (bootstrap-owned, created up front so every
+  // teardown path — including the outer startup-failure catch — can shut it
+  // down; construction never throws and touches no I/O).
+  const backgroundResource = createBackgroundResourceGate();
   const removeSignalHandlers = (): void => {
     if (onSigint !== undefined) {
       try {
@@ -1337,6 +1342,11 @@ export async function startServer(
         return out;
       },
     });
+    // Shared background admission (bootstrap-owned, repo-independent so the
+    // gated repository rebuild below can never drop it): at most ONE
+    // model-heavy background unit — memory extraction, shadow deliberation,
+    // idle distill — runs at a time. Foreground work and notifications never
+    // acquire it. Created once above with the other service bindings.
     if (config.memory !== null) {
       const memoryConfig: MemoryConfig = config.memory;
       memory = createMemoryService({
@@ -1354,6 +1364,11 @@ export async function startServer(
         gateway: modelGateway,
         model: modelName,
         logger,
+        // Shared background admission (bootstrap-owned): post-completion
+        // extraction and idle-distill drains admit ONE unit at a time
+        // against the shadow worker below. Foreground memory paths
+        // (recall/search/stage) never consult it.
+        background: backgroundResource,
       });
       repo = wrapRepoWithMemoryIntake(baseRepo, memory);
       logger.info("server.memory_ready", { status: 1 });
@@ -1392,6 +1407,9 @@ export async function startServer(
         recall: memory !== null ? memory.recallHook : null,
         logger,
         now,
+        // Same shared gate: each shadow job admits BEFORE claim and defers
+        // untouched while another background unit holds it.
+        background: backgroundResource,
       });
       // Priority composition OUTSIDE the memory intake wrapper: accepted
       // foreground work aborts shadow's OWN call; run settlement re-wakes.
@@ -2385,6 +2403,7 @@ export async function startServer(
     }
 
     const activeShadowWake = shadow;
+    const activeMemoryControl = memory;
     const { app, controls } = createApp({
       config,
       repo,
@@ -2408,9 +2427,18 @@ export async function startServer(
             // replayed old resume): the worker reads the ACTUAL control
             // state and aborts its OWN in-flight call when paused, so a
             // pure STOP aborts model/recall work with no foreground chat.
+            // The memory service is notified on the same hook: STOP aborts
+            // its OWN parked extraction call and closes shared background
+            // admission (resume reopens it). Both reads are live-state and
+            // never throw into the committed command.
             shadowControlChanged: (): void => {
               try {
                 activeShadowWake.notifyControl();
+              } catch {
+                // Best effort: notify never throws into the caller.
+              }
+              try {
+                activeMemoryControl?.notifyControl();
               } catch {
                 // Best effort: notify never throws into the caller.
               }
@@ -2484,6 +2512,13 @@ export async function startServer(
         if (notifications !== null) {
           await notifications.stop();
         }
+      } catch {
+        // Best effort: the listen error carries the startup failure.
+      }
+      // Shared background admission: closed by both service stops above;
+      // clear deferred wakes here so nothing fires after the DB close.
+      try {
+        backgroundResource.shutdown();
       } catch {
         // Best effort: the listen error carries the startup failure.
       }
@@ -2584,6 +2619,14 @@ export async function startServer(
           } catch {
             // Best effort: the engine drain below still runs.
           }
+        }
+        // Shared background admission: closed by both service stops above;
+        // clear deferred wakes here (no DB-after-close) before the engine
+        // drain and the DB close below.
+        try {
+          backgroundResource.shutdown();
+        } catch {
+          // Best effort: the engine drain below still runs.
         }
         try {
           await activeEngine.shutdown({ drainMs });
@@ -2739,6 +2782,13 @@ export async function startServer(
       } catch {
         // Best effort: the original startup error carries the failure.
       }
+    }
+    // Shared background admission: clear deferred wakes BEFORE the DB close
+    // below (both services already stopped and closed above).
+    try {
+      backgroundResource.shutdown();
+    } catch {
+      // Best effort: the original startup error carries the failure.
     }
     if (ownedMcp !== undefined) {
       try {
