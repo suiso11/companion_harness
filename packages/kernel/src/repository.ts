@@ -17,6 +17,8 @@ import {
   type ActionReceiptView,
   ActionReceiptViewSchema,
   ActionToolInputSchema,
+  type ActionTargetCitation,
+  ActionTargetCitationSchema,
   type CreateSessionResponse,
   CreateSessionResponseSchema,
   EventsQuerySchema,
@@ -1854,17 +1856,29 @@ export function createKernelRepository(
       result: RunResult | null;
       receipt: ActionReceiptView | null;
       executionStatus: ActionExecutionStatus | null;
+      targetCitation: ActionTargetCitation;
     } | null => {
       const execution = db
         .prepare(
-          `SELECT id, action_run_id, status FROM action_executions
+          `SELECT id, proposal_id, action_run_id, status FROM action_executions
            WHERE session_id = ? AND approval_turn_id = ?`,
         )
         .get(session, turnId) as
-        | { id: string; action_run_id: string; status: string }
+        | {
+            id: string;
+            proposal_id: string;
+            action_run_id: string;
+            status: string;
+          }
         | undefined;
       if (execution === undefined) {
         return null;
+      }
+      const proposalRow = loadProposal(execution.proposal_id);
+      if (proposalRow === null) {
+        throw new DatabaseStateInvalidError(
+          `execution ${execution.id} has no proposal (impossible state)`,
+        );
       }
       const runRow = readRun(db, execution.action_run_id);
       if (
@@ -1897,6 +1911,9 @@ export function createKernelRepository(
         result,
         receipt: receiptViewForExecution(execution.id),
         executionStatus,
+        // ORIGINAL-only BEFORE label from the owning proposal's immutable
+        // target (fail closed when unresolvable — never a fabricated AFTER).
+        targetCitation: targetCitationForProposal(session, proposalRow),
       };
     };
     const items = page.map((row) => {
@@ -2421,6 +2438,41 @@ export function createKernelRepository(
   }
 
   /**
+   * ORIGINAL-only session citation label (BEFORE evidence navigation) for a
+   * session-owned proposal: the `rN` ordinal of the exact source
+   * SessionReference the proposal's immutable `target_ref_id` points at.
+   * Display metadata only — never a verified AFTER claim, never parsed from
+   * preview prose, never a new read of the current upstream. The composite
+   * DB FK (`action_proposals_target_fk`) guarantees the owned reference row
+   * exists; a missing row is impossible state and fails closed (no
+   * fabricated label, no cross-session info).
+   */
+  function targetCitationForProposal(
+    session: string,
+    proposal: RawProposal,
+  ): ActionTargetCitation {
+    if (proposal.session_id !== session) {
+      throw new RepositoryNotFoundError(
+        `proposal ${proposal.id} not found in session ${session}`,
+      );
+    }
+    const reference = db
+      .prepare(
+        "SELECT ordinal FROM session_references WHERE session_id = ? AND id = ?",
+      )
+      .get(session, proposal.target_ref_id) as { ordinal: number } | undefined;
+    if (reference === undefined) {
+      throw new DatabaseStateInvalidError(
+        `proposal ${proposal.id} has no owned target reference (impossible state)`,
+      );
+    }
+    return parseOrValidation(
+      () => ActionTargetCitationSchema.parse(`r${reference.ordinal}`),
+      "proposal target citation",
+    );
+  }
+
+  /**
    * Freeze a decision Turn: the same immutable FrozenContext shape as an
    * M0 message Turn (current ordering/sets of the session reference
    * context + temporal now), with an empty UI context (decisions carry no
@@ -2589,6 +2641,7 @@ export function createKernelRepository(
                   summary: JSON.parse(receiptRow.summary_json) as unknown,
                   createdAt: receiptRow.created_at,
                 },
+          targetCitation: targetCitationForProposal(session, row),
         }),
       "proposal execution view",
     );

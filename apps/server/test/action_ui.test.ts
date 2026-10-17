@@ -11,7 +11,9 @@ import { describe, expect, it } from "vitest";
 import {
   type ActionCardInput,
   actionCardModel,
+  actionEvidenceButtons,
   isRetryableTurnKind,
+  isStoredCitationLabel,
   parseCancelRunStatus,
   receiptOutcomeText,
 } from "../src/ui/reducer.js";
@@ -169,6 +171,100 @@ describe("C22 action card model", () => {
       "cancelled",
     ]) {
       expect(parseCancelRunStatus(bad)).toBeNull();
+    }
+  });
+});
+
+describe("M5 action evidence navigation policy", () => {
+  const verifiedResult = {
+    version: 2,
+    text: "done",
+    answer: {
+      version: 1,
+      parts: [{ text: "done", citations: ["r3"] }],
+    },
+  };
+
+  it("accepts only structural session rN labels as evidence", () => {
+    expect(isStoredCitationLabel("r1")).toBe(true);
+    expect(isStoredCitationLabel("r12")).toBe(true);
+    for (const bad of [
+      null,
+      undefined,
+      "",
+      "r0",
+      "r01",
+      "m1",
+      "1",
+      "r1 ",
+      " r1",
+      "http://x",
+      "00000000-0000-4000-8000-000000000000",
+    ]) {
+      expect(isStoredCitationLabel(bad)).toBe(false);
+    }
+  });
+
+  it("always offers BEFORE from the owned original label, even live or terminal-unverified", () => {
+    // Live (no receipt yet): BEFORE only, never a fabricated AFTER.
+    expect(
+      actionEvidenceButtons({
+        targetCitation: "r1",
+        outcome: null,
+        result: null,
+      }),
+    ).toEqual({ before: "r1", after: [] });
+    // Every non-verified terminal keeps BEFORE alone with its real result.
+    for (const outcome of [
+      "unknown",
+      "succeeded_unverified",
+      "failed",
+      "blocked_stale",
+    ]) {
+      expect(
+        actionEvidenceButtons({
+          targetCitation: "r1",
+          outcome,
+          result: verifiedResult,
+        }),
+      ).toEqual({ before: "r1", after: [] });
+    }
+  });
+
+  it("offers the verified AFTER only for a succeeded receipt with actual result citations", () => {
+    expect(
+      actionEvidenceButtons({
+        targetCitation: "r1",
+        outcome: "succeeded",
+        result: verifiedResult,
+      }),
+    ).toEqual({ before: "r1", after: ["r3"] });
+    // Succeeded without actual result citations: BEFORE alone, no fake link.
+    expect(
+      actionEvidenceButtons({
+        targetCitation: "r1",
+        outcome: "succeeded",
+        result: null,
+      }),
+    ).toEqual({ before: "r1", after: [] });
+    expect(
+      actionEvidenceButtons({
+        targetCitation: "r1",
+        outcome: "succeeded",
+        result: { version: 1, text: "done without citations" },
+      }),
+    ).toEqual({ before: "r1", after: [] });
+  });
+
+  it("fails closed on a missing or malformed original label (no fabricated BEFORE)", () => {
+    for (const targetCitation of [null, undefined, "", "r0", "m1"]) {
+      expect(
+        actionEvidenceButtons({
+          targetCitation,
+          outcome: "succeeded",
+          result: verifiedResult,
+        }),
+      ).toEqual({ before: null, after: ["r3"] });
     }
   });
 });

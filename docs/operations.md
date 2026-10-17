@@ -2759,6 +2759,64 @@ retry is unchanged (still `202`, same Turn, new queued Run).
    `test-results/` removed; no `pnpm` dependency change (offline
    store-link install only).
 
+## M5 action evidence navigation (BEFORE/AFTER stored-only, 2026-10-16, observed)
+
+Action result/receipt history and the live card carry distinct evidence
+buttons: BEFORE (the ORIGINAL staged snapshot) is display metadata resolved
+from the owning proposal's immutable `target_ref_id` plus session ownership
+(the staged source reference's `rN` ordinal) and rides both the
+server-owned execution view (`GET .../proposals/:id/execution`
+`targetCitation`) and the action history projection (`selectedRun`
+`targetCitation`); AFTER (the verified new snapshot) comes ONLY from the
+authoritative `run.result` via `runResultToAnswerParts` when the receipt
+outcome is exactly `succeeded` with actual result citations. Every other
+outcome (`unknown` / `succeeded_unverified` / `failed` / `blocked_stale` /
+live `null`) yields BEFORE alone — a `succeeded_unverified` V1 text result
+(which by construction carries no structured citations, and even a result
+that happened to carry preflight citations) is never presented as verified
+AFTER. Opening either button reuses the existing stored-only citation
+drawer (exact stored `SnapshotBody` text, `textContent` only): no
+Google/upstream GET/PATCH after opening, no automatic refresh/retry, no
+`rN` derived from preview prose or the current latest resource. History
+reload retains both buttons; one Run never renders four evidence buttons
+(card BEFORE at most one + history BEFORE/AFTER). No durable receipt /
+`RunResult` / grant / proposal-hash / DB-schema change: the label is
+metadata on the existing safe execution and history views (no N+1, no
+async stale races); old proposals resolve without rewriting hash/preview/
+snapshot, and non-action `user_text` history omits the field entirely.
+
+- Contracts/kernel (`packages/contracts/src/action.ts`,
+  `packages/contracts/src/http.ts`, `packages/kernel/src/repository.ts`):
+  `ActionTargetCitationSchema` (`rN`) + required `targetCitation` on
+  `ProposalExecutionView` and `ActionRunHistorySelection` (`user_text`
+  omits it); `targetCitationForProposal` resolves the owned ordinal and
+  fails closed cross-session (no citation info leaked).
+- Client (`apps/server/src/ui/reducer.ts` pure `actionEvidenceButtons`
+  + `apps/server/src/ui/client.ts`): card renders stored BEFORE only;
+  history renders BEFORE plus verified AFTER only; both open via the
+  existing `openCitation` stored path.
+- Observed final verification (Linux, Node 24.12.0, this worktree):
+  kernel `action_evidence_navigation` 9/9 (real SQLite service lifecycle:
+  pending/live/failed/unknown/unverified/blocked keep BEFORE alone,
+  verified succeeded keeps BEFORE + distinct fresh AFTER, wrong-session
+  fails closed, `user_text` omits the field); server `proposals` 9/9
+  (execution BEFORE for pending/approved + foreign 404 with no evidence,
+  history live BEFORE-only, history verified BEFORE + fresh AFTER,
+  history unverified BEFORE + citation-less V1, cross-session history
+  leaks nothing) + `action_ui` 13/13 (pure BEFORE/AFTER policy);
+  `tsc --noEmit` exit 0 (server/kernel/contracts); owned `biome check`
+  clean on touched files (one pre-existing `useLiteralKeys` in untouched
+  memory code left as-is). Real-Chromium browser proof via the existing
+  Calendar fake harness (`apps/server/e2e/calendar/evidence.spec.ts`,
+  kept) 2/2: verified run shows BEFORE r1 + distinct AFTER, both open
+  the EXACT different stored bodies (09:00 vs 11:00), fixture counters
+  (`searchCalls`/`listCalls`/`getCalls`/`writeCalls`) byte-identical
+  across both opens and across reload (exactly 1 write total, 0 extra
+  upstream GET/PATCH); unverified run shows BEFORE alone with the real
+  manual-check outcome, 0 AFTER/citation nodes, stored original opens
+  with identical counters, reload retains BEFORE-only with 0 extra
+  writes. `test-results/` removed; no dependency change.
+
 ## Live readonly acceptance ledger (2026-10-14, current profile)
 
 Current accepted activation: the host-owned pinned profile
