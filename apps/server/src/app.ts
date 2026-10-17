@@ -26,6 +26,13 @@ import {
   MemorySearchRequestSchema,
   MemorySearchResponseSchema,
   messageScope,
+  NotificationAckReceiptSchema,
+  NotificationForwardQuerySchema,
+  NotificationHistoryResponseSchema,
+  NotificationListQuerySchema,
+  NotificationListResponseSchema,
+  NotificationReadQuerySchema,
+  NotificationViewSchema,
   PostMessageRequestSchema,
   PostMessageResponseSchema,
   PostRetryRequestSchema,
@@ -63,6 +70,8 @@ import {
   InvalidReferenceError,
   isUuidV4,
   type KernelRepository,
+  NotificationKeyConflictError,
+  NotificationProjectionResetError,
   ProposalHashMismatchError,
   ProposalStateConflictError,
   ReferenceNotFoundError,
@@ -76,10 +85,11 @@ import {
 } from "@companion/kernel";
 import type { Context } from "hono";
 import { Hono } from "hono";
+import { z } from "zod";
 import type { ServerConfig } from "./config.js";
 import { ServerConfigError } from "./config.js";
 import { createStdServerLogger, type ServerLogger } from "./logger.js";
-import { createSseResponse } from "./sse.js";
+import { createNotificationFeedSseResponse, createSseResponse } from "./sse.js";
 import { renderConversationShell, STRICT_CSP } from "./ui/page.js";
 import { effectiveCursor } from "./ui/reducer.js";
 
@@ -689,6 +699,32 @@ function mapDomainError(c: Context, error: unknown): Response {
         error: {
           code: "shadow_lease_conflict",
           message: "shadow lease conflict",
+        },
+      },
+      409,
+    );
+  }
+  // AV05 notification slice: an explicit ack under a stable key on a
+  // DIFFERENT notification (or a second key on an acked one) is a fixed
+  // 409; a renumbered durable source refuses with a fixed 409 (never an
+  // auto-reset, never dropped notices). Ownership stays 404 above.
+  if (error instanceof NotificationKeyConflictError) {
+    return c.json(
+      {
+        error: {
+          code: "notification_key_conflict",
+          message: "notification ack key conflict",
+        },
+      },
+      409,
+    );
+  }
+  if (error instanceof NotificationProjectionResetError) {
+    return c.json(
+      {
+        error: {
+          code: "notification_projection_reset_required",
+          message: "notification projection reset required",
         },
       },
       409,
@@ -2854,6 +2890,322 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       return mapDomainError(c, error);
     }
   });
+
+  /* ---------------- AV05 notifications: durable feed + explicit ack --- */
+  // Session-owned durable notification feed (projection reads) plus
+  // explicit ack receipts. Reads are pure SELECTs: no ingest, no ack, no
+  // model nudge, no authority. An ack records ONLY the receipt: it changes
+  // no purpose / task / control / Calendar grant / proposal / hypothesis,
+  // and the strict `{}` body carries no job / purpose / task / action /
+  // grant / resume selector (an ack can never imply a question answer or a
+  // consent). Ownership-first 404s; stable-key replays 200; key drift 409.
+
+  /**
+   * Strict ack body: exactly `{}`. Any key (job / purpose / task / action
+   * / grant / resume / answer / consent …) is rejected: an ack selects
+   * its notification ONLY via the path id + the Idempotency-Key header.
+   */
+  const NotificationAckRequestSchema = z.strictObject({});
+
+  /**
+   * Draining replay for POST acks: read-only. A stored ack under the SAME
+   * key replays verbatim (200); a stored ack under a DIFFERENT key replays
+   * the fixed 409; anything without a stored ack rejects 503 without
+   * persisting. Never writes during drain.
+   */
+  function tryReplayStoredAck(
+    c: Context,
+    sessionId: string,
+    notificationId: string,
+    key: string,
+  ): Response | null {
+    try {
+      const history = NotificationHistoryResponseSchema.parse(
+        repo.getNotificationHistory(sessionId, notificationId),
+      );
+      if (history.ack === null) {
+        return null;
+      }
+      if (history.ack.key !== key) {
+        return c.json(
+          {
+            error: {
+              code: "notification_key_conflict",
+              message: "notification ack key conflict",
+            },
+          },
+          409,
+        );
+      }
+      const body = NotificationAckReceiptSchema.parse(history.ack);
+      return c.json(body, 200);
+    } catch (error) {
+      if (
+        error instanceof RepositoryNotFoundError ||
+        error instanceof NotificationKeyConflictError ||
+        error instanceof NotificationProjectionResetError
+      ) {
+        return mapDomainError(c, error);
+      }
+      return null;
+    }
+  }
+
+  // Newest-page history (no hidden cap: strict 1..100 `limit` +
+  // `beforeSeq` paging with truthful `hasMore`/`nextBefore`).
+  app.get("/api/sessions/:sessionId/notifications", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const gated = strictQuery(c, ["beforeSeq", "limit", "now"]);
+    if (!gated.ok) {
+      return validationError(c);
+    }
+    const parsed = NotificationListQuerySchema.safeParse({
+      beforeSeq: gated.values.beforeSeq,
+      limit: gated.values.limit,
+      now: gated.values.now,
+    });
+    if (!parsed.success) {
+      return validationError(c);
+    }
+    try {
+      const body = NotificationListResponseSchema.parse(
+        repo.listNotifications(session.id, {
+          limit: parsed.data.limit,
+          ...(parsed.data.beforeSeq !== undefined
+            ? { beforeSeq: parsed.data.beforeSeq }
+            : {}),
+          ...(parsed.data.now !== undefined ? { now: parsed.data.now } : {}),
+        }),
+      );
+      return c.json(body, 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  // Forward read-after page (`seq > after` oldest-first, strict 1..100):
+  // the durable counterpart of SSE replay (same SQL paging).
+  app.get("/api/sessions/:sessionId/notifications/forward", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const gated = strictQuery(c, ["after", "limit", "now"]);
+    if (!gated.ok) {
+      return validationError(c);
+    }
+    const parsed = NotificationForwardQuerySchema.safeParse({
+      after: gated.values.after,
+      limit: gated.values.limit,
+      now: gated.values.now,
+    });
+    if (!parsed.success) {
+      return validationError(c);
+    }
+    try {
+      const body = repo.listNotificationsForward(session.id, {
+        after: parsed.data.after,
+        limit: parsed.data.limit,
+        ...(parsed.data.now !== undefined ? { now: parsed.data.now } : {}),
+      });
+      return c.json(body, 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  // Pure-read feed cursor (per-source cursors + latest notification seq):
+  // strictly a SELECT, never an ack/ingest/baseline.
+  app.get("/api/sessions/:sessionId/notifications/feed/cursor", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(repo.getLatestNotificationCursor(session.id), 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  // Durable SSE replay: `seq > cursor ORDER BY seq ASC` in bounded pages,
+  // cursor = max(valid ?after, valid Last-Event-ID), strict safe integer,
+  // session-owned (foreign sessions 404). Reading never acks; disconnect
+  // never touches delivery state. The stream is never terminal by itself:
+  // it ends on client disconnect or on the synchronous drain gate (which
+  // fires BEFORE the DB close, so an open feed can never throw a
+  // closed-DB error).
+  app.get("/api/sessions/:sessionId/notifications/feed/stream", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const gated = strictQuery(c, ["after"]);
+    if (!gated.ok) {
+      return validationError(c);
+    }
+    const cursor = effectiveCursor(
+      gated.values.after,
+      c.req.header("last-event-id"),
+    );
+    try {
+      repo.getLatestNotificationCursor(session.id);
+      return createNotificationFeedSseResponse(repo, session.id, cursor, {
+        isDraining: () => draining,
+      });
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  // Single immutable record (pure read, foreign ids 404).
+  app.get("/api/sessions/:sessionId/notifications/:notificationId", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const notification = requireUuid(
+      c,
+      c.req.param("notificationId"),
+      "notificationId",
+    );
+    if ("response" in notification) {
+      return notification.response;
+    }
+    const gated = strictQuery(c, ["now"]);
+    if (!gated.ok) {
+      return validationError(c);
+    }
+    const parsed = NotificationReadQuerySchema.safeParse({
+      now: gated.values.now,
+    });
+    if (!parsed.success) {
+      return validationError(c);
+    }
+    try {
+      const body = NotificationViewSchema.parse(
+        repo.getNotification(session.id, notification.id, {
+          ...(parsed.data.now !== undefined ? { now: parsed.data.now } : {}),
+        }),
+      );
+      return c.json(body, 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  // Record + explicit ack receipt (pure read, foreign ids 404).
+  app.get(
+    "/api/sessions/:sessionId/notifications/:notificationId/history",
+    (c) => {
+      const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+      if ("response" in session) {
+        return session.response;
+      }
+      const notification = requireUuid(
+        c,
+        c.req.param("notificationId"),
+        "notificationId",
+      );
+      if ("response" in notification) {
+        return notification.response;
+      }
+      const gated = strictQuery(c, ["now"]);
+      if (!gated.ok) {
+        return validationError(c);
+      }
+      const parsed = NotificationReadQuerySchema.safeParse({
+        now: gated.values.now,
+      });
+      if (!parsed.success) {
+        return validationError(c);
+      }
+      try {
+        const body = NotificationHistoryResponseSchema.parse(
+          repo.getNotificationHistory(session.id, notification.id, {
+            ...(parsed.data.now !== undefined ? { now: parsed.data.now } : {}),
+          }),
+        );
+        return c.json(body, 200);
+      } catch (error) {
+        return mapDomainError(c, error);
+      }
+    },
+  );
+
+  // Explicit ack (keyed): same key replays the stored receipt, key drift
+  // is 409, foreign ids 404 — all BEFORE any other dispatch (the kernel
+  // asserts ownership first). Strict `{}` body: no job/purpose/task/
+  // action/grant/resume/answer/consent selector is accepted here.
+  app.post(
+    "/api/sessions/:sessionId/notifications/:notificationId/ack",
+    async (c) => {
+      const started = now();
+      // No early draining reject: the admission gate runs after body
+      // await/validation so a stored ack replay wins over 503.
+      const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+      if ("response" in session) {
+        return session.response;
+      }
+      const notification = requireUuid(
+        c,
+        c.req.param("notificationId"),
+        "notificationId",
+      );
+      if ("response" in notification) {
+        return notification.response;
+      }
+      const keyed = requireIdempotencyKey(c);
+      if ("response" in keyed) {
+        return keyed.response;
+      }
+      const raw = await readJsonBody(c);
+      if (!raw.ok) {
+        return validationError(c);
+      }
+      if (NotificationAckRequestSchema.safeParse(raw.value).success !== true) {
+        return validationError(c);
+      }
+      // Draining admission re-check immediately before the repository
+      // call (no await between here and repo.ackNotification, so a drain
+      // that begins mid-flight cannot slip a fresh ack into the store).
+      // A stored receipt for this exact key replays verbatim instead of
+      // 503; anything else is rejected without persisting.
+      if (draining) {
+        const replayed = tryReplayStoredAck(
+          c,
+          session.id,
+          notification.id,
+          keyed.key,
+        );
+        if (replayed !== null) {
+          return replayed;
+        }
+        return shuttingDown(c);
+      }
+      try {
+        const out = repo.ackNotification(session.id, notification.id, {
+          key: keyed.key,
+          now: now(),
+        });
+        const body = NotificationAckReceiptSchema.parse(out.body);
+        logger.info("http.notifications.ack", {
+          sessionId: session.id,
+          status: out.status,
+          durationMs: Math.max(now() - started, 0),
+        });
+        return c.json(body, out.status as 200);
+      } catch (error) {
+        return mapDomainError(c, error);
+      }
+    },
+  );
 
   return { app, controls };
 }
