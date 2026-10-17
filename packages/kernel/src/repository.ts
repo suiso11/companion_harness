@@ -118,8 +118,8 @@ import {
   TrialLaunchRequestSchema,
   type TrialProfileSnapshot,
   TrialProfileSnapshotSchema,
-  TrialProposalViewSchema,
   type TrialProposalView,
+  TrialProposalViewSchema,
   TrialStageRequestSchema,
 } from "@companion/contracts";
 import type Database from "better-sqlite3";
@@ -159,15 +159,6 @@ import {
   recordUserActivityInTx,
 } from "./autonomy.js";
 import {
-  approveTrialProposal,
-  claimTrialGrant,
-  expireTrialProposal,
-  fenceUnknownExecution,
-  hashTrialRequest,
-  listTrialProposals,
-  stageTrialProposal,
-} from "./trial_authority.js";
-import {
   assertUuidV4,
   canonicalJsonString,
   generateId,
@@ -189,6 +180,29 @@ import {
   RepositoryValidationError,
   SessionBusyError,
 } from "./errors.js";
+import {
+  approveTrialProposal,
+  authorityDeadlineMs,
+  claimTrialGrant,
+  clearAliasFence,
+  expireTrialProposal,
+  fenceUnknownExecution,
+  hashTrialRequest,
+  issueLaunchPermit,
+  listClaimedTrialWorkers,
+  listQueuedTrialGrants,
+  listTrialProposals,
+  readLaunchPermit,
+  readTrialIntent,
+  readWorkerOutcome,
+  readWorkerOutcomeByProposal,
+  reconcileTrialExpiry,
+  recordQuiescence,
+  recordWorkerResult,
+  registerWorkerBoot,
+  stageTrialProposal,
+  type TrustedObservation,
+} from "./trial_authority.js";
 
 /**
  * C19: fixed safe error thrown when a generic Run lifecycle transition
@@ -4858,7 +4872,10 @@ export function createKernelRepository(
           ? { validUntil: parsed.validUntil }
           : {}),
         ...("constraintRule" in parsed
-          ? { constraintRule: (parsed as { constraintRule?: unknown }).constraintRule ?? null }
+          ? {
+              constraintRule:
+                (parsed as { constraintRule?: unknown }).constraintRule ?? null,
+            }
           : {}),
       },
       options,
@@ -5199,7 +5216,6 @@ export function createKernelRepository(
       () => TrialProfileSnapshotSchema.parse(options.profile),
       "trial profile snapshot",
     );
-    void profile;
     const out = stageTrialProposal(
       db,
       sessionId,
@@ -5217,7 +5233,11 @@ export function createKernelRepository(
         requiredChecks: [...parsed.requiredChecks],
         workspaceAlias: options.workspaceAlias,
       },
-      { key: options.key, ...(options.now !== undefined ? { now: options.now } : {}) },
+      {
+        key: options.key,
+        ...(options.now !== undefined ? { now: options.now } : {}),
+        profile,
+      },
     );
     const body = parseOrValidation(
       () => TrialProposalViewSchema.parse(out.body),
@@ -5226,7 +5246,10 @@ export function createKernelRepository(
     return { status: out.status, body, replayed: out.replayed };
   }
 
-  function listTrials(sessionId: string, query: unknown = {}): { items: TrialProposalView[] } {
+  function listTrials(
+    sessionId: string,
+    query: unknown = {},
+  ): { items: TrialProposalView[] } {
     const parsed = parseOrValidation(
       () => AutonomyListQuerySchema.parse(query ?? {}),
       "trial list query",
@@ -5234,7 +5257,10 @@ export function createKernelRepository(
     const out = listTrialProposals(db, sessionId, parsed.limit);
     return {
       items: out.items.map((item) =>
-        parseOrValidation(() => TrialProposalViewSchema.parse(item), "trial proposal"),
+        parseOrValidation(
+          () => TrialProposalViewSchema.parse(item),
+          "trial proposal",
+        ),
       ),
     };
   }
@@ -5266,7 +5292,6 @@ export function createKernelRepository(
     options: AutonomyKeyOptions & {
       profile: TrialProfileSnapshot;
       workspaceAlias: string;
-      purposeStatement: string;
     },
   ): { status: number; body: unknown; replayed: boolean } {
     const profile = parseOrValidation(
@@ -5278,22 +5303,39 @@ export function createKernelRepository(
       ...(options.now !== undefined ? { now: options.now } : {}),
       profile,
       workspaceAlias: options.workspaceAlias,
-      purposeStatement: options.purposeStatement,
     });
     const req = parseOrValidation(
-      () => TrialLaunchRequestSchema.parse((out.body as { request: unknown }).request),
+      () =>
+        TrialLaunchRequestSchema.parse(
+          (out.body as { request: unknown }).request,
+        ),
       "trial launch request",
     );
     void req;
     return { status: out.status, body: out.body, replayed: out.replayed };
   }
 
-  function expireTrial(sessionId: string, proposalId: string, now?: number): void {
+  function expireTrial(
+    sessionId: string,
+    proposalId: string,
+    now?: number,
+  ): void {
     expireTrialProposal(db, sessionId, proposalId, now ?? Date.now());
   }
 
-  function fenceTrialUnknown(sessionId: string, scope: string, now?: number): number {
-    return fenceUnknownExecution(db, sessionId, scope, now ?? Date.now());
+  function fenceTrialUnknown(
+    sessionId: string,
+    opts: {
+      workspaceAlias: string;
+      executionId: string;
+      taskHash?: string | null;
+      pid?: number | null;
+      bootId?: string | null;
+      reason: string;
+    },
+    now?: number,
+  ): number {
+    return fenceUnknownExecution(db, sessionId, now ?? Date.now(), opts);
   }
 
   function hashTrialLaunchRequest(request: unknown): string {
@@ -5302,6 +5344,146 @@ export function createKernelRepository(
       "trial launch request",
     );
     return hashTrialRequest(parsed);
+  }
+
+  /* Internal execution-lifecycle facade (Root service only, never browser). */
+  function readTrialLaunchIntent(sessionId: string, executionId: string) {
+    return readTrialIntent(db, sessionId, executionId);
+  }
+
+  function registerTrialWorkerBoot(
+    input: {
+      executionId: string;
+      sessionId?: string;
+      pid: number;
+      bootId: string;
+      processStartTicks: string;
+      observedAt?: number;
+    },
+    now?: number,
+  ) {
+    return registerWorkerBoot(db, {
+      ...input,
+      ...(now !== undefined ? { now } : {}),
+    });
+  }
+
+  function issueTrialLaunchPermit(
+    sessionId: string,
+    executionId: string,
+    deps: AutonomyKeyOptions & {
+      observation: TrustedObservation;
+      profile: TrialProfileSnapshot;
+      requestHash: string;
+    },
+  ) {
+    return issueLaunchPermit(db, sessionId, executionId, {
+      key: deps.key,
+      ...(deps.now !== undefined ? { now: deps.now } : {}),
+      observation: deps.observation,
+      profile: deps.profile,
+      requestHash: deps.requestHash,
+    });
+  }
+
+  function readTrialLaunchPermit(sessionId: string, executionId: string) {
+    return readLaunchPermit(db, sessionId, executionId);
+  }
+
+  function readTrialWorkerOutcome(sessionId: string, executionId: string) {
+    return readWorkerOutcome(db, sessionId, executionId);
+  }
+
+  function readTrialWorkerOutcomeByProposal(
+    sessionId: string,
+    proposalId: string,
+  ) {
+    return readWorkerOutcomeByProposal(db, sessionId, proposalId);
+  }
+
+  function recordTrialWorkerResult(
+    sessionId: string,
+    executionId: string,
+    input: {
+      detail: string;
+      observation: TrustedObservation;
+      result: {
+        taskHash: string;
+        exitCode: number;
+        checks: { id: string; ok: boolean }[];
+        outputMatched: boolean;
+        noTimeout: boolean;
+      };
+    },
+    now?: number,
+  ) {
+    return recordWorkerResult(db, sessionId, executionId, {
+      ...input,
+      ...(now !== undefined ? { now } : {}),
+    });
+  }
+
+  function recordTrialQuiescence(
+    sessionId: string,
+    scope: string,
+    executionId: string | null,
+    now?: number,
+    opts?: {
+      workspaceAlias: string;
+      executionId?: string;
+      taskHash?: string | null;
+      pid?: number | null;
+      bootId?: string | null;
+      reason: string;
+    },
+  ) {
+    return recordQuiescence(db, sessionId, scope, executionId, now, opts);
+  }
+
+  function clearTrialAliasFence(
+    workspaceAlias: string,
+    executionId: string,
+    observation: TrustedObservation,
+  ) {
+    return clearAliasFence(db, workspaceAlias, executionId, observation);
+  }
+
+  function trialAuthorityDeadline(
+    sessionId: string,
+    taskId: string,
+    operation: "investigate" | "implement" | "verify" | "maintenance_trial",
+    writePaths: string[],
+    workspaceAlias: string,
+    proposalExpiry: string,
+    now: number,
+  ) {
+    return authorityDeadlineMs(
+      db,
+      sessionId,
+      taskId,
+      operation,
+      writePaths,
+      workspaceAlias,
+      proposalExpiry,
+      now,
+    );
+  }
+
+  function reconcileTrialExpiries(now?: number) {
+    return reconcileTrialExpiry(db, now);
+  }
+
+  /**
+   * Runner pick read (pure SELECT): oldest queued grant for an alias.
+   * Empty array when nothing is queued (runNext no-op).
+   */
+  function listQueuedTrialGrantsForAlias(workspaceAlias: string, limit = 1) {
+    return listQueuedTrialGrants(db, workspaceAlias, limit);
+  }
+
+  /** Runner recovery scan (pure SELECT): claimed grants with boot rows. */
+  function listClaimedTrialWorkersForRecovery() {
+    return listClaimedTrialWorkers(db);
   }
 
   return {
@@ -5400,6 +5582,19 @@ export function createKernelRepository(
     expireTrial,
     fenceTrialUnknown,
     hashTrialLaunchRequest,
+    readTrialLaunchIntent,
+    registerTrialWorkerBoot,
+    issueTrialLaunchPermit,
+    readTrialLaunchPermit,
+    readTrialWorkerOutcome,
+    readTrialWorkerOutcomeByProposal,
+    recordTrialWorkerResult,
+    recordTrialQuiescence,
+    clearTrialAliasFence,
+    trialAuthorityDeadline,
+    reconcileTrialExpiries,
+    listQueuedTrialGrantsForAlias,
+    listClaimedTrialWorkersForRecovery,
   };
 }
 

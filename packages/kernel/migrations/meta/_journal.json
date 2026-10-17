@@ -86,6 +86,13 @@
       "when": 1790000000011,
       "tag": "0012_trial_authority",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": 13,
+      "when": 1790000000012,
+      "tag": "0013_trial_lifecycle",
+      "breakpoints": true
     }
   ]
 }

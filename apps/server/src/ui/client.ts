@@ -29,6 +29,9 @@ import {
   type ReceiptOutcome,
   type RunViewState,
   runResultToAnswerParts,
+  type TrialProposalInput,
+  type TrialProposalStatus,
+  trialProposalModel,
 } from "./reducer.js";
 
 const LS_SESSION = "ch.sessionId";
@@ -543,6 +546,15 @@ class ConversationApp {
       const panel = new AutonomyPanel(() => this.sessionId);
       panel.bind();
       void panel.refreshAll();
+    } catch {
+      // Best effort: the conversation shell stays usable.
+    }
+    // Trial proposal/approval panel: opt-in human surface, usable without
+    // any model (plain DOM + HTTP). Fail-open locally like AutonomyPanel.
+    try {
+      const trials = new TrialPanel(() => this.sessionId);
+      trials.bind();
+      void trials.refreshAll();
     } catch {
       // Best effort: the conversation shell stays usable.
     }
@@ -4504,10 +4516,7 @@ class AutonomyPanel {
     this.purposeDetailBody.textContent += `\n履歴:\n${lines.join("\n")}`;
   }
 
-  private formatHistoryEvents(
-    events: unknown,
-    withNote: boolean,
-  ): string[] {
+  private formatHistoryEvents(events: unknown, withNote: boolean): string[] {
     if (!Array.isArray(events)) {
       return [];
     }
@@ -4523,8 +4532,7 @@ class AutonomyPanel {
       if (typeof row.seq !== "number" || typeof row.event !== "string") {
         continue;
       }
-      const from =
-        typeof row.fromStatus === "string" ? row.fromStatus : "−";
+      const from = typeof row.fromStatus === "string" ? row.fromStatus : "−";
       const to = typeof row.toStatus === "string" ? row.toStatus : "";
       const note =
         withNote && typeof row.note === "string" && row.note.length > 0
@@ -5309,6 +5317,358 @@ class AutonomyPanel {
 
 export type { HistoryItemView };
 export { ConversationApp };
+
+/**
+ * Structural guard for one trial proposal read from the ACTUAL list API
+ * (exact contracts `TrialProposalView`): every field the card binds must
+ * have its expected primitive type, so a malformed body renders nothing
+ * rather than a partial card. Unknown body keys are never read.
+ */
+function isTrialProposal(
+  value: unknown,
+): value is TrialProposalInput & { readonly id: string } {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const item = value as Record<string, unknown>;
+  const aliasOk =
+    item.workspaceAlias === null ||
+    (typeof item.workspaceAlias === "string" &&
+      /^[a-z0-9_-]{1,64}$/.test(item.workspaceAlias));
+  let profileOk = false;
+  if (item.profile === null) {
+    profileOk = true;
+  } else if (typeof item.profile === "object" && item.profile !== null) {
+    const profile = item.profile as Record<string, unknown>;
+    profileOk =
+      typeof profile.configFingerprint === "string" &&
+      /^[0-9a-f]{64}$/.test(profile.configFingerprint) &&
+      typeof profile.sourceRevision === "string" &&
+      /^[0-9a-f]{40}$/.test(profile.sourceRevision);
+  }
+  return (
+    typeof item.id === "string" &&
+    (item.status === "staged" ||
+      item.status === "granted" ||
+      item.status === "expired" ||
+      item.status === "invalidated") &&
+    typeof item.objective === "string" &&
+    Array.isArray(item.acceptance) &&
+    Array.isArray(item.literalPatchPaths) &&
+    typeof item.operation === "string" &&
+    typeof item.readOnlyMode === "boolean" &&
+    typeof item.expiry === "string" &&
+    typeof item.timeoutMs === "number" &&
+    typeof item.maxOutputBytes === "number" &&
+    Array.isArray(item.requiredChecks) &&
+    aliasOk &&
+    profileOk &&
+    typeof item.possibleExternalDataConsent === "boolean"
+  );
+}
+
+/**
+ * Structural guard for the session trial outcome attached to the trial
+ * reads (`outcome: { status, authorized, summary } | null`). Unknown keys
+ * are never read; malformed values render as absent.
+ */
+function readTrialOutcome(value: unknown): {
+  readonly status: string;
+  readonly authorized: boolean;
+  readonly summary: string;
+} | null {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+  const outcome = (value as Record<string, unknown>).outcome;
+  if (outcome === null || outcome === undefined) {
+    return null;
+  }
+  if (typeof outcome !== "object" || Array.isArray(outcome)) {
+    return null;
+  }
+  const record = outcome as Record<string, unknown>;
+  if (
+    typeof record.status !== "string" ||
+    typeof record.authorized !== "boolean"
+  ) {
+    return null;
+  }
+  if (
+    record.summary !== undefined &&
+    record.summary !== null &&
+    typeof record.summary !== "string"
+  ) {
+    return null;
+  }
+  return {
+    status: record.status,
+    authorized: record.authorized,
+    summary: typeof record.summary === "string" ? record.summary : "",
+  };
+}
+
+/** Fixed plain-text outcome lines for the trial detail view. */
+function trialOutcomeLines(
+  outcome: {
+    readonly status: string;
+    readonly authorized: boolean;
+    readonly summary: string;
+  } | null,
+): readonly string[] {
+  if (outcome === null) {
+    return ["結果: 未実行"];
+  }
+  const lines = [
+    `結果: ${outcome.status} (承認済み: ${outcome.authorized ? "はい" : "いいえ"})`,
+  ];
+  if (outcome.summary.length > 0) {
+    lines.push(`概要: ${outcome.summary.slice(0, 200)}`);
+  }
+  return lines;
+}
+
+/**
+ * Trial proposal/approval panel (opt-in human surface). Lists the session's
+ * staged proposals with their FROZEN staged snapshot (objective,
+ * acceptance, literal paths, operation, read-only mode, expiry,
+ * timeout/maxOutputBytes, required checks, workspace alias, external-data
+ * consent, status) and offers explicit Approve / Expire for staged ones.
+ * All strings via `textContent`; no `innerHTML`. Fail-open locally: a
+ * missing section never breaks the conversation.
+ */
+class TrialPanel {
+  private readonly getSessionId: () => string | null;
+  private readonly status: HTMLElement;
+  private readonly list: HTMLElement;
+  private readonly detail: HTMLElement;
+  private readonly detailBody: HTMLElement;
+  private readonly approveButton: HTMLButtonElement;
+  private readonly expireButton: HTMLButtonElement;
+  private readonly opStatus: HTMLElement;
+  private selected: string | null = null;
+  private mutating = false;
+  private seq = 0;
+
+  constructor(getSessionId: () => string | null) {
+    this.getSessionId = getSessionId;
+    const get = <T extends HTMLElement>(id: string, tag: string): T =>
+      (document.getElementById(id) as T | null) ?? (el(tag) as unknown as T);
+    this.status = get<HTMLElement>("trial-status", "p");
+    this.list = get<HTMLElement>("trial-list", "ul");
+    this.detail = get<HTMLElement>("trial-detail", "div");
+    this.detailBody = get<HTMLElement>("trial-detail-body", "pre");
+    this.approveButton = get<HTMLButtonElement>(
+      "trial-approve-button",
+      "button",
+    );
+    this.expireButton = get<HTMLButtonElement>("trial-expire-button", "button");
+    this.opStatus = get<HTMLElement>("trial-op-status", "p");
+  }
+
+  bind(): void {
+    this.approveButton.addEventListener("click", () => {
+      void this.approve();
+    });
+    this.expireButton.addEventListener("click", () => {
+      void this.expire();
+    });
+  }
+
+  async refreshAll(): Promise<void> {
+    await this.refreshList();
+  }
+
+  private async refreshList(): Promise<void> {
+    const sessionId = this.getSessionId();
+    if (sessionId === null) {
+      return;
+    }
+    this.seq += 1;
+    const mine = this.seq;
+    let listed: { status: number; body: unknown };
+    try {
+      listed = await fetchJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/trials`,
+      );
+    } catch {
+      return;
+    }
+    if (this.seq !== mine || this.getSessionId() !== sessionId) {
+      return;
+    }
+    if (listed.status === 404) {
+      // Disabled config (or unknown session): fixed disabled state, no card.
+      this.list.replaceChildren();
+      this.detail.hidden = true;
+      this.selected = null;
+      this.status.textContent = "試行の提案は無効です";
+      return;
+    }
+    if (listed.status !== 200) {
+      return;
+    }
+    const items = (listed.body as { items?: unknown }).items;
+    if (!Array.isArray(items)) {
+      return;
+    }
+    const proposals = items.filter(isTrialProposal);
+    this.list.replaceChildren();
+    let staged = 0;
+    for (const proposal of proposals) {
+      if (proposal.status === "staged") {
+        staged += 1;
+      }
+      const row = document.createElement("li");
+      const button = document.createElement("button");
+      button.type = "button";
+      // Frozen snapshot summary line only (no technical ids).
+      button.textContent = `${proposal.operation} [${proposal.workspaceAlias ?? "unbound"}]: ${proposal.objective} (${proposal.status})`;
+      const id = proposal.id;
+      button.addEventListener("click", () => {
+        void this.select(id);
+      });
+      row.appendChild(button);
+      this.list.appendChild(row);
+    }
+    this.status.textContent =
+      staged > 0
+        ? "承認待ちの試行の提案があります"
+        : "承認待ちの試行の提案はありません";
+    if (this.selected !== null) {
+      await this.select(this.selected);
+    }
+  }
+
+  private async select(proposalId: string): Promise<void> {
+    const sessionId = this.getSessionId();
+    if (sessionId === null) {
+      return;
+    }
+    this.seq += 1;
+    const mine = this.seq;
+    let fetched: { status: number; body: unknown };
+    try {
+      fetched = await fetchJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/trials/${encodeURIComponent(proposalId)}`,
+      );
+    } catch {
+      return;
+    }
+    if (this.seq !== mine || this.getSessionId() !== sessionId) {
+      return;
+    }
+    if (fetched.status !== 200 || !isTrialProposal(fetched.body)) {
+      return;
+    }
+    const proposal = fetched.body;
+    const outcome = readTrialOutcome(fetched.body);
+    this.selected = proposal.id;
+    const model = trialProposalModel(
+      {
+        status: proposal.status as TrialProposalStatus,
+        objective: proposal.objective,
+        acceptance: proposal.acceptance.filter(
+          (entry): entry is string => typeof entry === "string",
+        ),
+        literalPatchPaths: proposal.literalPatchPaths.filter(
+          (entry): entry is string => typeof entry === "string",
+        ),
+        operation: proposal.operation,
+        readOnlyMode: proposal.readOnlyMode,
+        expiry: proposal.expiry,
+        timeoutMs: proposal.timeoutMs,
+        maxOutputBytes: proposal.maxOutputBytes,
+        requiredChecks: proposal.requiredChecks.filter(
+          (entry): entry is string => typeof entry === "string",
+        ),
+        workspaceAlias: proposal.workspaceAlias,
+        profile: proposal.profile,
+        possibleExternalDataConsent: proposal.possibleExternalDataConsent,
+      } satisfies TrialProposalInput,
+      true,
+    );
+    this.detailBody.replaceChildren();
+    for (const line of model.detailLines) {
+      const lineEl = document.createElement("div");
+      lineEl.textContent = line;
+      if (
+        line.startsWith("設定指紋: ") &&
+        proposal.profile !== null &&
+        typeof proposal.profile === "object"
+      ) {
+        const full = (proposal.profile as { configFingerprint: string })
+          .configFingerprint;
+        if (typeof full === "string") {
+          lineEl.title = full;
+        }
+      }
+      this.detailBody.appendChild(lineEl);
+    }
+    // Session trial outcome (grant status + authorized + fixed summary):
+    // all via textContent, never innerHTML.
+    for (const line of trialOutcomeLines(outcome)) {
+      const lineEl = document.createElement("div");
+      lineEl.textContent = line;
+      this.detailBody.appendChild(lineEl);
+    }
+    this.opStatus.textContent = model.statusText;
+    this.approveButton.disabled = !model.decisionVisible;
+    this.expireButton.disabled = !model.decisionVisible;
+    this.detail.hidden = false;
+  }
+
+  private async approve(): Promise<void> {
+    const sessionId = this.getSessionId();
+    const id = this.selected;
+    if (sessionId === null || id === null || this.mutating) {
+      return;
+    }
+    this.mutating = true;
+    try {
+      const result = await postJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/trials/${encodeURIComponent(id)}/approve`,
+        {},
+        randomUuid(),
+      );
+      if (result.status === 201) {
+        this.opStatus.textContent = "承認しました";
+      } else if (result.status === 409) {
+        this.opStatus.textContent = "他の変更がありました。一覧を更新しました";
+      } else {
+        this.opStatus.textContent = "承認に失敗しました";
+      }
+      await this.refreshList();
+    } finally {
+      this.mutating = false;
+    }
+  }
+
+  private async expire(): Promise<void> {
+    const sessionId = this.getSessionId();
+    const id = this.selected;
+    if (sessionId === null || id === null || this.mutating) {
+      return;
+    }
+    this.mutating = true;
+    try {
+      // Keyless state-idempotent expire: no Idempotency-Key header.
+      const result = await postJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/trials/${encodeURIComponent(id)}/expire`,
+        {},
+        null,
+      );
+      if (result.status === 200) {
+        this.opStatus.textContent = "取り消しました";
+      } else {
+        this.opStatus.textContent = "取り消しに失敗しました";
+      }
+      await this.refreshList();
+    } finally {
+      this.mutating = false;
+    }
+  }
+}
 
 function boot(): void {
   const app = new ConversationApp();

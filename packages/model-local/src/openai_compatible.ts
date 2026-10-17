@@ -12,6 +12,7 @@ import {
   assertToolArgumentsByteLengthForTool,
   assertToolCallCountWithinBound,
   assertToolCallingCapability,
+  type ChatCallOptions,
   canonicalToolArgumentsJson,
   extractModelUsage,
   isRecord,
@@ -313,7 +314,7 @@ export function createOpenAICompatibleGateway(
     capabilities: OPENAI_COMPATIBLE_CAPABILITIES,
     baseUrl: config.baseUrl,
     chatUrl,
-    async chat(request, options) {
+    async chat(request, options: ChatCallOptions | undefined) {
       validateChatRequest(request);
       assertToolCallingCapability(
         OPENAI_COMPATIBLE_CAPABILITIES,
@@ -328,6 +329,9 @@ export function createOpenAICompatibleGateway(
         messages: request.messages.map(toOpenAIMessage),
         stream: false,
       };
+      if (request.maxOutputTokens !== undefined) {
+        body.max_tokens = request.maxOutputTokens;
+      }
       if (request.tools !== undefined && request.tools.length > 0) {
         body.tools = request.tools.map((tool) => ({
           type: "function",
@@ -349,6 +353,9 @@ export function createOpenAICompatibleGateway(
         apiKey: config.apiKey,
         timeoutMs: config.timeoutMs,
         ...(options?.signal === undefined ? {} : { signal: options.signal }),
+        ...(options?.maxResponseBytes === undefined
+          ? {}
+          : { maxResponseBytes: options.maxResponseBytes }),
       });
       return normalizeOpenAIResponse(raw, request.tools);
     },

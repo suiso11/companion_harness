@@ -3700,3 +3700,56 @@ while chat 202, proposals 0); real-Chromium `e2e/autonomy.spec.ts` 2/2
 Limits: base-only (no v12 executions / pi bridge); history pages cap
 200, lists cap 100; control gates only new autonomous background work.
 Prior pin7b40/M6 fixes and historical records elsewhere are preserved.
+
+## Autonomous trial execution (opt-in)
+
+Strict opt-in workspace-trial runner (schema 12 trial authority). Unset
+`COMPANION_AUTONOMY_JSON` (default) disables the whole path: no
+proposals, grants, runner, or bridge spawn.
+
+### Configuration
+
+- `COMPANION_AUTONOMY_JSON` must be one strict JSON object with exactly
+  the profile block `{ available, enabled, mandatoryChecks,
+  configFingerprint, sourceRevision, currentModel,
+  disclosedWholeRepoRead, timeoutMs, maxOutputBytes, workspaceAlias }`
+  plus a `runner` block `{ nodeRealpath, bridgeScriptPath,
+  bridgeConfigTemplatePath, systemctlRealpath, xdgRuntimeDir, relay,
+  observe, pollMs }`, where `relay` carries `{ maxRequestBytes,
+  maxModelCalls, maxOutputTokens, maxResponseBytes, perCallTimeoutMs,
+  maxConcurrent }` and `observe` carries `{ activeTimeoutMs,
+  goneTimeoutMs, pollIntervalMs }`. Every field is required; there are
+  no defaults. Unknown keys, wrong types, or out-of-range values fail
+  startup closed with a fixed safe message.
+- `COMPANION_MODEL_JSON` is additionally required: without a model
+  gateway there is no extraction and no trial model leg.
+- The bridge path is the Own-pi wholejob capsule guest
+  (`bridgeScriptPath` + `bridgeConfigTemplatePath`, spawned via
+  `nodeRealpath` under a systemd scope checked via `systemctlRealpath`
+  / `xdgRuntimeDir`). No other bridge is supported.
+
+### Runtime behavior
+
+- Startup boots with the global control paused; autonomous work starts
+  only after an explicit resume (guarded: a revoked parent requires a
+  NEW active same-scope parent before resume).
+- Approval is explicit in the UI: one approval stages exactly one grant
+  plus one execution UUID (`UNIQUE proposal_id` blocks double-approve).
+  The runner executes strictly one claimed grant at a time.
+- STOP revokes only `claimed` grants (`queued` survives; reclaim needs a
+  fresh resume). Foreground work preempts background trials; shutdown
+  drains the runner (bridge child reaped, no orphan scope).
+- An unknown execution raises a durable per-alias fence that denies
+  further stage/approve/claim for that workspace alias until the exact
+  fence row is cleared; unrelated scopes/aliases continue.
+- Results are workspace trials only: journal lines always carry
+  `productionApplied: false`, and trial completion never auto-completes
+  the owning Task/Goal (they stay `open`/`active`).
+- Verified 2026-10-17, synthetic only (fixed `synth-e2e-model` over a
+  loopback relay, never a real model): full server A+B driver green —
+  scenario A `consumed`/`authorized`/`bridge-exit:0` (12 model calls,
+  all fixed-model, all within the 2048-token cap, unit gone, Task open,
+  Goal active, git clean) and scenario B STOP `revoked`/unauthorized/
+  `bridge-exit:143` with the unit gone. Evidence:
+  `.all-plan-progress/AV-E2E-RESULTS.json` (`run7`); the throwaway
+  `.e2e-trial/` driver was deleted afterwards.

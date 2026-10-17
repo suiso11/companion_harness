@@ -9,6 +9,7 @@
 //   (operation/version domain separation), SHA-256 hex.
 
 import { createHash, randomUUID } from "node:crypto";
+import type Database from "better-sqlite3";
 
 type JsonObject = Record<string, unknown>;
 
@@ -125,6 +126,63 @@ export const IDEMPOTENCY_OPERATIONS = {
   approveTrial: { operation: "trial_approve", schemaVersion: 1 },
   claimTrial: { operation: "trial_claim", schemaVersion: 1 },
 } as const;
+
+/** Shared BEGIN IMMEDIATE transaction helper (autonomy + trial leaf). */
+export function withImmediateTx<T>(db: Database.Database, fn: () => T): T {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const out = fn();
+    db.exec("COMMIT");
+    return out;
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // Best effort: the original error carries the failure.
+    }
+    throw error;
+  }
+}
+
+/** Raw idempotency-cache row read (callers parse/validate the body). */
+export function readIdempotencyRow(
+  db: Database.Database,
+  scope: string,
+  key: string,
+): {
+  requestHash: string;
+  responseStatus: number;
+  responseBody: string;
+} | null {
+  const row = db
+    .prepare(
+      "SELECT request_hash, response_status, response_body FROM api_idempotency WHERE scope = ? AND key = ?",
+    )
+    .get(scope, key) as
+    | { request_hash: string; response_status: number; response_body: string }
+    | undefined;
+  if (row === undefined) return null;
+  return {
+    requestHash: row.request_hash,
+    responseStatus: row.response_status,
+    responseBody: row.response_body,
+  };
+}
+
+/** Raw idempotency-cache row write (body must already be a JSON string). */
+export function writeIdempotencyRow(
+  db: Database.Database,
+  scope: string,
+  key: string,
+  hash: string,
+  status: number,
+  bodyJson: string,
+  now: number,
+): void {
+  db.prepare(
+    "INSERT INTO api_idempotency (scope, key, request_hash, response_status, response_body, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+  ).run(scope, key, hash, status, bodyJson, now);
+}
 
 /** Generate a new UUID v4 harness id. */
 export function generateId(): string {

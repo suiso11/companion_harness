@@ -1184,6 +1184,9 @@ export const trialProposals = sqliteTable("trial_proposals", {
   checksJson: text("checks_json").notNull(),
   status: text("status").notNull(),
   createdAt: integer("created_at").notNull(),
+  // Schema13: frozen staging-time workspace alias + profile snapshot JSON.
+  workspaceAlias: text("workspace_alias"),
+  profileJson: text("profile_json"),
 });
 
 export const trialGrants = sqliteTable("trial_grants", {
@@ -1197,7 +1200,55 @@ export const trialGrants = sqliteTable("trial_grants", {
   requestJson: text("request_json"),
   createdAt: integer("created_at").notNull(),
   claimedAt: integer("claimed_at"),
+  // Schema13: frozen approval-time workspace alias + profile snapshot JSON.
+  workspaceAlias: text("workspace_alias"),
+  approvedProfileJson: text("approved_profile_json"),
 });
+
+// Schema13: internal execution-lifecycle tables (Root service only).
+export const trialWorkerBoots = sqliteTable("trial_worker_boots", {
+  executionId: text("execution_id").primaryKey(),
+  sessionId: text("session_id").notNull(),
+  pid: integer("pid").notNull(),
+  bootId: text("boot_id").notNull(),
+  processStartTicks: text("process_start_ticks").notNull(),
+  observedAt: integer("observed_at").notNull(),
+  startedAt: integer("started_at").notNull(),
+});
+
+export const trialLaunchPermits = sqliteTable("trial_launch_permits", {
+  permitId: text("permit_id").primaryKey(),
+  executionId: text("execution_id").notNull().unique(),
+  sessionId: text("session_id").notNull(),
+  issuedAt: integer("issued_at").notNull(),
+  consumedAt: integer("consumed_at").notNull(),
+});
+
+export const trialWorkerOutcomes = sqliteTable("trial_worker_outcomes", {
+  executionId: text("execution_id").primaryKey(),
+  sessionId: text("session_id").notNull(),
+  succeeded: integer("succeeded").notNull(),
+  quiescent: integer("quiescent").notNull(),
+  authorized: integer("authorized").notNull(),
+  taskHash: text("task_hash"),
+  detail: text("detail").notNull(),
+  recordedAt: integer("recorded_at").notNull(),
+});
+
+export const trialAliasFences = sqliteTable(
+  "trial_alias_fences",
+  {
+    workspaceAlias: text("workspace_alias").notNull(),
+    executionId: text("execution_id").notNull(),
+    taskHash: text("task_hash"),
+    pid: integer("pid"),
+    bootId: text("boot_id"),
+    reason: text("reason").notNull(),
+    createdAt: integer("created_at").notNull(),
+    clearedAt: integer("cleared_at"),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceAlias, t.executionId] })],
+);
 
 export const kernelSchema = {
   sessions,
@@ -1211,6 +1262,10 @@ export const kernelSchema = {
   trialConstraintRules,
   trialProposals,
   trialGrants,
+  trialWorkerBoots,
+  trialLaunchPermits,
+  trialWorkerOutcomes,
+  trialAliasFences,
   turns,
   runs,
   turnSelections,

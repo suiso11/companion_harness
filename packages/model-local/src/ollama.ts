@@ -10,6 +10,7 @@ import {
   assertToolArgumentsByteLengthForTool,
   assertToolCallCountWithinBound,
   assertToolCallingCapability,
+  type ChatCallOptions,
   canonicalToolArgumentsJson,
   extractModelUsage,
   isRecord,
@@ -256,7 +257,7 @@ export function createOllamaGateway(options: GatewayOptions): ModelGateway {
     capabilities: OLLAMA_CAPABILITIES,
     baseUrl: config.baseUrl,
     chatUrl,
-    async chat(request, options) {
+    async chat(request, options: ChatCallOptions | undefined) {
       validateChatRequest(request);
       assertToolCallingCapability(OLLAMA_CAPABILITIES, request.tools);
       // Recompute the fetch target from the pinned base on every request
@@ -269,6 +270,9 @@ export function createOllamaGateway(options: GatewayOptions): ModelGateway {
         messages: request.messages.map(toOllamaMessage),
         stream: false,
       };
+      if (request.maxOutputTokens !== undefined) {
+        body.options = { num_predict: request.maxOutputTokens };
+      }
       if (request.tools !== undefined && request.tools.length > 0) {
         body.tools = request.tools.map((tool) => ({
           type: "function",
@@ -289,6 +293,9 @@ export function createOllamaGateway(options: GatewayOptions): ModelGateway {
         apiKey: config.apiKey,
         timeoutMs: config.timeoutMs,
         ...(options?.signal === undefined ? {} : { signal: options.signal }),
+        ...(options?.maxResponseBytes === undefined
+          ? {}
+          : { maxResponseBytes: options.maxResponseBytes }),
       });
       return normalizeOllamaResponse(raw, request.tools);
     },

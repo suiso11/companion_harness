@@ -11,6 +11,7 @@ import {
   type ApiErrorCode,
   AutonomyControlSetRequestSchema,
   AutonomyHistoryQuerySchema,
+  AutonomyListQuerySchema,
   CancelRunRequestSchema,
   CancelRunResponseSchema,
   CreateSessionRequestSchema,
@@ -53,6 +54,9 @@ import {
   TaskHoldRequestSchema,
   TaskResumeRequestSchema,
   TaskTransitionRequestSchema,
+  type TrialProfileSnapshot,
+  TrialProposalViewSchema,
+  TrialStageRequestSchema,
 } from "@companion/contracts";
 import {
   ActionNotCancellableError,
@@ -2185,7 +2189,9 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       ...(query.values.afterSeq !== undefined
         ? { afterSeq: query.values.afterSeq }
         : {}),
-      ...(query.values.limit !== undefined ? { limit: query.values.limit } : {}),
+      ...(query.values.limit !== undefined
+        ? { limit: query.values.limit }
+        : {}),
     });
     if (parsed.success !== true) {
       return validationError(c);
@@ -2508,7 +2514,9 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       ...(query.values.afterSeq !== undefined
         ? { afterSeq: query.values.afterSeq }
         : {}),
-      ...(query.values.limit !== undefined ? { limit: query.values.limit } : {}),
+      ...(query.values.limit !== undefined
+        ? { limit: query.values.limit }
+        : {}),
     });
     if (parsed.success !== true) {
       return validationError(c);
@@ -2685,6 +2693,313 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         }),
         200,
       );
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  /* ---------------- trial proposals/approvals (opt-in, config profile) --- */
+  // Human-facing trial proposal/approval surface. The trusted profile
+  // snapshot + workspace alias come ONLY from the frozen server config
+  // (COMPANION_AUTONOMY_JSON); request bodies can never supply them (the
+  // strict stage schema rejects unknown keys, and approve/expire take an
+  // exactly-empty body). Worker launch, scope observation, permit issuance
+  // and result recording stay internal and are never exposed here. Pure
+  // reads never expire or mutate; expiry is an explicit POST only.
+
+  /** Fixed disabled response: GETs 404, POSTs 409, never touching the DB. */
+  function trialsDisabled(c: Context, mutation: boolean): Response {
+    return c.json(
+      { error: { code: "trials_disabled", message: "trials are disabled" } },
+      (mutation ? 409 : 404) as 404,
+    );
+  }
+
+  /** Frozen config profile snapshot + workspace alias (never body flags). */
+  function trialProfileOf(cfg: ServerConfig): {
+    profile: TrialProfileSnapshot;
+    workspaceAlias: string;
+  } | null {
+    const trial = cfg.trial;
+    if (trial === null) {
+      return null;
+    }
+    return {
+      profile: {
+        available: trial.available,
+        enabled: trial.enabled,
+        mandatoryChecks: [...trial.mandatoryChecks],
+        configFingerprint: trial.configFingerprint,
+        sourceRevision: trial.sourceRevision,
+        currentModel: trial.currentModel,
+        disclosedWholeRepoRead: trial.disclosedWholeRepoRead,
+        timeoutMs: trial.timeoutMs,
+        maxOutputBytes: trial.maxOutputBytes,
+      },
+      workspaceAlias: trial.workspaceAlias,
+    };
+  }
+
+  /** Strict exactly-empty body (approve/expire carry no inputs). */
+  function isEmptyBody(value: unknown): boolean {
+    return (
+      typeof value === "object" &&
+      value !== null &&
+      !Array.isArray(value) &&
+      Object.keys(value).length === 0
+    );
+  }
+
+  // Stage a DATA-only trial proposal (keyed, exactly-once): strict
+  // `TrialStageRequestSchema` body (unknown keys rejected, so no
+  // profile/alias override is possible).
+  app.post("/api/sessions/:sessionId/trials", async (c) => {
+    const started = now();
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const keyed = requireIdempotencyKey(c);
+    if ("response" in keyed) {
+      return keyed.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    const raw = await readJsonBody(c);
+    if (!raw.ok) {
+      return validationError(c);
+    }
+    const parsedBody = TrialStageRequestSchema.safeParse(raw.value);
+    if (!parsedBody.success) {
+      return validationError(c);
+    }
+    const frozen = trialProfileOf(config);
+    if (frozen === null) {
+      return trialsDisabled(c, true);
+    }
+    if (draining) {
+      return shuttingDown(c);
+    }
+    try {
+      const out = repo.stageTrial(session.id, parsedBody.data, {
+        key: keyed.key,
+        now: now(),
+        profile: frozen.profile,
+        workspaceAlias: frozen.workspaceAlias,
+      });
+      const body = TrialProposalViewSchema.parse(out.body);
+      logger.info("http.trials.stage", {
+        sessionId: session.id,
+        proposalId: body.id,
+        status: out.status,
+        bytes: raw.bytes,
+        durationMs: Math.max(now() - started, 0),
+      });
+      return c.json(body, out.status as 201);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  // Approve a staged proposal (keyed, one grant): the frozen config
+  // profile/alias are re-checked against the staged snapshot inside the
+  // kernel (drift is a 409 re-stage).
+  app.post("/api/sessions/:sessionId/trials/:proposalId/approve", async (c) => {
+    const started = now();
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const proposal = requireUuid(c, c.req.param("proposalId"), "proposalId");
+    if ("response" in proposal) {
+      return proposal.response;
+    }
+    const keyed = requireIdempotencyKey(c);
+    if ("response" in keyed) {
+      return keyed.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    const raw = await readJsonBody(c);
+    if (!raw.ok) {
+      return validationError(c);
+    }
+    if (!isEmptyBody(raw.value)) {
+      return validationError(c);
+    }
+    const frozen = trialProfileOf(config);
+    if (frozen === null) {
+      return trialsDisabled(c, true);
+    }
+    if (draining) {
+      return shuttingDown(c);
+    }
+    try {
+      const out = repo.approveTrial(session.id, proposal.id, {
+        key: keyed.key,
+        now: now(),
+        profile: frozen.profile,
+        workspaceAlias: frozen.workspaceAlias,
+      });
+      logger.info("http.trials.approve", {
+        sessionId: session.id,
+        proposalId: proposal.id,
+        status: out.status,
+        durationMs: Math.max(now() - started, 0),
+      });
+      return c.json(out.body, out.status as 201);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  // List proposals for a session (pure read, never expires/mutates).
+  app.get("/api/sessions/:sessionId/trials", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const query = strictQuery(c, ["limit"]);
+    if (!query.ok) {
+      return validationError(c);
+    }
+    const parsed = AutonomyListQuerySchema.safeParse({
+      ...(query.values.limit !== undefined
+        ? { limit: query.values.limit }
+        : {}),
+    });
+    if (!parsed.success) {
+      return validationError(c);
+    }
+    if (trialProfileOf(config) === null) {
+      return trialsDisabled(c, false);
+    }
+    try {
+      const body = repo.listTrials(session.id, { limit: parsed.data.limit });
+      const items = body.items.map((item) => ({
+        ...item,
+        outcome: repo.readTrialWorkerOutcomeByProposal(session.id, item.id),
+      }));
+      return c.json({ ...body, items }, 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  // Read one session-owned proposal (pure read, never expires/mutates).
+  // Carries the grant outcome alongside (null until granted) so the UI
+  // trial section renders consumed/interrupted/revoked + authorized.
+  app.get("/api/sessions/:sessionId/trials/:proposalId", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const proposal = requireUuid(c, c.req.param("proposalId"), "proposalId");
+    if ("response" in proposal) {
+      return proposal.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    if (trialProfileOf(config) === null) {
+      return trialsDisabled(c, false);
+    }
+    try {
+      const listed = repo.listTrials(session.id, {});
+      const found = listed.items.find((item) => item.id === proposal.id);
+      if (found === undefined) {
+        return apiError(c, 404, "not_found", "resource not found");
+      }
+      const outcome = repo.readTrialWorkerOutcomeByProposal(
+        session.id,
+        proposal.id,
+      );
+      return c.json({ ...TrialProposalViewSchema.parse(found), outcome }, 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  // Read the grant + frozen launch intent for one session-owned execution
+  // (pure read, never expires/mutates/claims). The durable worker outcome
+  // (grant status + authorized flag + fixed observed summary) rides along
+  // so the UI can render consumed/interrupted/revoked without a second
+  // read. The summary is fixed vocabulary (bridge-exit code or fixed
+  // fence/invalid reasons), never free text.
+  app.get("/api/sessions/:sessionId/trial-grants/:executionId", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const execution = requireUuid(c, c.req.param("executionId"), "executionId");
+    if ("response" in execution) {
+      return execution.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    if (trialProfileOf(config) === null) {
+      return trialsDisabled(c, false);
+    }
+    try {
+      const body = repo.readTrialLaunchIntent(session.id, execution.id);
+      const outcome = repo.readTrialWorkerOutcome(session.id, execution.id);
+      return c.json({ ...body, outcome }, 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  // Read one session-owned proposal WITH its grant outcome (pure read).
+  // The outcome (grant status + authorized + fixed summary) renders in the
+  // trial section; absent when no grant exists yet (staged proposals).
+
+  // Explicit expire/cancel of a staged proposal (KEYLESS, state-idempotent):
+  // Idempotency-Key is deliberately not used (same family as reject). No
+  // draining gate: expiring creates no Run and no queued work.
+  app.post("/api/sessions/:sessionId/trials/:proposalId/expire", async (c) => {
+    const started = now();
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const proposal = requireUuid(c, c.req.param("proposalId"), "proposalId");
+    if ("response" in proposal) {
+      return proposal.response;
+    }
+    if (c.req.header("idempotency-key") !== undefined) {
+      return validationError(c, "idempotency-key is not used for expire");
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    const raw = await readJsonBody(c);
+    if (!raw.ok) {
+      return validationError(c);
+    }
+    if (!isEmptyBody(raw.value)) {
+      return validationError(c);
+    }
+    if (trialProfileOf(config) === null) {
+      return trialsDisabled(c, true);
+    }
+    try {
+      repo.expireTrial(session.id, proposal.id, now());
+      const listed = repo.listTrials(session.id, {});
+      const found = listed.items.find((item) => item.id === proposal.id);
+      if (found === undefined) {
+        return apiError(c, 404, "not_found", "resource not found");
+      }
+      const body = TrialProposalViewSchema.parse(found);
+      logger.info("http.trials.expire", {
+        sessionId: session.id,
+        proposalId: proposal.id,
+        status: body.status,
+        durationMs: Math.max(now() - started, 0),
+      });
+      return c.json(body, 200);
     } catch (error) {
       return mapDomainError(c, error);
     }

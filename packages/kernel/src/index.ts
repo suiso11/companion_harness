@@ -152,20 +152,6 @@ export {
   listTaskEvents,
   recordPurposeConflict,
 } from "./autonomy.js";
-export {
-  checkTrialAuthority,
-  claimTrialGrant,
-  expireTrialProposal,
-  fenceUnknownExecution,
-  hashTrialRequest,
-  invalidateTrialsForScope,
-  listTrialProposals,
-  parseConstraintRule,
-  pathIntersectsDenied,
-  revokeAllClaimedForStop,
-  stageTrialProposal,
-  approveTrialProposal,
-} from "./trial_authority.js";
 export type {
   ManualBackupOptions,
   PreMigrationBackupOptions,
@@ -241,9 +227,12 @@ export {
   generateId,
   IDEMPOTENCY_OPERATIONS,
   isUuidV4,
+  readIdempotencyRow,
   requestHash,
   sha256Hex,
   uuidVersion,
+  withImmediateTx,
+  writeIdempotencyRow,
 } from "./canonical.js";
 export type {
   KernelDatabaseHandle,
@@ -459,3 +448,32 @@ export {
   StrategyError,
   StrategyRegistry,
 } from "./strategy.js";
+export type { TrustedObservation } from "./trial_authority.js";
+export {
+  activeAliasFence,
+  approveTrialProposal,
+  assertCanonicalLiteralPath,
+  authorityDeadlineMs,
+  checkTrialAuthority,
+  claimTrialGrant,
+  clearAliasFence,
+  expireTrialProposal,
+  fenceUnknownExecution,
+  hashTrialRequest,
+  invalidateTrialsForScope,
+  issueLaunchPermit,
+  listTrialProposals,
+  parseConstraintRule,
+  pathIntersectsDenied,
+  readLaunchPermit,
+  readTrialIntent,
+  readWorkerOutcome,
+  readWorkerOutcomeByProposal,
+  reconcileTrialExpiry,
+  recordQuiescence,
+  recordWorkerResult,
+  registerWorkerBoot,
+  revokeAllClaimedForStop,
+  stageTrialProposal,
+  wireModeForReadOnly,
+} from "./trial_authority.js";

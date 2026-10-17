@@ -33,6 +33,17 @@ body {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+#trials section {
+  border-top: 1px solid #ccc;
+  padding: 0.5rem 0;
+}
+#trial-list {
+  list-style: disc inside;
+}
+#trial-detail-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 button:disabled {
   opacity: 0.5;
 }

@@ -24,6 +24,7 @@ import {
   mcpConnectorConfigSchema,
 } from "@companion/connector-mcp";
 import {
+  MAX_RESPONSE_BYTES as GATEWAY_MAX_RESPONSE_BYTES,
   isValidApiKeyHeaderValue,
   normalizeLoopbackBaseUrl,
 } from "@companion/model-local";
@@ -192,6 +193,13 @@ export interface ServerConfig {
   readonly actions: ActionConfig;
   /** Strict opt-in remind memory config; null (unset) means memoryless. */
   readonly memory: MemoryConfig | null;
+  /**
+   * Strict opt-in trial proposal/approval surface config; null (unset)
+   * means trials disabled. When set, the profile snapshot plus the
+   * workspace alias come ONLY from this frozen config, never from a
+   * request body. No defaults for caps/checks: every field required.
+   */
+  readonly trial: TrialConfig | null;
 }
 
 /** Local model adapter (loopback-only, strict opt-in). */
@@ -678,7 +686,7 @@ function requireAbsolutePath(value: unknown): string {
     typeof value !== "string" ||
     value.length === 0 ||
     value.length > 4096 ||
-    value.includes(" ") ||
+    value.includes("\0") ||
     !isAbsolute(value)
   ) {
     throw configError("memory executable/entry/config must be absolute paths");
@@ -803,6 +811,394 @@ export function parseMemoryConfig(
 }
 
 /**
+ * Strict opt-in trial proposal/approval surface config (frozen profile
+ * snapshot + workspace alias, deep-frozen). Unset (default) means trials
+ * disabled. No defaults for caps/checks: every field is required and must
+ * satisfy the TrialProfileSnapshotSchema bounds from
+ * packages/contracts/src/trial_authority.ts, plus the workspace alias
+ * wire rule (`/^[a-z0-9_-]{1,64}$/`).
+ *
+ * - Env `COMPANION_AUTONOMY_JSON` is strict JSON only; unset means null.
+ * - Must be an exact object with only the ten snapshot/alias fields below;
+ *   any unknown key fails closed (a request body can never smuggle a
+ *   `profile`/`workspaceAlias` override through this config either).
+ * - Failures carry fixed messages only: no values escape.
+ * - The returned object (including the checks array) is deep-frozen.
+ */
+export interface TrialRunnerRelayCapsConfig {
+  readonly maxRequestBytes: number;
+  readonly maxModelCalls: number;
+  readonly maxOutputTokens: number;
+  readonly maxResponseBytes: number;
+  readonly perCallTimeoutMs: number;
+  readonly maxConcurrent: number;
+}
+
+export interface TrialRunnerObserveConfig {
+  readonly activeTimeoutMs: number;
+  readonly goneTimeoutMs: number;
+  readonly pollIntervalMs: number;
+}
+
+export interface TrialRunnerHostConfig {
+  readonly nodeRealpath: string;
+  readonly bridgeScriptPath: string;
+  readonly bridgeConfigTemplatePath: string;
+  readonly systemctlRealpath: string;
+  readonly xdgRuntimeDir: string;
+  readonly relay: TrialRunnerRelayCapsConfig;
+  readonly observe: TrialRunnerObserveConfig;
+  readonly pollMs: number;
+}
+
+export interface TrialConfig {
+  /** Snapshot: profile data is available for new grants. */
+  readonly available: boolean;
+  /** Snapshot: profile is enabled for new grants. */
+  readonly enabled: boolean;
+  /** Mandatory checks: strict non-empty unique operator set, no defaults. */
+  readonly mandatoryChecks: readonly string[];
+  /** 64 lowercase hex config fingerprint. */
+  readonly configFingerprint: string;
+  /** 40 lowercase hex source revision. */
+  readonly sourceRevision: string;
+  /** Current model identifier (1..256 chars). */
+  readonly currentModel: string;
+  /** Whole-repo READ disclosure attested. */
+  readonly disclosedWholeRepoRead: boolean;
+  /** Explicit operator timeout cap in ms (no default). */
+  readonly timeoutMs: number;
+  /** Explicit operator output cap in bytes (no default). */
+  readonly maxOutputBytes: number;
+  /** Frozen workspace alias under which proposals stage/approve. */
+  readonly workspaceAlias: string;
+  /** Required root-side runner host config (no defaults, absolute paths). */
+  readonly runner: TrialRunnerHostConfig;
+}
+
+const TRIAL_CHECK_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+const TRIAL_ALIAS_PATTERN = /^[a-z0-9_-]{1,64}$/;
+
+function requireRunnerAbsolutePath(value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > 4096 ||
+    value.includes("\0") ||
+    !isAbsolute(value)
+  ) {
+    throw configError("trial runner path must be absolute");
+  }
+  return value;
+}
+
+function requireRunnerInt(
+  value: unknown,
+  min: number,
+  max: number,
+  what: string,
+): number {
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value < min ||
+    value > max
+  ) {
+    throw configError(what);
+  }
+  return value;
+}
+
+function parseTrialRunnerConfig(raw: unknown): TrialRunnerHostConfig {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw configError("trial runner config is invalid");
+  }
+  const keys = Object.keys(raw);
+  for (const key of keys) {
+    if (
+      key !== "nodeRealpath" &&
+      key !== "bridgeScriptPath" &&
+      key !== "bridgeConfigTemplatePath" &&
+      key !== "systemctlRealpath" &&
+      key !== "xdgRuntimeDir" &&
+      key !== "relay" &&
+      key !== "observe" &&
+      key !== "pollMs"
+    ) {
+      throw configError("trial runner config has an unknown key");
+    }
+  }
+  const record = raw as {
+    nodeRealpath?: unknown;
+    bridgeScriptPath?: unknown;
+    bridgeConfigTemplatePath?: unknown;
+    systemctlRealpath?: unknown;
+    xdgRuntimeDir?: unknown;
+    relay?: unknown;
+    observe?: unknown;
+    pollMs?: unknown;
+  };
+  const nodeRealpath = requireRunnerAbsolutePath(record.nodeRealpath);
+  const bridgeScriptPath = requireRunnerAbsolutePath(record.bridgeScriptPath);
+  const bridgeConfigTemplatePath = requireRunnerAbsolutePath(
+    record.bridgeConfigTemplatePath,
+  );
+  const systemctlRealpath = requireRunnerAbsolutePath(record.systemctlRealpath);
+  const xdgRuntimeDir = requireRunnerAbsolutePath(record.xdgRuntimeDir);
+  const relayRaw = record.relay;
+  if (
+    typeof relayRaw !== "object" ||
+    relayRaw === null ||
+    Array.isArray(relayRaw)
+  ) {
+    throw configError("trial runner relay caps are invalid");
+  }
+  for (const key of Object.keys(relayRaw)) {
+    if (
+      key !== "maxRequestBytes" &&
+      key !== "maxModelCalls" &&
+      key !== "maxOutputTokens" &&
+      key !== "maxResponseBytes" &&
+      key !== "perCallTimeoutMs" &&
+      key !== "maxConcurrent"
+    ) {
+      throw configError("trial runner relay caps have an unknown key");
+    }
+  }
+  const relayRecord = relayRaw as Record<string, unknown>;
+  const relay: TrialRunnerRelayCapsConfig = Object.freeze({
+    maxRequestBytes: requireRunnerInt(
+      relayRecord.maxRequestBytes,
+      1024,
+      16777216,
+      "trial runner relay caps are invalid",
+    ),
+    maxModelCalls: requireRunnerInt(
+      relayRecord.maxModelCalls,
+      1,
+      64,
+      "trial runner relay caps are invalid",
+    ),
+    maxOutputTokens: requireRunnerInt(
+      relayRecord.maxOutputTokens,
+      1,
+      32768,
+      "trial runner relay caps are invalid",
+    ),
+    maxResponseBytes: requireRunnerInt(
+      relayRecord.maxResponseBytes,
+      1024,
+      GATEWAY_MAX_RESPONSE_BYTES,
+      "trial runner relay caps are invalid",
+    ),
+    perCallTimeoutMs: requireRunnerInt(
+      relayRecord.perCallTimeoutMs,
+      100,
+      60000,
+      "trial runner relay caps are invalid",
+    ),
+    maxConcurrent: requireRunnerInt(
+      relayRecord.maxConcurrent,
+      1,
+      16,
+      "trial runner relay caps are invalid",
+    ),
+  });
+  const observeRaw = record.observe;
+  if (
+    typeof observeRaw !== "object" ||
+    observeRaw === null ||
+    Array.isArray(observeRaw)
+  ) {
+    throw configError("trial runner observe timeouts are invalid");
+  }
+  for (const key of Object.keys(observeRaw)) {
+    if (
+      key !== "activeTimeoutMs" &&
+      key !== "goneTimeoutMs" &&
+      key !== "pollIntervalMs"
+    ) {
+      throw configError("trial runner observe timeouts have an unknown key");
+    }
+  }
+  const observeRecord = observeRaw as Record<string, unknown>;
+  const observe: TrialRunnerObserveConfig = Object.freeze({
+    activeTimeoutMs: requireRunnerInt(
+      observeRecord.activeTimeoutMs,
+      500,
+      120000,
+      "trial runner observe timeouts are invalid",
+    ),
+    goneTimeoutMs: requireRunnerInt(
+      observeRecord.goneTimeoutMs,
+      500,
+      120000,
+      "trial runner observe timeouts are invalid",
+    ),
+    pollIntervalMs: requireRunnerInt(
+      observeRecord.pollIntervalMs,
+      5,
+      5000,
+      "trial runner observe timeouts are invalid",
+    ),
+  });
+  const pollMs = requireRunnerInt(
+    record.pollMs,
+    100,
+    60000,
+    "trial runner poll interval is invalid",
+  );
+  return Object.freeze({
+    nodeRealpath,
+    bridgeScriptPath,
+    bridgeConfigTemplatePath,
+    systemctlRealpath,
+    xdgRuntimeDir,
+    relay,
+    observe,
+    pollMs,
+  });
+}
+
+export function parseTrialConfig(raw: string | undefined): TrialConfig | null {
+  if (raw === undefined) {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw configError("trial config must be a JSON object");
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw configError("trial config must be a JSON object");
+  }
+  const keys = Object.keys(parsed);
+  for (const key of keys) {
+    if (
+      key !== "available" &&
+      key !== "enabled" &&
+      key !== "mandatoryChecks" &&
+      key !== "configFingerprint" &&
+      key !== "sourceRevision" &&
+      key !== "currentModel" &&
+      key !== "disclosedWholeRepoRead" &&
+      key !== "timeoutMs" &&
+      key !== "maxOutputBytes" &&
+      key !== "workspaceAlias" &&
+      key !== "runner"
+    ) {
+      throw configError("trial config has an unknown key");
+    }
+  }
+  const record = parsed as {
+    available?: unknown;
+    enabled?: unknown;
+    mandatoryChecks?: unknown;
+    configFingerprint?: unknown;
+    sourceRevision?: unknown;
+    currentModel?: unknown;
+    disclosedWholeRepoRead?: unknown;
+    timeoutMs?: unknown;
+    maxOutputBytes?: unknown;
+    workspaceAlias?: unknown;
+    runner?: unknown;
+  };
+  if (typeof record.available !== "boolean") {
+    throw configError("trial config availability is invalid");
+  }
+  if (typeof record.enabled !== "boolean") {
+    throw configError("trial config availability is invalid");
+  }
+  if (
+    !Array.isArray(record.mandatoryChecks) ||
+    record.mandatoryChecks.length < 1 ||
+    record.mandatoryChecks.length > 16
+  ) {
+    throw configError("trial config mandatory checks are invalid");
+  }
+  const checks: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of record.mandatoryChecks) {
+    if (
+      typeof entry !== "string" ||
+      entry.length < 1 ||
+      entry.length > 64 ||
+      !TRIAL_CHECK_PATTERN.test(entry)
+    ) {
+      throw configError("trial config mandatory checks are invalid");
+    }
+    if (seen.has(entry)) {
+      throw configError("trial config mandatory checks are invalid");
+    }
+    seen.add(entry);
+    checks.push(entry);
+  }
+  if (
+    typeof record.configFingerprint !== "string" ||
+    !/^[0-9a-f]{64}$/.test(record.configFingerprint)
+  ) {
+    throw configError("trial config fingerprint is invalid");
+  }
+  if (
+    typeof record.sourceRevision !== "string" ||
+    !/^[0-9a-f]{40}$/.test(record.sourceRevision)
+  ) {
+    throw configError("trial config source revision is invalid");
+  }
+  if (
+    typeof record.currentModel !== "string" ||
+    record.currentModel.length < 1 ||
+    record.currentModel.length > 256 ||
+    record.currentModel.includes("\0")
+  ) {
+    throw configError("trial config model is invalid");
+  }
+  if (typeof record.disclosedWholeRepoRead !== "boolean") {
+    throw configError("trial config disclosure flag is invalid");
+  }
+  if (
+    typeof record.timeoutMs !== "number" ||
+    !Number.isInteger(record.timeoutMs) ||
+    record.timeoutMs < 1000 ||
+    record.timeoutMs > 3600000
+  ) {
+    throw configError("trial config timeout is invalid");
+  }
+  if (
+    typeof record.maxOutputBytes !== "number" ||
+    !Number.isInteger(record.maxOutputBytes) ||
+    record.maxOutputBytes < 1024 ||
+    record.maxOutputBytes > 268435456
+  ) {
+    throw configError("trial config output cap is invalid");
+  }
+  if (
+    typeof record.workspaceAlias !== "string" ||
+    !TRIAL_ALIAS_PATTERN.test(record.workspaceAlias)
+  ) {
+    throw configError("trial config workspace alias is invalid");
+  }
+  if (record.runner === undefined) {
+    throw configError("trial config runner is required");
+  }
+  const runner = parseTrialRunnerConfig(record.runner);
+  return Object.freeze({
+    available: record.available,
+    enabled: record.enabled,
+    mandatoryChecks: Object.freeze(checks),
+    configFingerprint: record.configFingerprint,
+    sourceRevision: record.sourceRevision,
+    currentModel: record.currentModel,
+    disclosedWholeRepoRead: record.disclosedWholeRepoRead,
+    timeoutMs: record.timeoutMs,
+    maxOutputBytes: record.maxOutputBytes,
+    workspaceAlias: record.workspaceAlias,
+    runner,
+  });
+}
+
+/**
  * Load + freeze the server config from the environment. Never logs paths,
  * secrets, or raw values: failures carry a fixed code only.
  */
@@ -843,6 +1239,10 @@ export function loadServerConfig(
   const calendar = parseCalendarConfig(env.COMPANION_CALENDAR_JSON);
   const actions = parseActionConfig(env.COMPANION_ACTIONS_JSON);
   const memory = parseMemoryConfig(env.COMPANION_MEMORY_JSON);
+  const trial = parseTrialConfig(env.COMPANION_AUTONOMY_JSON);
+  if (trial !== null && model === null) {
+    throw configError("trial config requires model config");
+  }
   const parsed = ServerConfigSchema.safeParse({
     dbPath,
     host: host.data,
@@ -864,5 +1264,6 @@ export function loadServerConfig(
     calendar,
     actions,
     memory,
+    trial,
   });
 }

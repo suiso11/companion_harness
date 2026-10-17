@@ -23,6 +23,17 @@ import type {
   ToolDefinition,
 } from "./types.js";
 
+/** Per-call options for a single gateway chat attempt (no retry). */
+export interface ChatCallOptions {
+  signal?: AbortSignal;
+  /**
+   * Optional per-call response byte cap (1..MAX_RESPONSE_BYTES). The
+   * effective cap is min(option, MAX_RESPONSE_BYTES); absent preserves the
+   * default MAX_RESPONSE_BYTES behavior.
+   */
+  maxResponseBytes?: number;
+}
+
 /** Provider-neutral local model gateway. */
 export interface ModelGateway {
   readonly provider: "ollama" | "openai-compatible";
@@ -33,13 +44,11 @@ export interface ModelGateway {
   readonly chatUrl: string;
   /**
    * Single chat attempt (no retry). The optional `signal` aborts the
-   * underlying fetch when present; gateways must forward it. Omitting the
-   * argument preserves backward compatibility.
+   * underlying fetch when present and the optional `maxResponseBytes`
+   * tightens the response body byte cap for this call only; gateways must
+   * forward both. Omitting the argument preserves backward compatibility.
    */
-  chat(
-    request: ChatRequest,
-    options?: { signal?: AbortSignal },
-  ): Promise<ChatResult>;
+  chat(request: ChatRequest, options?: ChatCallOptions): Promise<ChatResult>;
 }
 
 /** Maximum sizes accepted on gateway inputs (generic, prompt-safe). */
@@ -54,11 +63,13 @@ export const MAX_MESSAGES_PER_REQUEST = 128;
 export const MAX_TOOLS_PER_REQUEST = 32;
 /**
  * Maximum provider HTTP response body accepted by `postJsonNoRedirect`
- * (1 MiB, counted in UTF-8 bytes, not JS string characters).
+ * (1 MiB, counted in UTF-8 bytes, not JS string characters). This is the
+ * technical ceiling: an optional per-call `maxResponseBytes` (1..this
+ * value) may tighten the cap for one call to min(option, this value).
  *
- * Both success and non-2xx bodies share this bound: an oversized
+ * Both success and non-2xx bodies share the effective bound: an oversized
  * `Content-Length` is rejected before reading, otherwise the body stream
- * is read up to `MAX_RESPONSE_BYTES + 1` bytes (catching absent or
+ * is read up to `effectiveLimit + 1` bytes (catching absent or
  * dishonest lengths) and the reader is cancelled on overflow. Only bytes
  * within the bound are decoded and `JSON.parse`d. Failures use fixed
  * redacted messages (no body, URL, apiKey, or prompt).
@@ -663,6 +674,18 @@ export function validateChatRequest(request: ChatRequest): void {
   for (const message of request.messages) {
     validateChatMessage(message);
   }
+  if (request.maxOutputTokens !== undefined) {
+    if (
+      typeof request.maxOutputTokens !== "number" ||
+      !Number.isSafeInteger(request.maxOutputTokens) ||
+      request.maxOutputTokens < 1
+    ) {
+      throw new ModelLocalError(
+        "invalid_request",
+        "model request carries an invalid output token cap",
+      );
+    }
+  }
   if (request.tools !== undefined) {
     validateToolDefinitions(request.tools);
   }
@@ -918,6 +941,30 @@ export function resolveGatewayConfig(
 }
 
 /**
+ * Resolve the effective per-call response byte cap: min(option,
+ * MAX_RESPONSE_BYTES). Absent means MAX_RESPONSE_BYTES. A present value
+ * must be an integer 1..MAX_RESPONSE_BYTES, else fixed redacted
+ * invalid_request.
+ */
+export function resolveResponseByteLimit(maxResponseBytes?: number): number {
+  if (maxResponseBytes === undefined) {
+    return MAX_RESPONSE_BYTES;
+  }
+  if (
+    typeof maxResponseBytes !== "number" ||
+    !Number.isInteger(maxResponseBytes) ||
+    maxResponseBytes < 1 ||
+    maxResponseBytes > MAX_RESPONSE_BYTES
+  ) {
+    throw new ModelLocalError(
+      "invalid_request",
+      "model request carries an invalid response byte cap",
+    );
+  }
+  return maxResponseBytes;
+}
+
+/**
  * POST a JSON body with `redirect: "error"` (redirects rejected, never
  * followed) exactly once (no retry). Returns the parsed JSON body.
  * All failures are redacted ModelLocalError instances, except external
@@ -926,8 +973,9 @@ export function resolveGatewayConfig(
  * transport timeout. The signal actually aborts the underlying fetch
  * (not a Promise.race alone) and is composed with the optional
  * single-attempt transport `timeoutMs` guard, which also covers bounded
- * body reading. Response bodies are bounded by `MAX_RESPONSE_BYTES`
- * (byte length, never `response.json()` on unbounded data); see the
+ * body reading. Response bodies are bounded by the effective per-call cap
+ * (min(`maxResponseBytes`, MAX_RESPONSE_BYTES), default MAX_RESPONSE_BYTES;
+ * byte length, never `response.json()` on unbounded data); see the
  * constant for the exact reader behavior.
  */
 export async function postJsonNoRedirect(options: {
@@ -937,12 +985,14 @@ export async function postJsonNoRedirect(options: {
   apiKey: string | undefined;
   timeoutMs: number | undefined;
   signal?: AbortSignal;
+  maxResponseBytes?: number;
 }): Promise<unknown> {
   // Revalidate the concrete fetch target immediately before use: construction-
   // time validation alone leaves a bypass window if the stored URL is mutated
   // or joined incorrectly. Only literal loopback (no `localhost`) passes, so
   // no DNS lookup occurs here and no rebinding/hosts-file name reaches fetch.
   const safeUrl = assertPinnedLoopbackFetchUrl(options.url);
+  const limit = resolveResponseByteLimit(options.maxResponseBytes);
   const externalSignal = options.signal;
   if (isAborted(externalSignal)) {
     throw toAbortRejection(externalSignal as AbortSignal);
@@ -981,10 +1031,10 @@ export async function postJsonNoRedirect(options: {
       throw mapFetchRejection(error);
     }
     // Bound the response body before JSON parsing (success and error
-    // statuses share the bound; `response.json()` is never called on
+    // statuses share the effective bound; `response.json()` is never called on
     // unbounded data). An oversized declared `Content-Length` is rejected
     // before reading; otherwise the stream is read up to
-    // `MAX_RESPONSE_BYTES + 1` bytes so absent or dishonest lengths are
+    // `effectiveLimit + 1` bytes so absent or dishonest lengths are
     // still caught, and the reader is cancelled on overflow. Only bytes
     // within the bound are decoded and parsed. Errors are fixed redacted
     // messages (no body, URL, apiKey, or prompt).
@@ -994,7 +1044,7 @@ export async function postJsonNoRedirect(options: {
         `model request failed with status ${status}`,
       );
     const declared = parseDeclaredContentLength(response);
-    if (declared !== undefined && declared > MAX_RESPONSE_BYTES) {
+    if (declared !== undefined && declared > limit) {
       cancelResponseBody(response);
       if (!response.ok) {
         throw requestFailed(response.status);
@@ -1008,7 +1058,7 @@ export async function postJsonNoRedirect(options: {
       // Drain the error body within the same bound (absent/dishonest
       // lengths included) so a huge error payload cannot exhaust memory,
       // then report only the fixed status failure.
-      await readBoundedBodyText(response, controller, externalSignal, {
+      await readBoundedBodyText(response, controller, externalSignal, limit, {
         tooLarge: () => requestFailed(response.status),
         failed: () => requestFailed(response.status),
       });
@@ -1018,6 +1068,7 @@ export async function postJsonNoRedirect(options: {
       response,
       controller,
       externalSignal,
+      limit,
       {
         tooLarge: () =>
           new ModelLocalError(
@@ -1122,8 +1173,9 @@ function cancelReaderQuietly(reader: BoundedBodyReader, reason: unknown): void {
 }
 
 /**
- * Read at most `MAX_RESPONSE_BYTES + 1` UTF-8 bytes from the response
- * stream, cancel the reader on overflow, and decode only bytes within the
+ * Read at most `effectiveLimit + 1` UTF-8 bytes from the response
+ * stream (effectiveLimit is min(per-call `maxResponseBytes`,
+ * MAX_RESPONSE_BYTES)), cancel the reader on overflow, and decode only bytes within the
  * bound (chunks are merged before a single fatal `TextDecoder` pass so
  * valid multibyte characters split across chunks survive while malformed
  * sequences are rejected instead of replaced with U+FFFD). Byte length
@@ -1138,6 +1190,7 @@ async function readBoundedBodyText(
   response: Response,
   controller: AbortController,
   externalSignal: AbortSignal | undefined,
+  limit: number,
   failures: {
     tooLarge: () => ModelLocalError;
     failed: () => ModelLocalError;
@@ -1204,7 +1257,7 @@ async function readBoundedBodyText(
         break;
       }
       totalBytes += value.byteLength;
-      if (totalBytes > MAX_RESPONSE_BYTES) {
+      if (totalBytes > limit) {
         // Overflow cleanup: fire-and-forget with a synchronous rejection
         // handler (never await a hostile cancel). The redacted overflow
         // error below is authoritative; a cancel rejection never replaces

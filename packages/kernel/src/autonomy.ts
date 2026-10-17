@@ -74,19 +74,22 @@ import {
   generateId,
   IDEMPOTENCY_OPERATIONS,
   isUuidV4,
+  readIdempotencyRow,
   requestHash,
+  withImmediateTx,
+  writeIdempotencyRow,
 } from "./canonical.js";
-import {
-  invalidateTrialsForScope,
-  parseConstraintRule,
-  revokeAllClaimedForStop,
-} from "./trial_authority.js";
 import {
   IdempotencyConflictError,
   KernelStorageError,
   RepositoryNotFoundError,
   RepositoryValidationError,
 } from "./errors.js";
+import {
+  invalidateTrialsForScope,
+  parseConstraintRule,
+  revokeAllClaimedForStop,
+} from "./trial_authority.js";
 
 /** CAS version mismatch on a purpose / task / control mutation (409). */
 export class AutonomyVersionConflictError extends KernelStorageError {
@@ -152,20 +155,35 @@ function requireId(id: unknown, what: string): string {
   return id as string;
 }
 
+/** Shared BEGIN IMMEDIATE helper (re-exported; trial leaf imports from canonical). */
+export { withImmediateTx };
+
 function withImmediate<T>(db: Database.Database, fn: () => T): T {
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    const out = fn();
-    db.exec("COMMIT");
-    return out;
-  } catch (error) {
-    try {
-      db.exec("ROLLBACK");
-    } catch {
-      // Best effort: the original error carries the failure.
-    }
-    throw error;
+  return withImmediateTx(db, fn);
+}
+
+/** Shared idempotency-cache read (re-exported; trial leaf imports from canonical). */
+export function readStoredResponse(
+  db: Database.Database,
+  scope: string,
+  key: string,
+): {
+  requestHash: string;
+  responseStatus: number;
+  responseBody: unknown;
+} | null {
+  const row = readIdempotencyRow(db, scope, key);
+  if (row === null) {
+    return null;
   }
+  return {
+    requestHash: row.requestHash,
+    responseStatus: row.responseStatus,
+    responseBody: parseOrValidation(
+      () => JSON.parse(row.responseBody),
+      "stored idempotency body",
+    ),
+  };
 }
 
 function toStoredResponse(
@@ -177,24 +195,20 @@ function toStoredResponse(
   responseStatus: number;
   responseBody: unknown;
 } | null {
-  const row = db
-    .prepare(
-      "SELECT request_hash, response_status, response_body FROM api_idempotency WHERE scope = ? AND key = ?",
-    )
-    .get(scope, key) as
-    | { request_hash: string; response_status: number; response_body: string }
-    | undefined;
-  if (row === undefined) {
-    return null;
-  }
-  return {
-    requestHash: row.request_hash,
-    responseStatus: row.response_status,
-    responseBody: parseOrValidation(
-      () => JSON.parse(row.response_body),
-      "stored idempotency body",
-    ),
-  };
+  return readStoredResponse(db, scope, key);
+}
+
+/** Shared idempotency-cache write (re-exported; trial leaf imports from canonical). */
+export function writeStoredResponse(
+  db: Database.Database,
+  scope: string,
+  key: string,
+  hash: string,
+  status: number,
+  body: unknown,
+  now: number,
+): void {
+  storeIdempotentResponse(db, scope, key, hash, status, body, now);
 }
 
 function storeIdempotentResponse(
@@ -206,9 +220,7 @@ function storeIdempotentResponse(
   body: unknown,
   now: number,
 ): void {
-  db.prepare(
-    "INSERT INTO api_idempotency (scope, key, request_hash, response_status, response_body, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-  ).run(scope, key, hash, status, JSON.stringify(body), now);
+  writeIdempotencyRow(db, scope, key, hash, status, JSON.stringify(body), now);
 }
 
 function requireSession(db: Database.Database, sessionId: string): void {
@@ -343,13 +355,12 @@ interface RawTask {
   updated_at: number;
 }
 
-function readRuleJson(
-  db: Database.Database,
-  purposeId: string,
-): unknown {
+function readRuleJson(db: Database.Database, purposeId: string): unknown {
   try {
     const r = db
-      .prepare("SELECT rule_json FROM trial_constraint_rules WHERE purpose_id = ?")
+      .prepare(
+        "SELECT rule_json FROM trial_constraint_rules WHERE purpose_id = ?",
+      )
       .get(purposeId) as { rule_json: string | null } | undefined;
     if (!r || r.rule_json === null) return null;
     return JSON.parse(r.rule_json);
@@ -371,11 +382,15 @@ function writeConstraintRuleInTx(
 ): void {
   if (!rulePresent) return;
   if (rule === null || rule === undefined) {
-    db.prepare("DELETE FROM trial_constraint_rules WHERE purpose_id = ?").run(purposeId);
+    db.prepare("DELETE FROM trial_constraint_rules WHERE purpose_id = ?").run(
+      purposeId,
+    );
     return;
   }
   if (kind !== "constraint") {
-    throw new RepositoryValidationError("constraintRule requires kind=constraint");
+    throw new RepositoryValidationError(
+      "constraintRule requires kind=constraint",
+    );
   }
   const parsed = parseConstraintRule(rule);
   db.prepare(
@@ -661,7 +676,8 @@ export function createPurpose(
   const key = requireKey(options.key);
   const now = nowMs(options.now);
   const scope = `session:${session}:purpose`;
-  const rulePresent = input.constraintRulePresent ?? input.constraintRule !== undefined;
+  const rulePresent =
+    input.constraintRulePresent ?? input.constraintRule !== undefined;
   const hash = requestHash(
     IDEMPOTENCY_OPERATIONS.createPurpose.operation,
     IDEMPOTENCY_OPERATIONS.createPurpose.schemaVersion,
@@ -744,7 +760,13 @@ export function createPurpose(
       now,
     );
     if (input.kind === "constraint") {
-      invalidateTrialsForScope(db, session, input.scope, "constraint_created", now);
+      invalidateTrialsForScope(
+        db,
+        session,
+        input.scope,
+        "constraint_created",
+        now,
+      );
     }
     const row = readPurpose(db, id);
     if (row === null) {
@@ -1149,26 +1171,61 @@ export function correctPurpose(
     // Kind change away from constraint with a live rule must explicitly
     // clear (null) or the correction is rejected.
     const oldRule = readRuleJson(db, oldRow.id);
-    if (input.kind !== "constraint" && input.constraintRule !== undefined && input.constraintRule !== null) {
-      throw new RepositoryValidationError("constraintRule requires kind=constraint: clear it explicitly");
+    if (
+      input.kind !== "constraint" &&
+      input.constraintRule !== undefined &&
+      input.constraintRule !== null
+    ) {
+      throw new RepositoryValidationError(
+        "constraintRule requires kind=constraint: clear it explicitly",
+      );
     }
-    if (input.kind !== "constraint" && oldRule !== null && input.constraintRule === undefined) {
-      throw new RepositoryValidationError("kind change away from constraint must explicitly clear constraintRule");
+    if (
+      input.kind !== "constraint" &&
+      oldRule !== null &&
+      input.constraintRule === undefined
+    ) {
+      throw new RepositoryValidationError(
+        "kind change away from constraint must explicitly clear constraintRule",
+      );
     }
     if (input.constraintRule !== undefined) {
       if (input.constraintRule === null) {
-        db.prepare("DELETE FROM trial_constraint_rules WHERE purpose_id = ?").run(oldRow.id);
+        db.prepare(
+          "DELETE FROM trial_constraint_rules WHERE purpose_id = ?",
+        ).run(oldRow.id);
       } else {
-        writeConstraintRuleInTx(db, session, input.scope, newId, input.kind, input.constraintRule, true, now);
+        writeConstraintRuleInTx(
+          db,
+          session,
+          input.scope,
+          newId,
+          input.kind,
+          input.constraintRule,
+          true,
+          now,
+        );
       }
     } else if (oldRule !== null && input.kind === "constraint") {
       db.prepare(
         "INSERT INTO trial_constraint_rules (purpose_id, session_id, scope, rule_json, created_at) VALUES (?, ?, ?, ?, ?)",
       ).run(newId, session, input.scope, JSON.stringify(oldRule), now);
     }
-    invalidateTrialsForScope(db, session, oldRow.scope, "purpose_corrected", now);
+    invalidateTrialsForScope(
+      db,
+      session,
+      oldRow.scope,
+      "purpose_corrected",
+      now,
+    );
     if (input.scope !== oldRow.scope) {
-      invalidateTrialsForScope(db, session, input.scope, "purpose_corrected", now);
+      invalidateTrialsForScope(
+        db,
+        session,
+        input.scope,
+        "purpose_corrected",
+        now,
+      );
     }
     const oldCurrent = readPurpose(db, oldRow.id);
     const newCurrent = readPurpose(db, newId);
@@ -1372,7 +1429,13 @@ function transitionPurpose(
       operation === "revoke" ? "purpose_revoked" : "purpose_achieved",
       now,
     );
-    invalidateTrialsForScope(db, session, row.scope, `purpose_${operation}d`, now);
+    invalidateTrialsForScope(
+      db,
+      session,
+      row.scope,
+      `purpose_${operation}d`,
+      now,
+    );
     const current = readPurpose(db, row.id);
     if (current === null) {
       throw new RepositoryNotFoundError(`purpose ${row.id} not found`);
