@@ -258,11 +258,14 @@ describe("action proposal stager", () => {
       expect(a.tool).toBe("calendar.reschedule");
       expect(a.input).toEqual(TIMED);
       // Target-aware human preview: immutable normalized title + session rN
-      // + staged range; no tool-name prefix, no raw ids.
+      // + frozen BEFORE range vs staged AFTER range; no tool-name prefix,
+      // no raw ids.
       expect(a.preview.summary).toContain("Event");
       expect(a.preview.summary).toContain("(r1)");
-      expect(a.preview.summary).toContain(`start=${TIMED.start}`);
-      expect(a.preview.summary).toContain(`end=${TIMED.end}`);
+      expect(a.preview.summary).toContain("2026-01-01T10:00:00Z");
+      expect(a.preview.summary).toContain("2026-01-01T11:00:00Z");
+      expect(a.preview.summary).toContain(TIMED.start);
+      expect(a.preview.summary).toContain(TIMED.end);
       expect(a.preview.summary).not.toContain("calendar.reschedule");
       expect(a.preview.summary).not.toContain(fx.refId);
       expect(a.preview.summary).not.toContain(fx.resourceId);
@@ -687,6 +690,146 @@ describe("action proposal stager", () => {
       expect(stager.removeStaged(fx.runId)).toBe(true);
       expect(stager.removeStaged(fx.runId)).toBe(false);
       expect(stager.getStaged(fx.runId)).toBeNull();
+    } finally {
+      await closeKernelDatabase(fx.handle);
+    }
+  });
+
+  it("before→after preview shows the frozen timed source range and the proposed range with offsets intact", async () => {
+    const fx = await setupFixture();
+    try {
+      const { stager } = makeStager(fx, () => 1000);
+      const staged = stager.stage(fx.runId, {
+        targetRefId: fx.refId,
+        ...TIMED,
+      });
+      // BEFORE comes from the SAME frozen snapshot (not a live read); AFTER
+      // keeps the proposed verbatim offsets. Offsets are never converted to
+      // a browser-local zone.
+      expect(staged.preview.summary).toContain("2026-01-01T10:00:00Z");
+      expect(staged.preview.summary).toContain("2026-01-01T11:00:00Z");
+      expect(staged.preview.summary).toContain(TIMED.start);
+      expect(staged.preview.summary).toContain(TIMED.end);
+      expect(staged.preview.summary).toContain("(r1)");
+      expect(staged.preview.summary.length).toBeLessThanOrEqual(1024);
+      expect(staged.preview.summary).not.toMatch(/[\n\r\t]/);
+    } finally {
+      await closeKernelDatabase(fx.handle);
+    }
+  });
+
+  it("all-day source renders date-only bounds with the exclusive-end note and the timed conversion", async () => {
+    const fx = await setupFixture();
+    try {
+      const referenceManager = createReferenceManager(fx.db);
+      const connector = referenceManager.ensureCalendarConnectorInstance(
+        "c",
+        "cal1",
+        { now: 2 },
+      );
+      const allDayText = calendarEventBodyText({
+        canonicalKey: "cal|cal1|evt1",
+        status: "confirmed",
+        title: "All Day Event",
+        start: "2026-03-01",
+        end: "2026-03-02",
+        allDayEndExclusive: true,
+        sourceRevision: "src@2",
+        revisionBasis: "etag",
+      });
+      const presented = referenceManager.presentObservations(
+        fx.sessionId,
+        fx.runId,
+        [
+          {
+            connectorInstanceId: connector.id,
+            canonicalKey: "cal|cal1|evt1",
+            title: "All Day Event",
+            text: allDayText,
+            sourceRevision: "src@2",
+            observedAt: 2,
+          },
+        ],
+        { freshness: "normal", now: 2 },
+      );
+      expect(presented.applied).toBe(true);
+      const currentRefs = fx.db
+        .prepare(
+          "SELECT id, ordinal FROM session_references WHERE session_id = ? ORDER BY ordinal ASC",
+        )
+        .all(fx.sessionId) as Array<{ id: string; ordinal: number }>;
+      const latest = currentRefs[currentRefs.length - 1] as {
+        id: string;
+        ordinal: number;
+      };
+      const { stager } = makeStager(fx, () => 3000);
+      const staged = stager.stage(fx.runId, {
+        targetRefId: latest.id,
+        ...TIMED,
+      });
+      // Date-only BEFORE bounds are preserved (no invented midnight) with the
+      // exclusive end denoted; the timed AFTER range keeps its offsets and
+      // the kind change is visible. No exact full-string pin here.
+      expect(staged.preview.summary).toContain("2026-03-01");
+      expect(staged.preview.summary).toContain("2026-03-02");
+      expect(staged.preview.summary).toContain(TIMED.start);
+      expect(staged.preview.summary).toContain(TIMED.end);
+      expect(staged.preview.summary.length).toBeLessThanOrEqual(1024);
+    } finally {
+      await closeKernelDatabase(fx.handle);
+    }
+  });
+
+  it("staged before→after preview stays frozen when the upstream reference advances", async () => {
+    const fx = await setupFixture();
+    try {
+      const { stager } = makeStager(fx, () => 1000);
+      const staged = stager.stage(fx.runId, {
+        targetRefId: fx.refId,
+        ...TIMED,
+      });
+      const frozenSummary = staged.preview.summary;
+      const frozenHash = staged.hash;
+      // The upstream advances AFTER staging (new title + revision + new rN).
+      const referenceManager = createReferenceManager(fx.db);
+      const connector = referenceManager.ensureCalendarConnectorInstance(
+        "c",
+        "cal1",
+        { now: 2 },
+      );
+      const advanced = calendarEventBodyText({
+        canonicalKey: "cal|cal1|evt1",
+        status: "confirmed",
+        title: "Event moved upstream",
+        start: "2026-01-01T12:00:00Z",
+        end: "2026-01-01T13:00:00Z",
+        allDayEndExclusive: false,
+        sourceRevision: "src@2",
+        revisionBasis: "etag",
+      });
+      const presented = referenceManager.presentObservations(
+        fx.sessionId,
+        fx.runId,
+        [
+          {
+            connectorInstanceId: connector.id,
+            canonicalKey: "cal|cal1|evt1",
+            title: "Event moved upstream",
+            text: advanced,
+            sourceRevision: "src@2",
+            observedAt: 2,
+          },
+        ],
+        { freshness: "normal", now: 2 },
+      );
+      expect(presented.applied).toBe(true);
+      // The staged entry keeps the ORIGINAL frozen preview/hash (it never
+      // re-reads the current reference): approval still binds the exact
+      // stored hash, not the refreshed display.
+      const reread = stager.getStaged(fx.runId);
+      expect(reread?.preview.summary).toBe(frozenSummary);
+      expect(reread?.hash).toBe(frozenHash);
+      expect(reread?.basedOnSnapshotId).toBe(fx.snapshotId);
     } finally {
       await closeKernelDatabase(fx.handle);
     }

@@ -1369,7 +1369,7 @@ class ConversationApp {
   /**
    * Build (once) the approval card for a pending, unexpired proposal. Every
    * string is set with `textContent` (escaped plain text, never HTML) and
-   * carries NO technical id: preview, target event, start/end, and the
+   * carries NO technical id: the deterministic before→after preview and the
    * server deadline only.
    *
    * Each pending card owns at most ONE one-shot expiry timer bound to the
@@ -1414,23 +1414,14 @@ class ConversationApp {
           : "日程変更の確認",
       ),
     );
+    // Single deterministic before→after preview block (trusted kernel
+    // summary; never parsed back into times/identity). The proposed
+    // start/end already live inside the summary AFTER range, so no separate
+    // raw start/end rows are rendered (no duplicated content to drift).
     const preview = el("p", summary.preview.summary);
     preview.setAttribute("data-action-preview", "true");
+    preview.style.whiteSpace = "pre-wrap";
     node.appendChild(preview);
-    if (
-      summary.tool === "calendar.create" &&
-      summary.input.title !== undefined
-    ) {
-      const titleLine = el("p", `件名: ${summary.input.title}`);
-      titleLine.setAttribute("data-action-title", "true");
-      node.appendChild(titleLine);
-    }
-    const startLine = el("p", `開始: ${summary.input.start}`);
-    startLine.setAttribute("data-action-start", "true");
-    node.appendChild(startLine);
-    const endLine = el("p", `終了: ${summary.input.end}`);
-    endLine.setAttribute("data-action-end", "true");
-    node.appendChild(endLine);
     const deadline = el("p", `確認期限: ${formatInstant(summary.expiresAt)}`);
     deadline.setAttribute("data-action-deadline", "true");
     node.appendChild(deadline);
