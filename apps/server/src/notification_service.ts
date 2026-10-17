@@ -50,10 +50,12 @@ export const NOTIFICATION_TIMER_MAX_MS = 2_147_483_647;
  * batches (50 shadow/receipt rows, 100 task events), so a continuous
  * backlog (e.g. a 100-row source-ingest batch where cursors advance ~5
  * source events per job) needs several passes. The tick re-sweeps while
- * cursors advance, bounded — the backlog converges WITHOUT waiting for
- * another unrelated wake, and a stuck fault never spins (a cursor-reset
- * refusal or storage failure advances nothing, so the tick ends and the
- * fixed degraded diagnostic stays up until the next real wake).
+ * cursors advance, bounded — and when the FINAL bounded sweep still made
+ * progress, exactly ONE continuation wake chains (same bound applies
+ * there), so a >1250-event backlog converges WITHOUT waiting for another
+ * unrelated wake. A stuck fault never spins (a cursor-reset refusal or
+ * storage failure advances nothing, so the tick ends and the fixed
+ * degraded diagnostic stays up until the next real wake).
  */
 export const NOTIFICATION_MAX_SWEEPS = 25;
 
@@ -376,6 +378,8 @@ export function createNotificationService(
       return;
     }
     let clean = true;
+    let sweepsRun = 0;
+    let finalProgress = false;
     for (let sweep = 0; sweep < NOTIFICATION_MAX_SWEEPS; sweep += 1) {
       if (!started || stopping) {
         return;
@@ -444,20 +448,34 @@ export function createNotificationService(
           markDegraded();
         }
       }
+      sweepsRun = sweep + 1;
       if (!advanced && !cursorAdvancedSince(before)) {
         // Nothing inserted and no cursor moved: every source batch is
         // consumed (or honestly faulted, which also advances nothing).
         // End the tick here — never spin on a persistent refusal.
+        finalProgress = false;
         break;
       }
       // Otherwise a backlog remains (inserts landed, or skipped rows
       // were consumed and advanced the frontier): sweep again, still
       // inside this same tick and bound.
+      finalProgress = true;
     }
     if (clean) {
       degraded = false;
     }
     rescheduleTimer(sessions);
+    if (sweepsRun >= NOTIFICATION_MAX_SWEEPS && finalProgress) {
+      // The bounded tick converged as far as it may, but the FINAL sweep
+      // still made progress — more backlog remains past the per-tick
+      // bound. Queue exactly ONE continuation wake (the same bound applies
+      // there; chained-drain limits still hold), so a >1250-event backlog
+      // converges with NO unrelated mutation needed. A stuck fault or a
+      // cursor-reset refusal advances nothing, so the tick ends here with
+      // the degraded diagnostic up — never a spinner, never a fault
+      // auto-retry.
+      wake();
+    }
   }
 
   /**

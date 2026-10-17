@@ -694,7 +694,7 @@ describe("notifications runtime (real SQLite + app HTTP)", () => {
       expect((noCatchup.body as { latestSeq: number }).latestSeq).toBe(1);
 
       // A newly created explicit PAST deadline logs once (new state).
-      const late = fx.repo.createAutonomyTask(
+      fx.repo.createAutonomyTask(
         fx.sessionId,
         {
           scope: "bills",
@@ -705,7 +705,6 @@ describe("notifications runtime (real SQLite + app HTTP)", () => {
         },
         { key: randomUUID(), now: T0 + 310_000 },
       );
-      const lateId = (late.body as { id: string }).id;
       await settle(fx.service);
       const logged = await get(
         fx.app,
@@ -714,7 +713,9 @@ describe("notifications runtime (real SQLite + app HTTP)", () => {
       expect((logged.body as { latestSeq: number }).latestSeq).toBe(2);
 
       // Terminal cancel drops only ITS derived schedule row: no new
-      // alert, and the surviving deadline is exactly the late fee.
+      // alert, and nothing remains pending (the late fee already alerted
+      // exactly once, so the timer query honestly reports null instead of
+      // re-arming on the notified due).
       const task = fx.repo.getAutonomyTask(fx.sessionId, taskId);
       fx.repo.cancelAutonomyTask(
         fx.sessionId,
@@ -728,9 +729,7 @@ describe("notifications runtime (real SQLite + app HTTP)", () => {
         `/api/sessions/${fx.sessionId}/notifications`,
       );
       expect((cancelled.body as { latestSeq: number }).latestSeq).toBe(2);
-      expect(fx.repo.getNextDeadline(fx.sessionId).deadline?.taskId).toBe(
-        lateId,
-      );
+      expect(fx.repo.getNextDeadline(fx.sessionId).deadline).toBeNull();
       expect(fx.service.getDiagnostic()).toBeNull();
       expect(fx.service.getDiagnostic()).toBeNull();
     } finally {

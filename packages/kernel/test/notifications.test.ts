@@ -846,7 +846,7 @@ describe("notifications durable core", () => {
     const { handle, repo, sessionId } = await makeRepo();
     try {
       // Old task with an old past deadline, created while paused.
-      const old = repo.createAutonomyTask(
+      repo.createAutonomyTask(
         sessionId,
         {
           scope: "health",
@@ -931,9 +931,12 @@ describe("notifications durable core", () => {
         now: T0 + 91,
       });
       expect(reconciled.removed).toBe(1);
+      // The remaining old row is resume-cutoff-skipped (never pending), so
+      // the timer query honestly reports NO pending deadline instead of
+      // re-arming on a row the recorder will always skip.
       expect(
-        repo.getNextDeadline(sessionId, { now: T0 + 92 }).deadline?.taskId,
-      ).toBe(old.body.id);
+        repo.getNextDeadline(sessionId, { now: T0 + 92 }).deadline,
+      ).toBeNull();
       const terminal = repo.recordDueDeadlines(sessionId, {
         expectedControlVersion: control.version,
         now: T0 + 100,

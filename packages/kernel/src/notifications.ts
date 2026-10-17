@@ -503,18 +503,25 @@ interface RawShadowJob {
 }
 
 /**
- * DERIVED question-context expiry: the min FUTURE time-applicability
- * boundary frozen at notice creation, using the EXISTING strict
+ * DERIVED question-context expiry: the min time-applicability boundary
+ * frozen at notice creation, using the EXISTING strict
  * RFC3339-with-explicit-offset grammar + `Date.parse` (no new timezone
- * parser, no model dates). Candidates are (a) the `validUntil` of frozen
- * purposes that were APPLICABLE at claim (`applicableAtClaim === true`;
- * already-inapplicable history — including already-expired windows — MUST
- * NOT blanket-outdate a valid question) and (b) the draft's cited EXPLICIT
- * task deadlines in the future. A purpose window is NEVER a task deadline
- * and is never stored as one. Only boundaries strictly AFTER `now` count,
- * so a past deadline cited in a NEW post-deadline question never instantly
- * expires that meaningful question. Returns null when nothing relevant is
- * pending in the future.
+ * parser, no model dates). Candidates are (a) the `validUntil` END of
+ * frozen purposes that were APPLICABLE at claim
+ * (`applicableAtClaim === true`) — persisted STALE even when the
+ * projection lands after the window already closed, so a question
+ * completed while the window was valid still expires instead of staying
+ * actionable forever; already-inapplicable history — including
+ * already-expired windows — MUST NOT blanket-outdate a valid question —
+ * (b) the `validFrom` START of a frozen ACTIVE purpose whose window opens
+ * in the future (inapplicable at claim only because it has not started
+ * yet; the context changes at `validFrom`, mirroring the shadow fence
+ * applicability predicate of active status + window), and (c) the draft's
+ * cited EXPLICIT task deadlines in the future. A purpose window is NEVER
+ * a task deadline and is never stored as one. Cited deadlines keep the
+ * future-only policy relative to notice creation, so a past deadline
+ * cited in a NEW post-deadline question never instantly expires that
+ * meaningful question. Returns null when nothing relevant is pending.
  */
 function questionContextExpiryAt(
   contextJson: string | null,
@@ -522,8 +529,15 @@ function questionContextExpiryAt(
   now: number,
 ): number | null {
   let expiry: number | null = null;
-  const consider = (ms: number): void => {
+  const considerFuture = (ms: number): void => {
     if (Number.isInteger(ms) && ms > now && (expiry === null || ms < expiry)) {
+      expiry = ms;
+    }
+  };
+  // Frozen purpose END boundary: takes the min over ALL applicable-at-claim
+  // ends, past or future, so delayed ingestion still expires the question.
+  const considerPurposeEnd = (ms: number): void => {
+    if (Number.isInteger(ms) && ms >= 0 && (expiry === null || ms < expiry)) {
       expiry = ms;
     }
   };
@@ -531,14 +545,28 @@ function questionContextExpiryAt(
     try {
       const frozen = ShadowJobContextSchema.parse(JSON.parse(contextJson));
       for (const purpose of frozen.purposes) {
-        if (!purpose.applicableAtClaim) {
+        if (purpose.applicableAtClaim) {
+          if (
+            purpose.validUntil !== null &&
+            isStrictAutonomyDeadline(purpose.validUntil)
+          ) {
+            considerPurposeEnd(Date.parse(purpose.validUntil));
+          }
           continue;
         }
+        // Future START transition only: ACTIVE status + a strict future
+        // validFrom whose window is not already closed. Anything else that
+        // was inapplicable at claim (inactive status, past start, closed
+        // window) is history, never a future transition.
         if (
-          purpose.validUntil !== null &&
-          isStrictAutonomyDeadline(purpose.validUntil)
+          purpose.status === "active" &&
+          purpose.validFrom !== null &&
+          isStrictAutonomyDeadline(purpose.validFrom) &&
+          (purpose.validUntil === null ||
+            (isStrictAutonomyDeadline(purpose.validUntil) &&
+              Date.parse(purpose.validUntil) > now))
         ) {
-          consider(Date.parse(purpose.validUntil));
+          considerFuture(Date.parse(purpose.validFrom));
         }
       }
     } catch {
@@ -547,7 +575,7 @@ function questionContextExpiryAt(
   }
   for (const cited of citedDeadlines) {
     if (isStrictAutonomyDeadline(cited)) {
-      consider(Date.parse(cited));
+      considerFuture(Date.parse(cited));
     }
   }
   return expiry;
@@ -1400,10 +1428,83 @@ export interface NextDeadlineOptions {
   now?: number;
 }
 
+interface DeadlineScheduleRow {
+  task_id: string;
+  session_id: string;
+  scope: string;
+  due_at: number;
+  observed_task_version: number;
+  source_updated_at: number;
+}
+
 /**
- * Pure-read future-deadline query: the earliest indexed numeric dueAt for
- * the session, with the CURRENT control version + paused fence reported
- * honestly (paused still returns the deadline row — it never fakes one).
+ * Exact (taskId, EXACT deadline) alert fingerprint — the same string the
+ * due recorder stores, so reads can tell genuinely-pending schedule rows
+ * from already-alerted ones without touching history.
+ */
+function deadlineFingerprint(taskId: string, dueAt: number): string {
+  return truncateCp(`v1|deadline|${taskId}|${dueAt}`, 500);
+}
+
+/** True when this EXACT deadline already produced its one alert. */
+function isDeadlineAlerted(
+  db: Database.Database,
+  sessionId: string,
+  taskId: string,
+  dueAt: number,
+): boolean {
+  const hit = db
+    .prepare(
+      "SELECT 1 AS hit FROM notifications WHERE session_id = ? AND fingerprint = ? LIMIT 1",
+    )
+    .get(sessionId, deadlineFingerprint(taskId, dueAt)) as
+    | { hit: number }
+    | undefined;
+  return hit !== undefined;
+}
+
+/**
+ * Pure-read pending probe for ONE schedule row: the CURRENT task still
+ * carries this EXACT eligible deadline, the resume cutoff does not skip
+ * it, and this EXACT deadline never alerted yet. Stale / terminal /
+ * skipped / already-alerted rows are NOT pending — they must never arm
+ * the single timer nor head-of-line-block rows behind them. Never mutates
+ * anything (stale-row refresh belongs to the recorder).
+ */
+function isPendingDeadlineRow(
+  db: Database.Database,
+  sessionId: string,
+  row: DeadlineScheduleRow,
+  resumeCutoff: number,
+): boolean {
+  const task = readTaskRow(db, row.task_id);
+  if (task === null || task.session_id !== sessionId) {
+    return false;
+  }
+  if (isTerminalTaskStatus(task.status)) {
+    return false;
+  }
+  const currentDue = eligibleDueAt(task);
+  if (currentDue === null || currentDue !== row.due_at) {
+    return false;
+  }
+  if (row.due_at < resumeCutoff && task.updated_at <= resumeCutoff) {
+    return false;
+  }
+  if (isDeadlineAlerted(db, sessionId, row.task_id, row.due_at)) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Pure-read future-deadline query: the earliest GENUINELY PENDING eligible
+ * explicit deadline for the session (keyset-scanned past stale /
+ * skipped / already-alerted head rows, never a 100-row silent
+ * truncation), with the CURRENT control version + paused fence reported
+ * honestly (paused still returns the pending row — it never fakes one;
+ * the service simply arms no timer while paused). Null when nothing is
+ * pending, so the service never re-polls an already-notified due.
  */
 export function getNextDeadline(
   db: Database.Database,
@@ -1426,40 +1527,65 @@ export function getNextDeadline(
   void nowMs(options.now);
   requireSession(db, session);
   const control = db
-    .prepare("SELECT paused, version FROM autonomy_control WHERE id = 'global'")
-    .get() as { paused: number; version: number } | undefined;
+    .prepare(
+      "SELECT paused, version, updated_at FROM autonomy_control WHERE id = 'global'",
+    )
+    .get() as
+    | { paused: number; version: number; updated_at: number }
+    | undefined;
   const paused = control?.paused === 1;
   const version = control?.version ?? 1;
-  const row = db
-    .prepare(
-      "SELECT task_id, session_id, scope, due_at, observed_task_version, source_updated_at FROM notification_deadline_schedule WHERE session_id = ? ORDER BY due_at ASC, task_id ASC LIMIT 1",
-    )
-    .get(session) as
-    | {
-        task_id: string;
-        session_id: string;
-        scope: string;
-        due_at: number;
-        observed_task_version: number;
-        source_updated_at: number;
+  const resumeCutoff = control?.updated_at ?? 0;
+  const status = paused ? "control_paused" : "ready";
+  let lastDue: number | null = null;
+  let lastTask: string | null = null;
+  for (;;) {
+    const page =
+      lastDue === null
+        ? (db
+            .prepare(
+              "SELECT task_id, session_id, scope, due_at, observed_task_version, source_updated_at FROM notification_deadline_schedule WHERE session_id = ? ORDER BY due_at ASC, task_id ASC LIMIT ?",
+            )
+            .all(session, SCHEDULE_PAGE) as DeadlineScheduleRow[])
+        : (db
+            .prepare(
+              "SELECT task_id, session_id, scope, due_at, observed_task_version, source_updated_at FROM notification_deadline_schedule WHERE session_id = ? AND (due_at > ? OR (due_at = ? AND task_id > ?)) ORDER BY due_at ASC, task_id ASC LIMIT ?",
+            )
+            .all(
+              session,
+              lastDue,
+              lastDue,
+              lastTask,
+              SCHEDULE_PAGE,
+            ) as DeadlineScheduleRow[]);
+    if (page.length === 0) {
+      break;
+    }
+    for (const row of page) {
+      lastDue = row.due_at;
+      lastTask = row.task_id;
+      if (!isPendingDeadlineRow(db, session, row, resumeCutoff)) {
+        continue;
       }
-    | undefined;
-  return {
-    status: paused ? "control_paused" : "ready",
-    paused,
-    controlVersion: version,
-    deadline:
-      row === undefined
-        ? null
-        : {
-            taskId: row.task_id,
-            sessionId: row.session_id,
-            scope: row.scope,
-            dueAt: row.due_at,
-            observedTaskVersion: row.observed_task_version,
-            sourceUpdatedAt: row.source_updated_at,
-          },
-  };
+      return {
+        status,
+        paused,
+        controlVersion: version,
+        deadline: {
+          taskId: row.task_id,
+          sessionId: row.session_id,
+          scope: row.scope,
+          dueAt: row.due_at,
+          observedTaskVersion: row.observed_task_version,
+          sourceUpdatedAt: row.source_updated_at,
+        },
+      };
+    }
+    if (page.length < SCHEDULE_PAGE) {
+      break;
+    }
+  }
+  return { status, paused, controlVersion: version, deadline: null };
 }
 
 export interface RecordDueDeadlinesOptions {
@@ -1476,10 +1602,13 @@ export interface RecordDueDeadlinesOptions {
  * BEFORE the explicit-resume cutoff (`control.updatedAt`) are skipped
  * unless the task was meaningfully updated / created AFTER the resume; a
  * newly created explicit PAST deadline is NEW state and may log once.
- * Dedup is (taskId, EXACT deadline) through hold / resume status changes;
- * terminal tasks remove only their derived schedule row. Recording NEVER
- * marks a task held / completed / resumed and NEVER creates calendar
- * state.
+ * The due scan KEYSET-DRAINS the whole due set past settled /
+ * cutoff-skipped / already-alerted head rows (never a 100-row silent
+ * truncation masking the 101st eligible task). Dedup is (taskId, EXACT
+ * deadline) through hold / resume status changes — one alert per actual
+ * deadline even after a meaningful task update; terminal tasks remove
+ * only their derived schedule row. Recording NEVER marks a task held /
+ * completed / resumed and NEVER creates calendar state.
  */
 export function recordDueDeadlines(
   db: Database.Database,
@@ -1523,69 +1652,94 @@ export function recordDueDeadlines(
       };
     }
     const resumeCutoff = control?.updated_at ?? 0;
-    const due = db
-      .prepare(
-        "SELECT task_id, session_id, scope, due_at, observed_task_version, source_updated_at FROM notification_deadline_schedule WHERE session_id = ? AND due_at <= ? ORDER BY due_at ASC, task_id ASC LIMIT ?",
-      )
-      .all(session, now, DUE_SCAN_BATCH) as {
-      task_id: string;
-      session_id: string;
-      scope: string;
-      due_at: number;
-      observed_task_version: number;
-      source_updated_at: number;
-    }[];
     const seqState = { next: readNextSeq(db, session) };
     let recorded = 0;
-    for (const row of due) {
-      const task = readTaskRow(db, row.task_id);
-      if (task === null || task.session_id !== session) {
-        db.prepare(
-          "DELETE FROM notification_deadline_schedule WHERE task_id = ?",
-        ).run(row.task_id);
-        continue;
+    let lastDue: number | null = null;
+    let lastTask: string | null = null;
+    for (;;) {
+      const due =
+        lastDue === null
+          ? (db
+              .prepare(
+                "SELECT task_id, session_id, scope, due_at, observed_task_version, source_updated_at FROM notification_deadline_schedule WHERE session_id = ? AND due_at <= ? ORDER BY due_at ASC, task_id ASC LIMIT ?",
+              )
+              .all(session, now, DUE_SCAN_BATCH) as DeadlineScheduleRow[])
+          : (db
+              .prepare(
+                "SELECT task_id, session_id, scope, due_at, observed_task_version, source_updated_at FROM notification_deadline_schedule WHERE session_id = ? AND due_at <= ? AND (due_at > ? OR (due_at = ? AND task_id > ?)) ORDER BY due_at ASC, task_id ASC LIMIT ?",
+              )
+              .all(
+                session,
+                now,
+                lastDue,
+                lastDue,
+                lastTask,
+                DUE_SCAN_BATCH,
+              ) as DeadlineScheduleRow[]);
+      if (due.length === 0) {
+        break;
       }
-      if (isTerminalTaskStatus(task.status)) {
-        db.prepare(
-          "DELETE FROM notification_deadline_schedule WHERE task_id = ?",
-        ).run(row.task_id);
-        db.prepare(
-          "UPDATE notifications SET outdated = 1 WHERE session_id = ? AND kind = 'deadline' AND source_id = ? AND outdated = 0",
-        ).run(session, row.task_id);
-        continue;
+      for (const row of due) {
+        lastDue = row.due_at;
+        lastTask = row.task_id;
+        const task = readTaskRow(db, row.task_id);
+        if (task === null || task.session_id !== session) {
+          db.prepare(
+            "DELETE FROM notification_deadline_schedule WHERE task_id = ?",
+          ).run(row.task_id);
+          continue;
+        }
+        if (isTerminalTaskStatus(task.status)) {
+          db.prepare(
+            "DELETE FROM notification_deadline_schedule WHERE task_id = ?",
+          ).run(row.task_id);
+          db.prepare(
+            "UPDATE notifications SET outdated = 1 WHERE session_id = ? AND kind = 'deadline' AND source_id = ? AND outdated = 0",
+          ).run(session, row.task_id);
+          continue;
+        }
+        const currentDue = eligibleDueAt(task);
+        if (currentDue === null || currentDue !== row.due_at) {
+          // Deadline changed / cleared / became ineligible: refresh the
+          // derived row, never alert on a stale value.
+          projectTaskDeadlineInTx(db, task, now);
+          continue;
+        }
+        // Offline-time rule: OLD past deadlines (due before the explicit
+        // resume cutoff) stay silent unless the task was meaningfully
+        // updated / created AFTER the resume. Skipped rows stay in the
+        // schedule but never mask rows behind them (keyset advances).
+        if (row.due_at < resumeCutoff && task.updated_at <= resumeCutoff) {
+          continue;
+        }
+        // One alert per ACTUAL deadline: a meaningful task update stays
+        // eligible, but the same task + same EXACT deadline never re-alerts.
+        if (isDeadlineAlerted(db, session, row.task_id, row.due_at)) {
+          continue;
+        }
+        const deadlineIso = task.deadline as string;
+        const draft: NotificationDraft = {
+          scope: task.scope,
+          kind: "deadline",
+          priority: "routine",
+          briefText: `deadline due in scope ${task.scope}: ${truncateCp(task.title, 200)} is due at ${deadlineIso} — fixed system notice, verify against the task record`,
+          sourceKind: "task_deadline",
+          sourceId: task.id,
+          sourceVersion: task.version,
+          sourceEpoch: null,
+          citedDeadlines: [deadlineIso],
+          // Dedup (taskId, EXACT deadline): status / version / hold-resume
+          // cycles are EXCLUDED so re-alerts never spam.
+          fingerprint: deadlineFingerprint(task.id, row.due_at),
+          // Deadline alerts never carry a derived question-context expiry.
+          contextExpiryAt: null,
+        };
+        if (insertNotificationInTx(db, session, seqState, draft, now)) {
+          recorded += 1;
+        }
       }
-      const currentDue = eligibleDueAt(task);
-      if (currentDue === null || currentDue !== row.due_at) {
-        // Deadline changed / cleared / became ineligible: refresh the
-        // derived row, never alert on a stale value.
-        projectTaskDeadlineInTx(db, task, now);
-        continue;
-      }
-      // Offline-time rule: OLD past deadlines (due before the explicit
-      // resume cutoff) stay silent unless the task was meaningfully
-      // updated / created AFTER the resume.
-      if (row.due_at < resumeCutoff && task.updated_at <= resumeCutoff) {
-        continue;
-      }
-      const deadlineIso = task.deadline as string;
-      const draft: NotificationDraft = {
-        scope: task.scope,
-        kind: "deadline",
-        priority: "routine",
-        briefText: `deadline due in scope ${task.scope}: ${truncateCp(task.title, 200)} is due at ${deadlineIso} — fixed system notice, verify against the task record`,
-        sourceKind: "task_deadline",
-        sourceId: task.id,
-        sourceVersion: task.version,
-        sourceEpoch: null,
-        citedDeadlines: [deadlineIso],
-        // Dedup (taskId, EXACT deadline): status / version / hold-resume
-        // cycles are EXCLUDED so re-alerts never spam.
-        fingerprint: truncateCp(`v1|deadline|${task.id}|${row.due_at}`, 500),
-        // Deadline alerts never carry a derived question-context expiry.
-        contextExpiryAt: null,
-      };
-      if (insertNotificationInTx(db, session, seqState, draft, now)) {
-        recorded += 1;
+      if (due.length < DUE_SCAN_BATCH) {
+        break;
       }
     }
     return { status: "recorded" as const, recorded, controlVersion: version };
