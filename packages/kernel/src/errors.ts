@@ -249,3 +249,31 @@ export class ProposalHashMismatchError extends KernelStorageError {
     );
   }
 }
+
+/**
+ * AV05 notification stable-key drift: the same ack key was used with a
+ * different notification (or a second key targets an already-acked
+ * notification). Fixed code `notification_key_conflict` (409, no state
+ * change, no silent rewrite).
+ */
+export class NotificationKeyConflictError extends KernelStorageError {
+  constructor(message = "notification ack key conflict") {
+    super("notification_key_conflict", message);
+  }
+}
+
+/**
+ * AV05 notification source renumber/rebuild detected: the durable source's
+ * current MAX(rowid) sits BELOW the stored cursor, so advancing would
+ * silently skip rows. Fixed code
+ * `notification_projection_reset_required` (409, no cursor advance, no
+ * notification insert). An explicit operator-driven rebuild is required;
+ * the projection never invents a new baseline on its own.
+ */
+export class NotificationProjectionResetError extends KernelStorageError {
+  constructor(
+    message = "notification source renumbered; projection reset required",
+  ) {
+    super("notification_projection_reset_required", message);
+  }
+}

@@ -280,6 +280,8 @@ export {
   MigrationFailedError,
   MigrationMissingError,
   NewerDatabaseError,
+  NotificationKeyConflictError,
+  NotificationProjectionResetError,
   PragmasError,
   ProposalHashMismatchError,
   ProposalStateConflictError,
@@ -350,6 +352,26 @@ export {
   migrateKernelDatabase,
   setSchemaVersion,
 } from "./migrate.js";
+export type {
+  AckNotificationOptions,
+  BuildDeadlineScheduleOptions,
+  IngestNotificationsOptions,
+  NextDeadlineOptions,
+  NotificationCursorSource,
+  RecordDueDeadlinesOptions,
+} from "./notifications.js";
+export {
+  ackNotification,
+  buildDeadlineSchedule,
+  getLatestNotificationCursor,
+  getNextDeadline,
+  getNotification,
+  getNotificationHistory,
+  ingestNotifications,
+  listNotifications,
+  reconcileDeadlineSchedule,
+  recordDueDeadlines,
+} from "./notifications.js";
 export type {
   CalendarConnectorView,
   EnsureMarkdownConnectorOptions,
@@ -426,6 +448,10 @@ export {
   memoryGrants,
   memoryOutbox,
   modelCalls,
+  notificationAcks,
+  notificationCursors,
+  notificationDeadlineSchedule,
+  notifications,
   referenceSetItems,
   referenceSets,
   resourceSnapshots,

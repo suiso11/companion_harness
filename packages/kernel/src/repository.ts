@@ -23,8 +23,11 @@ import {
   type AutonomyControlView,
   AutonomyControlViewSchema,
   AutonomyListQuerySchema,
+  type BuildDeadlineScheduleResponse,
+  BuildDeadlineScheduleResponseSchema,
   type CreateSessionResponse,
   CreateSessionResponseSchema,
+  DeadlineScheduleViewSchema,
   EventsQuerySchema,
   type FrozenContext,
   FrozenContextSchema,
@@ -36,6 +39,8 @@ import {
   type IdempotencyLookupResponse,
   IdempotencyLookupResponseSchema,
   IdempotencyScopeSchema,
+  type IngestNotificationsResponse,
+  IngestNotificationsResponseSchema,
   isTerminalStatus,
   LatestEventsResponseSchema,
   type LatestRunEvent,
@@ -47,6 +52,18 @@ import {
   type M2ModelStepEventType,
   M2ModelStepEventTypeSchema,
   messageScope,
+  type NextDeadlineResponse,
+  NextDeadlineResponseSchema,
+  type NotificationAckReceipt,
+  NotificationAckReceiptSchema,
+  type NotificationFeedCursorResponse,
+  NotificationFeedCursorResponseSchema,
+  type NotificationHistoryResponse,
+  NotificationHistoryResponseSchema,
+  type NotificationListResponse,
+  NotificationListResponseSchema,
+  type NotificationView,
+  NotificationViewSchema,
   PostMessageRequestSchema,
   type PostMessageResponse,
   PostMessageResponseSchema,
@@ -85,6 +102,8 @@ import {
   parseRunResult,
   parseTurnInput,
   proposalApproveScope,
+  type RecordDueDeadlinesResponse,
+  RecordDueDeadlinesResponseSchema,
   type ReferenceContextGetResponse,
   ReferenceContextGetResponseSchema,
   ReferenceContextPutRequestSchema,
@@ -186,6 +205,18 @@ import {
   RepositoryValidationError,
   SessionBusyError,
 } from "./errors.js";
+import {
+  ackNotification as notifyAck,
+  buildDeadlineSchedule as notifyBuildSchedule,
+  getNotification as notifyGet,
+  getNotificationHistory as notifyHistory,
+  ingestNotifications as notifyIngest,
+  getLatestNotificationCursor as notifyLatestCursor,
+  listNotifications as notifyList,
+  getNextDeadline as notifyNextDeadline,
+  reconcileDeadlineSchedule as notifyReconcileSchedule,
+  recordDueDeadlines as notifyRecordDue,
+} from "./notifications.js";
 import {
   type ShadowPolicyReader,
   type ShadowReaderPurpose,
@@ -5639,6 +5670,163 @@ export function createKernelRepository(
     return shadowHasActiveRuns(db);
   }
 
+  /* AV05 notifications durable-projection facade (core only).          */
+  /*                                                                  */
+  /* Ownership: every method below delegates to `notifications.ts`,   */
+  /* the ONLY writer of the notification tables. This facade adds the */
+  /* strict Zod boundary and returns kernel shapes so the NEXT       */
+  /* service / HTTP worker can consume them verbatim. No model       */
+  /* invoke, no worker, no calendar write, no authorization lives     */
+  /* here: notifications never become execution authority and an ack  */
+  /* changes NO purpose / task / control / grant state.               */
+  /* ---------------------------------------------------------------- */
+
+  function ingestNotifications(
+    sessionId: string,
+    options: { now?: number } = {},
+  ): IngestNotificationsResponse {
+    const out = notifyIngest(db, sessionId, options);
+    return parseOrValidation(
+      () => IngestNotificationsResponseSchema.parse(out),
+      "ingest notifications response",
+    );
+  }
+
+  function listNotifications(
+    sessionId: string,
+    query: unknown = {},
+  ): NotificationListResponse {
+    const parsed = parseOrValidation(
+      () => AutonomyListQuerySchema.parse(query ?? {}),
+      "notification list query",
+    );
+    const out = notifyList(db, sessionId, parsed.limit);
+    return parseOrValidation(
+      () => NotificationListResponseSchema.parse(out),
+      "notification list response",
+    );
+  }
+
+  function getNotification(
+    sessionId: string,
+    notificationId: string,
+  ): NotificationView {
+    return parseOrValidation(
+      () =>
+        NotificationViewSchema.parse(notifyGet(db, sessionId, notificationId)),
+      "notification response",
+    );
+  }
+
+  function getNotificationHistory(
+    sessionId: string,
+    notificationId: string,
+  ): NotificationHistoryResponse {
+    const out = notifyHistory(db, sessionId, notificationId);
+    return parseOrValidation(
+      () => NotificationHistoryResponseSchema.parse(out),
+      "notification history response",
+    );
+  }
+
+  function getLatestNotificationCursor(
+    sessionId: string,
+  ): NotificationFeedCursorResponse {
+    const out = notifyLatestCursor(db, sessionId);
+    return parseOrValidation(
+      () => NotificationFeedCursorResponseSchema.parse(out),
+      "notification feed cursor response",
+    );
+  }
+
+  function ackNotification(
+    sessionId: string,
+    notificationId: string,
+    options: { key: string; now?: number },
+  ): {
+    status: number;
+    body: NotificationAckReceipt;
+    replayed: boolean;
+  } {
+    if (typeof options.key !== "string") {
+      throw new RepositoryValidationError("ack key must be a UUID v4");
+    }
+    const out = notifyAck(db, sessionId, notificationId, options);
+    const body = parseOrValidation(
+      () => NotificationAckReceiptSchema.parse(out.body),
+      "notification ack receipt",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function buildDeadlineSchedule(
+    sessionId: string,
+    options: { now?: number } = {},
+  ): BuildDeadlineScheduleResponse {
+    const out = notifyBuildSchedule(db, sessionId, options);
+    return parseOrValidation(
+      () => BuildDeadlineScheduleResponseSchema.parse(out),
+      "build deadline schedule response",
+    );
+  }
+
+  function reconcileDeadlineSchedule(
+    sessionId: string,
+    options: { now?: number } = {},
+  ): BuildDeadlineScheduleResponse {
+    const out = notifyReconcileSchedule(db, sessionId, options);
+    return parseOrValidation(
+      () => BuildDeadlineScheduleResponseSchema.parse(out),
+      "reconcile deadline schedule response",
+    );
+  }
+
+  function getNextDeadline(
+    sessionId: string,
+    options: { now?: number } = {},
+  ): NextDeadlineResponse {
+    const out = notifyNextDeadline(db, sessionId, options);
+    const deadline =
+      out.deadline === null
+        ? null
+        : parseOrValidation(
+            () => DeadlineScheduleViewSchema.parse(out.deadline),
+            "deadline schedule response",
+          );
+    return parseOrValidation(
+      () =>
+        NextDeadlineResponseSchema.parse({
+          status: out.status,
+          paused: out.paused,
+          controlVersion: out.controlVersion,
+          deadline,
+        }),
+      "next deadline response",
+    );
+  }
+
+  function recordDueDeadlines(
+    sessionId: string,
+    options: { expectedControlVersion: number; now?: number },
+  ): RecordDueDeadlinesResponse {
+    if (
+      !Number.isInteger(options.expectedControlVersion) ||
+      options.expectedControlVersion < 1
+    ) {
+      throw new RepositoryValidationError(
+        "expectedControlVersion must be >= 1",
+      );
+    }
+    const out = notifyRecordDue(db, sessionId, {
+      expectedControlVersion: options.expectedControlVersion,
+      ...(options.now !== undefined ? { now: options.now } : {}),
+    });
+    return parseOrValidation(
+      () => RecordDueDeadlinesResponseSchema.parse(out),
+      "record due deadlines response",
+    );
+  }
+
   return {
     createSession,
     postMessage,
@@ -5742,6 +5930,16 @@ export function createKernelRepository(
     cancelShadowJob,
     readPendingShadowJob,
     hasActiveShadowBlock,
+    ingestNotifications,
+    listNotifications,
+    getNotification,
+    getNotificationHistory,
+    getLatestNotificationCursor,
+    ackNotification,
+    buildDeadlineSchedule,
+    reconcileDeadlineSchedule,
+    getNextDeadline,
+    recordDueDeadlines,
   };
 }
 
