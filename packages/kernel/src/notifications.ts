@@ -1540,7 +1540,7 @@ export function getNextDeadline(
   let lastDue: number | null = null;
   let lastTask: string | null = null;
   for (;;) {
-    const page =
+    const page: DeadlineScheduleRow[] =
       lastDue === null
         ? (db
             .prepare(
@@ -1657,7 +1657,7 @@ export function recordDueDeadlines(
     let lastDue: number | null = null;
     let lastTask: string | null = null;
     for (;;) {
-      const due =
+      const due: DeadlineScheduleRow[] =
         lastDue === null
           ? (db
               .prepare(
