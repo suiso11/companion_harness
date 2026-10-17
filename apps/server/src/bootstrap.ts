@@ -1175,6 +1175,20 @@ export async function startServer(
       if (!(error instanceof Error) || !/no such table/i.test(error.message)) {
         throw error;
       }
+      // Post-migration the schema version is BUNDLED_SCHEMA_VERSION (>= the
+      // 0011 autonomy migration), so every autonomy table must exist: a
+      // missing table means the durable stop fence was NOT applied and
+      // startup must fail instead of running unprotected. Only a pre-0011
+      // database (which never had the slice) may proceed best-effort.
+      let version = 0;
+      try {
+        version = getSchemaVersion(handle.raw);
+      } catch {
+        throw error;
+      }
+      if (version >= BUNDLED_SCHEMA_VERSION) {
+        throw error;
+      }
     }
 
     // Bound-roots guard: removing every Markdown root while a Markdown

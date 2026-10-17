@@ -12,6 +12,11 @@
 
 import type { ActiveStatus } from "@companion/contracts";
 import {
+  retryRefreshesControl,
+  revalidateConflictArm,
+  shouldResetConflictArm,
+} from "./autonomy_state.js";
+import {
   ACTION_PROGRESS_TEXT,
   type ActionCardModel,
   type ActionErrorCode,
@@ -3865,6 +3870,8 @@ class AutonomyPanel {
   private readonly taskCancelButton: HTMLButtonElement;
   private controlVersion = 1;
   private readonly purposeVersions = new Map<string, number>();
+  /** Ids whose latest list row is `active` (the list also carries inactive rows). */
+  private readonly purposeActiveIds = new Set<string>();
   private readonly taskVersions = new Map<string, number>();
   private selectedPurpose: string | null = null;
   private selectedTask: string | null = null;
@@ -4185,6 +4192,9 @@ class AutonomyPanel {
       }
       this.pendingAutonomy = null;
       this.renderPending();
+      if (retryRefreshesControl(pending.endpoint)) {
+        await this.refreshControl();
+      }
       await this.refreshLists();
       this.notice("再送しました");
     } finally {
@@ -4298,6 +4308,7 @@ class AutonomyPanel {
   private renderPurposes(result: { status: number; body: unknown }): void {
     this.purposeList.textContent = "";
     this.purposeVersions.clear();
+    this.purposeActiveIds.clear();
     // Rebind (never blindly hide): keep the detail visible only when the
     // selected id is still present; otherwise clear the selection AND its
     // drafts so a stale draft can never overwrite a new target.
@@ -4330,6 +4341,9 @@ class AutonomyPanel {
         continue;
       }
       this.purposeVersions.set(row.id, row.version);
+      if (row.status === "active") {
+        this.purposeActiveIds.add(row.id);
+      }
       const line = el("li");
       const button = document.createElement("button");
       button.type = "button";
@@ -4535,12 +4549,10 @@ class AutonomyPanel {
       this.notice("競合にする目的を二つ選んでください");
       return;
     }
-    if (
-      this.conflictArm !== null &&
-      !this.purposeVersions.has(this.conflictArm)
-    ) {
-      this.conflictArm = null;
-    }
+    this.conflictArm = revalidateConflictArm(
+      this.conflictArm,
+      this.purposeActiveIds,
+    );
     if (this.conflictArm === null) {
       this.conflictArm = id;
       this.notice(
@@ -4565,6 +4577,9 @@ class AutonomyPanel {
       await this.refreshLists();
       this.notice("競合を記録しました（自動解決されません）");
     } else if (result.status === 409) {
+      if (shouldResetConflictArm(result.status)) {
+        this.conflictArm = null;
+      }
       await this.refreshLists();
       this.notice("他の変更がありました。一覧を更新しました");
     } else {
