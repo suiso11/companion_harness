@@ -27,12 +27,22 @@
 //   cursor and inserts notification / projection rows in the SAME TX.
 //   Catchup consumes only durable UNSEEN changes and never re-executes
 //   work. No model invoke, no ToolBroker, no worker, no calendar write.
-// - Source cursors baseline lazily at the current MAX(source rowid) per
-//   (session, source) on first ingest, so historical pre-existing jobs /
-//   receipts are NOT mass-notified. The last consumed source rowid is
-//   stored with the cursor and checked before advancing: a renumbered /
-//   rebuilt source (MAX(rowid) below the cursor) surfaces an honest
-//   `notification_projection_reset_required` instead of silently skipping.
+// - Source cursors are owned by migration 0014 + the kernel: migration 14
+//   INSERTs one cursor row per (pre-existing session, source) at that
+//   session's current MAX(source rowid) with a NULL key anchor, and an
+//   AFTER-INSERT-ON-sessions trigger starts every NEW session at rowid 0 /
+//   NULL anchor — so a new session's FIRST source event is always
+//   consumed and historical rows are never mass-notified. The kernel
+//   NEVER lazily baselines at MAX on first ingest: a missing cursor after
+//   migration/trigger is an honest `notification_projection_reset_required`
+//   (a projection reset), never a silent skip of the first event.
+//   Every advance stores the source KEY at the frontier rowid in the SAME
+//   TX (`shadow_job_events.id`, `action_receipts.execution_id`,
+//   `autonomy_task_events.id`); before advancing the kernel verifies the
+//   rowid at the stored cursor still carries the anchored key for the OWN
+//   session, so a rowid reuse / reorder / rebuild with the same or higher
+//   MAX surfaces an honest reset with ZERO partial progress instead of
+//   silently skipping durable history.
 // - A notification is an immutable original record: UUID id + per-session
 //   monotonic seq, scope when the source knows it, kind
 //   (progress / proposal / question / deadline / commitment), priority
@@ -100,6 +110,7 @@ import {
   type NotificationKind,
   type NotificationView,
   NotificationViewSchema,
+  ShadowJobContextSchema,
   type ShadowModelOutput,
   ShadowModelOutputSchema,
   type ShadowPolicyCode,
@@ -224,48 +235,77 @@ function readCursor(
   db: Database.Database,
   sessionId: string,
   source: NotificationCursorSource,
-): number | null {
+): { rowid: number; key: string | null } | null {
   const row = db
     .prepare(
-      "SELECT last_source_rowid FROM notification_cursors WHERE session_id = ? AND source = ?",
+      "SELECT last_source_rowid, last_source_key FROM notification_cursors WHERE session_id = ? AND source = ?",
     )
-    .get(sessionId, source) as { last_source_rowid: number } | undefined;
-  return row?.last_source_rowid ?? null;
+    .get(sessionId, source) as
+    | { last_source_rowid: number; last_source_key: string | null }
+    | undefined;
+  return row === undefined
+    ? null
+    : { rowid: row.last_source_rowid, key: row.last_source_key };
 }
 
+/** Immutable source key column anchoring each cursor's frontier rowid. */
+const CURSOR_KEY_COLUMNS: Record<NotificationCursorSource, string> = {
+  shadow_job_events: "id",
+  action_receipts: "execution_id",
+  autonomy_task_events: "id",
+};
+
 /**
- * Lazily baseline a missing cursor at the current session-scoped MAX(rowid)
- * (historical pre-existing rows are NOT mass-notified) or return the stored
- * cursor after a renumber check (MAX(rowid) below the cursor is an honest
- * `notification_projection_reset_required`, never a silent skip). MUST run
- * inside the caller's transaction.
+ * Resolve the stored cursor or fail honest. There is NO lazy MAX(rowid)
+ * baseline here: migration 14 owns the backfill for pre-existing sessions
+ * and the sessions trigger owns fresh-session init, so a new session's
+ * FIRST source event is always consumed. A missing cursor, a
+ * renumber/rebuild (MAX(rowid) below the cursor), or a key-anchor mismatch
+ * (the rowid at the cursor no longer carries the anchored source key for
+ * the OWN session — rowid reuse / reorder / rebuild at the same or higher
+ * MAX) is an honest `notification_projection_reset_required` with ZERO
+ * partial progress, never a silent skip. MUST run inside the caller's
+ * transaction.
  */
 function resolveCursorInTx(
   db: Database.Database,
   sessionId: string,
   source: NotificationCursorSource,
-  now: number,
-): { cursor: number; baselined: boolean } {
+): { cursor: number } {
   const stored = readCursor(db, sessionId, source);
-  const currentMax = sessionMaxRowid(db, source, sessionId);
   if (stored === null) {
-    const baseline = currentMax ?? 0;
-    db.prepare(
-      "INSERT INTO notification_cursors (session_id, source, last_source_rowid, updated_at) VALUES (?, ?, ?, ?)",
-    ).run(sessionId, source, baseline, now);
-    return { cursor: baseline, baselined: true };
+    throw new NotificationProjectionResetError(
+      `source ${source} has no cursor for session ${sessionId}; projection reset required`,
+    );
   }
+  const currentMax = sessionMaxRowid(db, source, sessionId);
   // Renumber / rebuild detection: the append-only source must never sit
   // below the stored cursor — whether rows shifted down (MAX below cursor)
   // or vanished entirely (no rows left past a nonzero cursor). Either way
   // advancing would silently skip durable history, so the projection
   // honestly refuses instead.
-  if (currentMax === null ? stored > 0 : currentMax < stored) {
+  if (currentMax === null ? stored.rowid > 0 : currentMax < stored.rowid) {
     throw new NotificationProjectionResetError(
-      `source ${source} renumbered (max ${currentMax ?? "empty"} below cursor ${stored}); projection reset required`,
+      `source ${source} renumbered (max ${currentMax ?? "empty"} below cursor ${stored.rowid}); projection reset required`,
     );
   }
-  return { cursor: stored, baselined: false };
+  // Key-anchor verification: NULL anchors are grandfathered (migration-14
+  // baselines and fresh-session inits carry no key yet) and cursor 0 sits
+  // before any source row; anything else must still own its anchored key.
+  if (stored.key !== null && stored.rowid > 0) {
+    const keyColumn = CURSOR_KEY_COLUMNS[source];
+    const at = db
+      .prepare(
+        `SELECT ${keyColumn} AS anchor_key FROM ${source} WHERE rowid = ? AND session_id = ?`,
+      )
+      .get(stored.rowid, sessionId) as { anchor_key: string } | undefined;
+    if (at === undefined || at.anchor_key !== stored.key) {
+      throw new NotificationProjectionResetError(
+        `source ${source} cursor row ${stored.rowid} no longer carries the anchored key; projection reset required`,
+      );
+    }
+  }
+  return { cursor: stored.rowid };
 }
 
 function advanceCursorInTx(
@@ -273,11 +313,12 @@ function advanceCursorInTx(
   sessionId: string,
   source: NotificationCursorSource,
   rowid: number,
+  key: string | null,
   now: number,
 ): void {
   db.prepare(
-    "INSERT INTO notification_cursors (session_id, source, last_source_rowid, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(session_id, source) DO UPDATE SET last_source_rowid = excluded.last_source_rowid, updated_at = excluded.updated_at",
-  ).run(sessionId, source, rowid, now);
+    "INSERT INTO notification_cursors (session_id, source, last_source_rowid, last_source_key, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(session_id, source) DO UPDATE SET last_source_rowid = excluded.last_source_rowid, last_source_key = excluded.last_source_key, updated_at = excluded.updated_at",
+  ).run(sessionId, source, rowid, key, now);
 }
 
 /* ------------------------------------------------------------------ */
@@ -297,6 +338,12 @@ interface NotificationDraft {
   citedDeadlines: string[];
   /** Semantic state WITHOUT paraphrase / model text / job id. */
   fingerprint: string;
+  /**
+   * DERIVED question-context expiry (Unix-ms) or null. Computed ONCE at
+   * notice creation as the min FUTURE applicability boundary; reads map
+   * `outdated` from it without ever mutating the stored original.
+   */
+  contextExpiryAt: number | null;
 }
 
 /**
@@ -324,10 +371,18 @@ function insertNotificationInTx(
   if (draft.citedDeadlines.length > 8) {
     throw new RepositoryValidationError("citedDeadlines max 8");
   }
+  if (
+    draft.contextExpiryAt !== null &&
+    (!Number.isInteger(draft.contextExpiryAt) || draft.contextExpiryAt < 0)
+  ) {
+    throw new RepositoryValidationError(
+      "contextExpiryAt must be Unix-ms or null",
+    );
+  }
   const seq = seqState.next;
   const moved = db
     .prepare(
-      "INSERT INTO notifications (id, session_id, seq, scope, kind, priority, brief_text, source_kind, source_id, source_version, source_epoch, cited_deadlines, fingerprint, outdated, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?) ON CONFLICT(session_id, fingerprint) DO NOTHING",
+      "INSERT INTO notifications (id, session_id, seq, scope, kind, priority, brief_text, source_kind, source_id, source_version, source_epoch, cited_deadlines, fingerprint, outdated, context_expiry_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?) ON CONFLICT(session_id, fingerprint) DO NOTHING",
     )
     .run(
       generateId(),
@@ -343,6 +398,7 @@ function insertNotificationInTx(
       draft.sourceEpoch,
       JSON.stringify(draft.citedDeadlines),
       draft.fingerprint,
+      draft.contextExpiryAt,
       now,
     );
   if (moved.changes === 1) {
@@ -361,7 +417,7 @@ function readNextSeq(db: Database.Database, sessionId: string): number {
   return row.max_seq + 1;
 }
 
-function toNotificationView(row: {
+interface StoredNotificationRow {
   id: string;
   session_id: string;
   seq: number;
@@ -375,8 +431,14 @@ function toNotificationView(row: {
   source_epoch: number | null;
   cited_deadlines: string;
   outdated: number;
+  context_expiry_at: number | null;
   created_at: number;
-}): NotificationView {
+}
+
+function toNotificationView(
+  row: StoredNotificationRow,
+  now: number,
+): NotificationView {
   return parseOrValidation(
     () =>
       NotificationViewSchema.parse({
@@ -392,7 +454,12 @@ function toNotificationView(row: {
         sourceVersion: row.source_version,
         sourceEpoch: row.source_epoch,
         citedDeadlines: JSON.parse(row.cited_deadlines),
-        outdated: row.outdated === 1,
+        // DERIVED relevance: the stored flag OR the technical expiry
+        // reached at read time — computed here, never mutated on GET.
+        outdated:
+          row.outdated === 1 ||
+          (row.context_expiry_at !== null && row.context_expiry_at <= now),
+        contextExpiryAt: row.context_expiry_at,
         createdAt: row.created_at,
       }),
     "stored notification",
@@ -403,41 +470,11 @@ function assertOwnedNotification(
   db: Database.Database,
   sessionId: string,
   notificationId: string,
-): {
-  id: string;
-  session_id: string;
-  seq: number;
-  scope: string;
-  kind: string;
-  priority: string;
-  brief_text: string;
-  source_kind: string;
-  source_id: string;
-  source_version: number | null;
-  source_epoch: number | null;
-  cited_deadlines: string;
-  outdated: number;
-  created_at: number;
-} {
+): StoredNotificationRow {
   const session = requireId(sessionId, "sessionId");
   const id = requireId(notificationId, "notificationId");
   const row = db.prepare("SELECT * FROM notifications WHERE id = ?").get(id) as
-    | {
-        id: string;
-        session_id: string;
-        seq: number;
-        scope: string;
-        kind: string;
-        priority: string;
-        brief_text: string;
-        source_kind: string;
-        source_id: string;
-        source_version: number | null;
-        source_epoch: number | null;
-        cited_deadlines: string;
-        outdated: number;
-        created_at: number;
-      }
+    | StoredNotificationRow
     | undefined;
   if (row === undefined || row.session_id !== session) {
     throw new RepositoryNotFoundError(
@@ -460,8 +497,60 @@ interface RawShadowJob {
   scope_epoch: number;
   claim_scope_epoch: number | null;
   claim_control_version: number | null;
+  context_json: string | null;
   model_decision_json: string | null;
   policy_code: string | null;
+}
+
+/**
+ * DERIVED question-context expiry: the min FUTURE time-applicability
+ * boundary frozen at notice creation, using the EXISTING strict
+ * RFC3339-with-explicit-offset grammar + `Date.parse` (no new timezone
+ * parser, no model dates). Candidates are (a) the `validUntil` of frozen
+ * purposes that were APPLICABLE at claim (`applicableAtClaim === true`;
+ * already-inapplicable history — including already-expired windows — MUST
+ * NOT blanket-outdate a valid question) and (b) the draft's cited EXPLICIT
+ * task deadlines in the future. A purpose window is NEVER a task deadline
+ * and is never stored as one. Only boundaries strictly AFTER `now` count,
+ * so a past deadline cited in a NEW post-deadline question never instantly
+ * expires that meaningful question. Returns null when nothing relevant is
+ * pending in the future.
+ */
+function questionContextExpiryAt(
+  contextJson: string | null,
+  citedDeadlines: string[],
+  now: number,
+): number | null {
+  let expiry: number | null = null;
+  const consider = (ms: number): void => {
+    if (Number.isInteger(ms) && ms > now && (expiry === null || ms < expiry)) {
+      expiry = ms;
+    }
+  };
+  if (contextJson !== null) {
+    try {
+      const frozen = ShadowJobContextSchema.parse(JSON.parse(contextJson));
+      for (const purpose of frozen.purposes) {
+        if (!purpose.applicableAtClaim) {
+          continue;
+        }
+        if (
+          purpose.validUntil !== null &&
+          isStrictAutonomyDeadline(purpose.validUntil)
+        ) {
+          consider(Date.parse(purpose.validUntil));
+        }
+      }
+    } catch {
+      // Unparsable frozen context yields no derived expiry (never fake one).
+    }
+  }
+  for (const cited of citedDeadlines) {
+    if (isStrictAutonomyDeadline(cited)) {
+      consider(Date.parse(cited));
+    }
+  }
+  return expiry;
 }
 
 /**
@@ -476,6 +565,7 @@ function draftFromCompletedShadowJob(
   job: RawShadowJob,
   decision: ShadowModelOutput,
   policy: ShadowPolicyCode,
+  now: number,
 ): NotificationDraft | null {
   if (decision.decision === "do-nothing") {
     return null;
@@ -514,6 +604,12 @@ function draftFromCompletedShadowJob(
     sourceEpoch: job.claim_scope_epoch ?? job.scope_epoch,
     citedDeadlines: cited,
     fingerprint,
+    // Only questions carry a derived context expiry (future applicability
+    // boundaries frozen at creation); every other kind stays NULL.
+    contextExpiryAt:
+      kind === "question"
+        ? questionContextExpiryAt(job.context_json, cited, now)
+        : null,
   };
 }
 
@@ -523,21 +619,24 @@ function ingestShadowEventsInTx(
   seqState: { next: number },
   now: number,
 ): { ingested: number; skipped: number } {
-  const { cursor } = resolveCursorInTx(db, sessionId, "shadow_job_events", now);
+  const { cursor } = resolveCursorInTx(db, sessionId, "shadow_job_events");
   const rows = db
     .prepare(
-      "SELECT rowid AS rowid, job_id, to_status FROM shadow_job_events WHERE session_id = ? AND rowid > ? ORDER BY rowid ASC LIMIT ?",
+      "SELECT rowid AS rowid, id, job_id, to_status FROM shadow_job_events WHERE session_id = ? AND rowid > ? ORDER BY rowid ASC LIMIT ?",
     )
     .all(sessionId, cursor, SHADOW_EVENT_BATCH) as {
     rowid: number;
+    id: string;
     job_id: string;
     to_status: string;
   }[];
   let ingested = 0;
   let skipped = 0;
   let frontier = cursor;
+  let frontierKey: string | null = null;
   for (const event of rows) {
     frontier = Math.max(frontier, event.rowid);
+    frontierKey = event.id;
     if (event.to_status !== "completed") {
       skipped += 1;
       continue;
@@ -572,6 +671,7 @@ function ingestShadowEventsInTx(
       job,
       decision,
       job.policy_code as ShadowPolicyCode,
+      now,
     );
     if (draft === null) {
       skipped += 1;
@@ -584,7 +684,14 @@ function ingestShadowEventsInTx(
     }
   }
   if (frontier > cursor) {
-    advanceCursorInTx(db, sessionId, "shadow_job_events", frontier, now);
+    advanceCursorInTx(
+      db,
+      sessionId,
+      "shadow_job_events",
+      frontier,
+      frontierKey,
+      now,
+    );
   }
   return { ingested, skipped };
 }
@@ -599,7 +706,7 @@ function ingestReceiptsInTx(
   seqState: { next: number },
   now: number,
 ): { ingested: number; skipped: number } {
-  const { cursor } = resolveCursorInTx(db, sessionId, "action_receipts", now);
+  const { cursor } = resolveCursorInTx(db, sessionId, "action_receipts");
   const rows = db
     .prepare(
       "SELECT rowid AS rowid, execution_id, proposal_id, outcome FROM action_receipts WHERE session_id = ? AND rowid > ? ORDER BY rowid ASC LIMIT ?",
@@ -613,8 +720,10 @@ function ingestReceiptsInTx(
   let ingested = 0;
   let skipped = 0;
   let frontier = cursor;
+  let frontierKey: string | null = null;
   for (const receipt of rows) {
     frontier = Math.max(frontier, receipt.rowid);
+    frontierKey = receipt.execution_id;
     // ONLY actual uncertain outcomes notify: `unknown` /
     // `succeeded_unverified`. Verified / failed / blocked outcomes are
     // already terminally recorded elsewhere and stay silent here. The
@@ -643,6 +752,7 @@ function ingestReceiptsInTx(
       sourceVersion: null,
       sourceEpoch: null,
       citedDeadlines: [],
+      contextExpiryAt: null,
       fingerprint: truncateCp(
         `v1|receipt|${receipt.proposal_id}|${receipt.outcome}`,
         500,
@@ -655,7 +765,14 @@ function ingestReceiptsInTx(
     }
   }
   if (frontier > cursor) {
-    advanceCursorInTx(db, sessionId, "action_receipts", frontier, now);
+    advanceCursorInTx(
+      db,
+      sessionId,
+      "action_receipts",
+      frontier,
+      frontierKey,
+      now,
+    );
   }
   return { ingested, skipped };
 }
@@ -780,28 +897,26 @@ function ingestTaskEventsInTx(
   sessionId: string,
   now: number,
 ): { projected: number; removed: number; skipped: number } {
-  const { cursor } = resolveCursorInTx(
-    db,
-    sessionId,
-    "autonomy_task_events",
-    now,
-  );
+  const { cursor } = resolveCursorInTx(db, sessionId, "autonomy_task_events");
   const rows = db
     .prepare(
-      "SELECT rowid AS rowid, task_id FROM autonomy_task_events WHERE session_id = ? AND rowid > ? ORDER BY rowid ASC LIMIT ?",
+      "SELECT rowid AS rowid, id, task_id FROM autonomy_task_events WHERE session_id = ? AND rowid > ? ORDER BY rowid ASC LIMIT ?",
     )
     .all(sessionId, cursor, TASK_EVENT_BATCH) as {
     rowid: number;
+    id: string;
     task_id: string;
   }[];
   let projected = 0;
   let removed = 0;
   let skipped = 0;
   let frontier = cursor;
+  let frontierKey: string | null = null;
   const seen = new Set<string>();
   const ordered: string[] = [];
   for (const event of rows) {
     frontier = Math.max(frontier, event.rowid);
+    frontierKey = event.id;
     if (!seen.has(event.task_id)) {
       seen.add(event.task_id);
       ordered.push(event.task_id);
@@ -824,7 +939,14 @@ function ingestTaskEventsInTx(
     skipped += rows.length;
   }
   if (frontier > cursor) {
-    advanceCursorInTx(db, sessionId, "autonomy_task_events", frontier, now);
+    advanceCursorInTx(
+      db,
+      sessionId,
+      "autonomy_task_events",
+      frontier,
+      frontierKey,
+      now,
+    );
   }
   return { projected, removed, skipped };
 }
@@ -839,13 +961,14 @@ export interface IngestNotificationsOptions {
 
 /**
  * Bounded durable catchup for ONE session: shadow completions, uncertain
- * receipts, and task-event deadline projection advance their cursors and
- * insert notification / projection rows in ONE transaction (atomic
- * rollback on ANY failure — partial cursor advance is impossible).
- * Historical rows present before the first ingest stay un-notified
- * (lazy MAX(rowid) baseline); afterwards only durable unseen changes are
- * consumed, and work is never re-executed. Never enqueues shadow jobs,
- * never touches receipts, never writes calendars.
+ * receipts, and task-event deadline projection advance their key-anchored
+ * cursors and insert notification / projection rows in ONE transaction
+ * (atomic rollback on ANY failure — partial cursor advance is impossible).
+ * Cursors are owned by migration 14 (pre-existing sessions) + the
+ * sessions trigger (new sessions at rowid 0), so a new session's FIRST
+ * source event is always consumed; afterwards only durable unseen changes
+ * are consumed, and work is never re-executed. Never enqueues shadow
+ * jobs, never touches receipts, never writes calendars.
  */
 export function ingestNotifications(
   db: Database.Database,
@@ -873,43 +996,155 @@ export function ingestNotifications(
   });
 }
 
-/**
- * Pure-read bounded notification list (newest first, existing 50 / 100
- * caps). Never auto-acks, never mutates delivered state. Returns truthful
- * latestSeq + unread counts (no hardcoded data).
- */
-export function listNotifications(
-  db: Database.Database,
-  sessionId: string,
-  limit = 50,
-): {
-  items: NotificationView[];
-  latestSeq: number;
-  unreadCount: number;
-} {
-  const session = requireId(sessionId, "sessionId");
-  requireSession(db, session);
-  const capped = Math.min(Math.max(limit, 1), 100);
-  const rows = db
-    .prepare(
-      "SELECT * FROM notifications WHERE session_id = ? ORDER BY seq DESC, id ASC LIMIT ?",
-    )
-    .all(session, capped) as Parameters<typeof toNotificationView>[0][];
-  const unread = db
-    .prepare(
-      "SELECT COUNT(*) AS count FROM notifications n LEFT JOIN notification_acks a ON a.notification_id = n.id WHERE n.session_id = ? AND a.notification_id IS NULL",
-    )
-    .get(session) as { count: number };
+export interface ListNotificationsOptions {
+  limit?: number;
+  /** Newest page strictly below this seq (history paging). */
+  beforeSeq?: number;
+  /** Read clock for derived `outdated` (expiry <= readNow). */
+  now?: number;
+}
+
+export interface ListNotificationsForwardOptions {
+  /** Forward-read cursor: notifications strictly after this seq. */
+  after?: number;
+  limit?: number;
+  /** Read clock for derived `outdated` (expiry <= readNow). */
+  now?: number;
+}
+
+function parseListLimit(limit: number | undefined): number {
+  const value = limit ?? 50;
+  if (!Number.isInteger(value) || value < 1 || value > 100) {
+    throw new RepositoryValidationError("limit must be an integer 1..100");
+  }
+  return value;
+}
+
+function readLatestSeq(db: Database.Database, session: string): number {
   const latest = db
     .prepare(
       "SELECT COALESCE(MAX(seq), 0) AS max_seq FROM notifications WHERE session_id = ?",
     )
     .get(session) as { max_seq: number };
+  return latest.max_seq;
+}
+
+/**
+ * Truthful unread count: unacked AND actionable (stored-outdated and
+ * derived-expired rows are HISTORY and never count as unread). Pure read.
+ */
+function readUnreadCount(
+  db: Database.Database,
+  session: string,
+  now: number,
+): number {
+  const unread = db
+    .prepare(
+      "SELECT COUNT(*) AS count FROM notifications n LEFT JOIN notification_acks a ON a.notification_id = n.id WHERE n.session_id = ? AND a.notification_id IS NULL AND n.outdated = 0 AND (n.context_expiry_at IS NULL OR n.context_expiry_at > ?)",
+    )
+    .get(session, now) as { count: number };
+  return unread.count;
+}
+
+/**
+ * Pure-read bounded newest page (newest first, strict 1..100 cap, optional
+ * `beforeSeq` history cursor). Real SQL paging with a LIMIT+1 probe, so
+ * `hasMore` / `nextBefore` are truthful and feeds never silently truncate.
+ * Never auto-acks, never ingests, never baselines a cursor, never mutates
+ * delivered state. Returns truthful latestSeq + unread counts.
+ */
+export function listNotifications(
+  db: Database.Database,
+  sessionId: string,
+  options: ListNotificationsOptions = {},
+): {
+  items: NotificationView[];
+  latestSeq: number;
+  unreadCount: number;
+  hasMore: boolean;
+  nextBefore: number | null;
+} {
+  const session = requireId(sessionId, "sessionId");
+  requireSession(db, session);
+  const capped = parseListLimit(options.limit);
+  let beforeSeq: number | null = null;
+  if (options.beforeSeq !== undefined) {
+    if (!Number.isInteger(options.beforeSeq) || options.beforeSeq < 1) {
+      throw new RepositoryValidationError("beforeSeq must be an integer >= 1");
+    }
+    beforeSeq = options.beforeSeq;
+  }
+  const now = nowMs(options.now);
+  const rows = (
+    beforeSeq === null
+      ? db
+          .prepare(
+            "SELECT * FROM notifications WHERE session_id = ? ORDER BY seq DESC, id ASC LIMIT ?",
+          )
+          .all(session, capped + 1)
+      : db
+          .prepare(
+            "SELECT * FROM notifications WHERE session_id = ? AND seq < ? ORDER BY seq DESC, id ASC LIMIT ?",
+          )
+          .all(session, beforeSeq, capped + 1)
+  ) as StoredNotificationRow[];
+  const hasMore = rows.length > capped;
+  const page = hasMore ? rows.slice(0, capped) : rows;
   return {
-    items: rows.map(toNotificationView),
-    latestSeq: latest.max_seq,
-    unreadCount: unread.count,
+    items: page.map((row) => toNotificationView(row, now)),
+    latestSeq: readLatestSeq(db, session),
+    unreadCount: readUnreadCount(db, session, now),
+    hasMore,
+    nextBefore: hasMore ? (page[page.length - 1]?.seq ?? null) : null,
   };
+}
+
+/**
+ * Pure-read bounded forward page (`seq > after`, oldest first, strict
+ * 1..100 cap). Real read-after SQL with a LIMIT+1 probe, so a future SSE
+ * feed filtering AFTER a limited latest window never loses the first of
+ * >100 new notices: every seq is delivered exactly once, even with equal
+ * `createdAt` (ordering is by seq, never by timestamp). Never auto-acks,
+ * never ingests, never baselines a cursor, never mutates anything.
+ */
+export function listNotificationsForward(
+  db: Database.Database,
+  sessionId: string,
+  options: ListNotificationsForwardOptions = {},
+): {
+  items: NotificationView[];
+  latestSeq: number;
+  unreadCount: number;
+  hasMore: boolean;
+  nextAfter: number | null;
+} {
+  const session = requireId(sessionId, "sessionId");
+  requireSession(db, session);
+  const after = options.after ?? 0;
+  if (!Number.isInteger(after) || after < 0) {
+    throw new RepositoryValidationError("after must be an integer >= 0");
+  }
+  const capped = parseListLimit(options.limit);
+  const now = nowMs(options.now);
+  const rows = db
+    .prepare(
+      "SELECT * FROM notifications WHERE session_id = ? AND seq > ? ORDER BY seq ASC, id ASC LIMIT ?",
+    )
+    .all(session, after, capped + 1) as StoredNotificationRow[];
+  const hasMore = rows.length > capped;
+  const page = hasMore ? rows.slice(0, capped) : rows;
+  return {
+    items: page.map((row) => toNotificationView(row, now)),
+    latestSeq: readLatestSeq(db, session),
+    unreadCount: readUnreadCount(db, session, now),
+    hasMore,
+    nextAfter: hasMore ? (page[page.length - 1]?.seq ?? null) : null,
+  };
+}
+
+export interface ReadNotificationOptions {
+  /** Read clock for derived `outdated` (expiry <= readNow). */
+  now?: number;
 }
 
 /** Pure-read single notification (foreign ids 404, never 403). */
@@ -917,9 +1152,11 @@ export function getNotification(
   db: Database.Database,
   sessionId: string,
   notificationId: string,
+  options: ReadNotificationOptions = {},
 ): NotificationView {
   return toNotificationView(
     assertOwnedNotification(db, sessionId, notificationId),
+    nowMs(options.now),
   );
 }
 
@@ -931,6 +1168,7 @@ export function getNotificationHistory(
   db: Database.Database,
   sessionId: string,
   notificationId: string,
+  options: ReadNotificationOptions = {},
 ): {
   notification: NotificationView;
   ack: {
@@ -948,7 +1186,7 @@ export function getNotificationHistory(
     | { session_id: string; ack_key: string; created_at: number }
     | undefined;
   return {
-    notification: toNotificationView(owned),
+    notification: toNotificationView(owned, nowMs(options.now)),
     ack:
       ack === undefined
         ? null
@@ -962,7 +1200,11 @@ export function getNotificationHistory(
   };
 }
 
-/** Pure-read feed cursor: per-source cursors + latest notification seq. */
+/**
+ * Pure-read feed cursor: per-source cursors + latest notification seq.
+ * Strictly a SELECT: never acks, never ingests, never baselines or
+ * advances a cursor.
+ */
 export function getLatestNotificationCursor(
   db: Database.Database,
   sessionId: string,
@@ -1086,7 +1328,7 @@ export function ackNotification(
 }
 
 /* ------------------------------------------------------------------ */
-/* Deadline schedule: build / reconcile / read / record                 */
+/* Deadline schedule: build / read / record                           */
 /* ------------------------------------------------------------------ */
 
 export interface BuildDeadlineScheduleOptions {
@@ -1096,12 +1338,12 @@ export interface BuildDeadlineScheduleOptions {
 /**
  * (Re)build the derived deadline schedule for ONE session by ITERATING the
  * whole task source in bounded pages (never a 100-record silent
- * truncation). Original task rows are NEVER changed or deleted — only
- * derived schedule rows are upserted / removed (completed / cancelled
- * drops the row and marks its alert history outdated). No queue, no
- * notifications emitted here (alerts come from `recordDueDeadlines`).
- * `buildDeadlineSchedule` (first pass) and `reconcileDeadlineSchedule`
- * (ongoing) share these exact semantics.
+ * truncation). This is the startup rebuild; ongoing projection consumes
+ * the durable `autonomy_task_events` cursor inside `ingestNotifications`.
+ * Original task rows are NEVER changed or deleted — only derived schedule
+ * rows are upserted / removed (completed / cancelled drops the row and
+ * marks its alert history outdated). No queue, no notifications emitted
+ * here (alerts come from `recordDueDeadlines`).
  */
 export function buildDeadlineSchedule(
   db: Database.Database,
@@ -1152,15 +1394,6 @@ export function buildDeadlineSchedule(
     }
     return { upserted, removed, observed };
   });
-}
-
-/** Ongoing reconcile: identical semantics to `buildDeadlineSchedule`. */
-export function reconcileDeadlineSchedule(
-  db: Database.Database,
-  sessionId: string,
-  options: BuildDeadlineScheduleOptions = {},
-): { upserted: number; removed: number; observed: number } {
-  return buildDeadlineSchedule(db, sessionId, options);
 }
 
 export interface NextDeadlineOptions {
@@ -1348,6 +1581,8 @@ export function recordDueDeadlines(
         // Dedup (taskId, EXACT deadline): status / version / hold-resume
         // cycles are EXCLUDED so re-alerts never spam.
         fingerprint: truncateCp(`v1|deadline|${task.id}|${row.due_at}`, 500),
+        // Deadline alerts never carry a derived question-context expiry.
+        contextExpiryAt: null,
       };
       if (insertNotificationInTx(db, session, seqState, draft, now)) {
         recorded += 1;

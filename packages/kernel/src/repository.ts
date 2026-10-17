@@ -58,10 +58,15 @@ import {
   NotificationAckReceiptSchema,
   type NotificationFeedCursorResponse,
   NotificationFeedCursorResponseSchema,
+  type NotificationForwardPageResponse,
+  NotificationForwardPageResponseSchema,
+  NotificationForwardQuerySchema,
   type NotificationHistoryResponse,
   NotificationHistoryResponseSchema,
+  NotificationListQuerySchema,
   type NotificationListResponse,
   NotificationListResponseSchema,
+  NotificationReadQuerySchema,
   type NotificationView,
   NotificationViewSchema,
   PostMessageRequestSchema,
@@ -213,8 +218,8 @@ import {
   ingestNotifications as notifyIngest,
   getLatestNotificationCursor as notifyLatestCursor,
   listNotifications as notifyList,
+  listNotificationsForward as notifyListForward,
   getNextDeadline as notifyNextDeadline,
-  reconcileDeadlineSchedule as notifyReconcileSchedule,
   recordDueDeadlines as notifyRecordDue,
 } from "./notifications.js";
 import {
@@ -5697,23 +5702,57 @@ export function createKernelRepository(
     query: unknown = {},
   ): NotificationListResponse {
     const parsed = parseOrValidation(
-      () => AutonomyListQuerySchema.parse(query ?? {}),
+      () => NotificationListQuerySchema.parse(query ?? {}),
       "notification list query",
     );
-    const out = notifyList(db, sessionId, parsed.limit);
+    const out = notifyList(db, sessionId, {
+      limit: parsed.limit,
+      ...(parsed.beforeSeq !== undefined
+        ? { beforeSeq: parsed.beforeSeq }
+        : {}),
+      ...(parsed.now !== undefined ? { now: parsed.now } : {}),
+    });
     return parseOrValidation(
       () => NotificationListResponseSchema.parse(out),
       "notification list response",
     );
   }
 
+  function listNotificationsForward(
+    sessionId: string,
+    query: unknown = {},
+  ): NotificationForwardPageResponse {
+    const parsed = parseOrValidation(
+      () => NotificationForwardQuerySchema.parse(query ?? {}),
+      "notification forward query",
+    );
+    const out = notifyListForward(db, sessionId, {
+      after: parsed.after,
+      limit: parsed.limit,
+      ...(parsed.now !== undefined ? { now: parsed.now } : {}),
+    });
+    return parseOrValidation(
+      () => NotificationForwardPageResponseSchema.parse(out),
+      "notification forward page response",
+    );
+  }
+
   function getNotification(
     sessionId: string,
     notificationId: string,
+    options: { now?: number } = {},
   ): NotificationView {
+    const parsed = parseOrValidation(
+      () => NotificationReadQuerySchema.parse(options ?? {}),
+      "notification read query",
+    );
     return parseOrValidation(
       () =>
-        NotificationViewSchema.parse(notifyGet(db, sessionId, notificationId)),
+        NotificationViewSchema.parse(
+          notifyGet(db, sessionId, notificationId, {
+            ...(parsed.now !== undefined ? { now: parsed.now } : {}),
+          }),
+        ),
       "notification response",
     );
   }
@@ -5721,8 +5760,15 @@ export function createKernelRepository(
   function getNotificationHistory(
     sessionId: string,
     notificationId: string,
+    options: { now?: number } = {},
   ): NotificationHistoryResponse {
-    const out = notifyHistory(db, sessionId, notificationId);
+    const parsed = parseOrValidation(
+      () => NotificationReadQuerySchema.parse(options ?? {}),
+      "notification read query",
+    );
+    const out = notifyHistory(db, sessionId, notificationId, {
+      ...(parsed.now !== undefined ? { now: parsed.now } : {}),
+    });
     return parseOrValidation(
       () => NotificationHistoryResponseSchema.parse(out),
       "notification history response",
@@ -5767,17 +5813,6 @@ export function createKernelRepository(
     return parseOrValidation(
       () => BuildDeadlineScheduleResponseSchema.parse(out),
       "build deadline schedule response",
-    );
-  }
-
-  function reconcileDeadlineSchedule(
-    sessionId: string,
-    options: { now?: number } = {},
-  ): BuildDeadlineScheduleResponse {
-    const out = notifyReconcileSchedule(db, sessionId, options);
-    return parseOrValidation(
-      () => BuildDeadlineScheduleResponseSchema.parse(out),
-      "reconcile deadline schedule response",
     );
   }
 
@@ -5932,12 +5967,12 @@ export function createKernelRepository(
     hasActiveShadowBlock,
     ingestNotifications,
     listNotifications,
+    listNotificationsForward,
     getNotification,
     getNotificationHistory,
     getLatestNotificationCursor,
     ackNotification,
     buildDeadlineSchedule,
-    reconcileDeadlineSchedule,
     getNextDeadline,
     recordDueDeadlines,
   };

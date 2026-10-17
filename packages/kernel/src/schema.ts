@@ -1299,6 +1299,7 @@ export const notificationCursors = sqliteTable(
       .references(() => sessions.id),
     source: text("source").notNull(),
     lastSourceRowid: integer("last_source_rowid").notNull(),
+    lastSourceKey: text("last_source_key"),
     updatedAt: integer("updated_at").notNull(),
   },
   (t) => [
@@ -1330,6 +1331,7 @@ export const notifications = sqliteTable(
     citedDeadlines: text("cited_deadlines").notNull(),
     fingerprint: text("fingerprint").notNull(),
     outdated: integer("outdated").notNull().default(0),
+    contextExpiryAt: integer("context_expiry_at"),
     createdAt: integer("created_at").notNull(),
   },
   (t) => [

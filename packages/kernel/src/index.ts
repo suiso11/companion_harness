@@ -356,8 +356,11 @@ export type {
   AckNotificationOptions,
   BuildDeadlineScheduleOptions,
   IngestNotificationsOptions,
+  ListNotificationsForwardOptions,
+  ListNotificationsOptions,
   NextDeadlineOptions,
   NotificationCursorSource,
+  ReadNotificationOptions,
   RecordDueDeadlinesOptions,
 } from "./notifications.js";
 export {
@@ -369,7 +372,7 @@ export {
   getNotificationHistory,
   ingestNotifications,
   listNotifications,
-  reconcileDeadlineSchedule,
+  listNotificationsForward,
   recordDueDeadlines,
 } from "./notifications.js";
 export type {

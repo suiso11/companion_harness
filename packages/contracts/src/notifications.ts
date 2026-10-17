@@ -83,6 +83,12 @@ export const NotificationViewSchema = z.strictObject({
   sourceEpoch: z.number().int().min(1).nullable(),
   citedDeadlines: z.array(z.string().min(1).max(128)).max(8),
   outdated: z.boolean(),
+  /**
+   * DERIVED question-context expiry (Unix-ms, nullable technical column).
+   * `outdated` reads as stored-flag OR (`contextExpiryAt <= readNow`);
+   * NULL means no expiry. Never a task deadline, never mutated on read.
+   */
+  contextExpiryAt: UnixMsSchema.nullable(),
   createdAt: UnixMsSchema,
 });
 export type NotificationView = z.infer<typeof NotificationViewSchema>;
@@ -92,10 +98,62 @@ export const NotificationListResponseSchema = z.strictObject({
   items: z.array(NotificationViewSchema),
   latestSeq: z.number().int().min(0),
   unreadCount: z.number().int().min(0),
+  /** True when an older page remains (LIMIT+1 probe, never truncated). */
+  hasMore: z.boolean(),
+  /** Smallest seq in this page when `hasMore`, else null (history paging). */
+  nextBefore: z.number().int().min(1).nullable(),
 });
 export type NotificationListResponse = z.infer<
   typeof NotificationListResponseSchema
 >;
+
+/** Bounded newest-page list query: strict caps, optional history cursor. */
+export const NotificationListQuerySchema = z.strictObject({
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  /** Return the newest page strictly below this seq (history paging). */
+  beforeSeq: z.coerce.number().int().min(1).optional(),
+  /** Read clock for derived `outdated` (expiry <= readNow); defaults to now. */
+  now: UnixMsSchema.optional(),
+});
+export type NotificationListQuery = z.infer<typeof NotificationListQuerySchema>;
+export type NotificationListQueryInput = z.input<
+  typeof NotificationListQuerySchema
+>;
+
+/** Bounded forward-read page: notifications strictly after a seq, oldest first. */
+export const NotificationForwardPageResponseSchema = z.strictObject({
+  items: z.array(NotificationViewSchema),
+  latestSeq: z.number().int().min(0),
+  unreadCount: z.number().int().min(0),
+  /** True when a newer page remains (LIMIT+1 probe, never truncated). */
+  hasMore: z.boolean(),
+  /** Last seq in this page when `hasMore`, else null (feed paging). */
+  nextAfter: z.number().int().min(1).nullable(),
+});
+export type NotificationForwardPageResponse = z.infer<
+  typeof NotificationForwardPageResponseSchema
+>;
+
+/** Bounded forward-read query: strict caps, read-after cursor. */
+export const NotificationForwardQuerySchema = z.strictObject({
+  after: z.coerce.number().int().min(0).default(0),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  /** Read clock for derived `outdated` (expiry <= readNow); defaults to now. */
+  now: UnixMsSchema.optional(),
+});
+export type NotificationForwardQuery = z.infer<
+  typeof NotificationForwardQuerySchema
+>;
+export type NotificationForwardQueryInput = z.input<
+  typeof NotificationForwardQuerySchema
+>;
+
+/** Pure-read single-notification query clock (derived `outdated`). */
+export const NotificationReadQuerySchema = z.strictObject({
+  /** Read clock for derived `outdated` (expiry <= readNow); defaults to now. */
+  now: UnixMsSchema.optional(),
+});
+export type NotificationReadQuery = z.infer<typeof NotificationReadQuerySchema>;
 
 /** Explicit ack receipt (separate immutable row, never mutates purpose/task). */
 export const NotificationAckReceiptSchema = z.strictObject({

@@ -19,14 +19,24 @@
 -- anywhere here: a recorded `permission` CLAIM stays a claim, and an ack
 -- changes NO purpose / task / control / Calendar grant / proposal.
 --
--- Cursor baseline: the kernel lazily baselines each (session, source)
--- cursor at the current MAX(source rowid) on first ingest, so historical
--- pre-existing jobs / receipts are NOT mass-notified. Renumber/rebuild
--- detection: the kernel stores the last consumed source rowid and checks
--- MAX(rowid) >= cursor before advancing; a rebuilt source surfaces an
--- honest `notification_projection_reset_required` instead of silently
--- skipping rows. SQLite ROWID append-only sources are acceptable while no
--- VACUUM / DELETE runs against them.
+-- Cursor baseline: migration 0014 INSERTs one cursor row per
+-- (pre-existing session, source) at that session's current MAX(source
+-- rowid) with a NULL key anchor (grandfathered: anchor checks are skipped
+-- while the anchor is NULL, MAX-vs-cursor renumber checks still apply),
+-- so historical pre-existing jobs / receipts are NOT mass-notified, and
+-- an AFTER-INSERT-ON-sessions trigger initializes the three cursor rows
+-- (rowid 0, NULL anchor) for every NEW session. The kernel NEVER lazily
+-- baselines at MAX on first ingest: a new session's FIRST source event is
+-- always consumed, and a missing cursor after migration/trigger is an
+-- honest `notification_projection_reset_required`, never a silent skip.
+-- Anchor: every cursor advance stores the source KEY at the frontier
+-- rowid (`shadow_job_events.id`, `action_receipts.execution_id`,
+-- `autonomy_task_events.id`) in the SAME transaction; before advancing
+-- the kernel verifies the rowid at the stored cursor still carries the
+-- anchored key for the OWN session, so a same-or-higher-MAX rowid
+-- reuse / reorder / rebuild surfaces an honest reset with ZERO partial
+-- progress instead of silently skipping. SQLite ROWID append-only sources
+-- are acceptable while no VACUUM / DELETE runs against them.
 --
 -- Invariants (must not be weakened):
 -- - All tables are STRICT, none WITHOUT ROWID (ROWID cursors required).
@@ -54,6 +64,7 @@ CREATE TABLE notification_cursors (
   source            TEXT NOT NULL
                     CHECK (source IN ('shadow_job_events','action_receipts','autonomy_task_events')),
   last_source_rowid INTEGER NOT NULL CHECK (last_source_rowid >= 0),
+  last_source_key   TEXT,  -- immutable source key at the frontier rowid (NULL = grandfathered baseline / fresh session)
   updated_at        INTEGER NOT NULL,
   PRIMARY KEY (session_id, source)
 ) STRICT;
@@ -81,6 +92,8 @@ CREATE TABLE notifications (
   fingerprint     TEXT NOT NULL     -- semantic-state dedup key (excludes paraphrase/model text/job id)
                   CHECK (length(fingerprint) >= 1 AND length(fingerprint) <= 500),
   outdated        INTEGER NOT NULL CHECK (outdated IN (0,1)) DEFAULT 0,
+  context_expiry_at INTEGER  -- DERIVED question-context expiry (Unix-ms): min FUTURE applicability boundary at creation; NULL = no expiry
+                    CHECK (context_expiry_at IS NULL OR context_expiry_at >= 0),
   created_at      INTEGER NOT NULL,
   UNIQUE (session_id, seq),
   UNIQUE (session_id, fingerprint)
@@ -118,3 +131,34 @@ CREATE TABLE notification_deadline_schedule (
 
 CREATE INDEX idx_notification_deadline_session_due
   ON notification_deadline_schedule(session_id, due_at);
+
+-- Baseline cursors for ALL pre-existing sessions at their current session-
+-- scoped MAX(source rowid) (NULL anchor: grandfathered, see header), so
+-- upgrading a populated store never mass-notifies historical rows.
+INSERT INTO notification_cursors (session_id, source, last_source_rowid, last_source_key, updated_at)
+SELECT s.id, 'shadow_job_events',
+  COALESCE((SELECT MAX(rowid) FROM shadow_job_events e WHERE e.session_id = s.id), 0),
+  NULL, CAST(strftime('%s','now') AS INTEGER) * 1000
+FROM sessions s;
+INSERT INTO notification_cursors (session_id, source, last_source_rowid, last_source_key, updated_at)
+SELECT s.id, 'action_receipts',
+  COALESCE((SELECT MAX(rowid) FROM action_receipts e WHERE e.session_id = s.id), 0),
+  NULL, CAST(strftime('%s','now') AS INTEGER) * 1000
+FROM sessions s;
+INSERT INTO notification_cursors (session_id, source, last_source_rowid, last_source_key, updated_at)
+SELECT s.id, 'autonomy_task_events',
+  COALESCE((SELECT MAX(rowid) FROM autonomy_task_events e WHERE e.session_id = s.id), 0),
+  NULL, CAST(strftime('%s','now') AS INTEGER) * 1000
+FROM sessions s;
+
+-- Every NEW session starts all three cursors at rowid 0 / NULL anchor
+-- BEFORE any source row exists, so its first source event is consumed.
+-- Session-idempotent replay (same id, no INSERT) never touches cursors.
+CREATE TRIGGER trg_notification_cursors_init_session
+AFTER INSERT ON sessions
+BEGIN
+  INSERT INTO notification_cursors (session_id, source, last_source_rowid, last_source_key, updated_at)
+  VALUES (NEW.id, 'shadow_job_events', 0, NULL, NEW.created_at),
+         (NEW.id, 'action_receipts', 0, NULL, NEW.created_at),
+         (NEW.id, 'autonomy_task_events', 0, NULL, NEW.created_at);
+END;

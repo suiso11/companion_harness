@@ -13,10 +13,15 @@
 // - Repeated explicit re-evaluation of the SAME semantic state dedups
 //   (paraphrased reason / new job id do not re-notify); a second catchup
 //   ingests zero.
-// - Source cursors baseline at MAX(rowid) on first ingest (historical rows
-//   are not mass-notified); afterwards only durable unseen changes notify.
-//   A renumbered source surfaces an honest projection-reset error with NO
-//   partial cursor advance and NO partial inserts (atomic rollback).
+// - Source cursors are owned by migration 14 (pre-existing sessions) +
+//   the sessions trigger (new sessions at rowid 0): a new session's FIRST
+//   completion / first uncertain receipt notifies with NO prior ingest,
+//   while upgrading a populated v13 store never mass-notifies history.
+//   A missing cursor is an honest projection-reset error (never a lazy
+//   MAX baseline). Every advance stores the source key at the frontier
+//   rowid; a rowid reuse carrying another event's key at the same MAX
+//   surfaces an honest reset with NO partial cursor advance and NO
+//   partial inserts (atomic rollback).
 // - Claims never become grants: ingest creates no executions / grants (the
 //   honest CODE `missing_grant` diagnostic stays a diagnostic).
 // - Ack is a separate immutable receipt (stable-key replay, drift 409,
@@ -28,6 +33,16 @@
 //   production path as the receipt tests, never a fake worker outcome
 //   written as "live") ingests to an URGENT commitment notice even while
 //   autonomy is paused.
+// - Reads are pure and paged: newest-page history (`beforeSeq` /
+//   `nextBefore` / `hasMore`) plus forward read-after pages (`after` /
+//   `nextAfter` / `hasMore`) deliver >100 notices exactly once by seq
+//   even with equal createdAt; foreign sessions never read or ack.
+//   Question notices carry a DERIVED context expiry (min FUTURE
+//   applicability boundary at creation): reads map `outdated` from it
+//   without mutating the stored original, unread excludes derived
+//   outdated, already-expired history never blanket-outdates a valid
+//   question, and a past cited deadline never instantly expires a NEW
+//   post-deadline question. Acks stay authority-free.
 // - Deadline schedule rebuild ITERATES the whole task source (213-task
 //   proof: no silent truncation, ineligible rows honestly excluded) and
 //   reads the earliest due; terminal tasks drop only their derived row;
@@ -37,6 +52,9 @@
 //   get honest zero-recording statuses, never fake alerts.
 
 import { randomUUID } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { SnapshotBodySchema } from "@companion/contracts";
 import { describe, expect, it } from "vitest";
 import { calendarEventBodyText } from "../src/calendar_tools.js";
@@ -285,11 +303,15 @@ async function driveUnknownReceipt(
 }
 
 describe("notifications durable core", () => {
-  it("baselines historical rows, then notifies only durable unseen completions", async () => {
+  it("consumes a new session's FIRST completion with no prior ingest (no first-source loss)", async () => {
     const { handle, repo, sessionId } = await makeRepo();
     try {
       seedPurpose(repo, sessionId, "health", T0 + 5);
       unpause(repo, 1, T0 + 10);
+      // The sessions trigger initialized all three cursors at rowid 0.
+      const feed = repo.getLatestNotificationCursor(sessionId);
+      expect(feed.cursors).toHaveLength(3);
+      expect(feed.latestSeq).toBe(0);
       // Historical work BEFORE the first ingest completes honestly.
       const first = completeExplicitJob(
         repo,
@@ -303,7 +325,69 @@ describe("notifications durable core", () => {
         T0 + 20,
       );
       expect(first.done.outcome).toBe("completed");
-      // First ingest baselines all three sources: history is NOT mass-notified.
+      // NO ingest ran before this point: the FIRST event must notify.
+      const caught = repo.ingestNotifications(sessionId, { now: T0 + 30 });
+      expect(caught.ingested).toBe(1);
+      expect(caught.latestSeq).toBe(1);
+      const listed = repo.listNotifications(sessionId, {});
+      expect(listed.items).toHaveLength(1);
+      const item = listed.items[0] as NonNullable<(typeof listed.items)[0]>;
+      expect(item.seq).toBe(1);
+      expect(item.scope).toBe("health");
+      expect(item.kind).toBe("proposal");
+      expect(item.priority).toBe("routine");
+      expect(item.sourceKind).toBe("shadow_job");
+      expect(item.sourceVersion).toBe(3);
+      expect(item.sourceEpoch).toBeGreaterThanOrEqual(1);
+      expect(item.outdated).toBe(false);
+      expect(listed.latestSeq).toBe(1);
+      expect(listed.unreadCount).toBe(1);
+      expect(listed.hasMore).toBe(false);
+      expect(listed.nextBefore).toBeNull();
+      // The shadow cursor advanced WITH a key anchor at the frontier.
+      const cursor = handle.raw
+        .prepare(
+          "SELECT last_source_rowid AS rowid, last_source_key AS key FROM notification_cursors WHERE session_id = ? AND source = 'shadow_job_events'",
+        )
+        .get(sessionId) as { rowid: number; key: string | null };
+      expect(cursor.rowid).toBeGreaterThan(0);
+      expect(cursor.key).toMatch(/^[0-9a-f-]{36}$/);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("upgrading a populated v13 store baselines old rows (no historical mass notice)", async () => {
+    const handle = openKernelDatabase(":memory:");
+    try {
+      await migrateKernelDatabase({ db: handle.raw, targetVersion: 13 });
+      const repo = createKernelRepository(handle.raw, {
+        actionProposals: { writeEnabled: true },
+      });
+      const session = repo.createSession({ key: randomUUID(), now: T0 });
+      const sessionId = session.body.sessionId;
+      seedPurpose(repo, sessionId, "health", T0 + 5);
+      unpause(repo, 1, T0 + 10);
+      const first = completeExplicitJob(
+        repo,
+        sessionId,
+        "health",
+        (labels) =>
+          validOutput(labels.purposes, {
+            decision: "execute",
+            proposedAction: { kind: "message", summary: "ping the owner" },
+          }),
+        T0 + 20,
+      );
+      expect(first.done.outcome).toBe("completed");
+      // Upgrade to 14 in a temp backup dir (populated store needs one).
+      const backupDir = await mkdtemp(join(tmpdir(), "av-notif-mig-"));
+      try {
+        await migrateKernelDatabase({ db: handle.raw, backupDir });
+      } finally {
+        await rm(backupDir, { recursive: true, force: true });
+      }
+      // Migration baselined the pre-existing rows: no mass notice.
       const baseline = repo.ingestNotifications(sessionId, { now: T0 + 30 });
       expect(baseline.ingested).toBe(0);
       expect(baseline.latestSeq).toBe(0);
@@ -326,17 +410,7 @@ describe("notifications durable core", () => {
       expect(caught.latestSeq).toBe(1);
       const listed = repo.listNotifications(sessionId, {});
       expect(listed.items).toHaveLength(1);
-      const item = listed.items[0] as NonNullable<(typeof listed.items)[0]>;
-      expect(item.seq).toBe(1);
-      expect(item.scope).toBe("health");
-      expect(item.kind).toBe("question");
-      expect(item.priority).toBe("routine");
-      expect(item.sourceKind).toBe("shadow_job");
-      expect(item.sourceVersion).toBe(3);
-      expect(item.sourceEpoch).toBeGreaterThanOrEqual(1);
-      expect(item.outdated).toBe(false);
-      expect(listed.latestSeq).toBe(1);
-      expect(listed.unreadCount).toBe(1);
+      expect(listed.items[0]?.kind).toBe("question");
     } finally {
       closeKernelDatabase(handle);
     }
@@ -756,8 +830,8 @@ describe("notifications durable core", () => {
       expect(next.status).toBe("ready");
       expect(next.paused).toBe(false);
       expect(next.deadline?.dueAt).toBe(Date.parse(FUTURE_DEADLINE));
-      // Reconcile is idempotent: same state, zero churn.
-      const again = repo.reconcileDeadlineSchedule(sessionId, {
+      // Rebuild is idempotent: same state, zero churn.
+      const again = repo.buildDeadlineSchedule(sessionId, {
         now: T0 + 602,
       });
       expect(again.upserted).toBe(0);
@@ -806,7 +880,7 @@ describe("notifications durable core", () => {
         },
         { key: randomUUID(), now: T0 + 40 },
       );
-      repo.reconcileDeadlineSchedule(sessionId, { now: T0 + 41 });
+      repo.buildDeadlineSchedule(sessionId, { now: T0 + 41 });
       const once = repo.recordDueDeadlines(sessionId, {
         expectedControlVersion: control.version,
         now: T0 + 50,
@@ -839,7 +913,7 @@ describe("notifications durable core", () => {
         },
         { key: randomUUID(), now: T0 + 70 },
       );
-      repo.reconcileDeadlineSchedule(sessionId, { now: T0 + 71 });
+      repo.buildDeadlineSchedule(sessionId, { now: T0 + 71 });
       const repeat = repo.recordDueDeadlines(sessionId, {
         expectedControlVersion: control.version,
         now: T0 + 80,
@@ -853,7 +927,7 @@ describe("notifications durable core", () => {
         { expectedVersion: 3 },
         { key: randomUUID(), now: T0 + 90 },
       );
-      const reconciled = repo.reconcileDeadlineSchedule(sessionId, {
+      const reconciled = repo.buildDeadlineSchedule(sessionId, {
         now: T0 + 91,
       });
       expect(reconciled.removed).toBe(1);
@@ -952,6 +1026,493 @@ describe("notifications durable core", () => {
       expect(feed.cursors.length).toBe(3);
       const otherFeed = repo.getLatestNotificationCursor(otherId);
       expect(otherFeed.latestSeq).toBe(0);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("refuses a missing cursor honestly (no lazy MAX baseline, no silent skip)", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      seedPurpose(repo, sessionId, "health", T0 + 5);
+      unpause(repo, 1, T0 + 10);
+      completeExplicitJob(
+        repo,
+        sessionId,
+        "health",
+        (labels) =>
+          validOutput(labels.purposes, {
+            decision: "execute",
+            proposedAction: { kind: "message", summary: "ping" },
+          }),
+        T0 + 20,
+      );
+      // Simulate a store that lost its projection state: cursors gone.
+      handle.raw
+        .prepare("DELETE FROM notification_cursors WHERE session_id = ?")
+        .run(sessionId);
+      let reset: unknown;
+      try {
+        repo.ingestNotifications(sessionId, { now: T0 + 30 });
+      } catch (error) {
+        reset = error;
+      }
+      expect(reset).toBeInstanceOf(NotificationProjectionResetError);
+      expect((reset as { code: string }).code).toBe(
+        "notification_projection_reset_required",
+      );
+      // Zero partial progress: nothing was notified, nothing was baselined.
+      expect(countRows(handle, "notifications")).toBe(0);
+      expect(
+        (
+          handle.raw
+            .prepare(
+              "SELECT COUNT(*) AS n FROM notification_cursors WHERE session_id = ?",
+            )
+            .get(sessionId) as { n: number }
+        ).n,
+      ).toBe(0);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("rejects a rowid-reused source at the same MAX via the key anchor (no advance, no partial notices)", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      seedPurpose(repo, sessionId, "health", T0 + 5);
+      unpause(repo, 1, T0 + 10);
+      completeExplicitJob(
+        repo,
+        sessionId,
+        "health",
+        (labels) =>
+          validOutput(labels.purposes, {
+            decision: "execute",
+            proposedAction: { kind: "message", summary: "ping" },
+          }),
+        T0 + 20,
+      );
+      expect(
+        repo.ingestNotifications(sessionId, { now: T0 + 30 }).ingested,
+      ).toBe(1);
+      const anchored = handle.raw
+        .prepare(
+          "SELECT last_source_rowid AS rowid, last_source_key AS key FROM notification_cursors WHERE session_id = ? AND source = 'shadow_job_events'",
+        )
+        .get(sessionId) as { rowid: number; key: string };
+      expect(anchored.key).toMatch(/^[0-9a-f-]{36}$/);
+      // Unsupported source change: request a second real job (its enqueued
+      // event lands past the cursor), then move that immutable event row
+      // back onto the cursor rowid — MAX is unchanged, but the rowid now
+      // carries ANOTHER event's key.
+      const requested = repo.requestShadowDeliberation(
+        sessionId,
+        { scope: "health" },
+        { key: randomUUID(), now: T0 + 40 },
+      );
+      const movedId = (
+        handle.raw
+          .prepare(
+            "SELECT id AS id FROM shadow_job_events WHERE job_id = ? ORDER BY rowid DESC LIMIT 1",
+          )
+          .get(requested.body.id) as { id: string }
+      ).id;
+      expect(movedId).not.toBe(anchored.key);
+      handle.raw
+        .prepare("DELETE FROM shadow_job_events WHERE rowid = ?")
+        .run(anchored.rowid);
+      handle.raw
+        .prepare("UPDATE shadow_job_events SET rowid = ? WHERE id = ?")
+        .run(anchored.rowid, movedId);
+      const maxAfter = (
+        handle.raw
+          .prepare(
+            "SELECT MAX(rowid) AS n FROM shadow_job_events WHERE session_id = ?",
+          )
+          .get(sessionId) as { n: number }
+      ).n;
+      // MAX sits exactly AT the cursor: the legacy MAX>=cursor check alone
+      // would pass — only the key anchor catches the rebuild.
+      expect(maxAfter).toBe(anchored.rowid);
+      let reset: unknown;
+      try {
+        repo.ingestNotifications(sessionId, { now: T0 + 50 });
+      } catch (error) {
+        reset = error;
+      }
+      expect(reset).toBeInstanceOf(NotificationProjectionResetError);
+      expect((reset as { code: string }).code).toBe(
+        "notification_projection_reset_required",
+      );
+      // Zero partial progress: the anchored cursor is untouched and no new
+      // notice was recorded for the rebuilt source.
+      expect(countRows(handle, "notifications")).toBe(1);
+      const kept = handle.raw
+        .prepare(
+          "SELECT last_source_rowid AS rowid, last_source_key AS key FROM notification_cursors WHERE session_id = ? AND source = 'shadow_job_events'",
+        )
+        .get(sessionId) as { rowid: number; key: string };
+      expect(kept).toEqual(anchored);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("pages >100 notices forward exactly once with truthful hasMore/nextAfter (foreign sessions isolated)", async () => {
+    const { handle, repo, sessionId, otherId } = await makeRepo();
+    try {
+      unpause(repo, 1, T0 + 10);
+      const COUNT = 105;
+      for (let i = 0; i < COUNT; i += 1) {
+        const scope = `page${i}`;
+        seedPurpose(repo, sessionId, scope, T0 + 20 + i);
+        completeExplicitJob(
+          repo,
+          sessionId,
+          scope,
+          (labels) =>
+            validOutput(labels.purposes, {
+              decision: "execute",
+              proposedAction: { kind: "message", summary: `ping ${scope}` },
+            }),
+          T0 + 1000 + i,
+        );
+      }
+      // Drain through the bounded per-source batch with one frozen clock,
+      // so every notice shares the same createdAt (ordering is by seq).
+      for (;;) {
+        const out = repo.ingestNotifications(sessionId, { now: T0 + 5000 });
+        if (out.ingested === 0) {
+          break;
+        }
+      }
+      expect(repo.listNotifications(sessionId, {}).latestSeq).toBe(COUNT);
+      // Forward pages from after=0 deliver every seq exactly once.
+      const seen: number[] = [];
+      let after = 0;
+      let pages = 0;
+      for (;;) {
+        const page = repo.listNotificationsForward(sessionId, {
+          after,
+          limit: 50,
+        });
+        pages += 1;
+        const seqs = page.items.map((n) => n.seq);
+        expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
+        seen.push(...seqs);
+        if (!page.hasMore) {
+          expect(page.nextAfter).toBeNull();
+          break;
+        }
+        expect(page.items).toHaveLength(50);
+        expect(page.nextAfter).toBe(seqs[seqs.length - 1] as number);
+        after = page.nextAfter as number;
+      }
+      expect(pages).toBe(3);
+      expect(seen).toHaveLength(COUNT);
+      expect(new Set(seen).size).toBe(COUNT);
+      expect(Math.min(...seen)).toBe(1);
+      expect(Math.max(...seen)).toBe(COUNT);
+      // Newest-page history cursor walks back with truthful nextBefore.
+      const newest = repo.listNotifications(sessionId, { limit: 50 });
+      expect(newest.items).toHaveLength(50);
+      expect(newest.hasMore).toBe(true);
+      expect(newest.nextBefore).toBe(56);
+      const older = repo.listNotifications(sessionId, {
+        limit: 50,
+        beforeSeq: newest.nextBefore as number,
+      });
+      expect(older.items.map((n) => n.seq)).toEqual(
+        Array.from({ length: 50 }, (_, i) => 55 - i),
+      );
+      expect(older.hasMore).toBe(true);
+      expect(older.nextBefore).toBe(6);
+      const oldest = repo.listNotifications(sessionId, {
+        limit: 50,
+        beforeSeq: older.nextBefore as number,
+      });
+      expect(oldest.items.map((n) => n.seq)).toEqual([5, 4, 3, 2, 1]);
+      expect(oldest.hasMore).toBe(false);
+      expect(oldest.nextBefore).toBeNull();
+      // Foreign sessions never read or ack another session's notices.
+      const foreign = repo.listNotificationsForward(otherId, { after: 0 });
+      expect(foreign.items).toHaveLength(0);
+      expect(foreign.hasMore).toBe(false);
+      const ownId = repo.listNotificationsForward(sessionId, {
+        after: 0,
+        limit: 1,
+      }).items[0]?.id as string;
+      expect(() =>
+        repo.ackNotification(otherId, ownId, {
+          key: randomUUID(),
+          now: T0 + 6000,
+        }),
+      ).toThrowError(RepositoryNotFoundError);
+      expect(() => repo.getNotification(otherId, ownId)).toThrowError(
+        RepositoryNotFoundError,
+      );
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("expires a question on real window advance with no source event (old expired context never blanket-outdates)", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      // Applicable-at-claim purpose window ending at FUTURE_DEADLINE.
+      const WINDOW_END = FUTURE_DEADLINE;
+      repo.createAutonomyPurpose(
+        sessionId,
+        {
+          scope: "health",
+          statement: "windowed goal for health",
+          kind: "goal",
+          explicit: true,
+          sourceKind: "user",
+          validUntil: WINDOW_END,
+        },
+        { key: randomUUID(), now: T0 + 5 },
+      );
+      // Cited explicit task deadline strictly later than the window.
+      repo.createAutonomyTask(
+        sessionId,
+        {
+          scope: "health",
+          title: "call the clinic",
+          kind: "task",
+          speaker: "user",
+          deadline: LATER_DEADLINE,
+        },
+        { key: randomUUID(), now: T0 + 6 },
+      );
+      unpause(repo, 1, T0 + 10);
+      completeExplicitJob(
+        repo,
+        sessionId,
+        "health",
+        (labels) =>
+          validOutput([labels.tasks[0] as string], {
+            decision: "ask",
+            reason: "which slot works",
+            proposedAction: {
+              kind: "message",
+              summary: "ask for a slot",
+              taskDraft: { title: "pick a slot", deadline: LATER_DEADLINE },
+            },
+          }),
+        T0 + 20,
+      );
+      expect(
+        repo.ingestNotifications(sessionId, { now: T0 + 30 }).ingested,
+      ).toBe(1);
+      const item = repo.listNotifications(sessionId, {})
+        .items[0] as NonNullable<
+        ReturnType<Repo["listNotifications"]>["items"][0]
+      >;
+      expect(item.kind).toBe("question");
+      // The derived expiry is the min FUTURE boundary (the purpose
+      // window, not the later cited task deadline) — and a purpose
+      // window is never stored as a cited task deadline.
+      expect(item.contextExpiryAt).toBe(Date.parse(WINDOW_END));
+      expect(item.citedDeadlines).toEqual([LATER_DEADLINE]);
+      // Actionable before the window ends (no source event since ingest).
+      const fresh = repo.listNotifications(sessionId, { now: T0 + 60 });
+      expect(fresh.items[0]?.outdated).toBe(false);
+      expect(fresh.unreadCount).toBe(1);
+      // At the window end the SAME stored row reads outdated with NO new
+      // ingest, NO mutation of the stored original, and zero unread.
+      const expiry = Date.parse(WINDOW_END);
+      const stale = repo.listNotifications(sessionId, { now: expiry });
+      expect(stale.items[0]?.outdated).toBe(true);
+      expect(stale.unreadCount).toBe(0);
+      expect(
+        repo.getNotification(sessionId, item.id, { now: expiry }).outdated,
+      ).toBe(true);
+      expect(
+        repo.getNotificationHistory(sessionId, item.id, { now: expiry })
+          .notification.outdated,
+      ).toBe(true);
+      const stored = handle.raw
+        .prepare(
+          "SELECT outdated AS outdated, context_expiry_at AS expiry FROM notifications WHERE id = ?",
+        )
+        .get(item.id) as { outdated: number; expiry: number };
+      expect(stored.outdated).toBe(0);
+      expect(stored.expiry).toBe(expiry);
+      // An already-expired purpose window at claim never blanket-outdates
+      // a valid question asked without a cited deadline.
+      const other = repo.createSession({ key: randomUUID(), now: T0 + 100 });
+      const otherId = other.body.sessionId;
+      repo.createAutonomyPurpose(
+        otherId,
+        {
+          scope: "health",
+          statement: "evergreen goal",
+          kind: "goal",
+          explicit: true,
+          sourceKind: "user",
+        },
+        { key: randomUUID(), now: T0 + 101 },
+      );
+      repo.createAutonomyPurpose(
+        otherId,
+        {
+          scope: "health",
+          statement: "long-dead goal",
+          kind: "goal",
+          explicit: true,
+          sourceKind: "user",
+          validFrom: "2019-01-01T10:00:00Z",
+          validUntil: PAST_DEADLINE,
+        },
+        { key: randomUUID(), now: T0 + 102 },
+      );
+      unpause(repo, 2, T0 + 110);
+      completeExplicitJob(
+        repo,
+        otherId,
+        "health",
+        (labels) =>
+          validOutput([labels.purposes[0] as string], {
+            decision: "ask",
+            reason: "still relevant",
+            proposedAction: null,
+          }),
+        T0 + 120,
+      );
+      expect(
+        repo.ingestNotifications(otherId, { now: T0 + 130 }).ingested,
+      ).toBe(1);
+      const valid = repo.listNotifications(otherId, {}).items[0] as NonNullable<
+        ReturnType<Repo["listNotifications"]>["items"][0]
+      >;
+      expect(valid.contextExpiryAt).toBeNull();
+      const farFuture = repo.listNotifications(otherId, {
+        now: Date.parse(LATER_DEADLINE),
+      });
+      expect(farFuture.items[0]?.outdated).toBe(false);
+      expect(farFuture.unreadCount).toBe(1);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("keeps a new post-deadline question actionable when its cited deadline is already past (ack stays authority-free)", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      seedPurpose(repo, sessionId, "health", T0 + 5);
+      repo.createAutonomyTask(
+        sessionId,
+        {
+          scope: "health",
+          title: "missed intake",
+          kind: "task",
+          speaker: "user",
+          deadline: PAST_DEADLINE,
+        },
+        { key: randomUUID(), now: T0 + 6 },
+      );
+      unpause(repo, 1, T0 + 10);
+      completeExplicitJob(
+        repo,
+        sessionId,
+        "health",
+        (labels) =>
+          validOutput([labels.tasks[0] as string], {
+            decision: "ask",
+            reason: "what now after the missed window",
+            proposedAction: {
+              kind: "message",
+              summary: "ask next step",
+              taskDraft: { title: "next step", deadline: PAST_DEADLINE },
+            },
+          }),
+        T0 + 20,
+      );
+      expect(
+        repo.ingestNotifications(sessionId, { now: T0 + 30 }).ingested,
+      ).toBe(1);
+      const item = repo.listNotifications(sessionId, {})
+        .items[0] as NonNullable<
+        ReturnType<Repo["listNotifications"]>["items"][0]
+      >;
+      // The past cited deadline stays cited but never becomes an instant
+      // expiry for the NEW meaningful question.
+      expect(item.kind).toBe("question");
+      expect(item.citedDeadlines).toEqual([PAST_DEADLINE]);
+      expect(item.contextExpiryAt).toBeNull();
+      expect(item.outdated).toBe(false);
+      // An explicit ack is still neither consent nor refusal: zero
+      // authority flows to purposes, tasks, control, or grants.
+      const purposesBefore = countRows(handle, "autonomy_purposes");
+      const tasksBefore = countRows(handle, "autonomy_tasks");
+      const controlBefore = repo.getAutonomyControlState();
+      const briefBefore = item.briefText;
+      const acked = repo.ackNotification(sessionId, item.id, {
+        key: randomUUID(),
+        now: T0 + 40,
+      });
+      expect(acked.status).toBe(201);
+      expect(acked.body.status).toBe("acknowledged");
+      expect(countRows(handle, "autonomy_purposes")).toBe(purposesBefore);
+      expect(countRows(handle, "autonomy_tasks")).toBe(tasksBefore);
+      expect(repo.getAutonomyControlState()).toEqual(controlBefore);
+      expect(
+        (repo.getNotification(sessionId, item.id) as { briefText: string })
+          .briefText,
+      ).toBe(briefBefore);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("keeps cursors across session-idempotent replay (no reset, no re-notify)", async () => {
+    const handle = openKernelDatabase(":memory:");
+    try {
+      await migrateKernelDatabase({ db: handle.raw });
+      const repo = createKernelRepository(handle.raw, {
+        actionProposals: { writeEnabled: true },
+      });
+      const key = randomUUID();
+      const created = repo.createSession({ key, now: T0 });
+      const sessionId = created.body.sessionId;
+      seedPurpose(repo, sessionId, "health", T0 + 5);
+      unpause(repo, 1, T0 + 10);
+      completeExplicitJob(
+        repo,
+        sessionId,
+        "health",
+        (labels) =>
+          validOutput(labels.purposes, {
+            decision: "execute",
+            proposedAction: { kind: "message", summary: "ping" },
+          }),
+        T0 + 20,
+      );
+      expect(
+        repo.ingestNotifications(sessionId, { now: T0 + 30 }).ingested,
+      ).toBe(1);
+      const cursorBefore = handle.raw
+        .prepare(
+          "SELECT last_source_rowid AS rowid, last_source_key AS key FROM notification_cursors WHERE session_id = ? AND source = 'shadow_job_events'",
+        )
+        .get(sessionId) as { rowid: number; key: string };
+      expect(cursorBefore.rowid).toBeGreaterThan(0);
+      // Same-key replay replays the stored session WITHOUT re-inserting
+      // (the trigger never refires, cursors never reset).
+      const replayed = repo.createSession({ key, now: T0 + 40 });
+      expect(replayed.replayed).toBe(true);
+      expect(replayed.body.sessionId).toBe(sessionId);
+      const cursorAfter = handle.raw
+        .prepare(
+          "SELECT last_source_rowid AS rowid, last_source_key AS key FROM notification_cursors WHERE session_id = ? AND source = 'shadow_job_events'",
+        )
+        .get(sessionId) as { rowid: number; key: string };
+      expect(cursorAfter).toEqual(cursorBefore);
+      const idle = repo.ingestNotifications(sessionId, { now: T0 + 50 });
+      expect(idle.ingested).toBe(0);
+      expect(idle.latestSeq).toBe(1);
     } finally {
       closeKernelDatabase(handle);
     }
