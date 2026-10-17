@@ -68,6 +68,7 @@ import {
   createConversationProposalRegistrations,
   createDurableCalendarTargetStore,
   createKernelRepository,
+  createLearningRegistrations,
   createM1ToolRegistrations,
   createMemorySearchRegistration,
   createMemoryStageRegistrations,
@@ -2242,6 +2243,8 @@ export async function startServer(
       // AV03 proposal tools: proposal-only staging of inferred drafts
       // (purpose.propose / task.propose); the model stages but never
       // creates, and approval lives outside it. Same budgets, no new step.
+      // AV04 learning tools: read-only list/open plus proposal-only
+      // learning.propose (staged pending, human accept/reject outside).
       const agentBroker = createToolBroker({
         db: handle.raw,
         repo,
@@ -2249,6 +2252,7 @@ export async function startServer(
           ...agentBaseRegistrations,
           ...createAutonomyReadRegistrations({ repo }),
           ...createConversationProposalRegistrations({ repo }),
+          ...createLearningRegistrations({ repo }),
         ],
       });
       registry.register(

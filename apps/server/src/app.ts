@@ -20,6 +20,10 @@ import {
   HistoryQuerySchema,
   IDEMPOTENCY_SCOPE_SESSIONS_CREATE,
   IdempotencyLookupQuerySchema,
+  LearningEvidenceAttachRequestSchema,
+  LearningHypothesisCreateRequestSchema,
+  LearningHypothesisDecisionRequestSchema,
+  LearningHypothesisTransitionRequestSchema,
   MemoryDetailResponseSchema,
   MemoryMutationRequestSchema,
   MemoryMutationResponseSchema,
@@ -72,6 +76,8 @@ import {
   InvalidReferenceError,
   isUuidV4,
   type KernelRepository,
+  LearningStateConflictError,
+  LearningVersionConflictError,
   NotificationKeyConflictError,
   NotificationProjectionResetError,
   ProposalHashMismatchError,
@@ -664,6 +670,32 @@ function mapDomainError(c: Context, error: unknown): Response {
         error: {
           code: "autonomy_state_conflict",
           message: "autonomy state conflict",
+        },
+      },
+      409,
+    );
+  }
+  // AV04 learning slice: CAS version conflicts and illegal lifecycle
+  // transitions / invalid evidence anchors map to fixed 409 codes (same
+  // shape as the autonomy codes above; outside the frozen ApiErrorCode
+  // enum). Ownership failures stay 404 above.
+  if (error instanceof LearningVersionConflictError) {
+    return c.json(
+      {
+        error: {
+          code: "learning_version_conflict",
+          message: "learning version conflict",
+        },
+      },
+      409,
+    );
+  }
+  if (error instanceof LearningStateConflictError) {
+    return c.json(
+      {
+        error: {
+          code: "learning_state_conflict",
+          message: "learning state conflict",
         },
       },
       409,
@@ -2836,6 +2868,239 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         return mapDomainError(c, error);
       }
     },
+  );
+
+  /* ---------------- AV04 learning: hypotheses + evidence ------------- */
+  // Session-owned durable METHODS / HYPOTHESES plus append-only EVIDENCE
+  // anchored to existing durable sources only. Human-explicit CRUD:
+  // create / transition (support/refute/retire, CAS) / evidence attach /
+  // staged accept-reject. Model tools are proposal-only + read-only (no
+  // staging route exists). Strict Zod bodies, UUID ids, Idempotency-Key on
+  // every POST, exact query gates, ownership-first 404s, CAS 409s. Every
+  // read DTO carries the explicit hypothesis label (kind + status +
+  // evidence counts); refuted is never surfaced as fact. Routine learning
+  // writes NO notifications and never touches control/grants/budget.
+  app.get("/api/sessions/:sessionId/learning/hypotheses", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const query = strictQuery(c, ["limit", "cursor", "status", "kind"]);
+    if (!query.ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(
+        repo.listLearningHypotheses(session.id, {
+          ...(query.values.limit !== undefined
+            ? { limit: query.values.limit }
+            : {}),
+          ...(query.values.cursor !== undefined
+            ? { cursor: query.values.cursor }
+            : {}),
+          ...(query.values.status !== undefined
+            ? { status: query.values.status }
+            : {}),
+          ...(query.values.kind !== undefined
+            ? { kind: query.values.kind }
+            : {}),
+        }),
+        200,
+      );
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.post("/api/sessions/:sessionId/learning/hypotheses", async (c) => {
+    const started = now();
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const keyed = requireIdempotencyKey(c);
+    if ("response" in keyed) {
+      return keyed.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    const raw = await readJsonBody(c);
+    if (!raw.ok) {
+      return validationError(c);
+    }
+    if (
+      LearningHypothesisCreateRequestSchema.safeParse(raw.value).success !==
+      true
+    ) {
+      return validationError(c);
+    }
+    if (draining) {
+      return shuttingDown(c);
+    }
+    try {
+      const out = repo.createLearningHypothesis(session.id, raw.value, {
+        key: keyed.key,
+        now: now(),
+      });
+      logger.info("http.learning.hypotheses.create", {
+        sessionId: session.id,
+        status: out.status,
+        durationMs: Math.max(now() - started, 0),
+      });
+      return c.json(out.body, out.status as 201);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get("/api/sessions/:sessionId/learning/hypotheses/:hypothesisId", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const hypothesis = requireUuid(
+      c,
+      c.req.param("hypothesisId"),
+      "hypothesisId",
+    );
+    if ("response" in hypothesis) {
+      return hypothesis.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(repo.getLearningHypothesis(session.id, hypothesis.id), 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get(
+    "/api/sessions/:sessionId/learning/hypotheses/:hypothesisId/evidence",
+    (c) => {
+      const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+      if ("response" in session) {
+        return session.response;
+      }
+      const hypothesis = requireUuid(
+        c,
+        c.req.param("hypothesisId"),
+        "hypothesisId",
+      );
+      if ("response" in hypothesis) {
+        return hypothesis.response;
+      }
+      if (!strictQuery(c, []).ok) {
+        return validationError(c);
+      }
+      try {
+        return c.json(
+          repo.listLearningHypothesisEvidence(session.id, hypothesis.id),
+          200,
+        );
+      } catch (error) {
+        return mapDomainError(c, error);
+      }
+    },
+  );
+
+  function learningHypothesisMutation(
+    suffix: string,
+    logName: string,
+    schemaName: "transition" | "evidence" | "decision",
+    apply: (
+      sessionId: string,
+      hypothesisId: string,
+      body: unknown,
+      options: { key: string; now: number },
+    ) => { status: number; body: unknown; replayed: boolean },
+  ): void {
+    app.post(
+      `/api/sessions/:sessionId/learning/hypotheses/:hypothesisId/${suffix}`,
+      async (c) => {
+        const started = now();
+        const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+        if ("response" in session) {
+          return session.response;
+        }
+        const hypothesis = requireUuid(
+          c,
+          c.req.param("hypothesisId"),
+          "hypothesisId",
+        );
+        if ("response" in hypothesis) {
+          return hypothesis.response;
+        }
+        const keyed = requireIdempotencyKey(c);
+        if ("response" in keyed) {
+          return keyed.response;
+        }
+        if (!strictQuery(c, []).ok) {
+          return validationError(c);
+        }
+        const raw = await readJsonBody(c);
+        if (!raw.ok) {
+          return validationError(c);
+        }
+        const schema =
+          schemaName === "transition"
+            ? LearningHypothesisTransitionRequestSchema
+            : schemaName === "evidence"
+              ? LearningEvidenceAttachRequestSchema
+              : LearningHypothesisDecisionRequestSchema;
+        if (schema.safeParse(raw.value).success !== true) {
+          return validationError(c);
+        }
+        if (draining) {
+          return shuttingDown(c);
+        }
+        try {
+          const out = apply(session.id, hypothesis.id, raw.value, {
+            key: keyed.key,
+            now: now(),
+          });
+          logger.info(logName, {
+            sessionId: session.id,
+            status: out.status,
+            durationMs: Math.max(now() - started, 0),
+          });
+          return c.json(out.body, out.status as 200);
+        } catch (error) {
+          return mapDomainError(c, error);
+        }
+      },
+    );
+  }
+
+  learningHypothesisMutation(
+    "transition",
+    "http.learning.hypotheses.transition",
+    "transition",
+    (sessionId, hypothesisId, body, options) =>
+      repo.transitionLearningHypothesis(sessionId, hypothesisId, body, options),
+  );
+  learningHypothesisMutation(
+    "evidence",
+    "http.learning.hypotheses.evidence",
+    "evidence",
+    (sessionId, hypothesisId, body, options) =>
+      repo.attachLearningEvidence(sessionId, hypothesisId, body, options),
+  );
+  learningHypothesisMutation(
+    "accept",
+    "http.learning.hypotheses.accept",
+    "decision",
+    (sessionId, hypothesisId, body, options) =>
+      repo.acceptLearningHypothesis(sessionId, hypothesisId, body, options),
+  );
+  learningHypothesisMutation(
+    "reject",
+    "http.learning.hypotheses.reject",
+    "decision",
+    (sessionId, hypothesisId, body, options) =>
+      repo.rejectLearningHypothesis(sessionId, hypothesisId, body, options),
   );
 
   app.get("/api/autonomy/control", (c) => {

@@ -11,6 +11,7 @@
 /// <reference lib="dom" />
 
 import type { ActiveStatus } from "@companion/contracts";
+import { LearningPanel } from "./learning_panel.js";
 import { NotificationPanel } from "./notification_panel.js";
 import { ProposalPanel } from "./proposal_panel.js";
 import {
@@ -390,6 +391,8 @@ class ConversationApp {
   private notifications: NotificationPanel | null = null;
   /** AV03 conversation-proposal consumer (quiet review + explicit adopt). */
   private proposals: ProposalPanel | null = null;
+  /** AV04 learning consumer (labeled hypotheses + anchored evidence). */
+  private learning: LearningPanel | null = null;
 
   private readonly list: HTMLElement;
   private readonly notice: HTMLElement;
@@ -628,6 +631,31 @@ class ConversationApp {
           drafts.bind();
           drafts.notifySessionChanged();
           this.proposals = drafts;
+          // AV04 learning: labeled hypotheses + anchored evidence (reads
+          // never promote; transitions/evidence explicit human commits).
+          // Missing nodes fail closed with a visible status (SSR ships
+          // together). Refreshes on the same run-settled hook as drafts.
+          try {
+            const learning = new LearningPanel({
+              getSessionId: () => this.sessionId,
+              http: {
+                get: (path) => fetchJson(path),
+                post: (path, payload, key) => postJson(path, payload, key),
+              },
+            });
+            learning.bind();
+            learning.notifySessionChanged();
+            this.learning = learning;
+          } catch (error) {
+            const message =
+              error instanceof Error ? error.message : "learning failed";
+            const statusNode = document.getElementById("learning-status");
+            if (statusNode !== null) {
+              statusNode.textContent = message;
+            } else {
+              throw error;
+            }
+          }
         } catch (error) {
           const message =
             error instanceof Error ? error.message : "proposal failed";
@@ -3884,6 +3912,11 @@ class ConversationApp {
       this.proposals?.notifyRunSettled();
     } catch {
       // Best effort: run teardown never breaks for proposals.
+    }
+    try {
+      this.learning?.notifyRunSettled();
+    } catch {
+      // Best effort: run teardown never breaks for learning.
     }
     try {
       this.proposals?.notifyComposureChanged();

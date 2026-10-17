@@ -137,6 +137,26 @@ export const IDEMPOTENCY_OPERATIONS = {
     operation: "conv_proposal_reject",
     schemaVersion: 1,
   },
+  createLearningHypothesis: {
+    operation: "learning_create_hypothesis",
+    schemaVersion: 1,
+  },
+  proposeLearningHypothesis: {
+    operation: "learning_propose_hypothesis",
+    schemaVersion: 1,
+  },
+  transitionLearningHypothesis: {
+    operation: "learning_transition_hypothesis",
+    schemaVersion: 1,
+  },
+  decideLearningHypothesis: {
+    operation: "learning_decide_hypothesis",
+    schemaVersion: 1,
+  },
+  attachLearningEvidence: {
+    operation: "learning_attach_evidence",
+    schemaVersion: 1,
+  },
   ackNotification: { operation: "notification_ack", schemaVersion: 1 },
 } as const;
 

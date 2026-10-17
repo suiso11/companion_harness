@@ -83,6 +83,7 @@ import {
   RepositoryNotFoundError,
   RepositoryValidationError,
 } from "./errors.js";
+import { flagLearningReevaluationInTx } from "./learning.js";
 import {
   enqueueShadowSourceInTx,
   holdPendingShadowJobsInTx,
@@ -1263,6 +1264,22 @@ export function correctPurpose(
       "purpose_superseded",
       now,
     );
+    // Same-TX durable reevaluation NOTICE for in-scope hypotheses (AV04):
+    // flags only (never a purpose/task mutation, never auto-cancel, never
+    // a notification). Best-effort on pre-0016 databases (missing tables).
+    try {
+      flagLearningReevaluationInTx(
+        db,
+        session,
+        input.scope,
+        "purpose_superseded",
+        now,
+      );
+    } catch (error) {
+      if (!(error instanceof Error && /no such table/i.test(error.message))) {
+        throw error;
+      }
+    }
     const oldCurrent = readPurpose(db, oldRow.id);
     const newCurrent = readPurpose(db, newId);
     if (oldCurrent === null || newCurrent === null) {
@@ -1463,6 +1480,22 @@ function transitionPurpose(
       operation === "revoke" ? "purpose_revoked" : "purpose_achieved",
       now,
     );
+    // Same-TX durable reevaluation NOTICE for in-scope hypotheses (AV04):
+    // flags only (never a purpose/task mutation, never auto-cancel, never
+    // a notification). Best-effort on pre-0016 databases (missing tables).
+    try {
+      flagLearningReevaluationInTx(
+        db,
+        session,
+        row.scope,
+        operation === "revoke" ? "purpose_revoked" : "purpose_achieved",
+        now,
+      );
+    } catch (error) {
+      if (!(error instanceof Error && /no such table/i.test(error.message))) {
+        throw error;
+      }
+    }
     // Same-TX durable shadow source (covers the dependent holds too).
     enqueueShadowPolicyChangeInTx(
       db,

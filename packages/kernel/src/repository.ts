@@ -57,6 +57,20 @@ import {
   type LatestRunEvent,
   type LatestRunEventType,
   LatestRunEventTypeSchema,
+  LearningEvidenceAttachRequestSchema,
+  type LearningEvidenceListResponse,
+  LearningEvidenceListResponseSchema,
+  type LearningEvidenceView,
+  LearningEvidenceViewSchema,
+  LearningHypothesisCreateRequestSchema,
+  LearningHypothesisDecisionRequestSchema,
+  LearningHypothesisListQuerySchema,
+  type LearningHypothesisListResponse,
+  LearningHypothesisListResponseSchema,
+  LearningHypothesisTransitionRequestSchema,
+  type LearningHypothesisView,
+  LearningHypothesisViewSchema,
+  LearningProposeRequestSchema,
   type M0RunEventType,
   type M2ModelErrorCode,
   M2ModelErrorCodeSchema,
@@ -229,6 +243,19 @@ import {
   RepositoryValidationError,
   SessionBusyError,
 } from "./errors.js";
+import {
+  type HypothesisTransition,
+  acceptStagedHypothesis as learningAcceptStaged,
+  attachEvidence as learningAttachEvidence,
+  createHypothesis as learningCreateHypothesis,
+  getHypothesis as learningGetHypothesis,
+  listHypothesisEvents as learningListEvents,
+  listHypothesisEvidence as learningListEvidence,
+  listHypotheses as learningListHypotheses,
+  rejectStagedHypothesis as learningRejectStaged,
+  stageHypothesisFromModel as learningStageFromModel,
+  transitionHypothesis as learningTransition,
+} from "./learning.js";
 import {
   ackNotification as notifyAck,
   buildDeadlineSchedule as notifyBuildSchedule,
@@ -5499,6 +5526,250 @@ export function createKernelRepository(
     return { status: out.status, body, replayed: out.replayed };
   }
 
+  /* ---------------------------------------------------------------- */
+  /* AV04 learning facade (hypotheses + anchored evidence).             */
+  /*                                                                  */
+  /* Ownership: every method below delegates to `learning.ts`, the     */
+  /* ONLY writer of the learning tables. Human routes create /        */
+  /* transition / attach / accept / reject; the model reaches ONLY    */
+  /* the staged proposal path (`proposeLearningHypothesisFromModel`,  */
+  /* source derived server-side from the calling run's CURRENT        */
+  /* ordinary `user_text` turn) and the read-only list/get readers.   */
+  /* No purpose / task / grant / control / notification behavior.     */
+  /* ---------------------------------------------------------------- */
+
+  function createLearningHypothesis(
+    sessionId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: LearningHypothesisView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => LearningHypothesisCreateRequestSchema.parse(request),
+      "learning create request",
+    );
+    const out = learningCreateHypothesis(
+      db,
+      sessionId,
+      {
+        scope: parsed.scope,
+        kind: parsed.kind,
+        statement: parsed.statement,
+      },
+      options,
+    );
+    const body = parseOrValidation(
+      () => LearningHypothesisViewSchema.parse(out.body),
+      "learning create response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function proposeLearningHypothesisFromModel(
+    runId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): {
+    status: number;
+    body: LearningHypothesisView;
+    replayed: boolean;
+  } {
+    const run = getRun(runId);
+    const turn = getTurn(run.turnId);
+    if (run.sessionId !== turn.sessionId) {
+      throw new RepositoryValidationError("run/turn session mismatch");
+    }
+    if (turn.input.kind !== "user_text") {
+      // Only CURRENT ordinary user_text is an eligible source: action
+      // approval/rejection decisions (or any non-text turn) can never
+      // source a learning proposal.
+      throw new RepositoryValidationError(
+        "only ordinary user_text turns can source a learning proposal",
+      );
+    }
+    const parsed = parseOrValidation(
+      () => LearningProposeRequestSchema.parse(request),
+      "learning propose request",
+    );
+    const out = learningStageFromModel(
+      db,
+      run.sessionId,
+      {
+        scope: parsed.scope,
+        kind: parsed.kind,
+        statement: parsed.statement,
+      },
+      { sourceRunId: run.id, sourceTurnId: turn.id },
+      options,
+    );
+    const body = parseOrValidation(
+      () => LearningHypothesisViewSchema.parse(out.body),
+      "learning propose response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function listLearningHypotheses(
+    sessionId: string,
+    query: unknown = {},
+  ): LearningHypothesisListResponse {
+    const parsed = parseOrValidation(
+      () => LearningHypothesisListQuerySchema.parse(query ?? {}),
+      "learning list query",
+    );
+    const out = learningListHypotheses(db, sessionId, {
+      limit: parsed.limit,
+      ...(parsed.cursor !== undefined ? { cursor: parsed.cursor } : {}),
+      ...(parsed.status !== undefined ? { status: parsed.status } : {}),
+      ...(parsed.kind !== undefined ? { kind: parsed.kind } : {}),
+    });
+    return parseOrValidation(
+      () => LearningHypothesisListResponseSchema.parse(out),
+      "learning list response",
+    );
+  }
+
+  function getLearningHypothesis(
+    sessionId: string,
+    hypothesisId: string,
+  ): LearningHypothesisView {
+    return parseOrValidation(
+      () =>
+        LearningHypothesisViewSchema.parse(
+          learningGetHypothesis(db, sessionId, hypothesisId),
+        ),
+      "learning hypothesis response",
+    );
+  }
+
+  function listLearningHypothesisEvidence(
+    sessionId: string,
+    hypothesisId: string,
+  ): LearningEvidenceListResponse {
+    const out = learningListEvidence(db, sessionId, hypothesisId);
+    return parseOrValidation(
+      () => LearningEvidenceListResponseSchema.parse(out),
+      "learning evidence response",
+    );
+  }
+
+  function listLearningHypothesisEvents(
+    sessionId: string,
+    hypothesisId: string,
+  ): {
+    hypothesisId: string;
+    events: {
+      seq: number;
+      event: string;
+      fromStatus: string | null;
+      toStatus: string;
+      createdAt: number;
+    }[];
+  } {
+    return learningListEvents(db, sessionId, hypothesisId);
+  }
+
+  function transitionLearningHypothesis(
+    sessionId: string,
+    hypothesisId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: LearningHypothesisView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => LearningHypothesisTransitionRequestSchema.parse(request),
+      "learning transition request",
+    );
+    const out = learningTransition(
+      db,
+      sessionId,
+      hypothesisId,
+      parsed.transition as HypothesisTransition,
+      parsed.expectedVersion,
+      options,
+    );
+    const body = parseOrValidation(
+      () => LearningHypothesisViewSchema.parse(out.body),
+      "learning transition response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function acceptLearningHypothesis(
+    sessionId: string,
+    hypothesisId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: LearningHypothesisView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => LearningHypothesisDecisionRequestSchema.parse(request),
+      "learning accept request",
+    );
+    const out = learningAcceptStaged(
+      db,
+      sessionId,
+      hypothesisId,
+      parsed.expectedVersion,
+      options,
+    );
+    const body = parseOrValidation(
+      () => LearningHypothesisViewSchema.parse(out.body),
+      "learning accept response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function rejectLearningHypothesis(
+    sessionId: string,
+    hypothesisId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: LearningHypothesisView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => LearningHypothesisDecisionRequestSchema.parse(request),
+      "learning reject request",
+    );
+    const out = learningRejectStaged(
+      db,
+      sessionId,
+      hypothesisId,
+      parsed.expectedVersion,
+      options,
+    );
+    const body = parseOrValidation(
+      () => LearningHypothesisViewSchema.parse(out.body),
+      "learning reject response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function attachLearningEvidence(
+    sessionId: string,
+    hypothesisId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: LearningEvidenceView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => LearningEvidenceAttachRequestSchema.parse(request),
+      "learning evidence request",
+    );
+    const out = learningAttachEvidence(
+      db,
+      sessionId,
+      hypothesisId,
+      {
+        polarity: parsed.polarity,
+        sourceKind: parsed.sourceKind,
+        sourceId: parsed.sourceId,
+        ...(parsed.note !== undefined ? { note: parsed.note } : {}),
+      },
+      options,
+    );
+    const body = parseOrValidation(
+      () => LearningEvidenceViewSchema.parse(out.body),
+      "learning evidence response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
   function setAutonomyControlState(
     request: unknown,
     options: AutonomyKeyOptions,
@@ -6195,6 +6466,16 @@ export function createKernelRepository(
     listConversationProposalEvents,
     acceptConversationProposal,
     rejectConversationProposal,
+    createLearningHypothesis,
+    proposeLearningHypothesisFromModel,
+    listLearningHypotheses,
+    getLearningHypothesis,
+    listLearningHypothesisEvidence,
+    listLearningHypothesisEvents,
+    transitionLearningHypothesis,
+    acceptLearningHypothesis,
+    rejectLearningHypothesis,
+    attachLearningEvidence,
     requestShadowDeliberation,
     listShadowJobs,
     getShadowJob,

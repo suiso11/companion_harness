@@ -1408,8 +1408,136 @@ export const notificationDeadlineSchedule = sqliteTable(
   ],
 );
 
+// AV04 learning durable core (methods/hypotheses + anchored evidence).
+// Mirrors packages/kernel/migrations/0016_learning.sql, which is
+// authoritative. Hypotheses are immutable originals (only status / version
+// / staged / needs_reevaluation / updated_at are ever rewritten); evidence
+// is append-only and anchors ONLY to existing durable source rows. No
+// purpose / task / grant / control / notification column exists here.
+
+export const learningHypotheses = sqliteTable(
+  "learning_hypotheses",
+  {
+    id: text("id").primaryKey(),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id),
+    scope: text("scope").notNull(),
+    kind: text("kind").notNull(),
+    statement: text("statement").notNull(),
+    status: text("status").notNull(),
+    version: integer("version").notNull(),
+    origin: text("origin").notNull(),
+    staged: integer("staged").notNull(),
+    needsReevaluation: integer("needs_reevaluation").notNull().default(0),
+    sourceRunId: text("source_run_id"),
+    sourceTurnId: text("source_turn_id"),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (t) => [
+    unique("learning_hypotheses_session_id_unique").on(t.sessionId, t.id),
+    foreignKey({
+      name: "learning_hypotheses_session_source_turn_fk",
+      columns: [t.sessionId, t.sourceTurnId],
+      foreignColumns: [turns.sessionId, turns.id],
+    }),
+    foreignKey({
+      name: "learning_hypotheses_session_source_run_fk",
+      columns: [t.sessionId, t.sourceRunId],
+      foreignColumns: [runs.sessionId, runs.id],
+    }),
+    check(
+      "learning_hypotheses_kind_check",
+      sql`${t.kind} IN ('method','hypothesis')`,
+    ),
+    check(
+      "learning_hypotheses_status_check",
+      sql`${t.status} IN ('open','supported','refuted','retired')`,
+    ),
+    check("learning_hypotheses_version_check", sql`${t.version} >= 1`),
+    check(
+      "learning_hypotheses_origin_check",
+      sql`${t.origin} IN ('human','model')`,
+    ),
+    check("learning_hypotheses_staged_check", sql`${t.staged} IN (0,1)`),
+    check(
+      "learning_hypotheses_needs_reevaluation_check",
+      sql`${t.needsReevaluation} IN (0,1)`,
+    ),
+  ],
+);
+
+export const learningEvidence = sqliteTable(
+  "learning_evidence",
+  {
+    id: text("id").primaryKey(),
+    hypothesisId: text("hypothesis_id").notNull(),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id),
+    polarity: text("polarity").notNull(),
+    sourceKind: text("source_kind").notNull(),
+    sourceId: text("source_id").notNull(),
+    note: text("note"),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [
+    unique("learning_evidence_session_id_unique").on(t.sessionId, t.id),
+    foreignKey({
+      name: "learning_evidence_session_hypothesis_fk",
+      columns: [t.sessionId, t.hypothesisId],
+      foreignColumns: [learningHypotheses.sessionId, learningHypotheses.id],
+    }),
+    check(
+      "learning_evidence_polarity_check",
+      sql`${t.polarity} IN ('supports','refutes','neutral')`,
+    ),
+    check(
+      "learning_evidence_source_kind_check",
+      sql`${t.sourceKind} IN ('shadow_job','conversation_proposal','action_receipt','task_event')`,
+    ),
+  ],
+);
+
+export const learningHypothesisEvents = sqliteTable(
+  "learning_hypothesis_events",
+  {
+    id: text("id").primaryKey(),
+    hypothesisId: text("hypothesis_id").notNull(),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id),
+    seq: integer("seq").notNull(),
+    event: text("event").notNull(),
+    fromStatus: text("from_status"),
+    toStatus: text("to_status").notNull(),
+    note: text("note"),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [
+    unique("learning_hypothesis_events_hypothesis_seq_unique").on(
+      t.hypothesisId,
+      t.seq,
+    ),
+    foreignKey({
+      name: "learning_hypothesis_events_session_hypothesis_fk",
+      columns: [t.sessionId, t.hypothesisId],
+      foreignColumns: [learningHypotheses.sessionId, learningHypotheses.id],
+    }),
+    check("learning_hypothesis_events_seq_check", sql`${t.seq} >= 1`),
+    check(
+      "learning_hypothesis_events_event_check",
+      sql`${t.event} IN ('created','proposed','accepted','rejected','evidence_attached','supported','refuted','retired','reevaluation_flagged','reevaluation_cleared')`,
+    ),
+  ],
+);
+
 export const kernelSchema = {
   sessions,
+  learningHypotheses,
+  learningEvidence,
+  learningHypothesisEvents,
   autonomyPurposes,
   autonomyPurposeConflicts,
   turns,
