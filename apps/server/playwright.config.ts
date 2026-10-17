@@ -45,6 +45,7 @@ export default defineConfig({
           "notifications.spec.ts",
           "conversation_proposals.spec.ts",
           "learning.spec.ts",
+          "handoff.spec.ts",
         ],
   timeout: 60_000,
   expect: { timeout: 15_000 },

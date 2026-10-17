@@ -395,12 +395,15 @@ export class ProposalPanel {
     this.historyCursor = historyCursor;
     this.historyHasMore = historyHasMore;
     if (pendingCount >= 0) this.totalPending = pendingCount;
-    // A selected draft missing from the fresh pages is NOT gone: it may
-    // live on an older page. Fetch it directly; close the drawer only when
-    // the server says it is gone (404). An unresolved frozen op keeps its
-    // drawer pinned without any fetch.
+    // A selected draft NOT on the fresh pages (pending queue or newest
+    // history page) is NOT gone: it may live on an older page. Fetch it
+    // directly even though the map still has it — the map's copy may be
+    // stale. Close the drawer only when the server says it is gone (404).
+    // An unresolved frozen op keeps its drawer pinned without any fetch.
     if (this.pendingOp === null && this.selectedId !== null) {
-      if (!this.items.has(this.selectedId)) {
+      if (
+        ![...pending, ...history].some((item) => item.id === this.selectedId)
+      ) {
         const missing = this.selectedId;
         try {
           const single = await this.deps.http.get(
@@ -737,6 +740,13 @@ export class ProposalPanel {
       this.opInFlight = false;
       if (this.retryButton !== null) this.retryButton.hidden = true;
       this.setStatus(res.status === 201 ? "採用しました" : "見送りにしました");
+      // Apply the deterministic returned view BEFORE the refresh so the
+      // history list stays truthful if the page fetch lags (session must
+      // match). The drawer closes either way (the decision is final).
+      if (isProposalView(res.body) && res.body.sessionId === op.ownerSession) {
+        this.items.set(res.body.id, res.body);
+      }
+      this.renderAll();
       this.selectedId = null;
       if (this.detail !== null) this.detail.hidden = true;
       await this.refresh();
@@ -758,6 +768,24 @@ export class ProposalPanel {
       this.opInFlight = false;
       await this.refresh();
       if (session !== this.sessionSeq) return;
+      // The 409 names THIS proposal: re-read it DIRECTLY (it may live on
+      // an older page) so the message evaluates against the committed
+      // truth before the human re-commits.
+      try {
+        const single = await this.deps.http.get(
+          `/api/sessions/${op.ownerSession}/conversation-proposals/${op.proposalId}`,
+        );
+        if (session !== this.sessionSeq) return;
+        if (
+          single.status === 200 &&
+          isProposalView(single.body) &&
+          (single.body as ProposalView).sessionId === op.ownerSession
+        ) {
+          this.items.set(op.proposalId, single.body as ProposalView);
+        }
+      } catch {
+        // Network loss on the re-read: the refresh above still ran.
+      }
       this.pendingOp = null;
       if (this.retryButton !== null) this.retryButton.hidden = true;
       const current = this.items.get(op.proposalId);

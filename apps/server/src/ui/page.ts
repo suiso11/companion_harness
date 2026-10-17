@@ -506,6 +506,127 @@ export function renderConversationShell(): HtmlEscapedString {
         jsx("p", { id: "learning-status", "aria-live": "polite" }),
       ),
       jsx(
+        "section",
+        { id: "handoff", "aria-label": "引継ぎ" },
+        jsx("h2", {}, "引継ぎ（pi-orchへの手動受渡）"),
+        jsx(
+          "p",
+          {},
+          "実行は自動化されません。人が仕様を貼り付けてpi-orchへ渡し、検証済み結果を記録します（サンドボックス成功≠本番／権限は別途承認）",
+        ),
+        jsx(
+          "form",
+          { id: "handoff-create-form" },
+          jsx("input", {
+            id: "handoff-task",
+            type: "text",
+            autocomplete: "off",
+          }),
+          jsx("textarea", { id: "handoff-target" }),
+          jsx("textarea", { id: "handoff-criteria" }),
+          jsx(
+            "select",
+            { id: "handoff-op-scope" },
+            jsx("option", { value: "investigate" }, "調査"),
+            jsx("option", { value: "implement" }, "実装"),
+          ),
+          jsx("input", {
+            id: "handoff-budget",
+            type: "text",
+            autocomplete: "off",
+          }),
+          jsx(
+            "select",
+            { id: "handoff-boundaries", multiple: true },
+            jsx("option", { value: "external_publication" }, "外部公開"),
+            jsx("option", { value: "shared_branch" }, "共有ブランチ"),
+            jsx("option", { value: "payment" }, "支払い"),
+            jsx("option", { value: "deletion" }, "削除"),
+            jsx("option", { value: "secret" }, "秘密情報"),
+            jsx("option", { value: "access_change" }, "権限変更"),
+          ),
+          jsx("input", {
+            id: "handoff-supersedes",
+            type: "text",
+            autocomplete: "off",
+          }),
+          jsx(
+            "button",
+            { id: "handoff-create", type: "button" },
+            "引継ぎを記録",
+          ),
+        ),
+        jsx("p", { id: "handoff-active-count", "aria-live": "polite" }),
+        jsx("ul", { id: "handoff-list" }),
+        jsx("button", { id: "handoff-refresh", type: "button" }, "一覧を更新"),
+        jsx(
+          "button",
+          { id: "handoff-more", type: "button", hidden: true },
+          "古い履歴を読み込む",
+        ),
+        jsx(
+          "div",
+          { id: "handoff-detail", hidden: true },
+          jsx("div", { id: "handoff-detail-body" }),
+          jsx("ul", { id: "handoff-events-list" }),
+          jsx("ul", { id: "handoff-attempts-list" }),
+          jsx("input", {
+            id: "handoff-external-ref",
+            type: "text",
+            autocomplete: "off",
+          }),
+          jsx("button", { id: "handoff-dispatch", type: "button" }, "送付する"),
+          jsx(
+            "select",
+            { id: "handoff-report-env" },
+            jsx("option", { value: "sandbox" }, "砂箱"),
+            jsx("option", { value: "production" }, "本番（未検証申告）"),
+          ),
+          jsx("textarea", { id: "handoff-report-summary" }),
+          jsx("button", { id: "handoff-report", type: "button" }, "報告する"),
+          jsx("div", { id: "handoff-verify-rows" }),
+          jsx("button", { id: "handoff-verify", type: "button" }, "検証する"),
+          jsx("button", { id: "handoff-fail", type: "button" }, "失敗にする"),
+          jsx("button", { id: "handoff-cancel", type: "button" }, "取消する"),
+          jsx(
+            "button",
+            { id: "handoff-abnormal", type: "button" },
+            "異常終了を記録",
+          ),
+          jsx(
+            "select",
+            { id: "handoff-attempt-cause" },
+            jsx("option", { value: "transient_infra" }, "一時的障害"),
+            jsx("option", { value: "worker_error" }, "作業者エラー"),
+            jsx("option", { value: "criteria_unmet" }, "条件未達"),
+            jsx("option", { value: "environment" }, "環境要因"),
+          ),
+          jsx(
+            "button",
+            { id: "handoff-attempt", type: "button" },
+            "再試行を記録",
+          ),
+          jsx(
+            "button",
+            { id: "handoff-reaffirm", type: "button" },
+            "再確認する",
+          ),
+          jsx("button", { id: "handoff-spec", type: "button" }, "仕様を取得"),
+          jsx("div", { id: "handoff-spec-view" }),
+        ),
+        // The frozen-request retry + op status belong to the section, NOT
+        // the detail drawer: the drawer stays hidden until a handoff is
+        // selected, so a retry nested inside it could never be pressed
+        // after an uncertain POST with no selection (same pattern as the
+        // learning retry above).
+        jsx(
+          "button",
+          { id: "handoff-retry", type: "button", hidden: true },
+          "同じ内容で再送",
+        ),
+        jsx("p", { id: "handoff-status", "aria-live": "polite" }),
+      ),
+      jsx(
         "div",
         { id: "drawer", hidden: true, role: "dialog", "aria-label": "引用" },
         jsx("pre", { id: "drawer-body" }),

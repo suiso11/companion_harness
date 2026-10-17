@@ -476,17 +476,18 @@ export class LearningPanel {
     // Merge the newest page into the map (never clear): older pages loaded
     // via "古い履歴を読み込む" stay reachable, and a 409 re-read never
     // drops the older-page row behind the frozen op.
-    for (const item of readItems(res.body)) {
-      if (item.sessionId === sessionId) this.items.set(item.id, item);
-    }
+    const freshest = readItems(res.body).filter(
+      (item) => item.sessionId === sessionId,
+    );
+    for (const item of freshest) this.items.set(item.id, item);
     this.historyCursor = readCursor(res.body);
     this.historyHasMore = readHasMore(res.body);
-    // A selected hypothesis missing from the newest page is NOT gone: it
-    // may live on an older page. Fetch it directly; close the drawer only
-    // when the server says it is gone (404). An unresolved frozen op keeps
-    // its drawer pinned without any fetch.
+    // The fresh page, not the map, decides: a selected hypothesis that
+    // lives only on an OLDER page stays stale — re-fetch it directly
+    // anyway. An unresolved frozen op keeps its drawer pinned without
+    // any fetch.
     if (this.pendingOp === null && this.selectedId !== null) {
-      if (!this.items.has(this.selectedId)) {
+      if (!freshest.some((item) => item.id === this.selectedId)) {
         const missing = this.selectedId;
         try {
           const single = await this.deps.http.get(
@@ -936,6 +937,15 @@ export class LearningPanel {
       this.setStatus(
         op.hypothesisId === "" ? "仮説を記録しました" : "操作を反映しました",
       );
+      // Apply the deterministic returned view BEFORE the refresh: the
+      // map (and the open drawer) shows the committed truth even while
+      // the page fetch is in flight. Only a view owned by THIS session.
+      if (
+        isHypothesisView(res.body) &&
+        res.body.sessionId === op.ownerSession
+      ) {
+        this.items.set(res.body.id, res.body);
+      }
       await this.refresh();
       if (session !== this.sessionSeq) return;
       // Selection-bound: the created/updated record opens only when it is
@@ -969,6 +979,24 @@ export class LearningPanel {
       this.opInFlight = false;
       await this.refresh();
       if (session !== this.sessionSeq) return;
+      // The 409 names THIS hypothesis: re-read it DIRECTLY (it may live
+      // on an older page) so the drawer evaluates against the committed
+      // truth before the human re-commits.
+      try {
+        const single = await this.deps.http.get(
+          `/api/sessions/${op.ownerSession}/learning/hypotheses/${op.hypothesisId}`,
+        );
+        if (session !== this.sessionSeq) return;
+        if (
+          single.status === 200 &&
+          isHypothesisView(single.body) &&
+          (single.body as HypothesisView).sessionId === op.ownerSession
+        ) {
+          this.items.set(op.hypothesisId, single.body as HypothesisView);
+        }
+      } catch {
+        // Network loss on the re-read: the refresh above still ran.
+      }
       this.pendingOp = null;
       if (this.retryButton !== null) this.retryButton.hidden = true;
       if (op.hypothesisId === "") {
@@ -980,8 +1008,10 @@ export class LearningPanel {
       const current = this.items.get(op.hypothesisId);
       if (current === undefined) {
         this.setStatus("仮説が見つかりません（別セッションの可能性）");
-        this.selectedId = null;
-        if (this.detail !== null) this.detail.hidden = true;
+        if (op.hypothesisId === this.selectedId) {
+          this.selectedId = null;
+          if (this.detail !== null) this.detail.hidden = true;
+        }
         this.renderAll();
         return;
       }
