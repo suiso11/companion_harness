@@ -832,7 +832,10 @@ describe("notifications runtime (real SQLite + app HTTP)", () => {
       );
       expect(unsafeForward.status).toBe(400);
       // Trusted-clock reads still work without any `now` key.
-      const ok = await get(fx.app, `/api/sessions/${fx.sessionId}/notifications`);
+      const ok = await get(
+        fx.app,
+        `/api/sessions/${fx.sessionId}/notifications`,
+      );
       expect(ok.status).toBe(200);
     } finally {
       fx.close();
