@@ -42,6 +42,17 @@ import {
   EventsQuerySchema,
   type FrozenContext,
   FrozenContextSchema,
+  HandoffAttemptRequestSchema,
+  HandoffCreateRequestSchema,
+  HandoffDispatchRequestSchema,
+  HandoffListQuerySchema,
+  type HandoffListResponse,
+  HandoffListResponseSchema,
+  HandoffReportRequestSchema,
+  HandoffTransitionRequestSchema,
+  HandoffVerifyRequestSchema,
+  type HandoffView,
+  HandoffViewSchema,
   HistoryQuerySchema,
   type HistoryResponse,
   HistoryResponseSchema,
@@ -244,6 +255,23 @@ import {
   RepositoryValidationError,
   SessionBusyError,
 } from "./errors.js";
+import {
+  abnormalExitHandoff as handoffAbnormalExit,
+  buildHandoffSpec as handoffBuildSpec,
+  cancelHandoff as handoffCancel,
+  countActiveHandoffs as handoffCountActive,
+  createHandoff as handoffCreate,
+  dispatchHandoff as handoffDispatch,
+  failHandoff as handoffFail,
+  getHandoff as handoffGet,
+  listHandoffs as handoffList,
+  listHandoffAttempts as handoffListAttempts,
+  listHandoffEvents as handoffListEvents,
+  reaffirmHandoff as handoffReaffirm,
+  recordHandoffAttempt as handoffRecordAttempt,
+  reportHandoff as handoffReport,
+  verifyHandoff as handoffVerify,
+} from "./handoff.js";
 import {
   type HypothesisTransition,
   acceptStagedHypothesis as learningAcceptStaged,
@@ -5808,6 +5836,310 @@ export function createKernelRepository(
     return { status: out.status, body, replayed: out.replayed };
   }
 
+  /* ---------------- AV03 delegation handoffs (human-driven only) -------- */
+  // Session-owned handoffs bound to an existing task. The model can never
+  // reach these writers (no model tool registration exists): every frozen
+  // field is human-entered, verification needs all frozen criteria passing,
+  // and boundary flags grant nothing.
+
+  function createHandoff(
+    sessionId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: HandoffView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => HandoffCreateRequestSchema.parse(request),
+      "handoff create request",
+    );
+    const out = handoffCreate(
+      db,
+      sessionId,
+      {
+        taskId: parsed.taskId,
+        target: parsed.target,
+        acceptanceCriteria: [...parsed.acceptanceCriteria],
+        opScope: parsed.opScope,
+        ...(parsed.budgetLabel !== undefined
+          ? { budgetLabel: parsed.budgetLabel }
+          : {}),
+        boundaries: [...new Set(parsed.boundaries)],
+        ...(parsed.supersedesHandoffId !== undefined
+          ? { supersedesHandoffId: parsed.supersedesHandoffId }
+          : {}),
+      },
+      options,
+    );
+    const body = parseOrValidation(
+      () => HandoffViewSchema.parse(out.body),
+      "handoff create response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function getHandoff(sessionId: string, handoffId: string): HandoffView {
+    return parseOrValidation(
+      () => HandoffViewSchema.parse(handoffGet(db, sessionId, handoffId)),
+      "handoff response",
+    );
+  }
+
+  function listHandoffs(
+    sessionId: string,
+    query: unknown = {},
+  ): HandoffListResponse {
+    const parsed = parseOrValidation(
+      () => HandoffListQuerySchema.parse(query ?? {}),
+      "handoff list query",
+    );
+    const out = handoffList(db, sessionId, {
+      limit: parsed.limit,
+      ...(parsed.cursor !== undefined ? { cursor: parsed.cursor } : {}),
+      ...(parsed.status !== undefined ? { status: parsed.status } : {}),
+    });
+    const activeCount = handoffCountActive(db, sessionId);
+    return parseOrValidation(
+      () =>
+        HandoffListResponseSchema.parse({
+          items: out.items,
+          nextCursor: out.nextCursor,
+          hasMore: out.hasMore,
+          activeCount,
+        }),
+      "handoff list response",
+    );
+  }
+
+  function getHandoffSpec(sessionId: string, handoffId: string): string {
+    return handoffBuildSpec(db, sessionId, handoffId);
+  }
+
+  function listHandoffEvents(
+    sessionId: string,
+    handoffId: string,
+  ): {
+    handoffId: string;
+    events: {
+      seq: number;
+      event: string;
+      fromStatus: string | null;
+      toStatus: string;
+      createdAt: number;
+    }[];
+  } {
+    return handoffListEvents(db, sessionId, handoffId);
+  }
+
+  function listHandoffAttempts(
+    sessionId: string,
+    handoffId: string,
+  ): {
+    handoffId: string;
+    attempts: { attemptNo: number; cause: string; createdAt: number }[];
+  } {
+    return handoffListAttempts(db, sessionId, handoffId);
+  }
+
+  function dispatchHandoff(
+    sessionId: string,
+    handoffId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: HandoffView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => HandoffDispatchRequestSchema.parse(request),
+      "handoff dispatch request",
+    );
+    const out = handoffDispatch(
+      db,
+      sessionId,
+      handoffId,
+      parsed.expectedVersion,
+      parsed.externalRef,
+      options,
+    );
+    const body = parseOrValidation(
+      () => HandoffViewSchema.parse(out.body),
+      "handoff dispatch response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function reportHandoff(
+    sessionId: string,
+    handoffId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: HandoffView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => HandoffReportRequestSchema.parse(request),
+      "handoff report request",
+    );
+    const out = handoffReport(
+      db,
+      sessionId,
+      handoffId,
+      parsed.expectedVersion,
+      parsed.environment,
+      parsed.summary,
+      options,
+    );
+    const body = parseOrValidation(
+      () => HandoffViewSchema.parse(out.body),
+      "handoff report response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function verifyHandoff(
+    sessionId: string,
+    handoffId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: HandoffView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => HandoffVerifyRequestSchema.parse(request),
+      "handoff verify request",
+    );
+    const out = handoffVerify(
+      db,
+      sessionId,
+      handoffId,
+      parsed.expectedVersion,
+      parsed.results.map((result) => ({
+        index: result.index,
+        pass: result.pass,
+        evidence: result.evidence,
+      })),
+      options,
+    );
+    const body = parseOrValidation(
+      () => HandoffViewSchema.parse(out.body),
+      "handoff verify response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function failHandoff(
+    sessionId: string,
+    handoffId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: HandoffView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => HandoffTransitionRequestSchema.parse(request),
+      "handoff fail request",
+    );
+    const out = handoffFail(
+      db,
+      sessionId,
+      handoffId,
+      parsed.expectedVersion,
+      options,
+    );
+    const body = parseOrValidation(
+      () => HandoffViewSchema.parse(out.body),
+      "handoff fail response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function cancelHandoff(
+    sessionId: string,
+    handoffId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: HandoffView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => HandoffTransitionRequestSchema.parse(request),
+      "handoff cancel request",
+    );
+    const out = handoffCancel(
+      db,
+      sessionId,
+      handoffId,
+      parsed.expectedVersion,
+      options,
+    );
+    const body = parseOrValidation(
+      () => HandoffViewSchema.parse(out.body),
+      "handoff cancel response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function abnormalExitHandoff(
+    sessionId: string,
+    handoffId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: HandoffView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => HandoffTransitionRequestSchema.parse(request),
+      "handoff abnormal exit request",
+    );
+    const out = handoffAbnormalExit(
+      db,
+      sessionId,
+      handoffId,
+      parsed.expectedVersion,
+      options,
+    );
+    const body = parseOrValidation(
+      () => HandoffViewSchema.parse(out.body),
+      "handoff abnormal exit response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function recordHandoffAttempt(
+    sessionId: string,
+    handoffId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: HandoffView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => HandoffAttemptRequestSchema.parse(request),
+      "handoff attempt request",
+    );
+    const out = handoffRecordAttempt(
+      db,
+      sessionId,
+      handoffId,
+      parsed.expectedVersion,
+      parsed.cause,
+      options,
+    );
+    const body = parseOrValidation(
+      () => HandoffViewSchema.parse(out.body),
+      "handoff attempt response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function reaffirmHandoff(
+    sessionId: string,
+    handoffId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: HandoffView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => HandoffTransitionRequestSchema.parse(request),
+      "handoff reaffirm request",
+    );
+    const out = handoffReaffirm(
+      db,
+      sessionId,
+      handoffId,
+      parsed.expectedVersion,
+      options,
+    );
+    const body = parseOrValidation(
+      () => HandoffViewSchema.parse(out.body),
+      "handoff reaffirm response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
   function setAutonomyControlState(
     request: unknown,
     options: AutonomyKeyOptions,
@@ -6515,6 +6847,20 @@ export function createKernelRepository(
     acceptLearningHypothesis,
     rejectLearningHypothesis,
     attachLearningEvidence,
+    createHandoff,
+    getHandoff,
+    listHandoffs,
+    getHandoffSpec,
+    listHandoffEvents,
+    listHandoffAttempts,
+    dispatchHandoff,
+    reportHandoff,
+    verifyHandoff,
+    failHandoff,
+    cancelHandoff,
+    abnormalExitHandoff,
+    recordHandoffAttempt,
+    reaffirmHandoff,
     requestShadowDeliberation,
     listShadowJobs,
     getShadowJob,

@@ -1533,11 +1533,133 @@ export const learningHypothesisEvents = sqliteTable(
   ],
 );
 
+// AV03 delegation handoffs (human-driven pi-orch records).
+// Mirrors packages/kernel/migrations/0017_handoff.sql, which is
+// authoritative. Frozen fields (target / criteria / scope / budget labels /
+// boundary flags) are never rewritten except through a superseding NEW
+// row; attempts and events are append-only. No numeric budget, grant, or
+// task-write column exists here.
+
+export const delegationHandoffs = sqliteTable(
+  "delegation_handoffs",
+  {
+    id: text("id").primaryKey(),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id),
+    taskId: text("task_id").notNull(),
+    taskVersion: integer("task_version").notNull(),
+    parentPurposeId: text("parent_purpose_id"),
+    parentPurposeVersion: integer("parent_purpose_version"),
+    target: text("target").notNull(),
+    acceptanceCriteria: text("acceptance_criteria").notNull(),
+    opScope: text("op_scope").notNull(),
+    budgetLabel: text("budget_label"),
+    boundaries: text("boundaries").notNull(),
+    status: text("status").notNull(),
+    version: integer("version").notNull(),
+    needsReevaluation: integer("needs_reevaluation").notNull().default(0),
+    activeAttempt: integer("active_attempt").notNull().default(0),
+    externalRef: text("external_ref"),
+    reportEnvironment: text("report_environment"),
+    reportSummary: text("report_summary"),
+    verificationResults: text("verification_results"),
+    supersedesHandoffId: text("supersedes_handoff_id"),
+    supersededBy: text("superseded_by"),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (t) => [
+    unique("delegation_handoffs_session_id_unique").on(t.sessionId, t.id),
+    foreignKey({
+      name: "delegation_handoffs_session_task_fk",
+      columns: [t.sessionId, t.taskId],
+      foreignColumns: [autonomyTasks.sessionId, autonomyTasks.id],
+    }),
+    check(
+      "delegation_handoffs_op_scope_check",
+      sql`${t.opScope} IN ('investigate','implement')`,
+    ),
+    check(
+      "delegation_handoffs_status_check",
+      sql`${t.status} IN ('prepared','dispatched','reported','verified','failed','cancelled')`,
+    ),
+    check("delegation_handoffs_version_check", sql`${t.version} >= 1`),
+    check(
+      "delegation_handoffs_needs_reevaluation_check",
+      sql`${t.needsReevaluation} IN (0,1)`,
+    ),
+    check(
+      "delegation_handoffs_active_attempt_check",
+      sql`${t.activeAttempt} >= 0`,
+    ),
+  ],
+);
+
+export const handoffAttempts = sqliteTable(
+  "handoff_attempts",
+  {
+    id: text("id").primaryKey(),
+    handoffId: text("handoff_id").notNull(),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id),
+    attemptNo: integer("attempt_no").notNull(),
+    cause: text("cause").notNull(),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [
+    unique("handoff_attempts_handoff_no_unique").on(t.handoffId, t.attemptNo),
+    foreignKey({
+      name: "handoff_attempts_session_handoff_fk",
+      columns: [t.sessionId, t.handoffId],
+      foreignColumns: [delegationHandoffs.sessionId, delegationHandoffs.id],
+    }),
+    check(
+      "handoff_attempts_cause_check",
+      sql`${t.cause} IN ('transient_infra','worker_error','criteria_unmet','environment')`,
+    ),
+  ],
+);
+
+export const handoffEvents = sqliteTable(
+  "handoff_events",
+  {
+    id: text("id").primaryKey(),
+    handoffId: text("handoff_id").notNull(),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id),
+    seq: integer("seq").notNull(),
+    event: text("event").notNull(),
+    fromStatus: text("from_status"),
+    toStatus: text("to_status").notNull(),
+    note: text("note"),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [
+    unique("handoff_events_handoff_seq_unique").on(t.handoffId, t.seq),
+    foreignKey({
+      name: "handoff_events_session_handoff_fk",
+      columns: [t.sessionId, t.handoffId],
+      foreignColumns: [delegationHandoffs.sessionId, delegationHandoffs.id],
+    }),
+    check("handoff_events_seq_check", sql`${t.seq} >= 1`),
+    check(
+      "handoff_events_event_check",
+      sql`${t.event} IN ('prepared','dispatched','reported','verified','failed','cancelled','abnormal_exit','attempt_recorded','superseded','reaffirmed','reevaluation_flagged','reevaluation_cleared')`,
+    ),
+  ],
+);
+
 export const kernelSchema = {
   sessions,
   learningHypotheses,
   learningEvidence,
   learningHypothesisEvents,
+  delegationHandoffs,
+  handoffAttempts,
+  handoffEvents,
   autonomyPurposes,
   autonomyPurposeConflicts,
   turns,
