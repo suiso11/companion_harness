@@ -636,4 +636,81 @@ describe("learning hypotheses", () => {
       closeKernelDatabase(handle);
     }
   });
+
+  it("same-millisecond rows keep exact append order across list pages (injected fixed clock)", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      const purpose = makePurpose(repo, sessionId, T0 + 1);
+      const task = makeTask(repo, sessionId, T0 + 2, purpose.body.id);
+      const eventId = taskEventId(handle, task.body.id);
+      // ONE injected clock value for every append below: all rows land in
+      // the same millisecond, where a (created_at, id) keyset orders by
+      // RANDOM UUID and flakes against insertion order. Append order is
+      // the durable truth these append-only lists must present.
+      const SAME_MS = T0 + 10;
+      const hypIds: string[] = [];
+      for (let n = 0; n < 12; n += 1) {
+        const hyp = repo.createLearningHypothesis(
+          sessionId,
+          {
+            scope: "health",
+            kind: n % 2 === 0 ? "method" : "hypothesis",
+            statement: `same-ms append ${n}`,
+          },
+          { key: randomUUID(), now: SAME_MS },
+        );
+        expect(hyp.status).toBe(201);
+        hypIds.push((hyp.body as { id: string }).id);
+      }
+      for (let n = 0; n < 8; n += 1) {
+        const ev = repo.attachLearningEvidence(
+          sessionId,
+          hypIds[0] as string,
+          {
+            polarity: "supports",
+            sourceKind: "task_event",
+            sourceId: eventId,
+            note: `anchor ${n}`,
+          },
+          { key: randomUUID(), now: SAME_MS },
+        );
+        expect(ev.status).toBe(201);
+      }
+      // Evidence pages (limit=3) stitch to the EXACT append order 0..7.
+      const notes: (string | null)[] = [];
+      let hasMore = true;
+      let cursor: string | undefined;
+      while (hasMore) {
+        const page = repo.listLearningHypothesisEvidence(
+          sessionId,
+          hypIds[0] as string,
+          {
+            limit: 3,
+            ...(cursor !== undefined ? { cursor } : {}),
+          },
+        );
+        for (const item of page.items) notes.push(item.note);
+        hasMore = page.hasMore;
+        cursor = page.hasMore ? (page.nextCursor as string) : undefined;
+      }
+      expect(notes).toEqual([0, 1, 2, 3, 4, 5, 6, 7].map((n) => `anchor ${n}`));
+      // Hypotheses pages (limit=2, newest-first) are the exact append
+      // order reversed — no random-id reorder inside the same ms.
+      const listed: string[] = [];
+      hasMore = true;
+      cursor = undefined;
+      while (hasMore) {
+        const page = repo.listLearningHypotheses(sessionId, {
+          limit: 2,
+          ...(cursor !== undefined ? { cursor } : {}),
+        });
+        for (const item of page.items) listed.push((item as { id: string }).id);
+        hasMore = page.hasMore;
+        cursor = page.hasMore ? (page.nextCursor as string) : undefined;
+      }
+      expect(listed).toEqual([...hypIds].reverse());
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
 });

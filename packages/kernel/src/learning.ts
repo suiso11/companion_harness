@@ -583,32 +583,36 @@ export function stageHypothesisFromModel(
 /* Reads (paged keyset list + owned get + evidence list + events)      */
 /* ------------------------------------------------------------------ */
 
-function encodeLearningCursor(createdAt: number, id: string): string {
-  return Buffer.from(JSON.stringify({ createdAt, id }), "utf8").toString(
-    "base64url",
-  );
+/**
+ * Opaque paging cursor over the DURABLE APPEND ORDER of an append-only
+ * learning table. SQLite rowids (STRICT tables here are rowid tables, none
+ * are WITHOUT ROWID, and append-only learning rows are never updated or
+ * deleted) increase monotonically with INSERT order, so a rowid keyset
+ * paginates in exact append order deterministically. A (created_at, id)
+ * keyset would be NONDETERMINISTIC when rows land in the same millisecond:
+ * ids are random UUID v4, so equal-`created_at` rows order by random id,
+ * not by insertion order (this really happened: PR48 CI run 39056812937
+ * flaked 'anchor 1' vs 'anchor 0' on the evidence paging test). The same
+ * convention is already used by the notification bridge keysets
+ * (shadow_job_events / action_receipts / autonomy_task_events on rowid).
+ */
+function encodeLearningCursor(rowid: number): string {
+  return Buffer.from(JSON.stringify({ rowid }), "utf8").toString("base64url");
 }
 
-function decodeLearningCursor(cursor: string): {
-  createdAt: number;
-  id: string;
-} {
+function decodeLearningCursor(cursor: string): { rowid: number } {
   try {
     const raw = Buffer.from(cursor, "base64url").toString("utf8");
     const parsed = JSON.parse(raw) as unknown;
     if (
       typeof parsed !== "object" ||
       parsed === null ||
-      !Number.isInteger((parsed as { createdAt?: unknown }).createdAt) ||
-      typeof (parsed as { id?: unknown }).id !== "string" ||
-      !isUuidV4((parsed as { id: string }).id)
+      !Number.isInteger((parsed as { rowid?: unknown }).rowid) ||
+      (parsed as { rowid: number }).rowid < 0
     ) {
       throw new Error("bad cursor shape");
     }
-    return {
-      createdAt: (parsed as { createdAt: number }).createdAt,
-      id: (parsed as { id: string }).id,
-    };
+    return { rowid: (parsed as { rowid: number }).rowid };
   } catch (error) {
     if (error instanceof KernelStorageError) {
       throw error;
@@ -688,15 +692,18 @@ export function listHypotheses(
     args.push(query.kind);
   }
   if (bound !== null) {
-    clauses.push("(created_at < ? OR (created_at = ? AND id > ?))");
-    args.push(bound.createdAt, bound.createdAt, bound.id);
+    // Newest-first over the DURABLE APPEND ORDER: strictly before the
+    // bound rowid (higher rowids were appended later and already appear
+    // on earlier pages).
+    clauses.push("rowid < ?");
+    args.push(bound.rowid);
   }
   const where = `WHERE ${clauses.join(" AND ")}`;
   const rows = db
     .prepare(
-      `SELECT * FROM learning_hypotheses ${where} ORDER BY created_at DESC, id ASC LIMIT ?`,
+      `SELECT rowid AS rid, * FROM learning_hypotheses ${where} ORDER BY rowid DESC LIMIT ?`,
     )
-    .all(...args, capped + 1) as RawHypothesis[];
+    .all(...args, capped + 1) as (RawHypothesis & { rid: number })[];
   const hasMore = rows.length > capped;
   const page = hasMore ? rows.slice(0, capped) : rows;
   const last = page[page.length - 1];
@@ -705,9 +712,7 @@ export function listHypotheses(
       toHypothesisView(row, readEvidenceCounts(db, row.id)),
     ),
     nextCursor:
-      hasMore && last !== undefined
-        ? encodeLearningCursor(last.created_at, last.id)
-        : null,
+      hasMore && last !== undefined ? encodeLearningCursor(last.rid) : null,
     hasMore,
   };
 }
@@ -753,15 +758,18 @@ export function listHypothesisEvidence(
   const clauses = ["hypothesis_id = ?"];
   const args: (string | number)[] = [owned.id];
   if (bound !== null) {
-    // Oldest-first keyset: strictly after (created_at, id).
-    clauses.push("(created_at > ? OR (created_at = ? AND id > ?))");
-    args.push(bound.createdAt, bound.createdAt, bound.id);
+    // Oldest-first over the DURABLE APPEND ORDER: strictly after the bound
+    // rowid. Same as hypotheses, but ascending (append order, page 1 = the
+    // first evidence ever attached to this hypothesis).
+    clauses.push("rowid > ?");
+    args.push(bound.rowid);
   }
   const rows = db
     .prepare(
-      `SELECT * FROM learning_evidence WHERE ${clauses.join(" AND ")} ORDER BY created_at ASC, id ASC LIMIT ?`,
+      `SELECT rowid AS rid, * FROM learning_evidence WHERE ${clauses.join(" AND ")} ORDER BY rowid ASC LIMIT ?`,
     )
     .all(...args, capped + 1) as {
+    rid: number;
     id: string;
     hypothesis_id: string;
     session_id: string;
@@ -793,9 +801,7 @@ export function listHypothesisEvidence(
       ),
     ),
     nextCursor:
-      hasMore && last !== undefined
-        ? encodeLearningCursor(last.created_at, last.id)
-        : null,
+      hasMore && last !== undefined ? encodeLearningCursor(last.rid) : null,
     hasMore,
   };
 }
