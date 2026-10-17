@@ -32,11 +32,11 @@ import {
   createAutonomyReadRegistrations,
   createKernelRepository,
   createToolBroker,
+  type KernelRepository,
   migrateKernelDatabase,
   openKernelDatabase,
   RunEngine,
   StrategyRegistry,
-  type KernelRepository,
 } from "@companion/kernel";
 import type {
   ChatRequest,
@@ -132,10 +132,11 @@ function executeXssOutput(labels: string[]) {
     evidenceIds: labels,
     // Untrusted model-controlled strings: the UI must render these as inert
     // text (never HTML, never script execution).
-    reason: "<img src=\"x\" onerror=\"alert(1)\"> untrusted <script>alert(2)</script>",
+    reason:
+      '<img src="x" onerror="alert(1)"> untrusted <script>alert(2)</script>',
     proposedAction: {
       kind: "message" as const,
-      summary: "<b>ping</b> <img src=\"x\" onerror=\"alert(3)\">",
+      summary: '<b>ping</b> <img src="x" onerror="alert(3)">',
     },
     completion: "user notified",
     uncertainty: "high",
@@ -215,11 +216,19 @@ const gateway = {
     }
     const step = plan[Math.min(index, plan.length - 1)] ?? "donothing";
     if (step === "ask") {
-      return chatResult([deliberationCall(askOutput(firstLabel(request, "P")), `shadow-${index}`)]);
+      return chatResult([
+        deliberationCall(
+          askOutput(firstLabel(request, "P")),
+          `shadow-${index}`,
+        ),
+      ]);
     }
     if (step === "execute-xss") {
       return chatResult([
-        deliberationCall(executeXssOutput(allLabels(request)), `shadow-${index}`),
+        deliberationCall(
+          executeXssOutput(allLabels(request)),
+          `shadow-${index}`,
+        ),
       ]);
     }
     return chatResult([
@@ -307,21 +316,17 @@ function after<TArgs extends unknown[], TReturn>(
 
 const repo: KernelRepository = {
   ...baseRepo,
-  postMessage: after(
-    baseRepo.postMessage.bind(baseRepo),
-    () => service.notifyForeground(),
+  postMessage: after(baseRepo.postMessage.bind(baseRepo), () =>
+    service.notifyForeground(),
   ),
-  postRetry: after(
-    baseRepo.postRetry.bind(baseRepo),
-    () => service.notifyForeground(),
+  postRetry: after(baseRepo.postRetry.bind(baseRepo), () =>
+    service.notifyForeground(),
   ),
-  cancelRun: after(
-    baseRepo.cancelRun.bind(baseRepo),
-    () => service.notifyForeground(),
+  cancelRun: after(baseRepo.cancelRun.bind(baseRepo), () =>
+    service.notifyForeground(),
   ),
-  completeRun: after(
-    baseRepo.completeRun.bind(baseRepo),
-    () => service.onRunSettled(),
+  completeRun: after(baseRepo.completeRun.bind(baseRepo), () =>
+    service.onRunSettled(),
   ),
   failRun: after(baseRepo.failRun.bind(baseRepo), () => service.onRunSettled()),
   finalizeCancelRequested: after(
@@ -352,77 +357,81 @@ const appServer = serve(
   },
 );
 
-const control = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-  res.on("error", () => {});
-  req.on("error", () => {});
-  const url = new URL(req.url ?? "/", "http://127.0.0.1");
-  const raw = await readBody(req);
-  const json = (status: number, body: unknown): void => {
-    res.writeHead(status, { "content-type": "application/json" });
-    res.end(JSON.stringify(body));
-  };
-  if (req.method === "POST" && url.pathname === "/shadow-test/config") {
-    try {
-      const body = (raw === "" ? {} : JSON.parse(raw)) as {
-        plan?: unknown;
-        parkIndexes?: unknown;
-      };
-      if (
-        body.plan !== undefined &&
-        (!Array.isArray(body.plan) ||
-          body.plan.length === 0 ||
-          body.plan.length > 8 ||
-          body.plan.some(
-            (step) =>
-              step !== "donothing" && step !== "ask" && step !== "execute-xss",
-          ))
-      ) {
-        throw new Error("invalid plan");
-      }
-      if (
-        body.parkIndexes !== undefined &&
-        (!Array.isArray(body.parkIndexes) ||
-          body.parkIndexes.some(
-            (index) => !Number.isSafeInteger(index) || index < 0 || index > 7,
-          ))
-      ) {
-        throw new Error("invalid parkIndexes");
-      }
-      if (body.plan !== undefined) plan = body.plan as PlanStep[];
-      parkIndexes =
-        body.parkIndexes === undefined
-          ? new Set<number>()
-          : new Set(body.parkIndexes as number[]);
-      json(200, { configured: true });
-    } catch {
-      json(400, { error: { code: "validation_error" } });
-    }
-    return;
-  }
-  if (req.method === "POST" && url.pathname === "/shadow-test/release") {
-    const pending = parkReleases;
-    parkReleases = [];
-    for (const release of pending) {
+const control = createServer(
+  async (req: IncomingMessage, res: ServerResponse) => {
+    res.on("error", () => {});
+    req.on("error", () => {});
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    const raw = await readBody(req);
+    const json = (status: number, body: unknown): void => {
+      res.writeHead(status, { "content-type": "application/json" });
+      res.end(JSON.stringify(body));
+    };
+    if (req.method === "POST" && url.pathname === "/shadow-test/config") {
       try {
-        release();
+        const body = (raw === "" ? {} : JSON.parse(raw)) as {
+          plan?: unknown;
+          parkIndexes?: unknown;
+        };
+        if (
+          body.plan !== undefined &&
+          (!Array.isArray(body.plan) ||
+            body.plan.length === 0 ||
+            body.plan.length > 8 ||
+            body.plan.some(
+              (step) =>
+                step !== "donothing" &&
+                step !== "ask" &&
+                step !== "execute-xss",
+            ))
+        ) {
+          throw new Error("invalid plan");
+        }
+        if (
+          body.parkIndexes !== undefined &&
+          (!Array.isArray(body.parkIndexes) ||
+            body.parkIndexes.some(
+              (index) => !Number.isSafeInteger(index) || index < 0 || index > 7,
+            ))
+        ) {
+          throw new Error("invalid parkIndexes");
+        }
+        if (body.plan !== undefined) plan = body.plan as PlanStep[];
+        parkIndexes =
+          body.parkIndexes === undefined
+            ? new Set<number>()
+            : new Set(body.parkIndexes as number[]);
+        json(200, { configured: true });
       } catch {
-        // Best effort.
+        json(400, { error: { code: "validation_error" } });
       }
+      return;
     }
-    json(200, { released: pending.length });
-    return;
-  }
-  if (req.method === "GET" && url.pathname === "/shadow-test/stats") {
-    json(200, {
-      deliberationCalls: stats.deliberationCalls,
-      ordinaryCalls: stats.ordinaryCalls,
-      advertisedTools: [...stats.advertisedTools].sort(),
-      ordinaryToolCalls: [...stats.ordinaryToolCalls],
-    });
-    return;
-  }
-  json(404, { error: { code: "not_found", message: "resource not found" } });
-});
+    if (req.method === "POST" && url.pathname === "/shadow-test/release") {
+      const pending = parkReleases;
+      parkReleases = [];
+      for (const release of pending) {
+        try {
+          release();
+        } catch {
+          // Best effort.
+        }
+      }
+      json(200, { released: pending.length });
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/shadow-test/stats") {
+      json(200, {
+        deliberationCalls: stats.deliberationCalls,
+        ordinaryCalls: stats.ordinaryCalls,
+        advertisedTools: [...stats.advertisedTools].sort(),
+        ordinaryToolCalls: [...stats.ordinaryToolCalls],
+      });
+      return;
+    }
+    json(404, { error: { code: "not_found", message: "resource not found" } });
+  },
+);
 
 const controlPort = 0;
 control.listen(controlPort, "127.0.0.1", () => {

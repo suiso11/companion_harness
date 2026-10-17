@@ -431,8 +431,13 @@ export class ShadowPanel {
     }
   }
 
-  /** Select a job: SYNC-invalidate, then await detail + deliberation. */
-  private async selectJob(jobId: string, version: number): Promise<void> {
+  /**
+   * Select a job: SYNC-invalidate, then await detail + deliberation.
+   * Public seam for the AV05 notifications consumer (select a completed
+   * job on notification); latest-intent guards inside make a stale call
+   * a no-op. No behavior change for existing callers.
+   */
+  async selectJob(jobId: string, version: number): Promise<void> {
     const sessionId = this.deps.getSessionId();
     if (sessionId === null) return;
     // Invalidate synchronously BEFORE any await: a held earlier reply can

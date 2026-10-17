@@ -29,15 +29,12 @@
 //      answer.submit on the same gateway) completes with zero shadow side
 //      effects.
 
-import { spawn, type ChildProcess } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { type ChildProcess, spawn } from "node:child_process";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { expect, type Page, test } from "@playwright/test";
 
-const SERVER_DIR = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "..",
-);
+const SERVER_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 interface Fixture {
   origin: string;
@@ -65,7 +62,9 @@ async function startFixture(): Promise<Fixture> {
       if (Date.now() > deadline) {
         clearInterval(timer);
         reject(
-          new Error(`fixture did not boot in time: ${stderr.join("").slice(-2000)}`),
+          new Error(
+            `fixture did not boot in time: ${stderr.join("").slice(-2000)}`,
+          ),
         );
       }
     }, 100);
@@ -282,16 +281,17 @@ interface ShadowJobRow {
   [key: string]: unknown;
 }
 
-async function listShadowJobs(page: Page, sessionId: string): Promise<ShadowJobRow[]> {
+async function listShadowJobs(
+  page: Page,
+  sessionId: string,
+): Promise<ShadowJobRow[]> {
   const result = await api(
     page,
     "GET",
     `/api/sessions/${sessionId}/shadow-jobs?limit=50`,
   );
   expect(result.status).toBe(200);
-  return (
-    (result.body as { items: ShadowJobRow[] }).items ?? []
-  );
+  return (result.body as { items: ShadowJobRow[] }).items ?? [];
 }
 
 async function waitShadowJob(
@@ -308,7 +308,9 @@ async function waitShadowJob(
     );
     if (found !== undefined) return found;
     if (Date.now() > deadline) {
-      throw new Error(`shadow job scope=${scope} status=${status} never landed`);
+      throw new Error(
+        `shadow job scope=${scope} status=${status} never landed`,
+      );
     }
     await page.waitForTimeout(250);
   }
@@ -381,9 +383,7 @@ test("trial-only execute proposal renders 未実行 under a CODE policy, untrust
     await expect(detail).toContainText("解釈：narrow reading");
     await expect(detail).toContainText("出所：");
     await expect(detail).toContainText("適用：");
-    await expect(detail).toContainText(
-      "権限の記録 sM",
-    );
+    await expect(detail).toContainText("権限の記録 sM");
     await expect(detail).toContainText("権限付与ではない");
 
     // Untrusted model strings render as inert text: literal payload visible,
@@ -391,12 +391,8 @@ test("trial-only execute proposal renders 未実行 under a CODE policy, untrust
     const detailText = (await detail.textContent()) ?? "";
     expect(detailText).toContain('<img src="x" onerror="alert(1)">');
     expect(detailText).toContain("<script>alert(2)</script>");
-    expect(
-      await page.locator("#shadow-detail-body img").count(),
-    ).toBe(0);
-    expect(
-      await page.locator("#shadow-detail-body script").count(),
-    ).toBe(0);
+    expect(await page.locator("#shadow-detail-body img").count()).toBe(0);
+    expect(await page.locator("#shadow-detail-body script").count()).toBe(0);
     const inner = await detail.evaluate((node) => node.innerHTML);
     expect(inner).toContain("&lt;img");
     expect(inner).not.toContain("<img");
@@ -483,7 +479,12 @@ test("aborted first POST keeps the frozen request; edited retry refuses and the 
     await expect(page.locator("#shadow-status")).toContainText("再送");
 
     // The backend really committed exactly one job for the original scope.
-    const committed = await waitShadowJob(page, sessionId, "health", "completed");
+    const committed = await waitShadowJob(
+      page,
+      sessionId,
+      "health",
+      "completed",
+    );
     expect(committed.scope).toBe("health");
 
     // Editing scope/reason then retrying must NOT reuse the old key and must
@@ -701,9 +702,9 @@ test("STOP-held background output leaves the composer draft alone while ordinary
     expect(await page.locator("#composer-input").inputValue()).toBe(
       "draft must survive",
     );
-    expect(
-      await page.evaluate(() => document.activeElement?.id ?? ""),
-    ).toBe("composer-input");
+    expect(await page.evaluate(() => document.activeElement?.id ?? "")).toBe(
+      "composer-input",
+    );
     const selection = await page.evaluate(() => {
       const input = document.getElementById(
         "composer-input",
@@ -719,7 +720,11 @@ test("STOP-held background output leaves the composer draft alone while ordinary
     await expect(detail).toContainText("一時停止中のため保留", {
       timeout: 15_000,
     });
-    const stored = await api(page, "GET", `${`/api/sessions/${sessionId}/shadow-jobs/${held.id}`}`);
+    const stored = await api(
+      page,
+      "GET",
+      `${`/api/sessions/${sessionId}/shadow-jobs/${held.id}`}`,
+    );
     expect((stored.body as { holdReason: string }).holdReason).toBe(
       "control_paused",
     );

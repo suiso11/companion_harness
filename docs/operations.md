@@ -3818,3 +3818,44 @@ branch until that lands.
   each frozen scope; test4 re-focuses composer after explicit STOP so the
   held landing alone proves no draft/focus/selection clobber. `tsc` + Biome
   clean.
+- AV02 shadow-deliberation FULL VERTICAL published (2026-10-17, branch
+  feat/av-shadow-deliberation, full acceptance observed): kernel durable
+  core + model-gated shadow service + read-only HTTP + consumer UI. Model
+  proposals NEVER execute: CODE policy `missing_grant` (claim != grant,
+  with or without a permission claim), zero `action_executions` /
+  proposals / memory-outbox writes.   Read-only views: scope purposes/tasks via repository getters
+  (`ShadowPolicyReader.listScopePurposes/listScopeTasks`, no Markdown or
+  memory connectors; labels/statement/interpretation/explicit deadlines
+  only).
+  Durable queue: explicit request persists, input-complete fences
+  (foreground userMessage/retry/cancel aborts the shadow's OWN call only),
+  STOP holds pending globally, restart fence re-pauses with zero
+  catchup/replay. Frozen context: memory recall (when configured) is
+  UNTRUSTED evidence, exactly ONE bounded gateway call per job
+  (`autonomy_deliberation.submit`, ONE dot — the two-dot name failed the
+  shared `namespace.verb` gate). UI `ShadowPanel`: latest-intent list/
+  detail (held GET never restores stale selection), stable retry OUTSIDE
+  hidden detail, XSS inert (`textContent`, no `img`/`script` nodes),
+  composer draft/focus/selection never clobbered by STOP-held background
+  output. Full proof: Vitest 136 files / 1557 tests passed (8 skipped,
+  real remind CLI via `COMPANION_MEMORY_TEST_ENTRY`, LLM/vectors
+  disabled); full default browser 32 passed (28 prior + new shadow 4);
+  prior production smoke 17/17 real HTTP loopback (synthetic provider,
+  NOT a real model); root `tsc` + e2e `tsc` exit 0; root Biome exit 0.
+  Own `apps/server/test-results/` Playwright output removed + standard
+  `test-results/`/`playwright-report/` gitignore added (own artifacts
+  only). NO real model / GPU perf / Google writes / OAuth / user DB /
+  device / listeners / grants claimed.
+- Next-worker interfaces (AV05 notifications consumer, declarations only):
+  kernel `completeShadowJob(jobId, …)` appends the terminal
+  `shadow_job_events` row (completion note source) + `listShadowJobEvents`
+  / `listShadowJobs`; task helper `appendTaskEventInTx` (module-private,
+  via public task transitions) + `listAutonomyActivity`; server control
+  hooks `shadowWake` / `shadowControlChanged` (app deps) =
+  `ShadowService.wake()` / `notifyControl()` / `notifyForeground()` /
+  `onRunSettled()`; UI `ShadowPanel.refreshList(): Promise<void>` +
+  `ShadowPanel.selectJob(jobId, version): Promise<void>` (public).
+  Remaining NOT claimed: AV05 notifications, AV06 shared resources, AV07
+  external supervisor/recovery, AV04 methods learning, AV03 conversation
+  task-proposals + actual pi-orch handoff, AV08 maintenance, unresolved
+  device/standing/external rollout.
