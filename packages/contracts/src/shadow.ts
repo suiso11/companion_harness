@@ -390,6 +390,19 @@ export type ShadowJobEventsResponse = z.infer<
   typeof ShadowJobEventsResponseSchema
 >;
 
+/**
+ * Deliberation read envelope for `GET .../shadow-jobs/:jobId/context`:
+ * the frozen claim-time context PLUS the stored MODEL decision (null
+ * until a fenced completion stores one). The decision is a frozen
+ * record shown NEXT TO the CODE policy (`ShadowJobView.policyCode`);
+ * it never confers execution authority.
+ */
+export const ShadowJobDeliberationSchema = z.strictObject({
+  context: ShadowJobContextSchema,
+  modelDecision: ShadowModelOutputSchema.nullable(),
+});
+export type ShadowJobDeliberation = z.infer<typeof ShadowJobDeliberationSchema>;
+
 /** Durable inbox row (session-owned; paused-time rows are skipped, never replayed). */
 export const ShadowInboxItemSchema = z.strictObject({
   id: UuidSchema,

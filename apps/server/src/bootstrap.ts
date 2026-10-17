@@ -60,6 +60,7 @@ import {
   createActionExecutionService,
   createActionStrategy,
   createAgentStrategy,
+  createAutonomyReadRegistrations,
   createCalendarActionReadPort,
   createCalendarActionTargetResolver,
   createCalendarCreateProposalRegistration,
@@ -85,6 +86,7 @@ import {
   StrategyRegistry,
   type ToolBroker,
   ToolError,
+  type ToolRegistration,
   toCalendarObservation,
 } from "@companion/kernel";
 import {
@@ -1373,6 +1375,10 @@ export async function startServer(
     // four M1 registrations and a ToolBroker on the same db/repo. No
     // invocation endpoint here. No roots => toolBroker stays null (M0).
     let toolBroker: ToolBroker | null = null;
+    // Agent base registrations captured from the composition above (empty
+    // without roots/memory). The agent broker always appends the four
+    // strictly-readonly autonomy tools below.
+    const agentBaseRegistrations: ToolRegistration[] = [];
     // Calendar composition was fully resolved synchronously BEFORE any DB
     // side effect above (frozen selector, completeness, conflicts, exact
     // profile compatibility); reuse it here without re-reading env.
@@ -1919,6 +1925,11 @@ export async function startServer(
       actionsEnabled ||
       createEnabled;
     if (needsMarkdownTools || memory !== null) {
+      // Agent-visible base: the M1/M6/memory registrations below are ALSO
+      // the agent's base toolset. Captured here so the agent broker (built
+      // later) reuses the exact same registrations plus the always-on
+      // readonly autonomy tools, while `toolBroker` keeps its exact
+      // existing composition.
       const registrations = needsMarkdownTools
         ? [
             ...createM1ToolRegistrations({
@@ -2044,6 +2055,7 @@ export async function startServer(
         registrations.push(...createMemoryStageRegistrations({ repo, port }));
       }
       toolBroker = createToolBroker({ db: handle.raw, repo, registrations });
+      agentBaseRegistrations.push(...registrations);
       logger.info("server.markdown_ready", {
         status: registrations.length,
       });
@@ -2103,18 +2115,29 @@ export async function startServer(
     }
     // M2 (opt-in): when a gateway resolved above, register the agent under
     // m0-default before engine.start/listen. The agent reuses the M1
-    // ToolBroker, or a private empty-registration broker when no Markdown
-    // roots exist (toolBroker stays null without roots). With memory
-    // configured the agent additionally gets the bounded pre-answer recall
-    // hook (fail-open memoryless otherwise). No model gateway => empty
-    // registry: runs fail closed with a fixed code instead of producing
-    // fake LLM output. No direct model endpoint is added; only counts are
-    // logged (never URLs/keys).
+    // ToolBroker composition (or a private broker when no Markdown roots
+    // exist and toolBroker stays null) PLUS the four strictly-readonly
+    // autonomy tools (`purpose.list` / `purpose.open` / `task.list` /
+    // `task.open`), registered regardless of Markdown roots or memory
+    // configuration: without roots the agent broker contains exactly
+    // those four. With memory configured the agent additionally gets the
+    // bounded pre-answer recall hook (fail-open memoryless otherwise).
+    // No model gateway => empty registry: runs fail closed with a fixed
+    // code instead of producing fake LLM output. No direct model endpoint
+    // is added; only counts are logged (never URLs/keys).
     const registry = new StrategyRegistry();
     if (modelGateway !== null) {
-      const agentBroker =
-        toolBroker ??
-        createToolBroker({ db: handle.raw, repo, registrations: [] });
+      // AV autonomy read tools: SELECT-only over the runtime session's
+      // owned records (session derived from the calling run, never model
+      // input). Same existing broker budgets, no widening, no mutations.
+      const agentBroker = createToolBroker({
+        db: handle.raw,
+        repo,
+        registrations: [
+          ...agentBaseRegistrations,
+          ...createAutonomyReadRegistrations({ repo }),
+        ],
+      });
       registry.register(
         AGENT_STRATEGY_NAME,
         createAgentStrategy({
@@ -2330,6 +2353,17 @@ export async function startServer(
                 activeShadowWake.wake();
               } catch {
                 // Best effort: wake never throws into the caller.
+              }
+            },
+            // Committed control changes (pause OR resume, including a
+            // replayed old resume): the worker reads the ACTUAL control
+            // state and aborts its OWN in-flight call when paused, so a
+            // pure STOP aborts model/recall work with no foreground chat.
+            shadowControlChanged: (): void => {
+              try {
+                activeShadowWake.notifyControl();
+              } catch {
+                // Best effort: notify never throws into the caller.
               }
             },
           }

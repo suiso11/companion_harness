@@ -290,6 +290,44 @@ export function renderConversationShell(): HtmlEscapedString {
         ),
       ),
       jsx(
+        "section",
+        { id: "shadow", "aria-label": "試行の記録" },
+        jsx("h2", {}, "試行の記録"),
+        jsx(
+          "p",
+          { id: "shadow-disclaimer" },
+          "試行のみ・未実行・記録は権限付与ではない",
+        ),
+        jsx(
+          "form",
+          { id: "shadow-request-form" },
+          jsx("input", {
+            id: "shadow-scope",
+            type: "text",
+            autocomplete: "off",
+          }),
+          jsx("textarea", { id: "shadow-reason" }),
+          jsx(
+            "button",
+            { id: "shadow-request-submit", type: "submit" },
+            "試行を依頼",
+          ),
+        ),
+        jsx("p", { id: "shadow-status", "aria-live": "polite" }),
+        jsx("button", { id: "shadow-refresh", type: "button" }, "一覧を更新"),
+        jsx("ul", { id: "shadow-job-list" }),
+        jsx(
+          "div",
+          { id: "shadow-detail", hidden: true },
+          jsx("pre", { id: "shadow-detail-body" }),
+          jsx(
+            "button",
+            { id: "shadow-retry", type: "button", hidden: true },
+            "同じ内容で再送",
+          ),
+        ),
+      ),
+      jsx(
         "div",
         { id: "drawer", hidden: true, role: "dialog", "aria-label": "引用" },
         jsx("pre", { id: "drawer-body" }),

@@ -119,6 +119,19 @@ export class ShadowLeaseConflictError extends KernelStorageError {
 }
 
 /**
+ * GLOBAL one-claimed-job-at-once fence: another shadow job already holds
+ * the single live service lease (409, no state change, no loss). The new
+ * pending job is NOT dropped/failed and the old lease is NOT stolen: the
+ * runtime defers honestly until settlement/reconcile re-drives it. Lease
+ * expiry never auto-reruns work; startup already holds old claims.
+ */
+export class ShadowWorkerBusyError extends KernelStorageError {
+  constructor(message: string) {
+    super("shadow_worker_busy", message);
+  }
+}
+
+/**
  * Frozen context exceeds the bounded policy window: the job is honestly
  * HELD with `context_too_large` BEFORE any gateway call instead of
  * silently dropping permissions / constraints.
@@ -247,6 +260,20 @@ function requireKey(key: unknown): string {
     throw new RepositoryValidationError("Idempotency-Key must be a UUID v4");
   }
   return (key as string).toLowerCase();
+}
+
+/**
+ * True for better-sqlite3 lock-contention failures (`SQLITE_BUSY` /
+ * `SQLITE_BUSY_SNAPSHOT`): another connection holds the write lock. The
+ * runtime maps these to honest busy-deferral, never to a dropped job.
+ */
+function isSqliteBusy(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { code?: unknown }).code !== undefined &&
+    String((error as { code?: unknown }).code).startsWith("SQLITE_BUSY")
+  );
 }
 
 function requireId(id: unknown, what: string): string {
@@ -939,14 +966,24 @@ export function requestShadowDeliberation(
  * (never exposed over HTTP, never a foreign-session read): the single
  * oldest `pending` job across ALL sessions in one bounded SQL statement
  * (no per-session iteration, no truncation). Returns null when the queue
- * is empty. Callers still claim under CAS + the global live-lease fence,
- * so a concurrent claimer wins exactly once.
+ * is empty OR when another job already holds the single live lease: the
+ * runtime must not spin on an unclaimable queue — the pending job stays
+ * `pending` (no loss) and the next meaningful wake (after settlement or
+ * reconcile) re-drives it. Callers still claim under CAS + the global
+ * live-lease fence, so a concurrent claimer wins exactly once.
  */
 export function readPendingShadowJob(db: Database.Database): {
   sessionId: string;
   jobId: string;
   version: number;
 } | null {
+  const claimed = db
+    .prepare("SELECT id FROM shadow_jobs WHERE status = 'claimed' LIMIT 1")
+    .get() as { id: string } | undefined;
+  if (claimed !== undefined) {
+    // GLOBAL one-claimed-job-at-once: deferred, never spun on.
+    return null;
+  }
   const row = db
     .prepare(
       "SELECT id, session_id, version FROM shadow_jobs WHERE status = 'pending' ORDER BY created_at ASC, id ASC LIMIT 1",
@@ -1117,6 +1154,30 @@ export function getShadowJobContext(
   );
 }
 
+/**
+ * Read the stored MODEL decision (404-owned, null until a fenced
+ * completion stores one). SELECT-only: never mutates the job, never
+ * confers authority — the decision stays a frozen record next to the
+ * CODE policy, and `execute` still means "proposal, unexecuted".
+ */
+export function getShadowJobDecision(
+  db: Database.Database,
+  sessionId: string,
+  jobId: string,
+): ShadowModelOutput | null {
+  const owned = assertOwnedJob(db, sessionId, jobId);
+  if (owned.model_decision_json === null) {
+    return null;
+  }
+  return parseOrValidation(
+    () =>
+      ShadowModelOutputSchema.parse(
+        JSON.parse(owned.model_decision_json as string),
+      ),
+    "stored shadow decision",
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /* Claim (freeze full context + epochs under a lease)                   */
 /* ------------------------------------------------------------------ */
@@ -1173,88 +1234,116 @@ export function claimShadowJob(
     throw new RepositoryValidationError("leaseMs must be 1000..3600000");
   }
   const now = nowMs(options.now);
-  return withImmediate(db, () => {
-    const row = assertOwnedJob(db, session, job);
-    if (row.version !== options.expectedVersion) {
-      throw new ShadowVersionConflictError(
-        options.expectedVersion,
-        row.version,
-      );
-    }
-    if (row.status !== "pending") {
-      throw new ShadowStateConflictError(
-        `shadow job ${row.id} is ${row.status} and cannot be claimed`,
-      );
-    }
-    const control = readControlInTx(db);
-    if (control.paused === 1) {
-      throw new ShadowStateConflictError(
-        "autonomous work is paused; shadow jobs cannot be claimed",
-      );
-    }
-    // NOTE: no global live-lease fence here by design (parent kernel
-    // contract): per-job CAS + lease ownership already serialize SAME-job
-    // races inside this transaction, and concurrent claims of DIFFERENT
-    // jobs are legal at this layer (covered by the frozen core tests).
-    // GLOBAL one-claimed-job-at-once is a SERVICE discipline instead: the
-    // runtime worker is the ONLY production claimer (claim/complete/fail
-    // are trusted runtime-only, never HTTP-exposed), it drives jobs
-    // strictly serially (singleflight), and every post-claim path lands
-    // the job terminal (complete/hold/fail) before the next claim — so at
-    // most one live service lease ever exists. A second claimer still
-    // cannot steal a job (CAS version + lease-owner fences hold).
-    let context: ShadowJobContext;
-    try {
-      context = buildShadowContext(db, reader, session, row.scope, now, {
-        ...(options.memories !== undefined
-          ? { memories: options.memories }
-          : {}),
-      });
-    } catch (error) {
-      if (error instanceof ShadowContextTooLargeError) {
-        const held = holdJobInTx(db, row, "context_too_large", now);
-        return { outcome: "held" as const, job: held, context: null };
+  try {
+    return withImmediate(db, () => {
+      const row = assertOwnedJob(db, session, job);
+      if (row.version !== options.expectedVersion) {
+        throw new ShadowVersionConflictError(
+          options.expectedVersion,
+          row.version,
+        );
       }
-      throw error;
-    }
-    const epoch = readShadowScopeEpoch(db, session, row.scope) ?? 1;
-    const moved = db
-      .prepare(
-        "UPDATE shadow_jobs SET status = 'claimed', version = ?, updated_at = ?, claim_control_version = ?, claim_scope_epoch = ?, context_json = ?, lease_owner = ?, lease_expires_at = ? WHERE id = ? AND status = 'pending' AND version = ?",
-      )
-      .run(
-        row.version + 1,
-        now,
-        control.version,
-        epoch,
-        JSON.stringify(context),
-        options.owner,
-        now + leaseMs,
+      if (row.status !== "pending") {
+        throw new ShadowStateConflictError(
+          `shadow job ${row.id} is ${row.status} and cannot be claimed`,
+        );
+      }
+      const control = readControlInTx(db);
+      if (control.paused === 1) {
+        throw new ShadowStateConflictError(
+          "autonomous work is paused; shadow jobs cannot be claimed",
+        );
+      }
+      // GLOBAL one-claimed-job-at-once (parent kernel contract): at most
+      // one live lease exists across ALL sessions/scopes/jobs. The check
+      // runs atomically inside this BEGIN IMMEDIATE transaction, and the
+      // partial unique index `ux_shadow_jobs_single_claimed` backstops it
+      // across connections. A busy newcomer is NOT dropped/failed and
+      // NEVER steals the old lease: it throws `ShadowWorkerBusyError` and
+      // stays `pending` until settlement/reconcile re-drives it. Per-job
+      // CAS + lease ownership still serialize SAME-job races; the runtime
+      // worker is the ONLY production claimer (claim/complete/fail are
+      // trusted runtime-only, never HTTP-exposed) and lands every
+      // post-claim path terminal before the next claim. Lease expiry never
+      // auto-reruns work; startup already holds old claims.
+      const liveLease = db
+        .prepare(
+          "SELECT id FROM shadow_jobs WHERE status = 'claimed' AND id != ? LIMIT 1",
+        )
+        .get(row.id) as { id: string } | undefined;
+      if (liveLease !== undefined) {
+        throw new ShadowWorkerBusyError(
+          "another shadow job already holds the live lease; deferred until settlement",
+        );
+      }
+      let context: ShadowJobContext;
+      try {
+        context = buildShadowContext(db, reader, session, row.scope, now, {
+          ...(options.memories !== undefined
+            ? { memories: options.memories }
+            : {}),
+        });
+      } catch (error) {
+        if (error instanceof ShadowContextTooLargeError) {
+          const held = holdJobInTx(db, row, "context_too_large", now);
+          return { outcome: "held" as const, job: held, context: null };
+        }
+        throw error;
+      }
+      const epoch = readShadowScopeEpoch(db, session, row.scope) ?? 1;
+      const moved = db
+        .prepare(
+          "UPDATE shadow_jobs SET status = 'claimed', version = ?, updated_at = ?, claim_control_version = ?, claim_scope_epoch = ?, context_json = ?, lease_owner = ?, lease_expires_at = ? WHERE id = ? AND status = 'pending' AND version = ?",
+        )
+        .run(
+          row.version + 1,
+          now,
+          control.version,
+          epoch,
+          JSON.stringify(context),
+          options.owner,
+          now + leaseMs,
+          row.id,
+          row.version,
+        );
+      if (moved.changes !== 1) {
+        throw new ShadowVersionConflictError(
+          options.expectedVersion,
+          row.version,
+        );
+      }
+      appendJobEventInTx(
+        db,
         row.id,
-        row.version,
+        session,
+        "claimed",
+        "pending",
+        "claimed",
+        options.owner,
+        now,
       );
-    if (moved.changes !== 1) {
-      throw new ShadowVersionConflictError(
-        options.expectedVersion,
-        row.version,
+      const current = readJob(db, row.id);
+      if (current === null) {
+        throw new RepositoryNotFoundError(`shadow job ${row.id} not found`);
+      }
+      return {
+        outcome: "claimed" as const,
+        job: toJobView(current),
+        context,
+      };
+    });
+  } catch (error) {
+    if (isSqliteBusy(error)) {
+      // A second connection holds the write lock (its claim transaction
+      // is mid-flight): honest busy-deferral, never a dropped/failed job
+      // and never a stolen lease. The job stays `pending` for the next
+      // meaningful wake after settlement/reconcile.
+      throw new ShadowWorkerBusyError(
+        "shadow store busy: another claim transaction holds the write lock; deferred until settlement",
       );
     }
-    appendJobEventInTx(
-      db,
-      row.id,
-      session,
-      "claimed",
-      "pending",
-      "claimed",
-      options.owner,
-      now,
-    );
-    const current = readJob(db, row.id);
-    if (current === null) {
-      throw new RepositoryNotFoundError(`shadow job ${row.id} not found`);
-    }
-    return { outcome: "claimed" as const, job: toJobView(current), context };
-  });
+    throw error;
+  }
 }
 
 /**
@@ -1373,9 +1462,17 @@ export function buildShadowContext(
     label: `sF${index + 1}`,
     code,
   }));
-  const conflictPairs = reader
-    .listScopeConflictPairs(sessionId, scope)
-    .map(([a, b]) => [a, b] as [string, string]);
+  const rawPairs = reader.listScopeConflictPairs(sessionId, scope);
+  if (rawPairs.length > SHADOW_CONTEXT_RECORD_CAP) {
+    // The reader returns up to 101 rows precisely so REAL overflow is
+    // detectable: 16 active purposes already yield 120 explicit pairs,
+    // BELOW the purpose/task cap, and silently dropping 19 relations
+    // would corrupt CODE policy. Hold honestly BEFORE the claim freeze.
+    throw new ShadowContextTooLargeError(
+      `scope ${scope} holds ${rawPairs.length} explicit conflict pairs (cap ${SHADOW_CONTEXT_RECORD_CAP}); job must hold context_too_large`,
+    );
+  }
+  const conflictPairs = rawPairs.map(([a, b]) => [a, b] as [string, string]);
   // Server-frozen REAL memory evidence: valid snippets only (1..512 code
   // points), first-valid order, capped. Canonical record ids never enter.
   const memories = (options.memories ?? [])

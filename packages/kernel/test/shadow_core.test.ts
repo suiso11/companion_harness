@@ -26,6 +26,9 @@
 // - a foreground abort holds without pretending a decision was made.
 
 import { randomUUID } from "node:crypto";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   IdempotencyConflictError,
@@ -42,6 +45,7 @@ import {
   ShadowLeaseConflictError,
   ShadowStateConflictError,
   ShadowVersionConflictError,
+  ShadowWorkerBusyError,
 } from "../src/shadow.js";
 
 const T0 = 1_700_001_000_000;
@@ -97,6 +101,17 @@ function validOutput(
     counterargument: "waiting could miss a window",
     ...extra,
   };
+}
+
+/** Raw stored explicit-conflict count (the public list caps at 100). */
+function storedConflictPairs(
+  handle: ReturnType<typeof openKernelDatabase>,
+): number {
+  return (
+    handle.raw
+      .prepare("SELECT COUNT(*) AS n FROM autonomy_purpose_conflicts")
+      .get() as { n: number }
+  ).n;
 }
 
 describe("shadow durable core", () => {
@@ -691,6 +706,17 @@ describe("shadow durable core", () => {
           oldConstraint.body.id,
         ),
       ).toBe(true);
+      // GLOBAL one-claimed-job-at-once: land this claim terminal before the
+      // overflow claim below (concurrent live leases are refused, never
+      // silently shared).
+      const workLabel = claimed.context?.purposes[0]?.label as string;
+      const workDone = repo.completeShadowJob(
+        sessionId,
+        req.body.id,
+        validOutput([workLabel]),
+        { expectedVersion: 2, leaseOwner: "worker-1", now: T0 + 520 },
+      );
+      expect(workDone.outcome).toBe("completed");
       // Same-scope overflow (101 in-scope purposes) holds honestly.
       for (let i = 0; i < 101; i++) {
         repo.createAutonomyPurpose(
@@ -876,6 +902,16 @@ describe("shadow durable core", () => {
           { expectedVersion: 2, leaseOwner: "worker-1", now: T0 + 50 },
         ),
       ).toThrow(RepositoryValidationError);
+      // The rejected claim stays owned until landed terminal: fail it
+      // honestly (GLOBAL one-claimed-job-at-once forbids a second live
+      // lease while it sits CLAIMED).
+      const windowFailed = repo.failShadowJob(
+        sessionId,
+        req.body.id,
+        { expectedVersion: 2, code: "model_error" },
+        { now: T0 + 55 },
+      );
+      expect(windowFailed.status).toBe("failed");
       // Two dated tasks: borrowing the UNCITED task's date is rejected,
       // citing the task's own date is allowed.
       const dateA = "2026-10-20T10:00:00+00:00";
@@ -1111,6 +1147,356 @@ describe("shadow durable core", () => {
           { now: T0 + 40 },
         ),
       ).toThrow();
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+});
+
+describe("shadow review safety fixes", () => {
+  it("enforces GLOBAL one-claimed-job-at-once: busy newcomer stays pending, never spins, claims after the first lands terminal", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      unpause(repo, 1, T0 + 10);
+      repo.createAutonomyPurpose(
+        sessionId,
+        {
+          scope: "alpha",
+          statement: "alpha goal",
+          kind: "goal",
+          explicit: true,
+          sourceKind: "user",
+        },
+        { key: randomUUID(), now: T0 + 15 },
+      );
+      const reqA = repo.requestShadowDeliberation(
+        sessionId,
+        { scope: "alpha" },
+        { key: randomUUID(), now: T0 + 20 },
+      );
+      const reqB = repo.requestShadowDeliberation(
+        sessionId,
+        { scope: "beta" },
+        { key: randomUUID(), now: T0 + 30 },
+      );
+      const claimA = repo.claimShadowJob(
+        sessionId,
+        reqA.body.id,
+        { owner: "worker-1", expectedVersion: 1 },
+        { now: T0 + 40 },
+      );
+      expect(claimA.outcome).toBe("claimed");
+      // A second live lease is refused: the newcomer is NOT dropped/failed
+      // and NEVER steals the old lease.
+      expect(() =>
+        repo.claimShadowJob(
+          sessionId,
+          reqB.body.id,
+          { owner: "worker-2", expectedVersion: 1 },
+          { now: T0 + 50 },
+        ),
+      ).toThrow(ShadowWorkerBusyError);
+      const stillPending = repo.getShadowJob(sessionId, reqB.body.id);
+      expect(stillPending.status).toBe("pending");
+      expect(stillPending.leaseOwner).toBeNull();
+      expect(stillPending.version).toBe(1);
+      // The queue read does not spin while a live lease exists.
+      expect(repo.readPendingShadowJob()).toBeNull();
+      // At most one claimed job exists across all sessions/scopes.
+      const claimedCount = (
+        handle.raw
+          .prepare(
+            "SELECT COUNT(*) AS n FROM shadow_jobs WHERE status = 'claimed'",
+          )
+          .get() as { n: number }
+      ).n;
+      expect(claimedCount).toBe(1);
+      // After the first job lands terminal, the second claims normally.
+      const alphaLabel = claimA.context?.purposes[0]?.label as string;
+      const doneA = repo.completeShadowJob(
+        sessionId,
+        reqA.body.id,
+        validOutput([alphaLabel]),
+        { expectedVersion: 2, leaseOwner: "worker-1", now: T0 + 60 },
+      );
+      expect(doneA.outcome).toBe("completed");
+      const claimB = repo.claimShadowJob(
+        sessionId,
+        reqB.body.id,
+        { owner: "worker-2", expectedVersion: 1 },
+        { now: T0 + 70 },
+      );
+      expect(claimB.outcome).toBe("claimed");
+      const claimedAgain = (
+        handle.raw
+          .prepare(
+            "SELECT COUNT(*) AS n FROM shadow_jobs WHERE status = 'claimed'",
+          )
+          .get() as { n: number }
+      ).n;
+      expect(claimedAgain).toBe(1);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("holds the global fence across two actual SQLite connections on the same file", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "companion-shadow-fence-"));
+    const dbPath = join(dir, "fence.sqlite");
+    const first = openKernelDatabase(dbPath);
+    try {
+      await migrateKernelDatabase({ db: first.raw });
+      // The cross-connection backstop index ships with the migration.
+      const index = first.raw
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'ux_shadow_jobs_single_claimed'",
+        )
+        .get() as { name: string } | undefined;
+      expect(index?.name).toBe("ux_shadow_jobs_single_claimed");
+      const repo1 = createKernelRepository(first.raw);
+      const session = repo1.createSession({ key: randomUUID(), now: T0 });
+      const sessionId = session.body.sessionId;
+      repo1.setAutonomyControlState(
+        { paused: false, expectedVersion: 1 },
+        { key: randomUUID(), now: T0 + 10 },
+      );
+      repo1.createAutonomyPurpose(sessionId, goalBody("alpha goal"), {
+        key: randomUUID(),
+        now: T0 + 20,
+      });
+      const second = openKernelDatabase(dbPath);
+      try {
+        const repo2 = createKernelRepository(second.raw);
+        const jobs = repo1.listShadowJobs(sessionId, { limit: 10 });
+        const policyJobs = jobs.items.filter(
+          (job) => job.kind === "policy_change" && job.status === "pending",
+        );
+        expect(policyJobs.length).toBeGreaterThanOrEqual(1);
+        const jobA = policyJobs[0]?.id as string;
+        const reqB = repo1.requestShadowDeliberation(
+          sessionId,
+          { scope: "beta" },
+          { key: randomUUID(), now: T0 + 30 },
+        );
+        // First connection claims; the second connection (DIFFERENT job,
+        // different scope) sees BUSY-pending, never steals the lease.
+        const claimA = repo1.claimShadowJob(
+          sessionId,
+          jobA,
+          { owner: "worker-1", expectedVersion: 1 },
+          { now: T0 + 40 },
+        );
+        expect(claimA.outcome).toBe("claimed");
+        expect(repo2.readPendingShadowJob()).toBeNull();
+        expect(() =>
+          repo2.claimShadowJob(
+            sessionId,
+            reqB.body.id,
+            { owner: "worker-2", expectedVersion: 1 },
+            { now: T0 + 50 },
+          ),
+        ).toThrow(ShadowWorkerBusyError);
+        expect(repo2.getShadowJob(sessionId, reqB.body.id).status).toBe(
+          "pending",
+        );
+        const claimedCount = (
+          first.raw
+            .prepare(
+              "SELECT COUNT(*) AS n FROM shadow_jobs WHERE status = 'claimed'",
+            )
+            .get() as { n: number }
+        ).n;
+        expect(claimedCount).toBe(1);
+        // First job terminal => the second connection can claim.
+        const label = claimA.context?.purposes[0]?.label as string;
+        repo1.completeShadowJob(sessionId, jobA, validOutput([label]), {
+          expectedVersion: 2,
+          leaseOwner: "worker-1",
+          now: T0 + 60,
+        });
+        const claimB = repo2.claimShadowJob(
+          sessionId,
+          reqB.body.id,
+          { owner: "worker-2", expectedVersion: 1 },
+          { now: T0 + 70 },
+        );
+        expect(claimB.outcome).toBe("claimed");
+      } finally {
+        closeKernelDatabase(second);
+      }
+    } finally {
+      closeKernelDatabase(first);
+    }
+  });
+
+  it("holds honestly on 120 explicit conflict pairs (no silent truncation) and still claims exactly 100", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      unpause(repo, 1, T0 + 10);
+      // 16 active purposes => 120 explicit pairs, BELOW the 100-record
+      // purpose/task cap: every relation must survive or the job holds.
+      const ids: string[] = [];
+      for (let i = 0; i < 16; i += 1) {
+        const created = repo.createAutonomyPurpose(
+          sessionId,
+          {
+            scope: "rel",
+            statement: `standing goal ${i}`,
+            kind: "goal",
+            explicit: true,
+            sourceKind: "user",
+          },
+          { key: randomUUID(), now: T0 + 20 + i },
+        );
+        ids.push(created.body.id);
+      }
+      for (let a = 0; a < ids.length; a += 1) {
+        for (let b = a + 1; b < ids.length; b += 1) {
+          repo.recordAutonomyPurposeConflict(
+            sessionId,
+            { purposeAId: ids[a] as string, purposeBId: ids[b] as string },
+            { key: randomUUID(), now: T0 + 100 },
+          );
+        }
+      }
+      expect(storedConflictPairs(handle)).toBe(120);
+      const req = repo.requestShadowDeliberation(
+        sessionId,
+        { scope: "rel" },
+        { key: randomUUID(), now: T0 + 200 },
+      );
+      const held = repo.claimShadowJob(
+        sessionId,
+        req.body.id,
+        { owner: "worker-1", expectedVersion: 1 },
+        { now: T0 + 210 },
+      );
+      expect(held.outcome).toBe("held");
+      expect(held.job.status).toBe("held");
+      expect(held.job.holdReason).toBe("context_too_large");
+      expect(held.context).toBeNull();
+      // No history rewritten, no pairs deleted: the relations stand.
+      expect(storedConflictPairs(handle)).toBe(120);
+      // Exactly 100 pairs still claims when the context fits.
+      const other = repo.createSession({ key: randomUUID(), now: T0 + 300 });
+      const otherId = other.body.sessionId as string;
+      const twenty: string[] = [];
+      for (let i = 0; i < 20; i += 1) {
+        const created = repo.createAutonomyPurpose(
+          otherId,
+          {
+            scope: "mesh",
+            statement: `mesh goal ${i}`,
+            kind: "goal",
+            explicit: true,
+            sourceKind: "user",
+          },
+          { key: randomUUID(), now: T0 + 310 + i },
+        );
+        twenty.push(created.body.id);
+      }
+      let recorded = 0;
+      for (let a = 0; a < twenty.length && recorded < 100; a += 1) {
+        for (let b = a + 1; b < twenty.length && recorded < 100; b += 1) {
+          repo.recordAutonomyPurposeConflict(
+            otherId,
+            {
+              purposeAId: twenty[a] as string,
+              purposeBId: twenty[b] as string,
+            },
+            { key: randomUUID(), now: T0 + 400 },
+          );
+          recorded += 1;
+        }
+      }
+      expect(recorded).toBe(100);
+      const reqFit = repo.requestShadowDeliberation(
+        otherId,
+        { scope: "mesh" },
+        { key: randomUUID(), now: T0 + 500 },
+      );
+      const fit = repo.claimShadowJob(
+        otherId,
+        reqFit.body.id,
+        { owner: "worker-1", expectedVersion: 1 },
+        { now: T0 + 510 },
+      );
+      expect(fit.outcome).toBe("claimed");
+      expect(fit.context?.conflictPairs).toHaveLength(100);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("leaves a semantically rejected completion CLAIMED under its lease (never silently terminal)", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      unpause(repo, 1, T0 + 10);
+      repo.createAutonomyPurpose(sessionId, goalBody("walk daily"), {
+        key: randomUUID(),
+        now: T0 + 20,
+      });
+      const deadline = "2026-10-21T10:00:00+00:00";
+      repo.createAutonomyTask(
+        sessionId,
+        {
+          scope: "health",
+          title: "evening walk",
+          kind: "task",
+          speaker: "user",
+          deadline,
+        },
+        { key: randomUUID(), now: T0 + 25 },
+      );
+      const req = repo.requestShadowDeliberation(
+        sessionId,
+        { scope: "health" },
+        { key: randomUUID(), now: T0 + 30 },
+      );
+      const claimed = repo.claimShadowJob(
+        sessionId,
+        req.body.id,
+        { owner: "worker-1", expectedVersion: 1 },
+        { now: T0 + 40 },
+      );
+      const purposeLabel = claimed.context?.purposes.find(
+        (p) => p.kind === "goal",
+      )?.label as string;
+      // Unknown frozen label: syntactically valid output the fence rejects.
+      expect(() =>
+        repo.completeShadowJob(sessionId, req.body.id, validOutput(["sP999"]), {
+          expectedVersion: 2,
+          leaseOwner: "worker-1",
+          now: T0 + 50,
+        }),
+      ).toThrow(RepositoryValidationError);
+      // Uncited draft deadline (matches an explicit deadline no evidence
+      // cites): likewise rejected, lease untouched.
+      expect(() =>
+        repo.completeShadowJob(
+          sessionId,
+          req.body.id,
+          validOutput([purposeLabel], {
+            decision: "execute",
+            proposedAction: {
+              kind: "local_task",
+              summary: "borrowed date draft",
+              taskDraft: { title: "borrowed", deadline },
+            },
+          }),
+          { expectedVersion: 2, leaseOwner: "worker-1", now: T0 + 60 },
+        ),
+      ).toThrow(RepositoryValidationError);
+      // The TX rolled back: the job is STILL claimed under OUR lease with
+      // no terminal outcome recorded — the runtime (not the kernel) lands
+      // it failed before the next claim.
+      const current = repo.getShadowJob(sessionId, req.body.id);
+      expect(current.status).toBe("claimed");
+      expect(current.version).toBe(2);
+      expect(current.leaseOwner).toBe("worker-1");
+      expect(current.policyCode).toBeNull();
+      expect(current.holdReason).toBeNull();
+      expect(current.failCode).toBeNull();
     } finally {
       closeKernelDatabase(handle);
     }

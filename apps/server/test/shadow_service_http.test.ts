@@ -780,6 +780,153 @@ describe("shadow service (same gateway/model as the ordinary agent)", () => {
     }
   });
 
+  it("fails permanent semantic defects terminally through the real native call and processes the next good job", async () => {
+    // A syntactically valid native tool call carrying an UNKNOWN frozen
+    // label (sP999) passes the service pre-check but the kernel fence
+    // rejects it: the TX rolls back leaving the job CLAIMED, so the
+    // service must fail the still-owned lease (model_error, lease cleared)
+    // BEFORE any next claim — never a stranded lease, never an overwrite
+    // of a genuine terminal outcome. A later GOOD job then completes.
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      unpause(repo, 1, T0 + 10);
+      repo.createAutonomyPurpose(sessionId, goalBody("walk daily"), {
+        key: randomUUID(),
+        now: T0 + 20,
+      });
+      repo.createAutonomyPurpose(sessionId, goalBody("stretch hourly"), {
+        key: randomUUID(),
+        now: T0 + 30,
+      });
+      let calls = 0;
+      const fixture = makeGateway(async (request) => {
+        calls += 1;
+        if (calls === 1) {
+          // Permanent native-output defect: unknown frozen label.
+          return chatResult([deliberationCall(executeOutput(["sP999"]))]);
+        }
+        const userText =
+          (request.messages[1] as { content: string }).content ?? "";
+        const label = /-(sP\d+)/.exec(userText)?.[1] ?? "sP1";
+        return chatResult([deliberationCall(validOutput([label]))]);
+      });
+      const service = makeService(repo, fixture.gateway);
+      try {
+        service.wake();
+        await settle(service);
+        expect(calls).toBe(2);
+        const jobs = repo.listShadowJobs(sessionId, { limit: 50 });
+        expect(jobs.items).toHaveLength(2);
+        const failed = jobs.items.find((job) => job.status === "failed");
+        const done = jobs.items.find((job) => job.status === "completed");
+        expect(failed).toBeDefined();
+        expect(readJobRow(handle, failed?.id as string).fail_code).toBe(
+          "model_error",
+        );
+        expect(failed?.leaseOwner).toBeNull();
+        expect(done?.policyCode).toBe("no_action");
+        // A later GOOD job processes normally: no lease left behind.
+        repo.createAutonomyPurpose(sessionId, goalBody("drink water"), {
+          key: randomUUID(),
+          now: T0 + 40,
+        });
+        service.wake();
+        await settle(service);
+        expect(calls).toBe(3);
+        const latest = repo.listShadowJobs(sessionId, { limit: 50 });
+        expect(
+          latest.items.filter((job) => job.status === "completed"),
+        ).toHaveLength(2);
+        expect(latest.items.every((job) => job.leaseOwner === null)).toBe(true);
+      } finally {
+        await service.stop();
+      }
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("pure control STOP aborts the parked call with no foreground involved (control_paused, never mislabeled)", async () => {
+    // No foreground chat, no retry, no cancel: a committed STOP alone
+    // must abort the shadow's OWN in-flight call promptly, hold the job
+    // `control_paused` with no result, and settle the worker.
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      unpause(repo, 1, T0 + 10);
+      repo.createAutonomyPurpose(sessionId, goalBody("walk daily"), {
+        key: randomUUID(),
+        now: T0 + 20,
+      });
+      let observedAbort = false;
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const calls: ChatRequest[] = [];
+      const gateway = {
+        provider: "openai-compatible",
+        capabilities: { toolCalling: true },
+        baseUrl: "http://127.0.0.1:1",
+        chatUrl: "http://127.0.0.1:1/v1/chat/completions",
+        async chat(request: ChatRequest, options?: { signal?: AbortSignal }) {
+          calls.push(request);
+          const signal = options?.signal;
+          if (signal?.aborted === true) {
+            observedAbort = true;
+            throw new DOMException("aborted", "AbortError");
+          }
+          await new Promise<void>((resolve, reject) => {
+            signal?.addEventListener(
+              "abort",
+              () => {
+                observedAbort = true;
+                reject(new DOMException("aborted", "AbortError"));
+              },
+              { once: true },
+            );
+            void gate.then(() => resolve());
+          });
+          return chatResult([deliberationCall(validOutput(["sP1"]))]);
+        },
+      } as unknown as ModelGateway;
+      const service = makeService(repo, gateway);
+      try {
+        service.wake();
+        const start = Date.now();
+        while (calls.length < 1 && Date.now() - start < 5000) {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        expect(calls).toHaveLength(1);
+        // Pure STOP through the kernel (no foreground message/retry/cancel
+        // anywhere), then the committed-control hook the app wires.
+        const control = repo.getAutonomyControlState();
+        pause(repo, control.version, T0 + 30);
+        service.notifyControl();
+        const abortedAt = Date.now();
+        while (!observedAbort && Date.now() - abortedAt < 5000) {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        expect(observedAbort).toBe(true);
+        release();
+        await settle(service);
+        expect(service.busy).toBe(false);
+        const jobs = repo.listShadowJobs(sessionId, { limit: 50 });
+        expect(jobs.items[0]?.status).toBe("held");
+        expect(
+          readJobRow(handle, jobs.items[0]?.id as string).hold_reason,
+        ).toBe("control_paused");
+        // No result committed: the aborted call decided nothing.
+        expect(
+          readJobRow(handle, jobs.items[0]?.id as string).model_decision_json,
+        ).toBeNull();
+      } finally {
+        await service.stop();
+      }
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
   it("deliberation tool survives real provider normalization (two-dot names never ship)", async () => {
     // Production regression: the shared gateway name gate
     // (`namespace.verb`, single dot) once rejected the shadow tool, so every

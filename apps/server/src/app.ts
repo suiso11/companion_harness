@@ -237,6 +237,16 @@ export interface CreateAppDeps {
    * keeps the existing no-worker behavior.
    */
   shadowWake?: () => void;
+  /**
+   * AV shadow worker control hook (server-owned). Called synchronously
+   * AFTER a committed control change (pause OR resume, INCLUDING a
+   * replayed old resume): the worker reads the ACTUAL current control
+   * state and aborts its OWN in-flight call immediately when paused, so a
+   * pure STOP aborts model/recall work even with no foreground chat. Never
+   * throws back into the committed command (guarded like `shadowWake`);
+   * absent (default) keeps wake-only behavior.
+   */
+  shadowControlChanged?: () => void;
 }
 
 export interface ServerControls {
@@ -701,6 +711,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   const createEnabled = deps.createEnabled === true;
   const memory = deps.memory ?? null;
   const shadowWake = deps.shadowWake;
+  const shadowControlChanged = deps.shadowControlChanged;
   const logger = deps.logger ?? createStdServerLogger(config.logLevel);
   const now = deps.now ?? Date.now;
   const assets = deps.assets ?? {};
@@ -723,6 +734,20 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       shadowWake?.();
     } catch {
       // Best effort: the mutation already committed.
+    }
+  };
+  /**
+   * Notify the shadow worker of a COMMITTED control change. Synchronous
+   * and throw-guarded like `wakeShadow`: the worker reads the ACTUAL
+   * current control state (never a stored replay reply) and aborts its OWN
+   * in-flight call when paused, so a pure STOP aborts model/recall work
+   * with no foreground chat involved.
+   */
+  const notifyShadowControl = (): void => {
+    try {
+      shadowControlChanged?.();
+    } catch {
+      // Best effort: the control change already committed.
     }
   };
 
@@ -2645,6 +2670,11 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         status: out.status,
         durationMs: Math.max(now() - started, 0),
       });
+      // Committed control change: abort the shadow's OWN in-flight call
+      // FIRST when the actual state is paused (pure STOP aborts model /
+      // recall work with no foreground chat), then wake for new state.
+      // Both hooks read live state and never throw into the command.
+      notifyShadowControl();
       wakeShadow();
       return c.json(out.body, out.status as 200);
     } catch (error) {
@@ -2676,9 +2706,12 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   // Strict Zod bodies, UUID ids, Idempotency-Key on every POST, exact query
   // gates, ownership-first 404s, CAS 409s. Claim/complete/fail/lease-owner/
   // model-grant surfaces are TRUSTED runtime-only and are NEVER exposed
-  // here (no such route exists). GET list/detail/events reads carry NO ack
-  // side effect. A successful explicit request wakes the worker (same
-  // throw-guarded semantics as the autonomy mutations above).
+  // here (no such route exists). GET list/detail/events/context reads
+  // carry NO ack side effect; the context read additionally projects the
+  // stored MODEL decision next to the frozen context (both frozen
+  // records, never authority). A successful explicit request wakes the
+  // worker (same throw-guarded semantics as the autonomy mutations
+  // above).
 
   app.post("/api/sessions/:sessionId/shadow-jobs", async (c) => {
     const started = now();
@@ -2813,7 +2846,10 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       return validationError(c);
     }
     try {
-      return c.json(repo.getShadowJobContext(session.id, job.id), 200);
+      // Deliberation envelope: frozen claim-time context + stored MODEL
+      // decision (null until fenced completion). Read-only projection of
+      // already-stored rows: no ack, no mutation, no authority conferred.
+      return c.json(repo.getShadowJobDeliberation(session.id, job.id), 200);
     } catch (error) {
       return mapDomainError(c, error);
     }

@@ -106,6 +106,8 @@ import {
   ShadowHoldRequestSchema,
   type ShadowJobContext,
   ShadowJobContextSchema,
+  type ShadowJobDeliberation,
+  ShadowJobDeliberationSchema,
   type ShadowJobEventsResponse,
   ShadowJobEventsResponseSchema,
   type ShadowJobListResponse,
@@ -193,6 +195,7 @@ import {
   completeShadowJob as shadowCompleteJob,
   failShadowJob as shadowFailJob,
   getShadowJobContext as shadowGetContext,
+  getShadowJobDecision as shadowGetDecision,
   getShadowJob as shadowGetJob,
   hasActiveUserRuns as shadowHasActiveRuns,
   holdShadowJob as shadowHoldJob,
@@ -4910,6 +4913,17 @@ export function createKernelRepository(
     );
   }
 
+  function listAutonomyPurposesInScope(
+    sessionId: string,
+    scope: string,
+  ): PurposeListResponse {
+    const out = autonomyListPurposesInScope(db, sessionId, scope, 101);
+    return parseOrValidation(
+      () => PurposeListResponseSchema.parse(out),
+      "purpose scope list response",
+    );
+  }
+
   function correctAutonomyPurpose(
     sessionId: string,
     request: unknown,
@@ -5085,6 +5099,17 @@ export function createKernelRepository(
 
   function getAutonomyTask(sessionId: string, taskId: string): TaskView {
     return autonomyGetTask(db, sessionId, taskId);
+  }
+
+  function listAutonomyTasksInScope(
+    sessionId: string,
+    scope: string,
+  ): TaskListResponse {
+    const out = autonomyListTasksInScope(db, sessionId, scope, 101);
+    return parseOrValidation(
+      () => TaskListResponseSchema.parse(out),
+      "task scope list response",
+    );
   }
 
   function startAutonomyTask(
@@ -5397,6 +5422,20 @@ export function createKernelRepository(
     );
   }
 
+  function getShadowJobDeliberation(
+    sessionId: string,
+    jobId: string,
+  ): ShadowJobDeliberation {
+    return parseOrValidation(
+      () =>
+        ShadowJobDeliberationSchema.parse({
+          context: shadowGetContext(db, sessionId, jobId),
+          modelDecision: shadowGetDecision(db, sessionId, jobId),
+        }),
+      "shadow job deliberation response",
+    );
+  }
+
   function claimShadowJob(
     sessionId: string,
     jobId: string,
@@ -5670,6 +5709,7 @@ export function createKernelRepository(
     createAutonomyPurpose,
     listAutonomyPurposes,
     getAutonomyPurpose,
+    listAutonomyPurposesInScope,
     correctAutonomyPurpose,
     revokeAutonomyPurpose,
     achieveAutonomyPurpose,
@@ -5678,6 +5718,7 @@ export function createKernelRepository(
     createAutonomyTask,
     listAutonomyTasks,
     getAutonomyTask,
+    listAutonomyTasksInScope,
     startAutonomyTask,
     holdAutonomyTask,
     resumeAutonomyTask,
@@ -5693,6 +5734,7 @@ export function createKernelRepository(
     listShadowJobEvents,
     listShadowInbox,
     getShadowJobContext,
+    getShadowJobDeliberation,
     claimShadowJob,
     completeShadowJob,
     holdShadowJob,

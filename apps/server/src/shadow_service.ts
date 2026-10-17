@@ -32,16 +32,20 @@
 //   expand it; the lease covers the work. Configured-none / capability-
 //   missing / timeout / malformed output map to honest fixed held/failed
 //   codes, never a fake `do-nothing`.
-// - SINGLEFLIGHT + GLOBAL one-claimed-job-at-once as a SERVICE
-//   discipline: this worker is the ONLY production claimer (claim/complete/
-//   fail are trusted runtime-only, never HTTP-exposed), it drives jobs
-//   strictly serially, and every post-claim path lands the job terminal
-//   (complete/hold/fail) before the next claim — so at most one live
-//   service lease ever exists. SAME-job races still serialize inside the
-//   kernel claim transaction (CAS version + lease-owner fences), which also
-//   protects against a second direct claimer. No queued job is lost on
-//   worker-busy: the job stays `pending` and the next meaningful wake
-//   re-drives it. Expiry holds, never replays.
+// - SINGLEFLIGHT + the KERNEL-enforced GLOBAL one-claimed-job-at-once
+//   fence (parent contract: atomic `BEGIN IMMEDIATE` live-lease check in
+//   the claim transaction, backstopped by the partial unique index
+//   `ux_shadow_jobs_single_claimed`): this worker is the ONLY production
+//   claimer (claim/complete/fail are trusted runtime-only, never
+//   HTTP-exposed), it drives jobs strictly serially, and every post-claim
+//   path lands the job terminal (complete/hold/fail) before the next
+//   claim — so at most one live service lease ever exists. SAME-job races
+//   still serialize inside the kernel claim transaction (CAS version +
+//   lease-owner fences), which also protects against a second direct
+//   claimer. A busy newcomer is NOT dropped/failed and never steals the
+//   old lease: the job stays `pending` and the next meaningful wake (after
+//   settlement/reconcile) re-drives it. The queue read returns null while
+//   a live lease exists (no spin). Expiry holds, never replays.
 // - Wake happens ONLY on meaningful new state (purpose/task/conflict/
 //   explicit-request acceptance, control resume, run settlement): NO
 //   interval poll, NO all-chat taskization, NO model-job event requeue.
@@ -62,12 +66,16 @@
 //   not start new work (trusted `hasActiveShadowBlock` read); actual run
 //   settlement (including FAIL/cancel, not only success) re-wakes eligible
 //   pending jobs. Resource-busy deferral never becomes an infinite poll.
-// - Control STOP aborts immediately (the kernel already holds pending jobs
-//   in the SAME stop transaction; this worker's in-flight call fences
-//   `control_paused` at completion). On resume an OLD control key replay
-//   reads the REAL control state (never a stored reply): pending jobs from
-//   the old control epoch are never revived — the claim/complete fences
-//   hold them on version drift.
+// - Control STOP aborts the shadow's OWN in-flight call IMMEDIATELY (the
+//   kernel already holds pending jobs in the SAME stop transaction, and
+//   `notifyControl` + every `wake` read the ACTUAL control state and abort
+//   the OWN AbortController — never the global gateway, never a
+//   human-approved Calendar/ordinary run — so model/recall work cannot run
+//   to timeout; the completion fences still hold the late output
+//   `control_paused`). On resume an OLD control key replay reads the REAL
+//   control state (never a stored reply): pending jobs from the old
+//   control epoch are never revived — the claim/complete fences hold them
+//   on version drift.
 // - Shutdown marks draining, then stops the shadow worker and awaits its
 //   abort BEFORE memory.stop/engine drain/DB close (no orphan CLI/model
 //   calls). Synchronous notify/wake entry points never throw back into a
@@ -81,6 +89,11 @@ import {
 import {
   AGENT_STEP_TIMEOUT_MS,
   type KernelRepository,
+  RepositoryValidationError,
+  ShadowLeaseConflictError,
+  ShadowStateConflictError,
+  ShadowVersionConflictError,
+  ShadowWorkerBusyError,
 } from "@companion/kernel";
 import {
   type ChatResult,
@@ -220,6 +233,14 @@ export interface ShadowService {
   wake(): void;
   /** Foreground preemption: aborts the shadow's OWN call, synchronously. */
   notifyForeground(): void;
+  /**
+   * Control change (pause OR resume key, INCLUDING a replayed old resume):
+   * reads the ACTUAL current control state and aborts the shadow's OWN
+   * in-flight call immediately when it is paused — never the global
+   * gateway, never a human-approved Calendar/ordinary run. Never throws
+   * into the committed control command.
+   */
+  notifyControl(): void;
   /** Actual run settlement (any terminal outcome): re-wake if eligible. */
   onRunSettled(): void;
   /** True while a shadow gateway call is in flight (tests/smoke). */
@@ -364,6 +385,12 @@ export function createShadowService(
       if (!started || stopping) {
         return;
       }
+      // A committed STOP (even a replayed old resume whose stored reply
+      // says "unpaused" while the REAL state is paused) aborts the OWN
+      // in-flight call BEFORE the singleflight branch below, so model /
+      // recall work cannot run to timeout while the kernel already holds
+      // pending jobs in the same stop transaction.
+      abortIfControlPaused();
       if (inFlight !== null) {
         // Singleflight: the in-flight tick observes the newest queue state
         // on its next iteration; just mark that more work arrived.
@@ -395,6 +422,37 @@ export function createShadowService(
       );
     } catch {
       // Best effort: wake never throws.
+    }
+  }
+
+  /**
+   * STOP aborts immediately: when the ACTUAL current control is paused,
+   * abort the shadow's OWN in-flight call (recall + gateway share the one
+   * controller) so model work cannot run to timeout. Reads live state, so
+   * even a replayed old resume still aborts while the real state is
+   * paused. Never throws into the caller.
+   */
+  function abortIfControlPaused(): void {
+    try {
+      const control = repo.getAutonomyControlState();
+      if (control.paused === true && currentCall !== null) {
+        try {
+          currentCall.abort();
+        } catch {
+          // Best effort.
+        }
+      }
+    } catch {
+      // Best effort: a control-read failure never breaks the caller, and
+      // the kernel completion fences still hold the late output.
+    }
+  }
+
+  function notifyControl(): void {
+    try {
+      abortIfControlPaused();
+    } catch {
+      // Best effort: notify never throws into a committed command.
     }
   }
 
@@ -438,16 +496,99 @@ export function createShadowService(
       if (pending === null) {
         return;
       }
-      await driveOneJob(pending.sessionId, pending.jobId, pending.version);
+      try {
+        await driveOneJob(pending.sessionId, pending.jobId, pending.version);
+      } catch (error) {
+        if (error instanceof ShadowWorkerBusyError) {
+          // GLOBAL one-claimed-job-at-once: another live lease exists (or
+          // a concurrent claim holds the store lock). The job stays
+          // `pending` (no loss, no steal); stop THIS drain instead of
+          // spinning — settlement/reconcile re-wakes honestly.
+          return;
+        }
+        // Unexpected storage failure: stop this drain honestly instead of
+        // continuing unsettled; the next reconcile/wake retries. Never a
+        // fake success, never a blanket-suppressed continuation.
+        throw error;
+      }
+    }
+  }
+
+  /**
+   * Fail a still-OWNED claimed job after a semantic rejection: CAS on the
+   * claim-time version under OUR owner, so another lease can never be
+   * failed. When the job already left our lease (a concurrent terminal
+   * hold won the race), the recorded outcome stands and is never
+   * overwritten. When the failure itself hits an unexpected storage error
+   * while the claim is still ours, the caller stops the drain (throw)
+   * instead of continuing unsettled.
+   */
+  function failOwnedClaim(
+    sessionId: string,
+    jobId: string,
+    claimedVersion: number,
+  ): void {
+    let owned = false;
+    try {
+      const current = repo.getShadowJob(sessionId, jobId);
+      owned =
+        current.status === "claimed" &&
+        current.version === claimedVersion &&
+        current.leaseOwner === SHADOW_WORKER_OWNER;
+    } catch {
+      owned = false;
+    }
+    if (!owned) {
+      // No longer our lease (already terminal/held or moved on): the
+      // recorded outcome stands, never overwritten.
+      return;
+    }
+    try {
+      repo.failShadowJob(
+        sessionId,
+        jobId,
+        { expectedVersion: claimedVersion, code: "model_error" },
+        { now: now() },
+      );
+    } catch (error) {
+      if (
+        error instanceof ShadowStateConflictError ||
+        error instanceof ShadowLeaseConflictError ||
+        error instanceof ShadowVersionConflictError
+      ) {
+        // Lost the race while failing: the recorded outcome stands.
+        return;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Truthful abort attribution: when the ACTUAL control is paused the
+   * STOP owns the abort (`control_paused`, never mislabeled as
+   * foreground and never pretending the provider ended); otherwise the
+   * foreground owns it. Best-effort read — an unreadable control keeps
+   * the foreground label and the kernel fences still hold late output.
+   */
+  function abortHoldReason(): "control_paused" | "aborted_foreground" {
+    try {
+      return repo.getAutonomyControlState().paused === true
+        ? "control_paused"
+        : "aborted_foreground";
+    } catch {
+      return "aborted_foreground";
     }
   }
 
   /**
    * Drive exactly ONE job: recall BEFORE claim, claim (freezing memory
    * evidence atomically), then EXACTLY ONE bounded gateway call fenced by
-   * the foreground abort + kernel completion fences. Never throws: every
-   * outcome lands as completed/held/failed, and worker-busy keeps the job
-   * `pending` for the next meaningful wake (no loss, no spin).
+   * the foreground abort + kernel completion fences. Completed/held/failed
+   * outcomes land terminally; worker-busy keeps the job `pending` for the
+   * next meaningful wake (no loss, no spin). Throws ONLY to stop the
+   * drain: `ShadowWorkerBusyError` on the GLOBAL fence, or an unexpected
+   * storage failure — both always caught by `drainLoop`, which stops the
+   * drain instead of continuing unsettled.
    */
   async function driveOneJob(
     sessionId: string,
@@ -512,10 +653,16 @@ export function createShadowService(
         }
         claimedJob = out.job;
         context = out.context;
-      } catch {
-        // Worker-busy / paused / version drift / lease conflict: the job
-        // stays pending (no loss); the next meaningful wake re-drives it.
-        // Claimed-by-another-worker races resolve via the kernel fences.
+      } catch (error) {
+        if (error instanceof ShadowWorkerBusyError) {
+          // GLOBAL one-claimed-job-at-once: another live lease exists (or
+          // a concurrent claim holds the store lock). The job stays
+          // `pending` (no loss, no steal); stop THIS drain instead of
+          // spinning — settlement/reconcile re-wakes honestly.
+          throw error;
+        }
+        // Paused / version drift / lease race: the job stays pending (no
+        // loss); the next meaningful wake re-drives it.
         return;
       }
       const claimedVersion = claimedJob.version;
@@ -526,7 +673,7 @@ export function createShadowService(
           repo.holdShadowJob(
             sessionId,
             jobId,
-            { expectedVersion: claimedVersion, reason: "aborted_foreground" },
+            { expectedVersion: claimedVersion, reason: abortHoldReason() },
             { now: now() },
           );
         } catch {
@@ -604,7 +751,7 @@ export function createShadowService(
               jobId,
               {
                 expectedVersion: claimedVersion,
-                reason: "aborted_foreground",
+                reason: abortHoldReason(),
               },
               { now: now() },
             );
@@ -634,7 +781,7 @@ export function createShadowService(
           repo.holdShadowJob(
             sessionId,
             jobId,
-            { expectedVersion: claimedVersion, reason: "aborted_foreground" },
+            { expectedVersion: claimedVersion, reason: abortHoldReason() },
             { now: now() },
           );
         } catch {
@@ -700,7 +847,7 @@ export function createShadowService(
           repo.holdShadowJob(
             sessionId,
             jobId,
-            { expectedVersion: claimedVersion, reason: "aborted_foreground" },
+            { expectedVersion: claimedVersion, reason: abortHoldReason() },
             { now: now() },
           );
         } catch {
@@ -717,11 +864,32 @@ export function createShadowService(
         log("info", "shadow.job_completed", {
           durationMs: Math.max(now() - startedAt, 0),
         });
-      } catch {
-        // Late fence holds (epoch drift / paused / lease) land inside the
-        // kernel as held; version/lease races stay pending-safe for later
-        // wakes only when still pending (terminal states never replay).
-        return;
+      } catch (error) {
+        if (error instanceof RepositoryValidationError) {
+          // SEMANTIC rejection (unknown frozen label / uncited draft
+          // deadline): the kernel TX rolled back, so the job is STILL
+          // claimed under OUR lease. Fail it terminal (`model_error`,
+          // lease cleared, failure appended) BEFORE any next claim — a
+          // permanent native-output defect must never sit CLAIMED across
+          // drains. Owner + current-version CAS guarantees we can only
+          // fail our own lease, never another worker's.
+          failOwnedClaim(sessionId, jobId, claimedVersion);
+          return;
+        }
+        if (
+          error instanceof ShadowStateConflictError ||
+          error instanceof ShadowLeaseConflictError ||
+          error instanceof ShadowVersionConflictError
+        ) {
+          // Genuine already-terminal / CAS / control-held outcomes land
+          // inside the kernel as held (or lost the race): never overwrite
+          // them with a failure.
+          return;
+        }
+        // Unexpected storage error: NOT blanket-suppressed and never a
+        // fake success — stop this drain unsettled; the next
+        // reconcile/wake retries honestly.
+        throw error;
       }
     } finally {
       if (currentCall === callController) {
@@ -754,6 +922,7 @@ export function createShadowService(
     stop,
     wake,
     notifyForeground,
+    notifyControl,
     onRunSettled,
     get busy() {
       return inFlight !== null;

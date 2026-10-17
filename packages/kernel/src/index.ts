@@ -149,6 +149,18 @@ export {
   listAutonomyActivity,
   recordPurposeConflict,
 } from "./autonomy.js";
+export type { AutonomyToolsOptions } from "./autonomy_tools.js";
+export {
+  createAutonomyReadRegistrations,
+  PurposeListToolInputSchema,
+  PurposeListToolOutputSchema,
+  PurposeOpenToolInputSchema,
+  PurposeOpenToolOutputSchema,
+  TaskListToolInputSchema,
+  TaskListToolOutputSchema,
+  TaskOpenToolInputSchema,
+  TaskOpenToolOutputSchema,
+} from "./autonomy_tools.js";
 export type {
   ManualBackupOptions,
   PreMigrationBackupOptions,
@@ -455,6 +467,7 @@ export {
   failShadowJob,
   getShadowJob,
   getShadowJobContext,
+  getShadowJobDecision,
   hasActiveUserRuns,
   holdPendingShadowJobsInTx,
   holdShadowJob,
@@ -472,6 +485,7 @@ export {
   ShadowLeaseConflictError,
   ShadowStateConflictError,
   ShadowVersionConflictError,
+  ShadowWorkerBusyError,
   skipRecordedInboxInTx,
 } from "./shadow.js";
 export type {

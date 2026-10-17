@@ -3792,3 +3792,21 @@ branch until that lands.
   `shadow_service_http.test.ts` 12/12 incl. wire-normalization regression;
   Biome clean; root `tsc` only pre-existing better-sqlite3 TS7016. Whole
   feature UI STILL IN PROGRESS (service/HTTP done, UI unstarted).
+- Final review proof (2026-10-17, branch feat/av-shadow-deliberation):
+  repaired OWN `packages/kernel` + `apps/server` `@types` links (they were
+  absolute symlinks into the parent checkout, so the relative
+  `@types/better-sqlite3` hop resolved to a store that lacks 9.6.0):
+  replaced with real OWN dirs holding ABSOLUTE links to the OWN
+  `node_modules/.pnpm/@types+better-sqlite3@9.6.0` (159-line DTS) and
+  `@types+node@24.12.4` caches; root `tsc` now fully clean, zero TS7016,
+  no shims/suppressions. Live-test fix (test-only, CSRF unchanged):
+  `shadow_stop_abort_live.test.ts` now sends same-origin `Origin` on real
+  loopback POSTs (Node 24 fetch emits `sec-fetch-mode`, so missing-Origin
+  is browser-like -> 403). Verified: kernel `shadow_core` 19/19 +
+  `autonomy_tools` 7/7, `shadow_service_http` 14/14,
+  `shadow_deliberation_http` (envelope `{context,modelDecision}` read-only)
+  1/1, `shadow_stop_abort_live` 1/1 (pure STOP aborts parked call,
+  `control_paused`; sP999 -> `model_error` terminal + lease clear; GOOD
+  next completes), production smoke (real `startServer` + real provider
+  HTTP loopback) 17/17; `tsc` + Biome clean. UI browser proof STILL
+  unverified (Chromium regression is the handoff).
