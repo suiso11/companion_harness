@@ -5,9 +5,8 @@
 // `google-calendar-reschedule-test-fixture`) — no nested fork checkout, no
 // unpublished dependency, no skip. EXPLICIT setup: set
 // `M5_RESCHEDULE_FORK_CLI` to the fork checkout root (or a built fork
-// `build/reschedule-cli.js`; derived branch
-// `feat/m5-reschedule-entrypoint-v2`, draft PR
-// suiso11/google-calendar-mcp#3) to drive the REAL production provider +
+// `build/reschedule-cli.js`; branch `feat/m5-allday-conversion`, fork PR
+// suiso11/google-calendar-mcp#4) to drive the REAL production provider +
 // MCP server factory through the TEST-ONLY runner
 // (`src/tests/helpers/rescheduleTestStdio.ts`, unshipped, outside `bin`)
 // instead; a set-but-missing path is a HARD error (never a silent skip).
@@ -164,11 +163,14 @@ async function resolveStdioTarget(): Promise<StdioTarget> {
     );
     if (!existsSync(runner)) {
       throw new Error(
-        `explicit fork test runner missing: ${runner} (fork branch feat/m5-reschedule-entrypoint-v2 with test-only runner required)`,
+        `explicit fork test runner missing: ${runner} (fork branch feat/m5-allday-conversion with test-only runner required)`,
       );
     }
     // Resolve a tsx loader without importing the ignored nested repo: prefer
     // the root-owned tsx binary, else node --experimental-strip-types.
+    // (The shipped CLI's persisted-grant file flow is proven separately in
+    // `reschedulePersistedGrant.test.ts`: auth-parse level, `tools/list`
+    // only, file-only env, 0 Google writes.)
     const rootTsx = join(
       dirname(fileURLToPath(import.meta.url)),
       "..",
