@@ -18,9 +18,9 @@
 //   deadlines MUST match an EXPLICIT input deadline; execute/do-nothing
 //   action combinations enforced);
 // - CODE policy classifies execute proposals without executing anything:
-//   wish -> wish_not_command, external text -> external_no_authority, no
-//   permission claim -> missing_grant, claim present -> shadow_noexecution
-//   (recorded permission NEVER becomes a grant; zero execution performed);
+//   wish -> wish_not_command, external text -> external_no_authority,
+//   execute -> missing_grant WITH or WITHOUT a recorded permission claim
+//   (a CLAIM never becomes a grant; zero execution performed);
 // - do-nothing is genuinely representable (completed/no_action), never a
 //   fake failure fallback;
 // - a foreground abort holds without pretending a decision was made.
@@ -507,7 +507,9 @@ describe("shadow durable core", () => {
         { expectedVersion: 2, leaseOwner: "worker-1", now: T0 + 160 },
       );
       expect(grantDone.outcome).toBe("completed");
-      expect(grantDone.policyCode).toBe("shadow_noexecution");
+      // CLAIM != GRANT: even WITH a recorded permission claim, execute
+      // stays unauthorized (missing_grant); nothing executes.
+      expect(grantDone.policyCode).toBe("missing_grant");
       // Zero execution surface: no grant/calendar/tool columns exist, and
       // stored decisions carry no grant keys.
       const cols = (
@@ -521,7 +523,7 @@ describe("shadow durable core", () => {
           "SELECT model_decision_json AS j, policy_code AS p FROM shadow_jobs WHERE id = ?",
         )
         .get(grantReq.body.id) as { j: string; p: string };
-      expect(stored.p).toBe("shadow_noexecution");
+      expect(stored.p).toBe("missing_grant");
       expect(Object.keys(JSON.parse(stored.j)).sort()).toEqual(
         [
           "completion",
@@ -635,6 +637,318 @@ describe("shadow durable core", () => {
           { expectedVersion: 2, leaseOwner: "worker-1", now: T0 + 110 },
         ),
       ).toThrow(RepositoryValidationError);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("keeps scope completeness: other-scope flood never drops an in-scope constraint; same-scope overflow holds", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      unpause(repo, 1, T0 + 10);
+      // Old in-scope constraint created FIRST.
+      const oldConstraint = repo.createAutonomyPurpose(
+        sessionId,
+        {
+          scope: "work",
+          statement: "no deploys after 18:00",
+          kind: "constraint",
+          explicit: true,
+          sourceKind: "user",
+        },
+        { key: randomUUID(), now: T0 + 20 },
+      );
+      // Flood ANOTHER scope with >100 records (newest-first truncation
+      // would previously hide the old in-scope record).
+      for (let i = 0; i < 105; i++) {
+        repo.createAutonomyPurpose(
+          sessionId,
+          {
+            scope: "noise",
+            statement: `noise goal ${i}`,
+            kind: "goal",
+            explicit: true,
+            sourceKind: "user",
+          },
+          { key: randomUUID(), now: T0 + 30 + i },
+        );
+      }
+      const req = repo.requestShadowDeliberation(
+        sessionId,
+        { scope: "work" },
+        { key: randomUUID(), now: T0 + 500 },
+      );
+      const claimed = repo.claimShadowJob(
+        sessionId,
+        req.body.id,
+        { owner: "worker-1", expectedVersion: 1 },
+        { now: T0 + 510 },
+      );
+      expect(claimed.outcome).toBe("claimed");
+      // The old in-scope constraint survives the other-scope flood.
+      expect(
+        (claimed.context?.activeConstraintIds ?? []).includes(
+          oldConstraint.body.id,
+        ),
+      ).toBe(true);
+      // Same-scope overflow (101 in-scope purposes) holds honestly.
+      for (let i = 0; i < 101; i++) {
+        repo.createAutonomyPurpose(
+          sessionId,
+          {
+            scope: "packed",
+            statement: `packed goal ${i}`,
+            kind: "goal",
+            explicit: true,
+            sourceKind: "user",
+          },
+          { key: randomUUID(), now: T0 + 600 + i },
+        );
+      }
+      const overflowReq = repo.requestShadowDeliberation(
+        sessionId,
+        { scope: "packed" },
+        { key: randomUUID(), now: T0 + 800 },
+      );
+      const overflowClaim = repo.claimShadowJob(
+        sessionId,
+        overflowReq.body.id,
+        { owner: "worker-1", expectedVersion: 1 },
+        { now: T0 + 810 },
+      );
+      expect(overflowClaim.outcome).toBe("held");
+      expect(overflowClaim.job.status).toBe("held");
+      expect(overflowClaim.job.holdReason).toBe("context_too_large");
+      expect(overflowClaim.context).toBeNull();
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("applies time applicability: expired constraints never gate unrelated work, crossings hold stale proposals", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      unpause(repo, 1, T0 + 10);
+      // A temporary feeling that already EXPIRED before the claim.
+      repo.createAutonomyPurpose(
+        sessionId,
+        {
+          scope: "health",
+          statement: "temporary quiet hours",
+          kind: "constraint",
+          explicit: true,
+          sourceKind: "user",
+          validFrom: "2020-01-01T00:00:00+00:00",
+          validUntil: "2020-01-02T00:00:00+00:00",
+        },
+        { key: randomUUID(), now: T0 + 20 },
+      );
+      const goal = repo.createAutonomyPurpose(
+        sessionId,
+        goalBody("walk daily"),
+        { key: randomUUID(), now: T0 + 30 },
+      );
+      void goal;
+      const req = repo.requestShadowDeliberation(
+        sessionId,
+        { scope: "health" },
+        { key: randomUUID(), now: T0 + 40 },
+      );
+      const claimed = repo.claimShadowJob(
+        sessionId,
+        req.body.id,
+        { owner: "worker-1", expectedVersion: 1 },
+        { now: T0 + 50 },
+      );
+      expect(claimed.outcome).toBe("claimed");
+      // The expired constraint stays in history but is NOT promoted.
+      expect(claimed.context?.purposes.length ?? 0).toBeGreaterThanOrEqual(2);
+      expect(claimed.context?.activeConstraintIds ?? []).toHaveLength(0);
+      // Genuine do-nothing completes despite the retained expired record.
+      const goalLabel = claimed.context?.purposes.find((p) => p.kind === "goal")
+        ?.label as string;
+      const done = repo.completeShadowJob(
+        sessionId,
+        req.body.id,
+        validOutput([goalLabel]),
+        { expectedVersion: 2, leaseOwner: "worker-1", now: T0 + 60 },
+      );
+      expect(done.outcome).toBe("completed");
+      expect(done.policyCode).toBe("no_action");
+      // A window boundary crossed DURING the call holds the stale proposal.
+      const windowUntil = "2026-06-01T00:00:00+00:00";
+      const crossing = repo.createAutonomyPurpose(
+        sessionId,
+        {
+          scope: "focus",
+          statement: "focus block",
+          kind: "constraint",
+          explicit: true,
+          sourceKind: "user",
+          validFrom: "2020-01-01T00:00:00+00:00",
+          validUntil: windowUntil,
+        },
+        { key: randomUUID(), now: T0 + 70 },
+      );
+      void crossing;
+      const windowMs = Date.parse(windowUntil);
+      const req2 = repo.requestShadowDeliberation(
+        sessionId,
+        { scope: "focus" },
+        { key: randomUUID(), now: T0 + 80 },
+      );
+      const claim2 = repo.claimShadowJob(
+        sessionId,
+        req2.body.id,
+        { owner: "worker-1", expectedVersion: 1 },
+        { now: windowMs - 60_000 },
+      );
+      expect(claim2.outcome).toBe("claimed");
+      expect(claim2.context?.activeConstraintIds ?? []).toHaveLength(1);
+      const focusLabel = claim2.context?.purposes[0]?.label as string;
+      const late = repo.completeShadowJob(
+        sessionId,
+        req2.body.id,
+        validOutput([focusLabel]),
+        {
+          expectedVersion: 2,
+          leaseOwner: "worker-1",
+          now: windowMs + 1,
+        },
+      );
+      expect(late.outcome).toBe("held");
+      expect(late.job.holdReason).toBe("target_inapplicable");
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("never invents deadlines: windows are not deadlines and uncited dates cannot be adopted", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      unpause(repo, 1, T0 + 10);
+      // A purpose window alone creates NO deadline allowlist entry.
+      const windowUntil = "2026-11-02T10:00:00+00:00";
+      const win = repo.createAutonomyPurpose(
+        sessionId,
+        {
+          scope: "health",
+          statement: "seasonal goal",
+          kind: "goal",
+          explicit: true,
+          sourceKind: "user",
+          validFrom: "2026-11-01T10:00:00+00:00",
+          validUntil: windowUntil,
+        },
+        { key: randomUUID(), now: T0 + 20 },
+      );
+      void win;
+      const req = repo.requestShadowDeliberation(
+        sessionId,
+        { scope: "health" },
+        { key: randomUUID(), now: T0 + 30 },
+      );
+      const claimed = repo.claimShadowJob(
+        sessionId,
+        req.body.id,
+        { owner: "worker-1", expectedVersion: 1 },
+        { now: T0 + 40 },
+      );
+      // No dated task exists: the window must NOT appear as a deadline.
+      expect(claimed.context?.explicitDeadlines ?? []).not.toContain(
+        windowUntil,
+      );
+      expect(claimed.context?.explicitDeadlines ?? []).toHaveLength(0);
+      const goalLabel = claimed.context?.purposes.find((p) => p.kind === "goal")
+        ?.label as string;
+      expect(() =>
+        repo.completeShadowJob(
+          sessionId,
+          req.body.id,
+          validOutput([goalLabel], {
+            decision: "execute",
+            proposedAction: {
+              kind: "local_task",
+              summary: "window-as-deadline",
+              taskDraft: { title: "borrowed window", deadline: windowUntil },
+            },
+          }),
+          { expectedVersion: 2, leaseOwner: "worker-1", now: T0 + 50 },
+        ),
+      ).toThrow(RepositoryValidationError);
+      // Two dated tasks: borrowing the UNCITED task's date is rejected,
+      // citing the task's own date is allowed.
+      const dateA = "2026-10-20T10:00:00+00:00";
+      const dateB = "2026-10-21T10:00:00+00:00";
+      repo.createAutonomyTask(
+        sessionId,
+        {
+          scope: "health",
+          title: "task A",
+          kind: "task",
+          speaker: "user",
+          deadline: dateA,
+        },
+        { key: randomUUID(), now: T0 + 60 },
+      );
+      repo.createAutonomyTask(
+        sessionId,
+        {
+          scope: "health",
+          title: "task B",
+          kind: "task",
+          speaker: "user",
+          deadline: dateB,
+        },
+        { key: randomUUID(), now: T0 + 70 },
+      );
+      const req2 = repo.requestShadowDeliberation(
+        sessionId,
+        { scope: "health" },
+        { key: randomUUID(), now: T0 + 80 },
+      );
+      const claim2 = repo.claimShadowJob(
+        sessionId,
+        req2.body.id,
+        { owner: "worker-1", expectedVersion: 1 },
+        { now: T0 + 90 },
+      );
+      const labelA = claim2.context?.tasks.find((t) => t.title === "task A")
+        ?.label as string;
+      const labelB = claim2.context?.tasks.find((t) => t.title === "task B")
+        ?.label as string;
+      // Cite only task A but borrow task B's date: rejected.
+      expect(() =>
+        repo.completeShadowJob(
+          sessionId,
+          req2.body.id,
+          validOutput([labelA], {
+            decision: "execute",
+            proposedAction: {
+              kind: "local_task",
+              summary: "borrowed date",
+              taskDraft: { title: "draft", deadline: dateB },
+            },
+          }),
+          { expectedVersion: 2, leaseOwner: "worker-1", now: T0 + 100 },
+        ),
+      ).toThrow(RepositoryValidationError);
+      // Cite task B with its own date: allowed (still unauthorized).
+      const ok = repo.completeShadowJob(
+        sessionId,
+        req2.body.id,
+        validOutput([labelB], {
+          decision: "execute",
+          proposedAction: {
+            kind: "local_task",
+            summary: "own date",
+            taskDraft: { title: "draft", deadline: dateB },
+          },
+        }),
+        { expectedVersion: 2, leaseOwner: "worker-1", now: T0 + 110 },
+      );
+      expect(ok.outcome).toBe("completed");
+      expect(ok.policyCode).toBe("missing_grant");
     } finally {
       closeKernelDatabase(handle);
     }

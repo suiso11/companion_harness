@@ -3755,21 +3755,25 @@ branch until that lands.
   nullable structured action (kind/summary/optional LOCAL task draft) +
   completion + stop conditions + uncertainty + counterargument; strict
   unknown-field reject (no grant/permission/budget/bypass); task-draft
-  deadlines only when matching an EXPLICIT input deadline; execute
-  requires an action, do-nothing forbids one. CODE policy (never
-  model-chosen): shadow_only/shadow_noexecution/missing_grant/
+  deadlines only when matching the EXPLICIT deadline of a task ACTUALLY
+  cited in evidence (windows are never deadlines, uncited dates rejected);
+  execute requires an action, do-nothing forbids one. CODE policy (never
+  model-chosen): shadow_only/missing_grant/
   wish_not_command/external_no_authority/needs_clarification/no_action.
-  Recorded permission NEVER becomes a grant; zero execution performed.
-- Verified 2026-10-17: permanent `shadow_core.test.ts` 12/12 (ownership,
+  Recorded permission NEVER becomes a grant (CLAIM != GRANT: execute with
+  or without a claim stays missing_grant); zero execution performed.
+- Verified 2026-10-17: permanent `shadow_core.test.ts` 15/15 (ownership,
   atomic same-TX queue, stable-key replay/drift, epoch-drift hold,
-  pause/restart holds, no-catchup, wish/external/missing-grant policies,
-  genuine do-nothing, strict rejects, foreground abort, redacted fail);
-  affected `autonomy_slice` 11/11 + `migration` 21/21 +
-  `migration_create_0010` 3/3 + `autonomy_http` 3/3; Biome clean; root
-  `tsc` only the pre-existing better-sqlite3 TS7016 noise; throwaway
-  SQLite smoke (deleted after run): claim froze ctx (1 purpose + 1 task,
-  epoch 2, control v2) -> mid-call constraint held late output
-  (scope_epoch_drift) -> fresh state completed shadow_noexecution with
-  zero grant/calendar/tool surface and 0 executions / 0 grants.
+  pause/restart holds, no-catchup, wish/external/missing-grant policies
+  incl. WITH-claim still missing_grant, genuine do-nothing, strict
+  rejects, foreground abort, redacted fail, scope-completeness overflow,
+  time-applicability, deadline provenance); affected `autonomy_slice`
+  11/11 + `migration` 21/21 + full kernel 545/545 + contracts 135/135;
+  Biome clean; root `tsc` only the pre-existing better-sqlite3 TS7016
+  noise; throwaway SQLite smoke (deleted after run): claim froze ctx (1
+  purpose + 1 task, epoch 2, control v2) -> mid-call constraint held late
+  output (scope_epoch_drift) -> fresh state completed missing_grant with
+  zero grant/calendar/tool surface and 0 executions / 0 grants. Feature
+  vertical STILL in progress (gateway/service/HTTP unstarted).
 - Remaining (NOT claimed): model gateway, shadow service, HTTP routes,
   UI; then feature publication.

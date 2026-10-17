@@ -24,8 +24,10 @@
 //   no ToolBroker, no calendar connector, no child-process, no device, no
 //   secret store, and performs ZERO execution on completion: a completed
 //   job stores the validated MODEL decision SEPARATE from the CODE policy
-//   code (`shadow_noexecution` / `missing_grant` / `wish_not_command` /
-//   `external_no_authority` / `needs_clarification` / `no_action`).
+//   code (`missing_grant` / `wish_not_command` /
+//   `external_no_authority` / `needs_clarification` / `no_action` /
+//   `shadow_only`). A recorded permission CLAIM never removes
+//   `missing_grant`: there is no runtime grant anywhere in this core.
 // - A recorded `permission` purpose is ONLY a claim: the CODE policy may
 //   record `missing_grant`, but a recorded permission NEVER becomes a
 //   grant and NOTHING here can spend or create one.
@@ -168,14 +170,31 @@ export interface ShadowReaderTask {
  * no runtime import of `autonomy.ts` from here).
  */
 export interface ShadowPolicyReader {
-  /** ALL purposes in (session, scope), newest first, capped at 100. */
+  /**
+   * ALL purposes in (session, scope), newest first, SQL scope-filtered
+   * BEFORE the limit, up to 101 rows so the builder detects REAL overflow
+   * (101 in => `context_too_large`). Internal port only: never exposed
+   * through the public max-100 list DTO.
+   */
   listScopePurposes(sessionId: string, scope: string): ShadowReaderPurpose[];
-  /** ALL tasks in (session, scope), newest first, capped at 100. */
+  /**
+   * ALL tasks in (session, scope), newest first, SQL scope-filtered BEFORE
+   * the limit, up to 101 rows for overflow detection (internal port only).
+   */
   listScopeTasks(sessionId: string, scope: string): ShadowReaderTask[];
-  /** Explicit conflict pairs in (session, scope). */
+  /** Explicit conflict pairs in (session, scope), scope-filtered, up to 101. */
   listScopeConflictPairs(sessionId: string, scope: string): [string, string][];
   /** Strict explicit-offset RFC3339 check (borrowed grammar, no copy). */
   isStrictDeadline(value: string): boolean;
+  /**
+   * Trusted time-applicability check (borrowed autonomy grammar, no copy):
+   * true when the stored window covers `now` (NULL bounds unbounded, end
+   * exclusive). Status is checked by callers; this covers the window only.
+   */
+  isPurposeApplicableAt(
+    purpose: { validFrom: string | null; validUntil: string | null },
+    now: number,
+  ): boolean;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1181,23 +1200,36 @@ export function buildShadowContext(
   }
   const control = readControlInTx(db);
   const epoch = readShadowScopeEpoch(db, sessionId, scope) ?? 1;
-  const frozenPurposes = purposes.map((purpose, index) => ({
-    label: `sP${index + 1}`,
-    id: purpose.id,
-    version: purpose.version,
-    status: purpose.status,
-    kind: purpose.kind,
-    explicitness: purpose.explicit
-      ? ("explicit" as const)
-      : ("inferred" as const),
-    source: purpose.sourceKind,
-    scope: purpose.scope,
-    statement: purpose.statement,
-    interpretation: purpose.interpretation,
-    validFrom: purpose.validFrom,
-    validUntil: purpose.validUntil,
-    supersededBy: purpose.supersededBy,
-  }));
+  // Trusted applicability is computed here (status + borrowed window
+  // grammar via the read port) and frozen per purpose. ALL records stay
+  // in the context (history preserved, never TTL-deleted); only
+  // currently-applicable records populate the constraint/claim allowlists.
+  const frozenPurposes = purposes.map((purpose, index) => {
+    const applicableAtClaim =
+      purpose.status === "active" &&
+      reader.isPurposeApplicableAt(
+        { validFrom: purpose.validFrom, validUntil: purpose.validUntil },
+        at,
+      );
+    return {
+      label: `sP${index + 1}`,
+      id: purpose.id,
+      version: purpose.version,
+      status: purpose.status,
+      kind: purpose.kind,
+      explicitness: purpose.explicit
+        ? ("explicit" as const)
+        : ("inferred" as const),
+      source: purpose.sourceKind,
+      scope: purpose.scope,
+      statement: purpose.statement,
+      interpretation: purpose.interpretation,
+      validFrom: purpose.validFrom,
+      validUntil: purpose.validUntil,
+      supersededBy: purpose.supersededBy,
+      applicableAtClaim,
+    };
+  });
   const frozenTasks = tasks.map((task, index) => ({
     label: `sT${index + 1}`,
     id: task.id,
@@ -1210,26 +1242,27 @@ export function buildShadowContext(
     parentPurposeId: task.parentPurposeId,
   }));
   const permissionClaims = frozenPurposes
-    .filter((p) => p.status === "active" && p.kind === "permission")
+    .filter(
+      (p) =>
+        p.status === "active" && p.applicableAtClaim && p.kind === "permission",
+    )
     .map((p, index) => ({
       label: `sM${index + 1}`,
       purposeId: p.id,
       statement: p.statement,
     }));
   const activeConstraintIds = frozenPurposes
-    .filter((p) => p.status === "active" && p.kind === "constraint")
+    .filter(
+      (p) =>
+        p.status === "active" && p.applicableAtClaim && p.kind === "constraint",
+    )
     .map((p) => p.id);
+  // EXPLICIT TASK deadlines only: purpose applicability windows
+  // (validFrom/validUntil) are NEVER deadlines and never enter this list.
   const explicitDeadlines: string[] = [];
   for (const task of frozenTasks) {
     if (task.deadline !== null && !explicitDeadlines.includes(task.deadline)) {
       explicitDeadlines.push(task.deadline);
-    }
-  }
-  for (const purpose of frozenPurposes) {
-    for (const bound of [purpose.validFrom, purpose.validUntil]) {
-      if (bound !== null && !explicitDeadlines.includes(bound)) {
-        explicitDeadlines.push(bound);
-      }
     }
   }
   const failureCodes: string[] = [];
@@ -1296,7 +1329,7 @@ export interface CompleteShadowJobOptions {
  * lifecycle + time applicability, and the job lease. Any fence failure
  * HOLDS the job with a fixed redacted reason (late output held, never
  * applied, never retried). On success the CODE policy classifies the MODEL
- * decision (`shadow_noexecution` et al.) and the job completes with ZERO
+ * decision (`missing_grant` et al.) and the job completes with ZERO
  * execution performed. Opens its own transaction.
  */
 export function completeShadowJob(
@@ -1387,7 +1420,7 @@ export function completeShadowJob(
         policyCode: null,
       };
     }
-    const targetFence = fenceClaimedTargets(db, context, now);
+    const targetFence = fenceClaimedTargets(db, context, reader, now);
     if (targetFence !== null) {
       return {
         outcome: "held" as const,
@@ -1445,9 +1478,10 @@ export function completeShadowJob(
  * Validate MODEL evidence + task-draft deadline against the FROZEN
  * context: every evidence id MUST be a frozen label (no arbitrary source
  * ids, no foreign-session ids, no free-form citations); a task-draft
- * deadline is accepted ONLY when it matches an EXPLICIT input deadline
- * frozen in the context (no creative calendar dates) and satisfies the
- * strict grammar via the read port.
+ * deadline is accepted ONLY when it matches the EXPLICIT deadline of a
+ * task ACTUALLY cited in `evidenceIds` (no creative calendar dates, no
+ * window-as-deadline, no borrowing an uncited task's date) and satisfies
+ * the strict grammar via the read port.
  */
 function validateEvidenceAndDraft(
   parsed: ShadowModelOutput,
@@ -1478,18 +1512,35 @@ function validateEvidenceAndDraft(
         "task draft deadline must satisfy the strict deadline grammar",
       );
     }
+    const citedTaskDeadlines = new Set(
+      context.tasks
+        .filter(
+          (task) =>
+            parsed.evidenceIds.includes(task.label) && task.deadline !== null,
+        )
+        .map((task) => task.deadline as string),
+    );
+    if (!citedTaskDeadlines.has(draftDeadline)) {
+      throw new RepositoryValidationError(
+        "task draft deadline must match a cited task's explicit deadline",
+      );
+    }
   }
 }
 
 /**
  * Fence every frozen target against CURRENT lifecycle state: version +
- * status must be unchanged, and still-active purposes must still be time
- * applicable at the frozen `now`. Returns the hold reason, or null when
- * every target still matches.
+ * status must be unchanged, and time applicability must be UNCHANGED since
+ * the claim (computed via the borrowed grammar on the read port, never a
+ * local copy). An already-inapplicable record stays context data and never
+ * holds unrelated work; a window boundary crossed DURING the call holds
+ * the stale proposal. Returns the hold reason, or null when every target
+ * still matches.
  */
 function fenceClaimedTargets(
   db: Database.Database,
   context: ShadowJobContext,
+  reader: ShadowPolicyReader,
   now: number,
 ): "target_changed" | "target_inapplicable" | null {
   for (const purpose of context.purposes) {
@@ -1512,13 +1563,14 @@ function fenceClaimedTargets(
     ) {
       return "target_changed";
     }
-    if (row.status === "active") {
-      if (
-        (row.valid_from !== null && Date.parse(row.valid_from) > now) ||
-        (row.valid_until !== null && now >= Date.parse(row.valid_until))
-      ) {
-        return "target_inapplicable";
-      }
+    const nowApplicable =
+      row.status === "active" &&
+      reader.isPurposeApplicableAt(
+        { validFrom: row.valid_from, validUntil: row.valid_until },
+        now,
+      );
+    if (nowApplicable !== purpose.applicableAtClaim) {
+      return "target_inapplicable";
     }
   }
   for (const task of context.tasks) {
@@ -1540,9 +1592,9 @@ function fenceClaimedTargets(
  * CODE policy mapping (never model-chosen, never a grant): `do-nothing` →
  * `no_action`; `ask` → `needs_clarification`; `hold` → `shadow_only`;
  * `execute` evidence touching external text → `external_no_authority`;
- * wish-kind evidence → `wish_not_command`; no active permission CLAIM →
- * `missing_grant`; otherwise `shadow_noexecution` (recorded only — a
- * recorded permission NEVER becomes a grant, and NOTHING executes).
+ * wish-kind evidence → `wish_not_command`; otherwise (including WITH a
+ * recorded permission CLAIM) → `missing_grant`. A CLAIM never becomes a
+ * grant and NOTHING executes: `execute` always stays unauthorized.
  */
 export function deriveShadowPolicyCode(
   decision: ShadowDecision,
@@ -1575,10 +1627,11 @@ export function deriveShadowPolicyCode(
   if (evidence.some((entry) => entry.kind === "wish")) {
     return "wish_not_command";
   }
-  if (context.permissionClaims.length === 0) {
-    return "missing_grant";
-  }
-  return "shadow_noexecution";
+  // CLAIM != GRANT: presence of a permission CLAIM never removes the
+  // missing-grant diagnostic. `execute` always stays unauthorized (unless
+  // the higher-priority external/wish boundaries above applied).
+  void context;
+  return "missing_grant";
 }
 
 /* ------------------------------------------------------------------ */

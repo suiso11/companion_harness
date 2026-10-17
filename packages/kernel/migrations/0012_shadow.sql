@@ -11,7 +11,7 @@
 -- NO grant / capability / calendar / ToolBroker / child-process / device /
 -- secret column anywhere here: a recorded `permission` purpose stays a
 -- CLAIM, and a completed shadow job stores a MODEL decision SEPARATE from
--- the CODE policy code (`shadow_noexecution` / `missing_grant` /
+-- the CODE policy code (`missing_grant` /
 -- `wish_not_command` / `external_no_authority` / `needs_clarification` /
 -- `no_action`). NOTHING in this migration can trigger external execution.
 --
@@ -100,7 +100,7 @@ CREATE TABLE shadow_jobs (
   model_decision_json   TEXT               -- validated MODEL output (complete time), json_valid
                         CHECK (model_decision_json IS NULL OR json_valid(model_decision_json)),
   policy_code           TEXT               -- CODE policy (complete time only, never model-chosen)
-                        CHECK (policy_code IS NULL OR policy_code IN ('shadow_only','shadow_noexecution','missing_grant','wish_not_command','external_no_authority','needs_clarification','no_action')),
+                         CHECK (policy_code IS NULL OR policy_code IN ('shadow_only','missing_grant','wish_not_command','external_no_authority','needs_clarification','no_action')),
   version               INTEGER NOT NULL CHECK (version >= 1),
   lease_owner           TEXT CHECK (lease_owner IS NULL OR length(lease_owner) >= 1),
   lease_expires_at      INTEGER,

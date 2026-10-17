@@ -10,7 +10,7 @@ import { UnixMsSchema, UuidSchema } from "./ids.js";
  * budget, bypass, calendar, ToolBroker, child-process, or device field
  * anywhere in these contracts — `z.strictObject` rejects such unknown
  * fields outright. A recorded `permission` purpose stays a CLAIM: the CODE
- * policy mapping (`ShadowPolicyCodeSchema`) may record `missing_grant` /
+ * policy mapping (`ShadowPolicyCodeSchema`) records `missing_grant` /
  * `wish_not_command` / `external_no_authority`, but a recorded permission
  * NEVER becomes a grant and NOTHING here can trigger execution.
  *
@@ -54,14 +54,14 @@ export type ShadowJobStatus = z.infer<typeof ShadowJobStatusSchema>;
 
 /**
  * CODE-computed policy for a completed job (never model-chosen, never a
- * grant): `shadow_noexecution` records deliberation with zero execution;
- * `missing_grant` / `wish_not_command` / `external_no_authority` name why an
- * `execute` proposal stays unexecuted; `needs_clarification` / `no_action`
- * mirror `ask` / `do-nothing`.
+ * grant): `missing_grant` / `wish_not_command` / `external_no_authority`
+ * name why an `execute` proposal stays unexecuted (a recorded permission
+ * CLAIM never removes `missing_grant`: there is no runtime grant anywhere
+ * in the shadow core); `needs_clarification` / `no_action` mirror `ask` /
+ * `do-nothing`; `shadow_only` mirrors `hold`.
  */
 export const ShadowPolicyCodeSchema = z.enum([
   "shadow_only",
-  "shadow_noexecution",
   "missing_grant",
   "wish_not_command",
   "external_no_authority",
@@ -134,9 +134,10 @@ export type ShadowActionKind = z.infer<typeof ShadowActionKindSchema>;
 
 /**
  * LOCAL task draft: an explicit local entity sketch, never a calendar
- * event. `deadline` is accepted ONLY when it matches an EXPLICIT input
- * deadline frozen in the job context (no creative calendar dates); the
- * match is enforced by the kernel at completion time.
+ * event. `deadline` is accepted ONLY when it matches the EXPLICIT deadline
+ * of a task ACTUALLY cited in `evidenceIds` (no creative calendar dates,
+ * no window-as-deadline, no borrowing an uncited task's date); the match
+ * is enforced by the kernel at completion time.
  */
 export const ShadowTaskDraftSchema = z.strictObject({
   title: z.string().min(1).max(256),
@@ -245,6 +246,8 @@ export const ShadowContextPurposeSchema = z.strictObject({
   validFrom: z.string().nullable(),
   validUntil: z.string().nullable(),
   supersededBy: UuidSchema.nullable(),
+  /** Trusted time applicability at claim (`active` + window at `capturedAt`). */
+  applicableAtClaim: z.boolean(),
 });
 export type ShadowContextPurpose = z.infer<typeof ShadowContextPurposeSchema>;
 
@@ -289,11 +292,11 @@ export const ShadowJobContextSchema = z.strictObject({
   purposes: z.array(ShadowContextPurposeSchema),
   tasks: z.array(ShadowContextTaskSchema),
   conflictPairs: z.array(z.tuple([UuidSchema, UuidSchema])),
-  /** Active `constraint`-kind purpose ids (complete list, unranked). */
+  /** Currently-applicable `constraint`-kind purpose ids (complete list, unranked). */
   activeConstraintIds: z.array(UuidSchema),
-  /** Active `permission`-kind CLAIM excerpts (complete list, unranked). */
+  /** Currently-applicable `permission`-kind CLAIM excerpts (complete list, unranked; never grants). */
   permissionClaims: z.array(ShadowContextClaimSchema),
-  /** EXPLICIT input deadlines only (task-draft deadlines must match one). */
+  /** EXPLICIT TASK deadlines only (applicability windows are never deadlines; drafts must cite the task). */
   explicitDeadlines: z.array(z.string().min(1).max(128)),
   priorFailures: z.array(ShadowContextFailureSchema),
   claimControlVersion: z.number().int().min(1),

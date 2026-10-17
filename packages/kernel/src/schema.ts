@@ -1249,7 +1249,7 @@ export const shadowJobs = sqliteTable(
     check("shadow_jobs_version_check", sql`${t.version} >= 1`),
     check(
       "shadow_jobs_policy_code_check",
-      sql`${t.policyCode} IS NULL OR ${t.policyCode} IN ('shadow_only','shadow_noexecution','missing_grant','wish_not_command','external_no_authority','needs_clarification','no_action')`,
+      sql`${t.policyCode} IS NULL OR ${t.policyCode} IN ('shadow_only','missing_grant','wish_not_command','external_no_authority','needs_clarification','no_action')`,
     ),
     check(
       "shadow_jobs_context_json_check",

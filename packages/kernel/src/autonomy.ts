@@ -818,6 +818,35 @@ export function getPurpose(
   return toPurposeView(assertOwnedPurpose(db, sessionId, purposeId));
 }
 
+/**
+ * Scope-filtered internal reader for the shadow port (NOT a public list
+ * DTO): SQL filters `(session, scope)` BEFORE the limit and reads up to
+ * `limit` rows (callers pass 101) so the builder detects REAL overflow
+ * instead of silently dropping in-scope constraints / permission claims
+ * hidden behind newest-first truncation of other-scope records. Reuses the
+ * exact `toPurposeView` mapper + session/scope validation (no second
+ * projection, no unbounded reads).
+ */
+export function listPurposesInScope(
+  db: Database.Database,
+  sessionId: string,
+  scope: string,
+  limit = 101,
+): { items: ReturnType<typeof toPurposeView>[] } {
+  const session = requireId(sessionId, "sessionId");
+  if (scope.length === 0 || scope.length > 128) {
+    throw new RepositoryValidationError("scope must be 1..128 chars");
+  }
+  requireSession(db, session);
+  const capped = Math.min(Math.max(limit, 1), 101);
+  const rows = db
+    .prepare(
+      "SELECT * FROM autonomy_purposes WHERE session_id = ? AND scope = ? ORDER BY created_at DESC, id ASC LIMIT ?",
+    )
+    .all(session, scope, capped) as RawPurpose[];
+  return { items: rows.map(toPurposeView) };
+}
+
 export function listPurposeEvents(
   db: Database.Database,
   sessionId: string,
@@ -879,6 +908,32 @@ export function listPurposeConflicts(
       purposeIds: [row.a, row.b],
     })),
   };
+}
+
+/**
+ * Scope-filtered internal conflict reader for the shadow port: SQL filters
+ * `(session, scope)` BEFORE the limit (up to 101) so an in-scope explicit
+ * pair is never hidden behind other-scope truncation. Active-membership
+ * semantics are unchanged (both members still active).
+ */
+export function listConflictPairsInScope(
+  db: Database.Database,
+  sessionId: string,
+  scope: string,
+  limit = 101,
+): [string, string][] {
+  const session = requireId(sessionId, "sessionId");
+  if (scope.length === 0 || scope.length > 128) {
+    throw new RepositoryValidationError("scope must be 1..128 chars");
+  }
+  requireSession(db, session);
+  const capped = Math.min(Math.max(limit, 1), 101);
+  const rows = db
+    .prepare(
+      "SELECT c.purpose_a_id AS a, c.purpose_b_id AS b FROM autonomy_purpose_conflicts c JOIN autonomy_purposes pa ON pa.id = c.purpose_a_id JOIN autonomy_purposes pb ON pb.id = c.purpose_b_id WHERE c.session_id = ? AND pa.scope = ? AND pa.status = 'active' AND pb.status = 'active' ORDER BY c.created_at ASC, c.id ASC LIMIT ?",
+    )
+    .all(session, scope, capped) as { a: string; b: string }[];
+  return rows.map((row) => [row.a, row.b] as [string, string]);
 }
 
 export interface RecordConflictInput {
@@ -1570,6 +1625,32 @@ export function listTasks(
       "SELECT * FROM autonomy_tasks WHERE session_id = ? ORDER BY created_at DESC, id ASC LIMIT ?",
     )
     .all(session, capped) as RawTask[];
+  return { items: rows.map(toTaskView) };
+}
+
+/**
+ * Scope-filtered internal reader for the shadow port (NOT a public list
+ * DTO): SQL filters `(session, scope)` BEFORE the limit and reads up to
+ * `limit` rows (callers pass 101) so the builder detects REAL overflow.
+ * Reuses the exact `toTaskView` mapper (no second projection).
+ */
+export function listTasksInScope(
+  db: Database.Database,
+  sessionId: string,
+  scope: string,
+  limit = 101,
+): { items: ReturnType<typeof toTaskView>[] } {
+  const session = requireId(sessionId, "sessionId");
+  if (scope.length === 0 || scope.length > 128) {
+    throw new RepositoryValidationError("scope must be 1..128 chars");
+  }
+  requireSession(db, session);
+  const capped = Math.min(Math.max(limit, 1), 101);
+  const rows = db
+    .prepare(
+      "SELECT * FROM autonomy_tasks WHERE session_id = ? AND scope = ? ORDER BY created_at DESC, id ASC LIMIT ?",
+    )
+    .all(session, scope, capped) as RawTask[];
   return { items: rows.map(toTaskView) };
 }
 

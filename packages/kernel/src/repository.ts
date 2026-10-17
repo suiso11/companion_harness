@@ -146,10 +146,14 @@ import {
   getPurpose as autonomyGetPurpose,
   getTask as autonomyGetTask,
   holdTask as autonomyHoldTask,
+  isPurposeApplicableAt as autonomyIsPurposeApplicableAt,
   listAutonomyActivity as autonomyListActivity,
+  listConflictPairsInScope as autonomyListConflictPairsInScope,
   listPurposeConflicts as autonomyListConflicts,
   listPurposes as autonomyListPurposes,
+  listPurposesInScope as autonomyListPurposesInScope,
   listTasks as autonomyListTasks,
+  listTasksInScope as autonomyListTasksInScope,
   recordPurposeConflict as autonomyRecordConflict,
   resumeTask as autonomyResumeTask,
   revokePurpose as autonomyRevokePurpose,
@@ -5234,56 +5238,50 @@ export function createKernelRepository(
 
   const shadowPolicyReader: ShadowPolicyReader = {
     listScopePurposes(sessionId: string, scope: string): ShadowReaderPurpose[] {
-      const out = autonomyListPurposes(db, sessionId, 100);
-      return out.items
-        .filter((purpose) => purpose.scope === scope)
-        .map((purpose) => ({
-          id: purpose.id,
-          scope: purpose.scope,
-          kind: purpose.kind,
-          explicit: purpose.explicit,
-          sourceKind: purpose.sourceKind,
-          statement: purpose.statement,
-          interpretation: purpose.interpretation,
-          status: purpose.status,
-          version: purpose.version,
-          supersededBy: purpose.supersededBy,
-          validFrom: purpose.validFrom,
-          validUntil: purpose.validUntil,
-          createdAt: purpose.createdAt,
-        }));
+      const out = autonomyListPurposesInScope(db, sessionId, scope, 101);
+      return out.items.map((purpose) => ({
+        id: purpose.id,
+        scope: purpose.scope,
+        kind: purpose.kind,
+        explicit: purpose.explicit,
+        sourceKind: purpose.sourceKind,
+        statement: purpose.statement,
+        interpretation: purpose.interpretation,
+        status: purpose.status,
+        version: purpose.version,
+        supersededBy: purpose.supersededBy,
+        validFrom: purpose.validFrom,
+        validUntil: purpose.validUntil,
+        createdAt: purpose.createdAt,
+      }));
     },
     listScopeTasks(sessionId: string, scope: string): ShadowReaderTask[] {
-      const out = autonomyListTasks(db, sessionId, 100);
-      return out.items
-        .filter((task) => task.scope === scope)
-        .map((task) => ({
-          id: task.id,
-          scope: task.scope,
-          title: task.title,
-          kind: task.kind,
-          speaker: task.speaker,
-          deadline: task.deadline,
-          parentPurposeId: task.parentPurposeId,
-          status: task.status,
-          version: task.version,
-          holdReason: task.holdReason,
-        }));
+      const out = autonomyListTasksInScope(db, sessionId, scope, 101);
+      return out.items.map((task) => ({
+        id: task.id,
+        scope: task.scope,
+        title: task.title,
+        kind: task.kind,
+        speaker: task.speaker,
+        deadline: task.deadline,
+        parentPurposeId: task.parentPurposeId,
+        status: task.status,
+        version: task.version,
+        holdReason: task.holdReason,
+      }));
     },
     listScopeConflictPairs(
       sessionId: string,
       scope: string,
     ): [string, string][] {
-      const out = autonomyListConflicts(db, sessionId);
-      return out.conflicts
-        .filter((group) => group.scope === scope)
-        .map(
-          (group) =>
-            [group.purposeIds[0], group.purposeIds[1]] as [string, string],
-        );
+      return autonomyListConflictPairsInScope(db, sessionId, scope, 101);
     },
     isStrictDeadline: (value: string): boolean =>
       isStrictAutonomyDeadline(value),
+    isPurposeApplicableAt: (
+      purpose: { validFrom: string | null; validUntil: string | null },
+      now: number,
+    ): boolean => autonomyIsPurposeApplicableAt(purpose, now),
   };
 
   function requestShadowDeliberation(
@@ -5444,7 +5442,6 @@ export function createKernelRepository(
     job: ShadowJobView;
     policyCode:
       | "shadow_only"
-      | "shadow_noexecution"
       | "missing_grant"
       | "wish_not_command"
       | "external_no_authority"
