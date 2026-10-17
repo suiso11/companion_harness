@@ -316,15 +316,19 @@ export function renderConversationShell(): HtmlEscapedString {
         jsx("p", { id: "shadow-status", "aria-live": "polite" }),
         jsx("button", { id: "shadow-refresh", type: "button" }, "一覧を更新"),
         jsx("ul", { id: "shadow-job-list" }),
+        // The frozen-request retry belongs to the request surface, NOT the
+        // detail panel: the detail stays hidden until a job is selected, so
+        // a retry nested inside it could never be pressed after an
+        // uncertain POST (pinned by the shadow browser regression).
+        jsx(
+          "button",
+          { id: "shadow-retry", type: "button", hidden: true },
+          "同じ内容で再送",
+        ),
         jsx(
           "div",
           { id: "shadow-detail", hidden: true },
           jsx("pre", { id: "shadow-detail-body" }),
-          jsx(
-            "button",
-            { id: "shadow-retry", type: "button", hidden: true },
-            "同じ内容で再送",
-          ),
         ),
       ),
       jsx(

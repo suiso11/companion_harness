@@ -3810,3 +3810,11 @@ branch until that lands.
   next completes), production smoke (real `startServer` + real provider
   HTTP loopback) 17/17; `tsc` + Biome clean. UI browser proof STILL
   unverified (Chromium regression is the handoff).
+- Shadow browser 4/4 Chromium (2026-10-17, branch feat/av-shadow-deliberation,
+  fresh `build:ui`): `e2e/shadow.spec.ts` 4/4 green on real HTTP+SQLite+SSR
+  (per-test fixture server + synthetic gateway). Retry button moved out of
+  hidden detail (REAL SSR bug: uncertain POST retry was unreachable);
+  test3 seeds scope-a+scope-b while paused so ask evidence sP1 exists in
+  each frozen scope; test4 re-focuses composer after explicit STOP so the
+  held landing alone proves no draft/focus/selection clobber. `tsc` + Biome
+  clean.

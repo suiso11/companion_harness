@@ -41,6 +41,7 @@ export default defineConfig({
           "sse_history.spec.ts",
           "polling.spec.ts",
           "autonomy.spec.ts",
+          "shadow.spec.ts",
         ],
   timeout: 60_000,
   expect: { timeout: 15_000 },
