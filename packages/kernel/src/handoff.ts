@@ -414,8 +414,13 @@ export interface CreateHandoffInput {
  * Trusted human creation: bound to an EXISTING session-owned task (frozen
  * task version + parent purpose snapshot). All frozen fields are stored
  * verbatim: the model can never reach this path. A superseding creation
- * links the old frozen record forward WITHOUT rewriting it (the old
- * criteria stay preserved on the old row).
+ * links the old frozen record forward WITHOUT rewriting its frozen
+ * content (the old criteria stay preserved on the old row): the old row
+ * gets `superseded_by` AND a version bump inside the SAME transaction
+ * (CAS-guarded, exactly-one-row asserted), and superseding an
+ * ALREADY-superseded handoff refuses (409, no forward-link fork).
+ * Creation against a completed/cancelled task refuses (409): frozen
+ * records for terminal work are meaningless.
  */
 export function createHandoff(
   db: Database.Database,
@@ -457,14 +462,26 @@ export function createHandoff(
     const taskId = requireId(input.taskId, "taskId");
     const task = db
       .prepare(
-        "SELECT id, version, parent_purpose_id FROM autonomy_tasks WHERE session_id = ? AND id = ?",
+        "SELECT id, version, status, parent_purpose_id FROM autonomy_tasks WHERE session_id = ? AND id = ?",
       )
       .get(session, taskId) as
-      | { id: string; version: number; parent_purpose_id: string | null }
+      | {
+          id: string;
+          version: number;
+          status: string;
+          parent_purpose_id: string | null;
+        }
       | undefined;
     if (task === undefined) {
       throw new RepositoryNotFoundError(
         `task ${taskId} not found in session ${session}`,
+      );
+    }
+    // A terminal task (completed/cancelled) accepts no new handoff: the
+    // human can never dispatch frozen work against finished records.
+    if (task.status === "completed" || task.status === "cancelled") {
+      throw new HandoffStateConflictError(
+        `task ${taskId} is ${task.status}: handoff refused`,
       );
     }
     let parentVersion: number | null = null;
@@ -491,6 +508,13 @@ export function createHandoff(
       if (supersedes.task_id !== taskId) {
         throw new HandoffStateConflictError(
           "superseding handoff must bind the same task",
+        );
+      }
+      // No fork: a handoff already linked forward can never be superseded
+      // a second time (the frozen chain stays linear, one successor max).
+      if (supersedes.superseded_by !== null) {
+        throw new HandoffStateConflictError(
+          "superseding handoff refused: the target is already superseded",
         );
       }
     }
@@ -537,9 +561,19 @@ export function createHandoff(
       );
     }
     if (supersedes !== null) {
-      db.prepare(
-        "UPDATE delegation_handoffs SET superseded_by = ?, updated_at = ? WHERE id = ? AND superseded_by IS NULL",
-      ).run(id, now, supersedes.id);
+      // Same-TX forward link + version bump: every holder of the old row's
+      // version alerts via CAS on the next mutation, and lifecycle
+      // writers refusing `superseded_by !== null` made this airtight.
+      const moved = db
+        .prepare(
+          "UPDATE delegation_handoffs SET superseded_by = ?, version = version + 1, updated_at = ? WHERE id = ? AND superseded_by IS NULL",
+        )
+        .run(id, now, supersedes.id);
+      if (moved.changes !== 1) {
+        throw new HandoffStateConflictError(
+          "supersede refused: the old handoff became superseded inside the same transaction",
+        );
+      }
       appendHandoffEventInTx(
         db,
         supersedes.id,
@@ -845,8 +879,10 @@ function setHandoffStatusInTx(
 
 /**
  * Human marks dispatched (optional external ref text, recorded never
- * resolved). Refused while a reevaluation notice is pending; cancel stays
- * available instead.
+ * resolved). Refused while a reevaluation notice is pending (cancel stays
+ * available instead), for an already-superseded handoff (the successor
+ * record owns the work now), and against a completed/cancelled task
+ * (terminal work accepts no dispatch).
  */
 export function dispatchHandoff(
   db: Database.Database,
@@ -864,6 +900,11 @@ export function dispatchHandoff(
     { ...options, operation: "dispatchHandoff" },
     { expectedVersion, externalRef: externalRef ?? null },
     (row, now) => {
+      if (row.superseded_by !== null) {
+        throw new HandoffStateConflictError(
+          `handoff was superseded by ${row.superseded_by}: dispatch refused`,
+        );
+      }
       if (row.needs_reevaluation === 1) {
         throw new HandoffStateConflictError(
           "handoff needs reevaluation: reaffirm before dispatch",
@@ -872,6 +913,23 @@ export function dispatchHandoff(
       if (row.status !== "prepared") {
         throw new HandoffStateConflictError(
           `dispatch requires prepared status (current ${row.status})`,
+        );
+      }
+      // The task's CURRENT status rules at dispatch time: a task that was
+      // completed/cancelled after the handoff froze refuses the dispatch
+      // (no frozen snapshot can re-open terminal work).
+      const task = db
+        .prepare(
+          "SELECT status FROM autonomy_tasks WHERE session_id = ? AND id = ?",
+        )
+        .get(row.session_id, row.task_id) as { status: string } | undefined;
+      if (
+        task === undefined ||
+        task.status === "completed" ||
+        task.status === "cancelled"
+      ) {
+        throw new HandoffStateConflictError(
+          "task is completed or cancelled: dispatch refused",
         );
       }
       setHandoffStatusInTx(
@@ -916,6 +974,11 @@ export function reportHandoff(
     { ...options, operation: "reportHandoff" },
     { expectedVersion, environment, summary },
     (row, now) => {
+      if (row.superseded_by !== null) {
+        throw new HandoffStateConflictError(
+          `handoff was superseded by ${row.superseded_by}: report refused`,
+        );
+      }
       if (row.status !== "dispatched") {
         throw new HandoffStateConflictError(
           `report requires dispatched status (current ${row.status})`,
@@ -981,6 +1044,11 @@ export function verifyHandoff(
     { ...options, operation: "verifyHandoff" },
     { expectedVersion, results },
     (row, now) => {
+      if (row.superseded_by !== null) {
+        throw new HandoffStateConflictError(
+          `handoff was superseded by ${row.superseded_by}: verify refused`,
+        );
+      }
       if (row.status !== "reported") {
         throw new HandoffStateConflictError(
           `verify requires reported status (current ${row.status})`,
@@ -1175,9 +1243,14 @@ export function abnormalExitHandoff(
 }
 
 /**
- * Human records one more attempt with an explicit REQUIRED cause (never
- * automatic, never invented by us). Allowed from any non-terminal state
- * plus `failed` (retry after failure); verified/cancelled stay terminal.
+ * Human records one more attempt with an explicit REQUIRED closed-cause
+ * label (never automatic, never invented by us; attempts are bounded only
+ * by explicit human action). Allowed from any non-terminal state; a
+ * `failed` handoff RETURNS TO `prepared` on a recorded attempt (the retry
+ * then follows the normal dispatch→report→verify path). Already-superseded
+ * handoffs and handoffs with a pending `needs_reevaluation` notice refuse
+ * (reaffirm comes first, so a stale parent never gets silently retried).
+ * Verified/cancelled stay terminal.
  */
 export function recordHandoffAttempt(
   db: Database.Database,
@@ -1200,15 +1273,33 @@ export function recordHandoffAttempt(
           `attempt requires a retryable status (current ${row.status})`,
         );
       }
+      if (row.superseded_by !== null) {
+        throw new HandoffStateConflictError(
+          `handoff was superseded by ${row.superseded_by}: attempt refused`,
+        );
+      }
+      // Same durable reevaluation gate as dispatch: a handoff whose parent
+      // was revoked/superseded is never silently retried — reaffirm first.
+      if (row.needs_reevaluation === 1) {
+        throw new HandoffStateConflictError(
+          "handoff needs reevaluation: reaffirm before recording an attempt",
+        );
+      }
+      // A retry after `failed` goes back to `prepared` (same-TX status
+      // move): the human can then dispatch→report→verify the new attempt
+      // through the standard lifecycle. Every other status keeps its
+      // current lifecycle state (an attempt row is only a record).
+      const toStatus: HandoffStatus =
+        row.status === "failed" ? "prepared" : (row.status as HandoffStatus);
       const attemptNo = row.active_attempt + 1;
       db.prepare(
         "INSERT INTO handoff_attempts (id, handoff_id, session_id, attempt_no, cause, created_at) VALUES (?, ?, ?, ?, ?, ?)",
       ).run(generateId(), row.id, row.session_id, attemptNo, cause, now);
       const moved = db
         .prepare(
-          "UPDATE delegation_handoffs SET active_attempt = ?, version = version + 1, updated_at = ? WHERE id = ? AND version = ?",
+          "UPDATE delegation_handoffs SET active_attempt = ?, status = ?, version = version + 1, updated_at = ? WHERE id = ? AND version = ?",
         )
-        .run(attemptNo, now, row.id, row.version);
+        .run(attemptNo, toStatus, now, row.id, row.version);
       if (moved.changes !== 1) {
         const current = readHandoff(db, row.id);
         throw new HandoffVersionConflictError(
@@ -1222,8 +1313,8 @@ export function recordHandoffAttempt(
         row.session_id,
         "attempt_recorded",
         row.status,
-        row.status,
-        `attempt ${attemptNo} cause=${cause} (explicit human retry, never automatic)`,
+        toStatus,
+        `attempt ${attemptNo} cause=${cause}${row.status === "failed" ? " (retry returns to prepared for a new dispatch)" : ""} (explicit human retry, never automatic)`,
         now,
       );
       const next = readHandoff(db, row.id);
@@ -1310,11 +1401,16 @@ export function reaffirmHandoff(
 /* ------------------------------------------------------------------ */
 
 /**
- * Flag every ACTIVE (prepared/dispatched/reported) handoff bound to the
+ * Flag every ACTIVE (prepared/dispatched/reported) handoff affected by a
  * revoked/superseded parent purpose with the durable `needs_reevaluation`
- * NOTICE plus a `reevaluation_flagged` history event. Called by
- * autonomy.ts INSIDE the parent-transition transaction, so the flag and
- * the parent state change are atomic (idempotent: flagged rows skipped).
+ * NOTICE plus a `reevaluation_flagged` history event. Both binding
+ * directions match: the FROZEN parent snapshot on the handoff row AND the
+ * task's CURRENT parent (a task re-parented via `resumeTask` — including
+ * a task that was parentless when the handoff froze — belongs to the
+ * revoked purpose now, even when the handoff snapshot names an older
+ * purpose or none). Called by autonomy.ts INSIDE the parent-transition
+ * transaction, so the flag and the parent state change are atomic
+ * (idempotent: flagged rows skipped).
  *
  * The flag ALSO bumps `version` under a CAS guard: a human holding a
  * stale loaded version can no longer dispatch over the notice. New
@@ -1335,9 +1431,9 @@ export function flagHandoffReevaluationInTx(
 ): void {
   const rows = db
     .prepare(
-      "SELECT id, status, version FROM delegation_handoffs WHERE session_id = ? AND parent_purpose_id = ? AND status IN ('prepared','dispatched','reported') AND needs_reevaluation = 0",
+      "SELECT h.id AS id, h.status AS status, h.version AS version FROM delegation_handoffs h LEFT JOIN autonomy_tasks t ON t.session_id = h.session_id AND t.id = h.task_id WHERE h.session_id = ? AND (h.parent_purpose_id = ? OR t.parent_purpose_id = ?) AND h.status IN ('prepared','dispatched','reported') AND h.needs_reevaluation = 0",
     )
-    .all(sessionId, parentPurposeId) as {
+    .all(sessionId, parentPurposeId, parentPurposeId) as {
     id: string;
     status: string;
     version: number;

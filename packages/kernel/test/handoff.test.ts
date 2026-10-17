@@ -648,6 +648,315 @@ describe("handoff core", () => {
     }
   });
 
+  it("supersede bumps the old version in the same tx; already-superseded refuses; dispatch/verify refuse after supersede (no fork)", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      const purpose = makePurpose(repo, sessionId, T0);
+      const task = makeTask(repo, sessionId, T0 + 1, purpose.body.id);
+      const old = makeHandoff(repo, sessionId, task.body.id, T0 + 2);
+      expect(old.body.version).toBe(1);
+      const next = repo.createHandoff(
+        sessionId,
+        {
+          taskId: task.body.id,
+          target: "superseding handoff",
+          acceptanceCriteria: ["one new criterion"],
+          opScope: "implement",
+          supersedesHandoffId: old.body.id,
+        },
+        { key: randomUUID(), now: T0 + 3 },
+      );
+      expect(next.status).toBe(201);
+      // The OLD row was bumped in the SAME transaction: a human holding
+      // the pre-supersede version can never race the successor.
+      const reread = repo.getHandoff(sessionId, old.body.id);
+      expect(reread.version).toBe(2);
+      expect(reread.supersededBy).toBe(next.body.id);
+      // A second forward link forks the frozen chain: refuses.
+      expect(() =>
+        repo.createHandoff(
+          sessionId,
+          {
+            taskId: task.body.id,
+            target: "attempted fork",
+            acceptanceCriteria: ["another"],
+            opScope: "investigate",
+            supersedesHandoffId: old.body.id,
+          },
+          { key: randomUUID(), now: T0 + 4 },
+        ),
+      ).toThrow(HandoffStateConflictError);
+      // The holder of the superseded handoff cannot dispatch/report/
+      // verify/attempt over it (lifecycle 409s, no 500).
+      expect(() =>
+        repo.dispatchHandoff(
+          sessionId,
+          old.body.id,
+          { expectedVersion: 2 },
+          { key: randomUUID(), now: T0 + 5 },
+        ),
+      ).toThrow(HandoffStateConflictError);
+      const oldCurrent = repo.getHandoff(sessionId, old.body.id);
+      expect(() =>
+        repo.reportHandoff(
+          sessionId,
+          old.body.id,
+          {
+            expectedVersion: oldCurrent.version,
+            environment: "sandbox",
+            summary: "superseded refuse",
+          },
+          { key: randomUUID(), now: T0 + 6 },
+        ),
+      ).toThrow(HandoffStateConflictError);
+      const dispatched = repo.dispatchHandoff(
+        sessionId,
+        next.body.id,
+        { expectedVersion: next.body.version },
+        { key: randomUUID(), now: T0 + 7 },
+      );
+      const reported = repo.reportHandoff(
+        sessionId,
+        next.body.id,
+        {
+          expectedVersion: dispatched.body.version,
+          environment: "sandbox",
+          summary: "successor works",
+        },
+        { key: randomUUID(), now: T0 + 8 },
+      );
+      expect(() =>
+        repo.verifyHandoff(
+          sessionId,
+          old.body.id,
+          {
+            expectedVersion: oldCurrent.version,
+            results: [{ index: 0, pass: true, evidence: "e0" }],
+          },
+          { key: randomUUID(), now: T0 + 9 },
+        ),
+      ).toThrow(HandoffStateConflictError);
+      // The successor's lifecycle is untouched by the old row's refusal.
+      expect(reported.body.status).toBe("reported");
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("recording an attempt on failed returns to prepared; full retry path dispatch→report→verify works", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      const purpose = makePurpose(repo, sessionId, T0);
+      const task = makeTask(repo, sessionId, T0 + 1, purpose.body.id);
+      const created = makeHandoff(repo, sessionId, task.body.id, T0 + 2);
+      const id = created.body.id;
+      const dispatched = repo.dispatchHandoff(
+        sessionId,
+        id,
+        { expectedVersion: 1 },
+        { key: randomUUID(), now: T0 + 3 },
+      );
+      const failed = repo.failHandoff(
+        sessionId,
+        id,
+        { expectedVersion: dispatched.body.version },
+        { key: randomUUID(), now: T0 + 4 },
+      );
+      expect(failed.body.status).toBe("failed");
+      const attempt = repo.recordHandoffAttempt(
+        sessionId,
+        id,
+        { expectedVersion: failed.body.version, cause: "worker_error" },
+        { key: randomUUID(), now: T0 + 5 },
+      );
+      // (a) semantics: the retry returns the handoff to PREPARED with the
+      // recorded attempt count preserved.
+      expect(attempt.body.status).toBe("prepared");
+      expect(attempt.body.activeAttempt).toBe(1);
+      expect(attempt.body.version).toBe(failed.body.version + 1);
+      // The retry then follows the standard lifecycle: dispatch first.
+      const redispatched = repo.dispatchHandoff(
+        sessionId,
+        id,
+        { expectedVersion: attempt.body.version },
+        { key: randomUUID(), now: T0 + 55 },
+      );
+      const rereported = repo.reportHandoff(
+        sessionId,
+        id,
+        {
+          expectedVersion: redispatched.body.version,
+          environment: "sandbox",
+          summary: "second try ran",
+        },
+        { key: randomUUID(), now: T0 + 6 },
+      );
+      expect(rereported.body.status).toBe("reported");
+      const verified = repo.verifyHandoff(
+        sessionId,
+        id,
+        {
+          expectedVersion: rereported.body.version,
+          results: [
+            { index: 0, pass: true, evidence: "e0" },
+            { index: 1, pass: true, evidence: "e1" },
+          ],
+        },
+        { key: randomUUID(), now: T0 + 7 },
+      );
+      expect(verified.body.status).toBe("verified");
+      const events = repo.listHandoffEvents(sessionId, id);
+      const attemptEvent = events.events.find(
+        (e) => e.event === "attempt_recorded",
+      );
+      expect(attemptEvent?.fromStatus).toBe("failed");
+      expect(attemptEvent?.toStatus).toBe("prepared");
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("completed/cancelled tasks refuse handoff create and dispatch", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      const purpose = makePurpose(repo, sessionId, T0);
+      const done = makeTask(repo, sessionId, T0 + 1, purpose.body.id);
+      const cancelledTask = makeTask(repo, sessionId, T0 + 2, purpose.body.id);
+      repo.completeAutonomyTask(
+        sessionId,
+        done.body.id,
+        { expectedVersion: 1 },
+        { key: randomUUID(), now: T0 + 3 },
+      );
+      repo.cancelAutonomyTask(
+        sessionId,
+        cancelledTask.body.id,
+        { expectedVersion: 1 },
+        { key: randomUUID(), now: T0 + 3 },
+      );
+      for (const task of [done, cancelledTask]) {
+        expect(() =>
+          repo.createHandoff(
+            sessionId,
+            {
+              taskId: task.body.id,
+              target: "terminal work",
+              acceptanceCriteria: ["one"],
+              opScope: "investigate",
+            },
+            { key: randomUUID(), now: T0 + 4 },
+          ),
+        ).toThrow(HandoffStateConflictError);
+      }
+      // A task completed AFTER the handoff froze refuses at dispatch.
+      const stillOpen = makeTask(repo, sessionId, T0 + 5, purpose.body.id);
+      const created = makeHandoff(repo, sessionId, stillOpen.body.id, T0 + 6);
+      repo.completeAutonomyTask(
+        sessionId,
+        stillOpen.body.id,
+        { expectedVersion: 1 },
+        { key: randomUUID(), now: T0 + 7 },
+      );
+      expect(() =>
+        repo.dispatchHandoff(
+          sessionId,
+          created.body.id,
+          { expectedVersion: 1 },
+          { key: randomUUID(), now: T0 + 8 },
+        ),
+      ).toThrow(HandoffStateConflictError);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("re-parented plus parentless-origin tasks are flagged via their CURRENT parent on revoke; flagged handoffs refuse attempts", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      // Re-parent case: handoff froze parent A, but the task currently
+      // belongs to purpose B (resumed with an explicit new parent).
+      const purposeA = makePurpose(repo, sessionId, T0, "goal A");
+      const taskA = makeTask(repo, sessionId, T0 + 1, purposeA.body.id);
+      const handoffA = makeHandoff(repo, sessionId, taskA.body.id, T0 + 2);
+      repo.holdAutonomyTask(
+        sessionId,
+        taskA.body.id,
+        { expectedVersion: 1, reason: "work", reconsiderTrigger: "work" },
+        { key: randomUUID(), now: T0 + 3 },
+      );
+      const purposeB = makePurpose(repo, sessionId, T0 + 4, "goal B");
+      repo.resumeAutonomyTask(
+        sessionId,
+        taskA.body.id,
+        {
+          expectedVersion: 2,
+          evidenceKind: "parent_changed",
+          evidence: "re-parented to goal B",
+          newParentPurposeId: purposeB.body.id,
+        },
+        { key: randomUUID(), now: T0 + 5 },
+      );
+      // Parentless-origin case: the handoff froze NO parent, the task
+      // gained one via a resume.
+      const taskB = repo.createAutonomyTask(
+        sessionId,
+        {
+          scope: "work",
+          title: "standalone task",
+          kind: "task",
+          speaker: "user",
+        },
+        { key: randomUUID(), now: T0 + 6 },
+      );
+      const handoffB = makeHandoff(repo, sessionId, taskB.body.id, T0 + 7);
+      expect(handoffB.body.parentPurposeId).toBeNull();
+      repo.holdAutonomyTask(
+        sessionId,
+        taskB.body.id,
+        { expectedVersion: 1, reason: "work", reconsiderTrigger: "work" },
+        { key: randomUUID(), now: T0 + 8 },
+      );
+      repo.resumeAutonomyTask(
+        sessionId,
+        taskB.body.id,
+        {
+          expectedVersion: 2,
+          evidenceKind: "parent_changed",
+          evidence: "adopted goal B",
+          newParentPurposeId: purposeB.body.id,
+        },
+        { key: randomUUID(), now: T0 + 9 },
+      );
+      // Revoking B flags BOTH handoffs (current-parent match), each with
+      // its own version bump under CAS.
+      repo.revokeAutonomyPurpose(
+        sessionId,
+        purposeB.body.id,
+        { expectedVersion: 1 },
+        { key: randomUUID(), now: T0 + 10 },
+      );
+      expect(
+        repo.getHandoff(sessionId, handoffA.body.id).needsReevaluation,
+      ).toBe(true);
+      expect(
+        repo.getHandoff(sessionId, handoffB.body.id).needsReevaluation,
+      ).toBe(true);
+      const flagged = repo.getHandoff(sessionId, handoffA.body.id);
+      expect(flagged.version).toBe(2);
+      // The flagged gate also refuses recorded attempts until reaffirm.
+      expect(() =>
+        repo.recordHandoffAttempt(
+          sessionId,
+          handoffA.body.id,
+          { expectedVersion: flagged.version, cause: "worker_error" },
+          { key: randomUUID(), now: T0 + 11 },
+        ),
+      ).toThrow(HandoffStateConflictError);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
   it("idempotent replay returns the stored body; key reuse with drift conflicts", async () => {
     const { handle, repo, sessionId } = await makeRepo();
     try {
