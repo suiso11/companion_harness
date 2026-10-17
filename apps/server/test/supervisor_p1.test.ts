@@ -26,6 +26,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -50,10 +51,19 @@ import {
 } from "../src/supervisor.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-// Worktree node_modules .bin/tsx: runs the real TS helper in a separate OS
-// process (same code the production CLI uses).
-const tsxBin = join(here, "..", "..", "..", "node_modules", ".bin", "tsx");
+// Portable cross-process runner: the current Node binary with the tsx ESM
+// loader (same pattern as `node --import tsx` used by e2e:serve). This
+// avoids the node_modules/.bin/tsx shell shim, which is not directly
+// spawnable on Windows (no .cmd resolution) and is absent from the repo
+// root under pnpm isolation on CI (ENOENT on both platforms).
 const helper = join(here, "supervisor_race_helper.mts");
+const nodeBin = process.execPath;
+// Absolute tsx ESM loader resolved from apps/server (where tsx is a
+// devDependency): immune to cwd and to pnpm's isolated .bin layout.
+// Bare `--import tsx` does NOT resolve from the repo root on CI.
+const serverRequire = createRequire(join(here, "..", "package.json"));
+const tsxLoader = serverRequire.resolve("tsx");
+const helperBaseArgs = ["--import", tsxLoader, helper];
 
 let dirs: string[] = [];
 let children: ChildProcess[] = [];
@@ -199,11 +209,16 @@ describe("P1 external stop racing startup is preserved (cross-process)", () => {
     const stale = readSupervisorState(paths, Date.now(), nonce("r1s"));
 
     // Separate `supervise stop`-equivalent process commits concurrently.
-    const stop = spawnSync(tsxBin, [helper, "stop", dbPath, nonce("r1x")], {
-      encoding: "utf-8",
-      timeout: 60000,
-    });
-    expect(stop.stdout).toContain("STOPPED");
+    const stop = spawnSync(
+      nodeBin,
+      [...helperBaseArgs, "stop", dbPath, nonce("r1x")],
+      {
+        encoding: "utf-8",
+        timeout: 60000,
+      },
+    );
+    expect(stop.error ?? null).toBeNull();
+    expect(String(stop.stdout ?? "")).toContain("STOPPED");
     expect(stop.status).toBe(0);
 
     // The loop's ready commit MUST read latest inside the mutex: the
@@ -254,13 +269,24 @@ describe("P1 stale-owner lock race allows at most one server (two processes)", (
     const runOne = (tag: string) =>
       new Promise<{ stdout: string; status: number | null }>((resolve) => {
         const contender = track(
-          spawn(tsxBin, [helper, "lock", dbPath, nonce(tag)], {
+          spawn(nodeBin, [...helperBaseArgs, "lock", dbPath, nonce(tag)], {
             stdio: ["ignore", "pipe", "pipe"],
           }),
         );
         let stdout = "";
         contender.stdout?.on("data", (chunk: Buffer) => {
           stdout += chunk.toString();
+        });
+        contender.stderr?.on("data", () => {
+          // Drain stderr so a loader diagnostic can never block the pipe.
+        });
+        // A spawn failure must resolve fast (never hang to the 120s
+        // timeout): surface it as DENIED-shaped output for the assertion.
+        contender.on("error", (error) => {
+          resolve({
+            stdout: `${stdout}\nSPAWN_ERROR ${String(error)}`,
+            status: null,
+          });
         });
         contender.on("exit", (code) => resolve({ stdout, status: code }));
       });
