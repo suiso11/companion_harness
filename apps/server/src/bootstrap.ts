@@ -153,6 +153,7 @@ import {
   type RescheduleWriteConnectorHint,
 } from "./rescheduleWriteProfile.js";
 import { createShadowService, type ShadowService } from "./shadow_service.js";
+import { childFailedStatusForError } from "./supervisor.js";
 
 /** Graceful-drain natural-completion budget (§11.5: max 10s). */
 export const SHUTDOWN_DRAIN_MS = 10_000;
@@ -650,8 +651,7 @@ export async function boundedActionShutdown(
   return completed;
 }
 
-/**
- * Fixed shutdown-reason vocabulary. Arbitrary caller reasons never enter
+/** Fixed shutdown-reason vocabulary: arbitrary caller reasons never enter
  * logs verbatim (logger also enforces a pattern + "unknown" fallback).
  */
 export function sanitizeShutdownReason(reason: string): string {
@@ -660,6 +660,34 @@ export function sanitizeShutdownReason(reason: string): string {
     return lowered;
   }
   return "unknown";
+}
+
+/**
+ * AV07 supervisor IPC (best-effort, fixed codes only). Active ONLY when the
+ * server was spawned by the opt-in supervisor, which sets the fixed
+ * `COMPANION_SUPERVISED=1` marker in the child's environment (never accepted
+ * from any other parent: test workers and embedders that happen to own an
+ * IPC channel never receive supervisor traffic). When active, the child
+ * reports genuine lifecycle events: `companion-ready` ONLY after listen
+ * succeeds, `companion-failed` on startup failure, `companion-drained` /
+ * `companion-drain-failed` after a supervisor-requested graceful shutdown.
+ * Never carries paths, secrets, or model content.
+ */
+function isSupervisorManaged(): boolean {
+  return process.env.COMPANION_SUPERVISED === "1";
+}
+
+function notifySupervisor(message: Record<string, unknown>): void {
+  if (!isSupervisorManaged()) {
+    return;
+  }
+  try {
+    if (typeof process.send === "function") {
+      process.send(message);
+    }
+  } catch {
+    // Best effort: the supervisor treats silence as not-ready/failed.
+  }
 }
 
 /**
@@ -772,6 +800,13 @@ export async function startServer(
       options.logger ?? createStdServerLogger(DEFAULT_LOG_LEVEL);
     earlyLogger.error("server.start_failed", {
       status: sanitizeStartupErrorStatus(error),
+    });
+    // AV07: early (pre-config) startup failure still reported when a
+    // supervisor channel exists; otherwise the non-zero exit alone marks
+    // the crash on the supervisor side.
+    notifySupervisor({
+      type: "companion-failed",
+      status: childFailedStatusForError(error),
     });
     throw error;
   }
@@ -2479,6 +2514,10 @@ export async function startServer(
                 if (!settled) {
                   settled = true;
                   logger.info("server.listening", { port: info.port });
+                  notifySupervisor({
+                    type: "companion-ready",
+                    port: info.port,
+                  });
                   if (listener !== undefined) {
                     resolvePromise(listener);
                   } else {
@@ -2503,6 +2542,14 @@ export async function startServer(
         },
       );
     } catch (listenError) {
+      // AV07: genuine failure signal BEFORE any cleanup, so the supervisor
+      // never mistakes silence for readiness. A port collision
+      // (`address_in_use`) degrades to bounded retry on the supervisor side —
+      // the foreign listener is never touched.
+      notifySupervisor({
+        type: "companion-failed",
+        status: childFailedStatusForError(listenError),
+      });
       // Listen failed: stop the shadow worker FIRST (its in-flight gateway
       // call aborts and is awaited: no orphan model calls), then the memory
       // service (its crash-recovered CLI children and timer must not outlive
@@ -2757,6 +2804,49 @@ export async function startServer(
     process.on("SIGINT", onSigint);
     process.on("SIGTERM", onSigterm);
 
+    // AV07 supervisor handshake: an EXPLICIT operator request relayed by the
+    // supervisor (`stop` or `planned-restart`) runs the EXISTING graceful
+    // shutdown (mark draining -> shadow/memory/notifications stop -> engine
+    // drain -> bounded connector shutdown -> DB close -> listener close).
+    // That drain IS the safe boundary: queued/running work either completes
+    // inside SHUTDOWN_DRAIN_MS or shutdown throws and stays draining (never
+    // a forced immediate kill for a normal planned restart). Unknown-commit
+    // rows are durable and allow restart but are NEVER retried (unchanged
+    // engine recovery rule). On success the child reports `companion-drained`
+    // and exits so the supervisor can respawn (planned restart) or hold
+    // (operator stop); on drain failure it reports `companion-drain-failed`
+    // and stays alive so the supervisor HOLDS instead of forcing unsafe
+    // work. Registered ONLY for supervisor-managed children (fixed marker in
+    // the supervisor-set environment): test workers, embedders, and any
+    // other IPC parent never see this channel. Only messages from the
+    // supervisor IPC channel are honored — never model output, HTTP input,
+    // or any untrusted channel.
+    if (isSupervisorManaged()) {
+      process.on("message", (message: unknown) => {
+        if (
+          typeof message !== "object" ||
+          message === null ||
+          (message as { type?: unknown }).type !== "supervisor-shutdown"
+        ) {
+          return;
+        }
+        const mode = (message as { mode?: unknown }).mode;
+        if (mode !== "stop" && mode !== "planned-restart") {
+          return;
+        }
+        void (async (): Promise<void> => {
+          try {
+            await shutdown("signal");
+          } catch {
+            notifySupervisor({ type: "companion-drain-failed" });
+            return;
+          }
+          notifySupervisor({ type: "companion-drained" });
+          process.exit(0);
+        })();
+      });
+    }
+
     return {
       config,
       controls,
@@ -2844,6 +2934,14 @@ export async function startServer(
     }
     const code = sanitizeStartupErrorStatus(error);
     logger.error("server.start_failed", { status: code });
+    // AV07: report startup failure to the supervisor (when present) with the
+    // fixed status vocabulary. `newer_database` holds with the DB preserved
+    // (never restore an old backup); `address_in_use` degrades to bounded
+    // retry (never kill any listener).
+    notifySupervisor({
+      type: "companion-failed",
+      status: childFailedStatusForError(error),
+    });
     throw error;
   }
 }
