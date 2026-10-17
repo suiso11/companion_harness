@@ -378,6 +378,27 @@ describe("live memory management lifecycle (real server + real remind CLI)", () 
       const base = `http://127.0.0.1:${started.port}`;
       expect(started.port).toBeGreaterThan(0);
 
+      // STOP semantics: a fresh restart starts paused with background
+      // admission closed. This cultivation regression needs background
+      // extraction, so resume explicitly via AUTH control.
+      const controlRes = await fetch(`${base}/api/autonomy/control`, {
+        headers: { host: "127.0.0.1" },
+      });
+      expect(controlRes.status).toBe(200);
+      const control = (await controlRes.json()) as {
+        paused: boolean;
+        version: number;
+      };
+      if (control.paused === true) {
+        const resumed = await postJson(
+          base,
+          "/api/autonomy/control",
+          { paused: false, expectedVersion: control.version },
+          { "idempotency-key": randomUUID() },
+        );
+        expect(resumed.status).toBe(200);
+      }
+
       // Gate proof: a ToolBroker exists with zero markdown roots, exposing
       // all four explicit management tools.
       expect(started.toolBroker).not.toBeNull();
