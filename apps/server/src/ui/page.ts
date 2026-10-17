@@ -332,6 +332,36 @@ export function renderConversationShell(): HtmlEscapedString {
         ),
       ),
       jsx(
+        "section",
+        { id: "notifications", "aria-label": "お知らせ" },
+        jsx("h2", {}, "お知らせ"),
+        jsx("p", { id: "notification-badge", "aria-live": "polite" }),
+        jsx("div", { id: "notification-urgent", "aria-live": "assertive" }),
+        jsx("div", { id: "notification-routine", "aria-live": "polite" }),
+        jsx("ul", { id: "notification-list" }),
+        jsx(
+          "button",
+          { id: "notification-older", type: "button", hidden: true },
+          "古いお知らせを読み込む",
+        ),
+        jsx(
+          "div",
+          { id: "notification-detail", hidden: true },
+          jsx("div", { id: "notification-detail-body" }),
+          jsx(
+            "button",
+            { id: "notification-ack", type: "button" },
+            "確認済みにする",
+          ),
+          jsx(
+            "button",
+            { id: "notification-retry", type: "button", hidden: true },
+            "同じ内容で再送",
+          ),
+          jsx("p", { id: "notification-status", "aria-live": "polite" }),
+        ),
+      ),
+      jsx(
         "div",
         { id: "drawer", hidden: true, role: "dialog", "aria-label": "引用" },
         jsx("pre", { id: "drawer-body" }),

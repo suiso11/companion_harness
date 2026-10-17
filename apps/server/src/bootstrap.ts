@@ -134,6 +134,11 @@ import {
 } from "./maintenance.js";
 import { createMemoryService, type MemoryService } from "./memory_service.js";
 import {
+  createNotificationService,
+  type NotificationService,
+  wrapRepoWithNotifications,
+} from "./notification_service.js";
+import {
   assertRescheduleWriteAccountCompatible,
   assertRescheduleWriteHintCompatible,
   assertRescheduleWriteReadonlyPathVisible,
@@ -391,6 +396,8 @@ export interface StartedServer {
   memory: MemoryService | null;
   /** Shadow-deliberation worker when a model gateway resolved, else null. */
   shadow: ShadowService | null;
+  /** Notification projector (always on: durable feed + deadline alerts). */
+  notifications: NotificationService | null;
 }
 
 /** Fixed path-free display name for the single M1 Markdown connector. */
@@ -803,6 +810,8 @@ export async function startServer(
   let memory: MemoryService | null = null;
   /** Shadow-deliberation worker (null = no gateway; set inside try). */
   let shadow: ShadowService | null = null;
+  /** Notification projector (always on; set inside try). */
+  let notifications: NotificationService | null = null;
   const removeSignalHandlers = (): void => {
     if (onSigint !== undefined) {
       try {
@@ -1348,6 +1357,25 @@ export async function startServer(
       repo = wrapRepoWithMemoryIntake(baseRepo, memory);
       logger.info("server.memory_ready", { status: 1 });
     }
+    // AV05 notification projector (always on, no config gate): durable
+    // background projection AFTER committed sources — never inside the M5
+    // receipt writer, so a projection failure can never lose a Calendar
+    // receipt. The wrapper composes here (outside memory intake) so the
+    // shadow worker's creation-time repo already wakes on settlement; the
+    // gated rebuild below re-applies it on the final repo the engine and
+    // app share (same rule as the memory intake + shadow priority
+    // wrappers — none of them is dropped by the recovery rebuild).
+    notifications = createNotificationService({
+      db: handle.raw,
+      repo,
+      logger,
+      now,
+    });
+    {
+      const activeNotifications = notifications;
+      repo = wrapRepoWithNotifications(repo, activeNotifications);
+      logger.info("server.notifications_ready", { status: 1 });
+    }
     // AV shadow worker (model-gated): uses the EXACT SAME configured
     // gateway/modelName as the ordinary agent above (no model selection,
     // download, provider, or fake response) plus the SAME bounded memory
@@ -1836,6 +1864,15 @@ export async function startServer(
     if (shadow !== null) {
       const activeShadow = shadow;
       repo = wrapRepoWithShadowPriority(repo, activeShadow);
+    }
+    // AV05 recovery-rebuild rule (PR42 pattern preserved): the gated repo
+    // above supersedes the pre-gate object, so re-apply the notification
+    // wake wrapper OUTSIDE the memory/shadow wrappers on the repo the app
+    // and engine actually share. Without this, HTTP-committed mutations
+    // and engine run settlement never re-drive the projector.
+    if (notifications !== null) {
+      const activeNotifications = notifications;
+      repo = wrapRepoWithNotifications(repo, activeNotifications);
     }
 
     // M5 host-owned dedicated port (normal startup, no injection). The
@@ -2334,6 +2371,13 @@ export async function startServer(
     if (shadow !== null) {
       shadow.start();
     }
+    // Notification projector starts after engine recovery: startup ingest
+    // from the migration-14 baselines + derived deadline rebuild (no
+    // old-deadline catchup, no mass-notify of history), then armed on
+    // committed writes + the single deadline timer.
+    if (notifications !== null) {
+      notifications.start();
+    }
 
     const activeShadowWake = shadow;
     const { app, controls } = createApp({
@@ -2432,6 +2476,13 @@ export async function startServer(
         // Best effort: the listen error carries the startup failure.
       }
       try {
+        if (notifications !== null) {
+          await notifications.stop();
+        }
+      } catch {
+        // Best effort: the listen error carries the startup failure.
+      }
+      try {
         if (engine !== undefined) {
           await engine.shutdown({ drainMs });
         }
@@ -2515,6 +2566,16 @@ export async function startServer(
         if (memory !== null) {
           try {
             await memory.stop();
+          } catch {
+            // Best effort: the engine drain below still runs.
+          }
+        }
+        // Stop notifications third: the single deadline timer is cleared
+        // and the in-flight drain awaited (no post-close DB reads), before
+        // the engine drain and the DB close below.
+        if (notifications !== null) {
+          try {
+            await notifications.stop();
           } catch {
             // Best effort: the engine drain below still runs.
           }
@@ -2639,6 +2700,7 @@ export async function startServer(
       toolBroker,
       memory,
       shadow,
+      notifications,
     };
   } catch (error) {
     removeSignalHandlers();
@@ -2660,6 +2722,15 @@ export async function startServer(
     if (memory !== null) {
       try {
         await memory.stop();
+      } catch {
+        // Best effort: the original startup error carries the failure.
+      }
+    }
+    // Same rule for the notification projector: clear the deadline timer
+    // and await the in-flight drain BEFORE the DB close below.
+    if (notifications !== null) {
+      try {
+        await notifications.stop();
       } catch {
         // Best effort: the original startup error carries the failure.
       }
