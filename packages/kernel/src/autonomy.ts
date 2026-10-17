@@ -2446,6 +2446,23 @@ function codePointsOf(text: string): number {
   return Array.from(text).length;
 }
 
+/**
+ * Count EXACT occurrences of `quote` inside `body`, including overlaps
+ * (e.g. quote "aa" occurs twice in body "aaa"). Matching is exact on the
+ * ORIGINAL strings: no normalization, no case folding, no trimming — the
+ * stored quote must identify exactly ONE passage of the source body.
+ */
+function countExactOccurrences(body: string, quote: string): number {
+  let count = 0;
+  let from = 0;
+  for (;;) {
+    const at = body.indexOf(quote, from);
+    if (at === -1) return count;
+    count += 1;
+    from = at + 1;
+  }
+}
+
 export interface StageConversationProposalDraft {
   scope: string;
   target: ConversationProposalTarget;
@@ -2503,6 +2520,14 @@ export function stageConversationProposal(
   if (!source.userText.includes(quote)) {
     throw new RepositoryValidationError(
       "sourceQuote must be an exact substring of the current source body",
+    );
+  }
+  // The quote must identify EXACTLY ONE passage: a repeated (or
+  // overlapping) quote is ambiguous and stages nothing. Checked here,
+  // before any pending insert, against the server-bound source body.
+  if (countExactOccurrences(source.userText, quote) !== 1) {
+    throw new RepositoryValidationError(
+      "sourceQuote must occur exactly once in the current source body",
     );
   }
   const quoteCap = draft.target === "task" ? 256 : 2000;
@@ -2688,20 +2713,138 @@ export function stageConversationProposal(
   });
 }
 
+const PROPOSAL_CURSOR_BYTES =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+function encodeProposalCursor(createdAt: number, id: string): string {
+  const raw = `${createdAt}:${id}`;
+  let out = "";
+  for (let i = 0; i < raw.length; i += 3) {
+    const a = raw.charCodeAt(i);
+    const b = i + 1 < raw.length ? raw.charCodeAt(i + 1) : NaN;
+    const c = i + 2 < raw.length ? raw.charCodeAt(i + 2) : NaN;
+    out += PROPOSAL_CURSOR_BYTES[(a >> 2) & 63];
+    out +=
+      PROPOSAL_CURSOR_BYTES[
+        ((a & 3) << 4) | (Number.isNaN(b) ? 0 : (b >> 4) & 15)
+      ];
+    out += Number.isNaN(b)
+      ? ""
+      : PROPOSAL_CURSOR_BYTES[
+          ((b & 15) << 2) | (Number.isNaN(c) ? 0 : (c >> 6) & 3)
+        ];
+    out += Number.isNaN(c) ? "" : PROPOSAL_CURSOR_BYTES[c & 63];
+  }
+  return out;
+}
+
+function decodeProposalCursor(cursor: string): {
+  createdAt: number;
+  id: string;
+} {
+  const fail = (): never => {
+    throw new RepositoryValidationError("invalid proposal cursor");
+  };
+  if (cursor.length === 0 || cursor.length > 2048) fail();
+  const vals = new Array<number>(cursor.length);
+  for (let i = 0; i < cursor.length; i += 1) {
+    const v = PROPOSAL_CURSOR_BYTES.indexOf(cursor[i] as string);
+    if (v === -1) fail();
+    vals[i] = v;
+  }
+  let raw = "";
+  for (let i = 0; i < vals.length; i += 4) {
+    const a = vals[i] as number;
+    const b = (vals[i + 1] ?? 0) as number;
+    const c = (vals[i + 2] ?? -1) as number;
+    const d = (vals[i + 3] ?? -1) as number;
+    raw += String.fromCharCode(((a << 2) | (b >> 4)) & 255);
+    if (c !== -1)
+      raw += String.fromCharCode((((b & 15) << 4) | (c >> 2)) & 255);
+    if (d !== -1) raw += String.fromCharCode((((c & 3) << 6) | d) & 255);
+  }
+  const sep = raw.indexOf(":");
+  if (sep === -1) fail();
+  const createdAt = Number(raw.slice(0, sep));
+  const id = raw.slice(sep + 1);
+  if (!Number.isInteger(createdAt) || createdAt < 0 || !isUuidV4(id)) fail();
+  return { createdAt, id };
+}
+
+export interface ListConversationProposalsQuery {
+  limit?: number;
+  /** Opaque cursor: the next older page strictly below this position. */
+  cursor?: string;
+  /** Optional status filter (e.g. the pending review queue). */
+  status?: "pending" | "accepted" | "rejected";
+}
+
+/**
+ * Newest-first proposal history with a stable opaque keyset
+ * (created_at, id) and a LIMIT+1 probe, so every owned row — including an
+ * old pending draft buried under newer decisions — stays reachable.
+ * `pendingCount` always covers ALL owned pending drafts (never the page).
+ * Pure read: no mutations, no cursor advancement writes. An unknown cursor
+ * id is just a keyset bound (never a 404 oracle for foreign ids).
+ */
 export function listConversationProposals(
   db: Database.Database,
   sessionId: string,
-  limit = 50,
-): { items: ReturnType<typeof toProposalView>[] } {
+  query: ListConversationProposalsQuery = {},
+): {
+  items: ReturnType<typeof toProposalView>[];
+  nextCursor: string | null;
+  hasMore: boolean;
+  pendingCount: number;
+} {
   const session = requireId(sessionId, "sessionId");
   requireSession(db, session);
-  const capped = Math.min(Math.max(limit, 1), 100);
+  const capped = Math.min(Math.max(query.limit ?? 50, 1), 100);
+  if (
+    query.status !== undefined &&
+    query.status !== "pending" &&
+    query.status !== "accepted" &&
+    query.status !== "rejected"
+  ) {
+    throw new RepositoryValidationError(
+      "proposal status must be pending, accepted, or rejected",
+    );
+  }
+  const bound =
+    query.cursor === undefined ? null : decodeProposalCursor(query.cursor);
+  const clauses = ["session_id = ?"];
+  const args: (string | number)[] = [session];
+  if (query.status !== undefined) {
+    clauses.push("status = ?");
+    args.push(query.status);
+  }
+  if (bound !== null) {
+    clauses.push("(created_at < ? OR (created_at = ? AND id > ?))");
+    args.push(bound.createdAt, bound.createdAt, bound.id);
+  }
+  const where = `WHERE ${clauses.join(" AND ")}`;
   const rows = db
     .prepare(
-      "SELECT * FROM conversation_proposals WHERE session_id = ? ORDER BY created_at DESC, id ASC LIMIT ?",
+      `SELECT * FROM conversation_proposals ${where} ORDER BY created_at DESC, id ASC LIMIT ?`,
     )
-    .all(session, capped) as RawProposal[];
-  return { items: rows.map(toProposalView) };
+    .all(...args, capped + 1) as RawProposal[];
+  const hasMore = rows.length > capped;
+  const page = hasMore ? rows.slice(0, capped) : rows;
+  const last = page[page.length - 1];
+  const pending = db
+    .prepare(
+      "SELECT COUNT(*) AS n FROM conversation_proposals WHERE session_id = ? AND status = 'pending'",
+    )
+    .get(session) as { n: number };
+  return {
+    items: page.map(toProposalView),
+    nextCursor:
+      hasMore && last !== undefined
+        ? encodeProposalCursor(last.created_at, last.id)
+        : null,
+    hasMore,
+    pendingCount: pending.n,
+  };
 }
 
 export function getConversationProposal(

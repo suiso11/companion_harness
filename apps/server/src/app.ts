@@ -2686,7 +2686,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     if ("response" in session) {
       return session.response;
     }
-    const query = strictQuery(c, ["limit"]);
+    const query = strictQuery(c, ["limit", "cursor", "status"]);
     if (!query.ok) {
       return validationError(c);
     }
@@ -2695,6 +2695,12 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         repo.listConversationProposals(session.id, {
           ...(query.values.limit !== undefined
             ? { limit: query.values.limit }
+            : {}),
+          ...(query.values.cursor !== undefined
+            ? { cursor: query.values.cursor }
+            : {}),
+          ...(query.values.status !== undefined
+            ? { status: query.values.status }
             : {}),
         }),
         200,

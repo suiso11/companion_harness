@@ -21,6 +21,9 @@
 //   POST /seed-proposal { sessionId, target, quote, ... } -> stage one
 //     conversation proposal from the session's latest user_text turn via
 //     the real model-only kernel path (fixture setup only)
+//   POST /seed-proposal-burst { sessionId, decided, pendingQuote } -> one
+//     old pending + `decided` rejected drafts via the real kernel paths
+//     (fixture setup only; paging/badge/review stay on real routes/UI)
 //   POST /seed-history { sessionId, count, prefix } -> store `count`
 //     completed user_text turns (+ selected V1 runs with queued/started/
 //     completed events) for that session via direct SQL (fixture setup
@@ -1001,6 +1004,96 @@ const control = createServer(
           { key: randomUUID() },
         );
         json(staged.status, staged.body);
+      } catch {
+        json(400, { error: { code: "validation_error" } });
+      }
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/seed-proposal-burst") {
+      // Test-fixture bulk history (narrow): ONE old pending draft first,
+      // then N decided (rejected) drafts, all through the REAL kernel
+      // paths (`postMessage`/`startRun` + `stageConversationProposalFromModel`
+      // + `rejectConversationProposal`). Each quote occurs exactly once in
+      // its own source text. Fixture setup only — paging, badge, and review
+      // all run through the real production routes/UI.
+      // `{ sessionId, decided, pendingQuote }` (1 <= decided <= 80).
+      const parsed = parseJsonBody();
+      const sessionId = parsed?.sessionId;
+      const decided = parsed?.decided;
+      const pendingQuote = parsed?.pendingQuote;
+      if (
+        typeof sessionId !== "string" ||
+        !UUID_V4_RE.test(sessionId) ||
+        typeof decided !== "number" ||
+        !Number.isInteger(decided) ||
+        decided < 1 ||
+        decided > 80 ||
+        typeof pendingQuote !== "string" ||
+        pendingQuote.length === 0
+      ) {
+        json(400, { error: { code: "validation_error" } });
+        return;
+      }
+      try {
+        const now = Date.now();
+        let priorRun: string | null = null;
+        const postTurn = (text: string): string => {
+          if (priorRun !== null) {
+            repo.failRun(priorRun, "execution_failed", { now });
+          }
+          const posted = repo.postMessage(
+            sessionId,
+            { text },
+            { key: randomUUID(), now },
+          );
+          const runId = (posted.body as { run: { id: string } }).run.id;
+          repo.startRun(runId, { now: now + 1 });
+          priorRun = runId;
+          return runId;
+        };
+        const keeperRun = postTurn(`note ${pendingQuote} end`);
+        if (!`note ${pendingQuote} end`.includes(pendingQuote)) {
+          json(400, { error: { code: "validation_error" } });
+          return;
+        }
+        const keeper = repo.stageConversationProposalFromModel(
+          keeperRun,
+          {
+            target: "purpose",
+            scope: "health",
+            draftKind: "wish",
+            purposeKind: "goal",
+            sourceQuote: pendingQuote,
+            interpretation: "burst keeper draft",
+          },
+          { key: randomUUID() },
+        );
+        for (let i = 0; i < (decided as number); i += 1) {
+          const text = `burst filler ${i} marker`;
+          const runId = postTurn(text);
+          const staged = repo.stageConversationProposalFromModel(
+            runId,
+            {
+              target: "purpose",
+              scope: "health",
+              draftKind: "wish",
+              purposeKind: "goal",
+              sourceQuote: `filler ${i} marker`,
+              interpretation: `burst decided ${i}`,
+            },
+            { key: randomUUID() },
+          );
+          repo.rejectConversationProposal(
+            sessionId,
+            (staged.body as { id: string }).id,
+            { expectedVersion: 1 },
+            { key: randomUUID(), now },
+          );
+        }
+        json(201, {
+          pendingId: (keeper.body as { id: string }).id,
+          decided,
+        });
       } catch {
         json(400, { error: { code: "validation_error" } });
       }

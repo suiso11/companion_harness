@@ -370,6 +370,11 @@ export function renderConversationShell(): HtmlEscapedString {
         jsx("ul", { id: "proposal-list" }),
         jsx("button", { id: "proposal-refresh", type: "button" }, "候補を更新"),
         jsx(
+          "button",
+          { id: "proposal-more", type: "button", hidden: true },
+          "古い履歴を読み込む",
+        ),
+        jsx(
           "div",
           { id: "proposal-detail", hidden: true },
           jsx("div", { id: "proposal-detail-body" }),

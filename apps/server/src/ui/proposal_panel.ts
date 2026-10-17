@@ -116,6 +116,27 @@ function readItems(body: unknown): ProposalView[] {
   return items.filter(isProposalView);
 }
 
+/** Opaque older-page cursor (null when the server has no older page). */
+function readCursor(body: unknown): string | null {
+  if (!isRecord(body)) return null;
+  return typeof body.nextCursor === "string" ? body.nextCursor : null;
+}
+
+function readHasMore(body: unknown): boolean {
+  if (!isRecord(body)) return false;
+  return body.hasMore === true;
+}
+
+/** ALL owned pending drafts (never page-limited); -1 when unknown. */
+function readPendingCount(body: unknown): number {
+  if (!isRecord(body)) return -1;
+  return typeof body.pendingCount === "number" &&
+    Number.isInteger(body.pendingCount) &&
+    body.pendingCount >= 0
+    ? body.pendingCount
+    : -1;
+}
+
 const DRAFT_KIND_TEXT: Record<string, string> = {
   casual: "雑談",
   wish: "希望",
@@ -140,6 +161,7 @@ export class ProposalPanel {
   private brief: HTMLElement | null = null;
   private list: HTMLElement | null = null;
   private refreshButton: HTMLButtonElement | null = null;
+  private moreButton: HTMLButtonElement | null = null;
   private detail: HTMLElement | null = null;
   private detailBody: HTMLElement | null = null;
   private parentLine: HTMLElement | null = null;
@@ -154,6 +176,13 @@ export class ProposalPanel {
   private sessionSeq = 0;
   private listSeq = 0;
   private destroyed = false;
+  /** Newest-history keyset: opaque cursor + truthful older-page flag. */
+  private historyCursor: string | null = null;
+  private historyHasMore = false;
+  /** ALL owned pending drafts (badge truth); -1 until the first read. */
+  private totalPending = -1;
+  /** Parent-read generation: every selection change invalidates late reads. */
+  private parentSeq = 0;
   private readonly items = new Map<string, ProposalView>();
   /** Explicitly selected pending draft id (drawer content). */
   private selectedId: string | null = null;
@@ -186,6 +215,7 @@ export class ProposalPanel {
     this.brief = required<HTMLElement>("proposal-brief");
     this.list = required<HTMLElement>("proposal-list");
     this.refreshButton = required<HTMLButtonElement>("proposal-refresh");
+    this.moreButton = required<HTMLButtonElement>("proposal-more");
     this.detail = required<HTMLElement>("proposal-detail");
     this.detailBody = required<HTMLElement>("proposal-detail-body");
     this.parentLine = required<HTMLElement>("proposal-parent");
@@ -198,6 +228,9 @@ export class ProposalPanel {
     this.status = required<HTMLElement>("proposal-status");
     this.refreshButton.addEventListener("click", () => {
       void this.refresh();
+    });
+    this.moreButton.addEventListener("click", () => {
+      void this.loadOlderHistory();
     });
     this.acceptButton.addEventListener("click", () => {
       void this.commitAccept();
@@ -216,10 +249,14 @@ export class ProposalPanel {
   /** Session lifecycle: clear state, hide drawer, boot new session. */
   notifySessionChanged(): void {
     this.sessionSeq += 1;
+    this.parentSeq += 1;
     this.items.clear();
     this.selectedId = null;
     this.pendingOp = null;
     this.opInFlight = false;
+    this.historyCursor = null;
+    this.historyHasMore = false;
+    this.totalPending = -1;
     if (this.detail !== null) this.detail.hidden = true;
     if (this.retryButton !== null) this.retryButton.hidden = true;
     this.renderAll();
@@ -252,11 +289,48 @@ export class ProposalPanel {
   }
 
   private pendingCount(): number {
+    if (this.totalPending >= 0) return this.totalPending;
     let n = 0;
     for (const item of this.items.values()) {
       if (item.status === "pending") n += 1;
     }
     return n;
+  }
+
+  /** Read one newest-first history page behind the stored keyset cursor. */
+  private async loadOlderHistory(): Promise<void> {
+    const sessionId = this.deps.getSessionId();
+    if (sessionId === null || this.destroyed) return;
+    const cursor = this.historyCursor;
+    if (cursor === null) return;
+    const session = this.sessionSeq;
+    let res: { status: number; body: unknown };
+    try {
+      res = await this.deps.http.get(
+        `/api/sessions/${sessionId}/conversation-proposals?limit=50&cursor=${encodeURIComponent(cursor)}`,
+      );
+    } catch {
+      if (session === this.sessionSeq) {
+        this.setStatus("古い履歴の読み込みに失敗しました");
+      }
+      return;
+    }
+    if (session !== this.sessionSeq) return;
+    if (res.status !== 200) {
+      this.setStatus("古い履歴の読み込みに失敗しました");
+      return;
+    }
+    // The open drawer (selection, typed dates, frozen metadata) is
+    // preserved: older rows only merge into the list, never reset it.
+    for (const item of readItems(res.body)) {
+      if (item.sessionId === sessionId) this.items.set(item.id, item);
+    }
+    this.historyCursor = readCursor(res.body);
+    this.historyHasMore = readHasMore(res.body);
+    const count = readPendingCount(res.body);
+    if (count >= 0) this.totalPending = count;
+    this.renderAll();
+    if (this.selectedId !== null) this.renderDetail(false);
   }
 
   private async refresh(): Promise<void> {
@@ -265,11 +339,47 @@ export class ProposalPanel {
     const session = this.sessionSeq;
     this.listSeq += 1;
     const seen = this.listSeq;
-    let res: { status: number; body: unknown };
+    const pending: ProposalView[] = [];
+    let history: ProposalView[] = [];
+    let historyCursor: string | null = null;
+    let historyHasMore = false;
+    let pendingCount = -1;
     try {
-      res = await this.deps.http.get(
+      // Drain the OWN pending queue first (status filter, keyset pages;
+      // bounded by the small pending cap so an old pending draft buried
+      // under newer decisions stays reachable), then read the newest
+      // history page. Older history stays behind the explicit "load
+      // older" affordance — never a full materialization on refresh.
+      let cursor: string | undefined;
+      for (let n = 0; n < 25; n += 1) {
+        const url =
+          cursor === undefined
+            ? `/api/sessions/${sessionId}/conversation-proposals?limit=50&status=pending`
+            : `/api/sessions/${sessionId}/conversation-proposals?limit=50&status=pending&cursor=${encodeURIComponent(cursor)}`;
+        const res = await this.deps.http.get(url);
+        if (res.status !== 200) throw new Error("pending page failed");
+        if (session !== this.sessionSeq || seen !== this.listSeq) return;
+        for (const item of readItems(res.body)) {
+          if (item.sessionId === sessionId) pending.push(item);
+        }
+        const count = readPendingCount(res.body);
+        if (count >= 0) pendingCount = count;
+        const next = readCursor(res.body);
+        if (next === null || !readHasMore(res.body)) break;
+        cursor = next;
+      }
+      const hist = await this.deps.http.get(
         `/api/sessions/${sessionId}/conversation-proposals?limit=50`,
       );
+      if (hist.status !== 200) throw new Error("history page failed");
+      if (session !== this.sessionSeq || seen !== this.listSeq) return;
+      history = readItems(hist.body).filter(
+        (item) => item.sessionId === sessionId,
+      );
+      historyCursor = readCursor(hist.body);
+      historyHasMore = readHasMore(hist.body);
+      const count = readPendingCount(hist.body);
+      if (count >= 0) pendingCount = count;
     } catch {
       if (session === this.sessionSeq && seen === this.listSeq) {
         this.setStatus("候補の読み込みに失敗しました");
@@ -277,20 +387,17 @@ export class ProposalPanel {
       return;
     }
     if (session !== this.sessionSeq || seen !== this.listSeq) return;
-    if (res.status !== 200) {
-      this.setStatus("候補の読み込みに失敗しました");
-      return;
-    }
-    const fresh = readItems(res.body);
     this.items.clear();
-    for (const item of fresh) {
-      if (item.sessionId === sessionId) this.items.set(item.id, item);
-    }
-    // A selected draft that left pending (adopted/rejected elsewhere) closes
-    // the drawer; an unresolved frozen op keeps its drawer pinned.
+    for (const item of pending) this.items.set(item.id, item);
+    for (const item of history) this.items.set(item.id, item);
+    this.historyCursor = historyCursor;
+    this.historyHasMore = historyHasMore;
+    if (pendingCount >= 0) this.totalPending = pendingCount;
+    // A selected draft that vanished closes the drawer; a decided draft
+    // stays open as READONLY history; an unresolved frozen op keeps its
+    // drawer pinned.
     if (this.pendingOp === null && this.selectedId !== null) {
-      const current = this.items.get(this.selectedId);
-      if (current === undefined || current.status !== "pending") {
+      if (!this.items.has(this.selectedId)) {
         this.selectedId = null;
         if (this.detail !== null) this.detail.hidden = true;
       }
@@ -311,6 +418,9 @@ export class ProposalPanel {
     }
     this.maybeBrief();
     if (this.list === null) return;
+    if (this.moreButton !== null) {
+      this.moreButton.hidden = !this.historyHasMore;
+    }
     while (this.list.firstChild !== null) {
       this.list.removeChild(this.list.firstChild);
     }
@@ -355,14 +465,18 @@ export class ProposalPanel {
 
   private select(id: string): void {
     // An unresolved frozen operation pins the drawer: switching selection
-    // cannot replace it (the retry affordance stays on the frozen draft).
+    // cannot replace it (the retry affordance stays on the frozen draft,
+    // and the frozen key/body/action is never overwritten).
     if (this.pendingOp !== null) {
       this.setStatus("未確定の操作があります。同じ内容で再送してください");
       return;
     }
     const item = this.items.get(id);
-    if (item === undefined || item.status !== "pending") return;
+    if (item === undefined) return;
+    // Resolved drafts open READONLY (real quote/interpretation/source/
+    // parent/target/status); only pending drafts allow dates + decisions.
     this.selectedId = id;
+    this.parentSeq += 1;
     if (this.detail !== null) this.detail.hidden = false;
     if (this.retryButton !== null) this.retryButton.hidden = true;
     this.renderDetail(true);
@@ -386,7 +500,7 @@ export class ProposalPanel {
       this.detailBody.removeChild(this.detailBody.firstChild);
     }
     const badge = document.createElement("p");
-    badge.textContent = `AI候補／未採用［${item.target === "purpose" ? "目的" : "作業"}・${textOf(DRAFT_KIND_TEXT, item.draftKind)}・${item.scope}］`;
+    badge.textContent = `AI候補／${textOf(STATUS_TEXT, item.status)}［${item.target === "purpose" ? "目的" : "作業"}・${textOf(DRAFT_KIND_TEXT, item.draftKind)}・${item.scope}］`;
     const quoteHead = document.createElement("p");
     quoteHead.textContent = "発言の原文（引用）:";
     const quote = document.createElement("p");
@@ -396,6 +510,18 @@ export class ProposalPanel {
     const interp = document.createElement("p");
     interp.textContent = item.interpretation;
     this.detailBody.append(badge, quoteHead, quote, interpHead, interp);
+    // Resolved history: real outcome only (status + accepted target, no
+    // raw UUID wall, no decision controls, no mutations from here).
+    const readonly = item.status !== "pending";
+    if (readonly) {
+      const outcome = document.createElement("p");
+      const targetShort =
+        item.acceptedTargetId === null
+          ? "なし"
+          : `${item.acceptedTargetId.slice(0, 8)}…`;
+      outcome.textContent = `結果: ${textOf(STATUS_TEXT, item.status)}／採用先: ${targetShort}`;
+      this.detailBody.appendChild(outcome);
+    }
     // Parent line: model's explicit parent only (immutable, human-readable
     // title fetched readonly; never auto-pick another purpose).
     this.parentLine.textContent = "";
@@ -403,7 +529,9 @@ export class ProposalPanel {
       this.parentLine.textContent = "親の目的を確認しています…";
       void this.loadParentTitle(item);
     }
-    if (resetDates || this.pendingOp === null) {
+    // Human-typed dates survive every same-selection refresh: only an
+    // explicit NEW selection clears them.
+    if (resetDates) {
       this.dateInput.value = "";
       this.dateInputB.value = "";
     }
@@ -416,15 +544,23 @@ export class ProposalPanel {
         "適用期間（任意・空欄は無期限。開始と終了いずれも厳密なRFC3339・時差必須）";
       this.dateInputB.hidden = false;
     }
-    const locked = this.opInFlight;
-    if (this.acceptButton !== null) this.acceptButton.disabled = locked;
-    if (this.rejectButton !== null) this.rejectButton.disabled = locked;
+    const locked = this.opInFlight || this.pendingOp !== null;
+    const decidable = !readonly && !locked;
+    if (this.dateInput !== null) this.dateInput.disabled = !decidable;
+    if (this.dateInputB !== null) this.dateInputB.disabled = !decidable;
+    if (this.acceptButton !== null) this.acceptButton.disabled = !decidable;
+    if (this.rejectButton !== null) this.rejectButton.disabled = !decidable;
   }
 
   private async loadParentTitle(item: ProposalView): Promise<void> {
     const session = this.sessionSeq;
+    // Bind this read to the exact selection + generation: a late reply for
+    // a previous selection must never overwrite the shown draft's parent.
+    const selected = this.selectedId;
+    const parentId = item.parentPurposeId;
+    const gen = this.parentSeq;
     if (item.parentPurposeId === null) {
-      if (this.parentLine !== null) {
+      if (this.parentLine !== null && selected === this.selectedId) {
         this.parentLine.textContent = "親の目的：なし（異常）";
       }
       return;
@@ -433,7 +569,10 @@ export class ProposalPanel {
       const res = await this.deps.http.get(
         `/api/sessions/${item.sessionId}/purposes/${item.parentPurposeId}`,
       );
-      if (session !== this.sessionSeq) return;
+      if (session !== this.sessionSeq || gen !== this.parentSeq) return;
+      if (this.selectedId !== selected) return;
+      const current = this.items.get(item.id);
+      if (current?.parentPurposeId !== parentId) return;
       if (res.status === 200 && isRecord(res.body)) {
         const statement = res.body.statement;
         const version = res.body.version;
@@ -451,7 +590,10 @@ export class ProposalPanel {
           "親の目的は現在確認できません（採用時に再確認されます）";
       }
     } catch {
-      if (session !== this.sessionSeq) return;
+      if (session !== this.sessionSeq || gen !== this.parentSeq) return;
+      if (this.selectedId !== selected) return;
+      const current = this.items.get(item.id);
+      if (current?.parentPurposeId !== parentId) return;
       if (this.parentLine !== null) {
         this.parentLine.textContent =
           "親の目的は現在確認できません（採用時に再確認されます）";
@@ -480,7 +622,20 @@ export class ProposalPanel {
     const item =
       this.selectedId === null ? undefined : this.items.get(this.selectedId);
     const sessionId = this.deps.getSessionId();
-    if (item === undefined || sessionId === null || this.opInFlight) return;
+    // A frozen unresolved operation owns the decision: no fresh accept may
+    // overwrite its key/body while it is unresolved (retry it instead).
+    if (this.pendingOp !== null) {
+      this.setStatus("未確定の操作があります。同じ内容で再送してください");
+      return;
+    }
+    if (
+      item === undefined ||
+      sessionId === null ||
+      this.opInFlight ||
+      item.status !== "pending"
+    ) {
+      return;
+    }
     const body = this.frozenBody(item);
     if (body === null) return;
     const key = this.newKey();
@@ -503,7 +658,20 @@ export class ProposalPanel {
     const item =
       this.selectedId === null ? undefined : this.items.get(this.selectedId);
     const sessionId = this.deps.getSessionId();
-    if (item === undefined || sessionId === null || this.opInFlight) return;
+    // Same ownership as accept: a frozen op blocks every fresh decision
+    // (explicit reject creates no preference write of its own either).
+    if (this.pendingOp !== null) {
+      this.setStatus("未確定の操作があります。同じ内容で再送してください");
+      return;
+    }
+    if (
+      item === undefined ||
+      sessionId === null ||
+      this.opInFlight ||
+      item.status !== "pending"
+    ) {
+      return;
+    }
     const key = this.newKey();
     this.pendingOp = {
       proposalId: item.id,
@@ -565,15 +733,39 @@ export class ProposalPanel {
       return;
     }
     if (res.status === 409) {
-      // Honest conflict (stale version / parent drift / reused key):
-      // keep the frozen op for the explicit same-key retry, re-read the
-      // truth so the drawer never applies to a new version silently.
+      // Re-read the truth first: the frozen op clears ONLY on a
+      // diagnostically definitive terminal outcome (the draft is decided
+      // or gone — a same-key retry could never succeed). A still-pending
+      // draft (version drift / parent change / key reuse) keeps the
+      // frozen op for the explicit same-key retry; network-level
+      // uncertainty (503/transport, handled above/below) never clears.
       this.opInFlight = false;
+      await this.refresh();
+      if (session !== this.sessionSeq) return;
+      const current = this.items.get(op.proposalId);
+      if (current === undefined || current.status !== "pending") {
+        this.pendingOp = null;
+        if (this.retryButton !== null) this.retryButton.hidden = true;
+        if (current === undefined) {
+          this.setStatus("候補が見つかりません（別セッションの可能性）");
+          this.selectedId = null;
+          if (this.detail !== null) this.detail.hidden = true;
+        } else {
+          this.setStatus(
+            current.status === "accepted"
+              ? "採用されています（履歴を確認してください）"
+              : "見送りになっています（履歴を確認してください）",
+          );
+        }
+        this.renderAll();
+        if (this.selectedId !== null) this.renderDetail(false);
+        return;
+      }
       if (this.retryButton !== null) this.retryButton.hidden = false;
       this.setStatus(
         "競合しました（版ずれ・親の変更・キーの再利用）。内容を確認して再送してください",
       );
-      await this.refresh();
+      this.renderDetail(false);
       return;
     }
     if (res.status === 404) {

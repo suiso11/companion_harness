@@ -583,9 +583,33 @@ export type ConversationProposalView = z.infer<
 
 export const ConversationProposalListResponseSchema = z.strictObject({
   items: z.array(ConversationProposalViewSchema).max(100),
+  /** Opaque keyset cursor for the next older page; null when exhausted. */
+  nextCursor: z.string().min(1).max(2048).nullable(),
+  /** True when an older page remains (LIMIT+1 probe, never truncated). */
+  hasMore: z.boolean(),
+  /** ALL owned pending drafts in this session (never page-limited). */
+  pendingCount: z.number().int().min(0),
 });
 export type ConversationProposalListResponse = z.infer<
   typeof ConversationProposalListResponseSchema
+>;
+
+/**
+ * Bounded proposal list query: strict caps, optional opaque keyset cursor
+ * (older page strictly below the cursor in newest-first order), optional
+ * status filter for the pending review queue. Unknown keys are rejected
+ * by the server's strict query gate.
+ */
+export const ConversationProposalListQuerySchema = z.strictObject({
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  cursor: z.string().min(1).max(2048).optional(),
+  status: ConversationProposalStatusSchema.optional(),
+});
+export type ConversationProposalListQuery = z.infer<
+  typeof ConversationProposalListQuerySchema
+>;
+export type ConversationProposalListQueryInput = z.input<
+  typeof ConversationProposalListQuerySchema
 >;
 
 /**

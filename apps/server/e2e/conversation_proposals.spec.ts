@@ -41,6 +41,17 @@ async function seedProposal(
   return (await res.json()) as Record<string, unknown>;
 }
 
+async function seedBurst(
+  request: import("@playwright/test").APIRequestContext,
+  payload: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const res = await request.post(`${E2E_CONTROL_ORIGIN}/seed-proposal-burst`, {
+    data: payload,
+  });
+  expect(res.ok()).toBe(true);
+  return (await res.json()) as Record<string, unknown>;
+}
+
 async function boot(page: Page): Promise<string> {
   await page.goto("/");
   await page.locator("#proposal-badge").waitFor({ timeout: 15_000 });
@@ -303,4 +314,296 @@ test("task draft shows the explicit parent, adopts the human deadline, renders m
   ).toBe("accepted,rejected");
   const tasksAfter = await api(page, "GET", `${base}/tasks?limit=50`);
   expect((tasksAfter.body as { items: unknown[] }).items).toHaveLength(1);
+});
+
+test("an old pending draft stays reachable and actionable behind history paging", async ({
+  page,
+  request,
+}) => {
+  const sessionId = await page.evaluate(() =>
+    localStorage.getItem("ch.sessionId"),
+  );
+  const base = `/api/sessions/${sessionId}`;
+  // One old pending draft buried under 55 newer rejections (real kernel
+  // paths; the keeper quote occurs exactly once in its own source text).
+  const burst = await seedBurst(request, {
+    sessionId,
+    decided: 55,
+    pendingQuote: "keeper choice",
+  });
+  expect(burst.decided).toBe(55);
+
+  await page.locator("#proposal-refresh").click();
+  // The badge counts ALL owned pending (truthful pendingCount), not the
+  // visible page — even though the keeper is not on the newest page.
+  await expect(page.locator("#proposal-badge")).toContainText(
+    "未採用の候補 1件",
+  );
+  await expect(page.locator("#proposal-more")).toBeVisible();
+
+  // Load the older page: the buried keeper appears and opens real detail.
+  await page.locator("#proposal-more").click();
+  const keeperRow = page.locator("#proposal-list button", {
+    hasText: "未採用",
+  });
+  await expect(keeperRow).toHaveCount(1);
+  await keeperRow.click();
+  await expect(page.locator("#proposal-detail")).toBeVisible();
+  await expect(page.locator("#proposal-detail-body")).toContainText(
+    "keeper choice",
+  );
+  // Fresh decision controls are live for the pending keeper.
+  await expect(page.locator("#proposal-accept")).toBeEnabled();
+  await page.locator("#proposal-accept").click();
+  await expect(page.locator("#proposal-status")).toContainText("採用しました", {
+    timeout: 15_000,
+  });
+  await expect(page.locator("#proposal-badge")).toContainText(
+    "未採用の候補はありません",
+  );
+  const purposes = await api(page, "GET", `${base}/purposes?limit=50`);
+  const items = (purposes.body as { items: Record<string, unknown>[] }).items;
+  expect(items).toHaveLength(1);
+  expect(items[0]?.statement).toBe("keeper choice");
+});
+
+test("typed dates survive refresh and resolved drafts open readonly", async ({
+  page,
+  request,
+}) => {
+  const sessionId = await page.evaluate(() =>
+    localStorage.getItem("ch.sessionId"),
+  );
+  const base = `/api/sessions/${sessionId}`;
+  await sendChat(page, "i want to garden daily e2e");
+  await seedProposal(request, {
+    sessionId,
+    target: "purpose",
+    quote: "garden daily",
+  });
+  await page.locator("#proposal-refresh").click();
+  await page.locator("#proposal-list button").first().click();
+  await expect(page.locator("#proposal-detail")).toBeVisible();
+
+  // Human-typed window survives a same-selection refresh untouched.
+  await page.locator("#proposal-date").fill("2026-11-01T09:00:00+09:00");
+  await page.locator("#proposal-date-until").fill("2026-11-08T09:00:00+09:00");
+  await page.locator("#proposal-refresh").click();
+  await expect(page.locator("#proposal-date")).toHaveValue(
+    "2026-11-01T09:00:00+09:00",
+  );
+  await expect(page.locator("#proposal-date-until")).toHaveValue(
+    "2026-11-08T09:00:00+09:00",
+  );
+
+  // Adopt with the frozen window, then reload: the resolved row reopens
+  // READONLY with the real quote/interpretation/outcome and no live
+  // decision controls (reopening mutates nothing).
+  await page.locator("#proposal-accept").click();
+  await expect(page.locator("#proposal-status")).toContainText("採用しました", {
+    timeout: 15_000,
+  });
+  await page.reload();
+  await page.locator("#proposal-badge").waitFor({ timeout: 15_000 });
+  await page.locator("#proposal-refresh").click();
+  await expect(page.locator("#proposal-badge")).toContainText(
+    "未採用の候補はありません",
+  );
+  await page.locator("#proposal-list button").first().click();
+  await expect(page.locator("#proposal-detail")).toBeVisible();
+  const detailBody = page.locator("#proposal-detail-body");
+  await expect(detailBody).toContainText("garden daily");
+  await expect(detailBody).toContainText("採用済み");
+  await expect(page.locator("#proposal-accept")).toBeDisabled();
+  await expect(page.locator("#proposal-reject")).toBeDisabled();
+  const purposes = await api(page, "GET", `${base}/purposes?limit=50`);
+  const items = (purposes.body as { items: Record<string, unknown>[] }).items;
+  expect(items).toHaveLength(1);
+  expect(items[0]?.validFrom).toBe("2026-11-01T09:00:00+09:00");
+  expect(items[0]?.validUntil).toBe("2026-11-08T09:00:00+09:00");
+});
+
+test("a late parent read never overwrites the shown draft", async ({
+  page,
+  request,
+}) => {
+  const sessionId = await page.evaluate(() =>
+    localStorage.getItem("ch.sessionId"),
+  );
+  const base = `/api/sessions/${sessionId}`;
+  const parentA = await api(page, "POST", `${base}/purposes`, {
+    scope: "health",
+    statement: "e2e parent alpha",
+    kind: "goal",
+    explicit: true,
+    sourceKind: "user",
+  });
+  expect(parentA.status).toBe(201);
+  const parentB = await api(page, "POST", `${base}/purposes`, {
+    scope: "health",
+    statement: "e2e parent beta",
+    kind: "goal",
+    explicit: true,
+    sourceKind: "user",
+  });
+  expect(parentB.status).toBe(201);
+  const paBody = parentA.body as { id: string; version: number };
+  const pbBody = parentB.body as { id: string; version: number };
+
+  await sendChat(page, "alpha task work now");
+  await seedProposal(request, {
+    sessionId,
+    target: "task",
+    draftKind: "task",
+    taskKind: "task",
+    quote: "alpha task",
+    interpretation: "alpha reading",
+    parentPurposeId: paBody.id,
+    expectedParentVersion: paBody.version,
+  });
+  await sendChat(page, "beta task work now");
+  await seedProposal(request, {
+    sessionId,
+    target: "task",
+    draftKind: "task",
+    taskKind: "task",
+    quote: "beta task",
+    interpretation: "beta reading",
+    parentPurposeId: pbBody.id,
+    expectedParentVersion: pbBody.version,
+  });
+  await page.locator("#proposal-refresh").click();
+  await expect(page.locator("#proposal-badge")).toContainText(
+    "未採用の候補 2件",
+  );
+
+  // Hold A's actual parent GET, open A, then select B: B shows its own
+  // parent, and A's late reply must not overwrite it.
+  let releaseA!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    releaseA = resolve;
+  });
+  await page.route(`**/purposes/${paBody.id}`, async (route) => {
+    await gate;
+    await route.continue();
+  });
+  try {
+    const rows = page.locator("#proposal-list button");
+    await rows.last().click();
+    await expect(page.locator("#proposal-parent")).toContainText(
+      "親の目的を確認しています",
+    );
+    await rows.first().click();
+    await expect(page.locator("#proposal-parent")).toContainText(
+      "e2e parent beta",
+      { timeout: 15_000 },
+    );
+    releaseA();
+    await page.waitForTimeout(500);
+    await expect(page.locator("#proposal-parent")).toContainText(
+      "e2e parent beta",
+    );
+    await expect(page.locator("#proposal-parent")).not.toContainText(
+      "e2e parent alpha",
+    );
+
+    // Adopting B binds B's actual parent (no approval drift to A).
+    await page.locator("#proposal-date").fill("2026-11-02T09:00:00+09:00");
+    await page.locator("#proposal-accept").click();
+    await expect(page.locator("#proposal-status")).toContainText(
+      "採用しました",
+      { timeout: 15_000 },
+    );
+    const tasks = await api(page, "GET", `${base}/tasks?limit=50`);
+    const taskItems = (tasks.body as { items: Record<string, unknown>[] })
+      .items;
+    expect(taskItems).toHaveLength(1);
+    expect(taskItems[0]?.parentPurposeId).toBe(pbBody.id);
+    expect(taskItems[0]?.title).toBe("beta task");
+  } finally {
+    await page.unroute(`**/purposes/${paBody.id}`);
+  }
+});
+
+test("a lost accept response freezes one operation until same-key retry", async ({
+  page,
+  request,
+}) => {
+  const sessionId = await page.evaluate(() =>
+    localStorage.getItem("ch.sessionId"),
+  );
+  const base = `/api/sessions/${sessionId}`;
+  await sendChat(page, "frozen alpha wish e2e");
+  await seedProposal(request, {
+    sessionId,
+    target: "purpose",
+    quote: "frozen alpha",
+  });
+  await sendChat(page, "frozen beta wish e2e");
+  await seedProposal(request, {
+    sessionId,
+    target: "purpose",
+    quote: "frozen beta",
+  });
+  await page.locator("#proposal-refresh").click();
+  await expect(page.locator("#proposal-badge")).toContainText(
+    "未採用の候補 2件",
+  );
+
+  // Newest first: open the older alpha draft (last row).
+  await page.locator("#proposal-list button").last().click();
+  await expect(page.locator("#proposal-detail-body")).toContainText(
+    "frozen alpha",
+  );
+
+  // Drop the first accept POST (lost response): the frozen op survives,
+  // fresh controls lock, and only the explicit retry may resend it.
+  await page.route(
+    "**/conversation-proposals/*/accept",
+    async (route) => route.abort(),
+    { times: 1 },
+  );
+  try {
+    await page.locator("#proposal-accept").click();
+    await expect(page.locator("#proposal-status")).toContainText(
+      "応答が不確定です",
+      { timeout: 15_000 },
+    );
+    await expect(page.locator("#proposal-retry")).toBeVisible();
+    await expect(page.locator("#proposal-accept")).toBeDisabled();
+    await expect(page.locator("#proposal-reject")).toBeDisabled();
+
+    // Fresh decisions cannot overwrite the frozen operation: reject is
+    // refused and selecting B keeps A's drawer pinned.
+    await page.locator("#proposal-reject").dispatchEvent("click");
+    await expect(page.locator("#proposal-status")).toContainText(
+      "未確定の操作があります",
+    );
+    await page.locator("#proposal-list button").first().click();
+    await expect(page.locator("#proposal-detail-body")).toContainText(
+      "frozen alpha",
+    );
+
+    // Same-key retry commits exactly ONE adoption; B stays pending.
+    await page.locator("#proposal-retry").click();
+    await expect(page.locator("#proposal-status")).toContainText(
+      "採用しました",
+      { timeout: 15_000 },
+    );
+    await expect(page.locator("#proposal-badge")).toContainText(
+      "未採用の候補 1件",
+    );
+  } finally {
+    await page.unroute("**/conversation-proposals/*/accept");
+  }
+  const purposes = await api(page, "GET", `${base}/purposes?limit=50`);
+  expect((purposes.body as { items: unknown[] }).items).toHaveLength(1);
+  const drafts = await api(
+    page,
+    "GET",
+    `${base}/conversation-proposals?limit=50`,
+  );
+  const rows = (drafts.body as { items: Record<string, unknown>[] }).items;
+  expect(rows.filter((row) => row.status === "accepted")).toHaveLength(1);
+  expect(rows.filter((row) => row.status === "pending")).toHaveLength(1);
 });

@@ -28,6 +28,7 @@ import {
   ConversationProposalAcceptRequestSchema,
   type ConversationProposalAcceptResponse,
   ConversationProposalAcceptResponseSchema,
+  ConversationProposalListQuerySchema,
   type ConversationProposalListResponse,
   ConversationProposalListResponseSchema,
   ConversationProposalRejectRequestSchema,
@@ -5390,10 +5391,14 @@ export function createKernelRepository(
     query: unknown = {},
   ): ConversationProposalListResponse {
     const parsed = parseOrValidation(
-      () => AutonomyListQuerySchema.parse(query ?? {}),
+      () => ConversationProposalListQuerySchema.parse(query ?? {}),
       "proposal list query",
     );
-    const out = autonomyListProposals(db, sessionId, parsed.limit);
+    const out = autonomyListProposals(db, sessionId, {
+      limit: parsed.limit,
+      ...(parsed.cursor !== undefined ? { cursor: parsed.cursor } : {}),
+      ...(parsed.status !== undefined ? { status: parsed.status } : {}),
+    });
     return parseOrValidation(
       () => ConversationProposalListResponseSchema.parse(out),
       "proposal list response",
