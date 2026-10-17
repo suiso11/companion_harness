@@ -23,6 +23,7 @@ import {
 import {
   AUTHORITATIVE_DELETED_REVISION,
   AUTHORITATIVE_GET_TOOL,
+  CALENDAR_CONTROL_ORIGIN,
   CALENDAR_ID,
   EVENT_DESCRIPTION,
   EVENT_END_RENDERED,
@@ -32,6 +33,7 @@ import {
   EVENT_TITLE_V2,
   FAKE_MCP_SERVER_NAME,
   FAKE_MCP_SERVER_VERSION,
+  FIXTURE_CREATE_PATH,
 } from "./ports.js";
 
 /**
@@ -269,6 +271,60 @@ export async function fakeToolSchemaHashes(): Promise<{
 }
 
 /**
+ * M6 create read-back fetch: an actual loopback HTTP GET against the
+ * hermetic Google-shaped fixture storage. Returns the provider-shaped event
+ * object, null on a 404 miss, or "lost" when the response itself was lost.
+ */
+async function fetchCreatedEvent(
+  eventId: string,
+): Promise<Record<string, unknown> | null | "lost"> {
+  let res: Response;
+  try {
+    res = await fetch(
+      `${CALENDAR_CONTROL_ORIGIN}${FIXTURE_CREATE_PATH}/${encodeURIComponent(eventId)}`,
+      {
+        method: "GET",
+        headers: { accept: "application/json" },
+        redirect: "manual",
+      },
+    );
+  } catch {
+    return "lost";
+  }
+  if (res.status === 404) return null;
+  if (!res.ok) return "lost";
+  try {
+    const body = (await res.json()) as {
+      id?: unknown;
+      summary?: unknown;
+      start?: { dateTime?: unknown };
+      end?: { dateTime?: unknown };
+    };
+    if (
+      typeof body.id !== "string" ||
+      typeof body.summary !== "string" ||
+      typeof body.start?.dateTime !== "string" ||
+      typeof body.end?.dateTime !== "string"
+    ) {
+      return "lost";
+    }
+    return {
+      id: body.id,
+      calendarId: CALENDAR_ID,
+      status: "confirmed",
+      summary: body.summary,
+      description: EVENT_DESCRIPTION,
+      start: { dateTime: body.start.dateTime },
+      end: { dateTime: body.end.dateTime },
+      updated: "2026-11-04T00:00:00Z",
+      etag: `create-${body.id}`,
+    };
+  } catch {
+    return "lost";
+  }
+}
+
+/**
  * One fresh SDK `Server` per transport pair (the connector may reconnect;
  * servers are recreated per connect while sharing the state object).
  * Handshake identity, tools/list and tools/call all follow the fake state;
@@ -376,6 +432,26 @@ export function createFakeCalendarMcpServer(
         await awaitRelease(state, "read");
         state.getCalls += 1;
         if (state.deleted) return deletedResult();
+        // M6 create read-back: a stable insert id (32 lowercase hex) that is
+        // not the seeded reschedule event is served from the REAL loopback
+        // Google-shaped fixture storage (an actual HTTP GET against the
+        // harness control server, counted fixture-side). A never-inserted id
+        // is a bare miss (no synthesis); a transport loss is an isError miss
+        // (the strategy classifies both as unverified, never verified).
+        if (typeof args.eventId === "string" && args.eventId !== EVENT_ID) {
+          const created = await fetchCreatedEvent(args.eventId);
+          if (created === "lost") {
+            return {
+              content: [{ type: "text", text: "transport_lost" }],
+              isError: true,
+            };
+          }
+          if (created === null) return deletedResult();
+          return {
+            content: [{ type: "text", text: "fake created event" }],
+            structuredContent: { event: created },
+          };
+        }
         return {
           content: [{ type: "text", text: "fake event" }],
           structuredContent: { event: fakeEvent(state) },

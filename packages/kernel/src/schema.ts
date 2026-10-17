@@ -644,15 +644,20 @@ export const memoryOperations = sqliteTable("memory_operations", {
   updatedAt: integer("updated_at").notNull(),
 });
 
-// M5 action storage (§18). Mirrors
-// packages/kernel/migrations/0007_m5_actions.sql, which is authoritative.
-// Four STRICT tables with the exact §18.3 compound FKs, the 4-column target
-// FK, decision-turn uniqueness, status/marker/receipt CHECKs, and grant
-// one-shot semantics. The pending-per-session partial unique index
+// M5 action storage + M6 opt-in calendar.create extension (§18 + agreed
+// M6 follow-up). Mirrors packages/kernel/migrations/0010_m6_calendar_create.sql,
+// which is authoritative (0007 rebuilt leaf-first/root-first with the
+// per-tool target NULL-ability CHECK). Four STRICT tables with the exact
+// §18.3 compound FKs, the 4-column target FK (NULL create columns simply do
+// not constrain), decision-turn uniqueness, status/marker/receipt CHECKs,
+// and grant one-shot semantics. The pending-per-session partial unique index
 // idx_proposals_one_pending_per_session is owned by the committed SQL file
 // only (as with the M0 active-run partial index). Proposal content
 // (input/target/expectedRevision/preview/hash) is immutable; only
 // status / resolved_at / decision_turn_id may ever be written again.
+// `calendar.reschedule` rows keep all four target columns NON-NULL;
+// `calendar.create` rows carry all four NULL (no source event, no etag,
+// no preflight snapshot — never a fake placeholder).
 
 export const actionProposals = sqliteTable(
   "action_proposals",
@@ -669,10 +674,10 @@ export const actionProposals = sqliteTable(
       .notNull()
       .references(() => connectorInstances.id),
     inputJson: text("input_json").notNull(),
-    targetRefId: text("target_ref_id").notNull(),
-    targetResourceId: text("target_resource_id").notNull(),
-    basedOnSnapshotId: text("based_on_snapshot_id").notNull(),
-    expectedRevision: text("expected_revision").notNull(),
+    targetRefId: text("target_ref_id"),
+    targetResourceId: text("target_resource_id"),
+    basedOnSnapshotId: text("based_on_snapshot_id"),
+    expectedRevision: text("expected_revision"),
     previewJson: text("preview_json").notNull(),
     hash: text("hash").notNull(),
     status: text("status").notNull(),
@@ -731,7 +736,7 @@ export const actionProposals = sqliteTable(
     }),
     check(
       "action_proposals_tool_check",
-      sql`${t.tool} = 'calendar.reschedule'`,
+      sql`${t.tool} IN ('calendar.reschedule', 'calendar.create')`,
     ),
     check("action_proposals_input_json_check", sql`json_valid(${t.inputJson})`),
     check(
@@ -739,6 +744,10 @@ export const actionProposals = sqliteTable(
       sql`json_valid(${t.previewJson})`,
     ),
     check("action_proposals_ttl_check", sql`${t.expiresAt} > ${t.createdAt}`),
+    check(
+      "action_proposals_create_target_check",
+      sql`(${t.tool} = 'calendar.reschedule' AND ${t.targetRefId} IS NOT NULL AND ${t.targetResourceId} IS NOT NULL AND ${t.basedOnSnapshotId} IS NOT NULL AND ${t.expectedRevision} IS NOT NULL) OR (${t.tool} = 'calendar.create' AND ${t.targetRefId} IS NULL AND ${t.targetResourceId} IS NULL AND ${t.basedOnSnapshotId} IS NULL AND ${t.expectedRevision} IS NULL)`,
+    ),
     check(
       "action_proposals_status_check",
       sql`${t.status} IN ('pending','approved','rejected','expired')`,
@@ -853,7 +862,7 @@ export const actionExecutionGrants = sqliteTable(
     }),
     check(
       "action_execution_grants_tool_check",
-      sql`${t.tool} = 'calendar.reschedule'`,
+      sql`${t.tool} IN ('calendar.reschedule', 'calendar.create')`,
     ),
     check(
       "action_execution_grants_consumed_check",

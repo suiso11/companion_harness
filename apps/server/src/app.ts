@@ -195,6 +195,16 @@ export interface CreateAppDeps {
    */
   actionsEnabled?: boolean;
   /**
+   * M6: true only when the explicit create gate is open (config opt-in +
+   * writeEnabled + createEnabled + a dedicated trusted create binding on
+   * the active Calendar instance). APPROVE admits per proposal tool BEFORE
+   * any repository mutation: `calendar.create` rows require this flag,
+   * `calendar.reschedule` rows require actionsEnabled; the disabled tool
+   * is refused with fixed 409 `action_execution_disabled`. Default false
+   * (fail closed).
+   */
+  createEnabled?: boolean;
+  /**
    * Explicit memory management service (server-owned). Null (default)
    * preserves the existing memory-disabled behavior: every
    * `/memory/*` route answers 404 without touching the repository.
@@ -599,6 +609,7 @@ function mapDomainError(c: Context, error: unknown): Response {
 export function createApp(deps: CreateAppDeps): CreatedServerApp {
   const { config, repo, engine } = deps;
   const actionsEnabled = deps.actionsEnabled === true;
+  const createEnabled = deps.createEnabled === true;
   const memory = deps.memory ?? null;
   const logger = deps.logger ?? createStdServerLogger(config.logLevel);
   const now = deps.now ?? Date.now;
@@ -1052,10 +1063,34 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       if (!parsedBody.success) {
         return validationError(c);
       }
-      // C21 disabled composition: refuse BEFORE any repository call, so no
-      // proposal can be approved into a queued Action Run while the M5 write
-      // surface is gated off. Fixed 409 code, no ids or content in the body.
-      if (actionsEnabled !== true) {
+      // Per-tool disabled composition: resolve the proposal FIRST
+      // (ownership-safe bounded read, no mutation), then admit ONLY the
+      // tool's own surface BEFORE any repository mutation/grant/queue.
+      // A pending create staged before restart is refused after
+      // createEnabled is turned off even while reschedule stays enabled,
+      // and vice versa. Fixed 409 code, no ids or content in the body.
+      // Foreign/unknown proposals stay 404; hash/replay semantics live
+      // inside repo.approveProposal below and are unchanged here.
+      let proposalTool: string;
+      try {
+        const listed = repo.listProposals(session.id);
+        const found = listed.proposals.find(
+          (entry) => entry.proposalId === proposal.id,
+        );
+        if (found === undefined) {
+          return apiError(c, 404, "not_found", "resource not found");
+        }
+        proposalTool = found.tool;
+      } catch (error) {
+        return mapDomainError(c, error);
+      }
+      const toolEnabled =
+        proposalTool === "calendar.create"
+          ? createEnabled === true
+          : proposalTool === "calendar.reschedule"
+            ? actionsEnabled === true
+            : false;
+      if (toolEnabled !== true) {
         return c.json(
           {
             error: {

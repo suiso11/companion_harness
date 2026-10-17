@@ -11,6 +11,8 @@
 export type {
   ActionAuthoritativeObservation,
   ActionCancelResult,
+  ActionCreateFinishRequest,
+  ActionCreateReadPort,
   ActionExecutionService,
   ActionExecutionServiceOptions,
   ActionFinishRequest,
@@ -41,13 +43,18 @@ export type {
   ActionProposalEventSink,
   ActionProposalStager,
   ActionProposalStagerOptions,
+  AnyStagedContent,
+  CalendarCreateAgentInput,
+  CalendarCreateAgentOutput,
   CalendarRescheduleAgentInput,
   CalendarRescheduleAgentOutput,
   CommittedProposal,
+  StagedCreateContent,
   StagedProposedContent,
 } from "./action_proposals.js";
 export {
   createActionProposalStager,
+  createCalendarCreateProposalRegistration,
   createCalendarRescheduleProposalRegistration,
 } from "./action_proposals.js";
 export type {
@@ -55,11 +62,16 @@ export type {
   CalendarActionWriteCapability,
   CalendarActionWritePort,
   CalendarActionWriteRequest,
+  CalendarCreateWriteCapability,
+  CalendarCreateWriteOutcome,
+  CalendarCreateWritePort,
+  CalendarCreateWriteRequest,
   CalendarTargetResolver,
   CalendarWriteOutcome,
 } from "./action_strategy.js";
 export {
   CalendarActionWriteCapabilitySchema,
+  CalendarCreateWriteCapabilitySchema,
   createActionStrategy,
 } from "./action_strategy.js";
 export type {
@@ -185,6 +197,7 @@ export type {
   CreateCalendarSearchRegistrationOptions,
 } from "./calendar_tools.js";
 export {
+  authoritativeCreateTitleMatches,
   calendarEventBodyText,
   createCalendarSearchRegistration,
   createDurableCalendarTargetStore,

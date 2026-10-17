@@ -413,8 +413,10 @@ describe("write-profile default/off composition", () => {
         body: JSON.stringify({ proposalHash: "a".repeat(64) }),
       },
     );
-    expect(response.status).toBe(409);
-    expect(await response.text()).toContain("action_execution_disabled");
+    // Unknown proposals resolve before the per-tool gate (404, no mutation);
+    // the owned-disabled 409 boundary lives in createApprovalGate.test.ts.
+    expect(response.status).toBe(404);
+    expect(await response.text()).not.toContain("action_execution_disabled");
     expect(writeChildren).toBe(0);
   });
 
@@ -1863,7 +1865,7 @@ describe("injected calendar binding derives the write port from the active selec
                   method: "PATCH",
                   headers: {
                     "content-type": "application/json",
-                    "if-match": request.grant.expectedRevision,
+                    "if-match": request.grant.expectedRevision ?? "",
                   },
                   body: JSON.stringify({
                     start: { dateTime: request.start },
