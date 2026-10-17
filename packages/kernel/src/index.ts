@@ -152,6 +152,20 @@ export {
   listTaskEvents,
   recordPurposeConflict,
 } from "./autonomy.js";
+export {
+  checkTrialAuthority,
+  claimTrialGrant,
+  expireTrialProposal,
+  fenceUnknownExecution,
+  hashTrialRequest,
+  invalidateTrialsForScope,
+  listTrialProposals,
+  parseConstraintRule,
+  pathIntersectsDenied,
+  revokeAllClaimedForStop,
+  stageTrialProposal,
+  approveTrialProposal,
+} from "./trial_authority.js";
 export type {
   ManualBackupOptions,
   PreMigrationBackupOptions,
@@ -395,7 +409,6 @@ export type {
   SessionRow,
   StoredIdempotencyRecord,
   TransitionOptions,
-  TurnRow,
 } from "./repository.js";
 export { createKernelRepository } from "./repository.js";
 export {
@@ -429,6 +442,9 @@ export {
   sessions,
   snapshotLinks,
   toolCalls,
+  trialConstraintRules,
+  trialGrants,
+  trialProposals,
   turnSelections,
   turns,
 } from "./schema.js";

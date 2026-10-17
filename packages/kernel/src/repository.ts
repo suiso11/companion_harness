@@ -115,6 +115,12 @@ import {
   TaskResumeRequestSchema,
   TaskTransitionRequestSchema,
   type TaskView,
+  TrialLaunchRequestSchema,
+  type TrialProfileSnapshot,
+  TrialProfileSnapshotSchema,
+  TrialProposalViewSchema,
+  type TrialProposalView,
+  TrialStageRequestSchema,
 } from "@companion/contracts";
 import type Database from "better-sqlite3";
 import {
@@ -152,6 +158,15 @@ import {
   startTask as autonomyStartTask,
   recordUserActivityInTx,
 } from "./autonomy.js";
+import {
+  approveTrialProposal,
+  claimTrialGrant,
+  expireTrialProposal,
+  fenceUnknownExecution,
+  hashTrialRequest,
+  listTrialProposals,
+  stageTrialProposal,
+} from "./trial_authority.js";
 import {
   assertUuidV4,
   canonicalJsonString,
@@ -4744,6 +4759,14 @@ export function createKernelRepository(
         ...(parsed.validUntil !== undefined
           ? { validUntil: parsed.validUntil }
           : {}),
+        ...("constraintRule" in parsed &&
+        (parsed as { constraintRule?: unknown }).constraintRule !== undefined
+          ? {
+              constraintRule: (parsed as { constraintRule?: unknown })
+                .constraintRule,
+              constraintRulePresent: true,
+            }
+          : {}),
       },
       options,
     );
@@ -4833,6 +4856,9 @@ export function createKernelRepository(
           : {}),
         ...(parsed.validUntil !== undefined
           ? { validUntil: parsed.validUntil }
+          : {}),
+        ...("constraintRule" in parsed
+          ? { constraintRule: (parsed as { constraintRule?: unknown }).constraintRule ?? null }
           : {}),
       },
       options,
@@ -5156,6 +5182,128 @@ export function createKernelRepository(
     return applyAutonomyRestartFence(db, now);
   }
 
+  /* Trial authority facade: DATA-only stage, one-grant approve, claim. */
+  function stageTrial(
+    sessionId: string,
+    request: unknown,
+    options: AutonomyKeyOptions & {
+      profile: TrialProfileSnapshot;
+      workspaceAlias: string;
+    },
+  ): { status: number; body: TrialProposalView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => TrialStageRequestSchema.parse(request),
+      "trial stage request",
+    );
+    const profile = parseOrValidation(
+      () => TrialProfileSnapshotSchema.parse(options.profile),
+      "trial profile snapshot",
+    );
+    void profile;
+    const out = stageTrialProposal(
+      db,
+      sessionId,
+      {
+        taskId: parsed.taskId,
+        objective: parsed.objective,
+        acceptance: [...parsed.acceptance],
+        literalPatchPaths: [...parsed.literalPatchPaths],
+        operation: parsed.operation,
+        readOnlyMode: parsed.readOnlyMode,
+        expiry: parsed.expiry,
+        possibleExternalDataConsent: parsed.possibleExternalDataConsent,
+        timeoutMs: parsed.objectiveResourceCaps.timeoutMs,
+        maxOutputBytes: parsed.objectiveResourceCaps.maxOutputBytes,
+        requiredChecks: [...parsed.requiredChecks],
+        workspaceAlias: options.workspaceAlias,
+      },
+      { key: options.key, ...(options.now !== undefined ? { now: options.now } : {}) },
+    );
+    const body = parseOrValidation(
+      () => TrialProposalViewSchema.parse(out.body),
+      "trial proposal response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function listTrials(sessionId: string, query: unknown = {}): { items: TrialProposalView[] } {
+    const parsed = parseOrValidation(
+      () => AutonomyListQuerySchema.parse(query ?? {}),
+      "trial list query",
+    );
+    const out = listTrialProposals(db, sessionId, parsed.limit);
+    return {
+      items: out.items.map((item) =>
+        parseOrValidation(() => TrialProposalViewSchema.parse(item), "trial proposal"),
+      ),
+    };
+  }
+
+  function approveTrial(
+    sessionId: string,
+    proposalId: string,
+    options: AutonomyKeyOptions & {
+      profile: TrialProfileSnapshot;
+      workspaceAlias: string;
+    },
+  ): { status: number; body: { executionId: string }; replayed: boolean } {
+    const profile = parseOrValidation(
+      () => TrialProfileSnapshotSchema.parse(options.profile),
+      "trial profile snapshot",
+    );
+    const out = approveTrialProposal(db, sessionId, proposalId, {
+      key: options.key,
+      ...(options.now !== undefined ? { now: options.now } : {}),
+      profile,
+      workspaceAlias: options.workspaceAlias,
+    });
+    return { status: out.status, body: out.body, replayed: out.replayed };
+  }
+
+  function claimTrial(
+    sessionId: string,
+    executionId: string,
+    options: AutonomyKeyOptions & {
+      profile: TrialProfileSnapshot;
+      workspaceAlias: string;
+      purposeStatement: string;
+    },
+  ): { status: number; body: unknown; replayed: boolean } {
+    const profile = parseOrValidation(
+      () => TrialProfileSnapshotSchema.parse(options.profile),
+      "trial profile snapshot",
+    );
+    const out = claimTrialGrant(db, sessionId, executionId, {
+      key: options.key,
+      ...(options.now !== undefined ? { now: options.now } : {}),
+      profile,
+      workspaceAlias: options.workspaceAlias,
+      purposeStatement: options.purposeStatement,
+    });
+    const req = parseOrValidation(
+      () => TrialLaunchRequestSchema.parse((out.body as { request: unknown }).request),
+      "trial launch request",
+    );
+    void req;
+    return { status: out.status, body: out.body, replayed: out.replayed };
+  }
+
+  function expireTrial(sessionId: string, proposalId: string, now?: number): void {
+    expireTrialProposal(db, sessionId, proposalId, now ?? Date.now());
+  }
+
+  function fenceTrialUnknown(sessionId: string, scope: string, now?: number): number {
+    return fenceUnknownExecution(db, sessionId, scope, now ?? Date.now());
+  }
+
+  function hashTrialLaunchRequest(request: unknown): string {
+    const parsed = parseOrValidation(
+      () => TrialLaunchRequestSchema.parse(request),
+      "trial launch request",
+    );
+    return hashTrialRequest(parsed);
+  }
+
   return {
     createSession,
     postMessage,
@@ -5245,6 +5393,13 @@ export function createKernelRepository(
     setAutonomyControlState,
     listAutonomyActivityLog,
     applyAutonomyRestartFenceNow,
+    stageTrial,
+    listTrials,
+    approveTrial,
+    claimTrial,
+    expireTrial,
+    fenceTrialUnknown,
+    hashTrialLaunchRequest,
   };
 }
 

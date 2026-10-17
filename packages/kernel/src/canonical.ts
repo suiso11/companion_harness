@@ -121,6 +121,9 @@ export const IDEMPOTENCY_OPERATIONS = {
     operation: "autonomy_record_conflict",
     schemaVersion: 1,
   },
+  stageTrial: { operation: "trial_stage", schemaVersion: 1 },
+  approveTrial: { operation: "trial_approve", schemaVersion: 1 },
+  claimTrial: { operation: "trial_claim", schemaVersion: 1 },
 } as const;
 
 /** Generate a new UUID v4 harness id. */

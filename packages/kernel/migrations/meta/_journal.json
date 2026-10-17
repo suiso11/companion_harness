@@ -1,5 +1,5 @@
 {
-  "version": 7,
+  "version": 8,
   "dialect": "sqlite",
   "id": "m0-foundation",
   "entries": [
@@ -78,6 +78,13 @@
       "version": 11,
       "when": 1790000000010,
       "tag": "0011_autonomy",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": 12,
+      "when": 1790000000011,
+      "tag": "0012_trial_authority",
       "breakpoints": true
     }
   ]

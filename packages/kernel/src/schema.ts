@@ -1156,6 +1156,49 @@ export const autonomyActivity = sqliteTable(
   ],
 );
 
+export const trialConstraintRules = sqliteTable("trial_constraint_rules", {
+  purposeId: text("purpose_id").primaryKey(),
+  sessionId: text("session_id").notNull(),
+  scope: text("scope").notNull(),
+  ruleJson: text("rule_json"),
+  createdAt: integer("created_at").notNull(),
+});
+
+export const trialProposals = sqliteTable("trial_proposals", {
+  id: text("id").primaryKey(),
+  sessionId: text("session_id").notNull(),
+  scope: text("scope").notNull(),
+  taskId: text("task_id").notNull(),
+  goalId: text("goal_id"),
+  goalVersion: integer("goal_version"),
+  taskVersion: integer("task_version").notNull(),
+  objective: text("objective").notNull(),
+  acceptanceJson: text("acceptance_json").notNull(),
+  pathsJson: text("paths_json").notNull(),
+  operation: text("operation").notNull(),
+  readOnly: integer("read_only").notNull(),
+  expiry: text("expiry").notNull(),
+  consent: integer("consent").notNull(),
+  timeoutMs: integer("timeout_ms").notNull(),
+  maxOutputBytes: integer("max_output_bytes").notNull(),
+  checksJson: text("checks_json").notNull(),
+  status: text("status").notNull(),
+  createdAt: integer("created_at").notNull(),
+});
+
+export const trialGrants = sqliteTable("trial_grants", {
+  executionId: text("execution_id").primaryKey(),
+  proposalId: text("proposal_id").notNull(),
+  sessionId: text("session_id").notNull(),
+  scope: text("scope").notNull(),
+  status: text("status").notNull(),
+  cancelRequested: integer("cancel_requested").notNull(),
+  controlGeneration: integer("control_generation").notNull(),
+  requestJson: text("request_json"),
+  createdAt: integer("created_at").notNull(),
+  claimedAt: integer("claimed_at"),
+});
+
 export const kernelSchema = {
   sessions,
   autonomyPurposes,
@@ -1165,6 +1208,9 @@ export const kernelSchema = {
   autonomyTaskEvents,
   autonomyControl,
   autonomyActivity,
+  trialConstraintRules,
+  trialProposals,
+  trialGrants,
   turns,
   runs,
   turnSelections,

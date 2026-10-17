@@ -60,8 +60,7 @@ export const TaskKindSchema = z.enum(["chat", "wish", "problem", "task"]);
 export type TaskKind = z.infer<typeof TaskKindSchema>;
 
 /** Closed task-speaker vocabulary (who raised the task). */
-export const TaskSpeakerSchema = z.enum(["user", "self", "external"]);
-export type TaskSpeaker = z.infer<typeof TaskSpeakerSchema>;
+export const TaskSpeakerSchema = z.enum(["user", "self", "external"]);export type TaskSpeaker = z.infer<typeof TaskSpeakerSchema>;
 
 /** Closed task lifecycle (terminal: completed / cancelled, never revived). */
 export const TaskStatusSchema = z.enum([
@@ -207,6 +206,12 @@ export const PurposeCreateRequestSchema = z.strictObject({
    */
   validFrom: PurposeApplicabilityInstantSchema.optional(),
   validUntil: PurposeApplicabilityInstantSchema.optional(),
+  /**
+   * Optional structured constraint rule (ONLY kind=constraint; strict shape
+   * validated server-side: deny_workspace/deny_operation/deny_write_path).
+   * Present passes through hashing; absent leaves stored rule unchanged.
+   */
+  constraintRule: z.unknown().optional(),
 });
 export type PurposeCreateRequest = z.infer<typeof PurposeCreateRequestSchema>;
 
@@ -226,6 +231,8 @@ export const PurposeViewSchema = z.strictObject({
   /** Explicit applicability window; NULL bounds are unbounded. */
   validFrom: PurposeApplicabilityInstantSchema.nullable(),
   validUntil: PurposeApplicabilityInstantSchema.nullable(),
+  /** Structured constraint rule payload (kind=constraint only), else null. */
+  constraintRule: z.unknown().nullable().default(null),
   createdAt: UnixMsSchema,
   updatedAt: UnixMsSchema,
 });
@@ -260,6 +267,12 @@ export const PurposeCorrectRequestSchema = z.strictObject({
    */
   validFrom: z.union([PurposeApplicabilityInstantSchema, z.null()]).optional(),
   validUntil: z.union([PurposeApplicabilityInstantSchema, z.null()]).optional(),
+  /**
+   * Rule correction: `undefined` preserves, `null` clears, object sets
+   * (kind=constraint only; kind change away with non-null rule must
+   * explicitly clear or the correction is rejected).
+   */
+  constraintRule: z.unknown().optional().nullable(),
 });
 export type PurposeCorrectRequest = z.infer<typeof PurposeCorrectRequestSchema>;
 

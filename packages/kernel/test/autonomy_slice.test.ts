@@ -1099,7 +1099,7 @@ describe("autonomy slice", () => {
       // Autonomy reads fail closed on the old version (never silently empty).
       expect(() => repo.getAutonomyControlState()).toThrow();
       expect(() => repo.listAutonomyActivityLog({})).toThrow();
-      // Upgrading to 11 seeds the paused control; chat activity resumes.
+      // Upgrading to latest seeds the paused control; chat activity resumes.
       const backups = join(
         mkdtempSync(join(tmpdir(), "av-migrate-11-")),
         "backups",
@@ -1108,7 +1108,7 @@ describe("autonomy slice", () => {
         db: handle.raw,
         backupDir: backups,
       });
-      expect(upgrade.applied).toEqual([11]);
+      expect(upgrade.applied).toEqual([11, 12]);
       expect(repo.getAutonomyControlState().paused).toBe(true);
       const before = repo.listAutonomyActivityLog({}).items.length;
       const v11Session = repo.createSession({ key: randomUUID() });

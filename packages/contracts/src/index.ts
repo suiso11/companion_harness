@@ -207,6 +207,32 @@ export {
   taskOpScope,
 } from "./autonomy.js";
 export type {
+  ConstraintRule,
+  TrialClaimResult,
+  TrialGrantStatus,
+  TrialGrantView,
+  TrialLaunchRequest,
+  TrialOperation,
+  TrialProposalStatus,
+  TrialProposalView,
+  TrialProfileSnapshot,
+  TrialStageRequest,
+} from "./trial_authority.js";
+export {
+  ConstraintRuleSchema,
+  TRIAL_OPERATIONS_READONLY,
+  TrialClaimResultSchema,
+  TrialGrantStatusSchema,
+  TrialGrantViewSchema,
+  TrialLaunchRequestSchema,
+  TrialOperationSchema,
+  trialOperationIsReadOnly,
+  TrialProfileSnapshotSchema,
+  TrialProposalStatusSchema,
+  TrialProposalViewSchema,
+  TrialStageRequestSchema,
+} from "./trial_authority.js";
+export type {
   CalendarEventStatus,
   CalendarGetTarget,
   CalendarSearchHit,

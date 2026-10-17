@@ -77,6 +77,11 @@ import {
   requestHash,
 } from "./canonical.js";
 import {
+  invalidateTrialsForScope,
+  parseConstraintRule,
+  revokeAllClaimedForStop,
+} from "./trial_authority.js";
+import {
   IdempotencyConflictError,
   KernelStorageError,
   RepositoryNotFoundError,
@@ -338,6 +343,46 @@ interface RawTask {
   updated_at: number;
 }
 
+function readRuleJson(
+  db: Database.Database,
+  purposeId: string,
+): unknown {
+  try {
+    const r = db
+      .prepare("SELECT rule_json FROM trial_constraint_rules WHERE purpose_id = ?")
+      .get(purposeId) as { rule_json: string | null } | undefined;
+    if (!r || r.rule_json === null) return null;
+    return JSON.parse(r.rule_json);
+  } catch {
+    return null;
+  }
+}
+
+/** Persist/clear a structured rule; strict shape, kind=constraint only. */
+function writeConstraintRuleInTx(
+  db: Database.Database,
+  session: string,
+  scope: string,
+  purposeId: string,
+  kind: string,
+  rule: unknown,
+  rulePresent: boolean,
+  now: number,
+): void {
+  if (!rulePresent) return;
+  if (rule === null || rule === undefined) {
+    db.prepare("DELETE FROM trial_constraint_rules WHERE purpose_id = ?").run(purposeId);
+    return;
+  }
+  if (kind !== "constraint") {
+    throw new RepositoryValidationError("constraintRule requires kind=constraint");
+  }
+  const parsed = parseConstraintRule(rule);
+  db.prepare(
+    "INSERT INTO trial_constraint_rules (purpose_id, session_id, scope, rule_json, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(purpose_id) DO UPDATE SET rule_json = excluded.rule_json",
+  ).run(purposeId, session, scope, JSON.stringify(parsed), now);
+}
+
 function toPurposeView(row: RawPurpose): {
   id: string;
   sessionId: string;
@@ -353,6 +398,7 @@ function toPurposeView(row: RawPurpose): {
   supersededBy: string | null;
   validFrom: string | null;
   validUntil: string | null;
+  constraintRule: unknown;
   createdAt: number;
   updatedAt: number;
 } {
@@ -373,6 +419,7 @@ function toPurposeView(row: RawPurpose): {
         supersededBy: row.superseded_by,
         validFrom: row.valid_from,
         validUntil: row.valid_until,
+        constraintRule: (row as { __rule?: unknown }).__rule ?? null,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
       }),
@@ -424,11 +471,14 @@ function readPurpose(
   db: Database.Database,
   purposeId: string,
 ): RawPurpose | null {
-  return (
+  const row =
     (db
       .prepare("SELECT * FROM autonomy_purposes WHERE id = ?")
-      .get(purposeId) as RawPurpose | undefined) ?? null
-  );
+      .get(purposeId) as RawPurpose | undefined) ?? null;
+  if (row !== null) {
+    (row as { __rule?: unknown }).__rule = readRuleJson(db, row.id);
+  }
+  return row;
 }
 
 function readTask(db: Database.Database, taskId: string): RawTask | null {
@@ -588,6 +638,8 @@ export interface CreatePurposeInput {
   interpretation?: string;
   validFrom?: string | null;
   validUntil?: string | null;
+  constraintRule?: unknown;
+  constraintRulePresent?: boolean;
 }
 
 export interface AutonomyKeyOptions {
@@ -609,6 +661,7 @@ export function createPurpose(
   const key = requireKey(options.key);
   const now = nowMs(options.now);
   const scope = `session:${session}:purpose`;
+  const rulePresent = input.constraintRulePresent ?? input.constraintRule !== undefined;
   const hash = requestHash(
     IDEMPOTENCY_OPERATIONS.createPurpose.operation,
     IDEMPOTENCY_OPERATIONS.createPurpose.schemaVersion,
@@ -623,6 +676,7 @@ export function createPurpose(
       interpretation: input.interpretation ?? null,
       validFrom: input.validFrom ?? null,
       validUntil: input.validUntil ?? null,
+      ...(rulePresent ? { constraintRule: input.constraintRule ?? null } : {}),
     },
   );
   return withImmediate(db, () => {
@@ -679,6 +733,19 @@ export function createPurpose(
       input.statement,
       now,
     );
+    writeConstraintRuleInTx(
+      db,
+      session,
+      input.scope,
+      id,
+      input.kind,
+      input.constraintRule,
+      rulePresent,
+      now,
+    );
+    if (input.kind === "constraint") {
+      invalidateTrialsForScope(db, session, input.scope, "constraint_created", now);
+    }
     const row = readPurpose(db, id);
     if (row === null) {
       throw new RepositoryNotFoundError(`purpose ${id} not found`);
@@ -702,6 +769,9 @@ export function listPurposes(
       "SELECT * FROM autonomy_purposes WHERE session_id = ? ORDER BY created_at DESC, id ASC LIMIT ?",
     )
     .all(session, capped) as RawPurpose[];
+  for (const r of rows) {
+    (r as { __rule?: unknown }).__rule = readRuleJson(db, r.id);
+  }
   return { items: rows.map(toPurposeView) };
 }
 
@@ -898,6 +968,7 @@ export function recordPurposeConflict(
     db.prepare(
       "INSERT INTO autonomy_purpose_conflicts (id, session_id, purpose_a_id, purpose_b_id, created_at) VALUES (?, ?, ?, ?, ?)",
     ).run(id, session, first, second, now);
+    invalidateTrialsForScope(db, session, a.scope, "conflict_recorded", now);
     const body = {
       id,
       sessionId: session,
@@ -917,6 +988,8 @@ export interface CorrectPurposeInput extends CreatePurposeInput {
   /** undefined = preserve old window; null = clear bound; string = set. */
   validFrom?: string | null;
   validUntil?: string | null;
+  /** undefined = preserve rule; null = clear; object = set. */
+  constraintRule?: unknown;
 }
 
 export function correctPurpose(
@@ -936,8 +1009,7 @@ export function correctPurpose(
   const key = requireKey(options.key);
   const now = nowMs(options.now);
   const scope = `purpose:${requireId(input.purposeId, "purposeId")}:correct`;
-  // Presence-sensitive hash: `undefined` (preserve the old window bound)
-  // and `null` (clear it to unbounded) are DIFFERENT commands, so the
+  // Presence-sensitive hash: `undefined` (preserve the old window bound)  // and `null` (clear it to unbounded) are DIFFERENT commands, so the
   // canonical payload carries explicit presence flags alongside the
   // nullable values. The same key with a changed presence/value is a
   // conflict, never a silent merge.
@@ -959,6 +1031,8 @@ export function correctPurpose(
       validFrom: input.validFrom ?? null,
       validUntilPresent: input.validUntil !== undefined,
       validUntil: input.validUntil ?? null,
+      rulePresent: input.constraintRule !== undefined,
+      constraintRule: input.constraintRule ?? null,
     },
   );
   return withImmediate(db, () => {
@@ -1071,6 +1145,31 @@ export function correctPurpose(
       "purpose_superseded",
       now,
     );
+    // Rule correction: omission preserves, null clears, object sets.
+    // Kind change away from constraint with a live rule must explicitly
+    // clear (null) or the correction is rejected.
+    const oldRule = readRuleJson(db, oldRow.id);
+    if (input.kind !== "constraint" && input.constraintRule !== undefined && input.constraintRule !== null) {
+      throw new RepositoryValidationError("constraintRule requires kind=constraint: clear it explicitly");
+    }
+    if (input.kind !== "constraint" && oldRule !== null && input.constraintRule === undefined) {
+      throw new RepositoryValidationError("kind change away from constraint must explicitly clear constraintRule");
+    }
+    if (input.constraintRule !== undefined) {
+      if (input.constraintRule === null) {
+        db.prepare("DELETE FROM trial_constraint_rules WHERE purpose_id = ?").run(oldRow.id);
+      } else {
+        writeConstraintRuleInTx(db, session, input.scope, newId, input.kind, input.constraintRule, true, now);
+      }
+    } else if (oldRule !== null && input.kind === "constraint") {
+      db.prepare(
+        "INSERT INTO trial_constraint_rules (purpose_id, session_id, scope, rule_json, created_at) VALUES (?, ?, ?, ?, ?)",
+      ).run(newId, session, input.scope, JSON.stringify(oldRule), now);
+    }
+    invalidateTrialsForScope(db, session, oldRow.scope, "purpose_corrected", now);
+    if (input.scope !== oldRow.scope) {
+      invalidateTrialsForScope(db, session, input.scope, "purpose_corrected", now);
+    }
     const oldCurrent = readPurpose(db, oldRow.id);
     const newCurrent = readPurpose(db, newId);
     if (oldCurrent === null || newCurrent === null) {
@@ -1273,6 +1372,7 @@ function transitionPurpose(
       operation === "revoke" ? "purpose_revoked" : "purpose_achieved",
       now,
     );
+    invalidateTrialsForScope(db, session, row.scope, `purpose_${operation}d`, now);
     const current = readPurpose(db, row.id);
     if (current === null) {
       throw new RepositoryNotFoundError(`purpose ${row.id} not found`);
@@ -1639,6 +1739,7 @@ function transitionTask(
       throw new RepositoryNotFoundError(`task ${row.id} not found`);
     }
     const body = toTaskView(current);
+    invalidateTrialsForScope(db, session, row.scope, `task_${operation}`, now);
     storeIdempotentResponse(db, scope, canonical, hash, 200, body, now);
     return { status: 200, body, replayed: false };
   });
@@ -1810,6 +1911,7 @@ export function holdTask(
       throw new RepositoryNotFoundError(`task ${row.id} not found`);
     }
     const body = toTaskView(current);
+    invalidateTrialsForScope(db, session, row.scope, "task_held", now);
     storeIdempotentResponse(db, scope, canonical, hash, 200, body, now);
     return { status: 200, body, replayed: false };
   });
@@ -2024,6 +2126,14 @@ export function resumeTask(
       throw new RepositoryNotFoundError(`task ${row.id} not found`);
     }
     const body = toTaskView(current);
+    // Reparenting changes authority scope: invalidate BOTH old and new.
+    invalidateTrialsForScope(db, session, row.scope, "task_resumed", now);
+    if (nextParent !== row.parent_purpose_id) {
+      const np = readPurpose(db, nextParent as string);
+      if (np !== null && np.scope !== row.scope) {
+        invalidateTrialsForScope(db, session, np.scope, "task_reparented", now);
+      }
+    }
     storeIdempotentResponse(db, scope, canonical, hash, 200, body, now);
     return { status: 200, body, replayed: false };
   });
@@ -2174,6 +2284,12 @@ export function setAutonomyControl(
         now,
       );
     }
+    if (input.paused) {
+      // STOP: DB pause first + revoke CLAIMED/inflight, cancelRequested.
+      // QUEUED-unconsumed otherwise-valid grants SURVIVE pause but can
+      // claim only after a fresh explicit global resume (gated at claim).
+      revokeAllClaimedForStop(db, now);
+    }
     const body = getAutonomyControl(db);
     storeIdempotentResponse(db, scope, key, hash, 200, body, now);
     return { status: 200, body, replayed: false };
@@ -2264,6 +2380,8 @@ export function applyAutonomyRestartFence(
     }
     recordActivityInTx(db, "restart_fence", null, at);
     recordActivityInTx(db, "interrupted_note", null, at);
+    // Restart never revives: inflight claimed grants are revoked.
+    revokeAllClaimedForStop(db, at);
     const current = readControlRow(db);
     return { paused: current.paused === 1, version: current.version };
   });
