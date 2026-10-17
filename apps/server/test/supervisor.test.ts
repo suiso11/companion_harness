@@ -6,6 +6,7 @@
 // conversation/model/credential content: one test asserts the serialized
 // form carries only the fixed vocabulary fields.
 
+import { type ChildProcess, spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -156,7 +157,7 @@ describe("supervisor crash budget", () => {
 });
 
 describe("supervisor ownership lock", () => {
-  it("releases a stale dead-PID lock and fails closed on ambiguity", () => {
+  it("releases a stale dead-PID lock and fails closed on ambiguity", async () => {
     const { dbPath } = tempDb();
     const paths = supervisorPathsForDb(dbPath);
     const first = acquireSupervisorLock(paths, freshNonce("k"), 100);
@@ -167,18 +168,34 @@ describe("supervisor ownership lock", () => {
     expect(() => acquireSupervisorLock(paths, freshNonce("l"), 101)).toThrow(
       "supervisor ownership ambiguous",
     );
-    // A foreign live PID is never killed and never taken over.
-    writeFileSync(
-      paths.lockFile,
-      JSON.stringify({ pid: 1, nonce: "foreign", startedAt: 1 }),
-      { encoding: "utf-8" },
-    );
-    expect(() => acquireSupervisorLock(paths, freshNonce("m"), 102)).toThrow(
-      /already running|ambiguous/,
-    );
-    // Release only honors our own nonce: foreign locks survive us.
-    releaseSupervisorLock(paths, freshNonce("n"));
-    expect(readFileSync(paths.lockFile, "utf-8")).toContain("foreign");
+    // A foreign live PID is never killed and never taken over. PID 1 is
+    // NOT portable (absent on Windows, so ESRCH would look stale): use a
+    // real live child of this test process instead.
+    let foreign: ChildProcess | null = null;
+    try {
+      foreign = spawn(process.execPath, ["-e", "setInterval(()=>{},1000);"], {
+        stdio: "ignore",
+      });
+      const foreignPid = foreign.pid ?? 0;
+      expect(foreignPid).toBeGreaterThan(0);
+      writeFileSync(
+        paths.lockFile,
+        JSON.stringify({ pid: foreignPid, nonce: "foreign", startedAt: 1 }),
+        { encoding: "utf-8" },
+      );
+      expect(() => acquireSupervisorLock(paths, freshNonce("m"), 102)).toThrow(
+        /already running|ambiguous/,
+      );
+      // Release only honors our own nonce: foreign locks survive us.
+      releaseSupervisorLock(paths, freshNonce("n"));
+      expect(readFileSync(paths.lockFile, "utf-8")).toContain("foreign");
+    } finally {
+      try {
+        foreign?.kill("SIGKILL");
+      } catch {
+        // Best effort: only our own test process is ever signalled.
+      }
+    }
   });
 
   it("state files carry only the fixed vocabulary", () => {
