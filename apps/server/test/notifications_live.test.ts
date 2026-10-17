@@ -806,4 +806,36 @@ describe("notifications runtime (real SQLite + app HTTP)", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("production reads use the trusted server clock and safe-integer cursors", async () => {
+    const fx = await makeFixture(T0);
+    try {
+      // Untrusted `?now=` overrides are strict 400 on every read path.
+      for (const path of [
+        `/api/sessions/${fx.sessionId}/notifications?now=${T0}`,
+        `/api/sessions/${fx.sessionId}/notifications?limit=10&now=${T0}`,
+        `/api/sessions/${fx.sessionId}/notifications/forward?after=0&now=${T0}`,
+        `/api/sessions/${fx.sessionId}/notifications/${randomUUID()}/history?now=${T0}`,
+      ]) {
+        const res = await get(fx.app, path);
+        expect(res.status).toBe(400);
+      }
+      // Unsafe integer cursors are 400 (no SQLite-unsafe magnitudes).
+      const unsafe = await get(
+        fx.app,
+        `/api/sessions/${fx.sessionId}/notifications?beforeSeq=9007199254740993`,
+      );
+      expect(unsafe.status).toBe(400);
+      const unsafeForward = await get(
+        fx.app,
+        `/api/sessions/${fx.sessionId}/notifications/forward?after=9007199254740993`,
+      );
+      expect(unsafeForward.status).toBe(400);
+      // Trusted-clock reads still work without any `now` key.
+      const ok = await get(fx.app, `/api/sessions/${fx.sessionId}/notifications`);
+      expect(ok.status).toBe(200);
+    } finally {
+      fx.close();
+    }
+  });
 });

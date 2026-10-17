@@ -42,6 +42,7 @@ export default defineConfig({
           "polling.spec.ts",
           "autonomy.spec.ts",
           "shadow.spec.ts",
+          "notifications.spec.ts",
         ],
   timeout: 60_000,
   expect: { timeout: 15_000 },

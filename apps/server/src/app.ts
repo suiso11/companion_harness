@@ -2901,6 +2901,35 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   // consent). Ownership-first 404s; stable-key replays 200; key drift 409.
 
   /**
+   * App-local notification read queries: the contracts `now` read clock
+   * stays kernel-only (deterministic tests inject it there). Production
+   * HTTP reads MUST use the trusted server clock (`now()` below), never an
+   * untrusted `?now=` override — unknown `now` keys are strict 400 via the
+   * query gates. `omit` reuses the exact contract bounds (no duplication);
+   * the single-field read schema omits to a strict empty object.
+   */
+  const NotificationListHttpQuerySchema = NotificationListQuerySchema.omit({
+    now: true,
+  });
+  const NotificationForwardHttpQuerySchema =
+    NotificationForwardQuerySchema.omit({ now: true });
+  const NotificationReadHttpQuerySchema = NotificationReadQuerySchema.omit({
+    now: true,
+  });
+
+  /**
+   * HTTP cursor/seq safe-integer gate: contracts `.int()` alone admits
+   * unsafe magnitudes (SQLite-unfriendly). Reads reject non-safe values
+   * with 400; no arbitrary new bounds are introduced.
+   */
+  function isSafeSeq(value: number | undefined): boolean {
+    if (value === undefined) {
+      return true;
+    }
+    return Number.isSafeInteger(value);
+  }
+
+  /**
    * Strict ack body: exactly `{}`. Any key (job / purpose / task / action
    * / grant / resume / answer / consent …) is rejected: an ack selects
    * its notification ONLY via the path id + the Idempotency-Key header.
@@ -2952,22 +2981,25 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   }
 
   // Newest-page history (no hidden cap: strict 1..100 `limit` +
-  // `beforeSeq` paging with truthful `hasMore`/`nextBefore`).
+  // `beforeSeq` paging with truthful `hasMore`/`nextBefore`). Production
+  // reads use the trusted server clock; `?now=` is rejected as unknown.
   app.get("/api/sessions/:sessionId/notifications", (c) => {
     const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
     if ("response" in session) {
       return session.response;
     }
-    const gated = strictQuery(c, ["beforeSeq", "limit", "now"]);
+    const gated = strictQuery(c, ["beforeSeq", "limit"]);
     if (!gated.ok) {
       return validationError(c);
     }
-    const parsed = NotificationListQuerySchema.safeParse({
+    const parsed = NotificationListHttpQuerySchema.safeParse({
       beforeSeq: gated.values.beforeSeq,
       limit: gated.values.limit,
-      now: gated.values.now,
     });
     if (!parsed.success) {
+      return validationError(c);
+    }
+    if (!isSafeSeq(parsed.data.beforeSeq) || !isSafeSeq(parsed.data.limit)) {
       return validationError(c);
     }
     try {
@@ -2977,7 +3009,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
           ...(parsed.data.beforeSeq !== undefined
             ? { beforeSeq: parsed.data.beforeSeq }
             : {}),
-          ...(parsed.data.now !== undefined ? { now: parsed.data.now } : {}),
+          now: now(),
         }),
       );
       return c.json(body, 200);
@@ -2987,29 +3019,31 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   });
 
   // Forward read-after page (`seq > after` oldest-first, strict 1..100):
-  // the durable counterpart of SSE replay (same SQL paging).
+  // the durable counterpart of SSE replay (same SQL paging). Trusted clock.
   app.get("/api/sessions/:sessionId/notifications/forward", (c) => {
     const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
     if ("response" in session) {
       return session.response;
     }
-    const gated = strictQuery(c, ["after", "limit", "now"]);
+    const gated = strictQuery(c, ["after", "limit"]);
     if (!gated.ok) {
       return validationError(c);
     }
-    const parsed = NotificationForwardQuerySchema.safeParse({
+    const parsed = NotificationForwardHttpQuerySchema.safeParse({
       after: gated.values.after,
       limit: gated.values.limit,
-      now: gated.values.now,
     });
     if (!parsed.success) {
+      return validationError(c);
+    }
+    if (!isSafeSeq(parsed.data.after) || !isSafeSeq(parsed.data.limit)) {
       return validationError(c);
     }
     try {
       const body = repo.listNotificationsForward(session.id, {
         after: parsed.data.after,
         limit: parsed.data.limit,
-        ...(parsed.data.now !== undefined ? { now: parsed.data.now } : {}),
+        now: now(),
       });
       return c.json(body, 200);
     } catch (error) {
@@ -3064,7 +3098,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     }
   });
 
-  // Single immutable record (pure read, foreign ids 404).
+  // Single immutable record (pure read, foreign ids 404). Trusted clock.
   app.get("/api/sessions/:sessionId/notifications/:notificationId", (c) => {
     const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
     if ("response" in session) {
@@ -3078,21 +3112,16 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     if ("response" in notification) {
       return notification.response;
     }
-    const gated = strictQuery(c, ["now"]);
+    const gated = strictQuery(c, []);
     if (!gated.ok) {
       return validationError(c);
     }
-    const parsed = NotificationReadQuerySchema.safeParse({
-      now: gated.values.now,
-    });
-    if (!parsed.success) {
+    if (!NotificationReadHttpQuerySchema.safeParse({}).success) {
       return validationError(c);
     }
     try {
       const body = NotificationViewSchema.parse(
-        repo.getNotification(session.id, notification.id, {
-          ...(parsed.data.now !== undefined ? { now: parsed.data.now } : {}),
-        }),
+        repo.getNotification(session.id, notification.id, { now: now() }),
       );
       return c.json(body, 200);
     } catch (error) {
@@ -3116,20 +3145,17 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       if ("response" in notification) {
         return notification.response;
       }
-      const gated = strictQuery(c, ["now"]);
+      const gated = strictQuery(c, []);
       if (!gated.ok) {
         return validationError(c);
       }
-      const parsed = NotificationReadQuerySchema.safeParse({
-        now: gated.values.now,
-      });
-      if (!parsed.success) {
+      if (!NotificationReadHttpQuerySchema.safeParse({}).success) {
         return validationError(c);
       }
       try {
         const body = NotificationHistoryResponseSchema.parse(
           repo.getNotificationHistory(session.id, notification.id, {
-            ...(parsed.data.now !== undefined ? { now: parsed.data.now } : {}),
+            now: now(),
           }),
         );
         return c.json(body, 200);
