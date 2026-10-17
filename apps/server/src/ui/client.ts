@@ -12,6 +12,7 @@
 
 import type { ActiveStatus } from "@companion/contracts";
 import { NotificationPanel } from "./notification_panel.js";
+import { ProposalPanel } from "./proposal_panel.js";
 import {
   ACTION_PROGRESS_TEXT,
   type ActionCardModel,
@@ -387,6 +388,8 @@ class ConversationApp {
   private fallbackTimer: number | null = null;
   /** AV05 notification consumer (readonly feed + explicit ack only). */
   private notifications: NotificationPanel | null = null;
+  /** AV03 conversation-proposal consumer (quiet review + explicit adopt). */
+  private proposals: ProposalPanel | null = null;
 
   private readonly list: HTMLElement;
   private readonly notice: HTMLElement;
@@ -587,7 +590,44 @@ class ConversationApp {
         this.notifications = notices;
         this.input.addEventListener("input", () => {
           this.notifications?.notifyComposureChanged();
+          try {
+            this.proposals?.notifyComposureChanged();
+          } catch {
+            // Best effort: composer paint never breaks for proposals.
+          }
         });
+        // AV03 conversation proposals: quiet review + explicit human adopt.
+        // Missing nodes fail closed with a visible status (SSR ships
+        // together). Adoption refreshes the autonomy panel via its public
+        // refreshAll without losing unrelated drafts.
+        try {
+          const drafts = new ProposalPanel({
+            getSessionId: () => this.sessionId,
+            isNaturalBreak: () =>
+              this.activeRunId === null &&
+              this.input.value.trim().length === 0 &&
+              document.visibilityState === "visible",
+            http: {
+              get: (path) => fetchJson(path),
+              post: (path, payload, key) => postJson(path, payload, key),
+            },
+            onAdopted: () => {
+              void panel.refreshAll();
+            },
+          });
+          drafts.bind();
+          drafts.notifySessionChanged();
+          this.proposals = drafts;
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : "proposal failed";
+          const statusNode = document.getElementById("proposal-status");
+          if (statusNode !== null) {
+            statusNode.textContent = message;
+          } else {
+            throw error;
+          }
+        }
       } catch (error) {
         const message =
           error instanceof Error ? error.message : "notification failed";
@@ -3817,6 +3857,18 @@ class ConversationApp {
     this.activeTurnId = null;
     this.closeStream();
     this.renderComposer();
+    // AV03: a settled run may have staged new drafts — re-read the quiet
+    // list (plain GET, never taskization) and re-evaluate the natural break.
+    try {
+      this.proposals?.notifyRunSettled();
+    } catch {
+      // Best effort: run teardown never breaks for proposals.
+    }
+    try {
+      this.proposals?.notifyComposureChanged();
+    } catch {
+      // Best effort: composer paint never breaks for proposals.
+    }
   }
 
   private closeStream(): void {

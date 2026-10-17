@@ -12,6 +12,8 @@ import {
   AutonomyControlSetRequestSchema,
   CancelRunRequestSchema,
   CancelRunResponseSchema,
+  ConversationProposalAcceptRequestSchema,
+  ConversationProposalRejectRequestSchema,
   CreateSessionRequestSchema,
   CreateSessionResponseSchema,
   EventsQuerySchema,
@@ -2665,6 +2667,169 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   app.post(
     "/api/sessions/:sessionId/tasks/:taskId/cancel",
     autonomyTaskTransition("cancel"),
+  );
+
+  /* ---------------- AV03 conversation proposals: review + adopt ------- */
+  // Session-owned durable INFERRED drafts staged ONLY by the model-only
+  // tools `purpose.propose` / `task.propose` (no staging route exists).
+  // Strict Zod bodies, UUID ids, Idempotency-Key on every POST, exact query
+  // gates, ownership-first 404s, CAS 409s. The accept decision atomically
+  // creates the actual purpose/task (+ accepted-target link); reject
+  // creates nothing. Human date args only (strict RFC3339, explicit
+  // offset); model dates never exist. Draining rejects fresh keys with 503
+  // without persisting (same admission as the autonomy mutations above:
+  // no lookup replay — the frozen client key retries after drain).
+  // Recorded `permission` adoptions stay claims only (no grant anywhere).
+
+  app.get("/api/sessions/:sessionId/conversation-proposals", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const query = strictQuery(c, ["limit"]);
+    if (!query.ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(
+        repo.listConversationProposals(session.id, {
+          ...(query.values.limit !== undefined
+            ? { limit: query.values.limit }
+            : {}),
+        }),
+        200,
+      );
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get(
+    "/api/sessions/:sessionId/conversation-proposals/:proposalId",
+    (c) => {
+      const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+      if ("response" in session) {
+        return session.response;
+      }
+      const proposal = requireUuid(c, c.req.param("proposalId"), "proposalId");
+      if ("response" in proposal) {
+        return proposal.response;
+      }
+      if (!strictQuery(c, []).ok) {
+        return validationError(c);
+      }
+      try {
+        return c.json(
+          repo.getConversationProposal(session.id, proposal.id),
+          200,
+        );
+      } catch (error) {
+        return mapDomainError(c, error);
+      }
+    },
+  );
+
+  app.post(
+    "/api/sessions/:sessionId/conversation-proposals/:proposalId/accept",
+    async (c) => {
+      const started = now();
+      const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+      if ("response" in session) {
+        return session.response;
+      }
+      const proposal = requireUuid(c, c.req.param("proposalId"), "proposalId");
+      if ("response" in proposal) {
+        return proposal.response;
+      }
+      const keyed = requireIdempotencyKey(c);
+      if ("response" in keyed) {
+        return keyed.response;
+      }
+      if (!strictQuery(c, []).ok) {
+        return validationError(c);
+      }
+      const raw = await readJsonBody(c);
+      if (!raw.ok) {
+        return validationError(c);
+      }
+      if (
+        ConversationProposalAcceptRequestSchema.safeParse(raw.value).success !==
+        true
+      ) {
+        return validationError(c);
+      }
+      if (draining) {
+        return shuttingDown(c);
+      }
+      try {
+        const out = repo.acceptConversationProposal(
+          session.id,
+          proposal.id,
+          raw.value,
+          { key: keyed.key, now: now() },
+        );
+        logger.info("http.proposals.conversation.accept", {
+          sessionId: session.id,
+          status: out.status,
+          durationMs: Math.max(now() - started, 0),
+        });
+        wakeShadow();
+        return c.json(out.body, out.status as 201);
+      } catch (error) {
+        return mapDomainError(c, error);
+      }
+    },
+  );
+
+  app.post(
+    "/api/sessions/:sessionId/conversation-proposals/:proposalId/reject",
+    async (c) => {
+      const started = now();
+      const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+      if ("response" in session) {
+        return session.response;
+      }
+      const proposal = requireUuid(c, c.req.param("proposalId"), "proposalId");
+      if ("response" in proposal) {
+        return proposal.response;
+      }
+      const keyed = requireIdempotencyKey(c);
+      if ("response" in keyed) {
+        return keyed.response;
+      }
+      if (!strictQuery(c, []).ok) {
+        return validationError(c);
+      }
+      const raw = await readJsonBody(c);
+      if (!raw.ok) {
+        return validationError(c);
+      }
+      if (
+        ConversationProposalRejectRequestSchema.safeParse(raw.value).success !==
+        true
+      ) {
+        return validationError(c);
+      }
+      if (draining) {
+        return shuttingDown(c);
+      }
+      try {
+        const out = repo.rejectConversationProposal(
+          session.id,
+          proposal.id,
+          raw.value,
+          { key: keyed.key, now: now() },
+        );
+        logger.info("http.proposals.conversation.reject", {
+          sessionId: session.id,
+          status: out.status,
+          durationMs: Math.max(now() - started, 0),
+        });
+        return c.json(out.body, out.status as 200);
+      } catch (error) {
+        return mapDomainError(c, error);
+      }
+    },
   );
 
   app.get("/api/autonomy/control", (c) => {
