@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   ActionExecutionStatusSchema,
   ActionReceiptViewSchema,
+  ActionTargetCitationSchema,
 } from "./action.js";
 import { LatestRunEventSchema, M0RunEventSchema } from "./events.js";
 import {
@@ -184,9 +185,16 @@ export type UserTextHistoryItem = z.infer<typeof UserTextHistoryItemSchema>;
  * with a persisted `result_json` (verified/unverified/blocked); terminal
  * non-completed runs (failed/unknown/cancelled/abandoned, incl. recovered)
  * carry `result: null` with the actual `receipt`. Active runs carry
- * `receipt: null` with the live `runStatus`/`executionStatus` (frozen intent
- * + progress, never a fake failure). No internal IDs appear in rendered
- * text; IDs live only in these structured fields.
+ *   `receipt: null` with the live `runStatus`/`executionStatus` (frozen intent
+ *  + progress, never a fake failure). No internal IDs appear in rendered
+ *  text; IDs live only in these structured fields.
+ *  `targetCitation` is the ORIGINAL-only session `rN` label (BEFORE
+ *  evidence) resolved from the owning proposal's immutable `target_ref_id`;
+ *  it is display metadata, not a verified AFTER claim. `user_text` items
+ *  carry no such field (the discriminated union omits it there entirely —
+ *  never a null legacy shim). The verified AFTER citation (if any) comes
+ *  only from the authoritative `result` via `runResultToAnswerParts` when
+ *  the receipt outcome is `succeeded`.
  */
 export const ActionRunHistorySelectionSchema = z.strictObject({
   runId: UuidSchema,
@@ -196,6 +204,7 @@ export const ActionRunHistorySelectionSchema = z.strictObject({
   result: RunResultSchema.nullable(),
   receipt: ActionReceiptViewSchema.nullable(),
   executionStatus: ActionExecutionStatusSchema.nullable(),
+  targetCitation: ActionTargetCitationSchema,
 });
 export type ActionRunHistorySelection = z.infer<
   typeof ActionRunHistorySelectionSchema

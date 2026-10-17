@@ -321,6 +321,25 @@ export const ActionReceiptViewSchema = z.strictObject({
 export type ActionReceiptView = z.infer<typeof ActionReceiptViewSchema>;
 
 /**
+ * ORIGINAL-only session citation label (BEFORE evidence navigation).
+ *
+ * Display metadata resolved from the proposal's OWN immutable
+ * `target_ref_id` plus session ownership: the `rN` ordinal of the exact
+ * staged source SessionReference. It is the pre-write (BEFORE) snapshot
+ * reference and NEVER a verified AFTER claim, NEVER a new model evidence
+ * grant, and NEVER parsed from preview prose. Raw provider ids / UUID
+ * snapshot ids are never exposed through this label.
+ */
+export const ActionTargetCitationSchema = z
+  .string()
+  .min(2)
+  .max(11)
+  .regex(/^r[1-9][0-9]*$/, {
+    message: "target citation must be a session rN label (e.g. r1)",
+  });
+export type ActionTargetCitation = z.infer<typeof ActionTargetCitationSchema>;
+
+/**
  * Session-scoped execution + receipt read for ONE proposal (C22). Carries
  * the actual persisted execution status, whether the external-call marker is
  * committed (the exact Stop boundary: cancel is only possible before it),
@@ -343,6 +362,15 @@ export const ProposalExecutionViewSchema = z.strictObject({
   /** Fixed safe redacted code when the execution failed; null otherwise. */
   errorCode: M5ActionErrorCodeSchema.nullable(),
   receipt: ActionReceiptViewSchema.nullable(),
+  /**
+   * ORIGINAL-only session citation label (BEFORE evidence navigation),
+   * resolved from the proposal's OWN immutable `target_ref_id` plus session
+   * ownership. Present even before any execution exists (proposal metadata,
+   * not execution state). The verified AFTER citation (if any) comes only
+   * from the authoritative `run.result` via `runResultToAnswerParts` when
+   * the outcome is `succeeded` — never from this field.
+   */
+  targetCitation: ActionTargetCitationSchema,
 });
 export type ProposalExecutionView = z.infer<typeof ProposalExecutionViewSchema>;
 
