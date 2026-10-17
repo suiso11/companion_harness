@@ -16,6 +16,8 @@
 //   POST /notify-test/urgent-unknown { sessionId } -> real unknown receipt
 //   POST /notify-test/bulk { sessionId, count, scopePrefix } -> N asks
 //   POST /notify-test/settle {} -> waits until the projector is idle
+//   POST /notify-test/deadline { sessionId, scope } -> real task deadline notice
+//   POST /notify-test/task-complete-latest { sessionId } -> real task terminal
 
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -374,6 +376,31 @@ const control = createServer(
         await new Promise((r) => setTimeout(r, 4000));
         await settle();
         json(200, { ok: true });
+        return;
+      }
+      if (
+        req.method === "POST" &&
+        url.pathname === "/notify-test/task-complete-latest"
+      ) {
+        const body = (raw === "" ? {} : JSON.parse(raw)) as {
+          sessionId?: unknown;
+        };
+        if (typeof body.sessionId !== "string") throw new Error("bad session");
+        const listed = repo.listAutonomyTasks(body.sessionId, {}) as {
+          items: Array<{ id: string; status: string; version: number }>;
+        };
+        const open = listed.items.find(
+          (t) => t.status !== "completed" && t.status !== "cancelled",
+        );
+        if (open === undefined) throw new Error("no open task");
+        repo.completeAutonomyTask(
+          body.sessionId,
+          open.id,
+          { expectedVersion: open.version },
+          { key: randomUUID(), now: Date.now() },
+        );
+        await settle();
+        json(200, { ok: true, taskId: open.id });
         return;
       }
       json(404, { error: "unknown" });

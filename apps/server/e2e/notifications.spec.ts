@@ -474,3 +474,320 @@ test("held old-session history can never clobber the new session; >50 pages load
     await fx.dispose();
   }
 });
+
+test("post-baseline burst before initial history is never skipped and never briefs while drafting", async ({
+  page,
+  request,
+}) => {
+  const fx = await startFixture();
+  try {
+    const sessionId = await makeSession(request, fx.controlOrigin);
+    await bootOnSession(page, fx.origin, sessionId);
+    // Fresh boot with the initial history HELD: the cursor baseline is
+    // taken first, then 60 post-baseline arrivals land before history.
+    const resumes: Array<() => void> = [];
+    await page.route(
+      (url) =>
+        url.pathname.endsWith("/notifications") &&
+        url.searchParams.get("limit") === "50" &&
+        !url.searchParams.has("beforeSeq"),
+      async (route) => {
+        await new Promise<void>((resolve) => {
+          resumes.push(resolve);
+        });
+        await route.continue();
+      },
+    );
+    await page.evaluate((id: string) => {
+      localStorage.setItem("ch.sessionId", id);
+    }, sessionId);
+    await page.reload();
+    await page.locator("#notification-badge").waitFor({ timeout: 30_000 });
+    // Composer holds a draft BEFORE history lands: nothing may brief.
+    await page.locator("#composer-input").fill("burst draft held");
+    await controlPost(request, fx.controlOrigin, "/notify-test/bulk", {
+      sessionId,
+      count: 60,
+      scopePrefix: "burst",
+    });
+    await page.waitForTimeout(1000);
+    for (const resume of resumes.splice(0)) resume();
+    await page.unrouteAll({ behavior: "wait" });
+    // All 60 arrive exactly once (the 10 pre-page arrivals are replayed
+    // live, not skipped past the history latest).
+    await page.waitForFunction(
+      () => document.querySelectorAll("#notification-list li").length === 60,
+      null,
+      { timeout: 25_000 },
+    );
+    await expect(page.locator("#notification-badge")).toContainText("保留中", {
+      timeout: 15_000,
+    });
+    // While the draft is held, the initial burst stays behind the badge.
+    expect(await page.locator("#notification-routine h3").count()).toBe(0);
+    // Natural break briefs the whole burst once, grouped.
+    await page.locator("#composer-input").fill("");
+    await expect(page.locator("#notification-routine h3").first()).toBeVisible({
+      timeout: 15_000,
+    });
+  } finally {
+    await fx.dispose();
+  }
+});
+
+test("dropped forward page never skips the urgent notice; reconnect replays it exactly once", async ({
+  page,
+  request,
+}) => {
+  const fx = await startFixture();
+  try {
+    const sessionId = await makeSession(request, fx.controlOrigin);
+    await bootOnSession(page, fx.origin, sessionId);
+    // Drop the FIRST real feed consume (a real abort, never a fake body):
+    // the checkpoint must stay behind the unconsumed record. Both the
+    // durable forward page and a legacy per-record GET are armed so the
+    // old independent-GET path drops N while the fixed ordered path just
+    // replays it.
+    let firstForward = true;
+    let firstRecord = true;
+    await page.route(
+      (url) =>
+        (url.pathname.endsWith("/notifications/forward") &&
+          url.searchParams.has("after")) ||
+        (/\/notifications\/[^/]+$/.test(url.pathname) &&
+          !url.pathname.endsWith("/notifications")),
+      async (route) => {
+        const isForward = route.request().url().includes("/forward");
+        if (isForward && firstForward) {
+          firstForward = false;
+          await route.abort();
+          return;
+        }
+        if (!isForward && firstRecord) {
+          firstRecord = false;
+          await route.abort();
+          return;
+        }
+        await route.continue();
+      },
+    );
+    await controlPost(request, fx.controlOrigin, "/notify-test/ask", {
+      sessionId,
+      scope: "feed-n",
+    });
+    await controlPost(
+      request,
+      fx.controlOrigin,
+      "/notify-test/urgent-unknown",
+      {
+        sessionId,
+      },
+    );
+    // The urgent notice surfaces after the bounded reconnect replay…
+    await expect(page.locator("#notification-urgent")).toContainText("要確認", {
+      timeout: 25_000,
+    });
+    // …exactly once, with the earlier routine notice intact (no N+1 skip).
+    await expect(page.locator("#notification-urgent div")).toHaveCount(1, {
+      timeout: 25_000,
+    });
+    await expect(
+      page.locator("#notification-list li").filter({ hasText: "feed-n" }),
+    ).toHaveCount(1, { timeout: 15_000 });
+    await page.unrouteAll({ behavior: "wait" });
+  } finally {
+    await fx.dispose();
+  }
+});
+
+test("uncertain ack stays owned by A: B never inherits retry, same-key retry settles A once", async ({
+  page,
+  request,
+}) => {
+  const fx = await startFixture();
+  try {
+    const sessionId = await makeSession(request, fx.controlOrigin);
+    await controlPost(request, fx.controlOrigin, "/notify-test/ask", {
+      sessionId,
+      scope: "ack-a",
+    });
+    await controlPost(request, fx.controlOrigin, "/notify-test/ask", {
+      sessionId,
+      scope: "ack-b",
+    });
+    await bootOnSession(page, fx.origin, sessionId);
+    await expect(page.locator("#notification-list li").first()).toBeVisible({
+      timeout: 20_000,
+    });
+    // REAL commit, aborted response: the receipt exists, the UI is unsure.
+    let firstAck = true;
+    const ackKeys: Array<string | null> = [];
+    await page.route("**/api/sessions/*/notifications/*/ack", async (route) => {
+      if (route.request().method() !== "POST") {
+        await route.continue();
+        return;
+      }
+      ackKeys.push(await route.request().headerValue("idempotency-key"));
+      if (firstAck) {
+        firstAck = false;
+        await route.fetch();
+        await route.abort();
+        return;
+      }
+      await route.continue();
+    });
+    await page
+      .locator("#notification-list li", { hasText: "ack-a" })
+      .locator("button")
+      .click();
+    await expect(page.locator("#notification-detail")).toBeVisible();
+    await page.locator("#notification-ack").click();
+    await expect(page.locator("#notification-retry")).toBeVisible({
+      timeout: 15_000,
+    });
+    // Switch to B: B shows no retry and no foreign error text…
+    await page
+      .locator("#notification-list li", { hasText: "ack-b" })
+      .locator("button")
+      .click();
+    await expect(page.locator("#notification-retry")).toBeHidden({
+      timeout: 10_000,
+    });
+    expect(await page.locator("#notification-status").textContent()).toBe("");
+    // …and starting B's ack while A is unresolved cannot steal A's key.
+    await page.locator("#notification-ack").click();
+    await expect(page.locator("#notification-status")).toContainText(
+      "別の確認",
+      { timeout: 10_000 },
+    );
+    // Back on A: the SAME frozen entry retries with the SAME key…
+    await page
+      .locator("#notification-list li", { hasText: "ack-a" })
+      .locator("button")
+      .click();
+    await expect(page.locator("#notification-retry")).toBeVisible({
+      timeout: 15_000,
+    });
+    await page.locator("#notification-retry").click();
+    await expect(page.locator("#notification-status")).toContainText(
+      "確認済み",
+      { timeout: 15_000 },
+    );
+    expect(ackKeys.length).toBe(2);
+    expect(ackKeys[0]).not.toBeNull();
+    expect(ackKeys[1]).toBe(ackKeys[0]);
+    // Canonical outcome: exactly one receipt on A, zero on B.
+    const listed = await api(
+      page,
+      "GET",
+      `/api/sessions/${sessionId}/notifications?limit=50`,
+    );
+    const items = (listed.body as { items: Array<{ id: string }> }).items;
+    expect(items.length).toBeGreaterThanOrEqual(2);
+    const ackedFlags: Array<{ scope: string; acked: boolean }> = [];
+    for (const scope of ["ack-a", "ack-b"]) {
+      const item = (
+        listed.body as {
+          items: Array<{ id: string; scope: string }>;
+        }
+      ).items.find((v) => v.scope === scope);
+      expect(item).toBeDefined();
+      const h = await api(
+        page,
+        "GET",
+        `/api/sessions/${sessionId}/notifications/${item?.id}/history`,
+      );
+      ackedFlags.push({
+        scope,
+        acked:
+          (h.body as { ack: { status: string } | null }).ack?.status ===
+          "acknowledged",
+      });
+    }
+    expect(ackedFlags).toEqual([
+      { scope: "ack-a", acked: true },
+      { scope: "ack-b", acked: false },
+    ]);
+    await page.unrouteAll({ behavior: "wait" });
+  } finally {
+    await fx.dispose();
+  }
+});
+
+test("terminal task flips the deadline notice outdated in place, never re-nudging", async ({
+  page,
+  request,
+}) => {
+  const fx = await startFixture();
+  try {
+    const sessionId = await makeSession(request, fx.controlOrigin);
+    await controlPost(request, fx.controlOrigin, "/notify-test/deadline", {
+      sessionId,
+      scope: "rent-5",
+    });
+    await bootOnSession(page, fx.origin, sessionId);
+    await expect(page.locator("#notification-list li").first()).toBeVisible({
+      timeout: 20_000,
+    });
+    await page
+      .locator("#notification-list li", { hasText: "rent-5" })
+      .locator("button")
+      .click();
+    await expect(page.locator("#notification-detail")).toBeVisible();
+    const beforeText =
+      (await page.locator("#notification-detail-body").textContent()) ?? "";
+    expect(beforeText).not.toContain("古い内容");
+    const listedBefore = await api(
+      page,
+      "GET",
+      `/api/sessions/${sessionId}/notifications?limit=50`,
+    );
+    const before = (
+      listedBefore.body as {
+        items: Array<{ id: string; seq: number; scope: string }>;
+      }
+    ).items.find((v) => v.scope === "rent-5");
+    expect(before).toBeDefined();
+    // REAL terminal write on the task source (no new notice seq).
+    await controlPost(
+      request,
+      fx.controlOrigin,
+      "/notify-test/task-complete-latest",
+      { sessionId },
+    );
+    // Reopen: the SAME id/seq now reads outdated, truthfully unread…
+    await page
+      .locator("#notification-list li", { hasText: "rent-5" })
+      .locator("button")
+      .click();
+    await expect(page.locator("#notification-detail-body")).toContainText(
+      "古い内容",
+      { timeout: 15_000 },
+    );
+    const listedAfter = await api(
+      page,
+      "GET",
+      `/api/sessions/${sessionId}/notifications?limit=50`,
+    );
+    const after = (
+      listedAfter.body as {
+        items: Array<{ id: string; seq: number; scope: string }>;
+      }
+    ).items.find((v) => v.scope === "rent-5");
+    expect(after?.id).toBe(before?.id);
+    expect(after?.seq).toBe(before?.seq);
+    // …with no extra alert: no urgent box, quiet badge, same brief text.
+    expect(await page.locator("#notification-urgent div").count()).toBe(0);
+    await expect(page.locator("#notification-badge")).toContainText("未読", {
+      timeout: 15_000,
+    });
+    const afterText =
+      (await page.locator("#notification-detail-body").textContent()) ?? "";
+    // Same source body, only the outdated marker added (no rewrite).
+    expect(afterText.replace("古い内容です（履歴表示のみ）", "")).toBe(
+      beforeText,
+    );
+  } finally {
+    await fx.dispose();
+  }
+});

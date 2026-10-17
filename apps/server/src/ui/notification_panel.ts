@@ -165,16 +165,27 @@ export class NotificationPanel {
   private historyHasMore = false;
   private loadingOlder = false;
   private baseline = 0;
+  /** Live checkpoint: last APPLIED (cached + routed) feed seq. History
+   *  reads never move it; only ordered feed consumption advances it. */
   private lastSeq = 0;
   private readonly seen = new Map<number, NotificationView>();
+  /** Seqs already routed through deliver() (history or feed) — the only
+   *  delivery/nudge dedup. Separate from the `seen` history cache. */
+  private readonly delivered = new Set<number>();
+  /** Routine seqs already briefed on a natural break (renderable groups). */
+  private readonly briefed = new Set<number>();
   private readonly acked = new Set<string>();
   private readonly pendingRoutine: NotificationView[] = [];
   private selectedId: string | null = null;
-  private pendingAck: {
-    ownerSession: string;
-    notificationId: string;
-    key: string;
-  } | null = null;
+  /** Frozen ack per notification id: owner session + key + in-flight guard.
+   *  A pending entry for A never leaks its error/retry affordance onto
+   *  selection B, and no new ack for B may overwrite unresolved A. */
+  private readonly pendingAcks = new Map<
+    string,
+    { ownerSession: string; key: string }
+  >();
+  private readonly ackFlight = new Set<string>();
+  private drainingFeed = false;
   private destroyed = false;
 
   constructor(deps: NotificationPanelDeps) {
@@ -205,7 +216,7 @@ export class NotificationPanel {
       void this.commitAck();
     });
     this.retryButton.addEventListener("click", () => {
-      void this.commitAck();
+      void this.retryPendingAck();
     });
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible") this.maybeFlushRoutine();
@@ -219,8 +230,12 @@ export class NotificationPanel {
     this.clearReconnect();
     this.seen.clear();
     this.acked.clear();
+    this.delivered.clear();
+    this.briefed.clear();
     this.pendingRoutine.length = 0;
-    this.pendingAck = null;
+    this.pendingAcks.clear();
+    this.ackFlight.clear();
+    this.drainingFeed = false;
     this.selectedId = null;
     this.oldestBefore = null;
     this.historyHasMore = false;
@@ -304,14 +319,19 @@ export class NotificationPanel {
       nextBefore?: unknown;
     };
     if (!Array.isArray(body.items)) return;
+    // History is a CACHE read, never the live checkpoint: `lastSeq` stays
+    // at the boot baseline until the feed actually consumes records, so
+    // post-baseline arrivals that land before this response are still
+    // replayed live instead of skipped. New post-baseline history rides
+    // the SAME delivery/deferral path as the feed (deduped by `delivered`
+    // across both); pre-baseline history stays quiet forever.
     for (const item of body.items) {
       if (!isView(item)) continue;
       if (item.sessionId !== sessionId) continue;
-      if (!this.seen.has(item.seq)) this.seen.set(item.seq, item);
-      if (item.seq > this.lastSeq) this.lastSeq = item.seq;
-    }
-    if (typeof body.latestSeq === "number" && body.latestSeq > this.lastSeq) {
-      this.lastSeq = body.latestSeq;
+      this.upsertSeen(item);
+      if (item.seq > this.baseline && !this.delivered.has(item.seq)) {
+        this.deliver(item);
+      }
     }
     this.historyHasMore =
       body.hasMore === true && typeof body.nextBefore === "number";
@@ -369,7 +389,10 @@ export class NotificationPanel {
       for (const item of body.items) {
         if (!isView(item)) continue;
         if (item.sessionId !== sessionId) continue;
-        if (!this.seen.has(item.seq)) this.seen.set(item.seq, item);
+        // Older pages are pure cache backfill: always refresh the owned
+        // view (a terminal task can flip `outdated` without a new seq)
+        // but never route delivery or move the live checkpoint.
+        this.upsertSeen(item);
       }
       this.historyHasMore =
         body.hasMore === true && typeof body.nextBefore === "number";
@@ -399,20 +422,15 @@ export class NotificationPanel {
       return;
     }
     this.feed = source;
-    source.addEventListener("notification", (event) => {
+    source.addEventListener("notification", () => {
       if (session !== this.sessionSeq) return;
       if (sessionId !== this.deps.getSessionId()) return;
-      const raw = (event as MessageEvent).data;
-      let parsed: unknown = null;
-      try {
-        parsed = JSON.parse(String(raw));
-      } catch {
-        return;
-      }
-      // Feed DTO is a subset; re-read the immutable record for full view.
-      const stub = parsed as { seq?: unknown; id?: unknown };
-      if (typeof stub.id !== "string") return;
-      void this.ingestFeedRecord(session, sessionId, stub.id);
+      // The SSE signal is only a wake-up: consume the durable forward page
+      // (`seq > lastSeq ORDER BY seq ASC`) so records apply strictly in
+      // feed order and a failed record blocks the checkpoint instead of
+      // being skipped by a parallel per-record GET. The SSE `data` is
+      // intentionally unread (it lacks citedDeadlines/expiry/version).
+      void this.drainForward(session, sessionId);
     });
     source.onerror = () => {
       if (session !== this.sessionSeq) return;
@@ -421,46 +439,101 @@ export class NotificationPanel {
     };
   }
 
-  private async ingestFeedRecord(
+  /**
+   * Ordered feed consume: one durable forward page from the APPLIED
+   * checkpoint. Records apply strictly oldest-first; the checkpoint moves
+   * only past applied records, never beyond an unapplied one. On failure
+   * the cursor is retained, our own EventSource is closed (so the native
+   * Last-Event-ID auto-advance can never resume past the unconsumed
+   * record), and the existing bounded reconnect replays from the
+   * unresolved cursor. No server writes: pure reads only.
+   */
+  private async drainForward(
     session: number,
     sessionId: string,
-    notificationId: string,
   ): Promise<void> {
-    let res: { status: number; body: unknown };
+    if (this.drainingFeed) return;
+    this.drainingFeed = true;
     try {
-      res = await this.deps.http.get(
-        `/api/sessions/${encodeURIComponent(sessionId)}/notifications/${encodeURIComponent(notificationId)}`,
-      );
-    } catch {
-      return;
+      let guard = 0;
+      for (;;) {
+        let res: { status: number; body: unknown };
+        try {
+          res = await this.deps.http.get(
+            `/api/sessions/${encodeURIComponent(sessionId)}/notifications/forward?after=${this.lastSeq}&limit=100`,
+          );
+        } catch {
+          this.closeFeed();
+          this.scheduleReconnect(session);
+          return;
+        }
+        if (session !== this.sessionSeq) return;
+        if (sessionId !== this.deps.getSessionId()) return;
+        if (res.status !== 200 || !isRecord(res.body)) {
+          this.closeFeed();
+          this.scheduleReconnect(session);
+          return;
+        }
+        const body = res.body as {
+          items?: unknown;
+          hasMore?: unknown;
+        };
+        if (!Array.isArray(body.items)) {
+          this.closeFeed();
+          this.scheduleReconnect(session);
+          return;
+        }
+        for (const item of body.items) {
+          if (!isView(item)) continue;
+          if (item.sessionId !== sessionId) continue;
+          this.upsertSeen(item);
+          if (item.seq <= this.lastSeq) continue;
+          if (!this.delivered.has(item.seq)) this.deliver(item);
+          // Advance only after the record is cached + routed (applied).
+          if (item.seq > this.lastSeq) this.lastSeq = item.seq;
+        }
+        if (body.hasMore !== true) break;
+        guard += 1;
+        if (guard >= 5) break;
+      }
+      this.renderAll();
+    } finally {
+      this.drainingFeed = false;
     }
-    if (session !== this.sessionSeq) return;
-    if (sessionId !== this.deps.getSessionId()) return;
-    if (res.status !== 200 || !isView(res.body)) return;
-    const view = res.body;
-    if (view.sessionId !== sessionId) return;
-    if (this.seen.has(view.seq)) return;
-    this.seen.set(view.seq, view);
-    if (view.seq > this.lastSeq) this.lastSeq = view.seq;
-    this.deliver(view);
   }
 
-  /** Route one new notice: urgent now, routine deferred past break. */
+  /** Cache write: always replace the owned view; delivery dedup lives in
+   *  `delivered`, never in `seen`. An outdated flip without a new seq
+   *  therefore refreshes the view but can never re-nudge. */
+  private upsertSeen(view: NotificationView): void {
+    for (const [seq, current] of this.seen) {
+      if (current.id === view.id && seq !== view.seq) this.seen.delete(seq);
+    }
+    this.seen.set(view.seq, view);
+  }
+
+  /** Route one new notice: urgent now, routine deferred past break.
+   *  Exactly-once via `delivered`; render-only state (focus, selection,
+   *  composer text) is never touched here. */
   private deliver(view: NotificationView): void {
+    if (this.delivered.has(view.seq)) return;
+    this.delivered.add(view.seq);
     if (isLocallyOutdated(view)) {
       this.renderAll();
       return;
     }
     if (view.priority === "urgent") {
+      this.briefed.add(view.seq);
       this.renderAll();
       return;
     }
     // Routine: only brief on a natural break, else quiet badge.
-    if (this.deps.isNaturalBreak()) {
+    if (!this.pendingRoutine.some((v) => v.seq === view.seq)) {
       this.pendingRoutine.push(view);
+    }
+    if (this.deps.isNaturalBreak()) {
       this.maybeFlushRoutine();
     } else {
-      this.pendingRoutine.push(view);
       this.renderBadge();
     }
     this.renderAll();
@@ -475,10 +548,7 @@ export class NotificationPanel {
     // Drop locally-expired while deferred (history keeps them, no nudge).
     const live = this.pendingRoutine.filter((v) => !isLocallyOutdated(v));
     this.pendingRoutine.length = 0;
-    if (live.length === 0) {
-      this.renderAll();
-      return;
-    }
+    for (const view of live) this.briefed.add(view.seq);
     this.renderAll();
   }
 
@@ -584,15 +654,14 @@ export class NotificationPanel {
     while (this.routineBox.firstChild !== null) {
       this.routineBox.removeChild(this.routineBox.firstChild);
     }
-    // Only briefed (flushed) routine questions render as groups; deferred
-    // ones stay behind the badge. History below keeps everything durable.
-    const briefed = new Set(this.seen.keys());
-    for (const pending of this.pendingRoutine) briefed.delete(pending.seq);
+    // Only explicitly BRIEFED (flushed on a natural break) routine
+    // questions render as groups; deferred ones stay behind the badge and
+    // pre-baseline history never briefs. History below keeps everything.
     const questions = [...this.seen.values()].filter(
       (v) =>
         v.priority !== "urgent" &&
         v.kind === "question" &&
-        briefed.has(v.seq) &&
+        this.briefed.has(v.seq) &&
         !isLocallyOutdated(v) &&
         v.seq > this.baseline,
     );
@@ -717,8 +786,7 @@ export class NotificationPanel {
     const acked = this.acked.has(view.id);
     this.ackButton.hidden = acked;
     this.ackButton.textContent = "確認済みにする";
-    const uncertain =
-      this.pendingAck !== null && this.pendingAck.notificationId === view.id;
+    const uncertain = this.pendingAcks.has(view.id);
     this.retryButton.hidden = !uncertain;
     this.retryButton.textContent = "同じ内容で再送";
     if (this.status !== null && !acked && !uncertain)
@@ -747,68 +815,112 @@ export class NotificationPanel {
     const body = res.body as { notification?: unknown; ack?: unknown };
     if (!isView(body.notification)) return;
     if (body.notification.sessionId !== sessionId) return;
-    if (!this.seen.has(body.notification.seq)) {
-      this.seen.set(body.notification.seq, body.notification);
-    }
+    // Always replace the owned cached view: a terminal/cancelled task can
+    // flip `outdated` without a new seq, and the discarded refresh would
+    // leave detail/history stale. Delivery tracking is separate (`delivered`
+    // / `briefed`), so the refreshed outdated view can never re-nudge.
+    this.upsertSeen(body.notification);
     if (isRecord(body.ack)) this.acked.add(notificationId);
     this.renderAll();
   }
 
-  /** Explicit ack: frozen key+N+{} in memory, same-key retry only. */
+  /** Explicit retry: resend ONLY the frozen entry owned by the current
+   *  selection (same id/key/body). A selection with no frozen entry never
+   *  inherits another notice's error or retry affordance. */
+  private async retryPendingAck(): Promise<void> {
+    const target = this.selectedId;
+    if (target === null) return;
+    if (!this.pendingAcks.has(target)) return;
+    await this.commitAck();
+  }
+
+  /** Explicit ack: frozen key+N+{} in memory, same-key retry only.
+   *  Ownership rules: the frozen entry belongs to its notice; starting a
+   *  fresh ack for B while A is unresolved is blocked with an honest
+   *  message (never overwrites A); late responses for a deselected notice
+   *  mark only that notice's receipt and never rewrite the current
+   *  selection's status. Still receipt-only: never approval/permission. */
   private async commitAck(): Promise<void> {
     const sessionId = this.deps.getSessionId();
     const target = this.selectedId;
     if (sessionId === null || target === null) return;
     const session = this.sessionSeq;
-    if (
-      this.pendingAck === null ||
-      this.pendingAck.notificationId !== target ||
-      this.pendingAck.ownerSession !== sessionId
-    ) {
-      this.pendingAck = {
-        ownerSession: sessionId,
-        notificationId: target,
-        key: this.newKey(),
-      };
+    let frozen = this.pendingAcks.get(target);
+    if (frozen === undefined) {
+      const other = [...this.pendingAcks.keys()].find((k) => k !== target);
+      if (other !== undefined) {
+        if (this.status !== null && this.selectedId === target) {
+          this.status.textContent =
+            "別の確認の再送待ちです。先にそちらを再送してください。";
+        }
+        return;
+      }
+      frozen = { ownerSession: sessionId, key: this.newKey() };
+      this.pendingAcks.set(target, frozen);
     }
-    const frozen = this.pendingAck;
-    if (this.status !== null) this.status.textContent = "確認を送信中…";
-    if (this.retryButton !== null) this.retryButton.hidden = true;
+    if (this.ackFlight.has(target)) return;
+    this.ackFlight.add(target);
+    const frozenTarget = target;
+    const frozenEntry = frozen;
+    if (this.status !== null && this.selectedId === frozenTarget) {
+      this.status.textContent = "確認を送信中…";
+    }
+    this.renderDetailShell();
     let res: { status: number; body: unknown };
     try {
       res = await this.deps.http.post(
-        `/api/sessions/${encodeURIComponent(sessionId)}/notifications/${encodeURIComponent(target)}/ack`,
+        `/api/sessions/${encodeURIComponent(sessionId)}/notifications/${encodeURIComponent(frozenTarget)}/ack`,
         {},
-        frozen.key,
+        frozenEntry.key,
       );
     } catch {
-      if (session !== this.sessionSeq || this.pendingAck !== frozen) return;
-      if (frozen.ownerSession !== this.deps.getSessionId()) return;
-      if (this.status !== null)
-        this.status.textContent = "通信が不確かです。同じ内容で再送できます。";
-      if (this.retryButton !== null) this.retryButton.hidden = false;
+      this.ackFlight.delete(frozenTarget);
+      if (session !== this.sessionSeq) return;
+      if (this.pendingAcks.get(frozenTarget) !== frozenEntry) return;
+      if (frozenEntry.ownerSession !== this.deps.getSessionId()) return;
+      // Uncertain A stays frozen; B never inherits it.
+      if (this.selectedId === frozenTarget) {
+        if (this.status !== null) {
+          this.status.textContent =
+            "通信が不確かです。同じ内容で再送できます。";
+        }
+        this.renderDetailShell();
+      }
       return;
     }
-    if (session !== this.sessionSeq || this.pendingAck !== frozen) return;
-    if (frozen.ownerSession !== this.deps.getSessionId()) return;
+    this.ackFlight.delete(frozenTarget);
+    if (session !== this.sessionSeq) return;
+    if (this.pendingAcks.get(frozenTarget) !== frozenEntry) return;
+    if (frozenEntry.ownerSession !== this.deps.getSessionId()) return;
     if (res.status === 200 || res.status === 201) {
-      this.pendingAck = null;
-      this.acked.add(target);
-      if (this.retryButton !== null) this.retryButton.hidden = true;
-      if (this.status !== null)
-        this.status.textContent = "確認済みにしました。";
-      this.renderAll();
+      this.pendingAcks.delete(frozenTarget);
+      this.acked.add(frozenTarget);
+      if (this.selectedId === frozenTarget) {
+        if (this.status !== null) {
+          this.status.textContent = "確認済みにしました。";
+        }
+        this.renderAll();
+      } else {
+        this.renderAll();
+      }
       return;
     }
     if (res.status === 429 || res.status >= 500) {
-      if (this.status !== null)
-        this.status.textContent = "応答が不確かです。同じ内容で再送できます。";
-      if (this.retryButton !== null) this.retryButton.hidden = false;
+      if (this.selectedId === frozenTarget) {
+        if (this.status !== null) {
+          this.status.textContent =
+            "応答が不確かです。同じ内容で再送できます。";
+        }
+        this.renderDetailShell();
+      }
       return;
     }
-    this.pendingAck = null;
-    if (this.retryButton !== null) this.retryButton.hidden = true;
-    if (this.status !== null)
-      this.status.textContent = "確認できませんでした。";
+    this.pendingAcks.delete(frozenTarget);
+    if (this.selectedId === frozenTarget) {
+      if (this.status !== null) {
+        this.status.textContent = "確認できませんでした。";
+      }
+      this.renderDetailShell();
+    }
   }
 }
