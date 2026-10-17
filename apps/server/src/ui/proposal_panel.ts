@@ -387,19 +387,36 @@ export class ProposalPanel {
       return;
     }
     if (session !== this.sessionSeq || seen !== this.listSeq) return;
-    this.items.clear();
+    // Merge fresh pages into the map (never clear): older pages loaded via
+    // "古い履歴を読み込む" stay reachable, and a 409 re-read never drops
+    // the older-page row behind the frozen op.
     for (const item of pending) this.items.set(item.id, item);
     for (const item of history) this.items.set(item.id, item);
     this.historyCursor = historyCursor;
     this.historyHasMore = historyHasMore;
     if (pendingCount >= 0) this.totalPending = pendingCount;
-    // A selected draft that vanished closes the drawer; a decided draft
-    // stays open as READONLY history; an unresolved frozen op keeps its
-    // drawer pinned.
+    // A selected draft missing from the fresh pages is NOT gone: it may
+    // live on an older page. Fetch it directly; close the drawer only when
+    // the server says it is gone (404). An unresolved frozen op keeps its
+    // drawer pinned without any fetch.
     if (this.pendingOp === null && this.selectedId !== null) {
       if (!this.items.has(this.selectedId)) {
-        this.selectedId = null;
-        if (this.detail !== null) this.detail.hidden = true;
+        const missing = this.selectedId;
+        try {
+          const single = await this.deps.http.get(
+            `/api/sessions/${sessionId}/conversation-proposals/${missing}`,
+          );
+          if (session !== this.sessionSeq || seen !== this.listSeq) return;
+          if (single.status === 200 && isProposalView(single.body)) {
+            this.items.set(missing, single.body);
+          } else if (single.status === 404) {
+            this.selectedId = null;
+            if (this.detail !== null) this.detail.hidden = true;
+          }
+        } catch {
+          // Network loss: keep the stale selection (never close on a
+          // failed read); the next refresh retries.
+        }
       }
     }
     this.renderAll();
@@ -733,38 +750,44 @@ export class ProposalPanel {
       return;
     }
     if (res.status === 409) {
-      // Re-read the truth first: the frozen op clears ONLY on a
-      // diagnostically definitive terminal outcome (the draft is decided
-      // or gone — a same-key retry could never succeed). A still-pending
-      // draft (version drift / parent change / key reuse) keeps the
-      // frozen op for the explicit same-key retry; network-level
-      // uncertainty (503/transport, handled above/below) never clears.
+      // Definitive conflict (version drift, parent change, or key reuse):
+      // re-read the truth, then CLEAR the frozen op — retrying the
+      // identical frozen body could never succeed, so keeping it would pin
+      // the drawer forever. Only network loss and 5xx/503 keep the frozen
+      // op (handled above/below).
       this.opInFlight = false;
       await this.refresh();
       if (session !== this.sessionSeq) return;
+      this.pendingOp = null;
+      if (this.retryButton !== null) this.retryButton.hidden = true;
       const current = this.items.get(op.proposalId);
-      if (current === undefined || current.status !== "pending") {
-        this.pendingOp = null;
-        if (this.retryButton !== null) this.retryButton.hidden = true;
-        if (current === undefined) {
-          this.setStatus("候補が見つかりません（別セッションの可能性）");
-          this.selectedId = null;
-          if (this.detail !== null) this.detail.hidden = true;
-        } else {
-          this.setStatus(
-            current.status === "accepted"
-              ? "採用されています（履歴を確認してください）"
-              : "見送りになっています（履歴を確認してください）",
-          );
-        }
-        this.renderAll();
-        if (this.selectedId !== null) this.renderDetail(false);
-        return;
+      if (current === undefined) {
+        this.setStatus("候補が見つかりません（別セッションの可能性）");
+        this.selectedId = null;
+        if (this.detail !== null) this.detail.hidden = true;
+      } else if (current.status !== "pending") {
+        this.setStatus(
+          current.status === "accepted"
+            ? "採用されています（履歴を確認してください）"
+            : "見送りになっています（履歴を確認してください）",
+        );
+      } else {
+        this.setStatus(
+          "競合しました（版ずれ・親の変更・キーの再利用）。内容を確認して入力し直してください",
+        );
       }
-      if (this.retryButton !== null) this.retryButton.hidden = false;
-      this.setStatus(
-        "競合しました（版ずれ・親の変更・キーの再利用）。内容を確認して再送してください",
-      );
+      this.renderAll();
+      if (this.selectedId !== null) this.renderDetail(false);
+      return;
+    }
+    if (res.status === 400) {
+      // Definitive validation rejection: the identical body can never
+      // succeed, so clear the frozen op and keep the drawer + typed dates
+      // for correction (never pin the drawer).
+      this.pendingOp = null;
+      this.opInFlight = false;
+      if (this.retryButton !== null) this.retryButton.hidden = true;
+      this.setStatus("入力が不正です（内容を確認して入力し直してください）");
       this.renderDetail(false);
       return;
     }

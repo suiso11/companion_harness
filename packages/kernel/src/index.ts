@@ -317,6 +317,31 @@ export {
   nonCooperativeDelayed,
   successResult,
 } from "./fakes.js";
+export {
+  acceptStagedHypothesis,
+  attachEvidence,
+  createHypothesis,
+  flagLearningReevaluationInTx,
+  getHypothesis,
+  LearningStateConflictError,
+  LearningVersionConflictError,
+  listHypotheses,
+  listHypothesisEvents,
+  listHypothesisEvidence,
+  rejectStagedHypothesis,
+  stageHypothesisFromModel,
+  transitionHypothesis,
+} from "./learning.js";
+export type { LearningToolsOptions } from "./learning_tools.js";
+export {
+  createLearningRegistrations,
+  LearningListToolInputSchema,
+  LearningListToolOutputSchema,
+  LearningOpenToolInputSchema,
+  LearningOpenToolOutputSchema,
+  LearningProposeToolInputSchema,
+  LearningProposeToolOutputSchema,
+} from "./learning_tools.js";
 export type {
   CreateM1ToolRegistrationsOptions,
   MarkdownConnectorBinding,
