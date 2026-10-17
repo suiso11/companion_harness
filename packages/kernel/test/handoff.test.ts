@@ -1123,4 +1123,41 @@ describe("handoff core", () => {
       closeKernelDatabase(handle);
     }
   });
+
+  it("same-millisecond handoffs keep exact append order across list pages (injected fixed clock)", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      const purpose = makePurpose(repo, sessionId, T0);
+      const task = makeTask(repo, sessionId, T0 + 1, purpose.body.id);
+      // ONE injected clock value for every append below: all handoff rows
+      // land in the same millisecond, where a (created_at, id) keyset
+      // orders by RANDOM UUID and flakes against insertion order.
+      const SAME_MS = T0 + 10;
+      const ids: string[] = [];
+      for (let n = 0; n < 10; n += 1) {
+        const handoff = makeHandoff(repo, sessionId, task.body.id, SAME_MS, {
+          target: `same-ms append ${n}`,
+        });
+        expect(handoff.status).toBe(201);
+        ids.push((handoff.body as { id: string }).id);
+      }
+      // Pages (limit=3, newest-first) stitch to the exact append order
+      // reversed — no random-id reorder inside the same millisecond.
+      const listed: string[] = [];
+      let hasMore = true;
+      let cursor: string | undefined;
+      while (hasMore) {
+        const page = repo.listHandoffs(sessionId, {
+          limit: 3,
+          ...(cursor !== undefined ? { cursor } : {}),
+        });
+        for (const item of page.items) listed.push((item as { id: string }).id);
+        hasMore = page.hasMore;
+        cursor = page.hasMore ? (page.nextCursor as string) : undefined;
+      }
+      expect(listed).toEqual([...ids].reverse());
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
 });

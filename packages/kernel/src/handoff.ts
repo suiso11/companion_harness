@@ -361,32 +361,34 @@ function appendHandoffEventInTx(
   );
 }
 
-function encodeHandoffCursor(createdAt: number, id: string): string {
-  return Buffer.from(JSON.stringify({ createdAt, id }), "utf8").toString(
-    "base64url",
-  );
+/**
+ * Opaque paging cursor over the DURABLE APPEND ORDER of the append-only
+ * delegation_handoffs table (STRICT rowid table; handoff rows are never
+ * deleted, so SQLite rowids increase monotonically with INSERT order). A
+ * (created_at, id) keyset would order equal-millisecond rows by RANDOM
+ * UUID v4, which is nondeterministic against insertion order — the same
+ * defect that flaked the learning evidence paging test (PR48 CI run
+ * 39056812937). Rowid keyset convention is already used by the
+ * notification bridge keysets (shadow_job_events / action_receipts /
+ * autonomy_task_events).
+ */
+function encodeHandoffCursor(rowid: number): string {
+  return Buffer.from(JSON.stringify({ rowid }), "utf8").toString("base64url");
 }
 
-function decodeHandoffCursor(cursor: string): {
-  createdAt: number;
-  id: string;
-} {
+function decodeHandoffCursor(cursor: string): { rowid: number } {
   try {
     const raw = Buffer.from(cursor, "base64url").toString("utf8");
     const parsed = JSON.parse(raw) as unknown;
     if (
       typeof parsed !== "object" ||
       parsed === null ||
-      !Number.isInteger((parsed as { createdAt?: unknown }).createdAt) ||
-      typeof (parsed as { id?: unknown }).id !== "string" ||
-      !isUuidV4((parsed as { id: string }).id)
+      !Number.isInteger((parsed as { rowid?: unknown }).rowid) ||
+      (parsed as { rowid: number }).rowid < 0
     ) {
       throw new Error("bad cursor shape");
     }
-    return {
-      createdAt: (parsed as { createdAt: number }).createdAt,
-      id: (parsed as { id: string }).id,
-    };
+    return { rowid: (parsed as { rowid: number }).rowid };
   } catch (error) {
     if (error instanceof KernelStorageError) {
       throw error;
@@ -653,24 +655,25 @@ export function listHandoffs(
     args.push(query.status);
   }
   if (bound !== null) {
-    clauses.push("(created_at < ? OR (created_at = ? AND id > ?))");
-    args.push(bound.createdAt, bound.createdAt, bound.id);
+    // Newest-first over the DURABLE APPEND ORDER: strictly before the
+    // bound rowid (higher rowids were appended later and already appear
+    // on earlier pages).
+    clauses.push("rowid < ?");
+    args.push(bound.rowid);
   }
   const where = `WHERE ${clauses.join(" AND ")}`;
   const rows = db
     .prepare(
-      `SELECT * FROM delegation_handoffs ${where} ORDER BY created_at DESC, id ASC LIMIT ?`,
+      `SELECT rowid AS rid, * FROM delegation_handoffs ${where} ORDER BY rowid DESC LIMIT ?`,
     )
-    .all(...args, capped + 1) as RawHandoff[];
+    .all(...args, capped + 1) as (RawHandoff & { rid: number })[];
   const hasMore = rows.length > capped;
   const page = hasMore ? rows.slice(0, capped) : rows;
   const last = page[page.length - 1];
   return {
     items: page.map((row) => toHandoffView(row)),
     nextCursor:
-      hasMore && last !== undefined
-        ? encodeHandoffCursor(last.created_at, last.id)
-        : null,
+      hasMore && last !== undefined ? encodeHandoffCursor(last.rid) : null,
     hasMore,
   };
 }
