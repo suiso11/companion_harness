@@ -101,6 +101,18 @@ import {
   type RunStatus,
   RunStatusSchema,
   retryScope,
+  ShadowExplicitRequestSchema,
+  ShadowFailRequestSchema,
+  ShadowHoldRequestSchema,
+  type ShadowJobContext,
+  ShadowJobContextSchema,
+  type ShadowJobEventsResponse,
+  ShadowJobEventsResponseSchema,
+  type ShadowJobListResponse,
+  ShadowJobListResponseSchema,
+  type ShadowJobView,
+  ShadowJobViewSchema,
+  ShadowModelOutputSchema,
   SnapshotBodySchema,
   TaskCreateRequestSchema,
   type TaskCreateResponse,
@@ -143,6 +155,7 @@ import {
   revokePurpose as autonomyRevokePurpose,
   setAutonomyControl as autonomySetControl,
   startTask as autonomyStartTask,
+  isStrictAutonomyDeadline,
   recordUserActivityInTx,
 } from "./autonomy.js";
 import {
@@ -167,6 +180,22 @@ import {
   RepositoryValidationError,
   SessionBusyError,
 } from "./errors.js";
+import {
+  type ShadowPolicyReader,
+  type ShadowReaderPurpose,
+  type ShadowReaderTask,
+  cancelShadowJob as shadowCancelJob,
+  claimShadowJob as shadowClaimJob,
+  completeShadowJob as shadowCompleteJob,
+  failShadowJob as shadowFailJob,
+  getShadowJobContext as shadowGetContext,
+  getShadowJob as shadowGetJob,
+  holdShadowJob as shadowHoldJob,
+  listShadowJobEvents as shadowListEvents,
+  listShadowInbox as shadowListInbox,
+  listShadowJobs as shadowListJobs,
+  requestShadowDeliberation as shadowRequest,
+} from "./shadow.js";
 
 /**
  * C19: fixed safe error thrown when a generic Run lifecycle transition
@@ -5191,6 +5220,333 @@ export function createKernelRepository(
     return applyAutonomyRestartFence(db, now);
   }
 
+  /* ---------------------------------------------------------------- */
+  /* AV02 shadow-deliberation facade (durable queue + fenced core).    */
+  /*                                                                  */
+  /* Ownership: every method below delegates to `shadow.ts`, the ONLY */
+  /* writer of the shadow tables. This facade adds the strict Zod     */
+  /* boundary and implements the narrow `ShadowPolicyReader` port     */
+  /* from the EXISTING autonomy getters (no duplicated purpose        */
+  /* mapper, no runtime cycle: `shadow.ts` never imports this         */
+  /* module or `autonomy.ts`). Completed jobs store a MODEL decision  */
+  /* SEPARATE from the CODE policy with ZERO execution performed.     */
+  /* ---------------------------------------------------------------- */
+
+  const shadowPolicyReader: ShadowPolicyReader = {
+    listScopePurposes(sessionId: string, scope: string): ShadowReaderPurpose[] {
+      const out = autonomyListPurposes(db, sessionId, 100);
+      return out.items
+        .filter((purpose) => purpose.scope === scope)
+        .map((purpose) => ({
+          id: purpose.id,
+          scope: purpose.scope,
+          kind: purpose.kind,
+          explicit: purpose.explicit,
+          sourceKind: purpose.sourceKind,
+          statement: purpose.statement,
+          interpretation: purpose.interpretation,
+          status: purpose.status,
+          version: purpose.version,
+          supersededBy: purpose.supersededBy,
+          validFrom: purpose.validFrom,
+          validUntil: purpose.validUntil,
+          createdAt: purpose.createdAt,
+        }));
+    },
+    listScopeTasks(sessionId: string, scope: string): ShadowReaderTask[] {
+      const out = autonomyListTasks(db, sessionId, 100);
+      return out.items
+        .filter((task) => task.scope === scope)
+        .map((task) => ({
+          id: task.id,
+          scope: task.scope,
+          title: task.title,
+          kind: task.kind,
+          speaker: task.speaker,
+          deadline: task.deadline,
+          parentPurposeId: task.parentPurposeId,
+          status: task.status,
+          version: task.version,
+          holdReason: task.holdReason,
+        }));
+    },
+    listScopeConflictPairs(
+      sessionId: string,
+      scope: string,
+    ): [string, string][] {
+      const out = autonomyListConflicts(db, sessionId);
+      return out.conflicts
+        .filter((group) => group.scope === scope)
+        .map(
+          (group) =>
+            [group.purposeIds[0], group.purposeIds[1]] as [string, string],
+        );
+    },
+    isStrictDeadline: (value: string): boolean =>
+      isStrictAutonomyDeadline(value),
+  };
+
+  function requestShadowDeliberation(
+    sessionId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: ShadowJobView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => ShadowExplicitRequestSchema.parse(request),
+      "shadow explicit request",
+    );
+    const out = shadowRequest(
+      db,
+      sessionId,
+      parsed.scope,
+      parsed.reason,
+      options,
+    );
+    const body = parseOrValidation(
+      () => ShadowJobViewSchema.parse(out.body),
+      "shadow job response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function listShadowJobs(
+    sessionId: string,
+    query: unknown = {},
+  ): ShadowJobListResponse {
+    const parsed = parseOrValidation(
+      () => AutonomyListQuerySchema.parse(query ?? {}),
+      "shadow job list query",
+    );
+    const out = shadowListJobs(db, sessionId, parsed.limit);
+    return parseOrValidation(
+      () => ShadowJobListResponseSchema.parse(out),
+      "shadow job list response",
+    );
+  }
+
+  function getShadowJob(sessionId: string, jobId: string): ShadowJobView {
+    return parseOrValidation(
+      () => ShadowJobViewSchema.parse(shadowGetJob(db, sessionId, jobId)),
+      "shadow job response",
+    );
+  }
+
+  function listShadowJobEvents(
+    sessionId: string,
+    jobId: string,
+  ): ShadowJobEventsResponse {
+    const out = shadowListEvents(db, sessionId, jobId);
+    return parseOrValidation(
+      () => ShadowJobEventsResponseSchema.parse(out),
+      "shadow job events response",
+    );
+  }
+
+  function listShadowInbox(
+    sessionId: string,
+    query: unknown = {},
+  ): {
+    items: {
+      id: string;
+      sessionId: string;
+      scope: string;
+      kind: "policy_change" | "explicit_request";
+      triggerEvent: string;
+      triggerId: string | null;
+      controlVersion: number;
+      scopeEpoch: number;
+      disposition: "recorded" | "consumed" | "skipped";
+      jobId: string | null;
+      createdAt: number;
+    }[];
+  } {
+    const parsed = parseOrValidation(
+      () => AutonomyListQuerySchema.parse(query ?? {}),
+      "shadow inbox list query",
+    );
+    return shadowListInbox(db, sessionId, parsed.limit);
+  }
+
+  function getShadowJobContext(
+    sessionId: string,
+    jobId: string,
+  ): ShadowJobContext {
+    return parseOrValidation(
+      () =>
+        ShadowJobContextSchema.parse(shadowGetContext(db, sessionId, jobId)),
+      "shadow job context response",
+    );
+  }
+
+  function claimShadowJob(
+    sessionId: string,
+    jobId: string,
+    request: unknown,
+    options: { now?: number },
+  ): {
+    outcome: "claimed" | "held";
+    job: ShadowJobView;
+    context: ShadowJobContext | null;
+  } {
+    const candidate = request as {
+      owner?: unknown;
+      expectedVersion?: unknown;
+      leaseMs?: unknown;
+    };
+    if (
+      typeof candidate.owner !== "string" ||
+      candidate.owner.length === 0 ||
+      candidate.owner.length > 128 ||
+      !Number.isInteger(candidate.expectedVersion) ||
+      (candidate.expectedVersion as number) < 1
+    ) {
+      throw new RepositoryValidationError("shadow claim request is invalid");
+    }
+    if (
+      candidate.leaseMs !== undefined &&
+      (!Number.isInteger(candidate.leaseMs) ||
+        (candidate.leaseMs as number) < 1000 ||
+        (candidate.leaseMs as number) > 3_600_000)
+    ) {
+      throw new RepositoryValidationError("leaseMs must be 1000..3600000");
+    }
+    const owner = candidate.owner as string;
+    const expectedVersion = candidate.expectedVersion as number;
+    const out = shadowClaimJob(db, sessionId, jobId, shadowPolicyReader, {
+      owner,
+      expectedVersion,
+      ...(candidate.leaseMs !== undefined
+        ? { leaseMs: candidate.leaseMs as number }
+        : {}),
+      ...(options.now !== undefined ? { now: options.now } : {}),
+    });
+    const job = parseOrValidation(
+      () => ShadowJobViewSchema.parse(out.job),
+      "shadow job response",
+    );
+    const context =
+      out.context === null
+        ? null
+        : parseOrValidation(
+            () => ShadowJobContextSchema.parse(out.context),
+            "shadow job context response",
+          );
+    return { outcome: out.outcome, job, context };
+  }
+
+  function completeShadowJob(
+    sessionId: string,
+    jobId: string,
+    modelOutput: unknown,
+    options: { expectedVersion: number; leaseOwner: string; now?: number },
+  ): {
+    outcome: "completed" | "held";
+    job: ShadowJobView;
+    policyCode:
+      | "shadow_only"
+      | "shadow_noexecution"
+      | "missing_grant"
+      | "wish_not_command"
+      | "external_no_authority"
+      | "needs_clarification"
+      | "no_action"
+      | null;
+  } {
+    if (
+      !Number.isInteger(options.expectedVersion) ||
+      options.expectedVersion < 1 ||
+      typeof options.leaseOwner !== "string"
+    ) {
+      throw new RepositoryValidationError(
+        "shadow complete options are invalid",
+      );
+    }
+    const parsedOutput = parseOrValidation(
+      () => ShadowModelOutputSchema.parse(modelOutput),
+      "shadow model output",
+    );
+    const out = shadowCompleteJob(
+      db,
+      sessionId,
+      jobId,
+      shadowPolicyReader,
+      parsedOutput,
+      {
+        expectedVersion: options.expectedVersion,
+        leaseOwner: options.leaseOwner,
+        ...(options.now !== undefined ? { now: options.now } : {}),
+      },
+    );
+    const job = parseOrValidation(
+      () => ShadowJobViewSchema.parse(out.job),
+      "shadow job response",
+    );
+    return { outcome: out.outcome, job, policyCode: out.policyCode };
+  }
+
+  function holdShadowJob(
+    sessionId: string,
+    jobId: string,
+    request: unknown,
+    options: { now?: number },
+  ): ShadowJobView {
+    const parsed = parseOrValidation(
+      () => ShadowHoldRequestSchema.parse(request),
+      "shadow hold request",
+    );
+    const job = shadowHoldJob(db, sessionId, jobId, parsed.reason, {
+      expectedVersion: parsed.expectedVersion,
+      ...(options.now !== undefined ? { now: options.now } : {}),
+    });
+    return parseOrValidation(
+      () => ShadowJobViewSchema.parse(job),
+      "shadow job response",
+    );
+  }
+
+  function failShadowJob(
+    sessionId: string,
+    jobId: string,
+    request: unknown,
+    options: { now?: number },
+  ): ShadowJobView {
+    const parsed = parseOrValidation(
+      () => ShadowFailRequestSchema.parse(request),
+      "shadow fail request",
+    );
+    const job = shadowFailJob(db, sessionId, jobId, parsed.code, {
+      expectedVersion: parsed.expectedVersion,
+      ...(options.now !== undefined ? { now: options.now } : {}),
+    });
+    return parseOrValidation(
+      () => ShadowJobViewSchema.parse(job),
+      "shadow job response",
+    );
+  }
+
+  function cancelShadowJob(
+    sessionId: string,
+    jobId: string,
+    request: unknown,
+    options: { now?: number },
+  ): ShadowJobView {
+    const candidate = request as { expectedVersion?: unknown };
+    if (
+      !Number.isInteger(candidate.expectedVersion) ||
+      (candidate.expectedVersion as number) < 1
+    ) {
+      throw new RepositoryValidationError("shadow cancel request is invalid");
+    }
+    const job = shadowCancelJob(db, sessionId, jobId, {
+      expectedVersion: candidate.expectedVersion as number,
+      ...(options.now !== undefined ? { now: options.now } : {}),
+    });
+    return parseOrValidation(
+      () => ShadowJobViewSchema.parse(job),
+      "shadow job response",
+    );
+  }
+
   return {
     createSession,
     postMessage,
@@ -5278,6 +5634,17 @@ export function createKernelRepository(
     setAutonomyControlState,
     listAutonomyActivityLog,
     applyAutonomyRestartFenceNow,
+    requestShadowDeliberation,
+    listShadowJobs,
+    getShadowJob,
+    listShadowJobEvents,
+    listShadowInbox,
+    getShadowJobContext,
+    claimShadowJob,
+    completeShadowJob,
+    holdShadowJob,
+    failShadowJob,
+    cancelShadowJob,
   };
 }
 

@@ -3725,3 +3725,51 @@ drafts instead of applying them to the new version).
 - Remaining (NOT claimed): AV02 shadow, AV04 learning, AV05
   notification, AV06 priority, AV07 supervisor/reconcile, AV08
   maintenance/handoff.
+
+## AV02 shadow-deliberation durable CORE — kernel/contracts only (2026-10-17, observed, branch feat/av-shadow-deliberation)
+
+Implements the CONCRETE shadow kernel/contracts/durable core only (NOT the
+full vertical): model proposals NEVER become execution authority. Actual
+SQLite queue/projection/policy/transition API + runtime proof below.
+The full vertical (model gateway service + HTTP + UI) is STILL IN PROGRESS
+and arrives via the NEXT bounded worker; NO PR is published for this
+branch until that lands.
+
+- Owned new sources: `packages/contracts/src/shadow.ts` (strict MODEL
+  output + job/context/policy DTOs + `shadowRequestScope`), migration
+  `packages/kernel/migrations/0012_shadow.sql` (FOUR new STRICT tables:
+  `shadow_scope_epochs`, `shadow_inbox`, `shadow_jobs`, `shadow_job_events`;
+  BUNDLED_SCHEMA_VERSION 11 -> 12; Drizzle mirror in
+  `packages/kernel/src/schema.ts`), `packages/kernel/src/shadow.ts`
+  (ONLY writer of the shadow tables; `autonomy.ts` imports the enqueue /
+  reconcile entries FROM it — never the reverse, enforced by the
+  `ShadowPolicyReader` port the repository implements from existing
+  getters), same-TX hooks in `packages/kernel/src/autonomy.ts`
+  (purpose/task/conflict mutations enqueue; pause holds pending globally;
+  resume skips paused-time inbox; restart fence reconciles), repository
+  facade (`requestShadowDeliberation/listShadowJobs/getShadowJob/
+  listShadowJobEvents/listShadowInbox/getShadowJobContext/claimShadowJob/
+  completeShadowJob/holdShadowJob/failShadowJob/cancelShadowJob`).
+- MODEL contract: decision execute|hold|ask|do-nothing + evidence ids
+  (frozen sP/sT/sM/sF labels only) + brief reason (<=500cp, not CoT) +
+  nullable structured action (kind/summary/optional LOCAL task draft) +
+  completion + stop conditions + uncertainty + counterargument; strict
+  unknown-field reject (no grant/permission/budget/bypass); task-draft
+  deadlines only when matching an EXPLICIT input deadline; execute
+  requires an action, do-nothing forbids one. CODE policy (never
+  model-chosen): shadow_only/shadow_noexecution/missing_grant/
+  wish_not_command/external_no_authority/needs_clarification/no_action.
+  Recorded permission NEVER becomes a grant; zero execution performed.
+- Verified 2026-10-17: permanent `shadow_core.test.ts` 12/12 (ownership,
+  atomic same-TX queue, stable-key replay/drift, epoch-drift hold,
+  pause/restart holds, no-catchup, wish/external/missing-grant policies,
+  genuine do-nothing, strict rejects, foreground abort, redacted fail);
+  affected `autonomy_slice` 11/11 + `migration` 21/21 +
+  `migration_create_0010` 3/3 + `autonomy_http` 3/3; Biome clean; root
+  `tsc` only the pre-existing better-sqlite3 TS7016 noise; throwaway
+  SQLite smoke (deleted after run): claim froze ctx (1 purpose + 1 task,
+  epoch 2, control v2) -> mid-call constraint held late output
+  (scope_epoch_drift) -> fresh state completed shadow_noexecution with
+  zero grant/calendar/tool surface and 0 executions / 0 grants.
+- Remaining (NOT claimed): model gateway, shadow service, HTTP routes,
+  UI; then feature publication.
