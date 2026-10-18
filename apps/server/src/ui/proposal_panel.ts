@@ -737,6 +737,13 @@ export class ProposalPanel {
       this.opInFlight = false;
       if (this.retryButton !== null) this.retryButton.hidden = true;
       this.setStatus(res.status === 201 ? "採用しました" : "見送りにしました");
+      // Apply the decided row to the cache BEFORE re-reading: an old
+      // pending proposal sits outside the newest 50-row history page, so a
+      // merge-only refresh would keep it rendered as pending forever (the
+      // success path clears selectedId, so no direct fetch can correct it).
+      if (isRecord(res.body) && isProposalView(res.body)) {
+        this.items.set(op.proposalId, res.body);
+      }
       this.selectedId = null;
       if (this.detail !== null) this.detail.hidden = true;
       await this.refresh();

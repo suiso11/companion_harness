@@ -1068,9 +1068,15 @@ function decideStagedHypothesis(
         now,
       );
     } else {
+      // Human reject retires the staged record AND clears a pending
+      // `needs_reevaluation` notice (a flagged staged row would otherwise
+      // sit terminally retired with an unactionable notice: the UI disables
+      // reaffirm on retired rows and no later op could clear it). The
+      // clearing is audited like every other explicit notice clear.
+      const wasFlagged = row.needs_reevaluation === 1;
       const moved = db
         .prepare(
-          "UPDATE learning_hypotheses SET staged = 0, status = 'retired', version = ?, updated_at = ? WHERE id = ? AND staged = 1 AND version = ?",
+          "UPDATE learning_hypotheses SET staged = 0, status = 'retired', version = ?, updated_at = ?, needs_reevaluation = 0 WHERE id = ? AND staged = 1 AND version = ?",
         )
         .run(row.version + 1, now, row.id, row.version);
       if (moved.changes !== 1) {
@@ -1086,6 +1092,18 @@ function decideStagedHypothesis(
         null,
         now,
       );
+      if (wasFlagged) {
+        appendHypothesisEventInTx(
+          db,
+          row.id,
+          session,
+          "reevaluation_cleared",
+          "retired",
+          "retired",
+          "explicit human reject",
+          now,
+        );
+      }
     }
     const current = readHypothesis(db, row.id);
     if (current === null) {
@@ -1355,6 +1373,10 @@ export function attachEvidence(
 /**
  * Flag every in-scope non-terminal hypothesis with the durable
  * `needs_reevaluation` NOTICE plus an `reevaluation_flagged` history event.
+ * `refuted` is scanned (not just `open`/`supported`): `retired` is the
+ * declared terminal state and the transition logic explicitly permits
+ * reaffirming a flagged refuted record, so skipping refuted rows would hide
+ * the notice exactly on the path that needs it.
  * Called by autonomy.ts INSIDE the revoke/supersede transaction (same TX as
  * the parent transition + dependent task holds), so the flag and the parent
  * state change are atomic (idempotent: already-flagged rows are skipped).
@@ -1380,7 +1402,7 @@ export function flagLearningReevaluationInTx(
 ): void {
   const rows = db
     .prepare(
-      "SELECT id, status, version FROM learning_hypotheses WHERE session_id = ? AND scope = ? AND status IN ('open','supported') AND needs_reevaluation = 0",
+      "SELECT id, status, version FROM learning_hypotheses WHERE session_id = ? AND scope = ? AND status IN ('open','supported','refuted') AND needs_reevaluation = 0",
     )
     .all(sessionId, scope) as { id: string; status: string; version: number }[];
   for (const row of rows) {
