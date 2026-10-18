@@ -23,6 +23,16 @@ import {
   type RunViewState,
   runResultToAnswerParts,
 } from "./lib/reducer.js";
+import {
+  appendThinkingText,
+  applyThinkingUsage,
+  deriveRunPhase,
+  EMPTY_THINKING,
+  formatPhaseText,
+  formatThinkingStats,
+  type ThinkingState,
+  thinkingDisplayText,
+} from "./lib/thinking.js";
 
 // PR-1 Svelte chat page (Q1/Q4/Q7/Q8/Q10, PR-1 scope): dark-only, Japanese,
 // same APIs/SSE events + JSON fallback polling as the vanilla client.
@@ -134,6 +144,16 @@ let runView: RunViewState = $state({ ...INITIAL_RUN_VIEW });
 let activeRunCursor = 0;
 let liveAnswer: { text: string; citations: string[] }[] = $state([]);
 let liveVisible = $state(false);
+// PR-3 thinking/status (frontend plan §11.1 Q11): ephemeral reasoning
+// text lives in memory only (never persisted, never sent back). The
+// block expands while reasoning streams and auto-collapses on answer;
+// the phase line derives from durable events only (reload-safe).
+let thinking: ThinkingState = $state({ ...EMPTY_THINKING });
+let thinkingCollapsed = $state(false);
+let showThinking = $state(false);
+let runStartedAt = $state(0);
+let elapsedSec = $state(0);
+let elapsedTimer: number | null = null;
 let retryTurnId: string | null = $state(null);
 let drawerOpen = $state(false);
 let drawerBody = $state("");
@@ -302,6 +322,11 @@ function resetChatState(): void {
   activeRunCursor = 0;
   liveAnswer = [];
   liveVisible = false;
+  thinking = { ...EMPTY_THINKING };
+  thinkingCollapsed = false;
+  showThinking = false;
+  stopElapsedTimer();
+  elapsedSec = 0;
   retryTurnId = null;
   renderedAnswers = new Set();
   terminalHydrated = new Set();
@@ -311,6 +336,88 @@ function resetChatState(): void {
   cards = [];
   degradedMemory = false;
   notice = "";
+}
+
+// --- PR-3 thinking/status helpers (ephemeral deltas + durable phase) ---
+function stopElapsedTimer(): void {
+  if (elapsedTimer !== null) {
+    window.clearInterval(elapsedTimer);
+    elapsedTimer = null;
+  }
+}
+
+function startElapsedTimer(): void {
+  stopElapsedTimer();
+  runStartedAt = Date.now();
+  elapsedSec = 0;
+  elapsedTimer = window.setInterval(() => {
+    if (activeRunId === null) {
+      stopElapsedTimer();
+      return;
+    }
+    elapsedSec = Math.max(0, Math.floor((Date.now() - runStartedAt) / 1000));
+  }, 500);
+}
+
+/** Phase/status line text (durable events only; empty when not running). */
+function runStatusText(): string {
+  if (activeRunId === null || runView.visible !== "generating") {
+    return "";
+  }
+  const phase = deriveRunPhase({
+    toolRequested: runView.toolRequested,
+    toolCompleted: runView.toolCompleted,
+    stepsCompleted: runView.stepsCompleted,
+  });
+  const text = formatPhaseText(
+    phase,
+    runView.toolNames,
+    runView.toolRequested,
+    runView.toolCompleted,
+  );
+  return `${text}（${elapsedSec}秒）`;
+}
+
+/** Ephemeral PR-2 delta envelope (seq 0: never a cursor, never stored). */
+function isEphemeralDelta(event: { seq: number; type: string }): boolean {
+  return (
+    event.seq === 0 ||
+    event.type === "model.reasoning.delta" ||
+    event.type === "model.usage" ||
+    event.type === "answer.draft.delta"
+  );
+}
+
+/**
+ * Apply one ephemeral delta to memory-only thinking state. Never touches
+ * the durable cursor, never persists, never sends anything back.
+ * `answer.draft.delta` is PR-4 scope (provisional drafts): ignored here.
+ */
+function applyEphemeralDelta(
+  runId: string,
+  event: { type: string; payload: unknown },
+): void {
+  if (activeRunId !== runId || runView.visible !== "generating") {
+    return;
+  }
+  if (event.type === "model.reasoning.delta") {
+    const payload =
+      typeof event.payload === "object" && event.payload !== null
+        ? (event.payload as { text?: unknown }).text
+        : null;
+    const hadText = thinking.text.length > 0;
+    thinking = appendThinkingText(thinking, payload);
+    if (!hadText && thinking.text.length > 0) {
+      // llama.cpp-style: expanded while streaming; the user toggle wins
+      // afterwards and the answer auto-collapses the block.
+      showThinking = true;
+      thinkingCollapsed = false;
+    }
+    return;
+  }
+  if (event.type === "model.usage") {
+    thinking = applyThinkingUsage(thinking, event.payload);
+  }
 }
 
 // --- history ---
@@ -685,6 +792,7 @@ function closeStream(): void {
 
 function finishActiveRun(): void {
   closeStream();
+  stopElapsedTimer();
   activeRunId = null;
   activeTurnId = null;
 }
@@ -694,6 +802,13 @@ function subscribe(runId: string): void {
   closeStream();
   activeRunId = runId;
   retryTurnId = null;
+  // Ephemeral thinking state is memory-only: every (re)subscribe starts
+  // fresh (a reload loses the text by construction; only durable events
+  // rebuild the phase line).
+  thinking = { ...EMPTY_THINKING };
+  thinkingCollapsed = false;
+  showThinking = false;
+  startElapsedTimer();
   if (seededRunId === runId) {
     // Boot-seeded pre-subscription view (e.g. the cancel_requested stop
     // notice): preserved across the stream open; the real events stay
@@ -807,6 +922,13 @@ function applySerialized(
   runId: string,
   event: { seq: number; type: string; payload: unknown },
 ): void {
+  // Ephemeral deltas bypass the durable reducer entirely: no cursor, no
+  // persistence, no catch-up. Deltas arriving after the terminal stay
+  // dropped (the validated answer is authoritative).
+  if (isEphemeralDelta(event)) {
+    applyEphemeralDelta(runId, event);
+    return;
+  }
   const absorbed = runChain.catch(() => {});
   const link = absorbed.then(async () => {
     try {
@@ -945,6 +1067,8 @@ async function pollFallback(runId: string): Promise<void> {
 
 function renderRunView(runId: string): void {
   if (runView.visible === "answered") {
+    // The answer auto-collapses the Thinking block (user can re-open).
+    thinkingCollapsed = true;
     if (renderedAnswers.has(runId)) {
       finishActiveRun();
       if (!terminalHydrated.has(runId)) {
@@ -1813,6 +1937,7 @@ onMount(() => {
   })();
   return () => {
     closeStream();
+    stopElapsedTimer();
     for (const timer of watchTimers.values()) window.clearInterval(timer);
     watchTimers.clear();
     onAuthExpired(null);
@@ -2011,6 +2136,44 @@ function evidenceForTurn(turn: Turn): {
       >
         もう一度生成
       </button>
+    {/if}
+    {#if activeRunId !== null && runView.visible === "generating"}
+      {@const statusText = runStatusText()}
+      {#if statusText.length > 0}
+        <section data-run-progress="true" aria-label="実行状況">
+          <p id="run-status" data-run-status="true" aria-live="polite">
+            {statusText}
+          </p>
+        </section>
+      {/if}
+    {/if}
+    {#if showThinking}
+      {@const statsLine = formatThinkingStats(thinking.usage)}
+      <section data-thinking="true" aria-label="考え中">
+        <button
+          type="button"
+          data-thinking-toggle="true"
+          aria-expanded={!thinkingCollapsed}
+          onclick={() => {
+            thinkingCollapsed = !thinkingCollapsed;
+          }}
+        >
+          {thinkingCollapsed ? "考え中（詳細を開く）" : "考え中…（詳細を閉じる）"}
+        </button>
+        {#if !thinkingCollapsed}
+          <pre data-thinking-text="true">{thinkingDisplayText(thinking)}</pre>
+        {/if}
+        {#if statsLine !== null}
+          <p data-run-stats="true">{statsLine}</p>
+        {/if}
+      </section>
+    {:else}
+      {@const statsOnly = formatThinkingStats(thinking.usage)}
+      {#if statsOnly !== null}
+        <section data-thinking-stats="true" aria-label="実行統計">
+          <p data-run-stats="true">{statsOnly}</p>
+        </section>
+      {/if}
     {/if}
     {#if liveVisible}
       {@const runId = [...renderedAnswers].pop()}
