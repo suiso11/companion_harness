@@ -9,6 +9,12 @@ import {
   randomUuid,
 } from "./lib/api.js";
 import {
+  appendDraftText,
+  DRAFT_LABEL,
+  type DraftState,
+  draftDisplayText,
+} from "./lib/draft.js";
+import {
   ACTION_PROGRESS_TEXT,
   actionCardModel,
   actionDecisionIntentText,
@@ -33,12 +39,6 @@ import {
   type ThinkingState,
   thinkingDisplayText,
 } from "./lib/thinking.js";
-import {
-  appendDraftText,
-  DRAFT_LABEL,
-  draftDisplayText,
-  type DraftState,
-} from "./lib/draft.js";
 
 // PR-1 Svelte chat page (Q1/Q4/Q7/Q8/Q10, PR-1 scope): dark-only, Japanese,
 // same APIs/SSE events + JSON fallback polling as the vanilla client.
