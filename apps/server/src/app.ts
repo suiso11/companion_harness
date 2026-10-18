@@ -390,9 +390,14 @@ function allowedRemoteHosts(config: ServerConfig): Set<string> {
 
 /**
  * Exact-match allowlist for one request: the configured remote origins
- * plus the current loopback same-origin (`http://<host header>`). The
- * Host header value (with port) is used verbatim so a spoofed Host can
- * never widen the loopback entry.
+ * plus the loopback same-origin (`http://<host header>`). The loopback
+ * exception applies only when the Host is a loopback name
+ * (127.0.0.1/localhost, optional port): an allowlisted remote Host with
+ * Origin `http://<same-host>` is rejected (remote origins must be
+ * explicit https allowlist entries). The Host header value (with port)
+ * is used verbatim so a spoofed Host can never widen the entry.
+ * Disabled remote keeps the historical behavior: Host is loopback-only
+ * there, so the loopback gate is a no-op (byte-identical decisions).
  */
 function originAllowedForRequest(c: Context, config: ServerConfig): boolean {
   const origin = c.req.header("origin");
@@ -401,7 +406,10 @@ function originAllowedForRequest(c: Context, config: ServerConfig): boolean {
   }
   const host = c.req.header("host") ?? "";
   if (origin === `http://${host}`) {
-    return true;
+    const hostName = hostNameOfHeader(host);
+    if (hostName !== null && isLoopbackHostName(hostName)) {
+      return true;
+    }
   }
   const remote = remoteConfigOf(config);
   if (remote === null) {
