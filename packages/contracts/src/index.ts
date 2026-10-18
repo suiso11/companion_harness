@@ -347,11 +347,6 @@ export {
   CalendarSearchToolInputSchema,
   CalendarSearchToolOutputSchema,
 } from "./calendar.js";
-export {
-  daysInStrictMonth,
-  isStrictCalendarInstant,
-  parseStrictCalendarInstantMs,
-} from "./instant.js";
 export type {
   LatestRunEvent,
   LatestRunEventType,
@@ -516,6 +511,11 @@ export {
   UUID_V4_REGEX,
   UuidSchema,
 } from "./ids.js";
+export {
+  daysInStrictMonth,
+  isStrictCalendarInstant,
+  parseStrictCalendarInstantMs,
+} from "./instant.js";
 export type {
   MemoryDetailResponse,
   MemoryErrorCode,

@@ -1,11 +1,7 @@
 import type { CallResult, McpErrorCode } from "@companion/connector-mcp";
+import { parseStrictCalendarInstantMs } from "@companion/contracts";
 import { z } from "zod";
-import {
-  canonicalUtcIso,
-  isIanaTimeZone,
-  parseDateOnly,
-  parseTimedInstant,
-} from "./time.js";
+import { canonicalUtcIso, isIanaTimeZone, parseDateOnly } from "./time.js";
 
 /**
  * Consumer-owned decoder for the candidate readonly fork surface
@@ -36,7 +32,7 @@ const timedSchema = z
   .string()
   .min(1)
   .max(128)
-  .refine((value) => parseTimedInstant(value) !== undefined, {
+  .refine((value) => parseStrictCalendarInstantMs(value) !== undefined, {
     message: "datetime must be RFC3339 with an explicit offset",
   });
 
@@ -211,8 +207,8 @@ function resolveEndpoints(
   if (start.dateTime === undefined || end.dateTime === undefined) {
     throw new Error("mixed endpoint kinds");
   }
-  const startMs = parseTimedInstant(start.dateTime);
-  const endMs = parseTimedInstant(end.dateTime);
+  const startMs = parseStrictCalendarInstantMs(start.dateTime);
+  const endMs = parseStrictCalendarInstantMs(end.dateTime);
   if (startMs === undefined || endMs === undefined || !(endMs > startMs)) {
     throw new Error("invalid timed range");
   }
@@ -267,7 +263,7 @@ async function normalizeEventStrict(
   // so a malformed timestamp can never become sourceUpdatedAt.
   let sourceUpdatedAt: string | undefined;
   if (parsed.updated !== undefined) {
-    const updatedMs = parseTimedInstant(parsed.updated);
+    const updatedMs = parseStrictCalendarInstantMs(parsed.updated);
     if (updatedMs === undefined) throw new Error("invalid updated");
     sourceUpdatedAt = canonicalUtcIso(updatedMs);
   }

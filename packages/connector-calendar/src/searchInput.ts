@@ -1,23 +1,27 @@
+import { parseStrictCalendarInstantMs } from "@companion/contracts";
 import { z } from "zod";
-import { isIanaTimeZone, parseTimedInstant } from "./time.js";
+import { isIanaTimeZone } from "./time.js";
 
 /**
  * `calendar.search` exact input contract (§17.4, agreed):
  * query? / start (ISO, req) / end (ISO, req) / limit (default 10, max 20) /
  * cursor? (opaque). start<end, elapsed range <= 90d, one page per call.
  *
- * Start/end are validated with the shared explicit-offset parser so impossible
- * calendar dates, missing offsets and whole-string rollovers are rejected
- * without relying on `Date.parse`. Fractional seconds remain part of the
- * agreed ISO contract (never silently narrowed to the candidate's whole-second
- * regex).
+ * Start/end are validated with the SHARED strict explicit-offset instant
+ * contract (`parseStrictCalendarInstantMs` in `@companion/contracts` B2/
+ * C10-08) so impossible calendar dates, missing offsets and whole-string
+ * rollovers are rejected without relying on `Date.parse`. Millisecond-
+ * expressible fractional seconds remain part of the agreed ISO contract;
+ * genuine sub-millisecond precision (`.1234`…) is REJECTED, never a silent
+ * truncate. The former whole-second-readonly vs fractional-consumer
+ * divergence (C10-08 gap) is closed by sharing one grammar.
  */
 const isoInstant = (field: "start" | "end") =>
   z
     .string()
     .min(1)
     .max(128)
-    .refine((value) => parseTimedInstant(value) !== undefined, {
+    .refine((value) => parseStrictCalendarInstantMs(value) !== undefined, {
       message: `${field} must be an RFC3339 datetime with an explicit offset`,
     });
 
@@ -31,8 +35,8 @@ export const calendarSearchInputSchema = z
   })
   .strict()
   .superRefine((v, ctx) => {
-    const start = parseTimedInstant(v.start);
-    const end = parseTimedInstant(v.end);
+    const start = parseStrictCalendarInstantMs(v.start);
+    const end = parseStrictCalendarInstantMs(v.end);
     if (start === undefined || end === undefined) return;
     if (!(start < end)) {
       ctx.addIssue({

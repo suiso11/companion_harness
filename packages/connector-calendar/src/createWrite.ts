@@ -44,8 +44,8 @@
 //     an `unknown` insert response is NEVER read-to-auto-resolve or retried
 //     by any caller — it finishes plain `unknown`)
 
+import { isStrictCalendarInstant } from "@companion/contracts";
 import { z } from "zod";
-import { isStrictCalendarInstant } from "./rescheduleWrite.js";
 
 /** Dedicated create MCP identity (never the readonly/reschedule entrypoint). */
 export const CREATE_WRITE_MCP_NAME = "google-calendar-create" as const;

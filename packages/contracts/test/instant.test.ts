@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { isStrictCalendarInstant, parseStrictCalendarInstantMs } from "../src/instant.js";
+import {
+  isStrictCalendarInstant,
+  parseStrictCalendarInstantMs,
+} from "../src/instant.js";
 
 /**
  * Shared strict instant contract (B2/C10-08): one grammar for every

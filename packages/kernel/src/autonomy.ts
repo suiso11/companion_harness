@@ -63,6 +63,7 @@ import {
   type ConversationProposalTarget,
   ConversationProposalViewSchema,
   IDEMPOTENCY_SCOPE_AUTONOMY_CONTROL,
+  isStrictCalendarInstant,
   type ProvenanceSource,
   type PurposeKind,
   PurposeViewSchema,
@@ -72,7 +73,6 @@ import {
   TaskViewSchema,
 } from "@companion/contracts";
 import type Database from "better-sqlite3";
-import { parseStrictInstantMs } from "./action_strategy.js";
 import {
   generateId,
   IDEMPOTENCY_OPERATIONS,
@@ -332,27 +332,20 @@ function enqueueShadowPolicyChangeInTx(
 }
 
 /* ------------------------------------------------------------------ */
-/* Strict deadline grammar (reuses the existing kernel helper).          */
+/* Strict deadline grammar (the SHARED contracts instant contract).     */
 /*                                                                     */
-/* Task deadlines + purpose applicability windows share the kernel's    */
-/* existing strict explicit-offset RFC3339 grammar (`parseStrictInstant  */
-/* Ms` in `action_strategy.ts`, owned by the kernel so the               */
-/* dependency-inverted direction stays intact). The autonomy layer adds */
-/* only its own 128-char cap and genuine sub-millisecond rejection      */
-/* (fractions with nonzero digits past millis reject, never truncate).  */
+/* Task deadlines + purpose applicability windows use the SAME strict   */
+/* explicit-offset RFC3339 grammar as every other inbound instant path  */
+/* (`isStrictCalendarInstant` in `@companion/contracts`, B2/C10-08):    */
+/* whole seconds + ms-expressible fractions accept, genuine sub-        */
+/* millisecond precision rejects (never truncates), 128-char cap, no    */
+/* `Date.parse` rollover acceptance. The former local SUBSECOND_FRACTION*/
+/* copy is deleted; the kernel-deadline name stays exported.           */
 /* ------------------------------------------------------------------ */
-
-const SUBSECOND_FRACTION = /T\d{2}:\d{2}:\d{2}\.(\d+)/;
 
 /** True for a strict explicit-offset RFC3339 instant (never inferred). */
 export function isStrictAutonomyDeadline(value: string): boolean {
-  if (value.length === 0 || value.length > 128) return false;
-  const fraction = SUBSECOND_FRACTION.exec(value);
-  if (fraction?.[1] !== undefined) {
-    const digits = fraction[1] as string;
-    if (digits.length > 3 && /[^0]/.test(digits.slice(3))) return false;
-  }
-  return parseStrictInstantMs(value) !== undefined;
+  return isStrictCalendarInstant(value);
 }
 
 /**

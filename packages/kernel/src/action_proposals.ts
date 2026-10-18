@@ -61,7 +61,12 @@ import type { z } from "zod";
 /** Payload type mirroring the C16 strictObject schema (contracts export). */
 type ActionProposedPayload = z.infer<typeof ActionProposedPayloadSchema>;
 
-import { type SnapshotBody, SnapshotBodySchema } from "@companion/contracts";
+import {
+  isStrictCalendarInstant as isStrictSharedInstant,
+  parseStrictCalendarInstantMs as parseStrictSharedInstantMs,
+  type SnapshotBody,
+  SnapshotBodySchema,
+} from "@companion/contracts";
 import { canonicalJsonString, generateId, sha256Hex } from "./canonical.js";
 import {
   RepositoryNotFoundError,
@@ -206,22 +211,15 @@ interface TargetRow {
 const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}(?![T\s+/])/;
 
 /**
- * Millisecond boundary, mirrored EXACTLY with the connector write contract
- * (`isStrictCalendarInstant` in
- * `packages/connector-calendar/src/rescheduleWrite.ts`): genuine
- * sub-millisecond precision (a nonzero digit past the millisecond position,
- * e.g. `.1234`) can never be staged — let alone approved — so the
- * ms-truncating read-back comparison can never verify a boundary the
- * approval did not preserve. Millisecond-expressible fractions (`.12`,
- * `.123`, `.123000`) stage normally: an all-zero tail names the same ms.
+ * Instant boundary precision is NOW the SHARED contracts contract
+ * (`isStrictCalendarInstant` / `parseStrictCalendarInstantMs` in
+ * `@companion/contracts`, B2/C10-08): genuine sub-millisecond precision
+ * (a nonzero digit past the millisecond position, e.g. `.1234`) can never
+ * be staged — let alone approved — so the ms-exact read-back comparison can
+ * never verify a boundary the approval did not preserve. Millisecond-
+ * expressible fractions (`.12`, `.123`, `.123000`) stage normally: an
+ * all-zero tail names the same ms.
  */
-const SUBSECOND_FRACTION_PATTERN = /T\d{2}:\d{2}:\d{2}\.(\d+)/;
-function hasSubMillisecondPrecision(value: string): boolean {
-  const match = SUBSECOND_FRACTION_PATTERN.exec(value);
-  if (match === null) return false;
-  const digits = match[1] as string;
-  return digits.length > 3 && /[^0]/.test(digits.slice(3));
-}
 
 /** Classify a proposed boundary string: all-day (`date`) or timed (`instant`). */
 function boundaryClass(value: string): "date" | "instant" {
@@ -234,9 +232,13 @@ function boundaryClass(value: string): "date" | "instant" {
 /** Parse a boundary into comparable ms. All-day: local midnight semantics. */
 function parseBoundaryMs(value: string, kind: "date" | "instant"): number {
   // Date-only strings keep whole-day semantics: compare as UTC midnight.
+  // Instant boundaries go through the SHARED strict parser (never a loose
+  // `Date.parse`, which would accept host-zone-naive / rolled-over values).
   const ms =
-    kind === "date" ? Date.parse(`${value}T00:00:00Z`) : Date.parse(value);
-  if (Number.isNaN(ms)) {
+    kind === "date"
+      ? Date.parse(`${value}T00:00:00Z`)
+      : parseStrictSharedInstantMs(value);
+  if (ms === undefined || Number.isNaN(ms)) {
     throw new RepositoryValidationError(
       "start/end must be a valid instant or date-only range boundary",
     );
@@ -259,11 +261,12 @@ function validateRange(start: string, end: string): void {
   }
   if (startClass === "instant") {
     // Reject BEFORE staging (hence before approval and before any write):
-    // see `hasSubMillisecondPrecision` above.
+    // instants must satisfy the SHARED strict contract (explicit offset,
+    // real calendar, no genuine sub-ms precision — see above).
     for (const value of [start, end] as const) {
-      if (hasSubMillisecondPrecision(value)) {
+      if (!isStrictSharedInstant(value)) {
         throw new RepositoryValidationError(
-          "start/end must not carry sub-millisecond precision",
+          "instant boundaries must be strict RFC3339 instants with an explicit offset and no sub-millisecond precision",
         );
       }
     }
@@ -308,26 +311,15 @@ function validateCreateTitle(title: string): void {
 }
 
 const CREATE_OFFSET_PATTERN = /(Z|[+-]\d{2}:\d{2})$/;
-const CREATE_INSTANT_PARTS =
-  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?(Z|[+-]\d{2}:\d{2})$/;
-
-function daysInCreateMonth(year: number, month: number): number {
-  if (month === 2) {
-    const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
-    return leap ? 29 : 28;
-  }
-  if (month === 4 || month === 6 || month === 9 || month === 11) {
-    return 30;
-  }
-  return 31;
-}
 
 /**
  * M6 create timed-only range check: BOTH boundaries must be full RFC3339
- * instants with an EXPLICIT offset (trailing `Z` or `±HH:MM`) on a REAL
- * calendar (no `Date.parse` rollover acceptance), millisecond-representable,
- * without sub-millisecond precision, and start < end. Date-only (all-day)
- * boundaries are refused: creation is normal TIMED only.
+ * instants under the SHARED strict contract (`isStrictCalendarInstant` /
+ * `parseStrictCalendarInstantMs` in `@companion/contracts`, B2/C10-08) —
+ * explicit `Z`/`±HH:MM` offset, REAL calendar (no `Date.parse` rollover
+ * acceptance), whole seconds + millisecond-expressible fractions accepted,
+ * genuine sub-millisecond precision REJECTED, start < end. Date-only
+ * (all-day) boundaries are refused: creation is normal TIMED only.
  */
 function validateCreateRange(start: string, end: string): void {
   for (const value of [start, end] as const) {
@@ -341,51 +333,20 @@ function validateCreateRange(start: string, end: string): void {
         "start/end must be 1..128 character instants",
       );
     }
-    if (hasSubMillisecondPrecision(value)) {
-      throw new RepositoryValidationError(
-        "start/end must not carry sub-millisecond precision",
-      );
-    }
     if (!CREATE_OFFSET_PATTERN.test(value)) {
       throw new RepositoryValidationError(
         "start/end must carry an explicit UTC offset",
       );
     }
-    const parts = CREATE_INSTANT_PARTS.exec(value);
-    if (parts === null) {
+    if (!isStrictSharedInstant(value)) {
       throw new RepositoryValidationError(
-        "start/end must be RFC3339 instants with an explicit offset",
-      );
-    }
-    const year = Number(parts[1]);
-    const month = Number(parts[2]);
-    const day = Number(parts[3]);
-    const hour = Number(parts[4]);
-    const minute = Number(parts[5]);
-    const second = parts[6] === undefined ? 0 : Number(parts[6]);
-    if (
-      month < 1 ||
-      month > 12 ||
-      day < 1 ||
-      day > daysInCreateMonth(year, month) ||
-      hour > 23 ||
-      minute > 59 ||
-      second > 60
-    ) {
-      throw new RepositoryValidationError(
-        "start/end must name a real calendar instant",
-      );
-    }
-    const ms = Date.parse(value);
-    if (Number.isNaN(ms) || !Number.isFinite(ms)) {
-      throw new RepositoryValidationError(
-        "start/end must be millisecond-representable instants",
+        "start/end must be RFC3339 instants with an explicit offset naming a real calendar instant without sub-millisecond precision",
       );
     }
   }
-  const startMs = Date.parse(start);
-  const endMs = Date.parse(end);
-  if (!(endMs > startMs)) {
+  const startMs = parseStrictSharedInstantMs(start);
+  const endMs = parseStrictSharedInstantMs(end);
+  if (startMs === undefined || endMs === undefined || !(endMs > startMs)) {
     throw new RepositoryValidationError("start must be before end");
   }
 }

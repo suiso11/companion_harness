@@ -196,15 +196,31 @@ describe("calendar.search input (§17.4 exact)", () => {
     ).not.toThrow();
   });
 
-  it("accepts a year-0 leap-day range and a long-fraction short range", () => {
+  it("accepts a year-0 leap-day range and rejects genuine sub-ms fractions (shared contract)", () => {
     const leapDay = calendarSearchInputSchema.parse({
       start: "0000-02-29T23:00:00Z",
       end: "0000-03-01T01:00:00Z",
     });
     expect(leapDay.start).toBe("0000-02-29T23:00:00Z");
+    // Shared strict-instant contract (B2/C10-08): a nonzero digit past the
+    // millisecond position is genuine sub-ms precision — REJECTED, never
+    // silently truncated to `.999` (the old truncating behavior is gone).
+    expect(() =>
+      calendarSearchInputSchema.parse({
+        start: "2026-09-10T09:00:00.1234Z",
+        end: "2026-09-10T09:00:01Z",
+      }),
+    ).toThrow();
     expect(() =>
       calendarSearchInputSchema.parse({
         start: "2026-09-10T09:00:00.999999999999999999Z",
+        end: "2026-09-10T09:00:01Z",
+      }),
+    ).toThrow();
+    // Millisecond-expressible fractions (same instants, trailing zeros) stay.
+    expect(() =>
+      calendarSearchInputSchema.parse({
+        start: "2026-09-10T09:00:00.123000Z",
         end: "2026-09-10T09:00:01Z",
       }),
     ).not.toThrow();
@@ -364,17 +380,20 @@ describe("normalizeEvent (retained nested candidate shape)", () => {
     expect(offset.start).toBe("0000-02-28T23:00:00.000Z");
   });
 
-  it("keeps a long fractional second inside its own second", async () => {
+  it("rejects a long genuine sub-ms fraction (shared contract) but keeps ms-expressible precision in its own second", async () => {
+    // Shared strict-instant contract (B2/C10-08): `.9999999…` names genuine
+    // sub-millisecond precision — REJECTED (`calendar_response_invalid`),
+    // never truncated to `.999` as before.
     const long = "2026-09-10T09:00:00.999999999999999999Z";
-    const out = await normalizeEvent(
-      timedEvent({
-        start: { dateTime: long },
-        end: { dateTime: "2026-09-10T09:00:01Z" },
-      }),
-      { connectorInstanceId: "cal-1" },
-    );
-    expect(out.start).toBe("2026-09-10T09:00:00.999Z");
-    expect(out.end).toBe("2026-09-10T09:00:01.000Z");
+    await expect(
+      normalizeEvent(
+        timedEvent({
+          start: { dateTime: long },
+          end: { dateTime: "2026-09-10T09:00:01Z" },
+        }),
+        { connectorInstanceId: "cal-1" },
+      ),
+    ).rejects.toThrow("calendar_response_invalid");
 
     const short = await normalizeEvent(
       timedEvent({
@@ -383,13 +402,15 @@ describe("normalizeEvent (retained nested candidate shape)", () => {
       }),
       { connectorInstanceId: "cal-1" },
     );
+    // Same instant, millisecond-expressible with a trailing-zero tail.
     const same = await normalizeEvent(
       timedEvent({
-        start: { dateTime: long },
+        start: { dateTime: "2026-09-10T09:00:00.999000Z" },
         end: { dateTime: "2026-09-10T10:00:00Z" },
       }),
       { connectorInstanceId: "cal-1" },
     );
+    expect(short.start).toBe("2026-09-10T09:00:00.999Z");
     expect(short.start).toBe(same.start);
     expect(short.sourceRevision).toBe(same.sourceRevision);
   });

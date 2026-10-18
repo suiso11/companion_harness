@@ -50,6 +50,7 @@ import {
   CalendarCreateToolInputSchema,
   CalendarRescheduleToolInputSchema,
   parseRunResult,
+  parseStrictCalendarInstantMs as parseStrictSharedInstantMs,
   UuidSchema,
 } from "@companion/contracts";
 import type Database from "better-sqlite3";
@@ -366,114 +367,30 @@ function normalizeInstant(value: string): string {
   return value.normalize("NFC");
 }
 
-// Strict RFC3339 instant grammar shared with the readonly normalization
-// (`packages/connector-calendar/src/time.ts` `parseTimedInstant` plus the
-// minute-precision form the dedicated write port accepts in
-// `rescheduleWrite.ts` `isStrictCalendarInstant`): explicit `Z`/`±HH:MM`
-// offset only, real calendar validation (leap years, month lengths,
-// component and offset bounds), NO `Date.parse` permissiveness (rollover
-// like `2023-02-30` -> March 2 must reject, never verify). The kernel owns
-// this copy so the dependency-inverted direction stays intact
-// (kernel never imports `@companion/connector-*`); the convention —
-// same instant, strict grammar, invalid fails closed — is defined once in
-// the connector and mirrored exactly here.
-const STRICT_INSTANT_SECONDS =
-  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
-const STRICT_INSTANT_MINUTES =
-  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(Z|[+-]\d{2}:\d{2})$/;
-
-function strictDaysInMonth(year: number, month: number): number {
-  if (month === 2) {
-    const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
-    return leap ? 29 : 28;
-  }
-  if (month === 4 || month === 6 || month === 9 || month === 11) return 30;
-  return 31;
-}
-
-/** Year-safe UTC epoch ms (`Date.UTC` maps years 0..99 to 1900..1999). */
-function strictUtcMs(
-  year: number,
-  month: number,
-  day: number,
-  hour: number,
-  minute: number,
-  second: number,
-  ms: number,
-): number {
-  if (year >= 100) {
-    return Date.UTC(year, month - 1, day, hour, minute, second, ms);
-  }
-  const fixed = new Date(0);
-  fixed.setUTCFullYear(year, month - 1, day);
-  fixed.setUTCHours(hour, minute, second, ms);
-  return fixed.getTime();
-}
+// The strict RFC3339 instant grammar is NOW the SHARED contracts module
+// (`parseStrictCalendarInstantMs` / `isStrictCalendarInstant` in
+// `@companion/contracts`, B2/C10-08): explicit `Z`/`±HH:MM` offset only,
+// real calendar validation (leap years, month lengths, component and offset
+// bounds), whole seconds + millisecond-expressible fractions accepted,
+// genuine sub-millisecond precision REJECTED (never silently truncated),
+// no `Date.parse` rollover acceptance (like `2023-02-30` -> March 2).
+// The former kernel-owned seconds/minutes regex copies are deleted: one
+// grammar, defined once in `@companion/contracts` (a downward dependency,
+// not `@companion/connector-*`), used identically by the read-back
+// comparison here, proposal staging, the connector's readonly/write ports,
+// and the autonomy deadline checks.
 
 /**
  * Strict explicit-offset RFC3339 instant to epoch ms, or `undefined`.
- * All-day DATE strings, offset-less strings and impossible calendar values
- * are all `undefined` (fail closed) — never parsed loosely.
+ * All-day DATE strings, offset-less strings, impossible calendar values
+ * and genuine sub-millisecond precision are all `undefined` (fail closed)
+ * — always the shared contracts grammar, never parsed loosely.
  *
- * Exported for reuse by the AV autonomy slice (task deadlines + purpose
- * applicability windows share this exact grammar; the autonomy layer adds
- * only its own length cap and genuine-sub-millisecond rejection). No
- * behavior change to the action strategy itself.
+ * Exported (unchanged name) for reuse by the AV autonomy slice (task
+ * deadlines + purpose applicability windows) and trial authority.
  */
 export function parseStrictInstantMs(value: string): number | undefined {
-  const seconds = STRICT_INSTANT_SECONDS.exec(value);
-  if (seconds !== null) {
-    const year = Number(seconds[1]);
-    const month = Number(seconds[2]);
-    const day = Number(seconds[3]);
-    const hour = Number(seconds[4]);
-    const minute = Number(seconds[5]);
-    const second = Number(seconds[6]);
-    if (month < 1 || month > 12) return undefined;
-    if (day < 1 || day > strictDaysInMonth(year, month)) return undefined;
-    if (hour > 23 || minute > 59 || second > 59) return undefined;
-    // Milliseconds are exactly the first three decimal digits,
-    // right-padded (float parsing could round up into the next second).
-    // Truncation here is exact: genuinely sub-millisecond instants are
-    // rejected at staging and by the write port, so a surviving approved
-    // fraction is always millisecond-expressible.
-    const fraction = seconds[7] as string | undefined;
-    const ms =
-      fraction !== undefined ? Number(fraction.slice(1, 4).padEnd(3, "0")) : 0;
-    const zone = seconds[8] as string;
-    let offsetMs = 0;
-    if (zone !== "Z") {
-      const sign = zone.startsWith("-") ? -1 : 1;
-      const offsetHour = Number(zone.slice(1, 3));
-      const offsetMinute = Number(zone.slice(4, 6));
-      if (offsetHour > 23 || offsetMinute > 59) return undefined;
-      offsetMs = sign * (offsetHour * 60 + offsetMinute) * 60_000;
-    }
-    const epochMs =
-      strictUtcMs(year, month, day, hour, minute, second, ms) - offsetMs;
-    return Number.isFinite(epochMs) ? epochMs : undefined;
-  }
-  const minutes = STRICT_INSTANT_MINUTES.exec(value);
-  if (minutes === null) return undefined;
-  const year = Number(minutes[1]);
-  const month = Number(minutes[2]);
-  const day = Number(minutes[3]);
-  const hour = Number(minutes[4]);
-  const minute = Number(minutes[5]);
-  if (month < 1 || month > 12) return undefined;
-  if (day < 1 || day > strictDaysInMonth(year, month)) return undefined;
-  if (hour > 23 || minute > 59) return undefined;
-  const zone = minutes[6] as string;
-  let offsetMs = 0;
-  if (zone !== "Z") {
-    const sign = zone.startsWith("-") ? -1 : 1;
-    const offsetHour = Number(zone.slice(1, 3));
-    const offsetMinute = Number(zone.slice(4, 6));
-    if (offsetHour > 23 || offsetMinute > 59) return undefined;
-    offsetMs = sign * (offsetHour * 60 + offsetMinute) * 60_000;
-  }
-  const epochMs = strictUtcMs(year, month, day, hour, minute, 0, 0) - offsetMs;
-  return Number.isFinite(epochMs) ? epochMs : undefined;
+  return parseStrictSharedInstantMs(value);
 }
 
 /**

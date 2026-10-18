@@ -34,8 +34,11 @@
 //     (the write may have been dispatched)               -> `unknown`
 //     (never a resend, never a cancel, never definite_failure on loss)
 
+import {
+  isStrictCalendarInstant,
+  parseStrictCalendarInstantMs,
+} from "@companion/contracts";
 import { z } from "zod";
-import { daysInMonth, parseTimedInstant } from "./time.js";
 
 /** Dedicated write MCP identity (never the readonly entrypoint). */
 export const RESCHEDULE_WRITE_MCP_NAME = "google-calendar-reschedule" as const;
@@ -60,56 +63,25 @@ export const RESCHEDULE_WRITE_WIRE_HASH =
 export const CALENDAR_RESCHEDULE_TOOL = "calendar.reschedule" as const;
 
 /**
- * Strict RFC3339 instant grammar with real calendar validation (matches the
- * fork `isStrictCalendarInstant` wire contract): `Date.parse` rollover
- * (`2023-02-30` -> March 2) is rejected instead of accepted. Month lengths,
- * leap years, time ranges, and numeric offsets are enforced.
- *
- * Reuses the existing strict helper (`parseTimedInstant` from `./time.js`,
- * explicit calendar validation, no `Date.parse` permissiveness) for the
- * seconds-precision form; the fork wire contract additionally allows
- * minute-precision (`THH:MM`), which is validated strictly here with the
- * same shared `daysInMonth` table.
+ * The strict RFC3339 instant wire contract is NOW the SHARED one
+ * (`isStrictCalendarInstant` / `parseStrictCalendarInstantMs` in
+ * `@companion/contracts`, B2/C10-08): explicit `Z`/`±HH:MM` offset only,
+ * real calendar validation (leap years, month lengths, component and
+ * offset bounds), whole seconds + millisecond-expressible fractions
+ * accepted, genuine sub-millisecond precision REJECTED (never truncated),
+ * `Date.parse` rollover rejected. The former local seconds-regex +
+ * minute-regex + sub-ms helpers are deleted (one grammar everywhere);
+ * the exported wire-contract name is re-exported unchanged for the
+ * dedicated write ports (`createWrite` ) and their tests.
  */
-const ISO_MINUTE_INSTANT_PATTERN =
-  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(Z|[+-](\d{2}):(\d{2}))$/;
+export { isStrictCalendarInstant } from "@companion/contracts";
 
-/**
- * True when an instant carries genuine sub-millisecond precision: a nonzero
- * digit past the millisecond position (e.g. `.1234`). Millisecond-expressible
- * fractions (`.12`, `.123`, `.123000`) are NOT sub-millisecond — a trailing
- * all-zero tail names the same ms. The write contract rejects genuine sub-ms
- * input so the ms-truncating instant parsers (`parseTimedInstant` here, the
- * kernel read-back comparison mirroring it) can never verify a boundary the
- * approval did not preserve.
- */
-const SUBSECOND_FRACTION_PATTERN = /T\d{2}:\d{2}:\d{2}\.(\d+)/;
-function hasSubMillisecondPrecision(value: string): boolean {
-  const match = SUBSECOND_FRACTION_PATTERN.exec(value);
-  if (match === null) return false;
-  const digits = match[1] as string;
-  return digits.length > 3 && /[^0]/.test(digits.slice(3));
-}
-
-export function isStrictCalendarInstant(value: string): boolean {
-  if (value.length === 0 || value.length > 128) return false;
-  if (hasSubMillisecondPrecision(value)) return false;
-  if (parseTimedInstant(value) !== undefined) return true;
-  const m = ISO_MINUTE_INSTANT_PATTERN.exec(value);
-  if (m === null) return false;
-  const year = Number(m[1]);
-  const month = Number(m[2]);
-  const day = Number(m[3]);
-  const hour = Number(m[4]);
-  const minute = Number(m[5]);
-  if (month < 1 || month > 12) return false;
-  if (day < 1 || day > daysInMonth(year, month)) return false;
-  if (hour > 23 || minute > 59) return false;
-  const offHour = Number(m[7]);
-  const offMinute = Number(m[8]);
-  if (m[6] !== "Z" && (offHour > 23 || offMinute > 59)) return false;
-  return !Number.isNaN(Date.parse(value));
-}
+/** Start/end ordering under the shared strict parser (never `Date.parse`). */
+const strictInstantOrdering = (start: string, end: string): boolean => {
+  const startMs = parseStrictCalendarInstantMs(start);
+  const endMs = parseStrictCalendarInstantMs(end);
+  return startMs !== undefined && endMs !== undefined && endMs > startMs;
+};
 
 /** Strict RFC3339-with-offset instant (explicit offset, no bare dates). */
 const IsoInstantSchema = z
@@ -132,9 +104,7 @@ export const RescheduleWriteMcpInputSchema = z
     expectedEtag: z.string().min(1).max(256),
   })
   .superRefine((value, ctx) => {
-    const startMs = Date.parse(value.start);
-    const endMs = Date.parse(value.end);
-    if (Number.isNaN(startMs) || Number.isNaN(endMs) || !(endMs > startMs)) {
+    if (!strictInstantOrdering(value.start, value.end)) {
       ctx.addIssue({
         code: "custom",
         message: "start must be before end",
