@@ -210,7 +210,13 @@ export interface MemoryHttpPort {
     sessionId: string;
     runId: string;
     citation: string;
-  }): { runId: string; citation: string; snippet: string } | null;
+  }): {
+    runId: string;
+    citation: string;
+    snippet: string;
+    revision: number | null;
+    kind: "user_fact" | "model_inference" | "summary" | null;
+  } | null;
   hashDrainingReplay(input: {
     kind: "record.correct" | "record.retire" | "record.reactivate";
     sessionId: string;
@@ -1989,6 +1995,8 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         runId: out.runId,
         citation: out.citation,
         snippet: out.snippet,
+        revision: out.revision,
+        kind: out.kind,
       });
       return c.json(body, 200);
     },

@@ -1737,6 +1737,12 @@ async function recallMemoryForRun(args: {
         scope,
         citation,
         snippet: snippet.snippet,
+        // I04: pin the delivered provenance at exposure time so a later
+        // record correction (new revision) never rewrites this snapshot.
+        ...(snippet.revision !== undefined
+          ? { revision: snippet.revision }
+          : {}),
+        ...(snippet.kind !== undefined ? { kind: snippet.kind } : {}),
       });
     } catch {
       continue;

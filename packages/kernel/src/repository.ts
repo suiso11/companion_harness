@@ -566,6 +566,9 @@ export interface FailMemoryJobOptions {
   now?: number;
 }
 
+/** Additive recall-item provenance kind (I04; mirrors AgentMemorySnippet). */
+export type MemoryRecallItemKind = "user_fact" | "model_inference" | "summary";
+
 export interface MemoryExposureInput {
   recallId: string;
   recordId: string;
@@ -574,6 +577,10 @@ export interface MemoryExposureInput {
   scope: string;
   citation: string;
   snippet: string;
+  /** Record revision delivered at recall time (I04); undefined = unknown. */
+  revision?: number;
+  /** Provenance kind delivered at recall time (I04); undefined = unknown. */
+  kind?: MemoryRecallItemKind;
 }
 
 export interface MemoryExposureRow {
@@ -584,6 +591,10 @@ export interface MemoryExposureRow {
   scope: string;
   citation: string;
   snippet: string;
+  /** Delivered revision, or null when unknown/pre-I04 (immutable after insert). */
+  revision: number | null;
+  /** Delivered provenance kind, or null when unknown/pre-I04. */
+  kind: MemoryRecallItemKind | null;
   createdAt: number;
 }
 
@@ -603,6 +614,8 @@ export interface MemoryGrantRow {
   recallId: string;
   sessionId: string;
   scope: string;
+  /** Revision pinned from the same-run exposure at grant creation (I04). */
+  revision: number | null;
   createdAt: number;
 }
 
@@ -3982,6 +3995,40 @@ export function createKernelRepository(
     return value;
   }
 
+  /** Closed recall-item provenance kind validation (I04; additive). */
+  function parseMemoryRecallItemKind(
+    value: unknown,
+  ): MemoryRecallItemKind | undefined {
+    if (value === undefined) {
+      return undefined;
+    }
+    if (
+      value === "user_fact" ||
+      value === "model_inference" ||
+      value === "summary"
+    ) {
+      return value;
+    }
+    throw new RepositoryValidationError("memory kind is invalid");
+  }
+
+  /** Positive safe-integer revision validation (I04; additive). */
+  function parseMemoryRevision(value: unknown): number | undefined {
+    if (value === undefined) {
+      return undefined;
+    }
+    if (
+      typeof value === "number" &&
+      Number.isSafeInteger(value) &&
+      value >= 1
+    ) {
+      return value;
+    }
+    throw new RepositoryValidationError(
+      "memory revision must be a positive safe integer",
+    );
+  }
+
   function requireMemoryKind(value: unknown): MemoryJobKind {
     if (
       value !== "event.append" &&
@@ -4171,7 +4218,9 @@ export function createKernelRepository(
   /**
    * Immutable recall-exposure snapshot: one row per actually exposed
    * (recallId, recordId). INSERT OR IGNORE keeps replays idempotent and
-   * never updates an existing snapshot row.
+   * never updates an existing snapshot row. I04: the delivered revision
+   * and provenance kind are pinned here at exposure time (additive,
+   * undefined = unknown); rows are immutable after creation.
    */
   function recordMemoryExposure(
     exposure: MemoryExposureInput,
@@ -4183,6 +4232,8 @@ export function createKernelRepository(
     const runId = requireId(exposure.runId, "runId");
     const scope = requireMemoryScope(exposure.scope);
     const citation = requireMemoryCitation(exposure.citation);
+    const revision = parseMemoryRevision(exposure.revision);
+    const kind = parseMemoryRecallItemKind(exposure.kind);
     if (
       typeof exposure.snippet !== "string" ||
       exposure.snippet.length < 1 ||
@@ -4192,7 +4243,7 @@ export function createKernelRepository(
     }
     const now = nowMs(options.now);
     db.prepare(
-      "INSERT OR IGNORE INTO memory_exposures (recall_id, record_id, session_id, run_id, scope, citation, snippet, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT OR IGNORE INTO memory_exposures (recall_id, record_id, session_id, run_id, scope, citation, snippet, revision, kind, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     ).run(
       recallId,
       recordId,
@@ -4201,6 +4252,8 @@ export function createKernelRepository(
       scope,
       citation,
       exposure.snippet,
+      revision === undefined ? null : revision,
+      kind === undefined ? null : kind,
       now,
     );
   }
@@ -4208,7 +4261,7 @@ export function createKernelRepository(
   function listMemoryExposures(runId: string): MemoryExposureRow[] {
     const rows = db
       .prepare(
-        "SELECT recall_id, record_id, session_id, run_id, scope, citation, snippet, created_at FROM memory_exposures WHERE run_id = ? ORDER BY citation ASC, record_id ASC",
+        "SELECT recall_id, record_id, session_id, run_id, scope, citation, snippet, revision, kind, created_at FROM memory_exposures WHERE run_id = ? ORDER BY citation ASC, record_id ASC",
       )
       .all(requireId(runId, "runId")) as Array<{
       recall_id: string;
@@ -4218,6 +4271,8 @@ export function createKernelRepository(
       scope: string;
       citation: string;
       snippet: string;
+      revision: number | null;
+      kind: string | null;
       created_at: number;
     }>;
     return rows.map((row) => ({
@@ -4228,6 +4283,13 @@ export function createKernelRepository(
       scope: row.scope,
       citation: row.citation,
       snippet: row.snippet,
+      revision: row.revision,
+      kind:
+        row.kind === "user_fact" ||
+        row.kind === "model_inference" ||
+        row.kind === "summary"
+          ? row.kind
+          : null,
       createdAt: row.created_at,
     }));
   }
@@ -4260,7 +4322,10 @@ export function createKernelRepository(
    * call this (the service parses citation arrays, never prose): mere
    * recall exposure or textual mentions never insert here. Scope must
    * equal the exposure scope (cross-scope grants rejected). INSERT OR
-   * IGNORE keeps completion replays idempotent.
+   * IGNORE keeps completion replays idempotent. I04: the grant's revision
+   * is COPIED from the same-run exposure (citation pinned to the
+   * delivered revision); grants are immutable after creation — no UPDATE
+   * path ever rewrites this column.
    */
   function grantMemoryCitation(
     grant: MemoryGrantInput,
@@ -4276,10 +4341,10 @@ export function createKernelRepository(
     withImmediate(db, () => {
       const exposure = db
         .prepare(
-          "SELECT scope FROM memory_exposures WHERE recall_id = ? AND record_id = ? AND run_id = ? AND citation = ?",
+          "SELECT scope, revision FROM memory_exposures WHERE recall_id = ? AND record_id = ? AND run_id = ? AND citation = ?",
         )
         .get(recallId, recordId, runId, citation) as
-        | { scope: string }
+        | { scope: string; revision: number | null }
         | undefined;
       if (exposure === undefined) {
         throw new RepositoryValidationError(
@@ -4292,15 +4357,24 @@ export function createKernelRepository(
         );
       }
       db.prepare(
-        "INSERT OR IGNORE INTO memory_grants (run_id, citation, record_id, recall_id, session_id, scope, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      ).run(runId, citation, recordId, recallId, sessionId, scope, now);
+        "INSERT OR IGNORE INTO memory_grants (run_id, citation, record_id, recall_id, session_id, scope, revision, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run(
+        runId,
+        citation,
+        recordId,
+        recallId,
+        sessionId,
+        scope,
+        exposure.revision,
+        now,
+      );
     });
   }
 
   function listMemoryGrants(runId: string): MemoryGrantRow[] {
     const rows = db
       .prepare(
-        "SELECT run_id, citation, record_id, recall_id, session_id, scope, created_at FROM memory_grants WHERE run_id = ? ORDER BY citation ASC",
+        "SELECT run_id, citation, record_id, recall_id, session_id, scope, revision, created_at FROM memory_grants WHERE run_id = ? ORDER BY citation ASC",
       )
       .all(requireId(runId, "runId")) as Array<{
       run_id: string;
@@ -4309,6 +4383,7 @@ export function createKernelRepository(
       recall_id: string;
       session_id: string;
       scope: string;
+      revision: number | null;
       created_at: number;
     }>;
     return rows.map((row) => ({
@@ -4318,6 +4393,7 @@ export function createKernelRepository(
       recallId: row.recall_id,
       sessionId: row.session_id,
       scope: row.scope,
+      revision: row.revision,
       createdAt: row.created_at,
     }));
   }

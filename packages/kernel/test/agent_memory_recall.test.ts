@@ -205,6 +205,60 @@ describe("agent memory recall projection", () => {
     }
   });
 
+  it("pins the recalled revision/kind onto the exposure and the grant (I04)", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const gateway: ModelGateway = {
+        provider: "ollama",
+        capabilities: { toolCalling: true },
+        baseUrl: "http://127.0.0.1:11434",
+        chatUrl: "http://127.0.0.1:11434/api/chat",
+        chat: async () => answerResult(["m1"]),
+      };
+      const broker = createToolBroker({
+        db: handle.raw,
+        repo,
+        registrations: [],
+      });
+      const strategy = createAgentStrategy({
+        db: handle.raw,
+        repo,
+        broker,
+        gateway,
+        model: "test-model",
+        memory: {
+          scope: SCOPE,
+          recall: async () => [
+            {
+              recordId: "record-1",
+              recallId: "recall-1",
+              snippet: "delivered text",
+              kind: "user_fact" as const,
+              revision: 7,
+            },
+          ],
+        },
+      });
+      const { runId } = newRunningTurn(repo, T0);
+      await strategy(ctxFor(repo, runId));
+      // The exposure snapshot pins the DELIVERED provenance.
+      const exposures = repo.listMemoryExposures(runId);
+      expect(exposures).toHaveLength(1);
+      expect(exposures[0]).toMatchObject({
+        citation: "m1",
+        recordId: "record-1",
+        snippet: "delivered text",
+        revision: 7,
+        kind: "user_fact",
+      });
+      // Grants without an accepted answer never exist; the citation-only
+      // exposure path above never mints one (used vs delivered split).
+      expect(repo.listMemoryGrants(runId)).toHaveLength(0);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
   it("aborts a hanging recall on the wall deadline and never calls the model", async () => {
     const { handle, repo } = await setup();
     try {

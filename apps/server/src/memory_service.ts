@@ -258,13 +258,20 @@ export interface MemoryService {
   /**
    * Per-run recall exposure for answer citations (`mN`): the exact snippet
    * the model saw during ONE run, or null when the citation is not bound
-   * to that run's exposure in this session.
+   * to that run's exposure in this session. I04: the pinned revision and
+   * provenance kind are included (null = unknown/pre-I04).
    */
   getMemoryRecallExposure(input: {
     sessionId: string;
     runId: string;
     citation: string;
-  }): { runId: string; citation: string; snippet: string } | null;
+  }): {
+    runId: string;
+    citation: string;
+    snippet: string;
+    revision: number | null;
+    kind: "user_fact" | "model_inference" | "summary" | null;
+  } | null;
   /**
    * Draining replay identity: recompute the immutable request hash for an
    * incoming same-key mutation without staging, or null when unverifiable.
@@ -2771,7 +2778,13 @@ export function createMemoryService(
     sessionId: string;
     runId: string;
     citation: string;
-  }): { runId: string; citation: string; snippet: string } | null {
+  }): {
+    runId: string;
+    citation: string;
+    snippet: string;
+    revision: number | null;
+    kind: "user_fact" | "model_inference" | "summary" | null;
+  } | null {
     if (!/^m[1-9][0-9]*$/.test(input.citation)) {
       return null;
     }
@@ -2793,6 +2806,10 @@ export function createMemoryService(
       runId: input.runId,
       citation: match.citation,
       snippet: match.snippet,
+      // I04: provenance pinned at exposure time — a later correction is a
+      // new revision and never rewrites this cited snapshot.
+      revision: match.revision,
+      kind: match.kind,
     };
   }
 

@@ -582,9 +582,24 @@ export const memoryExposures = sqliteTable(
     scope: text("scope").notNull(),
     citation: text("citation").notNull(),
     snippet: text("snippet").notNull(),
+    // I04 (additive, migration 0021): revision/kind DELIVERED at recall
+    // time. NULL = pre-I04 row or absent/unknown provenance; never
+    // backfilled, never updated after creation.
+    revision: integer("revision"),
+    kind: text("kind"),
     createdAt: integer("created_at").notNull(),
   },
-  (t) => [primaryKey({ columns: [t.recallId, t.recordId] })],
+  (t) => [
+    primaryKey({ columns: [t.recallId, t.recordId] }),
+    check(
+      "memory_exposures_revision_check",
+      sql`${t.revision} IS NULL OR ${t.revision} >= 1`,
+    ),
+    check(
+      "memory_exposures_kind_check",
+      sql`${t.kind} IS NULL OR ${t.kind} IN ('user_fact','model_inference','summary')`,
+    ),
+  ],
 );
 
 export const memoryGrants = sqliteTable(
@@ -596,9 +611,19 @@ export const memoryGrants = sqliteTable(
     recallId: text("recall_id").notNull(),
     sessionId: text("session_id").notNull(),
     scope: text("scope").notNull(),
+    // I04 (additive, migration 0021): revision copied from the SAME-run
+    // exposure at grant creation (citation pinned to the delivered
+    // revision). NULL = pre-I04 grant or unrevisioned exposure.
+    revision: integer("revision"),
     createdAt: integer("created_at").notNull(),
   },
-  (t) => [primaryKey({ columns: [t.runId, t.citation] })],
+  (t) => [
+    primaryKey({ columns: [t.runId, t.citation] }),
+    check(
+      "memory_grants_revision_check",
+      sql`${t.revision} IS NULL OR ${t.revision} >= 1`,
+    ),
+  ],
 );
 
 // NOTE: the memory lookup indexes (idx_memory_outbox_due,
