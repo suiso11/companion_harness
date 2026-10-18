@@ -175,6 +175,7 @@ export class NotificationPanel {
   /** Routine seqs already briefed on a natural break (renderable groups). */
   private readonly briefed = new Set<number>();
   private readonly acked = new Set<string>();
+  private serverUnread: number | null = null;
   private readonly pendingRoutine: NotificationView[] = [];
   private selectedId: string | null = null;
   /** Frozen ack per notification id: owner session + key + in-flight guard.
@@ -241,6 +242,8 @@ export class NotificationPanel {
     this.historyHasMore = false;
     this.baseline = 0;
     this.lastSeq = 0;
+    this.serverUnread = null;
+    this.resetReconnectBackoff();
     if (this.detail !== null) this.detail.hidden = true;
     if (this.retryButton !== null) this.retryButton.hidden = true;
     this.renderAll();
@@ -276,7 +279,9 @@ export class NotificationPanel {
     this.bootSeq += 1;
     const boot = this.bootSeq;
     // Baseline FIRST (cursor), then history, then feed — dedup by seq.
-    let base = 0;
+    // A failed/foreign baseline never falls back to zero (that would
+    // mass-announce history as new); abort and retry via reconnect.
+    let base: number | null = null;
     try {
       const cursor = await this.deps.http.get(
         `/api/sessions/${encodeURIComponent(sessionId)}/notifications/feed/cursor`,
@@ -286,10 +291,18 @@ export class NotificationPanel {
         const latest = (cursor.body as { latestSeq?: unknown }).latestSeq;
         if (typeof latest === "number" && Number.isSafeInteger(latest)) {
           base = latest;
+        } else {
+          this.scheduleReconnect(session);
+          return;
         }
+      } else {
+        this.scheduleReconnect(session);
+        return;
       }
     } catch {
-      base = 0;
+      if (session !== this.sessionSeq || boot !== this.bootSeq) return;
+      this.scheduleReconnect(session);
+      return;
     }
     this.baseline = base;
     this.lastSeq = base;
@@ -315,10 +328,14 @@ export class NotificationPanel {
     const body = result.body as {
       items?: unknown;
       latestSeq?: unknown;
+      unreadCount?: unknown;
       hasMore?: unknown;
       nextBefore?: unknown;
     };
     if (!Array.isArray(body.items)) return;
+    if (typeof body.unreadCount === "number" && body.unreadCount >= 0) {
+      this.serverUnread = Math.floor(body.unreadCount);
+    }
     // History is a CACHE read, never the live checkpoint: `lastSeq` stays
     // at the boot baseline until the feed actually consumes records, so
     // post-baseline arrivals that land before this response are still
@@ -363,7 +380,13 @@ export class NotificationPanel {
     if (sessionId !== this.deps.getSessionId()) return;
     if (res.status !== 200 || !isRecord(res.body)) return;
     const ack = (res.body as { ack?: unknown }).ack;
-    if (isRecord(ack)) this.acked.add(notificationId);
+    if (isRecord(ack) && !this.acked.has(notificationId)) {
+      this.acked.add(notificationId);
+      if (this.serverUnread !== null && this.serverUnread > 0) {
+        this.serverUnread -= 1;
+      }
+      this.renderAll();
+    }
   }
 
   private async loadOlder(): Promise<void> {
@@ -422,6 +445,10 @@ export class NotificationPanel {
       return;
     }
     this.feed = source;
+    source.onopen = () => {
+      if (session !== this.sessionSeq || this.destroyed) return;
+      this.resetReconnectBackoff();
+    };
     source.addEventListener("notification", () => {
       if (session !== this.sessionSeq) return;
       if (sessionId !== this.deps.getSessionId()) return;
@@ -476,8 +503,17 @@ export class NotificationPanel {
         }
         const body = res.body as {
           items?: unknown;
+          unreadCount?: unknown;
           hasMore?: unknown;
         };
+        if (
+          typeof (body as { unreadCount?: unknown }).unreadCount === "number" &&
+          (body as { unreadCount: number }).unreadCount >= 0
+        ) {
+          this.serverUnread = Math.floor(
+            (body as { unreadCount: number }).unreadCount,
+          );
+        }
         if (!Array.isArray(body.items)) {
           this.closeFeed();
           this.scheduleReconnect(session);
@@ -554,7 +590,7 @@ export class NotificationPanel {
 
   private scheduleReconnect(session: number): void {
     if (this.destroyed || session !== this.sessionSeq) return;
-    this.clearReconnect();
+    this.clearReconnectTimer();
     const delay = this.reconnectDelay;
     this.reconnectDelay = Math.min(
       this.reconnectDelay * 2,
@@ -567,11 +603,19 @@ export class NotificationPanel {
     }, delay);
   }
 
-  private clearReconnect(): void {
+  private clearReconnectTimer(): void {
     if (this.reconnectTimer !== null) {
       window.clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+  }
+
+  private clearReconnect(): void {
+    this.clearReconnectTimer();
+    this.reconnectDelay = NotificationPanel.RECONNECT_BASE_MS;
+  }
+
+  private resetReconnectBackoff(): void {
     this.reconnectDelay = NotificationPanel.RECONNECT_BASE_MS;
   }
 
@@ -587,9 +631,12 @@ export class NotificationPanel {
   }
 
   private unreadCount(): number {
+    if (this.serverUnread !== null) return Math.max(0, this.serverUnread);
     let count = 0;
     for (const view of this.seen.values()) {
-      if (!this.acked.has(view.id)) count += 1;
+      if (this.acked.has(view.id)) continue;
+      if (isLocallyOutdated(view)) continue;
+      count += 1;
     }
     return count;
   }
@@ -627,7 +674,12 @@ export class NotificationPanel {
       this.urgentBox.removeChild(this.urgentBox.firstChild);
     }
     const urgent = [...this.seen.values()]
-      .filter((v) => v.priority === "urgent" && !isLocallyOutdated(v))
+      .filter(
+        (v) =>
+          v.priority === "urgent" &&
+          !isLocallyOutdated(v) &&
+          !this.acked.has(v.id),
+      )
       .sort((a, b) => b.seq - a.seq)
       .slice(0, 5);
     for (const view of urgent) {
@@ -655,17 +707,19 @@ export class NotificationPanel {
       this.routineBox.removeChild(this.routineBox.firstChild);
     }
     // Only explicitly BRIEFED (flushed on a natural break) routine
-    // questions render as groups; deferred ones stay behind the badge and
+    // notices render as groups; deferred ones stay behind the badge and
     // pre-baseline history never briefs. History below keeps everything.
-    const questions = [...this.seen.values()].filter(
+    const briefedRoutine = [...this.seen.values()].filter(
       (v) =>
         v.priority !== "urgent" &&
-        v.kind === "question" &&
         this.briefed.has(v.seq) &&
         !isLocallyOutdated(v) &&
+        !this.acked.has(v.id) &&
         v.seq > this.baseline,
     );
-    if (questions.length === 0) return;
+    if (briefedRoutine.length === 0) return;
+    const questions = briefedRoutine.filter((v) => v.kind === "question");
+    const others = briefedRoutine.filter((v) => v.kind !== "question");
     const general = questions.filter((v) => v.citedDeadlines.length === 0);
     const dated = questions.filter((v) => v.citedDeadlines.length > 0);
     const groups: Array<{ title: string; items: NotificationView[] }> = [];
@@ -673,6 +727,8 @@ export class NotificationPanel {
       groups.push({ title: `確認事項 ${general.length}件`, items: general });
     if (dated.length > 0)
       groups.push({ title: `期限付きの確認 ${dated.length}件`, items: dated });
+    if (others.length > 0)
+      groups.push({ title: `お知らせ ${others.length}件`, items: others });
     for (const group of groups) {
       const head = document.createElement("h3");
       head.textContent = group.title;
@@ -820,7 +876,12 @@ export class NotificationPanel {
     // leave detail/history stale. Delivery tracking is separate (`delivered`
     // / `briefed`), so the refreshed outdated view can never re-nudge.
     this.upsertSeen(body.notification);
-    if (isRecord(body.ack)) this.acked.add(notificationId);
+    if (isRecord(body.ack) && !this.acked.has(notificationId)) {
+      this.acked.add(notificationId);
+      if (this.serverUnread !== null && this.serverUnread > 0) {
+        this.serverUnread -= 1;
+      }
+    }
     this.renderAll();
   }
 
@@ -894,7 +955,12 @@ export class NotificationPanel {
     if (frozenEntry.ownerSession !== this.deps.getSessionId()) return;
     if (res.status === 200 || res.status === 201) {
       this.pendingAcks.delete(frozenTarget);
-      this.acked.add(frozenTarget);
+      if (!this.acked.has(frozenTarget)) {
+        this.acked.add(frozenTarget);
+        if (this.serverUnread !== null && this.serverUnread > 0) {
+          this.serverUnread -= 1;
+        }
+      }
       if (this.selectedId === frozenTarget) {
         if (this.status !== null) {
           this.status.textContent = "確認済みにしました。";

@@ -66,6 +66,7 @@ import {
 } from "./action_executions.js";
 import type { CalendarGetTarget } from "./calendar_tools.js";
 import { authoritativeCreateTitleMatches } from "./calendar_tools.js";
+import { sha256Hex } from "./canonical.js";
 import { RepositoryValidationError } from "./errors.js";
 import type { RunStrategy, RunStrategyContext } from "./strategy.js";
 import { StrategyError } from "./strategy.js";
@@ -518,6 +519,46 @@ function boundariesMatch(text: string, start: string, end: string): boolean {
   return observedStart === intendedStart && observedEnd === intendedEnd;
 }
 
+/**
+ * Timed-only body check over the canonical event text: the parsed body
+ * MUST carry `allDayEndExclusive === false`. Missing/true/wrong-type
+ * values return false (unverified), never a partial claim. Mirrors the
+ * terminal recheck in `action_executions.ts` so injected-port and direct
+ * terminal callers are equally protected.
+ */
+function createBodyIsTimed(text: string): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text) as unknown;
+  } catch {
+    return false;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return false;
+  }
+  return (
+    (parsed as { allDayEndExclusive?: unknown }).allDayEndExclusive === false
+  );
+}
+
+/**
+ * Expected canonical key for a verified create read-back, derived from the
+ * TRUSTED triple (connectorInstanceId, host-selected calendarId,
+ * execution-derived stableEventId) under the existing normalization/hash
+ * convention (`calendar:` + SHA-256 hex of the JSON tuple — the same
+ * convention as `packages/connector-calendar/src/normalize.ts`
+ * `canonicalKey`, re-expressed here with the kernel-owned `sha256Hex`).
+ */
+function expectedCreateCanonicalKey(
+  connectorInstanceId: string,
+  calendarId: string,
+  stableEventId: string,
+): string {
+  return `calendar:${sha256Hex(
+    JSON.stringify([connectorInstanceId, calendarId, stableEventId]),
+  )}`;
+}
+
 /* ------------------------------------------------------------------ */
 /* The strategy                                                          */
 /* ------------------------------------------------------------------ */
@@ -928,7 +969,14 @@ export function createActionStrategy(
       const verified =
         observation.connectorInstanceId ===
           createCapability.connectorInstanceId &&
+        observation.resourceCanonicalKey ===
+          expectedCreateCanonicalKey(
+            createCapability.connectorInstanceId,
+            activeSelection.calendarId,
+            stableEventId,
+          ) &&
         observation.eventStatus !== "deleted" &&
+        createBodyIsTimed(observation.text) &&
         authoritativeCreateTitleMatches(observation.text, title) &&
         boundariesMatch(observation.text, start, end);
       if (!verified) {

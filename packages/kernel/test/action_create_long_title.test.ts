@@ -29,10 +29,12 @@ import {
 import { generateId } from "../src/canonical.js";
 import {
   closeKernelDatabase,
+  createDurableCalendarTargetStore,
   createKernelRepository,
   createReferenceManager,
   migrateKernelDatabase,
   openKernelDatabase,
+  sha256Hex,
 } from "../src/index.js";
 
 const tempRoots: string[] = [];
@@ -138,10 +140,21 @@ function bodyText(stableEventId: string, title: string): string {
     title,
     start: CREATE_START,
     end: CREATE_END,
-    allDayEndExclusive: true,
+    allDayEndExclusive: false,
     sourceRevision: stableEventId,
     revisionBasis: "etag",
   });
+}
+
+/**
+ * Expected verified canonical key under the existing normalization/hash
+ * convention: `calendar:` + SHA-256 hex of the JSON tuple
+ * [connectorInstanceId, calendarId, stableEventId].
+ */
+function expectedKey(connectorId: string, stableEventId: string): string {
+  return `calendar:${sha256Hex(
+    JSON.stringify([connectorId, "cal1", stableEventId]),
+  )}`;
 }
 
 /** Drive one approved create run through the REAL strategy with a fixed read-back. */
@@ -176,7 +189,7 @@ async function driveCreate(
       status: "ok" as const,
       observation: {
         connectorInstanceId: connectorId,
-        resourceCanonicalKey: `calendar:${request.stableEventId}${"0".repeat(32)}`,
+        resourceCanonicalKey: expectedKey(connectorId, request.stableEventId),
         eventStatus: "confirmed" as const,
         ...readback(request.stableEventId),
         sourceRevision: request.stableEventId,
@@ -192,6 +205,7 @@ async function driveCreate(
   const service = createActionExecutionService({
     db,
     referenceManager: createReferenceManager(db),
+    targetStore: createDurableCalendarTargetStore(db),
     preflightRead: noGetPort,
     clock: () => now,
   });
@@ -427,6 +441,7 @@ describe("create verifies the FULL authoritative text title (F1)", () => {
       const service = createActionExecutionService({
         db,
         referenceManager: rm,
+        targetStore: createDurableCalendarTargetStore(db),
         preflightRead: dummyPreflightRead as never,
         clock: () => T0 + 20,
       });
@@ -447,7 +462,7 @@ describe("create verifies the FULL authoritative text title (F1)", () => {
           outcome: "succeeded",
           observation: {
             connectorInstanceId: connector.id,
-            resourceCanonicalKey: `calendar:${stableEventId}${"0".repeat(32)}`,
+            resourceCanonicalKey: expectedKey(connector.id, stableEventId),
             title: SHORT_TITLE,
             text: bodyText(stableEventId, "Drifted title"),
             sourceRevision: stableEventId,

@@ -243,6 +243,8 @@ export class LearningPanel {
   private readonly evidence = new Map<string, EvidenceView[]>();
   /** Explicitly selected hypothesis id (drawer content). */
   private selectedId: string | null = null;
+  /** Guard against concurrent evidence-page loads (double-click dedupe). */
+  private evidenceLoading = false;
   /**
    * Frozen unresolved operation: {hypothesis id, session, key, endpoint,
    * body}. While set, selection/input changes cannot replace it; only the
@@ -350,6 +352,7 @@ export class LearningPanel {
     this.historyHasMore = false;
     this.evidenceCursor = null;
     this.evidenceHasMore = false;
+    this.evidenceLoading = false;
     if (this.detail !== null) this.detail.hidden = true;
     if (this.retryButton !== null) this.retryButton.hidden = true;
     this.renderAll();
@@ -425,6 +428,13 @@ export class LearningPanel {
     }
     const current = this.items.get(selected);
     if (current === undefined) return;
+    // Gate concurrent page loads: two double-clicked requests share the
+    // same cursor and would each append the identical page (visible
+    // duplicates). A second load waits for the in-flight one; the merge
+    // below ALSO dedupes by id, so a late out-of-order reply can never
+    // duplicate a row.
+    if (this.evidenceLoading) return;
+    this.evidenceLoading = true;
     const session = this.sessionSeq;
     let res: { status: number; body: unknown };
     try {
@@ -435,18 +445,29 @@ export class LearningPanel {
       if (session === this.sessionSeq && this.selectedId === selected) {
         this.setStatus("古い証拠の読み込みに失敗しました");
       }
+      this.evidenceLoading = false;
       return;
     }
-    if (session !== this.sessionSeq || this.selectedId !== selected) return;
+    if (session !== this.sessionSeq || this.selectedId !== selected) {
+      this.evidenceLoading = false;
+      return;
+    }
     if (res.status !== 200) {
       this.setStatus("古い証拠の読み込みに失敗しました");
+      this.evidenceLoading = false;
       return;
     }
     const rows = this.evidence.get(selected) ?? [];
-    for (const row of readEvidence(res.body)) rows.push(row);
+    const seen = new Set(rows.map((row) => row.id));
+    for (const row of readEvidence(res.body)) {
+      if (seen.has(row.id)) continue;
+      seen.add(row.id);
+      rows.push(row);
+    }
     this.evidence.set(selected, rows);
     this.evidenceCursor = readCursor(res.body);
     this.evidenceHasMore = readHasMore(res.body);
+    this.evidenceLoading = false;
     const shown = this.items.get(selected);
     if (shown !== undefined) this.renderEvidence(shown);
   }
@@ -476,18 +497,24 @@ export class LearningPanel {
     // Merge the newest page into the map (never clear): older pages loaded
     // via "古い履歴を読み込む" stay reachable, and a 409 re-read never
     // drops the older-page row behind the frozen op.
-    const freshest = readItems(res.body).filter(
-      (item) => item.sessionId === sessionId,
-    );
-    for (const item of freshest) this.items.set(item.id, item);
+    const freshIds = new Set<string>();
+    for (const item of readItems(res.body)) {
+      if (item.sessionId === sessionId) {
+        this.items.set(item.id, item);
+        freshIds.add(item.id);
+      }
+    }
     this.historyCursor = readCursor(res.body);
     this.historyHasMore = readHasMore(res.body);
-    // The fresh page, not the map, decides: a selected hypothesis that
-    // lives only on an OLDER page stays stale — re-fetch it directly
-    // anyway. An unresolved frozen op keeps its drawer pinned without
-    // any fetch.
+    // A selected hypothesis missing from the newest page is NOT gone: it
+    // may live on an older page. Fetch it directly whenever it is absent
+    // from the NEWLY RETURNED page (not the merged cache: a selected row
+    // from an older page is already cached, yet may have transitioned
+    // locally or changed externally while the newest page cannot carry it);
+    // close the drawer only when the server says it is gone (404). An
+    // unresolved frozen op keeps its drawer pinned without any fetch.
     if (this.pendingOp === null && this.selectedId !== null) {
-      if (!freshest.some((item) => item.id === this.selectedId)) {
+      if (!freshIds.has(this.selectedId)) {
         const missing = this.selectedId;
         try {
           const single = await this.deps.http.get(
@@ -512,8 +539,15 @@ export class LearningPanel {
     }
     this.renderAll();
     // Keep the open drawer truthful after a background refresh without
-    // clobbering the human's typed create/evidence inputs.
-    if (this.selectedId !== null) this.renderDetail(false);
+    // clobbering the human's typed create/evidence inputs: rerender the
+    // cached row AND reload the first evidence page, so evidence attached
+    // from another tab or API client appears without closing the drawer.
+    if (this.selectedId !== null) {
+      this.renderDetail(false);
+      const current =
+        this.selectedId === null ? undefined : this.items.get(this.selectedId);
+      if (current !== undefined) void this.loadEvidence(current);
+    }
   }
 
   private renderAll(): void {
@@ -524,8 +558,12 @@ export class LearningPanel {
     while (this.list.firstChild !== null) {
       this.list.removeChild(this.list.firstChild);
     }
+    // Newest-first by server timestamp only: Array.sort is stable, so
+    // same-millisecond rows keep the paged API's durable rowid append
+    // order. A UUID tie-breaker would replace that exact order with random
+    // UUID order (the kernel keyset paginates in append order deliberately).
     const ordered = [...this.items.values()].sort(
-      (a, b) => b.createdAt - a.createdAt || (a.id < b.id ? -1 : 1),
+      (a, b) => b.createdAt - a.createdAt,
     );
     for (const item of ordered) {
       const row = document.createElement("li");
@@ -563,6 +601,7 @@ export class LearningPanel {
     // A new selection starts evidence paging from the newest page.
     this.evidenceCursor = null;
     this.evidenceHasMore = false;
+    this.evidenceLoading = false;
     this.renderDetail(true);
     void this.loadEvidence(item);
   }
@@ -665,6 +704,25 @@ export class LearningPanel {
         }
       });
       line.append(label, open);
+      // Source discovery: the attach form requires a full source UUID that
+      // no owning UI renders visibly, so each attached row offers a
+      // one-tap reuse that fills the attach form's kind + id from a real,
+      // already-anchored source (no memorization, no devtools needed).
+      const reuse = document.createElement("button");
+      reuse.type = "button";
+      reuse.textContent = "この参照元を使う";
+      reuse.addEventListener("click", () => {
+        if (this.sourceKindSelect !== null) {
+          this.sourceKindSelect.value = row.sourceKind;
+        }
+        if (this.sourceIdInput !== null) {
+          this.sourceIdInput.value = row.sourceId;
+        }
+        this.setStatus(
+          "参照元を転記しました（極性・備考を添えて追加できます）",
+        );
+      });
+      line.appendChild(reuse);
       this.evidenceList.appendChild(line);
     }
     // Older evidence pages stay behind the explicit affordance (the drawer
@@ -939,12 +997,22 @@ export class LearningPanel {
       );
       // Apply the deterministic returned view BEFORE the refresh: the
       // map (and the open drawer) shows the committed truth even while
-      // the page fetch is in flight. Only a view owned by THIS session.
+      // the page fetch is in flight. A transitioned/reaffirmed/decided row
+      // from an older page falls outside the newest 50-row page, so a
+      // merge-only refresh would keep the stale version/status and the
+      // next commit would 409 on it. Only a view owned by THIS session.
       if (
         isHypothesisView(res.body) &&
         res.body.sessionId === op.ownerSession
       ) {
         this.items.set(res.body.id, res.body);
+      }
+      if (
+        op.hypothesisId !== "" &&
+        isRecord(res.body) &&
+        isHypothesisView(res.body)
+      ) {
+        this.items.set(op.hypothesisId, res.body);
       }
       await this.refresh();
       if (session !== this.sessionSeq) return;

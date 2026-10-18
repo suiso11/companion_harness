@@ -282,7 +282,20 @@ async function runSupervisor(): Promise<void> {
       }
       releaseSupervisorLock(paths, lock.nonce);
       void signal;
-      process.exitCode = 0;
+      // The foreground stdin handle (resume() + data listener) would
+      // otherwise keep this process alive with no lock and no child, so
+      // detach it and exit explicitly after cleanup completes.
+      try {
+        process.stdin.removeAllListeners("data");
+      } catch {
+        // Best effort.
+      }
+      try {
+        process.stdin.pause();
+      } catch {
+        // Best effort.
+      }
+      process.exit(0);
     })();
   };
   process.on("SIGINT", () => onSignal("SIGINT"));
@@ -329,7 +342,7 @@ async function runSupervisor(): Promise<void> {
             Date.now(),
             nonce,
             (latest) => {
-              if (latest.operatorStop) {
+              if (latest.operatorStop || latest.lastReason === "drain_failed") {
                 throw new Error("stopped");
               }
               return applyPlannedRestartRequest(latest, Date.now());
@@ -744,7 +757,7 @@ async function runSupervisor(): Promise<void> {
 
 function printServiceSample(): void {
   // Sample ONLY: printed, never written to any OS location, never enabled.
-  const entry = fileURLToPath(new URL("./index.ts", import.meta.url));
+  const entry = fileURLToPath(new URL("./supervisor_cli.ts", import.meta.url));
   const node = process.execPath;
   process.stdout.write(
     [
@@ -758,7 +771,7 @@ function printServiceSample(): void {
       "",
       "[Service]",
       "Type=simple",
-      `ExecStart=${node} --import tsx ${entry}`,
+      `ExecStart=${node} --import tsx ${entry} start`,
       "Restart=no",
       "# Environment is inherited from the operator shell that enables this",
       "# unit (COMPANION_DB_PATH, COMPANION_PORT, ...). No secrets are added",
@@ -812,7 +825,7 @@ export async function runSupervisorCli(
         if (command === "resume") {
           return applyOperatorResume(latest, now);
         }
-        if (latest.operatorStop) {
+        if (latest.operatorStop || latest.lastReason === "drain_failed") {
           throw new Error("stopped");
         }
         return applyPlannedRestartRequest(latest, now);

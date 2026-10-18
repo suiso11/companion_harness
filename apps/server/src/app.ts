@@ -239,14 +239,11 @@ export interface CreateAppDeps {
   /**
    * M6: true only when the explicit create gate is open (config opt-in +
    * writeEnabled + createEnabled + a dedicated trusted create binding on
-   * the active Calendar instance). While BOTH this and actionsEnabled are
-   * false, APPROVE is refused before any state change. When either is
-   * true the approval reaches the repository, where the per-tool kernel
-   * gates (writeEnabled for reschedule, writeEnabled + createEnabled for
-   * calendar.create) and the per-tool strategy bindings enforce the exact
-   * surface: a valid create approves in create-only mode, a reschedule
-   * without its trusted binding still fails closed. Default false (fail
-   * closed).
+   * the active Calendar instance). APPROVE admits per proposal tool BEFORE
+   * any repository mutation: `calendar.create` rows require this flag,
+   * `calendar.reschedule` rows require actionsEnabled; the disabled tool
+   * is refused with fixed 409 `action_execution_disabled`. Default false
+   * (fail closed).
    */
   createEnabled?: boolean;
   /**
@@ -1294,13 +1291,34 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       if (!parsedBody.success) {
         return validationError(c);
       }
-      // C21 disabled composition: refuse BEFORE any repository call, so no
-      // proposal can be approved into a queued Action Run while BOTH the M5
-      // write surface and the M6 create surface are gated off. Fixed 409
-      // code, no ids or content in the body. When either surface is
-      // enabled the approval reaches the repository, where the per-tool
-      // kernel gates and strategy bindings enforce the exact surface.
-      if (actionsEnabled !== true && createEnabled !== true) {
+      // Per-tool disabled composition: resolve the proposal FIRST
+      // (ownership-safe bounded read, no mutation), then admit ONLY the
+      // tool's own surface BEFORE any repository mutation/grant/queue.
+      // A pending create staged before restart is refused after
+      // createEnabled is turned off even while reschedule stays enabled,
+      // and vice versa. Fixed 409 code, no ids or content in the body.
+      // Foreign/unknown proposals stay 404; hash/replay semantics live
+      // inside repo.approveProposal below and are unchanged here.
+      let proposalTool: string;
+      try {
+        const listed = repo.listProposals(session.id);
+        const found = listed.proposals.find(
+          (entry) => entry.proposalId === proposal.id,
+        );
+        if (found === undefined) {
+          return apiError(c, 404, "not_found", "resource not found");
+        }
+        proposalTool = found.tool;
+      } catch (error) {
+        return mapDomainError(c, error);
+      }
+      const toolEnabled =
+        proposalTool === "calendar.create"
+          ? createEnabled === true
+          : proposalTool === "calendar.reschedule"
+            ? actionsEnabled === true
+            : false;
+      if (toolEnabled !== true) {
         return c.json(
           {
             error: {
