@@ -1,0 +1,25 @@
+-- AV02 shadow-deliberation explicit-request reason persistence
+-- (migration 0014, parent kernel contract).
+--
+-- Committed migration 0014: adds ONE nullable TEXT column
+-- `request_reason` to the 0012 shadow queue and touches NOTHING else
+-- (0001-0013 preserved, including the 0011 autonomy slice, the 0012
+-- shadow tables/constraints, and the 0013 single-claimed backstop).
+--
+-- Why: the HTTP contract accepts an explicit-request `reason` (and folds
+-- it into the idempotency hash), but 0012 stored no reason anywhere, so
+-- two requests for the same scope with different requested focuses froze
+-- IDENTICAL deliberation input. The claim path now copies this column
+-- into the frozen context (`requestReason`, citable ONLY as `sQ1` and
+-- rendered as UNTRUSTED requester data, never obeyed). Policy-change jobs
+-- and reason-less requests store NULL (no `sQ1` label exists for them).
+--
+-- Invariants (must not be weakened):
+-- - No new tables, no grant/capability/calendar surface; the column is
+--   plain TEXT with no validity check (length is enforced at the Zod
+--   boundary, 1..500 chars, before insert).
+-- - `IF NOT EXISTS`-style resume safety comes from the migrator's
+--   per-file transaction + user_version (a partially-applied 0014 resumes
+--   at 0014, never replays 0013).
+
+ALTER TABLE shadow_jobs ADD COLUMN request_reason TEXT;

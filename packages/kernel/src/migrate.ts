@@ -26,7 +26,7 @@ import {
 } from "./errors.js";
 
 /** Bundled M5 + memory-integration + M6 create + AV autonomy + AV shadow schema version. Bump only with a new committed migration. */
-export const BUNDLED_SCHEMA_VERSION = 13;
+export const BUNDLED_SCHEMA_VERSION = 14;
 
 export interface BundledMigration {
   version: number;

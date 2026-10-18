@@ -101,6 +101,7 @@ import {
   type RunStatus,
   RunStatusSchema,
   retryScope,
+  SearchLimitSchema,
   ShadowExplicitRequestSchema,
   ShadowFailRequestSchema,
   ShadowHoldRequestSchema,
@@ -153,8 +154,10 @@ import {
   listConflictPairsInScope as autonomyListConflictPairsInScope,
   listPurposeConflicts as autonomyListConflicts,
   listPurposes as autonomyListPurposes,
+  listPurposesFiltered as autonomyListPurposesFiltered,
   listPurposesInScope as autonomyListPurposesInScope,
   listTasks as autonomyListTasks,
+  listTasksFiltered as autonomyListTasksFiltered,
   listTasksInScope as autonomyListTasksInScope,
   recordPurposeConflict as autonomyRecordConflict,
   resumeTask as autonomyResumeTask,
@@ -4924,6 +4927,32 @@ export function createKernelRepository(
     );
   }
 
+  /**
+   * Filtered bounded purpose reader for the readonly agent tools
+   * (NOT the public HTTP list): scope/status/kind filters apply in SQL
+   * BEFORE the limit, and up to `limit + 1` matching rows are returned so
+   * the caller reports a truthful `hasMore` for the FILTERED set (never a
+   * falsely complete result while older matching records exist).
+   */
+  function listAutonomyPurposesFiltered(
+    sessionId: string,
+    filters: { scope?: string; status?: string; kind?: string },
+    limit: number,
+  ): PurposeListResponse {
+    // Tool-family bound (default 10 / max 20): the `limit + 1` probe row
+    // must fit the list DTO (max 100 items), so larger limits are rejected
+    // loudly instead of truncating the probe.
+    const capped = parseOrValidation(
+      () => SearchLimitSchema.parse(limit),
+      "purpose filtered list limit",
+    );
+    const out = autonomyListPurposesFiltered(db, sessionId, filters, capped);
+    return parseOrValidation(
+      () => PurposeListResponseSchema.parse(out),
+      "purpose filtered list response",
+    );
+  }
+
   function correctAutonomyPurpose(
     sessionId: string,
     request: unknown,
@@ -5109,6 +5138,28 @@ export function createKernelRepository(
     return parseOrValidation(
       () => TaskListResponseSchema.parse(out),
       "task scope list response",
+    );
+  }
+
+  /**
+   * Filtered bounded task reader for the readonly agent tools (NOT the
+   * public HTTP list): same SQL-before-limit + `limit + 1` probe contract
+   * as `listAutonomyPurposesFiltered` (see above).
+   */
+  function listAutonomyTasksFiltered(
+    sessionId: string,
+    filters: { scope?: string; status?: string; kind?: string },
+    limit: number,
+  ): TaskListResponse {
+    // Tool-family bound (see `listAutonomyPurposesFiltered` above).
+    const capped = parseOrValidation(
+      () => SearchLimitSchema.parse(limit),
+      "task filtered list limit",
+    );
+    const out = autonomyListTasksFiltered(db, sessionId, filters, capped);
+    return parseOrValidation(
+      () => TaskListResponseSchema.parse(out),
+      "task filtered list response",
     );
   }
 
@@ -5307,6 +5358,7 @@ export function createKernelRepository(
         id: task.id,
         scope: task.scope,
         title: task.title,
+        body: task.body,
         kind: task.kind,
         speaker: task.speaker,
         deadline: task.deadline,
@@ -5314,6 +5366,7 @@ export function createKernelRepository(
         status: task.status,
         version: task.version,
         holdReason: task.holdReason,
+        reconsiderTrigger: task.reconsiderTrigger,
       }));
     },
     listScopeConflictPairs(
@@ -5710,6 +5763,7 @@ export function createKernelRepository(
     listAutonomyPurposes,
     getAutonomyPurpose,
     listAutonomyPurposesInScope,
+    listAutonomyPurposesFiltered,
     correctAutonomyPurpose,
     revokeAutonomyPurpose,
     achieveAutonomyPurpose,
@@ -5719,6 +5773,7 @@ export function createKernelRepository(
     listAutonomyTasks,
     getAutonomyTask,
     listAutonomyTasksInScope,
+    listAutonomyTasksFiltered,
     startAutonomyTask,
     holdAutonomyTask,
     resumeAutonomyTask,

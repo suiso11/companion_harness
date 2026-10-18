@@ -1220,6 +1220,8 @@ export const shadowJobs = sqliteTable(
     triggerEvent: text("trigger_event").notNull(),
     triggerId: text("trigger_id"),
     requestKey: text("request_key"),
+    /** UNTRUSTED explicit-request text (NULL for policy-change jobs). */
+    requestReason: text("request_reason"),
     controlVersion: integer("control_version").notNull(),
     scopeEpoch: integer("scope_epoch").notNull(),
     claimControlVersion: integer("claim_control_version"),

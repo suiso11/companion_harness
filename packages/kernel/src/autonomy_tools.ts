@@ -18,10 +18,10 @@
 //   the EXISTING broker budgets).
 // - Lists are bounded by the existing search-limit family (default 10,
 //   max 20, mirroring `DEFAULT_SEARCH_LIMIT` / `MAX_SEARCH_LIMIT`).
-//   The scope filter applies in SQL BEFORE the limit (via the existing
-//   `listPurposesInScope` / `listTasksInScope` readers); status/kind
-//   post-filters apply before pagination; `hasMore` is truthful
-//   (limit+1 probe) and lists never claim completeness.
+//   Scope/status/kind filters apply in SQL BEFORE the limit (via the
+//   filtered bounded readers, limit+1 probe); `hasMore` is truthful for
+//   the FILTERED set (older matching records are never hidden behind
+//   newest-first truncation) and lists never claim `all`.
 // - List items carry BOUNDED SNIPPETS with an explicit `truncated` flag
 //   (never the full original); `open` returns the full original
 //   statement/title/body PLUS the separately stored interpretation, kind,
@@ -212,15 +212,19 @@ export function createAutonomyReadRegistrations(
       const owned = requireOwnedRun(repo, ctx.runId);
       let rows: PurposeView[];
       try {
-        // Scope filter BEFORE any limit (dedicated SQL reader, bounded
-        // 101-row cap); unscoped lists read the session newest-first.
-        // Status/kind post-filters apply BEFORE pagination so `hasMore`
-        // stays truthful for the filtered set; nothing claims `all`.
-        rows =
-          parsed.scope !== undefined
-            ? repo.listAutonomyPurposesInScope(owned.sessionId, parsed.scope)
-                .items
-            : repo.listAutonomyPurposes(owned.sessionId, { limit: 100 }).items;
+        // Scope/status/kind filters apply in SQL BEFORE the limit (bounded
+        // limit+1 reader); the probe row makes `hasMore` truthful for the
+        // FILTERED set — older matching records are never hidden behind
+        // newest-first truncation, and nothing claims `all`.
+        rows = repo.listAutonomyPurposesFiltered(
+          owned.sessionId,
+          {
+            ...(parsed.scope !== undefined ? { scope: parsed.scope } : {}),
+            ...(parsed.status !== undefined ? { status: parsed.status } : {}),
+            ...(parsed.kind !== undefined ? { kind: parsed.kind } : {}),
+          },
+          parsed.limit,
+        ).items;
       } catch (error) {
         if (error instanceof ToolError) throw error;
         throw new ToolError("execution_failed");
@@ -228,15 +232,10 @@ export function createAutonomyReadRegistrations(
       if (ctx.signal.aborted) {
         throw new ToolError("execution_cancelled");
       }
-      const filtered = rows.filter(
-        (row) =>
-          (parsed.status === undefined || row.status === parsed.status) &&
-          (parsed.kind === undefined || row.kind === parsed.kind),
-      );
-      const window = filtered.slice(0, parsed.limit + 1);
-      const hasMore = window.length > parsed.limit;
+      const hasMore = rows.length > parsed.limit;
+      const window = rows.slice(0, parsed.limit);
       return {
-        items: window.slice(0, parsed.limit).map((row) => {
+        items: window.map((row) => {
           const cut = snippetOf(row.statement, SNIPPET_CP);
           return {
             purposeId: row.id,
@@ -339,10 +338,19 @@ export function createAutonomyReadRegistrations(
       const owned = requireOwnedRun(repo, ctx.runId);
       let rows: TaskView[];
       try {
-        rows =
-          parsed.scope !== undefined
-            ? repo.listAutonomyTasksInScope(owned.sessionId, parsed.scope).items
-            : repo.listAutonomyTasks(owned.sessionId, { limit: 100 }).items;
+        // Scope/status/kind filters apply in SQL BEFORE the limit (bounded
+        // limit+1 reader); the probe row makes `hasMore` truthful for the
+        // FILTERED set — older matching records are never hidden behind
+        // newest-first truncation, and nothing claims `all`.
+        rows = repo.listAutonomyTasksFiltered(
+          owned.sessionId,
+          {
+            ...(parsed.scope !== undefined ? { scope: parsed.scope } : {}),
+            ...(parsed.status !== undefined ? { status: parsed.status } : {}),
+            ...(parsed.kind !== undefined ? { kind: parsed.kind } : {}),
+          },
+          parsed.limit,
+        ).items;
       } catch (error) {
         if (error instanceof ToolError) throw error;
         throw new ToolError("execution_failed");
@@ -350,15 +358,10 @@ export function createAutonomyReadRegistrations(
       if (ctx.signal.aborted) {
         throw new ToolError("execution_cancelled");
       }
-      const filtered = rows.filter(
-        (row) =>
-          (parsed.status === undefined || row.status === parsed.status) &&
-          (parsed.kind === undefined || row.kind === parsed.kind),
-      );
-      const window = filtered.slice(0, parsed.limit + 1);
-      const hasMore = window.length > parsed.limit;
+      const hasMore = rows.length > parsed.limit;
+      const window = rows.slice(0, parsed.limit);
       return {
-        items: window.slice(0, parsed.limit).map((row) => {
+        items: window.map((row) => {
           const cut = snippetOf(row.title, SNIPPET_CP);
           return {
             taskId: row.id,
