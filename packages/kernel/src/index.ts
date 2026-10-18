@@ -140,6 +140,7 @@ export {
 export {
   AutonomyStateConflictError,
   AutonomyVersionConflictError,
+  acceptConversationProposal,
   achievePurpose,
   applyAutonomyRestartFence,
   cancelTask,
@@ -149,14 +150,18 @@ export {
   createPurpose,
   createTask,
   getAutonomyControl,
+  getConversationProposal,
   holdTask,
   isAutonomousWorkAllowed,
   isPurposeApplicableAt,
   isStrictAutonomyDeadline,
   listAutonomyActivity,
+  listConversationProposals,
   recordPurposeConflict,
+  rejectConversationProposal,
   resumeTask,
   revokePurpose,
+  stageConversationProposal,
   startTask,
 } from "./autonomy.js";
 export type { AutonomyToolsOptions } from "./autonomy_tools.js";
@@ -266,6 +271,13 @@ export {
   openKernelDatabase,
   quickCheck,
 } from "./connection.js";
+export type { ConversationProposalToolsOptions } from "./conversation_proposal_tools.js";
+export {
+  createConversationProposalRegistrations,
+  ProposalStageToolOutputSchema,
+  PurposeProposeToolInputSchema,
+  TaskProposeToolInputSchema,
+} from "./conversation_proposal_tools.js";
 export type {
   EngineClock,
   EngineRecovery,

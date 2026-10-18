@@ -58,6 +58,9 @@
 
 import {
   AutonomyControlViewSchema,
+  type ConversationDraftKind,
+  type ConversationProposalTarget,
+  ConversationProposalViewSchema,
   IDEMPOTENCY_SCOPE_AUTONOMY_CONTROL,
   type ProvenanceSource,
   type PurposeKind,
@@ -152,6 +155,32 @@ function requireId(id: unknown, what: string): string {
 }
 
 function withImmediate<T>(db: Database.Database, fn: () => T): T {
+  if (db.inTransaction) {
+    // Nested inside a caller's BEGIN IMMEDIATE (proposal adoption composes
+    // purpose/task creation atomically in ONE outer transaction): join via
+    // SAVEPOINT so an inner failure rolls back to the savepoint without
+    // breaking the outer transaction. Same-name stacking is safe (SQLite
+    // releases them LIFO). Top-level callers keep the exact BEGIN
+    // IMMEDIATE ... COMMIT behavior below (no consumer change).
+    db.exec("SAVEPOINT av_nested_tx");
+    try {
+      const out = fn();
+      db.exec("RELEASE av_nested_tx");
+      return out;
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK TO av_nested_tx");
+      } catch {
+        // Best effort: the original error carries the failure.
+      }
+      try {
+        db.exec("RELEASE av_nested_tx");
+      } catch {
+        // Best effort: the original error carries the failure.
+      }
+      throw error;
+    }
+  }
   db.exec("BEGIN IMMEDIATE");
   try {
     const out = fn();
@@ -2355,6 +2384,949 @@ export function resumeTask(
     }
     const body = toTaskView(current);
     storeIdempotentResponse(db, scope, canonical, hash, 200, body, now);
+    return { status: 200, body, replayed: false };
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* Conversation proposals (AV03 proposal-only staging core)             */
+/*                                                                     */
+/* A proposal is a durable INFERRED draft staged ONLY by the model-only */
+/* tools `purpose.propose` / `task.propose` (never by the human UI,     */
+/* never by background work). Staging creates NO purpose, NO task, NO  */
+/* grant, NO calendar write, NO notification, and never touches the     */
+/* stop control. The quote is the immutable ORIGINAL exact substring   */
+/* of the CURRENT ordinary `user_text` turn body the calling run was   */
+/* dispatched from (server-derived, never model input); the model      */
+/* interpretation is stored SEPARATELY and can never rewrite the quote */
+/* or bind an external/injected read record as a user instruction.     */
+/* Source kind is hardcoded `model` (inference, never user instruction */
+/* and never an actual permission grant). Only `user_text` turns are   */
+/* eligible sources: action approval/rejection/system/tool turns fail  */
+/* closed. Draft kind is explicit (casual/wish/problem/task/deadline): */
+/* a casual remark stays casual (no mandatory taskization); a model    */
+/* do-nothing stages nothing. Model tools accept NO date fields at     */
+/* all: task drafts adopt with a NULL deadline and purpose drafts with */
+/* a NULL window unless the trusted human supplies an explicit strict  */
+/* value at accept time. Task drafts REQUIRE an explicit parent        */
+/* (id + expected version, same session/scope, active — checked at    */
+/* stage AND re-checked at adopt); the model can never auto-pick one.  */
+/* Decisions are trusted-human only (accept = atomic create + accept,  */
+/* reject = terminal with zero side effects) and NEVER resume the     */
+/* global stop control.                                                */
+/* ------------------------------------------------------------------ */
+
+/** Closed conversation-proposal target vocabulary. */
+export type ConversationTarget = ConversationProposalTarget;
+/** Closed explicit draft-kind vocabulary. */
+export type ConversationDraftKindValue = ConversationDraftKind;
+
+/** Max PENDING drafts per session (borrowed tool-list cap, not a budget). */
+const MAX_PENDING_PROPOSALS_PER_SESSION = 20;
+
+interface RawProposal {
+  id: string;
+  session_id: string;
+  scope: string;
+  target: string;
+  draft_kind: string;
+  purpose_kind: string | null;
+  task_kind: string | null;
+  source_quote: string;
+  interpretation: string;
+  source_kind: string;
+  source_turn_id: string;
+  source_run_id: string;
+  parent_purpose_id: string | null;
+  expected_parent_version: number | null;
+  request_hash: string;
+  stage_call_id: string;
+  status: string;
+  version: number;
+  accepted_target_id: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+function toProposalView(row: RawProposal): {
+  id: string;
+  sessionId: string;
+  scope: string;
+  target: ConversationProposalTarget;
+  draftKind: ConversationDraftKind;
+  purposeKind: PurposeKind | null;
+  taskKind: TaskKind | null;
+  sourceQuote: string;
+  interpretation: string;
+  sourceKind: "model";
+  sourceTurnId: string;
+  sourceRunId: string;
+  parentPurposeId: string | null;
+  expectedParentVersion: number | null;
+  status: "pending" | "accepted" | "rejected";
+  version: number;
+  acceptedTargetId: string | null;
+  createdAt: number;
+  updatedAt: number;
+} {
+  return parseOrValidation(
+    () =>
+      ConversationProposalViewSchema.parse({
+        id: row.id,
+        sessionId: row.session_id,
+        scope: row.scope,
+        target: row.target,
+        draftKind: row.draft_kind,
+        purposeKind: row.purpose_kind,
+        taskKind: row.task_kind,
+        sourceQuote: row.source_quote,
+        interpretation: row.interpretation,
+        sourceKind: row.source_kind,
+        sourceTurnId: row.source_turn_id,
+        sourceRunId: row.source_run_id,
+        parentPurposeId: row.parent_purpose_id,
+        expectedParentVersion: row.expected_parent_version,
+        status: row.status,
+        version: row.version,
+        acceptedTargetId: row.accepted_target_id,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      }),
+    "stored conversation proposal",
+  );
+}
+
+function readProposal(
+  db: Database.Database,
+  proposalId: string,
+): RawProposal | null {
+  return (
+    (db
+      .prepare("SELECT * FROM conversation_proposals WHERE id = ?")
+      .get(proposalId) as RawProposal | undefined) ?? null
+  );
+}
+
+/**
+ * Ownership-first proposal lookup (foreign ids are 404, never 403).
+ */
+export function assertOwnedProposal(
+  db: Database.Database,
+  sessionId: string,
+  proposalId: string,
+): RawProposal {
+  const session = requireId(sessionId, "sessionId");
+  const proposal = requireId(proposalId, "proposalId");
+  const row = readProposal(db, proposal);
+  if (row === null || row.session_id !== session) {
+    throw new RepositoryNotFoundError(
+      `proposal ${proposal} not found in session ${session}`,
+    );
+  }
+  return row;
+}
+
+function appendProposalEventInTx(
+  db: Database.Database,
+  proposalId: string,
+  sessionId: string,
+  event: "proposed" | "accepted" | "rejected",
+  fromStatus: string | null,
+  toStatus: string,
+  note: string | null,
+  now: number,
+): void {
+  const seqRow = db
+    .prepare(
+      "SELECT COALESCE(MAX(seq), 0) AS max_seq FROM conversation_proposal_events WHERE proposal_id = ?",
+    )
+    .get(proposalId) as { max_seq: number };
+  db.prepare(
+    "INSERT INTO conversation_proposal_events (id, proposal_id, session_id, seq, event, from_status, to_status, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  ).run(
+    generateId(),
+    proposalId,
+    sessionId,
+    seqRow.max_seq + 1,
+    event,
+    fromStatus,
+    toStatus,
+    note,
+    now,
+  );
+}
+
+function codePointsOf(text: string): number {
+  return Array.from(text).length;
+}
+
+/**
+ * Count EXACT occurrences of `quote` inside `body`, including overlaps
+ * (e.g. quote "aa" occurs twice in body "aaa"). Matching is exact on the
+ * ORIGINAL strings: no normalization, no case folding, no trimming — the
+ * stored quote must identify exactly ONE passage of the source body.
+ */
+function countExactOccurrences(body: string, quote: string): number {
+  let count = 0;
+  let from = 0;
+  for (;;) {
+    const at = body.indexOf(quote, from);
+    if (at === -1) return count;
+    count += 1;
+    from = at + 1;
+  }
+}
+
+export interface StageConversationProposalDraft {
+  scope: string;
+  target: ConversationProposalTarget;
+  draftKind: ConversationDraftKind;
+  purposeKind?: PurposeKind;
+  taskKind?: TaskKind;
+  sourceQuote: string;
+  interpretation: string;
+  parentPurposeId?: string;
+  expectedParentVersion?: number;
+}
+
+export interface StageConversationProposalSource {
+  sourceRunId: string;
+  sourceTurnId: string;
+  /** CURRENT ordinary `user_text` body the calling run was dispatched from. */
+  userText: string;
+}
+
+/**
+ * Stage one durable inferred draft. The caller derives the source
+ * (session/run/turn/text) server-side; this function re-verifies the
+ * quote is a nonempty EXACT substring of the CURRENT source body, the
+ * parent (task drafts) is owned + same-scope + active + version-matched,
+ * and dedups semantically (same exact input replays the pending draft).
+ * Creates NO purpose/task/grant/calendar/notification and never touches
+ * the stop control.
+ */
+export function stageConversationProposal(
+  db: Database.Database,
+  sessionId: string,
+  draft: StageConversationProposalDraft,
+  source: StageConversationProposalSource,
+  options: AutonomyKeyOptions,
+): {
+  status: number;
+  body: ReturnType<typeof toProposalView>;
+  replayed: boolean;
+} {
+  const session = requireId(sessionId, "sessionId");
+  const key = requireKey(options.key);
+  const now = nowMs(options.now);
+  const sourceRun = requireId(source.sourceRunId, "sourceRunId");
+  const sourceTurn = requireId(source.sourceTurnId, "sourceTurnId");
+  if (draft.scope.length === 0 || draft.scope.length > 128) {
+    throw new RepositoryValidationError("scope must be 1..128 chars");
+  }
+  if (draft.target !== "purpose" && draft.target !== "task") {
+    throw new RepositoryValidationError("target must be purpose or task");
+  }
+  const quote = draft.sourceQuote;
+  if (quote.length === 0 || quote.trim().length === 0) {
+    throw new RepositoryValidationError("sourceQuote must be nonempty");
+  }
+  if (!source.userText.includes(quote)) {
+    throw new RepositoryValidationError(
+      "sourceQuote must be an exact substring of the current source body",
+    );
+  }
+  // The quote must identify EXACTLY ONE passage: a repeated (or
+  // overlapping) quote is ambiguous and stages nothing. Checked here,
+  // before any pending insert, against the server-bound source body.
+  if (countExactOccurrences(source.userText, quote) !== 1) {
+    throw new RepositoryValidationError(
+      "sourceQuote must occur exactly once in the current source body",
+    );
+  }
+  const quoteCap = draft.target === "task" ? 256 : 2000;
+  if (codePointsOf(quote) > quoteCap) {
+    throw new RepositoryValidationError(
+      `sourceQuote over ${quoteCap} code points`,
+    );
+  }
+  if (
+    draft.interpretation.length === 0 ||
+    codePointsOf(draft.interpretation) > 2000
+  ) {
+    throw new RepositoryValidationError(
+      "interpretation must be 1..2000 code points",
+    );
+  }
+  if (draft.target === "purpose") {
+    if (draft.purposeKind === undefined) {
+      throw new RepositoryValidationError(
+        "purposeKind is required for purpose drafts",
+      );
+    }
+    if (draft.taskKind !== undefined) {
+      throw new RepositoryValidationError(
+        "taskKind is not accepted for purpose drafts",
+      );
+    }
+    if (
+      draft.parentPurposeId !== undefined ||
+      draft.expectedParentVersion !== undefined
+    ) {
+      throw new RepositoryValidationError(
+        "parent is not accepted for purpose drafts",
+      );
+    }
+  } else {
+    if (draft.taskKind === undefined) {
+      throw new RepositoryValidationError(
+        "taskKind is required for task drafts",
+      );
+    }
+    if (draft.purposeKind !== undefined) {
+      throw new RepositoryValidationError(
+        "purposeKind is not accepted for task drafts",
+      );
+    }
+    if (draft.parentPurposeId === undefined) {
+      throw new RepositoryValidationError(
+        "task drafts require an explicit parent purpose",
+      );
+    }
+    requireId(draft.parentPurposeId, "parentPurposeId");
+    if (
+      draft.expectedParentVersion === undefined ||
+      !Number.isInteger(draft.expectedParentVersion) ||
+      draft.expectedParentVersion < 1
+    ) {
+      throw new RepositoryValidationError(
+        "task drafts require an explicit expectedParentVersion >= 1",
+      );
+    }
+  }
+  // Semantic dedup key: the source RUN is audit only (stored on the row)
+  // and must not participate in dedup — a retry runs under a new run id
+  // for the same turn/draft and must replay the still-pending draft.
+  const hash = requestHash(
+    IDEMPOTENCY_OPERATIONS.stageConversationProposal.operation,
+    IDEMPOTENCY_OPERATIONS.stageConversationProposal.schemaVersion,
+    {
+      sessionId: session,
+      scope: draft.scope,
+      target: draft.target,
+      draftKind: draft.draftKind,
+      purposeKind: draft.purposeKind ?? null,
+      taskKind: draft.taskKind ?? null,
+      sourceQuote: quote,
+      interpretation: draft.interpretation,
+      parentPurposeId: draft.parentPurposeId ?? null,
+      expectedParentVersion: draft.expectedParentVersion ?? null,
+      sourceTurnId: sourceTurn,
+    },
+  );
+  const scope = `session:${session}:conv_proposal`;
+  return withImmediate(db, () => {
+    const existing = toStoredResponse(db, scope, key);
+    if (existing !== null) {
+      if (existing.requestHash !== hash) {
+        throw new IdempotencyConflictError(scope);
+      }
+      const body = parseOrValidation(
+        () => ConversationProposalViewSchema.parse(existing.responseBody),
+        "stored proposal body",
+      );
+      return { status: existing.responseStatus, body, replayed: true };
+    }
+    requireSession(db, session);
+    // Semantic replay: an identical exact draft that is still pending
+    // replays instead of duplicating (ordinary repeated model calls with
+    // the same source quote stage nothing new; a meaningfully new source
+    // hashes differently and stages a new draft).
+    const dup = db
+      .prepare(
+        "SELECT * FROM conversation_proposals WHERE session_id = ? AND request_hash = ? AND status = 'pending' ORDER BY created_at ASC, id ASC LIMIT 1",
+      )
+      .get(session, hash) as RawProposal | undefined;
+    if (dup !== undefined) {
+      const body = toProposalView(dup);
+      storeIdempotentResponse(db, scope, key, hash, 200, body, now);
+      return { status: 200, body, replayed: true };
+    }
+    if (draft.target === "task") {
+      // Parent checked at stage (owned, same scope, active, CAS version);
+      // adoption re-checks before creating anything.
+      const parent = assertOwnedPurpose(
+        db,
+        session,
+        draft.parentPurposeId as string,
+      );
+      if (parent.scope !== draft.scope) {
+        throw new RepositoryValidationError(
+          "parent purpose must share the draft scope",
+        );
+      }
+      if (parent.status !== "active") {
+        throw new AutonomyStateConflictError(
+          `parent purpose ${parent.id} is ${parent.status}`,
+        );
+      }
+      if (parent.version !== draft.expectedParentVersion) {
+        throw new AutonomyVersionConflictError(
+          draft.expectedParentVersion as number,
+          parent.version,
+        );
+      }
+    }
+    const pending = db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM conversation_proposals WHERE session_id = ? AND status = 'pending'",
+      )
+      .get(session) as { n: number };
+    if (pending.n >= MAX_PENDING_PROPOSALS_PER_SESSION) {
+      throw new RepositoryValidationError("proposal backlog full");
+    }
+    const id = generateId();
+    db.prepare(
+      "INSERT INTO conversation_proposals (id, session_id, scope, target, draft_kind, purpose_kind, task_kind, source_quote, interpretation, source_kind, source_turn_id, source_run_id, parent_purpose_id, expected_parent_version, request_hash, stage_call_id, status, version, accepted_target_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'model', ?, ?, ?, ?, ?, ?, 'pending', 1, NULL, ?, ?)",
+    ).run(
+      id,
+      session,
+      draft.scope,
+      draft.target,
+      draft.draftKind,
+      draft.purposeKind ?? null,
+      draft.taskKind ?? null,
+      quote,
+      draft.interpretation,
+      sourceTurn,
+      sourceRun,
+      draft.parentPurposeId ?? null,
+      draft.expectedParentVersion ?? null,
+      hash,
+      key,
+      now,
+      now,
+    );
+    appendProposalEventInTx(
+      db,
+      id,
+      session,
+      "proposed",
+      null,
+      "pending",
+      `staged from user_text turn ${sourceTurn}`,
+      now,
+    );
+    // Deliberately NO shadow projection, NO notification, NO control
+    // write: drafts stay quiet until the human reviews them.
+    const row = readProposal(db, id);
+    if (row === null) {
+      throw new RepositoryNotFoundError(`proposal ${id} not found`);
+    }
+    const body = toProposalView(row);
+    storeIdempotentResponse(db, scope, key, hash, 201, body, now);
+    return { status: 201, body, replayed: false };
+  });
+}
+
+const PROPOSAL_CURSOR_BYTES =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+function encodeProposalCursor(createdAt: number, id: string): string {
+  const raw = `${createdAt}:${id}`;
+  let out = "";
+  for (let i = 0; i < raw.length; i += 3) {
+    const a = raw.charCodeAt(i);
+    const b = i + 1 < raw.length ? raw.charCodeAt(i + 1) : NaN;
+    const c = i + 2 < raw.length ? raw.charCodeAt(i + 2) : NaN;
+    out += PROPOSAL_CURSOR_BYTES[(a >> 2) & 63];
+    out +=
+      PROPOSAL_CURSOR_BYTES[
+        ((a & 3) << 4) | (Number.isNaN(b) ? 0 : (b >> 4) & 15)
+      ];
+    out += Number.isNaN(b)
+      ? ""
+      : PROPOSAL_CURSOR_BYTES[
+          ((b & 15) << 2) | (Number.isNaN(c) ? 0 : (c >> 6) & 3)
+        ];
+    out += Number.isNaN(c) ? "" : PROPOSAL_CURSOR_BYTES[c & 63];
+  }
+  return out;
+}
+
+function decodeProposalCursor(cursor: string): {
+  createdAt: number;
+  id: string;
+} {
+  const fail = (): never => {
+    throw new RepositoryValidationError("invalid proposal cursor");
+  };
+  if (cursor.length === 0 || cursor.length > 2048) fail();
+  const vals = new Array<number>(cursor.length);
+  for (let i = 0; i < cursor.length; i += 1) {
+    const v = PROPOSAL_CURSOR_BYTES.indexOf(cursor[i] as string);
+    if (v === -1) fail();
+    vals[i] = v;
+  }
+  let raw = "";
+  for (let i = 0; i < vals.length; i += 4) {
+    const a = vals[i] as number;
+    const b = (vals[i + 1] ?? 0) as number;
+    const c = (vals[i + 2] ?? -1) as number;
+    const d = (vals[i + 3] ?? -1) as number;
+    raw += String.fromCharCode(((a << 2) | (b >> 4)) & 255);
+    if (c !== -1)
+      raw += String.fromCharCode((((b & 15) << 4) | (c >> 2)) & 255);
+    if (d !== -1) raw += String.fromCharCode((((c & 3) << 6) | d) & 255);
+  }
+  const sep = raw.indexOf(":");
+  if (sep === -1) fail();
+  const createdAt = Number(raw.slice(0, sep));
+  const id = raw.slice(sep + 1);
+  if (!Number.isInteger(createdAt) || createdAt < 0 || !isUuidV4(id)) fail();
+  return { createdAt, id };
+}
+
+export interface ListConversationProposalsQuery {
+  limit?: number;
+  /** Opaque cursor: the next older page strictly below this position. */
+  cursor?: string;
+  /** Optional status filter (e.g. the pending review queue). */
+  status?: "pending" | "accepted" | "rejected";
+}
+
+/**
+ * Newest-first proposal history with a stable opaque keyset
+ * (created_at, id) and a LIMIT+1 probe, so every owned row — including an
+ * old pending draft buried under newer decisions — stays reachable.
+ * `pendingCount` always covers ALL owned pending drafts (never the page).
+ * Pure read: no mutations, no cursor advancement writes. An unknown cursor
+ * id is just a keyset bound (never a 404 oracle for foreign ids).
+ */
+export function listConversationProposals(
+  db: Database.Database,
+  sessionId: string,
+  query: ListConversationProposalsQuery = {},
+): {
+  items: ReturnType<typeof toProposalView>[];
+  nextCursor: string | null;
+  hasMore: boolean;
+  pendingCount: number;
+} {
+  const session = requireId(sessionId, "sessionId");
+  requireSession(db, session);
+  const capped = Math.min(Math.max(query.limit ?? 50, 1), 100);
+  if (
+    query.status !== undefined &&
+    query.status !== "pending" &&
+    query.status !== "accepted" &&
+    query.status !== "rejected"
+  ) {
+    throw new RepositoryValidationError(
+      "proposal status must be pending, accepted, or rejected",
+    );
+  }
+  const bound =
+    query.cursor === undefined ? null : decodeProposalCursor(query.cursor);
+  const clauses = ["session_id = ?"];
+  const args: (string | number)[] = [session];
+  if (query.status !== undefined) {
+    clauses.push("status = ?");
+    args.push(query.status);
+  }
+  if (bound !== null) {
+    clauses.push("(created_at < ? OR (created_at = ? AND id > ?))");
+    args.push(bound.createdAt, bound.createdAt, bound.id);
+  }
+  const where = `WHERE ${clauses.join(" AND ")}`;
+  const rows = db
+    .prepare(
+      `SELECT * FROM conversation_proposals ${where} ORDER BY created_at DESC, id ASC LIMIT ?`,
+    )
+    .all(...args, capped + 1) as RawProposal[];
+  const hasMore = rows.length > capped;
+  const page = hasMore ? rows.slice(0, capped) : rows;
+  const last = page[page.length - 1];
+  const pending = db
+    .prepare(
+      "SELECT COUNT(*) AS n FROM conversation_proposals WHERE session_id = ? AND status = 'pending'",
+    )
+    .get(session) as { n: number };
+  return {
+    items: page.map(toProposalView),
+    nextCursor:
+      hasMore && last !== undefined
+        ? encodeProposalCursor(last.created_at, last.id)
+        : null,
+    hasMore,
+    pendingCount: pending.n,
+  };
+}
+
+export function getConversationProposal(
+  db: Database.Database,
+  sessionId: string,
+  proposalId: string,
+): ReturnType<typeof toProposalView> {
+  return toProposalView(assertOwnedProposal(db, sessionId, proposalId));
+}
+
+export function listConversationProposalEvents(
+  db: Database.Database,
+  sessionId: string,
+  proposalId: string,
+): {
+  proposalId: string;
+  events: {
+    seq: number;
+    event: string;
+    fromStatus: string | null;
+    toStatus: string;
+    createdAt: number;
+  }[];
+} {
+  const owned = assertOwnedProposal(db, sessionId, proposalId);
+  const rows = db
+    .prepare(
+      "SELECT seq, event, from_status, to_status, created_at FROM conversation_proposal_events WHERE proposal_id = ? ORDER BY seq ASC",
+    )
+    .all(owned.id) as {
+    seq: number;
+    event: string;
+    from_status: string | null;
+    to_status: string;
+    created_at: number;
+  }[];
+  return {
+    proposalId: owned.id,
+    events: rows.map((row) => ({
+      seq: row.seq,
+      event: row.event,
+      fromStatus: row.from_status,
+      toStatus: row.to_status,
+      createdAt: row.created_at,
+    })),
+  };
+}
+
+export interface AcceptConversationProposalInput {
+  expectedVersion: number;
+  /** Human-explicit deadline (task targets only; absent stays NULL). */
+  deadline?: string;
+  /** Human-explicit window (purpose targets only; absent stays NULL). */
+  validFrom?: string;
+  validUntil?: string;
+}
+
+/**
+ * Trusted human adoption: creates the actual purpose/task AND records the
+ * accept decision in ONE atomic transaction (no check-then-write gap, no
+ * crash window). The adopted purpose keeps the original quote +
+ * interpretation with inferred `self` provenance; the adopted task keeps
+ * the quote as title, the interpretation as body, hardcoded `self`
+ * speaker, and a NULL deadline unless the human supplies an explicit
+ * strict instant. Parent drift/revocation/scope mismatch fails WITHOUT
+ * creating anything. Never resumes the global stop control.
+ */
+export function acceptConversationProposal(
+  db: Database.Database,
+  sessionId: string,
+  proposalId: string,
+  input: AcceptConversationProposalInput,
+  options: AutonomyKeyOptions,
+): {
+  status: number;
+  body: {
+    proposal: ReturnType<typeof toProposalView>;
+    purpose: ReturnType<typeof toPurposeView> | null;
+    task: ReturnType<typeof toTaskView> | null;
+  };
+  replayed: boolean;
+} {
+  const session = requireId(sessionId, "sessionId");
+  const proposal = requireId(proposalId, "proposalId");
+  const key = requireKey(options.key);
+  const now = nowMs(options.now);
+  const scope = `proposal:${proposal}:accept`;
+  const hash = requestHash(
+    IDEMPOTENCY_OPERATIONS.acceptConversationProposal.operation,
+    IDEMPOTENCY_OPERATIONS.acceptConversationProposal.schemaVersion,
+    {
+      sessionId: session,
+      proposalId: proposal,
+      expectedVersion: input.expectedVersion,
+      deadline: input.deadline ?? null,
+      validFrom: input.validFrom ?? null,
+      validUntil: input.validUntil ?? null,
+    },
+  );
+  return withImmediate(db, () => {
+    const existing = toStoredResponse(db, scope, key);
+    if (existing !== null) {
+      if (existing.requestHash !== hash) {
+        throw new IdempotencyConflictError(scope);
+      }
+      const stored = existing.responseBody as {
+        proposal: unknown;
+        purpose: unknown;
+        task: unknown;
+      };
+      const body = parseOrValidation(
+        () =>
+          ({
+            proposal: ConversationProposalViewSchema.parse(stored.proposal),
+            purpose:
+              stored.purpose === null
+                ? null
+                : PurposeViewSchema.parse(stored.purpose),
+            task:
+              stored.task === null ? null : TaskViewSchema.parse(stored.task),
+          }) as unknown as {
+            proposal: ReturnType<typeof toProposalView>;
+            purpose: ReturnType<typeof toPurposeView> | null;
+            task: ReturnType<typeof toTaskView> | null;
+          },
+        "stored proposal accept body",
+      );
+      return { status: existing.responseStatus, body, replayed: true };
+    }
+    const row = assertOwnedProposal(db, session, proposal);
+    if (row.status !== "pending") {
+      throw new AutonomyStateConflictError(
+        `proposal ${row.id} is ${row.status} and cannot be accepted`,
+      );
+    }
+    if (row.version !== input.expectedVersion) {
+      throw new AutonomyVersionConflictError(
+        input.expectedVersion,
+        row.version,
+      );
+    }
+    const target = row.target as ConversationProposalTarget;
+    // Human date args are validated BEFORE any write; model dates never
+    // exist (staging accepts no date fields at all).
+    let deadline: string | undefined;
+    let window: { from: string | null; until: string | null } | undefined;
+    if (target === "task") {
+      if (input.validFrom !== undefined || input.validUntil !== undefined) {
+        throw new RepositoryValidationError(
+          "validity window is not accepted for task drafts",
+        );
+      }
+      if (input.deadline !== undefined) {
+        if (!isStrictAutonomyDeadline(input.deadline)) {
+          throw new RepositoryValidationError(
+            "deadline must be a strict RFC3339 instant with an explicit offset",
+          );
+        }
+        deadline = input.deadline;
+      }
+      // Re-check the explicit parent at adopt time (drift/revocation/scope
+      // mismatch fails WITHOUT creating anything).
+      const parent = readProposalParent(db, session, row);
+      if (parent.scope !== row.scope) {
+        throw new RepositoryValidationError(
+          "parent purpose must share the draft scope",
+        );
+      }
+      if (parent.status !== "active") {
+        throw new AutonomyStateConflictError(
+          `parent purpose ${parent.id} is ${parent.status}`,
+        );
+      }
+      if (parent.version !== row.expected_parent_version) {
+        throw new AutonomyVersionConflictError(
+          row.expected_parent_version as number,
+          parent.version,
+        );
+      }
+      if (
+        !isPurposeApplicableAt(
+          { validFrom: parent.valid_from, validUntil: parent.valid_until },
+          now,
+        )
+      ) {
+        throw new AutonomyStateConflictError(
+          `parent purpose ${parent.id} is not applicable now`,
+        );
+      }
+    } else {
+      if (input.deadline !== undefined) {
+        throw new RepositoryValidationError(
+          "deadline is not accepted for purpose drafts",
+        );
+      }
+      window = requireApplicabilityWindow(input.validFrom, input.validUntil);
+    }
+    // The inner create joins THIS transaction via SAVEPOINT (nest-safe
+    // withImmediate): purpose/task rows, their events, their shadow
+    // source, and their idempotency row commit or roll back atomically
+    // with the accept decision below. The inner key is the proposal id
+    // (deterministic per proposal, never a reused human key).
+    const adopted =
+      target === "purpose"
+        ? createPurpose(
+            db,
+            session,
+            {
+              scope: row.scope,
+              statement: row.source_quote,
+              kind: row.purpose_kind as PurposeKind,
+              explicit: false,
+              sourceKind: "self",
+              sourceTurnId: row.source_turn_id,
+              interpretation: row.interpretation,
+              ...(window?.from != null ? { validFrom: window.from } : {}),
+              ...(window?.until != null ? { validUntil: window.until } : {}),
+            },
+            { key: row.id, now },
+          ).body
+        : createTask(
+            db,
+            session,
+            {
+              scope: row.scope,
+              title: row.source_quote,
+              body: row.interpretation,
+              kind: row.task_kind as TaskKind,
+              speaker: "self",
+              ...(deadline !== undefined ? { deadline } : {}),
+              parentPurposeId: row.parent_purpose_id as string,
+            },
+            { key: row.id, now },
+          ).body;
+    const acceptedTargetId =
+      target === "purpose"
+        ? (adopted as ReturnType<typeof toPurposeView>).id
+        : (adopted as ReturnType<typeof toTaskView>).id;
+    const moved = db
+      .prepare(
+        "UPDATE conversation_proposals SET status = 'accepted', version = ?, updated_at = ?, accepted_target_id = ? WHERE id = ? AND status = 'pending' AND version = ?",
+      )
+      .run(row.version + 1, now, acceptedTargetId, row.id, row.version);
+    if (moved.changes !== 1) {
+      throw new AutonomyVersionConflictError(
+        input.expectedVersion,
+        row.version,
+      );
+    }
+    appendProposalEventInTx(
+      db,
+      row.id,
+      session,
+      "accepted",
+      "pending",
+      "accepted",
+      `adopted ${target} ${acceptedTargetId}`,
+      now,
+    );
+    // The stop control is NEVER touched here: a paused control stays
+    // paused (manual adoption while paused is allowed, like existing
+    // manual purpose/task creation) and never resumes globally.
+    const current = readProposal(db, row.id);
+    if (current === null) {
+      throw new RepositoryNotFoundError(`proposal ${row.id} not found`);
+    }
+    const body = {
+      proposal: toProposalView(current),
+      purpose:
+        target === "purpose"
+          ? (adopted as ReturnType<typeof toPurposeView>)
+          : null,
+      task:
+        target === "task" ? (adopted as ReturnType<typeof toTaskView>) : null,
+    };
+    storeIdempotentResponse(db, scope, key, hash, 201, body, now);
+    return { status: 201, body, replayed: false };
+  });
+}
+
+/** Adopt-time parent re-read (owned, same session; scope checked by caller). */
+function readProposalParent(
+  db: Database.Database,
+  session: string,
+  row: RawProposal,
+): RawPurpose {
+  if (row.parent_purpose_id === null) {
+    throw new RepositoryValidationError(
+      "task drafts require an explicit parent purpose",
+    );
+  }
+  return assertOwnedPurpose(db, session, row.parent_purpose_id);
+}
+
+/**
+ * Trusted human rejection: terminal, CAS-guarded, creates NOTHING (no
+ * purpose/task/preference/learning/grant write — only the proposal row +
+ * its decision history + the idempotency receipt). Never touches the stop
+ * control.
+ */
+export function rejectConversationProposal(
+  db: Database.Database,
+  sessionId: string,
+  proposalId: string,
+  expectedVersion: number,
+  options: AutonomyKeyOptions,
+): {
+  status: number;
+  body: ReturnType<typeof toProposalView>;
+  replayed: boolean;
+} {
+  const session = requireId(sessionId, "sessionId");
+  const proposal = requireId(proposalId, "proposalId");
+  const key = requireKey(options.key);
+  const now = nowMs(options.now);
+  const scope = `proposal:${proposal}:reject`;
+  const hash = requestHash(
+    IDEMPOTENCY_OPERATIONS.rejectConversationProposal.operation,
+    IDEMPOTENCY_OPERATIONS.rejectConversationProposal.schemaVersion,
+    { sessionId: session, proposalId: proposal, expectedVersion },
+  );
+  return withImmediate(db, () => {
+    const existing = toStoredResponse(db, scope, key);
+    if (existing !== null) {
+      if (existing.requestHash !== hash) {
+        throw new IdempotencyConflictError(scope);
+      }
+      const body = parseOrValidation(
+        () => ConversationProposalViewSchema.parse(existing.responseBody),
+        "stored proposal reject body",
+      );
+      return { status: existing.responseStatus, body, replayed: true };
+    }
+    const row = assertOwnedProposal(db, session, proposal);
+    if (row.status !== "pending") {
+      throw new AutonomyStateConflictError(
+        `proposal ${row.id} is ${row.status} and cannot be rejected`,
+      );
+    }
+    if (row.version !== expectedVersion) {
+      throw new AutonomyVersionConflictError(expectedVersion, row.version);
+    }
+    const moved = db
+      .prepare(
+        "UPDATE conversation_proposals SET status = 'rejected', version = ?, updated_at = ? WHERE id = ? AND status = 'pending' AND version = ?",
+      )
+      .run(row.version + 1, now, row.id, row.version);
+    if (moved.changes !== 1) {
+      throw new AutonomyVersionConflictError(expectedVersion, row.version);
+    }
+    appendProposalEventInTx(
+      db,
+      row.id,
+      session,
+      "rejected",
+      "pending",
+      "rejected",
+      null,
+      now,
+    );
+    const current = readProposal(db, row.id);
+    if (current === null) {
+      throw new RepositoryNotFoundError(`proposal ${row.id} not found`);
+    }
+    const body = toProposalView(current);
+    storeIdempotentResponse(db, scope, key, hash, 200, body, now);
     return { status: 200, body, replayed: false };
   });
 }

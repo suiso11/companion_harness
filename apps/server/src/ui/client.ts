@@ -17,6 +17,7 @@ import {
   shouldResetConflictArm,
 } from "./autonomy_state.js";
 import { NotificationPanel } from "./notification_panel.js";
+import { ProposalPanel } from "./proposal_panel.js";
 import {
   ACTION_PROGRESS_TEXT,
   type ActionCardModel,
@@ -409,6 +410,8 @@ class ConversationApp {
   private fallbackTimer: number | null = null;
   /** AV05 notification consumer (readonly feed + explicit ack only). */
   private notifications: NotificationPanel | null = null;
+  /** AV03 conversation-proposal consumer (quiet review + explicit adopt). */
+  private proposals: ProposalPanel | null = null;
 
   private readonly list: HTMLElement;
   private readonly notice: HTMLElement;
@@ -526,6 +529,12 @@ class ConversationApp {
   }
 
   async boot(): Promise<void> {
+    // The session is not ready yet: keep Send disabled until ensureSession
+    // resolves so an early click can never be silently dropped (send()
+    // returns early while sessionId is null). renderComposer() re-enables
+    // once the session exists; the existing beforeEach toBeEnabled() then
+    // correctly waits for session readiness as an event gate.
+    this.sendButton.disabled = true;
     this.form.addEventListener("submit", (event) => {
       event.preventDefault();
       void this.send();
@@ -563,6 +572,10 @@ class ConversationApp {
       }
     });
     await this.ensureSession();
+    // Session outcome is known now: repaint the composer so Send is
+    // enabled exactly when a session exists (event gate for the test and
+    // for early user clicks), still disabled when creation failed.
+    this.renderComposer();
     // AV autonomy panel: usable without any model (plain DOM + HTTP).
     // Fail-open locally: a missing section never breaks the conversation.
     let shadow: ShadowPanel | null = null;
@@ -609,7 +622,44 @@ class ConversationApp {
         this.notifications = notices;
         this.input.addEventListener("input", () => {
           this.notifications?.notifyComposureChanged();
+          try {
+            this.proposals?.notifyComposureChanged();
+          } catch {
+            // Best effort: composer paint never breaks for proposals.
+          }
         });
+        // AV03 conversation proposals: quiet review + explicit human adopt.
+        // Missing nodes fail closed with a visible status (SSR ships
+        // together). Adoption refreshes the autonomy panel via its public
+        // refreshAll without losing unrelated drafts.
+        try {
+          const drafts = new ProposalPanel({
+            getSessionId: () => this.sessionId,
+            isNaturalBreak: () =>
+              this.activeRunId === null &&
+              this.input.value.trim().length === 0 &&
+              document.visibilityState === "visible",
+            http: {
+              get: (path) => fetchJson(path),
+              post: (path, payload, key) => postJson(path, payload, key),
+            },
+            onAdopted: () => {
+              void panel.refreshAll();
+            },
+          });
+          drafts.bind();
+          drafts.notifySessionChanged();
+          this.proposals = drafts;
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : "proposal failed";
+          const statusNode = document.getElementById("proposal-status");
+          if (statusNode !== null) {
+            statusNode.textContent = message;
+          } else {
+            throw error;
+          }
+        }
       } catch (error) {
         const message =
           error instanceof Error ? error.message : "notification failed";
@@ -2370,7 +2420,15 @@ class ConversationApp {
    * posting; an explicit resend reuses that frozen request as-is.
    */
   private async send(): Promise<void> {
-    if (this.sessionId === null || this.activeRunId !== null || this.sending) {
+    if (this.sessionId === null) {
+      // Session not ready (or creation failed): never silently drop the
+      // typed text — keep it and surface a notice so an early submit
+      // (e.g. Enter before boot finished) is retryable, not lost.
+      this.showNotice("セッションを開始できませんでした");
+      this.renderComposer();
+      return;
+    }
+    if (this.activeRunId !== null || this.sending) {
       return;
     }
     if (this.pendingRequest === null) {
@@ -3873,8 +3931,11 @@ class ConversationApp {
   private renderComposer(): void {
     // Submit is disabled while a run is active AND while a send/post
     // round-trip (including the context freeze) is in flight; the input
-    // itself stays enabled (§16.3 type-while-active).
-    const busy = this.activeRunId !== null || this.sending;
+    // itself stays enabled (§16.3 type-while-active). A missing session
+    // (boot still resolving ensureSession, or session creation failed)
+    // also disables Send so an early submit can never be silently dropped.
+    const busy =
+      this.activeRunId !== null || this.sending || this.sessionId === null;
     // An adopted Action run keeps the composer busy (Send disabled), but
     // its Stop follows the ACTUAL execution marker/cancellability: after
     // the marker (or terminal) the generic Stop is hidden AND disabled —
@@ -3887,11 +3948,18 @@ class ConversationApp {
     this.stopButton.hidden = !stopOffered;
     this.stopButton.disabled = !stopOffered;
     // A composer/run transition may open a natural break for deferred
-    // routine notices (never focuses, never clobbers text).
+    // routine notices (never focuses, never clobbers text). The proposal
+    // brief re-evaluates here too so it hides for the whole active run
+    // (subscribe() sets activeRunId then paints via this method).
     try {
       this.notifications?.notifyComposureChanged();
     } catch {
       // Best effort: composer paint never breaks for notices.
+    }
+    try {
+      this.proposals?.notifyComposureChanged();
+    } catch {
+      // Best effort: composer paint never breaks for proposals.
     }
   }
 
@@ -3900,6 +3968,18 @@ class ConversationApp {
     this.activeTurnId = null;
     this.closeStream();
     this.renderComposer();
+    // AV03: a settled run may have staged new drafts — re-read the quiet
+    // list (plain GET, never taskization) and re-evaluate the natural break.
+    try {
+      this.proposals?.notifyRunSettled();
+    } catch {
+      // Best effort: run teardown never breaks for proposals.
+    }
+    try {
+      this.proposals?.notifyComposureChanged();
+    } catch {
+      // Best effort: composer paint never breaks for proposals.
+    }
   }
 
   private closeStream(): void {

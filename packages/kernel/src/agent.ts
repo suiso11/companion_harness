@@ -918,6 +918,98 @@ export const AGENT_TASK_OPEN_PARAMETERS = Object.freeze({
 }) as unknown as Record<string, unknown>;
 
 /**
+ * Explicit closed JSON parameter schemas for the proposal-only
+ * `purpose.propose` / `task.propose` (AV03): the model supplies only the
+ * strict draft input (scope/draft-kind/kind/quote/interpretation, plus the
+ * explicit parent for task drafts). Source identity (session/run/turn) is
+ * ALWAYS server-derived from the calling run — no session/run/turn/source
+ * fields exist — and NO date fields exist at all (strict objects reject
+ * `deadline` / `validFrom` / `validUntil` before anything stages).
+ */
+export const AGENT_PURPOSE_PROPOSE_PARAMETERS = Object.freeze({
+  type: "object",
+  properties: Object.freeze({
+    scope: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+    draftKind: Object.freeze({
+      type: "string",
+      enum: Object.freeze(["casual", "wish", "problem", "task", "deadline"]),
+    }),
+    purposeKind: Object.freeze({
+      type: "string",
+      enum: Object.freeze([
+        "goal",
+        "preference",
+        "constraint",
+        "permission",
+        "wish",
+        "temporary_state",
+      ]),
+    }),
+    sourceQuote: Object.freeze({
+      type: "string",
+      minLength: 1,
+      maxLength: 2000,
+    }),
+    interpretation: Object.freeze({
+      type: "string",
+      minLength: 1,
+      maxLength: 2000,
+    }),
+  }),
+  required: Object.freeze([
+    "scope",
+    "draftKind",
+    "purposeKind",
+    "sourceQuote",
+    "interpretation",
+  ]),
+  additionalProperties: false,
+}) as unknown as Record<string, unknown>;
+
+export const AGENT_TASK_PROPOSE_PARAMETERS = Object.freeze({
+  type: "object",
+  properties: Object.freeze({
+    scope: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+    draftKind: Object.freeze({
+      type: "string",
+      enum: Object.freeze(["casual", "wish", "problem", "task", "deadline"]),
+    }),
+    taskKind: Object.freeze({
+      type: "string",
+      enum: Object.freeze(["chat", "wish", "problem", "task"]),
+    }),
+    sourceQuote: Object.freeze({
+      type: "string",
+      minLength: 1,
+      maxLength: 256,
+    }),
+    interpretation: Object.freeze({
+      type: "string",
+      minLength: 1,
+      maxLength: 2000,
+    }),
+    parentPurposeId: Object.freeze({
+      type: "string",
+      pattern: AGENT_UUID_PATTERN,
+    }),
+    expectedParentVersion: Object.freeze({
+      type: "integer",
+      minimum: 1,
+    }),
+  }),
+  required: Object.freeze([
+    "scope",
+    "draftKind",
+    "taskKind",
+    "sourceQuote",
+    "interpretation",
+    "parentPurposeId",
+    "expectedParentVersion",
+  ]),
+  additionalProperties: false,
+}) as unknown as Record<string, unknown>;
+
+/**
  * Broker-visible M1 tools the agent may advertise, each with its explicit
  * closed parameter schema. Unknown/unregistered names are never advertised:
  * `buildAgentToolDefinitions` skips descriptors outside this map.
@@ -952,6 +1044,8 @@ const AGENT_PROPOSAL_TOOL_PARAMETERS: Readonly<
   "memory.correct": AGENT_MEMORY_CORRECT_PARAMETERS,
   "memory.retire": AGENT_MEMORY_RETIRE_PARAMETERS,
   "memory.reactivate": AGENT_MEMORY_RETIRE_PARAMETERS,
+  "purpose.propose": AGENT_PURPOSE_PROPOSE_PARAMETERS,
+  "task.propose": AGENT_TASK_PROPOSE_PARAMETERS,
 };
 
 /** Deep copy one advertised parameter schema (callers cannot mutate it). */
