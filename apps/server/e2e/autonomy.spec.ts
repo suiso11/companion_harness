@@ -374,7 +374,7 @@ test("selection clears drafts and late detail responses never restore them", asy
   const sessionId = await page.evaluate(() =>
     localStorage.getItem("ch.sessionId"),
   );
-  const purposes = await api(
+  const purposes = await pageApi(
     page,
     "GET",
     `/api/sessions/${sessionId}/purposes?limit=50`,
@@ -458,7 +458,7 @@ test("selection clears drafts and late detail responses never restore them", asy
     "",
   );
 
-  const tasks = await api(
+  const tasks = await pageApi(
     page,
     "GET",
     `/api/sessions/${sessionId}/tasks?limit=50`,
@@ -536,7 +536,7 @@ test("stale drafts cannot apply after a backend mutation plus refresh", async ({
   const target = (
     (listed.body as { items: Record<string, unknown>[] }).items ?? []
   ).find((row) => row.statement === "ui version target");
-  const corrected = await api(
+  const corrected = await pageApi(
     page,
     "POST",
     `${base}/purposes/${target?.id}/correct`,
