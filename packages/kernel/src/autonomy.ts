@@ -2590,6 +2590,9 @@ export function stageConversationProposal(
       );
     }
   }
+  // Semantic dedup key: the source RUN is audit only (stored on the row)
+  // and must not participate in dedup — a retry runs under a new run id
+  // for the same turn/draft and must replay the still-pending draft.
   const hash = requestHash(
     IDEMPOTENCY_OPERATIONS.stageConversationProposal.operation,
     IDEMPOTENCY_OPERATIONS.stageConversationProposal.schemaVersion,
@@ -2605,7 +2608,6 @@ export function stageConversationProposal(
       parentPurposeId: draft.parentPurposeId ?? null,
       expectedParentVersion: draft.expectedParentVersion ?? null,
       sourceTurnId: sourceTurn,
-      sourceRunId: sourceRun,
     },
   );
   const scope = `session:${session}:conv_proposal`;

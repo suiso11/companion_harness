@@ -3865,11 +3865,18 @@ class ConversationApp {
     this.stopButton.hidden = !stopOffered;
     this.stopButton.disabled = !stopOffered;
     // A composer/run transition may open a natural break for deferred
-    // routine notices (never focuses, never clobbers text).
+    // routine notices (never focuses, never clobbers text). The proposal
+    // brief re-evaluates here too so it hides for the whole active run
+    // (subscribe() sets activeRunId then paints via this method).
     try {
       this.notifications?.notifyComposureChanged();
     } catch {
       // Best effort: composer paint never breaks for notices.
+    }
+    try {
+      this.proposals?.notifyComposureChanged();
+    } catch {
+      // Best effort: composer paint never breaks for proposals.
     }
   }
 
