@@ -26,12 +26,15 @@ import {
   openKernelDatabase,
   RunEngine,
 } from "@companion/kernel";
-import { describe, expect, it, afterEach } from "vitest";
+import type Database from "better-sqlite3";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   type CreatedServerApp,
   createApp,
   type RemotePasswordVerifier,
 } from "../src/app.js";
+import { type StartedServer, startServer } from "../src/bootstrap.js";
+import { runSetPasswordCli } from "../src/cli.js";
 import {
   DEFAULT_REMOTE_ABSOLUTE_TIMEOUT_MS,
   DEFAULT_REMOTE_IDLE_TIMEOUT_MS,
@@ -53,12 +56,6 @@ import {
   hashRemoteToken,
   type RemoteSessionStore,
 } from "../src/remote_session.js";
-import {
-  type StartedServer,
-  startServer,
-} from "../src/bootstrap.js";
-import { runSetPasswordCli } from "../src/cli.js";
-import type Database from "better-sqlite3";
 
 const ALLOWED_ORIGIN = "https://happy-meerkat.ts.net";
 const ALLOWED_HOST = "happy-meerkat.ts.net";
@@ -162,7 +159,11 @@ function loginHeaders(cookie?: string): Record<string, string> {
 async function loginAs(
   f: Fixture,
   password: string,
-): Promise<{ status: number; cookie: string | null; setCookie: string | null }> {
+): Promise<{
+  status: number;
+  cookie: string | null;
+  setCookie: string | null;
+}> {
   const res = await f.app.request("/api/remote/login", {
     method: "POST",
     headers: loginHeaders(),
@@ -172,8 +173,7 @@ async function loginAs(
   const pair = setCookie?.split(";")[0] ?? null;
   return {
     status: res.status,
-    cookie:
-      pair !== null && pair.startsWith("companion_remote=") ? pair : null,
+    cookie: pair?.startsWith("companion_remote=") === true ? pair : null,
     setCookie,
   };
 }
@@ -313,7 +313,9 @@ describe("password file (step 1)", () => {
 
   it("refuses missing/directory/malformed password files", () => {
     expect(() =>
-      loadRemotePasswordRecordSync(join(tmpdir(), `no-such-${randomUUID()}.json`)),
+      loadRemotePasswordRecordSync(
+        join(tmpdir(), `no-such-${randomUUID()}.json`),
+      ),
     ).toThrow(ServerConfigError);
     const dir = mkdtempSync(join(tmpdir(), "companion-remote-pwbad-"));
     expect(() => loadRemotePasswordRecordSync(dir)).toThrow(ServerConfigError);
@@ -376,7 +378,11 @@ describe("set-password CLI (step 1)", () => {
       }),
     ).rejects.toThrow(/do not match/);
     await expect(
-      runSetPasswordCli(["set-password"], cliEnv(passwordFile), async () => "short"),
+      runSetPasswordCli(
+        ["set-password"],
+        cliEnv(passwordFile),
+        async () => "short",
+      ),
     ).rejects.toThrow();
     // Secrets never ride argv: any extra argument is rejected.
     await expect(
@@ -426,9 +432,9 @@ describe("login sessions (steps 2-4)", () => {
         { key: randomUUID(), now: T0, timeZone: "UTC" },
       );
       void runId;
-      const runs = f.db
-        .prepare("SELECT id FROM runs LIMIT 1")
-        .get() as { id: string } | undefined;
+      const runs = f.db.prepare("SELECT id FROM runs LIMIT 1").get() as
+        | { id: string }
+        | undefined;
       if (runs !== undefined) {
         const sse = await f.app.request(
           `/api/sessions/${sessionId}/runs/${runs.id}/events/stream`,
@@ -478,9 +484,7 @@ describe("login sessions (steps 2-4)", () => {
       const page = await f.app.request("/", {
         headers: { host: ALLOWED_HOST, cookie },
       });
-      expect((await page.text()).toLowerCase()).toContain(
-        "/assets/client.js",
-      );
+      expect((await page.text()).toLowerCase()).toContain("/assets/client.js");
     } finally {
       f.close();
     }
@@ -517,11 +521,15 @@ describe("login sessions (steps 2-4)", () => {
       // The global counter (not IP-keyed) now locks every attempt.
       const locked = await loginAs(f, WRONG);
       expect(locked.status).toBe(429);
-      expect(await (await f.app.request("/api/remote/login", {
-        method: "POST",
-        headers: loginHeaders(),
-        body: JSON.stringify({ password: PASSWORD }),
-      })).json()).toEqual({
+      expect(
+        await (
+          await f.app.request("/api/remote/login", {
+            method: "POST",
+            headers: loginHeaders(),
+            body: JSON.stringify({ password: PASSWORD }),
+          })
+        ).json(),
+      ).toEqual({
         error: { code: "rate_limited", message: "too many attempts" },
       });
       // After the lockout window a correct password succeeds again.
@@ -558,9 +566,7 @@ describe("login sessions (steps 2-4)", () => {
       expect(reuse.status).toBe(401);
       // The row is gone from SQLite (not merely flagged).
       const token = cookie.split("=")[1] as string;
-      expect(
-        f.store.lookup(hashRemoteToken(token)),
-      ).toBeNull();
+      expect(f.store.lookup(hashRemoteToken(token))).toBeNull();
     } finally {
       f.close();
     }
@@ -790,9 +796,13 @@ describe("remote bootstrap over HTTP (step 4)", () => {
     expect(setCookie).toContain("SameSite=Strict");
     const cookie = (setCookie.split(";")[0] ?? "").trim();
     expect(cookie).toMatch(/^companion_remote=[0-9a-f]{64}$/);
-    expect(await (await fetch(`${base}/health/ready`, {
-      headers: { cookie },
-    })).status).toBe(200);
+    expect(
+      await (
+        await fetch(`${base}/health/ready`, {
+          headers: { cookie },
+        })
+      ).status,
+    ).toBe(200);
     expect(
       await (
         await fetch(`${base}/api/sessions`, {
