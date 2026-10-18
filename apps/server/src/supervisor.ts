@@ -465,21 +465,13 @@ export function writeSupervisorState(
 // Lazy dynamic import avoided in sync code: use createRequire-free sync fs.
 
 function syncFile(path: string): void {
-  // Durability hint only: must never fail the write. On Windows, fsync on a
-  // read-only handle throws EPERM, and dir fsync is unsupported, so skip.
-  if (process.platform === "win32") {
-    return;
-  }
+  // Durability hint: sync failures must propagate (never report durable).
+  // Open read-write: on Windows, fsync on a read-only handle throws EPERM,
+  // while a writable handle syncs correctly.
   let fd = -1;
   try {
-    fd = openSync(path, "r");
-    try {
-      nodeFsyncSync(fd);
-    } catch {
-      // Best effort.
-    }
-  } catch {
-    return;
+    fd = openSync(path, "r+");
+    nodeFsyncSync(fd);
   } finally {
     if (fd >= 0) {
       try {
@@ -492,20 +484,15 @@ function syncFile(path: string): void {
 }
 
 function syncDir(path: string): void {
-  // POSIX-only durability hint; Windows has no dir fsync. Never throw.
+  // Directory fsync is unsupported on Windows; skip only there.
+  // On POSIX failures propagate (never report durable).
   if (process.platform === "win32") {
     return;
   }
   let fd = -1;
   try {
     fd = openSync(path, "r");
-    try {
-      nodeFsyncSync(fd);
-    } catch {
-      // Best effort.
-    }
-  } catch {
-    return;
+    nodeFsyncSync(fd);
   } finally {
     if (fd >= 0) {
       try {
