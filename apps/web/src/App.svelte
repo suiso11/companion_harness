@@ -201,16 +201,16 @@ function showNotice(text: string): void {
   notice = text;
 }
 
-  function composerSendDisabled(): boolean {
-    // Session-gated like the vanilla composer (renderComposer): Send is
-    // enabled as soon as the session exists, without waiting for the full
-    // boot (history + proposals + active-run discovery) to finish, so the
-    // control never stays disabled through a slow boot and early submits
-    // reach send() instead of being silently dropped on a disabled button.
-    if (sessionId === null || authExpired) return true;
-    if (sending || activeRunId !== null) return true;
-    return false;
-  }
+function composerSendDisabled(): boolean {
+  // Session-gated like the vanilla composer (renderComposer): Send is
+  // enabled as soon as the session exists, without waiting for the full
+  // boot (history + proposals + active-run discovery) to finish, so the
+  // control never stays disabled through a slow boot and early submits
+  // reach send() instead of being silently dropped on a disabled button.
+  if (sessionId === null || authExpired) return true;
+  if (sending || activeRunId !== null) return true;
+  return false;
+}
 
 function composerStopVisible(): boolean {
   if (activeRunId === null) return false;
