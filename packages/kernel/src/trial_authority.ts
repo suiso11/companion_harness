@@ -1569,6 +1569,13 @@ export function authorityDeadlineMs(
       try {
         rule = parseConstraintRule(JSON.parse(row.rule_json));
       } catch {
+        // Malformed stored rule fails closed as an unstructured HOLD in
+        // the task scope: narrow the deadline to its valid_from (mirrors
+        // activeConstraints, which HOLDS the same row once it applies).
+        const t = db
+          .prepare("SELECT scope FROM autonomy_tasks WHERE id=?")
+          .get(taskId) as { scope: string } | undefined;
+        if (t && row.scope === t.scope) deadline = Math.min(deadline, ms);
         continue;
       }
       const taskScope = (

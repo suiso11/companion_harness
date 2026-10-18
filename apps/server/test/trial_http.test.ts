@@ -604,6 +604,34 @@ describe("trial HTTP proposal lifecycle", () => {
       fixture.close();
     }
   });
+
+  it("expires a proposal that falls outside the default list window", async () => {
+    const fixture = await makeApp(true);
+    try {
+      const { app, repo } = fixture;
+      const created = await post(app, "/api/sessions", {}, randomUUID());
+      const sessionId = (created.body as { sessionId: string }).sessionId;
+      const { taskId } = stageAuthority(repo, sessionId, "b7");
+      const base = `/api/sessions/${sessionId}/trials`;
+
+      let firstId = "";
+      for (let i = 0; i < 55; i++) {
+        const staged = await post(app, base, stageBody(taskId), randomUUID());
+        expect(staged.status).toBe(201);
+        if (i === 0) firstId = (staged.body as { id: string }).id;
+      }
+      // The oldest proposal is outside the default list limit of 50, but an
+      // explicit expire by id must still succeed (not 404).
+      const expired = await post(app, `${base}/${firstId}/expire`, {});
+      expect(expired.status).toBe(200);
+      expect((expired.body as { status: string }).status).toBe("expired");
+      const reread = await get(app, `${base}/${firstId}`);
+      expect(reread.status).toBe(200);
+      expect((reread.body as { status: string }).status).toBe("expired");
+    } finally {
+      fixture.close();
+    }
+  });
 });
 
 describe("trial config parsing", () => {

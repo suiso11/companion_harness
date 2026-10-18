@@ -537,4 +537,50 @@ describe("codex3/3: malformed future-constraint timestamps fail closed", () => {
       closeKernelDatabase(handle);
     }
   });
+
+  it("narrows the deadline for a future constraint with malformed rule_json", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      const { task } = goalTask(repo, sessionId, "b1rule");
+      const expiry = new Date(NOW + 3600_000).toISOString();
+      const validFrom = new Date(NOW + 600_000).toISOString();
+      const created = repo.createAutonomyPurpose(
+        sessionId,
+        {
+          scope: "b1rule",
+          statement: "future deny",
+          kind: "constraint",
+          explicit: true,
+          sourceKind: "user",
+          validFrom,
+          constraintRule: {
+            denyWorkspace: ["ws"],
+            denyOperation: [],
+            denyWritePath: [],
+          },
+        },
+        { key: randomUUID(), now: NOW + 4 },
+      );
+      // Corrupt the stored rule below the API: fail-closed HOLD must narrow
+      // the deadline to valid_from instead of being skipped.
+      handle.raw
+        .prepare(
+          "UPDATE trial_constraint_rules SET rule_json='not-json' WHERE purpose_id=?",
+        )
+        .run(created.body.id);
+      expect(
+        repo.trialAuthorityDeadline(
+          sessionId,
+          task.id,
+          "implement",
+          ["src/a.ts"],
+          "ws",
+          expiry,
+          NOW + 5,
+        ),
+      ).toBe(Date.parse(validFrom));
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
 });

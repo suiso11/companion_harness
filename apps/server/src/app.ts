@@ -2985,11 +2985,9 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     }
     try {
       repo.expireTrial(session.id, proposal.id, now());
-      const listed = repo.listTrials(session.id, {});
-      const found = listed.items.find((item) => item.id === proposal.id);
-      if (found === undefined) {
-        return apiError(c, 404, "not_found", "resource not found");
-      }
+      // Read by id directly: paging the list would 404 proposals that fall
+      // outside the default list limit even though expire succeeded.
+      const found = repo.readTrial(session.id, proposal.id);
       const body = TrialProposalViewSchema.parse(found);
       logger.info("http.trials.expire", {
         sessionId: session.id,
