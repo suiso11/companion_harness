@@ -247,7 +247,14 @@ describe("systemctl show parsing", () => {
 describe("readProcessIdentity (real /proc)", () => {
   it("resolves own pid and never throws for pid 1", async () => {
     const self = await readProcessIdentity(process.pid);
-    expect(typeof self).toBe("object");
+    if (process.platform === "win32") {
+      // No /proc on Windows: identity or unknown — never throws.
+      expect(
+        self === "gone" || self === "unknown" || typeof self === "object",
+      ).toBe(true);
+    } else {
+      expect(typeof self).toBe("object");
+    }
     if (typeof self !== "string") {
       expect(self.pid).toBe(process.pid);
       expect(/^[1-9][0-9]{0,19}$/.test(self.processStartTicks)).toBe(true);
