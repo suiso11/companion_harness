@@ -17,6 +17,7 @@
 - 現況追記（2026-10-15、履歴保持・上記ラベルは書き換えない）: I02/I03 実装＋単体回帰は適用済み（既存 suite green 継承、再実行なし）で I05 相当の live HTTP→synthetic gateway→REAL remind CLI tempDB smoke を完了（I05 現況参照）。I01/I04 正式採用判断・Windows manual・現行 CI は未完維持。perception/export/deletion は未実装維持。
 - 現況追記（2026-10-18、履歴保持・上記ラベルは書き換えない）: 残存実装の棚卸しを実施。判断・確認待ち事項は [decision_inputs_2026-10-18.md](decision_inputs_2026-10-18.md) に集約。operations.md の Remind I01–I05 行は同日 supersede 追記済み。
 - 現況追記（2026-10-18 検証、履歴保持・ラベル/checkbox不変）: origin/master `1596690`（PR #41 merge）で CI run `39097183807` が windows/ubuntu × check/e2e 全 success、open PR 0。decision_inputs B1–B5 の5レビュー指摘は master コードで修正済み（B1 frozen-inherited env freeze `packages/connector-mcp/src/client.ts`、B2 sub-ms 拒否 `packages/connector-calendar/src/rescheduleWrite.ts` `isStrictCalendarInstant`、B3 注入 binding の derivePort、B4 identity 長さ pre-DB preflight `apps/server/src/bootstrap.ts`、B5 structuredContent 優先 `createWrite.ts`/`rescheduleWrite.ts`）。PR51 Codex 指摘14件は13件修正確認、残1件（restart fence 対 recoverOnBoot 順序）は booted claimed grant を fence が revoke せず recovery で決着させる実装で対応済みと判断。AV trial E2E は run7 で scenario A（bridge-exit:0 authorized）/B（STOP→revoked bridge-exit:143）とも pass。判断待ち（decision_inputs）・live/OAuth・Windows manual・remind 書込は未着手維持。
+- 現況追記（2026-10-18 手順書 PROPOSAL、履歴保持・ラベル/checkbox不変）: haruka 2026-10-18 決定（C08/C11-01/C11-07/C15/D1/D2/M5）対応の手順草案 [procedures_2026-10-18.md](procedures_2026-10-18.md) を作成。PROPOSAL であり採用・gate 閉鎖・live 実行なし。
 
 ## 凡例・件数・着手順
 | 親範囲 | 親数 | サブチェック数 |
