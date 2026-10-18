@@ -82,12 +82,22 @@ export const MEMORY_PROVENANCE_SOURCE = "companion:conversation";
 /** Fixed audit runId marker for pre-answer recall calls (never a real run). */
 export const MEMORY_RECALL_RUN_MARKER = "companion-recall";
 
+/** Fixed privacy origin stamped on Companion-written events/records. */
+export const MEMORY_PRIVACY_ORIGIN_CONVERSATION = "conversation";
+/** Fixed privacy sensitivity for `event.append` (F-I01-05 P5). */
+export const MEMORY_PRIVACY_SENSITIVITY_NORMAL = "normal" as const;
+export type MemoryPrivacySensitivity = "normal" | "sensitive";
+
 /**
- * Provenance kind on recalled items (F-I01-04). Additive remind field: the
- * closed set is the same extraction kinds; any other value is tolerated as
- * an unknown kind (never presented as fact, F-I01-01/F-I01-04).
+ * Provenance kind on recalled items (F-I01-04). Additive remind field: only
+ * the extraction kinds are carried as facts/inferences; `correction`
+ * (remind#16) is tolerated as an unknown kind and never presented as a
+ * fact (F-I01-01/F-I01-04, inference framing downstream).
  */
 export type MemoryRecallItemKind = "user_fact" | "model_inference" | "summary";
+
+/** Recall `vector` mode (remind#16, metadata only, never content). */
+export type MemoryRecallVector = "disabled" | "used" | "unavailable";
 
 /**
  * One recalled item passed through the recall hook to the agent (kernel
@@ -130,12 +140,29 @@ const EXTRACT_KINDS: ReadonlySet<string> = new Set([
   "summary",
 ]);
 
+/** Closed extraction sensitivities (F-I01-05 P5; undecidable -> sensitive). */
+const EXTRACT_SENSITIVITIES: ReadonlySet<string> = new Set([
+  "normal",
+  "sensitive",
+]);
+
+/** Closed recall vector modes (remind#16; invalid -> absent, metadata only). */
+const RECALL_VECTORS: ReadonlySet<string> = new Set([
+  "disabled",
+  "used",
+  "unavailable",
+]);
+
 /** Fixed extraction system instruction (deterministic, no conversation). */
 export const MEMORY_EXTRACT_SYSTEM_PROMPT =
   "Extract durable memories from the conversation as strict JSON only. " +
   "Respond with exactly one JSON object of the form " +
-  '{"memories":[{"body":"...","kind":"..."}]} where kind is one of ' +
-  "user_fact, model_inference, summary. " +
+  '{"memories":[{"body":"...","kind":"...","sensitivity":"..."}]} where kind ' +
+  "is one of user_fact, model_inference, summary and sensitivity is one of " +
+  "normal, sensitive. " +
+  "Decide sensitivity at the same step that decides kind: mark sensitive " +
+  "anything personal, identifying, credential-like, health, or otherwise " +
+  "non-public; when undecidable, use sensitive. " +
   "Include only stable user facts, durable preferences, or decisions worth " +
   "remembering across sessions. Exclude greetings, chit-chat, and anything " +
   "already quoted verbatim. At most 8 items. No prose, no markdown, JSON only.";
@@ -367,6 +394,7 @@ export class MemoryManageCancelled extends Error {
 interface ExtractedMemory {
   readonly body: string;
   readonly kind: string;
+  readonly sensitivity: MemoryPrivacySensitivity;
 }
 
 function countCodePoints(text: string): number {
@@ -419,10 +447,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 /**
  * Strict extraction-output validation: exact `{ memories: [...] }` shape,
- * at most MEMORY_EXTRACT_MAX_ITEMS items, each an exact `{ body, kind }`
- * object with a 1..MEMORY_EXTRACT_BODY_MAX_CP body and a closed kind.
- * Unknown keys, wrong types, and over-bound items are dropped (never
- * repaired); zero valid items yields no memory.
+ * at most MEMORY_EXTRACT_MAX_ITEMS items. Each item must carry exactly
+ * `{ body, kind }` plus an optional `sensitivity` (F-I01-05 P5): no other
+ * keys are allowed. Body/kind stay strict (invalid drops the item); a
+ * missing/invalid/undecidable sensitivity fails closed to `sensitive`
+ * (the item is kept, never upgraded to `normal`).
+ * Zero valid items yields no memory.
  */
 export function parseExtractionOutput(text: string): ExtractedMemory[] {
   let parsed: unknown;
@@ -448,14 +478,26 @@ export function parseExtractionOutput(text: string): ExtractedMemory[] {
       continue;
     }
     const itemKeys = Object.keys(item);
+    const hasBody = itemKeys.includes("body");
+    const hasKind = itemKeys.includes("kind");
+    const hasSensitivity = itemKeys.includes("sensitivity");
+    if (!hasBody || !hasKind) {
+      continue;
+    }
+    // Exact-key discipline: only body/kind plus the additive sensitivity.
     if (
-      itemKeys.length !== 2 ||
-      !itemKeys.includes("body") ||
-      !itemKeys.includes("kind")
+      itemKeys.length !== (hasSensitivity ? 3 : 2) ||
+      itemKeys.some(
+        (key) => key !== "body" && key !== "kind" && key !== "sensitivity",
+      )
     ) {
       continue;
     }
-    const { body, kind } = item as { body?: unknown; kind?: unknown };
+    const { body, kind, sensitivity } = item as {
+      body?: unknown;
+      kind?: unknown;
+      sensitivity?: unknown;
+    };
     if (
       typeof body !== "string" ||
       typeof kind !== "string" ||
@@ -463,6 +505,10 @@ export function parseExtractionOutput(text: string): ExtractedMemory[] {
     ) {
       continue;
     }
+    const resolvedSensitivity: MemoryPrivacySensitivity =
+      typeof sensitivity === "string" && EXTRACT_SENSITIVITIES.has(sensitivity)
+        ? (sensitivity as MemoryPrivacySensitivity)
+        : "sensitive";
     const size = countCodePoints(body);
     if (size < 1 || size > MEMORY_EXTRACT_BODY_MAX_CP) {
       continue;
@@ -481,7 +527,7 @@ export function parseExtractionOutput(text: string): ExtractedMemory[] {
     if (!clean) {
       continue;
     }
-    out.push({ body, kind });
+    out.push({ body, kind, sensitivity: resolvedSensitivity });
   }
   return out;
 }
@@ -501,14 +547,19 @@ export interface ParsedRecallItem {
 
 /**
  * Validate recall response data: closed shape, bounded items. Additive
- * item fields (`kind`, `revision` from remind) are read tolerantly:
- * absent fields are allowed, a kind outside the closed set becomes an
- * unknown kind, and a non-positive-safe-integer revision is treated as
- * absent (F-I01-01, F-I01-04). Everything else keeps the strict shape.
+ * item fields (`kind`, `revision` from remind#16) are read tolerantly:
+ * absent fields are allowed, a kind outside the closed set (including a
+ * missing field) becomes an unknown kind, and a non-positive-safe-integer
+ * revision is treated as absent (F-I01-01, F-I01-04). The top-level
+ * `vector` mode (disabled/used/unavailable) is metadata only and likewise
+ * treated as absent when invalid (F-I01-05). Everything else keeps the
+ * strict shape. Grant pinning prefers this recall `revision` (exposure
+ * carries it; grants copy the exposure) with the existing unknown fallback.
  */
 export function parseRecallData(data: Record<string, unknown> | null): {
   recallId: string;
   items: ParsedRecallItem[];
+  vector?: MemoryRecallVector;
 } | null {
   if (data === null || typeof data.recallId !== "string") {
     return null;
@@ -546,10 +597,14 @@ export function parseRecallData(data: Record<string, unknown> | null): {
     ) {
       continue;
     }
-    // Additive provenance fields (F-I01-04): only the closed kind set is
-    // accepted; any other value (including a missing field) stays unknown
-    // and is never presented as a user fact. Revision must be a positive
-    // safe integer; absent/invalid means unknown revision.
+    // Additive provenance fields (F-I01-04/F-I04-07, remind#16): only
+    // the closed extraction kind set is carried; `correction` and any
+    // other value (including a missing field) stays unknown and is never
+    // presented as a user fact (kernel inference framing covers
+    // model_inference/summary plus unknown/correction). Revision must be
+    // a positive safe integer; absent/invalid means unknown revision
+    // (grant keeps the existing exposure-copy fallback, preferring the
+    // recall revision when available).
     const itemKind: MemoryRecallItemKind | undefined =
       typeof kind === "string" && EXTRACT_KINDS.has(kind)
         ? (kind as MemoryRecallItemKind)
@@ -567,7 +622,16 @@ export function parseRecallData(data: Record<string, unknown> | null): {
       ...(itemRevision !== undefined ? { revision: itemRevision } : {}),
     });
   }
-  return { recallId, items };
+  const rawVector: unknown = (data as Record<string, unknown>).vector;
+  const vector: MemoryRecallVector | undefined =
+    typeof rawVector === "string" && RECALL_VECTORS.has(rawVector)
+      ? (rawVector as MemoryRecallVector)
+      : undefined;
+  return {
+    recallId,
+    items,
+    ...(vector !== undefined ? { vector } : {}),
+  };
 }
 
 export function createMemoryService(
@@ -642,7 +706,7 @@ export function createMemoryService(
       bytes?: number;
       durationMs?: number;
       attempt?: number;
-      status?: number;
+      status?: number | string;
     },
   ): void => {
     try {
@@ -985,7 +1049,11 @@ export function createMemoryService(
       if (!isRecord(memory)) {
         continue;
       }
-      const { body, kind } = memory as { body?: unknown; kind?: unknown };
+      const { body, kind, sensitivity } = memory as {
+        body?: unknown;
+        kind?: unknown;
+        sensitivity?: unknown;
+      };
       if (
         typeof body !== "string" ||
         typeof kind !== "string" ||
@@ -995,6 +1063,13 @@ export function createMemoryService(
       ) {
         continue;
       }
+      // F-I01-05 P5: AI decides sensitivity with kind; missing/invalid
+      // fails closed to sensitive (never upgraded to normal here).
+      const resolvedSensitivity: MemoryPrivacySensitivity =
+        typeof sensitivity === "string" &&
+        EXTRACT_SENSITIVITIES.has(sensitivity)
+          ? (sensitivity as MemoryPrivacySensitivity)
+          : "sensitive";
       try {
         repo.enqueueMemoryJob(
           "record.remember",
@@ -1008,6 +1083,10 @@ export function createMemoryService(
               body,
               kind,
               provenance,
+              privacy: {
+                sensitivity: resolvedSensitivity,
+                origin: MEMORY_PRIVACY_ORIGIN_CONVERSATION,
+              },
               scope: followScope,
               tags: [],
               links: [],
@@ -1114,6 +1193,14 @@ export function createMemoryService(
             body,
             kind: MEMORY_CORRECT_KIND,
             provenance,
+            // F-I01-05 P3: Companion-issued correct carries privacy;
+            // no AI sensitivity decision exists on this user-driven path,
+            // so fail closed to sensitive (old version inherited when the
+            // CLI omits it, per the decided P3 rule).
+            privacy: {
+              sensitivity: "sensitive",
+              origin: MEMORY_PRIVACY_ORIGIN_CONVERSATION,
+            },
             scope: followScope,
             sourceRefs: [sourceEventId],
             runId,
@@ -1632,6 +1719,10 @@ export function createMemoryService(
               turnId: run.turnId,
               body: eventBody,
               provenance,
+              privacy: {
+                sensitivity: MEMORY_PRIVACY_SENSITIVITY_NORMAL,
+                origin: MEMORY_PRIVACY_ORIGIN_CONVERSATION,
+              },
               scope,
               runId: run.id,
             },
@@ -1644,6 +1735,7 @@ export function createMemoryService(
               memories: memories.map((memory) => ({
                 body: memory.body,
                 kind: memory.kind,
+                sensitivity: memory.sensitivity,
               })),
             },
           }),
@@ -1819,6 +1911,11 @@ export function createMemoryService(
       if (parsed === null) {
         onFailure?.("cli_malformed");
         return [];
+      }
+      // F-I01-05: recall `vector` mode is metadata only (never a body).
+      // Logged as a fixed closed-vocabulary status; never shown to the model.
+      if (parsed.vector !== undefined) {
+        log("info", "memory.recall_vector", { status: parsed.vector });
       }
       return parsed.items.map((item) => ({
         recordId: item.id,
@@ -2693,6 +2790,10 @@ export function createMemoryService(
               turnId,
               body: eventBody,
               provenance,
+              privacy: {
+                sensitivity: MEMORY_PRIVACY_SENSITIVITY_NORMAL,
+                origin: MEMORY_PRIVACY_ORIGIN_CONVERSATION,
+              },
               scope,
               runId: input.runId,
             },
