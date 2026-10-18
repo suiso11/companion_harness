@@ -7,6 +7,9 @@
 // staging only.
 
 import { randomUUID } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   closeKernelDatabase,
@@ -416,6 +419,296 @@ describe("memory exposure snapshots and citation grants", () => {
       expect(() =>
         repo.recordMemoryExposure({ ...base, snippet: "x".repeat(513) }),
       ).toThrow(RepositoryValidationError);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+});
+
+describe("I04 revision-pinned memory evidence", () => {
+  function exposureOf(
+    overrides: {
+      recallId?: string;
+      recordId?: string;
+      sessionId?: string;
+      runId?: string;
+      scope?: string;
+      citation?: string;
+      snippet?: string;
+    } = {},
+  ) {
+    return {
+      recallId: "recall-1",
+      recordId: "record-1",
+      sessionId: generateId(),
+      runId: generateId(),
+      scope: "test-scope",
+      citation: "m1",
+      snippet: "a recalled snippet",
+      ...overrides,
+    };
+  }
+
+  it("keeps pre-I04 exposure and grant rows with NULL revision through the 0021 upgrade", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mem-i04-"));
+    const backups = join(dir, "backups");
+    const handle = openKernelDatabase(":memory:");
+    try {
+      // Build the pre-I04 database (through migration 0020) and seed
+      // old-shape rows with raw SQL (the v20 repo API has no revision).
+      await migrateKernelDatabase({ db: handle.raw, targetVersion: 20 });
+      const sessionId = generateId();
+      const runId = generateId();
+      handle.raw
+        .prepare(
+          "INSERT INTO memory_exposures (recall_id, record_id, session_id, run_id, scope, citation, snippet, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .run(
+          "recall-old",
+          "record-old",
+          sessionId,
+          runId,
+          "s",
+          "m1",
+          "old",
+          T0,
+        );
+      handle.raw
+        .prepare(
+          "INSERT INTO memory_grants (run_id, citation, record_id, recall_id, session_id, scope, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .run(runId, "m1", "record-old", "recall-old", sessionId, "s", T0);
+      // Upgrade to the bundled (0021) schema: additive ALTERs only, old
+      // rows survive with NULL revision/kind (never backfilled).
+      const result = await migrateKernelDatabase({
+        db: handle.raw,
+        backupDir: backups,
+      });
+      expect(result.applied).toEqual([21]);
+      const repo = createKernelRepository(handle.raw);
+      const exposures = repo.listMemoryExposures(runId);
+      expect(exposures).toHaveLength(1);
+      expect(exposures[0]).toMatchObject({
+        recallId: "recall-old",
+        recordId: "record-old",
+        snippet: "old",
+        revision: null,
+        kind: null,
+      });
+      const grants = repo.listMemoryGrants(runId);
+      expect(grants).toHaveLength(1);
+      expect(grants[0]).toMatchObject({
+        citation: "m1",
+        recordId: "record-old",
+        revision: null,
+      });
+      // New rows on the upgraded schema still pin a revision.
+      repo.recordMemoryExposure(
+        {
+          recallId: "recall-new",
+          recordId: "record-new",
+          sessionId,
+          runId,
+          scope: "s",
+          citation: "m2",
+          snippet: "new",
+          revision: 2,
+          kind: "model_inference",
+        },
+        { now: T0 + 1 },
+      );
+      const fresh = repo
+        .listMemoryExposures(runId)
+        .find((item) => item.recallId === "recall-new");
+      expect(fresh?.revision).toBe(2);
+      expect(fresh?.kind).toBe("model_inference");
+    } finally {
+      closeKernelDatabase(handle);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("pins the delivered revision/kind on the exposure and copies the revision into the grant", async () => {
+    const { handle, repo } = await openRepo();
+    try {
+      const sessionId = generateId();
+      const runId = generateId();
+      repo.recordMemoryExposure(
+        {
+          recallId: "recall-1",
+          recordId: "record-1",
+          sessionId,
+          runId,
+          scope: "test-scope",
+          citation: "m1",
+          snippet: "delivered at revision 3",
+          revision: 3,
+          kind: "user_fact",
+        },
+        { now: T0 },
+      );
+      const exposures = repo.listMemoryExposures(runId);
+      expect(exposures[0]?.revision).toBe(3);
+      expect(exposures[0]?.kind).toBe("user_fact");
+      repo.grantMemoryCitation(
+        {
+          runId,
+          citation: "m1",
+          recordId: "record-1",
+          recallId: "recall-1",
+          sessionId,
+          scope: "test-scope",
+        },
+        { now: T0 + 1 },
+      );
+      // The grant is pinned to the DELIVERED revision copied from the
+      // same-run exposure (not whatever the record looks like now).
+      const grants = repo.listMemoryGrants(runId);
+      expect(grants).toHaveLength(1);
+      expect(grants[0]?.revision).toBe(3);
+      // Replay with a drifted revision never rewrites the snapshot row:
+      // exposures/grants are immutable after creation (F-I04-06).
+      repo.recordMemoryExposure(
+        {
+          recallId: "recall-1",
+          recordId: "record-1",
+          sessionId,
+          runId,
+          scope: "test-scope",
+          citation: "m9",
+          snippet: "drifted",
+          revision: 4,
+        },
+        { now: T0 + 2 },
+      );
+      const after = repo.listMemoryExposures(runId);
+      expect(after).toHaveLength(1);
+      expect(after[0]?.revision).toBe(3);
+      expect(after[0]?.snippet).toBe("delivered at revision 3");
+      // Exposure without provenance stores NULL (unknown), not zero.
+      repo.recordMemoryExposure(
+        {
+          recallId: "recall-2",
+          recordId: "record-2",
+          sessionId,
+          runId: generateId(),
+          scope: "test-scope",
+          citation: "m1",
+          snippet: "no provenance",
+        },
+        { now: T0 + 3 },
+      );
+      const plain = repo.listMemoryGrants(runId);
+      expect(plain).toHaveLength(1);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("pins later citations to a newer revision while the earlier grant keeps the old one", async () => {
+    const { handle, repo } = await openRepo();
+    try {
+      const sessionId = generateId();
+      const firstRunId = generateId();
+      const secondRunId = generateId();
+      // Run 1 delivers revision 3 and the answer cites m1.
+      repo.recordMemoryExposure(
+        {
+          recallId: "recall-1",
+          recordId: "record-1",
+          sessionId,
+          runId: firstRunId,
+          scope: "test-scope",
+          citation: "m1",
+          snippet: "v3 text",
+          revision: 3,
+          kind: "user_fact",
+        },
+        { now: T0 },
+      );
+      repo.grantMemoryCitation(
+        {
+          runId: firstRunId,
+          citation: "m1",
+          recordId: "record-1",
+          recallId: "recall-1",
+          sessionId,
+          scope: "test-scope",
+        },
+        { now: T0 + 1 },
+      );
+      // A correction makes revision 4; a later recall delivers it as a
+      // NEW exposure row (new recallId; the old snapshot is untouched).
+      repo.recordMemoryExposure(
+        {
+          recallId: "recall-2",
+          recordId: "record-1",
+          sessionId,
+          runId: secondRunId,
+          scope: "test-scope",
+          citation: "m1",
+          snippet: "v4 text",
+          revision: 4,
+          kind: "user_fact",
+        },
+        { now: T0 + 2 },
+      );
+      repo.grantMemoryCitation(
+        {
+          runId: secondRunId,
+          citation: "m1",
+          recordId: "record-1",
+          recallId: "recall-2",
+          sessionId,
+          scope: "test-scope",
+        },
+        { now: T0 + 3 },
+      );
+      const firstGrant = repo
+        .listMemoryGrants(firstRunId)
+        .find((grant) => grant.citation === "m1");
+      const secondGrant = repo
+        .listMemoryGrants(secondRunId)
+        .find((grant) => grant.citation === "m1");
+      expect(firstGrant?.revision).toBe(3);
+      expect(secondGrant?.revision).toBe(4);
+      // Both exposure snapshots survive side by side, each pinned.
+      const exposureByRun = [
+        ...repo.listMemoryExposures(firstRunId),
+        ...repo.listMemoryExposures(secondRunId),
+      ];
+      expect(exposureByRun.map((item) => item.revision).sort()).toEqual([3, 4]);
+      expect(exposureByRun.map((item) => item.snippet).sort()).toEqual([
+        "v3 text",
+        "v4 text",
+      ]);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("rejects invalid revisions and kinds at exposure time", async () => {
+    const { handle, repo } = await openRepo();
+    try {
+      const base = exposureOf();
+      expect(() => repo.recordMemoryExposure({ ...base, revision: 0 })).toThrow(
+        RepositoryValidationError,
+      );
+      expect(() =>
+        repo.recordMemoryExposure({ ...base, revision: -2 }),
+      ).toThrow(RepositoryValidationError);
+      expect(() =>
+        repo.recordMemoryExposure({ ...base, revision: 1.5 }),
+      ).toThrow(RepositoryValidationError);
+      expect(() =>
+        repo.recordMemoryExposure({ ...base, kind: "fact" as "summary" }),
+      ).toThrow(RepositoryValidationError);
+      // Valid boundaries are accepted.
+      repo.recordMemoryExposure(
+        { ...base, revision: 1, kind: "summary" },
+        { now: T0 },
+      );
+      expect(repo.listMemoryExposures(base.runId)[0]?.revision).toBe(1);
     } finally {
       closeKernelDatabase(handle);
     }
