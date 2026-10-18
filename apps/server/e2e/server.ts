@@ -77,6 +77,10 @@ import {
   TEXT_CITE,
   TEXT_CITE_MEM,
   TEXT_CITE_TWO,
+  TEXT_DRAFT,
+  TEXT_DRAFT_CANCEL,
+  TEXT_DRAFT_RELOAD,
+  TEXT_DRAFT_STEPS,
   TEXT_FAIL,
   TEXT_HANG,
   TEXT_THINK,
@@ -265,6 +269,167 @@ registry.register("m0-default", async (ctx: RunStrategyContext) => {
       elapsedMs: 2000,
       now: Date.now(),
     });
+    return { version: 1, text: `echo:${text}` };
+  }
+  if (STREAMING_SIM_ENABLED && text.includes(TEXT_DRAFT)) {
+    // Provisional draft streaming (PR-4): three paced same-step pieces
+    // with markup-significant and citation-like markers (inert text in
+    // the draft bubble), then a VALIDATED V2 answer with a structural r1
+    // citation that must REPLACE the draft completely. The leading pause
+    // lets the browser's run SSE stream connect first (same rationale as
+    // the TEXT_THINK branches: no-subscriber pieces drop by design).
+    const runId = ctx.run.id;
+    await streamingSleep(600, ctx.signal);
+    modelDeltaBus.publishPiece({
+      runId,
+      step: 1,
+      kind: "draft",
+      text: 'draft one <a href="https://x">link</a> ',
+      now: Date.now(),
+    });
+    modelDeltaBus.flush(runId);
+    await streamingSleep(250, ctx.signal);
+    modelDeltaBus.publishPiece({
+      runId,
+      step: 1,
+      kind: "draft",
+      text: "draft two [r1] ",
+      now: Date.now(),
+    });
+    modelDeltaBus.flush(runId);
+    await streamingSleep(250, ctx.signal);
+    modelDeltaBus.publishPiece({
+      runId,
+      step: 1,
+      kind: "draft",
+      text: "draft three [m1] <b>bold</b>",
+      now: Date.now(),
+    });
+    modelDeltaBus.flush(runId);
+    await streamingSleep(250, ctx.signal);
+    modelDeltaBus.publishUsage({
+      runId,
+      step: 1,
+      promptTokens: 80,
+      completionTokens: 30,
+      elapsedMs: 1350,
+      now: Date.now(),
+    });
+    return {
+      version: 2,
+      text: "validated answer",
+      answer: {
+        version: 1,
+        parts: [{ text: "validated answer", citations: ["r1"] }],
+      },
+    };
+  }
+  if (text.includes(TEXT_DRAFT_STEPS)) {
+    // Repair/second-step simulation: a step-1 draft, then a step-2 draft
+    // that must RESTART (replace) the visible text, then the terminal
+    // echo. Paced so the spec can observe each phase deterministically.
+    const runId = ctx.run.id;
+    if (STREAMING_SIM_ENABLED) {
+      await streamingSleep(600, ctx.signal);
+      modelDeltaBus.publishPiece({
+        runId,
+        step: 1,
+        kind: "draft",
+        text: "first-piece ",
+        now: Date.now(),
+      });
+      modelDeltaBus.flush(runId);
+      await streamingSleep(1500, ctx.signal);
+      modelDeltaBus.publishPiece({
+        runId,
+        step: 2,
+        kind: "draft",
+        text: "second-step ",
+        now: Date.now(),
+      });
+      modelDeltaBus.flush(runId);
+      await streamingSleep(800, ctx.signal);
+      modelDeltaBus.publishUsage({
+        runId,
+        step: 2,
+        promptTokens: 60,
+        completionTokens: 20,
+        elapsedMs: 2900,
+        now: Date.now(),
+      });
+    }
+    return { version: 1, text: `echo:${text}` };
+  }
+  if (text.includes(TEXT_DRAFT_RELOAD)) {
+    // Slow draft for mid-run reload: the draft is ephemeral (gone after
+    // reload) while the durable phase line rebuilds from replayed events.
+    const runId = ctx.run.id;
+    if (STREAMING_SIM_ENABLED) {
+      await streamingSleep(600, ctx.signal);
+      modelDeltaBus.publishPiece({
+        runId,
+        step: 1,
+        kind: "draft",
+        text: "reload draft slowly",
+        now: Date.now(),
+      });
+      modelDeltaBus.flush(runId);
+      await streamingSleep(3000, ctx.signal);
+      modelDeltaBus.publishUsage({
+        runId,
+        step: 1,
+        promptTokens: 60,
+        completionTokens: 20,
+        elapsedMs: 3600,
+        now: Date.now(),
+      });
+    }
+    return { version: 1, text: `echo:${text}` };
+  }
+  if (text.includes(TEXT_DRAFT_CANCEL)) {
+    // Provisional draft, then hang until released or aborted so the spec
+    // can cancel the run and assert the draft is discarded. Abort maps to
+    // `execution_cancelled` (production cancel path); a sticky early
+    // release resolves immediately like TEXT_HANG.
+    const runId = ctx.run.id;
+    if (STREAMING_SIM_ENABLED) {
+      await streamingSleep(600, ctx.signal);
+      modelDeltaBus.publishPiece({
+        runId,
+        step: 1,
+        kind: "draft",
+        text: "cancel draft quickly",
+        now: Date.now(),
+      });
+      modelDeltaBus.flush(runId);
+    }
+    if (pendingReleases > 0) {
+      pendingReleases -= 1;
+      return { version: 1, text: `echo:${text}` };
+    }
+    await new Promise<void>((resolve, reject) => {
+      if (ctx.signal.aborted) {
+        reject(new StrategyError("execution_cancelled"));
+        return;
+      }
+      const onRelease = (): void => {
+        ctx.signal.removeEventListener("abort", onAbort);
+        resolve();
+      };
+      const onAbort = (): void => {
+        releaseHangers = releaseHangers.filter((fn) => fn !== onRelease);
+        if (!holdCancel) {
+          reject(new StrategyError("execution_cancelled"));
+        } else {
+          releaseHangers.push(onRelease);
+        }
+      };
+      releaseHangers.push(onRelease);
+      ctx.signal.addEventListener("abort", onAbort, { once: true });
+    });
+    if (ctx.signal.aborted) {
+      throw new StrategyError("execution_cancelled");
+    }
     return { version: 1, text: `echo:${text}` };
   }
   if (text.includes(TEXT_HANG)) {

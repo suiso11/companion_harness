@@ -29,6 +29,14 @@ export const TEXT_THINK = "think-stream";
 export const TEXT_THINK_TOOLS = "think-tools";
 /** Input text whose strategy answers V2 with a structural m1 citation. */
 export const TEXT_CITE_MEM = "cite-mem";
+/** Input text whose fake strategy streams draft deltas, then a V2 cited answer. */
+export const TEXT_DRAFT = "draft-stream";
+/** Input text whose fake strategy streams step-1 then step-2 drafts (restart). */
+export const TEXT_DRAFT_STEPS = "draft-steps";
+/** Input text whose fake strategy streams a draft then hangs until cancel. */
+export const TEXT_DRAFT_CANCEL = "draft-cancel";
+/** Input text whose fake strategy streams a draft slowly (reload recovery). */
+export const TEXT_DRAFT_RELOAD = "draft-reload";
 /**
  * Stored snapshot body text seeded for the citation drawer test. Contains
  * markup-significant characters so the spec can prove escaped plain-text
