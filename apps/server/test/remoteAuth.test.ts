@@ -442,7 +442,8 @@ describe("login sessions (steps 2-4)", () => {
         );
         expect(sse.status).toBe(401);
       }
-      // The UI serves the no-asset login form while unauthenticated.
+      // The UI serves the script-free login form while unauthenticated
+      // (slice (c): only the shared self-hosted stylesheet, no script).
       const page = await f.app.request("/", {
         headers: { host: ALLOWED_HOST },
       });
@@ -450,6 +451,7 @@ describe("login sessions (steps 2-4)", () => {
       const html = await page.text();
       expect(html).toContain("<form");
       expect(html).toContain('action="/api/remote/login"');
+      expect(html).toContain('href="/assets/client.css"');
       expect(html).not.toContain("/assets/client.js");
       expect(html.toLowerCase()).not.toContain("<script");
     } finally {

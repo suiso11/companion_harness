@@ -836,11 +836,14 @@ export function renderConversationShell(): HtmlEscapedString {
 
 /**
  * Slice (b) minimal login form for unauthenticated browsers in remote
- * mode. Deliberately asset-free: no script (inline or bundled), no
- * stylesheet, no external origins — a plain HTML form POSTing
+ * mode. Deliberately script-free: no inline/bundled script, no external
+ * origins — a plain HTML form POSTing
  * `application/x-www-form-urlencoded` to `/api/remote/login`, which the
- * server accepts alongside JSON. Served only when the session cookie is
- * absent/invalid; authenticated browsers get the normal shell.
+ * server accepts alongside JSON. The only asset is the shared self-hosted
+ * stylesheet (`/assets/client.css`, slice (c) responsive rules included)
+ * so the form stays usable at 360px width and 200% text zoom; the form
+ * works without it (plain flow layout). Served only when the session
+ * cookie is absent/invalid; authenticated browsers get the normal shell.
  */
 export function renderRemoteLogin(): HtmlEscapedString {
   return jsx(
@@ -855,6 +858,7 @@ export function renderRemoteLogin(): HtmlEscapedString {
         content: "width=device-width, initial-scale=1",
       }),
       jsx("title", {}, "Companion Harness — ログイン"),
+      jsx("link", { rel: "stylesheet", href: "/assets/client.css" }),
     ),
     jsx(
       "body",
