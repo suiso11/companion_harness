@@ -11,8 +11,15 @@
 //   basename), non-zero with fixed safe text on failure (no paths, no raw
 //   error text).
 
-import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import * as readline from "node:readline";
 import {
   closeKernelDatabase,
@@ -258,6 +265,57 @@ function readAllStdin(input: NodeJS.ReadableStream): Promise<string> {
   });
 }
 
+/**
+ * Pre-write guard for `set-password`: refuse to truncate unrelated
+ * files. An existing `passwordFile` target must be absent (fresh setup)
+ * or already parse as a valid password record; anything else —
+ * directories, symlinks, the SQLite DB itself, or garbage content — is
+ * rejected BEFORE any write, so a path typo can never destroy
+ * application data. Fixed safe message only (no paths leak).
+ */
+function assertPasswordTargetSafe(
+  passwordFile: string,
+  dbPath: string,
+): void {
+  if (resolve(passwordFile) === resolve(dbPath)) {
+    throw cliError("unsafe_target", ERR_SET_PASSWORD_FAILED);
+  }
+  let stat: ReturnType<typeof lstatSync>;
+  try {
+    stat = lstatSync(passwordFile);
+  } catch {
+    // Absent: fresh setup, safe to create below.
+    return;
+  }
+  if (stat.isSymbolicLink()) {
+    throw cliError("unsafe_target", ERR_SET_PASSWORD_FAILED);
+  }
+  if (!stat.isFile()) {
+    throw cliError("unsafe_target", ERR_SET_PASSWORD_FAILED);
+  }
+  try {
+    checkPasswordFileStat(passwordFile);
+    const text = readFileSync(passwordFile, "utf-8");
+    const parsed: unknown = JSON.parse(text);
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed) ||
+      (parsed as Record<string, unknown>).version !== 1 ||
+      (parsed as Record<string, unknown>).algo !== "scrypt" ||
+      typeof (parsed as Record<string, unknown>).saltB64 !== "string" ||
+      typeof (parsed as Record<string, unknown>).hashB64 !== "string"
+    ) {
+      throw cliError("unsafe_target", ERR_SET_PASSWORD_FAILED);
+    }
+  } catch (error) {
+    if (error instanceof ManualBackupCliError) {
+      throw error;
+    }
+    throw cliError("unsafe_target", ERR_SET_PASSWORD_FAILED);
+  }
+}
+
 export async function runSetPasswordCli(
   argv: string[] = process.argv.slice(2),
   env: NodeJS.ProcessEnv = process.env,
@@ -292,6 +350,7 @@ export async function runSetPasswordCli(
       "set password failed: remote password file is not configured",
     );
   }
+  assertPasswordTargetSafe(passwordFile, config.dbPath);
   let first: string;
   let second: string;
   try {

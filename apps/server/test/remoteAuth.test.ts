@@ -971,3 +971,73 @@ describe("disabled remote regression (step 5)", () => {
     }
   });
 });
+
+describe("set-password target guard (review finding)", () => {
+  function guardCliEnv(passwordFile: string): NodeJS.ProcessEnv {
+    return {
+      COMPANION_DB_PATH: join(
+        mkdtempSync(join(tmpdir(), "companion-remote-guard-")),
+        "db.sqlite",
+      ),
+      COMPANION_HOST: "127.0.0.1",
+      COMPANION_PORT: "3000",
+      COMPANION_TIME_ZONE: "UTC",
+      COMPANION_LOG_LEVEL: "error",
+      COMPANION_REMOTE_JSON: JSON.stringify({
+        enabled: true,
+        allowedOrigins: [ALLOWED_ORIGIN],
+        passwordFile,
+      }),
+    };
+  }
+
+  it("refuses to overwrite unrelated, symlink, or DB targets", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "companion-remote-guard-"));
+    const reader = async () => "cli-password-1";
+    // Junk content (e.g. a mispointed DB path) is left intact.
+    const junk = join(dir, "not-a-password.json");
+    writeFileSync(junk, "sqlite format 3\0junk-junk-junk");
+    await expect(
+      runSetPasswordCli(["set-password"], guardCliEnv(junk), reader),
+    ).rejects.toThrow(/^set password failed$/);
+    expect(readFileSync(junk, "utf-8")).toBe("sqlite format 3\0junk-junk-junk");
+    // Symlink targets are rejected even when pointing at a valid file.
+    if (process.platform !== "win32") {
+      const { symlinkSync } = await import("node:fs");
+      const target = join(dir, "remote-pass.json");
+      await runSetPasswordCli(["set-password"], guardCliEnv(target), reader);
+      const link = join(dir, "link-pass.json");
+      symlinkSync(target, link);
+      await expect(
+        runSetPasswordCli(["set-password"], guardCliEnv(link), reader),
+      ).rejects.toThrow(/^set password failed$/);
+      // Rotation over an existing VALID password file stays allowed.
+      const rotated = await runSetPasswordCli(
+        ["set-password"],
+        guardCliEnv(target),
+        reader,
+      );
+      expect(rotated).toBe("password updated");
+    }
+  });
+
+  it("refuses a passwordFile equal to the DB path", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "companion-remote-guard-"));
+    const dbPath = join(dir, "db.sqlite");
+    const env: NodeJS.ProcessEnv = {
+      COMPANION_DB_PATH: dbPath,
+      COMPANION_HOST: "127.0.0.1",
+      COMPANION_PORT: "3000",
+      COMPANION_TIME_ZONE: "UTC",
+      COMPANION_LOG_LEVEL: "error",
+      COMPANION_REMOTE_JSON: JSON.stringify({
+        enabled: true,
+        allowedOrigins: [ALLOWED_ORIGIN],
+        passwordFile: dbPath,
+      }),
+    };
+    await expect(
+      runSetPasswordCli(["set-password"], env, async () => "cli-password-1"),
+    ).rejects.toThrow(/^set password failed$/);
+  });
+});
