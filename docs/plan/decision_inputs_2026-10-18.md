@@ -237,6 +237,7 @@
 - 依存・影響先: A3、Remind 側 Windows manual 未完
 - 回答 checkboxes: ☑ 決定 / □ 保留 / □ 棄却 / □ 要追加調査
 - 内容: 追記（2026-10-18 確認）: 1) 手順書を作って実施する。Windows 11 x64 実機で、Remind 側の Windows manual 確認もあわせて行う。
+  - 追記（2026-10-18）: N7 により保留。代替は Linux サーバー＋Tailscale 経由ブラウザ smoke。
 - 決定者: haruka
 - 日付: 2026-10-18
 - 証拠・リンク: 2026-10-18 項目別確認
@@ -536,4 +537,96 @@
 - AV-03 / AV-10: 正式 permission 変更・standing 承認の具体的な契約
 - AV-09: 除外・削除・backup 消去・export
 - 全項目: 本書は正本ではないため、各台帳（operations.md / active_projects_plan.md / active_projects_tasks.md / implementation_plan.md / remind plan）への正式な追記が別途必要
+
+---
+
+## G Linux 集約・リモートアクセス（追記 2026-10-18、haruka 決定）
+
+### N1 Linux 集約（server＋data＋remind）
+- 質問: Companion server・data・remind の実行場所を Linux に集約するか。Windows PC・スマホはブラウザのみにするか。
+- 背景・根拠: haruka 指示（2026-10-18）。現行 `apps/server/src/config.ts:12`（bind host は loopback のみ）・`apps/server/src/bootstrap.ts:2702`（`serve({ hostname: config.host })`）は loopback 想定の構成。
+- 選択肢: 1) Linux 集約 2) 現状維持
+- 依存・影響先: N2–N7、D1
+- 回答 checkboxes: ☑ 決定 / □ 保留 / □ 棄却 / □ 要追加調査
+- 内容: Companion server＋data＋remind は Linux 上でのみ実行する。Windows PC とスマートフォンはブラウザとしてのみ利用する（サーバー実行なし）。
+- 決定者: haruka
+- 日付: 2026-10-18
+- 証拠・リンク: 2026-10-18 項目別確認、設計: `docs/plan/linux_remote_access_design.md`
+
+### N2 Tailscale 経由・0.0.0.0 bind 禁止
+- 質問: リモート到達手段を Tailscale のみに限定し、サーバーの 0.0.0.0 bind を禁止するか。
+- 背景・根拠: haruka 指示（2026-10-18）。現行 `apps/server/src/config.ts:33,39`（`DEFAULT_HOST = "127.0.0.1"`、`HostSchema` は `127.0.0.1`/`localhost` のみ許可）。
+- 選択肢: 1) Tailscale のみ・0.0.0.0 禁止 2) インターネット公開あり
+- 依存・影響先: N3、N5
+- 回答 checkboxes: ☑ 決定 / □ 保留 / □ 棄却 / □ 要追加調査
+- 内容: 自宅外からも含め Tailscale（tailnet）経由でのみアクセスする。インターネット公開はしない。サーバーは 0.0.0.0 に bind しない（loopback のまま `tailscale serve` で tailnet へ公開する構成を推奨。詳細は設計書）。
+- 決定者: haruka
+- 日付: 2026-10-18
+- 証拠・リンク: 2026-10-18 項目別確認、設計: `docs/plan/linux_remote_access_design.md`
+
+### N3 HTTPS（Tailscale 発行証明書・`tailscale serve`）
+- 質問: HTTPS 化を Tailscale 発行証明書＋`tailscale serve` で行うか。
+- 背景・根拠: haruka 指示（2026-10-18）。
+- 選択肢: 1) `tailscale serve`＋Tailscale 証明書 2) 自前証明書・他リバプロ
+- 依存・影響先: N2、N5
+- 回答 checkboxes: ☑ 決定 / □ 保留 / □ 棄却 / □ 要追加調査
+- 内容: HTTPS は Tailscale 発行の証明書を用い、`tailscale serve` で実現する。
+- 決定者: haruka
+- 日付: 2026-10-18
+- 証拠・リンク: 2026-10-18 項目別確認、設計: `docs/plan/linux_remote_access_design.md`
+
+### N4 アプリ層ログイン＋セッション Cookie（tailnet ACL に加えた defense in depth）
+- 質問: tailnet ACL に加えてアプリ層のログイン＋セッション Cookie を設けるか。
+- 背景・根拠: haruka 指示（2026-10-18）。現行コードにアプリ層 auth は存在しない（`apps/server/src/app.ts` に auth/cookie/session ログイン機構なし。`checkHost` は `apps/server/src/app.ts:360` で loopback のみ許可）。
+- 選択肢: 1) 単一ユーザーパスワード＋セッション Cookie を追加 2) tailnet ACL のみ
+- 依存・影響先: N2、テスト計画
+- 回答 checkboxes: ☑ 決定 / □ 保留 / □ 棄却 / □ 要追加調査
+- 内容: tailnet ACL に加え、アプリ層のログイン（単一ユーザーパスワード。ハッシュは secret-not-in-DB ルールに従い SQLite 外に保存し CLI/setup コマンドで設定）とセッション Cookie（HttpOnly・Secure・SameSite=Strict、不透明ランダムトークン、サーバーはハッシュのみ保持）を defense in depth として設ける。全 API＋SSE はセッション必須、health 方針は設計書に定める。ログイン rate limiting・logout・有効期限/アイドル timeout は未決または設計書の案を参照。
+- 決定者: haruka
+- 日付: 2026-10-18
+- 証拠・リンク: 2026-10-18 項目別確認、設計: `docs/plan/linux_remote_access_design.md`
+
+### N5 明示的 Origin allowlist（loopback 前提の置換）
+- 質問: loopback 前提の暗黙チェックを明示的 Origin allowlist に置き換えるか。
+- 背景・根拠: haruka 指示（2026-10-18）。現行 `apps/server/src/app.ts:360`（`checkHost`: loopback ホスト名のみ許可）・`apps/server/src/app.ts:411-437`（`checkMutationSecurity`: `origin === http://${host}` の同一オリジンのみ許可、Origin 未指定は CLI 的リクエストとして許容）。
+- 選択肢: 1) 明示的 Origin allowlist＋Host 検査 2) loopback 暗黙前提の維持
+- 依存・影響先: N2、N4
+- 回答 checkboxes: ☑ 決定 / □ 保留 / □ 棄却 / □ 要追加調査
+- 内容: loopback のみ暗黙許可の前提をやめ、明示的な Origin allowlist（例: `https://<host>.<tailnet>.ts.net` およびローカル開発用 loopback）を設ける。Host ヘッダ検査・state-changing リクエストの CSRF 対策とあわせて設計書に定める。
+- 決定者: haruka
+- 日付: 2026-10-18
+- 証拠・リンク: 2026-10-18 項目別確認、設計: `docs/plan/linux_remote_access_design.md`
+
+### N6 スマホ UI 最低限対応
+- 質問: 現行 UI をスマートフォンで最低限使えるようにするか。
+- 背景・根拠: haruka 指示（2026-10-18）。現行 `apps/server/src/ui/page.ts:41`（viewport `width=device-width, initial-scale=1` あり）・`apps/server/src/ui/client.css`（49 行、media query・responsive 対応なし）。
+- 選択肢: 1) 最低限（viewport・レイアウト・タッチ target）対応 2) 対応しない
+- 依存・影響先: N1（スマホはブラウザ利用）
+- 回答 checkboxes: ☑ 決定 / □ 保留 / □ 棄却 / □ 要追加調査
+- 内容: 現行 UI をスマートフォンで最低限使えるようにする（viewport・レイアウト・タッチ target が scope。具体策は設計書）。
+- 決定者: haruka
+- 日付: 2026-10-18
+- 証拠・リンク: 2026-10-18 項目別確認、設計: `docs/plan/linux_remote_access_design.md`
+
+### N7 Windows server-run 手動 smoke（D1）保留・代替受入
+- 質問: D1「Windows server-run 手動 smoke」を保留とし、代替受入に置き換えるか。
+- 背景・根拠: haruka 指示（2026-10-18）。D1 ブロック（本書 D1 項）参照。
+- 選択肢: 1) 保留＋代替受入 2) D1 継続
+- 依存・影響先: D1
+- 回答 checkboxes: ☑ 決定 / □ 保留 / □ 棄却 / □ 要追加調査
+- 内容: 「Windows server-run 手動 smoke（D1）」は保留とする。代替の受入は「Windows/スマホのブラウザ → Linux サーバー（Tailscale 経由）」smoke とする。
+- 決定者: haruka
+- 日付: 2026-10-18
+- 証拠・リンク: 2026-10-18 項目別確認、設計: `docs/plan/linux_remote_access_design.md`（受入 smoke 節）
+
+### NODE26 Node 26 trial（CI non-blocking、green なら pin 切替）
+- 質問: Node 26 を CI で trial するか。
+- 背景・根拠: haruka 指示（2026-10-18）。現行 pin: `.github/workflows/ci.yml:51,93`（`node-version: 24.12.0`）・`package.json:8`（`"node": "24.12.0"`）。
+- 選択肢: 1) 試験的に Node 26 を CI に追加（non-blocking）し green なら pin 切替 2) 追加しない
+- 依存・影響先: CI
+- 回答 checkboxes: ☑ 決定 / □ 保留 / □ 棄却 / □ 要追加調査
+- 内容: Node 26 を CI で試験的に追加する（non-blocking）。green なら pin を切り替える。
+- 決定者: haruka
+- 日付: 2026-10-18
+- 証拠・リンク: 2026-10-18 項目別確認
 - テンプレート上の不備: 依存早見の「G01 / G02」に対応する本文項目がない
