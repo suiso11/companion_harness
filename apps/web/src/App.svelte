@@ -33,6 +33,12 @@ import {
   type ThinkingState,
   thinkingDisplayText,
 } from "./lib/thinking.js";
+import {
+  appendDraftText,
+  DRAFT_LABEL,
+  draftDisplayText,
+  type DraftState,
+} from "./lib/draft.js";
 
 // PR-1 Svelte chat page (Q1/Q4/Q7/Q8/Q10, PR-1 scope): dark-only, Japanese,
 // same APIs/SSE events + JSON fallback polling as the vanilla client.
@@ -153,6 +159,8 @@ let thinkingCollapsed = $state(false);
 let showThinking = $state(false);
 let runStartedAt = $state(0);
 let elapsedSec = $state(0);
+// PR-4 provisional draft (ephemeral, memory-only, never persisted/sent).
+let draft: DraftState | null = $state(null);
 let elapsedTimer: number | null = null;
 let retryTurnId: string | null = $state(null);
 let drawerOpen = $state(false);
@@ -325,6 +333,7 @@ function resetChatState(): void {
   thinking = { ...EMPTY_THINKING };
   thinkingCollapsed = false;
   showThinking = false;
+  draft = null;
   stopElapsedTimer();
   elapsedSec = 0;
   retryTurnId = null;
@@ -389,9 +398,10 @@ function isEphemeralDelta(event: { seq: number; type: string }): boolean {
 }
 
 /**
- * Apply one ephemeral delta to memory-only thinking state. Never touches
- * the durable cursor, never persists, never sends anything back.
- * `answer.draft.delta` is PR-4 scope (provisional drafts): ignored here.
+ * Apply one ephemeral delta to memory-only thinking/draft state. Never
+ * touches the durable cursor, never persists, never sends anything back.
+ * `answer.draft.delta` accumulates the provisional draft (PR-4); a new
+ * step restarts the text, the validated answer/failure/cancel discards it.
  */
 function applyEphemeralDelta(
   runId: string,
@@ -417,6 +427,11 @@ function applyEphemeralDelta(
   }
   if (event.type === "model.usage") {
     thinking = applyThinkingUsage(thinking, event.payload);
+    return;
+  }
+  if (event.type === "answer.draft.delta") {
+    // Provisional unvalidated text: same-step appends, new-step restarts.
+    draft = appendDraftText(draft, event.payload);
   }
 }
 
@@ -808,6 +823,7 @@ function subscribe(runId: string): void {
   thinking = { ...EMPTY_THINKING };
   thinkingCollapsed = false;
   showThinking = false;
+  draft = null;
   startElapsedTimer();
   if (seededRunId === runId) {
     // Boot-seeded pre-subscription view (e.g. the cancel_requested stop
@@ -1075,6 +1091,9 @@ function renderRunView(runId: string): void {
   if (runView.visible === "answered") {
     // The answer auto-collapses the Thinking block (user can re-open).
     thinkingCollapsed = true;
+    // PR-4: the validated structured answer REPLACES the provisional
+    // draft completely (the draft label vanishes with the draft text).
+    draft = null;
     if (renderedAnswers.has(runId)) {
       finishActiveRun();
       if (!terminalHydrated.has(runId)) {
@@ -1102,6 +1121,8 @@ function renderRunView(runId: string): void {
     return;
   }
   if (runView.visible === "failed") {
+    // PR-4: a failed run discards the provisional draft.
+    draft = null;
     showNotice("生成に失敗しました");
     const turnId = runTurns.get(runId) ?? activeTurnId;
     const retryVisible = runView.retryVisible;
@@ -1123,6 +1144,8 @@ function renderRunView(runId: string): void {
     return;
   }
   if (runView.visible === "stopped") {
+    // PR-4: a cancelled run discards the provisional draft.
+    draft = null;
     showNotice("停止しました");
     finishActiveRun();
     if (!terminalHydrated.has(runId)) {
@@ -2180,6 +2203,12 @@ function evidenceForTurn(turn: Turn): {
           <p data-run-stats="true">{statsOnly}</p>
         </section>
       {/if}
+    {/if}
+    {#if draft !== null && activeRunId !== null && runView.visible === "generating" && draftDisplayText(draft).length > 0}
+      <section data-draft="true" aria-label="下書き" aria-live="off">
+        <p data-draft-label="true">{DRAFT_LABEL}</p>
+        <p data-draft-text="true">{draftDisplayText(draft)}</p>
+      </section>
     {/if}
     {#if liveVisible}
       {@const runId = [...renderedAnswers].pop()}
