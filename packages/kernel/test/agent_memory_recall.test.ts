@@ -405,6 +405,12 @@ describe("memory block provenance labels", () => {
         snippet: "Recap.",
         kind: "summary" as const,
       },
+      {
+        recordId: "r5",
+        recallId: "k5",
+        snippet: "User corrected the time.",
+        kind: "correction" as const,
+      },
     ];
     const block = formatMemoryPromptBlock(snippets);
     expect(block).toContain("- m1 [user_fact]: User likes tea.");
@@ -416,6 +422,9 @@ describe("memory block provenance labels", () => {
     );
     expect(block).toContain(
       "- m4 [summary — distilled inference, not a user fact]: Recap.",
+    );
+    expect(block).toContain(
+      "- m5 [correction — revised memory, not a user fact]: User corrected the time.",
     );
     expect(block).toContain("only user_fact items are user-stated facts");
   });

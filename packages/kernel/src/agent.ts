@@ -457,11 +457,12 @@ export const AGENT_MAX_MEMORY_SNIPPETS = 8;
  */
 export const AGENT_MEMORY_BLOCK_MAX_CHARS = 8192;
 
-/** Additive recall-item provenance kinds (remind contract, F-I01-04). */
+/** Additive recall-item provenance kinds (remind contract, F-I01-04; 0022 adds correction). */
 export const MEMORY_RECALL_ITEM_KINDS: ReadonlySet<string> = new Set([
   "user_fact",
   "model_inference",
   "summary",
+  "correction",
 ]);
 /** The only provenance kind that may be presented as a user fact. */
 export const MEMORY_ITEM_KIND_USER_FACT = "user_fact";
@@ -469,8 +470,8 @@ export const MEMORY_ITEM_KIND_USER_FACT = "user_fact";
 /**
  * Concise provenance label for one recalled snippet (F-I01-04): only a
  * `user_fact` is ever presented as a fact; model inference, summaries,
- * and unknown/absent kinds are explicitly marked as inference, never as
- * fact. English, consistent with the block header text.
+ * corrections, and unknown/absent kinds are explicitly marked as
+ * inference, never as fact. English, consistent with the block header text.
  */
 function memoryProvenanceLabel(kind: string | undefined): string {
   switch (kind) {
@@ -480,6 +481,8 @@ function memoryProvenanceLabel(kind: string | undefined): string {
       return "model_inference — model inference, not a user fact";
     case "summary":
       return "summary — distilled inference, not a user fact";
+    case "correction":
+      return "correction — revised memory, not a user fact";
     default:
       return "inference — unverified provenance, not a user fact";
   }
@@ -498,7 +501,7 @@ export interface AgentMemorySnippet {
   /** Snippet text only, at most 512 code points (never a raw whole turn). */
   readonly snippet: string;
   /** Provenance kind, or undefined when absent/unknown (never a fact then). */
-  readonly kind?: "user_fact" | "model_inference" | "summary";
+  readonly kind?: "user_fact" | "model_inference" | "summary" | "correction";
   /** Positive safe-integer revision, or undefined when absent/invalid. */
   readonly revision?: number;
 }

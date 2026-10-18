@@ -582,9 +582,11 @@ export const memoryExposures = sqliteTable(
     scope: text("scope").notNull(),
     citation: text("citation").notNull(),
     snippet: text("snippet").notNull(),
-    // I04 (additive, migration 0021): revision/kind DELIVERED at recall
-    // time. NULL = pre-I04 row or absent/unknown provenance; never
-    // backfilled, never updated after creation.
+    // I04 (additive, migration 0021) + correction kind (additive,
+    // migration 0022): revision/kind DELIVERED at recall time. NULL =
+    // pre-I04 row or absent/unknown provenance; never backfilled, never
+    // updated after creation. Only user_fact is ever presented as a fact;
+    // correction is inference-framed downstream (never a fact).
     revision: integer("revision"),
     kind: text("kind"),
     createdAt: integer("created_at").notNull(),
@@ -597,7 +599,7 @@ export const memoryExposures = sqliteTable(
     ),
     check(
       "memory_exposures_kind_check",
-      sql`${t.kind} IS NULL OR ${t.kind} IN ('user_fact','model_inference','summary')`,
+      sql`${t.kind} IS NULL OR ${t.kind} IN ('user_fact','model_inference','summary','correction')`,
     ),
   ],
 );
