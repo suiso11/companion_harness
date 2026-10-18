@@ -482,7 +482,7 @@ function memoryProvenanceLabel(kind: string | undefined): string {
     case "summary":
       return "summary — distilled inference, not a user fact";
     case "correction":
-      return "correction — user correction, not a user fact";
+      return "correction — revised memory, not a user fact";
     default:
       return "inference — unverified provenance, not a user fact";
   }

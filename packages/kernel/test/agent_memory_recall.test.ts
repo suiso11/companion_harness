@@ -424,7 +424,7 @@ describe("memory block provenance labels", () => {
       "- m4 [summary — distilled inference, not a user fact]: Recap.",
     );
     expect(block).toContain(
-      "- m5 [correction — user correction, not a user fact]: User corrected the time.",
+      "- m5 [correction — revised memory, not a user fact]: User corrected the time.",
     );
     expect(block).toContain("only user_fact items are user-stated facts");
   });
