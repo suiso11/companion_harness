@@ -224,6 +224,10 @@ function requireRemoteOrigin(value: unknown): string {
   } catch {
     throw configError("remote origin allowlist entry is invalid");
   }
+  // IPv6 literals are rejected at config time: Node keeps the brackets
+  // in URL.hostname while Host-header parsing strips them, so an IPv6
+  // entry could never pass the Host check. Tailscale MagicDNS hostnames
+  // are the documented form; this keeps parsing simple and fail-closed.
   if (
     url.protocol !== "https:" ||
     url.username !== "" ||
@@ -231,7 +235,10 @@ function requireRemoteOrigin(value: unknown): string {
     url.port !== "" ||
     url.search !== "" ||
     url.hash !== "" ||
-    url.origin !== value
+    url.origin !== value ||
+    url.hostname.includes(":") ||
+    url.hostname.includes("[") ||
+    url.hostname.includes("]")
   ) {
     throw configError("remote origin allowlist entry is invalid");
   }

@@ -347,6 +347,16 @@ describe("remote config fail-closed", () => {
     ).toThrow(/requires authentication/);
   });
 
+  it("rejects IPv6-literal origins at config time", () => {
+    for (const raw of [
+      '{"enabled":false,"allowedOrigins":["https://[fd7a:115c:a1e0::1]"]}',
+      '{"enabled":false,"allowedOrigins":["https://[::1]"]}',
+      '{"enabled":false,"allowedOrigins":["https://[::1]:8443"]}',
+    ]) {
+      expect(() => parseRemoteConfig(raw), raw).toThrow(ServerConfigError);
+    }
+  });
+
   it("rejects malformed origins and shapes", () => {
     const bad = [
       "not-json",
