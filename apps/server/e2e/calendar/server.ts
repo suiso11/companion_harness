@@ -379,6 +379,20 @@ const control = createServer(async (req, res) => {
     json(200, { titleOverride: state.titleOverride });
     return;
   }
+  // Before→after fixture seam: serve an all-day source event (date-only,
+  // exclusive end) so the real flow can freeze/approve an all-day→timed
+  // conversion. Cleared by `/reset` like every other fixture field.
+  if (req.method === "POST" && url.pathname === "/set-all-day") {
+    const parsed = parseBody(raw);
+    const allDay = parsed?.allDay;
+    if (typeof allDay !== "boolean") {
+      json(400, { error: { code: "invalid_all_day" } });
+      return;
+    }
+    state.allDay = allDay;
+    json(200, { allDay: state.allDay });
+    return;
+  }
   // C22 fixture seams (fake write behavior + barriers; no production path).
   if (req.method === "POST" && url.pathname === "/arm-write") {
     const parsed = parseBody(raw);

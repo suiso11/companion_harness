@@ -491,6 +491,11 @@ function freshSnapshotRevision(target: TargetRow): {
   eventStatus: string;
   /** Immutable normalized event title (raw; sanitized at preview build). */
   title: string;
+  /** Immutable normalized source range (verbatim snapshot bounds). */
+  sourceStart: string;
+  sourceEnd: string;
+  /** True when the frozen snapshot is an all-day range (exclusive end). */
+  sourceAllDay: boolean;
 } | null {
   // The STORED row is the SnapshotBody wrapper ReferenceManager wrote
   // (`{ version: 1, text }`); the normalized Calendar event is the strict
@@ -532,6 +537,20 @@ function freshSnapshotRevision(target: TargetRow): {
   }
   const eventStatus = (body as { status: string }).status;
   const title = (body as { title: string }).title;
+  const sourceStart = (body as { start: string }).start;
+  const sourceEnd = (body as { end: string }).end;
+  // All-day marker from the SAME frozen normalized snapshot. Missing or
+  // non-boolean values fall back to boundary-shape inference so historical
+  // rows without the flag still render deterministically.
+  const rawAllDay = (body as { allDayEndExclusive?: unknown })
+    .allDayEndExclusive;
+  const sourceAllDay =
+    typeof rawAllDay === "boolean"
+      ? rawAllDay &&
+        boundaryClass(sourceStart) === "date" &&
+        boundaryClass(sourceEnd) === "date"
+      : boundaryClass(sourceStart) === "date" &&
+        boundaryClass(sourceEnd) === "date";
   // Fresh snapshot: a deleted event snapshot can never back a reschedule.
   if (eventStatus === "deleted") {
     return null;
@@ -541,6 +560,9 @@ function freshSnapshotRevision(target: TargetRow): {
     expected: target.sourceRevision ?? target.contentHash,
     eventStatus,
     title,
+    sourceStart,
+    sourceEnd,
+    sourceAllDay,
   };
 }
 
@@ -560,13 +582,20 @@ function previewTitle(raw: string): string {
 }
 
 /**
- * Deterministic target-aware human preview (C22 §18.9): the unambiguous
- * `対象イベント: ` marker, then the immutable normalized event title in FULL
- * (never truncated at the front, never dropped), plus the session rN
- * citation plus the staged start/end. No tool name, no UUID/provider ids,
- * no upstream reads — everything derives from the frozen staged triple
- * (target row + normalized snapshot text + staged input). Same
- * `{ summary }` seam, same hash coverage.
+ * Deterministic target-aware human preview (C22 §18.9, before→after): the
+ * unambiguous `対象イベント: ` marker, then the immutable normalized event
+ * title in FULL (never truncated at the front, never dropped), plus the
+ * session rN citation plus the BEFORE range read from THE SAME frozen
+ * based-on snapshot already validated for staging and the AFTER range from
+ * the staged input. No tool name, no UUID/provider ids, no upstream reads —
+ * everything derives from the frozen staged triple (target row + normalized
+ * snapshot text + staged input). Same `{ summary }` seam, same hash
+ * coverage. Historical rows keep their stored preview/hash untouched.
+ *
+ * BEFORE/AFTER ranges keep their own class explicitly: all-day bounds stay
+ * date-only with the exclusive-end note (never an invented midnight), timed
+ * bounds stay verbatim with their original offset/UTC (never browser-local).
+ * A class change (e.g. all-day → timed) is visible from the two kind labels.
  *
  * The fixed leading marker is load-bearing: an arbitrary normalized title
  * may itself begin with `calendar.reschedule:` (the LEGACY stored-preview
@@ -577,11 +606,25 @@ function previewTitle(raw: string): string {
 function buildPreview(params: {
   title: string;
   ordinal: number;
+  sourceStart: string;
+  sourceEnd: string;
+  sourceAllDay: boolean;
   start: string;
   end: string;
 }): { summary: string } {
+  const beforeKind = params.sourceAllDay ? "終日" : "時刻指定";
+  const afterAllDay =
+    boundaryClass(params.start) === "date" &&
+    boundaryClass(params.end) === "date";
+  const afterKind = afterAllDay ? "終日" : "時刻指定";
+  const beforeRange = params.sourceAllDay
+    ? `${params.sourceStart} ～ ${params.sourceEnd} (終了日は含まない)`
+    : `${params.sourceStart} ～ ${params.sourceEnd}`;
+  const afterRange = afterAllDay
+    ? `${params.start} ～ ${params.end} (終了日は含まない)`
+    : `${params.start} ～ ${params.end}`;
   return {
-    summary: `対象イベント: ${previewTitle(params.title)} (r${params.ordinal}): start=${params.start} end=${params.end}`,
+    summary: `対象イベント: ${previewTitle(params.title)} (r${params.ordinal}): 変更前 [${beforeKind}] ${beforeRange} → 変更後 [${afterKind}] ${afterRange}`,
   };
 }
 
@@ -686,11 +729,14 @@ export function createActionProposalStager(
           "target snapshot event is deleted; staging requires a fresh snapshot",
         );
       }
-      // Deterministic target-aware human preview (no provider ids, no
-      // tool name, no content beyond the immutable title + rN + range).
+      // Deterministic before→after preview (no provider ids, no
+      // tool name): BEFORE from the SAME frozen snapshot, AFTER from input.
       const preview = buildPreview({
         title: fresh.title,
         ordinal: target.ordinal,
+        sourceStart: fresh.sourceStart,
+        sourceEnd: fresh.sourceEnd,
+        sourceAllDay: fresh.sourceAllDay,
         start: parsed.start,
         end: parsed.end,
       });

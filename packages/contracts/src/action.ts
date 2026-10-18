@@ -494,11 +494,13 @@ export const ProposalExecutionViewSchema = z.strictObject({
    * ORIGINAL-only session citation label (BEFORE evidence navigation),
    * resolved from the proposal's OWN immutable `target_ref_id` plus session
    * ownership. Present even before any execution exists (proposal metadata,
-   * not execution state). The verified AFTER citation (if any) comes only
+   * not execution state). Targetless `calendar.create` proposals carry no
+   * source event, so this is null for them (never a fabricated label).
+   * The verified AFTER citation (if any) comes only
    * from the authoritative `run.result` via `runResultToAnswerParts` when
    * the outcome is `succeeded` — never from this field.
    */
-  targetCitation: ActionTargetCitationSchema,
+  targetCitation: ActionTargetCitationSchema.nullable(),
 });
 export type ProposalExecutionView = z.infer<typeof ProposalExecutionViewSchema>;
 
