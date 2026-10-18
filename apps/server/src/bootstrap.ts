@@ -2441,17 +2441,24 @@ export async function startServer(
                 // Best effort: wake never throws into the caller.
               }
             },
-            // Committed control changes (pause OR resume, including a
-            // replayed old resume): the worker reads the ACTUAL control
-            // state and aborts its OWN in-flight call when paused, so a
-            // pure STOP aborts model/recall work with no foreground chat.
-            // The memory service is notified on the same hook: STOP aborts
-            // its OWN parked extraction call and closes shared background
-            // admission (resume reopens it). Both reads are live-state and
-            // never throw into the committed command.
+          }
+        : {}),
+      // Committed control changes (pause OR resume, including a
+      // replayed old resume): the worker reads the ACTUAL control
+      // state and aborts its OWN in-flight call when paused, so a
+      // pure STOP aborts model/recall work with no foreground chat.
+      // The memory service is notified on the same hook: STOP aborts
+      // its OWN parked extraction call and closes shared background
+      // admission (resume reopens it). Both reads are live-state and
+      // never throw into the committed command. Wired independently
+      // of shadow creation so a memory-only server (no model gateway,
+      // no worker) still reopens admission on an explicit resume —
+      // otherwise every automatic distill stays skipped forever.
+      ...(activeShadowWake !== null || activeMemoryControl !== null
+        ? {
             shadowControlChanged: (): void => {
               try {
-                activeShadowWake.notifyControl();
+                activeShadowWake?.notifyControl();
               } catch {
                 // Best effort: notify never throws into the caller.
               }

@@ -495,3 +495,35 @@ export function effectiveCursor(
   }
   return candidates.length === 0 ? 0 : Math.max(...candidates);
 }
+
+/**
+ * Composer control state (§16.3, pure policy): Send is disabled while a run
+ * is active, while a send/post round-trip is in flight, AND while no
+ * session exists (boot resolving or creation failed — an early submit must
+ * never be silently dropped). Stop is offered ONLY for a real
+ * run/send-busy state (never for a missing session with no run in flight,
+ * where it would be a nonfunctional control during startup failure).
+ */
+export interface ComposerStateInput {
+  readonly activeRunId: string | null;
+  readonly sending: boolean;
+  readonly sessionId: string | null;
+  readonly actionBlocked: boolean;
+}
+
+export interface ComposerState {
+  readonly sendDisabled: boolean;
+  readonly stopVisible: boolean;
+  readonly stopDisabled: boolean;
+}
+
+export function composerState(input: ComposerStateInput): ComposerState {
+  const noSession = input.sessionId === null;
+  const busy = input.activeRunId !== null || input.sending;
+  const stopOffered = busy && !input.actionBlocked;
+  return {
+    sendDisabled: busy || noSession,
+    stopVisible: stopOffered,
+    stopDisabled: !stopOffered,
+  };
+}

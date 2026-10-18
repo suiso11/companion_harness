@@ -1121,6 +1121,7 @@ export function createMemoryService(
           if (due.length === 0) {
             break;
           }
+          const executedBeforePage = executed;
           for (const job of due) {
             if (
               stopped ||
@@ -1183,6 +1184,14 @@ export function createMemoryService(
             const settled = await executeJob(job, tickSignal);
             void settled;
             executed += 1;
+          }
+          // Gated skips leave no state touch (still pending, attempts
+          // unchanged) and the read-only due selection returns them again:
+          // a page that made no progress must end the tick here, or a
+          // batch-filling skip (e.g. one distill + four explicit jobs with
+          // a batch of five) spins forever re-reading the same skipped row.
+          if (executed === executedBeforePage) {
+            break;
           }
           if (due.length < requested) {
             break;
