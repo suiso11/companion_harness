@@ -2822,6 +2822,22 @@ export async function startServer(
     // supervisor IPC channel are honored — never model output, HTTP input,
     // or any untrusted channel.
     if (isSupervisorManaged()) {
+      // Parent-death cleanup: if the supervisor crashes or is killed before
+      // its own signal handler runs, the IPC channel disconnects while this
+      // child still holds the DB and the listening port. Without this the
+      // orphan stays alive and a replacement supervisor's child gets
+      // EADDRINUSE until manual cleanup. Shut down gracefully (EXISTING
+      // shutdown path, idempotent) and exit so the port/DB are released.
+      process.on("disconnect", () => {
+        void (async (): Promise<void> => {
+          try {
+            await shutdown("signal");
+          } catch {
+            // Best effort: exit below still releases the port/DB.
+          }
+          process.exit(1);
+        })();
+      });
       process.on("message", (message: unknown) => {
         if (
           typeof message !== "object" ||

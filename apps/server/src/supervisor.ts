@@ -347,11 +347,16 @@ export function applyOperatorResume(
   };
 }
 
-/** Pure planned-restart request (explicit operator only). */
+/** Pure planned-restart request (explicit operator only). Never clears a
+ * persistent `drain_failed` hold: a restart requested while held preserves
+ * the hold (only an explicit operator resume/reset clears it). */
 export function applyPlannedRestartRequest(
   state: SupervisorState,
   now: number,
 ): SupervisorState {
+  if (state.lastReason === "drain_failed") {
+    return { ...state, updatedAt: now };
+  }
   return {
     ...state,
     plannedRestart: true,
@@ -446,6 +451,9 @@ export function writeSupervisorState(
   syncFile(tmp);
   renameSync(tmp, paths.stateFile);
   if (process.platform !== "win32") {
+    syncDir(dirname(paths.stateFile));
+  }
+  if (process.platform !== "win32") {
     try {
       chmodSync(paths.stateFile, 0o600);
     } catch {
@@ -461,8 +469,22 @@ function syncFile(path: string): void {
   try {
     fd = openSync(path, "r");
     nodeFsyncSync(fd);
-  } catch {
-    // Best effort: rename below is still atomic.
+  } finally {
+    if (fd >= 0) {
+      try {
+        nodeCloseSync(fd);
+      } catch {
+        // Best effort.
+      }
+    }
+  }
+}
+
+function syncDir(path: string): void {
+  let fd = -1;
+  try {
+    fd = openSync(path, "r");
+    nodeFsyncSync(fd);
   } finally {
     if (fd >= 0) {
       try {
