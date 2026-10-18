@@ -40,14 +40,15 @@ a missing DB fails without creating any DB or backup files.
 | `COMPANION_CALENDAR_JSON` | unset (no Calendar) | Strict JSON object `{ selection, connector }` (see C14 below); unset registers no Calendar connector |
 | `COMPANION_CALENDAR_PROFILE` | unset (no profile) | Strict opt-in profile selector (see C14 profile below). Unset keeps the previous behavior (explicit host `mcpDefinitions` injection or fail-closed incomplete opt-in). Only `google-readonly` is accepted; any other value fails startup. Requires `COMPANION_CALENDAR_JSON` describing exactly the adopted candidate. |
 | `COMPANION_ACTIONS_JSON` | `{"optIn":false,"writeEnabled":false}` | Strict JSON object `{ optIn?, writeEnabled? }` (booleans, default false). HINT ONLY: never supplies a write capability, a category or a binding — see "C21 M5 Action composition" below |
-| `COMPANION_REMOTE_JSON` | unset (remote disabled) | Strict JSON object `{ enabled?, allowedOrigins? }` (see "Remote access (allowlist only)" below); unset means loopback-only behavior, unchanged |
+| `COMPANION_REMOTE_JSON` | unset (remote disabled) | Strict JSON object `{ enabled?, allowedOrigins?, passwordFile?, absoluteTimeoutMs?, idleTimeoutMs?, maxFailures?, lockoutMs? }` (see "Remote access" below); unset means loopback-only behavior, unchanged |
 
 Config is Zod-validated and frozen at startup (no hot reload).
 
-## Remote access (allowlist only, authentication pending)
+## Remote access (allowlist + login sessions; default-off)
 
 Slice (a) of the Linux remote-access plan: an explicit Origin/Host
-allowlist, **default-off**. The server always binds loopback-only
+allowlist, **default-off**, plus slice (b) single-user password login
+with sessions. The server always binds loopback-only
 (`COMPANION_HOST` stays `127.0.0.1` / `localhost`; `0.0.0.0` is still
 rejected). Remote reachability is provided outside the app (for example
 `tailscale serve` terminating tailnet HTTPS and proxying to
@@ -71,11 +72,15 @@ rejected). Remote reachability is provided outside the app (for example
   rejected. Decisions use only Host/Origin/Sec-Fetch-Site headers — never
   `remoteAddress` or `X-Forwarded-*` — and no CORS headers are emitted.
 - Fail-closed: `enabled: true` with an empty allowlist refuses to start.
-  **Authentication (slice b) is not implemented yet, so enabling remote
-  currently always refuses to start** with
-  `remote mode requires authentication (not yet available)`. Do not use
-  remote mode until slice (b) lands; flipping `enabled` back to `false`
-  restores loopback-only operation.
+  Slice (b) adds the login/session layer: `passwordFile` (absolute path
+  to the scrypt file created by the `set-password` CLI, stored outside
+  SQLite) plus ms tunables `absoluteTimeoutMs` (default 30d),
+  `idleTimeoutMs` (default 7d), `maxFailures` (default 5), `lockoutMs`
+  (default 15m). `enabled: true` without a valid password file still
+  refuses to start. Flipping `enabled` back to `false` restores
+  loopback-only operation. Full operator procedure (password setup,
+  `tailscale serve`, ACL, SSE check, N7 smoke, rollback) is in
+  "Linux remote-mode procedure (Tailscale; slices a–d)" below.
 
 ## Plaintext sensitivity and OS permissions
 
@@ -4217,3 +4222,65 @@ newly added tests, no flaky rewrites.
   - `smoke:startup` script added in `apps/server/package.json` running exactly the covering files
     (`pnpm-smoke.startup.config.mts` include: `startup_smoke`, `rescheduleWriteStartup`,
     `createWriteStartup`): run output `Test Files 3 passed (3), Tests 42 passed (42)`.
+
+## Linux remote-mode procedure (Tailscale; slices a–d)
+
+Operator procedure for reaching the Linux-hosted server from a Windows
+browser and a smartphone browser over the tailnet. The server always
+binds loopback-only (`COMPANION_HOST` stays `127.0.0.1` / `localhost`;
+`0.0.0.0` is rejected and internet exposure is out of scope). TLS is
+terminated by `tailscale serve`; the app holds no TLS keys. All
+commands below run on the Linux host unless noted; this repo never runs
+the `tailscale` CLI itself (per task constraints) — verify the exact flags with
+`tailscale serve --help` on the host (syntax follows the current Tailscale
+docs and is not re-verified here).
+
+1. Set the login password (slice b). The remote config must already
+   name the password file (`passwordFile`, absolute path), then run
+   from the repo: `pnpm --filter @companion/server set-password` (or
+   `tsx src/cli.ts set-password` from `apps/server`). The password is
+   typed twice with echo suppressed and NEVER comes from env/argv;
+   there is no path-override flag. The file is written mode `0600`
+   (enforced after write) outside SQLite. Rotation is the same
+   command; no restart is needed (the verifier re-reads the file per
+   attempt). Success prints `password updated`.
+2. Configure remote (slices a–b). Example (substitute host/tailnet;
+   timeouts are ms, shown values are the 案 defaults from design §3):
+   `COMPANION_REMOTE_JSON='{"enabled":true,"allowedOrigins":["https://<host>.<tailnet>.ts.net"],"passwordFile":"/var/lib/companion/remote.passwd","absoluteTimeoutMs":2592000000,"idleTimeoutMs":604800000,"maxFailures":5,"lockoutMs":900000}'`.
+   Strict JSON, exact `https://<host>` origins only (no port/path/
+   trailing slash, max 16 entries of 256 chars). `enabled: true`
+   with an empty allowlist, or a missing/unreadable/world-readable
+   password file, fails startup fail-closed. Restart the server with
+   the variable set.
+3. Publish over the tailnet (slice a topology). Keep the server on
+   loopback and proxy tailnet HTTPS to it, e.g.
+   `tailscale serve --bg https / http://127.0.0.1:<port>`
+   (substitute the configured `<port>`; confirm flags with
+   `tailscale serve --help` on the host). Only the allowlisted
+   `https://<host>.<tailnet>.ts.net` origin is served; nothing else
+   is published.
+4. Tailnet ACL note. The tailnet ACL is the first layer, the app
+   session is the second: grant only the operator's users/devices
+   access to the host's served name, keep tailnet-only (no Funnel /
+   internet exposure — out of scope), and re-check the ACL after any
+   tailnet membership change.
+5. SSE buffering check (design U5, still open). Send one chat turn
+   and watch the answer stream in progressively (token by token), not
+   arrive as a single burst at the end. If output stalls then bursts,
+   the proxy path is buffering SSE — revisit the `tailscale serve`
+   buffering options on the host before accepting the setup.
+6. N7 acceptance smoke (Windows browser + smartphone browser):
+   (a) `https://<host>.<tailnet>.ts.net` loads the login form;
+   (b) login succeeds with the set-password password;
+   (c) one chat turn completes in the composer;
+   (d) the turn visibly streams (SSE, see 5);
+   (e) logout, then the API answers 401 and `/` serves the login
+   form again;
+   (f) a foreign Origin (e.g. a test page on another origin
+   POSTing to the API) is rejected.
+7. Rollback. Set `"enabled":false` (or unset
+   `COMPANION_REMOTE_JSON`) and restart: the server is loopback-only
+   again with behavior identical to before. To also withdraw the
+   tailnet surface: `tailscale serve reset` (verify with
+   `tailscale serve --help` on the host), then confirm the tailnet
+   name no longer answers.
