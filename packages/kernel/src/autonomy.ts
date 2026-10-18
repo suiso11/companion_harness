@@ -1224,6 +1224,21 @@ export function correctPurpose(
       "purpose.corrected",
       now,
     );
+    // A scope move also retires the OLD scope (supersession + dependent
+    // holds land there): without its own job + epoch bump, an in-flight
+    // old-scope job is fenced with no successor and the removal is never
+    // deliberated. Enqueue the old scope whenever it differs.
+    if (oldRow.scope !== input.scope) {
+      enqueueShadowPolicyChangeInTx(
+        db,
+        session,
+        oldRow.scope,
+        "purpose",
+        oldRow.id,
+        "purpose.superseded",
+        now,
+      );
+    }
     // The superseded parent is non-active: hold every dependent
     // non-terminal task (never complete) so no background execution
     // continues under the superseded goal.

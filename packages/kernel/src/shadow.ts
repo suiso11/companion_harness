@@ -665,11 +665,15 @@ export function enqueueShadowSourceInTx(
     );
     return { jobId: null, scopeEpoch: epoch, reused: false };
   }
-  // Unpaused: reuse a live job for the same trigger (no duplicate queue
-  // bursts from multi-row mutations such as parent-held cascades).
+  // Unpaused: reuse a live PENDING job for the same trigger (no duplicate
+  // queue bursts from multi-row mutations such as parent-held cascades).
+  // A CLAIMED job is never reused: the epoch bump below fences its
+  // in-flight completion to held-on-drift, so coalescing into it would
+  // leave the new state with no pending successor (event lost). The new
+  // event therefore queues its own pending job behind the live lease.
   const live = db
     .prepare(
-      "SELECT id FROM shadow_jobs WHERE session_id = ? AND scope = ? AND trigger_event = ? AND ((trigger_id IS NULL AND ? IS NULL) OR trigger_id = ?) AND status IN ('pending','claimed') ORDER BY created_at ASC, id ASC LIMIT 1",
+      "SELECT id FROM shadow_jobs WHERE session_id = ? AND scope = ? AND trigger_event = ? AND ((trigger_id IS NULL AND ? IS NULL) OR trigger_id = ?) AND status = 'pending' ORDER BY created_at ASC, id ASC LIMIT 1",
     )
     .get(session, scope, input.triggerEvent, input.sourceId, input.sourceId) as
     | { id: string }
