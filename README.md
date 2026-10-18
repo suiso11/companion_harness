@@ -1594,7 +1594,7 @@ COMPANION_REMOTE_JSON='{"enabled":false,"allowedOrigins":["https://<host>.<tailn
 - パスワード保管: scrypt ハッシュ (Node 標準 `crypto.scrypt`、追加の
   native 依存なし) を **SQLite 外**のファイルに保存します
   (secret-not-in-DB)。セッション側はトークンの SHA-256 ハッシュのみを
-  SQLite (`remote_sessions`、additive migration `0022`) に保持します
+  SQLite (`remote_sessions`、additive migration `0023`) に保持します
   (トークン平文は DB・ログに残りません)。
 - 設定キー (`COMPANION_REMOTE_JSON` に追加、以下はすべて任意・既定あり):
   `passwordFile` (有効時は必須、絶対パス。0600 推奨・POSIX では

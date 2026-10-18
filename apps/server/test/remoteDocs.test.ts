@@ -21,4 +21,9 @@ describe("remote docs consistency (review findings)", () => {
     expect(ops).toContain("0023_remote_sessions.sql");
   });
 
+  it("README references migration 0023 for remote sessions", () => {
+    const readme = readFileSync(join(ROOT, "README.md"), "utf-8");
+    expect(readme).toContain("0023");
+    expect(readme).not.toContain("additive migration `0022`");
+  });
 });
