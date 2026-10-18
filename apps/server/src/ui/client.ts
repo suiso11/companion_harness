@@ -11,14 +11,14 @@
 /// <reference lib="dom" />
 
 import type { ActiveStatus } from "@companion/contracts";
-import { LearningPanel } from "./learning_panel.js";
-import { NotificationPanel } from "./notification_panel.js";
-import { ProposalPanel } from "./proposal_panel.js";
 import {
   retryRefreshesControl,
   revalidateConflictArm,
   shouldResetConflictArm,
 } from "./autonomy_state.js";
+import { LearningPanel } from "./learning_panel.js";
+import { NotificationPanel } from "./notification_panel.js";
+import { ProposalPanel } from "./proposal_panel.js";
 import {
   ACTION_PROGRESS_TEXT,
   type ActionCardModel,
@@ -1524,7 +1524,7 @@ class ConversationApp {
   /**
    * Build (once) the approval card for a pending, unexpired proposal. Every
    * string is set with `textContent` (escaped plain text, never HTML) and
-   * carries NO technical id: preview, target event, start/end, and the
+   * carries NO technical id: the deterministic before→after preview and the
    * server deadline only.
    *
    * Each pending card owns at most ONE one-shot expiry timer bound to the
@@ -1569,9 +1569,16 @@ class ConversationApp {
           : "日程変更の確認",
       ),
     );
+    // Single deterministic before→after preview block (trusted kernel
+    // summary; never parsed back into times/identity).
     const preview = el("p", summary.preview.summary);
     preview.setAttribute("data-action-preview", "true");
+    preview.style.whiteSpace = "pre-wrap";
     node.appendChild(preview);
+    // M6 create card rows: the markup-significant title survives VERBATIM
+    // (textContent, never parsed as HTML) plus the exact creation bounds.
+    // Restored after the m5 before-after merge dropped them: create.spec.ts
+    // binds [data-action-title/start/end] and the card must carry them.
     if (
       summary.tool === "calendar.create" &&
       summary.input.title !== undefined

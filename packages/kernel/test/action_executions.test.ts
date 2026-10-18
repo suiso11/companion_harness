@@ -397,8 +397,9 @@ describe("C19 Action execution boundaries", () => {
         // the legacy strip from triggering).
         const adversarialTitle = "calendar.reschedule: quarterly planning";
         const summary =
-          `対象イベント: ${adversarialTitle} (r1): ` +
-          `start=${TIMED_INPUT.start} end=${TIMED_INPUT.end}`;
+          `対象イベント: ${adversarialTitle} (r1): 変更前 [時刻指定] ` +
+          `2026-01-01T10:00:00Z ～ 2026-01-01T11:00:00Z → 変更後 [時刻指定] ` +
+          `${TIMED_INPUT.start} ～ ${TIMED_INPUT.end}`;
         fx.db
           .prepare("UPDATE action_proposals SET preview_json = ? WHERE id = ?")
           .run(JSON.stringify({ summary }), fx.proposalId);
