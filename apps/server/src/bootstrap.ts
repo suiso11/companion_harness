@@ -154,6 +154,11 @@ import {
   RESCHEDULE_WRITE_PROFILE_ENV,
   type RescheduleWriteConnectorHint,
 } from "./rescheduleWriteProfile.js";
+import {
+  loadRemotePasswordRecordSync,
+  verifyPasswordAgainstRecord,
+} from "./remote_password.js";
+import { createSqliteRemoteSessionStore } from "./remote_session.js";
 import { createShadowService, type ShadowService } from "./shadow_service.js";
 import { childFailedStatusForError } from "./supervisor.js";
 import { TrialModelRelay } from "./trial_model_relay.js";
@@ -1209,6 +1214,21 @@ export async function startServer(
       calendarProfile !== null
         ? GOOGLE_READONLY_CONNECTOR_DISPLAY_NAME
         : CALENDAR_CONNECTOR_DISPLAY_NAME;
+    // Slice (b): validate the remote password file BEFORE ensureDbDir/
+    // open/migrations or any DB side effect. Missing, unreadable,
+    // world-readable (POSIX group/other bits) or malformed files fail
+    // startup fail-closed with fixed path-free messages (logged exactly
+    // once by the single startup-failure catch below). The password hash
+    // itself stays outside SQLite; only the path comes from config.
+    if (config.remote.enabled) {
+      const passwordFile = config.remote.passwordFile;
+      if (passwordFile === null) {
+        throw new ServerConfigError(
+          "remote mode requires a password file (set one with the set-password command)",
+        );
+      }
+      loadRemotePasswordRecordSync(passwordFile);
+    }
     ensureDbDir(config.dbPath, {
       ...(options.platform !== undefined ? { platform: options.platform } : {}),
       ...(options.chmod !== undefined ? { chmod: options.chmod } : {}),
@@ -2641,6 +2661,32 @@ export async function startServer(
     }
 
     const activeMemoryControl = memory;
+    // Slice (b) remote session wiring (enabled only): the SHA-256 token
+    // store lives in the migrated kernel DB (table `remote_sessions`,
+    // migration 0022 — tokens themselves are never stored); the verifier
+    // re-reads the password file per attempt so rotation needs no
+    // restart, and any unreadable file answers a uniform login failure
+    // (never a distinct error). Disabled remote wires nothing.
+    const remotePasswordFile =
+      config.remote.enabled === true ? config.remote.passwordFile : null;
+    const remoteStore =
+      remotePasswordFile !== null && handle !== undefined
+        ? createSqliteRemoteSessionStore(handle.raw)
+        : null;
+    const remotePassword =
+      remotePasswordFile !== null
+        ? {
+            verify: (password: string): boolean => {
+              try {
+                const record =
+                  loadRemotePasswordRecordSync(remotePasswordFile);
+                return verifyPasswordAgainstRecord(password, record);
+              } catch {
+                return false;
+              }
+            },
+          }
+        : null;
     const { app, controls } = createApp({
       config,
       repo,
@@ -2651,6 +2697,9 @@ export async function startServer(
       actionsEnabled,
       createEnabled,
       ...(memory !== null ? { memory } : {}),
+      ...(remoteStore !== null && remotePassword !== null
+        ? { remoteStore, remotePassword }
+        : {}),
       ...(activeShadowWake !== null
         ? {
             shadowWake: (): void => {

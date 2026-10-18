@@ -110,8 +110,22 @@ import { z } from "zod";
 import type { RemoteConfig, ServerConfig } from "./config.js";
 import { ServerConfigError } from "./config.js";
 import { createStdServerLogger, type ServerLogger } from "./logger.js";
+import {
+  createRemoteLoginRateLimiter,
+  hashRemoteToken,
+  issueRemoteToken,
+  type RemoteLoginRateLimiter,
+  remoteSessionClearCookie,
+  remoteSessionSetCookie,
+  type RemoteSessionStore,
+  remoteTokenFromCookieHeader,
+} from "./remote_session.js";
 import { createNotificationFeedSseResponse, createSseResponse } from "./sse.js";
-import { renderConversationShell, STRICT_CSP } from "./ui/page.js";
+import {
+  renderConversationShell,
+  renderRemoteLogin,
+  STRICT_CSP,
+} from "./ui/page.js";
 import { effectiveCursor } from "./ui/reducer.js";
 
 /** Minimal engine surface the routes need (RunEngine satisfies this). */
@@ -226,6 +240,17 @@ export interface MemoryHttpPort {
   }): { requestHash: string; recordId: string } | null;
 }
 
+/**
+ * Slice (b) password verifier (server-owned). Production verifies against
+ * the scrypt record in the remote config `passwordFile` (re-read per
+ * attempt so rotation needs no restart); tests inject a stub. The
+ * password itself never crosses this boundary except as the login
+ * attempt argument (never logged, never persisted).
+ */
+export interface RemotePasswordVerifier {
+  verify(password: string): boolean;
+}
+
 export interface CreateAppDeps {
   config: ServerConfig;
   repo: KernelRepository;
@@ -281,6 +306,15 @@ export interface CreateAppDeps {
    * absent (default) keeps wake-only behavior.
    */
   shadowControlChanged?: () => void;
+  /**
+   * Slice (b) remote session wiring. BOTH are REQUIRED when the remote
+   * config is enabled (createApp throws fail-closed otherwise) and both
+   * are IGNORED when remote mode is disabled (zero behavior change).
+   * `remoteStore` persists only SHA-256 token hashes (never tokens);
+   * `remotePassword` verifies login attempts in constant time.
+   */
+  remoteStore?: RemoteSessionStore;
+  remotePassword?: RemotePasswordVerifier;
 }
 
 export interface ServerControls {
@@ -528,6 +562,116 @@ function checkReadSecurity(c: Context, config: ServerConfig): Response | null {
     );
   }
   return null;
+}
+
+/**
+ * Slice (b) session gate. When remote mode is disabled this is never
+ * consulted (zero behavior change). When enabled, a request carries a
+ * valid session only when its `companion_remote` cookie holds a 256-bit
+ * hex token whose SHA-256 hash is stored, unexpired (absolute timeout)
+ * and recently seen (idle timeout). Validation refreshes `last_seen_at`;
+ * expired/idle rows are revoked on sight. Only the token HASH is ever
+ * compared or stored; the token itself never touches the DB or logs.
+ */
+function hasValidRemoteSession(
+  c: Context,
+  config: ServerConfig,
+  store: RemoteSessionStore,
+  now: () => number,
+): boolean {
+  const remote = remoteConfigOf(config);
+  if (remote === null) {
+    return false;
+  }
+  const token = remoteTokenFromCookieHeader(c.req.header("cookie"));
+  if (token === null) {
+    return false;
+  }
+  const tokenHash = hashRemoteToken(token);
+  const row = store.lookup(tokenHash);
+  if (row === null) {
+    return false;
+  }
+  const t = now();
+  if (t >= row.expiresAt || t - row.lastSeenAt > remote.idleTimeoutMs) {
+    try {
+      store.revoke(tokenHash);
+    } catch {
+      // Best effort: the session is rejected regardless.
+    }
+    return false;
+  }
+  try {
+    store.touch(tokenHash, t);
+  } catch {
+    // Best effort: the session is still valid for this request.
+  }
+  return true;
+}
+
+function remoteUnauthenticated(c: Context): Response {
+  return c.json(
+    { error: { code: "unauthenticated", message: "authentication required" } },
+    401,
+  );
+}
+
+/**
+ * Slice (b) login origin gate. The login route is exempt from the global
+ * mutation gate (which mandates `application/json`) so the minimal
+ * no-asset login form can POST `application/x-www-form-urlencoded`
+ * without any script. The Origin rules are identical to the global ones:
+ * absent is fine for non-browser callers, present (including `null`)
+ * must be exactly allowed.
+ */
+function checkLoginOrigin(c: Context, config: ServerConfig): Response | null {
+  const origin = c.req.header("origin");
+  if (origin === undefined) {
+    if (isBrowserLikeFetch(c)) {
+      return apiError(
+        c,
+        403,
+        "validation_error",
+        "cross-origin request rejected",
+      );
+    }
+    return null;
+  }
+  if (origin === "null") {
+    return apiError(
+      c,
+      403,
+      "validation_error",
+      "cross-origin request rejected",
+    );
+  }
+  if (originAllowedForRequest(c, config)) {
+    return null;
+  }
+  return apiError(c, 403, "validation_error", "cross-origin request rejected");
+}
+
+/** Bounded `application/x-www-form-urlencoded` parser for the login form. */
+function parseLoginFormBody(
+  text: string,
+): { ok: true; password: unknown } | { ok: false } {
+  if (text.length > 8192) {
+    return { ok: false };
+  }
+  let params: URLSearchParams;
+  try {
+    params = new URLSearchParams(text);
+  } catch {
+    return { ok: false };
+  }
+  const seen = new Set<string>();
+  for (const key of params.keys()) {
+    seen.add(key);
+  }
+  if (seen.size !== 1 || !seen.has("password")) {
+    return { ok: false };
+  }
+  return { ok: true, password: params.get("password") };
 }
 
 function requireIdempotencyKey(
@@ -917,6 +1061,37 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   const logger = deps.logger ?? createStdServerLogger(config.logLevel);
   const now = deps.now ?? Date.now;
   const assets = deps.assets ?? {};
+  /**
+   * Slice (b) remote session wiring. Fail closed at composition time:
+   * an enabled remote config without BOTH the token-hash store and the
+   * password verifier refuses to compose (bootstrap supplies both from
+   * the password file + migrated DB). Disabled remote ignores both.
+   */
+  const remote = remoteConfigOf(config);
+  const remoteStore = deps.remoteStore ?? null;
+  const remotePassword = deps.remotePassword ?? null;
+  if (remote !== null && (remoteStore === null || remotePassword === null)) {
+    throw new ServerConfigError("remote mode requires session wiring");
+  }
+  /**
+   * Global login failure counter with lockout (design §3). Deliberately
+   * NOT keyed by IP: every proxied request arrives from 127.0.0.1, so an
+   * IP key would either lock the single operator out behind any failure
+   * or never trigger. In-memory only: RESETS ON RESTART (README).
+   */
+  const loginLimiter: RemoteLoginRateLimiter | null =
+    remote !== null
+      ? createRemoteLoginRateLimiter({
+          maxFailures: remote.maxFailures,
+          lockoutMs: remote.lockoutMs,
+        })
+      : null;
+  const hasSession = (c: Context): boolean => {
+    if (remote === null || remoteStore === null) {
+      return false;
+    }
+    return hasValidRemoteSession(c, config, remoteStore, now);
+  };
   let draining = false;
   const controls: ServerControls = {
     get draining() {
@@ -967,11 +1142,22 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   // Mutation security for every mutation route; slice (a) read-path
   // security additionally covers GET/HEAD API routes (SSE included) when
   // remote mode is enabled. Disabled remote leaves reads untouched.
+  // Slice (b): the login route is exempt here and enforces its own
+  // Origin + content-type gate (it must also accept the no-asset HTML
+  // login form's urlencoded POST, which the JSON-only gate would refuse).
   app.use(async (c, next) => {
     if (isMutationMethod(c.req.method)) {
-      const rejected = checkMutationSecurity(c, config);
-      if (rejected !== null) {
-        return rejected;
+      if (
+        !(
+          remote !== null &&
+          c.req.method === "POST" &&
+          c.req.path === "/api/remote/login"
+        )
+      ) {
+        const rejected = checkMutationSecurity(c, config);
+        if (rejected !== null) {
+          return rejected;
+        }
       }
     } else if (
       (c.req.method === "GET" || c.req.method === "HEAD") &&
@@ -981,6 +1167,39 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       if (rejected !== null) {
         return rejected;
       }
+    }
+    await next();
+  });
+
+  // Slice (b) session enforcement. Disabled remote: no-op (every route
+  // behaves exactly as before). Enabled remote: EVERY API route and the
+  // SSE handshake requires a valid session (401 JSON, including SSE —
+  // the EventSource handshake carries the HttpOnly cookie automatically).
+  // `/health/live` stays unauthenticated (process liveness only);
+  // `/health/ready` requires a session (it reflects internal state).
+  // The login/logout endpoints and the UI shell path stay reachable so
+  // an unauthenticated browser can reach the no-asset login form.
+  app.use(async (c, next) => {
+    if (remote === null) {
+      await next();
+      return;
+    }
+    const path = c.req.path;
+    const method = c.req.method;
+    if (method === "GET" && path === "/health/live") {
+      await next();
+      return;
+    }
+    if (path === "/api/remote/login" || path === "/api/remote/logout") {
+      await next();
+      return;
+    }
+    if ((method === "GET" || method === "HEAD") && path === "/") {
+      await next();
+      return;
+    }
+    if (!hasSession(c)) {
+      return remoteUnauthenticated(c);
     }
     await next();
   });
@@ -1158,10 +1377,136 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   app.get("/health/live", (c) => c.json({ status: "live" }, 200));
 
   app.get("/health/ready", (c) => {
+    // Slice (b): readiness reflects internal state, so remote mode
+    // requires a session here (liveness stays open above). Disabled
+    // remote keeps the historical open behavior.
+    if (remote !== null && !hasSession(c)) {
+      return remoteUnauthenticated(c);
+    }
     if (draining) {
       return c.json({ status: "not_ready", code: "server_shutting_down" }, 503);
     }
     return c.json({ status: "ready" }, 200);
+  });
+
+  /* ---------------- slice (b) remote login/logout ---------------- */
+  //
+  // Single-user password login issuing the opaque session cookie.
+  // Uniform failure message (no user enumeration): a wrong password and
+  // a missing account state are indistinguishable. The global lockout
+  // answers 429 only while a lockout is already in force; the attempt
+  // that TRIGGERS the lockout still answers the uniform 401.
+
+  app.post("/api/remote/login", async (c) => {
+    if (remote === null || remoteStore === null || remotePassword === null) {
+      return apiError(c, 404, "not_found", "resource not found");
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    const originRejected = checkLoginOrigin(c, config);
+    if (originRejected !== null) {
+      return originRejected;
+    }
+    const contentType = c.req.header("content-type");
+    const mediaType =
+      contentType === undefined
+        ? null
+        : (contentType.split(";")[0]?.trim().toLowerCase() ?? null);
+    let password: unknown;
+    if (mediaType === "application/json") {
+      const raw = await readJsonBody(c);
+      if (!raw.ok || typeof raw.value !== "object" || raw.value === null) {
+        return validationError(c);
+      }
+      const keys = Object.keys(raw.value as Record<string, unknown>);
+      if (keys.length !== 1 || keys[0] !== "password") {
+        return validationError(c);
+      }
+      password = (raw.value as { password?: unknown }).password;
+    } else if (mediaType === "application/x-www-form-urlencoded") {
+      const lengthHeader = c.req.header("content-length");
+      if (lengthHeader !== undefined && !/^\d+$/.test(lengthHeader.trim())) {
+        return validationError(c);
+      }
+      let text: string;
+      try {
+        text = await c.req.text();
+      } catch {
+        return validationError(c);
+      }
+      const form = parseLoginFormBody(text);
+      if (!form.ok) {
+        return validationError(c);
+      }
+      password = form.password;
+    } else {
+      return validationError(c, "content-type must be application/json");
+    }
+    if (typeof password !== "string") {
+      return validationError(c);
+    }
+    const t = now();
+    if (loginLimiter !== null && loginLimiter.isLocked(t)) {
+      return c.json(
+        { error: { code: "rate_limited", message: "too many attempts" } },
+        429,
+      );
+    }
+    let ok = false;
+    try {
+      ok = remotePassword.verify(password);
+    } catch {
+      ok = false;
+    }
+    if (!ok) {
+      loginLimiter?.recordFailure(t);
+      return c.json(
+        { error: { code: "invalid_credentials", message: "invalid credentials" } },
+        401,
+      );
+    }
+    loginLimiter?.reset();
+    const token = issueRemoteToken();
+    try {
+      remoteStore.create(hashRemoteToken(token), t, t + remote.absoluteTimeoutMs);
+    } catch {
+      return apiError(c, 500, "internal_error", "internal error");
+    }
+    logger.info("http.remote.login", {
+      status: 200,
+      durationMs: Math.max(now() - t, 0),
+    });
+    c.header(
+      "Set-Cookie",
+      remoteSessionSetCookie(
+        token,
+        Math.max(Math.floor(remote.absoluteTimeoutMs / 1000), 1),
+      ),
+    );
+    c.header("cache-control", "no-store");
+    return c.json({ ok: true }, 200);
+  });
+
+  app.post("/api/remote/logout", async (c) => {
+    if (remote === null || remoteStore === null) {
+      return apiError(c, 404, "not_found", "resource not found");
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    const token = remoteTokenFromCookieHeader(c.req.header("cookie"));
+    if (token !== null) {
+      try {
+        remoteStore.revoke(hashRemoteToken(token));
+      } catch {
+        // Best effort: the cookie is cleared regardless.
+      }
+    }
+    logger.info("http.remote.logout", { status: 200 });
+    c.header("Set-Cookie", remoteSessionClearCookie());
+    c.header("cache-control", "no-store");
+    return c.json({ ok: true }, 200);
   });
 
   /* ---------------- sessions ---------------- */
@@ -1756,6 +2101,13 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     }
     c.header("Content-Security-Policy", STRICT_CSP);
     c.header("cache-control", "no-store");
+    // Slice (b): an unauthenticated browser in remote mode gets the
+    // minimal no-asset login form (plain HTML form, no script, no
+    // stylesheet, no external/self-hosted assets) instead of the app
+    // shell. Disabled remote always serves the shell as before.
+    if (remote !== null && !hasSession(c)) {
+      return c.html(renderRemoteLogin().toString(), 200);
+    }
     return c.html(renderConversationShell().toString(), 200);
   });
 

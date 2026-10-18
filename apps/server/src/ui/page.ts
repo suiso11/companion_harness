@@ -834,9 +834,57 @@ export function renderConversationShell(): HtmlEscapedString {
   ) as unknown as HtmlEscapedString;
 }
 
+/**
+ * Slice (b) minimal login form for unauthenticated browsers in remote
+ * mode. Deliberately asset-free: no script (inline or bundled), no
+ * stylesheet, no external origins — a plain HTML form POSTing
+ * `application/x-www-form-urlencoded` to `/api/remote/login`, which the
+ * server accepts alongside JSON. Served only when the session cookie is
+ * absent/invalid; authenticated browsers get the normal shell.
+ */
+export function renderRemoteLogin(): HtmlEscapedString {
+  return jsx(
+    "html",
+    { lang: "ja" },
+    jsx(
+      "head",
+      {},
+      jsx("meta", { charset: "utf-8" }),
+      jsx("meta", {
+        name: "viewport",
+        content: "width=device-width, initial-scale=1",
+      }),
+      jsx("title", {}, "Companion Harness — ログイン"),
+    ),
+    jsx(
+      "body",
+      {},
+      jsx(
+        "main",
+        {},
+        jsx("h1", {}, "ログイン"),
+        jsx(
+          "form",
+          { method: "post", action: "/api/remote/login" },
+          jsx(
+            "label",
+            {},
+            "パスワード",
+            jsx("input", {
+              type: "password",
+              name: "password",
+              autocomplete: "current-password",
+            }),
+          ),
+          jsx("button", { type: "submit" }, "ログイン"),
+        ),
+      ),
+    ),
+  ) as unknown as HtmlEscapedString;
+}
+
 /** The shell carries no user/external strings; this guards regressions. */
-export function shellHasNoInlineScript(html: string): boolean {
-  const lower = html.toLowerCase();
+export function shellHasNoInlineScript(html: string): boolean {  const lower = html.toLowerCase();
   if (lower.includes("<script") && !lower.includes('src="/assets/client.js"')) {
     return false;
   }

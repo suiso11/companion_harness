@@ -11,14 +11,19 @@
 //   basename), non-zero with fixed safe text on failure (no paths, no raw
 //   error text).
 
-import { existsSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import * as readline from "node:readline";
 import {
   closeKernelDatabase,
   createManualBackup,
   openKernelDatabase,
 } from "@companion/kernel";
 import { loadServerConfig, type ServerConfig } from "./config.js";
+import {
+  checkPasswordFileStat,
+  createPasswordFileContent,
+} from "./remote_password.js";
 
 const CLI_USAGE = "Use: backup";
 const ERR_UNKNOWN_COMMAND = `manual backup failed: unknown command. ${CLI_USAGE}`;
@@ -118,13 +123,142 @@ function isMainModule(): boolean {
   return invoked?.endsWith("cli.ts") ?? false;
 }
 
-if (isMainModule()) {
-  runManualBackupCli()
-    .then((backupName) => {
-      process.stdout.write(`${backupName}\n`);
-    })
-    .catch((error: unknown) => {
-      process.stderr.write(`${toSafeCliMessage(error)}\n`);
-      process.exitCode = 1;
+// Slice (b) `set-password`: creates/rotates the single-user remote login
+// password hash file OUTSIDE SQLite (design §3).
+//
+// - Usage: tsx src/cli.ts set-password  (or pnpm --filter server set-password)
+// - The password is read TWICE from TTY/stdin with echo suppressed and
+//   must match; it NEVER comes from env/argv (no flags carry it, and the
+//   process environment is never consulted for secret material).
+// - The target path comes ONLY from the frozen remote config
+//   (`COMPANION_REMOTE_JSON.passwordFile`); there is no path override
+//   flag. The file is written with POSIX mode 0600 (enforced after write)
+//   and re-validated before success is reported.
+// - Exit 0 prints a fixed confirmation line; failures print fixed safe
+//   text (no paths, no raw error text).
+
+const SET_PASSWORD_USAGE = "Use: set-password";
+const ERR_SET_PASSWORD_FAILED = "set password failed";
+
+/** Injectable secret reader (default: TTY/stdin without echo). */
+export type ReadSecretFn = (prompt: string) => Promise<string>;
+
+function readPasswordNoEcho(prompt: string): Promise<string> {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+      terminal: true,
     });
+    const mutable = rl as unknown as {
+      _writeToOutput: (text: string) => void;
+    };
+    const original = mutable._writeToOutput.bind(rl);
+    mutable._writeToOutput = (text: string) => {
+      // Echo the prompt itself only; mask every typed/pasted char and
+      // turn line breaks into a single newline.
+      if (text === prompt || text === `\r${prompt}` || text.startsWith(prompt)) {
+        rl.output?.write(text);
+        return;
+      }
+      if (/[\r\n]/.test(text)) {
+        rl.output?.write("\n");
+      }
+    };
+    rl.question(prompt, (answer) => {
+      mutable._writeToOutput = original;
+      rl.close();
+      resolve(answer);
+    });
+  });
+}
+
+export async function runSetPasswordCli(
+  argv: string[] = process.argv.slice(2),
+  env: NodeJS.ProcessEnv = process.env,
+  readSecret: ReadSecretFn = readPasswordNoEcho,
+): Promise<string> {
+  const [command, ...rest] = argv;
+  if (command !== "set-password") {
+    throw cliError(
+      "unknown_command",
+      `set password failed: unknown command. ${SET_PASSWORD_USAGE}`,
+    );
+  }
+  if (rest.length > 0) {
+    throw cliError(
+      "extra_arguments",
+      "set password failed: set-password accepts no arguments",
+    );
+  }
+  let config: ServerConfig;
+  try {
+    config = loadServerConfig(env);
+  } catch {
+    throw cliError(
+      "invalid_configuration",
+      "set password failed: invalid configuration",
+    );
+  }
+  const passwordFile = config.remote.passwordFile;
+  if (passwordFile === null) {
+    throw cliError(
+      "password_file_unconfigured",
+      "set password failed: remote password file is not configured",
+    );
+  }
+  let first: string;
+  let second: string;
+  try {
+    first = await readSecret("New password: ");
+    second = await readSecret("Confirm password: ");
+  } catch {
+    throw cliError("read_failed", ERR_SET_PASSWORD_FAILED);
+  }
+  if (first.length === 0 || first !== second) {
+    throw cliError("mismatch", "set password failed: passwords do not match");
+  }
+  let content: string;
+  try {
+    content = createPasswordFileContent(first);
+  } catch {
+    throw cliError("weak_password", "set password failed: password too weak");
+  }
+  try {
+    mkdirSync(dirname(passwordFile), { recursive: true });
+    writeFileSync(passwordFile, content, { mode: 0o600 });
+    if (process.platform !== "win32") {
+      chmodSync(passwordFile, 0o600);
+    }
+    checkPasswordFileStat(passwordFile);
+  } catch (error) {
+    if (error instanceof ManualBackupCliError) {
+      throw error;
+    }
+    throw cliError("write_failed", ERR_SET_PASSWORD_FAILED);
+  }
+  return "password updated";
+}
+
+if (isMainModule()) {
+  const [command] = process.argv.slice(2);
+  if (command === "set-password") {
+    runSetPasswordCli()
+      .then((message) => {
+        process.stdout.write(`${message}\n`);
+      })
+      .catch((error: unknown) => {
+        process.stderr.write(`${toSafeCliMessage(error)}\n`);
+        process.exitCode = 1;
+      });
+  } else {
+    runManualBackupCli()
+      .then((backupName) => {
+        process.stdout.write(`${backupName}\n`);
+      })
+      .catch((error: unknown) => {
+        process.stderr.write(`${toSafeCliMessage(error)}\n`);
+        process.exitCode = 1;
+      });
+  }
 }
