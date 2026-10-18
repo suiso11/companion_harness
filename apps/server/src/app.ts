@@ -1266,8 +1266,9 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   // the EventSource handshake carries the HttpOnly cookie automatically).
   // `/health/live` stays unauthenticated (process liveness only);
   // `/health/ready` requires a session (it reflects internal state).
-  // The login/logout endpoints and the UI shell path stay reachable so
-  // an unauthenticated browser can reach the no-asset login form.
+  // The login/logout endpoints, the UI shell path, and the login
+  // stylesheet stay reachable so an unauthenticated browser can render
+  // the login form styled. Every other asset stays behind the session.
   app.use(async (c, next) => {
     if (remote === null) {
       await next();
@@ -1284,6 +1285,13 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       return;
     }
     if ((method === "GET" || method === "HEAD") && path === "/") {
+      await next();
+      return;
+    }
+    if (
+      (method === "GET" || method === "HEAD") &&
+      path === "/assets/client.css"
+    ) {
       await next();
       return;
     }
