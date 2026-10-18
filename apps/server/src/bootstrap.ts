@@ -2259,6 +2259,45 @@ export async function startServer(
         targetStore,
         clock: now,
       });
+      // AV05 P1: action receipts settle asynchronously inside the action
+      // service (never through the repo wrapper). Wake the projector after
+      // every receipt-settling terminal so urgent commitment notices
+      // project without waiting for an unrelated mutation.
+      if (notifications !== null) {
+        const activeNotifications = notifications;
+        const wakeAction = (): void => {
+          try {
+            activeNotifications.onActionSettled();
+          } catch {
+            // Best effort: the receipt already committed.
+          }
+        };
+        const actionTerminalKeys = [
+          "recordActionPreflightFailure",
+          "recordActionPreflightBlocked",
+          "cancelActionRun",
+          "finishActionExecution",
+          "finishCreateExecution",
+          "recoverAbandonedActionRun",
+          "validateAndRecoverActionRuns",
+        ] as const;
+        for (const key of actionTerminalKeys) {
+          const fn = (actionService as unknown as Record<string, unknown>)[key];
+          if (typeof fn !== "function") continue;
+          const bound = (fn as (...a: never[]) => unknown).bind(actionService);
+          (actionService as unknown as Record<string, unknown>)[key] = (
+            ...args: never[]
+          ) => {
+            const out = bound(...args) as unknown;
+            if (out !== null && typeof out === "object") {
+              const applied = (out as { applied?: unknown }).applied;
+              if (applied === false) return out;
+            }
+            wakeAction();
+            return out;
+          };
+        }
+      }
       const createRead: ActionCreateReadPort | undefined =
         activeCreateBindings === null
           ? undefined

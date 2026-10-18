@@ -324,4 +324,64 @@ describe("review fixes: deadline drain + frozen window expiry", () => {
       closeKernelDatabase(handle);
     }
   });
+
+  it("P2/codex43: shadow question goes outdated when its scope epoch advances", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      repo.createAutonomyPurpose(
+        sessionId,
+        {
+          scope: "health",
+          statement: "evergreen goal",
+          kind: "goal",
+          explicit: true,
+          sourceKind: "user",
+        },
+        { key: randomUUID(), now: T0 + 5 },
+      );
+      unpause(repo, 1, T0 + 10);
+      completeAskJob(
+        repo,
+        sessionId,
+        "health",
+        (labels) => [labels.purposes[0] as string],
+        T0 + 20,
+      );
+      expect(
+        repo.ingestNotifications(sessionId, { now: T0 + 30 }).ingested,
+      ).toBe(1);
+      const before = repo.listNotifications(sessionId, { now: T0 + 30 });
+      expect(before.items[0]?.outdated).toBe(false);
+      expect(before.unreadCount).toBe(1);
+      // Advance the durable per-scope epoch (correct the purpose).
+      const listed = repo.listAutonomyPurposes(sessionId, { limit: 100 });
+      const target = (listed.items as Array<{
+        scope: string;
+        status: string;
+        id: string;
+        version: number;
+        kind: string;
+        statement: string;
+      }>)!.find((x) => x.scope === "health" && x.status === "active");
+      expect(target).toBeDefined();
+      repo.correctAutonomyPurpose(
+        sessionId,
+        {
+          purposeId: target!.id,
+          scope: "health",
+          statement: "revised goal",
+          kind: "goal",
+          explicit: true,
+          sourceKind: "user",
+          expectedVersion: target!.version,
+        },
+        { key: randomUUID(), now: T0 + 40 },
+      );
+      const after = repo.listNotifications(sessionId, { now: T0 + 50 });
+      expect(after.items[0]?.outdated).toBe(true);
+      expect(after.unreadCount).toBe(0);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
 });
