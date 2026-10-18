@@ -1291,6 +1291,125 @@ export const shadowJobEvents = sqliteTable(
   ],
 );
 
+// AV05 notifications durable projection (kernel core only). Mirrors
+// packages/kernel/migrations/0014_notifications.sql, which is authoritative.
+export const notificationCursors = sqliteTable(
+  "notification_cursors",
+  {
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id),
+    source: text("source").notNull(),
+    lastSourceRowid: integer("last_source_rowid").notNull(),
+    lastSourceKey: text("last_source_key"),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.sessionId, t.source] }),
+    check(
+      "notification_cursors_source_check",
+      sql`${t.source} IN ('shadow_job_events','action_receipts','autonomy_task_events')`,
+    ),
+    check("notification_cursors_rowid_check", sql`${t.lastSourceRowid} >= 0`),
+  ],
+);
+
+export const notifications = sqliteTable(
+  "notifications",
+  {
+    id: text("id").primaryKey(),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id),
+    seq: integer("seq").notNull(),
+    scope: text("scope").notNull(),
+    kind: text("kind").notNull(),
+    priority: text("priority").notNull(),
+    briefText: text("brief_text").notNull(),
+    sourceKind: text("source_kind").notNull(),
+    sourceId: text("source_id").notNull(),
+    sourceVersion: integer("source_version"),
+    sourceEpoch: integer("source_epoch"),
+    citedDeadlines: text("cited_deadlines").notNull(),
+    fingerprint: text("fingerprint").notNull(),
+    outdated: integer("outdated").notNull().default(0),
+    contextExpiryAt: integer("context_expiry_at"),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [
+    unique("notifications_session_seq_unique").on(t.sessionId, t.seq),
+    unique("notifications_session_fingerprint_unique").on(
+      t.sessionId,
+      t.fingerprint,
+    ),
+    check("notifications_seq_check", sql`${t.seq} >= 1`),
+    check(
+      "notifications_kind_check",
+      sql`${t.kind} IN ('progress','proposal','question','deadline','commitment')`,
+    ),
+    check(
+      "notifications_priority_check",
+      sql`${t.priority} IN ('routine','urgent')`,
+    ),
+    check(
+      "notifications_source_kind_check",
+      sql`${t.sourceKind} IN ('shadow_job','action_receipt','task_deadline')`,
+    ),
+    check(
+      "notifications_cited_deadlines_check",
+      sql`json_valid(${t.citedDeadlines})`,
+    ),
+    check("notifications_outdated_check", sql`${t.outdated} IN (0,1)`),
+  ],
+);
+
+export const notificationAcks = sqliteTable(
+  "notification_acks",
+  {
+    notificationId: text("notification_id")
+      .primaryKey()
+      .references(() => notifications.id),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id),
+    ackKey: text("ack_key").notNull(),
+    ackBody: text("ack_body").notNull(),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [
+    unique("notification_acks_session_key_unique").on(t.sessionId, t.ackKey),
+    check("notification_acks_body_check", sql`json_valid(${t.ackBody})`),
+  ],
+);
+
+export const notificationDeadlineSchedule = sqliteTable(
+  "notification_deadline_schedule",
+  {
+    taskId: text("task_id").primaryKey(),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id),
+    scope: text("scope").notNull(),
+    dueAt: integer("due_at").notNull(),
+    observedTaskVersion: integer("observed_task_version").notNull(),
+    sourceUpdatedAt: integer("source_updated_at").notNull(),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (t) => [
+    foreignKey({
+      columns: [t.sessionId, t.taskId],
+      foreignColumns: [autonomyTasks.sessionId, autonomyTasks.id],
+      name: "notification_deadline_session_task_fk",
+    }),
+    check("notification_deadline_due_at_check", sql`${t.dueAt} >= 0`),
+    check(
+      "notification_deadline_version_check",
+      sql`${t.observedTaskVersion} >= 1`,
+    ),
+  ],
+);
+
 export const kernelSchema = {
   sessions,
   autonomyPurposes,
@@ -1330,4 +1449,8 @@ export const kernelSchema = {
   shadowInbox,
   shadowJobs,
   shadowJobEvents,
+  notificationCursors,
+  notifications,
+  notificationAcks,
+  notificationDeadlineSchedule,
 };

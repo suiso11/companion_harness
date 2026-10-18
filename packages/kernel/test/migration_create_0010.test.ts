@@ -61,10 +61,36 @@ const MIGRATIONS_DIR = join(
 );
 
 const tempRoots: string[] = [];
-afterEach(() => {
+
+// Portable temp cleanup: on Windows the OS (AV/indexer, lingering file
+// locks after better-sqlite3 close) briefly denies recursive removal with
+// EPERM/EBUSY/ENOTEMPTY. Retry those briefly instead of failing the run;
+// any other error still throws immediately. (CI ground truth: run
+// 39033565336 hit EPERM in afterEach after the mega-test exceeded the
+// default timeout with its DB handles still open.)
+async function removeTempRootSync(dir: string): Promise<void> {
+  const start = Date.now();
+  for (;;) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | undefined)?.code;
+      if (code !== "EPERM" && code !== "EBUSY" && code !== "ENOTEMPTY") {
+        throw error;
+      }
+      if (Date.now() - start > 10_000) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+}
+
+afterEach(async () => {
   while (tempRoots.length > 0) {
     const dir = tempRoots.pop() as string;
-    rmSync(dir, { recursive: true, force: true });
+    await removeTempRootSync(dir);
   }
 });
 
@@ -813,7 +839,10 @@ describe("M6 migration 0009 through M6 and later preserves reschedule and enable
     } finally {
       closeKernelDatabase(handle);
     }
-  });
+    // Heavy end-to-end migration (v9 seed + backup + old/new tool drives):
+    // exceeds the 5s default on loaded Windows CI (run 39033565336 ground
+    // truth), so carry an explicit budget like the other live suites.
+  }, 60_000);
 
   it("leaves a wrong-title read-back unverified with no new rN and exactly one insert", async () => {
     const dir = mkdtempSync(join(tmpdir(), "m6-create-edge-"));

@@ -125,6 +125,7 @@ export const IDEMPOTENCY_OPERATIONS = {
     operation: "shadow_request_deliberation",
     schemaVersion: 1,
   },
+  ackNotification: { operation: "notification_ack", schemaVersion: 1 },
 } as const;
 
 /** Generate a new UUID v4 harness id. */

@@ -254,3 +254,256 @@ export function createSseResponse(
 
   return new Response(stream, { status: 200, headers: sseHeaders() });
 }
+
+/* ---------------- AV05 notification feed (§SSE conventions reused) ------ */
+// Owned durable feed: notifications `seq > cursor ORDER BY seq ASC` in
+// bounded pages, so >100 new notices replay exactly once (never a
+// latest-100 window filtered client-side). Reading never acks, never
+// ingests. The stream is NEVER terminal by itself (done is always false):
+// it ends only on client disconnect or on the server drain signal, which
+// aborts SYNCHRONOUSLY before any further DB read (the run stream may rely
+// on terminal close; this feed must not — shutdown closes the DB after the
+// engine drain, and a post-close poll would throw).
+
+/** Forward-page bound for the notification feed (contract max, exact-once). */
+export const NOTIFICATION_SSE_PAGE_LIMIT = 100;
+
+/** Fixed SSE event name for notification records (never an internal name). */
+export const NOTIFICATION_SSE_EVENT = "notification" as const;
+
+/** Minimal notification DTO surface the feed wire needs. */
+export interface SseNotificationDto {
+  readonly seq: number;
+  readonly id: string;
+  readonly sessionId: string;
+  readonly scope: string;
+  readonly kind: string;
+  readonly priority: string;
+  readonly briefText: string;
+  readonly sourceKind: string;
+  readonly sourceId: string;
+  readonly outdated: boolean;
+  readonly createdAt: number;
+}
+
+/** Minimal repository surface the notification feed loop needs. */
+export interface NotificationFeedSource {
+  listNotificationsForward(
+    sessionId: string,
+    query: { after?: number; limit?: number },
+  ): {
+    items: SseNotificationDto[];
+    nextAfter: number | null;
+    hasMore: boolean;
+  };
+}
+
+/**
+ * Format one notification as SSE bytes (same envelope as run events):
+ * `id` = seq string, `event` = `notification` fixed, `data` = the full
+ * notification DTO as one JSON line.
+ */
+export function formatNotificationSse(event: SseNotificationDto): string {
+  const data = JSON.stringify({
+    id: event.id,
+    sessionId: event.sessionId,
+    seq: event.seq,
+    scope: event.scope,
+    kind: event.kind,
+    priority: event.priority,
+    briefText: event.briefText,
+    sourceKind: event.sourceKind,
+    sourceId: event.sourceId,
+    outdated: event.outdated,
+    createdAt: event.createdAt,
+  });
+  return `id: ${event.seq}\nevent: ${NOTIFICATION_SSE_EVENT}\ndata: ${data}\n\n`;
+}
+
+/**
+ * One poll step of the feed loop. Reads strictly after `cursor`
+ * (`seq > cursor ORDER BY seq ASC`, bounded page): reconnect dedupes by
+ * seq (the client replays `Last-Event-ID`), and every notice is delivered
+ * exactly once even across >100-notice backlogs (later ticks continue
+ * from the advanced cursor). Never terminal: `done` is always false.
+ */
+export function pollNotificationFeedStep(
+  source: NotificationFeedSource,
+  sessionId: string,
+  cursor: number,
+): {
+  readonly chunks: string[];
+  readonly cursor: number;
+  readonly done: false;
+} {
+  const page = source.listNotificationsForward(sessionId, {
+    after: cursor,
+    limit: NOTIFICATION_SSE_PAGE_LIMIT,
+  });
+  const chunks = page.items.map((item) => formatNotificationSse(item));
+  const advanced =
+    page.items.length > 0
+      ? (page.items[page.items.length - 1]?.seq ?? cursor)
+      : cursor;
+  return { chunks, cursor: advanced, done: false };
+}
+
+/**
+ * Serve the notification feed as a Response. Same boring loop as run
+ * events (250ms SQLite poll, 15s heartbeat, awaited writes with the 5s
+ * backpressure grace, multi-client safe), except:
+ * - ownership is session-scoped (the source read is already session-owned;
+ *   no event from a foreign session can appear);
+ * - the `isDraining` gate aborts the stream SYNCHRONOUSLY before any DB
+ *   read (checked at the top of every tick): shutdown marks draining
+ *   FIRST and only closes the DB after the engine drain, so an open feed
+ *   always ends before the close and never throws a closed-DB error;
+ * - abort (client disconnect) ends the loop and cleans the timers.
+ * Reading the feed never acks: delivery state is untouched.
+ */
+export function createNotificationFeedSseResponse(
+  source: NotificationFeedSource,
+  sessionId: string,
+  cursor: number,
+  options: {
+    isDraining?: () => boolean;
+    setInterval?: typeof setInterval;
+    clearInterval?: typeof clearInterval;
+    setTimeout?: typeof setTimeout;
+  } = {},
+): Response {
+  const isDraining = options.isDraining ?? (() => false);
+  const setIntervalFn = options.setInterval ?? setInterval;
+  const clearIntervalFn = options.clearInterval ?? clearInterval;
+  const setTimeoutFn = options.setTimeout ?? setTimeout;
+  const encoder = new TextEncoder();
+  let current = cursor;
+  let closed = false;
+  let stepping = false;
+  let pollTimer: ReturnType<typeof setInterval> | undefined;
+  let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+  let waiters: Array<() => void> = [];
+
+  const stream = new ReadableStream<Uint8Array>({
+    pull() {
+      const pending = waiters;
+      waiters = [];
+      for (const wake of pending) {
+        wake();
+      }
+    },
+    start(controller) {
+      const cleanup = (): void => {
+        if (closed) {
+          return;
+        }
+        closed = true;
+        if (pollTimer !== undefined) {
+          clearIntervalFn(pollTimer);
+        }
+        if (heartbeatTimer !== undefined) {
+          clearIntervalFn(heartbeatTimer);
+        }
+        const pending = waiters;
+        waiters = [];
+        for (const wake of pending) {
+          wake();
+        }
+        try {
+          controller.close();
+        } catch {
+          // Already closed by the consumer; nothing to do.
+        }
+      };
+      const writeWithGrace = async (chunk: string): Promise<boolean> => {
+        if (closed) {
+          return false;
+        }
+        const bytes = encoder.encode(chunk);
+        const desired = controller.desiredSize;
+        if (desired === null || desired > 0) {
+          try {
+            controller.enqueue(bytes);
+            return true;
+          } catch {
+            cleanup();
+            return false;
+          }
+        }
+        const drained = await new Promise<boolean>((resolve) => {
+          const timer = setTimeoutFn(
+            () => resolve(false),
+            SSE_BACKPRESSURE_GRACE_MS,
+          );
+          waiters.push(() => {
+            clearIntervalFn(timer as unknown as ReturnType<typeof setInterval>);
+            resolve(true);
+          });
+        });
+        if (!drained || closed) {
+          cleanup();
+          return false;
+        }
+        try {
+          controller.enqueue(bytes);
+          return true;
+        } catch {
+          cleanup();
+          return false;
+        }
+      };
+      const step = async (): Promise<void> => {
+        if (closed || stepping) {
+          return;
+        }
+        // Synchronous drain gate BEFORE any DB read: a draining server
+        // ends the open feed here, never after the DB close.
+        if (isDraining()) {
+          cleanup();
+          return;
+        }
+        stepping = true;
+        try {
+          let chunks: string[];
+          try {
+            const out = pollNotificationFeedStep(source, sessionId, current);
+            chunks = [...out.chunks];
+            current = out.cursor;
+          } catch {
+            cleanup();
+            return;
+          }
+          for (const chunk of chunks) {
+            const ok = await writeWithGrace(chunk);
+            if (!ok || closed || isDraining()) {
+              if (isDraining()) {
+                cleanup();
+              }
+              return;
+            }
+          }
+        } finally {
+          stepping = false;
+        }
+      };
+      pollTimer = setIntervalFn(() => {
+        void step();
+      }, SSE_POLL_MS);
+      heartbeatTimer = setIntervalFn(() => {
+        void writeWithGrace(SSE_HEARTBEAT_CHUNK);
+      }, SSE_HEARTBEAT_MS);
+      void step();
+    },
+    cancel() {
+      closed = true;
+      if (pollTimer !== undefined) {
+        clearIntervalFn(pollTimer);
+      }
+      if (heartbeatTimer !== undefined) {
+        clearIntervalFn(heartbeatTimer);
+      }
+    },
+  });
+
+  return new Response(stream, { status: 200, headers: sseHeaders() });
+}

@@ -16,6 +16,7 @@ import {
   revalidateConflictArm,
   shouldResetConflictArm,
 } from "./autonomy_state.js";
+import { NotificationPanel } from "./notification_panel.js";
 import {
   ACTION_PROGRESS_TEXT,
   type ActionCardModel,
@@ -406,6 +407,8 @@ class ConversationApp {
   private readonly turnKinds = new Map<string, string>();
   private sse: EventSource | null = null;
   private fallbackTimer: number | null = null;
+  /** AV05 notification consumer (readonly feed + explicit ack only). */
+  private notifications: NotificationPanel | null = null;
 
   private readonly list: HTMLElement;
   private readonly notice: HTMLElement;
@@ -585,6 +588,38 @@ class ConversationApp {
       });
       shadow.bind();
       shadow.notifySessionChanged();
+      // AV05 notifications: durable feed + explicit ack (reads never ack).
+      // Missing nodes fail closed with a visible status (SSR ships together).
+      try {
+        const notices = new NotificationPanel({
+          getSessionId: () => this.sessionId,
+          isNaturalBreak: () =>
+            this.activeRunId === null &&
+            this.input.value.trim().length === 0 &&
+            document.visibilityState === "visible",
+          http: {
+            get: (path) => fetchJson(path),
+            post: (path, payload, key) => postJson(path, payload, key),
+          },
+          selectShadowJob: (jobId, version) =>
+            shadow?.selectJob(jobId, version),
+        });
+        notices.bind();
+        notices.notifySessionChanged();
+        this.notifications = notices;
+        this.input.addEventListener("input", () => {
+          this.notifications?.notifyComposureChanged();
+        });
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "notification failed";
+        const statusNode = document.getElementById("notification-status");
+        if (statusNode !== null) {
+          statusNode.textContent = message;
+        } else {
+          throw error;
+        }
+      }
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "shadow panel failed";
@@ -3851,6 +3886,13 @@ class ConversationApp {
     this.input.disabled = false;
     this.stopButton.hidden = !stopOffered;
     this.stopButton.disabled = !stopOffered;
+    // A composer/run transition may open a natural break for deferred
+    // routine notices (never focuses, never clobbers text).
+    try {
+      this.notifications?.notifyComposureChanged();
+    } catch {
+      // Best effort: composer paint never breaks for notices.
+    }
   }
 
   private finishActiveRun(): void {
