@@ -28,6 +28,7 @@ import {
   actionEvidenceButtons,
   applyRunEvent,
   claimTerminalHydration,
+  composerState,
   type ExecutionStatus,
   INITIAL_RUN_VIEW,
   isCorruptCursor,
@@ -3934,16 +3935,22 @@ class ConversationApp {
     // itself stays enabled (§16.3 type-while-active). A missing session
     // (boot still resolving ensureSession, or session creation failed)
     // also disables Send so an early submit can never be silently dropped.
-    const busy =
-      this.activeRunId !== null || this.sending || this.sessionId === null;
     // An adopted Action run keeps the composer busy (Send disabled), but
     // its Stop follows the ACTUAL execution marker/cancellability: after
     // the marker (or terminal) the generic Stop is hidden AND disabled —
     // the write already left this process. Ordinary Runs are unchanged.
+    // A missing session (no run in flight) never offers Stop: the shared
+    // composerState policy keeps it hidden/disabled there.
     const actionBlocked =
       this.activeRunId !== null && this.isActionStopBlocked(this.activeRunId);
-    const stopOffered = busy && !actionBlocked;
-    this.sendButton.disabled = busy;
+    const state = composerState({
+      activeRunId: this.activeRunId,
+      sending: this.sending,
+      sessionId: this.sessionId,
+      actionBlocked,
+    });
+    const stopOffered = state.stopVisible;
+    this.sendButton.disabled = state.sendDisabled;
     this.input.disabled = false;
     this.stopButton.hidden = !stopOffered;
     this.stopButton.disabled = !stopOffered;

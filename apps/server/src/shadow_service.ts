@@ -101,6 +101,10 @@ import {
   type ModelGateway,
   type ToolDefinition,
 } from "@companion/model-local";
+import {
+  BACKGROUND_OWNER_SHADOW,
+  type BackgroundResourceGate,
+} from "./background_resource.js";
 import type { ServerLogger } from "./logger.js";
 import {
   MEMORY_DRAIN_BATCH,
@@ -225,6 +229,13 @@ export interface ShadowServiceOptions {
   readonly recall: ShadowRecallHook | null;
   readonly logger?: ServerLogger;
   readonly now?: () => number;
+  /**
+   * Shared background admission (server-owned, bootstrap-injected). When
+   * present, each job admits ONE unit BEFORE claim; a busy/closed gate
+   * defers with the job untouched (`pending`, never claimed-then-starved).
+   * Absent (default) preserves the legacy behavior.
+   */
+  readonly background?: BackgroundResourceGate | null;
   /** Wall budget per gateway call (default AGENT_STEP_TIMEOUT_MS; test hook). */
   readonly wallTimeoutMs?: number;
 }
@@ -441,6 +452,8 @@ export function createShadowService(
   const { repo, gateway, model, recall } = options;
   const logger = options.logger;
   const now = options.now ?? Date.now;
+  /** Shared background admission (null = legacy behavior). */
+  const background = options.background ?? null;
   const wallTimeoutMs = options.wallTimeoutMs ?? AGENT_STEP_TIMEOUT_MS;
 
   let started = false;
@@ -549,6 +562,19 @@ export function createShadowService(
   function notifyControl(): void {
     try {
       abortIfControlPaused();
+    } catch {
+      // Best effort: notify never throws into a committed command.
+    }
+    // STOP closes shared background admission (no new shadow unit starts
+    // even with no foreground chat anywhere); resume reopens it. Reads the
+    // ACTUAL control state, idempotent with the memory service's own
+    // close/reopen. Never throws.
+    try {
+      if (repo.getAutonomyControlState().paused === true) {
+        background?.close();
+      } else {
+        background?.reopen();
+      }
     } catch {
       // Best effort: notify never throws into a committed command.
     }
@@ -690,16 +716,62 @@ export function createShadowService(
   }
 
   /**
-   * Drive exactly ONE job: recall BEFORE claim, claim (freezing memory
-   * evidence atomically), then EXACTLY ONE bounded gateway call fenced by
-   * the foreground abort + kernel completion fences. Completed/held/failed
-   * outcomes land terminally; worker-busy keeps the job `pending` for the
-   * next meaningful wake (no loss, no spin). Throws ONLY to stop the
-   * drain: `ShadowWorkerBusyError` on the GLOBAL fence, or an unexpected
-   * storage failure — both always caught by `drainLoop`, which stops the
-   * drain instead of continuing unsettled.
+   * Background admission gate for exactly ONE job: the foreground fence is
+   * re-checked first (a run may have queued since the drain check), then
+   * the shared background unit is admitted BEFORE recall/claim. A
+   * busy/closed gate DEFERS with the job untouched (`pending`, no loss, no
+   * claim-then-starve, no unbounded queue); the lease releases in `finally`
+   * so the releaser's single finite wake re-drives eligible work.
    */
   async function driveOneJob(
+    sessionId: string,
+    jobId: string,
+    version: number,
+  ): Promise<void> {
+    if (background === null) {
+      await driveAdmittedJob(sessionId, jobId, version);
+      return;
+    }
+    try {
+      if (repo.hasActiveShadowBlock()) {
+        return;
+      }
+    } catch {
+      // Fail closed on a read failure: defer to the next meaningful wake.
+      return;
+    }
+    const lease = background.tryAcquire(BACKGROUND_OWNER_SHADOW);
+    if (lease === null) {
+      // Busy (another background unit holds the gate) or closed (STOP):
+      // honest fixed diagnostic, job stays `pending` for the next
+      // meaningful wake (release/settlement/control), never dropped.
+      log(
+        "info",
+        background.closed
+          ? "shadow.job_deferred_closed"
+          : "shadow.job_deferred_busy",
+        { status: "deferred" },
+      );
+      return;
+    }
+    try {
+      await driveAdmittedJob(sessionId, jobId, version);
+    } finally {
+      background.release(lease);
+    }
+  }
+
+  /**
+   * Drive exactly ONE admitted job: recall BEFORE claim, claim (freezing
+   * memory evidence atomically), then EXACTLY ONE bounded gateway call
+   * fenced by the foreground abort + kernel completion fences.
+   * Completed/held/failed outcomes land terminally; worker-busy keeps the
+   * job `pending` for the next meaningful wake (no loss, no spin). Throws
+   * ONLY to stop the drain: `ShadowWorkerBusyError` on the GLOBAL fence,
+   * or an unexpected storage failure — both always caught by `drainLoop`,
+   * which stops the drain instead of continuing unsettled.
+   */
+  async function driveAdmittedJob(
     sessionId: string,
     jobId: string,
     version: number,
@@ -1067,8 +1139,29 @@ export function createShadowService(
     // meaningful new state (or an explicit request) wakes the worker.
   }
 
+  // Sole finite wakeup on background release: when ANY admitted unit (our
+  // own job, a memory extraction, an idle distill) frees the gate, eligible
+  // pending jobs are re-driven through the existing fences (foreground
+  // block, claim CAS, held/expired states — never auto-revived). Single
+  // wake per release, singleflight inside `wake`: no storm, no spin.
+  const unsubscribeGateWake =
+    background !== null ? background.onSettled(wake) : null;
+
   async function stop(): Promise<void> {
     stopping = true;
+    // No new background admissions from here; our own gate wake is
+    // unregistered (shutdown additionally clears every wake: no
+    // DB-after-close).
+    try {
+      unsubscribeGateWake?.();
+    } catch {
+      // Best effort.
+    }
+    try {
+      background?.close();
+    } catch {
+      // Best effort.
+    }
     notifyForeground();
     const flight = inFlight;
     if (flight !== null) {
