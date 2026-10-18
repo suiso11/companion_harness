@@ -355,25 +355,30 @@ describe("review fixes: deadline drain + frozen window expiry", () => {
       expect(before.unreadCount).toBe(1);
       // Advance the durable per-scope epoch (correct the purpose).
       const listed = repo.listAutonomyPurposes(sessionId, { limit: 100 });
-      const target = (listed.items as Array<{
-        scope: string;
-        status: string;
-        id: string;
-        version: number;
-        kind: string;
-        statement: string;
-      }>)!.find((x) => x.scope === "health" && x.status === "active");
+      const target = (
+        listed.items as Array<{
+          scope: string;
+          status: string;
+          id: string;
+          version: number;
+          kind: string;
+          statement: string;
+        }>
+      )?.find((x) => x.scope === "health" && x.status === "active");
       expect(target).toBeDefined();
+      if (target === undefined) {
+        throw new Error("expected an active health purpose");
+      }
       repo.correctAutonomyPurpose(
         sessionId,
         {
-          purposeId: target!.id,
+          purposeId: target.id,
           scope: "health",
           statement: "revised goal",
           kind: "goal",
           explicit: true,
           sourceKind: "user",
-          expectedVersion: target!.version,
+          expectedVersion: target.version,
         },
         { key: randomUUID(), now: T0 + 40 },
       );
