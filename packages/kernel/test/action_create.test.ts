@@ -18,6 +18,7 @@ import { RepositoryValidationError } from "../src/errors.js";
 import {
   BUNDLED_SCHEMA_VERSION,
   closeKernelDatabase,
+  createKernelRepository,
   migrateKernelDatabase,
   openKernelDatabase,
 } from "../src/index.js";
@@ -114,7 +115,9 @@ function addTimedTarget(
   );
   if (!presented.applied || presented.references.length !== 1)
     throw new Error("no reference");
-  return presented.references[0]!;
+  const created = presented.references[0];
+  if (created === undefined) throw new Error("no reference");
+  return created;
 }
 
 describe("M6 create gates", () => {
@@ -232,6 +235,38 @@ describe("M6 create gates", () => {
       expect(() => stager.commitStaged(run2, 3)).toThrow(
         RepositoryValidationError,
       );
+    } finally {
+      await closeKernelDatabase(handle);
+    }
+  });
+
+  it("targetless create execution view carries null citation (no throw)", async () => {
+    const { handle, db } = await setupDb();
+    try {
+      const { sessionId, runId, connectorInstanceId } = addRun(db);
+      const stager = createActionProposalStager({
+        db,
+        writeEnabled: true,
+        createEnabled: true,
+        events: sink() as never,
+        clock: () => 1,
+      });
+      stager.stageCreate(
+        runId,
+        {
+          title: "T",
+          start: "2026-02-01T10:00:00Z",
+          end: "2026-02-01T11:00:00Z",
+        },
+        { connectorInstanceId },
+      );
+      const committed = stager.commitStaged(runId, 2);
+      // Regression: the create run completes but the execution view
+      // endpoint threw (DatabaseStateInvalidError) because the view
+      // required an owned BEFORE citation that targetless creates lack.
+      const repo = createKernelRepository(db);
+      const view = repo.getProposalExecution(sessionId, committed.proposalId);
+      expect(view.targetCitation).toBeNull();
     } finally {
       await closeKernelDatabase(handle);
     }
