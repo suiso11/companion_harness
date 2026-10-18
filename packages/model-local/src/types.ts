@@ -64,6 +64,25 @@ export interface ChatResult {
   usage?: ModelUsage | null;
 }
 
+/**
+ * Incremental streaming delta emitted while a `stream:true` response is
+ * being read (PR-2). Pieces are provisional and unvalidated: only the
+ * final ChatResult carries validated output. `content` is plain assistant
+ * text, `reasoning` is `reasoning_content` (thinking), `draft` is the
+ * newly decoded suffix of `answer.submit` `parts[].text` extracted from
+ * partial tool-call argument JSON (provisional, replaced by the validated
+ * answer), and `usage` is the terminal token summary (present only when
+ * the provider honors `stream_options.include_usage`).
+ */
+export type ModelStreamDelta =
+  | { kind: "content"; text: string }
+  | { kind: "reasoning"; text: string }
+  | { kind: "draft"; text: string }
+  | { kind: "usage"; inputTokens: number; outputTokens: number };
+
+/** Optional per-chunk callback receiving provisional streaming deltas. */
+export type ModelStreamDeltaCallback = (delta: ModelStreamDelta) => void;
+
 /** Provider capability advertisement. */
 export interface ModelCapabilities {
   toolCalling: boolean;
@@ -83,4 +102,14 @@ export interface GatewayOptions {
   fetchImpl?: FetchImpl;
   /** Single-attempt abort timeout in ms; no retries. */
   timeoutMs?: number;
+  /**
+   * Opt-in streaming (PR-2, default off / additive). When true the
+   * OpenAI-compatible adapter sends `stream:true` with
+   * `stream_options:{include_usage:true}` and accumulates SSE deltas into
+   * the same ChatResult the non-streaming path returns. Absent/false keeps
+   * the exact `stream:false` behavior. There is no automatic fallback: a
+   * streaming failure surfaces with the same redacted error classes as the
+   * non-streaming path.
+   */
+  streamingEnabled?: boolean;
 }

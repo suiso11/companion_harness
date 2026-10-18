@@ -20,6 +20,7 @@ import type {
   FetchImpl,
   GatewayOptions,
   ModelCapabilities,
+  ModelStreamDeltaCallback,
   ToolDefinition,
 } from "./types.js";
 
@@ -32,6 +33,13 @@ export interface ChatCallOptions {
    * default MAX_RESPONSE_BYTES behavior.
    */
   maxResponseBytes?: number;
+  /**
+   * Optional per-call streaming delta callback (PR-2). Invoked with
+   * provisional `content` / `reasoning` / `draft` / `usage` pieces while a
+   * `stream:true` response is read; never invoked on the non-streaming
+   * path. Callback exceptions never affect the result (best-effort emit).
+   */
+  onDelta?: ModelStreamDeltaCallback;
 }
 
 /** Provider-neutral local model gateway. */
@@ -895,6 +903,7 @@ export interface ResolvedGatewayConfig {
   fetchImpl: FetchImpl;
   apiKey: string | undefined;
   timeoutMs: number | undefined;
+  streamingEnabled: boolean;
 }
 
 /** Validate gateway options: loopback base URL, fetch impl, timeout. */
@@ -937,6 +946,7 @@ export function resolveGatewayConfig(
     fetchImpl,
     apiKey: options.apiKey,
     timeoutMs: options.timeoutMs,
+    streamingEnabled: options.streamingEnabled === true,
   };
 }
 
