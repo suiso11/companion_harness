@@ -89,12 +89,16 @@ export const MEMORY_PRIVACY_SENSITIVITY_NORMAL = "normal" as const;
 export type MemoryPrivacySensitivity = "normal" | "sensitive";
 
 /**
- * Provenance kind on recalled items (F-I01-04). Additive remind field: only
- * the extraction kinds are carried as facts/inferences; `correction`
- * (remind#16) is tolerated as an unknown kind and never presented as a
- * fact (F-I01-01/F-I01-04, inference framing downstream).
+ * Provenance kind on recalled items (F-I01-04). Additive remind field: the
+ * extraction kinds are carried as facts/inferences, and `correction`
+ * (remind#16) is carried as its own kind and inference-framed downstream —
+ * never presented as a fact (F-I01-01/F-I01-04).
  */
-export type MemoryRecallItemKind = "user_fact" | "model_inference" | "summary";
+export type MemoryRecallItemKind =
+  | "user_fact"
+  | "model_inference"
+  | "summary"
+  | "correction";
 
 /** Recall `vector` mode (remind#16, metadata only, never content). */
 export type MemoryRecallVector = "disabled" | "used" | "unavailable";
@@ -138,6 +142,18 @@ const EXTRACT_KINDS: ReadonlySet<string> = new Set([
   "user_fact",
   "model_inference",
   "summary",
+]);
+/**
+ * Closed recall kinds (remind#16): everything extraction may write, plus
+ * `correction`, which extraction never emits but recall may deliver. Only
+ * `user_fact` is ever presented as a fact; `correction` is stored with its
+ * own kind and inference-framed downstream.
+ */
+const RECALL_KINDS: ReadonlySet<string> = new Set([
+  "user_fact",
+  "model_inference",
+  "summary",
+  "correction",
 ]);
 
 /** Closed extraction sensitivities (F-I01-05 P5; undecidable -> sensitive). */
@@ -297,7 +313,7 @@ export interface MemoryService {
     citation: string;
     snippet: string;
     revision: number | null;
-    kind: "user_fact" | "model_inference" | "summary" | null;
+    kind: "user_fact" | "model_inference" | "summary" | "correction" | null;
   } | null;
   /**
    * Draining replay identity: recompute the immutable request hash for an
@@ -597,16 +613,17 @@ export function parseRecallData(data: Record<string, unknown> | null): {
     ) {
       continue;
     }
-    // Additive provenance fields (F-I01-04/F-I04-07, remind#16): only
-    // the closed extraction kind set is carried; `correction` and any
-    // other value (including a missing field) stays unknown and is never
-    // presented as a user fact (kernel inference framing covers
-    // model_inference/summary plus unknown/correction). Revision must be
+    // Additive provenance fields (F-I01-04/F-I04-07, remind#16): the
+    // closed recall kind set is carried (`correction` included, mapped to
+    // itself and stored as such); any other value (including a missing
+    // field) stays unknown and is never presented as a user fact (kernel
+    // inference framing covers model_inference/summary/correction plus
+    // unknown). Revision must be
     // a positive safe integer; absent/invalid means unknown revision
     // (grant keeps the existing exposure-copy fallback, preferring the
     // recall revision when available).
     const itemKind: MemoryRecallItemKind | undefined =
-      typeof kind === "string" && EXTRACT_KINDS.has(kind)
+      typeof kind === "string" && RECALL_KINDS.has(kind)
         ? (kind as MemoryRecallItemKind)
         : undefined;
     const itemRevision: number | undefined =
@@ -2884,7 +2901,7 @@ export function createMemoryService(
     citation: string;
     snippet: string;
     revision: number | null;
-    kind: "user_fact" | "model_inference" | "summary" | null;
+    kind: "user_fact" | "model_inference" | "summary" | "correction" | null;
   } | null {
     if (!/^m[1-9][0-9]*$/.test(input.citation)) {
       return null;

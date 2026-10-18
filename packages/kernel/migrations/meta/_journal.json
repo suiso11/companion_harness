@@ -142,6 +142,13 @@
       "when": 1790000000021,
       "tag": "0021_memory_evidence",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": 22,
+      "when": 1790000000022,
+      "tag": "0022_memory_correction_kind",
+      "breakpoints": true
     }
   ]
 }

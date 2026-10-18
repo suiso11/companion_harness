@@ -566,8 +566,12 @@ export interface FailMemoryJobOptions {
   now?: number;
 }
 
-/** Additive recall-item provenance kind (I04; mirrors AgentMemorySnippet). */
-export type MemoryRecallItemKind = "user_fact" | "model_inference" | "summary";
+/** Additive recall-item provenance kind (I04; mirrors AgentMemorySnippet; 0022 adds correction). */
+export type MemoryRecallItemKind =
+  | "user_fact"
+  | "model_inference"
+  | "summary"
+  | "correction";
 
 export interface MemoryExposureInput {
   recallId: string;
@@ -3995,7 +3999,7 @@ export function createKernelRepository(
     return value;
   }
 
-  /** Closed recall-item provenance kind validation (I04; additive). */
+  /** Closed recall-item provenance kind validation (I04; additive; 0022 adds correction). */
   function parseMemoryRecallItemKind(
     value: unknown,
   ): MemoryRecallItemKind | undefined {
@@ -4005,7 +4009,8 @@ export function createKernelRepository(
     if (
       value === "user_fact" ||
       value === "model_inference" ||
-      value === "summary"
+      value === "summary" ||
+      value === "correction"
     ) {
       return value;
     }
@@ -4287,7 +4292,8 @@ export function createKernelRepository(
       kind:
         row.kind === "user_fact" ||
         row.kind === "model_inference" ||
-        row.kind === "summary"
+        row.kind === "summary" ||
+        row.kind === "correction"
           ? row.kind
           : null,
       createdAt: row.created_at,

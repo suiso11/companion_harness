@@ -592,6 +592,69 @@ describe("recall hook", () => {
     }
   });
 
+  it("carries a recalled correction through the hook and stores it as correction", async () => {
+    const f = await openRepo();
+    try {
+      const cliCall: CliCall = async (_address, op, _params) => {
+        expect(op).toBe("record.recall");
+        return okEnvelope({
+          recallId: "recall-corr",
+          items: [
+            {
+              id: "record-corr",
+              snippet: "corrected text",
+              kind: "correction",
+              revision: 4,
+            },
+          ],
+        });
+      };
+      const service = makeService(f.repo, cliCall);
+      service.start();
+      const snippets = await service.recallHook.recall(
+        "what changed?",
+        new AbortController().signal,
+      );
+      // The hook preserves the correction kind (never dropped to unknown).
+      expect(snippets).toEqual([
+        {
+          recordId: "record-corr",
+          recallId: "recall-corr",
+          snippet: "corrected text",
+          kind: "correction",
+          revision: 4,
+        },
+      ]);
+      // The agent snapshot path stores it under its own kind (0022 CHECK).
+      const sessionId = generateId();
+      const runId = generateId();
+      const correction = snippets[0];
+      expect(correction?.kind).toBe("correction");
+      f.repo.recordMemoryExposure(
+        {
+          recallId: "recall-corr",
+          recordId: "record-corr",
+          sessionId,
+          runId,
+          scope: SCOPE,
+          citation: "m1",
+          snippet: "corrected text",
+          ...(correction?.revision !== undefined
+            ? { revision: correction.revision }
+            : {}),
+          ...(correction?.kind !== undefined ? { kind: correction.kind } : {}),
+        },
+        { now: T0 },
+      );
+      const stored = f.repo
+        .listMemoryExposures(runId)
+        .find((item) => item.recallId === "recall-corr");
+      expect(stored).toMatchObject({ kind: "correction", revision: 4 });
+    } finally {
+      f.close();
+    }
+  });
+
   it("returns memoryless on child failure, abort, and malformed data", async () => {
     const f = await openRepo();
     try {
@@ -1397,12 +1460,14 @@ describe("parseRecallData provenance fields", () => {
     ).toBeUndefined();
   });
 
-  it("treats correction kind as unknown (kept item, never a fact)", () => {
+  it("carries the correction kind as itself (stored, never a fact)", () => {
     const parsed = parseRecallData({
       recallId: "r-1",
       items: [{ id: "rec-1", snippet: "s", kind: "correction", revision: 2 }],
     });
-    expect(parsed?.items).toEqual([{ id: "rec-1", snippet: "s", revision: 2 }]);
+    expect(parsed?.items).toEqual([
+      { id: "rec-1", snippet: "s", kind: "correction", revision: 2 },
+    ]);
   });
 });
 

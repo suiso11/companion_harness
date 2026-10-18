@@ -101,3 +101,4 @@
 - 記録する証拠: T3/T4 の実行結果（ready 200、read/close 回数、derivePort 呼出回数）。
 - 完了条件: T3/T4 smoke の受入組込みが台帳に追記されること。
 - 未決事項: `#55` の証拠は引用指定の docs（operations.md / implementation_plan.md / m4_dependency_spike.md / binding design / active_projects_tasks.md C08–C22）中に見当たらなかったため、本書では `#55` 起源の特定を未決とする。該当 PR/issue 番号の特定は別途確認が必要。
+- 追記（2026-10-18 merge）: D2 の `apps/server/test/startup_smoke.test.ts`（T3/T4）は PR #55（companion #55、B1–B4,D2）対応として参照する（`docs/plan/active_projects_tasks.md` 現況追記および `docs/operations.md:4168–4180` の D2 記録）。
