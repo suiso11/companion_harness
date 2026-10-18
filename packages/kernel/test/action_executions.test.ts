@@ -272,7 +272,10 @@ describe("C19 Action execution boundaries", () => {
       } finally {
         await closeKernelDatabase(fx.handle);
       }
-    });
+      // Full-migration fixture + parallel workers on Windows CI can exceed
+      // vitest's 5s default (observed 6.4s); the assertion itself is
+      // synchronous, so a bounded explicit timeout keeps it deterministic.
+    }, 20000);
 
     it("is one-shot (applied:false once picked up) and fails closed on an impossible queued pair", async () => {
       const fx = await setupApprovedProposalFixture(() => 100);

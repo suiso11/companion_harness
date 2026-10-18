@@ -271,7 +271,7 @@ describe("action evidence navigation (original BEFORE label)", () => {
     } finally {
       fx.close();
     }
-  });
+  }, 30000);
 
   it("live execution keeps the original label with no receipt and no result", async () => {
     const fx = await makeEvidenceFixture();

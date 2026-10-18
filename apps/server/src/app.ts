@@ -14,12 +14,24 @@ import {
   AutonomyListQuerySchema,
   CancelRunRequestSchema,
   CancelRunResponseSchema,
+  ConversationProposalAcceptRequestSchema,
+  ConversationProposalRejectRequestSchema,
   CreateSessionRequestSchema,
   CreateSessionResponseSchema,
   EventsQuerySchema,
+  HandoffAttemptRequestSchema,
+  HandoffCreateRequestSchema,
+  HandoffDispatchRequestSchema,
+  HandoffReportRequestSchema,
+  HandoffTransitionRequestSchema,
+  HandoffVerifyRequestSchema,
   HistoryQuerySchema,
   IDEMPOTENCY_SCOPE_SESSIONS_CREATE,
   IdempotencyLookupQuerySchema,
+  LearningEvidenceAttachRequestSchema,
+  LearningHypothesisCreateRequestSchema,
+  LearningHypothesisDecisionRequestSchema,
+  LearningHypothesisTransitionRequestSchema,
   MemoryDetailResponseSchema,
   MemoryMutationRequestSchema,
   MemoryMutationResponseSchema,
@@ -28,6 +40,13 @@ import {
   MemorySearchRequestSchema,
   MemorySearchResponseSchema,
   messageScope,
+  NotificationAckReceiptSchema,
+  NotificationForwardQuerySchema,
+  NotificationHistoryResponseSchema,
+  NotificationListQuerySchema,
+  NotificationListResponseSchema,
+  NotificationReadQuerySchema,
+  NotificationViewSchema,
   PostMessageRequestSchema,
   PostMessageResponseSchema,
   PostRetryRequestSchema,
@@ -50,6 +69,8 @@ import {
   ReferenceSetDetailResponseSchema,
   RunStatusResponseSchema,
   retryScope,
+  ShadowExplicitRequestSchema,
+  shadowRequestScope,
   TaskCreateRequestSchema,
   TaskHoldRequestSchema,
   TaskResumeRequestSchema,
@@ -62,10 +83,16 @@ import {
   ActionNotCancellableError,
   AutonomyStateConflictError,
   AutonomyVersionConflictError,
+  HandoffStateConflictError,
+  HandoffVersionConflictError,
   IdempotencyConflictError,
   InvalidReferenceError,
   isUuidV4,
   type KernelRepository,
+  LearningStateConflictError,
+  LearningVersionConflictError,
+  NotificationKeyConflictError,
+  NotificationProjectionResetError,
   ProposalHashMismatchError,
   ProposalStateConflictError,
   ReferenceNotFoundError,
@@ -73,13 +100,17 @@ import {
   RepositoryNotFoundError,
   RepositoryValidationError,
   SessionBusyError,
+  ShadowLeaseConflictError,
+  ShadowStateConflictError,
+  ShadowVersionConflictError,
 } from "@companion/kernel";
 import type { Context } from "hono";
 import { Hono } from "hono";
+import { z } from "zod";
 import type { ServerConfig } from "./config.js";
 import { ServerConfigError } from "./config.js";
 import { createStdServerLogger, type ServerLogger } from "./logger.js";
-import { createSseResponse } from "./sse.js";
+import { createNotificationFeedSseResponse, createSseResponse } from "./sse.js";
 import { renderConversationShell, STRICT_CSP } from "./ui/page.js";
 import { effectiveCursor } from "./ui/reducer.js";
 
@@ -226,6 +257,24 @@ export interface CreateAppDeps {
    * `/memory/*` route answers 404 without touching the repository.
    */
   memory?: MemoryHttpPort;
+  /**
+   * AV shadow worker wake hook (server-owned). Called synchronously AFTER a
+   * committed autonomy mutation / control change / explicit shadow request
+   * so meaningful new state re-drives the worker. Never throws back into
+   * the committed command (the app guards every call); absent (default)
+   * keeps the existing no-worker behavior.
+   */
+  shadowWake?: () => void;
+  /**
+   * AV shadow worker control hook (server-owned). Called synchronously
+   * AFTER a committed control change (pause OR resume, INCLUDING a
+   * replayed old resume): the worker reads the ACTUAL current control
+   * state and aborts its OWN in-flight call immediately when paused, so a
+   * pure STOP aborts model/recall work even with no foreground chat. Never
+   * throws back into the committed command (guarded like `shadowWake`);
+   * absent (default) keeps wake-only behavior.
+   */
+  shadowControlChanged?: () => void;
 }
 
 export interface ServerControls {
@@ -636,6 +685,121 @@ function mapDomainError(c: Context, error: unknown): Response {
       409,
     );
   }
+  // AV04 learning slice: CAS version conflicts and illegal lifecycle
+  // transitions / invalid evidence anchors map to fixed 409 codes (same
+  // shape as the autonomy codes above; outside the frozen ApiErrorCode
+  // enum). Ownership failures stay 404 above.
+  if (error instanceof LearningVersionConflictError) {
+    return c.json(
+      {
+        error: {
+          code: "learning_version_conflict",
+          message: "learning version conflict",
+        },
+      },
+      409,
+    );
+  }
+  if (error instanceof LearningStateConflictError) {
+    return c.json(
+      {
+        error: {
+          code: "learning_state_conflict",
+          message: "learning state conflict",
+        },
+      },
+      409,
+    );
+  }
+  // AV03 delegation-handoff slice: CAS version conflicts and illegal
+  // lifecycle transitions / invalid verification inputs map to fixed 409
+  // codes (same shape as the autonomy codes above). Ownership failures
+  // stay 404 above.
+  if (error instanceof HandoffVersionConflictError) {
+    return c.json(
+      {
+        error: {
+          code: "handoff_version_conflict",
+          message: "handoff version conflict",
+        },
+      },
+      409,
+    );
+  }
+  if (error instanceof HandoffStateConflictError) {
+    return c.json(
+      {
+        error: {
+          code: "handoff_state_conflict",
+          message: "handoff state conflict",
+        },
+      },
+      409,
+    );
+  }
+  // AV shadow slice: CAS version conflicts, illegal lifecycle transitions,
+  // and lease races map to fixed 409 codes (same shape as the autonomy
+  // codes above; outside the frozen ApiErrorCode enum). No 500 swallows a
+  // security-relevant conflict; ownership failures stay 404 above.
+  if (error instanceof ShadowVersionConflictError) {
+    return c.json(
+      {
+        error: {
+          code: "shadow_version_conflict",
+          message: "shadow version conflict",
+        },
+      },
+      409,
+    );
+  }
+  if (error instanceof ShadowStateConflictError) {
+    return c.json(
+      {
+        error: {
+          code: "shadow_state_conflict",
+          message: "shadow state conflict",
+        },
+      },
+      409,
+    );
+  }
+  if (error instanceof ShadowLeaseConflictError) {
+    return c.json(
+      {
+        error: {
+          code: "shadow_lease_conflict",
+          message: "shadow lease conflict",
+        },
+      },
+      409,
+    );
+  }
+  // AV05 notification slice: an explicit ack under a stable key on a
+  // DIFFERENT notification (or a second key on an acked one) is a fixed
+  // 409; a renumbered durable source refuses with a fixed 409 (never an
+  // auto-reset, never dropped notices). Ownership stays 404 above.
+  if (error instanceof NotificationKeyConflictError) {
+    return c.json(
+      {
+        error: {
+          code: "notification_key_conflict",
+          message: "notification ack key conflict",
+        },
+      },
+      409,
+    );
+  }
+  if (error instanceof NotificationProjectionResetError) {
+    return c.json(
+      {
+        error: {
+          code: "notification_projection_reset_required",
+          message: "notification projection reset required",
+        },
+      },
+      409,
+    );
+  }
   if (
     typeof error === "object" &&
     error !== null &&
@@ -652,6 +816,8 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   const actionsEnabled = deps.actionsEnabled === true;
   const createEnabled = deps.createEnabled === true;
   const memory = deps.memory ?? null;
+  const shadowWake = deps.shadowWake;
+  const shadowControlChanged = deps.shadowControlChanged;
   const logger = deps.logger ?? createStdServerLogger(config.logLevel);
   const now = deps.now ?? Date.now;
   const assets = deps.assets ?? {};
@@ -663,6 +829,32 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     markDraining: () => {
       draining = true;
     },
+  };
+  /**
+   * Wake the shadow worker after a COMMITTED state change. Synchronous and
+   * throw-guarded: a wake failure can never unwind a committed user command
+   * (or a committed control/explicit-request write).
+   */
+  const wakeShadow = (): void => {
+    try {
+      shadowWake?.();
+    } catch {
+      // Best effort: the mutation already committed.
+    }
+  };
+  /**
+   * Notify the shadow worker of a COMMITTED control change. Synchronous
+   * and throw-guarded like `wakeShadow`: the worker reads the ACTUAL
+   * current control state (never a stored replay reply) and aborts its OWN
+   * in-flight call when paused, so a pure STOP aborts model/recall work
+   * with no foreground chat involved.
+   */
+  const notifyShadowControl = (): void => {
+    try {
+      shadowControlChanged?.();
+    } catch {
+      // Best effort: the control change already committed.
+    }
   };
 
   const app = new Hono();
@@ -2124,7 +2316,8 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         status: out.status,
         durationMs: Math.max(now() - started, 0),
       });
-      return c.json(out.body, out.status as 201);
+      wakeShadow();
+      return c.json(out.body, out.status as 200 | 201);
     } catch (error) {
       return mapDomainError(c, error);
     }
@@ -2254,6 +2447,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
           status: out.status,
           durationMs: Math.max(now() - started, 0),
         });
+        wakeShadow();
         return c.json(out.body, out.status as 201);
       } catch (error) {
         return mapDomainError(c, error);
@@ -2300,6 +2494,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         status: out.status,
         durationMs: Math.max(now() - started, 0),
       });
+      wakeShadow();
       return c.json(out.body, out.status as 200);
     } catch (error) {
       return mapDomainError(c, error);
@@ -2349,6 +2544,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
           status: out.status,
           durationMs: Math.max(now() - started, 0),
         });
+        wakeShadow();
         return c.json(out.body, out.status as 200);
       } catch (error) {
         return mapDomainError(c, error);
@@ -2410,6 +2606,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         status: out.status,
         durationMs: Math.max(now() - started, 0),
       });
+      wakeShadow();
       return c.json(out.body, out.status as 200 | 201);
     } catch (error) {
       return mapDomainError(c, error);
@@ -2449,7 +2646,8 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         status: out.status,
         durationMs: Math.max(now() - started, 0),
       });
-      return c.json(out.body, out.status as 201);
+      wakeShadow();
+      return c.json(out.body, out.status as 200 | 201);
     } catch (error) {
       return mapDomainError(c, error);
     }
@@ -2606,6 +2804,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
           status: out.status,
           durationMs: Math.max(now() - started, 0),
         });
+        wakeShadow();
         return c.json(out.body, out.status as 200);
       } catch (error) {
         return mapDomainError(c, error);
@@ -2632,6 +2831,716 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   app.post(
     "/api/sessions/:sessionId/tasks/:taskId/cancel",
     autonomyTaskTransition("cancel"),
+  );
+
+  /* ---------------- AV03 conversation proposals: review + adopt ------- */
+  // Session-owned durable INFERRED drafts staged ONLY by the model-only
+  // tools `purpose.propose` / `task.propose` (no staging route exists).
+  // Strict Zod bodies, UUID ids, Idempotency-Key on every POST, exact query
+  // gates, ownership-first 404s, CAS 409s. The accept decision atomically
+  // creates the actual purpose/task (+ accepted-target link); reject
+  // creates nothing. Human date args only (strict RFC3339, explicit
+  // offset); model dates never exist. Draining rejects fresh keys with 503
+  // without persisting (same admission as the autonomy mutations above:
+  // no lookup replay — the frozen client key retries after drain).
+  // Recorded `permission` adoptions stay claims only (no grant anywhere).
+
+  app.get("/api/sessions/:sessionId/conversation-proposals", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const query = strictQuery(c, ["limit", "cursor", "status"]);
+    if (!query.ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(
+        repo.listConversationProposals(session.id, {
+          ...(query.values.limit !== undefined
+            ? { limit: query.values.limit }
+            : {}),
+          ...(query.values.cursor !== undefined
+            ? { cursor: query.values.cursor }
+            : {}),
+          ...(query.values.status !== undefined
+            ? { status: query.values.status }
+            : {}),
+        }),
+        200,
+      );
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get(
+    "/api/sessions/:sessionId/conversation-proposals/:proposalId",
+    (c) => {
+      const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+      if ("response" in session) {
+        return session.response;
+      }
+      const proposal = requireUuid(c, c.req.param("proposalId"), "proposalId");
+      if ("response" in proposal) {
+        return proposal.response;
+      }
+      if (!strictQuery(c, []).ok) {
+        return validationError(c);
+      }
+      try {
+        return c.json(
+          repo.getConversationProposal(session.id, proposal.id),
+          200,
+        );
+      } catch (error) {
+        return mapDomainError(c, error);
+      }
+    },
+  );
+
+  app.post(
+    "/api/sessions/:sessionId/conversation-proposals/:proposalId/accept",
+    async (c) => {
+      const started = now();
+      const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+      if ("response" in session) {
+        return session.response;
+      }
+      const proposal = requireUuid(c, c.req.param("proposalId"), "proposalId");
+      if ("response" in proposal) {
+        return proposal.response;
+      }
+      const keyed = requireIdempotencyKey(c);
+      if ("response" in keyed) {
+        return keyed.response;
+      }
+      if (!strictQuery(c, []).ok) {
+        return validationError(c);
+      }
+      const raw = await readJsonBody(c);
+      if (!raw.ok) {
+        return validationError(c);
+      }
+      if (
+        ConversationProposalAcceptRequestSchema.safeParse(raw.value).success !==
+        true
+      ) {
+        return validationError(c);
+      }
+      if (draining) {
+        return shuttingDown(c);
+      }
+      try {
+        const out = repo.acceptConversationProposal(
+          session.id,
+          proposal.id,
+          raw.value,
+          { key: keyed.key, now: now() },
+        );
+        logger.info("http.proposals.conversation.accept", {
+          sessionId: session.id,
+          status: out.status,
+          durationMs: Math.max(now() - started, 0),
+        });
+        wakeShadow();
+        return c.json(out.body, out.status as 201);
+      } catch (error) {
+        return mapDomainError(c, error);
+      }
+    },
+  );
+
+  app.post(
+    "/api/sessions/:sessionId/conversation-proposals/:proposalId/reject",
+    async (c) => {
+      const started = now();
+      const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+      if ("response" in session) {
+        return session.response;
+      }
+      const proposal = requireUuid(c, c.req.param("proposalId"), "proposalId");
+      if ("response" in proposal) {
+        return proposal.response;
+      }
+      const keyed = requireIdempotencyKey(c);
+      if ("response" in keyed) {
+        return keyed.response;
+      }
+      if (!strictQuery(c, []).ok) {
+        return validationError(c);
+      }
+      const raw = await readJsonBody(c);
+      if (!raw.ok) {
+        return validationError(c);
+      }
+      if (
+        ConversationProposalRejectRequestSchema.safeParse(raw.value).success !==
+        true
+      ) {
+        return validationError(c);
+      }
+      if (draining) {
+        return shuttingDown(c);
+      }
+      try {
+        const out = repo.rejectConversationProposal(
+          session.id,
+          proposal.id,
+          raw.value,
+          { key: keyed.key, now: now() },
+        );
+        logger.info("http.proposals.conversation.reject", {
+          sessionId: session.id,
+          status: out.status,
+          durationMs: Math.max(now() - started, 0),
+        });
+        return c.json(out.body, out.status as 200);
+      } catch (error) {
+        return mapDomainError(c, error);
+      }
+    },
+  );
+
+  /* ---------------- AV04 learning: hypotheses + evidence ------------- */
+  // Session-owned durable METHODS / HYPOTHESES plus append-only EVIDENCE
+  // anchored to existing durable sources only. Human-explicit CRUD:
+  // create / transition (support/refute/retire, CAS) / evidence attach /
+  // staged accept-reject. Model tools are proposal-only + read-only (no
+  // staging route exists). Strict Zod bodies, UUID ids, Idempotency-Key on
+  // every POST, exact query gates, ownership-first 404s, CAS 409s. Every
+  // read DTO carries the explicit hypothesis label (kind + status +
+  // evidence counts); refuted is never surfaced as fact. Routine learning
+  // writes NO notifications and never touches control/grants/budget.
+  app.get("/api/sessions/:sessionId/learning/hypotheses", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const query = strictQuery(c, [
+      "limit",
+      "cursor",
+      "scope",
+      "status",
+      "kind",
+    ]);
+    if (!query.ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(
+        repo.listLearningHypotheses(session.id, {
+          ...(query.values.limit !== undefined
+            ? { limit: query.values.limit }
+            : {}),
+          ...(query.values.cursor !== undefined
+            ? { cursor: query.values.cursor }
+            : {}),
+          ...(query.values.scope !== undefined
+            ? { scope: query.values.scope }
+            : {}),
+          ...(query.values.status !== undefined
+            ? { status: query.values.status }
+            : {}),
+          ...(query.values.kind !== undefined
+            ? { kind: query.values.kind }
+            : {}),
+        }),
+        200,
+      );
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.post("/api/sessions/:sessionId/learning/hypotheses", async (c) => {
+    const started = now();
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const keyed = requireIdempotencyKey(c);
+    if ("response" in keyed) {
+      return keyed.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    const raw = await readJsonBody(c);
+    if (!raw.ok) {
+      return validationError(c);
+    }
+    if (
+      LearningHypothesisCreateRequestSchema.safeParse(raw.value).success !==
+      true
+    ) {
+      return validationError(c);
+    }
+    if (draining) {
+      return shuttingDown(c);
+    }
+    try {
+      const out = repo.createLearningHypothesis(session.id, raw.value, {
+        key: keyed.key,
+        now: now(),
+      });
+      logger.info("http.learning.hypotheses.create", {
+        sessionId: session.id,
+        status: out.status,
+        durationMs: Math.max(now() - started, 0),
+      });
+      return c.json(out.body, out.status as 201);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get("/api/sessions/:sessionId/learning/hypotheses/:hypothesisId", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const hypothesis = requireUuid(
+      c,
+      c.req.param("hypothesisId"),
+      "hypothesisId",
+    );
+    if ("response" in hypothesis) {
+      return hypothesis.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(repo.getLearningHypothesis(session.id, hypothesis.id), 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get(
+    "/api/sessions/:sessionId/learning/hypotheses/:hypothesisId/evidence",
+    (c) => {
+      const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+      if ("response" in session) {
+        return session.response;
+      }
+      const hypothesis = requireUuid(
+        c,
+        c.req.param("hypothesisId"),
+        "hypothesisId",
+      );
+      if ("response" in hypothesis) {
+        return hypothesis.response;
+      }
+      const listQuery = strictQuery(c, ["limit", "cursor"]);
+      if (!listQuery.ok) {
+        return validationError(c);
+      }
+      try {
+        return c.json(
+          repo.listLearningHypothesisEvidence(session.id, hypothesis.id, {
+            ...(listQuery.values.limit !== undefined
+              ? { limit: listQuery.values.limit }
+              : {}),
+            ...(listQuery.values.cursor !== undefined
+              ? { cursor: listQuery.values.cursor }
+              : {}),
+          }),
+          200,
+        );
+      } catch (error) {
+        return mapDomainError(c, error);
+      }
+    },
+  );
+
+  function learningHypothesisMutation(
+    suffix: string,
+    logName: string,
+    schemaName: "transition" | "evidence" | "decision",
+    apply: (
+      sessionId: string,
+      hypothesisId: string,
+      body: unknown,
+      options: { key: string; now: number },
+    ) => { status: number; body: unknown; replayed: boolean },
+  ): void {
+    app.post(
+      `/api/sessions/:sessionId/learning/hypotheses/:hypothesisId/${suffix}`,
+      async (c) => {
+        const started = now();
+        const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+        if ("response" in session) {
+          return session.response;
+        }
+        const hypothesis = requireUuid(
+          c,
+          c.req.param("hypothesisId"),
+          "hypothesisId",
+        );
+        if ("response" in hypothesis) {
+          return hypothesis.response;
+        }
+        const keyed = requireIdempotencyKey(c);
+        if ("response" in keyed) {
+          return keyed.response;
+        }
+        if (!strictQuery(c, []).ok) {
+          return validationError(c);
+        }
+        const raw = await readJsonBody(c);
+        if (!raw.ok) {
+          return validationError(c);
+        }
+        const schema =
+          schemaName === "transition"
+            ? LearningHypothesisTransitionRequestSchema
+            : schemaName === "evidence"
+              ? LearningEvidenceAttachRequestSchema
+              : LearningHypothesisDecisionRequestSchema;
+        if (schema.safeParse(raw.value).success !== true) {
+          return validationError(c);
+        }
+        if (draining) {
+          return shuttingDown(c);
+        }
+        try {
+          const out = apply(session.id, hypothesis.id, raw.value, {
+            key: keyed.key,
+            now: now(),
+          });
+          logger.info(logName, {
+            sessionId: session.id,
+            status: out.status,
+            durationMs: Math.max(now() - started, 0),
+          });
+          return c.json(out.body, out.status as 200);
+        } catch (error) {
+          return mapDomainError(c, error);
+        }
+      },
+    );
+  }
+
+  learningHypothesisMutation(
+    "transition",
+    "http.learning.hypotheses.transition",
+    "transition",
+    (sessionId, hypothesisId, body, options) =>
+      repo.transitionLearningHypothesis(sessionId, hypothesisId, body, options),
+  );
+  // Explicit human reaffirm: keeps the status, clears a pending
+  // `needs_reevaluation` notice (CAS on the expected version, allowed only
+  // while the notice is set). Decision-shaped body (no status fields).
+  learningHypothesisMutation(
+    "reaffirm",
+    "http.learning.hypotheses.reaffirm",
+    "decision",
+    (sessionId, hypothesisId, body, options) =>
+      repo.reaffirmLearningHypothesis(sessionId, hypothesisId, body, options),
+  );
+  learningHypothesisMutation(
+    "evidence",
+    "http.learning.hypotheses.evidence",
+    "evidence",
+    (sessionId, hypothesisId, body, options) =>
+      repo.attachLearningEvidence(sessionId, hypothesisId, body, options),
+  );
+  learningHypothesisMutation(
+    "accept",
+    "http.learning.hypotheses.accept",
+    "decision",
+    (sessionId, hypothesisId, body, options) =>
+      repo.acceptLearningHypothesis(sessionId, hypothesisId, body, options),
+  );
+  learningHypothesisMutation(
+    "reject",
+    "http.learning.hypotheses.reject",
+    "decision",
+    (sessionId, hypothesisId, body, options) =>
+      repo.rejectLearningHypothesis(sessionId, hypothesisId, body, options),
+  );
+
+  /* ----------------- AV03 delegation handoffs (human-driven) --------- */
+  // Session-owned handoffs bound to an existing task (+ frozen parent
+  // purpose snapshot). Human-explicit CRUD: create (prepared) / dispatch /
+  // report / verify / fail / cancel / abnormal-exit / attempt / reaffirm.
+  // No execution, no spawning, no grants, no numeric budgets (budget text
+  // labels only), no task auto-complete. Strict Zod bodies, UUID ids,
+  // Idempotency-Key on every POST, exact query gates, ownership-first
+  // 404s, CAS 409s. Sandbox claims never imply production; boundary flags
+  // are recorded claims requiring separate authorization.
+  app.get("/api/sessions/:sessionId/handoffs", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const query = strictQuery(c, ["limit", "cursor", "status"]);
+    if (!query.ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(
+        repo.listHandoffs(session.id, {
+          ...(query.values.limit !== undefined
+            ? { limit: query.values.limit }
+            : {}),
+          ...(query.values.cursor !== undefined
+            ? { cursor: query.values.cursor }
+            : {}),
+          ...(query.values.status !== undefined
+            ? { status: query.values.status }
+            : {}),
+        }),
+        200,
+      );
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.post("/api/sessions/:sessionId/handoffs", async (c) => {
+    const started = now();
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const keyed = requireIdempotencyKey(c);
+    if ("response" in keyed) {
+      return keyed.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    const raw = await readJsonBody(c);
+    if (!raw.ok) {
+      return validationError(c);
+    }
+    if (HandoffCreateRequestSchema.safeParse(raw.value).success !== true) {
+      return validationError(c);
+    }
+    if (draining) {
+      return shuttingDown(c);
+    }
+    try {
+      const out = repo.createHandoff(session.id, raw.value, {
+        key: keyed.key,
+        now: now(),
+      });
+      logger.info("http.handoffs.create", {
+        sessionId: session.id,
+        status: out.status,
+        durationMs: Math.max(now() - started, 0),
+      });
+      return c.json(out.body, out.status as 201);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get("/api/sessions/:sessionId/handoffs/:handoffId", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const handoff = requireUuid(c, c.req.param("handoffId"), "handoffId");
+    if ("response" in handoff) {
+      return handoff.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(repo.getHandoff(session.id, handoff.id), 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  // Deterministic plain-text handoff spec for manual paste into pi-orch.
+  // Execution is NOT automated by this export: the human hands the task
+  // over and records verified outcomes back through the routes above.
+  app.get("/api/sessions/:sessionId/handoffs/:handoffId/spec", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const handoff = requireUuid(c, c.req.param("handoffId"), "handoffId");
+    if ("response" in handoff) {
+      return handoff.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      return c.text(repo.getHandoffSpec(session.id, handoff.id), 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get("/api/sessions/:sessionId/handoffs/:handoffId/events", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const handoff = requireUuid(c, c.req.param("handoffId"), "handoffId");
+    if ("response" in handoff) {
+      return handoff.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(repo.listHandoffEvents(session.id, handoff.id), 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get("/api/sessions/:sessionId/handoffs/:handoffId/attempts", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const handoff = requireUuid(c, c.req.param("handoffId"), "handoffId");
+    if ("response" in handoff) {
+      return handoff.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(repo.listHandoffAttempts(session.id, handoff.id), 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  function handoffMutation(
+    suffix: string,
+    logName: string,
+    schemaName: "transition" | "dispatch" | "report" | "verify" | "attempt",
+    apply: (
+      sessionId: string,
+      handoffId: string,
+      body: unknown,
+      options: { key: string; now: number },
+    ) => { status: number; body: unknown; replayed: boolean },
+  ): void {
+    app.post(
+      `/api/sessions/:sessionId/handoffs/:handoffId/${suffix}`,
+      async (c) => {
+        const started = now();
+        const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+        if ("response" in session) {
+          return session.response;
+        }
+        const handoff = requireUuid(c, c.req.param("handoffId"), "handoffId");
+        if ("response" in handoff) {
+          return handoff.response;
+        }
+        const keyed = requireIdempotencyKey(c);
+        if ("response" in keyed) {
+          return keyed.response;
+        }
+        if (!strictQuery(c, []).ok) {
+          return validationError(c);
+        }
+        const raw = await readJsonBody(c);
+        if (!raw.ok) {
+          return validationError(c);
+        }
+        const schema =
+          schemaName === "dispatch"
+            ? HandoffDispatchRequestSchema
+            : schemaName === "report"
+              ? HandoffReportRequestSchema
+              : schemaName === "verify"
+                ? HandoffVerifyRequestSchema
+                : schemaName === "attempt"
+                  ? HandoffAttemptRequestSchema
+                  : HandoffTransitionRequestSchema;
+        if (schema.safeParse(raw.value).success !== true) {
+          return validationError(c);
+        }
+        if (draining) {
+          return shuttingDown(c);
+        }
+        try {
+          const out = apply(session.id, handoff.id, raw.value, {
+            key: keyed.key,
+            now: now(),
+          });
+          logger.info(logName, {
+            sessionId: session.id,
+            status: out.status,
+            durationMs: Math.max(now() - started, 0),
+          });
+          return c.json(out.body, out.status as 200);
+        } catch (error) {
+          return mapDomainError(c, error);
+        }
+      },
+    );
+  }
+
+  handoffMutation(
+    "dispatch",
+    "http.handoffs.dispatch",
+    "dispatch",
+    (sessionId, handoffId, body, options) =>
+      repo.dispatchHandoff(sessionId, handoffId, body, options),
+  );
+  handoffMutation(
+    "report",
+    "http.handoffs.report",
+    "report",
+    (sessionId, handoffId, body, options) =>
+      repo.reportHandoff(sessionId, handoffId, body, options),
+  );
+  handoffMutation(
+    "verify",
+    "http.handoffs.verify",
+    "verify",
+    (sessionId, handoffId, body, options) =>
+      repo.verifyHandoff(sessionId, handoffId, body, options),
+  );
+  handoffMutation(
+    "fail",
+    "http.handoffs.fail",
+    "transition",
+    (sessionId, handoffId, body, options) =>
+      repo.failHandoff(sessionId, handoffId, body, options),
+  );
+  handoffMutation(
+    "cancel",
+    "http.handoffs.cancel",
+    "transition",
+    (sessionId, handoffId, body, options) =>
+      repo.cancelHandoff(sessionId, handoffId, body, options),
+  );
+  handoffMutation(
+    "abnormal-exit",
+    "http.handoffs.abnormal-exit",
+    "transition",
+    (sessionId, handoffId, body, options) =>
+      repo.abnormalExitHandoff(sessionId, handoffId, body, options),
+  );
+  handoffMutation(
+    "attempt",
+    "http.handoffs.attempt",
+    "attempt",
+    (sessionId, handoffId, body, options) =>
+      repo.recordHandoffAttempt(sessionId, handoffId, body, options),
+  );
+  handoffMutation(
+    "reaffirm",
+    "http.handoffs.reaffirm",
+    "transition",
+    (sessionId, handoffId, body, options) =>
+      repo.reaffirmHandoff(sessionId, handoffId, body, options),
   );
 
   app.get("/api/autonomy/control", (c) => {
@@ -2673,6 +3582,12 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         status: out.status,
         durationMs: Math.max(now() - started, 0),
       });
+      // Committed control change: abort the shadow's OWN in-flight call
+      // FIRST when the actual state is paused (pure STOP aborts model /
+      // recall work with no foreground chat), then wake for new state.
+      // Both hooks read live state and never throw into the command.
+      notifyShadowControl();
+      wakeShadow();
       return c.json(out.body, out.status as 200);
     } catch (error) {
       return mapDomainError(c, error);
@@ -3000,6 +3915,502 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       return mapDomainError(c, error);
     }
   });
+
+  /* ---------------- AV shadow: explicit requests + read-only views ------- */
+  // Session-owned explicit deliberation requests plus read-only job views.
+  // Strict Zod bodies, UUID ids, Idempotency-Key on every POST, exact query
+  // gates, ownership-first 404s, CAS 409s. Claim/complete/fail/lease-owner/
+  // model-grant surfaces are TRUSTED runtime-only and are NEVER exposed
+  // here (no such route exists). GET list/detail/events/context reads
+  // carry NO ack side effect; the context read additionally projects the
+  // stored MODEL decision next to the frozen context (both frozen
+  // records, never authority). A successful explicit request wakes the
+  // worker (same throw-guarded semantics as the autonomy mutations
+  // above).
+
+  app.post("/api/sessions/:sessionId/shadow-jobs", async (c) => {
+    const started = now();
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const keyed = requireIdempotencyKey(c);
+    if ("response" in keyed) {
+      return keyed.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    const raw = await readJsonBody(c);
+    if (!raw.ok) {
+      return validationError(c);
+    }
+    if (ShadowExplicitRequestSchema.safeParse(raw.value).success !== true) {
+      return validationError(c);
+    }
+    if (draining) {
+      // Draining replay-first (consistent with message/retry admission):
+      // an already-ACCEPTED key replays its stored response verbatim; a
+      // fresh key is rejected with 503 and persists nothing.
+      try {
+        const stored = repo.lookupIdempotencyForSession(
+          session.id,
+          keyed.key,
+          shadowRequestScope(session.id),
+        );
+        if (stored.found) {
+          const out = repo.requestShadowDeliberation(session.id, raw.value, {
+            key: keyed.key,
+            now: now(),
+          });
+          return c.json(out.body, out.status as 201);
+        }
+      } catch {
+        // Lookup/replay failure while draining still rejects below.
+      }
+      return shuttingDown(c);
+    }
+    try {
+      const out = repo.requestShadowDeliberation(session.id, raw.value, {
+        key: keyed.key,
+        now: now(),
+      });
+      logger.info("http.shadow.jobs.request", {
+        sessionId: session.id,
+        status: out.status,
+        durationMs: Math.max(now() - started, 0),
+      });
+      wakeShadow();
+      return c.json(out.body, out.status as 200 | 201);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get("/api/sessions/:sessionId/shadow-jobs", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const query = strictQuery(c, ["limit"]);
+    if (!query.ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(
+        repo.listShadowJobs(session.id, {
+          ...(query.values.limit !== undefined
+            ? { limit: query.values.limit }
+            : {}),
+        }),
+        200,
+      );
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get("/api/sessions/:sessionId/shadow-jobs/:jobId", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const job = requireUuid(c, c.req.param("jobId"), "jobId");
+    if ("response" in job) {
+      return job.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(repo.getShadowJob(session.id, job.id), 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get("/api/sessions/:sessionId/shadow-jobs/:jobId/events", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const job = requireUuid(c, c.req.param("jobId"), "jobId");
+    if ("response" in job) {
+      return job.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(repo.listShadowJobEvents(session.id, job.id), 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get("/api/sessions/:sessionId/shadow-jobs/:jobId/context", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const job = requireUuid(c, c.req.param("jobId"), "jobId");
+    if ("response" in job) {
+      return job.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      // Deliberation envelope: frozen claim-time context + stored MODEL
+      // decision (null until fenced completion). Read-only projection of
+      // already-stored rows: no ack, no mutation, no authority conferred.
+      return c.json(repo.getShadowJobDeliberation(session.id, job.id), 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  /* ---------------- AV05 notifications: durable feed + explicit ack --- */
+  // Session-owned durable notification feed (projection reads) plus
+  // explicit ack receipts. Reads are pure SELECTs: no ingest, no ack, no
+  // model nudge, no authority. An ack records ONLY the receipt: it changes
+  // no purpose / task / control / Calendar grant / proposal / hypothesis,
+  // and the strict `{}` body carries no job / purpose / task / action /
+  // grant / resume selector (an ack can never imply a question answer or a
+  // consent). Ownership-first 404s; stable-key replays 200; key drift 409.
+
+  /**
+   * App-local notification read queries: the contracts `now` read clock
+   * stays kernel-only (deterministic tests inject it there). Production
+   * HTTP reads MUST use the trusted server clock (`now()` below), never an
+   * untrusted `?now=` override — unknown `now` keys are strict 400 via the
+   * query gates. `omit` reuses the exact contract bounds (no duplication);
+   * the single-field read schema omits to a strict empty object.
+   */
+  const NotificationListHttpQuerySchema = NotificationListQuerySchema.omit({
+    now: true,
+  });
+  const NotificationForwardHttpQuerySchema =
+    NotificationForwardQuerySchema.omit({ now: true });
+  const NotificationReadHttpQuerySchema = NotificationReadQuerySchema.omit({
+    now: true,
+  });
+
+  /**
+   * HTTP cursor/seq safe-integer gate: contracts `.int()` alone admits
+   * unsafe magnitudes (SQLite-unfriendly). Reads reject non-safe values
+   * with 400; no arbitrary new bounds are introduced.
+   */
+  function isSafeSeq(value: number | undefined): boolean {
+    if (value === undefined) {
+      return true;
+    }
+    return Number.isSafeInteger(value);
+  }
+
+  /**
+   * Strict ack body: exactly `{}`. Any key (job / purpose / task / action
+   * / grant / resume / answer / consent …) is rejected: an ack selects
+   * its notification ONLY via the path id + the Idempotency-Key header.
+   */
+  const NotificationAckRequestSchema = z.strictObject({});
+
+  /**
+   * Draining replay for POST acks: read-only. A stored ack under the SAME
+   * key replays verbatim (200); a stored ack under a DIFFERENT key replays
+   * the fixed 409; anything without a stored ack rejects 503 without
+   * persisting. Never writes during drain.
+   */
+  function tryReplayStoredAck(
+    c: Context,
+    sessionId: string,
+    notificationId: string,
+    key: string,
+  ): Response | null {
+    try {
+      const history = NotificationHistoryResponseSchema.parse(
+        repo.getNotificationHistory(sessionId, notificationId),
+      );
+      if (history.ack === null) {
+        return null;
+      }
+      if (history.ack.key !== key) {
+        return c.json(
+          {
+            error: {
+              code: "notification_key_conflict",
+              message: "notification ack key conflict",
+            },
+          },
+          409,
+        );
+      }
+      const body = NotificationAckReceiptSchema.parse(history.ack);
+      return c.json(body, 200);
+    } catch (error) {
+      if (
+        error instanceof RepositoryNotFoundError ||
+        error instanceof NotificationKeyConflictError ||
+        error instanceof NotificationProjectionResetError
+      ) {
+        return mapDomainError(c, error);
+      }
+      return null;
+    }
+  }
+
+  // Newest-page history (no hidden cap: strict 1..100 `limit` +
+  // `beforeSeq` paging with truthful `hasMore`/`nextBefore`). Production
+  // reads use the trusted server clock; `?now=` is rejected as unknown.
+  app.get("/api/sessions/:sessionId/notifications", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const gated = strictQuery(c, ["beforeSeq", "limit"]);
+    if (!gated.ok) {
+      return validationError(c);
+    }
+    const parsed = NotificationListHttpQuerySchema.safeParse({
+      beforeSeq: gated.values.beforeSeq,
+      limit: gated.values.limit,
+    });
+    if (!parsed.success) {
+      return validationError(c);
+    }
+    if (!isSafeSeq(parsed.data.beforeSeq) || !isSafeSeq(parsed.data.limit)) {
+      return validationError(c);
+    }
+    try {
+      const body = NotificationListResponseSchema.parse(
+        repo.listNotifications(session.id, {
+          limit: parsed.data.limit,
+          ...(parsed.data.beforeSeq !== undefined
+            ? { beforeSeq: parsed.data.beforeSeq }
+            : {}),
+          now: now(),
+        }),
+      );
+      return c.json(body, 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  // Forward read-after page (`seq > after` oldest-first, strict 1..100):
+  // the durable counterpart of SSE replay (same SQL paging). Trusted clock.
+  app.get("/api/sessions/:sessionId/notifications/forward", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const gated = strictQuery(c, ["after", "limit"]);
+    if (!gated.ok) {
+      return validationError(c);
+    }
+    const parsed = NotificationForwardHttpQuerySchema.safeParse({
+      after: gated.values.after,
+      limit: gated.values.limit,
+    });
+    if (!parsed.success) {
+      return validationError(c);
+    }
+    if (!isSafeSeq(parsed.data.after) || !isSafeSeq(parsed.data.limit)) {
+      return validationError(c);
+    }
+    try {
+      const body = repo.listNotificationsForward(session.id, {
+        after: parsed.data.after,
+        limit: parsed.data.limit,
+        now: now(),
+      });
+      return c.json(body, 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  // Pure-read feed cursor (per-source cursors + latest notification seq):
+  // strictly a SELECT, never an ack/ingest/baseline.
+  app.get("/api/sessions/:sessionId/notifications/feed/cursor", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(repo.getLatestNotificationCursor(session.id), 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  // Durable SSE replay: `seq > cursor ORDER BY seq ASC` in bounded pages,
+  // cursor = max(valid ?after, valid Last-Event-ID), strict safe integer,
+  // session-owned (foreign sessions 404). Reading never acks; disconnect
+  // never touches delivery state. The stream is never terminal by itself:
+  // it ends on client disconnect or on the synchronous drain gate (which
+  // fires BEFORE the DB close, so an open feed can never throw a
+  // closed-DB error).
+  app.get("/api/sessions/:sessionId/notifications/feed/stream", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const gated = strictQuery(c, ["after"]);
+    if (!gated.ok) {
+      return validationError(c);
+    }
+    const cursor = effectiveCursor(
+      gated.values.after,
+      c.req.header("last-event-id"),
+    );
+    try {
+      repo.getLatestNotificationCursor(session.id);
+      return createNotificationFeedSseResponse(repo, session.id, cursor, {
+        isDraining: () => draining,
+      });
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  // Single immutable record (pure read, foreign ids 404). Trusted clock.
+  app.get("/api/sessions/:sessionId/notifications/:notificationId", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const notification = requireUuid(
+      c,
+      c.req.param("notificationId"),
+      "notificationId",
+    );
+    if ("response" in notification) {
+      return notification.response;
+    }
+    const gated = strictQuery(c, []);
+    if (!gated.ok) {
+      return validationError(c);
+    }
+    if (!NotificationReadHttpQuerySchema.safeParse({}).success) {
+      return validationError(c);
+    }
+    try {
+      const body = NotificationViewSchema.parse(
+        repo.getNotification(session.id, notification.id, { now: now() }),
+      );
+      return c.json(body, 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  // Record + explicit ack receipt (pure read, foreign ids 404).
+  app.get(
+    "/api/sessions/:sessionId/notifications/:notificationId/history",
+    (c) => {
+      const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+      if ("response" in session) {
+        return session.response;
+      }
+      const notification = requireUuid(
+        c,
+        c.req.param("notificationId"),
+        "notificationId",
+      );
+      if ("response" in notification) {
+        return notification.response;
+      }
+      const gated = strictQuery(c, []);
+      if (!gated.ok) {
+        return validationError(c);
+      }
+      if (!NotificationReadHttpQuerySchema.safeParse({}).success) {
+        return validationError(c);
+      }
+      try {
+        const body = NotificationHistoryResponseSchema.parse(
+          repo.getNotificationHistory(session.id, notification.id, {
+            now: now(),
+          }),
+        );
+        return c.json(body, 200);
+      } catch (error) {
+        return mapDomainError(c, error);
+      }
+    },
+  );
+
+  // Explicit ack (keyed): same key replays the stored receipt, key drift
+  // is 409, foreign ids 404 — all BEFORE any other dispatch (the kernel
+  // asserts ownership first). Strict `{}` body: no job/purpose/task/
+  // action/grant/resume/answer/consent selector is accepted here.
+  app.post(
+    "/api/sessions/:sessionId/notifications/:notificationId/ack",
+    async (c) => {
+      const started = now();
+      // No early draining reject: the admission gate runs after body
+      // await/validation so a stored ack replay wins over 503.
+      const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+      if ("response" in session) {
+        return session.response;
+      }
+      const notification = requireUuid(
+        c,
+        c.req.param("notificationId"),
+        "notificationId",
+      );
+      if ("response" in notification) {
+        return notification.response;
+      }
+      const keyed = requireIdempotencyKey(c);
+      if ("response" in keyed) {
+        return keyed.response;
+      }
+      const raw = await readJsonBody(c);
+      if (!raw.ok) {
+        return validationError(c);
+      }
+      if (NotificationAckRequestSchema.safeParse(raw.value).success !== true) {
+        return validationError(c);
+      }
+      // Draining admission re-check immediately before the repository
+      // call (no await between here and repo.ackNotification, so a drain
+      // that begins mid-flight cannot slip a fresh ack into the store).
+      // A stored receipt for this exact key replays verbatim instead of
+      // 503; anything else is rejected without persisting.
+      if (draining) {
+        const replayed = tryReplayStoredAck(
+          c,
+          session.id,
+          notification.id,
+          keyed.key,
+        );
+        if (replayed !== null) {
+          return replayed;
+        }
+        return shuttingDown(c);
+      }
+      try {
+        const out = repo.ackNotification(session.id, notification.id, {
+          key: keyed.key,
+          now: now(),
+        });
+        const body = NotificationAckReceiptSchema.parse(out.body);
+        logger.info("http.notifications.ack", {
+          sessionId: session.id,
+          status: out.status,
+          durationMs: Math.max(now() - started, 0),
+        });
+        return c.json(body, out.status as 200);
+      } catch (error) {
+        return mapDomainError(c, error);
+      }
+    },
+  );
 
   return { app, controls };
 }

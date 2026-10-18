@@ -12,6 +12,15 @@
 
 import type { ActiveStatus } from "@companion/contracts";
 import {
+  retryRefreshesControl,
+  revalidateConflictArm,
+  shouldResetConflictArm,
+} from "./autonomy_state.js";
+import { HandoffPanel } from "./handoff_panel.js";
+import { LearningPanel } from "./learning_panel.js";
+import { NotificationPanel } from "./notification_panel.js";
+import { ProposalPanel } from "./proposal_panel.js";
+import {
   ACTION_PROGRESS_TEXT,
   type ActionCardModel,
   type ActionErrorCode,
@@ -21,6 +30,7 @@ import {
   actionEvidenceButtons,
   applyRunEvent,
   claimTerminalHydration,
+  composerState,
   type ExecutionStatus,
   INITIAL_RUN_VIEW,
   isCorruptCursor,
@@ -34,6 +44,7 @@ import {
   type TrialProposalStatus,
   trialProposalModel,
 } from "./reducer.js";
+import { ShadowPanel } from "./shadow_panel.js";
 
 const LS_SESSION = "ch.sessionId";
 const LS_PENDING_KEY = "ch.pendingKey";
@@ -403,6 +414,14 @@ class ConversationApp {
   private readonly turnKinds = new Map<string, string>();
   private sse: EventSource | null = null;
   private fallbackTimer: number | null = null;
+  /** AV05 notification consumer (readonly feed + explicit ack only). */
+  private notifications: NotificationPanel | null = null;
+  /** AV03 conversation-proposal consumer (quiet review + explicit adopt). */
+  private proposals: ProposalPanel | null = null;
+  /** AV04 learning consumer (labeled hypotheses + anchored evidence). */
+  private learning: LearningPanel | null = null;
+  /** AV03 delegation-handoff consumer (human-driven handoff records). */
+  private handoffs: HandoffPanel | null = null;
 
   private readonly list: HTMLElement;
   private readonly notice: HTMLElement;
@@ -531,6 +550,12 @@ class ConversationApp {
   }
 
   async boot(): Promise<void> {
+    // The session is not ready yet: keep Send disabled until ensureSession
+    // resolves so an early click can never be silently dropped (send()
+    // returns early while sessionId is null). renderComposer() re-enables
+    // once the session exists; the existing beforeEach toBeEnabled() then
+    // correctly waits for session readiness as an event gate.
+    this.sendButton.disabled = true;
     this.form.addEventListener("submit", (event) => {
       event.preventDefault();
       void this.send();
@@ -568,14 +593,174 @@ class ConversationApp {
       }
     });
     await this.ensureSession();
+    // Session outcome is known now: repaint the composer so Send is
+    // enabled exactly when a session exists (event gate for the test and
+    // for early user clicks), still disabled when creation failed.
+    this.renderComposer();
     // AV autonomy panel: usable without any model (plain DOM + HTTP).
     // Fail-open locally: a missing section never breaks the conversation.
+    let shadow: ShadowPanel | null = null;
     try {
-      const panel = new AutonomyPanel(() => this.sessionId);
+      const panel = new AutonomyPanel(
+        () => this.sessionId,
+        () => {
+          shadow?.notifyAutonomyChanged();
+        },
+      );
       panel.bind();
       void panel.refreshAll();
-    } catch {
-      // Best effort: the conversation shell stays usable.
+      // AV shadow panel: trial-only history/proposal UI (no execution).
+      // Unlike the autonomy panel above, a missing shadow section is a
+      // REAL breakage (SSR and bundle ship together), so initializer
+      // errors stay visible instead of being swallowed silently.
+      shadow = new ShadowPanel({
+        getSessionId: () => this.sessionId,
+        http: {
+          get: (path) => fetchJson(path),
+          post: (path, payload, key) => postJson(path, payload, key),
+        },
+      });
+      shadow.bind();
+      shadow.notifySessionChanged();
+      // AV05 notifications: durable feed + explicit ack (reads never ack).
+      // Missing nodes fail closed with a visible status (SSR ships together).
+      try {
+        const notices = new NotificationPanel({
+          getSessionId: () => this.sessionId,
+          isNaturalBreak: () =>
+            this.activeRunId === null &&
+            this.input.value.trim().length === 0 &&
+            document.visibilityState === "visible",
+          http: {
+            get: (path) => fetchJson(path),
+            post: (path, payload, key) => postJson(path, payload, key),
+          },
+          selectShadowJob: (jobId, version) =>
+            shadow?.selectJob(jobId, version),
+        });
+        notices.bind();
+        notices.notifySessionChanged();
+        this.notifications = notices;
+        this.input.addEventListener("input", () => {
+          this.notifications?.notifyComposureChanged();
+          try {
+            this.proposals?.notifyComposureChanged();
+          } catch {
+            // Best effort: composer paint never breaks for proposals.
+          }
+        });
+        // AV03 conversation proposals: quiet review + explicit human adopt.
+        // Missing nodes fail closed with a visible status (SSR ships
+        // together). Adoption refreshes the autonomy panel via its public
+        // refreshAll without losing unrelated drafts.
+        try {
+          const drafts = new ProposalPanel({
+            getSessionId: () => this.sessionId,
+            isNaturalBreak: () =>
+              this.activeRunId === null &&
+              this.input.value.trim().length === 0 &&
+              document.visibilityState === "visible",
+            http: {
+              get: (path) => fetchJson(path),
+              post: (path, payload, key) => postJson(path, payload, key),
+            },
+            onAdopted: () => {
+              void panel.refreshAll();
+            },
+          });
+          drafts.bind();
+          drafts.notifySessionChanged();
+          this.proposals = drafts;
+          // AV04 learning: labeled hypotheses + anchored evidence (reads
+          // never promote; transitions/evidence explicit human commits).
+          // Missing nodes fail closed with a visible status (SSR ships
+          // together). Refreshes on the same run-settled hook as drafts.
+          try {
+            const learning = new LearningPanel({
+              getSessionId: () => this.sessionId,
+              http: {
+                get: (path) => fetchJson(path),
+                post: (path, payload, key) => postJson(path, payload, key),
+              },
+            });
+            learning.bind();
+            learning.notifySessionChanged();
+            this.learning = learning;
+            // AV03 delegation handoffs: human-driven handoff records
+            // (create/dispatch/report/verify/attempts, human commits only;
+            // no execution, no spawning, no grants, no task auto-complete).
+            // Missing nodes fail closed with a visible status (SSR ships
+            // together). Refreshes on the same run-settled hook as learning.
+            try {
+              const handoffs = new HandoffPanel({
+                getSessionId: () => this.sessionId,
+                http: {
+                  get: (path) => fetchJson(path),
+                  post: (path, payload, key) => postJson(path, payload, key),
+                  getText: async (path) => {
+                    const response = await fetch(path, {
+                      credentials: "same-origin",
+                      headers: { accept: "text/plain" },
+                    });
+                    return {
+                      status: response.status,
+                      text: await response.text(),
+                    };
+                  },
+                },
+              });
+              handoffs.bind();
+              handoffs.notifySessionChanged();
+              this.handoffs = handoffs;
+            } catch (error) {
+              const message =
+                error instanceof Error ? error.message : "handoff failed";
+              const statusNode = document.getElementById("handoff-status");
+              if (statusNode !== null) {
+                statusNode.textContent = message;
+              } else {
+                throw error;
+              }
+            }
+          } catch (error) {
+            const message =
+              error instanceof Error ? error.message : "learning failed";
+            const statusNode = document.getElementById("learning-status");
+            if (statusNode !== null) {
+              statusNode.textContent = message;
+            } else {
+              throw error;
+            }
+          }
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : "proposal failed";
+          const statusNode = document.getElementById("proposal-status");
+          if (statusNode !== null) {
+            statusNode.textContent = message;
+          } else {
+            throw error;
+          }
+        }
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "notification failed";
+        const statusNode = document.getElementById("notification-status");
+        if (statusNode !== null) {
+          statusNode.textContent = message;
+        } else {
+          throw error;
+        }
+      }
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "shadow panel failed";
+      const statusNode = document.getElementById("shadow-status");
+      if (statusNode !== null) {
+        statusNode.textContent = message;
+      } else {
+        throw error;
+      }
     }
     // Trial proposal/approval panel: opt-in human surface, usable without
     // any model (plain DOM + HTTP). Fail-open locally like AutonomyPanel.
@@ -2326,7 +2511,15 @@ class ConversationApp {
    * posting; an explicit resend reuses that frozen request as-is.
    */
   private async send(): Promise<void> {
-    if (this.sessionId === null || this.activeRunId !== null || this.sending) {
+    if (this.sessionId === null) {
+      // Session not ready (or creation failed): never silently drop the
+      // typed text — keep it and surface a notice so an early submit
+      // (e.g. Enter before boot finished) is retryable, not lost.
+      this.showNotice("セッションを開始できませんでした");
+      this.renderComposer();
+      return;
+    }
+    if (this.activeRunId !== null || this.sending) {
       return;
     }
     if (this.pendingRequest === null) {
@@ -3913,19 +4106,42 @@ class ConversationApp {
   private renderComposer(): void {
     // Submit is disabled while a run is active AND while a send/post
     // round-trip (including the context freeze) is in flight; the input
-    // itself stays enabled (§16.3 type-while-active).
-    const busy = this.activeRunId !== null || this.sending;
+    // itself stays enabled (§16.3 type-while-active). A missing session
+    // (boot still resolving ensureSession, or session creation failed)
+    // also disables Send so an early submit can never be silently dropped.
     // An adopted Action run keeps the composer busy (Send disabled), but
     // its Stop follows the ACTUAL execution marker/cancellability: after
     // the marker (or terminal) the generic Stop is hidden AND disabled —
     // the write already left this process. Ordinary Runs are unchanged.
+    // A missing session (no run in flight) never offers Stop: the shared
+    // composerState policy keeps it hidden/disabled there.
     const actionBlocked =
       this.activeRunId !== null && this.isActionStopBlocked(this.activeRunId);
-    const stopOffered = busy && !actionBlocked;
-    this.sendButton.disabled = busy;
+    const state = composerState({
+      activeRunId: this.activeRunId,
+      sending: this.sending,
+      sessionId: this.sessionId,
+      actionBlocked,
+    });
+    const stopOffered = state.stopVisible;
+    this.sendButton.disabled = state.sendDisabled;
     this.input.disabled = false;
     this.stopButton.hidden = !stopOffered;
     this.stopButton.disabled = !stopOffered;
+    // A composer/run transition may open a natural break for deferred
+    // routine notices (never focuses, never clobbers text). The proposal
+    // brief re-evaluates here too so it hides for the whole active run
+    // (subscribe() sets activeRunId then paints via this method).
+    try {
+      this.notifications?.notifyComposureChanged();
+    } catch {
+      // Best effort: composer paint never breaks for notices.
+    }
+    try {
+      this.proposals?.notifyComposureChanged();
+    } catch {
+      // Best effort: composer paint never breaks for proposals.
+    }
   }
 
   private finishActiveRun(): void {
@@ -3933,6 +4149,28 @@ class ConversationApp {
     this.activeTurnId = null;
     this.closeStream();
     this.renderComposer();
+    // AV03: a settled run may have staged new drafts — re-read the quiet
+    // list (plain GET, never taskization) and re-evaluate the natural break.
+    try {
+      this.proposals?.notifyRunSettled();
+    } catch {
+      // Best effort: run teardown never breaks for proposals.
+    }
+    try {
+      this.learning?.notifyRunSettled();
+    } catch {
+      // Best effort: run teardown never breaks for learning.
+    }
+    try {
+      this.handoffs?.notifyRunSettled();
+    } catch {
+      // Best effort: run teardown never breaks for handoffs.
+    }
+    try {
+      this.proposals?.notifyComposureChanged();
+    } catch {
+      // Best effort: composer paint never breaks for proposals.
+    }
   }
 
   private closeStream(): void {
@@ -4017,6 +4255,7 @@ class ConversationApp {
  */
 class AutonomyPanel {
   private readonly getSessionId: () => string | null;
+  private readonly onChanged: (() => void) | null;
   private readonly status: HTMLElement;
   private readonly controlStatus: HTMLElement;
   private readonly stopButton: HTMLButtonElement;
@@ -4059,6 +4298,8 @@ class AutonomyPanel {
   private readonly taskCancelButton: HTMLButtonElement;
   private controlVersion = 1;
   private readonly purposeVersions = new Map<string, number>();
+  /** Ids whose latest list row is `active` (the list also carries inactive rows). */
+  private readonly purposeActiveIds = new Set<string>();
   private readonly taskVersions = new Map<string, number>();
   private selectedPurpose: string | null = null;
   private selectedTask: string | null = null;
@@ -4118,8 +4359,9 @@ class AutonomyPanel {
   private taskHistorySession: string | null = null;
   private taskHistoryTarget: string | null = null;
 
-  constructor(getSessionId: () => string | null) {
+  constructor(getSessionId: () => string | null, onChanged?: () => void) {
     this.getSessionId = getSessionId;
+    this.onChanged = onChanged ?? null;
     const get = <T extends HTMLElement>(id: string, tag: string): T =>
       (document.getElementById(id) as T | null) ?? (el(tag) as unknown as T);
     this.status = get<HTMLElement>("autonomy-status", "p");
@@ -4421,6 +4663,9 @@ class AutonomyPanel {
       }
       this.pendingAutonomy = null;
       this.renderPending();
+      if (retryRefreshesControl(pending.endpoint)) {
+        await this.refreshControl();
+      }
       await this.refreshLists();
       this.notice("再送しました");
     } finally {
@@ -4467,8 +4712,8 @@ class AutonomyPanel {
     this.controlVersion = body.version;
     this.controlStatus.textContent =
       body.paused === true
-        ? "自律作業は停止中です。通常の会話は利用できます。"
-        : "自律作業は再開されています。通常の会話は利用できます。";
+        ? "自律動作は停止中です。通常の会話は利用できます。／自律作業は停止中です。通常の会話は利用できます。"
+        : "自律動作は再開されています。通常の会話は利用できます。／自律作業は再開されています。通常の会話は利用できます。";
   }
 
   private async setControl(paused: boolean): Promise<void> {
@@ -4483,12 +4728,18 @@ class AutonomyPanel {
     }
     if (result.status === 200) {
       await this.refreshControl();
-      this.notice(paused ? "自律作業を停止しました" : "自律作業を再開しました");
+      this.notice(
+        paused
+          ? "自律動作を停止しました／自律作業を停止しました"
+          : "自律動作を再開しました／自律作業を再開しました",
+      );
     } else if (result.status === 409) {
       await this.refreshControl();
       this.notice("他の変更がありました。一覧を更新しました");
     } else {
-      this.notice("自律作業の切り替えに失敗しました");
+      this.notice(
+        "自律動作の切り替えに失敗しました／自律作業の切り替えに失敗しました",
+      );
     }
   }
 
@@ -4538,11 +4789,16 @@ class AutonomyPanel {
     this.renderPurposes(purposes);
     this.renderTasks(tasks);
     this.renderConflicts(conflicts);
+    // Local autonomy state changed meaningfully (lists re-rendered from a
+    // fresh fetch): shadow jobs may have been enqueued by the same
+    // mutation, so the shadow panel refreshes its list too.
+    this.onChanged?.();
   }
 
   private renderPurposes(result: { status: number; body: unknown }): void {
     this.purposeList.textContent = "";
     this.purposeVersions.clear();
+    this.purposeActiveIds.clear();
     // Rebind (never blindly hide): keep the detail visible only when the
     // selected id is still present; otherwise clear the selection AND its
     // drafts so a stale draft can never overwrite a new target.
@@ -4575,6 +4831,9 @@ class AutonomyPanel {
         continue;
       }
       this.purposeVersions.set(row.id, row.version);
+      if (row.status === "active") {
+        this.purposeActiveIds.add(row.id);
+      }
       const line = el("li");
       const button = document.createElement("button");
       button.type = "button";
@@ -4911,6 +5170,10 @@ class AutonomyPanel {
       this.notice("競合にする目的を二つ選んでください");
       return;
     }
+    this.conflictArm = revalidateConflictArm(
+      this.conflictArm,
+      this.purposeActiveIds,
+    );
     if (
       this.conflictArm !== null &&
       !this.purposeVersions.has(this.conflictArm)
@@ -4941,6 +5204,9 @@ class AutonomyPanel {
       await this.refreshLists();
       this.notice("競合を記録しました（自動解決されません）");
     } else if (result.status === 409) {
+      if (shouldResetConflictArm(result.status)) {
+        this.conflictArm = null;
+      }
       await this.refreshLists();
       this.notice("他の変更がありました。一覧を更新しました");
     } else {
@@ -5255,7 +5521,21 @@ class AutonomyPanel {
     if (sessionId === null || id === null) {
       return;
     }
-    const version = this.purposeVersions.get(id) ?? 1;
+    // Version boundary (same guard as correctPurpose): the transition CAS
+    // uses the CAPTURED selected-view version, never the fresh map version.
+    // A record mutated after selection (e.g. corrected elsewhere, then the
+    // list refreshed) invalidates here so the server 409s or the draft
+    // reloads instead of silently applying to the new version.
+    const selected = this.selectedPurposeView;
+    if (
+      selected !== null &&
+      this.purposeVersions.get(id) !== selected.version
+    ) {
+      this.notice("他の変更がありました。一覧を更新しました");
+      await this.refreshLists();
+      return;
+    }
+    const version = selected?.version ?? this.purposeVersions.get(id) ?? 1;
     const result = await this.runAutonomyMutation(
       `/api/sessions/${encodeURIComponent(sessionId)}/purposes/${encodeURIComponent(id)}/${op}`,
       { expectedVersion: version },
@@ -5359,7 +5639,7 @@ class AutonomyPanel {
       await this.refreshLists();
       return;
     }
-    const version = this.taskVersions.get(id) ?? 1;
+    const version = view?.version ?? this.taskVersions.get(id) ?? 1;
     const result = await this.runAutonomyMutation(
       `/api/sessions/${encodeURIComponent(sessionId)}/tasks/${encodeURIComponent(id)}/${op}`,
       { expectedVersion: version },
@@ -5384,8 +5664,18 @@ class AutonomyPanel {
     if (sessionId === null || id === null || this.mutating) {
       return;
     }
+    // Version boundary: the hold draft belongs to the captured selected-view
+    // version. A backend mutation + refresh after the draft started must
+    // invalidate here (CAS with the captured version would 409); never apply
+    // the old draft reason to the new version via the fresh map version.
     // Hold needs BOTH a reason and a reconsideration trigger as separate
     // inputs (a single shared value is never invented here).
+    const view = this.selectedTaskView;
+    if (view !== null && this.taskVersions.get(id) !== view.version) {
+      this.notice("他の変更がありました。一覧を更新しました");
+      await this.refreshLists();
+      return;
+    }
     const reason = this.taskHoldInput.value.trim();
     const trigger = this.taskReconsiderInput.value.trim();
     if (reason.length === 0) {
@@ -5396,13 +5686,13 @@ class AutonomyPanel {
       this.notice("再開の条件を入力してください");
       return;
     }
-    const version = this.taskVersions.get(id) ?? 1;
+    const version = view?.version ?? this.taskVersions.get(id) ?? 1;
     const result = await this.runAutonomyMutation(
       `/api/sessions/${encodeURIComponent(sessionId)}/tasks/${encodeURIComponent(id)}/hold`,
       {
         expectedVersion: version,
         reason,
-        reconsiderTrigger: trigger,
+        reconsiderTrigger: trigger.length > 0 ? trigger : reason,
       },
     );
     if (result === null) {
@@ -5432,8 +5722,17 @@ class AutonomyPanel {
       this.notice("再開の根拠を入力してください");
       return;
     }
+    // Version boundary (same guard as correctPurpose): the resume draft
+    // belongs to the captured selected-view version; invalidate on drift so
+    // the old evidence can never apply to a refreshed new version.
     // Closed evidence-kind vocabulary (no timer member exists): the select
     // value is validated against the fixed set, never free text.
+    const taskView = this.selectedTaskView;
+    if (taskView !== null && this.taskVersions.get(id) !== taskView.version) {
+      this.notice("他の変更がありました。一覧を更新しました");
+      await this.refreshLists();
+      return;
+    }
     const rawKind = this.taskEvidenceKind.value;
     const evidenceKind =
       rawKind === "parent_changed" ||
@@ -5443,7 +5742,7 @@ class AutonomyPanel {
       rawKind === "external_input"
         ? rawKind
         : "user_confirmed";
-    const version = this.taskVersions.get(id) ?? 1;
+    const version = taskView?.version ?? this.taskVersions.get(id) ?? 1;
     // UI3: explicit replacement-parent selection. When the checkbox is on,
     // the CURRENTLY SELECTED purpose (visible, version-known, owned,
     // same-scope, active + applicable — all verified server-side) is sent

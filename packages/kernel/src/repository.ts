@@ -26,11 +26,36 @@ import {
   AutonomyControlViewSchema,
   AutonomyHistoryQuerySchema,
   AutonomyListQuerySchema,
+  type BuildDeadlineScheduleResponse,
+  BuildDeadlineScheduleResponseSchema,
+  ConversationProposalAcceptRequestSchema,
+  type ConversationProposalAcceptResponse,
+  ConversationProposalAcceptResponseSchema,
+  ConversationProposalListQuerySchema,
+  type ConversationProposalListResponse,
+  ConversationProposalListResponseSchema,
+  ConversationProposalRejectRequestSchema,
+  type ConversationProposalRejectResponse,
+  ConversationProposalRejectResponseSchema,
+  type ConversationProposalView,
+  ConversationProposalViewSchema,
   type CreateSessionResponse,
   CreateSessionResponseSchema,
+  DeadlineScheduleViewSchema,
   EventsQuerySchema,
   type FrozenContext,
   FrozenContextSchema,
+  HandoffAttemptRequestSchema,
+  HandoffCreateRequestSchema,
+  HandoffDispatchRequestSchema,
+  HandoffListQuerySchema,
+  type HandoffListResponse,
+  HandoffListResponseSchema,
+  HandoffReportRequestSchema,
+  HandoffTransitionRequestSchema,
+  HandoffVerifyRequestSchema,
+  type HandoffView,
+  HandoffViewSchema,
   HistoryQuerySchema,
   type HistoryResponse,
   HistoryResponseSchema,
@@ -40,17 +65,51 @@ import {
   type IdempotencyLookupResponse,
   IdempotencyLookupResponseSchema,
   IdempotencyScopeSchema,
+  type IngestNotificationsResponse,
+  IngestNotificationsResponseSchema,
   isTerminalStatus,
   LatestEventsResponseSchema,
   type LatestRunEvent,
   type LatestRunEventType,
   LatestRunEventTypeSchema,
+  LearningEvidenceAttachRequestSchema,
+  LearningEvidenceListQuerySchema,
+  type LearningEvidenceListResponse,
+  LearningEvidenceListResponseSchema,
+  type LearningEvidenceView,
+  LearningEvidenceViewSchema,
+  LearningHypothesisCreateRequestSchema,
+  LearningHypothesisDecisionRequestSchema,
+  LearningHypothesisListQuerySchema,
+  type LearningHypothesisListResponse,
+  LearningHypothesisListResponseSchema,
+  LearningHypothesisTransitionRequestSchema,
+  type LearningHypothesisView,
+  LearningHypothesisViewSchema,
+  LearningProposeRequestSchema,
   type M0RunEventType,
   type M2ModelErrorCode,
   M2ModelErrorCodeSchema,
   type M2ModelStepEventType,
   M2ModelStepEventTypeSchema,
   messageScope,
+  type NextDeadlineResponse,
+  NextDeadlineResponseSchema,
+  type NotificationAckReceipt,
+  NotificationAckReceiptSchema,
+  type NotificationFeedCursorResponse,
+  NotificationFeedCursorResponseSchema,
+  type NotificationForwardPageResponse,
+  NotificationForwardPageResponseSchema,
+  NotificationForwardQuerySchema,
+  type NotificationHistoryResponse,
+  NotificationHistoryResponseSchema,
+  NotificationListQuerySchema,
+  type NotificationListResponse,
+  NotificationListResponseSchema,
+  NotificationReadQuerySchema,
+  type NotificationView,
+  NotificationViewSchema,
   PostMessageRequestSchema,
   type PostMessageResponse,
   PostMessageResponseSchema,
@@ -82,6 +141,7 @@ import {
   PurposeHistoryResponseSchema,
   type PurposeListResponse,
   PurposeListResponseSchema,
+  PurposeProposeRequestSchema,
   PurposeTransitionRequestSchema,
   type PurposeView,
   PurposeViewSchema,
@@ -92,6 +152,8 @@ import {
   parseTurnInput,
   proposalApproveScope,
   purposeCreateScope,
+  type RecordDueDeadlinesResponse,
+  RecordDueDeadlinesResponseSchema,
   type ReferenceContextGetResponse,
   ReferenceContextGetResponseSchema,
   ReferenceContextPutRequestSchema,
@@ -108,6 +170,21 @@ import {
   type RunStatus,
   RunStatusSchema,
   retryScope,
+  SearchLimitSchema,
+  ShadowExplicitRequestSchema,
+  ShadowFailRequestSchema,
+  ShadowHoldRequestSchema,
+  type ShadowJobContext,
+  ShadowJobContextSchema,
+  type ShadowJobDeliberation,
+  ShadowJobDeliberationSchema,
+  type ShadowJobEventsResponse,
+  ShadowJobEventsResponseSchema,
+  type ShadowJobListResponse,
+  ShadowJobListResponseSchema,
+  type ShadowJobView,
+  ShadowJobViewSchema,
+  ShadowModelOutputSchema,
   SnapshotBodySchema,
   TaskCreateRequestSchema,
   type TaskCreateResponse,
@@ -116,6 +193,7 @@ import {
   TaskHoldRequestSchema,
   type TaskListResponse,
   TaskListResponseSchema,
+  TaskProposeRequestSchema,
   TaskResumeRequestSchema,
   TaskTransitionRequestSchema,
   type TaskView,
@@ -143,6 +221,7 @@ import {
   applyAutonomyRestartFence,
   assertOwnedPurpose,
   assertOwnedTask,
+  acceptConversationProposal as autonomyAcceptProposal,
   achievePurpose as autonomyAchievePurpose,
   cancelTask as autonomyCancelTask,
   completeTask as autonomyCompleteTask,
@@ -150,20 +229,32 @@ import {
   createPurpose as autonomyCreatePurpose,
   createTask as autonomyCreateTask,
   getAutonomyControl as autonomyGetControl,
+  getConversationProposal as autonomyGetProposal,
   getPurpose as autonomyGetPurpose,
   getTask as autonomyGetTask,
   holdTask as autonomyHoldTask,
+  isPurposeApplicableAt as autonomyIsPurposeApplicableAt,
   listAutonomyActivity as autonomyListActivity,
+  listConflictPairsInScope as autonomyListConflictPairsInScope,
   listPurposeConflicts as autonomyListConflicts,
+  listConversationProposalEvents as autonomyListProposalEvents,
+  listConversationProposals as autonomyListProposals,
   listPurposeEvents as autonomyListPurposeEvents,
   listPurposes as autonomyListPurposes,
+  listPurposesFiltered as autonomyListPurposesFiltered,
+  listPurposesInScope as autonomyListPurposesInScope,
   listTaskEvents as autonomyListTaskEvents,
   listTasks as autonomyListTasks,
+  listTasksFiltered as autonomyListTasksFiltered,
+  listTasksInScope as autonomyListTasksInScope,
   recordPurposeConflict as autonomyRecordConflict,
+  rejectConversationProposal as autonomyRejectProposal,
   resumeTask as autonomyResumeTask,
   revokePurpose as autonomyRevokePurpose,
   setAutonomyControl as autonomySetControl,
+  stageConversationProposal as autonomyStageProposal,
   startTask as autonomyStartTask,
+  isStrictAutonomyDeadline,
   recordUserActivityInTx,
 } from "./autonomy.js";
 import {
@@ -188,6 +279,67 @@ import {
   RepositoryValidationError,
   SessionBusyError,
 } from "./errors.js";
+import {
+  abnormalExitHandoff as handoffAbnormalExit,
+  buildHandoffSpec as handoffBuildSpec,
+  cancelHandoff as handoffCancel,
+  countActiveHandoffs as handoffCountActive,
+  createHandoff as handoffCreate,
+  dispatchHandoff as handoffDispatch,
+  failHandoff as handoffFail,
+  getHandoff as handoffGet,
+  listHandoffs as handoffList,
+  listHandoffAttempts as handoffListAttempts,
+  listHandoffEvents as handoffListEvents,
+  reaffirmHandoff as handoffReaffirm,
+  recordHandoffAttempt as handoffRecordAttempt,
+  reportHandoff as handoffReport,
+  verifyHandoff as handoffVerify,
+} from "./handoff.js";
+import {
+  type HypothesisTransition,
+  acceptStagedHypothesis as learningAcceptStaged,
+  attachEvidence as learningAttachEvidence,
+  createHypothesis as learningCreateHypothesis,
+  getHypothesis as learningGetHypothesis,
+  listHypothesisEvents as learningListEvents,
+  listHypothesisEvidence as learningListEvidence,
+  listHypotheses as learningListHypotheses,
+  rejectStagedHypothesis as learningRejectStaged,
+  stageHypothesisFromModel as learningStageFromModel,
+  transitionHypothesis as learningTransition,
+} from "./learning.js";
+import {
+  ackNotification as notifyAck,
+  buildDeadlineSchedule as notifyBuildSchedule,
+  getNotification as notifyGet,
+  getNotificationHistory as notifyHistory,
+  ingestNotifications as notifyIngest,
+  getLatestNotificationCursor as notifyLatestCursor,
+  listNotifications as notifyList,
+  listNotificationsForward as notifyListForward,
+  getNextDeadline as notifyNextDeadline,
+  recordDueDeadlines as notifyRecordDue,
+} from "./notifications.js";
+import {
+  type ShadowPolicyReader,
+  type ShadowReaderPurpose,
+  type ShadowReaderTask,
+  cancelShadowJob as shadowCancelJob,
+  claimShadowJob as shadowClaimJob,
+  completeShadowJob as shadowCompleteJob,
+  failShadowJob as shadowFailJob,
+  getShadowJobContext as shadowGetContext,
+  getShadowJobDecision as shadowGetDecision,
+  getShadowJob as shadowGetJob,
+  hasActiveUserRuns as shadowHasActiveRuns,
+  holdShadowJob as shadowHoldJob,
+  listShadowJobEvents as shadowListEvents,
+  listShadowInbox as shadowListInbox,
+  listShadowJobs as shadowListJobs,
+  readPendingShadowJob as shadowReadPendingJob,
+  requestShadowDeliberation as shadowRequest,
+} from "./shadow.js";
 import {
   approveTrialProposal,
   authorityDeadlineMs,
@@ -3210,13 +3362,30 @@ export function createKernelRepository(
       );
       return lookupIdempotency(validScope, validKey);
     }
-    // Global stop-control scope: the session must exist, then read the
-    // stored control write (same ownership-first pattern as above).
-    if (validScope === IDEMPOTENCY_SCOPE_AUTONOMY_CONTROL) {
+    // AV autonomy session-create/entity scopes: the embedded session must
+    // equal the path session (foreign sessions are 404, never 403), and the
+    // session must exist. Global `autonomy:control` is NEVER exposed here:
+    // control retry reuses the same POST key (no foreign-session lookup).
+    const purposeCreateMatch = /^session:([^:]+):purpose$/.exec(validScope);
+    if (purposeCreateMatch?.[1] !== undefined) {
+      const embedded = assertUuidV4(purposeCreateMatch[1], "sessionId");
+      if (embedded.toLowerCase() !== session.toLowerCase()) {
+        throw new RepositoryNotFoundError(
+          `scope ${validScope} not found in session ${session}`,
+        );
+      }
       if (readSession(db, session) === null) {
         throw new RepositoryNotFoundError(`session ${session} not found`);
       }
       return lookupIdempotency(validScope, validKey);
+    }
+    // Global stop-control scope is NEVER exposed via a session lookup
+    // (merged master session-read + feat never-expose; both layers' tests
+    // require 404 — control retry reuses the same POST key).
+    if (validScope === IDEMPOTENCY_SCOPE_AUTONOMY_CONTROL) {
+      throw new RepositoryNotFoundError(
+        `scope ${validScope} not found in session ${session}`,
+      );
     }
     // Session-bound create scopes (purpose / task / trial-stage): the
     // embedded session must be this session, which must exist.
@@ -3274,6 +3443,25 @@ export function createKernelRepository(
       /^task:([^:]+):(start|hold|resume|complete|cancel)$/.exec(validScope);
     if (taskOpMatch?.[1] !== undefined) {
       assertOwnedTask(db, session, assertUuidV4(taskOpMatch[1], "taskId"));
+      return lookupIdempotency(validScope, validKey);
+    }
+    // AV shadow explicit-request scope: the embedded session must equal the
+    // path session (foreign sessions are 404, never 403), and the session
+    // must exist. The stored job ownership is re-verified on replay inside
+    // `requestShadowDeliberation` (stored session must still match).
+    const shadowRequestMatch = /^session:([^:]+):shadow-request$/.exec(
+      validScope,
+    );
+    if (shadowRequestMatch?.[1] !== undefined) {
+      const embedded = assertUuidV4(shadowRequestMatch[1], "sessionId");
+      if (embedded.toLowerCase() !== session.toLowerCase()) {
+        throw new RepositoryNotFoundError(
+          `scope ${validScope} not found in session ${session}`,
+        );
+      }
+      if (readSession(db, session) === null) {
+        throw new RepositoryNotFoundError(`session ${session} not found`);
+      }
       return lookupIdempotency(validScope, validKey);
     }
     // Trial approve/claim/permit scopes: the referenced proposal/grant must
@@ -4920,6 +5108,14 @@ export function createKernelRepository(
   }
 
   /* ---------------------------------------------------------------- */
+  /* AV autonomy facade (purposes + tasks + stop control).              */
+  /*                                                                  */
+  /* Ownership: every method below delegates to `autonomy.ts`, the     */
+  /* ONLY writer of the autonomy tables. This facade adds the HTTP-    */
+  /* facing strict Zod boundary (request schemas, list-query bounds,   */
+  /* UUID checks) and returns the kernel `{ status, body, replayed }`  */
+  /* shape so routes can replay verbatim. No calendar / scheduling /   */
+  /* permission-grant behavior lives here.                             */
   /* AV autonomy slice facade (§AV01). Thin validated delegation to      */
   /* `autonomy.ts` (the ONLY writer of the autonomy tables): Zod on the  */
   /* JSON boundary, session/target ownership enforced inside the         */
@@ -5000,6 +5196,43 @@ export function createKernelRepository(
       () =>
         PurposeViewSchema.parse(autonomyGetPurpose(db, sessionId, purposeId)),
       "purpose response",
+    );
+  }
+
+  function listAutonomyPurposesInScope(
+    sessionId: string,
+    scope: string,
+  ): PurposeListResponse {
+    const out = autonomyListPurposesInScope(db, sessionId, scope, 101);
+    return parseOrValidation(
+      () => PurposeListResponseSchema.parse(out),
+      "purpose scope list response",
+    );
+  }
+
+  /**
+   * Filtered bounded purpose reader for the readonly agent tools
+   * (NOT the public HTTP list): scope/status/kind filters apply in SQL
+   * BEFORE the limit, and up to `limit + 1` matching rows are returned so
+   * the caller reports a truthful `hasMore` for the FILTERED set (never a
+   * falsely complete result while older matching records exist).
+   */
+  function listAutonomyPurposesFiltered(
+    sessionId: string,
+    filters: { scope?: string; status?: string; kind?: string },
+    limit: number,
+  ): PurposeListResponse {
+    // Tool-family bound (default 10 / max 20): the `limit + 1` probe row
+    // must fit the list DTO (max 100 items), so larger limits are rejected
+    // loudly instead of truncating the probe.
+    const capped = parseOrValidation(
+      () => SearchLimitSchema.parse(limit),
+      "purpose filtered list limit",
+    );
+    const out = autonomyListPurposesFiltered(db, sessionId, filters, capped);
+    return parseOrValidation(
+      () => PurposeListResponseSchema.parse(out),
+      "purpose filtered list response",
     );
   }
 
@@ -5209,6 +5442,39 @@ export function createKernelRepository(
     return autonomyGetTask(db, sessionId, taskId);
   }
 
+  function listAutonomyTasksInScope(
+    sessionId: string,
+    scope: string,
+  ): TaskListResponse {
+    const out = autonomyListTasksInScope(db, sessionId, scope, 101);
+    return parseOrValidation(
+      () => TaskListResponseSchema.parse(out),
+      "task scope list response",
+    );
+  }
+
+  /**
+   * Filtered bounded task reader for the readonly agent tools (NOT the
+   * public HTTP list): same SQL-before-limit + `limit + 1` probe contract
+   * as `listAutonomyPurposesFiltered` (see above).
+   */
+  function listAutonomyTasksFiltered(
+    sessionId: string,
+    filters: { scope?: string; status?: string; kind?: string },
+    limit: number,
+  ): TaskListResponse {
+    // Tool-family bound (see `listAutonomyPurposesFiltered` above).
+    const capped = parseOrValidation(
+      () => SearchLimitSchema.parse(limit),
+      "task filtered list limit",
+    );
+    const out = autonomyListTasksFiltered(db, sessionId, filters, capped);
+    return parseOrValidation(
+      () => TaskListResponseSchema.parse(out),
+      "task filtered list response",
+    );
+  }
+
   function getAutonomyTaskHistory(
     sessionId: string,
     taskId: string,
@@ -5345,6 +5611,811 @@ export function createKernelRepository(
     );
   }
 
+  /* ---------------------------------------------------------------- */
+  /* AV03 conversation-proposal facade (durable inferred drafts).       */
+  /*                                                                  */
+  /* Ownership: every method below delegates to `autonomy.ts`, the     */
+  /* ONLY writer of the proposal tables. Staging is model-origin ONLY */
+  /* via `stageConversationProposalFromModel` (source derived          */
+  /* server-side from the calling run's CURRENT ordinary `user_text`   */
+  /* turn — never model input). Accept/reject are the trusted-human    */
+  /* kernel API used by the NEXT HTTP/UI worker; this slice ships the  */
+  /* bounded owned list/get readers and the atomic adoption core ONLY  */
+  /* (no HTTP routes in this slice). No calendar / scheduling /        */
+  /* permission-grant behavior lives here.                            */
+  /* ---------------------------------------------------------------- */
+
+  function stageConversationProposalFromModel(
+    runId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): {
+    status: number;
+    body: ConversationProposalView;
+    replayed: boolean;
+  } {
+    const run = getRun(runId);
+    const turn = getTurn(run.turnId);
+    if (run.sessionId !== turn.sessionId) {
+      throw new RepositoryValidationError("run/turn session mismatch");
+    }
+    if (turn.input.kind !== "user_text") {
+      // Only CURRENT ordinary user_text is an eligible source: action
+      // approval/rejection decisions (or any non-text turn) can never be
+      // quoted as a user instruction.
+      throw new RepositoryValidationError(
+        "only ordinary user_text turns can source a proposal",
+      );
+    }
+    const userText = turn.input.text;
+    const target =
+      typeof request === "object" && request !== null
+        ? (request as { target?: unknown }).target
+        : undefined;
+    // Strip the dispatch discriminator before strict validation (the
+    // model-facing tool schemas never carry a target field; the
+    // registration name fixes it).
+    const { target: _discarded, ...rest } =
+      typeof request === "object" && request !== null
+        ? (request as Record<string, unknown>)
+        : {};
+    void _discarded;
+    if (target === "purpose") {
+      const parsed = parseOrValidation(
+        () => PurposeProposeRequestSchema.parse(rest),
+        "purpose propose request",
+      );
+      const out = autonomyStageProposal(
+        db,
+        run.sessionId,
+        {
+          scope: parsed.scope,
+          target: "purpose",
+          draftKind: parsed.draftKind,
+          purposeKind: parsed.purposeKind,
+          sourceQuote: parsed.sourceQuote,
+          interpretation: parsed.interpretation,
+        },
+        { sourceRunId: run.id, sourceTurnId: turn.id, userText },
+        options,
+      );
+      const body = parseOrValidation(
+        () => ConversationProposalViewSchema.parse(out.body),
+        "proposal stage response",
+      );
+      return { status: out.status, body, replayed: out.replayed };
+    }
+    if (target === "task") {
+      const parsed = parseOrValidation(
+        () => TaskProposeRequestSchema.parse(rest),
+        "task propose request",
+      );
+      const out = autonomyStageProposal(
+        db,
+        run.sessionId,
+        {
+          scope: parsed.scope,
+          target: "task",
+          draftKind: parsed.draftKind,
+          taskKind: parsed.taskKind,
+          sourceQuote: parsed.sourceQuote,
+          interpretation: parsed.interpretation,
+          parentPurposeId: parsed.parentPurposeId,
+          expectedParentVersion: parsed.expectedParentVersion,
+        },
+        { sourceRunId: run.id, sourceTurnId: turn.id, userText },
+        options,
+      );
+      const body = parseOrValidation(
+        () => ConversationProposalViewSchema.parse(out.body),
+        "proposal stage response",
+      );
+      return { status: out.status, body, replayed: out.replayed };
+    }
+    throw new RepositoryValidationError(
+      "proposal target must be purpose or task",
+    );
+  }
+
+  function listConversationProposals(
+    sessionId: string,
+    query: unknown = {},
+  ): ConversationProposalListResponse {
+    const parsed = parseOrValidation(
+      () => ConversationProposalListQuerySchema.parse(query ?? {}),
+      "proposal list query",
+    );
+    const out = autonomyListProposals(db, sessionId, {
+      limit: parsed.limit,
+      ...(parsed.cursor !== undefined ? { cursor: parsed.cursor } : {}),
+      ...(parsed.status !== undefined ? { status: parsed.status } : {}),
+    });
+    return parseOrValidation(
+      () => ConversationProposalListResponseSchema.parse(out),
+      "proposal list response",
+    );
+  }
+
+  function getConversationProposal(
+    sessionId: string,
+    proposalId: string,
+  ): ConversationProposalView {
+    return parseOrValidation(
+      () =>
+        ConversationProposalViewSchema.parse(
+          autonomyGetProposal(db, sessionId, proposalId),
+        ),
+      "proposal response",
+    );
+  }
+
+  function listConversationProposalEvents(
+    sessionId: string,
+    proposalId: string,
+  ): {
+    proposalId: string;
+    events: {
+      seq: number;
+      event: string;
+      fromStatus: string | null;
+      toStatus: string;
+      createdAt: number;
+    }[];
+  } {
+    return autonomyListProposalEvents(db, sessionId, proposalId);
+  }
+
+  function acceptConversationProposal(
+    sessionId: string,
+    proposalId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): {
+    status: number;
+    body: ConversationProposalAcceptResponse;
+    replayed: boolean;
+  } {
+    const parsed = parseOrValidation(
+      () => ConversationProposalAcceptRequestSchema.parse(request),
+      "proposal accept request",
+    );
+    const out = autonomyAcceptProposal(
+      db,
+      sessionId,
+      proposalId,
+      {
+        expectedVersion: parsed.expectedVersion,
+        ...(parsed.deadline !== undefined ? { deadline: parsed.deadline } : {}),
+        ...(parsed.validFrom !== undefined
+          ? { validFrom: parsed.validFrom }
+          : {}),
+        ...(parsed.validUntil !== undefined
+          ? { validUntil: parsed.validUntil }
+          : {}),
+      },
+      options,
+    );
+    const body = parseOrValidation(
+      () => ConversationProposalAcceptResponseSchema.parse(out.body),
+      "proposal accept response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function rejectConversationProposal(
+    sessionId: string,
+    proposalId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): {
+    status: number;
+    body: ConversationProposalRejectResponse;
+    replayed: boolean;
+  } {
+    const parsed = parseOrValidation(
+      () => ConversationProposalRejectRequestSchema.parse(request),
+      "proposal reject request",
+    );
+    const out = autonomyRejectProposal(
+      db,
+      sessionId,
+      proposalId,
+      parsed.expectedVersion,
+      options,
+    );
+    const body = parseOrValidation(
+      () => ConversationProposalRejectResponseSchema.parse(out.body),
+      "proposal reject response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* AV04 learning facade (hypotheses + anchored evidence).             */
+  /*                                                                  */
+  /* Ownership: every method below delegates to `learning.ts`, the     */
+  /* ONLY writer of the learning tables. Human routes create /        */
+  /* transition / attach / accept / reject; the model reaches ONLY    */
+  /* the staged proposal path (`proposeLearningHypothesisFromModel`,  */
+  /* source derived server-side from the calling run's CURRENT        */
+  /* ordinary `user_text` turn) and the read-only list/get readers.   */
+  /* No purpose / task / grant / control / notification behavior.     */
+  /* ---------------------------------------------------------------- */
+
+  function createLearningHypothesis(
+    sessionId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: LearningHypothesisView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => LearningHypothesisCreateRequestSchema.parse(request),
+      "learning create request",
+    );
+    const out = learningCreateHypothesis(
+      db,
+      sessionId,
+      {
+        scope: parsed.scope,
+        kind: parsed.kind,
+        statement: parsed.statement,
+      },
+      options,
+    );
+    const body = parseOrValidation(
+      () => LearningHypothesisViewSchema.parse(out.body),
+      "learning create response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function proposeLearningHypothesisFromModel(
+    runId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): {
+    status: number;
+    body: LearningHypothesisView;
+    replayed: boolean;
+  } {
+    const run = getRun(runId);
+    const turn = getTurn(run.turnId);
+    if (run.sessionId !== turn.sessionId) {
+      throw new RepositoryValidationError("run/turn session mismatch");
+    }
+    if (turn.input.kind !== "user_text") {
+      // Only CURRENT ordinary user_text is an eligible source: action
+      // approval/rejection decisions (or any non-text turn) can never
+      // source a learning proposal.
+      throw new RepositoryValidationError(
+        "only ordinary user_text turns can source a learning proposal",
+      );
+    }
+    const parsed = parseOrValidation(
+      () => LearningProposeRequestSchema.parse(request),
+      "learning propose request",
+    );
+    const out = learningStageFromModel(
+      db,
+      run.sessionId,
+      {
+        scope: parsed.scope,
+        kind: parsed.kind,
+        statement: parsed.statement,
+      },
+      { sourceRunId: run.id, sourceTurnId: turn.id },
+      options,
+    );
+    const body = parseOrValidation(
+      () => LearningHypothesisViewSchema.parse(out.body),
+      "learning propose response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function listLearningHypotheses(
+    sessionId: string,
+    query: unknown = {},
+  ): LearningHypothesisListResponse {
+    const parsed = parseOrValidation(
+      () => LearningHypothesisListQuerySchema.parse(query ?? {}),
+      "learning list query",
+    );
+    const out = learningListHypotheses(db, sessionId, {
+      limit: parsed.limit,
+      ...(parsed.cursor !== undefined ? { cursor: parsed.cursor } : {}),
+      ...(parsed.scope !== undefined ? { scope: parsed.scope } : {}),
+      ...(parsed.status !== undefined ? { status: parsed.status } : {}),
+      ...(parsed.kind !== undefined ? { kind: parsed.kind } : {}),
+    });
+    return parseOrValidation(
+      () => LearningHypothesisListResponseSchema.parse(out),
+      "learning list response",
+    );
+  }
+
+  function getLearningHypothesis(
+    sessionId: string,
+    hypothesisId: string,
+  ): LearningHypothesisView {
+    return parseOrValidation(
+      () =>
+        LearningHypothesisViewSchema.parse(
+          learningGetHypothesis(db, sessionId, hypothesisId),
+        ),
+      "learning hypothesis response",
+    );
+  }
+
+  function listLearningHypothesisEvidence(
+    sessionId: string,
+    hypothesisId: string,
+    query: unknown = {},
+  ): LearningEvidenceListResponse {
+    const parsed = parseOrValidation(
+      () => LearningEvidenceListQuerySchema.parse(query ?? {}),
+      "learning evidence list query",
+    );
+    const out = learningListEvidence(db, sessionId, hypothesisId, {
+      limit: parsed.limit,
+      ...(parsed.cursor !== undefined ? { cursor: parsed.cursor } : {}),
+    });
+    return parseOrValidation(
+      () => LearningEvidenceListResponseSchema.parse(out),
+      "learning evidence response",
+    );
+  }
+
+  function listLearningHypothesisEvents(
+    sessionId: string,
+    hypothesisId: string,
+  ): {
+    hypothesisId: string;
+    events: {
+      seq: number;
+      event: string;
+      fromStatus: string | null;
+      toStatus: string;
+      createdAt: number;
+    }[];
+  } {
+    return learningListEvents(db, sessionId, hypothesisId);
+  }
+
+  function transitionLearningHypothesis(
+    sessionId: string,
+    hypothesisId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: LearningHypothesisView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => LearningHypothesisTransitionRequestSchema.parse(request),
+      "learning transition request",
+    );
+    const out = learningTransition(
+      db,
+      sessionId,
+      hypothesisId,
+      parsed.transition as HypothesisTransition,
+      parsed.expectedVersion,
+      options,
+    );
+    const body = parseOrValidation(
+      () => LearningHypothesisViewSchema.parse(out.body),
+      "learning transition response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function reaffirmLearningHypothesis(
+    sessionId: string,
+    hypothesisId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: LearningHypothesisView; replayed: boolean } {
+    // Explicit human reaffirm: same CAS-checked transition core with the
+    // fixed `reaffirm` transition (keeps status, clears the reevaluation
+    // notice, allowed only while the notice is set).
+    const parsed = parseOrValidation(
+      () => LearningHypothesisDecisionRequestSchema.parse(request),
+      "learning reaffirm request",
+    );
+    const out = learningTransition(
+      db,
+      sessionId,
+      hypothesisId,
+      "reaffirm",
+      parsed.expectedVersion,
+      options,
+    );
+    const body = parseOrValidation(
+      () => LearningHypothesisViewSchema.parse(out.body),
+      "learning reaffirm response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function acceptLearningHypothesis(
+    sessionId: string,
+    hypothesisId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: LearningHypothesisView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => LearningHypothesisDecisionRequestSchema.parse(request),
+      "learning accept request",
+    );
+    const out = learningAcceptStaged(
+      db,
+      sessionId,
+      hypothesisId,
+      parsed.expectedVersion,
+      options,
+    );
+    const body = parseOrValidation(
+      () => LearningHypothesisViewSchema.parse(out.body),
+      "learning accept response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function rejectLearningHypothesis(
+    sessionId: string,
+    hypothesisId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: LearningHypothesisView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => LearningHypothesisDecisionRequestSchema.parse(request),
+      "learning reject request",
+    );
+    const out = learningRejectStaged(
+      db,
+      sessionId,
+      hypothesisId,
+      parsed.expectedVersion,
+      options,
+    );
+    const body = parseOrValidation(
+      () => LearningHypothesisViewSchema.parse(out.body),
+      "learning reject response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function attachLearningEvidence(
+    sessionId: string,
+    hypothesisId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: LearningEvidenceView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => LearningEvidenceAttachRequestSchema.parse(request),
+      "learning evidence request",
+    );
+    const out = learningAttachEvidence(
+      db,
+      sessionId,
+      hypothesisId,
+      {
+        polarity: parsed.polarity,
+        sourceKind: parsed.sourceKind,
+        sourceId: parsed.sourceId,
+        ...(parsed.note !== undefined ? { note: parsed.note } : {}),
+      },
+      options,
+    );
+    const body = parseOrValidation(
+      () => LearningEvidenceViewSchema.parse(out.body),
+      "learning evidence response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  /* ---------------- AV03 delegation handoffs (human-driven only) -------- */
+  // Session-owned handoffs bound to an existing task. The model can never
+  // reach these writers (no model tool registration exists): every frozen
+  // field is human-entered, verification needs all frozen criteria passing,
+  // and boundary flags grant nothing.
+
+  function createHandoff(
+    sessionId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: HandoffView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => HandoffCreateRequestSchema.parse(request),
+      "handoff create request",
+    );
+    const out = handoffCreate(
+      db,
+      sessionId,
+      {
+        taskId: parsed.taskId,
+        target: parsed.target,
+        acceptanceCriteria: [...parsed.acceptanceCriteria],
+        opScope: parsed.opScope,
+        ...(parsed.budgetLabel !== undefined
+          ? { budgetLabel: parsed.budgetLabel }
+          : {}),
+        boundaries: [...new Set(parsed.boundaries)],
+        ...(parsed.supersedesHandoffId !== undefined
+          ? { supersedesHandoffId: parsed.supersedesHandoffId }
+          : {}),
+      },
+      options,
+    );
+    const body = parseOrValidation(
+      () => HandoffViewSchema.parse(out.body),
+      "handoff create response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function getHandoff(sessionId: string, handoffId: string): HandoffView {
+    return parseOrValidation(
+      () => HandoffViewSchema.parse(handoffGet(db, sessionId, handoffId)),
+      "handoff response",
+    );
+  }
+
+  function listHandoffs(
+    sessionId: string,
+    query: unknown = {},
+  ): HandoffListResponse {
+    const parsed = parseOrValidation(
+      () => HandoffListQuerySchema.parse(query ?? {}),
+      "handoff list query",
+    );
+    const out = handoffList(db, sessionId, {
+      limit: parsed.limit,
+      ...(parsed.cursor !== undefined ? { cursor: parsed.cursor } : {}),
+      ...(parsed.status !== undefined ? { status: parsed.status } : {}),
+    });
+    const activeCount = handoffCountActive(db, sessionId);
+    return parseOrValidation(
+      () =>
+        HandoffListResponseSchema.parse({
+          items: out.items,
+          nextCursor: out.nextCursor,
+          hasMore: out.hasMore,
+          activeCount,
+        }),
+      "handoff list response",
+    );
+  }
+
+  function getHandoffSpec(sessionId: string, handoffId: string): string {
+    return handoffBuildSpec(db, sessionId, handoffId);
+  }
+
+  function listHandoffEvents(
+    sessionId: string,
+    handoffId: string,
+  ): {
+    handoffId: string;
+    events: {
+      seq: number;
+      event: string;
+      fromStatus: string | null;
+      toStatus: string;
+      note: string | null;
+      createdAt: number;
+    }[];
+  } {
+    return handoffListEvents(db, sessionId, handoffId);
+  }
+
+  function listHandoffAttempts(
+    sessionId: string,
+    handoffId: string,
+  ): {
+    handoffId: string;
+    attempts: { attemptNo: number; cause: string; createdAt: number }[];
+  } {
+    return handoffListAttempts(db, sessionId, handoffId);
+  }
+
+  function dispatchHandoff(
+    sessionId: string,
+    handoffId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: HandoffView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => HandoffDispatchRequestSchema.parse(request),
+      "handoff dispatch request",
+    );
+    const out = handoffDispatch(
+      db,
+      sessionId,
+      handoffId,
+      parsed.expectedVersion,
+      parsed.externalRef,
+      options,
+    );
+    const body = parseOrValidation(
+      () => HandoffViewSchema.parse(out.body),
+      "handoff dispatch response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function reportHandoff(
+    sessionId: string,
+    handoffId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: HandoffView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => HandoffReportRequestSchema.parse(request),
+      "handoff report request",
+    );
+    const out = handoffReport(
+      db,
+      sessionId,
+      handoffId,
+      parsed.expectedVersion,
+      parsed.environment,
+      parsed.summary,
+      options,
+    );
+    const body = parseOrValidation(
+      () => HandoffViewSchema.parse(out.body),
+      "handoff report response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function verifyHandoff(
+    sessionId: string,
+    handoffId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: HandoffView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => HandoffVerifyRequestSchema.parse(request),
+      "handoff verify request",
+    );
+    const out = handoffVerify(
+      db,
+      sessionId,
+      handoffId,
+      parsed.expectedVersion,
+      parsed.results.map((result) => ({
+        index: result.index,
+        pass: result.pass,
+        evidence: result.evidence,
+      })),
+      options,
+    );
+    const body = parseOrValidation(
+      () => HandoffViewSchema.parse(out.body),
+      "handoff verify response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function failHandoff(
+    sessionId: string,
+    handoffId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: HandoffView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => HandoffTransitionRequestSchema.parse(request),
+      "handoff fail request",
+    );
+    const out = handoffFail(
+      db,
+      sessionId,
+      handoffId,
+      parsed.expectedVersion,
+      options,
+    );
+    const body = parseOrValidation(
+      () => HandoffViewSchema.parse(out.body),
+      "handoff fail response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function cancelHandoff(
+    sessionId: string,
+    handoffId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: HandoffView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => HandoffTransitionRequestSchema.parse(request),
+      "handoff cancel request",
+    );
+    const out = handoffCancel(
+      db,
+      sessionId,
+      handoffId,
+      parsed.expectedVersion,
+      options,
+    );
+    const body = parseOrValidation(
+      () => HandoffViewSchema.parse(out.body),
+      "handoff cancel response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function abnormalExitHandoff(
+    sessionId: string,
+    handoffId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: HandoffView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => HandoffTransitionRequestSchema.parse(request),
+      "handoff abnormal exit request",
+    );
+    const out = handoffAbnormalExit(
+      db,
+      sessionId,
+      handoffId,
+      parsed.expectedVersion,
+      options,
+    );
+    const body = parseOrValidation(
+      () => HandoffViewSchema.parse(out.body),
+      "handoff abnormal exit response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function recordHandoffAttempt(
+    sessionId: string,
+    handoffId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: HandoffView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => HandoffAttemptRequestSchema.parse(request),
+      "handoff attempt request",
+    );
+    const out = handoffRecordAttempt(
+      db,
+      sessionId,
+      handoffId,
+      parsed.expectedVersion,
+      parsed.cause,
+      options,
+    );
+    const body = parseOrValidation(
+      () => HandoffViewSchema.parse(out.body),
+      "handoff attempt response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function reaffirmHandoff(
+    sessionId: string,
+    handoffId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: HandoffView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => HandoffTransitionRequestSchema.parse(request),
+      "handoff reaffirm request",
+    );
+    const out = handoffReaffirm(
+      db,
+      sessionId,
+      handoffId,
+      parsed.expectedVersion,
+      options,
+    );
+    const body = parseOrValidation(
+      () => HandoffViewSchema.parse(out.body),
+      "handoff reaffirm response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
   function setAutonomyControlState(
     request: unknown,
     options: AutonomyKeyOptions,
@@ -5388,6 +6459,91 @@ export function createKernelRepository(
     version: number;
   } {
     return applyAutonomyRestartFence(db, now);
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* AV02 shadow-deliberation facade (durable queue + fenced core).    */
+  /*                                                                  */
+  /* Ownership: every method below delegates to `shadow.ts`, the ONLY */
+  /* writer of the shadow tables. This facade adds the strict Zod     */
+  /* boundary and implements the narrow `ShadowPolicyReader` port     */
+  /* from the EXISTING autonomy getters (no duplicated purpose        */
+  /* mapper, no runtime cycle: `shadow.ts` never imports this         */
+  /* module or `autonomy.ts`). Completed jobs store a MODEL decision  */
+  /* SEPARATE from the CODE policy with ZERO execution performed.     */
+  /* ---------------------------------------------------------------- */
+
+  const shadowPolicyReader: ShadowPolicyReader = {
+    listScopePurposes(sessionId: string, scope: string): ShadowReaderPurpose[] {
+      const out = autonomyListPurposesInScope(db, sessionId, scope, 101);
+      return out.items.map((purpose) => ({
+        id: purpose.id,
+        scope: purpose.scope,
+        kind: purpose.kind,
+        explicit: purpose.explicit,
+        sourceKind: purpose.sourceKind,
+        statement: purpose.statement,
+        interpretation: purpose.interpretation,
+        status: purpose.status,
+        version: purpose.version,
+        supersededBy: purpose.supersededBy,
+        validFrom: purpose.validFrom,
+        validUntil: purpose.validUntil,
+        createdAt: purpose.createdAt,
+      }));
+    },
+    listScopeTasks(sessionId: string, scope: string): ShadowReaderTask[] {
+      const out = autonomyListTasksInScope(db, sessionId, scope, 101);
+      return out.items.map((task) => ({
+        id: task.id,
+        scope: task.scope,
+        title: task.title,
+        body: task.body,
+        kind: task.kind,
+        speaker: task.speaker,
+        deadline: task.deadline,
+        parentPurposeId: task.parentPurposeId,
+        status: task.status,
+        version: task.version,
+        holdReason: task.holdReason,
+        reconsiderTrigger: task.reconsiderTrigger,
+      }));
+    },
+    listScopeConflictPairs(
+      sessionId: string,
+      scope: string,
+    ): [string, string][] {
+      return autonomyListConflictPairsInScope(db, sessionId, scope, 101);
+    },
+    isStrictDeadline: (value: string): boolean =>
+      isStrictAutonomyDeadline(value),
+    isPurposeApplicableAt: (
+      purpose: { validFrom: string | null; validUntil: string | null },
+      now: number,
+    ): boolean => autonomyIsPurposeApplicableAt(purpose, now),
+  };
+
+  function requestShadowDeliberation(
+    sessionId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: ShadowJobView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => ShadowExplicitRequestSchema.parse(request),
+      "shadow explicit request",
+    );
+    const out = shadowRequest(
+      db,
+      sessionId,
+      parsed.scope,
+      parsed.reason,
+      options,
+    );
+    const body = parseOrValidation(
+      () => ShadowJobViewSchema.parse(out.body),
+      "shadow job response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
   }
 
   /* Trial authority facade: DATA-only stage, one-grant approve, claim. */
@@ -5435,6 +6591,292 @@ export function createKernelRepository(
       "trial proposal response",
     );
     return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function listShadowJobs(
+    sessionId: string,
+    query: unknown = {},
+  ): ShadowJobListResponse {
+    const parsed = parseOrValidation(
+      () => AutonomyListQuerySchema.parse(query ?? {}),
+      "shadow job list query",
+    );
+    const out = shadowListJobs(db, sessionId, parsed.limit);
+    return parseOrValidation(
+      () => ShadowJobListResponseSchema.parse(out),
+      "shadow job list response",
+    );
+  }
+
+  function getShadowJob(sessionId: string, jobId: string): ShadowJobView {
+    return parseOrValidation(
+      () => ShadowJobViewSchema.parse(shadowGetJob(db, sessionId, jobId)),
+      "shadow job response",
+    );
+  }
+
+  function listShadowJobEvents(
+    sessionId: string,
+    jobId: string,
+  ): ShadowJobEventsResponse {
+    const out = shadowListEvents(db, sessionId, jobId);
+    return parseOrValidation(
+      () => ShadowJobEventsResponseSchema.parse(out),
+      "shadow job events response",
+    );
+  }
+
+  function listShadowInbox(
+    sessionId: string,
+    query: unknown = {},
+  ): {
+    items: {
+      id: string;
+      sessionId: string;
+      scope: string;
+      kind: "policy_change" | "explicit_request";
+      triggerEvent: string;
+      triggerId: string | null;
+      controlVersion: number;
+      scopeEpoch: number;
+      disposition: "recorded" | "consumed" | "skipped";
+      jobId: string | null;
+      createdAt: number;
+    }[];
+  } {
+    const parsed = parseOrValidation(
+      () => AutonomyListQuerySchema.parse(query ?? {}),
+      "shadow inbox list query",
+    );
+    return shadowListInbox(db, sessionId, parsed.limit);
+  }
+
+  function getShadowJobContext(
+    sessionId: string,
+    jobId: string,
+  ): ShadowJobContext {
+    return parseOrValidation(
+      () =>
+        ShadowJobContextSchema.parse(shadowGetContext(db, sessionId, jobId)),
+      "shadow job context response",
+    );
+  }
+
+  function getShadowJobDeliberation(
+    sessionId: string,
+    jobId: string,
+  ): ShadowJobDeliberation {
+    return parseOrValidation(
+      () =>
+        ShadowJobDeliberationSchema.parse({
+          context: shadowGetContext(db, sessionId, jobId),
+          modelDecision: shadowGetDecision(db, sessionId, jobId),
+        }),
+      "shadow job deliberation response",
+    );
+  }
+
+  function claimShadowJob(
+    sessionId: string,
+    jobId: string,
+    request: unknown,
+    options: { now?: number },
+  ): {
+    outcome: "claimed" | "held";
+    job: ShadowJobView;
+    context: ShadowJobContext | null;
+  } {
+    const candidate = request as {
+      owner?: unknown;
+      expectedVersion?: unknown;
+      leaseMs?: unknown;
+      memories?: unknown;
+    };
+    if (
+      typeof candidate.owner !== "string" ||
+      candidate.owner.length === 0 ||
+      candidate.owner.length > 128 ||
+      !Number.isInteger(candidate.expectedVersion) ||
+      (candidate.expectedVersion as number) < 1
+    ) {
+      throw new RepositoryValidationError("shadow claim request is invalid");
+    }
+    if (
+      candidate.leaseMs !== undefined &&
+      (!Number.isInteger(candidate.leaseMs) ||
+        (candidate.leaseMs as number) < 1000 ||
+        (candidate.leaseMs as number) > 3_600_000)
+    ) {
+      throw new RepositoryValidationError("leaseMs must be 1000..3600000");
+    }
+    const owner = candidate.owner as string;
+    const expectedVersion = candidate.expectedVersion as number;
+    // Trusted server-only memory freeze: valid snippet entries only; any
+    // other shape is dropped (never a validation throw into the claim).
+    const memories =
+      Array.isArray(candidate.memories) &&
+      candidate.memories.every(
+        (entry) =>
+          typeof entry === "object" &&
+          entry !== null &&
+          typeof (entry as { snippet?: unknown }).snippet === "string",
+      )
+        ? (candidate.memories as Array<{ snippet: string }>)
+        : undefined;
+    const out = shadowClaimJob(db, sessionId, jobId, shadowPolicyReader, {
+      owner,
+      expectedVersion,
+      ...(candidate.leaseMs !== undefined
+        ? { leaseMs: candidate.leaseMs as number }
+        : {}),
+      ...(memories !== undefined ? { memories } : {}),
+      ...(options.now !== undefined ? { now: options.now } : {}),
+    });
+    const job = parseOrValidation(
+      () => ShadowJobViewSchema.parse(out.job),
+      "shadow job response",
+    );
+    const context =
+      out.context === null
+        ? null
+        : parseOrValidation(
+            () => ShadowJobContextSchema.parse(out.context),
+            "shadow job context response",
+          );
+    return { outcome: out.outcome, job, context };
+  }
+
+  function completeShadowJob(
+    sessionId: string,
+    jobId: string,
+    modelOutput: unknown,
+    options: { expectedVersion: number; leaseOwner: string; now?: number },
+  ): {
+    outcome: "completed" | "held";
+    job: ShadowJobView;
+    policyCode:
+      | "shadow_only"
+      | "missing_grant"
+      | "wish_not_command"
+      | "external_no_authority"
+      | "needs_clarification"
+      | "no_action"
+      | null;
+  } {
+    if (
+      !Number.isInteger(options.expectedVersion) ||
+      options.expectedVersion < 1 ||
+      typeof options.leaseOwner !== "string"
+    ) {
+      throw new RepositoryValidationError(
+        "shadow complete options are invalid",
+      );
+    }
+    const parsedOutput = parseOrValidation(
+      () => ShadowModelOutputSchema.parse(modelOutput),
+      "shadow model output",
+    );
+    const out = shadowCompleteJob(
+      db,
+      sessionId,
+      jobId,
+      shadowPolicyReader,
+      parsedOutput,
+      {
+        expectedVersion: options.expectedVersion,
+        leaseOwner: options.leaseOwner,
+        ...(options.now !== undefined ? { now: options.now } : {}),
+      },
+    );
+    const job = parseOrValidation(
+      () => ShadowJobViewSchema.parse(out.job),
+      "shadow job response",
+    );
+    return { outcome: out.outcome, job, policyCode: out.policyCode };
+  }
+
+  function holdShadowJob(
+    sessionId: string,
+    jobId: string,
+    request: unknown,
+    options: { now?: number },
+  ): ShadowJobView {
+    const parsed = parseOrValidation(
+      () => ShadowHoldRequestSchema.parse(request),
+      "shadow hold request",
+    );
+    const job = shadowHoldJob(db, sessionId, jobId, parsed.reason, {
+      expectedVersion: parsed.expectedVersion,
+      ...(options.now !== undefined ? { now: options.now } : {}),
+    });
+    return parseOrValidation(
+      () => ShadowJobViewSchema.parse(job),
+      "shadow job response",
+    );
+  }
+
+  function failShadowJob(
+    sessionId: string,
+    jobId: string,
+    request: unknown,
+    options: { now?: number },
+  ): ShadowJobView {
+    const parsed = parseOrValidation(
+      () => ShadowFailRequestSchema.parse(request),
+      "shadow fail request",
+    );
+    const job = shadowFailJob(db, sessionId, jobId, parsed.code, {
+      expectedVersion: parsed.expectedVersion,
+      ...(options.now !== undefined ? { now: options.now } : {}),
+    });
+    return parseOrValidation(
+      () => ShadowJobViewSchema.parse(job),
+      "shadow job response",
+    );
+  }
+
+  function cancelShadowJob(
+    sessionId: string,
+    jobId: string,
+    request: unknown,
+    options: { now?: number },
+  ): ShadowJobView {
+    const candidate = request as { expectedVersion?: unknown };
+    if (
+      !Number.isInteger(candidate.expectedVersion) ||
+      (candidate.expectedVersion as number) < 1
+    ) {
+      throw new RepositoryValidationError("shadow cancel request is invalid");
+    }
+    const job = shadowCancelJob(db, sessionId, jobId, {
+      expectedVersion: candidate.expectedVersion as number,
+      ...(options.now !== undefined ? { now: options.now } : {}),
+    });
+    return parseOrValidation(
+      () => ShadowJobViewSchema.parse(job),
+      "shadow job response",
+    );
+  }
+
+  /**
+   * Narrow trusted global pending selector for the runtime shadow worker
+   * ONLY (never called from HTTP): oldest pending job across sessions in
+   * one bounded SQL statement. Null when the queue is empty.
+   */
+  function readPendingShadowJob(): {
+    sessionId: string;
+    jobId: string;
+    version: number;
+  } | null {
+    return shadowReadPendingJob(db);
+  }
+
+  /**
+   * Trusted foreground-activity read for the runtime shadow worker ONLY:
+   * true while ANY user run is queued/running/cancel_requested.
+   */
+  function hasActiveShadowBlock(): boolean {
+    return shadowHasActiveRuns(db);
   }
 
   function listTrials(
@@ -5687,6 +7129,193 @@ export function createKernelRepository(
     return listClaimedTrialWorkers(db);
   }
 
+  /* AV05 notifications durable-projection facade (core only).          */
+  /*                                                                  */
+  /* Ownership: every method below delegates to `notifications.ts`,   */
+  /* the ONLY writer of the notification tables. This facade adds the */
+  /* strict Zod boundary and returns kernel shapes so the NEXT       */
+  /* service / HTTP worker can consume them verbatim. No model       */
+  /* invoke, no worker, no calendar write, no authorization lives     */
+  /* here: notifications never become execution authority and an ack  */
+  /* changes NO purpose / task / control / grant state.               */
+  /* ---------------------------------------------------------------- */
+
+  function ingestNotifications(
+    sessionId: string,
+    options: { now?: number } = {},
+  ): IngestNotificationsResponse {
+    const out = notifyIngest(db, sessionId, options);
+    return parseOrValidation(
+      () => IngestNotificationsResponseSchema.parse(out),
+      "ingest notifications response",
+    );
+  }
+
+  function listNotifications(
+    sessionId: string,
+    query: unknown = {},
+  ): NotificationListResponse {
+    const parsed = parseOrValidation(
+      () => NotificationListQuerySchema.parse(query ?? {}),
+      "notification list query",
+    );
+    const out = notifyList(db, sessionId, {
+      limit: parsed.limit,
+      ...(parsed.beforeSeq !== undefined
+        ? { beforeSeq: parsed.beforeSeq }
+        : {}),
+      ...(parsed.now !== undefined ? { now: parsed.now } : {}),
+    });
+    return parseOrValidation(
+      () => NotificationListResponseSchema.parse(out),
+      "notification list response",
+    );
+  }
+
+  function listNotificationsForward(
+    sessionId: string,
+    query: unknown = {},
+  ): NotificationForwardPageResponse {
+    const parsed = parseOrValidation(
+      () => NotificationForwardQuerySchema.parse(query ?? {}),
+      "notification forward query",
+    );
+    const out = notifyListForward(db, sessionId, {
+      after: parsed.after,
+      limit: parsed.limit,
+      ...(parsed.now !== undefined ? { now: parsed.now } : {}),
+    });
+    return parseOrValidation(
+      () => NotificationForwardPageResponseSchema.parse(out),
+      "notification forward page response",
+    );
+  }
+
+  function getNotification(
+    sessionId: string,
+    notificationId: string,
+    options: { now?: number } = {},
+  ): NotificationView {
+    const parsed = parseOrValidation(
+      () => NotificationReadQuerySchema.parse(options ?? {}),
+      "notification read query",
+    );
+    return parseOrValidation(
+      () =>
+        NotificationViewSchema.parse(
+          notifyGet(db, sessionId, notificationId, {
+            ...(parsed.now !== undefined ? { now: parsed.now } : {}),
+          }),
+        ),
+      "notification response",
+    );
+  }
+
+  function getNotificationHistory(
+    sessionId: string,
+    notificationId: string,
+    options: { now?: number } = {},
+  ): NotificationHistoryResponse {
+    const parsed = parseOrValidation(
+      () => NotificationReadQuerySchema.parse(options ?? {}),
+      "notification read query",
+    );
+    const out = notifyHistory(db, sessionId, notificationId, {
+      ...(parsed.now !== undefined ? { now: parsed.now } : {}),
+    });
+    return parseOrValidation(
+      () => NotificationHistoryResponseSchema.parse(out),
+      "notification history response",
+    );
+  }
+
+  function getLatestNotificationCursor(
+    sessionId: string,
+  ): NotificationFeedCursorResponse {
+    const out = notifyLatestCursor(db, sessionId);
+    return parseOrValidation(
+      () => NotificationFeedCursorResponseSchema.parse(out),
+      "notification feed cursor response",
+    );
+  }
+
+  function ackNotification(
+    sessionId: string,
+    notificationId: string,
+    options: { key: string; now?: number },
+  ): {
+    status: number;
+    body: NotificationAckReceipt;
+    replayed: boolean;
+  } {
+    if (typeof options.key !== "string") {
+      throw new RepositoryValidationError("ack key must be a UUID v4");
+    }
+    const out = notifyAck(db, sessionId, notificationId, options);
+    const body = parseOrValidation(
+      () => NotificationAckReceiptSchema.parse(out.body),
+      "notification ack receipt",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function buildDeadlineSchedule(
+    sessionId: string,
+    options: { now?: number } = {},
+  ): BuildDeadlineScheduleResponse {
+    const out = notifyBuildSchedule(db, sessionId, options);
+    return parseOrValidation(
+      () => BuildDeadlineScheduleResponseSchema.parse(out),
+      "build deadline schedule response",
+    );
+  }
+
+  function getNextDeadline(
+    sessionId: string,
+    options: { now?: number } = {},
+  ): NextDeadlineResponse {
+    const out = notifyNextDeadline(db, sessionId, options);
+    const deadline =
+      out.deadline === null
+        ? null
+        : parseOrValidation(
+            () => DeadlineScheduleViewSchema.parse(out.deadline),
+            "deadline schedule response",
+          );
+    return parseOrValidation(
+      () =>
+        NextDeadlineResponseSchema.parse({
+          status: out.status,
+          paused: out.paused,
+          controlVersion: out.controlVersion,
+          deadline,
+        }),
+      "next deadline response",
+    );
+  }
+
+  function recordDueDeadlines(
+    sessionId: string,
+    options: { expectedControlVersion: number; now?: number },
+  ): RecordDueDeadlinesResponse {
+    if (
+      !Number.isInteger(options.expectedControlVersion) ||
+      options.expectedControlVersion < 1
+    ) {
+      throw new RepositoryValidationError(
+        "expectedControlVersion must be >= 1",
+      );
+    }
+    const out = notifyRecordDue(db, sessionId, {
+      expectedControlVersion: options.expectedControlVersion,
+      ...(options.now !== undefined ? { now: options.now } : {}),
+    });
+    return parseOrValidation(
+      () => RecordDueDeadlinesResponseSchema.parse(out),
+      "record due deadlines response",
+    );
+  }
+
   return {
     createSession,
     postMessage,
@@ -5757,6 +7386,8 @@ export function createKernelRepository(
     createAutonomyPurpose,
     listAutonomyPurposes,
     getAutonomyPurpose,
+    listAutonomyPurposesInScope,
+    listAutonomyPurposesFiltered,
     getAutonomyPurposeHistory,
     correctAutonomyPurpose,
     revokeAutonomyPurpose,
@@ -5766,6 +7397,8 @@ export function createKernelRepository(
     createAutonomyTask,
     listAutonomyTasks,
     getAutonomyTask,
+    listAutonomyTasksInScope,
+    listAutonomyTasksFiltered,
     getAutonomyTaskHistory,
     startAutonomyTask,
     holdAutonomyTask,
@@ -5776,6 +7409,52 @@ export function createKernelRepository(
     setAutonomyControlState,
     listAutonomyActivityLog,
     applyAutonomyRestartFenceNow,
+    stageConversationProposalFromModel,
+    listConversationProposals,
+    getConversationProposal,
+    listConversationProposalEvents,
+    acceptConversationProposal,
+    rejectConversationProposal,
+    createLearningHypothesis,
+    proposeLearningHypothesisFromModel,
+    listLearningHypotheses,
+    getLearningHypothesis,
+    listLearningHypothesisEvidence,
+    listLearningHypothesisEvents,
+    transitionLearningHypothesis,
+    reaffirmLearningHypothesis,
+    acceptLearningHypothesis,
+    rejectLearningHypothesis,
+    attachLearningEvidence,
+    createHandoff,
+    getHandoff,
+    listHandoffs,
+    getHandoffSpec,
+    listHandoffEvents,
+    listHandoffAttempts,
+    dispatchHandoff,
+    reportHandoff,
+    verifyHandoff,
+    failHandoff,
+    cancelHandoff,
+    abnormalExitHandoff,
+    recordHandoffAttempt,
+    reaffirmHandoff,
+    requestShadowDeliberation,
+    listShadowJobs,
+    getShadowJob,
+    listShadowJobEvents,
+    listShadowInbox,
+    getShadowJobContext,
+    getShadowJobDeliberation,
+    claimShadowJob,
+    completeShadowJob,
+    holdShadowJob,
+    failShadowJob,
+    cancelShadowJob,
+    readPendingShadowJob,
+    hasActiveShadowBlock,
+
     stageTrial,
     listTrials,
     readTrial,
@@ -5797,6 +7476,16 @@ export function createKernelRepository(
     reconcileTrialExpiries,
     listQueuedTrialGrantsForAlias,
     listClaimedTrialWorkersForRecovery,
+    ingestNotifications,
+    listNotifications,
+    listNotificationsForward,
+    getNotification,
+    getNotificationHistory,
+    getLatestNotificationCursor,
+    ackNotification,
+    buildDeadlineSchedule,
+    getNextDeadline,
+    recordDueDeadlines,
   };
 }
 

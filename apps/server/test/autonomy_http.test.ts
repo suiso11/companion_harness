@@ -9,6 +9,7 @@
 // revoke-holds-dependent + no-blind-resume, null deadlines/windows, and that
 // normal chat still admits while paused.
 
+// UNION of HEAD (closed scope + idempotency lookup) + origin/master (correction omission + history pagination): all 5 its kept.
 import { randomUUID } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -340,6 +341,141 @@ describe("autonomy HTTP", () => {
     }
   });
 
+  it("enforces the task scope wire contract (missing scope defaults)", async () => {
+    const fixture = await makeApp();
+    try {
+      const { app } = fixture;
+      const created = await post(app, "/api/sessions", {}, randomUUID());
+      const sessionId = (created.body as { sessionId: string }).sessionId;
+      const base = `/api/sessions/${sessionId}`;
+      const parent = await post(
+        app,
+        `${base}/purposes`,
+        {
+          scope: "health",
+          statement: "scoped parent",
+          kind: "goal",
+          explicit: true,
+          sourceKind: "user",
+        },
+        randomUUID(),
+      );
+      const parentId = (parent.body as { id: string }).id;
+      // Scope round-trips on create + read + list.
+      const tasked = await post(
+        app,
+        `${base}/tasks`,
+        {
+          scope: "health",
+          title: "scoped work",
+          kind: "task",
+          speaker: "user",
+          parentPurposeId: parentId,
+        },
+        randomUUID(),
+      );
+      expect(tasked.status).toBe(201);
+      expect((tasked.body as { scope: string }).scope).toBe("health");
+      const read = await get(
+        app,
+        `${base}/tasks/${(tasked.body as { id: string }).id}`,
+      );
+      expect((read.body as { scope: string }).scope).toBe("health");
+      // Cross-scope parent and unknown fields are refused by the strict wire
+      // schema (both 400); missing scope falls back to the contract default
+      // "default" (MERGE: master's defaulted-scope contract wins over HEAD's
+      // closed-reject variant).
+      expect(
+        (
+          await post(
+            app,
+            `${base}/tasks`,
+            {
+              scope: "work",
+              title: "cross",
+              kind: "task",
+              speaker: "user",
+              parentPurposeId: parentId,
+            },
+            randomUUID(),
+          )
+        ).status,
+      ).toBe(400);
+      const scopedDefault = await post(
+        app,
+        `${base}/tasks`,
+        { title: "no scope", kind: "task", speaker: "user" },
+        randomUUID(),
+      );
+      expect(scopedDefault.status).toBe(201);
+      expect((scopedDefault.body as { scope: string }).scope).toBe("default");
+      expect(
+        (
+          await post(
+            app,
+            `${base}/tasks`,
+            {
+              scope: "health",
+              title: "extra",
+              kind: "task",
+              speaker: "user",
+              bogus: true,
+            },
+            randomUUID(),
+          )
+        ).status,
+      ).toBe(400);
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it("serves owned session idempotency lookups and 404s foreign/global scopes", async () => {
+    const fixture = await makeApp();
+    try {
+      const { app } = fixture;
+      const first = await post(app, "/api/sessions", {}, randomUUID());
+      const sessionId = (first.body as { sessionId: string }).sessionId;
+      const second = await post(app, "/api/sessions", {}, randomUUID());
+      const otherId = (second.body as { sessionId: string }).sessionId;
+      const key = randomUUID();
+      const created = await post(
+        app,
+        `/api/sessions/${sessionId}/purposes`,
+        {
+          scope: "health",
+          statement: "lookup probe",
+          kind: "goal",
+          explicit: true,
+          sourceKind: "user",
+        },
+        key,
+      );
+      expect(created.status).toBe(201);
+      const scope = `session:${sessionId}:purpose`;
+      const owned = await get(
+        app,
+        `/api/sessions/${sessionId}/idempotency/${key}?scope=${encodeURIComponent(scope)}`,
+      );
+      expect(owned.status).toBe(200);
+      expect((owned.body as { found: boolean }).found).toBe(true);
+      // Same scope+key through a foreign session: 404, never leaked.
+      const foreign = await get(
+        app,
+        `/api/sessions/${otherId}/idempotency/${key}?scope=${encodeURIComponent(scope)}`,
+      );
+      expect(foreign.status).toBe(404);
+      // Global control state is never exposed via a session lookup.
+      const global = await get(
+        app,
+        `/api/sessions/${sessionId}/idempotency/${randomUUID()}?scope=autonomy%3Acontrol`,
+      );
+      expect(global.status).toBe(404);
+    } finally {
+      fixture.close();
+    }
+  });
+
   it("distinguishes correction omission from explicit null and replays terminal corrections verbatim", async () => {
     const fixture = await makeApp();
     try {
@@ -544,6 +680,49 @@ describe("autonomy HTTP", () => {
       }
     } finally {
       fixture.close();
+    }
+  });
+  it("notifies memory control on a committed control change without any shadow worker (memory-only wiring)", async () => {
+    const handle = openKernelDatabase(":memory:");
+    await migrateKernelDatabase({ db: handle.raw });
+    const repo = createKernelRepository(handle.raw);
+    const config = loadServerConfig({
+      COMPANION_DB_PATH: join(
+        mkdtempSync(join(tmpdir(), "companion-autonomy-memonly-")),
+        "db.sqlite",
+      ),
+      COMPANION_HOST: "127.0.0.1",
+      COMPANION_PORT: "3000",
+      COMPANION_TIME_ZONE: "UTC",
+      COMPANION_LOG_LEVEL: "debug",
+    });
+    const { logger } = createCollectingLogger("debug");
+    const engine = new RunEngine({ db: handle.raw, repo, cancelGraceMs: 30 });
+    // Memory-only bootstrap shape: no shadowWake, but the control hook
+    // (memory notifyControl) IS provided — the P1 review fault was that
+    // bootstrap omitted the whole spread without a worker, so an
+    // explicit resume could never reopen the memory gate.
+    let notified = 0;
+    const created = createApp({
+      config,
+      repo,
+      engine,
+      logger,
+      shadowControlChanged: () => {
+        notified += 1;
+      },
+    });
+    try {
+      const control = await post(
+        created.app,
+        "/api/autonomy/control",
+        { paused: false, expectedVersion: 1 },
+        randomUUID(),
+      );
+      expect(control.status).toBe(200);
+      expect(notified).toBe(1);
+    } finally {
+      closeKernelDatabase(handle);
     }
   });
 });

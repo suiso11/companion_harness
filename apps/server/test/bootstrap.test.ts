@@ -177,6 +177,27 @@ describe("bootstrap startup + graceful shutdown", () => {
     await expect(startServer({ env, drainMs: 50 })).rejects.toThrow();
   });
 
+  it("fails startup when a post-migration autonomy table is missing", async () => {
+    const { env, dbPath } = tempEnv();
+    const setup = new Database(dbPath);
+    try {
+      await migrateKernelDatabase({ db: setup });
+      // Version-11 database mirroring the finding: control left unpaused
+      // while the activity table is gone, so the restart fence cannot
+      // apply the durable stop fence.
+      setup.exec("UPDATE autonomy_control SET paused = 0 WHERE id = 'global'");
+      setup.exec("DROP TABLE autonomy_activity");
+      expect(setup.pragma("user_version", { simple: true })).toBe(
+        BUNDLED_SCHEMA_VERSION,
+      );
+    } finally {
+      setup.close();
+    }
+    await expect(startServer({ env, drainMs: 50 })).rejects.toThrow(
+      /no such table/i,
+    );
+  });
+
   it("fails drain closed without closing DB/listener and permits retry", async () => {
     const { env } = tempEnv();
     const started = await startServer({ env, drainMs: 50 });

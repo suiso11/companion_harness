@@ -61,8 +61,11 @@ test("type while active keeps submit disabled, stop cancels the run", async ({
   expect(await input.inputValue()).toBe("typing while generating");
   // Contextual stop: cancel posts, the run stays active until terminal.
   await page.locator("#composer-stop").click();
+  // Delivery-only window: the assertion is unchanged; loaded Windows CI
+  // once needed longer than 15s for the terminal to render (PR-run
+  // 39033565336 ground truth, same head passed the push run).
   await expect(page.locator("#composer-notice")).toContainText("停止しました", {
-    timeout: 15_000,
+    timeout: 30_000,
   });
   // Terminal cancelled: composer released, no retry offered for cancels.
   await expect(page.locator("#composer-send")).toBeEnabled();

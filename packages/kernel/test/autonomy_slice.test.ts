@@ -16,6 +16,7 @@
 // - the stop control defaults paused, survives the restart fence, and
 //   accepted (non-replayed) chat messages append user activity.
 
+// UNION of HEAD (omitted-bounds + session lookup) + origin/master (defaulted scope + history/ownership/cursors/pre-11): all non-duplicate its kept; the duplicate scope round-trip variant was unified on master's defaulted-scope contract (see MERGE note in-test).
 import { randomUUID } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -573,7 +574,7 @@ describe("autonomy slice", () => {
     }
   });
 
-  it("round-trips task scope, refuses cross-scope parents, rejects unknown fields", async () => {
+  it("round-trips task scope, defaults missing scope, refuses cross-scope parents, rejects unknown fields", async () => {
     const { handle, repo, sessionId } = await makeRepo();
     try {
       const parent = repo.createAutonomyPurpose(
@@ -615,6 +616,10 @@ describe("autonomy slice", () => {
       ).toThrow(RepositoryValidationError);
       // Absent scope falls back to the contract default (single-scope
       // clients stay working); unknown wire fields reject (closed contract).
+      // MERGE note: HEAD's variant asserted missing scope throws, but the
+      // merged contract keeps origin/master's deliberate `.default("default")`
+      // on TaskCreateRequestSchema, so the default wins and the duplicate
+      // closed-contract variant was removed.
       const defaulted = repo.createAutonomyTask(
         sessionId,
         {
@@ -638,6 +643,109 @@ describe("autonomy slice", () => {
           { key: randomUUID() },
         ),
       ).toThrow(RepositoryValidationError);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("correction idempotency distinguishes omitted bounds (preserve) from explicit null (clear)", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      const from = "2026-01-05T09:00:00+09:00";
+      const until = "2026-02-05T09:00:00+09:00";
+      const created = repo.createAutonomyPurpose(
+        sessionId,
+        purposeBody("windowed goal", { validFrom: from, validUntil: until }),
+        { key: randomUUID() },
+      );
+      expect(created.body.validFrom).toBe(from);
+      const key = randomUUID();
+      const base = {
+        purposeId: created.body.id,
+        expectedVersion: 1,
+        scope: "health",
+        statement: "windowed goal v2",
+        kind: "goal",
+        explicit: true,
+        sourceKind: "user",
+      } as const;
+      // Omit both bounds: the old window is preserved.
+      const omitted = repo.correctAutonomyPurpose(sessionId, base, { key });
+      expect(omitted.status).toBe(201);
+      expect(omitted.body.current.validFrom).toBe(from);
+      expect(omitted.body.current.validUntil).toBe(until);
+      // Same key with explicit null validUntil (clear) MUST 409 conflict,
+      // never silently replay the omit-bounds response.
+      expect(() =>
+        repo.correctAutonomyPurpose(
+          sessionId,
+          { ...base, validUntil: null },
+          { key },
+        ),
+      ).toThrow(IdempotencyConflictError);
+      // Same key with explicit null validFrom MUST also 409.
+      expect(() =>
+        repo.correctAutonomyPurpose(
+          sessionId,
+          { ...base, validFrom: null },
+          { key },
+        ),
+      ).toThrow(IdempotencyConflictError);
+      // Exact replay of the omit-bounds body on the same key replays.
+      const replay = repo.correctAutonomyPurpose(sessionId, base, { key });
+      expect(replay.replayed).toBe(true);
+      expect(replay.body.current.id).toBe(omitted.body.current.id);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("session idempotency lookup routes owned purpose/task/conflict scopes and 404s foreign sessions", async () => {
+    const { handle, repo, sessionId, otherId } = await makeRepo();
+    try {
+      const key = randomUUID();
+      const created = repo.createAutonomyPurpose(
+        sessionId,
+        purposeBody("lookup probe"),
+        { key },
+      );
+      const scope = `session:${sessionId}:purpose`;
+      const found = repo.lookupIdempotencyForSession(sessionId, key, scope);
+      expect(found.found).toBe(true);
+      // Foreign session path with the same scope+key: 404, never leaked.
+      expect(() =>
+        repo.lookupIdempotencyForSession(otherId, key, scope),
+      ).toThrow(RepositoryNotFoundError);
+      // Entity-operation scope for the owned purpose resolves.
+      const opKey = randomUUID();
+      repo.correctAutonomyPurpose(
+        sessionId,
+        {
+          purposeId: created.body.id,
+          expectedVersion: 1,
+          scope: "health",
+          statement: "lookup probe v2",
+          kind: "goal",
+          explicit: true,
+          sourceKind: "user",
+        },
+        { key: opKey },
+      );
+      const opScope = `purpose:${created.body.id}:correct`;
+      expect(
+        repo.lookupIdempotencyForSession(sessionId, opKey, opScope).found,
+      ).toBe(true);
+      expect(() =>
+        repo.lookupIdempotencyForSession(otherId, opKey, opScope),
+      ).toThrow(RepositoryNotFoundError);
+      // Global control scope is never exposed via a session lookup.
+      expect(() =>
+        repo.lookupIdempotencyForSession(
+          sessionId,
+          randomUUID(),
+          "autonomy:control",
+        ),
+      ).toThrow(RepositoryNotFoundError);
     } finally {
       closeKernelDatabase(handle);
     }

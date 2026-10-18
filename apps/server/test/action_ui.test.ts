@@ -12,6 +12,7 @@ import {
   type ActionCardInput,
   actionCardModel,
   actionEvidenceButtons,
+  composerState,
   isRetryableTurnKind,
   isStoredCitationLabel,
   parseCancelRunStatus,
@@ -172,6 +173,43 @@ describe("C22 action card model", () => {
     ]) {
       expect(parseCancelRunStatus(bad)).toBeNull();
     }
+  });
+
+  it("never offers Stop for a missing session while keeping Send disabled (P2 review)", () => {
+    // Session creation failed (or boot still resolving): no run or
+    // request exists, so Stop must stay hidden AND disabled — the old
+    // `busy includes sessionId === null` fault showed an enabled Stop
+    // precisely during the startup failure. Send stays disabled so an
+    // early submit can never be silently dropped.
+    const missing = composerState({
+      activeRunId: null,
+      sending: false,
+      sessionId: null,
+      actionBlocked: false,
+    });
+    expect(missing.sendDisabled).toBe(true);
+    expect(missing.stopVisible).toBe(false);
+    expect(missing.stopDisabled).toBe(true);
+    // Idle with a session: everything enabled, no Stop.
+    const idle = composerState({
+      activeRunId: null,
+      sending: false,
+      sessionId: "s1",
+      actionBlocked: false,
+    });
+    expect(idle.sendDisabled).toBe(false);
+    expect(idle.stopVisible).toBe(false);
+    expect(idle.stopDisabled).toBe(true);
+    // A real run still offers Stop and disables Send.
+    const running = composerState({
+      activeRunId: "r1",
+      sending: false,
+      sessionId: "s1",
+      actionBlocked: false,
+    });
+    expect(running.sendDisabled).toBe(true);
+    expect(running.stopVisible).toBe(true);
+    expect(running.stopDisabled).toBe(false);
   });
 });
 

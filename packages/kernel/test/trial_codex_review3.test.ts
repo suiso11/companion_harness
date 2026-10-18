@@ -175,20 +175,22 @@ describe("codex3/3: autonomy/trial idempotency scope lookup", () => {
   it("resolves stored autonomy/trial rows for the owning session", async () => {
     const { handle, repo, sessionId } = await makeRepo();
     try {
-      // Global stop control.
+      // Global stop control is NEVER exposed via a session lookup
+      // (merged master+feat: autonomy_slice/autonomy_http require 404 —
+      // control retry reuses the same POST key).
       const ctlKey = randomUUID();
       const ctl = repo.getAutonomyControlState();
       repo.setAutonomyControlState(
         { paused: false, expectedVersion: ctl.version },
         { key: ctlKey, now: NOW + 2 },
       );
-      expect(
+      expect(() =>
         repo.lookupIdempotencyForSession(
           sessionId,
           ctlKey,
           IDEMPOTENCY_SCOPE_AUTONOMY_CONTROL,
         ),
-      ).toMatchObject({ found: true });
+      ).toThrow(RepositoryNotFoundError);
 
       // Session-bound creates: purpose + task + trial-stage.
       const pKey = randomUUID();

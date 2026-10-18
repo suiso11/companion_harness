@@ -144,5 +144,13 @@ export const IdempotencyScopeSchema = z.union([
       },
     )
     .max(320),
+  // AV shadow explicit-request scope (`shadowRequestScope`): owned lookup
+  // per owning session (foreign sessions 404, never 403).
+  z
+    .string()
+    .regex(new RegExp(`^session:${UUID_V4_CORE}:shadow-request$`, "i"), {
+      message: "session scope id must be a UUID v4",
+    })
+    .max(320),
 ]);
 export type IdempotencyScope = z.infer<typeof IdempotencyScopeSchema>;
