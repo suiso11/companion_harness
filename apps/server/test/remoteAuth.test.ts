@@ -700,7 +700,7 @@ describe("login sessions (steps 2-4)", () => {
     }
   });
 
-  it("accepts the no-asset urlencoded login form", async () => {
+  it("accepts the no-asset urlencoded login form (303 to the app)", async () => {
     const f = await makeAuthApp();
     try {
       const res = await f.app.request("/api/remote/login", {
@@ -712,8 +712,30 @@ describe("login sessions (steps 2-4)", () => {
         },
         body: `password=${encodeURIComponent(PASSWORD)}`,
       });
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(303);
+      expect(res.headers.get("location")).toBe("/");
       expect(res.headers.get("set-cookie")).toContain("companion_remote=");
+      // The redirect target serves the app shell once authenticated.
+      const cookie = (res.headers.get("set-cookie")?.split(";")[0] ?? "").trim();
+      const page = await f.app.request("/", {
+        headers: { host: ALLOWED_HOST, cookie },
+      });
+      expect((await page.text()).toLowerCase()).toContain("/assets/client.js");
+    } finally {
+      f.close();
+    }
+  });
+
+  it("keeps the JSON login response for API clients", async () => {
+    const f = await makeAuthApp();
+    try {
+      const res = await f.app.request("/api/remote/login", {
+        method: "POST",
+        headers: loginHeaders(),
+        body: JSON.stringify({ password: PASSWORD }),
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true });
     } finally {
       f.close();
     }

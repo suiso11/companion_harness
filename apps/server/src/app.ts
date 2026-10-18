@@ -1577,6 +1577,12 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       ),
     );
     c.header("cache-control", "no-store");
+    if (mediaType === "application/x-www-form-urlencoded") {
+      // No-script browser form: redirect into the app shell so the login
+      // lands on the conversation UI. API (JSON) clients keep the JSON
+      // response below; the session cookie is already set above.
+      return c.redirect("/", 303);
+    }
     return c.json({ ok: true }, 200);
   });
 
