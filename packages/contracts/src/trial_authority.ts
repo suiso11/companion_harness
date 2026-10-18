@@ -100,7 +100,7 @@ export const TrialProposalViewSchema = z.strictObject({
   goalId: UuidSchema.nullable(),
   goalVersion: z.number().int().min(1).nullable(),
   taskVersion: z.number().int().min(1),
-  objective: z.string().min(1).max(2000),
+  objective: z.string().min(1).max(8192),
   acceptance: z.array(z.string()),
   literalPatchPaths: z.array(z.string()),
   operation: TrialOperationSchema,
@@ -323,3 +323,27 @@ export const TrialWorkerOutcomeSchema = z.strictObject({
   recordedAt: UnixMsSchema,
 });
 export type TrialWorkerOutcome = z.infer<typeof TrialWorkerOutcomeSchema>;
+
+/* ------------------------------------------------------------------ */
+/* Idempotency scopes (mirror the kernel's api_idempotency key spaces)  */
+/* ------------------------------------------------------------------ */
+
+/** Trial stage scope: one key space per owning session. */
+export function trialStageScope(sessionId: string): string {
+  return `session:${UuidSchema.parse(sessionId)}:trial-stage`;
+}
+
+/** Trial approve scope: one key space per proposal. */
+export function trialProposalScope(proposalId: string): string {
+  return `trial-proposal:${UuidSchema.parse(proposalId)}`;
+}
+
+/** Trial claim scope: one key space per execution. */
+export function trialClaimScope(executionId: string): string {
+  return `trial-claim:${UuidSchema.parse(executionId)}`;
+}
+
+/** Trial launch-permit scope: one key space per execution. */
+export function trialPermitScope(executionId: string): string {
+  return `trial-permit:${UuidSchema.parse(executionId)}`;
+}

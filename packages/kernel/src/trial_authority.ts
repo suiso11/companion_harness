@@ -784,6 +784,27 @@ export function listTrialProposals(
     .all(session, capped) as Parameters<typeof toProposalView>[0][];
   return { items: rows.map((r) => toProposalView(r)) };
 }
+/**
+ * Pure single-proposal read (never expires/mutates). Foreign or missing
+ * rows are 404: the detail route must read by id directly instead of
+ * paging the list (the default list limit would 404 tail items).
+ */
+export function readTrialProposal(
+  db: Database.Database,
+  sessionId: string,
+  proposalId: string,
+): TrialProposalView {
+  const session = requireId(sessionId, "sessionId");
+  const pid = requireId(proposalId, "proposalId");
+  const row = db.prepare("SELECT * FROM trial_proposals WHERE id=?").get(pid) as
+    | Parameters<typeof toProposalView>[0]
+    | undefined;
+  if (!row || (row as { session_id: string }).session_id !== session)
+    throw new RepositoryNotFoundError(
+      `proposal ${pid} not found in session ${session}`,
+    );
+  return toProposalView(row);
+}
 function toProposalView(r: {
   id: string;
   session_id: string;
@@ -924,133 +945,155 @@ export function approveTrialProposal(
   const profile = profileOrThrow(options.profile);
   assertWorkspaceAlias(options.workspaceAlias, "workspaceAlias");
   const scope = `trial-proposal:${pid}`;
-  return withImmediate(db, () => {
-    const prow = db
-      .prepare("SELECT * FROM trial_proposals WHERE id=?")
-      .get(pid) as Parameters<typeof toProposalView>[0] | undefined;
-    if (!prow || (prow as { session_id: string }).session_id !== session)
-      throw new RepositoryNotFoundError(
-        `proposal ${pid} not found in session ${session}`,
-      );
-    const hash = requestHash(
-      IDEMPOTENCY_OPERATIONS.approveTrial.operation,
-      IDEMPOTENCY_OPERATIONS.approveTrial.schemaVersion,
-      {
-        sessionId: session,
-        proposalId: pid,
-        workspaceAlias: options.workspaceAlias,
-        profile: JSON.parse(profileBindingKey(profile)),
-      },
-    );
-    const ex = stored(db, scope, key);
-    if (ex) {
-      if (ex.requestHash !== hash) throw new IdempotencyConflictError(scope);
-      return {
-        status: ex.status,
-        body: ex.body as {
-          executionId: string;
-          proposalId: string;
-          sessionId: string;
-          scope: string;
-          status: string;
-          cancelRequested: boolean;
-          controlGeneration: number;
-          createdAt: number;
-        },
-        replayed: true,
+  const out = withImmediate(
+    db,
+    (): {
+      status: number;
+      body: {
+        executionId: string;
+        proposalId: string;
+        sessionId: string;
+        scope: string;
+        status: string;
+        cancelRequested: boolean;
+        controlGeneration: number;
+        createdAt: number;
       };
-    }
-    // UNIQUE(proposal_id) prevents different-keys double approve.
-    const prior = db
-      .prepare("SELECT execution_id FROM trial_grants WHERE proposal_id=?")
-      .get(pid) as { execution_id: string } | undefined;
-    if (prior)
-      throw new RepositoryValidationError(
-        "proposal already granted (one grant per approval)",
+      replayed: boolean;
+    } | null => {
+      const prow = db
+        .prepare("SELECT * FROM trial_proposals WHERE id=?")
+        .get(pid) as Parameters<typeof toProposalView>[0] | undefined;
+      if (!prow || (prow as { session_id: string }).session_id !== session)
+        throw new RepositoryNotFoundError(
+          `proposal ${pid} not found in session ${session}`,
+        );
+      const hash = requestHash(
+        IDEMPOTENCY_OPERATIONS.approveTrial.operation,
+        IDEMPOTENCY_OPERATIONS.approveTrial.schemaVersion,
+        {
+          sessionId: session,
+          proposalId: pid,
+          workspaceAlias: options.workspaceAlias,
+          profile: JSON.parse(profileBindingKey(profile)),
+        },
       );
-    const view = toProposalView(prow);
-    if (view.status !== "staged")
-      throw new RepositoryValidationError(`proposal is ${view.status}`);
-    if ((parseStrictInstantMs(view.expiry) ?? NaN) <= now) {
-      db.prepare("UPDATE trial_proposals SET status='expired' WHERE id=?").run(
+      const ex = stored(db, scope, key);
+      if (ex) {
+        if (ex.requestHash !== hash) throw new IdempotencyConflictError(scope);
+        return {
+          status: ex.status,
+          body: ex.body as {
+            executionId: string;
+            proposalId: string;
+            sessionId: string;
+            scope: string;
+            status: string;
+            cancelRequested: boolean;
+            controlGeneration: number;
+            createdAt: number;
+          },
+          replayed: true,
+        };
+      }
+      // UNIQUE(proposal_id) prevents different-keys double approve.
+      const prior = db
+        .prepare("SELECT execution_id FROM trial_grants WHERE proposal_id=?")
+        .get(pid) as { execution_id: string } | undefined;
+      if (prior)
+        throw new RepositoryValidationError(
+          "proposal already granted (one grant per approval)",
+        );
+      const view = toProposalView(prow);
+      if (view.status !== "staged")
+        throw new RepositoryValidationError(`proposal is ${view.status}`);
+      if ((parseStrictInstantMs(view.expiry) ?? NaN) <= now) {
+        // Commit the expiry, then report it OUTSIDE the transaction: throwing
+        // here would roll the expiry write back (fail-open on retry).
+        db.prepare(
+          "UPDATE trial_proposals SET status='expired' WHERE id=?",
+        ).run(pid);
+        return null;
+      }
+      requireProfileForNewGrant(profile);
+      requireNoActiveFence(db, options.workspaceAlias, "approve");
+      // Human-approved profile MUST match the profile SHOWN/staged: drift => 409.
+      const staged = readStagedProfile(db, pid);
+      if (profileBindingKey(profile) !== profileBindingKey(staged))
+        throw new RepositoryValidationError(
+          "profile drift since staging: re-stage for human review",
+        );
+      const frozenAlias = readProposalAlias(db, pid);
+      if (options.workspaceAlias !== frozenAlias)
+        throw new RepositoryValidationError(
+          "workspace alias drift since staging: re-stage for human review",
+        );
+      for (const m of profile.mandatoryChecks) {
+        if (!view.requiredChecks.includes(m))
+          throw new RepositoryValidationError(
+            `request drops mandatory check ${m}`,
+          );
+      }
+      // Exact operator set: reject unadvertised optional IDs even when the
+      // mandatory subset matches (done must prove exactly the advertised set).
+      requireChecksOrThrow(view.requiredChecks, profile.mandatoryChecks);
+      const ctl = db
+        .prepare(
+          "SELECT paused, version FROM autonomy_control WHERE id='global'",
+        )
+        .get() as { paused: number; version: number };
+      if (ctl.paused === 1)
+        throw new RepositoryValidationError("autonomy paused: no new grant");
+      // Fresh authority re-check before grant (frozen alias, frozen versions
+      // must still be current: goal/task version drift => authority fails).
+      const auth = checkTrialAuthority(
+        db,
+        session,
+        view.taskId,
+        view.operation,
+        view.readOnlyMode ? [] : view.literalPatchPaths,
+        frozenAlias,
+        now,
+      );
+      if (
+        auth.goalVersion !== view.goalVersion ||
+        auth.taskVersion !== view.taskVersion
+      )
+        throw new RepositoryValidationError(
+          "goal/task version drift since staging: re-stage for human review",
+        );
+      const executionId = generateId();
+      db.prepare(
+        "INSERT INTO trial_grants (execution_id, proposal_id, session_id, scope, status, cancel_requested, control_generation, created_at, workspace_alias, approved_profile_json) VALUES (?,?,?,?, 'queued', 0, ?, ?, ?, ?)",
+      ).run(
+        executionId,
+        pid,
+        session,
+        view.scope,
+        ctl.version,
+        now,
+        frozenAlias,
+        JSON.stringify(profile),
+      );
+      db.prepare("UPDATE trial_proposals SET status='granted' WHERE id=?").run(
         pid,
       );
-      throw new RepositoryValidationError("proposal expired");
-    }
-    requireProfileForNewGrant(profile);
-    requireNoActiveFence(db, options.workspaceAlias, "approve");
-    // Human-approved profile MUST match the profile SHOWN/staged: drift => 409.
-    const staged = readStagedProfile(db, pid);
-    if (profileBindingKey(profile) !== profileBindingKey(staged))
-      throw new RepositoryValidationError(
-        "profile drift since staging: re-stage for human review",
-      );
-    const frozenAlias = readProposalAlias(db, pid);
-    if (options.workspaceAlias !== frozenAlias)
-      throw new RepositoryValidationError(
-        "workspace alias drift since staging: re-stage for human review",
-      );
-    for (const m of profile.mandatoryChecks) {
-      if (!view.requiredChecks.includes(m))
-        throw new RepositoryValidationError(
-          `request drops mandatory check ${m}`,
-        );
-    }
-    // Exact operator set: reject unadvertised optional IDs even when the
-    // mandatory subset matches (done must prove exactly the advertised set).
-    requireChecksOrThrow(view.requiredChecks, profile.mandatoryChecks);
-    const ctl = db
-      .prepare("SELECT paused, version FROM autonomy_control WHERE id='global'")
-      .get() as { paused: number; version: number };
-    if (ctl.paused === 1)
-      throw new RepositoryValidationError("autonomy paused: no new grant");
-    // Fresh authority re-check before grant (frozen alias, frozen versions
-    // must still be current: goal/task version drift => authority fails).
-    const auth = checkTrialAuthority(
-      db,
-      session,
-      view.taskId,
-      view.operation,
-      view.readOnlyMode ? [] : view.literalPatchPaths,
-      frozenAlias,
-      now,
-    );
-    if (
-      auth.goalVersion !== view.goalVersion ||
-      auth.taskVersion !== view.taskVersion
-    )
-      throw new RepositoryValidationError(
-        "goal/task version drift since staging: re-stage for human review",
-      );
-    const executionId = generateId();
-    db.prepare(
-      "INSERT INTO trial_grants (execution_id, proposal_id, session_id, scope, status, cancel_requested, control_generation, created_at, workspace_alias, approved_profile_json) VALUES (?,?,?,?, 'queued', 0, ?, ?, ?, ?)",
-    ).run(
-      executionId,
-      pid,
-      session,
-      view.scope,
-      ctl.version,
-      now,
-      frozenAlias,
-      JSON.stringify(profile),
-    );
-    db.prepare("UPDATE trial_proposals SET status='granted' WHERE id=?").run(
-      pid,
-    );
-    const body = {
-      executionId,
-      proposalId: pid,
-      sessionId: session,
-      scope: view.scope,
-      status: "queued",
-      cancelRequested: false,
-      controlGeneration: ctl.version,
-      createdAt: now,
-    };
-    store(db, scope, key, hash, 201, body, now);
-    return { status: 201, body, replayed: false };
-  });
+      const body = {
+        executionId,
+        proposalId: pid,
+        sessionId: session,
+        scope: view.scope,
+        status: "queued",
+        cancelRequested: false,
+        controlGeneration: ctl.version,
+        createdAt: now,
+      };
+      store(db, scope, key, hash, 201, body, now);
+      return { status: 201, body, replayed: false };
+    },
+  );
+  if (out === null) throw new RepositoryValidationError("proposal expired");
+  return out;
 }
 
 /** Exact immutable intent read (pure GET: never mutates). */
@@ -1506,7 +1549,9 @@ export function authorityDeadlineMs(
     if (normPaths.some((p) => p === null)) return 0;
     for (const row of rows) {
       const ms = parseStrictInstantMs(row.valid_from);
-      if (ms === undefined) continue;
+      // Malformed future-constraint timestamps fail closed (immediate
+      // deadline): ignoring them would admit runtime past a deny.
+      if (ms === undefined) return 0;
       if (ms <= now || ms >= deadline) continue;
       if (row.rule_json === null) {
         // Future unstructured HOLD in the task scope narrows; other scopes irrelevant.

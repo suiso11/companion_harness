@@ -108,5 +108,41 @@ export const IdempotencyScopeSchema = z.union([
       },
     )
     .max(320),
+  z
+    .string()
+    .regex(new RegExp(`^session:${UUID_V4_CORE}:trial-stage$`, "i"), {
+      message: "session scope id must be a UUID v4",
+    })
+    .max(320),
+  z
+    .string()
+    .regex(new RegExp(`^trial-proposal:${UUID_V4_CORE}$`, "i"), {
+      message: "proposal scope id must be a UUID v4",
+    })
+    .max(320),
+  z
+    .string()
+    .regex(new RegExp(`^trial-claim:${UUID_V4_CORE}$`, "i"), {
+      message: "execution scope id must be a UUID v4",
+    })
+    .max(320),
+  z
+    .string()
+    .regex(new RegExp(`^trial-permit:${UUID_V4_CORE}$`, "i"), {
+      message: "execution scope id must be a UUID v4",
+    })
+    .max(320),
+  z
+    .string()
+    .regex(
+      new RegExp(
+        `^session:${UUID_V4_CORE}:conflict:${UUID_V4_CORE}:${UUID_V4_CORE}$`,
+        "i",
+      ),
+      {
+        message: "conflict scope ids must be UUID v4",
+      },
+    )
+    .max(320),
 ]);
 export type IdempotencyScope = z.infer<typeof IdempotencyScopeSchema>;

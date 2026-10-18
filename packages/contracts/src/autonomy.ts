@@ -60,7 +60,8 @@ export const TaskKindSchema = z.enum(["chat", "wish", "problem", "task"]);
 export type TaskKind = z.infer<typeof TaskKindSchema>;
 
 /** Closed task-speaker vocabulary (who raised the task). */
-export const TaskSpeakerSchema = z.enum(["user", "self", "external"]);export type TaskSpeaker = z.infer<typeof TaskSpeakerSchema>;
+export const TaskSpeakerSchema = z.enum(["user", "self", "external"]);
+export type TaskSpeaker = z.infer<typeof TaskSpeakerSchema>;
 
 /** Closed task lifecycle (terminal: completed / cancelled, never revived). */
 export const TaskStatusSchema = z.enum([
@@ -181,6 +182,19 @@ export type TaskOp = z.infer<typeof TaskOpSchema>;
 /** Task-transition scope: one key space per task + operation. */
 export function taskOpScope(taskId: string, op: TaskOp): string {
   return `task:${UuidSchema.parse(taskId)}:${op}`;
+}
+
+/** Purpose-conflict scope: one key space per owning session + id pair. */
+export function purposeConflictScope(
+  sessionId: string,
+  purposeAId: string,
+  purposeBId: string,
+): string {
+  const session = UuidSchema.parse(sessionId);
+  const a = UuidSchema.parse(purposeAId);
+  const b = UuidSchema.parse(purposeBId);
+  const [first, second] = a < b ? [a, b] : [b, a];
+  return `session:${session}:conflict:${first}:${second}`;
 }
 
 /* ------------------------------------------------------------------ */

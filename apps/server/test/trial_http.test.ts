@@ -354,6 +354,57 @@ describe("trial HTTP proposal lifecycle", () => {
     }
   });
 
+  it("reads a proposal beyond the default list window by id", async () => {
+    const fixture = await makeApp(true);
+    try {
+      const { app, repo } = fixture;
+      const created = await post(app, "/api/sessions", {}, randomUUID());
+      expect(created.status).toBe(201);
+      const sessionId = (created.body as { sessionId: string }).sessionId;
+      const { taskId } = stageAuthority(repo, sessionId, "b1x");
+      const base = `/api/sessions/${sessionId}/trials`;
+      const frozenProfile = {
+        available: true,
+        enabled: true,
+        mandatoryChecks: ["lint"],
+        configFingerprint: FP,
+        sourceRevision: REV,
+        currentModel: "test-model",
+        disclosedWholeRepoRead: true,
+        timeoutMs: 60000,
+        maxOutputBytes: 1000000,
+      };
+      const t0 = Date.now();
+      const first = repo.stageTrial(sessionId, stageBody(taskId), {
+        key: randomUUID(),
+        now: t0,
+        profile: frozenProfile,
+        workspaceAlias: "ws",
+      });
+      const firstId = first.body.id;
+      for (let i = 0; i < 54; i++) {
+        repo.stageTrial(sessionId, stageBody(taskId), {
+          key: randomUUID(),
+          now: t0 + 1 + i,
+          profile: frozenProfile,
+          workspaceAlias: "ws",
+        });
+      }
+      const listed = await get(app, base);
+      expect(listed.status).toBe(200);
+      expect(((listed.body as { items: unknown[] }).items ?? []).length).toBe(
+        50,
+      );
+      // The oldest proposal falls outside the default page but the detail
+      // route reads by id directly (no list-limit 404).
+      const single = await get(app, `${base}/${firstId}`);
+      expect(single.status).toBe(200);
+      expect((single.body as { id: string }).id).toBe(firstId);
+    } finally {
+      fixture.close();
+    }
+  });
+
   it("rejects profile/alias overrides in the body", async () => {
     const fixture = await makeApp(true);
     try {

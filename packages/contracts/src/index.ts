@@ -184,6 +184,7 @@ export {
   PurposeStatusSchema,
   PurposeTransitionRequestSchema,
   PurposeViewSchema,
+  purposeConflictScope,
   purposeCreateScope,
   purposeOpScope,
   ResumeEvidenceKindSchema,
@@ -707,7 +708,11 @@ export {
   TrialWorkerBootSchema,
   TrialWorkerOutcomeSchema,
   TrustedRuntimeObservationSchema,
+  trialClaimScope,
   trialOperationIsReadOnly,
+  trialPermitScope,
+  trialProposalScope,
+  trialStageScope,
 } from "./trial_authority.js";
 export type {
   ActionApprovalTurnInputV1,

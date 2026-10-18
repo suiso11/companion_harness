@@ -2907,16 +2907,14 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       return trialsDisabled(c, false);
     }
     try {
-      const listed = repo.listTrials(session.id, {});
-      const found = listed.items.find((item) => item.id === proposal.id);
-      if (found === undefined) {
-        return apiError(c, 404, "not_found", "resource not found");
-      }
+      // Read by id directly: paging the list would 404 proposals that fall
+      // outside the default list limit (pure read, never expires/mutates).
+      const found = repo.readTrial(session.id, proposal.id);
       const outcome = repo.readTrialWorkerOutcomeByProposal(
         session.id,
         proposal.id,
       );
-      return c.json({ ...TrialProposalViewSchema.parse(found), outcome }, 200);
+      return c.json({ ...found, outcome }, 200);
     } catch (error) {
       return mapDomainError(c, error);
     }

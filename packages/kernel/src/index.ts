@@ -467,6 +467,7 @@ export {
   pathIntersectsDenied,
   readLaunchPermit,
   readTrialIntent,
+  readTrialProposal,
   readWorkerOutcome,
   readWorkerOutcomeByProposal,
   reconcileTrialExpiry,

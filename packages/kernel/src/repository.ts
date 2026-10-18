@@ -32,6 +32,7 @@ import {
   HistoryQuerySchema,
   type HistoryResponse,
   HistoryResponseSchema,
+  IDEMPOTENCY_SCOPE_AUTONOMY_CONTROL,
   IDEMPOTENCY_SCOPE_SESSIONS_CREATE,
   IdempotencyLookupQuerySchema,
   type IdempotencyLookupResponse,
@@ -88,6 +89,7 @@ import {
   parseRunResult,
   parseTurnInput,
   proposalApproveScope,
+  purposeCreateScope,
   type ReferenceContextGetResponse,
   ReferenceContextGetResponseSchema,
   ReferenceContextPutRequestSchema,
@@ -121,6 +123,8 @@ import {
   type TrialProposalView,
   TrialProposalViewSchema,
   TrialStageRequestSchema,
+  taskCreateScope,
+  trialStageScope,
 } from "@companion/contracts";
 import type Database from "better-sqlite3";
 import {
@@ -135,6 +139,8 @@ import {
 import {
   type AutonomyKeyOptions,
   applyAutonomyRestartFence,
+  assertOwnedPurpose,
+  assertOwnedTask,
   achievePurpose as autonomyAchievePurpose,
   cancelTask as autonomyCancelTask,
   completeTask as autonomyCompleteTask,
@@ -194,6 +200,7 @@ import {
   listTrialProposals,
   readLaunchPermit,
   readTrialIntent,
+  readTrialProposal,
   readWorkerOutcome,
   readWorkerOutcomeByProposal,
   reconcileTrialExpiry,
@@ -982,6 +989,38 @@ export function createKernelRepository(
       );
     }
     return row;
+  }
+
+  function requireOwnedTrialProposal(
+    sessionId: string,
+    proposalId: string,
+  ): void {
+    const session = requireId(sessionId, "sessionId");
+    const proposal = requireId(proposalId, "proposalId");
+    const row = db
+      .prepare("SELECT session_id FROM trial_proposals WHERE id = ?")
+      .get(proposal) as { session_id: string } | undefined;
+    if (row === undefined || row.session_id !== session) {
+      throw new RepositoryNotFoundError(
+        `proposal ${proposal} not found in session ${session}`,
+      );
+    }
+  }
+
+  function requireOwnedTrialGrant(
+    sessionId: string,
+    executionId: string,
+  ): void {
+    const session = requireId(sessionId, "sessionId");
+    const execution = requireId(executionId, "executionId");
+    const row = db
+      .prepare("SELECT session_id FROM trial_grants WHERE execution_id = ?")
+      .get(execution) as { session_id: string } | undefined;
+    if (row === undefined || row.session_id !== session) {
+      throw new RepositoryNotFoundError(
+        `grant ${execution} not found in session ${session}`,
+      );
+    }
   }
 
   function requireOwnedProposal(
@@ -3108,6 +3147,98 @@ export function createKernelRepository(
       requireOwnedProposal(
         session,
         assertUuidV4(proposalMatch[1], "proposalId"),
+      );
+      return lookupIdempotency(validScope, validKey);
+    }
+    // Global stop-control scope: the session must exist, then read the
+    // stored control write (same ownership-first pattern as above).
+    if (validScope === IDEMPOTENCY_SCOPE_AUTONOMY_CONTROL) {
+      if (readSession(db, session) === null) {
+        throw new RepositoryNotFoundError(`session ${session} not found`);
+      }
+      return lookupIdempotency(validScope, validKey);
+    }
+    // Session-bound create scopes (purpose / task / trial-stage): the
+    // embedded session must be this session, which must exist.
+    if (
+      validScope === purposeCreateScope(session) ||
+      validScope === taskCreateScope(session) ||
+      validScope === trialStageScope(session)
+    ) {
+      if (readSession(db, session) === null) {
+        throw new RepositoryNotFoundError(`session ${session} not found`);
+      }
+      return lookupIdempotency(validScope, validKey);
+    }
+    // Conflict scope: embedded session must be this session and both
+    // purposes must be session-owned (foreign ids are 404, never 403).
+    const conflictMatch = /^session:([^:]+):conflict:([^:]+):([^:]+)$/.exec(
+      validScope,
+    );
+    if (
+      conflictMatch?.[1] !== undefined &&
+      conflictMatch[2] !== undefined &&
+      conflictMatch[3] !== undefined
+    ) {
+      if (conflictMatch[1] !== session) {
+        throw new RepositoryNotFoundError(
+          `scope ${validScope} not found in session ${session}`,
+        );
+      }
+      assertOwnedPurpose(
+        db,
+        session,
+        assertUuidV4(conflictMatch[2], "purposeAId"),
+      );
+      assertOwnedPurpose(
+        db,
+        session,
+        assertUuidV4(conflictMatch[3], "purposeBId"),
+      );
+      return lookupIdempotency(validScope, validKey);
+    }
+    // Purpose/task mutation scopes: the referenced row must be
+    // session-owned (foreign ids are 404, never 403).
+    const purposeOpMatch = /^purpose:([^:]+):(correct|revoke|achieve)$/.exec(
+      validScope,
+    );
+    if (purposeOpMatch?.[1] !== undefined) {
+      assertOwnedPurpose(
+        db,
+        session,
+        assertUuidV4(purposeOpMatch[1], "purposeId"),
+      );
+      return lookupIdempotency(validScope, validKey);
+    }
+    const taskOpMatch =
+      /^task:([^:]+):(start|hold|resume|complete|cancel)$/.exec(validScope);
+    if (taskOpMatch?.[1] !== undefined) {
+      assertOwnedTask(db, session, assertUuidV4(taskOpMatch[1], "taskId"));
+      return lookupIdempotency(validScope, validKey);
+    }
+    // Trial approve/claim/permit scopes: the referenced proposal/grant must
+    // be session-owned (foreign ids are 404, never 403).
+    const trialProposalMatch = /^trial-proposal:([^:]+)$/.exec(validScope);
+    if (trialProposalMatch?.[1] !== undefined) {
+      requireOwnedTrialProposal(
+        session,
+        assertUuidV4(trialProposalMatch[1], "proposalId"),
+      );
+      return lookupIdempotency(validScope, validKey);
+    }
+    const trialClaimMatch = /^trial-claim:([^:]+)$/.exec(validScope);
+    if (trialClaimMatch?.[1] !== undefined) {
+      requireOwnedTrialGrant(
+        session,
+        assertUuidV4(trialClaimMatch[1], "executionId"),
+      );
+      return lookupIdempotency(validScope, validKey);
+    }
+    const trialPermitMatch = /^trial-permit:([^:]+)$/.exec(validScope);
+    if (trialPermitMatch?.[1] !== undefined) {
+      requireOwnedTrialGrant(
+        session,
+        assertUuidV4(trialPermitMatch[1], "executionId"),
       );
       return lookupIdempotency(validScope, validKey);
     }
@@ -5265,6 +5396,16 @@ export function createKernelRepository(
     };
   }
 
+  function readTrial(sessionId: string, proposalId: string): TrialProposalView {
+    return parseOrValidation(
+      () =>
+        TrialProposalViewSchema.parse(
+          readTrialProposal(db, sessionId, proposalId),
+        ),
+      "trial proposal",
+    );
+  }
+
   function approveTrial(
     sessionId: string,
     proposalId: string,
@@ -5577,6 +5718,7 @@ export function createKernelRepository(
     applyAutonomyRestartFenceNow,
     stageTrial,
     listTrials,
+    readTrial,
     approveTrial,
     claimTrial,
     expireTrial,
