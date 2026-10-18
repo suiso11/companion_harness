@@ -30,6 +30,7 @@ import {
   MEMORY_RECALL_RUN_MARKER,
   type MemoryService,
   parseExtractionOutput,
+  parseRecallData,
   stableMemoryJobKey,
 } from "../src/memory_service.js";
 
@@ -1216,5 +1217,51 @@ describe("baseline regression contracts", () => {
     } finally {
       f.close();
     }
+  });
+});
+
+describe("parseRecallData provenance fields", () => {
+  const base = { recallId: "r-1", items: [] as unknown[] };
+
+  it("carries kind and revision when present and valid", () => {
+    const parsed = parseRecallData({
+      recallId: "r-1",
+      items: [
+        { id: "rec-1", snippet: "s", kind: "user_fact", revision: 3 },
+        { id: "rec-2", snippet: "t", kind: "model_inference", revision: 1 },
+        { id: "rec-3", snippet: "u", kind: "summary", revision: 12 },
+      ],
+    });
+    expect(parsed).not.toBeNull();
+    expect(parsed?.items).toEqual([
+      { id: "rec-1", snippet: "s", kind: "user_fact", revision: 3 },
+      { id: "rec-2", snippet: "t", kind: "model_inference", revision: 1 },
+      { id: "rec-3", snippet: "u", kind: "summary", revision: 12 },
+    ]);
+  });
+
+  it("drops unknown kinds and invalid revisions (absent, not fact)", () => {
+    const parsed = parseRecallData({
+      recallId: "r-1",
+      items: [
+        { id: "rec-1", snippet: "s" },
+        { id: "rec-2", snippet: "t", kind: "unknown_kind", revision: 0 },
+        { id: "rec-3", snippet: "u", kind: 42, revision: -1 },
+        { id: "rec-4", snippet: "v", kind: "user_fact", revision: 1.5 },
+      ],
+    });
+    expect(parsed).not.toBeNull();
+    expect(parsed?.items).toEqual([
+      { id: "rec-1", snippet: "s" },
+      { id: "rec-2", snippet: "t" },
+      { id: "rec-3", snippet: "u" },
+      { id: "rec-4", snippet: "v", kind: "user_fact" },
+    ]);
+  });
+
+  it("still rejects a null or shape-drifted payload", () => {
+    expect(parseRecallData(null)).toBeNull();
+    expect(parseRecallData({ ...base, items: "nope" })).toBeNull();
+    expect(parseRecallData({ items: [] })).toBeNull();
   });
 });

@@ -80,6 +80,29 @@ export const MEMORY_RECALL_QUERY_MAX_CP = 500;
 export const MEMORY_PROVENANCE_SOURCE = "companion:conversation";
 /** Fixed audit runId marker for pre-answer recall calls (never a real run). */
 export const MEMORY_RECALL_RUN_MARKER = "companion-recall";
+
+/**
+ * Provenance kind on recalled items (F-I01-04). Additive remind field: the
+ * closed set is the same extraction kinds; any other value is tolerated as
+ * an unknown kind (never presented as fact, F-I01-01/F-I01-04).
+ */
+export type MemoryRecallItemKind = "user_fact" | "model_inference" | "summary";
+
+/**
+ * One recalled item passed through the recall hook to the agent (kernel
+ * `AgentMemorySnippet` shape with additive provenance fields).
+ */
+export interface MemoryRecallItem {
+  readonly recordId: string;
+  /** Remind recall id binding this exposure (server-side only). */
+  readonly recallId: string;
+  readonly snippet: string;
+  /** Provenance kind, or undefined when absent or an unknown value. */
+  readonly kind?: MemoryRecallItemKind;
+  /** Positive safe-integer revision, or undefined when absent/invalid. */
+  readonly revision?: number;
+}
+
 /**
  * Explicit management bounds (closed, deterministic).
  *
@@ -153,9 +176,7 @@ export interface MemoryService {
     recall(
       query: string,
       signal: AbortSignal,
-    ): Promise<
-      ReadonlyArray<{ recordId: string; recallId: string; snippet: string }>
-    >;
+    ): Promise<ReadonlyArray<MemoryRecallItem>>;
   };
   /** Foreground activity: preempts an in-flight idle drain. */
   notifyForeground(): void;
@@ -451,10 +472,29 @@ export function parseExtractionOutput(text: string): ExtractedMemory[] {
   return out;
 }
 
-/** Validate recall response data: closed shape, bounded items. */
-function parseRecallData(data: Record<string, unknown> | null): {
+/**
+ * Validate recall response data: closed shape, bounded items. Exported for
+ * contract tests (F-I01-04): callers always go through the recall hook.
+ */
+export interface ParsedRecallItem {
+  id: string;
+  snippet: string;
+  /** Provenance kind, or undefined when absent or an unknown value. */
+  kind?: MemoryRecallItemKind;
+  /** Positive safe-integer revision, or undefined when absent/invalid. */
+  revision?: number;
+}
+
+/**
+ * Validate recall response data: closed shape, bounded items. Additive
+ * item fields (`kind`, `revision` from remind) are read tolerantly:
+ * absent fields are allowed, a kind outside the closed set becomes an
+ * unknown kind, and a non-positive-safe-integer revision is treated as
+ * absent (F-I01-01, F-I01-04). Everything else keeps the strict shape.
+ */
+export function parseRecallData(data: Record<string, unknown> | null): {
   recallId: string;
-  items: Array<{ id: string; snippet: string }>;
+  items: ParsedRecallItem[];
 } | null {
   if (data === null || typeof data.recallId !== "string") {
     return null;
@@ -471,12 +511,17 @@ function parseRecallData(data: Record<string, unknown> | null): {
   if (!Array.isArray(rawItems)) {
     return null;
   }
-  const items: Array<{ id: string; snippet: string }> = [];
+  const items: ParsedRecallItem[] = [];
   for (const item of rawItems.slice(0, 8)) {
     if (!isRecord(item)) {
       continue;
     }
-    const { id, snippet } = item as { id?: unknown; snippet?: unknown };
+    const { id, snippet, kind, revision } = item as {
+      id?: unknown;
+      snippet?: unknown;
+      kind?: unknown;
+      revision?: unknown;
+    };
     if (
       typeof id !== "string" ||
       id.length < 1 ||
@@ -487,7 +532,26 @@ function parseRecallData(data: Record<string, unknown> | null): {
     ) {
       continue;
     }
-    items.push({ id, snippet });
+    // Additive provenance fields (F-I01-04): only the closed kind set is
+    // accepted; any other value (including a missing field) stays unknown
+    // and is never presented as a user fact. Revision must be a positive
+    // safe integer; absent/invalid means unknown revision.
+    const itemKind: MemoryRecallItemKind | undefined =
+      typeof kind === "string" && EXTRACT_KINDS.has(kind)
+        ? (kind as MemoryRecallItemKind)
+        : undefined;
+    const itemRevision: number | undefined =
+      typeof revision === "number" &&
+      Number.isSafeInteger(revision) &&
+      revision > 0
+        ? revision
+        : undefined;
+    items.push({
+      id,
+      snippet,
+      ...(itemKind !== undefined ? { kind: itemKind } : {}),
+      ...(itemRevision !== undefined ? { revision: itemRevision } : {}),
+    });
   }
   return { recallId, items };
 }
@@ -1685,9 +1749,7 @@ export function createMemoryService(
     recall: async (
       query: string,
       signal: AbortSignal,
-    ): Promise<
-      ReadonlyArray<{ recordId: string; recallId: string; snippet: string }>
-    > => {
+    ): Promise<ReadonlyArray<MemoryRecallItem>> => {
       if (!started || stopped || signal.aborted) {
         return [];
       }
@@ -1709,8 +1771,19 @@ export function createMemoryService(
           undefined,
           { signal },
         );
-      } catch {
-        // Fail-open: every recall failure yields a memoryless response.
+      } catch (error) {
+        // Fail-open: every recall failure yields a memoryless response
+        // (F-I01-07). A protocol-version mismatch (F-I01-01: version is
+        // in the envelope, breaking evolution = major) is treated like
+        // memory being disabled: the companion continues memoryless. It
+        // logs once per occurrence as a fixed metadata-only code — never
+        // the version value, snippets, or any memory content.
+        if (
+          error instanceof MemoryCliError &&
+          error.cliCode === "cli_version_mismatch"
+        ) {
+          log("warn", "memory.version_mismatch");
+        }
         return [];
       }
       if (!envelope.ok) {
@@ -1724,6 +1797,8 @@ export function createMemoryService(
         recordId: item.id,
         recallId: parsed.recallId,
         snippet: item.snippet,
+        ...(item.kind !== undefined ? { kind: item.kind } : {}),
+        ...(item.revision !== undefined ? { revision: item.revision } : {}),
       }));
     },
   };

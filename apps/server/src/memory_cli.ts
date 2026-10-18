@@ -22,13 +22,24 @@
 //
 // Failures throw `MemoryCliError` with a fixed `cliCode` only
 // (`cli_unavailable`, `cli_timeout`, `cli_malformed`, `cli_limit`,
-// `cli_bad_request`). No paths, no scopes, no request/response bodies, and
+// `cli_version_mismatch`, `cli_bad_request`). No paths, no scopes, no
+// request/response bodies, and
 // no raw error text ever escape in the error or in logs (this module logs
 // nothing at all; the service logs fixed codes plus numeric sizes only).
 // Companion never opens the remind DB directly: this client is the only
 // interface.
 
 import { spawn } from "node:child_process";
+
+/**
+ * Companion-side memory protocol version (F-I01-01). Sent with every
+ * request and required on every response envelope. Additive evolution
+ * keeps this version; a mismatch means breaking (major) changes, which
+ * the recall path treats like memory being disabled (F-I01-07).
+ */
+export const MEMORY_PROTOCOL_VERSION = 1;
+/** Fixed remind BAD_REQUEST text for an unsupported numeric version. */
+const UNSUPPORTED_PROTOCOL_VERSION_MESSAGE = "unsupported protocol version";
 
 /** Max raw stdin request size in UTF-8 bytes (remind protocol fixed cap). */
 export const MEMORY_CLI_RAW_MAX_BYTES = 32768;
@@ -77,6 +88,7 @@ export type MemoryCliFailureCode =
   | "cli_unavailable"
   | "cli_timeout"
   | "cli_malformed"
+  | "cli_version_mismatch"
   | "cli_limit"
   | "cli_bad_request";
 
@@ -214,8 +226,25 @@ export function parseMemoryCliStdout(
       throw fail("cli_malformed");
     }
   }
+  // Protocol-version mismatch is a distinct failure (F-I01-01 additive
+  // compatibility: breaking changes bump the version). A numeric response
+  // version other than the one this client speaks is a mismatch, never
+  // generic malformed shape; a non-numeric/missing v stays cli_malformed.
+  if (typeof parsed.v === "number" && parsed.v !== MEMORY_PROTOCOL_VERSION) {
+    throw fail("cli_version_mismatch");
+  }
+  // A well-formed rejection naming the fixed unsupported-version message is
+  // the version-mismatch answer (fixed string only; the value never
+  // escapes this module).
   if (
-    parsed.v !== 1 ||
+    parsed.ok === false &&
+    parsed.code === "BAD_REQUEST" &&
+    parsed.message === UNSUPPORTED_PROTOCOL_VERSION_MESSAGE
+  ) {
+    throw fail("cli_version_mismatch");
+  }
+  if (
+    parsed.v !== MEMORY_PROTOCOL_VERSION ||
     typeof parsed.ok !== "boolean" ||
     typeof parsed.code !== "string" ||
     !CLI_ENVELOPE_CODES.has(parsed.code) ||
@@ -257,7 +286,11 @@ export async function callMemoryCli(
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1) {
     throw fail("cli_unavailable");
   }
-  const request: Record<string, unknown> = { v: 1, op, params };
+  const request: Record<string, unknown> = {
+    v: MEMORY_PROTOCOL_VERSION,
+    op,
+    params,
+  };
   if (idempotencyKey !== undefined) {
     request.idempotencyKey = idempotencyKey;
   }

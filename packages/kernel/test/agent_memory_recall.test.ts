@@ -122,7 +122,7 @@ describe("agent memory recall projection", () => {
     );
     const block = formatMemoryPromptBlock(snippets);
     expect(block.length).toBeLessThanOrEqual(8192);
-    expect(block).toContain(`- m${kept.length}:`);
+    expect(block).toContain(`- m${kept.length} [`);
     expect(block).not.toContain(`- m${kept.length + 1}:`);
     expect(block).toMatch(
       new RegExp(
@@ -325,5 +325,44 @@ describe("agent memory recall projection", () => {
     } finally {
       closeKernelDatabase(handle);
     }
+  });
+});
+
+describe("memory block provenance labels", () => {
+  it("labels user_fact as a fact and everything else as inference", () => {
+    const snippets = [
+      {
+        recordId: "r1",
+        recallId: "k1",
+        snippet: "User likes tea.",
+        kind: "user_fact" as const,
+        revision: 2,
+      },
+      {
+        recordId: "r2",
+        recallId: "k2",
+        snippet: "Model guessed coffee.",
+        kind: "model_inference" as const,
+      },
+      { recordId: "r3", recallId: "k3", snippet: "Unknown provenance." },
+      {
+        recordId: "r4",
+        recallId: "k4",
+        snippet: "Recap.",
+        kind: "summary" as const,
+      },
+    ];
+    const block = formatMemoryPromptBlock(snippets);
+    expect(block).toContain("- m1 [user_fact]: User likes tea.");
+    expect(block).toContain(
+      "- m2 [model_inference — model inference, not a user fact]: Model guessed coffee.",
+    );
+    expect(block).toContain(
+      "- m3 [inference — unverified provenance, not a user fact]: Unknown provenance.",
+    );
+    expect(block).toContain(
+      "- m4 [summary — distilled inference, not a user fact]: Recap.",
+    );
+    expect(block).toContain("only user_fact items are user-stated facts");
   });
 });
