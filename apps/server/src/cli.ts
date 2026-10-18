@@ -196,8 +196,7 @@ export async function readDefaultSecretPair(
   input: NodeJS.ReadableStream = process.stdin,
   output: NodeJS.WritableStream = process.stdout,
 ): Promise<[string, string]> {
-  const isTty =
-    (input as unknown as { isTTY?: unknown }).isTTY === true;
+  const isTty = (input as unknown as { isTTY?: unknown }).isTTY === true;
   if (!isTty) {
     const text = await readAllStdin(input);
     const lines = text
@@ -218,9 +217,7 @@ export async function readDefaultSecretPair(
     if (
       prompts.some(
         (prompt) =>
-          text === prompt ||
-          text === `\r${prompt}` ||
-          text.startsWith(prompt),
+          text === prompt || text === `\r${prompt}` || text.startsWith(prompt),
       )
     ) {
       output.write(text);
@@ -273,10 +270,7 @@ function readAllStdin(input: NodeJS.ReadableStream): Promise<string> {
  * rejected BEFORE any write, so a path typo can never destroy
  * application data. Fixed safe message only (no paths leak).
  */
-function assertPasswordTargetSafe(
-  passwordFile: string,
-  dbPath: string,
-): void {
+function assertPasswordTargetSafe(passwordFile: string, dbPath: string): void {
   if (resolve(passwordFile) === resolve(dbPath)) {
     throw cliError("unsafe_target", ERR_SET_PASSWORD_FAILED);
   }

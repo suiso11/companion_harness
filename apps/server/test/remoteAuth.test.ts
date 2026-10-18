@@ -35,7 +35,7 @@ import {
   type RemotePasswordVerifier,
 } from "../src/app.js";
 import { type StartedServer, startServer } from "../src/bootstrap.js";
-import { runSetPasswordCli, readDefaultSecretPair } from "../src/cli.js";
+import { readDefaultSecretPair, runSetPasswordCli } from "../src/cli.js";
 import {
   DEFAULT_REMOTE_ABSOLUTE_TIMEOUT_MS,
   DEFAULT_REMOTE_IDLE_TIMEOUT_MS,
@@ -735,7 +735,9 @@ describe("login sessions (steps 2-4)", () => {
       expect(res.headers.get("location")).toBe("/");
       expect(res.headers.get("set-cookie")).toContain("companion_remote=");
       // The redirect target serves the app shell once authenticated.
-      const cookie = (res.headers.get("set-cookie")?.split(";")[0] ?? "").trim();
+      const cookie = (
+        res.headers.get("set-cookie")?.split(";")[0] ?? ""
+      ).trim();
       const page = await f.app.request("/", {
         headers: { host: ALLOWED_HOST, cookie },
       });
