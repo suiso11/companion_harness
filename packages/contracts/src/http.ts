@@ -12,7 +12,11 @@ import {
   UuidSchema,
 } from "./ids.js";
 import { RunResultSchema } from "./run_result.js";
-import { ActiveStatusSchema, RunStatusSchema } from "./run_status.js";
+import {
+  ActiveStatusSchema,
+  RunMemoryStatusSchema,
+  RunStatusSchema,
+} from "./run_status.js";
 import { MAX_USER_TEXT_LENGTH } from "./turn_input.js";
 
 /* ------------------------------------------------------------------ */
@@ -319,6 +323,10 @@ export const RunStatusResponseSchema = z.strictObject({
     id: UuidSchema,
     status: RunStatusSchema,
     eventSeq: z.number().int().min(0),
+    // Additive (I01-06): per-run memory status (metadata only, closed set).
+    // Absent/null when the run never reached the recall boundary or the
+    // row predates the column; the frozen core fields stay unchanged.
+    memoryStatus: RunMemoryStatusSchema.nullable().optional(),
   }),
 });
 export type RunStatusResponse = z.infer<typeof RunStatusResponseSchema>;

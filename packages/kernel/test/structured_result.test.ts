@@ -241,7 +241,11 @@ describe("structured result persistence (V2 RunResult)", () => {
         .prepare("SELECT sql FROM sqlite_master WHERE name = 'runs'")
         .get() as { sql: string };
       expect(ddl.sql).toContain("json_valid");
-      expect(ddl.sql).not.toContain("version");
+      // Guard intent: no result-version discriminator column on runs. (The
+      // I01-06 memory_status CHECK legitimately mentions the closed status
+      // literal `version_mismatch`; a `version TEXT/INTEGER` column would
+      // still be rejected here.)
+      expect(ddl.sql).not.toMatch(/version\s+(?:TEXT|INTEGER)/);
     } finally {
       const { closeKernelDatabase } = await import("../src/index.js");
       closeKernelDatabase(handle);

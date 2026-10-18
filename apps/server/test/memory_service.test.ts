@@ -576,6 +576,73 @@ describe("recall hook", () => {
       f.close();
     }
   });
+
+  it("reports fixed failure codes to the optional kernel status sink (I01-06)", async () => {
+    const f = await openRepo();
+    try {
+      let mode: "timeout" | "version" | "malformed" | "ok" = "timeout";
+      const cliCall: CliCall = async () => {
+        if (mode === "timeout") {
+          throw new MemoryCliError("cli_timeout");
+        }
+        if (mode === "version") {
+          throw new MemoryCliError("cli_version_mismatch");
+        }
+        if (mode === "malformed") {
+          return okEnvelope({ recallId: "", items: "nope" });
+        }
+        return okEnvelope({ recallId: "recall-ok", items: [] });
+      };
+      const service = makeService(f.repo, cliCall);
+      service.start();
+      const codes: string[] = [];
+      const sink = (code: string) => {
+        codes.push(code);
+      };
+      expect(
+        await service.recallHook.recall(
+          "q",
+          new AbortController().signal,
+          sink,
+        ),
+      ).toEqual([]);
+      expect(codes).toEqual(["cli_timeout"]);
+      mode = "version";
+      expect(
+        await service.recallHook.recall(
+          "q",
+          new AbortController().signal,
+          sink,
+        ),
+      ).toEqual([]);
+      expect(codes).toEqual(["cli_timeout", "cli_version_mismatch"]);
+      mode = "malformed";
+      expect(
+        await service.recallHook.recall(
+          "q",
+          new AbortController().signal,
+          sink,
+        ),
+      ).toEqual([]);
+      expect(codes).toEqual([
+        "cli_timeout",
+        "cli_version_mismatch",
+        "cli_malformed",
+      ]);
+      // Success reports nothing to the sink.
+      mode = "ok";
+      expect(
+        await service.recallHook.recall(
+          "q",
+          new AbortController().signal,
+          sink,
+        ),
+      ).toEqual([]);
+      expect(codes).toHaveLength(3);
+    } finally {
+      f.close();
+    }
+  });
 });
 
 describe("completion cultivation and cite-gated feedback", () => {

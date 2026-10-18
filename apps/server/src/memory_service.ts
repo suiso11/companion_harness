@@ -62,6 +62,7 @@ import {
   type MemoryCliAddress,
   type MemoryCliEnvelope,
   MemoryCliError,
+  type MemoryCliFailureCode,
 } from "./memory_cli.js";
 
 /** Long-budget deadline for one idle distill CLI call (bounded, abortable). */
@@ -176,6 +177,12 @@ export interface MemoryService {
     recall(
       query: string,
       signal: AbortSignal,
+      /**
+       * Additive (I01-06): optional kernel status sink. When provided, the
+       * hook reports the fixed CLI failure code (metadata only, closed set)
+       * before resolving memoryless; success reports nothing.
+       */
+      onFailure?: (code: MemoryCliFailureCode) => void,
     ): Promise<ReadonlyArray<MemoryRecallItem>>;
   };
   /** Foreground activity: preempts an in-flight idle drain. */
@@ -1749,8 +1756,16 @@ export function createMemoryService(
     recall: async (
       query: string,
       signal: AbortSignal,
+      onFailure?: (code: MemoryCliFailureCode) => void,
     ): Promise<ReadonlyArray<MemoryRecallItem>> => {
       if (!started || stopped || signal.aborted) {
+        // I01-06 (additive): report the fixed unavailable code so the run's
+        // memory status stays visible; the fail-open empty result is
+        // unchanged. A post-abort report is skipped: the kernel derives
+        // `unavailable` from the aborted signal itself.
+        if (!signal.aborted) {
+          onFailure?.("cli_unavailable");
+        }
         return [];
       }
       const trimmed = sliceCodePoints(query, MEMORY_RECALL_QUERY_MAX_CP);
@@ -1778,19 +1793,24 @@ export function createMemoryService(
         // memory being disabled: the companion continues memoryless. It
         // logs once per occurrence as a fixed metadata-only code — never
         // the version value, snippets, or any memory content.
-        if (
-          error instanceof MemoryCliError &&
-          error.cliCode === "cli_version_mismatch"
-        ) {
+        // I01-06 (additive): the fixed failure code rides to the kernel's
+        // optional status sink so the run can surface `timeout`,
+        // `version_mismatch`, `limit`, or `unavailable` — metadata only.
+        const code: MemoryCliFailureCode =
+          error instanceof MemoryCliError ? error.cliCode : "cli_unavailable";
+        if (code === "cli_version_mismatch") {
           log("warn", "memory.version_mismatch");
         }
+        onFailure?.(code);
         return [];
       }
       if (!envelope.ok) {
+        onFailure?.("cli_malformed");
         return [];
       }
       const parsed = parseRecallData(envelope.data);
       if (parsed === null) {
+        onFailure?.("cli_malformed");
         return [];
       }
       return parsed.items.map((item) => ({

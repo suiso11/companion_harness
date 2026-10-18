@@ -76,6 +76,7 @@ export {
   parseStrictInstantMs,
 } from "./action_strategy.js";
 export type {
+  AgentMemoryFailureCode,
   AgentMemoryRecall,
   AgentMemorySnippet,
   AgentRepairReason,

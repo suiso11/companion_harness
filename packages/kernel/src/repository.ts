@@ -166,6 +166,8 @@ import {
   type ReferenceSetDetailResponse,
   ReferenceSetDetailResponseSchema,
   RUN_EVENT_SCHEMA_VERSION,
+  type RunMemoryStatus,
+  RunMemoryStatusSchema,
   type RunResult,
   type RunStatus,
   RunStatusSchema,
@@ -437,6 +439,8 @@ export interface RunRow {
   startedAt: number | null;
   finishedAt: number | null;
   cancelRequestedAt: number | null;
+  /** Per-run memory status (I01-06, metadata only); null = never recalled. */
+  memoryStatus: RunMemoryStatus | null;
 }
 
 export interface StoredIdempotencyRecord {
@@ -853,6 +857,7 @@ interface RawRun {
   started_at: number | null;
   finished_at: number | null;
   cancel_requested_at: number | null;
+  memory_status: string | null;
 }
 
 function parseRunRow(row: RawRun): RunRow {
@@ -862,6 +867,15 @@ function parseRunRow(row: RawRun): RunRow {
       : parseOrValidation(
           () => parseRunResult(JSON.parse(row.result_json as string)),
           "run result_json",
+        );
+  // `SELECT *` on a pre-0020 store (older migration target) yields no
+  // memory_status key at all: undefined counts as absent/null here too.
+  const memoryStatus =
+    row.memory_status === null || row.memory_status === undefined
+      ? null
+      : parseOrValidation(
+          () => RunMemoryStatusSchema.parse(row.memory_status),
+          "run memory_status",
         );
   return {
     id: row.id,
@@ -879,6 +893,7 @@ function parseRunRow(row: RawRun): RunRow {
     startedAt: row.started_at,
     finishedAt: row.finished_at,
     cancelRequestedAt: row.cancel_requested_at,
+    memoryStatus,
   };
 }
 
@@ -4218,6 +4233,28 @@ export function createKernelRepository(
   }
 
   /**
+   * Explicit per-run memory status (I01-06, additive): metadata only over a
+   * closed union, never memory content. Recall happens at most once per run
+   * attempt, so a plain UPDATE is idempotent in practice; a run that never
+   * reaches the recall boundary keeps NULL. Unknown run ids are rejected
+   * like every other row write. Best-effort at the call site: the marker
+   * never fails the run (memoryless continuation is preserved).
+   */
+  function recordRunMemoryStatus(runId: string, status: RunMemoryStatus): void {
+    const id = requireId(runId, "runId");
+    const valid = parseOrValidation(
+      () => RunMemoryStatusSchema.parse(status),
+      "run memory status",
+    );
+    const moved = db
+      .prepare("UPDATE runs SET memory_status = ? WHERE id = ?")
+      .run(valid, id);
+    if (moved.changes !== 1) {
+      throw new RepositoryNotFoundError(`run ${id} not found`);
+    }
+  }
+
+  /**
    * Bind an accepted completed run's cited `mN` to its exposed record.
    * Only citations present in the accepted answer's citation arrays may
    * call this (the service parses citation arrays, never prose): mere
@@ -7342,6 +7379,7 @@ export function createKernelRepository(
     countPendingMemoryJobs,
     recordMemoryExposure,
     listMemoryExposures,
+    recordRunMemoryStatus,
     grantMemoryCitation,
     listMemoryGrants,
     recordMemorySearch,

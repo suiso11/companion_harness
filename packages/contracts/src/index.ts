@@ -735,12 +735,18 @@ export {
   RunResultV2Schema,
   renderRunResultText,
 } from "./run_result.js";
-export type { ActiveStatus, RunStatus, TerminalStatus } from "./run_status.js";
+export type {
+  ActiveStatus,
+  RunMemoryStatus,
+  RunStatus,
+  TerminalStatus,
+} from "./run_status.js";
 export {
   ACTIVE_STATUSES,
   ActiveStatusSchema,
   isActiveStatus,
   isTerminalStatus,
+  RunMemoryStatusSchema,
   RunStatusSchema,
   TERMINAL_STATUSES,
   TerminalStatusSchema,

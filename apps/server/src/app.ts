@@ -1538,7 +1538,14 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         return apiError(c, 404, "not_found", "resource not found");
       }
       const body = RunStatusResponseSchema.parse({
-        run: { id: owned.id, status: owned.status, eventSeq: owned.eventSeq },
+        run: {
+          id: owned.id,
+          status: owned.status,
+          eventSeq: owned.eventSeq,
+          // Additive (I01-06): per-run memory status, metadata only; null
+          // stays visible as null (the run reached recall but no marker).
+          memoryStatus: owned.memoryStatus,
+        },
       });
       return c.json(body, 200);
     } catch (error) {

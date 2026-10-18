@@ -41,6 +41,7 @@ import {
   MEMORY_CITATION_ID_REGEX,
   parseStructuredAnswer,
   RESERVED_ANSWER_NAMESPACE,
+  type RunMemoryStatus,
   type RunResultV2,
   SNAPSHOT_BODY_VERSION,
   type StructuredAnswer,
@@ -503,11 +504,30 @@ export interface AgentMemorySnippet {
 }
 
 /**
+ * Closed CLI failure codes the server-owned recall boundary may report
+ * (memory_cli.ts). The kernel maps them onto the additive per-run memory
+ * status (I01-06): metadata only, never memory content.
+ */
+export type AgentMemoryFailureCode =
+  | "cli_unavailable"
+  | "cli_timeout"
+  | "cli_malformed"
+  | "cli_version_mismatch"
+  | "cli_limit"
+  | "cli_bad_request";
+
+/**
  * Pre-answer recall hook (server-owned remind CLI boundary). Resolves to
  * the bounded snippet list for one query, or rejects/returns empty on any
  * failure: the strategy treats every failure as memoryless (fail-open) and
  * never fails the run for memory. Canonical remind ids stay behind this
  * boundary: the model only ever sees `mN` labels.
+ *
+ * Additive (I01-06): implementations MAY accept an optional `onFailure`
+ * callback and invoke it once with the fixed failure code before resolving
+ * empty/rejecting, so the run can surface WHY memory was absent (status
+ * metadata only). Omitting the parameter keeps the previous behavior; the
+ * kernel then records `unavailable` for any thrown recall.
  */
 export interface AgentMemoryRecall {
   /** Remind scope bound to this hook (1..256 chars, enforced at exposure). */
@@ -515,7 +535,44 @@ export interface AgentMemoryRecall {
   recall(
     query: string,
     signal: AbortSignal,
+    onFailure?: (code: AgentMemoryFailureCode) => void,
   ): Promise<readonly AgentMemorySnippet[]>;
+}
+
+/**
+ * Map a reported CLI failure code onto the additive per-run memory status
+ * (I01-06). Unknown/unreported codes close to `unavailable` (metadata only:
+ * memory was reachable-but-broken or the cause was never classified).
+ */
+function memoryStatusFromFailureCode(
+  code: AgentMemoryFailureCode | undefined,
+): RunMemoryStatus {
+  switch (code) {
+    case "cli_timeout":
+      return "timeout";
+    case "cli_version_mismatch":
+      return "version_mismatch";
+    case "cli_limit":
+      return "limit";
+    default:
+      return "unavailable";
+  }
+}
+
+/**
+ * Best-effort status marker (I01-06): never fails the run — a status write
+ * failure degrades to the previous silent-memoryless behavior.
+ */
+function recordMemoryStatus(
+  repo: KernelRepository,
+  runId: string,
+  status: RunMemoryStatus,
+): void {
+  try {
+    repo.recordRunMemoryStatus(runId, status);
+  } catch {
+    // Best effort: the run outcome never depends on the status marker.
+  }
 }
 
 /**
@@ -1573,6 +1630,10 @@ function detachRecallSignal(composed: AbortSignal): void {
  * so its `mN` can never be cited or feedback-granted. Ordinal mapping is
  * preserved (m_i names snippets[i]); historical exposures are immutable
  * (INSERT OR IGNORE never rewrites them).
+ *
+ * Additive (I01-06): every exit also records a per-run memory status marker
+ * (metadata only, closed union) so the memoryless state is visible without
+ * changing the memoryless continuation itself.
  */
 async function recallMemoryForRun(args: {
   repo: KernelRepository;
@@ -1586,22 +1647,35 @@ async function recallMemoryForRun(args: {
   const { repo, sessionId, runId, scope, memory, signal } = args;
   const queryCps = Array.from(args.query);
   if (queryCps.length === 0 || signal.aborted) {
+    recordMemoryStatus(
+      repo,
+      runId,
+      queryCps.length === 0 ? "empty" : "unavailable",
+    );
     return [];
   }
   const query = queryCps.slice(0, 500).join("");
+  // Reported failure code from the recall boundary (I01-06): closed set,
+  // metadata only. Absent = the failure (if any) was never classified.
+  let failureCode: AgentMemoryFailureCode | undefined;
   let recalled: readonly AgentMemorySnippet[];
   try {
-    recalled = await memory.recall(query, signal);
+    recalled = await memory.recall(query, signal, (code) => {
+      failureCode = code;
+    });
   } catch {
+    recordMemoryStatus(repo, runId, memoryStatusFromFailureCode(failureCode));
     return [];
   }
   if (signal.aborted || !Array.isArray(recalled)) {
+    recordMemoryStatus(repo, runId, memoryStatusFromFailureCode(failureCode));
     return [];
   }
   const validated: AgentMemorySnippet[] = [];
   const seenRecords = new Set<string>();
   for (const candidate of recalled.slice(0, AGENT_MAX_MEMORY_SNIPPETS)) {
     if (signal.aborted) {
+      recordMemoryStatus(repo, runId, memoryStatusFromFailureCode(failureCode));
       return [];
     }
     if (
@@ -1650,6 +1724,7 @@ async function recallMemoryForRun(args: {
   const out: AgentMemorySnippet[] = [];
   for (const snippet of kept) {
     if (signal.aborted) {
+      recordMemoryStatus(repo, runId, memoryStatusFromFailureCode(failureCode));
       return [];
     }
     const citation = `m${out.length + 1}`;
@@ -1668,6 +1743,19 @@ async function recallMemoryForRun(args: {
     }
     out.push(snippet);
   }
+  // Normal settlement (I01-06): a reported failure code wins over the
+  // memoryless-empty default (the boundary reports it only on failure
+  // paths); otherwise `used` when the projected prefix is non-empty and
+  // `empty` when recall succeeded with nothing to show.
+  recordMemoryStatus(
+    repo,
+    runId,
+    out.length > 0
+      ? "used"
+      : failureCode !== undefined
+        ? memoryStatusFromFailureCode(failureCode)
+        : "empty",
+  );
   return out;
 }
 
@@ -2216,6 +2304,10 @@ export function createAgentStrategy(
         // composed signal already cancelled the recall, and no later model
         // call may start past the deadline.
         throwIfHalted();
+      } else if (options.memory === undefined) {
+        // I01-06 (additive): memory not configured is a visible state, not a
+        // silent one — the companion continues memoryless with `disabled`.
+        recordMemoryStatus(repo, runId, "disabled");
       }
       for (let step = 1; step <= maxSteps; step += 1) {
         throwIfHalted();

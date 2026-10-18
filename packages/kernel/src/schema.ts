@@ -90,6 +90,10 @@ export const runs = sqliteTable(
     startedAt: integer("started_at"),
     finishedAt: integer("finished_at"),
     cancelRequestedAt: integer("cancel_requested_at"),
+    // I01-06 (additive, migration 0020): explicit per-run memory status,
+    // metadata only (closed union, never memory content). NULL = the run
+    // never reached the recall boundary or the row predates the column.
+    memoryStatus: text("memory_status"),
   },
   (t) => [
     unique("runs_turn_attempt_unique").on(t.turnId, t.attempt),
@@ -108,6 +112,10 @@ export const runs = sqliteTable(
     check("runs_event_seq_check", sql`${t.eventSeq} >= 0`),
     check("runs_select_on_success_check", sql`${t.selectOnSuccess} IN (0,1)`),
     check("runs_tool_requests_used_check", sql`${t.toolRequestsUsed} >= 0`),
+    check(
+      "runs_memory_status_check",
+      sql`${t.memoryStatus} IS NULL OR ${t.memoryStatus} IN ('used','empty','disabled','unavailable','timeout','version_mismatch','limit')`,
+    ),
     check(
       "runs_result_json_check",
       sql`${t.resultJson} IS NULL OR json_valid(${t.resultJson})`,

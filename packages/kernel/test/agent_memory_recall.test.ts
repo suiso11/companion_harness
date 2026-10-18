@@ -366,3 +366,236 @@ describe("memory block provenance labels", () => {
     expect(block).toContain("only user_fact items are user-stated facts");
   });
 });
+
+describe("per-run memory status (I01-06)", () => {
+  /** Scripted happy-path gateway: one model step, no tool calls. */
+  function plainGateway(): ModelGateway {
+    return {
+      provider: "ollama",
+      capabilities: { toolCalling: true },
+      baseUrl: "http://127.0.0.1:11434",
+      chatUrl: "http://127.0.0.1:11434/api/chat",
+      chat: async () => answerResult(),
+    };
+  }
+
+  it("records used when snippets were projected and the turn completes", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const strategy = createAgentStrategy({
+        db: handle.raw,
+        repo,
+        broker: createToolBroker({
+          db: handle.raw,
+          repo,
+          registrations: [],
+        }),
+        gateway: plainGateway(),
+        model: "test-model",
+        memory: {
+          scope: SCOPE,
+          recall: async () => [
+            {
+              recordId: "record-1",
+              recallId: "recall-1",
+              snippet: "User likes tea.",
+            },
+          ],
+        },
+      });
+      const { runId } = newRunningTurn(repo, T0);
+      await expect(strategy(ctxFor(repo, runId))).resolves.toBeDefined();
+      expect(repo.getRun(runId).memoryStatus).toBe("used");
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("records empty when recall succeeds with nothing to show", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const strategy = createAgentStrategy({
+        db: handle.raw,
+        repo,
+        broker: createToolBroker({
+          db: handle.raw,
+          repo,
+          registrations: [],
+        }),
+        gateway: plainGateway(),
+        model: "test-model",
+        memory: { scope: SCOPE, recall: async () => [] },
+      });
+      const { runId } = newRunningTurn(repo, T0);
+      await expect(strategy(ctxFor(repo, runId))).resolves.toBeDefined();
+      expect(repo.getRun(runId).memoryStatus).toBe("empty");
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("records timeout from the reported CLI code and the turn still completes", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const strategy = createAgentStrategy({
+        db: handle.raw,
+        repo,
+        broker: createToolBroker({
+          db: handle.raw,
+          repo,
+          registrations: [],
+        }),
+        gateway: plainGateway(),
+        model: "test-model",
+        memory: {
+          scope: SCOPE,
+          recall: async (_query, _signal, onFailure) => {
+            onFailure?.("cli_timeout");
+            return [];
+          },
+        },
+      });
+      const { runId } = newRunningTurn(repo, T0);
+      // Memoryless continuation: the run completes, never fails.
+      await expect(strategy(ctxFor(repo, runId))).resolves.toBeDefined();
+      expect(repo.getRun(runId).memoryStatus).toBe("timeout");
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("records version_mismatch and limit from the reported CLI codes", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const strategy = createAgentStrategy({
+        db: handle.raw,
+        repo,
+        broker: createToolBroker({
+          db: handle.raw,
+          repo,
+          registrations: [],
+        }),
+        gateway: plainGateway(),
+        model: "test-model",
+        memory: {
+          scope: SCOPE,
+          recall: async (_query, _signal, onFailure) => {
+            onFailure?.("cli_version_mismatch");
+            throw new Error("recall rejected");
+          },
+        },
+      });
+      const { runId } = newRunningTurn(repo, T0);
+      await expect(strategy(ctxFor(repo, runId))).resolves.toBeDefined();
+      expect(repo.getRun(runId).memoryStatus).toBe("version_mismatch");
+
+      const strategy2 = createAgentStrategy({
+        db: handle.raw,
+        repo,
+        broker: createToolBroker({
+          db: handle.raw,
+          repo,
+          registrations: [],
+        }),
+        gateway: plainGateway(),
+        model: "test-model",
+        memory: {
+          scope: SCOPE,
+          recall: async (_query, _signal, onFailure) => {
+            onFailure?.("cli_limit");
+            return [];
+          },
+        },
+      });
+      const { runId: runId2 } = newRunningTurn(repo, T0 + 1);
+      await expect(strategy2(ctxFor(repo, runId2))).resolves.toBeDefined();
+      expect(repo.getRun(runId2).memoryStatus).toBe("limit");
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("records unavailable for an unclassified thrown recall", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const strategy = createAgentStrategy({
+        db: handle.raw,
+        repo,
+        broker: createToolBroker({
+          db: handle.raw,
+          repo,
+          registrations: [],
+        }),
+        gateway: plainGateway(),
+        model: "test-model",
+        memory: {
+          scope: SCOPE,
+          recall: async () => {
+            throw new Error("boom");
+          },
+        },
+      });
+      const { runId } = newRunningTurn(repo, T0);
+      await expect(strategy(ctxFor(repo, runId))).resolves.toBeDefined();
+      expect(repo.getRun(runId).memoryStatus).toBe("unavailable");
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("records disabled when memory is not configured and the turn completes", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const strategy = createAgentStrategy({
+        db: handle.raw,
+        repo,
+        broker: createToolBroker({
+          db: handle.raw,
+          repo,
+          registrations: [],
+        }),
+        gateway: plainGateway(),
+        model: "test-model",
+      });
+      const { runId } = newRunningTurn(repo, T0);
+      await expect(strategy(ctxFor(repo, runId))).resolves.toBeDefined();
+      expect(repo.getRun(runId).memoryStatus).toBe("disabled");
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("keeps the status absent for runs that never reach the recall boundary", async () => {
+    const { handle, repo } = await setup();
+    try {
+      // An already-cancelled context fails the run before the recall
+      // boundary: no marker is written (honest NULL).
+      const strategy = createAgentStrategy({
+        db: handle.raw,
+        repo,
+        broker: createToolBroker({
+          db: handle.raw,
+          repo,
+          registrations: [],
+        }),
+        gateway: plainGateway(),
+        model: "test-model",
+        memory: {
+          scope: SCOPE,
+          recall: async () => [],
+        },
+      });
+      const { runId } = newRunningTurn(repo, T0);
+      const aborted = new AbortController();
+      aborted.abort();
+      await expect(
+        strategy(ctxFor(repo, runId, aborted.signal)),
+      ).rejects.toMatchObject({
+        errorCode: "execution_cancelled",
+      });
+      expect(repo.getRun(runId).memoryStatus).toBeNull();
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+});
