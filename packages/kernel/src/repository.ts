@@ -2058,7 +2058,7 @@ export function createKernelRepository(
       result: RunResult | null;
       receipt: ActionReceiptView | null;
       executionStatus: ActionExecutionStatus | null;
-      targetCitation: ActionTargetCitation;
+      targetCitation: ActionTargetCitation | null;
     } | null => {
       const execution = db
         .prepare(
@@ -2652,11 +2652,18 @@ export function createKernelRepository(
   function targetCitationForProposal(
     session: string,
     proposal: RawProposal,
-  ): ActionTargetCitation {
+  ): ActionTargetCitation | null {
     if (proposal.session_id !== session) {
       throw new RepositoryNotFoundError(
         `proposal ${proposal.id} not found in session ${session}`,
       );
+    }
+    // M6 targetless `calendar.create` proposals carry a NULL target by
+    // contract (no source event, no BEFORE label): the view carries null,
+    // never a fabricated `rN`. Reschedule proposals always bind a target;
+    // a missing row there stays fail-closed below.
+    if (proposal.target_ref_id === null) {
+      return null;
     }
     const reference = db
       .prepare(
