@@ -651,3 +651,223 @@ export const ConversationProposalRejectResponseSchema =
 export type ConversationProposalRejectResponse = z.infer<
   typeof ConversationProposalRejectResponseSchema
 >;
+
+/* ------------------------------------------------------------------ */
+/* AV04 learning: methods / hypotheses + anchored evidence (read-only  */
+/* facts about learning state; NEVER permissions / budgets / goals).  */
+/*                                                                     */
+/* A hypothesis is EXPLICITLY labeled as such in every read DTO        */
+/* (kind + status + evidence counts): a `refuted` row is NEVER         */
+/* surfaced as supported/fact, and no transition promotes a            */
+/* hypothesis to a permission, grant, budget, or user goal. Evidence   */
+/* anchors ONLY to existing durable rows (shadow_job /                */
+/* conversation_proposal / action_receipt / task_event); model         */
+/* free-text claims are never valid sources.                           */
+/* ------------------------------------------------------------------ */
+
+/** What is being learned: a reusable method or a testable hypothesis. */
+export const LearningHypothesisKindSchema = z.enum(["method", "hypothesis"]);
+export type LearningHypothesisKind = z.infer<
+  typeof LearningHypothesisKindSchema
+>;
+
+/** Learning lifecycle (terminal: retired; refuted stays labeled refuted). */
+export const LearningHypothesisStatusSchema = z.enum([
+  "open",
+  "supported",
+  "refuted",
+  "retired",
+]);
+export type LearningHypothesisStatus = z.infer<
+  typeof LearningHypothesisStatusSchema
+>;
+
+/** Evidence polarity toward the hypothesis (refutes at most for rejects). */
+export const LearningEvidencePolaritySchema = z.enum([
+  "supports",
+  "refutes",
+  "neutral",
+]);
+export type LearningEvidencePolarity = z.infer<
+  typeof LearningEvidencePolaritySchema
+>;
+
+/** Closed evidence-source vocabulary (existing durable rows only). */
+export const LearningEvidenceSourceKindSchema = z.enum([
+  "shadow_job",
+  "conversation_proposal",
+  "action_receipt",
+  "task_event",
+]);
+export type LearningEvidenceSourceKind = z.infer<
+  typeof LearningEvidenceSourceKindSchema
+>;
+
+/** Hypothesis origin: explicit human record vs staged model proposal. */
+export const LearningHypothesisOriginSchema = z.enum(["human", "model"]);
+export type LearningHypothesisOrigin = z.infer<
+  typeof LearningHypothesisOriginSchema
+>;
+
+/** Human-explicit transition (CAS-checked; no automatic promotion). */
+export const LearningHypothesisTransitionSchema = z.enum([
+  "support",
+  "refute",
+  "retire",
+  "reaffirm",
+]);
+export type LearningHypothesisTransition = z.infer<
+  typeof LearningHypothesisTransitionSchema
+>;
+
+/** Per-polarity evidence counts (computed at read time, never stored). */
+export const LearningEvidenceCountsSchema = z.strictObject({
+  supports: z.number().int().min(0),
+  refutes: z.number().int().min(0),
+  neutral: z.number().int().min(0),
+});
+export type LearningEvidenceCounts = z.infer<
+  typeof LearningEvidenceCountsSchema
+>;
+
+export const LearningHypothesisViewSchema = z.strictObject({
+  id: UuidSchema,
+  sessionId: UuidSchema,
+  scope: AutonomyScopeSchema,
+  kind: LearningHypothesisKindSchema,
+  statement: z.string().min(1),
+  /** Explicit hypothesis label: open / supported / refuted / retired. */
+  status: LearningHypothesisStatusSchema,
+  version: z.number().int().min(1),
+  origin: LearningHypothesisOriginSchema,
+  /** True while a model-staged record awaits human accept/reject. */
+  staged: z.boolean(),
+  /**
+   * Durable NOTICE that the parent purpose was revoked/superseded (same
+   * transaction as the revocation). Never auto-cancels or auto-resumes.
+   */
+  needsReevaluation: z.boolean(),
+  evidenceCounts: LearningEvidenceCountsSchema,
+  createdAt: UnixMsSchema,
+  updatedAt: UnixMsSchema,
+});
+export type LearningHypothesisView = z.infer<
+  typeof LearningHypothesisViewSchema
+>;
+
+/** Trusted human creation: scope/kind/statement only (no status/source). */
+export const LearningHypothesisCreateRequestSchema = z.strictObject({
+  scope: AutonomyScopeSchema,
+  kind: LearningHypothesisKindSchema,
+  statement: PurposeStatementSchema,
+});
+export type LearningHypothesisCreateRequest = z.infer<
+  typeof LearningHypothesisCreateRequestSchema
+>;
+
+/** Trusted human transition: CAS on the expected version. */
+export const LearningHypothesisTransitionRequestSchema = z.strictObject({
+  expectedVersion: z.number().int().min(1),
+  transition: LearningHypothesisTransitionSchema,
+});
+export type LearningHypothesisTransitionRequest = z.infer<
+  typeof LearningHypothesisTransitionRequestSchema
+>;
+
+/** Trusted human accept/reject of a staged model proposal (CAS). */
+export const LearningHypothesisDecisionRequestSchema = z.strictObject({
+  expectedVersion: z.number().int().min(1),
+});
+export type LearningHypothesisDecisionRequest = z.infer<
+  typeof LearningHypothesisDecisionRequestSchema
+>;
+
+export const LearningEvidenceViewSchema = z.strictObject({
+  id: UuidSchema,
+  hypothesisId: UuidSchema,
+  sessionId: UuidSchema,
+  polarity: LearningEvidencePolaritySchema,
+  sourceKind: LearningEvidenceSourceKindSchema,
+  sourceId: UuidSchema,
+  note: z.string().min(1).nullable(),
+  createdAt: UnixMsSchema,
+});
+export type LearningEvidenceView = z.infer<typeof LearningEvidenceViewSchema>;
+
+/**
+ * Trusted human evidence attach: polarity + closed durable source anchor.
+ * A rejected conversation proposal anchors ONLY `refutes` polarity.
+ */
+export const LearningEvidenceAttachRequestSchema = z.strictObject({
+  polarity: LearningEvidencePolaritySchema,
+  sourceKind: LearningEvidenceSourceKindSchema,
+  sourceId: UuidSchema,
+  note: z.string().min(1).max(500).optional(),
+});
+export type LearningEvidenceAttachRequest = z.infer<
+  typeof LearningEvidenceAttachRequestSchema
+>;
+
+/** Bounded hypothesis list query (keyset cursor, newest-first). */
+export const LearningHypothesisListQuerySchema = z.strictObject({
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  cursor: z.string().min(1).max(2048).optional(),
+  scope: AutonomyScopeSchema.optional(),
+  status: LearningHypothesisStatusSchema.optional(),
+  kind: LearningHypothesisKindSchema.optional(),
+});
+export type LearningHypothesisListQuery = z.infer<
+  typeof LearningHypothesisListQuerySchema
+>;
+export type LearningHypothesisListQueryInput = z.input<
+  typeof LearningHypothesisListQuerySchema
+>;
+
+export const LearningHypothesisListResponseSchema = z.strictObject({
+  items: z.array(LearningHypothesisViewSchema).max(100),
+  /** Opaque keyset cursor for the next older page; null when exhausted. */
+  nextCursor: z.string().min(1).max(2048).nullable(),
+  /** True when an older page remains (LIMIT+1 probe, never truncated). */
+  hasMore: z.boolean(),
+});
+export type LearningHypothesisListResponse = z.infer<
+  typeof LearningHypothesisListResponseSchema
+>;
+
+export const LearningEvidenceListResponseSchema = z.strictObject({
+  hypothesisId: UuidSchema,
+  items: z.array(LearningEvidenceViewSchema).max(100),
+  /** Opaque keyset cursor for the next older page; null when exhausted. */
+  nextCursor: z.string().min(1).max(2048).nullable(),
+  /** True when an older page remains (LIMIT+1 probe, never truncated). */
+  hasMore: z.boolean(),
+});
+export type LearningEvidenceListResponse = z.infer<
+  typeof LearningEvidenceListResponseSchema
+>;
+
+/** Bounded evidence list query (keyset cursor, oldest-first). */
+export const LearningEvidenceListQuerySchema = z.strictObject({
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  cursor: z.string().min(1).max(2048).optional(),
+});
+export type LearningEvidenceListQuery = z.infer<
+  typeof LearningEvidenceListQuerySchema
+>;
+export type LearningEvidenceListQueryInput = z.input<
+  typeof LearningEvidenceListQuerySchema
+>;
+
+/**
+ * Model-side `learning.propose` input. Carries NO status/source: scope /
+ * kind / statement only. The record is staged pending (human accept /
+ * reject); staging creates no purpose, task, grant, or notification.
+ */
+export const LearningProposeRequestSchema = z.strictObject({
+  scope: AutonomyScopeSchema,
+  kind: LearningHypothesisKindSchema,
+  statement: PurposeStatementSchema,
+});
+export type LearningProposeRequest = z.infer<
+  typeof LearningProposeRequestSchema
+>;

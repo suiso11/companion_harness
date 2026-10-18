@@ -45,6 +45,7 @@ export default defineConfig({
           "shadow.spec.ts",
           "notifications.spec.ts",
           "conversation_proposals.spec.ts",
+          "learning.spec.ts",
         ],
   timeout: 60_000,
   expect: { timeout: 15_000 },
