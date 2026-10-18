@@ -15,9 +15,12 @@
 import { expect, type Page, test } from "@playwright/test";
 import {
   CITATION_SNAPSHOT_TEXT,
+  CITATION_SNAPSHOT_TEXT_B,
   E2E_APP_ORIGIN,
   E2E_CONTROL_ORIGIN,
   TEXT_CITE,
+  TEXT_CITE_MEM,
+  TEXT_CITE_TWO,
   TEXT_HANG,
   TEXT_OK,
 } from "./ports.js";
@@ -1125,5 +1128,252 @@ test("C06: cancel_requested reload seeds the stop notice before the native termi
     releaseHistory();
     await request.post(`${E2E_CONTROL_ORIGIN}/release`).catch(() => undefined);
     await page.unroute("**/api/sessions/*/history*").catch(() => undefined);
+  }
+});
+
+/* ------------------------------------------------------------------ */
+/* Shared citation drawer last-user-intent races (follow-up)            */
+/*                                                                      */
+/* rN stored citations and mN run-bound memory citations share ONE      */
+/* drawer with no generation guard (before fix): an older delayed A     */
+/* overwrites a newer B, or reopens after close. All held HTTP below    */
+/* is genuine forwarding (route.fetch + fulfill unchanged); no payload  */
+/* is fabricated and no sleeps/timing are used — gates release          */
+/* deterministically.                                                   */
+/* ------------------------------------------------------------------ */
+
+test("drawer last-intent wins when an older stored detail resolves late (rA held, rB wins)", async ({
+  page,
+  request,
+}) => {
+  const sessionId = await sessionIdOf(page);
+  const seedA = (await (
+    await request.post(`${E2E_CONTROL_ORIGIN}/seed-citation`, {
+      data: { sessionId },
+    })
+  ).json()) as { referenceId: string; ordinal: number };
+  expect(seedA.ordinal).toBe(1);
+  const seedB = (await (
+    await request.post(`${E2E_CONTROL_ORIGIN}/seed-citation`, {
+      data: { sessionId, text: CITATION_SNAPSHOT_TEXT_B },
+    })
+  ).json()) as { referenceId: string; ordinal: number };
+  expect(seedB.ordinal).toBe(2);
+
+  await page.locator("#composer-input").fill(TEXT_CITE_TWO);
+  await page.locator("#composer-send").click();
+  await expect(page.getByRole("button", { name: "r1" })).toBeVisible({
+    timeout: 15_000,
+  });
+  await expect(page.getByRole("button", { name: "r2" })).toBeVisible({
+    timeout: 15_000,
+  });
+
+  let heldA = 0;
+  let fulfilledA = 0;
+  let releaseA: () => void = () => {};
+  const gateA = new Promise<void>((resolve) => {
+    releaseA = resolve;
+  });
+  await page.route("**/api/sessions/*/references/*", async (route) => {
+    if (route.request().url().endsWith(`/references/${seedA.referenceId}`)) {
+      heldA += 1;
+      const genuine = await route.fetch();
+      await gateA;
+      await route.fulfill({ response: genuine });
+      fulfilledA += 1;
+      return;
+    }
+    await route.continue();
+  });
+  try {
+    await page.getByRole("button", { name: "r1" }).click();
+    await expect.poll(() => heldA).toBeGreaterThanOrEqual(1);
+    await page.getByRole("button", { name: "r2" }).click();
+    await expect(page.locator("#drawer")).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator("#drawer-body")).toHaveText(
+      CITATION_SNAPSHOT_TEXT_B,
+      { timeout: 15_000 },
+    );
+    releaseA();
+    // Wait for the late rA response to actually reach the page before
+    // asserting the final UI state; otherwise the check can observe the
+    // unchanged rB body and pass even when a broken client mishandles it.
+    await expect.poll(() => fulfilledA).toBeGreaterThanOrEqual(1);
+    // The late rA detail must not overwrite the newer rB body.
+    await expect(page.locator("#drawer-body")).toHaveText(
+      CITATION_SNAPSHOT_TEXT_B,
+      { timeout: 15_000 },
+    );
+    expect(await page.locator("#drawer-body script").count()).toBe(0);
+    await expect(page.locator("#drawer-body")).toHaveText(
+      CITATION_SNAPSHOT_TEXT_B,
+    );
+  } finally {
+    releaseA();
+    await page.unroute("**/api/sessions/*/references/*").catch(() => undefined);
+  }
+});
+
+test("drawer close-while-pending is never resurrected (A held, close, B held, A release)", async ({
+  page,
+  request,
+}) => {
+  const sessionId = await sessionIdOf(page);
+  const seedA = (await (
+    await request.post(`${E2E_CONTROL_ORIGIN}/seed-citation`, {
+      data: { sessionId },
+    })
+  ).json()) as { referenceId: string; ordinal: number };
+  expect(seedA.ordinal).toBe(1);
+  const seedB = (await (
+    await request.post(`${E2E_CONTROL_ORIGIN}/seed-citation`, {
+      data: { sessionId, text: CITATION_SNAPSHOT_TEXT_B },
+    })
+  ).json()) as { referenceId: string; ordinal: number };
+  expect(seedB.ordinal).toBe(2);
+
+  await page.locator("#composer-input").fill(TEXT_CITE_TWO);
+  await page.locator("#composer-send").click();
+  await expect(page.getByRole("button", { name: "r1" })).toBeVisible({
+    timeout: 15_000,
+  });
+  await expect(page.getByRole("button", { name: "r2" })).toBeVisible({
+    timeout: 15_000,
+  });
+
+  let heldA = 0;
+  let heldB = 0;
+  let fulfilledA = 0;
+  let fulfilledB = 0;
+  let releaseA: () => void = () => {};
+  let releaseB: () => void = () => {};
+  const gateA = new Promise<void>((resolve) => {
+    releaseA = resolve;
+  });
+  const gateB = new Promise<void>((resolve) => {
+    releaseB = resolve;
+  });
+  await page.route("**/api/sessions/*/references/*", async (route) => {
+    const url = route.request().url();
+    if (url.endsWith(`/references/${seedA.referenceId}`)) {
+      heldA += 1;
+      const genuine = await route.fetch();
+      await gateA;
+      await route.fulfill({ response: genuine });
+      fulfilledA += 1;
+      return;
+    }
+    if (url.endsWith(`/references/${seedB.referenceId}`)) {
+      heldB += 1;
+      const genuine = await route.fetch();
+      await gateB;
+      await route.fulfill({ response: genuine });
+      fulfilledB += 1;
+      return;
+    }
+    await route.continue();
+  });
+  try {
+    await page.getByRole("button", { name: "r1" }).click();
+    await expect.poll(() => heldA).toBeGreaterThanOrEqual(1);
+    // Close while A is pending: the real backdrop listener (no test API).
+    await page.locator("#drawer").dispatchEvent("click");
+    await expect(page.locator("#drawer")).toBeHidden();
+    await page.getByRole("button", { name: "r2" }).click();
+    await expect.poll(() => heldB).toBeGreaterThanOrEqual(1);
+    // Late A must not resurrect while B is still pending.
+    releaseA();
+    await expect.poll(() => fulfilledA).toBeGreaterThanOrEqual(1);
+    await expect(page.locator("#drawer")).toBeHidden();
+    await expect(page.locator("#drawer-body")).toHaveText("");
+    // Releasing B opens exactly B (plain text, no HTML interpretation).
+    releaseB();
+    await expect.poll(() => fulfilledB).toBeGreaterThanOrEqual(1);
+    await expect(page.locator("#drawer")).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator("#drawer-body")).toHaveText(
+      CITATION_SNAPSHOT_TEXT_B,
+      { timeout: 15_000 },
+    );
+    expect(await page.locator("#drawer-body script").count()).toBe(0);
+  } finally {
+    releaseA();
+    releaseB();
+    await page.unroute("**/api/sessions/*/references/*").catch(() => undefined);
+  }
+});
+
+test("shared drawer: stale memory-citation error cannot replace the newer stored citation", async ({
+  page,
+  request,
+}) => {
+  // Fixture backend note: this harness has no memory backend, so the m1
+  // recall is a GENUINE 404 from the real route (held + forwarded
+  // unchanged) — it exercises the shared-drawer async ordering without a
+  // real remind CLI dataset. Pure rN races above run on the production
+  // UI + temp DB regardless.
+  const sessionId = await sessionIdOf(page);
+  const seed = (await (
+    await request.post(`${E2E_CONTROL_ORIGIN}/seed-citation`, {
+      data: { sessionId },
+    })
+  ).json()) as { referenceId: string; ordinal: number };
+  expect(seed.ordinal).toBe(1);
+
+  await page.locator("#composer-input").fill(TEXT_CITE_MEM);
+  await page.locator("#composer-send").click();
+  await expect(page.getByRole("button", { name: "m1" })).toBeVisible({
+    timeout: 15_000,
+  });
+  await page.locator("#composer-input").fill(TEXT_CITE);
+  await page.locator("#composer-send").click();
+  await expect(page.getByRole("button", { name: "r1" })).toBeVisible({
+    timeout: 15_000,
+  });
+
+  let heldMem = 0;
+  let fulfilledMem = 0;
+  let releaseMem: () => void = () => {};
+  const gateMem = new Promise<void>((resolve) => {
+    releaseMem = resolve;
+  });
+  await page.route("**/api/sessions/*/memory/recall/**", async (route) => {
+    heldMem += 1;
+    const genuine = await route.fetch();
+    await gateMem;
+    await route.fulfill({ response: genuine });
+    fulfilledMem += 1;
+  });
+  try {
+    await page.getByRole("button", { name: "m1" }).click();
+    await expect.poll(() => heldMem).toBeGreaterThanOrEqual(1);
+    await page.getByRole("button", { name: "r1" }).click();
+    await expect(page.locator("#drawer")).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator("#drawer-body")).toHaveText(
+      CITATION_SNAPSHOT_TEXT,
+      { timeout: 15_000 },
+    );
+    const noticeBefore = await page.locator("#composer-notice").textContent();
+    releaseMem();
+    // Wait for the late genuine m1 error to reach the page before asserting
+    // the final UI state; otherwise the check can pass on the unchanged r1
+    // body before a broken client processes the stale error.
+    await expect.poll(() => fulfilledMem).toBeGreaterThanOrEqual(1);
+    // The late genuine m1 error must not replace the newer r1 body, must
+    // not overwrite the current notice, and must not latch the memory
+    // backend disabled (a later search stays usable).
+    await expect(page.locator("#drawer-body")).toHaveText(
+      CITATION_SNAPSHOT_TEXT,
+      { timeout: 15_000 },
+    );
+    await expect(page.locator("#drawer")).toBeVisible();
+    expect(await page.locator("#composer-notice").textContent()).toBe(
+      noticeBefore,
+    );
+  } finally {
+    releaseMem();
+    await page
+      .unroute("**/api/sessions/*/memory/recall/**")
+      .catch(() => undefined);
   }
 });
