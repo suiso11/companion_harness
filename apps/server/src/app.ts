@@ -17,6 +17,12 @@ import {
   CreateSessionRequestSchema,
   CreateSessionResponseSchema,
   EventsQuerySchema,
+  HandoffAttemptRequestSchema,
+  HandoffCreateRequestSchema,
+  HandoffDispatchRequestSchema,
+  HandoffReportRequestSchema,
+  HandoffTransitionRequestSchema,
+  HandoffVerifyRequestSchema,
   HistoryQuerySchema,
   IDEMPOTENCY_SCOPE_SESSIONS_CREATE,
   IdempotencyLookupQuerySchema,
@@ -72,6 +78,8 @@ import {
   ActionNotCancellableError,
   AutonomyStateConflictError,
   AutonomyVersionConflictError,
+  HandoffStateConflictError,
+  HandoffVersionConflictError,
   IdempotencyConflictError,
   InvalidReferenceError,
   isUuidV4,
@@ -693,6 +701,32 @@ function mapDomainError(c: Context, error: unknown): Response {
         error: {
           code: "learning_state_conflict",
           message: "learning state conflict",
+        },
+      },
+      409,
+    );
+  }
+  // AV03 delegation-handoff slice: CAS version conflicts and illegal
+  // lifecycle transitions / invalid verification inputs map to fixed 409
+  // codes (same shape as the autonomy codes above). Ownership failures
+  // stay 404 above.
+  if (error instanceof HandoffVersionConflictError) {
+    return c.json(
+      {
+        error: {
+          code: "handoff_version_conflict",
+          message: "handoff version conflict",
+        },
+      },
+      409,
+    );
+  }
+  if (error instanceof HandoffStateConflictError) {
+    return c.json(
+      {
+        error: {
+          code: "handoff_state_conflict",
+          message: "handoff state conflict",
         },
       },
       409,
@@ -3146,6 +3180,287 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     "decision",
     (sessionId, hypothesisId, body, options) =>
       repo.rejectLearningHypothesis(sessionId, hypothesisId, body, options),
+  );
+
+  /* ----------------- AV03 delegation handoffs (human-driven) --------- */
+  // Session-owned handoffs bound to an existing task (+ frozen parent
+  // purpose snapshot). Human-explicit CRUD: create (prepared) / dispatch /
+  // report / verify / fail / cancel / abnormal-exit / attempt / reaffirm.
+  // No execution, no spawning, no grants, no numeric budgets (budget text
+  // labels only), no task auto-complete. Strict Zod bodies, UUID ids,
+  // Idempotency-Key on every POST, exact query gates, ownership-first
+  // 404s, CAS 409s. Sandbox claims never imply production; boundary flags
+  // are recorded claims requiring separate authorization.
+  app.get("/api/sessions/:sessionId/handoffs", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const query = strictQuery(c, ["limit", "cursor", "status"]);
+    if (!query.ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(
+        repo.listHandoffs(session.id, {
+          ...(query.values.limit !== undefined
+            ? { limit: query.values.limit }
+            : {}),
+          ...(query.values.cursor !== undefined
+            ? { cursor: query.values.cursor }
+            : {}),
+          ...(query.values.status !== undefined
+            ? { status: query.values.status }
+            : {}),
+        }),
+        200,
+      );
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.post("/api/sessions/:sessionId/handoffs", async (c) => {
+    const started = now();
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const keyed = requireIdempotencyKey(c);
+    if ("response" in keyed) {
+      return keyed.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    const raw = await readJsonBody(c);
+    if (!raw.ok) {
+      return validationError(c);
+    }
+    if (HandoffCreateRequestSchema.safeParse(raw.value).success !== true) {
+      return validationError(c);
+    }
+    if (draining) {
+      return shuttingDown(c);
+    }
+    try {
+      const out = repo.createHandoff(session.id, raw.value, {
+        key: keyed.key,
+        now: now(),
+      });
+      logger.info("http.handoffs.create", {
+        sessionId: session.id,
+        status: out.status,
+        durationMs: Math.max(now() - started, 0),
+      });
+      return c.json(out.body, out.status as 201);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get("/api/sessions/:sessionId/handoffs/:handoffId", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const handoff = requireUuid(c, c.req.param("handoffId"), "handoffId");
+    if ("response" in handoff) {
+      return handoff.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(repo.getHandoff(session.id, handoff.id), 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  // Deterministic plain-text handoff spec for manual paste into pi-orch.
+  // Execution is NOT automated by this export: the human hands the task
+  // over and records verified outcomes back through the routes above.
+  app.get("/api/sessions/:sessionId/handoffs/:handoffId/spec", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const handoff = requireUuid(c, c.req.param("handoffId"), "handoffId");
+    if ("response" in handoff) {
+      return handoff.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      return c.text(repo.getHandoffSpec(session.id, handoff.id), 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get("/api/sessions/:sessionId/handoffs/:handoffId/events", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const handoff = requireUuid(c, c.req.param("handoffId"), "handoffId");
+    if ("response" in handoff) {
+      return handoff.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(repo.listHandoffEvents(session.id, handoff.id), 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get("/api/sessions/:sessionId/handoffs/:handoffId/attempts", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const handoff = requireUuid(c, c.req.param("handoffId"), "handoffId");
+    if ("response" in handoff) {
+      return handoff.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(repo.listHandoffAttempts(session.id, handoff.id), 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  function handoffMutation(
+    suffix: string,
+    logName: string,
+    schemaName: "transition" | "dispatch" | "report" | "verify" | "attempt",
+    apply: (
+      sessionId: string,
+      handoffId: string,
+      body: unknown,
+      options: { key: string; now: number },
+    ) => { status: number; body: unknown; replayed: boolean },
+  ): void {
+    app.post(
+      `/api/sessions/:sessionId/handoffs/:handoffId/${suffix}`,
+      async (c) => {
+        const started = now();
+        const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+        if ("response" in session) {
+          return session.response;
+        }
+        const handoff = requireUuid(c, c.req.param("handoffId"), "handoffId");
+        if ("response" in handoff) {
+          return handoff.response;
+        }
+        const keyed = requireIdempotencyKey(c);
+        if ("response" in keyed) {
+          return keyed.response;
+        }
+        if (!strictQuery(c, []).ok) {
+          return validationError(c);
+        }
+        const raw = await readJsonBody(c);
+        if (!raw.ok) {
+          return validationError(c);
+        }
+        const schema =
+          schemaName === "dispatch"
+            ? HandoffDispatchRequestSchema
+            : schemaName === "report"
+              ? HandoffReportRequestSchema
+              : schemaName === "verify"
+                ? HandoffVerifyRequestSchema
+                : schemaName === "attempt"
+                  ? HandoffAttemptRequestSchema
+                  : HandoffTransitionRequestSchema;
+        if (schema.safeParse(raw.value).success !== true) {
+          return validationError(c);
+        }
+        if (draining) {
+          return shuttingDown(c);
+        }
+        try {
+          const out = apply(session.id, handoff.id, raw.value, {
+            key: keyed.key,
+            now: now(),
+          });
+          logger.info(logName, {
+            sessionId: session.id,
+            status: out.status,
+            durationMs: Math.max(now() - started, 0),
+          });
+          return c.json(out.body, out.status as 200);
+        } catch (error) {
+          return mapDomainError(c, error);
+        }
+      },
+    );
+  }
+
+  handoffMutation(
+    "dispatch",
+    "http.handoffs.dispatch",
+    "dispatch",
+    (sessionId, handoffId, body, options) =>
+      repo.dispatchHandoff(sessionId, handoffId, body, options),
+  );
+  handoffMutation(
+    "report",
+    "http.handoffs.report",
+    "report",
+    (sessionId, handoffId, body, options) =>
+      repo.reportHandoff(sessionId, handoffId, body, options),
+  );
+  handoffMutation(
+    "verify",
+    "http.handoffs.verify",
+    "verify",
+    (sessionId, handoffId, body, options) =>
+      repo.verifyHandoff(sessionId, handoffId, body, options),
+  );
+  handoffMutation(
+    "fail",
+    "http.handoffs.fail",
+    "transition",
+    (sessionId, handoffId, body, options) =>
+      repo.failHandoff(sessionId, handoffId, body, options),
+  );
+  handoffMutation(
+    "cancel",
+    "http.handoffs.cancel",
+    "transition",
+    (sessionId, handoffId, body, options) =>
+      repo.cancelHandoff(sessionId, handoffId, body, options),
+  );
+  handoffMutation(
+    "abnormal-exit",
+    "http.handoffs.abnormal-exit",
+    "transition",
+    (sessionId, handoffId, body, options) =>
+      repo.abnormalExitHandoff(sessionId, handoffId, body, options),
+  );
+  handoffMutation(
+    "attempt",
+    "http.handoffs.attempt",
+    "attempt",
+    (sessionId, handoffId, body, options) =>
+      repo.recordHandoffAttempt(sessionId, handoffId, body, options),
+  );
+  handoffMutation(
+    "reaffirm",
+    "http.handoffs.reaffirm",
+    "transition",
+    (sessionId, handoffId, body, options) =>
+      repo.reaffirmHandoff(sessionId, handoffId, body, options),
   );
 
   app.get("/api/autonomy/control", (c) => {

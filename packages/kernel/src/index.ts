@@ -328,6 +328,35 @@ export {
   successResult,
 } from "./fakes.js";
 export {
+  abnormalExitHandoff,
+  assertOwnedHandoff,
+  buildHandoffSpec,
+  cancelHandoff,
+  countActiveHandoffs,
+  createHandoff,
+  dispatchHandoff,
+  failHandoff,
+  flagHandoffReevaluationInTx,
+  getHandoff,
+  HandoffStateConflictError,
+  HandoffVersionConflictError,
+  listHandoffAttempts,
+  listHandoffEvents,
+  listHandoffs,
+  reaffirmHandoff,
+  recordHandoffAttempt,
+  reportHandoff,
+  verifyHandoff,
+} from "./handoff.js";
+export type { HandoffToolsOptions } from "./handoff_tools.js";
+export {
+  createHandoffRegistrations,
+  HandoffListToolInputSchema,
+  HandoffListToolOutputSchema,
+  HandoffOpenToolInputSchema,
+  HandoffOpenToolOutputSchema,
+} from "./handoff_tools.js";
+export {
   acceptStagedHypothesis,
   attachEvidence,
   createHypothesis,

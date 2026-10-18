@@ -25,8 +25,8 @@ import {
   NewerDatabaseError,
 } from "./errors.js";
 
-/** Bundled M5 + memory-integration + M6 create + AV autonomy + AV shadow + AV05 notifications + AV03 conversation-proposal + AV04 learning schema version. Bump only with a new committed migration. */
-export const BUNDLED_SCHEMA_VERSION = 16;
+/** Bundled M5 + memory-integration + M6 create + AV autonomy + AV shadow + AV05 notifications + AV03 conversation-proposal + AV04 learning + AV03 delegation-handoff schema version. Bump only with a new committed migration. */
+export const BUNDLED_SCHEMA_VERSION = 17;
 
 export interface BundledMigration {
   version: number;

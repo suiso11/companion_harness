@@ -67,6 +67,7 @@ import {
   createCalendarRescheduleProposalRegistration,
   createConversationProposalRegistrations,
   createDurableCalendarTargetStore,
+  createHandoffRegistrations,
   createKernelRepository,
   createLearningRegistrations,
   createM1ToolRegistrations,
@@ -2266,6 +2267,9 @@ export async function startServer(
       // creates, and approval lives outside it. Same budgets, no new step.
       // AV04 learning tools: read-only list/open plus proposal-only
       // learning.propose (staged pending, human accept/reject outside).
+      // AV03 handoff tools: read-only handoff.list/open only (NO model
+      // write tool exists anywhere; create/dispatch/verify/attempts are
+      // human HTTP only).
       const agentBroker = createToolBroker({
         db: handle.raw,
         repo,
@@ -2274,6 +2278,7 @@ export async function startServer(
           ...createAutonomyReadRegistrations({ repo }),
           ...createConversationProposalRegistrations({ repo }),
           ...createLearningRegistrations({ repo }),
+          ...createHandoffRegistrations({ repo }),
         ],
       });
       registry.register(

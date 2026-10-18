@@ -962,6 +962,52 @@ export const AGENT_LEARNING_OPEN_PARAMETERS = Object.freeze({
 }) as unknown as Record<string, unknown>;
 
 /**
+ * Explicit closed JSON parameter schemas for the readonly handoff tools
+ * (`handoff.list` / `handoff.open`). The owned session is derived
+ * server-side from the calling run: the model supplies only a status
+ * filter/limit or one owned handoff id, never a session id. There is NO
+ * `handoff.*` write/propose/verify schema: the model can never create,
+ * dispatch, verify, or record attempts (human HTTP only). Boundary flags
+ * and budget labels are surfaced as recorded claims (never capability).
+ */
+export const AGENT_HANDOFF_LIST_PARAMETERS = Object.freeze({
+  type: "object",
+  properties: Object.freeze({
+    status: Object.freeze({
+      type: "string",
+      enum: Object.freeze([
+        "prepared",
+        "dispatched",
+        "reported",
+        "verified",
+        "failed",
+        "cancelled",
+      ]),
+    }),
+    limit: Object.freeze({
+      type: "integer",
+      minimum: 1,
+      maximum: MAX_SEARCH_LIMIT,
+      default: DEFAULT_SEARCH_LIMIT,
+    }),
+  }),
+  required: Object.freeze([]),
+  additionalProperties: false,
+}) as unknown as Record<string, unknown>;
+
+export const AGENT_HANDOFF_OPEN_PARAMETERS = Object.freeze({
+  type: "object",
+  properties: Object.freeze({
+    handoffId: Object.freeze({
+      type: "string",
+      pattern: AGENT_UUID_PATTERN,
+    }),
+  }),
+  required: Object.freeze(["handoffId"]),
+  additionalProperties: false,
+}) as unknown as Record<string, unknown>;
+
+/**
  * Explicit closed JSON parameter schemas for the proposal-only
  * `purpose.propose` / `task.propose` (AV03): the model supplies only the
  * strict draft input (scope/draft-kind/kind/quote/interpretation, plus the
@@ -1100,6 +1146,8 @@ const AGENT_BROKER_TOOL_PARAMETERS: Readonly<
   "task.open": AGENT_TASK_OPEN_PARAMETERS,
   "learning.list": AGENT_LEARNING_LIST_PARAMETERS,
   "learning.open": AGENT_LEARNING_OPEN_PARAMETERS,
+  "handoff.list": AGENT_HANDOFF_LIST_PARAMETERS,
+  "handoff.open": AGENT_HANDOFF_OPEN_PARAMETERS,
 };
 
 /**

@@ -871,3 +871,275 @@ export const LearningProposeRequestSchema = z.strictObject({
 export type LearningProposeRequest = z.infer<
   typeof LearningProposeRequestSchema
 >;
+
+/* ------------------------------------------------------------------ */
+/* AV03 delegation handoffs: human-driven pi-orch handoff records.     */
+/*                                                                     */
+/* A handoff is a session-owned record bound to an EXISTING task (+ a  */
+/* parent purpose snapshot). ALL frozen fields (target, acceptance      */
+/* criteria, operation scope, budget labels, boundary flags) are       */
+/* entered by the HUMAN at creation: the model can never create, edit, */
+/* or spawn a handoff. This module performs NO execution, NO spawning  */
+/* of workers/processes, NO grants, NO permission changes, NO numeric  */
+/* budget enforcement, and NO task auto-completion. Budget entries are  */
+/* human-entered TEXT labels only (never enforced numerically, never   */
+/* increased by us). Boundary flags are recorded as REQUIRES SEPARATE  */
+/* AUTHORIZATION claims: storing them grants nothing and changes       */
+/* nothing. A verified handoff never completes its task automatically. */
+/* ------------------------------------------------------------------ */
+
+/** Handoff lifecycle (terminal: verified / failed / cancelled). */
+export const HandoffStatusSchema = z.enum([
+  "prepared",
+  "dispatched",
+  "reported",
+  "verified",
+  "failed",
+  "cancelled",
+]);
+export type HandoffStatus = z.infer<typeof HandoffStatusSchema>;
+
+/** Closed operation-scope vocabulary (no automatic spawning implied). */
+export const HandoffOpScopeSchema = z.enum(["investigate", "implement"]);
+export type HandoffOpScope = z.infer<typeof HandoffOpScopeSchema>;
+
+/**
+ * Closed boundary-flag vocabulary. Each recorded flag means REQUIRES
+ * SEPARATE AUTHORIZATION: storing it grants nothing, changes no control,
+ * task, grant, or config anywhere in this codebase.
+ */
+export const HandoffBoundarySchema = z.enum([
+  "external_publication",
+  "shared_branch",
+  "payment",
+  "deletion",
+  "secret",
+  "access_change",
+]);
+export type HandoffBoundary = z.infer<typeof HandoffBoundarySchema>;
+
+/** Closed retry-cause vocabulary (explicit human cause, every time). */
+export const HandoffRetryCauseSchema = z.enum([
+  "transient_infra",
+  "worker_error",
+  "criteria_unmet",
+  "environment",
+]);
+export type HandoffRetryCause = z.infer<typeof HandoffRetryCauseSchema>;
+
+/**
+ * Worker-reported environment claim (UNTRUSTED text from the report).
+ * A `sandbox` success NEVER implies production deployment: production is
+ * a SEPARATE unverified claim field, never set by verification.
+ */
+export const HandoffEnvironmentSchema = z.enum(["sandbox", "production"]);
+export type HandoffEnvironment = z.infer<typeof HandoffEnvironmentSchema>;
+
+/** Append-only handoff lifecycle events (never updated or deleted). */
+export const HandoffEventSchema = z.enum([
+  "prepared",
+  "dispatched",
+  "reported",
+  "verified",
+  "failed",
+  "cancelled",
+  "abnormal_exit",
+  "attempt_recorded",
+  "superseded",
+  "reaffirmed",
+  "reevaluation_flagged",
+  "reevaluation_cleared",
+]);
+export type HandoffEvent = z.infer<typeof HandoffEventSchema>;
+
+/** Human frozen handoff target (bounded, immutable once created). */
+export const HandoffTargetSchema = z
+  .string()
+  .min(1)
+  .refine(codePointsMax(2000), { message: "target over 2000 code points" });
+export type HandoffTarget = z.infer<typeof HandoffTargetSchema>;
+
+/** One immutable acceptance criterion (bounded text, never weakened). */
+export const HandoffCriterionSchema = z
+  .string()
+  .min(1)
+  .refine(codePointsMax(2000), { message: "criterion over 2000 code points" });
+export type HandoffCriterion = z.infer<typeof HandoffCriterionSchema>;
+
+/**
+ * Human-entered resource/budget claim TEXT label only (never enforced
+ * numerically by us, never increased by us, never a numeric cap).
+ */
+export const HandoffBudgetLabelSchema = z
+  .string()
+  .min(1)
+  .refine(codePointsMax(500), {
+    message: "budget label over 500 code points",
+  });
+export type HandoffBudgetLabel = z.infer<typeof HandoffBudgetLabelSchema>;
+
+/** Optional human external reference text (recorded, never resolved). */
+export const HandoffExternalRefSchema = z
+  .string()
+  .min(1)
+  .refine(codePointsMax(500), {
+    message: "external ref over 500 code points",
+  });
+export type HandoffExternalRef = z.infer<typeof HandoffExternalRefSchema>;
+
+/** Untrusted worker report summary text (verification evidence, not fact). */
+export const HandoffReportSummarySchema = z
+  .string()
+  .min(1)
+  .refine(codePointsMax(2000), { message: "summary over 2000 code points" });
+export type HandoffReportSummary = z.infer<typeof HandoffReportSummarySchema>;
+
+/** Per-criterion verification result (human-entered pass + evidence). */
+export const HandoffCriterionResultSchema = z.strictObject({
+  index: z.number().int().min(0),
+  pass: z.boolean(),
+  evidence: z.string().min(1).refine(codePointsMax(2000), {
+    message: "evidence over 2000 code points",
+  }),
+});
+export type HandoffCriterionResult = z.infer<
+  typeof HandoffCriterionResultSchema
+>;
+
+export const HandoffViewSchema = z.strictObject({
+  id: UuidSchema,
+  sessionId: UuidSchema,
+  taskId: UuidSchema,
+  /** Frozen task version the handoff was recorded against. */
+  taskVersion: z.number().int().min(1),
+  /** Frozen parent purpose snapshot (ids/versions from the owning task). */
+  parentPurposeId: UuidSchema.nullable(),
+  parentPurposeVersion: z.number().int().min(1).nullable(),
+  /** Frozen human-entered target (immutable; change needs a new handoff). */
+  target: HandoffTargetSchema,
+  /** Frozen human-entered acceptance criteria (immutable array). */
+  acceptanceCriteria: z.array(HandoffCriterionSchema).min(1).max(20),
+  /** Frozen closed operation scope. */
+  opScope: HandoffOpScopeSchema,
+  /** Human-entered budget TEXT labels only (never numeric enforcement). */
+  budgetLabel: HandoffBudgetLabelSchema.nullable(),
+  /**
+   * Recorded boundary flags: each REQUIRES SEPARATE AUTHORIZATION.
+   * Storing them grants nothing.
+   */
+  boundaries: z.array(HandoffBoundarySchema).max(6),
+  status: HandoffStatusSchema,
+  version: z.number().int().min(1),
+  /**
+   * Durable NOTICE that the parent purpose was revoked/superseded (same
+   * transaction as the revocation). New dispatch is refused while set;
+   * cancel is always allowed.
+   */
+  needsReevaluation: z.boolean(),
+  /** Count of explicitly human-recorded attempts (no automatic retry). */
+  activeAttempt: z.number().int().min(0),
+  /** Optional human external reference text (recorded, never resolved). */
+  externalRef: HandoffExternalRefSchema.nullable(),
+  /** Untrusted worker environment claim (sandbox NEVER means production). */
+  reportEnvironment: HandoffEnvironmentSchema.nullable(),
+  /** Untrusted worker report summary text. */
+  reportSummary: HandoffReportSummarySchema.nullable(),
+  /** Per-criterion verification results (all frozen criteria, all pass). */
+  verificationResults: z.array(HandoffCriterionResultSchema).nullable(),
+  /** This handoff supersedes an older frozen record, if any. */
+  supersedesHandoffId: UuidSchema.nullable(),
+  /** Newer handoff that superseded this record, if any. */
+  supersededBy: UuidSchema.nullable(),
+  createdAt: UnixMsSchema,
+  updatedAt: UnixMsSchema,
+});
+export type HandoffView = z.infer<typeof HandoffViewSchema>;
+
+/** Trusted human creation: bound to an existing task, frozen on write. */
+export const HandoffCreateRequestSchema = z.strictObject({
+  taskId: UuidSchema,
+  target: HandoffTargetSchema,
+  acceptanceCriteria: z.array(HandoffCriterionSchema).min(1).max(20),
+  opScope: HandoffOpScopeSchema,
+  budgetLabel: HandoffBudgetLabelSchema.optional(),
+  boundaries: z.array(HandoffBoundarySchema).max(6).default([]),
+  /** Create this record as the superseding successor of a frozen handoff. */
+  supersedesHandoffId: UuidSchema.optional(),
+});
+export type HandoffCreateRequest = z.infer<typeof HandoffCreateRequestSchema>;
+
+/** Trusted human CAS guard (no status/body fields beyond the version). */
+export const HandoffTransitionRequestSchema = z.strictObject({
+  expectedVersion: z.number().int().min(1),
+});
+export type HandoffTransitionRequest = z.infer<
+  typeof HandoffTransitionRequestSchema
+>;
+
+/** Human marks dispatched, with an optional external reference text. */
+export const HandoffDispatchRequestSchema = z.strictObject({
+  expectedVersion: z.number().int().min(1),
+  externalRef: HandoffExternalRefSchema.optional(),
+});
+export type HandoffDispatchRequest = z.infer<
+  typeof HandoffDispatchRequestSchema
+>;
+
+/** Human records the untrusted worker report (sandbox NEVER production). */
+export const HandoffReportRequestSchema = z.strictObject({
+  expectedVersion: z.number().int().min(1),
+  environment: HandoffEnvironmentSchema,
+  summary: HandoffReportSummarySchema,
+});
+export type HandoffReportRequest = z.infer<typeof HandoffReportRequestSchema>;
+
+/**
+ * Human verification: per-criterion pass + evidence for EVERY frozen
+ * criterion (all must pass). Any fail or any missing index refuses.
+ */
+export const HandoffVerifyRequestSchema = z.strictObject({
+  expectedVersion: z.number().int().min(1),
+  results: z.array(HandoffCriterionResultSchema).min(1).max(20),
+});
+export type HandoffVerifyRequest = z.infer<typeof HandoffVerifyRequestSchema>;
+
+/** Human records one more attempt with an explicit cause (never auto). */
+export const HandoffAttemptRequestSchema = z.strictObject({
+  expectedVersion: z.number().int().min(1),
+  cause: HandoffRetryCauseSchema,
+});
+export type HandoffAttemptRequest = z.infer<typeof HandoffAttemptRequestSchema>;
+
+/** Bounded handoff list query (keyset cursor, newest-first). */
+export const HandoffListQuerySchema = z.strictObject({
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  cursor: z.string().min(1).max(2048).optional(),
+  status: HandoffStatusSchema.optional(),
+});
+export type HandoffListQuery = z.infer<typeof HandoffListQuerySchema>;
+export type HandoffListQueryInput = z.input<typeof HandoffListQuerySchema>;
+
+export const HandoffListResponseSchema = z.strictObject({
+  items: z.array(HandoffViewSchema).max(100),
+  /** Opaque keyset cursor for the next older page; null when exhausted. */
+  nextCursor: z.string().min(1).max(2048).nullable(),
+  /** True when an older page remains (LIMIT+1 probe, never truncated). */
+  hasMore: z.boolean(),
+  /**
+   * Count of session-owned ACTIVE (dispatched/reported) handoffs. A
+   * concurrency TRACKING count only: no numeric limit is invented or
+   * enforced anywhere.
+   */
+  activeCount: z.number().int().min(0),
+});
+export type HandoffListResponse = z.infer<typeof HandoffListResponseSchema>;
+
+/** Handoff-create scope: one key space per owning session. */
+export function handoffCreateScope(sessionId: string): string {
+  return `session:${UuidSchema.parse(sessionId)}:handoff`;
+}
+
+/** Handoff-mutation scope: one key space per handoff + operation. */
+export function handoffOpScope(handoffId: string, op: string): string {
+  return `handoff:${UuidSchema.parse(handoffId)}:${op}`;
+}

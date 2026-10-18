@@ -83,6 +83,10 @@ import {
   RepositoryNotFoundError,
   RepositoryValidationError,
 } from "./errors.js";
+import {
+  flagHandoffReevaluationInTx,
+  flagHandoffTaskReparentInTx,
+} from "./handoff.js";
 import { flagLearningReevaluationInTx } from "./learning.js";
 import {
   enqueueShadowSourceInTx,
@@ -1362,6 +1366,23 @@ export function correctPurpose(
         throw error;
       }
     }
+    // Same-TX durable reevaluation NOTICE for handoffs bound to the
+    // superseded parent (AV03): flags only (never a task/purpose write,
+    // never auto-cancel, never auto-complete). Best-effort on pre-0017
+    // databases (missing tables).
+    try {
+      flagHandoffReevaluationInTx(
+        db,
+        session,
+        oldRow.id,
+        "purpose_superseded",
+        now,
+      );
+    } catch (error) {
+      if (!(error instanceof Error && /no such table/i.test(error.message))) {
+        throw error;
+      }
+    }
     const oldCurrent = readPurpose(db, oldRow.id);
     const newCurrent = readPurpose(db, newId);
     if (oldCurrent === null || newCurrent === null) {
@@ -1570,6 +1591,22 @@ function transitionPurpose(
         db,
         session,
         row.scope,
+        operation === "revoke" ? "purpose_revoked" : "purpose_achieved",
+        now,
+      );
+    } catch (error) {
+      if (!(error instanceof Error && /no such table/i.test(error.message))) {
+        throw error;
+      }
+    }
+    // Same-TX durable reevaluation NOTICE for handoffs bound to this
+    // parent (AV03): flags only (never a task write, never auto-cancel,
+    // never auto-complete). Best-effort on pre-0017 databases.
+    try {
+      flagHandoffReevaluationInTx(
+        db,
+        session,
+        row.id,
         operation === "revoke" ? "purpose_revoked" : "purpose_achieved",
         now,
       );
@@ -2412,6 +2449,24 @@ export function resumeTask(
       `${input.evidenceKind}: ${input.evidence}`,
       now,
     );
+    // Same-TX handoff notice: a reparented (or version-advanced) task
+    // leaves frozen handoff snapshots stale, so flag bound handoffs whose
+    // frozen binding no longer matches. Best-effort on pre-0017 databases.
+    if (nextParent !== row.parent_purpose_id) {
+      try {
+        flagHandoffTaskReparentInTx(
+          db,
+          session,
+          row.id,
+          "task_reparented_on_resume",
+          now,
+        );
+      } catch (error) {
+        if (!(error instanceof Error && /no such table/i.test(error.message))) {
+          throw error;
+        }
+      }
+    }
     // Same-TX durable shadow source: resume needs new meaningful state, so
     // a resumed task re-enters deliberation (no catchup for paused time).
     enqueueShadowPolicyChangeInTx(

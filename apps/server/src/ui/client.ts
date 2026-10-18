@@ -16,6 +16,7 @@ import {
   revalidateConflictArm,
   shouldResetConflictArm,
 } from "./autonomy_state.js";
+import { HandoffPanel } from "./handoff_panel.js";
 import { LearningPanel } from "./learning_panel.js";
 import { NotificationPanel } from "./notification_panel.js";
 import { ProposalPanel } from "./proposal_panel.js";
@@ -416,6 +417,8 @@ class ConversationApp {
   private proposals: ProposalPanel | null = null;
   /** AV04 learning consumer (labeled hypotheses + anchored evidence). */
   private learning: LearningPanel | null = null;
+  /** AV03 delegation-handoff consumer (human-driven handoff records). */
+  private handoffs: HandoffPanel | null = null;
 
   private readonly list: HTMLElement;
   private readonly notice: HTMLElement;
@@ -669,6 +672,42 @@ class ConversationApp {
             learning.bind();
             learning.notifySessionChanged();
             this.learning = learning;
+            // AV03 delegation handoffs: human-driven handoff records
+            // (create/dispatch/report/verify/attempts, human commits only;
+            // no execution, no spawning, no grants, no task auto-complete).
+            // Missing nodes fail closed with a visible status (SSR ships
+            // together). Refreshes on the same run-settled hook as learning.
+            try {
+              const handoffs = new HandoffPanel({
+                getSessionId: () => this.sessionId,
+                http: {
+                  get: (path) => fetchJson(path),
+                  post: (path, payload, key) => postJson(path, payload, key),
+                  getText: async (path) => {
+                    const response = await fetch(path, {
+                      credentials: "same-origin",
+                      headers: { accept: "text/plain" },
+                    });
+                    return {
+                      status: response.status,
+                      text: await response.text(),
+                    };
+                  },
+                },
+              });
+              handoffs.bind();
+              handoffs.notifySessionChanged();
+              this.handoffs = handoffs;
+            } catch (error) {
+              const message =
+                error instanceof Error ? error.message : "handoff failed";
+              const statusNode = document.getElementById("handoff-status");
+              if (statusNode !== null) {
+                statusNode.textContent = message;
+              } else {
+                throw error;
+              }
+            }
           } catch (error) {
             const message =
               error instanceof Error ? error.message : "learning failed";
@@ -4014,6 +4053,11 @@ class ConversationApp {
       this.learning?.notifyRunSettled();
     } catch {
       // Best effort: run teardown never breaks for learning.
+    }
+    try {
+      this.handoffs?.notifyRunSettled();
+    } catch {
+      // Best effort: run teardown never breaks for handoffs.
     }
     try {
       this.proposals?.notifyComposureChanged();
