@@ -15,6 +15,7 @@
     "e2e:serve": "node --import tsx e2e/server.ts",
     "test:e2e": "playwright test --config playwright.config.ts",
     "test": "vitest run",
+    "smoke:startup": "vitest run --config pnpm-smoke.startup.config.mts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "biome check src"
   },

@@ -4136,3 +4136,50 @@ proposals, grants, runner, or bridge spawn.
 - Retry semantics: `recordHandoffAttempt` is allowed from any non-terminal state EXCEPT an already-superseded row and a pending `needs_reevaluation` notice (reaffirm first, so a stale parent is never silently retried); a `failed` handoff RETURNS TO `prepared` on the recorded attempt (same-TX status move + `active_attempt` bump + version bump), then follows the normal dispatch→report→verify path. No automatic retry, no timer, no attempt cap; verified/cancelled stay terminal; the attempt cause is a required closed label (transient_infra|worker_error|criteria_unmet|environment). The panel's attempt button is kernel-aligned: disabled for terminal states, a pending notice, and superseded rows (enabled again on the prepared successor path after the failed→prepared move).
 - Consumer-panel truthfulness (all three panels: handoff / learning / proposal): each 200 mutation response's returned view is applied to the map BEFORE the page fetch (session-owned only), and a handoff/hypothesis/proposal NOT on the fresh page is always re-read directly (map presence no longer decides) — so an older-page record's commit never uses a stale version: dispatch→report on a handoff living ONLY beyond the newest 50-item page completes WITHOUT a 409 (the second human commit always carries the version the server holds). A definitive 409 re-reads the named record directly and clears the frozen op with an honest retype message; a CREATE 404 keeps the drawer + typed inputs open for correction; a 404 for a background/older record never closes the human's current drawer; the open selection's history lists clear immediately on selection switch; a non-200 history read renders a visible failure line, never silent emptiness.
 - Proof (this worktree, observed): focused Vitest 17 files / 108 tests (kernel handoff/autonomy_slice/autonomy_tools/learning/learning_review_fixes/conversation_proposals/conversation_proposal_review_fixes/conversation_proposal_agent_adopt/action_proposals/proposal_idempotency_lookup + server handoff_http/autonomy_http/learning_http/conversation_proposals_http/conversation_proposals_paging/proposals/proposal_approval_replay) all pass; Chromium `handoff.spec.ts` + `learning.spec.ts` + `conversation_proposals.spec.ts` 15/15 via `apps/server/playwright.config.ts` webServer (auto production UI build), including the NEW older-page regression: 51 fillers push the target to item 52, it dispatches→reports with no stale-version 409 (badge 版 2 then 版 3). Root `tsc --noEmit` exit 0; e2e `tsc --noEmit` exit 0; `biome check .` exit 0 on touched files (1 pre-existing warning in untouched `action_create.test.ts` remains). Full old suites NOT rerun (prior green preserved). No PR.
+
+## Startup-contract B1–B4 decision_inputs verification + T3/T4 standalone smoke (2026-10-18, no live writes)
+
+Verification record for the `decision_inputs` B1–B4 startup-contract review items on branch
+`feat/startup-contract-b1-c10-08-d2` (worktree `.c12-calendar/startup-contract-wt`, commits
+`84b0feb` shared strict-instant module + `7d70e57` adoption). No product code changed in this
+step except the permanent smoke regression; all three decisions were proven with existing or
+newly added tests, no flaky rewrites.
+
+- B1, B3, B4 already satisfied on master (no new product change required):
+  - B3 (injected binding `derivePort`): existing test
+    `apps/server/test/rescheduleWriteStartup.test.ts` —
+    describe `injected calendar binding derives the write port from the active selection`,
+    test `derivePort receives the injected selection and the full approval pipeline succeeds`
+    (asserts the seen array is exactly `[{connectorInstanceId, calendarId: "primary", account: "ops@example"}]`,
+    `seen.length === 1`, real HTTP approve → scheduler → fixture PATCH → terminal receipt).
+  - B4 (overlong write identity pre-DB preflight): existing test in the same file —
+    describe `canonical write identity is validated before any DB side effect`, test
+    `rejects overlong test identities even with an injected factory (no DB, no transport)`
+    (129-char name / 65-char version reject with `existsSync(dbPath) === false`, factory
+    call count still 0).
+  - B1 (frozen-inherited env freeze): existing coverage on master per `docs/plan/active_projects_tasks.md`
+    line 19 (2026-10-18 追記, `packages/connector-mcp/src/client.ts`) — unchanged, not re-proven here.
+- B2 / C10-08 gap fixed on this branch via the shared predicate (commits `84b0feb` + `7d70e57`):
+  `packages/connector-calendar` `isStrictCalendarInstant` adopted at every inbound path, adopted by
+  the rescheduleWrite tool surface; regression tests in `packages/connector-calendar/test/` from the
+  adoption commit cover the sub-ms/fractional-instant rejections. Status: C10-08「採用判定待ち（gap 修正済み）」
+  — the fractional-ISO gap is fixed in code/tests, formal adoption of an external binding/pin/live
+  Google remains out of scope for this branch (no OAuth, no live writes).
+- D2 decision (include T3/T4 standalone actual-`startServer` smoke in acceptance, per the PR20 T5
+  record's "still-pending T3/T4 standalone actual-`startServer` smoke"): added
+  `apps/server/test/startup_smoke.test.ts` (real `startServer`, temp-dir SQLite/env, port 0, servers
+  closed in `afterEach`):
+  - T3: `T3: disabled calendar-write config listens with 0 capability reads and 0 closes` —
+    disabled composition with an injected OWNED write binding present never adopts it:
+    `GET /health/ready` 200, `derivePort`/`update` 0 calls, shutdown hook 0 closes even on a second
+    shutdown call.
+  - T4: `T4: enabled owned port derives once with the injected selection and closes exactly once` —
+    enabled (optIn + writeEnabled) composition: `GET /health/ready` 200, `derivePort` exactly once
+    with the injected selection (`{calendarId: "primary", account: "ops@example"}`), 0 `update`
+    calls, adopted `owned: true` shutdown hook closed EXACTLY once on server shutdown.
+  - Not duplicated (reuse per D2): the rescheduleWriteStartup full-pipeline B3 case and the B4
+    overlong-identity case; `createWriteStartup.test.ts` `preserves read-only defaults when every
+    gate is off` (disabled listens).
+  - `smoke:startup` script added in `apps/server/package.json` running exactly the covering files
+    (`pnpm-smoke.startup.config.mts` include: `startup_smoke`, `rescheduleWriteStartup`,
+    `createWriteStartup`): run output `Test Files 3 passed (3), Tests 42 passed (42)`.

@@ -10,8 +10,6 @@
  */
 
 const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
-const TIMED =
-  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
 
 /**
  * IANA shape copied from the existing server/contracts convention
@@ -68,44 +66,14 @@ export function parseDateOnly(value: string): number | undefined {
 }
 
 /**
- * Explicit-offset RFC3339 timestamp to epoch ms, or undefined. Rejects
- * impossible calendar dates, out-of-range components and offsets, and any
- * string without an explicit `Z`/`±HH:MM` offset.
+ * Explicit-offset RFC3339 instants (timed seconds/minute forms) are parsed
+ * by the SHARED strict contract (`parseStrictCalendarInstantMs` /
+ * `isStrictCalendarInstant` in `@companion/contracts`): whole seconds and
+ * millisecond-expressible fractions accept, genuine sub-millisecond
+ * precision rejects (never silently truncated), impossible calendar values,
+ * all-day/naive/missing-offset strings and overlong strings fail closed.
+ * This module keeps only the calendar-time helpers that are NOT instants.
  */
-export function parseTimedInstant(value: string): number | undefined {
-  const m = TIMED.exec(value);
-  if (m === null) return undefined;
-  const year = Number(m[1]);
-  const month = Number(m[2]);
-  const day = Number(m[3]);
-  const hour = Number(m[4]);
-  const minute = Number(m[5]);
-  const second = Number(m[6]);
-  if (month < 1 || month > 12) return undefined;
-  if (day < 1 || day > daysInMonth(year, month)) return undefined;
-  if (hour > 23 || minute > 59 || second > 59) return undefined;
-  const fraction = m[7];
-  // Milliseconds are exactly the first three decimal digits, right-padded.
-  // Parsing `0.<fraction>` as a float can round up to the next second (e.g.
-  // `.999999999999999999`), so take the digits as a bounded small integer.
-  // Truncation here is exact: the write contract (`isStrictCalendarInstant`
-  // in `rescheduleWrite.ts`) rejects genuine sub-millisecond precision, so a
-  // surviving fraction is always millisecond-expressible.
-  const ms =
-    fraction !== undefined ? Number(fraction.slice(1, 4).padEnd(3, "0")) : 0;
-  // Group 8 `(Z|[+-]\d{2}:\d{2})` is mandatory, so the capture is always a string.
-  const zone = m[8] as string;
-  let offsetMs = 0;
-  if (zone !== "Z") {
-    const sign = zone.startsWith("-") ? -1 : 1;
-    const offsetHour = Number(zone.slice(1, 3));
-    const offsetMinute = Number(zone.slice(4, 6));
-    if (offsetHour > 23 || offsetMinute > 59) return undefined;
-    offsetMs = sign * (offsetHour * 60 + offsetMinute) * 60_000;
-  }
-  const msValue = utcMs(year, month, day, hour, minute, second, ms) - offsetMs;
-  return Number.isFinite(msValue) ? msValue : undefined;
-}
 
 /** Canonical UTC ISO representation of a validated instant. */
 export function canonicalUtcIso(epochMs: number): string {

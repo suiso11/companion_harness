@@ -78,6 +78,9 @@ importers:
       '@companion/connector-mcp':
         specifier: workspace:*
         version: link:../connector-mcp
+      '@companion/contracts':
+        specifier: workspace:*
+        version: link:../contracts
       zod:
         specifier: 4.5.4
         version: 4.5.4

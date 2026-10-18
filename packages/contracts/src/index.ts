@@ -29,6 +29,15 @@
  * (envelopes in `./events.js`). Historical M0/M1/M2 registries stay exact
  * and untouched; `M5RunEvent*` / `Latest*` serve the M5 registry
  * (there is deliberately no `action.rejected` RunEvent).
+ *
+ * B2/C10-08 (2026-10-18) adds the shared strict instant contract
+ * (see `./instant.js`): the single strict RFC3339 parser/predicate
+ * (`parseStrictCalendarInstantMs` / `isStrictCalendarInstant`) shared by
+ * every inbound instant path (readonly search input, provider readonly
+ * output normalization, proposal staging, dedicated write ports, kernel
+ * read-back comparisons and autonomy deadlines) — whole seconds and
+ * millisecond-expressible fractions accepted, genuine sub-millisecond
+ * precision rejected, never silently truncated.
  */
 
 export type {
@@ -502,6 +511,11 @@ export {
   UUID_V4_REGEX,
   UuidSchema,
 } from "./ids.js";
+export {
+  daysInStrictMonth,
+  isStrictCalendarInstant,
+  parseStrictCalendarInstantMs,
+} from "./instant.js";
 export type {
   MemoryDetailResponse,
   MemoryErrorCode,

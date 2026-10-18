@@ -10,6 +10,7 @@
     "lint": "biome check src test"
   },
   "dependencies": {
+    "@companion/contracts": "workspace:*",
     "@companion/connector-mcp": "workspace:*",
     "zod": "4.5.4"
   },
