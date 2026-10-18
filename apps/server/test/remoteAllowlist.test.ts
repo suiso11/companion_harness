@@ -347,6 +347,22 @@ describe("remote config fail-closed", () => {
     ).toThrow(/requires authentication/);
   });
 
+  it("rejects explicit null for remote keys (defaults only when absent)", () => {
+    for (const raw of [
+      '{"enabled":null}',
+      '{"enabled":null,"allowedOrigins":[]}',
+      '{"enabled":false,"allowedOrigins":null}',
+      '{"enabled":true,"allowedOrigins":null}',
+    ]) {
+      expect(() => parseRemoteConfig(raw), raw).toThrow(ServerConfigError);
+    }
+    // Absent keys still default.
+    expect(parseRemoteConfig("{}")).toEqual({
+      enabled: false,
+      allowedOrigins: [],
+    });
+  });
+
   it("rejects IPv6-literal origins at config time", () => {
     for (const raw of [
       '{"enabled":false,"allowedOrigins":["https://[fd7a:115c:a1e0::1]"]}',

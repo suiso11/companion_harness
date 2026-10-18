@@ -267,11 +267,17 @@ export function parseRemoteConfig(raw: string | undefined): RemoteConfig {
     enabled?: unknown;
     allowedOrigins?: unknown;
   };
-  const enabled = record.enabled ?? false;
+  // Defaults apply only when keys are absent: an explicit `null` is a
+  // malformed shape (strict `{ enabled?, allowedOrigins? }` contract),
+  // not an omitted key. `??` would silently swallow null, so branch on
+  // key presence and let the type checks below reject null.
+  const hasEnabled = Object.hasOwn(parsed, "enabled");
+  const hasOrigins = Object.hasOwn(parsed, "allowedOrigins");
+  const enabled = hasEnabled ? record.enabled : false;
   if (typeof enabled !== "boolean") {
     throw configError("remote config enabled flag is invalid");
   }
-  const rawOrigins = record.allowedOrigins ?? [];
+  const rawOrigins = hasOrigins ? record.allowedOrigins : [];
   if (!Array.isArray(rawOrigins) || rawOrigins.length > MAX_REMOTE_ORIGINS) {
     throw configError("remote origin allowlist is invalid");
   }
