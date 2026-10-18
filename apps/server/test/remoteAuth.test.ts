@@ -85,6 +85,10 @@ function writePasswordFile(dir: string, password: string): string {
 
 async function makeAuthApp(
   overrides: Partial<RemoteConfig> = {},
+  assets: { clientJs?: string; clientCss?: string } = {
+    clientJs: 'console.log("test");',
+    clientCss: ":root{color:red}",
+  },
 ): Promise<Fixture> {
   const scratch = mkdtempSync(join(tmpdir(), "companion-remote-auth-"));
   const passwordFile = writePasswordFile(scratch, PASSWORD);
@@ -134,6 +138,7 @@ async function makeAuthApp(
     now: () => nowValue,
     remoteStore: store,
     remotePassword: verifier,
+    assets,
   });
   return {
     ...created,
@@ -757,6 +762,63 @@ describe("login sessions (steps 2-4)", () => {
       });
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ ok: true });
+    } finally {
+      f.close();
+    }
+  });
+});
+
+describe("login stylesheet exemption (exact)", () => {
+  it("serves client.css unauthenticated via GET with text/css", async () => {
+    const f = await makeAuthApp();
+    try {
+      const res = await f.app.request("/assets/client.css", {
+        headers: { host: ALLOWED_HOST },
+      });
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toContain("text/css");
+      expect((await res.text()).length).toBeGreaterThan(0);
+    } finally {
+      f.close();
+    }
+  });
+
+  it("serves client.css unauthenticated via HEAD with text/css", async () => {
+    const f = await makeAuthApp();
+    try {
+      const res = await f.app.request("/assets/client.css", {
+        method: "HEAD",
+        headers: { host: ALLOWED_HOST },
+      });
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toContain("text/css");
+    } finally {
+      f.close();
+    }
+  });
+
+  it("keeps client.js behind the session", async () => {
+    const f = await makeAuthApp();
+    try {
+      const res = await f.app.request("/assets/client.js", {
+        headers: { host: ALLOWED_HOST },
+      });
+      expect(res.status).toBe(401);
+      expect(await res.json()).toEqual({
+        error: { code: "unauthenticated", message: "authentication required" },
+      });
+    } finally {
+      f.close();
+    }
+  });
+
+  it("still rejects the stylesheet for unknown Hosts", async () => {
+    const f = await makeAuthApp();
+    try {
+      const res = await f.app.request("/assets/client.css", {
+        headers: { host: "evil.example" },
+      });
+      expect(res.status).toBe(400);
     } finally {
       f.close();
     }
