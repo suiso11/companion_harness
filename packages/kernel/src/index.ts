@@ -140,14 +140,24 @@ export {
 export {
   AutonomyStateConflictError,
   AutonomyVersionConflictError,
+  achievePurpose,
   applyAutonomyRestartFence,
+  cancelTask,
+  completeTask,
+  correctPurpose,
   createAutonomyQueryPort,
+  createPurpose,
+  createTask,
   getAutonomyControl,
+  holdTask,
   isAutonomousWorkAllowed,
   isPurposeApplicableAt,
   isStrictAutonomyDeadline,
   listAutonomyActivity,
   recordPurposeConflict,
+  resumeTask,
+  revokePurpose,
+  startTask,
 } from "./autonomy.js";
 export type { AutonomyToolsOptions } from "./autonomy_tools.js";
 export {
@@ -415,6 +425,7 @@ export {
   apiIdempotency,
   autonomyActivity,
   autonomyControl,
+  autonomyPurposeConflicts,
   autonomyPurposeEvents,
   autonomyPurposes,
   autonomyTaskEvents,
