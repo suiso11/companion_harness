@@ -168,7 +168,12 @@ registry.register("m0-default", async (ctx: RunStrategyContext) => {
     // Reasoning deltas (ephemeral) -> durable tool.requested x2 ->
     // durable tool.completed x2 -> usage -> terminal echo. The tool phase
     // spans ~3s so a mid-run reload deterministically lands pre-terminal.
+    // The leading pause lets the browser's run SSE stream connect before
+    // the first delta flushes: the bus drops pieces with no subscriber
+    // (ephemeral by design), so publishing immediately would race the
+    // subscribe and lose piece 1 flakily under load.
     const runId = ctx.run.id;
+    await streamingSleep(600, ctx.signal);
     modelDeltaBus.publishPiece({
       runId,
       step: 1,
@@ -229,8 +234,11 @@ registry.register("m0-default", async (ctx: RunStrategyContext) => {
   }
   if (STREAMING_SIM_ENABLED && text.includes(TEXT_THINK)) {
     // Two paced reasoning pieces (markup-significant text proves
-    // plain-text rendering) + terminal usage, then the echo answer.
+    // plain-text rendering) + terminal usage, then the echo answer. The
+    // leading pause lets the browser's run SSE stream connect first (see
+    // the TEXT_THINK_TOOLS branch: no-subscriber pieces drop by design).
     const runId = ctx.run.id;
+    await streamingSleep(600, ctx.signal);
     modelDeltaBus.publishPiece({
       runId,
       step: 1,
