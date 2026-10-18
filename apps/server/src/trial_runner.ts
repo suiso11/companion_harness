@@ -446,8 +446,8 @@ export class TrialRunner {
         const raw = out.body as unknown as Record<string, unknown>;
         selected = candidate;
         selectedBody = {
-          request: raw["request"] as TrialLaunchRequest,
-          grant: raw["grant"] as { scope: string },
+          request: raw.request as TrialLaunchRequest,
+          grant: raw.grant as { scope: string },
         };
         break;
       } catch (error) {
@@ -791,10 +791,10 @@ export class TrialRunner {
       stdoutChunks.push(buf);
       stdoutBytes += buf.length;
     });
-    let stderrBytes = 0;
+    let _stderrBytes = 0;
     child.stderr?.on("data", (chunk: Buffer | string) => {
       const buf = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
-      stderrBytes += buf.length;
+      _stderrBytes += buf.length;
       // Discard beyond the cap: keep the listener attached so stderr keeps
       // draining and the bridge can never block on a full pipe.
       void buf;
@@ -992,7 +992,9 @@ export class TrialRunner {
       // remaining<=0 check below still routes to permit-denied (kernel fit).
       remainingRuntimeMs: remainingRuntimeMs <= 0 ? 1 : remainingRuntimeMs,
       timeoutMs:
-        observedTimeoutMs === null ? request.budget.timeoutMs : observedTimeoutMs,
+        observedTimeoutMs === null
+          ? request.budget.timeoutMs
+          : observedTimeoutMs,
       maxOutputBytes: request.budget.maxOutputBytes,
       foregroundGateOpen: !this.isForegroundBusy(),
       observedAt: this.clock(),
@@ -1252,8 +1254,7 @@ export class TrialRunner {
     // exit or a signal still records observed (never authorized), because the
     // result JSON alone cannot prove the observed process succeeded.
     const stdoutText = Buffer.concat(stdoutChunks).toString("utf8");
-    const bridgeClean =
-      bridgeExit.exitCode === 0 && bridgeExit.signal === null;
+    const bridgeClean = bridgeExit.exitCode === 0 && bridgeExit.signal === null;
     const proof: ParsedBridgeResult = bridgeClean
       ? parseBridgeResult(stdoutText, request)
       : { kind: "invalid", exitCode: bridgeExit.exitCode ?? 1 };
@@ -1360,14 +1361,14 @@ function parseWireCheckEntry(
   const item = asRecord(entry);
   if (
     item === null ||
-    typeof item["id"] !== "string" ||
-    !/^[A-Za-z0-9_-]{1,64}$/.test(item["id"] as string)
+    typeof item.id !== "string" ||
+    !/^[A-Za-z0-9_-]{1,64}$/.test(item.id as string)
   ) {
     return null;
   }
-  const exitCode = item["exitCode"];
-  const timedOut = item["timedOut"];
-  const outputMatched = item["outputMatched"];
+  const exitCode = item.exitCode;
+  const timedOut = item.timedOut;
+  const outputMatched = item.outputMatched;
   if (
     (typeof exitCode !== "number" || !Number.isSafeInteger(exitCode)) &&
     exitCode !== null
@@ -1376,7 +1377,7 @@ function parseWireCheckEntry(
   if (typeof timedOut !== "boolean" || typeof outputMatched !== "boolean")
     return null;
   const ok = exitCode === 0 && timedOut === false && outputMatched === true;
-  return { id: item["id"] as string, ok };
+  return { id: item.id as string, ok };
 }
 
 /** Map a real bridge wire result line to the kernel result proof. */
@@ -1386,16 +1387,16 @@ function parseWireBridgeResult(parsed: unknown): ParsedBridgeResult | null {
   // Distinguish wire format (version/status/verified/report/evidence) from
   // the legacy test format ({taskHash, exitCode, checks:[{id,ok}], ...}).
   if (
-    record["version"] === undefined &&
-    record["status"] === undefined &&
-    record["evidence"] === undefined
+    record.version === undefined &&
+    record.status === undefined &&
+    record.evidence === undefined
   ) {
     return null;
   }
-  if (record["version"] !== 1) return { kind: "invalid", exitCode: 1 };
-  const taskHash = record["taskHash"];
-  const status = record["status"];
-  const verified = record["verified"];
+  if (record.version !== 1) return { kind: "invalid", exitCode: 1 };
+  const taskHash = record.taskHash;
+  const status = record.status;
+  const verified = record.verified;
   if (typeof taskHash !== "string" || !/^[0-9a-f]{64}$/.test(taskHash)) {
     return { kind: "invalid", exitCode: 1 };
   }
@@ -1408,10 +1409,10 @@ function parseWireBridgeResult(parsed: unknown): ParsedBridgeResult | null {
     return { kind: "invalid", exitCode: 1 };
   }
   if (typeof verified !== "boolean") return { kind: "invalid", exitCode: 1 };
-  const evidence = asRecord(record["evidence"]);
-  if (evidence === null || !Array.isArray(evidence["checks"]))
+  const evidence = asRecord(record.evidence);
+  if (evidence === null || !Array.isArray(evidence.checks))
     return { kind: "invalid", exitCode: 1 };
-  const rawChecks = evidence["checks"] as unknown[];
+  const rawChecks = evidence.checks as unknown[];
   const mapped: { id: string; ok: boolean }[] = [];
   for (const entry of rawChecks) {
     const check = parseWireCheckEntry(entry);
@@ -1438,8 +1439,8 @@ function parseWireBridgeResult(parsed: unknown): ParsedBridgeResult | null {
   const outputMatched = mapped.length > 0 && mapped.every((c) => c.ok);
   const noTimeout =
     mapped.length > 0 &&
-    (evidence["checks"] as unknown[]).every(
-      (entry) => asRecord(entry)?.["timedOut"] === false,
+    (evidence.checks as unknown[]).every(
+      (entry) => asRecord(entry)?.timedOut === false,
     );
   return {
     kind: "valid",
@@ -1471,11 +1472,11 @@ function parseBridgeResult(
   if (record === null) return { kind: "invalid", exitCode: 1 };
   const wire = parseWireBridgeResult(parsed);
   if (wire !== null) return wire;
-  const taskHash = record["taskHash"];
-  const exitCode = record["exitCode"];
-  const checks = record["checks"];
-  const outputMatched = record["outputMatched"];
-  const noTimeout = record["noTimeout"];
+  const taskHash = record.taskHash;
+  const exitCode = record.exitCode;
+  const checks = record.checks;
+  const outputMatched = record.outputMatched;
+  const noTimeout = record.noTimeout;
   if (typeof taskHash !== "string" || !/^[0-9a-f]{64}$/.test(taskHash)) {
     return {
       kind: "invalid",
@@ -1496,13 +1497,13 @@ function parseBridgeResult(
     const item = asRecord(entry);
     if (
       item === null ||
-      typeof item["id"] !== "string" ||
-      !/^[A-Za-z0-9_-]{1,64}$/.test(item["id"] as string) ||
-      typeof item["ok"] !== "boolean"
+      typeof item.id !== "string" ||
+      !/^[A-Za-z0-9_-]{1,64}$/.test(item.id as string) ||
+      typeof item.ok !== "boolean"
     ) {
       return { kind: "invalid", exitCode };
     }
-    mapped.push({ id: item["id"] as string, ok: item["ok"] as boolean });
+    mapped.push({ id: item.id as string, ok: item.ok as boolean });
   }
   if (outputMatched !== true && outputMatched !== false)
     return { kind: "invalid", exitCode };

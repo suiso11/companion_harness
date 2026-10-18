@@ -617,8 +617,8 @@ export class TrialModelRelay {
     if (!isRecord(body)) throw new TranslationError("invalid_request");
     // Fixed bootstrap model: never taken from the request. A present model
     // must be the fixed name or the known alias; anything else mismatches.
-    if (body["model"] !== undefined) {
-      const asked = body["model"];
+    if (body.model !== undefined) {
+      const asked = body.model;
       if (
         typeof asked !== "string" ||
         (asked !== this.fixedModel && !MODEL_ALIASES.has(asked))
@@ -628,28 +628,25 @@ export class TrialModelRelay {
     }
     // tool_choice "auto" only when present.
     if (
-      body["tool_choice"] !== undefined &&
-      body["tool_choice"] !== null &&
-      body["tool_choice"] !== "auto"
+      body.tool_choice !== undefined &&
+      body.tool_choice !== null &&
+      body.tool_choice !== "auto"
     ) {
       throw new TranslationError("unsupported_tool_choice");
     }
     // stream must be boolean when present.
     let stream = false;
-    if (body["stream"] !== undefined && body["stream"] !== null) {
-      if (typeof body["stream"] !== "boolean") {
+    if (body.stream !== undefined && body.stream !== null) {
+      if (typeof body.stream !== "boolean") {
         throw new TranslationError("invalid_request");
       }
-      stream = body["stream"];
+      stream = body.stream;
     }
     // Native sampling/passthrough options the fixed gateway profile does not
     // consume: validated for shape when present, otherwise ignored. Anything
     // that would change the output contract is rejected below instead.
-    if (
-      body["stream_options"] !== undefined &&
-      body["stream_options"] !== null
-    ) {
-      if (!isRecord(body["stream_options"])) {
+    if (body.stream_options !== undefined && body.stream_options !== null) {
+      if (!isRecord(body.stream_options)) {
         throw new TranslationError("invalid_request");
       }
     }
@@ -688,8 +685,8 @@ export class TrialModelRelay {
     }
     // max_tokens narrows the profile cap; effective = min(request, cap).
     let maxOutputTokens = this.caps.maxOutputTokens;
-    if (body["max_tokens"] !== undefined) {
-      const asked = body["max_tokens"];
+    if (body.max_tokens !== undefined) {
+      const asked = body.max_tokens;
       if (
         typeof asked !== "number" ||
         !Number.isSafeInteger(asked) ||
@@ -699,20 +696,20 @@ export class TrialModelRelay {
       }
       maxOutputTokens = Math.min(asked, this.caps.maxOutputTokens);
     }
-    const rawMessages = body["messages"];
+    const rawMessages = body.messages;
     if (!Array.isArray(rawMessages) || rawMessages.length === 0) {
       throw new TranslationError("invalid_request");
     }
     // Map assistant tool_call ids -> gateway tool names for tool replies.
     const idToGateway = new Map<string, string>();
     for (const entry of rawMessages) {
-      if (!isRecord(entry) || !Array.isArray(entry["tool_calls"])) continue;
-      for (const call of entry["tool_calls"] as unknown[]) {
+      if (!isRecord(entry) || !Array.isArray(entry.tool_calls)) continue;
+      for (const call of entry.tool_calls as unknown[]) {
         if (!isRecord(call)) continue;
-        const fn = call["function"];
+        const fn = call.function;
         if (!isRecord(fn)) continue;
-        const name = fn["name"];
-        const id = call["id"];
+        const name = fn.name;
+        const id = call.id;
         if (typeof id === "string" && isGuestToolName(name)) {
           idToGateway.set(id, toGatewayToolName(name));
         }
@@ -722,8 +719,8 @@ export class TrialModelRelay {
       this.translateMessage(entry, idToGateway),
     );
     let gatewayTools: ToolDefinition[] | undefined;
-    if (body["tools"] !== undefined && body["tools"] !== null) {
-      const rawTools = body["tools"];
+    if (body.tools !== undefined && body.tools !== null) {
+      const rawTools = body.tools;
       if (!Array.isArray(rawTools))
         throw new TranslationError("invalid_request");
       const translatedTools = rawTools.map((entry) =>
@@ -786,7 +783,7 @@ export class TrialModelRelay {
    * (images/audio) and any other shape.
    */
   private extractTextContent(entry: Record<string, unknown>): string {
-    const content = entry["content"];
+    const content = entry.content;
     if (content === undefined || content === null) return "";
     if (typeof content === "string") return content;
     if (Array.isArray(content)) {
@@ -794,8 +791,8 @@ export class TrialModelRelay {
         .map((part) => {
           if (typeof part === "string") return part;
           if (!isRecord(part)) throw new TranslationError("invalid_request");
-          if (part["type"] === "text" && typeof part["text"] === "string") {
-            return part["text"] as string;
+          if (part.type === "text" && typeof part.text === "string") {
+            return part.text as string;
           }
           throw new TranslationError("invalid_request");
         })
@@ -809,7 +806,7 @@ export class TrialModelRelay {
     idToGateway: Map<string, string>,
   ): ChatMessage {
     if (!isRecord(entry)) throw new TranslationError("invalid_request");
-    const role = entry["role"];
+    const role = entry.role;
     if (
       role !== "system" &&
       role !== "user" &&
@@ -822,7 +819,7 @@ export class TrialModelRelay {
     // null); text-part arrays join without separator.
     const content = this.extractTextContent(entry);
     if (role === "tool") {
-      const toolCallId = entry["tool_call_id"];
+      const toolCallId = entry.tool_call_id;
       if (typeof toolCallId !== "string" || toolCallId.length === 0) {
         throw new TranslationError("invalid_request");
       }
@@ -834,32 +831,32 @@ export class TrialModelRelay {
     const message: ChatMessage = { role, content };
     if (
       role === "assistant" &&
-      entry["tool_calls"] !== undefined &&
-      entry["tool_calls"] !== null
+      entry.tool_calls !== undefined &&
+      entry.tool_calls !== null
     ) {
-      const rawCalls = entry["tool_calls"];
+      const rawCalls = entry.tool_calls;
       if (!Array.isArray(rawCalls))
         throw new TranslationError("invalid_request");
       message.toolCalls = rawCalls.map((call, index) => {
         if (!isRecord(call)) throw new TranslationError("invalid_request");
-        if (call["type"] !== "function")
+        if (call.type !== "function")
           throw new TranslationError("invalid_request");
-        const fn = call["function"];
+        const fn = call.function;
         if (!isRecord(fn)) throw new TranslationError("invalid_request");
-        if (!isGuestToolName(fn["name"]))
+        if (!isGuestToolName(fn.name))
           throw new TranslationError("unknown_tool");
         const id =
-          typeof call["id"] === "string" && call["id"].length > 0
-            ? call["id"]
+          typeof call.id === "string" && call.id.length > 0
+            ? call.id
             : `call_${index}`;
         let args: unknown = {};
-        if (fn["arguments"] !== undefined && fn["arguments"] !== null) {
-          if (typeof fn["arguments"] === "string") {
-            if (fn["arguments"].trim().length === 0) {
+        if (fn.arguments !== undefined && fn.arguments !== null) {
+          if (typeof fn.arguments === "string") {
+            if (fn.arguments.trim().length === 0) {
               args = {};
             } else {
               try {
-                args = JSON.parse(fn["arguments"]);
+                args = JSON.parse(fn.arguments);
               } catch {
                 throw new TranslationError("invalid_request");
               }
@@ -871,13 +868,13 @@ export class TrialModelRelay {
                 throw new TranslationError("invalid_request");
               }
             }
-          } else if (isRecord(fn["arguments"])) {
-            args = fn["arguments"];
+          } else if (isRecord(fn.arguments)) {
+            args = fn.arguments;
           } else {
             throw new TranslationError("invalid_request");
           }
         }
-        return { id, name: toGatewayToolName(fn["name"]), arguments: args };
+        return { id, name: toGatewayToolName(fn.name), arguments: args };
       });
     }
     return message;
@@ -890,16 +887,15 @@ export class TrialModelRelay {
     parameters?: Record<string, unknown>;
   } {
     if (!isRecord(entry)) throw new TranslationError("invalid_request");
-    if (entry["type"] !== "function")
+    if (entry.type !== "function")
       throw new TranslationError("invalid_request");
-    const fn = entry["function"];
+    const fn = entry.function;
     if (!isRecord(fn)) throw new TranslationError("invalid_request");
-    if (!isGuestToolName(fn["name"]))
-      throw new TranslationError("unknown_tool");
+    if (!isGuestToolName(fn.name)) throw new TranslationError("unknown_tool");
     const fullDescription =
-      typeof fn["description"] === "string" && fn["description"].length > 0
-        ? (fn["description"] as string)
-        : String(fn["name"]);
+      typeof fn.description === "string" && fn.description.length > 0
+        ? (fn.description as string)
+        : String(fn.name);
     // Gateway-valid short definition: keep a useful prefix of the native
     // description, always within the gateway bound. The full native text is
     // preserved separately in the trusted labeled system message.
@@ -909,13 +905,13 @@ export class TrialModelRelay {
         ? fullDescription
         : `${fullDescription.slice(0, RELAY_SHORT_DESCRIPTION_LIMIT - suffix.length)}${suffix}`;
     let parameters: Record<string, unknown> | undefined;
-    if (fn["parameters"] !== undefined && fn["parameters"] !== null) {
-      if (!isRecord(fn["parameters"]))
+    if (fn.parameters !== undefined && fn.parameters !== null) {
+      if (!isRecord(fn.parameters))
         throw new TranslationError("invalid_request");
-      parameters = fn["parameters"];
+      parameters = fn.parameters;
     }
     return {
-      name: toGatewayToolName(fn["name"]),
+      name: toGatewayToolName(fn.name),
       description,
       fullDescription,
       ...(parameters === undefined ? {} : { parameters }),
@@ -965,7 +961,7 @@ export class TrialModelRelay {
         choices: [{ index: 0, message, finish_reason: finishReason }],
       };
       if (result.usage !== undefined && result.usage !== null) {
-        payload["usage"] = {
+        payload.usage = {
           prompt_tokens: result.usage.inputTokens,
           completion_tokens: result.usage.outputTokens,
           total_tokens: result.usage.inputTokens + result.usage.outputTokens,

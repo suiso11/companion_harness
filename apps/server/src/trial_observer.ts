@@ -314,18 +314,18 @@ export async function queryScopeUnit(
     return { scopeState: "unknown" };
   }
   const kv = parseSystemctlShow(stdout);
-  const loadState = kv["LoadState"];
-  const activeState = kv["ActiveState"];
+  const loadState = kv.LoadState;
+  const activeState = kv.ActiveState;
   const scopeState = classifyScopeState(loadState, activeState);
   if (scopeState !== "active") {
     return { scopeState, loadState, activeState };
   }
-  const enterRaw = kv["ActiveEnterTimestampMonotonic"];
+  const enterRaw = kv.ActiveEnterTimestampMonotonic;
   const enter: bigint | null =
     enterRaw !== undefined && /^[0-9]{1,20}$/.test(enterRaw)
       ? BigInt(enterRaw)
       : null;
-  const runtimeMax = parseUs(kv["RuntimeMaxUSec"]);
+  const runtimeMax = parseUs(kv.RuntimeMaxUSec);
   const remaining =
     enter !== null ? computeRemainingRuntimeMs(enter, runtimeMax, nowUs) : null;
   // Semantics: loaded+active with elapsed RuntimeMax (remaining 0) is still
@@ -339,9 +339,9 @@ export async function queryScopeUnit(
     activeState,
     activeEnterMonotonicUs: enter,
     runtimeMaxUsec: runtimeMax,
-    memoryMax: kv["MemoryMax"],
-    tasksMax: kv["TasksMax"],
-    cpuQuotaPerSecUsec: kv["CPUQuotaPerSecUSec"],
+    memoryMax: kv.MemoryMax,
+    tasksMax: kv.TasksMax,
+    cpuQuotaPerSecUsec: kv.CPUQuotaPerSecUSec,
     remainingRuntimeMs: remaining,
   };
   return props;

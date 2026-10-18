@@ -75,12 +75,12 @@ describe("parseProcStatStartTicks", () => {
 describe("systemctl show parsing", () => {
   const base = (over: Record<string, string>) =>
     [
-      `LoadState=${over["LoadState"] ?? "loaded"}`,
-      `ActiveState=${over["ActiveState"] ?? "active"}`,
-      `ActiveEnterTimestampMonotonic=${over["ActiveEnterTimestampMonotonic"] ?? "1000000"}`,
-      `RuntimeMaxUSec=${over["RuntimeMaxUSec"] ?? "20000000"}`,
+      `LoadState=${over.LoadState ?? "loaded"}`,
+      `ActiveState=${over.ActiveState ?? "active"}`,
+      `ActiveEnterTimestampMonotonic=${over.ActiveEnterTimestampMonotonic ?? "1000000"}`,
+      `RuntimeMaxUSec=${over.RuntimeMaxUSec ?? "20000000"}`,
       "MemoryMax=infinity",
-      `TasksMax=${over["TasksMax"] ?? "8"}`,
+      `TasksMax=${over.TasksMax ?? "8"}`,
       "CPUQuotaPerSecUSec=infinity",
     ].join("\n");
 
@@ -88,8 +88,8 @@ describe("systemctl show parsing", () => {
     const kv = parseSystemctlShow(
       `${base({})}\ngarbage-no-equals\n9bad=x\n=empty\n`,
     );
-    expect(kv["LoadState"]).toBe("loaded");
-    expect(kv["TasksMax"]).toBe("8");
+    expect(kv.LoadState).toBe("loaded");
+    expect(kv.TasksMax).toBe("8");
     expect(kv["garbage-no-equals"]).toBeUndefined();
   });
 
@@ -103,12 +103,12 @@ describe("systemctl show parsing", () => {
     };
     const show = (over: Record<string, string>) =>
       [
-        `LoadState=${over["LoadState"] ?? "loaded"}`,
-        `ActiveState=${over["ActiveState"] ?? "active"}`,
-        `ActiveEnterTimestampMonotonic=${over["ActiveEnterTimestampMonotonic"] ?? "1000000"}`,
-        `RuntimeMaxUSec=${over["RuntimeMaxUSec"] ?? "20000000"}`,
+        `LoadState=${over.LoadState ?? "loaded"}`,
+        `ActiveState=${over.ActiveState ?? "active"}`,
+        `ActiveEnterTimestampMonotonic=${over.ActiveEnterTimestampMonotonic ?? "1000000"}`,
+        `RuntimeMaxUSec=${over.RuntimeMaxUSec ?? "20000000"}`,
         "MemoryMax=infinity",
-        `TasksMax=${over["TasksMax"] ?? "8"}`,
+        `TasksMax=${over.TasksMax ?? "8"}`,
         "CPUQuotaPerSecUSec=infinity",
       ].join("\n");
     const xdg = { xdgRuntimeDir: "/run/user/1000", timeoutMs: 3000 };

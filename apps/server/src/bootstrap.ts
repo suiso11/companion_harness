@@ -2594,7 +2594,7 @@ export async function startServer(
       const pollMs = config.trial.runner.pollMs;
       trialTimer = setInterval(() => {
         if (controls.draining) return;
-        if (activeEngine !== undefined && activeEngine.isDraining()) return;
+        if (activeEngine?.isDraining()) return;
         void activeRunner.runNext().catch(() => undefined);
       }, pollMs);
       trialTimer.unref?.();

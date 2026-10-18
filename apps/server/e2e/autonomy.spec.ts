@@ -117,7 +117,9 @@ test("autonomy base: purpose/task lifecycle, guarded resume, stop control, chat 
       (event) => event.event,
     ),
   ).toEqual(["created", "superseded"]);
-  expect((oldHistory.body as { nextAfterSeq: unknown }).nextAfterSeq).toBeNull();
+  expect(
+    (oldHistory.body as { nextAfterSeq: unknown }).nextAfterSeq,
+  ).toBeNull();
 
   // Task hold with a separate reason + reconsider trigger.
   const tasked = await api(request, "post", `${base}/tasks`, {
@@ -280,7 +282,10 @@ test("autonomy history Load more renders 201 task events losslessly", async ({
   await expect(page.locator("#autonomy-task-list")).toContainText(title, {
     timeout: 15_000,
   });
-  await page.locator("#autonomy-task-list").getByRole("button", { name: title }).click();
+  await page
+    .locator("#autonomy-task-list")
+    .getByRole("button", { name: title })
+    .click();
   await expect(page.locator("#autonomy-task-detail")).toBeVisible();
   const detail = page.locator("#autonomy-task-detail-body");
   await expect(detail).toContainText("#1 created", { timeout: 15_000 });

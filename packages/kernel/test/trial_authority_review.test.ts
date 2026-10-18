@@ -471,7 +471,7 @@ describe("review: profile immutability + wire mode/hash", () => {
       const req = (c.body as { request: Record<string, unknown> }).request;
       // Wire-exact: NO domain operation key on the wire; mode only, strict schema, no remap.
       expect(req).not.toHaveProperty("operation");
-      expect(req["mode"]).toBe("write");
+      expect(req.mode).toBe("write");
       expect(() => TrialLaunchRequestSchema.parse(req)).not.toThrow();
       expect(() =>
         TrialLaunchRequestSchema.parse({ ...req, mode: "implement" }),
@@ -554,7 +554,7 @@ describe("review: profile immutability + wire mode/hash", () => {
       );
       const req = (c.body as { request: Record<string, unknown> }).request;
       expect(req).not.toHaveProperty("operation");
-      expect(req["mode"]).toBe("read_only");
+      expect(req.mode).toBe("read_only");
     } finally {
       closeKernelDatabase(handle);
     }

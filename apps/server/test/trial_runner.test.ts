@@ -159,9 +159,9 @@ interface FakeChild extends EventEmitter {
 
 function validDoneLine(request: Record<string, unknown>): string {
   return JSON.stringify({
-    taskHash: request["taskHash"],
+    taskHash: request.taskHash,
     exitCode: 0,
-    checks: ((request["requiredChecks"] as string[]) ?? ["lint"]).map((id) => ({
+    checks: ((request.requiredChecks as string[]) ?? ["lint"]).map((id) => ({
       id,
       ok: true,
     })),
@@ -380,8 +380,8 @@ describe("trial_runner", () => {
       const wireLineForRequest = (request: Record<string, unknown>): string =>
         JSON.stringify({
           version: 1,
-          executionId: request["executionId"],
-          taskHash: request["taskHash"],
+          executionId: request.executionId,
+          taskHash: request.taskHash,
           status: "done",
           verified: true,
           report: {
@@ -394,7 +394,7 @@ describe("trial_runner", () => {
             workerIds: ["w1"],
             workspaceTrial: true,
             productionApplied: false,
-            checks: ((request["requiredChecks"] as string[]) ?? ["lint"]).map(
+            checks: ((request.requiredChecks as string[]) ?? ["lint"]).map(
               (id) => ({
                 id,
                 exitCode: 0,
@@ -486,8 +486,8 @@ describe("trial_runner", () => {
       ): string =>
         JSON.stringify({
           version: 1,
-          executionId: request["executionId"],
-          taskHash: request["taskHash"],
+          executionId: request.executionId,
+          taskHash: request.taskHash,
           status: "error",
           verified: false,
           report: {
@@ -631,7 +631,7 @@ describe("trial_runner", () => {
       const sent = JSON.parse(
         state.stdinText.split("\n")[0] as string,
       ) as Record<string, unknown>;
-      expect(sent["executionId"]).toBe(out.executionId);
+      expect(sent.executionId).toBe(out.executionId);
       // Kernel outcome is authorized done; Task/Goal untouched.
       const stored = handle.raw
         .prepare(
