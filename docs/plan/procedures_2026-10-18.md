@@ -78,6 +78,7 @@
 - 記録する証拠: 実施環境（OS・Node/npm/pnpm 実測 version）、各コマンドの exit code・件数・日時、temp store の後片付け記録。ユーザーデータ・秘密情報を含めない。
 - 完了条件: Companion §19.6 項目＋Remind 上記 4 項目の観測記録が台帳に追記されること。
 - 未決事項: 実施者・実施日（決定は「手順書を作って実施」まで。誰が・いつ実施するかは未決）。
+- 追記（2026-10-18）: N7（decision_inputs §G）により Windows server-run manual smoke は保留。代替受入は Linux サーバー＋Tailscale 経由の Windows/スマホブラウザ smoke（docs/operations.md の remote 手順・docs/plan/linux_remote_access_design.md §10）。
 
 ## 6. M5 validation sequence（B3/B5・A3・C22 経由の live 許可判断）
 
