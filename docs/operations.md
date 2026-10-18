@@ -40,14 +40,15 @@ a missing DB fails without creating any DB or backup files.
 | `COMPANION_CALENDAR_JSON` | unset (no Calendar) | Strict JSON object `{ selection, connector }` (see C14 below); unset registers no Calendar connector |
 | `COMPANION_CALENDAR_PROFILE` | unset (no profile) | Strict opt-in profile selector (see C14 profile below). Unset keeps the previous behavior (explicit host `mcpDefinitions` injection or fail-closed incomplete opt-in). Only `google-readonly` is accepted; any other value fails startup. Requires `COMPANION_CALENDAR_JSON` describing exactly the adopted candidate. |
 | `COMPANION_ACTIONS_JSON` | `{"optIn":false,"writeEnabled":false}` | Strict JSON object `{ optIn?, writeEnabled? }` (booleans, default false). HINT ONLY: never supplies a write capability, a category or a binding — see "C21 M5 Action composition" below |
-| `COMPANION_REMOTE_JSON` | unset (remote disabled) | Strict JSON object `{ enabled?, allowedOrigins? }` (see "Remote access (allowlist only)" below); unset means loopback-only behavior, unchanged |
+| `COMPANION_REMOTE_JSON` | unset (remote disabled) | Strict JSON object `{ enabled?, allowedOrigins?, passwordFile?, absoluteTimeoutMs?, idleTimeoutMs?, maxFailures?, lockoutMs? }` (see "Remote access" below); unset means loopback-only behavior, unchanged |
 
 Config is Zod-validated and frozen at startup (no hot reload).
 
-## Remote access (allowlist only, authentication pending)
+## Remote access (allowlist + single-user login, default-off)
 
-Slice (a) of the Linux remote-access plan: an explicit Origin/Host
-allowlist, **default-off**. The server always binds loopback-only
+Slices (a) + (b) of the Linux remote-access plan: an explicit
+Origin/Host allowlist plus single-user password login with server-issued
+session cookies, **default-off**. The server always binds loopback-only
 (`COMPANION_HOST` stays `127.0.0.1` / `localhost`; `0.0.0.0` is still
 rejected). Remote reachability is provided outside the app (for example
 `tailscale serve` terminating tailnet HTTPS and proxying to
@@ -59,9 +60,12 @@ rejected). Remote reachability is provided outside the app (for example
   origin: https scheme, no credentials, no explicit port, no path, query,
   fragment, or trailing slash (the entry must equal its own `URL.origin`
   serialization). Unknown keys, duplicates, and malformed JSON fail
-  startup with a fixed safe message (no values logged).
+  startup with a fixed safe message (no values logged). Unset is the
+  same as disabled; malformed JSON fails startup fail-closed (never a
+  silent disable).
 - Disabled (default): Host/mutation checks behave exactly as before
   (loopback Host only, loopback same-origin mutations, no read check).
+  There is no login surface (`/api/remote/login` answers 404).
 - Enabled: the Host header must equal an allowlist origin's host or a
   loopback host (health endpoints included); mutations require an exact
   Origin match against the allowlist plus the current loopback
@@ -69,13 +73,27 @@ rejected). Remote reachability is provided outside the app (for example
   Origin to match (an absent Origin on same-origin GETs stays accepted,
   but `Sec-Fetch-Site: cross-site` is rejected). `Origin: null` is always
   rejected. Decisions use only Host/Origin/Sec-Fetch-Site headers — never
-  `remoteAddress` or `X-Forwarded-*` — and no CORS headers are emitted.
+  `remoteAddress` or `X-Forwarded-*` (proxied requests all look like
+  `127.0.0.1`, so the login rate limit is a single global counter, not
+  per-IP) — and no CORS headers are emitted.
+- Login/sessions (slice b): single-user password plus server-issued
+  session cookie (`companion_remote`: opaque 256-bit random, `HttpOnly` /
+  `Secure` / `SameSite=Strict` / `Path=/`). The scrypt password hash
+  lives in a file OUTSIDE SQLite at the absolute path in `passwordFile`
+  (required when enabled; POSIX mode must be 0600 — any group/other
+  access bit refuses startup; created via `pnpm --filter server
+  set-password`, which reads the password twice from TTY/stdin and never
+  from env/argv). Sessions persist only SHA-256 token hashes in SQLite
+  (`remote_sessions`, additive migration `0023_remote_sessions.sql`).
+  Tunables with 案 defaults: `absoluteTimeoutMs` (30d),
+  `idleTimeoutMs` (7d), `maxFailures` (5), `lockoutMs` (15min); the
+  lockout counter is in-memory and resets on restart. All API + SSE
+  require a session (401 JSON); `/health/live` stays open while
+  `/health/ready` requires a session. A browser form POST to
+  `/api/remote/login` redirects to `/` (303) on success; JSON logins
+  answer `{ ok: true }`.
 - Fail-closed: `enabled: true` with an empty allowlist refuses to start.
-  **Authentication (slice b) is not implemented yet, so enabling remote
-  currently always refuses to start** with
-  `remote mode requires authentication (not yet available)`. Do not use
-  remote mode until slice (b) lands; flipping `enabled` back to `false`
-  restores loopback-only operation.
+  Flipping `enabled` back to `false` restores loopback-only operation.
 
 ## Plaintext sensitivity and OS permissions
 
