@@ -264,6 +264,10 @@ function requireRemoteOrigin(value: unknown): string {
   } catch {
     throw configError("remote origin allowlist entry is invalid");
   }
+  // IPv6 literals are rejected at config time: Node keeps the brackets
+  // in URL.hostname while Host-header parsing strips them, so an IPv6
+  // entry could never pass the Host check. Tailscale MagicDNS hostnames
+  // are the documented form; this keeps parsing simple and fail-closed.
   if (
     url.protocol !== "https:" ||
     url.username !== "" ||
@@ -271,7 +275,10 @@ function requireRemoteOrigin(value: unknown): string {
     url.port !== "" ||
     url.search !== "" ||
     url.hash !== "" ||
-    url.origin !== value
+    url.origin !== value ||
+    url.hostname.includes(":") ||
+    url.hostname.includes("[") ||
+    url.hostname.includes("]")
   ) {
     throw configError("remote origin allowlist entry is invalid");
   }
@@ -313,11 +320,17 @@ export function parseRemoteConfig(raw: string | undefined): RemoteConfig {
     maxFailures?: unknown;
     lockoutMs?: unknown;
   };
-  const enabled = record.enabled ?? false;
+  // Defaults apply only when keys are absent: an explicit `null` is a
+  // malformed shape (strict `{ enabled?, allowedOrigins? }` contract),
+  // not an omitted key. `??` would silently swallow null, so branch on
+  // key presence and let the type checks below reject null.
+  const hasEnabled = Object.hasOwn(parsed, "enabled");
+  const hasOrigins = Object.hasOwn(parsed, "allowedOrigins");
+  const enabled = hasEnabled ? record.enabled : false;
   if (typeof enabled !== "boolean") {
     throw configError("remote config enabled flag is invalid");
   }
-  const rawOrigins = record.allowedOrigins ?? [];
+  const rawOrigins = hasOrigins ? record.allowedOrigins : [];
   if (!Array.isArray(rawOrigins) || rawOrigins.length > MAX_REMOTE_ORIGINS) {
     throw configError("remote origin allowlist is invalid");
   }

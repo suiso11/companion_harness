@@ -313,6 +313,44 @@ describe("remote enabled (allowlist)", () => {
     }
   });
 
+  it("rejects http same-origin on a remote Host (loopback exception only)", async () => {
+    const f = await makeApp(enabledRemote());
+    try {
+      // Remote http same-origin is NOT an allowlisted https origin.
+      const httpRemote = await f.app.request("/api/sessions", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          host: ALLOWED_HOST,
+          origin: `http://${ALLOWED_HOST}`,
+          "idempotency-key": randomUUID(),
+        },
+        body: "{}",
+      });
+      expect(httpRemote.status).toBe(403);
+      const sessionId = await createSessionId(f);
+      const httpRead = await f.app.request(
+        `/api/sessions/${sessionId}/active-run`,
+        { headers: { host: ALLOWED_HOST, origin: `http://${ALLOWED_HOST}` } },
+      );
+      expect(httpRead.status).toBe(403);
+      // Loopback http same-origin still passes under remote mode.
+      const httpLoopback = await f.app.request("/api/sessions", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          host: "127.0.0.1",
+          origin: "http://127.0.0.1",
+          "idempotency-key": randomUUID(),
+        },
+        body: "{}",
+      });
+      expect(httpLoopback.status).toBe(201);
+    } finally {
+      f.close();
+    }
+  });
+
   it("ignores X-Forwarded-Host for decisions", async () => {
     const f = await makeApp(enabledRemote());
     try {
@@ -402,6 +440,32 @@ describe("remote config fail-closed", () => {
     // Unset stays disabled.
     const config = loadServerConfig(baseEnv("unset"));
     expect(config.remote.enabled).toBe(false);
+  });
+
+  it("rejects explicit null for remote keys (defaults only when absent)", () => {
+    for (const raw of [
+      '{"enabled":null}',
+      '{"enabled":null,"allowedOrigins":[]}',
+      '{"enabled":false,"allowedOrigins":null}',
+      '{"enabled":true,"allowedOrigins":null}',
+    ]) {
+      expect(() => parseRemoteConfig(raw), raw).toThrow(ServerConfigError);
+    }
+    // Absent keys still default.
+    expect(parseRemoteConfig("{}")).toEqual({
+      enabled: false,
+      allowedOrigins: [],
+    });
+  });
+
+  it("rejects IPv6-literal origins at config time", () => {
+    for (const raw of [
+      '{"enabled":false,"allowedOrigins":["https://[fd7a:115c:a1e0::1]"]}',
+      '{"enabled":false,"allowedOrigins":["https://[::1]"]}',
+      '{"enabled":false,"allowedOrigins":["https://[::1]:8443"]}',
+    ]) {
+      expect(() => parseRemoteConfig(raw), raw).toThrow(ServerConfigError);
+    }
   });
 
   it("rejects malformed origins and shapes", () => {
