@@ -200,9 +200,12 @@ describe("create-only startup composition", () => {
       drainMs: 50,
     });
     servers.push(started);
+    // Unknown proposals resolve before the per-tool gate (404, never the
+    // 409 disabled surface); owned-disabled 409s live in
+    // createApprovalGate.test.ts.
     const { status, body } = await approveStatus(started.port);
-    expect(status).toBe(409);
-    expect(body).toContain("action_execution_disabled");
+    expect(status).toBe(404);
+    expect(body).not.toContain("action_execution_disabled");
   });
 });
 
@@ -323,8 +326,9 @@ describe("create binding shape fail-closed", () => {
     });
     servers.push(started);
     expect(derived).toBe(false);
+    // Unknown proposals resolve before the per-tool gate (404, no mutation).
     const { status, body } = await approveStatus(started.port);
-    expect(status).toBe(409);
-    expect(body).toContain("action_execution_disabled");
+    expect(status).toBe(404);
+    expect(body).not.toContain("action_execution_disabled");
   });
 });

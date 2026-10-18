@@ -1995,7 +1995,7 @@ vs formal HOLD; no C24 scope inferred):
 | C16–C20 engine/M2/UI slices | IMPLEMENTED | Covered by the final 103-file / 1251-test battery, root + e2e typecheck clean, whole-repo lint closed at `52d61ba` (216 files, 0 errors, 1 pre-existing info; NOT rerun here). |
 | C21 M5 Action composition | IMPLEMENTED (triple gate) | Config hints + dedicated write port + exact-instance match; disabled gate refuses staging / 409-before-repository; no production write binding selected. |
 | C22 action lifecycle E2E | IMPLEMENTED (fake) | Fake harness seams only; real-UI conversation→search→rN→refresh coverage via fakes, not live. |
-| M6 calendar.create extension (agreed, M5 non-goal exception) | IMPLEMENTED (opt-in, create-only safe) | `calendar.create` (TIMED title/start/end only) on the same approval flow; targetless rows, 1 grant -> 1 `create-event` POST (`{id,summary,start,end}` only), verified-only new rN. Fork `google-calendar-create@1.0.0-create.1` pinned at `5f07029`/tree `9a232e2`/lock `63261d25` (wire hash `983c1548…5234e` unchanged; exact-id 2xx proof fix, no schema delta); create runtime reuses the SHARED `M5_RESCHEDULE_*` grant namespace (no `M6_CREATE_*` credentials). Host profile `M6_CALENDAR_CREATE_PROFILE=google-create` + `M6_CREATE_CONNECTOR_JSON`; explicit `createEnabled` triple; create-only startup needs no reschedule binding (`createWriteStartup.test.ts` 3/3). Proof: B-result stdio REAL 1-POST/1-GET/receipt `succeeded`/r1/0-extra (liveGoogleCalls 0) + browser create 3/3 + action 26/26 + migration 24/24. |
+| M6 calendar.create extension (agreed, M5 non-goal exception) | IMPLEMENTED (opt-in, create-only safe) | `calendar.create` (TIMED title/start/end only) on the same approval flow; targetless rows, 1 grant -> 1 `create-event` POST (`{id,summary,start,end}` only), verified-only new rN. Fork `google-calendar-create@1.0.0-create.1` pinned at CURRENT `7b40eaf`/tree `a5661f1b`/lock `63261d25` (historical: `5f07029`/tree `9a232e2` at exact-id 2xx proof; wire hash `983c1548…5234e` unchanged; stream-cap/symlink-bin/scope-validator hardening in CURRENT); create runtime reuses the SHARED `M5_RESCHEDULE_*` grant namespace (no `M6_CREATE_*` credentials). Host profile `M6_CALENDAR_CREATE_PROFILE=google-create` + `M6_CREATE_CONNECTOR_JSON`; explicit `createEnabled` triple; create-only startup needs no reschedule binding (`createWriteStartup.test.ts` 3/3). Proof: B-result stdio REAL 1-POST/1-GET/receipt `succeeded`/r1/0-extra (liveGoogleCalls 0) + browser create 3/3 + action 26/26 + migration 24/24. |
 | C08 adoption / C10-08 production mapping / C11-01 positive tombstone | FORMAL HOLD / UNRESOLVED / BLOCKED | Unchanged: no adopted binding, pin, profile, OAuth, or live-Google wiring anywhere in this branch. |
 
 Review/PR linkage: PR #20 is published for this branch (see the
@@ -2758,6 +2758,64 @@ retry is unchanged (still `202`, same Turn, new queued Run).
   preserved in the real browser). Throwaway smokes/specs and
    `test-results/` removed; no `pnpm` dependency change (offline
    store-link install only).
+
+## M5 action evidence navigation (BEFORE/AFTER stored-only, 2026-10-16, observed)
+
+Action result/receipt history and the live card carry distinct evidence
+buttons: BEFORE (the ORIGINAL staged snapshot) is display metadata resolved
+from the owning proposal's immutable `target_ref_id` plus session ownership
+(the staged source reference's `rN` ordinal) and rides both the
+server-owned execution view (`GET .../proposals/:id/execution`
+`targetCitation`) and the action history projection (`selectedRun`
+`targetCitation`); AFTER (the verified new snapshot) comes ONLY from the
+authoritative `run.result` via `runResultToAnswerParts` when the receipt
+outcome is exactly `succeeded` with actual result citations. Every other
+outcome (`unknown` / `succeeded_unverified` / `failed` / `blocked_stale` /
+live `null`) yields BEFORE alone — a `succeeded_unverified` V1 text result
+(which by construction carries no structured citations, and even a result
+that happened to carry preflight citations) is never presented as verified
+AFTER. Opening either button reuses the existing stored-only citation
+drawer (exact stored `SnapshotBody` text, `textContent` only): no
+Google/upstream GET/PATCH after opening, no automatic refresh/retry, no
+`rN` derived from preview prose or the current latest resource. History
+reload retains both buttons; one Run never renders four evidence buttons
+(card BEFORE at most one + history BEFORE/AFTER). No durable receipt /
+`RunResult` / grant / proposal-hash / DB-schema change: the label is
+metadata on the existing safe execution and history views (no N+1, no
+async stale races); old proposals resolve without rewriting hash/preview/
+snapshot, and non-action `user_text` history omits the field entirely.
+
+- Contracts/kernel (`packages/contracts/src/action.ts`,
+  `packages/contracts/src/http.ts`, `packages/kernel/src/repository.ts`):
+  `ActionTargetCitationSchema` (`rN`) + required `targetCitation` on
+  `ProposalExecutionView` and `ActionRunHistorySelection` (`user_text`
+  omits it); `targetCitationForProposal` resolves the owned ordinal and
+  fails closed cross-session (no citation info leaked).
+- Client (`apps/server/src/ui/reducer.ts` pure `actionEvidenceButtons`
+  + `apps/server/src/ui/client.ts`): card renders stored BEFORE only;
+  history renders BEFORE plus verified AFTER only; both open via the
+  existing `openCitation` stored path.
+- Observed final verification (Linux, Node 24.12.0, this worktree):
+  kernel `action_evidence_navigation` 9/9 (real SQLite service lifecycle:
+  pending/live/failed/unknown/unverified/blocked keep BEFORE alone,
+  verified succeeded keeps BEFORE + distinct fresh AFTER, wrong-session
+  fails closed, `user_text` omits the field); server `proposals` 9/9
+  (execution BEFORE for pending/approved + foreign 404 with no evidence,
+  history live BEFORE-only, history verified BEFORE + fresh AFTER,
+  history unverified BEFORE + citation-less V1, cross-session history
+  leaks nothing) + `action_ui` 13/13 (pure BEFORE/AFTER policy);
+  `tsc --noEmit` exit 0 (server/kernel/contracts); owned `biome check`
+  clean on touched files (one pre-existing `useLiteralKeys` in untouched
+  memory code left as-is). Real-Chromium browser proof via the existing
+  Calendar fake harness (`apps/server/e2e/calendar/evidence.spec.ts`,
+  kept) 2/2: verified run shows BEFORE r1 + distinct AFTER, both open
+  the EXACT different stored bodies (09:00 vs 11:00), fixture counters
+  (`searchCalls`/`listCalls`/`getCalls`/`writeCalls`) byte-identical
+  across both opens and across reload (exactly 1 write total, 0 extra
+  upstream GET/PATCH); unverified run shows BEFORE alone with the real
+  manual-check outcome, 0 AFTER/citation nodes, stored original opens
+  with identical counters, reload retains BEFORE-only with 0 extra
+  writes. `test-results/` removed; no dependency change.
 
 ## Live readonly acceptance ledger (2026-10-14, current profile)
 

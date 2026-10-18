@@ -163,4 +163,34 @@ describe("create write port (M6)", () => {
       }),
     ).toThrow();
   });
+
+  it("rejects U+0085 and C1 controls in the title with zero calls", async () => {
+    let calls = 0;
+    const port = createCreateWritePort({
+      connectorInstanceId: INSTANCE,
+      caller: {
+        callTool: async () => {
+          calls += 1;
+          return {
+            ok: true as const,
+            structuredContent: { status: "succeeded" },
+          };
+        },
+      },
+    });
+    for (const title of ["\u0085", "a\u0085b", "a\u0001b", "a\u007f"]) {
+      expect(await port.insert({ ...baseRequest(), title })).toEqual({
+        status: "definite_failure",
+      });
+    }
+    expect(calls).toBe(0);
+    // Valid Unicode (CJK + emoji + accents + NBSP just above the C1 range)
+    // still dispatches exactly once.
+    const valid = await port.insert({
+      ...baseRequest(),
+      title: "日本語 🎉 café \u00a0ok",
+    });
+    expect(valid).toEqual({ status: "succeeded" });
+    expect(calls).toBe(1);
+  });
 });
