@@ -521,7 +521,9 @@ export function renderConversationShell(): HtmlEscapedString {
             id: "handoff-task",
             type: "text",
             autocomplete: "off",
+            list: "handoff-task-list",
           }),
+          jsx("datalist", { id: "handoff-task-list" }),
           jsx("textarea", { id: "handoff-target" }),
           jsx("textarea", { id: "handoff-criteria" }),
           jsx(
@@ -549,7 +551,9 @@ export function renderConversationShell(): HtmlEscapedString {
             id: "handoff-supersedes",
             type: "text",
             autocomplete: "off",
+            list: "handoff-supersedes-list",
           }),
+          jsx("datalist", { id: "handoff-supersedes-list" }),
           jsx(
             "button",
             { id: "handoff-create", type: "button" },

@@ -1161,3 +1161,210 @@ describe("handoff core", () => {
     }
   });
 });
+
+describe("codex review #48 findings", () => {
+  it("failed handoffs are flagged on parent revoke; attempt refused until reaffirm, then retry returns to prepared", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      const purpose = makePurpose(repo, sessionId, T0);
+      const task = makeTask(repo, sessionId, T0 + 1, purpose.body.id);
+      const created = makeHandoff(repo, sessionId, task.body.id, T0 + 2);
+      const failed = repo.failHandoff(
+        sessionId,
+        created.body.id,
+        { expectedVersion: 1 },
+        { key: randomUUID(), now: T0 + 3 },
+      );
+      expect(failed.body.status).toBe("failed");
+      repo.revokeAutonomyPurpose(
+        sessionId,
+        purpose.body.id,
+        { expectedVersion: 1 },
+        { key: randomUUID(), now: T0 + 4 },
+      );
+      const flagged = repo.getHandoff(sessionId, created.body.id);
+      expect(flagged.needsReevaluation).toBe(true);
+      expect(() =>
+        repo.recordHandoffAttempt(
+          sessionId,
+          created.body.id,
+          { expectedVersion: flagged.version, cause: "worker_error" },
+          { key: randomUUID(), now: T0 + 5 },
+        ),
+      ).toThrow(HandoffStateConflictError);
+      const reaffirmed = repo.reaffirmHandoff(
+        sessionId,
+        created.body.id,
+        { expectedVersion: flagged.version },
+        { key: randomUUID(), now: T0 + 6 },
+      );
+      expect(reaffirmed.body.needsReevaluation).toBe(false);
+      expect(reaffirmed.body.status).toBe("failed");
+      const attempt = repo.recordHandoffAttempt(
+        sessionId,
+        created.body.id,
+        {
+          expectedVersion: reaffirmed.body.version,
+          cause: "worker_error",
+        },
+        { key: randomUUID(), now: T0 + 7 },
+      );
+      expect(attempt.body.status).toBe("prepared");
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("fail and abnormal-exit refuse superseded handoffs; cancel stays allowed", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      const purpose = makePurpose(repo, sessionId, T0);
+      const task = makeTask(repo, sessionId, T0 + 1, purpose.body.id);
+      const old = makeHandoff(repo, sessionId, task.body.id, T0 + 2);
+      const next = repo.createHandoff(
+        sessionId,
+        {
+          taskId: task.body.id,
+          target: "hand the queue migration to pi-orch",
+          acceptanceCriteria: [
+            "queue drains without loss",
+            "no duplicate work",
+            "alerts stay green",
+          ],
+          opScope: "implement",
+          supersedesHandoffId: old.body.id,
+        },
+        { key: randomUUID(), now: T0 + 3 },
+      );
+      expect(next.status).toBe(201);
+      const reread = repo.getHandoff(sessionId, old.body.id);
+      expect(reread.supersededBy).toBe(next.body.id);
+      expect(() =>
+        repo.failHandoff(
+          sessionId,
+          old.body.id,
+          { expectedVersion: reread.version },
+          { key: randomUUID(), now: T0 + 4 },
+        ),
+      ).toThrow(HandoffStateConflictError);
+      expect(() =>
+        repo.abnormalExitHandoff(
+          sessionId,
+          old.body.id,
+          { expectedVersion: reread.version },
+          { key: randomUUID(), now: T0 + 5 },
+        ),
+      ).toThrow(HandoffStateConflictError);
+      const cancelled = repo.cancelHandoff(
+        sessionId,
+        old.body.id,
+        { expectedVersion: reread.version },
+        { key: randomUUID(), now: T0 + 6 },
+      );
+      expect(cancelled.body.status).toBe("cancelled");
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("dispatch refuses a handoff whose task was reparented on resume; reaffirm adopts the new binding and dispatch works", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      const purposeA = makePurpose(repo, sessionId, T0, "goal A");
+      const taskA = makeTask(repo, sessionId, T0 + 1, purposeA.body.id);
+      const created = makeHandoff(repo, sessionId, taskA.body.id, T0 + 2);
+      const id = created.body.id;
+      repo.holdAutonomyTask(
+        sessionId,
+        taskA.body.id,
+        { expectedVersion: 1, reason: "work", reconsiderTrigger: "work" },
+        { key: randomUUID(), now: T0 + 3 },
+      );
+      const purposeB = makePurpose(repo, sessionId, T0 + 4, "goal B");
+      repo.resumeAutonomyTask(
+        sessionId,
+        taskA.body.id,
+        {
+          expectedVersion: 2,
+          evidenceKind: "parent_changed",
+          evidence: "re-parented to goal B",
+          newParentPurposeId: purposeB.body.id,
+        },
+        { key: randomUUID(), now: T0 + 5 },
+      );
+      // The resume hook flags the handoff (frozen parent A is stale).
+      const flagged = repo.getHandoff(sessionId, id);
+      expect(flagged.needsReevaluation).toBe(true);
+      expect(() =>
+        repo.dispatchHandoff(
+          sessionId,
+          id,
+          { expectedVersion: flagged.version },
+          { key: randomUUID(), now: T0 + 6 },
+        ),
+      ).toThrow(HandoffStateConflictError);
+      const reaffirmed = repo.reaffirmHandoff(
+        sessionId,
+        id,
+        { expectedVersion: flagged.version },
+        { key: randomUUID(), now: T0 + 7 },
+      );
+      expect(reaffirmed.body.needsReevaluation).toBe(false);
+      expect(reaffirmed.body.parentPurposeId).toBe(purposeB.body.id);
+      const dispatched = repo.dispatchHandoff(
+        sessionId,
+        id,
+        { expectedVersion: reaffirmed.body.version },
+        { key: randomUUID(), now: T0 + 8 },
+      );
+      expect(dispatched.body.status).toBe("dispatched");
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("history endpoints return event notes and stay bounded (newest-500 window)", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      const purpose = makePurpose(repo, sessionId, T0);
+      const task = makeTask(repo, sessionId, T0 + 1, purpose.body.id);
+      const created = makeHandoff(repo, sessionId, task.body.id, T0 + 2);
+      const id = created.body.id;
+      repo.revokeAutonomyPurpose(
+        sessionId,
+        purpose.body.id,
+        { expectedVersion: 1 },
+        { key: randomUUID(), now: T0 + 3 },
+      );
+      const events = repo.listHandoffEvents(sessionId, id);
+      const flagged = events.events.find(
+        (e) => e.event === "reevaluation_flagged",
+      );
+      expect(flagged?.note).toContain("purpose_revoked");
+      // Flood attempts: the endpoints stay capped, oldest-first, newest kept.
+      const reaffirmed = repo.reaffirmHandoff(
+        sessionId,
+        id,
+        { expectedVersion: repo.getHandoff(sessionId, id).version },
+        { key: randomUUID(), now: T0 + 4 },
+      );
+      let version = reaffirmed.body.version;
+      for (let n = 0; n < 505; n += 1) {
+        const out = repo.recordHandoffAttempt(
+          sessionId,
+          id,
+          { expectedVersion: version, cause: "worker_error" },
+          { key: randomUUID(), now: T0 + 100 + n },
+        );
+        version = out.body.version;
+      }
+      const attempts = repo.listHandoffAttempts(sessionId, id);
+      expect(attempts.attempts).toHaveLength(500);
+      expect(attempts.attempts[0]?.attemptNo).toBe(6);
+      const cappedEvents = repo.listHandoffEvents(sessionId, id);
+      expect(cappedEvents.events).toHaveLength(500);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+});

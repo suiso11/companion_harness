@@ -488,6 +488,82 @@ export class HandoffPanel {
     // Keep the open drawer truthful after a background refresh without
     // clobbering the human's typed inputs.
     if (this.selectedId !== null) this.renderDetail(false);
+    // Selectable create-form IDs: fill the task/predecessor datalists so
+    // the UUID fields can be chosen from the shipped UI (no devtools).
+    // Best-effort: a failed read leaves the manual UUID entry usable.
+    this.fillCreateLists(sessionId, session, seen);
+  }
+
+  /** Populate the create-form datalists (tasks + handoff predecessors). */
+  private fillCreateLists(
+    sessionId: string,
+    session: number,
+    seen: number,
+  ): void {
+    const taskList = document.getElementById("handoff-task-list");
+    const supersedesList = document.getElementById("handoff-supersedes-list");
+    if (taskList !== null) {
+      while (taskList.firstChild !== null) {
+        taskList.removeChild(taskList.firstChild);
+      }
+      for (const item of this.items.values()) {
+        if (item.sessionId !== sessionId) continue;
+        const option = document.createElement("option");
+        option.value = item.taskId;
+        option.label = `作業 ${item.taskId.slice(0, 8)}…（引継ぎ ${item.id.slice(0, 8)}…・${item.status}）`;
+        taskList.appendChild(option);
+      }
+    }
+    if (supersedesList !== null) {
+      while (supersedesList.firstChild !== null) {
+        supersedesList.removeChild(supersedesList.firstChild);
+      }
+      for (const item of this.items.values()) {
+        if (item.sessionId !== sessionId) continue;
+        const option = document.createElement("option");
+        option.value = item.id;
+        option.label = `引継ぎ ${item.id.slice(0, 8)}…（${item.status}）`;
+        supersedesList.appendChild(option);
+      }
+    }
+    void this.fillTaskTitles(sessionId, session, seen);
+  }
+
+  /** Enrich task options with human titles (best-effort, never blocking). */
+  private async fillTaskTitles(
+    sessionId: string,
+    session: number,
+    seen: number,
+  ): Promise<void> {
+    let res: { status: number; body: unknown };
+    try {
+      res = await this.deps.http.get(
+        `/api/sessions/${sessionId}/tasks?limit=50`,
+      );
+    } catch {
+      return;
+    }
+    if (session !== this.sessionSeq || seen !== this.listSeq) return;
+    if (res.status !== 200 || !isRecord(res.body)) return;
+    const items = Array.isArray(res.body.items)
+      ? (res.body.items as unknown[])
+      : [];
+    const taskList = document.getElementById("handoff-task-list");
+    if (taskList === null || items.length === 0) return;
+    while (taskList.firstChild !== null) {
+      taskList.removeChild(taskList.firstChild);
+    }
+    for (const entry of items) {
+      if (!isRecord(entry)) continue;
+      if (typeof entry.id !== "string") continue;
+      const title = typeof entry.title === "string" ? entry.title : "";
+      const status = typeof entry.status === "string" ? entry.status : "";
+      const option = document.createElement("option");
+      option.value = entry.id;
+      option.label =
+        title.length > 0 ? `${title.slice(0, 40)}（${status}）` : status;
+      taskList.appendChild(option);
+    }
   }
 
   private renderAll(): void {
@@ -515,6 +591,11 @@ export class HandoffPanel {
       button.textContent =
         `引継ぎ［${textOf(STATUS_TEXT, item.status)}・${textOf(OP_SCOPE_TEXT, item.opScope)}${flags}］` +
         `［試行${item.activeAttempt}］${bounds}`;
+      // Discoverable IDs: the full handoff/task UUIDs are exposed here
+      // (hover) and in the detail drawer (selectable text), so the create
+      // form can be filled without API/devtools round-trips. The badge
+      // text itself stays human-readable.
+      button.title = `引継ぎID: ${item.id}\n作業ID: ${item.taskId}`;
       button.addEventListener("click", () => {
         this.select(item.id);
       });
@@ -555,6 +636,10 @@ export class HandoffPanel {
       ? "／要再評価（親の目的が変更されました。送付前に再確認してください）"
       : "";
     badge.textContent = `引継ぎ［${textOf(STATUS_TEXT, item.status)}・${textOf(OP_SCOPE_TEXT, item.opScope)}${flags}］（版 ${item.version}・試行 ${item.activeAttempt}）`;
+    // Selectable IDs: full UUIDs as plain text (copyable) so the create
+    // form's task/predecessor fields can be filled from the shipped UI.
+    const ids = document.createElement("p");
+    ids.textContent = `引継ぎID: ${item.id} ／ 作業ID: ${item.taskId}`;
     const targetHead = document.createElement("p");
     targetHead.textContent = "目的（凍結・人間入力）:";
     const target = document.createElement("p");
@@ -602,6 +687,7 @@ export class HandoffPanel {
     }
     this.detailBody.append(
       badge,
+      ids,
       targetHead,
       target,
       criteriaHead,
@@ -633,7 +719,7 @@ export class HandoffPanel {
     const reportable = active && item.status === "dispatched";
     const verifiable = active && item.status === "reported";
     const retryable =
-      active &&
+      !locked &&
       (item.status === "prepared" ||
         item.status === "dispatched" ||
         item.status === "reported" ||
@@ -646,7 +732,13 @@ export class HandoffPanel {
       (item.status === "prepared" ||
         item.status === "dispatched" ||
         item.status === "reported");
-    const reaffirmAble = !locked && !terminal && item.needsReevaluation;
+    const reaffirmAble =
+      !locked &&
+      item.needsReevaluation &&
+      (item.status === "prepared" ||
+        item.status === "dispatched" ||
+        item.status === "reported" ||
+        item.status === "failed");
     if (this.dispatchButton !== null) {
       this.dispatchButton.disabled = !dispatchable;
     }

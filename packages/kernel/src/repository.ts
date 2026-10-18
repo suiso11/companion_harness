@@ -5923,6 +5923,7 @@ export function createKernelRepository(
       event: string;
       fromStatus: string | null;
       toStatus: string;
+      note: string | null;
       createdAt: number;
     }[];
   } {

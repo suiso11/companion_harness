@@ -706,21 +706,25 @@ export function listHandoffEvents(
     event: string;
     fromStatus: string | null;
     toStatus: string;
+    note: string | null;
     createdAt: number;
   }[];
 } {
   const owned = assertOwnedHandoff(db, sessionId, handoffId);
   const rows = db
     .prepare(
-      "SELECT seq, event, from_status, to_status, created_at FROM handoff_events WHERE handoff_id = ? ORDER BY seq ASC",
+      "SELECT seq, event, from_status, to_status, note, created_at FROM handoff_events WHERE handoff_id = ? ORDER BY seq DESC LIMIT 500",
     )
     .all(owned.id) as {
     seq: number;
     event: string;
     from_status: string | null;
     to_status: string;
+    note: string | null;
     created_at: number;
   }[];
+  // Newest-500 window, returned oldest-first (stable audit order).
+  rows.reverse();
   return {
     handoffId: owned.id,
     events: rows.map((row) => ({
@@ -728,6 +732,7 @@ export function listHandoffEvents(
       event: row.event,
       fromStatus: row.from_status,
       toStatus: row.to_status,
+      note: row.note,
       createdAt: row.created_at,
     })),
   };
@@ -744,13 +749,15 @@ export function listHandoffAttempts(
   const owned = assertOwnedHandoff(db, sessionId, handoffId);
   const rows = db
     .prepare(
-      "SELECT attempt_no, cause, created_at FROM handoff_attempts WHERE handoff_id = ? ORDER BY attempt_no ASC",
+      "SELECT attempt_no, cause, created_at FROM handoff_attempts WHERE handoff_id = ? ORDER BY attempt_no DESC LIMIT 500",
     )
     .all(owned.id) as {
     attempt_no: number;
     cause: string;
     created_at: number;
   }[];
+  // Newest-500 window, returned oldest-first (stable audit order).
+  rows.reverse();
   return {
     handoffId: owned.id,
     attempts: rows.map((row) => ({
@@ -920,12 +927,19 @@ export function dispatchHandoff(
       }
       // The task's CURRENT status rules at dispatch time: a task that was
       // completed/cancelled after the handoff froze refuses the dispatch
-      // (no frozen snapshot can re-open terminal work).
+      // (no frozen snapshot can re-open terminal work). The CURRENT
+      // version/parent binding rules too: a task that was explicitly
+      // resumed under a different parent (or otherwise advanced) leaves
+      // the frozen snapshot stale, so dispatch refuses until the human
+      // reaffirms the new binding (the reparent hook flags it; this is
+      // defense-in-depth for a missed hook).
       const task = db
         .prepare(
-          "SELECT status FROM autonomy_tasks WHERE session_id = ? AND id = ?",
+          "SELECT status, version, parent_purpose_id FROM autonomy_tasks WHERE session_id = ? AND id = ?",
         )
-        .get(row.session_id, row.task_id) as { status: string } | undefined;
+        .get(row.session_id, row.task_id) as
+        | { status: string; version: number; parent_purpose_id: string | null }
+        | undefined;
       if (
         task === undefined ||
         task.status === "completed" ||
@@ -933,6 +947,14 @@ export function dispatchHandoff(
       ) {
         throw new HandoffStateConflictError(
           "task is completed or cancelled: dispatch refused",
+        );
+      }
+      if (
+        task.version !== row.task_version ||
+        (task.parent_purpose_id ?? null) !== (row.parent_purpose_id ?? null)
+      ) {
+        throw new HandoffStateConflictError(
+          "handoff task binding is stale (task resumed or reparented): reaffirm before dispatch",
         );
       }
       setHandoffStatusInTx(
@@ -1127,6 +1149,8 @@ export function verifyHandoff(
 
 /**
  * Human marks failed (prepared/dispatched/reported only; terminal stays).
+ * Refused for an already-superseded handoff (the successor record owns
+ * the work now): cancel is the documented escape hatch.
  */
 export function failHandoff(
   db: Database.Database,
@@ -1143,6 +1167,11 @@ export function failHandoff(
     { ...options, operation: "failHandoff" },
     { expectedVersion },
     (row, now) => {
+      if (row.superseded_by !== null) {
+        throw new HandoffStateConflictError(
+          `handoff was superseded by ${row.superseded_by}: fail refused`,
+        );
+      }
       if (
         row.status !== "prepared" &&
         row.status !== "dispatched" &&
@@ -1203,6 +1232,7 @@ export function cancelHandoff(
 /**
  * Human records an abnormal worker exit (event only, no status change):
  * the handoff stays in its current lifecycle state with an audited note.
+ * Refused for an already-superseded handoff (the successor owns the work).
  */
 export function abnormalExitHandoff(
   db: Database.Database,
@@ -1219,6 +1249,11 @@ export function abnormalExitHandoff(
     { ...options, operation: "abnormalExitHandoff" },
     { expectedVersion },
     (row, now) => {
+      if (row.superseded_by !== null) {
+        throw new HandoffStateConflictError(
+          `handoff was superseded by ${row.superseded_by}: abnormal exit refused`,
+        );
+      }
       if (
         row.status !== "prepared" &&
         row.status !== "dispatched" &&
@@ -1332,8 +1367,32 @@ export function recordHandoffAttempt(
 /**
  * Explicit human reaffirm: keeps the status, clears a pending
  * `needs_reevaluation` notice (CAS on the expected version, allowed only
- * while the notice is set).
+ * while the notice is set). A stale frozen task binding (task resumed or
+ * reparented without a flag, e.g. a missed hook) may also be reaffirmed:
+ * the binding staleness is the notice, so the human path never dead-ends.
+ * Reaffirm adopts the CURRENT task binding into the frozen snapshot
+ * (task_version + parent ids/version), so a later dispatch validates
+ * against what the human just accepted.
  */
+/** Current parent version for the reaffirm snapshot (null when parentless). */
+function parentVersionForReaffirm(
+  db: Database.Database,
+  sessionId: string,
+  parentPurposeId: string | null,
+): number | null {
+  if (parentPurposeId === null) return null;
+  try {
+    const parent = db
+      .prepare(
+        "SELECT version FROM autonomy_purposes WHERE session_id = ? AND id = ?",
+      )
+      .get(sessionId, parentPurposeId) as { version: number } | undefined;
+    return parent?.version ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export function reaffirmHandoff(
   db: Database.Database,
   sessionId: string,
@@ -1349,16 +1408,38 @@ export function reaffirmHandoff(
     { ...options, operation: "reaffirmHandoff" },
     { expectedVersion },
     (row, now) => {
-      if (row.needs_reevaluation !== 1) {
+      const task = db
+        .prepare(
+          "SELECT version, parent_purpose_id FROM autonomy_tasks WHERE session_id = ? AND id = ?",
+        )
+        .get(row.session_id, row.task_id) as
+        | { version: number; parent_purpose_id: string | null }
+        | undefined;
+      const staleBinding =
+        task !== undefined &&
+        (task.version !== row.task_version ||
+          (task.parent_purpose_id ?? null) !== (row.parent_purpose_id ?? null));
+      if (row.needs_reevaluation !== 1 && !staleBinding) {
         throw new HandoffStateConflictError(
           "reaffirm requires a pending reevaluation notice",
         );
       }
       const moved = db
         .prepare(
-          "UPDATE delegation_handoffs SET needs_reevaluation = 0, version = version + 1, updated_at = ? WHERE id = ? AND version = ? AND needs_reevaluation = 1",
+          "UPDATE delegation_handoffs SET needs_reevaluation = 0, version = version + 1, updated_at = ?, task_version = ?, parent_purpose_id = ?, parent_purpose_version = ? WHERE id = ? AND version = ?",
         )
-        .run(now, row.id, row.version);
+        .run(
+          now,
+          task?.version ?? row.task_version,
+          (task?.parent_purpose_id ?? null) as string | null,
+          parentVersionForReaffirm(
+            db,
+            sessionId,
+            task?.parent_purpose_id ?? null,
+          ),
+          row.id,
+          row.version,
+        );
       if (moved.changes !== 1) {
         const current = readHandoff(db, row.id);
         throw new HandoffVersionConflictError(
@@ -1404,9 +1485,12 @@ export function reaffirmHandoff(
 /* ------------------------------------------------------------------ */
 
 /**
- * Flag every ACTIVE (prepared/dispatched/reported) handoff affected by a
+ * Flag every ACTIVE (prepared/dispatched/reported/failed) handoff affected by a
  * revoked/superseded parent purpose with the durable `needs_reevaluation`
- * NOTICE plus a `reevaluation_flagged` history event. Both binding
+ * NOTICE plus a `reevaluation_flagged` history event. `failed` is included:
+ * `recordHandoffAttempt` can return a failed handoff to `prepared` and
+ * `dispatchHandoff` would then accept it, so a non-active parent must not
+ * go unflagged on failed rows. Both binding
  * directions match: the FROZEN parent snapshot on the handoff row AND the
  * task's CURRENT parent (a task re-parented via `resumeTask` — including
  * a task that was parentless when the handoff froze — belongs to the
@@ -1434,7 +1518,7 @@ export function flagHandoffReevaluationInTx(
 ): void {
   const rows = db
     .prepare(
-      "SELECT h.id AS id, h.status AS status, h.version AS version FROM delegation_handoffs h LEFT JOIN autonomy_tasks t ON t.session_id = h.session_id AND t.id = h.task_id WHERE h.session_id = ? AND (h.parent_purpose_id = ? OR t.parent_purpose_id = ?) AND h.status IN ('prepared','dispatched','reported') AND h.needs_reevaluation = 0",
+      "SELECT h.id AS id, h.status AS status, h.version AS version FROM delegation_handoffs h LEFT JOIN autonomy_tasks t ON t.session_id = h.session_id AND t.id = h.task_id WHERE h.session_id = ? AND (h.parent_purpose_id = ? OR t.parent_purpose_id = ?) AND h.status IN ('prepared','dispatched','reported','failed') AND h.needs_reevaluation = 0",
     )
     .all(sessionId, parentPurposeId, parentPurposeId) as {
     id: string;
@@ -1442,6 +1526,71 @@ export function flagHandoffReevaluationInTx(
     version: number;
   }[];
   for (const row of rows) {
+    const moved = db
+      .prepare(
+        "UPDATE delegation_handoffs SET needs_reevaluation = 1, version = version + 1, updated_at = ? WHERE id = ? AND version = ? AND needs_reevaluation = 0",
+      )
+      .run(now, row.id, row.version);
+    if (moved.changes !== 1) {
+      continue;
+    }
+    appendHandoffEventInTx(
+      db,
+      row.id,
+      sessionId,
+      "reevaluation_flagged",
+      row.status,
+      row.status,
+      reason,
+      now,
+    );
+  }
+}
+
+/**
+ * Flag every non-terminal handoff bound to `taskId` whose frozen task
+ * binding (version/parent snapshot) no longer matches the CURRENT task
+ * row. Called by autonomy.ts `resumeTask` INSIDE the resume transaction
+ * when the task is reparented (or its version advanced past the frozen
+ * snapshot), so the frozen export can never silently delegate under the
+ * old parent: new dispatch is refused while the notice is set, cancel
+ * stays allowed, and explicit human reaffirm clears it (idempotent:
+ * flagged rows skipped). Best-effort bridge: callers MUST treat a
+ * missing-table error as a pre-0017 database and skip.
+ */
+export function flagHandoffTaskReparentInTx(
+  db: Database.Database,
+  sessionId: string,
+  taskId: string,
+  reason: string,
+  now: number,
+): void {
+  const task = db
+    .prepare(
+      "SELECT version, parent_purpose_id FROM autonomy_tasks WHERE session_id = ? AND id = ?",
+    )
+    .get(sessionId, taskId) as
+    | { version: number; parent_purpose_id: string | null }
+    | undefined;
+  if (task === undefined) return;
+  const rows = db
+    .prepare(
+      "SELECT id, status, version, task_version, parent_purpose_id FROM delegation_handoffs WHERE session_id = ? AND task_id = ? AND status IN ('prepared','dispatched','reported','failed') AND needs_reevaluation = 0",
+    )
+    .all(sessionId, taskId) as {
+    id: string;
+    status: string;
+    version: number;
+    task_version: number;
+    parent_purpose_id: string | null;
+  }[];
+  for (const row of rows) {
+    if (
+      row.task_version === task.version &&
+      (row.parent_purpose_id ?? null) === (task.parent_purpose_id ?? null)
+    ) {
+      continue;
+    }
     const moved = db
       .prepare(
         "UPDATE delegation_handoffs SET needs_reevaluation = 1, version = version + 1, updated_at = ? WHERE id = ? AND version = ? AND needs_reevaluation = 0",
