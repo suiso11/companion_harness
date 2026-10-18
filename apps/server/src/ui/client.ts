@@ -36,6 +36,7 @@ import {
   type RunViewState,
   runResultToAnswerParts,
 } from "./reducer.js";
+import { ShadowPanel } from "./shadow_panel.js";
 
 const LS_SESSION = "ch.sessionId";
 const LS_PENDING_KEY = "ch.pendingKey";
@@ -561,12 +562,38 @@ class ConversationApp {
     await this.ensureSession();
     // AV autonomy panel: usable without any model (plain DOM + HTTP).
     // Fail-open locally: a missing section never breaks the conversation.
+    let shadow: ShadowPanel | null = null;
     try {
-      const panel = new AutonomyPanel(() => this.sessionId);
+      const panel = new AutonomyPanel(
+        () => this.sessionId,
+        () => {
+          shadow?.notifyAutonomyChanged();
+        },
+      );
       panel.bind();
       void panel.refreshAll();
-    } catch {
-      // Best effort: the conversation shell stays usable.
+      // AV shadow panel: trial-only history/proposal UI (no execution).
+      // Unlike the autonomy panel above, a missing shadow section is a
+      // REAL breakage (SSR and bundle ship together), so initializer
+      // errors stay visible instead of being swallowed silently.
+      shadow = new ShadowPanel({
+        getSessionId: () => this.sessionId,
+        http: {
+          get: (path) => fetchJson(path),
+          post: (path, payload, key) => postJson(path, payload, key),
+        },
+      });
+      shadow.bind();
+      shadow.notifySessionChanged();
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "shadow panel failed";
+      const statusNode = document.getElementById("shadow-status");
+      if (statusNode !== null) {
+        statusNode.textContent = message;
+      } else {
+        throw error;
+      }
     }
     let descriptor = await this.recoverPending();
     if (descriptor === null) {
@@ -3909,6 +3936,7 @@ class ConversationApp {
  */
 class AutonomyPanel {
   private readonly getSessionId: () => string | null;
+  private readonly onChanged: (() => void) | null;
   private readonly status: HTMLElement;
   private readonly controlStatus: HTMLElement;
   private readonly stopButton: HTMLButtonElement;
@@ -3993,8 +4021,9 @@ class AutonomyPanel {
   private readonly pendingLine: HTMLElement;
   private readonly retryButton: HTMLButtonElement;
 
-  constructor(getSessionId: () => string | null) {
+  constructor(getSessionId: () => string | null, onChanged?: () => void) {
     this.getSessionId = getSessionId;
+    this.onChanged = onChanged ?? null;
     const get = <T extends HTMLElement>(id: string, tag: string): T =>
       (document.getElementById(id) as T | null) ?? (el(tag) as unknown as T);
     this.status = get<HTMLElement>("autonomy-status", "p");
@@ -4381,6 +4410,10 @@ class AutonomyPanel {
     this.renderPurposes(purposes);
     this.renderTasks(tasks);
     this.renderConflicts(conflicts);
+    // Local autonomy state changed meaningfully (lists re-rendered from a
+    // fresh fetch): shadow jobs may have been enqueued by the same
+    // mutation, so the shadow panel refreshes its list too.
+    this.onChanged?.();
   }
 
   private renderPurposes(result: { status: number; body: unknown }): void {

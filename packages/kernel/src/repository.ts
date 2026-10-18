@@ -103,6 +103,21 @@ import {
   type RunStatus,
   RunStatusSchema,
   retryScope,
+  SearchLimitSchema,
+  ShadowExplicitRequestSchema,
+  ShadowFailRequestSchema,
+  ShadowHoldRequestSchema,
+  type ShadowJobContext,
+  ShadowJobContextSchema,
+  type ShadowJobDeliberation,
+  ShadowJobDeliberationSchema,
+  type ShadowJobEventsResponse,
+  ShadowJobEventsResponseSchema,
+  type ShadowJobListResponse,
+  ShadowJobListResponseSchema,
+  type ShadowJobView,
+  ShadowJobViewSchema,
+  ShadowModelOutputSchema,
   SnapshotBodySchema,
   TaskCreateRequestSchema,
   type TaskCreateResponse,
@@ -136,15 +151,22 @@ import {
   getPurpose as autonomyGetPurpose,
   getTask as autonomyGetTask,
   holdTask as autonomyHoldTask,
+  isPurposeApplicableAt as autonomyIsPurposeApplicableAt,
   listAutonomyActivity as autonomyListActivity,
+  listConflictPairsInScope as autonomyListConflictPairsInScope,
   listPurposeConflicts as autonomyListConflicts,
   listPurposes as autonomyListPurposes,
+  listPurposesFiltered as autonomyListPurposesFiltered,
+  listPurposesInScope as autonomyListPurposesInScope,
   listTasks as autonomyListTasks,
+  listTasksFiltered as autonomyListTasksFiltered,
+  listTasksInScope as autonomyListTasksInScope,
   recordPurposeConflict as autonomyRecordConflict,
   resumeTask as autonomyResumeTask,
   revokePurpose as autonomyRevokePurpose,
   setAutonomyControl as autonomySetControl,
   startTask as autonomyStartTask,
+  isStrictAutonomyDeadline,
   recordUserActivityInTx,
 } from "./autonomy.js";
 import {
@@ -169,6 +191,25 @@ import {
   RepositoryValidationError,
   SessionBusyError,
 } from "./errors.js";
+import {
+  type ShadowPolicyReader,
+  type ShadowReaderPurpose,
+  type ShadowReaderTask,
+  cancelShadowJob as shadowCancelJob,
+  claimShadowJob as shadowClaimJob,
+  completeShadowJob as shadowCompleteJob,
+  failShadowJob as shadowFailJob,
+  getShadowJobContext as shadowGetContext,
+  getShadowJobDecision as shadowGetDecision,
+  getShadowJob as shadowGetJob,
+  hasActiveUserRuns as shadowHasActiveRuns,
+  holdShadowJob as shadowHoldJob,
+  listShadowJobEvents as shadowListEvents,
+  listShadowInbox as shadowListInbox,
+  listShadowJobs as shadowListJobs,
+  readPendingShadowJob as shadowReadPendingJob,
+  requestShadowDeliberation as shadowRequest,
+} from "./shadow.js";
 
 /**
  * C19: fixed safe error thrown when a generic Run lifecycle transition
@@ -3227,6 +3268,25 @@ export function createKernelRepository(
       );
       return lookupIdempotency(validScope, validKey);
     }
+    // AV shadow explicit-request scope: the embedded session must equal the
+    // path session (foreign sessions are 404, never 403), and the session
+    // must exist. The stored job ownership is re-verified on replay inside
+    // `requestShadowDeliberation` (stored session must still match).
+    const shadowRequestMatch = /^session:([^:]+):shadow-request$/.exec(
+      validScope,
+    );
+    if (shadowRequestMatch?.[1] !== undefined) {
+      const embedded = assertUuidV4(shadowRequestMatch[1], "sessionId");
+      if (embedded.toLowerCase() !== session.toLowerCase()) {
+        throw new RepositoryNotFoundError(
+          `scope ${validScope} not found in session ${session}`,
+        );
+      }
+      if (readSession(db, session) === null) {
+        throw new RepositoryNotFoundError(`session ${session} not found`);
+      }
+      return lookupIdempotency(validScope, validKey);
+    }
     throw new RepositoryNotFoundError(
       `scope ${validScope} not found in session ${session}`,
     );
@@ -4916,6 +4976,43 @@ export function createKernelRepository(
     );
   }
 
+  function listAutonomyPurposesInScope(
+    sessionId: string,
+    scope: string,
+  ): PurposeListResponse {
+    const out = autonomyListPurposesInScope(db, sessionId, scope, 101);
+    return parseOrValidation(
+      () => PurposeListResponseSchema.parse(out),
+      "purpose scope list response",
+    );
+  }
+
+  /**
+   * Filtered bounded purpose reader for the readonly agent tools
+   * (NOT the public HTTP list): scope/status/kind filters apply in SQL
+   * BEFORE the limit, and up to `limit + 1` matching rows are returned so
+   * the caller reports a truthful `hasMore` for the FILTERED set (never a
+   * falsely complete result while older matching records exist).
+   */
+  function listAutonomyPurposesFiltered(
+    sessionId: string,
+    filters: { scope?: string; status?: string; kind?: string },
+    limit: number,
+  ): PurposeListResponse {
+    // Tool-family bound (default 10 / max 20): the `limit + 1` probe row
+    // must fit the list DTO (max 100 items), so larger limits are rejected
+    // loudly instead of truncating the probe.
+    const capped = parseOrValidation(
+      () => SearchLimitSchema.parse(limit),
+      "purpose filtered list limit",
+    );
+    const out = autonomyListPurposesFiltered(db, sessionId, filters, capped);
+    return parseOrValidation(
+      () => PurposeListResponseSchema.parse(out),
+      "purpose filtered list response",
+    );
+  }
+
   function correctAutonomyPurpose(
     sessionId: string,
     request: unknown,
@@ -5093,6 +5190,39 @@ export function createKernelRepository(
     return autonomyGetTask(db, sessionId, taskId);
   }
 
+  function listAutonomyTasksInScope(
+    sessionId: string,
+    scope: string,
+  ): TaskListResponse {
+    const out = autonomyListTasksInScope(db, sessionId, scope, 101);
+    return parseOrValidation(
+      () => TaskListResponseSchema.parse(out),
+      "task scope list response",
+    );
+  }
+
+  /**
+   * Filtered bounded task reader for the readonly agent tools (NOT the
+   * public HTTP list): same SQL-before-limit + `limit + 1` probe contract
+   * as `listAutonomyPurposesFiltered` (see above).
+   */
+  function listAutonomyTasksFiltered(
+    sessionId: string,
+    filters: { scope?: string; status?: string; kind?: string },
+    limit: number,
+  ): TaskListResponse {
+    // Tool-family bound (see `listAutonomyPurposesFiltered` above).
+    const capped = parseOrValidation(
+      () => SearchLimitSchema.parse(limit),
+      "task filtered list limit",
+    );
+    const out = autonomyListTasksFiltered(db, sessionId, filters, capped);
+    return parseOrValidation(
+      () => TaskListResponseSchema.parse(out),
+      "task filtered list response",
+    );
+  }
+
   function startAutonomyTask(
     sessionId: string,
     taskId: string,
@@ -5251,6 +5381,377 @@ export function createKernelRepository(
     return applyAutonomyRestartFence(db, now);
   }
 
+  /* ---------------------------------------------------------------- */
+  /* AV02 shadow-deliberation facade (durable queue + fenced core).    */
+  /*                                                                  */
+  /* Ownership: every method below delegates to `shadow.ts`, the ONLY */
+  /* writer of the shadow tables. This facade adds the strict Zod     */
+  /* boundary and implements the narrow `ShadowPolicyReader` port     */
+  /* from the EXISTING autonomy getters (no duplicated purpose        */
+  /* mapper, no runtime cycle: `shadow.ts` never imports this         */
+  /* module or `autonomy.ts`). Completed jobs store a MODEL decision  */
+  /* SEPARATE from the CODE policy with ZERO execution performed.     */
+  /* ---------------------------------------------------------------- */
+
+  const shadowPolicyReader: ShadowPolicyReader = {
+    listScopePurposes(sessionId: string, scope: string): ShadowReaderPurpose[] {
+      const out = autonomyListPurposesInScope(db, sessionId, scope, 101);
+      return out.items.map((purpose) => ({
+        id: purpose.id,
+        scope: purpose.scope,
+        kind: purpose.kind,
+        explicit: purpose.explicit,
+        sourceKind: purpose.sourceKind,
+        statement: purpose.statement,
+        interpretation: purpose.interpretation,
+        status: purpose.status,
+        version: purpose.version,
+        supersededBy: purpose.supersededBy,
+        validFrom: purpose.validFrom,
+        validUntil: purpose.validUntil,
+        createdAt: purpose.createdAt,
+      }));
+    },
+    listScopeTasks(sessionId: string, scope: string): ShadowReaderTask[] {
+      const out = autonomyListTasksInScope(db, sessionId, scope, 101);
+      return out.items.map((task) => ({
+        id: task.id,
+        scope: task.scope,
+        title: task.title,
+        body: task.body,
+        kind: task.kind,
+        speaker: task.speaker,
+        deadline: task.deadline,
+        parentPurposeId: task.parentPurposeId,
+        status: task.status,
+        version: task.version,
+        holdReason: task.holdReason,
+        reconsiderTrigger: task.reconsiderTrigger,
+      }));
+    },
+    listScopeConflictPairs(
+      sessionId: string,
+      scope: string,
+    ): [string, string][] {
+      return autonomyListConflictPairsInScope(db, sessionId, scope, 101);
+    },
+    isStrictDeadline: (value: string): boolean =>
+      isStrictAutonomyDeadline(value),
+    isPurposeApplicableAt: (
+      purpose: { validFrom: string | null; validUntil: string | null },
+      now: number,
+    ): boolean => autonomyIsPurposeApplicableAt(purpose, now),
+  };
+
+  function requestShadowDeliberation(
+    sessionId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: ShadowJobView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => ShadowExplicitRequestSchema.parse(request),
+      "shadow explicit request",
+    );
+    const out = shadowRequest(
+      db,
+      sessionId,
+      parsed.scope,
+      parsed.reason,
+      options,
+    );
+    const body = parseOrValidation(
+      () => ShadowJobViewSchema.parse(out.body),
+      "shadow job response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function listShadowJobs(
+    sessionId: string,
+    query: unknown = {},
+  ): ShadowJobListResponse {
+    const parsed = parseOrValidation(
+      () => AutonomyListQuerySchema.parse(query ?? {}),
+      "shadow job list query",
+    );
+    const out = shadowListJobs(db, sessionId, parsed.limit);
+    return parseOrValidation(
+      () => ShadowJobListResponseSchema.parse(out),
+      "shadow job list response",
+    );
+  }
+
+  function getShadowJob(sessionId: string, jobId: string): ShadowJobView {
+    return parseOrValidation(
+      () => ShadowJobViewSchema.parse(shadowGetJob(db, sessionId, jobId)),
+      "shadow job response",
+    );
+  }
+
+  function listShadowJobEvents(
+    sessionId: string,
+    jobId: string,
+  ): ShadowJobEventsResponse {
+    const out = shadowListEvents(db, sessionId, jobId);
+    return parseOrValidation(
+      () => ShadowJobEventsResponseSchema.parse(out),
+      "shadow job events response",
+    );
+  }
+
+  function listShadowInbox(
+    sessionId: string,
+    query: unknown = {},
+  ): {
+    items: {
+      id: string;
+      sessionId: string;
+      scope: string;
+      kind: "policy_change" | "explicit_request";
+      triggerEvent: string;
+      triggerId: string | null;
+      controlVersion: number;
+      scopeEpoch: number;
+      disposition: "recorded" | "consumed" | "skipped";
+      jobId: string | null;
+      createdAt: number;
+    }[];
+  } {
+    const parsed = parseOrValidation(
+      () => AutonomyListQuerySchema.parse(query ?? {}),
+      "shadow inbox list query",
+    );
+    return shadowListInbox(db, sessionId, parsed.limit);
+  }
+
+  function getShadowJobContext(
+    sessionId: string,
+    jobId: string,
+  ): ShadowJobContext {
+    return parseOrValidation(
+      () =>
+        ShadowJobContextSchema.parse(shadowGetContext(db, sessionId, jobId)),
+      "shadow job context response",
+    );
+  }
+
+  function getShadowJobDeliberation(
+    sessionId: string,
+    jobId: string,
+  ): ShadowJobDeliberation {
+    return parseOrValidation(
+      () =>
+        ShadowJobDeliberationSchema.parse({
+          context: shadowGetContext(db, sessionId, jobId),
+          modelDecision: shadowGetDecision(db, sessionId, jobId),
+        }),
+      "shadow job deliberation response",
+    );
+  }
+
+  function claimShadowJob(
+    sessionId: string,
+    jobId: string,
+    request: unknown,
+    options: { now?: number },
+  ): {
+    outcome: "claimed" | "held";
+    job: ShadowJobView;
+    context: ShadowJobContext | null;
+  } {
+    const candidate = request as {
+      owner?: unknown;
+      expectedVersion?: unknown;
+      leaseMs?: unknown;
+      memories?: unknown;
+    };
+    if (
+      typeof candidate.owner !== "string" ||
+      candidate.owner.length === 0 ||
+      candidate.owner.length > 128 ||
+      !Number.isInteger(candidate.expectedVersion) ||
+      (candidate.expectedVersion as number) < 1
+    ) {
+      throw new RepositoryValidationError("shadow claim request is invalid");
+    }
+    if (
+      candidate.leaseMs !== undefined &&
+      (!Number.isInteger(candidate.leaseMs) ||
+        (candidate.leaseMs as number) < 1000 ||
+        (candidate.leaseMs as number) > 3_600_000)
+    ) {
+      throw new RepositoryValidationError("leaseMs must be 1000..3600000");
+    }
+    const owner = candidate.owner as string;
+    const expectedVersion = candidate.expectedVersion as number;
+    // Trusted server-only memory freeze: valid snippet entries only; any
+    // other shape is dropped (never a validation throw into the claim).
+    const memories =
+      Array.isArray(candidate.memories) &&
+      candidate.memories.every(
+        (entry) =>
+          typeof entry === "object" &&
+          entry !== null &&
+          typeof (entry as { snippet?: unknown }).snippet === "string",
+      )
+        ? (candidate.memories as Array<{ snippet: string }>)
+        : undefined;
+    const out = shadowClaimJob(db, sessionId, jobId, shadowPolicyReader, {
+      owner,
+      expectedVersion,
+      ...(candidate.leaseMs !== undefined
+        ? { leaseMs: candidate.leaseMs as number }
+        : {}),
+      ...(memories !== undefined ? { memories } : {}),
+      ...(options.now !== undefined ? { now: options.now } : {}),
+    });
+    const job = parseOrValidation(
+      () => ShadowJobViewSchema.parse(out.job),
+      "shadow job response",
+    );
+    const context =
+      out.context === null
+        ? null
+        : parseOrValidation(
+            () => ShadowJobContextSchema.parse(out.context),
+            "shadow job context response",
+          );
+    return { outcome: out.outcome, job, context };
+  }
+
+  function completeShadowJob(
+    sessionId: string,
+    jobId: string,
+    modelOutput: unknown,
+    options: { expectedVersion: number; leaseOwner: string; now?: number },
+  ): {
+    outcome: "completed" | "held";
+    job: ShadowJobView;
+    policyCode:
+      | "shadow_only"
+      | "missing_grant"
+      | "wish_not_command"
+      | "external_no_authority"
+      | "needs_clarification"
+      | "no_action"
+      | null;
+  } {
+    if (
+      !Number.isInteger(options.expectedVersion) ||
+      options.expectedVersion < 1 ||
+      typeof options.leaseOwner !== "string"
+    ) {
+      throw new RepositoryValidationError(
+        "shadow complete options are invalid",
+      );
+    }
+    const parsedOutput = parseOrValidation(
+      () => ShadowModelOutputSchema.parse(modelOutput),
+      "shadow model output",
+    );
+    const out = shadowCompleteJob(
+      db,
+      sessionId,
+      jobId,
+      shadowPolicyReader,
+      parsedOutput,
+      {
+        expectedVersion: options.expectedVersion,
+        leaseOwner: options.leaseOwner,
+        ...(options.now !== undefined ? { now: options.now } : {}),
+      },
+    );
+    const job = parseOrValidation(
+      () => ShadowJobViewSchema.parse(out.job),
+      "shadow job response",
+    );
+    return { outcome: out.outcome, job, policyCode: out.policyCode };
+  }
+
+  function holdShadowJob(
+    sessionId: string,
+    jobId: string,
+    request: unknown,
+    options: { now?: number },
+  ): ShadowJobView {
+    const parsed = parseOrValidation(
+      () => ShadowHoldRequestSchema.parse(request),
+      "shadow hold request",
+    );
+    const job = shadowHoldJob(db, sessionId, jobId, parsed.reason, {
+      expectedVersion: parsed.expectedVersion,
+      ...(options.now !== undefined ? { now: options.now } : {}),
+    });
+    return parseOrValidation(
+      () => ShadowJobViewSchema.parse(job),
+      "shadow job response",
+    );
+  }
+
+  function failShadowJob(
+    sessionId: string,
+    jobId: string,
+    request: unknown,
+    options: { now?: number },
+  ): ShadowJobView {
+    const parsed = parseOrValidation(
+      () => ShadowFailRequestSchema.parse(request),
+      "shadow fail request",
+    );
+    const job = shadowFailJob(db, sessionId, jobId, parsed.code, {
+      expectedVersion: parsed.expectedVersion,
+      ...(options.now !== undefined ? { now: options.now } : {}),
+    });
+    return parseOrValidation(
+      () => ShadowJobViewSchema.parse(job),
+      "shadow job response",
+    );
+  }
+
+  function cancelShadowJob(
+    sessionId: string,
+    jobId: string,
+    request: unknown,
+    options: { now?: number },
+  ): ShadowJobView {
+    const candidate = request as { expectedVersion?: unknown };
+    if (
+      !Number.isInteger(candidate.expectedVersion) ||
+      (candidate.expectedVersion as number) < 1
+    ) {
+      throw new RepositoryValidationError("shadow cancel request is invalid");
+    }
+    const job = shadowCancelJob(db, sessionId, jobId, {
+      expectedVersion: candidate.expectedVersion as number,
+      ...(options.now !== undefined ? { now: options.now } : {}),
+    });
+    return parseOrValidation(
+      () => ShadowJobViewSchema.parse(job),
+      "shadow job response",
+    );
+  }
+
+  /**
+   * Narrow trusted global pending selector for the runtime shadow worker
+   * ONLY (never called from HTTP): oldest pending job across sessions in
+   * one bounded SQL statement. Null when the queue is empty.
+   */
+  function readPendingShadowJob(): {
+    sessionId: string;
+    jobId: string;
+    version: number;
+  } | null {
+    return shadowReadPendingJob(db);
+  }
+
+  /**
+   * Trusted foreground-activity read for the runtime shadow worker ONLY:
+   * true while ANY user run is queued/running/cancel_requested.
+   */
+  function hasActiveShadowBlock(): boolean {
+    return shadowHasActiveRuns(db);
+  }
+
   return {
     createSession,
     postMessage,
@@ -5321,6 +5822,8 @@ export function createKernelRepository(
     createAutonomyPurpose,
     listAutonomyPurposes,
     getAutonomyPurpose,
+    listAutonomyPurposesInScope,
+    listAutonomyPurposesFiltered,
     correctAutonomyPurpose,
     revokeAutonomyPurpose,
     achieveAutonomyPurpose,
@@ -5329,6 +5832,8 @@ export function createKernelRepository(
     createAutonomyTask,
     listAutonomyTasks,
     getAutonomyTask,
+    listAutonomyTasksInScope,
+    listAutonomyTasksFiltered,
     startAutonomyTask,
     holdAutonomyTask,
     resumeAutonomyTask,
@@ -5338,6 +5843,20 @@ export function createKernelRepository(
     setAutonomyControlState,
     listAutonomyActivityLog,
     applyAutonomyRestartFenceNow,
+    requestShadowDeliberation,
+    listShadowJobs,
+    getShadowJob,
+    listShadowJobEvents,
+    listShadowInbox,
+    getShadowJobContext,
+    getShadowJobDeliberation,
+    claimShadowJob,
+    completeShadowJob,
+    holdShadowJob,
+    failShadowJob,
+    cancelShadowJob,
+    readPendingShadowJob,
+    hasActiveShadowBlock,
   };
 }
 

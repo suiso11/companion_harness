@@ -3808,3 +3808,137 @@ drafts instead of applying them to the new version).
 - Remaining (NOT claimed): AV02 shadow, AV04 learning, AV05
   notification, AV06 priority, AV07 supervisor/reconcile, AV08
   maintenance/handoff.
+
+## AV02 shadow-deliberation durable CORE — kernel/contracts only (2026-10-17, observed, branch feat/av-shadow-deliberation)
+
+Implements the CONCRETE shadow kernel/contracts/durable core only (NOT the
+full vertical): model proposals NEVER become execution authority. Actual
+SQLite queue/projection/policy/transition API + runtime proof below.
+The full vertical (model gateway service + HTTP + UI) is STILL IN PROGRESS
+and arrives via the NEXT bounded worker; NO PR is published for this
+branch until that lands.
+
+- Owned new sources: `packages/contracts/src/shadow.ts` (strict MODEL
+  output + job/context/policy DTOs + `shadowRequestScope`), migration
+  `packages/kernel/migrations/0012_shadow.sql` (FOUR new STRICT tables:
+  `shadow_scope_epochs`, `shadow_inbox`, `shadow_jobs`, `shadow_job_events`;
+  BUNDLED_SCHEMA_VERSION 11 -> 12; Drizzle mirror in
+  `packages/kernel/src/schema.ts`), `packages/kernel/src/shadow.ts`
+  (ONLY writer of the shadow tables; `autonomy.ts` imports the enqueue /
+  reconcile entries FROM it — never the reverse, enforced by the
+  `ShadowPolicyReader` port the repository implements from existing
+  getters), same-TX hooks in `packages/kernel/src/autonomy.ts`
+  (purpose/task/conflict mutations enqueue; pause holds pending globally;
+  resume skips paused-time inbox; restart fence reconciles), repository
+  facade (`requestShadowDeliberation/listShadowJobs/getShadowJob/
+  listShadowJobEvents/listShadowInbox/getShadowJobContext/claimShadowJob/
+  completeShadowJob/holdShadowJob/failShadowJob/cancelShadowJob`).
+- MODEL contract: decision execute|hold|ask|do-nothing + evidence ids
+  (frozen sP/sT/sM/sF labels only) + brief reason (<=500cp, not CoT) +
+  nullable structured action (kind/summary/optional LOCAL task draft) +
+  completion + stop conditions + uncertainty + counterargument; strict
+  unknown-field reject (no grant/permission/budget/bypass); task-draft
+  deadlines only when matching the EXPLICIT deadline of a task ACTUALLY
+  cited in evidence (windows are never deadlines, uncited dates rejected);
+  execute requires an action, do-nothing forbids one. CODE policy (never
+  model-chosen): shadow_only/missing_grant/
+  wish_not_command/external_no_authority/needs_clarification/no_action.
+  Recorded permission NEVER becomes a grant (CLAIM != GRANT: execute with
+  or without a claim stays missing_grant); zero execution performed.
+- Verified 2026-10-17: permanent `shadow_core.test.ts` 15/15 (ownership,
+  atomic same-TX queue, stable-key replay/drift, epoch-drift hold,
+  pause/restart holds, no-catchup, wish/external/missing-grant policies
+  incl. WITH-claim still missing_grant, genuine do-nothing, strict
+  rejects, foreground abort, redacted fail, scope-completeness overflow,
+  time-applicability, deadline provenance); affected `autonomy_slice`
+  11/11 + `migration` 21/21 + full kernel 545/545 + contracts 135/135;
+  Biome clean; root `tsc` only the pre-existing better-sqlite3 TS7016
+  noise; throwaway SQLite smoke (deleted after run): claim froze ctx (1
+  purpose + 1 task, epoch 2, control v2) -> mid-call constraint held late
+  output (scope_epoch_drift) -> fresh state completed missing_grant with
+  zero grant/calendar/tool surface and 0 executions / 0 grants. Feature
+  vertical STILL in progress (gateway/service/HTTP unstarted).
+- Remaining (NOT claimed): model gateway, shadow service, HTTP routes,
+  UI; then feature publication.
+- Service+HTTP LIVE (2026-10-17, branch feat/av-shadow-deliberation):
+  actual `startServer` + temp-DB + real HTTP app + real configured gateway
+  to a synthetic loopback provider (NOT a real model): resume -> purpose ->
+  1 native call -> stored MODEL execute -> CODE `missing_grant`, zero
+  action_executions/proposals/memory-outbox; foreground chat preempts
+  (`aborted_foreground`, ordinary `answer.submit` still completes); restart
+  re-pauses with zero catchup/replay, fresh resume + new purpose deliberates
+  exactly once. Production fixes: deliberation tool renamed to
+  `autonomy_deliberation.submit` (two-dot name failed the shared
+  `namespace.verb` gateway gate -> every real round trip `model_error`);
+  bootstrap re-applies the shadow-priority repo wrapper after the gated
+  rebuild (foreground notify/settlement wake were lost). Focused unit:
+  `shadow_service_http.test.ts` 12/12 incl. wire-normalization regression;
+  Biome clean; root `tsc` only pre-existing better-sqlite3 TS7016. Whole
+  feature UI STILL IN PROGRESS (service/HTTP done, UI unstarted).
+- Final review proof (2026-10-17, branch feat/av-shadow-deliberation):
+  repaired OWN `packages/kernel` + `apps/server` `@types` links (they were
+  absolute symlinks into the parent checkout, so the relative
+  `@types/better-sqlite3` hop resolved to a store that lacks 9.6.0):
+  replaced with real OWN dirs holding ABSOLUTE links to the OWN
+  `node_modules/.pnpm/@types+better-sqlite3@9.6.0` (159-line DTS) and
+  `@types+node@24.12.4` caches; root `tsc` now fully clean, zero TS7016,
+  no shims/suppressions. Live-test fix (test-only, CSRF unchanged):
+  `shadow_stop_abort_live.test.ts` now sends same-origin `Origin` on real
+  loopback POSTs (Node 24 fetch emits `sec-fetch-mode`, so missing-Origin
+  is browser-like -> 403). Verified: kernel `shadow_core` 19/19 +
+  `autonomy_tools` 7/7, `shadow_service_http` 14/14,
+  `shadow_deliberation_http` (envelope `{context,modelDecision}` read-only)
+  1/1, `shadow_stop_abort_live` 1/1 (pure STOP aborts parked call,
+  `control_paused`; sP999 -> `model_error` terminal + lease clear; GOOD
+  next completes), production smoke (real `startServer` + real provider
+  HTTP loopback) 17/17; `tsc` + Biome clean. UI browser proof STILL
+  unverified (Chromium regression is the handoff).
+- Shadow browser 4/4 Chromium (2026-10-17, branch feat/av-shadow-deliberation,
+  fresh `build:ui`): `e2e/shadow.spec.ts` 4/4 green on real HTTP+SQLite+SSR
+  (per-test fixture server + synthetic gateway). Retry button moved out of
+  hidden detail (REAL SSR bug: uncertain POST retry was unreachable);
+  test3 seeds scope-a+scope-b while paused so ask evidence sP1 exists in
+  each frozen scope; test4 re-focuses composer after explicit STOP so the
+  held landing alone proves no draft/focus/selection clobber. `tsc` + Biome
+  clean.
+- AV02 shadow-deliberation FULL VERTICAL published (2026-10-17, branch
+  feat/av-shadow-deliberation, full acceptance observed): kernel durable
+  core + model-gated shadow service + read-only HTTP + consumer UI. Model
+  proposals NEVER execute: CODE policy `missing_grant` (claim != grant,
+  with or without a permission claim), zero `action_executions` /
+  proposals / memory-outbox writes.   Read-only views: scope purposes/tasks via repository getters
+  (`ShadowPolicyReader.listScopePurposes/listScopeTasks`, no Markdown or
+  memory connectors; labels/statement/interpretation/explicit deadlines
+  only).
+  Durable queue: explicit request persists, input-complete fences
+  (foreground userMessage/retry/cancel aborts the shadow's OWN call only),
+  STOP holds pending globally, restart fence re-pauses with zero
+  catchup/replay. Frozen context: memory recall (when configured) is
+  UNTRUSTED evidence, exactly ONE bounded gateway call per job
+  (`autonomy_deliberation.submit`, ONE dot — the two-dot name failed the
+  shared `namespace.verb` gate). UI `ShadowPanel`: latest-intent list/
+  detail (held GET never restores stale selection), stable retry OUTSIDE
+  hidden detail, XSS inert (`textContent`, no `img`/`script` nodes),
+  composer draft/focus/selection never clobbered by STOP-held background
+  output. Full proof: Vitest 136 files / 1557 tests passed (8 skipped,
+  real remind CLI via `COMPANION_MEMORY_TEST_ENTRY`, LLM/vectors
+  disabled); full default browser 32 passed (28 prior + new shadow 4);
+  prior production smoke 17/17 real HTTP loopback (synthetic provider,
+  NOT a real model); root `tsc` + e2e `tsc` exit 0; root Biome exit 0.
+  Own `apps/server/test-results/` Playwright output removed + standard
+  `test-results/`/`playwright-report/` gitignore added (own artifacts
+  only). NO real model / GPU perf / Google writes / OAuth / user DB /
+  device / listeners / grants claimed.
+- Next-worker interfaces (AV05 notifications consumer, declarations only):
+  kernel `completeShadowJob(jobId, …)` appends the terminal
+  `shadow_job_events` row (completion note source) + `listShadowJobEvents`
+  / `listShadowJobs`; task helper `appendTaskEventInTx` (module-private,
+  via public task transitions) + `listAutonomyActivity`; server control
+  hooks `shadowWake` / `shadowControlChanged` (app deps) =
+  `ShadowService.wake()` / `notifyControl()` / `notifyForeground()` /
+  `onRunSettled()`; UI `ShadowPanel.refreshList(): Promise<void>` +
+  `ShadowPanel.selectJob(jobId, version): Promise<void>` (public).
+  Remaining NOT claimed: AV05 notifications, AV06 shared resources, AV07
+  external supervisor/recovery, AV04 methods learning, AV03 conversation
+  task-proposals + actual pi-orch handoff, AV08 maintenance, unresolved
+  device/standing/external rollout.

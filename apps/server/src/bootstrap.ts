@@ -47,6 +47,7 @@ import type { KernelRepository } from "@companion/kernel";
 import {
   type ActionCreateReadPort,
   type ActionProposalStager,
+  applyAutonomyRestartFence,
   BUNDLED_SCHEMA_VERSION,
   CalendarActionWriteCapabilitySchema,
   type CalendarActionWritePort,
@@ -59,6 +60,7 @@ import {
   createActionExecutionService,
   createActionStrategy,
   createAgentStrategy,
+  createAutonomyReadRegistrations,
   createCalendarActionReadPort,
   createCalendarActionTargetResolver,
   createCalendarCreateProposalRegistration,
@@ -80,9 +82,11 @@ import {
   openKernelDatabase,
   quickCheck,
   RunEngine,
+  reconcileShadowRestartInTx,
   StrategyRegistry,
   type ToolBroker,
   ToolError,
+  type ToolRegistration,
   toCalendarObservation,
 } from "@companion/kernel";
 import {
@@ -141,6 +145,7 @@ import {
   RESCHEDULE_WRITE_PROFILE_ENV,
   type RescheduleWriteConnectorHint,
 } from "./rescheduleWriteProfile.js";
+import { createShadowService, type ShadowService } from "./shadow_service.js";
 
 /** Graceful-drain natural-completion budget (§11.5: max 10s). */
 export const SHUTDOWN_DRAIN_MS = 10_000;
@@ -384,6 +389,8 @@ export interface StartedServer {
   toolBroker: ToolBroker | null;
   /** Conversation-memory service when COMPANION_MEMORY_JSON is set, else null. */
   memory: MemoryService | null;
+  /** Shadow-deliberation worker when a model gateway resolved, else null. */
+  shadow: ShadowService | null;
 }
 
 /** Fixed path-free display name for the single M1 Markdown connector. */
@@ -794,6 +801,8 @@ export async function startServer(
   let onSigterm: (() => void) | undefined;
   /** Conversation-memory service (null = memoryless; set inside try). */
   let memory: MemoryService | null = null;
+  /** Shadow-deliberation worker (null = no gateway; set inside try). */
+  let shadow: ShadowService | null = null;
   const removeSignalHandlers = (): void => {
     if (onSigint !== undefined) {
       try {
@@ -1166,18 +1175,25 @@ export async function startServer(
     // the control was left UNPAUSED it flips back to PAUSED with a version
     // advance and appends `restart_fence` + `interrupted_note` activity rows
     // recording that background intent does NOT resume implicitly; an
-    // already-paused control stays untouched. Best-effort on pre-0011
-    // databases: a missing autonomy slice must never block startup.
+    // already-paused control stays untouched. Migration 0012 (the latest
+    // committed migration) REQUIRES the autonomy + shadow tables: a missing
+    // slice fails closed here (a partially-migrated database must never
+    // start unsafe). Shadow restart reconciliation then holds every
+    // pending/claimed job (`restart_interrupted`, terminal for those jobs):
+    // a restart never resumes or replays old work, and the paused control
+    // admits no new claims until meaningful new state arrives. Best-effort
+    // only on pre-0011 databases (which never had the autonomy slice): a
+    // missing slice there must never block startup.
     try {
-      const { applyAutonomyRestartFence } = await import("@companion/kernel");
       applyAutonomyRestartFence(handle.raw, now());
+      reconcileShadowRestartInTx(handle.raw, now());
     } catch (error) {
       if (!(error instanceof Error) || !/no such table/i.test(error.message)) {
         throw error;
       }
       // Post-migration the schema version is BUNDLED_SCHEMA_VERSION (>= the
-      // 0011 autonomy migration), so every autonomy table must exist: a
-      // missing table means the durable stop fence was NOT applied and
+      // 0011 autonomy migration), so every autonomy/shadow table must exist:
+      // a missing table means the durable stop fence was NOT applied and
       // startup must fail instead of running unprotected. Only a pre-0011
       // database (which never had the slice) may proceed best-effort.
       let version = 0;
@@ -1264,6 +1280,74 @@ export async function startServer(
         return out;
       },
     });
+    /**
+     * Shadow priority wrapper (server-owned): accepted foreground work
+     * (userMessage/retry/cancel) aborts the shadow's OWN call
+     * synchronously; actual run settlement (any terminal outcome) re-wakes
+     * eligible pending shadow jobs. Every hook is throw-guarded: a shadow
+     * wake/abort can never unwind a committed user command. Composes OUTSIDE
+     * the memory wrapper so both observe every call.
+     */
+    const wrapRepoWithShadowPriority = (
+      inner: KernelRepository,
+      service: ShadowService,
+    ): KernelRepository => ({
+      ...inner,
+      postMessage: (...args) => {
+        const out = inner.postMessage(...args);
+        try {
+          service.notifyForeground();
+        } catch {
+          // Best effort: the message already committed.
+        }
+        return out;
+      },
+      postRetry: (...args) => {
+        const out = inner.postRetry(...args);
+        try {
+          service.notifyForeground();
+        } catch {
+          // Best effort: the retry already committed.
+        }
+        return out;
+      },
+      cancelRun: (...args) => {
+        const out = inner.cancelRun(...args);
+        try {
+          service.notifyForeground();
+        } catch {
+          // Best effort: the cancel already committed.
+        }
+        return out;
+      },
+      completeRun: (...args) => {
+        const out = inner.completeRun(...args);
+        try {
+          service.onRunSettled();
+        } catch {
+          // Best effort: the completion already committed.
+        }
+        return out;
+      },
+      failRun: (...args) => {
+        const out = inner.failRun(...args);
+        try {
+          service.onRunSettled();
+        } catch {
+          // Best effort: the failure already committed.
+        }
+        return out;
+      },
+      finalizeCancelRequested: (...args) => {
+        const out = inner.finalizeCancelRequested(...args);
+        try {
+          service.onRunSettled();
+        } catch {
+          // Best effort: the settlement already committed.
+        }
+        return out;
+      },
+    });
     if (config.memory !== null) {
       const memoryConfig: MemoryConfig = config.memory;
       memory = createMemoryService({
@@ -1285,12 +1369,37 @@ export async function startServer(
       repo = wrapRepoWithMemoryIntake(baseRepo, memory);
       logger.info("server.memory_ready", { status: 1 });
     }
+    // AV shadow worker (model-gated): uses the EXACT SAME configured
+    // gateway/modelName as the ordinary agent above (no model selection,
+    // download, provider, or fake response) plus the SAME bounded memory
+    // recall scope when memory is configured (recall only: no feedback,
+    // heat, or mutation from shadow). Null gateway (or null model config)
+    // means NO worker: pending jobs honestly wait (claim fences paused
+    // work; completions fail closed) instead of producing fake output.
+    if (modelGateway !== null) {
+      shadow = createShadowService({
+        repo,
+        gateway: modelGateway,
+        model: modelName,
+        recall: memory !== null ? memory.recallHook : null,
+        logger,
+        now,
+      });
+      // Priority composition OUTSIDE the memory intake wrapper: accepted
+      // foreground work aborts shadow's OWN call; run settlement re-wakes.
+      repo = wrapRepoWithShadowPriority(repo, shadow);
+      logger.info("server.shadow_ready", { status: 1 });
+    }
     // M1 (plan 14.1/14.5-14.6): after migration and before engine
     // recovery/listen, when roots are configured create one connector
     // owning all roots, ensure one fingerprint-bound instance, then the
     // four M1 registrations and a ToolBroker on the same db/repo. No
     // invocation endpoint here. No roots => toolBroker stays null (M0).
     let toolBroker: ToolBroker | null = null;
+    // Agent base registrations captured from the composition above (empty
+    // without roots/memory). The agent broker always appends the four
+    // strictly-readonly autonomy tools below.
+    const agentBaseRegistrations: ToolRegistration[] = [];
     // Calendar composition was fully resolved synchronously BEFORE any DB
     // side effect above (frozen selector, completeness, conflicts, exact
     // profile compatibility); reuse it here without re-reading env.
@@ -1737,6 +1846,18 @@ export async function startServer(
     } else {
       repo = gatedRepo;
     }
+    // AV shadow priority composition (server-owned): the gated rebuild above
+    // supersedes the pre-gate repo object, so re-apply the foreground-abort
+    // + settlement-wake wrapper HERE, outside the memory intake wrapper, on
+    // the repo the app/engine actually share. Without this, accepted
+    // foreground work never aborts the shadow's OWN call and run settlement
+    // never re-wakes eligible pending jobs (the worker only wakes on explicit
+    // requests). The shadow service itself keeps operating on the same
+    // database through its creation-time repo reference.
+    if (shadow !== null) {
+      const activeShadow = shadow;
+      repo = wrapRepoWithShadowPriority(repo, activeShadow);
+    }
 
     // M5 host-owned dedicated port (normal startup, no injection). The
     // conditional etag resolves concretely from the REPOSITORY-immutable
@@ -1825,6 +1946,11 @@ export async function startServer(
       actionsEnabled ||
       createEnabled;
     if (needsMarkdownTools || memory !== null) {
+      // Agent-visible base: the M1/M6/memory registrations below are ALSO
+      // the agent's base toolset. Captured here so the agent broker (built
+      // later) reuses the exact same registrations plus the always-on
+      // readonly autonomy tools, while `toolBroker` keeps its exact
+      // existing composition.
       const registrations = needsMarkdownTools
         ? [
             ...createM1ToolRegistrations({
@@ -1950,6 +2076,7 @@ export async function startServer(
         registrations.push(...createMemoryStageRegistrations({ repo, port }));
       }
       toolBroker = createToolBroker({ db: handle.raw, repo, registrations });
+      agentBaseRegistrations.push(...registrations);
       logger.info("server.markdown_ready", {
         status: registrations.length,
       });
@@ -2009,18 +2136,29 @@ export async function startServer(
     }
     // M2 (opt-in): when a gateway resolved above, register the agent under
     // m0-default before engine.start/listen. The agent reuses the M1
-    // ToolBroker, or a private empty-registration broker when no Markdown
-    // roots exist (toolBroker stays null without roots). With memory
-    // configured the agent additionally gets the bounded pre-answer recall
-    // hook (fail-open memoryless otherwise). No model gateway => empty
-    // registry: runs fail closed with a fixed code instead of producing
-    // fake LLM output. No direct model endpoint is added; only counts are
-    // logged (never URLs/keys).
+    // ToolBroker composition (or a private broker when no Markdown roots
+    // exist and toolBroker stays null) PLUS the four strictly-readonly
+    // autonomy tools (`purpose.list` / `purpose.open` / `task.list` /
+    // `task.open`), registered regardless of Markdown roots or memory
+    // configuration: without roots the agent broker contains exactly
+    // those four. With memory configured the agent additionally gets the
+    // bounded pre-answer recall hook (fail-open memoryless otherwise).
+    // No model gateway => empty registry: runs fail closed with a fixed
+    // code instead of producing fake LLM output. No direct model endpoint
+    // is added; only counts are logged (never URLs/keys).
     const registry = new StrategyRegistry();
     if (modelGateway !== null) {
-      const agentBroker =
-        toolBroker ??
-        createToolBroker({ db: handle.raw, repo, registrations: [] });
+      // AV autonomy read tools: SELECT-only over the runtime session's
+      // owned records (session derived from the calling run, never model
+      // input). Same existing broker budgets, no widening, no mutations.
+      const agentBroker = createToolBroker({
+        db: handle.raw,
+        repo,
+        registrations: [
+          ...agentBaseRegistrations,
+          ...createAutonomyReadRegistrations({ repo }),
+        ],
+      });
       registry.register(
         AGENT_STRATEGY_NAME,
         createAgentStrategy({
@@ -2211,7 +2349,14 @@ export async function startServer(
     if (memory !== null) {
       memory.start();
     }
+    // Shadow worker starts after engine recovery (reconciled restart state
+    // is already paused + held above): NO automatic job pickup — only
+    // meaningful new state (or a new explicit request) wakes it.
+    if (shadow !== null) {
+      shadow.start();
+    }
 
+    const activeShadowWake = shadow;
     const { app, controls } = createApp({
       config,
       repo,
@@ -2222,6 +2367,28 @@ export async function startServer(
       actionsEnabled,
       createEnabled,
       ...(memory !== null ? { memory } : {}),
+      ...(activeShadowWake !== null
+        ? {
+            shadowWake: (): void => {
+              try {
+                activeShadowWake.wake();
+              } catch {
+                // Best effort: wake never throws into the caller.
+              }
+            },
+            // Committed control changes (pause OR resume, including a
+            // replayed old resume): the worker reads the ACTUAL control
+            // state and aborts its OWN in-flight call when paused, so a
+            // pure STOP aborts model/recall work with no foreground chat.
+            shadowControlChanged: (): void => {
+              try {
+                activeShadowWake.notifyControl();
+              } catch {
+                // Best effort: notify never throws into the caller.
+              }
+            },
+          }
+        : {}),
     });
     const activeEngine = engine;
     const activeHandle = handle;
@@ -2262,14 +2429,22 @@ export async function startServer(
         },
       );
     } catch (listenError) {
-      // Listen failed: stop the memory service FIRST (its crash-recovered
-      // CLI children and timer must not outlive the rejected startup or
-      // touch the repo/DB after close), then drain the started engine,
-      // stop the owned Calendar connector, close any created listener, and
-      // finally close the DB (in that order). Handlers were not yet
-      // registered, but remove defensively before rethrowing. Every step is
-      // best-effort: the listen error carries the startup failure even when
-      // a cleanup step also fails.
+      // Listen failed: stop the shadow worker FIRST (its in-flight gateway
+      // call aborts and is awaited: no orphan model calls), then the memory
+      // service (its crash-recovered CLI children and timer must not outlive
+      // the rejected startup or touch the repo/DB after close), then drain
+      // the started engine, stop the owned Calendar connector, close any
+      // created listener, and finally close the DB (in that order). Handlers
+      // were not yet registered, but remove defensively before rethrowing.
+      // Every step is best-effort: the listen error carries the startup
+      // failure even when a cleanup step also fails.
+      try {
+        if (shadow !== null) {
+          await shadow.stop();
+        }
+      } catch {
+        // Best effort: the listen error carries the startup failure.
+      }
       try {
         if (memory !== null) {
           await memory.stop();
@@ -2346,7 +2521,16 @@ export async function startServer(
         controls.markDraining();
         const safeReason = sanitizeShutdownReason(reason);
         logger.info("server.draining", { status: safeReason });
-        // Stop memory first: the idle timer is cancelled, in-flight CLI
+        // Stop shadow first: the in-flight gateway call aborts and is
+        // awaited (no orphan model calls) before memory/engine/DB teardown.
+        if (shadow !== null) {
+          try {
+            await shadow.stop();
+          } catch {
+            // Best effort: the engine drain below still runs.
+          }
+        }
+        // Stop memory second: the idle timer is cancelled, in-flight CLI
         // children are hard-killed and awaited (no orphans), and no new
         // cultivation starts while the engine drains.
         if (memory !== null) {
@@ -2475,9 +2659,21 @@ export async function startServer(
       shutdown,
       toolBroker,
       memory,
+      shadow,
     };
   } catch (error) {
     removeSignalHandlers();
+    // Any post-start failure path stops the shadow worker FIRST (abort +
+    // await in-flight gateway work: no orphan model calls), then the memory
+    // service (crash-recovery CLI/timer must not outlive startup), BEFORE
+    // the DB close below. The original error still carries the failure.
+    if (shadow !== null) {
+      try {
+        await shadow.stop();
+      } catch {
+        // Best effort: the original startup error carries the failure.
+      }
+    }
     // Any post-start failure path (including memory started above) stops
     // and awaits the memory service BEFORE the DB close below: a rejected
     // startup must never leave its crash-recovery CLI/timer alive. The

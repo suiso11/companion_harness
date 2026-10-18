@@ -1156,6 +1156,141 @@ export const autonomyActivity = sqliteTable(
   ],
 );
 
+// AV02 shadow-deliberation durable core. Mirrors
+// packages/kernel/migrations/0012_shadow.sql, which is authoritative.
+// Shadow jobs reason ABOUT policy state but NEVER execute: no grant /
+// capability / calendar / ToolBroker / child-process / device / secret
+// column exists here. A recorded `permission` purpose stays a CLAIM; a
+// completed job stores a MODEL decision SEPARATE from the CODE policy code.
+
+export const shadowScopeEpochs = sqliteTable(
+  "shadow_scope_epochs",
+  {
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id),
+    scope: text("scope").notNull(),
+    epoch: integer("epoch").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (t) => [check("shadow_scope_epochs_epoch_check", sql`${t.epoch} >= 1`)],
+);
+
+export const shadowInbox = sqliteTable(
+  "shadow_inbox",
+  {
+    id: text("id").primaryKey(),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id),
+    scope: text("scope").notNull(),
+    kind: text("kind").notNull(),
+    triggerEvent: text("trigger_event").notNull(),
+    triggerId: text("trigger_id"),
+    controlVersion: integer("control_version").notNull(),
+    scopeEpoch: integer("scope_epoch").notNull(),
+    disposition: text("disposition").notNull(),
+    jobId: text("job_id"),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [
+    check(
+      "shadow_inbox_kind_check",
+      sql`${t.kind} IN ('policy_change','explicit_request')`,
+    ),
+    check("shadow_inbox_control_version_check", sql`${t.controlVersion} >= 1`),
+    check("shadow_inbox_scope_epoch_check", sql`${t.scopeEpoch} >= 1`),
+    check(
+      "shadow_inbox_disposition_check",
+      sql`${t.disposition} IN ('recorded','consumed','skipped')`,
+    ),
+  ],
+);
+
+export const shadowJobs = sqliteTable(
+  "shadow_jobs",
+  {
+    id: text("id").primaryKey(),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id),
+    scope: text("scope").notNull(),
+    kind: text("kind").notNull(),
+    status: text("status").notNull(),
+    triggerEvent: text("trigger_event").notNull(),
+    triggerId: text("trigger_id"),
+    requestKey: text("request_key"),
+    /** UNTRUSTED explicit-request text (NULL for policy-change jobs). */
+    requestReason: text("request_reason"),
+    controlVersion: integer("control_version").notNull(),
+    scopeEpoch: integer("scope_epoch").notNull(),
+    claimControlVersion: integer("claim_control_version"),
+    claimScopeEpoch: integer("claim_scope_epoch"),
+    contextJson: text("context_json"),
+    modelDecisionJson: text("model_decision_json"),
+    policyCode: text("policy_code"),
+    version: integer("version").notNull(),
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: integer("lease_expires_at"),
+    holdReason: text("hold_reason"),
+    failCode: text("fail_code"),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (t) => [
+    check(
+      "shadow_jobs_kind_check",
+      sql`${t.kind} IN ('policy_change','explicit_request')`,
+    ),
+    check(
+      "shadow_jobs_status_check",
+      sql`${t.status} IN ('pending','claimed','completed','held','failed','cancelled')`,
+    ),
+    check("shadow_jobs_control_version_check", sql`${t.controlVersion} >= 1`),
+    check("shadow_jobs_scope_epoch_check", sql`${t.scopeEpoch} >= 1`),
+    check("shadow_jobs_version_check", sql`${t.version} >= 1`),
+    check(
+      "shadow_jobs_policy_code_check",
+      sql`${t.policyCode} IS NULL OR ${t.policyCode} IN ('shadow_only','missing_grant','wish_not_command','external_no_authority','needs_clarification','no_action')`,
+    ),
+    check(
+      "shadow_jobs_context_json_check",
+      sql`${t.contextJson} IS NULL OR json_valid(${t.contextJson})`,
+    ),
+    check(
+      "shadow_jobs_model_decision_json_check",
+      sql`${t.modelDecisionJson} IS NULL OR json_valid(${t.modelDecisionJson})`,
+    ),
+  ],
+);
+
+export const shadowJobEvents = sqliteTable(
+  "shadow_job_events",
+  {
+    id: text("id").primaryKey(),
+    jobId: text("job_id")
+      .notNull()
+      .references(() => shadowJobs.id),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id),
+    seq: integer("seq").notNull(),
+    event: text("event").notNull(),
+    fromStatus: text("from_status"),
+    toStatus: text("to_status").notNull(),
+    note: text("note"),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [
+    unique("shadow_job_events_job_seq_unique").on(t.jobId, t.seq),
+    check("shadow_job_events_seq_check", sql`${t.seq} >= 1`),
+    check(
+      "shadow_job_events_event_check",
+      sql`${t.event} IN ('enqueued','claimed','completed','held','failed','cancelled','superseded')`,
+    ),
+  ],
+);
+
 export const kernelSchema = {
   sessions,
   autonomyPurposes,
@@ -1191,4 +1326,8 @@ export const kernelSchema = {
   actionExecutions,
   actionExecutionGrants,
   actionReceipts,
+  shadowScopeEpochs,
+  shadowInbox,
+  shadowJobs,
+  shadowJobEvents,
 };
