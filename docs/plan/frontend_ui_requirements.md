@@ -193,3 +193,51 @@
 - `docs/plan/active_projects_tasks.md:326-372`（C04–C07）、`550-561`（C22）、`649`（AV-05）、`645-654`（AV 全体）
 - `docs/operations.md:47-96`（remote）
 - `docs/plan/decision_inputs_2026-10-18.md:484-520`（AV 判定）
+
+## 11. 決定（2026-10-18 haruka）
+
+- 本節は §10 の未決 Q1–Q11 に対する haruka 決定の記録。既存節（§1–§10）は書き換えない。
+
+### 11.0 調査根拠（決定の前提事実・出典付き）
+
+- llama.cpp 上流 web UI の場所は `tools/server/webui` ではなく現行 `tools/ui`（`gh api .../contents/tools --jq '.[].name'` で `ui` を確認）。`<https://github.com/ggml-org/llama.cpp/tree/master/tools/ui>`。
+- framework: **Svelte 5**（`svelte 5.56.1`）＋ **SvelteKit 2.70.2** ＋ **Vite 7.3.6** ＋ **Tailwind CSS 4.3.0**。component 基盤は **bits-ui 2.18.1**＋`src/lib/components/ui/` の shadcn 系 primitives（collapsible/dialog/drawer/select/skeleton/tooltip 等）＋ `@lucide/svelte` icons＋`mdsvex`（出典: `tools/ui/package.json` 全文、`tools/ui/svelte.config.js`）。
+- build 出力: `@sveltejs/adapter-static`＋`output.bundleStrategy: 'single'`＋hash router で単一 static bundle を生成し、`scripts/ui-assets.cmake`→`ui.cpp.in`/`ui.h.in` 経由で llama-server バイナリに埋め込み配信（当方の「同一 server routes 背後・no CDN・CSP self」制約と同形。出典: `tools/ui/svelte.config.js`、`tools/ui/ui.cpp.in` 先頭 10 行、`tools/ui/README.md` “Build Pipeline”）。
+- repo LICENSE: **MIT**（`gh api repos/ggml-org/llama.cpp --jq .license.spdx_id` → `MIT`）。再利用は表示義務付きで許可されるが、fork より pattern 流用が適する（§12 根拠）。
+- thinking 表示: `ChatMessageReasoningBlock.svelte`（`components/app/chat/ChatMessages/` 下）は Collapsible＋MarkdownContent 構成。header は streaming 中 `Reasoning...`／完了後 `Reasoning`、subtitle に Error/Cancelled、user scroll-up 時は自動追従停止（出典: 同ファイル先頭 80 行、`AgenticSectionType.REASONING_PENDING`）。
+- streaming: `services/chat.service.ts` が `/chat/completions`＋`/stream` を wrap し SSE parse。request は `stream: true`（約 395 行）、chunk 毎に `choice.delta.reasoning_content` を累積→`onReasoningChunk`、`timings`→`onTimings`、tool-call delta は `mergeToolCallDeltas` で統合（出典: 同ファイル `grep stream/reasoning_content/timings`）。
+- stats 表示: `ChatMessageStatistics.svelte`（predicted tokens/ms・prompt tokens/ms、live generation/reading 切替 badges。tokens/s 系表示の器。出典: 同ファイル先頭 60 行）。
+- markdown/code: remark 系（`remark-gfm`・`remark-math`）＋rehype 系（`rehype-highlight`＋`highlight.js 11.11.1`、`rehype-katex`）＋`mermaid 11.15`＋`dompurify`＋`safe-html-config.ts`（出典: `tools/ui/package.json` devDeps、`components/app/content/` 一覧: `MarkdownContent.svelte`・`SyntaxHighlightedCode.svelte`・`CollapsibleTerminalBlock.svelte` 等）。
+- 当方 llama-server 起動実測（`ps -o args= -C llama-server`）: `/app/llama-server -hf huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF:UD-Q4_K_XL --host 0.0.0.0 --port 8080 -c 16384 --n-gpu-layers 99 -fa on --api-key <redacted> --alias qwen3.8-27b`。**`--reasoning-format`／`--jinja`／`--chat-template` 指定なし**。上流 default は `reasoning-format=auto`（出典: `tools/server/README.md:233`）のため、Qwen3.8-27B の thinking が `message.reasoning_content` に分離されるか・`<think>` のまま content に残るかは template caps 次第で**未検証**（→ 未決 O-1: live probe が必要）。
+- gateway: `:4000` で `litellm --config /app/config.yaml --port 4000` が稼働（`ps aux` 実測。config は名称のみ記録し**未読**）。LiteLLM proxy は `stream: true` の SSE を透過する設計だが、当該 config での reasoning 透過は未検証（→ O-2）。
+- Companion DB（`~/.local/share/companion-harness/companion.sqlite` を metadata のみ照会・本文なし）: `model_calls` の列は `id/run_id/step/adapter/model/outcome/error_code/duration_ms/usage_json/created_at` のみで **reasoning 系列なし**（`PRAGMA table_info` 実測）。これは設計通り（`schema.ts:509`「reasoning NEVER columns」、`repository.ts:3602` metadata-only 注記）。最新 3 行はいずれも `adapter=openai-compatible/model=qwen-local/outcome=completed`、`usage_json` は `{"inputTokens":N,"outputTokens":N}` のみ（39 bytes）。蓄積 reasoning の発掘は不可・不要（→ thinking 表示の源泉は将来の live stream のみ）。
+- Companion model client（`packages/model-local/src/openai_compatible.ts`）: request は `stream: false` 固定（`:330`）。`normalizeOpenAIResponse`（`:106-`）は `message.content`＋`message.tool_calls`＋`finish_reason`＋`usage` のみ読み、`reasoning_content` は**読まない**（`grep reasoning` 0 件）。trial relay（`apps/server/src/trial_model_relay.ts:676-677`）は inbound の `reasoning`／`reasoning_effort` を `unsupported_option` で拒否。すなわち thinking 取得には3層（model client・relay・LiteLLM 経路）の対応が要る（→ §12 PR-2）。
+- answer 経路: `answer.submit` 終端 protocol（`contracts/src/structured_answer.ts`: parts 1–20・各 text 1–4000 code points・citations 0–8・全体 16KiB・rN/mN 構造検証／`kernel/src/agent.ts`: 単独 single submit・混在禁止・repair 1 回・`renderAnswerText` 決定性描画）。
+- streaming 実現性評価: (i) reasoning/thinking deltas は provider が出せば技術的に流せる（`stream:true`＋SSE delta parse＋contracts への** additive な新規 delta event 型**追加。既存 `model.step.*` は step 単位で粒度不足）。(ii) 回答文の streamed `tool_call` argument deltas（`answer.submit` の `parts[].text` 部分 JSON を provisional 表示）は技術的に可能だが、citation/grant 検証は validated submit 時にしかできないため** provisional は「下書き」明示＋validated 回答で置換**が必須（safety 条件）。(iii) tool-free の素 content streaming＋事後 citation parse は `answer.submit` 終端 protocol（agent.ts 単独 rule）と衝突し protocol redesign が要るため**非推奨**。
+
+### 11.1 各 Q の決定
+
+- Q1 framework: **採用可**。候補は Svelte 5＋Vite 系を第一とする（§12）。
+- Q2 chat 行為 ideal: **llama.cpp web UI 並み（streaming 応答・Thinking 開閉・stats 表示）**。license（MIT）が許す範囲で同 UI の再利用も可とするが、当方の structured-citation／C22／CSP 制約から **pattern 流用＋再実装を既定**とする（§12）。
+- Q3 デザイン: **シンプル維持**（現行の素朴スタイル方向。余白・可読性中心の整理に留める）。
+- Q4 dark mode: **dark mode のみ**（light 切替なし。`color-scheme: dark` 固定）。
+- Q5 PWA: **将来展望**。本更新の scope 外（manifest・service worker なし）。将来 issue として追跡する。
+- Q6 push 通知: **本更新では見送り**（提案通り）。AV-05 の in-app のみを維持し、WebPush 等は将来項目とする。
+- Q7 i18n: **日本語のみ**（ja 固定継続。切替 UI なし）。
+- Q8 優先順位: **chat が最優先**。会話以外の機能（記憶管理・自律・学習・shadow・提案・引継ぎ・通知・カレンダー結果表示）は**別 page／別 route**に分離する。
+- Q9 bundle budget・browser matrix（推奨値を本書で確定）: budget は**初回 page JS ≤300KB（min、現行 201.0KB 実測を floor とする）・route 毎 total ≤400KB・gzip 目安 ≤120KB**とし、build 時 guard で検査する。新 framework runtime 分の増加余地を含む。browser matrix は** Windows 上の最新 Chrome／Edge＋iOS Safari（最新）／Android Chrome（最新）の evergreen** とする。e2e は Chromium 継続＋Safari iOS／Android Chrome は Tailscale 経由の手動 smoke とする。
+- Q10 ログイン UX（推奨値を本書で確定）: **401（session なし／期限切れ）時は入力途中テキストを保持**し、inline で再ログイン導線を示し、再ログイン後は**同一 session に復帰**する。再送不可の場合のみその旨を明示する。lockout・timeout 値自体は operations 案のままとする。
+- Q11 thinking 表示（調査 §11.0 に基づく推奨）: **llama.cpp 式の collapsible “考え中（Thinking）” block**（`reasoning_content` が来た場合のみ streaming 表示、完了後は collapsed）＋**phase/tool 状態行**（例 `カレンダーを検索中…`。tool 名・引数は出さず count／種別のみ。F-01-2 の段階化を内包）＋**elapsed time**。回答文は **provisional draft として streaming 表示（上記 (ii)）**し、検証済み回答で置換する。provisional 表示中は「下書き・検証前」である旨を視覚的に明示する。`reasoning_content` 不在時（現行 llama-server default auto の未検証域）は phase 行のみとし、**thinking 文面の捏造はしない**。
+
+## 12. 実装計画案
+
+- 方針: framework 推奨は **Svelte 5＋Vite**（SvelteKit `adapter-static` single bundle または plain Vite build のいずれか。llama.cpp `tools/ui` と同系統）。理由: (a) collapsible thinking／stats／drawer 等の component 化に適合、(b) 単一 static bundle を同一 server routes 背後で配信でき no-CDN・CSP self を維持できる（llama.cpp が `ui.cpp.in` 埋め込みで実証済み）、(c) 上流 UI と知見・pattern を共有できる。**fork 再利用はしない**: 上流 client は llama-server の `/chat/completions`＋`/stream` 直結の汎用 chat であり、当方の `answer.submit` 終端 protocol・citation grant・C22 承認・session 認証には不要 surface が多く、攻撃面・e2e 作り直しが増える。MIT 表示義務を満たしつつ pattern（ReasoningBlock・SSE delta parse・statistics badges・markdown pipeline 方針）を流用する。
+- PR 分割（各 PR は docs＋実装＋e2e green を条件とし、DB migration を伴わない）:
+  - PR-1 chat page shell＋dark theme（新 framework、同一 server routes 背後）: 受入＝既存 SSR id（`#conversation`/`#composer` 等）と同等操作が可能・CSP self guard pass・`mobile_layout` 相当 pass。e2e: 既存 11 spec 維持（shell 差し替えに伴う selector 移行は spec 内修正で吸収し削減なし）。
+  - PR-2 streaming backend（model `stream:true`＋新規 SSE delta event 型）: contracts への** additive 追加のみ**（既存 event 型の変更なし）。受入＝delta 型の schema test＋SSE 再同期/poll fallback 維持（`polling`・`sse_history` spec green）。
+  - PR-3 thinking／status UI（collapsible Thinking＋phase 行＋elapsed）: 受入＝reasoning 有／無の両 matrix で表示確認（無の場合は phase 行のみ・捏造なし）、a11y（`aria-live=polite` 継承）。
+  - PR-4 provisional answer streaming（option ii）: 受入＝provisional に「下書き」明示・validated 回答で置換・citation drawer は validated 後のみ。C22 承認表示には**一切触れない**（C22 safety verbatim 維持を e2e で確認）。
+  - PR-5 他機能の別 page 分離（記憶管理・自律・学習・shadow・提案・引継ぎ・通知・カレンダー）: 受入＝各 page が単独 route で既存操作を維持（対応 e2e spec を page 単位に移行し 11 spec 相当を維持）。
+  - PR-6 旧 UI 退役: 受入＝旧 `client.ts`/`page.ts` 参照の除去・bundle guard（§11.1 Q9 値）・11 spec 相当＋C22 matrix 全 green。
+- e2e 保全: 既存 11 spec（`conversation`・`sse_history`・`polling`・`citation_recovery`・`conversation_proposals`・`learning`・`shadow`・`autonomy`・`handoff`・`notifications`・`mobile_layout`）は削減せず、移行先の同等 spec で cover する。C22 approval safety（明示 button のみ・hash/expiry・pre/post-marker・receipt 4 状態）は全 PR で回帰対象とする。
+- 未決（open items）: O-1 llama-server（default auto）の Qwen3.8-27B に対する `reasoning_content` 分離挙動の live probe（`--reasoning-format` 要否の確定）。O-2 LiteLLM `/app/config.yaml` 経路での streaming＋reasoning 透過の検証（config は名称のみ確認・未読）。O-3 delta event 型の exact 名称（contracts additive 設計時に確定）。O-4 provisional「下書き」文言の最終確定。O-5 Safari iOS 実機 smoke 手順の確定。O-6 PWA／push の将来追跡 issue 起票。
