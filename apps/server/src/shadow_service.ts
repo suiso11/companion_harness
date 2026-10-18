@@ -102,7 +102,10 @@ import {
   type ToolDefinition,
 } from "@companion/model-local";
 import type { ServerLogger } from "./logger.js";
-import { MEMORY_DRAIN_BATCH } from "./memory_service.js";
+import {
+  MEMORY_DRAIN_BATCH,
+  MEMORY_RECALL_QUERY_MAX_CP,
+} from "./memory_service.js";
 
 /** The ONE bounded native deliberation tool (never executed, only recorded). */
 export const SHADOW_DELIBERATION_TOOL = "autonomy_deliberation.submit" as const;
@@ -222,6 +225,8 @@ export interface ShadowServiceOptions {
   readonly recall: ShadowRecallHook | null;
   readonly logger?: ServerLogger;
   readonly now?: () => number;
+  /** Wall budget per gateway call (default AGENT_STEP_TIMEOUT_MS; test hook). */
+  readonly wallTimeoutMs?: number;
 }
 
 export interface ShadowService {
@@ -296,8 +301,19 @@ export function buildShadowUserPrompt(input: {
           : ` parent:none`),
     );
   }
+  const purposeLabelById = new Map(
+    context.purposes.map((purpose) => [purpose.id, purpose.label] as const),
+  );
+  const pairTexts = context.conflictPairs.map(([first, second]) => {
+    const firstLabel = purposeLabelById.get(first) ?? "withheld";
+    const secondLabel = purposeLabelById.get(second) ?? "withheld";
+    if (firstLabel === "withheld" && secondLabel === "withheld") {
+      return "(withheld-pair)";
+    }
+    return `${firstLabel} vs ${secondLabel}`;
+  });
   lines.push(
-    `Conflict pairs (${context.conflictPairs.length}): ${context.conflictPairs.length === 0 ? "none" : context.conflictPairs.map(() => "(withheld-pair)").join(", ")}`,
+    `Conflict pairs (${context.conflictPairs.length}): ${pairTexts.length === 0 ? "none" : pairTexts.join(", ")}`,
   );
   lines.push(
     `Active constraints (${context.activeConstraintIds.length}): ${context.activeConstraintIds.length === 0 ? "none" : "withheld-count-only"}`,
@@ -338,12 +354,71 @@ export function buildShadowUserPrompt(input: {
   return lines.join("\n");
 }
 
+/**
+ * Build a bounded UNTRUSTED recall query for one pending job from its live
+ * scope + policy content (purpose statements + task titles). Capped in code
+ * points at MEMORY_RECALL_QUERY_MAX_CP (the existing memory query bound):
+ * unrelated scopes retrieve distinct evidence instead of one generic query.
+ * Best-effort reads: any repository failure falls back to a scope-only
+ * query (still bounded, still scope-distinct).
+ */
+export function buildShadowRecallQuery(input: {
+  repo: KernelRepository;
+  sessionId: string;
+  jobId: string;
+}): string {
+  let scope = "unknown";
+  try {
+    scope = input.repo.getShadowJob(input.sessionId, input.jobId).scope;
+  } catch {
+    // Fall back to a scope-distinct generic query below.
+  }
+  const parts: string[] = [];
+  try {
+    const purposes = input.repo.listAutonomyPurposesInScope(
+      input.sessionId,
+      scope,
+    );
+    for (const purpose of purposes.items.slice(0, 8)) {
+      const statement =
+        typeof (purpose as { statement?: unknown }).statement === "string"
+          ? ((purpose as { statement: string }).statement as string)
+          : "";
+      if (statement.length > 0) {
+        parts.push(statement);
+      }
+    }
+  } catch {
+    // Best effort: scope-only query still distinguishes jobs.
+  }
+  try {
+    const tasks = input.repo.listAutonomyTasksInScope(input.sessionId, scope);
+    for (const task of tasks.items.slice(0, 8)) {
+      const title =
+        typeof (task as { title?: unknown }).title === "string"
+          ? ((task as { title: string }).title as string)
+          : "";
+      if (title.length > 0) {
+        parts.push(title);
+      }
+    }
+  } catch {
+    // Best effort.
+  }
+  const raw =
+    `shadow deliberation recall scope:${scope}` +
+    (parts.length > 0 ? ` ${parts.join(" | ")}` : ``) +
+    ` (untrusted query, evidence only)`;
+  return Array.from(raw).slice(0, MEMORY_RECALL_QUERY_MAX_CP).join("");
+}
+
 export function createShadowService(
   options: ShadowServiceOptions,
 ): ShadowService {
   const { repo, gateway, model, recall } = options;
   const logger = options.logger;
   const now = options.now ?? Date.now;
+  const wallTimeoutMs = options.wallTimeoutMs ?? AGENT_STEP_TIMEOUT_MS;
 
   let started = false;
   let stopping = false;
@@ -512,6 +587,17 @@ export function createShadowService(
         throw error;
       }
     }
+    // Batch limit reached with work remaining: chain another drain so a
+    // single wake still drains the whole backlog (one bounded tick at a
+    // time, still no poll). Inside the in-flight tick this marks
+    // `wakeQueued`, and the wake() continuation starts the next tick.
+    try {
+      if (started && !stopping && repo.readPendingShadowJob() !== null) {
+        wake();
+      }
+    } catch {
+      // Best effort: the next meaningful wake re-drives any remainder.
+    }
   }
 
   /**
@@ -616,7 +702,7 @@ export function createShadowService(
       if (recall !== null) {
         try {
           const recallLimit = 8;
-          const query = `shadow deliberation scope inquiry (untrusted query, evidence only)`;
+          const query = buildShadowRecallQuery({ repo, sessionId, jobId });
           const items = await recall.recall(query, callSignal);
           snippets = items
             .filter(
@@ -629,6 +715,20 @@ export function createShadowService(
           snippets = [];
         }
         if (callSignal.aborted) {
+          // Foreground/STOP preemption during pre-claim recall: the job is
+          // still `pending`, so hold it terminally at its ORIGINAL version
+          // (CAS) instead of returning and letting a later settlement wake
+          // silently replay the supposedly preempted work.
+          try {
+            repo.holdShadowJob(
+              sessionId,
+              jobId,
+              { expectedVersion: version, reason: abortHoldReason() },
+              { now: now() },
+            );
+          } catch {
+            // Best effort: already terminal/moved (e.g. STOP held it).
+          }
           return;
         }
       }
@@ -722,13 +822,37 @@ export function createShadowService(
       // AGENT_STEP_TIMEOUT_MS, existing gateway AbortSignal, no auto-repair
       // / retry / router. Budget is readonly trusted input.
       let result: ChatResult;
+      let wallFired = false;
       const wallTimer = setTimeout(() => {
+        wallFired = true;
         try {
           callController.abort();
         } catch {
           // Best effort.
         }
-      }, AGENT_STEP_TIMEOUT_MS);
+      }, wallTimeoutMs);
+      const wallTimedOutUnpaused = (): boolean => {
+        if (!wallFired) {
+          return false;
+        }
+        try {
+          return repo.getAutonomyControlState().paused !== true;
+        } catch {
+          return true;
+        }
+      };
+      const failClaimedModelError = (): void => {
+        try {
+          repo.failShadowJob(
+            sessionId,
+            jobId,
+            { expectedVersion: claimedVersion, code: "model_error" },
+            { now: now() },
+          );
+        } catch {
+          // Best effort.
+        }
+      };
       try {
         result = await gateway.chat(
           {
@@ -742,21 +866,27 @@ export function createShadowService(
           { signal: callSignal },
         );
       } catch {
-        // Gateway/transport/timeout failure: foreground aborts hold (never
-        // a fake decision); anything else fails with a fixed code.
+        // Gateway/transport/timeout failure: a wall-timeout (control
+        // unpaused) is an honest gateway failure (`model_error`), never a
+        // foreground hold; other foreground aborts hold (never a fake
+        // decision); anything else fails with a fixed code.
         if (callSignal.aborted) {
-          try {
-            repo.holdShadowJob(
-              sessionId,
-              jobId,
-              {
-                expectedVersion: claimedVersion,
-                reason: abortHoldReason(),
-              },
-              { now: now() },
-            );
-          } catch {
-            // Best effort.
+          if (wallTimedOutUnpaused()) {
+            failClaimedModelError();
+          } else {
+            try {
+              repo.holdShadowJob(
+                sessionId,
+                jobId,
+                {
+                  expectedVersion: claimedVersion,
+                  reason: abortHoldReason(),
+                },
+                { now: now() },
+              );
+            } catch {
+              // Best effort.
+            }
           }
         } else {
           try {
@@ -775,17 +905,22 @@ export function createShadowService(
         clearTimeout(wallTimer);
       }
       // Guard AFTER the await AND BEFORE completion: even a late provider
-      // result that ignored the abort can never commit.
+      // result that ignored the abort can never commit. A wall timeout with
+      // unpaused control still fails (gateway failure), not a hold.
       if (callSignal.aborted) {
-        try {
-          repo.holdShadowJob(
-            sessionId,
-            jobId,
-            { expectedVersion: claimedVersion, reason: abortHoldReason() },
-            { now: now() },
-          );
-        } catch {
-          // Best effort.
+        if (wallTimedOutUnpaused()) {
+          failClaimedModelError();
+        } else {
+          try {
+            repo.holdShadowJob(
+              sessionId,
+              jobId,
+              { expectedVersion: claimedVersion, reason: abortHoldReason() },
+              { now: now() },
+            );
+          } catch {
+            // Best effort.
+          }
         }
         return;
       }
@@ -841,17 +976,22 @@ export function createShadowService(
         }
         return;
       }
-      // Final foreground guard BEFORE committing the decision.
+      // Final foreground guard BEFORE committing the decision. A wall
+      // timeout with unpaused control still fails (gateway failure).
       if (callSignal.aborted) {
-        try {
-          repo.holdShadowJob(
-            sessionId,
-            jobId,
-            { expectedVersion: claimedVersion, reason: abortHoldReason() },
-            { now: now() },
-          );
-        } catch {
-          // Best effort.
+        if (wallTimedOutUnpaused()) {
+          failClaimedModelError();
+        } else {
+          try {
+            repo.holdShadowJob(
+              sessionId,
+              jobId,
+              { expectedVersion: claimedVersion, reason: abortHoldReason() },
+              { now: now() },
+            );
+          } catch {
+            // Best effort.
+          }
         }
         return;
       }
