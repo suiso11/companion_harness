@@ -170,8 +170,11 @@ function syntheticGateway(): ModelGateway {
           stopReason: "stop",
         };
       }
+      // Provenance-labelled format (F-I01-04): each projected line is
+      // `- mN [label]: snippet` where the label is `user_fact` or an
+      // explicit inference/summary/unverified marker (absent kind included).
       const hasMemory = request.messages.some((message) =>
-        message.content.includes("- m1:"),
+        /(^|\n)- m1 \[[^\]]*\]:/.test(message.content),
       );
       if (hasMemory) {
         return {
