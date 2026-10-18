@@ -47,6 +47,7 @@ import type { KernelRepository } from "@companion/kernel";
 import {
   type ActionCreateReadPort,
   type ActionProposalStager,
+  type AgentModelDelta,
   applyAutonomyRestartFence,
   BUNDLED_SCHEMA_VERSION,
   CalendarActionWriteCapabilitySchema,
@@ -137,6 +138,7 @@ import {
   shouldWarnStoreSize,
 } from "./maintenance.js";
 import { createMemoryService, type MemoryService } from "./memory_service.js";
+import { ModelDeltaBus } from "./model_deltas.js";
 import {
   createNotificationService,
   type NotificationService,
@@ -445,20 +447,39 @@ export const ACTION_STRATEGY_NAME = "m5-action";
  * `{base}/v1/chat/completions` (or `{base}/chat/completions` when the base
  * already ends in `/v1`). An optional fetch override exists for tests only;
  * production uses the global fetch. Never logs its inputs.
+ *
+ * PR-2 streaming is opt-in (default off, additive): pass
+ * `{ streamingEnabled: true }` (production wires
+ * `COMPANION_MODEL_STREAMING=1`) to send `stream:true` with
+ * `stream_options:{include_usage:true}` on the OpenAI-compatible adapter.
  */
 export function createModelGateway(
   model: ModelConfig,
   fetchImpl?: FetchImpl,
+  opts: { streamingEnabled?: boolean } = {},
 ): ModelGateway {
   const options = {
     baseUrl: model.baseUrl,
     ...(model.apiKey !== undefined ? { apiKey: model.apiKey } : {}),
     ...(fetchImpl !== undefined ? { fetchImpl } : {}),
+    ...(opts.streamingEnabled === true ? { streamingEnabled: true } : {}),
   };
   if (model.adapter === "ollama") {
     return createOllamaGateway(options);
   }
   return createOpenAICompatibleGateway(options);
+}
+
+/**
+ * PR-2 streaming opt-in flag (default off, additive). Exact `1` enables;
+ * every other value (including unset) keeps `stream:false`. Separate from
+ * the strict `COMPANION_MODEL_JSON` object so existing configs are
+ * untouched.
+ */
+export function isModelStreamingEnabled(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return env.COMPANION_MODEL_STREAMING === "1";
 }
 
 function ensureDbDir(
@@ -1370,7 +1391,9 @@ export async function startServer(
       const built =
         options.modelGateway !== undefined
           ? options.modelGateway
-          : createModelGateway(config.model, options.modelFetch);
+          : createModelGateway(config.model, options.modelFetch, {
+              streamingEnabled: isModelStreamingEnabled(),
+            });
       if (built !== null) {
         modelGateway = built;
         modelName = config.model.model;
@@ -2323,6 +2346,11 @@ export async function startServer(
     // No model gateway => empty registry: runs fail closed with a fixed
     // code instead of producing fake LLM output. No direct model endpoint
     // is added; only counts are logged (never URLs/keys).
+    //
+    // PR-2 ephemeral deltas: one process-wide bus carries provisional
+    // model progress (reasoning/draft/usage) from the agent strategy to
+    // open run SSE streams. SSE-only, never persisted, never replayed.
+    const modelDeltaBus = new ModelDeltaBus();
     const registry = new StrategyRegistry();
     if (modelGateway !== null) {
       // AV autonomy read tools: SELECT-only over the runtime session's
@@ -2356,6 +2384,45 @@ export async function startServer(
           gateway: modelGateway,
           model: modelName,
           ...(memory !== null ? { memory: memory.recallHook } : {}),
+          // PR-2: forward provisional step deltas to the ephemeral bus.
+          // `content` pieces are intentionally dropped: free text is never
+          // an answer (answer.submit terminal protocol), and no contract
+          // type exists for it. Reasoning/draft/usage map to the additive
+          // delta events; invalid pieces drop inside the bus (never throw
+          // here, never logged with content).
+          onModelDelta: (delta: AgentModelDelta): void => {
+            try {
+              const piece = delta.delta;
+              if (piece.kind === "reasoning") {
+                modelDeltaBus.publishPiece({
+                  runId: delta.runId,
+                  step: delta.step,
+                  kind: "reasoning",
+                  text: piece.text,
+                  now: now(),
+                });
+              } else if (piece.kind === "draft") {
+                modelDeltaBus.publishPiece({
+                  runId: delta.runId,
+                  step: delta.step,
+                  kind: "draft",
+                  text: piece.text,
+                  now: now(),
+                });
+              } else if (piece.kind === "usage") {
+                modelDeltaBus.publishUsage({
+                  runId: delta.runId,
+                  step: delta.step,
+                  promptTokens: piece.inputTokens,
+                  completionTokens: piece.outputTokens,
+                  elapsedMs: delta.elapsedMs,
+                  now: now(),
+                });
+              }
+            } catch {
+              // Best effort: progress routing never fails the strategy.
+            }
+          },
         }),
       );
       logger.info("server.model_ready", {
@@ -2721,6 +2788,9 @@ export async function startServer(
       assets: loadUiAssets(),
       actionsEnabled,
       createEnabled,
+      // PR-2 ephemeral deltas: multiplexed on run SSE streams only (never
+      // persisted, never replayed, polling ignores them).
+      modelDeltas: modelDeltaBus,
       ...(memory !== null ? { memory } : {}),
       ...(remoteStore !== null && remotePassword !== null
         ? { remoteStore, remotePassword }
