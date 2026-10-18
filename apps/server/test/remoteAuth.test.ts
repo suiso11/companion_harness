@@ -18,6 +18,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 import {
   closeKernelDatabase,
   createKernelRepository,
@@ -34,7 +35,7 @@ import {
   type RemotePasswordVerifier,
 } from "../src/app.js";
 import { type StartedServer, startServer } from "../src/bootstrap.js";
-import { runSetPasswordCli } from "../src/cli.js";
+import { runSetPasswordCli, readDefaultSecretPair } from "../src/cli.js";
 import {
   DEFAULT_REMOTE_ABSOLUTE_TIMEOUT_MS,
   DEFAULT_REMOTE_IDLE_TIMEOUT_MS,
@@ -395,6 +396,24 @@ describe("set-password CLI (step 1)", () => {
     await expect(
       runSetPasswordCli(["bogus"], cliEnv(passwordFile), async () => "x"),
     ).rejects.toThrow();
+  });
+
+  it("reads both piped confirmations through one interface", async () => {
+    // Regression: two per-prompt readline interfaces lose the second
+    // piped line (the first buffers the whole pipe). One shared
+    // interface preserves it.
+    const input = Readable.from(["piped-password-1\npiped-password-1\n"]);
+    const nullOutput = new (await import("node:stream")).Writable({
+      write(_chunk, _encoding, callback) {
+        callback();
+      },
+    });
+    const [first, second] = await readDefaultSecretPair(
+      input as unknown as NodeJS.ReadableStream,
+      nullOutput as unknown as NodeJS.WritableStream,
+    );
+    expect(first).toBe("piped-password-1");
+    expect(second).toBe("piped-password-1");
   });
 });
 

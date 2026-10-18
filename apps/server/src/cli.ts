@@ -177,6 +177,87 @@ function readPasswordNoEcho(prompt: string): Promise<string> {
   });
 }
 
+/**
+ * Default two-prompt secret read. When stdin is piped, the whole pipe is
+ * buffered up front and split into lines: a per-prompt readline interface
+ * would consume the entire pipe on the first prompt and close, so the
+ * confirmation prompt would never resolve. On a TTY both prompts share
+ * one interface so buffered input survives between prompts. The optional
+ * streams exist for tests; production passes the real stdio.
+ */
+export async function readDefaultSecretPair(
+  input: NodeJS.ReadableStream = process.stdin,
+  output: NodeJS.WritableStream = process.stdout,
+): Promise<[string, string]> {
+  const isTty =
+    (input as unknown as { isTTY?: unknown }).isTTY === true;
+  if (!isTty) {
+    const text = await readAllStdin(input);
+    const lines = text
+      .split("\n")
+      .map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line));
+    if (lines.length < 2 || lines[0] === undefined || lines[1] === undefined) {
+      throw cliError("read_failed", ERR_SET_PASSWORD_FAILED);
+    }
+    return [lines[0], lines[1]];
+  }
+  const prompts = ["New password: ", "Confirm password: "] as const;
+  const rl = readline.createInterface({ input, output, terminal: true });
+  const mutable = rl as unknown as {
+    _writeToOutput: (text: string) => void;
+  };
+  const original = mutable._writeToOutput.bind(rl);
+  mutable._writeToOutput = (text: string) => {
+    if (
+      prompts.some(
+        (prompt) =>
+          text === prompt ||
+          text === `\r${prompt}` ||
+          text.startsWith(prompt),
+      )
+    ) {
+      output.write(text);
+      return;
+    }
+    if (/[\r\n]/.test(text)) {
+      output.write("\n");
+    }
+  };
+  const ask = (prompt: string): Promise<string> =>
+    new Promise((resolve) => {
+      rl.question(prompt, (answer) => {
+        resolve(answer);
+      });
+    });
+  try {
+    const first = await ask(prompts[0]);
+    const second = await ask(prompts[1]);
+    return [first, second];
+  } finally {
+    mutable._writeToOutput = original;
+    rl.close();
+  }
+}
+
+/** Drain a piped stdin stream to text (caller guarantees non-TTY). */
+function readAllStdin(input: NodeJS.ReadableStream): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const stream = input as unknown as {
+      on: (event: string, listener: (...args: never[]) => void) => void;
+    };
+    const chunks: Buffer[] = [];
+    stream.on("data", ((chunk: Buffer | string) => {
+      chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+    }) as (...args: never[]) => void);
+    stream.on("end", (() => {
+      resolve(Buffer.concat(chunks).toString("utf-8"));
+    }) as (...args: never[]) => void);
+    stream.on("error", (() => {
+      reject(cliError("read_failed", ERR_SET_PASSWORD_FAILED));
+    }) as (...args: never[]) => void);
+  });
+}
+
 export async function runSetPasswordCli(
   argv: string[] = process.argv.slice(2),
   env: NodeJS.ProcessEnv = process.env,
@@ -214,8 +295,12 @@ export async function runSetPasswordCli(
   let first: string;
   let second: string;
   try {
-    first = await readSecret("New password: ");
-    second = await readSecret("Confirm password: ");
+    if (readSecret === readPasswordNoEcho) {
+      [first, second] = await readDefaultSecretPair();
+    } else {
+      first = await readSecret("New password: ");
+      second = await readSecret("Confirm password: ");
+    }
   } catch {
     throw cliError("read_failed", ERR_SET_PASSWORD_FAILED);
   }
