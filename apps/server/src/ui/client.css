@@ -47,3 +47,87 @@ body {
 button:disabled {
   opacity: 0.5;
 }
+
+/* Remote slice (c): minimum smartphone layout (design §6). Additive only:
+ * no redesign, no new assets. Goals: no page-level horizontal scroll at
+ * 360px width, readable transcript, usable composer, ≥44px touch targets
+ * for primary buttons + composer send, and operability at 200% text zoom
+ * (relative units, no fixed heights that clip enlarged text). */
+
+/* 16px+ inputs avoid iOS auto-zoom on focus; border-box keeps full-width
+ * inputs inside the viewport including padding/border. */
+input[type="text"],
+input[type="password"],
+textarea,
+select {
+  font-size: 1rem;
+  box-sizing: border-box;
+  max-width: 100%;
+}
+
+/* Primary touch targets (composer send/stop, forms, login submit). */
+button,
+input[type="submit"] {
+  min-height: 44px;
+  min-width: 44px;
+}
+
+#composer-send,
+#composer-stop {
+  flex-shrink: 0;
+}
+
+/* Long model/tool output must scroll inside its own block, never push the
+ * page wider than the viewport. */
+pre {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+/* Remote login form (slice b, asset-free markup): stack full-width so the
+ * password field + submit stay usable at 360px and 200% text zoom. */
+main > form[action="/api/remote/login"] {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  max-width: 100%;
+}
+
+main > form[action="/api/remote/login"] label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+main > form[action="/api/remote/login"] input[type="password"] {
+  width: 100%;
+  min-height: 44px;
+}
+
+/* Narrow viewport (360–480px class): tighten page padding, let the composer
+ * input shrink instead of overflowing (min-width: 0 defeats the flex
+ * default), keep transcript + drawers inside the viewport. */
+@media (max-width: 30rem) {
+  body {
+    padding: 0.75rem;
+  }
+
+  main,
+  #conversation,
+  #drawer,
+  #trials,
+  section {
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  #composer {
+    flex-wrap: wrap;
+  }
+
+  #composer-input {
+    flex: 1 1 10rem;
+    min-width: 0;
+    min-height: 44px;
+  }
+}

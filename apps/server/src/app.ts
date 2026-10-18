@@ -2119,9 +2119,10 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     c.header("Content-Security-Policy", STRICT_CSP);
     c.header("cache-control", "no-store");
     // Slice (b): an unauthenticated browser in remote mode gets the
-    // minimal no-asset login form (plain HTML form, no script, no
-    // stylesheet, no external/self-hosted assets) instead of the app
-    // shell. Disabled remote always serves the shell as before.
+    // minimal script-free login form (plain HTML form, no script, no
+    // external assets; only the shared self-hosted stylesheet for the
+    // slice (c) smartphone rules) instead of the app shell. Disabled
+    // remote always serves the shell as before.
     if (remote !== null && !hasSession(c)) {
       return c.html(renderRemoteLogin().toString(), 200);
     }
