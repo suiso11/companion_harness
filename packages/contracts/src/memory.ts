@@ -108,7 +108,9 @@ export type MemoryOperationResponse = z.infer<
 /**
  * GET per-run recall exposure: the exact snippet the model saw as `mN`
  * during one run (answer-citation drawer). Raw record/recall ids never
- * cross this boundary.
+ * cross this boundary. I04: `revision`/`kind` are the provenance pinned
+ * at exposure time (null = unknown/pre-I04); a record correction creates
+ * a new revision and never rewrites this snapshot.
  */
 export const MemoryRecallExposureResponseSchema = z.strictObject({
   runId: UuidSchema,
@@ -117,6 +119,8 @@ export const MemoryRecallExposureResponseSchema = z.strictObject({
     .string()
     .min(1)
     .refine(codePointsMax(512), { message: "snippet over 512 code points" }),
+  revision: z.number().int().min(1).nullable(),
+  kind: z.enum(["user_fact", "model_inference", "summary"]).nullable(),
 });
 export type MemoryRecallExposureResponse = z.infer<
   typeof MemoryRecallExposureResponseSchema

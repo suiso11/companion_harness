@@ -90,6 +90,10 @@ export const runs = sqliteTable(
     startedAt: integer("started_at"),
     finishedAt: integer("finished_at"),
     cancelRequestedAt: integer("cancel_requested_at"),
+    // I01-06 (additive, migration 0020): explicit per-run memory status,
+    // metadata only (closed union, never memory content). NULL = the run
+    // never reached the recall boundary or the row predates the column.
+    memoryStatus: text("memory_status"),
   },
   (t) => [
     unique("runs_turn_attempt_unique").on(t.turnId, t.attempt),
@@ -108,6 +112,10 @@ export const runs = sqliteTable(
     check("runs_event_seq_check", sql`${t.eventSeq} >= 0`),
     check("runs_select_on_success_check", sql`${t.selectOnSuccess} IN (0,1)`),
     check("runs_tool_requests_used_check", sql`${t.toolRequestsUsed} >= 0`),
+    check(
+      "runs_memory_status_check",
+      sql`${t.memoryStatus} IS NULL OR ${t.memoryStatus} IN ('used','empty','disabled','unavailable','timeout','version_mismatch','limit')`,
+    ),
     check(
       "runs_result_json_check",
       sql`${t.resultJson} IS NULL OR json_valid(${t.resultJson})`,
@@ -574,9 +582,24 @@ export const memoryExposures = sqliteTable(
     scope: text("scope").notNull(),
     citation: text("citation").notNull(),
     snippet: text("snippet").notNull(),
+    // I04 (additive, migration 0021): revision/kind DELIVERED at recall
+    // time. NULL = pre-I04 row or absent/unknown provenance; never
+    // backfilled, never updated after creation.
+    revision: integer("revision"),
+    kind: text("kind"),
     createdAt: integer("created_at").notNull(),
   },
-  (t) => [primaryKey({ columns: [t.recallId, t.recordId] })],
+  (t) => [
+    primaryKey({ columns: [t.recallId, t.recordId] }),
+    check(
+      "memory_exposures_revision_check",
+      sql`${t.revision} IS NULL OR ${t.revision} >= 1`,
+    ),
+    check(
+      "memory_exposures_kind_check",
+      sql`${t.kind} IS NULL OR ${t.kind} IN ('user_fact','model_inference','summary')`,
+    ),
+  ],
 );
 
 export const memoryGrants = sqliteTable(
@@ -588,9 +611,19 @@ export const memoryGrants = sqliteTable(
     recallId: text("recall_id").notNull(),
     sessionId: text("session_id").notNull(),
     scope: text("scope").notNull(),
+    // I04 (additive, migration 0021): revision copied from the SAME-run
+    // exposure at grant creation (citation pinned to the delivered
+    // revision). NULL = pre-I04 grant or unrevisioned exposure.
+    revision: integer("revision"),
     createdAt: integer("created_at").notNull(),
   },
-  (t) => [primaryKey({ columns: [t.runId, t.citation] })],
+  (t) => [
+    primaryKey({ columns: [t.runId, t.citation] }),
+    check(
+      "memory_grants_revision_check",
+      sql`${t.revision} IS NULL OR ${t.revision} >= 1`,
+    ),
+  ],
 );
 
 // NOTE: the memory lookup indexes (idx_memory_outbox_due,

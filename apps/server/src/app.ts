@@ -210,7 +210,13 @@ export interface MemoryHttpPort {
     sessionId: string;
     runId: string;
     citation: string;
-  }): { runId: string; citation: string; snippet: string } | null;
+  }): {
+    runId: string;
+    citation: string;
+    snippet: string;
+    revision: number | null;
+    kind: "user_fact" | "model_inference" | "summary" | null;
+  } | null;
   hashDrainingReplay(input: {
     kind: "record.correct" | "record.retire" | "record.reactivate";
     sessionId: string;
@@ -1538,7 +1544,14 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         return apiError(c, 404, "not_found", "resource not found");
       }
       const body = RunStatusResponseSchema.parse({
-        run: { id: owned.id, status: owned.status, eventSeq: owned.eventSeq },
+        run: {
+          id: owned.id,
+          status: owned.status,
+          eventSeq: owned.eventSeq,
+          // Additive (I01-06): per-run memory status, metadata only; null
+          // stays visible as null (the run reached recall but no marker).
+          memoryStatus: owned.memoryStatus,
+        },
       });
       return c.json(body, 200);
     } catch (error) {
@@ -1982,6 +1995,8 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         runId: out.runId,
         citation: out.citation,
         snippet: out.snippet,
+        revision: out.revision,
+        kind: out.kind,
       });
       return c.json(body, 200);
     },

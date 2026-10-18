@@ -1466,6 +1466,9 @@ describe("codex review 215f852: atomic ack, draining identity, owner, schemas, c
         runId: first.runId,
         citation: "m1",
         snippet: "first-run-snippet",
+        // I04 additive: this exposure carries no pinned provenance.
+        revision: null,
+        kind: null,
       });
       // Another run's same ordinal never resolves through this run.
       expect(

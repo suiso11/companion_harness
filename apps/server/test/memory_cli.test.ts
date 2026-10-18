@@ -407,4 +407,57 @@ describe("parseMemoryCliStdout", () => {
       parseMemoryCliStdout(Buffer.from("{}\n extra\n", "utf8"), 65536),
     ).toThrow(MemoryCliError);
   });
+
+  it("maps a foreign numeric response version to cli_version_mismatch", () => {
+    const foreign = Buffer.from(
+      `${JSON.stringify({ v: 2, ok: true, code: "OK", data: null, deduplicated: false })}\n`,
+      "utf8",
+    );
+    try {
+      parseMemoryCliStdout(foreign, 65536);
+      expect.unreachable("must throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(MemoryCliError);
+      expect((error as MemoryCliError).cliCode).toBe("cli_version_mismatch");
+    }
+  });
+
+  it("maps the fixed unsupported-version BAD_REQUEST to cli_version_mismatch", () => {
+    const reject = Buffer.from(
+      `${JSON.stringify({
+        v: 1,
+        ok: false,
+        code: "BAD_REQUEST",
+        message: "unsupported protocol version",
+        data: null,
+        deduplicated: false,
+      })}\n`,
+      "utf8",
+    );
+    try {
+      parseMemoryCliStdout(reject, 65536);
+      expect.unreachable("must throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(MemoryCliError);
+      expect((error as MemoryCliError).cliCode).toBe("cli_version_mismatch");
+    }
+  });
+
+  it("maps a missing/non-numeric response version to cli_malformed", () => {
+    for (const body of [
+      { ok: true, code: "OK", data: null, deduplicated: false },
+      { v: "1", ok: true, code: "OK", data: null, deduplicated: false },
+    ]) {
+      try {
+        parseMemoryCliStdout(
+          Buffer.from(`${JSON.stringify(body)}\n`, "utf8"),
+          65536,
+        );
+        expect.unreachable("must throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(MemoryCliError);
+        expect((error as MemoryCliError).cliCode).toBe("cli_malformed");
+      }
+    }
+  });
 });

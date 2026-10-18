@@ -34,6 +34,29 @@ export const ACTIVE_STATUSES = [
 export type ActiveStatus = (typeof ACTIVE_STATUSES)[number];
 export const ActiveStatusSchema = z.enum(ACTIVE_STATUSES);
 
+/**
+ * Explicit per-run memory status (I01-06, additive): metadata only, never
+ * memory content. `used` = snippets were projected into the prompt block;
+ * `empty` = recall succeeded with nothing to show; `disabled` = memory not
+ * configured; the failure statuses derive from the closed CLI failure codes
+ * (`cli_timeout` → timeout, `cli_version_mismatch` → version_mismatch,
+ * `cli_limit` → limit, `cli_unavailable`/`cli_malformed`/`cli_bad_request`
+ * → unavailable). A null/absent status means the run never reached the
+ * recall boundary (or predates the column). The companion continues
+ * memoryless on every non-`used` status — the status makes the state
+ * visible, it never fails the run.
+ */
+export const RunMemoryStatusSchema = z.enum([
+  "used",
+  "empty",
+  "disabled",
+  "unavailable",
+  "timeout",
+  "version_mismatch",
+  "limit",
+]);
+export type RunMemoryStatus = z.infer<typeof RunMemoryStatusSchema>;
+
 export function isTerminalStatus(status: RunStatus): status is TerminalStatus {
   return (TERMINAL_STATUSES as readonly string[]).includes(status);
 }

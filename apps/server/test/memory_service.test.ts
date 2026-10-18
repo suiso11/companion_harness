@@ -30,6 +30,7 @@ import {
   MEMORY_RECALL_RUN_MARKER,
   type MemoryService,
   parseExtractionOutput,
+  parseRecallData,
   stableMemoryJobKey,
 } from "../src/memory_service.js";
 
@@ -571,6 +572,73 @@ describe("recall hook", () => {
       const aborted = new AbortController();
       aborted.abort();
       expect(await service.recallHook.recall("q", aborted.signal)).toEqual([]);
+    } finally {
+      f.close();
+    }
+  });
+
+  it("reports fixed failure codes to the optional kernel status sink (I01-06)", async () => {
+    const f = await openRepo();
+    try {
+      let mode: "timeout" | "version" | "malformed" | "ok" = "timeout";
+      const cliCall: CliCall = async () => {
+        if (mode === "timeout") {
+          throw new MemoryCliError("cli_timeout");
+        }
+        if (mode === "version") {
+          throw new MemoryCliError("cli_version_mismatch");
+        }
+        if (mode === "malformed") {
+          return okEnvelope({ recallId: "", items: "nope" });
+        }
+        return okEnvelope({ recallId: "recall-ok", items: [] });
+      };
+      const service = makeService(f.repo, cliCall);
+      service.start();
+      const codes: string[] = [];
+      const sink = (code: string) => {
+        codes.push(code);
+      };
+      expect(
+        await service.recallHook.recall(
+          "q",
+          new AbortController().signal,
+          sink,
+        ),
+      ).toEqual([]);
+      expect(codes).toEqual(["cli_timeout"]);
+      mode = "version";
+      expect(
+        await service.recallHook.recall(
+          "q",
+          new AbortController().signal,
+          sink,
+        ),
+      ).toEqual([]);
+      expect(codes).toEqual(["cli_timeout", "cli_version_mismatch"]);
+      mode = "malformed";
+      expect(
+        await service.recallHook.recall(
+          "q",
+          new AbortController().signal,
+          sink,
+        ),
+      ).toEqual([]);
+      expect(codes).toEqual([
+        "cli_timeout",
+        "cli_version_mismatch",
+        "cli_malformed",
+      ]);
+      // Success reports nothing to the sink.
+      mode = "ok";
+      expect(
+        await service.recallHook.recall(
+          "q",
+          new AbortController().signal,
+          sink,
+        ),
+      ).toEqual([]);
+      expect(codes).toHaveLength(3);
     } finally {
       f.close();
     }
@@ -1216,5 +1284,51 @@ describe("baseline regression contracts", () => {
     } finally {
       f.close();
     }
+  });
+});
+
+describe("parseRecallData provenance fields", () => {
+  const base = { recallId: "r-1", items: [] as unknown[] };
+
+  it("carries kind and revision when present and valid", () => {
+    const parsed = parseRecallData({
+      recallId: "r-1",
+      items: [
+        { id: "rec-1", snippet: "s", kind: "user_fact", revision: 3 },
+        { id: "rec-2", snippet: "t", kind: "model_inference", revision: 1 },
+        { id: "rec-3", snippet: "u", kind: "summary", revision: 12 },
+      ],
+    });
+    expect(parsed).not.toBeNull();
+    expect(parsed?.items).toEqual([
+      { id: "rec-1", snippet: "s", kind: "user_fact", revision: 3 },
+      { id: "rec-2", snippet: "t", kind: "model_inference", revision: 1 },
+      { id: "rec-3", snippet: "u", kind: "summary", revision: 12 },
+    ]);
+  });
+
+  it("drops unknown kinds and invalid revisions (absent, not fact)", () => {
+    const parsed = parseRecallData({
+      recallId: "r-1",
+      items: [
+        { id: "rec-1", snippet: "s" },
+        { id: "rec-2", snippet: "t", kind: "unknown_kind", revision: 0 },
+        { id: "rec-3", snippet: "u", kind: 42, revision: -1 },
+        { id: "rec-4", snippet: "v", kind: "user_fact", revision: 1.5 },
+      ],
+    });
+    expect(parsed).not.toBeNull();
+    expect(parsed?.items).toEqual([
+      { id: "rec-1", snippet: "s" },
+      { id: "rec-2", snippet: "t" },
+      { id: "rec-3", snippet: "u" },
+      { id: "rec-4", snippet: "v", kind: "user_fact" },
+    ]);
+  });
+
+  it("still rejects a null or shape-drifted payload", () => {
+    expect(parseRecallData(null)).toBeNull();
+    expect(parseRecallData({ ...base, items: "nope" })).toBeNull();
+    expect(parseRecallData({ items: [] })).toBeNull();
   });
 });
