@@ -1436,13 +1436,29 @@ class ConversationApp {
       ),
     );
     // Single deterministic before→after preview block (trusted kernel
-    // summary; never parsed back into times/identity). The proposed
-    // start/end already live inside the summary AFTER range, so no separate
-    // raw start/end rows are rendered (no duplicated content to drift).
+    // summary; never parsed back into times/identity).
     const preview = el("p", summary.preview.summary);
     preview.setAttribute("data-action-preview", "true");
     preview.style.whiteSpace = "pre-wrap";
     node.appendChild(preview);
+    // M6 create card rows: the markup-significant title survives VERBATIM
+    // (textContent, never parsed as HTML) plus the exact creation bounds.
+    // Restored after the m5 before-after merge dropped them: create.spec.ts
+    // binds [data-action-title/start/end] and the card must carry them.
+    if (
+      summary.tool === "calendar.create" &&
+      summary.input.title !== undefined
+    ) {
+      const titleLine = el("p", `件名: ${summary.input.title}`);
+      titleLine.setAttribute("data-action-title", "true");
+      node.appendChild(titleLine);
+    }
+    const startLine = el("p", `開始: ${summary.input.start}`);
+    startLine.setAttribute("data-action-start", "true");
+    node.appendChild(startLine);
+    const endLine = el("p", `終了: ${summary.input.end}`);
+    endLine.setAttribute("data-action-end", "true");
+    node.appendChild(endLine);
     const deadline = el("p", `確認期限: ${formatInstant(summary.expiresAt)}`);
     deadline.setAttribute("data-action-deadline", "true");
     node.appendChild(deadline);
@@ -3493,7 +3509,7 @@ class ConversationApp {
         this.showNotice("訂正内容を入力してください");
         return;
       }
-      payload["correctionBody"] = replacement;
+      payload.correctionBody = replacement;
     }
     this.memoryOpSeq += 1;
     const opSeq = this.memoryOpSeq;

@@ -204,7 +204,14 @@ export const ActionRunHistorySelectionSchema = z.strictObject({
   result: RunResultSchema.nullable(),
   receipt: ActionReceiptViewSchema.nullable(),
   executionStatus: ActionExecutionStatusSchema.nullable(),
-  targetCitation: ActionTargetCitationSchema,
+  /**
+   * ORIGINAL-only `rN` label (see `ProposalExecutionView`). Null for
+   * targetless `calendar.create` approvals (no source event, never a
+   * fabricated label); the verified AFTER citation (if any) comes only
+   * from the authoritative `result` when the receipt outcome is
+   * `succeeded`.
+   */
+  targetCitation: ActionTargetCitationSchema.nullable(),
 });
 export type ActionRunHistorySelection = z.infer<
   typeof ActionRunHistorySelectionSchema
