@@ -21,6 +21,10 @@ export const TEXT_FAIL = "fail";
 export const TEXT_HANG = "hang";
 /** Input text whose strategy answers V2 with a structural r1 citation. */
 export const TEXT_CITE = "cite-me";
+/** Input text whose strategy answers V2 with structural r1+r2 citations. */
+export const TEXT_CITE_TWO = "cite-two";
+/** Input text whose strategy answers V2 with a structural m1 citation. */
+export const TEXT_CITE_MEM = "cite-mem";
 /**
  * Stored snapshot body text seeded for the citation drawer test. Contains
  * markup-significant characters so the spec can prove escaped plain-text
@@ -28,6 +32,9 @@ export const TEXT_CITE = "cite-me";
  */
 export const CITATION_SNAPSHOT_TEXT =
   '<script>alert("e2e-xss")</script> & <b>bold</b> \'quotes\' "dq" r1-body';
+/** Second distinct stored snapshot body for deterministic rA/rB races. */
+export const CITATION_SNAPSHOT_TEXT_B =
+  "<i>r2-body</i> & 'second' \"snapshot\" plain-only";
 /** Fixture prefix for seeded older-history turns (`${prefix}-NNN`). */
 export const SEED_HISTORY_PREFIX = "seedhist";
 /** Turns seeded for the older-history spec (above the default page 50). */

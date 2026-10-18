@@ -1791,6 +1791,34 @@ e2e `tsc --noEmit` exit 0, Biome on changed files clean. Full unit
 re-run (no production change since). Remote CI for the fix commit is
 pending at push time — see PR body.
 
+# Citation drawer last-intent guard (2026-10-16)
+
+Shared rN (stored-only) + mN (originating-run-bound) drawer raced: an
+older delayed response overwrote the newer body, reopened the drawer
+after close, or latched a stale memory error/disabled flag. Fix: ONE
+shared monotonic intent token (`citationDrawerSeq`) bumped
+synchronously on every open/close with the session frozen per open;
+every await guarded before UI state, errors, `memoryDisabled`, further
+requests, and CAS retries. No new APIs/DB columns/deps/retries; rN
+stays stored-only, mN stays run-bound, committed context PUTs are never
+rolled back.
+
+- **Changed**: `apps/server/src/ui/client.ts` (guard),
+  `apps/server/e2e/citation_recovery.spec.ts` (3 deterministic race
+  regressions), `apps/server/e2e/server.ts` + `ports.ts` (fixtures).
+- **Failing-before** (pre-fix client, same tests/fixtures): **3/3 fail**.
+- **Passing-after** (real Chromium, temp stores): full
+  `citation_recovery.spec.ts` **13/13 passed**; units **120 files /
+  1458 passed** (2 known missing-remind live files excluded, not
+  re-run); root + e2e typecheck exit 0; `pnpm lint` exit 0 (2
+  pre-existing infos with clean-HEAD evidence).
+- Cross-source note: the mN race uses the genuine 404 of the real
+  recall route (fixture harness has no memory backend) — async ordering
+  proof only, no real remind CLI dataset claimed. Full contract:
+  `docs/operations.md` ("Citation drawer last-intent guard").
+
+---
+
 # AV Autonomy Base (base-only, 2026-10-16, branch `feat/av-autonomy-continuation`)
 
 Session-owned durable purposes + explicit local tasks + a durable global
