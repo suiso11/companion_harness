@@ -107,7 +107,7 @@ import {
 import type { Context } from "hono";
 import { Hono } from "hono";
 import { z } from "zod";
-import type { ServerConfig } from "./config.js";
+import type { RemoteConfig, ServerConfig } from "./config.js";
 import { ServerConfigError } from "./config.js";
 import { createStdServerLogger, type ServerLogger } from "./logger.js";
 import { createNotificationFeedSseResponse, createSseResponse } from "./sse.js";
@@ -356,14 +356,80 @@ export function hostNameOfHeader(value: string): string | null {
   return name.toLowerCase();
 }
 
+/**
+ * Slice (a) remote mode switch. The config is default-off; when disabled
+ * every check below behaves byte-identically to the historical loopback
+ * logic. Decisions use only the Host/Origin/Sec-Fetch-Site headers —
+ * never remoteAddress or X-Forwarded-* — and no CORS headers are emitted.
+ */
+function remoteConfigOf(config: ServerConfig): RemoteConfig | null {
+  const remote = (config as { remote?: RemoteConfig }).remote;
+  return remote !== undefined && remote.enabled === true ? remote : null;
+}
+
+function isRemoteEnabled(config: ServerConfig): boolean {
+  return remoteConfigOf(config) !== null;
+}
+
+/** Lowercased hostnames of the validated `https://<host>` allowlist. */
+function allowedRemoteHosts(config: ServerConfig): Set<string> {
+  const hosts = new Set<string>();
+  const remote = remoteConfigOf(config);
+  if (remote === null) {
+    return hosts;
+  }
+  for (const origin of remote.allowedOrigins) {
+    try {
+      hosts.add(new URL(origin).hostname.toLowerCase());
+    } catch {
+      // Entries are validated at startup; a bad entry never opens access.
+    }
+  }
+  return hosts;
+}
+
+/**
+ * Exact-match allowlist for one request: the configured remote origins
+ * plus the loopback same-origin (`http://<host header>`). The loopback
+ * exception applies only when the Host is a loopback name
+ * (127.0.0.1/localhost, optional port): an allowlisted remote Host with
+ * Origin `http://<same-host>` is rejected (remote origins must be
+ * explicit https allowlist entries). The Host header value (with port)
+ * is used verbatim so a spoofed Host can never widen the entry.
+ * Disabled remote keeps the historical behavior: Host is loopback-only
+ * there, so the loopback gate is a no-op (byte-identical decisions).
+ */
+function originAllowedForRequest(c: Context, config: ServerConfig): boolean {
+  const origin = c.req.header("origin");
+  if (origin === undefined || origin === "null") {
+    return false;
+  }
+  const host = c.req.header("host") ?? "";
+  if (origin === `http://${host}`) {
+    const hostName = hostNameOfHeader(host);
+    if (hostName !== null && isLoopbackHostName(hostName)) {
+      return true;
+    }
+  }
+  const remote = remoteConfigOf(config);
+  if (remote === null) {
+    return false;
+  }
+  return (remote.allowedOrigins as readonly string[]).includes(origin);
+}
+
 /** Strict Host validation: loopback hostnames only, header required. */
-function checkHost(c: Context): Response | null {
+function checkHost(c: Context, config: ServerConfig): Response | null {
   const header = c.req.header("host");
   if (header === undefined) {
     return validationError(c, "missing host header");
   }
   const name = hostNameOfHeader(header);
-  if (name === null || !isLoopbackHostName(name)) {
+  if (
+    name === null ||
+    (!isLoopbackHostName(name) &&
+      !(isRemoteEnabled(config) && allowedRemoteHosts(config).has(name)))
+  ) {
     return validationError(c, "invalid host header");
   }
   return null;
@@ -399,7 +465,10 @@ function isBrowserLikeFetch(c: Context): boolean {
   return false;
 }
 
-function checkMutationSecurity(c: Context): Response | null {
+function checkMutationSecurity(
+  c: Context,
+  config: ServerConfig,
+): Response | null {
   const contentType = c.req.header("content-type");
   const mediaType =
     contentType === undefined
@@ -428,8 +497,37 @@ function checkMutationSecurity(c: Context): Response | null {
       "cross-origin request rejected",
     );
   }
-  const host = c.req.header("host") ?? "";
-  if (origin !== `http://${host}`) {
+  if (originAllowedForRequest(c, config)) {
+    return null;
+  }
+  return apiError(c, 403, "validation_error", "cross-origin request rejected");
+}
+
+/**
+ * Slice (a) read-path security for GET/HEAD API routes (SSE included).
+ * Disabled remote behaves as today (no read check at all). Enabled
+ * remote: a present Origin (including `null`) must be exactly allowed;
+ * an absent Origin is normal for same-origin GETs, so only an explicit
+ * `Sec-Fetch-Site: cross-site` is rejected.
+ */
+function checkReadSecurity(c: Context, config: ServerConfig): Response | null {
+  if (!isRemoteEnabled(config)) {
+    return null;
+  }
+  const origin = c.req.header("origin");
+  if (origin !== undefined) {
+    if (!originAllowedForRequest(c, config)) {
+      return apiError(
+        c,
+        403,
+        "validation_error",
+        "cross-origin request rejected",
+      );
+    }
+    return null;
+  }
+  const site = c.req.header("sec-fetch-site");
+  if (site !== undefined && site.trim().toLowerCase() === "cross-site") {
     return apiError(
       c,
       403,
@@ -867,17 +965,27 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
 
   // Strict Host validation for every route (health included).
   app.use(async (c, next) => {
-    const rejected = checkHost(c);
+    const rejected = checkHost(c, config);
     if (rejected !== null) {
       return rejected;
     }
     await next();
   });
 
-  // Mutation security for every mutation route.
+  // Mutation security for every mutation route; slice (a) read-path
+  // security additionally covers GET/HEAD API routes (SSE included) when
+  // remote mode is enabled. Disabled remote leaves reads untouched.
   app.use(async (c, next) => {
     if (isMutationMethod(c.req.method)) {
-      const rejected = checkMutationSecurity(c);
+      const rejected = checkMutationSecurity(c, config);
+      if (rejected !== null) {
+        return rejected;
+      }
+    } else if (
+      (c.req.method === "GET" || c.req.method === "HEAD") &&
+      c.req.path.startsWith("/api/")
+    ) {
+      const rejected = checkReadSecurity(c, config);
       if (rejected !== null) {
         return rejected;
       }

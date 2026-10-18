@@ -175,12 +175,134 @@ export function parseActionConfig(raw: string | undefined): ActionConfig {
   return Object.freeze({ optIn, writeEnabled, createEnabled });
 }
 
+/**
+ * Strict opt-in remote (tailnet) access config (slice a: Origin/Host
+ * allowlist only, DEFAULT DISABLED). This is a HINT for the allowlist
+ * check in app.ts only — it never authorizes anything by itself and it
+ * never changes the bind host (loopback-only, HostSchema unchanged).
+ *
+ * - Env `COMPANION_REMOTE_JSON` is strict JSON only; unset means disabled
+ *   with an empty allowlist (current loopback behavior, zero change).
+ * - Must be an exact object with only `{ enabled?, allowedOrigins? }`.
+ *   `enabled` defaults to false; `allowedOrigins` defaults to `[]`.
+ * - Each allowlist entry must be an exact `https://<host>` origin: https
+ *   scheme, no credentials, no explicit port, no path/query/fragment and
+ *   no trailing slash (the entry must equal its own `URL.origin`
+ *   serialization). Duplicate entries are rejected.
+ * - `enabled: true` with an empty allowlist fails startup fail-closed.
+ * - While slice (b) authentication is not implemented, `enabled: true`
+ *   always fails startup fail-closed ("requires authentication").
+ * - Failures carry fixed messages only: no values escape.
+ * - The returned object (including the origins array) is deep-frozen.
+ */
+export interface RemoteConfig {
+  readonly enabled: boolean;
+  readonly allowedOrigins: readonly string[];
+}
+
+/** Default remote config: fully disabled with an empty allowlist. */
+export const DEFAULT_REMOTE_CONFIG: RemoteConfig = Object.freeze({
+  enabled: false,
+  allowedOrigins: Object.freeze([]),
+});
+
+export const MAX_REMOTE_ORIGINS = 16;
+export const MAX_REMOTE_ORIGIN_LENGTH = 256;
+
+function requireRemoteOrigin(value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > MAX_REMOTE_ORIGIN_LENGTH ||
+    value.includes("\0")
+  ) {
+    throw configError("remote origin allowlist entry is invalid");
+  }
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw configError("remote origin allowlist entry is invalid");
+  }
+  // IPv6 literals are rejected at config time: Node keeps the brackets
+  // in URL.hostname while Host-header parsing strips them, so an IPv6
+  // entry could never pass the Host check. Tailscale MagicDNS hostnames
+  // are the documented form; this keeps parsing simple and fail-closed.
+  if (
+    url.protocol !== "https:" ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.port !== "" ||
+    url.search !== "" ||
+    url.hash !== "" ||
+    url.origin !== value ||
+    url.hostname.includes(":") ||
+    url.hostname.includes("[") ||
+    url.hostname.includes("]")
+  ) {
+    throw configError("remote origin allowlist entry is invalid");
+  }
+  return value;
+}
+
+export function parseRemoteConfig(raw: string | undefined): RemoteConfig {
+  if (raw === undefined) {
+    return DEFAULT_REMOTE_CONFIG;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw configError("remote config must be a JSON object");
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw configError("remote config must be a JSON object");
+  }
+  for (const key of Object.keys(parsed)) {
+    if (key !== "enabled" && key !== "allowedOrigins") {
+      throw configError("remote config has an unknown key");
+    }
+  }
+  const record = parsed as {
+    enabled?: unknown;
+    allowedOrigins?: unknown;
+  };
+  // Defaults apply only when keys are absent: an explicit `null` is a
+  // malformed shape (strict `{ enabled?, allowedOrigins? }` contract),
+  // not an omitted key. `??` would silently swallow null, so branch on
+  // key presence and let the type checks below reject null.
+  const hasEnabled = Object.hasOwn(parsed, "enabled");
+  const hasOrigins = Object.hasOwn(parsed, "allowedOrigins");
+  const enabled = hasEnabled ? record.enabled : false;
+  if (typeof enabled !== "boolean") {
+    throw configError("remote config enabled flag is invalid");
+  }
+  const rawOrigins = hasOrigins ? record.allowedOrigins : [];
+  if (!Array.isArray(rawOrigins) || rawOrigins.length > MAX_REMOTE_ORIGINS) {
+    throw configError("remote origin allowlist is invalid");
+  }
+  const seen = new Set<string>();
+  const allowedOrigins: string[] = [];
+  for (const entry of rawOrigins) {
+    const origin = requireRemoteOrigin(entry);
+    if (seen.has(origin)) {
+      throw configError("remote origin allowlist is invalid");
+    }
+    seen.add(origin);
+    allowedOrigins.push(origin);
+  }
+  return Object.freeze({
+    enabled,
+    allowedOrigins: Object.freeze(allowedOrigins),
+  });
+}
+
 export interface ServerConfig {
   readonly dbPath: string;
   readonly host: ServerHost;
   /** TCP port. 0 means an OS-assigned ephemeral port (tests only). */
   readonly port: number;
-  /** Verified IANA time-zone name (Intl membership, not shape). */
+  /** Verified IANA time-zone name (Intl membership). */
   readonly timeZone: string;
   readonly logLevel: ServerLogLevel;
   /** Validated Markdown vault roots (deep-frozen, default empty). */
@@ -193,6 +315,8 @@ export interface ServerConfig {
   readonly actions: ActionConfig;
   /** Strict opt-in remind memory config; null (unset) means memoryless. */
   readonly memory: MemoryConfig | null;
+  /** Strict opt-in remote (tailnet) Origin/Host allowlist (default off). */
+  readonly remote: RemoteConfig;
   /**
    * Strict opt-in trial proposal/approval surface config; null (unset)
    * means trials disabled. When set, the profile snapshot plus the
@@ -1239,6 +1363,17 @@ export function loadServerConfig(
   const calendar = parseCalendarConfig(env.COMPANION_CALENDAR_JSON);
   const actions = parseActionConfig(env.COMPANION_ACTIONS_JSON);
   const memory = parseMemoryConfig(env.COMPANION_MEMORY_JSON);
+  const remote = parseRemoteConfig(env.COMPANION_REMOTE_JSON);
+  if (remote.enabled && remote.allowedOrigins.length === 0) {
+    throw configError(
+      "remote origin allowlist must not be empty when remote mode is enabled",
+    );
+  }
+  if (remote.enabled) {
+    throw configError(
+      "remote mode requires authentication (not yet available)",
+    );
+  }
   const trial = parseTrialConfig(env.COMPANION_AUTONOMY_JSON);
   if (trial !== null && model === null) {
     throw configError("trial config requires model config");
@@ -1264,6 +1399,7 @@ export function loadServerConfig(
     calendar,
     actions,
     memory,
+    remote,
     trial,
   });
 }
