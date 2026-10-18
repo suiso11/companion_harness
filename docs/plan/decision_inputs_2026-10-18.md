@@ -347,6 +347,7 @@
 - 決定者: haruka
 - 日付: 2026-10-18
 - 証拠・リンク: 2026-10-18 項目別確認
+  - 追記（2026-10-18 詳細確定）: P1b 項目は privacy:{sensitivity:"normal"|"sensitive", origin:"conversation"|"self_activity"}（secret 値は §14.3 未決のため置かない、origin は後方互換で追加可）。P2a remind プロトコルでは任意項目、Companion は常に送信、remind 設定 requirePrivacy（既定 off）で必須化可。P3 event.append・record.remember・record.correct に付与、correct は省略時に旧版を継承。P4a 保存して record.get/record.search で返すのみ、想起の順位・対象は変えない。P5 Companion の AI が remember 時に判定し判定不能は sensitive、event.append は固定 normal。実装: suiso11/remind#19・companion#59（CI pin 更新 #60）。決定者: haruka / 日付: 2026-10-18
 
 ### F-I01-06
 - 質問: per-call/turn budgets・timeout・disabled/degraded response contractを決める。
@@ -457,6 +458,7 @@
 - 決定者: haruka
 - 日付: 2026-10-18
 - 証拠・リンク: 2026-10-18 項目別確認
+  - 追記（2026-10-18 調査結果・決定）: ReferenceManager に source_kind 概念はなく（kind は markdown/calendar のみ）、記憶引用は mN（packages/contracts/src/structured_answer.ts）＋memory_grants の別系統。Q1a 記憶の引用 ID は mN を維持し、F-I04-02/04 の「rN」は構造化引用 ID（rN/mN）と読む（migration なし）。Q2 memory_grants の revision に想起時の revision（remind#16 で返却）を引用時点の版として固定、新規引用は最新版（companion#58/#59）。Q3 表示は record.get(id) で引用時点の版を取得（remind 側変更不要）。回答: 要追加調査 → 決定。決定者: haruka / 日付: 2026-10-18
 
 ### F-I04-08
 - 質問: I02–I03完成を不要な依存にせず契約決定を先行記録する。

@@ -17,6 +17,7 @@
 - 現況追記（2026-10-15、履歴保持・上記ラベルは書き換えない）: I02/I03 実装＋単体回帰は適用済み（既存 suite green 継承、再実行なし）で I05 相当の live HTTP→synthetic gateway→REAL remind CLI tempDB smoke を完了（I05 現況参照）。I01/I04 正式採用判断・Windows manual・現行 CI は未完維持。perception/export/deletion は未実装維持。
 - 現況追記（2026-10-18、履歴保持・上記ラベルは書き換えない）: 残存実装の棚卸しを実施。判断・確認待ち事項は [decision_inputs_2026-10-18.md](decision_inputs_2026-10-18.md) に集約。operations.md の Remind I01–I05 行は同日 supersede 追記済み。
 - 現況追記（2026-10-18 検証、履歴保持・ラベル/checkbox不変）: origin/master `1596690`（PR #41 merge）で CI run `39097183807` が windows/ubuntu × check/e2e 全 success、open PR 0。decision_inputs B1–B5 の5レビュー指摘は master コードで修正済み（B1 frozen-inherited env freeze `packages/connector-mcp/src/client.ts`、B2 sub-ms 拒否 `packages/connector-calendar/src/rescheduleWrite.ts` `isStrictCalendarInstant`、B3 注入 binding の derivePort、B4 identity 長さ pre-DB preflight `apps/server/src/bootstrap.ts`、B5 structuredContent 優先 `createWrite.ts`/`rescheduleWrite.ts`）。PR51 Codex 指摘14件は13件修正確認、残1件（restart fence 対 recoverOnBoot 順序）は booted claimed grant を fence が revoke せず recovery で決着させる実装で対応済みと判断。AV trial E2E は run7 で scenario A（bridge-exit:0 authorized）/B（STOP→revoked bridge-exit:143）とも pass。判断待ち（decision_inputs）・live/OAuth・Windows manual・remind 書込は未着手維持。
+- 現況追記（2026-10-18 実装、履歴保持・上記ラベルは書き換えない）: I01/I04 採用に基づき実装 — remind #15（search revision 返却）・#16（recall revision/kind/vector・unsupported protocol version）・#19（privacy）・#20/#21/#22（review 修正・Windows eval・canonical fallback rank）、companion #55（B1–B4,D2）・#57（I01 version mismatch/provenance）・#58（I04 revision-pinned citations）・#59（privacy 送信＋recall fields）・#60（remind pin e4a8dcd）・#61（correction kind、open）・#62（vitest timeout、open）。R09–R18 は remind 側で実装済み（remind README/plan.md）のため本台帳の R ラベルは歴史 snapshot として据え置く。残 manual: D1 Windows 11・C15 live OAuth。
 
 ## 凡例・件数・着手順
 | 親範囲 | 親数 | サブチェック数 |
@@ -570,6 +571,7 @@
 - [ ] `I01-06` [決定] per-call/turn budgets・timeout・disabled/degraded response contractを決める。
 - [ ] `I01-07` [決定] opt-in/default-offとdowngrade/version mismatch behaviorを決める。
 - [ ] `I01-08` [決定] 追加scopeを採用するか棄却するかdecision recordに明記する。
+- 現況追記（2026-10-18 実装）: I01 採用。version mismatch/provenance は companion#57、privacy（F-I01-05 詳細確定）は remind#19・companion#59（pin 更新 #60）で実装。詳細は [decision_inputs_2026-10-18.md](decision_inputs_2026-10-18.md) F-I01-05 追記参照。
 
 ### I02 — async local CLI adapter
 元台帳状態: N。対象: `companion_harness/apps/server/` (候補 adapter), `remind/.tmp-t6/src/cli.ts` (既存CLI)。依存: I01採用。
@@ -609,6 +611,7 @@
 - [ ] `I04-06` [決定] correction後も既存citation immutable snapshotとして保つか明記する。
 - [ ] `I04-07` [決定] contract変更要否を既存 ReferenceManager APIs/testsの根拠で判断する。
 - [ ] `I04-08` [記録] I02–I03完成を不要な依存にせず契約決定を先行記録する。
+- 現況追記（2026-10-18 実装）: I04 採用。revision-pinned citations は companion#58/#59（remind#16 の recall revision 返却を利用、新規引用は最新版）。F-I04-07 は調査のうえ決定（mN 維持・migration なし）。詳細は [decision_inputs_2026-10-18.md](decision_inputs_2026-10-18.md) F-I04-07 追記参照。
 
 ### I05 — fake cross-repo E2E/failure isolation
 元台帳状態: N。対象: Companion E2E/adapter (候補), remind CLI/temporary DB; tests。依存: I02–I04。
