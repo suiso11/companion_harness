@@ -193,14 +193,37 @@ describe("parseExtractionOutput model decisions", () => {
     const out = parseExtractionOutput(
       JSON.stringify({
         memories: [
-          { body: "user likes tea", kind: "user_fact" },
-          { body: "decided Friday", kind: "summary" },
+          { body: "user likes tea", kind: "user_fact", sensitivity: "normal" },
+          { body: "decided Friday", kind: "summary", sensitivity: "sensitive" },
         ],
       }),
     );
     expect(out).toEqual([
-      { body: "user likes tea", kind: "user_fact" },
-      { body: "decided Friday", kind: "summary" },
+      { body: "user likes tea", kind: "user_fact", sensitivity: "normal" },
+      { body: "decided Friday", kind: "summary", sensitivity: "sensitive" },
+    ]);
+  });
+
+  it("fails closed to sensitive on missing/invalid sensitivity", () => {
+    const out = parseExtractionOutput(
+      JSON.stringify({
+        memories: [
+          { body: "legacy without sensitivity", kind: "user_fact" },
+          { body: "bad value", kind: "summary", sensitivity: "top-secret" },
+          { body: "non-string", kind: "user_fact", sensitivity: 42 },
+          { body: "explicit normal", kind: "user_fact", sensitivity: "normal" },
+        ],
+      }),
+    );
+    expect(out).toEqual([
+      {
+        body: "legacy without sensitivity",
+        kind: "user_fact",
+        sensitivity: "sensitive",
+      },
+      { body: "bad value", kind: "summary", sensitivity: "sensitive" },
+      { body: "non-string", kind: "user_fact", sensitivity: "sensitive" },
+      { body: "explicit normal", kind: "user_fact", sensitivity: "normal" },
     ]);
   });
 
@@ -216,24 +239,43 @@ describe("parseExtractionOutput model decisions", () => {
 
   it("drops invalid items while keeping valid ones, capped at 8", () => {
     const items: unknown[] = [
-      { body: "kept", kind: "user_fact" },
+      { body: "kept", kind: "user_fact", sensitivity: "normal" },
       { body: "wrong kind", kind: "episodic" },
       { body: "", kind: "user_fact" },
       { body: "x".repeat(2001), kind: "summary" },
       { body: "bad charhere", kind: "user_fact" },
-      { body: "extra key", kind: "user_fact", note: 1 },
+      {
+        body: "extra key",
+        kind: "user_fact",
+        sensitivity: "normal",
+        note: 1,
+      },
       { body: "missing kind" },
       42,
       null,
     ];
     for (let index = 0; index < 10; index += 1) {
-      items.push({ body: `overflow-${index}`, kind: "summary" });
+      items.push({
+        body: `overflow-${index}`,
+        kind: "summary",
+        sensitivity: "sensitive",
+      });
     }
     const out = parseExtractionOutput(JSON.stringify({ memories: items }));
-    expect(out[0]).toEqual({ body: "kept", kind: "user_fact" });
+    expect(out[0]).toEqual({
+      body: "kept",
+      kind: "user_fact",
+      sensitivity: "normal",
+    });
     expect(out.length).toBeLessThanOrEqual(8);
     expect(
       out.every((item) => item.kind === "user_fact" || item.kind === "summary"),
+    ).toBe(true);
+    expect(
+      out.every(
+        (item) =>
+          item.sensitivity === "normal" || item.sensitivity === "sensitive",
+      ),
     ).toBe(true);
   });
 });
@@ -1330,5 +1372,201 @@ describe("parseRecallData provenance fields", () => {
     expect(parseRecallData(null)).toBeNull();
     expect(parseRecallData({ ...base, items: "nope" })).toBeNull();
     expect(parseRecallData({ items: [] })).toBeNull();
+  });
+
+  it("carries top-level vector when valid, drops it when invalid", () => {
+    expect(
+      parseRecallData({ recallId: "r-1", items: [], vector: "used" })?.vector,
+    ).toBe("used");
+    expect(
+      parseRecallData({ recallId: "r-1", items: [], vector: "disabled" })
+        ?.vector,
+    ).toBe("disabled");
+    expect(
+      parseRecallData({ recallId: "r-1", items: [], vector: "unavailable" })
+        ?.vector,
+    ).toBe("unavailable");
+    expect(
+      parseRecallData({ recallId: "r-1", items: [] })?.vector,
+    ).toBeUndefined();
+    expect(
+      parseRecallData({ recallId: "r-1", items: [], vector: "bogus" })?.vector,
+    ).toBeUndefined();
+    expect(
+      parseRecallData({ recallId: "r-1", items: [], vector: 42 })?.vector,
+    ).toBeUndefined();
+  });
+
+  it("treats correction kind as unknown (kept item, never a fact)", () => {
+    const parsed = parseRecallData({
+      recallId: "r-1",
+      items: [{ id: "rec-1", snippet: "s", kind: "correction", revision: 2 }],
+    });
+    expect(parsed?.items).toEqual([{ id: "rec-1", snippet: "s", revision: 2 }]);
+  });
+});
+
+describe("privacy metadata on memory writes (F-I01-05)", () => {
+  it("sends fixed privacy on event.append and AI sensitivity on remember", async () => {
+    const f = await openRepo();
+    try {
+      const seen: Array<{ op: string; params: Record<string, unknown> }> = [];
+      const cliCall: CliCall = async (_address, op, params) => {
+        seen.push({ op, params });
+        return okEnvelope(null);
+      };
+      const { gateway } = extractionGateway(
+        JSON.stringify({
+          memories: [
+            {
+              body: "user likes tea",
+              kind: "user_fact",
+              sensitivity: "normal",
+            },
+            { body: "late-night worry", kind: "summary" },
+          ],
+        }),
+      );
+      const service = makeService(f.repo, cliCall, { gateway });
+      service.start();
+      const run = completeV2Run(f.repo, [{ text: "answered", citations: [] }]);
+      service.onRunCompleted(run.runId);
+      await waitFor(() => seen.some((call) => call.op === "event.append"));
+      const appended = seen.find((call) => call.op === "event.append");
+      expect(appended?.params).toMatchObject({
+        privacy: { sensitivity: "normal", origin: "conversation" },
+      });
+      await service.drainOnce();
+      const remembered = seen.filter((call) => call.op === "record.remember");
+      expect(remembered).toHaveLength(2);
+      const byBody = new Map(
+        remembered.map((call) => [
+          (call.params as { body: string }).body,
+          call.params,
+        ]),
+      );
+      expect(byBody.get("user likes tea")).toMatchObject({
+        privacy: { sensitivity: "normal", origin: "conversation" },
+      });
+      // Missing sensitivity fails closed to sensitive (kept, never normal).
+      expect(byBody.get("late-night worry")).toMatchObject({
+        privacy: { sensitivity: "sensitive", origin: "conversation" },
+      });
+    } finally {
+      f.close();
+    }
+  });
+
+  it("maps invalid AI sensitivity to sensitive on remember", async () => {
+    const f = await openRepo();
+    try {
+      const seen: Array<{ op: string; params: Record<string, unknown> }> = [];
+      const cliCall: CliCall = async (_address, op, params) => {
+        seen.push({ op, params });
+        return okEnvelope(null);
+      };
+      const sessionId = generateId();
+      const runId = generateId();
+      const turnId = generateId();
+      const service = makeService(f.repo, cliCall);
+      f.repo.enqueueMemoryJob(
+        "event.append",
+        sessionId,
+        runId,
+        SCOPE,
+        stableMemoryJobKey("event", runId),
+        JSON.stringify({
+          op: "event.append",
+          params: {
+            eventId: "evt-1",
+            privacy: { sensitivity: "normal", origin: "conversation" },
+          },
+          chain: {
+            eventId: "evt-1",
+            sessionId,
+            runId,
+            turnId,
+            provenance: {
+              source: "companion:conversation",
+              observedAt: new Date(T0).toISOString(),
+            },
+            memories: [
+              { body: "bogus", kind: "user_fact", sensitivity: "ultra" },
+            ],
+          },
+        }),
+        { turnId, now: T0 },
+      );
+      await service.drainOnce();
+      await service.drainOnce();
+      const remembered = seen.filter((call) => call.op === "record.remember");
+      expect(remembered).toHaveLength(1);
+      expect(remembered[0]?.params).toMatchObject({
+        privacy: { sensitivity: "sensitive", origin: "conversation" },
+      });
+    } finally {
+      f.close();
+    }
+  });
+
+  it("logs recall vector as metadata without exposing bodies", async () => {
+    const f = await openRepo();
+    try {
+      const logged: Array<{ code: string; fields?: Record<string, unknown> }> =
+        [];
+      const cliCall: CliCall = async () => {
+        return okEnvelope({
+          recallId: "recall-v",
+          items: [{ id: "rec-1", snippet: "alpha", revision: 4 }],
+          vector: "used",
+        });
+      };
+      const service = makeService(f.repo, cliCall);
+      service as unknown as { recallHook: unknown };
+      const { createCollectingLogger } = await import("../src/logger.js");
+      const collecting = createCollectingLogger("debug");
+      const { createMemoryService: create } = await import(
+        "../src/memory_service.js"
+      );
+      const svc = create({
+        address: {
+          executable: "/bin/true",
+          entry: "/cli.js",
+          config: "/mem.json",
+          timeoutMs: 5000,
+          maxResponseBytes: 65536,
+        },
+        scope: SCOPE,
+        recallLimit: 5,
+        idleMs: 300_000,
+        repo: f.repo,
+        gateway: null,
+        model: "test-model",
+        logger: collecting.logger,
+        cliCall,
+      });
+      svc.start();
+      const out = await svc.recallHook.recall(
+        "q",
+        new AbortController().signal,
+      );
+      expect(out).toEqual([
+        {
+          recordId: "rec-1",
+          recallId: "recall-v",
+          snippet: "alpha",
+          revision: 4,
+        },
+      ]);
+      const vectorLog = collecting.records.find(
+        (record) => record.code === "memory.recall_vector",
+      );
+      expect(vectorLog?.status).toBe("used");
+      await svc.stop().catch(() => undefined);
+      void logged;
+      await service.stop().catch(() => undefined);
+    } finally {
+      f.close();
+    }
   });
 });
