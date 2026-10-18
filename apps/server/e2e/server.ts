@@ -331,7 +331,7 @@ function seedCitation(
     1,
     null,
     contentHash,
-    JSON.stringify({ version: 1, text: snapshotText }),
+    JSON.stringify({ version: 1, text: normalized }),
     sizeBytes,
     now,
     now,

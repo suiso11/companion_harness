@@ -1170,6 +1170,7 @@ test("drawer last-intent wins when an older stored detail resolves late (rA held
   });
 
   let heldA = 0;
+  let fulfilledA = 0;
   let releaseA: () => void = () => {};
   const gateA = new Promise<void>((resolve) => {
     releaseA = resolve;
@@ -1180,6 +1181,7 @@ test("drawer last-intent wins when an older stored detail resolves late (rA held
       const genuine = await route.fetch();
       await gateA;
       await route.fulfill({ response: genuine });
+      fulfilledA += 1;
       return;
     }
     await route.continue();
@@ -1194,13 +1196,16 @@ test("drawer last-intent wins when an older stored detail resolves late (rA held
       { timeout: 15_000 },
     );
     releaseA();
+    // Wait for the late rA response to actually reach the page before
+    // asserting the final UI state; otherwise the check can observe the
+    // unchanged rB body and pass even when a broken client mishandles it.
+    await expect.poll(() => fulfilledA).toBeGreaterThanOrEqual(1);
     // The late rA detail must not overwrite the newer rB body.
     await expect(page.locator("#drawer-body")).toHaveText(
       CITATION_SNAPSHOT_TEXT_B,
       { timeout: 15_000 },
     );
     expect(await page.locator("#drawer-body script").count()).toBe(0);
-    await expect.poll(() => heldA).toBeGreaterThanOrEqual(1);
     await expect(page.locator("#drawer-body")).toHaveText(
       CITATION_SNAPSHOT_TEXT_B,
     );
@@ -1239,6 +1244,8 @@ test("drawer close-while-pending is never resurrected (A held, close, B held, A 
 
   let heldA = 0;
   let heldB = 0;
+  let fulfilledA = 0;
+  let fulfilledB = 0;
   let releaseA: () => void = () => {};
   let releaseB: () => void = () => {};
   const gateA = new Promise<void>((resolve) => {
@@ -1254,6 +1261,7 @@ test("drawer close-while-pending is never resurrected (A held, close, B held, A 
       const genuine = await route.fetch();
       await gateA;
       await route.fulfill({ response: genuine });
+      fulfilledA += 1;
       return;
     }
     if (url.endsWith(`/references/${seedB.referenceId}`)) {
@@ -1261,6 +1269,7 @@ test("drawer close-while-pending is never resurrected (A held, close, B held, A 
       const genuine = await route.fetch();
       await gateB;
       await route.fulfill({ response: genuine });
+      fulfilledB += 1;
       return;
     }
     await route.continue();
@@ -1275,10 +1284,12 @@ test("drawer close-while-pending is never resurrected (A held, close, B held, A 
     await expect.poll(() => heldB).toBeGreaterThanOrEqual(1);
     // Late A must not resurrect while B is still pending.
     releaseA();
+    await expect.poll(() => fulfilledA).toBeGreaterThanOrEqual(1);
     await expect(page.locator("#drawer")).toBeHidden();
     await expect(page.locator("#drawer-body")).toHaveText("");
     // Releasing B opens exactly B (plain text, no HTML interpretation).
     releaseB();
+    await expect.poll(() => fulfilledB).toBeGreaterThanOrEqual(1);
     await expect(page.locator("#drawer")).toBeVisible({ timeout: 15_000 });
     await expect(page.locator("#drawer-body")).toHaveText(
       CITATION_SNAPSHOT_TEXT_B,
@@ -1321,6 +1332,7 @@ test("shared drawer: stale memory-citation error cannot replace the newer stored
   });
 
   let heldMem = 0;
+  let fulfilledMem = 0;
   let releaseMem: () => void = () => {};
   const gateMem = new Promise<void>((resolve) => {
     releaseMem = resolve;
@@ -1330,6 +1342,7 @@ test("shared drawer: stale memory-citation error cannot replace the newer stored
     const genuine = await route.fetch();
     await gateMem;
     await route.fulfill({ response: genuine });
+    fulfilledMem += 1;
   });
   try {
     await page.getByRole("button", { name: "m1" }).click();
@@ -1342,10 +1355,13 @@ test("shared drawer: stale memory-citation error cannot replace the newer stored
     );
     const noticeBefore = await page.locator("#composer-notice").textContent();
     releaseMem();
+    // Wait for the late genuine m1 error to reach the page before asserting
+    // the final UI state; otherwise the check can pass on the unchanged r1
+    // body before a broken client processes the stale error.
+    await expect.poll(() => fulfilledMem).toBeGreaterThanOrEqual(1);
     // The late genuine m1 error must not replace the newer r1 body, must
     // not overwrite the current notice, and must not latch the memory
     // backend disabled (a later search stays usable).
-    await expect.poll(() => heldMem).toBeGreaterThanOrEqual(1);
     await expect(page.locator("#drawer-body")).toHaveText(
       CITATION_SNAPSHOT_TEXT,
       { timeout: 15_000 },
