@@ -505,7 +505,9 @@ describe("login sessions (steps 2-4)", () => {
       const page = await f.app.request("/", {
         headers: { host: ALLOWED_HOST, cookie },
       });
-      expect((await page.text()).toLowerCase()).toContain("/assets/svelte-app.js");
+      expect((await page.text()).toLowerCase()).toContain(
+        "/assets/svelte-app.js",
+      );
     } finally {
       f.close();
     }
@@ -741,7 +743,9 @@ describe("login sessions (steps 2-4)", () => {
       const page = await f.app.request("/", {
         headers: { host: ALLOWED_HOST, cookie },
       });
-      expect((await page.text()).toLowerCase()).toContain("/assets/svelte-app.js");
+      expect((await page.text()).toLowerCase()).toContain(
+        "/assets/svelte-app.js",
+      );
     } finally {
       f.close();
     }

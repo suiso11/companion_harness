@@ -130,10 +130,10 @@ let notice = $state("");
 let sending = $state(false);
 let activeRunId: string | null = $state(null);
 let activeTurnId: string | null = $state(null);
-  let runView: RunViewState = $state({ ...INITIAL_RUN_VIEW });
-  let activeRunCursor = 0;
-  let liveAnswer: { text: string; citations: string[] }[] = $state([]);
-  let liveVisible = $state(false);
+let runView: RunViewState = $state({ ...INITIAL_RUN_VIEW });
+let activeRunCursor = 0;
+let liveAnswer: { text: string; citations: string[] }[] = $state([]);
+let liveVisible = $state(false);
 let retryTurnId: string | null = $state(null);
 let drawerOpen = $state(false);
 let drawerBody = $state("");
@@ -197,11 +197,11 @@ function showNotice(text: string): void {
   notice = text;
 }
 
-  function composerSendDisabled(): boolean {
-    if (!booted || sessionId === null || authExpired) return true;
-    if (sending || activeRunId !== null) return true;
-    return false;
-  }
+function composerSendDisabled(): boolean {
+  if (!booted || sessionId === null || authExpired) return true;
+  if (sending || activeRunId !== null) return true;
+  return false;
+}
 
 function composerStopVisible(): boolean {
   if (activeRunId === null) return false;
@@ -289,11 +289,11 @@ function resetChatState(): void {
   turns = [];
   olderBefore = null;
   hasMoreHistory = false;
-    runView = { ...INITIAL_RUN_VIEW };
-    activeRunCursor = 0;
-    liveAnswer = [];
-    liveVisible = false;
-    retryTurnId = null;
+  runView = { ...INITIAL_RUN_VIEW };
+  activeRunCursor = 0;
+  liveAnswer = [];
+  liveVisible = false;
+  retryTurnId = null;
   renderedAnswers = new Set();
   terminalHydrated = new Set();
   turnKinds = new Map();
@@ -348,12 +348,12 @@ function coerceTurn(item: unknown): Turn | null {
   };
 }
 
-  async function hydrateHistory(): Promise<void> {
-    if (sessionId === null) return;
-    // The durable projection now owns the terminal text: hide any live
-    // answer first so it can never appear twice.
-    liveVisible = false;
-    const sid = sessionId;
+async function hydrateHistory(): Promise<void> {
+  if (sessionId === null) return;
+  // The durable projection now owns the terminal text: hide any live
+  // answer first so it can never appear twice.
+  liveVisible = false;
+  const sid = sessionId;
   const pages: Turn[][] = [];
   let before: number | null = null;
   for (let round = 0; round < 20; round += 1) {
@@ -662,10 +662,10 @@ function subscribe(runId: string): void {
   if (sessionId === null) return;
   closeStream();
   activeRunId = runId;
-    retryTurnId = null;
-    liveAnswer = [];
-    liveVisible = false;
-    runView = { ...INITIAL_RUN_VIEW };
+  retryTurnId = null;
+  liveAnswer = [];
+  liveVisible = false;
+  runView = { ...INITIAL_RUN_VIEW };
   activeRunCursor = 0;
   showNotice(runView.notice);
   const sid = sessionId;
@@ -900,13 +900,13 @@ function renderRunView(runId: string): void {
       }
       return;
     }
-      renderedAnswers.add(runId);
-      liveAnswer = runView.answer.map((p) => ({
-        text: p.text,
-        citations: [...p.citations],
-      }));
-      liveVisible = true;
-      finishActiveRun();
+    renderedAnswers.add(runId);
+    liveAnswer = runView.answer.map((p) => ({
+      text: p.text,
+      citations: [...p.citations],
+    }));
+    liveVisible = true;
+    finishActiveRun();
     if (!terminalHydrated.has(runId)) {
       terminalHydrated.add(runId);
       void hydrateHistory().then(() => {
