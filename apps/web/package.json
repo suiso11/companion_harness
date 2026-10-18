@@ -1,0 +1,22 @@
+{
+  "name": "@companion/web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "svelte": "5.57.2"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "5.1.1",
+    "typescript": "5.9.3",
+    "vite": "6.4.1"
+  },
+  "engines": {
+    "node": "24.12.0",
+    "pnpm": "11.25.0"
+  }
+}

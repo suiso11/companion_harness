@@ -152,7 +152,7 @@ async function mutateAndAwaitNewAck(
 
 test.beforeEach(async ({ page, request }) => {
   await control(request, "/reset");
-  await page.goto("/");
+  await page.goto("/legacy");
   await expect(page.locator("#composer")).toBeVisible();
   await expect(page.locator("#composer-send")).toBeEnabled();
   await expect(page.locator("#memory-search-form")).toBeVisible();

@@ -471,7 +471,7 @@ describe("login sessions (steps 2-4)", () => {
       expect(html).toContain("<form");
       expect(html).toContain('action="/api/remote/login"');
       expect(html).toContain('href="/assets/client.css"');
-      expect(html).not.toContain("/assets/client.js");
+      expect(html).not.toContain("/assets/svelte-app.js");
       expect(html.toLowerCase()).not.toContain("<script");
     } finally {
       f.close();
@@ -505,7 +505,7 @@ describe("login sessions (steps 2-4)", () => {
       const page = await f.app.request("/", {
         headers: { host: ALLOWED_HOST, cookie },
       });
-      expect((await page.text()).toLowerCase()).toContain("/assets/client.js");
+      expect((await page.text()).toLowerCase()).toContain("/assets/svelte-app.js");
     } finally {
       f.close();
     }
@@ -741,7 +741,7 @@ describe("login sessions (steps 2-4)", () => {
       const page = await f.app.request("/", {
         headers: { host: ALLOWED_HOST, cookie },
       });
-      expect((await page.text()).toLowerCase()).toContain("/assets/client.js");
+      expect((await page.text()).toLowerCase()).toContain("/assets/svelte-app.js");
     } finally {
       f.close();
     }
@@ -963,7 +963,7 @@ describe("disabled remote regression (step 5)", () => {
           headers: { host: "127.0.0.1" },
         });
         expect((await page.text()).toLowerCase()).toContain(
-          "/assets/client.js",
+          "/assets/svelte-app.js",
         );
       } finally {
         closeKernelDatabase(handle);

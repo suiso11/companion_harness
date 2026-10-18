@@ -212,7 +212,7 @@ async function api(
 }
 
 async function boot(page: Page, origin: string): Promise<string> {
-  await page.goto(origin);
+  await page.goto(`${origin}/legacy`);
   await page.locator("#autonomy-control-status").waitFor({ timeout: 30_000 });
   const sessionId = await page.evaluate(() =>
     localStorage.getItem("ch.sessionId"),

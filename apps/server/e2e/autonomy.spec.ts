@@ -54,7 +54,7 @@ async function controlReset(
 }
 
 async function bootAutonomy(page: Page): Promise<string> {
-  await page.goto("/");
+  await page.goto("/legacy");
   await page.locator("#autonomy-control-status").waitFor({ timeout: 15_000 });
   const sessionId = await page.evaluate(() =>
     localStorage.getItem("ch.sessionId"),
@@ -622,7 +622,7 @@ test("autonomy base: purpose/task lifecycle, guarded resume, stop control, chat 
   page,
   request,
 }) => {
-  await page.goto("/");
+  await page.goto("/legacy");
   const sessionId = await sessionIdOf(page);
   const base = `/api/sessions/${sessionId}`;
 
@@ -802,7 +802,7 @@ test("autonomy history Load more renders 201 task events losslessly", async ({
   page,
   request,
 }) => {
-  await page.goto("/");
+  await page.goto("/legacy");
   const sessionId = await sessionIdOf(page);
   const base = `/api/sessions/${sessionId}`;
   const title = `e2e cycled ${randomUUID()}`;

@@ -709,19 +709,28 @@ function notifySupervisor(message: Record<string, unknown>): void {
 }
 
 /**
- * M3 static UI assets (plan §16.1, §16.7). Best-effort load of the esbuild
- * bundle (`scripts/build-ui.mjs` output, `dist/assets/`): missing files
- * only mean the asset routes serve 404, never a startup failure. Never logs
- * paths or file contents — only the loaded count.
+ * M3 static UI assets (plan §16.1, §16.7) + PR-1 Svelte chat bundle.
+ * Best-effort load of the esbuild bundle (`scripts/build-ui.mjs` output,
+ * `dist/assets/`) and the Svelte bundle (`apps/web` Vite output,
+ * `dist/svelte/`): missing files only mean the asset routes serve 404,
+ * never a startup failure. Never logs paths or file contents — only the
+ * loaded count.
  */
 export function loadUiAssets(fromDir?: string): {
   clientJs?: string;
   clientCss?: string;
+  svelteJs?: string;
+  svelteCss?: string;
 } {
   const dir =
     fromDir ??
     join(dirname(fileURLToPath(import.meta.url)), "..", "dist", "assets");
-  const assets: { clientJs?: string; clientCss?: string } = {};
+  const assets: {
+    clientJs?: string;
+    clientCss?: string;
+    svelteJs?: string;
+    svelteCss?: string;
+  } = {};
   try {
     assets.clientJs = readFileSync(join(dir, "client.js"), "utf-8");
   } catch {
@@ -729,6 +738,23 @@ export function loadUiAssets(fromDir?: string): {
   }
   try {
     assets.clientCss = readFileSync(join(dir, "client.css"), "utf-8");
+  } catch {
+    // Best effort: the route serves 404 when the bundle was not built.
+  }
+  // PR-1 Svelte bundle lives next to `dist/assets` in `dist/svelte`.
+  const svelteDir = join(
+    dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "dist",
+    "svelte",
+  );
+  try {
+    assets.svelteJs = readFileSync(join(svelteDir, "svelte-app.js"), "utf-8");
+  } catch {
+    // Best effort: the route serves 404 when the bundle was not built.
+  }
+  try {
+    assets.svelteCss = readFileSync(join(svelteDir, "svelte-app.css"), "utf-8");
   } catch {
     // Best effort: the route serves 404 when the bundle was not built.
   }

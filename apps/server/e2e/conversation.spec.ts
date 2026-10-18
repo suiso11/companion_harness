@@ -103,8 +103,8 @@ test("privacy: strict CSP, no inline script, minimal localStorage", async ({
   expect(csp).not.toContain("unsafe-inline");
 
   const html = await cspCheck.text();
-  expect(html).toContain('src="/assets/client.js"');
-  expect(html).not.toMatch(/<script(?![^>]*src="\/assets\/client\.js")/i);
+  expect(html).toContain('src="/assets/svelte-app.js"');
+  expect(html).not.toMatch(/<script(?![^>]*src="\/assets\/svelte-app\.js")/i);
   expect(html).not.toMatch(/\son\w+\s*=/i);
 
   await send(page, TEXT_OK);
