@@ -55,7 +55,7 @@
 - `docs/implementation_plan.md` §16（M3 UI 合意: §16.1 1171-1175 / §16.2 1177-1194 / §16.3 1196-1200 / §16.4 1202-1212 / §16.5 1214-1219 / §16.6 1222-1226 / §16.7 1228-1239 / §16.8 非目標 1241-1249）および §18（承認フロー: 18.1 scope 1349-1371 / 18.4 variants・approve exact 1503 / 18.5 marker・18.6 Stop 境界 / 18.7 receipt / 18.10 test 1560-1566 / 18.11 非目標）。
 - `docs/plan/active_projects_tasks.md` C04–C07・C22（550-561）・AV-05（649）・AV 全体（645-654）。
 - `docs/plan/decision_inputs_2026-10-18.md` AV 判定（AV-05:511 ほか 484-520）。
-- `linux_remote_access_design.md §6` は本 worktree（origin/master 3e23d48）`docs/` に不在（glob で `docs/**/*.md` に該当なし）。代替として `docs/operations.md:47-96`（remote allowlist/login/session）＋ `client.css:51-55,87-105`（slice b/c）を正とする。本書では新規 §6 引用を創作しない。
+- `docs/plan/linux_remote_access_design.md` §6（スマホ UI 最低限、land-remote-design PR で master に着地）を正とし、`docs/operations.md:47-96`（remote allowlist/login/session）＋ `client.css:51-55,87-105`（slice b/c）とあわせて参照する。
 
 ### 2.7 進捗表示の現状
 
