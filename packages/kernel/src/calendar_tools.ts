@@ -247,6 +247,40 @@ export function calendarEventBodyText(event: CalendarNormalizedEvent): string {
   });
 }
 
+/**
+ * Authoritative create title check over the FULL canonical event body text.
+ *
+ * `observation.title` is a bounded DISPLAY field (128 code units in the
+ * action observation schema, 512 in the reference model) and MUST NOT bind
+ * the verified claim: a 129..256-char approved title shares its 128-char
+ * prefix with a wrong-suffix body. The canonical `text` carries the FULL
+ * normalized title (`calendarEventBodyText`), so verification compares THAT.
+ *
+ * Fail-closed: unparseable text, non-object bodies, or a missing/non-string
+ * `title` returns false (unverified) — never a fallback to the truncated
+ * display title. NFC is applied to the observed title exactly like the
+ * proposal/hash path; the caller passes the already-NFC intended title.
+ */
+export function authoritativeCreateTitleMatches(
+  text: string,
+  intendedTitleNfc: string,
+): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text) as unknown;
+  } catch {
+    return false;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return false;
+  }
+  const title = (parsed as { title?: unknown }).title;
+  if (typeof title !== "string") {
+    return false;
+  }
+  return title.normalize("NFC") === intendedTitleNfc;
+}
+
 /** Convert one normalized event to a ReferenceManager observation. */
 export function toCalendarObservation(
   event: CalendarNormalizedEvent,

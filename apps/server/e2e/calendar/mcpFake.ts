@@ -23,6 +23,7 @@ import {
 import {
   AUTHORITATIVE_DELETED_REVISION,
   AUTHORITATIVE_GET_TOOL,
+  CALENDAR_CONTROL_ORIGIN,
   CALENDAR_ID,
   EVENT_DESCRIPTION,
   EVENT_END_RENDERED,
@@ -32,6 +33,7 @@ import {
   EVENT_TITLE_V2,
   FAKE_MCP_SERVER_NAME,
   FAKE_MCP_SERVER_VERSION,
+  FIXTURE_CREATE_PATH,
 } from "./ports.js";
 
 /**
@@ -74,6 +76,13 @@ export interface FakeCalendarState {
   startOverride: string | null;
   endOverride: string | null;
   /**
+   * Test-only all-day source seam (loopback control; never a production
+   * normalizer path): when true and no write has landed yet, the fake
+   * upstream serves date-only bounds so a real search/stage/approve flow
+   * freezes an all-day snapshot (exclusive end). Reset per test via `/reset`.
+   */
+  allDay: boolean;
+  /**
    * Test-only upstream title override (loopback control seam; never a
    * production normalizer path): when set, the fake upstream serves this
    * summary so a real search/stage/approve flow can freeze an arbitrary
@@ -107,6 +116,7 @@ export function createFakeCalendarState(): FakeCalendarState {
     startOverride: null,
     endOverride: null,
     titleOverride: null,
+    allDay: false,
     releaseRead: null,
     releaseWrite: null,
   };
@@ -125,6 +135,7 @@ export function resetFakeCalendarState(state: FakeCalendarState): void {
   state.startOverride = null;
   state.endOverride = null;
   state.titleOverride = null;
+  state.allDay = false;
   state.releaseRead?.();
   state.releaseWrite?.();
   state.releaseRead = null;
@@ -205,6 +216,28 @@ export const FAKE_GET_TOOL_INPUT_SCHEMA = {
 
 /** Deterministic candidate event the scripted fake upstream serves. */
 export function fakeEvent(state: FakeCalendarState): unknown {
+  // All-day seam: before any write lands, serve date-only bounds (exclusive
+  // end) so the real normalizer freezes an all-day snapshot. After a write
+  // lands, the timed overrides take over (the conversion target).
+  if (
+    state.allDay &&
+    state.startOverride === null &&
+    state.endOverride === null
+  ) {
+    return {
+      id: EVENT_ID,
+      calendarId: CALENDAR_ID,
+      status: "confirmed",
+      summary:
+        state.titleOverride ??
+        (state.revision === 1 ? EVENT_TITLE_V1 : EVENT_TITLE_V2),
+      description: EVENT_DESCRIPTION,
+      start: { date: "2026-10-13" },
+      end: { date: "2026-10-14" },
+      updated: "2026-10-13T00:00:00Z",
+      etag: state.revision === 1 ? "rev-1" : "rev-2",
+    };
+  }
   return {
     id: EVENT_ID,
     calendarId: CALENDAR_ID,
@@ -235,6 +268,60 @@ export async function fakeToolSchemaHashes(): Promise<{
     list: await canonicalSchemaHash(FAKE_LIST_TOOL_INPUT_SCHEMA),
     get: await canonicalSchemaHash(FAKE_GET_TOOL_INPUT_SCHEMA),
   };
+}
+
+/**
+ * M6 create read-back fetch: an actual loopback HTTP GET against the
+ * hermetic Google-shaped fixture storage. Returns the provider-shaped event
+ * object, null on a 404 miss, or "lost" when the response itself was lost.
+ */
+async function fetchCreatedEvent(
+  eventId: string,
+): Promise<Record<string, unknown> | null | "lost"> {
+  let res: Response;
+  try {
+    res = await fetch(
+      `${CALENDAR_CONTROL_ORIGIN}${FIXTURE_CREATE_PATH}/${encodeURIComponent(eventId)}`,
+      {
+        method: "GET",
+        headers: { accept: "application/json" },
+        redirect: "manual",
+      },
+    );
+  } catch {
+    return "lost";
+  }
+  if (res.status === 404) return null;
+  if (!res.ok) return "lost";
+  try {
+    const body = (await res.json()) as {
+      id?: unknown;
+      summary?: unknown;
+      start?: { dateTime?: unknown };
+      end?: { dateTime?: unknown };
+    };
+    if (
+      typeof body.id !== "string" ||
+      typeof body.summary !== "string" ||
+      typeof body.start?.dateTime !== "string" ||
+      typeof body.end?.dateTime !== "string"
+    ) {
+      return "lost";
+    }
+    return {
+      id: body.id,
+      calendarId: CALENDAR_ID,
+      status: "confirmed",
+      summary: body.summary,
+      description: EVENT_DESCRIPTION,
+      start: { dateTime: body.start.dateTime },
+      end: { dateTime: body.end.dateTime },
+      updated: "2026-11-04T00:00:00Z",
+      etag: `create-${body.id}`,
+    };
+  } catch {
+    return "lost";
+  }
 }
 
 /**
@@ -345,6 +432,26 @@ export function createFakeCalendarMcpServer(
         await awaitRelease(state, "read");
         state.getCalls += 1;
         if (state.deleted) return deletedResult();
+        // M6 create read-back: a stable insert id (32 lowercase hex) that is
+        // not the seeded reschedule event is served from the REAL loopback
+        // Google-shaped fixture storage (an actual HTTP GET against the
+        // harness control server, counted fixture-side). A never-inserted id
+        // is a bare miss (no synthesis); a transport loss is an isError miss
+        // (the strategy classifies both as unverified, never verified).
+        if (typeof args.eventId === "string" && args.eventId !== EVENT_ID) {
+          const created = await fetchCreatedEvent(args.eventId);
+          if (created === "lost") {
+            return {
+              content: [{ type: "text", text: "transport_lost" }],
+              isError: true,
+            };
+          }
+          if (created === null) return deletedResult();
+          return {
+            content: [{ type: "text", text: "fake created event" }],
+            structuredContent: { event: created },
+          };
+        }
         return {
           content: [{ type: "text", text: "fake event" }],
           structuredContent: { event: fakeEvent(state) },

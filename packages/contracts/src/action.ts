@@ -25,6 +25,25 @@ export const CalendarRescheduleToolNameSchema = z.literal(
 );
 
 /**
+ * M6 opt-in creation tool (agreed extension of §18.1, normal TIMED events
+ * only). Exact input: `{ title, start, end }` ONLY — no allDay, attendees,
+ * description, recurrence, delete, or edit options. Unknown keys rejected.
+ * The host-owned Calendar/account/connector selection is NEVER model input:
+ * the tool carries no calendar/account/provider ids.
+ */
+export const CALENDAR_CREATE_TOOL_NAME = "calendar.create" as const;
+export const CalendarCreateToolNameSchema = z.literal(
+  CALENDAR_CREATE_TOOL_NAME,
+);
+
+/** Discriminated write-tool union (M5 reschedule + M6 opt-in create). */
+export const ActionToolNameSchema = z.union([
+  CalendarRescheduleToolNameSchema,
+  CalendarCreateToolNameSchema,
+]);
+export type ActionToolName = z.infer<typeof ActionToolNameSchema>;
+
+/**
  * Exact `calendar.reschedule` input: start / end fields ONLY (§18.1).
  * No create / delete / title / description / attendee fields exist and
  * unknown keys are rejected. Exact instant grammar stays in the connector
@@ -49,6 +68,41 @@ export const CalendarRescheduleToolInputSchema = z
 export type CalendarRescheduleToolInput = z.infer<
   typeof CalendarRescheduleToolInputSchema
 >;
+
+/**
+ * Exact `calendar.create` input: `{ title, start, end }` ONLY (M6, normal
+ * TIMED creation). Title is a bounded non-empty Unicode string (user
+ * semantics preserved verbatim); start/end are opaque non-empty strings
+ * here with exact RFC3339-explicit-offset / positive-duration validation in
+ * the connector port (mirroring `calendar.reschedule`). No allDay,
+ * attendees, description, recurrence, or provider ids exist here and unknown
+ * keys are rejected.
+ */
+export const CalendarCreateToolInputSchema = z
+  .strictObject({
+    title: z.string().min(1).max(256),
+    start: z.string().min(1).max(128),
+    end: z.string().min(1).max(128),
+  })
+  .superRefine((value, ctx) => {
+    if (value.start === value.end) {
+      ctx.addIssue({
+        code: "custom",
+        message: "start must be before end",
+        path: ["start"],
+      });
+    }
+  });
+export type CalendarCreateToolInput = z.infer<
+  typeof CalendarCreateToolInputSchema
+>;
+
+/** Discriminated approved-input union (per-tool exact shape). */
+export const ActionToolInputSchema = z.union([
+  CalendarRescheduleToolInputSchema,
+  CalendarCreateToolInputSchema,
+]);
+export type ActionToolInput = z.infer<typeof ActionToolInputSchema>;
 
 /** Proposal lifecycle status (§18.3). Expiry is a repository-time check. */
 export const ActionProposalStatusSchema = z.enum([
@@ -109,9 +163,15 @@ export const ActionProposalPreviewSchema = z.strictObject({
 export type ActionProposalPreview = z.infer<typeof ActionProposalPreviewSchema>;
 
 /**
- * Immutable ActionProposal (exact §18.3 fields). Only status / resolvedAt /
- * decisionTurnId may ever be written by a repository; input, target,
- * expectedRevision, preview, and hash are immutable content.
+ * Immutable ActionProposal (exact §18.3 fields + M6 create extension). Only
+ * status / resolvedAt / decisionTurnId may ever be written by a repository;
+ * input, target, expectedRevision, preview, and hash are immutable content.
+ *
+ * M6 create rows carry NO existing-event target: `targetRefId`,
+ * `targetResourceId`, `basedOnSnapshotId`, and `expectedRevision` are NULL
+ * for `calendar.create` (there is no source event, no etag, no preflight
+ * snapshot — never a fake placeholder). `calendar.reschedule` rows keep all
+ * four NON-NULL exactly as in M5.
  */
 export const ActionProposalSchema = z
   .strictObject({
@@ -120,14 +180,14 @@ export const ActionProposalSchema = z
     sourceTurnId: UuidSchema,
     sourceRunId: UuidSchema,
     decisionTurnId: UuidSchema.nullable(),
-    tool: CalendarRescheduleToolNameSchema,
+    tool: ActionToolNameSchema,
     connectorInstanceId: UuidSchema,
-    input: CalendarRescheduleToolInputSchema,
-    targetRefId: UuidSchema,
-    targetResourceId: UuidSchema,
-    basedOnSnapshotId: UuidSchema,
+    input: ActionToolInputSchema,
+    targetRefId: UuidSchema.nullable(),
+    targetResourceId: UuidSchema.nullable(),
+    basedOnSnapshotId: UuidSchema.nullable(),
     /** Source revision key (`source_revision` if present else content hash). */
-    expectedRevision: SourceRevisionSchema,
+    expectedRevision: SourceRevisionSchema.nullable(),
     preview: ActionProposalPreviewSchema,
     /** Normalized exact content hash (UI button + approval binding). */
     hash: Sha256HexSchema,
@@ -138,6 +198,54 @@ export const ActionProposalSchema = z
   .refine((value) => value.expiresAt === value.createdAt + PROPOSAL_TTL_MS, {
     message: "expiresAt must be createdAt + 15min",
     path: ["expiresAt"],
+  })
+  .superRefine((value, ctx) => {
+    if (value.tool === CALENDAR_RESCHEDULE_TOOL_NAME) {
+      if (
+        value.targetRefId === null ||
+        value.targetResourceId === null ||
+        value.basedOnSnapshotId === null ||
+        value.expectedRevision === null
+      ) {
+        ctx.addIssue({
+          code: "custom",
+          message:
+            "calendar.reschedule proposals require a full existing-event target",
+        });
+      }
+      // Tool/input coupling: a reschedule row must carry the exact
+      // reschedule input shape (a create `{ title, start, end }` input is
+      // rejected by the strict reschedule schema's unknown-key rule).
+      if (!CalendarRescheduleToolInputSchema.safeParse(value.input).success) {
+        ctx.addIssue({
+          code: "custom",
+          message: "calendar.reschedule proposals require a start/end input",
+          path: ["input"],
+        });
+      }
+    } else {
+      if (
+        value.targetRefId !== null ||
+        value.targetResourceId !== null ||
+        value.basedOnSnapshotId !== null ||
+        value.expectedRevision !== null
+      ) {
+        ctx.addIssue({
+          code: "custom",
+          message: "calendar.create proposals carry no existing-event target",
+        });
+      }
+      // Tool/input coupling: a create row must carry the exact create
+      // input shape (a reschedule `{ start, end }` input is rejected by
+      // the strict create schema's missing-title rule).
+      if (!CalendarCreateToolInputSchema.safeParse(value.input).success) {
+        ctx.addIssue({
+          code: "custom",
+          message: "calendar.create proposals require a title/start/end input",
+          path: ["input"],
+        });
+      }
+    }
   });
 export type ActionProposal = z.infer<typeof ActionProposalSchema>;
 
@@ -172,7 +280,7 @@ export const ActionExecutionGrantSchema = z.strictObject({
   sessionId: UuidSchema,
   proposalId: UuidSchema,
   proposalHash: Sha256HexSchema,
-  tool: CalendarRescheduleToolNameSchema,
+  tool: ActionToolNameSchema,
   inputHash: Sha256HexSchema,
   consumedAt: UnixMsSchema.nullable(),
   createdAt: UnixMsSchema,
@@ -266,18 +374,38 @@ export function proposalApproveScope(proposalId: string): string {
  * §18.9) plus the mutable decision state. Raw provider ids never appear
  * (`preview` is the deterministic start/end-only summary line).
  */
-export const ProposalSummarySchema = z.strictObject({
-  proposalId: UuidSchema,
-  tool: CalendarRescheduleToolNameSchema,
-  input: CalendarRescheduleToolInputSchema,
-  preview: ActionProposalPreviewSchema,
-  hash: Sha256HexSchema,
-  status: ActionProposalStatusSchema,
-  createdAt: UnixMsSchema,
-  expiresAt: UnixMsSchema,
-  resolvedAt: UnixMsSchema.nullable(),
-  decisionTurnId: UuidSchema.nullable(),
-});
+export const ProposalSummarySchema = z
+  .strictObject({
+    proposalId: UuidSchema,
+    tool: ActionToolNameSchema,
+    input: ActionToolInputSchema,
+    preview: ActionProposalPreviewSchema,
+    hash: Sha256HexSchema,
+    status: ActionProposalStatusSchema,
+    createdAt: UnixMsSchema,
+    expiresAt: UnixMsSchema,
+    resolvedAt: UnixMsSchema.nullable(),
+    decisionTurnId: UuidSchema.nullable(),
+  })
+  .superRefine((value, ctx) => {
+    // Tool/input coupling (same rule as `ActionProposalSchema`): the
+    // summary must carry the exact per-tool input shape, so contract
+    // consumers can never accept an impossible tool/input combination.
+    const expected =
+      value.tool === CALENDAR_RESCHEDULE_TOOL_NAME
+        ? CalendarRescheduleToolInputSchema.safeParse(value.input)
+        : CalendarCreateToolInputSchema.safeParse(value.input);
+    if (!expected.success) {
+      ctx.addIssue({
+        code: "custom",
+        message:
+          value.tool === CALENDAR_RESCHEDULE_TOOL_NAME
+            ? "calendar.reschedule proposals require a start/end input"
+            : "calendar.create proposals require a title/start/end input",
+        path: ["input"],
+      });
+    }
+  });
 export type ProposalSummary = z.infer<typeof ProposalSummarySchema>;
 
 /** Max proposal summaries served in one list page (bounded read). */
@@ -321,6 +449,25 @@ export const ActionReceiptViewSchema = z.strictObject({
 export type ActionReceiptView = z.infer<typeof ActionReceiptViewSchema>;
 
 /**
+ * ORIGINAL-only session citation label (BEFORE evidence navigation).
+ *
+ * Display metadata resolved from the proposal's OWN immutable
+ * `target_ref_id` plus session ownership: the `rN` ordinal of the exact
+ * staged source SessionReference. It is the pre-write (BEFORE) snapshot
+ * reference and NEVER a verified AFTER claim, NEVER a new model evidence
+ * grant, and NEVER parsed from preview prose. Raw provider ids / UUID
+ * snapshot ids are never exposed through this label.
+ */
+export const ActionTargetCitationSchema = z
+  .string()
+  .min(2)
+  .max(11)
+  .regex(/^r[1-9][0-9]*$/, {
+    message: "target citation must be a session rN label (e.g. r1)",
+  });
+export type ActionTargetCitation = z.infer<typeof ActionTargetCitationSchema>;
+
+/**
  * Session-scoped execution + receipt read for ONE proposal (C22). Carries
  * the actual persisted execution status, whether the external-call marker is
  * committed (the exact Stop boundary: cancel is only possible before it),
@@ -343,6 +490,15 @@ export const ProposalExecutionViewSchema = z.strictObject({
   /** Fixed safe redacted code when the execution failed; null otherwise. */
   errorCode: M5ActionErrorCodeSchema.nullable(),
   receipt: ActionReceiptViewSchema.nullable(),
+  /**
+   * ORIGINAL-only session citation label (BEFORE evidence navigation),
+   * resolved from the proposal's OWN immutable `target_ref_id` plus session
+   * ownership. Present even before any execution exists (proposal metadata,
+   * not execution state). The verified AFTER citation (if any) comes only
+   * from the authoritative `run.result` via `runResultToAnswerParts` when
+   * the outcome is `succeeded` — never from this field.
+   */
+  targetCitation: ActionTargetCitationSchema,
 });
 export type ProposalExecutionView = z.infer<typeof ProposalExecutionViewSchema>;
 
@@ -373,7 +529,7 @@ export const M5ActionEventTypeSchema = z.enum(M5_ACTION_EVENT_TYPES);
 export const ActionProposedPayloadSchema = z.strictObject({
   proposalId: UuidSchema,
   proposalHash: Sha256HexSchema,
-  tool: CalendarRescheduleToolNameSchema,
+  tool: ActionToolNameSchema,
 });
 
 export const ActionApprovedPayloadSchema = z.strictObject({
@@ -405,3 +561,37 @@ export const ActionExecutionFinishedPayloadSchema = z.strictObject({
   executionId: UuidSchema,
   outcome: ActionReceiptOutcomeSchema,
 });
+
+/* ------------------------------------------------------------------ */
+/* M6 calendar.create stable client event id (Google events.insert `id`) */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Stable Google client-assigned event id for exactly one approved
+ * `calendar.create` execution. Derived deterministically from the immutable
+ * execution id (UUID without dashes: 32 lowercase hex chars) BEFORE dispatch
+ * and never model input. Hex `[0-9a-f]` is a strict subset of Google's
+ * allowed base32hex `[a-v0-9]` alphabet and 32 chars sit inside the 5..1024
+ * length bound, so the derived id is always provider-legal. One execution
+ * owns exactly one id; one consumed grant performs exactly one insert with
+ * it. Repeated approval of the same hash/key returns the original run, so
+ * the same id is never re-inserted.
+ */
+export const CREATE_STABLE_EVENT_ID_LENGTH = 32 as const;
+export const CreateStableEventIdSchema = z
+  .string()
+  .min(5)
+  .max(1024)
+  .regex(/^[a-v0-9]+$/, {
+    message: "stable create event id must be Google base32hex, 5..1024 chars",
+  });
+export type CreateStableEventId = z.infer<typeof CreateStableEventIdSchema>;
+
+/**
+ * Derive the stable insert id for an approved create execution. Throws on a
+ * non-UUID execution id (fail closed, never a guessed id).
+ */
+export function deriveCreateEventId(executionId: string): string {
+  const id = UuidSchema.parse(executionId).toLowerCase().replace(/-/g, "");
+  return CreateStableEventIdSchema.parse(id);
+}

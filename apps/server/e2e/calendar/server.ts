@@ -62,6 +62,12 @@ import type { ModelGateway } from "@companion/model-local";
 import { startServer } from "../../src/index.js";
 import { createFakeCalendarActionWritePort } from "./actionPort.js";
 import { createAuthoritativeCalendarBinding } from "./authoritativeBinding.js";
+import {
+  type CreateFixtureMode,
+  createCreateFixtureStore,
+  handleCreateFixtureRequest,
+} from "./createFixture.js";
+import { createFakeCalendarCreateWritePort } from "./createPort.js";
 import type { FakeWriteMode } from "./mcpFake.js";
 import {
   createFakeCalendarMcpServer,
@@ -86,6 +92,10 @@ const dbPath = join(dir, "companion-calendar.sqlite");
 
 const hashes = await fakeToolSchemaHashes();
 const state = createFakeCalendarState();
+// M6 hermetic LOCAL Google-shaped create fixture storage (loopback only,
+// same process): POST materializes the created event, GET serves the
+// authoritative read-back. No fork checkout, no network, no OAuth.
+const createStore = createCreateFixtureStore();
 
 // Trusted host code: read-only definitions for the three fake tools, linked
 // to the config hint hashes (canonicalSchemaHash) AND the live tools/list
@@ -139,7 +149,11 @@ const env: NodeJS.ProcessEnv = {
   // C22: the ONLY action gate is the explicit host opt-in triple: config
   // opt-in + writeEnabled + the injected trusted write port derived from the
   // active Calendar instance below. Never derived from model output.
-  COMPANION_ACTIONS_JSON: JSON.stringify({ optIn: true, writeEnabled: true }),
+  COMPANION_ACTIONS_JSON: JSON.stringify({
+    optIn: true,
+    writeEnabled: true,
+    createEnabled: true,
+  }),
   COMPANION_CALENDAR_JSON: JSON.stringify({
     selection: { calendarId: CALENDAR_ID },
     connector: {
@@ -234,6 +248,15 @@ const started = await startServer({
     derivePort: ({ connectorInstanceId }: { connectorInstanceId: string }) =>
       createFakeCalendarActionWritePort(state, connectorInstanceId),
   },
+  // M6: the dedicated trusted fake CREATE port, DERIVED the same way. Its
+  // insert performs a REAL loopback HTTP POST against the hermetic
+  // Google-shaped fixture above (the event actually materializes); the
+  // authoritative read-back is the active read binding's GET by the stable
+  // insert id through the fake MCP server below (a real loopback GET).
+  actionCreateBinding: {
+    derivePort: ({ connectorInstanceId }: { connectorInstanceId: string }) =>
+      createFakeCalendarCreateWritePort(createStore, connectorInstanceId),
+  },
   // Bounded outer MCP shutdown backstop for the harness process.
   mcpShutdownMs: 2000,
 });
@@ -285,8 +308,28 @@ const control = createServer(async (req, res) => {
       // Tombstone app (App C) gate + its real wire get count.
       authoritativeDeleted: tombstoneState.authoritativeDeleted,
       tombstoneGetCalls: tombstoneState.getCalls,
+      // M6 hermetic create fixture (POST/GET counts + stored events,
+      // independent of receipt state; requests carry header/body proof).
+      createMode: createStore.mode,
+      createPostCount: createStore.postCount,
+      createGetCount: createStore.getCount,
+      createdEventIds: [...createStore.events.keys()],
+      createdEvents: [...createStore.events.values()],
+      createRequests: createStore.requests,
     });
     return;
+  }
+  // M6 hermetic Google-shaped create surface (loopback fixture; never a
+  // production path). Handled BEFORE the shared single body read below: the
+  // fixture POST consumes its own body exactly once, like every other arm.
+  if (url.pathname.startsWith("/google/calendar/v3/calendars/")) {
+    const handled = await handleCreateFixtureRequest(
+      req,
+      res,
+      createStore,
+      () => readBody(req),
+    );
+    if (handled) return;
   }
   // The body is read EXACTLY once: a second readBody() on an already-ended
   // request stream never resolves, which used to hang every /arm-write call
@@ -317,6 +360,7 @@ const control = createServer(async (req, res) => {
   }
   if (req.method === "POST" && url.pathname === "/reset") {
     resetFakeCalendarState(state);
+    createStore.reset();
     json(200, { reset: true });
     return;
   }
@@ -333,6 +377,20 @@ const control = createServer(async (req, res) => {
     }
     state.titleOverride = title;
     json(200, { titleOverride: state.titleOverride });
+    return;
+  }
+  // Before→after fixture seam: serve an all-day source event (date-only,
+  // exclusive end) so the real flow can freeze/approve an all-day→timed
+  // conversion. Cleared by `/reset` like every other fixture field.
+  if (req.method === "POST" && url.pathname === "/set-all-day") {
+    const parsed = parseBody(raw);
+    const allDay = parsed?.allDay;
+    if (typeof allDay !== "boolean") {
+      json(400, { error: { code: "invalid_all_day" } });
+      return;
+    }
+    state.allDay = allDay;
+    json(200, { allDay: state.allDay });
     return;
   }
   // C22 fixture seams (fake write behavior + barriers; no production path).
@@ -356,6 +414,22 @@ const control = createServer(async (req, res) => {
   if (req.method === "POST" && url.pathname === "/arm-read-barrier") {
     state.readBarrier = true;
     json(200, { readBarrier: state.readBarrier });
+    return;
+  }
+  // M6 fixture seam (fake CREATE behavior; no production path):
+  //   success     insert lands, read-back verifies,
+  //   loss        insert lands BEFORE the response is lost -> unknown,
+  //   wrong-title insert lands, read-back observes a drifted title ->
+  //               succeeded_unverified (never verified).
+  if (req.method === "POST" && url.pathname === "/arm-create") {
+    const parsed = parseBody(raw);
+    const mode = typeof parsed?.mode === "string" ? parsed.mode : "";
+    if (mode !== "success" && mode !== "loss" && mode !== "wrong-title") {
+      json(400, { error: { code: "invalid_create_mode" } });
+      return;
+    }
+    createStore.mode = mode as CreateFixtureMode;
+    json(200, { createMode: createStore.mode });
     return;
   }
   if (req.method === "POST" && url.pathname === "/release") {

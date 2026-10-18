@@ -668,10 +668,53 @@ test("preview names the frozen event title and session rN, never the tool name",
   const preview = page.locator("[data-action-preview='true']");
   await expect(preview).toContainText(EVENT_TITLE_V1);
   await expect(preview).toContainText("r1");
+  // Before→after comparison: the frozen source range and the proposed range
+  // are both visible (offsets intact), with explicit before/after labels.
+  await expect(preview).toContainText("2026-10-13T09:00:00.000Z");
+  await expect(preview).toContainText("2026-10-13T10:00:00.000Z");
+  await expect(preview).toContainText(STAGE_START);
+  await expect(preview).toContainText(STAGE_END);
   const cardText =
     (await page.locator('[data-action-card="true"]').textContent()) ?? "";
   expect(cardText).not.toContain("calendar.reschedule");
   void request;
+});
+
+test("all-day source shows exclusive-end dates and the timed conversion, then approves once", async ({
+  page,
+  request,
+}) => {
+  // Test-only all-day source seam (loopback control; production normalizer
+  // untouched): the fake upstream serves date-only bounds with an exclusive
+  // end. `/reset` (beforeEach) clears it per test.
+  await control(request, "/set-all-day", { allDay: true });
+  await stageProposal(page);
+  const preview = page.locator("[data-action-preview='true']");
+  // BEFORE stays date-only with the exclusive end denoted (no invented
+  // midnight); AFTER is the proposed timed range with offsets intact, and
+  // the kind change (all-day → timed) is visible.
+  await expect(preview).toContainText("2026-10-13");
+  await expect(preview).toContainText("2026-10-14");
+  await expect(preview).toContainText(STAGE_START);
+  await expect(preview).toContainText(STAGE_END);
+  await expect(preview).toContainText("r1");
+  const approved = page.waitForResponse(
+    (res) =>
+      res.url().includes("/approve") && res.request().method() === "POST",
+  );
+  await page.locator("#action-approve").click();
+  expect((await approved).status()).toBe(202);
+  const card = page.locator('[data-action-card="true"]');
+  await expect(card).toContainText("日程を更新しました", { timeout: 60_000 });
+  expect(await writeCalls(request)).toBe(1);
+  // Verified receipt cites a FRESH reference (new rN, never the staged r1).
+  const citations = page.locator("#conversation [data-action-citation='true']");
+  await expect(citations.first()).toBeVisible({ timeout: 30_000 });
+  expect(await citations.first().textContent()).not.toBe("r1");
+  expect(await citations.first().textContent()).toMatch(/^r\d+$/);
+  const after = await status(request);
+  expect(after.startOverride).toBe(STAGE_START);
+  expect(after.endOverride).toBe(STAGE_END);
 });
 
 test("tool-prefixed title survives card, receipt and reloaded history in full (1 write)", async ({

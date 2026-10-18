@@ -43,10 +43,15 @@
 //   repository construction wiring; the stager refuses to stage or commit
 //   otherwise.
 
-import type { CalendarRescheduleToolInput } from "@companion/contracts";
+import type {
+  CalendarCreateToolInput,
+  CalendarRescheduleToolInput,
+} from "@companion/contracts";
 import {
   ActionProposedPayloadSchema,
+  CALENDAR_CREATE_TOOL_NAME,
   CALENDAR_RESCHEDULE_TOOL_NAME,
+  CalendarCreateToolInputSchema,
   CalendarRescheduleToolInputSchema,
   PROPOSAL_TTL_MS,
 } from "@companion/contracts";
@@ -85,6 +90,12 @@ export interface ActionProposalStagerOptions {
   db: Database.Database;
   /** Default FALSE: staging/commits are refused unless explicitly true. */
   writeEnabled?: boolean;
+  /**
+   * M6 create gate, default FALSE: `stageCreate`/create commits additionally
+   * require this explicit opt-in. Old `writeEnabled === true` compositions
+   * NEVER implicitly authorize creation.
+   */
+  createEnabled?: boolean;
   /** Deterministic clock; defaults to Date.now(). */
   clock?: () => number;
   /** Required repository event callback (above). */
@@ -109,11 +120,43 @@ export interface StagedProposedContent {
   expiresAt: number;
 }
 
-export interface CommittedProposal extends StagedProposedContent {
-  proposalId: string;
-  status: "pending";
-  eventSeq: number;
+/**
+ * Staged M6 `calendar.create` content: NO existing-event target (all four
+ * target columns NULL, never a fake placeholder). The Calendar/account
+ * selection is the host-owned active configuration named by
+ * `connectorInstanceId` (never model input).
+ */
+export interface StagedCreateContent {
+  runId: string;
+  sessionId: string;
+  sourceTurnId: string;
+  tool: typeof CALENDAR_CREATE_TOOL_NAME;
+  input: CalendarCreateToolInput;
+  targetRefId: null;
+  targetResourceId: null;
+  basedOnSnapshotId: null;
+  connectorInstanceId: string;
+  expectedRevision: null;
+  preview: { summary: string };
+  hash: string;
+  createdAt: number;
+  expiresAt: number;
 }
+
+/** Either staged shape (at most one staged proposal per run, any tool). */
+export type AnyStagedContent = StagedProposedContent | StagedCreateContent;
+
+export type CommittedProposal =
+  | (StagedProposedContent & {
+      proposalId: string;
+      status: "pending";
+      eventSeq: number;
+    })
+  | (StagedCreateContent & {
+      proposalId: string;
+      status: "pending";
+      eventSeq: number;
+    });
 
 export interface ActionProposalStager {
   /** Concrete staging (interfaces above); throws RepositoryValidationError. */
@@ -121,8 +164,18 @@ export interface ActionProposalStager {
     runId: string,
     input: { targetRefId: string; start: string; end: string },
   ): StagedProposedContent;
+  /**
+   * M6 create staging: `{ title, start, end }` for a normal TIMED creation
+   * on the host-owned `authority.connectorInstanceId` (never model input).
+   * Requires BOTH `writeEnabled` and `createEnabled`.
+   */
+  stageCreate(
+    runId: string,
+    input: { title: string; start: string; end: string },
+    authority: { connectorInstanceId: string },
+  ): StagedCreateContent;
   /** Current staged content for `runId` (pruned when expired), or null. */
-  getStaged(runId: string): StagedProposedContent | null;
+  getStaged(runId: string): AnyStagedContent | null;
   /** Discard staged content (failed/cancelled runs). Idempotent. */
   removeStaged(runId: string): boolean;
   /**
@@ -222,6 +275,165 @@ function validateRange(start: string, end: string): void {
   }
 }
 
+/**
+ * M6 create title validation: bounded non-empty Unicode, user semantics
+ * preserved VERBATIM in the stored input (no normalization, no trimming of
+ * the stored value). Refused fail-closed: empty/blank-only, NUL, or C0/C1
+ * control characters (a title is rendered into provider payloads and UI).
+ */
+function validateCreateTitle(title: string): void {
+  if (title.length < 1 || title.length > 256) {
+    throw new RepositoryValidationError(
+      "title must be a 1..256 character string",
+    );
+  }
+  if (title.includes("\0")) {
+    throw new RepositoryValidationError("title must not contain NUL");
+  }
+  let hasVisible = false;
+  for (const unit of title) {
+    const code = unit.codePointAt(0) ?? 0;
+    if ((code >= 0x00 && code <= 0x1f) || (code >= 0x7f && code <= 0x9f)) {
+      throw new RepositoryValidationError(
+        "title must not contain control characters",
+      );
+    }
+    if (unit.trim().length > 0) {
+      hasVisible = true;
+    }
+  }
+  if (!hasVisible) {
+    throw new RepositoryValidationError("title must not be blank");
+  }
+}
+
+const CREATE_OFFSET_PATTERN = /(Z|[+-]\d{2}:\d{2})$/;
+const CREATE_INSTANT_PARTS =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?(Z|[+-]\d{2}:\d{2})$/;
+
+function daysInCreateMonth(year: number, month: number): number {
+  if (month === 2) {
+    const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+    return leap ? 29 : 28;
+  }
+  if (month === 4 || month === 6 || month === 9 || month === 11) {
+    return 30;
+  }
+  return 31;
+}
+
+/**
+ * M6 create timed-only range check: BOTH boundaries must be full RFC3339
+ * instants with an EXPLICIT offset (trailing `Z` or `±HH:MM`) on a REAL
+ * calendar (no `Date.parse` rollover acceptance), millisecond-representable,
+ * without sub-millisecond precision, and start < end. Date-only (all-day)
+ * boundaries are refused: creation is normal TIMED only.
+ */
+function validateCreateRange(start: string, end: string): void {
+  for (const value of [start, end] as const) {
+    if (DATE_ONLY_RE.test(value)) {
+      throw new RepositoryValidationError(
+        "calendar.create is timed-only; date-only boundaries are not creatable",
+      );
+    }
+    if (value.length < 1 || value.length > 128) {
+      throw new RepositoryValidationError(
+        "start/end must be 1..128 character instants",
+      );
+    }
+    if (hasSubMillisecondPrecision(value)) {
+      throw new RepositoryValidationError(
+        "start/end must not carry sub-millisecond precision",
+      );
+    }
+    if (!CREATE_OFFSET_PATTERN.test(value)) {
+      throw new RepositoryValidationError(
+        "start/end must carry an explicit UTC offset",
+      );
+    }
+    const parts = CREATE_INSTANT_PARTS.exec(value);
+    if (parts === null) {
+      throw new RepositoryValidationError(
+        "start/end must be RFC3339 instants with an explicit offset",
+      );
+    }
+    const year = Number(parts[1]);
+    const month = Number(parts[2]);
+    const day = Number(parts[3]);
+    const hour = Number(parts[4]);
+    const minute = Number(parts[5]);
+    const second = parts[6] === undefined ? 0 : Number(parts[6]);
+    if (
+      month < 1 ||
+      month > 12 ||
+      day < 1 ||
+      day > daysInCreateMonth(year, month) ||
+      hour > 23 ||
+      minute > 59 ||
+      second > 60
+    ) {
+      throw new RepositoryValidationError(
+        "start/end must name a real calendar instant",
+      );
+    }
+    const ms = Date.parse(value);
+    if (Number.isNaN(ms) || !Number.isFinite(ms)) {
+      throw new RepositoryValidationError(
+        "start/end must be millisecond-representable instants",
+      );
+    }
+  }
+  const startMs = Date.parse(start);
+  const endMs = Date.parse(end);
+  if (!(endMs > startMs)) {
+    throw new RepositoryValidationError("start must be before end");
+  }
+}
+
+/**
+ * Fail-closed host-authority check for create staging: the supplied active
+ * Calendar connector instance must exist (UUID shape + row present). The
+ * value itself is host-owned (registration closure), never model input.
+ */
+function requireCreateAuthority(
+  db: Database.Database,
+  connectorInstanceId: string,
+): string {
+  if (
+    typeof connectorInstanceId !== "string" ||
+    !/^[0-9a-fA-F-]{36}$/.test(connectorInstanceId)
+  ) {
+    throw new RepositoryValidationError(
+      "create authority must name the active calendar instance",
+    );
+  }
+  const row = db
+    .prepare("SELECT id FROM connector_instances WHERE id = ?")
+    .get(connectorInstanceId) as { id: string } | undefined;
+  if (row === undefined) {
+    throw new RepositoryValidationError(
+      "create authority must name the active calendar instance",
+    );
+  }
+  return connectorInstanceId;
+}
+
+/**
+ * Deterministic immutable create preview: the fixed creation marker, then
+ * the immutable title in FULL (same sanitization as reschedule previews),
+ * plus the staged timed start/end. No tool name, no UUID/provider ids, no
+ * upstream reads — everything derives from the frozen staged input.
+ */
+function buildCreatePreview(params: {
+  title: string;
+  start: string;
+  end: string;
+}): { summary: string } {
+  return {
+    summary: `作成予定: ${previewTitle(params.title)}: start=${params.start} end=${params.end}`,
+  };
+}
+
 function loadTarget(
   db: Database.Database,
   sessionId: string,
@@ -279,6 +491,11 @@ function freshSnapshotRevision(target: TargetRow): {
   eventStatus: string;
   /** Immutable normalized event title (raw; sanitized at preview build). */
   title: string;
+  /** Immutable normalized source range (verbatim snapshot bounds). */
+  sourceStart: string;
+  sourceEnd: string;
+  /** True when the frozen snapshot is an all-day range (exclusive end). */
+  sourceAllDay: boolean;
 } | null {
   // The STORED row is the SnapshotBody wrapper ReferenceManager wrote
   // (`{ version: 1, text }`); the normalized Calendar event is the strict
@@ -320,6 +537,20 @@ function freshSnapshotRevision(target: TargetRow): {
   }
   const eventStatus = (body as { status: string }).status;
   const title = (body as { title: string }).title;
+  const sourceStart = (body as { start: string }).start;
+  const sourceEnd = (body as { end: string }).end;
+  // All-day marker from the SAME frozen normalized snapshot. Missing or
+  // non-boolean values fall back to boundary-shape inference so historical
+  // rows without the flag still render deterministically.
+  const rawAllDay = (body as { allDayEndExclusive?: unknown })
+    .allDayEndExclusive;
+  const sourceAllDay =
+    typeof rawAllDay === "boolean"
+      ? rawAllDay &&
+        boundaryClass(sourceStart) === "date" &&
+        boundaryClass(sourceEnd) === "date"
+      : boundaryClass(sourceStart) === "date" &&
+        boundaryClass(sourceEnd) === "date";
   // Fresh snapshot: a deleted event snapshot can never back a reschedule.
   if (eventStatus === "deleted") {
     return null;
@@ -329,6 +560,9 @@ function freshSnapshotRevision(target: TargetRow): {
     expected: target.sourceRevision ?? target.contentHash,
     eventStatus,
     title,
+    sourceStart,
+    sourceEnd,
+    sourceAllDay,
   };
 }
 
@@ -348,13 +582,20 @@ function previewTitle(raw: string): string {
 }
 
 /**
- * Deterministic target-aware human preview (C22 §18.9): the unambiguous
- * `対象イベント: ` marker, then the immutable normalized event title in FULL
- * (never truncated at the front, never dropped), plus the session rN
- * citation plus the staged start/end. No tool name, no UUID/provider ids,
- * no upstream reads — everything derives from the frozen staged triple
- * (target row + normalized snapshot text + staged input). Same
- * `{ summary }` seam, same hash coverage.
+ * Deterministic target-aware human preview (C22 §18.9, before→after): the
+ * unambiguous `対象イベント: ` marker, then the immutable normalized event
+ * title in FULL (never truncated at the front, never dropped), plus the
+ * session rN citation plus the BEFORE range read from THE SAME frozen
+ * based-on snapshot already validated for staging and the AFTER range from
+ * the staged input. No tool name, no UUID/provider ids, no upstream reads —
+ * everything derives from the frozen staged triple (target row + normalized
+ * snapshot text + staged input). Same `{ summary }` seam, same hash
+ * coverage. Historical rows keep their stored preview/hash untouched.
+ *
+ * BEFORE/AFTER ranges keep their own class explicitly: all-day bounds stay
+ * date-only with the exclusive-end note (never an invented midnight), timed
+ * bounds stay verbatim with their original offset/UTC (never browser-local).
+ * A class change (e.g. all-day → timed) is visible from the two kind labels.
  *
  * The fixed leading marker is load-bearing: an arbitrary normalized title
  * may itself begin with `calendar.reschedule:` (the LEGACY stored-preview
@@ -365,11 +606,25 @@ function previewTitle(raw: string): string {
 function buildPreview(params: {
   title: string;
   ordinal: number;
+  sourceStart: string;
+  sourceEnd: string;
+  sourceAllDay: boolean;
   start: string;
   end: string;
 }): { summary: string } {
+  const beforeKind = params.sourceAllDay ? "終日" : "時刻指定";
+  const afterAllDay =
+    boundaryClass(params.start) === "date" &&
+    boundaryClass(params.end) === "date";
+  const afterKind = afterAllDay ? "終日" : "時刻指定";
+  const beforeRange = params.sourceAllDay
+    ? `${params.sourceStart} ～ ${params.sourceEnd} (終了日は含まない)`
+    : `${params.sourceStart} ～ ${params.sourceEnd}`;
+  const afterRange = afterAllDay
+    ? `${params.start} ～ ${params.end} (終了日は含まない)`
+    : `${params.start} ～ ${params.end}`;
   return {
-    summary: `対象イベント: ${previewTitle(params.title)} (r${params.ordinal}): start=${params.start} end=${params.end}`,
+    summary: `対象イベント: ${previewTitle(params.title)} (r${params.ordinal}): 変更前 [${beforeKind}] ${beforeRange} → 変更後 [${afterKind}] ${afterRange}`,
   };
 }
 
@@ -378,14 +633,24 @@ export function createActionProposalStager(
 ): ActionProposalStager {
   const { db, events } = options;
   const writeEnabled = options.writeEnabled === true;
+  const createEnabled = options.createEnabled === true;
   const clock = options.clock ?? (() => Date.now());
-  /** Immutable staged proposals; at most one per run. */
-  const staged = new Map<string, StagedProposedContent>();
+  /** Immutable staged proposals; at most one per run (any tool). */
+  const staged = new Map<string, AnyStagedContent>();
 
   function requireWriteEnabled(): void {
     if (!writeEnabled) {
       throw new RepositoryValidationError(
         "action proposal staging requires explicit writeEnabled",
+      );
+    }
+  }
+
+  function requireCreateEnabled(): void {
+    requireWriteEnabled();
+    if (!createEnabled) {
+      throw new RepositoryValidationError(
+        "calendar.create staging requires explicit createEnabled",
       );
     }
   }
@@ -464,11 +729,14 @@ export function createActionProposalStager(
           "target snapshot event is deleted; staging requires a fresh snapshot",
         );
       }
-      // Deterministic target-aware human preview (no provider ids, no
-      // tool name, no content beyond the immutable title + rN + range).
+      // Deterministic before→after preview (no provider ids, no
+      // tool name): BEFORE from the SAME frozen snapshot, AFTER from input.
       const preview = buildPreview({
         title: fresh.title,
         ordinal: target.ordinal,
+        sourceStart: fresh.sourceStart,
+        sourceEnd: fresh.sourceEnd,
+        sourceAllDay: fresh.sourceAllDay,
         start: parsed.start,
         end: parsed.end,
       });
@@ -507,6 +775,78 @@ export function createActionProposalStager(
       return { ...entry, input: { ...entry.input } };
     },
 
+    stageCreate(runId, input, authority) {
+      requireCreateEnabled();
+      const now = clock();
+      pruneExpired(now);
+      const parsed = CalendarCreateToolInputSchema.parse({
+        title: cstr(input.title),
+        start: str(input.start),
+        end: str(input.end),
+      });
+      validateCreateTitle(parsed.title);
+      validateCreateRange(parsed.start, parsed.end);
+      const run = loadRun(runId);
+      if (run.status !== "running") {
+        throw new RepositoryValidationError(
+          "action proposal can only be staged on a running run",
+        );
+      }
+      if (staged.has(runId)) {
+        throw new RepositoryValidationError(
+          "at most one proposal may be staged per run",
+        );
+      }
+      // Host-owned authority: the active Calendar instance (never model input).
+      const connectorInstanceId = requireCreateAuthority(
+        db,
+        authority.connectorInstanceId,
+      );
+      // Deterministic immutable creation preview (no provider ids, no tool
+      // name, no content beyond the immutable title + timed range).
+      const preview = buildCreatePreview({
+        title: parsed.title,
+        start: parsed.start,
+        end: parsed.end,
+      });
+      // Exact immutable content hash (no target, no revision: none exists).
+      const hash = sha256Hex(
+        canonicalJsonString({
+          tool: CALENDAR_CREATE_TOOL_NAME,
+          input: {
+            title: parsed.title,
+            start: parsed.start,
+            end: parsed.end,
+          },
+          target: null,
+          expectedRevision: null,
+          preview,
+        }),
+      );
+      const entry: StagedCreateContent = {
+        runId,
+        sessionId: run.sessionId,
+        sourceTurnId: run.turnId,
+        tool: CALENDAR_CREATE_TOOL_NAME,
+        input: {
+          title: parsed.title,
+          start: parsed.start,
+          end: parsed.end,
+        },
+        targetRefId: null,
+        targetResourceId: null,
+        basedOnSnapshotId: null,
+        connectorInstanceId,
+        expectedRevision: null,
+        preview,
+        hash,
+        createdAt: now,
+        expiresAt: now + PROPOSAL_TTL_MS,
+      };
+      staged.set(runId, entry);
+      return { ...entry, input: { ...entry.input } };
+    },
+
     getStaged(runId) {
       const entry = staged.get(runId);
       const now = clock();
@@ -516,6 +856,9 @@ export function createActionProposalStager(
       if (now >= entry.expiresAt) {
         staged.delete(runId);
         return null;
+      }
+      if (entry.tool === CALENDAR_CREATE_TOOL_NAME) {
+        return { ...entry, input: { ...entry.input } };
       }
       return { ...entry, input: { ...entry.input } };
     },
@@ -555,25 +898,50 @@ export function createActionProposalStager(
           "staged provenance no longer matches the run",
         );
       }
-      // Revalidate target relation exactly (reference/connector/resource/
-      // snapshot triple + expected source revision).
-      const target = loadTarget(db, run.sessionId, entry.targetRefId);
-      if (
-        target.refId !== entry.targetRefId ||
-        target.resourceId !== entry.targetResourceId ||
-        target.snapshotId !== entry.basedOnSnapshotId ||
-        target.connectorInstanceId !== entry.connectorInstanceId ||
-        target.kind !== "calendar" ||
-        (target.sourceRevision ?? target.contentHash) !== entry.expectedRevision
-      ) {
-        throw new RepositoryValidationError(
-          "target relation changed since staging",
-        );
-      }
-      if (freshSnapshotRevision(target) === null) {
-        throw new RepositoryValidationError(
-          "target snapshot event is deleted; commit requires a fresh snapshot",
-        );
+      if (entry.tool === CALENDAR_CREATE_TOOL_NAME) {
+        // Create commits additionally require the explicit create gate (old
+        // reschedule-only compositions can never commit a creation), and
+        // revalidate ONLY the host-owned authority (the active Calendar
+        // instance still exists). There is deliberately NO target relation,
+        // NO expected revision, and NO snapshot to revalidate — none exists.
+        if (!createEnabled) {
+          throw new RepositoryValidationError(
+            "calendar.create commit requires explicit createEnabled",
+          );
+        }
+        requireCreateAuthority(db, entry.connectorInstanceId);
+      } else {
+        // Revalidate target relation exactly (reference/connector/resource/
+        // snapshot triple + expected source revision).
+        if (
+          entry.targetRefId === null ||
+          entry.targetResourceId === null ||
+          entry.basedOnSnapshotId === null ||
+          entry.expectedRevision === null
+        ) {
+          throw new RepositoryValidationError(
+            "calendar.reschedule proposals require a full existing-event target",
+          );
+        }
+        const target = loadTarget(db, run.sessionId, entry.targetRefId);
+        if (
+          target.refId !== entry.targetRefId ||
+          target.resourceId !== entry.targetResourceId ||
+          target.snapshotId !== entry.basedOnSnapshotId ||
+          target.connectorInstanceId !== entry.connectorInstanceId ||
+          target.kind !== "calendar" ||
+          (target.sourceRevision ?? target.contentHash) !==
+            entry.expectedRevision
+        ) {
+          throw new RepositoryValidationError(
+            "target relation changed since staging",
+          );
+        }
+        if (freshSnapshotRevision(target) === null) {
+          throw new RepositoryValidationError(
+            "target snapshot event is deleted; commit requires a fresh snapshot",
+          );
+        }
       }
       // EXPIRE old pending proposals FIRST (within the caller tx): a pending
       // row past its own `expires_at` (judged by the SAME clock that decided
@@ -646,11 +1014,20 @@ export function createActionProposalStager(
       // Double-commit inside one tx is still blocked by the exact
       // one-pending-proposal-per-session recheck above (within the same
       // caller transaction, the pending insert is visible to the check).
+      if (entry.tool === CALENDAR_CREATE_TOOL_NAME) {
+        return {
+          ...entry,
+          input: { ...entry.input },
+          proposalId,
+          status: "pending" as const,
+          eventSeq,
+        };
+      }
       return {
         ...entry,
         input: { ...entry.input },
         proposalId,
-        status: "pending",
+        status: "pending" as const,
         eventSeq,
       };
     },
@@ -673,6 +1050,15 @@ function str(value: unknown): string {
   if (typeof value !== "string") {
     throw new RepositoryValidationError(
       "start/end must be strings (calendar.reschedule input)",
+    );
+  }
+  return value;
+}
+
+function cstr(value: unknown): string {
+  if (typeof value !== "string") {
+    throw new RepositoryValidationError(
+      "title/start/end must be strings (calendar.create input)",
     );
   }
   return value;
@@ -843,3 +1229,141 @@ const CalendarRescheduleAgentOutputSchema: ToolSchema<CalendarRescheduleAgentOut
       };
     },
   };
+
+// M6 proposal-only `calendar.create` ToolBroker registration.
+//
+// Same proposal-only discipline as `calendar.reschedule`: a `write`-category
+// tool whose sole model-reachable behavior STAGES a creation proposal on the
+// host-owned active Calendar instance. No calendar/account/provider id is
+// model input (the registration closure carries the host-owned
+// `connectorInstanceId`); no external write, OAuth flow, or provider call
+// ever happens here. The model can stage but never approve: approval is the
+// UI hash button only, and the staged candidate commits solely through the
+// repository's own terminal CAS transaction.
+export function createCalendarCreateProposalRegistration(options: {
+  stager: ActionProposalStager;
+  /** Host-owned active Calendar instance id (never model input). */
+  connectorInstanceId: string;
+}): ToolRegistration {
+  const { stager, connectorInstanceId } = options;
+  return {
+    descriptor: {
+      name: CALENDAR_CREATE_TOOL_NAME,
+      version: 1,
+      title: "Propose calendar event creation",
+      description:
+        "Propose (stage, never execute) a timed-only title/start/end creation on the configured calendar; approval happens outside the model",
+      category: "write",
+      defaultTimeoutMs: 15_000,
+      maxTimeoutMs: 60_000,
+      supportsRefresh: false,
+    },
+    inputSchema: CalendarCreateAgentInputSchema,
+    outputSchema: CalendarCreateAgentOutputSchema,
+    dedupMode: "always_bypass",
+    proposalOnly: true,
+    handler: (async (
+      input: CalendarCreateAgentInput,
+      ctx: ToolHandlerContext,
+    ) => {
+      // Proposal-only from the normal agent origin; nothing else stages.
+      if (ctx.origin !== AGENT_TOOL_ORIGIN) {
+        throw new ToolError("tool_denied");
+      }
+      try {
+        stager.stageCreate(
+          ctx.runId,
+          {
+            title: input.title,
+            start: input.start,
+            end: input.end,
+          },
+          { connectorInstanceId },
+        );
+      } catch (error) {
+        if (error instanceof ToolError) {
+          throw error;
+        }
+        // Raw validation text never reaches the model: fixed code only.
+        throw new ToolError("action_preflight_failed");
+      }
+      return {
+        staged: true,
+        title: input.title,
+        start: input.start,
+        end: input.end,
+      };
+    }) as ToolRegistration["handler"],
+    // Deterministic identity output: no ids, no mutable status.
+    normalize: (raw) => ({
+      normalized: raw,
+      observations: 0,
+      modelFacing: raw,
+    }),
+  };
+}
+
+/** Closed create agent input shape: title + timed start/end only. */
+export interface CalendarCreateAgentInput {
+  title: string;
+  start: string;
+  end: string;
+}
+
+/** Closed create agent output shape: staged marker + exact echoes. */
+export interface CalendarCreateAgentOutput {
+  staged: true;
+  title: string;
+  start: string;
+  end: string;
+}
+
+const CalendarCreateAgentInputSchema: ToolSchema<CalendarCreateAgentInput> = {
+  parse(data: unknown): CalendarCreateAgentInput {
+    if (typeof data !== "object" || data === null || Array.isArray(data)) {
+      throw new Error("calendar.create input must be an object");
+    }
+    const record = data as Record<string, unknown>;
+    const allowed = new Set(["title", "start", "end"]);
+    for (const key of Object.keys(record)) {
+      if (!allowed.has(key)) {
+        throw new Error("unknown calendar.create input field");
+      }
+    }
+    const bounded = (value: unknown, what: string, max: number): string => {
+      if (typeof value !== "string" || value.length < 1 || value.length > max) {
+        throw new Error(`${what} must be a 1..${max} character string`);
+      }
+      return value;
+    };
+    return {
+      title: bounded(record.title, "title", 256),
+      start: bounded(record.start, "start", 128),
+      end: bounded(record.end, "end", 128),
+    };
+  },
+};
+
+const CalendarCreateAgentOutputSchema: ToolSchema<CalendarCreateAgentOutput> = {
+  parse(data: unknown): CalendarCreateAgentOutput {
+    if (typeof data !== "object" || data === null || Array.isArray(data)) {
+      throw new Error("calendar.create output must be an object");
+    }
+    const record = data as Record<string, unknown>;
+    if (record.staged !== true) {
+      throw new Error("calendar.create output must be a staged marker");
+    }
+    const echo = (value: unknown, what: string, max: number): string => {
+      if (typeof value !== "string" || value.length < 1 || value.length > max) {
+        throw new Error(`staged ${what} echo invalid`);
+      }
+      return value;
+    };
+    return {
+      staged: true,
+      title: echo(record.title, "title", 256),
+      start: echo(record.start, "start", 128),
+      end: echo(record.end, "end", 128),
+    };
+  },
+};

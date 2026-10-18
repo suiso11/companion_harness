@@ -31,6 +31,8 @@ export default defineConfig({
         "calendar/calendar.spec.ts",
         "calendar/action.spec.ts",
         "calendar/tombstone.spec.ts",
+        "calendar/create.spec.ts",
+        "calendar/evidence.spec.ts",
       ]
     : MEMORY_MODE
       ? ["memory/memory_manage.spec.ts"]

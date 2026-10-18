@@ -109,3 +109,34 @@ export const ANSWER_NO_HIT_TEXT = "no calendar events";
 export const ANSWER_STAGE_TEXT = "calendar stage answer";
 /** C22: natural-language assent only ever produces this plain answer. */
 export const ANSWER_ASSENT_TEXT = "calendar assent answer";
+
+/**
+ * M6 create texts (the SAME current-turn-request keyed script): TEXT_CREATE
+ * stages a targetless `calendar.create` for the fixed immutable title and
+ * timed bounds below; the model then submits ANSWER_CREATE_TEXT with NO
+ * citation (there is no source event, no rN to cite).
+ */
+export const TEXT_CREATE = "create a team sync next week";
+export const ANSWER_CREATE_TEXT = "calendar create answer";
+
+/**
+ * M6 staged creation content (immutable user semantics, verbatim). The title
+ * deliberately carries markup-significant characters (`<sync>` / `&`) to
+ * prove the reused UI renders it via textContent (no new security surface);
+ * exact full title must survive the card, the verified receipt and the
+ * reloaded history.
+ */
+export const CREATE_TITLE = "Q3 planning <sync> & review";
+export const CREATE_START = "2026-11-04T10:00:00.000Z";
+export const CREATE_END = "2026-11-04T11:00:00.000Z";
+
+/**
+ * Loopback Google-shaped create fixture paths (served by the harness
+ * control server, Node-side loopback only, never page-fetched):
+ * POST {FIXTURE_CREATE_PATH} materializes the event (exactly one POST per
+ * committed insert, 409 on an already-inserted stable id), GET
+ * {FIXTURE_CREATE_PATH}/:id is the authoritative read-back surface the
+ * readonly fake MCP `get-event` serves for stable ids.
+ */
+export const FIXTURE_CREATE_PATH =
+  "/google/calendar/v3/calendars/cal-e2e/events";
