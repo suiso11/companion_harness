@@ -1228,14 +1228,35 @@ export async function startServer(
     // recording that background intent does NOT resume implicitly; an
     // already-paused control stays untouched. Migration 0012 (the latest
     // committed migration) REQUIRES the autonomy + shadow tables: a missing
-    // slice fails closed here (no legacy best-effort suppression — a
-    // partially-migrated database must never start unsafe). Shadow restart
-    // reconciliation then holds every pending/claimed job
-    // (`restart_interrupted`, terminal for those jobs): a restart never
-    // resumes or replays old work, and the paused control admits no new
-    // claims until meaningful new state arrives.
-    applyAutonomyRestartFence(handle.raw, now());
-    reconcileShadowRestartInTx(handle.raw, now());
+    // slice fails closed here (a partially-migrated database must never
+    // start unsafe). Shadow restart reconciliation then holds every
+    // pending/claimed job (`restart_interrupted`, terminal for those jobs):
+    // a restart never resumes or replays old work, and the paused control
+    // admits no new claims until meaningful new state arrives. Best-effort
+    // only on pre-0011 databases (which never had the autonomy slice): a
+    // missing slice there must never block startup.
+    try {
+      applyAutonomyRestartFence(handle.raw, now());
+      reconcileShadowRestartInTx(handle.raw, now());
+    } catch (error) {
+      if (!(error instanceof Error) || !/no such table/i.test(error.message)) {
+        throw error;
+      }
+      // Post-migration the schema version is BUNDLED_SCHEMA_VERSION (>= the
+      // 0011 autonomy migration), so every autonomy/shadow table must exist:
+      // a missing table means the durable stop fence was NOT applied and
+      // startup must fail instead of running unprotected. Only a pre-0011
+      // database (which never had the slice) may proceed best-effort.
+      let version = 0;
+      try {
+        version = getSchemaVersion(handle.raw);
+      } catch {
+        throw error;
+      }
+      if (version >= BUNDLED_SCHEMA_VERSION) {
+        throw error;
+      }
+    }
 
     // Gate admission starts from the ACTUAL persisted control state AFTER
     // the fence above (never optimistically open): a fence-paused control
@@ -2339,6 +2360,45 @@ export async function startServer(
         targetStore,
         clock: now,
       });
+      // AV05 P1: action receipts settle asynchronously inside the action
+      // service (never through the repo wrapper). Wake the projector after
+      // every receipt-settling terminal so urgent commitment notices
+      // project without waiting for an unrelated mutation.
+      if (notifications !== null) {
+        const activeNotifications = notifications;
+        const wakeAction = (): void => {
+          try {
+            activeNotifications.onActionSettled();
+          } catch {
+            // Best effort: the receipt already committed.
+          }
+        };
+        const actionTerminalKeys = [
+          "recordActionPreflightFailure",
+          "recordActionPreflightBlocked",
+          "cancelActionRun",
+          "finishActionExecution",
+          "finishCreateExecution",
+          "recoverAbandonedActionRun",
+          "validateAndRecoverActionRuns",
+        ] as const;
+        for (const key of actionTerminalKeys) {
+          const fn = (actionService as unknown as Record<string, unknown>)[key];
+          if (typeof fn !== "function") continue;
+          const bound = (fn as (...a: never[]) => unknown).bind(actionService);
+          (actionService as unknown as Record<string, unknown>)[key] = (
+            ...args: never[]
+          ) => {
+            const out = bound(...args) as unknown;
+            if (out !== null && typeof out === "object") {
+              const applied = (out as { applied?: unknown }).applied;
+              if (applied === false) return out;
+            }
+            wakeAction();
+            return out;
+          };
+        }
+      }
       const createRead: ActionCreateReadPort | undefined =
         activeCreateBindings === null
           ? undefined
@@ -2480,17 +2540,24 @@ export async function startServer(
                 // Best effort: wake never throws into the caller.
               }
             },
-            // Committed control changes (pause OR resume, including a
-            // replayed old resume): the worker reads the ACTUAL control
-            // state and aborts its OWN in-flight call when paused, so a
-            // pure STOP aborts model/recall work with no foreground chat.
-            // The memory service is notified on the same hook: STOP aborts
-            // its OWN parked extraction call and closes shared background
-            // admission (resume reopens it). Both reads are live-state and
-            // never throw into the committed command.
+          }
+        : {}),
+      // Committed control changes (pause OR resume, including a
+      // replayed old resume): the worker reads the ACTUAL control
+      // state and aborts its OWN in-flight call when paused, so a
+      // pure STOP aborts model/recall work with no foreground chat.
+      // The memory service is notified on the same hook: STOP aborts
+      // its OWN parked extraction call and closes shared background
+      // admission (resume reopens it). Both reads are live-state and
+      // never throw into the committed command. Wired independently
+      // of shadow creation so a memory-only server (no model gateway,
+      // no worker) still reopens admission on an explicit resume —
+      // otherwise every automatic distill stays skipped forever.
+      ...(activeShadowWake !== null || activeMemoryControl !== null
+        ? {
             shadowControlChanged: (): void => {
               try {
-                activeShadowWake.notifyControl();
+                activeShadowWake?.notifyControl();
               } catch {
                 // Best effort: notify never throws into the caller.
               }
@@ -2826,6 +2893,22 @@ export async function startServer(
     // supervisor IPC channel are honored — never model output, HTTP input,
     // or any untrusted channel.
     if (isSupervisorManaged()) {
+      // Parent-death cleanup: if the supervisor crashes or is killed before
+      // its own signal handler runs, the IPC channel disconnects while this
+      // child still holds the DB and the listening port. Without this the
+      // orphan stays alive and a replacement supervisor's child gets
+      // EADDRINUSE until manual cleanup. Shut down gracefully (EXISTING
+      // shutdown path, idempotent) and exit so the port/DB are released.
+      process.on("disconnect", () => {
+        void (async (): Promise<void> => {
+          try {
+            await shutdown("signal");
+          } catch {
+            // Best effort: exit below still releases the port/DB.
+          }
+          process.exit(1);
+        })();
+      });
       process.on("message", (message: unknown) => {
         if (
           typeof message !== "object" ||

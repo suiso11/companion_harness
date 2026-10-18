@@ -1001,4 +1001,57 @@ describe("P1 review fixes: automatic-distill admission boundary", () => {
       memory.close();
     }
   });
+
+  it("AFTER (P1 review): a batch-filling gated skip ends the tick instead of spinning forever", async () => {
+    const memory = await openRepo();
+    try {
+      const gate = createBackgroundResourceGate();
+      const parking = {
+        parked: false,
+        calls: [] as string[],
+        releases: [] as Array<() => void>,
+      };
+      const memoryService = makeMemoryService(
+        memory.repo,
+        parkingCli(parking),
+        {
+          idleMs: 300_000,
+          background: gate,
+        },
+      );
+      // Fill exactly one drain batch (MEMORY_DRAIN_BATCH = 5): one
+      // automatic distill plus four explicit retires. The closed gate
+      // skips the distill untouched; without a no-progress bound the
+      // follow-up page re-reads the same skipped distill with
+      // due.length == requested and spins forever.
+      const distillId = enqueueDistill(memory.repo);
+      const retireIds = [
+        enqueueRetire(memory.repo),
+        enqueueRetire(memory.repo),
+        enqueueRetire(memory.repo),
+        enqueueRetire(memory.repo),
+      ];
+      pauseControl(memory.repo);
+      memoryService.notifyControl();
+      expect(gate.closed).toBe(true);
+      const out = (await Promise.race([
+        memoryService.drainOnce(),
+        sleep(8000).then(() => {
+          throw new Error("drainOnce did not settle: gated skip spins");
+        }),
+      ])) as { executed: number };
+      // All four explicit jobs drained in the same tick the distill
+      // skipped; the distill stays durable pending, attempts unchanged.
+      expect(out.executed).toBe(4);
+      for (const retireId of retireIds) {
+        expect(memory.repo.getMemoryJob(retireId)?.status).toBe("acked");
+      }
+      const distill = memory.repo.getMemoryJob(distillId);
+      expect(distill?.status).toBe("pending");
+      expect(distill?.attempts).toBe(0);
+      expect(parking.calls).not.toContain("maintain.distill");
+    } finally {
+      memory.close();
+    }
+  });
 });

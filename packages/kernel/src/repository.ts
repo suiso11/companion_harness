@@ -16,6 +16,8 @@ import {
   ActionExecutionStatusSchema,
   type ActionReceiptView,
   ActionReceiptViewSchema,
+  type ActionTargetCitation,
+  ActionTargetCitationSchema,
   ActionToolInputSchema,
   type AutonomyActivityListResponse,
   AutonomyActivityListResponseSchema,
@@ -152,6 +154,7 @@ import {
   type RunStatus,
   RunStatusSchema,
   retryScope,
+  SearchLimitSchema,
   ShadowExplicitRequestSchema,
   ShadowFailRequestSchema,
   ShadowHoldRequestSchema,
@@ -209,8 +212,10 @@ import {
   listConversationProposalEvents as autonomyListProposalEvents,
   listConversationProposals as autonomyListProposals,
   listPurposes as autonomyListPurposes,
+  listPurposesFiltered as autonomyListPurposesFiltered,
   listPurposesInScope as autonomyListPurposesInScope,
   listTasks as autonomyListTasks,
+  listTasksFiltered as autonomyListTasksFiltered,
   listTasksInScope as autonomyListTasksInScope,
   recordPurposeConflict as autonomyRecordConflict,
   rejectConversationProposal as autonomyRejectProposal,
@@ -2081,17 +2086,29 @@ export function createKernelRepository(
       result: RunResult | null;
       receipt: ActionReceiptView | null;
       executionStatus: ActionExecutionStatus | null;
+      targetCitation: ActionTargetCitation;
     } | null => {
       const execution = db
         .prepare(
-          `SELECT id, action_run_id, status FROM action_executions
+          `SELECT id, proposal_id, action_run_id, status FROM action_executions
            WHERE session_id = ? AND approval_turn_id = ?`,
         )
         .get(session, turnId) as
-        | { id: string; action_run_id: string; status: string }
+        | {
+            id: string;
+            proposal_id: string;
+            action_run_id: string;
+            status: string;
+          }
         | undefined;
       if (execution === undefined) {
         return null;
+      }
+      const proposalRow = loadProposal(execution.proposal_id);
+      if (proposalRow === null) {
+        throw new DatabaseStateInvalidError(
+          `execution ${execution.id} has no proposal (impossible state)`,
+        );
       }
       const runRow = readRun(db, execution.action_run_id);
       if (
@@ -2124,6 +2141,9 @@ export function createKernelRepository(
         result,
         receipt: receiptViewForExecution(execution.id),
         executionStatus,
+        // ORIGINAL-only BEFORE label from the owning proposal's immutable
+        // target (fail closed when unresolvable — never a fabricated AFTER).
+        targetCitation: targetCitationForProposal(session, proposalRow),
       };
     };
     const items = page.map((row) => {
@@ -2648,6 +2668,41 @@ export function createKernelRepository(
   }
 
   /**
+   * ORIGINAL-only session citation label (BEFORE evidence navigation) for a
+   * session-owned proposal: the `rN` ordinal of the exact source
+   * SessionReference the proposal's immutable `target_ref_id` points at.
+   * Display metadata only — never a verified AFTER claim, never parsed from
+   * preview prose, never a new read of the current upstream. The composite
+   * DB FK (`action_proposals_target_fk`) guarantees the owned reference row
+   * exists; a missing row is impossible state and fails closed (no
+   * fabricated label, no cross-session info).
+   */
+  function targetCitationForProposal(
+    session: string,
+    proposal: RawProposal,
+  ): ActionTargetCitation {
+    if (proposal.session_id !== session) {
+      throw new RepositoryNotFoundError(
+        `proposal ${proposal.id} not found in session ${session}`,
+      );
+    }
+    const reference = db
+      .prepare(
+        "SELECT ordinal FROM session_references WHERE session_id = ? AND id = ?",
+      )
+      .get(session, proposal.target_ref_id) as { ordinal: number } | undefined;
+    if (reference === undefined) {
+      throw new DatabaseStateInvalidError(
+        `proposal ${proposal.id} has no owned target reference (impossible state)`,
+      );
+    }
+    return parseOrValidation(
+      () => ActionTargetCitationSchema.parse(`r${reference.ordinal}`),
+      "proposal target citation",
+    );
+  }
+
+  /**
    * Freeze a decision Turn: the same immutable FrozenContext shape as an
    * M0 message Turn (current ordering/sets of the session reference
    * context + temporal now), with an empty UI context (decisions carry no
@@ -2816,6 +2871,7 @@ export function createKernelRepository(
                   summary: JSON.parse(receiptRow.summary_json) as unknown,
                   createdAt: receiptRow.created_at,
                 },
+          targetCitation: targetCitationForProposal(session, row),
         }),
       "proposal execution view",
     );
@@ -5007,6 +5063,32 @@ export function createKernelRepository(
     );
   }
 
+  /**
+   * Filtered bounded purpose reader for the readonly agent tools
+   * (NOT the public HTTP list): scope/status/kind filters apply in SQL
+   * BEFORE the limit, and up to `limit + 1` matching rows are returned so
+   * the caller reports a truthful `hasMore` for the FILTERED set (never a
+   * falsely complete result while older matching records exist).
+   */
+  function listAutonomyPurposesFiltered(
+    sessionId: string,
+    filters: { scope?: string; status?: string; kind?: string },
+    limit: number,
+  ): PurposeListResponse {
+    // Tool-family bound (default 10 / max 20): the `limit + 1` probe row
+    // must fit the list DTO (max 100 items), so larger limits are rejected
+    // loudly instead of truncating the probe.
+    const capped = parseOrValidation(
+      () => SearchLimitSchema.parse(limit),
+      "purpose filtered list limit",
+    );
+    const out = autonomyListPurposesFiltered(db, sessionId, filters, capped);
+    return parseOrValidation(
+      () => PurposeListResponseSchema.parse(out),
+      "purpose filtered list response",
+    );
+  }
+
   function correctAutonomyPurpose(
     sessionId: string,
     request: unknown,
@@ -5192,6 +5274,28 @@ export function createKernelRepository(
     return parseOrValidation(
       () => TaskListResponseSchema.parse(out),
       "task scope list response",
+    );
+  }
+
+  /**
+   * Filtered bounded task reader for the readonly agent tools (NOT the
+   * public HTTP list): same SQL-before-limit + `limit + 1` probe contract
+   * as `listAutonomyPurposesFiltered` (see above).
+   */
+  function listAutonomyTasksFiltered(
+    sessionId: string,
+    filters: { scope?: string; status?: string; kind?: string },
+    limit: number,
+  ): TaskListResponse {
+    // Tool-family bound (see `listAutonomyPurposesFiltered` above).
+    const capped = parseOrValidation(
+      () => SearchLimitSchema.parse(limit),
+      "task filtered list limit",
+    );
+    const out = autonomyListTasksFiltered(db, sessionId, filters, capped);
+    return parseOrValidation(
+      () => TaskListResponseSchema.parse(out),
+      "task filtered list response",
     );
   }
 
@@ -5890,6 +5994,7 @@ export function createKernelRepository(
         id: task.id,
         scope: task.scope,
         title: task.title,
+        body: task.body,
         kind: task.kind,
         speaker: task.speaker,
         deadline: task.deadline,
@@ -5897,6 +6002,7 @@ export function createKernelRepository(
         status: task.status,
         version: task.version,
         holdReason: task.holdReason,
+        reconsiderTrigger: task.reconsiderTrigger,
       }));
     },
     listScopeConflictPairs(
@@ -6480,6 +6586,7 @@ export function createKernelRepository(
     listAutonomyPurposes,
     getAutonomyPurpose,
     listAutonomyPurposesInScope,
+    listAutonomyPurposesFiltered,
     correctAutonomyPurpose,
     revokeAutonomyPurpose,
     achieveAutonomyPurpose,
@@ -6489,6 +6596,7 @@ export function createKernelRepository(
     listAutonomyTasks,
     getAutonomyTask,
     listAutonomyTasksInScope,
+    listAutonomyTasksFiltered,
     startAutonomyTask,
     holdAutonomyTask,
     resumeAutonomyTask,

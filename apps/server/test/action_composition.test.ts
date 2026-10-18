@@ -169,9 +169,11 @@ describe("C21 M5 Action triple-gated composition", () => {
       "reference.related",
     ]);
     // Approve is refused BEFORE any state change: no queued orphan run.
+    // The per-tool gate resolves unknown proposals first (404, no mutation);
+    // the owned-disabled 409 boundary lives in createApprovalGate.test.ts.
     const probe = await approveProbe(started);
-    expect(probe.status).toBe(409);
-    expect(probe.body).toContain("action_execution_disabled");
+    expect(probe.status).toBe(404);
+    expect(probe.body).not.toContain("action_execution_disabled");
     expect(updates).toBe(0);
     await started.shutdown("test");
     // Disabled composition never adopts the port: no capability read, no
@@ -205,8 +207,9 @@ describe("C21 M5 Action triple-gated composition", () => {
       drainMs: 50,
     });
     servers.push(started);
+    // Unknown proposals resolve before the per-tool gate (404, no mutation).
     const probe = await approveProbe(started);
-    expect(probe.status).toBe(409);
+    expect(probe.status).toBe(404);
     await started.shutdown("test");
     expect(derived).toBe(0);
     expect(closed).toBe(0);
@@ -450,10 +453,11 @@ describe("C21 M5 Action triple-gated composition", () => {
     // No listener allocated by the failed start, no signal-handler leak.
     expect(process.listenerCount("SIGINT")).toBe(sigintBefore);
     expect(process.listenerCount("SIGTERM")).toBe(sigtermBefore);
-    // The occupying listener is untouched and still serves.
+    // The occupying listener is untouched and still serves (unknown ids
+    // resolve before the per-tool gate: 404, no mutation).
     const probe = await approveProbe(holder);
-    expect(probe.status).toBe(409);
-    expect(probe.body).toContain("action_execution_disabled");
+    expect(probe.status).toBe(404);
+    expect(probe.body).not.toContain("action_execution_disabled");
     // The failed start released its DB handle: the same path restarts
     // cleanly on a free port and its owned hook closes exactly once.
     let reopenedClosed = 0;

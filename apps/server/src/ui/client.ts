@@ -15,14 +15,21 @@ import { LearningPanel } from "./learning_panel.js";
 import { NotificationPanel } from "./notification_panel.js";
 import { ProposalPanel } from "./proposal_panel.js";
 import {
+  retryRefreshesControl,
+  revalidateConflictArm,
+  shouldResetConflictArm,
+} from "./autonomy_state.js";
+import {
   ACTION_PROGRESS_TEXT,
   type ActionCardModel,
   type ActionErrorCode,
   actionCardModel,
   actionDecisionIntentText,
   actionErrorCodeText,
+  actionEvidenceButtons,
   applyRunEvent,
   claimTerminalHydration,
+  composerState,
   type ExecutionStatus,
   INITIAL_RUN_VIEW,
   isCorruptCursor,
@@ -86,6 +93,11 @@ interface HistoryItemView {
       readonly summary?: { readonly summary?: string };
     } | null;
     readonly executionStatus?: string | null;
+    /**
+     * ORIGINAL-only session `rN` label (BEFORE evidence) from the owning
+     * proposal's immutable target. Server-owned; validated before render.
+     */
+    readonly targetCitation?: unknown;
   } | null;
 }
 
@@ -125,6 +137,11 @@ interface ProposalExecutionView {
     readonly summary: { readonly summary: string };
     readonly createdAt: number;
   } | null;
+  /**
+   * ORIGINAL-only session `rN` label (BEFORE evidence) from the proposal's
+   * immutable target. Server-owned; validated before render.
+   */
+  readonly targetCitation?: unknown;
 }
 
 /**
@@ -141,6 +158,12 @@ interface ActionCard {
   readonly approve: HTMLButtonElement;
   readonly reject: HTMLButtonElement;
   readonly stop: HTMLButtonElement;
+  /**
+   * Stored-only evidence container: the ORIGINAL BEFORE button from the
+   * server-owned execution view. Rebuilt on every card render (never
+   * appended twice); the verified AFTER lives in the history projection.
+   */
+  readonly evidence: HTMLElement;
   runId: string | null;
   /** Terminal execution observed: the card is final and stops polling. */
   terminal: boolean;
@@ -1572,6 +1595,9 @@ class ConversationApp {
     const outcome = el("p");
     outcome.setAttribute("data-action-outcome", "true");
     node.appendChild(outcome);
+    const evidence = el("p");
+    evidence.setAttribute("data-action-evidence", "card");
+    node.appendChild(evidence);
     const approve = document.createElement("button");
     approve.textContent = "承認";
     approve.type = "button";
@@ -1599,6 +1625,7 @@ class ConversationApp {
       approve,
       reject,
       stop,
+      evidence,
       runId: null,
       terminal: false,
       deadline: summary.expiresAt,
@@ -1749,6 +1776,30 @@ class ConversationApp {
       "data-action-marker",
       view?.markerCommitted === true ? "committed" : "uncommitted",
     );
+    // Stored-only BEFORE evidence on execution-owned cards (no per-card
+    // fetch, no upstream I/O): the ORIGINAL snapshot button from the
+    // server-owned view. Rebuilt every render so a stale label can never
+    // linger and a button is never appended twice. The verified AFTER lives
+    // in the history projection, which owns the authoritative run result.
+    card.evidence.replaceChildren();
+    if (view !== null && view !== undefined) {
+      const cardEvidence = actionEvidenceButtons({
+        targetCitation:
+          typeof view.targetCitation === "string" ? view.targetCitation : null,
+        outcome: null,
+        result: null,
+      });
+      if (cardEvidence.before !== null) {
+        const beforeCitation = cardEvidence.before;
+        const before = el("button", `変更前 ${beforeCitation}`);
+        before.setAttribute("data-action-evidence", "before");
+        const runId = typeof view.runId === "string" ? view.runId : undefined;
+        before.addEventListener("click", () => {
+          void this.openCitation(beforeCitation, runId);
+        });
+        card.evidence.appendChild(before);
+      }
+    }
   }
 
   private removeActionCard(proposalId: string): void {
@@ -2268,20 +2319,46 @@ class ConversationApp {
             wrap.appendChild(line);
           }
         }
-        // Citations only (no duplicated outcome/summary text): the verified
-        // fresh rN survives reloads with no extra external call.
-        if (run.result !== null && run.result !== undefined) {
-          for (const part of runResultToAnswerParts(run.result)) {
-            for (const citation of part.citations) {
-              const button = el("button", citation);
-              button.setAttribute("data-action-citation", "true");
-              const citationRunId =
-                typeof run.runId === "string" ? run.runId : undefined;
-              button.addEventListener("click", () => {
-                void this.openCitation(citation, citationRunId);
-              });
-              wrap.appendChild(button);
-            }
+        // Evidence navigation (stored-only, no upstream I/O): the ORIGINAL
+        // BEFORE snapshot button whenever the server-owned projection
+        // carries the proposal's immutable target label, plus the VERIFIED
+        // AFTER button(s) ONLY for a succeeded receipt with actual
+        // authoritative result citations. Unknown / unverified / failed /
+        // blocked outcomes render the BEFORE button alone with their
+        // accurate existing outcome text above — never a fabricated AFTER.
+        const evidence = actionEvidenceButtons({
+          targetCitation:
+            typeof run.targetCitation === "string" ? run.targetCitation : null,
+          outcome,
+          result: run.result,
+        });
+        if (evidence.before !== null) {
+          const beforeCitation = evidence.before;
+          const before = el("button", `変更前 ${beforeCitation}`);
+          before.setAttribute("data-action-evidence", "before");
+          const beforeRunId =
+            typeof run.runId === "string" ? run.runId : undefined;
+          before.addEventListener("click", () => {
+            void this.openCitation(beforeCitation, beforeRunId);
+          });
+          wrap.appendChild(before);
+        }
+        if (evidence.after.length > 0) {
+          for (const citation of evidence.after) {
+            // Verified AFTER keeps the bare `rN` button text: the
+            // [data-action-citation] receipt contract (existing calendar
+            // action E2E expects /^r\d+$/) stays intact. The BEFORE/AFTER
+            // distinction rides data-action-evidence="after" + aria-label.
+            const button = el("button", citation);
+            button.setAttribute("data-action-citation", "true");
+            button.setAttribute("data-action-evidence", "after");
+            button.setAttribute("aria-label", `確認済みの変更後 ${citation}`);
+            const citationRunId =
+              typeof run.runId === "string" ? run.runId : undefined;
+            button.addEventListener("click", () => {
+              void this.openCitation(citation, citationRunId);
+            });
+            wrap.appendChild(button);
           }
         }
       }
@@ -3879,25 +3956,38 @@ class ConversationApp {
     // itself stays enabled (§16.3 type-while-active). A missing session
     // (boot still resolving ensureSession, or session creation failed)
     // also disables Send so an early submit can never be silently dropped.
-    const busy =
-      this.activeRunId !== null || this.sending || this.sessionId === null;
     // An adopted Action run keeps the composer busy (Send disabled), but
     // its Stop follows the ACTUAL execution marker/cancellability: after
     // the marker (or terminal) the generic Stop is hidden AND disabled —
     // the write already left this process. Ordinary Runs are unchanged.
+    // A missing session (no run in flight) never offers Stop: the shared
+    // composerState policy keeps it hidden/disabled there.
     const actionBlocked =
       this.activeRunId !== null && this.isActionStopBlocked(this.activeRunId);
-    const stopOffered = busy && !actionBlocked;
-    this.sendButton.disabled = busy;
+    const state = composerState({
+      activeRunId: this.activeRunId,
+      sending: this.sending,
+      sessionId: this.sessionId,
+      actionBlocked,
+    });
+    const stopOffered = state.stopVisible;
+    this.sendButton.disabled = state.sendDisabled;
     this.input.disabled = false;
     this.stopButton.hidden = !stopOffered;
     this.stopButton.disabled = !stopOffered;
     // A composer/run transition may open a natural break for deferred
-    // routine notices (never focuses, never clobbers text).
+    // routine notices (never focuses, never clobbers text). The proposal
+    // brief re-evaluates here too so it hides for the whole active run
+    // (subscribe() sets activeRunId then paints via this method).
     try {
       this.notifications?.notifyComposureChanged();
     } catch {
       // Best effort: composer paint never breaks for notices.
+    }
+    try {
+      this.proposals?.notifyComposureChanged();
+    } catch {
+      // Best effort: composer paint never breaks for proposals.
     }
   }
 
@@ -4041,6 +4131,8 @@ class AutonomyPanel {
   private readonly taskCancelButton: HTMLButtonElement;
   private controlVersion = 1;
   private readonly purposeVersions = new Map<string, number>();
+  /** Ids whose latest list row is `active` (the list also carries inactive rows). */
+  private readonly purposeActiveIds = new Set<string>();
   private readonly taskVersions = new Map<string, number>();
   private selectedPurpose: string | null = null;
   private selectedTask: string | null = null;
@@ -4362,6 +4454,9 @@ class AutonomyPanel {
       }
       this.pendingAutonomy = null;
       this.renderPending();
+      if (retryRefreshesControl(pending.endpoint)) {
+        await this.refreshControl();
+      }
       await this.refreshLists();
       this.notice("再送しました");
     } finally {
@@ -4479,6 +4574,7 @@ class AutonomyPanel {
   private renderPurposes(result: { status: number; body: unknown }): void {
     this.purposeList.textContent = "";
     this.purposeVersions.clear();
+    this.purposeActiveIds.clear();
     // Rebind (never blindly hide): keep the detail visible only when the
     // selected id is still present; otherwise clear the selection AND its
     // drafts so a stale draft can never overwrite a new target.
@@ -4511,6 +4607,9 @@ class AutonomyPanel {
         continue;
       }
       this.purposeVersions.set(row.id, row.version);
+      if (row.status === "active") {
+        this.purposeActiveIds.add(row.id);
+      }
       const line = el("li");
       const button = document.createElement("button");
       button.type = "button";
@@ -4716,12 +4815,10 @@ class AutonomyPanel {
       this.notice("競合にする目的を二つ選んでください");
       return;
     }
-    if (
-      this.conflictArm !== null &&
-      !this.purposeVersions.has(this.conflictArm)
-    ) {
-      this.conflictArm = null;
-    }
+    this.conflictArm = revalidateConflictArm(
+      this.conflictArm,
+      this.purposeActiveIds,
+    );
     if (this.conflictArm === null) {
       this.conflictArm = id;
       this.notice(
@@ -4746,6 +4843,9 @@ class AutonomyPanel {
       await this.refreshLists();
       this.notice("競合を記録しました（自動解決されません）");
     } else if (result.status === 409) {
+      if (shouldResetConflictArm(result.status)) {
+        this.conflictArm = null;
+      }
       await this.refreshLists();
       this.notice("他の変更がありました。一覧を更新しました");
     } else {
