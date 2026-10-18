@@ -30,6 +30,9 @@ import {
   type ReceiptOutcome,
   type RunViewState,
   runResultToAnswerParts,
+  type TrialProposalInput,
+  type TrialProposalStatus,
+  trialProposalModel,
 } from "./reducer.js";
 
 const LS_SESSION = "ch.sessionId";
@@ -565,6 +568,24 @@ class ConversationApp {
       }
     });
     await this.ensureSession();
+    // AV autonomy panel: usable without any model (plain DOM + HTTP).
+    // Fail-open locally: a missing section never breaks the conversation.
+    try {
+      const panel = new AutonomyPanel(() => this.sessionId);
+      panel.bind();
+      void panel.refreshAll();
+    } catch {
+      // Best effort: the conversation shell stays usable.
+    }
+    // Trial proposal/approval panel: opt-in human surface, usable without
+    // any model (plain DOM + HTTP). Fail-open locally like AutonomyPanel.
+    try {
+      const trials = new TrialPanel(() => this.sessionId);
+      trials.bind();
+      void trials.refreshAll();
+    } catch {
+      // Best effort: the conversation shell stays usable.
+    }
     let descriptor = await this.recoverPending();
     if (descriptor === null) {
       descriptor = await this.discoverActiveRun();
@@ -3976,8 +3997,1851 @@ class ConversationApp {
   }
 }
 
+/**
+ * AV autonomy management panel (plain DOM, no model dependency).
+ *
+ * Session-owned purposes + explicit local tasks + the durable global stop
+ * control. All reads come from the ACTUAL HTTP API; every mutation carries
+ * a frozen idempotency key + frozen body (reload-safe CAS via the stored
+ * per-record version, never a shown technical id). Technical UUIDs are
+ * never rendered: rows show statement/title text plus kind/status labels.
+ * Generation counters bind every awaited response to the session + list
+ * generation that requested it, so out-of-order responses never overwrite
+ * newer DOM. Recorded `permission` rows are claims only (fixed note): the
+ * form never creates a grant, a capability, or an external action.
+ * Hold reasons and reconsider triggers are separate inputs; resume takes a
+ * closed evidence-kind select (no timer member exists) plus an optional
+ * explicit replacement parent. Purpose/task histories render the immutable
+ * original / correction / lifecycle trail (superseded originals stay
+ * readable, never overwritten).
+ */
+class AutonomyPanel {
+  private readonly getSessionId: () => string | null;
+  private readonly status: HTMLElement;
+  private readonly controlStatus: HTMLElement;
+  private readonly stopButton: HTMLButtonElement;
+  private readonly resumeButton: HTMLButtonElement;
+  private readonly purposeForm: HTMLFormElement;
+  private readonly purposeScope: HTMLInputElement;
+  private readonly purposeStatement: HTMLTextAreaElement;
+  private readonly purposeKind: HTMLSelectElement;
+  private readonly purposeSource: HTMLSelectElement;
+  private readonly purposeExplicit: HTMLInputElement;
+  private readonly purposeInterpretation: HTMLTextAreaElement;
+  private readonly purposeValidFrom: HTMLInputElement;
+  private readonly purposeValidUntil: HTMLInputElement;
+  private readonly purposeList: HTMLElement;
+  private readonly purposeDetail: HTMLElement;
+  private readonly purposeDetailBody: HTMLElement;
+  private readonly purposeCorrectInput: HTMLTextAreaElement;
+  private readonly purposeCorrectButton: HTMLButtonElement;
+  private readonly purposeRevokeButton: HTMLButtonElement;
+  private readonly purposeAchieveButton: HTMLButtonElement;
+  private readonly conflicts: HTMLElement;
+  private readonly conflictMarkButton: HTMLButtonElement;
+  private conflictArm: string | null = null;
+  private readonly taskForm: HTMLFormElement;
+  private readonly taskTitle: HTMLInputElement;
+  private readonly taskKind: HTMLSelectElement;
+  private readonly taskSpeaker: HTMLSelectElement;
+  private readonly taskDeadline: HTMLInputElement;
+  private readonly taskList: HTMLElement;
+  private readonly taskDetail: HTMLElement;
+  private readonly taskDetailBody: HTMLElement;
+  private readonly taskHoldInput: HTMLTextAreaElement;
+  private readonly taskReconsiderInput: HTMLTextAreaElement;
+  private readonly taskEvidenceKind: HTMLSelectElement;
+  private readonly taskResumeInput: HTMLTextAreaElement;
+  private readonly taskStartButton: HTMLButtonElement;
+  private readonly taskHoldButton: HTMLButtonElement;
+  private readonly taskResumeButton: HTMLButtonElement;
+  private readonly taskCompleteButton: HTMLButtonElement;
+  private readonly taskCancelButton: HTMLButtonElement;
+  private controlVersion = 1;
+  private readonly purposeVersions = new Map<string, number>();
+  private readonly taskVersions = new Map<string, number>();
+  private selectedPurpose: string | null = null;
+  private selectedTask: string | null = null;
+  /** Full selected record metadata (scope/kind/provenance/window/parent). */
+  private selectedPurposeView: {
+    scope: string;
+    kind: string;
+    explicit: boolean;
+    sourceKind: string;
+    interpretation: string | null;
+    version: number;
+  } | null = null;
+  private selectedTaskView: {
+    scope: string;
+    parentPurposeId: string | null;
+    version: number;
+  } | null = null;
+  private listSeq = 0;
+  private controlSeq = 0;
+  private purposeSelectSeq = 0;
+  private taskSelectSeq = 0;
+  private listedSession: string | null = null;
+  private mutating = false;
+  /**
+   * One frozen in-memory pending autonomy command (never localStorage user
+   * content): { session, endpoint, key, frozen body }. Retried with the SAME
+   * key + byte-identical body on uncertain network / 5xx; cleared ONLY on a
+   * definitive reply (2xx/4xx). A new target draft never reuses the old key.
+   */
+  private pendingAutonomy: {
+    session: string;
+    endpoint: string;
+    key: string;
+    body: unknown;
+  } | null = null;
+  private readonly purposeCorrectValidFrom: HTMLInputElement;
+  private readonly purposeCorrectValidUntil: HTMLInputElement;
+  private readonly taskScope: HTMLInputElement;
+  private readonly taskParentMode: HTMLSelectElement;
+  private readonly taskResumeUseParent: HTMLInputElement;
+  private readonly pendingLine: HTMLElement;
+  private readonly retryButton: HTMLButtonElement;
+  private readonly purposeHistoryMoreButton: HTMLButtonElement;
+  private readonly taskHistoryMoreButton: HTMLButtonElement;
+  /**
+   * Bounded history paging state: the exclusive `afterSeq` cursor for the
+   * next page (`null` = no more pages), bound to the exact session + target
+   * + selection generation that requested it. A session/target/generation
+   * change invalidates the cursor so a late page can never append to a new
+   * target. Request generations reuse the selection sequences (a new
+   * selection supersedes in-flight pages; each Load more click re-checks).
+   */
+  private purposeHistoryCursor: number | null = null;
+  private taskHistoryCursor: number | null = null;
+  private purposeHistorySession: string | null = null;
+  private purposeHistoryTarget: string | null = null;
+  private taskHistorySession: string | null = null;
+  private taskHistoryTarget: string | null = null;
+
+  constructor(getSessionId: () => string | null) {
+    this.getSessionId = getSessionId;
+    const get = <T extends HTMLElement>(id: string, tag: string): T =>
+      (document.getElementById(id) as T | null) ?? (el(tag) as unknown as T);
+    this.status = get<HTMLElement>("autonomy-status", "p");
+    this.controlStatus = get<HTMLElement>("autonomy-control-status", "p");
+    this.stopButton = get<HTMLButtonElement>("autonomy-stop-button", "button");
+    this.resumeButton = get<HTMLButtonElement>(
+      "autonomy-resume-button",
+      "button",
+    );
+    this.purposeForm = get<HTMLFormElement>("autonomy-purpose-form", "form");
+    this.purposeScope = get<HTMLInputElement>(
+      "autonomy-purpose-scope",
+      "input",
+    );
+    this.purposeStatement = get<HTMLTextAreaElement>(
+      "autonomy-purpose-statement",
+      "textarea",
+    );
+    this.purposeKind = get<HTMLSelectElement>(
+      "autonomy-purpose-kind",
+      "select",
+    );
+    this.purposeSource = get<HTMLSelectElement>(
+      "autonomy-purpose-source",
+      "select",
+    );
+    this.purposeExplicit = get<HTMLInputElement>(
+      "autonomy-purpose-explicit",
+      "input",
+    );
+    this.purposeInterpretation = get<HTMLTextAreaElement>(
+      "autonomy-purpose-interpretation",
+      "textarea",
+    );
+    this.purposeValidFrom = get<HTMLInputElement>(
+      "autonomy-purpose-valid-from",
+      "input",
+    );
+    this.purposeValidUntil = get<HTMLInputElement>(
+      "autonomy-purpose-valid-until",
+      "input",
+    );
+    this.purposeList = get<HTMLElement>("autonomy-purpose-list", "ul");
+    this.purposeDetail = get<HTMLElement>("autonomy-purpose-detail", "div");
+    this.purposeDetailBody = get<HTMLElement>(
+      "autonomy-purpose-detail-body",
+      "pre",
+    );
+    this.purposeCorrectInput = get<HTMLTextAreaElement>(
+      "autonomy-purpose-correct-input",
+      "textarea",
+    );
+    this.purposeCorrectButton = get<HTMLButtonElement>(
+      "autonomy-purpose-correct-button",
+      "button",
+    );
+    this.purposeRevokeButton = get<HTMLButtonElement>(
+      "autonomy-purpose-revoke-button",
+      "button",
+    );
+    this.purposeAchieveButton = get<HTMLButtonElement>(
+      "autonomy-purpose-achieve-button",
+      "button",
+    );
+    this.conflicts = get<HTMLElement>("autonomy-conflicts", "p");
+    this.conflictMarkButton = get<HTMLButtonElement>(
+      "autonomy-conflict-mark-button",
+      "button",
+    );
+    this.taskForm = get<HTMLFormElement>("autonomy-task-form", "form");
+    this.taskTitle = get<HTMLInputElement>("autonomy-task-title", "input");
+    this.taskKind = get<HTMLSelectElement>("autonomy-task-kind", "select");
+    this.taskSpeaker = get<HTMLSelectElement>(
+      "autonomy-task-speaker",
+      "select",
+    );
+    this.taskDeadline = get<HTMLInputElement>(
+      "autonomy-task-deadline",
+      "input",
+    );
+    this.taskList = get<HTMLElement>("autonomy-task-list", "ul");
+    this.taskDetail = get<HTMLElement>("autonomy-task-detail", "div");
+    this.taskDetailBody = get<HTMLElement>("autonomy-task-detail-body", "pre");
+    this.taskHoldInput = get<HTMLTextAreaElement>(
+      "autonomy-task-hold-input",
+      "textarea",
+    );
+    this.taskReconsiderInput = get<HTMLTextAreaElement>(
+      "autonomy-task-reconsider-input",
+      "textarea",
+    );
+    this.taskEvidenceKind = get<HTMLSelectElement>(
+      "autonomy-task-evidence-kind",
+      "select",
+    );
+    this.taskResumeInput = get<HTMLTextAreaElement>(
+      "autonomy-task-resume-input",
+      "textarea",
+    );
+    this.taskStartButton = get<HTMLButtonElement>(
+      "autonomy-task-start-button",
+      "button",
+    );
+    this.taskHoldButton = get<HTMLButtonElement>(
+      "autonomy-task-hold-button",
+      "button",
+    );
+    this.taskResumeButton = get<HTMLButtonElement>(
+      "autonomy-task-resume-button",
+      "button",
+    );
+    this.taskCompleteButton = get<HTMLButtonElement>(
+      "autonomy-task-complete-button",
+      "button",
+    );
+    this.taskCancelButton = get<HTMLButtonElement>(
+      "autonomy-task-cancel-button",
+      "button",
+    );
+    this.purposeCorrectValidFrom = get<HTMLInputElement>(
+      "autonomy-purpose-correct-valid-from",
+      "input",
+    );
+    this.purposeCorrectValidUntil = get<HTMLInputElement>(
+      "autonomy-purpose-correct-valid-until",
+      "input",
+    );
+    this.taskScope = get<HTMLInputElement>("autonomy-task-scope", "input");
+    this.taskParentMode = get<HTMLSelectElement>(
+      "autonomy-task-parent-mode",
+      "select",
+    );
+    this.taskResumeUseParent = get<HTMLInputElement>(
+      "autonomy-task-resume-use-parent",
+      "input",
+    );
+    this.pendingLine = get<HTMLElement>("autonomy-pending", "p");
+    this.retryButton = get<HTMLButtonElement>(
+      "autonomy-retry-button",
+      "button",
+    );
+    this.purposeHistoryMoreButton = get<HTMLButtonElement>(
+      "autonomy-purpose-history-more-button",
+      "button",
+    );
+    this.taskHistoryMoreButton = get<HTMLButtonElement>(
+      "autonomy-task-history-more-button",
+      "button",
+    );
+  }
+
+  bind(): void {
+    this.purposeForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      void this.createPurpose();
+    });
+    this.taskForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      void this.createTask();
+    });
+    this.purposeCorrectButton.addEventListener("click", () => {
+      void this.correctPurpose();
+    });
+    this.purposeRevokeButton.addEventListener("click", () => {
+      void this.transitionPurpose("revoke");
+    });
+    this.purposeAchieveButton.addEventListener("click", () => {
+      void this.transitionPurpose("achieve");
+    });
+    this.conflictMarkButton.addEventListener("click", () => {
+      void this.markConflict();
+    });
+    this.taskStartButton.addEventListener("click", () => {
+      void this.transitionTask("start");
+    });
+    this.taskHoldButton.addEventListener("click", () => {
+      void this.holdTask();
+    });
+    this.taskResumeButton.addEventListener("click", () => {
+      void this.resumeTask();
+    });
+    this.taskCompleteButton.addEventListener("click", () => {
+      void this.transitionTask("complete");
+    });
+    this.taskCancelButton.addEventListener("click", () => {
+      void this.transitionTask("cancel");
+    });
+    this.retryButton.addEventListener("click", () => {
+      void this.retryPendingAutonomy();
+    });
+    this.purposeHistoryMoreButton.addEventListener("click", () => {
+      void this.loadMorePurposeHistory();
+    });
+    this.taskHistoryMoreButton.addEventListener("click", () => {
+      void this.loadMoreTaskHistory();
+    });
+    this.stopButton.addEventListener("click", () => {
+      void this.setControl(true);
+    });
+    this.resumeButton.addEventListener("click", () => {
+      void this.setControl(false);
+    });
+  }
+
+  async refreshAll(): Promise<void> {
+    await this.refreshControl();
+    await this.refreshLists();
+  }
+
+  private notice(text: string): void {
+    this.status.textContent = text;
+  }
+
+  /**
+   * Frozen-command mutation helper (UI5): preserves ONE in-memory pending
+   * command { session, endpoint, key, FROZEN body } before dispatch. The
+   * frozen body is retried byte-identically on uncertain network / 5xx with
+   * the SAME key; a 409 with drift means key reuse with different content
+   * (never silently re-keyed). Cleared ONLY on a definitive reply.
+   * A new-target draft never reuses the old key (fresh key per new command).
+   * Bodies stay in memory only (never localStorage).
+   */
+  private renderPending(): void {
+    if (this.pendingAutonomy === null) {
+      this.pendingLine.textContent = "";
+      return;
+    }
+    this.pendingLine.textContent =
+      "未確定の操作があります。同じ内容で再送できます（新規操作は確定までお待ちください）";
+  }
+
+  private async runAutonomyMutation(
+    endpoint: string,
+    body: unknown,
+  ): Promise<{ status: number; body: unknown } | null> {
+    const sessionId = this.getSessionId();
+    if (sessionId === null || this.mutating) {
+      return null;
+    }
+    if (this.pendingAutonomy !== null) {
+      this.notice("未確定の操作があります。同じ内容で再送してください");
+      this.renderPending();
+      return null;
+    }
+    const key = randomUuid();
+    // Deep-freeze the body snapshot so an edited draft can never silently
+    // ride on the old key: retries reuse this exact object.
+    const frozen = JSON.parse(JSON.stringify(body)) as unknown;
+    this.pendingAutonomy = { session: sessionId, endpoint, key, body: frozen };
+    this.mutating = true;
+    this.renderPending();
+    try {
+      let result: { status: number; body: unknown };
+      try {
+        result = await postJson(endpoint, frozen, key);
+      } catch {
+        // Uncertain outcome (commit may have happened): keep the frozen
+        // command for an explicit same-key retry; do NOT invent a new key.
+        this.notice("通信が不確定です。同じ内容で再送できます");
+        return null;
+      }
+      if (result.status >= 500) {
+        this.notice("サーバーが不確定です。同じ内容で再送できます");
+        return null;
+      }
+      // Definitive reply (2xx/4xx incl. 409 drift): clear the pending slot.
+      this.pendingAutonomy = null;
+      this.renderPending();
+      return result;
+    } finally {
+      this.mutating = false;
+    }
+  }
+
+  /** Explicit same-key retry of the frozen pending command (no new key). */
+  private async retryPendingAutonomy(): Promise<void> {
+    const pending = this.pendingAutonomy;
+    const sessionId = this.getSessionId();
+    if (
+      pending === null ||
+      sessionId === null ||
+      this.mutating ||
+      pending.session !== sessionId
+    ) {
+      return;
+    }
+    this.mutating = true;
+    try {
+      let result: { status: number; body: unknown };
+      try {
+        result = await postJson(pending.endpoint, pending.body, pending.key);
+      } catch {
+        this.notice("通信が不確定です。同じ内容で再送できます");
+        return;
+      }
+      if (result.status >= 500) {
+        this.notice("サーバーが不確定です。同じ内容で再送できます");
+        return;
+      }
+      this.pendingAutonomy = null;
+      this.renderPending();
+      await this.refreshLists();
+      this.notice("再送しました");
+    } finally {
+      this.mutating = false;
+    }
+  }
+
+  /** Synchronously clear drafts bound to the previous selection target. */
+  private clearPurposeDrafts(): void {
+    this.purposeCorrectInput.value = "";
+    this.purposeCorrectValidFrom.value = "";
+    this.purposeCorrectValidUntil.value = "";
+  }
+
+  private clearTaskDrafts(): void {
+    this.taskHoldInput.value = "";
+    this.taskReconsiderInput.value = "";
+    this.taskResumeInput.value = "";
+  }
+
+  private async refreshControl(): Promise<void> {
+    const seq = ++this.controlSeq;
+    let result: { status: number; body: unknown };
+    try {
+      result = await fetchJson("/api/autonomy/control");
+    } catch {
+      return;
+    }
+    if (seq !== this.controlSeq) {
+      return;
+    }
+    const body = result.body as {
+      paused?: unknown;
+      version?: unknown;
+      reason?: unknown;
+    };
+    if (
+      result.status !== 200 ||
+      typeof body.paused !== "boolean" ||
+      typeof body.version !== "number"
+    ) {
+      return;
+    }
+    this.controlVersion = body.version;
+    this.controlStatus.textContent =
+      body.paused === true
+        ? "自律作業は停止中です。通常の会話は利用できます。"
+        : "自律作業は再開されています。通常の会話は利用できます。";
+  }
+
+  private async setControl(paused: boolean): Promise<void> {
+    // Global control retry reuses the SAME POST key via the frozen helper
+    // (never a foreign-session idempotency lookup, which stays 404).
+    const result = await this.runAutonomyMutation("/api/autonomy/control", {
+      paused,
+      expectedVersion: this.controlVersion,
+    });
+    if (result === null) {
+      return;
+    }
+    if (result.status === 200) {
+      await this.refreshControl();
+      this.notice(paused ? "自律作業を停止しました" : "自律作業を再開しました");
+    } else if (result.status === 409) {
+      await this.refreshControl();
+      this.notice("他の変更がありました。一覧を更新しました");
+    } else {
+      this.notice("自律作業の切り替えに失敗しました");
+    }
+  }
+
+  private async refreshLists(): Promise<void> {
+    const sessionId = this.getSessionId();
+    if (sessionId === null) {
+      return;
+    }
+    // Session guard (UI4): a session switch clears selections + drafts so a
+    // late response for the old session can never restore them. A pending
+    // command stays bound to its own session (retry refuses cross-session).
+    if (this.listedSession !== null && this.listedSession !== sessionId) {
+      this.selectedPurpose = null;
+      this.selectedPurposeView = null;
+      this.selectedTask = null;
+      this.selectedTaskView = null;
+      this.conflictArm = null;
+      this.clearPurposeDrafts();
+      this.clearTaskDrafts();
+      this.purposeHistoryCursor = null;
+      this.taskHistoryCursor = null;
+      this.purposeHistorySession = null;
+      this.taskHistorySession = null;
+      this.purposeHistoryTarget = null;
+      this.taskHistoryTarget = null;
+      this.purposeHistoryMoreButton.hidden = true;
+      this.taskHistoryMoreButton.hidden = true;
+    }
+    this.listedSession = sessionId;
+    const seq = ++this.listSeq;
+    let purposes: { status: number; body: unknown };
+    let tasks: { status: number; body: unknown };
+    let conflicts: { status: number; body: unknown };
+    try {
+      const base = `/api/sessions/${encodeURIComponent(sessionId)}`;
+      [purposes, tasks, conflicts] = await Promise.all([
+        fetchJson(`${base}/purposes?limit=50`),
+        fetchJson(`${base}/tasks?limit=50`),
+        fetchJson(`${base}/purpose-conflicts`),
+      ]);
+    } catch {
+      return;
+    }
+    if (seq !== this.listSeq) {
+      return;
+    }
+    this.renderPurposes(purposes);
+    this.renderTasks(tasks);
+    this.renderConflicts(conflicts);
+  }
+
+  private renderPurposes(result: { status: number; body: unknown }): void {
+    this.purposeList.textContent = "";
+    this.purposeVersions.clear();
+    // Rebind (never blindly hide): keep the detail visible only when the
+    // selected id is still present; otherwise clear the selection AND its
+    // drafts so a stale draft can never overwrite a new target.
+    const items =
+      ((result.body as { items?: unknown }).items as unknown[] | undefined) ??
+      [];
+    if (result.status !== 200 || !Array.isArray(items)) {
+      return;
+    }
+    for (const item of items) {
+      const row = item as {
+        id?: unknown;
+        statement?: unknown;
+        kind?: unknown;
+        status?: unknown;
+        explicit?: unknown;
+        sourceKind?: unknown;
+        scope?: unknown;
+        validFrom?: unknown;
+        validUntil?: unknown;
+        version?: unknown;
+      };
+      if (
+        typeof row.id !== "string" ||
+        typeof row.statement !== "string" ||
+        typeof row.kind !== "string" ||
+        typeof row.status !== "string" ||
+        typeof row.version !== "number"
+      ) {
+        continue;
+      }
+      this.purposeVersions.set(row.id, row.version);
+      const line = el("li");
+      const button = document.createElement("button");
+      button.type = "button";
+      const windowLabel =
+        (typeof row.validFrom === "string" && row.validFrom.length > 0) ||
+        (typeof row.validUntil === "string" && row.validUntil.length > 0)
+          ? `・期間 ${typeof row.validFrom === "string" && row.validFrom.length > 0 ? row.validFrom : "指定なし"}〜${typeof row.validUntil === "string" && row.validUntil.length > 0 ? row.validUntil : "指定なし"}`
+          : "";
+      button.textContent = `${row.statement}（${row.kind}・${row.status}${windowLabel}）`;
+      const id = row.id;
+      button.addEventListener("click", () => {
+        void this.selectPurpose(id);
+      });
+      line.appendChild(button);
+      this.purposeList.appendChild(line);
+    }
+    // Rebind the selection to the fresh list: a selected id that vanished
+    // (superseded/revoked) clears the selection, its drafts, and the arm.
+    if (this.selectedPurpose !== null) {
+      if (this.purposeVersions.has(this.selectedPurpose)) {
+        this.purposeDetail.hidden = false;
+      } else {
+        this.selectedPurpose = null;
+        this.selectedPurposeView = null;
+        this.conflictArm = null;
+        this.clearPurposeDrafts();
+        this.purposeDetail.hidden = true;
+      }
+    }
+  }
+
+  private renderConflicts(result: { status: number; body: unknown }): void {
+    if (result.status !== 200) {
+      this.conflicts.textContent = "";
+      return;
+    }
+    const groups =
+      ((result.body as { conflicts?: unknown }).conflicts as
+        | unknown[]
+        | undefined) ?? [];
+    if (!Array.isArray(groups) || groups.length === 0) {
+      this.conflicts.textContent = "競合はありません";
+      return;
+    }
+    this.conflicts.textContent = `${groups.length}件の未解決の競合があります（自動解決されません）`;
+  }
+
+  private renderTasks(result: { status: number; body: unknown }): void {
+    this.taskList.textContent = "";
+    this.taskVersions.clear();
+    const items =
+      ((result.body as { items?: unknown }).items as unknown[] | undefined) ??
+      [];
+    if (result.status !== 200 || !Array.isArray(items)) {
+      return;
+    }
+    for (const item of items) {
+      const row = item as {
+        id?: unknown;
+        title?: unknown;
+        kind?: unknown;
+        status?: unknown;
+        deadline?: unknown;
+        version?: unknown;
+      };
+      if (
+        typeof row.id !== "string" ||
+        typeof row.title !== "string" ||
+        typeof row.kind !== "string" ||
+        typeof row.status !== "string" ||
+        typeof row.version !== "number"
+      ) {
+        continue;
+      }
+      this.taskVersions.set(row.id, row.version);
+      const line = el("li");
+      const button = document.createElement("button");
+      button.type = "button";
+      const deadline =
+        typeof row.deadline === "string" && row.deadline.length > 0
+          ? `・期限 ${row.deadline}`
+          : "";
+      button.textContent = `${row.title}（${row.kind}・${row.status}${deadline}）`;
+      const id = row.id;
+      button.addEventListener("click", () => {
+        void this.selectTask(id);
+      });
+      line.appendChild(button);
+      this.taskList.appendChild(line);
+    }
+    if (this.selectedTask !== null) {
+      if (this.taskVersions.has(this.selectedTask)) {
+        this.taskDetail.hidden = false;
+      } else {
+        this.selectedTask = null;
+        this.selectedTaskView = null;
+        this.clearTaskDrafts();
+        this.taskDetail.hidden = true;
+      }
+    }
+  }
+
+  /**
+   * Render one immutable history trail (append-only rows, never rewritten).
+   * Guarded by the selection sequence + session so a late response for a
+   * previous target can never overwrite the current detail.
+   */
+  private appendHistoryLines(lines: string[]): void {
+    if (lines.length === 0) {
+      return;
+    }
+    this.purposeDetailBody.textContent += `\n履歴:\n${lines.join("\n")}`;
+  }
+
+  private formatHistoryEvents(events: unknown, withNote: boolean): string[] {
+    if (!Array.isArray(events)) {
+      return [];
+    }
+    const lines: string[] = [];
+    for (const entry of events) {
+      const row = entry as {
+        seq?: unknown;
+        event?: unknown;
+        fromStatus?: unknown;
+        toStatus?: unknown;
+        note?: unknown;
+      };
+      if (typeof row.seq !== "number" || typeof row.event !== "string") {
+        continue;
+      }
+      const from = typeof row.fromStatus === "string" ? row.fromStatus : "−";
+      const to = typeof row.toStatus === "string" ? row.toStatus : "";
+      const note =
+        withNote && typeof row.note === "string" && row.note.length > 0
+          ? ` ${row.note}`
+          : "";
+      lines.push(`#${row.seq} ${row.event}（${from}→${to}）${note}`);
+    }
+    return lines;
+  }
+
+  private async selectPurpose(id: string): Promise<void> {
+    const sessionId = this.getSessionId();
+    if (sessionId === null) {
+      return;
+    }
+    // Synchronous rebind BEFORE the first await: drafts belong to the exact
+    // selected id/version, so a pending A-draft can never overwrite B.
+    // History paging rebinds here too: the cursor/button belong to the new
+    // target only, so a late page for A can never append to B.
+    const seq = ++this.purposeSelectSeq;
+    this.selectedPurpose = id;
+    this.selectedPurposeView = null;
+    this.clearPurposeDrafts();
+    this.purposeHistoryCursor = null;
+    this.purposeHistorySession = sessionId;
+    this.purposeHistoryTarget = id;
+    this.purposeHistoryMoreButton.hidden = true;
+    let result: { status: number; body: unknown };
+    let history: { status: number; body: unknown } | null = null;
+    try {
+      const base = `/api/sessions/${encodeURIComponent(sessionId)}/purposes/${encodeURIComponent(id)}`;
+      result = await fetchJson(base);
+      try {
+        history = await fetchJson(`${base}/history?limit=50`);
+      } catch {
+        history = null;
+      }
+    } catch {
+      return;
+    }
+    if (result.status !== 200) {
+      return;
+    }
+    const row = result.body as {
+      statement?: unknown;
+      kind?: unknown;
+      status?: unknown;
+      explicit?: unknown;
+      sourceKind?: unknown;
+      scope?: unknown;
+      interpretation?: unknown;
+      validFrom?: unknown;
+      validUntil?: unknown;
+      version?: unknown;
+    };
+    if (typeof row.statement !== "string" || typeof row.version !== "number") {
+      return;
+    }
+    // Late-response guard: discard unless this exact session+selection is
+    // still current (prevents held-A -> B -> late-A restoring A).
+    if (
+      seq !== this.purposeSelectSeq ||
+      this.selectedPurpose !== id ||
+      this.getSessionId() !== sessionId
+    ) {
+      return;
+    }
+    this.selectedPurposeView = {
+      scope: typeof row.scope === "string" ? row.scope : "default",
+      kind: typeof row.kind === "string" ? row.kind : "goal",
+      explicit: row.explicit === true,
+      sourceKind: typeof row.sourceKind === "string" ? row.sourceKind : "user",
+      interpretation:
+        typeof row.interpretation === "string" ? row.interpretation : null,
+      version: row.version,
+    };
+    this.purposeVersions.set(id, row.version);
+    const explicitLabel = row.explicit === true ? "本人の記録" : "推測の記録";
+    const sourceLabel =
+      typeof row.sourceKind === "string" ? row.sourceKind : "";
+    const scopeLabel = typeof row.scope === "string" ? row.scope : "";
+    const kindLabel = typeof row.kind === "string" ? row.kind : "";
+    const statusLabel = typeof row.status === "string" ? row.status : "";
+    const interpretation =
+      typeof row.interpretation === "string" ? row.interpretation : "";
+    // Applicability is rendered verbatim from the server (never
+    // browser-local reinterpretation); absent bounds show as unbounded.
+    const fromLabel =
+      typeof row.validFrom === "string" && row.validFrom.length > 0
+        ? row.validFrom
+        : "指定なし";
+    const untilLabel =
+      typeof row.validUntil === "string" && row.validUntil.length > 0
+        ? row.validUntil
+        : "指定なし";
+    this.purposeDetailBody.textContent =
+      `【${kindLabel}・${statusLabel}】${row.statement}\n` +
+      `出所: ${explicitLabel}（${sourceLabel}） 範囲: ${scopeLabel}\n` +
+      `適用期間: ${fromLabel} 〜 ${untilLabel}\n` +
+      (interpretation.length > 0 ? `解釈: ${interpretation}\n` : "") +
+      "許可の記録は主張のみで、権限の付与ではありません。";
+    if (history !== null && history.status === 200) {
+      this.appendHistoryLines(
+        this.formatHistoryEvents(
+          (history.body as { events?: unknown }).events,
+          false,
+        ),
+      );
+      // Bounded paging: the server caps pages at 200 rows and returns the
+      // forward cursor. A non-null cursor arms Load more for THIS exact
+      // session + target + generation; a late page for a stale target is
+      // discarded by the guards above/below (never appended elsewhere).
+      const next = (history.body as { nextAfterSeq?: unknown }).nextAfterSeq;
+      if (typeof next === "number" && Number.isInteger(next) && next >= 1) {
+        this.purposeHistoryCursor = next;
+        this.purposeHistoryMoreButton.hidden = false;
+      } else {
+        this.purposeHistoryCursor = null;
+        this.purposeHistoryMoreButton.hidden = true;
+      }
+    } else {
+      this.purposeHistoryCursor = null;
+      this.purposeHistoryMoreButton.hidden = true;
+    }
+    this.purposeDetail.hidden = false;
+  }
+
+  /**
+   * Load more purpose history (bounded lossless paging): fetches the next
+   * `afterSeq` page for the CURRENT session + target + generation only.
+   * Session/target/generation guards run both before dispatch and after the
+   * await, so a stale click or a late response can never append another
+   * record's rows. The immutable cursor advances only on success.
+   */
+  private async loadMorePurposeHistory(): Promise<void> {
+    const sessionId = this.getSessionId();
+    const id = this.selectedPurpose;
+    const cursor = this.purposeHistoryCursor;
+    const seq = this.purposeSelectSeq;
+    if (
+      sessionId === null ||
+      id === null ||
+      cursor === null ||
+      this.purposeHistorySession !== sessionId ||
+      this.purposeHistoryTarget !== id
+    ) {
+      return;
+    }
+    let page: { status: number; body: unknown };
+    try {
+      page = await fetchJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/purposes/${encodeURIComponent(id)}/history?afterSeq=${cursor}&limit=50`,
+      );
+    } catch {
+      return;
+    }
+    if (
+      seq !== this.purposeSelectSeq ||
+      this.selectedPurpose !== id ||
+      this.getSessionId() !== sessionId ||
+      this.purposeHistoryTarget !== id ||
+      this.purposeHistoryCursor !== cursor
+    ) {
+      return;
+    }
+    if (page.status !== 200) {
+      return;
+    }
+    this.appendHistoryLines(
+      this.formatHistoryEvents(
+        (page.body as { events?: unknown }).events,
+        false,
+      ),
+    );
+    const next = (page.body as { nextAfterSeq?: unknown }).nextAfterSeq;
+    if (typeof next === "number" && Number.isInteger(next) && next >= 1) {
+      this.purposeHistoryCursor = next;
+      this.purposeHistoryMoreButton.hidden = false;
+    } else {
+      this.purposeHistoryCursor = null;
+      this.purposeHistoryMoreButton.hidden = true;
+    }
+  }
+
+  /**
+   * Explicit conflict marking (two-step, selection-based, no UUID typing):
+   * the first click arms the currently selected purpose; selecting another
+   * purpose and clicking again records the pair via the strict idempotent
+   * command. Same-pair re-clicks return the existing relation; unrelated
+   * records are never touched. Only recorded pairs count: same-kind prose
+   * similarity alone is never a conflict.
+   */
+  private async markConflict(): Promise<void> {
+    const sessionId = this.getSessionId();
+    const id = this.selectedPurpose;
+    // Diagnosed binding (no bypass): the button lives inside the detail
+    // panel and previously no-op'd after any list refresh hid the panel
+    // while keeping the selection, and a superseded arm id silently
+    // survived. The render-rebind fix above keeps the panel visible for a
+    // live selection and clears a vanished arm; here a stale arm (no longer
+    // in the version map) is re-armed instead of sent.
+    if (sessionId === null || id === null) {
+      this.notice("競合にする目的を二つ選んでください");
+      return;
+    }
+    if (
+      this.conflictArm !== null &&
+      !this.purposeVersions.has(this.conflictArm)
+    ) {
+      this.conflictArm = null;
+    }
+    if (this.conflictArm === null) {
+      this.conflictArm = id;
+      this.notice(
+        "競合の起点を保持しました。もう一方を選んで再度押してください",
+      );
+      return;
+    }
+    if (this.conflictArm === id) {
+      this.notice("異なる目的を二つ選んでください");
+      return;
+    }
+    const pair = { purposeAId: this.conflictArm, purposeBId: id };
+    const result = await this.runAutonomyMutation(
+      `/api/sessions/${encodeURIComponent(sessionId)}/purpose-conflicts`,
+      pair,
+    );
+    if (result === null) {
+      return;
+    }
+    if (result.status === 201 || result.status === 200) {
+      this.conflictArm = null;
+      await this.refreshLists();
+      this.notice("競合を記録しました（自動解決されません）");
+    } else if (result.status === 409) {
+      await this.refreshLists();
+      this.notice("他の変更がありました。一覧を更新しました");
+    } else {
+      this.notice("競合の記録に失敗しました");
+    }
+  }
+
+  private async selectTask(id: string): Promise<void> {
+    const sessionId = this.getSessionId();
+    if (sessionId === null) {
+      return;
+    }
+    // Synchronous rebind BEFORE the first await (same UI4 guarantee as
+    // purposes): hold/resume drafts belong to the exact selected task.
+    // History paging rebinds here too (cursor/button belong to the new
+    // target only).
+    const seq = ++this.taskSelectSeq;
+    this.selectedTask = id;
+    this.selectedTaskView = null;
+    this.clearTaskDrafts();
+    this.taskHistoryCursor = null;
+    this.taskHistorySession = sessionId;
+    this.taskHistoryTarget = id;
+    this.taskHistoryMoreButton.hidden = true;
+    let result: { status: number; body: unknown };
+    let history: { status: number; body: unknown } | null = null;
+    try {
+      const base = `/api/sessions/${encodeURIComponent(sessionId)}/tasks/${encodeURIComponent(id)}`;
+      result = await fetchJson(base);
+      try {
+        history = await fetchJson(`${base}/history?limit=50`);
+      } catch {
+        history = null;
+      }
+    } catch {
+      return;
+    }
+    if (result.status !== 200) {
+      return;
+    }
+    const row = result.body as {
+      title?: unknown;
+      kind?: unknown;
+      status?: unknown;
+      scope?: unknown;
+      parentPurposeId?: unknown;
+      deadline?: unknown;
+      holdReason?: unknown;
+      reconsiderTrigger?: unknown;
+      version?: unknown;
+    };
+    if (typeof row.title !== "string" || typeof row.version !== "number") {
+      return;
+    }
+    if (
+      seq !== this.taskSelectSeq ||
+      this.selectedTask !== id ||
+      this.getSessionId() !== sessionId
+    ) {
+      return;
+    }
+    this.selectedTaskView = {
+      scope: typeof row.scope === "string" ? row.scope : "default",
+      parentPurposeId:
+        typeof row.parentPurposeId === "string" ? row.parentPurposeId : null,
+      version: row.version,
+    };
+    this.taskVersions.set(id, row.version);
+    const kindLabel = typeof row.kind === "string" ? row.kind : "";
+    const statusLabel = typeof row.status === "string" ? row.status : "";
+    const deadline =
+      typeof row.deadline === "string" && row.deadline.length > 0
+        ? `\n期限: ${row.deadline}`
+        : "";
+    const hold =
+      typeof row.holdReason === "string" && row.holdReason.length > 0
+        ? `\n保留理由: ${row.holdReason}`
+        : "";
+    const trigger =
+      typeof row.reconsiderTrigger === "string" &&
+      row.reconsiderTrigger.length > 0
+        ? `\n再開の条件: ${row.reconsiderTrigger}`
+        : "";
+    this.taskDetailBody.textContent =
+      `【${kindLabel}・${statusLabel}】${row.title}${deadline}${hold}${trigger}\n` +
+      "作業はカレンダーと連携しません。期限は入力した値のみです。";
+    if (history !== null && history.status === 200) {
+      const lines = this.formatHistoryEvents(
+        (history.body as { events?: unknown }).events,
+        true,
+      );
+      if (lines.length > 0) {
+        this.taskDetailBody.textContent += `\n履歴:\n${lines.join("\n")}`;
+      }
+      const next = (history.body as { nextAfterSeq?: unknown }).nextAfterSeq;
+      if (typeof next === "number" && Number.isInteger(next) && next >= 1) {
+        this.taskHistoryCursor = next;
+        this.taskHistoryMoreButton.hidden = false;
+      } else {
+        this.taskHistoryCursor = null;
+        this.taskHistoryMoreButton.hidden = true;
+      }
+    } else {
+      this.taskHistoryCursor = null;
+      this.taskHistoryMoreButton.hidden = true;
+    }
+    this.taskDetail.hidden = false;
+  }
+
+  /**
+   * Load more task history (same guarded bounded-paging contract as
+   * purposes): current session + target + generation only, cursor advances
+   * only on a fresh success, stale responses never append elsewhere.
+   */
+  private async loadMoreTaskHistory(): Promise<void> {
+    const sessionId = this.getSessionId();
+    const id = this.selectedTask;
+    const cursor = this.taskHistoryCursor;
+    const seq = this.taskSelectSeq;
+    if (
+      sessionId === null ||
+      id === null ||
+      cursor === null ||
+      this.taskHistorySession !== sessionId ||
+      this.taskHistoryTarget !== id
+    ) {
+      return;
+    }
+    let page: { status: number; body: unknown };
+    try {
+      page = await fetchJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/tasks/${encodeURIComponent(id)}/history?afterSeq=${cursor}&limit=50`,
+      );
+    } catch {
+      return;
+    }
+    if (
+      seq !== this.taskSelectSeq ||
+      this.selectedTask !== id ||
+      this.getSessionId() !== sessionId ||
+      this.taskHistoryTarget !== id ||
+      this.taskHistoryCursor !== cursor
+    ) {
+      return;
+    }
+    if (page.status !== 200) {
+      return;
+    }
+    const lines = this.formatHistoryEvents(
+      (page.body as { events?: unknown }).events,
+      true,
+    );
+    if (lines.length > 0) {
+      this.taskDetailBody.textContent += `\n${lines.join("\n")}`;
+    }
+    const next = (page.body as { nextAfterSeq?: unknown }).nextAfterSeq;
+    if (typeof next === "number" && Number.isInteger(next) && next >= 1) {
+      this.taskHistoryCursor = next;
+      this.taskHistoryMoreButton.hidden = false;
+    } else {
+      this.taskHistoryCursor = null;
+      this.taskHistoryMoreButton.hidden = true;
+    }
+  }
+
+  private async createPurpose(): Promise<void> {
+    const sessionId = this.getSessionId();
+    if (sessionId === null) {
+      return;
+    }
+    const statement = this.purposeStatement.value.trim();
+    const scope =
+      this.purposeScope.value.trim().length > 0
+        ? this.purposeScope.value.trim()
+        : "default";
+    if (statement.length === 0) {
+      this.notice("目的の内容を入力してください");
+      return;
+    }
+    const body: Record<string, unknown> = {
+      scope,
+      statement,
+      kind: this.purposeKind.value,
+      explicit: this.purposeExplicit.checked,
+      sourceKind: this.purposeSource.value,
+    };
+    const interpretation = this.purposeInterpretation.value.trim();
+    if (interpretation.length > 0) {
+      body.interpretation = interpretation;
+    }
+    // Optional applicability window: raw text is sent verbatim; the server
+    // validates strict RFC3339 and renders it back verbatim (never
+    // browser-local reinterpretation, never an invented expiry).
+    const validFrom = this.purposeValidFrom.value.trim();
+    if (validFrom.length > 0) {
+      body.validFrom = validFrom;
+    }
+    const validUntil = this.purposeValidUntil.value.trim();
+    if (validUntil.length > 0) {
+      body.validUntil = validUntil;
+    }
+    const result = await this.runAutonomyMutation(
+      `/api/sessions/${encodeURIComponent(sessionId)}/purposes`,
+      body,
+    );
+    if (result === null) {
+      return;
+    }
+    if (result.status === 201) {
+      this.purposeStatement.value = "";
+      this.purposeInterpretation.value = "";
+      this.purposeValidFrom.value = "";
+      this.purposeValidUntil.value = "";
+      await this.refreshLists();
+      this.notice("目的を記録しました");
+    } else {
+      this.notice("目的の記録に失敗しました");
+    }
+  }
+
+  private async correctPurpose(): Promise<void> {
+    const sessionId = this.getSessionId();
+    const id = this.selectedPurpose;
+    const selected = this.selectedPurposeView;
+    if (sessionId === null || id === null || selected === null) {
+      this.notice("訂正する目的を選んでください");
+      return;
+    }
+    // Generation guard: the draft belongs to the exact selected id/version;
+    // a selection change already cleared this input, so a non-empty value
+    // here was typed for THIS target.
+    if (this.purposeVersions.get(id) !== selected.version) {
+      this.notice("他の変更がありました。一覧を更新しました");
+      await this.refreshLists();
+      return;
+    }
+    const statement = this.purposeCorrectInput.value.trim();
+    if (statement.length === 0) {
+      this.notice("訂正内容を入力してください");
+      return;
+    }
+    // UI1: build from the SELECTED record metadata (scope/kind/provenance),
+    // never from the creation form. The creation scope input is left intact
+    // (no hardcoded reset); the correction keeps the selected scope.
+    // Interpretation is preserved unless the correction explicitly edits
+    // it; the window is preserved (omitted) unless the correction inputs
+    // explicitly set/clear it ("clear" = null).
+    const body: Record<string, unknown> = {
+      expectedVersion: selected.version,
+      scope: selected.scope,
+      statement,
+      kind: selected.kind,
+      explicit: selected.explicit,
+      sourceKind: selected.sourceKind,
+    };
+    if (selected.interpretation !== null) {
+      body.interpretation = selected.interpretation;
+    }
+    const parseWindow = (raw: string): string | null | undefined => {
+      const text = raw.trim();
+      if (text.length === 0) {
+        return undefined;
+      }
+      if (text === "clear") {
+        return null;
+      }
+      return text;
+    };
+    const nextFrom = parseWindow(this.purposeCorrectValidFrom.value);
+    if (nextFrom !== undefined) {
+      body.validFrom = nextFrom;
+    }
+    const nextUntil = parseWindow(this.purposeCorrectValidUntil.value);
+    if (nextUntil !== undefined) {
+      body.validUntil = nextUntil;
+    }
+    const result = await this.runAutonomyMutation(
+      `/api/sessions/${encodeURIComponent(sessionId)}/purposes/${encodeURIComponent(id)}/correct`,
+      body,
+    );
+    if (result === null) {
+      return;
+    }
+    if (result.status === 201) {
+      this.purposeCorrectInput.value = "";
+      this.purposeCorrectValidFrom.value = "";
+      this.purposeCorrectValidUntil.value = "";
+      await this.refreshLists();
+      // The correction appends a NEW record: select it so its history
+      // (corrected) is visible, and keep the superseded original readable
+      // below (immutable original / correction both preserved).
+      const current = (result.body as { current?: { id?: unknown } }).current;
+      const old = (result.body as { old?: { statement?: unknown } }).old;
+      if (typeof current?.id === "string") {
+        await this.selectPurpose(current.id);
+        if (typeof old?.statement === "string") {
+          this.purposeDetailBody.textContent += `\n元の記録: ${old.statement}`;
+        }
+      }
+      this.notice("訂正を記録しました（元の記録は残ります）");
+    } else if (result.status === 409) {
+      await this.refreshLists();
+      this.notice("他の変更がありました。一覧を更新しました");
+    } else {
+      this.notice("訂正の記録に失敗しました");
+    }
+  }
+
+  private async transitionPurpose(op: "revoke" | "achieve"): Promise<void> {
+    const sessionId = this.getSessionId();
+    const id = this.selectedPurpose;
+    if (sessionId === null || id === null) {
+      return;
+    }
+    const version = this.purposeVersions.get(id) ?? 1;
+    const result = await this.runAutonomyMutation(
+      `/api/sessions/${encodeURIComponent(sessionId)}/purposes/${encodeURIComponent(id)}/${op}`,
+      { expectedVersion: version },
+    );
+    if (result === null) {
+      return;
+    }
+    if (result.status === 200) {
+      await this.refreshLists();
+      this.notice(
+        op === "revoke" ? "目的を取り消しました" : "目的を達成にしました",
+      );
+    } else if (result.status === 409) {
+      await this.refreshLists();
+      this.notice("他の変更がありました。一覧を更新しました");
+    } else {
+      this.notice("目的の更新に失敗しました");
+    }
+  }
+
+  private async createTask(): Promise<void> {
+    const sessionId = this.getSessionId();
+    if (sessionId === null) {
+      return;
+    }
+    const title = this.taskTitle.value.trim();
+    if (title.length === 0) {
+      this.notice("作業の内容を入力してください");
+      return;
+    }
+    // UI2: explicit standalone/parent control. "standalone" never attaches
+    // an invisible parent; "attached" requires a VISIBLE actually-selected
+    // purpose and takes the task scope from that parent unless the user
+    // typed an explicit scope (which must then match the parent scope —
+    // the server rejects mismatches, never silently re-scopes).
+    const mode = this.taskParentMode.value;
+    const typedScope = this.taskScope.value.trim();
+    let scope = typedScope.length > 0 ? typedScope : "default";
+    let parent: string | null = null;
+    if (mode === "standalone") {
+      parent = null;
+    } else {
+      const selected = this.selectedPurpose;
+      const view = this.selectedPurposeView;
+      if (selected === null || view === null) {
+        this.notice("結びつける目的を選ぶか、単独を選んでください");
+        return;
+      }
+      if (!this.purposeVersions.has(selected)) {
+        this.notice("選択中の目的が一覧にありません。選び直してください");
+        return;
+      }
+      parent = selected;
+      if (typedScope.length === 0) {
+        scope = view.scope;
+      }
+    }
+    const body: Record<string, unknown> = {
+      scope,
+      title,
+      kind: this.taskKind.value,
+      speaker: this.taskSpeaker.value,
+    };
+    const deadline = this.taskDeadline.value.trim();
+    if (deadline.length > 0) {
+      body.deadline = deadline;
+    }
+    if (parent !== null) {
+      body.parentPurposeId = parent;
+    }
+    const result = await this.runAutonomyMutation(
+      `/api/sessions/${encodeURIComponent(sessionId)}/tasks`,
+      body,
+    );
+    if (result === null) {
+      return;
+    }
+    if (result.status === 201) {
+      this.taskTitle.value = "";
+      this.taskDeadline.value = "";
+      await this.refreshLists();
+      this.notice("作業を記録しました");
+    } else {
+      this.notice("作業の記録に失敗しました");
+    }
+  }
+
+  private async transitionTask(
+    op: "start" | "complete" | "cancel",
+  ): Promise<void> {
+    const sessionId = this.getSessionId();
+    const id = this.selectedTask;
+    if (sessionId === null || id === null) {
+      return;
+    }
+    // Generation guard: the held/resume drafts belong to the exact selected
+    // task/version; a stale ack for another target never fires here.
+    const view = this.selectedTaskView;
+    if (view !== null && this.taskVersions.get(id) !== view.version) {
+      this.notice("他の変更がありました。一覧を更新しました");
+      await this.refreshLists();
+      return;
+    }
+    const version = this.taskVersions.get(id) ?? 1;
+    const result = await this.runAutonomyMutation(
+      `/api/sessions/${encodeURIComponent(sessionId)}/tasks/${encodeURIComponent(id)}/${op}`,
+      { expectedVersion: version },
+    );
+    if (result === null) {
+      return;
+    }
+    if (result.status === 200) {
+      await this.refreshLists();
+      this.notice("作業を更新しました");
+    } else if (result.status === 409) {
+      await this.refreshLists();
+      this.notice("他の変更がありました。一覧を更新しました");
+    } else {
+      this.notice("作業の更新に失敗しました");
+    }
+  }
+
+  private async holdTask(): Promise<void> {
+    const sessionId = this.getSessionId();
+    const id = this.selectedTask;
+    if (sessionId === null || id === null || this.mutating) {
+      return;
+    }
+    // Hold needs BOTH a reason and a reconsideration trigger as separate
+    // inputs (a single shared value is never invented here).
+    const reason = this.taskHoldInput.value.trim();
+    const trigger = this.taskReconsiderInput.value.trim();
+    if (reason.length === 0) {
+      this.notice("保留理由を入力してください");
+      return;
+    }
+    if (trigger.length === 0) {
+      this.notice("再開の条件を入力してください");
+      return;
+    }
+    const version = this.taskVersions.get(id) ?? 1;
+    const result = await this.runAutonomyMutation(
+      `/api/sessions/${encodeURIComponent(sessionId)}/tasks/${encodeURIComponent(id)}/hold`,
+      {
+        expectedVersion: version,
+        reason,
+        reconsiderTrigger: trigger,
+      },
+    );
+    if (result === null) {
+      return;
+    }
+    if (result.status === 200) {
+      this.taskHoldInput.value = "";
+      this.taskReconsiderInput.value = "";
+      await this.refreshLists();
+      this.notice("作業を保留しました");
+    } else if (result.status === 409) {
+      await this.refreshLists();
+      this.notice("他の変更がありました。一覧を更新しました");
+    } else {
+      this.notice("作業の保留に失敗しました");
+    }
+  }
+
+  private async resumeTask(): Promise<void> {
+    const sessionId = this.getSessionId();
+    const id = this.selectedTask;
+    if (sessionId === null || id === null) {
+      return;
+    }
+    const evidence = this.taskResumeInput.value.trim();
+    if (evidence.length === 0) {
+      this.notice("再開の根拠を入力してください");
+      return;
+    }
+    // Closed evidence-kind vocabulary (no timer member exists): the select
+    // value is validated against the fixed set, never free text.
+    const rawKind = this.taskEvidenceKind.value;
+    const evidenceKind =
+      rawKind === "parent_changed" ||
+      rawKind === "dependency_completed" ||
+      rawKind === "user_confirmed" ||
+      rawKind === "correction_applied" ||
+      rawKind === "external_input"
+        ? rawKind
+        : "user_confirmed";
+    const version = this.taskVersions.get(id) ?? 1;
+    // UI3: explicit replacement-parent selection. When the checkbox is on,
+    // the CURRENTLY SELECTED purpose (visible, version-known, owned,
+    // same-scope, active + applicable — all verified server-side) is sent
+    // as newParentPurposeId. Never automatic: unchecked resumes keep the
+    // recorded parent and fail loudly when it is revoked.
+    const body: Record<string, unknown> = {
+      expectedVersion: version,
+      evidenceKind,
+      evidence,
+    };
+    if (this.taskResumeUseParent.checked) {
+      const replacement = this.selectedPurpose;
+      const view = this.selectedPurposeView;
+      if (replacement === null || view === null) {
+        this.notice("置き換え先の目的を選んでください");
+        return;
+      }
+      if (!this.purposeVersions.has(replacement)) {
+        this.notice("選択中の目的が一覧にありません。選び直してください");
+        return;
+      }
+      body.newParentPurposeId = replacement;
+    }
+    const result = await this.runAutonomyMutation(
+      `/api/sessions/${encodeURIComponent(sessionId)}/tasks/${encodeURIComponent(id)}/resume`,
+      body,
+    );
+    if (result === null) {
+      return;
+    }
+    if (result.status === 200) {
+      this.taskResumeInput.value = "";
+      this.taskResumeUseParent.checked = false;
+      await this.refreshLists();
+      this.notice("作業を再開しました");
+    } else if (result.status === 409) {
+      await this.refreshLists();
+      this.notice("他の変更がありました。一覧を更新しました");
+    } else {
+      this.notice("作業の再開に失敗しました");
+    }
+  }
+}
+
 export type { HistoryItemView };
 export { ConversationApp };
+
+/**
+ * Structural guard for one trial proposal read from the ACTUAL list API
+ * (exact contracts `TrialProposalView`): every field the card binds must
+ * have its expected primitive type, so a malformed body renders nothing
+ * rather than a partial card. Unknown body keys are never read.
+ */
+function isTrialProposal(
+  value: unknown,
+): value is TrialProposalInput & { readonly id: string } {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const item = value as Record<string, unknown>;
+  const aliasOk =
+    item.workspaceAlias === null ||
+    (typeof item.workspaceAlias === "string" &&
+      /^[a-z0-9_-]{1,64}$/.test(item.workspaceAlias));
+  let profileOk = false;
+  if (item.profile === null) {
+    profileOk = true;
+  } else if (typeof item.profile === "object" && item.profile !== null) {
+    const profile = item.profile as Record<string, unknown>;
+    profileOk =
+      typeof profile.configFingerprint === "string" &&
+      /^[0-9a-f]{64}$/.test(profile.configFingerprint) &&
+      typeof profile.sourceRevision === "string" &&
+      /^[0-9a-f]{40}$/.test(profile.sourceRevision);
+  }
+  return (
+    typeof item.id === "string" &&
+    (item.status === "staged" ||
+      item.status === "granted" ||
+      item.status === "expired" ||
+      item.status === "invalidated") &&
+    typeof item.objective === "string" &&
+    Array.isArray(item.acceptance) &&
+    Array.isArray(item.literalPatchPaths) &&
+    typeof item.operation === "string" &&
+    typeof item.readOnlyMode === "boolean" &&
+    typeof item.expiry === "string" &&
+    typeof item.timeoutMs === "number" &&
+    typeof item.maxOutputBytes === "number" &&
+    Array.isArray(item.requiredChecks) &&
+    aliasOk &&
+    profileOk &&
+    typeof item.possibleExternalDataConsent === "boolean"
+  );
+}
+
+/**
+ * Structural guard for the session trial outcome attached to the trial
+ * reads (`outcome: { status, authorized, summary } | null`). Unknown keys
+ * are never read; malformed values render as absent.
+ */
+function readTrialOutcome(value: unknown): {
+  readonly status: string;
+  readonly authorized: boolean;
+  readonly summary: string;
+} | null {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+  const outcome = (value as Record<string, unknown>).outcome;
+  if (outcome === null || outcome === undefined) {
+    return null;
+  }
+  if (typeof outcome !== "object" || Array.isArray(outcome)) {
+    return null;
+  }
+  const record = outcome as Record<string, unknown>;
+  if (
+    typeof record.status !== "string" ||
+    typeof record.authorized !== "boolean"
+  ) {
+    return null;
+  }
+  if (
+    record.summary !== undefined &&
+    record.summary !== null &&
+    typeof record.summary !== "string"
+  ) {
+    return null;
+  }
+  return {
+    status: record.status,
+    authorized: record.authorized,
+    summary: typeof record.summary === "string" ? record.summary : "",
+  };
+}
+
+/** Fixed plain-text outcome lines for the trial detail view. */
+function trialOutcomeLines(
+  outcome: {
+    readonly status: string;
+    readonly authorized: boolean;
+    readonly summary: string;
+  } | null,
+): readonly string[] {
+  if (outcome === null) {
+    return ["結果: 未実行"];
+  }
+  const lines = [
+    `結果: ${outcome.status} (承認済み: ${outcome.authorized ? "はい" : "いいえ"})`,
+  ];
+  if (outcome.summary.length > 0) {
+    lines.push(`概要: ${outcome.summary.slice(0, 200)}`);
+  }
+  return lines;
+}
+
+/**
+ * Trial proposal/approval panel (opt-in human surface). Lists the session's
+ * staged proposals with their FROZEN staged snapshot (objective,
+ * acceptance, literal paths, operation, read-only mode, expiry,
+ * timeout/maxOutputBytes, required checks, workspace alias, external-data
+ * consent, status) and offers explicit Approve / Expire for staged ones.
+ * All strings via `textContent`; no `innerHTML`. Fail-open locally: a
+ * missing section never breaks the conversation.
+ */
+class TrialPanel {
+  private readonly getSessionId: () => string | null;
+  private readonly status: HTMLElement;
+  private readonly list: HTMLElement;
+  private readonly detail: HTMLElement;
+  private readonly detailBody: HTMLElement;
+  private readonly approveButton: HTMLButtonElement;
+  private readonly expireButton: HTMLButtonElement;
+  private readonly opStatus: HTMLElement;
+  private selected: string | null = null;
+  private mutating = false;
+  private seq = 0;
+
+  constructor(getSessionId: () => string | null) {
+    this.getSessionId = getSessionId;
+    const get = <T extends HTMLElement>(id: string, tag: string): T =>
+      (document.getElementById(id) as T | null) ?? (el(tag) as unknown as T);
+    this.status = get<HTMLElement>("trial-status", "p");
+    this.list = get<HTMLElement>("trial-list", "ul");
+    this.detail = get<HTMLElement>("trial-detail", "div");
+    this.detailBody = get<HTMLElement>("trial-detail-body", "pre");
+    this.approveButton = get<HTMLButtonElement>(
+      "trial-approve-button",
+      "button",
+    );
+    this.expireButton = get<HTMLButtonElement>("trial-expire-button", "button");
+    this.opStatus = get<HTMLElement>("trial-op-status", "p");
+  }
+
+  bind(): void {
+    this.approveButton.addEventListener("click", () => {
+      void this.approve();
+    });
+    this.expireButton.addEventListener("click", () => {
+      void this.expire();
+    });
+  }
+
+  async refreshAll(): Promise<void> {
+    await this.refreshList();
+  }
+
+  private async refreshList(): Promise<void> {
+    const sessionId = this.getSessionId();
+    if (sessionId === null) {
+      return;
+    }
+    this.seq += 1;
+    const mine = this.seq;
+    let listed: { status: number; body: unknown };
+    try {
+      listed = await fetchJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/trials`,
+      );
+    } catch {
+      return;
+    }
+    if (this.seq !== mine || this.getSessionId() !== sessionId) {
+      return;
+    }
+    if (listed.status === 404) {
+      // Disabled config (or unknown session): fixed disabled state, no card.
+      this.list.replaceChildren();
+      this.detail.hidden = true;
+      this.selected = null;
+      this.status.textContent = "試行の提案は無効です";
+      return;
+    }
+    if (listed.status !== 200) {
+      return;
+    }
+    const items = (listed.body as { items?: unknown }).items;
+    if (!Array.isArray(items)) {
+      return;
+    }
+    const proposals = items.filter(isTrialProposal);
+    this.list.replaceChildren();
+    let staged = 0;
+    for (const proposal of proposals) {
+      if (proposal.status === "staged") {
+        staged += 1;
+      }
+      const row = document.createElement("li");
+      const button = document.createElement("button");
+      button.type = "button";
+      // Frozen snapshot summary line only (no technical ids).
+      button.textContent = `${proposal.operation} [${proposal.workspaceAlias ?? "unbound"}]: ${proposal.objective} (${proposal.status})`;
+      const id = proposal.id;
+      button.addEventListener("click", () => {
+        void this.select(id);
+      });
+      row.appendChild(button);
+      this.list.appendChild(row);
+    }
+    this.status.textContent =
+      staged > 0
+        ? "承認待ちの試行の提案があります"
+        : "承認待ちの試行の提案はありません";
+    if (this.selected !== null) {
+      await this.select(this.selected);
+    }
+  }
+
+  private async select(proposalId: string): Promise<void> {
+    const sessionId = this.getSessionId();
+    if (sessionId === null) {
+      return;
+    }
+    this.seq += 1;
+    const mine = this.seq;
+    let fetched: { status: number; body: unknown };
+    try {
+      fetched = await fetchJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/trials/${encodeURIComponent(proposalId)}`,
+      );
+    } catch {
+      return;
+    }
+    if (this.seq !== mine || this.getSessionId() !== sessionId) {
+      return;
+    }
+    if (fetched.status !== 200 || !isTrialProposal(fetched.body)) {
+      return;
+    }
+    const proposal = fetched.body;
+    const outcome = readTrialOutcome(fetched.body);
+    this.selected = proposal.id;
+    const model = trialProposalModel(
+      {
+        status: proposal.status as TrialProposalStatus,
+        objective: proposal.objective,
+        acceptance: proposal.acceptance.filter(
+          (entry): entry is string => typeof entry === "string",
+        ),
+        literalPatchPaths: proposal.literalPatchPaths.filter(
+          (entry): entry is string => typeof entry === "string",
+        ),
+        operation: proposal.operation,
+        readOnlyMode: proposal.readOnlyMode,
+        expiry: proposal.expiry,
+        timeoutMs: proposal.timeoutMs,
+        maxOutputBytes: proposal.maxOutputBytes,
+        requiredChecks: proposal.requiredChecks.filter(
+          (entry): entry is string => typeof entry === "string",
+        ),
+        workspaceAlias: proposal.workspaceAlias,
+        profile: proposal.profile,
+        possibleExternalDataConsent: proposal.possibleExternalDataConsent,
+      } satisfies TrialProposalInput,
+      true,
+    );
+    this.detailBody.replaceChildren();
+    for (const line of model.detailLines) {
+      const lineEl = document.createElement("div");
+      lineEl.textContent = line;
+      if (
+        line.startsWith("設定指紋: ") &&
+        proposal.profile !== null &&
+        typeof proposal.profile === "object"
+      ) {
+        const full = (proposal.profile as { configFingerprint: string })
+          .configFingerprint;
+        if (typeof full === "string") {
+          lineEl.title = full;
+        }
+      }
+      this.detailBody.appendChild(lineEl);
+    }
+    // Session trial outcome (grant status + authorized + fixed summary):
+    // all via textContent, never innerHTML.
+    for (const line of trialOutcomeLines(outcome)) {
+      const lineEl = document.createElement("div");
+      lineEl.textContent = line;
+      this.detailBody.appendChild(lineEl);
+    }
+    this.opStatus.textContent = model.statusText;
+    this.approveButton.disabled = !model.decisionVisible;
+    this.expireButton.disabled = !model.decisionVisible;
+    this.detail.hidden = false;
+  }
+
+  private async approve(): Promise<void> {
+    const sessionId = this.getSessionId();
+    const id = this.selected;
+    if (sessionId === null || id === null || this.mutating) {
+      return;
+    }
+    this.mutating = true;
+    try {
+      const result = await postJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/trials/${encodeURIComponent(id)}/approve`,
+        {},
+        randomUuid(),
+      );
+      if (result.status === 201) {
+        this.opStatus.textContent = "承認しました";
+      } else if (result.status === 409) {
+        this.opStatus.textContent = "他の変更がありました。一覧を更新しました";
+      } else {
+        this.opStatus.textContent = "承認に失敗しました";
+      }
+      await this.refreshList();
+    } finally {
+      this.mutating = false;
+    }
+  }
+
+  private async expire(): Promise<void> {
+    const sessionId = this.getSessionId();
+    const id = this.selected;
+    if (sessionId === null || id === null || this.mutating) {
+      return;
+    }
+    this.mutating = true;
+    try {
+      // Keyless state-idempotent expire: no Idempotency-Key header.
+      const result = await postJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/trials/${encodeURIComponent(id)}/expire`,
+        {},
+        null,
+      );
+      if (result.status === 200) {
+        this.opStatus.textContent = "取り消しました";
+      } else {
+        this.opStatus.textContent = "取り消しに失敗しました";
+      }
+      await this.refreshList();
+    } finally {
+      this.mutating = false;
+    }
+  }
+}
 
 function boot(): void {
   const app = new ConversationApp();

@@ -1788,10 +1788,8 @@ passed**, real-browser `memory_manage.spec.ts` **2/2 passed**
 (production UI build, temp SQLite/RunEngine, loopback), root + server +
 e2e `tsc --noEmit` exit 0, Biome on changed files clean. Full unit
 (113 files/1370) + live HTTP/REAL CLI already green per oc-19 and not
- re-run (no production change since). Remote CI for the fix commit is
- pending at push time — see PR body.
-
----
+re-run (no production change since). Remote CI for the fix commit is
+pending at push time — see PR body.
 
 # Citation drawer last-intent guard (2026-10-16)
 
@@ -1818,3 +1816,47 @@ rolled back.
   recall route (fixture harness has no memory backend) — async ordering
   proof only, no real remind CLI dataset claimed. Full contract:
   `docs/operations.md` ("Citation drawer last-intent guard").
+
+---
+
+# AV Autonomy Base (base-only, 2026-10-16, branch `feat/av-autonomy-continuation`)
+
+Session-owned durable purposes + explicit local tasks + a durable global
+stop control (schema 11). Recorded `permission` rows are claims only: no
+route creates a grant, capability write, or external action. Tasks are
+local entities only (never calendar events, never external execution).
+Normal chat stays accepted while paused; the restart fence re-pauses an
+unpaused control on every start (version advance + `restart_fence` /
+`interrupted_note` rows). Purpose corrections append a NEW record and
+CAS-supersede exactly the referenced old record (original text preserved);
+conflicts are explicit owner-recorded pairs only (never prose similarity).
+Revoked/achieved/superseded parents atomically hold dependent
+non-terminal tasks; resume needs explicit state-change evidence (closed
+kind enum, no timer member) plus a NEW active same-scope parent when the
+recorded parent is non-active. Histories are immutable append-only rows,
+paged losslessly (`afterSeq` cursor, `limit` default 50 / max 200,
+`nextAfterSeq: number | null`); correction idempotency distinguishes
+omitted (preserve) from explicit-null (clear) bounds per field via
+presence flags (same key + changed command is a key-reuse conflict;
+exact terminal replay stays verbatim after later state changes).
+Use: autonomy panel in the web UI (plain DOM, no model) + the
+`/api/sessions/:id/purposes|tasks|purpose-conflicts` and
+`/api/autonomy/control|activity` routes (strict bodies, UUID ids,
+`Idempotency-Key` on mutations, ownership-first 404s, CAS 409s).
+Verified (temp stores only, throwaways removed): contracts/kernel/server/
+root/e2e `tsc --noEmit` exit 0 (frozen offline relink restored the exact
+`@types/better-sqlite3` links; no suppressions); focused Vitest **21/21**
+(slice 15 incl. omission-vs-null both directions/bounds + terminal replay
++ 201-event lossless paging, migration-10 3, HTTP 3 incl. 201-event paging
++ invalid-query 400s); temp app-request smoke
+(`sessionCreate:201, purposeCreate:[201,custom-scope], correction:[201,
+old:(created,superseded),cursor:null,tail:(superseded)],
+hold:[200,reason,trigger], resumeGate:[409-blind,200-new-parent],
+controlChat:[paused:true,chat:202,reopen:false,restop:true],
+zeroWrites:[proposals:0]`); real-Chromium `e2e/autonomy.spec.ts` **2/2**
+(base lifecycle + 201-event Load more, production UI build, temp DB).
+Limits (base-only): NO v12 executions / pi bridge; histories cap at 200
+rows per page (cursor needed past that); purposes/tasks list caps stay
+100; stop control gates only NEW autonomous background work (normal chat
+and dispatched M5 writes never gated). Prior pin7b40/M6 fixes and the
+historical47/421 records above are untouched.

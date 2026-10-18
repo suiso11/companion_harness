@@ -41,6 +41,7 @@ export default defineConfig({
           "citation_recovery.spec.ts",
           "sse_history.spec.ts",
           "polling.spec.ts",
+          "autonomy.spec.ts",
         ],
   timeout: 60_000,
   expect: { timeout: 15_000 },

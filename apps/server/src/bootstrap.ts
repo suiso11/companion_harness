@@ -47,6 +47,7 @@ import type { KernelRepository } from "@companion/kernel";
 import {
   type ActionCreateReadPort,
   type ActionProposalStager,
+  applyAutonomyRestartFence,
   BUNDLED_SCHEMA_VERSION,
   CalendarActionWriteCapabilitySchema,
   type CalendarActionWritePort,
@@ -141,6 +142,8 @@ import {
   RESCHEDULE_WRITE_PROFILE_ENV,
   type RescheduleWriteConnectorHint,
 } from "./rescheduleWriteProfile.js";
+import { TrialModelRelay } from "./trial_model_relay.js";
+import { TrialRunner } from "./trial_runner.js";
 
 /** Graceful-drain natural-completion budget (§11.5: max 10s). */
 export const SHUTDOWN_DRAIN_MS = 10_000;
@@ -243,7 +246,14 @@ export interface StartServerOptions {
     readonly version: string;
   };
   /**
-   * M6 (tests / trusted harness): injectable DEDICATED create MCP transport
+   * Trial runner seam (tests): `undefined` (default) constructs the real
+   * TrialRunner when trials are enabled and no runner when disabled;
+   * an explicit instance (usually a fake) is used as-is and exposed on
+   * `StartedServer.trialRunner`. Production never passes this field.
+   */
+  trialRunner?: TrialRunner | null;
+  /**
+   * M6: the DEDICATED trusted create MCP transport
    * factory used ONLY when the host-owned create profile
    * (`M6_CALENDAR_CREATE_PROFILE`) is selected. Production never passes
    * this field. Fixture transports arrive only through this option, never
@@ -384,6 +394,8 @@ export interface StartedServer {
   toolBroker: ToolBroker | null;
   /** Conversation-memory service when COMPANION_MEMORY_JSON is set, else null. */
   memory: MemoryService | null;
+  /** Root-side trial runner when trials are enabled, else null. */
+  trialRunner: TrialRunner | null;
 }
 
 /** Fixed path-free display name for the single M1 Markdown connector. */
@@ -794,6 +806,15 @@ export async function startServer(
   let onSigterm: (() => void) | undefined;
   /** Conversation-memory service (null = memoryless; set inside try). */
   let memory: MemoryService | null = null;
+  /** Root-side trial runner (null = trials disabled; set inside try). */
+  let trialRunner: TrialRunner | null = null;
+  let trialTimer: NodeJS.Timeout | undefined;
+  const clearTrialTimer = (): void => {
+    if (trialTimer !== undefined) {
+      clearInterval(trialTimer);
+      trialTimer = undefined;
+    }
+  };
   const removeSignalHandlers = (): void => {
     if (onSigint !== undefined) {
       try {
@@ -1161,6 +1182,16 @@ export async function startServer(
       backupDir: join(dirname(config.dbPath), "backups"),
     });
     logger.info("server.migrated", { status: migrated.toVersion });
+
+    // AV autonomy restart fence: runs on EVERY start AFTER the full
+    // migration (schema 11). A previously UNPAUSED control flips back to
+    // PAUSED (version advance + restart reason) in the same transaction that
+    // appends `restart_fence` + `interrupted_note` history rows; an
+    // already-paused control stays paused with no version change. No
+    // broad-catch masking and no `no such table` fallback: migration has
+    // completed, so a corrupted autonomy slice (>= 11) fails normal startup
+    // loudly instead of silently resuming background work.
+    applyAutonomyRestartFence(handle.raw, now());
 
     // Bound-roots guard: removing every Markdown root while a Markdown
     // connector instance remains bound must fail closed before the engine
@@ -2183,6 +2214,101 @@ export async function startServer(
       memory.start();
     }
 
+    // Root-side trial runner (trials enabled only): constructed with the
+    // SAME model gateway instance + model name the agent uses
+    // (createModelGateway above), the repo facade, and the engine
+    // liveness signal `engine.inflightCount() > 0` as isForegroundBusy
+    // (the actual foreground/engine activity signal: RunEngine owns the
+    // in-flight strategy set the agent runs under). Boot recovery settles
+    // claimed grants from a previous process (never kills). An injected
+    // `options.trialRunner` (tests) wins over construction.
+    // grant-approve event hook on the app controls object, so the timer is
+    // the only scheduler (no second trigger exists to double-schedule).
+    if (options.trialRunner !== undefined) {
+      trialRunner = options.trialRunner;
+    } else if (config.trial !== null) {
+      if (config.model === null || modelGateway === null) {
+        throw new ServerConfigError("trial config requires model config");
+      }
+      const trialConfig = config.trial;
+      // The trial profile freezes currentModel at approval/claim time while
+      // the relay executes fixedModel from COMPANION_MODEL_JSON: a mismatch
+      // would run an approved trial against a different model. Fail closed.
+      if (trialConfig.currentModel !== modelName) {
+        throw new ServerConfigError(
+          "trial currentModel must match model config",
+        );
+      }
+      const runnerGateway = modelGateway;
+      const runnerModel = modelName;
+      const runnerProfile = {
+        available: trialConfig.available,
+        enabled: trialConfig.enabled,
+        mandatoryChecks: [...trialConfig.mandatoryChecks],
+        configFingerprint: trialConfig.configFingerprint,
+        sourceRevision: trialConfig.sourceRevision,
+        currentModel: trialConfig.currentModel,
+        disclosedWholeRepoRead: trialConfig.disclosedWholeRepoRead,
+        timeoutMs: trialConfig.timeoutMs,
+        maxOutputBytes: trialConfig.maxOutputBytes,
+      };
+      const runnerEngine = engine;
+      trialRunner = new TrialRunner({
+        repo,
+        config: {
+          nodeRealpath: trialConfig.runner.nodeRealpath,
+          bridgeScriptPath: trialConfig.runner.bridgeScriptPath,
+          bridgeConfigTemplatePath: trialConfig.runner.bridgeConfigTemplatePath,
+          systemctlRealpath: trialConfig.runner.systemctlRealpath,
+          xdgRuntimeDir: trialConfig.runner.xdgRuntimeDir,
+          workspaceAlias: trialConfig.workspaceAlias,
+          profile: runnerProfile,
+          relayCaps: { ...trialConfig.runner.relay },
+          fixedModel: runnerModel,
+          gateway: runnerGateway,
+          observe: { ...trialConfig.runner.observe },
+        },
+        isForegroundBusy: () => runnerEngine.inflightCount() > 0,
+        logger,
+        createRelay: (sockPath: string) =>
+          new TrialModelRelay({
+            sockPath,
+            gateway: runnerGateway,
+            fixedModel: runnerModel,
+            caps: { ...trialConfig.runner.relay },
+            logger,
+          }),
+      });
+    }
+    if (trialRunner !== null) {
+      await trialRunner.recoverOnBoot();
+      // Foreground preemption: when a user chat run starts (repo intake),
+      // revoke the runner relay — hooked at the same place foreground
+      // activity is signalled (the repo postMessage/postRetry intake hook,
+      // cf. the memory intake wrapper above). The runner's own run loop
+      // additionally revokes on every FG-busy poll.
+      const activeRunner = trialRunner;
+      const innerRepo = repo;
+      const notifyTrialForeground = (): void => {
+        try {
+          activeRunner.revokeForForeground();
+        } catch {
+          // Best effort: intake never fails on the revoke.
+        }
+      };
+      repo = {
+        ...innerRepo,
+        postMessage: ((...args: never[]) => {
+          notifyTrialForeground();
+          return (innerRepo.postMessage as (...a: never[]) => unknown)(...args);
+        }) as KernelRepository["postMessage"],
+        postRetry: ((...args: never[]) => {
+          notifyTrialForeground();
+          return (innerRepo.postRetry as (...a: never[]) => unknown)(...args);
+        }) as KernelRepository["postRetry"],
+      };
+    }
+
     const { app, controls } = createApp({
       config,
       repo,
@@ -2233,14 +2359,20 @@ export async function startServer(
         },
       );
     } catch (listenError) {
-      // Listen failed: stop the memory service FIRST (its crash-recovered
-      // CLI children and timer must not outlive the rejected startup or
-      // touch the repo/DB after close), then drain the started engine,
-      // stop the owned Calendar connector, close any created listener, and
-      // finally close the DB (in that order). Handlers were not yet
+      // Listen failed: stop the trial runner + memory service FIRST, then
+      // drain the started engine, stop the owned Calendar connector, close
+      // any created listener, and finally close the DB (in that order). Handlers were not yet
       // registered, but remove defensively before rethrowing. Every step is
       // best-effort: the listen error carries the startup failure even when
       // a cleanup step also fails.
+      clearTrialTimer();
+      if (trialRunner !== null) {
+        try {
+          await trialRunner.shutdown(drainMs);
+        } catch {
+          // Best effort: the listen error carries the startup failure.
+        }
+      }
       try {
         if (memory !== null) {
           await memory.stop();
@@ -2315,8 +2447,22 @@ export async function startServer(
       }
       shutdownPromise = (async (): Promise<void> => {
         controls.markDraining();
+        // The trial poll timer never runs while draining (checked every
+        // tick below and cleared here first).
+        clearTrialTimer();
         const safeReason = sanitizeShutdownReason(reason);
         logger.info("server.draining", { status: safeReason });
+        // Trial runner shuts down BEFORE the engine drain: relay revoke +
+        // close fd3 + await bridge exit bounded by the drain budget — never
+        // leaves a bridge orphaned, records nothing as authorized. The
+        // engine drain below then sweeps residual runs.
+        if (trialRunner !== null) {
+          try {
+            await trialRunner.shutdown(drainMs);
+          } catch {
+            // Best effort: the engine drain below still runs.
+          }
+        }
         // Stop memory first: the idle timer is cancelled, in-flight CLI
         // children are hard-killed and awaited (no orphans), and no new
         // cultivation starts while the engine drains.
@@ -2438,6 +2584,22 @@ export async function startServer(
     process.on("SIGINT", onSigint);
     process.on("SIGTERM", onSigterm);
 
+    // Trial poll timer: runNext on a pollMs cadence AFTER listen. The tick
+    // never runs while draining (controls.draining checked every tick and
+    // the timer cleared first in shutdown). There is no control-resume /
+    // grant-approve event hook on the app controls object, so the timer is
+    // the only scheduler (no second trigger exists to double-schedule).
+    if (trialRunner !== null && config.trial !== null) {
+      const activeRunner = trialRunner;
+      const pollMs = config.trial.runner.pollMs;
+      trialTimer = setInterval(() => {
+        if (controls.draining) return;
+        if (activeEngine?.isDraining()) return;
+        void activeRunner.runNext().catch(() => undefined);
+      }, pollMs);
+      trialTimer.unref?.();
+    }
+
     return {
       config,
       controls,
@@ -2446,9 +2608,18 @@ export async function startServer(
       shutdown,
       toolBroker,
       memory,
+      trialRunner,
     };
   } catch (error) {
     removeSignalHandlers();
+    clearTrialTimer();
+    if (trialRunner !== null) {
+      try {
+        await trialRunner.shutdown(drainMs);
+      } catch {
+        // Best effort: the original startup error carries the failure.
+      }
+    }
     // Any post-start failure path (including memory started above) stops
     // and awaits the memory service BEFORE the DB close below: a rejected
     // startup must never leave its crash-recovery CLI/timer alive. The

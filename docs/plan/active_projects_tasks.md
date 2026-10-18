@@ -602,3 +602,6 @@
 
 ## 現況追記（2026-10-15、履歴保持・checkbox/ID/件数不変）
 - Companion explicit memory management（I02/I03 管理面＋I04 確認契約の範囲）: search（retired 含む・no-heat）・current-vs-snapshot confirm・source event→real correct chain・retire/reactivate（削除/非表示ではない）を実装。UI 同期 invalidation/generation guard・pending reset＋poll identity・stale ack 非再利用、7 integrity 回帰を含む。full Vitest 113 files/1370・browser GREEN・live GREEN・typecheck＋lint GREEN（synthetic gateway の限定付き）。perception/export/deletion 未実装維持。I01/I04 正式採用判断・Windows manual・現行 CI は未完維持。
+
+## 現況追記（2026-10-17、autonomy trial E2E・履歴保持・checkbox/ID/件数不変）
+- 自律 trial 実行系の実装＋合成モデル E2E（A 承認→完了、B STOP→revoke）を検証済み。証拠: `AV-E2E-RESULTS.json` run7（A consumed/authorized・B revoked/unauthorized・unit 消滅・Task/Goal 非完了維持）、`AV-SERVER-TRIAL-RESULTS.json`・`AV-RUNNER-RESULTS.json`・`AV-RELAY-RESULTS.json`・`AV-AUTHORITY-RESULTS.json`。throwaway driver 削除済み、運用 docs 追記済み。残: real model/hardware/resource caps 未選定、real model run 未実施、Own-pi 変更 uncommitted、Remind ops/graph done・commits pending。

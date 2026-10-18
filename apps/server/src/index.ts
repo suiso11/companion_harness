@@ -32,6 +32,7 @@ export type {
   ServerConfig,
   ServerHost,
   ServerLogLevel,
+  TrialConfig,
 } from "./config.js";
 export {
   assertDbPathHasNoSymlink,
@@ -40,6 +41,7 @@ export {
   loadServerConfig,
   parseMemoryConfig,
   parseModelConfig,
+  parseTrialConfig,
   ServerConfigError,
 } from "./config.js";
 export type {

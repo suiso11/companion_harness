@@ -479,6 +479,114 @@ export function isRetryableTurnKind(kind: unknown): boolean {
   return kind === "user_text";
 }
 
+/* ------------------------------------------------------------------ */
+/* Trial proposal/approval UX (pure view mapping, no DOM/I/O)           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Exact server-side trial proposal status vocabulary
+ * (`TrialProposalStatus` in contracts).
+ */
+export type TrialProposalStatus =
+  | "staged"
+  | "granted"
+  | "expired"
+  | "invalidated";
+
+/**
+ * Everything the trial proposal card needs, read from the ACTUAL trial
+ * APIs (`GET .../trials`, `GET .../trials/:id`) plus the local enabled
+ * flag. Every string below is rendered via `textContent` only.
+ */
+export interface TrialProposalInput {
+  readonly status: TrialProposalStatus;
+  /** Frozen staged snapshot fields (never re-derived client-side). */
+  readonly objective: string;
+  readonly acceptance: readonly string[];
+  readonly literalPatchPaths: readonly string[];
+  readonly operation: string;
+  readonly readOnlyMode: boolean;
+  readonly expiry: string;
+  readonly timeoutMs: number;
+  readonly maxOutputBytes: number;
+  readonly requiredChecks: readonly string[];
+  /** Frozen binding: null = legacy unbound row (Approve disabled). */
+  readonly workspaceAlias: string | null;
+  readonly profile: {
+    readonly configFingerprint: string;
+    readonly sourceRevision: string;
+  } | null;
+  readonly possibleExternalDataConsent: boolean;
+}
+
+export interface TrialProposalModel {
+  /**
+   * The Approve/Expire controls exist ONLY for a staged proposal while
+   * the surface is enabled: an expired/decided proposal or a disabled
+   * surface renders no control, so a stale card can never approve.
+   */
+  readonly decisionVisible: boolean;
+  /** Fixed plain-text status line (no technical ids). */
+  readonly statusText: string;
+  /** Frozen snapshot lines for the detail view (plain text each). */
+  readonly detailLines: readonly string[];
+}
+
+/** Fixed safe trial status text (no technical vocabulary). */
+export function trialStatusText(status: TrialProposalStatus): string {
+  switch (status) {
+    case "staged":
+      return "承認待ちの試行の提案があります";
+    case "granted":
+      return "承認済みの試行です";
+    case "expired":
+      return "期限切れの試行の提案です";
+    case "invalidated":
+      return "無効になった試行の提案です";
+    default:
+      return "";
+  }
+}
+
+/**
+ * Pure mapping from the actual trial reads to the rendered card.
+ * Deterministic and total; unknown statuses fail closed (no controls).
+ */
+export function trialProposalModel(
+  input: TrialProposalInput,
+  enabled: boolean,
+): TrialProposalModel {
+  const known =
+    input.status === "staged" ||
+    input.status === "granted" ||
+    input.status === "expired" ||
+    input.status === "invalidated";
+  const bound = input.workspaceAlias !== null && input.profile !== null;
+  const decisionVisible =
+    enabled && known && input.status === "staged" && bound;
+  return {
+    decisionVisible,
+    statusText: enabled
+      ? trialStatusText(input.status)
+      : "試行の提案は無効です",
+    detailLines: [
+      `目的: ${input.objective}`,
+      `受け入れ条件: ${input.acceptance.join(" / ")}`,
+      `対象パス: ${input.literalPatchPaths.join(", ")}`,
+      `操作: ${input.operation}`,
+      `読み取り専用: ${input.readOnlyMode ? "はい" : "いいえ"}`,
+      `期限: ${input.expiry}`,
+      `タイムアウト: ${String(input.timeoutMs)}ms`,
+      `最大出力: ${String(input.maxOutputBytes)}バイト`,
+      `必須チェック: ${input.requiredChecks.join(", ")}`,
+      `作業場所: ${input.workspaceAlias ?? "unbound (cannot approve)"}`,
+      `設定指紋: ${input.profile !== null ? `${input.profile.configFingerprint.slice(0, 12)}…` : "unbound (cannot approve)"}`,
+      `ソースリビジョン: ${input.profile !== null ? input.profile.sourceRevision : "unbound (cannot approve)"}`,
+      `外部データの同意: ${input.possibleExternalDataConsent ? "あり" : "なし"}`,
+    ],
+  };
+}
+
 /**
  * Validated parse of a cancel `200` response body (`CancelRunResponse`):
  * returns the actual `run.status` string, or `null` when the body is not

@@ -34,6 +34,40 @@ const LOG_STATUS_ALLOWLIST: ReadonlySet<string> = new Set([
   "kernel_migration_missing",
   "kernel_migration_failed",
   "kernel_backup_required",
+  // Trial runner + relay closed vocabulary (e2e instrumentation). Only these
+  // fixed reason/status strings are ever emitted; anything else maps to
+  // "unknown". No prompt, content, paths, or raw errors.
+  "forwarded",
+  "waited_then_forwarded",
+  "not_permitted",
+  "revoked",
+  "rejected",
+  "done",
+  "observed",
+  "fence",
+  "relay",
+  "sigkill",
+  "none",
+  // Relay rejection reason codes (trial.relay_request reason; fixed error
+  // body codes double as the closed reason vocabulary — no content/paths).
+  "not_found",
+  "bad_request",
+  "request_cap_exceeded",
+  "relay_revoked",
+  "relay_not_permitted",
+  "relay_busy",
+  "model_call_cap_exceeded",
+  "bad_json",
+  "invalid_request",
+  "model_mismatch",
+  "unsupported_tool_choice",
+  "unsupported_option",
+  "unknown_tool",
+  "unknown_tool_call_id",
+  "model_error",
+  "model_timeout",
+  "invalid_response",
+  "response_cap_exceeded",
 ]);
 
 /** Whitelisted scalar fields. Nothing else is ever emitted. */
@@ -48,6 +82,13 @@ export interface ServerLogFields {
   readonly durationMs?: number;
   readonly attempt?: number;
   readonly port?: number;
+  /**
+   * Closed-vocabulary reason code (sanitized via sanitizeLogStatus, so only
+   * allowlisted members survive): permit-denied reasons, bridge signals,
+   * relay rejection details. Numeric exit codes ride on `status`;
+   * `attempt` carries authorized as 1/0 (no boolean field exists).
+   */
+  readonly reason?: string;
 }
 
 export interface ServerLogRecord extends ServerLogFields {
@@ -146,6 +187,12 @@ function sanitizeFields(fields: ServerLogFields | undefined): ServerLogFields {
   const port = sanitizeNumber(fields.port);
   if (port !== undefined) {
     out.port = port;
+  }
+  if (typeof fields.reason === "string") {
+    const reason = sanitizeLogStatus(fields.reason);
+    if (reason !== undefined) {
+      out.reason = reason;
+    }
   }
   return out;
 }

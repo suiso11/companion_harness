@@ -19,6 +19,13 @@ import {
   type ActionTargetCitation,
   ActionTargetCitationSchema,
   ActionToolInputSchema,
+  type AutonomyActivityListResponse,
+  AutonomyActivityListResponseSchema,
+  AutonomyControlSetRequestSchema,
+  type AutonomyControlView,
+  AutonomyControlViewSchema,
+  AutonomyHistoryQuerySchema,
+  AutonomyListQuerySchema,
   type CreateSessionResponse,
   CreateSessionResponseSchema,
   EventsQuerySchema,
@@ -27,6 +34,7 @@ import {
   HistoryQuerySchema,
   type HistoryResponse,
   HistoryResponseSchema,
+  IDEMPOTENCY_SCOPE_AUTONOMY_CONTROL,
   IDEMPOTENCY_SCOPE_SESSIONS_CREATE,
   IdempotencyLookupQuerySchema,
   type IdempotencyLookupResponse,
@@ -60,12 +68,30 @@ import {
   ProposalSummarySchema,
   type ProposalsListResponse,
   ProposalsListResponseSchema,
+  type PurposeConflictListResponse,
+  PurposeConflictListResponseSchema,
+  type PurposeConflictRecord,
+  PurposeConflictRecordRequestSchema,
+  PurposeConflictRecordSchema,
+  PurposeCorrectRequestSchema,
+  type PurposeCorrectResponse,
+  PurposeCorrectResponseSchema,
+  PurposeCreateRequestSchema,
+  type PurposeCreateResponse,
+  type PurposeHistoryResponse,
+  PurposeHistoryResponseSchema,
+  type PurposeListResponse,
+  PurposeListResponseSchema,
+  PurposeTransitionRequestSchema,
+  type PurposeView,
+  PurposeViewSchema,
   parseRunErrorCode,
   parseRunEvent,
   parseRunEventPayload,
   parseRunResult,
   parseTurnInput,
   proposalApproveScope,
+  purposeCreateScope,
   type ReferenceContextGetResponse,
   ReferenceContextGetResponseSchema,
   ReferenceContextPutRequestSchema,
@@ -83,6 +109,24 @@ import {
   RunStatusSchema,
   retryScope,
   SnapshotBodySchema,
+  TaskCreateRequestSchema,
+  type TaskCreateResponse,
+  type TaskHistoryResponse,
+  TaskHistoryResponseSchema,
+  TaskHoldRequestSchema,
+  type TaskListResponse,
+  TaskListResponseSchema,
+  TaskResumeRequestSchema,
+  TaskTransitionRequestSchema,
+  type TaskView,
+  TrialLaunchRequestSchema,
+  type TrialProfileSnapshot,
+  TrialProfileSnapshotSchema,
+  type TrialProposalView,
+  TrialProposalViewSchema,
+  TrialStageRequestSchema,
+  taskCreateScope,
+  trialStageScope,
 } from "@companion/contracts";
 import type Database from "better-sqlite3";
 import {
@@ -94,6 +138,34 @@ import {
   type CommittedProposal,
   createActionProposalStager,
 } from "./action_proposals.js";
+import {
+  type AutonomyKeyOptions,
+  applyAutonomyRestartFence,
+  assertOwnedPurpose,
+  assertOwnedTask,
+  achievePurpose as autonomyAchievePurpose,
+  cancelTask as autonomyCancelTask,
+  completeTask as autonomyCompleteTask,
+  correctPurpose as autonomyCorrectPurpose,
+  createPurpose as autonomyCreatePurpose,
+  createTask as autonomyCreateTask,
+  getAutonomyControl as autonomyGetControl,
+  getPurpose as autonomyGetPurpose,
+  getTask as autonomyGetTask,
+  holdTask as autonomyHoldTask,
+  listAutonomyActivity as autonomyListActivity,
+  listPurposeConflicts as autonomyListConflicts,
+  listPurposeEvents as autonomyListPurposeEvents,
+  listPurposes as autonomyListPurposes,
+  listTaskEvents as autonomyListTaskEvents,
+  listTasks as autonomyListTasks,
+  recordPurposeConflict as autonomyRecordConflict,
+  resumeTask as autonomyResumeTask,
+  revokePurpose as autonomyRevokePurpose,
+  setAutonomyControl as autonomySetControl,
+  startTask as autonomyStartTask,
+  recordUserActivityInTx,
+} from "./autonomy.js";
 import {
   assertUuidV4,
   canonicalJsonString,
@@ -116,6 +188,30 @@ import {
   RepositoryValidationError,
   SessionBusyError,
 } from "./errors.js";
+import {
+  approveTrialProposal,
+  authorityDeadlineMs,
+  claimTrialGrant,
+  clearAliasFence,
+  expireTrialProposal,
+  fenceUnknownExecution,
+  hashTrialRequest,
+  issueLaunchPermit,
+  listClaimedTrialWorkers,
+  listQueuedTrialGrants,
+  listTrialProposals,
+  readLaunchPermit,
+  readTrialIntent,
+  readTrialProposal,
+  readWorkerOutcome,
+  readWorkerOutcomeByProposal,
+  reconcileTrialExpiry,
+  recordQuiescence,
+  recordWorkerResult,
+  registerWorkerBoot,
+  stageTrialProposal,
+  type TrustedObservation,
+} from "./trial_authority.js";
 
 /**
  * C19: fixed safe error thrown when a generic Run lifecycle transition
@@ -749,6 +845,20 @@ function storeIdempotentResponse(
   ).run(scope, key, hash, status, JSON.stringify(body), now);
 }
 
+/**
+ * AV autonomy activity gate: `autonomy_activity` exists only on schema
+ * version >= 11 (migration 0011). Pre-11 databases (legit old migration
+ * fixtures at versions <= 10) skip the activity write so normal chat keeps
+ * working; on version >= 11 the write is mandatory and any failure (e.g. a
+ * corrupt DB with the table dropped) propagates unmasked. Explicit
+ * `user_version` check only — never a broad catch, never a message-text
+ * match on `no such table`.
+ */
+function shouldRecordAutonomyActivity(db: Database.Database): boolean {
+  const version = Number(db.pragma("user_version", { simple: true }));
+  return Number.isInteger(version) && version >= 11;
+}
+
 /* ------------------------------------------------------------------ */
 /* Repository                                                          */
 /* ------------------------------------------------------------------ */
@@ -881,6 +991,38 @@ export function createKernelRepository(
       );
     }
     return row;
+  }
+
+  function requireOwnedTrialProposal(
+    sessionId: string,
+    proposalId: string,
+  ): void {
+    const session = requireId(sessionId, "sessionId");
+    const proposal = requireId(proposalId, "proposalId");
+    const row = db
+      .prepare("SELECT session_id FROM trial_proposals WHERE id = ?")
+      .get(proposal) as { session_id: string } | undefined;
+    if (row === undefined || row.session_id !== session) {
+      throw new RepositoryNotFoundError(
+        `proposal ${proposal} not found in session ${session}`,
+      );
+    }
+  }
+
+  function requireOwnedTrialGrant(
+    sessionId: string,
+    executionId: string,
+  ): void {
+    const session = requireId(sessionId, "sessionId");
+    const execution = requireId(executionId, "executionId");
+    const row = db
+      .prepare("SELECT session_id FROM trial_grants WHERE execution_id = ?")
+      .get(execution) as { session_id: string } | undefined;
+    if (row === undefined || row.session_id !== session) {
+      throw new RepositoryNotFoundError(
+        `grant ${execution} not found in session ${session}`,
+      );
+    }
   }
 
   function requireOwnedProposal(
@@ -1093,6 +1235,13 @@ export function createKernelRepository(
           }),
         "post-message response",
       );
+      // AV autonomy: accepted (non-replayed) user activity is recorded in
+      // the SAME transaction. Replayed/rejected requests never reach here.
+      // Pre-11 databases skip the write (table absent by construction);
+      // version >= 11 failures propagate unmasked (never swallowed).
+      if (shouldRecordAutonomyActivity(db)) {
+        recordUserActivityInTx(db, session, now);
+      }
       storeIdempotentResponse(db, scope, key, hash, 202, body, now);
       return { status: 202, body, replayed: false };
     });
@@ -1234,6 +1383,12 @@ export function createKernelRepository(
           }),
         "post-retry response",
       );
+      // AV autonomy: accepted (non-replayed) user activity is recorded in
+      // the SAME transaction. Same pre-11 skip / >= 11 fail-loud rule as
+      // postMessage (explicit user_version gate, never a broad catch).
+      if (shouldRecordAutonomyActivity(db)) {
+        recordUserActivityInTx(db, session, now);
+      }
       storeIdempotentResponse(db, scope, key, hash, 202, body, now);
       return { status: 202, body, replayed: false };
     });
@@ -3055,6 +3210,98 @@ export function createKernelRepository(
       );
       return lookupIdempotency(validScope, validKey);
     }
+    // Global stop-control scope: the session must exist, then read the
+    // stored control write (same ownership-first pattern as above).
+    if (validScope === IDEMPOTENCY_SCOPE_AUTONOMY_CONTROL) {
+      if (readSession(db, session) === null) {
+        throw new RepositoryNotFoundError(`session ${session} not found`);
+      }
+      return lookupIdempotency(validScope, validKey);
+    }
+    // Session-bound create scopes (purpose / task / trial-stage): the
+    // embedded session must be this session, which must exist.
+    if (
+      validScope === purposeCreateScope(session) ||
+      validScope === taskCreateScope(session) ||
+      validScope === trialStageScope(session)
+    ) {
+      if (readSession(db, session) === null) {
+        throw new RepositoryNotFoundError(`session ${session} not found`);
+      }
+      return lookupIdempotency(validScope, validKey);
+    }
+    // Conflict scope: embedded session must be this session and both
+    // purposes must be session-owned (foreign ids are 404, never 403).
+    const conflictMatch = /^session:([^:]+):conflict:([^:]+):([^:]+)$/.exec(
+      validScope,
+    );
+    if (
+      conflictMatch?.[1] !== undefined &&
+      conflictMatch[2] !== undefined &&
+      conflictMatch[3] !== undefined
+    ) {
+      if (conflictMatch[1] !== session) {
+        throw new RepositoryNotFoundError(
+          `scope ${validScope} not found in session ${session}`,
+        );
+      }
+      assertOwnedPurpose(
+        db,
+        session,
+        assertUuidV4(conflictMatch[2], "purposeAId"),
+      );
+      assertOwnedPurpose(
+        db,
+        session,
+        assertUuidV4(conflictMatch[3], "purposeBId"),
+      );
+      return lookupIdempotency(validScope, validKey);
+    }
+    // Purpose/task mutation scopes: the referenced row must be
+    // session-owned (foreign ids are 404, never 403).
+    const purposeOpMatch = /^purpose:([^:]+):(correct|revoke|achieve)$/.exec(
+      validScope,
+    );
+    if (purposeOpMatch?.[1] !== undefined) {
+      assertOwnedPurpose(
+        db,
+        session,
+        assertUuidV4(purposeOpMatch[1], "purposeId"),
+      );
+      return lookupIdempotency(validScope, validKey);
+    }
+    const taskOpMatch =
+      /^task:([^:]+):(start|hold|resume|complete|cancel)$/.exec(validScope);
+    if (taskOpMatch?.[1] !== undefined) {
+      assertOwnedTask(db, session, assertUuidV4(taskOpMatch[1], "taskId"));
+      return lookupIdempotency(validScope, validKey);
+    }
+    // Trial approve/claim/permit scopes: the referenced proposal/grant must
+    // be session-owned (foreign ids are 404, never 403).
+    const trialProposalMatch = /^trial-proposal:([^:]+)$/.exec(validScope);
+    if (trialProposalMatch?.[1] !== undefined) {
+      requireOwnedTrialProposal(
+        session,
+        assertUuidV4(trialProposalMatch[1], "proposalId"),
+      );
+      return lookupIdempotency(validScope, validKey);
+    }
+    const trialClaimMatch = /^trial-claim:([^:]+)$/.exec(validScope);
+    if (trialClaimMatch?.[1] !== undefined) {
+      requireOwnedTrialGrant(
+        session,
+        assertUuidV4(trialClaimMatch[1], "executionId"),
+      );
+      return lookupIdempotency(validScope, validKey);
+    }
+    const trialPermitMatch = /^trial-permit:([^:]+)$/.exec(validScope);
+    if (trialPermitMatch?.[1] !== undefined) {
+      requireOwnedTrialGrant(
+        session,
+        assertUuidV4(trialPermitMatch[1], "executionId"),
+      );
+      return lookupIdempotency(validScope, validKey);
+    }
     throw new RepositoryNotFoundError(
       `scope ${validScope} not found in session ${session}`,
     );
@@ -4672,6 +4919,774 @@ export function createKernelRepository(
     });
   }
 
+  /* ---------------------------------------------------------------- */
+  /* AV autonomy slice facade (§AV01). Thin validated delegation to      */
+  /* `autonomy.ts` (the ONLY writer of the autonomy tables): Zod on the  */
+  /* JSON boundary, session/target ownership enforced inside the         */
+  /* transaction BEFORE any idempotency-cache read (foreign ids are 404, */
+  /* never 409), version/state checked AFTER the cache so owned terminal */
+  /* same-key replay returns the stored body verbatim. A recorded        */
+  /* `permission` purpose is ONLY a claim here: no grant, receipt,       */
+  /* capability, OAuth, or config write exists on any of these paths.   */
+  /* Tasks are explicit LOCAL entities with a coherent public `scope`   */
+  /* (contract default applies; the facade neither extends nor strips    */
+  /* variants): the same-session/scope owned parent rule, strict         */
+  /* EXPLICIT deadlines, and no invented scheduling.                     */
+  /* ---------------------------------------------------------------- */
+
+  function createAutonomyPurpose(
+    sessionId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: PurposeCreateResponse; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => PurposeCreateRequestSchema.parse(request),
+      "purpose create request",
+    );
+    return autonomyCreatePurpose(
+      db,
+      sessionId,
+      {
+        scope: parsed.scope,
+        statement: parsed.statement,
+        kind: parsed.kind,
+        explicit: parsed.explicit,
+        sourceKind: parsed.sourceKind,
+        ...(parsed.sourceTurnId !== undefined
+          ? { sourceTurnId: parsed.sourceTurnId }
+          : {}),
+        ...(parsed.interpretation !== undefined
+          ? { interpretation: parsed.interpretation }
+          : {}),
+        ...(parsed.validFrom !== undefined
+          ? { validFrom: parsed.validFrom }
+          : {}),
+        ...(parsed.validUntil !== undefined
+          ? { validUntil: parsed.validUntil }
+          : {}),
+        ...("constraintRule" in parsed &&
+        (parsed as { constraintRule?: unknown }).constraintRule !== undefined
+          ? {
+              constraintRule: (parsed as { constraintRule?: unknown })
+                .constraintRule,
+              constraintRulePresent: true,
+            }
+          : {}),
+      },
+      options,
+    );
+  }
+
+  function listAutonomyPurposes(
+    sessionId: string,
+    query: unknown = {},
+  ): PurposeListResponse {
+    const parsed = parseOrValidation(
+      () => AutonomyListQuerySchema.parse(query ?? {}),
+      "purpose list query",
+    );
+    const out = autonomyListPurposes(db, sessionId, parsed.limit);
+    return parseOrValidation(
+      () => PurposeListResponseSchema.parse(out),
+      "purpose list response",
+    );
+  }
+
+  function getAutonomyPurpose(
+    sessionId: string,
+    purposeId: string,
+  ): PurposeView {
+    return parseOrValidation(
+      () =>
+        PurposeViewSchema.parse(autonomyGetPurpose(db, sessionId, purposeId)),
+      "purpose response",
+    );
+  }
+
+  function getAutonomyPurposeHistory(
+    sessionId: string,
+    purposeId: string,
+    query: unknown = {},
+  ): PurposeHistoryResponse {
+    const parsed = parseOrValidation(
+      () =>
+        AutonomyHistoryQuerySchema.parse({
+          afterSeq: (query as { afterSeq?: unknown } | null)?.afterSeq ?? 0,
+          limit: (query as { limit?: unknown } | null)?.limit,
+        }),
+      "purpose history query",
+    );
+    const out = autonomyListPurposeEvents(db, sessionId, purposeId, {
+      afterSeq: parsed.afterSeq,
+      limit: parsed.limit,
+    });
+    return parseOrValidation(
+      () => PurposeHistoryResponseSchema.parse(out),
+      "purpose history response",
+    );
+  }
+
+  function correctAutonomyPurpose(
+    sessionId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): {
+    status: number;
+    body: PurposeCorrectResponse;
+    replayed: boolean;
+  } {
+    const parsed = parseOrValidation(
+      () => PurposeCorrectRequestSchema.parse(request),
+      "purpose correct request",
+    );
+    const out = autonomyCorrectPurpose(
+      db,
+      sessionId,
+      {
+        scope: parsed.scope,
+        statement: parsed.statement,
+        kind: parsed.kind,
+        explicit: parsed.explicit,
+        sourceKind: parsed.sourceKind,
+        purposeId: parsed.purposeId,
+        expectedVersion: parsed.expectedVersion,
+        ...(parsed.sourceTurnId !== undefined
+          ? { sourceTurnId: parsed.sourceTurnId }
+          : {}),
+        ...(parsed.interpretation !== undefined
+          ? { interpretation: parsed.interpretation }
+          : {}),
+        ...(parsed.validFrom !== undefined
+          ? { validFrom: parsed.validFrom }
+          : {}),
+        ...(parsed.validUntil !== undefined
+          ? { validUntil: parsed.validUntil }
+          : {}),
+        ...("constraintRule" in parsed
+          ? {
+              constraintRule:
+                (parsed as { constraintRule?: unknown }).constraintRule ?? null,
+            }
+          : {}),
+      },
+      options,
+    );
+    const body = parseOrValidation(
+      () => PurposeCorrectResponseSchema.parse(out.body),
+      "purpose correct response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function revokeAutonomyPurpose(
+    sessionId: string,
+    purposeId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: PurposeView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => PurposeTransitionRequestSchema.parse(request),
+      "purpose revoke request",
+    );
+    const out = autonomyRevokePurpose(
+      db,
+      sessionId,
+      purposeId,
+      parsed.expectedVersion,
+      options,
+    );
+    const body = parseOrValidation(
+      () => PurposeViewSchema.parse(out.body),
+      "purpose response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function achieveAutonomyPurpose(
+    sessionId: string,
+    purposeId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: PurposeView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => PurposeTransitionRequestSchema.parse(request),
+      "purpose achieve request",
+    );
+    const out = autonomyAchievePurpose(
+      db,
+      sessionId,
+      purposeId,
+      parsed.expectedVersion,
+      options,
+    );
+    const body = parseOrValidation(
+      () => PurposeViewSchema.parse(out.body),
+      "purpose response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function listAutonomyPurposeConflicts(
+    sessionId: string,
+  ): PurposeConflictListResponse {
+    const out = autonomyListConflicts(db, sessionId);
+    return parseOrValidation(
+      () => PurposeConflictListResponseSchema.parse(out),
+      "purpose conflict response",
+    );
+  }
+
+  function recordAutonomyPurposeConflict(
+    sessionId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): {
+    status: number;
+    body: PurposeConflictRecord;
+    replayed: boolean;
+  } {
+    const parsed = parseOrValidation(
+      () => PurposeConflictRecordRequestSchema.parse(request),
+      "purpose conflict record request",
+    );
+    const out = autonomyRecordConflict(
+      db,
+      sessionId,
+      { purposeAId: parsed.purposeAId, purposeBId: parsed.purposeBId },
+      options,
+    );
+    const body = parseOrValidation(
+      () => PurposeConflictRecordSchema.parse(out.body),
+      "purpose conflict record response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function createAutonomyTask(
+    sessionId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: TaskCreateResponse; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => TaskCreateRequestSchema.parse(request),
+      "task create request",
+    );
+    const out = autonomyCreateTask(
+      db,
+      sessionId,
+      {
+        scope: parsed.scope,
+        title: parsed.title,
+        ...(parsed.body !== undefined ? { body: parsed.body } : {}),
+        kind: parsed.kind,
+        speaker: parsed.speaker,
+        ...(parsed.deadline !== undefined ? { deadline: parsed.deadline } : {}),
+        ...(parsed.parentPurposeId !== undefined
+          ? { parentPurposeId: parsed.parentPurposeId }
+          : {}),
+      },
+      options,
+    );
+    return { status: out.status, body: out.body, replayed: out.replayed };
+  }
+
+  function listAutonomyTasks(
+    sessionId: string,
+    query: unknown = {},
+  ): TaskListResponse {
+    const parsed = parseOrValidation(
+      () => AutonomyListQuerySchema.parse(query ?? {}),
+      "task list query",
+    );
+    const out = autonomyListTasks(db, sessionId, parsed.limit);
+    return parseOrValidation(
+      () => TaskListResponseSchema.parse(out),
+      "task list response",
+    );
+  }
+
+  function getAutonomyTask(sessionId: string, taskId: string): TaskView {
+    return autonomyGetTask(db, sessionId, taskId);
+  }
+
+  function getAutonomyTaskHistory(
+    sessionId: string,
+    taskId: string,
+    query: unknown = {},
+  ): TaskHistoryResponse {
+    const parsed = parseOrValidation(
+      () =>
+        AutonomyHistoryQuerySchema.parse({
+          afterSeq: (query as { afterSeq?: unknown } | null)?.afterSeq ?? 0,
+          limit: (query as { limit?: unknown } | null)?.limit,
+        }),
+      "task history query",
+    );
+    const out = autonomyListTaskEvents(db, sessionId, taskId, {
+      afterSeq: parsed.afterSeq,
+      limit: parsed.limit,
+    });
+    return parseOrValidation(
+      () => TaskHistoryResponseSchema.parse(out),
+      "task history response",
+    );
+  }
+
+  function startAutonomyTask(
+    sessionId: string,
+    taskId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: TaskView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => TaskTransitionRequestSchema.parse(request),
+      "task start request",
+    );
+    return autonomyStartTask(
+      db,
+      sessionId,
+      taskId,
+      parsed.expectedVersion,
+      options,
+    );
+  }
+
+  function holdAutonomyTask(
+    sessionId: string,
+    taskId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: TaskView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => TaskHoldRequestSchema.parse(request),
+      "task hold request",
+    );
+    return autonomyHoldTask(
+      db,
+      sessionId,
+      taskId,
+      {
+        expectedVersion: parsed.expectedVersion,
+        reason: parsed.reason,
+        reconsiderTrigger: parsed.reconsiderTrigger,
+      },
+      options,
+    );
+  }
+
+  function resumeAutonomyTask(
+    sessionId: string,
+    taskId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: TaskView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => TaskResumeRequestSchema.parse(request),
+      "task resume request",
+    );
+    return autonomyResumeTask(
+      db,
+      sessionId,
+      taskId,
+      {
+        expectedVersion: parsed.expectedVersion,
+        evidenceKind: parsed.evidenceKind,
+        evidence: parsed.evidence,
+        ...(parsed.newParentPurposeId !== undefined
+          ? { newParentPurposeId: parsed.newParentPurposeId }
+          : {}),
+      },
+      options,
+    );
+  }
+
+  function completeAutonomyTask(
+    sessionId: string,
+    taskId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: TaskView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => TaskTransitionRequestSchema.parse(request),
+      "task complete request",
+    );
+    return autonomyCompleteTask(
+      db,
+      sessionId,
+      taskId,
+      parsed.expectedVersion,
+      options,
+    );
+  }
+
+  function cancelAutonomyTask(
+    sessionId: string,
+    taskId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: TaskView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => TaskTransitionRequestSchema.parse(request),
+      "task cancel request",
+    );
+    return autonomyCancelTask(
+      db,
+      sessionId,
+      taskId,
+      parsed.expectedVersion,
+      options,
+    );
+  }
+
+  function getAutonomyControlState(): AutonomyControlView {
+    return parseOrValidation(
+      () => AutonomyControlViewSchema.parse(autonomyGetControl(db)),
+      "autonomy control response",
+    );
+  }
+
+  function setAutonomyControlState(
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: AutonomyControlView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => AutonomyControlSetRequestSchema.parse(request),
+      "autonomy control request",
+    );
+    const out = autonomySetControl(
+      db,
+      {
+        paused: parsed.paused,
+        expectedVersion: parsed.expectedVersion,
+        ...(parsed.reason !== undefined ? { reason: parsed.reason } : {}),
+      },
+      options,
+    );
+    const body = parseOrValidation(
+      () => AutonomyControlViewSchema.parse(out.body),
+      "autonomy control response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function listAutonomyActivityLog(
+    query: unknown = {},
+  ): AutonomyActivityListResponse {
+    const parsed = parseOrValidation(
+      () => AutonomyListQuerySchema.parse(query ?? {}),
+      "activity list query",
+    );
+    const out = autonomyListActivity(db, parsed.limit);
+    return parseOrValidation(
+      () => AutonomyActivityListResponseSchema.parse({ items: out.items }),
+      "activity list response",
+    );
+  }
+
+  function applyAutonomyRestartFenceNow(now?: number): {
+    paused: boolean;
+    version: number;
+  } {
+    return applyAutonomyRestartFence(db, now);
+  }
+
+  /* Trial authority facade: DATA-only stage, one-grant approve, claim. */
+  function stageTrial(
+    sessionId: string,
+    request: unknown,
+    options: AutonomyKeyOptions & {
+      profile: TrialProfileSnapshot;
+      workspaceAlias: string;
+    },
+  ): { status: number; body: TrialProposalView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => TrialStageRequestSchema.parse(request),
+      "trial stage request",
+    );
+    const profile = parseOrValidation(
+      () => TrialProfileSnapshotSchema.parse(options.profile),
+      "trial profile snapshot",
+    );
+    const out = stageTrialProposal(
+      db,
+      sessionId,
+      {
+        taskId: parsed.taskId,
+        objective: parsed.objective,
+        acceptance: [...parsed.acceptance],
+        literalPatchPaths: [...parsed.literalPatchPaths],
+        operation: parsed.operation,
+        readOnlyMode: parsed.readOnlyMode,
+        expiry: parsed.expiry,
+        possibleExternalDataConsent: parsed.possibleExternalDataConsent,
+        timeoutMs: parsed.objectiveResourceCaps.timeoutMs,
+        maxOutputBytes: parsed.objectiveResourceCaps.maxOutputBytes,
+        requiredChecks: [...parsed.requiredChecks],
+        workspaceAlias: options.workspaceAlias,
+      },
+      {
+        key: options.key,
+        ...(options.now !== undefined ? { now: options.now } : {}),
+        profile,
+      },
+    );
+    const body = parseOrValidation(
+      () => TrialProposalViewSchema.parse(out.body),
+      "trial proposal response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
+  function listTrials(
+    sessionId: string,
+    query: unknown = {},
+  ): { items: TrialProposalView[] } {
+    const parsed = parseOrValidation(
+      () => AutonomyListQuerySchema.parse(query ?? {}),
+      "trial list query",
+    );
+    const out = listTrialProposals(db, sessionId, parsed.limit);
+    return {
+      items: out.items.map((item) =>
+        parseOrValidation(
+          () => TrialProposalViewSchema.parse(item),
+          "trial proposal",
+        ),
+      ),
+    };
+  }
+
+  function readTrial(sessionId: string, proposalId: string): TrialProposalView {
+    return parseOrValidation(
+      () =>
+        TrialProposalViewSchema.parse(
+          readTrialProposal(db, sessionId, proposalId),
+        ),
+      "trial proposal",
+    );
+  }
+
+  function approveTrial(
+    sessionId: string,
+    proposalId: string,
+    options: AutonomyKeyOptions & {
+      profile: TrialProfileSnapshot;
+      workspaceAlias: string;
+    },
+  ): { status: number; body: { executionId: string }; replayed: boolean } {
+    const profile = parseOrValidation(
+      () => TrialProfileSnapshotSchema.parse(options.profile),
+      "trial profile snapshot",
+    );
+    const out = approveTrialProposal(db, sessionId, proposalId, {
+      key: options.key,
+      ...(options.now !== undefined ? { now: options.now } : {}),
+      profile,
+      workspaceAlias: options.workspaceAlias,
+    });
+    return { status: out.status, body: out.body, replayed: out.replayed };
+  }
+
+  function claimTrial(
+    sessionId: string,
+    executionId: string,
+    options: AutonomyKeyOptions & {
+      profile: TrialProfileSnapshot;
+      workspaceAlias: string;
+    },
+  ): { status: number; body: unknown; replayed: boolean } {
+    const profile = parseOrValidation(
+      () => TrialProfileSnapshotSchema.parse(options.profile),
+      "trial profile snapshot",
+    );
+    const out = claimTrialGrant(db, sessionId, executionId, {
+      key: options.key,
+      ...(options.now !== undefined ? { now: options.now } : {}),
+      profile,
+      workspaceAlias: options.workspaceAlias,
+    });
+    const req = parseOrValidation(
+      () =>
+        TrialLaunchRequestSchema.parse(
+          (out.body as { request: unknown }).request,
+        ),
+      "trial launch request",
+    );
+    void req;
+    return { status: out.status, body: out.body, replayed: out.replayed };
+  }
+
+  function expireTrial(
+    sessionId: string,
+    proposalId: string,
+    now?: number,
+  ): void {
+    expireTrialProposal(db, sessionId, proposalId, now ?? Date.now());
+  }
+
+  function fenceTrialUnknown(
+    sessionId: string,
+    opts: {
+      workspaceAlias: string;
+      executionId: string;
+      taskHash?: string | null;
+      pid?: number | null;
+      bootId?: string | null;
+      reason: string;
+    },
+    now?: number,
+  ): number {
+    return fenceUnknownExecution(db, sessionId, now ?? Date.now(), opts);
+  }
+
+  function hashTrialLaunchRequest(request: unknown): string {
+    const parsed = parseOrValidation(
+      () => TrialLaunchRequestSchema.parse(request),
+      "trial launch request",
+    );
+    return hashTrialRequest(parsed);
+  }
+
+  /* Internal execution-lifecycle facade (Root service only, never browser). */
+  function readTrialLaunchIntent(sessionId: string, executionId: string) {
+    return readTrialIntent(db, sessionId, executionId);
+  }
+
+  function registerTrialWorkerBoot(
+    input: {
+      executionId: string;
+      sessionId?: string;
+      pid: number;
+      bootId: string;
+      processStartTicks: string;
+      observedAt?: number;
+    },
+    now?: number,
+  ) {
+    return registerWorkerBoot(db, {
+      ...input,
+      ...(now !== undefined ? { now } : {}),
+    });
+  }
+
+  function issueTrialLaunchPermit(
+    sessionId: string,
+    executionId: string,
+    deps: AutonomyKeyOptions & {
+      observation: TrustedObservation;
+      profile: TrialProfileSnapshot;
+      requestHash: string;
+    },
+  ) {
+    return issueLaunchPermit(db, sessionId, executionId, {
+      key: deps.key,
+      ...(deps.now !== undefined ? { now: deps.now } : {}),
+      observation: deps.observation,
+      profile: deps.profile,
+      requestHash: deps.requestHash,
+    });
+  }
+
+  function readTrialLaunchPermit(sessionId: string, executionId: string) {
+    return readLaunchPermit(db, sessionId, executionId);
+  }
+
+  function readTrialWorkerOutcome(sessionId: string, executionId: string) {
+    return readWorkerOutcome(db, sessionId, executionId);
+  }
+
+  function readTrialWorkerOutcomeByProposal(
+    sessionId: string,
+    proposalId: string,
+  ) {
+    return readWorkerOutcomeByProposal(db, sessionId, proposalId);
+  }
+
+  function recordTrialWorkerResult(
+    sessionId: string,
+    executionId: string,
+    input: {
+      detail: string;
+      observation: TrustedObservation;
+      result: {
+        taskHash: string;
+        exitCode: number;
+        checks: { id: string; ok: boolean }[];
+        outputMatched: boolean;
+        noTimeout: boolean;
+      };
+    },
+    now?: number,
+  ) {
+    return recordWorkerResult(db, sessionId, executionId, {
+      ...input,
+      ...(now !== undefined ? { now } : {}),
+    });
+  }
+
+  function recordTrialQuiescence(
+    sessionId: string,
+    scope: string,
+    executionId: string | null,
+    now?: number,
+    opts?: {
+      workspaceAlias: string;
+      executionId?: string;
+      taskHash?: string | null;
+      pid?: number | null;
+      bootId?: string | null;
+      reason: string;
+    },
+  ) {
+    return recordQuiescence(db, sessionId, scope, executionId, now, opts);
+  }
+
+  function clearTrialAliasFence(
+    workspaceAlias: string,
+    executionId: string,
+    observation: TrustedObservation,
+  ) {
+    return clearAliasFence(db, workspaceAlias, executionId, observation);
+  }
+
+  function trialAuthorityDeadline(
+    sessionId: string,
+    taskId: string,
+    operation: "investigate" | "implement" | "verify" | "maintenance_trial",
+    writePaths: string[],
+    workspaceAlias: string,
+    proposalExpiry: string,
+    now: number,
+  ) {
+    return authorityDeadlineMs(
+      db,
+      sessionId,
+      taskId,
+      operation,
+      writePaths,
+      workspaceAlias,
+      proposalExpiry,
+      now,
+    );
+  }
+
+  function reconcileTrialExpiries(now?: number) {
+    return reconcileTrialExpiry(db, now);
+  }
+
+  /**
+   * Runner pick read (pure SELECT): oldest queued grant for an alias.
+   * Empty array when nothing is queued (runNext no-op).
+   */
+  function listQueuedTrialGrantsForAlias(workspaceAlias: string, limit = 1) {
+    return listQueuedTrialGrants(db, workspaceAlias, limit);
+  }
+
+  /** Runner recovery scan (pure SELECT): claimed grants with boot rows. */
+  function listClaimedTrialWorkersForRecovery() {
+    return listClaimedTrialWorkers(db);
+  }
+
   return {
     createSession,
     postMessage,
@@ -4739,6 +5754,49 @@ export function createKernelRepository(
     requireOwnedTurn: (sessionId: string, turnId: string): TurnRow =>
       parseTurnRow(requireOwnedTurn(sessionId, turnId)),
     actionProposalsStager: stager,
+    createAutonomyPurpose,
+    listAutonomyPurposes,
+    getAutonomyPurpose,
+    getAutonomyPurposeHistory,
+    correctAutonomyPurpose,
+    revokeAutonomyPurpose,
+    achieveAutonomyPurpose,
+    listAutonomyPurposeConflicts,
+    recordAutonomyPurposeConflict,
+    createAutonomyTask,
+    listAutonomyTasks,
+    getAutonomyTask,
+    getAutonomyTaskHistory,
+    startAutonomyTask,
+    holdAutonomyTask,
+    resumeAutonomyTask,
+    completeAutonomyTask,
+    cancelAutonomyTask,
+    getAutonomyControlState,
+    setAutonomyControlState,
+    listAutonomyActivityLog,
+    applyAutonomyRestartFenceNow,
+    stageTrial,
+    listTrials,
+    readTrial,
+    approveTrial,
+    claimTrial,
+    expireTrial,
+    fenceTrialUnknown,
+    hashTrialLaunchRequest,
+    readTrialLaunchIntent,
+    registerTrialWorkerBoot,
+    issueTrialLaunchPermit,
+    readTrialLaunchPermit,
+    readTrialWorkerOutcome,
+    readTrialWorkerOutcomeByProposal,
+    recordTrialWorkerResult,
+    recordTrialQuiescence,
+    clearTrialAliasFence,
+    trialAuthorityDeadline,
+    reconcileTrialExpiries,
+    listQueuedTrialGrantsForAlias,
+    listClaimedTrialWorkersForRecovery,
   };
 }
 

@@ -9,6 +9,9 @@
 import {
   ActiveRunResponseSchema,
   type ApiErrorCode,
+  AutonomyControlSetRequestSchema,
+  AutonomyHistoryQuerySchema,
+  AutonomyListQuerySchema,
   CancelRunRequestSchema,
   CancelRunResponseSchema,
   CreateSessionRequestSchema,
@@ -34,6 +37,10 @@ import {
   ProposalRejectRequestSchema,
   ProposalRejectResponseSchema,
   ProposalsListResponseSchema,
+  PurposeConflictRecordRequestSchema,
+  PurposeCorrectRequestSchema,
+  PurposeCreateRequestSchema,
+  PurposeTransitionRequestSchema,
   proposalApproveScope,
   ReferenceContextGetResponseSchema,
   ReferenceContextPutRequestSchema,
@@ -43,9 +50,18 @@ import {
   ReferenceSetDetailResponseSchema,
   RunStatusResponseSchema,
   retryScope,
+  TaskCreateRequestSchema,
+  TaskHoldRequestSchema,
+  TaskResumeRequestSchema,
+  TaskTransitionRequestSchema,
+  type TrialProfileSnapshot,
+  TrialProposalViewSchema,
+  TrialStageRequestSchema,
 } from "@companion/contracts";
 import {
   ActionNotCancellableError,
+  AutonomyStateConflictError,
+  AutonomyVersionConflictError,
   IdempotencyConflictError,
   InvalidReferenceError,
   isUuidV4,
@@ -593,6 +609,31 @@ function mapDomainError(c: Context, error: unknown): Response {
     return c.json(
       { error: { code: "invalid_reference", message: "invalid reference" } },
       400,
+    );
+  }
+  // AV autonomy slice: CAS version conflicts and illegal lifecycle
+  // transitions map to fixed 409 codes (same shape as the M5 proposal
+  // codes above; outside the frozen ApiErrorCode enum).
+  if (error instanceof AutonomyVersionConflictError) {
+    return c.json(
+      {
+        error: {
+          code: "autonomy_version_conflict",
+          message: "autonomy version conflict",
+        },
+      },
+      409,
+    );
+  }
+  if (error instanceof AutonomyStateConflictError) {
+    return c.json(
+      {
+        error: {
+          code: "autonomy_state_conflict",
+          message: "autonomy state conflict",
+        },
+      },
+      409,
     );
   }
   if (
@@ -2036,6 +2077,924 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
           { now: now() },
         ),
       );
+      return c.json(body, 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  /* ---------------- AV autonomy: purposes + tasks + stop control -------- */
+  // Session-owned durable purpose/task records plus the global stop
+  // control. Strict Zod bodies, UUID ids, Idempotency-Key on every
+  // mutation, exact query gates, ownership-first 404s, CAS 409s. Recorded
+  // `permission` purposes are claims only: no route here creates a grant,
+  // a capability write, or an external action. Histories are immutable
+  // append-only trails (original / correction / lifecycle all visible).
+
+  app.post("/api/sessions/:sessionId/purposes", async (c) => {
+    const started = now();
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const keyed = requireIdempotencyKey(c);
+    if ("response" in keyed) {
+      return keyed.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    const raw = await readJsonBody(c);
+    if (!raw.ok) {
+      return validationError(c);
+    }
+    if (PurposeCreateRequestSchema.safeParse(raw.value).success !== true) {
+      return validationError(c);
+    }
+    if (draining) {
+      return shuttingDown(c);
+    }
+    try {
+      const out = repo.createAutonomyPurpose(session.id, raw.value, {
+        key: keyed.key,
+        now: now(),
+      });
+      logger.info("http.autonomy.purposes.create", {
+        sessionId: session.id,
+        status: out.status,
+        durationMs: Math.max(now() - started, 0),
+      });
+      return c.json(out.body, out.status as 201);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get("/api/sessions/:sessionId/purposes", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const query = strictQuery(c, ["limit"]);
+    if (!query.ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(
+        repo.listAutonomyPurposes(session.id, {
+          ...(query.values.limit !== undefined
+            ? { limit: query.values.limit }
+            : {}),
+        }),
+        200,
+      );
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get("/api/sessions/:sessionId/purposes/:purposeId", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const purpose = requireUuid(c, c.req.param("purposeId"), "purposeId");
+    if ("response" in purpose) {
+      return purpose.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(repo.getAutonomyPurpose(session.id, purpose.id), 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get("/api/sessions/:sessionId/purposes/:purposeId/history", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const purpose = requireUuid(c, c.req.param("purposeId"), "purposeId");
+    if ("response" in purpose) {
+      return purpose.response;
+    }
+    const query = strictQuery(c, ["afterSeq", "limit"]);
+    if (!query.ok) {
+      return validationError(c);
+    }
+    const parsed = AutonomyHistoryQuerySchema.safeParse({
+      ...(query.values.afterSeq !== undefined
+        ? { afterSeq: query.values.afterSeq }
+        : {}),
+      ...(query.values.limit !== undefined
+        ? { limit: query.values.limit }
+        : {}),
+    });
+    if (parsed.success !== true) {
+      return validationError(c);
+    }
+    try {
+      return c.json(
+        repo.getAutonomyPurposeHistory(session.id, purpose.id, {
+          afterSeq: parsed.data.afterSeq,
+          limit: parsed.data.limit,
+        }),
+        200,
+      );
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.post(
+    "/api/sessions/:sessionId/purposes/:purposeId/correct",
+    async (c) => {
+      const started = now();
+      const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+      if ("response" in session) {
+        return session.response;
+      }
+      const purpose = requireUuid(c, c.req.param("purposeId"), "purposeId");
+      if ("response" in purpose) {
+        return purpose.response;
+      }
+      const keyed = requireIdempotencyKey(c);
+      if ("response" in keyed) {
+        return keyed.response;
+      }
+      if (!strictQuery(c, []).ok) {
+        return validationError(c);
+      }
+      const raw = await readJsonBody(c);
+      if (!raw.ok) {
+        return validationError(c);
+      }
+      // The path id is authoritative: the body carries the new statement but
+      // never selects a different record (no latest-wins rebinding).
+      const withId =
+        typeof raw.value === "object" && raw.value !== null
+          ? { ...(raw.value as Record<string, unknown>), purposeId: purpose.id }
+          : raw.value;
+      if (PurposeCorrectRequestSchema.safeParse(withId).success !== true) {
+        return validationError(c);
+      }
+      if (draining) {
+        return shuttingDown(c);
+      }
+      try {
+        const out = repo.correctAutonomyPurpose(session.id, withId, {
+          key: keyed.key,
+          now: now(),
+        });
+        logger.info("http.autonomy.purposes.correct", {
+          sessionId: session.id,
+          status: out.status,
+          durationMs: Math.max(now() - started, 0),
+        });
+        return c.json(out.body, out.status as 201);
+      } catch (error) {
+        return mapDomainError(c, error);
+      }
+    },
+  );
+
+  app.post("/api/sessions/:sessionId/purposes/:purposeId/revoke", async (c) => {
+    const started = now();
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const purpose = requireUuid(c, c.req.param("purposeId"), "purposeId");
+    if ("response" in purpose) {
+      return purpose.response;
+    }
+    const keyed = requireIdempotencyKey(c);
+    if ("response" in keyed) {
+      return keyed.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    const raw = await readJsonBody(c);
+    if (!raw.ok) {
+      return validationError(c);
+    }
+    if (PurposeTransitionRequestSchema.safeParse(raw.value).success !== true) {
+      return validationError(c);
+    }
+    if (draining) {
+      return shuttingDown(c);
+    }
+    try {
+      const out = repo.revokeAutonomyPurpose(
+        session.id,
+        purpose.id,
+        raw.value,
+        { key: keyed.key, now: now() },
+      );
+      logger.info("http.autonomy.purposes.revoke", {
+        sessionId: session.id,
+        status: out.status,
+        durationMs: Math.max(now() - started, 0),
+      });
+      return c.json(out.body, out.status as 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.post(
+    "/api/sessions/:sessionId/purposes/:purposeId/achieve",
+    async (c) => {
+      const started = now();
+      const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+      if ("response" in session) {
+        return session.response;
+      }
+      const purpose = requireUuid(c, c.req.param("purposeId"), "purposeId");
+      if ("response" in purpose) {
+        return purpose.response;
+      }
+      const keyed = requireIdempotencyKey(c);
+      if ("response" in keyed) {
+        return keyed.response;
+      }
+      if (!strictQuery(c, []).ok) {
+        return validationError(c);
+      }
+      const raw = await readJsonBody(c);
+      if (!raw.ok) {
+        return validationError(c);
+      }
+      if (
+        PurposeTransitionRequestSchema.safeParse(raw.value).success !== true
+      ) {
+        return validationError(c);
+      }
+      if (draining) {
+        return shuttingDown(c);
+      }
+      try {
+        const out = repo.achieveAutonomyPurpose(
+          session.id,
+          purpose.id,
+          raw.value,
+          { key: keyed.key, now: now() },
+        );
+        logger.info("http.autonomy.purposes.achieve", {
+          sessionId: session.id,
+          status: out.status,
+          durationMs: Math.max(now() - started, 0),
+        });
+        return c.json(out.body, out.status as 200);
+      } catch (error) {
+        return mapDomainError(c, error);
+      }
+    },
+  );
+
+  app.get("/api/sessions/:sessionId/purpose-conflicts", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(repo.listAutonomyPurposeConflicts(session.id), 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  // Explicit conflict record (idempotent, versioned via CAS on members at
+  // use time, never derived): same-session/scope owned active pair only.
+  // Cross-session ids are 404; scope mismatch / inactive members are 400 /
+  // 409; recording grants no authority and never auto-resolves anything.
+  app.post("/api/sessions/:sessionId/purpose-conflicts", async (c) => {
+    const started = now();
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const keyed = requireIdempotencyKey(c);
+    if ("response" in keyed) {
+      return keyed.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    const raw = await readJsonBody(c);
+    if (!raw.ok) {
+      return validationError(c);
+    }
+    if (
+      PurposeConflictRecordRequestSchema.safeParse(raw.value).success !== true
+    ) {
+      return validationError(c);
+    }
+    if (draining) {
+      return shuttingDown(c);
+    }
+    try {
+      const out = repo.recordAutonomyPurposeConflict(session.id, raw.value, {
+        key: keyed.key,
+        now: now(),
+      });
+      logger.info("http.autonomy.purposes.conflict.record", {
+        sessionId: session.id,
+        status: out.status,
+        durationMs: Math.max(now() - started, 0),
+      });
+      return c.json(out.body, out.status as 200 | 201);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.post("/api/sessions/:sessionId/tasks", async (c) => {
+    const started = now();
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const keyed = requireIdempotencyKey(c);
+    if ("response" in keyed) {
+      return keyed.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    const raw = await readJsonBody(c);
+    if (!raw.ok) {
+      return validationError(c);
+    }
+    if (TaskCreateRequestSchema.safeParse(raw.value).success !== true) {
+      return validationError(c);
+    }
+    if (draining) {
+      return shuttingDown(c);
+    }
+    try {
+      const out = repo.createAutonomyTask(session.id, raw.value, {
+        key: keyed.key,
+        now: now(),
+      });
+      logger.info("http.autonomy.tasks.create", {
+        sessionId: session.id,
+        status: out.status,
+        durationMs: Math.max(now() - started, 0),
+      });
+      return c.json(out.body, out.status as 201);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get("/api/sessions/:sessionId/tasks", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const query = strictQuery(c, ["limit"]);
+    if (!query.ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(
+        repo.listAutonomyTasks(session.id, {
+          ...(query.values.limit !== undefined
+            ? { limit: query.values.limit }
+            : {}),
+        }),
+        200,
+      );
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get("/api/sessions/:sessionId/tasks/:taskId", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const task = requireUuid(c, c.req.param("taskId"), "taskId");
+    if ("response" in task) {
+      return task.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(repo.getAutonomyTask(session.id, task.id), 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get("/api/sessions/:sessionId/tasks/:taskId/history", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const task = requireUuid(c, c.req.param("taskId"), "taskId");
+    if ("response" in task) {
+      return task.response;
+    }
+    const query = strictQuery(c, ["afterSeq", "limit"]);
+    if (!query.ok) {
+      return validationError(c);
+    }
+    const parsed = AutonomyHistoryQuerySchema.safeParse({
+      ...(query.values.afterSeq !== undefined
+        ? { afterSeq: query.values.afterSeq }
+        : {}),
+      ...(query.values.limit !== undefined
+        ? { limit: query.values.limit }
+        : {}),
+    });
+    if (parsed.success !== true) {
+      return validationError(c);
+    }
+    try {
+      return c.json(
+        repo.getAutonomyTaskHistory(session.id, task.id, {
+          afterSeq: parsed.data.afterSeq,
+          limit: parsed.data.limit,
+        }),
+        200,
+      );
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  function autonomyTaskTransition(
+    op: "start" | "hold" | "resume" | "complete" | "cancel",
+  ): (c: Context) => Promise<Response> {
+    const schema =
+      op === "hold"
+        ? TaskHoldRequestSchema
+        : op === "resume"
+          ? TaskResumeRequestSchema
+          : TaskTransitionRequestSchema;
+    return async (c) => {
+      const started = now();
+      const session = requireUuid(
+        c,
+        c.req.param("sessionId") ?? "",
+        "sessionId",
+      );
+      if ("response" in session) {
+        return session.response;
+      }
+      const task = requireUuid(c, c.req.param("taskId") ?? "", "taskId");
+      if ("response" in task) {
+        return task.response;
+      }
+      const keyed = requireIdempotencyKey(c);
+      if ("response" in keyed) {
+        return keyed.response;
+      }
+      if (!strictQuery(c, []).ok) {
+        return validationError(c);
+      }
+      const raw = await readJsonBody(c);
+      if (!raw.ok) {
+        return validationError(c);
+      }
+      if (schema.safeParse(raw.value).success !== true) {
+        return validationError(c);
+      }
+      if (draining) {
+        return shuttingDown(c);
+      }
+      try {
+        const options = { key: keyed.key, now: now() };
+        const out =
+          op === "start"
+            ? repo.startAutonomyTask(session.id, task.id, raw.value, options)
+            : op === "hold"
+              ? repo.holdAutonomyTask(session.id, task.id, raw.value, options)
+              : op === "resume"
+                ? repo.resumeAutonomyTask(
+                    session.id,
+                    task.id,
+                    raw.value,
+                    options,
+                  )
+                : op === "complete"
+                  ? repo.completeAutonomyTask(
+                      session.id,
+                      task.id,
+                      raw.value,
+                      options,
+                    )
+                  : repo.cancelAutonomyTask(
+                      session.id,
+                      task.id,
+                      raw.value,
+                      options,
+                    );
+        logger.info("http.autonomy.tasks.transition", {
+          sessionId: session.id,
+          status: out.status,
+          durationMs: Math.max(now() - started, 0),
+        });
+        return c.json(out.body, out.status as 200);
+      } catch (error) {
+        return mapDomainError(c, error);
+      }
+    };
+  }
+
+  app.post(
+    "/api/sessions/:sessionId/tasks/:taskId/start",
+    autonomyTaskTransition("start"),
+  );
+  app.post(
+    "/api/sessions/:sessionId/tasks/:taskId/hold",
+    autonomyTaskTransition("hold"),
+  );
+  app.post(
+    "/api/sessions/:sessionId/tasks/:taskId/resume",
+    autonomyTaskTransition("resume"),
+  );
+  app.post(
+    "/api/sessions/:sessionId/tasks/:taskId/complete",
+    autonomyTaskTransition("complete"),
+  );
+  app.post(
+    "/api/sessions/:sessionId/tasks/:taskId/cancel",
+    autonomyTaskTransition("cancel"),
+  );
+
+  app.get("/api/autonomy/control", (c) => {
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(repo.getAutonomyControlState(), 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.post("/api/autonomy/control", async (c) => {
+    const started = now();
+    const keyed = requireIdempotencyKey(c);
+    if ("response" in keyed) {
+      return keyed.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    const raw = await readJsonBody(c);
+    if (!raw.ok) {
+      return validationError(c);
+    }
+    if (AutonomyControlSetRequestSchema.safeParse(raw.value).success !== true) {
+      return validationError(c);
+    }
+    if (draining) {
+      return shuttingDown(c);
+    }
+    try {
+      const out = repo.setAutonomyControlState(raw.value, {
+        key: keyed.key,
+        now: now(),
+      });
+      logger.info("http.autonomy.control", {
+        status: out.status,
+        durationMs: Math.max(now() - started, 0),
+      });
+      return c.json(out.body, out.status as 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get("/api/autonomy/activity", (c) => {
+    const query = strictQuery(c, ["limit"]);
+    if (!query.ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(
+        repo.listAutonomyActivityLog({
+          ...(query.values.limit !== undefined
+            ? { limit: query.values.limit }
+            : {}),
+        }),
+        200,
+      );
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  /* ---------------- trial proposals/approvals (opt-in, config profile) --- */
+  // Human-facing trial proposal/approval surface. The trusted profile
+  // snapshot + workspace alias come ONLY from the frozen server config
+  // (COMPANION_AUTONOMY_JSON); request bodies can never supply them (the
+  // strict stage schema rejects unknown keys, and approve/expire take an
+  // exactly-empty body). Worker launch, scope observation, permit issuance
+  // and result recording stay internal and are never exposed here. Pure
+  // reads never expire or mutate; expiry is an explicit POST only.
+
+  /** Fixed disabled response: GETs 404, POSTs 409, never touching the DB. */
+  function trialsDisabled(c: Context, mutation: boolean): Response {
+    return c.json(
+      { error: { code: "trials_disabled", message: "trials are disabled" } },
+      (mutation ? 409 : 404) as 404,
+    );
+  }
+
+  /** Frozen config profile snapshot + workspace alias (never body flags). */
+  function trialProfileOf(cfg: ServerConfig): {
+    profile: TrialProfileSnapshot;
+    workspaceAlias: string;
+  } | null {
+    const trial = cfg.trial;
+    if (trial === null) {
+      return null;
+    }
+    return {
+      profile: {
+        available: trial.available,
+        enabled: trial.enabled,
+        mandatoryChecks: [...trial.mandatoryChecks],
+        configFingerprint: trial.configFingerprint,
+        sourceRevision: trial.sourceRevision,
+        currentModel: trial.currentModel,
+        disclosedWholeRepoRead: trial.disclosedWholeRepoRead,
+        timeoutMs: trial.timeoutMs,
+        maxOutputBytes: trial.maxOutputBytes,
+      },
+      workspaceAlias: trial.workspaceAlias,
+    };
+  }
+
+  /** Strict exactly-empty body (approve/expire carry no inputs). */
+  function isEmptyBody(value: unknown): boolean {
+    return (
+      typeof value === "object" &&
+      value !== null &&
+      !Array.isArray(value) &&
+      Object.keys(value).length === 0
+    );
+  }
+
+  // Stage a DATA-only trial proposal (keyed, exactly-once): strict
+  // `TrialStageRequestSchema` body (unknown keys rejected, so no
+  // profile/alias override is possible).
+  app.post("/api/sessions/:sessionId/trials", async (c) => {
+    const started = now();
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const keyed = requireIdempotencyKey(c);
+    if ("response" in keyed) {
+      return keyed.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    const raw = await readJsonBody(c);
+    if (!raw.ok) {
+      return validationError(c);
+    }
+    const parsedBody = TrialStageRequestSchema.safeParse(raw.value);
+    if (!parsedBody.success) {
+      return validationError(c);
+    }
+    const frozen = trialProfileOf(config);
+    if (frozen === null) {
+      return trialsDisabled(c, true);
+    }
+    if (draining) {
+      return shuttingDown(c);
+    }
+    try {
+      const out = repo.stageTrial(session.id, parsedBody.data, {
+        key: keyed.key,
+        now: now(),
+        profile: frozen.profile,
+        workspaceAlias: frozen.workspaceAlias,
+      });
+      const body = TrialProposalViewSchema.parse(out.body);
+      logger.info("http.trials.stage", {
+        sessionId: session.id,
+        proposalId: body.id,
+        status: out.status,
+        bytes: raw.bytes,
+        durationMs: Math.max(now() - started, 0),
+      });
+      return c.json(body, out.status as 201);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  // Approve a staged proposal (keyed, one grant): the frozen config
+  // profile/alias are re-checked against the staged snapshot inside the
+  // kernel (drift is a 409 re-stage).
+  app.post("/api/sessions/:sessionId/trials/:proposalId/approve", async (c) => {
+    const started = now();
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const proposal = requireUuid(c, c.req.param("proposalId"), "proposalId");
+    if ("response" in proposal) {
+      return proposal.response;
+    }
+    const keyed = requireIdempotencyKey(c);
+    if ("response" in keyed) {
+      return keyed.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    const raw = await readJsonBody(c);
+    if (!raw.ok) {
+      return validationError(c);
+    }
+    if (!isEmptyBody(raw.value)) {
+      return validationError(c);
+    }
+    const frozen = trialProfileOf(config);
+    if (frozen === null) {
+      return trialsDisabled(c, true);
+    }
+    if (draining) {
+      return shuttingDown(c);
+    }
+    try {
+      const out = repo.approveTrial(session.id, proposal.id, {
+        key: keyed.key,
+        now: now(),
+        profile: frozen.profile,
+        workspaceAlias: frozen.workspaceAlias,
+      });
+      logger.info("http.trials.approve", {
+        sessionId: session.id,
+        proposalId: proposal.id,
+        status: out.status,
+        durationMs: Math.max(now() - started, 0),
+      });
+      return c.json(out.body, out.status as 201);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  // List proposals for a session (pure read, never expires/mutates).
+  app.get("/api/sessions/:sessionId/trials", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const query = strictQuery(c, ["limit"]);
+    if (!query.ok) {
+      return validationError(c);
+    }
+    const parsed = AutonomyListQuerySchema.safeParse({
+      ...(query.values.limit !== undefined
+        ? { limit: query.values.limit }
+        : {}),
+    });
+    if (!parsed.success) {
+      return validationError(c);
+    }
+    if (trialProfileOf(config) === null) {
+      return trialsDisabled(c, false);
+    }
+    try {
+      const body = repo.listTrials(session.id, { limit: parsed.data.limit });
+      const items = body.items.map((item) => ({
+        ...item,
+        outcome: repo.readTrialWorkerOutcomeByProposal(session.id, item.id),
+      }));
+      return c.json({ ...body, items }, 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  // Read one session-owned proposal (pure read, never expires/mutates).
+  // Carries the grant outcome alongside (null until granted) so the UI
+  // trial section renders consumed/interrupted/revoked + authorized.
+  app.get("/api/sessions/:sessionId/trials/:proposalId", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const proposal = requireUuid(c, c.req.param("proposalId"), "proposalId");
+    if ("response" in proposal) {
+      return proposal.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    if (trialProfileOf(config) === null) {
+      return trialsDisabled(c, false);
+    }
+    try {
+      // Read by id directly: paging the list would 404 proposals that fall
+      // outside the default list limit (pure read, never expires/mutates).
+      const found = repo.readTrial(session.id, proposal.id);
+      const outcome = repo.readTrialWorkerOutcomeByProposal(
+        session.id,
+        proposal.id,
+      );
+      return c.json({ ...found, outcome }, 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  // Read the grant + frozen launch intent for one session-owned execution
+  // (pure read, never expires/mutates/claims). The durable worker outcome
+  // (grant status + authorized flag + fixed observed summary) rides along
+  // so the UI can render consumed/interrupted/revoked without a second
+  // read. The summary is fixed vocabulary (bridge-exit code or fixed
+  // fence/invalid reasons), never free text.
+  app.get("/api/sessions/:sessionId/trial-grants/:executionId", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const execution = requireUuid(c, c.req.param("executionId"), "executionId");
+    if ("response" in execution) {
+      return execution.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    if (trialProfileOf(config) === null) {
+      return trialsDisabled(c, false);
+    }
+    try {
+      const body = repo.readTrialLaunchIntent(session.id, execution.id);
+      const outcome = repo.readTrialWorkerOutcome(session.id, execution.id);
+      return c.json({ ...body, outcome }, 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  // Read one session-owned proposal WITH its grant outcome (pure read).
+  // The outcome (grant status + authorized + fixed summary) renders in the
+  // trial section; absent when no grant exists yet (staged proposals).
+
+  // Explicit expire/cancel of a staged proposal (KEYLESS, state-idempotent):
+  // Idempotency-Key is deliberately not used (same family as reject). No
+  // draining gate: expiring creates no Run and no queued work.
+  app.post("/api/sessions/:sessionId/trials/:proposalId/expire", async (c) => {
+    const started = now();
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const proposal = requireUuid(c, c.req.param("proposalId"), "proposalId");
+    if ("response" in proposal) {
+      return proposal.response;
+    }
+    if (c.req.header("idempotency-key") !== undefined) {
+      return validationError(c, "idempotency-key is not used for expire");
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    const raw = await readJsonBody(c);
+    if (!raw.ok) {
+      return validationError(c);
+    }
+    if (!isEmptyBody(raw.value)) {
+      return validationError(c);
+    }
+    if (trialProfileOf(config) === null) {
+      return trialsDisabled(c, true);
+    }
+    try {
+      repo.expireTrial(session.id, proposal.id, now());
+      // Read by id directly: paging the list would 404 proposals that fall
+      // outside the default list limit even though expire succeeded.
+      const found = repo.readTrial(session.id, proposal.id);
+      const body = TrialProposalViewSchema.parse(found);
+      logger.info("http.trials.expire", {
+        sessionId: session.id,
+        proposalId: proposal.id,
+        status: body.status,
+        durationMs: Math.max(now() - started, 0),
+      });
       return c.json(body, 200);
     } catch (error) {
       return mapDomainError(c, error);

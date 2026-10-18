@@ -414,8 +414,13 @@ function strictUtcMs(
  * Strict explicit-offset RFC3339 instant to epoch ms, or `undefined`.
  * All-day DATE strings, offset-less strings and impossible calendar values
  * are all `undefined` (fail closed) — never parsed loosely.
+ *
+ * Exported for reuse by the AV autonomy slice (task deadlines + purpose
+ * applicability windows share this exact grammar; the autonomy layer adds
+ * only its own length cap and genuine-sub-millisecond rejection). No
+ * behavior change to the action strategy itself.
  */
-function parseStrictInstantMs(value: string): number | undefined {
+export function parseStrictInstantMs(value: string): number | undefined {
   const seconds = STRICT_INSTANT_SECONDS.exec(value);
   if (seconds !== null) {
     const year = Number(seconds[1]);

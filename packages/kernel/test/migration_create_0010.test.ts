@@ -562,12 +562,15 @@ describe("M6 migration 0009 -> 0010 preserves reschedule and enables create", ()
     }
 
     // --- Run the ACTUAL migrator 0009 -> 0010 with a proper backup. ---
+    // Pinned to version 10 on purpose: this suite guards the M6 migration
+    // only, independent of the bundled default (now 11 with AV autonomy).
     const handle = openKernelDatabase(file);
     try {
       const result = await migrateKernelDatabase({
         db: handle.raw,
         backupDir: backups,
         migrationsDir: MIGRATIONS_DIR,
+        targetVersion: 10,
         now: new Date("2026-10-16T00:00:00.000Z"),
         backupId: "11111111-2222-4333-8444-555555555555",
       });
