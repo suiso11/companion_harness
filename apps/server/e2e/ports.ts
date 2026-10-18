@@ -23,6 +23,10 @@ export const TEXT_HANG = "hang";
 export const TEXT_CITE = "cite-me";
 /** Input text whose strategy answers V2 with structural r1+r2 citations. */
 export const TEXT_CITE_TWO = "cite-two";
+/** Input text whose fake strategy streams reasoning deltas + usage before answering. */
+export const TEXT_THINK = "think-stream";
+/** Input text exercising ephemeral reasoning deltas plus durable tool events. */
+export const TEXT_THINK_TOOLS = "think-tools";
 /** Input text whose strategy answers V2 with a structural m1 citation. */
 export const TEXT_CITE_MEM = "cite-mem";
 /**

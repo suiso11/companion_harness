@@ -68,6 +68,7 @@ import { createApp } from "../src/app.js";
 import { loadUiAssets } from "../src/bootstrap.js";
 import { loadServerConfig } from "../src/config.js";
 import { createStdServerLogger } from "../src/logger.js";
+import { ModelDeltaBus } from "../src/model_deltas.js";
 import {
   CITATION_SNAPSHOT_TEXT,
   E2E_APP_PORT,
@@ -78,6 +79,8 @@ import {
   TEXT_CITE_TWO,
   TEXT_FAIL,
   TEXT_HANG,
+  TEXT_THINK,
+  TEXT_THINK_TOOLS,
 } from "./ports.js";
 
 const dir = mkdtempSync(join(tmpdir(), "companion-e2e-"));
@@ -122,10 +125,140 @@ function inputText(ctx: RunStrategyContext): string {
   return typeof text === "string" ? text : "";
 }
 
+// PR-3 streaming simulation: the fake strategy publishes the same
+// ephemeral deltas the production agent path forwards (`reasoning` text
+// pieces + terminal `usage`) and records real durable `tool.*` events,
+// multiplexed on the run SSE stream via the shared ModelDeltaBus. Gated
+// on COMPANION_MODEL_STREAMING=1 (the e2e webServer sets it) so the
+// non-streaming default stays delta-free; other TEXT_* behaviors are
+// untouched.
+const STREAMING_SIM_ENABLED = process.env.COMPANION_MODEL_STREAMING === "1";
+const modelDeltaBus = new ModelDeltaBus();
+
+/** Abort-aware sleep for paced fake streaming (never hangs the engine). */
+function streamingSleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new StrategyError("execution_cancelled"));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(new StrategyError("execution_cancelled"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/** Fixed fake tool identity for the durable tool-phase simulation. */
+const E2E_TOOL_NAME = "calendar.search";
+const E2E_TOOL_ARGS_HASH = createHash("sha256")
+  .update("e2e-tool-args", "utf8")
+  .digest("hex");
+
 // Deterministic fake strategy: predictable behavior from input text only.
 const registry = new StrategyRegistry();
 registry.register("m0-default", async (ctx: RunStrategyContext) => {
   const text = inputText(ctx);
+  if (STREAMING_SIM_ENABLED && text.includes(TEXT_THINK_TOOLS)) {
+    // Reasoning deltas (ephemeral) -> durable tool.requested x2 ->
+    // durable tool.completed x2 -> usage -> terminal echo. The tool phase
+    // spans ~3s so a mid-run reload deterministically lands pre-terminal.
+    const runId = ctx.run.id;
+    modelDeltaBus.publishPiece({
+      runId,
+      step: 1,
+      kind: "reasoning",
+      text: "tool plan <b>one</b> & draft",
+      now: Date.now(),
+    });
+    modelDeltaBus.flush(runId);
+    await streamingSleep(300, ctx.signal);
+    const callA = randomUUID();
+    const callB = randomUUID();
+    repo.appendToolEvent(runId, "tool.requested", {
+      callId: callA,
+      callIndex: 1,
+      tool: E2E_TOOL_NAME,
+      argsHash: E2E_TOOL_ARGS_HASH,
+    });
+    await streamingSleep(1500, ctx.signal);
+    repo.appendToolEvent(runId, "tool.requested", {
+      callId: callB,
+      callIndex: 2,
+      tool: E2E_TOOL_NAME,
+      argsHash: E2E_TOOL_ARGS_HASH,
+    });
+    await streamingSleep(1500, ctx.signal);
+    repo.appendToolEvent(runId, "tool.completed", {
+      callId: callA,
+      callIndex: 1,
+      tool: E2E_TOOL_NAME,
+      actualOutcome: "succeeded",
+      reportedOutcome: "succeeded",
+      disposition: "accepted",
+      errorCode: null,
+      resultDigest: null,
+      reusedFromCallId: null,
+    });
+    await streamingSleep(400, ctx.signal);
+    repo.appendToolEvent(runId, "tool.completed", {
+      callId: callB,
+      callIndex: 2,
+      tool: E2E_TOOL_NAME,
+      actualOutcome: "succeeded",
+      reportedOutcome: "succeeded",
+      disposition: "accepted",
+      errorCode: null,
+      resultDigest: null,
+      reusedFromCallId: null,
+    });
+    modelDeltaBus.publishUsage({
+      runId,
+      step: 1,
+      promptTokens: 120,
+      completionTokens: 45,
+      elapsedMs: 3700,
+      now: Date.now(),
+    });
+    return { version: 1, text: `echo:${text}` };
+  }
+  if (STREAMING_SIM_ENABLED && text.includes(TEXT_THINK)) {
+    // Two paced reasoning pieces (markup-significant text proves
+    // plain-text rendering) + terminal usage, then the echo answer.
+    const runId = ctx.run.id;
+    modelDeltaBus.publishPiece({
+      runId,
+      step: 1,
+      kind: "reasoning",
+      text: '考え <b>one</b> & "quotes"',
+      now: Date.now(),
+    });
+    modelDeltaBus.flush(runId);
+    await streamingSleep(250, ctx.signal);
+    modelDeltaBus.publishPiece({
+      runId,
+      step: 1,
+      kind: "reasoning",
+      text: "続き two",
+      now: Date.now(),
+    });
+    modelDeltaBus.flush(runId);
+    await streamingSleep(250, ctx.signal);
+    modelDeltaBus.publishUsage({
+      runId,
+      step: 1,
+      promptTokens: 100,
+      completionTokens: 45,
+      elapsedMs: 2000,
+      now: Date.now(),
+    });
+    return { version: 1, text: `echo:${text}` };
+  }
   if (text.includes(TEXT_HANG)) {
     // Consume a sticky early release so a /release that raced ahead of
     // strategy registration still unblocks this hang deterministically.
@@ -228,6 +361,10 @@ const { app } = createApp({
   engine,
   logger,
   assets: loadUiAssets(),
+  // PR-3: ephemeral deltas multiplexed on run SSE streams (SSE-only,
+  // never persisted, never replayed). Only the TEXT_THINK* fake branches
+  // publish; every other spec's traffic stays delta-free.
+  modelDeltas: modelDeltaBus,
 });
 
 const appServer = serve(
