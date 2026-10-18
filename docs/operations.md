@@ -2357,17 +2357,17 @@ with review proof; formal release gates stay explicit.
 | item | status | boundary |
 | --- | --- | --- |
 | C01–C07 milestones / browser resilience / aggregate CI | HISTORICAL EVIDENCE (see README + C07) | 23/23 browser CI aggregate pinned to `56b7952a`; not re-asserted for this HEAD. |
-| C08 upstream adoption | **HOLD / NOT ADOPTED** | No adopted binding, pin, profile, or registration anywhere in this branch. |
+| C08 upstream adoption | **HOLD / NOT ADOPTED** | No adopted binding, pin, profile, or registration anywhere in this branch. 2026-10-18 決定: 段階的採用方針（案は docs/plan/c08_staged_adoption_plan.md）。 |
 | C09 MCP library policy | IMPLEMENTED (library) / server enablement HOLD | Mandatory host definitions, read-only lattice, stdio/HTTP bounds proven by review smokes; production registration absent. |
-| C10 consumer normalization | IMPLEMENTED / C10-08 production mapping **UNRESOLVED** | Whole-second-regex vs fractional-ISO gap persists as an adoption hold. |
-| C11 deletion boundary | IMPLEMENTED (consumer negatives) / C11-01 **BLOCKED** | Cancelled / bare 404-410 / thrown RPC / search omission are never positive evidence; actual upstream HTTP status UNKNOWN. |
+| C10 consumer normalization | IMPLEMENTED / C10-08 production mapping **UNRESOLVED** | Whole-second-regex vs fractional-ISO gap persists as an adoption hold. 2026-10-18 決定: gap 修正後に採用判定（共有 strict-instant predicate は PR #55）。 |
+| C11 deletion boundary | IMPLEMENTED (consumer negatives) / C11-01 **BLOCKED** | Cancelled / bare 404-410 / thrown RPC / search omission are never positive evidence; actual upstream HTTP status UNKNOWN. 2026-10-18 決定: positive evidence schema 先行（docs/plan/c11_positive_evidence_schema.md）。 |
 | C12–C16 pipeline / broker / config / fake E2E | IMPLEMENTED (consumer/fake) | Real-SDK + fake-harness proofs only; adoption HOLD. |
 | C17–C20 engine / M2 / UI slices | IMPLEMENTED | Covered by the 106-file / 1270-test battery above. |
-| C21 M5 Action composition | IMPLEMENTED (triple gate) | Config hints + dedicated write port + exact-instance match; disabled gate refuses staging / 409-before-repository. **No production write binding selected; dedicated write binding / adoption + triple-gate live use NOT authorized.** |
+| C21 M5 Action composition | IMPLEMENTED (triple gate) | Config hints + dedicated write port + exact-instance match; disabled gate refuses staging / 409-before-repository. **No production write binding selected; dedicated write binding / adoption + triple-gate live use NOT authorized.** 2026-10-18 決定: M5 live は validation（B3/B5・A3・C22 再実行）後で binding は derivePort 方式。 |
 | C22 action lifecycle E2E | IMPLEMENTED (fake) | Fake seams + real chromium (13/13 at `61b3573`, confirmed not rerun); not live. |
-| Windows 11 x64 manual smoke | **NOT EXECUTED** | Linux-only evidence here; §19.6 support gate stays open. |
-| Fresh OAuth | **SEPARATE DECISION, untouched** | No flow, token, or status read here (`No authstatus/login/tokenread`). |
-| Remind I01–I05 | **UNAPPROVED, untouched** | Other repo; no C23/C24 invented, nothing solved here. Superseded 2026-10-18 (status sync with docs/plan/active_projects_tasks.md:17, I05 現況): I02/I03 adapter + 二パス implemented with unit regressions; I05-equivalent live smoke (real Companion HTTP + synthetic gateway + REAL remind CLI tempDB) completed 2026-10-15. I01/I04 formal adoption decision, Windows manual smoke, current-HEAD CI remain open; perception/export/deletion not implemented. |
+| Windows 11 x64 manual smoke | **NOT EXECUTED** | Linux-only evidence here; §19.6 support gate stays open. 2026-10-18 決定: 手順書 docs/plan/d1_windows11_manual_smoke.md 作成、受入に含める。 |
+| Fresh OAuth | **SEPARATE DECISION, untouched** | No flow, token, or status read here (`No authstatus/login/tokenread`). 2026-10-18 決定: 実アカウント観測手順は docs/plan/c15_live_consent_procedure.md。 |
+| Remind I01–I05 | **UNAPPROVED, untouched** | Other repo; no C23/C24 invented, nothing solved here. Superseded 2026-10-18 (status sync with docs/plan/active_projects_tasks.md:17, I05 現況): I02/I03 adapter + 二パス implemented with unit regressions; I05-equivalent live smoke (real Companion HTTP + synthetic gateway + REAL remind CLI tempDB) completed 2026-10-15. I01/I04 formal adoption decision, Windows manual smoke, current-HEAD CI remain open; perception/export/deletion not implemented. 2026-10-18 決定: I01 F-I01-01..08 採用・I04 F-I04-01..06 採用（01 修正つき・07 要追加調査・08 先行記録）。 |
 | Candidate PR21/22 | **STACKED REVIEW ONLY** | PR20 baseline pins have known gaps; the newest candidate is NOT claimed as the current binding. |
 
 §20 write-binding source facts (parent-read, directly relevant to the

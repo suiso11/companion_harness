@@ -17,6 +17,13 @@
 - 現況追記（2026-10-15、履歴保持・上記ラベルは書き換えない）: I02/I03 実装＋単体回帰は適用済み（既存 suite green 継承、再実行なし）で I05 相当の live HTTP→synthetic gateway→REAL remind CLI tempDB smoke を完了（I05 現況参照）。I01/I04 正式採用判断・Windows manual・現行 CI は未完維持。perception/export/deletion は未実装維持。
 - 現況追記（2026-10-18、履歴保持・上記ラベルは書き換えない）: 残存実装の棚卸しを実施。判断・確認待ち事項は [decision_inputs_2026-10-18.md](decision_inputs_2026-10-18.md) に集約。operations.md の Remind I01–I05 行は同日 supersede 追記済み。
 - 現況追記（2026-10-18 検証、履歴保持・ラベル/checkbox不変）: origin/master `1596690`（PR #41 merge）で CI run `39097183807` が windows/ubuntu × check/e2e 全 success、open PR 0。decision_inputs B1–B5 の5レビュー指摘は master コードで修正済み（B1 frozen-inherited env freeze `packages/connector-mcp/src/client.ts`、B2 sub-ms 拒否 `packages/connector-calendar/src/rescheduleWrite.ts` `isStrictCalendarInstant`、B3 注入 binding の derivePort、B4 identity 長さ pre-DB preflight `apps/server/src/bootstrap.ts`、B5 structuredContent 優先 `createWrite.ts`/`rescheduleWrite.ts`）。PR51 Codex 指摘14件は13件修正確認、残1件（restart fence 対 recoverOnBoot 順序）は booted claimed grant を fence が revoke せず recovery で決着させる実装で対応済みと判断。AV trial E2E は run7 で scenario A（bridge-exit:0 authorized）/B（STOP→revoked bridge-exit:143）とも pass。判断待ち（decision_inputs）・live/OAuth・Windows manual・remind 書込は未着手維持。
+- 現況追記（2026-10-18 決定、decider haruka・詳細全文は [decision_inputs_2026-10-18.md](decision_inputs_2026-10-18.md)）: A1 push 許可 → 8357a6e は PR #41（merged 2026-10-18, merge 1596690）で superseded のため push せず（remote d9287d8 非 ff）。A2 作業コピー保持（A1/B5 完了後に破棄）。A3 merge 後 HEAD で CI 再観測（master 1596690 run 39097183807 全 green、保留 PR merge 後に再実施）。
+- 現況追記（2026-10-18 決定）: B1–B5 決定。master で実装済み、B2/C10-08 共有 strict-instant predicate は PR #55。
+- 現況追記（2026-10-18 決定）: C08 段階的採用（案: [c08_staged_adoption_plan.md](c08_staged_adoption_plan.md)）、C10-08 gap 修正後採用判定（PR #55）、C11-01 schema 先行（[c11_positive_evidence_schema.md](c11_positive_evidence_schema.md)）、C11-07 schema 合意後に観測手順・runtime logger 追加なし、C15 実アカウント観測手順（[c15_live_consent_procedure.md](c15_live_consent_procedure.md)）、M5 live は validation（B3/B5・A3・C22 再実行）後、binding は derivePort 方式。
+- 現況追記（2026-10-18 決定）: D1 手順書（[d1_windows11_manual_smoke.md](d1_windows11_manual_smoke.md)）、D2 受入に含める（PR #55 smoke:startup）。
+- 現況追記（2026-10-18 決定）: R09/R13/R14 決定は remind plan.md に記録（remind PR）。
+- 現況追記（2026-10-18 決定）: I01 F-I01-01..08 採用、I04 F-I04-01..06 採用（01 修正つき）・07 要追加調査・08 先行記録。
+- 現況追記（2026-10-18 決定）: AV-01..10 方針合意（POLICY ≠ 実装・権限）。
 
 ## 凡例・件数・着手順
 | 親範囲 | 親数 | サブチェック数 |
