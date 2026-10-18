@@ -90,7 +90,7 @@ function allLabels(request: ChatRequest): string[] {
   const text = JSON.stringify(request.messages ?? []);
   const out: string[] = [];
   const seen = new Set<string>();
-  for (const match of text.matchAll(/s[PTMFR][1-9]\d*/g)) {
+  for (const match of text.matchAll(/s[PTMFRQ][1-9]\d*/g)) {
     const label = match[0] ?? "";
     if (label !== "" && !seen.has(label)) {
       seen.add(label);

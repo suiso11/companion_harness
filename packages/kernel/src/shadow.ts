@@ -168,6 +168,8 @@ export interface ShadowReaderTask {
   id: string;
   scope: string;
   title: string;
+  /** Bounded operative detail (null when the task carries none). */
+  body: string | null;
   kind: string;
   speaker: string;
   deadline: string | null;
@@ -175,6 +177,8 @@ export interface ShadowReaderTask {
   status: string;
   version: number;
   holdReason: string | null;
+  /** Reconsideration condition (held tasks only; null otherwise). */
+  reconsiderTrigger: string | null;
 }
 
 /**
@@ -390,6 +394,7 @@ interface RawJob {
   trigger_event: string;
   trigger_id: string | null;
   request_key: string | null;
+  request_reason: string | null;
   control_version: number;
   scope_epoch: number;
   claim_control_version: number | null;
@@ -665,11 +670,15 @@ export function enqueueShadowSourceInTx(
     );
     return { jobId: null, scopeEpoch: epoch, reused: false };
   }
-  // Unpaused: reuse a live job for the same trigger (no duplicate queue
-  // bursts from multi-row mutations such as parent-held cascades).
+  // Unpaused: reuse a live PENDING job for the same trigger (no duplicate
+  // queue bursts from multi-row mutations such as parent-held cascades).
+  // A CLAIMED job is never reused: the epoch bump below fences its
+  // in-flight completion to held-on-drift, so coalescing into it would
+  // leave the new state with no pending successor (event lost). The new
+  // event therefore queues its own pending job behind the live lease.
   const live = db
     .prepare(
-      "SELECT id FROM shadow_jobs WHERE session_id = ? AND scope = ? AND trigger_event = ? AND ((trigger_id IS NULL AND ? IS NULL) OR trigger_id = ?) AND status IN ('pending','claimed') ORDER BY created_at ASC, id ASC LIMIT 1",
+      "SELECT id FROM shadow_jobs WHERE session_id = ? AND scope = ? AND trigger_event = ? AND ((trigger_id IS NULL AND ? IS NULL) OR trigger_id = ?) AND status = 'pending' ORDER BY created_at ASC, id ASC LIMIT 1",
     )
     .get(session, scope, input.triggerEvent, input.sourceId, input.sourceId) as
     | { id: string }
@@ -911,14 +920,21 @@ export function requestShadowDeliberation(
     const paused = control.paused === 1;
     const jobId = generateId();
     const status = paused ? "held" : "pending";
+    // The explicit request text is persisted on the job row (NULL when the
+    // caller passes no reason): the claim path copies it into the frozen
+    // context as UNTRUSTED request evidence (citable ONLY as `sQ1`), so
+    // different requested focuses freeze different deliberation input.
+    // Policy-change jobs (the other INSERT below) always store NULL.
+    const storedReason = reason ?? null;
     db.prepare(
-      "INSERT INTO shadow_jobs (id, session_id, scope, kind, status, trigger_event, trigger_id, request_key, control_version, scope_epoch, claim_control_version, claim_scope_epoch, context_json, model_decision_json, policy_code, version, lease_owner, lease_expires_at, hold_reason, fail_code, created_at, updated_at) VALUES (?, ?, ?, 'explicit_request', ?, 'explicit.request', NULL, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, 1, NULL, NULL, ?, NULL, ?, ?)",
+      "INSERT INTO shadow_jobs (id, session_id, scope, kind, status, trigger_event, trigger_id, request_key, request_reason, control_version, scope_epoch, claim_control_version, claim_scope_epoch, context_json, model_decision_json, policy_code, version, lease_owner, lease_expires_at, hold_reason, fail_code, created_at, updated_at) VALUES (?, ?, ?, 'explicit_request', ?, 'explicit.request', NULL, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, 1, NULL, NULL, ?, NULL, ?, ?)",
     ).run(
       jobId,
       session,
       scope,
       status,
       key,
+      storedReason,
       control.version,
       epoch,
       paused ? "requested_while_paused" : null,
@@ -1282,6 +1298,9 @@ export function claimShadowJob(
           ...(options.memories !== undefined
             ? { memories: options.memories }
             : {}),
+          // Durable explicit-request text (NULL for policy-change jobs):
+          // frozen as UNTRUSTED request evidence (citable ONLY as `sQ1`).
+          requestReason: row.request_reason,
         });
       } catch (error) {
         if (error instanceof ShadowContextTooLargeError) {
@@ -1350,10 +1369,13 @@ export function claimShadowJob(
  * Bounded context builder: captures the FULL active policy records for
  * (session, scope) — every purpose with original-vs-interpretation, kind +
  * explicit/inferred, source/scope/applicability, lifecycle/supersession;
- * every task with versions + parent links; explicit conflict pairs; ALL
+ * every task with versions + parent links + bounded body +
+ * reconsiderTrigger; explicit conflict pairs; ALL
  * active constraints and ALL permission CLAIMs unranked (created order is
  * preserved, never relevance-ranked); prior failure codes (task hold
- * reasons + earlier shadow holds in scope); EXPLICIT deadlines verbatim.
+ * reasons + earlier shadow holds in scope); EXPLICIT deadlines verbatim;
+ * plus the UNTRUSTED explicit-request text (`options.requestReason`,
+ * citable ONLY as `sQ1`, null for policy-change jobs).
  * Throws `ShadowContextTooLargeError` when the scope exceeds the bounded
  * window instead of silently dropping records.
  */
@@ -1365,6 +1387,12 @@ export function buildShadowContext(
   now: number,
   options: {
     memories?: ReadonlyArray<{ snippet: string }>;
+    /**
+     * UNTRUSTED explicit-request text persisted on the job row (NULL for
+     * policy-change jobs): frozen verbatim into the context so different
+     * requested focuses deliberate different input, citable ONLY as `sQ1`.
+     */
+    requestReason?: string | null;
   } = {},
 ): ShadowJobContext {
   const at = nowMs(now);
@@ -1415,8 +1443,10 @@ export function buildShadowContext(
     kind: task.kind,
     speaker: task.speaker,
     title: task.title,
+    body: task.body,
     deadline: task.deadline,
     parentPurposeId: task.parentPurposeId,
+    reconsiderTrigger: task.reconsiderTrigger,
   }));
   const permissionClaims = frozenPurposes
     .filter(
@@ -1503,6 +1533,9 @@ export function buildShadowContext(
         explicitDeadlines,
         priorFailures,
         memories,
+        // UNTRUSTED requester text (never obeyed): null for policy-change
+        // jobs and reason-less requests (no `sQ1` label exists for them).
+        requestReason: options.requestReason ?? null,
         claimControlVersion: control.version,
         claimScopeEpoch: epoch,
         capturedAt: at,
@@ -1697,6 +1730,11 @@ function validateEvidenceAndDraft(
   for (const c of context.permissionClaims) labels.add(c.label);
   for (const f of context.priorFailures) labels.add(f.label);
   for (const m of context.memories) labels.add(m.label);
+  // The explicit-request text is citable ONLY as the single `sQ1` label,
+  // and only when a reason was actually frozen (reason-less and
+  // policy-change jobs have no `sQ1`; the nullish read keeps pre-reason
+  // frozen payloads on the honest branch).
+  if ((context.requestReason ?? null) !== null) labels.add("sQ1");
   for (const id of parsed.evidenceIds) {
     if (!labels.has(id)) {
       throw new RepositoryValidationError(

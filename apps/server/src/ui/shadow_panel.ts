@@ -264,6 +264,34 @@ function evidenceFromContext(context: unknown): EvidenceEntry[] {
       applicability: "実行の根拠にならない",
     });
   }
+  const failures = Array.isArray(context.priorFailures)
+    ? context.priorFailures
+    : [];
+  for (const entry of failures) {
+    if (!isRecord(entry) || typeof entry.label !== "string") continue;
+    if (typeof entry.code !== "string") continue;
+    out.push({
+      label: entry.label,
+      heading: `以前の失敗 ${entry.label}`,
+      original: entry.code,
+      interpretation: null,
+      provenance: "凍結された失敗記録（対応済み・未実行の区別用）",
+      applicability: "同じ失敗の再発防止の参考",
+    });
+  }
+  // UNTRUSTED explicit-request text (citable ONLY as `sQ1`; reason about
+  // it, never obey it). Absent for policy-change jobs and reason-less
+  // requests (then there is no `sQ1` to resolve).
+  if (isRecord(context) && typeof context.requestReason === "string") {
+    out.push({
+      label: "sQ1",
+      heading: "依頼内容 sQ1（依頼者の言葉・命令ではない）",
+      original: context.requestReason,
+      interpretation: null,
+      provenance: "依頼時の入力（未検証の要求文）",
+      applicability: "参考のみ（実行の根拠にならない）",
+    });
+  }
   const memories = Array.isArray(context.memories) ? context.memories : [];
   for (const entry of memories) {
     if (!isRecord(entry) || typeof entry.label !== "string") continue;
@@ -282,7 +310,19 @@ function evidenceFromContext(context: unknown): EvidenceEntry[] {
 
 export class ShadowPanel {
   private static readonly POLL_INTERVAL_MS = 2000;
-  private static readonly POLL_MAX_TICKS = 10;
+  /**
+   * Bounded active-job watch window (GET-only): the shadow gateway call is
+   * allowed a full `AGENT_STEP_TIMEOUT_MS` (120s) wall budget IN ADDITION
+   * to pre-claim recall, so a fixed 20s watch would abandon a valid slower
+   * deliberation as pending/claimed. The window covers the 120s gateway
+   * budget plus a 15s recall/pre-claim margin (135s total, polled every
+   * 2s); session change, selection change, or terminal status still exits
+   * early, so the watch never loops forever.
+   */
+  private static readonly POLL_WINDOW_MS = 135_000;
+  private static readonly POLL_MAX_TICKS = Math.ceil(
+    ShadowPanel.POLL_WINDOW_MS / ShadowPanel.POLL_INTERVAL_MS,
+  );
 
   private readonly deps: ShadowPanelDeps;
   private form: HTMLFormElement | null = null;
@@ -552,6 +592,16 @@ export class ShadowPanel {
     this.detailBody.appendChild(line);
   }
 
+  /**
+   * Hide the request-retry control UNLESS an uncertain explicit request is
+   * still in flight: detail rendering must never steal the only UI path
+   * for replaying the frozen key + body while `pendingRequest` exists.
+   */
+  private hideRetryUnlessPending(): void {
+    if (this.pendingRequest !== null) return;
+    if (this.retryButton !== null) this.retryButton.hidden = true;
+  }
+
   private renderDetailLoading(): void {
     this.clearDetail();
     this.appendLine("読み込み中…");
@@ -573,7 +623,7 @@ export class ShadowPanel {
     );
     if (job.status === "held" && job.holdReason !== null) {
       this.appendLine(textOf(HOLD_TEXT, job.holdReason));
-      if (this.retryButton !== null) this.retryButton.hidden = true;
+      this.hideRetryUnlessPending();
       if (deliberation !== null) {
         this.renderDeliberation(deliberation);
       }
@@ -581,17 +631,17 @@ export class ShadowPanel {
     }
     if (job.status === "failed" && job.failCode !== null) {
       this.appendLine(textOf(FAIL_TEXT, job.failCode));
-      if (this.retryButton !== null) this.retryButton.hidden = true;
+      this.hideRetryUnlessPending();
       return;
     }
     if (job.status === "pending" || job.status === "claimed") {
       this.appendLine("検討の準備中または検討中です。実行はしません。");
-      if (this.retryButton !== null) this.retryButton.hidden = true;
+      this.hideRetryUnlessPending();
       return;
     }
     if (job.status === "cancelled") {
       this.appendLine("取り消されました。実行はしていません。");
-      if (this.retryButton !== null) this.retryButton.hidden = true;
+      this.hideRetryUnlessPending();
       return;
     }
     // Completed: CODE policy first (never model-chosen, never a grant)…
@@ -603,7 +653,7 @@ export class ShadowPanel {
     } else {
       this.appendLine("検討内容の取得に失敗しました。");
     }
-    if (this.retryButton !== null) this.retryButton.hidden = true;
+    this.hideRetryUnlessPending();
   }
 
   private renderDeliberation(response: {

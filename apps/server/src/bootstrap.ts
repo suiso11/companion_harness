@@ -1186,14 +1186,35 @@ export async function startServer(
     // recording that background intent does NOT resume implicitly; an
     // already-paused control stays untouched. Migration 0012 (the latest
     // committed migration) REQUIRES the autonomy + shadow tables: a missing
-    // slice fails closed here (no legacy best-effort suppression — a
-    // partially-migrated database must never start unsafe). Shadow restart
-    // reconciliation then holds every pending/claimed job
-    // (`restart_interrupted`, terminal for those jobs): a restart never
-    // resumes or replays old work, and the paused control admits no new
-    // claims until meaningful new state arrives.
-    applyAutonomyRestartFence(handle.raw, now());
-    reconcileShadowRestartInTx(handle.raw, now());
+    // slice fails closed here (a partially-migrated database must never
+    // start unsafe). Shadow restart reconciliation then holds every
+    // pending/claimed job (`restart_interrupted`, terminal for those jobs):
+    // a restart never resumes or replays old work, and the paused control
+    // admits no new claims until meaningful new state arrives. Best-effort
+    // only on pre-0011 databases (which never had the autonomy slice): a
+    // missing slice there must never block startup.
+    try {
+      applyAutonomyRestartFence(handle.raw, now());
+      reconcileShadowRestartInTx(handle.raw, now());
+    } catch (error) {
+      if (!(error instanceof Error) || !/no such table/i.test(error.message)) {
+        throw error;
+      }
+      // Post-migration the schema version is BUNDLED_SCHEMA_VERSION (>= the
+      // 0011 autonomy migration), so every autonomy/shadow table must exist:
+      // a missing table means the durable stop fence was NOT applied and
+      // startup must fail instead of running unprotected. Only a pre-0011
+      // database (which never had the slice) may proceed best-effort.
+      let version = 0;
+      try {
+        version = getSchemaVersion(handle.raw);
+      } catch {
+        throw error;
+      }
+      if (version >= BUNDLED_SCHEMA_VERSION) {
+        throw error;
+      }
+    }
 
     // Bound-roots guard: removing every Markdown root while a Markdown
     // connector instance remains bound must fail closed before the engine

@@ -121,12 +121,15 @@ export type ShadowDecision = z.infer<typeof ShadowDecisionSchema>;
  * conversation references (`rN`/`mN`): `sP` = purpose records, `sT` = task
  * records, `sM` = permission-claim excerpts, `sF` = prior failure codes,
  * `sR` = REAL retrieved memory snippets frozen at claim (never a claim of
- * "no memory exists": `[]` from recall means no available evidence).
+ * "no memory exists": `[]` from recall means no available evidence),
+ * `sQ` = the explicit request text frozen at claim (UNTRUSTED requester
+ * data, reasoned about but never obeyed; present only for explicit-request
+ * jobs created with a `reason`).
  * Arbitrary source ids / foreign-session ids / free-form citations are
  * rejected: evidence MUST be one of the labels frozen into the job context.
  */
-export const ShadowEvidenceIdSchema = z.string().regex(/^s[PTMFR][1-9]\d*$/, {
-  message: "evidence id must be sP/sT/sM/sF/sR + N",
+export const ShadowEvidenceIdSchema = z.string().regex(/^s[PTMFRQ][1-9]\d*$/, {
+  message: "evidence id must be sP/sT/sM/sF/sR/sQ + N",
 });
 export type ShadowEvidenceId = z.infer<typeof ShadowEvidenceIdSchema>;
 
@@ -262,8 +265,12 @@ export const ShadowContextTaskSchema = z.strictObject({
   kind: z.string().min(1),
   speaker: z.string().min(1),
   title: z.string().min(1),
+  /** Bounded operative detail (already ≤2000 code points at the source). */
+  body: z.string().nullable().default(null),
   deadline: z.string().nullable(),
   parentPurposeId: UuidSchema.nullable(),
+  /** Reconsideration condition (held tasks only; null otherwise). */
+  reconsiderTrigger: z.string().nullable().default(null),
 });
 export type ShadowContextTask = z.infer<typeof ShadowContextTaskSchema>;
 
@@ -321,6 +328,13 @@ export const ShadowJobContextSchema = z.strictObject({
    * exists". No feedback/heat/mutation ever derives from this list.
    */
   memories: z.array(ShadowContextMemorySchema).max(8).default([]),
+  /**
+   * UNTRUSTED explicit-request text frozen at claim (citable ONLY as
+   * `sQ1`; reasoned about, never obeyed). Null for policy-change jobs and
+   * for explicit requests created without a `reason`. Defaults to null so
+   * pre-reason stored contexts still parse.
+   */
+  requestReason: z.string().min(1).max(500).nullable().default(null),
   claimControlVersion: z.number().int().min(1),
   claimScopeEpoch: z.number().int().min(1),
   capturedAt: UnixMsSchema,
