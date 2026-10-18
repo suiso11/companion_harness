@@ -153,6 +153,10 @@ let runTurns = new Map<string, string>();
 let pendingRequest: { key: string; text: string; uiContext: unknown } | null =
   null;
 let citationSeq = 0;
+// Boot-seeded pre-subscription view (cancel_requested stop notice): consumed
+// by the next subscribe() so the seeded notice survives the stream open,
+// mirroring the legacy runViews seed preservation.
+let seededRunId: string | null = null;
 let watchTimers = new Map<string, number>();
 
 function isProposalSummary(item: unknown): item is ProposalSummary {
@@ -530,7 +534,10 @@ async function send(): Promise<void> {
     showNotice("送信できませんでした。もう一度お試しください");
     return;
   }
-  const body = posted.body as { turnId?: unknown; run?: { id?: unknown } };
+  const body = (posted.body ?? {}) as {
+    turnId?: unknown;
+    run?: { id?: unknown };
+  };
   const run = body.run;
   const runId =
     typeof run === "object" && run !== null
@@ -584,7 +591,10 @@ async function retry(turnId: string): Promise<void> {
     {},
     key,
   );
-  const body = posted.body as { turnId?: unknown; run?: { id?: unknown } };
+  const body = (posted.body ?? {}) as {
+    turnId?: unknown;
+    run?: { id?: unknown };
+  };
   const run = body.run;
   const runId =
     typeof run === "object" && run !== null
@@ -673,10 +683,17 @@ function subscribe(runId: string): void {
   closeStream();
   activeRunId = runId;
   retryTurnId = null;
-  liveAnswer = [];
-  liveVisible = false;
-  runView = { ...INITIAL_RUN_VIEW };
-  activeRunCursor = 0;
+  if (seededRunId === runId) {
+    // Boot-seeded pre-subscription view (e.g. the cancel_requested stop
+    // notice): preserved across the stream open; the real events stay
+    // authoritative for the terminal.
+    seededRunId = null;
+  } else {
+    liveAnswer = [];
+    liveVisible = false;
+    runView = { ...INITIAL_RUN_VIEW };
+    activeRunCursor = 0;
+  }
   showNotice(runView.notice);
   const sid = sessionId;
   const stored = readStoredCursor(runId);
@@ -1018,7 +1035,7 @@ async function updateReferenceContextCas(
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ version: stored.version, items }),
-      } as RequestInit);
+      });
     } catch {
       return;
     }
@@ -1624,11 +1641,21 @@ async function submitLogin(): Promise<void> {
 }
 
 // --- boot (C06 reload recovery) ---
+// Legacy order (client.ts boot): recover/discover first so a held discovery
+// gates boot and a recovered run owns the composer BEFORE the final
+// hydration; the subscription stays deferred until after hydration so the
+// durable history (and its terminal dedup anchor) registers first.
 async function bootSession(): Promise<void> {
   if (sessionId === null) return;
   const sid = sessionId;
-  // Pending-key recovery: accepted keys replay before discovery.
-  let recovered: { runId: string; turnId: string | null } | null = null;
+  // Pending-key recovery: accepted keys replay before discovery. The stored
+  // idempotency response carries no status; the accepted run is seeded only
+  // by live events/status after subscription.
+  let descriptor: {
+    runId: string;
+    turnId: string | null;
+    status: string | null;
+  } | null = null;
   const pendingKey = lsGet(LS_PENDING_KEY);
   if (pendingKey !== null && pendingKey.length > 0) {
     try {
@@ -1647,10 +1674,11 @@ async function bootSession(): Promise<void> {
             ? (storedRun as { id?: unknown }).id
             : null;
         if (typeof runId === "string") {
-          recovered = {
+          descriptor = {
             runId,
             turnId:
               typeof body.body?.turnId === "string" ? body.body.turnId : null,
+            status: null,
           };
         }
       } else if (
@@ -1666,49 +1694,65 @@ async function bootSession(): Promise<void> {
     }
   }
   if (sessionId !== sid) return;
+  // Active-run discovery. A held discovery gates boot here (before
+  // hydration); a 404 session or 200 `{run:null}` yields no descriptor.
+  if (descriptor === null) {
+    try {
+      const discovered = await fetchJson(
+        `/api/sessions/${encodeURIComponent(sid)}/active-run`,
+      );
+      if (discovered.status === 200 && sessionId === sid) {
+        const run = (discovered.body as { run?: unknown }).run;
+        const r = (typeof run === "object" && run !== null ? run : {}) as {
+          id?: unknown;
+          status?: unknown;
+          turnId?: unknown;
+        };
+        if (
+          typeof r.id === "string" &&
+          typeof r.status === "string" &&
+          ACTIVE_RUN_STATUSES.has(r.status)
+        ) {
+          descriptor = {
+            runId: r.id,
+            turnId: typeof r.turnId === "string" ? r.turnId : null,
+            status: r.status,
+          };
+        }
+      }
+    } catch {
+      // Best effort.
+    }
+  }
+  if (sessionId !== sid) return;
+  // The recovered run owns the composer BEFORE the final hydration: a
+  // held/slow hydration must never expose an enabled Send for a genuinely
+  // active run. A discovered non-terminal `cancel_requested` also seeds its
+  // 「停止しました」notice here (cursor stays 0, never the discovery
+  // `eventSeq`); the actual subscription happens after hydration.
+  if (descriptor !== null) {
+    if (descriptor.turnId !== null) {
+      activeTurnId = descriptor.turnId;
+      runTurns.set(descriptor.runId, descriptor.turnId);
+    }
+    activeRunId = descriptor.runId;
+    if (descriptor.status === "cancel_requested") {
+      runView = { ...INITIAL_RUN_VIEW, notice: "停止しました" };
+      activeRunCursor = 0;
+      showNotice("停止しました");
+      seededRunId = descriptor.runId;
+    }
+  }
+  if (sessionId !== sid) return;
   await hydrateHistory();
   if (sessionId !== sid) return;
   await syncActions();
   if (sessionId !== sid) return;
-  if (recovered !== null) {
-    if (recovered.turnId !== null) {
-      activeTurnId = recovered.turnId;
-      runTurns.set(recovered.runId, recovered.turnId);
-    }
-    subscribe(recovered.runId);
-    return;
-  }
-  // Active-run discovery.
-  try {
-    const discovered = await fetchJson(
-      `/api/sessions/${encodeURIComponent(sid)}/active-run`,
-    );
-    if (discovered.status === 200 && sessionId === sid) {
-      const run = (discovered.body as { run?: unknown }).run;
-      const r = (typeof run === "object" && run !== null ? run : {}) as {
-        id?: unknown;
-        status?: unknown;
-        turnId?: unknown;
-      };
-      if (
-        typeof r.id === "string" &&
-        typeof r.status === "string" &&
-        ACTIVE_RUN_STATUSES.has(r.status)
-      ) {
-        if (typeof r.turnId === "string") {
-          activeTurnId = r.turnId;
-          runTurns.set(r.id, r.turnId);
-        }
-        if (r.status === "cancel_requested") {
-          runView = { ...INITIAL_RUN_VIEW, notice: "停止しました" };
-          activeRunCursor = 0;
-          showNotice("停止しました");
-        }
-        subscribe(r.id);
-      }
-    }
-  } catch {
-    // Best effort.
+  // The captured run id is subscribed exactly once, even when the run has
+  // already completed meanwhile: the durable event backlog renders or
+  // dedups, and the terminal view releases the composer normally.
+  if (descriptor !== null) {
+    subscribe(descriptor.runId);
   }
 }
 

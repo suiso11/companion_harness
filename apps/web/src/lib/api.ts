@@ -36,12 +36,16 @@ async function readJson(response: Response): Promise<unknown> {
   }
 }
 
-export async function fetchJson(path: string): Promise<ApiResult> {
+export async function fetchJson(
+  path: string,
+  init?: { method?: string; headers?: Record<string, string>; body?: string },
+): Promise<ApiResult> {
   let response: Response;
   try {
     response = await fetch(path, {
       credentials: "same-origin",
-      headers: { accept: "application/json" },
+      ...init,
+      headers: { accept: "application/json", ...(init?.headers ?? {}) },
     });
   } catch {
     return { status: 0, body: null };
