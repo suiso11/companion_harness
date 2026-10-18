@@ -21,15 +21,22 @@ import {
 import { describe, expect, it } from "vitest";
 import { type CreatedServerApp, createApp } from "../src/app.js";
 import {
+  DEFAULT_REMOTE_ABSOLUTE_TIMEOUT_MS,
+  DEFAULT_REMOTE_IDLE_TIMEOUT_MS,
+  DEFAULT_REMOTE_LOCKOUT_MS,
+  DEFAULT_REMOTE_MAX_FAILURES,
   loadServerConfig,
   parseRemoteConfig,
   type RemoteConfig,
   ServerConfigError,
 } from "../src/config.js";
 import { createCollectingLogger } from "../src/logger.js";
+import { createMemoryRemoteSessionStore } from "../src/remote_session.js";
 
 const ALLOWED_ORIGIN = "https://happy-meerkat.ts.net";
 const ALLOWED_HOST = "happy-meerkat.ts.net";
+/** Slice (b): the enabled fixture now wires a stub password verifier. */
+const TEST_PASSWORD = "test-password-1";
 
 interface Fixture extends CreatedServerApp {
   repo: KernelRepository;
@@ -58,16 +65,63 @@ async function makeApp(remote: RemoteConfig | null): Promise<Fixture> {
           remote: Object.freeze({
             enabled: remote.enabled,
             allowedOrigins: Object.freeze([...remote.allowedOrigins]),
+            passwordFile: remote.passwordFile,
+            absoluteTimeoutMs: remote.absoluteTimeoutMs,
+            idleTimeoutMs: remote.idleTimeoutMs,
+            maxFailures: remote.maxFailures,
+            lockoutMs: remote.lockoutMs,
           }),
         });
   const { logger } = createCollectingLogger("debug");
   const engine = new RunEngine({ db: handle.raw, repo, cancelGraceMs: 30 });
-  const created = createApp({ config, repo, engine, logger });
+  // Slice (b): enabled remote requires session wiring (fail closed);
+  // the stub accepts exactly TEST_PASSWORD. Disabled remote ignores it.
+  const created = createApp({
+    config,
+    repo,
+    engine,
+    logger,
+    ...(remote === null
+      ? {}
+      : {
+          remoteStore: createMemoryRemoteSessionStore(),
+          remotePassword: {
+            verify: (password: string): boolean => password === TEST_PASSWORD,
+          },
+        }),
+  });
   return { ...created, repo, close: () => closeKernelDatabase(handle) };
 }
 
 function enabledRemote(): RemoteConfig {
-  return { enabled: true, allowedOrigins: [ALLOWED_ORIGIN] };
+  return {
+    enabled: true,
+    allowedOrigins: [ALLOWED_ORIGIN],
+    passwordFile: null,
+    absoluteTimeoutMs: DEFAULT_REMOTE_ABSOLUTE_TIMEOUT_MS,
+    idleTimeoutMs: DEFAULT_REMOTE_IDLE_TIMEOUT_MS,
+    maxFailures: DEFAULT_REMOTE_MAX_FAILURES,
+    lockoutMs: DEFAULT_REMOTE_LOCKOUT_MS,
+  };
+}
+
+/** Slice (b): log in over the wired stub and return the Cookie value. */
+async function loginCookie(f: Fixture): Promise<string> {
+  const res = await f.app.request("/api/remote/login", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      host: ALLOWED_HOST,
+      origin: ALLOWED_ORIGIN,
+    },
+    body: JSON.stringify({ password: TEST_PASSWORD }),
+  });
+  expect(res.status).toBe(200);
+  const setCookie = res.headers.get("set-cookie");
+  expect(setCookie).toContain("companion_remote=");
+  const pair = setCookie?.split(";")[0];
+  expect(pair).toMatch(/^companion_remote=[0-9a-f]{64}$/);
+  return pair as string;
 }
 
 async function createSessionId(f: Fixture): Promise<string> {
@@ -127,8 +181,43 @@ describe("remote enabled (allowlist)", () => {
         headers: { host: "127.0.0.1" },
       });
       expect(loopback.status).toBe(200);
+      // Slice (b): API reads/writes need the session cookie now.
+      const cookie = await loginCookie(f);
       const sessionId = await createSessionId(f);
       const created = await f.app.request("/api/sessions", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          host: ALLOWED_HOST,
+          origin: ALLOWED_ORIGIN,
+          "idempotency-key": randomUUID(),
+          cookie,
+        },
+        body: "{}",
+      });
+      expect(created.status).toBe(201);
+      expect(created.headers.get("access-control-allow-origin")).toBeNull();
+      // Loopback same-origin mutation still passes (with a session).
+      const local = await f.app.request("/api/sessions", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          host: "127.0.0.1",
+          origin: "http://127.0.0.1",
+          "idempotency-key": randomUUID(),
+          cookie,
+        },
+        body: "{}",
+      });
+      expect(local.status).toBe(201);
+      // Allowed GET read passes with the allowlisted Origin + session.
+      const read = await f.app.request(
+        `/api/sessions/${sessionId}/active-run`,
+        { headers: { host: ALLOWED_HOST, origin: ALLOWED_ORIGIN, cookie } },
+      );
+      expect(read.status).toBe(200);
+      // And the same requests without the cookie are 401 (slice b).
+      const bare = await f.app.request("/api/sessions", {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -138,26 +227,7 @@ describe("remote enabled (allowlist)", () => {
         },
         body: "{}",
       });
-      expect(created.status).toBe(201);
-      expect(created.headers.get("access-control-allow-origin")).toBeNull();
-      // Loopback same-origin mutation still passes.
-      const local = await f.app.request("/api/sessions", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          host: "127.0.0.1",
-          origin: "http://127.0.0.1",
-          "idempotency-key": randomUUID(),
-        },
-        body: "{}",
-      });
-      expect(local.status).toBe(201);
-      // Allowed GET read passes with the allowlisted Origin.
-      const read = await f.app.request(
-        `/api/sessions/${sessionId}/active-run`,
-        { headers: { host: ALLOWED_HOST, origin: ALLOWED_ORIGIN } },
-      );
-      expect(read.status).toBe(200);
+      expect(bare.status).toBe(401);
       void sessionId;
     } finally {
       f.close();
@@ -213,19 +283,31 @@ describe("remote enabled (allowlist)", () => {
         },
       );
       expect(fetchSite.status).toBe(403);
-      // Same-origin GET without Origin stays normal.
+      // Same-origin GET without Origin stays normal (with a session).
+      const cookie = await loginCookie(f);
       const sameOrigin = await f.app.request(
         `/api/sessions/${sessionId}/active-run`,
         {
-          headers: { host: ALLOWED_HOST, "sec-fetch-site": "same-origin" },
+          headers: {
+            host: ALLOWED_HOST,
+            "sec-fetch-site": "same-origin",
+            cookie,
+          },
         },
       );
       expect(sameOrigin.status).toBe(200);
       const noMetadata = await f.app.request(
         `/api/sessions/${sessionId}/active-run`,
-        { headers: { host: ALLOWED_HOST } },
+        { headers: { host: ALLOWED_HOST, cookie } },
       );
       expect(noMetadata.status).toBe(200);
+      // Same requests without the session are 401 even when the
+      // Origin/Host checks pass (slice b enforcement runs after them).
+      const bare = await f.app.request(
+        `/api/sessions/${sessionId}/active-run`,
+        { headers: { host: ALLOWED_HOST } },
+      );
+      expect(bare.status).toBe(401);
     } finally {
       f.close();
     }
@@ -297,7 +379,7 @@ describe("remote config fail-closed", () => {
     }
   });
 
-  it("requires authentication while slice (b) is unavailable", () => {
+  it("requires a password file when enabled (slice b lifts the auth block)", () => {
     expect(() =>
       loadServerConfig({
         ...baseEnv("auth"),
@@ -306,7 +388,20 @@ describe("remote config fail-closed", () => {
           allowedOrigins: [ALLOWED_ORIGIN],
         }),
       }),
-    ).toThrow(/requires authentication/);
+    ).toThrow(/password file/);
+  });
+
+  it("rejects unparseable remote JSON fail-closed (never a silent disable)", () => {
+    for (const raw of ["not-json", "{oops", ""]) {
+      expect(
+        () =>
+          loadServerConfig({ ...baseEnv("parse"), COMPANION_REMOTE_JSON: raw }),
+        raw,
+      ).toThrow(ServerConfigError);
+    }
+    // Unset stays disabled.
+    const config = loadServerConfig(baseEnv("unset"));
+    expect(config.remote.enabled).toBe(false);
   });
 
   it("rejects malformed origins and shapes", () => {

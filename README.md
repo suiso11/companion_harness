@@ -1551,13 +1551,14 @@ COMPANION_ACTIONS_JSON='{ "optIn": true, "writeEnabled": true }'
 
 ---
 
-# リモートアクセス (default-off・準備中)
+# リモートアクセス (default-off)
 
-tailnet 経由のリモート利用に向けた、明示的 Origin/Host allowlist です
-(slice (a): allowlist のみ、既定で無効)。サーバーは常に loopback のみ
-bind します (`COMPANION_HOST` は `127.0.0.1` / `localhost` のまま;
-`0.0.0.0` は引き続き起動拒否)。tailnet 側の到達性 (例: `tailscale serve`
-による HTTPS 終端 + `127.0.0.1:<port>` への proxy) はアプリの外で用意し、
+tailnet 経由のリモート利用に向けた、明示的 Origin/Host allowlist +
+単一ユーザーパスワード認証です (slice (a): allowlist、slice (b): ログイン
+セッション、既定で無効)。サーバーは常に loopback のみ bind します
+(`COMPANION_HOST` は `127.0.0.1` / `localhost` のまま; `0.0.0.0` は
+引き続き起動拒否)。tailnet 側の到達性 (例: `tailscale serve` による
+HTTPS 終端 + `127.0.0.1:<port>` への proxy) はアプリの外で用意し、
 アプリは TLS 鍵を持ちません。
 
 ```bash
@@ -1569,20 +1570,57 @@ COMPANION_REMOTE_JSON='{"enabled":false,"allowedOrigins":["https://<host>.<tailn
   https scheme、認証情報・明示ポート・path/query/fragment・末尾スラッシュ
   不可 (自身の `URL.origin` と完全一致すること)。未知キー・重複・不正
   JSON は固定メッセージで起動失敗します (値のログ出力なし)。
+  未設定は無効と同等です。不正 JSON は無効化ではなく起動失敗します
+  (fail closed)。
 - 無効時 (既定): Host/mutation 検査は従来どおり (loopback Host のみ、
-  loopback 同一オリジンの mutation のみ、読み取り検査なし)。
+  loopback 同一オリジンの mutation のみ、読み取り検査なし)。ログイン
+  surface は存在しません (`/api/remote/login` は 404)。
 - 有効時: Host ヘッダは allowlist 由来ホストまたは loopback のみ許可
   (health 含む全 route)。mutation は allowlist + 現在の loopback
   同一オリジンとの正確な Origin 一致を要求。GET API・SSE も Origin 提示
   時は一致を要求 (同一オリジン GET の Origin 省略は通常どおり許可、
   `Sec-Fetch-Site: cross-site` は拒否)。`Origin: null` は常に拒否。
   判定は Host/Origin/Sec-Fetch-Site ヘッダのみで行い、`remoteAddress`
-  や `X-Forwarded-*` は使用しません。CORS ヘッダは発行しません。
-- fail-closed: 空 allowlist のまま有効化は起動失敗します。**認証
-  (slice (b)) は未実装のため、現時点では有効化すると必ず
-  `remote mode requires authentication (not yet available)` で起動失敗
-  します**。slice (b) が入るまでリモート運用はしないでください。
+  や `X-Forwarded-*` は使用しません (認証・認可・allowlist 判定に
+  proxy ヘッダは使いません)。CORS ヘッダは発行しません。
+- fail-closed: 空 allowlist のまま有効化は起動失敗します。
   `enabled` を `false` に戻すだけで loopback 運用に復帰できます。
+
+## リモート認証 (slice (b))
+
+- 方式: 単一ユーザーパスワード + サーバー発行セッション Cookie
+  (`companion_remote`: 不透明 256bit ランダム、`HttpOnly`・`Secure`・
+  `SameSite=Strict`・`Path=/`)。tailnet ACL が第一層、アプリ層が第二層です。
+- パスワード保管: scrypt ハッシュ (Node 標準 `crypto.scrypt`、追加の
+  native 依存なし) を **SQLite 外**のファイルに保存します
+  (secret-not-in-DB)。セッション側はトークンの SHA-256 ハッシュのみを
+  SQLite (`remote_sessions`、additive migration `0022`) に保持します
+  (トークン平文は DB・ログに残りません)。
+- 設定キー (`COMPANION_REMOTE_JSON` に追加、以下はすべて任意・既定あり):
+  `passwordFile` (有効時は必須、絶対パス。0600 推奨・POSIX では
+  group/other 読み取り可で起動拒否)、`absoluteTimeoutMs` (既定
+  2592000000 = 30 日、案)、`idleTimeoutMs` (既定 604800000 = 7 日、案)、
+  `maxFailures` (既定 5、案)、`lockoutMs` (既定 900000 = 15 分、案)。
+  いずれも範囲外・型違いは固定メッセージで起動失敗します。
+- 設定手順 (Linux):
+  1. `COMPANION_REMOTE_JSON` に `enabled:true`・`allowedOrigins`・
+     `passwordFile` (例: データ dir 配下の絶対パス) を設定
+  2. `pnpm --filter server set-password` でパスワードを設定
+     (TTY/stdin からエコーなしで二度読み、env/argv 経由は不可)
+  3. `tailscale serve` で HTTPS 終端 + `127.0.0.1:<port>` へ proxy
+  4. 起動・ログイン・会話一往復・SSE 受信・logout 後の再拒否を確認
+- 適用範囲: **全 API + SSE はセッション必須** (401 JSON。SSE の
+  ハンドシェイクも同様)。`/health/live` は無認証のままです。
+  `/health/ready` は要セッションです (案 U3 の暫定確定。監視用途の
+  例外が必要なら専用トークン方式で別途設計)。未認証の `/` は
+  アセットなしの最小ログイン form (外部アセット・script なしの素の
+  HTML form) を返します。
+- ログイン失敗は一律 `invalid credentials` (user 枚举なし)。
+  rate limiting は **IP 単位ではなく全体カウンタ** です
+  (proxy 経由は全て 127.0.0.1 に見えるため。既定 5 回失敗で 15 分
+  lock、案)。カウンタはメモリ保持のため **再起動でリセット**
+  されます (SQLite 永続化は見送り: 単一運用者の box では再起動解除が
+  安全側のため)。
 
 ---
 
