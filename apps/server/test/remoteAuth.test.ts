@@ -831,6 +831,43 @@ describe("remote bootstrap over HTTP (step 4)", () => {
   });
 });
 
+describe("login form body bounds (review finding)", () => {
+  it("rejects oversized urlencoded login bodies without buffering", async () => {
+    const f = await makeAuthApp();
+    try {
+      const formHeaders = {
+        "content-type": "application/x-www-form-urlencoded",
+        host: ALLOWED_HOST,
+        origin: ALLOWED_ORIGIN,
+      };
+      // Declared length over the 8 KiB cap: rejected outright.
+      const huge = await f.app.request("/api/remote/login", {
+        method: "POST",
+        headers: { ...formHeaders, "content-length": "1000000" },
+        body: `password=${encodeURIComponent(PASSWORD)}`,
+      });
+      expect(huge.status).toBe(400);
+      // Actually-over-cap chunked body: streamed, cancelled, rejected.
+      const over = await f.app.request("/api/remote/login", {
+        method: "POST",
+        headers: formHeaders,
+        body: `password=${"x".repeat(9000)}`,
+      });
+      expect(over.status).toBe(400);
+      expect(over.headers.get("set-cookie")).toBeNull();
+      // Malformed Content-Length fails closed.
+      const malformed = await f.app.request("/api/remote/login", {
+        method: "POST",
+        headers: { ...formHeaders, "content-length": "many" },
+        body: `password=${encodeURIComponent(PASSWORD)}`,
+      });
+      expect(malformed.status).toBe(400);
+    } finally {
+      f.close();
+    }
+  });
+});
+
 describe("disabled remote regression (step 5)", () => {
   it("serves everything without login and exposes no remote routes", async () => {
     const handle = openKernelDatabase(":memory:");

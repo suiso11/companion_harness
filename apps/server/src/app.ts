@@ -659,6 +659,9 @@ function checkLoginOrigin(c: Context, config: ServerConfig): Response | null {
   return apiError(c, 403, "validation_error", "cross-origin request rejected");
 }
 
+/** Upper bound for the urlencoded login form body (bytes on the wire). */
+export const MAX_LOGIN_FORM_BYTES = 8192;
+
 /** Bounded `application/x-www-form-urlencoded` parser for the login form. */
 function parseLoginFormBody(
   text: string,
@@ -680,6 +683,84 @@ function parseLoginFormBody(
     return { ok: false };
   }
   return { ok: true, password: params.get("password") };
+}
+
+/**
+ * Byte-bounded text reader for the urlencoded login form. Mirrors the
+ * Content-Length pre-check + streaming byte cap of `readJsonBody` so an
+ * unauthenticated client cannot force the server to buffer an unbounded
+ * body: oversized declared lengths are rejected without reading, and
+ * chunked bodies are cancelled as soon as the cap is crossed. Never
+ * calls `req.text()` on an unbounded stream.
+ */
+async function readLoginFormBody(
+  c: Context,
+): Promise<{ ok: true; text: string } | { ok: false }> {
+  const lengthHeader = c.req.header("content-length");
+  if (lengthHeader !== undefined) {
+    const trimmed = lengthHeader.trim();
+    if (!/^\d+$/.test(trimmed)) {
+      return { ok: false };
+    }
+    const declared = Number(trimmed);
+    if (!Number.isSafeInteger(declared) || declared > MAX_LOGIN_FORM_BYTES) {
+      try {
+        await c.req.raw.body?.cancel();
+      } catch {
+        // Best effort: the request is rejected regardless.
+      }
+      return { ok: false };
+    }
+  }
+  const stream = c.req.raw.body;
+  if (stream === null || stream === undefined) {
+    return { ok: true, text: "" };
+  }
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      if (value !== undefined) {
+        total += value.byteLength;
+        if (total > MAX_LOGIN_FORM_BYTES) {
+          try {
+            await reader.cancel();
+          } catch {
+            // Best effort: the request is rejected regardless.
+          }
+          return { ok: false };
+        }
+        chunks.push(value);
+      }
+    }
+  } catch {
+    return { ok: false };
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // Best effort.
+    }
+  }
+  const combined = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    combined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return {
+      ok: true,
+      text: new TextDecoder("utf-8", { fatal: true }).decode(combined),
+    };
+  } catch {
+    return { ok: false };
+  }
 }
 
 function requireIdempotencyKey(
@@ -1433,17 +1514,11 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       }
       password = (raw.value as { password?: unknown }).password;
     } else if (mediaType === "application/x-www-form-urlencoded") {
-      const lengthHeader = c.req.header("content-length");
-      if (lengthHeader !== undefined && !/^\d+$/.test(lengthHeader.trim())) {
+      const formRaw = await readLoginFormBody(c);
+      if (!formRaw.ok) {
         return validationError(c);
       }
-      let text: string;
-      try {
-        text = await c.req.text();
-      } catch {
-        return validationError(c);
-      }
-      const form = parseLoginFormBody(text);
+      const form = parseLoginFormBody(formRaw.text);
       if (!form.ok) {
         return validationError(c);
       }
