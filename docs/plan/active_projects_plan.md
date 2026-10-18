@@ -316,3 +316,6 @@
 
 ## 現況追記（2026-10-17、autonomy trial E2E・履歴保持・上記分類は書き換えない）
 - 自律 trial 実行系（schema12＋server/runner/relay＋Own-pi bridge）を実装＋合成モデルで E2E 検証済み。証拠: `.all-plan-progress/AV-E2E-RESULTS.json`（run7: A consumed/authorized/bridge-exit:0・12 calls 全 fixed-model・token cap 内・unit 消滅・Task open/Goal active/git clean、B STOP revoked/unauthorized/bridge-exit:143・unit 消滅）、`.all-plan-progress/AV-SERVER-TRIAL-RESULTS.json`・`AV-RUNNER-RESULTS.json`・`AV-RELAY-RESULTS.json`・`AV-AUTHORITY-RESULTS.json` 等。throwaway `.e2e-trial/` は削除済み。運用面は `docs/operations.md`「Autonomous trial execution (opt-in)」に記録。未採用・未完残: real model・hardware・resource caps 未選定、real（非 synthetic）model run 未実施、Own-pi 側変更 uncommitted、Remind ops/graph は done・commits pending。
+
+## 現況追記（2026-10-17、AV03 conversation-proposals完成・履歴保持・上記分類/ID/件数不変）
+- AV03 full vertical（kernel＋HTTP＋UI、feat/av-conversation-proposals）: proposal-only core＋session review/adopt routes＋quiet drawer UI。統合受入ONCE実測: full Vitest 143 files passed/2 skipped・1606 tests passed/8 skipped（real remind CLI、LLM/vectors無効）＋default Chromium 42 passed＋root/e2e tsc exit 0＋Biome exit 0（既存warning/infoのみ）。PR未発行・review findings pending。詳細は `docs/operations.md`（AV03 FULL VERTICAL）。

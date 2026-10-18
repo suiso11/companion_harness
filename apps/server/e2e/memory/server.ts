@@ -194,6 +194,46 @@ const started = await startServer({
   modelGateway: syntheticGateway(),
 });
 
+// STOP semantics: a fresh restart starts paused with background admission
+// closed. This cultivation E2E needs background extraction, so resume
+// explicitly via AUTH control before any chat runs.
+{
+  const appBase = `http://127.0.0.1:${MEMORY_APP_PORT}`;
+  const controlRes = await fetch(`${appBase}/api/autonomy/control`, {
+    headers: { host: "127.0.0.1" },
+  });
+  if (!controlRes.ok) {
+    throw new Error(
+      `memory e2e resume prerequisite failed: control GET ${controlRes.status}`,
+    );
+  }
+  const control = (await controlRes.json()) as {
+    paused: boolean;
+    version: number;
+  };
+  if (control.paused === true) {
+    const { randomUUID } = await import("node:crypto");
+    const resumed = await fetch(`${appBase}/api/autonomy/control`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        host: "127.0.0.1",
+        origin: appBase,
+        "idempotency-key": randomUUID(),
+      },
+      body: JSON.stringify({
+        paused: false,
+        expectedVersion: control.version,
+      }),
+    });
+    if (!resumed.ok) {
+      throw new Error(
+        `memory e2e resume prerequisite failed: control POST ${resumed.status}`,
+      );
+    }
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Loopback control server (fixture seam; Node-side requests only)      */
 /* ------------------------------------------------------------------ */

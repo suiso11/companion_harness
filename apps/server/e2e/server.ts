@@ -18,6 +18,12 @@
 //   POST /seed-citation { sessionId } -> store one immutable snapshot +
 //     session reference (ordinal rN) for that session via direct SQL
 //     (fixture setup only; drawer/CAS/rendering stay on real routes/UI)
+//   POST /seed-proposal { sessionId, target, quote, ... } -> stage one
+//     conversation proposal from the session's latest user_text turn via
+//     the real model-only kernel path (fixture setup only)
+//   POST /seed-proposal-burst { sessionId, decided, pendingQuote } -> one
+//     old pending + `decided` rejected drafts via the real kernel paths
+//     (fixture setup only; paging/badge/review stay on real routes/UI)
 //   POST /seed-history { sessionId, count, prefix } -> store `count`
 //     completed user_text turns (+ selected V1 runs with queued/started/
 //     completed events) for that session via direct SQL (fixture setup
@@ -930,6 +936,214 @@ const control = createServer(
         json(200, seedHistory(sessionId, count, prefix));
       } catch {
         json(404, { error: { code: "not_found" } });
+      }
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/seed-proposal") {
+      // Test-fixture seed (narrow): stage ONE conversation proposal from the
+      // session's LATEST ordinary `user_text` turn via the REAL kernel
+      // model-only path (`stageConversationProposalFromModel`, the exact
+      // function the `purpose.propose` / `task.propose` tool registrations
+      // call). The quote must be an exact substring of that OWN turn text;
+      // the model-native toolcall half is proven in the kernel agent test.
+      // Fixture setup only — listing/review/adopt all run through the real
+      // production routes/UI. `{ sessionId, target, quote, scope?,
+      // draftKind?, purposeKind?, taskKind?, interpretation?,
+      // parentPurposeId?, expectedParentVersion? }`.
+      const parsed = parseJsonBody();
+      const sessionId = parsed?.sessionId;
+      const target = parsed?.target;
+      const quote = parsed?.quote;
+      const scope = typeof parsed?.scope === "string" ? parsed.scope : "health";
+      const draftKind =
+        typeof parsed?.draftKind === "string" ? parsed.draftKind : "wish";
+      const interpretation =
+        typeof parsed?.interpretation === "string"
+          ? parsed.interpretation
+          : "e2e inferred interpretation";
+      if (
+        typeof sessionId !== "string" ||
+        !UUID_V4_RE.test(sessionId) ||
+        (target !== "purpose" && target !== "task") ||
+        typeof quote !== "string" ||
+        quote.length === 0
+      ) {
+        json(400, { error: { code: "validation_error" } });
+        return;
+      }
+      try {
+        const db = handle.raw as unknown as {
+          prepare(sql: string): {
+            get(...params: unknown[]): Record<string, unknown> | undefined;
+            all(...params: unknown[]): Array<Record<string, unknown>>;
+          };
+        };
+        const turns = db
+          .prepare(
+            "SELECT id, input_json FROM turns WHERE session_id = ? ORDER BY seq DESC LIMIT 25",
+          )
+          .all(sessionId) as Array<{ id: string; input_json: string }>;
+        let sourceRunId: string | null = null;
+        let sourceText: string | null = null;
+        for (const turn of turns) {
+          let input: unknown = null;
+          try {
+            input = JSON.parse(turn.input_json) as unknown;
+          } catch {
+            continue;
+          }
+          if (
+            typeof input !== "object" ||
+            input === null ||
+            (input as { kind?: unknown }).kind !== "user_text" ||
+            typeof (input as { text?: unknown }).text !== "string"
+          ) {
+            continue;
+          }
+          const runRow = db
+            .prepare(
+              "SELECT id FROM runs WHERE turn_id = ? ORDER BY created_at DESC LIMIT 1",
+            )
+            .get(turn.id) as { id: string } | undefined;
+          if (runRow === undefined) {
+            continue;
+          }
+          sourceRunId = runRow.id;
+          sourceText = (input as { text: string }).text;
+          break;
+        }
+        if (sourceRunId === null || sourceText === null) {
+          json(404, { error: { code: "not_found" } });
+          return;
+        }
+        if (!sourceText.includes(quote)) {
+          json(400, { error: { code: "validation_error" } });
+          return;
+        }
+        const draft: Record<string, unknown> = {
+          target,
+          scope,
+          draftKind,
+          sourceQuote: quote,
+          interpretation,
+        };
+        if (target === "purpose") {
+          draft.purposeKind =
+            typeof parsed?.purposeKind === "string"
+              ? parsed.purposeKind
+              : "goal";
+        } else {
+          draft.taskKind =
+            typeof parsed?.taskKind === "string" ? parsed.taskKind : "task";
+          if (
+            typeof parsed?.parentPurposeId !== "string" ||
+            !UUID_V4_RE.test(parsed.parentPurposeId) ||
+            typeof parsed?.expectedParentVersion !== "number"
+          ) {
+            json(400, { error: { code: "validation_error" } });
+            return;
+          }
+          draft.parentPurposeId = parsed.parentPurposeId;
+          draft.expectedParentVersion = parsed.expectedParentVersion;
+        }
+        const staged = repo.stageConversationProposalFromModel(
+          sourceRunId,
+          draft,
+          { key: randomUUID() },
+        );
+        json(staged.status, staged.body);
+      } catch {
+        json(400, { error: { code: "validation_error" } });
+      }
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/seed-proposal-burst") {
+      // Test-fixture bulk history (narrow): ONE old pending draft first,
+      // then N decided (rejected) drafts, all through the REAL kernel
+      // paths (`postMessage`/`startRun` + `stageConversationProposalFromModel`
+      // + `rejectConversationProposal`). Each quote occurs exactly once in
+      // its own source text. Fixture setup only — paging, badge, and review
+      // all run through the real production routes/UI.
+      // `{ sessionId, decided, pendingQuote }` (1 <= decided <= 80).
+      const parsed = parseJsonBody();
+      const sessionId = parsed?.sessionId;
+      const decided = parsed?.decided;
+      const pendingQuote = parsed?.pendingQuote;
+      if (
+        typeof sessionId !== "string" ||
+        !UUID_V4_RE.test(sessionId) ||
+        typeof decided !== "number" ||
+        !Number.isInteger(decided) ||
+        decided < 1 ||
+        decided > 80 ||
+        typeof pendingQuote !== "string" ||
+        pendingQuote.length === 0
+      ) {
+        json(400, { error: { code: "validation_error" } });
+        return;
+      }
+      try {
+        const now = Date.now();
+        let priorRun: string | null = null;
+        const postTurn = (text: string): string => {
+          if (priorRun !== null) {
+            repo.failRun(priorRun, "execution_failed", { now });
+          }
+          const posted = repo.postMessage(
+            sessionId,
+            { text },
+            { key: randomUUID(), now },
+          );
+          const runId = (posted.body as { run: { id: string } }).run.id;
+          repo.startRun(runId, { now: now + 1 });
+          priorRun = runId;
+          return runId;
+        };
+        const keeperRun = postTurn(`note ${pendingQuote} end`);
+        if (!`note ${pendingQuote} end`.includes(pendingQuote)) {
+          json(400, { error: { code: "validation_error" } });
+          return;
+        }
+        const keeper = repo.stageConversationProposalFromModel(
+          keeperRun,
+          {
+            target: "purpose",
+            scope: "health",
+            draftKind: "wish",
+            purposeKind: "goal",
+            sourceQuote: pendingQuote,
+            interpretation: "burst keeper draft",
+          },
+          { key: randomUUID() },
+        );
+        for (let i = 0; i < (decided as number); i += 1) {
+          const text = `burst filler ${i} marker`;
+          const runId = postTurn(text);
+          const staged = repo.stageConversationProposalFromModel(
+            runId,
+            {
+              target: "purpose",
+              scope: "health",
+              draftKind: "wish",
+              purposeKind: "goal",
+              sourceQuote: `filler ${i} marker`,
+              interpretation: `burst decided ${i}`,
+            },
+            { key: randomUUID() },
+          );
+          repo.rejectConversationProposal(
+            sessionId,
+            (staged.body as { id: string }).id,
+            { expectedVersion: 1 },
+            { key: randomUUID(), now },
+          );
+        }
+        json(201, {
+          pendingId: (keeper.body as { id: string }).id,
+          decided,
+        });
+      } catch {
+        json(400, { error: { code: "validation_error" } });
       }
       return;
     }

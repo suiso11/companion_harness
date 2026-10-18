@@ -65,8 +65,11 @@ import {
   createCalendarActionTargetResolver,
   createCalendarCreateProposalRegistration,
   createCalendarRescheduleProposalRegistration,
+  createConversationProposalRegistrations,
   createDurableCalendarTargetStore,
+  createHandoffRegistrations,
   createKernelRepository,
+  createLearningRegistrations,
   createM1ToolRegistrations,
   createMemorySearchRegistration,
   createMemoryStageRegistrations,
@@ -97,6 +100,7 @@ import {
 } from "@companion/model-local";
 import { serve } from "@hono/node-server";
 import { createApp, type EnginePort, type ServerControls } from "./app.js";
+import { createBackgroundResourceGate } from "./background_resource.js";
 import {
   assertGoogleReadonlyHintCompatible,
   CALENDAR_PROFILE_ENV,
@@ -134,6 +138,11 @@ import {
 } from "./maintenance.js";
 import { createMemoryService, type MemoryService } from "./memory_service.js";
 import {
+  createNotificationService,
+  type NotificationService,
+  wrapRepoWithNotifications,
+} from "./notification_service.js";
+import {
   assertRescheduleWriteAccountCompatible,
   assertRescheduleWriteHintCompatible,
   assertRescheduleWriteReadonlyPathVisible,
@@ -146,6 +155,7 @@ import {
   type RescheduleWriteConnectorHint,
 } from "./rescheduleWriteProfile.js";
 import { createShadowService, type ShadowService } from "./shadow_service.js";
+import { childFailedStatusForError } from "./supervisor.js";
 import { TrialModelRelay } from "./trial_model_relay.js";
 import { TrialRunner } from "./trial_runner.js";
 
@@ -402,6 +412,8 @@ export interface StartedServer {
   shadow: ShadowService | null;
   /** Root-side trial runner when trials are enabled, else null. */
   trialRunner: TrialRunner | null;
+  /** Notification projector (always on: durable feed + deadline alerts). */
+  notifications: NotificationService | null;
 }
 
 /** Fixed path-free display name for the single M1 Markdown connector. */
@@ -652,8 +664,7 @@ export async function boundedActionShutdown(
   return completed;
 }
 
-/**
- * Fixed shutdown-reason vocabulary. Arbitrary caller reasons never enter
+/** Fixed shutdown-reason vocabulary: arbitrary caller reasons never enter
  * logs verbatim (logger also enforces a pattern + "unknown" fallback).
  */
 export function sanitizeShutdownReason(reason: string): string {
@@ -662,6 +673,34 @@ export function sanitizeShutdownReason(reason: string): string {
     return lowered;
   }
   return "unknown";
+}
+
+/**
+ * AV07 supervisor IPC (best-effort, fixed codes only). Active ONLY when the
+ * server was spawned by the opt-in supervisor, which sets the fixed
+ * `COMPANION_SUPERVISED=1` marker in the child's environment (never accepted
+ * from any other parent: test workers and embedders that happen to own an
+ * IPC channel never receive supervisor traffic). When active, the child
+ * reports genuine lifecycle events: `companion-ready` ONLY after listen
+ * succeeds, `companion-failed` on startup failure, `companion-drained` /
+ * `companion-drain-failed` after a supervisor-requested graceful shutdown.
+ * Never carries paths, secrets, or model content.
+ */
+function isSupervisorManaged(): boolean {
+  return process.env.COMPANION_SUPERVISED === "1";
+}
+
+function notifySupervisor(message: Record<string, unknown>): void {
+  if (!isSupervisorManaged()) {
+    return;
+  }
+  try {
+    if (typeof process.send === "function") {
+      process.send(message);
+    }
+  } catch {
+    // Best effort: the supervisor treats silence as not-ready/failed.
+  }
 }
 
 /**
@@ -775,6 +814,13 @@ export async function startServer(
     earlyLogger.error("server.start_failed", {
       status: sanitizeStartupErrorStatus(error),
     });
+    // AV07: early (pre-config) startup failure still reported when a
+    // supervisor channel exists; otherwise the non-zero exit alone marks
+    // the crash on the supervisor side.
+    notifySupervisor({
+      type: "companion-failed",
+      status: childFailedStatusForError(error),
+    });
     throw error;
   }
   const logger = options.logger ?? createStdServerLogger(config.logLevel);
@@ -823,6 +869,12 @@ export async function startServer(
       trialTimer = undefined;
     }
   };
+  /** Notification projector (always on; set inside try). */
+  let notifications: NotificationService | null = null;
+  // Shared background admission (bootstrap-owned, created up front so every
+  // teardown path — including the outer startup-failure catch — can shut it
+  // down; construction never throws and touches no I/O).
+  const backgroundResource = createBackgroundResourceGate();
   const removeSignalHandlers = (): void => {
     if (onSigint !== undefined) {
       try {
@@ -1227,6 +1279,24 @@ export async function startServer(
       }
     }
 
+    // Gate admission starts from the ACTUAL persisted control state AFTER
+    // the fence above (never optimistically open): a fence-paused control
+    // (or an already-paused one) closes admission BEFORE any service starts,
+    // so a fresh restart's first ordinary chat cannot launch background
+    // extraction until an explicit current-version resume reopens it.
+    // Ordinary foreground chat and explicit memory management stay
+    // available while paused; they never consult this gate.
+    try {
+      const persisted = handle.raw
+        .prepare("SELECT paused FROM autonomy_control WHERE id = 'global'")
+        .get() as { paused: number } | undefined;
+      if (persisted === undefined || persisted.paused === 1) {
+        backgroundResource.close();
+      }
+    } catch {
+      backgroundResource.close();
+    }
+
     // Bound-roots guard: removing every Markdown root while a Markdown
     // connector instance remains bound must fail closed before the engine
     // or listener starts. Fixed path-free ServerConfigError, no DB writes.
@@ -1368,6 +1438,11 @@ export async function startServer(
         return out;
       },
     });
+    // Shared background admission (bootstrap-owned, repo-independent so the
+    // gated repository rebuild below can never drop it): at most ONE
+    // model-heavy background unit — memory extraction, shadow deliberation,
+    // idle distill — runs at a time. Foreground work and notifications never
+    // acquire it. Created once above with the other service bindings.
     if (config.memory !== null) {
       const memoryConfig: MemoryConfig = config.memory;
       memory = createMemoryService({
@@ -1385,9 +1460,33 @@ export async function startServer(
         gateway: modelGateway,
         model: modelName,
         logger,
+        // Shared background admission (bootstrap-owned): post-completion
+        // extraction and idle-distill drains admit ONE unit at a time
+        // against the shadow worker below. Foreground memory paths
+        // (recall/search/stage) never consult it.
+        background: backgroundResource,
       });
       repo = wrapRepoWithMemoryIntake(baseRepo, memory);
       logger.info("server.memory_ready", { status: 1 });
+    }
+    // AV05 notification projector (always on, no config gate): durable
+    // background projection AFTER committed sources — never inside the M5
+    // receipt writer, so a projection failure can never lose a Calendar
+    // receipt. The wrapper composes here (outside memory intake) so the
+    // shadow worker's creation-time repo already wakes on settlement; the
+    // gated rebuild below re-applies it on the final repo the engine and
+    // app share (same rule as the memory intake + shadow priority
+    // wrappers — none of them is dropped by the recovery rebuild).
+    notifications = createNotificationService({
+      db: handle.raw,
+      repo,
+      logger,
+      now,
+    });
+    {
+      const activeNotifications = notifications;
+      repo = wrapRepoWithNotifications(repo, activeNotifications);
+      logger.info("server.notifications_ready", { status: 1 });
     }
     // AV shadow worker (model-gated): uses the EXACT SAME configured
     // gateway/modelName as the ordinary agent above (no model selection,
@@ -1404,6 +1503,9 @@ export async function startServer(
         recall: memory !== null ? memory.recallHook : null,
         logger,
         now,
+        // Same shared gate: each shadow job admits BEFORE claim and defers
+        // untouched while another background unit holds it.
+        background: backgroundResource,
       });
       // Priority composition OUTSIDE the memory intake wrapper: accepted
       // foreground work aborts shadow's OWN call; run settlement re-wakes.
@@ -1878,6 +1980,15 @@ export async function startServer(
       const activeShadow = shadow;
       repo = wrapRepoWithShadowPriority(repo, activeShadow);
     }
+    // AV05 recovery-rebuild rule (PR42 pattern preserved): the gated repo
+    // above supersedes the pre-gate object, so re-apply the notification
+    // wake wrapper OUTSIDE the memory/shadow wrappers on the repo the app
+    // and engine actually share. Without this, HTTP-committed mutations
+    // and engine run settlement never re-drive the projector.
+    if (notifications !== null) {
+      const activeNotifications = notifications;
+      repo = wrapRepoWithNotifications(repo, activeNotifications);
+    }
 
     // M5 host-owned dedicated port (normal startup, no injection). The
     // conditional etag resolves concretely from the REPOSITORY-immutable
@@ -2171,12 +2282,23 @@ export async function startServer(
       // AV autonomy read tools: SELECT-only over the runtime session's
       // owned records (session derived from the calling run, never model
       // input). Same existing broker budgets, no widening, no mutations.
+      // AV03 proposal tools: proposal-only staging of inferred drafts
+      // (purpose.propose / task.propose); the model stages but never
+      // creates, and approval lives outside it. Same budgets, no new step.
+      // AV04 learning tools: read-only list/open plus proposal-only
+      // learning.propose (staged pending, human accept/reject outside).
+      // AV03 handoff tools: read-only handoff.list/open only (NO model
+      // write tool exists anywhere; create/dispatch/verify/attempts are
+      // human HTTP only).
       const agentBroker = createToolBroker({
         db: handle.raw,
         repo,
         registrations: [
           ...agentBaseRegistrations,
           ...createAutonomyReadRegistrations({ repo }),
+          ...createConversationProposalRegistrations({ repo }),
+          ...createLearningRegistrations({ repo }),
+          ...createHandoffRegistrations({ repo }),
         ],
       });
       registry.register(
@@ -2263,6 +2385,45 @@ export async function startServer(
         targetStore,
         clock: now,
       });
+      // AV05 P1: action receipts settle asynchronously inside the action
+      // service (never through the repo wrapper). Wake the projector after
+      // every receipt-settling terminal so urgent commitment notices
+      // project without waiting for an unrelated mutation.
+      if (notifications !== null) {
+        const activeNotifications = notifications;
+        const wakeAction = (): void => {
+          try {
+            activeNotifications.onActionSettled();
+          } catch {
+            // Best effort: the receipt already committed.
+          }
+        };
+        const actionTerminalKeys = [
+          "recordActionPreflightFailure",
+          "recordActionPreflightBlocked",
+          "cancelActionRun",
+          "finishActionExecution",
+          "finishCreateExecution",
+          "recoverAbandonedActionRun",
+          "validateAndRecoverActionRuns",
+        ] as const;
+        for (const key of actionTerminalKeys) {
+          const fn = (actionService as unknown as Record<string, unknown>)[key];
+          if (typeof fn !== "function") continue;
+          const bound = (fn as (...a: never[]) => unknown).bind(actionService);
+          (actionService as unknown as Record<string, unknown>)[key] = (
+            ...args: never[]
+          ) => {
+            const out = bound(...args) as unknown;
+            if (out !== null && typeof out === "object") {
+              const applied = (out as { applied?: unknown }).applied;
+              if (applied === false) return out;
+            }
+            wakeAction();
+            return out;
+          };
+        }
+      }
       const createRead: ActionCreateReadPort | undefined =
         activeCreateBindings === null
           ? undefined
@@ -2375,6 +2536,13 @@ export async function startServer(
     if (shadow !== null) {
       shadow.start();
     }
+    // Notification projector starts after engine recovery: startup ingest
+    // from the migration-14 baselines + derived deadline rebuild (no
+    // old-deadline catchup, no mass-notify of history), then armed on
+    // committed writes + the single deadline timer.
+    if (notifications !== null) {
+      notifications.start();
+    }
 
     const activeShadowWake = shadow;
     // Root-side trial runner (trials enabled only): constructed with the
@@ -2472,6 +2640,7 @@ export async function startServer(
       };
     }
 
+    const activeMemoryControl = memory;
     const { app, controls } = createApp({
       config,
       repo,
@@ -2491,13 +2660,29 @@ export async function startServer(
                 // Best effort: wake never throws into the caller.
               }
             },
-            // Committed control changes (pause OR resume, including a
-            // replayed old resume): the worker reads the ACTUAL control
-            // state and aborts its OWN in-flight call when paused, so a
-            // pure STOP aborts model/recall work with no foreground chat.
+          }
+        : {}),
+      // Committed control changes (pause OR resume, including a
+      // replayed old resume): the worker reads the ACTUAL control
+      // state and aborts its OWN in-flight call when paused, so a
+      // pure STOP aborts model/recall work with no foreground chat.
+      // The memory service is notified on the same hook: STOP aborts
+      // its OWN parked extraction call and closes shared background
+      // admission (resume reopens it). Both reads are live-state and
+      // never throw into the committed command. Wired independently
+      // of shadow creation so a memory-only server (no model gateway,
+      // no worker) still reopens admission on an explicit resume —
+      // otherwise every automatic distill stays skipped forever.
+      ...(activeShadowWake !== null || activeMemoryControl !== null
+        ? {
             shadowControlChanged: (): void => {
               try {
-                activeShadowWake.notifyControl();
+                activeShadowWake?.notifyControl();
+              } catch {
+                // Best effort: notify never throws into the caller.
+              }
+              try {
+                activeMemoryControl?.notifyControl();
               } catch {
                 // Best effort: notify never throws into the caller.
               }
@@ -2520,6 +2705,10 @@ export async function startServer(
                 if (!settled) {
                   settled = true;
                   logger.info("server.listening", { port: info.port });
+                  notifySupervisor({
+                    type: "companion-ready",
+                    port: info.port,
+                  });
                   if (listener !== undefined) {
                     resolvePromise(listener);
                   } else {
@@ -2544,6 +2733,14 @@ export async function startServer(
         },
       );
     } catch (listenError) {
+      // AV07: genuine failure signal BEFORE any cleanup, so the supervisor
+      // never mistakes silence for readiness. A port collision
+      // (`address_in_use`) degrades to bounded retry on the supervisor side —
+      // the foreign listener is never touched.
+      notifySupervisor({
+        type: "companion-failed",
+        status: childFailedStatusForError(listenError),
+      });
       // Listen failed: stop the shadow worker FIRST (its in-flight gateway
       // call aborts and is awaited: no orphan model calls), then the trial
       // runner (revoke + close + bounded bridge-exit await), then the memory
@@ -2573,6 +2770,20 @@ export async function startServer(
         if (memory !== null) {
           await memory.stop();
         }
+      } catch {
+        // Best effort: the listen error carries the startup failure.
+      }
+      try {
+        if (notifications !== null) {
+          await notifications.stop();
+        }
+      } catch {
+        // Best effort: the listen error carries the startup failure.
+      }
+      // Shared background admission: closed by both service stops above;
+      // clear deferred wakes here so nothing fires after the DB close.
+      try {
+        backgroundResource.shutdown();
       } catch {
         // Best effort: the listen error carries the startup failure.
       }
@@ -2677,6 +2888,24 @@ export async function startServer(
           } catch {
             // Best effort: the engine drain below still runs.
           }
+        }
+        // Stop notifications third: the single deadline timer is cleared
+        // and the in-flight drain awaited (no post-close DB reads), before
+        // the engine drain and the DB close below.
+        if (notifications !== null) {
+          try {
+            await notifications.stop();
+          } catch {
+            // Best effort: the engine drain below still runs.
+          }
+        }
+        // Shared background admission: closed by both service stops above;
+        // clear deferred wakes here (no DB-after-close) before the engine
+        // drain and the DB close below.
+        try {
+          backgroundResource.shutdown();
+        } catch {
+          // Best effort: the engine drain below still runs.
         }
         try {
           await activeEngine.shutdown({ drainMs });
@@ -2805,6 +3034,65 @@ export async function startServer(
       trialTimer.unref?.();
     }
 
+    // AV07 supervisor handshake: an EXPLICIT operator request relayed by the
+    // supervisor (`stop` or `planned-restart`) runs the EXISTING graceful
+    // shutdown (mark draining -> shadow/memory/notifications stop -> engine
+    // drain -> bounded connector shutdown -> DB close -> listener close).
+    // That drain IS the safe boundary: queued/running work either completes
+    // inside SHUTDOWN_DRAIN_MS or shutdown throws and stays draining (never
+    // a forced immediate kill for a normal planned restart). Unknown-commit
+    // rows are durable and allow restart but are NEVER retried (unchanged
+    // engine recovery rule). On success the child reports `companion-drained`
+    // and exits so the supervisor can respawn (planned restart) or hold
+    // (operator stop); on drain failure it reports `companion-drain-failed`
+    // and stays alive so the supervisor HOLDS instead of forcing unsafe
+    // work. Registered ONLY for supervisor-managed children (fixed marker in
+    // the supervisor-set environment): test workers, embedders, and any
+    // other IPC parent never see this channel. Only messages from the
+    // supervisor IPC channel are honored — never model output, HTTP input,
+    // or any untrusted channel.
+    if (isSupervisorManaged()) {
+      // Parent-death cleanup: if the supervisor crashes or is killed before
+      // its own signal handler runs, the IPC channel disconnects while this
+      // child still holds the DB and the listening port. Without this the
+      // orphan stays alive and a replacement supervisor's child gets
+      // EADDRINUSE until manual cleanup. Shut down gracefully (EXISTING
+      // shutdown path, idempotent) and exit so the port/DB are released.
+      process.on("disconnect", () => {
+        void (async (): Promise<void> => {
+          try {
+            await shutdown("signal");
+          } catch {
+            // Best effort: exit below still releases the port/DB.
+          }
+          process.exit(1);
+        })();
+      });
+      process.on("message", (message: unknown) => {
+        if (
+          typeof message !== "object" ||
+          message === null ||
+          (message as { type?: unknown }).type !== "supervisor-shutdown"
+        ) {
+          return;
+        }
+        const mode = (message as { mode?: unknown }).mode;
+        if (mode !== "stop" && mode !== "planned-restart") {
+          return;
+        }
+        void (async (): Promise<void> => {
+          try {
+            await shutdown("signal");
+          } catch {
+            notifySupervisor({ type: "companion-drain-failed" });
+            return;
+          }
+          notifySupervisor({ type: "companion-drained" });
+          process.exit(0);
+        })();
+      });
+    }
+
     return {
       config,
       controls,
@@ -2815,6 +3103,7 @@ export async function startServer(
       memory,
       shadow,
       trialRunner,
+      notifications,
     };
   } catch (error) {
     removeSignalHandlers();
@@ -2848,6 +3137,22 @@ export async function startServer(
       } catch {
         // Best effort: the original startup error carries the failure.
       }
+    }
+    // Same rule for the notification projector: clear the deadline timer
+    // and await the in-flight drain BEFORE the DB close below.
+    if (notifications !== null) {
+      try {
+        await notifications.stop();
+      } catch {
+        // Best effort: the original startup error carries the failure.
+      }
+    }
+    // Shared background admission: clear deferred wakes BEFORE the DB close
+    // below (both services already stopped and closed above).
+    try {
+      backgroundResource.shutdown();
+    } catch {
+      // Best effort: the original startup error carries the failure.
     }
     if (ownedMcp !== undefined) {
       try {
@@ -2885,6 +3190,14 @@ export async function startServer(
     }
     const code = sanitizeStartupErrorStatus(error);
     logger.error("server.start_failed", { status: code });
+    // AV07: report startup failure to the supervisor (when present) with the
+    // fixed status vocabulary. `newer_database` holds with the DB preserved
+    // (never restore an old backup); `address_in_use` degrades to bounded
+    // retry (never kill any listener).
+    notifySupervisor({
+      type: "companion-failed",
+      status: childFailedStatusForError(error),
+    });
     throw error;
   }
 }

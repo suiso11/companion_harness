@@ -141,6 +141,7 @@ export {
 export {
   AutonomyStateConflictError,
   AutonomyVersionConflictError,
+  acceptConversationProposal,
   achievePurpose,
   applyAutonomyRestartFence,
   cancelTask,
@@ -150,16 +151,20 @@ export {
   createPurpose,
   createTask,
   getAutonomyControl,
+  getConversationProposal,
   holdTask,
   isAutonomousWorkAllowed,
   isPurposeApplicableAt,
   isStrictAutonomyDeadline,
   listAutonomyActivity,
+  listConversationProposals,
   listPurposeEvents,
   listTaskEvents,
   recordPurposeConflict,
+  rejectConversationProposal,
   resumeTask,
   revokePurpose,
+  stageConversationProposal,
   startTask,
 } from "./autonomy.js";
 export type { AutonomyToolsOptions } from "./autonomy_tools.js";
@@ -272,6 +277,13 @@ export {
   openKernelDatabase,
   quickCheck,
 } from "./connection.js";
+export type { ConversationProposalToolsOptions } from "./conversation_proposal_tools.js";
+export {
+  createConversationProposalRegistrations,
+  ProposalStageToolOutputSchema,
+  PurposeProposeToolInputSchema,
+  TaskProposeToolInputSchema,
+} from "./conversation_proposal_tools.js";
 export type {
   EngineClock,
   EngineRecovery,
@@ -296,6 +308,8 @@ export {
   MigrationFailedError,
   MigrationMissingError,
   NewerDatabaseError,
+  NotificationKeyConflictError,
+  NotificationProjectionResetError,
   PragmasError,
   ProposalHashMismatchError,
   ProposalStateConflictError,
@@ -319,6 +333,60 @@ export {
   nonCooperativeDelayed,
   successResult,
 } from "./fakes.js";
+export {
+  abnormalExitHandoff,
+  assertOwnedHandoff,
+  buildHandoffSpec,
+  cancelHandoff,
+  countActiveHandoffs,
+  createHandoff,
+  dispatchHandoff,
+  failHandoff,
+  flagHandoffReevaluationInTx,
+  getHandoff,
+  HandoffStateConflictError,
+  HandoffVersionConflictError,
+  listHandoffAttempts,
+  listHandoffEvents,
+  listHandoffs,
+  reaffirmHandoff,
+  recordHandoffAttempt,
+  reportHandoff,
+  verifyHandoff,
+} from "./handoff.js";
+export type { HandoffToolsOptions } from "./handoff_tools.js";
+export {
+  createHandoffRegistrations,
+  HandoffListToolInputSchema,
+  HandoffListToolOutputSchema,
+  HandoffOpenToolInputSchema,
+  HandoffOpenToolOutputSchema,
+} from "./handoff_tools.js";
+export {
+  acceptStagedHypothesis,
+  attachEvidence,
+  createHypothesis,
+  flagLearningReevaluationInTx,
+  getHypothesis,
+  LearningStateConflictError,
+  LearningVersionConflictError,
+  listHypotheses,
+  listHypothesisEvents,
+  listHypothesisEvidence,
+  rejectStagedHypothesis,
+  stageHypothesisFromModel,
+  transitionHypothesis,
+} from "./learning.js";
+export type { LearningToolsOptions } from "./learning_tools.js";
+export {
+  createLearningRegistrations,
+  LearningListToolInputSchema,
+  LearningListToolOutputSchema,
+  LearningOpenToolInputSchema,
+  LearningOpenToolOutputSchema,
+  LearningProposeToolInputSchema,
+  LearningProposeToolOutputSchema,
+} from "./learning_tools.js";
 export type {
   CreateM1ToolRegistrationsOptions,
   MarkdownConnectorBinding,
@@ -366,6 +434,29 @@ export {
   migrateKernelDatabase,
   setSchemaVersion,
 } from "./migrate.js";
+export type {
+  AckNotificationOptions,
+  BuildDeadlineScheduleOptions,
+  IngestNotificationsOptions,
+  ListNotificationsForwardOptions,
+  ListNotificationsOptions,
+  NextDeadlineOptions,
+  NotificationCursorSource,
+  ReadNotificationOptions,
+  RecordDueDeadlinesOptions,
+} from "./notifications.js";
+export {
+  ackNotification,
+  buildDeadlineSchedule,
+  getLatestNotificationCursor,
+  getNextDeadline,
+  getNotification,
+  getNotificationHistory,
+  ingestNotifications,
+  listNotifications,
+  listNotificationsForward,
+  recordDueDeadlines,
+} from "./notifications.js";
 export type {
   CalendarConnectorView,
   EnsureMarkdownConnectorOptions,
@@ -442,6 +533,10 @@ export {
   memoryGrants,
   memoryOutbox,
   modelCalls,
+  notificationAcks,
+  notificationCursors,
+  notificationDeadlineSchedule,
+  notifications,
   referenceSetItems,
   referenceSets,
   resourceSnapshots,

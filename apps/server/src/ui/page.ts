@@ -506,6 +506,305 @@ export function renderConversationShell(): HtmlEscapedString {
         ),
       ),
       jsx(
+        "section",
+        { id: "notifications", "aria-label": "お知らせ" },
+        jsx("h2", {}, "お知らせ"),
+        jsx("p", { id: "notification-badge", "aria-live": "polite" }),
+        jsx("div", { id: "notification-urgent", "aria-live": "assertive" }),
+        jsx("div", { id: "notification-routine", "aria-live": "polite" }),
+        jsx("ul", { id: "notification-list" }),
+        jsx(
+          "button",
+          { id: "notification-older", type: "button", hidden: true },
+          "古いお知らせを読み込む",
+        ),
+        jsx(
+          "div",
+          { id: "notification-detail", hidden: true },
+          jsx("div", { id: "notification-detail-body" }),
+          jsx(
+            "button",
+            { id: "notification-ack", type: "button" },
+            "確認済みにする",
+          ),
+          jsx(
+            "button",
+            { id: "notification-retry", type: "button", hidden: true },
+            "同じ内容で再送",
+          ),
+          jsx("p", { id: "notification-status", "aria-live": "polite" }),
+        ),
+      ),
+      jsx(
+        "section",
+        { id: "proposals", "aria-label": "会話の候補" },
+        jsx("h2", {}, "会話の候補"),
+        jsx("p", { id: "proposal-badge", "aria-live": "polite" }),
+        jsx("p", { id: "proposal-brief", "aria-live": "polite" }),
+        jsx("ul", { id: "proposal-list" }),
+        jsx("button", { id: "proposal-refresh", type: "button" }, "候補を更新"),
+        jsx(
+          "button",
+          { id: "proposal-more", type: "button", hidden: true },
+          "古い履歴を読み込む",
+        ),
+        jsx(
+          "div",
+          { id: "proposal-detail", hidden: true },
+          jsx("div", { id: "proposal-detail-body" }),
+          jsx("p", { id: "proposal-parent", "aria-live": "polite" }),
+          jsx("p", { id: "proposal-date-label" }),
+          jsx("input", {
+            id: "proposal-date",
+            type: "text",
+            autocomplete: "off",
+          }),
+          jsx("input", {
+            id: "proposal-date-until",
+            type: "text",
+            autocomplete: "off",
+            hidden: true,
+          }),
+          jsx("button", { id: "proposal-accept", type: "button" }, "採用する"),
+          jsx("button", { id: "proposal-reject", type: "button" }, "見送る"),
+        ),
+        // The frozen-request retry + op status belong to the section, NOT
+        // the detail drawer: the drawer stays hidden until a draft is
+        // selected, so a retry nested inside it could never be pressed
+        // after an uncertain POST with no selection.
+        jsx(
+          "button",
+          { id: "proposal-retry", type: "button", hidden: true },
+          "同じ内容で再送",
+        ),
+        jsx("p", { id: "proposal-status", "aria-live": "polite" }),
+      ),
+      jsx(
+        "section",
+        { id: "learning", "aria-label": "学びの記録" },
+        jsx("h2", {}, "学びの記録"),
+        jsx(
+          "p",
+          {},
+          "仮説は事実ではありません（支持・反証・引退は明示の操作のみ）",
+        ),
+        jsx(
+          "form",
+          { id: "learning-create-form" },
+          jsx("input", {
+            id: "learning-scope",
+            type: "text",
+            autocomplete: "off",
+          }),
+          jsx(
+            "select",
+            { id: "learning-kind" },
+            jsx("option", { value: "method" }, "方法"),
+            jsx("option", { value: "hypothesis" }, "仮説"),
+          ),
+          jsx("textarea", { id: "learning-statement" }),
+          jsx(
+            "button",
+            { id: "learning-create", type: "button" },
+            "仮説を記録",
+          ),
+        ),
+        jsx("ul", { id: "learning-list" }),
+        jsx("button", { id: "learning-refresh", type: "button" }, "一覧を更新"),
+        jsx(
+          "button",
+          { id: "learning-more", type: "button", hidden: true },
+          "古い履歴を読み込む",
+        ),
+        jsx(
+          "div",
+          { id: "learning-detail", hidden: true },
+          jsx("div", { id: "learning-detail-body" }),
+          jsx("ul", { id: "learning-evidence-list" }),
+          jsx(
+            "button",
+            { id: "learning-evidence-more", type: "button", hidden: true },
+            "古い証拠を読み込む",
+          ),
+          jsx(
+            "select",
+            { id: "learning-evidence-polarity" },
+            jsx("option", { value: "supports" }, "支持"),
+            jsx("option", { value: "refutes" }, "反証"),
+            jsx("option", { value: "neutral" }, "中立"),
+          ),
+          jsx(
+            "select",
+            { id: "learning-evidence-source-kind" },
+            jsx("option", { value: "shadow_job" }, "試行"),
+            jsx("option", { value: "conversation_proposal" }, "会話の候補"),
+            jsx("option", { value: "action_receipt" }, "実行記録"),
+            jsx("option", { value: "task_event" }, "作業履歴"),
+          ),
+          jsx("input", {
+            id: "learning-evidence-source-id",
+            type: "text",
+            autocomplete: "off",
+          }),
+          jsx("input", {
+            id: "learning-evidence-note",
+            type: "text",
+            autocomplete: "off",
+          }),
+          jsx(
+            "button",
+            { id: "learning-evidence-attach", type: "button" },
+            "証拠を結びつける",
+          ),
+          jsx("button", { id: "learning-support", type: "button" }, "支持する"),
+          jsx("button", { id: "learning-refute", type: "button" }, "反証する"),
+          jsx("button", { id: "learning-retire", type: "button" }, "引退する"),
+          jsx(
+            "button",
+            { id: "learning-reaffirm", type: "button" },
+            "再確認する",
+          ),
+          jsx("button", { id: "learning-accept", type: "button" }, "採用する"),
+          jsx("button", { id: "learning-reject", type: "button" }, "見送る"),
+        ),
+        // The frozen-request retry + op status belong to the section, NOT
+        // the detail drawer: the drawer stays hidden until a hypothesis is
+        // selected, so a retry nested inside it could never be pressed
+        // after an uncertain POST with no selection (same pattern as the
+        // shadow retry above).
+        jsx(
+          "button",
+          { id: "learning-retry", type: "button", hidden: true },
+          "同じ内容で再送",
+        ),
+        jsx("p", { id: "learning-status", "aria-live": "polite" }),
+      ),
+      jsx(
+        "section",
+        { id: "handoff", "aria-label": "引継ぎ" },
+        jsx("h2", {}, "引継ぎ（pi-orchへの手動受渡）"),
+        jsx(
+          "p",
+          {},
+          "実行は自動化されません。人が仕様を貼り付けてpi-orchへ渡し、検証済み結果を記録します（サンドボックス成功≠本番／権限は別途承認）",
+        ),
+        jsx(
+          "form",
+          { id: "handoff-create-form" },
+          jsx("input", {
+            id: "handoff-task",
+            type: "text",
+            autocomplete: "off",
+            list: "handoff-task-list",
+          }),
+          jsx("datalist", { id: "handoff-task-list" }),
+          jsx("textarea", { id: "handoff-target" }),
+          jsx("textarea", { id: "handoff-criteria" }),
+          jsx(
+            "select",
+            { id: "handoff-op-scope" },
+            jsx("option", { value: "investigate" }, "調査"),
+            jsx("option", { value: "implement" }, "実装"),
+          ),
+          jsx("input", {
+            id: "handoff-budget",
+            type: "text",
+            autocomplete: "off",
+          }),
+          jsx(
+            "select",
+            { id: "handoff-boundaries", multiple: true },
+            jsx("option", { value: "external_publication" }, "外部公開"),
+            jsx("option", { value: "shared_branch" }, "共有ブランチ"),
+            jsx("option", { value: "payment" }, "支払い"),
+            jsx("option", { value: "deletion" }, "削除"),
+            jsx("option", { value: "secret" }, "秘密情報"),
+            jsx("option", { value: "access_change" }, "権限変更"),
+          ),
+          jsx("input", {
+            id: "handoff-supersedes",
+            type: "text",
+            autocomplete: "off",
+            list: "handoff-supersedes-list",
+          }),
+          jsx("datalist", { id: "handoff-supersedes-list" }),
+          jsx(
+            "button",
+            { id: "handoff-create", type: "button" },
+            "引継ぎを記録",
+          ),
+        ),
+        jsx("p", { id: "handoff-active-count", "aria-live": "polite" }),
+        jsx("ul", { id: "handoff-list" }),
+        jsx("button", { id: "handoff-refresh", type: "button" }, "一覧を更新"),
+        jsx(
+          "button",
+          { id: "handoff-more", type: "button", hidden: true },
+          "古い履歴を読み込む",
+        ),
+        jsx(
+          "div",
+          { id: "handoff-detail", hidden: true },
+          jsx("div", { id: "handoff-detail-body" }),
+          jsx("ul", { id: "handoff-events-list" }),
+          jsx("ul", { id: "handoff-attempts-list" }),
+          jsx("input", {
+            id: "handoff-external-ref",
+            type: "text",
+            autocomplete: "off",
+          }),
+          jsx("button", { id: "handoff-dispatch", type: "button" }, "送付する"),
+          jsx(
+            "select",
+            { id: "handoff-report-env" },
+            jsx("option", { value: "sandbox" }, "砂箱"),
+            jsx("option", { value: "production" }, "本番（未検証申告）"),
+          ),
+          jsx("textarea", { id: "handoff-report-summary" }),
+          jsx("button", { id: "handoff-report", type: "button" }, "報告する"),
+          jsx("div", { id: "handoff-verify-rows" }),
+          jsx("button", { id: "handoff-verify", type: "button" }, "検証する"),
+          jsx("button", { id: "handoff-fail", type: "button" }, "失敗にする"),
+          jsx("button", { id: "handoff-cancel", type: "button" }, "取消する"),
+          jsx(
+            "button",
+            { id: "handoff-abnormal", type: "button" },
+            "異常終了を記録",
+          ),
+          jsx(
+            "select",
+            { id: "handoff-attempt-cause" },
+            jsx("option", { value: "transient_infra" }, "一時的障害"),
+            jsx("option", { value: "worker_error" }, "作業者エラー"),
+            jsx("option", { value: "criteria_unmet" }, "条件未達"),
+            jsx("option", { value: "environment" }, "環境要因"),
+          ),
+          jsx(
+            "button",
+            { id: "handoff-attempt", type: "button" },
+            "再試行を記録",
+          ),
+          jsx(
+            "button",
+            { id: "handoff-reaffirm", type: "button" },
+            "再確認する",
+          ),
+          jsx("button", { id: "handoff-spec", type: "button" }, "仕様を取得"),
+          jsx("div", { id: "handoff-spec-view" }),
+        ),
+        // The frozen-request retry + op status belong to the section, NOT
+        // the detail drawer: the drawer stays hidden until a handoff is
+        // selected, so a retry nested inside it could never be pressed
+        // after an uncertain POST with no selection (same pattern as the
+        // learning retry above).
+        jsx(
+          "button",
+          { id: "handoff-retry", type: "button", hidden: true },
+          "同じ内容で再送",
+        ),
+        jsx("p", { id: "handoff-status", "aria-live": "polite" }),
+      ),
+      jsx(
         "div",
         { id: "drawer", hidden: true, role: "dialog", "aria-label": "引用" },
         jsx("pre", { id: "drawer-body" }),
@@ -519,7 +818,11 @@ export function renderConversationShell(): HtmlEscapedString {
           type: "text",
           autocomplete: "off",
         }),
-        jsx("button", { id: "composer-send", type: "submit" }, "送信"),
+        jsx(
+          "button",
+          { id: "composer-send", type: "submit", disabled: true },
+          "送信",
+        ),
         jsx(
           "button",
           { id: "composer-stop", type: "button", hidden: true },

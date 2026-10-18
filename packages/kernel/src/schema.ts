@@ -1384,8 +1384,377 @@ export const trialAliasFences = sqliteTable(
   (t) => [primaryKey({ columns: [t.workspaceAlias, t.executionId] })],
 );
 
+// AV05 notifications durable projection (kernel core only). Mirrors
+// packages/kernel/migrations/0016_notifications.sql, which is authoritative.
+export const notificationCursors = sqliteTable(
+  "notification_cursors",
+  {
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id),
+    source: text("source").notNull(),
+    lastSourceRowid: integer("last_source_rowid").notNull(),
+    lastSourceKey: text("last_source_key"),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.sessionId, t.source] }),
+    check(
+      "notification_cursors_source_check",
+      sql`${t.source} IN ('shadow_job_events','action_receipts','autonomy_task_events')`,
+    ),
+    check("notification_cursors_rowid_check", sql`${t.lastSourceRowid} >= 0`),
+  ],
+);
+
+export const notifications = sqliteTable(
+  "notifications",
+  {
+    id: text("id").primaryKey(),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id),
+    seq: integer("seq").notNull(),
+    scope: text("scope").notNull(),
+    kind: text("kind").notNull(),
+    priority: text("priority").notNull(),
+    briefText: text("brief_text").notNull(),
+    sourceKind: text("source_kind").notNull(),
+    sourceId: text("source_id").notNull(),
+    sourceVersion: integer("source_version"),
+    sourceEpoch: integer("source_epoch"),
+    citedDeadlines: text("cited_deadlines").notNull(),
+    fingerprint: text("fingerprint").notNull(),
+    outdated: integer("outdated").notNull().default(0),
+    contextExpiryAt: integer("context_expiry_at"),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [
+    unique("notifications_session_seq_unique").on(t.sessionId, t.seq),
+    unique("notifications_session_fingerprint_unique").on(
+      t.sessionId,
+      t.fingerprint,
+    ),
+    check("notifications_seq_check", sql`${t.seq} >= 1`),
+    check(
+      "notifications_kind_check",
+      sql`${t.kind} IN ('progress','proposal','question','deadline','commitment')`,
+    ),
+    check(
+      "notifications_priority_check",
+      sql`${t.priority} IN ('routine','urgent')`,
+    ),
+    check(
+      "notifications_source_kind_check",
+      sql`${t.sourceKind} IN ('shadow_job','action_receipt','task_deadline')`,
+    ),
+    check(
+      "notifications_cited_deadlines_check",
+      sql`json_valid(${t.citedDeadlines})`,
+    ),
+    check("notifications_outdated_check", sql`${t.outdated} IN (0,1)`),
+  ],
+);
+
+export const notificationAcks = sqliteTable(
+  "notification_acks",
+  {
+    notificationId: text("notification_id")
+      .primaryKey()
+      .references(() => notifications.id),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id),
+    ackKey: text("ack_key").notNull(),
+    ackBody: text("ack_body").notNull(),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [
+    unique("notification_acks_session_key_unique").on(t.sessionId, t.ackKey),
+    check("notification_acks_body_check", sql`json_valid(${t.ackBody})`),
+  ],
+);
+
+export const notificationDeadlineSchedule = sqliteTable(
+  "notification_deadline_schedule",
+  {
+    taskId: text("task_id").primaryKey(),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id),
+    scope: text("scope").notNull(),
+    dueAt: integer("due_at").notNull(),
+    observedTaskVersion: integer("observed_task_version").notNull(),
+    sourceUpdatedAt: integer("source_updated_at").notNull(),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (t) => [
+    foreignKey({
+      columns: [t.sessionId, t.taskId],
+      foreignColumns: [autonomyTasks.sessionId, autonomyTasks.id],
+      name: "notification_deadline_session_task_fk",
+    }),
+    check("notification_deadline_due_at_check", sql`${t.dueAt} >= 0`),
+    check(
+      "notification_deadline_version_check",
+      sql`${t.observedTaskVersion} >= 1`,
+    ),
+  ],
+);
+
+// AV04 learning durable core (methods/hypotheses + anchored evidence).
+// Mirrors packages/kernel/migrations/0018_learning.sql, which is
+// authoritative. Hypotheses are immutable originals (only status / version
+// / staged / needs_reevaluation / updated_at are ever rewritten); evidence
+// is append-only and anchors ONLY to existing durable source rows. No
+// purpose / task / grant / control / notification column exists here.
+
+export const learningHypotheses = sqliteTable(
+  "learning_hypotheses",
+  {
+    id: text("id").primaryKey(),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id),
+    scope: text("scope").notNull(),
+    kind: text("kind").notNull(),
+    statement: text("statement").notNull(),
+    status: text("status").notNull(),
+    version: integer("version").notNull(),
+    origin: text("origin").notNull(),
+    staged: integer("staged").notNull(),
+    needsReevaluation: integer("needs_reevaluation").notNull().default(0),
+    sourceRunId: text("source_run_id"),
+    sourceTurnId: text("source_turn_id"),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (t) => [
+    unique("learning_hypotheses_session_id_unique").on(t.sessionId, t.id),
+    foreignKey({
+      name: "learning_hypotheses_session_source_turn_fk",
+      columns: [t.sessionId, t.sourceTurnId],
+      foreignColumns: [turns.sessionId, turns.id],
+    }),
+    foreignKey({
+      name: "learning_hypotheses_session_source_run_fk",
+      columns: [t.sessionId, t.sourceRunId],
+      foreignColumns: [runs.sessionId, runs.id],
+    }),
+    check(
+      "learning_hypotheses_kind_check",
+      sql`${t.kind} IN ('method','hypothesis')`,
+    ),
+    check(
+      "learning_hypotheses_status_check",
+      sql`${t.status} IN ('open','supported','refuted','retired')`,
+    ),
+    check("learning_hypotheses_version_check", sql`${t.version} >= 1`),
+    check(
+      "learning_hypotheses_origin_check",
+      sql`${t.origin} IN ('human','model')`,
+    ),
+    check("learning_hypotheses_staged_check", sql`${t.staged} IN (0,1)`),
+    check(
+      "learning_hypotheses_needs_reevaluation_check",
+      sql`${t.needsReevaluation} IN (0,1)`,
+    ),
+  ],
+);
+
+export const learningEvidence = sqliteTable(
+  "learning_evidence",
+  {
+    id: text("id").primaryKey(),
+    hypothesisId: text("hypothesis_id").notNull(),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id),
+    polarity: text("polarity").notNull(),
+    sourceKind: text("source_kind").notNull(),
+    sourceId: text("source_id").notNull(),
+    note: text("note"),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [
+    unique("learning_evidence_session_id_unique").on(t.sessionId, t.id),
+    foreignKey({
+      name: "learning_evidence_session_hypothesis_fk",
+      columns: [t.sessionId, t.hypothesisId],
+      foreignColumns: [learningHypotheses.sessionId, learningHypotheses.id],
+    }),
+    check(
+      "learning_evidence_polarity_check",
+      sql`${t.polarity} IN ('supports','refutes','neutral')`,
+    ),
+    check(
+      "learning_evidence_source_kind_check",
+      sql`${t.sourceKind} IN ('shadow_job','conversation_proposal','action_receipt','task_event')`,
+    ),
+  ],
+);
+
+export const learningHypothesisEvents = sqliteTable(
+  "learning_hypothesis_events",
+  {
+    id: text("id").primaryKey(),
+    hypothesisId: text("hypothesis_id").notNull(),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id),
+    seq: integer("seq").notNull(),
+    event: text("event").notNull(),
+    fromStatus: text("from_status"),
+    toStatus: text("to_status").notNull(),
+    note: text("note"),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [
+    unique("learning_hypothesis_events_hypothesis_seq_unique").on(
+      t.hypothesisId,
+      t.seq,
+    ),
+    foreignKey({
+      name: "learning_hypothesis_events_session_hypothesis_fk",
+      columns: [t.sessionId, t.hypothesisId],
+      foreignColumns: [learningHypotheses.sessionId, learningHypotheses.id],
+    }),
+    check("learning_hypothesis_events_seq_check", sql`${t.seq} >= 1`),
+    check(
+      "learning_hypothesis_events_event_check",
+      sql`${t.event} IN ('created','proposed','accepted','rejected','evidence_attached','supported','refuted','retired','reevaluation_flagged','reevaluation_cleared')`,
+    ),
+  ],
+);
+
+// AV03 delegation handoffs (human-driven pi-orch records).
+// Mirrors packages/kernel/migrations/0019_handoff.sql, which is
+// authoritative. Frozen fields (target / criteria / scope / budget labels /
+// boundary flags) are never rewritten except through a superseding NEW
+// row; attempts and events are append-only. No numeric budget, grant, or
+// task-write column exists here.
+
+export const delegationHandoffs = sqliteTable(
+  "delegation_handoffs",
+  {
+    id: text("id").primaryKey(),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id),
+    taskId: text("task_id").notNull(),
+    taskVersion: integer("task_version").notNull(),
+    parentPurposeId: text("parent_purpose_id"),
+    parentPurposeVersion: integer("parent_purpose_version"),
+    target: text("target").notNull(),
+    acceptanceCriteria: text("acceptance_criteria").notNull(),
+    opScope: text("op_scope").notNull(),
+    budgetLabel: text("budget_label"),
+    boundaries: text("boundaries").notNull(),
+    status: text("status").notNull(),
+    version: integer("version").notNull(),
+    needsReevaluation: integer("needs_reevaluation").notNull().default(0),
+    activeAttempt: integer("active_attempt").notNull().default(0),
+    externalRef: text("external_ref"),
+    reportEnvironment: text("report_environment"),
+    reportSummary: text("report_summary"),
+    verificationResults: text("verification_results"),
+    supersedesHandoffId: text("supersedes_handoff_id"),
+    supersededBy: text("superseded_by"),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (t) => [
+    unique("delegation_handoffs_session_id_unique").on(t.sessionId, t.id),
+    foreignKey({
+      name: "delegation_handoffs_session_task_fk",
+      columns: [t.sessionId, t.taskId],
+      foreignColumns: [autonomyTasks.sessionId, autonomyTasks.id],
+    }),
+    check(
+      "delegation_handoffs_op_scope_check",
+      sql`${t.opScope} IN ('investigate','implement')`,
+    ),
+    check(
+      "delegation_handoffs_status_check",
+      sql`${t.status} IN ('prepared','dispatched','reported','verified','failed','cancelled')`,
+    ),
+    check("delegation_handoffs_version_check", sql`${t.version} >= 1`),
+    check(
+      "delegation_handoffs_needs_reevaluation_check",
+      sql`${t.needsReevaluation} IN (0,1)`,
+    ),
+    check(
+      "delegation_handoffs_active_attempt_check",
+      sql`${t.activeAttempt} >= 0`,
+    ),
+  ],
+);
+
+export const handoffAttempts = sqliteTable(
+  "handoff_attempts",
+  {
+    id: text("id").primaryKey(),
+    handoffId: text("handoff_id").notNull(),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id),
+    attemptNo: integer("attempt_no").notNull(),
+    cause: text("cause").notNull(),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [
+    unique("handoff_attempts_handoff_no_unique").on(t.handoffId, t.attemptNo),
+    foreignKey({
+      name: "handoff_attempts_session_handoff_fk",
+      columns: [t.sessionId, t.handoffId],
+      foreignColumns: [delegationHandoffs.sessionId, delegationHandoffs.id],
+    }),
+    check(
+      "handoff_attempts_cause_check",
+      sql`${t.cause} IN ('transient_infra','worker_error','criteria_unmet','environment')`,
+    ),
+  ],
+);
+
+export const handoffEvents = sqliteTable(
+  "handoff_events",
+  {
+    id: text("id").primaryKey(),
+    handoffId: text("handoff_id").notNull(),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id),
+    seq: integer("seq").notNull(),
+    event: text("event").notNull(),
+    fromStatus: text("from_status"),
+    toStatus: text("to_status").notNull(),
+    note: text("note"),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [
+    unique("handoff_events_handoff_seq_unique").on(t.handoffId, t.seq),
+    foreignKey({
+      name: "handoff_events_session_handoff_fk",
+      columns: [t.sessionId, t.handoffId],
+      foreignColumns: [delegationHandoffs.sessionId, delegationHandoffs.id],
+    }),
+    check("handoff_events_seq_check", sql`${t.seq} >= 1`),
+    check(
+      "handoff_events_event_check",
+      sql`${t.event} IN ('prepared','dispatched','reported','verified','failed','cancelled','abnormal_exit','attempt_recorded','superseded','reaffirmed','reevaluation_flagged','reevaluation_cleared')`,
+    ),
+  ],
+);
+
 export const kernelSchema = {
   sessions,
+  learningHypotheses,
+  learningEvidence,
+  learningHypothesisEvents,
+  delegationHandoffs,
+  handoffAttempts,
+  handoffEvents,
   autonomyPurposes,
   autonomyPurposeConflicts,
   autonomyPurposeEvents,
@@ -1430,4 +1799,8 @@ export const kernelSchema = {
   shadowInbox,
   shadowJobs,
   shadowJobEvents,
+  notificationCursors,
+  notifications,
+  notificationAcks,
+  notificationDeadlineSchedule,
 };

@@ -129,6 +129,51 @@ export const IDEMPOTENCY_OPERATIONS = {
   stageTrial: { operation: "trial_stage", schemaVersion: 1 },
   approveTrial: { operation: "trial_approve", schemaVersion: 1 },
   claimTrial: { operation: "trial_claim", schemaVersion: 1 },
+  stageConversationProposal: {
+    operation: "conv_proposal_stage",
+    schemaVersion: 1,
+  },
+  acceptConversationProposal: {
+    operation: "conv_proposal_accept",
+    schemaVersion: 1,
+  },
+  rejectConversationProposal: {
+    operation: "conv_proposal_reject",
+    schemaVersion: 1,
+  },
+  createLearningHypothesis: {
+    operation: "learning_create_hypothesis",
+    schemaVersion: 1,
+  },
+  proposeLearningHypothesis: {
+    operation: "learning_propose_hypothesis",
+    schemaVersion: 1,
+  },
+  transitionLearningHypothesis: {
+    operation: "learning_transition_hypothesis",
+    schemaVersion: 1,
+  },
+  decideLearningHypothesis: {
+    operation: "learning_decide_hypothesis",
+    schemaVersion: 1,
+  },
+  attachLearningEvidence: {
+    operation: "learning_attach_evidence",
+    schemaVersion: 1,
+  },
+  createHandoff: { operation: "handoff_create", schemaVersion: 1 },
+  dispatchHandoff: { operation: "handoff_dispatch", schemaVersion: 1 },
+  reportHandoff: { operation: "handoff_report", schemaVersion: 1 },
+  verifyHandoff: { operation: "handoff_verify", schemaVersion: 1 },
+  failHandoff: { operation: "handoff_fail", schemaVersion: 1 },
+  cancelHandoff: { operation: "handoff_cancel", schemaVersion: 1 },
+  abnormalExitHandoff: { operation: "handoff_abnormal_exit", schemaVersion: 1 },
+  recordHandoffAttempt: {
+    operation: "handoff_record_attempt",
+    schemaVersion: 1,
+  },
+  reaffirmHandoff: { operation: "handoff_reaffirm", schemaVersion: 1 },
+  ackNotification: { operation: "notification_ack", schemaVersion: 1 },
 } as const;
 
 /** Shared BEGIN IMMEDIATE transaction helper (autonomy + trial + shadow leaf). */

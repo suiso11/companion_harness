@@ -611,3 +611,8 @@
 
 ## 現況追記（2026-10-17、autonomy trial E2E・履歴保持・checkbox/ID/件数不変）
 - 自律 trial 実行系の実装＋合成モデル E2E（A 承認→完了、B STOP→revoke）を検証済み。証拠: `AV-E2E-RESULTS.json` run7（A consumed/authorized・B revoked/unauthorized・unit 消滅・Task/Goal 非完了維持）、`AV-SERVER-TRIAL-RESULTS.json`・`AV-RUNNER-RESULTS.json`・`AV-RELAY-RESULTS.json`・`AV-AUTHORITY-RESULTS.json`。throwaway driver 削除済み、運用 docs 追記済み。残: real model/hardware/resource caps 未選定、real model run 未実施、Own-pi 変更 uncommitted、Remind ops/graph done・commits pending。
+## 現況追記（2026-10-17、AV05 notifications完成・履歴保持・checkbox/ID/件数不変）
+- AV05 full vertical（kernel＋service＋HTTP＋UI、feat/av-notifications、feat/av-shadow-deliberation積み）: migration14＋anchored cursor＋新session trigger＋explicit deadline＋question expiry、background drain＋HTTP paged read/ack＋SSE bootstrap、会話保全UI。focused Vitest 4 files/30＋root/e2e tsc 0＋Biome 0（既存warning/infoのみ）を本sliceで実測；full 138/1583・Chromium 36は既往slice記録（再実行なし）。残件: AV06 shared resources、AV07 external supervisor/recovery、AV04 methods learning、AV03 conversation task-proposals＋actual pi-orch handoff、AV08 maintenance、未解決 device/standing/external rollout。
+
+## 現況追記（2026-10-17、AV03 conversation-proposals完成・履歴保持・checkbox/ID/件数不変）
+- AV03 full vertical（kernel＋HTTP＋UI、feat/av-conversation-proposals）: proposal-only staging core＋session review/adopt routes＋quiet drawer UI。統合受入ONCE実測: full Vitest 143 files passed/2 skipped・1606 tests passed/8 skipped（real remind CLI、LLM/vectors無効）＋default Chromium 42 passed＋root/e2e tsc exit 0＋Biome exit 0（既存warning/infoのみ）。PR未発行・review findings pending。残件: AV04 methods learning、AV06 shared resources、AV07 external supervisor/recovery、AV08 maintenance、未解決 device/standing/external rollout。

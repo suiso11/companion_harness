@@ -107,6 +107,34 @@
       "when": 1790000000014,
       "tag": "0015_shadow_single_claim",
       "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": 16,
+      "when": 1790000000015,
+      "tag": "0016_notifications",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": 17,
+      "when": 1790000000016,
+      "tag": "0017_conversation_proposals",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": 18,
+      "when": 1790000000017,
+      "tag": "0018_learning",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": 19,
+      "when": 1790000000018,
+      "tag": "0019_handoff",
+      "breakpoints": true
     }
   ]
 }
