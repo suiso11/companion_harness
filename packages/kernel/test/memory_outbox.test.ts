@@ -449,7 +449,7 @@ describe("I04 revision-pinned memory evidence", () => {
     };
   }
 
-  it("keeps pre-I04 exposure and grant rows with NULL revision through the 0021 upgrade", async () => {
+  it("keeps pre-I04 exposure and grant rows with NULL revision through the 0021/0022 upgrade", async () => {
     const dir = mkdtempSync(join(tmpdir(), "mem-i04-"));
     const backups = join(dir, "backups");
     const handle = openKernelDatabase(":memory:");
@@ -478,13 +478,14 @@ describe("I04 revision-pinned memory evidence", () => {
           "INSERT INTO memory_grants (run_id, citation, record_id, recall_id, session_id, scope, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .run(runId, "m1", "record-old", "recall-old", sessionId, "s", T0);
-      // Upgrade to the bundled (0021) schema: additive ALTERs only, old
-      // rows survive with NULL revision/kind (never backfilled).
+      // Upgrade to the bundled (0022) schema: 0021 additive ALTERs plus
+      // 0022 additive remote_sessions table; old rows survive with NULL
+      // revision/kind (never backfilled).
       const result = await migrateKernelDatabase({
         db: handle.raw,
         backupDir: backups,
       });
-      expect(result.applied).toEqual([21]);
+      expect(result.applied).toEqual([21, 22]);
       const repo = createKernelRepository(handle.raw);
       const exposures = repo.listMemoryExposures(runId);
       expect(exposures).toHaveLength(1);
