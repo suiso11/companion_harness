@@ -68,6 +68,8 @@ import {
   E2E_CONTROL_PORT,
   E2E_PROXY_PORT,
   TEXT_CITE,
+  TEXT_CITE_MEM,
+  TEXT_CITE_TWO,
   TEXT_FAIL,
   TEXT_HANG,
 } from "./ports.js";
@@ -160,6 +162,31 @@ registry.register("m0-default", async (ctx: RunStrategyContext) => {
     failArmed = false;
     throw new StrategyError("execution_failed");
   }
+  if (text.includes(TEXT_CITE_TWO)) {
+    // V2 structured answer with structural r1+r2 citations for
+    // deterministic drawer races (two distinct stored snapshots).
+    return {
+      version: 2,
+      text: "cited answer two",
+      answer: {
+        version: 1,
+        parts: [{ text: "cited answer two", citations: ["r1", "r2"] }],
+      },
+    };
+  }
+  if (text.includes(TEXT_CITE_MEM)) {
+    // V2 structured answer with a structural m1 citation bound to the
+    // originating run. The recall exposure itself stays on the real route
+    // (genuine 404 in this harness, which has no memory backend).
+    return {
+      version: 2,
+      text: "cited mem answer",
+      answer: {
+        version: 1,
+        parts: [{ text: "cited mem answer", citations: ["m1"] }],
+      },
+    };
+  }
   if (text.includes(TEXT_CITE)) {
     // V2 structured answer with a structural r1 citation. The engine only
     // schema-validates the candidate (no grant check for this fake), so the
@@ -226,7 +253,10 @@ const UUID_V4_RE =
  * under test all run through the real production routes/UI. The snapshot
  * body carries markup-significant characters to prove escaped rendering.
  */
-function seedCitation(sessionId: string): {
+function seedCitation(
+  sessionId: string,
+  text?: unknown,
+): {
   referenceId: string;
   ordinal: number;
   snapshotId: string;
@@ -271,7 +301,23 @@ function seedCitation(sessionId: string): {
     now,
   );
   const resource = { id: resourceId };
-  const normalized = CITATION_SNAPSHOT_TEXT.normalize("NFC");
+  // Plain-text only: no control characters, stays escaped in the drawer.
+  let customText: string | null = null;
+  if (typeof text === "string" && text.length > 0 && text.length <= 500) {
+    let hasControl = false;
+    for (let index = 0; index < text.length; index += 1) {
+      const code = text.charCodeAt(index);
+      if (code < 32 && code !== 9 && code !== 10 && code !== 13) {
+        hasControl = true;
+        break;
+      }
+    }
+    if (!hasControl) {
+      customText = text;
+    }
+  }
+  const snapshotText = customText ?? CITATION_SNAPSHOT_TEXT;
+  const normalized = snapshotText.normalize("NFC");
   const contentHash = createHash("sha256")
     .update(normalized, "utf8")
     .digest("hex");
@@ -285,7 +331,7 @@ function seedCitation(sessionId: string): {
     1,
     null,
     contentHash,
-    JSON.stringify({ version: 1, text: CITATION_SNAPSHOT_TEXT }),
+    JSON.stringify({ version: 1, text: normalized }),
     sizeBytes,
     now,
     now,
@@ -839,12 +885,14 @@ const control = createServer(
     }
     if (req.method === "POST" && url.pathname === "/seed-citation") {
       let sessionId: unknown = null;
+      let text: unknown = null;
       try {
-        sessionId = (
-          JSON.parse(rawBody === "" ? "{}" : rawBody) as {
-            sessionId?: unknown;
-          }
-        ).sessionId;
+        const parsed = JSON.parse(rawBody === "" ? "{}" : rawBody) as {
+          sessionId?: unknown;
+          text?: unknown;
+        };
+        sessionId = parsed.sessionId;
+        text = parsed.text;
       } catch {
         json(400, { error: { code: "validation_error" } });
         return;
@@ -854,7 +902,7 @@ const control = createServer(
         return;
       }
       try {
-        json(200, seedCitation(sessionId));
+        json(200, seedCitation(sessionId, text));
       } catch {
         json(404, { error: { code: "not_found" } });
       }

@@ -464,6 +464,17 @@ class ConversationApp {
   private memorySearchSeq = 0;
   private memoryDetailSeq = 0;
   private memoryOpSeq = 0;
+  /**
+   * Shared citation-drawer generation (rN stored + mN run-bound): ONE
+   * monotonic counter for ALL drawer opens plus closeDrawer. Incremented
+   * synchronously at the START of every new open (including mN
+   * dispatch/errors/missing run) and on close. Awaited drawer responses
+   * apply only when their generation is still current AND the session
+   * matches, so last user intent wins even when the new request fails or
+   * is still pending. Already-dispatched context PUTs cannot be unsent;
+   * the guard gates all future work/UI instead.
+   */
+  private citationDrawerSeq = 0;
 
   constructor() {
     this.list = document.getElementById("conversation") ?? el("main");
@@ -3012,20 +3023,32 @@ class ConversationApp {
    */
   private static readonly REFERENCE_CONTEXT_CAS_ATTEMPTS = 3;
 
-  private async updateReferenceContextCas(referenceId: string): Promise<void> {
-    if (this.sessionId === null) {
+  private async updateReferenceContextCas(
+    referenceId: string,
+    sessionId: string | null,
+    seq: number,
+  ): Promise<void> {
+    if (sessionId === null) {
       return;
     }
-    const base = `/api/sessions/${encodeURIComponent(this.sessionId)}/reference-context`;
+    const currentDrawer = (): boolean =>
+      this.sessionId === sessionId && seq === this.citationDrawerSeq;
+    const base = `/api/sessions/${encodeURIComponent(sessionId)}/reference-context`;
     for (
       let attempt = 0;
       attempt < ConversationApp.REFERENCE_CONTEXT_CAS_ATTEMPTS;
       attempt += 1
     ) {
+      if (!currentDrawer()) {
+        return;
+      }
       let current: { status: number; body: unknown };
       try {
         current = await fetchJson(base);
       } catch {
+        return;
+      }
+      if (!currentDrawer()) {
         return;
       }
       if (current.status !== 200) {
@@ -3049,6 +3072,9 @@ class ConversationApp {
         return;
       }
       items.push(referenceId);
+      if (!currentDrawer()) {
+        return;
+      }
       let put: { status: number; body: unknown };
       try {
         put = await fetchJson(base, {
@@ -3059,6 +3085,9 @@ class ConversationApp {
       } catch {
         return;
       }
+      if (!currentDrawer()) {
+        return;
+      }
       if (put.status >= 200 && put.status < 300) {
         return;
       }
@@ -3066,7 +3095,8 @@ class ConversationApp {
         return;
       }
       // Version conflict (§16.5 exact): surface the conflict before
-      // re-reading the latest context and retrying the CAS.
+      // re-reading the latest context and retrying the CAS — only when this
+      // open is still the latest drawer intent.
       this.showNotice("参照の更新で競合しました。最新の状態を取得しています");
       // Version conflict: loop re-reads the stored context and retries CAS.
     }
@@ -3074,20 +3104,41 @@ class ConversationApp {
 
   /** Citation drawer (§16.5): stored snapshot as escaped plain text only. */
   private async openCitation(citation: string, runId?: string): Promise<void> {
+    // ONE shared generation for every drawer open: bump + invalidate
+    // synchronously BEFORE the first await so the prior body can never be
+    // falsely shown as the new request, and a superseded open can never
+    // apply body/notices/disabled/context after it.
+    this.citationDrawerSeq += 1;
+    const seq = this.citationDrawerSeq;
+    const sessionId = this.sessionId;
+    const currentDrawer = (): boolean =>
+      this.sessionId === sessionId && seq === this.citationDrawerSeq;
+    // Synchronous invalidation using the existing drawer pattern (same as
+    // closeDrawer): no new loading abstraction.
+    this.drawerBody.textContent = "";
+    this.drawer.hidden = true;
     // Memory citations (mN) bind to their originating run's recall exposure,
     // never to the latest explicit management search: an older answer's `m1`
     // must open the snippet the model saw in THAT run even after an unrelated
     // newer search minted a different `m1`.
     if (/^m[1-9][0-9]*$/.test(citation)) {
-      await this.openMemoryCitation(citation, runId);
+      await this.openMemoryCitation(citation, runId, seq, sessionId);
       return;
     }
-    if (this.sessionId === null) {
+    if (sessionId === null) {
       return;
     }
-    const listed = await fetchJson(
-      `/api/sessions/${encodeURIComponent(this.sessionId)}/references`,
-    );
+    let listed: { status: number; body: unknown };
+    try {
+      listed = await fetchJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/references`,
+      );
+    } catch {
+      return;
+    }
+    if (!currentDrawer()) {
+      return;
+    }
     // Exact contracts `ReferenceListResponse`: `{ items: [...] }` — each
     // item carries the reference id plus its rN presentation ordinal.
     const items = (listed.body as { items?: unknown }).items;
@@ -3113,11 +3164,24 @@ class ConversationApp {
     }
     // Open = implicit selection update (§14.8 CAS): add the reference to the
     // session reference context via a real conditional PUT before showing it.
-    // Conflict/loss is non-fatal — the drawer still opens.
-    await this.updateReferenceContextCas(referenceId);
-    const detail = await fetchJson(
-      `/api/sessions/${encodeURIComponent(this.sessionId)}/references/${encodeURIComponent(referenceId)}`,
-    );
+    // Conflict/loss is non-fatal — the drawer still opens. A superseded open
+    // never issues new CAS work after this point (checked inside + below);
+    // an already-dispatched PUT stays committed (never rolled back).
+    await this.updateReferenceContextCas(referenceId, sessionId, seq);
+    if (!currentDrawer()) {
+      return;
+    }
+    let detail: { status: number; body: unknown };
+    try {
+      detail = await fetchJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/references/${encodeURIComponent(referenceId)}`,
+      );
+    } catch {
+      return;
+    }
+    if (!currentDrawer()) {
+      return;
+    }
     // Exact contracts `ReferenceDetailResponse`: `body` is the stored
     // `SnapshotBody` `{ version, text }` — render the text only.
     const snapshot = (detail.body as { body?: unknown }).body;
@@ -3293,46 +3357,74 @@ class ConversationApp {
   /** Answer-body mN citation: resolve through the originating run's recall exposure. */
   private async openMemoryCitation(
     handle: string,
-    runId?: string,
+    runId: string | undefined,
+    seq: number,
+    sessionId: string | null,
   ): Promise<void> {
-    if (this.sessionId === null) {
+    const currentDrawer = (): boolean =>
+      this.sessionId === sessionId && seq === this.citationDrawerSeq;
+    if (sessionId === null) {
       return;
     }
-    const sessionId = this.sessionId;
     // Answer citations REQUIRE their originating run: without it the handle
     // is ambiguous across searches, so fail closed instead of opening the
     // latest management search's unrelated snapshot.
     if (runId === undefined || runId.length === 0) {
+      if (!currentDrawer()) {
+        return;
+      }
       this.showNotice("先に「記憶を検索」で対象を探してください");
       return;
     }
+    const boundRunId = runId;
     let res: { status: number; body: unknown };
     try {
       res = await fetchJson(
-        `/api/sessions/${encodeURIComponent(sessionId)}/memory/recall/${encodeURIComponent(runId)}/items/${encodeURIComponent(handle)}`,
+        `/api/sessions/${encodeURIComponent(sessionId)}/memory/recall/${encodeURIComponent(boundRunId)}/items/${encodeURIComponent(handle)}`,
       );
     } catch {
+      if (!currentDrawer()) {
+        return;
+      }
       this.showNotice("記憶の引用取得に失敗しました");
+      return;
+    }
+    if (!currentDrawer()) {
       return;
     }
     if (res.status === 404) {
       const code = (res.body as { error?: { code?: unknown } }).error?.code;
       if (code === "memory_unavailable") {
+        if (!currentDrawer()) {
+          return;
+        }
         this.memoryDisabled = true;
         this.showNotice("記憶は無効です");
+        return;
+      }
+      if (!currentDrawer()) {
         return;
       }
       this.showNotice("引用が見つかりません。再検索してください");
       return;
     }
     if (res.status !== 200) {
+      if (!currentDrawer()) {
+        return;
+      }
       this.showNotice("記憶の引用取得に失敗しました");
       return;
     }
     const body = res.body as { snippet?: unknown; citation?: unknown };
     const snippet = typeof body.snippet === "string" ? body.snippet : "";
     if (snippet.length === 0) {
+      if (!currentDrawer()) {
+        return;
+      }
       this.showNotice("引用が見つかりません。再検索してください");
+      return;
+    }
+    if (!currentDrawer()) {
       return;
     }
     // Immutable cited snapshot for THIS run (never rebound to the latest
@@ -3830,6 +3922,9 @@ class ConversationApp {
   }
 
   private closeDrawer(): void {
+    // Bumping the shared drawer generation makes every in-flight open
+    // superseded: its late response can neither apply content nor reopen.
+    this.citationDrawerSeq += 1;
     this.drawerBody.textContent = "";
     this.drawer.hidden = true;
   }

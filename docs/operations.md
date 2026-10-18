@@ -3552,6 +3552,39 @@ Proof after repin: profile 5/5 + wire-hash 2/2 + startup 22/22 + focused
   read binding now decodes the provider-shaped fixture GET through the
   REAL `normalizeEvent`, asserting canonical-UTC read-back bounds).
 
+## Citation drawer last-intent guard (2026-10-16, no new APIs/storage/retries)
+
+  rN stored citations and mN run-bound memory citations share ONE drawer
+  with no generation guard (before fix): an older delayed response
+  overwrites a newer body, reopens the drawer after close, or latches a
+  stale memory error/`memoryDisabled` over the newer stored citation.
+  Fix (`apps/server/src/ui/client.ts`): ONE shared monotonic
+  `citationDrawerSeq` for every drawer open plus `closeDrawer`,
+  incremented synchronously before the first await; the session is
+  frozen per open and every await is guarded (UI body/notices/disabled,
+  further requests, CAS re-read/PUT retries). New intent invalidates
+  old content immediately (synchronous clear+hide); close invalidates
+  pending opens. rN stays stored-only (existing contextCAS, no upstream
+  GET/PATCH) with exact immutable snapshots; mN stays bound to the
+  originating-run recall endpoint (no latest-search fallback).
+  Already-dispatched context PUTs stay committed (never rolled back).
+  Fixtures (`e2e/server.ts`/`ports.ts`): `cite-two` (V2 r1+r2 answer),
+  `cite-mem` (V2 m1 answer), `seed-citation` accepts plain-text `text`
+  (bounded, control-char free). Three deterministic race regressions in
+  `e2e/citation_recovery.spec.ts` (genuine forwarding via route.fetch +
+  fulfill unchanged, no sleeps): older stored detail resolving late
+  cannot overwrite newer; close-while-pending never resurrects;
+  stale memory-citation error cannot replace the newer stored citation
+  (nor latch notices/disabled). Failing-before on the pre-fix client:
+  3/3 fail (late-overwrite, reopen, `記憶は無効です` latch). Passing-after:
+  full `citation_recovery.spec.ts` 13/13 green (real Chromium, temp
+  SQLite/fixture backend; mN recall is the genuine 404 of the real
+  route — no real remind CLI dataset, stated honestly). Units 120 files /
+  1458 passed (2 known missing-remind live files excluded, not rerun);
+  root + e2e typecheck exit 0; `pnpm lint` exit 0 (2 pre-existing infos:
+  `payload["correctionBody"]` present on clean HEAD, deprecated
+   `recommended` field in `biome.json`).
+
 ## M5 approval before→after preview (2026-10-16, no live writes)
 
   Approval cards show the frozen BEFORE range beside the proposed AFTER
