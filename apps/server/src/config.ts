@@ -177,37 +177,77 @@ export function parseActionConfig(raw: string | undefined): ActionConfig {
 
 /**
  * Strict opt-in remote (tailnet) access config (slice a: Origin/Host
- * allowlist only, DEFAULT DISABLED). This is a HINT for the allowlist
- * check in app.ts only — it never authorizes anything by itself and it
- * never changes the bind host (loopback-only, HostSchema unchanged).
+ * allowlist, slice b: single-user password login + sessions, DEFAULT
+ * DISABLED). This is a HINT for the allowlist check in app.ts plus the
+ * session enforcement only — it never changes the bind host
+ * (loopback-only, HostSchema unchanged).
  *
  * - Env `COMPANION_REMOTE_JSON` is strict JSON only; unset means disabled
- *   with an empty allowlist (current loopback behavior, zero change).
- * - Must be an exact object with only `{ enabled?, allowedOrigins? }`.
- *   `enabled` defaults to false; `allowedOrigins` defaults to `[]`.
+ *   with an empty allowlist (current loopback behavior, zero change), and
+ *   any unparseable/non-object value fails startup fail-closed (never a
+ *   silent disable).
+ * - Must be an exact object with only `{ enabled?, allowedOrigins?,
+ *   passwordFile?, absoluteTimeoutMs?, idleTimeoutMs?, maxFailures?,
+ *   lockoutMs? }`. `enabled` defaults to false; `allowedOrigins`
+ *   defaults to `[]`.
  * - Each allowlist entry must be an exact `https://<host>` origin: https
  *   scheme, no credentials, no explicit port, no path/query/fragment and
  *   no trailing slash (the entry must equal its own `URL.origin`
  *   serialization). Duplicate entries are rejected.
  * - `enabled: true` with an empty allowlist fails startup fail-closed.
- * - While slice (b) authentication is not implemented, `enabled: true`
- *   always fails startup fail-closed ("requires authentication").
+ * - `enabled: true` requires `passwordFile` (absolute path to the
+ *   scrypt password file created by the `set-password` CLI, stored
+ *   OUTSIDE SQLite). Missing/unreadable/world-readable/invalid files fail
+ *   startup fail-closed. The password itself never travels via env/argv.
+ * - Timeout/lockout tunables below carry 案 defaults (design §3):
+ *   absolute session expiry 30d, idle timeout 7d, 5 failures → 15 min
+ *   global lockout. The lockout counter lives in memory and resets on
+ *   restart (documented in README).
  * - Failures carry fixed messages only: no values escape.
  * - The returned object (including the origins array) is deep-frozen.
  */
 export interface RemoteConfig {
   readonly enabled: boolean;
   readonly allowedOrigins: readonly string[];
+  /** Absolute path to the password hash file; null means unset. */
+  readonly passwordFile: string | null;
+  /** Absolute session lifetime in ms (案 default 30d). */
+  readonly absoluteTimeoutMs: number;
+  /** Idle session timeout in ms (案 default 7d). */
+  readonly idleTimeoutMs: number;
+  /** Consecutive failed logins before the global lockout (案 default 5). */
+  readonly maxFailures: number;
+  /** Global login lockout duration in ms (案 default 15 min). */
+  readonly lockoutMs: number;
 }
 
 /** Default remote config: fully disabled with an empty allowlist. */
 export const DEFAULT_REMOTE_CONFIG: RemoteConfig = Object.freeze({
   enabled: false,
   allowedOrigins: Object.freeze([]),
+  passwordFile: null,
+  absoluteTimeoutMs: 30 * 24 * 60 * 60 * 1000,
+  idleTimeoutMs: 7 * 24 * 60 * 60 * 1000,
+  maxFailures: 5,
+  lockoutMs: 15 * 60 * 1000,
 });
 
 export const MAX_REMOTE_ORIGINS = 16;
 export const MAX_REMOTE_ORIGIN_LENGTH = 256;
+export const MAX_REMOTE_PATH_LENGTH = 4096;
+/** 案 defaults (design §3, still open to haruka confirmation). */
+export const DEFAULT_REMOTE_ABSOLUTE_TIMEOUT_MS = 30 * 24 * 60 * 60 * 1000;
+export const DEFAULT_REMOTE_IDLE_TIMEOUT_MS = 7 * 24 * 60 * 60 * 1000;
+export const DEFAULT_REMOTE_MAX_FAILURES = 5;
+export const DEFAULT_REMOTE_LOCKOUT_MS = 15 * 60 * 1000;
+export const MIN_REMOTE_ABSOLUTE_TIMEOUT_MS = 60 * 60 * 1000;
+export const MAX_REMOTE_ABSOLUTE_TIMEOUT_MS = 90 * 24 * 60 * 60 * 1000;
+export const MIN_REMOTE_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
+export const MAX_REMOTE_IDLE_TIMEOUT_MS = 30 * 24 * 60 * 60 * 1000;
+export const MIN_REMOTE_MAX_FAILURES = 3;
+export const MAX_REMOTE_MAX_FAILURES = 20;
+export const MIN_REMOTE_LOCKOUT_MS = 60 * 1000;
+export const MAX_REMOTE_LOCKOUT_MS = 24 * 60 * 60 * 1000;
 
 function requireRemoteOrigin(value: unknown): string {
   if (
@@ -252,13 +292,26 @@ export function parseRemoteConfig(raw: string | undefined): RemoteConfig {
     throw configError("remote config must be a JSON object");
   }
   for (const key of Object.keys(parsed)) {
-    if (key !== "enabled" && key !== "allowedOrigins") {
+    if (
+      key !== "enabled" &&
+      key !== "allowedOrigins" &&
+      key !== "passwordFile" &&
+      key !== "absoluteTimeoutMs" &&
+      key !== "idleTimeoutMs" &&
+      key !== "maxFailures" &&
+      key !== "lockoutMs"
+    ) {
       throw configError("remote config has an unknown key");
     }
   }
   const record = parsed as {
     enabled?: unknown;
     allowedOrigins?: unknown;
+    passwordFile?: unknown;
+    absoluteTimeoutMs?: unknown;
+    idleTimeoutMs?: unknown;
+    maxFailures?: unknown;
+    lockoutMs?: unknown;
   };
   const enabled = record.enabled ?? false;
   if (typeof enabled !== "boolean") {
@@ -278,10 +331,75 @@ export function parseRemoteConfig(raw: string | undefined): RemoteConfig {
     seen.add(origin);
     allowedOrigins.push(origin);
   }
+  let passwordFile: string | null = null;
+  if (record.passwordFile !== undefined) {
+    if (
+      typeof record.passwordFile !== "string" ||
+      record.passwordFile.length === 0 ||
+      record.passwordFile.length > MAX_REMOTE_PATH_LENGTH ||
+      record.passwordFile.includes("\0") ||
+      !isAbsolute(record.passwordFile)
+    ) {
+      throw configError("remote password file path is invalid");
+    }
+    passwordFile = record.passwordFile;
+  }
+  const absoluteTimeoutMs = requireRemoteBoundedInt(
+    record.absoluteTimeoutMs,
+    DEFAULT_REMOTE_ABSOLUTE_TIMEOUT_MS,
+    MIN_REMOTE_ABSOLUTE_TIMEOUT_MS,
+    MAX_REMOTE_ABSOLUTE_TIMEOUT_MS,
+    "remote absolute session timeout",
+  );
+  const idleTimeoutMs = requireRemoteBoundedInt(
+    record.idleTimeoutMs,
+    DEFAULT_REMOTE_IDLE_TIMEOUT_MS,
+    MIN_REMOTE_IDLE_TIMEOUT_MS,
+    MAX_REMOTE_IDLE_TIMEOUT_MS,
+    "remote idle session timeout",
+  );
+  const maxFailures = requireRemoteBoundedInt(
+    record.maxFailures,
+    DEFAULT_REMOTE_MAX_FAILURES,
+    MIN_REMOTE_MAX_FAILURES,
+    MAX_REMOTE_MAX_FAILURES,
+    "remote login failure limit",
+  );
+  const lockoutMs = requireRemoteBoundedInt(
+    record.lockoutMs,
+    DEFAULT_REMOTE_LOCKOUT_MS,
+    MIN_REMOTE_LOCKOUT_MS,
+    MAX_REMOTE_LOCKOUT_MS,
+    "remote login lockout",
+  );
   return Object.freeze({
     enabled,
     allowedOrigins: Object.freeze(allowedOrigins),
+    passwordFile,
+    absoluteTimeoutMs,
+    idleTimeoutMs,
+    maxFailures,
+    lockoutMs,
   });
+}
+
+function requireRemoteBoundedInt(
+  value: unknown,
+  fallback: number,
+  min: number,
+  max: number,
+  what: string,
+): number {
+  if (value === undefined) {
+    return fallback;
+  }
+  if (typeof value !== "number" || !Number.isInteger(value)) {
+    throw configError(`${what} must be an integer`);
+  }
+  if (value < min || value > max) {
+    throw configError(`${what} is out of bounds`);
+  }
+  return value;
 }
 
 export interface ServerConfig {
@@ -1356,9 +1474,9 @@ export function loadServerConfig(
       "remote origin allowlist must not be empty when remote mode is enabled",
     );
   }
-  if (remote.enabled) {
+  if (remote.enabled && remote.passwordFile === null) {
     throw configError(
-      "remote mode requires authentication (not yet available)",
+      "remote mode requires a password file (set one with the set-password command)",
     );
   }
   const trial = parseTrialConfig(env.COMPANION_AUTONOMY_JSON);
