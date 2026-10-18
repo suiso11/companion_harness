@@ -143,6 +143,11 @@ import {
   wrapRepoWithNotifications,
 } from "./notification_service.js";
 import {
+  loadRemotePasswordRecordSync,
+  verifyPasswordAgainstRecord,
+} from "./remote_password.js";
+import { createSqliteRemoteSessionStore } from "./remote_session.js";
+import {
   assertRescheduleWriteAccountCompatible,
   assertRescheduleWriteHintCompatible,
   assertRescheduleWriteReadonlyPathVisible,
@@ -154,11 +159,6 @@ import {
   RESCHEDULE_WRITE_PROFILE_ENV,
   type RescheduleWriteConnectorHint,
 } from "./rescheduleWriteProfile.js";
-import {
-  loadRemotePasswordRecordSync,
-  verifyPasswordAgainstRecord,
-} from "./remote_password.js";
-import { createSqliteRemoteSessionStore } from "./remote_session.js";
 import { createShadowService, type ShadowService } from "./shadow_service.js";
 import { childFailedStatusForError } from "./supervisor.js";
 import { TrialModelRelay } from "./trial_model_relay.js";
@@ -2678,8 +2678,7 @@ export async function startServer(
         ? {
             verify: (password: string): boolean => {
               try {
-                const record =
-                  loadRemotePasswordRecordSync(remotePasswordFile);
+                const record = loadRemotePasswordRecordSync(remotePasswordFile);
                 return verifyPasswordAgainstRecord(password, record);
               } catch {
                 return false;

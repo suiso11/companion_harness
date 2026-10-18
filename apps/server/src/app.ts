@@ -115,9 +115,9 @@ import {
   hashRemoteToken,
   issueRemoteToken,
   type RemoteLoginRateLimiter,
+  type RemoteSessionStore,
   remoteSessionClearCookie,
   remoteSessionSetCookie,
-  type RemoteSessionStore,
   remoteTokenFromCookieHeader,
 } from "./remote_session.js";
 import { createNotificationFeedSseResponse, createSseResponse } from "./sse.js";
@@ -1447,7 +1447,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       return validationError(c);
     }
     const t = now();
-    if (loginLimiter !== null && loginLimiter.isLocked(t)) {
+    if (loginLimiter?.isLocked(t) === true) {
       return c.json(
         { error: { code: "rate_limited", message: "too many attempts" } },
         429,
@@ -1462,14 +1462,23 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     if (!ok) {
       loginLimiter?.recordFailure(t);
       return c.json(
-        { error: { code: "invalid_credentials", message: "invalid credentials" } },
+        {
+          error: {
+            code: "invalid_credentials",
+            message: "invalid credentials",
+          },
+        },
         401,
       );
     }
     loginLimiter?.reset();
     const token = issueRemoteToken();
     try {
-      remoteStore.create(hashRemoteToken(token), t, t + remote.absoluteTimeoutMs);
+      remoteStore.create(
+        hashRemoteToken(token),
+        t,
+        t + remote.absoluteTimeoutMs,
+      );
     } catch {
       return apiError(c, 500, "internal_error", "internal error");
     }

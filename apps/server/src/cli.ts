@@ -157,12 +157,16 @@ function readPasswordNoEcho(prompt: string): Promise<string> {
     mutable._writeToOutput = (text: string) => {
       // Echo the prompt itself only; mask every typed/pasted char and
       // turn line breaks into a single newline.
-      if (text === prompt || text === `\r${prompt}` || text.startsWith(prompt)) {
-        rl.output?.write(text);
+      if (
+        text === prompt ||
+        text === `\r${prompt}` ||
+        text.startsWith(prompt)
+      ) {
+        process.stdout.write(text);
         return;
       }
       if (/[\r\n]/.test(text)) {
-        rl.output?.write("\n");
+        process.stdout.write("\n");
       }
     };
     rl.question(prompt, (answer) => {

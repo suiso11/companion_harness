@@ -199,7 +199,10 @@ export function remoteTokenFromCookieHeader(
 }
 
 /** `Set-Cookie` value for an issued session (flags per design §3). */
-export function remoteSessionSetCookie(tokenHex: string, maxAgeSec: number): string {
+export function remoteSessionSetCookie(
+  tokenHex: string,
+  maxAgeSec: number,
+): string {
   return (
     `${REMOTE_SESSION_COOKIE}=${tokenHex}; Path=/; HttpOnly; ` +
     `Secure; SameSite=Strict; Max-Age=${maxAgeSec}`

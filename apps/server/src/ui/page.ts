@@ -884,7 +884,8 @@ export function renderRemoteLogin(): HtmlEscapedString {
 }
 
 /** The shell carries no user/external strings; this guards regressions. */
-export function shellHasNoInlineScript(html: string): boolean {  const lower = html.toLowerCase();
+export function shellHasNoInlineScript(html: string): boolean {
+  const lower = html.toLowerCase();
   if (lower.includes("<script") && !lower.includes('src="/assets/client.js"')) {
     return false;
   }

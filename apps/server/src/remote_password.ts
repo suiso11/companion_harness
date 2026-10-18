@@ -113,7 +113,10 @@ function parsePasswordRecord(text: string): RemotePasswordRecord {
   ) {
     throw passwordError("remote password file is invalid");
   }
-  if (typeof record.saltB64 !== "string" || typeof record.hashB64 !== "string") {
+  if (
+    typeof record.saltB64 !== "string" ||
+    typeof record.hashB64 !== "string"
+  ) {
     throw passwordError("remote password file is invalid");
   }
   let salt: Buffer;
@@ -232,7 +235,10 @@ export function verifyPasswordAgainstRecord(
   } catch {
     return false;
   }
-  if (salt.byteLength !== SALT_BYTES || expected.byteLength !== SCRYPT_KEY_LEN) {
+  if (
+    salt.byteLength !== SALT_BYTES ||
+    expected.byteLength !== SCRYPT_KEY_LEN
+  ) {
     return false;
   }
   let derived: Buffer;
