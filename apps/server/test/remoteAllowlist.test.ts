@@ -334,7 +334,21 @@ describe("remote enabled (allowlist)", () => {
         { headers: { host: ALLOWED_HOST, origin: `http://${ALLOWED_HOST}` } },
       );
       expect(httpRead.status).toBe(403);
-      // Loopback http same-origin still passes under remote mode.
+      // Loopback http same-origin still passes the Origin gate under
+      // remote mode (slice b still requires the session cookie: 401
+      // proves the Origin was allowed, 201 with the cookie proves it).
+      const cookie = await loginCookie(f);
+      const httpLoopbackBare = await f.app.request("/api/sessions", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          host: "127.0.0.1",
+          origin: "http://127.0.0.1",
+          "idempotency-key": randomUUID(),
+        },
+        body: "{}",
+      });
+      expect(httpLoopbackBare.status).toBe(401);
       const httpLoopback = await f.app.request("/api/sessions", {
         method: "POST",
         headers: {
@@ -342,6 +356,7 @@ describe("remote enabled (allowlist)", () => {
           host: "127.0.0.1",
           origin: "http://127.0.0.1",
           "idempotency-key": randomUUID(),
+          cookie,
         },
         body: "{}",
       });
@@ -448,14 +463,24 @@ describe("remote config fail-closed", () => {
       '{"enabled":null,"allowedOrigins":[]}',
       '{"enabled":false,"allowedOrigins":null}',
       '{"enabled":true,"allowedOrigins":null}',
+      // Slice (b) keys: explicit null is never an omitted key.
+      '{"enabled":false,"passwordFile":null}',
+      '{"enabled":false,"absoluteTimeoutMs":null}',
+      '{"enabled":false,"idleTimeoutMs":null}',
+      '{"enabled":false,"maxFailures":null}',
+      '{"enabled":false,"lockoutMs":null}',
     ]) {
       expect(() => parseRemoteConfig(raw), raw).toThrow(ServerConfigError);
     }
-    // Absent keys still default.
-    expect(parseRemoteConfig("{}")).toEqual({
-      enabled: false,
-      allowedOrigins: [],
-    });
+    // Absent keys still default (slice b 案 defaults included).
+    const defaults = parseRemoteConfig("{}");
+    expect(defaults.enabled).toBe(false);
+    expect(defaults.allowedOrigins).toEqual([]);
+    expect(defaults.passwordFile).toBeNull();
+    expect(defaults.absoluteTimeoutMs).toBe(DEFAULT_REMOTE_ABSOLUTE_TIMEOUT_MS);
+    expect(defaults.idleTimeoutMs).toBe(DEFAULT_REMOTE_IDLE_TIMEOUT_MS);
+    expect(defaults.maxFailures).toBe(DEFAULT_REMOTE_MAX_FAILURES);
+    expect(defaults.lockoutMs).toBe(DEFAULT_REMOTE_LOCKOUT_MS);
   });
 
   it("rejects IPv6-literal origins at config time", () => {
