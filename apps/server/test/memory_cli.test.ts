@@ -136,6 +136,50 @@ describe("memory CLI client", () => {
     }
   });
 
+  it("passes privacy params through untouched (F-I01-05)", async () => {
+    const dir = tempDir();
+    const entry = writeScript(
+      dir,
+      "echo.mjs",
+      `
+const chunks = [];
+process.stdin.on("data", (c) => chunks.push(c));
+process.stdin.on("end", () => {
+  const raw = Buffer.concat(chunks).toString("utf8");
+  const req = JSON.parse(raw);
+  const res = { v: 1, ok: true, code: "OK", message: "ok", data: { echo: req.params }, deduplicated: false };
+  process.stdout.write(JSON.stringify(res) + "\\n");
+});
+`,
+    );
+    const address = addressOf(entry);
+    const remember = await callMemoryCli(
+      address,
+      "record.remember",
+      {
+        body: "user likes tea",
+        kind: "user_fact",
+        privacy: { sensitivity: "sensitive", origin: "conversation" },
+      },
+      "remember-key_1",
+    );
+    expect(remember.data).toMatchObject({
+      echo: { privacy: { sensitivity: "sensitive", origin: "conversation" } },
+    });
+    const appended = await callMemoryCli(
+      address,
+      "event.append",
+      {
+        eventId: "evt-1",
+        privacy: { sensitivity: "normal", origin: "conversation" },
+      },
+      "event-key_1",
+    );
+    expect(appended.data).toMatchObject({
+      echo: { privacy: { sensitivity: "normal", origin: "conversation" } },
+    });
+  });
+
   it("rejects unknown ops and key misuse without spawning", async () => {
     const dir = tempDir();
     const entry = writeScript(dir, "never.mjs", `process.exit(9);`);

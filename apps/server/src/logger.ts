@@ -68,6 +68,11 @@ const LOG_STATUS_ALLOWLIST: ReadonlySet<string> = new Set([
   "model_timeout",
   "invalid_response",
   "response_cap_exceeded",
+  // Memory recall vector mode (F-I01-05, remind#16): metadata only, never
+  // content. Logged via `memory.recall_vector` status; kept closed.
+  "disabled",
+  "used",
+  "unavailable",
 ]);
 
 /** Whitelisted scalar fields. Nothing else is ever emitted. */
