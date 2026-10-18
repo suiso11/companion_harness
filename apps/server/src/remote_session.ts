@@ -3,7 +3,7 @@
 // - Session tokens are opaque 256-bit random values (hex) sent ONLY in the
 //   `companion_remote` cookie (HttpOnly; Secure; SameSite=Strict; Path=/).
 //   The server stores ONLY the SHA-256 hex of the token in SQLite
-//   (`remote_sessions`, additive migration 0022): the token itself never
+//   (`remote_sessions`, additive migration 0023): the token itself never
 //   touches the DB or logs, so a DB read alone cannot impersonate anyone.
 // - Absolute expiry + idle timeout come from the remote config (案 defaults
 //   30d / 7d). Every authenticated use refreshes `last_seen_at`.

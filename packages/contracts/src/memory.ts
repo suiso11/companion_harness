@@ -120,7 +120,9 @@ export const MemoryRecallExposureResponseSchema = z.strictObject({
     .min(1)
     .refine(codePointsMax(512), { message: "snippet over 512 code points" }),
   revision: z.number().int().min(1).nullable(),
-  kind: z.enum(["user_fact", "model_inference", "summary"]).nullable(),
+  kind: z
+    .enum(["user_fact", "model_inference", "summary", "correction"])
+    .nullable(),
 });
 export type MemoryRecallExposureResponse = z.infer<
   typeof MemoryRecallExposureResponseSchema

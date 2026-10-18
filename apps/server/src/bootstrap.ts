@@ -2663,7 +2663,7 @@ export async function startServer(
     const activeMemoryControl = memory;
     // Slice (b) remote session wiring (enabled only): the SHA-256 token
     // store lives in the migrated kernel DB (table `remote_sessions`,
-    // migration 0022 — tokens themselves are never stored); the verifier
+    // migration 0023 — tokens themselves are never stored); the verifier
     // re-reads the password file per attempt so rotation needs no
     // restart, and any unreadable file answers a uniform login failure
     // (never a distinct error). Disabled remote wires nothing.
