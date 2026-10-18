@@ -11,14 +11,26 @@
 //   basename), non-zero with fixed safe text on failure (no paths, no raw
 //   error text).
 
-import { existsSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
+import * as readline from "node:readline";
 import {
   closeKernelDatabase,
   createManualBackup,
   openKernelDatabase,
 } from "@companion/kernel";
 import { loadServerConfig, type ServerConfig } from "./config.js";
+import {
+  checkPasswordFileStat,
+  createPasswordFileContent,
+} from "./remote_password.js";
 
 const CLI_USAGE = "Use: backup";
 const ERR_UNKNOWN_COMMAND = `manual backup failed: unknown command. ${CLI_USAGE}`;
@@ -118,13 +130,277 @@ function isMainModule(): boolean {
   return invoked?.endsWith("cli.ts") ?? false;
 }
 
-if (isMainModule()) {
-  runManualBackupCli()
-    .then((backupName) => {
-      process.stdout.write(`${backupName}\n`);
-    })
-    .catch((error: unknown) => {
-      process.stderr.write(`${toSafeCliMessage(error)}\n`);
-      process.exitCode = 1;
+// Slice (b) `set-password`: creates/rotates the single-user remote login
+// password hash file OUTSIDE SQLite (design §3).
+//
+// - Usage: tsx src/cli.ts set-password  (or pnpm --filter server set-password)
+// - The password is read TWICE from TTY/stdin with echo suppressed and
+//   must match; it NEVER comes from env/argv (no flags carry it, and the
+//   process environment is never consulted for secret material).
+// - The target path comes ONLY from the frozen remote config
+//   (`COMPANION_REMOTE_JSON.passwordFile`); there is no path override
+//   flag. The file is written with POSIX mode 0600 (enforced after write)
+//   and re-validated before success is reported.
+// - Exit 0 prints a fixed confirmation line; failures print fixed safe
+//   text (no paths, no raw error text).
+
+const SET_PASSWORD_USAGE = "Use: set-password";
+const ERR_SET_PASSWORD_FAILED = "set password failed";
+
+/** Injectable secret reader (default: TTY/stdin without echo). */
+export type ReadSecretFn = (prompt: string) => Promise<string>;
+
+function readPasswordNoEcho(prompt: string): Promise<string> {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+      terminal: true,
     });
+    const mutable = rl as unknown as {
+      _writeToOutput: (text: string) => void;
+    };
+    const original = mutable._writeToOutput.bind(rl);
+    mutable._writeToOutput = (text: string) => {
+      // Echo the prompt itself only; mask every typed/pasted char and
+      // turn line breaks into a single newline.
+      if (
+        text === prompt ||
+        text === `\r${prompt}` ||
+        text.startsWith(prompt)
+      ) {
+        process.stdout.write(text);
+        return;
+      }
+      if (/[\r\n]/.test(text)) {
+        process.stdout.write("\n");
+      }
+    };
+    rl.question(prompt, (answer) => {
+      mutable._writeToOutput = original;
+      rl.close();
+      resolve(answer);
+    });
+  });
+}
+
+/**
+ * Default two-prompt secret read. When stdin is piped, the whole pipe is
+ * buffered up front and split into lines: a per-prompt readline interface
+ * would consume the entire pipe on the first prompt and close, so the
+ * confirmation prompt would never resolve. On a TTY both prompts share
+ * one interface so buffered input survives between prompts. The optional
+ * streams exist for tests; production passes the real stdio.
+ */
+export async function readDefaultSecretPair(
+  input: NodeJS.ReadableStream = process.stdin,
+  output: NodeJS.WritableStream = process.stdout,
+): Promise<[string, string]> {
+  const isTty = (input as unknown as { isTTY?: unknown }).isTTY === true;
+  if (!isTty) {
+    const text = await readAllStdin(input);
+    const lines = text
+      .split("\n")
+      .map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line));
+    if (lines.length < 2 || lines[0] === undefined || lines[1] === undefined) {
+      throw cliError("read_failed", ERR_SET_PASSWORD_FAILED);
+    }
+    return [lines[0], lines[1]];
+  }
+  const prompts = ["New password: ", "Confirm password: "] as const;
+  const rl = readline.createInterface({ input, output, terminal: true });
+  const mutable = rl as unknown as {
+    _writeToOutput: (text: string) => void;
+  };
+  const original = mutable._writeToOutput.bind(rl);
+  mutable._writeToOutput = (text: string) => {
+    if (
+      prompts.some(
+        (prompt) =>
+          text === prompt || text === `\r${prompt}` || text.startsWith(prompt),
+      )
+    ) {
+      output.write(text);
+      return;
+    }
+    if (/[\r\n]/.test(text)) {
+      output.write("\n");
+    }
+  };
+  const ask = (prompt: string): Promise<string> =>
+    new Promise((resolve) => {
+      rl.question(prompt, (answer) => {
+        resolve(answer);
+      });
+    });
+  try {
+    const first = await ask(prompts[0]);
+    const second = await ask(prompts[1]);
+    return [first, second];
+  } finally {
+    mutable._writeToOutput = original;
+    rl.close();
+  }
+}
+
+/** Drain a piped stdin stream to text (caller guarantees non-TTY). */
+function readAllStdin(input: NodeJS.ReadableStream): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const stream = input as unknown as {
+      on: (event: string, listener: (...args: never[]) => void) => void;
+    };
+    const chunks: Buffer[] = [];
+    stream.on("data", ((chunk: Buffer | string) => {
+      chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+    }) as (...args: never[]) => void);
+    stream.on("end", (() => {
+      resolve(Buffer.concat(chunks).toString("utf-8"));
+    }) as (...args: never[]) => void);
+    stream.on("error", (() => {
+      reject(cliError("read_failed", ERR_SET_PASSWORD_FAILED));
+    }) as (...args: never[]) => void);
+  });
+}
+
+/**
+ * Pre-write guard for `set-password`: refuse to truncate unrelated
+ * files. An existing `passwordFile` target must be absent (fresh setup)
+ * or already parse as a valid password record; anything else —
+ * directories, symlinks, the SQLite DB itself, or garbage content — is
+ * rejected BEFORE any write, so a path typo can never destroy
+ * application data. Fixed safe message only (no paths leak).
+ */
+function assertPasswordTargetSafe(passwordFile: string, dbPath: string): void {
+  if (resolve(passwordFile) === resolve(dbPath)) {
+    throw cliError("unsafe_target", ERR_SET_PASSWORD_FAILED);
+  }
+  let stat: ReturnType<typeof lstatSync>;
+  try {
+    stat = lstatSync(passwordFile);
+  } catch {
+    // Absent: fresh setup, safe to create below.
+    return;
+  }
+  if (stat.isSymbolicLink()) {
+    throw cliError("unsafe_target", ERR_SET_PASSWORD_FAILED);
+  }
+  if (!stat.isFile()) {
+    throw cliError("unsafe_target", ERR_SET_PASSWORD_FAILED);
+  }
+  try {
+    checkPasswordFileStat(passwordFile);
+    const text = readFileSync(passwordFile, "utf-8");
+    const parsed: unknown = JSON.parse(text);
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed) ||
+      (parsed as Record<string, unknown>).version !== 1 ||
+      (parsed as Record<string, unknown>).algo !== "scrypt" ||
+      typeof (parsed as Record<string, unknown>).saltB64 !== "string" ||
+      typeof (parsed as Record<string, unknown>).hashB64 !== "string"
+    ) {
+      throw cliError("unsafe_target", ERR_SET_PASSWORD_FAILED);
+    }
+  } catch (error) {
+    if (error instanceof ManualBackupCliError) {
+      throw error;
+    }
+    throw cliError("unsafe_target", ERR_SET_PASSWORD_FAILED);
+  }
+}
+
+export async function runSetPasswordCli(
+  argv: string[] = process.argv.slice(2),
+  env: NodeJS.ProcessEnv = process.env,
+  readSecret: ReadSecretFn = readPasswordNoEcho,
+): Promise<string> {
+  const [command, ...rest] = argv;
+  if (command !== "set-password") {
+    throw cliError(
+      "unknown_command",
+      `set password failed: unknown command. ${SET_PASSWORD_USAGE}`,
+    );
+  }
+  if (rest.length > 0) {
+    throw cliError(
+      "extra_arguments",
+      "set password failed: set-password accepts no arguments",
+    );
+  }
+  let config: ServerConfig;
+  try {
+    config = loadServerConfig(env);
+  } catch {
+    throw cliError(
+      "invalid_configuration",
+      "set password failed: invalid configuration",
+    );
+  }
+  const passwordFile = config.remote.passwordFile;
+  if (passwordFile === null) {
+    throw cliError(
+      "password_file_unconfigured",
+      "set password failed: remote password file is not configured",
+    );
+  }
+  assertPasswordTargetSafe(passwordFile, config.dbPath);
+  let first: string;
+  let second: string;
+  try {
+    if (readSecret === readPasswordNoEcho) {
+      [first, second] = await readDefaultSecretPair();
+    } else {
+      first = await readSecret("New password: ");
+      second = await readSecret("Confirm password: ");
+    }
+  } catch {
+    throw cliError("read_failed", ERR_SET_PASSWORD_FAILED);
+  }
+  if (first.length === 0 || first !== second) {
+    throw cliError("mismatch", "set password failed: passwords do not match");
+  }
+  let content: string;
+  try {
+    content = createPasswordFileContent(first);
+  } catch {
+    throw cliError("weak_password", "set password failed: password too weak");
+  }
+  try {
+    mkdirSync(dirname(passwordFile), { recursive: true });
+    writeFileSync(passwordFile, content, { mode: 0o600 });
+    if (process.platform !== "win32") {
+      chmodSync(passwordFile, 0o600);
+    }
+    checkPasswordFileStat(passwordFile);
+  } catch (error) {
+    if (error instanceof ManualBackupCliError) {
+      throw error;
+    }
+    throw cliError("write_failed", ERR_SET_PASSWORD_FAILED);
+  }
+  return "password updated";
+}
+
+if (isMainModule()) {
+  const [command] = process.argv.slice(2);
+  if (command === "set-password") {
+    runSetPasswordCli()
+      .then((message) => {
+        process.stdout.write(`${message}\n`);
+      })
+      .catch((error: unknown) => {
+        process.stderr.write(`${toSafeCliMessage(error)}\n`);
+        process.exitCode = 1;
+      });
+  } else {
+    runManualBackupCli()
+      .then((backupName) => {
+        process.stdout.write(`${backupName}\n`);
+      })
+      .catch((error: unknown) => {
+        process.stderr.write(`${toSafeCliMessage(error)}\n`);
+        process.exitCode = 1;
+      });
+  }
 }

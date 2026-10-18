@@ -834,6 +834,59 @@ export function renderConversationShell(): HtmlEscapedString {
   ) as unknown as HtmlEscapedString;
 }
 
+/**
+ * Slice (b) minimal login form for unauthenticated browsers in remote
+ * mode. Deliberately script-free: no inline/bundled script, no external
+ * origins — a plain HTML form POSTing
+ * `application/x-www-form-urlencoded` to `/api/remote/login`, which the
+ * server accepts alongside JSON. The only asset is the shared self-hosted
+ * stylesheet (`/assets/client.css`, slice (c) responsive rules included)
+ * so the form stays usable at 360px width and 200% text zoom; the form
+ * works without it (plain flow layout). Served only when the session
+ * cookie is absent/invalid; authenticated browsers get the normal shell.
+ */
+export function renderRemoteLogin(): HtmlEscapedString {
+  return jsx(
+    "html",
+    { lang: "ja" },
+    jsx(
+      "head",
+      {},
+      jsx("meta", { charset: "utf-8" }),
+      jsx("meta", {
+        name: "viewport",
+        content: "width=device-width, initial-scale=1",
+      }),
+      jsx("title", {}, "Companion Harness — ログイン"),
+      jsx("link", { rel: "stylesheet", href: "/assets/client.css" }),
+    ),
+    jsx(
+      "body",
+      {},
+      jsx(
+        "main",
+        {},
+        jsx("h1", {}, "ログイン"),
+        jsx(
+          "form",
+          { method: "post", action: "/api/remote/login" },
+          jsx(
+            "label",
+            {},
+            "パスワード",
+            jsx("input", {
+              type: "password",
+              name: "password",
+              autocomplete: "current-password",
+            }),
+          ),
+          jsx("button", { type: "submit" }, "ログイン"),
+        ),
+      ),
+    ),
+  ) as unknown as HtmlEscapedString;
+}
+
 /** The shell carries no user/external strings; this guards regressions. */
 export function shellHasNoInlineScript(html: string): boolean {
   const lower = html.toLowerCase();

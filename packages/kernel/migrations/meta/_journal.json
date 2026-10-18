@@ -149,6 +149,13 @@
       "when": 1790000000022,
       "tag": "0022_memory_correction_kind",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": 23,
+      "when": 1790000000023,
+      "tag": "0023_remote_sessions",
+      "breakpoints": true
     }
   ]
 }

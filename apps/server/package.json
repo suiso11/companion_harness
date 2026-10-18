@@ -10,6 +10,7 @@
     "dev": "tsx watch src/index.ts",
     "predev": "node scripts/build-ui.mjs",
     "backup": "tsx src/cli.ts backup",
+    "set-password": "tsx src/cli.ts set-password",
     "supervise": "tsx src/supervisor_cli.ts",
     "build:ui": "node scripts/build-ui.mjs",
     "e2e:serve": "node --import tsx e2e/server.ts",
