@@ -1187,7 +1187,7 @@ Companion Harness は milestone 単位で構築しています。
 | M3        | Conversation UI / SSE                  | Implemented / hardening |
 | M4        | MCP / Calendar                         | Foundation / design     |
 | M5        | Write Actions / Approval               | Planned                 |
-| M6        | Calendar create extension (agreed)     | Implemented (opt-in, `calendar.create` TIMED title/start/end only; fork `google-calendar-create@1.0.0-create.1` pinned `5f07029`; shared `M5_RESCHEDULE_*` grant, no new credential namespace) |
+| M6        | Calendar create extension (agreed)     | Implemented (opt-in, `calendar.create` TIMED title/start/end only; fork `google-calendar-create@1.0.0-create.1` pinned CURRENT `7b40eaf` (historical `5f07029`); shared `M5_RESCHEDULE_*` grant, no new credential namespace) |
 
 v0.1 は M0〜M4 を対象とし、基本的に **read-only** です。
 
@@ -1519,6 +1519,13 @@ COMPANION_ACTIONS_JSON='{ "optIn": true, "writeEnabled": true }'
   一覧 (decision read) は従来どおり状態を返します。
 - port の lifecycle は `owned: true` を明示した場合のみサーバーが close します
   (caller 所有の port は閉じません)。
+- 証跡ナビゲーション (stored-only, 上流 I/O なし):
+  承認カードと履歴は所有プロポーザルの不変 target 由来の BEFORE (`rN`)
+  ボタンを持ち、検証済み AFTER は receipt `succeeded` かつ権威ある
+  `run.result` の実引用がある場合のみ履歴に表示します
+  (`succeeded_unverified` の preflight 引用は AFTER 化しません)。
+  どちらのボタンも既存の引用ドロワーの保存済みスナップショット本文のみを開き、
+  開封で外部 GET/PATCH は発生しません。リロード後も両リンクは保持されます。
 
 ---
 

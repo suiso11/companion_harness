@@ -1852,7 +1852,12 @@ export function createActionExecutionService(
     }
     if (
       observation.connectorInstanceId !== proposal.connector_instance_id ||
-      !/^calendar:[0-9a-f]{64}$/.test(observation.resourceCanonicalKey)
+      observation.resourceCanonicalKey !==
+        expectedCreateCanonicalKey(
+          proposal.connector_instance_id,
+          calendarId,
+          stableEventId,
+        )
     ) {
       throw new RepositoryValidationError(
         "verified create observation does not bind the proposal target (fail closed)",
@@ -1874,6 +1879,13 @@ export function createActionExecutionService(
       JSON.parse(proposal.input_json) as unknown,
     );
     const intendedTitle = intended.title.normalize("NFC");
+    // Timed-only: the canonical body MUST carry allDayEndExclusive === false.
+    // Missing/true/wrong-type observations verify nothing (unverified, never
+    // a partial claim). Checked in the strategy precheck AND here so direct
+    // terminal callers are equally protected.
+    if (!createBodyIsTimed(observation.text)) {
+      return finishPlainTerminal(id, "succeeded_unverified", null, null, now);
+    }
     if (!authoritativeCreateTitleMatches(observation.text, intendedTitle)) {
       return finishPlainTerminal(id, "succeeded_unverified", null, null, now);
     }
@@ -1897,6 +1909,15 @@ export function createActionExecutionService(
     if (referenceManager === undefined) {
       throw new RepositoryValidationError(
         "this boundary requires an injected referenceManager",
+      );
+    }
+    // Fail closed BEFORE any create materialization (snapshot/resource/ref/
+    // success receipt): a verified create without a durable target store
+    // would mint an unrefreshable rN. Reschedule-only compositions (no
+    // targetStore) are unaffected — only this create terminal requires it.
+    if (options.targetStore === undefined) {
+      throw new RepositoryValidationError(
+        "verified create requires a durable target store (fail closed)",
       );
     }
     const presented = referenceManager.presentObservations(
@@ -2764,8 +2785,29 @@ export function createActionExecutionService(
 
   // Strict explicit-offset RFC3339 instant to epoch ms (create verify copy
   // of the strategy's strict grammar: seconds + minute precision, real
-  // calendar validation, no Date.parse rollover acceptance). All-day DATE
-  // strings and offset-less strings are undefined (fail closed).
+  // calendar validation, full millisecond precision, year-safe UTC epoch
+  // (Date.UTC maps years 00..99 to 1900..1999), no Date.parse rollover
+  // acceptance). All-day DATE strings and offset-less strings are undefined
+  // (fail closed). Mirrors `action_strategy.ts` `parseStrictInstantMs` exactly
+  // (same instant, strict grammar, invalid fails closed).
+  function createStrictUtcMs(
+    year: number,
+    month: number,
+    day: number,
+    hour: number,
+    minute: number,
+    second: number,
+    ms: number,
+  ): number {
+    if (year >= 100) {
+      return Date.UTC(year, month - 1, day, hour, minute, second, ms);
+    }
+    const fixed = new Date(0);
+    fixed.setUTCFullYear(year, month - 1, day);
+    fixed.setUTCHours(hour, minute, second, ms);
+    return fixed.getTime();
+  }
+
   function createStrictInstantMs(value: string): number | undefined {
     const seconds =
       /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2})$/.exec(
@@ -2781,6 +2823,13 @@ export function createActionExecutionService(
       if (month < 1 || month > 12) return undefined;
       if (day < 1 || day > strictDaysInMonth(year, month)) return undefined;
       if (hour > 23 || minute > 59 || second > 59) return undefined;
+      // Milliseconds are exactly the first three decimal digits,
+      // right-padded (float parsing could round up into the next second).
+      const fraction = seconds[7] as string | undefined;
+      const millis =
+        fraction !== undefined
+          ? Number(fraction.slice(1, 4).padEnd(3, "0"))
+          : 0;
       const zone = seconds[8] as string;
       let offsetMs = 0;
       if (zone !== "Z") {
@@ -2790,7 +2839,15 @@ export function createActionExecutionService(
         if (oh > 23 || om > 59) return undefined;
         offsetMs = sign * (oh * 60 + om) * 60_000;
       }
-      const ms = Date.UTC(year, month - 1, day, hour, minute, second, 0);
+      const ms = createStrictUtcMs(
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+        millis,
+      );
       const epoch = ms - offsetMs;
       return Number.isFinite(epoch) ? epoch : undefined;
     }
@@ -2816,7 +2873,8 @@ export function createActionExecutionService(
       if (oh > 23 || om > 59) return undefined;
       offsetMs = sign * (oh * 60 + om) * 60_000;
     }
-    const epoch = Date.UTC(year, month - 1, day, hour, minute, 0, 0) - offsetMs;
+    const epoch =
+      createStrictUtcMs(year, month, day, hour, minute, 0, 0) - offsetMs;
     return Number.isFinite(epoch) ? epoch : undefined;
   }
 
@@ -2827,6 +2885,49 @@ export function createActionExecutionService(
     }
     if (month === 4 || month === 6 || month === 9 || month === 11) return 30;
     return 31;
+  }
+
+  /**
+   * Expected canonical key for a verified create read-back, derived from the
+   * TRUSTED triple (connectorInstanceId, host-selected calendarId,
+   * execution-derived stableEventId) under the existing normalization/hash
+   * convention (`calendar:` + SHA-256 hex of the JSON tuple — the same
+   * convention as `packages/connector-calendar/src/normalize.ts`
+   * `canonicalKey`, re-expressed here with the kernel-owned `sha256Hex` so
+   * the dependency-inverted direction stays intact; no second algorithm).
+   */
+  function expectedCreateCanonicalKey(
+    connectorInstanceId: string,
+    calendarId: string,
+    stableEventId: string,
+  ): string {
+    return `calendar:${sha256Hex(
+      JSON.stringify([connectorInstanceId, calendarId, stableEventId]),
+    )}`;
+  }
+
+  /**
+   * Timed-only body check over the canonical event text: the parsed body
+   * MUST carry `allDayEndExclusive === false`. Missing/true/wrong-type
+   * values return false (unverified), never a partial claim.
+   */
+  function createBodyIsTimed(text: string): boolean {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text) as unknown;
+    } catch {
+      return false;
+    }
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      return false;
+    }
+    return (
+      (parsed as { allDayEndExclusive?: unknown }).allDayEndExclusive === false
+    );
   }
 
   // Same-instant timed-bounds comparison over the canonical event body

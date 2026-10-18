@@ -410,6 +410,64 @@ export function actionDecisionIntentText(
 }
 
 /**
+ * M5 action evidence navigation (pure button policy, no DOM/I/O).
+ *
+ * BEFORE (the original staged snapshot) is display metadata resolved from
+ * the owning proposal's immutable target: shown whenever the server-owned
+ * view carries a structurally valid session `rN` label — for live,
+ * terminal, failed, unknown, unverified, and blocked executions alike, and
+ * across reloads (the label rides the durable projections, never
+ * localStorage, never preview prose).
+ *
+ * AFTER (the verified new snapshot) comes ONLY from the current
+ * authoritative `run.result` via `runResultToAnswerParts` AND only when the
+ * receipt outcome is exactly `succeeded` with actual result citations.
+ * Every other outcome (`unknown` / `succeeded_unverified` / `failed` /
+ * `blocked_stale` / still-live `null`) yields no AFTER — even if a result
+ * object happened to carry citations — so an unverified claim can never be
+ * presented as verified evidence, and opening either button performs no
+ * upstream I/O (the existing stored-only citation drawer).
+ */
+export interface ActionEvidenceInput {
+  readonly targetCitation: string | null | undefined;
+  /** Receipt outcome string; only exactly `"succeeded"` unlocks AFTER. */
+  readonly outcome: string | null | undefined;
+  readonly result: unknown;
+}
+
+export interface ActionEvidenceButtons {
+  /** ORIGINAL-only BEFORE label (`rN`), or null when absent/invalid. */
+  readonly before: string | null;
+  /** Verified AFTER labels (usually exactly one; empty unless verified). */
+  readonly after: readonly string[];
+}
+
+/** Structural session `rN` label (mirrors contracts `ActionTargetCitation`). */
+export function isStoredCitationLabel(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length >= 2 &&
+    value.length <= 11 &&
+    /^r[1-9][0-9]*$/.test(value)
+  );
+}
+
+export function actionEvidenceButtons(
+  input: ActionEvidenceInput,
+): ActionEvidenceButtons {
+  const before = isStoredCitationLabel(input.targetCitation)
+    ? input.targetCitation
+    : null;
+  if (input.outcome !== "succeeded") {
+    return { before, after: [] };
+  }
+  const after = runResultToAnswerParts(input.result)
+    .flatMap((part) => part.citations)
+    .filter(isStoredCitationLabel);
+  return { before, after };
+}
+
+/**
  * M5 decision-turn retry denial (§18.4/§18.6, pure policy): the generic
  * generation retry ("もう一度送る", failure-only per §16.6) is offered only
  * for `user_text` Turns. Decision Turns never re-execute through it: an

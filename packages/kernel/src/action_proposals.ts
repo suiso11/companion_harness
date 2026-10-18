@@ -293,10 +293,7 @@ function validateCreateTitle(title: string): void {
   let hasVisible = false;
   for (const unit of title) {
     const code = unit.codePointAt(0) ?? 0;
-    if (
-      (code >= 0x00 && code <= 0x1f) ||
-      (code >= 0x7f && code <= 0x9f && code !== 0x85)
-    ) {
+    if ((code >= 0x00 && code <= 0x1f) || (code >= 0x7f && code <= 0x9f)) {
       throw new RepositoryValidationError(
         "title must not contain control characters",
       );

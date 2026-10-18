@@ -40,3 +40,6 @@ Thumbs.db
 # local stdio/browser smoke logs only, never credentials/fixtures/real
 # grants/events).
 .m6-calendar-create-proof/
+# Shared all-plan prerequisite snapshots (sanitized metadata only, never
+# credentials/private content/user DB).
+.all-plan-progress/
