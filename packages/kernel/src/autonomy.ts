@@ -58,6 +58,7 @@
 
 import {
   AutonomyControlViewSchema,
+  AutonomyHistoryQuerySchema,
   IDEMPOTENCY_SCOPE_AUTONOMY_CONTROL,
   type ProvenanceSource,
   type PurposeKind,
@@ -68,11 +69,15 @@ import {
   TaskViewSchema,
 } from "@companion/contracts";
 import type Database from "better-sqlite3";
+import { parseStrictInstantMs } from "./action_strategy.js";
 import {
   generateId,
   IDEMPOTENCY_OPERATIONS,
   isUuidV4,
+  readIdempotencyRow,
   requestHash,
+  withImmediateTx,
+  writeIdempotencyRow,
 } from "./canonical.js";
 import {
   IdempotencyConflictError,
@@ -86,6 +91,11 @@ import {
   reconcileShadowRestartInTx,
   skipRecordedInboxInTx,
 } from "./shadow.js";
+import {
+  invalidateTrialsForScope,
+  parseConstraintRule,
+  revokeAllClaimedForStop,
+} from "./trial_authority.js";
 
 /** CAS version mismatch on a purpose / task / control mutation (409). */
 export class AutonomyVersionConflictError extends KernelStorageError {
@@ -151,20 +161,35 @@ function requireId(id: unknown, what: string): string {
   return id as string;
 }
 
+/** Shared BEGIN IMMEDIATE helper (re-exported; trial leaf imports from canonical). */
+export { withImmediateTx };
+
 function withImmediate<T>(db: Database.Database, fn: () => T): T {
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    const out = fn();
-    db.exec("COMMIT");
-    return out;
-  } catch (error) {
-    try {
-      db.exec("ROLLBACK");
-    } catch {
-      // Best effort: the original error carries the failure.
-    }
-    throw error;
+  return withImmediateTx(db, fn);
+}
+
+/** Shared idempotency-cache read (re-exported; trial leaf imports from canonical). */
+export function readStoredResponse(
+  db: Database.Database,
+  scope: string,
+  key: string,
+): {
+  requestHash: string;
+  responseStatus: number;
+  responseBody: unknown;
+} | null {
+  const row = readIdempotencyRow(db, scope, key);
+  if (row === null) {
+    return null;
   }
+  return {
+    requestHash: row.requestHash,
+    responseStatus: row.responseStatus,
+    responseBody: parseOrValidation(
+      () => JSON.parse(row.responseBody),
+      "stored idempotency body",
+    ),
+  };
 }
 
 function toStoredResponse(
@@ -176,24 +201,20 @@ function toStoredResponse(
   responseStatus: number;
   responseBody: unknown;
 } | null {
-  const row = db
-    .prepare(
-      "SELECT request_hash, response_status, response_body FROM api_idempotency WHERE scope = ? AND key = ?",
-    )
-    .get(scope, key) as
-    | { request_hash: string; response_status: number; response_body: string }
-    | undefined;
-  if (row === undefined) {
-    return null;
-  }
-  return {
-    requestHash: row.request_hash,
-    responseStatus: row.response_status,
-    responseBody: parseOrValidation(
-      () => JSON.parse(row.response_body),
-      "stored idempotency body",
-    ),
-  };
+  return readStoredResponse(db, scope, key);
+}
+
+/** Shared idempotency-cache write (re-exported; trial leaf imports from canonical). */
+export function writeStoredResponse(
+  db: Database.Database,
+  scope: string,
+  key: string,
+  hash: string,
+  status: number,
+  body: unknown,
+  now: number,
+): void {
+  storeIdempotentResponse(db, scope, key, hash, status, body, now);
 }
 
 function storeIdempotentResponse(
@@ -205,9 +226,7 @@ function storeIdempotentResponse(
   body: unknown,
   now: number,
 ): void {
-  db.prepare(
-    "INSERT INTO api_idempotency (scope, key, request_hash, response_status, response_body, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-  ).run(scope, key, hash, status, JSON.stringify(body), now);
+  writeIdempotencyRow(db, scope, key, hash, status, JSON.stringify(body), now);
 }
 
 function requireSession(db: Database.Database, sessionId: string): void {
@@ -222,7 +241,7 @@ function requireSession(db: Database.Database, sessionId: string): void {
 
 /**
  * Shadow-durability bridge (AV02): run a shadow-table write inside the
- * caller's autonomy transaction, best-effort on pre-0012 databases (missing
+ * caller's autonomy transaction, best-effort on pre-0014 databases (missing
  * tables): the conversation / autonomy path must never break because the
  * shadow slice is absent. On migrated databases the write is atomic with
  * the state change (no enqueue-after-commit crash window). Shadow's OWN
@@ -267,30 +286,17 @@ function enqueueShadowPolicyChangeInTx(
 }
 
 /* ------------------------------------------------------------------ */
-/* Strict deadline grammar (borrowed, dependency-free).                 */
+/* Strict deadline grammar (reuses the existing kernel helper).          */
 /*                                                                     */
-/* Borrowed from the calendar connector's existing strict contract      */
-/* (`isStrictCalendarInstant` over `parseTimedInstant` in               */
-/* `connector-calendar/src/time.ts` + `rescheduleWrite.ts`): explicit-  */
-/* offset RFC3339 only (bare dates rejected), real calendar validation  */
-/* (month lengths, leap years, component/offset bounds, no Date.parse   */
-/* rollover), genuine sub-millisecond precision rejected. Re-expressed  */
-/* locally so this module keeps zero connector dependencies.            */
+/* Task deadlines + purpose applicability windows share the kernel's    */
+/* existing strict explicit-offset RFC3339 grammar (`parseStrictInstant  */
+/* Ms` in `action_strategy.ts`, owned by the kernel so the               */
+/* dependency-inverted direction stays intact). The autonomy layer adds */
+/* only its own 128-char cap and genuine sub-millisecond rejection      */
+/* (fractions with nonzero digits past millis reject, never truncate).  */
 /* ------------------------------------------------------------------ */
 
-const TIMED_INSTANT =
-  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
-const MINUTE_INSTANT =
-  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(Z|[+-](\d{2}):(\d{2}))$/;
 const SUBSECOND_FRACTION = /T\d{2}:\d{2}:\d{2}\.(\d+)/;
-
-function autonomyDaysInMonth(year: number, month: number): number {
-  if (month === 2) {
-    return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0 ? 29 : 28;
-  }
-  if (month === 4 || month === 6 || month === 9 || month === 11) return 30;
-  return 31;
-}
 
 /** True for a strict explicit-offset RFC3339 instant (never inferred). */
 export function isStrictAutonomyDeadline(value: string): boolean {
@@ -300,41 +306,7 @@ export function isStrictAutonomyDeadline(value: string): boolean {
     const digits = fraction[1] as string;
     if (digits.length > 3 && /[^0]/.test(digits.slice(3))) return false;
   }
-  const timed = TIMED_INSTANT.exec(value);
-  if (timed !== null) {
-    const year = Number(timed[1]);
-    const month = Number(timed[2]);
-    const day = Number(timed[3]);
-    const hour = Number(timed[4]);
-    const minute = Number(timed[5]);
-    const second = Number(timed[6]);
-    if (month < 1 || month > 12) return false;
-    if (day < 1 || day > autonomyDaysInMonth(year, month)) return false;
-    if (hour > 23 || minute > 59 || second > 59) return false;
-    const zone = timed[8] as string;
-    if (zone !== "Z") {
-      const offsetHour = Number(zone.slice(1, 3));
-      const offsetMinute = Number(zone.slice(4, 6));
-      if (offsetHour > 23 || offsetMinute > 59) return false;
-    }
-    return !Number.isNaN(Date.parse(value));
-  }
-  const minute = MINUTE_INSTANT.exec(value);
-  if (minute === null) return false;
-  const year = Number(minute[1]);
-  const month = Number(minute[2]);
-  const day = Number(minute[3]);
-  const hour = Number(minute[4]);
-  const minutePart = Number(minute[5]);
-  if (month < 1 || month > 12) return false;
-  if (day < 1 || day > autonomyDaysInMonth(year, month)) return false;
-  if (hour > 23 || minutePart > 59) return false;
-  if (minute[6] !== "Z") {
-    const offsetHour = Number(minute[7]);
-    const offsetMinute = Number(minute[8]);
-    if (offsetHour > 23 || offsetMinute > 59) return false;
-  }
-  return !Number.isNaN(Date.parse(value));
+  return parseStrictInstantMs(value) !== undefined;
 }
 
 /**
@@ -435,6 +407,49 @@ interface RawTask {
   updated_at: number;
 }
 
+function readRuleJson(db: Database.Database, purposeId: string): unknown {
+  try {
+    const r = db
+      .prepare(
+        "SELECT rule_json FROM trial_constraint_rules WHERE purpose_id = ?",
+      )
+      .get(purposeId) as { rule_json: string | null } | undefined;
+    if (!r || r.rule_json === null) return null;
+    return JSON.parse(r.rule_json);
+  } catch {
+    return null;
+  }
+}
+
+/** Persist/clear a structured rule; strict shape, kind=constraint only. */
+function writeConstraintRuleInTx(
+  db: Database.Database,
+  session: string,
+  scope: string,
+  purposeId: string,
+  kind: string,
+  rule: unknown,
+  rulePresent: boolean,
+  now: number,
+): void {
+  if (!rulePresent) return;
+  if (rule === null || rule === undefined) {
+    db.prepare("DELETE FROM trial_constraint_rules WHERE purpose_id = ?").run(
+      purposeId,
+    );
+    return;
+  }
+  if (kind !== "constraint") {
+    throw new RepositoryValidationError(
+      "constraintRule requires kind=constraint",
+    );
+  }
+  const parsed = parseConstraintRule(rule);
+  db.prepare(
+    "INSERT INTO trial_constraint_rules (purpose_id, session_id, scope, rule_json, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(purpose_id) DO UPDATE SET rule_json = excluded.rule_json",
+  ).run(purposeId, session, scope, JSON.stringify(parsed), now);
+}
+
 function toPurposeView(row: RawPurpose): {
   id: string;
   sessionId: string;
@@ -450,6 +465,7 @@ function toPurposeView(row: RawPurpose): {
   supersededBy: string | null;
   validFrom: string | null;
   validUntil: string | null;
+  constraintRule: unknown;
   createdAt: number;
   updatedAt: number;
 } {
@@ -470,6 +486,7 @@ function toPurposeView(row: RawPurpose): {
         supersededBy: row.superseded_by,
         validFrom: row.valid_from,
         validUntil: row.valid_until,
+        constraintRule: (row as { __rule?: unknown }).__rule ?? null,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
       }),
@@ -521,11 +538,14 @@ function readPurpose(
   db: Database.Database,
   purposeId: string,
 ): RawPurpose | null {
-  return (
+  const row =
     (db
       .prepare("SELECT * FROM autonomy_purposes WHERE id = ?")
-      .get(purposeId) as RawPurpose | undefined) ?? null
-  );
+      .get(purposeId) as RawPurpose | undefined) ?? null;
+  if (row !== null) {
+    (row as { __rule?: unknown }).__rule = readRuleJson(db, row.id);
+  }
+  return row;
 }
 
 function readTask(db: Database.Database, taskId: string): RawTask | null {
@@ -685,6 +705,8 @@ export interface CreatePurposeInput {
   interpretation?: string;
   validFrom?: string | null;
   validUntil?: string | null;
+  constraintRule?: unknown;
+  constraintRulePresent?: boolean;
 }
 
 export interface AutonomyKeyOptions {
@@ -706,6 +728,8 @@ export function createPurpose(
   const key = requireKey(options.key);
   const now = nowMs(options.now);
   const scope = `session:${session}:purpose`;
+  const rulePresent =
+    input.constraintRulePresent ?? input.constraintRule !== undefined;
   const hash = requestHash(
     IDEMPOTENCY_OPERATIONS.createPurpose.operation,
     IDEMPOTENCY_OPERATIONS.createPurpose.schemaVersion,
@@ -720,9 +744,13 @@ export function createPurpose(
       interpretation: input.interpretation ?? null,
       validFrom: input.validFrom ?? null,
       validUntil: input.validUntil ?? null,
+      ...(rulePresent ? { constraintRule: input.constraintRule ?? null } : {}),
     },
   );
   return withImmediate(db, () => {
+    // Ownership-first: unknown/foreign sessions are 404 before any
+    // idempotency-cache read (never a 409 on a replayed key).
+    requireSession(db, session);
     const existing = toStoredResponse(db, scope, key);
     if (existing !== null) {
       if (existing.requestHash !== hash) {
@@ -784,6 +812,25 @@ export function createPurpose(
       "purpose.created",
       now,
     );
+    writeConstraintRuleInTx(
+      db,
+      session,
+      input.scope,
+      id,
+      input.kind,
+      input.constraintRule,
+      rulePresent,
+      now,
+    );
+    if (input.kind === "constraint") {
+      invalidateTrialsForScope(
+        db,
+        session,
+        input.scope,
+        "constraint_created",
+        now,
+      );
+    }
     const row = readPurpose(db, id);
     if (row === null) {
       throw new RepositoryNotFoundError(`purpose ${id} not found`);
@@ -807,6 +854,9 @@ export function listPurposes(
       "SELECT * FROM autonomy_purposes WHERE session_id = ? ORDER BY created_at DESC, id ASC LIMIT ?",
     )
     .all(session, capped) as RawPurpose[];
+  for (const r of rows) {
+    (r as { __rule?: unknown }).__rule = readRuleJson(db, r.id);
+  }
   return { items: rows.map(toPurposeView) };
 }
 
@@ -906,6 +956,7 @@ export function listPurposeEvents(
   db: Database.Database,
   sessionId: string,
   purposeId: string,
+  query: { afterSeq?: number; limit?: number } = {},
 ): {
   purposeId: string;
   events: {
@@ -915,28 +966,46 @@ export function listPurposeEvents(
     toStatus: string;
     createdAt: number;
   }[];
+  nextAfterSeq: number | null;
 } {
+  // Ownership-first: a foreign id is 404 before any history read (never a
+  // 403, never an existence probe via the idempotency cache — mutations
+  // keep the same order, reads have no cache at all).
   const owned = assertOwnedPurpose(db, sessionId, purposeId);
+  const parsed = parseOrValidation(
+    () =>
+      AutonomyHistoryQuerySchema.parse({
+        afterSeq: query.afterSeq ?? 0,
+        limit: query.limit,
+      }),
+    "purpose history query",
+  );
   const rows = db
     .prepare(
-      "SELECT seq, event, from_status, to_status, created_at FROM autonomy_purpose_events WHERE purpose_id = ? ORDER BY seq ASC",
+      "SELECT seq, event, from_status, to_status, created_at FROM autonomy_purpose_events WHERE purpose_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?",
     )
-    .all(owned.id) as {
+    .all(owned.id, parsed.afterSeq, parsed.limit + 1) as {
     seq: number;
     event: string;
     from_status: string | null;
     to_status: string;
     created_at: number;
   }[];
+  const hasMore = rows.length > parsed.limit;
+  const page = rows.slice(0, parsed.limit);
   return {
     purposeId: owned.id,
-    events: rows.map((row) => ({
+    events: page.map((row) => ({
       seq: row.seq,
       event: row.event,
       fromStatus: row.from_status,
       toStatus: row.to_status,
       createdAt: row.created_at,
     })),
+    nextAfterSeq:
+      hasMore && page.length > 0
+        ? (page[page.length - 1] as { seq: number }).seq
+        : null,
   };
 }
 
@@ -1039,6 +1108,10 @@ export function recordPurposeConflict(
     { sessionId: session, purposeAId: first, purposeBId: second },
   );
   return withImmediate(db, () => {
+    // Ownership-first: foreign ids are 404 (assertOwned throws 404)
+    // before any idempotency-cache read.
+    const a = assertOwnedPurpose(db, session, first);
+    const b = assertOwnedPurpose(db, session, second);
     const existing = toStoredResponse(db, scope, key);
     if (existing !== null) {
       if (existing.requestHash !== hash) {
@@ -1058,8 +1131,6 @@ export function recordPurposeConflict(
       };
     }
     // Ownership-first: foreign ids are 404 (assertOwned throws 404).
-    const a = assertOwnedPurpose(db, session, first);
-    const b = assertOwnedPurpose(db, session, second);
     if (a.scope !== b.scope) {
       throw new RepositoryValidationError(
         "conflicting purposes must share the same scope",
@@ -1104,6 +1175,7 @@ export function recordPurposeConflict(
       "conflict.recorded",
       now,
     );
+    invalidateTrialsForScope(db, session, a.scope, "conflict_recorded", now);
     const body = {
       id,
       sessionId: session,
@@ -1123,6 +1195,8 @@ export interface CorrectPurposeInput extends CreatePurposeInput {
   /** undefined = preserve old window; null = clear bound; string = set. */
   validFrom?: string | null;
   validUntil?: string | null;
+  /** undefined = preserve rule; null = clear; object = set. */
+  constraintRule?: unknown;
 }
 
 export function correctPurpose(
@@ -1142,11 +1216,10 @@ export function correctPurpose(
   const key = requireKey(options.key);
   const now = nowMs(options.now);
   const scope = `purpose:${requireId(input.purposeId, "purposeId")}:correct`;
-  // Presence-sensitive hash (v2): omitted (preserve) vs explicit null
-  // (clear) vs string (set) must hash differently. `canonicalJson` drops
-  // `undefined`, so presence is encoded with explicit tags; otherwise an
-  // omit-bounds correction and a clear-bounds correction on the same key
-  // would falsely replay instead of 409 IdempotencyConflict.
+  // Presence-sensitive hash: `undefined` (preserve the old window bound)  // and `null` (clear it to unbounded) are DIFFERENT commands, so the
+  // canonical payload carries explicit presence flags alongside the
+  // nullable values. The same key with a changed presence/value is a
+  // conflict, never a silent merge.
   const hash = requestHash(
     IDEMPOTENCY_OPERATIONS.correctPurpose.operation,
     IDEMPOTENCY_OPERATIONS.correctPurpose.schemaVersion,
@@ -1161,17 +1234,19 @@ export function correctPurpose(
       sourceKind: input.sourceKind,
       sourceTurnId: input.sourceTurnId ?? null,
       interpretation: input.interpretation ?? null,
-      validFrom:
-        input.validFrom === undefined
-          ? { present: false }
-          : { present: true, value: input.validFrom },
-      validUntil:
-        input.validUntil === undefined
-          ? { present: false }
-          : { present: true, value: input.validUntil },
+      validFromPresent: input.validFrom !== undefined,
+      validFrom: input.validFrom ?? null,
+      validUntilPresent: input.validUntil !== undefined,
+      validUntil: input.validUntil ?? null,
+      rulePresent: input.constraintRule !== undefined,
+      constraintRule: input.constraintRule ?? null,
     },
   );
   return withImmediate(db, () => {
+    // Ownership-first: foreign ids are 404 before any idempotency-cache
+    // read. Version/state checks stay AFTER the cache so verbatim replay
+    // of an accepted key is preserved.
+    const oldRow = assertOwnedPurpose(db, session, input.purposeId);
     const existing = toStoredResponse(db, scope, key);
     if (existing !== null) {
       if (existing.requestHash !== hash) {
@@ -1194,7 +1269,6 @@ export function correctPurpose(
       );
       return { status: existing.responseStatus, body, replayed: true };
     }
-    const oldRow = assertOwnedPurpose(db, session, input.purposeId);
     if (oldRow.status !== "active") {
       throw new AutonomyStateConflictError(
         `purpose ${oldRow.id} is ${oldRow.status} and cannot be corrected`,
@@ -1304,6 +1378,66 @@ export function correctPurpose(
       "purpose_superseded",
       now,
     );
+    // Rule correction: omission preserves, null clears, object sets.
+    // Kind change away from constraint with a live rule must explicitly
+    // clear (null) or the correction is rejected.
+    const oldRule = readRuleJson(db, oldRow.id);
+    if (
+      input.kind !== "constraint" &&
+      input.constraintRule !== undefined &&
+      input.constraintRule !== null
+    ) {
+      throw new RepositoryValidationError(
+        "constraintRule requires kind=constraint: clear it explicitly",
+      );
+    }
+    if (
+      input.kind !== "constraint" &&
+      oldRule !== null &&
+      input.constraintRule === undefined
+    ) {
+      throw new RepositoryValidationError(
+        "kind change away from constraint must explicitly clear constraintRule",
+      );
+    }
+    if (input.constraintRule !== undefined) {
+      if (input.constraintRule === null) {
+        db.prepare(
+          "DELETE FROM trial_constraint_rules WHERE purpose_id = ?",
+        ).run(oldRow.id);
+      } else {
+        writeConstraintRuleInTx(
+          db,
+          session,
+          input.scope,
+          newId,
+          input.kind,
+          input.constraintRule,
+          true,
+          now,
+        );
+      }
+    } else if (oldRule !== null && input.kind === "constraint") {
+      db.prepare(
+        "INSERT INTO trial_constraint_rules (purpose_id, session_id, scope, rule_json, created_at) VALUES (?, ?, ?, ?, ?)",
+      ).run(newId, session, input.scope, JSON.stringify(oldRule), now);
+    }
+    invalidateTrialsForScope(
+      db,
+      session,
+      oldRow.scope,
+      "purpose_corrected",
+      now,
+    );
+    if (input.scope !== oldRow.scope) {
+      invalidateTrialsForScope(
+        db,
+        session,
+        input.scope,
+        "purpose_corrected",
+        now,
+      );
+    }
     const oldCurrent = readPurpose(db, oldRow.id);
     const newCurrent = readPurpose(db, newId);
     if (oldCurrent === null || newCurrent === null) {
@@ -1452,6 +1586,9 @@ function transitionPurpose(
     expectedVersion,
   });
   return withImmediate(db, () => {
+    // Ownership-first: foreign ids are 404 before any idempotency-cache
+    // read. Version/state checks stay AFTER the cache (verbatim replay).
+    const row = assertOwnedPurpose(db, session, purpose);
     const existing = toStoredResponse(db, scope, canonical);
     if (existing !== null) {
       if (existing.requestHash !== hash) {
@@ -1463,7 +1600,6 @@ function transitionPurpose(
       );
       return { status: existing.responseStatus, body: stored, replayed: true };
     }
-    const row = assertOwnedPurpose(db, session, purpose);
     // Version (CAS) is checked before lifecycle state so a stale writer
     // always sees `autonomy_version_conflict` — the same order as the task
     // transitions below (version first, state second).
@@ -1512,6 +1648,13 @@ function transitionPurpose(
       "purpose",
       row.id,
       operation === "revoke" ? "purpose.revoked" : "purpose.achieved",
+      now,
+    );
+    invalidateTrialsForScope(
+      db,
+      session,
+      row.scope,
+      `purpose_${operation}d`,
       now,
     );
     const current = readPurpose(db, row.id);
@@ -1607,6 +1750,9 @@ export function createTask(
     },
   );
   return withImmediate(db, () => {
+    // Ownership-first: unknown/foreign sessions are 404 before any
+    // idempotency-cache read (never a 409 on a replayed key).
+    requireSession(db, session);
     const existing = toStoredResponse(db, scope, key);
     if (existing !== null) {
       if (existing.requestHash !== hash) {
@@ -1780,6 +1926,7 @@ export function listTaskEvents(
   db: Database.Database,
   sessionId: string,
   taskId: string,
+  query: { afterSeq?: number; limit?: number } = {},
 ): {
   taskId: string;
   events: {
@@ -1790,13 +1937,24 @@ export function listTaskEvents(
     note: string | null;
     createdAt: number;
   }[];
+  nextAfterSeq: number | null;
 } {
+  // Ownership-first (same guarantee as purpose history): foreign ids are
+  // 404 before any row read.
   const owned = assertOwnedTask(db, sessionId, taskId);
+  const parsed = parseOrValidation(
+    () =>
+      AutonomyHistoryQuerySchema.parse({
+        afterSeq: query.afterSeq ?? 0,
+        limit: query.limit,
+      }),
+    "task history query",
+  );
   const rows = db
     .prepare(
-      "SELECT seq, event, from_status, to_status, note, created_at FROM autonomy_task_events WHERE task_id = ? ORDER BY seq ASC",
+      "SELECT seq, event, from_status, to_status, note, created_at FROM autonomy_task_events WHERE task_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?",
     )
-    .all(owned.id) as {
+    .all(owned.id, parsed.afterSeq, parsed.limit + 1) as {
     seq: number;
     event: string;
     from_status: string | null;
@@ -1804,9 +1962,11 @@ export function listTaskEvents(
     note: string | null;
     created_at: number;
   }[];
+  const hasMore = rows.length > parsed.limit;
+  const page = rows.slice(0, parsed.limit);
   return {
     taskId: owned.id,
-    events: rows.map((row) => ({
+    events: page.map((row) => ({
       seq: row.seq,
       event: row.event,
       fromStatus: row.from_status,
@@ -1814,6 +1974,10 @@ export function listTaskEvents(
       note: row.note,
       createdAt: row.created_at,
     })),
+    nextAfterSeq:
+      hasMore && page.length > 0
+        ? (page[page.length - 1] as { seq: number }).seq
+        : null,
   };
 }
 
@@ -1846,6 +2010,9 @@ function transitionTask(
     expectedVersion,
   });
   return withImmediate(db, () => {
+    // Ownership-first: foreign ids are 404 before any idempotency-cache
+    // read. Version/state checks stay AFTER the cache (verbatim replay).
+    const row = assertOwnedTask(db, session, task);
     const existing = toStoredResponse(db, scope, canonical);
     if (existing !== null) {
       if (existing.requestHash !== hash) {
@@ -1861,7 +2028,6 @@ function transitionTask(
         replayed: true,
       };
     }
-    const row = assertOwnedTask(db, session, task);
     if (row.version !== expectedVersion) {
       throw new AutonomyVersionConflictError(expectedVersion, row.version);
     }
@@ -1952,6 +2118,7 @@ function transitionTask(
       throw new RepositoryNotFoundError(`task ${row.id} not found`);
     }
     const body = toTaskView(current);
+    invalidateTrialsForScope(db, session, row.scope, `task_${operation}`, now);
     storeIdempotentResponse(db, scope, canonical, hash, 200, body, now);
     return { status: 200, body, replayed: false };
   });
@@ -2057,6 +2224,9 @@ export function holdTask(
     },
   );
   return withImmediate(db, () => {
+    // Ownership-first: foreign ids are 404 before any idempotency-cache
+    // read. Version/state checks stay AFTER the cache (verbatim replay).
+    const row = assertOwnedTask(db, session, task);
     const existing = toStoredResponse(db, scope, canonical);
     if (existing !== null) {
       if (existing.requestHash !== hash) {
@@ -2072,7 +2242,6 @@ export function holdTask(
         replayed: true,
       };
     }
-    const row = assertOwnedTask(db, session, task);
     if (row.version !== input.expectedVersion) {
       throw new AutonomyVersionConflictError(
         input.expectedVersion,
@@ -2131,6 +2300,7 @@ export function holdTask(
       throw new RepositoryNotFoundError(`task ${row.id} not found`);
     }
     const body = toTaskView(current);
+    invalidateTrialsForScope(db, session, row.scope, "task_held", now);
     storeIdempotentResponse(db, scope, canonical, hash, 200, body, now);
     return { status: 200, body, replayed: false };
   });
@@ -2172,6 +2342,9 @@ export function resumeTask(
     },
   );
   return withImmediate(db, () => {
+    // Ownership-first: foreign ids are 404 before any idempotency-cache
+    // read. Version/state checks stay AFTER the cache (verbatim replay).
+    const row = assertOwnedTask(db, session, task);
     const existing = toStoredResponse(db, scope, canonical);
     if (existing !== null) {
       if (existing.requestHash !== hash) {
@@ -2187,7 +2360,6 @@ export function resumeTask(
         replayed: true,
       };
     }
-    const row = assertOwnedTask(db, session, task);
     if (row.version !== input.expectedVersion) {
       throw new AutonomyVersionConflictError(
         input.expectedVersion,
@@ -2354,6 +2526,14 @@ export function resumeTask(
       throw new RepositoryNotFoundError(`task ${row.id} not found`);
     }
     const body = toTaskView(current);
+    // Reparenting changes authority scope: invalidate BOTH old and new.
+    invalidateTrialsForScope(db, session, row.scope, "task_resumed", now);
+    if (nextParent !== row.parent_purpose_id) {
+      const np = readPurpose(db, nextParent as string);
+      if (np !== null && np.scope !== row.scope) {
+        invalidateTrialsForScope(db, session, np.scope, "task_reparented", now);
+      }
+    }
     storeIdempotentResponse(db, scope, canonical, hash, 200, body, now);
     return { status: 200, body, replayed: false };
   });
@@ -2515,6 +2695,12 @@ export function setAutonomyControl(
         skipRecordedInboxInTx(db, now);
       }
     });
+    if (input.paused) {
+      // STOP: DB pause first + revoke CLAIMED/inflight, cancelRequested.
+      // QUEUED-unconsumed otherwise-valid grants SURVIVE pause but can
+      // claim only after a fresh explicit global resume (gated at claim).
+      revokeAllClaimedForStop(db, now);
+    }
     const body = getAutonomyControl(db);
     storeIdempotentResponse(db, scope, key, hash, 200, body, now);
     return { status: 200, body, replayed: false };
@@ -2610,9 +2796,34 @@ export function applyAutonomyRestartFence(
     });
     recordActivityInTx(db, "restart_fence", null, at);
     recordActivityInTx(db, "interrupted_note", null, at);
+    // Restart never revives: inflight claimed grants are revoked — EXCEPT
+    // grants carrying a worker boot row, which boot recovery (recoverOnBoot,
+    // running after this fence) must still observe via
+    // listClaimedTrialWorkers (status='claimed') to prove quiescent vs fence.
+    // Booted grants stay claimed here and are settled by recovery; unbooted
+    // claimed grants revoke immediately.
+    revokeClaimedWithoutWorkerForRestart(db);
     const current = readControlRow(db);
     return { paused: current.paused === 1, version: current.version };
   });
+}
+
+/**
+ * Restart-fence revocation that preserves boot recovery visibility:
+ * revokes only claimed grants WITHOUT a worker boot row.
+ */
+function revokeClaimedWithoutWorkerForRestart(db: Database.Database): number {
+  const rows = db
+    .prepare(
+      "SELECT g.execution_id AS execution_id FROM trial_grants g LEFT JOIN trial_worker_boots b ON b.execution_id=g.execution_id WHERE g.status='claimed' AND b.execution_id IS NULL",
+    )
+    .all() as { execution_id: string }[];
+  for (const r of rows) {
+    db.prepare(
+      "UPDATE trial_grants SET status='revoked', cancel_requested=1 WHERE execution_id=?",
+    ).run(r.execution_id);
+  }
+  return rows.length;
 }
 
 /**

@@ -73,6 +73,7 @@ export {
   CalendarActionWriteCapabilitySchema,
   CalendarCreateWriteCapabilitySchema,
   createActionStrategy,
+  parseStrictInstantMs,
 } from "./action_strategy.js";
 export type {
   AgentMemoryRecall,
@@ -154,6 +155,8 @@ export {
   isPurposeApplicableAt,
   isStrictAutonomyDeadline,
   listAutonomyActivity,
+  listPurposeEvents,
+  listTaskEvents,
   recordPurposeConflict,
   resumeTask,
   revokePurpose,
@@ -246,9 +249,12 @@ export {
   generateId,
   IDEMPOTENCY_OPERATIONS,
   isUuidV4,
+  readIdempotencyRow,
   requestHash,
   sha256Hex,
   uuidVersion,
+  withImmediateTx,
+  writeIdempotencyRow,
 } from "./canonical.js";
 export type {
   KernelDatabaseHandle,
@@ -414,7 +420,6 @@ export type {
   SessionRow,
   StoredIdempotencyRecord,
   TransitionOptions,
-  TurnRow,
 } from "./repository.js";
 export { createKernelRepository } from "./repository.js";
 export {
@@ -452,6 +457,9 @@ export {
   shadowScopeEpochs,
   snapshotLinks,
   toolCalls,
+  trialConstraintRules,
+  trialGrants,
+  trialProposals,
   turnSelections,
   turns,
 } from "./schema.js";
@@ -510,3 +518,33 @@ export {
   StrategyError,
   StrategyRegistry,
 } from "./strategy.js";
+export type { TrustedObservation } from "./trial_authority.js";
+export {
+  activeAliasFence,
+  approveTrialProposal,
+  assertCanonicalLiteralPath,
+  authorityDeadlineMs,
+  checkTrialAuthority,
+  claimTrialGrant,
+  clearAliasFence,
+  expireTrialProposal,
+  fenceUnknownExecution,
+  hashTrialRequest,
+  invalidateTrialsForScope,
+  issueLaunchPermit,
+  listTrialProposals,
+  parseConstraintRule,
+  pathIntersectsDenied,
+  readLaunchPermit,
+  readTrialIntent,
+  readTrialProposal,
+  readWorkerOutcome,
+  readWorkerOutcomeByProposal,
+  reconcileTrialExpiry,
+  recordQuiescence,
+  recordWorkerResult,
+  registerWorkerBoot,
+  revokeAllClaimedForStop,
+  stageTrialProposal,
+  wireModeForReadOnly,
+} from "./trial_authority.js";

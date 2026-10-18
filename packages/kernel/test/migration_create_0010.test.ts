@@ -561,13 +561,20 @@ describe("M6 migration 0009 through M6 and later preserves reschedule and enable
       closeKernelDatabase(before);
     }
 
-    // --- Run the ACTUAL migrator from 0009 to latest with a proper backup. ---
+    // --- Run the ACTUAL migrator 0009 -> 0010 with a proper backup. ---
+    // UNION: kept HEAD "to latest" intent as comment but preserved pinned
+    // targetVersion 10 from both sides; this suite guards the M6 migration
+    // only, independent of the bundled default (now 15 with AV autonomy +
+    // trials; master comment said 11 at its time).
+    // Pinned to version 10 on purpose: this suite guards the M6 migration
+    // only, independent of the bundled default.
     const handle = openKernelDatabase(file);
     try {
       const result = await migrateKernelDatabase({
         db: handle.raw,
         backupDir: backups,
         migrationsDir: MIGRATIONS_DIR,
+        targetVersion: 10,
         now: new Date("2026-10-16T00:00:00.000Z"),
         backupId: "11111111-2222-4333-8444-555555555555",
       });

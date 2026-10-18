@@ -608,3 +608,6 @@
 
 ## 現況追記（2026-10-17、AV02 shadow-deliberation完成・履歴保持・checkbox/ID/件数不変）
 - AV02 full vertical（kernel＋service＋HTTP＋UI）: missing_grant は決して実行しない（claim≠grant、zero executions）。scope読取は repository getter のみ（Markdown/memory connectorなし）、memoryはUNTRUSTED・1 bounded call（`autonomy_deliberation.submit` ONE dot）。persistent queue＋input-complete fence＋foreground/STOP/restart保全（catchupなし）。UI latest-intent・stable retry・textContent・composer保全。full Vitest 136/1557（8 skipped、real CLI）＋ browser 32（28＋shadow 4）＋既往 smoke 17/17（synthetic）＋ root/e2e tsc 0＋Biome 0。残件: AV05 notifications、AV06 shared resources、AV07 external supervisor/recovery、AV04 methods learning、AV03 conversation task-proposals＋actual pi-orch handoff、AV08 maintenance、未解決 device/standing/external rollout。
+
+## 現況追記（2026-10-17、autonomy trial E2E・履歴保持・checkbox/ID/件数不変）
+- 自律 trial 実行系の実装＋合成モデル E2E（A 承認→完了、B STOP→revoke）を検証済み。証拠: `AV-E2E-RESULTS.json` run7（A consumed/authorized・B revoked/unauthorized・unit 消滅・Task/Goal 非完了維持）、`AV-SERVER-TRIAL-RESULTS.json`・`AV-RUNNER-RESULTS.json`・`AV-RELAY-RESULTS.json`・`AV-AUTHORITY-RESULTS.json`。throwaway driver 削除済み、運用 docs 追記済み。残: real model/hardware/resource caps 未選定、real model run 未実施、Own-pi 変更 uncommitted、Remind ops/graph done・commits pending。

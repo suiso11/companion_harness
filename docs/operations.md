@@ -3853,7 +3853,7 @@ branch until that lands.
 
 - Owned new sources: `packages/contracts/src/shadow.ts` (strict MODEL
   output + job/context/policy DTOs + `shadowRequestScope`), migration
-  `packages/kernel/migrations/0012_shadow.sql` (FOUR new STRICT tables:
+  `packages/kernel/migrations/0014_shadow.sql` (FOUR new STRICT tables:
   `shadow_scope_epochs`, `shadow_inbox`, `shadow_jobs`, `shadow_job_events`;
   BUNDLED_SCHEMA_VERSION 11 -> 12; Drizzle mirror in
   `packages/kernel/src/schema.ts`), `packages/kernel/src/shadow.ts`
@@ -3974,4 +3974,91 @@ branch until that lands.
   Remaining NOT claimed: AV05 notifications, AV06 shared resources, AV07
   external supervisor/recovery, AV04 methods learning, AV03 conversation
   task-proposals + actual pi-orch handoff, AV08 maintenance, unresolved
-  device/standing/external rollout.
+   device/standing/external rollout.
+## AV autonomy base (2026-10-16, base-only, `feat/av-autonomy-continuation`)
+
+Scope: durable purposes + explicit local tasks + global stop control
+(schema 11) with HTTP/UI/control/fence wiring. Recorded `permission`
+rows are claims only (no grant/capability/external write anywhere);
+tasks never become calendar events; deadlines/validity windows are never
+inferred (absent stays NULL, present must be strict explicit-offset
+RFC3339, `validUntil` after `validFrom`). Two independent review bugs
+fixed with behavior regressions (no source assertions): (1)
+correction idempotency now presence-flags `validFrom`/`validUntil`
+(omission=preserve vs explicit null=clear per field; same key + changed
+command is `IdempotencyConflictError`; exact terminal replay stays
+verbatim after later state changes; owner lookup before cache); (2)
+purpose/task histories are bounded lossless pages (`afterSeq`+`limit`
+default 50/max 200, `seq > cursor ORDER BY seq LIMIT limit+1`,
+`events <= 200` + `nextAfterSeq: number | null`) across contracts,
+kernel, facade, strict HTTP query routes (unknown/invalid queries are
+400; ownership before history), and UI Load more with session/target/
+generation stale-response guards; all audit rows immutable. Verified on
+temp stores only (throwaways removed): contracts/kernel/server/root/e2e
+`tsc --noEmit` exit 0 with genuinely green output (exact frozen offline
+relink restored `@types/better-sqlite3`; no declaration-any,
+suppressions, or tsconfig narrowing); focused Vitest 21/21
+(`autonomy_slice` 15, `migration_create_0010` 3, `autonomy_http` 3,
+incl. >=201-event consecutive-page exactness both layers and both
+null-vs-omission directions/bounds); temp app-request smoke
+(custom scope, explicit goal+validity, correction-vs-original
+history/pagination, hold with separate reason/trigger, revoked parent
+blocks resume until a NEW active same-scope parent, Stop/reopen paused
+while chat 202, proposals 0); real-Chromium `e2e/autonomy.spec.ts` 2/2
+(base lifecycle incl. guarded resume + 201-event UI Load more).
+Limits: base-only (no v12 executions / pi bridge); history pages cap
+200, lists cap 100; control gates only new autonomous background work.
+Prior pin7b40/M6 fixes and historical records elsewhere are preserved.
+
+## Autonomous trial execution (opt-in)
+
+Strict opt-in workspace-trial runner (schema 12 trial authority). Unset
+`COMPANION_AUTONOMY_JSON` (default) disables the whole path: no
+proposals, grants, runner, or bridge spawn.
+
+### Configuration
+
+- `COMPANION_AUTONOMY_JSON` must be one strict JSON object with exactly
+  the profile block `{ available, enabled, mandatoryChecks,
+  configFingerprint, sourceRevision, currentModel,
+  disclosedWholeRepoRead, timeoutMs, maxOutputBytes, workspaceAlias }`
+  plus a `runner` block `{ nodeRealpath, bridgeScriptPath,
+  bridgeConfigTemplatePath, systemctlRealpath, xdgRuntimeDir, relay,
+  observe, pollMs }`, where `relay` carries `{ maxRequestBytes,
+  maxModelCalls, maxOutputTokens, maxResponseBytes, perCallTimeoutMs,
+  maxConcurrent }` and `observe` carries `{ activeTimeoutMs,
+  goneTimeoutMs, pollIntervalMs }`. Every field is required; there are
+  no defaults. Unknown keys, wrong types, or out-of-range values fail
+  startup closed with a fixed safe message.
+- `COMPANION_MODEL_JSON` is additionally required: without a model
+  gateway there is no extraction and no trial model leg.
+- The bridge path is the Own-pi wholejob capsule guest
+  (`bridgeScriptPath` + `bridgeConfigTemplatePath`, spawned via
+  `nodeRealpath` under a systemd scope checked via `systemctlRealpath`
+  / `xdgRuntimeDir`). No other bridge is supported.
+
+### Runtime behavior
+
+- Startup boots with the global control paused; autonomous work starts
+  only after an explicit resume (guarded: a revoked parent requires a
+  NEW active same-scope parent before resume).
+- Approval is explicit in the UI: one approval stages exactly one grant
+  plus one execution UUID (`UNIQUE proposal_id` blocks double-approve).
+  The runner executes strictly one claimed grant at a time.
+- STOP revokes only `claimed` grants (`queued` survives; reclaim needs a
+  fresh resume). Foreground work preempts background trials; shutdown
+  drains the runner (bridge child reaped, no orphan scope).
+- An unknown execution raises a durable per-alias fence that denies
+  further stage/approve/claim for that workspace alias until the exact
+  fence row is cleared; unrelated scopes/aliases continue.
+- Results are workspace trials only: journal lines always carry
+  `productionApplied: false`, and trial completion never auto-completes
+  the owning Task/Goal (they stay `open`/`active`).
+- Verified 2026-10-17, synthetic only (fixed `synth-e2e-model` over a
+  loopback relay, never a real model): full server A+B driver green —
+  scenario A `consumed`/`authorized`/`bridge-exit:0` (12 model calls,
+  all fixed-model, all within the 2048-token cap, unit gone, Task open,
+  Goal active, git clean) and scenario B STOP `revoked`/unauthorized/
+  `bridge-exit:143` with the unit gone. Evidence:
+   `.all-plan-progress/AV-E2E-RESULTS.json` (`run7`); the throwaway
+   `.e2e-trial/` driver was deleted afterwards.

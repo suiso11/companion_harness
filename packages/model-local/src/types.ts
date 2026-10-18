@@ -40,6 +40,12 @@ export interface ChatRequest {
   model: string;
   messages: ChatMessage[];
   tools?: ToolDefinition[];
+  /**
+   * Optional per-call output token cap. When present, serialized
+   * provider-natively (OpenAI-compatible `max_tokens`, Ollama
+   * `options.num_predict`); absent means no cap is sent.
+   */
+  maxOutputTokens?: number;
 }
 
 /** Normalized native tool call (never derived from free-text content). */

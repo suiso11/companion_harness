@@ -1,9 +1,9 @@
 -- AV02 shadow-deliberation GLOBAL one-claimed-job-at-once backstop
--- (migration 0013, parent kernel contract).
+-- (migration 0015, renumbered from 0013 at merge time; parent kernel contract).
 --
--- Committed migration 0013: adds ONE partial unique index over the 0012
--- shadow queue and touches NOTHING else (0001-0012 preserved, including
--- the 0011 autonomy slice and the 0012 shadow tables/constraints).
+-- Committed migration 0015: adds ONE partial unique index over the 0014
+-- shadow queue and touches NOTHING else (0001-0014 preserved, including
+-- the 0011 autonomy slice and the 0014 shadow tables/constraints).
 --
 -- What this enforces: at most ONE `shadow_jobs` row may carry
 -- `status = 'claimed'` at any time, across ALL sessions/scopes/jobs.

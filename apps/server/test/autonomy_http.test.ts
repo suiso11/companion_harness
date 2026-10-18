@@ -9,6 +9,7 @@
 // revoke-holds-dependent + no-blind-resume, null deadlines/windows, and that
 // normal chat still admits while paused.
 
+// UNION of HEAD (closed scope + idempotency lookup) + origin/master (correction omission + history pagination): all 5 its kept.
 import { randomUUID } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -340,7 +341,7 @@ describe("autonomy HTTP", () => {
     }
   });
 
-  it("enforces the closed task scope wire contract", async () => {
+  it("enforces the task scope wire contract (missing scope defaults)", async () => {
     const fixture = await makeApp();
     try {
       const { app } = fixture;
@@ -380,8 +381,10 @@ describe("autonomy HTTP", () => {
         `${base}/tasks/${(tasked.body as { id: string }).id}`,
       );
       expect((read.body as { scope: string }).scope).toBe("health");
-      // Cross-scope parent is refused; missing scope and unknown fields are
-      // rejected by the closed strict wire schema (all 400, never defaulted).
+      // Cross-scope parent and unknown fields are refused by the strict wire
+      // schema (both 400); missing scope falls back to the contract default
+      // "default" (MERGE: master's defaulted-scope contract wins over HEAD's
+      // closed-reject variant).
       expect(
         (
           await post(
@@ -398,16 +401,14 @@ describe("autonomy HTTP", () => {
           )
         ).status,
       ).toBe(400);
-      expect(
-        (
-          await post(
-            app,
-            `${base}/tasks`,
-            { title: "no scope", kind: "task", speaker: "user" },
-            randomUUID(),
-          )
-        ).status,
-      ).toBe(400);
+      const scopedDefault = await post(
+        app,
+        `${base}/tasks`,
+        { title: "no scope", kind: "task", speaker: "user" },
+        randomUUID(),
+      );
+      expect(scopedDefault.status).toBe(201);
+      expect((scopedDefault.body as { scope: string }).scope).toBe("default");
       expect(
         (
           await post(
@@ -470,6 +471,213 @@ describe("autonomy HTTP", () => {
         `/api/sessions/${sessionId}/idempotency/${randomUUID()}?scope=autonomy%3Acontrol`,
       );
       expect(global.status).toBe(404);
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it("distinguishes correction omission from explicit null and replays terminal corrections verbatim", async () => {
+    const fixture = await makeApp();
+    try {
+      const { app } = fixture;
+      const created = await post(app, "/api/sessions", {}, randomUUID());
+      const sessionId = (created.body as { sessionId: string }).sessionId;
+      const base = `/api/sessions/${sessionId}`;
+      const windowed = {
+        scope: "health",
+        statement: "windowed goal",
+        kind: "goal",
+        explicit: true,
+        sourceKind: "user",
+        validFrom: "2026-11-01T00:00:00+09:00",
+        validUntil: "2026-11-30T00:00:00+09:00",
+      };
+      const made = await post(app, `${base}/purposes`, windowed, randomUUID());
+      expect(made.status).toBe(201);
+      const purposeId = (made.body as { id: string }).id;
+      const key = randomUUID();
+      const preservedBody = {
+        expectedVersion: 1,
+        scope: "health",
+        statement: "kept window",
+        kind: "goal",
+        explicit: true,
+        sourceKind: "user",
+      };
+      const kept = await post(
+        app,
+        `${base}/purposes/${purposeId}/correct`,
+        preservedBody,
+        key,
+      );
+      expect(kept.status).toBe(201);
+      expect(
+        (kept.body as { current: { validFrom: string } }).current.validFrom,
+      ).toBe(windowed.validFrom);
+      // Same key with explicit null instead of omission is a key-reuse
+      // conflict (never a silent merge of preserve vs clear).
+      const clash = await post(
+        app,
+        `${base}/purposes/${purposeId}/correct`,
+        { ...preservedBody, validFrom: null },
+        key,
+      );
+      expect(clash.status).toBe(409);
+      expect((clash.body as { error: { code: string } }).error.code).toBe(
+        "idempotency_key_reused",
+      );
+      // A later state change (revoke the new record) does not alter the
+      // stored correction: exact replay stays verbatim.
+      const currentId = (kept.body as { current: { id: string } }).current.id;
+      const revoked = await post(
+        app,
+        `${base}/purposes/${currentId}/revoke`,
+        { expectedVersion: 1 },
+        randomUUID(),
+      );
+      expect(revoked.status).toBe(200);
+      const replay = await post(
+        app,
+        `${base}/purposes/${purposeId}/correct`,
+        preservedBody,
+        key,
+      );
+      expect(replay.status).toBe(201);
+      expect((replay.body as { current: { id: string } }).current.id).toBe(
+        currentId,
+      );
+      expect(
+        (replay.body as { old: { statement: string } }).old.statement,
+      ).toBe("windowed goal");
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it("paginates task history losslessly past 200 events and rejects invalid history queries", async () => {
+    const fixture = await makeApp();
+    try {
+      const { app } = fixture;
+      const created = await post(app, "/api/sessions", {}, randomUUID());
+      const sessionId = (created.body as { sessionId: string }).sessionId;
+      const other = await post(app, "/api/sessions", {}, randomUUID());
+      const otherId = (other.body as { sessionId: string }).sessionId;
+      const base = `/api/sessions/${sessionId}`;
+      const tasked = await post(
+        app,
+        `${base}/tasks`,
+        { scope: "health", title: "cycled", kind: "task", speaker: "user" },
+        randomUUID(),
+      );
+      expect(tasked.status).toBe(201);
+      const taskId = (tasked.body as { id: string }).id;
+      let version = (tasked.body as { version: number }).version;
+      // 100 hold/resume cycles => 201 valid events.
+      for (let cycle = 0; cycle < 100; cycle += 1) {
+        const held = await post(
+          app,
+          `${base}/tasks/${taskId}/hold`,
+          {
+            expectedVersion: version,
+            reason: `waiting ${cycle}`,
+            reconsiderTrigger: `signal ${cycle}`,
+          },
+          randomUUID(),
+        );
+        expect(held.status).toBe(200);
+        version = (held.body as { version: number }).version;
+        const resumed = await post(
+          app,
+          `${base}/tasks/${taskId}/resume`,
+          {
+            expectedVersion: version,
+            evidenceKind: "user_confirmed",
+            evidence: `signal arrived ${cycle}`,
+          },
+          randomUUID(),
+        );
+        expect(resumed.status).toBe(200);
+        version = (resumed.body as { version: number }).version;
+      }
+      // The default page is bounded; consecutive pages yield exactly all
+      // ordered distinct events (lossless, never rewritten).
+      const first = await get(app, `${base}/tasks/${taskId}/history`);
+      expect(first.status).toBe(200);
+      const firstBody = first.body as {
+        events: { seq: number }[];
+        nextAfterSeq: number | null;
+      };
+      expect(firstBody.events.length).toBeLessThanOrEqual(200);
+      expect(firstBody.nextAfterSeq).not.toBeNull();
+      const seqs: number[] = [];
+      let after = 0;
+      for (;;) {
+        const page = await get(
+          app,
+          `${base}/tasks/${taskId}/history?afterSeq=${after}&limit=50`,
+        );
+        expect(page.status).toBe(200);
+        const pageBody = page.body as {
+          events: { seq: number }[];
+          nextAfterSeq: number | null;
+        };
+        expect(pageBody.events.length).toBeLessThanOrEqual(50);
+        for (const event of pageBody.events) {
+          seqs.push(event.seq);
+        }
+        if (pageBody.nextAfterSeq === null) {
+          break;
+        }
+        after = pageBody.nextAfterSeq;
+      }
+      expect(seqs).toHaveLength(201);
+      expect(seqs).toEqual(
+        Array.from({ length: 201 }, (_, index) => index + 1),
+      );
+      // Purpose history carries the same cursor contract on small trails.
+      const made = await post(
+        app,
+        `${base}/purposes`,
+        {
+          scope: "health",
+          statement: "paged purpose",
+          kind: "goal",
+          explicit: true,
+          sourceKind: "user",
+        },
+        randomUUID(),
+      );
+      const purposeId = (made.body as { id: string }).id;
+      const purposeHistory = await get(
+        app,
+        `${base}/purposes/${purposeId}/history`,
+      );
+      expect(purposeHistory.status).toBe(200);
+      expect(
+        (purposeHistory.body as { nextAfterSeq: unknown }).nextAfterSeq,
+      ).toBeNull();
+      // Ownership runs before history: foreign sessions are 404.
+      const foreignTask = await get(
+        app,
+        `/api/sessions/${otherId}/tasks/${taskId}/history`,
+      );
+      expect(foreignTask.status).toBe(404);
+      const foreignPurpose = await get(
+        app,
+        `/api/sessions/${otherId}/purposes/${purposeId}/history`,
+      );
+      expect(foreignPurpose.status).toBe(404);
+      // Invalid history queries are rejected (never clamped or ignored).
+      for (const bad of [
+        `${base}/tasks/${taskId}/history?afterSeq=-1`,
+        `${base}/tasks/${taskId}/history?limit=0`,
+        `${base}/tasks/${taskId}/history?limit=201`,
+        `${base}/tasks/${taskId}/history?unknown=1`,
+        `${base}/purposes/${purposeId}/history?afterSeq=oops`,
+        `${base}/purposes/${purposeId}/history?limit=201`,
+      ]) {
+        expect(await get(app, bad)).toMatchObject({ status: 400 });
+      }
     } finally {
       fixture.close();
     }

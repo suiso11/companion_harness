@@ -16,7 +16,11 @@
 // - the stop control defaults paused, survives the restart fence, and
 //   accepted (non-replayed) chat messages append user activity.
 
+// UNION of HEAD (omitted-bounds + session lookup) + origin/master (defaulted scope + history/ownership/cursors/pre-11): all non-duplicate its kept; the duplicate scope round-trip variant was unified on master's defaulted-scope contract (see MERGE note in-test).
 import { randomUUID } from "node:crypto";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   AutonomyStateConflictError,
@@ -570,7 +574,7 @@ describe("autonomy slice", () => {
     }
   });
 
-  it("round-trips task scope, refuses cross-scope parents, rejects unknown fields", async () => {
+  it("round-trips task scope, defaults missing scope, refuses cross-scope parents, rejects unknown fields", async () => {
     const { handle, repo, sessionId } = await makeRepo();
     try {
       const parent = repo.createAutonomyPurpose(
@@ -610,18 +614,22 @@ describe("autonomy slice", () => {
           { key: randomUUID() },
         ),
       ).toThrow(RepositoryValidationError);
-      // Missing scope and unknown wire fields both reject (closed contract).
-      expect(() =>
-        repo.createAutonomyTask(
-          sessionId,
-          {
-            title: "no scope",
-            kind: "task",
-            speaker: "user",
-          } as unknown as Parameters<typeof repo.createAutonomyTask>[1],
-          { key: randomUUID() },
-        ),
-      ).toThrow(RepositoryValidationError);
+      // Absent scope falls back to the contract default (single-scope
+      // clients stay working); unknown wire fields reject (closed contract).
+      // MERGE note: HEAD's variant asserted missing scope throws, but the
+      // merged contract keeps origin/master's deliberate `.default("default")`
+      // on TaskCreateRequestSchema, so the default wins and the duplicate
+      // closed-contract variant was removed.
+      const defaulted = repo.createAutonomyTask(
+        sessionId,
+        {
+          title: "no scope",
+          kind: "task",
+          speaker: "user",
+        } as unknown as Parameters<typeof repo.createAutonomyTask>[1],
+        { key: randomUUID() },
+      );
+      expect(defaulted.body.scope).toBe("default");
       expect(() =>
         repo.createAutonomyTask(
           sessionId,
@@ -740,6 +748,511 @@ describe("autonomy slice", () => {
       ).toThrow(RepositoryNotFoundError);
     } finally {
       closeKernelDatabase(handle);
+    }
+  });
+
+  it("keeps immutable purpose/task history with the original text intact", async () => {
+    const { handle, repo, sessionId, otherId } = await makeRepo();
+    try {
+      const created = repo.createAutonomyPurpose(
+        sessionId,
+        purposeBody("original wording"),
+        { key: randomUUID(), now: 1_700_000_000_010 },
+      );
+      const corrected = repo.correctAutonomyPurpose(
+        sessionId,
+        {
+          ...purposeBody("revised wording"),
+          purposeId: created.body.id,
+          expectedVersion: 1,
+        },
+        { key: randomUUID(), now: 1_700_000_000_020 },
+      );
+      // Old record history: created -> superseded, original text preserved.
+      const oldHistory = repo.getAutonomyPurposeHistory(
+        sessionId,
+        created.body.id,
+      );
+      expect(oldHistory.purposeId).toBe(created.body.id);
+      expect(oldHistory.events.map((event) => event.event)).toEqual([
+        "created",
+        "superseded",
+      ]);
+      expect(oldHistory.events[1]?.toStatus).toBe("superseded");
+      expect(corrected.body.old.statement).toBe("original wording");
+      // New record history starts its own trail (never rewrites the old).
+      const newHistory = repo.getAutonomyPurposeHistory(
+        sessionId,
+        corrected.body.current.id,
+      );
+      expect(newHistory.events.map((event) => event.event)).toEqual([
+        "corrected",
+      ]);
+      // Task trail records every transition including parent holds.
+      const task = repo.createAutonomyTask(
+        sessionId,
+        {
+          scope: "health",
+          title: "trailed work",
+          kind: "task",
+          speaker: "user",
+          parentPurposeId: corrected.body.current.id,
+        },
+        { key: randomUUID(), now: 1_700_000_000_030 },
+      );
+      repo.startAutonomyTask(
+        sessionId,
+        task.body.id,
+        { expectedVersion: 1 },
+        { key: randomUUID(), now: 1_700_000_000_040 },
+      );
+      repo.revokeAutonomyPurpose(
+        sessionId,
+        corrected.body.current.id,
+        { expectedVersion: 1 },
+        { key: randomUUID(), now: 1_700_000_000_050 },
+      );
+      const trail = repo.getAutonomyTaskHistory(sessionId, task.body.id);
+      expect(trail.taskId).toBe(task.body.id);
+      expect(trail.events.map((event) => event.event)).toEqual([
+        "created",
+        "started",
+        "parent_held",
+      ]);
+      expect(trail.events[2]?.toStatus).toBe("held");
+      // Foreign sessions see 404 on history too (ownership-first, never 403).
+      expect(() =>
+        repo.getAutonomyPurposeHistory(otherId, created.body.id),
+      ).toThrow(RepositoryNotFoundError);
+      expect(() => repo.getAutonomyTaskHistory(otherId, task.body.id)).toThrow(
+        RepositoryNotFoundError,
+      );
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("checks ownership before the idempotency cache on every mutation", async () => {
+    const { handle, repo, sessionId, otherId } = await makeRepo();
+    try {
+      const created = repo.createAutonomyPurpose(
+        sessionId,
+        purposeBody("owned intent"),
+        { key: randomUUID() },
+      );
+      // A foreign session replaying an accepted mutation key is 404 (the
+      // owner check runs before any cache read), never a 409 conflict.
+      const acceptedKey = randomUUID();
+      repo.revokeAutonomyPurpose(
+        sessionId,
+        created.body.id,
+        { expectedVersion: 1 },
+        { key: acceptedKey },
+      );
+      expect(() =>
+        repo.revokeAutonomyPurpose(
+          otherId,
+          created.body.id,
+          { expectedVersion: 2 },
+          { key: acceptedKey },
+        ),
+      ).toThrow(RepositoryNotFoundError);
+      // Owned terminal same-key replay returns the stored body verbatim.
+      const task = repo.createAutonomyTask(
+        sessionId,
+        { scope: "home", title: "finish me", kind: "task", speaker: "user" },
+        { key: randomUUID() },
+      );
+      const finishKey = randomUUID();
+      const finished = repo.completeAutonomyTask(
+        sessionId,
+        task.body.id,
+        { expectedVersion: 1 },
+        { key: finishKey },
+      );
+      expect(finished.body.status).toBe("completed");
+      const replayed = repo.completeAutonomyTask(
+        sessionId,
+        task.body.id,
+        { expectedVersion: 1 },
+        { key: finishKey },
+      );
+      expect(replayed.replayed).toBe(true);
+      expect(replayed.body.status).toBe("completed");
+      expect(replayed.body.version).toBe(finished.body.version);
+      // Creates validate the session before the cache: unknown sessions are
+      // 404 even for a fresh key, and the key is never stored for them.
+      const ghost = randomUUID();
+      const ghostKey = randomUUID();
+      expect(() =>
+        repo.createAutonomyPurpose(ghost, purposeBody("ghost intent"), {
+          key: ghostKey,
+        }),
+      ).toThrow(RepositoryNotFoundError);
+      const retry = repo.createAutonomyPurpose(
+        sessionId,
+        purposeBody("ghost intent"),
+        { key: ghostKey },
+      );
+      expect(retry.replayed).toBe(false);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("distinguishes omitted vs explicit-null applicability bounds in correction idempotency", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      const window = {
+        validFrom: "2026-11-01T00:00:00+09:00",
+        validUntil: "2026-11-30T00:00:00+09:00",
+      };
+      const base = (statement: string) => ({
+        ...purposeBody(statement),
+        ...window,
+      });
+      // validFrom, omit-then-null: omission preserves, explicit null clears,
+      // and the same key with a changed presence conflicts (never merges).
+      const pFrom = repo.createAutonomyPurpose(sessionId, base("windowed"), {
+        key: randomUUID(),
+      });
+      const keepKey = randomUUID();
+      const kept = repo.correctAutonomyPurpose(
+        sessionId,
+        {
+          ...purposeBody("kept window"),
+          purposeId: pFrom.body.id,
+          expectedVersion: 1,
+        },
+        { key: keepKey },
+      );
+      expect(kept.body.current.validFrom).toBe(window.validFrom);
+      expect(() =>
+        repo.correctAutonomyPurpose(
+          sessionId,
+          {
+            ...purposeBody("kept window"),
+            purposeId: pFrom.body.id,
+            expectedVersion: 1,
+            validFrom: null,
+          },
+          { key: keepKey },
+        ),
+      ).toThrow(IdempotencyConflictError);
+      // validFrom, null-then-omit: the reverse direction also conflicts.
+      const qFrom = repo.createAutonomyPurpose(sessionId, base("windowed q"), {
+        key: randomUUID(),
+      });
+      const clearKey = randomUUID();
+      const cleared = repo.correctAutonomyPurpose(
+        sessionId,
+        {
+          ...purposeBody("cleared from"),
+          purposeId: qFrom.body.id,
+          expectedVersion: 1,
+          validFrom: null,
+        },
+        { key: clearKey },
+      );
+      expect(cleared.body.current.validFrom).toBeNull();
+      expect(cleared.body.current.validUntil).toBe(window.validUntil);
+      expect(() =>
+        repo.correctAutonomyPurpose(
+          sessionId,
+          {
+            ...purposeBody("cleared from"),
+            purposeId: qFrom.body.id,
+            expectedVersion: 1,
+          },
+          { key: clearKey },
+        ),
+      ).toThrow(IdempotencyConflictError);
+      // validUntil, omit-then-null.
+      const pUntil = repo.createAutonomyPurpose(sessionId, base("windowed u"), {
+        key: randomUUID(),
+      });
+      const keepUKey = randomUUID();
+      const keptU = repo.correctAutonomyPurpose(
+        sessionId,
+        {
+          ...purposeBody("kept until"),
+          purposeId: pUntil.body.id,
+          expectedVersion: 1,
+        },
+        { key: keepUKey },
+      );
+      expect(keptU.body.current.validUntil).toBe(window.validUntil);
+      expect(() =>
+        repo.correctAutonomyPurpose(
+          sessionId,
+          {
+            ...purposeBody("kept until"),
+            purposeId: pUntil.body.id,
+            expectedVersion: 1,
+            validUntil: null,
+          },
+          { key: keepUKey },
+        ),
+      ).toThrow(IdempotencyConflictError);
+      // validUntil, null-then-omit.
+      const qUntil = repo.createAutonomyPurpose(sessionId, base("windowed v"), {
+        key: randomUUID(),
+      });
+      const clearUKey = randomUUID();
+      const clearedU = repo.correctAutonomyPurpose(
+        sessionId,
+        {
+          ...purposeBody("cleared until"),
+          purposeId: qUntil.body.id,
+          expectedVersion: 1,
+          validUntil: null,
+        },
+        { key: clearUKey },
+      );
+      expect(clearedU.body.current.validUntil).toBeNull();
+      expect(clearedU.body.current.validFrom).toBe(window.validFrom);
+      expect(() =>
+        repo.correctAutonomyPurpose(
+          sessionId,
+          {
+            ...purposeBody("cleared until"),
+            purposeId: qUntil.body.id,
+            expectedVersion: 1,
+          },
+          { key: clearUKey },
+        ),
+      ).toThrow(IdempotencyConflictError);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("replays a terminal correction verbatim after later state changes", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      const created = repo.createAutonomyPurpose(
+        sessionId,
+        purposeBody("original"),
+        { key: randomUUID() },
+      );
+      const key = randomUUID();
+      const corrected = repo.correctAutonomyPurpose(
+        sessionId,
+        {
+          ...purposeBody("revised"),
+          purposeId: created.body.id,
+          expectedVersion: 1,
+        },
+        { key },
+      );
+      // A later state change: revoke the NEW record (the old stays
+      // superseded; the stored correction body must not change).
+      repo.revokeAutonomyPurpose(
+        sessionId,
+        corrected.body.current.id,
+        { expectedVersion: 1 },
+        { key: randomUUID() },
+      );
+      expect(
+        repo.getAutonomyPurpose(sessionId, corrected.body.current.id).status,
+      ).toBe("revoked");
+      // Exact terminal replay: same key + byte-identical command returns the
+      // stored body verbatim (ownership first, cache before state checks).
+      const replayed = repo.correctAutonomyPurpose(
+        sessionId,
+        {
+          ...purposeBody("revised"),
+          purposeId: created.body.id,
+          expectedVersion: 1,
+        },
+        { key },
+      );
+      expect(replayed.replayed).toBe(true);
+      expect(replayed.status).toBe(201);
+      expect(replayed.body.old.id).toBe(corrected.body.old.id);
+      expect(replayed.body.current.id).toBe(corrected.body.current.id);
+      expect(replayed.body.current.statement).toBe("revised");
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("pages task history losslessly past 200 events and validates cursors", async () => {
+    const { handle, repo, sessionId, otherId } = await makeRepo();
+    try {
+      const task = repo.createAutonomyTask(
+        sessionId,
+        { scope: "health", title: "cycled", kind: "task", speaker: "user" },
+        { key: randomUUID() },
+      );
+      // 100 hold/resume cycles => 1 created + 200 transitions = 201 events.
+      let version = 1;
+      for (let cycle = 0; cycle < 100; cycle += 1) {
+        const held = repo.holdAutonomyTask(
+          sessionId,
+          task.body.id,
+          {
+            expectedVersion: version,
+            reason: `waiting ${cycle}`,
+            reconsiderTrigger: `signal ${cycle}`,
+          },
+          { key: randomUUID() },
+        );
+        version = held.body.version;
+        const resumed = repo.resumeAutonomyTask(
+          sessionId,
+          task.body.id,
+          {
+            expectedVersion: version,
+            evidenceKind: "user_confirmed",
+            evidence: `signal arrived ${cycle}`,
+          },
+          { key: randomUUID() },
+        );
+        version = resumed.body.version;
+      }
+      // A single default page is bounded (never the full 201 at once).
+      const first = repo.getAutonomyTaskHistory(sessionId, task.body.id);
+      expect(first.events.length).toBeLessThanOrEqual(200);
+      expect(first.events).toHaveLength(50);
+      expect(first.nextAfterSeq).toBe(50);
+      // Consecutive pages yield exactly all ordered distinct events.
+      const seen: number[] = [];
+      const kinds: string[] = [];
+      let after = 0;
+      for (;;) {
+        const page = repo.getAutonomyTaskHistory(sessionId, task.body.id, {
+          afterSeq: after,
+          limit: 50,
+        });
+        expect(page.events.length).toBeLessThanOrEqual(50);
+        for (const event of page.events) {
+          seen.push(event.seq);
+          kinds.push(event.event);
+        }
+        if (page.nextAfterSeq === null) {
+          break;
+        }
+        after = page.nextAfterSeq;
+      }
+      expect(seen).toHaveLength(201);
+      expect(seen).toEqual(
+        Array.from({ length: 201 }, (_, index) => index + 1),
+      );
+      expect(kinds[0]).toBe("created");
+      expect(kinds.slice(1)).toEqual(
+        Array.from({ length: 100 }, () => ["held", "resumed"]).flat(),
+      );
+      // Small histories stay exact: a fresh task fits one page, cursor null.
+      const solo = repo.createAutonomyTask(
+        sessionId,
+        { scope: "health", title: "solo", kind: "task", speaker: "user" },
+        { key: randomUUID() },
+      );
+      const soloHistory = repo.getAutonomyTaskHistory(sessionId, solo.body.id);
+      expect(soloHistory.events.map((event) => event.event)).toEqual([
+        "created",
+      ]);
+      expect(soloHistory.nextAfterSeq).toBeNull();
+      // Ownership runs before history: foreign sessions are 404 even with a
+      // cursor, and invalid cursors/limits are rejected (never clamped).
+      expect(() =>
+        repo.getAutonomyTaskHistory(otherId, task.body.id, { afterSeq: 50 }),
+      ).toThrow(RepositoryNotFoundError);
+      expect(() =>
+        repo.getAutonomyTaskHistory(sessionId, task.body.id, { afterSeq: -1 }),
+      ).toThrow(RepositoryValidationError);
+      expect(() =>
+        repo.getAutonomyTaskHistory(sessionId, task.body.id, { limit: 201 }),
+      ).toThrow(RepositoryValidationError);
+      // Purpose history pages the same way (small trail, exact + null).
+      const purpose = repo.createAutonomyPurpose(
+        sessionId,
+        purposeBody("paged purpose"),
+        { key: randomUUID() },
+      );
+      const purposeHistory = repo.getAutonomyPurposeHistory(
+        sessionId,
+        purpose.body.id,
+      );
+      expect(purposeHistory.events.map((event) => event.event)).toEqual([
+        "created",
+      ]);
+      expect(purposeHistory.nextAfterSeq).toBeNull();
+      expect(() =>
+        repo.getAutonomyPurposeHistory(otherId, purpose.body.id),
+      ).toThrow(RepositoryNotFoundError);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("keeps normal chat working on pre-11 stores and fails loud on corrupt v11 stores", async () => {
+    // Pre-11 fixture: a legit old store migrated only to version 10.
+    const handle = openKernelDatabase(":memory:");
+    try {
+      const first = await migrateKernelDatabase({
+        db: handle.raw,
+        targetVersion: 10,
+      });
+      expect(first.applied).toContain(10);
+      const repo = createKernelRepository(handle.raw);
+      const session = repo.createSession({
+        key: randomUUID(),
+        now: 1_700_000_000_000,
+      });
+      const sessionId = session.body.sessionId;
+      // Normal chat is accepted without the autonomy tables present.
+      const posted = repo.postMessage(
+        sessionId,
+        { text: "hello from v10" },
+        { key: randomUUID(), now: 1_700_000_000_010 },
+      );
+      expect(posted.status).toBe(202);
+      // Autonomy reads fail closed on the old version (never silently empty).
+      expect(() => repo.getAutonomyControlState()).toThrow();
+      expect(() => repo.listAutonomyActivityLog({})).toThrow();
+      // Upgrading to latest seeds the paused control; chat activity resumes.
+      const backups = join(
+        mkdtempSync(join(tmpdir(), "av-migrate-11-")),
+        "backups",
+      );
+      const upgrade = await migrateKernelDatabase({
+        db: handle.raw,
+        backupDir: backups,
+      });
+      expect(upgrade.applied.length).toBeGreaterThanOrEqual(2);
+      expect(upgrade.applied).toContain(11);
+      expect(repo.getAutonomyControlState().paused).toBe(true);
+      const before = repo.listAutonomyActivityLog({}).items.length;
+      const v11Session = repo.createSession({ key: randomUUID() });
+      repo.postMessage(
+        v11Session.body.sessionId,
+        { text: "hello from v11" },
+        { key: randomUUID(), now: 1_700_000_000_020 },
+      );
+      expect(repo.listAutonomyActivityLog({}).items.length).toBe(before + 1);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+
+    // Corrupt v11 store: the activity table was dropped. Accepted chat must
+    // fail loud (the missing-table failure is never masked as acceptance).
+    const broken = openKernelDatabase(":memory:");
+    try {
+      await migrateKernelDatabase({ db: broken.raw });
+      const repo = createKernelRepository(broken.raw);
+      const session = repo.createSession({ key: randomUUID() });
+      broken.raw.exec("DROP TABLE autonomy_activity");
+      expect(() =>
+        repo.postMessage(
+          session.body.sessionId,
+          { text: "should not be masked" },
+          { key: randomUUID() },
+        ),
+      ).toThrow(/no such table/i);
+    } finally {
+      closeKernelDatabase(broken);
     }
   });
 });

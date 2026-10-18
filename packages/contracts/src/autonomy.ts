@@ -20,7 +20,9 @@ import { Sha256HexSchema, UnixMsSchema, UuidSchema } from "./ids.js";
  * `correctionBody` cap); task titles cap at 256 (borrowed from the
  * `calendar.create` title cap); hold reasons / reconsider triggers cap at
  * 500 code points (borrowed from the fixed API error message cap); list
- * limits default 50 / max 100 (borrowed from history pagination); scope
+ * limits default 50 / max 100 (borrowed from history pagination); history
+ * pages default 50 / max 200 with an exclusive `afterSeq` cursor and a
+ * `nextAfterSeq` cursor (borrowed from the run-events pagination cap); scope
  * strings cap at 128 (borrowed from the strategy-name length cap). No new
  * model / threshold / authority settings are introduced here.
  */
@@ -182,6 +184,19 @@ export function taskOpScope(taskId: string, op: TaskOp): string {
   return `task:${UuidSchema.parse(taskId)}:${op}`;
 }
 
+/** Purpose-conflict scope: one key space per owning session + id pair. */
+export function purposeConflictScope(
+  sessionId: string,
+  purposeAId: string,
+  purposeBId: string,
+): string {
+  const session = UuidSchema.parse(sessionId);
+  const a = UuidSchema.parse(purposeAId);
+  const b = UuidSchema.parse(purposeBId);
+  const [first, second] = a < b ? [a, b] : [b, a];
+  return `session:${session}:conflict:${first}:${second}`;
+}
+
 /* ------------------------------------------------------------------ */
 /* Purpose DTOs                                                         */
 /* ------------------------------------------------------------------ */
@@ -205,6 +220,12 @@ export const PurposeCreateRequestSchema = z.strictObject({
    */
   validFrom: PurposeApplicabilityInstantSchema.optional(),
   validUntil: PurposeApplicabilityInstantSchema.optional(),
+  /**
+   * Optional structured constraint rule (ONLY kind=constraint; strict shape
+   * validated server-side: deny_workspace/deny_operation/deny_write_path).
+   * Present passes through hashing; absent leaves stored rule unchanged.
+   */
+  constraintRule: z.unknown().optional(),
 });
 export type PurposeCreateRequest = z.infer<typeof PurposeCreateRequestSchema>;
 
@@ -224,6 +245,8 @@ export const PurposeViewSchema = z.strictObject({
   /** Explicit applicability window; NULL bounds are unbounded. */
   validFrom: PurposeApplicabilityInstantSchema.nullable(),
   validUntil: PurposeApplicabilityInstantSchema.nullable(),
+  /** Structured constraint rule payload (kind=constraint only), else null. */
+  constraintRule: z.unknown().nullable().default(null),
   createdAt: UnixMsSchema,
   updatedAt: UnixMsSchema,
 });
@@ -258,6 +281,12 @@ export const PurposeCorrectRequestSchema = z.strictObject({
    */
   validFrom: z.union([PurposeApplicabilityInstantSchema, z.null()]).optional(),
   validUntil: z.union([PurposeApplicabilityInstantSchema, z.null()]).optional(),
+  /**
+   * Rule correction: `undefined` preserves, `null` clears, object sets
+   * (kind=constraint only; kind change away with non-null rule must
+   * explicitly clear or the correction is rejected).
+   */
+  constraintRule: z.unknown().optional().nullable(),
 });
 export type PurposeCorrectRequest = z.infer<typeof PurposeCorrectRequestSchema>;
 
@@ -321,7 +350,12 @@ export type PurposeConflictListResponse = z.infer<
 /* ------------------------------------------------------------------ */
 
 export const TaskCreateRequestSchema = z.strictObject({
-  scope: AutonomyScopeSchema,
+  /**
+   * Explicit metadata scope: the parent purpose (when given) must share it.
+   * Absent defaults to `"default"` (single-scope clients stay working);
+   * present must satisfy the shared scope bound.
+   */
+  scope: AutonomyScopeSchema.default("default"),
   title: TaskTitleSchema,
   body: TaskBodySchema.optional(),
   kind: TaskKindSchema,
@@ -447,6 +481,21 @@ export const AutonomyListQuerySchema = z.strictObject({
 export type AutonomyListQuery = z.infer<typeof AutonomyListQuerySchema>;
 export type AutonomyListQueryInput = z.input<typeof AutonomyListQuerySchema>;
 
+/**
+ * Bounded immutable-history page query (borrowed run-events pagination
+ * caps: default 50 / max 200). `afterSeq` is the exclusive per-record event
+ * cursor (0 = from the start); the server reads `seq > afterSeq ORDER BY
+ * seq ASC LIMIT limit+1` so pages are lossless and never rewritten.
+ */
+export const AutonomyHistoryQuerySchema = z.strictObject({
+  afterSeq: z.coerce.number().int().min(0).default(0),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+});
+export type AutonomyHistoryQuery = z.infer<typeof AutonomyHistoryQuerySchema>;
+export type AutonomyHistoryQueryInput = z.input<
+  typeof AutonomyHistoryQuerySchema
+>;
+
 /** Fixed autonomy error codes (transport mapping is a server concern). */
 export const AutonomyErrorCodeSchema = z.enum([
   "autonomy_version_conflict",
@@ -459,3 +508,61 @@ export const AutonomyRequestHashSchema = z.strictObject({
   requestHash: Sha256HexSchema,
 });
 export type AutonomyRequestHash = z.infer<typeof AutonomyRequestHashSchema>;
+
+/* ------------------------------------------------------------------ */
+/* History DTOs (immutable original / correction / revocation trail)    */
+/* ------------------------------------------------------------------ */
+
+/** One immutable purpose event (append-only; rows never updated). */
+export const PurposeHistoryEventSchema = z.strictObject({
+  seq: z.number().int().min(1),
+  event: z.enum(["created", "corrected", "superseded", "revoked", "achieved"]),
+  fromStatus: PurposeStatusSchema.nullable(),
+  toStatus: PurposeStatusSchema,
+  createdAt: UnixMsSchema,
+});
+export type PurposeHistoryEvent = z.infer<typeof PurposeHistoryEventSchema>;
+
+export const PurposeHistoryResponseSchema = z.strictObject({
+  purposeId: UuidSchema,
+  events: z.array(PurposeHistoryEventSchema).max(200),
+  /**
+   * Forward cursor: the last returned `seq` when more rows remain, else
+   * null. Clients pass it back as `afterSeq` to fetch the next lossless
+   * page; rows are immutable so already-read pages never change.
+   */
+  nextAfterSeq: z.number().int().min(1).nullable(),
+});
+export type PurposeHistoryResponse = z.infer<
+  typeof PurposeHistoryResponseSchema
+>;
+
+/** One immutable task event (append-only; rows never updated). */
+export const TaskHistoryEventSchema = z.strictObject({
+  seq: z.number().int().min(1),
+  event: z.enum([
+    "created",
+    "started",
+    "held",
+    "resumed",
+    "completed",
+    "cancelled",
+    "parent_held",
+  ]),
+  fromStatus: TaskStatusSchema.nullable(),
+  toStatus: TaskStatusSchema,
+  note: z.string().nullable(),
+  createdAt: UnixMsSchema,
+});
+export type TaskHistoryEvent = z.infer<typeof TaskHistoryEventSchema>;
+
+export const TaskHistoryResponseSchema = z.strictObject({
+  taskId: UuidSchema,
+  events: z.array(TaskHistoryEventSchema).max(200),
+  /**
+   * Forward cursor: the last returned `seq` when more rows remain, else
+   * null. Same lossless `afterSeq` paging contract as purpose history.
+   */
+  nextAfterSeq: z.number().int().min(1).nullable(),
+});
+export type TaskHistoryResponse = z.infer<typeof TaskHistoryResponseSchema>;

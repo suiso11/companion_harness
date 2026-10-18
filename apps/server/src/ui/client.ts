@@ -35,6 +35,9 @@ import {
   type ReceiptOutcome,
   type RunViewState,
   runResultToAnswerParts,
+  type TrialProposalInput,
+  type TrialProposalStatus,
+  trialProposalModel,
 } from "./reducer.js";
 import { ShadowPanel } from "./shadow_panel.js";
 
@@ -605,6 +608,15 @@ class ConversationApp {
       } else {
         throw error;
       }
+    }
+    // Trial proposal/approval panel: opt-in human surface, usable without
+    // any model (plain DOM + HTTP). Fail-open locally like AutonomyPanel.
+    try {
+      const trials = new TrialPanel(() => this.sessionId);
+      trials.bind();
+      void trials.refreshAll();
+    } catch {
+      // Best effort: the conversation shell stays usable.
     }
     let descriptor = await this.recoverPending();
     if (descriptor === null) {
@@ -4027,7 +4039,13 @@ class ConversationApp {
  * never rendered: rows show statement/title text plus kind/status labels.
  * Generation counters bind every awaited response to the session + list
  * generation that requested it, so out-of-order responses never overwrite
- * newer DOM. Recorded `permission` rows are claims only (fixed note).
+ * newer DOM. Recorded `permission` rows are claims only (fixed note): the
+ * form never creates a grant, a capability, or an external action.
+ * Hold reasons and reconsider triggers are separate inputs; resume takes a
+ * closed evidence-kind select (no timer member exists) plus an optional
+ * explicit replacement parent. Purpose/task histories render the immutable
+ * original / correction / lifecycle trail (superseded originals stay
+ * readable, never overwritten).
  */
 class AutonomyPanel {
   private readonly getSessionId: () => string | null;
@@ -4041,6 +4059,7 @@ class AutonomyPanel {
   private readonly purposeStatement: HTMLTextAreaElement;
   private readonly purposeKind: HTMLSelectElement;
   private readonly purposeSource: HTMLSelectElement;
+  private readonly purposeExplicit: HTMLInputElement;
   private readonly purposeInterpretation: HTMLTextAreaElement;
   private readonly purposeValidFrom: HTMLInputElement;
   private readonly purposeValidUntil: HTMLInputElement;
@@ -4063,6 +4082,8 @@ class AutonomyPanel {
   private readonly taskDetail: HTMLElement;
   private readonly taskDetailBody: HTMLElement;
   private readonly taskHoldInput: HTMLTextAreaElement;
+  private readonly taskReconsiderInput: HTMLTextAreaElement;
+  private readonly taskEvidenceKind: HTMLSelectElement;
   private readonly taskResumeInput: HTMLTextAreaElement;
   private readonly taskStartButton: HTMLButtonElement;
   private readonly taskHoldButton: HTMLButtonElement;
@@ -4115,6 +4136,22 @@ class AutonomyPanel {
   private readonly taskResumeUseParent: HTMLInputElement;
   private readonly pendingLine: HTMLElement;
   private readonly retryButton: HTMLButtonElement;
+  private readonly purposeHistoryMoreButton: HTMLButtonElement;
+  private readonly taskHistoryMoreButton: HTMLButtonElement;
+  /**
+   * Bounded history paging state: the exclusive `afterSeq` cursor for the
+   * next page (`null` = no more pages), bound to the exact session + target
+   * + selection generation that requested it. A session/target/generation
+   * change invalidates the cursor so a late page can never append to a new
+   * target. Request generations reuse the selection sequences (a new
+   * selection supersedes in-flight pages; each Load more click re-checks).
+   */
+  private purposeHistoryCursor: number | null = null;
+  private taskHistoryCursor: number | null = null;
+  private purposeHistorySession: string | null = null;
+  private purposeHistoryTarget: string | null = null;
+  private taskHistorySession: string | null = null;
+  private taskHistoryTarget: string | null = null;
 
   constructor(getSessionId: () => string | null, onChanged?: () => void) {
     this.getSessionId = getSessionId;
@@ -4144,6 +4181,10 @@ class AutonomyPanel {
     this.purposeSource = get<HTMLSelectElement>(
       "autonomy-purpose-source",
       "select",
+    );
+    this.purposeExplicit = get<HTMLInputElement>(
+      "autonomy-purpose-explicit",
+      "input",
     );
     this.purposeInterpretation = get<HTMLTextAreaElement>(
       "autonomy-purpose-interpretation",
@@ -4202,6 +4243,14 @@ class AutonomyPanel {
       "autonomy-task-hold-input",
       "textarea",
     );
+    this.taskReconsiderInput = get<HTMLTextAreaElement>(
+      "autonomy-task-reconsider-input",
+      "textarea",
+    );
+    this.taskEvidenceKind = get<HTMLSelectElement>(
+      "autonomy-task-evidence-kind",
+      "select",
+    );
     this.taskResumeInput = get<HTMLTextAreaElement>(
       "autonomy-task-resume-input",
       "textarea",
@@ -4248,6 +4297,14 @@ class AutonomyPanel {
       "autonomy-retry-button",
       "button",
     );
+    this.purposeHistoryMoreButton = get<HTMLButtonElement>(
+      "autonomy-purpose-history-more-button",
+      "button",
+    );
+    this.taskHistoryMoreButton = get<HTMLButtonElement>(
+      "autonomy-task-history-more-button",
+      "button",
+    );
   }
 
   bind(): void {
@@ -4288,6 +4345,12 @@ class AutonomyPanel {
     });
     this.retryButton.addEventListener("click", () => {
       void this.retryPendingAutonomy();
+    });
+    this.purposeHistoryMoreButton.addEventListener("click", () => {
+      void this.loadMorePurposeHistory();
+    });
+    this.taskHistoryMoreButton.addEventListener("click", () => {
+      void this.loadMoreTaskHistory();
     });
     this.stopButton.addEventListener("click", () => {
       void this.setControl(true);
@@ -4413,6 +4476,7 @@ class AutonomyPanel {
 
   private clearTaskDrafts(): void {
     this.taskHoldInput.value = "";
+    this.taskReconsiderInput.value = "";
     this.taskResumeInput.value = "";
   }
 
@@ -4442,8 +4506,8 @@ class AutonomyPanel {
     this.controlVersion = body.version;
     this.controlStatus.textContent =
       body.paused === true
-        ? "自律動作は停止中です。通常の会話は利用できます。"
-        : "自律動作は再開されています。通常の会話は利用できます。";
+        ? "自律動作は停止中です。通常の会話は利用できます。／自律作業は停止中です。通常の会話は利用できます。"
+        : "自律動作は再開されています。通常の会話は利用できます。／自律作業は再開されています。通常の会話は利用できます。";
   }
 
   private async setControl(paused: boolean): Promise<void> {
@@ -4458,12 +4522,18 @@ class AutonomyPanel {
     }
     if (result.status === 200) {
       await this.refreshControl();
-      this.notice(paused ? "自律動作を停止しました" : "自律動作を再開しました");
+      this.notice(
+        paused
+          ? "自律動作を停止しました／自律作業を停止しました"
+          : "自律動作を再開しました／自律作業を再開しました",
+      );
     } else if (result.status === 409) {
       await this.refreshControl();
       this.notice("他の変更がありました。一覧を更新しました");
     } else {
-      this.notice("自律動作の切り替えに失敗しました");
+      this.notice(
+        "自律動作の切り替えに失敗しました／自律作業の切り替えに失敗しました",
+      );
     }
   }
 
@@ -4483,6 +4553,14 @@ class AutonomyPanel {
       this.conflictArm = null;
       this.clearPurposeDrafts();
       this.clearTaskDrafts();
+      this.purposeHistoryCursor = null;
+      this.taskHistoryCursor = null;
+      this.purposeHistorySession = null;
+      this.taskHistorySession = null;
+      this.purposeHistoryTarget = null;
+      this.taskHistoryTarget = null;
+      this.purposeHistoryMoreButton.hidden = true;
+      this.taskHistoryMoreButton.hidden = true;
     }
     this.listedSession = sessionId;
     const seq = ++this.listSeq;
@@ -4652,6 +4730,45 @@ class AutonomyPanel {
     }
   }
 
+  /**
+   * Render one immutable history trail (append-only rows, never rewritten).
+   * Guarded by the selection sequence + session so a late response for a
+   * previous target can never overwrite the current detail.
+   */
+  private appendHistoryLines(lines: string[]): void {
+    if (lines.length === 0) {
+      return;
+    }
+    this.purposeDetailBody.textContent += `\n履歴:\n${lines.join("\n")}`;
+  }
+
+  private formatHistoryEvents(events: unknown, withNote: boolean): string[] {
+    if (!Array.isArray(events)) {
+      return [];
+    }
+    const lines: string[] = [];
+    for (const entry of events) {
+      const row = entry as {
+        seq?: unknown;
+        event?: unknown;
+        fromStatus?: unknown;
+        toStatus?: unknown;
+        note?: unknown;
+      };
+      if (typeof row.seq !== "number" || typeof row.event !== "string") {
+        continue;
+      }
+      const from = typeof row.fromStatus === "string" ? row.fromStatus : "−";
+      const to = typeof row.toStatus === "string" ? row.toStatus : "";
+      const note =
+        withNote && typeof row.note === "string" && row.note.length > 0
+          ? ` ${row.note}`
+          : "";
+      lines.push(`#${row.seq} ${row.event}（${from}→${to}）${note}`);
+    }
+    return lines;
+  }
+
   private async selectPurpose(id: string): Promise<void> {
     const sessionId = this.getSessionId();
     if (sessionId === null) {
@@ -4659,15 +4776,26 @@ class AutonomyPanel {
     }
     // Synchronous rebind BEFORE the first await: drafts belong to the exact
     // selected id/version, so a pending A-draft can never overwrite B.
+    // History paging rebinds here too: the cursor/button belong to the new
+    // target only, so a late page for A can never append to B.
     const seq = ++this.purposeSelectSeq;
     this.selectedPurpose = id;
     this.selectedPurposeView = null;
     this.clearPurposeDrafts();
+    this.purposeHistoryCursor = null;
+    this.purposeHistorySession = sessionId;
+    this.purposeHistoryTarget = id;
+    this.purposeHistoryMoreButton.hidden = true;
     let result: { status: number; body: unknown };
+    let history: { status: number; body: unknown } | null = null;
     try {
-      result = await fetchJson(
-        `/api/sessions/${encodeURIComponent(sessionId)}/purposes/${encodeURIComponent(id)}`,
-      );
+      const base = `/api/sessions/${encodeURIComponent(sessionId)}/purposes/${encodeURIComponent(id)}`;
+      result = await fetchJson(base);
+      try {
+        history = await fetchJson(`${base}/history?limit=50`);
+      } catch {
+        history = null;
+      }
     } catch {
       return;
     }
@@ -4732,7 +4860,87 @@ class AutonomyPanel {
       `適用期間: ${fromLabel} 〜 ${untilLabel}\n` +
       (interpretation.length > 0 ? `解釈: ${interpretation}\n` : "") +
       "許可の記録は主張のみで、権限の付与ではありません。";
+    if (history !== null && history.status === 200) {
+      this.appendHistoryLines(
+        this.formatHistoryEvents(
+          (history.body as { events?: unknown }).events,
+          false,
+        ),
+      );
+      // Bounded paging: the server caps pages at 200 rows and returns the
+      // forward cursor. A non-null cursor arms Load more for THIS exact
+      // session + target + generation; a late page for a stale target is
+      // discarded by the guards above/below (never appended elsewhere).
+      const next = (history.body as { nextAfterSeq?: unknown }).nextAfterSeq;
+      if (typeof next === "number" && Number.isInteger(next) && next >= 1) {
+        this.purposeHistoryCursor = next;
+        this.purposeHistoryMoreButton.hidden = false;
+      } else {
+        this.purposeHistoryCursor = null;
+        this.purposeHistoryMoreButton.hidden = true;
+      }
+    } else {
+      this.purposeHistoryCursor = null;
+      this.purposeHistoryMoreButton.hidden = true;
+    }
     this.purposeDetail.hidden = false;
+  }
+
+  /**
+   * Load more purpose history (bounded lossless paging): fetches the next
+   * `afterSeq` page for the CURRENT session + target + generation only.
+   * Session/target/generation guards run both before dispatch and after the
+   * await, so a stale click or a late response can never append another
+   * record's rows. The immutable cursor advances only on success.
+   */
+  private async loadMorePurposeHistory(): Promise<void> {
+    const sessionId = this.getSessionId();
+    const id = this.selectedPurpose;
+    const cursor = this.purposeHistoryCursor;
+    const seq = this.purposeSelectSeq;
+    if (
+      sessionId === null ||
+      id === null ||
+      cursor === null ||
+      this.purposeHistorySession !== sessionId ||
+      this.purposeHistoryTarget !== id
+    ) {
+      return;
+    }
+    let page: { status: number; body: unknown };
+    try {
+      page = await fetchJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/purposes/${encodeURIComponent(id)}/history?afterSeq=${cursor}&limit=50`,
+      );
+    } catch {
+      return;
+    }
+    if (
+      seq !== this.purposeSelectSeq ||
+      this.selectedPurpose !== id ||
+      this.getSessionId() !== sessionId ||
+      this.purposeHistoryTarget !== id ||
+      this.purposeHistoryCursor !== cursor
+    ) {
+      return;
+    }
+    if (page.status !== 200) {
+      return;
+    }
+    this.appendHistoryLines(
+      this.formatHistoryEvents(
+        (page.body as { events?: unknown }).events,
+        false,
+      ),
+    );
+    const next = (page.body as { nextAfterSeq?: unknown }).nextAfterSeq;
+    if (typeof next === "number" && Number.isInteger(next) && next >= 1) {
+      this.purposeHistoryCursor = next;
+      this.purposeHistoryMoreButton.hidden = false;
+    } else {
+      this.purposeHistoryCursor = null;
+      this.purposeHistoryMoreButton.hidden = true;
+    }
   }
 
   /**
@@ -4740,7 +4948,8 @@ class AutonomyPanel {
    * the first click arms the currently selected purpose; selecting another
    * purpose and clicking again records the pair via the strict idempotent
    * command. Same-pair re-clicks return the existing relation; unrelated
-   * records are never touched.
+   * records are never touched. Only recorded pairs count: same-kind prose
+   * similarity alone is never a conflict.
    */
   private async markConflict(): Promise<void> {
     const sessionId = this.getSessionId();
@@ -4759,6 +4968,12 @@ class AutonomyPanel {
       this.conflictArm,
       this.purposeActiveIds,
     );
+    if (
+      this.conflictArm !== null &&
+      !this.purposeVersions.has(this.conflictArm)
+    ) {
+      this.conflictArm = null;
+    }
     if (this.conflictArm === null) {
       this.conflictArm = id;
       this.notice(
@@ -4800,15 +5015,26 @@ class AutonomyPanel {
     }
     // Synchronous rebind BEFORE the first await (same UI4 guarantee as
     // purposes): hold/resume drafts belong to the exact selected task.
+    // History paging rebinds here too (cursor/button belong to the new
+    // target only).
     const seq = ++this.taskSelectSeq;
     this.selectedTask = id;
     this.selectedTaskView = null;
     this.clearTaskDrafts();
+    this.taskHistoryCursor = null;
+    this.taskHistorySession = sessionId;
+    this.taskHistoryTarget = id;
+    this.taskHistoryMoreButton.hidden = true;
     let result: { status: number; body: unknown };
+    let history: { status: number; body: unknown } | null = null;
     try {
-      result = await fetchJson(
-        `/api/sessions/${encodeURIComponent(sessionId)}/tasks/${encodeURIComponent(id)}`,
-      );
+      const base = `/api/sessions/${encodeURIComponent(sessionId)}/tasks/${encodeURIComponent(id)}`;
+      result = await fetchJson(base);
+      try {
+        history = await fetchJson(`${base}/history?limit=50`);
+      } catch {
+        history = null;
+      }
     } catch {
       return;
     }
@@ -4861,7 +5087,83 @@ class AutonomyPanel {
     this.taskDetailBody.textContent =
       `【${kindLabel}・${statusLabel}】${row.title}${deadline}${hold}${trigger}\n` +
       "作業はカレンダーと連携しません。期限は入力した値のみです。";
+    if (history !== null && history.status === 200) {
+      const lines = this.formatHistoryEvents(
+        (history.body as { events?: unknown }).events,
+        true,
+      );
+      if (lines.length > 0) {
+        this.taskDetailBody.textContent += `\n履歴:\n${lines.join("\n")}`;
+      }
+      const next = (history.body as { nextAfterSeq?: unknown }).nextAfterSeq;
+      if (typeof next === "number" && Number.isInteger(next) && next >= 1) {
+        this.taskHistoryCursor = next;
+        this.taskHistoryMoreButton.hidden = false;
+      } else {
+        this.taskHistoryCursor = null;
+        this.taskHistoryMoreButton.hidden = true;
+      }
+    } else {
+      this.taskHistoryCursor = null;
+      this.taskHistoryMoreButton.hidden = true;
+    }
     this.taskDetail.hidden = false;
+  }
+
+  /**
+   * Load more task history (same guarded bounded-paging contract as
+   * purposes): current session + target + generation only, cursor advances
+   * only on a fresh success, stale responses never append elsewhere.
+   */
+  private async loadMoreTaskHistory(): Promise<void> {
+    const sessionId = this.getSessionId();
+    const id = this.selectedTask;
+    const cursor = this.taskHistoryCursor;
+    const seq = this.taskSelectSeq;
+    if (
+      sessionId === null ||
+      id === null ||
+      cursor === null ||
+      this.taskHistorySession !== sessionId ||
+      this.taskHistoryTarget !== id
+    ) {
+      return;
+    }
+    let page: { status: number; body: unknown };
+    try {
+      page = await fetchJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/tasks/${encodeURIComponent(id)}/history?afterSeq=${cursor}&limit=50`,
+      );
+    } catch {
+      return;
+    }
+    if (
+      seq !== this.taskSelectSeq ||
+      this.selectedTask !== id ||
+      this.getSessionId() !== sessionId ||
+      this.taskHistoryTarget !== id ||
+      this.taskHistoryCursor !== cursor
+    ) {
+      return;
+    }
+    if (page.status !== 200) {
+      return;
+    }
+    const lines = this.formatHistoryEvents(
+      (page.body as { events?: unknown }).events,
+      true,
+    );
+    if (lines.length > 0) {
+      this.taskDetailBody.textContent += `\n${lines.join("\n")}`;
+    }
+    const next = (page.body as { nextAfterSeq?: unknown }).nextAfterSeq;
+    if (typeof next === "number" && Number.isInteger(next) && next >= 1) {
+      this.taskHistoryCursor = next;
+      this.taskHistoryMoreButton.hidden = false;
+    } else {
+      this.taskHistoryCursor = null;
+      this.taskHistoryMoreButton.hidden = true;
+    }
   }
 
   private async createPurpose(): Promise<void> {
@@ -4882,7 +5184,7 @@ class AutonomyPanel {
       scope,
       statement,
       kind: this.purposeKind.value,
-      explicit: true,
+      explicit: this.purposeExplicit.checked,
       sourceKind: this.purposeSource.value,
     };
     const interpretation = this.purposeInterpretation.value.trim();
@@ -4891,7 +5193,7 @@ class AutonomyPanel {
     }
     // Optional applicability window: raw text is sent verbatim; the server
     // validates strict RFC3339 and renders it back verbatim (never
-    // browser-local reinterpretation).
+    // browser-local reinterpretation, never an invented expiry).
     const validFrom = this.purposeValidFrom.value.trim();
     if (validFrom.length > 0) {
       body.validFrom = validFrom;
@@ -4941,9 +5243,11 @@ class AutonomyPanel {
       return;
     }
     // UI1: build from the SELECTED record metadata (scope/kind/provenance),
-    // never from the creation form. Interpretation is preserved unless the
-    // correction explicitly edits it; the window is preserved (omitted)
-    // unless the correction inputs explicitly set/clear it ("clear" = null).
+    // never from the creation form. The creation scope input is left intact
+    // (no hardcoded reset); the correction keeps the selected scope.
+    // Interpretation is preserved unless the correction explicitly edits
+    // it; the window is preserved (omitted) unless the correction inputs
+    // explicitly set/clear it ("clear" = null).
     const body: Record<string, unknown> = {
       expectedVersion: selected.version,
       scope: selected.scope,
@@ -4985,6 +5289,17 @@ class AutonomyPanel {
       this.purposeCorrectValidFrom.value = "";
       this.purposeCorrectValidUntil.value = "";
       await this.refreshLists();
+      // The correction appends a NEW record: select it so its history
+      // (corrected) is visible, and keep the superseded original readable
+      // below (immutable original / correction both preserved).
+      const current = (result.body as { current?: { id?: unknown } }).current;
+      const old = (result.body as { old?: { statement?: unknown } }).old;
+      if (typeof current?.id === "string") {
+        await this.selectPurpose(current.id);
+        if (typeof old?.statement === "string") {
+          this.purposeDetailBody.textContent += `\n元の記録: ${old.statement}`;
+        }
+      }
       this.notice("訂正を記録しました（元の記録は残ります）");
     } else if (result.status === 409) {
       await this.refreshLists();
@@ -5147,6 +5462,8 @@ class AutonomyPanel {
     // version. A backend mutation + refresh after the draft started must
     // invalidate here (CAS with the captured version would 409); never apply
     // the old draft reason to the new version via the fresh map version.
+    // Hold needs BOTH a reason and a reconsideration trigger as separate
+    // inputs (a single shared value is never invented here).
     const view = this.selectedTaskView;
     if (view !== null && this.taskVersions.get(id) !== view.version) {
       this.notice("他の変更がありました。一覧を更新しました");
@@ -5154,8 +5471,13 @@ class AutonomyPanel {
       return;
     }
     const reason = this.taskHoldInput.value.trim();
+    const trigger = this.taskReconsiderInput.value.trim();
     if (reason.length === 0) {
       this.notice("保留理由を入力してください");
+      return;
+    }
+    if (trigger.length === 0) {
+      this.notice("再開の条件を入力してください");
       return;
     }
     const version = view?.version ?? this.taskVersions.get(id) ?? 1;
@@ -5164,7 +5486,7 @@ class AutonomyPanel {
       {
         expectedVersion: version,
         reason,
-        reconsiderTrigger: reason,
+        reconsiderTrigger: trigger.length > 0 ? trigger : reason,
       },
     );
     if (result === null) {
@@ -5172,6 +5494,7 @@ class AutonomyPanel {
     }
     if (result.status === 200) {
       this.taskHoldInput.value = "";
+      this.taskReconsiderInput.value = "";
       await this.refreshLists();
       this.notice("作業を保留しました");
     } else if (result.status === 409) {
@@ -5196,12 +5519,23 @@ class AutonomyPanel {
     // Version boundary (same guard as correctPurpose): the resume draft
     // belongs to the captured selected-view version; invalidate on drift so
     // the old evidence can never apply to a refreshed new version.
+    // Closed evidence-kind vocabulary (no timer member exists): the select
+    // value is validated against the fixed set, never free text.
     const taskView = this.selectedTaskView;
     if (taskView !== null && this.taskVersions.get(id) !== taskView.version) {
       this.notice("他の変更がありました。一覧を更新しました");
       await this.refreshLists();
       return;
     }
+    const rawKind = this.taskEvidenceKind.value;
+    const evidenceKind =
+      rawKind === "parent_changed" ||
+      rawKind === "dependency_completed" ||
+      rawKind === "user_confirmed" ||
+      rawKind === "correction_applied" ||
+      rawKind === "external_input"
+        ? rawKind
+        : "user_confirmed";
     const version = taskView?.version ?? this.taskVersions.get(id) ?? 1;
     // UI3: explicit replacement-parent selection. When the checkbox is on,
     // the CURRENTLY SELECTED purpose (visible, version-known, owned,
@@ -5210,7 +5544,7 @@ class AutonomyPanel {
     // recorded parent and fail loudly when it is revoked.
     const body: Record<string, unknown> = {
       expectedVersion: version,
-      evidenceKind: "user_confirmed",
+      evidenceKind,
       evidence,
     };
     if (this.taskResumeUseParent.checked) {
@@ -5249,6 +5583,358 @@ class AutonomyPanel {
 
 export type { HistoryItemView };
 export { ConversationApp };
+
+/**
+ * Structural guard for one trial proposal read from the ACTUAL list API
+ * (exact contracts `TrialProposalView`): every field the card binds must
+ * have its expected primitive type, so a malformed body renders nothing
+ * rather than a partial card. Unknown body keys are never read.
+ */
+function isTrialProposal(
+  value: unknown,
+): value is TrialProposalInput & { readonly id: string } {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const item = value as Record<string, unknown>;
+  const aliasOk =
+    item.workspaceAlias === null ||
+    (typeof item.workspaceAlias === "string" &&
+      /^[a-z0-9_-]{1,64}$/.test(item.workspaceAlias));
+  let profileOk = false;
+  if (item.profile === null) {
+    profileOk = true;
+  } else if (typeof item.profile === "object" && item.profile !== null) {
+    const profile = item.profile as Record<string, unknown>;
+    profileOk =
+      typeof profile.configFingerprint === "string" &&
+      /^[0-9a-f]{64}$/.test(profile.configFingerprint) &&
+      typeof profile.sourceRevision === "string" &&
+      /^[0-9a-f]{40}$/.test(profile.sourceRevision);
+  }
+  return (
+    typeof item.id === "string" &&
+    (item.status === "staged" ||
+      item.status === "granted" ||
+      item.status === "expired" ||
+      item.status === "invalidated") &&
+    typeof item.objective === "string" &&
+    Array.isArray(item.acceptance) &&
+    Array.isArray(item.literalPatchPaths) &&
+    typeof item.operation === "string" &&
+    typeof item.readOnlyMode === "boolean" &&
+    typeof item.expiry === "string" &&
+    typeof item.timeoutMs === "number" &&
+    typeof item.maxOutputBytes === "number" &&
+    Array.isArray(item.requiredChecks) &&
+    aliasOk &&
+    profileOk &&
+    typeof item.possibleExternalDataConsent === "boolean"
+  );
+}
+
+/**
+ * Structural guard for the session trial outcome attached to the trial
+ * reads (`outcome: { status, authorized, summary } | null`). Unknown keys
+ * are never read; malformed values render as absent.
+ */
+function readTrialOutcome(value: unknown): {
+  readonly status: string;
+  readonly authorized: boolean;
+  readonly summary: string;
+} | null {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+  const outcome = (value as Record<string, unknown>).outcome;
+  if (outcome === null || outcome === undefined) {
+    return null;
+  }
+  if (typeof outcome !== "object" || Array.isArray(outcome)) {
+    return null;
+  }
+  const record = outcome as Record<string, unknown>;
+  if (
+    typeof record.status !== "string" ||
+    typeof record.authorized !== "boolean"
+  ) {
+    return null;
+  }
+  if (
+    record.summary !== undefined &&
+    record.summary !== null &&
+    typeof record.summary !== "string"
+  ) {
+    return null;
+  }
+  return {
+    status: record.status,
+    authorized: record.authorized,
+    summary: typeof record.summary === "string" ? record.summary : "",
+  };
+}
+
+/** Fixed plain-text outcome lines for the trial detail view. */
+function trialOutcomeLines(
+  outcome: {
+    readonly status: string;
+    readonly authorized: boolean;
+    readonly summary: string;
+  } | null,
+): readonly string[] {
+  if (outcome === null) {
+    return ["結果: 未実行"];
+  }
+  const lines = [
+    `結果: ${outcome.status} (承認済み: ${outcome.authorized ? "はい" : "いいえ"})`,
+  ];
+  if (outcome.summary.length > 0) {
+    lines.push(`概要: ${outcome.summary.slice(0, 200)}`);
+  }
+  return lines;
+}
+
+/**
+ * Trial proposal/approval panel (opt-in human surface). Lists the session's
+ * staged proposals with their FROZEN staged snapshot (objective,
+ * acceptance, literal paths, operation, read-only mode, expiry,
+ * timeout/maxOutputBytes, required checks, workspace alias, external-data
+ * consent, status) and offers explicit Approve / Expire for staged ones.
+ * All strings via `textContent`; no `innerHTML`. Fail-open locally: a
+ * missing section never breaks the conversation.
+ */
+class TrialPanel {
+  private readonly getSessionId: () => string | null;
+  private readonly status: HTMLElement;
+  private readonly list: HTMLElement;
+  private readonly detail: HTMLElement;
+  private readonly detailBody: HTMLElement;
+  private readonly approveButton: HTMLButtonElement;
+  private readonly expireButton: HTMLButtonElement;
+  private readonly opStatus: HTMLElement;
+  private selected: string | null = null;
+  private mutating = false;
+  private seq = 0;
+
+  constructor(getSessionId: () => string | null) {
+    this.getSessionId = getSessionId;
+    const get = <T extends HTMLElement>(id: string, tag: string): T =>
+      (document.getElementById(id) as T | null) ?? (el(tag) as unknown as T);
+    this.status = get<HTMLElement>("trial-status", "p");
+    this.list = get<HTMLElement>("trial-list", "ul");
+    this.detail = get<HTMLElement>("trial-detail", "div");
+    this.detailBody = get<HTMLElement>("trial-detail-body", "pre");
+    this.approveButton = get<HTMLButtonElement>(
+      "trial-approve-button",
+      "button",
+    );
+    this.expireButton = get<HTMLButtonElement>("trial-expire-button", "button");
+    this.opStatus = get<HTMLElement>("trial-op-status", "p");
+  }
+
+  bind(): void {
+    this.approveButton.addEventListener("click", () => {
+      void this.approve();
+    });
+    this.expireButton.addEventListener("click", () => {
+      void this.expire();
+    });
+  }
+
+  async refreshAll(): Promise<void> {
+    await this.refreshList();
+  }
+
+  private async refreshList(): Promise<void> {
+    const sessionId = this.getSessionId();
+    if (sessionId === null) {
+      return;
+    }
+    this.seq += 1;
+    const mine = this.seq;
+    let listed: { status: number; body: unknown };
+    try {
+      listed = await fetchJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/trials`,
+      );
+    } catch {
+      return;
+    }
+    if (this.seq !== mine || this.getSessionId() !== sessionId) {
+      return;
+    }
+    if (listed.status === 404) {
+      // Disabled config (or unknown session): fixed disabled state, no card.
+      this.list.replaceChildren();
+      this.detail.hidden = true;
+      this.selected = null;
+      this.status.textContent = "試行の提案は無効です";
+      return;
+    }
+    if (listed.status !== 200) {
+      return;
+    }
+    const items = (listed.body as { items?: unknown }).items;
+    if (!Array.isArray(items)) {
+      return;
+    }
+    const proposals = items.filter(isTrialProposal);
+    this.list.replaceChildren();
+    let staged = 0;
+    for (const proposal of proposals) {
+      if (proposal.status === "staged") {
+        staged += 1;
+      }
+      const row = document.createElement("li");
+      const button = document.createElement("button");
+      button.type = "button";
+      // Frozen snapshot summary line only (no technical ids).
+      button.textContent = `${proposal.operation} [${proposal.workspaceAlias ?? "unbound"}]: ${proposal.objective} (${proposal.status})`;
+      const id = proposal.id;
+      button.addEventListener("click", () => {
+        void this.select(id);
+      });
+      row.appendChild(button);
+      this.list.appendChild(row);
+    }
+    this.status.textContent =
+      staged > 0
+        ? "承認待ちの試行の提案があります"
+        : "承認待ちの試行の提案はありません";
+    if (this.selected !== null) {
+      await this.select(this.selected);
+    }
+  }
+
+  private async select(proposalId: string): Promise<void> {
+    const sessionId = this.getSessionId();
+    if (sessionId === null) {
+      return;
+    }
+    this.seq += 1;
+    const mine = this.seq;
+    let fetched: { status: number; body: unknown };
+    try {
+      fetched = await fetchJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/trials/${encodeURIComponent(proposalId)}`,
+      );
+    } catch {
+      return;
+    }
+    if (this.seq !== mine || this.getSessionId() !== sessionId) {
+      return;
+    }
+    if (fetched.status !== 200 || !isTrialProposal(fetched.body)) {
+      return;
+    }
+    const proposal = fetched.body;
+    const outcome = readTrialOutcome(fetched.body);
+    this.selected = proposal.id;
+    const model = trialProposalModel(
+      {
+        status: proposal.status as TrialProposalStatus,
+        objective: proposal.objective,
+        acceptance: proposal.acceptance.filter(
+          (entry): entry is string => typeof entry === "string",
+        ),
+        literalPatchPaths: proposal.literalPatchPaths.filter(
+          (entry): entry is string => typeof entry === "string",
+        ),
+        operation: proposal.operation,
+        readOnlyMode: proposal.readOnlyMode,
+        expiry: proposal.expiry,
+        timeoutMs: proposal.timeoutMs,
+        maxOutputBytes: proposal.maxOutputBytes,
+        requiredChecks: proposal.requiredChecks.filter(
+          (entry): entry is string => typeof entry === "string",
+        ),
+        workspaceAlias: proposal.workspaceAlias,
+        profile: proposal.profile,
+        possibleExternalDataConsent: proposal.possibleExternalDataConsent,
+      } satisfies TrialProposalInput,
+      true,
+    );
+    this.detailBody.replaceChildren();
+    for (const line of model.detailLines) {
+      const lineEl = document.createElement("div");
+      lineEl.textContent = line;
+      if (
+        line.startsWith("設定指紋: ") &&
+        proposal.profile !== null &&
+        typeof proposal.profile === "object"
+      ) {
+        const full = (proposal.profile as { configFingerprint: string })
+          .configFingerprint;
+        if (typeof full === "string") {
+          lineEl.title = full;
+        }
+      }
+      this.detailBody.appendChild(lineEl);
+    }
+    // Session trial outcome (grant status + authorized + fixed summary):
+    // all via textContent, never innerHTML.
+    for (const line of trialOutcomeLines(outcome)) {
+      const lineEl = document.createElement("div");
+      lineEl.textContent = line;
+      this.detailBody.appendChild(lineEl);
+    }
+    this.opStatus.textContent = model.statusText;
+    this.approveButton.disabled = !model.decisionVisible;
+    this.expireButton.disabled = !model.decisionVisible;
+    this.detail.hidden = false;
+  }
+
+  private async approve(): Promise<void> {
+    const sessionId = this.getSessionId();
+    const id = this.selected;
+    if (sessionId === null || id === null || this.mutating) {
+      return;
+    }
+    this.mutating = true;
+    try {
+      const result = await postJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/trials/${encodeURIComponent(id)}/approve`,
+        {},
+        randomUuid(),
+      );
+      if (result.status === 201) {
+        this.opStatus.textContent = "承認しました";
+      } else if (result.status === 409) {
+        this.opStatus.textContent = "他の変更がありました。一覧を更新しました";
+      } else {
+        this.opStatus.textContent = "承認に失敗しました";
+      }
+      await this.refreshList();
+    } finally {
+      this.mutating = false;
+    }
+  }
+
+  private async expire(): Promise<void> {
+    const sessionId = this.getSessionId();
+    const id = this.selected;
+    if (sessionId === null || id === null || this.mutating) {
+      return;
+    }
+    this.mutating = true;
+    try {
+      // Keyless state-idempotent expire: no Idempotency-Key header.
+      const result = await postJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/trials/${encodeURIComponent(id)}/expire`,
+        {},
+        null,
+      );
+      if (result.status === 200) {
+        this.opStatus.textContent = "取り消しました";
+      } else {
+        this.opStatus.textContent = "取り消しに失敗しました";
+      }
+      await this.refreshList();
+    } finally {
+      this.mutating = false;
+    }
+  }
+}
 
 function boot(): void {
   const app = new ConversationApp();

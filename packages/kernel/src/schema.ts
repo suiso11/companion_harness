@@ -1157,7 +1157,7 @@ export const autonomyActivity = sqliteTable(
 );
 
 // AV02 shadow-deliberation durable core. Mirrors
-// packages/kernel/migrations/0012_shadow.sql, which is authoritative.
+// packages/kernel/migrations/0014_shadow.sql, which is authoritative.
 // Shadow jobs reason ABOUT policy state but NEVER execute: no grant /
 // capability / calendar / ToolBroker / child-process / device / secret
 // column exists here. A recorded `permission` purpose stays a CLAIM; a
@@ -1290,6 +1290,99 @@ export const shadowJobEvents = sqliteTable(
     ),
   ],
 );
+export const trialConstraintRules = sqliteTable("trial_constraint_rules", {
+  purposeId: text("purpose_id").primaryKey(),
+  sessionId: text("session_id").notNull(),
+  scope: text("scope").notNull(),
+  ruleJson: text("rule_json"),
+  createdAt: integer("created_at").notNull(),
+});
+
+export const trialProposals = sqliteTable("trial_proposals", {
+  id: text("id").primaryKey(),
+  sessionId: text("session_id").notNull(),
+  scope: text("scope").notNull(),
+  taskId: text("task_id").notNull(),
+  goalId: text("goal_id"),
+  goalVersion: integer("goal_version"),
+  taskVersion: integer("task_version").notNull(),
+  objective: text("objective").notNull(),
+  acceptanceJson: text("acceptance_json").notNull(),
+  pathsJson: text("paths_json").notNull(),
+  operation: text("operation").notNull(),
+  readOnly: integer("read_only").notNull(),
+  expiry: text("expiry").notNull(),
+  consent: integer("consent").notNull(),
+  timeoutMs: integer("timeout_ms").notNull(),
+  maxOutputBytes: integer("max_output_bytes").notNull(),
+  checksJson: text("checks_json").notNull(),
+  status: text("status").notNull(),
+  createdAt: integer("created_at").notNull(),
+  // Schema13: frozen staging-time workspace alias + profile snapshot JSON.
+  workspaceAlias: text("workspace_alias"),
+  profileJson: text("profile_json"),
+});
+
+export const trialGrants = sqliteTable("trial_grants", {
+  executionId: text("execution_id").primaryKey(),
+  proposalId: text("proposal_id").notNull(),
+  sessionId: text("session_id").notNull(),
+  scope: text("scope").notNull(),
+  status: text("status").notNull(),
+  cancelRequested: integer("cancel_requested").notNull(),
+  controlGeneration: integer("control_generation").notNull(),
+  requestJson: text("request_json"),
+  createdAt: integer("created_at").notNull(),
+  claimedAt: integer("claimed_at"),
+  // Schema13: frozen approval-time workspace alias + profile snapshot JSON.
+  workspaceAlias: text("workspace_alias"),
+  approvedProfileJson: text("approved_profile_json"),
+});
+
+// Schema13: internal execution-lifecycle tables (Root service only).
+export const trialWorkerBoots = sqliteTable("trial_worker_boots", {
+  executionId: text("execution_id").primaryKey(),
+  sessionId: text("session_id").notNull(),
+  pid: integer("pid").notNull(),
+  bootId: text("boot_id").notNull(),
+  processStartTicks: text("process_start_ticks").notNull(),
+  observedAt: integer("observed_at").notNull(),
+  startedAt: integer("started_at").notNull(),
+});
+
+export const trialLaunchPermits = sqliteTable("trial_launch_permits", {
+  permitId: text("permit_id").primaryKey(),
+  executionId: text("execution_id").notNull().unique(),
+  sessionId: text("session_id").notNull(),
+  issuedAt: integer("issued_at").notNull(),
+  consumedAt: integer("consumed_at").notNull(),
+});
+
+export const trialWorkerOutcomes = sqliteTable("trial_worker_outcomes", {
+  executionId: text("execution_id").primaryKey(),
+  sessionId: text("session_id").notNull(),
+  succeeded: integer("succeeded").notNull(),
+  quiescent: integer("quiescent").notNull(),
+  authorized: integer("authorized").notNull(),
+  taskHash: text("task_hash"),
+  detail: text("detail").notNull(),
+  recordedAt: integer("recorded_at").notNull(),
+});
+
+export const trialAliasFences = sqliteTable(
+  "trial_alias_fences",
+  {
+    workspaceAlias: text("workspace_alias").notNull(),
+    executionId: text("execution_id").notNull(),
+    taskHash: text("task_hash"),
+    pid: integer("pid"),
+    bootId: text("boot_id"),
+    reason: text("reason").notNull(),
+    createdAt: integer("created_at").notNull(),
+    clearedAt: integer("cleared_at"),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceAlias, t.executionId] })],
+);
 
 export const kernelSchema = {
   sessions,
@@ -1300,6 +1393,13 @@ export const kernelSchema = {
   autonomyTaskEvents,
   autonomyControl,
   autonomyActivity,
+  trialConstraintRules,
+  trialProposals,
+  trialGrants,
+  trialWorkerBoots,
+  trialLaunchPermits,
+  trialWorkerOutcomes,
+  trialAliasFences,
   turns,
   runs,
   turnSelections,

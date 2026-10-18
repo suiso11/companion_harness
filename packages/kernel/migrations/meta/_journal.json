@@ -1,5 +1,5 @@
 {
-  "version": 7,
+  "version": 8,
   "dialect": "sqlite",
   "id": "m0-foundation",
   "entries": [
@@ -57,6 +57,55 @@
       "version": 8,
       "when": 1790000000007,
       "tag": "0008_memory_outbox",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": 9,
+      "when": 1790000000008,
+      "tag": "0009_memory_manage",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": 10,
+      "when": 1790000000009,
+      "tag": "0010_m6_calendar_create",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": 11,
+      "when": 1790000000010,
+      "tag": "0011_autonomy",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": 12,
+      "when": 1790000000011,
+      "tag": "0012_trial_authority",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": 13,
+      "when": 1790000000012,
+      "tag": "0013_trial_lifecycle",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": 14,
+      "when": 1790000000013,
+      "tag": "0014_shadow",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": 15,
+      "when": 1790000000014,
+      "tag": "0015_shadow_single_claim",
       "breakpoints": true
     }
   ]

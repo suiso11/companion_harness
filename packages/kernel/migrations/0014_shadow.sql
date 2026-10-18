@@ -1,6 +1,7 @@
--- AV02 shadow-deliberation durable core (migration 0012).
+-- AV02 shadow-deliberation durable core (migration 0014; renumbered from 0012
+-- at merge time because master's trial migrations took 0012/0013).
 --
--- Committed migration 0012: creates FOUR new STRICT tables for durable
+-- Committed migration 0014: creates FOUR new STRICT tables for durable
 -- shadow deliberation. It touches NO existing table (0001-0011 preserved
 -- byte-for-byte, including the 0011 autonomy slice): purposes/tasks/
 -- conflicts/control/activity keep their exact shapes, and the ONLY writer
