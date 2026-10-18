@@ -197,11 +197,16 @@ function showNotice(text: string): void {
   notice = text;
 }
 
-function composerSendDisabled(): boolean {
-  if (!booted || sessionId === null || authExpired) return true;
-  if (sending || activeRunId !== null) return true;
-  return false;
-}
+  function composerSendDisabled(): boolean {
+    // Session-gated like the vanilla composer (renderComposer): Send is
+    // enabled as soon as the session exists, without waiting for the full
+    // boot (history + proposals + active-run discovery) to finish, so the
+    // control never stays disabled through a slow boot and early submits
+    // reach send() instead of being silently dropped on a disabled button.
+    if (sessionId === null || authExpired) return true;
+    if (sending || activeRunId !== null) return true;
+    return false;
+  }
 
 function composerStopVisible(): boolean {
   if (activeRunId === null) return false;
@@ -350,9 +355,10 @@ function coerceTurn(item: unknown): Turn | null {
 
 async function hydrateHistory(): Promise<void> {
   if (sessionId === null) return;
-  // The durable projection now owns the terminal text: hide any live
-  // answer first so it can never appear twice.
-  liveVisible = false;
+  // The live section stays visible until the durable projection lands, so
+  // a failed refresh keeps the already-rendered terminal answer on screen
+  // (same fail-open as the vanilla list rebuild). It is hidden atomically
+  // with the durable assignment below, so the text never appears twice.
   const sid = sessionId;
   const pages: Turn[][] = [];
   let before: number | null = null;
@@ -398,6 +404,10 @@ async function hydrateHistory(): Promise<void> {
       ordered.push(t);
     }
   }
+  // Atomic handover: the durable projection owns the terminal text from
+  // this paint on, so the live section hides in the same batch and the
+  // answer is never rendered twice.
+  liveVisible = false;
   turns = ordered;
 }
 
