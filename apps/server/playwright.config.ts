@@ -48,6 +48,7 @@ export default defineConfig({
           "learning.spec.ts",
           "handoff.spec.ts",
           "mobile_layout.spec.ts",
+          "svelte_shell.spec.ts",
         ],
   timeout: 60_000,
   expect: { timeout: 15_000 },
