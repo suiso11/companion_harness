@@ -40,8 +40,42 @@ a missing DB fails without creating any DB or backup files.
 | `COMPANION_CALENDAR_JSON` | unset (no Calendar) | Strict JSON object `{ selection, connector }` (see C14 below); unset registers no Calendar connector |
 | `COMPANION_CALENDAR_PROFILE` | unset (no profile) | Strict opt-in profile selector (see C14 profile below). Unset keeps the previous behavior (explicit host `mcpDefinitions` injection or fail-closed incomplete opt-in). Only `google-readonly` is accepted; any other value fails startup. Requires `COMPANION_CALENDAR_JSON` describing exactly the adopted candidate. |
 | `COMPANION_ACTIONS_JSON` | `{"optIn":false,"writeEnabled":false}` | Strict JSON object `{ optIn?, writeEnabled? }` (booleans, default false). HINT ONLY: never supplies a write capability, a category or a binding — see "C21 M5 Action composition" below |
+| `COMPANION_REMOTE_JSON` | unset (remote disabled) | Strict JSON object `{ enabled?, allowedOrigins? }` (see "Remote access (allowlist only)" below); unset means loopback-only behavior, unchanged |
 
 Config is Zod-validated and frozen at startup (no hot reload).
+
+## Remote access (allowlist only, authentication pending)
+
+Slice (a) of the Linux remote-access plan: an explicit Origin/Host
+allowlist, **default-off**. The server always binds loopback-only
+(`COMPANION_HOST` stays `127.0.0.1` / `localhost`; `0.0.0.0` is still
+rejected). Remote reachability is provided outside the app (for example
+`tailscale serve` terminating tailnet HTTPS and proxying to
+`127.0.0.1:<port>`); the app itself holds no TLS keys.
+
+- Format: `COMPANION_REMOTE_JSON='{"enabled":false,"allowedOrigins":["https://<host>.<tailnet>.ts.net"]}'`.
+  `enabled` defaults to `false`; `allowedOrigins` defaults to `[]` (max 16
+  entries, 256 chars each). Every entry must be an exact `https://<host>`
+  origin: https scheme, no credentials, no explicit port, no path, query,
+  fragment, or trailing slash (the entry must equal its own `URL.origin`
+  serialization). Unknown keys, duplicates, and malformed JSON fail
+  startup with a fixed safe message (no values logged).
+- Disabled (default): Host/mutation checks behave exactly as before
+  (loopback Host only, loopback same-origin mutations, no read check).
+- Enabled: the Host header must equal an allowlist origin's host or a
+  loopback host (health endpoints included); mutations require an exact
+  Origin match against the allowlist plus the current loopback
+  same-origin; GET API routes and SSE additionally require a present
+  Origin to match (an absent Origin on same-origin GETs stays accepted,
+  but `Sec-Fetch-Site: cross-site` is rejected). `Origin: null` is always
+  rejected. Decisions use only Host/Origin/Sec-Fetch-Site headers — never
+  `remoteAddress` or `X-Forwarded-*` — and no CORS headers are emitted.
+- Fail-closed: `enabled: true` with an empty allowlist refuses to start.
+  **Authentication (slice b) is not implemented yet, so enabling remote
+  currently always refuses to start** with
+  `remote mode requires authentication (not yet available)`. Do not use
+  remote mode until slice (b) lands; flipping `enabled` back to `false`
+  restores loopback-only operation.
 
 ## Plaintext sensitivity and OS permissions
 

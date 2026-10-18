@@ -1547,7 +1547,42 @@ COMPANION_ACTIONS_JSON='{ "optIn": true, "writeEnabled": true }'
   `run.result` の実引用がある場合のみ履歴に表示します
   (`succeeded_unverified` の preflight 引用は AFTER 化しません)。
   どちらのボタンも既存の引用ドロワーの保存済みスナップショット本文のみを開き、
-  開封で外部 GET/PATCH は発生しません。リロード後も両リンクは保持されます。
+   開封で外部 GET/PATCH は発生しません。リロード後も両リンクは保持されます。
+
+---
+
+# リモートアクセス (default-off・準備中)
+
+tailnet 経由のリモート利用に向けた、明示的 Origin/Host allowlist です
+(slice (a): allowlist のみ、既定で無効)。サーバーは常に loopback のみ
+bind します (`COMPANION_HOST` は `127.0.0.1` / `localhost` のまま;
+`0.0.0.0` は引き続き起動拒否)。tailnet 側の到達性 (例: `tailscale serve`
+による HTTPS 終端 + `127.0.0.1:<port>` への proxy) はアプリの外で用意し、
+アプリは TLS 鍵を持ちません。
+
+```bash
+COMPANION_REMOTE_JSON='{"enabled":false,"allowedOrigins":["https://<host>.<tailnet>.ts.net"]}'
+```
+
+- `enabled` (既定 `false`)、`allowedOrigins` (既定 `[]`、最大 16 件・各
+  256 文字まで)。各要素は正確な `https://<host>` 形式の origin のみ:
+  https scheme、認証情報・明示ポート・path/query/fragment・末尾スラッシュ
+  不可 (自身の `URL.origin` と完全一致すること)。未知キー・重複・不正
+  JSON は固定メッセージで起動失敗します (値のログ出力なし)。
+- 無効時 (既定): Host/mutation 検査は従来どおり (loopback Host のみ、
+  loopback 同一オリジンの mutation のみ、読み取り検査なし)。
+- 有効時: Host ヘッダは allowlist 由来ホストまたは loopback のみ許可
+  (health 含む全 route)。mutation は allowlist + 現在の loopback
+  同一オリジンとの正確な Origin 一致を要求。GET API・SSE も Origin 提示
+  時は一致を要求 (同一オリジン GET の Origin 省略は通常どおり許可、
+  `Sec-Fetch-Site: cross-site` は拒否)。`Origin: null` は常に拒否。
+  判定は Host/Origin/Sec-Fetch-Site ヘッダのみで行い、`remoteAddress`
+  や `X-Forwarded-*` は使用しません。CORS ヘッダは発行しません。
+- fail-closed: 空 allowlist のまま有効化は起動失敗します。**認証
+  (slice (b)) は未実装のため、現時点では有効化すると必ず
+  `remote mode requires authentication (not yet available)` で起動失敗
+  します**。slice (b) が入るまでリモート運用はしないでください。
+  `enabled` を `false` に戻すだけで loopback 運用に復帰できます。
 
 ---
 
