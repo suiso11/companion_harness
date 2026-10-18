@@ -93,114 +93,124 @@ describe("systemctl show parsing", () => {
     expect(kv["garbage-no-equals"]).toBeUndefined();
   });
 
-  it("gone/active/failed classification via stub systemctl executables", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "trial-ob-stub-"));
-    const mkStub = (name: string, body: string) => {
-      const p = join(dir, name);
-      writeFileSync(p, `#!/bin/sh\nprintf '%b' ${JSON.stringify(body)}\n`);
-      chmodSync(p, 0o755);
-      return p;
-    };
-    const show = (over: Record<string, string>) =>
-      [
-        `LoadState=${over.LoadState ?? "loaded"}`,
-        `ActiveState=${over.ActiveState ?? "active"}`,
-        `ActiveEnterTimestampMonotonic=${over.ActiveEnterTimestampMonotonic ?? "1000000"}`,
-        `RuntimeMaxUSec=${over.RuntimeMaxUSec ?? "20000000"}`,
+  // Linux-only: these two cases execute stub systemctl binaries via
+  // `#!/bin/sh` scripts. Windows has no POSIX sh/systemctl, so the stubs
+  // cannot execute there (queryScopeUnit returns "unknown"); pure parsers
+  // above stay platform-independent.
+  it.runIf(process.platform !== "win32")(
+    "gone/active/failed classification via stub systemctl executables",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "trial-ob-stub-"));
+      const mkStub = (name: string, body: string) => {
+        const p = join(dir, name);
+        writeFileSync(p, `#!/bin/sh\nprintf '%b' ${JSON.stringify(body)}\n`);
+        chmodSync(p, 0o755);
+        return p;
+      };
+      const show = (over: Record<string, string>) =>
+        [
+          `LoadState=${over.LoadState ?? "loaded"}`,
+          `ActiveState=${over.ActiveState ?? "active"}`,
+          `ActiveEnterTimestampMonotonic=${over.ActiveEnterTimestampMonotonic ?? "1000000"}`,
+          `RuntimeMaxUSec=${over.RuntimeMaxUSec ?? "20000000"}`,
+          "MemoryMax=infinity",
+          `TasksMax=${over.TasksMax ?? "8"}`,
+          "CPUQuotaPerSecUSec=infinity",
+        ].join("\n");
+      const xdg = { xdgRuntimeDir: "/run/user/1000", timeoutMs: 3000 };
+
+      const gone = await queryScopeUnit(
+        mkStub(
+          "gone.sh",
+          show({ LoadState: "not-found", ActiveState: "inactive" }),
+        ),
+        "u.scope",
+        xdg,
+      );
+      expect(gone.scopeState).toBe("gone");
+
+      const failed = await queryScopeUnit(
+        mkStub("failed.sh", show({ ActiveState: "failed" })),
+        "u.scope",
+        xdg,
+      );
+      expect(failed.scopeState).toBe("unknown");
+
+      const garbage = await queryScopeUnit(
+        mkStub("garbage.sh", "total nonsense\n"),
+        "u.scope",
+        xdg,
+      );
+      expect(garbage.scopeState).toBe("unknown");
+
+      // Active with known remaining: enter=1s mono, max=20s, now≈real mono.
+      // Stub enter is stale (1s) so remaining clamps out of range -> unknown;
+      // use a fresh enter close to now for the positive case.
+      const nowUs = process.hrtime.bigint() / 1000n;
+      const fresh = await queryScopeUnit(
+        mkStub(
+          "active.sh",
+          show({ ActiveEnterTimestampMonotonic: nowUs.toString() }),
+        ),
+        "u.scope",
+        { ...xdg, nowMonotonicUs: nowUs + 1_000_000n },
+      );
+      expect(fresh.scopeState).toBe("active");
+      expect(fresh.remainingRuntimeMs).toBe(19000);
+      expect(fresh.tasksMax).toBe("8");
+
+      const inf = await queryScopeUnit(
+        mkStub(
+          "inf.sh",
+          show({
+            ActiveEnterTimestampMonotonic: nowUs.toString(),
+            RuntimeMaxUSec: "infinity",
+          }),
+        ),
+        "u.scope",
+        { ...xdg, nowMonotonicUs: nowUs },
+      );
+      expect(inf.scopeState).toBe("unknown");
+      expect(inf.remainingRuntimeMs).toBeNull();
+
+      // Missing binary -> unknown, never throws.
+      const missing = await queryScopeUnit(
+        "/nonexistent-systemctl-probe",
+        "u.scope",
+        xdg,
+      );
+      expect(missing.scopeState).toBe("unknown");
+    },
+  );
+
+  it.runIf(process.platform !== "win32")(
+    "elapsed RuntimeMax while loaded is active with remaining 0 (finding 4)",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "trial-ob-elapsed-"));
+      const nowUs = process.hrtime.bigint() / 1000n;
+      // Entered 30s ago with a 20s max: elapsed while still loaded+active.
+      const entered = (nowUs - 30_000_000n).toString();
+      const body = [
+        "LoadState=loaded",
+        "ActiveState=active",
+        `ActiveEnterTimestampMonotonic=${entered}`,
+        "RuntimeMaxUSec=20000000",
         "MemoryMax=infinity",
-        `TasksMax=${over.TasksMax ?? "8"}`,
+        "TasksMax=8",
         "CPUQuotaPerSecUSec=infinity",
       ].join("\n");
-    const xdg = { xdgRuntimeDir: "/run/user/1000", timeoutMs: 3000 };
-
-    const gone = await queryScopeUnit(
-      mkStub(
-        "gone.sh",
-        show({ LoadState: "not-found", ActiveState: "inactive" }),
-      ),
-      "u.scope",
-      xdg,
-    );
-    expect(gone.scopeState).toBe("gone");
-
-    const failed = await queryScopeUnit(
-      mkStub("failed.sh", show({ ActiveState: "failed" })),
-      "u.scope",
-      xdg,
-    );
-    expect(failed.scopeState).toBe("unknown");
-
-    const garbage = await queryScopeUnit(
-      mkStub("garbage.sh", "total nonsense\n"),
-      "u.scope",
-      xdg,
-    );
-    expect(garbage.scopeState).toBe("unknown");
-
-    // Active with known remaining: enter=1s mono, max=20s, now≈real mono.
-    // Stub enter is stale (1s) so remaining clamps out of range -> unknown;
-    // use a fresh enter close to now for the positive case.
-    const nowUs = process.hrtime.bigint() / 1000n;
-    const fresh = await queryScopeUnit(
-      mkStub(
-        "active.sh",
-        show({ ActiveEnterTimestampMonotonic: nowUs.toString() }),
-      ),
-      "u.scope",
-      { ...xdg, nowMonotonicUs: nowUs + 1_000_000n },
-    );
-    expect(fresh.scopeState).toBe("active");
-    expect(fresh.remainingRuntimeMs).toBe(19000);
-    expect(fresh.tasksMax).toBe("8");
-
-    const inf = await queryScopeUnit(
-      mkStub(
-        "inf.sh",
-        show({
-          ActiveEnterTimestampMonotonic: nowUs.toString(),
-          RuntimeMaxUSec: "infinity",
-        }),
-      ),
-      "u.scope",
-      { ...xdg, nowMonotonicUs: nowUs },
-    );
-    expect(inf.scopeState).toBe("unknown");
-    expect(inf.remainingRuntimeMs).toBeNull();
-
-    // Missing binary -> unknown, never throws.
-    const missing = await queryScopeUnit(
-      "/nonexistent-systemctl-probe",
-      "u.scope",
-      xdg,
-    );
-    expect(missing.scopeState).toBe("unknown");
-  });
-
-  it("elapsed RuntimeMax while loaded is active with remaining 0 (finding 4)", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "trial-ob-elapsed-"));
-    const nowUs = process.hrtime.bigint() / 1000n;
-    // Entered 30s ago with a 20s max: elapsed while still loaded+active.
-    const entered = (nowUs - 30_000_000n).toString();
-    const body = [
-      "LoadState=loaded",
-      "ActiveState=active",
-      `ActiveEnterTimestampMonotonic=${entered}`,
-      "RuntimeMaxUSec=20000000",
-      "MemoryMax=infinity",
-      "TasksMax=8",
-      "CPUQuotaPerSecUSec=infinity",
-    ].join("\n");
-    const p = join(dir, "elapsed.sh");
-    writeFileSync(p, `#!/bin/sh\nprintf '%b' ${JSON.stringify(body)}\n`);
-    chmodSync(p, 0o755);
-    const props = await queryScopeUnit(p, "u.scope", {
-      xdgRuntimeDir: "/run/user/1000",
-      timeoutMs: 3000,
-      nowMonotonicUs: nowUs,
-    });
-    expect(props.scopeState).toBe("active");
-    expect(props.remainingRuntimeMs).toBe(0);
-  });
+      const p = join(dir, "elapsed.sh");
+      writeFileSync(p, `#!/bin/sh\nprintf '%b' ${JSON.stringify(body)}\n`);
+      chmodSync(p, 0o755);
+      const props = await queryScopeUnit(p, "u.scope", {
+        xdgRuntimeDir: "/run/user/1000",
+        timeoutMs: 3000,
+        nowMonotonicUs: nowUs,
+      });
+      expect(props.scopeState).toBe("active");
+      expect(props.remainingRuntimeMs).toBe(0);
+    },
+  );
 
   it("remaining computation incl. infinity", () => {
     // enter=1s, max=20s, now=2s (all us) -> 19000ms.

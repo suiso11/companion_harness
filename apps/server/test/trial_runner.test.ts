@@ -1541,83 +1541,90 @@ describe("trial_runner", () => {
     }
   });
 
-  it("shutdown SIGKILLs a bridge that ignores fd3 close (bounded)", async () => {
-    const { handle, repo, sessionId } = await makeKernel();
-    try {
-      const { executionId } = queueGrant(repo, sessionId, "b1", "ws");
-      const exited = { current: false };
-      const identity = {
-        pid: 4413,
-        bootId: "boot-shutdown",
-        processStartTicks: "660",
-      };
-      let killed = false;
-      let fd3Destroyed = false;
-      const spawnImpl = ((_cmd: string, _args: string[], _opts: unknown) => {
-        const child = new EventEmitter() as FakeChild;
-        child.pid = identity.pid;
-        const stdout = new EventEmitter();
-        const stderr = new EventEmitter();
-        child.stdin = { write: () => {}, end: () => {} };
-        child.stdout = stdout;
-        child.stderr = stderr;
-        child.stdio = [
-          child.stdin,
-          stdout,
-          stderr,
-          {
-            destroy() {
-              fd3Destroyed = true;
-              // Broken bridge: ignores fd3 close, never exits on its own.
-            },
-          },
-        ];
-        child.kill = () => {
-          killed = true;
-          if (!exited.current) {
-            exited.current = true;
-            child.emit("exit", null, "SIGKILL");
-          }
+  // Linux-only: the trial runner targets systemd scopes and relies on POSIX
+  // SIGKILL semantics (child.kill("SIGKILL") + fd3 gate). Windows has no
+  // SIGKILL/systemd, so this scenario cannot run there; other runner tests
+  // use fakes and stay platform-independent.
+  it.runIf(process.platform !== "win32")(
+    "shutdown SIGKILLs a bridge that ignores fd3 close (bounded)",
+    async () => {
+      const { handle, repo, sessionId } = await makeKernel();
+      try {
+        const { executionId } = queueGrant(repo, sessionId, "b1", "ws");
+        const exited = { current: false };
+        const identity = {
+          pid: 4413,
+          bootId: "boot-shutdown",
+          processStartTicks: "660",
         };
-        return child;
-      }) as unknown as TrialRunnerSpawn;
-      const observer: TrialRunnerObserverFns = {
-        expectedScopeUnit: (eid: string) =>
-          `capsule-${eid}-${"c".repeat(64)}.scope`,
-        queryScope: async () => ({
-          scopeState: "active" as const,
-          remainingRuntimeMs: 5000,
-          runtimeMaxUsec: 5_000_000n,
-        }),
-        readIdentity: async () => ({ ...identity }),
-      };
-      const { factory } = createFakeRelayFactory();
-      const { logger } = createCollectingLogger("debug");
-      const dir = mkdtempSync(join(tmpdir(), "trial-run-"));
-      const runner = new TrialRunner({
-        repo,
-        config: runnerConfigBase("ws", writeTemplate(dir), join(dir, "runs")),
-        isForegroundBusy: () => false,
-        logger,
-        observer,
-        createRelay: factory,
-        spawnImpl,
-        clock: makeClock(),
-      });
-      const pending = runner.runNext();
-      for (let i = 0; i < 400 && !fd3Destroyed; i++) {
-        await new Promise((r) => setTimeout(r, 5));
+        let killed = false;
+        let fd3Destroyed = false;
+        const spawnImpl = ((_cmd: string, _args: string[], _opts: unknown) => {
+          const child = new EventEmitter() as FakeChild;
+          child.pid = identity.pid;
+          const stdout = new EventEmitter();
+          const stderr = new EventEmitter();
+          child.stdin = { write: () => {}, end: () => {} };
+          child.stdout = stdout;
+          child.stderr = stderr;
+          child.stdio = [
+            child.stdin,
+            stdout,
+            stderr,
+            {
+              destroy() {
+                fd3Destroyed = true;
+                // Broken bridge: ignores fd3 close, never exits on its own.
+              },
+            },
+          ];
+          child.kill = () => {
+            killed = true;
+            if (!exited.current) {
+              exited.current = true;
+              child.emit("exit", null, "SIGKILL");
+            }
+          };
+          return child;
+        }) as unknown as TrialRunnerSpawn;
+        const observer: TrialRunnerObserverFns = {
+          expectedScopeUnit: (eid: string) =>
+            `capsule-${eid}-${"c".repeat(64)}.scope`,
+          queryScope: async () => ({
+            scopeState: "active" as const,
+            remainingRuntimeMs: 5000,
+            runtimeMaxUsec: 5_000_000n,
+          }),
+          readIdentity: async () => ({ ...identity }),
+        };
+        const { factory } = createFakeRelayFactory();
+        const { logger } = createCollectingLogger("debug");
+        const dir = mkdtempSync(join(tmpdir(), "trial-run-"));
+        const runner = new TrialRunner({
+          repo,
+          config: runnerConfigBase("ws", writeTemplate(dir), join(dir, "runs")),
+          isForegroundBusy: () => false,
+          logger,
+          observer,
+          createRelay: factory,
+          spawnImpl,
+          clock: makeClock(),
+        });
+        const pending = runner.runNext();
+        for (let i = 0; i < 400 && !fd3Destroyed; i++) {
+          await new Promise((r) => setTimeout(r, 5));
+        }
+        await runner.shutdown(50);
+        const out = await pending;
+        expect(killed).toBe(true);
+        expect(out.ran).toBe(true);
+        expect(out.authorized).toBe(false);
+        void executionId;
+      } finally {
+        closeKernelDatabase(handle);
       }
-      await runner.shutdown(50);
-      const out = await pending;
-      expect(killed).toBe(true);
-      expect(out.ran).toBe(true);
-      expect(out.authorized).toBe(false);
-      void executionId;
-    } finally {
-      closeKernelDatabase(handle);
-    }
-  });
+    },
+  );
 
   it("honors STOP while waiting for scope activation (no full timeout)", async () => {
     const { handle, repo, sessionId } = await makeKernel();

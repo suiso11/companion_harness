@@ -141,7 +141,11 @@ async function startRelay(
   return { relay, sock };
 }
 
-describe("trial_model_relay", () => {
+// Linux-only: the trial relay binds a unix-domain socket with POSIX 0700/0600
+// permissions. Windows runners lack unix-socket + chmod semantics (EACCES on
+// model.sock), so the whole suite is skipped there; the relay is only
+// deployed on systemd Linux hosts.
+describe.skipIf(process.platform === "win32")("trial_model_relay", () => {
   it("socket lives in a 0700 dir with 0600 mode", async () => {
     const gw = fakeGateway();
     const { relay, sock } = await startRelay(testCaps(), gw);
