@@ -876,6 +876,61 @@ export function listPurposesInScope(
   return { items: rows.map(toPurposeView) };
 }
 
+/** Bounded status/kind/scope filter set for the readonly tool readers. */
+export interface AutonomyListFilters {
+  scope?: string;
+  status?: string;
+  kind?: string;
+}
+
+/**
+ * Filtered bounded reader for the readonly agent tools: applies the
+ * optional scope/status/kind filters in SQL BEFORE the limit and reads up
+ * to `limit + 1` matching rows (callers slice to `limit` and report
+ * `hasMore` from the probe row). The unscoped list + post-filter pattern
+ * it replaces could return an empty list with `hasMore: false` while older
+ * matching records existed; SQL filtering keeps `hasMore` truthful for
+ * the filtered set. Values are bound parameters (never interpolated), and
+ * the fetch stays bounded (at most `limit + 1` rows, cap 101).
+ */
+export function listPurposesFiltered(
+  db: Database.Database,
+  sessionId: string,
+  filters: AutonomyListFilters,
+  limit = 20,
+): { items: ReturnType<typeof toPurposeView>[] } {
+  const session = requireId(sessionId, "sessionId");
+  if (
+    filters.scope !== undefined &&
+    (filters.scope.length === 0 || filters.scope.length > 128)
+  ) {
+    throw new RepositoryValidationError("scope must be 1..128 chars");
+  }
+  requireSession(db, session);
+  const capped = Math.min(Math.max(Math.floor(limit), 1), 100);
+  const clauses = ["session_id = ?"];
+  const params: Array<string | number> = [session];
+  if (filters.scope !== undefined) {
+    clauses.push("scope = ?");
+    params.push(filters.scope);
+  }
+  if (filters.status !== undefined) {
+    clauses.push("status = ?");
+    params.push(filters.status);
+  }
+  if (filters.kind !== undefined) {
+    clauses.push("kind = ?");
+    params.push(filters.kind);
+  }
+  params.push(capped + 1);
+  const rows = db
+    .prepare(
+      `SELECT * FROM autonomy_purposes WHERE ${clauses.join(" AND ")} ORDER BY created_at DESC, id ASC LIMIT ?`,
+    )
+    .all(...params) as RawPurpose[];
+  return { items: rows.map(toPurposeView) };
+}
+
 export function listPurposeEvents(
   db: Database.Database,
   sessionId: string,
@@ -1253,6 +1308,21 @@ export function correctPurpose(
       "purpose.corrected",
       now,
     );
+    // A scope move also retires the OLD scope (supersession + dependent
+    // holds land there): without its own job + epoch bump, an in-flight
+    // old-scope job is fenced with no successor and the removal is never
+    // deliberated. Enqueue the old scope whenever it differs.
+    if (oldRow.scope !== input.scope) {
+      enqueueShadowPolicyChangeInTx(
+        db,
+        session,
+        oldRow.scope,
+        "purpose",
+        oldRow.id,
+        "purpose.superseded",
+        now,
+      );
+    }
     // The superseded parent is non-active: hold every dependent
     // non-terminal task (never complete) so no background execution
     // continues under the superseded goal.
@@ -1680,6 +1750,50 @@ export function listTasksInScope(
       "SELECT * FROM autonomy_tasks WHERE session_id = ? AND scope = ? ORDER BY created_at DESC, id ASC LIMIT ?",
     )
     .all(session, scope, capped) as RawTask[];
+  return { items: rows.map(toTaskView) };
+}
+
+/**
+ * Filtered bounded task reader for the readonly agent tools: same
+ * SQL-before-limit + `limit + 1` probe contract as `listPurposesFiltered`
+ * (see above), so a filtered task list never reports a falsely complete
+ * result while older matching records exist.
+ */
+export function listTasksFiltered(
+  db: Database.Database,
+  sessionId: string,
+  filters: AutonomyListFilters,
+  limit = 20,
+): { items: ReturnType<typeof toTaskView>[] } {
+  const session = requireId(sessionId, "sessionId");
+  if (
+    filters.scope !== undefined &&
+    (filters.scope.length === 0 || filters.scope.length > 128)
+  ) {
+    throw new RepositoryValidationError("scope must be 1..128 chars");
+  }
+  requireSession(db, session);
+  const capped = Math.min(Math.max(Math.floor(limit), 1), 100);
+  const clauses = ["session_id = ?"];
+  const params: Array<string | number> = [session];
+  if (filters.scope !== undefined) {
+    clauses.push("scope = ?");
+    params.push(filters.scope);
+  }
+  if (filters.status !== undefined) {
+    clauses.push("status = ?");
+    params.push(filters.status);
+  }
+  if (filters.kind !== undefined) {
+    clauses.push("kind = ?");
+    params.push(filters.kind);
+  }
+  params.push(capped + 1);
+  const rows = db
+    .prepare(
+      `SELECT * FROM autonomy_tasks WHERE ${clauses.join(" AND ")} ORDER BY created_at DESC, id ASC LIMIT ?`,
+    )
+    .all(...params) as RawTask[];
   return { items: rows.map(toTaskView) };
 }
 
@@ -2590,6 +2704,9 @@ export function stageConversationProposal(
       );
     }
   }
+  // Semantic dedup key: the source RUN is audit only (stored on the row)
+  // and must not participate in dedup — a retry runs under a new run id
+  // for the same turn/draft and must replay the still-pending draft.
   const hash = requestHash(
     IDEMPOTENCY_OPERATIONS.stageConversationProposal.operation,
     IDEMPOTENCY_OPERATIONS.stageConversationProposal.schemaVersion,
@@ -2605,7 +2722,6 @@ export function stageConversationProposal(
       parentPurposeId: draft.parentPurposeId ?? null,
       expectedParentVersion: draft.expectedParentVersion ?? null,
       sourceTurnId: sourceTurn,
-      sourceRunId: sourceRun,
     },
   );
   const scope = `session:${session}:conv_proposal`;

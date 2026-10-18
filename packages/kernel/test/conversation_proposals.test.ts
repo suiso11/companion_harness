@@ -915,6 +915,51 @@ describe("conversation proposal adoption (trusted human core)", () => {
   });
 });
 
+describe("conversation proposal retry dedup", () => {
+  it("replays the pending draft when a retry run restages the same turn", async () => {
+    const { handle, repo, sessionId } = await setup();
+    try {
+      const text = "maybe I should read more books this year";
+      const runId = newRunningRun(repo, sessionId, text, T0);
+      const run = repo.getRun(runId);
+      const draft = {
+        target: "purpose",
+        scope: "growth",
+        draftKind: "wish",
+        purposeKind: "wish",
+        sourceQuote: "read more books",
+        interpretation: "reading aspiration, no commitment yet",
+      } as const;
+      const first = repo.stageConversationProposalFromModel(
+        runId,
+        { ...draft },
+        { key: randomUUID(), now: T0 + 2 },
+      );
+      expect(first.replayed).toBe(false);
+      // Retry the SAME turn: a new run id, unchanged turn + draft content.
+      repo.failRun(runId, "execution_failed", { now: T0 + 3 });
+      const retry = repo.postRetry(sessionId, run.turnId, {
+        key: randomUUID(),
+        now: T0 + 4,
+      });
+      const retryRunId = (retry.body as { run: { id: string } }).run.id;
+      repo.startRun(retryRunId, { now: T0 + 5 });
+      expect(retryRunId).not.toBe(runId);
+      const second = repo.stageConversationProposalFromModel(
+        retryRunId,
+        { ...draft },
+        { key: randomUUID(), now: T0 + 6 },
+      );
+      expect(second.replayed).toBe(true);
+      expect(second.body.id).toBe(first.body.id);
+      expect(second.body.sourceTurnId).toBe(first.body.sourceTurnId);
+      expect(countRows(handle, "conversation_proposals")).toBe(1);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+});
+
 function callKeyOf(
   handle: ReturnType<typeof openKernelDatabase>,
   proposalId: string,

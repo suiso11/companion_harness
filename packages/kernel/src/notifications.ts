@@ -435,9 +435,39 @@ interface StoredNotificationRow {
   created_at: number;
 }
 
+function readScopeEpoch(
+  db: Database.Database,
+  sessionId: string,
+  scope: string,
+): number | null {
+  try {
+    const row = db
+      .prepare(
+        "SELECT epoch FROM shadow_scope_epochs WHERE session_id = ? AND scope = ?",
+      )
+      .get(sessionId, scope) as { epoch: number } | undefined;
+    return row?.epoch ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function isEpochStale(
+  db: Database.Database | null,
+  row: StoredNotificationRow,
+): boolean {
+  if (db === null) return false;
+  if (row.source_kind !== "shadow_job") return false;
+  if (row.kind !== "question") return false;
+  if (row.source_epoch === null) return false;
+  const current = readScopeEpoch(db, row.session_id, row.scope);
+  return current !== null && current > row.source_epoch;
+}
+
 function toNotificationView(
   row: StoredNotificationRow,
   now: number,
+  db?: Database.Database,
 ): NotificationView {
   return parseOrValidation(
     () =>
@@ -458,7 +488,8 @@ function toNotificationView(
         // reached at read time — computed here, never mutated on GET.
         outdated:
           row.outdated === 1 ||
-          (row.context_expiry_at !== null && row.context_expiry_at <= now),
+          (row.context_expiry_at !== null && row.context_expiry_at <= now) ||
+          (db !== undefined && isEpochStale(db, row)),
         contextExpiryAt: row.context_expiry_at,
         createdAt: row.created_at,
       }),
@@ -1068,7 +1099,7 @@ function readUnreadCount(
 ): number {
   const unread = db
     .prepare(
-      "SELECT COUNT(*) AS count FROM notifications n LEFT JOIN notification_acks a ON a.notification_id = n.id WHERE n.session_id = ? AND a.notification_id IS NULL AND n.outdated = 0 AND (n.context_expiry_at IS NULL OR n.context_expiry_at > ?)",
+      "SELECT COUNT(*) AS count FROM notifications n LEFT JOIN notification_acks a ON a.notification_id = n.id WHERE n.session_id = ? AND a.notification_id IS NULL AND n.outdated = 0 AND (n.context_expiry_at IS NULL OR n.context_expiry_at > ?) AND NOT (n.source_kind = 'shadow_job' AND n.kind = 'question' AND n.source_epoch IS NOT NULL AND EXISTS (SELECT 1 FROM shadow_scope_epochs e WHERE e.session_id = n.session_id AND e.scope = n.scope AND e.epoch > n.source_epoch))",
     )
     .get(session, now) as { count: number };
   return unread.count;
@@ -1119,7 +1150,7 @@ export function listNotifications(
   const hasMore = rows.length > capped;
   const page = hasMore ? rows.slice(0, capped) : rows;
   return {
-    items: page.map((row) => toNotificationView(row, now)),
+    items: page.map((row) => toNotificationView(row, now, db)),
     latestSeq: readLatestSeq(db, session),
     unreadCount: readUnreadCount(db, session, now),
     hasMore,
@@ -1162,7 +1193,7 @@ export function listNotificationsForward(
   const hasMore = rows.length > capped;
   const page = hasMore ? rows.slice(0, capped) : rows;
   return {
-    items: page.map((row) => toNotificationView(row, now)),
+    items: page.map((row) => toNotificationView(row, now, db)),
     latestSeq: readLatestSeq(db, session),
     unreadCount: readUnreadCount(db, session, now),
     hasMore,
@@ -1182,10 +1213,8 @@ export function getNotification(
   notificationId: string,
   options: ReadNotificationOptions = {},
 ): NotificationView {
-  return toNotificationView(
-    assertOwnedNotification(db, sessionId, notificationId),
-    nowMs(options.now),
-  );
+  const owned = assertOwnedNotification(db, sessionId, notificationId);
+  return toNotificationView(owned, nowMs(options.now), db);
 }
 
 /**
@@ -1214,7 +1243,7 @@ export function getNotificationHistory(
     | { session_id: string; ack_key: string; created_at: number }
     | undefined;
   return {
-    notification: toNotificationView(owned, nowMs(options.now)),
+    notification: toNotificationView(owned, nowMs(options.now), db),
     ack:
       ack === undefined
         ? null

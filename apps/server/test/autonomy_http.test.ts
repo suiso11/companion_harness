@@ -474,4 +474,48 @@ describe("autonomy HTTP", () => {
       fixture.close();
     }
   });
+
+  it("notifies memory control on a committed control change without any shadow worker (memory-only wiring)", async () => {
+    const handle = openKernelDatabase(":memory:");
+    await migrateKernelDatabase({ db: handle.raw });
+    const repo = createKernelRepository(handle.raw);
+    const config = loadServerConfig({
+      COMPANION_DB_PATH: join(
+        mkdtempSync(join(tmpdir(), "companion-autonomy-memonly-")),
+        "db.sqlite",
+      ),
+      COMPANION_HOST: "127.0.0.1",
+      COMPANION_PORT: "3000",
+      COMPANION_TIME_ZONE: "UTC",
+      COMPANION_LOG_LEVEL: "debug",
+    });
+    const { logger } = createCollectingLogger("debug");
+    const engine = new RunEngine({ db: handle.raw, repo, cancelGraceMs: 30 });
+    // Memory-only bootstrap shape: no shadowWake, but the control hook
+    // (memory notifyControl) IS provided — the P1 review fault was that
+    // bootstrap omitted the whole spread without a worker, so an
+    // explicit resume could never reopen the memory gate.
+    let notified = 0;
+    const created = createApp({
+      config,
+      repo,
+      engine,
+      logger,
+      shadowControlChanged: () => {
+        notified += 1;
+      },
+    });
+    try {
+      const control = await post(
+        created.app,
+        "/api/autonomy/control",
+        { paused: false, expectedVersion: 1 },
+        randomUUID(),
+      );
+      expect(control.status).toBe(200);
+      expect(notified).toBe(1);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
 });
