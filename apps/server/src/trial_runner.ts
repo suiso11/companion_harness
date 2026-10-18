@@ -45,6 +45,7 @@ export const TRIAL_STDERR_CAP_BYTES = 65536;
 /** Fixed reason codes (never free text into the kernel fence/detail). */
 export const TRIAL_REASON_INVALID_RESULT = "bridge-result-invalid";
 export const TRIAL_REASON_FENCE_UNKNOWN_SCOPE = "scope-unknown-after-exit";
+export const TRIAL_REASON_FENCE_ACTIVE_SCOPE = "scope-active-after-exit";
 export const TRIAL_REASON_FENCE_RECOVER_UNSETTLED = "recover-unsettled-worker";
 
 export interface TrialRunnerObserveTimeouts {
@@ -637,6 +638,14 @@ export class TrialRunner {
       }
       await relay.start();
     } catch {
+      // Launch setup failed after claim: settle the claimed grant (known
+      // quiescence → interrupted, never authorized) instead of leaving it
+      // claimed with no boot row (the scheduler would never reselect it).
+      this.abortClaimedBeforeBoot(
+        sessionId,
+        executionId,
+        request.workspaceAlias,
+      );
       await cleanup();
       return { ran: true, outcome: "launch-failed", executionId };
     }
@@ -654,6 +663,13 @@ export class TrialRunner {
       });
       chmodSync(execConfigPath, 0o600);
     } catch {
+      // Config setup failed after claim: settle the claimed grant (known
+      // quiescence → interrupted, never authorized), never leave it claimed.
+      this.abortClaimedBeforeBoot(
+        sessionId,
+        executionId,
+        request.workspaceAlias,
+      );
       await cleanup();
       return { ran: true, outcome: "launch-failed", executionId };
     }
@@ -689,6 +705,13 @@ export class TrialRunner {
         },
       ) as ChildProcess;
     } catch {
+      // Synchronous spawn failure after claim: settle the claimed grant
+      // (known quiescence → interrupted, never authorized).
+      this.abortClaimedBeforeBoot(
+        sessionId,
+        executionId,
+        request.workspaceAlias,
+      );
       await cleanup();
       return { ran: true, outcome: "launch-failed", executionId };
     }
@@ -699,6 +722,13 @@ export class TrialRunner {
       } catch {
         // Best effort.
       }
+      // No usable child after claim: settle the claimed grant, never leave
+      // it claimed.
+      this.abortClaimedBeforeBoot(
+        sessionId,
+        executionId,
+        request.workspaceAlias,
+      );
       await cleanup();
       return { ran: true, outcome: "launch-failed", executionId };
     }
@@ -854,6 +884,7 @@ export class TrialRunner {
     const activeDeadline = this.clock() + this.config.observe.activeTimeoutMs;
     const scopeWaitStart = this.clock();
     let remainingRuntimeMs = request.budget.timeoutMs;
+    let observedRuntimeMaxUsec: ScopeUnitProps["runtimeMaxUsec"];
     let scopeActive = false;
     while (this.clock() < activeDeadline) {
       // STOP honors promptly while waiting for scope activation: a pause,
@@ -902,6 +933,8 @@ export class TrialRunner {
         scopeActive = true;
         if (typeof props.remainingRuntimeMs === "number")
           remainingRuntimeMs = props.remainingRuntimeMs;
+        if (props.runtimeMaxUsec !== undefined)
+          observedRuntimeMaxUsec = props.runtimeMaxUsec;
         break;
       }
       if (props.scopeState === "gone" && childExit !== null) {
@@ -921,10 +954,26 @@ export class TrialRunner {
       durationMs: Math.max(0, this.clock() - scopeWaitStart),
     });
 
-    // Kernel permit with a fresh pid identity + frozen budget props.
+    // Kernel permit with a fresh pid identity + OBSERVED budget props. The
+    // timeoutMs derives from the unit's RuntimeMaxUSec (ceil to ms) — never
+    // copied from the frozen request — so the kernel compares the observed
+    // bound against the frozen wire budget (mismatch denies). An infinite or
+    // unparsable RuntimeMax, or observed remaining beyond the observed bound,
+    // denies the same way an elapsed RuntimeMax does.
     const permitIdentity = await this.observer.readIdentity(pid);
     if (permitIdentity === "gone" || permitIdentity === "unknown") {
       return await failLaunch();
+    }
+    let observedTimeoutMs: number | null = null;
+    if (typeof observedRuntimeMaxUsec === "bigint") {
+      const derived = Number((observedRuntimeMaxUsec + 999n) / 1000n);
+      if (
+        Number.isSafeInteger(derived) &&
+        derived >= 1000 &&
+        derived <= 3600000
+      ) {
+        observedTimeoutMs = derived;
+      }
     }
     let requestHash = "";
     try {
@@ -942,7 +991,8 @@ export class TrialRunner {
       // clamp to the schema floor for the local object, but the explicit
       // remaining<=0 check below still routes to permit-denied (kernel fit).
       remainingRuntimeMs: remainingRuntimeMs <= 0 ? 1 : remainingRuntimeMs,
-      timeoutMs: request.budget.timeoutMs,
+      timeoutMs:
+        observedTimeoutMs === null ? request.budget.timeoutMs : observedTimeoutMs,
       maxOutputBytes: request.budget.maxOutputBytes,
       foregroundGateOpen: !this.isForegroundBusy(),
       observedAt: this.clock(),
@@ -950,8 +1000,16 @@ export class TrialRunner {
     // Gate 3 (pre-permit): sticky latch + fresh paused/FG/cancel/shutdown,
     // plus elapsed-RuntimeMax (remaining<=0) deny — never setPermitted(true)
     // when any stop is requested. Elapsed remaining denies via the same
-    // permit-denied path the kernel fit would take (never authorized).
-    if (this.stopRequested(sessionId, executionId) || remainingRuntimeMs <= 0) {
+    // permit-denied path the kernel fit would take (never authorized). An
+    // unobserved bound (infinite/unparsable RuntimeMax) or observed remaining
+    // beyond the observed bound denies too: the observation would otherwise
+    // certify a bound the kernel cannot verify against the frozen budget.
+    if (
+      this.stopRequested(sessionId, executionId) ||
+      remainingRuntimeMs <= 0 ||
+      observedTimeoutMs === null ||
+      remainingRuntimeMs > observedTimeoutMs
+    ) {
       this.logger.warn("trial.permit_denied", {
         runId: executionId,
         reason: "unknown",
@@ -1159,34 +1217,52 @@ export class TrialRunner {
       };
     }
     if (!gone) {
+      // A still-active scope at the cleanup deadline may hold descendant
+      // processes: fence the alias (unknown path) instead of certifying
+      // known quiescence, so no new trial starts on lingering work.
       try {
         const intent = this.repo.readTrialLaunchIntent(sessionId, executionId);
         this.repo.recordTrialQuiescence(
           sessionId,
           intent.grant.scope as string,
-          executionId,
+          null,
           this.clock(),
+          {
+            workspaceAlias: request.workspaceAlias,
+            executionId,
+            taskHash: request.taskHash,
+            reason: TRIAL_REASON_FENCE_ACTIVE_SCOPE,
+          },
         );
       } catch {
-        // Best effort.
+        // Best effort: fence evidence never fails the outcome.
       }
       await cleanup();
       this.ownedPids.delete(pid);
       return {
         ran: true,
-        outcome: "quiescent",
+        outcome: "fenced-unknown",
         executionId,
         authorized: false,
       };
     }
 
-    // Final stdout line is the wire result JSON.
+    // Final stdout line is the wire result JSON. Authorization additionally
+    // requires a CLEAN bridge exit: a valid done line followed by a nonzero
+    // exit or a signal still records observed (never authorized), because the
+    // result JSON alone cannot prove the observed process succeeded.
     const stdoutText = Buffer.concat(stdoutChunks).toString("utf8");
-    const proof = parseBridgeResult(stdoutText, request);
+    const bridgeClean =
+      bridgeExit.exitCode === 0 && bridgeExit.signal === null;
+    const proof: ParsedBridgeResult = bridgeClean
+      ? parseBridgeResult(stdoutText, request)
+      : { kind: "invalid", exitCode: bridgeExit.exitCode ?? 1 };
     const detail =
       proof.kind === "valid"
         ? `bridge-exit:${proof.exitCode}`
-        : TRIAL_REASON_INVALID_RESULT;
+        : bridgeClean
+          ? TRIAL_REASON_INVALID_RESULT
+          : `bridge-exit:${bridgeExit.signal === null ? (bridgeExit.exitCode ?? "unknown") : bridgeExit.signal.toLowerCase()}`;
     const result =
       proof.kind === "valid"
         ? {
