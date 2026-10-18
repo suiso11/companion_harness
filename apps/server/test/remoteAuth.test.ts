@@ -573,15 +573,23 @@ describe("login sessions (steps 2-4)", () => {
     });
     try {
       const cookie = (await loginAs(f, PASSWORD)).cookie as string;
-      // Still valid just before the absolute deadline.
-      f.setNow(T0 + 3_599_000);
-      expect(
-        (
-          await f.app.request("/health/ready", {
-            headers: { host: ALLOWED_HOST, cookie },
-          })
-        ).status,
-      ).toBe(200);
+      // Stay inside the idle window with touches until just before the
+      // absolute deadline (each hop is shorter than the idle timeout).
+      for (const t of [
+        T0 + 800_000,
+        T0 + 1_600_000,
+        T0 + 2_400_000,
+        T0 + 3_200_000,
+      ]) {
+        f.setNow(t);
+        expect(
+          (
+            await f.app.request("/health/ready", {
+              headers: { host: ALLOWED_HOST, cookie },
+            })
+          ).status,
+        ).toBe(200);
+      }
       // Absolute expiry wins even with recent activity.
       f.setNow(T0 + 3_600_000);
       expect(
@@ -747,7 +755,9 @@ describe("remote bootstrap over HTTP (step 4)", () => {
     expect(await (await fetch(`${base}/health/live`)).json()).toEqual({
       status: "live",
     });
-    // No cookie: API + ready rejected, login form served.
+    // No cookie: API + ready rejected, login form served. (Real fetch
+    // sends `sec-fetch-mode`, so the POSTs carry the allowed Origin
+    // exactly as a browser would; without it they are browser-like 403s.)
     expect(await (await fetch(`${base}/health/ready`)).status).toBe(401);
     expect(
       await (
@@ -756,6 +766,7 @@ describe("remote bootstrap over HTTP (step 4)", () => {
           headers: {
             "content-type": "application/json",
             "idempotency-key": randomUUID(),
+            origin: ALLOWED_ORIGIN,
           },
           body: "{}",
         })
@@ -766,7 +777,10 @@ describe("remote bootstrap over HTTP (step 4)", () => {
     // Login, then the cookie opens the API.
     const login = await fetch(`${base}/api/remote/login`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        origin: ALLOWED_ORIGIN,
+      },
       body: JSON.stringify({ password: PASSWORD }),
     });
     expect(login.status).toBe(200);
@@ -786,6 +800,7 @@ describe("remote bootstrap over HTTP (step 4)", () => {
           headers: {
             "content-type": "application/json",
             "idempotency-key": randomUUID(),
+            origin: ALLOWED_ORIGIN,
             cookie,
           },
           body: "{}",
