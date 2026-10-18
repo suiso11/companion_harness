@@ -215,7 +215,7 @@ export interface MemoryHttpPort {
     citation: string;
     snippet: string;
     revision: number | null;
-    kind: "user_fact" | "model_inference" | "summary" | null;
+    kind: "user_fact" | "model_inference" | "summary" | "correction" | null;
   } | null;
   hashDrainingReplay(input: {
     kind: "record.correct" | "record.retire" | "record.reactivate";
