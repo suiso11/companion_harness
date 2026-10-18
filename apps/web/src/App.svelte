@@ -900,6 +900,12 @@ async function catchUp(
     }
     cursor = typeof body.nextAfter === "number" ? body.nextAfter : cursor + 1;
     if (activeRunId !== runId) return true;
+    // Stop at the first empty page like the vanilla client: the drain must
+    // not outrun the live SSE stream. A terminal event created mid-drain
+    // would otherwise be consumed here via JSON, render, and close the
+    // stream before the server's next poll delivers the native terminal
+    // frame (C06 native-resubscription race).
+    if (body.events.length === 0) return true;
   }
   return true;
 }
