@@ -74,10 +74,7 @@ const CreateTitleSchema = z
   .refine((value) => {
     for (const unit of value) {
       const code = unit.codePointAt(0) ?? 0;
-      if (
-        (code >= 0x00 && code <= 0x1f) ||
-        (code >= 0x7f && code <= 0x9f && code !== 0x85)
-      ) {
+      if ((code >= 0x00 && code <= 0x1f) || (code >= 0x7f && code <= 0x9f)) {
         return false;
       }
     }

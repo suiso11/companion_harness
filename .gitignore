@@ -43,3 +43,6 @@ Thumbs.db
 # Standard Playwright generated output (local runs only, never committed).
 test-results/
 playwright-report/
+# Shared all-plan prerequisite snapshots (sanitized metadata only, never
+# credentials/private content/user DB).
+.all-plan-progress/

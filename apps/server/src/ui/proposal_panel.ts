@@ -576,11 +576,27 @@ export class ProposalPanel {
       if (res.status === 200 && isRecord(res.body)) {
         const statement = res.body.statement;
         const version = res.body.version;
-        if (typeof statement === "string" && typeof version === "number") {
+        const status = res.body.status;
+        if (
+          typeof statement === "string" &&
+          typeof version === "number" &&
+          typeof status === "string"
+        ) {
           if (this.parentLine !== null) {
-            // Readable title + staged version; the staged parent is
-            // immutable (shown, never re-picked by the UI).
-            this.parentLine.textContent = `親の目的（採用時に再確認・変更不可）: ${statement}（版 ${version}）`;
+            // Show the STAGED pinned parent version (immutable), never the
+            // fetched current version as the referenced one: a correction
+            // or revocation after staging must not be misread as the pinned
+            // reference, and accepting a drifted parent is a guaranteed
+            // conflict. Flag current-version or inactive-status drift.
+            const expected = item.expectedParentVersion;
+            let text = `親の目的（採用時に再確認・変更不可）: ${statement}（提案時の版 ${String(expected)}／現在 ${String(version)}）`;
+            if (version !== expected) {
+              text += "⚠ 現在の版と一致しません（採用時に競合します）";
+            }
+            if (status !== "active") {
+              text += `⚠ 親は現在${status}です`;
+            }
+            this.parentLine.textContent = text;
           }
           return;
         }
@@ -776,6 +792,18 @@ export class ProposalPanel {
       this.selectedId = null;
       if (this.detail !== null) this.detail.hidden = true;
       await this.refresh();
+      return;
+    }
+    if (res.status === 400) {
+      // Definitive validation failure (invalid/inverted human dates):
+      // the identical body can never succeed, so clear the frozen op and
+      // re-enable editing instead of pinning a same-body retry that leaves
+      // the controls disabled.
+      this.pendingOp = null;
+      this.opInFlight = false;
+      if (this.retryButton !== null) this.retryButton.hidden = true;
+      this.setStatus("入力に誤りがあります。日付を確認して修正してください");
+      this.renderDetail(false);
       return;
     }
     this.opInFlight = false;

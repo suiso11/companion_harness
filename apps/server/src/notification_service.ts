@@ -95,6 +95,8 @@ export interface NotificationService {
   onShadowSettled(): void;
   /** Foreground run settlement (any terminal outcome): re-drive. */
   onRunSettled(): void;
+  /** Action receipt settlement (uncertain Calendar outcomes): re-drive. */
+  onActionSettled(): void;
   /** Fixed honest diagnostic when projection degraded, else null. */
   getDiagnostic(): typeof NOTIFICATION_DIAGNOSTIC_CODE | null;
   /** True while a drain tick is in flight (tests/smoke). */
@@ -661,6 +663,10 @@ export function createNotificationService(
     wake();
   }
 
+  function onActionSettled(): void {
+    wake();
+  }
+
   function start(): void {
     started = true;
     // Startup ingest from the migration-14 baselines + derived deadline
@@ -689,6 +695,7 @@ export function createNotificationService(
     notifyControl,
     onShadowSettled,
     onRunSettled,
+    onActionSettled,
     getDiagnostic: () => (degraded ? NOTIFICATION_DIAGNOSTIC_CODE : null),
     get busy() {
       return inFlight !== null;

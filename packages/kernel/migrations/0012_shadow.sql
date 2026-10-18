@@ -39,6 +39,11 @@
 -- - `shadow_job_events` is append-only per-job history (never updated or
 --   deleted). Shadow's OWN writes never enqueue further work (no jobs from
 --   own job/log writes, no timers, no polling).
+-- - `shadow_jobs.request_reason` is plain nullable TEXT holding the
+--   UNTRUSTED explicit-request text (NULL for policy-change / reason-less
+--   jobs; length is enforced at the Zod boundary, 1..500 chars). Folded
+--   into this CREATE TABLE (not a later ALTER) to keep the migration
+--   numbering collision-free.
 --
 -- Invariants (must not be weakened):
 -- - All tables are STRICT, none WITHOUT ROWID.
@@ -91,6 +96,7 @@ CREATE TABLE shadow_jobs (
                         CHECK (length(trigger_event) >= 1 AND length(trigger_event) <= 128),
   trigger_id            TEXT,
   request_key           TEXT,              -- stable caller key (explicit requests only)
+  request_reason        TEXT,              -- UNTRUSTED explicit-request text (NULL for policy-change / reason-less jobs)
   control_version       INTEGER NOT NULL CHECK (control_version >= 1),
   scope_epoch           INTEGER NOT NULL CHECK (scope_epoch >= 1),
   claim_control_version INTEGER CHECK (claim_control_version IS NULL OR claim_control_version >= 1),
