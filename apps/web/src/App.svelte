@@ -657,6 +657,17 @@ function storeCursor(runId: string, cursor: number): void {
   }
 }
 
+// Drops a poisoned cursor so the resubscription replays from the durable
+// history (dedup keeps it exactly-once); without this an ahead-poisoned key
+// survives resync and the re-opened stream replays nothing.
+function clearStoredCursor(runId: string): void {
+  try {
+    localStorage.removeItem(LS_CURSOR_PREFIX + runId);
+  } catch {
+    // Best effort.
+  }
+}
+
 function closeStream(): void {
   if (sse !== null) {
     try {
@@ -781,6 +792,10 @@ async function validateStoredCursor(
 }
 
 async function resyncFromHistory(runId: string): Promise<void> {
+  // Normalize a poisoned stored cursor BEFORE the re-subscribe reads it:
+  // replay-from-zero plus the reducer dedup converges to exactly one answer
+  // and the live ticks rewrite the key with the real cursor.
+  clearStoredCursor(runId);
   await hydrateHistory();
   if (activeRunId === runId) {
     activeRunCursor = 0;
@@ -843,7 +858,11 @@ function applySerialized(
   runChain = link.catch(() => {});
 }
 
-async function catchUp(runId: string, after: number): Promise<boolean> {
+async function catchUp(
+  runId: string,
+  after: number,
+  onPage?: () => void,
+): Promise<boolean> {
   if (sessionId === null) return true;
   let cursor = after;
   for (let page = 0; page < 20; page += 1) {
@@ -861,6 +880,10 @@ async function catchUp(runId: string, after: number): Promise<boolean> {
       nextAfter?: unknown;
     };
     if (!Array.isArray(body.events)) return false;
+    // A 2xx page with a well-formed body resets the caller's consecutive
+    // failure streak even when a later page in the same drain fails: the
+    // streak counts consecutive failed page requests, not poll iterations.
+    onPage?.();
     for (const item of body.events) {
       if (typeof item.seq !== "number" || typeof item.type !== "string")
         continue;
@@ -890,7 +913,12 @@ async function pollFallback(runId: string): Promise<void> {
     if (activeRunId !== runId) return;
     let ok = false;
     try {
-      ok = await catchUp(runId, activeRunCursor);
+      // Successful pages inside the drain reset the streak per request, so
+      // an interleaved [fail×4, ok, ok, fail×4, ok] pattern converges instead
+      // of tripping the 5-consecutive stop on cumulative failures.
+      ok = await catchUp(runId, activeRunCursor, () => {
+        errorStreak = 0;
+      });
     } catch {
       ok = false;
     }
