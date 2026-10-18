@@ -241,3 +241,36 @@
   - PR-6 旧 UI 退役: 受入＝旧 `client.ts`/`page.ts` 参照の除去・bundle guard（§11.1 Q9 値）・11 spec 相当＋C22 matrix 全 green。
 - e2e 保全: 既存 11 spec（`conversation`・`sse_history`・`polling`・`citation_recovery`・`conversation_proposals`・`learning`・`shadow`・`autonomy`・`handoff`・`notifications`・`mobile_layout`）は削減せず、移行先の同等 spec で cover する。C22 approval safety（明示 button のみ・hash/expiry・pre/post-marker・receipt 4 状態）は全 PR で回帰対象とする。
 - 未決（open items）: O-1 llama-server（default auto）の Qwen3.8-27B に対する `reasoning_content` 分離挙動の live probe（`--reasoning-format` 要否の確定）。O-2 LiteLLM `/app/config.yaml` 経路での streaming＋reasoning 透過の検証（config は名称のみ確認・未読）。O-3 delta event 型の exact 名称（contracts additive 設計時に確定）。O-4 provisional「下書き」文言の最終確定。O-5 Safari iOS 実機 smoke 手順の確定。O-6 PWA／push の将来追跡 issue 起票。
+
+## 13. Live probe 結果（2026-10-18、config 変更なし）
+
+- 本節は §12 の open items O-1／O-2 に対する live probe の記録。既存節（§1–§12）は書き換えない。
+- 方式: 台帳追記式（ledger style）。config 読替・変更なし。
+
+### 13.1 O-1 llama-server 直結 probe（resolved）
+
+- 対象: llama-server（Docker、`qwen3.8-27b`、default flags。`--reasoning-format`／`--jinja`／`--chat-template` 指定なし）。
+- 結果: streaming 時に `delta.reasoning_content` を `delta.content` とは別に流す。`delta.content` 側に `<think>` は混入しない。
+- 判定: **O-1 resolved**。Qwen3.8-27B は default（`reasoning-format=auto`）のまま thinking が `reasoning_content` に分離される。`--reasoning-format` 追加は不要。
+
+### 13.2 O-2 LiteLLM :4000 経由 probe（resolved）
+
+- 対象: LiteLLM `:4000`（`qwen-local`）。config は名称のみ確認・未読、変更なし。
+- 結果: `reasoning_content` deltas を incremental に透過する。実測 45 tokens が約 2.8s の spread で到達し、first chunk は約 0.2s。non-streaming では `message.reasoning_content` を返す。
+- 世代速度実測: 約 13.6 tok/s。
+- 判定: **O-2 resolved**。LiteLLM 経路での streaming＋reasoning 透過を確認。config 変更は不要。
+
+### 13.3 stats 表示への帰結（timings／usage）
+
+- LiteLLM は llama の `timings` を strip する。stream 時の `usage` は `stream_options.include_usage` 設定時のみ返る（未設定では省略）。
+- よって stats 表示（tokens/s）は llama `timings` に依存せず、`stream_options.include_usage` を request した上で `usage`＋elapsed から client／server-side で rate を算出すること。`timings` 直結表示はしない。
+
+### 13.4 open items 更新
+
+- O-1: resolved（§13.1）。
+- O-2: resolved（§13.2、§13.3 の include_usage 条件付き）。
+- O-3: open 維持（delta event 型の exact 名称は contracts additive 設計時に確定）。
+- O-4: open 維持（provisional「下書き」文言の最終確定）。
+- O-5: open 維持（Safari iOS 実機 smoke 手順の確定）。
+- O-6: open 維持（PWA／push の将来追跡 issue 起票）。
+- O-7（new）: show-thinking default（collapsed vs expanded）。推奨: streaming 中は expanded、回答完了後は collapsed。
