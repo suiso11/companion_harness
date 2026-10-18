@@ -1333,6 +1333,28 @@ feedback is granted only for structural `mN` citations in the accepted
 answer. Memory perception/reactivation/retirement, export, and
 deletion APIs are not implemented. Full contract: `docs/operations.md`.
 
+C04/C05 local dynamic acceptance is proven by the 2026-10-10 run and C06
+by the 2026-10-11 run above; this does **not** complete M3, all plan
+§16/Phase 1, Windows 11 manual smoke, or current Windows/Linux CI for
+uncommitted edits.
+
+M3 §16 wording alignment, 2026-10-14 (local, uncommitted): failure-only
+retry button now renders the agreed plan text `もう一度生成`
+(`apps/server/src/ui/client.ts`; `conversation.spec.ts` updated to the
+same text) and a reference-context 409 now surfaces
+`参照の更新で競合しました。最新の状態を取得しています` in
+`#composer-notice` before the existing CAS re-read/retry (drawer still
+opens; no new storage). Verified once after edits with temp stores only:
+root `tsc --noEmit` exit 0, e2e `tsc -p apps/server/tsconfig.e2e.json`
+ exit 0, `biome check` on the two changed files exit 0, full Vitest
+ **88 files / 1086 tests passed**, real-browser `conversation.spec.ts`
+ **4/4 passed** (production UI build, temp SQLite/RunEngine, loopback;
+ C04/C05/C06 suites not re-run). The changed 409 branch itself was not
+ exercised in a browser at that point (stale-PUT-409 API evidence only);
+ the 2026-10-14 conflict-acceptance run below supersedes that limit.
+ M3 remains incomplete; Windows manual
+ smoke and current remote CI for these edits are still open.
+
 Live HTTP smoke, 2026-10-15 (local, temp stores only, uncommitted):
 real server + synthetic loopback gateway (scripted `answer.submit` +
 extraction JSON; no real model) + REAL remind CLI temp DB
@@ -1737,6 +1759,53 @@ timeout change, no behavior change: the scheduler tests' engine-idle poll
 now yields via `setImmediate` instead of wall-clock `setTimeout` sleeps,
 and `vitest.config.ts` caps `maxWorkers: 2` on CI only. Detail:
 `docs/operations.md` ("PR29 Windows stall fix").
+
+Conflict-notice browser acceptance, 2026-10-14 (local, uncommitted):
+ new permanent `citation_recovery.spec.ts` case drives a genuine stale PUT
+ during the citation drawer action — the browser's first conditional PUT is
+ held, a concurrent real same-citation selection commits version 1 → 2 via
+ the Node-side API, and the held PUT is forwarded unchanged so the real
+ server answers 409 `reference_version_conflict` (observed exactly once).
+ The fixed notice becomes visible in `#composer-notice`, the client
+ re-reads and recovers (exactly one PUT ever reaches the server; the
+ re-read finds the citation already selected so no duplicate PUT follows),
+ the saved citation still opens as escaped plain text, the latest context
+ is exactly `[ref]` at version ≥ 2, `r1` renders once, and browser storage
+  keeps only `ch.sessionId/ch.pendingKey/ch.cursor.*` with no snapshot text.
+  No product source change was needed: the prior fix already shows the
+  notice before the existing re-read/retry (no silent retry), confirmed by
+  this behavior. Fixture fix in `e2e/server.ts`: `seed-citation` now mints
+  one fresh resource per call (the shared-key form could seed only once per
+  server lifetime via `UNIQUE(resource_id, revision)`, which blocked a
+  second citation test in the same run). Verified once after edits with
+  temp stores only: e2e `tsc -p apps/server/tsconfig.e2e.json` exit 0,
+  real-browser `citation_recovery.spec.ts` **8/8 passed** (production UI
+  build, temp SQLite/RunEngine, loopback; other suites not re-run). M3
+  remains incomplete; Windows manual smoke and current remote CI for these
+  edits are still open.
+
+M3 §16 final matrix, 2026-10-14 (implementation-complete evidence, not a
+release claim): every §16.1–16.8 clause has an exact source implementation
+and **no implementation gap remains** (the two 10-14 wording fixes are
+browser-proven; no new product fix was needed). Five deterministic unit
+regressions were added to `apps/server/test/m3_ui.test.ts` only for
+previously uncovered consumer edges (abandoned→failure+retry mapping,
+heartbeat emission lifecycle, same-run multi-client identical bytes,
+backpressure grace hold-then-close plus in-grace drain delivery; controlled
+timers, no wallclock sleeps). CAS exhaustion and reference-context freezing
+reuse existing kernel coverage. Verified once after final edits with temp
+stores only: full Vitest **88 files / 1091 tests passed**, root + server +
+e2e `tsc --noEmit` exit 0, owned-file Biome exit 0 (full-repo `pnpm lint`
+is red solely on the preexisting untracked Playwright artifact
+`apps/server/test-results/.last-run.json`, left untouched), and the FULL
+configured real-browser suite (`apps/server/playwright.config.ts`)
+**22/22 passed** (conversation 4, citation 8, sse_history 6, polling 4; zero
+retries). Minor automated gaps remain: session_busy client-notice branch,
+persistent CAS-race exhaustion, real-restart abandoned E2E, heartbeat
+wallclock cadence. Still open as separate gates: current remote CI for these
+uncommitted edits and Windows 11 manual smoke. M4/M5 clauses are excluded;
+this is not an all-Companion-complete claim. Full clause matrix:
+`docs/plan/execution_progress_2026-10-10.md`.
 
 # PR31 Citation CI Race Fix (2026-10-15)
 

@@ -2367,7 +2367,7 @@ with review proof; formal release gates stay explicit.
 | C22 action lifecycle E2E | IMPLEMENTED (fake) | Fake seams + real chromium (13/13 at `61b3573`, confirmed not rerun); not live. |
 | Windows 11 x64 manual smoke | **NOT EXECUTED** | Linux-only evidence here; §19.6 support gate stays open. |
 | Fresh OAuth | **SEPARATE DECISION, untouched** | No flow, token, or status read here (`No authstatus/login/tokenread`). |
-| Remind I01–I05 | **UNAPPROVED, untouched** | Other repo; no C23/C24 invented, nothing solved here. |
+| Remind I01–I05 | **UNAPPROVED, untouched** | Other repo; no C23/C24 invented, nothing solved here. Superseded 2026-10-18 (status sync with docs/plan/active_projects_tasks.md:17, I05 現況): I02/I03 adapter + 二パス implemented with unit regressions; I05-equivalent live smoke (real Companion HTTP + synthetic gateway + REAL remind CLI tempDB) completed 2026-10-15. I01/I04 formal adoption decision, Windows manual smoke, current-HEAD CI remain open; perception/export/deletion not implemented. |
 | Candidate PR21/22 | **STACKED REVIEW ONLY** | PR20 baseline pins have known gaps; the newest candidate is NOT claimed as the current binding. |
 
 §20 write-binding source facts (parent-read, directly relevant to the

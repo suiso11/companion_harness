@@ -1,11 +1,21 @@
 # アクティブプロジェクト詳細タスクリスト
 
+## 現在地（DONE / INPROGRESS / TODO）— 2026-10-14
+- 定義: DONE=限定scope実装/検証済み（下記範囲のみ）。INPROGRESS=部分実装または残gateあり。TODO=未着手。blocked/判断待ちは3分類内に記載し、4分類目は新設しない。マイルストーン全体完了の主張ではない。全checkboxの一括変更はしない（`[ ]`は維持）。
+- 元台帳状態ラベル・件数表は作成時点の歴史snapshotとして据え置き、書き換えない。現況判断は本節＋各親の現況追記＋[plan現況](active_projects_plan.md)・[execution_progress索引](execution_progress_2026-10-10.md)・README証拠で把握する。
+- DONE（限定）: C04/C05 corrected local acceptance（2026-10-10 17/17→2026-10-11 full 21/21）。C06修正・local acceptance（active-run契約＋4 cases、同21/21）。10/14限定 conversation 4/4（M3文言整合）＋conflict-notice citation 8/8（genuine 409・harness seed修正、full再実行と別扱い）。R05 raceのみ（OK=1/CONFLICT=1・loser ROLLBACK、R05全体は未完）。CalendarはC08 protocol evidenceのみ／C09 pre-enable IMPLEMENTED（PR16/PR17 library段階）／C10 consumer normalizationのみ（C10-08除く）／C11 negativeのみ（6/6等）に限定。
+- INPROGRESS（部分・残gate）: M3集約gate（C07 remote aggregate 23/23が最新だが未コミット現行CI・Windows manual・M3/Phase 1全体は未完）。R05全体（archive/rollback残）。Calendar C08–C15未完成統合（C08正式採用HOLD、C10-08 UNRESOLVED、C11-01 BLOCKED、C12はPR20 local/fakeのみ、C13–C15は後継branch code/verificationありをlocal/fake範囲として区別、実接続/採用なし）。G01/G02・R03/R04/R07/R08等の既存受入再実行も残gate。
+- TODO（未着手）: remind M2（R09–R13、判断待ち: model/license/pin・評価閾値）。remind M3（R14–R18、判断待ち: distill/旧記憶扱い）。連携契約と実連携（I01/I04判断待ち、I02/I03/I05未着手）。M5承認付きaction（C16–C22未着手、判断待ち: 専用write binding・三重gate）。live 7-item・readonly live consentも未着手。
+
 ## 利用ルール
 - この文書は `active_projects_plan.md` を変更・置換せず、47親グループを独立した確認・実装・決定・調査・検証・記録単位へ分解する補助台帳。正本は remind=`remind/.tmp-t6/plan.md`・README・`docs/acceptance-manifest.md` A1–A7・`docs/retention.md`・src/tests、Companion=`companion_harness/docs/implementation_plan.md`（合意）・README・`docs/operations.md`・M4 spike末尾・readonly binding design最新evidence・関連src/tests。
 - `[ ]`は未チェックであり未実装の断定ではない。既存コード/テストがある項目は再実装せず、現状確認・既存テスト再利用・不足時のみ追加。checked化には対象commit・check名・結果・必要な決定記録を残す。N/Aは理由を記録し件数に加算しない。
 - 種別: `[確認] [実装] [決定] [調査] [検証] [記録]`。IDは固定・一意。親見出しはcheckboxでなく、親件数を二重計上しない。細分化数は工数/完成率ではない。
 - 対象パスはrepo相対。`候補:`とあるパス/APIは実装先案であり現存・採用済みを意味しない。live/import/migrate/ユーザーデータ操作は明示承認なしに行わない。readonly forkはprotocol evidenceのみで、正式採用・live OAuth・現行テスト成功とは別。
-- 元台帳状態は指定スナップショットで保持。G01/G02 V、R01–R18 `E,E,P,P,P,E,P,P,D,N,N,N,D,D,N,N,N,N`、C01–C22 `E,E,E,P,P,D,V,D,P,P,D,N,N,N,N,N,N,N,N,N,N,N`、I01–I05 `D,N,N,D,N`。
+- 元台帳状態は指定スナップショットで保持（作成時点の歴史集計であり、正確な再計数はしていない）。G01/G02 V、R01–R18 `E,E,P,P,P,E,P,P,D,N,N,N,D,D,N,N,N,N`、C01–C22 `E,E,E,P,P,D,V,D,P,P,D,N,N,N,N,N,N,N,N,N,N,N`、I01–I05 `D,N,N,D,N`。
+- 現況同期（2026-10-14、履歴保持、最新証拠整合）: 上記状態ラベルは書き換えず、各親の現況のみ追記で整合する。C04/C05 corrected local acceptance、C06 修正/local acceptance（local full 21/21・Vitest 88 files/1086、2026-10-11；後継 remote 23/23 は C07 参照）、R05 race OK=1/CONFLICT=1・loser rollback 検証済み（R05 全体未完）、10/14 限定 conversation 4/4＋conflict-notice citation 8/8 は full suite 再実行とは別扱い。Calendar は C08 DONE/HOLD・C09 pre-enable IMPLEMENTED・C10 consumer のみ/C10-08 UNRESOLVED・C11 negative のみ/C11-01 BLOCKED・C12 PR20 部分 local/fake のみ（実接続/採用なし）。M3/Phase 1 全体・Windows manual・未コミット変更の現行 CI・M2/M3/M4 実接続/連携は未完維持。
+- 現況追記（2026-10-15、履歴保持・上記ラベルは書き換えない）: I02/I03 実装＋単体回帰は適用済み（既存 suite green 継承、再実行なし）で I05 相当の live HTTP→synthetic gateway→REAL remind CLI tempDB smoke を完了（I05 現況参照）。I01/I04 正式採用判断・Windows manual・現行 CI は未完維持。perception/export/deletion は未実装維持。
+- 現況追記（2026-10-18、履歴保持・上記ラベルは書き換えない）: 残存実装の棚卸しを実施。判断・確認待ち事項は [decision_inputs_2026-10-18.md](decision_inputs_2026-10-18.md) に集約。operations.md の Remind I01–I05 行は同日 supersede 追記済み。
 
 ## 凡例・件数・着手順
 | 親範囲 | 親数 | サブチェック数 |
@@ -18,7 +28,8 @@
 | **計** | **47** | **421** |
 | 既存scope合計（G+R+C01–C22） | 42 | 375 |
 
-`[検証・条件付きlive]`は採用/明示承認等の条件を満たした場合のみ実施する。通常CIやfake検証のリリースゲートとして必須ではない。
+（上表は作成時点の歴史集計であり、正確な再計数はしていない）
+ `[検証・条件付きlive]`は採用/明示承認等の条件を満たした場合のみ実施する。通常CIやfake検証のリリースゲートとして必須ではない。
 
 順序: Phase 0 G01–G02 → Phase 1 R01–R08+C01–C07 → Phase 2 C08–C15+R09–R13（R13評価方針先行）→ Phase 3 R14–R18 → Phase 4 I01採用決定後I02–I05 → Phase 5 C16–C22 fake（memory Phase 4不要）。分岐は可能。live/import/migrate/userdataは禁止。M5 fake独立先行可、本番v0.2はv0.1 M4受入と書込binding確定後。
 
@@ -107,7 +118,8 @@
 - [ ] `R04-10` [記録] A3/A6/A7とrecall testsをcoverage棚卸しし、実装済み経路の重複提案を除く。
 
 ### R05 — correction/archive・実共有DB並行勝者
-元台帳状態: P。対象: `remind/.tmp-t6/src/`, tests。依存: R01,G02。完了条件: 実shared file DB raceで勝者1・敗者CONFLICT・余分な行なし。
+元台帳状態: P（歴史 snapshot として保持）。対象: `remind/.tmp-t6/src/`, tests。依存: R01,G02。完了条件: 実shared file DB raceで勝者1・敗者CONFLICT・余分な行なし。
+現況（2026-10-14）: race は OK=1/CONFLICT=1・loser ROLLBACK・orphan なしを検証済み。R05 全体（archive/rollback 全要件）は未完維持。証拠は execution_progress 索引参照。
 - [ ] `R05-01` [確認] correctionが新revisionを作り旧activeをsupersededにする単一transactionを確認する。
 - [ ] `R05-02` [検証] correction失敗時、新revisionもstatus変更も残らないrollbackを確認する。
 - [ ] `R05-03` [検証] supersedes連鎖から旧revisionを辿れ、recall/list active結果から旧版が除外されることを確認する。
@@ -266,6 +278,13 @@
 - [ ] `R18-07` [検証] R04/R06 baselineに対しseeded links/feedback後の有用性を比較する。
 - [ ] `R18-08` [記録] R14/R17・既存R04/R06依存を記録しM2 embeddingを必須化しない。
 
+> R14–R18 補足 — ローカル小型LLMによる育成の整理（横断台帳メモ、正本の代替ではない。分類・件数・ID・checkbox 不変）:
+> - 元台帳状態は保持する（R14=[D]、R15–R18=[N]）。計画記載済みと実装済みを混同しない。新規 docs・新規 checkbox・ID 追加なし。M2 最新 status は remind README・既存台帳・証拠を参照し、古い「M2 未実装」主張を新たに追加しない。
+> - 根拠は remind 正本 `remind/plan.md`（§7・§10–12、R3/R9 受入を含む）および `docs/retention.md`。本台帳は正本の代替ではない。
+> - 合意済み方針: 原記録保持、保持バイアス、事実/実験優先、一過性感情を人格特性化しない、固定 TTL/時間だけの忘却なし、retired と archived/superseded の区別、一度の取り出しで再活性化しない、一時非表示との区別、承認不要、外部送信なし。
+> - 提案安全策の有界背景処理: (a) リンク後付け — 正当化できる orphan/dangling のみ、リンク 0 許容・filler 禁止・想起時リンク自動付与なし。(b) 蒸留統合 — distill 有界・取消・同時 1・失敗隔離・リトライ・直接冪等書込み。(c) 可逆引退 — retired 区別・可逆・一度の取り出しで再活性化しない・一時非表示と区別。(d) 明示検索/再活性化のみ。(e) 追加訂正の実引用 — supersedes 連鎖・sourceRefs・根拠 refs なし事実化なし。
+> - 未決定技術: LLM モデル・runtime・見直し入力・API・状態 schema・閾値・資源 bounds・安全策実装検証は未決定。リンク判断のすべてを同一小型 LLM に固定しない。
+
 ## C Companion Harness
 
 ### C01 — M0 queue/CAS/cancel/recovery/operations
@@ -302,7 +321,8 @@
 - [ ] `C03-08` [記録] §15の既存test名と不足項目を整理し既存機能を重複実装しない。
 
 ### C04 — JSON status fallback dynamic E2E
-元台帳状態: P。対象: `companion_harness/apps/server/e2e/` (existing harness), UI client source/tests。依存: G02,C01–C03。完了条件: real browser sequential JSON polling証拠。
+元台帳状態: P（歴史 snapshot として保持）。対象: `companion_harness/apps/server/e2e/` (existing harness), UI client source/tests。依存: G02,C01–C03。完了条件: real browser sequential JSON polling証拠。
+現況（2026-10-14）: corrected local acceptance 済み（2026-10-10 17/17、2026-10-11 full 21/21 に含む）。M3/Phase 1 全体は未完。
 - [ ] `C04-01` [確認] 現行clientのSSE failure→逐次JSON fallback実装と既存unit coverageを確認する。
 - [ ] `C04-02` [検証] real BrowserでSSEを不成立にしterminal状態までJSON pollを継続する。
 - [ ] `C04-03` [検証] transient poll error後回復し、terminal event/statusを最終反映する。
@@ -313,7 +333,8 @@
 - [ ] `C04-08` [記録] 実browser名/version・spec・実行結果をsource countと分離記録する。
 
 ### C05 — duplicate seq/gap/cursor E2E
-元台帳状態: P。対象: `companion_harness/apps/server/e2e/`, reducer/client tests。依存: G02,C01–C03。
+元台帳状態: P（歴史 snapshot として保持）。対象: `companion_harness/apps/server/e2e/`, reducer/client tests。依存: G02,C01–C03。
+現況（2026-10-14）: corrected local acceptance 済み（held-gap terminal-consumer proof 強化、2026-10-10 17/17、2026-10-11 full 21/21 に含む）。M3/Phase 1 全体は未完。
 - [ ] `C05-01` [確認] reducerのduplicate seq処理とexisting unit coverageを特定し再利用する。
 - [ ] `C05-02` [検証] real Browser streamへterminal前duplicate eventを注入し画面上の二重描画がない。
 - [ ] `C05-03` [検証] terminal後duplicate eventでもanswer/effectが二重適用されない。
@@ -324,7 +345,8 @@
 - [ ] `C05-08` [確認] 既存SSE/reconnect testsを棚卸ししcoverage済み部分を重複追加しない。
 
 ### C06 — accepted 202後のactive reload調査
-元台帳状態: D。対象: `companion_harness/apps/server/e2e/`, client/history code, plan §16。依存: G02,C01–C03。
+元台帳状態: D（歴史 snapshot として保持。疑い/未修正の記述は supersede）。対象: `companion_harness/apps/server/e2e/`, client/history code, plan §16。依存: G02,C01–C03。
+現況（2026-10-14）: 修正実装・local acceptance 済み（active-run discovery 契約、2026-10-11 full 21/21 の C06 4 cases）。M3/Phase 1 全体・Windows manual・未コミット変更の現行 CI は未完維持。
 - [ ] `C06-01` [調査] 正常202を受領済みの別ケースを作り、active run中reloadの再現有無を記録する。
 - [ ] `C06-02` [確認] 再現条件でserver側Runが継続しterminal state/eventが存在するか照合する。
 - [ ] `C06-03` [確認] 現行history/hydration APIでactive run再発見可能か、pending key喪失問題と分離して調べる。
@@ -335,7 +357,8 @@
 - [ ] `C06-08` [記録] 再現失敗/未実行をsource bug確定扱いせず、環境/理由を明記する。
 
 ### C07 — current E2E集約gate
-元台帳状態: V。対象: `companion_harness/README.md`, `apps/server/e2e/`, CI workflows。依存: G02,C04,C05。C07をC04/C05の前提にせず集約。
+元台帳状態: V（歴史 snapshot として保持）。対象: `companion_harness/README.md`, `apps/server/e2e/`, CI workflows。依存: G02,C04,C05。C07をC04/C05の前提にせず集約。
+現況（2026-10-14）: 古い「12 件未実行」は履歴。provisioned 12/12→corrected 17/17（2026-10-10）→local full 21/21（2026-10-11、Vitest 88 files/1086）を経て、後継 remote CI aggregate 23/23（PR11 head 56b7952、runs 38106715359/38106713796、Ubuntu 88/1086・Windows 88/1084+2 skips）が最新集約。10/14 限定 conversation 4/4（M3 文言 `もう一度生成` 整合）＋conflict-notice citation 8/8（`参照の更新で競合しました…` 表示→再読/retry、genuine 409×1、PUT 到達×1、製品第二分岐は無変更、harness seed fresh-mint 修正、e2e typecheck exit 0、他 suite 非再実行）は full suite 再実行とは別扱い。M3 全体・未コミット変更の現行 CI・Windows manual は未完維持。
 - [ ] `C07-01` [確認] config/specから現在のE2E source test数を数え、既存12は歴史snapshotと分ける。
 - [ ] `C07-02` [検証] current E2E runで実際に実行されたtest countと結果をreportから採取する。
 - [ ] `C07-03` [検証] root lintを現在commitで実行し結果を記録する。
@@ -347,6 +370,7 @@
 
 ### C08 — M4 exact MCP binding identity/adoption
 元台帳状態: D。対象: `companion_harness/docs/implementation_plan.md` §17–20, `docs/m4_dependency_spike.md`末尾, `docs/google_calendar_readonly_binding_design.md`。依存: Phase 2の決定gate。
+現況（2026-10-14）: protocol evidence のみ DONE（2026-10-11、archive `docs/evidence/c08/2026-10-11/c08-evidence.tar.gz` SHA `52b63fee…`、4 schema hash 一致、full SHA `97a3dc3…`＋lock `6afe76f9…`、wire `google-calendar`/`3.0.0-readonly.1`、structuredContent ABSENT）。formal adoption HOLD/NOT ADOPTED、live なし。M4 完成主張なし。
 - [ ] `C08-01` [確認] SDK 1.30.0 registry metadataとfork 97a3dc3/private 3.0.0-readonly.1をprotocol evidenceとして区別する。
 - [ ] `C08-02` [調査] exact full immutable commit・server identity・runtime versionを一次evidenceで確定できるか調べる。
 - [ ] `C08-03` [調査] initialize/tools/listの実protocol responseとexact tool namesを採取する。過去のHTTP metadataをprotocol proofにしない。
@@ -358,6 +382,7 @@
 
 ### C09 — MCP lifecycle/transport/security
 元台帳状態: P。対象: `companion_harness/packages/` (候補: 新connector modules; 新規候補で未採用), tests, plan §17.6–8。依存: C08採用判断。
+現況（2026-10-14）: wire-identity guard・輸送 bounds・trusted read-only boundaries は merged master PR16/PR17 で IMPLEMENTED（stderr 64KiB・shutdown・HTTP redirect・no resend・concurrency 1、server 有効化前）。prod registration・pin・OAuth・live は対象外。C07 gate・Windows manual は未完。
 - [ ] `C09-01` [実装] 明示allowlistのみ登録しtools/list全自動exposure/write tool露出を拒否する。
 - [ ] `C09-02` [検証] reconnect delay 1,2,5,10,max30sとlazy connect動作をfake clockで確認する。
 - [ ] `C09-03` [検証] reconnect後にlogical callを自動再送せず、instance concurrency 1を確認する。
@@ -369,6 +394,7 @@
 
 ### C10 — Calendar input/normalization/privacy
 元台帳状態: P。対象: `companion_harness/packages/` (候補: connector-calendar, 未実装案), tests, plan §17.4–5。依存: C08。
+現況（2026-10-14）: consumer normalization のみ IMPLEMENTED（`normalizeSearchResult`/`GetResult`・`time.ts`・`searchInput`、94 files/1164 tests＋e2e typecheck exit 0、root typecheck/lint は初回 FAIL→bounded fix 後 PASS、11/11 smoke）。C10-08 production mapping は UNRESOLVED（binding/pin/profile/OAuth/live なし）、fractional ISO gap 残存。
 - [ ] `C10-01` [決定] structuredContent-firstとstrict contract JSON fallback schemaをexactly defineしprose heuristicを禁止する。
 - [ ] `C10-02` [検証] invalid structured response/fallback JSONはcalendar_response_invalid固定errorとなる。
 - [ ] `C10-03` [実装] privacy allowlist normalizationで7 excluded sensitive fieldsをsnapshotから除く。
@@ -380,6 +406,7 @@
 
 ### C11 — authoritative deletion evidence
 元台帳状態: D。対象: implementation_plan §17.5, M4 spike/design, candidate connector tests。依存: C08–C10。
+現況（2026-10-14）: consumer negative のみ IMPLEMENTED（`deletion-boundary.test.ts` 6/6、full 95/1168、root/e2e typecheck exit 0、biome exit 0 after fix、SDK Server＋InMemoryTransport fixture）。C11-01 BLOCKED（positive 証拠なし）、HTTP UNKNOWN、C11-05 は C12 未配線。tombstone 生成なし。
 - [ ] `C11-01` [決定] upstream get/delete-operation-specific evidenceがtombstoneを証明する条件を定義する。
 - [ ] `C11-02` [検証] cancelled statusを削除と同義にせずsnapshotを保持する。
 - [ ] `C11-03` [検証] 404単独と410単独がdeletion proofにならないことを確認する。
@@ -391,6 +418,7 @@
 
 ### C12 — Calendar connector→canonical snapshot pipeline
 元台帳状態: N。対象: `companion_harness/packages/kernel/` existing ReferenceManager; connector path is候補。依存: C08–C11。
+現況（2026-10-14）: PR20（2026-10-13 HEAD `61b3573`、merge 2026-10-14）で pipeline source＋local/fake verification のみ（full 106/1270、typechecks exit 0、lint 219 files、action.spec 13/13、§19 source-run）。実接続・採用なし（C08 HOLD・C10-08 UNRESOLVED・C11-01 BLOCKED 維持）、live なし。v0.1/M4 完成主張なし。
 - [ ] `C12-01` [実装] 選定bindingからcalendar.search/getを既存connector interfaceへ接続する。
 - [ ] `C12-02` [実装] normalized Calendar resourceをCanonicalResource/Snapshot/rN経路で永続化する。
 - [ ] `C12-03` [検証] search結果はsnapshotをmaterialize/reuseし、単なるhitをevidence無しで返さない。
@@ -402,6 +430,7 @@
 
 ### C13 — calendar.search Broker/frozen context
 元台帳状態: N。対象: `companion_harness/packages/kernel/` ToolBroker/turn context; tests。依存: C12。
+現況（2026-10-14）: PR20 後継 branch に関連 code あり（local/fake 範囲）。実接続・採用なし（C08 HOLD・C10-08 UNRESOLVED 維持）。完成主張なし。
 - [ ] `C13-01` [実装] model-visible単一calendar.search descriptorを登録しupstream個別toolsは露出しない。
 - [ ] `C13-02` [検証] per-turn budget reservation precedes classify/validate/dedup/execute and overbudget blocks call.
 - [ ] `C13-03` [実装] canonical query dedup・timeout・fixed audit/errorを既存Broker policy pipelineへ接続する。
@@ -413,6 +442,7 @@
 
 ### C14 — opt-in config/bootstrap/lifecycle
 元台帳状態: N。対象: `companion_harness/apps/server/` bootstrap/config (existing), connector candidates new proposals。依存: C12–C13。
+現況（2026-10-14）: PR20 後継 branch に配線 code あり（local/fake 範囲、triple-gate 等）。実接続・採用なし。完成主張なし。
 - [ ] `C14-01` [実装] frozen startup configの明示opt-inでのみbindingを構築する。
 - [ ] `C14-02` [検証] 未設定時server起動非block、Markdown/Calendar absent behaviorを契約通り確認する。
 - [ ] `C14-03` [検証] Calendar-only構成でMarkdown未設定でも起動/利用可能か確認する。
@@ -424,6 +454,7 @@
 
 ### C15 — M4 fake integration E2E/live gate
 元台帳状態: N。対象: `companion_harness/apps/server/e2e/` existing harness, CI。依存: C12–C14。
+現況（2026-10-14）: PR20 後継 branch に calendar fake E2E（`calendar.spec`/`tombstone.spec`/`action.spec` 13/13 等）あり（local/fake 範囲）。live 7-item・採用・HEAD CI は未完。
 - [ ] `C15-01` [実装] fake MCP server + fake model + real UI E2E fixtureを既存Playwright harnessに加える。
 - [ ] `C15-02` [検証] conversation→calendar.search→normalized snapshot/rN→citation pathを実Browserで通す。
 - [ ] `C15-03` [検証] refresh same/changed revision・authoritative tombstone/unknownの各分岐をE2Eで確認する。
@@ -551,6 +582,7 @@
 - [ ] `I02-08` [検証] remind child遅延時にもreal server health/status requestが応答する。
 - [ ] `I02-09` [検証] disabled/missing CLI時memoryless応答で通常conversationを失敗させない。
 - [ ] `I02-10` [記録] command/pathはtrusted configのみ、shell argument injectionがないことを記録する。
+現況（2026-10-15）: I02 実装＋単体回帰（`memory_cli.test.ts` 12 cases: 固定argv/stdin・stdout厳格検証・timeout kill/abort settle・EPIPE settle 等）適用済み。live smoke（I05 参照）で real CLI tempDB 実呼び出しを確認。I01 正式採用判断は未完維持。
 
 ### I03 — committed conversation二pass memory write
 元台帳状態: N。対象: Companion event lifecycle (候補), remind CLI (既存ops), integration tests。依存: I01–I02。
@@ -564,6 +596,7 @@
 - [ ] `I03-08` [検証] run/session/source refs metadataはopaque IDsのみで本文をlogsへ出さない。
 - [ ] `I03-09` [確認] memory writeは自律・承認なし、Calendarのhuman hash approvalとは別境界にする。
 - [ ] `I03-10` [記録] first/second pass outcome、replay、failure recovery証拠を分けて残す。
+現況（2026-10-15）: I03 service 実装＋単体回帰（`memory_service.test.ts`: 選択変更時skip・idle timer 維持・preempt/shutdown・queued-scope follow-up 等）適用済み。live smoke（I05 参照）で turn1 二パス acked＋CLI recall 可視を確認。
 
 ### I04 — memory evidence/citation/exposure contract
 元台帳状態: D。対象: Companion EvidenceGrant/Citation contract (existing)・remind scope/source (existing); integration contract is未決。依存: I01後I02–I03と並行可。
@@ -588,17 +621,32 @@
 - [ ] `I05-08` [検証] feedbackは実際にexposed/used IDsのみでheat変更する。
 - [ ] `I05-09` [検証] process/DB/API間でshared DB/importがなく、user dataを書き込まない。
 - [ ] `I05-10` [記録] fake E2E結果をlive Companion↔memory deployment evidenceと区別する。
+現況（2026-10-15）: fake ではなく live smoke で完了 — real Companion HTTP＋synthetic loopback gateway（scripted `answer.submit`＋抽出JSON、real-model ではない）＋REAL remind CLI tempDB（`allowedScopes ["personal","default"]`、LLM/vectors disabled）。turn1 `event.append`＋`record.remember` acked（attempts 0）・CLI `record.recall` 1 snippet、turn2 構造 `m1` 引用＋`record.feedback` acked＋同run `m1` grant、idle `maintain.distill` 自動 acked（LLM-disabled degraded＝scheduling proof のみ）。preemption/start/stop は既存単体回帰の範囲で再実演なし。Windows manual・現行CI は未完。perception/export/deletion は未実装維持。
 
 ## 最初の実装候補と決定待ち
 - 最初の不足coverage候補: `R05` 新M1計画のshared-file-DB correction race（勝者1/敗者CONFLICT/orphanなし）を実証。旧T4 race proofは使わない。
 - 次に `C04` JSON fallbackからterminalまでの実Browser E2E、`C05` duplicate-seq/gap E2Eを既存harnessで確認する。coverage棚卸し後、不足だけ追加する。
 - `C06`は正常202受領後active-run reloadの再現調査から始める。pending-key-lost delivery reloadとは分離し、無断localStorage/API拡張なし。
+- 現況（2026-10-14、履歴保持・最新証拠に整合）: R05 race は OK=1/CONFLICT=1・loser rollback 検証済み（R05 全体未完）、C04/C05 は corrected local acceptance 済み、C06 は調査限定を supersede し修正・local acceptance 済み（2026-10-11 local 21/21、後継 remote 23/23 は C07 参照）。10/14 限定 conversation 4/4＋citation 8/8 は full 再実行と別扱い。Calendar C08–C12 部分のみ（C08 HOLD・C10-08 UNRESOLVED・C11-01 BLOCKED・実接続なし）。
 - 決定待ち: R09 embedding model/license/pin、R13評価threshold、R14 distill/old record扱い、C08 M4 exact upstream binding/formal adoption、C11 deletion evidence、C15 readonly live consent、I01 integration追加scope・I04 evidence contract、C22/M5 dedicated write binding。いずれも候補を合意仕様に昇格させない。
 
 ## 作成時点の検証記録
 - 参照したのは上記正本と計画/operations/spike/designの必要箇所、および `active_projects_plan.md`。rootにREADME/docsはなく、remind正本はnested `.tmp-t6`。
 - 全体readでG/R/C/Iの47見出しとID連番を照合し、各親の連番個数を集計した: G18、R150、C01–C15 120、C16–C22 72、I46、計406（既存scope 360、追加I scope 46）。checkbox ID重複・番号欠けなし。shellからの機械集計はWSL `/bin/bash` 起動失敗で未実施。テスト/CI/OAuth/network/installも未実行。shell失敗はtest未実行でありソース不具合ではない。
 - Branch/commit/status/dirty/integration/runtime/current CI/test successは実測していない。計画にある参照SHA/過去CIは現在の事実として主張しない。
+
+## 自律コンパニオン構想・未実装 planning items（設計のみ） {#autonomous-vision-tasks}
+- 本節は [plan §7 長期自律コンパニオン構想](active_projects_plan.md#autonomous-vision) の concise cross-reference である。新規 docs なし。既存 47 親・421 checkbox・ID・件数表・元台帳状態ラベルは不変（本節の AV 項目は件数に加算しない planning-only）。すべて TODO（未着手）。POLICY=明示合意方針、PROPOSAL=支持された設計案、UNRESOLVED=未解決。ポリシー合意は runtime 許可・実装完了ではない。`docs/implementation_plan.md`・`remind/plan.md` の変更なし。
+- `AV-01` [記録・TODO・PROPOSAL] PURPOSE MODEL：goal/preference/constraint/permission/wish/temporary state と AI inference を区別、高確信でも許可を付与せず、provenance/scope/時間適用性・訂正/取消/達成を追跡、目的は手段を認可せず、明示訂正の優先・矛盾の未解決保持・沈黙は同意/拒否でない・一時的感情の人格化なし・権限制約は想起順位/引退と独立検査・原本と解釈分離。
+- `AV-02` [記録・TODO・PROPOSAL] DELIBERATOR：自律候補/重要 policy 変更のみ有界起動、入力（trigger/memory/explicit-inferred/active-prior-failures/permission-budget）・出力（execute/hold/ask/do-nothing＋evidence/reason/action/stop条件/uncertainty）・proposals only・shadow evaluation 先行（wishes-not-commands/corrections/external-no-authority/do-nothing）・モデル未選定。
+- `AV-03` [記録・TODO・PROPOSAL/UNRESOLVED] TASK/ACTION：chat/wish/problem/task/deadline 区別・作成と scheduling 分離・日付発明なし、発言者区別、隔離 workspace 自律作業は提案軸で自動許可でない、target/operation/resource scope、外部公開/共有 branch/payments/deletion/secrets/access は個別 boundary・欠落は当該操作のみ block、pi-orch handoff・検証・sandbox!=本番・原因別 retry・受入弱め禁止、hold/reconsider/取消連動。正式 permission 変更は UNRESOLVED。
+- `AV-04` [記録・TODO・POLICY] LEARNING：methods/hypotheses/evidence のみ学習し権限/予算/目標を変更せず、棄却≠恒常選好・成功≠将来認可・失敗仮説≠事実、subgoal trace/取消再評価、見せかけ作業/通知なし、stop 覆す自己保存なし。
+- `AV-05` [記録・TODO・POLICY] NOTIFICATIONS：会話保全・強制 task 化/中断なし、定常は log＋自然区切りで簡潔・質問 group（deadline 除く）、重大 danger/commitment は即時、無変化は通知なし、沈黙は同意/拒否でなく hold は非認可動作のみ止める。
+- `AV-06` [記録・TODO・POLICY] RESOURCE：会話/stop 優先・応答低下で background throttle/pause、自己予算増加なし、数値 bounds/concurrency は測定で決定（ここで選定せず）。
+- `AV-07` [記録・TODO・POLICY] RECOVERY：supervisor 再起動・依存縮退、安全境界 persist・広範 OS-admin なし、明示 activity/stop は reboot 越え保持・再起動≠再開許可、重複回避・backoff/degrade/pause・bulk catch-up なし、unbootable は外部機材・無停止稼働の約束でない。
+- `AV-08` [記録・TODO・POLICY] SELF MAINTENANCE：隔離 trial・本番は事前 scope＋証拠/backup/復旧手順、rights/budget/stop 弱め禁止、code≠DB rollback・新記録保持・stale 復元で消失させず、migration/backup検証/export/終了/device change は将来課題（not implemented）。
+- `AV-09` [記録・TODO・PROPOSAL/UNRESOLVED] MEMORY：remind 小型 LLM 育成（R14–R18 補足）へ link・外部送信なし・可逆 retirement、fact/source/correction 優先と relevance/usage 分離・usage≠真実・自己強化回避、'All'=会話/自活動のみ・除外/削除/backup消去/export は UNRESOLVED、model/runtime/閾値/資源の発明なし。
+- `AV-10` [記録・TODO・UNRESOLVED] 既存計画調整：U1 は vision で自動承認されず I01 gate 必要、M5 都度承認 vs standing は契約決定が必要、自律 lifecycle は R14–R18 より広範・現 scope 拡大なし、task manager/pi-orch 統合は acceptance 不在、milestone/要件/順序を保全。
 
 ## 現況追記（2026-10-15、履歴保持・checkbox/ID/件数不変）
 - Companion explicit memory management（I02/I03 管理面＋I04 確認契約の範囲）: search（retired 含む・no-heat）・current-vs-snapshot confirm・source event→real correct chain・retire/reactivate（削除/非表示ではない）を実装。UI 同期 invalidation/generation guard・pending reset＋poll identity・stale ack 非再利用、7 integrity 回帰を含む。full Vitest 113 files/1370・browser GREEN・live GREEN・typecheck＋lint GREEN（synthetic gateway の限定付き）。perception/export/deletion 未実装維持。I01/I04 正式採用判断・Windows manual・現行 CI は未完維持。
