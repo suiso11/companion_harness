@@ -451,3 +451,6 @@
 
 ## 現況追記（2026-10-17、AV03 conversation-proposals完成・履歴保持・上記分類/ID/件数不変）
 - AV03 full vertical（kernel＋HTTP＋UI、feat/av-conversation-proposals）: proposal-only core＋session review/adopt routes＋quiet drawer UI。統合受入ONCE実測: full Vitest 143 files passed/2 skipped・1606 tests passed/8 skipped（real remind CLI、LLM/vectors無効）＋default Chromium 42 passed＋root/e2e tsc exit 0＋Biome exit 0（既存warning/infoのみ）。PR未発行・review findings pending。詳細は `docs/operations.md`（AV03 FULL VERTICAL）。
+
+## 決定追記（2026-10-18、AV-01..10 方針合意・decider haruka・既存ラベル/ID/件数不変）
+- AV-01..10 の方針合意を記録（詳細全文は [decision_inputs_2026-10-18.md](decision_inputs_2026-10-18.md)）。ポリシー合意であり POLICY ≠ 実装・権限（この合意だけでは実装も runtime 権限も付与されない）。修正を含む主な内容: AV-02 常時稼働許容、AV-06 準拠、proposals-only／shadow eval は維持、AV-04 目標変更は根拠付き提案義務（沈黙は承認でない）、AV-10 は都度承認から standing 目標へ、AV-03 boundary 対象は standing でも個別チェック。なお AV-03 permission および AV-09 除外/削除等は UNRESOLVED のまま維持。
