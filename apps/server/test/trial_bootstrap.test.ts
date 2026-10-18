@@ -158,4 +158,16 @@ describe("trial runner bootstrap wiring", () => {
       }
     }
   });
+
+  it("rejects a trial currentModel that differs from the model config", async () => {
+    const { env } = tempEnv();
+    const mismatched = trialEnv(env);
+    mismatched.COMPANION_AUTONOMY_JSON = JSON.stringify({
+      ...JSON.parse(mismatched.COMPANION_AUTONOMY_JSON as string),
+      currentModel: "other-model",
+    });
+    await expect(startServer({ env: mismatched, drainMs: 50 })).rejects.toThrow(
+      /currentModel/,
+    );
+  });
 });

@@ -2443,11 +2443,34 @@ export function applyAutonomyRestartFence(
     }
     recordActivityInTx(db, "restart_fence", null, at);
     recordActivityInTx(db, "interrupted_note", null, at);
-    // Restart never revives: inflight claimed grants are revoked.
-    revokeAllClaimedForStop(db, at);
+    // Restart never revives: inflight claimed grants are revoked — EXCEPT
+    // grants carrying a worker boot row, which boot recovery (recoverOnBoot,
+    // running after this fence) must still observe via
+    // listClaimedTrialWorkers (status='claimed') to prove quiescent vs fence.
+    // Booted grants stay claimed here and are settled by recovery; unbooted
+    // claimed grants revoke immediately.
+    revokeClaimedWithoutWorkerForRestart(db);
     const current = readControlRow(db);
     return { paused: current.paused === 1, version: current.version };
   });
+}
+
+/**
+ * Restart-fence revocation that preserves boot recovery visibility:
+ * revokes only claimed grants WITHOUT a worker boot row.
+ */
+function revokeClaimedWithoutWorkerForRestart(db: Database.Database): number {
+  const rows = db
+    .prepare(
+      "SELECT g.execution_id AS execution_id FROM trial_grants g LEFT JOIN trial_worker_boots b ON b.execution_id=g.execution_id WHERE g.status='claimed' AND b.execution_id IS NULL",
+    )
+    .all() as { execution_id: string }[];
+  for (const r of rows) {
+    db.prepare(
+      "UPDATE trial_grants SET status='revoked', cancel_requested=1 WHERE execution_id=?",
+    ).run(r.execution_id);
+  }
+  return rows.length;
 }
 
 /**

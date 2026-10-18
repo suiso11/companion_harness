@@ -2716,6 +2716,7 @@ export interface QueuedTrialGrant {
   sessionId: string;
   scope: string;
   createdAt: number;
+  proposalId: string;
 }
 
 /** Oldest queued grant bound to an alias (fail closed on bad alias). */
@@ -2728,19 +2729,21 @@ export function listQueuedTrialGrants(
   const capped = Math.min(Math.max(Math.floor(limit), 1), 100);
   const rows = db
     .prepare(
-      "SELECT execution_id, session_id, scope, created_at FROM trial_grants WHERE status='queued' AND workspace_alias=? ORDER BY created_at ASC, execution_id ASC LIMIT ?",
+      "SELECT execution_id, session_id, scope, created_at, proposal_id FROM trial_grants WHERE status='queued' AND workspace_alias=? ORDER BY created_at ASC, execution_id ASC LIMIT ?",
     )
     .all(alias, capped) as {
     execution_id: string;
     session_id: string;
     scope: string;
     created_at: number;
+    proposal_id: string;
   }[];
   return rows.map((r) => ({
     executionId: r.execution_id,
     sessionId: r.session_id,
     scope: r.scope,
     createdAt: r.created_at,
+    proposalId: r.proposal_id,
   }));
 }
 

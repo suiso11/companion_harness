@@ -902,4 +902,29 @@ describe("lifecycle: faithful empty-checks failure is terminal observed", () => 
       closeKernelDatabase(handle);
     }
   });
+
+  it("restart fence preserves booted claimed grants for recovery", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      const a = await fullClaim(repo, sessionId, "b1", "ws", NOW + 10);
+      repo.registerTrialWorkerBoot(
+        {
+          executionId: a.exec,
+          sessionId,
+          pid: 200,
+          bootId: "boot-a",
+          processStartTicks: "1",
+        },
+        NOW + 13,
+      );
+      const b = await fullClaim(repo, sessionId, "b2", "ws", NOW + 20);
+      void b;
+      repo.applyAutonomyRestartFenceNow(NOW + 30);
+      const workers = repo.listClaimedTrialWorkersForRecovery();
+      expect(workers.map((w) => w.executionId)).toContain(a.exec);
+      expect(workers.length).toBe(1);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
 });

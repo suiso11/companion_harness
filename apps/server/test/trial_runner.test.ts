@@ -1526,4 +1526,280 @@ describe("trial_runner", () => {
       closeKernelDatabase(handle);
     }
   });
+
+  it("shutdown SIGKILLs a bridge that ignores fd3 close (bounded)", async () => {
+    const { handle, repo, sessionId } = await makeKernel();
+    try {
+      const { executionId } = queueGrant(repo, sessionId, "b1", "ws");
+      const exited = { current: false };
+      const identity = {
+        pid: 4413,
+        bootId: "boot-shutdown",
+        processStartTicks: "660",
+      };
+      let killed = false;
+      let fd3Destroyed = false;
+      const spawnImpl = ((_cmd: string, _args: string[], _opts: unknown) => {
+        const child = new EventEmitter() as FakeChild;
+        child.pid = identity.pid;
+        const stdout = new EventEmitter();
+        const stderr = new EventEmitter();
+        child.stdin = { write: () => {}, end: () => {} };
+        child.stdout = stdout;
+        child.stderr = stderr;
+        child.stdio = [
+          child.stdin,
+          stdout,
+          stderr,
+          {
+            destroy() {
+              fd3Destroyed = true;
+              // Broken bridge: ignores fd3 close, never exits on its own.
+            },
+          },
+        ];
+        child.kill = () => {
+          killed = true;
+          if (!exited.current) {
+            exited.current = true;
+            child.emit("exit", null, "SIGKILL");
+          }
+        };
+        return child;
+      }) as unknown as TrialRunnerSpawn;
+      const observer: TrialRunnerObserverFns = {
+        expectedScopeUnit: (eid: string) =>
+          `capsule-${eid}-${"c".repeat(64)}.scope`,
+        queryScope: async () => ({
+          scopeState: "active" as const,
+          remainingRuntimeMs: 5000,
+        }),
+        readIdentity: async () => ({ ...identity }),
+      };
+      const { factory } = createFakeRelayFactory();
+      const { logger } = createCollectingLogger("debug");
+      const dir = mkdtempSync(join(tmpdir(), "trial-run-"));
+      const runner = new TrialRunner({
+        repo,
+        config: runnerConfigBase("ws", writeTemplate(dir), join(dir, "runs")),
+        isForegroundBusy: () => false,
+        logger,
+        observer,
+        createRelay: factory,
+        spawnImpl,
+        clock: makeClock(),
+      });
+      const pending = runner.runNext();
+      for (let i = 0; i < 400 && !fd3Destroyed; i++) {
+        await new Promise((r) => setTimeout(r, 5));
+      }
+      await runner.shutdown(50);
+      const out = await pending;
+      expect(killed).toBe(true);
+      expect(out.ran).toBe(true);
+      expect(out.authorized).toBe(false);
+      void executionId;
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("honors STOP while waiting for scope activation (no full timeout)", async () => {
+    const { handle, repo, sessionId } = await makeKernel();
+    try {
+      const { executionId } = queueGrant(repo, sessionId, "b1", "ws");
+      const identity = {
+        pid: 4414,
+        bootId: "boot-stopwait",
+        processStartTicks: "661",
+      };
+      const { spawnImpl, state } = createFakeSpawn({ hangUntilFd3: true });
+      const spawnProxy = ((cmd: string, args: string[], opts: unknown) => {
+        const child = (
+          spawnImpl as unknown as (
+            c: string,
+            a: string[],
+            o: unknown,
+          ) => FakeChild
+        )(cmd, args, opts);
+        child.pid = identity.pid;
+        return child;
+      }) as unknown as TrialRunnerSpawn;
+      let queries = 0;
+      const observer: TrialRunnerObserverFns = {
+        expectedScopeUnit: (eid: string) =>
+          `capsule-${eid}-${"c".repeat(64)}.scope`,
+        queryScope: async () => {
+          queries += 1;
+          return { scopeState: "unknown" as const };
+        },
+        readIdentity: async () => ({ ...identity }),
+      };
+      const { factory } = createFakeRelayFactory();
+      const { logger } = createCollectingLogger("debug");
+      const dir = mkdtempSync(join(tmpdir(), "trial-run-"));
+      const runner = new TrialRunner({
+        repo,
+        config: {
+          ...runnerConfigBase("ws", writeTemplate(dir), join(dir, "runs")),
+          observe: {
+            activeTimeoutMs: 60_000,
+            goneTimeoutMs: 2000,
+            pollIntervalMs: 5,
+          },
+        },
+        isForegroundBusy: () => queries >= 2,
+        logger,
+        observer,
+        createRelay: factory,
+        spawnImpl: spawnProxy,
+        clock: makeClock(),
+      });
+      const out = await runner.runNext();
+      expect(out).toMatchObject({
+        ran: true,
+        outcome: "permit-denied",
+        executionId,
+      });
+      expect(queries).toBeLessThan(50);
+      expect(state.fd3Destroyed).toBe(true);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("skips a permanently unclaimable head grant and runs the next", async () => {
+    const { handle, repo, sessionId } = await makeKernel();
+    try {
+      const alias = "ws";
+      const mkInput = (taskId: string) => stageInput(taskId);
+      const driftedProfile = { ...profile(), timeoutMs: 30000 };
+      // Head grant approved under a drifted profile (permanent claim failure).
+      const headTask = makeAuthority(repo, sessionId, "b1").taskId;
+      const headStaged = repo.stageTrial(
+        sessionId,
+        mkInput(headTask) as never,
+        {
+          key: randomUUID(),
+          now: NOW + 4,
+          profile: driftedProfile,
+          workspaceAlias: alias,
+        },
+      );
+      const headApproved = repo.approveTrial(
+        sessionId,
+        (headStaged.body as { id: string }).id,
+        {
+          key: randomUUID(),
+          now: NOW + 5,
+          profile: driftedProfile,
+          workspaceAlias: alias,
+        },
+      );
+      const headExec = (headApproved.body as { executionId: string })
+        .executionId;
+      // Valid grant behind it (strictly later created_at so it sorts second).
+      const nextTask = makeAuthority(repo, sessionId, "b2").taskId;
+      const nextStaged = repo.stageTrial(
+        sessionId,
+        mkInput(nextTask) as never,
+        {
+          key: randomUUID(),
+          now: NOW + 60,
+          profile: profile(),
+          workspaceAlias: alias,
+        },
+      );
+      const nextApproved = repo.approveTrial(
+        sessionId,
+        (nextStaged.body as { id: string }).id,
+        {
+          key: randomUUID(),
+          now: NOW + 61,
+          profile: profile(),
+          workspaceAlias: alias,
+        },
+      );
+      const nextExec = (nextApproved.body as { executionId: string })
+        .executionId;
+      const exited = { current: false };
+      const identity = {
+        pid: 4415,
+        bootId: "boot-skip",
+        processStartTicks: "662",
+      };
+      const { spawnImpl } = createFakeSpawn();
+      const spawnProxy = ((cmd: string, args: string[], opts: unknown) => {
+        const child = (
+          spawnImpl as unknown as (
+            c: string,
+            a: string[],
+            o: unknown,
+          ) => FakeChild
+        )(cmd, args, opts);
+        child.pid = identity.pid;
+        const origEmit = child.emit.bind(child);
+        child.emit = ((event: string, ...rest: unknown[]) => {
+          if (event === "exit") exited.current = true;
+          return (origEmit as (...a: unknown[]) => boolean)(event, ...rest);
+        }) as FakeChild["emit"];
+        return child;
+      }) as unknown as TrialRunnerSpawn;
+      const observer: TrialRunnerObserverFns = {
+        expectedScopeUnit: (eid: string) =>
+          `capsule-${eid}-${"c".repeat(64)}.scope`,
+        queryScope: async () => ({
+          scopeState: "gone" as const,
+        }),
+        readIdentity: async (pid: number) => {
+          if (exited.current) return "gone";
+          if (pid !== identity.pid) return "unknown";
+          return { ...identity };
+        },
+      };
+      // Scope never activates: use an observer that goes active then gone.
+      const activeObserver: TrialRunnerObserverFns = {
+        expectedScopeUnit: observer.expectedScopeUnit,
+        queryScope: async () => ({
+          scopeState: "active" as const,
+          remainingRuntimeMs: 5000,
+        }),
+        readIdentity: observer.readIdentity,
+      };
+      const { factory } = createFakeRelayFactory();
+      const { logger } = createCollectingLogger("debug");
+      const dir = mkdtempSync(join(tmpdir(), "trial-run-"));
+      const runner = new TrialRunner({
+        repo,
+        config: runnerConfigBase("ws", writeTemplate(dir), join(dir, "runs")),
+        isForegroundBusy: () => false,
+        logger,
+        observer: {
+          expectedScopeUnit: activeObserver.expectedScopeUnit,
+          queryScope: async (_rp: string, unit: string, _o: unknown) => {
+            void unit;
+            // First polls (scope wait): active; after exit (gone wait): gone.
+            if (!exited.current)
+              return {
+                scopeState: "active" as const,
+                remainingRuntimeMs: 5000,
+              };
+            return { scopeState: "gone" as const };
+          },
+          readIdentity: observer.readIdentity,
+        },
+        createRelay: factory,
+        spawnImpl: spawnProxy,
+        clock: makeClock(),
+      });
+      const out = await runner.runNext();
+      expect(out.executionId).toBe(nextExec);
+      expect(out.ran).toBe(true);
+      expect(headExec).not.toBe(nextExec);
+      const remaining = repo.listQueuedTrialGrantsForAlias(alias, 10);
+      expect(remaining.map((g) => g.executionId)).not.toContain(headExec);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
 });

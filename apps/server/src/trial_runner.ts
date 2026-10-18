@@ -153,6 +153,7 @@ export class TrialRunner {
   private shuttingDown = false;
   private currentRelay: TrialRunnerRelay | null = null;
   private currentCloseFd3: (() => void) | null = null;
+  private currentChild: { kill: (signal?: string) => void } | null = null;
   private currentRun: Promise<TrialRunNextResult> | null = null;
   /**
    * Per-run sticky revoke latch: set by ANY revoke trigger (foreground
@@ -258,16 +259,34 @@ export class TrialRunner {
    */
   async shutdown(boundMs = 10_000): Promise<void> {
     this.shuttingDown = true;
+    this.stopLatch = true;
     this.revokeForForeground();
     const run = this.currentRun;
     if (run === null) return;
     const bound = Math.max(0, boundMs);
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const timeout = new Promise<void>((resolve) => {
-        timer = setTimeout(resolve, bound);
+      const timeout = new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), bound);
       });
-      await Promise.race([run.then(() => undefined), timeout]);
+      const outcome = await Promise.race([
+        run.then(() => "done" as const),
+        timeout,
+      ]);
+      if (outcome === "timeout") {
+        // A broken bridge may ignore fd3 close and never exit: SIGKILL the
+        // child so shutdown stays bounded and never leaves executing work
+        // behind, then await the run to settle its quiescence evidence.
+        try {
+          this.currentChild?.kill("SIGKILL");
+        } catch {
+          // Best effort.
+        }
+        await run.then(
+          () => undefined,
+          () => undefined,
+        );
+      }
     } finally {
       if (timer !== undefined) clearTimeout(timer);
     }
@@ -370,45 +389,113 @@ export class TrialRunner {
     }
     if (this.isForegroundBusy())
       return { ran: false, outcome: "foreground-busy" };
-    let queued: { executionId: string; sessionId: string; scope: string }[];
+    let queued: {
+      executionId: string;
+      sessionId: string;
+      scope: string;
+      proposalId: string;
+    }[];
     try {
       queued = this.repo.listQueuedTrialGrantsForAlias(
         this.config.workspaceAlias,
-        1,
-      );
+        10,
+      ) as {
+        executionId: string;
+        sessionId: string;
+        scope: string;
+        proposalId: string;
+      }[];
     } catch {
       return { ran: false, outcome: "empty" };
     }
-    const next = queued[0];
-    if (next === undefined) return { ran: false, outcome: "empty" };
+    if (queued.length === 0) return { ran: false, outcome: "empty" };
 
+    // Head-of-line starvation guard: a permanently unclaimable head grant
+    // (expired, authority lost, alias/profile drift) must not starve valid
+    // grants behind it. Walk the oldest-first queue: transient failures
+    // (paused/fence) return immediately; permanent failures retire the grant
+    // best-effort via expireTrial and continue to the next candidate.
+    let next:
+      | {
+          executionId: string;
+          sessionId: string;
+          scope: string;
+          proposalId: string;
+        }
+      | undefined;
     let claimBody: { request: TrialLaunchRequest; grant: { scope: string } };
-    try {
-      const out = this.repo.claimTrial(next.sessionId, next.executionId, {
-        key: this.randomKey(),
-        now: this.clock(),
-        profile: this.config.profile,
-        workspaceAlias: this.config.workspaceAlias,
-      });
-      // claimTrial body is { kind, grant, request, applied? }: normalize.
-      const raw = out.body as unknown as Record<string, unknown>;
-      claimBody = {
-        request: raw["request"] as TrialLaunchRequest,
-        grant: raw["grant"] as { scope: string },
-      };
-    } catch (error) {
-      if (isFenceError(error)) {
-        this.logger.warn("trial.claim_fenced", {});
-        return { ran: false, outcome: "fenced", executionId: next.executionId };
+    let lastClaimFailed: { executionId: string; message: string } | undefined;
+    let selected: typeof next | undefined;
+    let selectedBody:
+      | { request: TrialLaunchRequest; grant: { scope: string } }
+      | undefined;
+    for (const candidate of queued) {
+      try {
+        const out = this.repo.claimTrial(
+          candidate.sessionId,
+          candidate.executionId,
+          {
+            key: this.randomKey(),
+            now: this.clock(),
+            profile: this.config.profile,
+            workspaceAlias: this.config.workspaceAlias,
+          },
+        );
+        // claimTrial body is { kind, grant, request, applied? }: normalize.
+        const raw = out.body as unknown as Record<string, unknown>;
+        selected = candidate;
+        selectedBody = {
+          request: raw["request"] as TrialLaunchRequest,
+          grant: raw["grant"] as { scope: string },
+        };
+        break;
+      } catch (error) {
+        if (isFenceError(error)) {
+          this.logger.warn("trial.claim_fenced", {});
+          return {
+            ran: false,
+            outcome: "fenced",
+            executionId: candidate.executionId,
+          };
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        if (/paused/i.test(message)) {
+          return { ran: false, outcome: "paused" };
+        }
+        lastClaimFailed = {
+          executionId: candidate.executionId,
+          message,
+        };
+        // Best-effort retire so the next poll does not reselect this row.
+        try {
+          if (
+            typeof candidate.proposalId === "string" &&
+            candidate.proposalId.length > 0
+          ) {
+            this.repo.expireTrial(
+              candidate.sessionId,
+              candidate.proposalId,
+              this.clock(),
+            );
+          }
+        } catch {
+          // Best effort: expiry never fails the skip.
+        }
+        this.logger.warn("trial.claim_skipped_unclaimable", {});
       }
+    }
+    next = selected;
+    if (next === undefined || selectedBody === undefined) {
       this.logger.warn("trial.claim_failed", {});
-      void error;
+      void lastClaimFailed;
+      const failedId = lastClaimFailed?.executionId ?? queued[0]?.executionId;
       return {
         ran: true,
         outcome: "claim-failed",
-        executionId: next.executionId,
+        ...(failedId === undefined ? {} : { executionId: failedId }),
       };
     }
+    claimBody = selectedBody;
 
     this.active = true;
     try {
@@ -516,6 +603,7 @@ export class TrialRunner {
     const cleanup = async (): Promise<void> => {
       this.currentRelay = null;
       this.currentCloseFd3 = null;
+      this.currentChild = null;
       try {
         await relay.close();
       } catch {
@@ -615,6 +703,9 @@ export class TrialRunner {
       return { ran: true, outcome: "launch-failed", executionId };
     }
     this.ownedPids.add(pid);
+    this.currentChild = child as unknown as {
+      kill: (signal?: string) => void;
+    };
 
     // Eager exit latch: the bridge may exit before any waiter attaches
     // (fake or fast bridges), so the 'exit' event is captured once here
@@ -765,6 +856,36 @@ export class TrialRunner {
     let remainingRuntimeMs = request.budget.timeoutMs;
     let scopeActive = false;
     while (this.clock() < activeDeadline) {
+      // STOP honors promptly while waiting for scope activation: a pause,
+      // foreground preempt, cancel, or shutdown arriving after spawn must
+      // not wait out the full active timeout (up to 120s) with fd3/bridge
+      // live.
+      if (this.stopRequested(sessionId, executionId)) {
+        try {
+          relay.revoke();
+        } catch {
+          // Best effort.
+        }
+        closeFd3();
+        await awaitChildExit();
+        try {
+          const intent = this.repo.readTrialLaunchIntent(
+            sessionId,
+            executionId,
+          );
+          this.repo.recordTrialQuiescence(
+            sessionId,
+            intent.grant.scope as string,
+            executionId,
+            this.clock(),
+          );
+        } catch {
+          // Best effort.
+        }
+        await cleanup();
+        this.ownedPids.delete(pid);
+        return { ran: true, outcome: "permit-denied", executionId };
+      }
       let props: ScopeUnitProps;
       try {
         props = await this.observer.queryScope(

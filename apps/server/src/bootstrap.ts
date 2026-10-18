@@ -2231,6 +2231,14 @@ export async function startServer(
         throw new ServerConfigError("trial config requires model config");
       }
       const trialConfig = config.trial;
+      // The trial profile freezes currentModel at approval/claim time while
+      // the relay executes fixedModel from COMPANION_MODEL_JSON: a mismatch
+      // would run an approved trial against a different model. Fail closed.
+      if (trialConfig.currentModel !== modelName) {
+        throw new ServerConfigError(
+          "trial currentModel must match model config",
+        );
+      }
       const runnerGateway = modelGateway;
       const runnerModel = modelName;
       const runnerProfile = {
