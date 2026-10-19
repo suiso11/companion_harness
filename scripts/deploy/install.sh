@@ -28,10 +28,54 @@ for arg in "$@"; do
 done
 
 mkdir -p "$UNIT_DIR" "$ENV_DIR"
+
+# systemd user services do not inherit the login-shell PATH, so bare
+# `node`/`pnpm` in run-google-readonly.sh / companion-deploy.sh fail with
+# `node: not found` (exit 127) when node lives in ~/.local/bin. Resolve
+# both at install time and pin them into per-unit drop-ins; the unit files
+# in the repo stay generic.
+NODE_BIN="$(command -v node 2>/dev/null || true)"
+if [ -z "$NODE_BIN" ]; then
+  printf 'install.sh: node not found in PATH (systemd user units get no login-shell PATH; install Node 24, e.g. ~/.local/bin, then re-run)\n' >&2
+  exit 1
+fi
+PNPM_BIN="$(command -v pnpm 2>/dev/null || true)"
+if [ -z "$PNPM_BIN" ]; then
+  printf 'install.sh: pnpm not found in PATH (systemd user units get no login-shell PATH; install pnpm, e.g. ~/.local/bin, then re-run)\n' >&2
+  exit 1
+fi
+NODE_DIR="$(dirname -- "$NODE_BIN")"
+PNPM_DIR="$(dirname -- "$PNPM_BIN")"
+UNIT_PATH="$NODE_DIR:$PNPM_DIR:/usr/local/bin:/usr/bin:/bin"
+DEDUP=""
+OLD_IFS="$IFS"
+IFS=":"
+for _d in $UNIT_PATH; do
+  case ":$DEDUP:" in
+    *":$_d:"*) ;;
+    *) DEDUP="${DEDUP:+$DEDUP:}$_d" ;;
+  esac
+done
+IFS="$OLD_IFS"
+UNIT_PATH="$DEDUP"
+unset DEDUP OLD_IFS _d NODE_BIN PNPM_BIN NODE_DIR PNPM_DIR
+
 cp "$HERE/systemd/companion.service" "$UNIT_DIR/companion.service"
 cp "$HERE/systemd/companion-deploy.service" "$UNIT_DIR/companion-deploy.service"
 cp "$HERE/systemd/companion-deploy.timer" "$UNIT_DIR/companion-deploy.timer"
 printf 'installed units to %s\n' "$UNIT_DIR"
+
+# companion-deploy.sh needs git, gh, pnpm, node: the same pinned PATH
+# covers both units (git/gh normally live in /usr/bin already in the
+# fallback tail).
+for _svc in companion.service companion-deploy.service; do
+  mkdir -p "$UNIT_DIR/$_svc.d"
+  printf '[Service]\nEnvironment=PATH=%s\n' "$UNIT_PATH" >"$UNIT_DIR/$_svc.d/path.conf"
+  printf 'wrote %s\n' "$UNIT_DIR/$_svc.d/path.conf"
+done
+unset _svc
+printf 'pinned unit PATH=%s\n' "$UNIT_PATH"
+unset UNIT_PATH
 
 if [ ! -f "$ENV_FILE" ]; then
   cat >"$ENV_FILE" <<EOF
