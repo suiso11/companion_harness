@@ -271,6 +271,9 @@ const SANITIZE_CONFIG = {
     "colspan",
     "rowspan",
     "type",
+    "start",
+    "checked",
+    "disabled",
     "aria-hidden",
     "aria-label",
     "aria-describedby",
@@ -319,8 +322,69 @@ const SANITIZE_CONFIG = {
     "caption",
     // code-block chrome (language label, copy button)
     "button",
+    // GFM task-list checkbox only (`- [ ]` / `- [x]`); constrained to
+    // `type=checkbox` with `checked`/`disabled` only and forced `disabled`
+    // by the hook below — every other `<input>` is removed.
+    "input",
   ],
 };
+
+// Task-list checkbox guard (review #84): raw HTML never reaches here as
+// elements (`literalHtml` demotes it to text), so the only `<input>`
+// elements are GFM task-list checkboxes from mdast→hast. The hook keeps
+// exactly those — `type` must be `checkbox`, all attributes except
+// `type`/`checked` are dropped, and `disabled` is forced on — and removes
+// anything else (e.g. `type=text` smuggled through a future pipeline
+// change). Installed once at module scope.
+let taskListHookInstalled = false;
+function installTaskListHook(): void {
+  if (taskListHookInstalled) return;
+  taskListHookInstalled = true;
+  DOMPurify.addHook("uponSanitizeElement", (node) => {
+    const el =
+      node !== null && typeof node === "object" && "tagName" in node
+        ? (node as globalThis.Element)
+        : null;
+    if (el === null || el.tagName !== "INPUT") return;
+    const type = el.getAttribute("type");
+    if (type !== "checkbox") {
+      el.remove();
+      return;
+    }
+    const checked = el.hasAttribute("checked");
+    for (const attr of Array.from(el.attributes)) {
+      el.removeAttribute(attr.name);
+    }
+    el.setAttribute("type", "checkbox");
+    if (checked) el.setAttribute("checked", "");
+    el.setAttribute("disabled", "");
+  });
+}
+
+// GFM table alignment (review #84): mdast→hast emits the deprecated
+// `align` attribute on th/td (`align="left"|"center"|"right"`). The
+// sanitizer drops it, so alignment was lost. This hook converts it to a
+// fixed class (`md-align-*`) before attribute filtering and removes the
+// attribute; the classes are styled in `app.css`. Installed once at
+// module scope.
+let alignHookInstalled = false;
+function installAlignHook(): void {
+  if (alignHookInstalled) return;
+  alignHookInstalled = true;
+  DOMPurify.addHook("uponSanitizeElement", (node) => {
+    const el =
+      node !== null && typeof node === "object" && "tagName" in node
+        ? (node as globalThis.Element)
+        : null;
+    if (el === null) return;
+    const name = el.tagName;
+    if (name !== "TH" && name !== "TD") return;
+    const align = el.getAttribute("align");
+    el.removeAttribute("align");
+    if (align !== "left" && align !== "center" && align !== "right") return;
+    el.classList.add(`md-align-${align}`);
+  });
+}
 
 // Subset highlighter (replaces rehype-highlight with `{ detect: false }`):
 // only `<pre><code class="language-x">` blocks whose language is
@@ -435,6 +499,8 @@ export function renderAnswerMarkdown(text: string): string {
     dirty = text;
   }
   try {
+    installTaskListHook();
+    installAlignHook();
     return DOMPurify.sanitize(dirty, SANITIZE_CONFIG) as unknown as string;
   } catch {
     return "";

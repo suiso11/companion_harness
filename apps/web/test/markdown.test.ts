@@ -70,6 +70,37 @@ describe("renderAnswerMarkdown", () => {
     expect(html).toContain("m2");
   });
 
+  test("keeps ordered-list start numbers", () => {
+    const html = renderAnswerMarkdown("3. three\n4. four\n");
+    expect(html).toContain("<ol");
+    expect(html).toContain('start="3"');
+  });
+
+  test("keeps task-list checkboxes disabled and drops other inputs", () => {
+    const checked = renderAnswerMarkdown("- [x] done\n- [ ] todo\n");
+    expect(checked).toMatch(/<input[^>]*type="checkbox"/);
+    expect(checked).toContain("disabled");
+    // Only checkbox inputs survive: no text inputs, no bare type attrs.
+    expect(checked).not.toMatch(/type="text"/);
+    const hostile = renderAnswerMarkdown(
+      '<input type="text" value="steal" onfocus="alert(1)">',
+    );
+    expect(hostile).not.toMatch(/<input[\s>]/);
+  });
+
+  test("preserves GFM table column alignment as classes", () => {
+    const html = renderAnswerMarkdown(
+      "| a | b | c |\n| --- | ---: | :---: |\n| 1 | 2 | 3 |\n",
+    );
+    // Left-aligned columns get no class (default `text-align: start`);
+    // center/right columns are carried through as classes.
+    expect(html).toContain("md-align-right");
+    expect(html).toContain("md-align-center");
+    expect(html).not.toContain("md-align-left");
+    // Deprecated align attribute must not survive sanitization.
+    expect(html).not.toMatch(/\salign=/);
+  });
+
   test("returns empty string for empty input", () => {
     expect(renderAnswerMarkdown("")).toBe("");
   });
