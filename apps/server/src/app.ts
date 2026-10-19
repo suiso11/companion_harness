@@ -2331,11 +2331,17 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   // PR-5 dynamic route chunks (e.g. svelte-app-FeaturePage.js). Only the
   // fixed self-hosted names loaded from dist/svelte are served; anything
   // else stays 404 (no catch-all static server).
-  app.get("/assets/svelte-app-:chunk", (c) => {
+  app.get("/assets/:chunk", (c) => {
     if (!strictQuery(c, []).ok) {
       return validationError(c);
     }
-    const chunk = assets.svelteChunks?.[`svelte-app-${c.req.param("chunk")}`];
+    // Hono path params match a whole segment, so the fixed-name check happens
+    // here: only the exact bundle names loaded from dist/svelte are served.
+    const name = c.req.param("chunk");
+    if (!/^svelte-app-.+\.js$/.test(name)) {
+      return apiError(c, 404, "not_found", "resource not found");
+    }
+    const chunk = assets.svelteChunks?.[name];
     if (chunk === undefined) {
       return apiError(c, 404, "not_found", "resource not found");
     }
