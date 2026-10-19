@@ -24,6 +24,7 @@ import type {
   GatewayOptions,
   ModelCapabilities,
   ModelStreamDeltaCallback,
+  ModelToolChoice,
   ToolDefinition,
 } from "./types.js";
 
@@ -910,6 +911,7 @@ export interface ResolvedGatewayConfig {
   apiKey: string | undefined;
   timeoutMs: number | undefined;
   streamingEnabled: boolean;
+  toolChoice: ModelToolChoice;
 }
 
 /** Validate gateway options: loopback base URL, fetch impl, timeout. */
@@ -947,12 +949,26 @@ export function resolveGatewayConfig(
   ) {
     throw new ModelLocalError("invalid_request", "model timeout is invalid");
   }
+  if (
+    options.toolChoice !== undefined &&
+    options.toolChoice !== "auto" &&
+    options.toolChoice !== "required"
+  ) {
+    throw new ModelLocalError(
+      "invalid_request",
+      "model tool choice is invalid",
+    );
+  }
   return {
     baseUrl,
     fetchImpl,
     apiKey: options.apiKey,
     timeoutMs: options.timeoutMs,
     streamingEnabled: options.streamingEnabled === true,
+    // Default `required`: a content-only step would be classified as
+    // `free_text` by the kernel. Explicit `auto` restores provider
+    // defaults; the Ollama adapter never emits tool_choice.
+    toolChoice: options.toolChoice ?? "required",
   };
 }
 

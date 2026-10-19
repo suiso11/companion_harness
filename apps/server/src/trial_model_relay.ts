@@ -626,11 +626,13 @@ export class TrialModelRelay {
         throw new TranslationError("model_mismatch");
       }
     }
-    // tool_choice "auto" only when present.
+    // tool_choice "auto" or "required" when present; the gateway owns the
+    // effective policy (its default is `required` for tool-bearing calls).
     if (
       body.tool_choice !== undefined &&
       body.tool_choice !== null &&
-      body.tool_choice !== "auto"
+      body.tool_choice !== "auto" &&
+      body.tool_choice !== "required"
     ) {
       throw new TranslationError("unsupported_tool_choice");
     }

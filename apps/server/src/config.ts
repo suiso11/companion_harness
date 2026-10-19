@@ -456,6 +456,14 @@ export interface ModelConfig {
   readonly model: string;
   /** Optional bearer token (never logged, never persisted). */
   readonly apiKey?: string;
+  /**
+   * Optional OpenAI-compatible `tool_choice` policy for tool-bearing
+   * requests. Unset defaults to `required` so a model that would answer in
+   * prose must call a tool instead (the kernel classifies a content-only
+   * step as `free_text`). `auto` restores provider defaults. Ignored by the
+   * Ollama adapter.
+   */
+  readonly toolChoice?: "auto" | "required";
 }
 
 export const MAX_MODEL_NAME_LENGTH = 256;
@@ -696,7 +704,8 @@ export function parseModelConfig(raw: string | undefined): ModelConfig | null {
       key !== "adapter" &&
       key !== "baseUrl" &&
       key !== "model" &&
-      key !== "apiKey"
+      key !== "apiKey" &&
+      key !== "toolChoice"
     ) {
       throw configError("model config has an unknown key");
     }
@@ -706,6 +715,7 @@ export function parseModelConfig(raw: string | undefined): ModelConfig | null {
     baseUrl?: unknown;
     model?: unknown;
     apiKey?: unknown;
+    toolChoice?: unknown;
   };
   if (record.adapter !== "ollama" && record.adapter !== "openai-compatible") {
     throw configError("model adapter is invalid");
@@ -724,6 +734,13 @@ export function parseModelConfig(raw: string | undefined): ModelConfig | null {
   ) {
     throw configError("model identifier is invalid");
   }
+  if (
+    record.toolChoice !== undefined &&
+    record.toolChoice !== "auto" &&
+    record.toolChoice !== "required"
+  ) {
+    throw configError("model tool choice is invalid");
+  }
   if (record.apiKey !== undefined) {
     if (
       typeof record.apiKey !== "string" ||
@@ -741,12 +758,18 @@ export function parseModelConfig(raw: string | undefined): ModelConfig | null {
           adapter: record.adapter,
           baseUrl,
           model: record.model as string,
+          ...(record.toolChoice === undefined
+            ? {}
+            : { toolChoice: record.toolChoice }),
         }
       : {
           adapter: record.adapter,
           baseUrl,
           model: record.model as string,
           apiKey: record.apiKey as string,
+          ...(record.toolChoice === undefined
+            ? {}
+            : { toolChoice: record.toolChoice }),
         },
   );
 }

@@ -283,6 +283,35 @@ describe.skipIf(process.platform === "win32")("trial_model_relay", () => {
     }
   });
 
+  it("accepts tool_choice required from the guest", async () => {
+    const gw = fakeGateway();
+    const { relay, sock } = await startRelay(testCaps(), gw);
+    try {
+      relay.setPermitted(true);
+      const res = await postUds(sock, chatBody({ tool_choice: "required" }));
+      expect(res.status).toBe(200);
+      expect(gw.calls.length).toBe(1);
+    } finally {
+      await relay.close();
+    }
+  });
+
+  it("rejects an unsupported tool_choice value", async () => {
+    const gw = fakeGateway();
+    const { relay, sock } = await startRelay(testCaps(), gw);
+    try {
+      relay.setPermitted(true);
+      const res = await postUds(sock, chatBody({ tool_choice: "none" }));
+      expect(res.status).toBe(400);
+      expect(JSON.parse(res.text).error.message).toBe(
+        "unsupported_tool_choice",
+      );
+      expect(gw.calls.length).toBe(0);
+    } finally {
+      await relay.close();
+    }
+  });
+
   it("rejects caps above the gateway response ceiling", async () => {
     const gw = fakeGateway();
     expect(

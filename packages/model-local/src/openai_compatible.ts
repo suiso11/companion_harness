@@ -341,6 +341,7 @@ export function createOpenAICompatibleGateway(
           timeoutMs: config.timeoutMs,
           request,
           options,
+          toolChoice: config.toolChoice,
         });
       }
       const body: Record<string, unknown> = {
@@ -363,7 +364,7 @@ export function createOpenAICompatibleGateway(
             },
           },
         }));
-        body.tool_choice = "auto";
+        body.tool_choice = config.toolChoice;
       }
       const raw = await postJsonNoRedirect({
         fetchImpl: config.fetchImpl,
@@ -400,8 +401,9 @@ async function streamOpenAIChat(options: {
   timeoutMs: number | undefined;
   request: Parameters<ModelGateway["chat"]>[0];
   options: ChatCallOptions | undefined;
+  toolChoice: import("./types.js").ModelToolChoice;
 }): Promise<import("./types.js").ChatResult> {
-  const { fetchImpl, url, apiKey, timeoutMs, request } = options;
+  const { fetchImpl, url, apiKey, timeoutMs, request, toolChoice } = options;
   const callOptions = options.options;
   const body: Record<string, unknown> = {
     model: request.model,
@@ -424,7 +426,7 @@ async function streamOpenAIChat(options: {
         },
       },
     }));
-    body.tool_choice = "auto";
+    body.tool_choice = toolChoice;
   }
   const accumulator = new OpenAIStreamAccumulator();
   let draftEmitted = "";

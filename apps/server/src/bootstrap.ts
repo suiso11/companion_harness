@@ -463,6 +463,7 @@ export function createModelGateway(
     ...(model.apiKey !== undefined ? { apiKey: model.apiKey } : {}),
     ...(fetchImpl !== undefined ? { fetchImpl } : {}),
     ...(opts.streamingEnabled === true ? { streamingEnabled: true } : {}),
+    ...(model.toolChoice !== undefined ? { toolChoice: model.toolChoice } : {}),
   };
   if (model.adapter === "ollama") {
     return createOllamaGateway(options);
