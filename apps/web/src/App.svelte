@@ -375,10 +375,16 @@ function stopElapsedTimer(): void {
   }
 }
 
-function startElapsedTimer(): void {
+function startElapsedTimer(fromMs?: number): void {
   stopElapsedTimer();
-  runStartedAt = Date.now();
-  elapsedSec = 0;
+  // PR77 review: when a durable run start is known (reload/resubscribe),
+  // seed the timer from it so a minutes-old run is not shown as newly
+  // started; a fresh subscription starts from now.
+  runStartedAt = typeof fromMs === "number" && fromMs > 0 ? fromMs : Date.now();
+  elapsedSec =
+    runStartedAt === Date.now()
+      ? 0
+      : Math.max(0, Math.floor((Date.now() - runStartedAt) / 1000));
   elapsedTimer = window.setInterval(() => {
     if (activeRunId === null) {
       stopElapsedTimer();
@@ -843,6 +849,10 @@ function finishActiveRun(): void {
 }
 
 function subscribe(runId: string): void {
+  void subscribeRun(runId);
+}
+
+async function subscribeRun(runId: string): Promise<void> {
   if (sessionId === null) return;
   closeStream();
   activeRunId = runId;
@@ -854,6 +864,7 @@ function subscribe(runId: string): void {
   thinkingCollapsed = false;
   showThinking = false;
   startElapsedTimer();
+  const stored = readStoredCursor(runId);
   if (seededRunId === runId) {
     // Boot-seeded pre-subscription view (e.g. the cancel_requested stop
     // notice): preserved across the stream open; the real events stay
@@ -864,11 +875,23 @@ function subscribe(runId: string): void {
     liveVisible = false;
     runView = { ...INITIAL_RUN_VIEW };
     activeRunCursor = 0;
+    if (stored !== null && stored > 0) {
+      // PR77 review: a stored cursor means the stream resumes mid-run
+      // (page reload). Before another durable event creates a gap and
+      // triggers catch-up, the zeroed projection would derive 「考え中…」
+      // even when the persisted events show an outstanding tool.requested.
+      // Seed the elapsed timer from the run's durable start and rebuild
+      // the phase projection from history (up to the stored cursor, so
+      // the native stream keeps delivering newer events; reducer dedup
+      // keeps any overlap exactly-once).
+      const resynced = await validateStoredCursor(runId, stored);
+      if (resynced || activeRunId !== runId || sessionId === null) return;
+      const rebuilt = await rebuildResumedProjection(runId, stored);
+      if (rebuilt && activeRunId !== runId) return;
+    }
   }
   showNotice(runView.notice);
   const sid = sessionId;
-  const stored = readStoredCursor(runId);
-  void validateStoredCursor(runId, stored ?? 0);
   const query = stored !== null && stored > 0 ? `?after=${stored}` : "";
   const url = `/api/sessions/${encodeURIComponent(sid)}/runs/${encodeURIComponent(runId)}/events/stream${query}`;
   let opened = false;
@@ -927,28 +950,112 @@ function subscribe(runId: string): void {
   };
 }
 
+/**
+ * Cursor validation on resume + durable elapsed-time seed (PR77 review).
+ * Returns true when a corrupt cursor triggered a resync + re-subscribe (the
+ * caller must not open another stream for the stale cursor).
+ */
 async function validateStoredCursor(
   runId: string,
   cursor: number,
-): Promise<void> {
-  if (sessionId === null || cursor <= 0 || activeRunId !== runId) return;
+): Promise<boolean> {
+  if (sessionId === null || cursor <= 0 || activeRunId !== runId) return false;
   let fetched: { status: number; body: unknown };
   try {
     fetched = await fetchJson(
       `/api/sessions/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(runId)}/status`,
     );
   } catch {
-    return;
+    return false;
   }
-  if (activeRunId !== runId || fetched.status !== 200) return;
+  if (activeRunId !== runId || fetched.status !== 200) return false;
   const run = (fetched.body as { run?: unknown }).run;
-  if (typeof run !== "object" || run === null) return;
-  const r = run as { id?: unknown; eventSeq?: unknown };
-  if (r.id !== runId || typeof r.eventSeq !== "number") return;
+  if (typeof run !== "object" || run === null) return false;
+  const r = run as {
+    id?: unknown;
+    eventSeq?: unknown;
+    startedAt?: unknown;
+    createdAt?: unknown;
+  };
+  if (r.id !== runId || typeof r.eventSeq !== "number") return false;
   if (isCorruptCursor(cursor, r.eventSeq)) {
     await resyncFromHistory(runId);
     if (sessionId !== null) subscribe(runId);
+    return true;
   }
+  // Durable run timing (additive status fields, PR77 review): seed the
+  // elapsed timer from the real run start instead of the subscription
+  // instant, so a reloaded page no longer shows a minutes-old run as new.
+  const startedAt = typeof r.startedAt === "number" ? r.startedAt : null;
+  const createdAt = typeof r.createdAt === "number" ? r.createdAt : null;
+  const durableStart = startedAt ?? createdAt;
+  if (durableStart !== null && activeRunId === runId) {
+    startElapsedTimer(durableStart);
+  }
+  return false;
+}
+
+/**
+ * PR77 review: rebuild the durable phase projection by replaying the run's
+ * event history from the beginning up to the stored resume cursor, so the
+ * status line derives from the persisted tool.requested/tool.completed/step
+ * counters instead of zeroed ones (no phantom 「考え中…」 while a tool is
+ * outstanding). Events past `upto` stay the native stream's responsibility
+ * (the C06 native-terminal-frame race), so this drain stops at the cursor;
+ * a best-effort failure keeps the zeroed view and the stream's
+ * needs-catchup path converges afterwards.
+ */
+async function rebuildResumedProjection(
+  runId: string,
+  upto: number,
+): Promise<boolean> {
+  if (sessionId === null) return false;
+  let cursor = 0;
+  for (let page = 0; page < 20; page += 1) {
+    if (cursor > upto) break;
+    let fetched: { status: number; body: unknown };
+    try {
+      fetched = await fetchJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(runId)}/events?after=${cursor}&limit=50`,
+      );
+    } catch {
+      return false;
+    }
+    if (fetched.status < 200 || fetched.status >= 300) return false;
+    const body = fetched.body as {
+      events?: Array<{ seq?: unknown; type?: unknown; payload?: unknown }>;
+      nextAfter?: unknown;
+    };
+    if (!Array.isArray(body.events)) return false;
+    for (const item of body.events) {
+      if (typeof item.seq !== "number" || typeof item.type !== "string")
+        continue;
+      if (item.seq > upto) break;
+      if (activeRunId !== runId) return false;
+      const applied = applyRunEvent(
+        { ...runView, cursor: activeRunCursor },
+        { seq: item.seq, type: item.type, payload: item.payload },
+      );
+      if (applied.outcome.kind === "ignored-duplicate") continue;
+      if (applied.outcome.kind === "needs-catchup") return true;
+      if (applied.outcome.kind === "ignored-unknown") {
+        activeRunCursor = applied.state.cursor;
+        storeCursor(runId, applied.state.cursor);
+        continue;
+      }
+      runView = applied.state;
+      activeRunCursor = applied.state.cursor;
+      storeCursor(runId, applied.state.cursor);
+    }
+    cursor = typeof body.nextAfter === "number" ? body.nextAfter : cursor + 1;
+    if (body.events.length === 0) break;
+  }
+  if (activeRunId !== runId) return false;
+  // One repaint after the rebuild: the derived phase line now matches the
+  // persisted events; a replayed terminal renders and releases the run
+  // exactly once (guarded by renderedAnswers/terminalHydrated).
+  renderRunView(runId);
+  return true;
 }
 
 async function resyncFromHistory(runId: string): Promise<void> {

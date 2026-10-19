@@ -2123,6 +2123,10 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
           // Additive (I01-06): per-run memory status, metadata only; null
           // stays visible as null (the run reached recall but no marker).
           memoryStatus: owned.memoryStatus,
+          // Additive (PR77 review): durable run timing for the resuming
+          // browser's elapsed timer (epoch ms; startedAt null while queued).
+          startedAt: owned.startedAt,
+          createdAt: owned.createdAt,
         },
       });
       return c.json(body, 200);

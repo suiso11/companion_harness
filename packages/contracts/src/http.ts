@@ -327,6 +327,12 @@ export const RunStatusResponseSchema = z.strictObject({
     // Absent/null when the run never reached the recall boundary or the
     // row predates the column; the frozen core fields stay unchanged.
     memoryStatus: RunMemoryStatusSchema.nullable().optional(),
+    // Additive (PR77 review): durable run timing (epoch ms) so a resuming
+    // browser seeds its elapsed timer from the real run start instead of
+    // the subscription instant. `startedAt` is null until the run left the
+    // queue; `createdAt` is always present on the row.
+    startedAt: z.number().int().nullable().optional(),
+    createdAt: z.number().int().optional(),
   }),
 });
 export type RunStatusResponse = z.infer<typeof RunStatusResponseSchema>;
