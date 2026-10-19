@@ -4,6 +4,7 @@
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ANSWER_INVALID_REASON_CODES } from "@companion/contracts";
 import { closeKernelDatabase, openKernelDatabase } from "@companion/kernel";
 import { afterEach, describe, expect, it } from "vitest";
 import { runManualBackupCli } from "../src/cli.js";
@@ -90,10 +91,9 @@ describe("store size warning", () => {
   });
 
   it("preserves only fixed answer-invalid reason codes in logs", () => {
-    expect(sanitizeLogReason("model_args_malformed")).toBe(
-      "model_args_malformed",
-    );
-    expect(sanitizeLogReason("mixed_tool_calls")).toBe("mixed_tool_calls");
+    for (const reason of ANSWER_INVALID_REASON_CODES) {
+      expect(sanitizeLogReason(reason)).toBe(reason);
+    }
     expect(sanitizeLogReason("parse:too_small@parts.0.text")).toBe(
       "parse:too_small@parts.0.text",
     );

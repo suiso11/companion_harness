@@ -125,7 +125,6 @@ function sanitizeString(value: unknown): string | undefined {
   return value.slice(0, MAX_STRING_LENGTH);
 }
 
-/** Map an arbitrary shutdown/startup reason or error name to a fixed status. */
 /**
  * Preserve the fixed answer-invalid reason vocabulary (including the
  * bounded `parse:<issue>@<path>` form); everything else falls back to the
@@ -142,6 +141,7 @@ export function sanitizeLogReason(value: unknown): string | undefined {
   return typeof status === "string" ? status : undefined;
 }
 
+/** Map an arbitrary shutdown/startup reason or error name to a fixed status. */
 export function sanitizeLogStatus(value: unknown): string | number | undefined {
   if (typeof value === "number") {
     return Number.isFinite(value) ? value : undefined;

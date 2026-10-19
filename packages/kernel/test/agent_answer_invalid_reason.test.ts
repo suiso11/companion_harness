@@ -11,6 +11,7 @@ import type {
 import { ModelLocalError } from "@companion/model-local";
 import { describe, expect, it } from "vitest";
 import {
+  type AgentModelStepFailure,
   closeKernelDatabase,
   createAgentStrategy,
   createKernelRepository,
@@ -116,7 +117,10 @@ function newRunningTurn(
 }
 
 /** Run a two-step script and return the persisted model.step.* payloads. */
-async function runScript(script: Array<ChatResult | Error>) {
+async function runScript(
+  script: Array<ChatResult | Error>,
+  onModelStepFailed?: (failure: AgentModelStepFailure) => void,
+) {
   const { handle, repo } = await setup();
   try {
     const broker = createToolBroker({
@@ -131,6 +135,7 @@ async function runScript(script: Array<ChatResult | Error>) {
       broker,
       gateway,
       model: "m",
+      ...(onModelStepFailed === undefined ? {} : { onModelStepFailed }),
     });
     const { sessionId, runId } = newRunningTurn(repo, T0);
     let thrown: unknown;
@@ -177,6 +182,35 @@ describe("answer_invalid reason codes", () => {
         errorCode: "answer_invalid",
       });
     }
+  });
+
+  it("falls back to other when the provider carries no fixed cause", async () => {
+    const error = new ModelLocalError(
+      "answer_invalid",
+      "model returned an invalid answer",
+    );
+    const { payloads } = await runScript([error, error]);
+    expect(payloads[0]).toMatchObject({
+      errorCode: "answer_invalid",
+      reason: "other",
+    });
+  });
+
+  it("notifies the log hook with metadata only (no model text)", async () => {
+    const seen: AgentModelStepFailure[] = [];
+    const bad = answerCall([{ text: LEAK }]);
+    const { payloads } = await runScript(
+      [chatResult([bad]), chatResult([bad])],
+      (failure) => seen.push(failure),
+    );
+    expect(seen[0]).toMatchObject({
+      step: 1,
+      errorCode: "answer_invalid",
+      reason: "parse:invalid_type@parts.0.citations",
+    });
+    expect(seen[0]?.runId).toBeTypeOf("string");
+    expect(JSON.stringify(seen)).not.toContain(LEAK);
+    expect(JSON.stringify(payloads)).not.toContain(LEAK);
   });
 
   it("records model_args_malformed for a custom-gateway non-object answer", async () => {
