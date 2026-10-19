@@ -50,6 +50,7 @@ export default defineConfig({
           "mobile_layout.spec.ts",
           "svelte_shell.spec.ts",
           "thinking_status.spec.ts",
+          "draft_answer.spec.ts",
         ],
   timeout: 60_000,
   expect: { timeout: 15_000 },

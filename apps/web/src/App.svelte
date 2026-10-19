@@ -9,6 +9,12 @@ import {
   randomUuid,
 } from "./lib/api.js";
 import {
+  appendDraftText,
+  DRAFT_LABEL,
+  type DraftState,
+  draftDisplayText,
+} from "./lib/draft.js";
+import {
   ACTION_PROGRESS_TEXT,
   actionCardModel,
   actionDecisionIntentText,
@@ -158,6 +164,13 @@ let thinkingCollapsed = $state(false);
 let showThinking = $state(false);
 let runStartedAt = $state(0);
 let elapsedSec = $state(0);
+// PR-4 provisional draft (ephemeral, memory-only, never persisted/sent).
+let draft: DraftState | null = $state(null);
+// PR78 review: run ids whose draft must never (re)appear. A reload-adopted
+// run clears its draft once; later `answer.draft.delta` frames for it are
+// ignored, and `run.cancel_requested` / a successful cancel POST discard
+// the draft even while the run still reports "generating".
+const draftSuppressedRuns = new Set<string>();
 let elapsedTimer: number | null = null;
 let retryTurnId: string | null = $state(null);
 let drawerOpen = $state(false);
@@ -347,6 +360,8 @@ function resetChatState(): void {
   thinking = { ...EMPTY_THINKING };
   thinkingCollapsed = false;
   showThinking = false;
+  draft = null;
+  draftSuppressedRuns.clear();
   stopElapsedTimer();
   elapsedSec = 0;
   retryTurnId = null;
@@ -425,9 +440,10 @@ function isEphemeralDelta(event: { seq: number; type: string }): boolean {
 }
 
 /**
- * Apply one ephemeral delta to memory-only thinking state. Never touches
- * the durable cursor, never persists, never sends anything back.
- * `answer.draft.delta` is PR-4 scope (provisional drafts): ignored here.
+ * Apply one ephemeral delta to memory-only thinking/draft state. Never
+ * touches the durable cursor, never persists, never sends anything back.
+ * `answer.draft.delta` accumulates the provisional draft (PR-4); a new
+ * step restarts the text, the validated answer/failure/cancel discards it.
  */
 function applyEphemeralDelta(
   runId: string,
@@ -453,7 +469,33 @@ function applyEphemeralDelta(
   }
   if (event.type === "model.usage") {
     thinking = applyThinkingUsage(thinking, event.payload);
+    return;
   }
+  if (event.type === "answer.draft.delta") {
+    // PR78 review: an adopted/reloaded run's draft is dropped once and
+    // never rebuilt from later delta frames (the bubble must not reappear).
+    if (draftSuppressedRuns.has(runId)) {
+      return;
+    }
+    // Provisional unvalidated text: same-step appends, new-step restarts.
+    draft = appendDraftText(draft, event.payload);
+  }
+}
+
+/**
+ * PR78 review: `run.cancel_requested` keeps `runView.visible` "generating"
+ * until the cancellation watchdog emits the terminal event, so the old
+ * draft would stay visible (and a non-cooperative gateway could keep
+ * feeding deltas). Discard the draft and suppress later delta frames as
+ * soon as cancellation is requested; also called right after a successful
+ * cancel POST.
+ */
+function discardDraftOnCancelRequested(runId: string, type: string): void {
+  if (type !== "run.cancel_requested" || activeRunId !== runId) {
+    return;
+  }
+  draft = null;
+  draftSuppressedRuns.add(runId);
 }
 
 // --- history ---
@@ -774,8 +816,9 @@ async function stop(): Promise<void> {
     await syncActions();
     return;
   }
+  const runId = activeRunId;
   const posted = await postJson(
-    `/api/sessions/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(activeRunId)}/cancel`,
+    `/api/sessions/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(runId)}/cancel`,
     {},
     null,
   );
@@ -783,7 +826,15 @@ async function stop(): Promise<void> {
     showNotice("停止できませんでした");
     return;
   }
-  if (actionRunStops.has(activeRunId)) {
+  // PR78 review: once the cancel POST is accepted, discard the draft and
+  // suppress later deltas immediately — do not wait for the terminal
+  // event, which a non-cooperative strategy can delay for seconds while
+  // the run still reports "generating".
+  if (activeRunId === runId) {
+    draft = null;
+    draftSuppressedRuns.add(runId);
+  }
+  if (actionRunStops.has(runId)) {
     if (parseCancelRunStatus(posted.body) === "cancelled") {
       showNotice("停止しました");
     }
@@ -845,6 +896,11 @@ function closeStream(): void {
 function finishActiveRun(): void {
   closeStream();
   stopElapsedTimer();
+  if (activeRunId !== null) {
+    // PR78 review: the terminal released the run; a later run must not
+    // inherit this run's draft suppression.
+    draftSuppressedRuns.delete(activeRunId);
+  }
   activeRunId = null;
   activeTurnId = null;
 }
@@ -864,6 +920,7 @@ async function subscribeRun(runId: string): Promise<void> {
   thinking = { ...EMPTY_THINKING };
   thinkingCollapsed = false;
   showThinking = false;
+  draft = null;
   startElapsedTimer();
   const stored = readStoredCursor(runId);
   if (seededRunId === runId) {
@@ -1048,6 +1105,7 @@ async function rebuildResumedProjection(
         continue;
       if (item.seq > upto) break;
       if (activeRunId !== runId) return false;
+      discardDraftOnCancelRequested(runId, item.type);
       const applied = applyRunEvent(
         { ...runView, cursor: activeRunCursor },
         { seq: item.seq, type: item.type, payload: item.payload },
@@ -1090,6 +1148,9 @@ function applySerialized(
   runId: string,
   event: { seq: number; type: string; payload: unknown },
 ): void {
+  // PR78 review: cancellation discards the draft immediately, even while
+  // the run still renders "generating" (non-cooperative hold-cancel path).
+  discardDraftOnCancelRequested(runId, event.type);
   // Ephemeral deltas bypass the durable reducer entirely: no cursor, no
   // persistence, no catch-up. Deltas arriving after the terminal stay
   // dropped (the validated answer is authoritative).
@@ -1178,6 +1239,7 @@ async function catchUp(
       if (typeof item.seq !== "number" || typeof item.type !== "string")
         continue;
       if (activeRunId !== runId) return true;
+      discardDraftOnCancelRequested(runId, item.type);
       const applied = applyRunEvent(
         { ...runView, cursor: activeRunCursor },
         { seq: item.seq, type: item.type, payload: item.payload },
@@ -1246,6 +1308,9 @@ function renderRunView(runId: string): void {
   if (runView.visible === "answered") {
     // The answer auto-collapses the Thinking block (user can re-open).
     thinkingCollapsed = true;
+    // PR-4: the validated structured answer REPLACES the provisional
+    // draft completely (the draft label vanishes with the draft text).
+    draft = null;
     if (renderedAnswers.has(runId)) {
       finishActiveRun();
       if (!terminalHydrated.has(runId)) {
@@ -1273,6 +1338,8 @@ function renderRunView(runId: string): void {
     return;
   }
   if (runView.visible === "failed") {
+    // PR-4: a failed run discards the provisional draft.
+    draft = null;
     showNotice("生成に失敗しました");
     const turnId = runTurns.get(runId) ?? activeTurnId;
     const retryVisible = runView.retryVisible;
@@ -1294,6 +1361,8 @@ function renderRunView(runId: string): void {
     return;
   }
   if (runView.visible === "stopped") {
+    // PR-4: a cancelled run discards the provisional draft.
+    draft = null;
     showNotice("停止しました");
     finishActiveRun();
     if (!terminalHydrated.has(runId)) {
@@ -2350,6 +2419,11 @@ async function bootSession(): Promise<void> {
       runTurns.set(descriptor.runId, descriptor.turnId);
     }
     activeRunId = descriptor.runId;
+    // PR78 review: a reload adopts this already-active run and drops its
+    // draft once; later `answer.draft.delta` frames from the freshly opened
+    // stream must never rebuild the bubble (the reload guarantee).
+    draft = null;
+    draftSuppressedRuns.add(descriptor.runId);
     if (descriptor.status === "cancel_requested") {
       runView = { ...INITIAL_RUN_VIEW, notice: "停止しました" };
       activeRunCursor = 0;
@@ -2650,6 +2724,12 @@ function evidenceForTurn(turn: Turn): {
           <p data-run-stats="true">{statsOnly}</p>
         </section>
       {/if}
+    {/if}
+    {#if draft !== null && activeRunId !== null && runView.visible === "generating" && draftDisplayText(draft).length > 0}
+      <section data-draft="true" aria-label="下書き" aria-live="off">
+        <p data-draft-label="true">{DRAFT_LABEL}</p>
+        <p data-draft-text="true">{draftDisplayText(draft)}</p>
+      </section>
     {/if}
     {#if liveVisible}
       {@const runId = [...renderedAnswers].pop()}
