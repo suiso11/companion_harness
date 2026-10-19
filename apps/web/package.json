@@ -5,13 +5,14 @@
   "type": "module",
   "scripts": {
     "build": "vite build",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json && svelte-check --tsconfig ./tsconfig.json"
   },
   "dependencies": {
     "svelte": "5.57.2"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "5.1.1",
+    "svelte-check": "4.7.7",
     "typescript": "5.9.3",
     "vite": "6.4.1"
   },

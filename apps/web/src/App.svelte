@@ -15,6 +15,7 @@ import {
   actionErrorCodeText,
   actionEvidenceButtons,
   applyRunEvent,
+  type ExecutionStatus,
   INITIAL_RUN_VIEW,
   isCorruptCursor,
   isRetryableTurnKind,
@@ -70,7 +71,7 @@ interface ExecutionView {
   proposalId: string;
   proposalStatus: ProposalStatus;
   runId: string | null;
-  status: string | null;
+  status: ExecutionStatus | null;
   markerCommitted: boolean;
   cancellable: boolean;
   errorCode: string | null;
@@ -150,7 +151,7 @@ let degradedMemory = $state(false);
 let sse: EventSource | null = null;
 let fallbackTimer: number | null = null;
 let runChain: Promise<void> = Promise.resolve();
-let renderedAnswers = new Set<string>();
+let renderedAnswers = $state(new Set<string>());
 let terminalHydrated = new Set<string>();
 let turnKinds = new Map<string, string>();
 let runTurns = new Map<string, string>();
@@ -368,7 +369,7 @@ function coerceTurn(item: unknown): Turn | null {
         result: s["result"] ?? null,
         receipt:
           typeof receipt === "object" && receipt !== null
-            ? (receipt as HistoryRun["receipt"])
+            ? (receipt as NonNullable<HistoryRun["receipt"]>)
             : null,
         executionStatus:
           typeof s["executionStatus"] === "string"
@@ -378,12 +379,12 @@ function coerceTurn(item: unknown): Turn | null {
       };
     }
   }
-  return {
-    turnId: r["turnId"],
-    kind: typeof r["kind"] === "string" ? r["kind"] : undefined,
-    text: typeof r["text"] === "string" ? r["text"] : undefined,
-    run,
-  };
+  // exactOptionalPropertyTypes: absent optional props are omitted, never
+  // explicitly `undefined` (svelte-check).
+  const turn: Turn = { turnId: r["turnId"], run };
+  if (typeof r["kind"] === "string") turn.kind = r["kind"];
+  if (typeof r["text"] === "string") turn.text = r["text"];
+  return turn;
 }
 
 async function hydrateHistory(): Promise<void> {
@@ -1291,6 +1292,8 @@ function cardModel(card: CardState): {
         ? view.receipt.summary.summary
         : null,
     preview: previewDisplay(summary.preview.summary),
+    start: summary.input.start,
+    end: summary.input.end,
     now: Date.now(),
   });
   return model;
@@ -2468,10 +2471,14 @@ function evidenceForTurn(turn: Turn): {
     {/each}
   </main>
 
+  <!-- Backdrop click-to-close is supplementary; keyboard users close via
+       the「閉じる」button inside the dialog. -->
+  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_interactive_supports_focus -->
   <div
     id="drawer"
     role="dialog"
     aria-label="引用"
+    tabindex="-1"
     hidden={!drawerOpen}
     onclick={(e) => {
       if (e.target === e.currentTarget) closeDrawer();
