@@ -15,6 +15,12 @@ const feature = routeForPath(pathname);
 
 {#if feature === null}
   <ChatPage />
+{:else if feature.path === "/memory"}
+  {#await import("./MemoryPage.svelte") then module}
+    <svelte:component this={module.default} />
+  {:catch}
+    <p>ページを読み込めませんでした</p>
+  {/await}
 {:else}
   {#await import("./FeaturePage.svelte") then module}
     <svelte:component this={module.default} route={feature} />

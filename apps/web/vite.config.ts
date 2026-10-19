@@ -7,6 +7,9 @@ import { defineConfig } from "vite";
 // strict CSP (no CDN, no inline script/style). Filenames are fixed so the
 // server asset routes stay stable and auditable.
 export default defineConfig({
+  // The server serves the entry bundle at `/assets/svelte-app.js`; a matching
+  // base keeps Vite's dynamic-chunk preload URLs (`/assets/...`) correct.
+  base: "/assets/",
   plugins: [svelte()],
   build: {
     outDir: "../server/dist/svelte",

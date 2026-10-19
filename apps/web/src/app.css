@@ -904,3 +904,43 @@ button[data-action-evidence="before"] {
   margin: 1rem;
   color: var(--destructive, #f87171);
 }
+
+/* PR-5 native memory panel (route `/memory`) inside the chat shell slot. */
+.feature-panel-slot {
+  flex: 0 0 auto;
+  min-height: 0;
+}
+.feature-panel {
+  margin: 0.75rem 1rem 1rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: 0.5rem;
+}
+.feature-panel h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+}
+#memory-search-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+#memory-list {
+  margin: 0.5rem 0;
+  padding-left: 1.25rem;
+  display: grid;
+  gap: 0.25rem;
+}
+#memory-detail {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+#memory-detail-body {
+  white-space: pre-wrap;
+  margin: 0;
+}
+.memory-notice {
+  margin: 0.5rem 0 0;
+  color: var(--muted-foreground);
+}

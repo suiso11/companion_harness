@@ -1,5 +1,5 @@
 <script lang="ts">
-import { onMount, tick } from "svelte";
+import { onMount, type Snippet, tick } from "svelte";
 import {
   errorCode,
   fetchJson,
@@ -46,6 +46,14 @@ import {
   type ThinkingState,
   thinkingDisplayText,
 } from "./lib/thinking.js";
+
+// PR-5: the chat shell also hosts the first native feature page. `activePath`
+// keeps the shared nav honest about the current route, and `children` is the
+// feature panel slot (memory today; later pages slot in the same way).
+let {
+  activePath = "/",
+  children,
+}: { activePath?: string; children?: Snippet } = $props();
 
 // PR-1 Svelte chat page (Q1/Q4/Q7/Q8/Q10, PR-1 scope): dark-only, Japanese,
 // same APIs/SSE events + JSON fallback polling as the vanilla client.
@@ -2652,9 +2660,18 @@ function evidenceForTurn(turn: Turn): {
   <header class="topbar">
     <h1>会話</h1>
     <nav class="feature-links" aria-label="機能">
-      <a href="/" class="active" aria-current="page">チャット</a>
+      <a
+        href="/"
+        class:active={activePath === "/"}
+        aria-current={activePath === "/" ? "page" : undefined}>チャット</a
+      >
       {#each FEATURE_ROUTES as item (item.path)}
-        <a href={item.path}>{item.label}</a>
+        <a
+          href={item.path}
+          class:active={activePath === item.path}
+          aria-current={activePath === item.path ? "page" : undefined}
+          >{item.label}</a
+        >
       {/each}
     </nav>
     <div class="sessions">
@@ -2997,6 +3014,12 @@ function evidenceForTurn(turn: Turn): {
     <pre id="drawer-body">{drawerBody}</pre>
     <button type="button" onclick={closeDrawer}>閉じる</button>
   </div>
+
+  {#if children}
+    <div class="feature-panel-slot">
+      {@render children()}
+    </div>
+  {/if}
 
   <footer class="composer-bar">
   <div class="composer-column">
