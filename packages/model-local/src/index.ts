@@ -10,7 +10,9 @@ export {
   normalizeLoopbackBaseUrl,
 } from "./base_url.js";
 export {
+  MODEL_LOCAL_ANSWER_INVALID_REASONS,
   MODEL_LOCAL_ERROR_CODES,
+  type ModelLocalAnswerInvalidReason,
   ModelLocalError,
   type ModelLocalErrorCode,
 } from "./errors.js";

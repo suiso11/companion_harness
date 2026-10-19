@@ -46,6 +46,67 @@ export const M2ModelErrorCodeSchema = z.enum(M2_MODEL_ERROR_CODES);
 /** Known M2 model error codes (alias of the closed M2 vocabulary). */
 export const KNOWN_M2_MODEL_ERROR_CODES = M2_MODEL_ERROR_CODES;
 
+/**
+ * Closed, non-sensitive cause vocabulary for `answer_invalid` (and the
+ * repair-exhausted terminal failure). Every value is a fixed literal (or a
+ * bounded `parse:<zod issue>@<path>` form); model text, arguments values,
+ * provider bodies, titles, and paths never enter this field.
+ */
+export const ANSWER_INVALID_REASON_CODES = [
+  "model_args_malformed",
+  "model_args_oversize",
+  "version_invalid",
+  "mixed_tool_calls",
+  "duplicate_answer",
+  "reserved_namespace",
+  "free_text",
+  "citation_not_granted",
+  "other",
+] as const;
+export type AnswerInvalidReasonCode =
+  (typeof ANSWER_INVALID_REASON_CODES)[number];
+
+/** Allowlisted zod issue codes that may appear in a parse reason. */
+export const ANSWER_INVALID_PARSE_ISSUE_CODES = [
+  "invalid_type",
+  "too_big",
+  "too_small",
+  "invalid_literal",
+  "invalid_union",
+  "invalid_format",
+  "unrecognized_keys",
+  "custom",
+] as const;
+export type AnswerInvalidParseIssueCode =
+  (typeof ANSWER_INVALID_PARSE_ISSUE_CODES)[number];
+
+/**
+ * A fixed parse reason. The path is limited to schema keys / array indices
+ * (joined with `.`) and the root sentinel `answer`, so a model-authored key
+ * can never be echoed into observability.
+ */
+export type AnswerInvalidReason =
+  | AnswerInvalidReasonCode
+  | `parse:${AnswerInvalidParseIssueCode}@${string}`;
+
+const ANSWER_INVALID_PARSE_REASON_REGEX = new RegExp(
+  `^parse:(?:${ANSWER_INVALID_PARSE_ISSUE_CODES.join("|")})@` +
+    `(?:version|parts|text|citations|answer|\\d{1,3})` +
+    `(?:\\.(?:version|parts|text|citations|answer|\\d{1,3}))*$`,
+);
+export const ANSWER_INVALID_REASON_REGEX = new RegExp(
+  `^(?:${ANSWER_INVALID_REASON_CODES.join("|")}|` +
+    `${ANSWER_INVALID_PARSE_REASON_REGEX.source.slice(1, -1)})$`,
+);
+
+/** Fixed reason code, bounded to 64 chars including a fixed parse path. */
+export const AnswerInvalidReasonSchema = z
+  .string()
+  .max(64)
+  .refine((value): value is AnswerInvalidReason =>
+    ANSWER_INVALID_REASON_REGEX.test(value),
+  );
+
 /** Exact M2 schema-versioned model error-code registry (version 1 only). */
 export const M2_MODEL_ERROR_CODE_REGISTRY = {
   1: M2ModelErrorCodeSchema,
@@ -114,6 +175,8 @@ export const ModelStepFailedPayloadSchema = z.strictObject({
   step: ModelStepNumberSchema,
   errorCode: M2ModelErrorCodeSchema,
   durationMs: ModelStepDurationMsSchema.optional(),
+  /** Additive optional cause for answer/citation failures (fixed codes). */
+  reason: AnswerInvalidReasonSchema.optional(),
 });
 export type ModelStepFailedPayload = z.infer<
   typeof ModelStepFailedPayloadSchema

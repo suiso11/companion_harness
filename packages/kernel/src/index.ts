@@ -81,6 +81,8 @@ export type {
   AgentMemorySnippet,
   AgentModelDelta,
   AgentModelDeltaCallback,
+  AgentModelStepFailedCallback,
+  AgentModelStepFailure,
   AgentRepairReason,
   AgentStrategyOptions,
   CitationVerification,

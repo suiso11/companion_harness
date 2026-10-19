@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  ANSWER_INVALID_REASON_CODES,
   ANSWER_SUBMIT_TOOL_NAME,
+  AnswerInvalidReasonSchema,
   AnswerSubmitToolInputSchema,
   ApiErrorCodeSchema,
   CITATION_ID_REGEX,
@@ -542,6 +544,55 @@ describe("model.step payloads are structural metadata only", () => {
       }),
     ).toThrow();
     expect(() => ModelStepFailedPayloadSchema.parse({ step: 1 })).toThrow();
+  });
+
+  it("failed accepts the additive fixed reason code (no content leak)", () => {
+    for (const reason of ANSWER_INVALID_REASON_CODES) {
+      const payload = ModelStepFailedPayloadSchema.parse({
+        step: 1,
+        errorCode: "answer_invalid",
+        reason,
+      });
+      expect(payload.reason).toBe(reason);
+    }
+    // Bounded parse form: allowlisted issue code + schema path only.
+    for (const reason of [
+      "parse:too_small@parts",
+      "parse:invalid_type@parts.0.text",
+      "parse:unrecognized_keys@answer",
+      "parse:custom@answer",
+    ]) {
+      expect(
+        ModelStepFailedPayloadSchema.parse({
+          step: 1,
+          errorCode: "answer_invalid",
+          reason,
+        }).reason,
+      ).toBe(reason);
+    }
+    for (const reason of [
+      "parse:too_small@parts.0.secret",
+      "parse:unknown_issue@parts",
+      "parse:too_small@parts.0.text.extra.extra.extra.extra.extra.extra.x",
+      "model text leaked",
+      "answer_invalid",
+    ]) {
+      expect(() => AnswerInvalidReasonSchema.parse(reason)).toThrow();
+      expect(() =>
+        ModelStepFailedPayloadSchema.parse({
+          step: 1,
+          errorCode: "answer_invalid",
+          reason,
+        }),
+      ).toThrow();
+    }
+    // Additive: payloads without the reason still parse exactly as before.
+    expect(
+      ModelStepFailedPayloadSchema.parse({
+        step: 2,
+        errorCode: "model_unavailable",
+      }),
+    ).toEqual({ step: 2, errorCode: "model_unavailable" });
   });
 
   it("rejects sensitive/raw content keys in every model payload", () => {

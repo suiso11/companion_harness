@@ -2426,6 +2426,20 @@ export async function startServer(
               // Best effort: progress routing never fails the strategy.
             }
           },
+          // Fixed reason code for answer/citation step failures: metadata
+          // only (never model text, args, or provider bodies).
+          onModelStepFailed: (failure): void => {
+            try {
+              logger.warn("model.step.failed", {
+                runId: failure.runId,
+                ...(failure.reason === undefined
+                  ? {}
+                  : { reason: failure.reason }),
+              });
+            } catch {
+              // Best effort: observability never fails the strategy.
+            }
+          },
         }),
       );
       logger.info("server.model_ready", {

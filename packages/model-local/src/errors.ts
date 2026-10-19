@@ -18,13 +18,32 @@ export const MODEL_LOCAL_ERROR_CODES = [
 
 export type ModelLocalErrorCode = (typeof MODEL_LOCAL_ERROR_CODES)[number];
 
+/**
+ * Fixed non-sensitive cause for `answer_invalid` normalization failures.
+ * Mirrors the kernel/contract answer-invalid reason vocabulary for the two
+ * provider-side branches; raw arguments/body never travel here.
+ */
+export const MODEL_LOCAL_ANSWER_INVALID_REASONS = [
+  "model_args_malformed",
+  "model_args_oversize",
+] as const;
+export type ModelLocalAnswerInvalidReason =
+  (typeof MODEL_LOCAL_ANSWER_INVALID_REASONS)[number];
+
 /** Typed gateway failure with a closed code; never holds secrets/bodies. */
 export class ModelLocalError extends Error {
   readonly code: ModelLocalErrorCode;
+  /** Optional fixed cause code (only for answer_invalid today). */
+  readonly reason: ModelLocalAnswerInvalidReason | undefined;
 
-  constructor(code: ModelLocalErrorCode, message: string) {
+  constructor(
+    code: ModelLocalErrorCode,
+    message: string,
+    reason?: ModelLocalAnswerInvalidReason,
+  ) {
     super(message);
     this.name = "ModelLocalError";
     this.code = code;
+    this.reason = reason;
   }
 }

@@ -29,7 +29,9 @@
 //   presence); never semantic truth.
 
 import {
+  ANSWER_INVALID_PARSE_ISSUE_CODES,
   ANSWER_SUBMIT_TOOL_NAME,
+  type AnswerInvalidReason,
   buildRunResultV2,
   CALENDAR_RESCHEDULE_TOOL_NAME,
   CITATION_ID_REGEX,
@@ -2135,6 +2137,21 @@ export interface AgentModelDelta {
 /** Best-effort streaming progress sink (exceptions are swallowed). */
 export type AgentModelDeltaCallback = (delta: AgentModelDelta) => void;
 
+/** Fixed metadata for one persisted model.step.failed event. */
+export interface AgentModelStepFailure {
+  readonly runId: string;
+  readonly step: number;
+  readonly errorCode: M2ModelErrorCode;
+  readonly durationMs?: number;
+  /** Fixed non-sensitive cause for answer/citation failures. */
+  readonly reason?: AnswerInvalidReason;
+}
+
+/** Best-effort model.step.failed sink (exceptions are swallowed). */
+export type AgentModelStepFailedCallback = (
+  failure: AgentModelStepFailure,
+) => void;
+
 export interface AgentStrategyOptions {
   /** Single kernel connection (scoped reads; writes go through repo/broker). */
   readonly db: Database.Database;
@@ -2164,6 +2181,12 @@ export interface AgentStrategyOptions {
    * path is unchanged. Absent preserves exact M2 behavior.
    */
   readonly onModelDelta?: AgentModelDeltaCallback;
+  /**
+   * Optional model.step.failed sink (PR observability, additive). Receives
+   * the same fixed metadata persisted in the event, including the closed
+   * `reason` code when applicable. Never receives model text/args/body.
+   */
+  readonly onModelStepFailed?: AgentModelStepFailedCallback;
   /**
    * Optional pre-answer memory recall (server-owned remind CLI boundary).
    * When present, the strategy performs one bounded recall before the first
@@ -2222,6 +2245,7 @@ export function createAgentStrategy(
     }
   }
   const clock = options.clock ?? { now: () => Date.now() };
+  const onModelStepFailed = options.onModelStepFailed;
   const stepTimeoutMs =
     options.stepTimeoutMs === undefined
       ? AGENT_STEP_TIMEOUT_MS
@@ -2414,6 +2438,7 @@ export function createAgentStrategy(
           wallSignal: wallController.signal,
           isWallExpired,
           onModelDelta: options.onModelDelta,
+          onModelStepFailed,
         });
         if (outcome.kind === "gateway_failed") {
           // No retry, no fallback, no repair for transport/timeout/cancel:
@@ -2539,6 +2564,8 @@ export function createAgentStrategy(
             : terminal.kind === "repaired"
               ? repairReasonErrorCode(terminal.reason)
               : terminal.errorCode;
+        const terminalReason =
+          terminal.kind === "succeeded" ? undefined : terminal.answerReason;
         const terminalAudited = finalizeDeliveredStep({
           repo,
           runId,
@@ -2548,7 +2575,9 @@ export function createAgentStrategy(
           durationMs: outcome.durationMs,
           usage: outcome.usage,
           errorCode: terminalErrorCode,
+          ...(terminalReason === undefined ? {} : { reason: terminalReason }),
           clock,
+          ...(onModelStepFailed === undefined ? {} : { onModelStepFailed }),
         });
         if (!terminalAudited) {
           throw new StrategyError("execution_cancelled");
@@ -3033,6 +3062,7 @@ async function runModelStep(args: {
   wallSignal: AbortSignal;
   isWallExpired: () => boolean;
   onModelDelta?: AgentModelDeltaCallback | undefined;
+  onModelStepFailed?: AgentModelStepFailedCallback | undefined;
 }): Promise<StepOutcome> {
   const {
     repo,
@@ -3049,6 +3079,7 @@ async function runModelStep(args: {
     wallSignal,
     isWallExpired,
     onModelDelta,
+    onModelStepFailed,
   } = args;
   const now = clock.now();
   const wallRemaining = Math.max(wallDeadline - now, 1);
@@ -3449,6 +3480,7 @@ async function runModelStep(args: {
       settlement.error instanceof ModelLocalError &&
       settlement.error.code === "answer_invalid"
     ) {
+      const reason = modelLocalAnswerInvalidReason(settlement.error);
       try {
         repo.recordModelCall(runId, {
           step,
@@ -3467,9 +3499,22 @@ async function runModelStep(args: {
         repo.appendModelStepEvent(
           runId,
           "model.step.failed",
-          { step, errorCode: "answer_invalid", durationMs },
+          { step, errorCode: "answer_invalid", durationMs, reason },
           { now: clock.now() },
         );
+        if (onModelStepFailed !== undefined) {
+          try {
+            onModelStepFailed({
+              runId,
+              step,
+              errorCode: "answer_invalid",
+              durationMs,
+              reason,
+            });
+          } catch {
+            // Observability sink is best effort; the audit already persisted.
+          }
+        }
       } catch {
         // Terminal race: the engine CAS owns the final word.
       }
@@ -3547,7 +3592,9 @@ function finalizeDeliveredStep(args: {
   durationMs: number;
   usage: { inputTokens: number; outputTokens: number } | null;
   errorCode: M2ModelErrorCode | null;
+  reason?: AnswerInvalidReason;
   clock: { now(): number };
+  onModelStepFailed?: AgentModelStepFailedCallback;
 }): boolean {
   const {
     repo,
@@ -3558,7 +3605,9 @@ function finalizeDeliveredStep(args: {
     durationMs,
     usage,
     errorCode,
+    reason,
     clock,
+    onModelStepFailed,
   } = args;
   const outcome: "completed" | "failed" =
     errorCode === null ? "completed" : "failed";
@@ -3588,9 +3637,27 @@ function finalizeDeliveredStep(args: {
       repo.appendModelStepEvent(
         runId,
         "model.step.failed",
-        { step, errorCode: errorCode as M2ModelErrorCode, durationMs },
+        {
+          step,
+          errorCode: errorCode as M2ModelErrorCode,
+          durationMs,
+          ...(reason === undefined ? {} : { reason }),
+        },
         { now: clock.now() },
       );
+      if (reason !== undefined && onModelStepFailed !== undefined) {
+        try {
+          onModelStepFailed({
+            runId,
+            step,
+            errorCode: errorCode as M2ModelErrorCode,
+            durationMs,
+            reason,
+          });
+        } catch {
+          // Observability sink is best effort; the audit already persisted.
+        }
+      }
     }
   } catch {
     // Terminal race: the engine CAS owns the final word.
@@ -3935,16 +4002,132 @@ function grantDeliveredReferences(
 
 type AnswerHandling =
   | { kind: "succeeded"; result: RunResultV2 }
-  | { kind: "repaired"; reason: AgentRepairReason; detail?: string }
+  | {
+      kind: "repaired";
+      reason: AgentRepairReason;
+      detail?: string;
+      answerReason: AnswerInvalidReason;
+    }
   | {
       kind: "failed";
       strategyError: StrategyError;
       errorCode: M2ModelErrorCode;
+      answerReason: AnswerInvalidReason;
     };
 
 /** Map a repair reason to its fixed audit error code (metadata only). */
 function repairReasonErrorCode(reason: AgentRepairReason): M2ModelErrorCode {
   return reason === "citation_invalid" ? "citation_invalid" : "answer_invalid";
+}
+
+/**
+ * Closed mapping from repair classes to stable non-sensitive reason codes.
+ * `answer_invalid` detail is decided per parse failure by
+ * `answerInvalidReason` (never through this default).
+ */
+const AGENT_REPAIR_REASON_CODES: Record<
+  AgentRepairReason,
+  AnswerInvalidReason
+> = {
+  mixed: "mixed_tool_calls",
+  duplicate: "duplicate_answer",
+  free_text: "free_text",
+  answer_invalid: "other",
+  citation_invalid: "citation_not_granted",
+  reserved_namespace: "reserved_namespace",
+};
+
+const ANSWER_INVALID_PARSE_ISSUE_ALLOWLIST: ReadonlySet<string> = new Set(
+  ANSWER_INVALID_PARSE_ISSUE_CODES,
+);
+const ANSWER_INVALID_PATH_SEGMENTS: ReadonlySet<string> = new Set([
+  "version",
+  "parts",
+  "text",
+  "citations",
+  "answer",
+]);
+
+/**
+ * Bounded zod issue path: only schema keys and small array indices survive
+ * (joined with `.`). Unknown/model-authored keys map to null so the reason
+ * falls back to `other` instead of echoing model text.
+ */
+function answerInvalidIssuePath(
+  path: readonly unknown[] | undefined,
+): string | null {
+  const segments: string[] = [];
+  for (const segment of path ?? []) {
+    if (
+      typeof segment === "number" &&
+      Number.isInteger(segment) &&
+      segment >= 0 &&
+      segment <= 999
+    ) {
+      segments.push(String(segment));
+      continue;
+    }
+    if (
+      typeof segment === "string" &&
+      ANSWER_INVALID_PATH_SEGMENTS.has(segment)
+    ) {
+      segments.push(segment);
+      continue;
+    }
+    return null;
+  }
+  return segments.length === 0 ? "answer" : segments.join(".");
+}
+
+/**
+ * Fixed cause for one answer_invalid parse failure. Only the protocol
+ * version sentinel, an allowlisted zod issue code, and an allowlisted field
+ * path are used; raw arguments, values, and messages are never included.
+ */
+function answerInvalidReason(
+  args: unknown,
+  error: unknown,
+): AnswerInvalidReason {
+  if (typeof args !== "object" || args === null) {
+    return "model_args_malformed";
+  }
+  const record = args as { version?: unknown };
+  if (
+    "version" in record &&
+    !ANSWER_MODEL_VERSION_FORMS.includes(record.version)
+  ) {
+    return "version_invalid";
+  }
+  const issues = (error as { issues?: unknown }).issues;
+  if (!Array.isArray(issues) || issues.length === 0) {
+    return "other";
+  }
+  const issue = issues[0] as {
+    code?: unknown;
+    path?: ReadonlyArray<string | number | symbol>;
+  };
+  if (
+    typeof issue.code !== "string" ||
+    !ANSWER_INVALID_PARSE_ISSUE_ALLOWLIST.has(issue.code)
+  ) {
+    return "other";
+  }
+  const path = answerInvalidIssuePath(issue.path);
+  if (path === null) {
+    return "other";
+  }
+  const reason = `parse:${issue.code}@${path}` as AnswerInvalidReason;
+  return reason.length <= 64 ? reason : "other";
+}
+
+/** Fixed reason carried by provider-side answer_invalid normalization. */
+function modelLocalAnswerInvalidReason(
+  error: ModelLocalError,
+): AnswerInvalidReason {
+  const reason = (error as { reason?: unknown }).reason;
+  return reason === "model_args_malformed" || reason === "model_args_oversize"
+    ? reason
+    : "other";
 }
 
 /**
@@ -4024,16 +4207,18 @@ function handleAnswerClass(args: {
   const maybeRepair = (
     reason: AgentRepairReason,
     detail?: string,
+    answerReason: AnswerInvalidReason = AGENT_REPAIR_REASON_CODES[reason],
   ): AnswerHandling => {
     if (!repairUsed) {
       return detail === undefined
-        ? { kind: "repaired", reason }
-        : { kind: "repaired", reason, detail };
+        ? { kind: "repaired", reason, answerReason }
+        : { kind: "repaired", reason, detail, answerReason };
     }
     return {
       kind: "failed",
       strategyError: new StrategyError("output_invalid"),
       errorCode: repairReasonErrorCode(reason),
+      answerReason,
     };
   };
 
@@ -4059,6 +4244,7 @@ function handleAnswerClass(args: {
         return maybeRepair(
           "answer_invalid",
           answerInvalidDetail(classification.call.arguments, error),
+          answerInvalidReason(classification.call.arguments, error),
         );
       }
       const cited = collectCitedOrdinals(answer);
