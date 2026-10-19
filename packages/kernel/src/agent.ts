@@ -44,6 +44,7 @@ import {
   type RunMemoryStatus,
   type RunResultV2,
   SNAPSHOT_BODY_VERSION,
+  STRUCTURED_ANSWER_VERSION,
   type StructuredAnswer,
   type ToolDescriptor,
 } from "@companion/contracts";
@@ -651,7 +652,17 @@ export function formatMemoryPromptBlock(
 /* Tool definitions (ordinary broker tools + reserved answer.submit)     */
 /* ------------------------------------------------------------------ */
 
-/** ToolDefinition advertised for the reserved terminal protocol. */
+/**
+ * Model-facing schema for the reserved terminal protocol. The protocol
+ * `version` is intentionally NOT modeled here: it is the StructuredAnswer
+ * protocol version (currently 1), never answer content, and requiring the
+ * model to author an exact `const: 1` number fails schema-agnostic models
+ * (Gemma 4 sends `"version":"1.0"` and was rejected as `answer_invalid`).
+ * The kernel authors the protocol version itself before strict contract
+ * validation (see `normalizeAnswerSubmitVersion` accepted spellings);
+ * `parseStructuredAnswer` stays strict for every other caller/persisted
+ * path. The schema stays closed (`additionalProperties: false`).
+ */
 export function answerSubmitToolDefinition(): ToolDefinition {
   return {
     name: ANSWER_SUBMIT_TOOL_NAME,
@@ -660,7 +671,6 @@ export function answerSubmitToolDefinition(): ToolDefinition {
     parameters: {
       type: "object",
       properties: {
-        version: { const: 1 },
         parts: {
           type: "array",
           minItems: 1,
@@ -680,10 +690,41 @@ export function answerSubmitToolDefinition(): ToolDefinition {
           },
         },
       },
-      required: ["version", "parts"],
+      required: ["parts"],
       additionalProperties: false,
     },
   };
+}
+
+/**
+ * The only model-authored `version` forms the kernel normalizes for
+ * `answer.submit` (before strict contract validation): exact-1 numbers
+ * (1 and 1.0 are the same number) and the alternate decimal spellings of
+ * 1 as strings ("1", "1.0"). Any other present value — "2", 2, "1.1",
+ * "x" — is left exactly as sent so `parseStructuredAnswer` rejects it:
+ * contract validation for persisted/other callers is never loosened here.
+ */
+const ANSWER_MODEL_VERSION_FORMS: readonly unknown[] = [1, "1", "1.0"];
+
+/**
+ * Author the StructuredAnswer protocol version on the kernel side, so the
+ * model never has to send it: a `version` that is omitted (or one of the
+ * accepted alternate spellings of 1) is rewritten to the exact contract
+ * value (`STRUCTURED_ANSWER_VERSION`). Present-but-different values are
+ * returned untouched and stay invalid, never silently upgraded to 1.
+ */
+export function normalizeAnswerSubmitVersion(rawArgs: unknown): unknown {
+  if (typeof rawArgs !== "object" || rawArgs === null) {
+    return rawArgs;
+  }
+  const record = rawArgs as { version?: unknown };
+  if (
+    "version" in record &&
+    !ANSWER_MODEL_VERSION_FORMS.includes(record.version)
+  ) {
+    return record;
+  }
+  return { ...record, version: STRUCTURED_ANSWER_VERSION };
 }
 
 /**
@@ -2531,7 +2572,9 @@ export function createAgentStrategy(
           }
           messages.push({
             role: "user",
-            content: `Repair instruction:\n${AGENT_REPAIR_HINTS[terminal.reason]}`,
+            content: `Repair instruction:\n${
+              AGENT_REPAIR_HINTS[terminal.reason]
+            }${terminal.detail ? ` (${terminal.detail})` : ""}`,
           });
           continue;
         }
@@ -3892,7 +3935,7 @@ function grantDeliveredReferences(
 
 type AnswerHandling =
   | { kind: "succeeded"; result: RunResultV2 }
-  | { kind: "repaired"; reason: AgentRepairReason }
+  | { kind: "repaired"; reason: AgentRepairReason; detail?: string }
   | {
       kind: "failed";
       strategyError: StrategyError;
@@ -3902,6 +3945,62 @@ type AnswerHandling =
 /** Map a repair reason to its fixed audit error code (metadata only). */
 function repairReasonErrorCode(reason: AgentRepairReason): M2ModelErrorCode {
   return reason === "citation_invalid" ? "citation_invalid" : "answer_invalid";
+}
+
+/**
+ * Fixed, non-echoing field-level detail appended to the `answer_invalid`
+ * repair hint, so models can self-correct in the single allowed repair
+ * attempt. Only fixed schema wording and field paths are emitted: no
+ * argument values, raw payloads, or provider text are ever echoed back.
+ */
+/** Upper bound on the appended validation-detail text (path + message). */
+const ANSWER_INVALID_DETAIL_LIMIT = 240;
+
+/**
+ * Produce the fixed validation detail appended to the `answer_invalid`
+ * repair hint. Covers the three failure families: non-object arguments,
+ * a present-but-unsupported `version` (kept invalid, never normalized),
+ * and the first zod issue (field path + fixed message). Zod messages that
+ * would echo a model-authored key are replaced with fixed wording, and
+ * the whole detail is capped at `ANSWER_INVALID_DETAIL_LIMIT`.
+ */
+function answerInvalidDetail(args: unknown, error: unknown): string {
+  const fallback =
+    "send one object {parts:[...]}: 1-20 parts, each text 1-4000 characters, 0-8 citations per part";
+  if (typeof args !== "object" || args === null) {
+    return fallback;
+  }
+  // Omitted `version` is normalized to 1 on a copy before parsing, so the
+  // zod-issue path below still applies to shape errors in that form.
+  if ("version" in args && (args as { version?: unknown }).version !== 1) {
+    return (
+      "version: unsupported value — the answer protocol version must be 1; " +
+      "it is set automatically, so omit it or send 1"
+    );
+  }
+  // Zod v4 validation errors (via contracts) carry the same {issues} shape.
+  const issues = (error as { issues?: unknown }).issues;
+  if (Array.isArray(issues) && issues.length > 0) {
+    const issue = issues[0] as {
+      path?: ReadonlyArray<string | number | symbol>;
+      message?: string;
+    };
+    const path = (issue.path ?? [])
+      .filter(
+        (segment): segment is string | number =>
+          typeof segment === "string" || typeof segment === "number",
+      )
+      .map(String)
+      .join(".");
+    let message = issue.message ?? "invalid value";
+    if (message.includes("Unrecognized key")) {
+      // Never echo the model-authored unknown key back into the prompt.
+      message = "unknown property: remove it";
+    }
+    const prefix = path.length > 0 ? path : "answer";
+    return `${prefix}: ${message}`.slice(0, ANSWER_INVALID_DETAIL_LIMIT);
+  }
+  return fallback;
 }
 
 /**
@@ -3922,9 +4021,14 @@ function handleAnswerClass(args: {
 }): AnswerHandling {
   const { db, repo, runId, sessionId, classification, repairUsed } = args;
 
-  const maybeRepair = (reason: AgentRepairReason): AnswerHandling => {
+  const maybeRepair = (
+    reason: AgentRepairReason,
+    detail?: string,
+  ): AnswerHandling => {
     if (!repairUsed) {
-      return { kind: "repaired", reason };
+      return detail === undefined
+        ? { kind: "repaired", reason }
+        : { kind: "repaired", reason, detail };
     }
     return {
       kind: "failed",
@@ -3945,9 +4049,17 @@ function handleAnswerClass(args: {
     case "single_answer": {
       let answer: StructuredAnswer;
       try {
-        answer = parseStructuredAnswer(classification.call.arguments);
-      } catch {
-        return maybeRepair("answer_invalid");
+        // The kernel authors the protocol version on the model's behalf
+        // (omitted or an exact alternate spelling of 1); any other value the
+        // model does send stays there and fails strict validation below.
+        answer = parseStructuredAnswer(
+          normalizeAnswerSubmitVersion(classification.call.arguments),
+        );
+      } catch (error) {
+        return maybeRepair(
+          "answer_invalid",
+          answerInvalidDetail(classification.call.arguments, error),
+        );
       }
       const cited = collectCitedOrdinals(answer);
       // r3946377098: empty citations perform no reference scan at all.

@@ -133,6 +133,7 @@ export {
   loadBoundedOrdinalMap,
   loadBoundedUuidToOrdinal,
   loadFrozenOrdinalMap,
+  normalizeAnswerSubmitVersion,
   projectPrompt,
   renderAnswerText,
   sanitizeModelFacingForFeedback,
