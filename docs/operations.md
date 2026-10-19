@@ -4255,6 +4255,13 @@ loginctl enable-linger $USER
   `~/.config/companion/env` (0600) が無ければ secrets なしテンプレートを
   作成する (既存ファイルは変更しない)。`--enable` 付きでのみ自身が
   daemon-reload/enable/linger まで行う。引数なしでは何も起動しない。
+- user systemd は login-shell の PATH を継承しないため、`install.sh` は
+  実行時の `command -v node` / `command -v pnpm` (不在時は明示エラーで
+  中止) から `PATH=<nodeのあるdir>:<pnpmのあるdir>:/usr/local/bin:/usr/bin:/bin`
+  (重複除去) を組み立て、`companion.service.d/path.conf` と
+  `companion-deploy.service.d/path.conf` (drop-in) に書き込む。リポジトリ内の
+  unit は汎用のまま。Node の導入場所を変えたら `install.sh` を再実行する
+  (drop-in を書き直し、daemon-reload)。
 - `companion.service`: `WorkingDirectory=%h/companion_master`、
   `EnvironmentFile=%h/.config/companion/env`、
   `ExecStart=%h/companion_master/run-google-readonly.sh`、
