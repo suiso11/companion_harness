@@ -18,8 +18,8 @@ import {
   INITIAL_RUN_VIEW,
   isCorruptCursor,
   isRetryableTurnKind,
-  parseCancelRunStatus,
   type ProposalStatus,
+  parseCancelRunStatus,
   type ReceiptOutcome,
   type RunViewState,
   runResultToAnswerParts,
@@ -1812,6 +1812,11 @@ async function approve(card: CardState): Promise<void> {
     await reconcileLostApprove(card);
     return;
   }
+  if (posted.status === 0) {
+    showNotice("承認できませんでした。もう一度お試しください");
+    await reconcileLostApprove(card);
+    return;
+  }
   if (posted.status === 202) {
     clearPendingExpiry(card.proposalId);
     card.deciding = false;
@@ -1867,6 +1872,11 @@ async function reject(card: CardState): Promise<void> {
     // authoritative re-read instead of relying on the deduped background
     // sync: that sync is dropped while an older sync is still in flight,
     // which would leave the buttons disabled and consume the pending timer.
+    showNotice("却下できませんでした。もう一度お試しください");
+    await reconcileLostReject(card);
+    return;
+  }
+  if (posted.status === 0) {
     showNotice("却下できませんでした。もう一度お試しください");
     await reconcileLostReject(card);
     return;
