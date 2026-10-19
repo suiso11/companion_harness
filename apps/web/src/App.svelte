@@ -2006,6 +2006,11 @@ async function submitLogin(): Promise<void> {
     loginPassword = "";
     authExpired = false;
     showNotice("再ログインしました");
+    // Re-run the retained session's boot path after the 401 gap: the
+    // failed read (history hydration, proposal sync, active-run
+    // discovery) must repeat or the missed state stays absent until a
+    // full reload (review PR75 4310874696).
+    await bootSession();
     return;
   }
   if (res.status === 429) {
