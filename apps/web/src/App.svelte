@@ -757,6 +757,7 @@ function subscribe(runId: string): void {
   const query = stored !== null && stored > 0 ? `?after=${stored}` : "";
   const url = `/api/sessions/${encodeURIComponent(sid)}/runs/${encodeURIComponent(runId)}/events/stream${query}`;
   let opened = false;
+  let sseErrorStreak = 0;
   try {
     sse = new EventSource(url);
   } catch {
@@ -775,6 +776,7 @@ function subscribe(runId: string): void {
   }, 5000);
   source.addEventListener("run-event", (message) => {
     opened = true;
+    sseErrorStreak = 0;
     const raw = (message as MessageEvent).data;
     let event: { seq?: unknown; type?: unknown; payload?: unknown } | null =
       null;
@@ -808,6 +810,19 @@ function subscribe(runId: string): void {
       runView.visible === "stopped"
     ) {
       finishActiveRun();
+      return;
+    }
+    // After the stream has opened, the one-shot pre-open fallback timer
+    // can never fire again: a nonterminal native reconnect loop (e.g. a
+    // remote session expiring into HTTP 401) would otherwise retry
+    // forever and fetchJson() would never see the failure. Count
+    // consecutive errors without an intervening event and switch to the
+    // JSON fallback polling so the 401 reaches the inline re-login UI
+    // (review PR75 4310874681).
+    sseErrorStreak += 1;
+    if (sseErrorStreak >= SSE_ERROR_FALLBACK_LIMIT) {
+      closeStream();
+      void pollFallback(runId);
     }
   };
 }
@@ -957,6 +972,9 @@ async function catchUp(
 
 const POLL_INTERVAL_MS = 1000;
 const POLL_MAX_ERROR_STREAK = 5;
+// Consecutive post-open EventSource errors without an intervening event
+// before the JSON fallback takes over (review PR75 4310874681).
+const SSE_ERROR_FALLBACK_LIMIT = 3;
 
 async function pollFallback(runId: string): Promise<void> {
   let errorStreak = 0;
