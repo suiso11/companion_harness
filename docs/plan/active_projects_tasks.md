@@ -669,3 +669,5 @@
 
 ## 現況追記（2026-10-17、AV03 conversation-proposals完成・履歴保持・checkbox/ID/件数不変）
 - AV03 full vertical（kernel＋HTTP＋UI、feat/av-conversation-proposals）: proposal-only staging core＋session review/adopt routes＋quiet drawer UI。統合受入ONCE実測: full Vitest 143 files passed/2 skipped・1606 tests passed/8 skipped（real remind CLI、LLM/vectors無効）＋default Chromium 42 passed＋root/e2e tsc exit 0＋Biome exit 0（既存warning/infoのみ）。PR未発行・review findings pending。残件: AV04 methods learning、AV06 shared resources、AV07 external supervisor/recovery、AV08 maintenance、未解決 device/standing/external rollout。
+## 現況追記（2026-10-18、frontend UI 要件定義案 PROPOSAL・履歴保持・checkbox/ID/件数不変）
+- フロントエンド UI 要件定義案（PROPOSAL・haruka 確認待ち、実装なし）を作成: [frontend_ui_requirements.md](frontend_ui_requirements.md)。2026-10-18 haruka 決定: latency 改善は今は不要、progress/streaming は consolidated frontend update に延期。
