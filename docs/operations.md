@@ -5,7 +5,7 @@ no external telemetry, no app-managed rolling log files.
 
 ## Source run
 
-Requirements: Node.js `24.12.0`, pnpm `11.25.0` (see `engines` +
+Requirements: Node.js `26.12.0`, pnpm `11.25.0` (see `engines` +
 `packageManager`).
 
 ```sh
