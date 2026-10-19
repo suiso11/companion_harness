@@ -141,6 +141,7 @@ const FEATURE_UI_PATHS: ReadonlySet<string> = new Set([
   "/memory",
   "/tasks",
   "/notifications",
+  "/trials",
   "/learning",
   "/shadow",
   "/proposals",

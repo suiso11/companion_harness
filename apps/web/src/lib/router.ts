@@ -35,6 +35,12 @@ export const FEATURE_ROUTES: readonly FeatureRoute[] = [
     title: "お知らせ",
   },
   {
+    path: "/trials",
+    label: "試行の提案",
+    sectionId: "trials",
+    title: "試行の提案",
+  },
+  {
     path: "/learning",
     label: "学び",
     sectionId: "learning",
