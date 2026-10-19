@@ -1,6 +1,5 @@
 <script lang="ts">
 import { onMount, tick } from "svelte";
-import Markdown from "./lib/Markdown.svelte";
 import {
   errorCode,
   fetchJson,
@@ -15,6 +14,7 @@ import {
   type DraftState,
   draftDisplayText,
 } from "./lib/draft.js";
+import Markdown from "./lib/Markdown.svelte";
 import {
   ACTION_PROGRESS_TEXT,
   actionCardModel,
@@ -182,13 +182,13 @@ let loginPassword = $state("");
 let loginError = $state("");
 let degradedMemory = $state(false);
 
-  let sse: EventSource | null = null;
-  let fallbackTimer: number | null = null;
-  // V2 llama-like list: the transcript is a scroll container pinned to the
-  // bottom. New content auto-scrolls unless the user scrolled up; sending
-  // re-pins. `scrollEl`/`stickToBottom` are view-only (no message state).
-  let scrollEl: HTMLElement | null = $state(null);
-  let stickToBottom = $state(true);
+let sse: EventSource | null = null;
+let fallbackTimer: number | null = null;
+// V2 llama-like list: the transcript is a scroll container pinned to the
+// bottom. New content auto-scrolls unless the user scrolled up; sending
+// re-pins. `scrollEl`/`stickToBottom` are view-only (no message state).
+let scrollEl: HTMLElement | null = $state(null);
+let stickToBottom = $state(true);
 let runChain: Promise<void> = Promise.resolve();
 let renderedAnswers = $state(new Set<string>());
 let terminalHydrated = new Set<string>();

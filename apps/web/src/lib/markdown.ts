@@ -2,9 +2,10 @@
 // `tools/ui` MarkdownContent (pinned commit + per-file provenance in
 // `vendor/llama-webui/NOTICE.md`). Deliberate subset for calendar answers:
 //
-//   remark (gfm, breaks) -> remark-rehype -> rehype-highlight (7-language
-//   lowlight subset, never `lowlightAll`) -> tables/links/code-copy
-//   enhancers -> DOMPurify sanitize.
+//   remark (gfm, breaks) -> remark-rehype -> subset highlight plugin
+//   (`createLowlight` with 7 pinned grammars, never `lowlightAll`/`common`
+//   and never `rehype-highlight`, which imports `common` unconditionally)
+//   -> tables/links/code-copy enhancers -> DOMPurify sanitize.
 //
 // Skipped upstream pieces (see NOTICE.md): math/katex, mermaid/svg
 // execution and preview dialogs, attachment image resolving, RTL helper,
@@ -28,9 +29,8 @@ import json from "highlight.js/lib/languages/json";
 import plaintext from "highlight.js/lib/languages/plaintext";
 import python from "highlight.js/lib/languages/python";
 import typescript from "highlight.js/lib/languages/typescript";
-import type { LanguageFn } from "lowlight";
+import { createLowlight, type LanguageFn } from "lowlight";
 import type { Root as MdastRoot } from "mdast";
-import rehypeHighlight from "rehype-highlight";
 import rehypeStringify from "rehype-stringify";
 import { remark } from "remark";
 import remarkBreaks from "remark-breaks";
@@ -328,13 +328,87 @@ const SANITIZE_CONFIG = {
   ],
 };
 
+// rehype-highlight imports `common` from lowlight unconditionally (even
+// when `languages` is passed), pulling ~35 highlight.js grammars into the
+// bundle. This tiny plugin calls `createLowlight` directly with our pinned
+// 7-language subset so tree-shaking drops `lowlight/lib/all.js` and
+// `lowlight/lib/common.js` entirely. Behavior matches rehype-highlight
+// with `{ detect: false }`: only `<pre><code class="language-x">` blocks
+// whose language is registered are highlighted; unknown/missing languages
+// and `no-highlight` are left as plain text (no auto-detect, no warnings).
+const lowlight = createLowlight(HIGHLIGHT_LANGUAGES);
+
+function codeText(node: Element): string {
+  let out = "";
+  const walk = (n: Element | ElementContent): void => {
+    if (n.type === "text") {
+      out += (n as HastText).value;
+    } else if (n.type === "element") {
+      for (const child of (n as Element).children) walk(child);
+    }
+  };
+  for (const child of node.children) walk(child);
+  return out;
+}
+
+function codeLanguage(node: Element): string | false | undefined {
+  const list = node.properties?.className;
+  if (!Array.isArray(list)) return undefined;
+  let name: string | undefined;
+  for (const entry of list) {
+    const value = String(entry);
+    if (value === "no-highlight" || value === "nohighlight") return false;
+    if (name === undefined && value.startsWith("lang-")) {
+      name = value.slice("lang-".length);
+    }
+    if (name === undefined && value.startsWith("language-")) {
+      name = value.slice("language-".length);
+    }
+  }
+  return name;
+}
+
+const rehypeHighlightSubset: Plugin<[], HastRoot> = () => {
+  return (tree: HastRoot) => {
+    visit(tree, "element", (node: Element, _index, parent) => {
+      if (
+        node.tagName !== "code" ||
+        parent === undefined ||
+        parent.type !== "element" ||
+        (parent as Element).tagName !== "pre"
+      ) {
+        return;
+      }
+      const lang = codeLanguage(node);
+      if (lang === false || lang === undefined || lang.length === 0) return;
+      if (!Object.hasOwn(HIGHLIGHT_LANGUAGES, lang)) return;
+      if (!Array.isArray(node.properties.className)) {
+        node.properties.className = [];
+      }
+      if (!node.properties.className.includes("hljs")) {
+        node.properties.className.unshift("hljs");
+      }
+      let result: HastRoot;
+      try {
+        result = lowlight.highlight(lang, codeText(node), {
+          prefix: "hljs-",
+        });
+      } catch {
+        return;
+      }
+      if (result.children.length > 0) {
+        node.children = result.children as ElementContent[];
+      }
+    });
+  };
+};
 function buildProcessor() {
   return remark()
     .use(remarkGfm)
     .use(remarkBreaks)
     .use(remarkLiteralHtml)
     .use(remarkRehype)
-    .use(rehypeHighlight, { languages: HIGHLIGHT_LANGUAGES })
+    .use(rehypeHighlightSubset)
     .use(rehypeStripImages)
     .use(rehypeEnhanceTables)
     .use(rehypeEnhanceLinks)

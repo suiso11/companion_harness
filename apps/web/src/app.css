@@ -122,6 +122,7 @@ body {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  /* biome-ignore lint/suspicious/noDuplicateProperties: dvh fallback for older browsers */
   height: 100dvh;
   min-width: 0;
 }
