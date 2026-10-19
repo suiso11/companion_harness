@@ -297,6 +297,11 @@ body {
 [data-thinking-text="true"] {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  /* PR #82 review (4312961790): the <pre> must always wrap within the
+   * viewport — a wider-than-viewport reasoning line is otherwise clipped
+   * with no way to reach it (#conversation hides horizontal overflow). */
+  max-width: 100%;
+  min-width: 0;
   max-height: 16rem;
   overflow-y: auto;
   background: var(--code-background);

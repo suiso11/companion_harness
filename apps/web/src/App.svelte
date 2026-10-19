@@ -37,7 +37,9 @@ import {
   appendThinkingText,
   applyThinkingUsage,
   deriveRunPhase,
+  durableRunStart,
   EMPTY_THINKING,
+  formatElapsedSuffix,
   formatPhaseText,
   formatThinkingStats,
   type ThinkingState,
@@ -177,6 +179,12 @@ let justEndedComposition = $state(false);
 let composerEl: HTMLTextAreaElement | null = $state(null);
 let runStartedAt = $state(0);
 let elapsedSec = $state(0);
+// PR #82 review (4312961764): cancellation requested but the run still
+// reports "generating" (watchdog not yet settled). The phase line is
+// hidden while this is set — the「停止しました」notice already tells the
+// user the stop was accepted, and a non-cooperative strategy must not
+// keep「考え中…/ツール実行中…」alive beside it.
+let cancelPending = $state(false);
 // PR-4 provisional draft (ephemeral, memory-only, never persisted/sent).
 let draft: DraftState | null = $state(null);
 // PR78 review: run ids whose draft must never (re)appear. A reload-adopted
@@ -281,6 +289,14 @@ function composerSendDisabled(): boolean {
   return false;
 }
 
+function isActionRun(runId: string): boolean {
+  // PR #82 review (4312961798): a reload-adopted m5-action run emits no
+  // model/tool phase events, so the generic phase line would show a
+  // phantom「考え中…」beside the action card. Action runs are exactly the
+  // entries in the execution Stop map (populated before subscribe on boot).
+  return actionRunStops.has(runId);
+}
+
 function composerStopVisible(): boolean {
   if (activeRunId === null) return false;
   if (runView.visible !== "generating") return false;
@@ -382,6 +398,7 @@ function resetChatState(): void {
   draftSuppressedRuns.clear();
   stopElapsedTimer();
   elapsedSec = 0;
+  cancelPending = false;
   retryTurnId = null;
   renderedAnswers = new Set();
   terminalHydrated = new Set();
@@ -432,7 +449,12 @@ function startElapsedTimer(fromMs?: number): void {
   }, 500);
 }
 
-/** Phase/status line text (durable events only; empty when not running). */
+/**
+ * Phase/status line text (durable events only; empty when not running).
+ * PR #82 review (4312961770): the elapsed seconds are NOT part of this
+ * live-announced text — they render in a separate aria-hidden span so the
+ * once-per-second tick never re-announces the phase line.
+ */
 function runStatusText(): string {
   if (activeRunId === null || runView.visible !== "generating") {
     return "";
@@ -442,13 +464,12 @@ function runStatusText(): string {
     toolCompleted: runView.toolCompleted,
     stepsCompleted: runView.stepsCompleted,
   });
-  const text = formatPhaseText(
+  return formatPhaseText(
     phase,
     runView.toolNames,
     runView.toolRequested,
     runView.toolCompleted,
   );
-  return `${text}（${elapsedSec}秒）`;
 }
 
 /** Ephemeral PR-2 delta envelope (seq 0: never a cursor, never stored). */
@@ -510,12 +531,15 @@ function applyEphemeralDelta(
  * draft would stay visible (and a non-cooperative gateway could keep
  * feeding deltas). Discard the draft and suppress later delta frames as
  * soon as cancellation is requested; also called right after a successful
- * cancel POST.
+ * cancel POST. PR #82 review (4312961764): the same paths mark the run
+ * cancel-pending so the phase line stops rendering/incrementing while the
+ *「停止しました」notice is up.
  */
 function discardDraftOnCancelRequested(runId: string, type: string): void {
   if (type !== "run.cancel_requested" || activeRunId !== runId) {
     return;
   }
+  cancelPending = true;
   draft = null;
   draftSuppressedRuns.add(runId);
 }
@@ -860,6 +884,9 @@ async function stop(): Promise<void> {
   // event, which a non-cooperative strategy can delay for seconds while
   // the run still reports "generating".
   if (activeRunId === runId) {
+    // PR #82 review (4312961764): the stop was accepted; hide the phase
+    // line immediately instead of counting seconds beside「停止しました」.
+    cancelPending = true;
     draft = null;
     draftSuppressedRuns.add(runId);
   }
@@ -962,6 +989,7 @@ async function subscribeRun(runId: string): Promise<void> {
     liveVisible = false;
     runView = { ...INITIAL_RUN_VIEW };
     activeRunCursor = 0;
+    cancelPending = false;
     if (stored !== null && stored > 0) {
       // PR77 review: a stored cursor means the stream resumes mid-run
       // (page reload). Before another durable event creates a gap and
@@ -975,6 +1003,18 @@ async function subscribeRun(runId: string): Promise<void> {
       if (resynced || activeRunId !== runId || sessionId === null) return;
       const rebuilt = await rebuildResumedProjection(runId, stored);
       if (rebuilt && activeRunId !== runId) return;
+    } else {
+      // PR #82 review (4312961778): a recovered run without a usable
+      // cursor (first event not yet persisted, storage failed/cleared)
+      // must still show the true elapsed time — the replayed events carry
+      // no start timestamp. Seed the timer from the status endpoint's
+      // durable start; projection replay stays cursor-gated. A fresh run
+      // resolves to ~now and keeps the previous behaviour.
+      const durableStart = await fetchDurableRunStart(runId);
+      if (activeRunId !== runId || sessionId === null) return;
+      if (durableStart !== null) {
+        startElapsedTimer(durableStart);
+      }
     }
   }
   showNotice(runView.notice);
@@ -1053,6 +1093,25 @@ async function subscribeRun(runId: string): Promise<void> {
 }
 
 /**
+ * Status-endpoint fetch for the durable run start (PR #82 review
+ * 4312961778). Best effort: any failure/shape mismatch keeps the current
+ * (subscription-instant) timer.
+ */
+async function fetchDurableRunStart(runId: string): Promise<number | null> {
+  if (sessionId === null || activeRunId !== runId) return null;
+  try {
+    const fetched = await fetchJson(
+      `/api/sessions/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(runId)}/status`,
+    );
+    if (activeRunId !== runId || fetched.status !== 200) return null;
+    const run = (fetched.body as { run?: unknown }).run;
+    return durableRunStart(run);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Cursor validation on resume + durable elapsed-time seed (PR77 review).
  * Returns true when a corrupt cursor triggered a resync + re-subscribe (the
  * caller must not open another stream for the stale cursor).
@@ -1076,8 +1135,6 @@ async function validateStoredCursor(
   const r = run as {
     id?: unknown;
     eventSeq?: unknown;
-    startedAt?: unknown;
-    createdAt?: unknown;
   };
   if (r.id !== runId || typeof r.eventSeq !== "number") return false;
   if (isCorruptCursor(cursor, r.eventSeq)) {
@@ -1088,9 +1145,7 @@ async function validateStoredCursor(
   // Durable run timing (additive status fields, PR77 review): seed the
   // elapsed timer from the real run start instead of the subscription
   // instant, so a reloaded page no longer shows a minutes-old run as new.
-  const startedAt = typeof r.startedAt === "number" ? r.startedAt : null;
-  const createdAt = typeof r.createdAt === "number" ? r.createdAt : null;
-  const durableStart = startedAt ?? createdAt;
+  const durableStart = durableRunStart(run);
   if (durableStart !== null && activeRunId === runId) {
     startElapsedTimer(durableStart);
   }
@@ -2456,6 +2511,9 @@ async function bootSession(): Promise<void> {
     if (descriptor.status === "cancel_requested") {
       runView = { ...INITIAL_RUN_VIEW, notice: "停止しました" };
       activeRunCursor = 0;
+      // PR #82 review (4312961764): a reload-adopted cancelling run shows
+      // the stop notice, never the phase line.
+      cancelPending = true;
       showNotice("停止しました");
       seededRunId = descriptor.runId;
     }
@@ -2761,13 +2819,19 @@ function evidenceForTurn(turn: Turn): {
         もう一度生成
       </button>
     {/if}
-    {#if activeRunId !== null && runView.visible === "generating"}
+    {#if activeRunId !== null && runView.visible === "generating" && !cancelPending && !isActionRun(activeRunId)}
       {@const statusText = runStatusText()}
       {#if statusText.length > 0}
         <section data-run-progress="true" aria-label="実行状況">
-          <p id="run-status" data-run-status="true" aria-live="polite">
-            {statusText}
-          </p>
+          <!-- PR #82 review: the elapsed tick lives in an aria-hidden span
+               (excluded from the live region's accessible text) so only the
+               phase transition itself is announced; the visible「秒」count
+               is kept for the e2e DOM contract. -->
+          <p id="run-status" data-run-status="true" aria-live="polite"
+            >{statusText}<span aria-hidden="true"
+              >{formatElapsedSuffix(elapsedSec)}</span
+            ></p
+          >
         </section>
       {/if}
     {/if}

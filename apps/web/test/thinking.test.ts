@@ -9,7 +9,9 @@ import {
   appendThinkingText,
   applyThinkingUsage,
   deriveRunPhase,
+  durableRunStart,
   EMPTY_THINKING,
+  formatElapsedSuffix,
   formatPhaseText,
   formatThinkingStats,
   MAX_THINKING_CHARS,
@@ -211,5 +213,55 @@ describe("phase derivation (durable counters only)", () => {
     ]);
     expect(view.visible).toBe("answered");
     expect(view.toolRequested).toBe(1);
+  });
+});
+
+describe("cancellation run views (PR #82 review)", () => {
+  test("run.cancel_requested stays generating with the stop notice", () => {
+    // PR #82 review (4312961764): the run stays "generating" (non-terminal,
+    // §11.5) until the watchdog settles, so the UI hides the phase line via
+    // the cancel-pending flag while this notice is up.
+    const view = stateAt([
+      { seq: 1, type: "run.started", payload: { attempt: 1 } },
+      { seq: 2, type: "run.cancel_requested", payload: {} },
+    ]);
+    expect(view.visible).toBe("generating");
+    expect(view.notice).toBe("停止しました");
+    expect(view.stopVisible).toBe(true);
+  });
+
+  test("run.cancelled is the terminal stopped view", () => {
+    const view = stateAt([{ seq: 1, type: "run.cancelled", payload: {} }]);
+    expect(view.visible).toBe("stopped");
+    expect(view.notice).toBe("停止しました");
+    expect(view.stopVisible).toBe(false);
+    expect(
+      deriveRunPhase({
+        toolRequested: view.toolRequested,
+        toolCompleted: view.toolCompleted,
+        stepsCompleted: view.stepsCompleted,
+      }),
+    ).toBe("thinking");
+  });
+});
+
+describe("elapsed suffix + durable run start (PR #82 review)", () => {
+  test("elapsed suffix is the visible（N秒）tick", () => {
+    expect(formatElapsedSuffix(0)).toBe("（0秒）");
+    expect(formatElapsedSuffix(42)).toBe("（42秒）");
+    expect(formatElapsedSuffix(7.9)).toBe("（7秒）");
+    expect(formatElapsedSuffix(-3)).toBe("（0秒）");
+  });
+
+  test("durableRunStart prefers startedAt, falls back to createdAt", () => {
+    expect(durableRunStart({ id: "r1", startedAt: 1000, createdAt: 500 })).toBe(
+      1000,
+    );
+    expect(durableRunStart({ id: "r1", createdAt: 500 })).toBe(500);
+    expect(durableRunStart({ id: "r1" })).toBeNull();
+    expect(durableRunStart({ startedAt: 0 })).toBeNull();
+    expect(durableRunStart({ startedAt: -5 })).toBeNull();
+    expect(durableRunStart(null)).toBeNull();
+    expect(durableRunStart("run")).toBeNull();
   });
 });

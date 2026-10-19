@@ -134,6 +134,39 @@ export function formatThinkingStats(
   );
 }
 
+/**
+ * Per-second elapsed suffix shown beside the phase text (PR #82 review
+ * 4312961770). Rendered inside an aria-hidden span so the once-per-second
+ * tick never re-announces the polite phase line.
+ */
+export function formatElapsedSuffix(elapsedSec: number): string {
+  const sec =
+    typeof elapsedSec === "number" && Number.isFinite(elapsedSec)
+      ? Math.max(0, Math.floor(elapsedSec))
+      : 0;
+  return `（${sec}秒）`;
+}
+
+/**
+ * Durable run start (epoch ms) from the status endpoint's run object
+ * (PR #82 review 4312961778): `startedAt` when present, else `createdAt`.
+ * Returns null for missing/invalid shapes so callers keep the fresh
+ * subscription instant instead of seeding a bogus timer.
+ */
+export function durableRunStart(run: unknown): number | null {
+  if (typeof run !== "object" || run === null) {
+    return null;
+  }
+  const r = run as { startedAt?: unknown; createdAt?: unknown };
+  const startedAt = typeof r.startedAt === "number" ? r.startedAt : null;
+  const createdAt = typeof r.createdAt === "number" ? r.createdAt : null;
+  const start = startedAt ?? createdAt;
+  if (start === null || !Number.isFinite(start) || start <= 0) {
+    return null;
+  }
+  return start;
+}
+
 /* ------------------------------------------------------------------ */
 /* Phase line (durable events only)                                     */
 /* ------------------------------------------------------------------ */
