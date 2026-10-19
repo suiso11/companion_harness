@@ -786,7 +786,11 @@ async function commitAck(): Promise<void> {
 
 // Mount: boot the feed for the adopted session; unmount: abort feed and
 // invalidate every in-flight generation (legacy destroy/notifySessionChanged).
+// The badge renders BEFORE the session boot (legacy reset() → renderAll()
+// runs renderBadge even without a session, so `#notification-badge` is
+// visible with 未読 0件 on a fresh page load).
 $effect(() => {
+  renderBadge();
   void boot();
   const onInput = (event: Event): void => {
     if ((event.target as HTMLElement | null)?.id === "composer-input") {
