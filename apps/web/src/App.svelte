@@ -169,6 +169,11 @@ let showThinking = $state(false);
 // Japanese conversion never submits (keydown `isComposing` is the primary
 // signal; the flag covers browsers that only fire composition events).
 let composing = $state(false);
+// Safari IME: the Enter keydown that immediately follows `compositionend`
+// arrives with `isComposing === false` yet must not submit. Set on
+// `compositionend`, cleared on the next tick (both event orders covered;
+// unit-tested via `justEndedComposition` in composer.test.ts).
+let justEndedComposition = $state(false);
 let composerEl: HTMLTextAreaElement | null = $state(null);
 let runStartedAt = $state(0);
 let elapsedSec = $state(0);
@@ -389,6 +394,10 @@ function resetChatState(): void {
   actionRunStops = new Map();
   degradedMemory = false;
   notice = "";
+  // A fresh session starts pinned to the bottom (review #84): without
+  // this the flag carries the previous session's scrolled-up state and
+  // new content never auto-scrolls.
+  stickToBottom = true;
   // Invalidate and close any citation drawer from the previous session:
   // the seq bump also drops in-flight openCitation responses (review PR75).
   citationSeq += 1;
@@ -705,7 +714,14 @@ async function send(): Promise<void> {
     stickToBottom = true;
     turns = [...turns, { turnId: "", kind: "user_text", text, run: null }];
     input = "";
+    // Resize only after the cleared value reaches the DOM, otherwise the
+    // textarea keeps its grown height with stale scrollHeight. Then keep
+    // the transcript pinned while the composer shrinks.
+    await tick();
     autogrowTextarea(composerEl);
+    if (stickToBottom && scrollEl !== null) {
+      scrollEl.scrollTop = scrollEl.scrollHeight;
+    }
     // `sending` stays true until the message POST settles (review PR75):
     // the composer, session switch, and new-session controls must stay
     // locked while the request is in flight. fetchUiContext() never throws.
@@ -2532,6 +2548,7 @@ $effect(() => {
     turns.length,
     liveAnswer.length,
     liveVisible,
+    thinking.text.length,
     draft === null ? "" : draftDisplayText(draft),
     runView.notice,
     runView.visible,
@@ -2934,12 +2951,21 @@ function evidenceForTurn(turn: Turn): {
       autocomplete="off"
       bind:value={input}
       bind:this={composerEl}
-      oninput={() => autogrowTextarea(composerEl)}
+      oninput={() => {
+        autogrowTextarea(composerEl);
+        if (stickToBottom && scrollEl !== null) {
+          scrollEl.scrollTop = scrollEl.scrollHeight;
+        }
+      }}
       oncompositionstart={() => {
         composing = true;
       }}
       oncompositionend={() => {
         composing = false;
+        justEndedComposition = true;
+        void tick().then(() => {
+          justEndedComposition = false;
+        });
       }}
       onkeydown={(e) => {
         if (
@@ -2947,7 +2973,12 @@ function evidenceForTurn(turn: Turn): {
             key: e.key,
             shiftKey: e.shiftKey,
             isComposing: e.isComposing,
+            keyCode:
+              typeof (e as KeyboardEvent).keyCode === "number"
+                ? (e as KeyboardEvent).keyCode
+                : null,
             composing,
+            justEndedComposition,
           })
         ) {
           e.preventDefault();

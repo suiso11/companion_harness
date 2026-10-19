@@ -11,12 +11,22 @@ export interface ComposerKeyInput {
   readonly key: string;
   readonly shiftKey: boolean;
   readonly isComposing: boolean;
+  /** Safari IME: Enter during conversion reports keyCode 229. */
+  readonly keyCode?: number | null;
   readonly composing: boolean;
+  /**
+   * True on the Enter keydown that immediately follows `compositionend`
+   * (Safari fires it with `isComposing === false`). Set on
+   * `compositionend`, cleared on the next tick.
+   */
+  readonly justEndedComposition?: boolean;
 }
 
 /**
  * True when this keydown must submit the composer: plain Enter only, never
- * while an IME composition is active, never Shift+Enter (newline).
+ * while an IME composition is active, never Shift+Enter (newline), never
+ * the Safari keyCode-229 conversion Enter, and never the Enter keydown that
+ * immediately follows `compositionend`.
  */
 export function shouldSendOnKeydown(input: ComposerKeyInput): boolean {
   if (input.key !== "Enter") {
@@ -26,6 +36,12 @@ export function shouldSendOnKeydown(input: ComposerKeyInput): boolean {
     return false;
   }
   if (input.isComposing || input.composing) {
+    return false;
+  }
+  if (input.justEndedComposition === true) {
+    return false;
+  }
+  if (input.keyCode === 229) {
     return false;
   }
   return true;

@@ -44,6 +44,51 @@ describe("shouldSendOnKeydown", () => {
     ).toBe(false);
   });
 
+  test("Safari IME keyCode 229 Enter never sends", () => {
+    expect(
+      shouldSendOnKeydown({
+        key: "Enter",
+        shiftKey: false,
+        isComposing: false,
+        keyCode: 229,
+        composing: false,
+      }),
+    ).toBe(false);
+  });
+
+  test("Enter immediately after compositionend never sends (both orders)", () => {
+    // Order 1: compositionend fired, flag set, keydown arrives with
+    // isComposing already false.
+    expect(
+      shouldSendOnKeydown({
+        key: "Enter",
+        shiftKey: false,
+        isComposing: false,
+        composing: false,
+        justEndedComposition: true,
+      }),
+    ).toBe(false);
+    // Order 2: stale isComposing true on the keydown itself.
+    expect(
+      shouldSendOnKeydown({
+        key: "Enter",
+        shiftKey: false,
+        isComposing: true,
+        composing: false,
+        justEndedComposition: true,
+      }),
+    ).toBe(false);
+    // After the next tick the flag clears and plain Enter sends again.
+    expect(
+      shouldSendOnKeydown({
+        key: "Enter",
+        shiftKey: false,
+        isComposing: false,
+        composing: false,
+        justEndedComposition: false,
+      }),
+    ).toBe(true);
+  });
   test("non-Enter keys never send", () => {
     for (const key of ["a", "Escape", "Tab", " "]) {
       expect(
