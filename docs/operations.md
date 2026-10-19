@@ -1320,6 +1320,11 @@ or complete activate config):
   `tmux new-session -d -s companion-cal ./run-google-readonly.sh` and
   read back scrollback instead of a log file.
 
+  Note (2026-10-19): the `qwen-local` observation above is historical and is
+  left unchanged. The launcher now requests the model-agnostic LiteLLM alias
+  `local-chat` (currently mapped to Gemma 4 26B-A4B); the `qwen-local` alias
+  is being removed.
+
 ### C15 Calendar fake E2E harness fixes (observed: refresh + tombstone scenarios)
 
 - The two failing C15 browser scenarios were ROOT-CAUSED against the real

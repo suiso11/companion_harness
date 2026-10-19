@@ -259,6 +259,7 @@
 - 結果: `reasoning_content` deltas を incremental に透過する。実測 45 tokens が約 2.8s の spread で到達し、first chunk は約 0.2s。non-streaming では `message.reasoning_content` を返す。
 - 世代速度実測: 約 13.6 tok/s。
 - 判定: **O-2 resolved**。LiteLLM 経路での streaming＋reasoning 透過を確認。config 変更は不要。
+- 注記（2026-10-19）: 上記の `qwen-local` は当時の測定記録であり、本文は変更しない。現在の launcher 既定はモデル非依存 alias `local-chat`（Gemma 4 26B-A4B を指す）。`qwen-local` alias は削除予定。
 
 ### 13.3 stats 表示への帰結（timings／usage）
 
