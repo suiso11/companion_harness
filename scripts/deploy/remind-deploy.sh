@@ -24,6 +24,27 @@ log() {
   printf '%s remind-deploy: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"
 }
 
+# systemd loads EnvironmentFile; manual runs fall back to reading the one
+# COMPANION_MEMORY_JSON line (never echoed) so the smoke call matches the
+# exact executable/entry/config/scope Companion uses.
+load_memory_json() {
+  if [ -n "${COMPANION_MEMORY_JSON:-}" ]; then
+    return 0
+  fi
+  _env_file="${COMPANION_ENV_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/companion/env}"
+  [ -r "$_env_file" ] || return 0
+  _line="$(grep -E '^[[:space:]]*(export[[:space:]]+)?COMPANION_MEMORY_JSON=' \
+    "$_env_file" | tail -n 1 || true)"
+  [ -n "$_line" ] || return 0
+  _value="${_line#*=}"
+  case "$_value" in
+    \"*\") _value="${_value#\"}" && _value="${_value%\"}" ;;
+    \'*\') _value="${_value#\'}" && _value="${_value%\'}" ;;
+  esac
+  COMPANION_MEMORY_JSON="$_value"
+  unset _env_file _line _value
+}
+
 # --- single-instance lock (non-blocking; a held lock is a clean skip) ---
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
@@ -132,13 +153,34 @@ if ! { git switch --detach "$TARGET" && npm ci && npm run build; }; then
 fi
 
 # --- smoke gate: one real record.list call must answer ok:true ---
-# The scope prefers COMPANION_MEMORY_JSON.scope, then the first allowedScope
-# in the remind config (see remindDeploy.mjs). A missing scope is a config
-# problem, so refuse and surface it instead of deploying unverified.
-if ! SCOPE="$(node "$SCRIPT_DIR/remindDeploy.mjs" scope \
-  --memory-json "${COMPANION_MEMORY_JSON:-}" \
+# Invoke the same executable/entry/config/scope Companion uses when
+# COMPANION_MEMORY_JSON is available; otherwise use the just-built CLI and
+# the first allowedScope in the remind config (see remindDeploy.mjs). A
+# missing scope is a config problem, so refuse instead of deploying unverified.
+load_memory_json
+MEMORY_JSON="${COMPANION_MEMORY_JSON:-}"
+if ! SCOPE="$(node "$SCRIPT_DIR/remindDeploy.mjs" field scope \
+  --memory-json "$MEMORY_JSON" \
   --config "$REMIND_CONFIG")" || [ -z "$SCOPE" ]; then
   log "cannot resolve a smoke-test scope from COMPANION_MEMORY_JSON or $REMIND_CONFIG; refusing"
+  rollback
+  exit 1
+fi
+if ! SMOKE_EXEC="$(node "$SCRIPT_DIR/remindDeploy.mjs" field executable \
+  --memory-json "$MEMORY_JSON" --fallback "$(command -v node)")"; then
+  log "cannot resolve the remind executable; refusing"
+  rollback
+  exit 1
+fi
+if ! SMOKE_ENTRY="$(node "$SCRIPT_DIR/remindDeploy.mjs" field entry \
+  --memory-json "$MEMORY_JSON" --fallback "$DEPLOY_DIR/dist/src/cli.js")"; then
+  log "cannot resolve the remind entry script; refusing"
+  rollback
+  exit 1
+fi
+if ! SMOKE_CONFIG="$(node "$SCRIPT_DIR/remindDeploy.mjs" field config \
+  --memory-json "$MEMORY_JSON" --fallback "$REMIND_CONFIG")"; then
+  log "cannot resolve the remind config path; refusing"
   rollback
   exit 1
 fi
@@ -148,7 +190,7 @@ process.stdout.write(JSON.stringify({ v: 1, op: "record.list", params: { scope: 
 
 SMOKE_FAILED=0
 if ! SMOKE_OUT="$(printf '%s\n' "$SMOKE_REQUEST" |
-  node "$DEPLOY_DIR/dist/src/cli.js" --config "$REMIND_CONFIG" 2>/dev/null)"; then
+  "$SMOKE_EXEC" "$SMOKE_ENTRY" --config "$SMOKE_CONFIG" 2>/dev/null)"; then
   SMOKE_FAILED=1
 elif ! printf '%s\n' "$SMOKE_OUT" | node "$SCRIPT_DIR/remindDeploy.mjs" check-ok; then
   SMOKE_FAILED=1

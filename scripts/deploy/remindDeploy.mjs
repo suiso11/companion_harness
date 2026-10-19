@@ -9,6 +9,9 @@
 // CLI:
 //   node remindDeploy.mjs scope [--memory-json RAW] [--config PATH]
 //     prints the selected scope (empty + exit 1 when none is available).
+//   node remindDeploy.mjs field <key> [--memory-json RAW] [--config PATH]
+//                              [--fallback VALUE]
+//     prints entry/config/executable/scope, preferring COMPANION_MEMORY_JSON.
 //   node remindDeploy.mjs check-ok
 //     reads one response envelope from stdin; exit 0 only for
 //     { v: 1, ok: true, code: "OK" }.
@@ -16,19 +19,27 @@
 
 import { readFileSync } from "node:fs";
 
-/** Extract the Companion memory scope from COMPANION_MEMORY_JSON. */
-export function scopeFromMemoryJson(raw) {
+function parseMemoryJson(raw) {
   if (typeof raw !== "string" || raw.length === 0) {
     return null;
   }
-  let parsed;
   try {
-    parsed = JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    return parsed !== null && typeof parsed === "object" ? parsed : null;
   } catch {
     return null;
   }
-  const scope = parsed?.scope;
-  return typeof scope === "string" && scope.length > 0 ? scope : null;
+}
+
+/** One string field from COMPANION_MEMORY_JSON (e.g. entry/config/scope). */
+export function memoryValue(raw, key) {
+  const value = parseMemoryJson(raw)?.[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+/** Extract the Companion memory scope from COMPANION_MEMORY_JSON. */
+export function scopeFromMemoryJson(raw) {
+  return memoryValue(raw, "scope");
 }
 
 /** First allowedScope from a remind memory.config.json, or null. */
@@ -55,6 +66,27 @@ export function resolveSmokeScope({ memoryJson, configPath } = {}) {
   return scopeFromMemoryJson(memoryJson) ?? readAllowedScope(configPath);
 }
 
+/**
+ * Resolve how to invoke the remind CLI for the smoke test. The Companion
+ * address (COMPANION_MEMORY_JSON) wins for executable/entry/config/scope;
+ * otherwise fall back to the just-deployed CLI and the remind config.
+ */
+export function resolveSmokeTarget({
+  memoryJson,
+  configPath,
+  fallbackEntry,
+  fallbackExecutable,
+} = {}) {
+  const config = memoryValue(memoryJson, "config") ?? configPath ?? null;
+  return {
+    executable:
+      memoryValue(memoryJson, "executable") ?? fallbackExecutable ?? null,
+    entry: memoryValue(memoryJson, "entry") ?? fallbackEntry ?? null,
+    config,
+    scope: scopeFromMemoryJson(memoryJson) ?? readAllowedScope(config),
+  };
+}
+
 /** True only for a well-formed ok:true remind response envelope. */
 export function isOkEnvelope(raw) {
   let parsed;
@@ -73,6 +105,8 @@ function parseArgs(argv) {
       out.memoryJson = argv[++i];
     } else if (argv[i] === "--config" && i + 1 < argv.length) {
       out.configPath = argv[++i];
+    } else if (argv[i] === "--fallback" && i + 1 < argv.length) {
+      out.fallback = argv[++i];
     } else if (argv[i] === "--help" || argv[i] === "-h") {
       out.help = true;
     }
@@ -99,6 +133,28 @@ if (invokedAsMain) {
       process.exit(1);
     }
     process.stdout.write(`${scope}\n`);
+  } else if (command === "field") {
+    // `field <key> [--memory-json RAW] [--config PATH] [--fallback VALUE]`
+    const key = rest[0];
+    const args = parseArgs(rest.slice(1));
+    const target = resolveSmokeTarget({
+      memoryJson: args.memoryJson,
+      configPath: args.configPath,
+      fallbackEntry: args.fallback,
+      fallbackExecutable: args.fallback,
+    });
+    const value =
+      key === "scope" ||
+      key === "entry" ||
+      key === "config" ||
+      key === "executable"
+        ? target[key]
+        : null;
+    if (value === null || value === "") {
+      process.stderr.write(`remindDeploy: no ${key ?? "field"} available\n`);
+      process.exit(1);
+    }
+    process.stdout.write(`${value}\n`);
   } else if (command === "check-ok") {
     let raw = "";
     for await (const chunk of process.stdin) {
@@ -108,6 +164,7 @@ if (invokedAsMain) {
   } else {
     process.stderr.write(
       "usage: remindDeploy.mjs scope [--memory-json RAW] [--config PATH]\n" +
+        "       remindDeploy.mjs field <entry|config|executable|scope> [...] [--fallback VALUE]\n" +
         "       remindDeploy.mjs check-ok\n",
     );
     process.exit(2);

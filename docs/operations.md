@@ -4331,7 +4331,7 @@ journalctl --user -u companion -u companion-deploy -f   # logs
 
 `remind-deploy.timer` が 5 分ごとに実行する。Companion の
 `companion-deploy.timer` と同時に走らないよう、起動時は
-`OnBootSec=4min` で 2 分ずらしてある (以後も 5 分間隔)。
+`OnBootSec=3min` で 1 分ずらしてある (以後も 5 分間隔)。
 
 ```sh
 scripts/deploy/install.sh
@@ -4358,9 +4358,10 @@ loginctl enable-linger $USER
 5. `git switch --detach <target>` → `npm ci` → `npm run build`
    (remind は npm 管理。`dist/` は gitignore)。
 6. Smoke: `record.list` を1回実行し `ok:true` を要求する。
-   scope は `COMPANION_MEMORY_JSON.scope`、無ければ remind config の
-   `allowedScopes[0]` (`scripts/deploy/remindDeploy.mjs`)。
-   `node dist/src/cli.js --config <config>` へ1行 JSON を渡す。
+   `COMPANION_MEMORY_JSON` があれば `executable` / `entry` / `config` /
+   `scope` をそのまま使い、無ければ `node dist/src/cli.js` と remind config
+   の `allowedScopes[0]` を使う (`scripts/deploy/remindDeploy.mjs`)。
+   1行 JSON を stdin へ渡し `{v:1,ok:true,code:"OK"}` を要求する。
    scope 解決不能・非0終了・`ok:true` 以外は失敗とみなし、直前 sha へ
    `git switch --detach` → `npm ci` → `npm run build` で rollback し exit 1。
 
@@ -4383,13 +4384,11 @@ auto-deploy や checkout の移動で壊れる。モデルはチェックアウ�
 `~/.local/share/remind/models` に置く。
 
 ```sh
-# 既存モデルを安定パスへコピー (rsync -a、再実行しても差分のみ)
+# 既存モデル一式を安定パスへコピー (rsync -a --mkpath、再実行しても差分のみ)
 scripts/deploy/remind-models.sh
-# コピー元/先/対象を変える場合
-REMIND_MODELS_SOURCE=~/remind/models \
-REMIND_MODELS_DIR=~/.local/share/remind/models \
-REMIND_MODEL_NAMES="paraphrase-multilingual-MiniLM-L12-v2 qwen25-15b-instruct" \
-  scripts/deploy/remind-models.sh
+# コピー元/先を変える場合 (コピー元は第1引数)
+scripts/deploy/remind-models.sh /path/to/remind/models
+REMIND_MODELS_DIR=~/.local/share/remind/models scripts/deploy/remind-models.sh
 ```
 
 スクリプトは設定を書き換えず、更新すべき行を表示する:

@@ -8,8 +8,10 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   isOkEnvelope,
+  memoryValue,
   readAllowedScope,
   resolveSmokeScope,
+  resolveSmokeTarget,
   scopeFromMemoryJson,
 } from "../../../scripts/deploy/remindDeploy.mjs";
 
@@ -48,6 +50,63 @@ describe("scopeFromMemoryJson", () => {
     expect(scopeFromMemoryJson("{}")).toBeNull();
     expect(scopeFromMemoryJson('{"scope":""}')).toBeNull();
     expect(scopeFromMemoryJson('{"scope":42}')).toBeNull();
+  });
+});
+
+describe("memoryValue", () => {
+  it("reads non-empty string fields and rejects the rest", () => {
+    const raw = JSON.stringify({
+      executable: "/node",
+      entry: "/remind/dist/src/cli.js",
+      config: "/cfg.json",
+      scope: "personal/default",
+    });
+    expect(memoryValue(raw, "entry")).toBe("/remind/dist/src/cli.js");
+    expect(memoryValue(raw, "config")).toBe("/cfg.json");
+    expect(memoryValue(raw, "missing")).toBeNull();
+    expect(memoryValue('{"entry":42}', "entry")).toBeNull();
+    expect(memoryValue(undefined, "entry")).toBeNull();
+  });
+});
+
+describe("resolveSmokeTarget", () => {
+  it("uses the Companion address for executable/entry/config/scope", () => {
+    const raw = JSON.stringify({
+      executable: "/node",
+      entry: "/remind/dist/src/cli.js",
+      config: "/companion/config.json",
+      scope: "companion/scope",
+    });
+    expect(
+      resolveSmokeTarget({
+        memoryJson: raw,
+        configPath: "/remind/config.json",
+        fallbackEntry: "/deploy/dist/src/cli.js",
+        fallbackExecutable: "/usr/bin/node",
+      }),
+    ).toEqual({
+      executable: "/node",
+      entry: "/remind/dist/src/cli.js",
+      config: "/companion/config.json",
+      scope: "companion/scope",
+    });
+  });
+
+  it("falls back to the deployed CLI and config scope", () => {
+    const path = writeConfig({ allowedScopes: ["config/scope"] });
+    expect(
+      resolveSmokeTarget({
+        memoryJson: "",
+        configPath: path,
+        fallbackEntry: "/deploy/dist/src/cli.js",
+        fallbackExecutable: "/usr/bin/node",
+      }),
+    ).toEqual({
+      executable: "/usr/bin/node",
+      entry: "/deploy/dist/src/cli.js",
+      config: path,
+      scope: "config/scope",
+    });
   });
 });
 
