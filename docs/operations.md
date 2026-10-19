@@ -4307,3 +4307,112 @@ exit 1。手動復旧も同じ手順 (`git switch --detach <sha>` + restart)。
 systemctl --user stop companion-deploy.timer    # pause (service は継続)
 journalctl --user -u companion -u companion-deploy -f   # logs
 ```
+
+## バックアップと復元 (Companion + remind, user systemd)
+
+`companion-backup.timer` が毎日 03:30 (Persistent=true,
+RandomizedDelaySec=15min) に `scripts/deploy/companion-backup.sh` を実行する。
+保存先は `~/.local/share/companion-backups/{companion,remind}/` (0700)、
+各世代は 0600 の SQLite。保持は各ディレクトリ newest 7 世代
+(`COMPANION_BACKUP_KEEP` で変更可)。
+
+- Companion: deploy dir (`~/companion_master`) で既存の
+  `pnpm --filter @companion/server backup` を実行し、CLI が
+  `quick_check` 済みのファイルを世代として atomic rename で取り込む。
+- remind: remind に backup CLI は無いため
+  `scripts/deploy/remind-backup.mjs` が
+  `~/.config/remind/memory.config.json` の `dbPath` (相対パスは config
+  ディレクトリ基準) を解決し、`node:sqlite` の online backup API で
+  読み取り専用ソースからコピーする。コピーは `.partial` →
+  `PRAGMA integrity_check` → 0600 → atomic rename。
+- prune は新世代の rename 成功後にのみ実行する。失敗時は `.partial` を
+  削除し、既存の最新 good copy を残す。
+- 同時実行は flock (`$XDG_RUNTIME_DIR/companion-backup.lock`) で排他。
+- ログは journal (stdout)。手動実行:
+
+```sh
+systemctl --user start companion-backup.service
+journalctl --user -u companion-backup.service -n 50
+```
+
+### Companion の復元 (停止必須)
+
+1. `systemctl --user stop companion.service`
+2. 現行 DB / `-wal` / `-shm` を退避コピー (削除しない)。
+3. 選んだ `companion-*.sqlite` を DB 隣の一時ファイルへコピー。
+4. 一時ファイルに `PRAGMA quick_check` を実行し、`ok` 以外なら中止。
+5. 一時ファイルを設定 DB パスへ atomic rename。
+6. 停止したまま古い `-wal` / `-shm` を削除。
+7. `systemctl --user start companion.service` (起動時 migration 可)。
+
+### remind の復元 (DB を開くプロセスを停止)
+
+1. remind CLI / それを呼ぶ処理を停止 (cron/常駐があれば止める)。
+2. 現行 DB / `-wal` / `-shm` を退避コピー。
+3. `~/.local/share/companion-backups/remind/` の選んだ世代を
+   `dbPath` 隣の一時ファイルへコピー。
+4. `PRAGMA integrity_check` が `ok` であることを確認。
+5. atomic rename で `dbPath` を置換し、古い sidecar を削除。
+6. 処理を再開。
+
+## 監視 (local only)
+
+`companion-health.timer` が 5 分ごとに
+`scripts/deploy/companion-health.sh` を実行し、以下を確認する。
+
+- `http://127.0.0.1:${COMPANION_PORT:-3000}/health/live`
+- `systemctl --user is-failed` (companion / companion-deploy / companion-backup)
+- `/` と `/srv` の空き容量 (<10% で error)
+- Companion / remind の最新バックアップ age (>36h で error,
+  `COMPANION_BACKUP_MAX_AGE_HOURS` で変更可)
+
+問題時は `systemd-cat -p err -t companion-health` で journal に記録する。
+`companion`, `companion-deploy`, `companion-backup` には
+`OnFailure=companion-alert@%n.service` を設定し、失敗時に
+`~/.local/state/companion/alerts.log` (0700/0600) へ追記 + journal err を
+出す。外部送信 (push/メール等) は未承認のため対象外。
+
+```sh
+journalctl --user -p err -S today
+journalctl --user -u companion-health -n 50
+cat ~/.local/state/companion/alerts.log
+```
+
+## LLM スタック管理 (ops/llm)
+
+`ops/llm/` はホストの `/srv/llm` を git 管理下に置いたもの。
+qwen サービスと `qwen-local` alias は削除済みで、`local-chat` のみ。
+イメージは digest pin。secrets は `/srv/llm/.env` (0600, 非コミット) のみ。
+
+```sh
+# 差分確認 (コピーしない)
+ops/llm/apply.sh
+# 差分を /srv/llm へ反映し、compose を収束
+ops/llm/apply.sh --yes
+```
+
+`apply.sh` は `compose.yaml` と `litellm_config.yaml` だけをコピーし、
+`.env` は読まない/コピーしない。`--dest` / `LLM_DIR` で配置先を変更できる。
+
+## 鍵ローテーション
+
+```sh
+ops/llm/rotate-keys.sh --yes
+# パスを変える場合:
+ops/llm/rotate-keys.sh --yes \
+  --llm-dir /srv/llm \
+  --companion-env ~/companion_master/.env.litellm
+```
+
+- `openssl rand -hex 32` で `LLAMA_API_KEY` / `LITELLM_MASTER_KEY` を生成。
+- `/srv/llm/.env` を `.env.bak-<UTC>` (0600) に退避し、0600 で atomic 更新。
+- `~/companion_master/.env.litellm` の `LITELLM_MASTER_KEY` も更新
+  (同様に backup、0600)。
+- `gemma` + `litellm` を force-recreate し、`companion.service` を restart。
+- 最後に認証付き `GET /v1/models` が 200 を返すことを確認 (鍵は表示しない)。
+- 鍵は argv / 標準出力 / journal に出さない。失敗時は退避パスだけを表示する。
+
+注意: 現行 compose の llama.cpp (`gemma`) は `--api-key` を渡していないため、
+`LLAMA_API_KEY` は LiteLLM → gemma の outbound header としてのみ使われる。
+llama.cpp 側でも認証を強制する場合は、`compose.yaml` の gemma command に
+`--api-key ${LLAMA_API_KEY}` を追加してから `apply.sh --yes` を実行する。
