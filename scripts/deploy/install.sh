@@ -60,15 +60,20 @@ IFS="$OLD_IFS"
 UNIT_PATH="$DEDUP"
 unset DEDUP OLD_IFS _d NODE_BIN PNPM_BIN NODE_DIR PNPM_DIR
 
-cp "$HERE/systemd/companion.service" "$UNIT_DIR/companion.service"
-cp "$HERE/systemd/companion-deploy.service" "$UNIT_DIR/companion-deploy.service"
-cp "$HERE/systemd/companion-deploy.timer" "$UNIT_DIR/companion-deploy.timer"
+for _unit in \
+  companion.service companion-deploy.service companion-deploy.timer \
+  companion-backup.service companion-backup.timer \
+  companion-health.service companion-health.timer \
+  companion-alert@.service; do
+  cp "$HERE/systemd/$_unit" "$UNIT_DIR/$_unit"
+done
+unset _unit
 printf 'installed units to %s\n' "$UNIT_DIR"
 
-# companion-deploy.sh needs git, gh, pnpm, node: the same pinned PATH
-# covers both units (git/gh normally live in /usr/bin already in the
-# fallback tail).
-for _svc in companion.service companion-deploy.service; do
+# companion-deploy.sh / companion-backup.sh / companion-health.sh need
+# git, gh, pnpm, node: the same pinned PATH covers all units (git/gh
+# normally live in /usr/bin already in the fallback tail).
+for _svc in companion.service companion-deploy.service companion-backup.service companion-health.service; do
   mkdir -p "$UNIT_DIR/$_svc.d"
   printf '[Service]\nEnvironment=PATH=%s\n' "$UNIT_PATH" >"$UNIT_DIR/$_svc.d/path.conf"
   printf 'wrote %s\n' "$UNIT_DIR/$_svc.d/path.conf"
@@ -100,14 +105,19 @@ cat <<'EOF'
 Next steps (run on the host):
   systemctl --user daemon-reload
   systemctl --user enable --now companion.service companion-deploy.timer
+  systemctl --user enable --now companion-backup.timer companion-health.timer
   loginctl enable-linger $USER
 Useful:
   systemctl --user stop companion-deploy.timer   # pause auto-deploy
+  systemctl --user stop companion-backup.timer   # pause backups
   journalctl --user -u companion -u companion-deploy -f   # logs
+  journalctl --user -p err -S today              # local monitoring errors
+  cat ~/.local/state/companion/alerts.log        # failure alerts (local)
 EOF
 
 if [ "$ENABLE" = "1" ]; then
   systemctl --user daemon-reload
   systemctl --user enable --now companion.service companion-deploy.timer
+  systemctl --user enable --now companion-backup.timer companion-health.timer
   loginctl enable-linger "$USER"
 fi
