@@ -1,9 +1,55 @@
-/* PR-1 Svelte chat theme: dark-only, Japanese, self-hosted, no CDN.
+/* V1 llama.cpp WebUI theme (dark only, hand-rolled CSS variables).
+ * Tokens adapted from upstream ggml-org/llama.cpp @ 098ce52
+ * `tools/ui/src/app.css` (`:root` / `.dark`, oklch) — see
+ * `vendor/llama-webui/NOTICE.md`. No Tailwind, no upstream JS.
  * Floor: slice (c) smartphone rules — 360px no horizontal scroll, usable
  * composer, >=44px primary touch targets, 16px+ inputs (no iOS auto-zoom),
- * border-box, operable at 200% text zoom. New: `color-scheme: dark`. */
+ * border-box, operable at 200% text zoom. `color-scheme: dark`. */
 :root {
   color-scheme: dark;
+
+  /* llama-webui: `--radius` + radius scale (hand-rolled `@theme inline`). */
+  --radius: 0.625rem;
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  /* llama-webui: `.dark` token subset (dark-only app: pinned on `:root`). */
+  --background: oklch(0.16 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.29 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 30%);
+  --input: oklch(1 0 0 / 30%);
+  --ring: oklch(0.556 0 0);
+  --chart-1: oklch(0.488 0.243 264.376);
+  --chart-2: oklch(0.696 0.17 162.48);
+  --chart-3: oklch(0.769 0.188 70.08);
+  --chart-4: oklch(0.627 0.265 303.9);
+  --chart-5: oklch(0.645 0.246 16.439);
+  --code-background: oklch(0.225 0 0);
+  --code-foreground: oklch(0.875 0 0);
+  /* Hairlines use the upstream sidebar-border alpha (10%) so the 30%
+   * `--border` only lands on emphasized controls. */
+  --border-subtle: oklch(1 0 0 / 10%);
+  /* llama-webui: `--font-mono` stack for code/stats. */
+  --font-mono:
+    ui-monospace, SFMono-Regular, "SF Mono", Monaco, "Cascadia Code",
+    "Roboto Mono", Consolas, "Liberation Mono", Menlo, monospace;
+  /* Sidebar/chat-form-area vars intentionally not ported (no sidebar, no
+   * upstream chat form yet — V4 owns the composer rework). */
 }
 
 *,
@@ -13,25 +59,71 @@
 }
 
 html {
-  background: #101418;
-  color: #e8ecef;
+  background: var(--background);
+  color: var(--foreground);
+  height: 100%;
 }
 
 body {
   font-family:
     system-ui, "Hiragino Kaku Gothic ProN", "Noto Sans JP", sans-serif;
-  margin: 0 auto;
-  max-width: 48rem;
-  padding: 1rem;
-  background: #101418;
-  color: #e8ecef;
+  margin: 0;
+  padding: 0;
+  background: var(--background);
+  color: var(--foreground);
   overflow-x: hidden;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  min-height: 100%;
 }
 
+#svelte-root {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* llama-webui: thin scrollbars, visible on hover only. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+
+*:hover {
+  scrollbar-color: var(--muted) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 3px;
+}
+
+*:hover::-webkit-scrollbar-thumb {
+  background: var(--muted);
+}
+
+:where(code, pre, kbd, samp) {
+  font-family: var(--font-mono);
+}
+
+/* V2 llama-like full-height column: slim header, scrollable message list,
+ * pinned composer. The transcript scrolls inside #conversation (the page
+ * itself never scrolls), so the composer is always visible. */
 .shell {
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
+  height: 100vh;
+  /* biome-ignore lint/suspicious/noDuplicateProperties: dvh fallback for older browsers */
+  height: 100dvh;
   min-width: 0;
 }
 
@@ -41,11 +133,15 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid var(--border-subtle);
+  flex: 0 0 auto;
 }
 
 .topbar h1 {
-  font-size: 1.1rem;
+  font-size: 1rem;
   margin: 0;
+  letter-spacing: 0.01em;
 }
 
 .sessions {
@@ -56,17 +152,70 @@ body {
   min-width: 0;
 }
 
+.sessions label {
+  color: var(--muted-foreground);
+  font-size: 0.85rem;
+}
+
+/* Transcript: the scroll container filling the middle (llama.cpp chat).
+ * Content lives in .messages, a max-width centered column. */
 #conversation {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+}
+
+.messages {
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: 0.75rem;
+  width: 100%;
+  max-width: 48rem;
+  margin: 0 auto;
+  padding: 1rem 1rem 0.5rem;
+  min-height: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+/* Empty-state hint (llama.cpp welcome): centered in the list. */
+#conversation-empty {
+  margin: auto;
+  text-align: center;
+  color: var(--muted-foreground);
+  padding: 2rem 1rem;
+}
+
+#conversation-empty p {
+  margin: 0;
+  font-size: 1rem;
+}
+
+/* Transcript rows: assistant/history turns read as borderless rows; the
+ * user's own turns render as muted right-side bubbles (llama.cpp chat). */
+#conversation section {
+  border: none;
+  background: transparent;
+  padding: 0.25rem 0;
   min-width: 0;
 }
 
-#conversation section {
-  border-top: 1px solid #3a434c;
-  padding: 0.5rem 0;
-  min-width: 0;
+#conversation section[data-turn-kind="user_text"] {
+  align-self: flex-end;
+  max-width: min(85%, 36rem);
+  background: var(--muted);
+  color: var(--foreground);
+  border-color: transparent;
+  border-radius: var(--radius-xl);
+}
+
+#conversation section[data-run-progress="true"],
+#conversation section[data-thinking-stats="true"] {
+  background: transparent;
+  border-color: transparent;
+  padding: 0.25rem 0;
 }
 
 #conversation p {
@@ -75,32 +224,162 @@ body {
   margin: 0.25rem 0;
 }
 
+/* Status line: llama.cpp shimmer while the run streams. */
+#run-status {
+  color: var(--muted-foreground);
+  font-size: 0.9rem;
+  background: linear-gradient(
+    90deg,
+    var(--muted-foreground),
+    var(--foreground),
+    var(--muted-foreground)
+  );
+  background-size: 200% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  font-weight: 500;
+  animation: shimmer 1s linear infinite;
+}
+
+@keyframes shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #run-status {
+    animation: none;
+  }
+}
+
+/* V3 thinking block (upstream ChatMessageReasoningBlock look): card shell,
+ * collapsible header row with chevron, muted mono body, muted mono stats
+ * line (upstream ChatMessageStatistics). Behavior unchanged: expanded
+ * while streaming, auto-collapsed on answer. */
+#conversation section[data-thinking="true"] {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+  padding: 0.625rem 0.875rem;
+}
+
+.thinking-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  background: transparent;
+  border: none;
+  color: var(--muted-foreground);
+  font-size: 0.85rem;
+  font-weight: 600;
+  padding: 0.25rem 0;
+  min-height: 44px;
+  min-width: 44px;
+}
+
+.thinking-toggle:hover:not(:disabled) {
+  background: transparent;
+  color: var(--foreground);
+}
+
+.thinking-chevron {
+  display: inline-block;
+  font-size: 0.8rem;
+  line-height: 1;
+}
+
+.thinking-title {
+  line-height: 1.4;
+}
+
+[data-thinking-text="true"] {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  /* PR #82 review (4312961790): the <pre> must always wrap within the
+   * viewport — a wider-than-viewport reasoning line is otherwise clipped
+   * with no way to reach it (#conversation hides horizontal overflow). */
+  max-width: 100%;
+  min-width: 0;
+  max-height: 16rem;
+  overflow-y: auto;
+  background: var(--code-background);
+  color: var(--code-foreground);
+  border-radius: var(--radius-md);
+  padding: 0.625rem 0.75rem;
+  font-size: 0.85rem;
+  font-family: var(--font-mono);
+  margin: 0.375rem 0 0;
+}
+
+[data-run-stats="true"] {
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  margin: 0.375rem 0 0;
+}
+
+/* Composer bar pinned at the bottom (llama.cpp chat): the footer holds the
+ * notice + composer in a centered column, with iOS safe-area inset. */
+.composer-bar {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--background);
+  padding: 0.5rem 1rem calc(0.5rem + env(safe-area-inset-bottom));
+}
+
+.composer-column {
+  width: 100%;
+  max-width: 48rem;
+  margin: 0 auto;
+  min-width: 0;
+}
+
 #composer {
   display: flex;
   gap: 0.5rem;
-  margin-top: 1rem;
-  position: sticky;
-  bottom: 0;
-  background: #101418;
-  padding: 0.5rem 0;
+  background: var(--background);
+  padding: 0;
+  border-top: none;
 }
 
+/* V4 composer input (upstream ChatFormInputBasic): auto-growing textarea,
+ * max ~10 lines then scroll, 16px (no iOS auto-zoom), safe-area handled by
+ * .composer-bar. Enter sends / Shift+Enter newline (App.svelte); IME
+ * composition never sends. */
 #composer-input {
   flex: 1;
   min-width: 0;
   font-size: 16px;
-  padding: 0.6rem;
-  background: #1a2129;
-  color: #e8ecef;
-  border: 1px solid #4a5560;
-  border-radius: 0.375rem;
+  line-height: 1.5;
+  padding: 0.6rem 0.9rem;
+  background: var(--secondary);
+  color: var(--foreground);
+  border: 1px solid var(--input);
+  border-radius: var(--radius-xl);
+  resize: none;
+  overflow-y: hidden;
+  max-height: 15rem;
+  min-height: 44px;
+  field-sizing: content;
+}
+
+#composer-input::placeholder {
+  color: var(--muted-foreground);
+}
+
+#composer-input:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
 }
 
 #login-expired {
-  border: 1px solid #8a6d1b;
-  background: #241d08;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--card-foreground);
   padding: 1rem;
-  border-radius: 0.375rem;
+  border-radius: var(--radius-lg);
 }
 
 #login-expired form {
@@ -109,22 +388,40 @@ body {
   gap: 0.5rem;
 }
 
+#login-expired label {
+  color: var(--muted-foreground);
+  font-size: 0.9rem;
+}
+
 #relogin-password {
   font-size: 16px;
   padding: 0.6rem;
   width: 100%;
-  background: #1a2129;
-  color: #e8ecef;
-  border: 1px solid #4a5560;
-  border-radius: 0.375rem;
+  background: var(--secondary);
+  color: var(--foreground);
+  border: 1px solid var(--input);
+  border-radius: var(--radius-md);
+}
+
+#relogin-error {
+  color: var(--destructive);
 }
 
 #drawer {
-  border: 1px solid #4a5560;
-  background: #161c22;
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(5.5rem + env(safe-area-inset-bottom));
+  width: min(46rem, calc(100vw - 2rem));
+  max-height: 60dvh;
+  overflow-y: auto;
+  z-index: 30;
+  border: 1px solid var(--border);
+  background: var(--popover);
+  color: var(--popover-foreground);
   padding: 1rem;
-  margin-top: 1rem;
-  border-radius: 0.375rem;
+  border-radius: var(--radius-lg);
+  box-sizing: border-box;
 }
 
 #drawer[hidden] {
@@ -134,20 +431,67 @@ body {
 #drawer-body {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  background: var(--code-background);
+  color: var(--code-foreground);
+  border-radius: var(--radius-md);
+  padding: 0.625rem 0.75rem;
+  max-height: 24rem;
+  overflow-y: auto;
 }
 
 button,
 select {
   font-size: 16px;
-  background: #22303d;
-  color: #e8ecef;
-  border: 1px solid #4a5560;
-  border-radius: 0.375rem;
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
   padding: 0.5rem 0.75rem;
+}
+
+button:not(:disabled),
+select:not(:disabled) {
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  background: var(--accent);
+  color: var(--accent-foreground);
 }
 
 button:disabled {
   opacity: 0.5;
+}
+
+/* Citation chips stay quiet until hovered. */
+button[data-action-citation="true"],
+button[data-action-evidence="before"] {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  padding: 0.25rem 0.5rem;
+  border-radius: var(--radius-sm);
+}
+
+/* Primary send: near-white llama.cpp primary with dark text. */
+#composer-send {
+  background: var(--primary);
+  color: var(--primary-foreground);
+  border-color: transparent;
+  border-radius: var(--radius-xl);
+  font-weight: 600;
+}
+
+#composer-send:hover:not(:disabled) {
+  background: var(--primary);
+  color: var(--primary-foreground);
+  filter: brightness(0.92);
+}
+
+/* Destructive calls to action keep the destructive token. */
+#action-reject,
+#composer-stop {
+  border-color: var(--destructive);
+  color: var(--destructive);
 }
 
 #composer-send,
@@ -156,33 +500,40 @@ button:disabled {
 #relogin-submit,
 #action-approve,
 #action-reject,
-#history-retry {
+#history-retry,
+#history-older {
   min-height: 44px;
   min-width: 44px;
 }
 
-[data-action-card="true"] {
-  border: 1px solid #8a6d1b;
-  background: #1c1a10;
+#conversation section[data-action-card="true"] {
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--card-foreground);
   padding: 0.75rem;
-  border-radius: 0.375rem;
+  border-radius: var(--radius-lg);
 }
 
-[data-action-card="true"][data-action-state="expired"] {
+#conversation section[data-action-card="true"][data-action-state="expired"] {
   opacity: 0.75;
 }
 
-[data-draft="true"] {
-  opacity: 0.75;
-  border: 1px dashed #4a5560;
-  background: #161c22;
+[data-action-card="true"] [data-action-outcome="true"]:not(:empty) {
+  color: var(--muted-foreground);
+}
+
+#conversation section[data-draft="true"] {
+  opacity: 0.85;
+  border: 1px dashed var(--border);
+  background: var(--card);
+  color: var(--muted-foreground);
   padding: 0.5rem 0.75rem;
-  border-radius: 0.375rem;
+  border-radius: var(--radius-lg);
 }
 
 [data-draft-label="true"] {
   font-size: 0.8rem;
-  color: #9aa7b2;
+  color: var(--muted-foreground);
   margin: 0 0 0.25rem 0;
 }
 
@@ -190,6 +541,8 @@ button:disabled {
 #memory-degraded {
   min-height: 1.5em;
   margin: 0;
+  color: var(--muted-foreground);
+  font-size: 0.9rem;
 }
 
 #composer-notice:empty::before {
@@ -197,13 +550,21 @@ button:disabled {
 }
 
 :focus-visible {
-  outline: 2px solid #7fb4ff;
+  outline: 2px solid var(--ring);
   outline-offset: 2px;
 }
 
 @media (max-width: 480px) {
-  body {
-    padding: 0.75rem;
+  .topbar {
+    padding: 0.5rem 0.75rem;
+  }
+
+  .messages {
+    padding: 0.75rem 0.75rem 0.5rem;
+  }
+
+  .composer-bar {
+    padding: 0.5rem 0.75rem calc(0.5rem + env(safe-area-inset-bottom));
   }
 
   #composer {
@@ -222,4 +583,253 @@ button:disabled {
   .sessions {
     width: 100%;
   }
+
+  #conversation section[data-turn-kind="user_text"] {
+    max-width: 100%;
+  }
+}
+
+/* V2 validated-answer markdown (adapted from upstream MarkdownContent/
+ * markdown-content.css; token colors mirror the github-dark palette,
+ * dark-only hand-rolled). Drafts stay plain text; only answer parts go
+ * through here, with citation buttons adjacent (never inside markdown). */
+.answer-markdown {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.answer-markdown > *:first-child {
+  margin-top: 0;
+}
+
+.answer-markdown > *:last-child {
+  margin-bottom: 0;
+}
+
+#conversation .answer-markdown p {
+  white-space: normal;
+  margin: 0.375rem 0;
+}
+
+.answer-markdown :is(h1, h2, h3, h4, h5, h6) {
+  margin: 0.75rem 0 0.375rem;
+  line-height: 1.4;
+}
+
+.answer-markdown h1 {
+  font-size: 1.25rem;
+}
+
+.answer-markdown h2 {
+  font-size: 1.15rem;
+}
+
+.answer-markdown h3 {
+  font-size: 1.05rem;
+}
+
+.answer-markdown :is(h4, h5, h6) {
+  font-size: 1rem;
+}
+
+.answer-markdown :is(ul, ol) {
+  margin: 0.375rem 0;
+  padding-inline-start: 1.5rem;
+}
+
+.answer-markdown li {
+  margin: 0.125rem 0;
+}
+
+.answer-markdown li > :is(ul, ol) {
+  margin: 0.125rem 0;
+}
+
+.answer-markdown a {
+  color: var(--chart-1);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.answer-markdown blockquote {
+  margin: 0.375rem 0;
+  padding: 0.125rem 0 0.125rem 0.75rem;
+  border-inline-start: 3px solid var(--border);
+  color: var(--muted-foreground);
+}
+
+.answer-markdown hr {
+  border: none;
+  border-top: 1px solid var(--border-subtle);
+  margin: 0.75rem 0;
+}
+
+.answer-markdown :not(pre) > code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  background: var(--code-background);
+  color: var(--code-foreground);
+  border-radius: var(--radius-sm);
+  padding: 0.1em 0.35em;
+}
+
+.answer-markdown pre {
+  margin: 0.5rem 0;
+  padding: 0;
+  background: transparent;
+}
+
+/* Code blocks: header (language + copy) over a horizontal scroll area. */
+.code-block-wrapper {
+  margin: 0.5rem 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--code-background);
+  overflow: hidden;
+  min-width: 0;
+}
+
+.code-block-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.375rem 0.625rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.code-language {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--muted-foreground);
+}
+
+.code-block-actions {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.copy-code-btn {
+  font-size: 0.78rem;
+  padding: 0.25rem 0.5rem;
+  min-height: 32px;
+}
+
+.code-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.code-scroll pre {
+  margin: 0;
+  padding: 0.625rem 0.75rem;
+  min-width: max-content;
+  box-sizing: border-box;
+}
+
+.code-scroll pre code {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  line-height: 1.5;
+  background: transparent;
+  color: var(--code-foreground);
+  padding: 0;
+}
+
+/* Syntax tokens (github-dark palette, dark-only). */
+.hljs-comment,
+.hljs-quote {
+  color: #8b949e;
+  font-style: italic;
+}
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-doctag,
+.hljs-template-tag {
+  color: #ff7b72;
+}
+
+.hljs-string,
+.hljs-regexp,
+.hljs-meta .hljs-string {
+  color: #a5d6ff;
+}
+
+.hljs-number,
+.hljs-literal {
+  color: #79c0ff;
+}
+
+.hljs-title,
+.hljs-title-function_,
+.hljs-section {
+  color: #d2a8ff;
+}
+
+.hljs-name,
+.hljs-selector-id,
+.hljs-selector-class {
+  color: #7ee787;
+}
+
+.hljs-attr,
+.hljs-attribute,
+.hljs-variable,
+.hljs-template-variable {
+  color: #79c0ff;
+}
+
+.hljs-built_in,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-link {
+  color: #ffa657;
+}
+
+.hljs-emphasis {
+  font-style: italic;
+}
+
+.hljs-strong {
+  font-weight: 700;
+}
+
+/* Tables: the rehype wrapper scrolls wide tables in place (360px floor). */
+.answer-markdown .table-wrapper {
+  overflow-x: auto;
+  max-width: 100%;
+  margin: 0.5rem 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.answer-markdown table {
+  border-collapse: collapse;
+  width: max-content;
+  min-width: 100%;
+  font-size: 0.9rem;
+}
+
+.answer-markdown :is(th, td) {
+  border: 1px solid var(--border-subtle);
+  padding: 0.375rem 0.625rem;
+}
+
+/* GFM column alignment (review #84): the sanitizer hook converts the
+   deprecated `align` attribute on th/td into these fixed classes. */
+.answer-markdown :is(th, td).md-align-left {
+  text-align: left;
+}
+
+.answer-markdown :is(th, td).md-align-center {
+  text-align: center;
+}
+
+.answer-markdown :is(th, td).md-align-right {
+  text-align: right;
+}
+
+.answer-markdown thead tr {
+  background: var(--code-background);
 }
