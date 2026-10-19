@@ -327,8 +327,10 @@ async function refresh(): Promise<void> {
   if (sessionId === null || destroyed) return;
   // Session change = legacy notifySessionChanged: sync-invalidate every
   // in-flight generation and all cached state BEFORE the boot read, so a
-  // previous session's rows/drawer/frozen op can never leak across.
-  if (listedSession !== sessionId) resetState();
+  // previous session's rows/drawer/frozen op can never leak across. The
+  // FIRST boot (no listed session yet) must NOT reset: the state is still
+  // empty and a reset would erase a just-committed op's status/rows.
+  if (listedSession !== null && listedSession !== sessionId) resetState();
   listedSession = sessionId;
   const session = sessionSeq;
   listSeq += 1;
@@ -638,9 +640,14 @@ async function sendPendingOp(): Promise<void> {
   try {
     res = await postJson(op.endpoint, op.body, op.key);
   } catch {
-    if (session !== sessionSeq) return;
+    // postJson normally resolves {status:0} on a lost response; a throw is
+    // treated identically (uncertain loss, frozen op survives).
+    res = { status: 0, body: null };
+  }
+  if (res.status === 0) {
     // Uncertain response loss: the frozen op SURVIVES (same-key retry
     // offered, never a new key, never an overwrite).
+    if (session !== sessionSeq) return;
     opInFlight = false;
     retryHidden = false;
     setStatus("応答が不確定です。同じ内容で再送してください");
