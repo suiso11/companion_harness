@@ -9,6 +9,7 @@ import {
 import {
   extractPartialPartsText,
   OpenAIStreamAccumulator,
+  postChatCompletionStream,
 } from "../src/streaming.js";
 import type { ChatRequest, FetchImpl, ModelStreamDelta } from "../src/types.js";
 
@@ -653,6 +654,125 @@ describe("strict streaming errors", () => {
       expect.unreachable();
     } catch (error) {
       expect(error).toBeInstanceOf(DOMException);
+    }
+  });
+
+  it("cancels the body and aborts the request when chunk validation fails", async () => {
+    let bodyCancelled = false;
+    let requestSignalAborted = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new TextEncoder().encode("data: not-json\n\n"));
+        c.enqueue(new TextEncoder().encode("data: [DONE]\n\n"));
+        // Never closed: only cancellation may end this body.
+      },
+      cancel() {
+        bodyCancelled = true;
+      },
+    });
+    const fetchImpl: FetchImpl = async (_url, init) => {
+      init?.signal?.addEventListener("abort", () => {
+        requestSignalAborted = true;
+      });
+      return new Response(stream, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    };
+    try {
+      await streamingGateway(fetchImpl).chat(baseRequest());
+      expect.unreachable();
+    } catch (error) {
+      expect((error as ModelLocalError).code).toBe("invalid_response");
+    }
+    // The unread response must stop generating: reader cancelled and the
+    // request controller aborted before the error propagated.
+    expect(bodyCancelled).toBe(true);
+    expect(requestSignalAborted).toBe(true);
+  });
+});
+
+describe("non-2xx error-body drain (abort semantics)", () => {
+  /** Never-ending streaming body (a reader not coupled to any signal). */
+  function endlessBody(): ReadableStream<Uint8Array> {
+    return new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new TextEncoder().encode("chunk-1"));
+        // Never closes: only reader cancellation can end the drain.
+      },
+      cancel() {},
+    });
+  }
+
+  it("returns timeout when the deadline hits during the drain", async () => {
+    const fetchImpl: FetchImpl = async () =>
+      new Response(endlessBody(), { status: 500 });
+    try {
+      await postChatCompletionStream({
+        fetchImpl,
+        url: "http://127.0.0.1:8000/v1/chat/completions",
+        body: {},
+        apiKey: undefined,
+        timeoutMs: 20,
+        onChunkBody: () => {},
+      });
+      expect.unreachable();
+    } catch (error) {
+      // Previously the drain swallowed the abort and the caller surfaced
+      // the HTTP status as request_failed; the deadline must win.
+      expect((error as ModelLocalError).code).toBe("timeout");
+    }
+  });
+
+  it("propagates external cancellation during the drain untouched", async () => {
+    const external = new AbortController();
+    const fetchImpl: FetchImpl = async () =>
+      new Response(endlessBody(), { status: 500 });
+    const pending = postChatCompletionStream({
+      fetchImpl,
+      url: "http://127.0.0.1:8000/v1/chat/completions",
+      body: {},
+      apiKey: undefined,
+      timeoutMs: undefined,
+      signal: external.signal,
+      onChunkBody: () => {},
+    });
+    setTimeout(
+      () => external.abort(new DOMException("stopped", "AbortError")),
+      10,
+    );
+    try {
+      await pending;
+      expect.unreachable();
+    } catch (error) {
+      expect(error).toBeInstanceOf(DOMException);
+      expect((error as DOMException).name).toBe("AbortError");
+    }
+  });
+
+  it("still reports the HTTP status when the drain completes normally", async () => {
+    const fetchImpl: FetchImpl = async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(c) {
+            c.enqueue(new TextEncoder().encode("gone"));
+            c.close();
+          },
+        }),
+        { status: 500 },
+      );
+    try {
+      await postChatCompletionStream({
+        fetchImpl,
+        url: "http://127.0.0.1:8000/v1/chat/completions",
+        body: {},
+        apiKey: undefined,
+        timeoutMs: undefined,
+        onChunkBody: () => {},
+      });
+      expect.unreachable();
+    } catch (error) {
+      expect((error as ModelLocalError).code).toBe("request_failed");
     }
   });
 });

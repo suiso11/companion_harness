@@ -765,6 +765,25 @@ async function readSseStream(
       );
     }
   };
+  // Chunk validation / consumer failure: cancel the body and abort the
+  // request BEFORE propagating, so the model stops generating a response
+  // nobody will read (no retained connection or compute after the gateway
+  // has already failed).
+  const dispatchWithCleanup = (lines: string[]): void => {
+    try {
+      dispatchEvent(lines, onChunkBody, () => {
+        seenDone = true;
+      });
+    } catch (error) {
+      cancelQuietly(reader, "chunk error");
+      try {
+        controller.abort();
+      } catch {
+        // Best effort: cancellation must never mask the chunk error.
+      }
+      throw error;
+    }
+  };
   try {
     for (;;) {
       const current = await readNext();
@@ -815,9 +834,7 @@ async function readSseStream(
             );
           }
           if (text === "") {
-            dispatchEvent(dataLines, onChunkBody, () => {
-              seenDone = true;
-            });
+            dispatchWithCleanup(dataLines);
             dataLines = [];
           } else if (text.startsWith(":")) {
             // SSE comment / heartbeat: ignored.
@@ -855,9 +872,7 @@ async function readSseStream(
           ),
         );
       }
-      dispatchEvent(dataLines, onChunkBody, () => {
-        seenDone = true;
-      });
+      dispatchWithCleanup(dataLines);
     }
     if (isAborted(externalSignal)) {
       throw toAbortRejection(externalSignal as AbortSignal);
@@ -970,6 +985,35 @@ async function drainBounded(
     cancel(reason?: unknown): Promise<void>;
     releaseLock(): void;
   };
+  // Wire BOTH abort sources to cancel the reader: a reader implementation
+  // not coupled to the fetch signal must never stay pending after a
+  // cancellation or deadline (the fetch signal alone cannot cancel it).
+  const onExternalAbort = (): void => {
+    cancelQuietly(reader, "aborted");
+  };
+  const onControllerAbort = (): void => {
+    cancelQuietly(reader, "aborted");
+  };
+  if (externalSignal !== undefined) {
+    externalSignal.addEventListener("abort", onExternalAbort, { once: true });
+  }
+  controller.signal.addEventListener("abort", onControllerAbort, {
+    once: true,
+  });
+  // Abort semantics match the successful-response reader: external
+  // cancellation propagates the original abort rejection untouched and a
+  // deadline surfaces as `timeout` — the caller's HTTP-status
+  // `request_failed` classification only applies when the drain completes
+  // (a drainBounded throw replaces it).
+  const classifyAbort = (): never => {
+    if (isAborted(externalSignal)) {
+      throw toAbortRejection(externalSignal as AbortSignal);
+    }
+    if (controller.signal.aborted) {
+      throw new ModelLocalError("timeout", "model request timed out");
+    }
+    throw new ModelLocalError("transport_error", "model transport failed");
+  };
   let total = 0;
   try {
     for (;;) {
@@ -977,9 +1021,18 @@ async function drainBounded(
       try {
         next = await reader.read();
       } catch {
+        // A read rejected because an abort/deadline landed mid-drain:
+        // classify it instead of swallowing into the status error.
+        classifyAbort();
         return;
       }
       if (next.done || next.value === undefined) {
+        // A reader cancelled by an abort/deadline resolves `done` instead
+        // of rejecting (cancel() closes the stream): classify the abort
+        // before treating it as a completed drain.
+        if (isAborted(externalSignal) || controller.signal.aborted) {
+          classifyAbort();
+        }
         return;
       }
       total += next.value.byteLength;
@@ -989,13 +1042,15 @@ async function drainBounded(
       }
     }
   } finally {
+    if (externalSignal !== undefined) {
+      externalSignal.removeEventListener("abort", onExternalAbort);
+    }
+    controller.signal.removeEventListener("abort", onControllerAbort);
     try {
       reader.releaseLock();
     } catch {
       // Best effort.
     }
-    void controller;
-    void externalSignal;
   }
 }
 
