@@ -302,6 +302,39 @@ describe("model config", () => {
     expect(Object.isFrozen(config.model)).toBe(true);
   });
 
+  it("accepts an optional toolChoice policy and freezes it", () => {
+    for (const toolChoice of ["auto", "required"] as const) {
+      const config = loadServerConfig(
+        modelEnv(
+          tempDbPath(),
+          JSON.stringify({
+            adapter: "openai-compatible",
+            baseUrl: "http://127.0.0.1:8000",
+            model: "m",
+            toolChoice,
+          }),
+        ),
+      );
+      expect(config.model?.toolChoice).toBe(toolChoice);
+      expect(Object.isFrozen(config.model)).toBe(true);
+    }
+  });
+
+  it("rejects unknown toolChoice values fail-closed", () => {
+    for (const toolChoice of ["none", "any", "", 1, null]) {
+      expect(() =>
+        parseModelConfig(
+          JSON.stringify({
+            adapter: "openai-compatible",
+            baseUrl: "http://127.0.0.1:8000",
+            model: "m",
+            toolChoice,
+          }),
+        ),
+      ).toThrow(ServerConfigError);
+    }
+  });
+
   it("rejects malformed model configs fail-closed", () => {
     const bad = [
       "not-json",

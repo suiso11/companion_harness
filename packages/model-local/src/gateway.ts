@@ -954,7 +954,10 @@ export function resolveGatewayConfig(
     options.toolChoice !== "auto" &&
     options.toolChoice !== "required"
   ) {
-    throw new ModelLocalError("invalid_request", "model tool choice is invalid");
+    throw new ModelLocalError(
+      "invalid_request",
+      "model tool choice is invalid",
+    );
   }
   return {
     baseUrl,

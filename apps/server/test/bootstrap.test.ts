@@ -902,6 +902,41 @@ describe("bootstrap M2 model wiring", () => {
     expect((await openai.chat(request)).text).toBe("hello");
   });
 
+  it("threads model.toolChoice into the gateway (default required)", async () => {
+    const bodies: Record<string, unknown>[] = [];
+    const fetchImpl: FetchImpl = async (_url, init) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+    const request: ChatRequest = {
+      model: MODEL_NAME,
+      messages: [{ role: "user", content: "hi" }],
+      tools: [{ name: "notes.search", description: "search" }],
+    };
+    const auto = createModelGateway(
+      {
+        adapter: "openai-compatible",
+        baseUrl: MODEL_BASE,
+        model: MODEL_NAME,
+        toolChoice: "auto",
+      },
+      fetchImpl,
+    );
+    await auto.chat(request);
+    expect(bodies[0]?.tool_choice).toBe("auto");
+    const dflt = createModelGateway(
+      { adapter: "openai-compatible", baseUrl: MODEL_BASE, model: MODEL_NAME },
+      fetchImpl,
+    );
+    await dflt.chat(request);
+    expect(bodies[1]?.tool_choice).toBe("required");
+  });
+
   it("registers the agent with a mocked gateway and null toolBroker when no roots", async () => {
     const { env } = tempEnv();
     const started = await startServer({
