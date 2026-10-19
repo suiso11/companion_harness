@@ -15,6 +15,7 @@ import {
   actionErrorCodeText,
   actionEvidenceButtons,
   applyRunEvent,
+  type ExecutionStatus,
   INITIAL_RUN_VIEW,
   isCorruptCursor,
   isRetryableTurnKind,
@@ -80,7 +81,7 @@ interface ExecutionView {
   proposalId: string;
   proposalStatus: ProposalStatus;
   runId: string | null;
-  status: string | null;
+  status: ExecutionStatus | null;
   markerCommitted: boolean;
   cancellable: boolean;
   errorCode: string | null;
@@ -170,7 +171,7 @@ let degradedMemory = $state(false);
 let sse: EventSource | null = null;
 let fallbackTimer: number | null = null;
 let runChain: Promise<void> = Promise.resolve();
-let renderedAnswers = new Set<string>();
+let renderedAnswers = $state(new Set<string>());
 let terminalHydrated = new Set<string>();
 let turnKinds = new Map<string, string>();
 let runTurns = new Map<string, string>();
@@ -481,7 +482,7 @@ function coerceTurn(item: unknown): Turn | null {
         result: s["result"] ?? null,
         receipt:
           typeof receipt === "object" && receipt !== null
-            ? (receipt as HistoryRun["receipt"])
+            ? (receipt as NonNullable<HistoryRun["receipt"]>)
             : null,
         executionStatus:
           typeof s["executionStatus"] === "string"
@@ -491,12 +492,12 @@ function coerceTurn(item: unknown): Turn | null {
       };
     }
   }
-  return {
-    turnId: r["turnId"],
-    kind: typeof r["kind"] === "string" ? r["kind"] : undefined,
-    text: typeof r["text"] === "string" ? r["text"] : undefined,
-    run,
-  };
+  // exactOptionalPropertyTypes: absent optional props are omitted, never
+  // explicitly `undefined` (svelte-check).
+  const turn: Turn = { turnId: r["turnId"], run };
+  if (typeof r["kind"] === "string") turn.kind = r["kind"];
+  if (typeof r["text"] === "string") turn.text = r["text"];
+  return turn;
 }
 
 async function hydrateHistory(): Promise<void> {
@@ -895,6 +896,7 @@ async function subscribeRun(runId: string): Promise<void> {
   const query = stored !== null && stored > 0 ? `?after=${stored}` : "";
   const url = `/api/sessions/${encodeURIComponent(sid)}/runs/${encodeURIComponent(runId)}/events/stream${query}`;
   let opened = false;
+  let sseErrorStreak = 0;
   try {
     sse = new EventSource(url);
   } catch {
@@ -913,6 +915,7 @@ async function subscribeRun(runId: string): Promise<void> {
   }, 5000);
   source.addEventListener("run-event", (message) => {
     opened = true;
+    sseErrorStreak = 0;
     const raw = (message as MessageEvent).data;
     let event: { seq?: unknown; type?: unknown; payload?: unknown } | null =
       null;
@@ -946,6 +949,19 @@ async function subscribeRun(runId: string): Promise<void> {
       runView.visible === "stopped"
     ) {
       finishActiveRun();
+      return;
+    }
+    // After the stream has opened, the one-shot pre-open fallback timer
+    // can never fire again: a nonterminal native reconnect loop (e.g. a
+    // remote session expiring into HTTP 401) would otherwise retry
+    // forever and fetchJson() would never see the failure. Count
+    // consecutive errors without an intervening event and switch to the
+    // JSON fallback polling so the 401 reaches the inline re-login UI
+    // (review PR75 4310874681).
+    sseErrorStreak += 1;
+    if (sseErrorStreak >= SSE_ERROR_FALLBACK_LIMIT) {
+      closeStream();
+      void pollFallback(runId);
     }
   };
 }
@@ -1186,6 +1202,9 @@ async function catchUp(
 
 const POLL_INTERVAL_MS = 1000;
 const POLL_MAX_ERROR_STREAK = 5;
+// Consecutive post-open EventSource errors without an intervening event
+// before the JSON fallback takes over (review PR75 4310874681).
+const SSE_ERROR_FALLBACK_LIMIT = 3;
 
 async function pollFallback(runId: string): Promise<void> {
   let errorStreak = 0;
@@ -1504,6 +1523,8 @@ function cardModel(card: CardState): {
         ? view.receipt.summary.summary
         : null,
     preview: previewDisplay(summary.preview.summary),
+    start: summary.input.start,
+    end: summary.input.end,
     now: Date.now(),
   });
   return model;
@@ -2219,6 +2240,11 @@ async function submitLogin(): Promise<void> {
     loginPassword = "";
     authExpired = false;
     showNotice("再ログインしました");
+    // Re-run the retained session's boot path after the 401 gap: the
+    // failed read (history hydration, proposal sync, active-run
+    // discovery) must repeat or the missed state stays absent until a
+    // full reload (review PR75 4310874696).
+    await bootSession();
     return;
   }
   if (res.status === 429) {
@@ -2715,10 +2741,14 @@ function evidenceForTurn(turn: Turn): {
     {/each}
   </main>
 
+  <!-- Backdrop click-to-close is supplementary; keyboard users close via
+       the「閉じる」button inside the dialog. -->
+  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_interactive_supports_focus -->
   <div
     id="drawer"
     role="dialog"
     aria-label="引用"
+    tabindex="-1"
     hidden={!drawerOpen}
     onclick={(e) => {
       if (e.target === e.currentTarget) closeDrawer();
