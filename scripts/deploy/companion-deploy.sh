@@ -106,8 +106,8 @@ if [ "$ACTIVE_N" != "0" ]; then
   exit 0
 fi
 
-# --- dirty-tree guard: never discard tracked modifications ---
-if [ -n "$(git status --porcelain)" ]; then
+# --- dirty-tree guard: never discard tracked modifications (untracked ignored) ---
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
   log "deploy dir has tracked modifications; refusing (never discards). Clean the tree and retry."
   exit 1
 fi

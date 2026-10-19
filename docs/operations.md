@@ -4282,7 +4282,7 @@ loginctl enable-linger $USER
    read-only (`node:sqlite`) で開き、`runs` の queued/running/
    cancel_requested が1件でもあればスキップ (exit 0、次 tick に retry)。
    DB 不在・`runs` テーブル不在は 0 件扱い。判定失敗時も安全側でスキップ。
-4. Dirty guard: tracked な変更があれば破棄せず exit 1 で拒否。
+4. Dirty guard: tracked な変更があれば破棄せず exit 1 で拒否 (untracked は無視、`--untracked-files=no`)。
 5. `git switch --detach <target>` → `pnpm install --frozen-lockfile`
    (UI build は `pnpm start` の prestart hook が行う) →
    `systemctl --user restart companion.service` →
