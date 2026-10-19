@@ -51,6 +51,7 @@ import type {
   ChatRequest,
   ChatResult,
   ModelGateway,
+  ModelStreamDelta,
   NormalizedToolCall,
   ToolDefinition,
 } from "@companion/model-local";
@@ -2077,6 +2078,22 @@ export function sanitizeModelFacingForFeedback(
 /* Factory                                                             */
 /* ------------------------------------------------------------------ */
 
+/**
+ * One provisional streaming progress piece (PR-2). `delta` carries the
+ * provider piece (`content` / `reasoning` / `draft` / `usage`);
+ * `elapsedMs` is step-elapsed time at emit (clock-measured, for stats).
+ * Never validated, never persisted: the validated result path decides.
+ */
+export interface AgentModelDelta {
+  readonly runId: string;
+  readonly step: number;
+  readonly delta: ModelStreamDelta;
+  readonly elapsedMs: number;
+}
+
+/** Best-effort streaming progress sink (exceptions are swallowed). */
+export type AgentModelDeltaCallback = (delta: AgentModelDelta) => void;
+
 export interface AgentStrategyOptions {
   /** Single kernel connection (scoped reads; writes go through repo/broker). */
   readonly db: Database.Database;
@@ -2096,6 +2113,16 @@ export interface AgentStrategyOptions {
   readonly wallMs?: number;
   /** Max model steps incl. repair. Default AGENT_MAX_STEPS (never widened). */
   readonly maxSteps?: number;
+  /**
+   * Optional streaming progress sink (PR-2, additive). When the gateway
+   * emits provisional `content` / `reasoning` / `draft` / `usage` deltas
+   * during a step, each piece is forwarded here with its run/step
+   * correlation plus step-elapsed time. Best-effort only: callback
+   * exceptions are swallowed, deltas never touch durable writes (no
+   * events-table rows, no model_calls fields), and the validated result
+   * path is unchanged. Absent preserves exact M2 behavior.
+   */
+  readonly onModelDelta?: AgentModelDeltaCallback;
   /**
    * Optional pre-answer memory recall (server-owned remind CLI boundary).
    * When present, the strategy performs one bounded recall before the first
@@ -2345,6 +2372,7 @@ export function createAgentStrategy(
           signal: ctx.signal,
           wallSignal: wallController.signal,
           isWallExpired,
+          onModelDelta: options.onModelDelta,
         });
         if (outcome.kind === "gateway_failed") {
           // No retry, no fallback, no repair for transport/timeout/cancel:
@@ -2961,6 +2989,7 @@ async function runModelStep(args: {
   signal: AbortSignal;
   wallSignal: AbortSignal;
   isWallExpired: () => boolean;
+  onModelDelta?: AgentModelDeltaCallback | undefined;
 }): Promise<StepOutcome> {
   const {
     repo,
@@ -2976,6 +3005,7 @@ async function runModelStep(args: {
     signal,
     wallSignal,
     isWallExpired,
+    onModelDelta,
   } = args;
   const now = clock.now();
   const wallRemaining = Math.max(wallDeadline - now, 1);
@@ -3093,7 +3123,37 @@ async function runModelStep(args: {
     timer = setTimeout(onStepTimeout, effectiveTimeout);
     let chat: Promise<ChatResult>;
     try {
-      chat = gateway.chat(request, { signal: stepController.signal });
+      // PR-2 streaming progress: forward provisional gateway deltas with
+      // run/step correlation (best-effort; never durable, never validated).
+      // Settlement/abort gate (same as the late result handlers): once
+      // `finish` settled the step, or the step controller aborted
+      // (cancellation / deadline in flight), later deltas from a
+      // non-cooperative gateway are dropped — stale pieces must never
+      // surface as progress from a call whose result was discarded.
+      const onDelta =
+        onModelDelta === undefined
+          ? undefined
+          : (delta: ModelStreamDelta): void => {
+              if (done || stepController.signal.aborted) {
+                return;
+              }
+              try {
+                onModelDelta({
+                  runId,
+                  step,
+                  delta,
+                  elapsedMs: Math.max(clock.now() - startedAt, 0),
+                });
+              } catch {
+                // Best effort: progress consumers never fail the step.
+              }
+            };
+      chat = gateway.chat(
+        request,
+        onDelta === undefined
+          ? { signal: stepController.signal }
+          : { signal: stepController.signal, onDelta },
+      );
     } catch (error) {
       if (signal.aborted) {
         finish({ kind: "aborted" });

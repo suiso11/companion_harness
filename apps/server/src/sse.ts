@@ -42,6 +42,16 @@ export interface SseEventSource {
 }
 
 /**
+ * Ephemeral delta surface the SSE loop multiplexes (PR-2). The source
+ * pushes pre-formatted SSE chunks for one run (see `model_deltas.ts`):
+ * deltas are SSE-only, never persisted, never replayed by cursor
+ * pagination. Absent preserves the exact durable-only stream.
+ */
+export interface RunDeltaSource {
+  subscribe(runId: string, listener: (chunk: string) => void): () => void;
+}
+
+/**
  * Format one RunEvent as SSE bytes (plan §16.4 exact):
  * `id` = seq string, `event` = `run-event`, `data` = full DTO one line.
  */
@@ -115,6 +125,7 @@ export function createSseResponse(
     clearInterval?: typeof clearInterval;
     setTimeout?: typeof setTimeout;
   } = {},
+  deltas?: RunDeltaSource | undefined,
 ): Response {
   const setIntervalFn = timers.setInterval ?? setInterval;
   const clearIntervalFn = timers.clearInterval ?? clearInterval;
@@ -127,6 +138,7 @@ export function createSseResponse(
   let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   // waiters woken by `pull` when the consumer drains the queue.
   let pullWaiters: Array<() => void> = [];
+  let unsubscribeDeltas: (() => void) | undefined;
 
   const stream = new ReadableStream<Uint8Array>({
     pull() {
@@ -147,6 +159,15 @@ export function createSseResponse(
         }
         if (heartbeatTimer !== undefined) {
           clearIntervalFn(heartbeatTimer);
+        }
+        if (unsubscribeDeltas !== undefined) {
+          const unsubscribe = unsubscribeDeltas;
+          unsubscribeDeltas = undefined;
+          try {
+            unsubscribe();
+          } catch {
+            // Best effort: unsubscribe never breaks stream teardown.
+          }
         }
         const waiters = pullWaiters;
         pullWaiters = [];
@@ -239,6 +260,30 @@ export function createSseResponse(
       heartbeatTimer = setIntervalFn(() => {
         void writeWithGrace(SSE_HEARTBEAT_CHUNK);
       }, SSE_HEARTBEAT_MS);
+      // PR-2 ephemeral deltas: multiplexed live (SSE-only, never
+      // persisted, never replayed). A throwing subscribe never breaks the
+      // durable stream; teardown unsubscribes. Delta writes serialize
+      // through one chained writer: at most one delta write is ever
+      // outstanding, so a burst while backpressured can never stack grace
+      // waiters and enqueue together on the next pull (the transport's
+      // backpressure bound is preserved; queued chunks are bounded by the
+      // 50ms/256-char coalescing upstream).
+      let deltaChain: Promise<void> = Promise.resolve();
+      if (deltas !== undefined) {
+        try {
+          unsubscribeDeltas = deltas.subscribe(runId, (chunk: string) => {
+            deltaChain = deltaChain
+              .then(() => writeWithGrace(chunk))
+              .then(() => {})
+              .catch(() => {
+                // writeWithGrace never throws; keep the chain alive so one
+                // failure can never strand later deltas.
+              });
+          });
+        } catch {
+          unsubscribeDeltas = undefined;
+        }
+      }
       void step();
     },
     cancel() {
@@ -248,6 +293,15 @@ export function createSseResponse(
       }
       if (heartbeatTimer !== undefined) {
         clearIntervalFn(heartbeatTimer);
+      }
+      if (unsubscribeDeltas !== undefined) {
+        const unsubscribe = unsubscribeDeltas;
+        unsubscribeDeltas = undefined;
+        try {
+          unsubscribe();
+        } catch {
+          // Best effort: client disconnect teardown never throws.
+        }
       }
     },
   });
