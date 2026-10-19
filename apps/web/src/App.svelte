@@ -8,6 +8,7 @@ import {
   postJson,
   randomUuid,
 } from "./lib/api.js";
+import { autogrowTextarea, shouldSendOnKeydown } from "./lib/composer.js";
 import {
   appendDraftText,
   DRAFT_LABEL,
@@ -32,7 +33,6 @@ import {
   type RunViewState,
   runResultToAnswerParts,
 } from "./lib/reducer.js";
-import { autogrowTextarea, shouldSendOnKeydown } from "./lib/composer.js";
 import {
   appendThinkingText,
   applyThinkingUsage,
