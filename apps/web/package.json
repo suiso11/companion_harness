@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "vite build",
+    "budget": "node scripts/check-bundle-gz.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json && svelte-check --tsconfig ./tsconfig.json"
   },
   "dependencies": {

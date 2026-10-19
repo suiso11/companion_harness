@@ -214,10 +214,10 @@ function isProposalSummary(item: unknown): item is ProposalSummary {
   if (typeof item !== "object" || item === null) return false;
   const r = item as Record<string, unknown>;
   return (
-    typeof r["proposalId"] === "string" &&
-    typeof r["hash"] === "string" &&
-    typeof r["status"] === "string" &&
-    typeof r["expiresAt"] === "number"
+    typeof r.proposalId === "string" &&
+    typeof r.hash === "string" &&
+    typeof r.status === "string" &&
+    typeof r.expiresAt === "number"
   );
 }
 
@@ -512,33 +512,31 @@ function trackTurnKind(item: Turn): void {
 function coerceTurn(item: unknown): Turn | null {
   if (typeof item !== "object" || item === null) return null;
   const r = item as Record<string, unknown>;
-  if (typeof r["turnId"] !== "string") return null;
-  const sel = r["selectedRun"];
+  if (typeof r.turnId !== "string") return null;
+  const sel = r.selectedRun;
   let run: HistoryRun | null = null;
   if (typeof sel === "object" && sel !== null) {
     const s = sel as Record<string, unknown>;
-    if (typeof s["runId"] === "string") {
-      const receipt = s["receipt"];
+    if (typeof s.runId === "string") {
+      const receipt = s.receipt;
       run = {
-        runId: s["runId"],
-        result: s["result"] ?? null,
+        runId: s.runId,
+        result: s.result ?? null,
         receipt:
           typeof receipt === "object" && receipt !== null
             ? (receipt as NonNullable<HistoryRun["receipt"]>)
             : null,
         executionStatus:
-          typeof s["executionStatus"] === "string"
-            ? s["executionStatus"]
-            : null,
-        targetCitation: s["targetCitation"] ?? null,
+          typeof s.executionStatus === "string" ? s.executionStatus : null,
+        targetCitation: s.targetCitation ?? null,
       };
     }
   }
   // exactOptionalPropertyTypes: absent optional props are omitted, never
   // explicitly `undefined` (svelte-check).
-  const turn: Turn = { turnId: r["turnId"], run };
-  if (typeof r["kind"] === "string") turn.kind = r["kind"];
-  if (typeof r["text"] === "string") turn.text = r["text"];
+  const turn: Turn = { turnId: r.turnId, run };
+  if (typeof r.kind === "string") turn.kind = r.kind;
+  if (typeof r.text === "string") turn.text = r.text;
   return turn;
 }
 
