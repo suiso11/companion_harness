@@ -23,7 +23,6 @@ import { describe, expect, it } from "vitest";
 import { type CreatedServerApp, createApp } from "../src/app.js";
 import { loadServerConfig, ServerConfigError } from "../src/config.js";
 import { createCollectingLogger } from "../src/logger.js";
-import { shellHasNoInlineScript } from "../src/ui/page.js";
 import { trialProposalModel, trialStatusText } from "../src/ui/reducer.js";
 
 const FP = "b".repeat(64);
@@ -875,24 +874,8 @@ describe("trial proposal card model", () => {
     expect(trialStatusText("invalidated").length).toBeGreaterThan(0);
   });
 
-  it("serves the trial section in the shell with a strict CSP", async () => {
-    const fixture = await makeApp(true);
-    try {
-      // PR-1: the full panels (trials included) live in the vanilla shell
-      // at `/legacy` until PR-5 moves them to their own routes.
-      const response = await fixture.app.request("/legacy", {
-        method: "GET",
-        headers: { host: "127.0.0.1" },
-      });
-      expect(response.status).toBe(200);
-      const html = await response.text();
-      expect(html).toContain('id="trials"');
-      expect(html).toContain('id="trial-list"');
-      expect(html).toContain('id="trial-approve-button"');
-      expect(html).toContain('id="trial-expire-button"');
-      expect(shellHasNoInlineScript(html)).toBe(true);
-    } finally {
-      fixture.close();
-    }
-  });
+  // PR-6: the former "serves the trial section in the shell with a strict
+  // CSP" test targeted the deleted vanilla shell (`/legacy`). Trials render
+  // client-side from the Svelte bundle (TrialsPage.svelte) now; the pure
+  // decision/status mapping above is unchanged.
 });

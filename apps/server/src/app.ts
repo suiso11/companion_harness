@@ -122,12 +122,7 @@ import {
 } from "./remote_session.js";
 import type { RunDeltaSource } from "./sse.js";
 import { createNotificationFeedSseResponse, createSseResponse } from "./sse.js";
-import {
-  renderConversationShell,
-  renderRemoteLogin,
-  renderSvelteShell,
-  STRICT_CSP,
-} from "./ui/page.js";
+import { renderRemoteLogin, renderSvelteShell, STRICT_CSP } from "./ui/page.js";
 import { effectiveCursor } from "./ui/reducer.js";
 
 /**
@@ -279,12 +274,13 @@ export interface CreateAppDeps {
   now?: () => number;
   /**
    * M3 static UI assets (plan §16.1, §16.7) + PR-1 Svelte chat bundle.
-   * Populated by bootstrap from `dist/assets` (esbuild bundle) and
+   * Populated by bootstrap from `dist/assets` (self-hosted stylesheet) and
    * `dist/svelte` (Vite bundle); tests inject inline. Missing entries
-   * serve 404 while the shells keep working.
+   * serve 404 while the shells keep working. PR-6: the legacy vanilla
+   * client bundle is gone; only the stylesheet (shared with the login
+   * page) remains under `dist/assets`.
    */
   assets?: {
-    clientJs?: string;
     clientCss?: string;
     svelteJs?: string;
     svelteCss?: string;
@@ -1321,7 +1317,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     }
     if (
       (method === "GET" || method === "HEAD") &&
-      (path === "/" || path === "/legacy" || FEATURE_UI_PATHS.has(path))
+      (path === "/" || FEATURE_UI_PATHS.has(path))
     ) {
       await next();
       return;
@@ -2260,21 +2256,10 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     if (remote !== null && !hasSession(c)) {
       return c.html(renderRemoteLogin().toString(), 200);
     }
-    // PR-1 cutover: the Svelte chat shell is the default route; the
-    // vanilla shell stays reachable at `/legacy` until PR-6.
+    // PR-1 cutover: the Svelte chat shell is the default route. PR-6: the
+    // legacy vanilla shell was removed; `/legacy` now 404s like any other
+    // unknown path.
     return c.html(renderSvelteShell().toString(), 200);
-  });
-
-  app.get("/legacy", (c) => {
-    if (!strictQuery(c, []).ok) {
-      return validationError(c);
-    }
-    c.header("Content-Security-Policy", STRICT_CSP);
-    c.header("cache-control", "no-store");
-    if (remote !== null && !hasSession(c)) {
-      return c.html(renderRemoteLogin().toString(), 200);
-    }
-    return c.html(renderConversationShell().toString(), 200);
   });
 
   // PR-5 feature pages: same Svelte shell/auth as `/`. The client mounts the
@@ -2292,18 +2277,6 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       return c.html(renderSvelteShell().toString(), 200);
     });
   }
-
-  app.get("/assets/client.js", (c) => {
-    if (!strictQuery(c, []).ok) {
-      return validationError(c);
-    }
-    if (assets.clientJs === undefined) {
-      return apiError(c, 404, "not_found", "resource not found");
-    }
-    c.header("content-type", "text/javascript; charset=utf-8");
-    c.header("cache-control", "no-cache");
-    return c.body(assets.clientJs, 200);
-  });
 
   app.get("/assets/svelte-app.js", (c) => {
     if (!strictQuery(c, []).ok) {
@@ -2329,6 +2302,18 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     return c.body(assets.svelteCss, 200);
   });
 
+  app.get("/assets/client.css", (c) => {
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    if (assets.clientCss === undefined) {
+      return apiError(c, 404, "not_found", "resource not found");
+    }
+    c.header("content-type", "text/css; charset=utf-8");
+    c.header("cache-control", "no-cache");
+    return c.body(assets.clientCss, 200);
+  });
+
   // PR-5 dynamic route chunks (e.g. svelte-app-FeaturePage.js). Only the
   // fixed self-hosted names loaded from dist/svelte are served; anything
   // else stays 404 (no catch-all static server).
@@ -2349,18 +2334,6 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     c.header("content-type", "text/javascript; charset=utf-8");
     c.header("cache-control", "no-cache");
     return c.body(chunk, 200);
-  });
-
-  app.get("/assets/client.css", (c) => {
-    if (!strictQuery(c, []).ok) {
-      return validationError(c);
-    }
-    if (assets.clientCss === undefined) {
-      return apiError(c, 404, "not_found", "resource not found");
-    }
-    c.header("content-type", "text/css; charset=utf-8");
-    c.header("cache-control", "no-cache");
-    return c.body(assets.clientCss, 200);
   });
 
   // SSE delivery (§16.4 exact): session ownership enforced (foreign runs are

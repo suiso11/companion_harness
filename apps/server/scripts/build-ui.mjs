@@ -1,14 +1,11 @@
-// M3 client bundle build (plan §16.1, §16.7) + PR-1 Svelte chat bundle.
+// UI bundle build (plan §16.1, §16.7) + PR-1 Svelte chat bundle.
 //
-// Bundles the vanilla TypeScript client (`src/ui/client.ts`, DOM API only,
-// no framework) with esbuild into `dist/assets/client.js` and copies the
-// self-hosted stylesheet to `dist/assets/client.css`. The server serves both
-// as static assets; the SSR shell references nothing else (strict CSP).
-//
-// PR-1: additionally builds the Svelte chat app (`apps/web`, Svelte 5 +
-// Vite, dark-only, Japanese) into `dist/svelte/svelte-app.{js,css}` served
-// at `/` behind the same strict CSP (no CDN, no inline script). The vanilla
-// shell stays reachable at `/legacy` until PR-6.
+// PR-6: the legacy vanilla TypeScript client (`src/ui/client.ts`) was
+// removed; this script now only copies the self-hosted stylesheet to
+// `dist/assets/client.css` (shared by the login page) and builds the
+// Svelte chat app (`apps/web`, Svelte 5 + Vite, dark-only, Japanese) into
+// `dist/svelte/svelte-app.{js,css}` served at `/` behind the same strict
+// CSP (no CDN, no inline script).
 //
 // Bundle budget guard (frontend plan §11.1 Q9): first-page JS (min) ≤300KB
 // per entry, route total ≤400KB, gzip ≤120KB. Fails the build on breach.
@@ -53,18 +50,7 @@ function reportBudget(label, path) {
 }
 
 async function main() {
-  const { build } = await import("esbuild");
   mkdirSync(outDir, { recursive: true });
-  await build({
-    entryPoints: [join(serverDir, "src", "ui", "client.ts")],
-    bundle: true,
-    minify: true,
-    format: "iife",
-    platform: "browser",
-    target: "es2022",
-    outfile: join(outDir, "client.js"),
-    logLevel: "info",
-  });
   copyFileSync(
     join(serverDir, "src", "ui", "client.css"),
     join(outDir, "client.css"),

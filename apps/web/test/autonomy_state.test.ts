@@ -7,7 +7,7 @@ import {
   retryRefreshesControl,
   revalidateConflictArm,
   shouldResetConflictArm,
-} from "../src/ui/autonomy_state.js";
+} from "../src/lib/autonomy_state.js";
 
 describe("autonomy panel state decisions", () => {
   it("refreshes global control after retrying its mutation", () => {

@@ -29,6 +29,11 @@
 //   rows with bounded lossy-free paging (afterSeq cursor per target).
 // Every model string renders via text interpolation only (no {@html}).
 import { fetchJson, postJson, randomUuid } from "./lib/api.js";
+import {
+  retryRefreshesControl,
+  revalidateConflictArm,
+  shouldResetConflictArm,
+} from "./lib/autonomy_state.js";
 
 const LS_SESSION = "ch.sessionId";
 
@@ -79,25 +84,6 @@ function readSession(): string | null {
   } catch {
     return null;
   }
-}
-
-/** Legacy `retryRefreshesControl` (autonomy_state.ts). */
-function retryRefreshesControl(endpoint: string): boolean {
-  return endpoint === "/api/autonomy/control";
-}
-
-/** Legacy `revalidateConflictArm`: an arm that left the active set is dropped. */
-function revalidateConflictArm(
-  arm: string | null,
-  activeIds: ReadonlySet<string>,
-): string | null {
-  if (arm !== null && !activeIds.has(arm)) return null;
-  return arm;
-}
-
-/** Legacy `shouldResetConflictArm`: a rejected pair resets the dead arm. */
-function shouldResetConflictArm(status: number): boolean {
-  return status === 409;
 }
 
 function formatHistoryEvents(events: unknown, withNote: boolean): string[] {

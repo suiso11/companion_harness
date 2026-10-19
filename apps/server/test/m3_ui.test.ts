@@ -42,7 +42,6 @@ interface Fixture extends CreatedServerApp {
 }
 
 async function makeApp(assets?: {
-  clientJs?: string;
   clientCss?: string;
   svelteJs?: string;
   svelteCss?: string;
@@ -102,7 +101,8 @@ describe("M3 SSR shell + CSP + assets", () => {
     const f = await makeApp();
     try {
       // PR-1 cutover: `/` serves the Svelte chat shell (self-hosted bundle,
-      // strict CSP, no inline script); the vanilla shell lives at `/legacy`.
+      // strict CSP, no inline script). PR-6: the vanilla shell was removed
+      // and `/legacy` intentionally 404s.
       const res = await f.app.request("/", { headers: headers() });
       expect(res.status).toBe(200);
       expect(res.headers.get("content-security-policy")).toBe(STRICT_CSP);
@@ -114,11 +114,7 @@ describe("M3 SSR shell + CSP + assets", () => {
       expect(shellHasNoInlineScript(html)).toBe(true);
       expect(html.toLowerCase()).not.toContain("innerhtml");
       const legacy = await f.app.request("/legacy", { headers: headers() });
-      expect(legacy.status).toBe(200);
-      expect(legacy.headers.get("content-security-policy")).toBe(STRICT_CSP);
-      const legacyHtml = await legacy.text();
-      expect(legacyHtml).toContain('src="/assets/client.js"');
-      expect(shellHasNoInlineScript(legacyHtml)).toBe(true);
+      expect(legacy.status).toBe(404);
     } finally {
       f.close();
     }
@@ -126,18 +122,17 @@ describe("M3 SSR shell + CSP + assets", () => {
 
   it("serves injected bundle assets and 404s when unbuilt", async () => {
     const built = await makeApp({
-      clientJs: "console.log(1)",
       clientCss: "body{}",
       svelteJs: "console.log(2)",
       svelteCss: "body{}",
     });
     try {
-      const js = await built.app.request("/assets/client.js", {
+      // PR-6: the legacy client bundle route is gone; only the stylesheet
+      // (shared with the login page) is still served from dist/assets.
+      const missingLegacyJs = await built.app.request("/assets/client.js", {
         headers: headers(),
       });
-      expect(js.status).toBe(200);
-      expect(js.headers.get("content-type")).toContain("javascript");
-      expect(await js.text()).toBe("console.log(1)");
+      expect(missingLegacyJs.status).toBe(404);
       const css = await built.app.request("/assets/client.css", {
         headers: headers(),
       });
@@ -159,7 +154,7 @@ describe("M3 SSR shell + CSP + assets", () => {
     }
     const bare = await makeApp();
     try {
-      const missing = await bare.app.request("/assets/client.js", {
+      const missing = await bare.app.request("/assets/client.css", {
         headers: headers(),
       });
       expect(missing.status).toBe(404);
@@ -535,23 +530,10 @@ describe("M3 client reducer contract", () => {
     expect(terminal.state.retryVisible).toBe(false);
   });
 
-  it("SSR shell exposes the composer live-region for cancel notices", async () => {
-    // Regression for HEAD page.ts fix: the client renders cancel notices
-    // into #composer-notice (aria-live polite); without that node the
-    //「停止しました」/「停止できませんでした」notice has no target.
-    // PR-1: the interactive composer now renders client-side from the
-    // Svelte bundle; the vanilla shell at `/legacy` keeps the SSR node.
-    const f = await makeApp();
-    try {
-      const res = await f.app.request("/legacy", { headers: headers() });
-      expect(res.status).toBe(200);
-      const html = await res.text();
-      expect(html).toContain('id="composer-notice"');
-      expect(html).toContain("aria-live");
-    } finally {
-      f.close();
-    }
-  });
+  // PR-6: the former "SSR shell exposes the composer live-region" test
+  // targeted the deleted vanilla shell (`/legacy`); the composer renders
+  // client-side from the Svelte bundle now, and cancel notices into
+  // #composer-notice are covered by the conversation/draft_answer e2e specs.
 });
 
 describe("M3 SSE loop lifetime (fake timers)", () => {
