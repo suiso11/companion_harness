@@ -968,6 +968,13 @@ function finishActiveRun(): void {
   }
   activeRunId = null;
   activeTurnId = null;
+  // Native feature-page seam (legacy run-settled hook parity): listeners
+  // (e.g. the native learning panel) re-read their quiet lists here.
+  try {
+    window.dispatchEvent(new CustomEvent("ch:run-settled"));
+  } catch {
+    // Best effort: teardown never breaks the chat page.
+  }
 }
 
 function subscribe(runId: string): void {
