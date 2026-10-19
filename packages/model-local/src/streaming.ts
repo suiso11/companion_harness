@@ -394,16 +394,21 @@ export class OpenAIStreamAccumulator {
         if (fn.name.length > 0) {
           if (call.name === undefined) {
             call.name = fn.name;
-          } else {
+          } else if (fn.name === call.name) {
             // Names stream once but some proxies repeat them: identical
-            // repeats are tolerated, conflicts reject strictly.
-            if (call.name !== fn.name && !fn.name.startsWith(call.name)) {
-              // Allow prefix-growth (split names) by keeping the longest.
-              call.name =
-                fn.name.length > call.name.length ? fn.name : call.name;
-            } else if (fn.name.startsWith(call.name)) {
-              call.name = fn.name;
-            }
+            // repeats are tolerated.
+          } else if (fn.name.startsWith(call.name)) {
+            // Prefix growth (split names): the accumulated name extends.
+            call.name = fn.name;
+          } else if (call.name.startsWith(fn.name)) {
+            // Repeat of an already-subsumed earlier fragment: tolerated.
+          } else {
+            // Any other name for the same index conflicts: reject the
+            // stream instead of combining arguments across tool names.
+            throw new ModelLocalError(
+              "invalid_response",
+              "model returned an invalid response",
+            );
           }
         }
       }
@@ -859,6 +864,15 @@ async function readSseStream(
     }
     if (controller.signal.aborted) {
       throw new ModelLocalError("timeout", "model request timed out");
+    }
+    if (!seenDone) {
+      // EOF before the `data: [DONE]` sentinel: a truncated stream must
+      // never be normalized into a successful ChatResult (a partial tool
+      // call could otherwise execute). Abort/timeout keep priority above.
+      throw new ModelLocalError(
+        "invalid_response",
+        "model returned an invalid response",
+      );
     }
   } finally {
     controller.signal.removeEventListener("abort", onControllerAbort);

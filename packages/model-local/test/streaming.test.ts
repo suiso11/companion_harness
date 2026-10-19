@@ -456,6 +456,143 @@ describe("strict streaming errors", () => {
     );
   });
 
+  it("rejects a stream that closes before the [DONE] sentinel", async () => {
+    // Plain content arrived but the body ended without `data: [DONE]`:
+    // a truncated connection must not normalize into a successful result.
+    await expectStreamCode(
+      [sseChunk({ choices: [{ delta: { content: "partial" } }] })],
+      "invalid_response",
+    );
+    // Even a complete-looking tool-call argument without [DONE] rejects
+    // (a partially streamed tool call must never execute).
+    await expectStreamCode(
+      [
+        sseChunk({
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "call_x",
+                    function: {
+                      name: "notes.search",
+                      arguments: '{"q":"x"}',
+                    },
+                  },
+                ],
+              },
+              finish_reason: "tool_calls",
+            },
+          ],
+        }),
+      ],
+      "invalid_response",
+      baseRequest({ tools: [{ name: "notes.search", description: "s" }] }),
+    );
+  });
+
+  it("rejects conflicting tool names on one index as invalid_response", async () => {
+    await expectStreamCode(
+      [
+        sseChunk({
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "c0",
+                    function: { name: "memory.search", arguments: '{"q"' },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+        sseChunk({
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    function: { name: "calendar.search", arguments: ':"x"}' },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+        "data: [DONE]\n\n",
+      ],
+      "invalid_response",
+    );
+  });
+
+  it("accepts identical repeats and cumulative-prefix name fragments", async () => {
+    const { fetchImpl } = mockFetch(
+      sseResponseFromChunks([
+        sseChunk({
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "c0",
+                    function: { name: "notes", arguments: '{"q"' },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+        // Prefix growth to the full split name, then an identical repeat,
+        // then a repeat of an already-subsumed earlier fragment.
+        sseChunk({
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    function: { name: "notes.search", arguments: ':"x"}' },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+        sseChunk({
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  { index: 0, function: { name: "notes.search" } },
+                ],
+              },
+            },
+          ],
+        }),
+        sseChunk({
+          choices: [
+            { delta: { tool_calls: [{ index: 0, function: { name: "notes" } }] } },
+          ],
+        }),
+        "data: [DONE]\n\n",
+      ]),
+    );
+    const result = await streamingGateway(fetchImpl).chat(
+      baseRequest({ tools: [{ name: "notes.search", description: "s" }] }),
+    );
+    expect(result.toolCalls).toHaveLength(1);
+    expect(result.toolCalls[0]).toMatchObject({
+      name: "notes.search",
+      arguments: { q: "x" },
+    });
+  });
+
   it("does not fall back: transport failures surface once", async () => {
     const { fetchImpl, calls } = mockFetch(
       new Response("oops", { status: 500 }),
