@@ -110,6 +110,106 @@ describe("ephemeral delta bus (PR-2)", () => {
     }
   });
 
+  it("keeps adjacent model steps in separate coalescing buffers", () => {
+    const { timers, pending } = manualTimers();
+    const bus = new ModelDeltaBus(timers);
+    const runId = randomUUID();
+    const chunks: string[] = [];
+    const unsubscribe = bus.subscribe(runId, (chunk) => {
+      chunks.push(chunk);
+    });
+    try {
+      bus.publishPiece({
+        runId,
+        step: 1,
+        kind: "reasoning",
+        text: "one",
+        now: 1,
+      });
+      // Same kind, same run, within the 50ms window: a different step must
+      // never merge into the earlier step's buffer.
+      bus.publishPiece({
+        runId,
+        step: 2,
+        kind: "reasoning",
+        text: "two",
+        now: 2,
+      });
+      for (const fire of pending.splice(0)) {
+        fire();
+      }
+      expect(chunks).toHaveLength(2);
+      const first = parseChunkData(chunks[0] as string);
+      const second = parseChunkData(chunks[1] as string);
+      expect(first.payload).toEqual({ step: 1, text: "one" });
+      expect(second.payload).toEqual({ step: 2, text: "two" });
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it("flushes a run's pending text before its terminal usage event", () => {
+    const { timers, pending } = manualTimers();
+    const bus = new ModelDeltaBus(timers);
+    const runId = randomUUID();
+    const otherRunId = randomUUID();
+    const chunks: string[] = [];
+    const unsubscribe = bus.subscribe(runId, (chunk) => {
+      chunks.push(chunk);
+    });
+    const unsubscribeOther = bus.subscribe(otherRunId, (chunk) => {
+      chunks.push(chunk);
+    });
+    try {
+      bus.publishPiece({
+        runId,
+        step: 3,
+        kind: "draft",
+        text: "tail",
+        now: 1,
+      });
+      // An unrelated run's buffer stays pending across this usage flush.
+      bus.publishPiece({
+        runId: otherRunId,
+        step: 1,
+        kind: "draft",
+        text: "other",
+        now: 1,
+      });
+      expect(pending.length).toBe(2);
+      bus.publishUsage({
+        runId,
+        step: 3,
+        promptTokens: 1,
+        completionTokens: 2,
+        elapsedMs: 5,
+        now: 2,
+      });
+      // The short draft tail flushed BEFORE usage (the SSE poll may close
+      // on the terminal usage event; the 50ms timer would be too late) and
+      // only this run's buffers flushed.
+      expect(chunks).toHaveLength(2);
+      expect(parseChunkData(chunks[0] as string).type).toBe(
+        "answer.draft.delta",
+      );
+      expect(parseChunkData(chunks[0] as string).payload).toEqual({
+        step: 3,
+        text: "tail",
+      });
+      expect(parseChunkData(chunks[1] as string).type).toBe("model.usage");
+      // Firing the stale timers flushes only the untouched other run.
+      pending.splice(0).forEach((fire) => fire());
+      expect(chunks).toHaveLength(3);
+      expect(parseChunkData(chunks[2] as string).payload).toEqual({
+        step: 1,
+        text: "other",
+      });
+    } finally {
+      unsubscribe();
+      unsubscribeOther();
+    }
+  });
+
   it("flushes early at the char bound and passes usage through", () => {
     const { timers } = manualTimers();
     const bus = new ModelDeltaBus(timers);
