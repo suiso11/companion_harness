@@ -1,4 +1,4 @@
-# NOTICE — llama.cpp WebUI vendoring (V1 theme + V2 messages/markdown)
+# NOTICE — llama.cpp WebUI vendoring (V1 theme + V2 messages/markdown + V3/V4 reasoning/stats/composer)
 
 Upstream: https://github.com/ggml-org/llama.cpp
 Pinned commit: `098ce526b546b5a190327c1da82929cee051b9ac`
@@ -63,3 +63,41 @@ sandbox/nerdamer/MCP runtimes, dexie persistence.
 
 Per-file provenance comments in `apps/web/src/lib/markdown.ts` name the
 upstream file each plugin mirrors.
+
+## Source files adapted in V3 (reasoning block + statistics)
+
+- `tools/ui/src/lib/components/app/chat/ChatMessages/ChatMessageReasoningBlock.svelte`
+  — the collapsible reasoning header (chevron + "Thinking" title, muted
+  mono body, auto-collapse on answer) was adapted into the existing
+  `[data-thinking]` section in `apps/web/src/App.svelte` + `app.css`
+  (`.thinking-toggle` / `.thinking-chevron` / `.thinking-body`). Behavior
+  is unchanged (expanded while streaming, collapsed on terminal); DOM
+  contracts kept (`data-thinking`, `data-thinking-toggle`,
+  `aria-expanded`, `data-thinking-text`, `aria-live`).
+- `tools/ui/src/lib/components/app/chat/ChatMessages/ChatMessage/ChatMessageAssistant/ChatMessageAssistantStatistics.svelte`
+  (+ nearby `formatters.ts` performance-time formatting) — the props-driven
+  completion stats line (tokens, tok/s, elapsed) was adapted into
+  `formatThinkingStats()` in `apps/web/src/lib/thinking.ts`, fed by the
+  existing `model.usage` data. The status/phase line keeps its durable
+  derivation; only its stats companion changed shape.
+
+What is still NOT taken: `bits-ui` collapsible, tooltip components,
+chat/tool stores, dexie. No upstream JS ships; only the look is mirrored.
+
+## Source files adapted in V4 (composer)
+
+- `tools/ui/src/lib/components/app/chat/ChatForm/ChatFormInput/ChatFormInputBasic.svelte`
+  + `tools/ui/src/lib/utils/autoresize-textarea.ts` — the autosizing
+  textarea pattern (auto-grow to ~10 lines, then scroll) was adapted into
+  `#composer-input` (now a `<textarea rows=1>`) in `App.svelte` + `app.css`
+  (`autogrowTextarea()` in `apps/web/src/lib/composer.ts`). Enter submits
+  via `shouldSendOnKeydown()`; Shift+Enter inserts a newline; IME
+  composition (`isComposing` + `compositionstart/end` flag) never submits
+  — load-bearing for Japanese input.
+- `tools/ui/src/lib/components/app/chat/ChatForm/ChatFormActions/ChatFormActionSubmit.svelte`
+  — the submit/stop affordance informed the composer controls, but the
+  existing two-button DOM contract is kept verbatim: `#composer-send`
+  (disabled while a run is active) + `#composer-stop` (visible while a
+  run is active, wired to the existing cancel; C22 card Stop untouched).
+  `bits-ui` Button/Tooltip and lucide ArrowUp were not taken; targets stay
+  >=44px with the iOS safe-area inset.

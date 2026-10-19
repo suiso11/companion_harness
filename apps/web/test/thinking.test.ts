@@ -69,7 +69,8 @@ describe("thinking usage stats", () => {
     const withUsage = applyThinkingUsage(EMPTY_THINKING, usage);
     expect(withUsage.usage).toEqual(usage);
     expect(thinkingTokensPerSec(withUsage.usage)).toBeCloseTo(45 / 2.8, 5);
-    expect(formatThinkingStats(withUsage.usage)).toMatch(/tok\/s$/);
+    expect(formatThinkingStats(withUsage.usage)).toMatch(/tok\/s/);
+    expect(formatThinkingStats(withUsage.usage)).toContain("45 tokens");
   });
 
   test("hidden when usage is missing or elapsed is zero", () => {

@@ -115,15 +115,23 @@ export function thinkingTokensPerSec(
   return usage.completionTokens / (usage.elapsedMs / 1000);
 }
 
-/** Completion stats line, or null when it must stay hidden. */
+/**
+ * Completion stats line (upstream `ChatMessageAssistantStatistics` look:
+ * tokens, tok/s, elapsed), or null when it must stay hidden. Plain ASCII
+ * numbers + fixed labels so e2e only asserts the "tok/s" substring.
+ */
 export function formatThinkingStats(
   usage: ThinkingUsage | null,
 ): string | null {
   const rate = thinkingTokensPerSec(usage);
-  if (rate === null) {
+  if (rate === null || usage === null) {
     return null;
   }
-  return `${rate.toFixed(1)} tok/s`;
+  const elapsedSec = usage.elapsedMs / 1000;
+  return (
+    `${usage.completionTokens} tokens · ` +
+    `${rate.toFixed(1)} tok/s · ${elapsedSec.toFixed(1)}s`
+  );
 }
 
 /* ------------------------------------------------------------------ */

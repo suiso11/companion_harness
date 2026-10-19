@@ -32,6 +32,7 @@ import {
   type RunViewState,
   runResultToAnswerParts,
 } from "./lib/reducer.js";
+import { autogrowTextarea, shouldSendOnKeydown } from "./lib/composer.js";
 import {
   appendThinkingText,
   applyThinkingUsage,
@@ -163,6 +164,12 @@ let liveVisible = $state(false);
 let thinking: ThinkingState = $state({ ...EMPTY_THINKING });
 let thinkingCollapsed = $state(false);
 let showThinking = $state(false);
+// V4 composer (upstream ChatFormInputBasic): textarea autoresize + IME
+// guard. `composing` mirrors the IME composition session so Enter during
+// Japanese conversion never submits (keydown `isComposing` is the primary
+// signal; the flag covers browsers that only fire composition events).
+let composing = $state(false);
+let composerEl: HTMLTextAreaElement | null = $state(null);
 let runStartedAt = $state(0);
 let elapsedSec = $state(0);
 // PR-4 provisional draft (ephemeral, memory-only, never persisted/sent).
@@ -698,6 +705,7 @@ async function send(): Promise<void> {
     stickToBottom = true;
     turns = [...turns, { turnId: "", kind: "user_text", text, run: null }];
     input = "";
+    autogrowTextarea(composerEl);
     // `sending` stays true until the message POST settles (review PR75):
     // the composer, session switch, and new-session controls must stay
     // locked while the request is in flight. fetchUiContext() never throws.
@@ -2748,22 +2756,36 @@ function evidenceForTurn(turn: Turn): {
     {/if}
     {#if showThinking}
       {@const statsLine = formatThinkingStats(thinking.usage)}
-      <section data-thinking="true" aria-label="考え中">
+      <!-- V3: upstream ChatMessageReasoningBlock look — collapsible header
+           with a chevron, muted mono body; auto-collapse behavior unchanged
+           (see renderRunView). DOM contracts kept: data-thinking,
+           data-thinking-toggle, aria-expanded, data-thinking-text,
+           data-run-stats. -->
+      <section data-thinking="true" class="thinking-block" aria-label="考え中">
         <button
           type="button"
+          class="thinking-toggle"
           data-thinking-toggle="true"
           aria-expanded={!thinkingCollapsed}
           onclick={() => {
             thinkingCollapsed = !thinkingCollapsed;
           }}
         >
-          {thinkingCollapsed ? "考え中（詳細を開く）" : "考え中…（詳細を閉じる）"}
+          <span class="thinking-chevron" aria-hidden="true"
+            >{thinkingCollapsed ? "▸" : "▾"}</span
+          >
+          <span class="thinking-title"
+            >{thinkingCollapsed ? "考え中" : "考え中…"}</span
+          >
         </button>
         {#if !thinkingCollapsed}
-          <pre data-thinking-text="true">{thinkingDisplayText(thinking)}</pre>
+          <pre
+            class="thinking-body"
+            data-thinking-text="true">{thinkingDisplayText(thinking)}</pre
+          >
         {/if}
         {#if statsLine !== null}
-          <p data-run-stats="true">{statsLine}</p>
+          <p class="run-stats" data-run-stats="true">{statsLine}</p>
         {/if}
       </section>
     {:else}
@@ -2901,12 +2923,38 @@ function evidenceForTurn(turn: Turn): {
       void send();
     }}
   >
-    <input
+    <!-- V4: upstream ChatFormInputBasic adaptation — auto-growing textarea
+         (max ~10 lines, then scroll), Enter sends / Shift+Enter newline,
+         IME-safe (never sends while composing). id/type contracts kept:
+         #composer-input stays the send hook; #composer-stop keeps its own
+         cancel semantics (card Stop untouched). -->
+    <textarea
       id="composer-input"
-      type="text"
+      rows={1}
       autocomplete="off"
       bind:value={input}
-    />
+      bind:this={composerEl}
+      oninput={() => autogrowTextarea(composerEl)}
+      oncompositionstart={() => {
+        composing = true;
+      }}
+      oncompositionend={() => {
+        composing = false;
+      }}
+      onkeydown={(e) => {
+        if (
+          shouldSendOnKeydown({
+            key: e.key,
+            shiftKey: e.shiftKey,
+            isComposing: e.isComposing,
+            composing,
+          })
+        ) {
+          e.preventDefault();
+          void send();
+        }
+      }}
+    ></textarea>
     <button id="composer-send" type="submit" disabled={composerSendDisabled()}>
       送信
     </button>
