@@ -21,6 +21,12 @@ const feature = routeForPath(pathname);
   {:catch}
     <p>ページを読み込めませんでした</p>
   {/await}
+{:else if feature.path === "/tasks"}
+  {#await import("./AutonomyPage.svelte") then module}
+    <svelte:component this={module.default} />
+  {:catch}
+    <p>ページを読み込めませんでした</p>
+  {/await}
 {:else if feature.path === "/notifications"}
   {#await import("./NotificationsPage.svelte") then module}
     <svelte:component this={module.default} />
