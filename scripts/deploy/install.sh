@@ -44,9 +44,16 @@ if [ -z "$PNPM_BIN" ]; then
   printf 'install.sh: pnpm not found in PATH (systemd user units get no login-shell PATH; install pnpm, e.g. ~/.local/bin, then re-run)\n' >&2
   exit 1
 fi
+# remind-deploy.sh uses npm (the remind repo is npm-managed: npm ci/build).
+NPM_BIN="$(command -v npm 2>/dev/null || true)"
+if [ -z "$NPM_BIN" ]; then
+  printf 'install.sh: npm not found in PATH (needed by remind-deploy.sh; install Node/npm, e.g. ~/.local/bin, then re-run)\n' >&2
+  exit 1
+fi
 NODE_DIR="$(dirname -- "$NODE_BIN")"
 PNPM_DIR="$(dirname -- "$PNPM_BIN")"
-UNIT_PATH="$NODE_DIR:$PNPM_DIR:/usr/local/bin:/usr/bin:/bin"
+NPM_DIR="$(dirname -- "$NPM_BIN")"
+UNIT_PATH="$NODE_DIR:$PNPM_DIR:$NPM_DIR:/usr/local/bin:/usr/bin:/bin"
 DEDUP=""
 OLD_IFS="$IFS"
 IFS=":"
@@ -58,22 +65,24 @@ for _d in $UNIT_PATH; do
 done
 IFS="$OLD_IFS"
 UNIT_PATH="$DEDUP"
-unset DEDUP OLD_IFS _d NODE_BIN PNPM_BIN NODE_DIR PNPM_DIR
+unset DEDUP OLD_IFS _d NODE_BIN PNPM_BIN NPM_BIN NODE_DIR PNPM_DIR NPM_DIR
 
 for _unit in \
   companion.service companion-deploy.service companion-deploy.timer \
   companion-backup.service companion-backup.timer \
   companion-health.service companion-health.timer \
+  remind-deploy.service remind-deploy.timer \
   companion-alert@.service; do
   cp "$HERE/systemd/$_unit" "$UNIT_DIR/$_unit"
 done
 unset _unit
 printf 'installed units to %s\n' "$UNIT_DIR"
 
-# companion-deploy.sh / companion-backup.sh / companion-health.sh need
-# git, gh, pnpm, node: the same pinned PATH covers all units (git/gh
-# normally live in /usr/bin already in the fallback tail).
-for _svc in companion.service companion-deploy.service companion-backup.service companion-health.service; do
+# companion-deploy.sh / companion-backup.sh / companion-health.sh /
+# remind-deploy.sh need git, gh, pnpm, npm, node: the same pinned PATH
+# covers all units (git/gh normally live in /usr/bin already in the
+# fallback tail).
+for _svc in companion.service companion-deploy.service companion-backup.service companion-health.service remind-deploy.service; do
   mkdir -p "$UNIT_DIR/$_svc.d"
   printf '[Service]\nEnvironment=PATH=%s\n' "$UNIT_PATH" >"$UNIT_DIR/$_svc.d/path.conf"
   printf 'wrote %s\n' "$UNIT_DIR/$_svc.d/path.conf"
@@ -91,6 +100,9 @@ COMPANION_PORT=3000
 COMPANION_DEPLOY_DIR=$HOME/companion_master
 GOOGLE_ACCOUNT_MODE=normal
 FORK_DIR=$HOME/gcal-readonly
+# remind CLI auto-deploy (detached worktree of the remind repo).
+REMIND_DEPLOY_DIR=$HOME/remind_master
+REMIND_CONFIG=$HOME/.config/remind/memory.config.json
 # COMPANION_DB_PATH defaults to OS app-data when unset (recommended: leave unset).
 # COMPANION_REMOTE_JSON stays unset (remote disabled) unless remote access is set up.
 EOF
@@ -106,9 +118,11 @@ Next steps (run on the host):
   systemctl --user daemon-reload
   systemctl --user enable --now companion.service companion-deploy.timer
   systemctl --user enable --now companion-backup.timer companion-health.timer
+  systemctl --user enable --now remind-deploy.timer
   loginctl enable-linger $USER
 Useful:
   systemctl --user stop companion-deploy.timer   # pause auto-deploy
+  systemctl --user stop remind-deploy.timer      # pause remind auto-deploy
   systemctl --user stop companion-backup.timer   # pause backups
   journalctl --user -u companion -u companion-deploy -f   # logs
   journalctl --user -p err -S today              # local monitoring errors
@@ -119,5 +133,6 @@ if [ "$ENABLE" = "1" ]; then
   systemctl --user daemon-reload
   systemctl --user enable --now companion.service companion-deploy.timer
   systemctl --user enable --now companion-backup.timer companion-health.timer
+  systemctl --user enable --now remind-deploy.timer
   loginctl enable-linger "$USER"
 fi

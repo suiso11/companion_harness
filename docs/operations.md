@@ -4308,6 +4308,108 @@ systemctl --user stop companion-deploy.timer    # pause (service は継続)
 journalctl --user -u companion -u companion-deploy -f   # logs
 ```
 
+## remind CLI の本番配置・自動更新・モデル配置
+
+### 本番配置
+
+- 本番の remind は `~/remind_master` (remind リポジトリ
+  `github.com/suiso11/remind` の detached worktree)。`npm ci && npm run build`
+  でビルドし、Companion は `dist/src/cli.js` を呼ぶ。
+- remind 設定は `~/.config/remind/memory.config.json`
+  (`dbPath`, `vaultPath`, `allowedScopes`, `vectors.modelDir`,
+  `llm.modelDir` など)。
+- Companion 側は `~/.config/companion/env` の `COMPANION_MEMORY_JSON`
+  (`{"executable","entry","config","scope"}`) で絶対パスを固定する。
+  `executable` は Node、`entry` は `~/remind_master/dist/src/cli.js`、
+  `config` は上記 JSON、`scope` は `allowedScopes` のいずれか。
+- Companion はメモリ操作のたびに remind CLI を子プロセスとして spawn する
+  (常駐プロセスなし)。そのため remind の更新に Companion の restart は
+  **不要**。唯一のリスクは、実行中 call が `dist/` を読んでいる最中の
+  再ビルドなので、deploy は active run が 0 のときだけ進む。
+
+### 自動更新 (scripts/deploy/remind-deploy.sh)
+
+`remind-deploy.timer` が 5 分ごとに実行する。Companion の
+`companion-deploy.timer` と同時に走らないよう、起動時は
+`OnBootSec=4min` で 2 分ずらしてある (以後も 5 分間隔)。
+
+```sh
+scripts/deploy/install.sh
+systemctl --user daemon-reload
+systemctl --user enable --now remind-deploy.timer
+loginctl enable-linger $USER
+```
+
+`install.sh` は `remind-deploy.service` / `remind-deploy.timer` も
+`~/.config/systemd/user/` へコピーし、`remind-deploy.service.d/path.conf`
+に node/npm/pnpm の PATH を固定する。`.service` は
+`WorkingDirectory=%h/companion_master`、`EnvironmentFile=%h/.config/companion/env`、
+`ExecStart=%h/companion_master/scripts/deploy/remind-deploy.sh`。
+
+判定順 (`companion-deploy.sh` と同じ):
+
+1. `git fetch origin` し target=`origin/master`。HEAD と同等なら exit 0。
+2. CI gate: `gh api repos/suiso11/remind/commits/<sha>/check-runs` が
+   すべて completed + success (skipped 許容) のときだけ進行。
+   `gh` 不在/未認証/API 失敗はスキップして次 tick。
+3. Active-run skip: `scripts/deploy/activeRuns.mjs` で Companion の
+   queued/running/cancel_requested が 0 件のときだけ進行。判定不能もスキップ。
+4. Dirty guard: tracked 変更があれば破棄せず exit 1 (untracked は無視)。
+5. `git switch --detach <target>` → `npm ci` → `npm run build`
+   (remind は npm 管理。`dist/` は gitignore)。
+6. Smoke: `record.list` を1回実行し `ok:true` を要求する。
+   scope は `COMPANION_MEMORY_JSON.scope`、無ければ remind config の
+   `allowedScopes[0]` (`scripts/deploy/remindDeploy.mjs`)。
+   `node dist/src/cli.js --config <config>` へ1行 JSON を渡す。
+   scope 解決不能・非0終了・`ok:true` 以外は失敗とみなし、直前 sha へ
+   `git switch --detach` → `npm ci` → `npm run build` で rollback し exit 1。
+
+単一インスタンスは flock (`$XDG_RUNTIME_DIR/remind-deploy.lock`)。失敗は
+`OnFailure=companion-alert@%n.service` で
+`~/.local/state/companion/alerts.log` に記録される。Companion の restart は
+行わない。
+
+```sh
+systemctl --user stop remind-deploy.timer          # pause
+journalctl --user -u remind-deploy.service -f      # logs
+systemctl --user start remind-deploy.service       # manual run
+```
+
+### モデル配置 (安定パス)
+
+`~/.config/remind/memory.config.json` の `vectors.modelDir` /
+`llm.modelDir` が開発チェックアウト (`/home/molmot/remind/models`) を指すと、
+auto-deploy や checkout の移動で壊れる。モデルはチェックアウト外の
+`~/.local/share/remind/models` に置く。
+
+```sh
+# 既存モデルを安定パスへコピー (rsync -a、再実行しても差分のみ)
+scripts/deploy/remind-models.sh
+# コピー元/先/対象を変える場合
+REMIND_MODELS_SOURCE=~/remind/models \
+REMIND_MODELS_DIR=~/.local/share/remind/models \
+REMIND_MODEL_NAMES="paraphrase-multilingual-MiniLM-L12-v2 qwen25-15b-instruct" \
+  scripts/deploy/remind-models.sh
+```
+
+スクリプトは設定を書き換えず、更新すべき行を表示する:
+
+```json
+"vectors": { "modelDir": "~/.local/share/remind/models/paraphrase-multilingual-MiniLM-L12-v2", ... }
+"llm":     { "modelDir": "~/.local/share/remind/models/qwen25-15b-instruct", ... }
+```
+
+モデルファイルの正規の取得方法は remind の provisioning (ネットワーク工程)。
+安定パスへ直接取得できる:
+
+```sh
+cd ~/remind_master
+npm run provision:model -- --dir ~/.local/share/remind/models/paraphrase-multilingual-MiniLM-L12-v2
+npm run provision:llm   -- --dir ~/.local/share/remind/models/qwen25-15b-instruct
+```
+
+`modelDir` の変更は次回の CLI 起動から効く (Companion restart 不要)。
+
 ## バックアップと復元 (Companion + remind, user systemd)
 
 `companion-backup.timer` が毎日 03:30 (Persistent=true,
