@@ -9,6 +9,12 @@ import {
   randomUuid,
 } from "./lib/api.js";
 import {
+  appendDraftText,
+  DRAFT_LABEL,
+  type DraftState,
+  draftDisplayText,
+} from "./lib/draft.js";
+import {
   ACTION_PROGRESS_TEXT,
   actionCardModel,
   actionDecisionIntentText,
@@ -25,6 +31,16 @@ import {
   type RunViewState,
   runResultToAnswerParts,
 } from "./lib/reducer.js";
+import {
+  appendThinkingText,
+  applyThinkingUsage,
+  deriveRunPhase,
+  EMPTY_THINKING,
+  formatPhaseText,
+  formatThinkingStats,
+  type ThinkingState,
+  thinkingDisplayText,
+} from "./lib/thinking.js";
 
 // PR-1 Svelte chat page (Q1/Q4/Q7/Q8/Q10, PR-1 scope): dark-only, Japanese,
 // same APIs/SSE events + JSON fallback polling as the vanilla client.
@@ -139,6 +155,23 @@ let runView: RunViewState = $state({ ...INITIAL_RUN_VIEW });
 let activeRunCursor = 0;
 let liveAnswer: { text: string; citations: string[] }[] = $state([]);
 let liveVisible = $state(false);
+// PR-3 thinking/status (frontend plan §11.1 Q11): ephemeral reasoning
+// text lives in memory only (never persisted, never sent back). The
+// block expands while reasoning streams and auto-collapses on answer;
+// the phase line derives from durable events only (reload-safe).
+let thinking: ThinkingState = $state({ ...EMPTY_THINKING });
+let thinkingCollapsed = $state(false);
+let showThinking = $state(false);
+let runStartedAt = $state(0);
+let elapsedSec = $state(0);
+// PR-4 provisional draft (ephemeral, memory-only, never persisted/sent).
+let draft: DraftState | null = $state(null);
+// PR78 review: run ids whose draft must never (re)appear. A reload-adopted
+// run clears its draft once; later `answer.draft.delta` frames for it are
+// ignored, and `run.cancel_requested` / a successful cancel POST discard
+// the draft even while the run still reports "generating".
+const draftSuppressedRuns = new Set<string>();
+let elapsedTimer: number | null = null;
 let retryTurnId: string | null = $state(null);
 let drawerOpen = $state(false);
 let drawerBody = $state("");
@@ -324,6 +357,13 @@ function resetChatState(): void {
   activeRunCursor = 0;
   liveAnswer = [];
   liveVisible = false;
+  thinking = { ...EMPTY_THINKING };
+  thinkingCollapsed = false;
+  showThinking = false;
+  draft = null;
+  draftSuppressedRuns.clear();
+  stopElapsedTimer();
+  elapsedSec = 0;
   retryTurnId = null;
   renderedAnswers = new Set();
   terminalHydrated = new Set();
@@ -341,6 +381,121 @@ function resetChatState(): void {
   citationSeq += 1;
   drawerOpen = false;
   drawerBody = "";
+}
+
+// --- PR-3 thinking/status helpers (ephemeral deltas + durable phase) ---
+function stopElapsedTimer(): void {
+  if (elapsedTimer !== null) {
+    window.clearInterval(elapsedTimer);
+    elapsedTimer = null;
+  }
+}
+
+function startElapsedTimer(fromMs?: number): void {
+  stopElapsedTimer();
+  // PR77 review: when a durable run start is known (reload/resubscribe),
+  // seed the timer from it so a minutes-old run is not shown as newly
+  // started; a fresh subscription starts from now.
+  runStartedAt = typeof fromMs === "number" && fromMs > 0 ? fromMs : Date.now();
+  elapsedSec =
+    runStartedAt === Date.now()
+      ? 0
+      : Math.max(0, Math.floor((Date.now() - runStartedAt) / 1000));
+  elapsedTimer = window.setInterval(() => {
+    if (activeRunId === null) {
+      stopElapsedTimer();
+      return;
+    }
+    elapsedSec = Math.max(0, Math.floor((Date.now() - runStartedAt) / 1000));
+  }, 500);
+}
+
+/** Phase/status line text (durable events only; empty when not running). */
+function runStatusText(): string {
+  if (activeRunId === null || runView.visible !== "generating") {
+    return "";
+  }
+  const phase = deriveRunPhase({
+    toolRequested: runView.toolRequested,
+    toolCompleted: runView.toolCompleted,
+    stepsCompleted: runView.stepsCompleted,
+  });
+  const text = formatPhaseText(
+    phase,
+    runView.toolNames,
+    runView.toolRequested,
+    runView.toolCompleted,
+  );
+  return `${text}（${elapsedSec}秒）`;
+}
+
+/** Ephemeral PR-2 delta envelope (seq 0: never a cursor, never stored). */
+function isEphemeralDelta(event: { seq: number; type: string }): boolean {
+  return (
+    event.seq === 0 ||
+    event.type === "model.reasoning.delta" ||
+    event.type === "model.usage" ||
+    event.type === "answer.draft.delta"
+  );
+}
+
+/**
+ * Apply one ephemeral delta to memory-only thinking/draft state. Never
+ * touches the durable cursor, never persists, never sends anything back.
+ * `answer.draft.delta` accumulates the provisional draft (PR-4); a new
+ * step restarts the text, the validated answer/failure/cancel discards it.
+ */
+function applyEphemeralDelta(
+  runId: string,
+  event: { type: string; payload: unknown },
+): void {
+  if (activeRunId !== runId || runView.visible !== "generating") {
+    return;
+  }
+  if (event.type === "model.reasoning.delta") {
+    const payload =
+      typeof event.payload === "object" && event.payload !== null
+        ? (event.payload as { text?: unknown }).text
+        : null;
+    const hadText = thinking.text.length > 0;
+    thinking = appendThinkingText(thinking, payload);
+    if (!hadText && thinking.text.length > 0) {
+      // llama.cpp-style: expanded while streaming; the user toggle wins
+      // afterwards and the answer auto-collapses the block.
+      showThinking = true;
+      thinkingCollapsed = false;
+    }
+    return;
+  }
+  if (event.type === "model.usage") {
+    thinking = applyThinkingUsage(thinking, event.payload);
+    return;
+  }
+  if (event.type === "answer.draft.delta") {
+    // PR78 review: an adopted/reloaded run's draft is dropped once and
+    // never rebuilt from later delta frames (the bubble must not reappear).
+    if (draftSuppressedRuns.has(runId)) {
+      return;
+    }
+    // Provisional unvalidated text: same-step appends, new-step restarts.
+    draft = appendDraftText(draft, event.payload);
+  }
+}
+
+/**
+ * PR78 review: `run.cancel_requested` keeps `runView.visible` "generating"
+ * until the cancellation watchdog emits the terminal event, so the old
+ * draft would stay visible (and a non-cooperative gateway could keep
+ * feeding deltas). Discard the draft and suppress later delta frames as
+ * soon as cancellation is requested; also called right after a successful
+ * cancel POST.
+ */
+function discardDraftOnCancelRequested(runId: string, type: string): void {
+  if (type !== "run.cancel_requested" || activeRunId !== runId) {
+    return;
+  }
+  draft = null;
+  draftSuppressedRuns.add(runId);
 }
 
 // --- history ---
@@ -661,8 +816,9 @@ async function stop(): Promise<void> {
     await syncActions();
     return;
   }
+  const runId = activeRunId;
   const posted = await postJson(
-    `/api/sessions/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(activeRunId)}/cancel`,
+    `/api/sessions/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(runId)}/cancel`,
     {},
     null,
   );
@@ -670,7 +826,15 @@ async function stop(): Promise<void> {
     showNotice("停止できませんでした");
     return;
   }
-  if (actionRunStops.has(activeRunId)) {
+  // PR78 review: once the cancel POST is accepted, discard the draft and
+  // suppress later deltas immediately — do not wait for the terminal
+  // event, which a non-cooperative strategy can delay for seconds while
+  // the run still reports "generating".
+  if (activeRunId === runId) {
+    draft = null;
+    draftSuppressedRuns.add(runId);
+  }
+  if (actionRunStops.has(runId)) {
     if (parseCancelRunStatus(posted.body) === "cancelled") {
       showNotice("停止しました");
     }
@@ -731,15 +895,34 @@ function closeStream(): void {
 
 function finishActiveRun(): void {
   closeStream();
+  stopElapsedTimer();
+  if (activeRunId !== null) {
+    // PR78 review: the terminal released the run; a later run must not
+    // inherit this run's draft suppression.
+    draftSuppressedRuns.delete(activeRunId);
+  }
   activeRunId = null;
   activeTurnId = null;
 }
 
 function subscribe(runId: string): void {
+  void subscribeRun(runId);
+}
+
+async function subscribeRun(runId: string): Promise<void> {
   if (sessionId === null) return;
   closeStream();
   activeRunId = runId;
   retryTurnId = null;
+  // Ephemeral thinking state is memory-only: every (re)subscribe starts
+  // fresh (a reload loses the text by construction; only durable events
+  // rebuild the phase line).
+  thinking = { ...EMPTY_THINKING };
+  thinkingCollapsed = false;
+  showThinking = false;
+  draft = null;
+  startElapsedTimer();
+  const stored = readStoredCursor(runId);
   if (seededRunId === runId) {
     // Boot-seeded pre-subscription view (e.g. the cancel_requested stop
     // notice): preserved across the stream open; the real events stay
@@ -750,11 +933,23 @@ function subscribe(runId: string): void {
     liveVisible = false;
     runView = { ...INITIAL_RUN_VIEW };
     activeRunCursor = 0;
+    if (stored !== null && stored > 0) {
+      // PR77 review: a stored cursor means the stream resumes mid-run
+      // (page reload). Before another durable event creates a gap and
+      // triggers catch-up, the zeroed projection would derive 「考え中…」
+      // even when the persisted events show an outstanding tool.requested.
+      // Seed the elapsed timer from the run's durable start and rebuild
+      // the phase projection from history (up to the stored cursor, so
+      // the native stream keeps delivering newer events; reducer dedup
+      // keeps any overlap exactly-once).
+      const resynced = await validateStoredCursor(runId, stored);
+      if (resynced || activeRunId !== runId || sessionId === null) return;
+      const rebuilt = await rebuildResumedProjection(runId, stored);
+      if (rebuilt && activeRunId !== runId) return;
+    }
   }
   showNotice(runView.notice);
   const sid = sessionId;
-  const stored = readStoredCursor(runId);
-  void validateStoredCursor(runId, stored ?? 0);
   const query = stored !== null && stored > 0 ? `?after=${stored}` : "";
   const url = `/api/sessions/${encodeURIComponent(sid)}/runs/${encodeURIComponent(runId)}/events/stream${query}`;
   let opened = false;
@@ -828,28 +1023,113 @@ function subscribe(runId: string): void {
   };
 }
 
+/**
+ * Cursor validation on resume + durable elapsed-time seed (PR77 review).
+ * Returns true when a corrupt cursor triggered a resync + re-subscribe (the
+ * caller must not open another stream for the stale cursor).
+ */
 async function validateStoredCursor(
   runId: string,
   cursor: number,
-): Promise<void> {
-  if (sessionId === null || cursor <= 0 || activeRunId !== runId) return;
+): Promise<boolean> {
+  if (sessionId === null || cursor <= 0 || activeRunId !== runId) return false;
   let fetched: { status: number; body: unknown };
   try {
     fetched = await fetchJson(
       `/api/sessions/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(runId)}/status`,
     );
   } catch {
-    return;
+    return false;
   }
-  if (activeRunId !== runId || fetched.status !== 200) return;
+  if (activeRunId !== runId || fetched.status !== 200) return false;
   const run = (fetched.body as { run?: unknown }).run;
-  if (typeof run !== "object" || run === null) return;
-  const r = run as { id?: unknown; eventSeq?: unknown };
-  if (r.id !== runId || typeof r.eventSeq !== "number") return;
+  if (typeof run !== "object" || run === null) return false;
+  const r = run as {
+    id?: unknown;
+    eventSeq?: unknown;
+    startedAt?: unknown;
+    createdAt?: unknown;
+  };
+  if (r.id !== runId || typeof r.eventSeq !== "number") return false;
   if (isCorruptCursor(cursor, r.eventSeq)) {
     await resyncFromHistory(runId);
     if (sessionId !== null) subscribe(runId);
+    return true;
   }
+  // Durable run timing (additive status fields, PR77 review): seed the
+  // elapsed timer from the real run start instead of the subscription
+  // instant, so a reloaded page no longer shows a minutes-old run as new.
+  const startedAt = typeof r.startedAt === "number" ? r.startedAt : null;
+  const createdAt = typeof r.createdAt === "number" ? r.createdAt : null;
+  const durableStart = startedAt ?? createdAt;
+  if (durableStart !== null && activeRunId === runId) {
+    startElapsedTimer(durableStart);
+  }
+  return false;
+}
+
+/**
+ * PR77 review: rebuild the durable phase projection by replaying the run's
+ * event history from the beginning up to the stored resume cursor, so the
+ * status line derives from the persisted tool.requested/tool.completed/step
+ * counters instead of zeroed ones (no phantom 「考え中…」 while a tool is
+ * outstanding). Events past `upto` stay the native stream's responsibility
+ * (the C06 native-terminal-frame race), so this drain stops at the cursor;
+ * a best-effort failure keeps the zeroed view and the stream's
+ * needs-catchup path converges afterwards.
+ */
+async function rebuildResumedProjection(
+  runId: string,
+  upto: number,
+): Promise<boolean> {
+  if (sessionId === null) return false;
+  let cursor = 0;
+  for (let page = 0; page < 20; page += 1) {
+    if (cursor > upto) break;
+    let fetched: { status: number; body: unknown };
+    try {
+      fetched = await fetchJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(runId)}/events?after=${cursor}&limit=50`,
+      );
+    } catch {
+      return false;
+    }
+    if (fetched.status < 200 || fetched.status >= 300) return false;
+    const body = fetched.body as {
+      events?: Array<{ seq?: unknown; type?: unknown; payload?: unknown }>;
+      nextAfter?: unknown;
+    };
+    if (!Array.isArray(body.events)) return false;
+    for (const item of body.events) {
+      if (typeof item.seq !== "number" || typeof item.type !== "string")
+        continue;
+      if (item.seq > upto) break;
+      if (activeRunId !== runId) return false;
+      discardDraftOnCancelRequested(runId, item.type);
+      const applied = applyRunEvent(
+        { ...runView, cursor: activeRunCursor },
+        { seq: item.seq, type: item.type, payload: item.payload },
+      );
+      if (applied.outcome.kind === "ignored-duplicate") continue;
+      if (applied.outcome.kind === "needs-catchup") return true;
+      if (applied.outcome.kind === "ignored-unknown") {
+        activeRunCursor = applied.state.cursor;
+        storeCursor(runId, applied.state.cursor);
+        continue;
+      }
+      runView = applied.state;
+      activeRunCursor = applied.state.cursor;
+      storeCursor(runId, applied.state.cursor);
+    }
+    cursor = typeof body.nextAfter === "number" ? body.nextAfter : cursor + 1;
+    if (body.events.length === 0) break;
+  }
+  if (activeRunId !== runId) return false;
+  // One repaint after the rebuild: the derived phase line now matches the
+  // persisted events; a replayed terminal renders and releases the run
+  // exactly once (guarded by renderedAnswers/terminalHydrated).
+  renderRunView(runId);
+  return true;
 }
 
 async function resyncFromHistory(runId: string): Promise<void> {
@@ -868,6 +1148,16 @@ function applySerialized(
   runId: string,
   event: { seq: number; type: string; payload: unknown },
 ): void {
+  // PR78 review: cancellation discards the draft immediately, even while
+  // the run still renders "generating" (non-cooperative hold-cancel path).
+  discardDraftOnCancelRequested(runId, event.type);
+  // Ephemeral deltas bypass the durable reducer entirely: no cursor, no
+  // persistence, no catch-up. Deltas arriving after the terminal stay
+  // dropped (the validated answer is authoritative).
+  if (isEphemeralDelta(event)) {
+    applyEphemeralDelta(runId, event);
+    return;
+  }
   const absorbed = runChain.catch(() => {});
   const link = absorbed.then(async () => {
     try {
@@ -949,6 +1239,7 @@ async function catchUp(
       if (typeof item.seq !== "number" || typeof item.type !== "string")
         continue;
       if (activeRunId !== runId) return true;
+      discardDraftOnCancelRequested(runId, item.type);
       const applied = applyRunEvent(
         { ...runView, cursor: activeRunCursor },
         { seq: item.seq, type: item.type, payload: item.payload },
@@ -1015,6 +1306,11 @@ async function pollFallback(runId: string): Promise<void> {
 
 function renderRunView(runId: string): void {
   if (runView.visible === "answered") {
+    // The answer auto-collapses the Thinking block (user can re-open).
+    thinkingCollapsed = true;
+    // PR-4: the validated structured answer REPLACES the provisional
+    // draft completely (the draft label vanishes with the draft text).
+    draft = null;
     if (renderedAnswers.has(runId)) {
       finishActiveRun();
       if (!terminalHydrated.has(runId)) {
@@ -1042,6 +1338,8 @@ function renderRunView(runId: string): void {
     return;
   }
   if (runView.visible === "failed") {
+    // PR-4: a failed run discards the provisional draft.
+    draft = null;
     showNotice("生成に失敗しました");
     const turnId = runTurns.get(runId) ?? activeTurnId;
     const retryVisible = runView.retryVisible;
@@ -1063,6 +1361,8 @@ function renderRunView(runId: string): void {
     return;
   }
   if (runView.visible === "stopped") {
+    // PR-4: a cancelled run discards the provisional draft.
+    draft = null;
     showNotice("停止しました");
     finishActiveRun();
     if (!terminalHydrated.has(runId)) {
@@ -2119,6 +2419,11 @@ async function bootSession(): Promise<void> {
       runTurns.set(descriptor.runId, descriptor.turnId);
     }
     activeRunId = descriptor.runId;
+    // PR78 review: a reload adopts this already-active run and drops its
+    // draft once; later `answer.draft.delta` frames from the freshly opened
+    // stream must never rebuild the bubble (the reload guarantee).
+    draft = null;
+    draftSuppressedRuns.add(descriptor.runId);
     if (descriptor.status === "cancel_requested") {
       runView = { ...INITIAL_RUN_VIEW, notice: "停止しました" };
       activeRunCursor = 0;
@@ -2178,6 +2483,7 @@ onMount(() => {
   document.addEventListener("visibilitychange", onVisibility);
   return () => {
     closeStream();
+    stopElapsedTimer();
     for (const timer of watchTimers.values()) window.clearInterval(timer);
     watchTimers.clear();
     for (const timer of pendingExpiryTimers.values())
@@ -2380,6 +2686,50 @@ function evidenceForTurn(turn: Turn): {
       >
         もう一度生成
       </button>
+    {/if}
+    {#if activeRunId !== null && runView.visible === "generating"}
+      {@const statusText = runStatusText()}
+      {#if statusText.length > 0}
+        <section data-run-progress="true" aria-label="実行状況">
+          <p id="run-status" data-run-status="true" aria-live="polite">
+            {statusText}
+          </p>
+        </section>
+      {/if}
+    {/if}
+    {#if showThinking}
+      {@const statsLine = formatThinkingStats(thinking.usage)}
+      <section data-thinking="true" aria-label="考え中">
+        <button
+          type="button"
+          data-thinking-toggle="true"
+          aria-expanded={!thinkingCollapsed}
+          onclick={() => {
+            thinkingCollapsed = !thinkingCollapsed;
+          }}
+        >
+          {thinkingCollapsed ? "考え中（詳細を開く）" : "考え中…（詳細を閉じる）"}
+        </button>
+        {#if !thinkingCollapsed}
+          <pre data-thinking-text="true">{thinkingDisplayText(thinking)}</pre>
+        {/if}
+        {#if statsLine !== null}
+          <p data-run-stats="true">{statsLine}</p>
+        {/if}
+      </section>
+    {:else}
+      {@const statsOnly = formatThinkingStats(thinking.usage)}
+      {#if statsOnly !== null}
+        <section data-thinking-stats="true" aria-label="実行統計">
+          <p data-run-stats="true">{statsOnly}</p>
+        </section>
+      {/if}
+    {/if}
+    {#if draft !== null && activeRunId !== null && runView.visible === "generating" && draftDisplayText(draft).length > 0}
+      <section data-draft="true" aria-label="下書き" aria-live="off">
+        <p data-draft-label="true">{DRAFT_LABEL}</p>
+        <p data-draft-text="true">{draftDisplayText(draft)}</p>
+      </section>
     {/if}
     {#if liveVisible}
       {@const runId = [...renderedAnswers].pop()}

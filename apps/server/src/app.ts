@@ -120,6 +120,7 @@ import {
   remoteSessionSetCookie,
   remoteTokenFromCookieHeader,
 } from "./remote_session.js";
+import type { RunDeltaSource } from "./sse.js";
 import { createNotificationFeedSseResponse, createSseResponse } from "./sse.js";
 import {
   renderConversationShell,
@@ -270,6 +271,14 @@ export interface CreateAppDeps {
     svelteJs?: string;
     svelteCss?: string;
   };
+  /**
+   * PR-2 ephemeral model deltas (SSE-only broadcast, never persisted).
+   * When present, the run SSE stream multiplexes live `model.reasoning.
+   * delta` / `answer.draft.delta` / `model.usage` chunks alongside durable
+   * events; absent (default) preserves the exact durable-only stream. The
+   * JSON fallback poller reads durable rows only and always ignores deltas.
+   */
+  modelDeltas?: RunDeltaSource;
   /**
    * C21: true only when the M5 triple gate is open (config opt-in +
    * writeEnabled + a dedicated trusted write binding on the active Calendar
@@ -2114,6 +2123,10 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
           // Additive (I01-06): per-run memory status, metadata only; null
           // stays visible as null (the run reached recall but no marker).
           memoryStatus: owned.memoryStatus,
+          // Additive (PR77 review): durable run timing for the resuming
+          // browser's elapsed timer (epoch ms; startedAt null while queued).
+          startedAt: owned.startedAt,
+          createdAt: owned.createdAt,
         },
       });
       return c.json(body, 200);
@@ -2320,7 +2333,14 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       if (owned.sessionId !== session.id) {
         return apiError(c, 404, "not_found", "resource not found");
       }
-      return createSseResponse(repo, session.id, run.id, cursor);
+      return createSseResponse(
+        repo,
+        session.id,
+        run.id,
+        cursor,
+        undefined,
+        deps.modelDeltas,
+      );
     } catch (error) {
       return mapDomainError(c, error);
     }

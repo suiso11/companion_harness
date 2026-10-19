@@ -68,6 +68,7 @@ import { createApp } from "../src/app.js";
 import { loadUiAssets } from "../src/bootstrap.js";
 import { loadServerConfig } from "../src/config.js";
 import { createStdServerLogger } from "../src/logger.js";
+import { ModelDeltaBus } from "../src/model_deltas.js";
 import {
   CITATION_SNAPSHOT_TEXT,
   E2E_APP_PORT,
@@ -76,8 +77,14 @@ import {
   TEXT_CITE,
   TEXT_CITE_MEM,
   TEXT_CITE_TWO,
+  TEXT_DRAFT,
+  TEXT_DRAFT_CANCEL,
+  TEXT_DRAFT_RELOAD,
+  TEXT_DRAFT_STEPS,
   TEXT_FAIL,
   TEXT_HANG,
+  TEXT_THINK,
+  TEXT_THINK_TOOLS,
 } from "./ports.js";
 
 const dir = mkdtempSync(join(tmpdir(), "companion-e2e-"));
@@ -122,10 +129,309 @@ function inputText(ctx: RunStrategyContext): string {
   return typeof text === "string" ? text : "";
 }
 
+// PR-3 streaming simulation: the fake strategy publishes the same
+// ephemeral deltas the production agent path forwards (`reasoning` text
+// pieces + terminal `usage`) and records real durable `tool.*` events,
+// multiplexed on the run SSE stream via the shared ModelDeltaBus. Gated
+// on COMPANION_MODEL_STREAMING=1 (the e2e webServer sets it) so the
+// non-streaming default stays delta-free; other TEXT_* behaviors are
+// untouched.
+const STREAMING_SIM_ENABLED = process.env.COMPANION_MODEL_STREAMING === "1";
+const modelDeltaBus = new ModelDeltaBus();
+
+/** Abort-aware sleep for paced fake streaming (never hangs the engine). */
+function streamingSleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new StrategyError("execution_cancelled"));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(new StrategyError("execution_cancelled"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/** Fixed fake tool identity for the durable tool-phase simulation. */
+const E2E_TOOL_NAME = "calendar.search";
+const E2E_TOOL_ARGS_HASH = createHash("sha256")
+  .update("e2e-tool-args", "utf8")
+  .digest("hex");
+
 // Deterministic fake strategy: predictable behavior from input text only.
 const registry = new StrategyRegistry();
 registry.register("m0-default", async (ctx: RunStrategyContext) => {
   const text = inputText(ctx);
+  if (STREAMING_SIM_ENABLED && text.includes(TEXT_THINK_TOOLS)) {
+    // Reasoning deltas (ephemeral) -> durable tool.requested x2 ->
+    // durable tool.completed x2 -> usage -> terminal echo. The tool phase
+    // spans ~3s so a mid-run reload deterministically lands pre-terminal.
+    // The leading pause lets the browser's run SSE stream connect before
+    // the first delta flushes: the bus drops pieces with no subscriber
+    // (ephemeral by design), so publishing immediately would race the
+    // subscribe and lose piece 1 flakily under load.
+    const runId = ctx.run.id;
+    await streamingSleep(600, ctx.signal);
+    modelDeltaBus.publishPiece({
+      runId,
+      step: 1,
+      kind: "reasoning",
+      text: "tool plan <b>one</b> & draft",
+      now: Date.now(),
+    });
+    modelDeltaBus.flush(runId);
+    await streamingSleep(300, ctx.signal);
+    const callA = randomUUID();
+    const callB = randomUUID();
+    repo.appendToolEvent(runId, "tool.requested", {
+      callId: callA,
+      callIndex: 1,
+      tool: E2E_TOOL_NAME,
+      argsHash: E2E_TOOL_ARGS_HASH,
+    });
+    await streamingSleep(1500, ctx.signal);
+    repo.appendToolEvent(runId, "tool.requested", {
+      callId: callB,
+      callIndex: 2,
+      tool: E2E_TOOL_NAME,
+      argsHash: E2E_TOOL_ARGS_HASH,
+    });
+    await streamingSleep(1500, ctx.signal);
+    repo.appendToolEvent(runId, "tool.completed", {
+      callId: callA,
+      callIndex: 1,
+      tool: E2E_TOOL_NAME,
+      actualOutcome: "succeeded",
+      reportedOutcome: "succeeded",
+      disposition: "accepted",
+      errorCode: null,
+      resultDigest: null,
+      reusedFromCallId: null,
+    });
+    await streamingSleep(400, ctx.signal);
+    repo.appendToolEvent(runId, "tool.completed", {
+      callId: callB,
+      callIndex: 2,
+      tool: E2E_TOOL_NAME,
+      actualOutcome: "succeeded",
+      reportedOutcome: "succeeded",
+      disposition: "accepted",
+      errorCode: null,
+      resultDigest: null,
+      reusedFromCallId: null,
+    });
+    modelDeltaBus.publishUsage({
+      runId,
+      step: 1,
+      promptTokens: 120,
+      completionTokens: 45,
+      elapsedMs: 3700,
+      now: Date.now(),
+    });
+    return { version: 1, text: `echo:${text}` };
+  }
+  if (STREAMING_SIM_ENABLED && text.includes(TEXT_THINK)) {
+    // Two paced reasoning pieces (markup-significant text proves
+    // plain-text rendering) + terminal usage, then the echo answer. The
+    // leading pause lets the browser's run SSE stream connect first (see
+    // the TEXT_THINK_TOOLS branch: no-subscriber pieces drop by design).
+    const runId = ctx.run.id;
+    await streamingSleep(600, ctx.signal);
+    modelDeltaBus.publishPiece({
+      runId,
+      step: 1,
+      kind: "reasoning",
+      text: '考え <b>one</b> & "quotes"',
+      now: Date.now(),
+    });
+    modelDeltaBus.flush(runId);
+    await streamingSleep(250, ctx.signal);
+    modelDeltaBus.publishPiece({
+      runId,
+      step: 1,
+      kind: "reasoning",
+      text: "続き two",
+      now: Date.now(),
+    });
+    modelDeltaBus.flush(runId);
+    await streamingSleep(250, ctx.signal);
+    modelDeltaBus.publishUsage({
+      runId,
+      step: 1,
+      promptTokens: 100,
+      completionTokens: 45,
+      elapsedMs: 2000,
+      now: Date.now(),
+    });
+    return { version: 1, text: `echo:${text}` };
+  }
+  if (STREAMING_SIM_ENABLED && text.includes(TEXT_DRAFT)) {
+    // Provisional draft streaming (PR-4): three paced same-step pieces
+    // with markup-significant and citation-like markers (inert text in
+    // the draft bubble), then a VALIDATED V2 answer with a structural r1
+    // citation that must REPLACE the draft completely. The leading pause
+    // lets the browser's run SSE stream connect first (same rationale as
+    // the TEXT_THINK branches: no-subscriber pieces drop by design).
+    const runId = ctx.run.id;
+    await streamingSleep(600, ctx.signal);
+    modelDeltaBus.publishPiece({
+      runId,
+      step: 1,
+      kind: "draft",
+      text: 'draft one <a href="https://x">link</a> ',
+      now: Date.now(),
+    });
+    modelDeltaBus.flush(runId);
+    await streamingSleep(250, ctx.signal);
+    modelDeltaBus.publishPiece({
+      runId,
+      step: 1,
+      kind: "draft",
+      text: "draft two [r1] ",
+      now: Date.now(),
+    });
+    modelDeltaBus.flush(runId);
+    await streamingSleep(250, ctx.signal);
+    modelDeltaBus.publishPiece({
+      runId,
+      step: 1,
+      kind: "draft",
+      text: "draft three [m1] <b>bold</b>",
+      now: Date.now(),
+    });
+    modelDeltaBus.flush(runId);
+    await streamingSleep(250, ctx.signal);
+    modelDeltaBus.publishUsage({
+      runId,
+      step: 1,
+      promptTokens: 80,
+      completionTokens: 30,
+      elapsedMs: 1350,
+      now: Date.now(),
+    });
+    return {
+      version: 2,
+      text: "validated answer",
+      answer: {
+        version: 1,
+        parts: [{ text: "validated answer", citations: ["r1"] }],
+      },
+    };
+  }
+  if (text.includes(TEXT_DRAFT_STEPS)) {
+    // Repair/second-step simulation: a step-1 draft, then a step-2 draft
+    // that must RESTART (replace) the visible text, then the terminal
+    // echo. Paced so the spec can observe each phase deterministically.
+    const runId = ctx.run.id;
+    if (STREAMING_SIM_ENABLED) {
+      await streamingSleep(600, ctx.signal);
+      modelDeltaBus.publishPiece({
+        runId,
+        step: 1,
+        kind: "draft",
+        text: "first-piece ",
+        now: Date.now(),
+      });
+      modelDeltaBus.flush(runId);
+      await streamingSleep(1500, ctx.signal);
+      modelDeltaBus.publishPiece({
+        runId,
+        step: 2,
+        kind: "draft",
+        text: "second-step ",
+        now: Date.now(),
+      });
+      modelDeltaBus.flush(runId);
+      await streamingSleep(800, ctx.signal);
+      modelDeltaBus.publishUsage({
+        runId,
+        step: 2,
+        promptTokens: 60,
+        completionTokens: 20,
+        elapsedMs: 2900,
+        now: Date.now(),
+      });
+    }
+    return { version: 1, text: `echo:${text}` };
+  }
+  if (text.includes(TEXT_DRAFT_RELOAD)) {
+    // Slow draft for mid-run reload: the draft is ephemeral (gone after
+    // reload) while the durable phase line rebuilds from replayed events.
+    const runId = ctx.run.id;
+    if (STREAMING_SIM_ENABLED) {
+      await streamingSleep(600, ctx.signal);
+      modelDeltaBus.publishPiece({
+        runId,
+        step: 1,
+        kind: "draft",
+        text: "reload draft slowly",
+        now: Date.now(),
+      });
+      modelDeltaBus.flush(runId);
+      await streamingSleep(3000, ctx.signal);
+      modelDeltaBus.publishUsage({
+        runId,
+        step: 1,
+        promptTokens: 60,
+        completionTokens: 20,
+        elapsedMs: 3600,
+        now: Date.now(),
+      });
+    }
+    return { version: 1, text: `echo:${text}` };
+  }
+  if (text.includes(TEXT_DRAFT_CANCEL)) {
+    // Provisional draft, then hang until released or aborted so the spec
+    // can cancel the run and assert the draft is discarded. Abort maps to
+    // `execution_cancelled` (production cancel path); a sticky early
+    // release resolves immediately like TEXT_HANG.
+    const runId = ctx.run.id;
+    if (STREAMING_SIM_ENABLED) {
+      await streamingSleep(600, ctx.signal);
+      modelDeltaBus.publishPiece({
+        runId,
+        step: 1,
+        kind: "draft",
+        text: "cancel draft quickly",
+        now: Date.now(),
+      });
+      modelDeltaBus.flush(runId);
+    }
+    if (pendingReleases > 0) {
+      pendingReleases -= 1;
+      return { version: 1, text: `echo:${text}` };
+    }
+    await new Promise<void>((resolve, reject) => {
+      if (ctx.signal.aborted) {
+        reject(new StrategyError("execution_cancelled"));
+        return;
+      }
+      const onRelease = (): void => {
+        ctx.signal.removeEventListener("abort", onAbort);
+        resolve();
+      };
+      const onAbort = (): void => {
+        releaseHangers = releaseHangers.filter((fn) => fn !== onRelease);
+        if (!holdCancel) {
+          reject(new StrategyError("execution_cancelled"));
+        } else {
+          releaseHangers.push(onRelease);
+        }
+      };
+      releaseHangers.push(onRelease);
+      ctx.signal.addEventListener("abort", onAbort, { once: true });
+    });
+    if (ctx.signal.aborted) {
+      throw new StrategyError("execution_cancelled");
+    }
+    return { version: 1, text: `echo:${text}` };
+  }
   if (text.includes(TEXT_HANG)) {
     // Consume a sticky early release so a /release that raced ahead of
     // strategy registration still unblocks this hang deterministically.
@@ -228,6 +534,10 @@ const { app } = createApp({
   engine,
   logger,
   assets: loadUiAssets(),
+  // PR-3: ephemeral deltas multiplexed on run SSE streams (SSE-only,
+  // never persisted, never replayed). Only the TEXT_THINK* fake branches
+  // publish; every other spec's traffic stays delta-free.
+  modelDeltas: modelDeltaBus,
 });
 
 const appServer = serve(

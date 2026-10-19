@@ -14,6 +14,7 @@ import {
   M2_MODEL_STEP_EVENT_TYPES,
   ModelStepCompletedPayloadSchema,
   ModelStepFailedPayloadSchema,
+  ModelStepNumberSchema,
   ModelStepStartedPayloadSchema,
 } from "./model.js";
 import { ReferencePresentedPayloadSchema } from "./references.js";
@@ -604,4 +605,128 @@ export function parseRunEventPayload<T extends M5RunEventType>(
   return (LATEST_RUN_EVENT_PAYLOAD_SCHEMAS[type] as z.ZodType).parse(
     data,
   ) as z.infer<(typeof LATEST_RUN_EVENT_PAYLOAD_SCHEMAS)[T]>;
+}
+
+/* ------------------------------------------------------------------ */
+/* PR-2: ephemeral model deltas (SSE-only, never persisted)             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Additive ephemeral delta types for streaming model progress (PR-2,
+ * frontend plan §11.1 Q11 / §12 PR-2). These are broadcast on the run SSE
+ * stream only: they are NEVER written to the events table, never replayed
+ * by cursor pagination, and ignored by the JSON fallback poller (which
+ * reads durable rows only). The persisted registries above (M0/M1/M2/M5,
+ * `LATEST_*`) are untouched: `LATEST_RUN_EVENT_TYPES` stays exactly 20
+ * closed types, and the durable pages reject these names (additive per
+ * F-I01-01: absent means unknown, old readers ignore them).
+ *
+ * - `model.reasoning.delta`: one incremental `reasoning_content` piece for
+ *   the collapsible Thinking block (present only when the provider streams
+ *   it; never fabricated).
+ * - `answer.draft.delta`: one incremental `parts[].text` suffix decoded
+ *   from partial `answer.submit` argument JSON (provisional "draft",
+ *   unvalidated; replaced by the validated answer on `run.completed`).
+ * - `model.usage`: terminal token summary for stats (usage arrives only
+ *   with `stream_options.include_usage`; rates derive from usage+elapsed,
+ *   never llama `timings`).
+ */
+export const MODEL_REASONING_DELTA_EVENT_TYPE =
+  "model.reasoning.delta" as const;
+export const ANSWER_DRAFT_DELTA_EVENT_TYPE = "answer.draft.delta" as const;
+export const MODEL_USAGE_EVENT_TYPE = "model.usage" as const;
+
+export const MODEL_DELTA_EVENT_TYPES = [
+  MODEL_REASONING_DELTA_EVENT_TYPE,
+  ANSWER_DRAFT_DELTA_EVENT_TYPE,
+  MODEL_USAGE_EVENT_TYPE,
+] as const;
+export type ModelDeltaEventType = (typeof MODEL_DELTA_EVENT_TYPES)[number];
+export const ModelDeltaEventTypeSchema = z.enum(MODEL_DELTA_EVENT_TYPES);
+
+/** Incremental text piece: non-empty, bounded like assistant text. */
+const ModelDeltaTextSchema = z.string().min(1).max(65_536);
+
+export const ModelReasoningDeltaPayloadSchema = z.strictObject({
+  step: ModelStepNumberSchema,
+  text: ModelDeltaTextSchema,
+});
+export type ModelReasoningDeltaPayload = z.infer<
+  typeof ModelReasoningDeltaPayloadSchema
+>;
+
+export const AnswerDraftDeltaPayloadSchema = z.strictObject({
+  step: ModelStepNumberSchema,
+  text: ModelDeltaTextSchema,
+});
+export type AnswerDraftDeltaPayload = z.infer<
+  typeof AnswerDraftDeltaPayloadSchema
+>;
+
+export const ModelUsageDeltaPayloadSchema = z.strictObject({
+  promptTokens: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  completionTokens: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  elapsedMs: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+});
+export type ModelUsageDeltaPayload = z.infer<
+  typeof ModelUsageDeltaPayloadSchema
+>;
+
+/**
+ * Ephemeral delta envelope: same version/run correlation as durable
+ * events but WITHOUT a persisted `seq` (seq 0 on the wire is never a
+ * cursor; reconnects must not replay deltas). `createdAt` carries the
+ * server emit time for elapsed displays.
+ */
+const ModelDeltaEnvelopeBase = {
+  schemaVersion: z.literal(RUN_EVENT_SCHEMA_VERSION),
+  runId: UuidSchema,
+  seq: z.literal(0),
+  createdAt: UnixMsSchema,
+} as const;
+
+const ModelReasoningDeltaEventSchema = z.strictObject({
+  ...ModelDeltaEnvelopeBase,
+  type: z.literal(MODEL_REASONING_DELTA_EVENT_TYPE),
+  payload: ModelReasoningDeltaPayloadSchema,
+});
+const AnswerDraftDeltaEventSchema = z.strictObject({
+  ...ModelDeltaEnvelopeBase,
+  type: z.literal(ANSWER_DRAFT_DELTA_EVENT_TYPE),
+  payload: AnswerDraftDeltaPayloadSchema,
+});
+const ModelUsageDeltaEventSchema = z.strictObject({
+  ...ModelDeltaEnvelopeBase,
+  type: z.literal(MODEL_USAGE_EVENT_TYPE),
+  payload: ModelUsageDeltaPayloadSchema,
+});
+
+/** Ephemeral delta envelope registry (SSE wire only, never the DB). */
+export const ModelDeltaEventSchema = z.discriminatedUnion("type", [
+  ModelReasoningDeltaEventSchema,
+  AnswerDraftDeltaEventSchema,
+  ModelUsageDeltaEventSchema,
+]);
+export type ModelDeltaEvent = z.infer<typeof ModelDeltaEventSchema>;
+
+/** Ephemeral per-type payload registry (deltas only). */
+export const MODEL_DELTA_EVENT_PAYLOAD_SCHEMAS = {
+  "model.reasoning.delta": ModelReasoningDeltaPayloadSchema,
+  "answer.draft.delta": AnswerDraftDeltaPayloadSchema,
+  "model.usage": ModelUsageDeltaPayloadSchema,
+} as const;
+
+/** Parse a full ephemeral delta envelope (rejects durable names). */
+export function parseModelDeltaEvent(data: unknown): ModelDeltaEvent {
+  return ModelDeltaEventSchema.parse(data);
+}
+
+/** Parse a bare payload for a known ephemeral delta type. */
+export function parseModelDeltaEventPayload<T extends ModelDeltaEventType>(
+  type: T,
+  data: unknown,
+): z.infer<(typeof MODEL_DELTA_EVENT_PAYLOAD_SCHEMAS)[T]> {
+  return (MODEL_DELTA_EVENT_PAYLOAD_SCHEMAS[type] as z.ZodType).parse(
+    data,
+  ) as z.infer<(typeof MODEL_DELTA_EVENT_PAYLOAD_SCHEMAS)[T]>;
 }

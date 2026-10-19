@@ -27,6 +27,10 @@ import {
   validateChatRequest,
   validateNativeToolCalls,
 } from "./gateway.js";
+import {
+  OpenAIStreamAccumulator,
+  postChatCompletionStream,
+} from "./streaming.js";
 import type {
   ChatMessage,
   ChatResult,
@@ -324,6 +328,21 @@ export function createOpenAICompatibleGateway(
       // mutated `chatUrl` state is ignored and the fetch boundary
       // revalidates the literal loopback target.
       const url = resolveOpenAIChatUrl(config.baseUrl);
+      // PR-2 opt-in streaming (default off, additive): `stream:true` with
+      // `stream_options:{include_usage:true}` accumulates SSE deltas into
+      // the same ChatResult the non-streaming path returns. No automatic
+      // fallback: streaming failures surface with the same redacted
+      // classes as `stream:false`.
+      if (config.streamingEnabled) {
+        return streamOpenAIChat({
+          fetchImpl: config.fetchImpl,
+          url,
+          apiKey: config.apiKey,
+          timeoutMs: config.timeoutMs,
+          request,
+          options,
+        });
+      }
       const body: Record<string, unknown> = {
         model: request.model,
         messages: request.messages.map(toOpenAIMessage),
@@ -360,4 +379,113 @@ export function createOpenAICompatibleGateway(
       return normalizeOpenAIResponse(raw, request.tools);
     },
   };
+}
+
+/**
+ * Streaming chat attempt (PR-2, opt-in only): POST `stream:true` with
+ * `stream_options:{include_usage:true}` (usage arrives only with the flag;
+ * LiteLLM strips llama `timings`, so rates derive from usage + elapsed),
+ * accumulate SSE deltas, and validate the synthesized normal-form body
+ * through `normalizeOpenAIResponse` so the returned ChatResult and every
+ * error class are identical to the non-streaming path. Provisional pieces
+ * (`content`, `reasoning_content`, `answer.submit` draft suffixes, terminal
+ * usage) emit via `options.onDelta` best-effort. The same byte/step budgets
+ * apply (raw SSE bytes share the per-call cap; text/argument bounds reject
+ * incrementally); step/wall timeouts abort via `options.signal`.
+ */
+async function streamOpenAIChat(options: {
+  fetchImpl: Parameters<typeof postJsonNoRedirect>[0]["fetchImpl"];
+  url: string;
+  apiKey: string | undefined;
+  timeoutMs: number | undefined;
+  request: Parameters<ModelGateway["chat"]>[0];
+  options: ChatCallOptions | undefined;
+}): Promise<import("./types.js").ChatResult> {
+  const { fetchImpl, url, apiKey, timeoutMs, request } = options;
+  const callOptions = options.options;
+  const body: Record<string, unknown> = {
+    model: request.model,
+    messages: request.messages.map(toOpenAIMessage),
+    stream: true,
+    stream_options: { include_usage: true },
+  };
+  if (request.maxOutputTokens !== undefined) {
+    body.max_tokens = request.maxOutputTokens;
+  }
+  if (request.tools !== undefined && request.tools.length > 0) {
+    body.tools = request.tools.map((tool) => ({
+      type: "function",
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters ?? {
+          type: "object",
+          properties: {},
+        },
+      },
+    }));
+    body.tool_choice = "auto";
+  }
+  const accumulator = new OpenAIStreamAccumulator();
+  let draftEmitted = "";
+  const emit = (delta: import("./types.js").ModelStreamDelta): void => {
+    const onDelta = callOptions?.onDelta;
+    if (onDelta === undefined) {
+      return;
+    }
+    try {
+      onDelta(delta);
+    } catch {
+      // Best effort: delta consumers must not break model delivery.
+    }
+  };
+  await postChatCompletionStream({
+    fetchImpl,
+    url,
+    body,
+    apiKey,
+    timeoutMs,
+    ...(callOptions?.signal === undefined
+      ? {}
+      : { signal: callOptions.signal }),
+    ...(callOptions?.maxResponseBytes === undefined
+      ? {}
+      : { maxResponseBytes: callOptions.maxResponseBytes }),
+    onChunkBody: (chunk: unknown) => {
+      const pieces = accumulator.pushChunkBody(chunk);
+      if (pieces.content.length > 0) {
+        emit({ kind: "content", text: pieces.content });
+      }
+      if (pieces.reasoning.length > 0) {
+        emit({ kind: "reasoning", text: pieces.reasoning });
+      }
+      // Provisional answer draft: newly decoded `parts[].text` suffix only.
+      const draft = accumulator.getAnswerDraftText();
+      if (draft.length > draftEmitted.length) {
+        const suffix = draft.slice(draftEmitted.length);
+        draftEmitted = draft;
+        if (suffix.length > 0) {
+          emit({ kind: "draft", text: suffix });
+        }
+      } else if (draft.length < draftEmitted.length) {
+        // Append-only arguments decode monotonically; a shrink means the
+        // accumulated shape changed unexpectedly: resync without emitting
+        // stale text (the final validated answer stays authoritative).
+        draftEmitted = draft;
+      }
+    },
+  });
+  accumulator.markDone();
+  const result = normalizeOpenAIResponse(
+    accumulator.toNormalFormBody(),
+    request.tools,
+  );
+  if (result.usage !== undefined && result.usage !== null) {
+    emit({
+      kind: "usage",
+      inputTokens: result.usage.inputTokens,
+      outputTokens: result.usage.outputTokens,
+    });
+  }
+  return result;
 }

@@ -68,6 +68,11 @@ export {
   resolveOpenAIChatUrl,
   toOpenAIMessage,
 } from "./openai_compatible.js";
+export {
+  extractPartialPartsText,
+  OpenAIStreamAccumulator,
+  postChatCompletionStream,
+} from "./streaming.js";
 export type {
   ChatMessage,
   ChatRequest,
@@ -76,6 +81,8 @@ export type {
   FetchImpl,
   GatewayOptions,
   ModelCapabilities,
+  ModelStreamDelta,
+  ModelStreamDeltaCallback,
   ModelUsage,
   NormalizedToolCall,
   ToolDefinition,
