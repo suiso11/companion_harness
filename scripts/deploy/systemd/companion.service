@@ -1,0 +1,20 @@
+[Unit]
+Description=Companion Harness (google-readonly profile)
+Documentation=file:%h/companion_master/docs/operations.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/companion_master
+EnvironmentFile=%h/.config/companion/env
+ExecStart=%h/companion_master/run-google-readonly.sh
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+# Server drain budget is 10s (SHUTDOWN_DRAIN_MS); allow margin for DB close.
+TimeoutStopSec=30
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
