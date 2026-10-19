@@ -58,8 +58,8 @@ const doc = {
       envAllowlist: [...base, "GOOGLE_OAUTH_CREDENTIALS", "GOOGLE_CALENDAR_MCP_READONLY_TOKEN_PATH", "GOOGLE_ACCOUNT_MODE"],
     },
     bindings: [
-      { upstreamTool: "list-events", canonicalSchemaHash: "81222b89482cba77b12a707c2097c66df383cab7929c14dca03cc303846d794c" },
-      { upstreamTool: "search-events", canonicalSchemaHash: "d48ba36e7f280d92eaba9550323e90aa7a6d7c758812932ad62012f4514558b7" },
+      { upstreamTool: "list-events", canonicalSchemaHash: "01c3d647c272fdbd0de1028f73c76cd8baab931f177733146cd6287b9683d1fe" },
+      { upstreamTool: "search-events", canonicalSchemaHash: "d94166b755b694710c925fcc96e6ecff1016ea53f470264428494656791be7f6" },
       { upstreamTool: "get-event", canonicalSchemaHash: "8c6736e2a1f397d0735efa5c0881f5c350c300b21a0b026e80c112258b596bda" },
     ],
   },

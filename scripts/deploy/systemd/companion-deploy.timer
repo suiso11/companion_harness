@@ -1,0 +1,12 @@
+[Unit]
+Description=Poll Companion Harness auto-deploy every 5 minutes
+Documentation=file:%h/companion_master/docs/operations.md
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+Unit=companion-deploy.service
+
+[Install]
+WantedBy=timers.target

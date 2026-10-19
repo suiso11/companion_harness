@@ -4235,3 +4235,63 @@ newly added tests, no flaky rewrites.
   - `smoke:startup` script added in `apps/server/package.json` running exactly the covering files
     (`pnpm-smoke.startup.config.mts` include: `startup_smoke`, `rescheduleWriteStartup`,
     `createWriteStartup`): run output `Test Files 3 passed (3), Tests 42 passed (42)`.
+
+## 自動デプロイ (single Linux host, user systemd, polling)
+
+`origin/master` の green な先端へ、単一 Linux ホスト上の detached worktree
+(`~/companion_master`) を自動で進める。インバウンド公開は一切なし
+(webhook なし、5分ポーリングの user timer)。
+
+### Setup (host)
+
+```sh
+scripts/deploy/install.sh
+systemctl --user daemon-reload
+systemctl --user enable --now companion.service companion-deploy.timer
+loginctl enable-linger $USER
+```
+
+- `install.sh` は unit を `~/.config/systemd/user/` へコピーし、
+  `~/.config/companion/env` (0600) が無ければ secrets なしテンプレートを
+  作成する (既存ファイルは変更しない)。`--enable` 付きでのみ自身が
+  daemon-reload/enable/linger まで行う。引数なしでは何も起動しない。
+- `companion.service`: `WorkingDirectory=%h/companion_master`、
+  `EnvironmentFile=%h/.config/companion/env`、
+  `ExecStart=%h/companion_master/run-google-readonly.sh`、
+  `Restart=on-failure`、`KillSignal=SIGTERM`、
+  `TimeoutStopSec=30` (server drain 10s + margin)。
+- `run-google-readonly.sh` は対話入力不要・TTY 前提なしで、`exec pnpm start`
+  により server へシグナルが直接届く。
+
+### How it decides (scripts/deploy/companion-deploy.sh)
+
+1. `git fetch origin` し target=`origin/master` を取得。HEAD と同等なら
+   正常終了 (exit 0)。
+2. CI gate: `gh api repos/suiso11/companion_harness/commits/<sha>/check-runs`
+   の全 run が completed + success (skipped 許容) のときのみ進行。
+   `gh` 不在/未認証・API 失敗時はスキップして次 tick に retry (exit 0)。
+3. Active-run skip: `scripts/deploy/activeRuns.mjs` が server と同じ既定
+   (`COMPANION_DB_PATH` 未設定時は OS app-data の `companion.sqlite`) を
+   read-only (`node:sqlite`) で開き、`runs` の queued/running/
+   cancel_requested が1件でもあればスキップ (exit 0、次 tick に retry)。
+   DB 不在・`runs` テーブル不在は 0 件扱い。判定失敗時も安全側でスキップ。
+4. Dirty guard: tracked な変更があれば破棄せず exit 1 で拒否。
+5. `git switch --detach <target>` → `pnpm install --frozen-lockfile`
+   (UI build は `pnpm start` の prestart hook が行う) →
+   `systemctl --user restart companion.service` →
+   `http://127.0.0.1:${COMPANION_PORT:-3000}/health/live` を最大60秒 poll。
+6. 単一インスタンスは flock (`$XDG_RUNTIME_DIR/companion-deploy.lock`) で
+   保証。ログは stdout → journal のみ。
+
+### Rollback
+
+Health が60秒以内に復帰しない・restart 失敗時は、直前の sha へ
+`git switch --detach` → reinstall → `restart` し、rollback をログして
+exit 1。手動復旧も同じ手順 (`git switch --detach <sha>` + restart)。
+
+### Pause / logs
+
+```sh
+systemctl --user stop companion-deploy.timer    # pause (service は継続)
+journalctl --user -u companion -u companion-deploy -f   # logs
+```

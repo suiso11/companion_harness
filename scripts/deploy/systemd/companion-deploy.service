@@ -1,0 +1,12 @@
+[Unit]
+Description=Companion Harness polling auto-deploy (advance to green master)
+Documentation=file:%h/companion_master/docs/operations.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/companion_master
+EnvironmentFile=%h/.config/companion/env
+ExecStart=%h/companion_master/scripts/deploy/companion-deploy.sh
+NoNewPrivileges=true
