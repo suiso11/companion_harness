@@ -3,6 +3,15 @@
 /** Roles allowed on gateway chat messages. */
 export type ChatRole = "system" | "user" | "assistant" | "tool";
 
+/**
+ * OpenAI-compatible `tool_choice` policy applied when tools are offered.
+ * `required` makes every model step call a tool (the kernel's final answer
+ * is still the reserved `answer.submit` tool call); `auto` lets the model
+ * answer in prose. The Ollama adapter ignores this option (tool_choice is
+ * not part of its wire format).
+ */
+export type ModelToolChoice = "auto" | "required";
+
 /** Optional provider usage summary (token counts only, when reported). */
 export interface ModelUsage {
   inputTokens: number;
@@ -112,4 +121,11 @@ export interface GatewayOptions {
    * non-streaming path.
    */
   streamingEnabled?: boolean;
+  /**
+   * `tool_choice` sent with tool-bearing OpenAI-compatible requests.
+   * Defaults to `required` so a model that would answer in prose must call a
+   * tool instead (the kernel treats a content-only step as `free_text`).
+   * Pass `auto` to restore provider defaults. Ignored by the Ollama adapter.
+   */
+  toolChoice?: ModelToolChoice;
 }
