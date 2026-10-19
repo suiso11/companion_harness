@@ -28,6 +28,16 @@ export interface RunViewState {
   readonly stopVisible: boolean;
   /** Last visible message ("生成中", answer head, failure, "停止しました"). */
   readonly notice: string;
+  /**
+   * PR-3 durable counters for the phase line (F-01-2). Derived from
+   * persisted `tool.*` / `model.step.*` events only, so the status line
+   * is identical with/without streaming and across reloads. Tool names
+   * are capped metadata for label mapping (never rendered raw).
+   */
+  readonly toolRequested: number;
+  readonly toolCompleted: number;
+  readonly toolNames: readonly string[];
+  readonly stepsCompleted: number;
 }
 
 export interface ReducerInputEvent {
@@ -49,17 +59,39 @@ export const INITIAL_RUN_VIEW: RunViewState = {
   retryVisible: false,
   stopVisible: true,
   notice: "生成中",
+  toolRequested: 0,
+  toolCompleted: 0,
+  toolNames: [],
+  stepsCompleted: 0,
 };
 
 /** Known non-final extension types: no visible change (plan §16.2). */
 const SILENT_TYPES: ReadonlySet<string> = new Set([
-  "tool.requested",
-  "tool.completed",
   "reference.presented",
   "model.step.started",
-  "model.step.completed",
   "model.step.failed",
 ]);
+
+/** Max distinct tool names kept for phase-label mapping (metadata only). */
+const MAX_TOOL_NAMES = 8;
+
+/** Max length of one recorded tool name (metadata only, never rendered). */
+const MAX_TOOL_NAME_LENGTH = 128;
+
+/**
+ * Read the tool name from a `tool.requested` payload (defensive: any
+ * other shape yields null, never throws into the event pipeline).
+ */
+function readToolName(payload: unknown): string | null {
+  if (typeof payload !== "object" || payload === null) {
+    return null;
+  }
+  const tool = (payload as { tool?: unknown }).tool;
+  if (typeof tool !== "string" || tool.length === 0) {
+    return null;
+  }
+  return tool.slice(0, MAX_TOOL_NAME_LENGTH);
+}
 
 /**
  * Map a durable RunResult (exact contracts shape) to answer part views:
@@ -155,13 +187,55 @@ export function applyRunEvent(
           retryVisible: false,
           stopVisible: true,
           notice: "生成中",
+          toolRequested: 0,
+          toolCompleted: 0,
+          toolNames: [],
+          stepsCompleted: 0,
         },
         outcome: { kind: "applied" },
       };
-    case "tool.requested":
+    case "tool.requested": {
+      // PR-3: durable tool counter for the phase line (F-01-2). The raw
+      // name is capped metadata for label mapping only, never rendered.
+      const name = readToolName(event.payload);
+      const toolNames =
+        name !== null &&
+        state.toolNames.length < MAX_TOOL_NAMES &&
+        !state.toolNames.includes(name)
+          ? [...state.toolNames, name]
+          : state.toolNames;
+      return {
+        state: {
+          ...state,
+          cursor,
+          visible: "generating",
+          notice: "生成中",
+          toolRequested: state.toolRequested + 1,
+          toolNames,
+        },
+        outcome: { kind: "applied" },
+      };
+    }
     case "tool.completed":
       return {
-        state: { ...state, cursor, visible: "generating", notice: "生成中" },
+        state: {
+          ...state,
+          cursor,
+          visible: "generating",
+          notice: "生成中",
+          toolCompleted: state.toolCompleted + 1,
+        },
+        outcome: { kind: "applied" },
+      };
+    case "model.step.completed":
+      // PR-3: durable step counter for the phase line (回答作成中… after
+      // tools settle or model steps land). No visible change by itself.
+      return {
+        state: {
+          ...state,
+          cursor,
+          stepsCompleted: state.stepsCompleted + 1,
+        },
         outcome: { kind: "applied" },
       };
     case "run.completed":
@@ -173,6 +247,10 @@ export function applyRunEvent(
           retryVisible: false,
           stopVisible: false,
           notice: "回答が届きました",
+          toolRequested: state.toolRequested,
+          toolCompleted: state.toolCompleted,
+          toolNames: state.toolNames,
+          stepsCompleted: state.stepsCompleted,
         },
         outcome: { kind: "applied" },
       };
@@ -186,6 +264,10 @@ export function applyRunEvent(
           retryVisible: true,
           stopVisible: false,
           notice: "生成に失敗しました",
+          toolRequested: state.toolRequested,
+          toolCompleted: state.toolCompleted,
+          toolNames: state.toolNames,
+          stepsCompleted: state.stepsCompleted,
         },
         outcome: { kind: "applied" },
       };
@@ -215,6 +297,10 @@ export function applyRunEvent(
           retryVisible: false,
           stopVisible: false,
           notice: "停止しました",
+          toolRequested: state.toolRequested,
+          toolCompleted: state.toolCompleted,
+          toolNames: state.toolNames,
+          stepsCompleted: state.stepsCompleted,
         },
         outcome: { kind: "applied" },
       };

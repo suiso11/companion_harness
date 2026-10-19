@@ -49,6 +49,8 @@ export default defineConfig({
           "handoff.spec.ts",
           "mobile_layout.spec.ts",
           "svelte_shell.spec.ts",
+          "thinking_status.spec.ts",
+          "draft_answer.spec.ts",
         ],
   timeout: 60_000,
   expect: { timeout: 15_000 },
@@ -83,5 +85,11 @@ export default defineConfig({
     timeout: 120_000,
     stdout: "pipe",
     stderr: "pipe",
+    // PR-2/PR-3: the default e2e harness simulates model streaming
+    // (ephemeral reasoning/usage deltas) when this flag is set; the fake
+    // strategy stays delta-free without it.
+    env: {
+      COMPANION_MODEL_STREAMING: "1",
+    },
   },
 });
