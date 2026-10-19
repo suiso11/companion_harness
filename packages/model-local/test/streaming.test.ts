@@ -316,6 +316,75 @@ describe("tool-call argument accumulation", () => {
       .join("");
     expect(draftText).toBe(tricky);
   });
+
+  it("joins multi-part draft text with one blank line like the final rendering", async () => {
+    const argsJson = JSON.stringify({
+      version: 1,
+      parts: [
+        { text: "first part", citations: [] },
+        { text: "second part", citations: [] },
+      ],
+    });
+    // Split right before the second part's object so the separator itself
+    // arrives as a draft suffix with the next piece.
+    const cut = argsJson.indexOf('{"text":"second"');
+    const first = argsJson.slice(0, cut);
+    const second = argsJson.slice(cut);
+    const { fetchImpl } = mockFetch(
+      sseResponseFromChunks([
+        sseChunk({
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "call_0",
+                    type: "function",
+                    function: { name: "answer.submit", arguments: first },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+        sseChunk({
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  { index: 0, function: { arguments: second } },
+                ],
+              },
+              finish_reason: "tool_calls",
+            },
+          ],
+        }),
+        "data: [DONE]\n\n",
+      ]),
+    );
+    const deltas: ModelStreamDelta[] = [];
+    const tools = [{ name: "answer.submit", description: "submit" }];
+    const streamed = await streamingGateway(fetchImpl).chat(
+      baseRequest({ tools }),
+      {
+        onDelta: (delta) => {
+          deltas.push(delta);
+        },
+      },
+    );
+    const draftText = deltas
+      .filter((delta) => delta.kind === "draft")
+      .map((delta) => (delta.kind === "draft" ? delta.text : ""))
+      .join("");
+    // Authoritative join semantics (renderRunResultText/renderAnswerText):
+    // exactly one blank line between parts, never direct adjacency.
+    const args = streamed.toolCalls[0]?.arguments as {
+      parts: Array<{ text: string }>;
+    };
+    expect(draftText).toBe("first part\n\nsecond part");
+    expect(draftText).toBe(args.parts.map((part) => part.text).join("\n\n"));
+  });
 });
 
 describe("partial-JSON draft extractor", () => {
@@ -347,6 +416,20 @@ describe("partial-JSON draft extractor", () => {
     ]) {
       expect(() => extractPartialPartsText(hostile)).not.toThrow();
     }
+  });
+
+  it("joins multiple parts with one blank line, monotonically", () => {
+    const full = JSON.stringify({ parts: [{ text: "aa" }, { text: "bb" }] });
+    let previous = "";
+    // Every prefix must decode to a prefix of the final draft (monotonic
+    // suffix emission) and the final draft must equal the authoritative
+    // `parts[].text` join.
+    for (let end = 1; end <= full.length; end += 1) {
+      const decoded = extractPartialPartsText(full.slice(0, end));
+      expect(decoded.startsWith(previous)).toBe(true);
+      previous = decoded;
+    }
+    expect(previous).toBe("aa\n\nbb");
   });
 });
 

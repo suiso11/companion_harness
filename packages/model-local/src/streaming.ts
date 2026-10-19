@@ -299,7 +299,14 @@ export class OpenAIStreamAccumulator {
       if (call.name === undefined || !isAnswerSubmitTool(call.name)) {
         continue;
       }
-      draft += extractPartialPartsText(call.argumentsText);
+      const piece = extractPartialPartsText(call.argumentsText);
+      if (piece.length === 0) {
+        continue;
+      }
+      // Multiple `answer.submit` calls concatenate like parts: exactly one
+      // blank line between contributions (matching the authoritative
+      // rendering), never direct adjacency.
+      draft += (draft.length === 0 ? "" : "\n\n") + piece;
     }
     return draft;
   }
@@ -460,6 +467,7 @@ export class OpenAIStreamAccumulator {
 export function extractPartialPartsText(partialJson: string): string {
   let out = "";
   let cursor = 0;
+  let parts = 0;
   for (;;) {
     const keyIndex = partialJson.indexOf('"text"', cursor);
     if (keyIndex === -1) {
@@ -477,6 +485,14 @@ export function extractPartialPartsText(partialJson: string): string {
       continue;
     }
     const decoded = decodeJsonStringPrefix(partialJson, pos);
+    // The authoritative rendering joins `parts[].text` with exactly one
+    // blank line (`renderRunResultText` / `renderAnswerText`): mirror the
+    // separator between successive text values so the provisional draft
+    // suffixes match the final text.
+    if (parts > 0) {
+      out += "\n\n";
+    }
+    parts += 1;
     out += decoded.text;
     cursor = decoded.nextCursor;
     if (cursor <= pos) {
