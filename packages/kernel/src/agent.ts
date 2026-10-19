@@ -3125,10 +3125,18 @@ async function runModelStep(args: {
     try {
       // PR-2 streaming progress: forward provisional gateway deltas with
       // run/step correlation (best-effort; never durable, never validated).
+      // Settlement/abort gate (same as the late result handlers): once
+      // `finish` settled the step, or the step controller aborted
+      // (cancellation / deadline in flight), later deltas from a
+      // non-cooperative gateway are dropped — stale pieces must never
+      // surface as progress from a call whose result was discarded.
       const onDelta =
         onModelDelta === undefined
           ? undefined
           : (delta: ModelStreamDelta): void => {
+              if (done || stepController.signal.aborted) {
+                return;
+              }
               try {
                 onModelDelta({
                   runId,
