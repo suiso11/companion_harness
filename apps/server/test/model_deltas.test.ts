@@ -340,6 +340,78 @@ describe("ephemeral delta bus (PR-2)", () => {
       expect(chunk).not.toMatch(/^id: /m);
     }
   });
+
+  it("serializes delta writes so at most one grace wait is outstanding", async () => {
+    // Backpressure timers are recorded, never fired: a grace wait only
+    // ends when a read pulls the stream.
+    const graceTimers: Array<() => void> = [];
+    const timers = {
+      setInterval: ((fn: () => void) => {
+        void fn;
+        return 0 as unknown as ReturnType<typeof setInterval>;
+      }) as typeof setInterval,
+      clearInterval: (() => {}) as typeof clearInterval,
+      setTimeout: ((fn: () => void) => {
+        graceTimers.push(fn);
+        return graceTimers.length as unknown as ReturnType<typeof setTimeout>;
+      }) as unknown as typeof setTimeout,
+    };
+    const runId = randomUUID();
+    const source = {
+      getEvents: () => ({
+        events: [],
+        nextAfter: 0,
+        hasMore: false,
+        terminal: false,
+      }),
+      getRun: () => ({ status: "running", eventSeq: 0 }),
+    };
+    let listener: ((chunk: string) => void) | undefined;
+    const deltas = {
+      subscribe: (_runId: string, l: (chunk: string) => void) => {
+        listener = l;
+        return () => {};
+      },
+    };
+    const res = createSseResponse(source, "s", runId, 0, timers, deltas);
+    const reader = res.body?.getReader();
+    const drain = async (): Promise<void> => {
+      for (let i = 0; i < 5; i += 1) {
+        await Promise.resolve();
+      }
+    };
+    await drain();
+    const encode = (text: string): string =>
+      formatModelDeltaSse(
+        parseModelDeltaEvent({
+          schemaVersion: 1,
+          runId,
+          seq: 0,
+          createdAt: 1,
+          type: "model.reasoning.delta",
+          payload: { step: 1, text },
+        }),
+      );
+    try {
+      // Burst of four while backpressured (nothing read yet).
+      for (const text of ["1", "2", "3", "4"]) {
+        listener?.(encode(text));
+      }
+      await drain();
+      // Exactly one delta write is enqueued-and-waiting: the burst can
+      // never stack concurrent grace waiters (previously three).
+      expect(graceTimers).toHaveLength(1);
+      // Each pull releases exactly one more chained writer, never the
+      // whole burst at once.
+      const first = await reader?.read();
+      expect(new TextDecoder().decode(first?.value)).toContain('"1"');
+      await drain();
+      expect(graceTimers).toHaveLength(2);
+    } finally {
+      await reader?.cancel().catch(() => {});
+      await res.body?.cancel().catch(() => {});
+    }
+  });
 });
 
 describe("SSE delta multiplexing (PR-2)", () => {
@@ -427,8 +499,7 @@ describe("SSE delta multiplexing (PR-2)", () => {
     await res.body?.cancel().catch(() => {});
   });
 
-  it("keeps the durable-only stream byte-identical without a bus", async () => {
-    const timers = fakeTimers();
+  it("keeps the durable-only stream byte-identical without a bus", async () => {    const timers = fakeTimers();
     const runId = randomUUID();
     const durable = {
       schemaVersion: 1,
