@@ -1366,7 +1366,10 @@ export async function startServer(
         options.modelGateway !== undefined
           ? options.modelGateway
           : createModelGateway(config.model, options.modelFetch, {
-              streamingEnabled: isModelStreamingEnabled(),
+              // Same frozen startup snapshot as every other selector: an
+              // embedding's `startServer({ env })` decides streaming, never
+              // the ambient process.env (mutable after startup).
+              streamingEnabled: isModelStreamingEnabled(frozenStartupEnv),
             });
       if (built !== null) {
         modelGateway = built;
