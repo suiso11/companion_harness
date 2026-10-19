@@ -436,16 +436,31 @@ $effect(() => {
   const watcher = window.setInterval(() => {
     if (destroyed) return;
     if (listedSession !== readSession()) {
-      // Session lifecycle: a new session invalidates selection + requests.
-      listSeq += 1;
-      detailSeq += 1;
-      requestSeq += 1;
-      selectedJob = null;
-      pendingRequest = null;
-      detailHidden = true;
-      retryHidden = true;
+      // Session lifecycle. A session CHANGE (a previous session existed)
+      // invalidates selection + requests, mirroring the legacy
+      // notifySessionChanged. The FIRST bind (no listed session yet) must
+      // NOT reset: the chat shell stores the session id asynchronously, so
+      // this first bind can land AFTER a user-pressed request already
+      // committed — a reset here would erase a just-frozen uncertain
+      // request's status/retry (same rule as the learning/proposals
+      // panels).
+      if (listedSession !== null) {
+        listSeq += 1;
+        detailSeq += 1;
+        requestSeq += 1;
+        selectedJob = null;
+        pendingRequest = null;
+        detailHidden = true;
+        retryHidden = true;
+      }
       listedSession = readSession();
-      void refreshList();
+      // The first bind's refresh is the panel's initial list load (the
+      // mount-time refresh no-ops while the session id is still unstored),
+      // but it must not clobber a frozen uncertain request's status/retry:
+      // this bind can land right after a user-pressed POST lost its
+      // response, and the refresh would clear the 再送 notice (legacy has
+      // no timer bind at all, so nothing ever clobbers it there).
+      if (pendingRequest === null) void refreshList();
     }
   }, 400);
   const onSettled = (): void => {
