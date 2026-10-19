@@ -42,6 +42,26 @@ function isValidStep(step: unknown): step is number {
 }
 
 /**
+ * Unicode-safe truncation (PR78 review): if the cut lands after a high
+ * surrogate, the kept text would hold only one half of a surrogate pair
+ * (a non-BMP character such as an emoji straddling the boundary) and the
+ * bubble would show a replacement character. Cut one code unit earlier so
+ * the pair is dropped whole.
+ */
+function sliceWithinLimit(text: string, max: number): string {
+  if (text.length <= max) {
+    return text;
+  }
+  if (max > 0) {
+    const cut = text.charCodeAt(max - 1);
+    if (cut >= 0xd800 && cut <= 0xdbff) {
+      return text.slice(0, max - 1);
+    }
+  }
+  return text.slice(0, max);
+}
+
+/**
  * Start (or restart) a draft from one delta piece. Invalid pieces yield
  * null (no draft). Over-long pieces are bounded with `truncated` set.
  */
@@ -57,7 +77,7 @@ export function initDraftText(step: unknown, text: unknown): DraftState | null {
   }
   return {
     step,
-    text: text.slice(0, MAX_DRAFT_CHARS),
+    text: sliceWithinLimit(text, MAX_DRAFT_CHARS),
     truncated: true,
   };
 }
@@ -86,6 +106,11 @@ export function appendDraftText(
   if (state === null || record.step !== state.step) {
     return initDraftText(record.step, record.text);
   }
+  // Once bounded, no further piece is appended: the shown tail must never
+  // re-open (this also keeps a surrogate-pair back-off cut closed).
+  if (state.truncated) {
+    return state;
+  }
   const combined = `${state.text}${record.text}`;
   if (combined.length <= MAX_DRAFT_CHARS) {
     return { ...state, text: combined };
@@ -95,7 +120,7 @@ export function appendDraftText(
   }
   return {
     ...state,
-    text: combined.slice(0, MAX_DRAFT_CHARS),
+    text: sliceWithinLimit(combined, MAX_DRAFT_CHARS),
     truncated: true,
   };
 }
