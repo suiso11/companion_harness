@@ -81,6 +81,7 @@ interface ExecutionView {
   targetCitation?: unknown;
 }
 interface CardState {
+  proposalId: string;
   summary: ProposalSummary;
   view: ExecutionView | null;
   deciding: boolean;
@@ -1234,6 +1235,7 @@ function cardModel(card: CardState): {
 }
 
 function trackActionExecutionView(view: ExecutionView): void {
+  if (view.runId === null) return;
   const live =
     view.status === "queued" ||
     view.status === "preflight" ||
@@ -1282,10 +1284,14 @@ async function syncActions(): Promise<void> {
       }
       seen.add(summary.proposalId);
       const existing = cards.find((c) => c.proposalId === summary.proposalId);
-      if (existing === undefined) {
+      if (existing !== undefined) {
+        existing.summary = summary;
+        cards = [...cards];
+      } else {
         cards = [
           ...cards,
           {
+            proposalId: summary.proposalId,
             summary,
             view: null,
             deciding: false,
@@ -1333,7 +1339,7 @@ async function syncActions(): Promise<void> {
       !card.terminal &&
       !watchTimers.has(card.proposalId)
     ) {
-      void watchAction(card.proposalId);
+      void watchAction(card.proposalId, card.summary);
     }
   }
   if (needHistory && sessionId === sid) {
@@ -1344,24 +1350,58 @@ async function syncActions(): Promise<void> {
 async function syncExecution(summary: ProposalSummary): Promise<boolean> {
   if (sessionId === null) return false;
   const sid = sessionId;
+  // Authoritative non-pending ownership BEFORE the execution GET: a
+  // server-decided summary owns the local card even when the execution
+  // read below fails (lost approve/reject delivery). A rejected/expired
+  // summary retires on the real list state; an approved one becomes
+  // execution-owned with disabled decisions while preserving any known
+  // run. The watch starts only AFTER the current execution GET below, so
+  // this call never runs two concurrent execution reads for one proposal.
+  const owned = cards.find((c) => c.proposalId === summary.proposalId);
+  let claimedApproved = false;
+  if (
+    owned !== undefined &&
+    !owned.terminal &&
+    summary.status !== "pending" &&
+    owned.status === "pending" &&
+    owned.runId === null
+  ) {
+    owned.status = summary.status;
+    owned.summary = summary;
+    owned.deciding = false;
+    if (summary.status === "rejected" || summary.status === "expired") {
+      clearApproveKey(summary.proposalId);
+      cards = cards.filter((c) => c.proposalId !== summary.proposalId);
+      return true;
+    }
+    cards = [...cards];
+    claimedApproved = true;
+  }
   let fetched: { status: number; body: unknown };
   try {
     fetched = await fetchJson(
       `/api/sessions/${encodeURIComponent(sid)}/proposals/${encodeURIComponent(summary.proposalId)}/execution`,
     );
   } catch {
+    if (claimedApproved) void watchAction(summary.proposalId, summary);
     return false;
   }
-  if (fetched.status !== 200 || sessionId !== sid) return false;
+  if (fetched.status !== 200 || sessionId !== sid) {
+    if (claimedApproved) void watchAction(summary.proposalId, summary);
+    return false;
+  }
   const view = fetched.body as ExecutionView;
   if (typeof view.proposalId !== "string") return false;
-  const card = cards.find((c) => c.proposalId === view.proposalId);
-  if (card?.terminal) return false;
+  const preCard = cards.find((c) => c.proposalId === view.proposalId);
+  if (preCard?.terminal) return false;
   trackActionExecutionView(view);
-  const actualStatus =
+  // The execution read is the AUTHORITATIVE proposal state: a watch started
+  // from the pre-approval (still `pending`) summary must never keep
+  // rendering a decided/executed proposal as an actionable pending card.
+  const actual: ProposalSummary =
     typeof view.proposalStatus === "string"
-      ? view.proposalStatus
-      : summary.status;
+      ? { ...summary, status: view.proposalStatus }
+      : summary;
   const terminal =
     view.receipt !== null && view.receipt !== undefined
       ? true
@@ -1369,44 +1409,79 @@ async function syncExecution(summary: ProposalSummary): Promise<boolean> {
         view.status !== "queued" &&
         view.status !== "preflight" &&
         view.status !== "executing";
-  if (actualStatus === "rejected" || actualStatus === "expired") {
+  const card = cards.find((c) => c.proposalId === view.proposalId);
+  if (actual.status === "rejected" || actual.status === "expired") {
     clearApproveKey(view.proposalId);
     if (card !== undefined) {
+      card.deciding = false;
       cards = cards.filter((c) => c.proposalId !== view.proposalId);
       return true;
     }
     return false;
   }
+  const errorText =
+    typeof view.errorCode === "string"
+      ? actionErrorCodeText(
+          view.errorCode as
+            | "action_preflight_failed"
+            | "action_cancelled_before_write"
+            | "action_write_failed"
+            | "action_recovery_abandoned_before_write"
+            | "database_state_invalid",
+        )
+      : "";
+  if (terminal && view.status !== null) {
+    // Terminal: the REAL receipt (or the real fixed failure text) is
+    // rendered ON the card the user was already looking at — the approval
+    // card is never retired before the outcome is shown. No card (e.g.
+    // after a reload): nothing to render, but the single batched history
+    // refresh still lands the receipt/citation.
+    clearApproveKey(view.proposalId);
+    if (card !== undefined) {
+      if (typeof view.runId === "string" && view.runId.length > 0) {
+        card.runId = view.runId;
+        runTurns.set(view.runId, activeTurnId ?? "");
+      }
+      card.terminal = true;
+      card.deciding = false;
+      card.status = actual.status;
+      card.summary = actual;
+      card.view = view;
+      card.errorText = errorText;
+      cards = [...cards];
+    }
+    return true;
+  }
   if (card === undefined) return false;
-  card.view = view;
-  card.status = actualStatus;
   if (typeof view.runId === "string" && view.runId.length > 0) {
     card.runId = view.runId;
     runTurns.set(view.runId, activeTurnId ?? "");
   }
-  if (view.errorCode !== null && typeof view.errorCode === "string") {
-    card.errorText = actionErrorCodeText(
-      view.errorCode as
-        | "action_preflight_failed"
-        | "action_cancelled_before_write"
-        | "action_write_failed"
-        | "action_recovery_abandoned_before_write"
-        | "database_state_invalid",
-    );
-  }
-  if (terminal) {
-    card.terminal = true;
-    card.deciding = false;
-    if (actualStatus === "approved") clearApproveKey(view.proposalId);
-  }
+  card.deciding = false;
+  card.status = actual.status;
+  card.summary = actual;
+  card.view = view;
+  card.errorText = errorText;
   cards = [...cards];
-  return terminal;
+  if (
+    view.status !== null &&
+    (view.status === "queued" ||
+      view.status === "preflight" ||
+      view.status === "executing")
+  ) {
+    void watchAction(view.proposalId, summary);
+  }
+  return false;
 }
 
-async function watchAction(proposalId: string): Promise<void> {
+async function watchAction(
+  proposalId: string,
+  summary: ProposalSummary,
+): Promise<void> {
   if (sessionId === null || watchTimers.has(proposalId)) return;
   const sid = sessionId;
   let ticks = 0;
+  let inFlight = false;
   const maxTicks = 16 * 60;
   const timer = window.setInterval(async () => {
     ticks += 1;
@@ -1421,38 +1496,20 @@ async function watchAction(proposalId: string): Promise<void> {
       watchTimers.delete(proposalId);
       return;
     }
+    if (inFlight) return;
+    inFlight = true;
     try {
-      const fetched = await fetchJson(
-        `/api/sessions/${encodeURIComponent(sid)}/proposals/${encodeURIComponent(proposalId)}/execution`,
-      );
-      if (fetched.status === 200 && sessionId === sid) {
-        const view = fetched.body as ExecutionView;
-        trackActionExecutionView(view);
-        const liveCard = cards.find((c) => c.proposalId === proposalId);
-        if (liveCard !== undefined && !liveCard.terminal) {
-          liveCard.view = view;
-          if (typeof view.runId === "string" && view.runId.length > 0) {
-            liveCard.runId = view.runId;
-          }
-          const terminal =
-            view.receipt !== null && view.receipt !== undefined
-              ? true
-              : view.status !== null &&
-                view.status !== "queued" &&
-                view.status !== "preflight" &&
-                view.status !== "executing";
-          if (terminal) {
-            liveCard.terminal = true;
-            liveCard.deciding = false;
-            window.clearInterval(timer);
-            watchTimers.delete(proposalId);
-            await hydrateHistory();
-          }
-          cards = [...cards];
-        }
+      const needHistory = await syncExecution(summary);
+      if (needHistory && sessionId === sid) {
+        await hydrateHistory();
       }
-    } catch {
-      // Best effort: next tick retries.
+    } finally {
+      inFlight = false;
+    }
+    if (cards.find((c) => c.proposalId === proposalId) === undefined) {
+      window.clearInterval(timer);
+      watchTimers.delete(proposalId);
+      return;
     }
   }, 1000);
   watchTimers.set(proposalId, timer);
@@ -1473,9 +1530,10 @@ async function reconcileLostApprove(card: CardState): Promise<void> {
       );
       if (current !== undefined && current.status === "approved") {
         card.status = "approved";
+        card.summary = current;
         card.deciding = false;
         cards = [...cards];
-        await syncActions();
+        void watchAction(card.proposalId, current);
         return;
       }
     }
@@ -1484,6 +1542,7 @@ async function reconcileLostApprove(card: CardState): Promise<void> {
   }
   card.deciding = false;
   cards = [...cards];
+  void syncActions();
 }
 
 async function approve(card: CardState): Promise<void> {
@@ -1545,7 +1604,7 @@ async function approve(card: CardState): Promise<void> {
     if (typeof body.runId === "string") card.runId = body.runId;
     showNotice("承認しました");
     cards = [...cards];
-    void watchAction(card.proposalId);
+    void watchAction(card.proposalId, current);
     return;
   }
   if (posted.status === 409) {
@@ -1564,20 +1623,58 @@ async function approve(card: CardState): Promise<void> {
 
 async function reject(card: CardState): Promise<void> {
   if (sessionId === null || card.deciding || card.terminal) return;
+  // Local deadline precheck (server stays authoritative): a locally
+  // expired pending card is never decided from a stale click.
   if (card.status !== "pending" || Date.now() >= card.summary.expiresAt) {
-    showNotice("この変更は承認できません。内容を確認してください");
+    showNotice("却下できませんでした。内容を確認してください");
     cards = cards.filter((c) => c.proposalId !== card.proposalId);
     void syncActions();
     return;
   }
   const sid = sessionId;
+  card.deciding = true;
+  cards = [...cards];
+  let posted: { status: number; body: unknown };
+  try {
+    posted = await postJson(
+      `/api/sessions/${encodeURIComponent(sid)}/proposals/${encodeURIComponent(card.proposalId)}/reject`,
+      { proposalHash: card.summary.hash },
+      null,
+    );
+  } catch {
+    // Transport failure with an unknown server outcome (the reject may
+    // already be durable server-side). Hold decision ownership across ONE
+    // authoritative re-read instead of relying on the deduped background
+    // sync: that sync is dropped while an older sync is still in flight,
+    // which would leave the buttons disabled and consume the pending timer.
+    showNotice("却下できませんでした。もう一度お試しください");
+    await reconcileLostReject(card);
+    return;
+  }
+  card.deciding = false;
+  if (posted.status === 200) {
+    clearApproveKey(card.proposalId);
+    showNotice("却下しました");
+    cards = cards.filter((c) => c.proposalId !== card.proposalId);
+    await hydrateHistory();
+    return;
+  }
+  cards = [...cards];
+  showNotice("却下できませんでした。内容を確認してください");
+  void syncActions();
+}
+
+async function reconcileLostReject(card: CardState): Promise<void> {
+  if (sessionId === null) return;
+  const sid = sessionId;
+  if (cards.find((c) => c.proposalId === card.proposalId) === undefined) return;
   let current: ProposalSummary | null = null;
   try {
     const listed = await fetchJson(
       `/api/sessions/${encodeURIComponent(sid)}/proposals`,
     );
     const items = (listed.body as { proposals?: unknown }).proposals;
-    if (listed.status === 200 && Array.isArray(items)) {
+    if (listed.status === 200 && Array.isArray(items) && sessionId === sid) {
       current =
         (items as unknown[]).find(
           (item): item is ProposalSummary =>
@@ -1587,53 +1684,31 @@ async function reject(card: CardState): Promise<void> {
   } catch {
     current = null;
   }
+  if (cards.find((c) => c.proposalId === card.proposalId) === undefined) return;
   if (
-    current === null ||
-    current.status !== "pending" ||
-    current.hash !== card.summary.hash ||
-    current.expiresAt <= Date.now()
+    current !== null &&
+    (current.status === "rejected" || current.status === "expired")
   ) {
-    showNotice("この変更は承認できません。内容を確認してください");
+    card.deciding = false;
+    clearApproveKey(card.proposalId);
     cards = cards.filter((c) => c.proposalId !== card.proposalId);
-    void syncActions();
+    await hydrateHistory();
     return;
   }
-  const key = approveKey(card.proposalId);
-  card.deciding = true;
-  cards = [...cards];
-  let posted: { status: number; body: unknown };
-  try {
-    posted = await postJson(
-      `/api/sessions/${encodeURIComponent(sid)}/proposals/${encodeURIComponent(card.proposalId)}/reject`,
-      { proposalHash: card.summary.hash },
-      key,
-    );
-  } catch {
+  if (current !== null && current.status === "approved") {
     card.deciding = false;
+    card.status = current.status;
+    card.summary = current;
     cards = [...cards];
-    showNotice("却下できませんでした。もう一度お試しください");
-    return;
-  }
-  if (posted.status === 200 || posted.status === 202) {
-    card.deciding = false;
-    clearApproveKey(card.proposalId);
-    cards = cards.filter((c) => c.proposalId !== card.proposalId);
-    showNotice("却下しました");
-    await hydrateHistory();
-    void syncActions();
-    return;
-  }
-  if (posted.status === 409) {
-    card.deciding = false;
-    clearApproveKey(card.proposalId);
-    showNotice("この変更は承認できません。内容を確認してください");
-    await hydrateHistory();
-    void syncActions();
+    void watchAction(card.proposalId, current);
     return;
   }
   card.deciding = false;
+  if (current !== null && current.status === "pending") {
+    card.summary = current;
+    card.status = current.status;
+  }
   cards = [...cards];
-  showNotice("却下できませんでした。もう一度お試しください");
   void syncActions();
 }
 
