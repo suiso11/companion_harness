@@ -262,11 +262,23 @@ export function createSseResponse(
       }, SSE_HEARTBEAT_MS);
       // PR-2 ephemeral deltas: multiplexed live (SSE-only, never
       // persisted, never replayed). A throwing subscribe never breaks the
-      // durable stream; teardown unsubscribes.
+      // durable stream; teardown unsubscribes. Delta writes serialize
+      // through one chained writer: at most one delta write is ever
+      // outstanding, so a burst while backpressured can never stack grace
+      // waiters and enqueue together on the next pull (the transport's
+      // backpressure bound is preserved; queued chunks are bounded by the
+      // 50ms/256-char coalescing upstream).
+      let deltaChain: Promise<void> = Promise.resolve();
       if (deltas !== undefined) {
         try {
           unsubscribeDeltas = deltas.subscribe(runId, (chunk: string) => {
-            void writeWithGrace(chunk);
+            deltaChain = deltaChain
+              .then(() => writeWithGrace(chunk))
+              .then(() => {})
+              .catch(() => {
+                // writeWithGrace never throws; keep the chain alive so one
+                // failure can never strand later deltas.
+              });
           });
         } catch {
           unsubscribeDeltas = undefined;

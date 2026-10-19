@@ -25,6 +25,7 @@ import {
   isCorruptCursor,
   isRetryableTurnKind,
   type ProposalStatus,
+  parseCancelRunStatus,
   type ReceiptOutcome,
   type RunViewState,
   runResultToAnswerParts,
@@ -97,6 +98,7 @@ interface ExecutionView {
   targetCitation?: unknown;
 }
 interface CardState {
+  proposalId: string;
   summary: ProposalSummary;
   view: ExecutionView | null;
   deciding: boolean;
@@ -105,6 +107,8 @@ interface CardState {
   status: ProposalStatus;
   errorText: string;
   actionStopBlocked: boolean;
+  deadline: number;
+  hash: string;
 }
 
 function loadText(value: unknown): string {
@@ -186,6 +190,19 @@ let citationSeq = 0;
 // mirroring the legacy runViews seed preservation.
 let seededRunId: string | null = null;
 let watchTimers = new Map<string, number>();
+let pendingExpiryTimers = new Map<string, number>();
+const PENDING_EXPIRY_MAX_MS = 15 * 60 * 1000;
+// C22 execution Stop state by owning run (legacy client.ts parity):
+// a live, pre-marker, cancellable Action execution keeps the generic
+// composer Stop, while a committed marker, a refused cancellability, or
+// a terminal execution hides/disables it. Runs without an entry are
+// ordinary Runs with the unchanged Stop behaviour.
+interface ActionStopState {
+  live: boolean;
+  markerCommitted: boolean;
+  cancellable: boolean;
+}
+let actionRunStops = $state(new Map<string, ActionStopState>());
 
 function isProposalSummary(item: unknown): item is ProposalSummary {
   if (typeof item !== "object" || item === null) return false;
@@ -243,7 +260,9 @@ function composerSendDisabled(): boolean {
 function composerStopVisible(): boolean {
   if (activeRunId === null) return false;
   if (runView.visible !== "generating") return false;
-  // Post-marker/terminal Action run adopted on reload: hide generic stop.
+  // Post-marker/terminal Action run adopted on reload: hide generic stop via
+  // the ACTUAL execution map first (cards populate only after syncActions).
+  if (isActionStopBlocked(activeRunId)) return false;
   for (const card of cards) {
     if (card.runId === activeRunId && card.actionStopBlocked) return false;
   }
@@ -286,7 +305,9 @@ async function ensureSession(): Promise<void> {
   }
   const key = randomUuid();
   const created = await postJson("/api/sessions", {}, key);
-  const body = created.body as { sessionId?: unknown };
+  // A transport failure yields `{ status: 0, body: null }`: never
+  // dereference a null body before the status check (review PR75).
+  const body = (created.body ?? {}) as { sessionId?: unknown };
   if (created.status !== 201 || typeof body.sessionId !== "string") {
     showNotice("セッションを開始できませんでした");
     return;
@@ -309,7 +330,7 @@ async function newSession(): Promise<void> {
   if (sending || activeRunId !== null) return;
   const key = randomUuid();
   const created = await postJson("/api/sessions", {}, key);
-  const body = created.body as { sessionId?: unknown };
+  const body = (created.body ?? {}) as { sessionId?: unknown };
   if (created.status !== 201 || typeof body.sessionId !== "string") {
     showNotice("セッションを開始できませんでした");
     return;
@@ -342,9 +363,17 @@ function resetChatState(): void {
   turnKinds = new Map();
   runTurns = new Map();
   pendingRequest = null;
+  for (const timer of pendingExpiryTimers.values()) window.clearTimeout(timer);
+  pendingExpiryTimers = new Map();
   cards = [];
+  actionRunStops = new Map();
   degradedMemory = false;
   notice = "";
+  // Invalidate and close any citation drawer from the previous session:
+  // the seq bump also drops in-flight openCitation responses (review PR75).
+  citationSeq += 1;
+  drawerOpen = false;
+  drawerBody = "";
 }
 
 // --- PR-3 thinking/status helpers (ephemeral deltas + durable phase) ---
@@ -355,10 +384,16 @@ function stopElapsedTimer(): void {
   }
 }
 
-function startElapsedTimer(): void {
+function startElapsedTimer(fromMs?: number): void {
   stopElapsedTimer();
-  runStartedAt = Date.now();
-  elapsedSec = 0;
+  // PR77 review: when a durable run start is known (reload/resubscribe),
+  // seed the timer from it so a minutes-old run is not shown as newly
+  // started; a fresh subscription starts from now.
+  runStartedAt = typeof fromMs === "number" && fromMs > 0 ? fromMs : Date.now();
+  elapsedSec =
+    runStartedAt === Date.now()
+      ? 0
+      : Math.max(0, Math.floor((Date.now() - runStartedAt) / 1000));
   elapsedTimer = window.setInterval(() => {
     if (activeRunId === null) {
       stopElapsedTimer();
@@ -630,12 +665,11 @@ async function send(): Promise<void> {
     // Optimistic user bubble (§16.2).
     turns = [...turns, { turnId: "", kind: "user_text", text, run: null }];
     input = "";
+    // `sending` stays true until the message POST settles (review PR75):
+    // the composer, session switch, and new-session controls must stay
+    // locked while the request is in flight. fetchUiContext() never throws.
     sending = true;
-    try {
-      request.uiContext = await fetchUiContext();
-    } finally {
-      sending = false;
-    }
+    request.uiContext = await fetchUiContext();
   }
   const request = pendingRequest;
   if (request === null) return;
@@ -645,6 +679,7 @@ async function send(): Promise<void> {
     // Best effort.
   }
   let posted: { status: number; body: unknown };
+  const sendSid = sessionId;
   try {
     posted = await postJson(
       `/api/sessions/${encodeURIComponent(sessionId)}/messages`,
@@ -656,6 +691,11 @@ async function send(): Promise<void> {
     showNotice("送信できませんでした。もう一度お試しください");
     return;
   }
+  // The POST has settled: release the composer before applying the result,
+  // and drop the response entirely if the user moved to another session
+  // while it was in flight (its run must never subscribe here).
+  sending = false;
+  if (sessionId !== sendSid) return;
   const body = (posted.body ?? {}) as {
     turnId?: unknown;
     run?: { id?: unknown };
@@ -734,15 +774,17 @@ async function retry(turnId: string): Promise<void> {
 }
 
 function isActionStopBlocked(runId: string): boolean {
-  for (const card of cards) {
-    if (card.runId === runId && card.actionStopBlocked) return true;
+  const state = actionRunStops.get(runId);
+  if (state === undefined) {
+    return false;
   }
-  return false;
+  return !state.live || state.markerCommitted || !state.cancellable;
 }
 
 async function stop(): Promise<void> {
   if (sessionId === null || activeRunId === null) return;
   if (isActionStopBlocked(activeRunId)) {
+    await refreshActionRunStops();
     await syncActions();
     return;
   }
@@ -753,6 +795,15 @@ async function stop(): Promise<void> {
   );
   if (posted.status < 200 || posted.status >= 300) {
     showNotice("停止できませんでした");
+    return;
+  }
+  if (actionRunStops.has(activeRunId)) {
+    if (parseCancelRunStatus(posted.body) === "cancelled") {
+      showNotice("停止しました");
+    }
+    await refreshActionRunStops();
+    await syncActions();
+    return;
   }
   // The terminal `run.cancelled` / `run.cancel_requested` events render
   // the「停止しました」notice through the stream path.
@@ -813,6 +864,10 @@ function finishActiveRun(): void {
 }
 
 function subscribe(runId: string): void {
+  void subscribeRun(runId);
+}
+
+async function subscribeRun(runId: string): Promise<void> {
   if (sessionId === null) return;
   closeStream();
   activeRunId = runId;
@@ -825,6 +880,7 @@ function subscribe(runId: string): void {
   showThinking = false;
   draft = null;
   startElapsedTimer();
+  const stored = readStoredCursor(runId);
   if (seededRunId === runId) {
     // Boot-seeded pre-subscription view (e.g. the cancel_requested stop
     // notice): preserved across the stream open; the real events stay
@@ -835,11 +891,23 @@ function subscribe(runId: string): void {
     liveVisible = false;
     runView = { ...INITIAL_RUN_VIEW };
     activeRunCursor = 0;
+    if (stored !== null && stored > 0) {
+      // PR77 review: a stored cursor means the stream resumes mid-run
+      // (page reload). Before another durable event creates a gap and
+      // triggers catch-up, the zeroed projection would derive 「考え中…」
+      // even when the persisted events show an outstanding tool.requested.
+      // Seed the elapsed timer from the run's durable start and rebuild
+      // the phase projection from history (up to the stored cursor, so
+      // the native stream keeps delivering newer events; reducer dedup
+      // keeps any overlap exactly-once).
+      const resynced = await validateStoredCursor(runId, stored);
+      if (resynced || activeRunId !== runId || sessionId === null) return;
+      const rebuilt = await rebuildResumedProjection(runId, stored);
+      if (rebuilt && activeRunId !== runId) return;
+    }
   }
   showNotice(runView.notice);
   const sid = sessionId;
-  const stored = readStoredCursor(runId);
-  void validateStoredCursor(runId, stored ?? 0);
   const query = stored !== null && stored > 0 ? `?after=${stored}` : "";
   const url = `/api/sessions/${encodeURIComponent(sid)}/runs/${encodeURIComponent(runId)}/events/stream${query}`;
   let opened = false;
@@ -898,28 +966,112 @@ function subscribe(runId: string): void {
   };
 }
 
+/**
+ * Cursor validation on resume + durable elapsed-time seed (PR77 review).
+ * Returns true when a corrupt cursor triggered a resync + re-subscribe (the
+ * caller must not open another stream for the stale cursor).
+ */
 async function validateStoredCursor(
   runId: string,
   cursor: number,
-): Promise<void> {
-  if (sessionId === null || cursor <= 0 || activeRunId !== runId) return;
+): Promise<boolean> {
+  if (sessionId === null || cursor <= 0 || activeRunId !== runId) return false;
   let fetched: { status: number; body: unknown };
   try {
     fetched = await fetchJson(
       `/api/sessions/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(runId)}/status`,
     );
   } catch {
-    return;
+    return false;
   }
-  if (activeRunId !== runId || fetched.status !== 200) return;
+  if (activeRunId !== runId || fetched.status !== 200) return false;
   const run = (fetched.body as { run?: unknown }).run;
-  if (typeof run !== "object" || run === null) return;
-  const r = run as { id?: unknown; eventSeq?: unknown };
-  if (r.id !== runId || typeof r.eventSeq !== "number") return;
+  if (typeof run !== "object" || run === null) return false;
+  const r = run as {
+    id?: unknown;
+    eventSeq?: unknown;
+    startedAt?: unknown;
+    createdAt?: unknown;
+  };
+  if (r.id !== runId || typeof r.eventSeq !== "number") return false;
   if (isCorruptCursor(cursor, r.eventSeq)) {
     await resyncFromHistory(runId);
     if (sessionId !== null) subscribe(runId);
+    return true;
   }
+  // Durable run timing (additive status fields, PR77 review): seed the
+  // elapsed timer from the real run start instead of the subscription
+  // instant, so a reloaded page no longer shows a minutes-old run as new.
+  const startedAt = typeof r.startedAt === "number" ? r.startedAt : null;
+  const createdAt = typeof r.createdAt === "number" ? r.createdAt : null;
+  const durableStart = startedAt ?? createdAt;
+  if (durableStart !== null && activeRunId === runId) {
+    startElapsedTimer(durableStart);
+  }
+  return false;
+}
+
+/**
+ * PR77 review: rebuild the durable phase projection by replaying the run's
+ * event history from the beginning up to the stored resume cursor, so the
+ * status line derives from the persisted tool.requested/tool.completed/step
+ * counters instead of zeroed ones (no phantom 「考え中…」 while a tool is
+ * outstanding). Events past `upto` stay the native stream's responsibility
+ * (the C06 native-terminal-frame race), so this drain stops at the cursor;
+ * a best-effort failure keeps the zeroed view and the stream's
+ * needs-catchup path converges afterwards.
+ */
+async function rebuildResumedProjection(
+  runId: string,
+  upto: number,
+): Promise<boolean> {
+  if (sessionId === null) return false;
+  let cursor = 0;
+  for (let page = 0; page < 20; page += 1) {
+    if (cursor > upto) break;
+    let fetched: { status: number; body: unknown };
+    try {
+      fetched = await fetchJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(runId)}/events?after=${cursor}&limit=50`,
+      );
+    } catch {
+      return false;
+    }
+    if (fetched.status < 200 || fetched.status >= 300) return false;
+    const body = fetched.body as {
+      events?: Array<{ seq?: unknown; type?: unknown; payload?: unknown }>;
+      nextAfter?: unknown;
+    };
+    if (!Array.isArray(body.events)) return false;
+    for (const item of body.events) {
+      if (typeof item.seq !== "number" || typeof item.type !== "string")
+        continue;
+      if (item.seq > upto) break;
+      if (activeRunId !== runId) return false;
+      const applied = applyRunEvent(
+        { ...runView, cursor: activeRunCursor },
+        { seq: item.seq, type: item.type, payload: item.payload },
+      );
+      if (applied.outcome.kind === "ignored-duplicate") continue;
+      if (applied.outcome.kind === "needs-catchup") return true;
+      if (applied.outcome.kind === "ignored-unknown") {
+        activeRunCursor = applied.state.cursor;
+        storeCursor(runId, applied.state.cursor);
+        continue;
+      }
+      runView = applied.state;
+      activeRunCursor = applied.state.cursor;
+      storeCursor(runId, applied.state.cursor);
+    }
+    cursor = typeof body.nextAfter === "number" ? body.nextAfter : cursor + 1;
+    if (body.events.length === 0) break;
+  }
+  if (activeRunId !== runId) return false;
+  // One repaint after the rebuild: the derived phase line now matches the
+  // persisted events; a replayed terminal renders and releases the run
+  // exactly once (guarded by renderedAnswers/terminalHydrated).
+  renderRunView(runId);
+  return true;
 }
 
 async function resyncFromHistory(runId: string): Promise<void> {
@@ -1381,10 +1533,16 @@ function cardModel(card: CardState): {
 }
 
 function trackActionExecutionView(view: ExecutionView): void {
+  if (view.runId === null) return;
   const live =
     view.status === "queued" ||
     view.status === "preflight" ||
     view.status === "executing";
+  actionRunStops.set(view.runId, {
+    live,
+    markerCommitted: view.markerCommitted === true,
+    cancellable: view.cancellable === true,
+  });
   const blocked = live && view.markerCommitted;
   const terminal =
     view.receipt !== null ||
@@ -1402,6 +1560,131 @@ function trackActionExecutionView(view: ExecutionView): void {
     }
   }
   cards = [...cards];
+}
+
+/**
+ * Read-only refresh of every decided proposal's ACTUAL execution Stop
+ * state through the existing proposals/execution APIs (no DOM, no card
+ * side effects). Boot awaits this before the first hydration paint so a
+ * reloaded post-marker Action cannot offer Stop even briefly (legacy
+ * client.ts refreshActionRunStops parity).
+ */
+async function refreshActionRunStops(): Promise<void> {
+  if (sessionId === null) return;
+  const sid = sessionId;
+  let listed: { status: number; body: unknown };
+  try {
+    listed = await fetchJson(
+      `/api/sessions/${encodeURIComponent(sid)}/proposals`,
+    );
+  } catch {
+    return;
+  }
+  if (listed.status !== 200 || sessionId !== sid) return;
+  const proposals = (listed.body as { proposals?: unknown }).proposals;
+  if (!Array.isArray(proposals)) return;
+  for (const item of proposals) {
+    if (!isProposalSummary(item) || item.status === "pending") continue;
+    let fetched: { status: number; body: unknown };
+    try {
+      fetched = await fetchJson(
+        `/api/sessions/${encodeURIComponent(sid)}/proposals/${encodeURIComponent(item.proposalId)}/execution`,
+      );
+    } catch {
+      continue;
+    }
+    if (fetched.status !== 200 || sessionId !== sid) continue;
+    const view = fetched.body as ExecutionView;
+    if (typeof view.proposalId !== "string") continue;
+    trackActionExecutionView(view);
+  }
+}
+
+function clearPendingExpiry(proposalId: string): void {
+  const timer = pendingExpiryTimers.get(proposalId);
+  if (timer !== undefined) {
+    window.clearTimeout(timer);
+    pendingExpiryTimers.delete(proposalId);
+  }
+}
+
+function removeActionCard(proposalId: string): void {
+  clearPendingExpiry(proposalId);
+  cards = cards.filter((c) => c.proposalId !== proposalId);
+}
+
+/**
+ * (Re)arm the card's single one-shot pending-expiry timer (legacy
+ * client.ts schedulePendingExpiry parity). At most one timer per card,
+ * capped at ~15min; the callback re-checks identity and never retires a
+ * decided/executing/terminal/awaiting card. Clock-skew re-arm when the
+ * capped shot fires before the real deadline.
+ */
+function schedulePendingExpiry(proposalId: string): void {
+  clearPendingExpiry(proposalId);
+  const card = cards.find((c) => c.proposalId === proposalId);
+  if (
+    card === undefined ||
+    card.status !== "pending" ||
+    card.terminal ||
+    card.runId !== null
+  ) {
+    return;
+  }
+  const hash = card.hash;
+  const deadline = card.deadline;
+  const status = card.status;
+  const delay = Math.min(
+    Math.max(deadline - Date.now(), 0),
+    PENDING_EXPIRY_MAX_MS,
+  );
+  const timer = window.setTimeout(() => {
+    const current = cards.find((c) => c.proposalId === proposalId);
+    if (current === undefined || current !== card) return;
+    if (
+      current.hash !== hash ||
+      current.deadline !== deadline ||
+      current.status !== status
+    ) {
+      return;
+    }
+    if (
+      current.terminal ||
+      current.runId !== null ||
+      current.deciding ||
+      current.status !== "pending"
+    ) {
+      return;
+    }
+    if (Date.now() < current.deadline) {
+      schedulePendingExpiry(proposalId);
+      return;
+    }
+    removeActionCard(proposalId);
+  }, delay);
+  pendingExpiryTimers.set(proposalId, timer);
+}
+
+/**
+ * Local tab-resume reconciliation (no network): retire every still-pending
+ * local card whose server deadline has passed. Execution/awaited cards are
+ * untouched; the server stays authoritative on next sync.
+ */
+function reconcilePendingExpiry(): void {
+  const now = Date.now();
+  for (const card of [...cards]) {
+    if (
+      card.terminal ||
+      card.runId !== null ||
+      card.deciding ||
+      card.status !== "pending"
+    ) {
+      continue;
+    }
+    if (now >= card.deadline) {
+      removeActionCard(card.proposalId);
+    }
+  }
 }
 
 async function syncActions(): Promise<void> {
@@ -1424,15 +1707,39 @@ async function syncActions(): Promise<void> {
   for (const summary of summaries) {
     if (summary.status === "pending") {
       if (summary.expiresAt <= now) {
-        cards = cards.filter((c) => c.proposalId !== summary.proposalId);
+        const stale = cards.find((c) => c.proposalId === summary.proposalId);
+        if (
+          stale !== undefined &&
+          !stale.terminal &&
+          stale.runId === null &&
+          !stale.deciding &&
+          stale.status === "pending"
+        ) {
+          removeActionCard(summary.proposalId);
+        }
         continue;
       }
       seen.add(summary.proposalId);
       const existing = cards.find((c) => c.proposalId === summary.proposalId);
-      if (existing === undefined) {
+      if (existing !== undefined) {
+        if (
+          existing.terminal ||
+          existing.runId !== null ||
+          existing.deciding ||
+          existing.status !== "pending"
+        ) {
+          continue;
+        }
+        existing.summary = summary;
+        existing.deadline = summary.expiresAt;
+        existing.hash = summary.hash;
+        cards = [...cards];
+        schedulePendingExpiry(existing.proposalId);
+      } else {
         cards = [
           ...cards,
           {
+            proposalId: summary.proposalId,
             summary,
             view: null,
             deciding: false,
@@ -1441,8 +1748,11 @@ async function syncActions(): Promise<void> {
             status: "pending",
             errorText: "",
             actionStopBlocked: false,
+            deadline: summary.expiresAt,
+            hash: summary.hash,
           },
         ];
+        schedulePendingExpiry(summary.proposalId);
       }
     }
   }
@@ -1454,7 +1764,7 @@ async function syncActions(): Promise<void> {
     if (summary.status === "rejected" || summary.status === "expired") {
       if (card !== undefined) {
         clearApproveKey(summary.proposalId);
-        cards = cards.filter((c) => c.proposalId !== summary.proposalId);
+        removeActionCard(summary.proposalId);
         needHistory = true;
       }
       continue;
@@ -1480,7 +1790,7 @@ async function syncActions(): Promise<void> {
       !card.terminal &&
       !watchTimers.has(card.proposalId)
     ) {
-      void watchAction(card.proposalId);
+      void watchAction(card.proposalId, card.summary);
     }
   }
   if (needHistory && sessionId === sid) {
@@ -1491,24 +1801,59 @@ async function syncActions(): Promise<void> {
 async function syncExecution(summary: ProposalSummary): Promise<boolean> {
   if (sessionId === null) return false;
   const sid = sessionId;
+  // Authoritative non-pending ownership BEFORE the execution GET: a
+  // server-decided summary owns the local card even when the execution
+  // read below fails (lost approve/reject delivery). A rejected/expired
+  // summary retires on the real list state; an approved one becomes
+  // execution-owned with disabled decisions while preserving any known
+  // run. The watch starts only AFTER the current execution GET below, so
+  // this call never runs two concurrent execution reads for one proposal.
+  const owned = cards.find((c) => c.proposalId === summary.proposalId);
+  let claimedApproved = false;
+  if (
+    owned !== undefined &&
+    !owned.terminal &&
+    summary.status !== "pending" &&
+    owned.status === "pending" &&
+    owned.runId === null
+  ) {
+    owned.status = summary.status;
+    owned.summary = summary;
+    owned.deciding = false;
+    clearPendingExpiry(owned.proposalId);
+    if (summary.status === "rejected" || summary.status === "expired") {
+      clearApproveKey(summary.proposalId);
+      removeActionCard(summary.proposalId);
+      return true;
+    }
+    cards = [...cards];
+    claimedApproved = true;
+  }
   let fetched: { status: number; body: unknown };
   try {
     fetched = await fetchJson(
       `/api/sessions/${encodeURIComponent(sid)}/proposals/${encodeURIComponent(summary.proposalId)}/execution`,
     );
   } catch {
+    if (claimedApproved) void watchAction(summary.proposalId, summary);
     return false;
   }
-  if (fetched.status !== 200 || sessionId !== sid) return false;
+  if (fetched.status !== 200 || sessionId !== sid) {
+    if (claimedApproved) void watchAction(summary.proposalId, summary);
+    return false;
+  }
   const view = fetched.body as ExecutionView;
   if (typeof view.proposalId !== "string") return false;
-  const card = cards.find((c) => c.proposalId === view.proposalId);
-  if (card?.terminal) return false;
+  const preCard = cards.find((c) => c.proposalId === view.proposalId);
+  if (preCard?.terminal) return false;
   trackActionExecutionView(view);
-  const actualStatus =
+  // The execution read is the AUTHORITATIVE proposal state: a watch started
+  // from the pre-approval (still `pending`) summary must never keep
+  // rendering a decided/executed proposal as an actionable pending card.
+  const actual: ProposalSummary =
     typeof view.proposalStatus === "string"
-      ? view.proposalStatus
-      : summary.status;
+      ? { ...summary, status: view.proposalStatus }
+      : summary;
   const terminal =
     view.receipt !== null && view.receipt !== undefined
       ? true
@@ -1516,44 +1861,83 @@ async function syncExecution(summary: ProposalSummary): Promise<boolean> {
         view.status !== "queued" &&
         view.status !== "preflight" &&
         view.status !== "executing";
-  if (actualStatus === "rejected" || actualStatus === "expired") {
+  const card = cards.find((c) => c.proposalId === view.proposalId);
+  if (actual.status === "rejected" || actual.status === "expired") {
     clearApproveKey(view.proposalId);
     if (card !== undefined) {
-      cards = cards.filter((c) => c.proposalId !== view.proposalId);
+      card.deciding = false;
+      removeActionCard(view.proposalId);
       return true;
     }
     return false;
   }
+  const errorText =
+    typeof view.errorCode === "string"
+      ? actionErrorCodeText(
+          view.errorCode as
+            | "action_preflight_failed"
+            | "action_cancelled_before_write"
+            | "action_write_failed"
+            | "action_recovery_abandoned_before_write"
+            | "database_state_invalid",
+        )
+      : "";
+  if (terminal && view.status !== null) {
+    // Terminal: the REAL receipt (or the real fixed failure text) is
+    // rendered ON the card the user was already looking at — the approval
+    // card is never retired before the outcome is shown. No card (e.g.
+    // after a reload): nothing to render, but the single batched history
+    // refresh still lands the receipt/citation.
+    clearApproveKey(view.proposalId);
+    clearPendingExpiry(view.proposalId);
+    if (card !== undefined) {
+      if (typeof view.runId === "string" && view.runId.length > 0) {
+        card.runId = view.runId;
+        runTurns.set(view.runId, activeTurnId ?? "");
+      }
+      card.terminal = true;
+      card.deciding = false;
+      card.status = actual.status;
+      card.summary = actual;
+      card.view = view;
+      card.errorText = errorText;
+      cards = [...cards];
+    }
+    return true;
+  }
   if (card === undefined) return false;
-  card.view = view;
-  card.status = actualStatus;
   if (typeof view.runId === "string" && view.runId.length > 0) {
     card.runId = view.runId;
     runTurns.set(view.runId, activeTurnId ?? "");
   }
-  if (view.errorCode !== null && typeof view.errorCode === "string") {
-    card.errorText = actionErrorCodeText(
-      view.errorCode as
-        | "action_preflight_failed"
-        | "action_cancelled_before_write"
-        | "action_write_failed"
-        | "action_recovery_abandoned_before_write"
-        | "database_state_invalid",
-    );
-  }
-  if (terminal) {
-    card.terminal = true;
-    card.deciding = false;
-    if (actualStatus === "approved") clearApproveKey(view.proposalId);
+  card.deciding = false;
+  card.status = actual.status;
+  card.summary = actual;
+  card.view = view;
+  card.errorText = errorText;
+  if (view.runId !== null || view.status !== null) {
+    clearPendingExpiry(card.proposalId);
   }
   cards = [...cards];
-  return terminal;
+  if (
+    view.status !== null &&
+    (view.status === "queued" ||
+      view.status === "preflight" ||
+      view.status === "executing")
+  ) {
+    void watchAction(view.proposalId, summary);
+  }
+  return false;
 }
 
-async function watchAction(proposalId: string): Promise<void> {
+async function watchAction(
+  proposalId: string,
+  summary: ProposalSummary,
+): Promise<void> {
   if (sessionId === null || watchTimers.has(proposalId)) return;
   const sid = sessionId;
   let ticks = 0;
+  let inFlight = false;
   const maxTicks = 16 * 60;
   const timer = window.setInterval(async () => {
     ticks += 1;
@@ -1568,38 +1952,20 @@ async function watchAction(proposalId: string): Promise<void> {
       watchTimers.delete(proposalId);
       return;
     }
+    if (inFlight) return;
+    inFlight = true;
     try {
-      const fetched = await fetchJson(
-        `/api/sessions/${encodeURIComponent(sid)}/proposals/${encodeURIComponent(proposalId)}/execution`,
-      );
-      if (fetched.status === 200 && sessionId === sid) {
-        const view = fetched.body as ExecutionView;
-        trackActionExecutionView(view);
-        const liveCard = cards.find((c) => c.proposalId === proposalId);
-        if (liveCard !== undefined && !liveCard.terminal) {
-          liveCard.view = view;
-          if (typeof view.runId === "string" && view.runId.length > 0) {
-            liveCard.runId = view.runId;
-          }
-          const terminal =
-            view.receipt !== null && view.receipt !== undefined
-              ? true
-              : view.status !== null &&
-                view.status !== "queued" &&
-                view.status !== "preflight" &&
-                view.status !== "executing";
-          if (terminal) {
-            liveCard.terminal = true;
-            liveCard.deciding = false;
-            window.clearInterval(timer);
-            watchTimers.delete(proposalId);
-            await hydrateHistory();
-          }
-          cards = [...cards];
-        }
+      const needHistory = await syncExecution(summary);
+      if (needHistory && sessionId === sid) {
+        await hydrateHistory();
       }
-    } catch {
-      // Best effort: next tick retries.
+    } finally {
+      inFlight = false;
+    }
+    if (cards.find((c) => c.proposalId === proposalId) === undefined) {
+      window.clearInterval(timer);
+      watchTimers.delete(proposalId);
+      return;
     }
   }, 1000);
   watchTimers.set(proposalId, timer);
@@ -1608,6 +1974,7 @@ async function watchAction(proposalId: string): Promise<void> {
 async function reconcileLostApprove(card: CardState): Promise<void> {
   if (sessionId === null) return;
   const sid = sessionId;
+  if (cards.find((c) => c.proposalId === card.proposalId) !== card) return;
   try {
     const listed = await fetchJson(
       `/api/sessions/${encodeURIComponent(sid)}/proposals`,
@@ -1619,26 +1986,40 @@ async function reconcileLostApprove(card: CardState): Promise<void> {
           isProposalSummary(item) && item.proposalId === card.proposalId,
       );
       if (current !== undefined && current.status === "approved") {
+        clearPendingExpiry(card.proposalId);
         card.status = "approved";
+        card.summary = current;
         card.deciding = false;
         cards = [...cards];
-        await syncActions();
+        void watchAction(card.proposalId, current);
         return;
+      }
+      if (cards.find((c) => c.proposalId === card.proposalId) !== card) return;
+      if (current !== undefined && current.status === "pending") {
+        card.deadline = current.expiresAt;
+        card.hash = current.hash;
+        card.status = current.status;
+        card.summary = current;
+        card.deciding = false;
+        cards = [...cards];
+        schedulePendingExpiry(card.proposalId);
       }
     }
   } catch {
     // Best effort.
   }
+  if (cards.find((c) => c.proposalId === card.proposalId) !== card) return;
   card.deciding = false;
   cards = [...cards];
+  void syncActions();
 }
 
 async function approve(card: CardState): Promise<void> {
   if (sessionId === null || card.deciding || card.terminal) return;
   // Local deadline precheck (server re-read stays authoritative).
-  if (card.status !== "pending" || Date.now() >= card.summary.expiresAt) {
+  if (card.status !== "pending" || Date.now() >= card.deadline) {
     showNotice("この変更は承認できません。内容を確認してください");
-    cards = cards.filter((c) => c.proposalId !== card.proposalId);
+    removeActionCard(card.proposalId);
     void syncActions();
     return;
   }
@@ -1662,11 +2043,11 @@ async function approve(card: CardState): Promise<void> {
   if (
     current === null ||
     current.status !== "pending" ||
-    current.hash !== card.summary.hash ||
+    current.hash !== card.hash ||
     current.expiresAt <= Date.now()
   ) {
     showNotice("この変更は承認できません。内容を確認してください");
-    cards = cards.filter((c) => c.proposalId !== card.proposalId);
+    removeActionCard(card.proposalId);
     void syncActions();
     return;
   }
@@ -1685,14 +2066,24 @@ async function approve(card: CardState): Promise<void> {
     await reconcileLostApprove(card);
     return;
   }
+  if (posted.status === 0) {
+    showNotice("承認できませんでした。もう一度お試しください");
+    await reconcileLostApprove(card);
+    return;
+  }
   if (posted.status === 202) {
+    clearPendingExpiry(card.proposalId);
     card.deciding = false;
     clearApproveKey(card.proposalId);
     const body = posted.body as { runId?: unknown };
     if (typeof body.runId === "string") card.runId = body.runId;
+    // The 202 is authoritative: claim the approved state so the decision
+    // controls disappear while the execution runs (review PR75).
+    card.status = "approved";
+    card.summary = current;
     showNotice("承認しました");
     cards = [...cards];
-    void watchAction(card.proposalId);
+    void watchAction(card.proposalId, current);
     return;
   }
   if (posted.status === 409) {
@@ -1711,20 +2102,64 @@ async function approve(card: CardState): Promise<void> {
 
 async function reject(card: CardState): Promise<void> {
   if (sessionId === null || card.deciding || card.terminal) return;
-  if (card.status !== "pending" || Date.now() >= card.summary.expiresAt) {
-    showNotice("この変更は承認できません。内容を確認してください");
-    cards = cards.filter((c) => c.proposalId !== card.proposalId);
+  // Local deadline precheck (server stays authoritative): a locally
+  // expired pending card is never decided from a stale click.
+  if (card.status !== "pending" || Date.now() >= card.deadline) {
+    showNotice("却下できませんでした。内容を確認してください");
+    removeActionCard(card.proposalId);
     void syncActions();
     return;
   }
   const sid = sessionId;
+  card.deciding = true;
+  cards = [...cards];
+  let posted: { status: number; body: unknown };
+  try {
+    posted = await postJson(
+      `/api/sessions/${encodeURIComponent(sid)}/proposals/${encodeURIComponent(card.proposalId)}/reject`,
+      { proposalHash: card.summary.hash },
+      null,
+    );
+  } catch {
+    // Transport failure with an unknown server outcome (the reject may
+    // already be durable server-side). Hold decision ownership across ONE
+    // authoritative re-read instead of relying on the deduped background
+    // sync: that sync is dropped while an older sync is still in flight,
+    // which would leave the buttons disabled and consume the pending timer.
+    showNotice("却下できませんでした。もう一度お試しください");
+    await reconcileLostReject(card);
+    return;
+  }
+  if (posted.status === 0) {
+    showNotice("却下できませんでした。もう一度お試しください");
+    await reconcileLostReject(card);
+    return;
+  }
+  card.deciding = false;
+  if (posted.status === 200) {
+    clearApproveKey(card.proposalId);
+    clearPendingExpiry(card.proposalId);
+    showNotice("却下しました");
+    cards = cards.filter((c) => c.proposalId !== card.proposalId);
+    await hydrateHistory();
+    return;
+  }
+  cards = [...cards];
+  showNotice("却下できませんでした。内容を確認してください");
+  void syncActions();
+}
+
+async function reconcileLostReject(card: CardState): Promise<void> {
+  if (sessionId === null) return;
+  const sid = sessionId;
+  if (cards.find((c) => c.proposalId === card.proposalId) === undefined) return;
   let current: ProposalSummary | null = null;
   try {
     const listed = await fetchJson(
       `/api/sessions/${encodeURIComponent(sid)}/proposals`,
     );
     const items = (listed.body as { proposals?: unknown }).proposals;
-    if (listed.status === 200 && Array.isArray(items)) {
+    if (listed.status === 200 && Array.isArray(items) && sessionId === sid) {
       current =
         (items as unknown[]).find(
           (item): item is ProposalSummary =>
@@ -1734,72 +2169,67 @@ async function reject(card: CardState): Promise<void> {
   } catch {
     current = null;
   }
+  if (cards.find((c) => c.proposalId === card.proposalId) === undefined) return;
   if (
-    current === null ||
-    current.status !== "pending" ||
-    current.hash !== card.summary.hash ||
-    current.expiresAt <= Date.now()
+    current !== null &&
+    (current.status === "rejected" || current.status === "expired")
   ) {
-    showNotice("この変更は承認できません。内容を確認してください");
-    cards = cards.filter((c) => c.proposalId !== card.proposalId);
-    void syncActions();
+    card.deciding = false;
+    clearApproveKey(card.proposalId);
+    removeActionCard(card.proposalId);
+    await hydrateHistory();
     return;
   }
-  const key = approveKey(card.proposalId);
-  card.deciding = true;
-  cards = [...cards];
-  let posted: { status: number; body: unknown };
-  try {
-    posted = await postJson(
-      `/api/sessions/${encodeURIComponent(sid)}/proposals/${encodeURIComponent(card.proposalId)}/reject`,
-      { proposalHash: card.summary.hash },
-      key,
-    );
-  } catch {
+  if (current !== null && current.status === "approved") {
+    clearPendingExpiry(card.proposalId);
     card.deciding = false;
+    card.status = current.status;
+    card.summary = current;
     cards = [...cards];
-    showNotice("却下できませんでした。もう一度お試しください");
-    return;
-  }
-  if (posted.status === 200 || posted.status === 202) {
-    card.deciding = false;
-    clearApproveKey(card.proposalId);
-    cards = cards.filter((c) => c.proposalId !== card.proposalId);
-    showNotice("却下しました");
-    await hydrateHistory();
-    void syncActions();
-    return;
-  }
-  if (posted.status === 409) {
-    card.deciding = false;
-    clearApproveKey(card.proposalId);
-    showNotice("この変更は承認できません。内容を確認してください");
-    await hydrateHistory();
-    void syncActions();
+    void watchAction(card.proposalId, current);
     return;
   }
   card.deciding = false;
-  cards = [...cards];
-  showNotice("却下できませんでした。もう一度お試しください");
+  if (current !== null && current.status === "pending") {
+    card.summary = current;
+    card.status = current.status;
+    card.deadline = current.expiresAt;
+    card.hash = current.hash;
+    cards = [...cards];
+    schedulePendingExpiry(card.proposalId);
+  } else {
+    cards = [...cards];
+  }
   void syncActions();
 }
 
 async function stopAction(card: CardState): Promise<void> {
   if (sessionId === null || card.runId === null) return;
-  const posted = await postJson(
-    `/api/sessions/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(card.runId)}/cancel`,
-    {},
-    null,
-  );
-  if (posted.status < 200 || posted.status >= 300) {
+  let posted: { status: number; body: unknown };
+  try {
+    posted = await postJson(
+      `/api/sessions/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(card.runId)}/cancel`,
+      {},
+      null,
+    );
+  } catch {
     showNotice("停止できませんでした");
+    void syncActions();
     return;
   }
-  if (card.terminal) return;
-  const model = cardModel(card);
-  if (!model.stopVisible) {
-    // Post-marker adoption: the body reports the actual resulting status.
+  if (posted.status === 0) {
     showNotice("停止できませんでした");
+    void syncActions();
+    return;
+  }
+  if (posted.status === 200) {
+    if (parseCancelRunStatus(posted.body) === "cancelled") {
+      showNotice("停止しました");
+      void syncActions();
+      return;
+    }
+    void syncActions();
+    return;
   }
   void syncActions();
 }
@@ -1923,6 +2353,10 @@ async function bootSession(): Promise<void> {
       showNotice("停止しました");
       seededRunId = descriptor.runId;
     }
+    // A reload can adopt an m5-action Run as the generic active run. Read
+    // its ACTUAL execution marker/cancellability BEFORE the first hydration
+    // paint so a post-marker (or terminal) Action never offers Stop.
+    await refreshActionRunStops();
   }
   if (sessionId !== sid) return;
   await hydrateHistory();
@@ -1964,11 +2398,21 @@ onMount(() => {
     }
     booted = true;
   })();
+  const onVisibility = (): void => {
+    if (document.visibilityState === "visible") {
+      reconcilePendingExpiry();
+    }
+  };
+  document.addEventListener("visibilitychange", onVisibility);
   return () => {
     closeStream();
     stopElapsedTimer();
     for (const timer of watchTimers.values()) window.clearInterval(timer);
     watchTimers.clear();
+    for (const timer of pendingExpiryTimers.values())
+      window.clearTimeout(timer);
+    pendingExpiryTimers.clear();
+    document.removeEventListener("visibilitychange", onVisibility);
     onAuthExpired(null);
   };
 });
@@ -2136,7 +2580,7 @@ function evidenceForTurn(turn: Turn): {
           {#if turn.run !== null}
             {@const parts = answerPartsForTurn(turn)}
             {@const runId = turn.run.runId}
-            {#each parts as part (part.text)}
+            {#each parts as part, partIndex (partIndex)}
               <p>{part.text}</p>
               {#each part.citations as citation (citation)}
                 <button
@@ -2213,7 +2657,7 @@ function evidenceForTurn(turn: Turn): {
     {#if liveVisible}
       {@const runId = [...renderedAnswers].pop()}
       <section data-live-answer="true">
-        {#each liveAnswer as part (part.text)}
+        {#each liveAnswer as part, partIndex (partIndex)}
           <p>{part.text}</p>
           {#each part.citations as citation (citation)}
             <button
@@ -2233,6 +2677,7 @@ function evidenceForTurn(turn: Turn): {
       {@const model = cardModel(card)}
       <section
         data-action-card="true"
+        data-action-tool={card.summary.tool}
         data-action-state={model.expired
           ? "expired"
           : card.summary.status === "pending"
@@ -2241,7 +2686,7 @@ function evidenceForTurn(turn: Turn): {
         data-action-marker={card.view?.markerCommitted === true ? "committed" : "uncommitted"}
         aria-label="承認カード"
       >
-        <p>確認が必要な変更があります</p>
+        <p>{card.summary.tool === "calendar.create" ? "予定作成の確認" : "日程変更の確認"}</p>
         {#if card.summary.tool === "calendar.create" && card.summary.input.title !== undefined}
           <p data-action-title="true">件名: {card.summary.input.title}</p>
         {/if}
@@ -2265,26 +2710,26 @@ function evidenceForTurn(turn: Turn): {
             </button>
           {/if}
         </p>
-        {#if model.decisionVisible}
-          <button
-            id="action-approve"
-            type="button"
-            data-action-approve="true"
-            disabled={card.deciding}
-            onclick={() => void approve(card)}
+        <button
+          id="action-approve"
+          type="button"
+          data-action-approve="true"
+          hidden={!model.decisionVisible}
+          disabled={!model.decisionVisible || card.deciding}
+          onclick={() => void approve(card)}
+        >
+          承認
+        </button>
+        <button
+          id="action-reject"
+          type="button"
+          data-action-reject="true"
+          hidden={!model.decisionVisible}
+          disabled={!model.decisionVisible || card.deciding}
+          onclick={() => void reject(card)}
           >
-            承認
-          </button>
-          <button
-            id="action-reject"
-            type="button"
-            data-action-reject="true"
-            disabled={card.deciding}
-            onclick={() => void reject(card)}
-          >
-            却下
-          </button>
-        {/if}
+          却下
+        </button>
         {#if model.stopVisible}
           <button
             type="button"
@@ -2333,11 +2778,15 @@ function evidenceForTurn(turn: Turn): {
     <button id="composer-send" type="submit" disabled={composerSendDisabled()}>
       送信
     </button>
-    {#if composerStopVisible()}
-      <button id="composer-stop" type="button" onclick={() => void stop()}>
-        停止
-      </button>
-    {/if}
+    <button
+      id="composer-stop"
+      type="button"
+      hidden={!composerStopVisible()}
+      disabled={!composerStopVisible()}
+      onclick={() => void stop()}
+    >
+      停止
+    </button>
   </form>
 </div>
 

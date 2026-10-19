@@ -77,9 +77,11 @@ export function formatModelDeltaSse(event: ModelDeltaEvent): string {
 }
 
 /**
- * Ephemeral per-run delta bus. `publishPiece` coalesces text; `publishUsage`
- * emits immediately. Invalid envelopes are dropped (never throw into the
- * strategy, never logged with content). Nothing here writes to the DB.
+ * Ephemeral per-run delta bus. `publishPiece` coalesces text per
+ * run+kind+step (steps never merge); `publishUsage` flushes the run's
+ * pending text buffers, then emits immediately. Invalid envelopes are
+ * dropped (never throw into the strategy, never logged with content).
+ * Nothing here writes to the DB.
  */
 export class ModelDeltaBus {
   private readonly listeners = new Map<string, Set<DeltaChunkListener>>();
@@ -87,7 +89,6 @@ export class ModelDeltaBus {
     string,
     {
       text: string;
-      step: number;
       timer: ReturnType<typeof setTimeout> | undefined;
     }
   >();
@@ -126,27 +127,34 @@ export class ModelDeltaBus {
     if (piece.text.length === 0) {
       return;
     }
-    const key = `${piece.runId}\n${piece.kind}`;
+    // Key includes the step: adjacent model steps never share a buffer, so
+    // one flush can never concatenate text from two steps while stamping
+    // it all with the later step number.
+    const key = `${piece.runId}\n${piece.kind}\n${piece.step}`;
     let buffer = this.buffers.get(key);
     if (buffer === undefined) {
-      buffer = { text: "", step: piece.step, timer: undefined };
+      buffer = { text: "", timer: undefined };
       this.buffers.set(key, buffer);
     }
     buffer.text += piece.text;
-    buffer.step = piece.step;
     if (buffer.text.length >= MODEL_DELTA_COALESCE_CHARS) {
-      this.flushBuffer(piece.runId, piece.kind);
+      this.flushKey(key);
       return;
     }
     if (buffer.timer === undefined) {
       buffer.timer = this.setTimeoutFn(() => {
-        this.flushBuffer(piece.runId, piece.kind);
+        this.flushKey(key);
       }, MODEL_DELTA_COALESCE_MS);
     }
   }
 
   /** Emit one terminal usage summary immediately (one per step). */
   publishUsage(usage: DeltaUsage): void {
+    // Terminal usage ends the run: flush this run's pending text buffers
+    // FIRST so a short final reasoning/draft piece is never stranded
+    // behind its 50ms timer while the SSE poll closes on the usage event
+    // (a connected client would miss the tail of the text).
+    this.flush(usage.runId);
     const event = this.buildEvent(
       usage.runId,
       MODEL_USAGE_EVENT_TYPE,
@@ -171,15 +179,25 @@ export class ModelDeltaBus {
       if (runId !== undefined && !key.startsWith(`${runId}\n`)) {
         continue;
       }
-      const separator = key.indexOf("\n");
-      const kind = key.slice(separator + 1) as DeltaTextKind;
-      const owner = key.slice(0, separator);
-      this.flushBuffer(owner, kind);
+      this.flushKey(key);
     }
   }
 
-  private flushBuffer(runId: string, kind: DeltaTextKind): void {
-    const key = `${runId}\n${kind}`;
+  private flushKey(key: string): void {
+    const first = key.indexOf("\n");
+    const second = key.indexOf("\n", first + 1);
+    if (first === -1 || second === -1) {
+      return;
+    }
+    this.flushBuffer(
+      key.slice(0, first),
+      key.slice(first + 1, second) as DeltaTextKind,
+      Number(key.slice(second + 1)),
+    );
+  }
+
+  private flushBuffer(runId: string, kind: DeltaTextKind, step: number): void {
+    const key = `${runId}\n${kind}\n${step}`;
     const buffer = this.buffers.get(key);
     if (buffer === undefined || buffer.text.length === 0) {
       if (buffer?.timer !== undefined) {
@@ -193,13 +211,8 @@ export class ModelDeltaBus {
       buffer.timer = undefined;
     }
     const text = buffer.text;
-    // The envelope step is the latest buffered step (buffers are per
-    // run+kind, flushed in order; cross-step merges stamp the newest).
-    const step = buffer.step;
     buffer.text = "";
-    if (this.buffers.get(key) === buffer && buffer.text.length === 0) {
-      this.buffers.delete(key);
-    }
+    this.buffers.delete(key);
     const type =
       kind === "reasoning"
         ? MODEL_REASONING_DELTA_EVENT_TYPE

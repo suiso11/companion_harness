@@ -110,6 +110,108 @@ describe("ephemeral delta bus (PR-2)", () => {
     }
   });
 
+  it("keeps adjacent model steps in separate coalescing buffers", () => {
+    const { timers, pending } = manualTimers();
+    const bus = new ModelDeltaBus(timers);
+    const runId = randomUUID();
+    const chunks: string[] = [];
+    const unsubscribe = bus.subscribe(runId, (chunk) => {
+      chunks.push(chunk);
+    });
+    try {
+      bus.publishPiece({
+        runId,
+        step: 1,
+        kind: "reasoning",
+        text: "one",
+        now: 1,
+      });
+      // Same kind, same run, within the 50ms window: a different step must
+      // never merge into the earlier step's buffer.
+      bus.publishPiece({
+        runId,
+        step: 2,
+        kind: "reasoning",
+        text: "two",
+        now: 2,
+      });
+      for (const fire of pending.splice(0)) {
+        fire();
+      }
+      expect(chunks).toHaveLength(2);
+      const first = parseChunkData(chunks[0] as string);
+      const second = parseChunkData(chunks[1] as string);
+      expect(first.payload).toEqual({ step: 1, text: "one" });
+      expect(second.payload).toEqual({ step: 2, text: "two" });
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it("flushes a run's pending text before its terminal usage event", () => {
+    const { timers, pending } = manualTimers();
+    const bus = new ModelDeltaBus(timers);
+    const runId = randomUUID();
+    const otherRunId = randomUUID();
+    const chunks: string[] = [];
+    const unsubscribe = bus.subscribe(runId, (chunk) => {
+      chunks.push(chunk);
+    });
+    const unsubscribeOther = bus.subscribe(otherRunId, (chunk) => {
+      chunks.push(chunk);
+    });
+    try {
+      bus.publishPiece({
+        runId,
+        step: 3,
+        kind: "draft",
+        text: "tail",
+        now: 1,
+      });
+      // An unrelated run's buffer stays pending across this usage flush.
+      bus.publishPiece({
+        runId: otherRunId,
+        step: 1,
+        kind: "draft",
+        text: "other",
+        now: 1,
+      });
+      expect(pending.length).toBe(2);
+      bus.publishUsage({
+        runId,
+        step: 3,
+        promptTokens: 1,
+        completionTokens: 2,
+        elapsedMs: 5,
+        now: 2,
+      });
+      // The short draft tail flushed BEFORE usage (the SSE poll may close
+      // on the terminal usage event; the 50ms timer would be too late) and
+      // only this run's buffers flushed.
+      expect(chunks).toHaveLength(2);
+      expect(parseChunkData(chunks[0] as string).type).toBe(
+        "answer.draft.delta",
+      );
+      expect(parseChunkData(chunks[0] as string).payload).toEqual({
+        step: 3,
+        text: "tail",
+      });
+      expect(parseChunkData(chunks[1] as string).type).toBe("model.usage");
+      // Firing the stale timers flushes only the untouched other run.
+      for (const fire of pending.splice(0)) {
+        fire();
+      }
+      expect(chunks).toHaveLength(3);
+      expect(parseChunkData(chunks[2] as string).payload).toEqual({
+        step: 1,
+        text: "other",
+      });
+    } finally {
+      unsubscribe();
+      unsubscribeOther();
+    }
+  });
+
   it("flushes early at the char bound and passes usage through", () => {
     const { timers } = manualTimers();
     const bus = new ModelDeltaBus(timers);
@@ -238,6 +340,78 @@ describe("ephemeral delta bus (PR-2)", () => {
         }),
       );
       expect(chunk).not.toMatch(/^id: /m);
+    }
+  });
+
+  it("serializes delta writes so at most one grace wait is outstanding", async () => {
+    // Backpressure timers are recorded, never fired: a grace wait only
+    // ends when a read pulls the stream.
+    const graceTimers: Array<() => void> = [];
+    const timers = {
+      setInterval: ((fn: () => void) => {
+        void fn;
+        return 0 as unknown as ReturnType<typeof setInterval>;
+      }) as typeof setInterval,
+      clearInterval: (() => {}) as typeof clearInterval,
+      setTimeout: ((fn: () => void) => {
+        graceTimers.push(fn);
+        return graceTimers.length as unknown as ReturnType<typeof setTimeout>;
+      }) as unknown as typeof setTimeout,
+    };
+    const runId = randomUUID();
+    const source = {
+      getEvents: () => ({
+        events: [],
+        nextAfter: 0,
+        hasMore: false,
+        terminal: false,
+      }),
+      getRun: () => ({ status: "running", eventSeq: 0 }),
+    };
+    let listener: ((chunk: string) => void) | undefined;
+    const deltas = {
+      subscribe: (_runId: string, l: (chunk: string) => void) => {
+        listener = l;
+        return () => {};
+      },
+    };
+    const res = createSseResponse(source, "s", runId, 0, timers, deltas);
+    const reader = res.body?.getReader();
+    const drain = async (): Promise<void> => {
+      for (let i = 0; i < 5; i += 1) {
+        await Promise.resolve();
+      }
+    };
+    await drain();
+    const encode = (text: string): string =>
+      formatModelDeltaSse(
+        parseModelDeltaEvent({
+          schemaVersion: 1,
+          runId,
+          seq: 0,
+          createdAt: 1,
+          type: "model.reasoning.delta",
+          payload: { step: 1, text },
+        }),
+      );
+    try {
+      // Burst of four while backpressured (nothing read yet).
+      for (const text of ["1", "2", "3", "4"]) {
+        listener?.(encode(text));
+      }
+      await drain();
+      // Exactly one delta write is enqueued-and-waiting: the burst can
+      // never stack concurrent grace waiters (previously three).
+      expect(graceTimers).toHaveLength(1);
+      // Each pull releases exactly one more chained writer, never the
+      // whole burst at once.
+      const first = await reader?.read();
+      expect(new TextDecoder().decode(first?.value)).toContain('"1"');
+      await drain();
+      expect(graceTimers).toHaveLength(2);
+    } finally {
+      await reader?.cancel().catch(() => {});
+      await res.body?.cancel().catch(() => {});
     }
   });
 });

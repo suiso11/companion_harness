@@ -960,6 +960,99 @@ describe("bootstrap M2 model wiring", () => {
     }
   });
 
+  it("reads the streaming flag from the supplied startup env, never ambient process.env", async () => {
+    const { env } = tempEnv();
+    const captured: Array<Record<string, unknown>> = [];
+    const fetchImpl: FetchImpl = async (_url, init) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      captured.push(body);
+      if (body.stream === true) {
+        // stream:true expects an SSE completion.
+        return new Response(
+          `data: ${JSON.stringify({
+            choices: [{ delta: { content: "hi" }, finish_reason: "stop" }],
+            usage: { prompt_tokens: 1, completion_tokens: 1 },
+          })}\n\ndata: [DONE]\n\n`,
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: "hi" }, finish_reason: "stop" }],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+    const runOnce = async (requestEnv: NodeJS.ProcessEnv): Promise<void> => {
+      captured.length = 0;
+      const started = await startServer({
+        env: requestEnv,
+        drainMs: 50,
+        modelFetch: fetchImpl,
+      });
+      servers.push(started);
+      try {
+        const base = `http://127.0.0.1:${started.port}`;
+        const created = await fetch(`${base}/api/sessions`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": randomUUID(),
+            origin: base,
+          },
+          body: "{}",
+        });
+        expect(created.status).toBe(201);
+        const { sessionId } = (await created.json()) as {
+          sessionId: string;
+        };
+        await fetch(`${base}/api/sessions/${sessionId}/messages`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": randomUUID(),
+            origin: base,
+          },
+          body: JSON.stringify({ text: "stream?" }),
+        });
+        for (let i = 0; i < 100 && captured.length === 0; i += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        expect(captured.length).toBeGreaterThan(0);
+      } finally {
+        await started.shutdown("test");
+        servers.pop();
+      }
+    };
+    // Supplied env opts in: the model request goes out with stream:true.
+    await runOnce({
+      ...modelEnv(env, "openai-compatible"),
+      COMPANION_MODEL_STREAMING: "1",
+    });
+    expect(captured.length).toBeGreaterThan(0);
+    for (const body of captured) {
+      expect(body.stream).toBe(true);
+      expect(body.stream_options).toEqual({ include_usage: true });
+    }
+    // Ambient process.env value must NOT enable it when the supplied env
+    // omits the flag (a sanitized supplied environment stays sanitized).
+    const previous = process.env.COMPANION_MODEL_STREAMING;
+    process.env.COMPANION_MODEL_STREAMING = "1";
+    try {
+      await runOnce(modelEnv(env, "openai-compatible"));
+      expect(captured.length).toBeGreaterThan(0);
+      for (const body of captured) {
+        expect(body.stream).toBe(false);
+      }
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COMPANION_MODEL_STREAMING;
+      } else {
+        process.env.COMPANION_MODEL_STREAMING = previous;
+      }
+    }
+  });
+
   it("reuses the M1 broker when roots are configured", async () => {
     const { env } = tempEnv();
     const vault = mkdtempSync(join(tmpdir(), "companion-m2-vault-"));

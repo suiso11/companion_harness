@@ -9,6 +9,7 @@ import {
 import {
   extractPartialPartsText,
   OpenAIStreamAccumulator,
+  postChatCompletionStream,
 } from "../src/streaming.js";
 import type { ChatRequest, FetchImpl, ModelStreamDelta } from "../src/types.js";
 
@@ -315,6 +316,73 @@ describe("tool-call argument accumulation", () => {
       .join("");
     expect(draftText).toBe(tricky);
   });
+
+  it("joins multi-part draft text with one blank line like the final rendering", async () => {
+    const argsJson = JSON.stringify({
+      version: 1,
+      parts: [
+        { text: "first part", citations: [] },
+        { text: "second part", citations: [] },
+      ],
+    });
+    // Split right before the second part's object so the separator itself
+    // arrives as a draft suffix with the next piece.
+    const cut = argsJson.indexOf('{"text":"second"');
+    const first = argsJson.slice(0, cut);
+    const second = argsJson.slice(cut);
+    const { fetchImpl } = mockFetch(
+      sseResponseFromChunks([
+        sseChunk({
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "call_0",
+                    type: "function",
+                    function: { name: "answer.submit", arguments: first },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+        sseChunk({
+          choices: [
+            {
+              delta: {
+                tool_calls: [{ index: 0, function: { arguments: second } }],
+              },
+              finish_reason: "tool_calls",
+            },
+          ],
+        }),
+        "data: [DONE]\n\n",
+      ]),
+    );
+    const deltas: ModelStreamDelta[] = [];
+    const tools = [{ name: "answer.submit", description: "submit" }];
+    const streamed = await streamingGateway(fetchImpl).chat(
+      baseRequest({ tools }),
+      {
+        onDelta: (delta) => {
+          deltas.push(delta);
+        },
+      },
+    );
+    const draftText = deltas
+      .filter((delta) => delta.kind === "draft")
+      .map((delta) => (delta.kind === "draft" ? delta.text : ""))
+      .join("");
+    // Authoritative join semantics (renderRunResultText/renderAnswerText):
+    // exactly one blank line between parts, never direct adjacency.
+    const args = streamed.toolCalls[0]?.arguments as {
+      parts: Array<{ text: string }>;
+    };
+    expect(draftText).toBe("first part\n\nsecond part");
+    expect(draftText).toBe(args.parts.map((part) => part.text).join("\n\n"));
+  });
 });
 
 describe("partial-JSON draft extractor", () => {
@@ -346,6 +414,20 @@ describe("partial-JSON draft extractor", () => {
     ]) {
       expect(() => extractPartialPartsText(hostile)).not.toThrow();
     }
+  });
+
+  it("joins multiple parts with one blank line, monotonically", () => {
+    const full = JSON.stringify({ parts: [{ text: "aa" }, { text: "bb" }] });
+    let previous = "";
+    // Every prefix must decode to a prefix of the final draft (monotonic
+    // suffix emission) and the final draft must equal the authoritative
+    // `parts[].text` join.
+    for (let end = 1; end <= full.length; end += 1) {
+      const decoded = extractPartialPartsText(full.slice(0, end));
+      expect(decoded.startsWith(previous)).toBe(true);
+      previous = decoded;
+    }
+    expect(previous).toBe("aa\n\nbb");
   });
 });
 
@@ -456,6 +538,145 @@ describe("strict streaming errors", () => {
     );
   });
 
+  it("rejects a stream that closes before the [DONE] sentinel", async () => {
+    // Plain content arrived but the body ended without `data: [DONE]`:
+    // a truncated connection must not normalize into a successful result.
+    await expectStreamCode(
+      [sseChunk({ choices: [{ delta: { content: "partial" } }] })],
+      "invalid_response",
+    );
+    // Even a complete-looking tool-call argument without [DONE] rejects
+    // (a partially streamed tool call must never execute).
+    await expectStreamCode(
+      [
+        sseChunk({
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "call_x",
+                    function: {
+                      name: "notes.search",
+                      arguments: '{"q":"x"}',
+                    },
+                  },
+                ],
+              },
+              finish_reason: "tool_calls",
+            },
+          ],
+        }),
+      ],
+      "invalid_response",
+      baseRequest({ tools: [{ name: "notes.search", description: "s" }] }),
+    );
+  });
+
+  it("rejects conflicting tool names on one index as invalid_response", async () => {
+    await expectStreamCode(
+      [
+        sseChunk({
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "c0",
+                    function: { name: "memory.search", arguments: '{"q"' },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+        sseChunk({
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    function: { name: "calendar.search", arguments: ':"x"}' },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+        "data: [DONE]\n\n",
+      ],
+      "invalid_response",
+    );
+  });
+
+  it("accepts identical repeats and cumulative-prefix name fragments", async () => {
+    const { fetchImpl } = mockFetch(
+      sseResponseFromChunks([
+        sseChunk({
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "c0",
+                    function: { name: "notes", arguments: '{"q"' },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+        // Prefix growth to the full split name, then an identical repeat,
+        // then a repeat of an already-subsumed earlier fragment.
+        sseChunk({
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    function: { name: "notes.search", arguments: ':"x"}' },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+        sseChunk({
+          choices: [
+            {
+              delta: {
+                tool_calls: [{ index: 0, function: { name: "notes.search" } }],
+              },
+            },
+          ],
+        }),
+        sseChunk({
+          choices: [
+            {
+              delta: {
+                tool_calls: [{ index: 0, function: { name: "notes" } }],
+              },
+            },
+          ],
+        }),
+        "data: [DONE]\n\n",
+      ]),
+    );
+    const result = await streamingGateway(fetchImpl).chat(
+      baseRequest({ tools: [{ name: "notes.search", description: "s" }] }),
+    );
+    expect(result.toolCalls).toHaveLength(1);
+    expect(result.toolCalls[0]).toMatchObject({
+      name: "notes.search",
+      arguments: { q: "x" },
+    });
+  });
+
   it("does not fall back: transport failures surface once", async () => {
     const { fetchImpl, calls } = mockFetch(
       new Response("oops", { status: 500 }),
@@ -516,6 +737,125 @@ describe("strict streaming errors", () => {
       expect.unreachable();
     } catch (error) {
       expect(error).toBeInstanceOf(DOMException);
+    }
+  });
+
+  it("cancels the body and aborts the request when chunk validation fails", async () => {
+    let bodyCancelled = false;
+    let requestSignalAborted = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new TextEncoder().encode("data: not-json\n\n"));
+        c.enqueue(new TextEncoder().encode("data: [DONE]\n\n"));
+        // Never closed: only cancellation may end this body.
+      },
+      cancel() {
+        bodyCancelled = true;
+      },
+    });
+    const fetchImpl: FetchImpl = async (_url, init) => {
+      init?.signal?.addEventListener("abort", () => {
+        requestSignalAborted = true;
+      });
+      return new Response(stream, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    };
+    try {
+      await streamingGateway(fetchImpl).chat(baseRequest());
+      expect.unreachable();
+    } catch (error) {
+      expect((error as ModelLocalError).code).toBe("invalid_response");
+    }
+    // The unread response must stop generating: reader cancelled and the
+    // request controller aborted before the error propagated.
+    expect(bodyCancelled).toBe(true);
+    expect(requestSignalAborted).toBe(true);
+  });
+});
+
+describe("non-2xx error-body drain (abort semantics)", () => {
+  /** Never-ending streaming body (a reader not coupled to any signal). */
+  function endlessBody(): ReadableStream<Uint8Array> {
+    return new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new TextEncoder().encode("chunk-1"));
+        // Never closes: only reader cancellation can end the drain.
+      },
+      cancel() {},
+    });
+  }
+
+  it("returns timeout when the deadline hits during the drain", async () => {
+    const fetchImpl: FetchImpl = async () =>
+      new Response(endlessBody(), { status: 500 });
+    try {
+      await postChatCompletionStream({
+        fetchImpl,
+        url: "http://127.0.0.1:8000/v1/chat/completions",
+        body: {},
+        apiKey: undefined,
+        timeoutMs: 20,
+        onChunkBody: () => {},
+      });
+      expect.unreachable();
+    } catch (error) {
+      // Previously the drain swallowed the abort and the caller surfaced
+      // the HTTP status as request_failed; the deadline must win.
+      expect((error as ModelLocalError).code).toBe("timeout");
+    }
+  });
+
+  it("propagates external cancellation during the drain untouched", async () => {
+    const external = new AbortController();
+    const fetchImpl: FetchImpl = async () =>
+      new Response(endlessBody(), { status: 500 });
+    const pending = postChatCompletionStream({
+      fetchImpl,
+      url: "http://127.0.0.1:8000/v1/chat/completions",
+      body: {},
+      apiKey: undefined,
+      timeoutMs: undefined,
+      signal: external.signal,
+      onChunkBody: () => {},
+    });
+    setTimeout(
+      () => external.abort(new DOMException("stopped", "AbortError")),
+      10,
+    );
+    try {
+      await pending;
+      expect.unreachable();
+    } catch (error) {
+      expect(error).toBeInstanceOf(DOMException);
+      expect((error as DOMException).name).toBe("AbortError");
+    }
+  });
+
+  it("still reports the HTTP status when the drain completes normally", async () => {
+    const fetchImpl: FetchImpl = async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(c) {
+            c.enqueue(new TextEncoder().encode("gone"));
+            c.close();
+          },
+        }),
+        { status: 500 },
+      );
+    try {
+      await postChatCompletionStream({
+        fetchImpl,
+        url: "http://127.0.0.1:8000/v1/chat/completions",
+        body: {},
+        apiKey: undefined,
+        timeoutMs: undefined,
+        onChunkBody: () => {},
+      });
+      expect.unreachable();
+    } catch (error) {
+      expect((error as ModelLocalError).code).toBe("request_failed");
     }
   });
 });
