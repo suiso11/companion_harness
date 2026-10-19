@@ -559,6 +559,9 @@ export {
   MemorySearchResponseSchema,
 } from "./memory.js";
 export type {
+  AnswerInvalidParseIssueCode,
+  AnswerInvalidReason,
+  AnswerInvalidReasonCode,
   M2ModelErrorCode,
   M2ModelErrorSchemaVersion,
   M2ModelStepEventType,
@@ -570,6 +573,10 @@ export type {
   ModelStepUsage,
 } from "./model.js";
 export {
+  ANSWER_INVALID_PARSE_ISSUE_CODES,
+  ANSWER_INVALID_REASON_CODES,
+  ANSWER_INVALID_REASON_REGEX,
+  AnswerInvalidReasonSchema,
   KNOWN_M2_MODEL_ERROR_CODES,
   M2_MODEL_ERROR_CODE_REGISTRY,
   M2_MODEL_ERROR_CODES,

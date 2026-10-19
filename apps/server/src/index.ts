@@ -53,6 +53,7 @@ export {
   createCollectingLogger,
   createServerLogger,
   createStdServerLogger,
+  sanitizeLogReason,
   sanitizeLogStatus,
 } from "./logger.js";
 export type { StoreSize } from "./maintenance.js";

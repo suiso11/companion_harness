@@ -42,6 +42,40 @@ function ollamaBody(toolCalls: unknown[]): unknown {
   };
 }
 
+describe("answer_invalid fixed reason codes", () => {
+  it("distinguishes malformed from oversize without echoing args", () => {
+    const malformed = {
+      id: "a-1",
+      type: "function",
+      function: { name: "answer.submit", arguments: `{broken ${SECRET}` },
+    };
+    try {
+      normalizeOpenAIResponse(openaiBody([malformed]), ANSWER_TOOLS);
+      expect.unreachable();
+    } catch (error) {
+      expectAnswerInvalid(error);
+      expect((error as ModelLocalError).reason).toBe("model_args_malformed");
+    }
+    const overhead = encoder.encode(`{"pad":""}`).byteLength;
+    const pad = MAX_TOOL_CALL_ARGUMENTS_BYTES - overhead + 1;
+    const oversize = {
+      id: "a-1",
+      type: "function",
+      function: {
+        name: "answer.submit",
+        arguments: JSON.stringify({ pad: `${SECRET}${"a".repeat(pad)}` }),
+      },
+    };
+    try {
+      normalizeOpenAIResponse(openaiBody([oversize]), ANSWER_TOOLS);
+      expect.unreachable();
+    } catch (error) {
+      expectAnswerInvalid(error);
+      expect((error as ModelLocalError).reason).toBe("model_args_oversize");
+    }
+  });
+});
+
 describe("openai answer.submit normalization", () => {
   it("malformed JSON answer args reject as answer_invalid", () => {
     const call = {

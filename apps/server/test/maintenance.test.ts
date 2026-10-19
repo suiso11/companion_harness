@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { closeKernelDatabase, openKernelDatabase } from "@companion/kernel";
 import { afterEach, describe, expect, it } from "vitest";
 import { runManualBackupCli } from "../src/cli.js";
-import { sanitizeLogStatus } from "../src/logger.js";
+import { sanitizeLogReason, sanitizeLogStatus } from "../src/logger.js";
 import {
   measureStoreSize,
   STORE_SIZE_WARN_BYTES,
@@ -87,6 +87,25 @@ describe("store size warning", () => {
     expect(sanitizeLogStatus(0)).toBe(0);
     expect(sanitizeLogStatus(Number.NaN)).toBe(undefined);
     expect(sanitizeLogStatus(undefined)).toBe(undefined);
+  });
+
+  it("preserves only fixed answer-invalid reason codes in logs", () => {
+    expect(sanitizeLogReason("model_args_malformed")).toBe(
+      "model_args_malformed",
+    );
+    expect(sanitizeLogReason("mixed_tool_calls")).toBe("mixed_tool_calls");
+    expect(sanitizeLogReason("parse:too_small@parts.0.text")).toBe(
+      "parse:too_small@parts.0.text",
+    );
+    // Model text, arbitrary keys, and overlong paths never survive.
+    expect(sanitizeLogReason("model text leaked")).toBe("unknown");
+    expect(sanitizeLogReason("parse:too_small@parts.0.secret")).toBe("unknown");
+    expect(
+      sanitizeLogReason(
+        "parse:too_small@parts.0.text.extra.extra.extra.extra.extra.x",
+      ),
+    ).toBe("unknown");
+    expect(sanitizeLogReason("SIGINT")).toBe("sigint");
   });
 });
 

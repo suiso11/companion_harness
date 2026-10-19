@@ -5,6 +5,8 @@
 // tool/model I/O, secrets, and raw errors are never representable: unknown
 // fields are dropped, strings are length-capped, and errors map to codes.
 
+import { ANSWER_INVALID_REASON_REGEX } from "@companion/contracts";
+
 import type { ServerLogLevel } from "./config.js";
 
 const LEVEL_ORDER: Record<ServerLogLevel, number> = {
@@ -124,6 +126,22 @@ function sanitizeString(value: unknown): string | undefined {
 }
 
 /** Map an arbitrary shutdown/startup reason or error name to a fixed status. */
+/**
+ * Preserve the fixed answer-invalid reason vocabulary (including the
+ * bounded `parse:<issue>@<path>` form); everything else falls back to the
+ * closed status allowlist. Model text/values can never match the pattern.
+ */
+export function sanitizeLogReason(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  if (value.length <= 64 && ANSWER_INVALID_REASON_REGEX.test(value)) {
+    return value;
+  }
+  const status = sanitizeLogStatus(value);
+  return typeof status === "string" ? status : undefined;
+}
+
 export function sanitizeLogStatus(value: unknown): string | number | undefined {
   if (typeof value === "number") {
     return Number.isFinite(value) ? value : undefined;
@@ -194,7 +212,7 @@ function sanitizeFields(fields: ServerLogFields | undefined): ServerLogFields {
     out.port = port;
   }
   if (typeof fields.reason === "string") {
-    const reason = sanitizeLogStatus(fields.reason);
+    const reason = sanitizeLogReason(fields.reason);
     if (reason !== undefined) {
       out.reason = reason;
     }

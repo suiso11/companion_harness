@@ -12,7 +12,10 @@ import {
   assertPinnedLoopbackFetchUrl,
   normalizeLoopbackBaseUrl,
 } from "./base_url.js";
-import { ModelLocalError } from "./errors.js";
+import {
+  type ModelLocalAnswerInvalidReason,
+  ModelLocalError,
+} from "./errors.js";
 import type {
   ChatMessage,
   ChatRequest,
@@ -434,10 +437,13 @@ export function isAnswerSubmitTool(name: unknown): boolean {
  * Fixed redacted normalization failure for `answer.submit` arguments
  * (malformed JSON, non-object, or oversized). No raw detail carried.
  */
-export function answerArgsInvalidError(): ModelLocalError {
+export function answerArgsInvalidError(
+  reason: ModelLocalAnswerInvalidReason = "model_args_malformed",
+): ModelLocalError {
   return new ModelLocalError(
     "answer_invalid",
     "model returned an invalid answer",
+    reason,
   );
 }
 
@@ -471,7 +477,7 @@ export function assertToolArgumentsByteLengthForTool(
 ): void {
   if (byteLength > MAX_TOOL_CALL_ARGUMENTS_BYTES) {
     if (isAnswerSubmitTool(toolName)) {
-      throw answerArgsInvalidError();
+      throw answerArgsInvalidError("model_args_oversize");
     }
     throw new ModelLocalError(
       "invalid_response",
