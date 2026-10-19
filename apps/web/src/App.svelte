@@ -1,5 +1,5 @@
 <script lang="ts">
-import { onMount } from "svelte";
+import { onMount, tick } from "svelte";
 import {
   errorCode,
   fetchJson,
@@ -8,12 +8,14 @@ import {
   postJson,
   randomUuid,
 } from "./lib/api.js";
+import { autogrowTextarea, shouldSendOnKeydown } from "./lib/composer.js";
 import {
   appendDraftText,
   DRAFT_LABEL,
   type DraftState,
   draftDisplayText,
 } from "./lib/draft.js";
+import Markdown from "./lib/Markdown.svelte";
 import {
   ACTION_PROGRESS_TEXT,
   actionCardModel,
@@ -35,7 +37,9 @@ import {
   appendThinkingText,
   applyThinkingUsage,
   deriveRunPhase,
+  durableRunStart,
   EMPTY_THINKING,
+  formatElapsedSuffix,
   formatPhaseText,
   formatThinkingStats,
   type ThinkingState,
@@ -162,8 +166,25 @@ let liveVisible = $state(false);
 let thinking: ThinkingState = $state({ ...EMPTY_THINKING });
 let thinkingCollapsed = $state(false);
 let showThinking = $state(false);
+// V4 composer (upstream ChatFormInputBasic): textarea autoresize + IME
+// guard. `composing` mirrors the IME composition session so Enter during
+// Japanese conversion never submits (keydown `isComposing` is the primary
+// signal; the flag covers browsers that only fire composition events).
+let composing = $state(false);
+// Safari IME: the Enter keydown that immediately follows `compositionend`
+// arrives with `isComposing === false` yet must not submit. Set on
+// `compositionend`, cleared on the next tick (both event orders covered;
+// unit-tested via `justEndedComposition` in composer.test.ts).
+let justEndedComposition = $state(false);
+let composerEl: HTMLTextAreaElement | null = $state(null);
 let runStartedAt = $state(0);
 let elapsedSec = $state(0);
+// PR #82 review (4312961764): cancellation requested but the run still
+// reports "generating" (watchdog not yet settled). The phase line is
+// hidden while this is set — the「停止しました」notice already tells the
+// user the stop was accepted, and a non-cooperative strategy must not
+// keep「考え中…/ツール実行中…」alive beside it.
+let cancelPending = $state(false);
 // PR-4 provisional draft (ephemeral, memory-only, never persisted/sent).
 let draft: DraftState | null = $state(null);
 // PR78 review: run ids whose draft must never (re)appear. A reload-adopted
@@ -183,6 +204,11 @@ let degradedMemory = $state(false);
 
 let sse: EventSource | null = null;
 let fallbackTimer: number | null = null;
+// V2 llama-like list: the transcript is a scroll container pinned to the
+// bottom. New content auto-scrolls unless the user scrolled up; sending
+// re-pins. `scrollEl`/`stickToBottom` are view-only (no message state).
+let scrollEl: HTMLElement | null = $state(null);
+let stickToBottom = $state(true);
 let runChain: Promise<void> = Promise.resolve();
 let renderedAnswers = $state(new Set<string>());
 let terminalHydrated = new Set<string>();
@@ -261,6 +287,14 @@ function composerSendDisabled(): boolean {
   if (sessionId === null || authExpired) return true;
   if (sending || activeRunId !== null) return true;
   return false;
+}
+
+function isActionRun(runId: string): boolean {
+  // PR #82 review (4312961798): a reload-adopted m5-action run emits no
+  // model/tool phase events, so the generic phase line would show a
+  // phantom「考え中…」beside the action card. Action runs are exactly the
+  // entries in the execution Stop map (populated before subscribe on boot).
+  return actionRunStops.has(runId);
 }
 
 function composerStopVisible(): boolean {
@@ -364,6 +398,7 @@ function resetChatState(): void {
   draftSuppressedRuns.clear();
   stopElapsedTimer();
   elapsedSec = 0;
+  cancelPending = false;
   retryTurnId = null;
   renderedAnswers = new Set();
   terminalHydrated = new Set();
@@ -376,6 +411,10 @@ function resetChatState(): void {
   actionRunStops = new Map();
   degradedMemory = false;
   notice = "";
+  // A fresh session starts pinned to the bottom (review #84): without
+  // this the flag carries the previous session's scrolled-up state and
+  // new content never auto-scrolls.
+  stickToBottom = true;
   // Invalidate and close any citation drawer from the previous session:
   // the seq bump also drops in-flight openCitation responses (review PR75).
   citationSeq += 1;
@@ -410,7 +449,12 @@ function startElapsedTimer(fromMs?: number): void {
   }, 500);
 }
 
-/** Phase/status line text (durable events only; empty when not running). */
+/**
+ * Phase/status line text (durable events only; empty when not running).
+ * PR #82 review (4312961770): the elapsed seconds are NOT part of this
+ * live-announced text — they render in a separate aria-hidden span so the
+ * once-per-second tick never re-announces the phase line.
+ */
 function runStatusText(): string {
   if (activeRunId === null || runView.visible !== "generating") {
     return "";
@@ -420,13 +464,12 @@ function runStatusText(): string {
     toolCompleted: runView.toolCompleted,
     stepsCompleted: runView.stepsCompleted,
   });
-  const text = formatPhaseText(
+  return formatPhaseText(
     phase,
     runView.toolNames,
     runView.toolRequested,
     runView.toolCompleted,
   );
-  return `${text}（${elapsedSec}秒）`;
 }
 
 /** Ephemeral PR-2 delta envelope (seq 0: never a cursor, never stored). */
@@ -488,12 +531,15 @@ function applyEphemeralDelta(
  * draft would stay visible (and a non-cooperative gateway could keep
  * feeding deltas). Discard the draft and suppress later delta frames as
  * soon as cancellation is requested; also called right after a successful
- * cancel POST.
+ * cancel POST. PR #82 review (4312961764): the same paths mark the run
+ * cancel-pending so the phase line stops rendering/incrementing while the
+ *「停止しました」notice is up.
  */
 function discardDraftOnCancelRequested(runId: string, type: string): void {
   if (type !== "run.cancel_requested" || activeRunId !== runId) {
     return;
   }
+  cancelPending = true;
   draft = null;
   draftSuppressedRuns.add(runId);
 }
@@ -688,9 +734,18 @@ async function send(): Promise<void> {
     }
     const request = { key: randomUuid(), text, uiContext: {} as unknown };
     pendingRequest = request;
-    // Optimistic user bubble (§16.2).
+    // Optimistic user bubble (§16.2). A fresh send re-pins the V2 list.
+    stickToBottom = true;
     turns = [...turns, { turnId: "", kind: "user_text", text, run: null }];
     input = "";
+    // Resize only after the cleared value reaches the DOM, otherwise the
+    // textarea keeps its grown height with stale scrollHeight. Then keep
+    // the transcript pinned while the composer shrinks.
+    await tick();
+    autogrowTextarea(composerEl);
+    if (stickToBottom && scrollEl !== null) {
+      scrollEl.scrollTop = scrollEl.scrollHeight;
+    }
     // `sending` stays true until the message POST settles (review PR75):
     // the composer, session switch, and new-session controls must stay
     // locked while the request is in flight. fetchUiContext() never throws.
@@ -829,6 +884,9 @@ async function stop(): Promise<void> {
   // event, which a non-cooperative strategy can delay for seconds while
   // the run still reports "generating".
   if (activeRunId === runId) {
+    // PR #82 review (4312961764): the stop was accepted; hide the phase
+    // line immediately instead of counting seconds beside「停止しました」.
+    cancelPending = true;
     draft = null;
     draftSuppressedRuns.add(runId);
   }
@@ -931,6 +989,7 @@ async function subscribeRun(runId: string): Promise<void> {
     liveVisible = false;
     runView = { ...INITIAL_RUN_VIEW };
     activeRunCursor = 0;
+    cancelPending = false;
     if (stored !== null && stored > 0) {
       // PR77 review: a stored cursor means the stream resumes mid-run
       // (page reload). Before another durable event creates a gap and
@@ -944,6 +1003,18 @@ async function subscribeRun(runId: string): Promise<void> {
       if (resynced || activeRunId !== runId || sessionId === null) return;
       const rebuilt = await rebuildResumedProjection(runId, stored);
       if (rebuilt && activeRunId !== runId) return;
+    } else {
+      // PR #82 review (4312961778): a recovered run without a usable
+      // cursor (first event not yet persisted, storage failed/cleared)
+      // must still show the true elapsed time — the replayed events carry
+      // no start timestamp. Seed the timer from the status endpoint's
+      // durable start; projection replay stays cursor-gated. A fresh run
+      // resolves to ~now and keeps the previous behaviour.
+      const durableStart = await fetchDurableRunStart(runId);
+      if (activeRunId !== runId || sessionId === null) return;
+      if (durableStart !== null) {
+        startElapsedTimer(durableStart);
+      }
     }
   }
   showNotice(runView.notice);
@@ -1022,6 +1093,25 @@ async function subscribeRun(runId: string): Promise<void> {
 }
 
 /**
+ * Status-endpoint fetch for the durable run start (PR #82 review
+ * 4312961778). Best effort: any failure/shape mismatch keeps the current
+ * (subscription-instant) timer.
+ */
+async function fetchDurableRunStart(runId: string): Promise<number | null> {
+  if (sessionId === null || activeRunId !== runId) return null;
+  try {
+    const fetched = await fetchJson(
+      `/api/sessions/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(runId)}/status`,
+    );
+    if (activeRunId !== runId || fetched.status !== 200) return null;
+    const run = (fetched.body as { run?: unknown }).run;
+    return durableRunStart(run);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Cursor validation on resume + durable elapsed-time seed (PR77 review).
  * Returns true when a corrupt cursor triggered a resync + re-subscribe (the
  * caller must not open another stream for the stale cursor).
@@ -1045,8 +1135,6 @@ async function validateStoredCursor(
   const r = run as {
     id?: unknown;
     eventSeq?: unknown;
-    startedAt?: unknown;
-    createdAt?: unknown;
   };
   if (r.id !== runId || typeof r.eventSeq !== "number") return false;
   if (isCorruptCursor(cursor, r.eventSeq)) {
@@ -1057,9 +1145,7 @@ async function validateStoredCursor(
   // Durable run timing (additive status fields, PR77 review): seed the
   // elapsed timer from the real run start instead of the subscription
   // instant, so a reloaded page no longer shows a minutes-old run as new.
-  const startedAt = typeof r.startedAt === "number" ? r.startedAt : null;
-  const createdAt = typeof r.createdAt === "number" ? r.createdAt : null;
-  const durableStart = startedAt ?? createdAt;
+  const durableStart = durableRunStart(run);
   if (durableStart !== null && activeRunId === runId) {
     startElapsedTimer(durableStart);
   }
@@ -2425,6 +2511,9 @@ async function bootSession(): Promise<void> {
     if (descriptor.status === "cancel_requested") {
       runView = { ...INITIAL_RUN_VIEW, notice: "停止しました" };
       activeRunCursor = 0;
+      // PR #82 review (4312961764): a reload-adopted cancelling run shows
+      // the stop notice, never the phase line.
+      cancelPending = true;
       showNotice("停止しました");
       seededRunId = descriptor.runId;
     }
@@ -2502,6 +2591,38 @@ function answerPartsForTurn(
   }));
 }
 
+function onConversationScroll(): void {
+  if (scrollEl === null) return;
+  const gap =
+    scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight;
+  stickToBottom = gap < 64;
+}
+
+// V2 auto-scroll: after any transcript change, stay pinned to the bottom
+// unless the user scrolled up. Runs after paint via tick() so the fresh
+// content's height is included. E2E DOM contracts are untouched (view-only).
+$effect(() => {
+  const signature = [
+    turns.length,
+    liveAnswer.length,
+    liveVisible,
+    thinking.text.length,
+    draft === null ? "" : draftDisplayText(draft),
+    runView.notice,
+    runView.visible,
+    cards.length,
+    showThinking,
+    thinkingCollapsed,
+    booted,
+  ].join("|");
+  void signature;
+  if (!stickToBottom || scrollEl === null) return;
+  void tick().then(() => {
+    if (stickToBottom && scrollEl !== null) {
+      scrollEl.scrollTop = scrollEl.scrollHeight;
+    }
+  });
+});
 function evidenceForTurn(turn: Turn): {
   before: string | null;
   after: string[];
@@ -2586,9 +2707,20 @@ function evidenceForTurn(turn: Turn): {
     </section>
   {/if}
 
-  <main id="conversation" aria-live="polite">
+  <main
+    id="conversation"
+    aria-live="polite"
+    bind:this={scrollEl}
+    onscroll={onConversationScroll}
+  >
+  <div class="messages">
     {#if !booted && turns.length === 0}
       <p>読み込み中…</p>
+    {/if}
+    {#if booted && turns.length === 0 && activeRunId === null && cards.length === 0}
+      <div id="conversation-empty" role="status">
+        <p>質問を入力してください</p>
+      </div>
     {/if}
     {#if hasMoreHistory}
       <button
@@ -2655,9 +2787,11 @@ function evidenceForTurn(turn: Turn): {
           {#if turn.run !== null}
             {@const parts = answerPartsForTurn(turn)}
             {@const runId = turn.run.runId}
-            {#each parts as part, partIndex (partIndex)}
-              <p>{part.text}</p>
-              {#each part.citations as citation (citation)}
+          {#each parts as part, partIndex (partIndex)}
+            <!-- V2: validated answer parts render as sanitized markdown;
+                 citation buttons stay adjacent, never inside markdown. -->
+            <Markdown text={part.text} />
+            {#each part.citations as citation (citation)}
                 <button
                   type="button"
                   aria-label={citation.startsWith("m")
@@ -2685,34 +2819,54 @@ function evidenceForTurn(turn: Turn): {
         もう一度生成
       </button>
     {/if}
-    {#if activeRunId !== null && runView.visible === "generating"}
+    {#if activeRunId !== null && runView.visible === "generating" && !cancelPending && !isActionRun(activeRunId)}
       {@const statusText = runStatusText()}
       {#if statusText.length > 0}
         <section data-run-progress="true" aria-label="実行状況">
-          <p id="run-status" data-run-status="true" aria-live="polite">
-            {statusText}
-          </p>
+          <!-- PR #82 review: the elapsed tick lives in an aria-hidden span
+               (excluded from the live region's accessible text) so only the
+               phase transition itself is announced; the visible「秒」count
+               is kept for the e2e DOM contract. -->
+          <p id="run-status" data-run-status="true" aria-live="polite"
+            >{statusText}<span aria-hidden="true"
+              >{formatElapsedSuffix(elapsedSec)}</span
+            ></p
+          >
         </section>
       {/if}
     {/if}
     {#if showThinking}
       {@const statsLine = formatThinkingStats(thinking.usage)}
-      <section data-thinking="true" aria-label="考え中">
+      <!-- V3: upstream ChatMessageReasoningBlock look — collapsible header
+           with a chevron, muted mono body; auto-collapse behavior unchanged
+           (see renderRunView). DOM contracts kept: data-thinking,
+           data-thinking-toggle, aria-expanded, data-thinking-text,
+           data-run-stats. -->
+      <section data-thinking="true" class="thinking-block" aria-label="考え中">
         <button
           type="button"
+          class="thinking-toggle"
           data-thinking-toggle="true"
           aria-expanded={!thinkingCollapsed}
           onclick={() => {
             thinkingCollapsed = !thinkingCollapsed;
           }}
         >
-          {thinkingCollapsed ? "考え中（詳細を開く）" : "考え中…（詳細を閉じる）"}
+          <span class="thinking-chevron" aria-hidden="true"
+            >{thinkingCollapsed ? "▸" : "▾"}</span
+          >
+          <span class="thinking-title"
+            >{thinkingCollapsed ? "考え中" : "考え中…"}</span
+          >
         </button>
         {#if !thinkingCollapsed}
-          <pre data-thinking-text="true">{thinkingDisplayText(thinking)}</pre>
+          <pre
+            class="thinking-body"
+            data-thinking-text="true">{thinkingDisplayText(thinking)}</pre
+          >
         {/if}
         {#if statsLine !== null}
-          <p data-run-stats="true">{statsLine}</p>
+          <p class="run-stats" data-run-stats="true">{statsLine}</p>
         {/if}
       </section>
     {:else}
@@ -2733,7 +2887,7 @@ function evidenceForTurn(turn: Turn): {
       {@const runId = [...renderedAnswers].pop()}
       <section data-live-answer="true">
         {#each liveAnswer as part, partIndex (partIndex)}
-          <p>{part.text}</p>
+          <Markdown text={part.text} />
           {#each part.citations as citation (citation)}
             <button
               type="button"
@@ -2817,6 +2971,7 @@ function evidenceForTurn(turn: Turn): {
         {/if}
       </section>
     {/each}
+  </div>
   </main>
 
   <!-- Backdrop click-to-close is supplementary; keyboard users close via
@@ -2836,10 +2991,11 @@ function evidenceForTurn(turn: Turn): {
     <button type="button" onclick={closeDrawer}>閉じる</button>
   </div>
 
+  <footer class="composer-bar">
+  <div class="composer-column">
   {#if degradedMemory}
     <p id="memory-degraded" role="status">記憶なしで続行しています</p>
   {/if}
-
   <p id="composer-notice" aria-live="polite">{notice}</p>
   <form
     id="composer"
@@ -2848,12 +3004,52 @@ function evidenceForTurn(turn: Turn): {
       void send();
     }}
   >
-    <input
+    <!-- V4: upstream ChatFormInputBasic adaptation — auto-growing textarea
+         (max ~10 lines, then scroll), Enter sends / Shift+Enter newline,
+         IME-safe (never sends while composing). id/type contracts kept:
+         #composer-input stays the send hook; #composer-stop keeps its own
+         cancel semantics (card Stop untouched). -->
+    <textarea
       id="composer-input"
-      type="text"
+      rows={1}
       autocomplete="off"
       bind:value={input}
-    />
+      bind:this={composerEl}
+      oninput={() => {
+        autogrowTextarea(composerEl);
+        if (stickToBottom && scrollEl !== null) {
+          scrollEl.scrollTop = scrollEl.scrollHeight;
+        }
+      }}
+      oncompositionstart={() => {
+        composing = true;
+      }}
+      oncompositionend={() => {
+        composing = false;
+        justEndedComposition = true;
+        void tick().then(() => {
+          justEndedComposition = false;
+        });
+      }}
+      onkeydown={(e) => {
+        if (
+          shouldSendOnKeydown({
+            key: e.key,
+            shiftKey: e.shiftKey,
+            isComposing: e.isComposing,
+            keyCode:
+              typeof (e as KeyboardEvent).keyCode === "number"
+                ? (e as KeyboardEvent).keyCode
+                : null,
+            composing,
+            justEndedComposition,
+          })
+        ) {
+          e.preventDefault();
+          void send();
+        }
+      }}
+    ></textarea>
     <button id="composer-send" type="submit" disabled={composerSendDisabled()}>
       送信
     </button>
@@ -2867,6 +3063,8 @@ function evidenceForTurn(turn: Turn): {
       停止
     </button>
   </form>
+  </div>
+  </footer>
 </div>
 
 <style>
