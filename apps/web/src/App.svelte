@@ -2041,6 +2041,7 @@ function evidenceForTurn(turn: Turn): {
       {@const model = cardModel(card)}
       <section
         data-action-card="true"
+        data-action-tool={card.summary.tool}
         data-action-state={model.expired
           ? "expired"
           : card.summary.status === "pending"
@@ -2049,7 +2050,7 @@ function evidenceForTurn(turn: Turn): {
         data-action-marker={card.view?.markerCommitted === true ? "committed" : "uncommitted"}
         aria-label="承認カード"
       >
-        <p>確認が必要な変更があります</p>
+        <p>{card.summary.tool === "calendar.create" ? "予定作成の確認" : "日程変更の確認"}</p>
         {#if card.summary.tool === "calendar.create" && card.summary.input.title !== undefined}
           <p data-action-title="true">件名: {card.summary.input.title}</p>
         {/if}
