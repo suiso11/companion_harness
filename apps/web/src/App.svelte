@@ -1963,6 +1963,11 @@ async function stopAction(card: CardState): Promise<void> {
     void syncActions();
     return;
   }
+  if (posted.status === 0) {
+    showNotice("停止できませんでした");
+    void syncActions();
+    return;
+  }
   if (posted.status === 200) {
     if (parseCancelRunStatus(posted.body) === "cancelled") {
       showNotice("停止しました");
@@ -2406,26 +2411,26 @@ function evidenceForTurn(turn: Turn): {
             </button>
           {/if}
         </p>
-        {#if model.decisionVisible}
-          <button
-            id="action-approve"
-            type="button"
-            data-action-approve="true"
-            disabled={card.deciding}
-            onclick={() => void approve(card)}
+        <button
+          id="action-approve"
+          type="button"
+          data-action-approve="true"
+          hidden={!model.decisionVisible}
+          disabled={!model.decisionVisible || card.deciding}
+          onclick={() => void approve(card)}
+        >
+          承認
+        </button>
+        <button
+          id="action-reject"
+          type="button"
+          data-action-reject="true"
+          hidden={!model.decisionVisible}
+          disabled={!model.decisionVisible || card.deciding}
+          onclick={() => void reject(card)}
           >
-            承認
-          </button>
-          <button
-            id="action-reject"
-            type="button"
-            data-action-reject="true"
-            disabled={card.deciding}
-            onclick={() => void reject(card)}
-          >
-            却下
-          </button>
-        {/if}
+          却下
+        </button>
         {#if model.stopVisible}
           <button
             type="button"
