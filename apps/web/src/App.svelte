@@ -1,5 +1,6 @@
 <script lang="ts">
-import { onMount } from "svelte";
+import { onMount, tick } from "svelte";
+import Markdown from "./lib/Markdown.svelte";
 import {
   errorCode,
   fetchJson,
@@ -181,8 +182,13 @@ let loginPassword = $state("");
 let loginError = $state("");
 let degradedMemory = $state(false);
 
-let sse: EventSource | null = null;
-let fallbackTimer: number | null = null;
+  let sse: EventSource | null = null;
+  let fallbackTimer: number | null = null;
+  // V2 llama-like list: the transcript is a scroll container pinned to the
+  // bottom. New content auto-scrolls unless the user scrolled up; sending
+  // re-pins. `scrollEl`/`stickToBottom` are view-only (no message state).
+  let scrollEl: HTMLElement | null = $state(null);
+  let stickToBottom = $state(true);
 let runChain: Promise<void> = Promise.resolve();
 let renderedAnswers = $state(new Set<string>());
 let terminalHydrated = new Set<string>();
@@ -688,7 +694,8 @@ async function send(): Promise<void> {
     }
     const request = { key: randomUuid(), text, uiContext: {} as unknown };
     pendingRequest = request;
-    // Optimistic user bubble (§16.2).
+    // Optimistic user bubble (§16.2). A fresh send re-pins the V2 list.
+    stickToBottom = true;
     turns = [...turns, { turnId: "", kind: "user_text", text, run: null }];
     input = "";
     // `sending` stays true until the message POST settles (review PR75):
@@ -2502,6 +2509,37 @@ function answerPartsForTurn(
   }));
 }
 
+function onConversationScroll(): void {
+  if (scrollEl === null) return;
+  const gap =
+    scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight;
+  stickToBottom = gap < 64;
+}
+
+// V2 auto-scroll: after any transcript change, stay pinned to the bottom
+// unless the user scrolled up. Runs after paint via tick() so the fresh
+// content's height is included. E2E DOM contracts are untouched (view-only).
+$effect(() => {
+  const signature = [
+    turns.length,
+    liveAnswer.length,
+    liveVisible,
+    draft === null ? "" : draftDisplayText(draft),
+    runView.notice,
+    runView.visible,
+    cards.length,
+    showThinking,
+    thinkingCollapsed,
+    booted,
+  ].join("|");
+  void signature;
+  if (!stickToBottom || scrollEl === null) return;
+  void tick().then(() => {
+    if (stickToBottom && scrollEl !== null) {
+      scrollEl.scrollTop = scrollEl.scrollHeight;
+    }
+  });
+});
 function evidenceForTurn(turn: Turn): {
   before: string | null;
   after: string[];
@@ -2586,9 +2624,20 @@ function evidenceForTurn(turn: Turn): {
     </section>
   {/if}
 
-  <main id="conversation" aria-live="polite">
+  <main
+    id="conversation"
+    aria-live="polite"
+    bind:this={scrollEl}
+    onscroll={onConversationScroll}
+  >
+  <div class="messages">
     {#if !booted && turns.length === 0}
       <p>読み込み中…</p>
+    {/if}
+    {#if booted && turns.length === 0 && activeRunId === null && cards.length === 0}
+      <div id="conversation-empty" role="status">
+        <p>質問を入力してください</p>
+      </div>
     {/if}
     {#if hasMoreHistory}
       <button
@@ -2655,9 +2704,11 @@ function evidenceForTurn(turn: Turn): {
           {#if turn.run !== null}
             {@const parts = answerPartsForTurn(turn)}
             {@const runId = turn.run.runId}
-            {#each parts as part, partIndex (partIndex)}
-              <p>{part.text}</p>
-              {#each part.citations as citation (citation)}
+          {#each parts as part, partIndex (partIndex)}
+            <!-- V2: validated answer parts render as sanitized markdown;
+                 citation buttons stay adjacent, never inside markdown. -->
+            <Markdown text={part.text} />
+            {#each part.citations as citation (citation)}
                 <button
                   type="button"
                   aria-label={citation.startsWith("m")
@@ -2733,7 +2784,7 @@ function evidenceForTurn(turn: Turn): {
       {@const runId = [...renderedAnswers].pop()}
       <section data-live-answer="true">
         {#each liveAnswer as part, partIndex (partIndex)}
-          <p>{part.text}</p>
+          <Markdown text={part.text} />
           {#each part.citations as citation (citation)}
             <button
               type="button"
@@ -2817,6 +2868,7 @@ function evidenceForTurn(turn: Turn): {
         {/if}
       </section>
     {/each}
+  </div>
   </main>
 
   <!-- Backdrop click-to-close is supplementary; keyboard users close via
@@ -2836,10 +2888,11 @@ function evidenceForTurn(turn: Turn): {
     <button type="button" onclick={closeDrawer}>閉じる</button>
   </div>
 
+  <footer class="composer-bar">
+  <div class="composer-column">
   {#if degradedMemory}
     <p id="memory-degraded" role="status">記憶なしで続行しています</p>
   {/if}
-
   <p id="composer-notice" aria-live="polite">{notice}</p>
   <form
     id="composer"
@@ -2867,6 +2920,8 @@ function evidenceForTurn(turn: Turn): {
       停止
     </button>
   </form>
+  </div>
+  </footer>
 </div>
 
 <style>
