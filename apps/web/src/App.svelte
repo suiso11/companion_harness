@@ -159,6 +159,17 @@ let citationSeq = 0;
 // mirroring the legacy runViews seed preservation.
 let seededRunId: string | null = null;
 let watchTimers = new Map<string, number>();
+// C22 execution Stop state by owning run (legacy client.ts parity):
+// a live, pre-marker, cancellable Action execution keeps the generic
+// composer Stop, while a committed marker, a refused cancellability, or
+// a terminal execution hides/disables it. Runs without an entry are
+// ordinary Runs with the unchanged Stop behaviour.
+interface ActionStopState {
+  live: boolean;
+  markerCommitted: boolean;
+  cancellable: boolean;
+}
+let actionRunStops = $state(new Map<string, ActionStopState>());
 
 function isProposalSummary(item: unknown): item is ProposalSummary {
   if (typeof item !== "object" || item === null) return false;
@@ -310,6 +321,7 @@ function resetChatState(): void {
   runTurns = new Map();
   pendingRequest = null;
   cards = [];
+  actionRunStops = new Map();
   degradedMemory = false;
   notice = "";
 }
@@ -613,10 +625,11 @@ async function retry(turnId: string): Promise<void> {
 }
 
 function isActionStopBlocked(runId: string): boolean {
-  for (const card of cards) {
-    if (card.runId === runId && card.actionStopBlocked) return true;
+  const state = actionRunStops.get(runId);
+  if (state === undefined) {
+    return false;
   }
-  return false;
+  return !state.live || state.markerCommitted || !state.cancellable;
 }
 
 async function stop(): Promise<void> {
@@ -1240,6 +1253,11 @@ function trackActionExecutionView(view: ExecutionView): void {
     view.status === "queued" ||
     view.status === "preflight" ||
     view.status === "executing";
+  actionRunStops.set(view.runId, {
+    live,
+    markerCommitted: view.markerCommitted === true,
+    cancellable: view.cancellable === true,
+  });
   const blocked = live && view.markerCommitted;
   const terminal =
     view.receipt !== null ||
@@ -1257,6 +1275,44 @@ function trackActionExecutionView(view: ExecutionView): void {
     }
   }
   cards = [...cards];
+}
+
+/**
+ * Read-only refresh of every decided proposal's ACTUAL execution Stop
+ * state through the existing proposals/execution APIs (no DOM, no card
+ * side effects). Boot awaits this before the first hydration paint so a
+ * reloaded post-marker Action cannot offer Stop even briefly (legacy
+ * client.ts refreshActionRunStops parity).
+ */
+async function refreshActionRunStops(): Promise<void> {
+  if (sessionId === null) return;
+  const sid = sessionId;
+  let listed: { status: number; body: unknown };
+  try {
+    listed = await fetchJson(
+      `/api/sessions/${encodeURIComponent(sid)}/proposals`,
+    );
+  } catch {
+    return;
+  }
+  if (listed.status !== 200 || sessionId !== sid) return;
+  const proposals = (listed.body as { proposals?: unknown }).proposals;
+  if (!Array.isArray(proposals)) return;
+  for (const item of proposals) {
+    if (!isProposalSummary(item) || item.status === "pending") continue;
+    let fetched: { status: number; body: unknown };
+    try {
+      fetched = await fetchJson(
+        `/api/sessions/${encodeURIComponent(sid)}/proposals/${encodeURIComponent(item.proposalId)}/execution`,
+      );
+    } catch {
+      continue;
+    }
+    if (fetched.status !== 200 || sessionId !== sid) continue;
+    const view = fetched.body as ExecutionView;
+    if (typeof view.proposalId !== "string") continue;
+    trackActionExecutionView(view);
+  }
 }
 
 async function syncActions(): Promise<void> {
@@ -1851,6 +1907,10 @@ async function bootSession(): Promise<void> {
       showNotice("停止しました");
       seededRunId = descriptor.runId;
     }
+    // A reload can adopt an m5-action Run as the generic active run. Read
+    // its ACTUAL execution marker/cancellability BEFORE the first hydration
+    // paint so a post-marker (or terminal) Action never offers Stop.
+    await refreshActionRunStops();
   }
   if (sessionId !== sid) return;
   await hydrateHistory();
