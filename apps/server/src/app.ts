@@ -111,7 +111,6 @@ import type { RemoteConfig, ServerConfig } from "./config.js";
 import { ServerConfigError } from "./config.js";
 import { createStdServerLogger, type ServerLogger } from "./logger.js";
 import {
-  createRemoteLoginRateLimiter,
   hashRemoteToken,
   issueRemoteToken,
   type RemoteLoginRateLimiter,
@@ -323,14 +322,17 @@ export interface CreateAppDeps {
    */
   shadowControlChanged?: () => void;
   /**
-   * Slice (b) remote session wiring. BOTH are REQUIRED when the remote
-   * config is enabled (createApp throws fail-closed otherwise) and both
-   * are IGNORED when remote mode is disabled (zero behavior change).
+   * Slice (b) remote session wiring. ALL THREE are REQUIRED when the
+   * remote config is enabled (createApp throws fail-closed otherwise) and
+   * all are IGNORED when remote mode is disabled (zero behavior change).
    * `remoteStore` persists only SHA-256 token hashes (never tokens);
-   * `remotePassword` verifies login attempts in constant time.
+   * `remotePassword` verifies login attempts in constant time;
+   * `remoteLoginLimiter` persists the global failure counter/lockout
+   * (migration 0024) so restarts cannot clear a brute-force lockout.
    */
   remoteStore?: RemoteSessionStore;
   remotePassword?: RemotePasswordVerifier;
+  remoteLoginLimiter?: RemoteLoginRateLimiter;
 }
 
 export interface ServerControls {
@@ -1175,22 +1177,18 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   const remote = remoteConfigOf(config);
   const remoteStore = deps.remoteStore ?? null;
   const remotePassword = deps.remotePassword ?? null;
-  if (remote !== null && (remoteStore === null || remotePassword === null)) {
+  const loginLimiter = deps.remoteLoginLimiter ?? null;
+  if (
+    remote !== null &&
+    (remoteStore === null || remotePassword === null || loginLimiter === null)
+  ) {
     throw new ServerConfigError("remote mode requires session wiring");
   }
-  /**
-   * Global login failure counter with lockout (design §3). Deliberately
-   * NOT keyed by IP: every proxied request arrives from 127.0.0.1, so an
-   * IP key would either lock the single operator out behind any failure
-   * or never trigger. In-memory only: RESETS ON RESTART (README).
-   */
-  const loginLimiter: RemoteLoginRateLimiter | null =
-    remote !== null
-      ? createRemoteLoginRateLimiter({
-          maxFailures: remote.maxFailures,
-          lockoutMs: remote.lockoutMs,
-        })
-      : null;
+  // Global login failure counter with lockout (design §3). Deliberately
+  // NOT keyed by IP: every proxied request arrives from 127.0.0.1, so an
+  // IP key would either lock the single operator out behind any failure
+  // or never trigger. The injected limiter is SQLite-backed (migration
+  // 0024), so the counter/lockout survives a process restart.
   const hasSession = (c: Context): boolean => {
     if (remote === null || remoteStore === null) {
       return false;
@@ -1583,7 +1581,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         401,
       );
     }
-    loginLimiter?.reset();
+    loginLimiter?.reset(t);
     const token = issueRemoteToken();
     try {
       remoteStore.create(

@@ -148,7 +148,10 @@ import {
   loadRemotePasswordRecordSync,
   verifyPasswordAgainstRecord,
 } from "./remote_password.js";
-import { createSqliteRemoteSessionStore } from "./remote_session.js";
+import {
+  createSqliteRemoteLoginRateLimiter,
+  createSqliteRemoteSessionStore,
+} from "./remote_session.js";
 import {
   assertRescheduleWriteAccountCompatible,
   assertRescheduleWriteHintCompatible,
@@ -2777,7 +2780,10 @@ export async function startServer(
     // migration 0023 — tokens themselves are never stored); the verifier
     // re-reads the password file per attempt so rotation needs no
     // restart, and any unreadable file answers a uniform login failure
-    // (never a distinct error). Disabled remote wires nothing.
+    // (never a distinct error). The global failure/lockout counter is
+    // SQLite-backed too (`remote_login_lockout`, migration 0024) so an
+    // auto-deploy restart cannot clear a brute-force lockout. Disabled
+    // remote wires nothing.
     const remotePasswordFile =
       config.remote.enabled === true ? config.remote.passwordFile : null;
     const remoteStore =
@@ -2797,6 +2803,13 @@ export async function startServer(
             },
           }
         : null;
+    const remoteLoginLimiter =
+      remotePasswordFile !== null && handle !== undefined
+        ? createSqliteRemoteLoginRateLimiter(handle.raw, {
+            maxFailures: config.remote.maxFailures,
+            lockoutMs: config.remote.lockoutMs,
+          })
+        : null;
     const { app, controls } = createApp({
       config,
       repo,
@@ -2810,8 +2823,10 @@ export async function startServer(
       // persisted, never replayed, polling ignores them).
       modelDeltas: modelDeltaBus,
       ...(memory !== null ? { memory } : {}),
-      ...(remoteStore !== null && remotePassword !== null
-        ? { remoteStore, remotePassword }
+      ...(remoteStore !== null &&
+      remotePassword !== null &&
+      remoteLoginLimiter !== null
+        ? { remoteStore, remotePassword, remoteLoginLimiter }
         : {}),
       ...(activeShadowWake !== null
         ? {
