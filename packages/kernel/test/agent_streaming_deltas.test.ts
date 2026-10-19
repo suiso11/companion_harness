@@ -72,7 +72,7 @@ async function setup(): Promise<{
   return { handle, repo: createKernelRepository(handle.raw) };
 }
 
-function ctxFor(repo: KernelRepository, runId: string) {
+function ctxFor(repo: KernelRepository, runId: string, signal?: AbortSignal) {
   const run = repo.getRun(runId);
   const turn = repo.getTurn(run.turnId);
   return freezeStrategyContext(
@@ -90,7 +90,7 @@ function ctxFor(repo: KernelRepository, runId: string) {
       input: turn.input,
       frozenContext: turn.frozenContext,
     },
-    new AbortController().signal,
+    signal ?? new AbortController().signal,
   );
 }
 
@@ -108,6 +108,40 @@ function newRunningTurn(
   const runId = posted.body.run.id;
   repo.startRun(runId, { now: now + 1 });
   return { sessionId, runId };
+}
+
+/** Gateway that aborts mid-call, then keeps emitting deltas (non-cooperative). */
+function abortingGateway(late: ModelStreamDelta[]): ModelGateway {
+  return {
+    provider: "openai-compatible",
+    capabilities: { toolCalling: true },
+    baseUrl: "http://127.0.0.1:8000",
+    chatUrl: "http://127.0.0.1:8000/v1/chat/completions",
+    chat: async (
+      _request: ChatRequest,
+      options?: {
+        signal?: AbortSignal;
+        onDelta?: (d: ModelStreamDelta) => void;
+      },
+    ): Promise<ChatResult> => {
+      const signal = options?.signal;
+      await new Promise<void>((resolve) => {
+        if (signal?.aborted) {
+          resolve();
+          return;
+        }
+        signal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+      // The step controller already aborted; these late deltas must be
+      // dropped by the kernel's settlement/abort gate.
+      for (const delta of late) {
+        options?.onDelta?.(delta);
+      }
+      const error = new Error("The operation was aborted");
+      error.name = "AbortError";
+      throw error;
+    },
+  };
 }
 
 describe("agent streaming deltas (PR-2)", () => {
@@ -219,6 +253,46 @@ describe("agent streaming deltas (PR-2)", () => {
       const { runId } = newRunningTurn(repo, T0);
       await strategy(ctxFor(repo, runId));
       expect(repo.listModelCalls(runId)).toHaveLength(1);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("drops deltas emitted after the step settled/aborted", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const broker = createToolBroker({
+        db: handle.raw,
+        repo,
+        registrations: [],
+      });
+      const gateway = abortingGateway([
+        { kind: "draft", text: "stale" },
+        { kind: "usage", inputTokens: 1, outputTokens: 1 },
+      ]);
+      const seen: AgentModelDelta[] = [];
+      const strategy = createAgentStrategy({
+        db: handle.raw,
+        repo,
+        broker,
+        gateway,
+        model: "m",
+        onModelDelta: (delta) => {
+          seen.push(delta);
+        },
+      });
+      const { runId } = newRunningTurn(repo, T0);
+      // Cancel the run while the gateway is mid-call: the step controller
+      // aborts, then the non-cooperative gateway keeps emitting deltas.
+      const external = new AbortController();
+      setTimeout(() => external.abort(), 10);
+      try {
+        await strategy(ctxFor(repo, runId, external.signal));
+      } catch {
+        // Abort settlement may surface as a rejection; the assertion below
+        // is about deltas, not the run fate.
+      }
+      expect(seen).toHaveLength(0);
     } finally {
       closeKernelDatabase(handle);
     }

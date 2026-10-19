@@ -352,9 +352,7 @@ describe("tool-call argument accumulation", () => {
           choices: [
             {
               delta: {
-                tool_calls: [
-                  { index: 0, function: { arguments: second } },
-                ],
+                tool_calls: [{ index: 0, function: { arguments: second } }],
               },
               finish_reason: "tool_calls",
             },
@@ -652,16 +650,18 @@ describe("strict streaming errors", () => {
           choices: [
             {
               delta: {
-                tool_calls: [
-                  { index: 0, function: { name: "notes.search" } },
-                ],
+                tool_calls: [{ index: 0, function: { name: "notes.search" } }],
               },
             },
           ],
         }),
         sseChunk({
           choices: [
-            { delta: { tool_calls: [{ index: 0, function: { name: "notes" } }] } },
+            {
+              delta: {
+                tool_calls: [{ index: 0, function: { name: "notes" } }],
+              },
+            },
           ],
         }),
         "data: [DONE]\n\n",

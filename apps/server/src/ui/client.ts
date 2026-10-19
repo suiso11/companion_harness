@@ -12,6 +12,11 @@
 
 import type { ActiveStatus } from "@companion/contracts";
 import {
+  ANSWER_DRAFT_DELTA_EVENT_TYPE,
+  MODEL_REASONING_DELTA_EVENT_TYPE,
+  MODEL_USAGE_EVENT_TYPE,
+} from "@companion/contracts";
+import {
   retryRefreshesControl,
   revalidateConflictArm,
   shouldResetConflictArm,
@@ -2797,6 +2802,19 @@ class ConversationApp {
         event === null ||
         typeof event.seq !== "number" ||
         typeof event.type !== "string"
+      ) {
+        return;
+      }
+      // Ephemeral delta frames (PR-2): `seq: 0` envelopes for
+      // reasoning/draft/usage are SSE-only and never durable. The bundled
+      // UI does not render deltas, so drop them before the serialized
+      // reducer: they must never advance the cursor or reach the durable
+      // reducer chain.
+      if (
+        event.seq === 0 ||
+        event.type === MODEL_REASONING_DELTA_EVENT_TYPE ||
+        event.type === ANSWER_DRAFT_DELTA_EVENT_TYPE ||
+        event.type === MODEL_USAGE_EVENT_TYPE
       ) {
         return;
       }

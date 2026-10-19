@@ -198,7 +198,9 @@ describe("ephemeral delta bus (PR-2)", () => {
       });
       expect(parseChunkData(chunks[1] as string).type).toBe("model.usage");
       // Firing the stale timers flushes only the untouched other run.
-      pending.splice(0).forEach((fire) => fire());
+      for (const fire of pending.splice(0)) {
+        fire();
+      }
       expect(chunks).toHaveLength(3);
       expect(parseChunkData(chunks[2] as string).payload).toEqual({
         step: 1,
@@ -499,7 +501,8 @@ describe("SSE delta multiplexing (PR-2)", () => {
     await res.body?.cancel().catch(() => {});
   });
 
-  it("keeps the durable-only stream byte-identical without a bus", async () => {    const timers = fakeTimers();
+  it("keeps the durable-only stream byte-identical without a bus", async () => {
+    const timers = fakeTimers();
     const runId = randomUUID();
     const durable = {
       schemaVersion: 1,
