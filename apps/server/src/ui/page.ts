@@ -887,10 +887,54 @@ export function renderRemoteLogin(): HtmlEscapedString {
   ) as unknown as HtmlEscapedString;
 }
 
+/**
+ * PR-1 Svelte chat shell (frontend plan §12 PR-1): dark-only, Japanese.
+ * Same strict CSP as the vanilla shell; the ONLY script/style references
+ * are the self-hosted Svelte bundle built by `scripts/build-ui.mjs` from
+ * `apps/web` (no CDN, no inline script/style/handlers). The interactive
+ * DOM (same `#conversation`/`#composer*`/`#drawer*` ids and `data-action-*`
+ * attributes as the vanilla shell) is rendered client-side by the bundle;
+ * the SSR fragment carries only the mount point plus a no-script notice.
+ * The vanilla shell stays reachable at `/legacy` until PR-6.
+ */
+export function renderSvelteShell(): HtmlEscapedString {
+  return jsx(
+    "html",
+    { lang: "ja" },
+    jsx(
+      "head",
+      {},
+      jsx("meta", { charset: "utf-8" }),
+      jsx("meta", {
+        name: "viewport",
+        content: "width=device-width, initial-scale=1",
+      }),
+      jsx("meta", { name: "color-scheme", content: "dark" }),
+      jsx("title", {}, "Companion Harness"),
+      jsx("link", { rel: "stylesheet", href: "/assets/svelte-app.css" }),
+    ),
+    jsx(
+      "body",
+      {},
+      jsx("div", { id: "svelte-root" }),
+      jsx(
+        "noscript",
+        {},
+        "このページを利用するには JavaScript を有効にしてください",
+      ),
+      jsx("script", { src: "/assets/svelte-app.js", defer: true }),
+    ),
+  ) as unknown as HtmlEscapedString;
+}
+
 /** The shell carries no user/external strings; this guards regressions. */
 export function shellHasNoInlineScript(html: string): boolean {
   const lower = html.toLowerCase();
-  if (lower.includes("<script") && !lower.includes('src="/assets/client.js"')) {
+  if (
+    lower.includes("<script") &&
+    !lower.includes('src="/assets/client.js"') &&
+    !lower.includes('src="/assets/svelte-app.js"')
+  ) {
     return false;
   }
   // Inline event handlers are attributes like ` onclick=` / ` onerror=`;

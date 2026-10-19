@@ -1,0 +1,211 @@
+/* PR-1 Svelte chat theme: dark-only, Japanese, self-hosted, no CDN.
+ * Floor: slice (c) smartphone rules — 360px no horizontal scroll, usable
+ * composer, >=44px primary touch targets, 16px+ inputs (no iOS auto-zoom),
+ * border-box, operable at 200% text zoom. New: `color-scheme: dark`. */
+:root {
+  color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  background: #101418;
+  color: #e8ecef;
+}
+
+body {
+  font-family:
+    system-ui, "Hiragino Kaku Gothic ProN", "Noto Sans JP", sans-serif;
+  margin: 0 auto;
+  max-width: 48rem;
+  padding: 1rem;
+  background: #101418;
+  color: #e8ecef;
+  overflow-x: hidden;
+}
+
+.shell {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.topbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.topbar h1 {
+  font-size: 1.1rem;
+  margin: 0;
+}
+
+.sessions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+#conversation {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+#conversation section {
+  border-top: 1px solid #3a434c;
+  padding: 0.5rem 0;
+  min-width: 0;
+}
+
+#conversation p {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 0.25rem 0;
+}
+
+#composer {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  position: sticky;
+  bottom: 0;
+  background: #101418;
+  padding: 0.5rem 0;
+}
+
+#composer-input {
+  flex: 1;
+  min-width: 0;
+  font-size: 16px;
+  padding: 0.6rem;
+  background: #1a2129;
+  color: #e8ecef;
+  border: 1px solid #4a5560;
+  border-radius: 0.375rem;
+}
+
+#login-expired {
+  border: 1px solid #8a6d1b;
+  background: #241d08;
+  padding: 1rem;
+  border-radius: 0.375rem;
+}
+
+#login-expired form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+#relogin-password {
+  font-size: 16px;
+  padding: 0.6rem;
+  width: 100%;
+  background: #1a2129;
+  color: #e8ecef;
+  border: 1px solid #4a5560;
+  border-radius: 0.375rem;
+}
+
+#drawer {
+  border: 1px solid #4a5560;
+  background: #161c22;
+  padding: 1rem;
+  margin-top: 1rem;
+  border-radius: 0.375rem;
+}
+
+#drawer[hidden] {
+  display: none;
+}
+
+#drawer-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+button,
+select {
+  font-size: 16px;
+  background: #22303d;
+  color: #e8ecef;
+  border: 1px solid #4a5560;
+  border-radius: 0.375rem;
+  padding: 0.5rem 0.75rem;
+}
+
+button:disabled {
+  opacity: 0.5;
+}
+
+#composer-send,
+#composer-stop,
+#session-new,
+#relogin-submit,
+#action-approve,
+#action-reject,
+#history-retry {
+  min-height: 44px;
+  min-width: 44px;
+}
+
+[data-action-card="true"] {
+  border: 1px solid #8a6d1b;
+  background: #1c1a10;
+  padding: 0.75rem;
+  border-radius: 0.375rem;
+}
+
+[data-action-card="true"][data-action-state="expired"] {
+  opacity: 0.75;
+}
+
+#composer-notice,
+#memory-degraded {
+  min-height: 1.5em;
+  margin: 0;
+}
+
+#composer-notice:empty::before {
+  content: "\00a0";
+}
+
+:focus-visible {
+  outline: 2px solid #7fb4ff;
+  outline-offset: 2px;
+}
+
+@media (max-width: 480px) {
+  body {
+    padding: 0.75rem;
+  }
+
+  #composer {
+    flex-wrap: wrap;
+  }
+
+  #composer-input {
+    flex: 1 1 100%;
+  }
+
+  #composer-send,
+  #composer-stop {
+    flex: 1 1 auto;
+  }
+
+  .sessions {
+    width: 100%;
+  }
+}

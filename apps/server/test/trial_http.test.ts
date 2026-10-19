@@ -878,7 +878,9 @@ describe("trial proposal card model", () => {
   it("serves the trial section in the shell with a strict CSP", async () => {
     const fixture = await makeApp(true);
     try {
-      const response = await fixture.app.request("/", {
+      // PR-1: the full panels (trials included) live in the vanilla shell
+      // at `/legacy` until PR-5 moves them to their own routes.
+      const response = await fixture.app.request("/legacy", {
         method: "GET",
         headers: { host: "127.0.0.1" },
       });

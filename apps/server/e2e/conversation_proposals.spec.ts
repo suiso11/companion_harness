@@ -53,7 +53,7 @@ async function seedBurst(
 }
 
 async function boot(page: Page): Promise<string> {
-  await page.goto("/");
+  await page.goto("/legacy");
   await page.locator("#proposal-badge").waitFor({ timeout: 15_000 });
   const sessionId = await page.evaluate(() =>
     localStorage.getItem("ch.sessionId"),

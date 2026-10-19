@@ -124,6 +124,7 @@ import { createNotificationFeedSseResponse, createSseResponse } from "./sse.js";
 import {
   renderConversationShell,
   renderRemoteLogin,
+  renderSvelteShell,
   STRICT_CSP,
 } from "./ui/page.js";
 import { effectiveCursor } from "./ui/reducer.js";
@@ -258,11 +259,17 @@ export interface CreateAppDeps {
   logger?: ServerLogger;
   now?: () => number;
   /**
-   * M3 static UI assets (plan §16.1, §16.7). Populated by bootstrap from
-   * `dist/assets` (esbuild bundle); tests inject inline. Missing entries
-   * serve 404 while the SSR shell keeps working.
+   * M3 static UI assets (plan §16.1, §16.7) + PR-1 Svelte chat bundle.
+   * Populated by bootstrap from `dist/assets` (esbuild bundle) and
+   * `dist/svelte` (Vite bundle); tests inject inline. Missing entries
+   * serve 404 while the shells keep working.
    */
-  assets?: { clientJs?: string; clientCss?: string };
+  assets?: {
+    clientJs?: string;
+    clientCss?: string;
+    svelteJs?: string;
+    svelteCss?: string;
+  };
   /**
    * C21: true only when the M5 triple gate is open (config opt-in +
    * writeEnabled + a dedicated trusted write binding on the active Calendar
@@ -1284,13 +1291,18 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       await next();
       return;
     }
-    if ((method === "GET" || method === "HEAD") && path === "/") {
+    if (
+      (method === "GET" || method === "HEAD") &&
+      (path === "/" || path === "/legacy")
+    ) {
       await next();
       return;
     }
     if (
       (method === "GET" || method === "HEAD") &&
-      path === "/assets/client.css"
+      (path === "/assets/client.css" ||
+        path === "/assets/svelte-app.css" ||
+        path === "/assets/svelte-app.js")
     ) {
       await next();
       return;
@@ -2215,6 +2227,20 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     if (remote !== null && !hasSession(c)) {
       return c.html(renderRemoteLogin().toString(), 200);
     }
+    // PR-1 cutover: the Svelte chat shell is the default route; the
+    // vanilla shell stays reachable at `/legacy` until PR-6.
+    return c.html(renderSvelteShell().toString(), 200);
+  });
+
+  app.get("/legacy", (c) => {
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    c.header("Content-Security-Policy", STRICT_CSP);
+    c.header("cache-control", "no-store");
+    if (remote !== null && !hasSession(c)) {
+      return c.html(renderRemoteLogin().toString(), 200);
+    }
     return c.html(renderConversationShell().toString(), 200);
   });
 
@@ -2228,6 +2254,30 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     c.header("content-type", "text/javascript; charset=utf-8");
     c.header("cache-control", "no-cache");
     return c.body(assets.clientJs, 200);
+  });
+
+  app.get("/assets/svelte-app.js", (c) => {
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    if (assets.svelteJs === undefined) {
+      return apiError(c, 404, "not_found", "resource not found");
+    }
+    c.header("content-type", "text/javascript; charset=utf-8");
+    c.header("cache-control", "no-cache");
+    return c.body(assets.svelteJs, 200);
+  });
+
+  app.get("/assets/svelte-app.css", (c) => {
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    if (assets.svelteCss === undefined) {
+      return apiError(c, 404, "not_found", "resource not found");
+    }
+    c.header("content-type", "text/css; charset=utf-8");
+    c.header("cache-control", "no-cache");
+    return c.body(assets.svelteCss, 200);
   });
 
   app.get("/assets/client.css", (c) => {

@@ -180,7 +180,7 @@ async function bootOnSession(
   origin: string,
   sessionId: string,
 ): Promise<void> {
-  await page.goto(origin);
+  await page.goto(`${origin}/legacy`);
   await page.locator("#notification-badge").waitFor({ timeout: 30_000 });
   await page.evaluate((id: string) => {
     localStorage.setItem("ch.sessionId", id);
