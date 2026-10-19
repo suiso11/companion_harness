@@ -53,6 +53,13 @@ export default defineConfig({
         ],
   timeout: 60_000,
   expect: { timeout: 15_000 },
+  // Serial execution is REQUIRED for the calendar suite: the dedicated
+  // fake harness (e2e/calendar/server.ts) keeps process-global fixture
+  // state (upstream revision, search/get/write counters, arm modes) that
+  // every spec resets via loopback /reset. Parallel workers share that
+  // state, so concurrent specs pollute each other's count assertions
+  // (searchCalls/writeCalls Expected 1 Received N/0). Do not override
+  // with --workers=N on the CLI.
   fullyParallel: false,
   workers: 1,
   retries: 0,
