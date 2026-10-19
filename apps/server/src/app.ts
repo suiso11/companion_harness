@@ -130,6 +130,23 @@ import {
 } from "./ui/page.js";
 import { effectiveCursor } from "./ui/reducer.js";
 
+/**
+ * PR-5: non-chat feature pages. Every path returns the SAME Svelte shell as
+ * `/` (the client derives the page from `location.pathname`), so refresh and
+ * deep-link both work without a catch-all SPA fallback. Kept as a Set so the
+ * remote-mode auth middleware allows the shell document while every API and
+ * asset below it still requires the session.
+ */
+const FEATURE_UI_PATHS: ReadonlySet<string> = new Set([
+  "/memory",
+  "/tasks",
+  "/notifications",
+  "/learning",
+  "/shadow",
+  "/proposals",
+  "/handoff",
+]);
+
 /** Minimal engine surface the routes need (RunEngine satisfies this). */
 export interface EnginePort {
   cancel(sessionId: string, runId: string): { status: string };
@@ -270,6 +287,7 @@ export interface CreateAppDeps {
     clientCss?: string;
     svelteJs?: string;
     svelteCss?: string;
+    svelteChunks?: Record<string, string>;
   };
   /**
    * PR-2 ephemeral model deltas (SSE-only broadcast, never persisted).
@@ -1302,7 +1320,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     }
     if (
       (method === "GET" || method === "HEAD") &&
-      (path === "/" || path === "/legacy")
+      (path === "/" || path === "/legacy" || FEATURE_UI_PATHS.has(path))
     ) {
       await next();
       return;
@@ -1311,7 +1329,8 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       (method === "GET" || method === "HEAD") &&
       (path === "/assets/client.css" ||
         path === "/assets/svelte-app.css" ||
-        path === "/assets/svelte-app.js")
+        path === "/assets/svelte-app.js" ||
+        /^\/assets\/svelte-app-.+\.js$/.test(path))
     ) {
       await next();
       return;
@@ -2257,6 +2276,22 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     return c.html(renderConversationShell().toString(), 200);
   });
 
+  // PR-5 feature pages: same Svelte shell/auth as `/`. The client mounts the
+  // matching surface from the route; unknown paths still 404 (no catch-all).
+  for (const path of FEATURE_UI_PATHS) {
+    app.get(path, (c) => {
+      if (!strictQuery(c, []).ok) {
+        return validationError(c);
+      }
+      c.header("Content-Security-Policy", STRICT_CSP);
+      c.header("cache-control", "no-store");
+      if (remote !== null && !hasSession(c)) {
+        return c.html(renderRemoteLogin().toString(), 200);
+      }
+      return c.html(renderSvelteShell().toString(), 200);
+    });
+  }
+
   app.get("/assets/client.js", (c) => {
     if (!strictQuery(c, []).ok) {
       return validationError(c);
@@ -2291,6 +2326,22 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     c.header("content-type", "text/css; charset=utf-8");
     c.header("cache-control", "no-cache");
     return c.body(assets.svelteCss, 200);
+  });
+
+  // PR-5 dynamic route chunks (e.g. svelte-app-FeaturePage.js). Only the
+  // fixed self-hosted names loaded from dist/svelte are served; anything
+  // else stays 404 (no catch-all static server).
+  app.get("/assets/svelte-app-:chunk", (c) => {
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    const chunk = assets.svelteChunks?.[`svelte-app-${c.req.param("chunk")}`];
+    if (chunk === undefined) {
+      return apiError(c, 404, "not_found", "resource not found");
+    }
+    c.header("content-type", "text/javascript; charset=utf-8");
+    c.header("cache-control", "no-cache");
+    return c.body(chunk, 200);
   });
 
   app.get("/assets/client.css", (c) => {

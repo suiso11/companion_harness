@@ -144,6 +144,34 @@ body {
   letter-spacing: 0.01em;
 }
 
+/* PR-5 slim nav: one link per feature page, chat stays the default. */
+.feature-links {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.feature-links a {
+  padding: 0.2rem 0.5rem;
+  border-radius: var(--radius-sm);
+  color: var(--muted-foreground);
+  text-decoration: none;
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+.feature-links a:hover {
+  background: var(--accent);
+  color: var(--accent-foreground);
+}
+
+.feature-links a.active {
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+}
+
 .sessions {
   display: flex;
   flex-wrap: wrap;
@@ -832,4 +860,47 @@ button[data-action-evidence="before"] {
 
 .answer-markdown thead tr {
   background: var(--code-background);
+}
+
+/* PR-5 feature route chrome + the legacy-side panel skin. */
+.feature-nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid var(--border-subtle, oklch(1 0 0 / 10%));
+}
+.feature-brand {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--foreground, #fafafa);
+  text-decoration: none;
+}
+.feature-nav nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+.feature-nav a {
+  padding: 0.25rem 0.5rem;
+  border-radius: 0.375rem;
+  color: var(--muted-foreground, #b3b3b3);
+  text-decoration: none;
+  font-size: 0.875rem;
+}
+.feature-nav a:hover {
+  background: var(--accent, #444);
+  color: var(--foreground, #fafafa);
+}
+.feature-nav a.active {
+  background: var(--secondary, #4a4a4a);
+  color: var(--foreground, #fafafa);
+}
+.feature-surface {
+  padding: 0 1rem 1rem;
+}
+.feature-error {
+  margin: 1rem;
+  color: var(--destructive, #f87171);
 }

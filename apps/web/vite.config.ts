@@ -18,7 +18,7 @@ export default defineConfig({
     rollupOptions: {
       output: {
         entryFileNames: "svelte-app.js",
-        chunkFileNames: "svelte-app-[hash].js",
+        chunkFileNames: "svelte-app-[name].js",
         assetFileNames: "svelte-app.[ext]",
       },
     },
