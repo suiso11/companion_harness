@@ -1,0 +1,58 @@
+# Local LLM stack (llama.cpp + LiteLLM) mirrored from the host's
+# /srv/llm/compose.yaml. qwen was removed; images are pinned by digest.
+# Secrets stay in /srv/llm/.env (never committed) — see .env.example.
+services:
+  gemma:
+    image: ghcr.io/ggml-org/llama.cpp@sha256:f88fa8d94d872312a4ad117acd490fa997bef81f03f161f0cfe0d74272e5b5bb
+    container_name: gemma-4-26b-a4b
+    restart: unless-stopped
+    environment:
+      LLAMA_API_KEY: ${LLAMA_API_KEY}
+    volumes:
+      - /srv/models/huggingface:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
+    command:
+      - -m
+      - /root/.cache/huggingface/models--unsloth--gemma-4-26B-A4B-it-GGUF/snapshots/c099eb48e663fd284577b04978a94ffccb261841/gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - -c
+      - "16384"
+      - --n-gpu-layers
+      - "99"
+      - -fa
+      - "on"
+      - --jinja
+      - --alias
+      - gemma-4-26b-a4b
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+    stop_grace_period: 30s
+
+  litellm:
+    image: docker.litellm.ai/berriai/litellm@sha256:3d88bd757134a00e8c00237b85a021ab1f6d54abb9c1df750f411dbe7256a500
+    container_name: litellm
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./litellm_config.yaml:/app/config.yaml:ro
+    environment:
+      LLAMA_API_KEY: ${LLAMA_API_KEY}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+    command:
+      - --config
+      - /app/config.yaml
+      - --port
+      - "4000"
+    depends_on:
+      gemma:
+        condition: service_healthy
