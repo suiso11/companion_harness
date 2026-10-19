@@ -809,7 +809,20 @@ button[data-action-evidence="before"] {
 .answer-markdown :is(th, td) {
   border: 1px solid var(--border-subtle);
   padding: 0.375rem 0.625rem;
-  text-align: start;
+}
+
+/* GFM column alignment (review #84): the sanitizer hook converts the
+   deprecated `align` attribute on th/td into these fixed classes. */
+.answer-markdown :is(th, td).md-align-left {
+  text-align: left;
+}
+
+.answer-markdown :is(th, td).md-align-center {
+  text-align: center;
+}
+
+.answer-markdown :is(th, td).md-align-right {
+  text-align: right;
 }
 
 .answer-markdown thead tr {

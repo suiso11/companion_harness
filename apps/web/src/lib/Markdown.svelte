@@ -10,6 +10,10 @@ let { text }: Props = $props();
 
 const html = $derived(renderAnswerMarkdown(text));
 
+// Copy-button "copied" reset timer: rapid clicks must clear the previous
+// timeout, otherwise the first timer restores the label early (review #84).
+let copyResetTimer: number | null = null;
+
 async function copyText(value: string): Promise<boolean> {
   try {
     await navigator.clipboard.writeText(value);
@@ -39,8 +43,10 @@ function onClick(event: MouseEvent): void {
     if (!ok) return;
     const label = button.textContent;
     button.textContent = "コピー済み";
-    window.setTimeout(() => {
+    if (copyResetTimer !== null) window.clearTimeout(copyResetTimer);
+    copyResetTimer = window.setTimeout(() => {
       button.textContent = label;
+      copyResetTimer = null;
     }, 1200);
   });
 }
