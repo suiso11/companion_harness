@@ -61,11 +61,11 @@ CREATE TABLE notifications_new (
 
 INSERT INTO notifications_new
   (id, session_id, seq, scope, kind, priority, brief_text, source_kind,
-   source_version, source_epoch, cited_deadlines, fingerprint, outdated,
-   context_expiry_at, created_at)
+   source_id, source_version, source_epoch, cited_deadlines, fingerprint,
+   outdated, context_expiry_at, created_at)
 SELECT id, session_id, seq, scope, kind, priority, brief_text, source_kind,
-       source_version, source_epoch, cited_deadlines, fingerprint, outdated,
-       context_expiry_at, created_at
+       source_id, source_version, source_epoch, cited_deadlines, fingerprint,
+       outdated, context_expiry_at, created_at
 FROM notifications;
 
 CREATE TABLE notification_acks_new (
