@@ -7,7 +7,7 @@
 # Checks:
 #   - GET /health/live
 #   - systemctl --user is-failed for companion/companion-deploy/companion-backup
-#   - free space on / and /srv (error below 10%)
+#   - used space on / and /srv (error above 90% used)
 #   - newest backup generation age for Companion and remind (error above 36h)
 #
 # Exit 0 when all checks pass, 1 when any check failed.
@@ -52,15 +52,15 @@ else
   report "systemctl not found; cannot check unit state"
 fi
 
-# --- disk free (error below 10%) ---
+# --- disk used (df col5 is %used; error above 90% used) ---
 check_disk() {
   mount="$1"
-  pct="$(df -P -k "$mount" 2>/dev/null | awk 'NR==2 {gsub("%", "", $5); print $5}')"
-  case "$pct" in
+  used="$(df -P -k "$mount" 2>/dev/null | awk 'NR==2 {gsub("%", "", $5); print $5}')"
+  case "$used" in
     ''|*[!0-9]*) report "disk check failed: $mount" ;;
     *)
-      if [ "$pct" -lt 10 ]; then
-        report "disk low: $mount ${pct}% free"
+      if [ "$used" -gt 90 ]; then
+        report "disk low: $mount ${used}% used"
       fi
       ;;
   esac
