@@ -899,7 +899,8 @@ function deepFreeze<T>(value: T): T {
  *
  * - Env `COMPANION_MEMORY_JSON` is strict JSON only; unset means null.
  * - Must be an exact object with only `{ executable, entry, config,
- *   scope, timeoutMs?, maxResponseBytes?, recallLimit?, idleMs? }`.
+ *   scope, timeoutMs?, extractTimeoutMs?, maxResponseBytes?, recallLimit?,
+ *   idleMs? }`.
  * - `executable`: absolute path to the child-process binary (usually the
  *   Node.js binary that runs the remind CLI). `entry`: absolute path to
  *   the remind CLI script. `config`: absolute path to the remind startup
@@ -909,7 +910,10 @@ function deepFreeze<T>(value: T): T {
  *   Companion CLI calls carry this scope; cross-scope records are
  *   rejected (FORBIDDEN_SCOPE) and never surfaced.
  * - `timeoutMs` (default 5000, bounds 500..30000): per-CLI-call deadline
- *   with hard kill afterwards. `maxResponseBytes` (default 65536, bounds
+ *   with hard kill afterwards. `extractTimeoutMs` (default 120000, bounds
+ *   5000..300000): SEPARATE budget for the extraction model call only —
+ *   a local reasoning model needs far longer than one CLI call; the CLI
+ *   `timeoutMs` is never changed by it. `maxResponseBytes` (default 65536, bounds
  *   4096..1048576): stdout byte cap. `recallLimit` (default 5, bounds
  *   1..8): pre-answer recall item cap. `idleMs` (default 30000, bounds
  *   5000..300000): idle delay before one bounded cultivation batch.
@@ -927,6 +931,8 @@ export interface MemoryConfig {
   readonly scope: string;
   /** Per-CLI-call deadline in ms (default 5000). */
   readonly timeoutMs: number;
+  /** Extraction model-call budget in ms (default 120000); never the CLI deadline. */
+  readonly extractTimeoutMs: number;
   /** Stdout byte cap per CLI call (default 65536). */
   readonly maxResponseBytes: number;
   /** Pre-answer recall item cap (default 5, never above 8). */
@@ -938,6 +944,9 @@ export interface MemoryConfig {
 export const DEFAULT_MEMORY_TIMEOUT_MS = 5000;
 export const MIN_MEMORY_TIMEOUT_MS = 500;
 export const MAX_MEMORY_TIMEOUT_MS = 30000;
+export const DEFAULT_MEMORY_EXTRACT_TIMEOUT_MS = 120000;
+export const MIN_MEMORY_EXTRACT_TIMEOUT_MS = 5000;
+export const MAX_MEMORY_EXTRACT_TIMEOUT_MS = 300000;
 export const DEFAULT_MEMORY_MAX_RESPONSE_BYTES = 65536;
 export const MIN_MEMORY_MAX_RESPONSE_BYTES = 4096;
 export const MAX_MEMORY_MAX_RESPONSE_BYTES = 1048576;
@@ -1015,6 +1024,7 @@ export function parseMemoryConfig(
       key !== "config" &&
       key !== "scope" &&
       key !== "timeoutMs" &&
+      key !== "extractTimeoutMs" &&
       key !== "maxResponseBytes" &&
       key !== "recallLimit" &&
       key !== "idleMs"
@@ -1028,6 +1038,7 @@ export function parseMemoryConfig(
     config?: unknown;
     scope?: unknown;
     timeoutMs?: unknown;
+    extractTimeoutMs?: unknown;
     maxResponseBytes?: unknown;
     recallLimit?: unknown;
     idleMs?: unknown;
@@ -1042,6 +1053,13 @@ export function parseMemoryConfig(
     MIN_MEMORY_TIMEOUT_MS,
     MAX_MEMORY_TIMEOUT_MS,
     "memory timeoutMs",
+  );
+  const extractTimeoutMs = requireBoundedInt(
+    record.extractTimeoutMs,
+    DEFAULT_MEMORY_EXTRACT_TIMEOUT_MS,
+    MIN_MEMORY_EXTRACT_TIMEOUT_MS,
+    MAX_MEMORY_EXTRACT_TIMEOUT_MS,
+    "memory extractTimeoutMs",
   );
   const maxResponseBytes = requireBoundedInt(
     record.maxResponseBytes,
@@ -1070,6 +1088,7 @@ export function parseMemoryConfig(
     config: configPath,
     scope,
     timeoutMs,
+    extractTimeoutMs,
     maxResponseBytes,
     recallLimit,
     idleMs,

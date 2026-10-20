@@ -23,6 +23,7 @@ import {
   type BackgroundResourceGate,
   createBackgroundResourceGate,
 } from "../src/background_resource.js";
+import { createCollectingLogger, type ServerLogger } from "../src/logger.js";
 import {
   type MemoryCliAddress,
   type MemoryCliCallOptions,
@@ -32,6 +33,7 @@ import {
 import {
   createMemoryService,
   MEMORY_EXTRACT_MAX_ITEMS,
+  MEMORY_EXTRACT_RETRY_MAX_ATTEMPTS,
   MEMORY_RECALL_RUN_MARKER,
   type MemoryService,
   parseExtractionOutcome,
@@ -114,6 +116,7 @@ function makeService(
     idleMs?: number;
     scope?: string;
     background?: BackgroundResourceGate | null;
+    logger?: ServerLogger;
   } = {},
 ): MemoryService {
   const service = createMemoryService({
@@ -134,6 +137,7 @@ function makeService(
     ...(overrides.background !== undefined
       ? { background: overrides.background }
       : {}),
+    ...(overrides.logger !== undefined ? { logger: overrides.logger } : {}),
     cliCall,
   });
   services.push(service);
@@ -1810,6 +1814,159 @@ describe("privacy metadata on memory writes (F-I01-05)", () => {
       await svc.stop().catch(() => undefined);
       void logged;
       await service.stop().catch(() => undefined);
+    } finally {
+      f.close();
+    }
+  });
+});
+
+describe("raw-first append and persistent extraction retries", () => {
+  /**
+   * Extraction gateway whose calls hang until aborted (polled signal):
+   * mimics a busy local reasoning model that only a preemption/STOP/shutoff
+   * ends. `started` counts how many extraction calls began.
+   */
+  function abortableExtractionGateway(): {
+    gateway: ModelGateway;
+    startedCount: () => number;
+  } {
+    let inFlight = 0;
+    const gateway: ModelGateway = {
+      provider: "openai-compatible",
+      capabilities: { toolCalling: false },
+      baseUrl: "http://127.0.0.1:9",
+      chatUrl: "http://127.0.0.1:9/v1/chat/completions",
+      chat: async (_request, options): Promise<ChatResult> => {
+        inFlight += 1;
+        const signal = options?.signal;
+        const deadline = Date.now() + 15000;
+        while (signal?.aborted !== true && Date.now() < deadline) {
+          await sleep(5);
+        }
+        throw new Error("extraction_aborted_or_deadline");
+      },
+    };
+    return { gateway, startedCount: () => inFlight };
+  }
+
+  it("raw-first: an aborted extraction never skips the committed turn's event.append", async () => {
+    const f = await openRepo();
+    try {
+      const collecting = createCollectingLogger("debug");
+      const { gateway, startedCount } = abortableExtractionGateway();
+      const service = makeService(f.repo, async () => okEnvelope(null), {
+        gateway,
+        logger: collecting.logger,
+      });
+      service.start();
+      const run = completeV2Run(f.repo, [{ text: "answered", citations: [] }]);
+      service.onRunCompleted(run.runId);
+      // RAW-FIRST: the append enqueues BEFORE the extraction resolves.
+      await waitFor(
+        () => outboxRowsByKind(f, "event.append", run.runId).length === 1,
+      );
+      await waitFor(() => startedCount() === 1);
+      // Foreground preemption aborts the in-flight extraction...
+      service.notifyForeground();
+      await waitFor(() =>
+        collecting.records.some(
+          (record) =>
+            record.code === "memory.extract_aborted" &&
+            record.runId === run.runId,
+        ),
+      );
+      // ...and the raw event.append row is still durable (never skipped):
+      expect(outboxRowsByKind(f, "event.append", run.runId)).toHaveLength(1);
+      // No remember fan-out from the aborted extraction (sourceRefs stay
+      // pending until a later bounded retry lands items):
+      expect(outboxRowsByKind(f, "record.remember", run.runId)).toHaveLength(0);
+    } finally {
+      f.close();
+    }
+  });
+
+  it("raw-first honors the STOP/shutdown gate: a closed gate lands nothing", async () => {
+    const f = await openRepo();
+    try {
+      const gate = createBackgroundResourceGate();
+      gate.close();
+      const { gateway, startedCount } = abortableExtractionGateway();
+      const service = makeService(f.repo, async () => okEnvelope(null), {
+        gateway,
+        background: gate,
+      });
+      service.start();
+      const run = completeV2Run(f.repo, [{ text: "answered", citations: [] }]);
+      service.onRunCompleted(run.runId);
+      await sleep(300);
+      // STOP/shutdown gate: no extraction AND no raw append — no writes.
+      expect(startedCount()).toBe(0);
+      expect(f.repo.countPendingMemoryJobs(Date.now())).toBe(0);
+      expect(outboxRowsByKind(f, "event.append", run.runId)).toHaveLength(0);
+    } finally {
+      f.close();
+    }
+  });
+
+  it("extraction retry attempts persist across retries and give up bounded", async () => {
+    const f = await openRepo();
+    try {
+      const collecting = createCollectingLogger("debug");
+      const { gateway, startedCount } = abortableExtractionGateway();
+      const service = makeService(f.repo, async () => okEnvelope(null), {
+        gateway,
+        idleMs: 30,
+        logger: collecting.logger,
+      });
+      service.start();
+      const run = completeV2Run(f.repo, [{ text: "answered", citations: [] }]);
+      service.onRunCompleted(run.runId);
+      // Every retry is freshly aborted by a "foreground" burst: the
+      // attempt counter must keep RISING (never reset to attempt:1).
+      for (
+        let expected = 1;
+        expected <= MEMORY_EXTRACT_RETRY_MAX_ATTEMPTS;
+        expected += 1
+      ) {
+        await waitFor(() => startedCount() >= expected, 10000);
+        service.notifyForeground();
+        await waitFor(
+          () =>
+            collecting.records.some(
+              (record) =>
+                record.code === "memory.extract_retry_scheduled" &&
+                record.runId === run.runId &&
+                record.attempt === expected,
+            ),
+          10000,
+        );
+      }
+      // One idle window re-cultivates once more; the final abort exceeds
+      // the bound: honest give-up from the SERVICE's persisted counter.
+      await waitFor(
+        () => startedCount() >= MEMORY_EXTRACT_RETRY_MAX_ATTEMPTS + 1,
+        10000,
+      );
+      service.notifyForeground();
+      await waitFor(
+        () =>
+          collecting.records.some(
+            (record) =>
+              record.code === "memory.extract_gave_up" &&
+              record.runId === run.runId &&
+              record.attempt === MEMORY_EXTRACT_RETRY_MAX_ATTEMPTS,
+          ),
+        10000,
+      );
+      // The counter never reset: attempt:1 was scheduled exactly once.
+      expect(
+        collecting.records.filter(
+          (record) =>
+            record.code === "memory.extract_retry_scheduled" &&
+            record.runId === run.runId &&
+            record.attempt === 1,
+        ),
+      ).toHaveLength(1);
     } finally {
       f.close();
     }

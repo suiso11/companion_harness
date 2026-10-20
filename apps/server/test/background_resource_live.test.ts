@@ -16,7 +16,9 @@
 //   completes normally) and the held job is never auto-revived.
 // - STOP (I03-09): pausing control keeps memory admission OPEN — a paused
 //   turn still cultivates (across restart too) and explicit manage still
-//   completes; a parked extraction aborts only on its own `timeoutMs` bound
+//   completes; a parked extraction aborts only on its own `extractTimeoutMs`
+//   budget (the extraction model call is never bounded by the CLI
+//   `timeoutMs`)
 //   (STOP never aborts memory work), landing NO late write for it.
 // - Release never auto-revives a held job (it stays held to the end).
 //
@@ -777,6 +779,10 @@ describe("background resource live proof (production server + real sockets)", ()
           config: remindConfig,
           scope: TEST_SCOPE,
           timeoutMs: 5000,
+          // Extraction budget EXPLICITLY separate from the CLI deadline:
+          // short here so phase 3's park aborts on its own budget within
+          // the wait window; the CLI `timeoutMs` is unchanged by it.
+          extractTimeoutMs: 5000,
           maxResponseBytes: 65536,
           recallLimit: 5,
           idleMs: 300000,
@@ -951,8 +957,10 @@ describe("background resource live proof (production server + real sockets)", ()
       expect((stillHeld.body as { status: string }).status).toBe("held");
 
       // Phase 3: with NO foreground chat anywhere, a parked extraction
-      // socket aborts only on its OWN `timeoutMs` bound (I03-09: STOP never
-      // aborts memory work) and lands no late memory write for that run.
+      // socket aborts only on its OWN `extractTimeoutMs` budget (I03-09:
+      // STOP never aborts memory work) and lands no late remember write
+      // for that run; the raw event.append landed at commit (raw-first,
+      // BEFORE the abort) and drained independently.
       model.state.parkExtract = true;
       model.state.parkShadow = false;
       const third = await postJson(
@@ -976,13 +984,21 @@ describe("background resource live proof (production server + real sockets)", ()
       await waitFor(
         () => model.state.aborted.includes("extract"),
         15_000,
-        "parked extraction socket never reached its own timeoutMs bound",
+        "parked extraction socket never reached its own extractTimeoutMs budget",
       );
       for (const entry of [...model.state.parked]) {
         entry.respond();
       }
       await new Promise((resolve) => setTimeout(resolve, 800));
-      expect(queryOutboxKinds(dbPath, turn3.runId)).toHaveLength(0);
+      // Raw-first: the committed turn's event.append enqueued at commit
+      // (before the abort) and is the ONLY outbox job for this run — the
+      // aborted extraction never became a payload verdict, so no late
+      // record.remember write landed even after the late output responded
+      // above (STOP still yields no late remember writes).
+      const abortedKinds = queryOutboxKinds(dbPath, turn3.runId).map(
+        (job) => job.kind,
+      );
+      expect(abortedKinds).toEqual(["event.append"]);
 
       // Foreground chat still works while STOPped.
       const fourth = await postJson(

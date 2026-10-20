@@ -1540,6 +1540,8 @@ export async function startServer(
         scope: memoryConfig.scope,
         recallLimit: memoryConfig.recallLimit,
         idleMs: memoryConfig.idleMs,
+        // SEPARATE extraction model-call budget (never the CLI timeoutMs).
+        extractTimeoutMs: memoryConfig.extractTimeoutMs,
         repo: baseRepo,
         gateway: modelGateway,
         model: modelName,
