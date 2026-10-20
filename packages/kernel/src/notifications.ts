@@ -1877,6 +1877,22 @@ export function recordSystemNotice(
   const now = nowMs(options.now);
   const fingerprint = systemNoticeFingerprint(subject, level, title, body);
   return withImmediate(db, () => {
+    // Idempotency per event key (live bug 2026-10-20): source_id is the
+    // event key (e.g. `ops:deploy-fail:<sha8>`). If ANY session already has
+    // a row with this source_id, the event was already fanned out — a retry
+    // (timer re-fire, manual re-run, crash between deploy and notify) must
+    // not duplicate it. Counted as deduped.
+    const existing = db
+      .prepare("SELECT 1 AS hit FROM notifications WHERE source_id = ? LIMIT 1")
+      .get(sourceId);
+    if (existing !== undefined) {
+      return {
+        sessions: 0,
+        recorded: 0,
+        deduped: 1,
+        level,
+      };
+    }
     const sessions = (
       db
         .prepare("SELECT id FROM sessions ORDER BY created_at ASC, id ASC")

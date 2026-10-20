@@ -36,10 +36,24 @@ if ! cd "$DEPLOY_DIR"; then
   exit 0
 fi
 # Under systemd the unit's EnvironmentFile already provides COMPANION_DB_PATH;
-# best-effort fallback for manual runs.
+# best-effort fallback for manual runs. NOTE: never `. "$ENV_FILE"` the whole
+# file — shell sourcing applies sh quoting rules, which mangle the quoted
+# JSON values (COMPANION_MEMORY_JSON / COMPANION_REMOTE_JSON) that systemd's
+# EnvironmentFile parser already unescaped correctly, and the mangled values
+# clobber the good env, making loadServerConfig fail with invalid
+# configuration (live bug 2026-10-20: every success notify failed this way).
+# Extract ONLY the DB path, without evaluating any other line.
 if [ -z "${COMPANION_DB_PATH:-}" ] && [ -f "$ENV_FILE" ]; then
-  # shellcheck disable=SC1090
-  . "$ENV_FILE"
+  _db_line="$(grep -E '^COMPANION_DB_PATH=' "$ENV_FILE" | tail -1 || true)"
+  COMPANION_DB_PATH="${_db_line#COMPANION_DB_PATH=}"
+  # Strip one pair of surrounding double or single quotes if present.
+  case "$COMPANION_DB_PATH" in
+    "\"\"") COMPANION_DB_PATH="" ;;
+    \"*\") COMPANION_DB_PATH="$(printf '%s' "$COMPANION_DB_PATH" | sed -e 's/^"//' -e 's/"$//')" ;;
+    \'*\') COMPANION_DB_PATH="$(printf '%s' "$COMPANION_DB_PATH" | sed -e "s/^'//" -e "s/'\$//")" ;;
+  esac
+  export COMPANION_DB_PATH
+  unset _db_line
 fi
 
 NOTIFY_OUT="$(timeout 10 pnpm --filter @companion/server exec tsx \

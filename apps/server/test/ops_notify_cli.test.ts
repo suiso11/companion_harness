@@ -118,7 +118,8 @@ describe("notify CLI run against the kernel repository", () => {
       "ops notify error: recorded=2 deduped=0",
     );
     expect(runNotifyCli(errorArgs, envFor(dbPath))).toBe(
-      "ops notify error: recorded=0 deduped=2",
+      // Retry with the same event key (source_id): one global dedup hit.
+      "ops notify error: recorded=0 deduped=1",
     );
     const handle = openKernelDatabase(dbPath);
     try {
