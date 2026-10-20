@@ -451,6 +451,10 @@ export type {
   ReadNotificationOptions,
   RecordDueDeadlinesOptions,
 } from "./notifications.js";
+export type {
+  SystemNotice,
+  SystemNoticeSpec,
+} from "./notifications.js";
 export {
   ackNotification,
   buildDeadlineSchedule,
@@ -462,6 +466,8 @@ export {
   listNotifications,
   listNotificationsForward,
   recordDueDeadlines,
+  recordSystemNotice,
+  systemNoticeFingerprint,
 } from "./notifications.js";
 export type {
   CalendarConnectorView,

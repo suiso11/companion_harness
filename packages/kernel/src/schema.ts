@@ -1420,7 +1420,8 @@ export const trialAliasFences = sqliteTable(
 );
 
 // AV05 notifications durable projection (kernel core only). Mirrors
-// packages/kernel/migrations/0016_notifications.sql, which is authoritative.
+// packages/kernel/migrations/0016_notifications.sql + 0025 (ops kind,
+// authoritative), which are authoritative.
 export const notificationCursors = sqliteTable(
   "notification_cursors",
   {
@@ -1473,7 +1474,7 @@ export const notifications = sqliteTable(
     check("notifications_seq_check", sql`${t.seq} >= 1`),
     check(
       "notifications_kind_check",
-      sql`${t.kind} IN ('progress','proposal','question','deadline','commitment')`,
+      sql`${t.kind} IN ('progress','proposal','question','deadline','commitment','ops')`,
     ),
     check(
       "notifications_priority_check",
@@ -1481,7 +1482,7 @@ export const notifications = sqliteTable(
     ),
     check(
       "notifications_source_kind_check",
-      sql`${t.sourceKind} IN ('shadow_job','action_receipt','task_deadline')`,
+      sql`${t.sourceKind} IN ('shadow_job','action_receipt','task_deadline','ops_event')`,
     ),
     check(
       "notifications_cited_deadlines_check",
