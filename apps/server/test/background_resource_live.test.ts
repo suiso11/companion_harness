@@ -615,11 +615,19 @@ describe("background resource live proof (production server + real sockets)", ()
           { query: "green tea", runId: turn1.runId },
         );
         expect(res.status).toBe(200);
-        const hits = (res.body as { hits: Array<{ handle: string }> }).hits;
+        const hits = (
+          res.body as {
+            hits: Array<{ handle: string; snippet: string }>;
+          }
+        ).hits;
         expect(hits.length).toBeGreaterThan(0);
+        // The summary row matches "green tea" too (store-every-turn):
+        // select the user_fact hit by snippet text, never by position.
+        const factHit = hits.find((hit) => hit.snippet.includes("green tea"));
+        expect(factHit).toBeDefined();
         return {
           searchId: (res.body as { searchId: string }).searchId,
-          handle: (hits[0] as { handle: string }).handle,
+          handle: (factHit as { handle: string }).handle,
         };
       };
       const stageAndAwait = async (

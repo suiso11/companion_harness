@@ -462,7 +462,11 @@ describe("live memory HTTP regression (real server + real remind CLI)", () => {
         }
       ).items;
       expect(items.length).toBeGreaterThanOrEqual(1);
-      expect(items[0]?.snippet).toContain("green tea");
+      // The summary row is Japanese (no ASCII fact text); match the
+      // user_fact snippet by text, never by list position.
+      expect(items.some((item) => item.snippet.includes("green tea"))).toBe(
+        true,
+      );
 
       // Mere recall without citations grants nothing (no feedback yet).
       expect(queryGrants(dbPath)).toHaveLength(0);
