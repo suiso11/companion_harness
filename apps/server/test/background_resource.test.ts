@@ -608,17 +608,13 @@ describe("background contention across actual callsites", () => {
       memoryService.notifyForeground();
       await waitFor(() => contention.state.aborted.includes("extract"));
       // Even though the provider would answer late, the late extraction
-      // output is discarded: no remember fan-out lands. The raw
-      // event.append was enqueued BEFORE extraction (decision I: raw
-      // storage never depends on extraction) and still lands.
+      // output is discarded and NO memory write lands for the run: the
+      // aborted extraction is never a payload verdict, so the raw
+      // event.append never enqueues either (no late writes).
       contention.releaseAll();
-      await waitFor(() => ops.includes("event.append"));
-      expect(ops.includes("record.remember")).toBe(false);
-      expect(
-        memory.repo
-          .claimDueMemoryJobs(5, Date.now())
-          .filter((job) => job.kind === "record.remember"),
-      ).toHaveLength(0);
+      await sleep(300);
+      expect(ops.includes("event.append")).toBe(false);
+      expect(memory.repo.countPendingMemoryJobs(Date.now())).toBe(0);
     } finally {
       memory.close();
     }
@@ -674,16 +670,16 @@ describe("background contention across actual callsites", () => {
         background: gate,
       });
       memoryService.start();
-      // Shutdown closes the gate: a completion while closed skips
-      // extraction with no claim on the gate — but the raw event.append
-      // still enqueues and drains (decision I: raw storage never depends
-      // on extraction).
+      // Shutdown closes the gate: a completion while closed admits nothing
+      // new — no extraction, and no raw event.append either (STOP lands
+      // no late write for that run).
       gate.close();
       expect(gate.closed).toBe(true);
       const run = completeV2Run(memory.repo);
       memoryService.onRunCompleted(run.runId);
-      await waitFor(() => ops.includes("event.append"));
-      expect(ops.includes("record.remember")).toBe(false);
+      await sleep(300);
+      expect(ops.includes("event.append")).toBe(false);
+      expect(memory.repo.countPendingMemoryJobs(Date.now())).toBe(0);
       // Reopen: a new completion cultivates normally again.
       gate.reopen();
       expect(gate.closed).toBe(false);

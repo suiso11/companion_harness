@@ -20,6 +20,10 @@ import {
 import type { ChatResult, ModelGateway } from "@companion/model-local";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  type BackgroundResourceGate,
+  createBackgroundResourceGate,
+} from "../src/background_resource.js";
+import {
   type MemoryCliAddress,
   type MemoryCliCallOptions,
   type MemoryCliEnvelope,
@@ -109,6 +113,7 @@ function makeService(
     now?: () => number;
     idleMs?: number;
     scope?: string;
+    background?: BackgroundResourceGate | null;
   } = {},
 ): MemoryService {
   const service = createMemoryService({
@@ -126,6 +131,9 @@ function makeService(
     gateway: overrides.gateway ?? null,
     model: "test-model",
     ...(overrides.now !== undefined ? { now: overrides.now } : {}),
+    ...(overrides.background !== undefined
+      ? { background: overrides.background }
+      : {}),
     cliCall,
   });
   services.push(service);
@@ -1123,17 +1131,63 @@ describe("completion cultivation and cite-gated feedback", () => {
         { text: "answered again", citations: [] },
       ]);
       service2.onRunCompleted(run2.runId);
+      // The raw event.append row exists for the failed-extraction run
+      // (pending or already acked by the drain); no remember fan-out.
       await waitFor(
-        () =>
-          f.repo
-            .claimDueMemoryJobs(5, Date.now())
-            .filter((job) => job.kind === "event.append").length === 1,
+        () => outboxRowsByKind(f, "event.append", run2.runId).length === 1,
       );
+      expect(outboxRowsByKind(f, "record.remember", run2.runId)).toHaveLength(
+        0,
+      );
+    } finally {
+      f.close();
+    }
+  });
+
+  it("raw append honors the background gate: open gate + invalid extraction lands, closed gate (STOP) lands nothing", async () => {
+    const f = await openRepo();
+    try {
+      const gate = createBackgroundResourceGate();
+      const ops: string[] = [];
+      const cliCall: CliCall = async (_address, op) => {
+        ops.push(op);
+        return okEnvelope(null);
+      };
+      // Gate OPEN + invalid extraction payload: the raw event.append still
+      // enqueues and drains (raw storage never depends on extraction
+      // success); only the remember fan-out is forgone.
+      const service = makeService(f.repo, cliCall, {
+        gateway: extractionGateway("not json at all").gateway,
+        background: gate,
+      });
+      service.start();
+      const run = completeV2Run(f.repo, [{ text: "answered", citations: [] }]);
+      service.onRunCompleted(run.runId);
+      await waitFor(() => ops.includes("event.append"));
       expect(
         f.repo
           .claimDueMemoryJobs(5, Date.now())
           .filter((job) => job.kind === "record.remember"),
       ).toHaveLength(0);
+
+      // Gate CLOSED (STOP/shutdown): a completion admits nothing new — no
+      // extraction, and no raw event.append: no late writes after STOP.
+      gate.close();
+      expect(gate.closed).toBe(true);
+      const opsBefore = ops.length;
+      const stoppedRun = completeV2Run(f.repo, [
+        { text: "answered while stopped", citations: [] },
+      ]);
+      service.onRunCompleted(stoppedRun.runId);
+      await sleep(300);
+      expect(ops.slice(opsBefore)).toEqual([]);
+      expect(f.repo.countPendingMemoryJobs(Date.now())).toBe(0);
+
+      // Reopen: a new completion cultivates normally again.
+      gate.reopen();
+      const run2 = completeV2Run(f.repo, [{ text: "answered", citations: [] }]);
+      service.onRunCompleted(run2.runId);
+      await waitFor(() => ops.length > opsBefore);
     } finally {
       f.close();
     }

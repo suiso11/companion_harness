@@ -524,7 +524,7 @@ export function stripOneJsonFence(text: string): string {
   return inner.slice(newlineIdx + 1).trim();
 }
 
-export type ExtractionParseStatus = "ok" | "none" | "invalid";
+export type ExtractionParseStatus = "ok" | "none" | "invalid" | "aborted";
 
 export interface ExtractionParseResult {
   readonly items: ExtractedMemory[];
@@ -533,6 +533,9 @@ export interface ExtractionParseResult {
    * `{memories: []}` shape with zero items (genuine nothing-to-remember).
    * "invalid": unparseable, wrong shape, or items present but ALL rejected
    * (model output shape problem — never conflated with a valid empty).
+   * "aborted": OUR OWN call was aborted (foreground preemption, its own
+   * `timeoutMs` bound, or shutdown) — never a payload verdict; the caller
+   * lands NO memory write for the run (no late writes after STOP).
    */
   readonly status: ExtractionParseStatus;
 }
@@ -1616,9 +1619,10 @@ export function createMemoryService(
       );
       // Guard AFTER the await: a foreground preemption, STOP, or shutdown
       // that aborted OUR OWN call discards even a late provider result that
-      // ignored the abort — no memory write lands from it.
+      // ignored the abort — no memory write lands from it. The aborted
+      // status is distinct from a payload verdict: the caller never writes.
       if (controller.signal.aborted || stopped) {
-        return { items: [], status: "invalid" };
+        return { items: [], status: "aborted" };
       }
       const text = result.text;
       if (typeof text !== "string" || text.length === 0) {
@@ -1626,7 +1630,12 @@ export function createMemoryService(
       }
       return parseExtractionOutcome(sliceCodePoints(text, 8192));
     } catch {
-      // Noop/invalid conservatively yields no memory; the run is unaffected.
+      // An aborted call rejects out of the gateway (fetch/socket abort):
+      // still an abort, never a payload verdict. A genuine provider error
+      // is a conservative noop/invalid (no memory; the run is unaffected).
+      if (controller.signal.aborted || stopped) {
+        return { items: [], status: "aborted" };
+      }
       return { items: [], status: "invalid" };
     } finally {
       clearTimeout(timer);
@@ -1713,11 +1722,14 @@ export function createMemoryService(
       } catch {
         // Best effort: feedback never fails completion.
       }
-      // Decision (I): store every turn. The RAW `event.append` is enqueued
-      // for EVERY completed selected turn BEFORE extraction runs — raw
-      // storage never depends on extraction success. Extraction failure,
-      // an invalid payload, or a skipped (busy/closed) background slot only
-      // forgoes the remember fan-out below, never the raw event.
+      // Decision (I): store every turn. The RAW `event.append` payload is
+      // built for EVERY completed selected turn — raw storage never depends
+      // on extraction SUCCESS: an invalid payload or a busy background slot
+      // only forgoes the remember fan-out, never the raw event. It is
+      // enqueued only AFTER the extraction attempt resolves: an ABORTED
+      // attempt (a foreground preemption, the call's own `timeoutMs` bound
+      // while STOPped, or shutdown) lands NO memory write at all for this
+      // run — the test-invariant "no late writes" for an aborted unit.
       const observedAt =
         run.finishedAt !== null && Number.isFinite(run.finishedAt)
           ? new Date(run.finishedAt).toISOString()
@@ -1731,68 +1743,74 @@ export function createMemoryService(
         source: MEMORY_PROVENANCE_SOURCE,
         observedAt,
       };
-      try {
-        repo.enqueueMemoryJob(
-          "event.append",
-          run.sessionId,
-          run.id,
-          scope,
-          stableMemoryJobKey("event", run.id),
-          JSON.stringify({
-            op: "event.append",
-            params: {
-              eventId,
-              sessionId: run.sessionId,
-              turnId: run.turnId,
-              body: eventBody,
-              provenance,
-              privacy: {
-                sensitivity: MEMORY_PRIVACY_SENSITIVITY_NORMAL,
-                origin: MEMORY_PRIVACY_ORIGIN_CONVERSATION,
+      const enqueueRawEvent = (): boolean => {
+        try {
+          repo.enqueueMemoryJob(
+            "event.append",
+            run.sessionId,
+            run.id,
+            scope,
+            stableMemoryJobKey("event", run.id),
+            JSON.stringify({
+              op: "event.append",
+              params: {
+                eventId,
+                sessionId: run.sessionId,
+                turnId: run.turnId,
+                body: eventBody,
+                provenance,
+                privacy: {
+                  sensitivity: MEMORY_PRIVACY_SENSITIVITY_NORMAL,
+                  origin: MEMORY_PRIVACY_ORIGIN_CONVERSATION,
+                },
+                scope,
+                runId: run.id,
               },
-              scope,
-              runId: run.id,
-            },
-            // No remember fan-out rides on the raw event's chain:
-            // extracted memories enqueue their own remember jobs below.
-            chain: {
-              eventId,
-              sessionId: run.sessionId,
-              runId: run.id,
-              turnId: run.turnId,
-              provenance,
-              memories: [],
-            },
-          }),
-          { turnId: run.turnId, now: now() },
-        );
-      } catch {
-        return;
-      }
-      log("info", "memory.event_queued", {
-        runId: run.id,
-        bytes: eventBody.length,
-      });
+              // No remember fan-out rides on the raw event's chain:
+              // extracted memories enqueue their own remember jobs below.
+              chain: {
+                eventId,
+                sessionId: run.sessionId,
+                runId: run.id,
+                turnId: run.turnId,
+                provenance,
+                memories: [],
+              },
+            }),
+            { turnId: run.turnId, now: now() },
+          );
+        } catch {
+          return false;
+        }
+        log("info", "memory.event_queued", {
+          runId: run.id,
+          bytes: eventBody.length,
+        });
+        return true;
+      };
       // Structured extraction (gateway-dependent, conservative noop).
       // Background admission: at most ONE model-heavy background unit runs
-      // at a time. When the gate is held (shadow/idle-distill in flight) or
-      // closed (STOP), extraction SKIPS with an honest fixed diagnostic —
-      // but the raw event.append above and the feedback jobs already
-      // enqueued stay durable: the outbox below still drains, and the
-      // automatic-job boundary inside `drainOnce` admits-or-skips ONLY the
-      // distill execution itself (explicit jobs always run), so nothing
+      // at a time. A CLOSED gate (STOP/shutdown) admits nothing new: no
+      // extraction AND no raw append — no late write of any kind for this
+      // run (a paused control never closes the gate: I03-09 keeps memory
+      // admission open while paused). A merely BUSY gate keeps the raw
+      // turn durable: the append enqueues and drains; the skipped
+      // extraction forgoes only the remember fan-out. The automatic-job
+      // boundary inside `drainOnce` admits-or-skips ONLY the distill
+      // execution itself (explicit jobs always run), so nothing
       // already-durable is lost, no catchup invented, no auto-revive of
       // this skipped extraction on release.
       const extractionLease =
         background?.tryAcquire(BACKGROUND_OWNER_MEMORY_EXTRACTION) ?? null;
       if (background !== null && extractionLease === null) {
-        log(
-          "info",
-          background.closed
-            ? "memory.extract_skipped_closed"
-            : "memory.extract_skipped_busy",
-          { runId: run.id },
-        );
+        if (background.closed) {
+          log("info", "memory.extract_skipped_closed", { runId: run.id });
+          return;
+        }
+        log("info", "memory.extract_skipped_busy", { runId: run.id });
+        if (!enqueueRawEvent()) {
+          return;
+        }
         // A just-scheduled outbox job CAN be missed by an in-flight drain
         // tick whose claim pass already ran (e.g. the start() recovery
         // tick): blindly returning that tick's `executed: 0` promise would
@@ -1816,6 +1834,18 @@ export function createMemoryService(
         if (extractionLease !== null) {
           background?.release(extractionLease);
         }
+      }
+      if (outcome.status === "aborted") {
+        // Our OWN gateway call was aborted (a foreground preemption, its
+        // own timeoutMs bound, or shutdown): even a late provider result is
+        // discarded and NO memory write lands for this run — the raw
+        // event.append never enqueues (no late writes after STOP).
+        log("info", "memory.extract_aborted", { runId: run.id });
+        await drainOnce().catch(() => undefined);
+        return;
+      }
+      if (!enqueueRawEvent()) {
+        return;
       }
       if (outcome.items.length === 0) {
         // Split diagnostics (fixed codes only): a valid strict-JSON empty
