@@ -72,8 +72,12 @@ if [ "$ASSUME_YES" -ne 1 ]; then
   exit 2
 fi
 
+# Validate BOTH destinations before touching either file: if the Companion
+# env directory is missing or unwritable, abort before /srv/llm/.env is
+# rewritten, or the containers would end up with mismatched keys.
 ENV_FILE="$LLM_DIR/.env"
 COMPOSE_FILE="$LLM_DIR/compose.yaml"
+COMPANION_DIR="$(dirname -- "$COMPANION_ENV")"
 [ -f "$ENV_FILE" ] || {
   printf 'rotate-keys: %s is missing\n' "$ENV_FILE" >&2
   exit 1
@@ -82,6 +86,18 @@ COMPOSE_FILE="$LLM_DIR/compose.yaml"
   printf 'rotate-keys: %s is missing\n' "$COMPOSE_FILE" >&2
   exit 1
 }
+[ -d "$COMPANION_DIR" ] || {
+  printf 'rotate-keys: companion env directory %s is missing\n' "$COMPANION_DIR" >&2
+  exit 1
+}
+[ -w "$COMPANION_DIR" ] || {
+  printf 'rotate-keys: companion env directory %s is not writable\n' "$COMPANION_DIR" >&2
+  exit 1
+}
+if [ -f "$COMPANION_ENV" ] && [ ! -w "$COMPANION_ENV" ]; then
+  printf 'rotate-keys: companion env file %s is not writable\n' "$COMPANION_ENV" >&2
+  exit 1
+fi
 command -v openssl >/dev/null 2>&1 || {
   printf 'rotate-keys: openssl not found\n' >&2
   exit 1
@@ -135,11 +151,7 @@ chmod 600 "$ENV_FILE"
 printf 'rotate-keys: wrote %s (0600)\n' "$ENV_FILE"
 
 # Update the Companion-side master key (run-google-readonly.sh reads it).
-COMPANION_DIR="$(dirname -- "$COMPANION_ENV")"
-[ -d "$COMPANION_DIR" ] || {
-  printf 'rotate-keys: companion env directory %s is missing\n' "$COMPANION_DIR" >&2
-  exit 1
-}
+# The destination was validated above, before /srv/llm/.env was touched.
 if [ -f "$COMPANION_ENV" ]; then
   COMPANION_BAK="$COMPANION_ENV.bak-$STAMP"
   cp -p "$COMPANION_ENV" "$COMPANION_BAK"

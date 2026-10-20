@@ -127,9 +127,11 @@ no delete, no auto-shrink.
   (`<UTC>` = `YYYYMMDDTHHMMSSZ`).
 - Procedure: `.partial` backup → private permissions (`0600`; Windows
   no-op) → `quick_check` of the copy → atomic rename.
-- Manual backups are **never rotated** and never match the
+- Manual backups are never rotated by the server itself and never match the
   `companion-pre-migration-` prefix. The only automatic deletion is the
-  newest-3 pre-migration rotation.
+  newest-3 pre-migration rotation. The daily backup job additionally prunes
+  legacy `companion-manual-*.sqlite` generations in `<data>/backups/` to the
+  newest `COMPANION_BACKUP_KEEP` (default 7).
 - Exposed only as the stopped-server CLI command above. **No HTTP
   backup/restore/delete endpoints exist.** The CLI takes no path flags,
   uses only the configured DB path, prints only the backup basename, and
@@ -4417,9 +4419,15 @@ RandomizedDelaySec=15min) に `scripts/deploy/companion-backup.sh` を実行す�
 各世代は 0600 の SQLite。保持は各ディレクトリ newest 7 世代
 (`COMPANION_BACKUP_KEEP` で変更可)。
 
-- Companion: deploy dir (`~/companion_master`) で既存の
-  `pnpm --filter @companion/server backup` を実行し、CLI が
-  `quick_check` 済みのファイルを世代として atomic rename で取り込む。
+- Companion: バックアップ CLI の契約はサーバ停止中のみ (stopped-server
+  only) だが、timer は `companion.service` 起動中に発火し得る。そこで
+  `scripts/deploy/companion-online-backup.mjs` がサーバと同じ規則
+  (`COMPANION_DB_PATH`、なければ OS 既定) で DB パスを解決し、**読み取り
+  専用で開いて** `node:sqlite` の online backup API でコピーする
+  (**ダウンタイム無し**)。コピーは `.partial` → `PRAGMA integrity_check`
+  → 0600 → atomic rename。旧 CLI が書いた legacy の
+  `companion-manual-*.sqlite` 世代 (DB の `<data>/backups/`) も同じく
+  newest N 世代に prune する。
 - remind: remind に backup CLI は無いため
   `scripts/deploy/remind-backup.mjs` が
   `~/.config/remind/memory.config.json` の `dbPath` (相対パスは config

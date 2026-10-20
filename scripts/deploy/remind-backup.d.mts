@@ -23,7 +23,16 @@ export declare function pruneGenerations(
   dir: string,
   keep?: number,
   protect?: string,
+  prefix?: string,
 ): string[];
+
+export declare function backupDb(options: {
+  dbPath: string;
+  outDir: string;
+  keep?: number;
+  prefix?: string;
+  now?: Date;
+}): Promise<{ file: string; path: string; removed: string[] }>;
 
 export declare function backupRemindDb(options?: {
   configPath?: string;
