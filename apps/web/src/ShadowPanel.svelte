@@ -23,7 +23,9 @@
 //   new selection, or terminal status.
 // - `postJson` resolves `{status: 0}` on a lost response: treated as an
 //   UNCERTAIN send (frozen key+body retry offered), like a thrown error.
+
 import { fetchJson, postJson, randomUuid } from "./lib/api.js";
+import { readAutonomyVersion } from "./lib/autonomy.svelte.js";
 import {
   ACTION_KIND_TEXT,
   DECISION_TEXT,
@@ -475,6 +477,15 @@ $effect(() => {
     window.clearInterval(watcher);
     window.removeEventListener(SETTLED_EVENT, onSettled);
   };
+});
+
+// Autonomy sibling mutations (purpose/task create/transition in
+// AutonomyPanel) bump the shared autonomy-changed signal; refetch the job
+// list so newly requested trials / updated purposes show up without a
+// manual refresh (legacy notifyAutonomyChanged hook).
+$effect(() => {
+  const version = readAutonomyVersion();
+  if (version > 0 && !destroyed) void refreshList();
 });
 </script>
 

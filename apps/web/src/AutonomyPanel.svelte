@@ -28,7 +28,9 @@
 // - History trails render the immutable original / correction / lifecycle
 //   rows with bounded lossy-free paging (afterSeq cursor per target).
 // Every model string renders via text interpolation only (no {@html}).
+
 import { fetchJson, postJson, randomUuid } from "./lib/api.js";
+import { notifyAutonomyChanged } from "./lib/autonomy.svelte.js";
 import { getSessionId } from "./lib/session.svelte.js";
 
 interface PurposeRow {
@@ -790,6 +792,7 @@ async function createPurpose(): Promise<void> {
     purposeValidFrom = "";
     purposeValidUntil = "";
     await refreshLists();
+    notifyAutonomyChanged();
     notice("目的を記録しました");
   } else {
     notice("目的の記録に失敗しました");
@@ -884,6 +887,7 @@ async function transitionPurpose(op: "revoke" | "achieve"): Promise<void> {
   if (result === null) return;
   if (result.status === 200) {
     await refreshLists();
+    notifyAutonomyChanged();
     notice(op === "revoke" ? "目的を取り消しました" : "目的を達成にしました");
   } else if (result.status === 409) {
     await refreshLists();
@@ -980,6 +984,7 @@ async function createTask(): Promise<void> {
     taskTitle = "";
     taskDeadline = "";
     await refreshLists();
+    notifyAutonomyChanged();
     notice("作業を記録しました");
   } else {
     notice("作業の記録に失敗しました");
@@ -1006,6 +1011,7 @@ async function transitionTask(
   if (result === null) return;
   if (result.status === 200) {
     await refreshLists();
+    notifyAutonomyChanged();
     notice("作業を更新しました");
   } else if (result.status === 409) {
     await refreshLists();
