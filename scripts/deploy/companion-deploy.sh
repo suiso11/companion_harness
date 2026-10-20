@@ -135,7 +135,7 @@ case "$CI_OK" in
     ;;
   *)
     log "CI not green for $TARGET ($CI_OK); skipping deploy this tick"
-    notify_skip_persisted "$TARGET" "CI not green: $CI_OK"
+    notify_skip_persisted "$TARGET" "ci_not_green"
     exit 0
     ;;
 esac
@@ -155,7 +155,7 @@ if [ "$ACTIVE_N" = "?" ]; then
 fi
 if [ "$ACTIVE_N" != "0" ]; then
   log "$ACTIVE_N active run(s); skipping deploy this tick"
-  notify_skip_persisted "$TARGET" "$ACTIVE_N active run(s)"
+  notify_skip_persisted "$TARGET" "active_run_present"
   exit 0
 fi
 
@@ -172,7 +172,7 @@ rollback() {
   pnpm install --frozen-lockfile
   systemctl --user restart companion.service
   log "rollback complete (previous revision restored and restarted)"
-  notify_rollback "$TARGET" "health check or restart failed"
+  notify_rollback "$TARGET" "health_failed"
 }
 
 log "switching to $TARGET"

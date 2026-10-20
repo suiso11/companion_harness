@@ -165,7 +165,7 @@ rollback() { # [reason]
       notify_rollback "$TARGET" "$reason"
     else
       log "rollback to release $PREV failed; $CURRENT_LINK unchanged"
-      notify_rollback_failed "$TARGET" "rollback to previous release failed"
+      notify_rollback_failed "$TARGET" "rollback_failed"
     fi
   else
     log "no previous verified release to roll back to; $CURRENT_LINK unchanged"
@@ -303,7 +303,7 @@ case "$CI_OK" in
     ;;
   *)
     log "CI not green for $TARGET ($CI_OK); skipping deploy this tick"
-    notify_skip_persisted "$TARGET" "CI not green: $CI_OK"
+    notify_skip_persisted "$TARGET" "ci_not_green"
     exit 0
     ;;
 esac
@@ -318,7 +318,7 @@ if ! { rm -rf "$RELEASE" && mkdir -p "$RELEASE" &&
   (cd "$RELEASE" && npm ci && npm run build); }; then
   log "archive/install/build failed for $TARGET; keeping previous release"
   state_write "$TARGET" failed "$PREV"
-  rollback "archive/install/build failed"
+  rollback "build_failed"
   exit 1
 fi
 cd "$DEPLOY_DIR"
@@ -330,25 +330,28 @@ cd "$DEPLOY_DIR"
 # can never mask a broken candidate.
 load_memory_json
 MEMORY_JSON="${COMPANION_MEMORY_JSON:-}"
-fail_refuse() {
-  log "$*"
+fail_refuse() { # <fixed reason code> <log detail>
+  # The detail (may contain paths/targets) goes to the journal ONLY; the
+  # rollback notice body carries the fixed reason code, never log-derived
+  # text (paths, env values, command output).
+  log "$2"
   state_write "$TARGET" failed "$PREV"
-  rollback "$*"
+  rollback "$1"
   exit 1
 }
 if ! SCOPE="$(node "$SCRIPT_DIR/remindDeploy.mjs" field scope \
   --memory-json "$MEMORY_JSON" \
   --config "$REMIND_CONFIG")" || [ -z "$SCOPE" ]; then
-  fail_refuse "cannot resolve a smoke-test scope from COMPANION_MEMORY_JSON or $REMIND_CONFIG; refusing"
+  fail_refuse "scope_unresolved" "cannot resolve a smoke-test scope from COMPANION_MEMORY_JSON or $REMIND_CONFIG; refusing"
 fi
 if ! SMOKE_EXEC="$(node "$SCRIPT_DIR/remindDeploy.mjs" field executable \
   --memory-json "$MEMORY_JSON" --fallback "$(command -v node)")"; then
-  fail_refuse "cannot resolve the remind executable; refusing"
+  fail_refuse "executable_unresolved" "cannot resolve the remind executable; refusing"
 fi
 SMOKE_ENTRY="$RELEASE/dist/src/cli.js"
 if ! SMOKE_CONFIG="$(node "$SCRIPT_DIR/remindDeploy.mjs" field config \
   --memory-json "$MEMORY_JSON" --fallback "$REMIND_CONFIG")"; then
-  fail_refuse "cannot resolve the remind config path; refusing"
+  fail_refuse "config_unresolved" "cannot resolve the remind config path; refusing"
 fi
 SMOKE_REQUEST="$(SCOPE="$SCOPE" node --input-type=module -e '
 process.stdout.write(JSON.stringify({ v: 1, op: "record.list", params: { scope: process.env.SCOPE } }));
@@ -396,7 +399,7 @@ elif ! node "$SCRIPT_DIR/remindDeploy.mjs" check-ok <"$SMOKE_TMP"; then
 fi
 rm -f "$SMOKE_TMP"
 if [ "$SMOKE_FAILED" != "0" ]; then
-  fail_refuse "smoke test failed for $TARGET (record.list did not return a valid ok envelope); rolling back"
+  fail_refuse "smoke_failed" "smoke test failed for $TARGET (record.list did not return a valid ok envelope); rolling back"
 fi
 
 # --- atomic publish -------------------------------------------------------
@@ -405,7 +408,7 @@ fi
 # children keep their own release directory's files).
 ln -sfn "$RELEASE" "$CURRENT_LINK.tmp.$$"
 if ! mv -Tf "$CURRENT_LINK.tmp.$$" "$CURRENT_LINK"; then
-  fail_refuse "failed to switch $CURRENT_LINK to $RELEASE; rolling back"
+  fail_refuse "publish_failed" "failed to switch $CURRENT_LINK to $RELEASE; rolling back"
 fi
 state_write "$TARGET" ok "$PREV"
 notify_success "$TARGET"

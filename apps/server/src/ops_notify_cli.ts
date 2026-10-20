@@ -101,6 +101,17 @@ export function parseNotifyArgv(argv: string[]): NotifyCliArgs {
   ) {
     throw cliError("bad_arguments", NOTIFY_USAGE);
   }
+  // Body allowlist: bodies carry ONLY fixed wording + short sha + PR
+  // number + fixed reason codes. Reject path-like segments ('/' — no
+  // filesystem paths, URLs, or check-run name/status pairs) and any
+  // newline/CR (no multi-line command output) so log-derived text can
+  // never reach a notice body.
+  if (body.includes("/") || /[\n\r]/.test(body)) {
+    throw cliError(
+      "bad_body",
+      "ops notify failed: body must be fixed wording, a short sha, a PR number, or fixed reason codes (no '/' or newlines)",
+    );
+  }
   return { level, title, body, source, subject };
 }
 

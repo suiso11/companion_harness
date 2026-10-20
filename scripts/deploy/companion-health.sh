@@ -70,9 +70,9 @@ report_recovered() {
 
 # --- liveness ---
 if ! command -v curl >/dev/null 2>&1; then
-  report_problem liveness "curl not found; cannot check liveness"
+  report_problem liveness "health_failed: curl_missing"
 elif ! curl -fsS --max-time 5 "$HEALTH_URL" >/dev/null 2>&1; then
-  report_problem liveness "liveness failed: $HEALTH_URL"
+  report_problem liveness "health_failed: liveness_failed"
 else
   report_recovered liveness
 fi
@@ -84,32 +84,35 @@ if command -v systemctl >/dev/null 2>&1; then
   report_recovered systemctl
   for unit in companion.service companion-deploy.service companion-backup.service; do
     if systemctl --user is-failed --quiet "$unit" >/dev/null 2>&1; then
-      report_problem "unit:$unit" "unit failed: $unit"
+      report_problem "unit:$unit" "health_failed: unit_failed:$unit"
     else
       report_recovered "unit:$unit"
     fi
   done
 else
-  report_problem systemctl "systemctl not found; cannot check unit state"
+  report_problem systemctl "health_failed: systemctl_missing"
 fi
 
 # --- disk used (df col5 is %used; error above 90% used) ---
+# Bodies use fixed reason codes keyed by a fixed label — never the mount
+# path (a filesystem path) or the df percentage (command output).
 check_disk() {
-  mount="$1"
+  label="$1"
+  mount="$2"
   used="$(df -P -k "$mount" 2>/dev/null | awk 'NR==2 {gsub("%", "", $5); print $5}')"
   case "$used" in
-    ''|*[!0-9]*) report_problem "disk:$mount" "disk check failed: $mount" ;;
+    ''|*[!0-9]*) report_problem "disk:$label" "health_failed: disk_check_failed:$label" ;;
     *)
       if [ "$used" -gt 90 ]; then
-        report_problem "disk:$mount" "disk low: $mount ${used}% used"
+        report_problem "disk:$label" "health_failed: disk_low:$label"
       else
-        report_recovered "disk:$mount"
+        report_recovered "disk:$label"
       fi
       ;;
   esac
 }
-check_disk /
-check_disk /srv
+check_disk root /
+check_disk srv /srv
 
 # --- backup age ---
 check_backup_age() {
@@ -119,13 +122,13 @@ check_backup_age() {
   newest="$(find "$dir" -maxdepth 1 -type f -name '*.sqlite' \
     -printf '%T@\n' 2>/dev/null | sort -rn | head -n 1)"
   if [ -z "$newest" ]; then
-    report_problem "$key" "no $label backups under $dir"
+    report_problem "$key" "health_failed: no_backups:$label"
     return
   fi
   age_h="$(awk -v now="$(date +%s)" -v then="$newest" \
     'BEGIN { printf "%d", (now - then) / 3600 }')"
   if [ "$age_h" -gt "$MAX_BACKUP_AGE_H" ]; then
-    report_problem "$key" "$label backup is ${age_h}h old (limit ${MAX_BACKUP_AGE_H}h)"
+    report_problem "$key" "health_failed: backup_stale:$label"
   else
     report_recovered "$key"
   fi

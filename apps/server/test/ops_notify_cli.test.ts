@@ -98,6 +98,55 @@ describe("notify argv parsing", () => {
       OpsNotifyCliError,
     );
   });
+
+  // Body allowlist: bodies carry only fixed wording + short sha + PR
+  // number + fixed reason codes. Path-like segments ('/') and newlines
+  // (multi-line command output) are rejected so no filesystem path or
+  // log-derived text can ever reach a notice body.
+  it("rejects bodies with '/' path-like segments or newlines", () => {
+    expect(() =>
+      parseNotifyArgv([
+        "--level",
+        "error",
+        "--title",
+        "t",
+        "--body",
+        "deploy failed: /home/user/companion_master/releases/abc",
+        "--source",
+        "ops:deploy:abc12345",
+        "--subject",
+        "s",
+      ]),
+    ).toThrow(OpsNotifyCliError);
+    expect(() =>
+      parseNotifyArgv([
+        "--level",
+        "error",
+        "--title",
+        "t",
+        "--body",
+        "line one\nline two",
+        "--source",
+        "ops:deploy:abc12345",
+        "--subject",
+        "s",
+      ]),
+    ).toThrow(OpsNotifyCliError);
+    expect(() =>
+      parseNotifyArgv([
+        "--level",
+        "error",
+        "--title",
+        "t",
+        "--body",
+        "deploy of abc1234 failed (smoke_failed)",
+        "--source",
+        "ops:deploy:abc12345",
+        "--subject",
+        "s",
+      ]),
+    ).not.toThrow();
+  });
 });
 
 describe("notify CLI run against the kernel repository", () => {

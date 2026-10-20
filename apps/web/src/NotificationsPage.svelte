@@ -70,6 +70,14 @@ function urgentHead(view: NotificationView): string {
   const label = view.kind === "ops" ? "要確認（ops）" : "要確認（受領）";
   return `${label}・${sourceLine(view)}`;
 }
+
+// Kind-aware priority label: an urgent SYSTEM (ops) notice is 要確認（ops）
+// everywhere the label is computed (urgent head AND the source line that
+// also appears in history/detail), never the receipt label 要確認（受領）.
+function priorityLabel(view: NotificationView): string {
+  if (view.priority !== "urgent") return textOf(PRIORITY_TEXT, view.priority);
+  return view.kind === "ops" ? "要確認（ops）" : "要確認（受領）";
+}
 const SOURCE_TEXT: Record<string, string> = {
   shadow_job: "試行の記録",
   action_receipt: "実行結果の受領",
@@ -229,7 +237,7 @@ function sourceLine(view: NotificationView): string {
     textOf(SOURCE_TEXT, view.sourceKind),
     view.scope,
     textOf(KIND_TEXT, view.kind),
-    textOf(PRIORITY_TEXT, view.priority),
+    priorityLabel(view),
   ];
   const when = formatInstant(view.createdAt);
   return when.length > 0 ? `${parts.join("・")}・${when}` : parts.join("・");
