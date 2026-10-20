@@ -565,19 +565,13 @@ export function createShadowService(
     } catch {
       // Best effort: notify never throws into a committed command.
     }
-    // STOP closes shared background admission (no new shadow unit starts
-    // even with no foreground chat anywhere); resume reopens it. Reads the
-    // ACTUAL control state, idempotent with the memory service's own
-    // close/reopen. Never throws.
-    try {
-      if (repo.getAutonomyControlState().paused === true) {
-        background?.close();
-      } else {
-        background?.reopen();
-      }
-    } catch {
-      // Best effort: notify never throws into a committed command.
-    }
+    // The shared background gate is deliberately NOT closed on a pause
+    // (I03-09): the kernel claim fence already refuses shadow claims while
+    // paused (`claimShadowJob` throws, pause holds every pending job with
+    // `control_paused`), and memory writes + cultivation must keep running
+    // while autonomy is paused — closing the shared gate here would skip
+    // memory extraction and idle distill too. Shutdown closes the gate via
+    // `stop()`/`shutdown()`. Never throws.
   }
 
   function onRunSettled(): void {

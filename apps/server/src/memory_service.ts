@@ -231,14 +231,6 @@ export interface MemoryService {
   /** Foreground activity: preempts an in-flight idle drain. */
   notifyForeground(): void;
   /**
-   * Committed control change (pause OR resume): reads the ACTUAL control
-   * state; a pause aborts the OWN in-flight extraction call and closes
-   * background admission (no new extraction/distill starts), a resume
-   * reopens admission. Never throws into the caller. Foreground paths
-   * (recall/search/stage) are unaffected: an explicit user-authorized
-   * memory path is never STOP-blocked.
-   */
-  notifyControl(): void;
   /** Post-settlement hook: only completed + currently-selected runs cultivate. */
   onRunCompleted(runId: string): void;
   start(): void;
@@ -794,42 +786,16 @@ export function createMemoryService(
   }
 
   /**
-   * Committed control change: read the ACTUAL control state (never a stored
-   * reply). A pause aborts OUR OWN in-flight extraction call plus any
-   * in-flight AUTOMATIC distill CLI child (tracked background controllers
-   * only — never explicit manage/foreground-recall calls) and closes shared
-   * background admission (no new extraction/distill starts even with no
-   * foreground chat anywhere); a resume reopens admission. Closing the gate
-   * is NOT an abort by itself: an already-parked automatic child is aborted
-   * through its own controller and its lease releases only after that call
-   * settles, so no late child overlaps the next admission. Never throws.
+   * Autonomy pause deliberately does NOT touch this service (I03-09):
+   * memory writes (`event.append`, `record.remember`, feedback) and
+   * cultivation (idle `maintain.distill`) are autonomous, no-approval work
+   * that keeps running while autonomy is PAUSED — pause gates only
+   * autonomous work (tasks/shadow/proposals). The shared background gate's
+   * `closed` flag is therefore owned by shutdown only: while closed
+   * (shutdown/drain), extraction and automatic distill skip with the
+   * honest `*_skipped_closed` diagnostics and durable pending jobs; the
+   * foreground paths (recall/search/stage) never consult the gate.
    */
-  function notifyControl(): void {
-    try {
-      const paused = repo.getAutonomyControlState().paused === true;
-      if (paused) {
-        for (const controller of [...extractionControllers]) {
-          try {
-            controller.abort();
-          } catch {
-            // Best effort.
-          }
-        }
-        for (const controller of [...backgroundJobControllers]) {
-          try {
-            controller.abort();
-          } catch {
-            // Best effort.
-          }
-        }
-        background?.close();
-        return;
-      }
-      background?.reopen();
-    } catch {
-      // Best effort: notify never throws into a committed command.
-    }
-  }
 
   /**
    * Execute one outbox job via the CLI. Returns true when the job reached a
@@ -3037,7 +3003,6 @@ export function createMemoryService(
   return {
     recallHook,
     notifyForeground,
-    notifyControl,
     onRunCompleted,
     start,
     stop,

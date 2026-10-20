@@ -4247,6 +4247,9 @@ newly added tests, no flaky rewrites.
     (`pnpm-smoke.startup.config.mts` include: `startup_smoke`, `rescheduleWriteStartup`,
     `createWriteStartup`): run output `Test Files 3 passed (3), Tests 42 passed (42)`.
 
+## Memory independent of autonomy pause — I03-09 decision applied (2026-10-20, branch fix/memory-independent-of-pause)
+- Decision (haruka 2026-10-20, I03-09): memory writes (`event.append`, `record.remember`, feedback) AND cultivation (idle `maintain.distill`) are autonomous, no-approval work and keep running while autonomy is PAUSED; the pause gates ONLY autonomous work (tasks/shadow/proposals). Implementation (`apps/server/src/memory_service.ts`, `shadow_service.ts`, `bootstrap.ts`): the pause no longer aborts in-flight memory extraction/distill CLI children and no longer closes the shared background admission gate — the gate's `closed` flag is owned by shutdown/drain only (bootstrap persisted-paused close removed; shadow `notifyControl` keeps only the in-flight abort; memory `notifyControl` removed from the service and bootstrap wiring). Shadow admission while paused stays fenced by the kernel itself (`claimShadowJob` refuses paused-control claims; pause holds pending jobs with `control_paused`). Remaining gates unchanged: memory disabled, shutdown/drain, foreground priority/preemption, shared one-unit admission, attempt/backoff budgets. `memory.extract_skipped_closed` / `memory.distill_skipped_closed` log codes preserved for the shutdown-closed reason.
+
 ## 自動デプロイ (single Linux host, user systemd, polling)
 
 `origin/master` の green な先端へ、単一 Linux ホスト上の detached worktree
