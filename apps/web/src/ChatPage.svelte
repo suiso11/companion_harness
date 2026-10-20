@@ -2820,28 +2820,42 @@ function evidenceForTurn(turn: Turn): {
             {/each}
           {/if}
         {:else}
-          <p>{turn.text ?? ""}</p>
+          <!-- Task ui-separate-turn-bubbles: the section stays as the outer
+               turn wrapper (data-turn-kind contract preserved for e2e), but
+               the user prompt and the assistant answer now render as two
+               separate rows: the user bubble right-aligned with its own
+               background (.msg-user-row), the answer left-aligned below it
+               (.msg-assistant-row) like the llama.cpp WebUI transcript. -->
+          <div class="msg-user-row">
+            <p>{turn.text ?? ""}</p>
+          </div>
           {#if turn.run !== null}
             {@const parts = answerPartsForTurn(turn)}
             {@const runId = turn.run.runId}
-          {#each parts as part, partIndex (partIndex)}
-            <!-- V2: validated answer parts render as sanitized markdown;
-                 citation buttons stay adjacent, never inside markdown. -->
-            <Markdown text={part.text} />
-            {#each part.citations as citation (citation)}
-                <button
-                  type="button"
-                  aria-label={citation.startsWith("m")
-                    ? `この回答の記憶引用 ${citation}`
-                    : `保存された引用 ${citation}`}
-                  onclick={() => void openCitation(citation, runId)}
-                >
-                  {citation}
-                </button>
-              {/each}
-            {/each}
+            {#if parts.length > 0}
+              <div class="msg-assistant-row">
+                {#each parts as part, partIndex (partIndex)}
+                  <!-- V2: validated answer parts render as sanitized markdown;
+                       citation buttons stay adjacent, never inside markdown. -->
+                  <Markdown text={part.text} />
+                  {#each part.citations as citation (citation)}
+                    <button
+                      type="button"
+                      aria-label={citation.startsWith("m")
+                        ? `この回答の記憶引用 ${citation}`
+                        : `保存された引用 ${citation}`}
+                      onclick={() => void openCitation(citation, runId)}
+                    >
+                      {citation}
+                    </button>
+                  {/each}
+                {/each}
+              </div>
+            {/if}
           {:else if turn.turnId.length > 0}
-            <p>応答なし</p>
+            <div class="msg-assistant-row">
+              <p>応答なし</p>
+            </div>
           {/if}
         {/if}
       </section>
@@ -2856,89 +2870,96 @@ function evidenceForTurn(turn: Turn): {
         もう一度生成
       </button>
     {/if}
-    {#if activeRunId !== null && runView.visible === "generating" && !cancelPending && !isActionRun(activeRunId)}
-      {@const statusText = runStatusText()}
-      {#if statusText.length > 0}
-        <section data-run-progress="true" aria-label="実行状況">
-          <!-- PR #82 review: the elapsed tick lives in an aria-hidden span
-               (excluded from the live region's accessible text) so only the
-               phase transition itself is announced; the visible「秒」count
-               is kept for the e2e DOM contract. -->
-          <p id="run-status" data-run-status="true" aria-live="polite"
-            >{statusText}<span aria-hidden="true"
-              >{formatElapsedSuffix(elapsedSec)}</span
-            ></p
-          >
-        </section>
-      {/if}
-    {/if}
-    {#if showThinking}
-      {@const statsLine = formatThinkingStats(thinking.usage)}
-      <!-- V3: upstream ChatMessageReasoningBlock look — collapsible header
-           with a chevron, muted mono body; auto-collapse behavior unchanged
-           (see renderRunView). DOM contracts kept: data-thinking,
-           data-thinking-toggle, aria-expanded, data-thinking-text,
-           data-run-stats. -->
-      <section data-thinking="true" class="thinking-block" aria-label="考え中">
-        <button
-          type="button"
-          class="thinking-toggle"
-          data-thinking-toggle="true"
-          aria-expanded={!thinkingCollapsed}
-          onclick={() => {
-            thinkingCollapsed = !thinkingCollapsed;
-          }}
-        >
-          <span class="thinking-chevron" aria-hidden="true"
-            >{thinkingCollapsed ? "▸" : "▾"}</span
-          >
-          <span class="thinking-title"
-            >{thinkingCollapsed ? "考え中" : "考え中…"}</span
-          >
-        </button>
-        {#if !thinkingCollapsed}
-          <pre
-            class="thinking-body"
-            data-thinking-text="true">{thinkingDisplayText(thinking)}</pre
-          >
-        {/if}
-        {#if statsLine !== null}
-          <p class="run-stats" data-run-stats="true">{statsLine}</p>
-        {/if}
-      </section>
-    {:else}
-      {@const statsOnly = formatThinkingStats(thinking.usage)}
-      {#if statsOnly !== null}
-        <section data-thinking-stats="true" aria-label="実行統計">
-          <p data-run-stats="true">{statsOnly}</p>
-        </section>
-      {/if}
-    {/if}
-    {#if draft !== null && activeRunId !== null && runView.visible === "generating" && draftDisplayText(draft).length > 0}
-      <section data-draft="true" aria-label="下書き" aria-live="off">
-        <p data-draft-label="true">{DRAFT_LABEL}</p>
-        <p data-draft-text="true">{draftDisplayText(draft)}</p>
-      </section>
-    {/if}
-    {#if liveVisible}
-      {@const runId = [...renderedAnswers].pop()}
-      <section data-live-answer="true">
-        {#each liveAnswer as part, partIndex (partIndex)}
-          <Markdown text={part.text} />
-          {#each part.citations as citation (citation)}
-            <button
-              type="button"
-              aria-label={citation.startsWith("m")
-                ? `この回答の記憶引用 ${citation}`
-                : `保存された引用 ${citation}`}
-              onclick={() => void openCitation(citation, runId)}
+    <!-- Task ui-separate-turn-bubbles: the streaming assistant content
+         (status line, thinking block, stats, provisional draft, live
+         answer) renders as one left-aligned assistant row below the
+         user bubble. The sections keep every data-testid/aria contract;
+         only the grouping wrapper is new. -->
+    <div class="msg-assistant-row">
+      {#if activeRunId !== null && runView.visible === "generating" && !cancelPending && !isActionRun(activeRunId)}
+        {@const statusText = runStatusText()}
+        {#if statusText.length > 0}
+          <section data-run-progress="true" aria-label="実行状況">
+            <!-- PR #82 review: the elapsed tick lives in an aria-hidden span
+                 (excluded from the live region's accessible text) so only the
+                 phase transition itself is announced; the visible「秒」count
+                 is kept for the e2e DOM contract. -->
+            <p id="run-status" data-run-status="true" aria-live="polite"
+              >{statusText}<span aria-hidden="true"
+                >{formatElapsedSuffix(elapsedSec)}</span
+              ></p
             >
-              {citation}
-            </button>
+          </section>
+        {/if}
+      {/if}
+      {#if showThinking}
+        {@const statsLine = formatThinkingStats(thinking.usage)}
+        <!-- V3: upstream ChatMessageReasoningBlock look — collapsible header
+             with a chevron, muted mono body; auto-collapse behavior unchanged
+             (see renderRunView). DOM contracts kept: data-thinking,
+             data-thinking-toggle, aria-expanded, data-thinking-text,
+             data-run-stats. -->
+        <section data-thinking="true" class="thinking-block" aria-label="考え中">
+          <button
+            type="button"
+            class="thinking-toggle"
+            data-thinking-toggle="true"
+            aria-expanded={!thinkingCollapsed}
+            onclick={() => {
+              thinkingCollapsed = !thinkingCollapsed;
+            }}
+          >
+            <span class="thinking-chevron" aria-hidden="true"
+              >{thinkingCollapsed ? "▸" : "▾"}</span
+            >
+            <span class="thinking-title"
+              >{thinkingCollapsed ? "考え中" : "考え中…"}</span
+            >
+          </button>
+          {#if !thinkingCollapsed}
+            <pre
+              class="thinking-body"
+              data-thinking-text="true">{thinkingDisplayText(thinking)}</pre
+            >
+          {/if}
+          {#if statsLine !== null}
+            <p class="run-stats" data-run-stats="true">{statsLine}</p>
+          {/if}
+        </section>
+      {:else}
+        {@const statsOnly = formatThinkingStats(thinking.usage)}
+        {#if statsOnly !== null}
+          <section data-thinking-stats="true" aria-label="実行統計">
+            <p data-run-stats="true">{statsOnly}</p>
+          </section>
+        {/if}
+      {/if}
+      {#if draft !== null && activeRunId !== null && runView.visible === "generating" && draftDisplayText(draft).length > 0}
+        <section data-draft="true" aria-label="下書き" aria-live="off">
+          <p data-draft-label="true">{DRAFT_LABEL}</p>
+          <p data-draft-text="true">{draftDisplayText(draft)}</p>
+        </section>
+      {/if}
+      {#if liveVisible}
+        {@const runId = [...renderedAnswers].pop()}
+        <section data-live-answer="true">
+          {#each liveAnswer as part, partIndex (partIndex)}
+            <Markdown text={part.text} />
+            {#each part.citations as citation (citation)}
+              <button
+                type="button"
+                aria-label={citation.startsWith("m")
+                  ? `この回答の記憶引用 ${citation}`
+                  : `保存された引用 ${citation}`}
+                onclick={() => void openCitation(citation, runId)}
+              >
+                {citation}
+              </button>
+            {/each}
           {/each}
-        {/each}
-      </section>
-    {/if}
+        </section>
+      {/if}
+    </div>
     {#each cards as card (card.proposalId)}
       {@const model = cardModel(card)}
       <section
