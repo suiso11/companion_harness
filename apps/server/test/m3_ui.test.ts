@@ -125,6 +125,28 @@ describe("M3 SSR shell + CSP + assets", () => {
     }
   });
 
+  it("serves trailing-slash feature routes with the same shell + auth", async () => {
+    const f = await makeApp();
+    try {
+      for (const base of ["/memory", "/tasks", "/shadow", "/proposals"]) {
+        const canonical = await f.app.request(base, { headers: headers() });
+        expect(canonical.status).toBe(200);
+        expect(canonical.headers.get("content-type")).toContain("text/html");
+        const slashed = await f.app.request(`${base}/`, { headers: headers() });
+        expect(slashed.status).toBe(200);
+        expect(slashed.headers.get("content-type")).toContain("text/html");
+        expect(slashed.headers.get("content-security-policy")).toBe(STRICT_CSP);
+        expect(slashed.headers.get("cache-control")).toBe("no-store");
+        expect(await slashed.text()).toBe(await canonical.text());
+      }
+      // A trailing slash on a NON-feature path stays 404 (no catch-all).
+      const unknown = await f.app.request("/unknown/", { headers: headers() });
+      expect(unknown.status).toBe(404);
+    } finally {
+      f.close();
+    }
+  });
+
   it("serves injected bundle assets and 404s when unbuilt", async () => {
     const built = await makeApp({
       clientJs: "console.log(1)",
