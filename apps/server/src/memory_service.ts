@@ -478,7 +478,11 @@ export function stripOneJsonFence(text: string): string {
     // hand the raw text to the strict parser unchanged.
     return /^[A-Za-z0-9_-]+$/.test(inner.trim())
       ? inner.trim()
-      : trimmed.slice(3).trim().replace(/^json\b/, "").trim();
+      : trimmed
+          .slice(3)
+          .trim()
+          .replace(/^json\b/, "")
+          .trim();
   }
   const firstLine = inner.slice(0, newlineIdx).trim();
   if (firstLine !== "" && !/^[A-Za-z0-9_-]+$/.test(firstLine)) {
