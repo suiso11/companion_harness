@@ -67,16 +67,27 @@ import {
 
 /** Long-budget deadline for one idle distill CLI call (bounded, abortable). */
 export const MEMORY_DISTILL_TIMEOUT_MS = 120_000;
+/**
+ * SEPARATE budget for the post-completion extraction MODEL call (bounded,
+ * abortable). Never the CLI `timeoutMs`: a local reasoning model (e.g.
+ * Gemma with reasoning enabled) routinely exceeds one CLI-call deadline,
+ * and bounding the extraction by the CLI timeout aborted every attempt.
+ * Default equals the existing distill step budget; configurable via
+ * `COMPANION_MEMORY_JSON` `extractTimeoutMs` (bounds 5000..300000).
+ */
+export const MEMORY_EXTRACT_TIMEOUT_MS = 120_000;
+export const MIN_MEMORY_EXTRACT_TIMEOUT_MS = 5000;
+export const MAX_MEMORY_EXTRACT_TIMEOUT_MS = 300_000;
 /** Max outbox jobs executed per drain tick (bounded work). */
 export const MEMORY_DRAIN_BATCH = 5;
 /**
  * Decision (I) "store every turn": bounded idle-window re-cultivation for a
- * run whose extraction was PREEMPTED by foreground activity (no raw append
- * landed). After this many retried-then-re-aborted attempts the run stops
- * re-scheduling (never an infinite loop); STOP/shutdown-aborted attempts
- * never re-schedule at all (no late writes).
+ * run whose extraction was PREEMPTED by foreground activity. After this many
+ * retried-then-re-aborted attempts the run gives up with an honest
+ * diagnostic (never an infinite loop, never a reset counter); STOP/shutdown
+ * aborts never re-schedule at all (no late writes).
  */
-export const MEMORY_EXTRACT_RETRY_MAX_ATTEMPTS = 3;
+export const MEMORY_EXTRACT_RETRY_MAX_ATTEMPTS = 5;
 /** Max CLI attempts per outbox job before it stays failed (no infinite retry). */
 export const MEMORY_JOB_MAX_ATTEMPTS = 8;
 /** Bounds for extraction inputs/outputs (code points). */
@@ -239,6 +250,12 @@ export interface MemoryServiceOptions {
   readonly cliCall?: typeof callMemoryCli;
   /** Injectable distill deadline (tests). Defaults to MEMORY_DISTILL_TIMEOUT_MS. */
   readonly distillTimeoutMs?: number;
+  /**
+   * SEPARATE extraction model-call budget in ms (tests/bootstrap).
+   * Defaults to MEMORY_EXTRACT_TIMEOUT_MS; bounds 5000..300000. Never
+   * applied to the CLI `timeoutMs` (address.timeoutMs stays untouched).
+   */
+  readonly extractTimeoutMs?: number;
   /**
    * Shared background admission (server-owned, bootstrap-injected). When
    * present, post-completion extraction admits ONE unit at a time against
@@ -764,6 +781,13 @@ export function createMemoryService(
   const cliCall = options.cliCall ?? callMemoryCli;
   const distillTimeoutMs =
     options.distillTimeoutMs ?? MEMORY_DISTILL_TIMEOUT_MS;
+  const extractTimeoutMs = Math.min(
+    Math.max(
+      options.extractTimeoutMs ?? MEMORY_EXTRACT_TIMEOUT_MS,
+      MIN_MEMORY_EXTRACT_TIMEOUT_MS,
+    ),
+    MAX_MEMORY_EXTRACT_TIMEOUT_MS,
+  );
 
   let started = false;
   let stopped = false;
@@ -1495,13 +1519,16 @@ export function createMemoryService(
       if (!started || stopped) {
         return;
       }
-      // Pop before the retry: a settled retry is one full cultivation pass;
-      // a re-aborted retry re-schedules itself (bounded attempts), a busy
-      // gate keeps the turn durable without this entry, and STOP never
-      // re-schedules.
+      // Pop the PERSISTED attempt count and carry it into the retry: a
+      // re-aborted retry re-schedules with `attemptBase` so the counter
+      // increments across retries (never resets to 1), bounded at
+      // MEMORY_EXTRACT_RETRY_MAX_ATTEMPTS then `memory.extract_gave_up`.
+      const attempts = extractionRetryAttempts.get(runId) ?? 0;
       extractionRetryAttempts.delete(runId);
       log("info", "memory.extract_retry", { runId });
-      await cultivateRun(runId).catch(() => undefined);
+      await cultivateRun(runId, { attemptBase: attempts }).catch(
+        () => undefined,
+      );
       if (stopped) {
         return;
       }
@@ -1653,7 +1680,7 @@ export function createMemoryService(
           // Best effort.
         }
       },
-      Math.max(address.timeoutMs, 1),
+      Math.max(extractTimeoutMs, 1),
     );
     try {
       const result: ChatResult = await gateway.chat(
@@ -1698,11 +1725,18 @@ export function createMemoryService(
    * Exceeding the attempt bound drops the entry with an honest diagnostic
    * (never an infinite retry loop).
    */
-  function scheduleExtractionRetry(runId: string): void {
-    const attempts = extractionRetryAttempts.get(runId) ?? 0;
+  /**
+   * Mark a foreground-preempted run for bounded idle-window re-cultivation.
+   * `attemptBase` carries the PERSISTED attempt count across retries (the
+   * idle retry pass re-invokes `cultivateRun` with the count it popped) so
+   * the counter never resets to 1 across retries. Exceeding the attempt
+   * bound gives up with an honest diagnostic (never an infinite loop).
+   */
+  function scheduleExtractionRetry(runId: string, attemptBase?: number): void {
+    const attempts = attemptBase ?? extractionRetryAttempts.get(runId) ?? 0;
     if (attempts >= MEMORY_EXTRACT_RETRY_MAX_ATTEMPTS) {
       extractionRetryAttempts.delete(runId);
-      log("warn", "memory.extract_retry_exhausted", {
+      log("warn", "memory.extract_gave_up", {
         runId,
         attempt: attempts,
       });
@@ -1727,7 +1761,10 @@ export function createMemoryService(
    * is best-effort and durable where enqueued). Authoritative guards first:
    * completed status + current selection + same-session binding.
    */
-  async function cultivateRun(runId: string): Promise<void> {
+  async function cultivateRun(
+    runId: string,
+    hints?: { attemptBase?: number },
+  ): Promise<void> {
     if (!started || stopped) {
       return;
     }
@@ -1799,14 +1836,14 @@ export function createMemoryService(
     } catch {
       // Best effort: feedback never fails completion.
     }
-    // Decision (I): store every turn. The RAW `event.append` payload is
-    // built for EVERY completed selected turn — raw storage never depends
-    // on extraction SUCCESS: an invalid payload or a busy background slot
-    // only forgoes the remember fan-out, never the raw event. It is
-    // enqueued only AFTER the extraction attempt resolves: an ABORTED
-    // attempt (a foreground preemption, the call's own `timeoutMs` bound
-    // while STOPped, or shutdown) lands NO memory write at all for this
-    // run — the test-invariant "no late writes" for an aborted unit.
+    // Decision (I): store every turn, RAW-FIRST. The RAW `event.append`
+    // payload is built and enqueued for EVERY completed selected turn
+    // IMMEDIATELY at commit time — before and independent of the
+    // extraction attempt — so an aborted/invalid extraction or a busy
+    // background slot forgoes only the remember fan-out, NEVER the raw
+    // event. The extraction's remember jobs later reference this event via
+    // `sourceRefs`. The STOP/shutdown gate is honored first: a CLOSED gate
+    // lands no write of any kind for this run (no late writes after STOP).
     const observedAt =
       run.finishedAt !== null && Number.isFinite(run.finishedAt)
         ? new Date(run.finishedAt).toISOString()
@@ -1865,29 +1902,32 @@ export function createMemoryService(
       });
       return true;
     };
+    // STOP/shutdown gate (authoritative, checked BEFORE any enqueue): a
+    // CLOSED gate admits nothing new — no extraction AND no raw
+    // event.append. A paused control never closes the gate (I03-09 keeps
+    // memory admission open while paused).
+    if (background?.closed) {
+      log("info", "memory.extract_skipped_closed", { runId: run.id });
+      return;
+    }
+    // RAW-FIRST enqueue: the committed turn's event.append lands here, in
+    // every path below (aborted, invalid, busy, and success alike). The
+    // remember fan-out references this event via `sourceRefs`.
+    if (!enqueueRawEvent()) {
+      return;
+    }
     // Structured extraction (gateway-dependent, conservative noop).
     // Background admission: at most ONE model-heavy background unit runs
-    // at a time. A CLOSED gate (STOP/shutdown) admits nothing new: no
-    // extraction AND no raw append — no late write of any kind for this
-    // run (a paused control never closes the gate: I03-09 keeps memory
-    // admission open while paused). A merely BUSY gate keeps the raw
-    // turn durable: the append enqueues and drains; the skipped
-    // extraction forgoes only the remember fan-out. The automatic-job
-    // boundary inside `drainOnce` admits-or-skips ONLY the distill
-    // execution itself (explicit jobs always run), so nothing
+    // at a time. A merely BUSY gate keeps the raw turn durable (enqueued
+    // above): the skipped extraction forgoes only the remember fan-out.
+    // The automatic-job boundary inside `drainOnce` admits-or-skips ONLY
+    // the distill execution itself (explicit jobs always run), so nothing
     // already-durable is lost, no catchup invented, no auto-revive of
     // this skipped extraction on release.
     const extractionLease =
       background?.tryAcquire(BACKGROUND_OWNER_MEMORY_EXTRACTION) ?? null;
     if (background !== null && extractionLease === null) {
-      if (background.closed) {
-        log("info", "memory.extract_skipped_closed", { runId: run.id });
-        return;
-      }
       log("info", "memory.extract_skipped_busy", { runId: run.id });
-      if (!enqueueRawEvent()) {
-        return;
-      }
       // A just-scheduled outbox job CAN be missed by an in-flight drain
       // tick whose claim pass already ran (e.g. the start() recovery
       // tick): blindly returning that tick's `executed: 0` promise would
@@ -1914,21 +1954,18 @@ export function createMemoryService(
     }
     if (outcome.status === "aborted") {
       // Our OWN gateway call was aborted (a foreground preemption, its
-      // own timeoutMs bound, or shutdown): even a late provider result is
-      // discarded and NO memory write lands for this run yet — the raw
-      // event.append never enqueues here (no late writes after STOP).
+      // own extraction budget bound, or shutdown): even a late provider
+      // result is discarded and NO remember fan-out lands for this run
+      // yet. The raw event.append is ALREADY durable (raw-first above):
+      // an aborted attempt never skips it. Bounded bounded re-extraction:
+      // a FOREGROUND-preempted attempt (service still running, gate still
+      // open) stays pending and re-cultivates via the full path on the
+      // next idle window, bounded; STOP/shutdown aborts never re-schedule.
       log("info", "memory.extract_aborted", { runId: run.id });
-      // Decision (I) "store every turn": a FOREGROUND-preempted attempt
-      // (service still running, gate still closed-open) stays pending and
-      // re-cultivates via the full path on the next idle window, bounded.
-      // STOP/shutdown aborts never re-schedule: no late writes.
       if (!stopped && !(background?.closed ?? false)) {
-        scheduleExtractionRetry(run.id);
+        scheduleExtractionRetry(run.id, hints?.attemptBase);
       }
       await drainOnce().catch(() => undefined);
-      return;
-    }
-    if (!enqueueRawEvent()) {
       return;
     }
     if (outcome.items.length === 0) {

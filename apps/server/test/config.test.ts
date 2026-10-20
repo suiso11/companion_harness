@@ -13,9 +13,72 @@ import {
   MAX_MARKDOWN_ROOTS,
   parseCalendarConfig,
   parseMarkdownRoots,
+  parseMemoryConfig,
   parseModelConfig,
   ServerConfigError,
 } from "../src/config.js";
+
+function memoryConfigEnv(
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    executable: process.execPath,
+    entry: "/cli.js",
+    config: "/mem.json",
+    scope: "test-scope",
+    timeoutMs: 5000,
+    maxResponseBytes: 65536,
+    recallLimit: 5,
+    idleMs: 30000,
+    ...extra,
+  };
+}
+
+describe("memory config extraction timeout (strict validation)", () => {
+  it("defaults extractTimeoutMs to 120000 and keeps the CLI timeoutMs untouched", () => {
+    const config = parseMemoryConfig(JSON.stringify(memoryConfigEnv()));
+    expect(config).not.toBeNull();
+    expect(config?.extractTimeoutMs).toBe(120000);
+    expect(config?.timeoutMs).toBe(5000);
+  });
+
+  it("accepts an in-bounds extractTimeoutMs", () => {
+    const config = parseMemoryConfig(
+      JSON.stringify(memoryConfigEnv({ extractTimeoutMs: 300000 })),
+    );
+    expect(config?.extractTimeoutMs).toBe(300000);
+    expect(config?.timeoutMs).toBe(5000);
+  });
+
+  it("rejects extractTimeoutMs out of bounds (5000..300000)", () => {
+    expect(() =>
+      parseMemoryConfig(
+        JSON.stringify(memoryConfigEnv({ extractTimeoutMs: 4999 })),
+      ),
+    ).toThrow("memory extractTimeoutMs is out of bounds");
+    expect(() =>
+      parseMemoryConfig(
+        JSON.stringify(memoryConfigEnv({ extractTimeoutMs: 300001 })),
+      ),
+    ).toThrow("memory extractTimeoutMs is out of bounds");
+  });
+
+  it("rejects a non-integer extractTimeoutMs", () => {
+    expect(() =>
+      parseMemoryConfig(
+        JSON.stringify(memoryConfigEnv({ extractTimeoutMs: 120.5 })),
+      ),
+    ).toThrow("memory extractTimeoutMs must be an integer");
+  });
+
+  it("still rejects unknown keys (strict allowlist includes extractTimeoutMs)", () => {
+    expect(() =>
+      parseMemoryConfig(
+        JSON.stringify(memoryConfigEnv({ extractTimeoutMs: 60000, rogue: 1 })),
+      ),
+    ).toThrow("memory config has an unknown key");
+  });
+});
 
 function baseEnv(dbPath: string): NodeJS.ProcessEnv {
   return {

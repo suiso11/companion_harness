@@ -587,7 +587,7 @@ describe("background contention across actual callsites", () => {
     }
   });
 
-  it("foreground activity aborts a parked extraction; late output never writes", async () => {
+  it("foreground activity aborts a parked extraction; late output never writes remember jobs", async () => {
     const memory = await openRepo();
     try {
       const contention = makeContentionGateway();
@@ -603,18 +603,26 @@ describe("background contention across actual callsites", () => {
       memoryService.start();
       const run = completeV2Run(memory.repo);
       memoryService.onRunCompleted(run.runId);
+      // RAW-FIRST: the committed turn's event.append enqueues before the
+      // extraction; it DRAINS once the aborted attempt resolves below.
       await waitFor(() => contention.state.current >= 1);
       // A newly starting foreground prompt aborts OUR OWN parked call.
       memoryService.notifyForeground();
       await waitFor(() => contention.state.aborted.includes("extract"));
       // Even though the provider would answer late, the late extraction
-      // output is discarded and NO memory write lands for the run: the
-      // aborted extraction is never a payload verdict, so the raw
-      // event.append never enqueues either (no late writes).
+      // output is discarded and NO remember fan-out lands for the run:
+      // the aborted extraction is never a payload verdict. The raw
+      // event.append (raw-first, enqueued pre-abort) still drains — the
+      // commit landed BEFORE the extraction, independent of its outcome.
       contention.releaseAll();
       await sleep(300);
-      expect(ops.includes("event.append")).toBe(false);
-      expect(memory.repo.countPendingMemoryJobs(Date.now())).toBe(0);
+      expect(ops.includes("event.append")).toBe(true);
+      expect(ops.includes("record.remember")).toBe(false);
+      expect(
+        memory.repo
+          .claimDueMemoryJobs(5, Date.now())
+          .filter((job) => job.kind === "record.remember"),
+      ).toHaveLength(0);
     } finally {
       memory.close();
     }
