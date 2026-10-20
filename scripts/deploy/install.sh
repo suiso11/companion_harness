@@ -120,6 +120,15 @@ Next steps (run on the host):
   systemctl --user enable --now companion-backup.timer companion-health.timer
   systemctl --user enable --now remind-deploy.timer
   loginctl enable-linger $USER
+Remind deploy migration (one-time; immutable releases + symlink):
+  remind-deploy.sh builds ~/remind_releases/<sha> and atomically switches
+  ~/remind_current (symlink) after a bounded smoke passes. Point
+  COMPANION_MEMORY_JSON (in $HOME/.config/companion/env) at the symlink:
+    "entry": "$HOME/remind_current/dist/src/cli.js"   # was ~/remind_master/...
+  First release: run scripts/deploy/remind-deploy.sh once manually (or wait
+  for the first timer tick); it creates ~/remind_current, then restart the
+  Companion service once to pick up the new entry. Later releases need no
+  Companion restart (in-flight children keep their own release directory).
 Useful:
   systemctl --user stop companion-deploy.timer   # pause auto-deploy
   systemctl --user stop remind-deploy.timer      # pause remind auto-deploy

@@ -4322,18 +4322,61 @@ journalctl --user -u companion -u companion-deploy -f   # logs
   `llm.modelDir` など)。
 - Companion 側は `~/.config/companion/env` の `COMPANION_MEMORY_JSON`
   (`{"executable","entry","config","scope"}`) で絶対パスを固定する。
-  `executable` は Node、`entry` は `~/remind_master/dist/src/cli.js`、
-  `config` は上記 JSON、`scope` は `allowedScopes` のいずれか。
+  `executable` は Node、**`entry` は必ず
+  `~/remind_current/dist/src/cli.js`** (`remind_current` は現行リリースへの
+  symlink。移行後は `~/remind_master/...` を直接指さない)、`config` は上記
+  JSON、`scope` は `allowedScopes` のいずれか。
 - Companion はメモリ操作のたびに remind CLI を子プロセスとして spawn する
   (常駐プロセスなし)。そのため remind の更新に Companion の restart は
-  **不要**。唯一のリスクは、実行中 call が `dist/` を読んでいる最中の
-  再ビルドなので、deploy は active run が 0 のときだけ進む。
+  **不要**。リリースディレクトリは一度作ったら書き換えない (immutable) ので、
+  実行中 call がビルド途中の `dist/` を読むリスクはない。
 
 ### 自動更新 (scripts/deploy/remind-deploy.sh)
 
 `remind-deploy.timer` が 5 分ごとに実行する。Companion の
 `companion-deploy.timer` と同時に走らないよう、起動時は
 `OnBootSec=3min` で 1 分ずらしてある (以後も 5 分間隔)。
+
+配布方式は out-of-tree な immutable リリース + symlink 切替
+(`~/remind_master` の working tree は触らない):
+
+1. `git fetch origin` し target=`origin/master`。state marker が
+   `ok` で target が一致し、`~/remind_current` がそのリリースを指して
+   いれば exit 0 (毎 tick 再検証: marker/symlink/ビルド済み CLI が揃って
+   いなければ再構築)。
+2. CI gate: `gh api repos/suiso11/remind/commits/<sha>/check-runs` が
+   すべて completed + success (skipped 許容) のときだけ進行。
+   `gh` 不在/未認証/API 失敗はスキップして次 tick (ページングは
+   `--slurp` 集約、旧 gh はストリーム結合でフォールバック)。
+3. `git archive <target>` を `~/remind_releases/<sha>` へ展開し、そこで
+   `npm ci && npm run build` (remind は npm 管理。`dist/` は gitignore)。
+4. Smoke: `record.list` を1回実行し、本番クライアント
+   (`memory_cli.ts`) と同一の厳密検証で `{v:1,ok:true,code:"OK"}` を
+   要求する (1行・LF 終端・完全な envelope キーセット・型チェック、
+   `scripts/deploy/remindDeploy.mjs`、`timeout 30` で境界付き)。
+   `executable` / `config` / `scope` は `COMPANION_MEMORY_JSON` を優先し
+   (無ければ node 本体と remind config の `allowedScopes[0]`)、`entry` は
+   **常に今ビルドしたリリースの** `dist/src/cli.js` を使う。
+   失敗時は state を `failed` にして直前の検証済みリリースへ symlink を
+   戻し (rollback) exit 1。
+5. Smoke 合格後のみ `mv -T` で `~/remind_current` を
+   `~/remind_releases/<sha>` へ原子的に付け替え、state marker
+   (`~/.local/state/companion/remind-deploy.state`) を `ok` に更新。
+   リリースは直近 2 世代を保持 (実行中の子プロセスは自分のディレクトリを
+   参照し続けるので quiesce 不要)。
+
+初回リリースの作り方 (移行手順):
+
+```sh
+# 1) 現行を手動リリースとして登録するか、1 回目の tick に任せる
+scripts/deploy/remind-deploy.sh        # smoke 通過で ~/remind_current 作成
+# 2) ~/.config/companion/env の COMPANION_MEMORY_JSON の entry を
+#    ~/remind_master/dist/src/cli.js → ~/remind_current/dist/src/cli.js へ変更
+# 3) Companion を 1 回だけ restart して新しい entry を読み込む
+#    (以降は symlink 切替のみで restart 不要)
+```
+
+インストール:
 
 ```sh
 scripts/deploy/install.sh
@@ -4347,25 +4390,6 @@ loginctl enable-linger $USER
 に node/npm/pnpm の PATH を固定する。`.service` は
 `WorkingDirectory=%h/companion_master`、`EnvironmentFile=%h/.config/companion/env`、
 `ExecStart=%h/companion_master/scripts/deploy/remind-deploy.sh`。
-
-判定順 (`companion-deploy.sh` と同じ):
-
-1. `git fetch origin` し target=`origin/master`。HEAD と同等なら exit 0。
-2. CI gate: `gh api repos/suiso11/remind/commits/<sha>/check-runs` が
-   すべて completed + success (skipped 許容) のときだけ進行。
-   `gh` 不在/未認証/API 失敗はスキップして次 tick。
-3. Active-run skip: `scripts/deploy/activeRuns.mjs` で Companion の
-   queued/running/cancel_requested が 0 件のときだけ進行。判定不能もスキップ。
-4. Dirty guard: tracked 変更があれば破棄せず exit 1 (untracked は無視)。
-5. `git switch --detach <target>` → `npm ci` → `npm run build`
-   (remind は npm 管理。`dist/` は gitignore)。
-6. Smoke: `record.list` を1回実行し `ok:true` を要求する。
-   `COMPANION_MEMORY_JSON` があれば `executable` / `entry` / `config` /
-   `scope` をそのまま使い、無ければ `node dist/src/cli.js` と remind config
-   の `allowedScopes[0]` を使う (`scripts/deploy/remindDeploy.mjs`)。
-   1行 JSON を stdin へ渡し `{v:1,ok:true,code:"OK"}` を要求する。
-   scope 解決不能・非0終了・`ok:true` 以外は失敗とみなし、直前 sha へ
-   `git switch --detach` → `npm ci` → `npm run build` で rollback し exit 1。
 
 単一インスタンスは flock (`$XDG_RUNTIME_DIR/remind-deploy.lock`)。失敗は
 `OnFailure=companion-alert@%n.service` で

@@ -76,8 +76,10 @@ export function resolveSmokeTarget({
   configPath,
   fallbackEntry,
   fallbackExecutable,
+  fallbackConfig,
 } = {}) {
-  const config = memoryValue(memoryJson, "config") ?? configPath ?? null;
+  const config =
+    memoryValue(memoryJson, "config") ?? fallbackConfig ?? configPath ?? null;
   return {
     executable:
       memoryValue(memoryJson, "executable") ?? fallbackExecutable ?? null,
@@ -235,6 +237,9 @@ if (invokedAsMain) {
       configPath: args.configPath,
       fallbackEntry: args.fallback,
       fallbackExecutable: args.fallback,
+      // `field config --fallback` seeds the remind config path when
+      // COMPANION_MEMORY_JSON carries no config (deploy smoke path).
+      fallbackConfig: key === "config" ? args.fallback : undefined,
     });
     const value =
       key === "scope" ||

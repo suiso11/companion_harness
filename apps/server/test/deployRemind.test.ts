@@ -203,7 +203,9 @@ describe("isOkEnvelope", () => {
 
   it("rejects wrong types and out-of-set codes", () => {
     expect(isOkEnvelope('{"v":2,"ok":true,"code":"OK"}\n')).toBe(false);
-    expect(isOkEnvelope('{"v":1,"ok":true,"code":"BAD_REQUEST"}\n')).toBe(false);
+    expect(isOkEnvelope('{"v":1,"ok":true,"code":"BAD_REQUEST"}\n')).toBe(
+      false,
+    );
     expect(isOkEnvelope('{"v":1,"ok":"true","code":"OK"}\n')).toBe(false);
     expect(
       isOkEnvelope(
