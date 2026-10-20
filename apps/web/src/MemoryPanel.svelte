@@ -10,8 +10,8 @@
 // provides the conversation/composer (the memory e2e cultivates a fact
 // there before searching).
 import { fetchJson, postJson, randomUuid } from "./lib/api.js";
+import { getSessionId } from "./lib/session.svelte.js";
 
-const LS_SESSION = "ch.sessionId";
 const POLL_INTERVAL_MS = 500;
 const POLL_ATTEMPTS = 90;
 
@@ -57,14 +57,6 @@ let pending: { key: string; body: Record<string, unknown> } | null = null;
 let searchSeq = 0;
 let detailSeq = 0;
 let opSeq = 0;
-
-function readSession(): string | null {
-  try {
-    return localStorage.getItem(LS_SESSION);
-  } catch {
-    return null;
-  }
-}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -115,7 +107,7 @@ async function search(): Promise<void> {
     notice = "記憶は無効です";
     return;
   }
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   if (sessionId === null) {
     failSearch("error: セッションがありません", "セッションを準備しています");
     return;
@@ -208,6 +200,12 @@ async function openDetail(target: string, handle: string): Promise<void> {
     notice = "古い検索結果です。再検索してください";
     return;
   }
+  // Session switch guard: the old search's scope must never render its
+  // detail inside the new session's UI.
+  if (scope.sessionId !== getSessionId()) {
+    notice = "セッションが変わりました。再検索してください";
+    return;
+  }
   const sessionId = scope.sessionId;
   detailSeq += 1;
   const seq = detailSeq;
@@ -291,7 +289,7 @@ function currentOp(
   seq: number,
   target: Selected | null,
 ): boolean {
-  if (opSeq !== seq || readSession() !== sessionId) return false;
+  if (opSeq !== seq || getSessionId() !== sessionId) return false;
   if (target !== null && selected !== null) {
     if (
       selected.searchId !== target.searchId ||
@@ -432,7 +430,7 @@ async function postMutation(
 async function stageMutation(kind: MutationKind): Promise<void> {
   if (selected === null || scope === null || mutating) return;
   const sessionId = scope.sessionId;
-  if (readSession() !== sessionId) {
+  if (getSessionId() !== sessionId) {
     notice = "セッションが変わりました。再検索してください";
     return;
   }
@@ -473,7 +471,7 @@ async function stageMutation(kind: MutationKind): Promise<void> {
 
 async function retryMutation(): Promise<void> {
   if (pending === null || mutating) return;
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   if (sessionId === null) return;
   const target = selected;
   const { key, body } = pending;
@@ -490,6 +488,34 @@ async function retryMutation(): Promise<void> {
     if (opSeq === seq) mutating = false;
   }
 }
+
+// Session rebinding (shared reactive store): a session switch (or a session
+// becoming available) invalidates the old search synchronously — stale hits
+// from the previous session never stay clickable in the new session's UI,
+// and in-flight responses are dropped by the bumped generations. No polling
+// watcher: the store read inside this effect is reactive.
+$effect(() => {
+  const sessionId = getSessionId();
+  if (sessionId === null) return;
+  searchSeq += 1;
+  detailSeq += 1;
+  opSeq += 1;
+  selected = null;
+  scope = null;
+  hits = [];
+  searchId = null;
+  operation = null;
+  detailBody = "";
+  detailVisible = false;
+  correctText = "";
+  retryVisible = false;
+  actionsDisabled = true;
+  opStatus = "";
+  notice = "";
+  memoryDisabled = false;
+  searching = false;
+  mutating = false;
+});
 </script>
 
 <section id="memory" aria-label="記憶の管理" class="feature-panel">

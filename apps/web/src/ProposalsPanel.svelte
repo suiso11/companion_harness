@@ -36,6 +36,7 @@ import {
   STATUS_TEXT,
   textOf,
 } from "./lib/proposal_shared.js";
+import { revealHashTarget } from "./lib/router.js";
 
 const LS_SESSION = "ch.sessionId";
 const SETTLED_EVENT = "ch:run-settled";
@@ -391,6 +392,10 @@ async function refresh(): Promise<void> {
     }
   }
   renderAll();
+  // Deep-link reveal: /learning source links land on /proposals#<record
+  // id>; scroll/focus that row once the list has rendered (retries until
+  // the data load finishes).
+  revealHashTarget();
   // Keep the open drawer truthful after a background refresh without
   // clobbering the human's typed date inputs.
   if (selectedId !== null) renderDetail(false);
@@ -724,7 +729,7 @@ $effect(() => {
   <p id="proposal-brief" aria-live="polite">{briefText}</p>
   <ul id="proposal-list">
     {#each rows as item (item.id)}
-      <li>
+      <li id={item.id}>
         <button type="button" onclick={() => select(item.id)}>
           {rowLabel(item)}
         </button>

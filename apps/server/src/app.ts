@@ -143,6 +143,19 @@ const FEATURE_UI_PATHS: ReadonlySet<string> = new Set([
   "/handoff",
 ]);
 
+/**
+ * A browser may deep-link a feature route WITH a trailing slash
+ * (`/memory/`); that must serve the same shell as the canonical path with
+ * the same auth treatment, not a 404. Returns the canonical path for both
+ * spellings (null when the path is not a feature route).
+ */
+function isFeatureUiPath(path: string): boolean {
+  return (
+    FEATURE_UI_PATHS.has(path) ||
+    (path.endsWith("/") && FEATURE_UI_PATHS.has(path.slice(0, -1)))
+  );
+}
+
 /** Minimal engine surface the routes need (RunEngine satisfies this). */
 export interface EnginePort {
   cancel(sessionId: string, runId: string): { status: string };
@@ -1317,7 +1330,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     }
     if (
       (method === "GET" || method === "HEAD") &&
-      (path === "/" || FEATURE_UI_PATHS.has(path))
+      (path === "/" || isFeatureUiPath(path))
     ) {
       await next();
       return;
@@ -2264,8 +2277,10 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
 
   // PR-5 feature pages: same Svelte shell/auth as `/`. The client mounts the
   // matching surface from the route; unknown paths still 404 (no catch-all).
+  // Trailing-slash variants (`/memory/`) are registered too: identical
+  // handler + auth so refresh/deep-link with a trailing slash works.
   for (const path of FEATURE_UI_PATHS) {
-    app.get(path, (c) => {
+    const handler = (c: Context): Response => {
       if (!strictQuery(c, []).ok) {
         return validationError(c);
       }
@@ -2275,7 +2290,9 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         return c.html(renderRemoteLogin().toString(), 200);
       }
       return c.html(renderSvelteShell().toString(), 200);
-    });
+    };
+    app.get(path, handler);
+    app.get(`${path}/`, handler);
   }
 
   app.get("/assets/svelte-app.js", (c) => {

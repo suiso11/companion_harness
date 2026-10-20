@@ -27,7 +27,8 @@ import { fetchJson, postJson } from "./lib/api.js";
 // The chat shell stays mounted (the notifications specs use the composer
 // draft + natural-break seam); this page is the route-specific content in
 // the shared shell's feature slot (same pattern as MemoryPage).
-const LS_SESSION = "ch.sessionId";
+import { getSessionId } from "./lib/session.svelte.js";
+
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 10_000;
 
@@ -118,14 +119,6 @@ function isLocallyOutdated(view: {
   return view.contextExpiryAt <= Date.now();
 }
 
-function readSession(): string | null {
-  try {
-    return localStorage.getItem(LS_SESSION);
-  } catch {
-    return null;
-  }
-}
-
 function newKey(): string {
   try {
     return crypto.randomUUID();
@@ -205,7 +198,7 @@ let routineGroups = $state<readonly RoutineGroup[]>([]);
 let historyRows = $state<readonly HistoryRow[]>([]);
 
 function sessionFresh(session: number, sessionId: string): boolean {
-  return session === sessionSeq && readSession() === sessionId;
+  return session === sessionSeq && getSessionId() === sessionId;
 }
 
 function unreadCount(): number {
@@ -432,7 +425,7 @@ function closeFeed(): void {
 
 function openFeed(session: number, after: number): void {
   closeFeed();
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   if (sessionId === null || destroyed) return;
   if (session !== sessionSeq) return;
   let source: EventSource;
@@ -451,7 +444,7 @@ function openFeed(session: number, after: number): void {
   };
   source.addEventListener("notification", () => {
     if (session !== sessionSeq) return;
-    if (readSession() !== sessionId) return;
+    if (getSessionId() !== sessionId) return;
     // The SSE signal is only a wake-up: consume the durable forward page
     // (`seq > lastSeq ORDER BY seq ASC`) so records apply strictly in
     // feed order and a failed record blocks the checkpoint instead of
@@ -534,7 +527,7 @@ async function refreshAckState(
     `/api/sessions/${encodeURIComponent(sessionId)}/notifications/${encodeURIComponent(notificationId)}/history`,
   );
   if (session !== sessionSeq) return;
-  if (readSession() !== sessionId) return;
+  if (getSessionId() !== sessionId) return;
   if (res.status !== 200 || !isRecord(res.body)) return;
   const ack = (res.body as { ack?: unknown }).ack;
   if (isRecord(ack) && !acked.has(notificationId)) {
@@ -547,13 +540,13 @@ async function refreshAckState(
 }
 
 async function loadNewest(session: number, boot: number): Promise<void> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   if (sessionId === null) return;
   const result = await fetchJson(
     `/api/sessions/${encodeURIComponent(sessionId)}/notifications?limit=50`,
   );
   if (session !== sessionSeq || boot !== bootSeq) return;
-  if (readSession() !== sessionId) return;
+  if (getSessionId() !== sessionId) return;
   if (result.status !== 200 || !isRecord(result.body)) return;
   const body = result.body as {
     items?: unknown;
@@ -592,7 +585,7 @@ async function loadNewest(session: number, boot: number): Promise<void> {
 }
 
 async function boot(): Promise<void> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   if (sessionId === null || destroyed) return;
   const session = sessionSeq;
   bootSeq += 1;
@@ -625,7 +618,7 @@ async function boot(): Promise<void> {
 }
 
 async function loadOlder(): Promise<void> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   if (sessionId === null || oldestBefore === null || loadingOlder) return;
   const session = sessionSeq;
   loadingOlder = true;
@@ -664,7 +657,7 @@ async function loadOlder(): Promise<void> {
 
 /** Open (read-only): pure GET, never an ack. */
 async function selectNotification(notificationId: string): Promise<void> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   if (sessionId === null) return;
   const session = sessionSeq;
   selectedId = notificationId;
@@ -673,7 +666,7 @@ async function selectNotification(notificationId: string): Promise<void> {
     `/api/sessions/${encodeURIComponent(sessionId)}/notifications/${encodeURIComponent(notificationId)}/history`,
   );
   if (session !== sessionSeq) return;
-  if (readSession() !== sessionId) return;
+  if (getSessionId() !== sessionId) return;
   if (selectedId !== notificationId) return;
   if (res.status !== 200 || !isRecord(res.body)) return;
   const body = res.body as { notification?: unknown; ack?: unknown };
@@ -710,7 +703,7 @@ async function retryPendingAck(): Promise<void> {
  *  mark only that notice's receipt and never rewrite the current
  *  selection's status. Still receipt-only: never approval/permission. */
 async function commitAck(): Promise<void> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   const target = selectedId;
   if (sessionId === null || target === null) return;
   const session = sessionSeq;
@@ -744,7 +737,7 @@ async function commitAck(): Promise<void> {
     ackFlight.delete(frozenTarget);
     if (session !== sessionSeq) return;
     if (pendingAcks.get(frozenTarget) !== frozenEntry) return;
-    if (frozenEntry.ownerSession !== readSession()) return;
+    if (frozenEntry.ownerSession !== getSessionId()) return;
     // Uncertain A stays frozen; B never inherits it.
     if (selectedId === frozenTarget) {
       statusText = "通信が不確かです。同じ内容で再送できます。";
@@ -755,7 +748,7 @@ async function commitAck(): Promise<void> {
   ackFlight.delete(frozenTarget);
   if (session !== sessionSeq) return;
   if (pendingAcks.get(frozenTarget) !== frozenEntry) return;
-  if (frozenEntry.ownerSession !== readSession()) return;
+  if (frozenEntry.ownerSession !== getSessionId()) return;
   if (res.status === 200 || res.status === 201) {
     pendingAcks.delete(frozenTarget);
     if (!acked.has(frozenTarget)) {
@@ -784,13 +777,16 @@ async function commitAck(): Promise<void> {
   }
 }
 
-// Mount: boot the feed for the adopted session; unmount: abort feed and
-// invalidate every in-flight generation (legacy destroy/notifySessionChanged).
-// The badge renders BEFORE the session boot (legacy reset() → renderAll()
-// runs renderBadge even without a session, so `#notification-badge` is
-// visible with 未読 0件 on a fresh page load).
+// Mount + session rebinding (shared reactive store): the feed boots for the
+// adopted session and RE-BINDS on every session change — teardown closes the
+// feed and invalidates every in-flight generation (legacy
+// destroy/notifySessionChanged), then the new session boots fresh. The badge
+// renders BEFORE the session boot (legacy reset() → renderAll() runs
+// renderBadge even without a session, so `#notification-badge` is visible
+// with 未読 0件 on a fresh page load).
 $effect(() => {
   renderBadge();
+  destroyed = false;
   void boot();
   const onInput = (event: Event): void => {
     if ((event.target as HTMLElement | null)?.id === "composer-input") {

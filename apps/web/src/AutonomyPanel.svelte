@@ -29,13 +29,14 @@
 //   rows with bounded lossy-free paging (afterSeq cursor per target).
 // Every model string renders via text interpolation only (no {@html}).
 import { fetchJson, postJson, randomUuid } from "./lib/api.js";
+import { notifyAutonomyChanged } from "./lib/autonomy.svelte.js";
 import {
   retryRefreshesControl,
   revalidateConflictArm,
   shouldResetConflictArm,
 } from "./lib/autonomy_state.js";
-
-const LS_SESSION = "ch.sessionId";
+import { revealHashTarget } from "./lib/router.js";
+import { getSessionId } from "./lib/session.svelte.js";
 
 interface PurposeRow {
   readonly id: string;
@@ -76,14 +77,6 @@ interface PendingCommand {
   endpoint: string;
   key: string;
   body: unknown;
-}
-
-function readSession(): string | null {
-  try {
-    return localStorage.getItem(LS_SESSION);
-  } catch {
-    return null;
-  }
 }
 
 function formatHistoryEvents(events: unknown, withNote: boolean): string[] {
@@ -206,7 +199,7 @@ async function runAutonomyMutation(
   endpoint: string,
   body: unknown,
 ): Promise<{ status: number; body: unknown } | null> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   if (sessionId === null || mutating) return null;
   if (pendingAutonomy !== null) {
     notice("未確定の操作があります。同じ内容で再送してください");
@@ -227,6 +220,13 @@ async function runAutonomyMutation(
       notice("通信が不確定です。同じ内容で再送できます");
       return null;
     }
+    // status 0 = network-level failure surfaced as a value (api.ts): the
+    // outcome is unknown, so it is treated EXACTLY like the throw path above
+    // (uncertain; the frozen command survives with the same idempotency key).
+    if (result.status === 0) {
+      notice("通信が不確定です。同じ内容で再送できます");
+      return null;
+    }
     if (result.status >= 500) {
       notice("サーバーが不確定です。同じ内容で再送できます");
       return null;
@@ -242,7 +242,7 @@ async function runAutonomyMutation(
 /** Explicit same-key retry of the frozen pending command (no new key). */
 async function retryPendingAutonomy(): Promise<void> {
   const pending = pendingAutonomy;
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   if (
     pending === null ||
     sessionId === null ||
@@ -257,6 +257,12 @@ async function retryPendingAutonomy(): Promise<void> {
     try {
       result = await postJson(pending.endpoint, pending.body, pending.key);
     } catch {
+      notice("通信が不確定です。同じ内容で再送できます");
+      return;
+    }
+    // status 0 = uncertain network loss (see runAutonomyMutation): keep the
+    // pending command + retry affordance, exactly like the throw path.
+    if (result.status === 0) {
       notice("通信が不確定です。同じ内容で再送できます");
       return;
     }
@@ -325,7 +331,7 @@ async function setControl(paused: boolean): Promise<void> {
 }
 
 async function refreshLists(): Promise<void> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   if (sessionId === null) return;
   // Session guard (UI4): a session switch clears selections + drafts.
   if (listedSession !== null && listedSession !== sessionId) {
@@ -364,6 +370,10 @@ async function refreshLists(): Promise<void> {
   renderPurposes(purposesResult);
   renderTasks(tasksResult);
   renderConflicts(conflicts);
+  // Deep-link reveal: /learning source links land on /tasks#<record id>;
+  // scroll/focus that row once both lists have rendered (retries until
+  // the data load finishes).
+  revealHashTarget();
 }
 
 function renderPurposes(result: { status: number; body: unknown }): void {
@@ -469,7 +479,7 @@ function renderConflicts(result: { status: number; body: unknown }): void {
 }
 
 async function selectPurpose(id: string): Promise<void> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   if (sessionId === null) return;
   // Synchronous rebind BEFORE the first await: drafts + history paging
   // belong to the exact selected id/version.
@@ -503,7 +513,7 @@ async function selectPurpose(id: string): Promise<void> {
   if (
     seq !== purposeSelectSeq ||
     selectedPurpose !== id ||
-    readSession() !== sessionId
+    getSessionId() !== sessionId
   ) {
     return;
   }
@@ -558,7 +568,7 @@ async function selectPurpose(id: string): Promise<void> {
 }
 
 async function loadMorePurposeHistory(): Promise<void> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   const id = selectedPurpose;
   const cursor = purposeHistoryCursor;
   const seq = purposeSelectSeq;
@@ -582,7 +592,7 @@ async function loadMorePurposeHistory(): Promise<void> {
   if (
     seq !== purposeSelectSeq ||
     selectedPurpose !== id ||
-    readSession() !== sessionId ||
+    getSessionId() !== sessionId ||
     purposeHistoryTarget !== id ||
     purposeHistoryCursor !== cursor
   ) {
@@ -607,7 +617,7 @@ async function loadMorePurposeHistory(): Promise<void> {
 }
 
 async function selectTask(id: string): Promise<void> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   if (sessionId === null) return;
   const seq = ++taskSelectSeq;
   selectedTask = id;
@@ -638,7 +648,7 @@ async function selectTask(id: string): Promise<void> {
   if (
     seq !== taskSelectSeq ||
     selectedTask !== id ||
-    readSession() !== sessionId
+    getSessionId() !== sessionId
   ) {
     return;
   }
@@ -689,7 +699,7 @@ async function selectTask(id: string): Promise<void> {
 }
 
 async function loadMoreTaskHistory(): Promise<void> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   const id = selectedTask;
   const cursor = taskHistoryCursor;
   const seq = taskSelectSeq;
@@ -713,7 +723,7 @@ async function loadMoreTaskHistory(): Promise<void> {
   if (
     seq !== taskSelectSeq ||
     selectedTask !== id ||
-    readSession() !== sessionId ||
+    getSessionId() !== sessionId ||
     taskHistoryTarget !== id ||
     taskHistoryCursor !== cursor
   ) {
@@ -738,7 +748,7 @@ async function loadMoreTaskHistory(): Promise<void> {
 }
 
 async function createPurpose(): Promise<void> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   if (sessionId === null) return;
   const statement = purposeStatement.trim();
   const scope =
@@ -772,6 +782,7 @@ async function createPurpose(): Promise<void> {
     purposeValidFrom = "";
     purposeValidUntil = "";
     await refreshLists();
+    notifyAutonomyChanged();
     notice("目的を記録しました");
   } else {
     notice("目的の記録に失敗しました");
@@ -779,7 +790,7 @@ async function createPurpose(): Promise<void> {
 }
 
 async function correctPurpose(): Promise<void> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   const id = selectedPurpose;
   const selected = selectedPurposeView;
   if (sessionId === null || id === null || selected === null) {
@@ -849,7 +860,7 @@ async function correctPurpose(): Promise<void> {
 }
 
 async function transitionPurpose(op: "revoke" | "achieve"): Promise<void> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   const id = selectedPurpose;
   if (sessionId === null || id === null) return;
   const selected = selectedPurposeView;
@@ -866,6 +877,7 @@ async function transitionPurpose(op: "revoke" | "achieve"): Promise<void> {
   if (result === null) return;
   if (result.status === 200) {
     await refreshLists();
+    notifyAutonomyChanged();
     notice(op === "revoke" ? "目的を取り消しました" : "目的を達成にしました");
   } else if (result.status === 409) {
     await refreshLists();
@@ -876,7 +888,7 @@ async function transitionPurpose(op: "revoke" | "achieve"): Promise<void> {
 }
 
 async function markConflict(): Promise<void> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   const id = selectedPurpose;
   if (sessionId === null || id === null) {
     notice("競合にする目的を二つ選んでください");
@@ -915,7 +927,7 @@ async function markConflict(): Promise<void> {
 }
 
 async function createTask(): Promise<void> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   if (sessionId === null) return;
   const title = taskTitle.trim();
   if (title.length === 0) {
@@ -962,6 +974,7 @@ async function createTask(): Promise<void> {
     taskTitle = "";
     taskDeadline = "";
     await refreshLists();
+    notifyAutonomyChanged();
     notice("作業を記録しました");
   } else {
     notice("作業の記録に失敗しました");
@@ -971,7 +984,7 @@ async function createTask(): Promise<void> {
 async function transitionTask(
   op: "start" | "complete" | "cancel",
 ): Promise<void> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   const id = selectedTask;
   if (sessionId === null || id === null) return;
   const view = selectedTaskView;
@@ -988,6 +1001,7 @@ async function transitionTask(
   if (result === null) return;
   if (result.status === 200) {
     await refreshLists();
+    notifyAutonomyChanged();
     notice("作業を更新しました");
   } else if (result.status === 409) {
     await refreshLists();
@@ -998,7 +1012,7 @@ async function transitionTask(
 }
 
 async function holdTask(): Promise<void> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   const id = selectedTask;
   if (sessionId === null || id === null || mutating) return;
   const view = selectedTaskView;
@@ -1042,7 +1056,7 @@ async function holdTask(): Promise<void> {
 }
 
 async function resumeTask(): Promise<void> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   const id = selectedTask;
   if (sessionId === null || id === null) return;
   const evidence = taskResumeInput.trim();
@@ -1104,8 +1118,31 @@ async function resumeTask(): Promise<void> {
   }
 }
 
-// Legacy boot: one control + lists refresh on mount.
+// Boot + session rebinding (shared reactive store): reading getSessionId()
+// inside this effect tracks the chat session, so the control + list refreshes
+// re-run when a session becomes available late (fresh /tasks before the chat
+// shell finishes booting) AND on every session switch. A switch resets the
+// previous session's selections, details, CAS versions, history cursors and
+// the frozen pending command, so stale rows/controls from the old session are
+// never shown while mutations target the newly selected one.
 $effect(() => {
+  getSessionId();
+  selectedPurpose = null;
+  selectedTask = null;
+  selectedPurposeView = null;
+  selectedTaskView = null;
+  purposeDetailVisible = false;
+  taskDetailVisible = false;
+  purposeDetailBody = "";
+  taskDetailBody = "";
+  purposeHistoryMoreVisible = false;
+  taskHistoryMoreVisible = false;
+  purposeVersions.clear();
+  taskVersions.clear();
+  purposeHistoryCursor = null;
+  taskHistoryCursor = null;
+  pendingAutonomy = null;
+  renderPending();
   void refreshControl();
   void refreshLists();
 });
@@ -1200,7 +1237,7 @@ $effect(() => {
   </form>
   <ul id="autonomy-purpose-list">
     {#each purposes as purpose (purpose.id)}
-      <li>
+      <li id={purpose.id}>
         <button
           type="button"
           onclick={() => void selectPurpose(purpose.id)}
@@ -1337,7 +1374,7 @@ $effect(() => {
   </form>
   <ul id="autonomy-task-list">
     {#each tasks as task (task.id)}
-      <li>
+      <li id={task.id}>
         <button type="button" onclick={() => void selectTask(task.id)}>
           {task.title}（{task.kind}・{task.status}{task.deadline.length > 0
             ? `・期限 ${task.deadline}`
