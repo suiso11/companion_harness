@@ -4397,6 +4397,44 @@ journalctl --user -u companion-health -n 50
 cat ~/.local/state/companion/alerts.log
 ```
 
+## 運用通知 (in-app system ops notices, local only)
+
+運用スクリプト (deploy / backup / health) は、journal に加えてアプリ内の
+システム通知フィード (notifications の `ops` scope) へ best-effort で通知を
+書き込む。外部送信 (push / メール等) は行わない。書き込みは
+`scripts/deploy/notify.sh` 経由で server の ops notify CLI
+(`apps/server/src/ops_notify_cli.ts notify`) を 10 秒の timeout で呼ぶ。
+失敗時は stderr に log を出すだけで、呼び出し元スクリプトの終了コードには
+影響しない (常に exit 0)。
+
+通知の種類と書き込みタイミング:
+
+- `companion-deploy.sh`
+  - 成功: info「デプロイ完了 <short sha> (#PR)」 (#PR は merge commit
+    subject から抽出、health ok 後に書き込む — server restart 中の
+    DB 書き込みを避けるため)。
+  - 失敗 / ロールバック: error「デプロイ失敗（ロールバック）」。
+  - スキップ継続: 同一 target が 1 時間超 skip し続けた場合 (CI not
+    green / active runs) に 1 時間窓ごとに最大 1 件の info。
+    状態は `~/.local/state/companion/deploy-skip` (JSON, 0600)。
+- `companion-backup.sh`: 失敗時のみ error (Companion / remind それぞれ)。
+- `companion-health.sh`: 問題 key ごとに初回のみ error、解消時に 1 件の
+  info「回復」。key は liveness / unit:<name> / disk:<mount> /
+  backup-age:<label>。状態は `~/.local/state/companion/health-notify.json`
+  (0600)。重複制御は `scripts/deploy/opsNotifyState.mjs` (pure 関数を
+  `apps/server/test/ops_notify_state.test.ts` で検証)。
+
+読み方は通常の通知と同じ (アプリ内通知フィードの ops scope、`ops` kind、
+urgent = error / routine = info)。journal だけを見る場合:
+
+```sh
+journalctl --user -t ops-notify -n 50
+cat ~/.local/state/companion/deploy-skip
+cat ~/.local/state/companion/health-notify.json
+```
+
+状態ファイルを削除すれば重複制御はリセットされる (次回の問題で再通知)。
+
 ## LLM スタック管理 (ops/llm)
 
 `ops/llm/` はホストの `/srv/llm` を git 管理下に置いたもの。

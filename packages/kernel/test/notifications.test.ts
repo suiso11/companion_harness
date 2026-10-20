@@ -1568,7 +1568,7 @@ describe("system-scope ops notices (recordSystemNotice)", () => {
           source_id: SPEC.sourceId,
           seq: 1,
         });
-        expect(rows[0]!.brief_text).toBe(`${SPEC.title} — ${SPEC.body}`);
+        expect(rows.at(0)?.brief_text).toBe(`${SPEC.title} — ${SPEC.body}`);
       }
       // Feed visibility: the notice is a durable forward page member.
       const page = listNotificationsForward(handle.raw, sessionId, {

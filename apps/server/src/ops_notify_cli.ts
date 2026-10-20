@@ -29,7 +29,7 @@ import {
   recordSystemNotice,
   type SystemNotice,
 } from "@companion/kernel";
-import { loadServerConfig } from "./config.js";
+import { loadServerConfig, type ServerConfig } from "./config.js";
 
 export const NOTIFY_USAGE =
   "Use: notify --level info|error --title <1..120> --body <1..300> --source <8..128> --subject <1..200>";
@@ -110,7 +110,7 @@ export function runNotifyCli(
   env: NodeJS.ProcessEnv = process.env,
 ): string {
   const args = parseNotifyArgv(argv);
-  let config;
+  let config: ServerConfig;
   try {
     config = loadServerConfig(env);
   } catch {

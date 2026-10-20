@@ -31,6 +31,17 @@ log() {
   printf '%s companion-backup: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"
 }
 
+# Best-effort in-app failure notice (never changes the exit path).
+notify_fail() {
+  label="$1"
+  detail="$2"
+  "$SCRIPT_DIR/notify.sh" error \
+    "バックアップ失敗" \
+    "$detail" \
+    "ops:backup-fail:$label" \
+    "backup-fail:$label"
+}
+
 fail() {
   log "$*"
   exit 1
@@ -66,6 +77,7 @@ COMPANION_OUT="$(
 )" || {
   log "Companion backup failed"
   printf '%s\n' "$COMPANION_OUT" >&2
+  notify_fail companion "Companion online backup failed"
   exit 1
 }
 log "stored Companion generation $COMPANION_OUT"
@@ -80,6 +92,7 @@ REMIND_OUT="$(
 )" || {
   log "remind backup failed"
   printf '%s\n' "$REMIND_OUT" >&2
+  notify_fail remind "remind online backup failed"
   exit 1
 }
 log "stored remind generation $REMIND_OUT"
