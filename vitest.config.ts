@@ -12,7 +12,11 @@ const isCI =
 export default defineConfig({
   test: {
     environment: "node",
-    include: ["packages/*/test/**/*.test.ts", "apps/*/test/**/*.test.ts"],
+    include: [
+      "packages/*/test/**/*.test.ts",
+      "apps/*/test/**/*.test.ts",
+      "scripts/deploy/**/*.test.mjs",
+    ],
     // Kernel SQLite suites take 3-7s on windows-latest (e.g. master push at
     // 3370434: action_readback_instant took 7012ms > vitest's 5s default),
     // so allow headroom repo-wide. Per-test timeouts larger than this keep

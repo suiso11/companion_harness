@@ -230,21 +230,16 @@ if ! command -v gh >/dev/null 2>&1; then
   notify_skip_persisted "$TARGET" "gh unavailable"
   exit 0
 fi
-# Aggregate every page before parsing: `gh api --paginate` emits each page
-# as a separate JSON object, so pages must be collected first (via --slurp
-# when the installed gh supports it, else streamed one run per line and
-# whitespace-joined inside a single JSON array); the aggregator below only
-# parses that one aggregated form.
-if gh api --help 2>/dev/null | grep -q -- '--slurp'; then
-  CHECK_RUNS_JSON="$(gh api \
-    "repos/${REPO_OWNER}/${REPO_NAME}/commits/${TARGET}/check-runs" \
-    --paginate --slurp 2>/dev/null)" || CHECK_RUNS_JSON=""
-else
-  CHECK_RUNS_JSON="[$(
-    gh api "repos/${REPO_OWNER}/${REPO_NAME}/commits/${TARGET}/check-runs" \
-      --paginate --jq '.check_runs[]' 2>/dev/null | tr '\n' ' '
-  )]" || CHECK_RUNS_JSON="[ ]"
-fi
+# Single request with per_page=100 (no --paginate). `gh api --paginate`
+# glues pages together differently across gh versions (gh 2.46 concatenates
+# raw page objects; the old gh<--slurp fallback streamed runs and joined
+# them with whitespace, producing [obj obj] — invalid JSON, which the
+# classifier misclassified as parse-error). A remind commit has only a
+# handful of check runs; when total_count ever exceeds 100 the classifier
+# reports too-many-checks and the deploy is skipped clearly, never misjudged.
+CHECK_RUNS_JSON="$(gh api \
+  "repos/${REPO_OWNER}/${REPO_NAME}/commits/${TARGET}/check-runs?per_page=100" \
+  2>/dev/null)" || CHECK_RUNS_JSON=""
 if [ -z "$CHECK_RUNS_JSON" ]; then
   log "gh api for check-runs failed (unauthed/offline?); skipping deploy this tick"
   notify_skip_persisted "$TARGET" "check-runs api failed"
@@ -259,20 +254,35 @@ try {
   process.stdout.write("parse-error");
   process.exit(0);
 }
-// doc is an array of page objects (--slurp), a flat array of check runs
-// (fallback stream), or a single page object. Aggregate every check_runs
-// we can see across pages before judging greenness.
+// doc is a single page object (per_page=100 fetch), an array of page
+// objects (gh --paginate --slurp), or a flat array of check runs.
+// Aggregate every check_runs we can see before judging greenness.
+// If the reported total exceeds the single fetched page size (100), refuse
+// clearly instead of silently judging a truncated subset.
+const isPage = (p) =>
+  p !== null && typeof p === "object" && Array.isArray(p.check_runs);
+const pages = Array.isArray(doc)
+  ? doc.length > 0 && isPage(doc[0])
+    ? doc
+    : [] // flat array of check runs -> handled below
+  : [doc];
+let totalCount = 0;
 let runs = [];
-if (Array.isArray(doc)) {
-  if (doc.length > 0 && doc[0] && typeof doc[0] === "object" && "check_runs" in doc[0]) {
-    for (const page of doc) {
-      if (page && Array.isArray(page.check_runs)) runs.push(...page.check_runs);
-    }
-  } else {
-    runs = doc;
+if (pages.length > 0) {
+  for (const page of pages) {
+    if (!isPage(page)) continue;
+    runs.push(...page.check_runs.filter((r) => r && typeof r === "object"));
+    if (typeof page.total_count === "number") totalCount += page.total_count;
   }
-} else if (doc && typeof doc === "object" && Array.isArray(doc.check_runs)) {
-  runs = doc.check_runs;
+  // Flat-array form carries no total_count; count the runs themselves.
+  if (totalCount === 0) totalCount = runs.length;
+} else if (Array.isArray(doc)) {
+  runs = doc.filter((r) => r && typeof r === "object");
+  totalCount = runs.length;
+}
+if (totalCount > 100) {
+  process.stdout.write("too-many-checks");
+  process.exit(0);
 }
 if (runs.length === 0) {
   process.stdout.write("no-checks");
