@@ -24,7 +24,7 @@
 // bootstrap narrows the window with an immediate post-open recheck of the
 // configured DB path (fail closed) before any migration writes.
 
-import { chmodSync, mkdirSync, readFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -148,7 +148,10 @@ import {
   loadRemotePasswordRecordSync,
   verifyPasswordAgainstRecord,
 } from "./remote_password.js";
-import { createSqliteRemoteSessionStore } from "./remote_session.js";
+import {
+  createSqliteRemoteLoginRateLimiter,
+  createSqliteRemoteSessionStore,
+} from "./remote_session.js";
 import {
   assertRescheduleWriteAccountCompatible,
   assertRescheduleWriteHintCompatible,
@@ -743,6 +746,7 @@ export function loadUiAssets(fromDir?: string): {
   clientCss?: string;
   svelteJs?: string;
   svelteCss?: string;
+  svelteChunks?: Record<string, string>;
 } {
   const dir =
     fromDir ??
@@ -752,6 +756,7 @@ export function loadUiAssets(fromDir?: string): {
     clientCss?: string;
     svelteJs?: string;
     svelteCss?: string;
+    svelteChunks?: Record<string, string>;
   } = {};
   try {
     assets.clientJs = readFileSync(join(dir, "client.js"), "utf-8");
@@ -777,6 +782,20 @@ export function loadUiAssets(fromDir?: string): {
   }
   try {
     assets.svelteCss = readFileSync(join(svelteDir, "svelte-app.css"), "utf-8");
+  } catch {
+    // Best effort: the route serves 404 when the bundle was not built.
+  }
+  // PR-5 route chunks (dynamic imports such as the feature page). Fixed
+  // names, self-hosted: no CDN and no inline script. Missing directory is
+  // the same best-effort 404 as the entry bundle.
+  try {
+    const chunks: Record<string, string> = {};
+    for (const name of readdirSync(svelteDir)) {
+      if (/^svelte-app-.+\.js$/.test(name)) {
+        chunks[name] = readFileSync(join(svelteDir, name), "utf-8");
+      }
+    }
+    assets.svelteChunks = chunks;
   } catch {
     // Best effort: the route serves 404 when the bundle was not built.
   }
@@ -2777,7 +2796,10 @@ export async function startServer(
     // migration 0023 — tokens themselves are never stored); the verifier
     // re-reads the password file per attempt so rotation needs no
     // restart, and any unreadable file answers a uniform login failure
-    // (never a distinct error). Disabled remote wires nothing.
+    // (never a distinct error). The global failure/lockout counter is
+    // SQLite-backed too (`remote_login_lockout`, migration 0024) so an
+    // auto-deploy restart cannot clear a brute-force lockout. Disabled
+    // remote wires nothing.
     const remotePasswordFile =
       config.remote.enabled === true ? config.remote.passwordFile : null;
     const remoteStore =
@@ -2797,6 +2819,13 @@ export async function startServer(
             },
           }
         : null;
+    const remoteLoginLimiter =
+      remotePasswordFile !== null && handle !== undefined
+        ? createSqliteRemoteLoginRateLimiter(handle.raw, {
+            maxFailures: config.remote.maxFailures,
+            lockoutMs: config.remote.lockoutMs,
+          })
+        : null;
     const { app, controls } = createApp({
       config,
       repo,
@@ -2810,8 +2839,10 @@ export async function startServer(
       // persisted, never replayed, polling ignores them).
       modelDeltas: modelDeltaBus,
       ...(memory !== null ? { memory } : {}),
-      ...(remoteStore !== null && remotePassword !== null
-        ? { remoteStore, remotePassword }
+      ...(remoteStore !== null &&
+      remotePassword !== null &&
+      remoteLoginLimiter !== null
+        ? { remoteStore, remotePassword, remoteLoginLimiter }
         : {}),
       ...(activeShadowWake !== null
         ? {

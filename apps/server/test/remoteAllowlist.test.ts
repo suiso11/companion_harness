@@ -31,7 +31,10 @@ import {
   ServerConfigError,
 } from "../src/config.js";
 import { createCollectingLogger } from "../src/logger.js";
-import { createMemoryRemoteSessionStore } from "../src/remote_session.js";
+import {
+  createMemoryRemoteSessionStore,
+  createSqliteRemoteLoginRateLimiter,
+} from "../src/remote_session.js";
 
 const ALLOWED_ORIGIN = "https://happy-meerkat.ts.net";
 const ALLOWED_HOST = "happy-meerkat.ts.net";
@@ -88,6 +91,10 @@ async function makeApp(remote: RemoteConfig | null): Promise<Fixture> {
           remotePassword: {
             verify: (password: string): boolean => password === TEST_PASSWORD,
           },
+          remoteLoginLimiter: createSqliteRemoteLoginRateLimiter(handle.raw, {
+            maxFailures: remote?.maxFailures ?? DEFAULT_REMOTE_MAX_FAILURES,
+            lockoutMs: remote?.lockoutMs ?? DEFAULT_REMOTE_LOCKOUT_MS,
+          }),
         }),
   });
   return { ...created, repo, close: () => closeKernelDatabase(handle) };

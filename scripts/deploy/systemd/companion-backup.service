@@ -1,0 +1,14 @@
+[Unit]
+Description=Companion + remind daily backup (7 generations)
+Documentation=file:%h/companion_master/docs/operations.md
+After=network-online.target
+OnFailure=companion-alert@%n.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/companion_master
+EnvironmentFile=%h/.config/companion/env
+ExecStart=%h/companion_master/scripts/deploy/companion-backup.sh
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true

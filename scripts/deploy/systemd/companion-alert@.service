@@ -1,0 +1,8 @@
+[Unit]
+Description=Companion local failure alert for %i
+Documentation=file:%h/companion_master/docs/operations.md
+
+[Service]
+Type=oneshot
+ExecStart=%h/companion_master/scripts/deploy/companion-alert.sh %i
+NoNewPrivileges=true

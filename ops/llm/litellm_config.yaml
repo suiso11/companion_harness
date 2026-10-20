@@ -1,0 +1,11 @@
+# LiteLLM model list for the local stack. The qwen-local alias was removed;
+# `local-chat` is the model Companion uses.
+model_list:
+  - model_name: local-chat
+    litellm_params:
+      model: openai/gemma-4-26b-a4b
+      api_base: http://gemma:8080/v1
+      api_key: os.environ/LLAMA_API_KEY
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

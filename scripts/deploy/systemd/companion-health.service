@@ -1,0 +1,11 @@
+[Unit]
+Description=Companion local health monitor (no external send)
+Documentation=file:%h/companion_master/docs/operations.md
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/companion_master
+EnvironmentFile=%h/.config/companion/env
+ExecStart=%h/companion_master/scripts/deploy/companion-health.sh
+Nice=10
+NoNewPrivileges=true

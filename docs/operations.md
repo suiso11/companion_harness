@@ -5,7 +5,7 @@ no external telemetry, no app-managed rolling log files.
 
 ## Source run
 
-Requirements: Node.js `24.12.0`, pnpm `11.25.0` (see `engines` +
+Requirements: Node.js `26.12.0`, pnpm `11.25.0` (see `engines` +
 `packageManager`).
 
 ```sh
@@ -85,9 +85,13 @@ rejected). Remote reachability is provided outside the app (for example
   set-password`, which reads the password twice from TTY/stdin and never
   from env/argv). Sessions persist only SHA-256 token hashes in SQLite
   (`remote_sessions`, additive migration `0023_remote_sessions.sql`).
+  The global login failure counter and lockout are persisted in
+  SQLite too (`remote_login_lockout`, additive migration
+  `0024_remote_login_lockout.sql`), so a process restart (including an
+  auto-deploy restart) cannot clear an active lockout.
   Tunables with 案 defaults: `absoluteTimeoutMs` (30d),
-  `idleTimeoutMs` (7d), `maxFailures` (5), `lockoutMs` (15min); the
-  lockout counter is in-memory and resets on restart. All API + SSE
+  `idleTimeoutMs` (7d), `maxFailures` (5), `lockoutMs` (15min).
+  All API + SSE
   require a session (401 JSON); `/health/live` stays open while
   `/health/ready` requires a session. A browser form POST to
   `/api/remote/login` redirects to `/` (303) on success; JSON logins
@@ -127,9 +131,11 @@ no delete, no auto-shrink.
   (`<UTC>` = `YYYYMMDDTHHMMSSZ`).
 - Procedure: `.partial` backup → private permissions (`0600`; Windows
   no-op) → `quick_check` of the copy → atomic rename.
-- Manual backups are **never rotated** and never match the
+- Manual backups are never rotated by the server itself and never match the
   `companion-pre-migration-` prefix. The only automatic deletion is the
-  newest-3 pre-migration rotation.
+  newest-3 pre-migration rotation. The daily backup job additionally prunes
+  legacy `companion-manual-*.sqlite` generations in `<data>/backups/` to the
+  newest `COMPANION_BACKUP_KEEP` (default 7).
 - Exposed only as the stopped-server CLI command above. **No HTTP
   backup/restore/delete endpoints exist.** The CLI takes no path flags,
   uses only the configured DB path, prints only the backup basename, and
@@ -4315,3 +4321,117 @@ brownie（単一 Linux ホスト）で本構成が稼働中。Companion は syst
 が tailnet HTTPS を終端して `127.0.0.1:<port>` へ proxy する。chat model は
 2026-10-19 に Gemma 4 26B-A4B（unsloth UD-Q4_K_XL）へ切替済み（Qwen 削除、
 `local-chat` alias は PR #90）。remind 側の自動デプロイは未着手（PR #92 open）。
+## バックアップと復元 (Companion + remind, user systemd)
+
+`companion-backup.timer` が毎日 03:30 (Persistent=true,
+RandomizedDelaySec=15min) に `scripts/deploy/companion-backup.sh` を実行する。
+保存先は `~/.local/share/companion-backups/{companion,remind}/` (0700)、
+各世代は 0600 の SQLite。保持は各ディレクトリ newest 7 世代
+(`COMPANION_BACKUP_KEEP` で変更可)。
+
+- Companion: バックアップ CLI の契約はサーバ停止中のみ (stopped-server
+  only) だが、timer は `companion.service` 起動中に発火し得る。そこで
+  `scripts/deploy/companion-online-backup.mjs` がサーバと同じ規則
+  (`COMPANION_DB_PATH`、なければ OS 既定) で DB パスを解決し、**読み取り
+  専用で開いて** `node:sqlite` の online backup API でコピーする
+  (**ダウンタイム無し**)。コピーは `.partial` → `PRAGMA integrity_check`
+  → 0600 → atomic rename。旧 CLI が書いた legacy の
+  `companion-manual-*.sqlite` 世代 (DB の `<data>/backups/`) も同じく
+  newest N 世代に prune する。
+- remind: remind に backup CLI は無いため
+  `scripts/deploy/remind-backup.mjs` が
+  `~/.config/remind/memory.config.json` の `dbPath` (相対パスは config
+  ディレクトリ基準) を解決し、`node:sqlite` の online backup API で
+  読み取り専用ソースからコピーする。コピーは `.partial` →
+  `PRAGMA integrity_check` → 0600 → atomic rename。
+- prune は新世代の rename 成功後にのみ実行する。失敗時は `.partial` を
+  削除し、既存の最新 good copy を残す。
+- 同時実行は flock (`$XDG_RUNTIME_DIR/companion-backup.lock`) で排他。
+- ログは journal (stdout)。手動実行:
+
+```sh
+systemctl --user start companion-backup.service
+journalctl --user -u companion-backup.service -n 50
+```
+
+### Companion の復元 (停止必須)
+
+1. `systemctl --user stop companion.service`
+2. 現行 DB / `-wal` / `-shm` を退避コピー (削除しない)。
+3. 選んだ `companion-*.sqlite` を DB 隣の一時ファイルへコピー。
+4. 一時ファイルに `PRAGMA quick_check` を実行し、`ok` 以外なら中止。
+5. 一時ファイルを設定 DB パスへ atomic rename。
+6. 停止したまま古い `-wal` / `-shm` を削除。
+7. `systemctl --user start companion.service` (起動時 migration 可)。
+
+### remind の復元 (DB を開くプロセスを停止)
+
+1. remind CLI / それを呼ぶ処理を停止 (cron/常駐があれば止める)。
+2. 現行 DB / `-wal` / `-shm` を退避コピー。
+3. `~/.local/share/companion-backups/remind/` の選んだ世代を
+   `dbPath` 隣の一時ファイルへコピー。
+4. `PRAGMA integrity_check` が `ok` であることを確認。
+5. atomic rename で `dbPath` を置換し、古い sidecar を削除。
+6. 処理を再開。
+
+## 監視 (local only)
+
+`companion-health.timer` が 5 分ごとに
+`scripts/deploy/companion-health.sh` を実行し、以下を確認する。
+
+- `http://127.0.0.1:${COMPANION_PORT:-3000}/health/live`
+- `systemctl --user is-failed` (companion / companion-deploy / companion-backup)
+- `/` と `/srv` の空き容量 (<10% で error)
+- Companion / remind の最新バックアップ age (>36h で error,
+  `COMPANION_BACKUP_MAX_AGE_HOURS` で変更可)
+
+問題時は `systemd-cat -p err -t companion-health` で journal に記録する。
+`companion`, `companion-deploy`, `companion-backup` には
+`OnFailure=companion-alert@%n.service` を設定し、失敗時に
+`~/.local/state/companion/alerts.log` (0700/0600) へ追記 + journal err を
+出す。外部送信 (push/メール等) は未承認のため対象外。
+
+```sh
+journalctl --user -p err -S today
+journalctl --user -u companion-health -n 50
+cat ~/.local/state/companion/alerts.log
+```
+
+## LLM スタック管理 (ops/llm)
+
+`ops/llm/` はホストの `/srv/llm` を git 管理下に置いたもの。
+qwen サービスと `qwen-local` alias は削除済みで、`local-chat` のみ。
+イメージは digest pin。secrets は `/srv/llm/.env` (0600, 非コミット) のみ。
+
+```sh
+# 差分確認 (コピーしない)
+ops/llm/apply.sh
+# 差分を /srv/llm へ反映し、compose を収束
+ops/llm/apply.sh --yes
+```
+
+`apply.sh` は `compose.yaml` と `litellm_config.yaml` だけをコピーし、
+`.env` は読まない/コピーしない。`--dest` / `LLM_DIR` で配置先を変更できる。
+
+## 鍵ローテーション
+
+```sh
+ops/llm/rotate-keys.sh --yes
+# パスを変える場合:
+ops/llm/rotate-keys.sh --yes \
+  --llm-dir /srv/llm \
+  --companion-env ~/companion_master/.env.litellm
+```
+
+- `openssl rand -hex 32` で `LLAMA_API_KEY` / `LITELLM_MASTER_KEY` を生成。
+- `/srv/llm/.env` を `.env.bak-<UTC>` (0600) に退避し、0600 で atomic 更新。
+- `~/companion_master/.env.litellm` の `LITELLM_MASTER_KEY` も更新
+  (同様に backup、0600)。
+- `gemma` + `litellm` を force-recreate し、`companion.service` を restart。
+- 最後に認証付き `GET /v1/models` が 200 を返すことを確認 (鍵は表示しない)。
+- 鍵は argv / 標準出力 / journal に出さない。失敗時は退避パスだけを表示する。
+
+注意: 現行 compose の llama.cpp (`gemma`) は `--api-key` を渡していないため、
+`LLAMA_API_KEY` は LiteLLM → gemma の outbound header としてのみ使われる。
+llama.cpp 側でも認証を強制する場合は、`compose.yaml` の gemma command に
+`--api-key ${LLAMA_API_KEY}` を追加してから `apply.sh --yes` を実行する。

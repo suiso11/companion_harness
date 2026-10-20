@@ -1252,7 +1252,7 @@ LLM-provider-specific optimization
 Requirements:
 
 ```text
-Node.js 24.12.0
+Node.js 26.12.0
 pnpm 11.25.0
 ```
 
@@ -1595,7 +1595,9 @@ COMPANION_REMOTE_JSON='{"enabled":false,"allowedOrigins":["https://<host>.<tailn
   native 依存なし) を **SQLite 外**のファイルに保存します
   (secret-not-in-DB)。セッション側はトークンの SHA-256 ハッシュのみを
   SQLite (`remote_sessions`、additive migration `0023`) に保持します
-  (トークン平文は DB・ログに残りません)。
+  (トークン平文は DB・ログに残りません)。ログイン失敗カウンターと
+  ロックアウトも SQLite (`remote_login_lockout`、additive migration
+  `0024`) に永続化し、再起動 (auto-deploy を含む) で解除されません。
 - 設定キー (`COMPANION_REMOTE_JSON` に追加、以下はすべて任意・既定あり):
   `passwordFile` (有効時は必須、絶対パス。0600 推奨・POSIX では
   group/other 読み取り可で起動拒否)、`absoluteTimeoutMs` (既定

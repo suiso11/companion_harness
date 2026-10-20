@@ -10,10 +10,10 @@
 // - Rate limiting is a GLOBAL failed-attempt counter (never keyed by IP:
 //   all proxied requests arrive from 127.0.0.1, so an IP key would lock out
 //   the single operator behind every failure — or never trigger). The
-//   counter lives in memory and RESETS ON RESTART (documented in README);
-//   SQLite persistence was considered and deliberately skipped: a restart
-//   clearing a lockout is the fail-open-safe direction for a single-user
-//   box, and it keeps the hot path free of extra writes.
+//   counter lives in SQLite (`remote_login_lockout`, additive migration
+//   0024): failures, the active lockout deadline, and the last update are
+//   updated atomically in one single-row transaction, so an auto-deploy
+//   restart no longer clears a lockout. Success resets the row.
 // - Decisions use only Host/Origin/Sec-Fetch-Site/Cookie headers — never
 //   remoteAddress or X-Forwarded-*.
 
@@ -140,12 +140,14 @@ export interface RemoteLoginRateLimiter {
   /** Record one failed attempt; returns true when this failure locks. */
   recordFailure(now: number): boolean;
   /** Clear failures + lockout (called on any successful login). */
-  reset(): void;
+  reset(now: number): void;
 }
 
 /**
  * Global failed-attempt counter with lockout (design §3, 案 defaults
- * 5 failures → 15 min). In-memory only: resets on restart.
+ * 5 failures → 15 min). In-memory only: tests / explicit non-production
+ * wiring. The server uses `createSqliteRemoteLoginRateLimiter` so the
+ * counter survives restarts.
  */
 export function createRemoteLoginRateLimiter(options: {
   maxFailures: number;
@@ -169,6 +171,60 @@ export function createRemoteLoginRateLimiter(options: {
     reset(): void {
       failures = 0;
       lockedUntil = 0;
+    },
+  };
+}
+
+/**
+ * SQLite-backed global failed-attempt counter (single row, migration 0024).
+ * Semantics mirror `createRemoteLoginRateLimiter`: increment on failure,
+ * lock at `maxFailures` (resetting the counter), and clear on success.
+ * `recordFailure`/`reset` run inside one IMMEDIATE transaction, so
+ * concurrent failures on separate connections cannot lose increments.
+ */
+export function createSqliteRemoteLoginRateLimiter(
+  db: Database.Database,
+  options: {
+    maxFailures: number;
+    lockoutMs: number;
+  },
+): RemoteLoginRateLimiter {
+  const select = db.prepare(
+    "SELECT failures AS failures, locked_until AS lockedUntil FROM remote_login_lockout WHERE id = 1",
+  );
+  const write = db.prepare(
+    "INSERT INTO remote_login_lockout (id, failures, locked_until, updated_at) VALUES (1, ?, ?, ?) " +
+      "ON CONFLICT(id) DO UPDATE SET failures = excluded.failures, locked_until = excluded.locked_until, updated_at = excluded.updated_at",
+  );
+  const recordFailureTx = db.transaction((now: number): boolean => {
+    const row = select.get() as
+      | { failures: number; lockedUntil: number }
+      | undefined;
+    const failures = (row?.failures ?? 0) + 1;
+    if (failures >= options.maxFailures) {
+      write.run(0, now + options.lockoutMs, now);
+      return true;
+    }
+    const lockedUntil =
+      row !== undefined && now < row.lockedUntil ? row.lockedUntil : 0;
+    write.run(failures, lockedUntil, now);
+    return false;
+  });
+  const resetTx = db.transaction((now: number): void => {
+    write.run(0, 0, now);
+  });
+  return {
+    isLocked(now: number): boolean {
+      const row = select.get() as
+        | { failures: number; lockedUntil: number }
+        | undefined;
+      return row !== undefined && now < row.lockedUntil;
+    },
+    recordFailure(now: number): boolean {
+      return recordFailureTx.immediate(now) as boolean;
+    },
+    reset(now: number): void {
+      resetTx.immediate(now);
     },
   };
 }

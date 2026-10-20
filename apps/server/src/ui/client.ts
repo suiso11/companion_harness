@@ -6162,9 +6162,17 @@ class TrialPanel {
 
 function boot(): void {
   const app = new ConversationApp();
-  document.addEventListener("DOMContentLoaded", () => {
-    void app.boot();
-  });
+  // PR-5: feature pages (served by the Svelte shell at /memory, /tasks, …)
+  // mount the legacy surface and load this bundle AFTER DOMContentLoaded,
+  // so the old deferred-only startup would never run there. Standard
+  // document-ready guard: load while parsing defers, otherwise boot now.
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", () => {
+      void app.boot();
+    });
+    return;
+  }
+  void app.boot();
 }
 
 boot();
