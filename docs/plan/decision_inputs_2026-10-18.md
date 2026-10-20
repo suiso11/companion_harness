@@ -630,3 +630,32 @@
 - 日付: 2026-10-18
 - 証拠・リンク: 2026-10-18 項目別確認
 - テンプレート上の不備: 依存早見の「G01 / G02」に対応する本文項目がない
+
+---
+
+## H フロントエンド（2026-10-18〜19 決定）
+
+※ [frontend_ui_requirements.md](frontend_ui_requirements.md) の Q1–Q11 に対する回答。決定者: haruka。
+
+- **Q1 フレームワーク**: 決定 — 軽量 framework の導入を許可 → **Svelte 5** を採用。
+- **Q2 chat UI の理想**: 決定 — **llama.cpp WebUI を理想とし、MIT ライセンス commit `098ce52` を vendoring**（改変可・出所明記）。
+- **Q3 テーマ**: 決定 — **simple dark のみ**（テーマ切替・light モードは作らない）。
+- **Q4 PWA**: 決定 — **将来課題として先送り**（現時点では実装しない）。
+- **Q5 push 通知**: 決定 — **現時点では導入しない**。AV-05 に従い in-app 通知のみ。
+- **Q6 言語**: 決定 — **日本語のみ**（多言語化はしない）。
+- **Q7 情報設計**: 決定 — **chat を最優先のトップ画面とし、他機能は別ページ**に置く。
+- **Q9 bundle budget・browser matrix**: 決定 — frontend_ui_requirements.md の**推奨値を採用**（初回 page JS ≤300KB min 等・evergreen browser matrix）。
+- **Q10（推奨値）**: 決定 — **推奨値を採用**。
+- **Q11 応答表示**: 決定 — **thinking block ＋ run status ＋ provisional draft（暫定回答）** の表示を採用。
+- 証拠・リンク: frontend_ui_requirements.md、実装は PR #75/#76/#77/#78/#82/#83/#84/#85（いずれも merged 2026-10-19）。
+
+### Gemma 4 26B-A4B 採用・Qwen 削除（2026-10-19, haruka）
+
+- 決定: chat model を **Gemma 4 26B-A4B（unsloth UD-Q4_K_XL）** に切替（2026-10-19 実施）。**Qwen は削除**。
+- 互換対応（merged）: #87（answer protocol version 要求を撤去）、#88（answer_invalid の fixed reason codes 記録）、#89（OpenAI-compatible モデルへ `tool_choice: required` 送信）、#90（model 非依存の `local-chat` LiteLLM alias）。
+- 決定者: haruka / 日付: 2026-10-19
+
+### 自動デプロイ採用（2026-10-19）
+
+- 決定: 単一 Linux ホスト上の systemd user units＋5分ポーリングによる **origin/master green 先端の自動デプロイを採用**（`scripts/deploy/`、docs/operations.md「自動デプロイ」節）。PR #79/#80/#86（merged）。
+- 決定者: haruka / 日付: 2026-10-19
