@@ -659,3 +659,9 @@
 
 - 決定: 単一 Linux ホスト上の systemd user units＋5分ポーリングによる **origin/master green 先端の自動デプロイを採用**（`scripts/deploy/`、docs/operations.md「自動デプロイ」節）。PR #79/#80/#86（merged）。
 - 決定者: haruka / 日付: 2026-10-19
+### メモリ store-everything 採用（2026-10-20）
+
+- 決定: Companion のターン抽出は **基本すべて保存**（haruka 2026-10-20 決定）。**選別は recall 時のみ**（会話に注入するものの選択）。extraction は毎ターン必ず 1 件の `summary`（ターンの要約・重要度判断なし）＋ユーザーが明言した全詳細を個別 `user_fact`（重要度フィルタなし）＋根拠のある `model_inference` を返す。抽出失敗時は free-text フォールバックなしで `memory.extract_invalid` を記録するのみ（raw event は既存の event.append 経路で保持）。上限 8 → 16 件/ターン。
+- 決定者: haruka / 日付: 2026-10-20
+
+- I 記憶の保存基準（2026-10-20 haruka 決定）: 基本すべて保存し、会話へ持ち込む記憶は想起時に厳選する。各ターンで summary 1 件＋本人発言の詳細を全件、根拠ある傾向は model_inference。

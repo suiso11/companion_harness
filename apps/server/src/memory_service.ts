@@ -69,12 +69,20 @@ import {
 export const MEMORY_DISTILL_TIMEOUT_MS = 120_000;
 /** Max outbox jobs executed per drain tick (bounded work). */
 export const MEMORY_DRAIN_BATCH = 5;
+/**
+ * Decision (I) "store every turn": bounded idle-window re-cultivation for a
+ * run whose extraction was PREEMPTED by foreground activity (no raw append
+ * landed). After this many retried-then-re-aborted attempts the run stops
+ * re-scheduling (never an infinite loop); STOP/shutdown-aborted attempts
+ * never re-schedule at all (no late writes).
+ */
+export const MEMORY_EXTRACT_RETRY_MAX_ATTEMPTS = 3;
 /** Max CLI attempts per outbox job before it stays failed (no infinite retry). */
 export const MEMORY_JOB_MAX_ATTEMPTS = 8;
 /** Bounds for extraction inputs/outputs (code points). */
 export const MEMORY_EXTRACT_INPUT_MAX_CP = 2000;
 export const MEMORY_EXTRACT_BODY_MAX_CP = 2000;
-export const MEMORY_EXTRACT_MAX_ITEMS = 8;
+export const MEMORY_EXTRACT_MAX_ITEMS = 16;
 export const MEMORY_EVENT_BODY_MAX_CP = 4000;
 export const MEMORY_RECALL_QUERY_MAX_CP = 500;
 /** Fixed provenance source stamped on Companion-written events/records. */
@@ -171,15 +179,19 @@ const RECALL_VECTORS: ReadonlySet<string> = new Set([
 
 /**
  * Fixed extraction system instruction (deterministic, no conversation).
- * Broadened (user report 2026-10-20: motorcycle chat saved nothing) to mine
- * each turn for durable, useful items — stated preferences/likes/dislikes,
- * interests/hobbies, owned equipment, habits, plans/goals, opinions, and
- * facts about people/places — while keeping the closed policy: user-stated
- * -> user_fact, turn-grounded tendencies -> model_inference, transient
- * moods never stored as traits, no secrets, fail-closed sensitivity.
+ * Store-everything policy (decision 2026-10-20: selection happens only at
+ * recall time): EVERY turn with non-empty user content yields EXACTLY one
+ * `summary` item (concise Japanese digest of the turn — topic, what the
+ * user said/asked, what was answered; no judgement of importance) PLUS
+ * every user-stated detail as its own `user_fact` (no importance filter:
+ * preferences, things mentioned, question topics, events, opinions) PLUS
+ * turn-grounded tendencies as `model_inference`. Closed policy kept:
+ * user-stated -> user_fact, turn-grounded tendencies -> model_inference,
+ * nothing ever phrased as a durable trait from a momentary feeling, no
+ * secrets, fail-closed sensitivity.
  */
 export const MEMORY_EXTRACT_SYSTEM_PROMPT =
-  "Extract durable memories from the conversation as strict JSON only. " +
+  "Extract memories from the conversation as strict JSON only. " +
   "Respond with exactly one JSON object of the form " +
   '{"memories":[{"body":"...","kind":"...","sensitivity":"..."}]} where kind ' +
   "is one of user_fact, model_inference, summary and sensitivity is one of " +
@@ -187,26 +199,29 @@ export const MEMORY_EXTRACT_SYSTEM_PROMPT =
   "The conversation is usually Japanese: write each body as a short, " +
   "self-contained Japanese sentence starting with the subject (e.g. " +
   "ユーザーは…) that makes sense on its own. " +
-  "Mine each turn for durable and useful items: stated likes, dislikes, " +
-  "and preferences (e.g. 好きなバイクの車種・メーカー), interests and " +
-  "hobbies, things the user owns or uses (vehicles, equipment, tools), " +
-  "habits and routines, plans and goals, opinions the user expresses " +
-  "about recurring topics, and relevant facts about people or places in " +
-  "the user's life. One fact per item: split a multi-part turn into " +
+  "ALWAYS include EXACTLY ONE kind=summary item first: a concise Japanese " +
+  "summary of THIS turn — the topic, what the user said or asked, and what " +
+  "was answered. No judgement of importance: even greetings, small talk " +
+  "and one-line questions get a summary. " +
+  "Then add ONE user_fact item for EVERY detail the USER explicitly " +
+  "stated or asked about in this turn, with no filter of usefulness: " +
+  "stated likes, dislikes and preferences (e.g. 好きなバイクの車種・メーカー), " +
+  "interests and hobbies, things the user owns or uses, habits and " +
+  "routines, plans and goals, events that happened, opinions, momentary " +
+  "conditions or feelings the user reported (phrased as what the user " +
+  "said today, never as a durable personality trait), and the topics of " +
+  "the user's questions. One fact per item: split a multi-part turn into " +
   "separate items. " +
-  "Kind policy: anything the USER explicitly stated is user_fact; a " +
-  "tendency YOU infer from what the user said in THIS turn (e.g. " +
-  "ネイキッド系のバイクを好む傾向がある) is model_inference — phrase it as a " +
-  "tendency, not certainty, grounded only in this turn's words. " +
-  "Exclude pure greetings, small talk, and anything already quoted " +
-  "verbatim. Never store transient moods or momentary feelings as traits " +
-  "(e.g. 今日は疲れた is not a personality trait), and never store " +
-  "secrets, credentials, or passwords. " +
+  "Then add at most a few model_inference items: a tendency YOU infer " +
+  "from what the user said in THIS turn (e.g. ネイキッド系のバイクを好む傾向が" +
+  "ある) — phrase it as a tendency, not certainty, grounded only in this " +
+  "turn's words. " +
+  "Never store secrets, credentials, or passwords. " +
   "Decide sensitivity at the same step that decides kind: mark sensitive " +
   "anything personal, identifying, credential-like, or touching health, " +
   "finance, relationships, or precise location, or otherwise non-public; " +
   "when undecidable, use sensitive. " +
-  "At most 8 items. No prose, no markdown, JSON only.";
+  "At most 16 items total. No prose, no markdown, JSON only.";
 
 export interface MemoryServiceOptions {
   readonly address: MemoryCliAddress;
@@ -517,7 +532,7 @@ export function stripOneJsonFence(text: string): string {
   return inner.slice(newlineIdx + 1).trim();
 }
 
-export type ExtractionParseStatus = "ok" | "none" | "invalid";
+export type ExtractionParseStatus = "ok" | "none" | "invalid" | "aborted";
 
 export interface ExtractionParseResult {
   readonly items: ExtractedMemory[];
@@ -526,6 +541,9 @@ export interface ExtractionParseResult {
    * `{memories: []}` shape with zero items (genuine nothing-to-remember).
    * "invalid": unparseable, wrong shape, or items present but ALL rejected
    * (model output shape problem — never conflated with a valid empty).
+   * "aborted": OUR OWN call was aborted (foreground preemption, its own
+   * `timeoutMs` bound, or shutdown) — never a payload verdict; the caller
+   * lands NO memory write for the run (no late writes after STOP).
    */
   readonly status: ExtractionParseStatus;
 }
@@ -621,6 +639,13 @@ export function parseExtractionOutcome(text: string): ExtractionParseResult {
   }
   // Tri-state outcome: raw items were present but every one was rejected —
   // an output-shape problem, never a valid "nothing to remember".
+  // Store-everything decision (2026-10-20): when ANY valid items parsed,
+  // the output MUST also carry at least one `summary` item (the
+  // per-turn digest the raw event is recallable through). Valid items
+  // missing that summary are an output-shape problem -> invalid.
+  if (out.length > 0 && !out.some((item) => item.kind === "summary")) {
+    return { items: [], status: "invalid" };
+  }
   return {
     items: out,
     status: out.length > 0 ? "ok" : list.length > 0 ? "invalid" : "none",
@@ -770,6 +795,13 @@ export function createMemoryService(
    * discarded (never enqueued).
    */
   const extractionControllers = new Set<AbortController>();
+  /**
+   * Foreground-preempted extraction retries (`runId` -> attempts so far).
+   * A preempted preemption stays PENDING here until the next idle window
+   * re-cultivates the run via the SAME authoritative path; STOP/shutdown
+   * aborts and exhausted attempts drop out. In-process state only.
+   */
+  const extractionRetryAttempts = new Map<string, number>();
   /** Shared background admission (null = legacy ungated behavior). */
   const background = options.background ?? null;
   /** True while the in-flight tick belongs to idle distill (preemptible). */
@@ -1451,10 +1483,39 @@ export function createMemoryService(
   }
 
   /**
+   * Decision (I) "store every turn": one idle window re-cultivates every
+   * foreground-preempted pending run through the SAME authoritative
+   * cultivation path (guards, gate admission, raw append, fan-out). Each
+   * retried-but-re-aborted run re-schedules itself with a bumped attempt
+   * count (bounded); a busy/closed gate at retry time stores the raw turn
+   * through the existing busy path (or schedules nothing after STOP).
+   */
+  async function runExtractionRetries(): Promise<void> {
+    for (const runId of [...extractionRetryAttempts.keys()]) {
+      if (!started || stopped) {
+        return;
+      }
+      // Pop before the retry: a settled retry is one full cultivation pass;
+      // a re-aborted retry re-schedules itself (bounded attempts), a busy
+      // gate keeps the turn durable without this entry, and STOP never
+      // re-schedules.
+      extractionRetryAttempts.delete(runId);
+      log("info", "memory.extract_retry", { runId });
+      await cultivateRun(runId).catch(() => undefined);
+      if (stopped) {
+        return;
+      }
+    }
+  }
+
+  /**
    * One bounded idle cultivation batch (single flight). The gate lives at
    * the AUTOMATIC JOB boundary inside `drainOnce` — never around this whole
    * batch — so explicit user-authorized manage work always progresses, even
    * while STOPped. Ordering per tick:
+   * 0. Foreground-preempted extraction retries re-cultivate FIRST (decision
+   *    (I) "store every turn"): their raw storage must never queue behind a
+   *    distill anchor that this tick could otherwise consume.
    * 1. A still-pending distill job whose backoff expired is drained (a
    *    transiently failed/preempted distill retries WITHOUT another
    *    foreground completion or restart); a not-yet-due one only rearms.
@@ -1474,6 +1535,12 @@ export function createMemoryService(
       return;
     }
     if (idleDrainActive) {
+      return;
+    }
+    // Decision (I) retries first: a preempted turn re-cultivates on this
+    // idle window before any distill anchor work below.
+    await runExtractionRetries().catch(() => undefined);
+    if (!started || stopped) {
       return;
     }
     if (pendingDistillJobId !== null) {
@@ -1602,9 +1669,10 @@ export function createMemoryService(
       );
       // Guard AFTER the await: a foreground preemption, STOP, or shutdown
       // that aborted OUR OWN call discards even a late provider result that
-      // ignored the abort — no memory write lands from it.
+      // ignored the abort — no memory write lands from it. The aborted
+      // status is distinct from a payload verdict: the caller never writes.
       if (controller.signal.aborted || stopped) {
-        return { items: [], status: "invalid" };
+        return { items: [], status: "aborted" };
       }
       const text = result.text;
       if (typeof text !== "string" || text.length === 0) {
@@ -1612,7 +1680,12 @@ export function createMemoryService(
       }
       return parseExtractionOutcome(sliceCodePoints(text, 8192));
     } catch {
-      // Noop/invalid conservatively yields no memory; the run is unaffected.
+      // An aborted call rejects out of the gateway (fetch/socket abort):
+      // still an abort, never a payload verdict. A genuine provider error
+      // is a conservative noop/invalid (no memory; the run is unaffected).
+      if (controller.signal.aborted || stopped) {
+        return { items: [], status: "aborted" };
+      }
       return { items: [], status: "invalid" };
     } finally {
       clearTimeout(timer);
@@ -1621,170 +1694,133 @@ export function createMemoryService(
   }
 
   /**
-   * Post-completion cultivation for one settled run. Fire-and-forget safe:
+   * Mark a foreground-preempted run for bounded idle-window re-cultivation.
+   * Exceeding the attempt bound drops the entry with an honest diagnostic
+   * (never an infinite retry loop).
+   */
+  function scheduleExtractionRetry(runId: string): void {
+    const attempts = extractionRetryAttempts.get(runId) ?? 0;
+    if (attempts >= MEMORY_EXTRACT_RETRY_MAX_ATTEMPTS) {
+      extractionRetryAttempts.delete(runId);
+      log("warn", "memory.extract_retry_exhausted", {
+        runId,
+        attempt: attempts,
+      });
+      return;
+    }
+    extractionRetryAttempts.set(runId, attempts + 1);
+    log("info", "memory.extract_retry_scheduled", {
+      runId,
+      attempt: attempts + 1,
+    });
+  }
+
+  function onRunCompleted(runId: string): void {
+    void cultivateRun(runId).catch(() => undefined);
+  }
+
+  /**
+   * Post-completion cultivation for one settled run. Also re-invoked by the
+   * idle window for foreground-preempted retries (same authoritative path:
+   * guards, gate admission, raw append, fan-out). Fire-and-forget safe:
    * every failure path returns silently (the run already completed; memory
    * is best-effort and durable where enqueued). Authoritative guards first:
    * completed status + current selection + same-session binding.
    */
-  function onRunCompleted(runId: string): void {
-    void (async () => {
-      if (!started || stopped) {
-        return;
-      }
-      let run: {
-        id: string;
-        turnId: string;
-        sessionId: string;
-        status: string;
-        result: unknown;
-        finishedAt: number | null;
+  async function cultivateRun(runId: string): Promise<void> {
+    if (!started || stopped) {
+      return;
+    }
+    let run: {
+      id: string;
+      turnId: string;
+      sessionId: string;
+      status: string;
+      result: unknown;
+      finishedAt: number | null;
+    };
+    try {
+      const loaded = repo.getRun(runId);
+      run = {
+        id: loaded.id,
+        turnId: loaded.turnId,
+        sessionId: loaded.sessionId,
+        status: loaded.status,
+        result: loaded.result,
+        finishedAt: loaded.finishedAt,
       };
-      try {
-        const loaded = repo.getRun(runId);
-        run = {
-          id: loaded.id,
-          turnId: loaded.turnId,
-          sessionId: loaded.sessionId,
-          status: loaded.status,
-          result: loaded.result,
-          finishedAt: loaded.finishedAt,
-        };
-      } catch {
+    } catch {
+      return;
+    }
+    // Extraction can never mutate a cancelled/stopped run: only completed
+    // runs with a result cultivate. Anything else returns silently.
+    if (run.status !== "completed" || run.result === null) {
+      return;
+    }
+    let turnText = "";
+    try {
+      const turn = repo.getTurn(run.turnId);
+      if (turn.sessionId !== run.sessionId) {
         return;
       }
-      // Extraction can never mutate a cancelled/stopped run: only completed
-      // runs with a result cultivate. Anything else returns silently.
-      if (run.status !== "completed" || run.result === null) {
+      turnText = turn.input.kind === "user_text" ? turn.input.text : "";
+    } catch {
+      return;
+    }
+    // Current-selection check: a superseded retry (no longer selected)
+    // never cultivates, even when completed.
+    try {
+      const selection = repo.getSelection(run.turnId);
+      if (selection === null || selection.runId !== run.id) {
         return;
       }
-      let turnText = "";
-      try {
-        const turn = repo.getTurn(run.turnId);
-        if (turn.sessionId !== run.sessionId) {
-          return;
-        }
-        turnText = turn.input.kind === "user_text" ? turn.input.text : "";
-      } catch {
-        return;
-      }
-      // Current-selection check: a superseded retry (no longer selected)
-      // never cultivates, even when completed.
-      try {
-        const selection = repo.getSelection(run.turnId);
-        if (selection === null || selection.runId !== run.id) {
-          return;
-        }
-      } catch {
-        return;
-      }
-      lastCompletedRun = {
-        sessionId: run.sessionId,
-        runId: run.id,
-        turnId: run.turnId,
-      };
-      const result = run.result as {
-        version?: unknown;
-        text?: unknown;
-        answer?: unknown;
-      };
-      const answerText = typeof result.text === "string" ? result.text : "";
-      if (answerText.length === 0) {
-        return;
-      }
-      // Feedback first (gateway-independent): only structural mN citations
-      // from the ACCEPTED answer's citation arrays. V1 results carry no
-      // answer and therefore never yield feedback.
-      try {
-        enqueueFeedbackJobs(run, result.answer);
-      } catch {
-        // Best effort: feedback never fails completion.
-      }
-      // Structured extraction (gateway-dependent, conservative noop).
-      // Background admission: at most ONE model-heavy background unit runs
-      // at a time. When the gate is held (shadow/idle-distill in flight) or
-      // closed (STOP), extraction SKIPS with an honest fixed diagnostic —
-      // but the completed-run anchor above and the feedback jobs already
-      // enqueued stay durable: the outbox below still drains, and the
-      // automatic-job boundary inside `drainOnce` admits-or-skips ONLY the
-      // distill execution itself (explicit jobs always run), so nothing
-      // already-durable is lost, no catchup invented, no auto-revive of
-      // this skipped extraction on release.
-      const extractionLease =
-        background?.tryAcquire(BACKGROUND_OWNER_MEMORY_EXTRACTION) ?? null;
-      if (background !== null && extractionLease === null) {
-        log(
-          "info",
-          background.closed
-            ? "memory.extract_skipped_closed"
-            : "memory.extract_skipped_busy",
-          { runId: run.id },
-        );
-        await drainOnce().catch(() => undefined);
-        return;
-      }
-      let outcome: ExtractionParseResult;
-      try {
-        outcome = await extractViaGateway({
-          turnText,
-          answerText,
-        });
-      } finally {
-        if (extractionLease !== null) {
-          background?.release(extractionLease);
-        }
-      }
-      if (outcome.items.length === 0) {
-        // Split diagnostics (fixed codes only): a valid strict-JSON empty
-        // list is `memory.extract_none` (genuine nothing-to-remember);
-        // anything else (unparseable, wrong shape, or all items rejected)
-        // is `memory.extract_invalid` — the old single extract_empty code
-        // conflated the two and hid real model-output-shape failures.
-        log(
-          "info",
-          outcome.status === "invalid"
-            ? "memory.extract_invalid"
-            : "memory.extract_none",
-          { runId: run.id },
-        );
-        await drainOnce().catch(() => undefined);
-        return;
-      }
-      // Authoritative recheck AFTER the async gateway call: selection,
-      // completion, and shutdown may have changed while awaited. A
-      // superseded retry or a stopped service never enqueues.
-      if (!started || stopped) {
-        return;
-      }
-      try {
-        const fresh = repo.getRun(runId);
-        if (
-          fresh.status !== "completed" ||
-          fresh.result === null ||
-          fresh.sessionId !== run.sessionId ||
-          fresh.turnId !== run.turnId
-        ) {
-          return;
-        }
-        const freshSelection = repo.getSelection(fresh.turnId);
-        if (freshSelection === null || freshSelection.runId !== fresh.id) {
-          return;
-        }
-      } catch {
-        return;
-      }
-      const observedAt =
-        run.finishedAt !== null && Number.isFinite(run.finishedAt)
-          ? new Date(run.finishedAt).toISOString()
-          : new Date(now()).toISOString();
-      const eventId = `evt-${run.id}`;
-      const eventBody = sliceCodePoints(
-        `User: ${turnText}\nAssistant: ${answerText}`,
-        MEMORY_EVENT_BODY_MAX_CP,
-      );
-      const provenance = {
-        source: MEMORY_PROVENANCE_SOURCE,
-        observedAt,
-      };
+    } catch {
+      return;
+    }
+    lastCompletedRun = {
+      sessionId: run.sessionId,
+      runId: run.id,
+      turnId: run.turnId,
+    };
+    const result = run.result as {
+      version?: unknown;
+      text?: unknown;
+      answer?: unknown;
+    };
+    const answerText = typeof result.text === "string" ? result.text : "";
+    if (answerText.length === 0) {
+      return;
+    }
+    // Feedback first (gateway-independent): only structural mN citations
+    // from the ACCEPTED answer's citation arrays. V1 results carry no
+    // answer and therefore never yield feedback.
+    try {
+      enqueueFeedbackJobs(run, result.answer);
+    } catch {
+      // Best effort: feedback never fails completion.
+    }
+    // Decision (I): store every turn. The RAW `event.append` payload is
+    // built for EVERY completed selected turn — raw storage never depends
+    // on extraction SUCCESS: an invalid payload or a busy background slot
+    // only forgoes the remember fan-out, never the raw event. It is
+    // enqueued only AFTER the extraction attempt resolves: an ABORTED
+    // attempt (a foreground preemption, the call's own `timeoutMs` bound
+    // while STOPped, or shutdown) lands NO memory write at all for this
+    // run — the test-invariant "no late writes" for an aborted unit.
+    const observedAt =
+      run.finishedAt !== null && Number.isFinite(run.finishedAt)
+        ? new Date(run.finishedAt).toISOString()
+        : new Date(now()).toISOString();
+    const eventId = `evt-${run.id}`;
+    const eventBody = sliceCodePoints(
+      `User: ${turnText}\nAssistant: ${answerText}`,
+      MEMORY_EVENT_BODY_MAX_CP,
+    );
+    const provenance = {
+      source: MEMORY_PROVENANCE_SOURCE,
+      observedAt,
+    };
+    const enqueueRawEvent = (): boolean => {
       try {
         repo.enqueueMemoryJob(
           "event.append",
@@ -1807,30 +1843,159 @@ export function createMemoryService(
               scope,
               runId: run.id,
             },
+            // No remember fan-out rides on the raw event's chain:
+            // extracted memories enqueue their own remember jobs below.
             chain: {
               eventId,
               sessionId: run.sessionId,
               runId: run.id,
               turnId: run.turnId,
               provenance,
-              memories: outcome.items.map((memory) => ({
-                body: memory.body,
-                kind: memory.kind,
-                sensitivity: memory.sensitivity,
-              })),
+              memories: [],
             },
           }),
           { turnId: run.turnId, now: now() },
         );
       } catch {
-        return;
+        return false;
       }
       log("info", "memory.event_queued", {
         runId: run.id,
         bytes: eventBody.length,
       });
+      return true;
+    };
+    // Structured extraction (gateway-dependent, conservative noop).
+    // Background admission: at most ONE model-heavy background unit runs
+    // at a time. A CLOSED gate (STOP/shutdown) admits nothing new: no
+    // extraction AND no raw append — no late write of any kind for this
+    // run (a paused control never closes the gate: I03-09 keeps memory
+    // admission open while paused). A merely BUSY gate keeps the raw
+    // turn durable: the append enqueues and drains; the skipped
+    // extraction forgoes only the remember fan-out. The automatic-job
+    // boundary inside `drainOnce` admits-or-skips ONLY the distill
+    // execution itself (explicit jobs always run), so nothing
+    // already-durable is lost, no catchup invented, no auto-revive of
+    // this skipped extraction on release.
+    const extractionLease =
+      background?.tryAcquire(BACKGROUND_OWNER_MEMORY_EXTRACTION) ?? null;
+    if (background !== null && extractionLease === null) {
+      if (background.closed) {
+        log("info", "memory.extract_skipped_closed", { runId: run.id });
+        return;
+      }
+      log("info", "memory.extract_skipped_busy", { runId: run.id });
+      if (!enqueueRawEvent()) {
+        return;
+      }
+      // A just-scheduled outbox job CAN be missed by an in-flight drain
+      // tick whose claim pass already ran (e.g. the start() recovery
+      // tick): blindly returning that tick's `executed: 0` promise would
+      // strand the committed raw turn until the 5-minute idle tick. Join
+      // the in-flight tick first, then drain once more: the fresh tick
+      // claims and executes the new event.append.
+      const inflightTick = drainInFlight;
+      if (inflightTick !== null) {
+        await inflightTick.catch(() => undefined);
+      }
       await drainOnce().catch(() => undefined);
-    })().catch(() => undefined);
+      return;
+    }
+    let outcome: ExtractionParseResult;
+    try {
+      outcome = await extractViaGateway({
+        turnText,
+        answerText,
+      });
+    } finally {
+      if (extractionLease !== null) {
+        background?.release(extractionLease);
+      }
+    }
+    if (outcome.status === "aborted") {
+      // Our OWN gateway call was aborted (a foreground preemption, its
+      // own timeoutMs bound, or shutdown): even a late provider result is
+      // discarded and NO memory write lands for this run yet — the raw
+      // event.append never enqueues here (no late writes after STOP).
+      log("info", "memory.extract_aborted", { runId: run.id });
+      // Decision (I) "store every turn": a FOREGROUND-preempted attempt
+      // (service still running, gate still closed-open) stays pending and
+      // re-cultivates via the full path on the next idle window, bounded.
+      // STOP/shutdown aborts never re-schedule: no late writes.
+      if (!stopped && !(background?.closed ?? false)) {
+        scheduleExtractionRetry(run.id);
+      }
+      await drainOnce().catch(() => undefined);
+      return;
+    }
+    if (!enqueueRawEvent()) {
+      return;
+    }
+    if (outcome.items.length === 0) {
+      // Split diagnostics (fixed codes only): a valid strict-JSON empty
+      // list is `memory.extract_none` (genuine nothing-to-remember);
+      // anything else (unparseable, wrong shape, or all items rejected)
+      // is `memory.extract_invalid` — the old single extract_empty code
+      // conflated the two and hid real model-output-shape failures.
+      log(
+        "info",
+        outcome.status === "invalid"
+          ? "memory.extract_invalid"
+          : "memory.extract_none",
+        { runId: run.id },
+      );
+      await drainOnce().catch(() => undefined);
+      return;
+    }
+    // Authoritative recheck AFTER the async gateway call: selection,
+    // completion, and shutdown may have changed while awaited. A
+    // superseded retry or a stopped service never enqueues remember jobs
+    // (the raw event above is already durable and stays).
+    const supersededOrStopped = (): boolean => {
+      if (!started || stopped) {
+        return true;
+      }
+      try {
+        const fresh = repo.getRun(runId);
+        if (
+          fresh.status !== "completed" ||
+          fresh.result === null ||
+          fresh.sessionId !== run.sessionId ||
+          fresh.turnId !== run.turnId
+        ) {
+          return true;
+        }
+        const freshSelection = repo.getSelection(fresh.turnId);
+        return freshSelection === null || freshSelection.runId !== fresh.id;
+      } catch {
+        return true;
+      }
+    };
+    if (supersededOrStopped()) {
+      // The raw event.append above is durable but not yet drained: drain
+      // before returning so the committed turn's raw write still lands.
+      await drainOnce().catch(() => undefined);
+      return;
+    }
+    // Remember fan-out for the extracted items: the same stable-keyed
+    // chain logic the event.append ack fan-out uses, invoked directly so
+    // the fan-out no longer depends on the raw event's chain payload.
+    enqueueRememberChainMemories(
+      { params: { scope } },
+      {
+        eventId,
+        sessionId: run.sessionId,
+        runId: run.id,
+        turnId: run.turnId,
+        provenance,
+        memories: outcome.items.map((memory) => ({
+          body: memory.body,
+          kind: memory.kind,
+          sensitivity: memory.sensitivity,
+        })),
+      },
+    );
+    await drainOnce().catch(() => undefined);
   }
 
   /**

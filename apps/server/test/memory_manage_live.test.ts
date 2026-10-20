@@ -152,10 +152,16 @@ function syntheticGateway(): ModelGateway {
     chatUrl: `${MODEL_BASE}/v1/chat/completions`,
     chat: async (request: ChatRequest): Promise<ChatResult> => {
       const system = request.messages[0]?.content ?? "";
-      if (system.startsWith("Extract durable memories")) {
+      if (system.startsWith("Extract memories from the conversation")) {
         return {
           text: JSON.stringify({
-            memories: [{ body: "user likes green tea", kind: "user_fact" }],
+            memories: [
+              {
+                body: "ユーザーは緑茶が好きだと伝え、アシスタントがそれを覚えた。",
+                kind: "summary",
+              },
+              { body: "user likes green tea", kind: "user_fact" },
+            ],
           }),
           toolCalls: [],
           stopReason: "stop",
@@ -437,7 +443,11 @@ describe("live memory management lifecycle (real server + real remind CLI)", () 
       await waitForOutboxKind(dbPath, "record.remember", "acked");
       const recalled = await recallSnippets(address, "green tea");
       expect(recalled.length).toBeGreaterThanOrEqual(1);
-      expect(recalled[0]).toContain("green tea");
+      // Store-every-turn also stores a Japanese summary; target the fact
+      // row by its snippet text, never by list position.
+      expect(recalled.some((snippet) => snippet.includes("green tea"))).toBe(
+        true,
+      );
 
       // Explicit search: opaque mN handles, retired included by contract.
       const searchRes = await postJson(
@@ -458,7 +468,11 @@ describe("live memory management lifecycle (real server + real remind CLI)", () 
         expect(hit.handle).toMatch(/^m[1-9][0-9]*$/);
       }
       expect(JSON.stringify(search)).not.toContain("rec-");
-      const activeHit = search.hits.find((hit) => hit.status === "active");
+      // The summary row is active too (store-every-turn): select the
+      // user_fact hit by its unique snippet text, never by position.
+      const activeHit = search.hits.find(
+        (hit) => hit.status === "active" && hit.snippet.includes("green tea"),
+      );
       expect(activeHit).toBeDefined();
       const handle = (activeHit as { handle: string }).handle;
       // No heat from explicit search: zero feedback jobs staged.
@@ -559,8 +573,10 @@ describe("live memory management lifecycle (real server + real remind CLI)", () 
         searchId: string;
         hits: Array<{ handle: string; snippet: string; status: string }>;
       };
+      // Retire the SAME fact record (corrected body still contains the
+      // fact text); the summary row must not be targeted by position.
       const retireTarget = preRetire.hits.find(
-        (hit) => hit.status === "active",
+        (hit) => hit.status === "active" && hit.snippet.includes("green tea"),
       );
       expect(retireTarget).toBeDefined();
       const retireRes = await postJson(

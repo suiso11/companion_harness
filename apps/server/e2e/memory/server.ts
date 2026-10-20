@@ -142,10 +142,16 @@ function syntheticGateway(): ModelGateway {
     chatUrl: `${MODEL_BASE}/v1/chat/completions`,
     chat: async (request: ChatRequest): Promise<ChatResult> => {
       const system = request.messages[0]?.content ?? "";
-      if (system.startsWith("Extract durable memories")) {
+      if (system.startsWith("Extract memories from the conversation")) {
         return {
           text: JSON.stringify({
-            memories: [{ body: "user likes green tea", kind: "user_fact" }],
+            memories: [
+              {
+                body: "ユーザーは緑茶が好きだと伝え、アシスタントがそれを覚えた。",
+                kind: "summary",
+              },
+              { body: "user likes green tea", kind: "user_fact" },
+            ],
           }),
           toolCalls: [],
           stopReason: "stop",

@@ -4,17 +4,36 @@
 // (#memory-search-input, #memory-list, #memory-detail, correct/retire/
 // reactivate buttons, #memory-op-status) against the REAL Hono app +
 // RunEngine + REAL remind CLI temp DB (e2e/memory/server.ts). The
-// synthetic scripted gateway cultivates one "green tea" fact (never a
-// real model). Fixture control uses the loopback-only control server via
-// the Node-side `request` fixture (never page.fetch, never mocked
-// responses).
+// synthetic scripted gateway cultivates the store-every-turn pair per
+// turn — one `summary` digest PLUS one "green tea" user_fact (never a
+// real model) — so a search legitimately renders BOTH rows; the specs
+// target the user_fact row by its unique snippet text. Fixture control
+// uses the loopback-only control server via the Node-side `request`
+// fixture (never page.fetch, never mocked responses).
 
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 import {
   MEMORY_CONTROL_ORIGIN,
   MEMORY_CORRECTED_BODY,
   MEMORY_TURN_TEXT,
 } from "./ports.js";
+
+/** The fixture user_fact snippet: unique to fact rows (summaries are Japanese). */
+const FACT_SNIPPET = "user likes green tea";
+
+/**
+ * The user_fact hit row, targeted by SNIPPET TEXT (precise selector), never
+ * by list position or a fixed handle: store-every-turn stores a summary AND
+ * the fact per turn (both match "green tea"), which record lands as m1
+ * depends on the nondeterministic outbox drain order, and hits accumulate
+ * across the remind DB's lifetime.
+ */
+function factHit(page: Page): Locator {
+  return page
+    .locator("#memory-list li")
+    .filter({ hasText: FACT_SNIPPET })
+    .first();
+}
 
 async function control(
   request: import("@playwright/test").APIRequestContext,
@@ -65,13 +84,14 @@ async function searchFresh(
       expect(typeof body.searchId).toBe("string");
       const searchId = body.searchId as string;
       // The authoritative fresh response must be applied to the DOM: the
-      // list carries the NEW search's hits and the status node carries
-      // the NEW searchId (an old out-of-order response cannot satisfy
-      // this binding).
+      // list carries the NEW search's user_fact hit (the summary row is
+      // rendered too — store-every-turn) and the status node carries the
+      // NEW searchId (an old out-of-order response cannot satisfy this
+      // binding).
       await expect(page.locator("#memory-search-button")).toBeEnabled({
         timeout: 10_000,
       });
-      await expect(page.locator("#memory-list li")).toHaveCount(1, {
+      await expect(factHit(page).locator("button")).toBeVisible({
         timeout: 10_000,
       });
       await expect(page.locator("#memory-op-status")).toHaveAttribute(
@@ -92,16 +112,16 @@ async function searchFresh(
   }
 }
 
-/** Select the first hit and wait for its authoritative detail response. */
-async function selectFirstHit(page: Page): Promise<void> {
-  const firstHit = page.locator("#memory-list li").first();
+/** Select the user_fact hit and wait for its authoritative detail response. */
+async function selectFactHit(page: Page): Promise<void> {
+  const factRow = factHit(page);
   const detailPromise = page.waitForResponse(
     (response) =>
       response.url().includes("/memory/searches/") &&
       response.request().method() === "GET",
     { timeout: 15_000 },
   );
-  await firstHit.locator("button").click();
+  await factRow.locator("button").click();
   const detail = await detailPromise;
   expect(detail.status()).toBe(200);
   await expect(page.locator("#memory-detail")).toBeVisible();
@@ -172,13 +192,16 @@ test("memory panel search/detail/correct/retire/reactivate lifecycle", async ({
   await expect(page.locator("#composer-send")).toBeEnabled();
 
   // Explicit search over the REAL UI: opaque mN handle, live record.
+  // Store-every-turn: the summary AND the user_fact are BOTH hits; the
+  // user_fact row is targeted by its unique snippet (the summary row is
+  // the Japanese digest). Which record lands as m1 follows the drain
+  // order, so only the handle SHAPE is asserted, never a fixed number.
   const searchId1 = await searchFresh(page, "green tea", 90_000);
   expect(searchId1.length).toBeGreaterThan(0);
-  const firstHit = page.locator("#memory-list li").first();
-  await expect(firstHit).toContainText(/m1 \[active\]/);
+  await expect(factHit(page)).toContainText(/m[1-9][0-9]* \[active\]/);
 
   // Confirmation detail: immutable snapshot vs live current provenance.
-  await selectFirstHit(page);
+  await selectFactHit(page);
   const detailBody = page.locator("#memory-detail-body");
   await expect(detailBody).toContainText("green tea");
   await expect(detailBody).toContainText("companion");
@@ -201,9 +224,9 @@ test("memory panel search/detail/correct/retire/reactivate lifecycle", async ({
   // old selected target cannot be re-operated after the new search.
   await expect(page.locator("#memory-correct-button")).toBeDisabled();
   await expect(page.locator("#memory-retire-button")).toBeDisabled();
-  const liveHit = page.locator("#memory-list li").first();
+  const liveHit = factHit(page);
   await expect(liveHit).toContainText("[active]");
-  await selectFirstHit(page);
+  await selectFactHit(page);
   await expect(page.locator("#memory-detail")).toBeVisible();
   // Fresh detail re-enables the actions for the NEW target only.
   await expect(page.locator("#memory-retire-button")).toBeEnabled();
@@ -216,7 +239,7 @@ test("memory panel search/detail/correct/retire/reactivate lifecycle", async ({
   // Fresh search still returns the handle, now with retired status.
   const searchId3 = await searchFresh(page, "green tea", 45_000);
   expect(searchId3).not.toBe(searchId2);
-  const retiredHit = page.locator("#memory-list li").first();
+  const retiredHit = factHit(page);
   await expect(retiredHit).toContainText("[retired]");
 
   // Reactivate through the REAL UI and confirm active again.
@@ -230,9 +253,7 @@ test("memory panel search/detail/correct/retire/reactivate lifecycle", async ({
   expect(opReactivate).not.toBe(opCorrect);
   const searchId4 = await searchFresh(page, "green tea", 45_000);
   expect(searchId4).not.toBe(searchId3);
-  await expect(page.locator("#memory-list li").first()).toContainText(
-    "[active]",
-  );
+  await expect(factHit(page)).toContainText("[active]");
 });
 
 test("memory correction draft binds to the exact target (F6) and pending stays pending (F4)", async ({
@@ -249,7 +270,7 @@ test("memory correction draft binds to the exact target (F6) and pending stays p
   await expect(page.locator("#composer-send")).toBeEnabled();
 
   await searchFresh(page, "green tea", 90_000);
-  await selectFirstHit(page);
+  await selectFactHit(page);
   await expect(page.locator("#memory-detail")).toBeVisible();
   // Type a draft for the current target, then start a new search: the draft
   // must clear synchronously so it can never apply to the next target.
@@ -261,7 +282,7 @@ test("memory correction draft binds to the exact target (F6) and pending stays p
   await expect(page.locator("#memory-correct-input")).toHaveValue("");
   // A bare search result is never directly actionable (stale target guard).
   await expect(page.locator("#memory-correct-button")).toBeDisabled();
-  await selectFirstHit(page);
+  await selectFactHit(page);
   // Fresh detail for the new target starts with an empty draft.
   await expect(page.locator("#memory-correct-input")).toHaveValue("");
 

@@ -233,7 +233,10 @@ function deliberationResult(): ChatResult {
 function extractionResult(): ChatResult {
   return {
     text: JSON.stringify({
-      memories: [{ body: "user likes tea", kind: "user_fact" }],
+      memories: [
+        { body: "user likes tea", kind: "summary" },
+        { body: "user likes tea", kind: "user_fact" },
+      ],
     }),
     toolCalls: [],
     stopReason: "stop",
@@ -265,7 +268,7 @@ function makeContentionGateway() {
       return "shadow";
     }
     const system = request.messages[0]?.content ?? "";
-    if (system.startsWith("Extract durable memories")) {
+    if (system.startsWith("Extract memories from the conversation")) {
       return "extract";
     }
     return "other";
@@ -604,8 +607,10 @@ describe("background contention across actual callsites", () => {
       // A newly starting foreground prompt aborts OUR OWN parked call.
       memoryService.notifyForeground();
       await waitFor(() => contention.state.aborted.includes("extract"));
-      // Even though the provider would answer late, the late output is
-      // discarded: release the park and prove no memory write lands.
+      // Even though the provider would answer late, the late extraction
+      // output is discarded and NO memory write lands for the run: the
+      // aborted extraction is never a payload verdict, so the raw
+      // event.append never enqueues either (no late writes).
       contention.releaseAll();
       await sleep(300);
       expect(ops.includes("event.append")).toBe(false);
@@ -665,14 +670,15 @@ describe("background contention across actual callsites", () => {
         background: gate,
       });
       memoryService.start();
-      // Shutdown closes the gate: a completion while closed skips
-      // extraction with no write and no claim on the gate — the durable
-      // anchor remains for later idle work.
+      // Shutdown closes the gate: a completion while closed admits nothing
+      // new — no extraction, and no raw event.append either (STOP lands
+      // no late write for that run).
       gate.close();
       expect(gate.closed).toBe(true);
       const run = completeV2Run(memory.repo);
       memoryService.onRunCompleted(run.runId);
       await sleep(300);
+      expect(ops.includes("event.append")).toBe(false);
       expect(memory.repo.countPendingMemoryJobs(Date.now())).toBe(0);
       // Reopen: a new completion cultivates normally again.
       gate.reopen();

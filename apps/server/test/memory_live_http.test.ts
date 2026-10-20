@@ -149,7 +149,7 @@ function answerCall(text: string, citations: string[]): NormalizedToolCall {
 /**
  * Synthetic loopback gateway (NOT a real model): scripted `answer.submit`
  * plus extraction JSON. Extraction requests carry the fixed
- * `MEMORY_EXTRACT_SYSTEM_PROMPT` ("Extract durable memories..."); answer
+ * `MEMORY_EXTRACT_SYSTEM_PROMPT` ("Extract memories from the conversation..."); answer
  * requests carry the agent system prompt. When the projected memory block
  * already exposes `m1`, the answer cites it; otherwise it cites nothing.
  */
@@ -161,10 +161,16 @@ function syntheticGateway(): ModelGateway {
     chatUrl: `${MODEL_BASE}/v1/chat/completions`,
     chat: async (request: ChatRequest): Promise<ChatResult> => {
       const system = request.messages[0]?.content ?? "";
-      if (system.startsWith("Extract durable memories")) {
+      if (system.startsWith("Extract memories from the conversation")) {
         return {
           text: JSON.stringify({
-            memories: [{ body: "user likes green tea", kind: "user_fact" }],
+            memories: [
+              {
+                body: "ユーザーは緑茶が好きだと伝え、アシスタントがそれを覚えた。",
+                kind: "summary",
+              },
+              { body: "user likes green tea", kind: "user_fact" },
+            ],
           }),
           toolCalls: [],
           stopReason: "stop",
@@ -308,10 +314,12 @@ async function waitForOutboxKind(
 ): Promise<void> {
   const started = Date.now();
   for (;;) {
-    const rows = queryOutbox(dbPath).filter(
-      (row) => row.kind === kind && row.status === status,
-    );
-    if (rows.length > 0) {
+    const rows = queryOutbox(dbPath).filter((row) => row.kind === kind);
+    // Store-every-turn enqueues MULTIPLE remember jobs per turn (summary +
+    // facts) with identical due timestamps; drain claim order (next_due_at,
+    // then random id) is nondeterministic, so wait until EVERY job of the
+    // kind reached the target status, not merely the first one.
+    if (rows.length > 0 && rows.every((row) => row.status === status)) {
       return;
     }
     if (Date.now() - started > timeoutMs) {
@@ -420,11 +428,20 @@ describe("live memory HTTP regression (real server + real remind CLI)", () => {
       await waitForOutboxKind(dbPath, "record.remember", "acked");
       const afterFirst = queryOutbox(dbPath);
       expect(
-        afterFirst.filter((row) => row.kind === "event.append")[0]?.status,
-      ).toBe("acked");
+        afterFirst
+          .filter((row) => row.kind === "event.append")
+          .every((row) => row.status === "acked"),
+      ).toBe(true);
       expect(
-        afterFirst.filter((row) => row.kind === "record.remember")[0]?.status,
-      ).toBe("acked");
+        afterFirst
+          .filter((row) => row.kind === "record.remember")
+          .every((row) => row.status === "acked"),
+      ).toBe(true);
+      // Store-every-turn: the summary + the user_fact are BOTH durably
+      // stored for turn 1.
+      expect(
+        afterFirst.filter((row) => row.kind === "record.remember").length,
+      ).toBeGreaterThanOrEqual(2);
 
       // Direct REAL CLI recall proves data (not a fixture echo).
       const recall = await callMemoryCli(
@@ -445,7 +462,11 @@ describe("live memory HTTP regression (real server + real remind CLI)", () => {
         }
       ).items;
       expect(items.length).toBeGreaterThanOrEqual(1);
-      expect(items[0]?.snippet).toContain("green tea");
+      // The summary row is Japanese (no ASCII fact text); match the
+      // user_fact snippet by text, never by list position.
+      expect(items.some((item) => item.snippet.includes("green tea"))).toBe(
+        true,
+      );
 
       // Mere recall without citations grants nothing (no feedback yet).
       expect(queryGrants(dbPath)).toHaveLength(0);
