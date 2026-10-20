@@ -109,7 +109,12 @@ export function listGenerations(dir, prefix = "remind-") {
 }
 
 /** Keep the newest `keep` generations (minimum 1). Never deletes `protect`. */
-export function pruneGenerations(dir, keep = DEFAULT_KEEP, protect, prefix = "remind-") {
+export function pruneGenerations(
+  dir,
+  keep = DEFAULT_KEEP,
+  protect,
+  prefix = "remind-",
+) {
   const limit = Math.max(1, Math.floor(keep));
   const generations = listGenerations(dir, prefix);
   const removed = [];
@@ -156,7 +161,7 @@ export async function backupDb({
 }) {
   ensurePrivateDir(outDir);
   const stamp = formatUtc(now);
-  const finalName = `${prefix}-${stamp}-${process.pid}-${Math.random()
+  const finalName = `${prefix}${stamp}-${process.pid}-${Math.random()
     .toString(16)
     .slice(2, 10)}.sqlite`;
   const finalPath = join(outDir, finalName);

@@ -5,7 +5,13 @@
 // `companion-manual-*.sqlite` generations the old CLI wrote into the DB's
 // own backups dir.
 
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -71,7 +77,7 @@ describe("companion online backup", () => {
     const names = readdirSync(outDir).filter((n) => n.endsWith(".sqlite"));
     expect(names).toHaveLength(2);
     expect(names.sort()).toEqual(kept.slice(-2).sort());
-    const copy = new DatabaseSync(join(outDir, kept[kept.length - 1]), {
+    const copy = new DatabaseSync(join(outDir, kept[kept.length - 1] ?? ""), {
       readOnly: true,
     });
     try {
@@ -91,7 +97,10 @@ describe("companion online backup", () => {
     const legacyDir = join(dir, "backups");
     mkdirSync(legacyDir, { recursive: true });
     for (let i = 0; i < 4; i += 1) {
-      const path = join(legacyDir, `companion-manual-2026101${i}T000000Z-${i}.sqlite`);
+      const path = join(
+        legacyDir,
+        `companion-manual-2026101${i}T000000Z-${i}.sqlite`,
+      );
       writeFileSync(path, "");
     }
     // Make mtimes distinct and ordered oldest-first.

@@ -66,7 +66,8 @@ if (invokedAsMain) {
     const dbPath = args.dbPath ?? resolveDbPath();
     const result = await backupDb({
       dbPath,
-      outDir: args.outDir ?? defaultOutDir(),      keep: Number.isFinite(args.keep) ? args.keep : DEFAULT_KEEP,
+      outDir: args.outDir ?? defaultOutDir(),
+      keep: Number.isFinite(args.keep) ? args.keep : DEFAULT_KEEP,
       prefix: "companion-",
     });
     // Bound the legacy CLI generations in the DB's own backups dir.
