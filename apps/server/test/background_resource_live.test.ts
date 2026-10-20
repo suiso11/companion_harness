@@ -170,7 +170,13 @@ function extractionPayload(): unknown {
       {
         message: {
           content: JSON.stringify({
-            memories: [{ body: "user likes green tea", kind: "user_fact" }],
+            memories: [
+              {
+                body: "ユーザーは緑茶が好きだと伝え、アシスタントがそれを覚えた。",
+                kind: "summary",
+              },
+              { body: "user likes green tea", kind: "user_fact" },
+            ],
           }),
         },
         finish_reason: "stop",

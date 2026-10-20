@@ -145,7 +145,13 @@ function syntheticGateway(): ModelGateway {
       if (system.startsWith("Extract durable memories")) {
         return {
           text: JSON.stringify({
-            memories: [{ body: "user likes green tea", kind: "user_fact" }],
+            memories: [
+              {
+                body: "ユーザーは緑茶が好きだと伝え、アシスタントがそれを覚えた。",
+                kind: "summary",
+              },
+              { body: "user likes green tea", kind: "user_fact" },
+            ],
           }),
           toolCalls: [],
           stopReason: "stop",

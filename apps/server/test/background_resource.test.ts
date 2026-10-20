@@ -233,7 +233,10 @@ function deliberationResult(): ChatResult {
 function extractionResult(): ChatResult {
   return {
     text: JSON.stringify({
-      memories: [{ body: "user likes tea", kind: "user_fact" }],
+      memories: [
+        { body: "user likes tea", kind: "summary" },
+        { body: "user likes tea", kind: "user_fact" },
+      ],
     }),
     toolCalls: [],
     stopReason: "stop",
@@ -265,7 +268,7 @@ function makeContentionGateway() {
       return "shadow";
     }
     const system = request.messages[0]?.content ?? "";
-    if (system.startsWith("Extract durable memories")) {
+    if (system.startsWith("Extract memories from the conversation")) {
       return "extract";
     }
     return "other";
