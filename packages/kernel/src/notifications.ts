@@ -106,6 +106,7 @@
 //   GLOBAL claim leases are preserved; no job is enqueued from
 //   notification events / ack / reads.
 
+import { createHash } from "node:crypto";
 import {
   type NotificationKind,
   type NotificationView,
@@ -116,7 +117,6 @@ import {
   type ShadowPolicyCode,
 } from "@companion/contracts";
 import type Database from "better-sqlite3";
-import { createHash } from "node:crypto";
 import { isStrictAutonomyDeadline } from "./autonomy.js";
 import { generateId, isUuidV4 } from "./canonical.js";
 import {
@@ -332,11 +332,7 @@ interface NotificationDraft {
   /** CODE-computed: urgent ONLY for uncertain commitment receipts. */
   priority: "routine" | "urgent";
   briefText: string;
-  sourceKind:
-    | "shadow_job"
-    | "action_receipt"
-    | "task_deadline"
-    | "ops_event";
+  sourceKind: "shadow_job" | "action_receipt" | "task_deadline" | "ops_event";
   sourceId: string;
   sourceVersion: number | null;
   sourceEpoch: number | null;
@@ -1825,11 +1821,7 @@ export interface SystemNotice {
   readonly level: SystemNoticeLevel;
 }
 
-function validateNoticePart(
-  value: string,
-  max: number,
-  what: string,
-): string {
+function validateNoticePart(value: string, max: number, what: string): string {
   const cps = Array.from(value);
   if (cps.length < 1 || cps.length > max) {
     throw new RepositoryValidationError(
@@ -1883,15 +1875,12 @@ export function recordSystemNotice(
   }
   const level = spec.level;
   const now = nowMs(options.now);
-  const fingerprint = systemNoticeFingerprint(
-    subject,
-    level,
-    title,
-    body,
-  );
+  const fingerprint = systemNoticeFingerprint(subject, level, title, body);
   return withImmediate(db, () => {
     const sessions = (
-      db.prepare("SELECT id FROM sessions ORDER BY created_at ASC, id ASC").all() as {
+      db
+        .prepare("SELECT id FROM sessions ORDER BY created_at ASC, id ASC")
+        .all() as {
         id: string;
       }[]
     ).map((row) => row.id);

@@ -450,8 +450,6 @@ export type {
   NotificationCursorSource,
   ReadNotificationOptions,
   RecordDueDeadlinesOptions,
-} from "./notifications.js";
-export type {
   SystemNotice,
   SystemNoticeSpec,
 } from "./notifications.js";
