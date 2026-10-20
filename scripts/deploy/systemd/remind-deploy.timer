@@ -1,0 +1,12 @@
+[Unit]
+Description=Poll remind CLI auto-deploy every 5 minutes (offset from Companion)
+Documentation=file:%h/companion_master/docs/operations.md
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+Persistent=true
+Unit=remind-deploy.service
+
+[Install]
+WantedBy=timers.target
