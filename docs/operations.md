@@ -85,9 +85,13 @@ rejected). Remote reachability is provided outside the app (for example
   set-password`, which reads the password twice from TTY/stdin and never
   from env/argv). Sessions persist only SHA-256 token hashes in SQLite
   (`remote_sessions`, additive migration `0023_remote_sessions.sql`).
+  The global login failure counter and lockout are persisted in
+  SQLite too (`remote_login_lockout`, additive migration
+  `0024_remote_login_lockout.sql`), so a process restart (including an
+  auto-deploy restart) cannot clear an active lockout.
   Tunables with 案 defaults: `absoluteTimeoutMs` (30d),
-  `idleTimeoutMs` (7d), `maxFailures` (5), `lockoutMs` (15min); the
-  lockout counter is in-memory and resets on restart. All API + SSE
+  `idleTimeoutMs` (7d), `maxFailures` (5), `lockoutMs` (15min).
+  All API + SSE
   require a session (401 JSON); `/health/live` stays open while
   `/health/ready` requires a session. A browser form POST to
   `/api/remote/login` redirects to `/` (303) on success; JSON logins

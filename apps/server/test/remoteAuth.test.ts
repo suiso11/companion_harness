@@ -53,6 +53,7 @@ import {
   verifyPasswordAgainstRecord,
 } from "../src/remote_password.js";
 import {
+  createSqliteRemoteLoginRateLimiter,
   createSqliteRemoteSessionStore,
   hashRemoteToken,
   type RemoteSessionStore,
@@ -69,6 +70,8 @@ interface Fixture extends CreatedServerApp {
   store: RemoteSessionStore;
   passwordFile: string;
   setNow: (t: number) => void;
+  /** Build a fresh app (fresh limiter instance) on the SAME migrated DB. */
+  recreate: () => CreatedServerApp;
   close: () => void;
 }
 
@@ -126,15 +129,23 @@ async function makeAuthApp(
   const store = createSqliteRemoteSessionStore(handle.raw);
   const { logger } = createCollectingLogger("debug");
   const engine = new RunEngine({ db: handle.raw, repo, cancelGraceMs: 30 });
-  const created = createApp({
-    config,
-    repo,
-    engine,
-    logger,
-    now: () => nowValue,
-    remoteStore: store,
-    remotePassword: verifier,
-  });
+  const build = (): CreatedServerApp =>
+    createApp({
+      config,
+      repo,
+      engine,
+      logger,
+      now: () => nowValue,
+      remoteStore: store,
+      remotePassword: verifier,
+      // A NEW limiter instance per app: persistence must come from the DB,
+      // never from shared in-process state (simulates a restart).
+      remoteLoginLimiter: createSqliteRemoteLoginRateLimiter(handle.raw, {
+        maxFailures: config.remote.maxFailures,
+        lockoutMs: config.remote.lockoutMs,
+      }),
+    });
+  const created = build();
   return {
     ...created,
     repo,
@@ -144,6 +155,7 @@ async function makeAuthApp(
     setNow: (t: number) => {
       nowValue = t;
     },
+    recreate: build,
     close: () => closeKernelDatabase(handle),
   };
 }
@@ -157,15 +169,15 @@ function loginHeaders(cookie?: string): Record<string, string> {
   };
 }
 
-async function loginAs(
-  f: Fixture,
+async function loginTo(
+  app: CreatedServerApp,
   password: string,
 ): Promise<{
   status: number;
   cookie: string | null;
   setCookie: string | null;
 }> {
-  const res = await f.app.request("/api/remote/login", {
+  const res = await app.app.request("/api/remote/login", {
     method: "POST",
     headers: loginHeaders(),
     body: JSON.stringify({ password }),
@@ -177,6 +189,17 @@ async function loginAs(
     cookie: pair?.startsWith("companion_remote=") === true ? pair : null,
     setCookie,
   };
+}
+
+async function loginAs(
+  f: Fixture,
+  password: string,
+): Promise<{
+  status: number;
+  cookie: string | null;
+  setCookie: string | null;
+}> {
+  return loginTo(f, password);
 }
 
 describe("remote auth config fail-closed (step 0)", () => {
@@ -560,6 +583,46 @@ describe("login sessions (steps 2-4)", () => {
       const ok = await loginAs(f, PASSWORD);
       expect(ok.status).toBe(200);
       expect(ok.cookie).not.toBeNull();
+    } finally {
+      f.close();
+    }
+  });
+
+  it("persists the failure counter and lockout across app re-creation", async () => {
+    const f = await makeAuthApp({ maxFailures: 3, lockoutMs: 60_000 });
+    try {
+      expect((await loginAs(f, WRONG)).status).toBe(401);
+      expect((await loginAs(f, WRONG)).status).toBe(401);
+
+      // A fresh app (new limiter instance) on the SAME DB keeps both
+      // failures: the third wrong password locks.
+      const restarted = f.recreate();
+      expect((await loginTo(restarted, WRONG)).status).toBe(401);
+      expect((await loginTo(restarted, WRONG)).status).toBe(429);
+      expect((await loginTo(restarted, PASSWORD)).status).toBe(429);
+
+      // Another restart is still locked (the deadline is persisted too).
+      const restartedAgain = f.recreate();
+      expect((await loginTo(restartedAgain, PASSWORD)).status).toBe(429);
+    } finally {
+      f.close();
+    }
+  });
+
+  it("successful login resets the persisted failure counter", async () => {
+    const f = await makeAuthApp({ maxFailures: 3, lockoutMs: 60_000 });
+    try {
+      expect((await loginAs(f, WRONG)).status).toBe(401);
+      expect((await loginAs(f, WRONG)).status).toBe(401);
+      expect((await loginAs(f, PASSWORD)).status).toBe(200);
+
+      // The success cleared both failures; two more stay below the limit
+      // even after a restart, and the third locks.
+      const restarted = f.recreate();
+      expect((await loginTo(restarted, WRONG)).status).toBe(401);
+      expect((await loginTo(restarted, WRONG)).status).toBe(401);
+      expect((await loginTo(restarted, WRONG)).status).toBe(401);
+      expect((await loginTo(restarted, WRONG)).status).toBe(429);
     } finally {
       f.close();
     }

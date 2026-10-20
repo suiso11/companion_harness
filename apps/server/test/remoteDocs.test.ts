@@ -19,11 +19,14 @@ describe("remote docs consistency (review findings)", () => {
     expect(ops).toContain("set-password");
     expect(ops).toContain("passwordFile");
     expect(ops).toContain("0023_remote_sessions.sql");
+    expect(ops).toContain("0024_remote_login_lockout.sql");
+    expect(ops).not.toContain("lockout counter is in-memory");
   });
 
-  it("README references migration 0023 for remote sessions", () => {
+  it("README references migrations 0023/0024 for remote sessions", () => {
     const readme = readFileSync(join(ROOT, "README.md"), "utf-8");
     expect(readme).toContain("0023");
+    expect(readme).toContain("0024");
     expect(readme).not.toContain("additive migration `0022`");
   });
 });

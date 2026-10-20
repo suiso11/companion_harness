@@ -156,6 +156,13 @@
       "when": 1790000000023,
       "tag": "0023_remote_sessions",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": 24,
+      "when": 1790000000024,
+      "tag": "0024_remote_login_lockout",
+      "breakpoints": true
     }
   ]
 }

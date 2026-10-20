@@ -201,8 +201,9 @@ export function parseActionConfig(raw: string | undefined): ActionConfig {
  *   startup fail-closed. The password itself never travels via env/argv.
  * - Timeout/lockout tunables below carry 案 defaults (design §3):
  *   absolute session expiry 30d, idle timeout 7d, 5 failures → 15 min
- *   global lockout. The lockout counter lives in memory and resets on
- *   restart (documented in README).
+ *   global lockout. The failure counter/lockout is persisted in SQLite
+ *   (`remote_login_lockout`, migration 0024), so restarts cannot clear
+ *   an active lockout.
  * - Failures carry fixed messages only: no values escape.
  * - The returned object (including the origins array) is deep-frozen.
  */
