@@ -3,6 +3,7 @@ Description=Companion Harness (google-readonly profile)
 Documentation=file:%h/companion_master/docs/operations.md
 After=network-online.target
 Wants=network-online.target
+OnFailure=companion-alert@%n.service
 
 [Service]
 Type=simple

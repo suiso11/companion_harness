@@ -1,0 +1,13 @@
+[Unit]
+Description=Check Companion health every 5 minutes
+Documentation=file:%h/companion_master/docs/operations.md
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+RandomizedDelaySec=30s
+Unit=companion-health.service
+
+[Install]
+WantedBy=timers.target

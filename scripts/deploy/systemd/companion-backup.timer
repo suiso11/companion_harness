@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Companion + remind backup daily
+Documentation=file:%h/companion_master/docs/operations.md
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+RandomizedDelaySec=15min
+Unit=companion-backup.service
+
+[Install]
+WantedBy=timers.target
