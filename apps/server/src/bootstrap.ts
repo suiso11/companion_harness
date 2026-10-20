@@ -732,14 +732,14 @@ function notifySupervisor(message: Record<string, unknown>): void {
 
 /**
  * M3 static UI assets (plan §16.1, §16.7) + PR-1 Svelte chat bundle.
- * Best-effort load of the esbuild bundle (`scripts/build-ui.mjs` output,
- * `dist/assets/`) and the Svelte bundle (`apps/web` Vite output,
+ * Best-effort load of the self-hosted stylesheet (`scripts/build-ui.mjs`
+ * output, `dist/assets/`) and the Svelte bundle (`apps/web` Vite output,
  * `dist/svelte/`): missing files only mean the asset routes serve 404,
  * never a startup failure. Never logs paths or file contents — only the
- * loaded count.
+ * loaded count. PR-6: the legacy vanilla client bundle is gone; only the
+ * stylesheet (shared with the login page) is loaded from `dist/assets`.
  */
 export function loadUiAssets(fromDir?: string): {
-  clientJs?: string;
   clientCss?: string;
   svelteJs?: string;
   svelteCss?: string;
@@ -749,17 +749,11 @@ export function loadUiAssets(fromDir?: string): {
     fromDir ??
     join(dirname(fileURLToPath(import.meta.url)), "..", "dist", "assets");
   const assets: {
-    clientJs?: string;
     clientCss?: string;
     svelteJs?: string;
     svelteCss?: string;
     svelteChunks?: Record<string, string>;
   } = {};
-  try {
-    assets.clientJs = readFileSync(join(dir, "client.js"), "utf-8");
-  } catch {
-    // Best effort: the route serves 404 when the bundle was not built.
-  }
   try {
     assets.clientCss = readFileSync(join(dir, "client.css"), "utf-8");
   } catch {

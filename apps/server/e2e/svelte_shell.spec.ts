@@ -1,6 +1,6 @@
 // PR-1 Svelte shell acceptance: the default `/` route serves the NEW Svelte
-// chat UI (not the `/legacy` vanilla shell) with the dark-only theme, and
-// the 375px smartphone floor holds (no horizontal overflow, send target
+// chat UI (the vanilla shell was removed in PR-6) with the dark-only theme,
+// and the 375px smartphone floor holds (no horizontal overflow, send target
 // >=44px). Real browser over the production UI/server with no API mocks
 // (same deterministic fake RunStrategy harness as conversation.spec.ts).
 
@@ -41,12 +41,15 @@ test.afterEach(async ({ request }) => {
   await control(request, "/release");
 });
 
-test("new Svelte shell at / is dark-only", async ({ page }) => {
-  // The SSR shell carries the Svelte bundle (and not the vanilla client),
-  // proving `/` serves the NEW UI while `/legacy` keeps the vanilla shell.
+test("new Svelte shell at / is dark-only", async ({ page, request }) => {
+  // The SSR shell carries the Svelte bundle (and not the legacy vanilla
+  // client), proving `/` serves the NEW UI. PR-6: the vanilla shell was
+  // removed — `/legacy` now intentionally 404s (intended behavior change).
   const html = await page.content();
   expect(html).toContain('src="/assets/svelte-app.js"');
   expect(html).not.toContain('src="/assets/client.js"');
+  const legacy = await request.get("/legacy");
+  expect(legacy.status()).toBe(404);
   // Computed body background is dark: every channel stays well below
   // mid-grey (#101418 -> rgb(16, 20, 24)).
   const bg = await page.evaluate(

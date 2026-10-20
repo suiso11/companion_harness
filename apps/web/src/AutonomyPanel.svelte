@@ -28,9 +28,13 @@
 // - History trails render the immutable original / correction / lifecycle
 //   rows with bounded lossy-free paging (afterSeq cursor per target).
 // Every model string renders via text interpolation only (no {@html}).
-
 import { fetchJson, postJson, randomUuid } from "./lib/api.js";
 import { notifyAutonomyChanged } from "./lib/autonomy.svelte.js";
+import {
+  retryRefreshesControl,
+  revalidateConflictArm,
+  shouldResetConflictArm,
+} from "./lib/autonomy_state.js";
 import { revealHashTarget } from "./lib/router.js";
 import { getSessionId } from "./lib/session.svelte.js";
 
@@ -73,25 +77,6 @@ interface PendingCommand {
   endpoint: string;
   key: string;
   body: unknown;
-}
-
-/** Legacy `retryRefreshesControl` (autonomy_state.ts). */
-function retryRefreshesControl(endpoint: string): boolean {
-  return endpoint === "/api/autonomy/control";
-}
-
-/** Legacy `revalidateConflictArm`: an arm that left the active set is dropped. */
-function revalidateConflictArm(
-  arm: string | null,
-  activeIds: ReadonlySet<string>,
-): string | null {
-  if (arm !== null && !activeIds.has(arm)) return null;
-  return arm;
-}
-
-/** Legacy `shouldResetConflictArm`: a rejected pair resets the dead arm. */
-function shouldResetConflictArm(status: number): boolean {
-  return status === 409;
 }
 
 function formatHistoryEvents(events: unknown, withNote: boolean): string[] {

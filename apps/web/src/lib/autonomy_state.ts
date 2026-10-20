@@ -1,9 +1,9 @@
 // AV autonomy panel state decisions (DOM-free, unit-tested).
 //
-// The browser panel (`client.ts`) renders plain DOM and cannot run under
-// node, so every branchable autonomy-panel decision lives here as a pure
-// function pinned by `test/autonomy_state.test.ts`. DOM code must call
-// these instead of inlining the decision.
+// PR-6: ported verbatim from the deleted legacy `apps/server/src/ui/
+// autonomy_state.ts`. The Svelte panel (`AutonomyPanel.svelte`) imports
+// these pure functions, pinned by `test/autonomy_state.test.ts`. DOM code
+// must call these instead of inlining the decision.
 
 /** Global stop-control mutation path (session-independent). */
 export const AUTONOMY_CONTROL_ENDPOINT = "/api/autonomy/control";
