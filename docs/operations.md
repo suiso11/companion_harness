@@ -4315,4 +4315,3 @@ brownie（単一 Linux ホスト）で本構成が稼働中。Companion は syst
 が tailnet HTTPS を終端して `127.0.0.1:<port>` へ proxy する。chat model は
 2026-10-19 に Gemma 4 26B-A4B（unsloth UD-Q4_K_XL）へ切替済み（Qwen 削除、
 `local-chat` alias は PR #90）。remind 側の自動デプロイは未着手（PR #92 open）。
-
