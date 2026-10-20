@@ -34,6 +34,22 @@
 
 /// <reference lib="dom" />
 
+// The pure guards/labels/state types moved to the shared module so the
+// native Svelte ProposalsPanel renders the exact same views (one source of
+// truth, no re-implementation divergence).
+import {
+  DRAFT_KIND_TEXT,
+  isProposalView,
+  isRecord,
+  type ProposalView,
+  readCursor,
+  readHasMore,
+  readItems,
+  readPendingCount,
+  STATUS_TEXT,
+  textOf,
+} from "../../../web/src/lib/proposal_shared.js";
+
 export interface ProposalHttp {
   get(path: string): Promise<{ status: number; body: unknown }>;
   post(
@@ -51,108 +67,6 @@ export interface ProposalPanelDeps {
   /** Refresh the adopted purpose/task target via existing public hooks. */
   onAdopted?: () => void;
   randomKey?: () => string;
-}
-
-interface ProposalView {
-  readonly id: string;
-  readonly sessionId: string;
-  readonly scope: string;
-  readonly target: "purpose" | "task";
-  readonly draftKind: string;
-  readonly purposeKind: string | null;
-  readonly taskKind: string | null;
-  readonly sourceQuote: string;
-  readonly interpretation: string;
-  readonly sourceKind: "model";
-  readonly sourceTurnId: string;
-  readonly sourceRunId: string;
-  readonly parentPurposeId: string | null;
-  readonly expectedParentVersion: number | null;
-  readonly status: "pending" | "accepted" | "rejected";
-  readonly version: number;
-  readonly acceptedTargetId: string | null;
-  readonly createdAt: number;
-  readonly updatedAt: number;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function isProposalView(value: unknown): value is ProposalView {
-  if (!isRecord(value)) return false;
-  return (
-    typeof value.id === "string" &&
-    typeof value.sessionId === "string" &&
-    typeof value.scope === "string" &&
-    (value.target === "purpose" || value.target === "task") &&
-    typeof value.draftKind === "string" &&
-    (value.purposeKind === null || typeof value.purposeKind === "string") &&
-    (value.taskKind === null || typeof value.taskKind === "string") &&
-    typeof value.sourceQuote === "string" &&
-    typeof value.interpretation === "string" &&
-    value.sourceKind === "model" &&
-    typeof value.sourceTurnId === "string" &&
-    typeof value.sourceRunId === "string" &&
-    (value.parentPurposeId === null ||
-      typeof value.parentPurposeId === "string") &&
-    (value.expectedParentVersion === null ||
-      typeof value.expectedParentVersion === "number") &&
-    (value.status === "pending" ||
-      value.status === "accepted" ||
-      value.status === "rejected") &&
-    typeof value.version === "number" &&
-    (value.acceptedTargetId === null ||
-      typeof value.acceptedTargetId === "string") &&
-    typeof value.createdAt === "number" &&
-    typeof value.updatedAt === "number"
-  );
-}
-
-function readItems(body: unknown): ProposalView[] {
-  if (!isRecord(body)) return [];
-  const items = body.items;
-  if (!Array.isArray(items)) return [];
-  return items.filter(isProposalView);
-}
-
-/** Opaque older-page cursor (null when the server has no older page). */
-function readCursor(body: unknown): string | null {
-  if (!isRecord(body)) return null;
-  return typeof body.nextCursor === "string" ? body.nextCursor : null;
-}
-
-function readHasMore(body: unknown): boolean {
-  if (!isRecord(body)) return false;
-  return body.hasMore === true;
-}
-
-/** ALL owned pending drafts (never page-limited); -1 when unknown. */
-function readPendingCount(body: unknown): number {
-  if (!isRecord(body)) return -1;
-  return typeof body.pendingCount === "number" &&
-    Number.isInteger(body.pendingCount) &&
-    body.pendingCount >= 0
-    ? body.pendingCount
-    : -1;
-}
-
-const DRAFT_KIND_TEXT: Record<string, string> = {
-  casual: "雑談",
-  wish: "希望",
-  problem: "課題",
-  task: "作業",
-  deadline: "期限",
-};
-
-const STATUS_TEXT: Record<string, string> = {
-  pending: "未採用",
-  accepted: "採用済み",
-  rejected: "見送り",
-};
-
-function textOf(map: Record<string, string>, key: string): string {
-  return map[key] ?? key;
 }
 
 export class ProposalPanel {

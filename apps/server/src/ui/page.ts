@@ -922,7 +922,13 @@ export function renderSvelteShell(): HtmlEscapedString {
         {},
         "このページを利用するには JavaScript を有効にしてください",
       ),
-      jsx("script", { src: "/assets/svelte-app.js", defer: true }),
+      // ES module: the PR-5 route chunks import shared symbols from the
+      // entry bundle, so it must be loaded as a module (same self-hosted
+      // asset, same strict CSP; modules defer like `defer`).
+      jsx("script", {
+        type: "module",
+        src: "/assets/svelte-app.js",
+      }),
     ),
   ) as unknown as HtmlEscapedString;
 }

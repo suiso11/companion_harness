@@ -24,7 +24,7 @@ async function controlReset(
 }
 
 async function boot(page: Page): Promise<string> {
-  await page.goto("/legacy");
+  await page.goto("/learning");
   await page.locator("#learning-create").waitFor({ timeout: 15_000 });
   const sessionId = await page.evaluate(() =>
     localStorage.getItem("ch.sessionId"),
