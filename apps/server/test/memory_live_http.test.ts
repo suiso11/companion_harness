@@ -314,10 +314,12 @@ async function waitForOutboxKind(
 ): Promise<void> {
   const started = Date.now();
   for (;;) {
-    const rows = queryOutbox(dbPath).filter(
-      (row) => row.kind === kind && row.status === status,
-    );
-    if (rows.length > 0) {
+    const rows = queryOutbox(dbPath).filter((row) => row.kind === kind);
+    // Store-every-turn enqueues MULTIPLE remember jobs per turn (summary +
+    // facts) with identical due timestamps; drain claim order (next_due_at,
+    // then random id) is nondeterministic, so wait until EVERY job of the
+    // kind reached the target status, not merely the first one.
+    if (rows.length > 0 && rows.every((row) => row.status === status)) {
       return;
     }
     if (Date.now() - started > timeoutMs) {
@@ -426,11 +428,20 @@ describe("live memory HTTP regression (real server + real remind CLI)", () => {
       await waitForOutboxKind(dbPath, "record.remember", "acked");
       const afterFirst = queryOutbox(dbPath);
       expect(
-        afterFirst.filter((row) => row.kind === "event.append")[0]?.status,
-      ).toBe("acked");
+        afterFirst
+          .filter((row) => row.kind === "event.append")
+          .every((row) => row.status === "acked"),
+      ).toBe(true);
       expect(
-        afterFirst.filter((row) => row.kind === "record.remember")[0]?.status,
-      ).toBe("acked");
+        afterFirst
+          .filter((row) => row.kind === "record.remember")
+          .every((row) => row.status === "acked"),
+      ).toBe(true);
+      // Store-every-turn: the summary + the user_fact are BOTH durably
+      // stored for turn 1.
+      expect(
+        afterFirst.filter((row) => row.kind === "record.remember").length,
+      ).toBeGreaterThanOrEqual(2);
 
       // Direct REAL CLI recall proves data (not a fixture echo).
       const recall = await callMemoryCli(
