@@ -34,22 +34,63 @@ report() {
   fi
 }
 
+# --- best-effort in-app notices (never affect the exit status) ---
+# One error per distinct problem key while it persists; one info notice
+# ("recovered") when a key clears. Dedupe state lives in
+# ~/.local/state/companion/health-notify.json.
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+NOTIFY_SCRIPT="$SCRIPT_DIR/notify.sh"
+STATE_SCRIPT="$SCRIPT_DIR/opsNotifyState.mjs"
+
+report_problem() {
+  key="$1"
+  shift
+  report "$*"
+  # "error <episodeStartMs>" — the episode id scopes the fingerprint subject
+  # so a re-occurrence after recovery is a fresh notice, not a dedup hit.
+  verdict="$(node "$STATE_SCRIPT" health "$key" failing 2>/dev/null || true)"
+  case "$verdict" in
+    error*)
+      episode="${verdict#error}"
+      episode="${episode# }"
+      "$NOTIFY_SCRIPT" error "ヘルスチェック失敗: $key" "$*" \
+        "ops:health-fail:$key" "health:$key:$episode"
+      ;;
+  esac
+}
+
+report_recovered() {
+  key="$1"
+  verdict="$(node "$STATE_SCRIPT" health "$key" ok 2>/dev/null || true)"
+  if [ "$verdict" = "recovered" ]; then
+    "$NOTIFY_SCRIPT" info "ヘルスチェック回復: $key" "$key has recovered" \
+      "ops:health-recovered:$key" "health:$key"
+  fi
+}
+
 # --- liveness ---
 if ! command -v curl >/dev/null 2>&1; then
-  report "curl not found; cannot check liveness"
+  report_problem liveness "curl not found; cannot check liveness"
 elif ! curl -fsS --max-time 5 "$HEALTH_URL" >/dev/null 2>&1; then
-  report "liveness failed: $HEALTH_URL"
+  report_problem liveness "liveness failed: $HEALTH_URL"
+else
+  report_recovered liveness
 fi
 
 # --- failed units ---
 if command -v systemctl >/dev/null 2>&1; then
+  # A previously recorded systemctl-missing failure must clear its key (and
+  # emit the recovery notice) once systemctl is usable again.
+  report_recovered systemctl
   for unit in companion.service companion-deploy.service companion-backup.service; do
     if systemctl --user is-failed --quiet "$unit" >/dev/null 2>&1; then
-      report "unit failed: $unit"
+      report_problem "unit:$unit" "unit failed: $unit"
+    else
+      report_recovered "unit:$unit"
     fi
   done
 else
-  report "systemctl not found; cannot check unit state"
+  report_problem systemctl "systemctl not found; cannot check unit state"
 fi
 
 # --- disk used (df col5 is %used; error above 90% used) ---
@@ -57,10 +98,12 @@ check_disk() {
   mount="$1"
   used="$(df -P -k "$mount" 2>/dev/null | awk 'NR==2 {gsub("%", "", $5); print $5}')"
   case "$used" in
-    ''|*[!0-9]*) report "disk check failed: $mount" ;;
+    ''|*[!0-9]*) report_problem "disk:$mount" "disk check failed: $mount" ;;
     *)
       if [ "$used" -gt 90 ]; then
-        report "disk low: $mount ${used}% used"
+        report_problem "disk:$mount" "disk low: $mount ${used}% used"
+      else
+        report_recovered "disk:$mount"
       fi
       ;;
   esac
@@ -72,16 +115,19 @@ check_disk /srv
 check_backup_age() {
   dir="$1"
   label="$2"
+  key="backup-age:$label"
   newest="$(find "$dir" -maxdepth 1 -type f -name '*.sqlite' \
     -printf '%T@\n' 2>/dev/null | sort -rn | head -n 1)"
   if [ -z "$newest" ]; then
-    report "no $label backups under $dir"
+    report_problem "$key" "no $label backups under $dir"
     return
   fi
   age_h="$(awk -v now="$(date +%s)" -v then="$newest" \
     'BEGIN { printf "%d", (now - then) / 3600 }')"
   if [ "$age_h" -gt "$MAX_BACKUP_AGE_H" ]; then
-    report "$label backup is ${age_h}h old (limit ${MAX_BACKUP_AGE_H}h)"
+    report_problem "$key" "$label backup is ${age_h}h old (limit ${MAX_BACKUP_AGE_H}h)"
+  else
+    report_recovered "$key"
   fi
 }
 check_backup_age "$BACKUP_ROOT/companion" companion

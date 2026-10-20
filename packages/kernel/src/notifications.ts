@@ -106,6 +106,7 @@
 //   GLOBAL claim leases are preserved; no job is enqueued from
 //   notification events / ack / reads.
 
+import { createHash } from "node:crypto";
 import {
   type NotificationKind,
   type NotificationView,
@@ -331,7 +332,7 @@ interface NotificationDraft {
   /** CODE-computed: urgent ONLY for uncertain commitment receipts. */
   priority: "routine" | "urgent";
   briefText: string;
-  sourceKind: "shadow_job" | "action_receipt" | "task_deadline";
+  sourceKind: "shadow_job" | "action_receipt" | "task_deadline" | "ops_event";
   sourceId: string;
   sourceVersion: number | null;
   sourceEpoch: number | null;
@@ -1773,4 +1774,151 @@ export function recordDueDeadlines(
     }
     return { status: "recorded" as const, recorded, controlVersion: version };
   });
+}
+
+/* ------------------------------------------------------------------ */
+/* System-scope ops notices (deploy / backup / health hooks)            */
+/* ------------------------------------------------------------------ */
+
+export type SystemNoticeLevel = "info" | "error";
+
+/**
+ * System-scope ops notice spec (branch feat/ops-inapp-notify, decision
+ * haruka 2026-10-19: in-app only, no external send, best-effort).
+ *
+ * Notifications are SESSION-OWNED (per-session seq + UNIQUE
+ * (session_id, fingerprint) + a per-session SSE feed), so there is no
+ * session-free row concept. The least invasive additive write therefore
+ * INSERTS THE SAME NOTICE INTO EVERY EXISTING SESSION: each session's feed
+ * (and its unread badge + SSE stream) shows the ops notice with the
+ * session-scoped machinery fully reused — no schema rewrite, no new feed,
+ * no session guesswork. Built on migration 0025's additive `ops` kind and
+ * `ops_event` source kind; the three durable source cursors are untouched.
+ */
+export interface SystemNoticeSpec {
+  /** info -> routine priority, error -> urgent priority. Code-only. */
+  level: SystemNoticeLevel;
+  /** 1..120 code points, no secrets by caller contract. */
+  title: string;
+  /** 1..300 code points, no secrets by caller contract. */
+  body: string;
+  /** 8..128 chars hidden-link id, e.g. `ops:deploy:<sha8>`. No secrets. */
+  sourceId: string;
+  /**
+   * Semantic dedup key subject (1..200 chars): the SAME fingerprint
+   * subject + level + title + body dedups per session (never re-spams).
+   */
+  fingerprintSubject: string;
+}
+
+export interface SystemNotice {
+  /** Sessions that received the notice at all. */
+  readonly sessions: number;
+  /** Sessions where a NEW notification row was actually inserted. */
+  readonly recorded: number;
+  /** Sessions where this exact notice was already stored (dedup skip). */
+  readonly deduped: number;
+  readonly level: SystemNoticeLevel;
+}
+
+function validateNoticePart(value: string, max: number, what: string): string {
+  const cps = Array.from(value);
+  if (cps.length < 1 || cps.length > max) {
+    throw new RepositoryValidationError(
+      `${what} must be 1..${max} code points`,
+    );
+  }
+  return value;
+}
+
+/**
+ * Stable fingerprint for one ops notice: subject + level + title + body
+ * hashed (no secrets come through this path by caller contract; hashing
+ * keeps the 500-char cap trivial regardless of input length).
+ */
+export function systemNoticeFingerprint(
+  subject: string,
+  level: SystemNoticeLevel,
+  title: string,
+  body: string,
+): string {
+  const digest = createHash("sha256")
+    .update(`${subject}\u0000${level}\u0000${title}\u0000${body}`)
+    .digest("hex");
+  return truncateCp(`v1|ops|${subject}|${digest}`, 500);
+}
+
+/**
+ * Record ONE system-scope ops notice into EVERY existing session (one TX;
+ * per-session seq continuity via the shared insert helper, per-session
+ * fingerprint dedup). Never changes tasks / control / grants; a
+ * session with no room foreigners nothing — the write is purely additive
+ * notification rows. Returns the truthful recorded / deduped counts.
+ */
+export function recordSystemNotice(
+  db: Database.Database,
+  spec: SystemNoticeSpec,
+  options: RecordSystemNoticeOptions = {},
+): SystemNotice {
+  const title = validateNoticePart(spec.title, 120, "title");
+  const body = validateNoticePart(spec.body, 300, "body");
+  const sourceId = validateNoticePart(spec.sourceId, 128, "sourceId");
+  const subject = validateNoticePart(
+    spec.fingerprintSubject,
+    200,
+    "fingerprintSubject",
+  );
+  if (sourceId.length < 8) {
+    throw new RepositoryValidationError(
+      "sourceId must be at least 8 characters",
+    );
+  }
+  const level = spec.level;
+  const now = nowMs(options.now);
+  const fingerprint = systemNoticeFingerprint(subject, level, title, body);
+  return withImmediate(db, () => {
+    const sessions = (
+      db
+        .prepare("SELECT id FROM sessions ORDER BY created_at ASC, id ASC")
+        .all() as {
+        id: string;
+      }[]
+    ).map((row) => row.id);
+    let recorded = 0;
+    let deduped = 0;
+    for (const session of sessions) {
+      const seqState = { next: readNextSeq(db, session) };
+      const moved = insertNotificationInTx(
+        db,
+        session,
+        seqState,
+        {
+          scope: "ops",
+          kind: "ops",
+          priority: level === "error" ? "urgent" : "routine",
+          briefText: truncateCp(`${title} — ${body}`, 500),
+          sourceKind: "ops_event",
+          sourceId,
+          sourceVersion: null,
+          sourceEpoch: null,
+          citedDeadlines: [],
+          fingerprint,
+          contextExpiryAt: null,
+        },
+        now,
+      );
+      if (moved) recorded += 1;
+      else deduped += 1;
+    }
+    return {
+      sessions: sessions.length,
+      recorded,
+      deduped,
+      level,
+    };
+  });
+}
+
+export interface RecordSystemNoticeOptions {
+  now?: number;
 }

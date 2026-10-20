@@ -4320,7 +4320,134 @@ brownie（単一 Linux ホスト）で本構成が稼働中。Companion は syst
 （`companion.service` + `companion-deploy.timer`）で起動し、`tailscale serve`
 が tailnet HTTPS を終端して `127.0.0.1:<port>` へ proxy する。chat model は
 2026-10-19 に Gemma 4 26B-A4B（unsloth UD-Q4_K_XL）へ切替済み（Qwen 削除、
-`local-chat` alias は PR #90）。remind 側の自動デプロイは未着手（PR #92 open）。
+`local-chat` alias は PR #90）。remind 側の自動デプロイは PR #92
+（remind-deploy.timer、下記参照）で導入済み。
+## remind CLI の本番配置・自動更新・モデル配置
+
+### 本番配置
+
+- 本番の remind は `~/remind_master` (remind リポジトリ
+  `github.com/suiso11/remind` の detached worktree)。`npm ci && npm run build`
+  でビルドし、Companion は `dist/src/cli.js` を呼ぶ。
+- remind 設定は `~/.config/remind/memory.config.json`
+  (`dbPath`, `vaultPath`, `allowedScopes`, `vectors.modelDir`,
+  `llm.modelDir` など)。
+- Companion 側は `~/.config/companion/env` の `COMPANION_MEMORY_JSON`
+  (`{"executable","entry","config","scope"}`) で絶対パスを固定する。
+  `executable` は Node、**`entry` は必ず
+  `~/remind_current/dist/src/cli.js`** (`remind_current` は現行リリースへの
+  symlink。移行後は `~/remind_master/...` を直接指さない)、`config` は上記
+  JSON、`scope` は `allowedScopes` のいずれか。
+- Companion はメモリ操作のたびに remind CLI を子プロセスとして spawn する
+  (常駐プロセスなし)。そのため remind の更新に Companion の restart は
+  **不要**。リリースディレクトリは一度作ったら書き換えない (immutable) ので、
+  実行中 call がビルド途中の `dist/` を読むリスクはない。
+
+### 自動更新 (scripts/deploy/remind-deploy.sh)
+
+`remind-deploy.timer` が 5 分ごとに実行する。Companion の
+`companion-deploy.timer` と同時に走らないよう、起動時は
+`OnBootSec=3min` で 1 分ずらしてある (以後も 5 分間隔)。
+
+配布方式は out-of-tree な immutable リリース + symlink 切替
+(`~/remind_master` の working tree は触らない):
+
+1. `git fetch origin` し target=`origin/master`。state marker が
+   `ok` で target が一致し、`~/remind_current` がそのリリースを指して
+   いれば exit 0 (毎 tick 再検証: marker/symlink/ビルド済み CLI が揃って
+   いなければ再構築)。
+2. CI gate: `gh api repos/suiso11/remind/commits/<sha>/check-runs` が
+   すべて completed + success (skipped 許容) のときだけ進行。
+   `gh` 不在/未認証/API 失敗はスキップして次 tick (ページングは
+   `--slurp` 集約、旧 gh はストリーム結合でフォールバック)。
+3. `git archive <target>` を `~/remind_releases/<sha>` へ展開し、そこで
+   `npm ci && npm run build` (remind は npm 管理。`dist/` は gitignore)。
+4. Smoke: `record.list` を1回実行し、本番クライアント
+   (`memory_cli.ts`) と同一の厳密検証で `{v:1,ok:true,code:"OK"}` を
+   要求する (1行・LF 終端・完全な envelope キーセット・型チェック、
+   `scripts/deploy/remindDeploy.mjs`、`timeout 30` で境界付き)。
+   `executable` / `config` / `scope` は `COMPANION_MEMORY_JSON` を優先し
+   (無ければ node 本体と remind config の `allowedScopes[0]`)、`entry` は
+   **常に今ビルドしたリリースの** `dist/src/cli.js` を使う。
+   失敗時は state を `failed` にして直前の検証済みリリースへ symlink を
+   戻し (rollback) exit 1。
+5. Smoke 合格後のみ `mv -T` で `~/remind_current` を
+   `~/remind_releases/<sha>` へ原子的に付け替え、state marker
+   (`~/.local/state/companion/remind-deploy.state`) を `ok` に更新。
+   リリースは直近 2 世代を保持 (実行中の子プロセスは自分のディレクトリを
+   参照し続けるので quiesce 不要)。
+
+初回リリースの作り方 (移行手順):
+
+```sh
+# 1) 現行を手動リリースとして登録するか、1 回目の tick に任せる
+scripts/deploy/remind-deploy.sh        # smoke 通過で ~/remind_current 作成
+# 2) ~/.config/companion/env の COMPANION_MEMORY_JSON の entry を
+#    ~/remind_master/dist/src/cli.js → ~/remind_current/dist/src/cli.js へ変更
+# 3) Companion を 1 回だけ restart して新しい entry を読み込む
+#    (以降は symlink 切替のみで restart 不要)
+```
+
+インストール:
+
+```sh
+scripts/deploy/install.sh
+systemctl --user daemon-reload
+systemctl --user enable --now remind-deploy.timer
+loginctl enable-linger $USER
+```
+
+`install.sh` は `remind-deploy.service` / `remind-deploy.timer` も
+`~/.config/systemd/user/` へコピーし、`remind-deploy.service.d/path.conf`
+に node/npm/pnpm の PATH を固定する。`.service` は
+`WorkingDirectory=%h/companion_master`、`EnvironmentFile=%h/.config/companion/env`、
+`ExecStart=%h/companion_master/scripts/deploy/remind-deploy.sh`。
+
+単一インスタンスは flock (`$XDG_RUNTIME_DIR/remind-deploy.lock`)。失敗は
+`OnFailure=companion-alert@%n.service` で
+`~/.local/state/companion/alerts.log` に記録される。Companion の restart は
+行わない。
+
+```sh
+systemctl --user stop remind-deploy.timer          # pause
+journalctl --user -u remind-deploy.service -f      # logs
+systemctl --user start remind-deploy.service       # manual run
+```
+
+### モデル配置 (安定パス)
+
+`~/.config/remind/memory.config.json` の `vectors.modelDir` /
+`llm.modelDir` が開発チェックアウト (`/home/molmot/remind/models`) を指すと、
+auto-deploy や checkout の移動で壊れる。モデルはチェックアウト外の
+`~/.local/share/remind/models` に置く。
+
+```sh
+# 既存モデル一式を安定パスへコピー (rsync -a --mkpath、再実行しても差分のみ)
+scripts/deploy/remind-models.sh
+# コピー元/先を変える場合 (コピー元は第1引数)
+scripts/deploy/remind-models.sh /path/to/remind/models
+REMIND_MODELS_DIR=~/.local/share/remind/models scripts/deploy/remind-models.sh
+```
+
+スクリプトは設定を書き換えず、更新すべき行を表示する:
+
+```json
+"vectors": { "modelDir": "~/.local/share/remind/models/paraphrase-multilingual-MiniLM-L12-v2", ... }
+"llm":     { "modelDir": "~/.local/share/remind/models/qwen25-15b-instruct", ... }
+```
+
+モデルファイルの正規の取得方法は remind の provisioning (ネットワーク工程)。
+安定パスへ直接取得できる:
+
+```sh
+cd ~/remind_master
+npm run provision:model -- --dir ~/.local/share/remind/models/paraphrase-multilingual-MiniLM-L12-v2
+npm run provision:llm   -- --dir ~/.local/share/remind/models/qwen25-15b-instruct
+```
+
+`modelDir` の変更は次回の CLI 起動から効く (Companion restart 不要)。
+
+
 ## バックアップと復元 (Companion + remind, user systemd)
 
 `companion-backup.timer` が毎日 03:30 (Persistent=true,
@@ -4396,6 +4523,44 @@ journalctl --user -p err -S today
 journalctl --user -u companion-health -n 50
 cat ~/.local/state/companion/alerts.log
 ```
+
+## 運用通知 (in-app system ops notices, local only)
+
+運用スクリプト (deploy / backup / health) は、journal に加えてアプリ内の
+システム通知フィード (notifications の `ops` scope) へ best-effort で通知を
+書き込む。外部送信 (push / メール等) は行わない。書き込みは
+`scripts/deploy/notify.sh` 経由で server の ops notify CLI
+(`apps/server/src/ops_notify_cli.ts notify`) を 10 秒の timeout で呼ぶ。
+失敗時は stderr に log を出すだけで、呼び出し元スクリプトの終了コードには
+影響しない (常に exit 0)。
+
+通知の種類と書き込みタイミング:
+
+- `companion-deploy.sh`
+  - 成功: info「デプロイ完了 <short sha> (#PR)」 (#PR は merge commit
+    subject から抽出、health ok 後に書き込む — server restart 中の
+    DB 書き込みを避けるため)。
+  - 失敗 / ロールバック: error「デプロイ失敗（ロールバック）」。
+  - スキップ継続: 同一 target が 1 時間超 skip し続けた場合 (CI not
+    green / active runs) に 1 時間窓ごとに最大 1 件の info。
+    状態は `~/.local/state/companion/deploy-skip` (JSON, 0600)。
+- `companion-backup.sh`: 失敗時のみ error (Companion / remind それぞれ)。
+- `companion-health.sh`: 問題 key ごとに初回のみ error、解消時に 1 件の
+  info「回復」。key は liveness / unit:<name> / disk:<mount> /
+  backup-age:<label>。状態は `~/.local/state/companion/health-notify.json`
+  (0600)。重複制御は `scripts/deploy/opsNotifyState.mjs` (pure 関数を
+  `apps/server/test/ops_notify_state.test.ts` で検証)。
+
+読み方は通常の通知と同じ (アプリ内通知フィードの ops scope、`ops` kind、
+urgent = error / routine = info)。journal だけを見る場合:
+
+```sh
+journalctl --user -t ops-notify -n 50
+cat ~/.local/state/companion/deploy-skip
+cat ~/.local/state/companion/health-notify.json
+```
+
+状態ファイルを削除すれば重複制御はリセットされる (次回の問題で再通知)。
 
 ## LLM スタック管理 (ops/llm)
 

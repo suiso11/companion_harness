@@ -23,6 +23,57 @@ log() {
   printf '%s companion-deploy: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"
 }
 
+# Best-effort in-app notices (never fails the deploy script).
+NOTIFY_SCRIPT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/notify.sh"
+STATE_SCRIPT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/opsNotifyState.mjs"
+
+notify_skip_persisted() {
+  # One info notice per target per hour window while the skip persists.
+  # The reason (e.g. the not-green check list) is bounded to 200 code
+  # points so the body stays within the notify CLI's 300-cp limit even when
+  # many checks are pending/failed, and the hour window is part of the
+  # fingerprint subject so each window gets its own notice.
+  target="$1"
+  reason="$2"
+  reason="$(node -e 'process.stdout.write(Array.from(process.argv[1] ?? "").slice(0, 200).join(""))' "$reason" 2>/dev/null || printf '%s' "$reason")"
+  if [ "$(node "$STATE_SCRIPT" skip "$target" 2>/dev/null || true)" = "notify" ]; then
+    short="$(git rev-parse --short "$target" 2>/dev/null || echo "$target")"
+    hour="$(date -u '+%Y%m%dT%H')"
+    "$NOTIFY_SCRIPT" info \
+      "デプロイスキップ継続" \
+      "target ${short} has been skipped for over 1h (${reason})" \
+      "ops:deploy-skip:${short}" \
+      "deploy-skip:${target}:${hour}"
+  fi
+}
+
+notify_success() {
+  # デプロイ完了 <short sha> (<#PR from merge commit subject>)
+  target="$1"
+  short="$(git rev-parse --short "$target" 2>/dev/null || echo "$target")"
+  subject="$(git log -1 --format=%s "$target" 2>/dev/null || true)"
+  pr="$(printf '%s' "$subject" | sed -n 's/.*pull request #\([0-9][0-9]*\).*/#\1/p')"
+  title="デプロイ完了 ${short}"
+  body="deployed ${short} (health ok)"
+  if [ -n "$pr" ]; then
+    title="デプロイ完了 ${short} (${pr})"
+    body="deployed ${short} (${pr}) (health ok)"
+  fi
+  node "$STATE_SCRIPT" skip-clear "$target" >/dev/null 2>&1 || true
+  "$NOTIFY_SCRIPT" info "$title" "$body" "ops:deploy:${short}" "deploy-success:${target}"
+}
+
+notify_rollback() {
+  target="$1"
+  reason="$2"
+  short="$(git rev-parse --short "$target" 2>/dev/null || echo "$target")"
+  "$NOTIFY_SCRIPT" error \
+    "デプロイ失敗（ロールバック）" \
+    "deploy of ${short} failed (${reason}); rolled back to previous revision" \
+    "ops:deploy-fail:${short}" \
+    "deploy-rollback:${target}"
+}
+
 # --- single-instance lock (non-blocking; a held lock is a clean skip) ---
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
@@ -84,6 +135,7 @@ case "$CI_OK" in
     ;;
   *)
     log "CI not green for $TARGET ($CI_OK); skipping deploy this tick"
+    notify_skip_persisted "$TARGET" "CI not green: $CI_OK"
     exit 0
     ;;
 esac
@@ -103,6 +155,7 @@ if [ "$ACTIVE_N" = "?" ]; then
 fi
 if [ "$ACTIVE_N" != "0" ]; then
   log "$ACTIVE_N active run(s); skipping deploy this tick"
+  notify_skip_persisted "$TARGET" "$ACTIVE_N active run(s)"
   exit 0
 fi
 
@@ -119,6 +172,7 @@ rollback() {
   pnpm install --frozen-lockfile
   systemctl --user restart companion.service
   log "rollback complete (previous revision restored and restarted)"
+  notify_rollback "$TARGET" "health check or restart failed"
 }
 
 log "switching to $TARGET"
@@ -138,6 +192,9 @@ i=0
 while [ "$i" -lt 30 ]; do
   if curl -fsS --max-time 3 "$HEALTH_URL" >/dev/null 2>&1; then
     log "deployed $TARGET (health ok)"
+    # Server has restarted and is healthy: DB writes are safe now, so
+    # notices are written only after health is ok.
+    notify_success "$TARGET"
     exit 0
   fi
   sleep 2

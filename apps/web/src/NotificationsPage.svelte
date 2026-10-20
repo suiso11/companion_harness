@@ -56,6 +56,7 @@ const KIND_TEXT: Record<string, string> = {
   question: "確認事項",
   deadline: "期限",
   commitment: "受領確認",
+  ops: "システム通知",
 };
 
 const PRIORITY_TEXT: Record<string, string> = {
@@ -63,6 +64,12 @@ const PRIORITY_TEXT: Record<string, string> = {
   urgent: "要確認（受領）",
 };
 
+// Urgent items with kind="ops" are system failures, not receipt
+// confirmations — give them their own heading instead of 要確認（受領）.
+function urgentHead(view: NotificationView): string {
+  const label = view.kind === "ops" ? "要確認（ops）" : "要確認（受領）";
+  return `${label}・${sourceLine(view)}`;
+}
 const SOURCE_TEXT: Record<string, string> = {
   shadow_job: "試行の記録",
   action_receipt: "実行結果の受領",
@@ -238,7 +245,7 @@ function renderUrgent(): void {
     .slice(0, 5);
   urgentRows = urgent.map((view) => ({
     id: view.id,
-    head: `要確認（受領）・${sourceLine(view)}`,
+    head: urgentHead(view),
     body: view.briefText,
   }));
 }

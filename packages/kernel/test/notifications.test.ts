@@ -65,11 +65,14 @@ import {
   createKernelRepository,
   createReferenceManager,
   generateId,
+  listNotificationsForward,
   migrateKernelDatabase,
   NotificationKeyConflictError,
   NotificationProjectionResetError,
   openKernelDatabase,
   RepositoryNotFoundError,
+  recordSystemNotice,
+  systemNoticeFingerprint,
 } from "../src/index.js";
 
 const T0 = 1_700_001_000_000;
@@ -1519,5 +1522,183 @@ describe("notifications durable core", () => {
     } finally {
       closeKernelDatabase(handle);
     }
+  });
+});
+
+describe("system-scope ops notices (recordSystemNotice)", () => {
+  const SPEC = {
+    level: "error" as const,
+    title: "deploy finished",
+    body: "validation failed on stage 2",
+    sourceId: "ops:deploy:abc12345",
+    fingerprintSubject: "deploy-run-42",
+  };
+
+  it("records one additive ops notice into EVERY session with derived priority", async () => {
+    const { handle, sessionId, otherId } = await makeRepo();
+    try {
+      const result = recordSystemNotice(
+        handle.raw,
+        { ...SPEC, level: "info" },
+        { now: T0 },
+      );
+      expect(result.sessions).toBe(2);
+      expect(result.recorded).toBe(2);
+      expect(result.deduped).toBe(0);
+      for (const id of [sessionId, otherId]) {
+        const rows = handle.raw
+          .prepare(
+            "SELECT scope, kind, priority, brief_text, source_kind, source_id, seq FROM notifications WHERE session_id = ? ORDER BY seq ASC",
+          )
+          .all(id) as {
+          scope: string;
+          kind: string;
+          priority: string;
+          brief_text: string;
+          source_kind: string;
+          source_id: string;
+          seq: number;
+        }[];
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+          scope: "ops",
+          kind: "ops",
+          priority: "routine",
+          source_kind: "ops_event",
+          source_id: SPEC.sourceId,
+          seq: 1,
+        });
+        expect(rows.at(0)?.brief_text).toBe(`${SPEC.title} — ${SPEC.body}`);
+      }
+      // Feed visibility: the notice is a durable forward page member.
+      const page = listNotificationsForward(handle.raw, sessionId, {
+        after: 0,
+        limit: 10,
+      });
+      expect(page.items).toHaveLength(1);
+      expect(page.hasMore).toBe(false);
+      expect(page.latestSeq).toBe(1);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("errors map to urgent priority and dedupe never re-spams", async () => {
+    const { handle } = await makeRepo();
+    try {
+      const first = recordSystemNotice(handle.raw, SPEC, { now: T0 });
+      expect(first.recorded).toBe(2);
+      expect(first.deduped).toBe(0);
+      const urgent = handle.raw
+        .prepare(
+          "SELECT DISTINCT priority FROM notifications WHERE scope = 'ops'",
+        )
+        .all() as { priority: string }[];
+      expect(urgent).toEqual([{ priority: "urgent" }]);
+      // Identical semantic content: deduped everywhere, zero new rows.
+      const replay = recordSystemNotice(handle.raw, SPEC, {
+        now: T0 + 5000,
+      });
+      expect(replay.recorded).toBe(0);
+      expect(replay.deduped).toBe(2);
+      // A change in any payload component makes a NEW notice.
+      const changed = recordSystemNotice(
+        handle.raw,
+        { ...SPEC, body: "validation failed on stage 3" },
+        { now: T0 + 6000 },
+      );
+      expect(changed.recorded).toBe(2);
+      expect(
+        handle.raw
+          .prepare(
+            "SELECT COUNT(*) AS n FROM notifications WHERE scope = 'ops'",
+          )
+          .get() as { n: number },
+      ).toMatchObject({ n: 4 });
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("validates every field strictly before touching the store", async () => {
+    const { handle } = await makeRepo();
+    try {
+      // Bounds are CODE-point based: an ASCII banner for over-max
+      // plus a combining sequence for the exact-at-max cases.
+      expect(() =>
+        recordSystemNotice(handle.raw, {
+          ...SPEC,
+          title: "t".repeat(121),
+        }),
+      ).toThrow(/title/);
+      expect(() =>
+        recordSystemNotice(handle.raw, {
+          ...SPEC,
+          body: "b".repeat(301),
+        }),
+      ).toThrow(/body/);
+      expect(() =>
+        recordSystemNotice(handle.raw, {
+          ...SPEC,
+          fingerprintSubject: "s".repeat(201),
+        }),
+      ).toThrow(/fingerprintSubject/);
+      expect(() =>
+        recordSystemNotice(handle.raw, {
+          ...SPEC,
+          sourceId: "short", // 5 chars < 8
+        }),
+      ).toThrow(/sourceId/);
+      expect(() =>
+        recordSystemNotice(handle.raw, {
+          ...SPEC,
+          sourceId: `ops:deploy:${"h".repeat(118)}!`, // 129 chars
+        }),
+      ).toThrow(/sourceId/);
+      expect(() =>
+        recordSystemNotice(handle.raw, { ...SPEC, title: "" }),
+      ).toThrow(/title/);
+      // Nothing was written: validation fails BEFORE any insert.
+      expect(
+        handle.raw.prepare("SELECT COUNT(*) AS n FROM notifications").get(),
+      ).toMatchObject({ n: 0 });
+      // Exact-at-max strings are accepted (code-point counting, not UTF-8 bytes).
+      const atMax = recordSystemNotice(handle.raw, {
+        ...SPEC,
+        title: "t".repeat(120),
+        body: "b".repeat(300),
+        fingerprintSubject: "s".repeat(200),
+        sourceId: `ops:deploy:${"h".repeat(117)}`, // exactly 128
+      });
+      expect(atMax.recorded).toBe(2);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("fingerprint is stable per payload and excludes the clock", () => {
+    const a = systemNoticeFingerprint(
+      SPEC.fingerprintSubject,
+      SPEC.level,
+      SPEC.title,
+      SPEC.body,
+    );
+    const b = systemNoticeFingerprint(
+      SPEC.fingerprintSubject,
+      SPEC.level,
+      SPEC.title,
+      SPEC.body,
+    );
+    expect(a).toBe(b);
+    expect(a.startsWith("v1|ops|")).toBe(true);
+    expect(a).not.toBe(
+      systemNoticeFingerprint(
+        SPEC.fingerprintSubject,
+        "info",
+        SPEC.title,
+        SPEC.body,
+      ),
+    );
+    expect(a.length).toBeLessThanOrEqual(500);
   });
 });

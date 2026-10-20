@@ -28,6 +28,8 @@ export const NotificationKindSchema = z.enum([
   "question",
   "deadline",
   "commitment",
+  // Additive system-scope kind (branch feat/ops-inapp-notify): ops notice.
+  "ops",
 ]);
 export type NotificationKind = z.infer<typeof NotificationKindSchema>;
 
@@ -44,6 +46,9 @@ export const NotificationSourceKindSchema = z.enum([
   "shadow_job",
   "action_receipt",
   "task_deadline",
+  // Additive system-scope source (branch feat/ops-inapp-notify): ops notice
+  // written directly by the server CLI, never by a shadow/receipt/task source.
+  "ops_event",
 ]);
 export type NotificationSourceKind = z.infer<
   typeof NotificationSourceKindSchema
