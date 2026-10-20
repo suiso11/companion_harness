@@ -478,15 +478,15 @@ describe("I04 revision-pinned memory evidence", () => {
           "INSERT INTO memory_grants (run_id, citation, record_id, recall_id, session_id, scope, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .run(runId, "m1", "record-old", "recall-old", sessionId, "s", T0);
-      // Upgrade to the bundled (0024) schema: 0022 correction-kind table
-      // rebuild, 0023 additive remote_sessions, and 0024 additive
-      // remote_login_lockout; old rows survive with NULL revision/kind
-      // (never backfilled).
+      // Upgrade to the bundled (0025) schema: 0022 correction-kind table
+      // rebuild, 0023 additive remote_sessions, 0024 additive
+      // remote_login_lockout, and 0025 additive ops-notification kind;
+      // old rows survive with NULL revision/kind (never backfilled).
       const result = await migrateKernelDatabase({
         db: handle.raw,
         backupDir: backups,
       });
-      expect(result.applied).toEqual([22, 23, 24]);
+      expect(result.applied).toEqual([22, 23, 24, 25]);
       const repo = createKernelRepository(handle.raw);
       const exposures = repo.listMemoryExposures(runId);
       expect(exposures).toHaveLength(1);
@@ -583,9 +583,9 @@ describe("I04 revision-pinned memory evidence", () => {
         db: handle.raw,
         backupDir: backups,
       });
-      // Bundled schema is 0024 (0022 rebuild + additive remote_sessions +
-      // additive remote_login_lockout).
-      expect(result.applied).toEqual([22, 23, 24]);
+      // Bundled schema is 0025 (0022 rebuild + additive remote_sessions +
+      // additive remote_login_lockout + additive ops-notification kind).
+      expect(result.applied).toEqual([22, 23, 24, 25]);
       const repo = createKernelRepository(handle.raw);
       const exposures = repo.listMemoryExposures(runId);
       expect(exposures).toHaveLength(4);
