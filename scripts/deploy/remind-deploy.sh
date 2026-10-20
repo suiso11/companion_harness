@@ -86,9 +86,52 @@ state_write() { # target phase prev
   unset _state_tmp
 }
 
+# Best-effort in-app notices (never fails the deploy script).
+notify_skip_persisted() {
+  # One info notice per target per hour window while the skip persists.
+  target="$1"
+  reason="$2"
+  if [ "$(node "$STATE_SCRIPT" skip "$target" 2>/dev/null || true)" = "notify" ]; then
+    short="$(git rev-parse --short "$target" 2>/dev/null || echo "$target")"
+    "$NOTIFY_SCRIPT" info \
+      "remind デプロイスキップ継続" \
+      "target ${short} has been skipped for over 1h (${reason})" \
+      "ops:remind-deploy-skip:${short}" \
+      "remind-deploy-skip:${target}"
+  fi
+}
+
+notify_success() {
+  # remind デプロイ完了 <short sha> (<#PR from merge commit subject>)
+  target="$1"
+  short="$(git rev-parse --short "$target" 2>/dev/null || echo "$target")"
+  subject="$(git log -1 --format=%s "$target" 2>/dev/null || true)"
+  pr="$(printf '%s' "$subject" | sed -n 's/.*pull request #\([0-9][0-9]*\).*/#\1/p')"
+  title="remind デプロイ完了 ${short}"
+  body="remind deployed ${short} (smoke ok)"
+  if [ -n "$pr" ]; then
+    title="remind デプロイ完了 ${short} (${pr})"
+    body="remind deployed ${short} (${pr}) (smoke ok)"
+  fi
+  node "$STATE_SCRIPT" skip-clear "$target" >/dev/null 2>&1 || true
+  "$NOTIFY_SCRIPT" info "$title" "$body" "ops:remind-deploy:${short}" "remind-deploy-success:${target}"
+}
+
+notify_rollback() {
+  target="$1"
+  reason="$2"
+  short="$(git rev-parse --short "$target" 2>/dev/null || echo "$target")"
+  "$NOTIFY_SCRIPT" error \
+    "remind デプロイ失敗（ロールバック）" \
+    "remind deploy of ${short} failed (${reason}); rolled back to previous release" \
+    "ops:remind-deploy-fail:${short}" \
+    "remind-deploy-rollback:${target}"
+}
+
 # Restore the recorded previous release as the serving one (only possible
 # once that release exists; otherwise the symlink is left untouched).
-rollback() {
+rollback() { # [reason]
+  notify_rollback "$TARGET" "${1:-deploy failed}"
   if [ -n "$PREV" ] && [ -d "$RELEASES_DIR/$PREV" ] &&
     [ -f "$RELEASES_DIR/$PREV/dist/src/cli.js" ]; then
     log "rolling back to release $PREV"
@@ -113,6 +156,9 @@ if [ ! -d "$DEPLOY_DIR/.git" ] && [ ! -f "$DEPLOY_DIR/.git" ]; then
 fi
 cd "$DEPLOY_DIR"
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+
+NOTIFY_SCRIPT="$SCRIPT_DIR/notify.sh"
+STATE_SCRIPT="$SCRIPT_DIR/opsNotifyState.mjs"
 
 git fetch origin
 TARGET="$(git rev-parse origin/master)"
@@ -149,6 +195,7 @@ fi
 # --- CI gate: target commit must be green. gh missing/unauthed => skip. ---
 if ! command -v gh >/dev/null 2>&1; then
   log "gh not available; skipping deploy this tick (retry later)"
+  notify_skip_persisted "$TARGET" "gh unavailable"
   exit 0
 fi
 # Aggregate every page before parsing: `gh api --paginate` emits each page
@@ -168,6 +215,7 @@ else
 fi
 if [ -z "$CHECK_RUNS_JSON" ]; then
   log "gh api for check-runs failed (unauthed/offline?); skipping deploy this tick"
+  notify_skip_persisted "$TARGET" "check-runs api failed"
   exit 0
 fi
 CI_OK="$(CHECK_RUNS_JSON="$CHECK_RUNS_JSON" node --input-type=module -e '
@@ -213,6 +261,7 @@ case "$CI_OK" in
     ;;
   *)
     log "CI not green for $TARGET ($CI_OK); skipping deploy this tick"
+    notify_skip_persisted "$TARGET" "CI not green: $CI_OK"
     exit 0
     ;;
 esac
@@ -227,7 +276,7 @@ if ! { rm -rf "$RELEASE" && mkdir -p "$RELEASE" &&
   (cd "$RELEASE" && npm ci && npm run build); }; then
   log "archive/install/build failed for $TARGET; keeping previous release"
   state_write "$TARGET" failed "$PREV"
-  rollback
+  rollback "archive/install/build failed"
   exit 1
 fi
 cd "$DEPLOY_DIR"
@@ -242,7 +291,7 @@ MEMORY_JSON="${COMPANION_MEMORY_JSON:-}"
 fail_refuse() {
   log "$*"
   state_write "$TARGET" failed "$PREV"
-  rollback
+  rollback "$*"
   exit 1
 }
 if ! SCOPE="$(node "$SCRIPT_DIR/remindDeploy.mjs" field scope \
@@ -317,6 +366,7 @@ if ! mv -Tf "$CURRENT_LINK.tmp.$$" "$CURRENT_LINK"; then
   fail_refuse "failed to switch $CURRENT_LINK to $RELEASE; rolling back"
 fi
 state_write "$TARGET" ok "$PREV"
+notify_success "$TARGET"
 
 # Keep the last 2 releases (the published candidate + the previously
 # verified one); in-flight children only ever need their own dir.
