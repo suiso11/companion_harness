@@ -607,12 +607,18 @@ describe("background contention across actual callsites", () => {
       // A newly starting foreground prompt aborts OUR OWN parked call.
       memoryService.notifyForeground();
       await waitFor(() => contention.state.aborted.includes("extract"));
-      // Even though the provider would answer late, the late output is
-      // discarded: release the park and prove no memory write lands.
+      // Even though the provider would answer late, the late extraction
+      // output is discarded: no remember fan-out lands. The raw
+      // event.append was enqueued BEFORE extraction (decision I: raw
+      // storage never depends on extraction) and still lands.
       contention.releaseAll();
-      await sleep(300);
-      expect(ops.includes("event.append")).toBe(false);
-      expect(memory.repo.countPendingMemoryJobs(Date.now())).toBe(0);
+      await waitFor(() => ops.includes("event.append"));
+      expect(ops.includes("record.remember")).toBe(false);
+      expect(
+        memory.repo
+          .claimDueMemoryJobs(5, Date.now())
+          .filter((job) => job.kind === "record.remember"),
+      ).toHaveLength(0);
     } finally {
       memory.close();
     }
@@ -669,14 +675,15 @@ describe("background contention across actual callsites", () => {
       });
       memoryService.start();
       // Shutdown closes the gate: a completion while closed skips
-      // extraction with no write and no claim on the gate — the durable
-      // anchor remains for later idle work.
+      // extraction with no claim on the gate — but the raw event.append
+      // still enqueues and drains (decision I: raw storage never depends
+      // on extraction).
       gate.close();
       expect(gate.closed).toBe(true);
       const run = completeV2Run(memory.repo);
       memoryService.onRunCompleted(run.runId);
-      await sleep(300);
-      expect(memory.repo.countPendingMemoryJobs(Date.now())).toBe(0);
+      await waitFor(() => ops.includes("event.append"));
+      expect(ops.includes("record.remember")).toBe(false);
       // Reopen: a new completion cultivates normally again.
       gate.reopen();
       expect(gate.closed).toBe(false);

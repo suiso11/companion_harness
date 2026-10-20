@@ -1010,12 +1010,24 @@ describe("completion cultivation and cite-gated feedback", () => {
       service.onRunCompleted(chosen.runId);
       await waitFor(() => ops.includes("event.append"));
       expect(calls.length).toBeGreaterThan(0);
+      // The drain executes the remember fan-out to acked (stronger than
+      // merely pending): two stable-keyed remember jobs must land.
       await waitFor(
         () =>
-          f.repo
-            .claimDueMemoryJobs(5, Date.now())
-            .filter((job) => job.kind === "record.remember").length === 2,
+          outboxRowsByKind(f, "record.remember", chosen.runId).filter(
+            (row) => row.status === "acked",
+          ).length === 2,
       );
+      expect(outboxRowsByKind(f, "record.remember", chosen.runId)).toEqual([
+        {
+          key: stableMemoryJobKey("remember", chosen.runId, 0),
+          status: "acked",
+        },
+        {
+          key: stableMemoryJobKey("remember", chosen.runId, 1),
+          status: "acked",
+        },
+      ]);
 
       // Cancelled runs never reach extraction: no gateway call, no jobs.
       const callsBefore = calls.length;
@@ -1073,7 +1085,7 @@ describe("completion cultivation and cite-gated feedback", () => {
     }
   });
 
-  it("treats invalid extraction output and gateway failure as a noop", async () => {
+  it("stores the raw event.append even when extraction is invalid or fails, with no remember fan-out", async () => {
     const f = await openRepo();
     try {
       const ops: string[] = [];
@@ -1086,9 +1098,15 @@ describe("completion cultivation and cite-gated feedback", () => {
       service.start();
       const run = completeV2Run(f.repo, [{ text: "answered", citations: [] }]);
       service.onRunCompleted(run.runId);
-      await sleep(300);
-      expect(ops.includes("event.append")).toBe(false);
-      expect(f.repo.countPendingMemoryJobs(Date.now())).toBe(0);
+      // Decision (I): raw storage never depends on extraction. The raw
+      // event.append still enqueues and acks; only the remember fan-out is
+      // forgone on extract_invalid.
+      await waitFor(() => ops.includes("event.append"));
+      expect(
+        f.repo
+          .claimDueMemoryJobs(5, Date.now())
+          .filter((job) => job.kind === "record.remember"),
+      ).toHaveLength(0);
 
       const throwing: ModelGateway = {
         provider: "openai-compatible",
@@ -1105,8 +1123,17 @@ describe("completion cultivation and cite-gated feedback", () => {
         { text: "answered again", citations: [] },
       ]);
       service2.onRunCompleted(run2.runId);
-      await sleep(300);
-      expect(ops.includes("event.append")).toBe(false);
+      await waitFor(
+        () =>
+          f.repo
+            .claimDueMemoryJobs(5, Date.now())
+            .filter((job) => job.kind === "event.append").length === 1,
+      );
+      expect(
+        f.repo
+          .claimDueMemoryJobs(5, Date.now())
+          .filter((job) => job.kind === "record.remember"),
+      ).toHaveLength(0);
     } finally {
       f.close();
     }
@@ -1241,7 +1268,7 @@ describe("foreground preemption and shutdown", () => {
     }
   });
 
-  it("skips cultivation when selection changes during extraction", async () => {
+  it("keeps the raw event.append but skips remember fan-out when selection changes during extraction", async () => {
     const f = await openRepo();
     try {
       const ops: string[] = [];
@@ -1291,11 +1318,14 @@ describe("foreground preemption and shutdown", () => {
         }),
       );
       await sleep(300);
-      expect(ops.includes("event.append")).toBe(false);
+      // Decision (I): the superseded run's raw turn is still a committed
+      // turn — the raw event.append stays durable. Only the stale
+      // extraction's remember fan-out is discarded.
+      await waitFor(() => ops.includes("event.append"));
       expect(
         f.repo
           .claimDueMemoryJobs(5, Date.now())
-          .filter((job) => job.kind === "event.append"),
+          .filter((job) => job.kind === "record.remember"),
       ).toHaveLength(0);
     } finally {
       f.close();

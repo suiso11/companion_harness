@@ -1713,79 +1713,11 @@ export function createMemoryService(
       } catch {
         // Best effort: feedback never fails completion.
       }
-      // Structured extraction (gateway-dependent, conservative noop).
-      // Background admission: at most ONE model-heavy background unit runs
-      // at a time. When the gate is held (shadow/idle-distill in flight) or
-      // closed (STOP), extraction SKIPS with an honest fixed diagnostic —
-      // but the completed-run anchor above and the feedback jobs already
-      // enqueued stay durable: the outbox below still drains, and the
-      // automatic-job boundary inside `drainOnce` admits-or-skips ONLY the
-      // distill execution itself (explicit jobs always run), so nothing
-      // already-durable is lost, no catchup invented, no auto-revive of
-      // this skipped extraction on release.
-      const extractionLease =
-        background?.tryAcquire(BACKGROUND_OWNER_MEMORY_EXTRACTION) ?? null;
-      if (background !== null && extractionLease === null) {
-        log(
-          "info",
-          background.closed
-            ? "memory.extract_skipped_closed"
-            : "memory.extract_skipped_busy",
-          { runId: run.id },
-        );
-        await drainOnce().catch(() => undefined);
-        return;
-      }
-      let outcome: ExtractionParseResult;
-      try {
-        outcome = await extractViaGateway({
-          turnText,
-          answerText,
-        });
-      } finally {
-        if (extractionLease !== null) {
-          background?.release(extractionLease);
-        }
-      }
-      if (outcome.items.length === 0) {
-        // Split diagnostics (fixed codes only): a valid strict-JSON empty
-        // list is `memory.extract_none` (genuine nothing-to-remember);
-        // anything else (unparseable, wrong shape, or all items rejected)
-        // is `memory.extract_invalid` — the old single extract_empty code
-        // conflated the two and hid real model-output-shape failures.
-        log(
-          "info",
-          outcome.status === "invalid"
-            ? "memory.extract_invalid"
-            : "memory.extract_none",
-          { runId: run.id },
-        );
-        await drainOnce().catch(() => undefined);
-        return;
-      }
-      // Authoritative recheck AFTER the async gateway call: selection,
-      // completion, and shutdown may have changed while awaited. A
-      // superseded retry or a stopped service never enqueues.
-      if (!started || stopped) {
-        return;
-      }
-      try {
-        const fresh = repo.getRun(runId);
-        if (
-          fresh.status !== "completed" ||
-          fresh.result === null ||
-          fresh.sessionId !== run.sessionId ||
-          fresh.turnId !== run.turnId
-        ) {
-          return;
-        }
-        const freshSelection = repo.getSelection(fresh.turnId);
-        if (freshSelection === null || freshSelection.runId !== fresh.id) {
-          return;
-        }
-      } catch {
-        return;
-      }
+      // Decision (I): store every turn. The RAW `event.append` is enqueued
+      // for EVERY completed selected turn BEFORE extraction runs — raw
+      // storage never depends on extraction success. Extraction failure,
+      // an invalid payload, or a skipped (busy/closed) background slot only
+      // forgoes the remember fan-out below, never the raw event.
       const observedAt =
         run.finishedAt !== null && Number.isFinite(run.finishedAt)
           ? new Date(run.finishedAt).toISOString()
@@ -1821,17 +1753,15 @@ export function createMemoryService(
               scope,
               runId: run.id,
             },
+            // No remember fan-out rides on the raw event's chain:
+            // extracted memories enqueue their own remember jobs below.
             chain: {
               eventId,
               sessionId: run.sessionId,
               runId: run.id,
               turnId: run.turnId,
               provenance,
-              memories: outcome.items.map((memory) => ({
-                body: memory.body,
-                kind: memory.kind,
-                sensitivity: memory.sensitivity,
-              })),
+              memories: [],
             },
           }),
           { turnId: run.turnId, now: now() },
@@ -1843,6 +1773,114 @@ export function createMemoryService(
         runId: run.id,
         bytes: eventBody.length,
       });
+      // Structured extraction (gateway-dependent, conservative noop).
+      // Background admission: at most ONE model-heavy background unit runs
+      // at a time. When the gate is held (shadow/idle-distill in flight) or
+      // closed (STOP), extraction SKIPS with an honest fixed diagnostic —
+      // but the raw event.append above and the feedback jobs already
+      // enqueued stay durable: the outbox below still drains, and the
+      // automatic-job boundary inside `drainOnce` admits-or-skips ONLY the
+      // distill execution itself (explicit jobs always run), so nothing
+      // already-durable is lost, no catchup invented, no auto-revive of
+      // this skipped extraction on release.
+      const extractionLease =
+        background?.tryAcquire(BACKGROUND_OWNER_MEMORY_EXTRACTION) ?? null;
+      if (background !== null && extractionLease === null) {
+        log(
+          "info",
+          background.closed
+            ? "memory.extract_skipped_closed"
+            : "memory.extract_skipped_busy",
+          { runId: run.id },
+        );
+        // A just-scheduled outbox job CAN be missed by an in-flight drain
+        // tick whose claim pass already ran (e.g. the start() recovery
+        // tick): blindly returning that tick's `executed: 0` promise would
+        // strand the committed raw turn until the 5-minute idle tick. Join
+        // the in-flight tick first, then drain once more: the fresh tick
+        // claims and executes the new event.append.
+        const inflightTick = drainInFlight;
+        if (inflightTick !== null) {
+          await inflightTick.catch(() => undefined);
+        }
+        await drainOnce().catch(() => undefined);
+        return;
+      }
+      let outcome: ExtractionParseResult;
+      try {
+        outcome = await extractViaGateway({
+          turnText,
+          answerText,
+        });
+      } finally {
+        if (extractionLease !== null) {
+          background?.release(extractionLease);
+        }
+      }
+      if (outcome.items.length === 0) {
+        // Split diagnostics (fixed codes only): a valid strict-JSON empty
+        // list is `memory.extract_none` (genuine nothing-to-remember);
+        // anything else (unparseable, wrong shape, or all items rejected)
+        // is `memory.extract_invalid` — the old single extract_empty code
+        // conflated the two and hid real model-output-shape failures.
+        log(
+          "info",
+          outcome.status === "invalid"
+            ? "memory.extract_invalid"
+            : "memory.extract_none",
+          { runId: run.id },
+        );
+        await drainOnce().catch(() => undefined);
+        return;
+      }
+      // Authoritative recheck AFTER the async gateway call: selection,
+      // completion, and shutdown may have changed while awaited. A
+      // superseded retry or a stopped service never enqueues remember jobs
+      // (the raw event above is already durable and stays).
+      const supersededOrStopped = (): boolean => {
+        if (!started || stopped) {
+          return true;
+        }
+        try {
+          const fresh = repo.getRun(runId);
+          if (
+            fresh.status !== "completed" ||
+            fresh.result === null ||
+            fresh.sessionId !== run.sessionId ||
+            fresh.turnId !== run.turnId
+          ) {
+            return true;
+          }
+          const freshSelection = repo.getSelection(fresh.turnId);
+          return freshSelection === null || freshSelection.runId !== fresh.id;
+        } catch {
+          return true;
+        }
+      };
+      if (supersededOrStopped()) {
+        // The raw event.append above is durable but not yet drained: drain
+        // before returning so the committed turn's raw write still lands.
+        await drainOnce().catch(() => undefined);
+        return;
+      }
+      // Remember fan-out for the extracted items: the same stable-keyed
+      // chain logic the event.append ack fan-out uses, invoked directly so
+      // the fan-out no longer depends on the raw event's chain payload.
+      enqueueRememberChainMemories(
+        { params: { scope } },
+        {
+          eventId,
+          sessionId: run.sessionId,
+          runId: run.id,
+          turnId: run.turnId,
+          provenance,
+          memories: outcome.items.map((memory) => ({
+            body: memory.body,
+            kind: memory.kind,
+            sensitivity: memory.sensitivity,
+          })),
+        },
+      );
       await drainOnce().catch(() => undefined);
     })().catch(() => undefined);
   }
