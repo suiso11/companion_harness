@@ -149,7 +149,7 @@ function answerCall(text: string, citations: string[]): NormalizedToolCall {
 /**
  * Synthetic loopback gateway (NOT a real model): scripted `answer.submit`
  * plus extraction JSON. Extraction requests carry the fixed
- * `MEMORY_EXTRACT_SYSTEM_PROMPT` ("Extract durable memories..."); answer
+ * `MEMORY_EXTRACT_SYSTEM_PROMPT` ("Extract memories from the conversation..."); answer
  * requests carry the agent system prompt. When the projected memory block
  * already exposes `m1`, the answer cites it; otherwise it cites nothing.
  */
@@ -161,7 +161,7 @@ function syntheticGateway(): ModelGateway {
     chatUrl: `${MODEL_BASE}/v1/chat/completions`,
     chat: async (request: ChatRequest): Promise<ChatResult> => {
       const system = request.messages[0]?.content ?? "";
-      if (system.startsWith("Extract durable memories")) {
+      if (system.startsWith("Extract memories from the conversation")) {
         return {
           text: JSON.stringify({
             memories: [

@@ -296,7 +296,9 @@ async function startSyntheticModel(): Promise<{
       let kind: ParkKind = "ordinary";
       if (names.includes("autonomy_deliberation.submit")) {
         kind = "shadow";
-      } else if (systemText.startsWith("Extract durable memories")) {
+      } else if (
+        systemText.startsWith("Extract memories from the conversation")
+      ) {
         kind = "extract";
       }
       state.calls += 1;
