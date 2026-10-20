@@ -169,19 +169,44 @@ const RECALL_VECTORS: ReadonlySet<string> = new Set([
   "unavailable",
 ]);
 
-/** Fixed extraction system instruction (deterministic, no conversation). */
+/**
+ * Fixed extraction system instruction (deterministic, no conversation).
+ * Broadened (user report 2026-10-20: motorcycle chat saved nothing) to mine
+ * each turn for durable, useful items — stated preferences/likes/dislikes,
+ * interests/hobbies, owned equipment, habits, plans/goals, opinions, and
+ * facts about people/places — while keeping the closed policy: user-stated
+ * -> user_fact, turn-grounded tendencies -> model_inference, transient
+ * moods never stored as traits, no secrets, fail-closed sensitivity.
+ */
 export const MEMORY_EXTRACT_SYSTEM_PROMPT =
   "Extract durable memories from the conversation as strict JSON only. " +
   "Respond with exactly one JSON object of the form " +
   '{"memories":[{"body":"...","kind":"...","sensitivity":"..."}]} where kind ' +
   "is one of user_fact, model_inference, summary and sensitivity is one of " +
   "normal, sensitive. " +
+  "The conversation is usually Japanese: write each body as a short, " +
+  "self-contained Japanese sentence starting with the subject (e.g. " +
+  "ユーザーは…) that makes sense on its own. " +
+  "Mine each turn for durable and useful items: stated likes, dislikes, " +
+  "and preferences (e.g. 好きなバイクの車種・メーカー), interests and " +
+  "hobbies, things the user owns or uses (vehicles, equipment, tools), " +
+  "habits and routines, plans and goals, opinions the user expresses " +
+  "about recurring topics, and relevant facts about people or places in " +
+  "the user's life. One fact per item: split a multi-part turn into " +
+  "separate items. " +
+  "Kind policy: anything the USER explicitly stated is user_fact; a " +
+  "tendency YOU infer from what the user said in THIS turn (e.g. " +
+  "ネイキッド系のバイクを好む傾向がある) is model_inference — phrase it as a " +
+  "tendency, not certainty, grounded only in this turn's words. " +
+  "Exclude pure greetings, small talk, and anything already quoted " +
+  "verbatim. Never store transient moods or momentary feelings as traits " +
+  "(e.g. 今日は疲れた is not a personality trait), and never store " +
+  "secrets, credentials, or passwords. " +
   "Decide sensitivity at the same step that decides kind: mark sensitive " +
-  "anything personal, identifying, credential-like, health, or otherwise " +
-  "non-public; when undecidable, use sensitive. " +
-  "Include only stable user facts, durable preferences, or decisions worth " +
-  "remembering across sessions. Exclude greetings, chit-chat, and anything " +
-  "already quoted verbatim. At most 8 items. No prose, no markdown, JSON only.";
+  "anything personal, identifying, credential-like, or touching health, " +
+  "finance, relationships, or precise location, or otherwise non-public; " +
+  "when undecidable, use sensitive. " +
+  "At most 8 items. No prose, no markdown, JSON only.";
 
 export interface MemoryServiceOptions {
   readonly address: MemoryCliAddress;
