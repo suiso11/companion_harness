@@ -34,6 +34,7 @@ import {
   runResultToAnswerParts,
 } from "./lib/reducer.js";
 import { FEATURE_ROUTES } from "./lib/router.js";
+import { setSessionId } from "./lib/session.svelte.js";
 import {
   appendThinkingText,
   applyThinkingUsage,
@@ -343,12 +344,17 @@ async function ensureSession(): Promise<void> {
     }
     if (probeStatus === 200) {
       sessionId = stored;
+      // Shared reactive store: feature panels rebind on this change.
+      setSessionId(stored);
       return;
     }
     if (probeStatus === 404 || probeStatus === 410) {
-      lsDel(LS_SESSION);
+      // The stored session is gone: clear it in ONE place (store + durable
+      // localStorage mirror) so no panel rebinds onto the dead id.
+      setSessionId(null);
     } else {
       sessionId = stored;
+      setSessionId(stored);
       return;
     }
   }
@@ -362,7 +368,7 @@ async function ensureSession(): Promise<void> {
     return;
   }
   sessionId = body.sessionId;
-  lsSet(LS_SESSION, body.sessionId);
+  setSessionId(body.sessionId);
   rememberSession(body.sessionId);
 }
 
@@ -370,7 +376,7 @@ async function switchSession(id: string): Promise<void> {
   if (id === sessionId || sending || activeRunId !== null) return;
   closeStream();
   sessionId = id;
-  lsSet(LS_SESSION, id);
+  setSessionId(id);
   resetChatState();
   await bootSession();
 }
@@ -386,7 +392,7 @@ async function newSession(): Promise<void> {
   }
   closeStream();
   sessionId = body.sessionId;
-  lsSet(LS_SESSION, body.sessionId);
+  setSessionId(body.sessionId);
   rememberSession(body.sessionId);
   resetChatState();
   await bootSession();

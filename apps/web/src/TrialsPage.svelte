@@ -14,8 +14,10 @@
 // Every string renders via text interpolation only (no {@html}).
 import { fetchJson, postJson, randomUuid } from "./lib/api.js";
 import { type TrialProposalStatus, trialProposalModel } from "./lib/reducer.js";
-
-const LS_SESSION = "ch.sessionId";
+// Shared reactive session store (session-rebinding group): a direct deep-link
+// into /trials adopts or creates the session ON BOOT here (the chat shell is
+// not mounted on this route), and every session change rebinds the panel.
+import { ensureSession, getSessionId } from "./lib/session.svelte.js";
 
 interface TrialProposal {
   readonly id: string;
@@ -131,14 +133,6 @@ function trialOutcomeLines(
   return lines;
 }
 
-function readSession(): string | null {
-  try {
-    return localStorage.getItem(LS_SESSION);
-  } catch {
-    return null;
-  }
-}
-
 let proposals = $state<TrialProposal[]>([]);
 let statusText = $state("");
 let detailVisible = $state(false);
@@ -152,11 +146,11 @@ let seq = 0;
 
 /** Stale-response guard: only the latest generation may render. */
 function current(mine: number, sessionId: string | null): boolean {
-  return seq === mine && readSession() === sessionId;
+  return seq === mine && getSessionId() === sessionId;
 }
 
 async function refreshList(): Promise<void> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   if (sessionId === null) return;
   seq += 1;
   const mine = seq;
@@ -188,7 +182,7 @@ async function refreshList(): Promise<void> {
 }
 
 async function select(proposalId: string): Promise<void> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   if (sessionId === null) return;
   seq += 1;
   const mine = seq;
@@ -245,7 +239,7 @@ async function select(proposalId: string): Promise<void> {
 }
 
 async function approve(): Promise<void> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   const id = selected;
   if (sessionId === null || id === null || mutating) return;
   mutating = true;
@@ -269,7 +263,7 @@ async function approve(): Promise<void> {
 }
 
 async function expire(): Promise<void> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   const id = selected;
   if (sessionId === null || id === null || mutating) return;
   mutating = true;
@@ -291,9 +285,26 @@ async function expire(): Promise<void> {
   }
 }
 
-// Legacy boot: one refresh on mount (the panel is refreshed again after
-// every explicit decision).
+// Boot: adopt/create the session on a direct deep-link (finding: trials
+// mounted without a session-owning shell), then rebind reactively — every
+// session change (or a session becoming available) resets the detail and
+// refetches the list. No polling watcher: the store is reactive.
 $effect(() => {
+  const sessionId = getSessionId();
+  if (sessionId === null) {
+    void (async () => {
+      const id = await ensureSession();
+      if (id !== null && getSessionId() === id) await refreshList();
+    })();
+    return;
+  }
+  // Session switch: reset selection + detail, refetch for the new session.
+  selected = null;
+  detailVisible = false;
+  decisionVisible = false;
+  detailLines = [];
+  detailTitles = [];
+  seq += 1;
   void refreshList();
 });
 </script>

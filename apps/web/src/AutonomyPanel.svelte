@@ -29,8 +29,7 @@
 //   rows with bounded lossy-free paging (afterSeq cursor per target).
 // Every model string renders via text interpolation only (no {@html}).
 import { fetchJson, postJson, randomUuid } from "./lib/api.js";
-
-const LS_SESSION = "ch.sessionId";
+import { getSessionId } from "./lib/session.svelte.js";
 
 interface PurposeRow {
   readonly id: string;
@@ -71,14 +70,6 @@ interface PendingCommand {
   endpoint: string;
   key: string;
   body: unknown;
-}
-
-function readSession(): string | null {
-  try {
-    return localStorage.getItem(LS_SESSION);
-  } catch {
-    return null;
-  }
 }
 
 /** Legacy `retryRefreshesControl` (autonomy_state.ts). */
@@ -220,7 +211,7 @@ async function runAutonomyMutation(
   endpoint: string,
   body: unknown,
 ): Promise<{ status: number; body: unknown } | null> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   if (sessionId === null || mutating) return null;
   if (pendingAutonomy !== null) {
     notice("未確定の操作があります。同じ内容で再送してください");
@@ -263,7 +254,7 @@ async function runAutonomyMutation(
 /** Explicit same-key retry of the frozen pending command (no new key). */
 async function retryPendingAutonomy(): Promise<void> {
   const pending = pendingAutonomy;
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   if (
     pending === null ||
     sessionId === null ||
@@ -352,7 +343,7 @@ async function setControl(paused: boolean): Promise<void> {
 }
 
 async function refreshLists(): Promise<void> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   if (sessionId === null) return;
   // Session guard (UI4): a session switch clears selections + drafts.
   if (listedSession !== null && listedSession !== sessionId) {
@@ -496,7 +487,7 @@ function renderConflicts(result: { status: number; body: unknown }): void {
 }
 
 async function selectPurpose(id: string): Promise<void> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   if (sessionId === null) return;
   // Synchronous rebind BEFORE the first await: drafts + history paging
   // belong to the exact selected id/version.
@@ -530,7 +521,7 @@ async function selectPurpose(id: string): Promise<void> {
   if (
     seq !== purposeSelectSeq ||
     selectedPurpose !== id ||
-    readSession() !== sessionId
+    getSessionId() !== sessionId
   ) {
     return;
   }
@@ -585,7 +576,7 @@ async function selectPurpose(id: string): Promise<void> {
 }
 
 async function loadMorePurposeHistory(): Promise<void> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   const id = selectedPurpose;
   const cursor = purposeHistoryCursor;
   const seq = purposeSelectSeq;
@@ -609,7 +600,7 @@ async function loadMorePurposeHistory(): Promise<void> {
   if (
     seq !== purposeSelectSeq ||
     selectedPurpose !== id ||
-    readSession() !== sessionId ||
+    getSessionId() !== sessionId ||
     purposeHistoryTarget !== id ||
     purposeHistoryCursor !== cursor
   ) {
@@ -634,7 +625,7 @@ async function loadMorePurposeHistory(): Promise<void> {
 }
 
 async function selectTask(id: string): Promise<void> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   if (sessionId === null) return;
   const seq = ++taskSelectSeq;
   selectedTask = id;
@@ -665,7 +656,7 @@ async function selectTask(id: string): Promise<void> {
   if (
     seq !== taskSelectSeq ||
     selectedTask !== id ||
-    readSession() !== sessionId
+    getSessionId() !== sessionId
   ) {
     return;
   }
@@ -716,7 +707,7 @@ async function selectTask(id: string): Promise<void> {
 }
 
 async function loadMoreTaskHistory(): Promise<void> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   const id = selectedTask;
   const cursor = taskHistoryCursor;
   const seq = taskSelectSeq;
@@ -740,7 +731,7 @@ async function loadMoreTaskHistory(): Promise<void> {
   if (
     seq !== taskSelectSeq ||
     selectedTask !== id ||
-    readSession() !== sessionId ||
+    getSessionId() !== sessionId ||
     taskHistoryTarget !== id ||
     taskHistoryCursor !== cursor
   ) {
@@ -765,7 +756,7 @@ async function loadMoreTaskHistory(): Promise<void> {
 }
 
 async function createPurpose(): Promise<void> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   if (sessionId === null) return;
   const statement = purposeStatement.trim();
   const scope =
@@ -806,7 +797,7 @@ async function createPurpose(): Promise<void> {
 }
 
 async function correctPurpose(): Promise<void> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   const id = selectedPurpose;
   const selected = selectedPurposeView;
   if (sessionId === null || id === null || selected === null) {
@@ -876,7 +867,7 @@ async function correctPurpose(): Promise<void> {
 }
 
 async function transitionPurpose(op: "revoke" | "achieve"): Promise<void> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   const id = selectedPurpose;
   if (sessionId === null || id === null) return;
   const selected = selectedPurposeView;
@@ -903,7 +894,7 @@ async function transitionPurpose(op: "revoke" | "achieve"): Promise<void> {
 }
 
 async function markConflict(): Promise<void> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   const id = selectedPurpose;
   if (sessionId === null || id === null) {
     notice("競合にする目的を二つ選んでください");
@@ -942,7 +933,7 @@ async function markConflict(): Promise<void> {
 }
 
 async function createTask(): Promise<void> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   if (sessionId === null) return;
   const title = taskTitle.trim();
   if (title.length === 0) {
@@ -998,7 +989,7 @@ async function createTask(): Promise<void> {
 async function transitionTask(
   op: "start" | "complete" | "cancel",
 ): Promise<void> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   const id = selectedTask;
   if (sessionId === null || id === null) return;
   const view = selectedTaskView;
@@ -1025,7 +1016,7 @@ async function transitionTask(
 }
 
 async function holdTask(): Promise<void> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   const id = selectedTask;
   if (sessionId === null || id === null || mutating) return;
   const view = selectedTaskView;
@@ -1069,7 +1060,7 @@ async function holdTask(): Promise<void> {
 }
 
 async function resumeTask(): Promise<void> {
-  const sessionId = readSession();
+  const sessionId = getSessionId();
   const id = selectedTask;
   if (sessionId === null || id === null) return;
   const evidence = taskResumeInput.trim();
@@ -1131,8 +1122,31 @@ async function resumeTask(): Promise<void> {
   }
 }
 
-// Legacy boot: one control + lists refresh on mount.
+// Boot + session rebinding (shared reactive store): reading getSessionId()
+// inside this effect tracks the chat session, so the control + list refreshes
+// re-run when a session becomes available late (fresh /tasks before the chat
+// shell finishes booting) AND on every session switch. A switch resets the
+// previous session's selections, details, CAS versions, history cursors and
+// the frozen pending command, so stale rows/controls from the old session are
+// never shown while mutations target the newly selected one.
 $effect(() => {
+  getSessionId();
+  selectedPurpose = null;
+  selectedTask = null;
+  selectedPurposeView = null;
+  selectedTaskView = null;
+  purposeDetailVisible = false;
+  taskDetailVisible = false;
+  purposeDetailBody = "";
+  taskDetailBody = "";
+  purposeHistoryMoreVisible = false;
+  taskHistoryMoreVisible = false;
+  purposeVersions.clear();
+  taskVersions.clear();
+  purposeHistoryCursor = null;
+  taskHistoryCursor = null;
+  pendingAutonomy = null;
+  renderPending();
   void refreshControl();
   void refreshLists();
 });

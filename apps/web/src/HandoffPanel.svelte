@@ -299,6 +299,11 @@ async function refresh(): Promise<void> {
     retryHidden = true;
     eventsLines = [];
     attemptsLines = [];
+    // Sync-clear the create-form datalists too: the previous session's
+    // task/predecessor IDs must not survive the switch (finding: stale
+    // handoff task choices when no tasks remain).
+    taskOptions = [];
+    supersedesOptions = [];
     renderAll();
   }
   listedSession = sessionId;
@@ -406,7 +411,9 @@ async function fillTaskTitles(
   const items = Array.isArray(res.body.items)
     ? (res.body.items as unknown[])
     : [];
-  if (items.length === 0) return;
+  // A successful EMPTY response clears the options: after switching from a
+  // session with tasks to one with none, the datalist must not keep offering
+  // the previous session's task IDs (a cross-session submit would fail).
   const options: OptionRow[] = [];
   for (const entry of items) {
     if (!isRecord(entry)) continue;
@@ -938,6 +945,8 @@ $effect(() => {
       retryHidden = true;
       eventsLines = [];
       attemptsLines = [];
+      taskOptions = [];
+      supersedesOptions = [];
       renderAll();
       void refresh();
     }
