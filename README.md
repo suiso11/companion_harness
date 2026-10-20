@@ -1252,7 +1252,7 @@ LLM-provider-specific optimization
 Requirements:
 
 ```text
-Node.js 24.12.0
+Node.js 26.12.0
 pnpm 11.25.0
 ```
 
