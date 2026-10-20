@@ -241,6 +241,13 @@ async function runAutonomyMutation(
       notice("通信が不確定です。同じ内容で再送できます");
       return null;
     }
+    // status 0 = network-level failure surfaced as a value (api.ts): the
+    // outcome is unknown, so it is treated EXACTLY like the throw path above
+    // (uncertain; the frozen command survives with the same idempotency key).
+    if (result.status === 0) {
+      notice("通信が不確定です。同じ内容で再送できます");
+      return null;
+    }
     if (result.status >= 500) {
       notice("サーバーが不確定です。同じ内容で再送できます");
       return null;
@@ -271,6 +278,12 @@ async function retryPendingAutonomy(): Promise<void> {
     try {
       result = await postJson(pending.endpoint, pending.body, pending.key);
     } catch {
+      notice("通信が不確定です。同じ内容で再送できます");
+      return;
+    }
+    // status 0 = uncertain network loss (see runAutonomyMutation): keep the
+    // pending command + retry affordance, exactly like the throw path.
+    if (result.status === 0) {
       notice("通信が不確定です。同じ内容で再送できます");
       return;
     }
