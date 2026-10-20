@@ -31,6 +31,7 @@
 
 import { fetchJson, postJson, randomUuid } from "./lib/api.js";
 import { notifyAutonomyChanged } from "./lib/autonomy.svelte.js";
+import { revealHashTarget } from "./lib/router.js";
 import { getSessionId } from "./lib/session.svelte.js";
 
 interface PurposeRow {
@@ -384,6 +385,10 @@ async function refreshLists(): Promise<void> {
   renderPurposes(purposesResult);
   renderTasks(tasksResult);
   renderConflicts(conflicts);
+  // Deep-link reveal: /learning source links land on /tasks#<record id>;
+  // scroll/focus that row once both lists have rendered (retries until
+  // the data load finishes).
+  revealHashTarget();
 }
 
 function renderPurposes(result: { status: number; body: unknown }): void {
@@ -1247,7 +1252,7 @@ $effect(() => {
   </form>
   <ul id="autonomy-purpose-list">
     {#each purposes as purpose (purpose.id)}
-      <li>
+      <li id={purpose.id}>
         <button
           type="button"
           onclick={() => void selectPurpose(purpose.id)}
@@ -1384,7 +1389,7 @@ $effect(() => {
   </form>
   <ul id="autonomy-task-list">
     {#each tasks as task (task.id)}
-      <li>
+      <li id={task.id}>
         <button type="button" onclick={() => void selectTask(task.id)}>
           {task.title}（{task.kind}・{task.status}{task.deadline.length > 0
             ? `・期限 ${task.deadline}`

@@ -152,7 +152,7 @@ export const SOURCE_TEXT: Record<string, string> = {
   task_event: "作業履歴",
 };
 
-/** Existing section that owns the source row (read-only scroll target). */
+/** Existing section that owns the source row (legacy shell scroll target). */
 export const SOURCE_SECTION: Record<string, string> = {
   shadow_job: "shadow",
   conversation_proposal: "proposals",

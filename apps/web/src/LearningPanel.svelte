@@ -35,12 +35,12 @@ import {
   readEvidence,
   readHasMore,
   readItems,
-  SOURCE_SECTION,
   SOURCE_TEXT,
   STATUS_TEXT,
   textOf,
   UUID_RE,
 } from "./lib/learning_shared.js";
+import { navigateToHash, SOURCE_ROUTES } from "./lib/router.js";
 
 const LS_SESSION = "ch.sessionId";
 const SETTLED_EVENT = "ch:run-settled";
@@ -796,16 +796,13 @@ async function sendPendingOp(): Promise<void> {
 
 /** Read-only navigation to the owning section (scroll only). */
 function openSource(source: { kind: string; sourceId: string }): void {
-  const target = document.getElementById(
-    SOURCE_SECTION[source.kind] ?? "autonomy",
-  );
-  if (target !== null) {
-    try {
-      target.scrollIntoView();
-    } catch {
-      // Best effort: navigation never breaks the drawer.
-    }
-  }
+  // The /learning page mounts only ChatPage + LearningPanel, so the source
+  // rows never exist in this document: navigate to the owning feature route
+  // (full page load) with the record id as the hash; that page reveals the
+  // row once its list has loaded (router.revealHashTarget).
+  const route = SOURCE_ROUTES[source.kind];
+  if (route === undefined || source.sourceId === "") return;
+  navigateToHash(route, source.sourceId);
 }
 
 /** One-tap source reuse into the attach form (no UUID memorization). */

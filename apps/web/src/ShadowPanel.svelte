@@ -26,6 +26,7 @@
 
 import { fetchJson, postJson, randomUuid } from "./lib/api.js";
 import { readAutonomyVersion } from "./lib/autonomy.svelte.js";
+import { revealHashTarget } from "./lib/router.js";
 import {
   ACTION_KIND_TEXT,
   DECISION_TEXT,
@@ -120,6 +121,7 @@ async function refreshList(): Promise<void> {
   }
   const items = Array.isArray(result.body.items) ? result.body.items : [];
   jobs = items.filter(isJobItem);
+  revealHashTarget();
   if (jobs.length === 0) {
     setStatus("試行の記録はまだありません。");
   } else {
@@ -512,7 +514,7 @@ $effect(() => {
   </button>
   <ul id="shadow-job-list">
     {#each jobs as job (job.id)}
-      <li>
+      <li id={job.id}>
         <button
           type="button"
           data-job-id={job.id}
