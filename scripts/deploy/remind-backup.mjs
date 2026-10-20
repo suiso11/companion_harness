@@ -165,14 +165,38 @@ export async function backupDb({
     .toString(16)
     .slice(2, 10)}.sqlite`;
   const finalPath = join(outDir, finalName);
-  const partialPath = `${finalPath}.partial`;
   let renamed = false;
 
+  // Stage the copy inside a private temp dir and rename ONLY the final file
+  // out of it. SQLite sidecars (`-wal` / `-shm`) that node:sqlite leaves next
+  // to the staged copy then can never leak into the backup root (live bug
+  // 2026-10-20: `.partial-shm` / `.partial-wal` accumulated per backup), and
+  // failed runs are cleaned up wholesale.
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const tmpDir = mkdtempSync(join(outDir, ".tmp-"));
+  const partialPath = join(tmpDir, `${finalName}.partial`);
+
   const { DatabaseSync, backup } = await import("node:sqlite");
-  const source = new DatabaseSync(dbPath, { readOnly: true });
+  let source;
   try {
+    source = new DatabaseSync(dbPath, { readOnly: true });
     await backup(source, partialPath);
     secureFile(partialPath);
+    // Fold any WAL sidecars into the main DB file and switch it to
+    // journal_mode=DELETE so the staged copy is a single self-contained
+    // file (checkpoint first — renaming a hot-WAL DB would lose data).
+    if (existsSync(`${partialPath}-wal`) || existsSync(`${partialPath}-shm`)) {
+      const staged = new DatabaseSync(partialPath);
+      try {
+        staged.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+        staged.exec("PRAGMA journal_mode=DELETE");
+      } finally {
+        staged.close();
+      }
+    }
+    for (const sidecar of [`${partialPath}-wal`, `${partialPath}-shm`]) {
+      if (existsSync(sidecar)) unlinkSync(sidecar);
+    }
     if (!(await integrityOk(partialPath))) {
       throw new Error("remind backup failed: integrity_check");
     }
@@ -181,7 +205,7 @@ export async function backupDb({
     secureFile(finalPath);
   } finally {
     try {
-      source.close();
+      source?.close();
     } catch {
       // already closed
     }
@@ -191,6 +215,13 @@ export async function backupDb({
       } catch {
         // no partial to remove
       }
+    }
+    // Wholesale temp-dir cleanup: removes any sidecars left by a failed
+    // SQLite operation, on success and failure alike.
+    try {
+      rmSync(tmpDir, { recursive: true, force: true });
+    } catch {
+      // best-effort only
     }
   }
 

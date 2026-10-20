@@ -1600,14 +1600,35 @@ describe("system-scope ops notices (recordSystemNotice)", () => {
         now: T0 + 5000,
       });
       expect(replay.recorded).toBe(0);
-      expect(replay.deduped).toBe(2);
-      // A change in any payload component makes a NEW notice.
+      // source_id is the event key: one global dedup hit, not per-session.
+      expect(replay.deduped).toBe(1);
+      // A RETRY of the same event key (same source_id, even with changed
+      // payload text) must never duplicate: idempotent per event key.
       const changed = recordSystemNotice(
         handle.raw,
         { ...SPEC, body: "validation failed on stage 3" },
         { now: T0 + 6000 },
       );
-      expect(changed.recorded).toBe(2);
+      expect(changed.recorded).toBe(0);
+      expect(changed.deduped).toBe(1);
+      expect(
+        handle.raw
+          .prepare(
+            "SELECT COUNT(*) AS n FROM notifications WHERE scope = 'ops'",
+          )
+          .get() as { n: number },
+      ).toMatchObject({ n: 2 });
+      // A genuinely NEW event key (new source_id) records normally.
+      const next = recordSystemNotice(
+        handle.raw,
+        {
+          ...SPEC,
+          sourceId: "ops:deploy:def67890",
+          fingerprintSubject: "deploy-run-43",
+        },
+        { now: T0 + 7000 },
+      );
+      expect(next.recorded).toBe(2);
       expect(
         handle.raw
           .prepare(
