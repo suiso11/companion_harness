@@ -699,9 +699,9 @@ describe("autonomy HTTP", () => {
     const { logger } = createCollectingLogger("debug");
     const engine = new RunEngine({ db: handle.raw, repo, cancelGraceMs: 30 });
     // Memory-only bootstrap shape: no shadowWake, but the control hook
-    // (memory notifyControl) IS provided — the P1 review fault was that
-    // bootstrap omitted the whole spread without a worker, so an
-    // explicit resume could never reopen the memory gate.
+    // (the worker notifyControl) IS provided so a committed control
+    // change always reaches whatever worker is wired (the memory service
+    // is deliberately independent of the pause per I03-09).
     let notified = 0;
     const created = createApp({
       config,

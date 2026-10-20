@@ -370,9 +370,10 @@ describe("live memory HTTP regression (real server + real remind CLI)", () => {
       const base = `http://127.0.0.1:${started.port}`;
       expect(started.port).toBeGreaterThan(0);
 
-      // STOP semantics: a fresh restart starts paused with background
-      // admission closed. This cultivation regression needs background
-      // extraction/distill, so resume explicitly via AUTH control.
+      // A fresh restart starts with the persisted paused control (kernel
+      // fence); memory admission itself stays open (I03-09). This
+      // cultivation regression only needs an unpaused KERNEL for realistic
+      // foreground behavior, so resume explicitly via AUTH control.
       const controlRes = await fetch(`${base}/api/autonomy/control`, {
         headers: { host: "127.0.0.1" },
       });

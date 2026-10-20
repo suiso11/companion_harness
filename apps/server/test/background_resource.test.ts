@@ -615,7 +615,7 @@ describe("background contention across actual callsites", () => {
     }
   });
 
-  it("STOP closes admission and aborts extraction; resume reopens honestly", async () => {
+  it("I03-09: paused autonomy keeps memory admission open; a paused turn still cultivates", async () => {
     const memory = await openRepo();
     try {
       const gate = createBackgroundResourceGate();
@@ -631,18 +631,51 @@ describe("background contention across actual callsites", () => {
         background: gate,
       });
       memoryService.start();
+      // Committed autonomy pause: memory admission stays OPEN (memory
+      // writes and cultivation are autonomous, no-approval work).
       pauseControl(memory.repo);
-      memoryService.notifyControl();
+      expect(gate.closed).toBe(false);
+      // A completion while paused cultivates normally: extraction runs,
+      // and the durable write pipeline (append -> remember) progresses.
+      const run = completeV2Run(memory.repo);
+      memoryService.onRunCompleted(run.runId);
+      await waitFor(() => ops.includes("event.append"));
+      // The remember fan-out lands after the event ack (same stable-key
+      // chain); one more bounded drain tick executes it — still paused.
+      await memoryService.drainOnce();
+      expect(ops.includes("record.remember")).toBe(true);
+    } finally {
+      memory.close();
+    }
+  });
+
+  it("shutdown closes admission and extraction skips; reopen admits honestly", async () => {
+    const memory = await openRepo();
+    try {
+      const gate = createBackgroundResourceGate();
+      const contention = makeContentionGateway();
+      contention.state.parkExtract = false;
+      const ops: string[] = [];
+      const cliCall: CliCall = async (_address, op) => {
+        ops.push(op);
+        return okEnvelope(null);
+      };
+      const memoryService = makeMemoryService(memory.repo, cliCall, {
+        gateway: contention.gateway,
+        background: gate,
+      });
+      memoryService.start();
+      // Shutdown closes the gate: a completion while closed skips
+      // extraction with no write and no claim on the gate — the durable
+      // anchor remains for later idle work.
+      gate.close();
       expect(gate.closed).toBe(true);
-      // A completion while STOPped skips extraction with no write and no
-      // claim on the gate — the durable anchor remains for later idle work.
       const run = completeV2Run(memory.repo);
       memoryService.onRunCompleted(run.runId);
       await sleep(300);
       expect(memory.repo.countPendingMemoryJobs(Date.now())).toBe(0);
-      // Resume reopens: a new completion cultivates normally again.
-      unpauseControl(memory.repo);
-      memoryService.notifyControl();
+      // Reopen: a new completion cultivates normally again.
+      gate.reopen();
       expect(gate.closed).toBe(false);
       const run2 = completeV2Run(memory.repo);
       memoryService.onRunCompleted(run2.runId);
@@ -776,7 +809,7 @@ describe("P1 review fixes: automatic-distill admission boundary", () => {
     return row.id;
   }
 
-  it("BEFORE (reported fault): STOP while a distill CLI child is parked must abort it and keep it durable", async () => {
+  it("BEFORE (reported fault): shutdown while a distill CLI child is parked must abort it and keep it durable", async () => {
     const memory = await openRepo();
     try {
       const gate = createBackgroundResourceGate();
@@ -796,11 +829,10 @@ describe("P1 review fixes: automatic-distill admission boundary", () => {
       const distillId = enqueueDistill(memory.repo);
       const tick = memoryService.drainOnce();
       await waitFor(() => parking.calls.includes("maintain.distill"));
-      // STOP with no other chat anywhere: aborts the background-owned CLI
-      // child (not the whole tick) and closes admission.
-      pauseControl(memory.repo);
-      memoryService.notifyControl();
-      expect(gate.closed).toBe(true);
+      // Shutdown with no other chat anywhere: aborts the background-owned
+      // CLI child (not the whole tick) and closes admission.
+      gate.close();
+      await memoryService.stop();
       await tick;
       const distill = memory.repo.getMemoryJob(distillId);
       // Durable pending (existing preempted path), never acked, never failed.
@@ -810,7 +842,7 @@ describe("P1 review fixes: automatic-distill admission boundary", () => {
     }
   });
 
-  it("AFTER: explicit work drains while STOP-closed; distill skips untouched (no attempt poisoning, no head-of-line)", async () => {
+  it("AFTER: explicit work drains while shutdown-closed; distill skips untouched (no attempt poisoning, no head-of-line)", async () => {
     const memory = await openRepo();
     try {
       const gate = createBackgroundResourceGate();
@@ -829,9 +861,8 @@ describe("P1 review fixes: automatic-distill admission boundary", () => {
       );
       const distillId = enqueueDistill(memory.repo);
       const retireId = enqueueRetire(memory.repo);
-      // STOP BEFORE the drain: the whole tick used to strand everything.
-      pauseControl(memory.repo);
-      memoryService.notifyControl();
+      // Shutdown BEFORE the drain: the whole tick used to strand everything.
+      gate.close();
       expect(gate.closed).toBe(true);
       const out = await memoryService.drainOnce();
       // The explicit retire executed in the SAME tick the distill skipped.
@@ -843,9 +874,8 @@ describe("P1 review fixes: automatic-distill admission boundary", () => {
       const distill = memory.repo.getMemoryJob(distillId);
       expect(distill?.status).toBe("pending");
       expect(distill?.attempts).toBe(0);
-      // Resume reopens: the SAME distill id drains normally (no duplicate).
-      unpauseControl(memory.repo);
-      memoryService.notifyControl();
+      // Reopen: the SAME distill id drains normally (no duplicate).
+      gate.reopen();
       expect(gate.closed).toBe(false);
       await memoryService.drainOnce();
       expect(memory.repo.getMemoryJob(distillId)?.status).toBe("acked");
@@ -960,11 +990,10 @@ describe("P1 review fixes: automatic-distill admission boundary", () => {
       });
       const { sessionId, runId } = completeV2Run(memory.repo);
       memoryService.start();
-      // STOP with no completion/chat in flight: closes admission.
-      pauseControl(memory.repo);
-      memoryService.notifyControl();
+      // Shutdown with no completion/chat in flight: closes admission.
+      gate.close();
       expect(gate.closed).toBe(true);
-      // Explicit user-authorized staging still works while STOPped.
+      // Explicit user-authorized staging still works while shutdown-closed.
       const search = await memoryService.searchMemories({
         sessionId,
         runId,
@@ -1031,8 +1060,7 @@ describe("P1 review fixes: automatic-distill admission boundary", () => {
         enqueueRetire(memory.repo),
         enqueueRetire(memory.repo),
       ];
-      pauseControl(memory.repo);
-      memoryService.notifyControl();
+      gate.close();
       expect(gate.closed).toBe(true);
       const out = (await Promise.race([
         memoryService.drainOnce(),
@@ -1050,6 +1078,37 @@ describe("P1 review fixes: automatic-distill admission boundary", () => {
       expect(distill?.status).toBe("pending");
       expect(distill?.attempts).toBe(0);
       expect(parking.calls).not.toContain("maintain.distill");
+    } finally {
+      memory.close();
+    }
+  });
+
+  it("I03-09: idle distill runs while autonomy is paused (gate stays open)", async () => {
+    const memory = await openRepo();
+    try {
+      const gate = createBackgroundResourceGate();
+      const parking = {
+        parked: false,
+        calls: [] as string[],
+        releases: [] as Array<() => void>,
+      };
+      const memoryService = makeMemoryService(
+        memory.repo,
+        parkingCli(parking),
+        {
+          idleMs: 300_000,
+          background: gate,
+        },
+      );
+      // Committed pause FIRST: cultivation is autonomous no-approval work
+      // and must not be gated by it.
+      pauseControl(memory.repo);
+      expect(gate.closed).toBe(false);
+      const distillId = enqueueDistill(memory.repo);
+      const out = await memoryService.drainOnce();
+      expect(out.executed).toBe(1);
+      expect(parking.calls).toEqual(["maintain.distill"]);
+      expect(memory.repo.getMemoryJob(distillId)?.status).toBe("acked");
     } finally {
       memory.close();
     }

@@ -1366,23 +1366,15 @@ export async function startServer(
       }
     }
 
-    // Gate admission starts from the ACTUAL persisted control state AFTER
-    // the fence above (never optimistically open): a fence-paused control
-    // (or an already-paused one) closes admission BEFORE any service starts,
-    // so a fresh restart's first ordinary chat cannot launch background
-    // extraction until an explicit current-version resume reopens it.
-    // Ordinary foreground chat and explicit memory management stay
-    // available while paused; they never consult this gate.
-    try {
-      const persisted = handle.raw
-        .prepare("SELECT paused FROM autonomy_control WHERE id = 'global'")
-        .get() as { paused: number } | undefined;
-      if (persisted === undefined || persisted.paused === 1) {
-        backgroundResource.close();
-      }
-    } catch {
-      backgroundResource.close();
-    }
+    // Autonomy pause deliberately does NOT close background admission
+    // (I03-09): memory writes (`event.append`, `record.remember`,
+    // feedback) and cultivation (idle `maintain.distill`) are autonomous,
+    // no-approval work that keeps running while autonomy is PAUSED — the
+    // pause gates only autonomous work (tasks/shadow/proposals). Shadow
+    // admissions stay fenced by the kernel itself (`claimShadowJob`
+    // refuses claims while paused; a pause holds every pending job with
+    // `control_paused`). The shared gate's `closed` flag is owned by
+    // shutdown only.
 
     // Bound-roots guard: removing every Markdown root while a Markdown
     // connector instance remains bound must fail closed before the engine
@@ -2790,7 +2782,6 @@ export async function startServer(
       };
     }
 
-    const activeMemoryControl = memory;
     // Slice (b) remote session wiring (enabled only): the SHA-256 token
     // store lives in the migrated kernel DB (table `remote_sessions`,
     // migration 0023 — tokens themselves are never stored); the verifier
@@ -2859,23 +2850,15 @@ export async function startServer(
       // replayed old resume): the worker reads the ACTUAL control
       // state and aborts its OWN in-flight call when paused, so a
       // pure STOP aborts model/recall work with no foreground chat.
-      // The memory service is notified on the same hook: STOP aborts
-      // its OWN parked extraction call and closes shared background
-      // admission (resume reopens it). Both reads are live-state and
-      // never throw into the committed command. Wired independently
-      // of shadow creation so a memory-only server (no model gateway,
-      // no worker) still reopens admission on an explicit resume —
-      // otherwise every automatic distill stays skipped forever.
-      ...(activeShadowWake !== null || activeMemoryControl !== null
+      // The memory service is deliberately NOT hooked here (I03-09):
+      // memory writes and cultivation keep running while paused — the
+      // shared background gate is closed by shutdown only. The worker's
+      // read is live-state and never throws into the committed command.
+      ...(activeShadowWake !== null
         ? {
             shadowControlChanged: (): void => {
               try {
                 activeShadowWake?.notifyControl();
-              } catch {
-                // Best effort: notify never throws into the caller.
-              }
-              try {
-                activeMemoryControl?.notifyControl();
               } catch {
                 // Best effort: notify never throws into the caller.
               }
