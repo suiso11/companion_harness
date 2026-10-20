@@ -152,37 +152,82 @@ describe("resolveSmokeScope", () => {
 });
 
 describe("isOkEnvelope", () => {
-  it("accepts a well-formed ok:true envelope", () => {
+  const goodEnvelope = JSON.stringify({
+    v: 1,
+    ok: true,
+    code: "OK",
+    message: "ok",
+    data: { records: [] },
+    deduplicated: false,
+  });
+
+  it("accepts a well-formed ok:true envelope framed as one LF line", () => {
+    expect(isOkEnvelope(`${goodEnvelope}\n`)).toBe(true);
+  });
+
+  it("rejects missing LF framing, extra lines, and empty output", () => {
+    expect(isOkEnvelope(goodEnvelope)).toBe(false);
+    expect(isOkEnvelope(`${goodEnvelope}\n\n`)).toBe(false);
+    expect(isOkEnvelope(`${goodEnvelope}\n{"v":1}\n`)).toBe(false);
+    expect(isOkEnvelope("")).toBe(false);
+  });
+
+  it("rejects unknown keys and missing envelope keys", () => {
     expect(
       isOkEnvelope(
-        JSON.stringify({
+        `${JSON.stringify({
           v: 1,
           ok: true,
           code: "OK",
           message: "ok",
-          data: { records: [] },
+          data: {},
           deduplicated: false,
-        }),
-      ),
-    ).toBe(true);
-  });
-
-  it("rejects domain failures, wrong versions, and non-JSON", () => {
-    expect(
-      isOkEnvelope(
-        JSON.stringify({
-          v: 1,
-          ok: false,
-          code: "FORBIDDEN_SCOPE",
-          message: "forbidden scope",
-          data: null,
-          deduplicated: false,
-        }),
+          extra: 1,
+        })}\n`,
       ),
     ).toBe(false);
-    expect(isOkEnvelope('{"v":2,"ok":true,"code":"OK"}')).toBe(false);
-    expect(isOkEnvelope('{"v":1,"ok":true,"code":"BAD_REQUEST"}')).toBe(false);
-    expect(isOkEnvelope("not json")).toBe(false);
-    expect(isOkEnvelope("")).toBe(false);
+    expect(isOkEnvelope('{"v":1,"ok":true,"code":"OK"}\n')).toBe(false);
+    expect(
+      isOkEnvelope(
+        `${JSON.stringify({
+          v: 1,
+          ok: true,
+          code: "OK",
+          message: "ok",
+          data: {},
+          deduplicated: false,
+        }).slice(0, -1)}\n`,
+      ),
+    ).toBe(false);
+  });
+
+  it("rejects wrong types and out-of-set codes", () => {
+    expect(isOkEnvelope('{"v":2,"ok":true,"code":"OK"}\n')).toBe(false);
+    expect(isOkEnvelope('{"v":1,"ok":true,"code":"BAD_REQUEST"}\n')).toBe(false);
+    expect(isOkEnvelope('{"v":1,"ok":"true","code":"OK"}\n')).toBe(false);
+    expect(
+      isOkEnvelope(
+        '{"v":1,"ok":true,"code":"OK","message":3,"data":{},"deduplicated":false}\n',
+      ),
+    ).toBe(false);
+    expect(
+      isOkEnvelope(
+        '{"v":1,"ok":true,"code":"OK","message":"ok","data":{},"deduplicated":"false"}\n',
+      ),
+    ).toBe(false);
+    expect(
+      isOkEnvelope(
+        '{"v":1,"ok":true,"code":"OK","message":"ok","data":[1],"deduplicated":false}\n',
+      ),
+    ).toBe(false);
+  });
+
+  it("rejects domain failures and non-JSON", () => {
+    expect(
+      isOkEnvelope(
+        '{"v":1,"ok":false,"code":"FORBIDDEN_SCOPE","message":"forbidden scope","data":null,"deduplicated":false}\n',
+      ),
+    ).toBe(false);
+    expect(isOkEnvelope("not json\n")).toBe(false);
   });
 });

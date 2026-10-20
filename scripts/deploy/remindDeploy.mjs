@@ -87,15 +87,108 @@ export function resolveSmokeTarget({
   };
 }
 
-/** True only for a well-formed ok:true remind response envelope. */
+// Strict smoke validation, mirroring the production client rules in
+// apps/server/src/memory_cli.ts (parseMemoryCliStdout): exactly one
+// LF-terminated line framed on raw bytes, a plain object with exactly the
+// envelope keys, a closed code set, v===1, boolean ok/message/deduplicated,
+// data object|null.
+
+const MEMORY_CLI_ENVELOPE_MAX_BYTES = 65536;
+
+const CLI_ENVELOPE_CODES = new Set([
+  "OK",
+  "BAD_REQUEST",
+  "NOT_FOUND",
+  "CONFLICT",
+  "FORBIDDEN_SCOPE",
+  "STORE_UNAVAILABLE",
+  "LIMIT_EXCEEDED",
+  "TIMEOUT",
+]);
+
+const ENVELOPE_KEYS = new Set([
+  "v",
+  "ok",
+  "code",
+  "message",
+  "data",
+  "deduplicated",
+]);
+
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * Byte-level framing validation, a text replica of the framing half of
+ * parseMemoryCliStdout: exactly one trailing LF byte, no other LF byte in
+ * the body, no NUL bytes, within maxBytes. Returns null when malformed,
+ * else the decoded line (without its trailing LF).
+ */
+export function parseCliStdoutFrame(
+  raw,
+  maxBytes = MEMORY_CLI_ENVELOPE_MAX_BYTES,
+) {
+  const buf =
+    typeof raw === "string" ? Buffer.from(raw, "utf8") : Buffer.from(raw ?? "");
+  if (buf.length === 0 || buf.length > maxBytes) {
+    return null;
+  }
+  if (buf[buf.length - 1] !== 0x0a || buf.indexOf(0x0a) !== buf.length - 1) {
+    return null;
+  }
+  if (buf.includes(0)) {
+    return null;
+  }
+  const body = buf.subarray(0, buf.length - 1);
+  let text;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(body);
+  } catch {
+    return null;
+  }
+  return text.length === 0 ? null : text;
+}
+
+/** True only for a well-formed ok:true remind response envelope:
+ * exactly one LF-terminated line; JSON object with exactly the keys
+ * {v,ok,code,message,data,deduplicated}; v===1; ok===true; code in the
+ * closed envelope set (success smoke => OK); string message; boolean
+ * deduplicated; data null or a plain object. Mirrors the production client
+ * (apps/server/src/memory_cli.ts) so a candidate that passes this smoke can
+ * never be rejected as cli_malformed by Companion.
+ */
 export function isOkEnvelope(raw) {
+  const text = parseCliStdoutFrame(raw);
+  if (text === null) {
+    return false;
+  }
   let parsed;
   try {
-    parsed = JSON.parse(raw);
+    parsed = JSON.parse(text);
   } catch {
     return false;
   }
-  return parsed?.v === 1 && parsed?.ok === true && parsed?.code === "OK";
+  if (!isPlainObject(parsed)) {
+    return false;
+  }
+  for (const key of Object.keys(parsed)) {
+    if (!ENVELOPE_KEYS.has(key)) {
+      return false;
+    }
+  }
+  if (
+    parsed.v !== 1 ||
+    typeof parsed.ok !== "boolean" ||
+    typeof parsed.code !== "string" ||
+    !CLI_ENVELOPE_CODES.has(parsed.code) ||
+    typeof parsed.message !== "string" ||
+    typeof parsed.deduplicated !== "boolean" ||
+    (parsed.data !== null && !isPlainObject(parsed.data))
+  ) {
+    return false;
+  }
+  return parsed.ok === true;
 }
 
 function parseArgs(argv) {
