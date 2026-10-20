@@ -29,15 +29,21 @@ STATE_SCRIPT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/opsNotifyState.mjs"
 
 notify_skip_persisted() {
   # One info notice per target per hour window while the skip persists.
+  # The reason (e.g. the not-green check list) is bounded to 200 code
+  # points so the body stays within the notify CLI's 300-cp limit even when
+  # many checks are pending/failed, and the hour window is part of the
+  # fingerprint subject so each window gets its own notice.
   target="$1"
   reason="$2"
+  reason="$(node -e 'process.stdout.write(Array.from(process.argv[1] ?? "").slice(0, 200).join(""))' "$reason" 2>/dev/null || printf '%s' "$reason")"
   if [ "$(node "$STATE_SCRIPT" skip "$target" 2>/dev/null || true)" = "notify" ]; then
     short="$(git rev-parse --short "$target" 2>/dev/null || echo "$target")"
+    hour="$(date -u '+%Y%m%dT%H')"
     "$NOTIFY_SCRIPT" info \
       "デプロイスキップ継続" \
       "target ${short} has been skipped for over 1h (${reason})" \
       "ops:deploy-skip:${short}" \
-      "deploy-skip:${target}"
+      "deploy-skip:${target}:${hour}"
   fi
 }
 

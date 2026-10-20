@@ -2,6 +2,9 @@
 // filesystem, no secrets. Covers deploy-skip hourly dedupe per target and
 // health problem-key error/recovered transitions.
 
+import { rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   clearSkipState,
@@ -103,18 +106,27 @@ describe("nextHealthState", () => {
 
 describe("runCli", () => {
   it("maps skip/health commands to verdicts with a temp state file", () => {
-    const env = { XDG_STATE_HOME: "/tmp/opencode/ops-notify-state-test" };
+    const stateDir = join(tmpdir(), "ops-notify-state-test");
+    rmSync(join(stateDir, "companion"), { recursive: true, force: true });
+    const env = { XDG_STATE_HOME: stateDir };
     const t = 1_000_000;
     expect(runCli(["skip", "deadbee1"], env, t)).toBe("silent");
     expect(runCli(["skip", "deadbee1"], env, t + SKIP_WINDOW_MS + 1)).toBe(
       "notify",
     );
     expect(runCli(["skip-clear", "deadbee1"], env, t)).toBe("ok");
-    expect(runCli(["health", "liveness", "failing"], env, t)).toBe("error");
+    expect(runCli(["health", "liveness", "failing"], env, t)).toBe(
+      `error ${t}`,
+    );
     expect(runCli(["health", "liveness", "failing"], env, t + 1)).toBe(
       "silent",
     );
     expect(runCli(["health", "liveness", "ok"], env, t + 2)).toBe("recovered");
+    // A re-occurrence in a NEW episode starts a new episode id, so callers
+    // can scope their fingerprint and the kernel will not dedup it away.
+    expect(runCli(["health", "liveness", "failing"], env, t + 3)).toBe(
+      `error ${t + 3}`,
+    );
     expect(runCli([], env, t)).toBe("usage");
   });
 });

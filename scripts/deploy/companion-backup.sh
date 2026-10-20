@@ -35,11 +35,13 @@ log() {
 notify_fail() {
   label="$1"
   detail="$2"
+  # The run timestamp scopes the fingerprint so a later failing episode for
+  # the same label is not kernel-deduped against the first one forever.
   "$SCRIPT_DIR/notify.sh" error \
     "バックアップ失敗" \
     "$detail" \
     "ops:backup-fail:$label" \
-    "backup-fail:$label"
+    "backup-fail:$label:$(date -u '+%Y%m%dT%H%M%SZ')"
 }
 
 fail() {

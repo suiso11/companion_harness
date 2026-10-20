@@ -89,15 +89,21 @@ state_write() { # target phase prev
 # Best-effort in-app notices (never fails the deploy script).
 notify_skip_persisted() {
   # One info notice per target per hour window while the skip persists.
+  # The reason (e.g. the not-green check list) is bounded to 200 code
+  # points so the body stays within the notify CLI's 300-cp limit even when
+  # many checks are pending/failed, and the hour window is part of the
+  # fingerprint subject so each window gets its own notice.
   target="$1"
   reason="$2"
+  reason="$(node -e 'process.stdout.write(Array.from(process.argv[1] ?? "").slice(0, 200).join(""))' "$reason" 2>/dev/null || printf '%s' "$reason")"
   if [ "$(node "$STATE_SCRIPT" skip "$target" 2>/dev/null || true)" = "notify" ]; then
     short="$(git rev-parse --short "$target" 2>/dev/null || echo "$target")"
+    hour="$(date -u '+%Y%m%dT%H')"
     "$NOTIFY_SCRIPT" info \
       "remind デプロイスキップ継続" \
       "target ${short} has been skipped for over 1h (${reason})" \
       "ops:remind-deploy-skip:${short}" \
-      "remind-deploy-skip:${target}"
+      "remind-deploy-skip:${target}:${hour}"
   fi
 }
 
@@ -121,25 +127,49 @@ notify_rollback() {
   target="$1"
   reason="$2"
   short="$(git rev-parse --short "$target" 2>/dev/null || echo "$target")"
+  hour="$(date -u '+%Y%m%dT%H')"
   "$NOTIFY_SCRIPT" error \
     "remind デプロイ失敗（ロールバック）" \
     "remind deploy of ${short} failed (${reason}); rolled back to previous release" \
     "ops:remind-deploy-fail:${short}" \
-    "remind-deploy-rollback:${target}"
+    "remind-deploy-rollback:${target}:${hour}"
+}
+
+# Failure notice when no rollback was possible (first deploy / missing prev
+# release) or the restoration itself failed. Includes the run hour in the
+# fingerprint subject so recurring episodes are not kernel-deduped forever.
+notify_rollback_failed() {
+  target="$1"
+  reason="$2"
+  short="$(git rev-parse --short "$target" 2>/dev/null || echo "$target")"
+  hour="$(date -u '+%Y%m%dT%H')"
+  "$NOTIFY_SCRIPT" error \
+    "remind デプロイ失敗（ロールバック不可）" \
+    "remind deploy of ${short} failed (${reason}); no rollback performed" \
+    "ops:remind-deploy-fail:${short}" \
+    "remind-deploy-fail:${target}:${hour}"
 }
 
 # Restore the recorded previous release as the serving one (only possible
-# once that release exists; otherwise the symlink is left untouched).
+# once that release exists; otherwise the symlink is left untouched). The
+# rollback notice is emitted only AFTER the restoration actually happened;
+# a failure to restore (or no previous release) reports a distinct message.
 rollback() { # [reason]
-  notify_rollback "$TARGET" "${1:-deploy failed}"
+  reason="${1:-deploy failed}"
   if [ -n "$PREV" ] && [ -d "$RELEASES_DIR/$PREV" ] &&
     [ -f "$RELEASES_DIR/$PREV/dist/src/cli.js" ]; then
     log "rolling back to release $PREV"
-    ln -sfn "$RELEASES_DIR/$PREV" "$CURRENT_LINK.tmp.$$"
-    mv -Tf "$CURRENT_LINK.tmp.$$" "$CURRENT_LINK"
-    state_write "$PREV" ok ""
+    if ln -sfn "$RELEASES_DIR/$PREV" "$CURRENT_LINK.tmp.$$" &&
+      mv -Tf "$CURRENT_LINK.tmp.$$" "$CURRENT_LINK"; then
+      state_write "$PREV" ok ""
+      notify_rollback "$TARGET" "$reason"
+    else
+      log "rollback to release $PREV failed; $CURRENT_LINK unchanged"
+      notify_rollback_failed "$TARGET" "rollback to previous release failed"
+    fi
   else
     log "no previous verified release to roll back to; $CURRENT_LINK unchanged"
+    notify_rollback_failed "$TARGET" "$reason"
   fi
 }
 
@@ -154,8 +184,10 @@ if [ ! -d "$DEPLOY_DIR/.git" ] && [ ! -f "$DEPLOY_DIR/.git" ]; then
   log "deploy dir $DEPLOY_DIR is not a git checkout; refusing"
   exit 1
 fi
-cd "$DEPLOY_DIR"
+# Resolve the script directory BEFORE cd-ing into the remind checkout: $0
+# can be relative to the caller's cwd (documented manual-run flow).
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+cd "$DEPLOY_DIR"
 
 NOTIFY_SCRIPT="$SCRIPT_DIR/notify.sh"
 STATE_SCRIPT="$SCRIPT_DIR/opsNotifyState.mjs"
@@ -182,7 +214,7 @@ CUR_RESOLVED="$(readlink "$CURRENT_LINK" 2>/dev/null || true)"
 # below re-runs instead of permanently trusting a half-updated tree.
 if [ "$PREV_PHASE" = "ok" ] && [ "$PREV_TARGET" = "$TARGET" ] &&
   [ "$CUR_RESOLVED" = "$RELEASE" ] &&
-  [ -f "$RELEASE/dist/src/cli.js" ] && [ -x "$RELEASE/dist/src/cli.js" ]; then
+  [ -f "$RELEASE/dist/src/cli.js" ]; then
   log "$CURRENT_LINK already serves verified $TARGET; nothing to do"
   exit 0
 fi

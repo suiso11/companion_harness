@@ -121,7 +121,11 @@ export function runCli(argv, env = process.env, now = Date.now()) {
       now,
     );
     saveState(path, state);
-    return level ?? "silent";
+    // "error" is followed by the episode's start timestamp (state.keys[key],
+    // set when the episode began) so the caller can scope its fingerprint to
+    // this episode — otherwise the kernel's UNIQUE(session_id, fingerprint)
+    // dedup would swallow every re-occurrence of the same problem forever.
+    return level === "error" ? `error ${state.keys[key]}` : (level ?? "silent");
   }
   return "usage";
 }

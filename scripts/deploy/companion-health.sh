@@ -38,6 +38,7 @@ report() {
 # One error per distinct problem key while it persists; one info notice
 # ("recovered") when a key clears. Dedupe state lives in
 # ~/.local/state/companion/health-notify.json.
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 NOTIFY_SCRIPT="$SCRIPT_DIR/notify.sh"
 STATE_SCRIPT="$SCRIPT_DIR/opsNotifyState.mjs"
 
@@ -45,11 +46,17 @@ report_problem() {
   key="$1"
   shift
   report "$*"
+  # "error <episodeStartMs>" — the episode id scopes the fingerprint subject
+  # so a re-occurrence after recovery is a fresh notice, not a dedup hit.
   verdict="$(node "$STATE_SCRIPT" health "$key" failing 2>/dev/null || true)"
-  if [ "$verdict" = "error" ]; then
-    "$NOTIFY_SCRIPT" error "ヘルスチェック失敗: $key" "$*" \
-      "ops:health-fail:$key" "health:$key"
-  fi
+  case "$verdict" in
+    error*)
+      episode="${verdict#error}"
+      episode="${episode# }"
+      "$NOTIFY_SCRIPT" error "ヘルスチェック失敗: $key" "$*" \
+        "ops:health-fail:$key" "health:$key:$episode"
+      ;;
+  esac
 }
 
 report_recovered() {
@@ -72,6 +79,9 @@ fi
 
 # --- failed units ---
 if command -v systemctl >/dev/null 2>&1; then
+  # A previously recorded systemctl-missing failure must clear its key (and
+  # emit the recovery notice) once systemctl is usable again.
+  report_recovered systemctl
   for unit in companion.service companion-deploy.service companion-backup.service; do
     if systemctl --user is-failed --quiet "$unit" >/dev/null 2>&1; then
       report_problem "unit:$unit" "unit failed: $unit"
