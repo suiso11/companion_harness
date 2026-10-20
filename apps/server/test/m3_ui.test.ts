@@ -46,6 +46,7 @@ async function makeApp(assets?: {
   clientCss?: string;
   svelteJs?: string;
   svelteCss?: string;
+  svelteChunks?: Record<string, string>;
 }): Promise<Fixture> {
   const handle = openKernelDatabase(":memory:");
   await migrateKernelDatabase({ db: handle.raw });
@@ -169,6 +170,39 @@ describe("M3 SSR shell + CSP + assets", () => {
       expect(missingSvelte.status).toBe(404);
     } finally {
       bare.close();
+    }
+  });
+
+  it("serves /assets/client.css even when a dynamic chunk route is registered (no shadowing 404)", async () => {
+    const built = await makeApp({
+      clientCss: "body{}",
+      svelteChunks: { "svelte-app-FeaturePage.js": "console.log(3)" },
+    });
+    try {
+      // The dynamic `/assets/:chunk` route must not shadow the fixed-name
+      // stylesheet (used by the legacy shell AND the remote login form).
+      const css = await built.app.request("/assets/client.css", {
+        headers: headers(),
+      });
+      expect(css.status).toBe(200);
+      expect(css.headers.get("content-type")).toContain("css");
+      expect(await css.text()).toBe("body{}");
+      // Unknown names still 404 through the chunk route (no catch-all).
+      const unknown = await built.app.request("/assets/login.css", {
+        headers: headers(),
+      });
+      expect(unknown.status).toBe(404);
+      // Known chunk names still serve.
+      const chunk = await built.app.request(
+        "/assets/svelte-app-FeaturePage.js",
+        {
+          headers: headers(),
+        },
+      );
+      expect(chunk.status).toBe(200);
+      expect(await chunk.text()).toBe("console.log(3)");
+    } finally {
+      built.close();
     }
   });
 });

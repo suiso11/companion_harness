@@ -2329,6 +2329,22 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     return c.body(assets.svelteCss, 200);
   });
 
+  // The shared stylesheet (used by the legacy shell AND the remote login
+  // form) is a fixed name, so it MUST be registered before the dynamic
+  // `/assets/:chunk` route below — otherwise the param route shadows it and
+  // fails its `svelte-app-*.js` name check with a 404.
+  app.get("/assets/client.css", (c) => {
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    if (assets.clientCss === undefined) {
+      return apiError(c, 404, "not_found", "resource not found");
+    }
+    c.header("content-type", "text/css; charset=utf-8");
+    c.header("cache-control", "no-cache");
+    return c.body(assets.clientCss, 200);
+  });
+
   // PR-5 dynamic route chunks (e.g. svelte-app-FeaturePage.js). Only the
   // fixed self-hosted names loaded from dist/svelte are served; anything
   // else stays 404 (no catch-all static server).
@@ -2349,18 +2365,6 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     c.header("content-type", "text/javascript; charset=utf-8");
     c.header("cache-control", "no-cache");
     return c.body(chunk, 200);
-  });
-
-  app.get("/assets/client.css", (c) => {
-    if (!strictQuery(c, []).ok) {
-      return validationError(c);
-    }
-    if (assets.clientCss === undefined) {
-      return apiError(c, 404, "not_found", "resource not found");
-    }
-    c.header("content-type", "text/css; charset=utf-8");
-    c.header("cache-control", "no-cache");
-    return c.body(assets.clientCss, 200);
   });
 
   // SSE delivery (§16.4 exact): session ownership enforced (foreign runs are
