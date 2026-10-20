@@ -231,6 +231,10 @@ body {
 #conversation .msg-user-row {
   align-self: flex-end;
   margin-left: auto;
+  /* Codex review PR #107: intrinsic width so short prompts shrink to their
+   * content and stay compact right-aligned bubbles; long messages still
+   * expand to the cap below and wrap. */
+  width: fit-content;
   max-width: min(85%, 36rem);
   background: var(--muted);
   color: var(--foreground);
