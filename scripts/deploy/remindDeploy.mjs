@@ -190,7 +190,8 @@ export function isOkEnvelope(raw) {
   ) {
     return false;
   }
-  return parsed.ok === true;
+  // Success smoke contract: ok:true with code "OK" (not just in-set).
+  return parsed.ok === true && parsed.code === "OK";
 }
 
 function parseArgs(argv) {
@@ -258,7 +259,7 @@ if (invokedAsMain) {
     for await (const chunk of process.stdin) {
       raw += chunk;
     }
-    process.exit(isOkEnvelope(raw.trim()) ? 0 : 1);
+    process.exit(isOkEnvelope(raw) ? 0 : 1);
   } else {
     process.stderr.write(
       "usage: remindDeploy.mjs scope [--memory-json RAW] [--config PATH]\n" +

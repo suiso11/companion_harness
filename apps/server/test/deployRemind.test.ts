@@ -232,4 +232,19 @@ describe("isOkEnvelope", () => {
     ).toBe(false);
     expect(isOkEnvelope("not json\n")).toBe(false);
   });
+
+  it("requires code OK on the success path (not just an in-set code)", () => {
+    expect(
+      isOkEnvelope(
+        '{"v":1,"ok":true,"code":"BAD_REQUEST","message":"ok","data":{},"deduplicated":false}\n',
+      ),
+    ).toBe(false);
+  });
+
+  it("accepts an untrimmed single-frame response (stdin keeps its trailing LF)", () => {
+    // The CLI check-ok path feeds the raw stdin bytes (no trim) into the
+    // validator so the exact LF framing is still enforced.
+    expect(isOkEnvelope(`${goodEnvelope}\n`)).toBe(true);
+    expect(isOkEnvelope(goodEnvelope)).toBe(false);
+  });
 });
