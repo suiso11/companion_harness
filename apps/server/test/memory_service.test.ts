@@ -29,9 +29,11 @@ import {
   createMemoryService,
   MEMORY_RECALL_RUN_MARKER,
   type MemoryService,
+  parseExtractionOutcome,
   parseExtractionOutput,
   parseRecallData,
   stableMemoryJobKey,
+  stripOneJsonFence,
 } from "../src/memory_service.js";
 
 const T0 = 1790000000000;
@@ -235,6 +237,60 @@ describe("parseExtractionOutput model decisions", () => {
     expect(parseExtractionOutput('{"memories":{}}')).toEqual([]);
     expect(parseExtractionOutput('{"other":[]}')).toEqual([]);
     expect(parseExtractionOutput('{"memories":[],"extra":1}')).toEqual([]);
+  });
+
+  it("strips exactly one surrounding code fence before strict parsing", () => {
+    const payload =
+      '{"memories":[{"body":"fenced fact","kind":"user_fact","sensitivity":"normal"}]}';
+    expect(stripOneJsonFence(`\`\`\`json\n${payload}\n\`\`\``)).toBe(payload);
+    expect(stripOneJsonFence(`\`\`\`\n${payload}\n\`\`\``)).toBe(payload);
+    expect(stripOneJsonFence(`  \n\`\`\`json\n${payload}\n\`\`\`  \n`)).toBe(
+      payload,
+    );
+    expect(parseExtractionOutput(`\`\`\`json\n${payload}\n\`\`\``)).toEqual([
+      {
+        body: "fenced fact",
+        kind: "user_fact",
+        sensitivity: "normal",
+      },
+    ]);
+    // No free-text fallback: prose around the fence is still rejected.
+    expect(
+      parseExtractionOutput(`Here you go:\n\`\`\`json\n${payload}\n\`\`\``),
+    ).toEqual([]);
+    // Strict schema inside the fence is unchanged: extra keys still reject.
+    expect(
+      parseExtractionOutput(
+        '```json\n{"memories":[{"body":"x","kind":"user_fact","confidence":1}]}\n```',
+      ),
+    ).toEqual([]);
+  });
+
+  it("splits tri-state outcome: none vs invalid vs ok", () => {
+    const validEmpty = parseExtractionOutcome('{"memories":[]}');
+    expect(validEmpty.status).toBe("none");
+    expect(validEmpty.items).toEqual([]);
+    const ok = parseExtractionOutcome(
+      '{"memories":[{"body":"b","kind":"summary","sensitivity":"normal"}]}',
+    );
+    expect(ok.status).toBe("ok");
+    expect(ok.items).toHaveLength(1);
+    for (const bad of [
+      "",
+      "not json",
+      "null",
+      '{"memories":{}}',
+      '{"other":[]}',
+      '{"memories":[],"extra":1}',
+      "```json\nnot json\n```",
+      // Raw items present but every one rejected: an output-shape problem.
+      '{"memories":[{"body":"x","kind":"episodic"}]}',
+      '{"memories":[{"body":"x","kind":"user_fact","confidence":1}]}',
+    ]) {
+      const outcome = parseExtractionOutcome(bad);
+      expect(outcome.status).toBe("invalid");
+      expect(outcome.items).toEqual([]);
+    }
   });
 
   it("drops invalid items while keeping valid ones, capped at 8", () => {

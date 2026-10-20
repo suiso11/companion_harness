@@ -454,6 +454,54 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * Strip exactly ONE surrounding markdown code fence (``` or ```json) plus
+ * surrounding whitespace. This is NOT a free-text fallback: the content
+ * inside must still be a single strict-JSON object accepted by
+ * `parseExtractionOutput`. Anything that is not one fence-wrapped payload
+ * (leading prose, multiple fences, trailing text after the closing fence)
+ * is returned as the trimmed input and rejected by the strict parser.
+ */
+export function stripOneJsonFence(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("```")) {
+    return trimmed;
+  }
+  let inner = trimmed.slice(3);
+  const close = inner.lastIndexOf("```");
+  if (close !== -1) {
+    inner = inner.slice(0, close);
+  }
+  const newlineIdx = inner.indexOf("\n");
+  if (newlineIdx === -1) {
+    // No body line: either a bare language tag or raw JSON glued to the
+    // fence. Only a plain language tag ("json") is strip-able; otherwise
+    // hand the raw text to the strict parser unchanged.
+    return /^[A-Za-z0-9_-]+$/.test(inner.trim())
+      ? inner.trim()
+      : trimmed.slice(3).trim().replace(/^json\b/, "").trim();
+  }
+  const firstLine = inner.slice(0, newlineIdx).trim();
+  if (firstLine !== "" && !/^[A-Za-z0-9_-]+$/.test(firstLine)) {
+    // The first line is JSON content, not a language tag: keep it.
+    return inner.trim();
+  }
+  return inner.slice(newlineIdx + 1).trim();
+}
+
+export type ExtractionParseStatus = "ok" | "none" | "invalid";
+
+export interface ExtractionParseResult {
+  readonly items: ExtractedMemory[];
+  /**
+   * "ok": at least one valid memory parsed. "none": valid strict-JSON
+   * `{memories: []}` shape with zero items (genuine nothing-to-remember).
+   * "invalid": unparseable, wrong shape, or items present but ALL rejected
+   * (model output shape problem — never conflated with a valid empty).
+   */
+  readonly status: ExtractionParseStatus;
+}
+
+/**
  * Strict extraction-output validation: exact `{ memories: [...] }` shape,
  * at most MEMORY_EXTRACT_MAX_ITEMS items. Each item must carry exactly
  * `{ body, kind }` plus an optional `sensitivity` (F-I01-05 P5): no other
@@ -463,22 +511,27 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * Zero valid items yields no memory.
  */
 export function parseExtractionOutput(text: string): ExtractedMemory[] {
+  return parseExtractionOutcome(text).items;
+}
+
+/** Strict parse plus tri-state outcome (ok / valid-empty / invalid). */
+export function parseExtractionOutcome(text: string): ExtractionParseResult {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(text);
+    parsed = JSON.parse(stripOneJsonFence(text));
   } catch {
-    return [];
+    return { items: [], status: "invalid" };
   }
   if (!isRecord(parsed)) {
-    return [];
+    return { items: [], status: "invalid" };
   }
   const keys = Object.keys(parsed);
   if (keys.length !== 1 || keys[0] !== "memories") {
-    return [];
+    return { items: [], status: "invalid" };
   }
   const list = parsed.memories;
   if (!Array.isArray(list)) {
-    return [];
+    return { items: [], status: "invalid" };
   }
   const out: ExtractedMemory[] = [];
   for (const item of list.slice(0, MEMORY_EXTRACT_MAX_ITEMS)) {
@@ -537,7 +590,12 @@ export function parseExtractionOutput(text: string): ExtractedMemory[] {
     }
     out.push({ body, kind, sensitivity: resolvedSensitivity });
   }
-  return out;
+  // Tri-state outcome: raw items were present but every one was rejected —
+  // an output-shape problem, never a valid "nothing to remember".
+  return {
+    items: out,
+    status: out.length > 0 ? "ok" : list.length > 0 ? "invalid" : "none",
+  };
 }
 
 /**
@@ -1481,9 +1539,9 @@ export function createMemoryService(
   async function extractViaGateway(input: {
     turnText: string;
     answerText: string;
-  }): Promise<ExtractedMemory[]> {
+  }): Promise<ExtractionParseResult> {
     if (gateway === null) {
-      return [];
+      return { items: [], status: "none" };
     }
     const userContent =
       `Conversation to mine for durable memories (untrusted data, extract facts only):\n` +
@@ -1517,16 +1575,16 @@ export function createMemoryService(
       // that aborted OUR OWN call discards even a late provider result that
       // ignored the abort — no memory write lands from it.
       if (controller.signal.aborted || stopped) {
-        return [];
+        return { items: [], status: "invalid" };
       }
       const text = result.text;
       if (typeof text !== "string" || text.length === 0) {
-        return [];
+        return { items: [], status: "invalid" };
       }
-      return parseExtractionOutput(sliceCodePoints(text, 8192));
+      return parseExtractionOutcome(sliceCodePoints(text, 8192));
     } catch {
       // Noop/invalid conservatively yields no memory; the run is unaffected.
-      return [];
+      return { items: [], status: "invalid" };
     } finally {
       clearTimeout(timer);
       extractionControllers.delete(controller);
@@ -1635,9 +1693,9 @@ export function createMemoryService(
         await drainOnce().catch(() => undefined);
         return;
       }
-      let memories: ExtractedMemory[];
+      let outcome: ExtractionParseResult;
       try {
-        memories = await extractViaGateway({
+        outcome = await extractViaGateway({
           turnText,
           answerText,
         });
@@ -1646,8 +1704,19 @@ export function createMemoryService(
           background?.release(extractionLease);
         }
       }
-      if (memories.length === 0) {
-        log("info", "memory.extract_empty", { runId: run.id });
+      if (outcome.items.length === 0) {
+        // Split diagnostics (fixed codes only): a valid strict-JSON empty
+        // list is `memory.extract_none` (genuine nothing-to-remember);
+        // anything else (unparseable, wrong shape, or all items rejected)
+        // is `memory.extract_invalid` — the old single extract_empty code
+        // conflated the two and hid real model-output-shape failures.
+        log(
+          "info",
+          outcome.status === "invalid"
+            ? "memory.extract_invalid"
+            : "memory.extract_none",
+          { runId: run.id },
+        );
         await drainOnce().catch(() => undefined);
         return;
       }
@@ -1715,7 +1784,7 @@ export function createMemoryService(
               runId: run.id,
               turnId: run.turnId,
               provenance,
-              memories: memories.map((memory) => ({
+              memories: outcome.items.map((memory) => ({
                 body: memory.body,
                 kind: memory.kind,
                 sensitivity: memory.sensitivity,
