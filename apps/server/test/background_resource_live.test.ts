@@ -14,9 +14,10 @@
 //   THAT job holds `aborted_foreground` with no synthetic decision, while
 //   the queued explicit job proceeds alone after the release (parks solo,
 //   completes normally) and the held job is never auto-revived.
-// - STOP: pausing control with NO foreground chat anywhere aborts a parked
-//   extraction socket and lands NO late memory write for that run; an
-//   ordinary chat still completes while STOPped.
+// - STOP (I03-09): pausing control keeps memory admission OPEN — a paused
+//   turn still cultivates (across restart too) and explicit manage still
+//   completes; a parked extraction aborts only on its own `timeoutMs` bound
+//   (STOP never aborts memory work), landing NO late write for it.
 // - Release never auto-revives a held job (it stays held to the end).
 //
 // The purpose POST auto-enqueues a `policy_change` deliberation job (older),
@@ -493,7 +494,7 @@ function queryOutboxKinds(
 }
 
 describe("background resource live proof (production server + real sockets)", () => {
-  it("restart keeps STOP closed until explicit resume; explicit manage completes STOPped", async () => {
+  it("restart keeps memory admission open while paused; explicit manage completes STOPped", async () => {
     const { entry, template } = resolveCliPaths();
     const root = mkdtempSync(join(tmpdir(), "companion-live-bg-restart-"));
     // The remind home is REUSED across the restart below: staged records
@@ -562,10 +563,11 @@ describe("background resource live proof (production server + real sockets)", ()
       );
       expect(countExtractCalls()).toBeGreaterThan(extractBaseline);
 
-      // STOP with no chat in flight. Idle ticks keep firing (idleMs 5000):
-      // the automatic distill stays durable pending while the gate is
-      // closed, and explicit management below still drains without
-      // another chat anywhere.
+      // STOP with no chat in flight (I03-09): memory admission stays OPEN.
+      // The idle tick (idleMs 5000) runs the due automatic distill while
+      // paused — it may be observed pending before its own drain completes —
+      // and explicit management below still drains without another chat
+      // anywhere.
       const pausing = await getJson(base, "/api/autonomy/control");
       const stopped = await postJson(base, "/api/autonomy/control", {
         paused: true,
@@ -576,18 +578,23 @@ describe("background resource live proof (production server + real sockets)", ()
         () => {
           const db = new Database(dbPath, { readonly: true });
           try {
+            // Observed pending BEFORE its own (open-gate) drain completes,
+            // OR already acked by that drain (either proves the idle tick
+            // enqueued the due distill while paused).
             const rows = db
               .prepare(
-                "SELECT COUNT(*) AS n FROM memory_outbox WHERE kind = 'maintain.distill' AND status = 'pending'",
+                "SELECT status FROM memory_outbox WHERE kind = 'maintain.distill'",
               )
-              .get() as { n: number };
-            return rows.n >= 1;
+              .all() as Array<{ status: string }>;
+            return rows.some(
+              (row) => row.status === "pending" || row.status === "acked",
+            );
           } finally {
             db.close();
           }
         },
         30_000,
-        "no due automatic distill pending while STOPped",
+        "no due automatic distill enqueued while STOPped",
       );
 
       const searchOnce = async (): Promise<{
@@ -646,18 +653,19 @@ describe("background resource live proof (production server + real sockets)", ()
         }
       };
 
-      // Each explicit management kind reaches terminal done while STOPped,
-      // with the due automatic distill still pending beside it.
+      // Each explicit management kind reaches terminal done while STOPped.
       await stageAndAwait("record.retire");
       await stageAndAwait("record.reactivate");
       await stageAndAwait("record.correct", {
         correctionBody: "The user prefers oolong tea in the evening.",
       });
 
-      // Restart with the control STILL paused: the fence keeps it paused and
-      // admission must initialize CLOSED — the first ordinary chat on the
-      // fresh process starts zero background extraction until an explicit
-      // current-version resume.
+      // Restart with the control STILL paused: the kernel fence keeps it
+      // paused but memory admission stays OPEN across restart (I03-09,
+      // bootstrap no longer initializes the gate from the persisted pause) —
+      // the first ordinary chat on the fresh process still cultivates while
+      // paused: extraction runs and the write chain (event.append acked,
+      // then the remember fan-out) lands without any explicit resume.
       await started.shutdown("test-restart");
       started = null;
       const extractBeforeRestart = countExtractCalls();
@@ -674,12 +682,27 @@ describe("background resource live proof (production server + real sockets)", ()
       expect(second.status).toBe(202);
       const turn2 = await waitForHistoryResult(base, sessionId, 2, 30_000);
       expect(turn2.text.length).toBeGreaterThan(0);
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-      expect(countExtractCalls()).toBe(extractBeforeRestart);
-      expect(queryOutboxKinds(dbPath, turn2.runId)).toHaveLength(0);
+      await waitFor(
+        () =>
+          queryOutboxKinds(dbPath, turn2.runId).some(
+            (row) => row.kind === "event.append" && row.status === "acked",
+          ),
+        30_000,
+        "paused turn did not cultivate across restart",
+      );
+      expect(countExtractCalls()).toBeGreaterThan(extractBeforeRestart);
+      await waitFor(
+        () =>
+          queryOutboxKinds(dbPath, turn2.runId).some(
+            (row) => row.kind === "record.remember",
+          ),
+        30_000,
+        "remember fan-out missing for the paused restart turn",
+      );
 
-      // An explicit current-version resume reopens admission: the next
-      // ordinary chat cultivates again.
+      // An explicit current-version resume unpauses the kernel fence (the
+      // memory gate was already open): the next ordinary chat cultivates
+      // as usual on the resumed control.
       const resuming = await getJson(base, "/api/autonomy/control");
       const resumed = await postJson(base, "/api/autonomy/control", {
         paused: false,
@@ -911,8 +934,9 @@ describe("background resource live proof (production server + real sockets)", ()
       );
       expect((stillHeld.body as { status: string }).status).toBe("held");
 
-      // Phase 3: STOP with NO foreground chat anywhere aborts a parked
-      // extraction socket and lands no late memory write for that run.
+      // Phase 3: with NO foreground chat anywhere, a parked extraction
+      // socket aborts only on its OWN `timeoutMs` bound (I03-09: STOP never
+      // aborts memory work) and lands no late memory write for that run.
       model.state.parkExtract = true;
       model.state.parkShadow = false;
       const third = await postJson(
@@ -936,7 +960,7 @@ describe("background resource live proof (production server + real sockets)", ()
       await waitFor(
         () => model.state.aborted.includes("extract"),
         15_000,
-        "parked extraction socket saw no real STOP abort",
+        "parked extraction socket never reached its own timeoutMs bound",
       );
       for (const entry of [...model.state.parked]) {
         entry.respond();
