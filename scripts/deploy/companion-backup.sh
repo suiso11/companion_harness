@@ -1,10 +1,14 @@
 #!/bin/sh
 # Daily backups for Companion + remind, run by companion-backup.timer.
 #
-# Companion: invokes the existing stopped-server CLI
-#   (pnpm --filter @companion/server backup) inside the deploy dir, then
-#   copies the verified result into ~/.local/share/companion-backups/companion
-#   as an atomic generation.
+# Companion: the timer may fire while companion.service is running, and the
+#   backup CLI contract is stopped-server only, so scripts/deploy/
+#   companion-online-backup.mjs instead opens the live DB read-only and uses
+#   node:sqlite's online backup API (no downtime), verifies
+#   PRAGMA integrity_check, publishes an atomic generation in
+#   ~/.local/share/companion-backups/companion, and prunes both old
+#   generations and the legacy CLI-written companion-manual-*.sqlite files
+#   in the DB's own <data>/backups dir (newest N kept either way).
 # remind: no CLI backup command exists, so scripts/deploy/remind-backup.mjs
 #   uses node:sqlite's online backup API against the read-only DB path
 #   resolved from ~/.config/remind/memory.config.json.
@@ -19,7 +23,6 @@ set -eu
 umask 077
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-DEPLOY_DIR="${COMPANION_DEPLOY_DIR:-$HOME/companion_master}"
 BACKUP_ROOT="${COMPANION_BACKUP_ROOT:-$HOME/.local/share/companion-backups}"
 KEEP="${COMPANION_BACKUP_KEEP:-7}"
 REMIND_CONFIG="${REMIND_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/remind/memory.config.json}"
@@ -44,81 +47,28 @@ if command -v flock >/dev/null 2>&1; then
 fi
 
 command -v node >/dev/null 2>&1 || fail "node not found in PATH"
-command -v pnpm >/dev/null 2>&1 || fail "pnpm not found in PATH"
 KEEP="$(printf '%s' "$KEEP" | tr -cd '0-9')"
 [ -n "$KEEP" ] && [ "$KEEP" -ge 1 ] 2>/dev/null || KEEP=7
 
-STAMP="$(date -u '+%Y%m%dT%H%M%SZ')"
 COMPANION_DIR="$BACKUP_ROOT/companion"
 REMIND_DIR="$BACKUP_ROOT/remind"
 mkdir -p "$COMPANION_DIR" "$REMIND_DIR"
 chmod 700 "$BACKUP_ROOT" "$COMPANION_DIR" "$REMIND_DIR" 2>/dev/null || true
 
-prune_generations() {
-  dir="$1"
-  prefix="$2"
-  protect="$3"
-  count=0
-  for name in $(find "$dir" -maxdepth 1 -type f -name "$prefix*.sqlite" \
-    -printf '%T@ %f\n' 2>/dev/null | sort -rn | cut -d' ' -f2-); do
-    count=$((count + 1))
-    if [ "$count" -gt "$KEEP" ] && [ "$name" != "$protect" ]; then
-      rm -f -- "$dir/$name"
-      log "pruned $prefix$name"
-    fi
-  done
+# --- Companion: online backup of the live DB (read-only, no downtime) ---
+# The old stopped-server CLI is no longer invoked: the timer can fire while
+# companion.service is running and that CLI contract requires a stopped
+# server. The online backup needs no stop/restart and verifies integrity.
+COMPANION_OUT="$(
+  node "$SCRIPT_DIR/companion-online-backup.mjs" \
+    --out-dir "$COMPANION_DIR" \
+    --keep "$KEEP"
+)" || {
+  log "Companion backup failed"
+  printf '%s\n' "$COMPANION_OUT" >&2
+  exit 1
 }
-
-# --- Companion: existing backup CLI, then retain a local generation ---
-log "running Companion backup in $DEPLOY_DIR"
-BACKUP_OUTPUT="$(
-  cd "$DEPLOY_DIR" &&
-    pnpm --filter @companion/server backup 2>&1
-)" || fail "Companion backup command failed"
-NAME="$(printf '%s\n' "$BACKUP_OUTPUT" |
-  awk '/^companion-manual-[^/\\]*\.sqlite$/{name=$0} END{print name}')"
-[ -n "$NAME" ] || fail "Companion backup produced no backup name"
-
-# activeRuns.mjs is also a CLI: its JSON reports the same default DB path
-# the server uses (COMPANION_DB_PATH, else OS app-data). Its exit code is 2
-# when runs are active, so ignore the status and validate the JSON instead.
-DB_JSON="$(node "$SCRIPT_DIR/activeRuns.mjs" 2>/dev/null || true)"
-[ -n "$DB_JSON" ] || fail "cannot resolve Companion DB directory"
-DB_DIR="$(
-  printf '%s' "$DB_JSON" | node --input-type=module -e '
-import { dirname, resolve } from "node:path";
-let raw = "";
-for await (const chunk of process.stdin) raw += chunk;
-process.stdout.write(dirname(resolve(JSON.parse(raw).db)));
-' 2>/dev/null
-)" || fail "cannot resolve Companion DB directory"
-SRC="$DB_DIR/backups/$NAME"
-[ -f "$SRC" ] || fail "Companion backup file missing after command"
-
-DEST_NAME="companion-$STAMP-$$.sqlite"
-DEST="$COMPANION_DIR/$DEST_NAME"
-PARTIAL="$DEST.partial"
-if ! cp -- "$SRC" "$PARTIAL"; then
-  rm -f -- "$PARTIAL"
-  fail "cannot copy Companion backup"
-fi
-chmod 600 "$PARTIAL" 2>/dev/null || true
-if ! node --input-type=module -e '
-import { DatabaseSync } from "node:sqlite";
-const db = new DatabaseSync(process.argv[1], { readOnly: true });
-const row = db.prepare("PRAGMA quick_check").get();
-db.close();
-process.exit(row?.quick_check === "ok" ? 0 : 1);
-' "$PARTIAL" >/dev/null 2>&1; then
-  rm -f -- "$PARTIAL"
-  fail "Companion backup copy failed quick_check"
-fi
-if ! mv -f -- "$PARTIAL" "$DEST"; then
-  rm -f -- "$PARTIAL"
-  fail "cannot publish Companion backup generation"
-fi
-log "stored Companion generation $DEST_NAME"
-prune_generations "$COMPANION_DIR" "companion-" "$DEST_NAME"
+log "stored Companion generation $COMPANION_OUT"
 
 # --- remind: online backup of the configured DB ---
 log "running remind backup from configured dbPath"

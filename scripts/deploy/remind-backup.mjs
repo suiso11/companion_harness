@@ -109,9 +109,9 @@ export function listGenerations(dir, prefix = "remind-") {
 }
 
 /** Keep the newest `keep` generations (minimum 1). Never deletes `protect`. */
-export function pruneGenerations(dir, keep = DEFAULT_KEEP, protect) {
+export function pruneGenerations(dir, keep = DEFAULT_KEEP, protect, prefix = "remind-") {
   const limit = Math.max(1, Math.floor(keep));
-  const generations = listGenerations(dir);
+  const generations = listGenerations(dir, prefix);
   const removed = [];
   for (const entry of generations.slice(limit)) {
     if (entry.name === protect) {
@@ -122,7 +122,7 @@ export function pruneGenerations(dir, keep = DEFAULT_KEEP, protect) {
       removed.push(entry.name);
     } catch (error) {
       process.stderr.write(
-        `remind-backup: prune skipped for ${entry.name}: ${error?.code ?? "error"}\n`,
+        `backup prune skipped for ${entry.name}: ${error?.code ?? "error"}\n`,
       );
     }
   }
@@ -143,26 +143,20 @@ function integrityOk(dbPath) {
 }
 
 /**
- * Back up one remind DB. Returns { file, path, removed }.
+ * Back up one SQLite DB opened read-only (generic engine shared by the
+ * remind and Companion online-backup CLIs). Returns { file, path, removed }.
  * Existing generations are untouched unless the new copy verified + renamed.
  */
-export async function backupRemindDb({
-  configPath = defaultConfigPath(),
-  outDir = join(homedir(), ".local", "share", "companion-backups", "remind"),
+export async function backupDb({
+  dbPath,
+  outDir,
   keep = DEFAULT_KEEP,
+  prefix = "remind-",
   now = new Date(),
-} = {}) {
-  if (!existsSync(configPath)) {
-    throw new Error("remind backup failed: config missing");
-  }
-  const dbPath = resolveRemindDbPath(configPath);
-  if (!existsSync(dbPath)) {
-    throw new Error("remind backup failed: database missing");
-  }
-
+}) {
   ensurePrivateDir(outDir);
   const stamp = formatUtc(now);
-  const finalName = `remind-${stamp}-${process.pid}-${Math.random()
+  const finalName = `${prefix}-${stamp}-${process.pid}-${Math.random()
     .toString(16)
     .slice(2, 10)}.sqlite`;
   const finalPath = join(outDir, finalName);
@@ -195,8 +189,28 @@ export async function backupRemindDb({
     }
   }
 
-  const removed = pruneGenerations(outDir, keep, finalName);
+  const removed = pruneGenerations(outDir, keep, finalName, prefix);
   return { file: basename(finalPath), path: finalPath, removed };
+}
+
+/**
+ * Back up the remind DB resolved from memory.config.json.
+ * Returns { file, path, removed }.
+ */
+export async function backupRemindDb({
+  configPath = defaultConfigPath(),
+  outDir = join(homedir(), ".local", "share", "companion-backups", "remind"),
+  keep = DEFAULT_KEEP,
+  now = new Date(),
+} = {}) {
+  if (!existsSync(configPath)) {
+    throw new Error("remind backup failed: config missing");
+  }
+  const dbPath = resolveRemindDbPath(configPath);
+  if (!existsSync(dbPath)) {
+    throw new Error("remind backup failed: database missing");
+  }
+  return backupDb({ dbPath, outDir, keep, prefix: "remind-", now });
 }
 
 function parseArgs(argv) {

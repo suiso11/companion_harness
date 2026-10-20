@@ -65,7 +65,7 @@ describe("remind online backup", () => {
       join(dir, "data", "memory.db"),
     );
     expect(defaultConfigPath({ XDG_CONFIG_HOME: "/tmp/xdg" })).toBe(
-      "/tmp/xdg/remind/memory.config.json",
+      join("/tmp/xdg", "remind", "memory.config.json"),
     );
   });
 
