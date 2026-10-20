@@ -114,7 +114,10 @@ export function runNotifyCli(
   try {
     config = loadServerConfig(env);
   } catch {
-    throw cliError("invalid_configuration", "ops notify failed: invalid configuration");
+    throw cliError(
+      "invalid_configuration",
+      "ops notify failed: invalid configuration",
+    );
   }
   const dbPath = config.dbPath;
   // Fail closed on a missing DB: better-sqlite3 would otherwise create an
@@ -124,16 +127,13 @@ export function runNotifyCli(
   }
   const handle = openKernelDatabase(dbPath);
   try {
-    const notice: SystemNotice = recordSystemNotice(
-      handle.raw,
-      {
-        level: args.level,
-        title: args.title,
-        body: args.body,
-        sourceId: args.source,
-        fingerprintSubject: args.subject,
-      },
-    );
+    const notice: SystemNotice = recordSystemNotice(handle.raw, {
+      level: args.level,
+      title: args.title,
+      body: args.body,
+      sourceId: args.source,
+      fingerprintSubject: args.subject,
+    });
     return `ops notify ${args.level}: recorded=${notice.recorded} deduped=${notice.deduped}`;
   } catch (error) {
     if (error instanceof OpsNotifyCliError) {
@@ -153,7 +153,9 @@ function isMainModule(): boolean {
 if (isMainModule()) {
   const [command, ...rest] = process.argv.slice(2);
   if (command !== "notify") {
-    process.stderr.write(`ops notify failed: unknown command. ${NOTIFY_USAGE}\n`);
+    process.stderr.write(
+      `ops notify failed: unknown command. ${NOTIFY_USAGE}\n`,
+    );
     process.exit(1);
   }
   try {
