@@ -1,10 +1,16 @@
 #!/bin/sh
 # Apply the repo's LLM stack files to /srv/llm and reconcile the containers.
 #
-# Shows a unified diff first. Without --yes it asks for confirmation on a
-# TTY (non-interactive runs must pass --yes). Only compose.yaml and
+# Shows a unified diff first. Without --yes it never writes files and never
+# reconciles containers: it only shows the diff (diff-only, even when the
+# files already match). On a TTY it asks for confirmation before writing;
+# non-interactive runs must pass --yes. Only compose.yaml and
 # litellm_config.yaml are copied; /srv/llm/.env is never read, copied, or
 # printed. The compose invocation inherits the host's existing .env.
+#
+# When litellm_config.yaml changes, the litellm container is force-recreated
+# because the file is a bind mount: the atomic rename below swaps the inode,
+# so a plain `up -d` would keep the old config live inside the container.
 #
 # Usage: ops/llm/apply.sh [--yes] [--dest /srv/llm]
 
@@ -58,12 +64,14 @@ if [ ! -f "$DEST/.env" ]; then
 fi
 
 CHANGED=0
+LITELLM_CHANGED=0
 for name in compose.yaml litellm_config.yaml; do
   if [ -f "$DEST/$name" ] && cmp -s "$SCRIPT_DIR/$name" "$DEST/$name"; then
     printf 'apply: %s is already up to date\n' "$name"
     continue
   fi
   CHANGED=1
+  [ "$name" = "litellm_config.yaml" ] && LITELLM_CHANGED=1
   printf '\n--- diff %s ---\n' "$name"
   if [ -f "$DEST/$name" ]; then
     diff -u "$DEST/$name" "$SCRIPT_DIR/$name" || true
@@ -73,7 +81,11 @@ for name in compose.yaml litellm_config.yaml; do
 done
 
 if [ "$CHANGED" -eq 0 ]; then
-  printf 'apply: repo files match %s; reconciling containers\n' "$DEST"
+  printf 'apply: repo files match %s\n' "$DEST"
+  if [ "$ASSUME_YES" -ne 1 ]; then
+    printf 'apply: diff-only run; pass --yes to reconcile containers\n'
+    exit 0
+  fi
 else
   if [ "$ASSUME_YES" -ne 1 ]; then
     if [ ! -t 0 ]; then
@@ -107,6 +119,13 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 1
 fi
 
-docker compose --project-directory "$DEST" --env-file "$DEST/.env" \
-  -f "$DEST/compose.yaml" up -d
+if [ "$LITELLM_CHANGED" -eq 1 ]; then
+  # litellm_config.yaml is bind-mounted; the atomic rename swapped the
+  # inode, so only --force-recreate makes the container see the new file.
+  docker compose --project-directory "$DEST" --env-file "$DEST/.env" \
+    -f "$DEST/compose.yaml" up -d --remove-orphans --force-recreate litellm
+else
+  docker compose --project-directory "$DEST" --env-file "$DEST/.env" \
+    -f "$DEST/compose.yaml" up -d --remove-orphans
+fi
 printf 'apply: containers reconciled (litellm on :4000, gemma internal :8080)\n'
