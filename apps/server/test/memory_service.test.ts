@@ -27,6 +27,7 @@ import {
 } from "../src/memory_cli.js";
 import {
   createMemoryService,
+  MEMORY_EXTRACT_MAX_ITEMS,
   MEMORY_RECALL_RUN_MARKER,
   type MemoryService,
   parseExtractionOutcome,
@@ -241,7 +242,7 @@ describe("parseExtractionOutput model decisions", () => {
 
   it("strips exactly one surrounding code fence before strict parsing", () => {
     const payload =
-      '{"memories":[{"body":"fenced fact","kind":"user_fact","sensitivity":"normal"}]}';
+      '{"memories":[{"body":"fenced fact","kind":"user_fact","sensitivity":"normal"},{"body":"fenced digest","kind":"summary"}]}';
     expect(stripOneJsonFence(`\`\`\`json\n${payload}\n\`\`\``)).toBe(payload);
     expect(stripOneJsonFence(`\`\`\`\n${payload}\n\`\`\``)).toBe(payload);
     expect(stripOneJsonFence(`  \n\`\`\`json\n${payload}\n\`\`\`  \n`)).toBe(
@@ -253,6 +254,7 @@ describe("parseExtractionOutput model decisions", () => {
         kind: "user_fact",
         sensitivity: "normal",
       },
+      { body: "fenced digest", kind: "summary", sensitivity: "sensitive" },
     ]);
     // No free-text fallback: prose around the fence is still rejected.
     expect(
@@ -293,7 +295,7 @@ describe("parseExtractionOutput model decisions", () => {
     }
   });
 
-  it("drops invalid items while keeping valid ones, capped at 8", () => {
+  it("drops invalid items while keeping valid ones, capped at 16", () => {
     const items: unknown[] = [
       { body: "kept", kind: "user_fact", sensitivity: "normal" },
       { body: "wrong kind", kind: "episodic" },
@@ -323,7 +325,7 @@ describe("parseExtractionOutput model decisions", () => {
       kind: "user_fact",
       sensitivity: "normal",
     });
-    expect(out.length).toBeLessThanOrEqual(8);
+    expect(out.length).toBeLessThanOrEqual(MEMORY_EXTRACT_MAX_ITEMS);
     expect(
       out.every((item) => item.kind === "user_fact" || item.kind === "summary"),
     ).toBe(true);
@@ -333,6 +335,38 @@ describe("parseExtractionOutput model decisions", () => {
           item.sensitivity === "normal" || item.sensitivity === "sensitive",
       ),
     ).toBe(true);
+  });
+
+  it("rejects valid items that lack the mandatory summary (store-everything)", () => {
+    // Any valid item set MUST carry at least one summary: without it the
+    // turn is unrecallable through raw descent, so the output is invalid.
+    const noSummary = parseExtractionOutcome(
+      JSON.stringify({
+        memories: [
+          { body: "user likes tea", kind: "user_fact", sensitivity: "normal" },
+          {
+            body: "tends to like tea",
+            kind: "model_inference",
+            sensitivity: "normal",
+          },
+        ],
+      }),
+    );
+    expect(noSummary.status).toBe("invalid");
+    expect(noSummary.items).toEqual([]);
+    // Mixed valid/invalid WITH a summary still parses the valid subset.
+    const withSummary = parseExtractionOutcome(
+      JSON.stringify({
+        memories: [
+          { body: "digest", kind: "summary", sensitivity: "normal" },
+          { body: "x", kind: "episodic" },
+        ],
+      }),
+    );
+    expect(withSummary.status).toBe("ok");
+    expect(withSummary.items).toEqual([
+      { body: "digest", kind: "summary", sensitivity: "normal" },
+    ]);
   });
 });
 
@@ -962,7 +996,10 @@ describe("completion cultivation and cite-gated feedback", () => {
       };
       const { gateway, calls } = extractionGateway(
         JSON.stringify({
-          memories: [{ body: "user likes tea", kind: "user_fact" }],
+          memories: [
+            { body: "user likes tea", kind: "user_fact" },
+            { body: "turn digest", kind: "summary" },
+          ],
         }),
       );
       const service = makeService(f.repo, cliCall, { gateway });
@@ -977,7 +1014,7 @@ describe("completion cultivation and cite-gated feedback", () => {
         () =>
           f.repo
             .claimDueMemoryJobs(5, Date.now())
-            .filter((job) => job.kind === "record.remember").length === 1,
+            .filter((job) => job.kind === "record.remember").length === 2,
       );
 
       // Cancelled runs never reach extraction: no gateway call, no jobs.
@@ -1247,7 +1284,10 @@ describe("foreground preemption and shutdown", () => {
       );
       release(
         JSON.stringify({
-          memories: [{ body: "stale fact", kind: "user_fact" }],
+          memories: [
+            { body: "stale fact", kind: "user_fact" },
+            { body: "stale digest", kind: "summary" },
+          ],
         }),
       );
       await sleep(300);

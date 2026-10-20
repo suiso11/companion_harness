@@ -74,7 +74,7 @@ export const MEMORY_JOB_MAX_ATTEMPTS = 8;
 /** Bounds for extraction inputs/outputs (code points). */
 export const MEMORY_EXTRACT_INPUT_MAX_CP = 2000;
 export const MEMORY_EXTRACT_BODY_MAX_CP = 2000;
-export const MEMORY_EXTRACT_MAX_ITEMS = 8;
+export const MEMORY_EXTRACT_MAX_ITEMS = 16;
 export const MEMORY_EVENT_BODY_MAX_CP = 4000;
 export const MEMORY_RECALL_QUERY_MAX_CP = 500;
 /** Fixed provenance source stamped on Companion-written events/records. */
@@ -171,15 +171,19 @@ const RECALL_VECTORS: ReadonlySet<string> = new Set([
 
 /**
  * Fixed extraction system instruction (deterministic, no conversation).
- * Broadened (user report 2026-10-20: motorcycle chat saved nothing) to mine
- * each turn for durable, useful items — stated preferences/likes/dislikes,
- * interests/hobbies, owned equipment, habits, plans/goals, opinions, and
- * facts about people/places — while keeping the closed policy: user-stated
- * -> user_fact, turn-grounded tendencies -> model_inference, transient
- * moods never stored as traits, no secrets, fail-closed sensitivity.
+ * Store-everything policy (decision 2026-10-20: selection happens only at
+ * recall time): EVERY turn with non-empty user content yields EXACTLY one
+ * `summary` item (concise Japanese digest of the turn — topic, what the
+ * user said/asked, what was answered; no judgement of importance) PLUS
+ * every user-stated detail as its own `user_fact` (no importance filter:
+ * preferences, things mentioned, question topics, events, opinions) PLUS
+ * turn-grounded tendencies as `model_inference`. Closed policy kept:
+ * user-stated -> user_fact, turn-grounded tendencies -> model_inference,
+ * nothing ever phrased as a durable trait from a momentary feeling, no
+ * secrets, fail-closed sensitivity.
  */
 export const MEMORY_EXTRACT_SYSTEM_PROMPT =
-  "Extract durable memories from the conversation as strict JSON only. " +
+  "Extract memories from the conversation as strict JSON only. " +
   "Respond with exactly one JSON object of the form " +
   '{"memories":[{"body":"...","kind":"...","sensitivity":"..."}]} where kind ' +
   "is one of user_fact, model_inference, summary and sensitivity is one of " +
@@ -187,26 +191,29 @@ export const MEMORY_EXTRACT_SYSTEM_PROMPT =
   "The conversation is usually Japanese: write each body as a short, " +
   "self-contained Japanese sentence starting with the subject (e.g. " +
   "ユーザーは…) that makes sense on its own. " +
-  "Mine each turn for durable and useful items: stated likes, dislikes, " +
-  "and preferences (e.g. 好きなバイクの車種・メーカー), interests and " +
-  "hobbies, things the user owns or uses (vehicles, equipment, tools), " +
-  "habits and routines, plans and goals, opinions the user expresses " +
-  "about recurring topics, and relevant facts about people or places in " +
-  "the user's life. One fact per item: split a multi-part turn into " +
+  "ALWAYS include EXACTLY ONE kind=summary item first: a concise Japanese " +
+  "summary of THIS turn — the topic, what the user said or asked, and what " +
+  "was answered. No judgement of importance: even greetings, small talk " +
+  "and one-line questions get a summary. " +
+  "Then add ONE user_fact item for EVERY detail the USER explicitly " +
+  "stated or asked about in this turn, with no filter of usefulness: " +
+  "stated likes, dislikes and preferences (e.g. 好きなバイクの車種・メーカー), " +
+  "interests and hobbies, things the user owns or uses, habits and " +
+  "routines, plans and goals, events that happened, opinions, momentary " +
+  "conditions or feelings the user reported (phrased as what the user " +
+  "said today, never as a durable personality trait), and the topics of " +
+  "the user's questions. One fact per item: split a multi-part turn into " +
   "separate items. " +
-  "Kind policy: anything the USER explicitly stated is user_fact; a " +
-  "tendency YOU infer from what the user said in THIS turn (e.g. " +
-  "ネイキッド系のバイクを好む傾向がある) is model_inference — phrase it as a " +
-  "tendency, not certainty, grounded only in this turn's words. " +
-  "Exclude pure greetings, small talk, and anything already quoted " +
-  "verbatim. Never store transient moods or momentary feelings as traits " +
-  "(e.g. 今日は疲れた is not a personality trait), and never store " +
-  "secrets, credentials, or passwords. " +
+  "Then add at most a few model_inference items: a tendency YOU infer " +
+  "from what the user said in THIS turn (e.g. ネイキッド系のバイクを好む傾向が" +
+  "ある) — phrase it as a tendency, not certainty, grounded only in this " +
+  "turn's words. " +
+  "Never store secrets, credentials, or passwords. " +
   "Decide sensitivity at the same step that decides kind: mark sensitive " +
   "anything personal, identifying, credential-like, or touching health, " +
   "finance, relationships, or precise location, or otherwise non-public; " +
   "when undecidable, use sensitive. " +
-  "At most 8 items. No prose, no markdown, JSON only.";
+  "At most 16 items total. No prose, no markdown, JSON only.";
 
 export interface MemoryServiceOptions {
   readonly address: MemoryCliAddress;
@@ -621,6 +628,13 @@ export function parseExtractionOutcome(text: string): ExtractionParseResult {
   }
   // Tri-state outcome: raw items were present but every one was rejected —
   // an output-shape problem, never a valid "nothing to remember".
+  // Store-everything decision (2026-10-20): when ANY valid items parsed,
+  // the output MUST also carry at least one `summary` item (the
+  // per-turn digest the raw event is recallable through). Valid items
+  // missing that summary are an output-shape problem -> invalid.
+  if (out.length > 0 && !out.some((item) => item.kind === "summary")) {
+    return { items: [], status: "invalid" };
+  }
   return {
     items: out,
     status: out.length > 0 ? "ok" : list.length > 0 ? "invalid" : "none",
