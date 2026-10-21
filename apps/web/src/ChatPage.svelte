@@ -450,6 +450,9 @@ function resetChatState(): void {
   citationSeq += 1;
   drawerOpen = false;
   drawerBody = "";
+  // Session-scoped citation data must not survive a session switch/creation:
+  // clear the hydrated web block alongside the drawer body (review PR112).
+  drawerWeb = null;
 }
 
 // --- PR-3 thinking/status helpers (ephemeral deltas + durable phase) ---
