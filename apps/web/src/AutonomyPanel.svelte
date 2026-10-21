@@ -297,13 +297,16 @@ async function retryPendingAutonomy(): Promise<void> {
 
 async function refreshControl(): Promise<void> {
   const seq = ++controlSeq;
+  // Session binding: the response applies only while the same session still
+  // holds (a boot/rebind before the fetch lands must discard this token).
+  const sessionId = getSessionId();
   let result: { status: number; body: unknown };
   try {
     result = await fetchJson("/api/autonomy/control");
   } catch {
     return;
   }
-  if (seq !== controlSeq) return;
+  if (seq !== controlSeq || getSessionId() !== sessionId) return;
   const body = result.body as {
     paused?: unknown;
     version?: unknown;
@@ -381,7 +384,7 @@ async function refreshLists(): Promise<void> {
   } catch {
     return;
   }
-  if (seq !== listSeq) return;
+  if (seq !== listSeq || getSessionId() !== sessionId) return;
   renderPurposes(purposesResult);
   renderTasks(tasksResult);
   renderConflicts(conflicts);
