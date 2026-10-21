@@ -348,6 +348,37 @@ export {
   CalendarSearchToolOutputSchema,
 } from "./calendar.js";
 export type {
+  WebCanonicalKey,
+  WebResultUrl,
+  WebSearchConfig,
+  WebSearchHit,
+  WebSearchToolInput,
+  WebSearchToolInputInput,
+  WebSearchToolOutput,
+  WebTimeRange,
+} from "./web.js";
+export {
+  DEFAULT_WEB_MAX_RESPONSE_BYTES,
+  DEFAULT_WEB_TOP_K,
+  MAX_WEB_MAX_RESPONSE_BYTES,
+  MAX_WEB_QUERY_CODE_POINTS,
+  MAX_WEB_TITLE_CODE_POINTS,
+  MAX_WEB_TOP_K,
+  MAX_WEB_URL_UTF16_UNITS,
+  WEB_CANONICAL_KEY_PREFIX,
+  WebCanonicalKeySchema,
+  buildWebCanonicalKey,
+  isValidLoopbackHttpUrl,
+  parseWebSearchConfig,
+  WebResultUrlSchema,
+  WebSearchConfigSchema,
+  WebSearchHitSchema,
+  WebSearchToolInputSchema,
+  WebSearchToolOutputSchema,
+  WebTimeRangeSchema,
+  WebTitleSchema,
+} from "./web.js";
+export type {
   AnswerDraftDeltaPayload,
   LatestRunEvent,
   LatestRunEventType,
