@@ -131,3 +131,249 @@ main > form[action="/api/remote/login"] input[type="password"] {
     min-height: 44px;
   }
 }
+
+/* Conversation-memory graph view (vanilla SVG; no inline styles/assets). */
+:root {
+  --graph-background: #f8fafc;
+  --graph-border: #cbd5e1;
+  --graph-edge: #94a3b8;
+  --graph-label: #1f2937;
+  --graph-node-active: #2563eb;
+  --graph-node-retired: #64748b;
+  /* Kind palette: cyan / amber / blue / violet are distinguishable by hue
+   * and remain readable against the light graph surface. */
+  --graph-kind-summary: #0e7490;
+  --graph-kind-correction: #b45309;
+  --graph-kind-user-fact: #1d4ed8;
+  --graph-kind-model-inference: #6d28d9;
+  --graph-kind-other: #475569;
+  --graph-match: #e11d48;
+  --graph-selected: #111827;
+}
+
+/* Dark theme: lighter hues with >= 4.5:1 contrast on the slate surface. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --graph-background: #0f172a;
+    --graph-border: #334155;
+    --graph-edge: #64748b;
+    --graph-label: #e2e8f0;
+    --graph-node-active: #60a5fa;
+    --graph-node-retired: #94a3b8;
+    --graph-kind-summary: #22d3ee;
+    --graph-kind-correction: #fbbf24;
+    --graph-kind-user-fact: #60a5fa;
+    --graph-kind-model-inference: #a78bfa;
+    --graph-kind-other: #cbd5e1;
+    --graph-match: #fb7185;
+    --graph-selected: #f8fafc;
+  }
+}
+
+#memory-view-toggle {
+  display: flex;
+  gap: 0.5rem;
+  margin: 0.25rem 0 0.5rem;
+}
+
+#memory-view-toggle button[aria-pressed="true"],
+#memory-graph-toolbar button[aria-pressed="true"] {
+  font-weight: 700;
+  outline: 2px solid var(--graph-node-active);
+  outline-offset: 1px;
+}
+
+#memory-graph-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+#memory-graph-toolbar label {
+  display: inline-flex;
+  gap: 0.25rem;
+  align-items: center;
+}
+
+#memory-graph-status {
+  flex-basis: 100%;
+  margin: 0.25rem 0;
+  min-height: 1.5em;
+}
+
+/* Kind/retired legend below the canvas. Swatches use the same variables as
+ * the node dots, so the mapping cannot drift from the rendering. */
+.memory-graph-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.9rem;
+  align-items: center;
+  margin: 0.4rem 0 0.25rem;
+  font-size: 0.85rem;
+}
+
+.memory-graph-legend__item {
+  display: inline-flex;
+  gap: 0.3rem;
+  align-items: center;
+  white-space: nowrap;
+}
+
+.memory-graph-legend__swatch {
+  box-sizing: border-box;
+  width: 0.75rem;
+  height: 0.75rem;
+  border: 1px solid rgba(15, 23, 42, 0.25);
+  border-radius: 50%;
+  background: var(--graph-kind-other);
+}
+
+.memory-graph-legend__swatch--summary {
+  background: var(--graph-kind-summary);
+}
+
+.memory-graph-legend__swatch--correction {
+  background: var(--graph-kind-correction);
+}
+
+.memory-graph-legend__swatch--user-fact {
+  background: var(--graph-kind-user-fact);
+}
+
+.memory-graph-legend__swatch--model-inference {
+  background: var(--graph-kind-model-inference);
+}
+
+.memory-graph-legend__swatch--retired {
+  border: 2px dashed var(--graph-node-retired);
+  background: transparent;
+}
+
+#memory-graph-canvas {
+  display: block;
+  width: 100%;
+  height: 480px;
+  background: var(--graph-background);
+  border: 1px solid var(--graph-border);
+  border-radius: 4px;
+  cursor: grab;
+  touch-action: none;
+}
+
+#memory-graph-canvas.memory-graph--panning {
+  cursor: grabbing;
+}
+
+#memory-graph-canvas:focus-visible {
+  outline: 2px solid var(--graph-node-active);
+  outline-offset: 2px;
+}
+
+.memory-graph-node {
+  cursor: pointer;
+  outline: none;
+}
+
+.memory-graph-node__dot {
+  fill: var(--graph-node-active);
+  stroke: #ffffff;
+  stroke-width: 1.5;
+  transition: opacity 120ms ease;
+}
+
+.memory-graph-node__dot.memory-graph-node--kind-summary {
+  fill: var(--graph-kind-summary);
+}
+
+.memory-graph-node__dot.memory-graph-node--kind-correction {
+  fill: var(--graph-kind-correction);
+}
+
+.memory-graph-node__dot.memory-graph-node--kind-user-fact {
+  fill: var(--graph-kind-user-fact);
+}
+
+.memory-graph-node__dot.memory-graph-node--kind-model-inference {
+  fill: var(--graph-kind-model-inference);
+}
+
+.memory-graph-node__dot.memory-graph-node--kind-other {
+  fill: var(--graph-kind-other);
+}
+
+.memory-graph-node__dot.memory-graph-node--retired {
+  fill: var(--graph-node-retired);
+  stroke-dasharray: 3 2;
+  opacity: 0.8;
+}
+
+.memory-graph-node:hover .memory-graph-node__dot,
+.memory-graph-node:focus-visible .memory-graph-node__dot {
+  stroke: var(--graph-selected);
+  stroke-width: 3;
+}
+
+.memory-graph-node.memory-graph-node--selected .memory-graph-node__dot {
+  stroke: var(--graph-selected);
+  stroke-width: 3;
+}
+
+.memory-graph-node.memory-graph-node--match .memory-graph-node__dot {
+  stroke: var(--graph-match);
+  stroke-width: 4;
+}
+
+.memory-graph-node__label {
+  display: none;
+  background: none;
+  font-family: system-ui, sans-serif;
+  font-size: 11px;
+  fill: var(--graph-label);
+  pointer-events: none;
+  paint-order: stroke;
+  stroke: var(--graph-background);
+  stroke-width: 2px;
+}
+
+.memory-graph--labels .memory-graph-node__label,
+.memory-graph-node--label .memory-graph-node__label {
+  display: block;
+}
+
+/* No background rectangle exists at all; dimming the whole group also dims
+ * the label. Removing the label's paint halo on dimmed nodes avoids the faint
+ * blocky rectangles long truncated labels could otherwise leave behind. */
+.memory-graph-node--dim .memory-graph-node__label {
+  stroke: none;
+}
+
+.memory-graph-node--match .memory-graph-node__label {
+  font-weight: 700;
+  fill: var(--graph-match);
+}
+
+.memory-graph-edge {
+  stroke: var(--graph-edge);
+  stroke-width: 1;
+  pointer-events: none;
+}
+
+.memory-graph-edge--consolidation {
+  stroke-dasharray: 6 4;
+}
+
+.memory-graph--focus .memory-graph-node--dim {
+  opacity: 0.18;
+}
+
+.memory-graph--focus .memory-graph-edge--dim {
+  opacity: 0.12;
+}
+
+@media (max-width: 30rem) {
+  #memory-graph-canvas {
+    height: 360px;
+  }
+}

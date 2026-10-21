@@ -9,7 +9,8 @@
 // keyed operation that is polled to its durable ack. The chat shell still
 // provides the conversation/composer (the memory e2e cultivates a fact
 // there before searching).
-import { fetchJson, postJson, randomUuid } from "./lib/api.js";
+import { GraphCanvas, parseGraphData } from "../../server/src/ui/graph.js";
+import { errorCode, fetchJson, postJson, randomUuid } from "./lib/api.js";
 import { getSessionId } from "./lib/session.svelte.js";
 
 const POLL_INTERVAL_MS = 500;
@@ -49,6 +50,24 @@ let mutating = $state(false);
 let retryVisible = $state(false);
 let notice = $state("");
 let memoryDisabled = $state(false);
+
+// Read-only graph view (same opaque-handle projection as the legacy panel).
+type GraphScope = Scope & {
+  readonly scope: "global" | "local";
+  readonly center: string | null;
+};
+let view = $state<"list" | "graph">("list");
+let graphStatus = $state("");
+let graphRetired = $state(false);
+let graphDepth = $state("1");
+let graphScope = $state<GraphScope | null>(null);
+let graphSelected = $state<string | null>(null);
+let graphLoading = $state(false);
+let graphCanvasEl = $state<SVGSVGElement | null>(null);
+let canvas: GraphCanvas | null = null;
+let graphSeq = 0;
+/** The explicit list-search scope (kept separate from the graph snapshot). */
+let listScope: Scope | null = null;
 
 // Non-reactive generation state: awaited responses apply only while their
 // own generation/session/target is still current (no stale overwrite).
@@ -185,6 +204,7 @@ async function search(): Promise<void> {
       });
     }
     scope = { sessionId, searchId: body.searchId, runId };
+    listScope = scope;
     searchId = body.searchId;
     hits = fresh;
     opStatus = "";
@@ -195,18 +215,192 @@ async function search(): Promise<void> {
   }
 }
 
+/** Switch between the existing result list and the read-only graph. */
+function switchView(next: "list" | "graph"): void {
+  view = next;
+  if (next === "graph") {
+    canvas?.setSearchQuery(query);
+    if (graphScope === null) void loadGraph("global");
+  } else {
+    canvas?.setSearchQuery("");
+  }
+}
+
+/** In graph view the search box highlights labels; it never calls search. */
+function applyGraphSearch(): void {
+  canvas?.setSearchQuery(query);
+}
+
+/**
+ * Fetch the read-only global/local graph. Reads never heat memory and never
+ * stage a mutation; generation + session guards make an older response
+ * harmless, and a 503 graph-unavailable response leaves the list usable.
+ */
+async function loadGraph(kind: "global" | "local"): Promise<void> {
+  const sessionId = getSessionId();
+  if (sessionId === null) return;
+  graphSeq += 1;
+  const seq = graphSeq;
+  const current = (): boolean =>
+    seq === graphSeq && getSessionId() === sessionId;
+  graphLoading = true;
+  graphStatus = "読み込み中";
+  try {
+    const runId = await latestRunId(sessionId);
+    if (!current()) return;
+    if (runId === null) {
+      graphStatus = "メッセージを送信して Run を作ってから表示してください";
+      return;
+    }
+    let handle: string | null = null;
+    let localSearchId: string | null = null;
+    if (kind === "local") {
+      if (graphSelected !== null && graphScope !== null) {
+        handle = graphSelected;
+        localSearchId = graphScope.searchId;
+      } else if (selected !== null && scope !== null) {
+        handle = selected.handle;
+        localSearchId = scope.searchId;
+      }
+      if (handle === null || localSearchId === null) {
+        graphStatus = "ノードを選択してください";
+        return;
+      }
+    }
+    let path = `/api/sessions/${encodeURIComponent(sessionId)}/memory/graph`;
+    if (kind === "local" && handle !== null && localSearchId !== null) {
+      const params = new URLSearchParams({
+        searchId: localSearchId,
+        handle,
+        depth: graphDepth === "2" ? "2" : "1",
+        runId,
+      });
+      path = `${path}/local?${params.toString()}`;
+    } else {
+      const params = new URLSearchParams({
+        includeRetired: graphRetired ? "true" : "false",
+        runId,
+      });
+      path = `${path}?${params.toString()}`;
+    }
+    const res = await fetchJson(path);
+    if (!current()) return;
+    const code = errorCode(res.body);
+    if (res.status === 404 && code === "memory_unavailable") {
+      memoryDisabled = true;
+      graphStatus = "error: 記憶は無効です";
+      notice = "記憶は無効です";
+      return;
+    }
+    if (res.status === 503 && code === "memory_graph_unavailable") {
+      graphStatus = "グラフ機能は記憶サーバーの更新後に利用できます";
+      notice = "グラフ機能は記憶サーバーの更新後に利用できます";
+      return;
+    }
+    if (res.status !== 200) {
+      graphStatus = "error: グラフの取得に失敗しました";
+      notice = "記憶グラフの取得に失敗しました";
+      return;
+    }
+    const data = parseGraphData(res.body);
+    if (data === null) {
+      graphStatus = "error: グラフの取得に失敗しました";
+      notice = "記憶グラフの取得に失敗しました";
+      return;
+    }
+    const previous = graphScope;
+    graphScope = {
+      sessionId,
+      searchId: data.searchId,
+      runId,
+      scope: data.scope,
+      center: data.center,
+    };
+    // A mutation refetch can mint a new snapshot searchId: keep the current
+    // detail actionable by moving its binding to the fresh snapshot.
+    if (previous !== null && scope?.searchId === previous.searchId) {
+      scope = { sessionId, searchId: data.searchId, runId };
+    }
+    if (
+      graphSelected !== null &&
+      !data.nodes.some((node) => node.handle === graphSelected)
+    ) {
+      graphSelected = null;
+    }
+    canvas?.setGraph(data, { selected: graphSelected, query });
+    if (data.nodes.length === 0) {
+      graphStatus = "記憶がありません";
+    } else if (data.truncated) {
+      graphStatus = "一部のみ表示（上限）";
+    } else {
+      graphStatus = "";
+    }
+  } finally {
+    if (current()) graphLoading = false;
+  }
+}
+
+/** Graph node click: select it and open the existing bound detail flow. */
+async function activateGraphNode(handle: string): Promise<void> {
+  const target = graphScope;
+  if (target === null) return;
+  graphSelected = handle;
+  canvas?.setSelected(handle);
+  await openDetail(target.searchId, handle);
+}
+
+/** Refresh the visible graph after an acked mutation (version-cached). */
+function refreshGraphAfterMutation(): void {
+  if (view !== "graph" || graphScope === null) return;
+  void loadGraph(graphScope.scope);
+}
+
+$effect(() => {
+  const element = graphCanvasEl;
+  if (element === null || canvas !== null) return;
+  canvas = new GraphCanvas(element, {
+    onNodeActivate: (handle) => {
+      void activateGraphNode(handle);
+    },
+    onSelectionChange: (handle) => {
+      graphSelected = handle;
+    },
+  });
+  return () => {
+    canvas?.destroy();
+    canvas = null;
+  };
+});
+
+$effect(() => {
+  const text = query;
+  if (view === "graph") canvas?.setSearchQuery(text);
+});
+
 async function openDetail(target: string, handle: string): Promise<void> {
-  if (scope === null || scope.searchId !== target) {
+  // A detail can belong to the explicit list search or the graph snapshot
+  // (its own session-bound searchId); only a matching authoritative scope
+  // is bound, so a stale searchId still fails closed.
+  const resolved =
+    scope?.searchId === target
+      ? scope
+      : listScope?.searchId === target
+        ? listScope
+        : graphScope?.searchId === target
+          ? graphScope
+          : null;
+  if (resolved === null) {
     notice = "古い検索結果です。再検索してください";
     return;
   }
   // Session switch guard: the old search's scope must never render its
   // detail inside the new session's UI.
-  if (scope.sessionId !== getSessionId()) {
+  if (resolved.sessionId !== getSessionId()) {
     notice = "セッションが変わりました。再検索してください";
     return;
   }
-  const sessionId = scope.sessionId;
+  scope = resolved;
+  const sessionId = resolved.sessionId;
   detailSeq += 1;
   const seq = detailSeq;
   actionsDisabled = true;
@@ -275,6 +469,10 @@ async function openDetail(target: string, handle: string): Promise<void> {
     correctText = "";
   }
   selected = { searchId: target, handle };
+  if (graphScope?.searchId === target) {
+    graphSelected = handle;
+    canvas?.setSelected(handle);
+  }
   detailVisible = true;
   detailBody =
     `引用スナップショット ${handle} [${snapshotStatus}]\n${snapshotSnippet}\n---\n` +
@@ -319,6 +517,7 @@ async function pollOperation(
     if (status === "acked") {
       opStatus = "acked: 適用済み";
       operation = operationId;
+      refreshGraphAfterMutation();
       return;
     }
     if (status === "failed") {
@@ -368,6 +567,7 @@ async function postMutation(
     if (body.status === "acked") {
       opStatus = "acked: 適用済み";
       operation = operationId;
+      refreshGraphAfterMutation();
       return;
     }
     if (body.status === "failed") {
@@ -500,8 +700,26 @@ $effect(() => {
   searchSeq += 1;
   detailSeq += 1;
   opSeq += 1;
+  graphSeq += 1;
   selected = null;
   scope = null;
+  listScope = null;
+  graphScope = null;
+  graphSelected = null;
+  graphStatus = "";
+  graphLoading = false;
+  canvas?.setGraph(
+    {
+      searchId: "",
+      version: "",
+      scope: "global",
+      center: null,
+      nodes: [],
+      edges: [],
+      truncated: false,
+    },
+    { selected: null },
+  );
   hits = [];
   searchId = null;
   operation = null;
@@ -520,10 +738,28 @@ $effect(() => {
 
 <section id="memory" aria-label="記憶の管理" class="feature-panel">
   <h2>記憶の管理</h2>
+  <div id="memory-view-toggle" role="group" aria-label="表示切替">
+    <button
+      id="memory-view-list"
+      type="button"
+      aria-pressed={view === "list"}
+      onclick={() => switchView("list")}>一覧</button
+    >
+    <button
+      id="memory-view-graph"
+      type="button"
+      aria-pressed={view === "graph"}
+      onclick={() => switchView("graph")}>グラフ</button
+    >
+  </div>
   <form
     id="memory-search-form"
     onsubmit={(event) => {
       event.preventDefault();
+      if (view === "graph") {
+        applyGraphSearch();
+        return;
+      }
       void search();
     }}
   >
@@ -540,18 +776,113 @@ $effect(() => {
   {#if notice.length > 0}
     <p class="memory-notice" role="status">{notice}</p>
   {/if}
-  <ul id="memory-list">
-    {#each hits as hit (hit.handle)}
-      <li>
+  {#if view === "graph"}
+    <div id="memory-graph">
+      <div id="memory-graph-toolbar">
         <button
+          id="memory-graph-global"
           type="button"
-          onclick={() => void openDetail(searchId ?? "", hit.handle)}
+          aria-pressed={(graphScope?.scope ?? "global") === "global"}
+          disabled={graphLoading}
+          onclick={() => void loadGraph("global")}>全体</button
         >
-          {hit.handle} [{hit.status}] {hit.snippet}
-        </button>
-      </li>
-    {/each}
-  </ul>
+        <button
+          id="memory-graph-local"
+          type="button"
+          aria-pressed={graphScope?.scope === "local"}
+          disabled={graphLoading ||
+            (graphSelected === null && selected === null)}
+          onclick={() => void loadGraph("local")}>ローカル</button
+        >
+        <label>
+          深さ
+          <select
+            id="memory-graph-depth"
+            bind:value={graphDepth}
+            onchange={() => {
+              if (view === "graph" && graphScope?.scope === "local") {
+                void loadGraph("local");
+              }
+            }}
+          >
+            <option value="1">1</option>
+            <option value="2">2</option>
+          </select>
+        </label>
+        <label>
+          <input
+            id="memory-graph-retired"
+            type="checkbox"
+            bind:checked={graphRetired}
+            onchange={() => {
+              if (view === "graph" && graphScope?.scope !== "local") {
+                void loadGraph("global");
+              }
+            }}
+          />
+          引退も表示
+        </label>
+        <p id="memory-graph-status" aria-live="polite">{graphStatus}</p>
+      </div>
+      <svg
+        bind:this={graphCanvasEl}
+        id="memory-graph-canvas"
+        role="img"
+        aria-label="記憶グラフ"
+        viewBox="0 0 800 480"
+        preserveAspectRatio="xMidYMid meet"
+      ></svg>
+      <p
+        id="memory-graph-legend"
+        class="memory-graph-legend"
+        aria-label="グラフの凡例"
+      >
+        <span class="memory-graph-legend__item">
+          <span
+            class="memory-graph-legend__swatch memory-graph-legend__swatch--user-fact"
+            aria-hidden="true"
+          ></span>事実
+        </span>
+        <span class="memory-graph-legend__item">
+          <span
+            class="memory-graph-legend__swatch memory-graph-legend__swatch--model-inference"
+            aria-hidden="true"
+          ></span>推論
+        </span>
+        <span class="memory-graph-legend__item">
+          <span
+            class="memory-graph-legend__swatch memory-graph-legend__swatch--summary"
+            aria-hidden="true"
+          ></span>要約
+        </span>
+        <span class="memory-graph-legend__item">
+          <span
+            class="memory-graph-legend__swatch memory-graph-legend__swatch--correction"
+            aria-hidden="true"
+          ></span>訂正
+        </span>
+        <span class="memory-graph-legend__item">
+          <span
+            class="memory-graph-legend__swatch memory-graph-legend__swatch--retired"
+            aria-hidden="true"
+          ></span>引退
+        </span>
+      </p>
+    </div>
+  {:else}
+    <ul id="memory-list">
+      {#each hits as hit (hit.handle)}
+        <li>
+          <button
+            type="button"
+            onclick={() => void openDetail(searchId ?? "", hit.handle)}
+          >
+            {hit.handle} [{hit.status}] {hit.snippet}
+          </button>
+        </li>
+      {/each}
+    </ul>
+  {/if}
   <div id="memory-detail" hidden={!detailVisible}>
     <pre id="memory-detail-body">{detailBody}</pre>
     <textarea id="memory-correct-input" bind:value={correctText}></textarea>
