@@ -2450,11 +2450,12 @@ export function createKernelRepository(
                 r.next_revision AS next_revision, r.created_at AS resource_created_at,
                 s.revision AS revision, s.source_revision AS source_revision,
                 s.content_hash AS content_hash, s.size_bytes AS size_bytes,
-                s.observed_at AS observed_at, s.created_at AS snapshot_created_at,
-                s.body_json AS body_json
+                 s.observed_at AS observed_at, s.created_at AS snapshot_created_at,
+                 s.body_json AS body_json, w.url AS web_result_url
            FROM session_references sr
            JOIN resources r ON r.id = sr.resource_id
            JOIN resource_snapshots s ON s.id = sr.snapshot_id
+           LEFT JOIN web_result_urls w ON w.snapshot_id = s.id
           WHERE sr.session_id = ? AND sr.id = ?`,
       )
       .get(session, reference) as
@@ -2476,6 +2477,7 @@ export function createKernelRepository(
           observed_at: number;
           snapshot_created_at: number;
           body_json: string;
+          web_result_url: string | null;
         }
       | undefined;
     if (row === undefined) {
@@ -2487,6 +2489,17 @@ export function createKernelRepository(
       () => SnapshotBodySchema.parse(JSON.parse(row.body_json)),
       "stored snapshot body",
     );
+    // Fail-closed web URL surfacing (design §5): the side table only ever
+    // receives connector-validated http(s) URLs, but a stored value that
+    // fails the scheme allowlist/bound degrades to null instead of ever
+    // reaching the UI as a link target.
+    const storedWebUrl = row.web_result_url;
+    const webResultUrl =
+      typeof storedWebUrl === "string" &&
+      storedWebUrl.length <= 2048 &&
+      /^https?:\/\//.test(storedWebUrl)
+        ? storedWebUrl
+        : null;
     return parseOrValidation(
       () =>
         ReferenceDetailResponseSchema.parse({
@@ -2513,6 +2526,7 @@ export function createKernelRepository(
             observedAt: row.observed_at,
           },
           body,
+          webResultUrl,
         }),
       "reference detail response",
     );

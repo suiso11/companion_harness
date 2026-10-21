@@ -204,6 +204,9 @@ export function toolKindLabel(tool: unknown): string | null {
   if (typeof tool !== "string") {
     return null;
   }
+  if (tool.startsWith("web.")) {
+    return "ウェブ検索";
+  }
   if (tool.startsWith("calendar.")) {
     return "カレンダー検索";
   }
@@ -239,6 +242,12 @@ export function formatPhaseText(
     case "tool": {
       const labels = toolPhaseLabels(toolNames);
       const count = `${toolCompleted}/${toolRequested}`;
+      // Web search runs its own dedicated phase wording (design slice ③):
+      // a pure web.search tool phase reads「ウェブ検索中…」instead of the
+      // generic count line. Mixed tool phases keep the generic line.
+      if (labels.length === 1 && labels[0] === "ウェブ検索") {
+        return "ウェブ検索中…";
+      }
       if (labels.length === 0) {
         return `ツール実行中（${count}）`;
       }

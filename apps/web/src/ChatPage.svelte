@@ -206,6 +206,21 @@ let elapsedTimer: number | null = null;
 let retryTurnId: string | null = $state(null);
 let drawerOpen = $state(false);
 let drawerBody = $state("");
+// Slice ③ web citation drawer: only references whose detail carries a
+// verified http(s) `webResultUrl` (connector kind `web`) render the
+// external-link block. The URL is re-validated client-side; nothing else
+// ever becomes an <a href>.
+let drawerWeb: {
+  title: string;
+  url: string;
+  snippet: string;
+} | null = $state(null);
+// Web citation chip labels (title bounded + host), hydrated lazily from the
+// stored reference detail. Memory-only (never persisted); the version tick
+// is the reactive dependency the template reads.
+let chipMeta = new Map<string, string>();
+let chipMetaVersion = $state(0);
+const chipHydrationDone = new Set<string>();
 let cards: CardState[] = $state([]);
 let authExpired = $state(false);
 let loginPassword = $state("");
@@ -1501,6 +1516,105 @@ async function checkDegradedMemory(runId: string): Promise<void> {
 }
 
 // --- citations (rN stored + mN run-bound, §16.5) ---
+
+/** Chip text for one citation: hydrated web chips show rN + title（host）. */
+function chipLabel(citation: string): string {
+  void chipMetaVersion;
+  const key = `${sessionId ?? ""}:${citation}`;
+  return chipMeta.get(key) ?? citation;
+}
+
+/**
+ * Lazily resolve one rN citation against the stored references. Only
+ * web-backed references (detail `webResultUrl`, scheme http/https) get a
+ * hydrated label; everything else keeps the plain rN text. One attempt per
+ * citation per session (failures are terminal for the chip, never fatal).
+ */
+async function hydrateChip(citation: string, sid: string): Promise<void> {
+  if (!/^r[1-9][0-9]*$/.test(citation)) return;
+  const key = `${sid}:${citation}`;
+  if (chipHydrationDone.has(key)) return;
+  chipHydrationDone.add(key);
+  let listed: { status: number; body: unknown };
+  try {
+    listed = await fetchJson(
+      `/api/sessions/${encodeURIComponent(sid)}/references`,
+    );
+  } catch {
+    return;
+  }
+  const items = (listed.body as { items?: unknown }).items;
+  let referenceId: string | null = null;
+  if (Array.isArray(items)) {
+    for (const item of items as Array<{ id?: unknown; ordinal?: unknown }>) {
+      const label =
+        typeof item.ordinal === "number" ? `r${item.ordinal}` : null;
+      if (label !== null && label === citation && typeof item.id === "string") {
+        referenceId = item.id;
+        break;
+      }
+    }
+  }
+  if (referenceId === null) return;
+  let detail: { status: number; body: unknown };
+  try {
+    detail = await fetchJson(
+      `/api/sessions/${encodeURIComponent(sid)}/references/${encodeURIComponent(referenceId)}`,
+    );
+  } catch {
+    return;
+  }
+  if (detail.status !== 200) return;
+  const parsed = detail.body as {
+    webResultUrl?: unknown;
+    resource?: { title?: unknown };
+  };
+  if (typeof parsed.webResultUrl !== "string") return;
+  // Client-side scheme re-validation: the drawer link and the chip are only
+  // built from http(s) URLs, never from anything else the API might carry.
+  if (!/^https?:\/\//.test(parsed.webResultUrl)) return;
+  let host = "";
+  try {
+    host = new URL(parsed.webResultUrl).host;
+  } catch {
+    return;
+  }
+  const rawTitle =
+    typeof parsed.resource?.title === "string" ? parsed.resource.title : "";
+  const title = rawTitle.length > 32 ? `${rawTitle.slice(0, 32)}…` : rawTitle;
+  chipMeta.set(
+    key,
+    title.length > 0
+      ? `${citation} ${title}（${host}）`
+      : `${citation}（${host}）`,
+  );
+  chipMetaVersion += 1;
+}
+
+// Hydrate web chips for every visible rN citation (transcript + live
+// answer). Re-runs as those reactive sources change; per-citation hydration
+// is attempted exactly once.
+$effect(() => {
+  const sid = sessionId;
+  if (sid === null) return;
+  const citations = new Set<string>();
+  for (const turn of turns) {
+    for (const part of answerPartsForTurn(turn)) {
+      for (const citation of part.citations) {
+        citations.add(citation);
+      }
+    }
+  }
+  for (const part of liveAnswer) {
+    for (const citation of part.citations) {
+      citations.add(citation);
+    }
+  }
+  for (const citation of citations) {
+    void hydrateChip(citation, sid);
+  }
+});
+
 async function updateReferenceContextCas(
   referenceId: string,
   sid: string,
@@ -1555,6 +1669,7 @@ async function openCitation(citation: string, runId?: string): Promise<void> {
   const seq = citationSeq;
   const sid = sessionId;
   drawerBody = "";
+  drawerWeb = null;
   drawerOpen = false;
   if (/^m[1-9][0-9]*$/.test(citation)) {
     await openMemoryCitation(citation, runId, seq, sid);
@@ -1603,6 +1718,24 @@ async function openCitation(citation: string, runId?: string): Promise<void> {
       ? (snapshot as { text?: unknown }).text
       : snapshot;
   drawerBody = loadText(snapshotText);
+  // Web reference drawer (slice ③): verified stored URL + resource title.
+  // Scheme allowlist enforced twice (repository + here) so only http(s)
+  // URLs ever become link targets; the visible link text is the full URL.
+  const webUrl = (detail.body as { webResultUrl?: unknown }).webResultUrl;
+  if (typeof webUrl === "string" && /^https?:\/\//.test(webUrl)) {
+    const resourceTitle =
+      typeof (detail.body as { resource?: { title?: unknown } }).resource
+        ?.title === "string"
+        ? (detail.body as { resource: { title: string } }).resource.title
+        : "";
+    drawerWeb = {
+      title: resourceTitle,
+      url: webUrl,
+      snippet: loadText(snapshotText),
+    };
+  } else {
+    drawerWeb = null;
+  }
   drawerOpen = true;
 }
 
@@ -1657,6 +1790,7 @@ async function openMemoryCitation(
 function closeDrawer(): void {
   citationSeq += 1;
   drawerBody = "";
+  drawerWeb = null;
   drawerOpen = false;
 }
 
@@ -2841,12 +2975,13 @@ function evidenceForTurn(turn: Turn): {
                   {#each part.citations as citation (citation)}
                     <button
                       type="button"
+                      data-citation={citation}
                       aria-label={citation.startsWith("m")
                         ? `この回答の記憶引用 ${citation}`
                         : `保存された引用 ${citation}`}
                       onclick={() => void openCitation(citation, runId)}
                     >
-                      {citation}
+                      {chipLabel(citation)}
                     </button>
                   {/each}
                 {/each}
@@ -2948,12 +3083,13 @@ function evidenceForTurn(turn: Turn): {
             {#each part.citations as citation (citation)}
               <button
                 type="button"
+                data-citation={citation}
                 aria-label={citation.startsWith("m")
                   ? `この回答の記憶引用 ${citation}`
                   : `保存された引用 ${citation}`}
                 onclick={() => void openCitation(citation, runId)}
               >
-                {citation}
+                {chipLabel(citation)}
               </button>
             {/each}
           {/each}
@@ -3046,6 +3182,21 @@ function evidenceForTurn(turn: Turn): {
     }}
   >
     <pre id="drawer-body">{drawerBody}</pre>
+    {#if drawerWeb !== null}
+      <div class="web-citation" data-web-citation="true">
+        <p data-web-citation-title="true">{drawerWeb.title}</p>
+        <p data-web-citation-snippet="true">{drawerWeb.snippet}</p>
+        <!-- External launch only: the verified http(s) URL, full text
+             visible, no favicon/remote image fetch. -->
+        <a
+          data-web-citation-url="true"
+          href={drawerWeb.url}
+          target="_blank"
+          rel="noopener noreferrer nofollow"
+          >{drawerWeb.url}</a
+        >
+      </div>
+    {/if}
     <button type="button" onclick={closeDrawer}>閉じる</button>
   </div>
 
