@@ -196,6 +196,49 @@ describe("web.search guard", () => {
     }
   });
 
+  it("exempts a verbatim substring of the current user turn's text from the memory guard", async () => {
+    const { handle, repo, registration } = await openStack();
+    try {
+      // The user explicitly (verbatim) types a phrase that also appears in
+      // an injected memory snippet for this run.
+      const sessionId = repo.createSession({ key: generateId(), now: T0 }).body
+        .sessionId;
+      const userText = "search for secret-context-abc online";
+      const posted = repo.postMessage(
+        sessionId,
+        { text: userText },
+        { key: generateId(), now: T0 },
+      );
+      const runId = posted.body.run.id;
+      repo.startRun(runId, { now: T0 + 1 });
+      const snippet = "secret-context-abc-XYZ-9876"; // 27 code points
+      repo.recordMemoryExposure(exposureOf({ sessionId, runId, snippet }), {
+        now: T0,
+      });
+      // 1) The ≥16 cp memory window the USER typed verbatim is exempt.
+      await invoke(
+        registration,
+        input("secret-context-abc recent news"),
+        ctx(runId),
+      );
+      expect(fakeFetchCalls).toEqual(["secret-context-abc recent news"]);
+      // 2) A different ≥16 cp memory window NOT present in the user's text
+      //    is still rejected as model-derived exfiltration.
+      expect(
+        await rejectedCode(
+          invoke(
+            registration,
+            input("cret-context-abc-XYZ more"),
+            ctx(runId),
+          ) as Promise<unknown>,
+        ),
+      ).toBe("web_query_rejected");
+      expect(fakeFetchCalls).toEqual(["secret-context-abc recent news"]);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
   it("guard rejection happens BEFORE the per-turn reservation and never consumes web budget", async () => {
     const { handle, repo, registration } = await openStack({
       perTurnBudget: 2,

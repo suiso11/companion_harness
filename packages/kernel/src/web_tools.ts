@@ -155,8 +155,31 @@ export function createWebSearchRegistration(options: {
     if (WEB_CITATION_TOKEN_REGEX.test(query)) {
       throw new ToolError("web_query_rejected");
     }
+    // Exempt verbatim text of the CURRENT user turn input (design §8.3 /
+    // acceptance criterion): when the user explicitly asks to search a
+    // phrase they themselves typed, the model's faithful query must not be
+    // dropped as a model-derived exfiltration attempt. If the current turn
+    // input cannot be read or is not user text, no exemption applies.
+    let currentUserTurnText: string | null = null;
+    try {
+      const turnId = repo.getRun(ctx.runId).turnId;
+      if (turnId !== null) {
+        const turn = repo.getTurn(turnId);
+        if (turn.input.kind === "user_text") {
+          currentUserTurnText = turn.input.text;
+        }
+      }
+    } catch {
+      currentUserTurnText = null;
+    }
     // 2) Exfiltration: a ≥WEB_MEMORY_EXFIL_WINDOW contiguous code-point
     //    substring of ANY injected memory snippet present in the query.
+    //    Verbatim text of the CURRENT user turn input is exempt (design
+    //    §8.3 / acceptance criterion): when the user explicitly asks to
+    //    search a phrase they themselves typed, the model's faithful query
+    //    must not be dropped as a model-derived exfiltration attempt. If
+    //    the current turn input cannot be read or is not user text, no
+    //    exemption applies (fail closed).
     const seenWindows = new Set<string>();
     for (const snippet of listInjectedMemoryExposures(ctx.runId)) {
       const points = Array.from(snippet);
@@ -167,9 +190,12 @@ export function createWebSearchRegistration(options: {
         const window = points.slice(i, i + WEB_MEMORY_EXFIL_WINDOW).join("");
         if (seenWindows.has(window)) continue;
         seenWindows.add(window);
-        if (query.includes(window)) {
-          throw new ToolError("web_query_rejected");
+        if (!query.includes(window)) continue;
+        if (currentUserTurnText?.includes(window)) {
+          // Verbatim from the current user's request → exempt.
+          continue;
         }
+        throw new ToolError("web_query_rejected");
       }
     }
 
