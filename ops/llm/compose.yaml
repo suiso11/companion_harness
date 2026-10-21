@@ -56,3 +56,27 @@ services:
     depends_on:
       gemma:
         condition: service_healthy
+
+  searxng:
+    # Self-hosted web-search backend for Companion (docs/plan/web_search_design.md).
+    # Loopback bind only: 127.0.0.1:8888 — never exposed to the tailnet or LAN.
+    image: docker.io/searxng/searxng@sha256:5ed0323b5f5f8701264ef65e239a2bd83cb57098f2b971fa30bf79c06eeae271
+    container_name: searxng
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8888:8080"
+    volumes:
+      - ./searxng:/etc/searxng:ro
+    environment:
+      # The image resolves server.secret_key from SEARXNG_SECRET
+      # (searxng settings_defaults: SettingsValue(environ_name='SEARXNG_SECRET')).
+      # Always set at apply time by ops/llm/apply.sh into /srv/llm/.env.
+      SEARXNG_SECRET: ${SEARXNG_SECRET}
+      # Skip entrypoint ownership fixes; /etc/searxng is a read-only volume.
+      FORCE_OWNERSHIP: "false"
+    healthcheck:
+      # /healthz (NOT /health — /health does not succeed, see design doc).
+      # The image ships neither curl nor wget; use python3 stdlib.
+      test:
+        - CMD-SHELL
+        - python3 -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8080/healthz", timeout=5)'

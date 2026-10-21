@@ -4514,6 +4514,7 @@ journalctl --user -u companion-backup.service -n 50
 - `/` と `/srv` の空き容量 (<10% で error)
 - Companion / remind の最新バックアップ age (>36h で error,
   `COMPANION_BACKUP_MAX_AGE_HOURS` で変更可)
+- SearXNG `127.0.0.1:8888/healthz` (searxng コンテナが存在するホストのみ)
 
 問題時は `systemd-cat -p err -t companion-health` で journal に記録する。
 `companion`, `companion-deploy`, `companion-backup` には
@@ -4578,8 +4579,60 @@ ops/llm/apply.sh
 ops/llm/apply.sh --yes
 ```
 
-`apply.sh` は `compose.yaml` と `litellm_config.yaml` だけをコピーし、
-`.env` は読まない/コピーしない。`--dest` / `LLM_DIR` で配置先を変更できる。
+`apply.sh` は `compose.yaml` と `litellm_config.yaml`、および
+`searxng/settings.yml` (`/srv/llm/searxng/` へ) だけをコピーし、
+`.env` は読まない/コピーしない (`SEARXNG_SECRET` 未登録の場合は起動用に
+1 行だけ追加する。下記「SearXNG」参照)。`--dest` / `LLM_DIR` で配置先を
+変更できる。
+
+### SearXNG (Web 検索バックエンド, loopback のみ)
+
+Companion の `web.search` ツール (実装は別 PR) は、ホスト上の
+self-hosted SearXNG を検索バックエンドとして使う
+(設計: `docs/plan/web_search_design.md`)。
+
+- `127.0.0.1:8888` のみにバインド。tailnet / LAN には露出しない。
+- イメージ `searxng/searxng` は digest pin (litellm と同様)。更新時は
+  `docker pull searxng/searxng:latest` 後に
+  `docker inspect --format '{{index .RepoDigests 0}}'` で新しい digest を
+  取得し、`ops/llm/compose.yaml` を更新して `apply.sh --yes` する。
+- 設定は `ops/llm/searxng/settings.yml`。secret はファイルに書かず、
+  イメージが `SEARXNG_SECRET` 環境変数から解決する。
+- healthcheck は `/healthz` (`/health` ではない。`/health` は 200 を
+  返さないため Compose が unhealthy 判定する)。
+
+セットアップ:
+
+```sh
+# 差分確認後、反映。SEARXNG_SECRET が /srv/llm/.env に無ければ
+# openssl rand -hex 32 で自動生成する (0600, 値は表示されない)。
+ops/llm/apply.sh --yes
+# 起動確認
+docker ps --filter name=searxng --format '{{.Status}}'
+```
+
+動作確認 (loopback から JSON 検索):
+
+```sh
+curl -s 'http://127.0.0.1:8888/search?q=test&format=json' | head -c 300
+curl -s -o /dev/null -w '%{http_code}\n' 'http://127.0.0.1:8888/healthz'
+```
+
+プライバシー注意:
+
+- 検索クエリは SearXNG からアップストリーム検索エンジン
+  (duckduckgo / startpage 等) へ送られる。認証情報や cookie は使わないが、
+  「インターネット上に送信されるテキスト」である点はユーザー確認済みの
+  決定 (設計 §1 Option B)。
+- Companion ↔ SearXNG 間は loopback のみで双方向非公開。
+- `SEARXNG_SECRET` は `/srv/llm/.env` (0600) のみに置き、コミット/表示は
+  しない。`ops/llm/rotate-keys.sh` は対象に含まれない (再生成は手作業:
+  .env の行を消して `apply.sh --yes`)。
+- SearXNG は 外部公開前提の bot 対策 (limiter) を off にしているため、
+  127.0.0.1 からしか到達不能なバインドを緩めないこと。
+
+`companion-health.sh` は searxng コンテナが存在するホストでのみ
+`127.0.0.1:8888/healthz` を監視する (未稼働 / 応答失敗で error 通知)。
 
 ## 鍵ローテーション
 
