@@ -632,7 +632,10 @@ export function normalizeWebResultUrl(raw: string): NormalizedWebUrl {
   const canonicalKey = buildWebCanonicalKey(
     sha256Hex(WEB_URL_HASH_SALT + normalized),
   );
-  return { url: cleaned, normalizedUrl: normalized, canonicalKey };
+  // Store/use the EXACT href-canonicalized spelling (IDNA punycode host,
+  // percent-encoded path) the canonical key hashes — never a raw or
+  // NFC-only variant spelling — so identity and side-table URL always agree.
+  return { url: normalized, normalizedUrl: normalized, canonicalKey };
 }
 
 /** Bounded NFC title (nullable, ≤256 code points per contracts). */

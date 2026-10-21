@@ -263,7 +263,7 @@ describe("web.search result -> rN mapping", () => {
       expect(output.hits).toHaveLength(2);
       // Model-facing rN mapping: ordinals 1 and 2 in presentation order.
       expect(output.hits.map((r) => r.ordinal)).toEqual([1, 2]);
-      expect(output.hits[0]?.url).toBe("https://Example.com/a");
+      expect(output.hits[0]?.url).toBe("https://example.com/a");
       expect(output.hits[1]?.url).toBe("https://example.com/B");
       expect(new Set(output.hits.map((r) => r.referenceId)).size).toBe(2);
       // References are persisted for the session (rN = ordinal within it).

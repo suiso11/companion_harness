@@ -1018,6 +1018,7 @@ export {
   buildWebCanonicalKey,
   DEFAULT_WEB_MAX_RESPONSE_BYTES,
   DEFAULT_WEB_TOP_K,
+  isLoopbackHostname,
   isValidLoopbackHttpUrl,
   MAX_WEB_MAX_RESPONSE_BYTES,
   MAX_WEB_QUERY_CODE_POINTS,
