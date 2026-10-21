@@ -1,0 +1,29 @@
+# Minimal SearXNG settings for the Companion web-search backend.
+# Deployed as /srv/llm/searxng/settings.yml by ops/llm/apply.sh and
+# bind-mounted read-only (ops/llm/compose.yaml). Loopback-only use.
+#
+# The secret is NOT stored in this file: the searxng image overrides
+# server.secret_key from the SEARXNG_SECRET environment variable
+# (settings_defaults.py: SettingsValue(environ_name='SEARXNG_SECRET')),
+# which compose feeds from /srv/llm/.env (apply.sh generates it).
+
+use_default_settings: true
+
+server:
+  # Loopback internal calls only; bot-mitigation rate limiting is
+  # unnecessary here and adds latency (design §2).
+  limiter: false
+  # Not a public instance: keep default image_proxy off and no
+  # public-instance telemetry/upgrade checks.
+  public_instance: false
+
+search:
+  # JSON format is required for the Companion web.search client API.
+  formats:
+    - html
+    - json
+  safe_search: 1
+  default_lang: auto
+  # External autocomplete providers send query text to third-party
+  # endpoints on every keystroke-equivalent path; disable entirely.
+  autocomplete: ""

@@ -9,6 +9,8 @@
 #   - systemctl --user is-failed for companion/companion-deploy/companion-backup
 #   - used space on / and /srv (error above 90% used)
 #   - newest backup generation age for Companion and remind (error above 36h)
+#   - SearXNG /healthz on 127.0.0.1:8888 (only when the searxng container
+#     exists on the host)
 #
 # Exit 0 when all checks pass, 1 when any check failed.
 
@@ -132,6 +134,30 @@ check_backup_age() {
 }
 check_backup_age "$BACKUP_ROOT/companion" companion
 check_backup_age "$BACKUP_ROOT/remind" remind
+
+# --- searxng (checked only when the searxng container is defined) ---
+# ops/llm/compose.yaml pins container_name: searxng and binds
+# 127.0.0.1:8888. Hosts without the web-search stack are never reported.
+SEARXNG_URL="${SEARXNG_URL:-http://127.0.0.1:8888/healthz}"
+if command -v docker >/dev/null 2>&1; then
+  searxng_state="$(docker inspect --format '{{.State.Running}}' searxng 2>/dev/null || echo missing)"
+  case "$searxng_state" in
+    missing) : ;; # stack not deployed on this host; skip silently
+    false)
+      report_problem searxng "searxng health failed: container not running"
+      ;;
+    true)
+      if ! curl -fsS --max-time 5 "$SEARXNG_URL" >/dev/null 2>&1; then
+        report_problem searxng "searxng health failed: $SEARXNG_URL"
+      else
+        report_recovered searxng
+      fi
+      ;;
+    *)
+      report_problem searxng "searxng health failed: unexpected inspect state"
+      ;;
+  esac
+fi
 
 if [ "$FAILURES" -gt 0 ]; then
   # A single journal line with the count keeps `journalctl -p err` readable.
