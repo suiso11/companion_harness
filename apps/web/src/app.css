@@ -221,22 +221,39 @@ body {
   font-size: 1rem;
 }
 
-/* Transcript rows: assistant/history turns read as borderless rows; the
- * user's own turns render as muted right-side bubbles (llama.cpp chat). */
-#conversation section {
-  border: none;
-  background: transparent;
-  padding: 0.25rem 0;
-  min-width: 0;
-}
-
-#conversation section[data-turn-kind="user_text"] {
+/* Transcript rows (task ui-separate-turn-bubbles): each turn is an outer
+ * wrapper `<section data-turn-kind>` kept visually neutral (e2e DOM
+ * contract). Inside it, the user's prompt renders as a right-aligned
+ * muted bubble (.msg-user-row) and the assistant answer as a separate
+ * left-aligned row (.msg-assistant-row) below it — llama.cpp WebUI look.
+ * Spacing between adjacent rows inside one turn is smaller than the gap
+ * .messages applies between turns. */
+#conversation .msg-user-row {
   align-self: flex-end;
+  margin-left: auto;
+  /* Codex review PR #107: intrinsic width so short prompts shrink to their
+   * content and stay compact right-aligned bubbles; long messages still
+   * expand to the cap below and wrap. */
+  width: fit-content;
   max-width: min(85%, 36rem);
   background: var(--muted);
   color: var(--foreground);
-  border-color: transparent;
   border-radius: var(--radius-xl);
+  padding: 0.25rem 0.875rem;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+#conversation .msg-assistant-row {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* Tight vertical rhythm inside one turn's assistant row (smaller than the
+ * .messages gap between turns). */
+#conversation .msg-assistant-row > * + * {
+  margin-top: 0.375rem;
 }
 
 #conversation section[data-run-progress="true"],
@@ -245,7 +262,6 @@ body {
   border-color: transparent;
   padding: 0.25rem 0;
 }
-
 #conversation p {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -612,7 +628,7 @@ button[data-action-evidence="before"] {
     width: 100%;
   }
 
-  #conversation section[data-turn-kind="user_text"] {
+  #conversation .msg-user-row {
     max-width: 100%;
   }
 }
