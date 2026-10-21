@@ -1535,58 +1535,56 @@ async function hydrateChip(citation: string, sid: string): Promise<void> {
   const key = `${sid}:${citation}`;
   if (chipHydrationDone.has(key)) return;
   chipHydrationDone.add(key);
-  let listed: { status: number; body: unknown };
-  try {
-    listed = await fetchJson(
-      `/api/sessions/${encodeURIComponent(sid)}/references`,
-    );
-  } catch {
-    return;
-  }
-  const items = (listed.body as { items?: unknown }).items;
+  // The scheme allowlist is enforced twice (repository + here): the chip and
+  // the drawer link are only ever built from http(s) URLs.
+  const isHttp = (raw: unknown): raw is string =>
+    typeof raw === "string" && /^https?:\/\//.test(raw);
+  const base = `/api/sessions/${encodeURIComponent(sid)}/references`;
   let referenceId: string | null = null;
-  if (Array.isArray(items)) {
-    for (const item of items as Array<{ id?: unknown; ordinal?: unknown }>) {
-      const label =
-        typeof item.ordinal === "number" ? `r${item.ordinal}` : null;
-      if (label !== null && label === citation && typeof item.id === "string") {
-        referenceId = item.id;
+  let webUrl: string | null = null;
+  let title = "";
+  try {
+    // fetchJson + item iteration share one guard: any failure or unexpected
+    // shape is terminal for the chip (exact ordinal match = `r${ordinal}`).
+    const listed = await fetchJson(base);
+    for (const item of ((listed.body as { items?: unknown }).items as Array<{
+      id?: unknown;
+      ordinal?: unknown;
+    }>) ?? []) {
+      if (item.ordinal === Number(citation.slice(1))) {
+        if (typeof item.id === "string") referenceId = item.id;
         break;
       }
     }
-  }
-  if (referenceId === null) return;
-  let detail: { status: number; body: unknown };
-  try {
-    detail = await fetchJson(
-      `/api/sessions/${encodeURIComponent(sid)}/references/${encodeURIComponent(referenceId)}`,
-    );
+    if (referenceId !== null) {
+      const detail = await fetchJson(
+        `${base}/${encodeURIComponent(referenceId)}`,
+      );
+      if (detail.status === 200) {
+        const body = detail.body as {
+          webResultUrl?: unknown;
+          resource?: { title?: unknown };
+        };
+        webUrl = isHttp(body.webResultUrl) ? body.webResultUrl : null;
+        if (webUrl !== null) {
+          title =
+            typeof body.resource?.title === "string" ? body.resource.title : "";
+        }
+      }
+    }
+    if (webUrl === null) return;
   } catch {
     return;
   }
-  if (detail.status !== 200) return;
-  const parsed = detail.body as {
-    webResultUrl?: unknown;
-    resource?: { title?: unknown };
-  };
-  if (typeof parsed.webResultUrl !== "string") return;
-  // Client-side scheme re-validation: the drawer link and the chip are only
-  // built from http(s) URLs, never from anything else the API might carry.
-  if (!/^https?:\/\//.test(parsed.webResultUrl)) return;
   let host = "";
   try {
-    host = new URL(parsed.webResultUrl).host;
+    host = new URL(webUrl).host;
   } catch {
     return;
   }
-  const rawTitle =
-    typeof parsed.resource?.title === "string" ? parsed.resource.title : "";
-  const title = rawTitle.length > 32 ? `${rawTitle.slice(0, 32)}…` : rawTitle;
   chipMeta.set(
     key,
-    title.length > 0
-      ? `${citation} ${title}（${host}）`
-      : `${citation}（${host}）`,
+    `${citation}${title.length > 0 ? ` ${title.length > 32 ? `${title.slice(0, 32)}…` : title}` : ""}（${host}）`,
   );
   chipMetaVersion += 1;
 }
@@ -1721,21 +1719,22 @@ async function openCitation(citation: string, runId?: string): Promise<void> {
   // Web reference drawer (slice ③): verified stored URL + resource title.
   // Scheme allowlist enforced twice (repository + here) so only http(s)
   // URLs ever become link targets; the visible link text is the full URL.
-  const webUrl = (detail.body as { webResultUrl?: unknown }).webResultUrl;
-  if (typeof webUrl === "string" && /^https?:\/\//.test(webUrl)) {
-    const resourceTitle =
-      typeof (detail.body as { resource?: { title?: unknown } }).resource
-        ?.title === "string"
-        ? (detail.body as { resource: { title: string } }).resource.title
-        : "";
-    drawerWeb = {
-      title: resourceTitle,
-      url: webUrl,
-      snippet: loadText(snapshotText),
-    };
-  } else {
-    drawerWeb = null;
-  }
+  const webBody = detail.body as {
+    webResultUrl?: unknown;
+    resource?: { title?: unknown };
+  };
+  drawerWeb =
+    typeof webBody.webResultUrl === "string" &&
+    /^https?:\/\//.test(webBody.webResultUrl)
+      ? {
+          title:
+            typeof webBody.resource?.title === "string"
+              ? webBody.resource.title
+              : "",
+          url: webBody.webResultUrl,
+          snippet: loadText(snapshotText),
+        }
+      : null;
   drawerOpen = true;
 }
 
