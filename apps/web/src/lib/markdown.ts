@@ -79,23 +79,12 @@ let highlightLanguagesPromise: Promise<void> | null = null;
  * code blocks stay static source, exactly like an unregistered language.
  */
 export function loadHighlightLanguages(): Promise<void> {
-  highlightLanguagesPromise ??= Promise.all([
-    import("highlight.js/lib/languages/bash"),
-    import("highlight.js/lib/languages/diff"),
-    import("highlight.js/lib/languages/json"),
-    import("highlight.js/lib/languages/plaintext"),
-    import("highlight.js/lib/languages/python"),
-    import("highlight.js/lib/languages/typescript"),
-  ])
-    .then(([bash, diff, json, plaintext, python, typescript]) => {
-      lowlight.register({
-        bash: bash.default,
-        diff: diff.default,
-        json: json.default,
-        plaintext: plaintext.default,
-        python: python.default,
-        typescript: typescript.default,
-      });
+  // One dynamic import = one lazy chunk (see `highlight-languages.ts`):
+  // per-grammar dynamic imports split the six concurrent loads into six
+  // chunks, five of which the bundle budget could not see (PR112 review).
+  highlightLanguagesPromise ??= import("./highlight-languages.js")
+    .then(({ highlightGrammars }) => {
+      lowlight.register({ ...highlightGrammars });
     })
     .catch(() => {
       // Never break rendering: keep the memoized (settled) promise so the
