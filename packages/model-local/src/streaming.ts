@@ -34,6 +34,7 @@ import type {
   FetchImpl,
   ModelStreamDelta,
   ModelStreamDeltaCallback,
+  RawHttpResponse,
 } from "./types.js";
 
 /** Raw per-chunk pieces produced by the accumulator (callback input). */
@@ -45,6 +46,81 @@ export interface StreamChunkPieces {
     readonly name: string;
     readonly argumentsText: string;
   }>;
+}
+
+/**
+ * Bounded capture of the raw SSE bytes actually received for one call.
+ * Disabled (zero work, no retained chunks, no extra copy) when the caller
+ * did not pass `onRawResponse`. When enabled it retains at most the existing
+ * per-call byte cap (the same effective limit that bounds reading), so the
+ * raw observer can never see more than the reader accepted. Decoding is
+ * non-fatal: malformed UTF-8 is exactly one of the failures this observer
+ * exists to expose, so replacement characters are preferable to throwing
+ * from the recording hook. Headers are never part of the captured value.
+ */
+class RawSseCapture {
+  private readonly chunks: Uint8Array[] = [];
+  private capturedBytes = 0;
+  private emitted = false;
+
+  constructor(
+    private readonly status: number,
+    private readonly limit: number,
+    private readonly onRawResponse:
+      | ((response: RawHttpResponse) => void)
+      | undefined,
+  ) {}
+
+  get enabled(): boolean {
+    return this.onRawResponse !== undefined;
+  }
+
+  /** Retain the received bytes (bounded to the per-call limit). */
+  push(value: Uint8Array): void {
+    if (!this.enabled || this.capturedBytes >= this.limit) {
+      return;
+    }
+    const remaining = this.limit - this.capturedBytes;
+    const part =
+      value.byteLength <= remaining ? value : value.subarray(0, remaining);
+    if (part.byteLength > 0) {
+      this.chunks.push(part);
+      this.capturedBytes += part.byteLength;
+    }
+  }
+
+  /**
+   * Invoke the raw observer at most once. Callback exceptions propagate
+   * unchanged (same as the non-streaming path): a recording failure must be
+   * explicit, never silently swallowed. Abort/timeout paths deliberately do
+   * not emit (see `postChatCompletionStream`).
+   */
+  emit(): void {
+    if (!this.enabled || this.emitted) {
+      return;
+    }
+    this.emitted = true;
+    const callback = this.onRawResponse as (response: RawHttpResponse) => void;
+    callback({ status: this.status, body: this.decode() });
+  }
+
+  private decode(): string {
+    if (this.chunks.length === 0) {
+      return "";
+    }
+    if (this.chunks.length === 1) {
+      return new TextDecoder().decode(this.chunks[0]);
+    }
+    const merged = new Uint8Array(this.capturedBytes);
+    let offset = 0;
+    for (const chunk of this.chunks) {
+      merged.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    // Non-fatal on purpose: invalid UTF-8 is captured as received (U+FFFD)
+    // instead of losing the raw record to a decode throw.
+    return new TextDecoder().decode(merged);
+  }
 }
 
 /** One accumulated tool call (arguments appended across chunks). */
@@ -618,6 +694,14 @@ function decodeJsonStringPrefix(
  * (effective per-call cap), fixed redacted errors. Non-2xx statuses drain
  * within the same bound and reject as `request_failed` with the status.
  * External cancellation rethrows the original abort rejection untouched.
+ * The optional `onRawResponse` observer receives the status plus the exact
+ * received SSE bytes decoded (bounded by the same cap) exactly once per
+ * call: after a completed stream before normalization, before a malformed
+ * chunk / invalid-response failure, and after a non-2xx body is drained.
+ * Headers are never included. Cancellation (external abort or timeout) does
+ * NOT invoke it: a cancelled response is not a provider response, and the
+ * abort outcome stays byte-for-byte unchanged. Declared-oversize bodies are
+ * rejected before reading and therefore have no received bytes to report.
  */
 export async function postChatCompletionStream(options: {
   fetchImpl: FetchImpl;
@@ -627,6 +711,8 @@ export async function postChatCompletionStream(options: {
   timeoutMs: number | undefined;
   signal?: AbortSignal;
   maxResponseBytes?: number;
+  /** Raw SSE-body observer invoked at most once, before normalization. */
+  onRawResponse?: (response: RawHttpResponse) => void;
   onChunkBody: (body: unknown) => void;
 }): Promise<void> {
   const safeUrl = assertPinnedLoopbackFetchUrl(options.url);
@@ -672,6 +758,11 @@ export async function postChatCompletionStream(options: {
         "request_failed",
         `model request failed with status ${status}`,
       );
+    const rawCapture = new RawSseCapture(
+      response.status,
+      limit,
+      options.onRawResponse,
+    );
     const declared = parseDeclaredContentLength(response);
     if (declared !== undefined && declared > limit) {
       cancelBody(response);
@@ -684,7 +775,17 @@ export async function postChatCompletionStream(options: {
       );
     }
     if (!response.ok) {
-      await drainBounded(response, controller, externalSignal, limit);
+      await drainBounded(
+        response,
+        controller,
+        externalSignal,
+        limit,
+        rawCapture,
+      );
+      // Non-2xx bodies are reported before the fixed status failure is
+      // thrown, mirroring `postJsonNoRedirect`. An abort/deadline during
+      // the drain skips this (drainBounded throws first).
+      rawCapture.emit();
       throw requestFailed(response.status);
     }
     await readSseStream(
@@ -692,8 +793,13 @@ export async function postChatCompletionStream(options: {
       controller,
       externalSignal,
       limit,
+      rawCapture,
       options.onChunkBody,
     );
+    // Completed stream: report the exact received bytes before the caller
+    // normalizes them (streamOpenAIChat calls normalizeOpenAIResponse after
+    // this returns).
+    rawCapture.emit();
   } finally {
     if (timer !== undefined) {
       clearTimeout(timer);
@@ -716,6 +822,7 @@ async function readSseStream(
   controller: AbortController,
   externalSignal: AbortSignal | undefined,
   limit: number,
+  rawCapture: RawSseCapture,
   onChunkBody: (body: unknown) => void,
 ): Promise<void> {
   if (isAborted(externalSignal)) {
@@ -723,6 +830,9 @@ async function readSseStream(
   }
   const stream = response.body;
   if (stream === null) {
+    // No body bytes were received; still expose the status before failing
+    // so an empty/malformed HTTP response is observable.
+    rawCapture.emit();
     throw new ModelLocalError(
       "invalid_response",
       "model returned an invalid response",
@@ -823,6 +933,9 @@ async function readSseStream(
         break;
       }
       totalBytes += value.byteLength;
+      // Retain at most the per-call cap; an overflowing chunk contributes
+      // only the prefix that fits (never beyond the existing raw bound).
+      rawCapture.push(value);
       if (totalBytes > limit) {
         cancelQuietly(reader, "exceeds limit");
         fail(
@@ -905,6 +1018,19 @@ async function readSseStream(
         "model returned an invalid response",
       );
     }
+  } catch (error) {
+    // Malformed chunk / invalid-response failures report the bytes received
+    // so far before propagating, so the private record can explain the
+    // failure. Cancellation (external abort or timeout) deliberately emits
+    // nothing: the raw observer only describes provider responses, and the
+    // abort rejection stays untouched. A chunk error cancels the request
+    // controller, but that internal cleanup must not suppress this report.
+    const timedOut =
+      error instanceof ModelLocalError && error.code === "timeout";
+    if (!isAborted(externalSignal) && !timedOut) {
+      rawCapture.emit();
+    }
+    throw error;
   } finally {
     controller.signal.removeEventListener("abort", onControllerAbort);
     try {
@@ -989,6 +1115,7 @@ async function drainBounded(
   controller: AbortController,
   externalSignal: AbortSignal | undefined,
   limit: number,
+  rawCapture: RawSseCapture,
 ): Promise<void> {
   const stream = response.body;
   if (stream === null) {
@@ -1052,6 +1179,9 @@ async function drainBounded(
         return;
       }
       total += next.value.byteLength;
+      // Same bounded capture as the successful reader: retain only bytes
+      // within the per-call cap (overflow keeps the fitting prefix).
+      rawCapture.push(next.value);
       if (total > limit) {
         cancelQuietly(reader, "exceeds limit");
         return;

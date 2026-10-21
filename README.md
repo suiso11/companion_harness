@@ -340,7 +340,11 @@ unknown       deny
 | Default timeout            |  15 sec |
 | Maximum timeout            |  60 sec |
 
-Tool の raw arguments / raw output / raw error をそのまま監査ログへ保存する設計にはしていません。
+公開 audit (`tool_calls` / `run_events` / SSE / log) は metadata-only で、
+Tool の raw arguments / raw output / raw error をそのまま保存する設計には
+していません。明示的に opt-in した private execution records
+(`COMPANION_EXECUTION_RECORDS_JSON`) だけが、別ディレクトリに raw な
+tool input / handler output / error を保存します (下記参照)。
 
 ---
 
@@ -757,7 +761,7 @@ token usage
 
 などの metadata です。
 
-以下は保存しません。
+以下は public DB / audit / log には保存しません。
 
 ```text
 API key
@@ -766,6 +770,10 @@ raw model response
 reasoning
 raw tool output
 ```
+
+唯一の例外は明示的に opt-in した private execution records
+(`COMPANION_EXECUTION_RECORDS_JSON`) で、debug 用に prompt / raw response /
+raw tool I/O を SQLite とは別の private store に保存します。
 
 ---
 
@@ -1219,7 +1227,10 @@ Citation grants                ✓
 
 Server / Model / MCP のネットワーク接続は原則 loopback に限定します。
 
-ログにも message text、prompt、tool output、file path、API key 等を保存しない方針です。
+公開 log / audit / SSE / memory は metadata-only で、message text、prompt、
+raw tool output、file path、API key 等を保存しない方針です。唯一の例外は
+明示的に opt-in した private execution records で、debug 用に raw な
+request / response / tool I/O を別ストアへ保存します (default off、下記参照)。
 
 ---
 
@@ -1367,6 +1378,78 @@ recalled and answered with structural `citations: ["m1"]`, and
 scheduling proof only). Preemption/start/stop edges are covered by
 existing unit regressions. This is not a real-model result and does
 not complete Windows manual smoke or current remote CI.
+
+# Private execution records (opt-in, local only)
+
+Unset `COMPANION_EXECUTION_RECORDS_JSON` (default) means no private
+records. When set, it must be a strict JSON object with only
+`{ directory, retentionDays? }`: `directory` is an absolute host path
+(no symlinks anywhere in the path), `retentionDays` is an integer
+`0..3650` default `30` (`0` means prune everything older than startup
+time). No HTTP route returns records; they live in a separate store, not
+in the DB or public audit.
+
+Recorded (when enabled): model request (provider/base/chat URL, model,
+messages, tool definitions, step settings, system prompt, prompt variant,
+harness fingerprint), raw response body (including exact streaming SSE
+bytes and malformed bodies; status only, never headers), normalized
+response, model outcome, tool input, raw handler output/error (including
+late/discarded settlements), and normalized tool result/error. Public
+`run_events` / `model_calls` / `tool_calls` / SSE / logs / memory remain
+metadata-only and unchanged. `web.search` calls are recorded like any
+other tool. Credential-shaped object keys (and credential keys inside
+encoded JSON bodies/arguments) are removed; arbitrary free text such as
+message content is preserved verbatim and may still contain secrets.
+There is no encryption at rest.
+
+Permissions are directories `0700` / files `0600` on POSIX (created
+directories only; pre-existing ancestors are not re-permissioned).
+Writes are atomic; a crash may leave an incomplete `.tmp-*` entry that
+`list` reports instead of pretending it was captured. A record larger
+than the per-record ceiling is reported with explicit `omitted`
+metadata. A recording write failure fails that invocation/Run (never a
+silent partial record). Startup prunes records older than
+`retentionDays`.
+
+Operate it with the local-only CLI (no record contents in logs):
+
+```bash
+pnpm records list
+pnpm records show <recordId>
+pnpm records export <runId>   # JSON on stdout
+pnpm records delete <recordId>
+pnpm records prune [days]     # default = configured retentionDays
+```
+
+The CLI fails closed when the variable is unset. It uses fixed safe
+stderr messages and prints no paths or payloads on failure.
+
+# Fixed-task comparison CLI (experimental)
+
+`pnpm compare -- /abs/input.json` runs the REAL agent path twice on one
+fixed task: baseline = the immutable base system prompt only; variant =
+the same base prompt with the operator's guidance appended (never
+replacing the base). The model comes from `COMPANION_MODEL_JSON` and
+must satisfy the same strict loopback-only parser as the server.
+
+Input is strict version-1 JSON: `version` (`1`), `prompt` (1..20000
+chars), `docs` (1..6 entries `{ key, path, title? }`; absolute,
+non-symlink regular UTF-8 files ≤32 KiB, unique keys
+`^[a-z][a-z0-9_-]{0,63}$`), `storageDirectory` (absolute),
+`variant` (`{ label, systemPrompt }`, label
+`^[A-Za-z0-9][A-Za-z0-9 _.-]{0,127}$`, guidance 1..8000 chars),
+`timeoutMs?` (1..900000, default 180000), `maxSteps?` (1..8). Unknown
+keys are rejected.
+
+Each invocation gets a fresh private `comparison-*` directory (mode
+`0700`) under `storageDirectory`, shared by both runs, with its own
+SQLite DB and private execution records. Only the fixed document tool
+(`experiment.read`) plus the terminal `answer.submit` are available; no
+production MCP/Calendar/Web tools are registered. Output contains the
+actual answers/citations/tool calls/token counts/durations for baseline
+and variant (plus task/document hashes and the storage path). It
+computes no score and never auto-adopts a variant; the operator compares
+the evidence.
 
 # Markdown References
 

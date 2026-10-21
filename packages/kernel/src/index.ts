@@ -326,6 +326,27 @@ export {
   RepositoryValidationError,
   SessionBusyError,
 } from "./errors.js";
+export type {
+  ExecutionRecorder,
+  ExecutionRecordInput,
+  ExecutionRecordListing,
+  ExecutionRecordOmission,
+  ExecutionRecordStore,
+  ExecutionRecordStoreOptions,
+  ExecutionRecordSummary,
+  StoredExecutionRecord,
+} from "./execution_records.js";
+export {
+  assertExecutionRecordDirectory,
+  createExecutionRecordStore,
+  createUnavailableExecutionRecorder,
+  EXECUTION_RECORD_MAX_BYTES,
+  EXECUTION_RECORD_RETENTION_DEFAULT_DAYS,
+  EXECUTION_RECORD_VERSION,
+  ExecutionRecordError,
+  redactRawResponseBody,
+  removeExecutionRecordDirectory,
+} from "./execution_records.js";
 export type { Deferred, GateObserver } from "./fakes.js";
 export {
   abortOnly,

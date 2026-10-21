@@ -144,6 +144,101 @@ describe("streaming request shape", () => {
   });
 });
 
+describe("raw SSE capture", () => {
+  it("reports the exact received bytes once on normal completion", async () => {
+    const body = [
+      sseChunk({ choices: [{ delta: { content: "hel" } }] }),
+      sseChunk({
+        choices: [{ delta: { content: "lo" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 1, completion_tokens: 2 },
+      }),
+      "data: [DONE]\n\n",
+    ].join("");
+    const { fetchImpl } = mockFetch(sseResponseFromChunks([body]));
+    const captured: { status: number; body: string }[] = [];
+    const result = await streamingGateway(fetchImpl).chat(baseRequest(), {
+      onRawResponse: (raw) => {
+        captured.push(raw);
+      },
+    });
+    expect(result.text).toBe("hello");
+    // Exactly once, status + entire SSE body, no headers.
+    expect(captured).toEqual([{ status: 200, body }]);
+  });
+
+  it("reports received bytes before a malformed chunk fails", async () => {
+    const prefix = sseChunk({
+      choices: [{ delta: { content: "partial" } }],
+    });
+    const malformed = "data: not-json\n\n";
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        // Separate reads: the malformed event must be reported with only
+        // the bytes actually received so far, not the trailing [DONE].
+        controller.enqueue(encoder.encode(prefix));
+        controller.enqueue(encoder.encode(malformed));
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+    const fetchImpl: FetchImpl = async () =>
+      new Response(stream, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    const captured: { status: number; body: string }[] = [];
+    try {
+      await streamingGateway(fetchImpl).chat(baseRequest(), {
+        onRawResponse: (raw) => {
+          captured.push(raw);
+        },
+      });
+      expect.unreachable();
+    } catch (error) {
+      expect((error as ModelLocalError).code).toBe("invalid_response");
+    }
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toEqual({ status: 200, body: prefix + malformed });
+  });
+
+  it("reports a drained non-2xx body before request_failed", async () => {
+    const fetchImpl: FetchImpl = async () =>
+      new Response("upstream exploded", { status: 502 });
+    const captured: { status: number; body: string }[] = [];
+    try {
+      await streamingGateway(fetchImpl).chat(baseRequest(), {
+        onRawResponse: (raw) => {
+          captured.push(raw);
+        },
+      });
+      expect.unreachable();
+    } catch (error) {
+      expect((error as ModelLocalError).code).toBe("request_failed");
+    }
+    expect(captured).toEqual([{ status: 502, body: "upstream exploded" }]);
+  });
+
+  it("propagates onRawResponse exceptions like the non-streaming path", async () => {
+    const body = [
+      sseChunk({ choices: [{ delta: {} }] }),
+      "data: [DONE]\n\n",
+    ].join("");
+    const { fetchImpl } = mockFetch(sseResponseFromChunks([body]));
+    const failure = new Error("record write failed");
+    try {
+      await streamingGateway(fetchImpl).chat(baseRequest(), {
+        onRawResponse: () => {
+          throw failure;
+        },
+      });
+      expect.unreachable();
+    } catch (error) {
+      expect(error).toBe(failure);
+    }
+  });
+});
+
 describe("reasoning deltas", () => {
   it("accumulates reasoning_content and keeps the final result identical", async () => {
     const { fetchImpl } = mockFetch(

@@ -16,7 +16,9 @@
     "typecheck": "tsc --noEmit -p tsconfig.json && pnpm --filter @companion/web typecheck",
     "typecheck:e2e": "tsc --noEmit -p apps/server/tsconfig.e2e.json",
     "lint": "biome check .",
-    "format": "biome check --write ."
+    "format": "biome check --write .",
+    "records": "pnpm --filter @companion/server records",
+    "compare": "pnpm --filter @companion/server compare"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.12",

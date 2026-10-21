@@ -62,6 +62,10 @@ import {
   RepositoryNotFoundError,
   RepositoryValidationError,
 } from "./errors.js";
+import {
+  ExecutionRecordError,
+  type ExecutionRecorder,
+} from "./execution_records.js";
 import type { KernelRepository } from "./repository.js";
 
 /* ------------------------------------------------------------------ */
@@ -208,6 +212,8 @@ export interface ToolBrokerOptions {
   readonly budgets?: Partial<ToolBrokerBudgets>;
   readonly clock?: { now(): number };
   readonly onStep?: (step: PipelineStep, info: PipelineStepInfo) => void;
+  /** Opt-in private execution recorder (raw inputs/results; never public). */
+  readonly executionRecorder?: ExecutionRecorder;
 }
 
 /** Caller-visible result: typed audit outcome plus delivered data. */
@@ -277,6 +283,62 @@ function mapHandlerError(error: unknown): {
     };
   }
   return { code: "execution_failed", cancelLike: false };
+}
+
+/** Pending execution-recorder failure, surfaced after the public audit commits. */
+interface RecordingState {
+  failure?: unknown;
+}
+
+const MAX_RECORDED_ERROR_TEXT = 8192;
+
+/**
+ * Free-text error diagnostics are private-only, but still receive a bounded
+ * best-effort credential scrub. The execution-record store performs the
+ * structural filtering of credential-shaped keys; these patterns cover the
+ * conventional textual forms (provider headers, key/value pairs, API keys).
+ */
+function redactRecordedErrorText(text: string): string {
+  return text
+    .replace(/\b(bearer)\s+[A-Za-z0-9._~+/=-]+/gi, "$1 [redacted]")
+    .replace(
+      /\b(api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|password|passwd|authorization|credential|secret|token)\b(\s*[:=]\s*)("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s,;]+)/gi,
+      "$1$2[redacted]",
+    )
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, "[redacted]");
+}
+
+function boundedRecordedText(text: unknown): string | null {
+  if (typeof text !== "string") {
+    return null;
+  }
+  return redactRecordedErrorText(text.slice(0, MAX_RECORDED_ERROR_TEXT));
+}
+
+/**
+ * Raw (private-only) handler error diagnostics. Error messages/stacks are
+ * bounded; non-Error thrown objects are preserved for the record store's
+ * structural sanitizer. Public audit never receives this value.
+ */
+function recordedErrorDetail(error: unknown): unknown {
+  if (error instanceof Error) {
+    const code = (error as { code?: unknown }).code;
+    return {
+      name: boundedRecordedText(error.name),
+      message: boundedRecordedText(error.message),
+      ...(error.stack === undefined
+        ? {}
+        : { stack: boundedRecordedText(error.stack) }),
+      ...(typeof code === "string" ? { code: boundedRecordedText(code) } : {}),
+    };
+  }
+  if (typeof error === "object" && error !== null) {
+    return { name: "object", value: error };
+  }
+  return {
+    name: typeof error,
+    message: boundedRecordedText(String(error)),
+  };
 }
 
 type AbortKind = "timeout" | "cancel" | null;
@@ -541,6 +603,7 @@ export class ToolBroker {
   private readonly onStep:
     | ((step: PipelineStep, info: PipelineStepInfo) => void)
     | undefined;
+  private readonly executionRecorder: ExecutionRecorder | undefined;
 
   private readonly processSlot: Slot;
   private readonly perRunSlots = new Map<string, Slot>();
@@ -630,6 +693,7 @@ export class ToolBroker {
     };
     this.clock = options.clock ?? { now: () => Date.now() };
     this.onStep = options.onStep;
+    this.executionRecorder = options.executionRecorder;
     this.processSlot = new Slot(this.budgets.maxConcurrentProcess);
 
     // Static registry: validated once, frozen, no mutators exposed.
@@ -738,6 +802,153 @@ export class ToolBroker {
     tool: string,
     args: unknown,
     context: ToolInvokeContext,
+  ): Promise<BrokerCallResult> {
+    if (this.executionRecorder === undefined) {
+      return this.invokeInternal(runId, tool, args, context);
+    }
+    const recordCallId = generateId();
+    this.executionRecorder.record({
+      kind: "tool.input",
+      runId,
+      callId: recordCallId,
+      data: {
+        tool,
+        args,
+        origin: context.origin,
+        caller: context.caller,
+        allowedTools: context.allowedTools ?? null,
+        freshness: context.freshness ?? "normal",
+        timeoutMs: context.timeoutMs ?? null,
+      },
+    });
+    // Handler-settlement recording failures are held here so the public
+    // audit can still commit before the invocation fails explicitly.
+    const recording: RecordingState = {};
+    try {
+      const out = await this.invokeInternal(
+        runId,
+        tool,
+        args,
+        context,
+        recordCallId,
+        recording,
+      );
+      this.tryRecord(recording, {
+        kind: "tool.result",
+        runId,
+        callId: recordCallId,
+        data: {
+          tool,
+          result: out.result,
+          normalized: out.normalized,
+          modelFacing: out.modelFacing,
+          pipeline: out.pipeline,
+        },
+      });
+      if (recording.failure !== undefined) {
+        throw recording.failure;
+      }
+      return out;
+    } catch (error) {
+      this.tryRecord(recording, {
+        kind: "tool.error",
+        runId,
+        callId: recordCallId,
+        data: {
+          tool,
+          errorName:
+            error instanceof Error ? error.name.slice(0, 128) : "unknown",
+          errorCode:
+            error instanceof ToolError ? error.errorCode : "execution_failed",
+          error: recordedErrorDetail(error),
+        },
+      });
+      if (recording.failure !== undefined) {
+        throw recording.failure;
+      }
+      throw error;
+    }
+  }
+
+  /** Recorder write that defers failure until the public audit has settled. */
+  private tryRecord(
+    state: RecordingState | undefined,
+    input: Parameters<ExecutionRecorder["record"]>[0],
+  ): void {
+    if (this.executionRecorder === undefined) {
+      return;
+    }
+    try {
+      this.executionRecorder.record(input);
+    } catch (error) {
+      if (state !== undefined && state.failure === undefined) {
+        state.failure = error;
+      }
+    }
+  }
+
+  /**
+   * Raw handler settlement records use the wrapper's independent
+   * recordCallId, so the input, raw settlement, and final outcome share one
+   * private invocation identity. `raw` is captured before normalization or
+   * output-schema validation can reject it.
+   */
+  private recordHandlerValue(
+    runId: string,
+    tool: string,
+    recordCallId: string | undefined,
+    recording: RecordingState | undefined,
+    raw: unknown,
+    detached: boolean,
+  ): void {
+    if (recordCallId === undefined) {
+      return;
+    }
+    this.tryRecord(recording, {
+      kind: "tool.handler.result",
+      runId,
+      callId: recordCallId,
+      data: {
+        tool,
+        raw,
+        disposition: detached ? "discarded" : "none",
+        detached,
+      },
+    });
+  }
+
+  private recordHandlerFailure(
+    runId: string,
+    tool: string,
+    recordCallId: string | undefined,
+    recording: RecordingState | undefined,
+    error: unknown,
+    detached: boolean,
+  ): void {
+    if (recordCallId === undefined) {
+      return;
+    }
+    this.tryRecord(recording, {
+      kind: "tool.handler.error",
+      runId,
+      callId: recordCallId,
+      data: {
+        tool,
+        errorCode: mapHandlerError(error).code,
+        error: recordedErrorDetail(error),
+        disposition: detached ? "discarded" : "none",
+        detached,
+      },
+    });
+  }
+
+  private async invokeInternal(
+    runId: string,
+    tool: string,
+    args: unknown,
+    context: ToolInvokeContext,
+    recordCallId?: string,
+    recording?: RecordingState,
   ): Promise<BrokerCallResult> {
     if (typeof runId !== "string" || runId.length === 0) {
       throw new RepositoryValidationError("runId must be a non-empty string");
@@ -1096,6 +1307,9 @@ export class ToolBroker {
       callerSignal: context.signal,
       timeoutMs: effectiveTimeoutMs,
       dedupKey: key,
+      ...(recordCallId === undefined
+        ? {}
+        : { recordCallId, ...(recording === undefined ? {} : { recording }) }),
       trace,
       note,
     });
@@ -1493,6 +1707,8 @@ export class ToolBroker {
     callerSignal: AbortSignal | undefined;
     timeoutMs: number;
     dedupKey: string;
+    recordCallId?: string;
+    recording?: RecordingState;
     trace: PipelineStep[];
     note: (step: PipelineStep) => void;
   }): Promise<LeaderSettlement> {
@@ -1635,6 +1851,8 @@ export class ToolBroker {
     freshness: ToolFreshness;
     callerSignal: AbortSignal | undefined;
     timeoutMs: number;
+    recordCallId?: string;
+    recording?: RecordingState;
     trace: PipelineStep[];
     note: (step: PipelineStep) => void;
   }): Promise<PhysicalSettlement> {
@@ -1762,8 +1980,19 @@ export class ToolBroker {
     };
     const attachDetachedLateReport = (): void => {
       handlerPromise.then(
-        () => {
+        (value: unknown) => {
           try {
+            // The run may already be terminal: the raw value is still
+            // private-record evidence, explicitly marked discarded, and no
+            // public RunEvent is appended for it.
+            this.recordHandlerValue(
+              runId,
+              tool,
+              args.recordCallId,
+              args.recording,
+              value,
+              true,
+            );
             this.lateReport(call.callId, "succeeded", true);
           } finally {
             releaseSlots();
@@ -1771,6 +2000,14 @@ export class ToolBroker {
         },
         (error: unknown) => {
           try {
+            this.recordHandlerFailure(
+              runId,
+              tool,
+              args.recordCallId,
+              args.recording,
+              error,
+              true,
+            );
             const mapped = mapHandlerError(error);
             this.lateReport(
               call.callId,
@@ -1821,10 +2058,33 @@ export class ToolBroker {
     }
 
     if ("error" in raced) {
+      this.recordHandlerFailure(
+        runId,
+        tool,
+        args.recordCallId,
+        args.recording,
+        raced.error,
+        false,
+      );
+      // A handler that directly writes private execution records must not
+      // have its storage failure converted into an ordinary tool outcome.
+      // Surface it after the public audit settles so the Agent fails the Run
+      // instead of continuing without evidence.
+      const recordFailure = raced.error instanceof ExecutionRecordError;
+      if (
+        recordFailure &&
+        args.recording !== undefined &&
+        args.recording.failure === undefined
+      ) {
+        args.recording.failure = raced.error;
+      }
       const mapped = mapHandlerError(raced.error);
       args.note("normalize");
       cleanupTimer();
       releaseSlots();
+      if (recordFailure && args.recording === undefined) {
+        throw raced.error;
+      }
       if (mapped.cancelLike) {
         return { kind: "failed", final: cancelOutcome("cancelled") };
       }
@@ -1842,6 +2102,18 @@ export class ToolBroker {
         },
       };
     }
+
+    // Capture the exact raw handler value before any normalizer or output
+    // schema can reject it; the final tool.result still carries only the
+    // normalized/model-facing projection.
+    this.recordHandlerValue(
+      runId,
+      tool,
+      args.recordCallId,
+      args.recording,
+      raced.value,
+      false,
+    );
 
     // ---- Step 6: normalization + strict output validation, still under
     // the composed timeout/cancel deadline. A non-cooperative async

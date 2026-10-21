@@ -12,6 +12,7 @@ import {
   loadServerConfig,
   MAX_MARKDOWN_ROOTS,
   parseCalendarConfig,
+  parseExecutionRecordsConfig,
   parseMarkdownRoots,
   parseMemoryConfig,
   parseModelConfig,
@@ -711,5 +712,39 @@ describe("web search config (COMPANION_WEB_SEARCH_JSON)", () => {
         COMPANION_WEB_SEARCH_JSON: JSON.stringify({ enabled: true }),
       }),
     ).toThrow("web search config is invalid");
+  });
+});
+
+describe("execution records config", () => {
+  it("requires an absolute directory and bounds retention", () => {
+    expect(parseExecutionRecordsConfig(undefined)).toBeNull();
+    expect(
+      parseExecutionRecordsConfig(
+        JSON.stringify({ directory: "/tmp/private-records" }),
+      ),
+    ).toEqual({ directory: "/tmp/private-records", retentionDays: 30 });
+    for (const raw of [
+      "not json",
+      JSON.stringify({ directory: "relative/records" }),
+      JSON.stringify({ directory: "/tmp/records", retentionDays: -1 }),
+      JSON.stringify({ directory: "/tmp/records", retentionDays: 3651 }),
+      JSON.stringify({ directory: "/tmp/records", extra: true }),
+    ]) {
+      expect(() => parseExecutionRecordsConfig(raw)).toThrow(ServerConfigError);
+    }
+  });
+
+  it("loads the opt-in env and keeps disabled legacy behavior unchanged", () => {
+    const env = baseEnv(tempDbPath());
+    expect(loadServerConfig(env).executionRecords).toBeNull();
+    expect(
+      loadServerConfig({
+        ...env,
+        COMPANION_EXECUTION_RECORDS_JSON: JSON.stringify({
+          directory: "/tmp/private-records",
+          retentionDays: 7,
+        }),
+      }).executionRecords,
+    ).toEqual({ directory: "/tmp/private-records", retentionDays: 7 });
   });
 });
