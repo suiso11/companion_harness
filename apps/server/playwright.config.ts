@@ -35,7 +35,7 @@ export default defineConfig({
         "calendar/evidence.spec.ts",
       ]
     : MEMORY_MODE
-      ? ["memory/memory_manage.spec.ts"]
+      ? ["memory/memory_graph.spec.ts", "memory/memory_manage.spec.ts"]
       : [
           "conversation.spec.ts",
           "citation_recovery.spec.ts",
