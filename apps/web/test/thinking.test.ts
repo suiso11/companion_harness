@@ -265,3 +265,23 @@ describe("elapsed suffix + durable run start (PR #82 review)", () => {
     expect(durableRunStart("run")).toBeNull();
   });
 });
+
+describe("web-only phase wording (PR112 review)", () => {
+  test("pure web.search phases use the dedicated wording", () => {
+    expect(formatPhaseText("tool", ["web.search"], 1, 0)).toBe("ウェブ検索中…");
+  });
+
+  test("web.search with an unmapped tool keeps the generic mixed line", () => {
+    // The unmapped tool is dropped from labels, so the count line shows the
+    // remaining label — but never the dedicated ウェブ検索中… wording.
+    expect(
+      formatPhaseText("tool", ["web.search", "reference.open"], 2, 1),
+    ).toBe("ツール実行中（ウェブ検索 1/2）");
+  });
+
+  test("unmapped-only runs still keep the generic count line", () => {
+    expect(formatPhaseText("tool", ["reference.open"], 1, 0)).toBe(
+      "ツール実行中（0/1）",
+    );
+  });
+});

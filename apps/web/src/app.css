@@ -483,6 +483,14 @@ body {
   overflow-y: auto;
 }
 
+/* Full stored result URLs can be 2048 chars with no break points: wrap
+   anywhere so a long link cannot force horizontal overflow at the narrow
+   drawer width (PR112 review). */
+.web-citation [data-web-citation-url="true"] {
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
 button,
 select {
   font-size: 16px;

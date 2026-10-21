@@ -505,6 +505,7 @@ describe("summaries/details are strict with UUID v4 ids", () => {
         resource,
         snapshot,
         body,
+        webResultUrl: null,
       }).body,
     ).toEqual(body);
     expect(() =>
@@ -519,6 +520,7 @@ describe("summaries/details are strict with UUID v4 ids", () => {
         },
         resource,
         snapshot,
+        webResultUrl: null,
       }),
     ).toThrow();
     expect(

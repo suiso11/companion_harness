@@ -341,6 +341,20 @@ export const ReferenceDetailResponseSchema = z.strictObject({
   resource: CanonicalResourceSummarySchema,
   snapshot: ResourceSnapshotSummarySchema,
   body: SnapshotBodySchema,
+  /**
+   * Verified result URL for web-backed references (connector kind `web`,
+   * design §5): the stored `web_result_urls` side-table row for the
+   * snapshot, surfaced so the UI can render the citation drawer's external
+   * link. `null` for every non-web reference (and for any stored value that
+   * fails the http/https scheme allowlist — the repository fails closed).
+   */
+  webResultUrl: z
+    .string()
+    .max(2048)
+    .refine((raw) => /^https?:\/\//.test(raw), {
+      message: "webResultUrl must be an http(s) URL",
+    })
+    .nullable(),
 });
 export type ReferenceDetailResponse = z.infer<
   typeof ReferenceDetailResponseSchema

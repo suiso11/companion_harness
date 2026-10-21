@@ -17,8 +17,9 @@
 //   points are imported (same syntax + mdast extensions as `remark-gfm`
 //   defaults: tables, footnotes, strikethrough, autolinks, task lists).
 // - No `rehype-highlight`: it imports lowlight `common` unconditionally
-//   (~35 grammars). `createLowlight` is called directly with the pinned
-//   subset below (never `lowlightAll`/`common`).
+//   (~35 grammars). `createLowlight` is called directly and the pinned
+//   subset loads lazily (`loadHighlightLanguages`), never `lowlightAll`/
+//   `common`.
 //
 // Skipped upstream pieces (see NOTICE.md): math/katex, mermaid/svg
 // execution and preview dialogs, attachment image resolving, RTL helper,
@@ -36,13 +37,7 @@ import type {
   Parent,
 } from "hast";
 import { toHtml } from "hast-util-to-html";
-import bash from "highlight.js/lib/languages/bash";
-import diff from "highlight.js/lib/languages/diff";
-import json from "highlight.js/lib/languages/json";
-import plaintext from "highlight.js/lib/languages/plaintext";
-import python from "highlight.js/lib/languages/python";
-import typescript from "highlight.js/lib/languages/typescript";
-import { createLowlight, type LanguageFn } from "lowlight";
+import { createLowlight } from "lowlight";
 import type { Root as MdastRoot } from "mdast";
 import { fromMarkdown } from "mdast-util-from-markdown";
 import { gfmFromMarkdown } from "mdast-util-gfm";
@@ -65,15 +60,38 @@ export const CODE_ID_ATTR = "data-code-id";
  * grammar embeds the full JavaScript grammar and extends it, so `js` blocks
  * highlight identically through the `typescript` registration (wired below
  * via `registerAlias`). This saves a duplicate ~17KB grammar.
+ *
+ * Bundle guard: the grammars are the single heaviest non-framework module
+ * group in the entry, but chat-critical code (every answer part renders
+ * through `Markdown.svelte`) never needs them until a fenced code block
+ * appears. They load in a lazy chunk via `loadHighlightLanguages()`; until
+ * then `highlightSubset` degrades to static source (the registered-check
+ * fails closed), and `registerAlias` is safe pre-registration: hljs core
+ * stores aliases in a lookup map and only resolves them against the
+ * registered set at `getLanguage` time.
  */
-const HIGHLIGHT_LANGUAGES: Record<string, LanguageFn> = {
-  bash,
-  diff,
-  json,
-  plaintext,
-  python,
-  typescript,
-};
+let highlightLanguagesPromise: Promise<void> | null = null;
+
+/**
+ * Dynamically imports the pinned grammar subset and registers it on the
+ * lowlight instance. Memoized: repeated calls await the same registration.
+ * Failure is terminal-for-highlight only (never throws to the caller):
+ * code blocks stay static source, exactly like an unregistered language.
+ */
+export function loadHighlightLanguages(): Promise<void> {
+  // One dynamic import = one lazy chunk (see `highlight-languages.ts`):
+  // per-grammar dynamic imports split the six concurrent loads into six
+  // chunks, five of which the bundle budget could not see (PR112 review).
+  highlightLanguagesPromise ??= import("./highlight-languages.js")
+    .then(({ highlightGrammars }) => {
+      lowlight.register({ ...highlightGrammars });
+    })
+    .catch(() => {
+      // Never break rendering: keep the memoized (settled) promise so the
+      // failure is not retried on every render.
+    });
+  return highlightLanguagesPromise;
+}
 
 /**
  * mdast pass adapted from upstream `plugins/remark/literal-html`:
@@ -390,10 +408,12 @@ function installAlignHook(): void {
 // only `<pre><code class="language-x">` blocks whose language is
 // registered are highlighted; unknown/missing languages and
 // `no-highlight` are left as plain text (no auto-detect, no warnings).
-const lowlight = createLowlight(HIGHLIGHT_LANGUAGES);
+const lowlight = createLowlight();
 // JavaScript is a subset of the registered TypeScript grammar: highlight
 // `javascript`/`js`/`jsx`/`mjs`/`cjs` blocks with it (same `hljs-` span
 // output; the `language-javascript` class on the element is untouched).
+// Safe before registration: aliases resolve through the alias map only
+// once the target grammar registers (see `loadHighlightLanguages`).
 lowlight.registerAlias({
   typescript: ["cjs", "javascript", "js", "jsx", "mjs"],
 });

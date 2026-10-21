@@ -51,6 +51,7 @@ export default defineConfig({
           "svelte_shell.spec.ts",
           "thinking_status.spec.ts",
           "draft_answer.spec.ts",
+          "web_search.spec.ts",
         ],
   timeout: 60_000,
   expect: { timeout: 15_000 },

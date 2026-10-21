@@ -217,6 +217,58 @@ describe("verified URL side table (0026)", () => {
       closeKernelDatabase(handle);
     }
   });
+
+  it("reference detail surfaces the stored web URL; non-web/invalid values fail closed to null", async () => {
+    const { handle, repo, manager, db } = await openStack();
+    try {
+      const inst = manager.ensureWebConnectorInstance("web", { now: T0 });
+      const { sessionId, runId } = runningFixture(repo);
+      const presented = manager.presentWebResults(sessionId, runId, inst.id, [
+        hit("https://example.com/alpha"),
+      ]);
+
+      const referenceId = presented.references[0]?.referenceId;
+      if (referenceId === undefined) throw new Error("no reference");
+      const detail = repo.getReferenceDetail(sessionId, referenceId);
+      expect(detail.webResultUrl).toBe("https://example.com/alpha");
+      // Non-web reference (markdown connector): null, never a URL.
+      const mdInst = manager.ensureMarkdownConnectorInstance("vault", 1, {
+        now: T0,
+      });
+      const mdPresented = manager.presentObservations(
+        sessionId,
+        runId,
+        [
+          {
+            connectorInstanceId: mdInst.id,
+            canonicalKey: "notes/a.md",
+            title: "A",
+            text: "text a",
+            sourceRevision: "rev-1",
+            observedAt: T0,
+          },
+        ],
+        { freshness: "normal", now: T0 + 2 },
+      );
+      const mdReferenceId = mdPresented.references[0]?.referenceId;
+      if (mdReferenceId === undefined) throw new Error("no md reference");
+      expect(
+        repo.getReferenceDetail(sessionId, mdReferenceId).webResultUrl,
+      ).toBe(null);
+      // Defensive fail-closed: a row that bypassed the connector allowlist
+      // (e.g. a javascript: URL) degrades to null, never a link target.
+      const snapId = presented.references[0]?.snapshotId;
+      if (snapId === undefined) throw new Error("no snapshot");
+      db.prepare(
+        "UPDATE web_result_urls SET url = 'javascript:alert(1)' WHERE snapshot_id = ?",
+      ).run(snapId);
+      expect(repo.getReferenceDetail(sessionId, referenceId).webResultUrl).toBe(
+        null,
+      );
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
 });
 
 describe("pre-0026 upgrade", () => {
