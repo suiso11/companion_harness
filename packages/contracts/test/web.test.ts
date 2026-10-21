@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildWebCanonicalKey,
+  isValidLoopbackHttpUrl,
   parseWebSearchConfig,
   WebSearchConfigSchema,
   WebSearchHitSchema,
   WebSearchToolInputSchema,
   WebSearchToolOutputSchema,
-  buildWebCanonicalKey,
-  isValidLoopbackHttpUrl,
 } from "../src/web.js";
 
 /**
@@ -64,10 +64,13 @@ describe("WebSearchToolOutputSchema", () => {
     canonicalKey: buildWebCanonicalKey("a".repeat(64)),
     title: null,
     url: "https://example.com/a",
-    snippet: "snippet"
+    snippet: "snippet",
   };
   it("rejects a 9th result", () => {
-    const hits = Array.from({ length: 9 }, (_, i) => ({ ...hit, ordinal: i + 1 }));
+    const hits = Array.from({ length: 9 }, (_, i) => ({
+      ...hit,
+      ordinal: i + 1,
+    }));
     expect(WebSearchToolOutputSchema.safeParse({ results: hits }).success).toBe(
       false,
     );
@@ -79,8 +82,10 @@ describe("WebSearchToolOutputSchema", () => {
         .success,
     ).toBe(false);
     expect(
-      WebSearchHitSchema.safeParse({ ...hit, url: "https://a" + "b".repeat(3000) })
-        .success,
+      WebSearchHitSchema.safeParse({
+        ...hit,
+        url: `https://a${"b".repeat(3000)}`,
+      }).success,
     ).toBe(false);
   });
 
@@ -122,7 +127,11 @@ describe("COMPANION_WEB_SEARCH_JSON config (fail-closed, §9)", () => {
   it("rejects unknown keys (strict)", () => {
     expect(() =>
       parseWebSearchConfig(
-        JSON.stringify({ enabled: true, searxng_base_url: "http://127.0.0.1", extra: 1 }),
+        JSON.stringify({
+          enabled: true,
+          searxng_base_url: "http://127.0.0.1",
+          extra: 1,
+        }),
       ),
     ).toThrow();
   });
@@ -137,7 +146,9 @@ describe("COMPANION_WEB_SEARCH_JSON config (fail-closed, §9)", () => {
       "http://user:pw@127.0.0.1:8888",
     ]) {
       expect(() =>
-        parseWebSearchConfig(JSON.stringify({ enabled: true, searxng_base_url: bad })),
+        parseWebSearchConfig(
+          JSON.stringify({ enabled: true, searxng_base_url: bad }),
+        ),
       ).toThrow();
       expect(isValidLoopbackHttpUrl(bad)).toBe(false);
     }
@@ -156,9 +167,11 @@ describe("COMPANION_WEB_SEARCH_JSON config (fail-closed, §9)", () => {
   });
 
   it("enforces enabled:true requires searxng_base_url", () => {
-    expect(() => parseWebSearchConfig(JSON.stringify({ enabled: true }))).toThrow();
-    expect(
-      WebSearchConfigSchema.safeParse({ enabled: false }).success,
-    ).toBe(true);
+    expect(() =>
+      parseWebSearchConfig(JSON.stringify({ enabled: true })),
+    ).toThrow();
+    expect(WebSearchConfigSchema.safeParse({ enabled: false }).success).toBe(
+      true,
+    );
   });
 });

@@ -15,13 +15,13 @@
 // bounds enforced by truncation. Result URLs must pass the strict
 // `http`/`https` scheme allowlist or the hit is dropped.
 
+import { createHash } from "node:crypto";
 import {
   buildWebCanonicalKey,
-  MAX_WEB_TITLE_CODE_POINTS,
   isValidLoopbackHttpUrl,
+  MAX_WEB_TITLE_CODE_POINTS,
   WebResultUrlSchema,
 } from "@companion/contracts";
-import { createHash } from "node:crypto";
 
 /** Connector-level error vocabulary (kernel maps these to broker codes). */
 export type WebSearchErrorCode =
@@ -74,13 +74,28 @@ export function normalizeSearxBaseUrl(raw: unknown): string {
 
 /** Immediate pre-fetch revalidation (fail-closed, no DNS lookup). */
 function assertPinnedLoopbackUrl(target: string): void {
-  if (!isValidLoopbackHttpUrl(target)) {
+  let parsed: URL;
+  try {
+    parsed = new URL(target);
+  } catch {
     throw new WebSearchClientError(
       "invalid_base_url",
       "web search endpoint is invalid",
     );
   }
-  const host = new URL(target).hostname.toLowerCase();
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new WebSearchClientError(
+      "invalid_base_url",
+      "web search endpoint is invalid",
+    );
+  }
+  if (parsed.username !== "" || parsed.password !== "") {
+    throw new WebSearchClientError(
+      "invalid_base_url",
+      "web search endpoint is invalid",
+    );
+  }
+  const host = parsed.hostname.toLowerCase();
   if (host !== "127.0.0.1" && host !== "::1") {
     // `localhost` must already have been pinned by normalizeSearxBaseUrl.
     throw new WebSearchClientError(
@@ -94,12 +109,18 @@ function assertPinnedLoopbackUrl(target: string): void {
 /* Untrusted text sanitizers                                            */
 /* ------------------------------------------------------------------ */
 
-/** Strip control characters (except \t\r\n, both also collapsed). */
+/**
+ * Neutralize control characters in untrusted text. C0 controls (U+0000-U+001F,
+ * including \t\n\r) are dropped entirely; DEL and C1 controls (U+007F-U+009F)
+ * degrade to spaces; remaining runs of whitespace collapse to one space.
+ * Callers decide whether to trim the result.
+ */
 export function stripControlChars(raw: string): string {
-  return raw
-    .replaceAll(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, "")
-    .replaceAll(/\s+/g, " ")
-    .trim();
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: sandboxing untrusted text REQUIRES matching control characters by code point
+  const noC0 = raw.replaceAll(/[\u0000-\u001f]/g, "");
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: DEL/C1 must be matched by code point; degrade to spaces instead of dropping
+  const noC1 = noC0.replaceAll(/[\u007f-\u009f]/g, " ");
+  return noC1.replaceAll(/\s+/g, " ");
 }
 
 /** Code-point truncation to `max` (astral characters count once). */
@@ -134,7 +155,10 @@ export function normalizeWebUrl(
   }
   const normalizedUrl = url;
   const canonicalKey = buildWebCanonicalKey(
-    createHash("sha256").update("web-v1\u0000").update(normalizedUrl).digest("hex"),
+    createHash("sha256")
+      .update("web-v1\u0000")
+      .update(normalizedUrl)
+      .digest("hex"),
   );
   return { url: cleaned, canonicalKey, normalizedUrl };
 }
@@ -156,7 +180,10 @@ export interface WebSnippet {
  * `response_invalid` (never a guess); bad URLs inside individual results
  * drop only that result (scheme allowlist enforcement, §3).
  */
-export function decodeSearxResults(rawBody: string, maxResults: number): WebSnippet[] {
+export function decodeSearxResults(
+  rawBody: string,
+  maxResults: number,
+): WebSnippet[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(rawBody) as unknown;
@@ -182,21 +209,31 @@ export function decodeSearxResults(rawBody: string, maxResults: number): WebSnip
   const out: WebSnippet[] = [];
   for (const entry of results.slice(0, Math.max(0, maxResults) * 4)) {
     if (typeof entry !== "object" || entry === null) continue;
-    const record = entry as { url?: unknown; title?: unknown; content?: unknown };
+    const record = entry as {
+      url?: unknown;
+      title?: unknown;
+      content?: unknown;
+    };
     const normalized = normalizeWebUrl(
       typeof record.url === "string" ? record.url : "",
     );
     if (normalized === null) continue; // non-allowlisted scheme/bounds: drop
     const title =
-      typeof record.title === "string" && stripControlChars(record.title).length > 0
+      typeof record.title === "string" &&
+      stripControlChars(record.title).length > 0
         ? truncateCodePoints(
             stripControlChars(record.title),
             MAX_WEB_TITLE_CODE_POINTS,
           )
         : null;
+    // Snippets are interior display text: trim the bounded edge whitespace.
+    const snippetRaw =
+      typeof record.content === "string"
+        ? stripControlChars(record.content)
+        : "";
     const snippet =
-      typeof record.content === "string" && stripControlChars(record.content).length > 0
-        ? truncateCodePoints(stripControlChars(record.content), 512)
+      snippetRaw.trim().length > 0
+        ? truncateCodePoints(snippetRaw.trim(), 512)
         : null;
     if (title === null && snippet === null) continue;
     out.push({
@@ -299,7 +336,7 @@ export async function fetchSearxResults(options: {
   );
   const cleanup = () => clearTimeout(timeoutTimer);
   const signal = options.signal
-    ? (AbortSignal.any([options.signal, timeoutController.signal]))
+    ? AbortSignal.any([options.signal, timeoutController.signal])
     : timeoutController.signal;
   try {
     const response = await fetch(target, {
@@ -333,10 +370,7 @@ export async function fetchSearxResults(options: {
     if (error instanceof Error && error.name === "AbortError") {
       throw new WebSearchClientError("timeout", "searxng fetch timed out");
     }
-    throw new WebSearchClientError(
-      "network_error",
-      "searxng fetch failed",
-    );
+    throw new WebSearchClientError("network_error", "searxng fetch failed");
   } finally {
     cleanup();
   }
@@ -359,9 +393,7 @@ export async function searchSearx(options: {
     maxResults: options.maxResults ?? 5,
     timeoutMs: options.timeoutMs ?? 10_000,
     maxResponseBytes: options.maxResponseBytes ?? 1_048_576,
-    ...(options.language === undefined
-      ? {}
-      : { language: options.language }),
+    ...(options.language === undefined ? {} : { language: options.language }),
     ...(options.timeRange === undefined
       ? {}
       : { timeRange: options.timeRange }),

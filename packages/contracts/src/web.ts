@@ -65,20 +65,23 @@ export type WebSearchToolInputInput = z.input<typeof WebSearchToolInputSchema>;
  * Everything else (javascript:, data:, file:, etc.) is discarded by the
  * connector before it can be persisted.
  */
-export const WebResultUrlSchema = z
-  .string()
-  .refine((raw) => {
+export const WebResultUrlSchema = z.string().refine(
+  (raw) => {
     if (raw.length > MAX_WEB_URL_UTF16_UNITS) return false;
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: result URLs are untrusted; control characters must be rejected by code point
     if (/[\u0000-\u001f\u007f-\u009f\s]/.test(raw)) return false;
     return /^https?:\/\//.test(raw);
-  }, { message: "web result url must be a bounded http(s) URL" });
+  },
+  { message: "web result url must be a bounded http(s) URL" },
+);
 export type WebResultUrl = z.infer<typeof WebResultUrlSchema>;
 
 /** Bounded display title for one search hit (nullable, ≤256 code points). */
-export const WebTitleSchema = z.string().refine(
-  (title) => countCodePoints(title) <= MAX_WEB_TITLE_CODE_POINTS,
-  { message: "web title must be ≤256 Unicode code points" },
-);
+export const WebTitleSchema = z
+  .string()
+  .refine((title) => countCodePoints(title) <= MAX_WEB_TITLE_CODE_POINTS, {
+    message: "web title must be ≤256 Unicode code points",
+  });
 export type WebTitle = z.infer<typeof WebTitleSchema>;
 
 /** One persisted search hit: structural ids + validated URL + snippet. */
@@ -153,13 +156,16 @@ export const WebSearchConfigSchema = z
     searxng_base_url: z
       .string()
       .optional()
-      .refine((raw) => {
-        if (raw === undefined) return true;
-        return isValidLoopbackHttpUrl(raw);
-      }, {
-        message:
-          "searxng_base_url must be a loopback http(s) URL without credentials/query/fragment",
-      }),
+      .refine(
+        (raw) => {
+          if (raw === undefined) return true;
+          return isValidLoopbackHttpUrl(raw);
+        },
+        {
+          message:
+            "searxng_base_url must be a loopback http(s) URL without credentials/query/fragment",
+        },
+      ),
     max_results: z.number().int().min(1).max(MAX_WEB_TOP_K).default(5),
     timeout_ms: z.number().int().min(1000).max(60_000).default(10_000),
     per_turn_budget: z.number().int().min(1).max(8).default(3),
@@ -201,34 +207,56 @@ export function isValidLoopbackHttpUrl(raw: string): boolean {
   const authority = rest.split("/")[0] ?? "";
   if (authority.length === 0) return false;
   let hostname = authority.toLowerCase();
-  // strip port (last ':' not part of an IPv6 literal)
-  const colon = hostname.lastIndexOf(":");
-  if (colon !== -1 && !hostname.startsWith("[")) {
-    const port = hostname.slice(colon + 1);
-    if (!/^[0-9]*$/.test(port)) return false;
-    hostname = hostname.slice(0, colon);
+  // Bracketed/[port] and bare [port] handling; "is this an IPv6 spelling?"
+  // is tracked separately because the charset rules differ below.
+  let isV6 = false;
+  if (hostname.startsWith("[")) {
+    const close = hostname.indexOf("]");
+    if (close === -1) return false;
+    const after = hostname.slice(close + 1);
+    if (after !== "" && !/^:[0-9]+$/.test(after)) return false;
+    isV6 = true;
+    hostname = hostname.slice(1, close);
+    if (hostname.includes(".")) return false; // no IPv4-mapped loops
+  } else {
+    const colon = hostname.lastIndexOf(":");
+    if (colon !== -1) {
+      const port = hostname.slice(colon + 1);
+      if (!/^[0-9]+$/.test(port)) return false;
+      hostname = hostname.slice(0, colon);
+    }
+    if (hostname.includes(":")) isV6 = true;
   }
-  if (hostname.startsWith("[") && hostname.endsWith("]")) {
-    hostname = hostname.slice(1, -1);
+  if (isV6) {
+    // IPv6 loopback spellings: `::1` or an 8-group expansion whose first
+    // seven groups are all zero and whose last group is `1`/`0001`.
+    if (hostname === "::1") return true;
+    const groups = hostname.split(":");
+    if (groups.length !== 8) return false;
+    return (
+      groups.slice(0, 7).every((group) => /^0{1,4}$/.test(group)) &&
+      (groups[7] === "1" || groups[7] === "0001")
+    );
   }
-  if (/[\u0000-\u002f\u003a-\u0040\u005b-\u0060\u007b-\u007f]/.test(hostname)) {
+  if (!/^[a-z0-9.-]+$/.test(hostname)) {
     // only [a-z0-9.-] allowed for names/addresses here
-    if (hostname !== "::1") return false;
+    return false;
   }
   if (hostname === "localhost" || hostname.endsWith(".localhost")) {
     return true;
   }
-  if (hostname === "::1" || (hostname.startsWith("0:") && hostname.endsWith(":1"))) {
-    // ::1 spelled with expansion; further IPv6 normalization is connector work
-    return hostname.replace(/0/g, "").replace(/[:1]/g, "") === "";
-  }
-  if (hostname.startsWith(":") || hostname.includes(":")) return false;
+  // dotted-quad IPv4 loopback: 127.0.0.0/8 (strict, no leading-zero groups)
   const parts = hostname.split(".");
   if (parts.length !== 4) return false;
-  return parts.every((part: string) =>
-    /^[0-9]{1,3}$/.test(part) && Number(part) <= 255 && part !== "" &&
-    (part === "0" || !part.startsWith("0")),
-  ) && parts[0] === "127";
+  return (
+    parts.every(
+      (part: string) =>
+        /^[0-9]{1,3}$/.test(part) &&
+        Number(part) <= 255 &&
+        part !== "" &&
+        (part === "0" || !part.startsWith("0")),
+    ) && parts[0] === "127"
+  );
 }
 
 /**

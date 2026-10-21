@@ -7,10 +7,7 @@ import {
   stripControlChars,
   WebSearchClientError,
 } from "../src/client.js";
-import {
-  searxJsonFixture,
-  startSearxStub,
-} from "./helpers/stub_searx.js";
+import { searxJsonFixture, startSearxStub } from "./helpers/stub_searx.js";
 
 describe("normalizeSearxBaseUrl", () => {
   it("pins localhost and strips the trailing slash", () => {
@@ -35,9 +32,7 @@ describe("normalizeSearxBaseUrl", () => {
       undefined,
       "",
     ]) {
-      expect(() => normalizeSearxBaseUrl(bad)).toThrow(
-        WebSearchClientError,
-      );
+      expect(() => normalizeSearxBaseUrl(bad)).toThrow(WebSearchClientError);
     }
   });
 });
@@ -141,7 +136,11 @@ describe("searchSearx over a loopback stub", () => {
     });
     try {
       await expect(
-        searchSearx({ baseUrl: stub.url, query: "secret query", timeoutMs: 5000 }),
+        searchSearx({
+          baseUrl: stub.url,
+          query: "secret query",
+          timeoutMs: 5000,
+        }),
       ).rejects.toMatchObject({ code: "redirect_refused" });
       // no second (redirect-following) request ever happened
       expect(stub.requests).toHaveLength(1);
@@ -152,7 +151,11 @@ describe("searchSearx over a loopback stub", () => {
 
   it("cuts oversized bodies at the byte cap before JSON.parse", async () => {
     const big = searxJsonFixture([
-      { url: "https://example.com/", title: "t", content: "b".repeat(64 * 1024) },
+      {
+        url: "https://example.com/",
+        title: "t",
+        content: "b".repeat(64 * 1024),
+      },
     ]);
     const stub = await startSearxStub({ body: big });
     try {
