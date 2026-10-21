@@ -98,6 +98,7 @@ fi
 CHANGED=0
 LITELLM_CHANGED=0
 SEARXNG_CHANGED=0
+RECREATE_SERVICES=""
 
 # ensure_secret <dest-env> — guarantees a SEARXNG_SECRET line exists.
 # Generates one with openssl if missing; never echoes the value.
@@ -225,7 +226,6 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 1
 fi
 
-RECRATE_SERVICES=""
 [ "$LITELLM_CHANGED" -eq 1 ] && RECREATE_SERVICES="litellm"
 [ "$SEARXNG_CHANGED" -eq 1 ] && RECREATE_SERVICES="$RECREATE_SERVICES searxng"
 

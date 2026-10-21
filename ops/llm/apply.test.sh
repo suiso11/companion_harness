@@ -68,4 +68,24 @@ fi
 grep -q -- "--force-recreate" "$LOG" || fail 'expected --force-recreate'
 grep -q '^searxng$' "$LOG" || fail 'expected searxng in recreate list'
 
+# --- compose-only change ----------------------------------------------------
+# Only compose.yaml differs: no bind-mounted config changed, so apply.sh must
+# still exit 0 and reconcile the stack (gemma) with a plain `up -d`. This is
+# the regression case for the RECREATE_SERVICES unbound-variable bug.
+printf '\n# stale\n' >>"$TARGET/compose.yaml"
+: >"$LOG"
+OUT2="$("$SCRIPT_DIR/apply.sh" --yes --dest "$TARGET" 2>&1)" || {
+  printf '%s\n' "$OUT2" >&2
+  fail 'apply.sh --yes (compose-only) exited non-zero'
+}
+cmp -s "$SCRIPT_DIR/compose.yaml" "$TARGET/compose.yaml" ||
+  fail 'compose.yaml was not refreshed on compose-only apply'
+grep -q '^compose$' "$LOG" || fail 'docker compose not invoked on compose-only change'
+grep -q '^up$' "$LOG" || fail 'expected compose up on compose-only change'
+# No explicit service list: plain `up -d` reconciles every service, gemma included.
+if grep -q -- '--force-recreate' "$LOG"; then
+  fail 'compose-only change must not force-recreate bind-mounted services'
+fi
+
 printf 'PASS: apply.sh --yes isolated (temp dest %s, docker shimmed)\n' "$TARGET"
+printf 'PASS: apply.sh --yes compose-only change reconciles without force-recreate\n'
