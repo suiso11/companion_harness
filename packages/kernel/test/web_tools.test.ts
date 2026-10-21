@@ -247,7 +247,7 @@ describe("web.search result -> rN mapping", () => {
         input("two hits", 5),
         ctx(runId),
       )) as {
-        results: Array<{
+        hits: Array<{
           referenceId: string;
           ordinal: number;
           url: string;
@@ -255,12 +255,12 @@ describe("web.search result -> rN mapping", () => {
           snippet: string | null;
         }>;
       };
-      expect(output.results).toHaveLength(2);
+      expect(output.hits).toHaveLength(2);
       // Model-facing rN mapping: ordinals 1 and 2 in presentation order.
-      expect(output.results.map((r) => r.ordinal)).toEqual([1, 2]);
-      expect(output.results[0]?.url).toBe("https://Example.com/a");
-      expect(output.results[1]?.url).toBe("https://example.com/B");
-      expect(new Set(output.results.map((r) => r.referenceId)).size).toBe(2);
+      expect(output.hits.map((r) => r.ordinal)).toEqual([1, 2]);
+      expect(output.hits[0]?.url).toBe("https://Example.com/a");
+      expect(output.hits[1]?.url).toBe("https://example.com/B");
+      expect(new Set(output.hits.map((r) => r.referenceId)).size).toBe(2);
       // References are persisted for the session (rN = ordinal within it).
       const rows = handle.raw
         .prepare(
@@ -273,11 +273,11 @@ describe("web.search result -> rN mapping", () => {
       }>;
       expect(rows.map((row) => row.ordinal)).toEqual([1, 2]);
       for (let i = 0; i < rows.length; i += 1) {
-        expect(output.results[i]?.referenceId).toBe(rows[i]?.id);
+        expect(output.hits[i]?.referenceId).toBe(rows[i]?.id);
         const urlRow = handle.raw
           .prepare("SELECT url FROM web_result_urls WHERE snapshot_id = ?")
           .get(rows[i]?.snapshot_id) as { url: string } | undefined;
-        expect(urlRow?.url).toBe(output.results[i]?.url);
+        expect(urlRow?.url).toBe(output.hits[i]?.url);
       }
     } finally {
       closeKernelDatabase(handle);

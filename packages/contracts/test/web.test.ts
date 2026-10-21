@@ -71,9 +71,7 @@ describe("WebSearchToolOutputSchema", () => {
       ...hit,
       ordinal: i + 1,
     }));
-    expect(WebSearchToolOutputSchema.safeParse({ results: hits }).success).toBe(
-      false,
-    );
+    expect(WebSearchToolOutputSchema.safeParse({ hits }).success).toBe(false);
   });
 
   it("rejects non-http(s) schemes and URLs over 2048 chars", () => {

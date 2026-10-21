@@ -100,9 +100,14 @@ export const WebSearchHitSchema = z.strictObject({
 });
 export type WebSearchHit = z.infer<typeof WebSearchHitSchema>;
 
-/** `web.search` output: at most `top_k` (and always ≤8) hits. */
+/**
+ * `web.search` output: at most `top_k` (and always ≤8) hits. The container
+ * key is `hits` — the same grantable shape as the M1 markdown search tool —
+ * because evidence grants and ordinal addressability are derived from the
+ * delivered broker payload via the shared `hits`/`references` visitor.
+ */
 export const WebSearchToolOutputSchema = z.strictObject({
-  results: z.array(WebSearchHitSchema).max(MAX_WEB_TOP_K),
+  hits: z.array(WebSearchHitSchema).max(MAX_WEB_TOP_K),
 });
 export type WebSearchToolOutput = z.infer<typeof WebSearchToolOutputSchema>;
 

@@ -192,7 +192,7 @@ export function createWebSearchRegistration(options: {
 
     // ---- Materialize via ReferenceManager web snapshots. ----
     const now = clock.now();
-    const hits: WebResultHit[] = decoded.map((item) => ({
+    const rawHits: WebResultHit[] = decoded.map((item) => ({
       url: item.url,
       title: item.title,
       snippet: item.snippet,
@@ -212,7 +212,7 @@ export function createWebSearchRegistration(options: {
         sessionId,
         ctx.runId,
         connectorInstanceId,
-        hits,
+        rawHits,
         { now },
       );
     } catch {
@@ -221,7 +221,7 @@ export function createWebSearchRegistration(options: {
     if (!presented.applied) {
       throw new ToolError("execution_cancelled");
     }
-    const results: WebSearchHit[] = presented.references.map(
+    const hits: WebSearchHit[] = presented.references.map(
       (ref): WebSearchHit => {
         const url = urlByKey.get(ref.canonicalKey);
         if (url === undefined) {
@@ -239,7 +239,7 @@ export function createWebSearchRegistration(options: {
         };
       },
     );
-    return { results };
+    return { hits };
   };
 
   return {
@@ -258,8 +258,8 @@ export function createWebSearchRegistration(options: {
     outputSchema: WebSearchToolOutputSchema,
     handler: handler as unknown as ToolRegistration["handler"],
     normalize: (raw) => {
-      const output = raw as { results: unknown[] };
-      const count = Array.isArray(output.results) ? output.results.length : 0;
+      const output = raw as { hits: unknown[] };
+      const count = Array.isArray(output.hits) ? output.hits.length : 0;
       return { normalized: raw, observations: count, modelFacing: raw };
     },
   };

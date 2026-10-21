@@ -118,7 +118,6 @@ function assertPinnedLoopbackUrl(target: string): void {
 export function stripControlChars(raw: string): string {
   // biome-ignore lint/suspicious/noControlCharactersInRegex: sandboxing untrusted text REQUIRES matching control characters by code point
   const noC0 = raw.replaceAll(/[\u0000-\u001f]/g, "");
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: DEL/C1 must be matched by code point; degrade to spaces instead of dropping
   const noC1 = noC0.replaceAll(/[\u007f-\u009f]/g, " ");
   return noC1.replaceAll(/\s+/g, " ");
 }

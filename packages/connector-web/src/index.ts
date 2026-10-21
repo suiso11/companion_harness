@@ -7,4 +7,5 @@ export {
   stripControlChars,
   WebSearchClientError,
   type WebSearchErrorCode,
+  type WebSnippet,
 } from "./client.js";

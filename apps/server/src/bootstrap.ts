@@ -76,6 +76,7 @@ import {
   createMemoryStageRegistrations,
   createReferenceManager,
   createToolBroker,
+  createWebSearchRegistration,
   getSchemaVersion,
   type KernelDatabaseHandle,
   type MarkdownConnectorBinding,
@@ -2162,7 +2163,14 @@ export async function startServer(
       calendarConfig !== null ||
       actionsEnabled ||
       createEnabled;
-    if (needsMarkdownTools || memory !== null) {
+    // Strict opt-in web search (SearXNG): registered only when the parsed
+    // config is explicitly enabled with a base URL; disabled (unset) never
+    // constructs the registration, so the model-facing tool list never
+    // advertises `web.search`.
+    const webSearchEnabled =
+      config.webSearch.enabled === true &&
+      config.webSearch.searxng_base_url !== undefined;
+    if (needsMarkdownTools || memory !== null || webSearchEnabled) {
       // Agent-visible base: the M1/M6/memory registrations below are ALSO
       // the agent's base toolset. Captured here so the agent broker (built
       // later) reuses the exact same registrations plus the always-on
@@ -2291,6 +2299,23 @@ export async function startServer(
         };
         registrations.push(createMemorySearchRegistration({ repo, port }));
         registrations.push(...createMemoryStageRegistrations({ repo, port }));
+      }
+      if (webSearchEnabled) {
+        // Metadata-only `kind='web'` connector instance the registration is
+        // bound to; the SearXNG endpoint itself never persists to the store.
+        const webInstance = referenceManager.ensureWebConnectorInstance("web", {
+          now: Date.now(),
+        });
+        registrations.push(
+          createWebSearchRegistration({
+            db: handle.raw,
+            repo,
+            referenceManager,
+            connectorInstanceId: webInstance.id,
+            config: config.webSearch,
+          }),
+        );
+        logger.info("server.web_search_ready", { status: 1 });
       }
       toolBroker = createToolBroker({ db: handle.raw, repo, registrations });
       agentBaseRegistrations.push(...registrations);
