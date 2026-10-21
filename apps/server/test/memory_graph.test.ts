@@ -23,6 +23,7 @@ import type {
 } from "../src/memory_cli.js";
 import {
   createMemoryService,
+  MemoryManageCancelled,
   MemoryManageError,
   type MemoryService,
 } from "../src/memory_service.js";
@@ -394,6 +395,71 @@ describe("global graph: stable opaque handles", () => {
         code: "memory_graph_unavailable",
       });
       expect(graph.ops).not.toContain("record.feedback");
+    } finally {
+      f.close();
+    }
+  });
+});
+
+describe("graph shutdown tracking", () => {
+  it("cancels and awaits an in-flight graph read on shutdown", async () => {
+    const f = await openRepo();
+    try {
+      const graph = state();
+      const base = makeCli(graph);
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let entered!: () => void;
+      const enteredPromise = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      let aborted = false;
+      const cli: CliCall = async (address, op, params, key, options) => {
+        if (op !== "graph.version") {
+          return base(address, op, params, key, options);
+        }
+        entered();
+        await new Promise<void>((resolve) => {
+          const signal = options?.signal;
+          if (signal?.aborted === true) {
+            aborted = true;
+            resolve();
+            return;
+          }
+          signal?.addEventListener(
+            "abort",
+            () => {
+              aborted = true;
+              resolve();
+            },
+            { once: true },
+          );
+          // A deferred CLI release is still harmless: shutdown aborts the
+          // read and waits for this promise, so no later page can run.
+          void gate.then(() => resolve());
+        });
+        return base(address, op, params, key, options);
+      };
+      const service = makeService(f.repo, cli);
+      const { sessionId, runId } = completeRun(f.repo);
+
+      const read = service.getMemoryGraphGlobal(sessionId, { runId }).then(
+        () => null,
+        (error: unknown) => error,
+      );
+      await enteredPromise;
+      await service.stop();
+      expect(aborted).toBe(true);
+      expect(await read).toBeInstanceOf(MemoryManageCancelled);
+      // The aborted version probe never reached graph.page, and no graph
+      // projection was minted after shutdown.
+      expect(graph.ops).toEqual(["graph.version"]);
+      expect(graph.pageCalls).toBe(0);
+      release();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(graph.pageCalls).toBe(0);
     } finally {
       f.close();
     }

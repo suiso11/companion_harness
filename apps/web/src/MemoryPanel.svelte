@@ -9,7 +9,11 @@
 // keyed operation that is polled to its durable ack. The chat shell still
 // provides the conversation/composer (the memory e2e cultivates a fact
 // there before searching).
-import { GraphCanvas, parseGraphData } from "../../server/src/ui/graph.js";
+import {
+  GraphCanvas,
+  type GraphData,
+  parseGraphData,
+} from "../../server/src/ui/graph.js";
 import { errorCode, fetchJson, postJson, randomUuid } from "./lib/api.js";
 import { getSessionId } from "./lib/session.svelte.js";
 
@@ -62,6 +66,12 @@ let graphRetired = $state(false);
 let graphDepth = $state("1");
 let graphScope = $state<GraphScope | null>(null);
 let graphSelected = $state<string | null>(null);
+/**
+ * Last successfully rendered graph payload. The canvas is destroyed when
+ * the list view unmounts it, so returning to the graph rehydrates this
+ * snapshot instead of showing an empty canvas (or forcing a refetch).
+ */
+let graphData = $state<GraphData | null>(null);
 let graphLoading = $state(false);
 let graphCanvasEl = $state<SVGSVGElement | null>(null);
 let canvas: GraphCanvas | null = null;
@@ -215,12 +225,25 @@ async function search(): Promise<void> {
   }
 }
 
+/** Paint the retained payload onto the current (possibly new) canvas. */
+function paintGraph(): void {
+  if (canvas === null || graphData === null) return;
+  canvas.setGraph(graphData, { selected: graphSelected, query });
+}
+
 /** Switch between the existing result list and the read-only graph. */
 function switchView(next: "list" | "graph"): void {
   view = next;
   if (next === "graph") {
     canvas?.setSearchQuery(query);
-    if (graphScope === null) void loadGraph("global");
+    if (graphData === null) {
+      void loadGraph(graphScope?.scope ?? "global");
+    } else {
+      // The list view destroyed the canvas, but graphData survives: restore
+      // the previously loaded graph (the mount effect paints it as soon as
+      // the new canvas exists).
+      paintGraph();
+    }
   } else {
     canvas?.setSearchQuery("");
   }
@@ -327,7 +350,8 @@ async function loadGraph(kind: "global" | "local"): Promise<void> {
     ) {
       graphSelected = null;
     }
-    canvas?.setGraph(data, { selected: graphSelected, query });
+    graphData = data;
+    paintGraph();
     if (data.nodes.length === 0) {
       graphStatus = "記憶がありません";
     } else if (data.truncated) {
@@ -366,6 +390,9 @@ $effect(() => {
       graphSelected = handle;
     },
   });
+  // A graph already loaded before the list view destroyed the canvas is
+  // rehydrated here, so list -> graph never renders an empty canvas.
+  paintGraph();
   return () => {
     canvas?.destroy();
     canvas = null;
@@ -706,6 +733,7 @@ $effect(() => {
   listScope = null;
   graphScope = null;
   graphSelected = null;
+  graphData = null;
   graphStatus = "";
   graphLoading = false;
   canvas?.setGraph(

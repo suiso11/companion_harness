@@ -164,9 +164,29 @@ test("graph view renders, highlights, opens detail, local depth 1, zooms, and re
   await page.setViewportSize({ width: 1280, height: 900 });
 
   // 1. Global view: exact seeded node/edge counts (real Hono + real CLI).
-  const initial = waitForGraphResponse(page);
+  const initial = page.waitForResponse(
+    (response) =>
+      response.request().method() === "GET" &&
+      response.url().includes("/memory/graph?") &&
+      response.status() > 0,
+    { timeout: 30_000 },
+  );
   await page.locator("#memory-view-graph").click();
   const globalResponse = await initial;
+  if (globalResponse.status() === 503) {
+    const body = (await globalResponse.json()) as {
+      error?: { code?: unknown };
+    };
+    if (body.error?.code === "memory_graph_unavailable") {
+      // The CI-pinned remind revision predates graph ops. Keep the skip
+      // explicit; bump the pin after remind#28 merges to run this suite.
+      test.skip(
+        true,
+        "pinned remind build has no graph ops (bump after remind#28)",
+      );
+      return;
+    }
+  }
   expect(globalResponse.status()).toBe(200);
   const globalBody = (await globalResponse.json()) as {
     scope?: unknown;
@@ -197,6 +217,16 @@ test("graph view renders, highlights, opens detail, local depth 1, zooms, and re
     await expect(page.locator("#memory-graph-legend")).toContainText(legend);
   }
   await screenshotMemory(page, GLOBAL_SCREENSHOT);
+
+  // 1b. List -> graph must restore the loaded graph, not an empty canvas:
+  // the list view unmounts the SVG/GraphCanvas, so the panel rehydrates the
+  // retained payload when the canvas remounts (no manual refresh needed).
+  await page.locator("#memory-view-list").click();
+  await expect(page.locator("#memory-search-form")).toBeVisible();
+  await page.locator("#memory-view-graph").click();
+  await expect(nodes(page)).toHaveCount(SEED_NODE_COUNT);
+  await expect(edges(page)).toHaveCount(SEED_EDGE_COUNT);
+  await settleLayout(page);
 
   // 2. Search highlights matching node(s) via the CSS class (no API call).
   await page.locator("#memory-search-input").fill("alpha");

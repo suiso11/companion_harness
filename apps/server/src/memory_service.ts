@@ -975,6 +975,58 @@ export function createMemoryService(
     }
   }
 
+  /**
+   * Every in-flight graph projection read owns a controller here. stop()
+   * aborts these CLI children and awaits their settlement, so a shutdown
+   * during `graph.version`/`graph.page`/`graph.local` can neither keep
+   * paging nor mint handles (write a projection) against a closed DB.
+   */
+  const graphReads = new Set<{
+    readonly controller: AbortController;
+    readonly settled: Promise<void>;
+  }>();
+
+  /**
+   * Run one graph read under shutdown tracking. The caller signal (HTTP
+   * client disconnect) is forwarded to a service-owned controller, so
+   * `stop()` can abort the same call; after the awaited read the projection
+   * write is fenced by `stopped`/abort (no post-shutdown mint or cache).
+   */
+  async function trackGraphRead<T>(
+    external: AbortSignal | undefined,
+    read: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T> {
+    throwIfStagingCancelled(external);
+    const controller = new AbortController();
+    let settle!: () => void;
+    const settled = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    const entry = { controller, settled };
+    graphReads.add(entry);
+    const forwardAbort = (): void => controller.abort();
+    if (external !== undefined) {
+      if (external.aborted) {
+        controller.abort();
+      } else {
+        external.addEventListener("abort", forwardAbort, { once: true });
+      }
+    }
+    try {
+      const result = await read(controller.signal);
+      // Fence the projection write: a stop/abort during the awaited read
+      // must not mint handles after shutdown started.
+      throwIfStagingCancelled(controller.signal);
+      return result;
+    } finally {
+      if (external !== undefined) {
+        external.removeEventListener("abort", forwardAbort);
+      }
+      graphReads.delete(entry);
+      settle();
+    }
+  }
+
   const log = (
     level: "info" | "warn" | "error",
     code: string,
@@ -3167,6 +3219,7 @@ export function createMemoryService(
     let truncated = false;
     let pages = 0;
     for (;;) {
+      throwIfStagingCancelled(input.signal);
       pages += 1;
       if (pages > MEMORY_GRAPH_PAGE_MAX) {
         throw new MemoryManageError("service_unavailable");
@@ -3216,6 +3269,7 @@ export function createMemoryService(
       }
       cursor = page.nextCursor;
     }
+    throwIfStagingCancelled(input.signal);
     const boundedEdges = boundRawGraphEdges(rawEdges, nodeIds);
     truncated = truncated || boundedEdges.truncated;
     const entry = {
@@ -3311,19 +3365,22 @@ export function createMemoryService(
       signal?: AbortSignal;
     },
   ): Promise<MemoryGraphResult> {
-    const raw = await fetchGlobalGraph({
-      includeRetired: input.includeRetired === true,
-      ...(input.signal !== undefined ? { signal: input.signal } : {}),
-    });
-    return mintGraphProjection({
-      sessionId,
-      runId: input.runId,
-      scope: "global",
-      version: raw.version,
-      center: null,
-      nodes: raw.nodes,
-      edges: raw.edges,
-      truncated: raw.truncated,
+    return trackGraphRead(input.signal, async (signal) => {
+      const raw = await fetchGlobalGraph({
+        includeRetired: input.includeRetired === true,
+        signal,
+      });
+      throwIfStagingCancelled(signal);
+      return mintGraphProjection({
+        sessionId,
+        runId: input.runId,
+        scope: "global",
+        version: raw.version,
+        center: null,
+        nodes: raw.nodes,
+        edges: raw.edges,
+        truncated: raw.truncated,
+      });
     });
   }
 
@@ -3341,43 +3398,47 @@ export function createMemoryService(
     if (depth !== 1 && depth !== 2) {
       throw new MemoryManageError("validation_error");
     }
-    // Resolve through the SAME session-bound snapshot path as detail:
-    // a handle is valid only in the session whose search created it, and
-    // the record id is the historical snapshot target (never rebound).
-    const resolved = resolveManagementTarget(
-      sessionId,
-      input.searchId,
-      input.handle,
-      true,
-    );
-    if ("refused" in resolved) {
-      throw new MemoryManageError("target_not_found");
-    }
-    const envelope = await callGraphCli(
-      "graph.local",
-      { scope, id: resolved.bound.recordId, depth },
-      input.signal,
-    );
-    if (!envelope.ok) {
-      graphFailure(envelope, "target_not_found");
-    }
-    const parsed = parseGraphLocal(envelope.data);
-    if (parsed === null) {
-      throw new MemoryManageError("service_unavailable");
-    }
-    const bounded = dedupeRawGraphNodes(parsed.nodes);
-    const nodeIds = new Set(bounded.nodes.map((node) => node.id));
-    const boundedEdges = boundRawGraphEdges(parsed.edges, nodeIds);
-    return mintGraphProjection({
-      sessionId,
-      runId: input.runId,
-      scope: "local",
-      version: parsed.version,
-      center: parsed.center,
-      nodes: bounded.nodes,
-      edges: boundedEdges.edges,
-      truncated:
-        parsed.truncated || bounded.truncated || boundedEdges.truncated,
+    return trackGraphRead(input.signal, async (signal) => {
+      throwIfStagingCancelled(signal);
+      // Resolve through the SAME session-bound snapshot path as detail:
+      // a handle is valid only in the session whose search created it, and
+      // the record id is the historical snapshot target (never rebound).
+      const resolved = resolveManagementTarget(
+        sessionId,
+        input.searchId,
+        input.handle,
+        true,
+      );
+      if ("refused" in resolved) {
+        throw new MemoryManageError("target_not_found");
+      }
+      const envelope = await callGraphCli(
+        "graph.local",
+        { scope, id: resolved.bound.recordId, depth },
+        signal,
+      );
+      if (!envelope.ok) {
+        graphFailure(envelope, "target_not_found");
+      }
+      const parsed = parseGraphLocal(envelope.data);
+      if (parsed === null) {
+        throw new MemoryManageError("service_unavailable");
+      }
+      const bounded = dedupeRawGraphNodes(parsed.nodes);
+      const nodeIds = new Set(bounded.nodes.map((node) => node.id));
+      const boundedEdges = boundRawGraphEdges(parsed.edges, nodeIds);
+      throwIfStagingCancelled(signal);
+      return mintGraphProjection({
+        sessionId,
+        runId: input.runId,
+        scope: "local",
+        version: parsed.version,
+        center: parsed.center,
+        nodes: bounded.nodes,
+        edges: boundedEdges.edges,
+        truncated:
+          parsed.truncated || bounded.truncated || boundedEdges.truncated,
+      });
     });
   }
 
@@ -3959,6 +4020,19 @@ export function createMemoryService(
     if (active !== null) {
       await active.catch(() => undefined);
     }
+    // Abort and await EVERY in-flight graph projection read: the global
+    // pager and local reads share the same tracking, so shutdown cancels
+    // their CLI children and waits for them to settle before bootstrap
+    // closes the kernel DB. The post-await fence keeps a late page from
+    // minting handles/projection rows after `stopped`.
+    for (const entry of [...graphReads]) {
+      try {
+        entry.controller.abort();
+      } catch {
+        // Best effort.
+      }
+    }
+    await Promise.all([...graphReads].map((entry) => entry.settled));
     // Track pending explicit stagings: an in-flight stageMemoryMutation
     // observes `stopped` via throwIfStagingCancelled after its awaited read
     // and immediately before its atomic write, so no post-stop write lands.
