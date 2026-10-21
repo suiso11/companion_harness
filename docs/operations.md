@@ -4699,6 +4699,25 @@ ops/llm/apply.sh --yes
 1 行だけ追加する。下記「SearXNG」参照)。`--dest` / `LLM_DIR` で配置先を
 変更できる。
 
+### Gemma MTP 投機デコード
+
+`gemma` は MTP draft を使う投機デコードで起動する
+(`--spec-type draft-mtp --spec-draft-model ... --spec-draft-ngl 99`)。
+効果 (P40, temp 0, 5 prompts x2): decode 48.4 → 80.7 tok/s、
+draft acceptance 72.7%、VRAM +~0.5 GiB、tool call は有効。
+`n-max 6` と E2B draft は遅かったため採用していない。
+
+- draft ファイルはコンテナ内から
+  `/root/.cache/huggingface/specdec/mtp-gemma-4-26B-A4B-it-Q8_0.gguf`
+  (= ホスト `/srv/models/huggingface/specdec/...`) に見える必要がある。
+  無いと `gemma` は起動しない。
+- 入手元: Hugging Face `unsloth/gemma-4-26B-A4B-it-GGUF` の
+  `MTP/mtp-gemma-4-26B-A4B-it-Q8_0.gguf` (461,766,816 bytes、ローカルと同サイズ)。
+  GGUF metadata の architecture は `gemma4-assistant`、tokenizer は
+  target の Gemma 4 と同一。`specdec/` へ配置してから `apply.sh --yes` する。
+- rollback: `ops/llm/compose.yaml` の `--spec-type` / `--spec-draft-model` /
+  `--spec-draft-ngl` の 3 フラグを削除し、`ops/llm/apply.sh --yes` を再実行する。
+
 ### SearXNG (Web 検索バックエンド, loopback のみ)
 
 Companion の `web.search` ツール (実装は別 PR) は、ホスト上の
