@@ -27,8 +27,6 @@ import {
   type WebSnippet,
 } from "@companion/connector-web";
 import {
-  CITATION_ID_REGEX,
-  MEMORY_CITATION_ID_REGEX,
   WEB_SEARCH_TOOL_NAME,
   type WebSearchConfig,
   WebSearchConfigSchema,
@@ -51,6 +49,15 @@ export const WEB_SEARCH_TOOL_DESCRIPTOR_NAME = WEB_SEARCH_TOOL_NAME;
 /** Guard window (§8): a query carrying this many code points of an
  * injected (recorded) memory snippet is an exfiltration-shaped attempt. */
 export const WEB_MEMORY_EXFIL_WINDOW = 16 as const;
+
+/** Citation-shaped token detector (§8 guard): rejects any query carrying
+ * an rN/mN citation id delimited by non-alphanumeric boundaries — the
+ * whole-trim anchored contract regexes alone let embedded forms like
+ * "newer than r1", "(r1)" or "r12abc" through. */
+export const WEB_CITATION_TOKEN_REGEX = /(?:^|[^\p{L}\p{N}])[rm][1-9][0-9]*/u;
+
+/** Per-run serialization gate: web.search calls queued per run id. */
+const runChains = new Map<string, Promise<unknown>>();
 
 /**
  * Create the one `web.search` read-tool registration. Fails closed at
@@ -91,9 +98,20 @@ export function createWebSearchRegistration(options: {
     throw new RepositoryValidationError("web search config must be enabled");
   }
   const clock = options.clock ?? { now: () => Date.now() };
-  // Per-turn web counters: run id -> chargeable executions. Guard
-  // rejections happen BEFORE touching this map, so they never consume it.
-  const perTurnUsed = new Map<string, number>();
+  // Durable per-turn web budget (migration 0027): one charged counter per
+  // turn id, persisted in SQLite so retrying a turn (new run id) or
+  // restarting the server cannot reset the allowance. Guard rejections
+  // happen BEFORE reserving, so they never consume it. Runs without a
+  // turn id (should not occur) fall back to an in-memory per-run map.
+  const perRunFallback = new Map<string, number>();
+  // Atomic guarded reservation: the upsert only increments when the
+  // persisted counter is still below the cap; zero changes = rejected.
+  const reserveTurnUsed = db.prepare(
+    "INSERT INTO web_search_turn_usage (turn_id, used) VALUES (?, 1) " +
+      "ON CONFLICT(turn_id) DO UPDATE SET " +
+      "used = web_search_turn_usage.used + 1 " +
+      "WHERE web_search_turn_usage.used < ?",
+  );
 
   function sessionOf(runId: string): string {
     try {
@@ -108,10 +126,10 @@ export function createWebSearchRegistration(options: {
     try {
       rows = repo.listMemoryExposures(runId);
     } catch {
-      // Fail open for the exfil guard only when storage is unavailable:
-      // the guard is a defense-in-depth check, and the materialization
-      // path itself never believes search results beyond the broker.
-      return [];
+      // Fail CLOSED: if the current run's memory exposures cannot be
+      // read, the exfiltration guard cannot run, so the query is rejected
+      // instead of being sent to SearXNG unchecked.
+      throw new ToolError("web_query_rejected");
     }
     return rows
       .map((row: MemoryExposureRow) => row.snippet)
@@ -130,11 +148,11 @@ export function createWebSearchRegistration(options: {
     }
 
     // ---- Guard (BEFORE the per-turn reservation). ----
-    // 1) Citation-id-shaped query: the whole trimmed query is an rN/mN id.
-    if (
-      CITATION_ID_REGEX.test(query.trim()) ||
-      MEMORY_CITATION_ID_REGEX.test(query.trim())
-    ) {
+    // 1) Citation-id-shaped query: any citation token (rN/mN) with token
+    //    boundaries inside the query — not only a whole-trim match — is
+    //    rejected so model-derived text like "newer than r1", "(r1)" or
+    //    "r12abc" never reaches SearXNG.
+    if (WEB_CITATION_TOKEN_REGEX.test(query)) {
       throw new ToolError("web_query_rejected");
     }
     // 2) Exfiltration: a ≥WEB_MEMORY_EXFIL_WINDOW contiguous code-point
@@ -155,91 +173,120 @@ export function createWebSearchRegistration(options: {
       }
     }
 
-    // ---- Per-turn web budget reservation (post-guard only). ----
-    const used = perTurnUsed.get(ctx.runId) ?? 0;
-    if (used >= config.per_turn_budget) {
-      throw new ToolError("budget_exceeded");
-    }
-    perTurnUsed.set(ctx.runId, used + 1);
+    // ---- Per-turn web budget reservation (post-guard only) + outbound
+    //      fetch, serialized per run (single concurrent web search). ----
+    const core = async (): Promise<WebSearchToolOutput> => {
+      const turnId = repo.getRun(ctx.runId).turnId;
+      if (turnId === null) {
+        // Turn-less runs (should not occur): in-memory per-run fallback.
+        const used = perRunFallback.get(ctx.runId) ?? 0;
+        if (used >= config.per_turn_budget) {
+          throw new ToolError("budget_exceeded");
+        }
+        perRunFallback.set(ctx.runId, used + 1);
+      } else {
+        const reserved = reserveTurnUsed.run(turnId, config.per_turn_budget);
+        if (reserved.changes === 0) {
+          throw new ToolError("budget_exceeded");
+        }
+      }
 
-    // ---- Bounded SearXNG fetch (loopback-only client). ----
-    let rawBody: string;
-    try {
-      rawBody = await fetchSearxResults({
-        baseUrl: config.searxng_base_url ?? "",
-        query,
-        maxResults: Math.max(parsed.top_k, config.max_results),
-        timeoutMs: config.timeout_ms,
-        maxResponseBytes: config.max_response_bytes,
-        ...(parsed.language !== undefined ? { language: parsed.language } : {}),
-        ...(parsed.time_range !== undefined
-          ? { timeRange: parsed.time_range }
-          : {}),
-        signal: ctx.signal,
-      });
-    } catch (error) {
-      throw mapWebClientError(error, ctx.signal);
-    }
-    let decoded: WebSnippet[];
-    try {
-      decoded = decodeSearxResults(rawBody, parsed.top_k);
-    } catch (error) {
-      throw mapWebClientError(error, ctx.signal);
-    }
-    if (ctx.signal.aborted) {
-      throw new ToolError("execution_cancelled");
-    }
+      // ---- Bounded SearXNG fetch (loopback-only client). ----
+      let rawBody: string;
+      try {
+        rawBody = await fetchSearxResults({
+          baseUrl: config.searxng_base_url ?? "",
+          query,
+          maxResults: config.max_results,
+          timeoutMs: config.timeout_ms,
+          maxResponseBytes: config.max_response_bytes,
+          ...(parsed.language !== undefined
+            ? { language: parsed.language }
+            : {}),
+          ...(parsed.time_range !== undefined
+            ? { timeRange: parsed.time_range }
+            : {}),
+          signal: ctx.signal,
+        });
+      } catch (error) {
+        throw mapWebClientError(error, ctx.signal);
+      }
+      let decoded: WebSnippet[];
+      try {
+        decoded = decodeSearxResults(
+          rawBody,
+          Math.min(parsed.top_k, config.max_results),
+        );
+      } catch (error) {
+        throw mapWebClientError(error, ctx.signal);
+      }
+      if (ctx.signal.aborted) {
+        throw new ToolError("execution_cancelled");
+      }
 
-    // ---- Materialize via ReferenceManager web snapshots. ----
-    const now = clock.now();
-    const rawHits: WebResultHit[] = decoded.map((item) => ({
-      url: item.url,
-      title: item.title,
-      snippet: item.snippet,
-      observedAt: now,
-    }));
-    const urlByKey = new Map<string, string>();
-    const snippetByKey = new Map<string, string | null>();
-    for (const item of decoded) {
-      if (!urlByKey.has(item.canonicalKey)) {
-        urlByKey.set(item.canonicalKey, item.url);
-        snippetByKey.set(item.canonicalKey, item.snippet);
+      // ---- Materialize via ReferenceManager web snapshots. ----
+      const now = clock.now();
+      const rawHits: WebResultHit[] = decoded.map((item) => ({
+        url: item.url,
+        title: item.title,
+        snippet: item.snippet,
+        observedAt: now,
+      }));
+      const urlByKey = new Map<string, string>();
+      for (const item of decoded) {
+        if (!urlByKey.has(item.canonicalKey)) {
+          urlByKey.set(item.canonicalKey, item.url);
+        }
+      }
+      let presented: ReturnType<ReferenceManager["presentWebResults"]>;
+      try {
+        presented = referenceManager.presentWebResults(
+          sessionId,
+          ctx.runId,
+          connectorInstanceId,
+          rawHits,
+          { now },
+        );
+      } catch {
+        throw new ToolError("execution_failed");
+      }
+      if (!presented.applied) {
+        throw new ToolError("execution_cancelled");
+      }
+      const hits: WebSearchHit[] = presented.references.map(
+        (ref): WebSearchHit => {
+          const url = urlByKey.get(ref.canonicalKey);
+          if (url === undefined) {
+            throw new ToolError("execution_failed");
+          }
+          return {
+            referenceId: ref.referenceId,
+            ordinal: ref.ordinal,
+            snapshotId: ref.snapshotId,
+            resourceId: ref.resourceId,
+            canonicalKey: ref.canonicalKey,
+            title: ref.title,
+            url,
+            // Title-only hits stay citable: fall back to the stored
+            // (ReferenceManager-normalized) title when the upstream
+            // snippet is absent.
+            snippet: ref.snippet ?? ref.title ?? null,
+          };
+        },
+      );
+      return { hits };
+    };
+    // Enqueue behind any already-running web.search of the same run.
+    const previous = runChains.get(ctx.runId) ?? Promise.resolve();
+    const next = previous.then(core, core);
+    runChains.set(ctx.runId, next);
+    try {
+      return await next;
+    } finally {
+      if (runChains.get(ctx.runId) === next) {
+        runChains.delete(ctx.runId);
       }
     }
-    let presented: ReturnType<ReferenceManager["presentWebResults"]>;
-    try {
-      presented = referenceManager.presentWebResults(
-        sessionId,
-        ctx.runId,
-        connectorInstanceId,
-        rawHits,
-        { now },
-      );
-    } catch {
-      throw new ToolError("execution_failed");
-    }
-    if (!presented.applied) {
-      throw new ToolError("execution_cancelled");
-    }
-    const hits: WebSearchHit[] = presented.references.map(
-      (ref): WebSearchHit => {
-        const url = urlByKey.get(ref.canonicalKey);
-        if (url === undefined) {
-          throw new ToolError("execution_failed");
-        }
-        return {
-          referenceId: ref.referenceId,
-          ordinal: ref.ordinal,
-          snapshotId: ref.snapshotId,
-          resourceId: ref.resourceId,
-          canonicalKey: ref.canonicalKey,
-          title: ref.title,
-          url,
-          snippet: snippetByKey.get(ref.canonicalKey) ?? null,
-        };
-      },
-    );
-    return { hits };
   };
 
   return {
@@ -250,7 +297,10 @@ export function createWebSearchRegistration(options: {
       description:
         "Search the web through the local SearXNG endpoint; results become rN references.",
       category: "read",
-      defaultTimeoutMs: 15_000,
+      // Derive the broker deadline from the configured timeout so values
+      // above the 15s descriptor default (up to the 60s max) are honored
+      // when the invocation carries no explicit override.
+      defaultTimeoutMs: config.timeout_ms,
       maxTimeoutMs: 60_000,
       supportsRefresh: false,
     },

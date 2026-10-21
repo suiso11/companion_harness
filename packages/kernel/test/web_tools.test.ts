@@ -5,6 +5,9 @@
 // module boundary; everything kernel-side (guard, budget, broker tool
 // registration, ReferenceManager, SQLite store) is real.
 
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { WebSearchClientError } from "@companion/connector-web";
 import { WebSearchToolInputSchema } from "@companion/contracts";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -27,6 +30,7 @@ const T0 = 1790000000000;
 
 const fakeFetchCalls: string[] = [];
 let fakeSearxBody = '{"results":[]}';
+let fakeFetchHold: Promise<void> | null = null;
 
 vi.mock("@companion/connector-web", async (importOriginal) => {
   const actual =
@@ -35,6 +39,7 @@ vi.mock("@companion/connector-web", async (importOriginal) => {
     ...actual,
     fetchSearxResults: async (options: { query: string }) => {
       fakeFetchCalls.push(options.query);
+      if (fakeFetchHold) await fakeFetchHold;
       return fakeSearxBody;
     },
     WebSearchClientError: actual.WebSearchClientError,
@@ -302,5 +307,123 @@ describe("mapWebClientError", () => {
     expect(mapWebClientError(new Error("boom"), signal.signal).errorCode).toBe(
       "execution_cancelled",
     );
+  });
+});
+
+describe("web.search review fixes", () => {
+  beforeEach(() => {
+    fakeFetchCalls.length = 0;
+    fakeFetchHold = null;
+  });
+
+  it("persisted per-turn budget survives registration recreation (restart/retry)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "web-budget-"));
+    const file = join(dir, "kernel.db");
+    try {
+      const h1 = openKernelDatabase(file);
+      await migrateKernelDatabase({ db: h1.raw });
+      const repo1 = createKernelRepository(h1.raw);
+      const m1 = createReferenceManager(h1.raw);
+      const inst = m1.ensureWebConnectorInstance("web", { now: T0 });
+      const reg1 = createWebSearchRegistration({
+        db: h1.raw,
+        repo: repo1,
+        referenceManager: m1,
+        connectorInstanceId: inst.id,
+        config: {
+          enabled: true,
+          searxng_base_url: "http://127.0.0.1:8080",
+          per_turn_budget: 1,
+        },
+        clock: { now: () => T0 + 50 },
+      });
+      const { runId } = runningRun(repo1);
+      await invoke(reg1, input("first"), ctx(runId));
+      // Simulate a restart: drop the process, keep the SQLite file.
+      closeKernelDatabase(h1);
+      const h2 = openKernelDatabase(file);
+      const repo2 = createKernelRepository(h2.raw);
+      const m2 = createReferenceManager(h2.raw);
+      const reg2 = createWebSearchRegistration({
+        db: h2.raw,
+        repo: repo2,
+        referenceManager: m2,
+        connectorInstanceId: inst.id,
+        config: {
+          enabled: true,
+          searxng_base_url: "http://127.0.0.1:8080",
+          per_turn_budget: 1,
+        },
+        clock: { now: () => T0 + 50 },
+      });
+      // Same turn (same run id) via a fresh registration: still charged.
+      expect(
+        await rejectedCode(
+          invoke(reg2, input("second"), ctx(runId)) as Promise<unknown>,
+        ),
+      ).toBe("budget_exceeded");
+      closeKernelDatabase(h2);
+      rmSync(dir, { recursive: true, force: true });
+    } catch (error) {
+      rmSync(dir, { recursive: true, force: true });
+      throw error;
+    }
+  });
+
+  it("fails closed when the memory exposure lookup throws", async () => {
+    const { handle, repo, registration } = await openStack();
+    try {
+      const { runId } = runningRun(repo);
+      (repo as unknown as Record<string, unknown>).listMemoryExposures = () => {
+        throw new Error("storage unavailable");
+      };
+      expect(
+        await rejectedCode(
+          invoke(registration, input("first"), ctx(runId)) as Promise<unknown>,
+        ),
+      ).toBe("web_query_rejected");
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("rejects embedded citation tokens but allows plain queries", async () => {
+    const { handle, repo, registration } = await openStack();
+    try {
+      const { runId } = runningRun(repo);
+      for (const q of ["newer than r1", "(r1)", "r12abc", "see m2 please"]) {
+        expect(
+          await rejectedCode(
+            invoke(registration, input(q), ctx(runId)) as Promise<unknown>,
+          ),
+        ).toBe("web_query_rejected");
+      }
+      expect(fakeFetchCalls).toEqual([]);
+      // Benign queries (no citation-shaped token) still go through.
+      await invoke(registration, input("rust 1.0 release notes"), ctx(runId));
+      expect(fakeFetchCalls).toEqual(["rust 1.0 release notes"]);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("serializes concurrent web.search calls within a run", async () => {
+    const { handle, repo, registration } = await openStack();
+    try {
+      let release!: () => void;
+      fakeFetchHold = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const { runId } = runningRun(repo);
+      const p1 = invoke(registration, input("a"), ctx(runId));
+      const p2 = invoke(registration, input("b"), ctx(runId));
+      await new Promise((r) => setTimeout(r, 10));
+      expect(fakeFetchCalls).toEqual(["a"]);
+      release();
+      await Promise.all([p1, p2]);
+      expect(fakeFetchCalls).toEqual(["a", "b"]);
+    } finally {
+      closeKernelDatabase(handle);
+    }
   });
 });
