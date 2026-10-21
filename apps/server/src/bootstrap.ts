@@ -68,6 +68,7 @@ import {
   createCalendarRescheduleProposalRegistration,
   createConversationProposalRegistrations,
   createDurableCalendarTargetStore,
+  createExecutionRecordStore,
   createHandoffRegistrations,
   createKernelRepository,
   createLearningRegistrations,
@@ -1331,6 +1332,31 @@ export async function startServer(
     });
     logger.info("server.migrated", { status: migrated.toVersion });
 
+    // Opt-in private execution records (COMPANION_EXECUTION_RECORDS_JSON).
+    // Construction validates/creates the absolute private root fail-closed
+    // (0700, no symlinks) and startup retention pruning is explicit. The
+    // store holds no file handles: lifecycle teardown is the process exit;
+    // records are deliberately NOT deleted on shutdown. A recorder write
+    // failure propagates out of the model/tool boundary and fails that
+    // invocation instead of implying it was captured.
+    const executionRecorder =
+      config.executionRecords === null
+        ? undefined
+        : createExecutionRecordStore({
+            directory: config.executionRecords.directory,
+            clock: { now },
+          });
+    if (executionRecorder !== undefined && config.executionRecords !== null) {
+      const pruned = executionRecorder.prune(
+        config.executionRecords.retentionDays,
+      );
+      logger.info("server.execution_records_ready", {
+        // Numeric status is the pruned count; only whitelisted scalar
+        // fields may reach the logger (never paths or record data).
+        status: pruned,
+      });
+    }
+
     // AV autonomy restart fence: runs on every start AFTER migration. When
     // the control was left UNPAUSED it flips back to PAUSED with a version
     // advance and appends `restart_fence` + `interrupted_note` activity rows
@@ -2317,7 +2343,12 @@ export async function startServer(
         );
         logger.info("server.web_search_ready", { status: 1 });
       }
-      toolBroker = createToolBroker({ db: handle.raw, repo, registrations });
+      toolBroker = createToolBroker({
+        db: handle.raw,
+        repo,
+        registrations,
+        ...(executionRecorder === undefined ? {} : { executionRecorder }),
+      });
       agentBaseRegistrations.push(...registrations);
       logger.info("server.markdown_ready", {
         status: registrations.length,
@@ -2416,6 +2447,7 @@ export async function startServer(
           ...createLearningRegistrations({ repo }),
           ...createHandoffRegistrations({ repo }),
         ],
+        ...(executionRecorder === undefined ? {} : { executionRecorder }),
       });
       registry.register(
         AGENT_STRATEGY_NAME,
@@ -2426,6 +2458,7 @@ export async function startServer(
           gateway: modelGateway,
           model: modelName,
           ...(memory !== null ? { memory: memory.recallHook } : {}),
+          ...(executionRecorder === undefined ? {} : { executionRecorder }),
           // PR-2: forward provisional step deltas to the ephemeral bus.
           // `content` pieces are intentionally dropped: free text is never
           // an answer (answer.submit terminal protocol), and no contract

@@ -87,5 +87,6 @@ export type {
   ModelStreamDeltaCallback,
   ModelUsage,
   NormalizedToolCall,
+  RawHttpResponse,
   ToolDefinition,
 } from "./types.js";

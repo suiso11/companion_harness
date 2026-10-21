@@ -25,6 +25,7 @@ import type {
   ModelCapabilities,
   ModelStreamDeltaCallback,
   ModelToolChoice,
+  RawHttpResponse,
   ToolDefinition,
 } from "./types.js";
 
@@ -44,6 +45,19 @@ export interface ChatCallOptions {
    * path. Callback exceptions never affect the result (best-effort emit).
    */
   onDelta?: ModelStreamDeltaCallback;
+  /**
+   * Optional raw response observer invoked after bounded reading and BEFORE
+   * JSON parsing/normalization (success and non-2xx bodies alike). Headers
+   * are never exposed. On the streaming path it receives the status plus the
+   * exact received SSE bytes (bounded by the same per-call cap), exactly
+   * once: on completion before normalization, before a malformed-chunk /
+   * invalid-response failure, and after a non-2xx body is drained.
+   * Cancellation (external abort or timeout) reports nothing: a cancelled
+   * response is not a provider response and abort semantics stay unchanged.
+   * Only an explicitly opt-in private execution record should consume this;
+   * provider behavior is unchanged when absent.
+   */
+  onRawResponse?: (response: RawHttpResponse) => void;
 }
 
 /** Provider-neutral local model gateway. */
@@ -1018,6 +1032,8 @@ export async function postJsonNoRedirect(options: {
   timeoutMs: number | undefined;
   signal?: AbortSignal;
   maxResponseBytes?: number;
+  /** Raw body observer invoked before any JSON parse / normalization. */
+  onRawResponse?: (response: RawHttpResponse) => void;
 }): Promise<unknown> {
   // Revalidate the concrete fetch target immediately before use: construction-
   // time validation alone leaves a bypass window if the stored URL is mutated
@@ -1089,11 +1105,19 @@ export async function postJsonNoRedirect(options: {
     if (!response.ok) {
       // Drain the error body within the same bound (absent/dishonest
       // lengths included) so a huge error payload cannot exhaust memory,
-      // then report only the fixed status failure.
-      await readBoundedBodyText(response, controller, externalSignal, limit, {
-        tooLarge: () => requestFailed(response.status),
-        failed: () => requestFailed(response.status),
-      });
+      // then report only the fixed status failure. The opt-in raw observer
+      // still sees the bounded body before the fixed failure is thrown.
+      const errorText = await readBoundedBodyText(
+        response,
+        controller,
+        externalSignal,
+        limit,
+        {
+          tooLarge: () => requestFailed(response.status),
+          failed: () => requestFailed(response.status),
+        },
+      );
+      options.onRawResponse?.({ status: response.status, body: errorText });
       throw requestFailed(response.status);
     }
     const text = await readBoundedBodyText(
@@ -1114,6 +1138,10 @@ export async function postJsonNoRedirect(options: {
           ),
       },
     );
+    // Raw interception precedes parsing/normalization so malformed bodies are
+    // observable by the explicitly opt-in private record. It never includes
+    // headers (authorization/cookies remain outside this boundary).
+    options.onRawResponse?.({ status: response.status, body: text });
     try {
       return JSON.parse(text) as unknown;
     } catch {

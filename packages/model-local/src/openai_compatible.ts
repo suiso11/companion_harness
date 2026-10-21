@@ -376,6 +376,9 @@ export function createOpenAICompatibleGateway(
         ...(options?.maxResponseBytes === undefined
           ? {}
           : { maxResponseBytes: options.maxResponseBytes }),
+        ...(options?.onRawResponse === undefined
+          ? {}
+          : { onRawResponse: options.onRawResponse }),
       });
       return normalizeOpenAIResponse(raw, request.tools);
     },
@@ -393,6 +396,10 @@ export function createOpenAICompatibleGateway(
  * usage) emit via `options.onDelta` best-effort. The same byte/step budgets
  * apply (raw SSE bytes share the per-call cap; text/argument bounds reject
  * incrementally); step/wall timeouts abort via `options.signal`.
+ * `options.onRawResponse` observes the status and exact received SSE bytes
+ * (bounded by that cap) once per call before normalization, including
+ * malformed-chunk and drained non-2xx failures; abort/timeout reports
+ * nothing.
  */
 async function streamOpenAIChat(options: {
   fetchImpl: Parameters<typeof postJsonNoRedirect>[0]["fetchImpl"];
@@ -453,6 +460,9 @@ async function streamOpenAIChat(options: {
     ...(callOptions?.maxResponseBytes === undefined
       ? {}
       : { maxResponseBytes: callOptions.maxResponseBytes }),
+    ...(callOptions?.onRawResponse === undefined
+      ? {}
+      : { onRawResponse: callOptions.onRawResponse }),
     onChunkBody: (chunk: unknown) => {
       const pieces = accumulator.pushChunkBody(chunk);
       if (pieces.content.length > 0) {

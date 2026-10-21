@@ -443,6 +443,8 @@ export interface ServerConfig {
   readonly webSearch: WebSearchConfig;
   /** Strict opt-in remind memory config; null (unset) means memoryless. */
   readonly memory: MemoryConfig | null;
+  /** Opt-in private execution records; null (unset) means disabled. */
+  readonly executionRecords: ExecutionRecordsConfig | null;
   /** Strict opt-in remote (tailnet) Origin/Host allowlist (default off). */
   readonly remote: RemoteConfig;
   /**
@@ -486,6 +488,67 @@ export class ServerConfigError extends Error {
     super(message, options);
     this.name = "ServerConfigError";
   }
+}
+
+/** Opt-in private local execution-record store configuration. */
+export interface ExecutionRecordsConfig {
+  readonly directory: string;
+  readonly retentionDays: number;
+}
+
+export const EXECUTION_RECORDS_RETENTION_DEFAULT_DAYS = 30;
+export const MAX_EXECUTION_RECORDS_RETENTION_DAYS = 3650;
+
+const EXECUTION_RECORD_DIR_KEYS = new Set(["directory", "retentionDays"]);
+
+/**
+ * Strict opt-in execution-record parser (COMPANION_EXECUTION_RECORDS_JSON).
+ * Unset = null (disabled). The directory must be absolute; it is validated
+ * again (symlink-safe) by the store at construction.
+ */
+export function parseExecutionRecordsConfig(
+  raw: string | undefined,
+): ExecutionRecordsConfig | null {
+  if (raw === undefined) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw configError("execution records config must be a JSON object");
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw configError("execution records config must be a JSON object");
+  }
+  const record = parsed as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (!EXECUTION_RECORD_DIR_KEYS.has(key)) {
+      throw configError("execution records config has an unknown key");
+    }
+  }
+  const directory = record.directory;
+  if (
+    typeof directory !== "string" ||
+    directory.length === 0 ||
+    directory.length > 4096 ||
+    directory.includes("\0") ||
+    !isAbsolute(directory)
+  ) {
+    throw configError("execution records directory must be absolute");
+  }
+  const rawRetention = record.retentionDays;
+  let retentionDays = EXECUTION_RECORDS_RETENTION_DEFAULT_DAYS;
+  if (rawRetention !== undefined) {
+    if (
+      typeof rawRetention !== "number" ||
+      !Number.isInteger(rawRetention) ||
+      rawRetention < 0 ||
+      rawRetention > MAX_EXECUTION_RECORDS_RETENTION_DAYS
+    ) {
+      throw configError("execution records retentionDays is out of bounds");
+    }
+    retentionDays = rawRetention;
+  }
+  return Object.freeze({ directory, retentionDays });
 }
 
 /** OS app-data directory for the default DB (plan §9 blocker 7.9). */
@@ -1541,6 +1604,9 @@ export function loadServerConfig(
     throw configError("web search config is invalid");
   }
   const memory = parseMemoryConfig(env.COMPANION_MEMORY_JSON);
+  const executionRecords = parseExecutionRecordsConfig(
+    env.COMPANION_EXECUTION_RECORDS_JSON,
+  );
   const remote = parseRemoteConfig(env.COMPANION_REMOTE_JSON);
   if (remote.enabled && remote.allowedOrigins.length === 0) {
     throw configError(
@@ -1578,6 +1644,7 @@ export function loadServerConfig(
     actions,
     webSearch,
     memory,
+    executionRecords,
     remote,
     trial,
   });

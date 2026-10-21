@@ -296,6 +296,9 @@ export function createOllamaGateway(options: GatewayOptions): ModelGateway {
         ...(options?.maxResponseBytes === undefined
           ? {}
           : { maxResponseBytes: options.maxResponseBytes }),
+        ...(options?.onRawResponse === undefined
+          ? {}
+          : { onRawResponse: options.onRawResponse }),
       });
       return normalizeOllamaResponse(raw, request.tools);
     },

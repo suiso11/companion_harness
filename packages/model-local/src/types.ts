@@ -57,6 +57,17 @@ export interface ChatRequest {
   maxOutputTokens?: number;
 }
 
+/**
+ * Raw provider response observed after bounded reading and BEFORE JSON
+ * parsing/normalization. Headers are never exposed. This hook exists only so
+ * an explicitly opt-in private execution record can capture malformed output
+ * that normalization would otherwise discard.
+ */
+export interface RawHttpResponse {
+  readonly status: number;
+  readonly body: string;
+}
+
 /** Normalized native tool call (never derived from free-text content). */
 export interface NormalizedToolCall {
   id: string;

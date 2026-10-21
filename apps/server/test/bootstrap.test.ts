@@ -8,6 +8,8 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:net";
@@ -21,6 +23,7 @@ import type {
 import {
   BUNDLED_SCHEMA_VERSION,
   closeKernelDatabase,
+  createExecutionRecordStore,
   createKernelRepository,
   migrateKernelDatabase,
   openKernelDatabase,
@@ -84,6 +87,41 @@ function tempEnv(): { env: NodeJS.ProcessEnv; dir: string; dbPath: string } {
 }
 
 describe("bootstrap startup + graceful shutdown", () => {
+  it("creates the opt-in private record store and fails closed on a symlinked root", async () => {
+    const { env, dir } = tempEnv();
+    const records = join(dir, "records");
+    const started = await startServer({
+      env: {
+        ...env,
+        COMPANION_EXECUTION_RECORDS_JSON: JSON.stringify({
+          directory: records,
+        }),
+      },
+      drainMs: 50,
+    });
+    servers.push(started);
+    expect(statSync(records).isDirectory()).toBe(true);
+    await started.shutdown("test-records");
+    servers.pop();
+
+    const second = tempEnv();
+    const target = join(second.dir, "target");
+    mkdirSync(target);
+    const link = join(second.dir, "records-link");
+    symlinkSync(target, link);
+    await expect(
+      startServer({
+        env: {
+          ...second.env,
+          COMPANION_EXECUTION_RECORDS_JSON: JSON.stringify({
+            directory: link,
+          }),
+        },
+        drainMs: 50,
+      }),
+    ).rejects.toThrow();
+  });
+
   it("starts in order, serves exact health, and shuts down gracefully", async () => {
     const { env, dbPath } = tempEnv();
     const started = await startServer({ env, drainMs: 200 });
@@ -956,6 +994,125 @@ describe("bootstrap M2 model wiring", () => {
       await started.shutdown("test");
       servers.pop();
     } finally {
+      const index = servers.indexOf(started);
+      if (index >= 0) {
+        servers.splice(index, 1);
+      }
+    }
+  });
+
+  it("captures private execution records through the real server", async () => {
+    const { env, dir } = tempEnv();
+    const recordsDirectory = join(dir, "records");
+    const gateway: ModelGateway = {
+      provider: "ollama",
+      capabilities: { toolCalling: true },
+      baseUrl: MODEL_BASE,
+      chatUrl: `${MODEL_BASE}/api/chat`,
+      chat: async () => ({
+        text: "",
+        toolCalls: [
+          {
+            id: "answer-1",
+            name: "answer.submit",
+            arguments: {
+              version: 1,
+              parts: [{ text: "recorded answer", citations: [] }],
+            },
+          },
+        ],
+        stopReason: "tool_calls",
+      }),
+    };
+    const started = await startServer({
+      env: {
+        ...modelEnv(env),
+        COMPANION_EXECUTION_RECORDS_JSON: JSON.stringify({
+          directory: recordsDirectory,
+          retentionDays: 30,
+        }),
+      },
+      drainMs: 50,
+      modelGateway: gateway,
+    });
+    servers.push(started);
+    try {
+      const base = `http://127.0.0.1:${started.port}`;
+      const created = await fetch(`${base}/api/sessions`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": randomUUID(),
+          origin: base,
+        },
+        body: "{}",
+      });
+      expect(created.status).toBe(201);
+      const { sessionId } = (await created.json()) as { sessionId: string };
+      const posted = await fetch(`${base}/api/sessions/${sessionId}/messages`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": randomUUID(),
+          origin: base,
+        },
+        body: JSON.stringify({ text: "record this run" }),
+      });
+      expect(posted.status).toBe(202);
+      const { run } = (await posted.json()) as { run: { id: string } };
+      const deadline = Date.now() + 5_000;
+      let status = "queued";
+      while (Date.now() < deadline) {
+        const response = await fetch(
+          `${base}/api/sessions/${sessionId}/runs/${run.id}/status`,
+        );
+        const body = (await response.json()) as {
+          run: { status: string };
+        };
+        status = body.run.status;
+        if (
+          status === "completed" ||
+          status === "failed" ||
+          status === "cancelled"
+        ) {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(status).toBe("completed");
+      const eventsResponse = await fetch(
+        `${base}/api/sessions/${sessionId}/runs/${run.id}/events`,
+      );
+      expect(eventsResponse.status).toBe(200);
+      const publicEvents = await eventsResponse.text();
+      expect(publicEvents).not.toContain("record this run");
+      const store = createExecutionRecordStore({
+        directory: recordsDirectory,
+      });
+      const records = store.list();
+      expect(records.incomplete).toBe(0);
+      const exported = store.exportRun(run.id);
+      expect(exported.map((record) => record.kind)).toEqual(
+        expect.arrayContaining(["model.request", "model.response"]),
+      );
+      const requestRecord = exported.find(
+        (record) => record.kind === "model.request",
+      );
+      const responseRecord = exported.find(
+        (record) => record.kind === "model.response",
+      );
+      // The private store captures the actual request/response payloads.
+      expect(JSON.stringify(requestRecord?.data)).toContain("record this run");
+      expect(JSON.stringify(responseRecord?.data)).toContain("recorded answer");
+      // Neither private record ids nor request text leak into public events.
+      for (const record of exported) {
+        expect(publicEvents).not.toContain(record.id);
+      }
+      await started.shutdown("test-records");
+      servers.pop();
+    } finally {
+      // A failed assertion must still release the listener and DB handles.
+      await started.shutdown("test-records");
       const index = servers.indexOf(started);
       if (index >= 0) {
         servers.splice(index, 1);

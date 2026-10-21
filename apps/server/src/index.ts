@@ -26,6 +26,7 @@ export {
   startServerFromEnv,
 } from "./bootstrap.js";
 export type {
+  ExecutionRecordsConfig,
   MemoryConfig,
   ModelAdapter,
   ModelConfig,
@@ -37,8 +38,11 @@ export type {
 export {
   assertDbPathHasNoSymlink,
   defaultDbPath,
+  EXECUTION_RECORDS_RETENTION_DEFAULT_DAYS,
   isIanaTimeZone,
   loadServerConfig,
+  MAX_EXECUTION_RECORDS_RETENTION_DAYS,
+  parseExecutionRecordsConfig,
   parseMemoryConfig,
   parseModelConfig,
   parseTrialConfig,

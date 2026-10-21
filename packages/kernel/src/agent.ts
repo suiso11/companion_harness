@@ -68,8 +68,18 @@ import {
 } from "@companion/model-local";
 import type Database from "better-sqlite3";
 import type { ToolBroker } from "./broker.js";
-import { isUuidV4 } from "./canonical.js";
+import {
+  canonicalJsonString,
+  generateId,
+  isUuidV4,
+  sha256Hex,
+} from "./canonical.js";
 import { RepositoryValidationError } from "./errors.js";
+import {
+  ExecutionRecordError,
+  type ExecutionRecorder,
+  redactRawResponseBody,
+} from "./execution_records.js";
 import type { KernelRepository } from "./repository.js";
 import { type RunStrategy, StrategyError } from "./strategy.js";
 
@@ -278,6 +288,37 @@ export function isProjectableHistoryItem(item: {
  * Omission is deterministic (input order preserved, latest valid items
  * win up to AGENT_MAX_HISTORY_ITEMS) and carries no stored text.
  */
+export function composeAgentSystemPrompt(variant?: string | null): string {
+  // The immutable safety instructions are ALWAYS present. An experimental
+  // prompt variant may add instructions, never replace the base contract.
+  if (variant === undefined || variant === null || variant.length === 0) {
+    return AGENT_SYSTEM_PROMPT;
+  }
+  return `${AGENT_SYSTEM_PROMPT}\n\n${variant}`;
+}
+
+/** Stable private fingerprint of the prompt/model/tool harness. */
+export function agentHarnessFingerprint(args: {
+  readonly model: string;
+  readonly provider: string;
+  readonly systemPrompt: string;
+  readonly tools: readonly ToolDefinition[];
+}): string {
+  return sha256Hex(
+    canonicalJsonString({
+      version: 1,
+      model: args.model,
+      provider: args.provider,
+      systemPrompt: args.systemPrompt,
+      tools: args.tools.map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters ?? null,
+      })),
+    }),
+  );
+}
+
 export function projectPrompt(args: ProjectPromptArgs): ChatRequest {
   const system = args.systemPrompt ?? AGENT_SYSTEM_PROMPT;
   const messages: ChatRequest["messages"] = [
@@ -1311,6 +1352,24 @@ export const AGENT_WEB_SEARCH_PARAMETERS = Object.freeze({
 }) as unknown as Record<string, unknown>;
 
 /**
+ * Explicit closed JSON parameter schema for the comparison CLI's
+ * `experiment.docs.read`, matching its strict `{ key }` input and doc-key
+ * grammar. The tool is advertised only when the broker registry actually
+ * contains it; production registries remain the availability gate.
+ */
+export const AGENT_EXPERIMENT_DOCS_READ_PARAMETERS = Object.freeze({
+  type: "object",
+  properties: Object.freeze({
+    key: Object.freeze({
+      type: "string",
+      pattern: "^[a-z][a-z0-9_-]{0,63}$",
+    }),
+  }),
+  required: Object.freeze(["key"]),
+  additionalProperties: false,
+}) as unknown as Record<string, unknown>;
+
+/**
  * Broker-visible M1 tools the agent may advertise, each with its explicit
  * closed parameter schema. Unknown/unregistered names are never advertised:
  * `buildAgentToolDefinitions` skips descriptors outside this map.
@@ -1321,6 +1380,11 @@ const AGENT_BROKER_TOOL_PARAMETERS: Readonly<
   "calendar.search": AGENT_CALENDAR_SEARCH_PARAMETERS,
   "markdown.search": AGENT_MARKDOWN_SEARCH_PARAMETERS,
   "web.search": AGENT_WEB_SEARCH_PARAMETERS,
+  "experiment.docs.read": AGENT_EXPERIMENT_DOCS_READ_PARAMETERS,
+  // Broker ToolDescriptor names are strict `namespace.verb`, so the compare
+  // CLI registers the same contract under this valid name. Both entries are
+  // closed; only the registry decides which (if either) is advertised.
+  "experiment.read": AGENT_EXPERIMENT_DOCS_READ_PARAMETERS,
   "reference.open": AGENT_REFERENCE_OPEN_PARAMETERS,
   "reference.refresh": AGENT_REFERENCE_REFRESH_PARAMETERS,
   "reference.related": AGENT_REFERENCE_RELATED_PARAMETERS,
@@ -2230,6 +2294,14 @@ export interface AgentStrategyOptions {
    * is fail-open (memoryless response); absence preserves M2 behavior.
    */
   readonly memory?: AgentMemoryRecall;
+  /**
+   * Optional experimental prompt variant appended to the immutable base
+   * safety/system instructions (never replaces them).
+   */
+  readonly systemPrompt?: string;
+  readonly promptVariantName?: string;
+  /** Opt-in private local execution recorder (separate from public audit). */
+  readonly executionRecorder?: ExecutionRecorder;
 }
 
 function requirePositiveInt(value: number, what: string): number {
@@ -2299,6 +2371,13 @@ export function createAgentStrategy(
     );
   }
   const toolDefinitions = buildAgentToolDefinitions(broker.describeTools());
+  const systemPrompt = composeAgentSystemPrompt(options.systemPrompt);
+  const harnessFingerprint = agentHarnessFingerprint({
+    model,
+    provider: gateway.provider,
+    systemPrompt,
+    tools: toolDefinitions,
+  });
 
   return async (ctx) => {
     if (ctx.signal.aborted) {
@@ -2380,6 +2459,7 @@ export function createAgentStrategy(
         references,
         tools: toolDefinitions,
         model,
+        systemPrompt,
       }).messages;
       // Authoritative recheck after synchronous preparation and before the
       // first gateway call: preparation that consumes/exceeds the wall budget
@@ -2474,6 +2554,14 @@ export function createAgentStrategy(
           isWallExpired,
           onModelDelta: options.onModelDelta,
           onModelStepFailed,
+          ...(options.executionRecorder === undefined
+            ? {}
+            : { executionRecorder: options.executionRecorder }),
+          harnessFingerprint,
+          systemPrompt,
+          ...(options.promptVariantName === undefined
+            ? {}
+            : { promptVariantName: options.promptVariantName }),
         });
         if (outcome.kind === "gateway_failed") {
           // No retry, no fallback, no repair for transport/timeout/cancel:
@@ -2523,6 +2611,9 @@ export function createAgentStrategy(
           if (!oversizeAudited) {
             throw new StrategyError("execution_cancelled");
           }
+          if (outcome.recordingError !== undefined) {
+            throw outcome.recordingError;
+          }
           throw new StrategyError("execution_failed");
         }
         const classification = classifyStep(outcome.result.toolCalls);
@@ -2552,6 +2643,9 @@ export function createAgentStrategy(
           });
           if (!audited) {
             throw new StrategyError("execution_cancelled");
+          }
+          if (outcome.recordingError !== undefined) {
+            throw outcome.recordingError;
           }
           const feedbacks = await executeOrdinaryTools({
             db,
@@ -2616,6 +2710,9 @@ export function createAgentStrategy(
         });
         if (!terminalAudited) {
           throw new StrategyError("execution_cancelled");
+        }
+        if (outcome.recordingError !== undefined) {
+          throw outcome.recordingError;
         }
         if (terminal.kind === "repaired") {
           repairUsed = true;
@@ -3028,6 +3125,12 @@ type StepOutcome =
       adapter: string;
       durationMs: number;
       usage: { inputTokens: number; outputTokens: number } | null;
+      /**
+       * The private model.response write failed after the response was
+       * delivered. The caller must still complete the public row/terminal
+       * event, then fail the Run with this recording error.
+       */
+      recordingError?: ExecutionRecordError;
     }
   | {
       kind: "answer_normalization_failed";
@@ -3098,6 +3201,10 @@ async function runModelStep(args: {
   isWallExpired: () => boolean;
   onModelDelta?: AgentModelDeltaCallback | undefined;
   onModelStepFailed?: AgentModelStepFailedCallback | undefined;
+  executionRecorder?: ExecutionRecorder;
+  harnessFingerprint: string;
+  systemPrompt: string;
+  promptVariantName?: string;
 }): Promise<StepOutcome> {
   const {
     repo,
@@ -3115,21 +3222,13 @@ async function runModelStep(args: {
     isWallExpired,
     onModelDelta,
     onModelStepFailed,
+    executionRecorder,
   } = args;
+  const recordCallId = generateId();
   const now = clock.now();
   const wallRemaining = Math.max(wallDeadline - now, 1);
   const effectiveTimeout = Math.max(Math.min(stepTimeoutMs, wallRemaining), 1);
 
-  try {
-    repo.appendModelStepEvent(runId, "model.step.started", { step }, { now });
-  } catch {
-    return {
-      kind: "gateway_failed",
-      strategyError: new StrategyError("execution_cancelled"),
-      auditCode: null,
-      auditOutcome: "cancelled",
-    };
-  }
   const startedAt = clock.now();
   // Composed per-step deadline (authoritative for late-success rechecks):
   // the race timer observes real time, but a fake clock or same-tick
@@ -3161,6 +3260,45 @@ async function runModelStep(args: {
     messages: messages.map((message) => ({ ...message })),
     tools: [...toolDefinitions],
   };
+  // The private record is written BEFORE the network call. A failed write is
+  // explicit (the step fails) rather than silently producing a partial record.
+  executionRecorder?.record({
+    kind: "model.request",
+    runId,
+    step,
+    callId: recordCallId,
+    data: {
+      provider: gateway.provider,
+      baseUrl: gateway.baseUrl,
+      chatUrl: gateway.chatUrl,
+      model,
+      messages: request.messages,
+      tools: request.tools,
+      settings: {
+        step,
+        stepTimeoutMs,
+        effectiveTimeoutMs: effectiveTimeout,
+        wallDeadline,
+        harnessFingerprint: args.harnessFingerprint,
+        systemPrompt: args.systemPrompt,
+        ...(args.promptVariantName === undefined
+          ? {}
+          : { promptVariant: args.promptVariantName }),
+      },
+    },
+  });
+  // Only after the request record landed: a failed request write must never
+  // leave an orphan model.step.started event with no corresponding call.
+  try {
+    repo.appendModelStepEvent(runId, "model.step.started", { step }, { now });
+  } catch {
+    return {
+      kind: "gateway_failed",
+      strategyError: new StrategyError("execution_cancelled"),
+      auditCode: null,
+      auditOutcome: "cancelled",
+    };
+  }
 
   type Settlement =
     | { kind: "result"; result: ChatResult }
@@ -3257,12 +3395,27 @@ async function runModelStep(args: {
                 // Best effort: progress consumers never fail the step.
               }
             };
-      chat = gateway.chat(
-        request,
-        onDelta === undefined
-          ? { signal: stepController.signal }
-          : { signal: stepController.signal, onDelta },
-      );
+      chat = gateway.chat(request, {
+        signal: stepController.signal,
+        ...(onDelta === undefined ? {} : { onDelta }),
+        ...(executionRecorder === undefined
+          ? {}
+          : {
+              onRawResponse: (raw) => {
+                // Precedes JSON parse/normalization; no headers are exposed.
+                executionRecorder.record({
+                  kind: "model.response.raw",
+                  runId,
+                  step,
+                  callId: recordCallId,
+                  data: {
+                    status: raw.status,
+                    body: redactRawResponseBody(raw.body),
+                  },
+                });
+              },
+            }),
+      });
     } catch (error) {
       if (signal.aborted) {
         finish({ kind: "aborted" });
@@ -3406,8 +3559,40 @@ async function runModelStep(args: {
   }
   const durationMs = Math.max(clock.now() - startedAt, 0);
   const adapter = gateway.provider;
+  // The private outcome is evidence alongside the public audit. If its write
+  // fails, the public model_calls row/terminal event must still be completed
+  // first; the caller then rethrows this recording failure so the Run fails.
+  const recordOutcome = (data: {
+    outcome: "cancelled" | "failed" | "timeout";
+    errorCode: M2ModelErrorCode | null;
+    durationMs: number;
+  }): ExecutionRecordError | undefined => {
+    if (executionRecorder === undefined) {
+      return undefined;
+    }
+    try {
+      executionRecorder.record({
+        kind: "model.outcome",
+        runId,
+        step,
+        callId: recordCallId,
+        data,
+      });
+      return undefined;
+    } catch (error) {
+      if (error instanceof ExecutionRecordError) {
+        return error;
+      }
+      throw error;
+    }
+  };
 
   if (settlement.kind === "aborted") {
+    const recordError = recordOutcome({
+      outcome: "cancelled",
+      errorCode: null,
+      durationMs,
+    });
     // User/engine cancellation: exactly one cancelled model_calls row
     // (errorCode null) and deliberately NO model.step.failed event. The
     // closed M2 error family has no cancellation code, so emitting
@@ -3428,6 +3613,9 @@ async function runModelStep(args: {
     } catch {
       // Metadata-only best effort; the cancellation itself carries the fate.
     }
+    if (recordError !== undefined) {
+      throw recordError;
+    }
     return {
       kind: "gateway_failed",
       strategyError: new StrategyError("execution_cancelled"),
@@ -3436,6 +3624,11 @@ async function runModelStep(args: {
     };
   }
   if (settlement.kind === "timeout" || settlement.kind === "wall") {
+    const recordError = recordOutcome({
+      outcome: "timeout",
+      errorCode: "model_step_timeout",
+      durationMs,
+    });
     try {
       repo.recordModelCall(runId, {
         step,
@@ -3460,6 +3653,9 @@ async function runModelStep(args: {
     } catch {
       // Terminal race: the engine CAS owns the final word.
     }
+    if (recordError !== undefined) {
+      throw recordError;
+    }
     return {
       kind: "gateway_failed",
       strategyError: new StrategyError("execution_failed"),
@@ -3475,6 +3671,11 @@ async function runModelStep(args: {
     // cancellation never reaches this branch (settled as aborted above);
     // defensively, an aborted engine signal still cancels here.
     if (signal.aborted || isEngineAbortRejection(settlement.error, signal)) {
+      const recordError = recordOutcome({
+        outcome: "cancelled",
+        errorCode: null,
+        durationMs,
+      });
       // Same cancellation coherence as the aborted race above: one
       // cancelled row (errorCode null), no model.step.failed event (no
       // valid M2 cancellation code; engine owns the terminal lifecycle).
@@ -3492,12 +3693,21 @@ async function runModelStep(args: {
       } catch {
         // Metadata-only best effort; the cancellation carries the fate.
       }
+      if (recordError !== undefined) {
+        throw recordError;
+      }
       return {
         kind: "gateway_failed",
         strategyError: new StrategyError("execution_cancelled"),
         auditCode: null,
         auditOutcome: "cancelled",
       };
+    }
+    // A recorder failure surfaced through the gateway (e.g. onRawResponse
+    // could not persist) is a storage failure, never a model availability
+    // problem: propagate it so the Run fails via the fatal mapping.
+    if (settlement.error instanceof ExecutionRecordError) {
+      throw settlement.error;
     }
     const isTimeout =
       (settlement.error instanceof ModelLocalError &&
@@ -3515,6 +3725,11 @@ async function runModelStep(args: {
       settlement.error instanceof ModelLocalError &&
       settlement.error.code === "answer_invalid"
     ) {
+      const recordError = recordOutcome({
+        outcome: "failed",
+        errorCode: "answer_invalid",
+        durationMs,
+      });
       const reason = modelLocalAnswerInvalidReason(settlement.error);
       try {
         repo.recordModelCall(runId, {
@@ -3553,6 +3768,9 @@ async function runModelStep(args: {
       } catch {
         // Terminal race: the engine CAS owns the final word.
       }
+      if (recordError !== undefined) {
+        throw recordError;
+      }
       return { kind: "answer_normalization_failed", adapter, durationMs };
     }
     // Ordinary malformed native tool calls (tool_call_invalid for bad
@@ -3564,6 +3782,11 @@ async function runModelStep(args: {
       ? "model_step_timeout"
       : "model_unavailable";
     const outcome: "failed" | "timeout" = isTimeout ? "timeout" : "failed";
+    const recordError = recordOutcome({
+      outcome,
+      errorCode: code,
+      durationMs,
+    });
     try {
       repo.recordModelCall(runId, {
         step,
@@ -3588,6 +3811,9 @@ async function runModelStep(args: {
     } catch {
       // Terminal race: the engine CAS owns the final word.
     }
+    if (recordError !== undefined) {
+      throw recordError;
+    }
     return {
       kind: "gateway_failed",
       strategyError: new StrategyError("execution_failed"),
@@ -3601,12 +3827,37 @@ async function runModelStep(args: {
   // invalid answer never records a contradictory completed+failed pair.
   // Token-count usage only (never raw text/args) travels with the outcome.
   const usage = sanitizeModelUsage(settlement.result.usage);
+  let recordingError: ExecutionRecordError | undefined;
+  try {
+    executionRecorder?.record({
+      kind: "model.response",
+      runId,
+      step,
+      callId: recordCallId,
+      data: {
+        text: settlement.result.text,
+        toolCalls: settlement.result.toolCalls,
+        stopReason: settlement.result.stopReason,
+        usage,
+        durationMs,
+      },
+    });
+  } catch (error) {
+    if (error instanceof ExecutionRecordError) {
+      // Defer: the caller still completes the public row and terminal event
+      // for this delivered response before failing the Run.
+      recordingError = error;
+    } else {
+      throw error;
+    }
+  }
   return {
     kind: "delivered",
     result: settlement.result,
     adapter,
     durationMs,
     usage,
+    ...(recordingError === undefined ? {} : { recordingError }),
   };
 }
 
@@ -3917,6 +4168,15 @@ async function executeOrdinaryTools(args: {
           } catch (error) {
             if (error instanceof StrategyError) {
               phaseError ??= error;
+              return;
+            }
+            // Execution-record writes are private evidence, not advisory: a
+            // failed input/handler/result record (or any recorder failure
+            // surfaced by the broker) must abort the Run instead of turning
+            // into ordinary feedback and letting a completed answer omit
+            // evidence. This is a real storage failure, never a cancel.
+            if (error instanceof ExecutionRecordError) {
+              phaseError ??= new StrategyError("execution_failed");
               return;
             }
             const after = halted();

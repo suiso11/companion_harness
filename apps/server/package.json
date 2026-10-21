@@ -18,7 +18,9 @@
     "test": "vitest run",
     "smoke:startup": "vitest run --config pnpm-smoke.startup.config.mts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "lint": "biome check src"
+    "lint": "biome check src",
+    "records": "tsx src/records_cli.ts",
+    "compare": "tsx src/compare_cli.ts"
   },
   "dependencies": {
     "@companion/connector-markdown": "workspace:*",

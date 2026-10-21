@@ -37,6 +37,7 @@ a missing DB fails without creating any DB or backup files.
 | `COMPANION_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 | `COMPANION_MARKDOWN_ROOTS_JSON` | `[]` | Strict JSON array of `{ path, alias? }` (see below); unset means no Markdown connector |
 | `COMPANION_MODEL_JSON` | unset (no model) | Strict JSON object `{ adapter, baseUrl, model, apiKey? }` (see M2 below); unset registers no model strategy |
+| `COMPANION_EXECUTION_RECORDS_JSON` | unset (no private records) | Strict JSON object `{ directory, retentionDays? }`: absolute `directory`, `retentionDays` integer `0..3650` default `30` (see "Private execution records" below); no HTTP surface |
 | `COMPANION_CALENDAR_JSON` | unset (no Calendar) | Strict JSON object `{ selection, connector }` (see C14 below); unset registers no Calendar connector |
 | `COMPANION_CALENDAR_PROFILE` | unset (no profile) | Strict opt-in profile selector (see C14 profile below). Unset keeps the previous behavior (explicit host `mcpDefinitions` injection or fail-closed incomplete opt-in). Only `google-readonly` is accepted; any other value fails startup. Requires `COMPANION_CALENDAR_JSON` describing exactly the adopted candidate. |
 | `COMPANION_ACTIONS_JSON` | `{"optIn":false,"writeEnabled":false}` | Strict JSON object `{ optIn?, writeEnabled? }` (booleans, default false). HINT ONLY: never supplies a write capability, a category or a binding — see "C21 M5 Action composition" below |
@@ -102,9 +103,9 @@ rejected). Remote reachability is provided outside the app (for example
 
 ## Plaintext sensitivity and OS permissions
 
-The DB and backups are stored **in plaintext** (no app-level encryption).
-Protection relies on **OS file permissions**; credentials/secrets are never
-stored in the DB.
+The DB, backups, and the opt-in private execution-record files are stored
+**in plaintext** (no app-level encryption). Protection relies on **OS file
+permissions**; credentials/secrets are never stored in the DB.
 
 - POSIX: app dir and `backups/` are `0700`; DB and backup files are `0600`.
   A POSIX app-dir `chmod` failure aborts startup fail-closed (fixed safe
@@ -298,8 +299,10 @@ connector instance owns **all** configured roots.
 - Security limitations: model config values and keys are **never logged**
   (only the tool count is logged); `model_calls` persists adapter/model
   identifier metadata only (adapter, model, outcome, error code, timing,
-  usage token counts). `apiKey`, `baseUrl`, prompts, raw responses,
-  reasoning, and secrets are never persisted or logged; single attempt per
+  usage token counts). Public logs/audit never persist `apiKey`, `baseUrl`,
+  prompts, raw responses, reasoning, or secrets; the ONLY exception is the
+  explicit private execution-record store below (default off), which also
+  never records `apiKey` or headers. Single attempt per
   step (no retry, no fallback, no router, no redirects); per-step 120s
   and 300s whole-run wall budgets with at most one repair inside max 8
   steps; native tool calling only.
@@ -451,6 +454,89 @@ connector instance owns **all** configured roots.
   child observably started, then asserts the rejection reaped it
   (`kill(pid, 0)` throws), signal counts restored, DB reopens, and a free
   port retry succeeds.
+
+## Private execution records (opt-in, no HTTP surface)
+
+Unset `COMPANION_EXECUTION_RECORDS_JSON` (default) keeps the previous
+behavior: public `run_events` / `model_calls` / `tool_calls`, SSE,
+history, logs, and memory stay metadata-only. When set, the value must
+be a strict JSON object with only `{ directory, retentionDays? }`:
+
+- `directory`: absolute host path, 1-4096 chars, no NUL. Every ancestor
+  is `lstat`-checked; symlinks/non-directories refuse startup.
+- `retentionDays`: integer `0..3650`, default `30`; `0` prunes every
+  record older than the startup time. Unknown keys and malformed JSON
+  fail startup fail-closed.
+- The store is separate from SQLite and the public audit. No HTTP route
+  returns or deletes records.
+
+Recorded kinds (private, debug-oriented): `model.request` (provider,
+base/chat URL, model, messages, tool definitions, step settings, system
+prompt, prompt variant, harness fingerprint), `model.response.raw`
+(status plus the exact received body, including streaming SSE bytes and
+malformed bodies; headers are never captured), `model.response`
+(normalized text/tool calls/stop reason/usage/duration),
+`model.outcome`, `tool.input`, `tool.result`, `tool.error`,
+`tool.handler.result` / `tool.handler.error` (raw handler settlement,
+including late/discarded dispositions). `web.search` (SearXNG) calls
+are recorded like any other tool. Cancellation/timeout produces no raw
+response record.
+
+Redaction is structural only: credential-shaped object keys
+(case-insensitive, `_`/`-` ignored) are removed, and encoded JSON
+request/response bodies or tool arguments are parsed and filtered
+recursively. Free text (e.g. message content) is preserved verbatim and
+may contain secrets. Files are not encrypted at rest.
+
+Permissions: constructed directories `0700`, files `0600` on POSIX;
+pre-existing ancestors (e.g. `/tmp`) are never re-permissioned. Writes
+are atomic (`.tmp-*` → fsync → rename); a crash may leave an incomplete
+entry that `list` reports (never silently counted). Per-record size is
+bounded; an oversized record carries explicit `omitted` metadata. A
+recording write failure fails that model/tool invocation and the Run
+rather than producing a silent partial record; if a public audit row
+already exists, it settles before the failure is raised.
+
+Operator CLI (local only; fails closed when the variable is unset;
+stderr carries fixed safe text, never paths/ids/payloads):
+
+```sh
+pnpm records list
+pnpm records show <recordId>
+pnpm records export <runId>   # full records for one run as JSON on stdout
+pnpm records delete <recordId>
+pnpm records prune [days]     # default = configured retentionDays
+```
+
+## Fixed-task comparison CLI (experimental)
+
+`pnpm compare -- /abs/input.json` is an operator experiment, not a
+production feature. It runs the real RunEngine + agent strategy twice:
+baseline uses only the immutable base system prompt; the variant appends
+the operator guidance to that same base prompt (never replaces it).
+`COMPANION_MODEL_JSON` is required and uses the same strict
+loopback-only parser as the server.
+
+Input is strict version-1 JSON: `version` (`1`), `prompt` (1..20000
+chars), `docs` (1..6 `{ key, path, title? }`; absolute non-symlink
+regular UTF-8 files ≤32 KiB each, unique keys
+`^[a-z][a-z0-9_-]{0,63}$`, title defaults to the basename),
+`storageDirectory` (absolute), `variant` (`{ label, systemPrompt }`,
+label `^[A-Za-z0-9][A-Za-z0-9 _.-]{0,127}$`, guidance 1..8000 chars),
+`timeoutMs?` (integer 1..900000, default 180000), `maxSteps?`
+(integer 1..8). Unknown keys, non-absolute paths, and invalid documents
+fail closed.
+
+`storageDirectory` is created `0700` when missing (symlink/non-directory
+rejected). Each invocation creates a fresh `comparison-*` directory
+containing a dedicated SQLite DB and private `records/` store. Only the
+fixed document tool (`experiment.read`) and the terminal
+`answer.submit` are available; production MCP/Calendar/Web tools are
+never registered. Output is JSON on stdout: task/document hashes, model
+adapter/model, and for baseline and variant the actual answer
+parts/citations, citations, tool calls, token counts, durations, status,
+error code, and private-record count/kinds. It computes no score and
+never auto-adopts a variant.
 
 ### MCP library wire identity (C09; not server-enabled)
 
