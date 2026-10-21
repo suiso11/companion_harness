@@ -31,10 +31,14 @@ web.search(input):
   time_range:   "day" | "week" | "month" | "year", optional
   top_k:        int 1..8, default 5 (output 上限)
 → output:
-  results: [{ referenceId: string, title: string|null, url: string, snippet: string|null }, ...] (<= top_k)
-  // referenceId: ReferenceManager が mint した presentation identity(rN)。
-  // calendar hit (`CalendarSearchHitSchema`) と同型に model へ直接渡し、
-  // answer での rN citation 必須化を model が満たせるようにする。
+  results: [{ referenceId: string(UUID), title: string|null, url: string, snippet: string|null }, ...] (<= top_k)
+  // referenceId: broker 契約では ReferenceManager が mint した **UUID**(calendar hit
+  // (`packages/contracts/src/calendar.ts:63-72` の `CalendarSearchHitSchema`) と同型)。
+  // agent は UUID `referenceId` + snippet を持つ hit にのみ EvidenceGrant を与え、
+  // `hits`/`references` のみを再帰的に認識する(`packages/kernel/src/agent.ts:1414-1443`)。
+  // そのため `rN` を broker 出力に直接渡してはならない(grant が生成されず answer の
+  // rN citation が `citation_not_granted` で拒否される)。UUID を broker 契約で保持し、
+  // **rN への presenting(sanitize)は model-facing 提示層で行う**。
 ```
 
 - クエリ長上限 **200 chars**(calendar.search が 256 なのに対し自由テキスト検索は短めに抑制: `packages/contracts/src/calendar.ts:29`)。
@@ -42,6 +46,7 @@ web.search(input):
 - URL/slug 長上限: url ≤ 2048 chars, title ≤ 256 chars, snippet ≤ 512 chars(bytes 校査は kernel 契約と整合的に §14.6 方針で別途確定)。
 - **phase 1 では `web.open`(ページ取得)を提供しない**(phase 2 で別途決定)。model は snippet のみを根拠にする。
 - Router descriptor の `category` は **`read`** とする(`unclassified` descriptor は `buildAgentToolDefinitions`(`packages/kernel/src/agent.ts:1348-1360`)が広告せず broker も non-read 登録を拒否する(`packages/kernel/src/broker.ts:871-881`)ため、`unclassified` のままだと露出 gate を通らない。web.search は外部読み取り専用で副作用を持たないため `read` 分類が妥当)、`defaultTimeoutMs` **10s**・`maxTimeoutMs` 60s で登録 descriptor shape は `packages/contracts/src/tools.ts:31` の `ToolDescriptorSchema` に従う。
+- **`AGENT_BROKER_TOOL_PARAMETERS` への明示登録が必須**: `read` 分類だけでは不十分である。`buildAgentToolDefinitions` は `AGENT_BROKER_TOOL_PARAMETERS` に名前が載っている read ツールのみを model に広告する(`packages/kernel/src/agent.ts:1284-1301,1355-1360`)。実装 PR では **closed parameter schema(`AGENT_WEB_SEARCH_PARAMETERS`、§3 の query/language/time_range/top_k を反映)を定義し、`AGENT_BROKER_TOOL_PARAMETERS` に `web.search` のエントリを追加する**ことを要件とする。map entry が無いと broker handler は動作しても model の tools から黙って欠落する。
 
 ## 4. Untrusted evidence の枠組み
 
@@ -52,7 +57,8 @@ web.search(input):
 
 - 検索ヒットを ReferenceManager に **connector kind `web`** として Snapshot 化し、既存の rN 命番号を redeem する形を推奨。既存の snapshot/rN メカニズムは `packages/contracts/src/references.ts:36`(同一 revision/content は同一 rN、変化時は新 Snapshot+rN)、`packages/contracts/src/references.ts:94`(snapshot body の `body_json` 形式)に準拠。
 - **各 hit を 1 つの rdf:text として Model に rN 参照で渡し、answer で rN citation を必須化**(§14 citation 規約、`agent.ts:2050` の title/provenance 規範も参照)。
-- **URL の不変 metadata 化**: snapshot body(`packages/contracts/src/references.ts:94` の `body_json`)に `url`(scheme allowlist 済、≤2048 chars)を不変 field として埋め込む。canonical key は URL そのものにしない(512 char cap・`https://` の空 path segment 拒否制約、`packages/contracts/src/references.ts:59-76` と衝突するため)。実装 PR では `ReferenceDetailResponseSchema`(`packages/contracts/src/references.ts:339-344`)を web snapshot 向けに拡張し、detail API 経由で検証済み `url` を UI へ返す。これにより rN citation のみが answer に残っても UI が開くべき構造化 URL を取得できる。
+- **URL の不変 metadata 化**: snapshot body(`packages/contracts/src/references.ts:94` の `body_json`)に `url`(scheme allowlist 済、≤2048 chars)を不変 field として埋め込む。canonical key は URL そのものにしない(512 char cap・`https://` の空 path segment 拒否制約、`packages/contracts/src/references.ts:59-76` と衝突するため)。**canonical key は検証済み URL から導出した安定かつ collision-resistant な key とする**: 具体には正規化済み URL(scheme/host/port/path/query を正規化)の versioned hash(例: `"web-" + version prefix + SHA-256(normalized_url)` の hex 前方部分)を `CanonicalKeySchema`(`packages/contracts/src/references.ts:59-76`)を満たす形で採用し、同一 URL の再検索が同一 resource(同一 snapshot/同一 rN)に合一されることを unit test で固定する(`ReferenceManager` の lookup は `(connectorInstanceId, canonicalKey)` 単位、`packages/kernel/src/reference_manager.ts:922-941`)。
+- **snapshot body schema の versioned 拡張が必要**: `SnapshotBodySchema` は strict な `{version: 1, text}` であり、`ReferenceManager` が構築するのも保存・詳細取得時の parse も同一 strict schema である(`packages/contracts/src/references.ts:123-134`, `packages/kernel/src/reference_manager.ts:275-280`, `packages/kernel/src/repository.ts:2486-2488`)。そのため「`ReferenceDetailResponseSchema` を広げるだけ」では `body_json` に url を保存できない。実装 PR では **snapshot body 契約を versioned 拡張する**(例: web snapshot 向け `{version: 1, text, metadata: {url}}` を許容する discriminated union への拡張、または `SNAPSHOT_BODY_VERSION` を 2 に進め旧 1 を読み取り専用で受理)か、**snapshot とは別の検証済み不変 metadata store**(snapshot id → url)を設ける。いずれの場合も保存された url は検証済み(scheme allowlist・長上限)であることを保証し、`ReferenceDetailResponseSchema`(`packages/contracts/src/references.ts:339-344`)を web snapshot 向けに拡張して detail API 経由で検証済み `url` を UI へ返す。これにより rN citation のみが answer に残っても UI が開くべき構造化 URL を取得できる。
 - **wN(別種の connector / table)を新設しない理由**: 参照の本体は URL+スニペットの evidenceであり、ReferenceManager の「同一参照・同一 revision に対する snapshot の合一」を活かせる。メモリ mN(`agent.ts:449`)や calendar hit(`packages/contracts/src/calendar.ts:63` の `CalendarSearchHitSchema`)と同型の snapshot モデルで自然に合流するため。
 
 ## 6. 検索予算
@@ -65,6 +71,7 @@ web.search(input):
 
 - SearXNG 呼び出しタイムアウト **10s**(案)・descriptor default 10s/最大 60s。
 - SearXNG 応答 byte cap: connector-web の HTTP クライアントは **JSON parse 前に生レスポンス body を streaming で読み取り、connector level の byte cap(案: 1MiB)を超過した時点で即座に切断**する(`maxNormalizedOutputBytesPerCall` は execute/normalize 後に適用されるため生 body の buffering を止められない)。kernel `maxNormalizedOutputBytesPerCall` (256KiB, `packages/contracts/src/tools.ts:52`) は normalized 出力に、web search 特化の model-facing cap(案: 64KiB)は model-facing 出力に、それぞれ別段に維持する。
+- **redirect 拒否(loopback fetch boundary)**: SearXNG エンドポイントが 3xx を返した場合、default fetch は redirect を追従し query を含む検索 URL を non-loopback 宛先へ再送しうる(初期 target と DNS 解決結果の検証だけでは redirect 先は検査されない)。そのため connector-web は **`redirect: "manual"` で fetch し、すべての 3xx を固定エラーとして拒否**する(既存の `loopbackNoRedirectFetch` wrapper と同一パターン、`packages/connector-mcp/src/client.ts:150-181`。拒否時の response body は読まず cancel する)。設定ミス・compromise された local サービスでも query が loopback 外へ漏れないことを unit test で検証する。
 - アップストリーム engine は SearXNG コンテナ外へは *任意に* port するが、SearXNG→Companion 間は loopback のみで双方向に非公開経路。
 
 ## 8. プライバシー・ガード
@@ -95,7 +102,7 @@ web.search(input):
 ## 12. テスト計画
 
 - contracts: schema 境界(query 200/limit/URL scheme/拒否 ID) を unit test。
-- kernel: budget 消費(turn 単位で永続化された web.search 3 件上限・retry 時の合算課金を含む)/timeout/byte cap/rN mint を unit test(memory snippet / citation id 拒否も含む。ユーザー明示 free text の適用除外テストも追加)。
+- kernel: budget 消費(turn 単位で永続化された web.search 3 件上限・retry 時の合算課金を含む)/timeout/byte cap/rN mint を unit test(memory snippet / citation id 拒否も含む。ユーザー明示 free text の適用除外テストも追加)。加えて canonical key の安定性(同一正規化 URL → 同一 resource 合一・collision resistance)、snapshot body versioned 拡張の schema テスト、redirect(3xx)拒否テストを含む。
 - connector-web: SearXNG JSON レスポンスの正常系・empty・限界・network error e2e stub(本物の SearXNG へ接続しない)。加えて streaming byte cap 超過(巨大応答の切断)・loopback 以外 base_url の fail-closed 拒否を unit test。
 - ops: `ops/llm/apply.sh`取得→ `docker compose up -d searxng` → `/healthz` + `/search?...&format=json` 手動スモーク。
 
