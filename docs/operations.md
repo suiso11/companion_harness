@@ -407,6 +407,30 @@ connector instance owns **all** configured roots.
   Integrity edges are covered by unit regressions: ambiguous-model
   refusal, atomic op/outbox/followup staging, replay-first state
   recovery, terminal-failure marking, and cancellation.
+- Read-only graph view (list/graph switch in the memory panel):
+  `GET /api/sessions/:sessionId/memory/graph` returns the global graph
+  (`includeRetired=false` by default);
+  `GET /api/sessions/:sessionId/memory/graph/local?searchId=&handle=&depth=1|2`
+  expands one already-bound handle. Both are strict-query, run-owned,
+  read-only (never heat or grant feedback), and return opaque `mN`
+  handles only. Handles are reused per `(record_id, status)` through
+  `memory_graph_searches` (one durable `query='graph'` search per
+  `(session, scope)`), so re-opening a graph never grows rows; edges are
+  rewritten to handles before serialization, and an unchanged
+  `graph.version` reuses the bounded in-process cache. If the remind
+  build has no graph ops the routes answer
+  `503 memory_graph_unavailable` and the UI shows
+  「グラフ機能は記憶サーバーの更新後に利用できます」 while the list
+  stays usable; this clears once suiso11/remind#28 is merged and
+  deployed. Verified 2026-10-21: graph unit/HTTP/UI + kernel suites
+  green, typecheck/lint clean, real-CLI live
+  `memory_graph_live.test.ts` 1/1 and `memory_manage_live.test.ts` 1/1.
+  Real browser:
+  `COMPANION_E2E_MEMORY=1 COMPANION_MEMORY_TEST_ENTRY=<remind dist/src/cli.js>
+  COMPANION_MEMORY_TEST_CONFIG_TEMPLATE=<remind memory.config.example.json>
+  pnpm --filter @companion/server exec playwright test --config
+  playwright.config.ts` runs the memory specs, including
+  `e2e/memory/memory_graph.spec.ts` (2/2).
 - Permanent regressions (temp stores only, no user DB writes):
   `pnpm exec vitest run apps/server/test/memory_manage.test.ts`
   (unit: guards, idempotent replay + partial-chain recovery, no-heat
