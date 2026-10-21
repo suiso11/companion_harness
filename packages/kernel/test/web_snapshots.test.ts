@@ -294,9 +294,10 @@ describe("pre-0026 upgrade", () => {
         backupDir: backups,
       });
       // Migration 0026 (web_result_urls) and 0027 (web_search_turn_usage)
-      // both apply on the pre-web v25 schema.
-      expect(result.applied).toEqual([26, 27]);
-      expect(getSchemaVersion(handle.raw)).toBe(27);
+      // both apply on the pre-web v25 schema; 0028 (memory graph) is the
+      // bundled head and applies in the same upgrade.
+      expect(result.applied).toEqual([26, 27, 28]);
+      expect(getSchemaVersion(handle.raw)).toBe(28);
       // Existing rows survive verbatim; the new table starts empty.
       const sessions = handle.raw
         .prepare("SELECT COUNT(*) AS n FROM sessions")

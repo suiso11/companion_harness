@@ -487,7 +487,7 @@ describe("I04 revision-pinned memory evidence", () => {
         db: handle.raw,
         backupDir: backups,
       });
-      expect(result.applied).toEqual([22, 23, 24, 25, 26, 27]);
+      expect(result.applied).toEqual([22, 23, 24, 25, 26, 27, 28]);
       const repo = createKernelRepository(handle.raw);
       const exposures = repo.listMemoryExposures(runId);
       expect(exposures).toHaveLength(1);
@@ -587,7 +587,7 @@ describe("I04 revision-pinned memory evidence", () => {
       // Bundled schema is 0027 (0022 rebuild + additive remote_sessions +
       // remote_login_lockout, ops-notification kind, web-result URLs, and
       // web-search turn usage).
-      expect(result.applied).toEqual([22, 23, 24, 25, 26, 27]);
+      expect(result.applied).toEqual([22, 23, 24, 25, 26, 27, 28]);
       const repo = createKernelRepository(handle.raw);
       const exposures = repo.listMemoryExposures(runId);
       expect(exposures).toHaveLength(4);

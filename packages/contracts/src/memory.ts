@@ -128,6 +128,99 @@ export type MemoryRecallExposureResponse = z.infer<
   typeof MemoryRecallExposureResponseSchema
 >;
 
+/**
+ * Conversation-memory graph (explicit read-only projection). Raw record ids
+ * never cross this boundary: nodes/edges use the same opaque session-scoped
+ * `mN` handles as search, and `searchId` names the durable graph snapshot so
+ * the existing detail/mutation item routes resolve reused handles unchanged.
+ */
+export const MemoryGraphScopeSchema = z.enum(["global", "local"]);
+export type MemoryGraphScope = z.infer<typeof MemoryGraphScopeSchema>;
+
+export const MemoryGraphEpisodeSchema = z.strictObject({
+  kind: z.enum(["session", "doc", "day"]),
+  episodeKey: z.string().min(1).max(256),
+  level: z.enum(["window", "episode"]),
+});
+export type MemoryGraphEpisode = z.infer<typeof MemoryGraphEpisodeSchema>;
+
+export const MemoryGraphNodeSchema = z.strictObject({
+  handle: MemoryHandleSchema,
+  label: z
+    .string()
+    .min(1)
+    .refine(codePointsMax(512), { message: "label over 512 code points" }),
+  status: z.enum(["active", "retired"]),
+  kind: z.string().min(1).max(64),
+  episode: MemoryGraphEpisodeSchema.nullable(),
+});
+export type MemoryGraphNode = z.infer<typeof MemoryGraphNodeSchema>;
+
+export const MemoryGraphEdgeSchema = z.strictObject({
+  from: MemoryHandleSchema,
+  to: MemoryHandleSchema,
+  kind: z.enum(["related", "consolidation"]),
+});
+export type MemoryGraphEdge = z.infer<typeof MemoryGraphEdgeSchema>;
+
+export const MemoryGraphResponseSchema = z.strictObject({
+  searchId: z.string().min(1).max(256),
+  /** Opaque remind `graph.version` token (never interpreted by Companion). */
+  version: z.string().min(1).max(256),
+  scope: MemoryGraphScopeSchema,
+  center: MemoryHandleSchema.nullable(),
+  nodes: z.array(MemoryGraphNodeSchema).max(500),
+  edges: z.array(MemoryGraphEdgeSchema).max(4000),
+  truncated: z.boolean(),
+});
+export type MemoryGraphResponse = z.infer<typeof MemoryGraphResponseSchema>;
+
+/** Local graph query: one already-bound handle expanded to `depth` hops. */
+export const MemoryGraphLocalRequestSchema = z.strictObject({
+  searchId: z.string().min(1).max(256),
+  handle: MemoryHandleSchema,
+  depth: z
+    .union([z.literal(1), z.literal(2)])
+    .optional()
+    .default(1),
+});
+export type MemoryGraphLocalRequest = z.infer<
+  typeof MemoryGraphLocalRequestSchema
+>;
+
+/** Global graph query: the whole (optionally retired-inclusive) scope. */
+export const MemoryGraphGlobalRequestSchema = z.strictObject({
+  includeRetired: z.boolean().optional().default(false),
+});
+export type MemoryGraphGlobalRequest = z.infer<
+  typeof MemoryGraphGlobalRequestSchema
+>;
+
+/** HTTP GET global graph query (raw query-string values). */
+export const MemoryGraphGlobalQuerySchema = z.strictObject({
+  includeRetired: z.enum(["true", "false"]).optional(),
+  runId: UuidSchema,
+});
+export type MemoryGraphGlobalQuery = z.infer<
+  typeof MemoryGraphGlobalQuerySchema
+>;
+
+/** HTTP GET local graph query (raw query-string values). */
+export const MemoryGraphLocalQuerySchema = z.strictObject({
+  searchId: z.string().min(1).max(256),
+  handle: MemoryHandleSchema,
+  depth: z.enum(["1", "2"]).optional(),
+  runId: UuidSchema,
+});
+export type MemoryGraphLocalQuery = z.infer<typeof MemoryGraphLocalQuerySchema>;
+
+export const MemoryGraphVersionResponseSchema = z.strictObject({
+  version: z.string().min(1).max(256),
+});
+export type MemoryGraphVersionResponse = z.infer<
+  typeof MemoryGraphVersionResponseSchema
+>;
+
 /** Fixed memory route error codes (lowercase, no values leak). */
 export const MEMORY_ERROR_CODES = [
   "needs_clarification",
@@ -135,6 +228,7 @@ export const MEMORY_ERROR_CODES = [
   "state_conflict",
   "idempotency_key_reused",
   "memory_unavailable",
+  "memory_graph_unavailable",
 ] as const;
 export const MemoryErrorCodeSchema = z.enum(MEMORY_ERROR_CODES);
 export type MemoryErrorCode = z.infer<typeof MemoryErrorCodeSchema>;

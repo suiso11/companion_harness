@@ -45,7 +45,7 @@
 // the server logger's whitelisted fields). No conversation text, scopes,
 // paths, CLI bodies, or raw errors are ever logged.
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   collectCitedMemoryOrdinals,
   type KernelRepository,
@@ -156,6 +156,22 @@ export const MEMORY_CORRECTION_BODY_MAX_CP = 2000;
 export const MEMORY_RETIRE_REASON = "NO_LONGER_USEFUL";
 export const MEMORY_REACTIVATE_REASON = "USER_REQUESTED";
 export const MEMORY_CORRECT_KIND = "correction";
+/**
+ * Graph projection bounds (explicit read-only view; never heats):
+ * 500 nodes / 4000 edges per response, `graph.page` fetched with a bounded
+ * page limit until done or the node cap is reached.
+ */
+export const MEMORY_GRAPH_NODE_MAX = 500;
+export const MEMORY_GRAPH_EDGE_MAX = 4000;
+/**
+ * `graph.page` default page size. remind's `graphLimitMax` defaults to
+ * `rangeLimitMax` (50); a larger limit is LIMIT_EXCEEDED, so the default
+ * must stay within that bound. The service still stops at the node cap.
+ */
+export const MEMORY_GRAPH_PAGE_LIMIT_DEFAULT = 50;
+/** Hard stop for a misbehaving remind cursor loop (fixed failure). */
+const MEMORY_GRAPH_PAGE_MAX = 100;
+export const MEMORY_GRAPH_LABEL_MAX_CP = 512;
 /** Closed extraction kinds (remind RECORD_KINDS subset we ever write). */
 const EXTRACT_KINDS: ReadonlySet<string> = new Set([
   "user_fact",
@@ -257,6 +273,12 @@ export interface MemoryServiceOptions {
    */
   readonly extractTimeoutMs?: number;
   /**
+   * `graph.page` page size for the global projection (bounded, tests).
+   * Defaults to MEMORY_GRAPH_PAGE_LIMIT_DEFAULT; the service still stops at
+   * MEMORY_GRAPH_NODE_MAX regardless.
+   */
+  readonly graphPageLimit?: number;
+  /**
    * Shared background admission (server-owned, bootstrap-injected). When
    * present, post-completion extraction admits ONE unit at a time against
    * the shadow worker, and each automatic `maintain.distill` execution
@@ -318,6 +340,35 @@ export interface MemoryService {
     searchId: string;
     handle: string;
   }): Promise<MemoryDetailResult>;
+  /**
+   * Global graph projection (`graph.version` + `graph.page`): bounded
+   * paging (≤500 nodes), version-cached raw traversal, edges restricted to
+   * returned nodes, and opaque handles minted into one durable graph search
+   * per (session, scope). Read-only: never feedback/heat.
+   */
+  getMemoryGraphGlobal(
+    sessionId: string,
+    input: {
+      includeRetired?: boolean;
+      runId: string;
+      signal?: AbortSignal;
+    },
+  ): Promise<MemoryGraphResult>;
+  /**
+   * Local graph projection (`graph.local`): `searchId`+`handle` resolve to
+   * the exact historical snapshot record (session-bound, never rebound),
+   * then depth 1|2 traversal is mapped to graph handles with `center` set.
+   */
+  getMemoryGraphLocal(
+    sessionId: string,
+    input: {
+      searchId: string;
+      handle: string;
+      depth?: 1 | 2;
+      runId: string;
+      signal?: AbortSignal;
+    },
+  ): Promise<MemoryGraphResult>;
   /**
    * Stage one management mutation through the durable outbox (queued, never
    * applied here). Corrections chain a NEW raw source `event.append`
@@ -389,6 +440,58 @@ export interface MemorySearchResult {
   readonly hits: readonly MemorySearchHit[];
 }
 
+export interface MemoryGraphEpisode {
+  readonly kind: "session" | "doc" | "day";
+  readonly episodeKey: string;
+  readonly level: "window" | "episode";
+}
+
+/** One graph node with an opaque session-scoped handle (never a raw id). */
+export interface MemoryGraphNodeResult {
+  readonly handle: string;
+  readonly label: string;
+  readonly status: "active" | "retired";
+  readonly kind: string;
+  readonly episode: MemoryGraphEpisode | null;
+}
+
+export interface MemoryGraphEdgeResult {
+  readonly from: string;
+  readonly to: string;
+  readonly kind: "related" | "consolidation";
+}
+
+/** Raw remind graph node (record id is server-only, never serialized). */
+interface RawGraphNode {
+  id: string;
+  label: string;
+  status: "active" | "retired";
+  kind: string;
+  episode: MemoryGraphEpisode | null;
+}
+
+interface RawGraphEdge {
+  from: string;
+  to: string;
+  kind: "related" | "consolidation";
+}
+
+/**
+ * Explicit graph projection. `searchId` is the durable `query='graph'`
+ * snapshot holding the minted handles, so the existing detail/mutation
+ * item routes resolve them without a new snapshot kind.
+ */
+export interface MemoryGraphResult {
+  readonly searchId: string;
+  /** Opaque remind `graph.version` token (string; never interpreted). */
+  readonly version: string;
+  readonly scope: "global" | "local";
+  readonly center: string | null;
+  readonly nodes: readonly MemoryGraphNodeResult[];
+  readonly edges: readonly MemoryGraphEdgeResult[];
+  readonly truncated: boolean;
+}
+
 /** Immutable cited snapshot kept distinct from the live current record. */
 export interface MemoryDetailResult {
   readonly snapshot: MemorySearchHit & { readonly searchId: string };
@@ -439,7 +542,8 @@ export class MemoryManageError extends Error {
     | "state_conflict"
     | "validation_error"
     | "service_unavailable"
-    | "idempotency_conflict";
+    | "idempotency_conflict"
+    | "memory_graph_unavailable";
 
   constructor(code: MemoryManageError["code"]) {
     super(code);
@@ -788,6 +892,27 @@ export function createMemoryService(
     ),
     MAX_MEMORY_EXTRACT_TIMEOUT_MS,
   );
+  const graphPageLimit = Math.min(
+    Math.max(
+      Math.trunc(options.graphPageLimit ?? MEMORY_GRAPH_PAGE_LIMIT_DEFAULT),
+      1,
+    ),
+    MEMORY_GRAPH_NODE_MAX,
+  );
+  /**
+   * In-process global graph cache keyed by (memory scope, includeRetired).
+   * The cached raw traversal is reused only when `graph.version` matches;
+   * handles are re-minted (reused) from the durable search on every read.
+   */
+  const graphCache = new Map<
+    string,
+    {
+      version: string;
+      nodes: RawGraphNode[];
+      edges: RawGraphEdge[];
+      truncated: boolean;
+    }
+  >();
 
   let started = false;
   let stopped = false;
@@ -2712,6 +2837,550 @@ export function createMemoryService(
     };
   }
 
+  /* ---------------------------------------------------------------- */
+  /* Conversation-memory graph (explicit read-only projection)        */
+  /* ---------------------------------------------------------------- */
+
+  function parseGraphVersion(
+    data: Record<string, unknown> | null,
+  ): string | null {
+    if (data === null) {
+      return null;
+    }
+    const version = data.version;
+    // Real remind `graph.version` is an OPAQUE STRING token (e.g.
+    // `o12:r40.7:a91:e3.2.2026-10-21...`). Companion must never parse its
+    // internals: it only compares it for cache freshness and passes it
+    // through. Malformed/oversized/control-bearing tokens fail closed.
+    if (
+      typeof version !== "string" ||
+      version.length < 1 ||
+      version.length > 256 ||
+      hasControlCode(version)
+    ) {
+      return null;
+    }
+    return version;
+  }
+
+  function parseGraphEpisode(value: unknown): MemoryGraphEpisode | null {
+    if (value === undefined || value === null) {
+      return null;
+    }
+    if (!isRecord(value)) {
+      return null;
+    }
+    const { kind, episodeKey, level } = value as {
+      kind?: unknown;
+      episodeKey?: unknown;
+      level?: unknown;
+    };
+    if (
+      (kind !== "session" && kind !== "doc" && kind !== "day") ||
+      typeof episodeKey !== "string" ||
+      episodeKey.length < 1 ||
+      episodeKey.length > 256 ||
+      hasControlCode(episodeKey) ||
+      (level !== "window" && level !== "episode")
+    ) {
+      // Episode provenance is optional metadata: an unknown shape is
+      // dropped (never guessed), leaving the rest of the valid node intact.
+      return null;
+    }
+    return { kind, episodeKey, level };
+  }
+
+  function parseRawGraphNode(value: unknown): RawGraphNode | null {
+    if (!isRecord(value)) {
+      return null;
+    }
+    const { id, label, status, kind } = value as {
+      id?: unknown;
+      label?: unknown;
+      status?: unknown;
+      kind?: unknown;
+    };
+    if (
+      typeof id !== "string" ||
+      id.length < 1 ||
+      id.length > 256 ||
+      hasControlCode(id) ||
+      typeof label !== "string" ||
+      label.length < 1 ||
+      countCodePoints(label) > MEMORY_GRAPH_LABEL_MAX_CP ||
+      (status !== "active" && status !== "retired") ||
+      typeof kind !== "string" ||
+      kind.length < 1 ||
+      kind.length > 64 ||
+      hasControlCode(kind)
+    ) {
+      return null;
+    }
+    return {
+      id,
+      label,
+      status,
+      kind,
+      episode: parseGraphEpisode(value.episode),
+    };
+  }
+
+  function parseRawGraphEdge(value: unknown): RawGraphEdge | null {
+    if (!isRecord(value)) {
+      return null;
+    }
+    const { from, to, kind } = value as {
+      from?: unknown;
+      to?: unknown;
+      kind?: unknown;
+    };
+    if (
+      typeof from !== "string" ||
+      from.length < 1 ||
+      from.length > 256 ||
+      hasControlCode(from) ||
+      typeof to !== "string" ||
+      to.length < 1 ||
+      to.length > 256 ||
+      hasControlCode(to) ||
+      (kind !== "related" && kind !== "consolidation")
+    ) {
+      return null;
+    }
+    return { from, to, kind };
+  }
+
+  function dedupeRawGraphNodes(nodes: RawGraphNode[]): {
+    nodes: RawGraphNode[];
+    truncated: boolean;
+  } {
+    const out: RawGraphNode[] = [];
+    const seen = new Set<string>();
+    let truncated = false;
+    for (const node of nodes) {
+      if (seen.has(node.id)) {
+        continue;
+      }
+      if (out.length >= MEMORY_GRAPH_NODE_MAX) {
+        truncated = true;
+        break;
+      }
+      seen.add(node.id);
+      out.push(node);
+    }
+    return { nodes: out, truncated };
+  }
+
+  function boundRawGraphEdges(
+    edges: RawGraphEdge[],
+    nodeIds: ReadonlySet<string>,
+  ): { edges: RawGraphEdge[]; truncated: boolean } {
+    const out: RawGraphEdge[] = [];
+    const seen = new Set<string>();
+    let truncated = false;
+    for (const edge of edges) {
+      if (!nodeIds.has(edge.from) || !nodeIds.has(edge.to)) {
+        continue;
+      }
+      const key = `${edge.from}\u0000${edge.to}\u0000${edge.kind}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      if (out.length >= MEMORY_GRAPH_EDGE_MAX) {
+        truncated = true;
+        break;
+      }
+      seen.add(key);
+      out.push(edge);
+    }
+    return { edges: out, truncated };
+  }
+
+  function parseGraphPage(data: Record<string, unknown> | null): {
+    nodes: RawGraphNode[];
+    edges: RawGraphEdge[];
+    nextCursor: string | null;
+    version: string;
+  } | null {
+    if (data === null || !Array.isArray(data.nodes)) {
+      return null;
+    }
+    const version = parseGraphVersion(data);
+    if (version === null) {
+      return null;
+    }
+    const rawCursor = data.nextCursor;
+    let nextCursor: string | null = null;
+    if (rawCursor !== undefined && rawCursor !== null) {
+      if (
+        typeof rawCursor !== "string" ||
+        rawCursor.length < 1 ||
+        rawCursor.length > 512 ||
+        hasControlCode(rawCursor)
+      ) {
+        return null;
+      }
+      nextCursor = rawCursor;
+    }
+    const nodes: RawGraphNode[] = [];
+    const edges: RawGraphEdge[] = [];
+    for (const value of data.nodes) {
+      const node = parseRawGraphNode(value);
+      if (node === null) {
+        // Fail closed per node: one malformed node is skipped whole (it
+        // never contributes a node or edges), the page still parses.
+        continue;
+      }
+      nodes.push(node);
+      const rawOut = isRecord(value) ? value.out : undefined;
+      if (Array.isArray(rawOut)) {
+        for (const out of rawOut) {
+          // Real `graph.page` emits adjacency edges as `{to, kind}` (the
+          // source is the containing node), never raw `{from,to}` pairs.
+          const edge = parseRawGraphEdge(
+            isRecord(out) ? { ...out, from: node.id } : out,
+          );
+          if (edge !== null) {
+            edges.push(edge);
+          }
+        }
+      }
+    }
+    return { nodes, edges, nextCursor, version };
+  }
+
+  function parseGraphLocal(data: Record<string, unknown> | null): {
+    center: string | null;
+    nodes: RawGraphNode[];
+    edges: RawGraphEdge[];
+    version: string;
+    truncated: boolean;
+  } | null {
+    if (data === null || !Array.isArray(data.nodes)) {
+      return null;
+    }
+    const version = parseGraphVersion(data);
+    if (version === null) {
+      return null;
+    }
+    let center: string | null = null;
+    if (data.center !== undefined && data.center !== null) {
+      if (
+        typeof data.center !== "string" ||
+        data.center.length < 1 ||
+        data.center.length > 256 ||
+        hasControlCode(data.center)
+      ) {
+        return null;
+      }
+      center = data.center;
+    }
+    const nodes: RawGraphNode[] = [];
+    for (const value of data.nodes) {
+      const node = parseRawGraphNode(value);
+      if (node !== null) {
+        nodes.push(node);
+      }
+    }
+    const edges: RawGraphEdge[] = [];
+    if (Array.isArray(data.edges)) {
+      for (const value of data.edges) {
+        const edge = parseRawGraphEdge(value);
+        if (edge !== null) {
+          edges.push(edge);
+        }
+      }
+    }
+    return {
+      center,
+      nodes,
+      edges,
+      version,
+      truncated: data.truncated === true,
+    };
+  }
+
+  async function callGraphCli(
+    op: "graph.local" | "graph.page" | "graph.version",
+    params: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<MemoryCliEnvelope> {
+    try {
+      return await cliCall(address, op, params, undefined, {
+        ...(signal !== undefined ? { signal } : {}),
+      });
+    } catch {
+      throw new MemoryManageError("service_unavailable");
+    }
+  }
+
+  /**
+   * Fixed graph failure mapping: an old remind that does not know the graph
+   * ops answers BAD_REQUEST -> distinct `memory_graph_unavailable` (routes
+   * render 503); transient store/timeout failures stay service_unavailable;
+   * other local failures fail closed as target_not_found.
+   */
+  function graphFailure(
+    envelope: MemoryCliEnvelope,
+    fallback: "target_not_found" | "service_unavailable",
+  ): never {
+    if (envelope.code === "BAD_REQUEST") {
+      throw new MemoryManageError("memory_graph_unavailable");
+    }
+    if (envelope.code === "TIMEOUT" || envelope.code === "STORE_UNAVAILABLE") {
+      throw new MemoryManageError("service_unavailable");
+    }
+    throw new MemoryManageError(fallback);
+  }
+
+  async function fetchGlobalGraph(input: {
+    includeRetired: boolean;
+    signal?: AbortSignal;
+  }): Promise<{
+    version: string;
+    nodes: RawGraphNode[];
+    edges: RawGraphEdge[];
+    truncated: boolean;
+  }> {
+    const versionEnvelope = await callGraphCli(
+      "graph.version",
+      { scope },
+      input.signal,
+    );
+    if (!versionEnvelope.ok) {
+      graphFailure(versionEnvelope, "service_unavailable");
+    }
+    const version = parseGraphVersion(versionEnvelope.data);
+    if (version === null) {
+      throw new MemoryManageError("service_unavailable");
+    }
+    const cacheKey = `${scope}\u0000${input.includeRetired ? "1" : "0"}`;
+    const cached = graphCache.get(cacheKey);
+    if (cached !== undefined && cached.version === version) {
+      return cached;
+    }
+
+    const nodes: RawGraphNode[] = [];
+    const rawEdges: RawGraphEdge[] = [];
+    const nodeIds = new Set<string>();
+    let cursor: string | undefined;
+    let truncated = false;
+    let pages = 0;
+    for (;;) {
+      pages += 1;
+      if (pages > MEMORY_GRAPH_PAGE_MAX) {
+        throw new MemoryManageError("service_unavailable");
+      }
+      const params: Record<string, unknown> = {
+        scope,
+        includeRetired: input.includeRetired,
+        limit: graphPageLimit,
+      };
+      if (cursor !== undefined) {
+        params.cursor = cursor;
+      }
+      const envelope = await callGraphCli("graph.page", params, input.signal);
+      if (!envelope.ok) {
+        graphFailure(envelope, "service_unavailable");
+      }
+      const page = parseGraphPage(envelope.data);
+      if (page === null || page.version !== version) {
+        throw new MemoryManageError("service_unavailable");
+      }
+      for (const node of page.nodes) {
+        if (nodeIds.has(node.id)) {
+          continue;
+        }
+        if (nodes.length >= MEMORY_GRAPH_NODE_MAX) {
+          truncated = true;
+          break;
+        }
+        nodeIds.add(node.id);
+        nodes.push(node);
+      }
+      rawEdges.push(...page.edges);
+      if (truncated) {
+        break;
+      }
+      if (nodes.length >= MEMORY_GRAPH_NODE_MAX) {
+        if (page.nextCursor !== null) {
+          truncated = true;
+        }
+        break;
+      }
+      if (page.nextCursor === null) {
+        break;
+      }
+      if (page.nextCursor === cursor) {
+        throw new MemoryManageError("service_unavailable");
+      }
+      cursor = page.nextCursor;
+    }
+    const boundedEdges = boundRawGraphEdges(rawEdges, nodeIds);
+    truncated = truncated || boundedEdges.truncated;
+    const entry = {
+      version,
+      nodes,
+      edges: boundedEdges.edges,
+      truncated,
+    };
+    graphCache.set(cacheKey, entry);
+    return entry;
+  }
+
+  function mintGraphProjection(input: {
+    sessionId: string;
+    runId: string;
+    scope: "global" | "local";
+    version: string;
+    center: string | null;
+    nodes: RawGraphNode[];
+    edges: RawGraphEdge[];
+    truncated: boolean;
+  }): MemoryGraphResult {
+    let searchId: string;
+    let minted: ReturnType<typeof repo.mintMemoryGraphItems>;
+    try {
+      searchId = repo.getOrCreateMemoryGraphSearch(
+        {
+          searchId: randomUUID(),
+          sessionId: input.sessionId,
+          runId: input.runId,
+          scope,
+        },
+        { now: now() },
+      );
+      minted = repo.mintMemoryGraphItems(
+        {
+          searchId,
+          items: input.nodes.map((node) => ({
+            recordId: node.id,
+            status: node.status,
+            snippet: node.label,
+          })),
+        },
+        { now: now() },
+      );
+    } catch {
+      throw new MemoryManageError("service_unavailable");
+    }
+    const handleByRecordId = new Map<string, string>();
+    for (const item of minted) {
+      handleByRecordId.set(item.recordId, item.handle);
+    }
+    const nodes: MemoryGraphNodeResult[] = input.nodes.map((node, index) => {
+      const mintedItem = minted[index];
+      const handle = mintedItem?.handle ?? handleByRecordId.get(node.id) ?? "";
+      return {
+        handle,
+        label: node.label,
+        status: node.status,
+        kind: node.kind,
+        episode: node.episode,
+      };
+    });
+    const edges: MemoryGraphEdgeResult[] = [];
+    for (const edge of input.edges) {
+      const from = handleByRecordId.get(edge.from);
+      const to = handleByRecordId.get(edge.to);
+      if (from === undefined || to === undefined) {
+        continue;
+      }
+      edges.push({ from, to, kind: edge.kind });
+    }
+    const center =
+      input.center === null
+        ? null
+        : (handleByRecordId.get(input.center) ?? null);
+    return {
+      searchId,
+      version: input.version,
+      scope: input.scope,
+      center,
+      nodes,
+      edges: edges.slice(0, MEMORY_GRAPH_EDGE_MAX),
+      truncated: input.truncated,
+    };
+  }
+
+  async function getMemoryGraphGlobal(
+    sessionId: string,
+    input: {
+      includeRetired?: boolean;
+      runId: string;
+      signal?: AbortSignal;
+    },
+  ): Promise<MemoryGraphResult> {
+    const raw = await fetchGlobalGraph({
+      includeRetired: input.includeRetired === true,
+      ...(input.signal !== undefined ? { signal: input.signal } : {}),
+    });
+    return mintGraphProjection({
+      sessionId,
+      runId: input.runId,
+      scope: "global",
+      version: raw.version,
+      center: null,
+      nodes: raw.nodes,
+      edges: raw.edges,
+      truncated: raw.truncated,
+    });
+  }
+
+  async function getMemoryGraphLocal(
+    sessionId: string,
+    input: {
+      searchId: string;
+      handle: string;
+      depth?: 1 | 2;
+      runId: string;
+      signal?: AbortSignal;
+    },
+  ): Promise<MemoryGraphResult> {
+    const depth = input.depth ?? 1;
+    if (depth !== 1 && depth !== 2) {
+      throw new MemoryManageError("validation_error");
+    }
+    // Resolve through the SAME session-bound snapshot path as detail:
+    // a handle is valid only in the session whose search created it, and
+    // the record id is the historical snapshot target (never rebound).
+    const resolved = resolveManagementTarget(
+      sessionId,
+      input.searchId,
+      input.handle,
+      true,
+    );
+    if ("refused" in resolved) {
+      throw new MemoryManageError("target_not_found");
+    }
+    const envelope = await callGraphCli(
+      "graph.local",
+      { scope, id: resolved.bound.recordId, depth },
+      input.signal,
+    );
+    if (!envelope.ok) {
+      graphFailure(envelope, "target_not_found");
+    }
+    const parsed = parseGraphLocal(envelope.data);
+    if (parsed === null) {
+      throw new MemoryManageError("service_unavailable");
+    }
+    const bounded = dedupeRawGraphNodes(parsed.nodes);
+    const nodeIds = new Set(bounded.nodes.map((node) => node.id));
+    const boundedEdges = boundRawGraphEdges(parsed.edges, nodeIds);
+    return mintGraphProjection({
+      sessionId,
+      runId: input.runId,
+      scope: "local",
+      version: parsed.version,
+      center: parsed.center,
+      nodes: bounded.nodes,
+      edges: boundedEdges.edges,
+      truncated:
+        parsed.truncated || bounded.truncated || boundedEdges.truncated,
+    });
+  }
+
   /**
    * Shared request-identity prefix for staging AND draining replays: body
    * validation + trusted snapshot resolution + the immutable request hash
@@ -3309,6 +3978,8 @@ export function createMemoryService(
     drainOnce: () => drainOnce(),
     searchMemories,
     getMemoryDetail,
+    getMemoryGraphGlobal,
+    getMemoryGraphLocal,
     stageMemoryMutation,
     getMemoryOperation,
     getMemoryRecallExposure,

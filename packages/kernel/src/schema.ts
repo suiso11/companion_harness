@@ -662,6 +662,21 @@ export const memorySearchItems = sqliteTable(
   (t) => [primaryKey({ columns: [t.searchId, t.handle] })],
 );
 
+// Conversation-memory graph mapping (migration 0028, authoritative SQL).
+// One durable graph search snapshot per (session, memory scope). The
+// referenced `memory_searches` row has query='graph'; graph nodes are
+// ordinary immutable `memory_search_items` rows in that search.
+export const memoryGraphSearches = sqliteTable(
+  "memory_graph_searches",
+  {
+    sessionId: text("session_id").notNull(),
+    scope: text("scope").notNull(),
+    searchId: text("search_id").notNull(),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.sessionId, t.scope] })],
+);
+
 export const memoryOperations = sqliteTable("memory_operations", {
   id: text("id").primaryKey(),
   kind: text("kind").notNull(),
