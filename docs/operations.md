@@ -41,6 +41,7 @@ a missing DB fails without creating any DB or backup files.
 | `COMPANION_CALENDAR_PROFILE` | unset (no profile) | Strict opt-in profile selector (see C14 profile below). Unset keeps the previous behavior (explicit host `mcpDefinitions` injection or fail-closed incomplete opt-in). Only `google-readonly` is accepted; any other value fails startup. Requires `COMPANION_CALENDAR_JSON` describing exactly the adopted candidate. |
 | `COMPANION_ACTIONS_JSON` | `{"optIn":false,"writeEnabled":false}` | Strict JSON object `{ optIn?, writeEnabled? }` (booleans, default false). HINT ONLY: never supplies a write capability, a category or a binding — see "C21 M5 Action composition" below |
 | `COMPANION_REMOTE_JSON` | unset (remote disabled) | Strict JSON object `{ enabled?, allowedOrigins?, passwordFile?, absoluteTimeoutMs?, idleTimeoutMs?, maxFailures?, lockoutMs? }` (see "Remote access" below); unset means loopback-only behavior, unchanged |
+| `COMPANION_WEB_SEARCH_JSON` | unset (web search disabled) | Strict JSON object `{ enabled?, searxng_base_url?, max_results?, timeout_ms?, per_turn_budget?, max_response_bytes? }` (see "Web search (SearXNG)" below); unset means no `web.search` tool |
 
 Config is Zod-validated and frozen at startup (no hot reload).
 
@@ -164,6 +165,33 @@ There is no automatic restore/rollback.
 There is **no session-level delete/export API** (no per-session physical
 deletion, no user export). Domain data is otherwise never auto-deleted
 (RunEvent/Snapshot/Reference/Receipt kept indefinitely).
+
+## Web search (SearXNG, default off)
+
+`web.search` is a single read-only model tool that submits a bounded query
+to ONE self-hosted SearXNG endpoint and materializes the hits as session
+references (`r1..rN`), never as raw upstream payloads. Unset
+`COMPANION_WEB_SEARCH_JSON` (default) means no web connector, no
+registration and NO tool in the model-facing tool list (fail-closed).
+
+### Enabling steps (requires a slice-1 SearXNG deployment)
+
+1. Deploy a local SearXNG instance reachable on the loopback interface
+   (e.g. `127.0.0.1:8888`); only loopback http(s) URLs are accepted.
+2. Start the server with:
+
+   ```
+   COMPANION_WEB_SEARCH_JSON='{"enabled":true,"searxng_base_url":"http://127.0.0.1:8888"}'
+   ```
+
+3. Optional strict fields (validated, defaults shown): `max_results: 5`
+   (1..8), `timeout_ms: 10000` (1000..60000), `per_turn_budget: 3`
+   (1..8, per-run `web.search` calls), `max_response_bytes: 1048576`
+   (1024..8388608).
+4. Verify the tool is advertised: a model turn may now call `web.search`
+   and cite the resulting `rN` references. Disabled (unset) never
+   advertises the tool, and invalid JSON / non-loopback URLs fail startup
+   closed (never silently disabled).
 
 ## Markdown references (M1, read-only)
 

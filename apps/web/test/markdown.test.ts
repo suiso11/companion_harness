@@ -2,7 +2,10 @@
 // V2 markdown unit tests: validated-answer rendering is sanitized HTML
 // with code highlighting. No network, no Svelte, pure pipeline.
 import { describe, expect, test } from "vitest";
-import { renderAnswerMarkdown } from "../src/lib/markdown.js";
+import {
+  loadHighlightLanguages,
+  renderAnswerMarkdown,
+} from "../src/lib/markdown.js";
 
 describe("renderAnswerMarkdown", () => {
   test("renders a list as list elements", () => {
@@ -12,7 +15,9 @@ describe("renderAnswerMarkdown", () => {
     expect(html).toContain("<li>two</li>");
   });
 
-  test("highlights fenced code and adds the copy chrome", () => {
+  test("highlights fenced code and adds the copy chrome", async () => {
+    // Grammars load lazily (entry budget): prime them before asserting.
+    await loadHighlightLanguages();
     const html = renderAnswerMarkdown(
       "```typescript\nconst x: number = 1;\n```\n",
     );
@@ -28,6 +33,16 @@ describe("renderAnswerMarkdown", () => {
     const html = renderAnswerMarkdown("```mermaid\ngraph TD;\n```\n");
     expect(html).toContain("code-block-wrapper");
     expect(html).toContain("graph TD;");
+  });
+
+  test("highlights tilde-fenced code too", async () => {
+    // CommonMark/GFM treats `~~~language` fences the same as backtick
+    // fences (PR112 review): grammars load and the block highlights.
+    await loadHighlightLanguages();
+    const html = renderAnswerMarkdown("~~~typescript\nconst x = 1;\n~~~\n");
+    expect(html).toContain("code-block-wrapper");
+    expect(html).toContain("language-typescript");
+    expect(html).toContain("hljs");
   });
 
   test("shows raw HTML as literal text, never elements", () => {

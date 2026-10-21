@@ -31,6 +31,8 @@ export const TEXT_THINK_TOOLS = "think-tools";
 export const TEXT_CITE_MEM = "cite-mem";
 /** Input text whose fake strategy streams draft deltas, then a V2 cited answer. */
 export const TEXT_DRAFT = "draft-stream";
+/** Input text whose strategy records durable `web.search` tool events. */
+export const TEXT_WEB_SEARCH = "web-search";
 /** Input text whose fake strategy streams step-1 then step-2 drafts (restart). */
 export const TEXT_DRAFT_STEPS = "draft-steps";
 /** Input text whose fake strategy streams a draft then hangs until cancel. */

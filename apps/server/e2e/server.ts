@@ -85,6 +85,7 @@ import {
   TEXT_HANG,
   TEXT_THINK,
   TEXT_THINK_TOOLS,
+  TEXT_WEB_SEARCH,
 } from "./ports.js";
 
 const dir = mkdtempSync(join(tmpdir(), "companion-e2e-"));
@@ -168,6 +169,38 @@ const E2E_TOOL_ARGS_HASH = createHash("sha256")
 const registry = new StrategyRegistry();
 registry.register("m0-default", async (ctx: RunStrategyContext) => {
   const text = inputText(ctx);
+  if (text.includes(TEXT_WEB_SEARCH)) {
+    // Web search phase simulation (slice ③): one durable web.search tool
+    // request held open long enough for the spec to observe the dedicated
+    //「ウェブ検索中…」phase line, then the completed event + terminal echo.
+    const runId = ctx.run.id;
+    const call = randomUUID();
+    repo.appendToolEvent(runId, "tool.requested", {
+      callId: call,
+      callIndex: 1,
+      tool: "web.search",
+      argsHash: E2E_TOOL_ARGS_HASH,
+    });
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 3000);
+      timer.unref?.();
+    });
+    if (ctx.signal.aborted) {
+      throw new StrategyError("execution_cancelled");
+    }
+    repo.appendToolEvent(runId, "tool.completed", {
+      callId: call,
+      callIndex: 1,
+      tool: "web.search",
+      actualOutcome: "succeeded",
+      reportedOutcome: "succeeded",
+      disposition: "accepted",
+      errorCode: null,
+      resultDigest: null,
+      reusedFromCallId: null,
+    });
+    return { version: 1, text: `echo:${text}` };
+  }
   if (STREAMING_SIM_ENABLED && text.includes(TEXT_THINK_TOOLS)) {
     // Reasoning deltas (ephemeral) -> durable tool.requested x2 ->
     // durable tool.completed x2 -> usage -> terminal echo. The tool phase
@@ -572,6 +605,8 @@ const UUID_V4_RE =
 function seedCitation(
   sessionId: string,
   text?: unknown,
+  url?: unknown,
+  title?: unknown,
 ): {
   referenceId: string;
   ordinal: number;
@@ -592,12 +627,15 @@ function seedCitation(
   }
   let connector = db
     .prepare("SELECT id FROM connector_instances WHERE kind = ?")
-    .get("e2e-fake") as { id: string } | undefined;
+    // Reference detail gates web_result_urls on the connector kind being
+    // 'web' (kernel repository): seed citations under a web-kind instance so
+    // the fixture mirrors the production resources the UI hydrates from.
+    .get("web") as { id: string } | undefined;
   if (connector === undefined) {
     const id = randomUUID();
     db.prepare(
       "INSERT INTO connector_instances (id, kind, display_name, config_json, created_at) VALUES (?, ?, ?, ?, ?)",
-    ).run(id, "e2e-fake", "e2e fake vault", '{"version":1,"rootCount":1}', now);
+    ).run(id, "web", "e2e fake web", '{"version":1,"rootCount":1}', now);
     connector = { id };
   }
   const connectorId = connector.id;
@@ -606,13 +644,17 @@ function seedCitation(
   // (UNIQUE(resource_id, revision)), which blocks a second citation test in
   // the same webServer run. Ordinals stay per-session via MAX(ordinal)+1.
   const resourceId = randomUUID();
+  const resourceTitle =
+    typeof title === "string" && title.length > 0 && title.length <= 256
+      ? title
+      : "E2E citation doc";
   db.prepare(
     "INSERT INTO resources (id, connector_instance_id, canonical_key, title, next_revision, created_at) VALUES (?, ?, ?, ?, ?, ?)",
   ).run(
     resourceId,
     connectorId,
     `e2e-citation-doc-${resourceId}`,
-    "E2E citation doc",
+    resourceTitle,
     2,
     now,
   );
@@ -675,6 +717,16 @@ function seedCitation(
     ).run(ordinal + 1, sessionId);
   } catch {
     // Column predates some DBs; the ordinal itself is authoritative.
+  }
+  // Web citation seeding (slice ③): an optional verified URL row in the
+  // `web_result_urls` side table, keyed by the seeded snapshot. The value is
+  // NOT scheme-validated here on purpose: the defensive javascript:-URL test
+  // relies on the repository/detail API failing closed to null so the UI
+  // never renders a link for it.
+  if (typeof url === "string" && url.length > 0 && url.length <= 2048) {
+    db.prepare(
+      "INSERT INTO web_result_urls (snapshot_id, url) VALUES (?, ?) ON CONFLICT DO NOTHING",
+    ).run(snapshotId, url);
   }
   return { referenceId, ordinal, snapshotId };
 }
@@ -1202,13 +1254,19 @@ const control = createServer(
     if (req.method === "POST" && url.pathname === "/seed-citation") {
       let sessionId: unknown = null;
       let text: unknown = null;
+      let seedUrl: unknown = null;
+      let title: unknown = null;
       try {
         const parsed = JSON.parse(rawBody === "" ? "{}" : rawBody) as {
           sessionId?: unknown;
           text?: unknown;
+          url?: unknown;
+          title?: unknown;
         };
         sessionId = parsed.sessionId;
         text = parsed.text;
+        seedUrl = parsed.url;
+        title = parsed.title;
       } catch {
         json(400, { error: { code: "validation_error" } });
         return;
@@ -1218,7 +1276,7 @@ const control = createServer(
         return;
       }
       try {
-        json(200, seedCitation(sessionId, text));
+        json(200, seedCitation(sessionId, text, seedUrl, title));
       } catch {
         json(404, { error: { code: "not_found" } });
       }

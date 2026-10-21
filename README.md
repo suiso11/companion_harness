@@ -1551,6 +1551,27 @@ COMPANION_ACTIONS_JSON='{ "optIn": true, "writeEnabled": true }'
 
 ---
 
+# Web search (opt-in, default off)
+
+`web.search` は 1 つの自己ホスト SearXNG endpoint に境界付き query を投げ、
+結果を session reference (`r1..rN`) として具体化する読み取り専用ツールです。
+既定 (unset) では何も登録されず、モデル向けツール一覧に `web.search` は
+現れません。不正 JSON / 非 loopback URL は黙って無効化されず、起動失敗します
+(fail closed)。
+
+```bash
+# 前提: slice-1 のローカル SearXNG が loopback で起動済みであること
+COMPANION_WEB_SEARCH_JSON='{"enabled":true,"searxng_base_url":"http://127.0.0.1:8888"}'
+```
+
+- 厳格な任意フィールド (既定値): `max_results: 5` (1..8)、
+  `timeout_ms: 10000` (1000..60000)、`per_turn_budget: 3` (1..8)、
+  `max_response_bytes: 1048576` (1024..8388608)。
+- 有効時のみ (登録時だけ) モデルの一覧に現れます。詳細は
+  docs/operations.md「Web search (SearXNG, default off)」参照。
+
+---
+
 # リモートアクセス (default-off)
 
 tailnet 経由のリモート利用に向けた、明示的 Origin/Host allowlist +

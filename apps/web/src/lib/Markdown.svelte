@@ -1,5 +1,9 @@
 <script lang="ts">
-import { CODE_COPY_BUTTON_CLASS, renderAnswerMarkdown } from "./markdown.js";
+import {
+  CODE_COPY_BUTTON_CLASS,
+  loadHighlightLanguages,
+  renderAnswerMarkdown,
+} from "./markdown.js";
 
 interface Props {
   /** One VALIDATED answer part (never draft/notice/citation text). */
@@ -8,7 +12,27 @@ interface Props {
 
 let { text }: Props = $props();
 
-const html = $derived(renderAnswerMarkdown(text));
+// Highlight grammars live in a lazy chunk (entry budget): the first fenced
+// code block triggers the load, and `highlightReady` re-runs the derived
+// render so the block upgrades from static source to highlighted spans.
+// The DOM contract (`hljs` spans, copy chrome) is identical after load.
+let highlightReady = $state(false);
+
+$effect(() => {
+  // CommonMark/GFM also marks `~~~language` fences as code blocks: either
+  // fence style must trigger the same lazy grammar load (PR112 review).
+  if (!text.includes("```") && !text.includes("~~~")) return;
+  void loadHighlightLanguages().then(() => {
+    highlightReady = true;
+  });
+});
+
+const html = $derived.by(() => {
+  // Reactive dependency: a completed (or already-done) grammar load
+  // re-renders with highlighting enabled.
+  highlightReady;
+  return renderAnswerMarkdown(text);
+});
 
 // Copy-button "copied" reset timer: rapid clicks must clear the previous
 // timeout, otherwise the first timer restores the label early (review #84).

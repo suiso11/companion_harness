@@ -41,6 +41,7 @@
 // - `reference.presented` payloads carry structural IDs/ordinals only.
 
 import {
+  buildWebCanonicalKey,
   CanonicalKeySchema,
   countCodePoints,
   createExpandedLinkGraphBudget,
@@ -54,6 +55,9 @@ import {
   SourceRevisionSchema,
   serializeExpandedLinkGraphEntry,
   utf8ByteLength,
+  WEB_CANONICAL_KEY_PREFIX,
+  WebResultUrlSchema,
+  WebTitleSchema,
 } from "@companion/contracts";
 import type Database from "better-sqlite3";
 import { generateId, isUuidV4, sha256Hex } from "./canonical.js";
@@ -163,6 +167,27 @@ export interface CalendarConnectorView {
   calendarId: string;
   account?: string;
   createdAt: number;
+}
+
+/** Web connector instance view (kind 'web'; metadata-only config). */
+export interface WebConnectorView {
+  id: string;
+  kind: string;
+  displayName: string;
+  createdAt: number;
+}
+
+/**
+ * One already-fetched web search hit, ready to persist. The URL is the raw
+ * (non-allowlisted, possibly fragmented/default-ported) spelling; kernel
+ * validation + normalization is part of presentation. Title/snippet are
+ * bounded display fields (NFC-normalized here, never rewritten later).
+ */
+export interface WebResultHit {
+  url: string;
+  title: string | null;
+  snippet: string | null;
+  observedAt: number;
 }
 
 /** Stored-only related view (no snippet/body; tool layer presents later). */
@@ -542,6 +567,114 @@ export function deriveSnippet(
   return snippet;
 }
 
+/* ------------------------------------------------------------------ */
+/* Web result persistence (design §5, connector kind 'web')             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Versioned hash salt for the normalized URL (stays `web-v1` + NUL,
+ * derived from the contracts prefix so a future version bump moves both).
+ * The SHA-256 of `salt + normalizedUrl` is the resource identity input; the
+ * canonical key is `web-v1-<64 hex>` (contracts `buildWebCanonicalKey`),
+ * which satisfies `CanonicalKeySchema` without funneling the 2048-char URL
+ * through the 512-char key bound.
+ */
+const WEB_URL_HASH_SALT = `${WEB_CANONICAL_KEY_PREFIX.replace(/-$/, "")}\u0000`;
+
+export interface NormalizedWebUrl {
+  /** Contract-validated original spelling (allowlist + 2048 bound). */
+  readonly url: string;
+  /** Normalized spelling (also the hash input). */
+  readonly normalizedUrl: string;
+  /** `web-v1-<sha256 hex>` of the normalized URL. */
+  readonly canonicalKey: string;
+}
+
+/**
+ * Normalize a web result URL exactly as the resource identity derivation
+ * defines it (design §5): scheme/host are lowercased by the URL parser, the
+ * fragment is dropped, default ports (http 80 / https 443) are absent from
+ * the standard serializer, and the path/query are kept verbatim (root
+ * without query keeps its trailing slash spelling minus the empty-path
+ * residue, matching the connector's `normalizeWebUrl`). Fails closed:
+ * anything outside the scheme allowlist/bounds or unparseable throws.
+ */
+export function normalizeWebResultUrl(raw: string): NormalizedWebUrl {
+  if (typeof raw !== "string") {
+    throw new RepositoryValidationError("web result url must be a string");
+  }
+  const cleaned = raw.normalize("NFC");
+  try {
+    WebResultUrlSchema.parse(cleaned);
+  } catch (error) {
+    throw new RepositoryValidationError(
+      `web result url invalid: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(cleaned);
+  } catch (error) {
+    throw new RepositoryValidationError("web result url is not parseable", {
+      cause: error,
+    });
+  }
+  parsed.hash = "";
+  let normalized = parsed.toString();
+  if (
+    normalized.endsWith("/") &&
+    parsed.pathname === "/" &&
+    parsed.search === ""
+  ) {
+    normalized = `${parsed.protocol}//${parsed.host}`;
+  }
+  const canonicalKey = buildWebCanonicalKey(
+    sha256Hex(WEB_URL_HASH_SALT + normalized),
+  );
+  // Store/use the EXACT href-canonicalized spelling (IDNA punycode host,
+  // percent-encoded path) the canonical key hashes — never a raw or
+  // NFC-only variant spelling — so identity and side-table URL always agree.
+  return { url: normalized, normalizedUrl: normalized, canonicalKey };
+}
+
+/** Bounded NFC title (nullable, ≤256 code points per contracts). */
+function normalizeWebTitle(raw: string | null): string | null {
+  if (raw === null || raw === undefined) {
+    return null;
+  }
+  if (typeof raw !== "string") {
+    throw new RepositoryValidationError("web result title must be a string");
+  }
+  const title = raw.normalize("NFC");
+  try {
+    WebTitleSchema.parse(title);
+  } catch (error) {
+    throw new RepositoryValidationError(
+      `web result title invalid: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
+  return countCodePoints(title) > 0 ? title : null;
+}
+
+/** Bounded NFC snippet (nullable, ≤512 code points, contracts web bound). */
+function normalizeWebSnippet(raw: string | null): string | null {
+  if (raw === null || raw === undefined) {
+    return null;
+  }
+  if (typeof raw !== "string") {
+    throw new RepositoryValidationError("web result snippet must be a string");
+  }
+  const snippet = raw.normalize("NFC");
+  if (countCodePoints(snippet) > MAX_SNIPPET_CODE_POINTS) {
+    throw new RepositoryValidationError(
+      `web result snippet must be ≤${MAX_SNIPPET_CODE_POINTS} code points`,
+    );
+  }
+  return countCodePoints(snippet) > 0 ? snippet : null;
+}
+
 interface RawRun {
   id: string;
   session_id: string;
@@ -835,6 +968,211 @@ export function createReferenceManager(db: Database.Database) {
         createdAt: now,
       };
     });
+  }
+
+  /**
+   * Ensure one Web connector instance (`kind = 'web'`) carrying a
+   * metadata-only `{version:1}` config (per design §5: the SearXNG endpoint
+   * itself is configuration, never persisted in the store). Same
+   * fail-closed ensure pattern as the markdown/calendar instances.
+   */
+  function ensureWebConnectorInstance(
+    displayName: string,
+    options: { now?: number } = {},
+  ): WebConnectorView {
+    if (
+      typeof displayName !== "string" ||
+      displayName.length < 1 ||
+      displayName.length > 128
+    ) {
+      throw new RepositoryValidationError("displayName must be 1..128 chars");
+    }
+    if (
+      displayName.includes("/") ||
+      displayName.includes("\\") ||
+      displayName.includes("\0") ||
+      /^[A-Za-z]:/.test(displayName)
+    ) {
+      throw new RepositoryValidationError(
+        "displayName must not contain paths or separators",
+      );
+    }
+    const now = nowMs(options.now);
+    return withImmediate(db, () => {
+      const existing = db
+        .prepare(
+          "SELECT id, kind, display_name, config_json, created_at FROM connector_instances WHERE kind = 'web' AND display_name = ?",
+        )
+        .get(displayName) as
+        | {
+            id: string;
+            kind: string;
+            display_name: string;
+            config_json: string;
+            created_at: number;
+          }
+        | undefined;
+      if (existing !== undefined) {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(existing.config_json);
+        } catch {
+          throw new RepositoryValidationError(
+            "stored connector config invalid",
+          );
+        }
+        if (
+          typeof parsed !== "object" ||
+          parsed === null ||
+          JSON.stringify(parsed) !==
+            JSON.stringify({ version: CONNECTOR_CONFIG_VERSION })
+        ) {
+          throw new RepositoryValidationError(
+            "stored connector config invalid",
+          );
+        }
+        return {
+          id: existing.id,
+          kind: existing.kind,
+          displayName: existing.display_name,
+          createdAt: existing.created_at,
+        };
+      }
+      const id = generateId();
+      const configJson = JSON.stringify({
+        version: CONNECTOR_CONFIG_VERSION,
+      });
+      db.prepare(
+        "INSERT INTO connector_instances (id, kind, display_name, config_json, created_at) VALUES (?, 'web', ?, ?, ?)",
+      ).run(id, displayName, configJson, now);
+      return { id, kind: "web", displayName, createdAt: now };
+    });
+  }
+
+  /**
+   * Persist web search hits as connector kind 'web' observations (design
+   * §5): title+snippet become the bounded NFC snapshot text, the resource
+   * identity is the versioned SHA-256 of the normalized URL (dedupe by
+   * normalized URL: same URL across searches reunifies into the same
+   * resource/snapshot/rN), and the revision bumps only when the content
+   * changes (`sourceRevision` is always NULL upstream — no revision signal
+   * exists for search hits). The validated URL is written to the
+   * `web_result_urls` side table (0026) keyed by snapshot INSIDE the same
+   * observation transaction via `onApplied`, so an absent/never-stored row
+   * backfills atomically and a cancelled run rolls back with everything
+   * else. Freshness is always `normal` (web has no refresh tool).
+   */
+  function presentWebResults(
+    sessionId: string,
+    runId: string,
+    connectorInstanceId: string,
+    hits: readonly WebResultHit[],
+    options: { now?: number } = {},
+  ): PresentObservationsResult {
+    const connectorId = requireId(connectorInstanceId, "connectorInstanceId");
+    if (!Array.isArray(hits)) {
+      throw new RepositoryValidationError("web hits must be an array");
+    }
+    const normalizedHits = hits.map((hit, index) => {
+      if (typeof hit !== "object" || hit === null) {
+        throw new RepositoryValidationError(
+          `web hit ${index} must be an object`,
+        );
+      }
+      const record = hit as {
+        url?: unknown;
+        title?: unknown;
+        snippet?: unknown;
+      };
+      if (typeof record.url !== "string") {
+        throw new RepositoryValidationError(
+          `web hit ${index} url must be a string`,
+        );
+      }
+      const normalizedUrl = normalizeWebResultUrl(record.url);
+      const title = normalizeWebTitle((record.title ?? null) as string | null);
+      const snippet = normalizeWebSnippet(
+        (record.snippet ?? null) as string | null,
+      );
+      // Snapshot content (bounded): title + snippet composed as NFC text.
+      // Either part may be absent; empty text is still immutable evidence.
+      const text = [title, snippet].filter((part) => part !== null).join("\n");
+      try {
+        SnapshotBodySchema.parse({ version: 1, text });
+      } catch (error) {
+        throw new RepositoryValidationError(
+          `web hit ${index} content invalid: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error },
+        );
+      }
+      const observedAt = nowMs(hit.observedAt);
+      return {
+        canonicalKey: normalizedUrl.canonicalKey,
+        url: normalizedUrl.url,
+        title,
+        snippet,
+        text,
+        observedAt,
+      };
+    });
+    // In-batch dedupe (insertion order preserved): repeated normalized
+    // links map onto the same resource -> same snapshot -> same rN, so
+    // exactly one observation per canonical key is presented and each
+    // caller-visible hit maps onto the returned reference by key.
+    const byKey = new Map<
+      string,
+      {
+        url: string;
+        title: string | null;
+        snippet: string | null;
+        text: string;
+        observedAt: number;
+      }
+    >();
+    for (const value of normalizedHits) {
+      if (!byKey.has(value.canonicalKey)) {
+        byKey.set(value.canonicalKey, value);
+      }
+    }
+    const urlByCanonicalKey = new Map<string, string>();
+    const observations: ResourceObservation[] = [];
+    for (const [canonicalKey, value] of byKey) {
+      urlByCanonicalKey.set(canonicalKey, value.url);
+      observations.push({
+        connectorInstanceId: connectorId,
+        canonicalKey,
+        title: value.title,
+        text: value.text,
+        sourceRevision: null,
+        observedAt: value.observedAt,
+      });
+    }
+    return presentObservations(sessionId, runId, observations, {
+      freshness: "normal",
+      ...(options.now !== undefined ? { now: options.now } : {}),
+      onApplied: ({ references }) => {
+        for (const reference of references) {
+          const url = urlByCanonicalKey.get(reference.canonicalKey);
+          if (url === undefined) {
+            continue;
+          }
+          // Reused snapshots already carry their row (ON CONFLICT keeps the
+          // original); only freshly materialized snapshots insert here.
+          db.prepare(
+            "INSERT INTO web_result_urls (snapshot_id, url) VALUES (?, ?) ON CONFLICT DO NOTHING",
+          ).run(reference.snapshotId, url);
+        }
+      },
+    });
+  }
+
+  /** Stored verified URL for one snapshot (UI citation drawer; design §5). */
+  function getWebResultUrl(snapshotId: string): string | null {
+    const id = requireId(snapshotId, "snapshotId");
+    const row = db
+      .prepare("SELECT url FROM web_result_urls WHERE snapshot_id = ?")
+      .get(id) as { url: string } | undefined;
+    return row === undefined ? null : row.url;
   }
 
   function presentObservations(
@@ -1546,9 +1884,12 @@ export function createReferenceManager(db: Database.Database) {
   return {
     ensureMarkdownConnectorInstance,
     ensureCalendarConnectorInstance,
+    ensureWebConnectorInstance,
     presentObservations,
+    presentWebResults,
     presentStored,
     getRelatedStored,
+    getWebResultUrl,
   };
 }
 

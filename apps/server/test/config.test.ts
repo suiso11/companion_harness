@@ -671,3 +671,45 @@ describe("calendar config (C14 strict opt-in, default disabled)", () => {
     ).toThrow("calendar connector config is invalid");
   });
 });
+
+describe("web search config (COMPANION_WEB_SEARCH_JSON)", () => {
+  it("defaults to disabled (off) when unset and freezes the config", () => {
+    const config = loadServerConfig(baseEnv(tempDbPath()));
+    expect(config.webSearch.enabled).toBe(false);
+    expect(Object.isFrozen(config.webSearch)).toBe(true);
+  });
+
+  it("parses an enabled loopback SearXNG config", () => {
+    const config = loadServerConfig({
+      ...baseEnv(tempDbPath()),
+      COMPANION_WEB_SEARCH_JSON: JSON.stringify({
+        enabled: true,
+        searxng_base_url: "http://127.0.0.1:8080",
+      }),
+    });
+    expect(config.webSearch.enabled).toBe(true);
+    expect(config.webSearch.searxng_base_url).toBe("http://127.0.0.1:8080");
+    expect(config.webSearch.max_results).toBe(5);
+  });
+
+  it("fails startup closed on invalid JSON or unknown keys", () => {
+    expect(() =>
+      loadServerConfig({
+        ...baseEnv(tempDbPath()),
+        COMPANION_WEB_SEARCH_JSON: "{not-json",
+      }),
+    ).toThrow("web search config is invalid");
+    expect(() =>
+      loadServerConfig({
+        ...baseEnv(tempDbPath()),
+        COMPANION_WEB_SEARCH_JSON: JSON.stringify({ enabled: true, nope: 1 }),
+      }),
+    ).toThrow("web search config is invalid");
+    expect(() =>
+      loadServerConfig({
+        ...baseEnv(tempDbPath()),
+        COMPANION_WEB_SEARCH_JSON: JSON.stringify({ enabled: true }),
+      }),
+    ).toThrow("web search config is invalid");
+  });
+});

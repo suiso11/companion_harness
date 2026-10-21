@@ -24,6 +24,10 @@ import {
   mcpConnectorConfigSchema,
 } from "@companion/connector-mcp";
 import {
+  parseWebSearchConfig,
+  type WebSearchConfig,
+} from "@companion/contracts";
+import {
   MAX_RESPONSE_BYTES as GATEWAY_MAX_RESPONSE_BYTES,
   isValidApiKeyHeaderValue,
   normalizeLoopbackBaseUrl,
@@ -432,6 +436,11 @@ export interface ServerConfig {
   readonly calendar: CalendarConfig | null;
   /** Strict opt-in M5 Action config (default fully disabled). */
   readonly actions: ActionConfig;
+  /**
+   * Strict opt-in web search config (SearXNG, deep-frozen). Unset means
+   * disabled; parsing failures fail startup closed.
+   */
+  readonly webSearch: WebSearchConfig;
   /** Strict opt-in remind memory config; null (unset) means memoryless. */
   readonly memory: MemoryConfig | null;
   /** Strict opt-in remote (tailnet) Origin/Host allowlist (default off). */
@@ -1523,6 +1532,14 @@ export function loadServerConfig(
   const model = parseModelConfig(env.COMPANION_MODEL_JSON);
   const calendar = parseCalendarConfig(env.COMPANION_CALENDAR_JSON);
   const actions = parseActionConfig(env.COMPANION_ACTIONS_JSON);
+  let webSearch: WebSearchConfig;
+  try {
+    webSearch = Object.freeze(
+      parseWebSearchConfig(env.COMPANION_WEB_SEARCH_JSON) as WebSearchConfig,
+    );
+  } catch {
+    throw configError("web search config is invalid");
+  }
   const memory = parseMemoryConfig(env.COMPANION_MEMORY_JSON);
   const remote = parseRemoteConfig(env.COMPANION_REMOTE_JSON);
   if (remote.enabled && remote.allowedOrigins.length === 0) {
@@ -1559,6 +1576,7 @@ export function loadServerConfig(
     model,
     calendar,
     actions,
+    webSearch,
     memory,
     remote,
     trial,

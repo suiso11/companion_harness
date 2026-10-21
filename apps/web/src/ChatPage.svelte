@@ -206,6 +206,20 @@ let elapsedTimer: number | null = null;
 let retryTurnId: string | null = $state(null);
 let drawerOpen = $state(false);
 let drawerBody = $state("");
+// Slice ③ web citation drawer: only references whose detail carries a
+// verified http(s) `webResultUrl` (connector kind `web`) render the
+// external-link block. The URL is re-validated client-side; nothing else
+// ever becomes an <a href>.
+let drawerWeb: {
+  title: string;
+  url: string;
+} | null = $state(null);
+// Web citation chip labels (title bounded + host), hydrated lazily from the
+// stored reference detail. Memory-only (never persisted); the version tick
+// is the reactive dependency the template reads.
+let chipMeta = new Map<string, string>();
+let chipMetaVersion = $state(0);
+const chipHydrationDone = new Set<string>();
 let cards: CardState[] = $state([]);
 let authExpired = $state(false);
 let loginPassword = $state("");
@@ -435,6 +449,9 @@ function resetChatState(): void {
   citationSeq += 1;
   drawerOpen = false;
   drawerBody = "";
+  // Session-scoped citation data must not survive a session switch/creation:
+  // clear the hydrated web block alongside the drawer body (review PR112).
+  drawerWeb = null;
 }
 
 // --- PR-3 thinking/status helpers (ephemeral deltas + durable phase) ---
@@ -1501,6 +1518,162 @@ async function checkDegradedMemory(runId: string): Promise<void> {
 }
 
 // --- citations (rN stored + mN run-bound, §16.5) ---
+
+/** Chip text for one citation: hydrated web chips show rN + title（host）. */
+function chipLabel(citation: string): string {
+  void chipMetaVersion;
+  const key = `${sessionId ?? ""}:${citation}`;
+  return chipMeta.get(key) ?? citation;
+}
+
+/**
+ * Lazily resolve a batch of rN citations against the stored references.
+ * Only web-backed references (detail `webResultUrl`, scheme http/https) get
+ * a hydrated label; everything else keeps the plain rN text. The whole
+ * batch shares ONE `/references` listing fetch — per-citation listings
+ * would transfer and scan the full unpaginated list N times per boot
+ * (PR112 review). One attempt per citation per session (failures for the
+ * chip only; transient list/detail failures stay retriable, never fatal).
+ */
+const chipHydrationInFlight = new Set<string>();
+
+async function hydrateChips(citations: string[], sid: string): Promise<void> {
+  const ordinalOf = (citation: string): number => Number(citation.slice(1));
+  const keyOf = (citation: string): string => `${sid}:${citation}`;
+  const pending: string[] = [];
+  for (const citation of citations) {
+    if (!/^r[1-9][0-9]*$/.test(citation)) continue;
+    const key = keyOf(citation);
+    if (chipHydrationDone.has(key) || chipHydrationInFlight.has(key)) continue;
+    chipHydrationInFlight.add(key);
+    pending.push(citation);
+  }
+  if (pending.length === 0) return;
+  const release = (citation: string, done: boolean): void => {
+    const key = keyOf(citation);
+    chipHydrationInFlight.delete(key);
+    if (done) chipHydrationDone.add(key);
+  };
+  // The scheme allowlist is enforced twice (repository + here): the chip and
+  // the drawer link are only ever built from http(s) URLs.
+  const isHttp = (raw: unknown): raw is string =>
+    typeof raw === "string" && /^https?:\/\//.test(raw);
+  const base = `/api/sessions/${encodeURIComponent(sid)}/references`;
+  let listed: { status: number; body: unknown };
+  try {
+    // Shared listing: one fetch + one ordinal scan for the whole batch.
+    listed = await fetchJson(base);
+  } catch {
+    // Transient network failure: leave every key retriable so the next
+    // effect re-run retries the shared listing (PR112 review).
+    for (const citation of pending)
+      chipHydrationInFlight.delete(keyOf(citation));
+    return;
+  }
+  const rawItems = (listed.body as { items?: unknown }).items;
+  const byOrdinal = new Map<number, string>();
+  for (const item of (Array.isArray(rawItems) ? rawItems : []) as Array<{
+    id?: unknown;
+    ordinal?: unknown;
+  }>) {
+    if (typeof item.ordinal === "number" && typeof item.id === "string") {
+      // Exact ordinal match = `r${ordinal}` (same rule as before batching).
+      byOrdinal.set(item.ordinal, item.id);
+    }
+  }
+  // Listing miss (non-200 or unknown ordinal) is terminal: not a stored
+  // web reference, the chip keeps its plain rN text.
+  const resolvable = pending.filter((citation) => {
+    if (byOrdinal.has(ordinalOf(citation))) return true;
+    release(citation, true);
+    return false;
+  });
+  await Promise.all(
+    resolvable.map(async (citation) => {
+      const key = keyOf(citation);
+      const referenceId = byOrdinal.get(ordinalOf(citation)) as string;
+      let webUrl: string | null = null;
+      let title = "";
+      try {
+        const detail = await fetchJson(
+          `${base}/${encodeURIComponent(referenceId)}`,
+        );
+        if (detail.status === 200) {
+          const body = detail.body as {
+            webResultUrl?: unknown;
+            resource?: { title?: unknown };
+          };
+          webUrl = isHttp(body.webResultUrl) ? body.webResultUrl : null;
+          if (webUrl !== null) {
+            title =
+              typeof body.resource?.title === "string"
+                ? body.resource.title
+                : "";
+          }
+        }
+        if (detail.status !== 200) {
+          // Transient failure (401, reconnect, ...): leave the key retriable.
+          // A later effect re-run (e.g. after re-login in bootSession) retries
+          // the request instead of stranding the chip as a plain rN (PR112).
+          chipHydrationInFlight.delete(key);
+          return;
+        }
+      } catch {
+        // Transient network failure: keep the key retriable (PR112 review).
+        chipHydrationInFlight.delete(key);
+        return;
+      }
+      if (webUrl === null) {
+        release(citation, true);
+        return;
+      }
+      let host = "";
+      try {
+        host = new URL(webUrl).host;
+      } catch {
+        release(citation, true);
+        return;
+      }
+      // Title bound is by Unicode code point (matches the web title contract):
+      // UTF-16 code units would truncate astral chars (emoji) early and can
+      // cut after an unmatched high surrogate (PR112 review).
+      const titleChars = Array.from(title);
+      const boundedTitle =
+        titleChars.length > 32 ? `${titleChars.slice(0, 32).join("")}…` : title;
+      chipMeta.set(
+        key,
+        `${citation}${titleChars.length > 0 ? ` ${boundedTitle}` : ""}（${host}）`,
+      );
+      chipMetaVersion += 1;
+      release(citation, true);
+    }),
+  );
+}
+
+// Hydrate web chips for every visible rN citation (transcript + live
+// answer). Re-runs as those reactive sources change; each visible batch
+// shares one references listing, and per-citation hydration is attempted
+// exactly once.
+$effect(() => {
+  const sid = sessionId;
+  if (sid === null) return;
+  const citations = new Set<string>();
+  for (const turn of turns) {
+    for (const part of answerPartsForTurn(turn)) {
+      for (const citation of part.citations) {
+        citations.add(citation);
+      }
+    }
+  }
+  for (const part of liveAnswer) {
+    for (const citation of part.citations) {
+      citations.add(citation);
+    }
+  }
+  if (citations.size === 0) return;
+  void hydrateChips([...citations], sid);
+});
+
 async function updateReferenceContextCas(
   referenceId: string,
   sid: string,
@@ -1555,6 +1728,7 @@ async function openCitation(citation: string, runId?: string): Promise<void> {
   const seq = citationSeq;
   const sid = sessionId;
   drawerBody = "";
+  drawerWeb = null;
   drawerOpen = false;
   if (/^m[1-9][0-9]*$/.test(citation)) {
     await openMemoryCitation(citation, runId, seq, sid);
@@ -1603,6 +1777,28 @@ async function openCitation(citation: string, runId?: string): Promise<void> {
       ? (snapshot as { text?: unknown }).text
       : snapshot;
   drawerBody = loadText(snapshotText);
+  // Web reference drawer (slice ③): verified stored URL + resource title.
+  // Scheme allowlist enforced twice (repository + here) so only http(s)
+  // URLs ever become link targets; the visible link text is the full URL.
+  // The snapshot itself is rendered once in `#drawer-body` only: production
+  // web snapshots already persist `title\nsnippet`, so repeating it as a
+  // second "snippet" paragraph duplicated the full evidence and showed the
+  // title three times (PR112 review).
+  const webBody = detail.body as {
+    webResultUrl?: unknown;
+    resource?: { title?: unknown };
+  };
+  drawerWeb =
+    typeof webBody.webResultUrl === "string" &&
+    /^https?:\/\//.test(webBody.webResultUrl)
+      ? {
+          title:
+            typeof webBody.resource?.title === "string"
+              ? webBody.resource.title
+              : "",
+          url: webBody.webResultUrl,
+        }
+      : null;
   drawerOpen = true;
 }
 
@@ -1657,6 +1853,7 @@ async function openMemoryCitation(
 function closeDrawer(): void {
   citationSeq += 1;
   drawerBody = "";
+  drawerWeb = null;
   drawerOpen = false;
 }
 
@@ -2841,12 +3038,13 @@ function evidenceForTurn(turn: Turn): {
                   {#each part.citations as citation (citation)}
                     <button
                       type="button"
+                      data-citation={citation}
                       aria-label={citation.startsWith("m")
                         ? `この回答の記憶引用 ${citation}`
-                        : `保存された引用 ${citation}`}
+                        : `保存された引用 ${chipLabel(citation)}`}
                       onclick={() => void openCitation(citation, runId)}
                     >
-                      {citation}
+                      {chipLabel(citation)}
                     </button>
                   {/each}
                 {/each}
@@ -2948,12 +3146,13 @@ function evidenceForTurn(turn: Turn): {
             {#each part.citations as citation (citation)}
               <button
                 type="button"
+                data-citation={citation}
                 aria-label={citation.startsWith("m")
                   ? `この回答の記憶引用 ${citation}`
-                  : `保存された引用 ${citation}`}
+                  : `保存された引用 ${chipLabel(citation)}`}
                 onclick={() => void openCitation(citation, runId)}
               >
-                {citation}
+                {chipLabel(citation)}
               </button>
             {/each}
           {/each}
@@ -3046,6 +3245,23 @@ function evidenceForTurn(turn: Turn): {
     }}
   >
     <pre id="drawer-body">{drawerBody}</pre>
+    {#if drawerWeb !== null}
+      <div class="web-citation" data-web-citation="true">
+        <p data-web-citation-title="true">{drawerWeb.title}</p>
+        <!-- The snapshot body renders once in `#drawer-body` above; this
+             block adds only the structured title + external link (no
+             second copy of the evidence, PR112 review). -->
+        <!-- External launch only: the verified http(s) URL, full text
+             visible, no favicon/remote image fetch. -->
+        <a
+          data-web-citation-url="true"
+          href={drawerWeb.url}
+          target="_blank"
+          rel="noopener noreferrer nofollow"
+          >{drawerWeb.url}</a
+        >
+      </div>
+    {/if}
     <button type="button" onclick={closeDrawer}>閉じる</button>
   </div>
 
