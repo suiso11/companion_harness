@@ -320,6 +320,10 @@ async function refresh(): Promise<void> {
     return;
   }
   if (session !== sessionSeq || seen !== listSeq) return;
+  // Session binding recheck: the response applies only if the same session
+  // id still holds (mirrors the request-token pattern used by the panel's
+  // other guards); a mid-flight session change discards this page.
+  if (readSession() !== sessionId) return;
   if (res.status !== 200) {
     setStatus("引継ぎの読み込みに失敗しました");
     return;
@@ -407,6 +411,7 @@ async function fillTaskTitles(
     return;
   }
   if (session !== sessionSeq || seen !== listSeq) return;
+  if (readSession() !== sessionId) return;
   if (res.status !== 200 || !isRecord(res.body)) return;
   const items = Array.isArray(res.body.items)
     ? (res.body.items as unknown[])
