@@ -665,3 +665,8 @@
 - 決定者: haruka / 日付: 2026-10-20
 
 - I 記憶の保存基準（2026-10-20 haruka 決定）: 基本すべて保存し、会話へ持ち込む記憶は想起時に厳選する。各ターンで summary 1 件＋本人発言の詳細を全件、根拠ある傾向は model_inference。
+
+### Web 検索: self-hosted SearXNG 採用（2026-10-20, haruka）
+
+- 決定: Option B — Linux ホスト上の **self-hosted SearXNG** を Companion の Web 検索バックエンドとして採用。クエリテキストが SearXNG 経由でアップストリーム検索エンジンへ送られることを許可（127.0.0.1:8888 loopback 限定・tailnet 非公開・`settings.yml` で `search.formats: [html, json]`、limiter off）。Companion 側は `web.search` ツール（query ≤200 chars、top-k ≤8）、結果は untrusted evidence、ReferenceManager 新 connector kind `web` → rN citation、ターン検索予算案 3・タイムアウト案 10s。設定は `COMPANION_WEB_SEARCH_JSON` default-off。phase 1 でページ取得は行わない（`web.open` は phase 2 の別決定）。デザイン詳細: docs/plan/web_search_design.md。
+- 決定者: haruka / 日付: 2026-10-20
