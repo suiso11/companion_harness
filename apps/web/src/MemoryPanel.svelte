@@ -9,12 +9,18 @@
 // keyed operation that is polled to its durable ack. The chat shell still
 // provides the conversation/composer (the memory e2e cultivates a fact
 // there before searching).
+import { untrack } from "svelte";
 import {
   GraphCanvas,
   type GraphData,
   parseGraphData,
 } from "../../server/src/ui/graph.js";
 import { errorCode, fetchJson, postJson, randomUuid } from "./lib/api.js";
+import {
+  graphShowAction,
+  invalidateAfterMutation,
+  retainLoadedGraph,
+} from "./lib/memory_graph_state.js";
 import { getSessionId } from "./lib/session.svelte.js";
 
 const POLL_INTERVAL_MS = 500;
@@ -72,6 +78,8 @@ let graphSelected = $state<string | null>(null);
  * snapshot instead of showing an empty canvas (or forcing a refetch).
  */
 let graphData = $state<GraphData | null>(null);
+/** An acked mutation invalidates the retained payload (next show refetches). */
+let graphStale = $state(false);
 let graphLoading = $state(false);
 let graphCanvasEl = $state<SVGSVGElement | null>(null);
 let canvas: GraphCanvas | null = null;
@@ -236,13 +244,16 @@ function switchView(next: "list" | "graph"): void {
   view = next;
   if (next === "graph") {
     canvas?.setSearchQuery(query);
-    if (graphData === null) {
-      void loadGraph(graphScope?.scope ?? "global");
-    } else {
-      // The list view destroyed the canvas, but graphData survives: restore
-      // the previously loaded graph (the mount effect paints it as soon as
-      // the new canvas exists).
+    // The canvas is created by the mount effect; only decide here whether
+    // the retained payload is still authoritative.
+    const action = graphShowAction({
+      loaded: graphData !== null,
+      stale: graphStale,
+    });
+    if (action === "paint") {
       paintGraph();
+    } else {
+      void loadGraph(graphScope?.scope ?? "global");
     }
   } else {
     canvas?.setSearchQuery("");
@@ -350,7 +361,9 @@ async function loadGraph(kind: "global" | "local"): Promise<void> {
     ) {
       graphSelected = null;
     }
+    const retained = retainLoadedGraph();
     graphData = data;
+    graphStale = retained.stale;
     paintGraph();
     if (data.nodes.length === 0) {
       graphStatus = "記憶がありません";
@@ -373,16 +386,27 @@ async function activateGraphNode(handle: string): Promise<void> {
   await openDetail(target.searchId, handle);
 }
 
-/** Refresh the visible graph after an acked mutation (version-cached). */
+/**
+ * Invalidate the retained graph after an acked mutation (list or graph
+ * view). The server's graph.version cache makes the eventual refetch cheap.
+ */
 function refreshGraphAfterMutation(): void {
-  if (view !== "graph" || graphScope === null) return;
-  void loadGraph(graphScope.scope);
+  const result = invalidateAfterMutation(
+    { loaded: graphData !== null, stale: graphStale },
+    view,
+  );
+  graphStale = result.retention.stale;
+  if (result.refetchNow) void loadGraph(graphScope?.scope ?? "global");
 }
 
+// The GraphCanvas instance follows the container's mount state only: search
+// and selection changes must not destroy it (which would reset the camera,
+// layout, and keyboard focus). Reads of graphData/graphSelected/query are
+// untracked so they cannot re-run this effect.
 $effect(() => {
   const element = graphCanvasEl;
-  if (element === null || canvas !== null) return;
-  canvas = new GraphCanvas(element, {
+  if (element === null) return;
+  const instance = new GraphCanvas(element, {
     onNodeActivate: (handle) => {
       void activateGraphNode(handle);
     },
@@ -390,18 +414,30 @@ $effect(() => {
       graphSelected = handle;
     },
   });
-  // A graph already loaded before the list view destroyed the canvas is
-  // rehydrated here, so list -> graph never renders an empty canvas.
-  paintGraph();
+  canvas = instance;
+  untrack(() => {
+    if (graphData !== null && !graphStale) {
+      instance.setGraph(graphData, { selected: graphSelected, query });
+    } else {
+      instance.setSearchQuery(query);
+    }
+  });
   return () => {
-    canvas?.destroy();
-    canvas = null;
+    instance.destroy();
+    if (canvas === instance) canvas = null;
   };
 });
 
+// Reactive repaints reuse the existing canvas instead of re-setting the
+// graph (which would reset zoom/pan and drop focus).
 $effect(() => {
   const text = query;
   if (view === "graph") canvas?.setSearchQuery(text);
+});
+
+$effect(() => {
+  const handle = graphSelected;
+  canvas?.setSelected(handle);
 });
 
 async function openDetail(target: string, handle: string): Promise<void> {
@@ -734,6 +770,7 @@ $effect(() => {
   graphScope = null;
   graphSelected = null;
   graphData = null;
+  graphStale = false;
   graphStatus = "";
   graphLoading = false;
   canvas?.setGraph(
