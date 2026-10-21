@@ -18,6 +18,7 @@
 import { createHash } from "node:crypto";
 import {
   buildWebCanonicalKey,
+  isLoopbackHostname,
   isValidLoopbackHttpUrl,
   MAX_WEB_TITLE_CODE_POINTS,
   WebResultUrlSchema,
@@ -65,7 +66,10 @@ export function normalizeSearxBaseUrl(raw: unknown): string {
       "searxng_base_url is invalid",
     );
   }
-  if (parsed.hostname.toLowerCase() === "localhost") {
+  const host = parsed.hostname.toLowerCase();
+  // Pin the whole reserved loopback name family (RFC 6761: `localhost` and
+  // every `.localhost` subdomain) to the literal IP without any DNS lookup.
+  if (host === "localhost" || host.endsWith(".localhost")) {
     parsed.hostname = "127.0.0.1";
   }
   const path = parsed.pathname.replace(/\/+$/, "");
@@ -96,8 +100,10 @@ function assertPinnedLoopbackUrl(target: string): void {
     );
   }
   const host = parsed.hostname.toLowerCase();
-  if (host !== "127.0.0.1" && host !== "::1") {
-    // `localhost` must already have been pinned by normalizeSearxBaseUrl.
+  // Whole `localhost` name family (pinned above) and the same loopback
+  // vocabulary the config validation accepts: 127.0.0.0/8 + IPv6 ::1.
+  if (!isLoopbackHostname(host)) {
+    // `localhost` names must already have been pinned to 127.0.0.1.
     throw new WebSearchClientError(
       "invalid_base_url",
       "web search endpoint is invalid",
@@ -137,7 +143,9 @@ export function normalizeWebUrl(
   raw: string,
 ): { url: string; canonicalKey: string; normalizedUrl: string } | null {
   if (typeof raw !== "string") return null;
-  const cleaned = stripControlChars(raw);
+  // NFC first so Unicode spellings of the same URL (host IDNA aside, path
+  // bytes) normalize identically at both the connector and kernel layers.
+  const cleaned = stripControlChars(raw).normalize("NFC");
   if (!WebResultUrlSchema.safeParse(cleaned).success) return null;
   let parsed: URL;
   try {
@@ -147,6 +155,9 @@ export function normalizeWebUrl(
   }
   // Normalize: keep scheme, inspect nothing implicit — preserve the exact
   // validated spelling minus the fragment, with the default port dropped.
+  // The stored/used URL is the SAME href-canonicalized spelling the
+  // canonical key hashes (IDNA punycode host, percent-encoded path), so a
+  // non-NFC or non-ASCII spelling can never diverge from its identity.
   parsed.hash = "";
   let url = parsed.toString();
   if (url.endsWith("/") && parsed.pathname === "/" && parsed.search === "") {
@@ -159,7 +170,7 @@ export function normalizeWebUrl(
       .update(normalizedUrl)
       .digest("hex"),
   );
-  return { url: cleaned, canonicalKey, normalizedUrl };
+  return { url: normalizedUrl, canonicalKey, normalizedUrl };
 }
 
 /* ------------------------------------------------------------------ */

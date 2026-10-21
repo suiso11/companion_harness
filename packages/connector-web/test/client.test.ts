@@ -1,3 +1,4 @@
+import { createServer } from "node:http";
 import { describe, expect, it } from "vitest";
 import {
   decodeSearxResults,
@@ -19,6 +20,14 @@ describe("normalizeSearxBaseUrl", () => {
     );
     expect(normalizeSearxBaseUrl("http://[::1]:8888")).toBe(
       "http://[::1]:8888",
+    );
+    // Reserved loopback name family and the whole 127.0.0.0/8 block are
+    // accepted exactly like the config validation.
+    expect(normalizeSearxBaseUrl("http://searx.localhost:8888")).toBe(
+      "http://127.0.0.1:8888",
+    );
+    expect(normalizeSearxBaseUrl("http://127.0.0.2:8888")).toBe(
+      "http://127.0.0.2:8888",
     );
   });
 
@@ -83,6 +92,31 @@ describe("normalizeWebUrl", () => {
     expect(normalizeWebUrl("gopher://example.com")).toBeNull();
     expect(normalizeWebUrl(`https://a/${"x".repeat(2500)}`)).toBeNull();
   });
+
+  it("stores and hashes the same href-canonical URL for non-ASCII host/path", () => {
+    const raw = "https://例え.テスト/パス?名=値";
+    const url = new URL(raw);
+    url.hash = "";
+    const canonical = url.toString();
+    const a = normalizeWebUrl(raw);
+    expect(a).not.toBeNull();
+    expect(a?.url).toBe(canonical);
+    expect(a?.url).toBe(a?.normalizedUrl);
+    // Different Unicode spellings of the same resource (NFC vs NFD path,
+    // fragment presence) map onto one identity.
+    const b = normalizeWebUrl(
+      "https://xn--r8jz45g.xn--zckzah/%E3%83%91%E3%82%B9?%E5%90%8D=%E5%80%A4#frag",
+    );
+    expect(b?.canonicalKey).toBe(a?.canonicalKey);
+    expect(b?.url).toBe(a?.url);
+  });
+
+  it("NFC and NFD spellings hash to one canonical URL", () => {
+    const nfc = normalizeWebUrl("https://example.com/café");
+    const nfd = normalizeWebUrl("https://example.com/cafe\u0301");
+    expect(nfc?.url).toBe(nfd?.url);
+    expect(nfc?.canonicalKey).toBe(nfd?.canonicalKey);
+  });
 });
 
 describe("searchSearx over a loopback stub", () => {
@@ -100,9 +134,37 @@ describe("searchSearx over a loopback stub", () => {
         timeoutMs: 5000,
       });
       expect(results).toHaveLength(1);
-      expect(results[0]?.url).toBe("https://example.com/");
+      // Stored/used URL is the href-canonicalized spelling (root slash
+      // stripped exactly like the canonical-key hash input).
+      expect(results[0]?.url).toBe("https://example.com");
     } finally {
       await stub.close();
+    }
+  });
+
+  it("accepts the whole 127.0.0.0/8 block consistently with config validation", async () => {
+    // A real listener on another 127.0.0.0/8 address (loopback block is
+    // locally routable on Linux) exercises the pre-fetch revalidation path
+    // that previously only accepted 127.0.0.1/::1.
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end('{"results":[]}');
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, "127.0.0.2", resolve),
+    );
+    const address = server.address();
+    if (address === null || typeof address === "string")
+      throw new Error("addr");
+    try {
+      const results = await searchSearx({
+        baseUrl: `http://127.0.0.2:${address.port}`,
+        query: "loopback /8",
+        timeoutMs: 5000,
+      });
+      expect(results).toEqual([]);
+    } finally {
+      server.close();
     }
   });
 

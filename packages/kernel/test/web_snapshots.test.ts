@@ -191,7 +191,7 @@ describe("verified URL side table (0026)", () => {
       const snap = first.references[0]?.snapshotId;
       if (snap === undefined) throw new Error("no snapshot");
       expect(manager.getWebResultUrl(snap)).toBe(
-        "https://Example.com/docs?a=1",
+        "https://example.com/docs?a=1",
       );
       // Re-presenting the same URL in a later observation reuses the
       // snapshot; the ON CONFLICT DO NOTHING keeps the verified spelling.
@@ -208,7 +208,7 @@ describe("verified URL side table (0026)", () => {
         ).n,
       ).toBe(1);
       expect(manager.getWebResultUrl(snap)).toBe(
-        "https://Example.com/docs?a=1",
+        "https://example.com/docs?a=1",
       );
       expect(manager.getWebResultUrl(generateId())).toBe(null);
       // Foreign keys keep the store verifiable.
@@ -293,8 +293,10 @@ describe("pre-0026 upgrade", () => {
         db: handle.raw,
         backupDir: backups,
       });
-      expect(result.applied).toEqual([26]);
-      expect(getSchemaVersion(handle.raw)).toBe(26);
+      // Migration 0026 (web_result_urls) and 0027 (web_search_turn_usage)
+      // both apply on the pre-web v25 schema.
+      expect(result.applied).toEqual([26, 27]);
+      expect(getSchemaVersion(handle.raw)).toBe(27);
       // Existing rows survive verbatim; the new table starts empty.
       const sessions = handle.raw
         .prepare("SELECT COUNT(*) AS n FROM sessions")

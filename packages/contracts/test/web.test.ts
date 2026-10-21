@@ -93,6 +93,34 @@ describe("WebSearchToolOutputSchema", () => {
         .success,
     ).toBe(false);
   });
+
+  it("bounds snippets by Unicode code points, not UTF-16 units (emoji)", () => {
+    const emoji = "\u{1F600}";
+    // 512 code points = 1024 UTF-16 units: within the bound.
+    expect(
+      WebSearchHitSchema.safeParse({ ...hit, snippet: emoji.repeat(512) })
+        .success,
+    ).toBe(true);
+    // 513 code points = 1026 UTF-16 units: over the code-point bound.
+    expect(
+      WebSearchHitSchema.safeParse({ ...hit, snippet: emoji.repeat(513) })
+        .success,
+    ).toBe(false);
+  });
+
+  it("loopback hostname classification matches the config URL validation", () => {
+    // Whole 127.0.0.0/8 is loopback.
+    expect(isValidLoopbackHttpUrl("http://127.0.0.2:8888")).toBe(true);
+    expect(isValidLoopbackHttpUrl("http://127.255.255.254")).toBe(true);
+    // Non-loopback IPv4 and malformed spellings stay rejected.
+    expect(isValidLoopbackHttpUrl("http://126.0.0.1")).toBe(false);
+    expect(isValidLoopbackHttpUrl("http://127.0.0.01")).toBe(false);
+    // ::1 (full eight-group spelling is canonicalized by the URL parser;
+    // the structurally accepted form stays valid like the bracketed one).
+    expect(isValidLoopbackHttpUrl("http://[::1]:8888")).toBe(true);
+    expect(isValidLoopbackHttpUrl("http://[0:0:0:0:0:0:0:1]:8888")).toBe(true);
+    expect(isValidLoopbackHttpUrl("http://[::2]:8888")).toBe(false);
+  });
 });
 
 describe("COMPANION_WEB_SEARCH_JSON config (fail-closed, §9)", () => {
