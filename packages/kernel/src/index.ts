@@ -472,6 +472,7 @@ export type {
   EnsureMarkdownConnectorOptions,
   FreshnessKind,
   MarkdownConnectorView,
+  NormalizedWebUrl,
   ObservationLink,
   PresentedReferenceView,
   PresentObservationsResult,
@@ -479,10 +480,13 @@ export type {
   ReferenceManager,
   RelatedStoredView,
   ResourceObservation,
+  WebConnectorView,
+  WebResultHit,
 } from "./reference_manager.js";
 export {
   createReferenceManager,
   deriveSnippet,
+  normalizeWebResultUrl,
   RELATED_DEFAULT_LIMIT,
   RELATED_MAX_LIMIT,
 } from "./reference_manager.js";
