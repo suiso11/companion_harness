@@ -657,3 +657,9 @@ export {
   stageTrialProposal,
   wireModeForReadOnly,
 } from "./trial_authority.js";
+export {
+  createWebSearchRegistration,
+  mapWebClientError,
+  WEB_MEMORY_EXFIL_WINDOW,
+  WEB_SEARCH_TOOL_DESCRIPTOR_NAME,
+} from "./web_tools.js";

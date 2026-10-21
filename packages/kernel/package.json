@@ -10,6 +10,7 @@
     "lint": "biome check src test"
   },
   "dependencies": {
+    "@companion/connector-web": "workspace:*",
     "@companion/contracts": "workspace:*",
     "@companion/model-local": "workspace:*",
     "better-sqlite3": "13.0.3",

@@ -31,6 +31,9 @@ export const MAX_WEB_TITLE_CODE_POINTS = 256 as const;
 export const WebTimeRangeSchema = z.enum(["day", "week", "month", "year"]);
 export type WebTimeRange = z.infer<typeof WebTimeRangeSchema>;
 
+/** The single model-visible web search tool name (namespace.verb, §3). */
+export const WEB_SEARCH_TOOL_NAME = "web.search" as const;
+
 /** `web.search` input (§3, closed schema; strict unknown-key rejection). */
 export const WebSearchToolInputSchema = z.strictObject({
   query: z.string().refine(

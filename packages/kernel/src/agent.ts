@@ -36,10 +36,12 @@ import {
   CALENDAR_RESCHEDULE_TOOL_NAME,
   CITATION_ID_REGEX,
   DEFAULT_SEARCH_LIMIT,
+  DEFAULT_WEB_TOP_K,
   type FrozenContext,
   type M2ModelErrorCode,
   MAX_MODEL_STEPS_PER_RUN,
   MAX_SEARCH_LIMIT,
+  MAX_WEB_TOP_K,
   MEMORY_CITATION_ID_REGEX,
   parseStructuredAnswer,
   RESERVED_ANSWER_NAMESPACE,
@@ -1277,6 +1279,38 @@ export const AGENT_LEARNING_PROPOSE_PARAMETERS = Object.freeze({
 }) as unknown as Record<string, unknown>;
 
 /**
+ * Explicit closed JSON parameter schema for `web.search`, matching
+ * `WebSearchToolInputSchema` (strict): `query` required (1-200 Unicode code
+ * points), `language` optional (1-16), `time_range` closed enum, `top_k`
+ * 1-8 default 5. Registered ONLY when web search is configured; the
+ * kernel-owned guard still rejects exfiltration-shaped queries with the
+ * fixed `web_query_rejected` code.
+ */
+export const AGENT_WEB_SEARCH_PARAMETERS = Object.freeze({
+  type: "object",
+  properties: Object.freeze({
+    query: Object.freeze({ type: "string", minLength: 1, maxLength: 200 }),
+    language: Object.freeze({
+      type: "string",
+      minLength: 1,
+      maxLength: 16,
+    }),
+    time_range: Object.freeze({
+      type: "string",
+      enum: Object.freeze(["day", "week", "month", "year"]),
+    }),
+    top_k: Object.freeze({
+      type: "integer",
+      minimum: 1,
+      maximum: MAX_WEB_TOP_K,
+      default: DEFAULT_WEB_TOP_K,
+    }),
+  }),
+  required: Object.freeze(["query"]),
+  additionalProperties: false,
+}) as unknown as Record<string, unknown>;
+
+/**
  * Broker-visible M1 tools the agent may advertise, each with its explicit
  * closed parameter schema. Unknown/unregistered names are never advertised:
  * `buildAgentToolDefinitions` skips descriptors outside this map.
@@ -1286,6 +1320,7 @@ const AGENT_BROKER_TOOL_PARAMETERS: Readonly<
 > = {
   "calendar.search": AGENT_CALENDAR_SEARCH_PARAMETERS,
   "markdown.search": AGENT_MARKDOWN_SEARCH_PARAMETERS,
+  "web.search": AGENT_WEB_SEARCH_PARAMETERS,
   "reference.open": AGENT_REFERENCE_OPEN_PARAMETERS,
   "reference.refresh": AGENT_REFERENCE_REFRESH_PARAMETERS,
   "reference.related": AGENT_REFERENCE_RELATED_PARAMETERS,

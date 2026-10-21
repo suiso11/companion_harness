@@ -141,36 +141,51 @@ export type M4ToolErrorCodeNew = (typeof M4_TOOL_ERROR_CODES)[number];
 export const M4ToolErrorCodeNewSchema = z.enum(M4_TOOL_ERROR_CODES);
 
 /**
+ * Exact M5 additions only (web search, docs/plan/web_search_design.md §8):
+ * the single fixed redacted code the `web.search` guard surfaces for a
+ * rejected query (citation-id-shaped query or an exfiltration-shaped
+ * ≥16-code-point injected-memory substring). It carries NO raw query text,
+ * snippet, URL or reason detail. The guard runs BEFORE the per-turn web
+ * reservation, so a rejected query never consumes web budget (the per-run
+ * broker budget is still charged by the ordinary pipeline).
+ */
+export const M5_TOOL_ERROR_CODES = ["web_query_rejected"] as const;
+export type M5ToolErrorCodeNew = (typeof M5_TOOL_ERROR_CODES)[number];
+export const M5ToolErrorCodeNewSchema = z.enum(M5_TOOL_ERROR_CODES);
+
+/**
  * Closed latest tool error vocabulary: the exact M0 nine plus the exact M1
- * five plus the exact M4 six (20 total, explicit closed union, never
- * regex/free text). Generic/latest validation accepts all twenty; exact M0
- * validation accepts only the nine above and exact M1 validation the five.
+ * five plus the exact M4 six plus the exact M5 one (21 total, explicit
+ * closed union, never regex/free text). Generic/latest validation accepts
+ * all twenty-one; exact M0 validation accepts only the nine above, exact
+ * M1 validation the five, and exact M4/M5 stay per-era closed sets.
  */
 export const LATEST_TOOL_ERROR_CODES = [
   ...M0_TOOL_ERROR_CODES,
   ...M1_TOOL_ERROR_CODES,
   ...M4_TOOL_ERROR_CODES,
+  ...M5_TOOL_ERROR_CODES,
 ] as const;
 export type LatestToolErrorCode = (typeof LATEST_TOOL_ERROR_CODES)[number];
 
 /**
- * Latest tool error-code schema: closed M0+M1+M4 union (20 codes). The M1
- * alias is retained for backwards-compatible importers; M4 is now latest.
+ * Latest tool error-code schema: closed M0+M1+M4+M5 union (21 codes). The
+ * M1 alias is retained for backwards-compatible importers; M5 is latest.
  */
 export const M1ToolErrorCodeSchema = z.enum(LATEST_TOOL_ERROR_CODES);
 export type M1ToolErrorCode = z.infer<typeof M1ToolErrorCodeSchema>;
 
-/** Alias: M4 (MCP/Calendar) is the latest schema version served. */
+/** Alias: M5 (web search) is the latest schema version served. */
 export const LatestToolErrorCodeSchema = M1ToolErrorCodeSchema;
 export type ToolErrorCode = z.infer<typeof LatestToolErrorCodeSchema>;
 
-/** Generic tool error-code schema: latest (M0+M1+M4, 20 codes). */
+/** Generic tool error-code schema: latest (M0+M1+M4+M5, 21 codes). */
 export const ToolErrorCodeSchema = LatestToolErrorCodeSchema;
 
 /** Known M0 tool error codes (alias of the closed M0 vocabulary). */
 export const KNOWN_M0_TOOL_ERROR_CODES = M0_TOOL_ERROR_CODES;
 
-/** Known latest (M0+M1+M4) tool error codes (closed 20-code vocabulary). */
+/** Known latest (M0+M1+M4+M5) tool error codes (closed 21-code vocabulary). */
 export const KNOWN_LATEST_TOOL_ERROR_CODES = LATEST_TOOL_ERROR_CODES;
 
 /** Exact M0 schema-versioned tool error-code registry (version 1 only). */
@@ -190,6 +205,12 @@ export const M4_TOOL_ERROR_CODE_REGISTRY = {
   1: M4ToolErrorCodeNewSchema,
 } as const;
 export type M4ToolErrorSchemaVersion = keyof typeof M4_TOOL_ERROR_CODE_REGISTRY;
+
+/** Exact M5 schema-versioned tool error-code registry (version 1 only). */
+export const M5_TOOL_ERROR_CODE_REGISTRY = {
+  1: M5ToolErrorCodeNewSchema,
+} as const;
+export type M5ToolErrorSchemaVersion = keyof typeof M5_TOOL_ERROR_CODE_REGISTRY;
 
 /** Alias: M4 is the latest schema version served. */
 export const LATEST_TOOL_ERROR_CODE_REGISTRY = M1_TOOL_ERROR_CODE_REGISTRY;

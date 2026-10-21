@@ -234,6 +234,9 @@ importers:
 
   packages/kernel:
     dependencies:
+      '@companion/connector-web':
+        specifier: workspace:*
+        version: link:../connector-web
       '@companion/contracts':
         specifier: workspace:*
         version: link:../contracts
