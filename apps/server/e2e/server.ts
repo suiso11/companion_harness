@@ -627,12 +627,15 @@ function seedCitation(
   }
   let connector = db
     .prepare("SELECT id FROM connector_instances WHERE kind = ?")
-    .get("e2e-fake") as { id: string } | undefined;
+    // Reference detail gates web_result_urls on the connector kind being
+    // 'web' (kernel repository): seed citations under a web-kind instance so
+    // the fixture mirrors the production resources the UI hydrates from.
+    .get("web") as { id: string } | undefined;
   if (connector === undefined) {
     const id = randomUUID();
     db.prepare(
       "INSERT INTO connector_instances (id, kind, display_name, config_json, created_at) VALUES (?, ?, ?, ?, ?)",
-    ).run(id, "e2e-fake", "e2e fake vault", '{"version":1,"rootCount":1}', now);
+    ).run(id, "web", "e2e fake web", '{"version":1,"rootCount":1}', now);
     connector = { id };
   }
   const connectorId = connector.id;
