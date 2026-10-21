@@ -33,6 +33,15 @@ services:
       - --jinja
       - --alias
       - gemma-4-26b-a4b
+      # MTP speculative decoding (P40, temp 0, 5 prompts x2): decode 48.4 -> 80.7 tok/s,
+      # 72.7% draft acceptance, +~0.5 GiB VRAM, tool calls valid. n-max 6 and
+      # the E2B draft were slower.
+      - --spec-type
+      - draft-mtp
+      - --spec-draft-model
+      - /root/.cache/huggingface/specdec/mtp-gemma-4-26B-A4B-it-Q8_0.gguf
+      - --spec-draft-ngl
+      - "99"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
     stop_grace_period: 30s
