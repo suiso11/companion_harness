@@ -96,7 +96,16 @@ export const WebSearchHitSchema = z.strictObject({
   canonicalKey: CanonicalKeySchema,
   title: WebTitleSchema.nullable(),
   url: WebResultUrlSchema,
-  snippet: z.string().min(1).max(512).nullable(),
+  snippet: z
+    .string()
+    .refine(
+      (snippet) => {
+        const size = countCodePoints(snippet);
+        return size >= 1 && size <= 512;
+      },
+      { message: "web snippet must be 1-512 Unicode code points" },
+    )
+    .nullable(),
 });
 export type WebSearchHit = z.infer<typeof WebSearchHitSchema>;
 
@@ -196,6 +205,46 @@ export const WebSearchConfigSchema = z
 export type WebSearchConfig = z.infer<typeof WebSearchConfigSchema>;
 
 /**
+ * Loopback hostname classification shared by the contract-level URL check
+ * and the connector's pre-fetch revalidation, so both accept exactly the
+ * same spellings: `localhost` (and `.localhost` subdomains per RFC 6761),
+ * the whole 127.0.0.0/8 block, and IPv6 `::1` (single or eight-group form).
+ */
+export function isLoopbackHostname(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  if (host.includes(":")) {
+    // IPv6 spellings: `::1` or an 8-group expansion whose first seven
+    // groups are all zero and whose last group is `1`/`0001`.
+    if (host === "::1") return true;
+    const groups = host.split(":");
+    return (
+      groups.length === 8 &&
+      groups.slice(0, 7).every((group) => /^0{1,4}$/.test(group)) &&
+      (groups[7] === "1" || groups[7] === "0001")
+    );
+  }
+  if (!/^[a-z0-9.-]+$/.test(host)) {
+    // only [a-z0-9.-] allowed for names/addresses here
+    return false;
+  }
+  if (host === "localhost" || host.endsWith(".localhost")) {
+    return true;
+  }
+  // dotted-quad IPv4 loopback: 127.0.0.0/8 (strict, no leading-zero groups)
+  const parts = host.split(".");
+  if (parts.length !== 4) return false;
+  return (
+    parts.every(
+      (part: string) =>
+        /^[0-9]{1,3}$/.test(part) &&
+        Number(part) <= 255 &&
+        part !== "" &&
+        (part === "0" || !part.startsWith("0")),
+    ) && parts[0] === "127"
+  );
+}
+
+/**
  * Loopback http(s) URL validation WITHOUT the URL/DOM grammar (contracts
  * stay `lib: ES2023` pure): structural string checks only. The connector
  * re-parses the validated URL with the real URL API per fetch.
@@ -246,25 +295,7 @@ export function isValidLoopbackHttpUrl(raw: string): boolean {
       (groups[7] === "1" || groups[7] === "0001")
     );
   }
-  if (!/^[a-z0-9.-]+$/.test(hostname)) {
-    // only [a-z0-9.-] allowed for names/addresses here
-    return false;
-  }
-  if (hostname === "localhost" || hostname.endsWith(".localhost")) {
-    return true;
-  }
-  // dotted-quad IPv4 loopback: 127.0.0.0/8 (strict, no leading-zero groups)
-  const parts = hostname.split(".");
-  if (parts.length !== 4) return false;
-  return (
-    parts.every(
-      (part: string) =>
-        /^[0-9]{1,3}$/.test(part) &&
-        Number(part) <= 255 &&
-        part !== "" &&
-        (part === "0" || !part.startsWith("0")),
-    ) && parts[0] === "127"
-  );
+  return isLoopbackHostname(hostname);
 }
 
 /**
