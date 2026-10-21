@@ -1574,9 +1574,18 @@ async function hydrateChip(citation: string, sid: string): Promise<void> {
             typeof body.resource?.title === "string" ? body.resource.title : "";
         }
       }
+      if (detail.status !== 200) {
+        // Transient failure (401, reconnect, ...): leave the key retriable.
+        // A later effect re-run (e.g. after re-login in bootSession) retries
+        // the request instead of stranding the chip as a plain rN (PR112).
+        chipHydrationDone.delete(key);
+      }
     }
     if (webUrl === null) return;
   } catch {
+    // Transient network failure: clear the terminal mark so the next
+    // effect re-run retries the request (PR112 review).
+    chipHydrationDone.delete(key);
     return;
   }
   let host = "";
@@ -1585,9 +1594,15 @@ async function hydrateChip(citation: string, sid: string): Promise<void> {
   } catch {
     return;
   }
+  // Title bound is by Unicode code point (matches the web title contract):
+  // UTF-16 code units would truncate astral chars (emoji) early and can cut
+  // after an unmatched high surrogate (PR112 review).
+  const titleChars = Array.from(title);
+  const boundedTitle =
+    titleChars.length > 32 ? `${titleChars.slice(0, 32).join("")}…` : title;
   chipMeta.set(
     key,
-    `${citation}${title.length > 0 ? ` ${title.length > 32 ? `${title.slice(0, 32)}…` : title}` : ""}（${host}）`,
+    `${citation}${titleChars.length > 0 ? ` ${boundedTitle}` : ""}（${host}）`,
   );
   chipMetaVersion += 1;
 }
@@ -2980,7 +2995,7 @@ function evidenceForTurn(turn: Turn): {
                       data-citation={citation}
                       aria-label={citation.startsWith("m")
                         ? `この回答の記憶引用 ${citation}`
-                        : `保存された引用 ${citation}`}
+                        : `保存された引用 ${chipLabel(citation)}`}
                       onclick={() => void openCitation(citation, runId)}
                     >
                       {chipLabel(citation)}
@@ -3088,7 +3103,7 @@ function evidenceForTurn(turn: Turn): {
                 data-citation={citation}
                 aria-label={citation.startsWith("m")
                   ? `この回答の記憶引用 ${citation}`
-                  : `保存された引用 ${citation}`}
+                  : `保存された引用 ${chipLabel(citation)}`}
                 onclick={() => void openCitation(citation, runId)}
               >
                 {chipLabel(citation)}

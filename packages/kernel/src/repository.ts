@@ -2454,8 +2454,10 @@ export function createKernelRepository(
                  s.body_json AS body_json, w.url AS web_result_url
            FROM session_references sr
            JOIN resources r ON r.id = sr.resource_id
+           JOIN connector_instances ci ON ci.id = r.connector_instance_id
            JOIN resource_snapshots s ON s.id = sr.snapshot_id
            LEFT JOIN web_result_urls w ON w.snapshot_id = s.id
+             AND ci.kind = 'web'
           WHERE sr.session_id = ? AND sr.id = ?`,
       )
       .get(session, reference) as

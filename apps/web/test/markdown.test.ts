@@ -35,6 +35,16 @@ describe("renderAnswerMarkdown", () => {
     expect(html).toContain("graph TD;");
   });
 
+  test("highlights tilde-fenced code too", async () => {
+    // CommonMark/GFM treats `~~~language` fences the same as backtick
+    // fences (PR112 review): grammars load and the block highlights.
+    await loadHighlightLanguages();
+    const html = renderAnswerMarkdown("~~~typescript\nconst x = 1;\n~~~\n");
+    expect(html).toContain("code-block-wrapper");
+    expect(html).toContain("language-typescript");
+    expect(html).toContain("hljs");
+  });
+
   test("shows raw HTML as literal text, never elements", () => {
     const html = renderAnswerMarkdown('<script>alert("x")</script>');
     expect(html).not.toContain("<script");

@@ -19,7 +19,9 @@ let { text }: Props = $props();
 let highlightReady = $state(false);
 
 $effect(() => {
-  if (!text.includes("```")) return;
+  // CommonMark/GFM also marks `~~~language` fences as code blocks: either
+  // fence style must trigger the same lazy grammar load (PR112 review).
+  if (!text.includes("```") && !text.includes("~~~")) return;
   void loadHighlightLanguages().then(() => {
     highlightReady = true;
   });

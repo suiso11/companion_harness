@@ -244,8 +244,14 @@ export function formatPhaseText(
       const count = `${toolCompleted}/${toolRequested}`;
       // Web search runs its own dedicated phase wording (design slice ③):
       // a pure web.search tool phase reads「ウェブ検索中…」instead of the
-      // generic count line. Mixed tool phases keep the generic line.
-      if (labels.length === 1 && labels[0] === "ウェブ検索") {
+      // generic count line. Mixed tool phases keep the generic line. Any
+      // unmapped-but-supported tool sharing the run (toolKindLabel → null)
+      // also counts as mixed: the generic web label must describe the
+      // pending operation, and that may be the unmapped one (PR112).
+      const hasUnmapped = toolNames.some(
+        (name) => toolKindLabel(name) === null,
+      );
+      if (labels.length === 1 && labels[0] === "ウェブ検索" && !hasUnmapped) {
         return "ウェブ検索中…";
       }
       if (labels.length === 0) {
