@@ -371,8 +371,9 @@ connector instance owns **all** configured roots.
    scheduling proof only), and graceful shutdown with a reaped child.
    Verified 2026-10-15: 1/1 passed (~16s). CI provides the REAL CLI: the
    workflow checks out the pinned remind source
-   (`suiso11/remind@e4a8dcddc90967a39703b17e71e8126b750377c4`,
-   remind master incl. remind#16 recall fields + remind#19 privacy support) into `.ci/remind`, builds it (`npm ci` + `npm run build`,
+   (`suiso11/remind@1d79cf21003cea5bbc143e1f02372357f080fe9a`,
+   remind master incl. remind#16 recall fields + remind#19 privacy support
+   + remind#28 graph ops; remind#28 merge commit 1d79cf2) into `.ci/remind`, builds it (`npm ci` + `npm run build`,
    no models), and sets `COMPANION_MEMORY_TEST_ENTRY` /
    `COMPANION_MEMORY_TEST_CONFIG_TEMPLATE` to the built entry + template.
    Limits: synthetic gateway only
@@ -421,8 +422,10 @@ connector instance owns **all** configured roots.
   build has no graph ops the routes answer
   `503 memory_graph_unavailable` and the UI shows
   「グラフ機能は記憶サーバーの更新後に利用できます」 while the list
-  stays usable; this clears once suiso11/remind#28 is merged and
-  deployed. Verified 2026-10-21: graph unit/HTTP/UI + kernel suites
+  stays usable; this clears once a graph-capable remind build is deployed
+  (suiso11/remind#28 is merged; CI is pinned to its merge commit
+  `1d79cf2`). Verified 2026-10-22 with the `1d79cf2` build: graph live
+  and e2e run (never skip). Verified 2026-10-21: graph unit/HTTP/UI + kernel suites
   green, typecheck/lint clean, real-CLI live
   `memory_graph_live.test.ts` 1/1 and `memory_manage_live.test.ts` 1/1.
   Real browser:
