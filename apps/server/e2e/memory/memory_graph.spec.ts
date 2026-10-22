@@ -203,7 +203,8 @@ test("graph view renders, highlights, opens detail, local depth 1, zooms, and re
   const fill = await graphFillRatio(page);
   expect(Math.max(fill.width, fill.height)).toBeGreaterThan(0.7);
   expect(Math.max(fill.width, fill.height)).toBeLessThan(0.95);
-  // <= 80 nodes -> every label is visible without hovering.
+  // Labels are decluttered greedily: some may be hidden to avoid overlap,
+  // but the small seeded graph must still show a useful subset.
   const visibleLabels = await page
     .locator("#memory-graph-canvas .memory-graph-node__label")
     .evaluateAll(
@@ -212,8 +213,9 @@ test("graph view renders, highlights, opens detail, local depth 1, zooms, and re
           (element) => getComputedStyle(element).display !== "none",
         ).length,
     );
-  expect(visibleLabels).toBe(SEED_NODE_COUNT);
-  for (const legend of ["事実", "推論", "要約", "訂正", "引退"]) {
+  expect(visibleLabels).toBeGreaterThan(0);
+  expect(visibleLabels).toBeLessThanOrEqual(SEED_NODE_COUNT);
+  for (const legend of ["事実", "推論", "要約", "訂正", "統合", "引退"]) {
     await expect(page.locator("#memory-graph-legend")).toContainText(legend);
   }
   await screenshotMemory(page, GLOBAL_SCREENSHOT);

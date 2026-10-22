@@ -38,10 +38,11 @@ const BIKE_LABELS = [
 ] as const;
 const MISO_LABEL = "味噌汁は赤味噌が好き";
 const ALL_LABELS = [...BIKE_LABELS, MISO_LABEL] as const;
-/** Two topic hubs: バイク (4 members) + 料理 (1 member). */
-const TOPIC_HUB_COUNT = 2;
+/** Only バイク (4 members) reaches the hub threshold; 料理 (1 member) never
+ * mints a single-member hub, so the 料理 chip stays on the memory tooltip. */
+const TOPIC_HUB_COUNT = 1;
 const BIKE_HUB_EDGES = 4;
-const MISO_HUB_EDGES = 1;
+const MISO_HUB_EDGES = 0;
 
 interface AssociationSeed {
   readonly supported?: unknown;
@@ -354,7 +355,7 @@ test("list browses all memories, search/すべて表示 round-trips, graph shows
     page
       .locator("#memory-graph-canvas .memory-graph-node--topic")
       .filter({ hasText: "料理" }),
-  ).toHaveCount(1);
+  ).toHaveCount(0);
   await expect(
     page.locator("#memory-graph-canvas .memory-graph-edge--similar"),
   ).toHaveCount(similarEdges.length);

@@ -474,6 +474,10 @@ class ConversationApp {
   private readonly memoryGraphDepth: HTMLSelectElement;
   private readonly memoryGraphRetired: HTMLInputElement;
   private readonly memoryGraphTopics: HTMLInputElement;
+  private readonly memoryGraphSimilar: HTMLInputElement;
+  private readonly memoryGraphZoomIn: HTMLButtonElement;
+  private readonly memoryGraphZoomOut: HTMLButtonElement;
+  private readonly memoryGraphZoomFit: HTMLButtonElement;
   private readonly memoryGraphStatus: HTMLElement;
   private readonly memoryGraphCanvas: GraphCanvas | null;
   /** Latest raw graph payload; the topics toggle re-renders from this. */
@@ -657,6 +661,22 @@ class ConversationApp {
       (document.getElementById(
         "memory-graph-topics",
       ) as HTMLInputElement | null) ?? document.createElement("input");
+    this.memoryGraphSimilar =
+      (document.getElementById(
+        "memory-graph-similar",
+      ) as HTMLInputElement | null) ?? document.createElement("input");
+    this.memoryGraphZoomIn =
+      (document.getElementById(
+        "memory-graph-zoom-in",
+      ) as HTMLButtonElement | null) ?? document.createElement("button");
+    this.memoryGraphZoomOut =
+      (document.getElementById(
+        "memory-graph-zoom-out",
+      ) as HTMLButtonElement | null) ?? document.createElement("button");
+    this.memoryGraphZoomFit =
+      (document.getElementById(
+        "memory-graph-zoom-fit",
+      ) as HTMLButtonElement | null) ?? document.createElement("button");
     this.memoryGraphStatus =
       document.getElementById("memory-graph-status") ?? el("p");
     const graphCanvas = document.getElementById("memory-graph-canvas");
@@ -734,6 +754,20 @@ class ConversationApp {
       if (this.memoryGraphView) {
         this.renderMemoryGraph();
       }
+    });
+    this.memoryGraphSimilar.addEventListener("change", () => {
+      if (this.memoryGraphView) {
+        this.renderMemoryGraph();
+      }
+    });
+    this.memoryGraphZoomIn.addEventListener("click", () => {
+      this.memoryGraphCanvas?.zoomBy(1.25);
+    });
+    this.memoryGraphZoomOut.addEventListener("click", () => {
+      this.memoryGraphCanvas?.zoomBy(0.8);
+    });
+    this.memoryGraphZoomFit.addEventListener("click", () => {
+      this.memoryGraphCanvas?.fitToView();
     });
     this.memoryListAll.addEventListener("click", () => {
       this.showAllMemories();
@@ -3939,11 +3973,17 @@ class ConversationApp {
       this.memoryGraphTopics.checked === false
         ? { nodes: data.nodes, edges: data.edges }
         : withTopicHubs(data.nodes, data.edges);
+    // The checkbox only hides automatic similarity edges; explicit links
+    // (related/consolidation) stay visible.
+    const edges =
+      this.memoryGraphSimilar.checked === false
+        ? display.edges.filter((edge) => edge.kind !== "similar")
+        : display.edges;
     this.memoryGraphCanvas?.setGraph(
       {
         ...data,
         nodes: display.nodes,
-        edges: display.edges,
+        edges,
       },
       {
         selected: this.memoryGraphSelected,

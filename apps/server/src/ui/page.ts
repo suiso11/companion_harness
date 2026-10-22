@@ -147,15 +147,64 @@ export function renderConversationShell(): HtmlEscapedString {
               }),
               "話題を表示",
             ),
+            jsx(
+              "label",
+              {},
+              jsx("input", {
+                id: "memory-graph-similar",
+                type: "checkbox",
+                checked: true,
+              }),
+              "自動関連を表示",
+            ),
             jsx("p", { id: "memory-graph-status", "aria-live": "polite" }),
           ),
-          jsx("svg", {
-            id: "memory-graph-canvas",
-            role: "img",
-            "aria-label": "記憶グラフ",
-            viewBox: "0 0 800 480",
-            preserveAspectRatio: "xMidYMid meet",
-          }),
+          jsx(
+            "div",
+            {
+              id: "memory-graph-canvas-wrap",
+              class: "memory-graph-canvas-wrap",
+            },
+            jsx("svg", {
+              id: "memory-graph-canvas",
+              role: "img",
+              "aria-label": "記憶グラフ",
+              viewBox: "0 0 800 480",
+              preserveAspectRatio: "xMidYMid meet",
+            }),
+            jsx(
+              "div",
+              {
+                id: "memory-graph-zoom-controls",
+                class: "memory-graph-zoom-controls",
+                role: "group",
+                "aria-label": "グラフの表示操作",
+              },
+              jsx(
+                "button",
+                {
+                  id: "memory-graph-zoom-in",
+                  type: "button",
+                  "aria-label": "拡大",
+                },
+                "+",
+              ),
+              jsx(
+                "button",
+                {
+                  id: "memory-graph-zoom-out",
+                  type: "button",
+                  "aria-label": "縮小",
+                },
+                "−",
+              ),
+              jsx(
+                "button",
+                { id: "memory-graph-zoom-fit", type: "button" },
+                "全体表示",
+              ),
+            ),
+          ),
           jsx(
             "p",
             {
@@ -202,6 +251,16 @@ export function renderConversationShell(): HtmlEscapedString {
                 "aria-hidden": "true",
               }),
               "訂正",
+            ),
+            jsx(
+              "span",
+              { class: "memory-graph-legend__item" },
+              jsx("span", {
+                class:
+                  "memory-graph-legend__swatch memory-graph-legend__swatch--consolidation",
+                "aria-hidden": "true",
+              }),
+              "統合",
             ),
             jsx(
               "span",
