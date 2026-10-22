@@ -7,9 +7,12 @@ import {
   createLayout,
   FIT_VIEW_RATIO,
   fitCamera,
+  GRAPH_HEIGHT,
+  GRAPH_WIDTH,
   type GraphData,
   type GraphEdgeData,
   type GraphNodeData,
+  graphBounds,
   highlightHandles,
   LABEL_MAX_CHARS,
   LABEL_NODE_LIMIT,
@@ -20,7 +23,10 @@ import {
   runLayout,
   screenToWorld,
   shouldShowLabels,
+  TOPIC_HUB_PREFIX,
+  topicHubHandle,
   truncateLabel,
+  withTopicHubs,
   worldToScreen,
   zoomAt,
 } from "../src/ui/graph.js";
@@ -145,6 +151,58 @@ describe("memory graph fit-to-view and labels", () => {
     expect(bottomRight.y).toBeLessThanOrEqual(480);
   });
 
+  it("keeps two disconnected components centred and fills the fitted canvas", () => {
+    // Two chains with NO edges between them: repulsion alone would push the
+    // clusters apart forever, so per-node gravity must keep the settled
+    // bounding box near the layout origin.
+    const component = (prefix: string): GraphNodeData[] =>
+      Array.from({ length: 6 }, (_, index) => ({
+        handle: `${prefix}${index}`,
+        label: `${prefix} ${index}`,
+        status: "active" as const,
+        kind: "user_fact",
+        episode: null,
+      }));
+    const chain = (prefix: string): GraphEdgeData[] =>
+      Array.from({ length: 5 }, (_, index) => ({
+        from: `${prefix}${index}`,
+        to: `${prefix}${index + 1}`,
+        kind: "related" as const,
+      }));
+    const nodes = [...component("a"), ...component("b")];
+    const edges = [...chain("a"), ...chain("b")];
+    const layout = runLayout(createLayout(nodes, edges));
+    const bounds = graphBounds(layout.nodes);
+    expect(bounds).not.toBeNull();
+    if (bounds === null) {
+      return;
+    }
+    const centerX = (bounds.minX + bounds.maxX) / 2;
+    const centerY = (bounds.minY + bounds.maxY) / 2;
+    // "Small distance" is relative to the graph size, so this scales with
+    // both a compact two-cluster graph and a 500-node one.
+    const tolerance = Math.max(
+      24,
+      Math.min(bounds.width, bounds.height) * 0.05,
+    );
+    expect(Math.hypot(centerX, centerY)).toBeLessThan(tolerance);
+
+    const width = GRAPH_WIDTH;
+    const height = GRAPH_HEIGHT;
+    const camera = fitCamera(layout.nodes, width, height);
+    const topLeft = worldToScreen(camera, bounds.minX, bounds.minY);
+    const bottomRight = worldToScreen(camera, bounds.maxX, bounds.maxY);
+    const spanX = (bottomRight.x - topLeft.x) / width;
+    const spanY = (bottomRight.y - topLeft.y) / height;
+    // The fitted transform must actually be applied: the limiting dimension
+    // fills at least 80% of the canvas (fit ratio is 85%).
+    expect(Math.max(spanX, spanY)).toBeGreaterThanOrEqual(0.8);
+    expect(Math.max(spanX, spanY)).toBeLessThanOrEqual(FIT_VIEW_RATIO + 0.001);
+    // And the settled bbox centre lands on the canvas centre.
+    expect((topLeft.x + bottomRight.x) / 2).toBeCloseTo(width / 2, 4);
+    expect((topLeft.y + bottomRight.y) / 2).toBeCloseTo(height / 2, 4);
+  });
+
   it("clamps fit scale to the shared zoom range and handles empty input", () => {
     expect(fitCamera([{ x: 0, y: 0, radius: 6 }]).scale).toBe(MAX_ZOOM);
     expect(
@@ -192,6 +250,118 @@ describe("memory graph fit-to-view and labels", () => {
   });
 });
 
+describe("withTopicHubs", () => {
+  const topicNodes: GraphNodeData[] = [
+    {
+      handle: "m1",
+      label: "Alpha",
+      status: "active",
+      kind: "user_fact",
+      topics: ["仕事", "健康"],
+      episode: null,
+    },
+    {
+      handle: "m2",
+      label: "Beta",
+      status: "active",
+      kind: "summary",
+      topics: ["仕事"],
+      episode: null,
+    },
+    {
+      handle: "m3",
+      label: "Gamma",
+      status: "active",
+      kind: "model_inference",
+      topics: ["m1"],
+      episode: null,
+    },
+    {
+      handle: "topic:仕事",
+      label: "Not a hub",
+      status: "active",
+      kind: "user_fact",
+      topics: ["健康"],
+      episode: null,
+    },
+  ];
+  const topicEdges: GraphEdgeData[] = [
+    ...EDGES,
+    { from: "m1", to: "m3", kind: "similar" },
+  ];
+
+  it("adds one hub per distinct topic, deduped case-insensitively", () => {
+    const caseNodes: GraphNodeData[] = [
+      {
+        handle: "m1",
+        label: "Alpha",
+        status: "active",
+        kind: "user_fact",
+        topics: ["Work", "健康"],
+        episode: null,
+      },
+      {
+        handle: "m2",
+        label: "Beta",
+        status: "active",
+        kind: "summary",
+        topics: ["work"],
+        episode: null,
+      },
+    ];
+    const display = withTopicHubs(caseNodes, []);
+    const hubs = display.nodes.filter((node) => node.topicHub === true);
+    expect(hubs.map((hub) => hub.label).sort()).toEqual(["Work", "健康"]);
+    expect(display.nodes).toHaveLength(caseNodes.length + 2);
+  });
+
+  it("links every member to its hub and keeps the original edges", () => {
+    const display = withTopicHubs(topicNodes, topicEdges);
+    const hubs = display.nodes.filter((node) => node.topicHub === true);
+    expect(hubs.map((hub) => hub.label).sort()).toEqual(["m1", "仕事", "健康"]);
+    // All original edges survive unchanged, including similar links.
+    for (const edge of topicEdges) {
+      expect(display.edges).toContainEqual(edge);
+    }
+    const members = (topic: string): string[] =>
+      display.edges
+        .filter(
+          (edge) =>
+            edge.kind === "related" &&
+            hubs.some((hub) => hub.handle === edge.to && hub.label === topic),
+        )
+        .map((edge) => edge.from)
+        .sort();
+    expect(members("仕事")).toEqual(["m1", "m2"]);
+    expect(members("健康")).toEqual(["m1", "topic:仕事"]);
+    expect(members("m1")).toEqual(["m3"]);
+  });
+
+  it("never mints a hub handle that collides with a memory handle", () => {
+    const display = withTopicHubs(topicNodes, topicEdges);
+    const memoryHandles = topicNodes.map((node) => node.handle);
+    const hubs = display.nodes.filter((node) => node.topicHub === true);
+    const handles = hubs.map((hub) => hub.handle);
+    expect(new Set(handles).size).toBe(handles.length);
+    for (const handle of handles) {
+      expect(handle.startsWith(TOPIC_HUB_PREFIX)).toBe(true);
+      expect(memoryHandles).not.toContain(handle);
+      // Opaque mN handles can never be mistaken for a hub id.
+      expect(/^m[1-9][0-9]*$/.test(handle)).toBe(false);
+    }
+    // A real node already owns `topic:仕事`: the hub gets a suffix instead.
+    expect(handles).toContain(`${topicHubHandle("仕事")}_`);
+    expect(handles).not.toContain("m1");
+  });
+
+  it("returns copies unchanged when no node has topics", () => {
+    const display = withTopicHubs(NODES, EDGES);
+    expect(display.nodes).toEqual(NODES);
+    expect(display.edges).toEqual(EDGES);
+    expect(display.nodes).not.toBe(NODES);
+  });
+});
+
 describe("memory graph shell", () => {
   it("renders the new controls without inline script", () => {
     const html = renderConversationShell().toString();
@@ -203,13 +373,27 @@ describe("memory graph shell", () => {
       "memory-graph-local",
       "memory-graph-depth",
       "memory-graph-retired",
+      "memory-graph-topics",
       "memory-graph-status",
       "memory-graph-canvas",
       "memory-graph-legend",
+      "memory-list-status",
+      "memory-list-all",
+      "memory-list-scroll",
     ]) {
       expect(html).toContain(`id="${id}"`);
     }
-    for (const label of ["事実", "推論", "要約", "訂正", "引退"]) {
+    for (const label of [
+      "事実",
+      "推論",
+      "要約",
+      "訂正",
+      "引退",
+      "話題",
+      "関連（自動）",
+      "話題を表示",
+      "すべて表示",
+    ]) {
       expect(html).toContain(label);
     }
     expect(html).toContain('aria-pressed="true"');
