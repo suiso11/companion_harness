@@ -486,6 +486,34 @@ export interface ModelCallRow {
   createdAt: number;
 }
 
+/** One latest model call for the monitor (metadata only). */
+export interface MonitorModelCallRow {
+  runId: string;
+  step: number;
+  model: string;
+  outcome: ModelCallOutcome;
+  errorCode: M2ModelErrorCode | null;
+  durationMs: number;
+  usage: { inputTokens: number; outputTokens: number } | null;
+  createdAt: number;
+}
+
+/** 24h model-call totals for the monitor. */
+export interface MonitorModelTotals {
+  since: number;
+  calls: number;
+  inputTokens: number;
+  outputTokens: number;
+  failures: number;
+}
+
+/** Active run counts for the monitor's live section. */
+export interface MonitorRunCounts {
+  running: number;
+  queued: number;
+  cancelRequested: number;
+}
+
 export interface EvidenceGrantRow {
   sessionId: string;
   runId: string;
@@ -3860,6 +3888,105 @@ export function createKernelRepository(
           : parseStoredModelUsage(row.usage_json as string),
       createdAt: row.created_at,
     }));
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* System monitor (read-only, bounded SQL; no schema change).        */
+  /* ---------------------------------------------------------------- */
+
+  /** Latest model calls across ALL runs, newest first (default 20). */
+  function listRecentModelCalls(limit = 20): MonitorModelCallRow[] {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+      throw new RepositoryValidationError("monitor call limit must be 1..100");
+    }
+    const rows = db
+      .prepare(
+        "SELECT run_id, step, model, outcome, error_code, duration_ms, usage_json, created_at FROM model_calls ORDER BY created_at DESC, rowid DESC LIMIT ?",
+      )
+      .all(limit) as Array<{
+      run_id: string;
+      step: number;
+      model: string;
+      outcome: string;
+      error_code: string | null;
+      duration_ms: number;
+      usage_json: string | null;
+      created_at: number;
+    }>;
+    return rows.map((row) => ({
+      runId: row.run_id,
+      step: row.step,
+      model: row.model,
+      outcome: row.outcome as ModelCallOutcome,
+      errorCode: row.error_code as M2ModelErrorCode | null,
+      durationMs: row.duration_ms,
+      usage:
+        row.usage_json === null
+          ? null
+          : parseStoredModelUsage(row.usage_json as string),
+      createdAt: row.created_at,
+    }));
+  }
+
+  /**
+   * Aggregate model calls since `since`. `failures` counts failed/timeout
+   * (a user-requested cancellation is not an infrastructure failure).
+   * Unreported usage contributes 0 tokens.
+   */
+  function getModelCallTotals(since: number): MonitorModelTotals {
+    if (
+      !Number.isSafeInteger(since) ||
+      since < 0 ||
+      since > Number.MAX_SAFE_INTEGER
+    ) {
+      throw new RepositoryValidationError(
+        "monitor totals since must be a Unix-ms timestamp",
+      );
+    }
+    const row = db
+      .prepare(
+        `SELECT COUNT(*) AS calls,
+                COALESCE(SUM(COALESCE(json_extract(usage_json, '$.inputTokens'), 0)), 0) AS input_tokens,
+                COALESCE(SUM(COALESCE(json_extract(usage_json, '$.outputTokens'), 0)), 0) AS output_tokens,
+                COALESCE(SUM(CASE WHEN outcome IN ('failed', 'timeout') THEN 1 ELSE 0 END), 0) AS failures
+           FROM model_calls
+          WHERE created_at >= ?`,
+      )
+      .get(since) as {
+      calls: number;
+      input_tokens: number;
+      output_tokens: number;
+      failures: number;
+    };
+    return {
+      since,
+      calls: row.calls,
+      inputTokens: row.input_tokens,
+      outputTokens: row.output_tokens,
+      failures: row.failures,
+    };
+  }
+
+  /** Count active runs by status (running + cancel_requested + queued). */
+  function countRunsByStatus(): MonitorRunCounts {
+    const rows = db
+      .prepare(
+        "SELECT status, COUNT(*) AS count FROM runs WHERE status IN ('running', 'queued', 'cancel_requested') GROUP BY status",
+      )
+      .all() as Array<{ status: string; count: number }>;
+    const counts: MonitorRunCounts = {
+      running: 0,
+      queued: 0,
+      cancelRequested: 0,
+    };
+    for (const row of rows) {
+      if (row.status === "running") counts.running = row.count;
+      else if (row.status === "queued") counts.queued = row.count;
+      else if (row.status === "cancel_requested") {
+        counts.cancelRequested = row.count;
+      }
+    }
+    return counts;
   }
 
   /**
@@ -7613,6 +7740,9 @@ export function createKernelRepository(
     appendModelStepEvent,
     recordModelCall,
     listModelCalls,
+    listRecentModelCalls,
+    getModelCallTotals,
+    countRunsByStatus,
     upsertEvidenceGrant,
     listEvidenceGrants,
     enqueueMemoryJob,

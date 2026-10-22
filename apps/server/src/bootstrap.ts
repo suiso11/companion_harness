@@ -141,6 +141,7 @@ import {
 } from "./maintenance.js";
 import { createMemoryService, type MemoryService } from "./memory_service.js";
 import { ModelDeltaBus } from "./model_deltas.js";
+import { createMonitorSampler, type MonitorSampler } from "./monitor.js";
 import {
   createNotificationService,
   type NotificationService,
@@ -945,6 +946,8 @@ export async function startServer(
   };
   /** Notification projector (always on; set inside try). */
   let notifications: NotificationService | null = null;
+  /** Lazy host sampler; no timer/process until the first /api/monitor read. */
+  let monitor: MonitorSampler | null = null;
   // Shared background admission (bootstrap-owned, created up front so every
   // teardown path — including the outer startup-failure catch — can shut it
   // down; construction never throws and touches no I/O).
@@ -2877,12 +2880,14 @@ export async function startServer(
             lockoutMs: config.remote.lockoutMs,
           })
         : null;
+    monitor = createMonitorSampler({ now });
     const { app, controls } = createApp({
       config,
       repo,
       engine,
       logger,
       now,
+      monitor,
       assets: loadUiAssets(),
       actionsEnabled,
       createEnabled,
@@ -3016,6 +3021,13 @@ export async function startServer(
       } catch {
         // Best effort: the listen error carries the startup failure.
       }
+      try {
+        if (monitor !== null) {
+          await monitor.stop();
+        }
+      } catch {
+        // Best effort: the listen error carries the startup failure.
+      }
       // Shared background admission: closed by both service stops above;
       // clear deferred wakes here so nothing fires after the DB close.
       try {
@@ -3131,6 +3143,15 @@ export async function startServer(
         if (notifications !== null) {
           try {
             await notifications.stop();
+          } catch {
+            // Best effort: the engine drain below still runs.
+          }
+        }
+        // Stop the host sampler: clear its timer and await any in-flight
+        // nvidia-smi/proc sample before the listener and DB close below.
+        if (monitor !== null) {
+          try {
+            await monitor.stop();
           } catch {
             // Best effort: the engine drain below still runs.
           }
@@ -3379,6 +3400,13 @@ export async function startServer(
     if (notifications !== null) {
       try {
         await notifications.stop();
+      } catch {
+        // Best effort: the original startup error carries the failure.
+      }
+    }
+    if (monitor !== null) {
+      try {
+        await monitor.stop();
       } catch {
         // Best effort: the original startup error carries the failure.
       }

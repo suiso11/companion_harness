@@ -47,6 +47,7 @@ export default defineConfig({
           "conversation_proposals.spec.ts",
           "learning.spec.ts",
           "handoff.spec.ts",
+          "monitor.spec.ts",
           "mobile_layout.spec.ts",
           "svelte_shell.spec.ts",
           "thinking_status.spec.ts",

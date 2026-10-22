@@ -4669,6 +4669,50 @@ journalctl --user -u companion-health -n 50
 cat ~/.local/state/companion/alerts.log
 ```
 
+## システムモニター (`/monitor`, local only, read-only)
+
+Web UI の `/monitor` と `GET /api/monitor` は、ホストとモデル呼び出しの
+概況を返す読み取り専用 surface です。表示内容:
+
+- 状態 (idle / queued / generating) と実行中・待ち Run 数
+- 出力 tok/s (出力トークン ÷ 呼び出し全体の時間。プリフィルを含むため
+  デコード専用速度ではなく下限値)、直近呼び出しの推移
+- GPU ごとの使用率・VRAM・温度・電力と直近 2 分の履歴 (最大 60 サンプル)
+- CPU 使用率・RAM 使用量 (Linux `/proc`)
+- サービス状態: モデル設定の有無 / 最終 outcome・時刻、SearXNG の
+  `ok` / `down` / `disabled`
+- 最新 20 件のモデル呼び出し (run id・step・model・outcome・error code・
+  時間・トークン数・tok/s)
+- 直近 24 時間の合計 (呼び出し数・入力/出力トークン・失敗数)
+
+データ源と安全境界:
+
+- GPU は `nvidia-smi` を `execFile` で実行 (shell なし、固定引数、2 秒
+  timeout)。バイナリ不在・timeout・非 0 終了は空の GPU 一覧になり、
+  エラー文字列は返しません。`[N/A]` 等は `0` ではなく `null` です。
+- CPU/RAM は `/proc/stat` と `/proc/meminfo`。読めない環境では `null`。
+- モデル呼び出しは `model_calls` のメタデータのみ (prompt / 出力本文は
+  読みません)。
+- SearXNG は設定済み `searxng_base_url` の `/healthz` を 10 秒 cache・
+  1.5 秒 timeout・redirect 不追従で確認し、`ok`/`down`/`disabled` の
+  固定値だけを返します。URL・status text・body は返しません。
+- サンプラーは遅延起動: 最初の読み取りまでタイマーも子プロセスもなく、
+  60 秒読み取りが無いと自動停止し履歴を破棄します (再開時は現在値から)。
+  サンプルは重複実行しません。
+- UI は可視中のみ 2 秒間隔で同一オリジン `GET /api/monitor` をポーリング
+  します (非表示で停止、再表示で即時 1 回、unmount で停止)。失敗時は
+  最後の値を保持し stale 表示のみ出します。
+- `/api/monitor` は他 API と同じ Host / Origin 検査の対象で、リモート
+  モード有効時はログインセッション必須です。応答はスカラー値のみで、
+  上流 URL・生のエラー・レスポンス本文・プロンプト・モデル出力は
+  含みません。
+- 最新呼び出しの並びと 24 時間集計のため、additive migration `0029`
+  で `idx_model_calls_created` (`model_calls(created_at)`) を追加します
+  (既存データ・索引は変更しません)。
+
+レイアウトは [Strata](https://github.com/Niko1221/Strata) (MIT) の
+monitor に着想を得た独自実装で、コードはコピーしていません。
+
 ## 運用通知 (in-app system ops notices, local only)
 
 運用スクリプト (deploy / backup / health) は、journal に加えてアプリ内の
