@@ -46,6 +46,49 @@ services:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
     stop_grace_period: 30s
 
+  ornith:
+    # Maintenance LLM for remind (importance / topics / consolidation),
+    # called directly on loopback by remind. Not registered in LiteLLM.
+    # Shares the pinned llama.cpp build with gemma.
+    image: ghcr.io/ggml-org/llama.cpp@sha256:f88fa8d94d872312a4ad117acd490fa997bef81f03f161f0cfe0d74272e5b5bb
+    container_name: ornith-1.5-9b
+    restart: unless-stopped
+    volumes:
+      # Host GGUF dir; ~/models/ornith on the current host. Override with
+      # ORNITH_MODEL_DIR when the file lives elsewhere.
+      - ${ORNITH_MODEL_DIR:-${HOME}/models/ornith}:/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              # Quadro P5000. gemma pins by index, so follow the same style;
+              # index 1 is the P5000 on this host.
+              device_ids: ["1"]
+              capabilities: [gpu]
+    command:
+      - -m
+      - /models/Ornith-1.5-9B-Q5_K_M.gguf
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - -c
+      - "8192"
+      - -ngl
+      - "99"
+      - -fa
+      - "on"
+      - --jinja
+      - --alias
+      - ornith-1.5-9b
+    ports:
+      # Loopback only: remind calls http://127.0.0.1:18090 directly.
+      - "127.0.0.1:18090:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+    stop_grace_period: 30s
+
   litellm:
     image: docker.litellm.ai/berriai/litellm@sha256:3d88bd757134a00e8c00237b85a021ab1f6d54abb9c1df750f411dbe7256a500
     container_name: litellm

@@ -4847,6 +4847,60 @@ draft acceptance 72.7%、VRAM +~0.5 GiB、tool call は有効。
 - rollback: `ops/llm/compose.yaml` の `--spec-type` / `--spec-draft-model` /
   `--spec-draft-ngl` の 3 フラグを削除し、`ops/llm/apply.sh --yes` を再実行する。
 
+### Ornith 1.5 9B メンテナンス LLM (P5000, loopback のみ)
+
+`ornith` は remind のメンテナンス処理 (重要度判定・トピック抽出・
+統合/整理) 専用のローカル LLM。Companion のチャット (`local-chat` /
+gemma) とは別系統で、remind が loopback の
+`http://127.0.0.1:18090` を直接叩く。LiteLLM には登録しない
+(既存の `local-chat` ルートを変えないため)。
+
+- イメージは gemma と同じ llama.cpp CUDA build を digest pin。
+- GPU は Quadro P5000 (`device_ids: ["1"]`)。gemma が index 指定なので
+  同じ方式で固定する。
+- 実測: VRAM 約 6.2 GiB、約 28 tok/s (P5000)。
+- `-c 8192`、`-ngl 99`、`-fa on`、`--jinja`、
+  `--alias ornith-1.5-9b`。投機デコード (MTP) は使わない。
+- ホスト側の公開は `127.0.0.1:18090` のみ。tailnet / LAN には出さない。
+
+モデル配置 (ホスト):
+
+```sh
+mkdir -p ~/models/ornith
+hf download ornith-ai/Ornith-1.5-9B-GGUF Ornith-1.5-9B-Q5_K_M.gguf \
+  --local-dir ~/models/ornith
+```
+
+`compose.yaml` は `${ORNITH_MODEL_DIR:-${HOME}/models/ornith}` を
+コンテナの `/models` に読み取り専用でマウントする。別の場所に置く場合は
+`/srv/llm/.env` に `ORNITH_MODEL_DIR=/path/to/dir` を追加する
+(Compose の `~` は展開されないため、シェル側で展開した絶対パスを渡す)。
+
+反映 (compose のみの変更なので `apply.sh` の通常の `up -d` 経路で
+全サービスが収束する。bind mount の force-recreate は不要):
+
+```sh
+# 評価用の一時コンテナが残っているとポート/名前が衝突するので先に消す
+docker rm -f ornith-eval
+ops/llm/apply.sh          # 差分確認
+ops/llm/apply.sh --yes
+docker ps --filter name=ornith-1.5-9b --format '{{.Status}}'
+curl -s http://127.0.0.1:18090/health
+```
+
+remind 側の設定 (`~/.config/remind/memory.config.json`):
+
+```json
+"llm": { "backend": "openai", "enabled": true, "baseUrl": "http://127.0.0.1:18090", "model": "ornith-1.5-9b" }
+```
+
+この openai バックエンドは remind 側の対応 (suiso11/remind#31) が
+入ってから有効になる。それまでは `enabled: false` のままにする。
+
+rollback: `compose.yaml` から `ornith` サービスを削除して
+`ops/llm/apply.sh --yes` を実行する (`--remove-orphans` でコンテナも消える)。
+remind 側は `llm.enabled: false` に戻す。
+
 ### SearXNG (Web 検索バックエンド, loopback のみ)
 
 Companion の `web.search` ツール (実装は別 PR) は、ホスト上の
