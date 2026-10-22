@@ -29,7 +29,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: suiso11/remind
-          ref: 1d79cf21003cea5bbc143e1f02372357f080fe9a
+          ref: 3a0afdcae71d11ada65239dfae2bb1b25bac4b6c
           path: .ci/remind
           persist-credentials: false
 
@@ -80,7 +80,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: suiso11/remind
-          ref: 1d79cf21003cea5bbc143e1f02372357f080fe9a
+          ref: 3a0afdcae71d11ada65239dfae2bb1b25bac4b6c
           path: .ci/remind
           persist-credentials: false
 
