@@ -10,7 +10,7 @@ describe("bundled shunkin voice profile", () => {
   it("loads the bundled profile with the verified format", () => {
     const profile = loadBundledVoiceProfile("shunkin");
     expect(profile.id).toBe("shunkin");
-    expect(profile.version).toBe("4");
+    expect(profile.version).toBe("5");
     expect(profile.displayName).toBe("春琴");
     expect(profile.rules.length).toBeGreaterThan(0);
     expect(profile.avoid.length).toBeGreaterThan(0);
@@ -19,6 +19,8 @@ describe("bundled shunkin voice profile", () => {
     expect(profile.references[0]?.quote).toBe("佐助どんにしてほしい");
     expect(profile.references[7]?.quote).toBe("妾は盲人なれども鼻は確なり");
     expect(profile.avoid.join("\n")).toContain("でおます");
+    expect(profile.avoid).toContain("まっせ");
+    expect(profile.avoid).toContain("〜しまっせ");
     expect(profile.rules.join("\n")).toContain("文全体の言い回し");
     expect(profile.rules.join("\n")).toContain("わて");
     expect(profile.rules.join("\n")).toContain("以下の通りです");
@@ -30,7 +32,7 @@ describe("bundled shunkin voice profile", () => {
     expect(voiceProfileFingerprint(first)).toBe(
       voiceProfileFingerprint(second),
     );
-    expect(voiceProfileFingerprint(first)).toMatch(/^4-[0-9a-f]{12}$/);
+    expect(voiceProfileFingerprint(first)).toMatch(/^5-[0-9a-f]{12}$/);
     const changed = parseVoiceProfile({
       ...first,
       description: `${first.description}!`,

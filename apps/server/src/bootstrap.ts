@@ -1468,6 +1468,10 @@ export async function startServer(
         }),
         profileId: profile.id,
         profileVersion: voiceProfileFingerprint(profile),
+        profile: {
+          displayName: profile.displayName,
+          description: profile.description,
+        },
       };
       logger.info("server.voice_ready", { status: 1 });
     }

@@ -10,6 +10,7 @@ import type {
 } from "@companion/model-local";
 import { describe, expect, it } from "vitest";
 import {
+  AGENT_SYSTEM_PROMPT,
   type AgentVoiceLayer,
   closeKernelDatabase,
   createAgentStrategy,
@@ -130,6 +131,10 @@ function voiceLayerFor(gateway: ModelGateway): AgentVoiceLayer {
     render: createVoiceRenderer({ gateway, model: "test-model", profile }),
     profileId: profile.id,
     profileVersion: voiceProfileFingerprint(profile),
+    profile: {
+      displayName: profile.displayName,
+      description: profile.description,
+    },
   };
 }
 
@@ -317,6 +322,72 @@ describe("agent voice wiring", () => {
       });
       expect("voice" in result).toBe(false);
       expect(JSON.stringify(result)).toBe(JSON.stringify(expected));
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("tells the agent about the voice layer in the system prompt", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const { gateway, calls } = scriptGateway([
+        chatResult([answerCall([{ text: "final answer", citations: [] }])]),
+        chatResult([], renderedVoiceText()),
+      ]);
+      const broker = createToolBroker({
+        db: handle.raw,
+        repo,
+        registrations: [],
+      });
+      const strategy = createAgentStrategy({
+        db: handle.raw,
+        repo,
+        broker,
+        gateway,
+        model: "test-model",
+        voice: voiceLayerFor(gateway),
+      });
+      const { runId } = newRunningTurn(repo, T0);
+      await strategy(ctxFor(repo, runId));
+
+      const system = calls[0]?.messages.find(
+        (message) => message.role === "system",
+      )?.content;
+      // Base safety rules remain first and intact; the note is appended.
+      expect(system?.startsWith(AGENT_SYSTEM_PROMPT)).toBe(true);
+      expect(system).toContain("『春琴』");
+      expect(system).toContain("大阪船場言葉");
+      expect(system).toContain("内容は変わらない");
+      expect(system).toContain("自分で口調を真似る必要はない");
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("keeps the system prompt byte-identical when voice is disabled", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const { gateway, calls } = scriptGateway([
+        chatResult([answerCall([{ text: "final answer", citations: [] }])]),
+      ]);
+      const broker = createToolBroker({
+        db: handle.raw,
+        repo,
+        registrations: [],
+      });
+      const strategy = createAgentStrategy({
+        db: handle.raw,
+        repo,
+        broker,
+        gateway,
+        model: "test-model",
+      });
+      const { runId } = newRunningTurn(repo, T0);
+      await strategy(ctxFor(repo, runId));
+      const system = calls[0]?.messages.find(
+        (message) => message.role === "system",
+      )?.content;
+      expect(system).toBe(AGENT_SYSTEM_PROMPT);
     } finally {
       closeKernelDatabase(handle);
     }

@@ -12,7 +12,10 @@
 // - kanji numerals followed by a counter are converted to values; each
 //   voiced value must equal a number present in the canonical part unless
 //   the same kanji run appears in the canonical text verbatim,
-// - negation markers per part (a flipped or added negation is rejected),
+// - negation markers per part (a flipped or added negation is rejected).
+//   Kansai demonstrative/interrogative words that merely contain 「ない」
+//   (どない, そない, こない, あない and their -な/-に/-して forms) are masked
+//   before counting, because they are not negations,
 // - ASCII words of two or more letters (identifiers, acronyms),
 // - URLs (multiset per part),
 // - fenced code blocks / inline code spans (byte-identical, in order).
@@ -42,6 +45,10 @@ const CODE_SPAN_PATTERN = /```[\s\S]*?```|`[^`\n]+`/g;
 const FULLWIDTH_DIGIT_PATTERN = /[０-９]/g;
 const NEGATION_PATTERN =
   /ない|なかっ|なく|ません|まへん|へん|ひん|あかん|ず(?=[、。に])|ぬ(?=[、。])|ませぬ|不可|禁止/g;
+// Kansai demonstrative/interrogative words that contain 「ない」 but carry no
+// negation. Longest surface forms are matched first via the optional suffix.
+const NON_NEGATION_NAI_PATTERN = /(?:ど|そ|こ|あ)ない(?:して|な|に)?/g;
+const NON_NEGATION_NAI_MASK = "＊";
 const KANJI_NUMERAL_SOURCE =
   "([〇一二三四五六七八九十百千万]+)(つ|個|人|日|時|分|年|月|件|回|円|%|割|週|本|枚|度)";
 const KANJI_DIGITS = new Map<string, number>([
@@ -133,8 +140,12 @@ function codeSpans(text: string): string[] {
   return matches(text, CODE_SPAN_PATTERN);
 }
 
+function maskNonNegationNai(text: string): string {
+  return text.replace(NON_NEGATION_NAI_PATTERN, NON_NEGATION_NAI_MASK);
+}
+
 function negationMarkers(text: string): string[] {
-  return matches(text, NEGATION_PATTERN);
+  return matches(maskNonNegationNai(text), NEGATION_PATTERN);
 }
 
 interface KanjiNumeral {

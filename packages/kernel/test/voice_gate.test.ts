@@ -84,6 +84,58 @@ describe("checkVoicePart", () => {
     ).toBeNull();
   });
 
+  it("ignores Kansai どない-type words when counting negations", () => {
+    // Production regression: どない is a demonstrative, not a negation.
+    expect(
+      checkVoicePart(
+        "今の私の口調はどう感じられますか？",
+        "今のわての口調、どない感じやろか？",
+      ),
+    ).toBeNull();
+    // -な/-に/-して forms are also non-negations.
+    expect(
+      checkVoicePart(
+        "今の私の口調はどう感じられますか？",
+        "今のわての口調、どないな感じやろか？",
+      ),
+    ).toBeNull();
+    expect(
+      checkVoicePart(
+        "今の私の口調はどう感じられますか？",
+        "今のわての口調、どないに感じやろか？",
+      ),
+    ).toBeNull();
+    expect(
+      checkVoicePart(
+        "今の私の口調はどう感じられますか？",
+        "そないして、今のわての口調はどう感じやろか？",
+      ),
+    ).toBeNull();
+  });
+
+  it("still rejects a real negation flip next to どない", () => {
+    expect(
+      checkVoicePart("その予定は確認できます。", "その予定は確認できまへん。"),
+    ).toBe("negation");
+    expect(
+      checkVoicePart(
+        "今の私の口調はどう感じられますか？",
+        "今のわての口調はどない感じられまへんか？",
+      ),
+    ).toBe("negation");
+  });
+
+  it("keeps a real なく negation while ignoring どない", () => {
+    // Exact production shape: canonical has 「ではなく」(one negation);
+    // voiced keeps it as 「やなく」 and adds どない, which must not count.
+    expect(
+      checkVoicePart(
+        "ユーザーさんの口調ではなく、私の口調が変わったことに気づいていらっしゃったのですね。今の私の口調はどう感じられますか？",
+        "ユーザーさんの口調やなく、わての口調が変わったことに気づいていらっしゃったんやね。今のわての口調、どない感じやろか？",
+      ),
+    ).toBeNull();
+  });
+
   it("rejects changed or dropped ASCII words", () => {
     expect(checkVoicePart("APIを使う。", "apiを使う。")).toBe("latin");
     expect(checkVoicePart("APIを使う。", "エーピーアイを使う。")).toBe("latin");

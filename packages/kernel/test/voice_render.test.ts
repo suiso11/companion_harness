@@ -85,7 +85,7 @@ describe("createVoiceRenderer", () => {
     const voice = await renderer(answer(), { runId: "run-1" });
     expect(voice.status).toBe("rendered");
     expect(voice.profileId).toBe("shunkin");
-    expect(voice.profileVersion).toMatch(/^4-[0-9a-f]{12}$/);
+    expect(voice.profileVersion).toMatch(/^5-[0-9a-f]{12}$/);
     expect(voice.parts).toEqual(voiced.map((text) => ({ text })));
 
     expect(calls).toHaveLength(1);
