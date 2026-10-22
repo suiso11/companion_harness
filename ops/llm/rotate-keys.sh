@@ -6,7 +6,7 @@
 #    atomically (0600).
 # 3. Update LITELLM_MASTER_KEY in the Companion env file (default
 #    ~/companion_master/.env.litellm, 0600; path overridable) and back it up.
-# 4. Recreate gemma + litellm, restart companion.service, then verify an
+# 4. Recreate main + litellm, restart companion.service, then verify an
 #    authenticated LiteLLM /v1/models call.
 #
 # Keys are never echoed. Requires --yes (write action).
@@ -186,11 +186,11 @@ PROJECT="${LLM_PROJECT:-$(
   docker inspect litellm --format '{{index .Config.Labels "com.docker.compose.project"}}' 2>/dev/null || true
 )}"
 [ -n "$PROJECT" ] || PROJECT=llm
-printf 'rotate-keys: recreating gemma + litellm (project %s)\n' "$PROJECT"
+printf 'rotate-keys: recreating main + litellm (project %s)\n' "$PROJECT"
 env -u LLAMA_API_KEY -u LITELLM_MASTER_KEY \
   docker compose -p "$PROJECT" --project-directory "$LLM_DIR" \
   --env-file "$ENV_FILE" -f "$COMPOSE_FILE" \
-  up -d --force-recreate gemma litellm
+  up -d --force-recreate main litellm
 
 printf 'rotate-keys: restarting companion.service\n'
 systemctl --user restart companion.service

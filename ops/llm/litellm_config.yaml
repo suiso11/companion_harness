@@ -3,8 +3,8 @@
 model_list:
   - model_name: local-chat
     litellm_params:
-      model: openai/gemma-4-26b-a4b
-      api_base: http://gemma:8080/v1
+      model: openai/huihui-ornith-35b
+      api_base: http://main:8080/v1
       api_key: os.environ/LLAMA_API_KEY
 
 general_settings:
