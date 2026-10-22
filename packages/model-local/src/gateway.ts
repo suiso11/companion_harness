@@ -715,6 +715,12 @@ export function validateChatRequest(request: ChatRequest): void {
       );
     }
   }
+  if (request.reasoning !== undefined && request.reasoning !== "off") {
+    throw new ModelLocalError(
+      "invalid_request",
+      "model request carries an invalid reasoning mode",
+    );
+  }
   if (request.tools !== undefined) {
     validateToolDefinitions(request.tools);
   }

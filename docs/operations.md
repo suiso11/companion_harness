@@ -553,6 +553,45 @@ pnpm records delete <recordId>
 pnpm records prune [days]     # default = configured retentionDays
 ```
 
+## Voice layer (strict opt-in, local only)
+
+Unset `COMPANION_VOICE_JSON` (default) keeps every answer canonical and
+omits `voice` from RunResult. When set (and `COMPANION_MODEL_JSON` is also
+configured), the value must be a strict JSON object with only
+`{ profile, timeoutMs? }`:
+
+```sh
+COMPANION_VOICE_JSON='{"profile":"shunkin","timeoutMs":30000}'
+```
+
+- `profile` must be a bundled profile id (currently only `shunkin`); no
+  filesystem path is accepted. `timeoutMs` is an integer `1000..120000`,
+  default `30000`. Unknown keys, malformed JSON, and unknown profiles fail
+  startup closed. Disabling voice restores byte-identical pre-voice results.
+- The canonical StructuredAnswer is validated first. Only after the step's
+  model_calls row and terminal event are durable does one auxiliary model
+  call run, with reasoning off and an output cap derived from the canonical
+  character count (clamped to 256-4096 tokens). The pure gate then checks,
+  per part: `[rN]`/`[mN]` citation markers, ordered number tokens, kanji
+  numerals with counters, ASCII words, URLs, code spans, negation markers,
+  and a bounded length ratio. Any mismatch, timeout, provider error, or
+  wrong part count falls back to the canonical text with a fixed reason.
+- The call is not an agent step: it writes no `model_calls` row, consumes no
+  step/tool budget, and never extends the 300s run wall. It is bounded by
+  `timeoutMs` and the remaining wall budget. Real Gemma with MTP took
+  roughly 1-4s per answer.
+- Canonical text remains authoritative for history projection, memory
+  intake, citations, and comparison output. `RunResult.voice` is only an
+  optional projection; the UI defaults to voiced text and offers an
+  「原文」/「話し方」 toggle per answer. Voiced text is never streamed: the
+  draft streams canonical and the voiced version appears at completion.
+- The `shunkin` profile draws on 谷崎潤一郎『春琴抄』 (青空文庫, public
+  domain) and 船場言葉 features documented at Wikipedia 大阪弁#船場言葉.
+- Limits: the gate cannot detect antonym swaps; prompt-based style can
+  drift across models; LoRA is future work (a per-request LoRA would apply
+  only to the voice call). Because `voice` extends the strict RunResult
+  schema, a pre-voice build cannot read rows that contain it.
+
 ## Fixed-task comparison CLI (experimental)
 
 `pnpm compare -- /abs/input.json` is an operator experiment, not a

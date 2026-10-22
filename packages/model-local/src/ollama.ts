@@ -273,6 +273,9 @@ export function createOllamaGateway(options: GatewayOptions): ModelGateway {
       if (request.maxOutputTokens !== undefined) {
         body.options = { num_predict: request.maxOutputTokens };
       }
+      if (request.reasoning === "off") {
+        body.think = false;
+      }
       if (request.tools !== undefined && request.tools.length > 0) {
         body.tools = request.tools.map((tool) => ({
           type: "function",

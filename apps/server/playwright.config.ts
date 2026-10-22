@@ -57,6 +57,7 @@ export default defineConfig({
           "thinking_status.spec.ts",
           "draft_answer.spec.ts",
           "web_search.spec.ts",
+          "voice.spec.ts",
         ],
   timeout: 60_000,
   expect: { timeout: 15_000 },
@@ -96,6 +97,9 @@ export default defineConfig({
     // strategy stays delta-free without it.
     env: {
       COMPANION_MODEL_STREAMING: "1",
+      // Voice spec: the shared e2e server only enables the TEXT_VOICE fake
+      // branch when this opt-in config is present (all other specs ignore it).
+      COMPANION_VOICE_JSON: '{"profile":"shunkin"}',
     },
   },
 });

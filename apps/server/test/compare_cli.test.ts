@@ -65,6 +65,40 @@ async function startFixture(): Promise<{
     };
     const system = body.messages.find((message) => message.role === "system");
     systemPrompts.push(system?.content ?? "");
+    // Auxiliary voice request: echo each canonical part with a safe suffix so
+    // the structural gate accepts it (ASCII words / rN survive unchanged).
+    if ((system?.content ?? "").includes("音声レンダラー")) {
+      const user = [...body.messages]
+        .reverse()
+        .find((message) => message.role === "user");
+      const line = (user?.content ?? "")
+        .split("\n")
+        .find((entry) => entry.startsWith('{"parts"'));
+      const canonical = (
+        line === undefined
+          ? { parts: [] }
+          : (JSON.parse(line) as { parts: Array<{ text: string }> })
+      ).parts.map((part) => part.text);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({
+          model: "fixture-model",
+          message: {
+            role: "assistant",
+            content: JSON.stringify({
+              parts: canonical.map((text) => ({
+                text: `${text} でござります。`,
+              })),
+            }),
+          },
+          done: true,
+          done_reason: "stop",
+          prompt_eval_count: 10,
+          eval_count: 5,
+        }),
+      );
+      return;
+    }
     const toolNames = (body.tools ?? []).map((tool) => tool.function.name);
     advertisedTools.push(toolNames);
     const hasToolResult = body.messages.some(
@@ -281,6 +315,76 @@ describe("fixed-task comparison CLI", () => {
     ).toHaveLength(2);
   });
 
+  it("applies the same voice profile to both cases without changing canonical answers", async () => {
+    const root = tempRoot();
+    const docPath = join(root, "doc-a.md");
+    writeFileSync(docPath, "# Alpha\n\nThe answer is alpha.\n");
+    const storage = join(root, "experiment");
+    const inputPath = join(root, "input.json");
+    writeFileSync(
+      inputPath,
+      JSON.stringify({
+        version: 1,
+        prompt: "What does the fixed document say?",
+        docs: [{ key: "doc-a", path: docPath, title: "Alpha" }],
+        storageDirectory: storage,
+        variant: {
+          label: "guided",
+          systemPrompt: "VARIANT-GUIDANCE: answer with one short sentence.",
+        },
+        timeoutMs: 20_000,
+        voice: "shunkin",
+      }),
+    );
+    const fixture = await startFixture();
+    const output = JSON.parse(
+      await runCompareCli([inputPath], {
+        COMPANION_MODEL_JSON: JSON.stringify({
+          adapter: "ollama",
+          baseUrl: fixture.baseUrl,
+          model: "fixture-model",
+        }),
+      }),
+    ) as {
+      baseline: {
+        status: string;
+        text: string | null;
+        answer: { parts: Array<{ text: string }> } | null;
+        voice: {
+          status: string;
+          reason: string | null;
+          parts: string[];
+        } | null;
+      };
+      variant: {
+        status: string;
+        text: string | null;
+        answer: { parts: Array<{ text: string }> } | null;
+        voice: {
+          status: string;
+          reason: string | null;
+          parts: string[];
+        } | null;
+      };
+    };
+    expect(output.baseline.status).toBe("completed");
+    expect(output.variant.status).toBe("completed");
+    expect(output.baseline.answer?.parts[0]?.text).toBe("baseline answer");
+    expect(output.variant.answer?.parts[0]?.text).toBe("variant answer");
+    expect(output.baseline.text).toBe("baseline answer");
+    expect(output.variant.text).toBe("variant answer");
+    expect(output.baseline.voice).toEqual({
+      status: "rendered",
+      reason: null,
+      parts: ["baseline answer でござります。"],
+    });
+    expect(output.variant.voice).toEqual({
+      status: "rendered",
+      reason: null,
+      parts: ["variant answer でござります。"],
+    });
+  });
+
   it("validates input paths and returns fixed safe errors", () => {
     const root = tempRoot();
     const docPath = join(root, "doc.md");
@@ -306,6 +410,9 @@ describe("fixed-task comparison CLI", () => {
     expect(() =>
       parseCompareInput(JSON.stringify({ ...base, variant: { label: "v" } })),
     ).toThrow(/systemPrompt is invalid/);
+    expect(() =>
+      parseCompareInput(JSON.stringify({ ...base, voice: "unknown" })),
+    ).toThrow(/voice must be a bundled profile id/);
     expect(toSafeCompareCliMessage(new Error("raw /tmp/payload"))).toBe(
       "compare failed",
     );

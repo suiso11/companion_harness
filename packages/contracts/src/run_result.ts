@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { countCodePoints } from "./references.js";
 import {
   type StructuredAnswer,
   StructuredAnswerSchema,
@@ -42,20 +43,146 @@ export function renderRunResultText(answer: StructuredAnswer): string {
 }
 
 /**
+ * Opt-in voice layer (voice-core): an optional, additive projection of the
+ * canonical StructuredAnswer through a fixed persona profile. `text` stays
+ * canonical (never the voiced text): voice is a separate rendering that is
+ * never used to reconstruct citations or durable answer content.
+ *
+ * Contract:
+ * - `profileId` is a lowercase slug, `profileVersion` is a bounded runtime
+ *   fingerprint string.
+ * - `status: "rendered"` REQUIRES exactly `answer.parts.length` non-empty
+ *   parts (1-8000 code points each) and forbids `reason`.
+ * - `status: "fallback" | "skipped"` REQUIRES a reason and forbids parts.
+ * - Rows without `voice` (historical M2 rows) remain valid.
+ */
+export const VOICE_RENDER_STATUSES = [
+  "rendered",
+  "fallback",
+  "skipped",
+] as const;
+export const VoiceRenderStatusSchema = z.enum(VOICE_RENDER_STATUSES);
+export type VoiceRenderStatus = z.infer<typeof VoiceRenderStatusSchema>;
+
+export const VOICE_RENDER_REASONS = [
+  "timeout",
+  "error",
+  "invalid_output",
+  "part_count",
+  "citation_marker",
+  "number",
+  "negation",
+  "latin",
+  "url",
+  "code_block",
+  "length",
+  "cancelled",
+] as const;
+export const VoiceRenderReasonSchema = z.enum(VOICE_RENDER_REASONS);
+export type VoiceRenderReason = z.infer<typeof VoiceRenderReasonSchema>;
+
+/** Lowercase slug: starts with a letter, 1-32 chars total. */
+export const VOICE_PROFILE_ID_REGEX = /^[a-z][a-z0-9-]{0,31}$/;
+export const VOICE_PROFILE_ID_PATTERN = VOICE_PROFILE_ID_REGEX;
+export const MAX_VOICE_PROFILE_VERSION_LENGTH = 64;
+export const MIN_VOICE_RENDER_PART_CODE_POINTS = 1;
+export const MAX_VOICE_RENDER_PART_CODE_POINTS = 8000;
+
+/** One voiced part: text only (citations stay in the canonical answer). */
+export const VoiceRenderPartSchema = z.strictObject({
+  text: z.string().refine(
+    (text) => {
+      const size = countCodePoints(text);
+      return (
+        size >= MIN_VOICE_RENDER_PART_CODE_POINTS &&
+        size <= MAX_VOICE_RENDER_PART_CODE_POINTS
+      );
+    },
+    { message: "voice part text must be 1-8000 Unicode code points" },
+  ),
+});
+export type VoiceRenderPart = z.infer<typeof VoiceRenderPartSchema>;
+
+export const VoiceRenderSchema = z
+  .strictObject({
+    profileId: z.string().regex(VOICE_PROFILE_ID_REGEX, {
+      message: "voice profileId must be a lowercase slug",
+    }),
+    profileVersion: z.string().min(1).max(MAX_VOICE_PROFILE_VERSION_LENGTH),
+    status: VoiceRenderStatusSchema,
+    reason: VoiceRenderReasonSchema.optional(),
+    parts: z.array(VoiceRenderPartSchema).optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (value.status === "rendered") {
+      if (value.parts === undefined) {
+        ctx.addIssue({
+          code: "custom",
+          message: "rendered voice requires parts",
+          path: ["parts"],
+        });
+      }
+      if (value.reason !== undefined) {
+        ctx.addIssue({
+          code: "custom",
+          message: "rendered voice must not carry a reason",
+          path: ["reason"],
+        });
+      }
+      return;
+    }
+    if (value.reason === undefined) {
+      ctx.addIssue({
+        code: "custom",
+        message: "non-rendered voice requires a reason",
+        path: ["reason"],
+      });
+    }
+    if (value.parts !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        message: "non-rendered voice must not carry parts",
+        path: ["parts"],
+      });
+    }
+  });
+export type VoiceRender = z.infer<typeof VoiceRenderSchema>;
+
+/**
  * Exact M2 RunResult shape: validated StructuredAnswer plus its
  * deterministic rendering. The nested answer is revalidated with the exact
  * 16KiB / parts / text / citation boundaries (never truncated), and the
  * rendered text must deterministically equal the answer parts joined by
  * blank lines (no silent citation drop, no semantic-verification claim).
+ * An optional voice projection must align one-to-one with answer parts.
  */
 export const RunResultV2Schema = z
   .strictObject({
     version: z.literal(RUN_RESULT_V2_VERSION),
     text: z.string().min(1).max(MAX_ASSISTANT_TEXT_LENGTH),
     answer: StructuredAnswerSchema,
+    voice: VoiceRenderSchema.optional(),
   })
-  .refine((value) => value.text === renderRunResultText(value.answer), {
-    message: "run result text must equal answer parts joined by blank lines",
+  .superRefine((value, ctx) => {
+    if (value.text !== renderRunResultText(value.answer)) {
+      ctx.addIssue({
+        code: "custom",
+        message:
+          "run result text must equal answer parts joined by blank lines",
+        path: ["text"],
+      });
+    }
+    if (
+      value.voice?.status === "rendered" &&
+      value.voice.parts !== undefined &&
+      value.voice.parts.length !== value.answer.parts.length
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        message: "rendered voice parts must match answer parts length",
+        path: ["voice", "parts"],
+      });
+    }
   });
 export type RunResultV2 = z.infer<typeof RunResultV2Schema>;
 
@@ -100,12 +227,17 @@ export function parseRunResult(data: unknown): RunResult {
 
 /**
  * Build the durable V2 result for a validated StructuredAnswer.
- * Revalidates the exact answer bounds and the deterministic rendering.
+ * Revalidates the exact answer bounds, the deterministic rendering, and
+ * (when supplied) the voice projection's part alignment.
  */
-export function buildRunResultV2(answer: StructuredAnswer): RunResultV2 {
+export function buildRunResultV2(
+  answer: StructuredAnswer,
+  voice?: VoiceRender,
+): RunResultV2 {
   return RunResultV2Schema.parse({
     version: RUN_RESULT_V2_VERSION,
     text: renderRunResultText(answer),
     answer,
+    ...(voice === undefined ? {} : { voice }),
   });
 }

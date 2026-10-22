@@ -29,6 +29,12 @@ export const TEXT_THINK = "think-stream";
 export const TEXT_THINK_TOOLS = "think-tools";
 /** Input text whose strategy answers V2 with a structural m1 citation. */
 export const TEXT_CITE_MEM = "cite-mem";
+/** Input text whose fake strategy renders a voice projection (voice spec). */
+export const TEXT_VOICE = "voice-render";
+/** Canonical answer text the voice spec toggles away from. */
+export const VOICE_CANONICAL_TEXT = "明日の天気は晴れです[r1]。";
+/** Voiced projection accepted by the production gate (same r1 marker). */
+export const VOICE_RENDERED_TEXT = "明日の天気は晴れでござります[r1]。";
 /** Input text whose fake strategy streams draft deltas, then a V2 cited answer. */
 export const TEXT_DRAFT = "draft-stream";
 /** Input text whose strategy records durable `web.search` tool events. */

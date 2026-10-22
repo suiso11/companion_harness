@@ -31,8 +31,13 @@
 //     "storageDirectory": "/abs/experimental-dir",
 //     "variant": { "label": "variant-a", "systemPrompt": "extra guidance" },
 //     "timeoutMs": 120000,
-//     "maxSteps": 6
+//     "maxSteps": 6,
+//     "voice": "shunkin"
 //   }
+//
+// `voice` is optional: when present, the SAME bundled voice renderer is
+// attached to both baseline and variant. Output keeps each case's canonical
+// answer/text and adds the auxiliary voice status/reason/parts.
 
 import { randomUUID } from "node:crypto";
 import {
@@ -46,18 +51,23 @@ import {
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  type AgentVoiceLayer,
+  BUNDLED_VOICE_PROFILE_IDS,
   closeKernelDatabase,
   createAgentStrategy,
   createExecutionRecordStore,
   createKernelRepository,
   createReferenceManager,
   createToolBroker,
+  createVoiceRenderer,
+  loadBundledVoiceProfile,
   migrateKernelDatabase,
   openKernelDatabase,
   RunEngine,
   StrategyRegistry,
   sha256Hex,
   ToolError,
+  voiceProfileFingerprint,
 } from "@companion/kernel";
 import type { ModelGateway } from "@companion/model-local";
 import { z } from "zod";
@@ -115,6 +125,8 @@ export interface CompareInput {
   readonly variant: { readonly label: string; readonly systemPrompt: string };
   readonly timeoutMs: number;
   readonly maxSteps: number | null;
+  /** Opt-in bundled voice profile applied to BOTH cases; null = disabled. */
+  readonly voice: "shunkin" | null;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -170,6 +182,7 @@ export function parseCompareInput(text: string): CompareInput {
     "variant",
     "timeoutMs",
     "maxSteps",
+    "voice",
   ]);
   for (const key of Object.keys(raw)) {
     if (!allowed.has(key)) {
@@ -334,6 +347,19 @@ export function parseCompareInput(text: string): CompareInput {
     }
     maxSteps = raw.maxSteps;
   }
+  let voice: "shunkin" | null = null;
+  if (raw.voice !== undefined) {
+    if (
+      typeof raw.voice !== "string" ||
+      !(BUNDLED_VOICE_PROFILE_IDS as readonly string[]).includes(raw.voice)
+    ) {
+      throw compareError(
+        "invalid_input",
+        "compare failed: voice must be a bundled profile id",
+      );
+    }
+    voice = raw.voice as "shunkin";
+  }
   return {
     version: 1,
     prompt,
@@ -342,6 +368,7 @@ export function parseCompareInput(text: string): CompareInput {
     variant: { label, systemPrompt },
     timeoutMs,
     maxSteps,
+    voice,
   };
 }
 
@@ -501,6 +528,11 @@ interface CaseEvidence {
     readonly count: number;
     readonly kinds: readonly string[];
   } | null;
+  readonly voice: {
+    readonly status: string;
+    readonly reason: string | null;
+    readonly parts: readonly string[];
+  } | null;
   readonly timedOut: boolean;
 }
 
@@ -538,6 +570,7 @@ async function runCase(args: {
   readonly manager: ReturnType<typeof createReferenceManager>;
   readonly connectorInstanceId: string;
   readonly recorder: ReturnType<typeof createExecutionRecordStore>;
+  readonly voice: AgentVoiceLayer | undefined;
 }): Promise<CaseEvidence> {
   const { input, repo, handle, gateway, recorder } = args;
   const registrations = [
@@ -570,6 +603,7 @@ async function runCase(args: {
             promptVariantName: args.label,
           }),
       executionRecorder: recorder,
+      ...(args.voice === undefined ? {} : { voice: args.voice }),
       ...(input.maxSteps === null ? {} : { maxSteps: input.maxSteps }),
     }),
   );
@@ -696,6 +730,20 @@ async function runCase(args: {
   } catch {
     privateRecords = null;
   }
+  // Voice is an optional V2 projection. Canonical `text` above always stays
+  // authoritative; this output only surfaces the auxiliary status/parts.
+  const voiceRender =
+    run.result !== null && run.result.version === 2
+      ? run.result.voice
+      : undefined;
+  const voice =
+    voiceRender === undefined
+      ? null
+      : {
+          status: voiceRender.status,
+          reason: voiceRender.reason ?? null,
+          parts: voiceRender.parts?.map((part) => part.text) ?? [],
+        };
   return {
     label: args.label,
     runId,
@@ -721,6 +769,7 @@ async function runCase(args: {
     tokens,
     toolCalls,
     privateRecords,
+    voice,
     timedOut,
   };
 }
@@ -773,6 +822,20 @@ export async function runCompareCli(
   const recorder = createExecutionRecordStore({
     directory: join(experimentDirectory, "records"),
   });
+  let voiceLayer: AgentVoiceLayer | undefined;
+  if (input.voice !== null) {
+    const profile = loadBundledVoiceProfile(input.voice);
+    voiceLayer = {
+      render: createVoiceRenderer({
+        gateway,
+        model: modelConfig.model,
+        profile,
+        recorder,
+      }),
+      profileId: profile.id,
+      profileVersion: voiceProfileFingerprint(profile),
+    };
+  }
   const handle = openKernelDatabase(dbPath);
   try {
     await migrateKernelDatabase({ db: handle.raw });
@@ -793,6 +856,7 @@ export async function runCompareCli(
       manager,
       connectorInstanceId: connector.id,
       recorder,
+      voice: voiceLayer,
     });
     const variant = await runCase({
       label: input.variant.label,
@@ -805,6 +869,7 @@ export async function runCompareCli(
       manager,
       connectorInstanceId: connector.id,
       recorder,
+      voice: voiceLayer,
     });
     const output = {
       version: 1,

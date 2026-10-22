@@ -18,6 +18,7 @@ import {
 import Markdown from "./lib/Markdown.svelte";
 import {
   ACTION_PROGRESS_TEXT,
+  type AnswerPartView,
   actionCardModel,
   actionDecisionIntentText,
   actionErrorCodeText,
@@ -167,8 +168,11 @@ let activeRunId: string | null = $state(null);
 let activeTurnId: string | null = $state(null);
 let runView: RunViewState = $state({ ...INITIAL_RUN_VIEW });
 let activeRunCursor = 0;
-let liveAnswer: { text: string; citations: string[] }[] = $state([]);
+let liveAnswer: AnswerPartView[] = $state([]);
 let liveVisible = $state(false);
+// Per-answer「原文」/「話し方」 toggle (keyed by run id). Default is voiced
+// whenever the completed RunResult carries a rendered voice projection.
+let canonicalAnswers: Record<string, boolean> = $state({});
 // PR-3 thinking/status (frontend plan §11.1 Q11): ephemeral reasoning
 // text lives in memory only (never persisted, never sent back). The
 // block expands while reasoning streams and auto-collapses on answer;
@@ -1445,9 +1449,16 @@ function renderRunView(runId: string): void {
       return;
     }
     renderedAnswers.add(runId);
-    liveAnswer = runView.answer.map((p) => ({
+    const voiced = runResultToAnswerParts(runView.result, {
+      preferVoice: true,
+    });
+    liveAnswer = (voiced.length > 0 ? voiced : runView.answer).map((p) => ({
       text: p.text,
       citations: [...p.citations],
+      ...(p.canonicalText === undefined
+        ? {}
+        : { canonicalText: p.canonicalText }),
+      ...(p.voicedText === undefined ? {} : { voicedText: p.voicedText }),
     }));
     liveVisible = true;
     finishActiveRun();
@@ -2800,14 +2811,23 @@ onMount(() => {
   };
 });
 
-function answerPartsForTurn(
-  turn: Turn,
-): { text: string; citations: string[] }[] {
+function answerPartsForTurn(turn: Turn, preferVoice = true): AnswerPartView[] {
   if (turn.run === null) return [];
-  return runResultToAnswerParts(turn.run.result).map((p) => ({
-    text: p.text,
+  return runResultToAnswerParts(turn.run.result, { preferVoice }).map((p) => ({
+    ...p,
     citations: [...p.citations],
   }));
+}
+
+function showsCanonicalAnswer(runId: string): boolean {
+  return canonicalAnswers[runId] === true;
+}
+
+function toggleAnswerVoice(runId: string): void {
+  canonicalAnswers = {
+    ...canonicalAnswers,
+    [runId]: !showsCanonicalAnswer(runId),
+  };
 }
 
 function onConversationScroll(): void {
@@ -3027,10 +3047,23 @@ function evidenceForTurn(turn: Turn): {
             <p>{turn.text ?? ""}</p>
           </div>
           {#if turn.run !== null}
-            {@const parts = answerPartsForTurn(turn)}
             {@const runId = turn.run.runId}
+            {@const canonical = showsCanonicalAnswer(runId)}
+            {@const parts = answerPartsForTurn(turn, !canonical)}
             {#if parts.length > 0}
               <div class="msg-assistant-row">
+                {#if parts.some((part) => part.voicedText !== undefined)}
+                  <button
+                    type="button"
+                    class="voice-toggle"
+                    data-voice-toggle="true"
+                    data-voice-view={canonical ? "canonical" : "voiced"}
+                    aria-label={canonical ? "話し方で表示" : "原文を表示"}
+                    onclick={() => toggleAnswerVoice(runId)}
+                  >
+                    {canonical ? "話し方" : "原文"}
+                  </button>
+                {/if}
                 {#each parts as part, partIndex (partIndex)}
                   <!-- V2: validated answer parts render as sanitized markdown;
                        citation buttons stay adjacent, never inside markdown. -->
@@ -3140,9 +3173,26 @@ function evidenceForTurn(turn: Turn): {
       {/if}
       {#if liveVisible}
         {@const runId = [...renderedAnswers].pop()}
+        {@const canonical = runId !== undefined && showsCanonicalAnswer(runId)}
         <section data-live-answer="true">
+          {#if runId !== undefined && liveAnswer.some((part) => part.voicedText !== undefined)}
+            <button
+              type="button"
+              class="voice-toggle"
+              data-voice-toggle="true"
+              data-voice-view={canonical ? "canonical" : "voiced"}
+              aria-label={canonical ? "話し方で表示" : "原文を表示"}
+              onclick={() => {
+                if (runId !== undefined) toggleAnswerVoice(runId);
+              }}
+            >
+              {canonical ? "話し方" : "原文"}
+            </button>
+          {/if}
           {#each liveAnswer as part, partIndex (partIndex)}
-            <Markdown text={part.text} />
+            <Markdown
+              text={canonical ? (part.canonicalText ?? part.text) : part.text}
+            />
             {#each part.citations as citation (citation)}
               <button
                 type="button"

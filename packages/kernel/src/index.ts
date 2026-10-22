@@ -85,6 +85,7 @@ export type {
   AgentModelStepFailure,
   AgentRepairReason,
   AgentStrategyOptions,
+  AgentVoiceLayer,
   CitationVerification,
   ProjectedHistoryItem,
   ProjectedReferenceSummary,
@@ -114,6 +115,7 @@ export {
   AGENT_TOOL_OUTPUT_TOO_LARGE_CODE,
   AGENT_UNMAPPED_REFERENCE_ID,
   AGENT_UUID_V4_PATTERN,
+  AGENT_VOICE_MIN_REMAINING_MS,
   AGENT_WALL_MS,
   answerSubmitToolDefinition,
   buildAgentToolDefinitions,
@@ -678,6 +680,43 @@ export {
   stageTrialProposal,
   wireModeForReadOnly,
 } from "./trial_authority.js";
+export type { VoiceGateReason } from "./voice/gate.js";
+export {
+  checkVoiceAnswer,
+  checkVoicePart,
+} from "./voice/gate.js";
+export type {
+  BundledVoiceProfileId,
+  VoiceProfile,
+  VoiceProfileExemplar,
+  VoiceProfileReference,
+} from "./voice/profile.js";
+export {
+  BUNDLED_VOICE_PROFILE_IDS,
+  DEFAULT_VOICE_PROFILE_ID,
+  loadBundledVoiceProfile,
+  loadVoiceProfileFile,
+  parseVoiceProfile,
+  VOICE_PROFILE_ID_REGEX,
+  VoiceProfileSchema,
+  voiceProfileFingerprint,
+} from "./voice/profile.js";
+export type {
+  VoiceRenderer,
+  VoiceRendererOptions,
+  VoiceRenderInput,
+} from "./voice/render.js";
+export {
+  buildVoiceSystemPrompt,
+  buildVoiceUserMessage,
+  createVoiceRenderer,
+  DEFAULT_VOICE_TIMEOUT_MS,
+  extractFirstJsonObject,
+  MAX_VOICE_MAX_OUTPUT_TOKENS,
+  MAX_VOICE_TIMEOUT_MS,
+  MIN_VOICE_MAX_OUTPUT_TOKENS,
+  resolveVoiceMaxOutputTokens,
+} from "./voice/render.js";
 export {
   createWebSearchRegistration,
   mapWebClientError,

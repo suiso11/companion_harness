@@ -12,8 +12,18 @@
 export type VisibleRunStatus = "generating" | "answered" | "failed" | "stopped";
 
 export interface AnswerPartView {
+  /** Text to display for this part (voiced only when requested + rendered). */
   readonly text: string;
   readonly citations: readonly string[];
+  /** Canonical text, attached only when a rendered voice exists. */
+  readonly canonicalText?: string;
+  /** Voiced text, attached only when `voice.status === "rendered"`. */
+  readonly voicedText?: string;
+}
+
+export interface RunResultAnswerPartsOptions {
+  /** Prefer the rendered voice text when it is present and aligned. */
+  readonly preferVoice?: boolean;
 }
 
 export interface RunViewState {
@@ -61,6 +71,32 @@ const SILENT_TYPES: ReadonlySet<string> = new Set([
   "model.step.failed",
 ]);
 
+/** Aligned voiced texts from a `rendered` voice projection, else null. */
+function readRenderedVoice(voice: unknown, partCount: number): string[] | null {
+  if (typeof voice !== "object" || voice === null) {
+    return null;
+  }
+  const projection = voice as { status?: unknown; parts?: unknown };
+  if (projection.status !== "rendered" || !Array.isArray(projection.parts)) {
+    return null;
+  }
+  if (projection.parts.length !== partCount) {
+    return null;
+  }
+  const texts: string[] = [];
+  for (const part of projection.parts) {
+    if (typeof part !== "object" || part === null) {
+      return null;
+    }
+    const text = (part as { text?: unknown }).text;
+    if (typeof text !== "string") {
+      return null;
+    }
+    texts.push(text);
+  }
+  return texts;
+}
+
 /**
  * Map a durable RunResult (exact contracts shape) to answer part views:
  * - V1 (`{ version: 1, text }`, historical M0/M1 rows): the rendered text
@@ -69,14 +105,19 @@ const SILENT_TYPES: ReadonlySet<string> = new Set([
  *   part-to-citations mapping of the nested StructuredAnswer.
  * Any other shape yields no parts (never crashes the reducer).
  */
-export function runResultToAnswerParts(result: unknown): AnswerPartView[] {
+export function runResultToAnswerParts(
+  result: unknown,
+  options?: RunResultAnswerPartsOptions,
+): AnswerPartView[] {
   if (typeof result !== "object" || result === null) {
     return [];
   }
+  const preferVoice = options?.preferVoice === true;
   const record = result as {
     version?: unknown;
     text?: unknown;
     answer?: unknown;
+    voice?: unknown;
   };
   if (record.version === 2) {
     const answer = record.answer as { parts?: unknown } | undefined;
@@ -100,7 +141,21 @@ export function runResultToAnswerParts(result: unknown): AnswerPartView[] {
         : [];
       out.push({ text: entry.text, citations });
     }
-    return out;
+    // Optional voice: only an exactly aligned `rendered` projection is
+    // displayed. Anything else silently keeps the canonical parts.
+    const voiced = readRenderedVoice(record.voice, out.length);
+    if (voiced === null) {
+      return out;
+    }
+    return out.map((part, index) => {
+      const voicedText = voiced[index] as string;
+      return {
+        ...part,
+        text: preferVoice ? voicedText : part.text,
+        canonicalText: part.text,
+        voicedText,
+      };
+    });
   }
   // V1: text only, no structured citations exist in that shape.
   if (record.version === 1 && typeof record.text === "string") {

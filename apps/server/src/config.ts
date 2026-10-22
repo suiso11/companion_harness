@@ -28,6 +28,10 @@ import {
   type WebSearchConfig,
 } from "@companion/contracts";
 import {
+  BUNDLED_VOICE_PROFILE_IDS,
+  type BundledVoiceProfileId,
+} from "@companion/kernel";
+import {
   MAX_RESPONSE_BYTES as GATEWAY_MAX_RESPONSE_BYTES,
   isValidApiKeyHeaderValue,
   normalizeLoopbackBaseUrl,
@@ -420,6 +424,70 @@ function requireRemoteBoundedInt(
   return value;
 }
 
+/**
+ * Strict opt-in voice-layer config (COMPANION_VOICE_JSON).
+ *
+ * - Unset means `null` (voice disabled; results have no `voice` key and are
+ *   byte-identical to the previous behavior).
+ * - Must be an exact object with only `{ profile, timeoutMs? }`.
+ * - `profile` must be one of the BUNDLED profile ids; any other value fails
+ *   closed before any filesystem access.
+ * - `timeoutMs` defaults to 30000 and is bounded to 1000..120000.
+ * - Unknown keys and malformed values fail closed with fixed messages.
+ * - The returned object is frozen.
+ */
+export interface VoiceConfig {
+  readonly profile: BundledVoiceProfileId;
+  readonly timeoutMs: number;
+}
+
+export const DEFAULT_VOICE_TIMEOUT_MS = 30_000;
+export const MIN_VOICE_TIMEOUT_MS = 1_000;
+export const MAX_VOICE_TIMEOUT_MS = 120_000;
+
+export function parseVoiceConfig(raw: string | undefined): VoiceConfig | null {
+  if (raw === undefined) {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw configError("voice config must be a JSON object");
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw configError("voice config must be a JSON object");
+  }
+  for (const key of Object.keys(parsed)) {
+    if (key !== "profile" && key !== "timeoutMs") {
+      throw configError("voice config has an unknown key");
+    }
+  }
+  const record = parsed as { profile?: unknown; timeoutMs?: unknown };
+  if (
+    typeof record.profile !== "string" ||
+    !(BUNDLED_VOICE_PROFILE_IDS as readonly string[]).includes(record.profile)
+  ) {
+    throw configError("voice profile is invalid");
+  }
+  const timeoutMs =
+    record.timeoutMs === undefined
+      ? DEFAULT_VOICE_TIMEOUT_MS
+      : record.timeoutMs;
+  if (
+    typeof timeoutMs !== "number" ||
+    !Number.isInteger(timeoutMs) ||
+    timeoutMs < MIN_VOICE_TIMEOUT_MS ||
+    timeoutMs > MAX_VOICE_TIMEOUT_MS
+  ) {
+    throw configError("voice timeoutMs is out of bounds");
+  }
+  return Object.freeze({
+    profile: record.profile as BundledVoiceProfileId,
+    timeoutMs,
+  });
+}
+
 export interface ServerConfig {
   readonly dbPath: string;
   readonly host: ServerHost;
@@ -445,6 +513,8 @@ export interface ServerConfig {
   readonly memory: MemoryConfig | null;
   /** Opt-in private execution records; null (unset) means disabled. */
   readonly executionRecords: ExecutionRecordsConfig | null;
+  /** Strict opt-in voice layer; null (unset) means disabled. */
+  readonly voice: VoiceConfig | null;
   /** Strict opt-in remote (tailnet) Origin/Host allowlist (default off). */
   readonly remote: RemoteConfig;
   /**
@@ -1607,6 +1677,7 @@ export function loadServerConfig(
   const executionRecords = parseExecutionRecordsConfig(
     env.COMPANION_EXECUTION_RECORDS_JSON,
   );
+  const voice = parseVoiceConfig(env.COMPANION_VOICE_JSON);
   const remote = parseRemoteConfig(env.COMPANION_REMOTE_JSON);
   if (remote.enabled && remote.allowedOrigins.length === 0) {
     throw configError(
@@ -1645,6 +1716,7 @@ export function loadServerConfig(
     webSearch,
     memory,
     executionRecords,
+    voice,
     remote,
     trial,
   });
