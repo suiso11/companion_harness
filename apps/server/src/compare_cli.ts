@@ -834,6 +834,10 @@ export async function runCompareCli(
       }),
       profileId: profile.id,
       profileVersion: voiceProfileFingerprint(profile),
+      profile: {
+        displayName: profile.displayName,
+        description: profile.description,
+      },
     };
   }
   const handle = openKernelDatabase(dbPath);

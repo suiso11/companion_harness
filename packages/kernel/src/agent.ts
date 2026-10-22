@@ -2265,6 +2265,11 @@ export type AgentModelStepFailedCallback = (
  * profile metadata is used only to build a deterministic `skipped` marker
  * when the run's wall budget is too small to attempt a render.
  */
+export interface AgentVoiceProfileSummary {
+  readonly displayName: string;
+  readonly description: string;
+}
+
 export interface AgentVoiceLayer {
   render(
     answer: StructuredAnswer,
@@ -2272,6 +2277,24 @@ export interface AgentVoiceLayer {
   ): Promise<VoiceRender>;
   readonly profileId?: string;
   readonly profileVersion?: string;
+  /**
+   * Optional human-readable profile summary. When present, a short note is
+   * appended to the agent system prompt so the agent can answer questions
+   * about the voice layer truthfully instead of imitating it.
+   */
+  readonly profile?: AgentVoiceProfileSummary;
+}
+
+/**
+ * Fixed Japanese note describing the auxiliary voice layer. Built only from
+ * the profile summary and appended (never replacing base instructions).
+ */
+function buildVoiceAwarenessNote(profile: AgentVoiceProfileSummary): string {
+  return (
+    `あなたの回答は、ユーザーに表示される前に自動で『${profile.displayName}』` +
+    `の話し方（${profile.description}）へ書き換えられる。内容は変わらない。` +
+    "口調や話し方について聞かれたらこの事実に基づいて答えること。自分で口調を真似る必要はない。"
+  );
 }
 
 export interface AgentStrategyOptions {
@@ -2402,7 +2425,21 @@ export function createAgentStrategy(
     );
   }
   const toolDefinitions = buildAgentToolDefinitions(broker.describeTools());
-  const systemPrompt = composeAgentSystemPrompt(options.systemPrompt);
+  // Append (never replace) the optional experimental variant and the
+  // voice-layer awareness note. With neither present the system prompt is
+  // byte-identical to the pre-voice base prompt.
+  const voiceNote =
+    options.voice?.profile === undefined
+      ? null
+      : buildVoiceAwarenessNote(options.voice.profile);
+  const promptAppend = [options.systemPrompt, voiceNote]
+    .filter(
+      (part): part is string => typeof part === "string" && part.length > 0,
+    )
+    .join("\n\n");
+  const systemPrompt = composeAgentSystemPrompt(
+    promptAppend.length === 0 ? undefined : promptAppend,
+  );
   const harnessFingerprint = agentHarnessFingerprint({
     model,
     provider: gateway.provider,
