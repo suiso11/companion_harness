@@ -31,6 +31,11 @@ import {
 } from "./graph.js";
 import { HandoffPanel } from "./handoff_panel.js";
 import { LearningPanel } from "./learning_panel.js";
+import {
+  browseRunId,
+  returnToBrowseGenerations,
+  searchButtonDisabledAfterAbandon,
+} from "./memory_list_actions.js";
 import { NotificationPanel } from "./notification_panel.js";
 import { ProposalPanel } from "./proposal_panel.js";
 import {
@@ -758,8 +763,6 @@ class ConversationApp {
     // enabled exactly when a session exists (event gate for the test and
     // for early user clicks), still disabled when creation failed.
     this.renderComposer();
-    // The list view is open by default: browse every projection node.
-    void this.loadMemoryBrowse();
     // AV autonomy panel: usable without any model (plain DOM + HTTP).
     // Fail-open locally: a missing section never breaks the conversation.
     let shadow: ShadowPanel | null = null;
@@ -963,6 +966,11 @@ class ConversationApp {
     // subscription replays its terminal — a captured-active reload that
     // races completion can never append a second answer.
     await this.hydrateHistory();
+    // The list view is open by default: browse every projection node. This
+    // must run AFTER history hydration / pending-run recovery: before that
+    // `activeRunId` and the rendered runs are empty, so a normal reload
+    // would only ever report "create a Run" and never retry.
+    void this.loadMemoryBrowse();
     // C22: read the actual pending proposals/executions after the durable
     // history so a reload restores a still-pending approval card (and its
     // real progress/receipt) without ever persisting proposal content.
@@ -3723,7 +3731,23 @@ class ConversationApp {
    */
   private showAllMemories(): void {
     this.setMemoryListMode("browse");
-    this.memorySearchSeq += 1;
+    // Returning to browse abandons both an in-flight search and a pending
+    // detail read: bumping both generations makes their late responses
+    // stale, so neither can restore the previous selection or re-enable
+    // correction/retirement actions over the fresh browse state.
+    const generations = returnToBrowseGenerations(
+      this.memorySearchSeq,
+      this.memoryDetailSeq,
+    );
+    this.memorySearchSeq = generations.searchSeq;
+    this.memoryDetailSeq = generations.detailSeq;
+    this.memoryScope = null;
+    // The abandoned search's `finally` no longer re-enables the button
+    // (its sequence is stale), so reset it here. A mutation in flight keeps
+    // it disabled until that operation settles.
+    this.memorySearchButton.disabled = searchButtonDisabledAfterAbandon(
+      this.memoryMutating,
+    );
     this.memorySelected = null;
     this.memoryDetail.hidden = true;
     this.memoryDetailBody.textContent = "";
@@ -3979,7 +4003,7 @@ class ConversationApp {
       return;
     }
     const sessionId = this.sessionId;
-    const runId = this.activeRunId ?? this.latestRenderedRunId();
+    const runId = browseRunId(this.activeRunId, this.latestRenderedRunId());
     if (runId === null) {
       this.setBrowseStatus(
         "メッセージを送信して Run を作ってから表示してください",

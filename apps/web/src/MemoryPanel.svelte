@@ -18,6 +18,7 @@ import {
   parseGraphData,
   withTopicHubs,
 } from "../../server/src/ui/graph.js";
+import { returnToBrowseGenerations } from "../../server/src/ui/memory_list_actions.js";
 import { errorCode, fetchJson, postJson, randomUuid } from "./lib/api.js";
 import {
   graphShowAction,
@@ -262,7 +263,12 @@ async function search(): Promise<void> {
  */
 function showAllMemories(): void {
   listMode = "browse";
-  searchSeq += 1;
+  // Returning to browse abandons both an in-flight search and a pending
+  // detail read: bumping both generations makes their late responses stale,
+  // so neither can restore the previous selection/hits over the fresh browse.
+  const generations = returnToBrowseGenerations(searchSeq, detailSeq);
+  searchSeq = generations.searchSeq;
+  detailSeq = generations.detailSeq;
   selected = null;
   scope = null;
   hits = [];
@@ -275,6 +281,8 @@ function showAllMemories(): void {
   actionsDisabled = true;
   opStatus = "";
   notice = "";
+  // The abandoned search's guarded `finally` cannot re-enable the search
+  // button (its sequence is stale), so reset the busy flag here.
   searching = false;
   void loadBrowse();
 }
@@ -936,7 +944,12 @@ $effect(() => {
   searching = false;
   mutating = false;
   // The list view is open by default: browse every projection node.
-  void loadBrowse();
+  // Untracked: `loadBrowse()` synchronously reads `memoryDisabled` (and
+  // other panel state), so a graph `memory_unavailable` response that flips
+  // that flag must not re-run this session-reset effect and loop requests.
+  untrack(() => {
+    void loadBrowse();
+  });
 });
 </script>
 

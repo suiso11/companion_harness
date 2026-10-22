@@ -1076,8 +1076,13 @@ export function createMemoryService(
   let associateDirty = true;
   let associateUnsupported = false;
   let topicsUnsupported = false;
-  /** Monotonic per-pass key suffix for `maintain.associate` (write key). */
-  let associateSequence = 0;
+  /**
+   * Foreground preemption epoch: `notifyForeground()` bumps it, and an
+   * in-flight idle-maintenance pass compares the value it captured at
+   * start. A preemption therefore cancels the WHOLE pass (topic loop and
+   * association), not just the one in-flight model call.
+   */
+  let foregroundEpoch = 0;
   /** In-flight idle-maintenance CLI calls (aborted by preemption/stop). */
   const idleMaintenanceControllers = new Set<AbortController>();
   /** In-flight idle-maintenance batch: stop() awaits it (no orphan child). */
@@ -1198,6 +1203,7 @@ export function createMemoryService(
     // Legacy ungated services (background null) track no background
     // controllers: preserve the previous whole-idle-tick preemption so a
     // parked automatic child cannot outlive foreground activity there.
+    foregroundEpoch += 1;
     if (background === null && idleDrainActive) {
       for (const controller of [...drainControllers]) {
         try {
@@ -1915,10 +1921,19 @@ export function createMemoryService(
     return normalizeTopics(parsed.topics).slice(0, MEMORY_TOPIC_MAX);
   }
 
-  /** One bounded topic-classification MODEL call (same gateway/model). */
-  async function completeTopicsViaGateway(body: string): Promise<string[]> {
+  /**
+   * One bounded topic-classification MODEL call (same gateway/model).
+   * `aborted` is distinct from an empty/failed classification: a foreground
+   * preemption must stop the entire maintenance pass instead of letting the
+   * next item start again with a fresh controller.
+   */
+  async function completeTopicsViaGateway(
+    body: string,
+  ): Promise<
+    { status: "ok"; topics: string[] } | { status: "aborted" | "failed" }
+  > {
     if (gateway === null) {
-      return [];
+      return { status: "failed" };
     }
     const controller = new AbortController();
     extractionControllers.add(controller);
@@ -1950,14 +1965,19 @@ export function createMemoryService(
         { signal: controller.signal },
       );
       if (controller.signal.aborted || stopped) {
-        return [];
+        return { status: "aborted" };
       }
       if (typeof result.text !== "string" || result.text.length === 0) {
-        return [];
+        return { status: "failed" };
       }
-      return parseTopicBackfillOutput(sliceCodePoints(result.text, 8192));
+      return {
+        status: "ok",
+        topics: parseTopicBackfillOutput(sliceCodePoints(result.text, 8192)),
+      };
     } catch {
-      return [];
+      return {
+        status: controller.signal.aborted || stopped ? "aborted" : "failed",
+      };
     } finally {
       clearTimeout(timer);
       extractionControllers.delete(controller);
@@ -2001,8 +2021,15 @@ export function createMemoryService(
    *    per item (same gateway/model/abort/timeout as extraction) -> a
    *    direct `topic.set` write keyed by (id, bodyHash). No outbox schema
    *    change is needed: the stable key makes reminder replay idempotent.
+   *    Each MODEL call holds the shared background admission unit: a busy
+   *    gate skips the WHOLE pass (no overlap with extraction/shadow), and a
+   *    foreground preemption aborts it instead of continuing with the next
+   *    item.
    * 2. `maintain.associate {scope}` once when a remember was enqueued since
-   *    the last pass or the last pass reported `remaining > 0`.
+   *    the last pass or the last pass reported `remaining > 0`, and ONLY
+   *    once no outbox job is pending any more: a remember awaiting retry
+   *    must land before the similarity pass snapshots the store. Otherwise
+   *    `associateDirty` stays armed for a later tick.
    * An old remind answers BAD_REQUEST: latch that surface until restart
    * (silent, no per-tick retry storm).
    */
@@ -2014,19 +2041,52 @@ export function createMemoryService(
     if (background?.closed === true) {
       return;
     }
+    const epoch = foregroundEpoch;
+    const passActive = (): boolean =>
+      started && !stopped && foregroundEpoch === epoch;
     if (!topicsUnsupported && gateway !== null) {
       const pending = await idleMaintenanceCliCall("topic.pending", {
         scope,
         limit: MEMORY_TOPIC_BACKFILL_LIMIT,
       });
+      if (!passActive()) {
+        return;
+      }
       if (pending !== null && !pending.ok && pending.code === "BAD_REQUEST") {
         topicsUnsupported = true;
       } else if (pending?.ok) {
         for (const item of parseTopicPendingItems(pending.data)) {
-          if (!started || stopped) {
+          if (!passActive()) {
             return;
           }
-          const topics = (await completeTopicsViaGateway(item.body)).sort();
+          // Same non-overlap invariant as extraction/shadow: one shared
+          // background unit around each model-heavy maintenance call. A
+          // busy/closed gate skips the rest of this pass (retried later)
+          // instead of overlapping another background model call.
+          const reservation =
+            background === null
+              ? null
+              : background.tryAcquire(BACKGROUND_OWNER_MEMORY_IDLE_DISTILL);
+          if (background !== null && reservation === null) {
+            return;
+          }
+          let result: Awaited<ReturnType<typeof completeTopicsViaGateway>>;
+          try {
+            result = await completeTopicsViaGateway(item.body);
+          } finally {
+            if (reservation !== null) {
+              background?.release(reservation);
+            }
+          }
+          if (result.status === "aborted") {
+            // Foreground preemption cancels the ENTIRE pass: do not start
+            // the next item with a fresh controller, and do not associate.
+            return;
+          }
+          if (!passActive()) {
+            return;
+          }
+          const topics = result.status === "ok" ? result.topics.sort() : [];
           if (topics.length === 0) {
             // No valid categories this pass: leave the item pending.
             continue;
@@ -2042,6 +2102,9 @@ export function createMemoryService(
             },
             key,
           );
+          if (!passActive()) {
+            return;
+          }
           if (stored !== null && !stored.ok && stored.code === "BAD_REQUEST") {
             topicsUnsupported = true;
             break;
@@ -2049,17 +2112,37 @@ export function createMemoryService(
         }
       }
     }
-    if (!associateUnsupported && associateDirty && started && !stopped) {
-      associateSequence += 1;
-      // A per-pass key: a constant key would replay remind's stored
-      // response forever instead of recomputing the similarity edges.
-      const key = stableMemoryJobKey("associate", scope, associateSequence);
+    if (!passActive()) {
+      return;
+    }
+    if (!associateUnsupported && associateDirty) {
+      // Pending (including not-yet-due) outbox work must land first: a
+      // remember retry acking after association would otherwise leave the
+      // new record unassociated until another enqueue/restart.
+      let outstanding = 1;
+      try {
+        outstanding = repo.countOutstandingMemoryJobs();
+      } catch {
+        outstanding = 1;
+      }
+      if (outstanding > 0) {
+        return;
+      }
+      // A nonce makes every pass unique across service restarts: a
+      // process-local sequence would reset to 1 and replay remind's stored
+      // response from the previous process. The same nonce is the retry key
+      // for this one logical pass.
+      const passNonce = randomUUID();
+      const key = stableMemoryJobKey("associate", scope, passNonce);
       const associate = await idleMaintenanceCliCall(
         "maintain.associate",
         { scope },
         key,
         distillTimeoutMs,
       );
+      if (!passActive()) {
+        return;
+      }
       if (associate !== null) {
         if (!associate.ok && associate.code === "BAD_REQUEST") {
           associateUnsupported = true;

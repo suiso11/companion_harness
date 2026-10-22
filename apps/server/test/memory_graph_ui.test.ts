@@ -31,6 +31,11 @@ import {
   zoomAt,
 } from "../src/ui/graph.js";
 import {
+  browseRunId,
+  returnToBrowseGenerations,
+  searchButtonDisabledAfterAbandon,
+} from "../src/ui/memory_list_actions.js";
+import {
   renderConversationShell,
   shellHasNoInlineScript,
 } from "../src/ui/page.js";
@@ -359,6 +364,34 @@ describe("withTopicHubs", () => {
     expect(display.nodes).toEqual(NODES);
     expect(display.edges).toEqual(EDGES);
     expect(display.nodes).not.toBe(NODES);
+  });
+});
+
+describe("memory list browse actions", () => {
+  it("binds browse to the active Run, else the latest rendered Run", () => {
+    expect(browseRunId("run-active", "run-rendered")).toBe("run-active");
+    expect(browseRunId(null, "run-rendered")).toBe("run-rendered");
+    // No Run at all: browse must not emit a request without a runId.
+    expect(browseRunId(null, null)).toBeNull();
+  });
+
+  it("bumps both generations when returning to browse", () => {
+    // An in-flight search and an in-flight detail both see a stale sequence,
+    // so neither late response can repaint the fresh browse state.
+    expect(returnToBrowseGenerations(4, 9)).toEqual({
+      searchSeq: 5,
+      detailSeq: 10,
+    });
+    expect(returnToBrowseGenerations(0, 0)).toEqual({
+      searchSeq: 1,
+      detailSeq: 1,
+    });
+  });
+
+  it("re-enables search after an abandoned search unless mutating", () => {
+    // The abandoned search's finally is stale, so showAll must own the reset.
+    expect(searchButtonDisabledAfterAbandon(false)).toBe(false);
+    expect(searchButtonDisabledAfterAbandon(true)).toBe(true);
   });
 });
 

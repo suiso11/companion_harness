@@ -19,6 +19,11 @@ import {
 } from "@companion/kernel";
 import type { ChatResult, ModelGateway } from "@companion/model-local";
 import { afterEach, describe, expect, it } from "vitest";
+import {
+  BACKGROUND_OWNER_SHADOW,
+  type BackgroundResourceGate,
+  createBackgroundResourceGate,
+} from "../src/background_resource.js";
 import type {
   MemoryCliAddress,
   MemoryCliCallOptions,
@@ -81,6 +86,7 @@ function makeService(
   overrides: {
     gateway?: ModelGateway | null;
     idleMs?: number;
+    background?: BackgroundResourceGate | null;
   } = {},
 ): MemoryService {
   const service = createMemoryService({
@@ -98,6 +104,9 @@ function makeService(
     gateway: overrides.gateway ?? null,
     model: "test-model",
     cliCall,
+    ...(overrides.background !== undefined
+      ? { background: overrides.background }
+      : {}),
   });
   services.push(service);
   return service;
@@ -170,10 +179,10 @@ function completeV2Run(
 function enqueueRememberChain(
   repo: KernelRepository,
   memories: Array<Record<string, unknown>>,
-): void {
+): string {
   const sessionId = generateId();
   const runId = generateId();
-  repo.enqueueMemoryJob(
+  const { row } = repo.enqueueMemoryJob(
     "event.append",
     sessionId,
     runId,
@@ -195,6 +204,7 @@ function enqueueRememberChain(
     }),
     { now: T0 },
   );
+  return row.id;
 }
 
 describe("extraction topics feed record.remember tags", () => {
@@ -426,6 +436,242 @@ describe("maintain.associate scheduling", () => {
       // remaining=0 on the third pass stops the loop (no per-tick storm).
       expect(keys).toHaveLength(3);
       expect(new Set(keys).size).toBe(3);
+    } finally {
+      f.close();
+    }
+  });
+});
+
+describe("maintain.associate idempotency key", () => {
+  it("uses a per-pass nonce that never collides across service restarts", async () => {
+    const f = await openRepo();
+    try {
+      const keys: Array<string | undefined> = [];
+      const cliCall: CliCall = async (_address, op, _params, key) => {
+        if (op === "maintain.associate") {
+          keys.push(key);
+          return okEnvelope({ associate: { remaining: 0 } });
+        }
+        return okEnvelope(null);
+      };
+      const first = makeService(f.repo, cliCall, { idleMs: 20 });
+      first.start();
+      await waitFor(() => keys.length >= 1, 5000);
+      await first.stop();
+
+      // A restarted process sees the same scope/history: a process-local
+      // sequence resetting to 1 would replay remind's stored response from
+      // the previous process instead of recomputing the edges.
+      const second = makeService(f.repo, cliCall, { idleMs: 20 });
+      second.start();
+      await waitFor(() => keys.length >= 2, 5000);
+      await second.stop();
+
+      expect(keys[0]).toBeDefined();
+      expect(keys[1]).toBeDefined();
+      expect(keys[0]).not.toBe(keys[1]);
+      expect(keys[0]).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      );
+    } finally {
+      f.close();
+    }
+  });
+});
+
+describe("idle topic backfill background admission", () => {
+  it("holds the shared gate around each model call and skips the pass when busy", async () => {
+    const f = await openRepo();
+    try {
+      const gate = createBackgroundResourceGate();
+      const setCalls: string[] = [];
+      const associateCalls: number[] = [];
+      const cliCall: CliCall = async (_address, op, _params, _key) => {
+        if (op === "topic.pending") {
+          // Keep the item pending until it is actually classified, so the
+          // post-release tick (not just the busy tick) retries it.
+          return okEnvelope(
+            setCalls.length === 0
+              ? {
+                  items: [
+                    {
+                      id: "rec-0",
+                      bodyHash: "hash-0",
+                      body: "memory 0",
+                      truncated: false,
+                    },
+                  ],
+                  remaining: 0,
+                }
+              : { items: [], remaining: 0 },
+          );
+        }
+        if (op === "topic.set") {
+          setCalls.push("rec-0");
+          return okEnvelope({ topic: {} });
+        }
+        if (op === "maintain.associate") {
+          associateCalls.push(1);
+          return okEnvelope({ associate: { remaining: 0 } });
+        }
+        return okEnvelope(null);
+      };
+      const { gateway, calls: prompts } = gatewayReturning(
+        '{"topics":["カメラ"]}',
+      );
+      // Another background owner holds the shared unit before the tick.
+      const held = gate.tryAcquire(BACKGROUND_OWNER_SHADOW);
+      expect(held).not.toBeNull();
+      const service = makeService(f.repo, cliCall, {
+        gateway,
+        idleMs: 20,
+        background: gate,
+      });
+      service.start();
+      await sleep(150);
+      // Busy gate: no model call, no write, and the WHOLE pass ends
+      // quietly (associate stays dirty for a later tick).
+      expect(prompts).toHaveLength(0);
+      expect(setCalls).toHaveLength(0);
+      expect(associateCalls).toHaveLength(0);
+
+      if (held !== null) {
+        gate.release(held);
+      }
+      await waitFor(() => setCalls.length === 1, 5000);
+      expect(prompts.length).toBeGreaterThanOrEqual(1);
+      // The admission unit is released in `finally` after the model call.
+      const again = gate.tryAcquire(BACKGROUND_OWNER_SHADOW);
+      expect(again).not.toBeNull();
+      if (again !== null) {
+        gate.release(again);
+      }
+    } finally {
+      f.close();
+    }
+  });
+});
+
+describe("foreground preemption of idle maintenance", () => {
+  it("aborts the whole pass instead of continuing to the next topic", async () => {
+    const f = await openRepo();
+    try {
+      const setCalls: string[] = [];
+      const associateCalls: number[] = [];
+      let pendingCalls = 0;
+      const cliCall: CliCall = async (_address, op, _params, _key) => {
+        if (op === "topic.pending") {
+          pendingCalls += 1;
+          return okEnvelope(
+            pendingCalls === 1
+              ? {
+                  items: [
+                    {
+                      id: "rec-0",
+                      bodyHash: "hash-0",
+                      body: "memory 0",
+                      truncated: false,
+                    },
+                    {
+                      id: "rec-1",
+                      bodyHash: "hash-1",
+                      body: "memory 1",
+                      truncated: false,
+                    },
+                  ],
+                  remaining: 0,
+                }
+              : { items: [], remaining: 0 },
+          );
+        }
+        if (op === "topic.set") {
+          setCalls.push(String(_params.id));
+          return okEnvelope({ topic: {} });
+        }
+        if (op === "maintain.associate") {
+          associateCalls.push(1);
+          return okEnvelope({ associate: { remaining: 0 } });
+        }
+        return okEnvelope(null);
+      };
+      const prompts: unknown[] = [];
+      const gateway: ModelGateway = {
+        provider: "openai-compatible",
+        capabilities: { toolCalling: false },
+        baseUrl: "http://127.0.0.1:9",
+        chatUrl: "http://127.0.0.1:9/v1/chat/completions",
+        chat: async (request, options): Promise<ChatResult> => {
+          const index = prompts.length;
+          prompts.push(request);
+          if (index === 0) {
+            return new Promise<ChatResult>((_resolve, reject) => {
+              const signal = options?.signal;
+              const abort = (): void => reject(new Error("preempted"));
+              if (signal?.aborted === true) {
+                abort();
+              } else {
+                signal?.addEventListener("abort", abort, { once: true });
+              }
+            });
+          }
+          // Only reached if a preempted pass wrongly starts its next item.
+          return {
+            text: '{"topics":["カメラ"]}',
+            toolCalls: [],
+            stopReason: "stop",
+          };
+        },
+      };
+      const service = makeService(f.repo, cliCall, { gateway, idleMs: 50 });
+      service.start();
+      await waitFor(() => prompts.length === 1, 5000);
+      service.notifyForeground();
+      await sleep(30);
+      // Aborted model call ends the WHOLE pass: the second pending item is
+      // not classified with a fresh controller and nothing is written.
+      expect(prompts).toHaveLength(1);
+      expect(setCalls).toHaveLength(0);
+      expect(associateCalls).toHaveLength(0);
+
+      // A later idle tick is a NEW pass and may associate: the preempted
+      // pass only left associateDirty armed.
+      await waitFor(() => associateCalls.length >= 1, 5000);
+      expect(setCalls).toHaveLength(0);
+    } finally {
+      f.close();
+    }
+  });
+});
+
+describe("associate waits for the outbox", () => {
+  it("defers associateDirty while a pending (even not-yet-due) job remains", async () => {
+    const f = await openRepo();
+    try {
+      const associateKeys: Array<string | undefined> = [];
+      const cliCall: CliCall = async (_address, op, _params, key) => {
+        if (op === "maintain.associate") {
+          associateKeys.push(key);
+          return okEnvelope({ associate: { remaining: 0 } });
+        }
+        return okEnvelope(null);
+      };
+      const jobId = enqueueRememberChain(f.repo, [
+        { body: "new fact", kind: "user_fact" },
+      ]);
+      // Pending but inside its retry backoff: the drain's due count is 0,
+      // yet the remember it carries has not landed.
+      const failed = f.repo.failMemoryJob(jobId, "test_failure", {
+        now: Date.now(),
+      });
+      expect(failed.status).toBe("pending");
+      const service = makeService(f.repo, cliCall, { idleMs: 20 });
+      service.start();
+      await sleep(180);
+      expect(associateKeys).toHaveLength(0);
+
+      f.repo.ackMemoryJob(jobId);
+      await waitFor(() => associateKeys.length >= 1, 5000);
+      expect(associateKeys[0]).toBeDefined();
     } finally {
       f.close();
     }

@@ -4364,6 +4364,20 @@ export function createKernelRepository(
   }
 
   /**
+   * Every `pending` outbox job, INCLUDING ones whose bounded retry backoff
+   * has not expired yet. Used by derived maintenance to defer work that
+   * must observe all acknowledged writes (e.g. association after remember).
+   */
+  function countOutstandingMemoryJobs(): number {
+    const row = db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM memory_outbox WHERE status = 'pending'",
+      )
+      .get() as { n: number };
+    return row.n;
+  }
+
+  /**
    * Immutable recall-exposure snapshot: one row per actually exposed
    * (recallId, recordId). INSERT OR IGNORE keeps replays idempotent and
    * never updates an existing snapshot row. I04: the delivered revision
@@ -7751,6 +7765,7 @@ export function createKernelRepository(
     ackMemoryJob,
     failMemoryJob,
     countPendingMemoryJobs,
+    countOutstandingMemoryJobs,
     recordMemoryExposure,
     listMemoryExposures,
     recordRunMemoryStatus,
