@@ -371,9 +371,10 @@ connector instance owns **all** configured roots.
    scheduling proof only), and graceful shutdown with a reaped child.
    Verified 2026-10-15: 1/1 passed (~16s). CI provides the REAL CLI: the
    workflow checks out the pinned remind source
-   (`suiso11/remind@1d79cf21003cea5bbc143e1f02372357f080fe9a`,
+   (`suiso11/remind@3a0afdcae71d11ada65239dfae2bb1b25bac4b6c`,
    remind master incl. remind#16 recall fields + remind#19 privacy support
-   + remind#28 graph ops; remind#28 merge commit 1d79cf2) into `.ci/remind`, builds it (`npm ci` + `npm run build`,
+   + remind#28 graph ops + remind#29 topic/auto-association;
+   remind#29 merge commit 3a0afdc) into `.ci/remind`, builds it (`npm ci` + `npm run build`,
    no models), and sets `COMPANION_MEMORY_TEST_ENTRY` /
    `COMPANION_MEMORY_TEST_CONFIG_TEMPLATE` to the built entry + template.
    Limits: synthetic gateway only
