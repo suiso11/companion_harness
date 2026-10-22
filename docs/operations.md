@@ -458,6 +458,24 @@ connector instance owns **all** configured roots.
    against the CI-built pinned remind CLI above. Limits: synthetic
    gateway only (no real-model result); Windows manual smoke remains
    open.
+- Topic-based association (remind#29, 2026-10-22): extraction may return
+  additive `topics` (0..3 general-category nouns, each 1..12 code points,
+  NFKC+trim, deduped) that ride `record.remember` as `tags` (sliced to
+  remind's `tagsMax`=5); an invalid topics field is dropped per field and
+  never drops the memory. Idle maintenance backfills older records:
+  `topic.pending {scope, limit:8}` → one conversation-model
+  classification call per item (same gateway/model/abort/timeout as
+  extraction) → a direct `topic.set {id, bodyHash, topics}` keyed by
+  `(id, bodyHash)`, bounded per tick and preemptible by foreground
+  activity/stop, then `maintain.associate {scope}` once after each new
+  remember and while the last pass reported `remaining > 0`. The graph
+  adds derived `similar` edges plus client-only topic-hub nodes
+  (Obsidian-style tags; a hub is not a memory, so it never opens detail),
+  and the list view browses every memory with internal scrolling (the
+  search results remain one click away via 「すべて表示」). Dependency:
+  suiso11/remind#29 must merge first; an old remind answers `BAD_REQUEST`
+  for `topic.pending`/`maintain.associate`, so those surfaces latch off
+  silently until restart while the legacy graph/list keep working.
 - Not implemented (unchanged): memory perception, user export, and
   memory/session deletion APIs. There is no per-session memory
   delete/export endpoint.
