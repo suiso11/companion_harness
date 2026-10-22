@@ -14,15 +14,19 @@ import {
   type GraphNodeData,
   graphBounds,
   highlightHandles,
+  LABEL_FONT_SIZE,
   LABEL_MAX_CHARS,
-  LABEL_NODE_LIMIT,
+  LABEL_SMALL_MAX_CHARS,
+  type LabelCandidate,
+  labelCharLimit,
   labelMatches,
   layoutStep,
   MAX_ZOOM,
   MIN_ZOOM,
   runLayout,
   screenToWorld,
-  shouldShowLabels,
+  selectVisibleLabels,
+  TOPIC_HUB_MIN_MEMBERS,
   TOPIC_HUB_PREFIX,
   topicHubHandle,
   truncateLabel,
@@ -83,6 +87,73 @@ describe("memory graph layout", () => {
     const before = first.nodes.map((node) => [node.x, node.y]);
     layoutStep(first);
     expect(first.nodes.map((node) => [node.x, node.y])).toEqual(before);
+  });
+
+  it("lays out in the measured canvas size, not the fixed default", () => {
+    const layout = createLayout(NODES, EDGES, 1534, 720);
+    expect(layout.width).toBe(1534);
+    expect(layout.height).toBe(720);
+    // A larger canvas increases the spacing target, so the settled graph
+    // spreads further instead of clumping into the same fixed pixel area.
+    const small = runLayout(createLayout(NODES, EDGES, 800, 480));
+    const large = runLayout(createLayout(NODES, EDGES, 1534, 720));
+    const span = (value: typeof small): number => {
+      const bounds = graphBounds(value.nodes);
+      return bounds === null ? 0 : bounds.width + bounds.height;
+    };
+    expect(span(large)).toBeGreaterThan(span(small));
+  });
+
+  it("does not pin nodes into rows on the canvas top/bottom edges", () => {
+    // 60 densely related memories: the old hard clamp pushed every node
+    // beyond the box onto y = ±(height/2 - radius), producing flat rows along
+    // the top and bottom while the horizontal space stayed empty.
+    const nodes: GraphNodeData[] = Array.from({ length: 60 }, (_, index) => ({
+      handle: `m${index + 1}`,
+      label: `memory ${index + 1}`,
+      status: "active" as const,
+      kind: "user_fact",
+      episode: null,
+    }));
+    const edges: GraphEdgeData[] = [];
+    for (let index = 1; index < nodes.length; index += 1) {
+      edges.push({
+        from: `m${index + 1}`,
+        to: `m${Math.max(1, index - (index % 5))}`,
+        kind: "related",
+      });
+      if (index % 7 === 0) {
+        edges.push({
+          from: `m${index + 1}`,
+          to: `m${Math.max(1, index - 1)}`,
+          kind: "similar",
+        });
+      }
+    }
+    const width = 1534;
+    const height = 480;
+    const layout = runLayout(createLayout(nodes, edges, width, height));
+    const bounds = graphBounds(layout.nodes);
+    expect(bounds).not.toBeNull();
+    if (bounds === null) {
+      return;
+    }
+    const nearTop = layout.nodes.filter(
+      (node) => Math.abs(node.y - node.radius - bounds.minY) <= 2,
+    ).length;
+    const nearBottom = layout.nodes.filter(
+      (node) => Math.abs(node.y + node.radius - bounds.maxY) <= 2,
+    ).length;
+    // A bbox extreme always contains at least one node; a clamped row had
+    // dozens sharing the same edge line.
+    expect(nearTop).toBeLessThanOrEqual(3);
+    expect(nearBottom).toBeLessThanOrEqual(3);
+    // Aspect-aware gravity lets the settled bbox roughly match the wide
+    // canvas rather than forming a square clump in the middle.
+    const settledAspect = bounds.width / bounds.height;
+    const canvasAspect = width / height;
+    expect(settledAspect / canvasAspect).toBeGreaterThan(0.7);
+    expect(settledAspect / canvasAspect).toBeLessThan(1.3);
   });
 
   it("keeps the small graph's resting nodes from overlapping", () => {
@@ -233,12 +304,12 @@ describe("memory graph fit-to-view and labels", () => {
     expect(center.y).toBeCloseTo(240, 6);
   });
 
-  it("shows all labels for small graphs or at the zoom threshold", () => {
-    expect(shouldShowLabels(LABEL_NODE_LIMIT, MIN_ZOOM)).toBe(true);
-    expect(shouldShowLabels(LABEL_NODE_LIMIT + 1, MIN_ZOOM)).toBe(false);
-    expect(shouldShowLabels(LABEL_NODE_LIMIT + 1, 1.2)).toBe(true);
-    expect(shouldShowLabels(LABEL_NODE_LIMIT + 1, 1.19)).toBe(false);
-    expect(shouldShowLabels(500, MAX_ZOOM)).toBe(true);
+  it("shortens the label budget when zoomed out", () => {
+    expect(labelCharLimit(MIN_ZOOM)).toBe(LABEL_SMALL_MAX_CHARS);
+    expect(labelCharLimit(1.19)).toBe(LABEL_SMALL_MAX_CHARS);
+    expect(labelCharLimit(1.2)).toBe(LABEL_MAX_CHARS);
+    expect(labelCharLimit(MAX_ZOOM)).toBe(LABEL_MAX_CHARS);
+    expect(LABEL_SMALL_MAX_CHARS).toBeLessThan(LABEL_MAX_CHARS);
   });
 
   it("truncates long labels to the character budget with an ellipsis", () => {
@@ -252,6 +323,137 @@ describe("memory graph fit-to-view and labels", () => {
     expect(
       Array.from(truncateLabel("日本語のとても長いラベルです".repeat(3))),
     ).toHaveLength(LABEL_MAX_CHARS);
+  });
+});
+
+describe("label declutter", () => {
+  const candidate = (
+    overrides: Partial<LabelCandidate> & { handle: string },
+  ): LabelCandidate => ({
+    label: `label ${overrides.handle}`,
+    x: 100,
+    y: 100,
+    radius: 8,
+    degree: 1,
+    ...overrides,
+  });
+
+  it("places labels that do not overlap and skips the ones that would", () => {
+    const visible = selectVisibleLabels(
+      [
+        candidate({ handle: "a", x: 100, label: "Alpha" }),
+        candidate({ handle: "b", x: 400, label: "Beta" }),
+        candidate({ handle: "c", x: 700, label: "Gamma" }),
+        // Directly on top of Alpha's label: must be dropped.
+        candidate({ handle: "d", x: 100, label: "Delta" }),
+      ],
+      { fontSize: LABEL_FONT_SIZE, width: 1000, height: 600 },
+    );
+    const handles = visible.map((label) => label.handle).sort();
+    expect(handles).toEqual(["a", "b", "c"]);
+    for (let i = 0; i < visible.length; i += 1) {
+      for (let j = i + 1; j < visible.length; j += 1) {
+        const a = visible[i];
+        const b = visible[j];
+        if (a === undefined || b === undefined) continue;
+        const overlap =
+          a.x < b.x + b.width &&
+          b.x < a.x + a.width &&
+          a.y < b.y + b.height &&
+          b.y < a.y + a.height;
+        expect(overlap).toBe(false);
+      }
+    }
+  });
+
+  it("prioritises selected/hovered, then hubs, then degree", () => {
+    const visible = selectVisibleLabels(
+      [
+        candidate({
+          handle: "plain",
+          degree: 30,
+          label: "Plain high degree",
+        }),
+        candidate({
+          handle: "hub",
+          degree: 2,
+          topicHub: true,
+          label: "Topic hub",
+        }),
+        candidate({
+          handle: "selected",
+          degree: 0,
+          selected: true,
+          label: "Selected",
+        }),
+      ],
+      { fontSize: LABEL_FONT_SIZE, width: 1000, height: 600 },
+    );
+    // All three share one anchor: only the top-priority label survives.
+    expect(visible.map((label) => label.handle)).toEqual(["selected"]);
+
+    const hubFirst = selectVisibleLabels(
+      [
+        candidate({ handle: "plain", degree: 30, label: "Plain high degree" }),
+        candidate({
+          handle: "hub",
+          degree: 2,
+          topicHub: true,
+          label: "Topic hub",
+        }),
+      ],
+      { fontSize: LABEL_FONT_SIZE, width: 1000, height: 600 },
+    );
+    expect(hubFirst.map((label) => label.handle)).toEqual(["hub"]);
+  });
+
+  it("always shows the selected label, even over a node disc", () => {
+    const visible = selectVisibleLabels(
+      [
+        candidate({
+          handle: "selected",
+          selected: true,
+          label: "Selected memory",
+        }),
+        // A node disc sitting exactly where the selected label is drawn.
+        candidate({ handle: "other", x: 150, y: 100, radius: 14 }),
+      ],
+      { fontSize: LABEL_FONT_SIZE, width: 1000, height: 600 },
+    );
+    expect(visible.map((label) => label.handle)).toEqual(["selected"]);
+  });
+
+  it("always shows 1-hop focus neighbours, even when they would overlap", () => {
+    const visible = selectVisibleLabels(
+      [
+        candidate({ handle: "focus", hovered: true, label: "Focus" }),
+        candidate({ handle: "near", nearFocus: true, label: "Near" }),
+        // Sits exactly on the neighbour anchor and would normally be dropped.
+        candidate({ handle: "plain", label: "Plain" }),
+      ],
+      { fontSize: LABEL_FONT_SIZE, width: 1000, height: 600 },
+    );
+    const handles = visible.map((label) => label.handle);
+    expect(handles).toContain("focus");
+    expect(handles).toContain("near");
+    expect(handles).not.toContain("plain");
+  });
+
+  it("honours the character limit when rendering label text", () => {
+    const visible = selectVisibleLabels(
+      [candidate({ handle: "long", label: "とても長いラベル".repeat(4) })],
+      {
+        fontSize: LABEL_FONT_SIZE,
+        charLimit: LABEL_SMALL_MAX_CHARS,
+        width: 1000,
+        height: 600,
+      },
+    );
+    expect(visible).toHaveLength(1);
+    expect(Array.from(visible[0]?.text ?? "")).toHaveLength(
+      LABEL_SMALL_MAX_CHARS,
+    );
+    expect(visible[0]?.text.endsWith("…")).toBe(true);
   });
 });
 
@@ -313,6 +515,14 @@ describe("withTopicHubs", () => {
         topics: ["work"],
         episode: null,
       },
+      {
+        handle: "m3",
+        label: "Gamma",
+        status: "active",
+        kind: "model_inference",
+        topics: ["健康"],
+        episode: null,
+      },
     ];
     const display = withTopicHubs(caseNodes, []);
     const hubs = display.nodes.filter((node) => node.topicHub === true);
@@ -320,10 +530,41 @@ describe("withTopicHubs", () => {
     expect(display.nodes).toHaveLength(caseNodes.length + 2);
   });
 
+  it("only mints a hub when at least TOPIC_HUB_MIN_MEMBERS share a topic", () => {
+    const nodes: GraphNodeData[] = [
+      {
+        handle: "m1",
+        label: "Alpha",
+        status: "active",
+        kind: "user_fact",
+        topics: ["solo", "shared"],
+        episode: null,
+      },
+      {
+        handle: "m2",
+        label: "Beta",
+        status: "active",
+        kind: "summary",
+        topics: ["SHARED"],
+        episode: null,
+      },
+    ];
+    expect(TOPIC_HUB_MIN_MEMBERS).toBe(2);
+    const display = withTopicHubs(nodes, []);
+    const hubs = display.nodes.filter((node) => node.topicHub === true);
+    expect(hubs.map((hub) => hub.label)).toEqual(["shared"]);
+    expect(display.edges).toEqual([
+      { from: "m1", to: topicHubHandle("shared"), kind: "related" },
+      { from: "m2", to: topicHubHandle("shared"), kind: "related" },
+    ]);
+    // Single-member topics still live on the memory node for its tooltip.
+    expect(display.nodes[0]?.topics).toEqual(["solo", "shared"]);
+  });
+
   it("links every member to its hub and keeps the original edges", () => {
     const display = withTopicHubs(topicNodes, topicEdges);
     const hubs = display.nodes.filter((node) => node.topicHub === true);
-    expect(hubs.map((hub) => hub.label).sort()).toEqual(["m1", "仕事", "健康"]);
+    expect(hubs.map((hub) => hub.label).sort()).toEqual(["仕事", "健康"]);
     // All original edges survive unchanged, including similar links.
     for (const edge of topicEdges) {
       expect(display.edges).toContainEqual(edge);
@@ -339,7 +580,8 @@ describe("withTopicHubs", () => {
         .sort();
     expect(members("仕事")).toEqual(["m1", "m2"]);
     expect(members("健康")).toEqual(["m1", "topic:仕事"]);
-    expect(members("m1")).toEqual(["m3"]);
+    // "m1" is carried by a single memory (m3), so it gets no hub/spoke.
+    expect(hubs.some((hub) => hub.label === "m1")).toBe(false);
   });
 
   it("never mints a hub handle that collides with a memory handle", () => {
@@ -407,8 +649,14 @@ describe("memory graph shell", () => {
       "memory-graph-depth",
       "memory-graph-retired",
       "memory-graph-topics",
+      "memory-graph-similar",
       "memory-graph-status",
       "memory-graph-canvas",
+      "memory-graph-canvas-wrap",
+      "memory-graph-zoom-controls",
+      "memory-graph-zoom-in",
+      "memory-graph-zoom-out",
+      "memory-graph-zoom-fit",
       "memory-graph-legend",
       "memory-list-status",
       "memory-list-all",
@@ -421,10 +669,13 @@ describe("memory graph shell", () => {
       "推論",
       "要約",
       "訂正",
+      "統合",
       "引退",
       "話題",
       "関連（自動）",
       "話題を表示",
+      "自動関連を表示",
+      "全体表示",
       "すべて表示",
     ]) {
       expect(html).toContain(label);

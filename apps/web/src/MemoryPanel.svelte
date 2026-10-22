@@ -80,6 +80,7 @@ let view = $state<"list" | "graph">("list");
 let graphStatus = $state("");
 let graphRetired = $state(false);
 let graphTopics = $state(true);
+let graphSimilar = $state(true);
 let graphDepth = $state("1");
 let graphScope = $state<GraphScope | null>(null);
 let graphSelected = $state<string | null>(null);
@@ -354,10 +355,19 @@ async function loadBrowse(): Promise<void> {
   browseStatus = browseStatusText(data.nodes.length, data.truncated);
 }
 
-/** The retained payload plus optional client-side topic hubs. */
+/**
+ * The retained payload plus optional client-side topic hubs and the
+ * automatic-similarity edge filter (both are display-only toggles).
+ */
 function displayGraph(data: GraphData): GraphData {
-  if (graphTopics === false) return data;
-  return { ...data, ...withTopicHubs(data.nodes, data.edges) };
+  const withHubs =
+    graphTopics === false
+      ? { nodes: data.nodes, edges: data.edges }
+      : withTopicHubs(data.nodes, data.edges);
+  const edges = graphSimilar
+    ? withHubs.edges
+    : withHubs.edges.filter((edge) => edge.kind !== "similar");
+  return { ...data, nodes: withHubs.nodes, edges };
 }
 
 /** Paint the retained payload, optionally with derived topic hubs. */
@@ -1050,16 +1060,53 @@ $effect(() => {
           />
           話題を表示
         </label>
+        <label>
+          <input
+            id="memory-graph-similar"
+            type="checkbox"
+            bind:checked={graphSimilar}
+            onchange={() => {
+              if (view === "graph") paintGraph();
+            }}
+          />
+          自動関連を表示
+        </label>
         <p id="memory-graph-status" aria-live="polite">{graphStatus}</p>
       </div>
-      <svg
-        bind:this={graphCanvasEl}
-        id="memory-graph-canvas"
-        role="img"
-        aria-label="記憶グラフ"
-        viewBox="0 0 800 480"
-        preserveAspectRatio="xMidYMid meet"
-      ></svg>
+      <div id="memory-graph-canvas-wrap" class="memory-graph-canvas-wrap">
+        <svg
+          bind:this={graphCanvasEl}
+          id="memory-graph-canvas"
+          role="img"
+          aria-label="記憶グラフ"
+          viewBox="0 0 800 480"
+          preserveAspectRatio="xMidYMid meet"
+        ></svg>
+        <div
+          id="memory-graph-zoom-controls"
+          class="memory-graph-zoom-controls"
+          role="group"
+          aria-label="グラフの表示操作"
+        >
+          <button
+            id="memory-graph-zoom-in"
+            type="button"
+            aria-label="拡大"
+            onclick={() => canvas?.zoomBy(1.25)}>+</button
+          >
+          <button
+            id="memory-graph-zoom-out"
+            type="button"
+            aria-label="縮小"
+            onclick={() => canvas?.zoomBy(0.8)}>−</button
+          >
+          <button
+            id="memory-graph-zoom-fit"
+            type="button"
+            onclick={() => canvas?.fitToView()}>全体表示</button
+          >
+        </div>
+      </div>
       <p
         id="memory-graph-legend"
         class="memory-graph-legend"
@@ -1088,6 +1135,12 @@ $effect(() => {
             class="memory-graph-legend__swatch memory-graph-legend__swatch--correction"
             aria-hidden="true"
           ></span>訂正
+        </span>
+        <span class="memory-graph-legend__item">
+          <span
+            class="memory-graph-legend__swatch memory-graph-legend__swatch--consolidation"
+            aria-hidden="true"
+          ></span>統合
         </span>
         <span class="memory-graph-legend__item">
           <span

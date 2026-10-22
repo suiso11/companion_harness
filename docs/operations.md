@@ -415,7 +415,14 @@ connector instance owns **all** configured roots.
   `GET /api/sessions/:sessionId/memory/graph/local?searchId=&handle=&depth=1|2`
   expands one already-bound handle. Both are strict-query, run-owned,
   read-only (never heat or grant feedback), and return opaque `mN`
-  handles only. Handles are reused per `(record_id, status)` through
+  handles only. The client lays the graph out in the measured canvas size,
+  greedily declutters labels (selected/hovered and their neighbours first,
+  then topic hubs, then degree), and offers zoom in/out/全体表示 plus a
+  display-only 「自動関連を表示」 toggle for similarity edges. Topic hubs are
+  minted only for topics shared by at least two visible memories; a
+  single-member topic stays on the memory's tooltip instead of adding a
+  perimeter hub. Handles are
+  reused per `(record_id, status)` through
   `memory_graph_searches` (one durable `query='graph'` search per
   `(session, scope)`), so re-opening a graph never grows rows; edges are
   rewritten to handles before serialization, and an unchanged

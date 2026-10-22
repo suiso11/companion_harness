@@ -283,6 +283,14 @@ main > form[action="/api/remote/login"] input[type="password"] {
   background: transparent;
 }
 
+.memory-graph-legend__swatch--consolidation {
+  height: 0;
+  border: 0;
+  border-bottom: 2px dashed var(--graph-edge);
+  border-radius: 0;
+  background: transparent;
+}
+
 .memory-graph-legend__swatch--topic {
   border-radius: 2px;
   background: var(--graph-kind-topic);
@@ -297,15 +305,44 @@ main > form[action="/api/remote/login"] input[type="password"] {
   opacity: 0.6;
 }
 
+.memory-graph-canvas-wrap {
+  position: relative;
+}
+
 #memory-graph-canvas {
   display: block;
   width: 100%;
-  height: 480px;
+  height: clamp(480px, 70vh, 900px);
   background: var(--graph-background);
   border: 1px solid var(--graph-border);
   border-radius: 4px;
   cursor: grab;
   touch-action: none;
+}
+
+/* Zoom controls overlay the canvas (no inline styles; CSP-safe). */
+.memory-graph-zoom-controls {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  display: flex;
+  gap: 0.25rem;
+}
+
+.memory-graph-zoom-controls button {
+  min-width: 2rem;
+  min-height: 2rem;
+  padding: 0 0.4rem;
+  border: 1px solid var(--graph-border);
+  border-radius: 4px;
+  background: var(--graph-background);
+  color: var(--graph-label);
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.memory-graph-zoom-controls button:hover {
+  border-color: var(--graph-node-active);
 }
 
 #memory-graph-canvas.memory-graph--panning {
@@ -380,15 +417,16 @@ main > form[action="/api/remote/login"] input[type="password"] {
   display: none;
   background: none;
   font-family: system-ui, sans-serif;
-  font-size: 11px;
+  font-size: 12px;
+  font-weight: 500;
   fill: var(--graph-label);
   pointer-events: none;
   paint-order: stroke;
   stroke: var(--graph-background);
-  stroke-width: 2px;
+  stroke-width: 3px;
+  stroke-linejoin: round;
 }
 
-.memory-graph--labels .memory-graph-node__label,
 .memory-graph-node--label .memory-graph-node__label {
   display: block;
 }
@@ -436,6 +474,6 @@ main > form[action="/api/remote/login"] input[type="password"] {
 
 @media (max-width: 30rem) {
   #memory-graph-canvas {
-    height: 360px;
+    height: 60vh;
   }
 }

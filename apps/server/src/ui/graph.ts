@@ -145,6 +145,14 @@ export function parseGraphData(value: unknown): GraphData | null {
 
 export const TOPIC_HUB_PREFIX = "topic:";
 
+/**
+ * Minimum number of visible memory nodes that must share a topic before a
+ * client-side topic hub is drawn. Single-member hubs only add a spoke to the
+ * perimeter (the layout has nothing to cluster around it), so they are
+ * omitted; the topic still appears in the member node's tooltip/detail.
+ */
+export const TOPIC_HUB_MIN_MEMBERS = 2;
+
 /** Stable synthetic handle for one client-side topic hub. */
 export function topicHubHandle(topic: string): string {
   return `${TOPIC_HUB_PREFIX}${topic}`;
@@ -156,10 +164,12 @@ export interface TopicHubGraph {
 }
 
 /**
- * Obsidian-style tags-as-nodes: append one hub node per distinct topic among
- * the visible nodes plus a `related` edge from every member to its hub.
- * Pure (never mutates the input); topics are deduped case-insensitively while
- * the first spelling is kept. Nodes without topics are returned unchanged.
+ * Obsidian-style tags-as-nodes: append one hub node per distinct topic shared
+ * by at least `TOPIC_HUB_MIN_MEMBERS` visible nodes plus a `related` edge from
+ * every member to its hub. Pure (never mutates the input); topics are deduped
+ * case-insensitively while the first spelling is kept. Single-member topics
+ * do not get a hub (the node keeps `topics` for its tooltip/detail). Nodes
+ * without topics are returned unchanged.
  */
 export function withTopicHubs(
   nodes: readonly GraphNodeData[],
@@ -168,8 +178,51 @@ export function withTopicHubs(
   if (!nodes.some((node) => (node.topics?.length ?? 0) > 0)) {
     return { nodes: [...nodes], edges: [...edges] };
   }
+  // First pass: count distinct nodes per topic so single-member topics never
+  // mint a hub. Keeping the first spelling mirrors the previous behaviour.
+  const topicByKey = new Map<
+    string,
+    { readonly label: string; count: number }
+  >();
+  for (const node of nodes) {
+    const seenInNode = new Set<string>();
+    for (const rawTopic of node.topics ?? []) {
+      const topic = rawTopic.trim();
+      const key = topic.toLowerCase();
+      if (topic.length === 0 || seenInNode.has(key)) {
+        continue;
+      }
+      seenInNode.add(key);
+      const entry = topicByKey.get(key);
+      if (entry === undefined) {
+        topicByKey.set(key, { label: topic, count: 1 });
+      } else {
+        entry.count += 1;
+      }
+    }
+  }
   const usedHandles = new Set(nodes.map((node) => node.handle));
   const hubByKey = new Map<string, GraphNodeData>();
+  for (const [key, entry] of topicByKey) {
+    if (entry.count < TOPIC_HUB_MIN_MEMBERS) {
+      continue;
+    }
+    let handle = topicHubHandle(entry.label);
+    while (usedHandles.has(handle)) {
+      handle = `${handle}_`;
+    }
+    usedHandles.add(handle);
+    hubByKey.set(key, {
+      handle,
+      label: entry.label,
+      status: "active",
+      kind: "topic",
+      topicHub: true,
+      episode: null,
+    });
+  }
+  // Second pass: link every member of an existing hub. Topics that did not
+  // reach the threshold have no hub and therefore no spoke.
   const hubEdges: GraphEdgeData[] = [];
   for (const node of nodes) {
     const seenInNode = new Set<string>();
@@ -180,22 +233,9 @@ export function withTopicHubs(
         continue;
       }
       seenInNode.add(key);
-      let hub = hubByKey.get(key);
+      const hub = hubByKey.get(key);
       if (hub === undefined) {
-        let handle = topicHubHandle(topic);
-        while (usedHandles.has(handle)) {
-          handle = `${handle}_`;
-        }
-        usedHandles.add(handle);
-        hub = {
-          handle,
-          label: topic,
-          status: "active",
-          kind: "topic",
-          topicHub: true,
-          episode: null,
-        };
-        hubByKey.set(key, hub);
+        continue;
       }
       hubEdges.push({ from: node.handle, to: hub.handle, kind: "related" });
     }
@@ -257,16 +297,18 @@ export const GRAPH_ALPHA_MIN = 0.02;
 export const GRAPH_ALPHA_DECAY = 0.97;
 /**
  * Per-node x/y gravity toward the layout origin (d3 `forceX`/`forceY`
- * strength). It is deliberately much stronger than a tiny drift correction:
- * repulsion pushes disconnected components apart forever otherwise, so a
- * visible two-cluster graph can settle against the canvas edge.
+ * strength). Kept just strong enough to keep disconnected components on
+ * screen: a much stronger pull clumped every graph into the middle of the
+ * canvas, so clusters could not separate.
  */
-export const GRAPH_CENTER_STRENGTH = 0.08;
+export const GRAPH_CENTER_STRENGTH = 0.03;
 export const LABEL_ZOOM_THRESHOLD = 1.2;
-/** Graphs up to this many nodes always show every label. */
-export const LABEL_NODE_LIMIT = 80;
 /** Displayed labels are truncated to this many characters (plus ellipsis). */
 export const LABEL_MAX_CHARS = 24;
+/** Tighter budget when zoomed out, where labels otherwise overlap. */
+export const LABEL_SMALL_MAX_CHARS = 14;
+/** Rendered label font size in CSS pixels at scale 1. */
+export const LABEL_FONT_SIZE = 12;
 /** Fraction of the canvas the fitted graph bounding box should occupy. */
 export const FIT_VIEW_RATIO = 0.85;
 export const MIN_ZOOM = 0.2;
@@ -477,11 +519,14 @@ export function fitCamera(
 }
 
 /**
- * Label rule: small graphs always show labels; large graphs only when the
- * effective zoom makes them readable (hover/selection labels are separate).
+ * Label character budget for the current zoom. Zoomed-in views have room for
+ * the long form; zoomed-out views keep a short prefix so decluttering has a
+ * chance to place more than a handful of labels. Full text lives in <title>.
  */
-export function shouldShowLabels(nodeCount: number, scale: number): boolean {
-  return nodeCount <= LABEL_NODE_LIMIT || scale >= LABEL_ZOOM_THRESHOLD;
+export function labelCharLimit(scale: number): number {
+  return scale < LABEL_ZOOM_THRESHOLD
+    ? Math.min(LABEL_SMALL_MAX_CHARS, LABEL_MAX_CHARS)
+    : LABEL_MAX_CHARS;
 }
 
 /**
@@ -497,6 +542,177 @@ export function truncateLabel(label: string, max = LABEL_MAX_CHARS): string {
     return label;
   }
   return `${characters.slice(0, max - 1).join("")}…`;
+}
+
+/**
+ * Approximate rendered width of a label in CSS pixels. CJK/full-width code
+ * points occupy roughly one em, ASCII roughly 0.6em. Deliberately a little
+ * generous: over-estimating only drops a label, under-estimating overlaps.
+ */
+export function estimateLabelWidth(
+  text: string,
+  fontSize = LABEL_FONT_SIZE,
+): number {
+  let width = 0;
+  for (const character of Array.from(text)) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    const wide =
+      (codePoint >= 0x1100 && codePoint <= 0x115f) ||
+      (codePoint >= 0x2e80 && codePoint <= 0xa4cf) ||
+      (codePoint >= 0xac00 && codePoint <= 0xd7a3) ||
+      (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+      (codePoint >= 0xfe30 && codePoint <= 0xfe4f) ||
+      (codePoint >= 0xff00 && codePoint <= 0xff60) ||
+      (codePoint >= 0xffe0 && codePoint <= 0xffe6);
+    width += wide ? fontSize : fontSize * 0.6;
+  }
+  return width;
+}
+
+/** Screen-space input for greedy label placement. */
+export interface LabelCandidate {
+  readonly handle: string;
+  readonly label: string;
+  /** Node centre in screen (CSS) pixels. */
+  readonly x: number;
+  readonly y: number;
+  /** Node disc radius in screen pixels. */
+  readonly radius: number;
+  readonly degree: number;
+  readonly topicHub?: boolean;
+  readonly selected?: boolean;
+  readonly hovered?: boolean;
+  /** Direct neighbour of the selected/hovered node (focus priority). */
+  readonly nearFocus?: boolean;
+}
+
+export interface VisibleLabel {
+  readonly handle: string;
+  readonly text: string;
+  /** Label box in screen (CSS) pixels. */
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+export interface LabelDeclutterOptions {
+  readonly fontSize?: number;
+  readonly charLimit?: number;
+  readonly width?: number;
+  readonly height?: number;
+  /** Horizontal gap between the node disc and the label, in screen pixels. */
+  readonly gap?: number;
+}
+
+function labelRect(
+  candidate: LabelCandidate,
+  text: string,
+  fontSize: number,
+  gap: number,
+): VisibleLabel {
+  return {
+    handle: candidate.handle,
+    text,
+    x: candidate.x + candidate.radius + gap,
+    y: candidate.y + gap - fontSize * 0.8,
+    width: estimateLabelWidth(text, fontSize),
+    height: fontSize,
+  };
+}
+
+function rectsOverlap(a: VisibleLabel, b: VisibleLabel): boolean {
+  return (
+    a.x < b.x + b.width &&
+    b.x < a.x + a.width &&
+    a.y < b.y + b.height &&
+    b.y < a.y + a.height
+  );
+}
+
+function rectOverlapsDisc(
+  label: VisibleLabel,
+  disc: { x: number; y: number; radius: number },
+): boolean {
+  const nearestX = Math.max(label.x, Math.min(disc.x, label.x + label.width));
+  const nearestY = Math.max(label.y, Math.min(disc.y, label.y + label.height));
+  return Math.hypot(disc.x - nearestX, disc.y - nearestY) < disc.radius + 1;
+}
+
+/**
+ * Greedy, deterministic label decluttering in screen space. Priority:
+ * selected/hovered and their 1-hop neighbours (always placed, even if they
+ * overlap), then topic hubs, then higher degree, then the rest. A label is
+ * skipped when it would overlap an already-placed label or any node disc, or
+ * when it falls outside the canvas.
+ */
+export function selectVisibleLabels(
+  candidates: readonly LabelCandidate[],
+  options: LabelDeclutterOptions = {},
+): VisibleLabel[] {
+  const fontSize = options.fontSize ?? LABEL_FONT_SIZE;
+  const charLimit = options.charLimit ?? LABEL_MAX_CHARS;
+  const width = options.width ?? Number.POSITIVE_INFINITY;
+  const height = options.height ?? Number.POSITIVE_INFINITY;
+  const gap = options.gap ?? 4;
+  const rank = (candidate: LabelCandidate): number => {
+    if (candidate.selected || candidate.hovered) {
+      return 0;
+    }
+    if (candidate.nearFocus) {
+      return 1;
+    }
+    return candidate.topicHub ? 2 : 3;
+  };
+  const ordered = [...candidates].sort((a, b) => {
+    const rankDelta = rank(a) - rank(b);
+    if (rankDelta !== 0) {
+      return rankDelta;
+    }
+    if (a.degree !== b.degree) {
+      return b.degree - a.degree;
+    }
+    const handleDelta = a.handle.localeCompare(b.handle);
+    return handleDelta !== 0 ? handleDelta : a.label.localeCompare(b.label);
+  });
+  const placed: VisibleLabel[] = [];
+  for (const candidate of ordered) {
+    const forced =
+      candidate.selected === true ||
+      candidate.hovered === true ||
+      candidate.nearFocus === true;
+    const text = truncateLabel(candidate.label, charLimit);
+    if (text.length === 0) {
+      continue;
+    }
+    const box = labelRect(candidate, text, fontSize, gap);
+    if (!forced) {
+      if (
+        box.x < 0 ||
+        box.y < 0 ||
+        box.x + box.width > width ||
+        box.y + box.height > height
+      ) {
+        continue;
+      }
+      if (placed.some((other) => rectsOverlap(box, other))) {
+        continue;
+      }
+      if (
+        candidates.some((node) =>
+          rectOverlapsDisc(box, {
+            x: node.x,
+            y: node.y,
+            radius: node.radius,
+          }),
+        )
+      ) {
+        continue;
+      }
+    }
+    placed.push(box);
+  }
+  return placed;
 }
 
 export function createLayout(
@@ -546,9 +762,12 @@ export function layoutStep(layout: GraphLayout): GraphLayout {
     return layout;
   }
   const area = layout.width * layout.height;
+  // Scale the force model with the *real* canvas: a wide desktop canvas has
+  // room for clusters to separate, while the old 800x480 constants clumped
+  // every node into roughly a quarter of the available area.
   const spread = Math.sqrt(area / count) * 0.5;
-  const desired = Math.max(42, Math.min(96, spread * 0.72));
-  const repulsion = spread * spread * 0.02;
+  const desired = Math.max(72, Math.min(190, spread * 1.15));
+  const repulsion = spread * spread * 0.045;
   const spring = 0.018;
   const damping = 0.84;
   const alpha = layout.alpha;
@@ -642,8 +861,16 @@ export function layoutStep(layout: GraphLayout): GraphLayout {
     forceY[toIndex] = (forceY[toIndex] ?? 0) - uy * pull;
   }
 
-  const halfWidth = layout.width / 2;
-  const halfHeight = layout.height / 2;
+  // Aspect-aware gravity: a wide canvas should settle into a wide bounding
+  // box instead of a square clump, so pull harder vertically and softer
+  // horizontally by the square root of the canvas aspect. fitCamera at settle
+  // then frames the naturally-sized graph; there is deliberately no hard
+  // clamp to the canvas box (that pinned nodes into rows on the top/bottom
+  // edges while the sides stayed empty).
+  const aspect = Math.max(0.1, layout.width / layout.height);
+  const aspectScale = Math.sqrt(aspect);
+  const gravityX = GRAPH_CENTER_STRENGTH / aspectScale;
+  const gravityY = GRAPH_CENTER_STRENGTH * aspectScale;
   for (let index = 0; index < count; index += 1) {
     const node = nodes[index];
     if (node === undefined) {
@@ -654,27 +881,18 @@ export function layoutStep(layout: GraphLayout): GraphLayout {
       // disconnected component, is pulled toward the canvas origin. Scaling
       // by alpha keeps the pull strong while the simulation is hot and lets
       // it relax as the layout settles.
-      const gravityX = -node.x * GRAPH_CENTER_STRENGTH;
-      const gravityY = -node.y * GRAPH_CENTER_STRENGTH;
+      const pullX = -node.x * gravityX;
+      const pullY = -node.y * gravityY;
       node.vx =
-        (node.vx + (forceX[index] ?? 0) * alpha + gravityX * alpha) * damping;
+        (node.vx + (forceX[index] ?? 0) * alpha + pullX * alpha) * damping;
       node.vy =
-        (node.vy + (forceY[index] ?? 0) * alpha + gravityY * alpha) * damping;
+        (node.vy + (forceY[index] ?? 0) * alpha + pullY * alpha) * damping;
       node.x += node.vx;
       node.y += node.vy;
     } else {
       node.vx = 0;
       node.vy = 0;
     }
-    const margin = node.radius + 4;
-    node.x = Math.min(
-      halfWidth - margin,
-      Math.max(-halfWidth + margin, node.x),
-    );
-    node.y = Math.min(
-      halfHeight - margin,
-      Math.max(-halfHeight + margin, node.y),
-    );
   }
 
   layout.steps += 1;
@@ -764,6 +982,8 @@ export class GraphCanvas {
   private gesture: PointerGesture | null = null;
   /** Refit once when the current simulation comes to rest. */
   private fitPending = true;
+  /** The user panned/zoomed: never steal their camera on settle. */
+  private userAdjusted = false;
   private readonly resizeObserver: ResizeObserver | null;
 
   constructor(svg: SVGSVGElement, callbacks: GraphCanvasCallbacks) {
@@ -836,8 +1056,17 @@ export class GraphCanvas {
     this.hovered = null;
     this.gesture = null;
     this.fitPending = true;
+    this.userAdjusted = false;
     this.syncViewportSize();
-    const layout = createLayout(data.nodes, data.edges);
+    // Use the measured SVG box, not the fixed default: a 1534x480 canvas
+    // otherwise lays out its nodes inside an 800x480 world and fit-to-view
+    // only magnifies the clump.
+    const layout = createLayout(
+      data.nodes,
+      data.edges,
+      this.viewportWidth,
+      this.viewportHeight,
+    );
     this.layout = layout;
     this.camera = fitCamera(
       layout.nodes,
@@ -963,10 +1192,25 @@ export class GraphCanvas {
       this.viewportWidth,
       this.viewportHeight,
     );
+    // "全体表示" is an explicit request: it also cancels the keep-my-camera
+    // flag set by a previous pan/zoom.
+    this.userAdjusted = false;
     // A resize mid-simulation keeps the pending settle refit.
     if (layout.alpha <= 0) {
       this.fitPending = false;
     }
+    this.render();
+  }
+
+  /** Zoom around the canvas centre (toolbar +/- controls). */
+  zoomBy(factor: number): void {
+    this.userAdjusted = true;
+    this.camera = zoomAt(
+      this.camera,
+      this.viewportWidth / 2,
+      this.viewportHeight / 2,
+      factor,
+    );
     this.render();
   }
 
@@ -1038,25 +1282,12 @@ export class GraphCanvas {
     const focus = this.hovered ?? this.selected;
     const highlighted =
       focus !== null ? highlightHandles(focus, this.neighbors) : null;
-    const labelled = new Set<string>();
-    if (this.hovered !== null) {
-      labelled.add(this.hovered);
-      for (const neighbor of this.neighbors.get(this.hovered) ?? []) {
-        labelled.add(neighbor);
-      }
-    }
-    if (this.selected !== null) {
-      labelled.add(this.selected);
-    }
-    this.svg.classList.toggle("memory-graph--focus", this.hovered !== null);
+    // Both hover and selection focus dim non-neighbours (CSS gate).
+    this.svg.classList.toggle("memory-graph--focus", focus !== null);
     for (const [handle, rendered] of this.rendered) {
       rendered.group.classList.toggle(
         "memory-graph-node--selected",
         handle === this.selected,
-      );
-      rendered.group.classList.toggle(
-        "memory-graph-node--label",
-        labelled.has(handle),
       );
       rendered.group.classList.toggle(
         "memory-graph-node--dim",
@@ -1071,7 +1302,6 @@ export class GraphCanvas {
       );
     }
     this.paintMatches();
-    this.updateLabelMode();
   }
 
   private paintMatches(): void {
@@ -1081,14 +1311,69 @@ export class GraphCanvas {
         labelMatches(rendered.layout.label, this.query),
       );
     }
-    this.updateLabelMode();
+    this.updateLabels();
   }
 
-  private updateLabelMode(): void {
-    this.svg.classList.toggle(
-      "memory-graph--labels",
-      shouldShowLabels(this.layout?.nodes.length ?? 0, this.camera.scale),
-    );
+  /**
+   * Re-run greedy label decluttering for the current camera and focus state.
+   * Selected/hovered nodes (and, at higher priority, their neighbours) always
+   * win; every other label is placed only when it fits without overlap.
+   */
+  private updateLabels(): void {
+    const layout = this.layout;
+    if (layout === null) {
+      return;
+    }
+    const scale = this.camera.scale;
+    const fontSize = LABEL_FONT_SIZE * scale;
+    const focus = this.hovered ?? this.selected;
+    const focusSet =
+      focus !== null ? highlightHandles(focus, this.neighbors) : null;
+    const candidates: LabelCandidate[] = [];
+    for (const [handle, rendered] of this.rendered) {
+      // Hover/selection is a focus mode: keep the 1-hop neighbourhood legible
+      // and hide every unrelated label so the graph reads as a local story.
+      if (focusSet !== null && !focusSet.has(handle)) {
+        continue;
+      }
+      const node = rendered.layout;
+      const screen = worldToScreen(this.camera, node.x, node.y);
+      const discRadius =
+        node.topicHub === true ? Math.max(5, node.radius * 0.6) : node.radius;
+      candidates.push({
+        handle,
+        label: node.label,
+        x: screen.x,
+        y: screen.y,
+        radius: discRadius * scale,
+        degree: node.degree,
+        topicHub: node.topicHub === true,
+        selected: handle === this.selected,
+        hovered: handle === this.hovered,
+        nearFocus: focusSet?.has(handle),
+      });
+    }
+    const visible = selectVisibleLabels(candidates, {
+      fontSize,
+      charLimit: labelCharLimit(scale),
+      width: this.viewportWidth,
+      height: this.viewportHeight,
+      gap: 4 * scale,
+    });
+    const byHandle = new Map<string, VisibleLabel>();
+    for (const label of visible) {
+      byHandle.set(label.handle, label);
+    }
+    for (const [handle, rendered] of this.rendered) {
+      const label = byHandle.get(handle);
+      rendered.group.classList.toggle(
+        "memory-graph-node--label",
+        label !== undefined,
+      );
+      if (label !== undefined) {
+        rendered.label.textContent = label.text;
+      }
+    }
   }
 
   private startFrame(): void {
@@ -1103,13 +1388,16 @@ export class GraphCanvas {
         return;
       }
       layoutStep(layout);
-      if (layout.alpha <= 0 && this.fitPending) {
+      if (layout.alpha <= 0 && this.fitPending && !this.userAdjusted) {
         // Refit the *resting* layout (not the deterministic seed cloud):
         // disconnected components can drift under repulsion, and a topic-hub
         // toggle replaces the node set, so every settled simulation needs a
         // fresh camera. fitToView clears fitPending and repaints.
         this.fitToView();
       } else {
+        if (layout.alpha <= 0) {
+          this.fitPending = false;
+        }
         this.render();
       }
       if (layout.alpha > 0) {
@@ -1157,7 +1445,7 @@ export class GraphCanvas {
         `translate(${rendered.layout.x} ${rendered.layout.y})`,
       );
     }
-    this.updateLabelMode();
+    this.updateLabels();
   }
 
   private svgPoint(event: PointerEvent | WheelEvent): { x: number; y: number } {
@@ -1237,6 +1525,7 @@ export class GraphCanvas {
     gesture.lastX = point.x;
     gesture.lastY = point.y;
     if (gesture.mode === "pan") {
+      this.userAdjusted = true;
       this.camera = {
         scale: this.camera.scale,
         tx: this.camera.tx + dx,
@@ -1287,6 +1576,7 @@ export class GraphCanvas {
     event.preventDefault();
     const point = this.svgPoint(event);
     const factor = Math.exp(-event.deltaY * 0.0015);
+    this.userAdjusted = true;
     this.camera = zoomAt(this.camera, point.x, point.y, factor);
     this.render();
   };

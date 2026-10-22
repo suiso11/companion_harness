@@ -1088,6 +1088,14 @@ button[data-action-evidence="before"] {
   background: transparent;
 }
 
+.memory-graph-legend__swatch--consolidation {
+  height: 0;
+  border: 0;
+  border-bottom: 2px dashed var(--muted-foreground);
+  border-radius: 0;
+  background: transparent;
+}
+
 .memory-graph-legend__swatch--topic {
   border-radius: 2px;
   background: var(--chart-5);
@@ -1101,15 +1109,39 @@ button[data-action-evidence="before"] {
   background: transparent;
   opacity: 0.6;
 }
+.memory-graph-canvas-wrap {
+  position: relative;
+}
 #memory-graph-canvas {
   display: block;
   width: 100%;
-  height: 480px;
+  height: clamp(480px, 70vh, 900px);
   background: var(--card);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   cursor: grab;
   touch-action: none;
+}
+.memory-graph-zoom-controls {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  display: flex;
+  gap: 0.25rem;
+}
+.memory-graph-zoom-controls button {
+  min-width: 2rem;
+  min-height: 2rem;
+  padding: 0 0.4rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--card);
+  color: var(--foreground);
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+.memory-graph-zoom-controls button:hover {
+  border-color: var(--ring);
 }
 #memory-graph-canvas.memory-graph--panning {
   cursor: grabbing;
@@ -1169,14 +1201,15 @@ button[data-action-evidence="before"] {
   display: none;
   background: none;
   font-family: system-ui, sans-serif;
-  font-size: 11px;
+  font-size: 12px;
+  font-weight: 500;
   fill: var(--foreground);
   pointer-events: none;
   paint-order: stroke;
   stroke: var(--card);
-  stroke-width: 2px;
+  stroke-width: 3px;
+  stroke-linejoin: round;
 }
-.memory-graph--labels .memory-graph-node__label,
 .memory-graph-node--label .memory-graph-node__label {
   display: block;
 }
@@ -1211,4 +1244,10 @@ button[data-action-evidence="before"] {
 }
 .memory-graph--focus .memory-graph-edge--dim {
   opacity: 0.12;
+}
+
+@media (max-width: 480px) {
+  #memory-graph-canvas {
+    height: 60vh;
+  }
 }
