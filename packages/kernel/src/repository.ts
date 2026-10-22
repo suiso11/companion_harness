@@ -4624,6 +4624,152 @@ export function createKernelRepository(
         };
   }
 
+  /**
+   * Return the durable graph search id for one (session, scope) or create
+   * it. The row is a NORMAL `memory_searches` row with query='graph' so
+   * the existing snapshot/detail/mutation routes work unchanged.
+   */
+  function getOrCreateMemoryGraphSearch(
+    input: {
+      searchId: string;
+      sessionId: string;
+      runId: string;
+      scope: string;
+    },
+    options: TransitionOptions = {},
+  ): string {
+    const candidate = requireMemoryToken(input.searchId, "searchId");
+    const sessionId = requireId(input.sessionId, "sessionId");
+    const runId = requireId(input.runId, "runId");
+    const scope = requireMemoryScope(input.scope);
+    const now = nowMs(options.now);
+    return withImmediate(db, () => {
+      const existing = db
+        .prepare(
+          "SELECT search_id FROM memory_graph_searches WHERE session_id = ? AND scope = ?",
+        )
+        .get(sessionId, scope) as { search_id: string } | undefined;
+      if (existing !== undefined) {
+        return existing.search_id;
+      }
+      const collision = db
+        .prepare(
+          "SELECT session_id, query FROM memory_searches WHERE search_id = ?",
+        )
+        .get(candidate) as { session_id: string; query: string } | undefined;
+      if (collision !== undefined) {
+        throw new RepositoryValidationError(
+          "graph search id already belongs to another snapshot",
+        );
+      }
+      db.prepare(
+        "INSERT INTO memory_searches (search_id, session_id, run_id, scope, query, created_at) VALUES (?, ?, ?, ?, 'graph', ?)",
+      ).run(candidate, sessionId, runId, scope, now);
+      db.prepare(
+        "INSERT INTO memory_graph_searches (session_id, scope, search_id, created_at) VALUES (?, ?, ?, ?)",
+      ).run(sessionId, scope, candidate, now);
+      return candidate;
+    });
+  }
+
+  /**
+   * Mint/reuse opaque handles for one graph projection into its durable
+   * graph search. Reuse key = (record_id, status): an unchanged re-open
+   * inserts ZERO rows, while a retired/re-activated record gets a new
+   * handle. Existing rows are never rewritten.
+   */
+  function mintMemoryGraphItems(
+    input: {
+      searchId: string;
+      items: ReadonlyArray<{
+        recordId: string;
+        status: string;
+        snippet: string;
+      }>;
+    },
+    options: TransitionOptions = {},
+  ): Array<{
+    handle: string;
+    recordId: string;
+    status: string;
+    snippet: string;
+  }> {
+    const searchId = requireMemoryToken(input.searchId, "searchId");
+    if (!Array.isArray(input.items) || input.items.length > 500) {
+      throw new RepositoryValidationError("items must be 0..500 entries");
+    }
+    const now = nowMs(options.now);
+    return withImmediate(db, () => {
+      const header = db
+        .prepare("SELECT search_id FROM memory_searches WHERE search_id = ?")
+        .get(searchId) as { search_id: string } | undefined;
+      if (header === undefined) {
+        throw new RepositoryValidationError("graph search does not exist");
+      }
+      const rows = db
+        .prepare(
+          "SELECT handle, record_id, status FROM memory_search_items WHERE search_id = ?",
+        )
+        .all(searchId) as Array<{
+        handle: string;
+        record_id: string;
+        status: string;
+      }>;
+      let maxHandle = 0;
+      const byRecordStatus = new Map<string, string>();
+      for (const row of rows) {
+        const ordinal = Number.parseInt(row.handle.slice(1), 10);
+        if (Number.isInteger(ordinal) && ordinal > maxHandle) {
+          maxHandle = ordinal;
+        }
+        const key = `${row.record_id}\u0000${row.status}`;
+        if (!byRecordStatus.has(key)) {
+          byRecordStatus.set(key, row.handle);
+        }
+      }
+      const out: Array<{
+        handle: string;
+        recordId: string;
+        status: string;
+        snippet: string;
+      }> = [];
+      for (const item of input.items) {
+        const recordId = requireMemoryToken(item.recordId, "recordId");
+        if (item.status !== "active" && item.status !== "retired") {
+          throw new RepositoryValidationError(
+            "graph node status must be active or retired",
+          );
+        }
+        if (
+          typeof item.snippet !== "string" ||
+          item.snippet.length < 1 ||
+          Array.from(item.snippet).length > 512
+        ) {
+          throw new RepositoryValidationError(
+            "graph node label must be 1..512 code points",
+          );
+        }
+        const key = `${recordId}\u0000${item.status}`;
+        let handle = byRecordStatus.get(key);
+        if (handle === undefined) {
+          maxHandle += 1;
+          handle = `m${maxHandle}`;
+          db.prepare(
+            "INSERT INTO memory_search_items (search_id, handle, record_id, revision, status, snippet, created_at) VALUES (?, ?, ?, NULL, ?, ?, ?)",
+          ).run(searchId, handle, recordId, item.status, item.snippet, now);
+          byRecordStatus.set(key, handle);
+        }
+        out.push({
+          handle,
+          recordId,
+          status: item.status,
+          snippet: item.snippet,
+        });
+      }
+      return out;
+    });
+  }
+
   function parseMemoryOperationRow(row: {
     id: string;
     kind: string;
@@ -7484,6 +7630,8 @@ export function createKernelRepository(
     getMemorySearch,
     listMemorySearchItems,
     getMemorySearchItem,
+    getOrCreateMemoryGraphSearch,
+    mintMemoryGraphItems,
     createMemoryOperation,
     getMemoryOperation,
     getMemoryOperationByKey,

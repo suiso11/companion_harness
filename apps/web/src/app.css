@@ -968,3 +968,180 @@ button[data-action-evidence="before"] {
   margin: 0.5rem 0 0;
   color: var(--muted-foreground);
 }
+
+/* Conversation-memory graph view (Svelte feature page, vanilla SVG). */
+#memory-view-toggle {
+  display: flex;
+  gap: 0.5rem;
+  margin: 0.25rem 0 0.5rem;
+}
+#memory-view-toggle button[aria-pressed="true"],
+#memory-graph-toolbar button[aria-pressed="true"] {
+  font-weight: 700;
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+#memory-graph-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin-top: 0.5rem;
+}
+#memory-graph-toolbar label {
+  display: inline-flex;
+  gap: 0.25rem;
+  align-items: center;
+}
+#memory-graph-status {
+  flex-basis: 100%;
+  margin: 0.25rem 0;
+  min-height: 1.5em;
+  color: var(--muted-foreground);
+}
+
+/* Kind/retired legend below the canvas. Swatches reuse the chart tokens used
+ * by the node dots so the mapping cannot drift from the rendering. */
+.memory-graph-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.9rem;
+  align-items: center;
+  margin: 0.4rem 0 0.25rem;
+  font-size: 0.85rem;
+}
+
+.memory-graph-legend__item {
+  display: inline-flex;
+  gap: 0.3rem;
+  align-items: center;
+  white-space: nowrap;
+}
+
+.memory-graph-legend__swatch {
+  box-sizing: border-box;
+  width: 0.75rem;
+  height: 0.75rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: 50%;
+  background: var(--muted-foreground);
+}
+
+.memory-graph-legend__swatch--summary {
+  background: var(--chart-2);
+}
+
+.memory-graph-legend__swatch--correction {
+  background: var(--chart-3);
+}
+
+.memory-graph-legend__swatch--user-fact {
+  background: var(--chart-1);
+}
+
+.memory-graph-legend__swatch--model-inference {
+  background: var(--chart-4);
+}
+
+.memory-graph-legend__swatch--retired {
+  border: 2px dashed var(--muted-foreground);
+  background: transparent;
+}
+#memory-graph-canvas {
+  display: block;
+  width: 100%;
+  height: 480px;
+  background: var(--card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  cursor: grab;
+  touch-action: none;
+}
+#memory-graph-canvas.memory-graph--panning {
+  cursor: grabbing;
+}
+#memory-graph-canvas:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+.memory-graph-node {
+  cursor: pointer;
+  outline: none;
+}
+.memory-graph-node__dot {
+  fill: var(--chart-1);
+  stroke: var(--background);
+  stroke-width: 1.5;
+  transition: opacity 120ms ease;
+}
+.memory-graph-node__dot.memory-graph-node--kind-summary {
+  fill: var(--chart-2);
+}
+.memory-graph-node__dot.memory-graph-node--kind-correction {
+  fill: var(--chart-3);
+}
+.memory-graph-node__dot.memory-graph-node--kind-user-fact {
+  fill: var(--chart-1);
+}
+.memory-graph-node__dot.memory-graph-node--kind-model-inference {
+  fill: var(--chart-4);
+}
+.memory-graph-node__dot.memory-graph-node--kind-other {
+  fill: var(--muted-foreground);
+}
+.memory-graph-node__dot.memory-graph-node--retired {
+  fill: var(--muted-foreground);
+  stroke-dasharray: 3 2;
+  opacity: 0.8;
+}
+.memory-graph-node:hover .memory-graph-node__dot,
+.memory-graph-node:focus-visible .memory-graph-node__dot {
+  stroke: var(--foreground);
+  stroke-width: 3;
+}
+.memory-graph-node.memory-graph-node--selected .memory-graph-node__dot {
+  stroke: var(--foreground);
+  stroke-width: 3;
+}
+.memory-graph-node.memory-graph-node--match .memory-graph-node__dot {
+  stroke: var(--chart-5);
+  stroke-width: 4;
+}
+.memory-graph-node__label {
+  display: none;
+  background: none;
+  font-family: system-ui, sans-serif;
+  font-size: 11px;
+  fill: var(--foreground);
+  pointer-events: none;
+  paint-order: stroke;
+  stroke: var(--card);
+  stroke-width: 2px;
+}
+.memory-graph--labels .memory-graph-node__label,
+.memory-graph-node--label .memory-graph-node__label {
+  display: block;
+}
+/* No background rectangle exists; drop the label paint halo on dimmed nodes
+ * so long truncated labels cannot leave faint blocky artifacts. */
+.memory-graph-node--dim .memory-graph-node__label {
+  stroke: none;
+}
+.memory-graph-node--match .memory-graph-node__label {
+  font-weight: 700;
+  fill: var(--chart-5);
+}
+.memory-graph-edge {
+  stroke: var(--muted-foreground);
+  stroke-width: 1;
+  pointer-events: none;
+}
+.memory-graph-edge--consolidation {
+  stroke-dasharray: 6 4;
+}
+.memory-graph--focus .memory-graph-node--dim {
+  opacity: 0.18;
+}
+.memory-graph--focus .memory-graph-edge--dim {
+  opacity: 0.12;
+}

@@ -21,6 +21,12 @@ import {
   revalidateConflictArm,
   shouldResetConflictArm,
 } from "./autonomy_state.js";
+import {
+  GraphCanvas,
+  type GraphData,
+  type GraphEdgeData,
+  type GraphNodeData,
+} from "./graph.js";
 import { HandoffPanel } from "./handoff_panel.js";
 import { LearningPanel } from "./learning_panel.js";
 import { NotificationPanel } from "./notification_panel.js";
@@ -371,6 +377,87 @@ function formatInstant(ms: number): string {
   );
 }
 
+/**
+ * Structural guard for the read-only graph response. Only the fields the
+ * canvas needs are accepted; malformed rows are dropped rather than rendered
+ * as partial nodes.
+ */
+function parseGraphData(value: unknown): GraphData | null {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+  const body = value as {
+    searchId?: unknown;
+    version?: unknown;
+    scope?: unknown;
+    center?: unknown;
+    nodes?: unknown;
+    edges?: unknown;
+    truncated?: unknown;
+  };
+  if (
+    typeof body.searchId !== "string" ||
+    typeof body.version !== "string" ||
+    (body.scope !== "global" && body.scope !== "local") ||
+    !Array.isArray(body.nodes) ||
+    !Array.isArray(body.edges)
+  ) {
+    return null;
+  }
+  const nodes = body.nodes.flatMap<GraphNodeData>((item) => {
+    if (typeof item !== "object" || item === null) {
+      return [];
+    }
+    const node = item as {
+      handle?: unknown;
+      label?: unknown;
+      status?: unknown;
+      kind?: unknown;
+      episode?: unknown;
+    };
+    if (
+      typeof node.handle !== "string" ||
+      typeof node.label !== "string" ||
+      (node.status !== "active" && node.status !== "retired") ||
+      typeof node.kind !== "string"
+    ) {
+      return [];
+    }
+    return [
+      {
+        handle: node.handle,
+        label: node.label,
+        status: node.status,
+        kind: node.kind,
+        episode: node.episode ?? null,
+      },
+    ];
+  });
+  const edges = body.edges.flatMap<GraphEdgeData>((item) => {
+    if (typeof item !== "object" || item === null) {
+      return [];
+    }
+    const edge = item as { from?: unknown; to?: unknown; kind?: unknown };
+    if (
+      typeof edge.from !== "string" ||
+      typeof edge.to !== "string" ||
+      (edge.kind !== "related" && edge.kind !== "consolidation")
+    ) {
+      return [];
+    }
+    return [{ from: edge.from, to: edge.to, kind: edge.kind }];
+  });
+  return {
+    searchId: body.searchId,
+    version: body.version,
+    scope: body.scope,
+    center: typeof body.center === "string" ? body.center : null,
+    nodes,
+    edges,
+    truncated: body.truncated === true,
+  };
+}
+
 class ConversationApp {
   private sessionId: string | null = null;
   private activeRunId: string | null = null;
@@ -449,6 +536,42 @@ class ConversationApp {
   private readonly memoryReactivateButton: HTMLButtonElement;
   private readonly memoryRetryButton: HTMLButtonElement;
   private readonly memoryOpStatus: HTMLElement;
+  /** List/graph view toggle + read-only graph toolbar and canvas. */
+  private readonly memoryViewList: HTMLButtonElement;
+  private readonly memoryViewGraph: HTMLButtonElement;
+  private readonly memoryGraph: HTMLElement;
+  private readonly memoryGraphGlobal: HTMLButtonElement;
+  private readonly memoryGraphLocal: HTMLButtonElement;
+  private readonly memoryGraphDepth: HTMLSelectElement;
+  private readonly memoryGraphRetired: HTMLInputElement;
+  private readonly memoryGraphStatus: HTMLElement;
+  private readonly memoryGraphCanvas: GraphCanvas | null;
+  /** True while the graph view (not the result list) is visible. */
+  private memoryGraphView = false;
+  /**
+   * The most recent graph response, including its own session-bound
+   * `searchId`. A graph snapshot is a valid detail/mutation scope, but it is
+   * kept separate from the explicit list search so toggling views never
+   * rebinds a stale list row to the graph snapshot.
+   */
+  private memoryGraphScope: {
+    readonly sessionId: string;
+    readonly searchId: string;
+    readonly runId: string;
+    readonly scope: "global" | "local";
+    readonly center: string | null;
+  } | null = null;
+  private memoryGraphSelected: string | null = null;
+  private memoryGraphSeq = 0;
+  /**
+   * Last explicit list-search scope (used to resolve list-row details even
+   * after the graph replaced the shared detail binding).
+   */
+  private memoryListScope: {
+    readonly sessionId: string;
+    readonly searchId: string;
+    readonly runId: string;
+  } | null = null;
   /**
    * Last explicit search scope: binds every mN handle to its originating
    * (sessionId, searchId, runId). Handles never cross sessions; a session
@@ -552,6 +675,46 @@ class ConversationApp {
       ) as HTMLButtonElement | null) ?? document.createElement("button");
     this.memoryOpStatus =
       document.getElementById("memory-op-status") ?? el("p");
+    this.memoryViewList =
+      (document.getElementById(
+        "memory-view-list",
+      ) as HTMLButtonElement | null) ?? document.createElement("button");
+    this.memoryViewGraph =
+      (document.getElementById(
+        "memory-view-graph",
+      ) as HTMLButtonElement | null) ?? document.createElement("button");
+    this.memoryGraph = document.getElementById("memory-graph") ?? el("div");
+    this.memoryGraphGlobal =
+      (document.getElementById(
+        "memory-graph-global",
+      ) as HTMLButtonElement | null) ?? document.createElement("button");
+    this.memoryGraphLocal =
+      (document.getElementById(
+        "memory-graph-local",
+      ) as HTMLButtonElement | null) ?? document.createElement("button");
+    this.memoryGraphDepth =
+      (document.getElementById(
+        "memory-graph-depth",
+      ) as HTMLSelectElement | null) ?? document.createElement("select");
+    this.memoryGraphRetired =
+      (document.getElementById(
+        "memory-graph-retired",
+      ) as HTMLInputElement | null) ?? document.createElement("input");
+    this.memoryGraphStatus =
+      document.getElementById("memory-graph-status") ?? el("p");
+    const graphCanvas = document.getElementById("memory-graph-canvas");
+    this.memoryGraphCanvas =
+      graphCanvas instanceof SVGSVGElement
+        ? new GraphCanvas(graphCanvas, {
+            onNodeActivate: (handle) => {
+              void this.activateGraphNode(handle);
+            },
+            onSelectionChange: (handle) => {
+              this.memoryGraphSelected = handle;
+              this.updateGraphLocalButton();
+            },
+          })
+        : null;
   }
 
   async boot(): Promise<void> {
@@ -575,7 +738,40 @@ class ConversationApp {
     });
     this.memoryForm.addEventListener("submit", (event) => {
       event.preventDefault();
+      // In graph view the same input is a local highlighter: it never calls
+      // the search API (and therefore never creates a new search scope).
+      if (this.memoryGraphView) {
+        this.applyGraphSearch();
+        return;
+      }
       void this.searchMemories();
+    });
+    this.memoryInput.addEventListener("input", () => {
+      if (this.memoryGraphView) {
+        this.applyGraphSearch();
+      }
+    });
+    this.memoryViewList.addEventListener("click", () => {
+      this.setMemoryView(false);
+    });
+    this.memoryViewGraph.addEventListener("click", () => {
+      this.setMemoryView(true);
+    });
+    this.memoryGraphGlobal.addEventListener("click", () => {
+      void this.loadMemoryGraph("global");
+    });
+    this.memoryGraphLocal.addEventListener("click", () => {
+      void this.loadMemoryGraph("local");
+    });
+    this.memoryGraphDepth.addEventListener("change", () => {
+      if (this.memoryGraphView && this.memoryGraphScope?.scope === "local") {
+        void this.loadMemoryGraph("local");
+      }
+    });
+    this.memoryGraphRetired.addEventListener("change", () => {
+      if (this.memoryGraphView && this.memoryGraphScope?.scope !== "local") {
+        void this.loadMemoryGraph("global");
+      }
     });
     this.memoryCorrectButton.addEventListener("click", () => {
       void this.stageMemoryMutation("record.correct");
@@ -3491,6 +3687,7 @@ class ConversationApp {
       return;
     }
     this.memoryScope = { sessionId, searchId: body.searchId, runId };
+    this.memoryListScope = { sessionId, searchId: body.searchId, runId };
     this.memorySelected = null;
     // A new search invalidates any draft typed for the previous target.
     this.memoryCorrectInput.value = "";
@@ -3528,6 +3725,219 @@ class ConversationApp {
       item.append(button);
       this.memoryList.append(item);
     }
+  }
+
+  /** Switch between the existing result list and the read-only graph. */
+  private setMemoryView(graph: boolean): void {
+    this.memoryGraphView = graph;
+    this.memoryViewList.setAttribute("aria-pressed", String(!graph));
+    this.memoryViewGraph.setAttribute("aria-pressed", String(graph));
+    this.memoryGraph.hidden = !graph;
+    this.memoryList.hidden = graph;
+    if (graph) {
+      this.memoryGraphCanvas?.setSearchQuery(this.memoryInput.value);
+      if (this.memoryGraphScope === null) {
+        void this.loadMemoryGraph("global");
+      }
+    } else {
+      this.memoryGraphCanvas?.setSearchQuery("");
+    }
+  }
+
+  /** In graph view the search box is a label highlighter, not a search. */
+  private applyGraphSearch(): void {
+    this.memoryGraphCanvas?.setSearchQuery(this.memoryInput.value);
+  }
+
+  /**
+   * Fetch (or refresh) the read-only global/local graph. Graph reads never
+   * heat memory and never stage a mutation. Generation + session guards make
+   * an older response harmless; a 503 graph-unavailable response leaves the
+   * list view fully usable and does not latch `memoryDisabled`.
+   */
+  private async loadMemoryGraph(scope: "global" | "local"): Promise<void> {
+    if (this.sessionId === null) {
+      return;
+    }
+    if (this.memoryDisabled) {
+      this.memoryGraphStatus.textContent = "error: 記憶は無効です";
+      return;
+    }
+    const sessionId = this.sessionId;
+    const runId = this.activeRunId ?? this.latestRenderedRunId();
+    if (runId === null) {
+      this.memoryGraphStatus.textContent =
+        "メッセージを送信して Run を作ってから表示してください";
+      this.showNotice(
+        "メッセージを送信して Run を作ってからグラフを表示してください",
+      );
+      return;
+    }
+    let handle: string | null = null;
+    let localSearchId: string | null = null;
+    if (scope === "local") {
+      if (this.memoryGraphSelected !== null && this.memoryGraphScope !== null) {
+        handle = this.memoryGraphSelected;
+        localSearchId = this.memoryGraphScope.searchId;
+      } else if (this.memorySelected !== null) {
+        handle = this.memorySelected.handle;
+        localSearchId = this.memorySelected.searchId;
+      }
+      if (handle === null || localSearchId === null) {
+        this.memoryGraphStatus.textContent = "ノードを選択してください";
+        return;
+      }
+    }
+    this.memoryGraphSeq += 1;
+    const seq = this.memoryGraphSeq;
+    const current = (): boolean =>
+      this.sessionId === sessionId && seq === this.memoryGraphSeq;
+    this.memoryGraphGlobal.setAttribute(
+      "aria-pressed",
+      String(scope === "global"),
+    );
+    this.memoryGraphGlobal.disabled = true;
+    this.memoryGraphLocal.disabled = true;
+    this.memoryGraphStatus.textContent = "読み込み中";
+    let path = `/api/sessions/${encodeURIComponent(sessionId)}/memory/graph`;
+    if (scope === "local" && handle !== null && localSearchId !== null) {
+      const params = new URLSearchParams({
+        searchId: localSearchId,
+        handle,
+        depth: this.memoryGraphDepth.value === "2" ? "2" : "1",
+        runId,
+      });
+      path = `${path}/local?${params.toString()}`;
+    } else {
+      const params = new URLSearchParams({
+        includeRetired: this.memoryGraphRetired.checked ? "true" : "false",
+        runId,
+      });
+      path = `${path}?${params.toString()}`;
+    }
+    let res: { status: number; body: unknown };
+    try {
+      res = await fetchJson(path);
+    } catch {
+      if (current()) {
+        this.memoryGraphStatus.textContent =
+          "error: グラフの取得に失敗しました";
+        this.showNotice("記憶グラフの取得に失敗しました");
+      }
+      return;
+    } finally {
+      if (current()) {
+        this.memoryGraphGlobal.disabled = false;
+        this.updateGraphLocalButton();
+      }
+    }
+    if (!current()) {
+      return;
+    }
+    const code = (res.body as { error?: { code?: unknown } }).error?.code;
+    if (res.status === 404 && code === "memory_unavailable") {
+      this.memoryDisabled = true;
+      this.memoryGraphStatus.textContent = "error: 記憶は無効です";
+      this.showNotice("記憶は無効です");
+      return;
+    }
+    if (res.status === 503 && code === "memory_graph_unavailable") {
+      this.memoryGraphStatus.textContent =
+        "グラフ機能は記憶サーバーの更新後に利用できます";
+      this.showNotice("グラフ機能は記憶サーバーの更新後に利用できます");
+      return;
+    }
+    if (res.status !== 200) {
+      this.memoryGraphStatus.textContent = "error: グラフの取得に失敗しました";
+      this.showNotice("記憶グラフの取得に失敗しました");
+      return;
+    }
+    const data = parseGraphData(res.body);
+    if (data === null) {
+      this.memoryGraphStatus.textContent = "error: グラフの取得に失敗しました";
+      this.showNotice("記憶グラフの取得に失敗しました");
+      return;
+    }
+    if (!current()) {
+      return;
+    }
+    const previous = this.memoryGraphScope;
+    this.memoryGraphScope = {
+      sessionId,
+      searchId: data.searchId,
+      runId,
+      scope: data.scope,
+      center: data.center,
+    };
+    // A mutation refetch can mint a new snapshot searchId. Keep the current
+    // detail actionable by moving its binding to the fresh snapshot.
+    if (
+      previous !== null &&
+      this.memorySelected !== null &&
+      this.memorySelected.searchId === previous.searchId
+    ) {
+      this.memorySelected = {
+        searchId: data.searchId,
+        handle: this.memorySelected.handle,
+      };
+      this.memoryScope = {
+        sessionId,
+        searchId: data.searchId,
+        runId,
+      };
+    }
+    if (
+      this.memoryGraphSelected !== null &&
+      !data.nodes.some((node) => node.handle === this.memoryGraphSelected)
+    ) {
+      this.memoryGraphSelected = null;
+    }
+    this.memoryGraphCanvas?.setGraph(data, {
+      selected: this.memoryGraphSelected,
+      query: this.memoryInput.value,
+    });
+    this.memoryGraphGlobal.setAttribute(
+      "aria-pressed",
+      String(data.scope === "global"),
+    );
+    this.memoryGraphLocal.setAttribute(
+      "aria-pressed",
+      String(data.scope === "local"),
+    );
+    this.updateGraphLocalButton();
+    if (data.nodes.length === 0) {
+      this.memoryGraphStatus.textContent = "記憶がありません";
+    } else if (data.truncated) {
+      this.memoryGraphStatus.textContent = "一部のみ表示（上限）";
+    } else {
+      this.memoryGraphStatus.textContent = "";
+    }
+  }
+
+  /** Graph node click: select it and open the existing bound detail flow. */
+  private async activateGraphNode(handle: string): Promise<void> {
+    const scope = this.memoryGraphScope;
+    if (scope === null || this.sessionId !== scope.sessionId) {
+      return;
+    }
+    this.memoryGraphSelected = handle;
+    this.memoryGraphCanvas?.setSelected(handle);
+    this.memoryGraphLocal.disabled = false;
+    await this.openMemoryDetail(scope.searchId, handle);
+  }
+
+  private updateGraphLocalButton(): void {
+    this.memoryGraphLocal.disabled =
+      this.sessionId === null ||
+      (this.memoryGraphSelected === null && this.memorySelected === null);
+  }
+
+  /** Refresh the visible graph after an acked mutation (version-cached). */
+  private refreshGraphAfterMutation(): void {
+    if (this.memoryGraph.hidden || this.memoryGraphScope === null) {
+      return;
+    }
+    void this.loadMemoryGraph(this.memoryGraphScope.scope);
   }
 
   /** Latest rendered run id (originating-run fallback when idle). */
@@ -3643,15 +4053,23 @@ class ConversationApp {
       return;
     }
     const sessionId = this.sessionId;
-    const scope = this.memoryScope;
-    if (
-      scope === null ||
-      scope.sessionId !== sessionId ||
-      scope.searchId !== searchId
-    ) {
+    // A detail can belong to the explicit list search, the graph snapshot
+    // (its own session-bound searchId), or the currently active scope. All
+    // three are authoritative server-owned snapshots; only the matching one
+    // is bound, so a stale searchId still fails closed.
+    const scope =
+      this.memoryScope?.searchId === searchId
+        ? this.memoryScope
+        : this.memoryListScope?.searchId === searchId
+          ? this.memoryListScope
+          : this.memoryGraphScope?.searchId === searchId
+            ? this.memoryGraphScope
+            : null;
+    if (scope === null || scope.sessionId !== sessionId) {
       this.showNotice("古い検索結果です。再検索してください");
       return;
     }
+    this.memoryScope = scope;
     this.memoryDetailSeq += 1;
     const seq = this.memoryDetailSeq;
     // Disable actions until the authoritative fresh detail arrives: the
@@ -3755,6 +4173,11 @@ class ConversationApp {
       this.memoryCorrectInput.value = "";
     }
     this.memorySelected = { searchId, handle };
+    if (this.memoryGraphScope?.searchId === searchId) {
+      this.memoryGraphSelected = handle;
+      this.memoryGraphCanvas?.setSelected(handle);
+      this.memoryGraphLocal.disabled = false;
+    }
     this.memoryDetail.hidden = false;
     this.memoryDetailBody.textContent =
       `引用スナップショット ${handle} [${snapshotStatus}]\n${snapshotSnippet}\n---\n` +
@@ -3963,6 +4386,7 @@ class ConversationApp {
       if (status === "acked") {
         this.memoryOpStatus.textContent = "acked: 適用済み";
         this.memoryOpStatus.dataset.operation = operationId;
+        this.refreshGraphAfterMutation();
         return;
       }
       if (status === "failed") {
@@ -4081,6 +4505,7 @@ class ConversationApp {
       if (status === "acked") {
         this.memoryOpStatus.textContent = "acked: 適用済み";
         this.memoryOpStatus.dataset.operation = operationId;
+        this.refreshGraphAfterMutation();
         return;
       }
       if (status === "failed") {

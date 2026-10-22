@@ -70,6 +70,10 @@ const ALLOWED_OPS: ReadonlySet<string> = new Set([
   "record.correct",
   "record.retire",
   "record.reactivate",
+  // Read-only graph ops (session-scoped, never write, never heat).
+  "graph.local",
+  "graph.page",
+  "graph.version",
 ]);
 
 /** Write ops require a caller-supplied stable idempotency key. */

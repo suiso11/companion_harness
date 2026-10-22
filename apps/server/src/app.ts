@@ -33,6 +33,9 @@ import {
   LearningHypothesisDecisionRequestSchema,
   LearningHypothesisTransitionRequestSchema,
   MemoryDetailResponseSchema,
+  MemoryGraphGlobalQuerySchema,
+  MemoryGraphLocalQuerySchema,
+  MemoryGraphResponseSchema,
   MemoryMutationRequestSchema,
   MemoryMutationResponseSchema,
   MemoryOperationResponseSchema,
@@ -169,6 +172,34 @@ export interface EnginePort {
 }
 
 /**
+ * Read-only graph projection returned by MemoryHttpPort. Mirrors the
+ * contracts response but keeps arrays readonly (the service's result shape).
+ */
+export interface MemoryGraphHttpResult {
+  readonly searchId: string;
+  readonly version: string;
+  readonly scope: "global" | "local";
+  readonly center: string | null;
+  readonly nodes: ReadonlyArray<{
+    readonly handle: string;
+    readonly label: string;
+    readonly status: "active" | "retired";
+    readonly kind: string;
+    readonly episode: {
+      readonly kind: "session" | "doc" | "day";
+      readonly episodeKey: string;
+      readonly level: "window" | "episode";
+    } | null;
+  }>;
+  readonly edges: ReadonlyArray<{
+    readonly from: string;
+    readonly to: string;
+    readonly kind: "related" | "consolidation";
+  }>;
+  readonly truncated: boolean;
+}
+
+/**
  * Minimal server-owned memory management surface the HTTP routes need.
  * Satisfied by the Companion memory service when COMPANION_MEMORY_JSON
  * is set; null keeps the existing memory-disabled behavior (404).
@@ -210,6 +241,26 @@ export interface MemoryHttpPort {
     };
     stale: boolean;
   }>;
+  /** Global linked-memory graph projection (read-only; never heats). */
+  getMemoryGraphGlobal(
+    sessionId: string,
+    input: {
+      includeRetired?: boolean;
+      runId: string;
+      signal?: AbortSignal;
+    },
+  ): Promise<MemoryGraphHttpResult>;
+  /** Local (centre+hops) linked-memory graph projection (read-only). */
+  getMemoryGraphLocal(
+    sessionId: string,
+    input: {
+      searchId: string;
+      handle: string;
+      depth?: 1 | 2;
+      runId: string;
+      signal?: AbortSignal;
+    },
+  ): Promise<MemoryGraphHttpResult>;
   stageMemoryMutation(input: {
     sessionId: string;
     runId: string;
@@ -2448,7 +2499,8 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       | "state_conflict"
       | "idempotency_conflict"
       | "validation_error"
-      | "service_unavailable",
+      | "service_unavailable"
+      | "memory_graph_unavailable",
     candidates?: readonly { handle: string; snippet: string; status: string }[],
   ): Response {
     switch (code) {
@@ -2496,6 +2548,18 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
           },
           503,
         );
+      case "memory_graph_unavailable":
+        // The configured remind build predates the graph ops (BAD_REQUEST):
+        // a distinct, fixed 503 so clients can disable graph UI only.
+        return c.json(
+          {
+            error: {
+              code: "memory_graph_unavailable",
+              message: "memory graph unavailable",
+            },
+          },
+          503,
+        );
       default:
         return validationError(c);
     }
@@ -2526,6 +2590,137 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   function validHandle(value: string): boolean {
     return /^m[1-9][0-9]*$/.test(value);
   }
+
+  /** Fixed graph failure mapping (never raw errors). */
+  function memoryGraphErrorCode(
+    error: unknown,
+  ):
+    | "target_not_found"
+    | "memory_graph_unavailable"
+    | "service_unavailable"
+    | "validation_error" {
+    if (
+      error !== null &&
+      typeof error === "object" &&
+      "name" in error &&
+      (error as { name?: unknown }).name === "MemoryManageError" &&
+      "code" in error &&
+      typeof (error as { code?: unknown }).code === "string"
+    ) {
+      const code = (error as { code: string }).code;
+      if (code === "target_not_found") {
+        return "target_not_found";
+      }
+      if (code === "validation_error") {
+        return "validation_error";
+      }
+      if (code === "memory_graph_unavailable") {
+        return "memory_graph_unavailable";
+      }
+    }
+    return "service_unavailable";
+  }
+
+  // Global linked-memory graph (read-only, never heats/feedback). Strict
+  // closed query: `includeRetired` is exactly true|false and `runId` must be
+  // an owned run of this session. Opaque mN handles only; raw ids never
+  // cross the boundary.
+  app.get("/api/sessions/:sessionId/memory/graph", async (c) => {
+    if (memory === null) {
+      return memoryUnavailable(c);
+    }
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const query = strictQuery(c, ["includeRetired", "runId"]);
+    if (!query.ok) {
+      return validationError(c);
+    }
+    const parsed = MemoryGraphGlobalQuerySchema.safeParse(query.values);
+    if (!parsed.success) {
+      return validationError(c);
+    }
+    const owned = requireOwnedRun(c, session.id, parsed.data.runId);
+    if (!owned.ok) {
+      return owned.response;
+    }
+    try {
+      repo.getSession(session.id);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+    try {
+      const out = await memory.getMemoryGraphGlobal(session.id, {
+        includeRetired: parsed.data.includeRetired === "true",
+        runId: parsed.data.runId,
+      });
+      const body = MemoryGraphResponseSchema.parse({
+        searchId: out.searchId,
+        version: out.version,
+        scope: out.scope,
+        center: out.center,
+        nodes: out.nodes.map((node) => ({ ...node })),
+        edges: out.edges.map((edge) => ({ ...edge })),
+        truncated: out.truncated,
+      });
+      return c.json(body, 200);
+    } catch (error) {
+      return memoryRouteError(c, memoryGraphErrorCode(error));
+    }
+  });
+
+  // Local graph around one already-bound search handle: `searchId`+`handle`
+  // resolve through the SAME durable snapshot path as detail (historical,
+  // session-bound, never rebound to latest memory). Strict query only.
+  app.get("/api/sessions/:sessionId/memory/graph/local", async (c) => {
+    if (memory === null) {
+      return memoryUnavailable(c);
+    }
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const query = strictQuery(c, ["searchId", "handle", "depth", "runId"]);
+    if (!query.ok) {
+      return validationError(c);
+    }
+    const parsed = MemoryGraphLocalQuerySchema.safeParse(query.values);
+    if (!parsed.success) {
+      return validationError(c);
+    }
+    const owned = requireOwnedRun(c, session.id, parsed.data.runId);
+    if (!owned.ok) {
+      return owned.response;
+    }
+    try {
+      repo.getSession(session.id);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+    try {
+      const out = await memory.getMemoryGraphLocal(session.id, {
+        searchId: parsed.data.searchId,
+        handle: parsed.data.handle,
+        ...(parsed.data.depth !== undefined
+          ? { depth: parsed.data.depth === "2" ? (2 as const) : (1 as const) }
+          : {}),
+        runId: parsed.data.runId,
+      });
+      const body = MemoryGraphResponseSchema.parse({
+        searchId: out.searchId,
+        version: out.version,
+        scope: out.scope,
+        center: out.center,
+        nodes: out.nodes.map((node) => ({ ...node })),
+        edges: out.edges.map((edge) => ({ ...edge })),
+        truncated: out.truncated,
+      });
+      return c.json(body, 200);
+    } catch (error) {
+      return memoryRouteError(c, memoryGraphErrorCode(error));
+    }
+  });
 
   // Explicit search (read, no idempotency key, allowed while draining:
   // reads never stage and never heat). Body carries the originating runId

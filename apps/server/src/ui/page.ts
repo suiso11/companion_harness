@@ -57,6 +57,28 @@ export function renderConversationShell(): HtmlEscapedString {
         { id: "memory", "aria-label": "記憶の管理" },
         jsx("h2", {}, "記憶の管理"),
         jsx(
+          "div",
+          { id: "memory-view-toggle", role: "group", "aria-label": "表示切替" },
+          jsx(
+            "button",
+            {
+              id: "memory-view-list",
+              type: "button",
+              "aria-pressed": "true",
+            },
+            "一覧",
+          ),
+          jsx(
+            "button",
+            {
+              id: "memory-view-graph",
+              type: "button",
+              "aria-pressed": "false",
+            },
+            "グラフ",
+          ),
+        ),
+        jsx(
           "form",
           { id: "memory-search-form" },
           jsx("input", {
@@ -68,6 +90,119 @@ export function renderConversationShell(): HtmlEscapedString {
             "button",
             { id: "memory-search-button", type: "submit" },
             "記憶を検索",
+          ),
+        ),
+        jsx(
+          "div",
+          { id: "memory-graph", hidden: true },
+          jsx(
+            "div",
+            { id: "memory-graph-toolbar" },
+            jsx(
+              "button",
+              {
+                id: "memory-graph-global",
+                type: "button",
+                "aria-pressed": "true",
+              },
+              "全体",
+            ),
+            jsx(
+              "button",
+              {
+                id: "memory-graph-local",
+                type: "button",
+                disabled: true,
+                "aria-pressed": "false",
+              },
+              "ローカル",
+            ),
+            jsx(
+              "label",
+              {},
+              "深さ",
+              jsx(
+                "select",
+                { id: "memory-graph-depth" },
+                jsx("option", { value: "1" }, "1"),
+                jsx("option", { value: "2" }, "2"),
+              ),
+            ),
+            jsx(
+              "label",
+              {},
+              jsx("input", {
+                id: "memory-graph-retired",
+                type: "checkbox",
+              }),
+              "引退も表示",
+            ),
+            jsx("p", { id: "memory-graph-status", "aria-live": "polite" }),
+          ),
+          jsx("svg", {
+            id: "memory-graph-canvas",
+            role: "img",
+            "aria-label": "記憶グラフ",
+            viewBox: "0 0 800 480",
+            preserveAspectRatio: "xMidYMid meet",
+          }),
+          jsx(
+            "p",
+            {
+              id: "memory-graph-legend",
+              class: "memory-graph-legend",
+              "aria-label": "グラフの凡例",
+            },
+            jsx(
+              "span",
+              { class: "memory-graph-legend__item" },
+              jsx("span", {
+                class:
+                  "memory-graph-legend__swatch memory-graph-legend__swatch--user-fact",
+                "aria-hidden": "true",
+              }),
+              "事実",
+            ),
+            jsx(
+              "span",
+              { class: "memory-graph-legend__item" },
+              jsx("span", {
+                class:
+                  "memory-graph-legend__swatch memory-graph-legend__swatch--model-inference",
+                "aria-hidden": "true",
+              }),
+              "推論",
+            ),
+            jsx(
+              "span",
+              { class: "memory-graph-legend__item" },
+              jsx("span", {
+                class:
+                  "memory-graph-legend__swatch memory-graph-legend__swatch--summary",
+                "aria-hidden": "true",
+              }),
+              "要約",
+            ),
+            jsx(
+              "span",
+              { class: "memory-graph-legend__item" },
+              jsx("span", {
+                class:
+                  "memory-graph-legend__swatch memory-graph-legend__swatch--correction",
+                "aria-hidden": "true",
+              }),
+              "訂正",
+            ),
+            jsx(
+              "span",
+              { class: "memory-graph-legend__item" },
+              jsx("span", {
+                class:
+                  "memory-graph-legend__swatch memory-graph-legend__swatch--retired",
+                "aria-hidden": "true",
+              }),
+              "引退",
+            ),
           ),
         ),
         jsx("ul", { id: "memory-list" }),
