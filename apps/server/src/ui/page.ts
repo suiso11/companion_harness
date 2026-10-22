@@ -137,6 +137,16 @@ export function renderConversationShell(): HtmlEscapedString {
               }),
               "引退も表示",
             ),
+            jsx(
+              "label",
+              {},
+              jsx("input", {
+                id: "memory-graph-topics",
+                type: "checkbox",
+                checked: true,
+              }),
+              "話題を表示",
+            ),
             jsx("p", { id: "memory-graph-status", "aria-live": "polite" }),
           ),
           jsx("svg", {
@@ -203,9 +213,44 @@ export function renderConversationShell(): HtmlEscapedString {
               }),
               "引退",
             ),
+            jsx(
+              "span",
+              { class: "memory-graph-legend__item" },
+              jsx("span", {
+                class:
+                  "memory-graph-legend__swatch memory-graph-legend__swatch--topic",
+                "aria-hidden": "true",
+              }),
+              "話題",
+            ),
+            jsx(
+              "span",
+              { class: "memory-graph-legend__item" },
+              jsx("span", {
+                class:
+                  "memory-graph-legend__swatch memory-graph-legend__swatch--similar",
+                "aria-hidden": "true",
+              }),
+              "関連（自動）",
+            ),
           ),
         ),
-        jsx("ul", { id: "memory-list" }),
+        jsx("p", {
+          id: "memory-list-status",
+          class: "memory-notice",
+          "aria-live": "polite",
+          hidden: true,
+        }),
+        jsx(
+          "button",
+          { id: "memory-list-all", type: "button", hidden: true },
+          "すべて表示",
+        ),
+        jsx(
+          "div",
+          { id: "memory-list-scroll", class: "memory-list-scroll" },
+          jsx("ul", { id: "memory-list" }),
+        ),
         jsx(
           "div",
           { id: "memory-detail", hidden: true },

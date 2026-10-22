@@ -132,6 +132,36 @@ main > form[action="/api/remote/login"] input[type="password"] {
   }
 }
 
+/* Scrollable full-memory browse list (one row per graph projection node). */
+.memory-list-scroll {
+  max-height: 60vh;
+  overflow-y: auto;
+  margin: 0.5rem 0;
+  padding: 0.25rem 0.75rem;
+  border: 1px solid var(--graph-border, #cbd5e1);
+  border-radius: 4px;
+}
+
+#memory-list li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+}
+
+.memory-topic-chip {
+  display: inline-block;
+  padding: 0 0.4rem;
+  border: 1px solid var(--graph-border, #cbd5e1);
+  border-radius: 999px;
+  font-size: 0.75rem;
+  opacity: 0.85;
+}
+
+#memory-list-all {
+  margin: 0.5rem 0;
+}
+
 /* Conversation-memory graph view (vanilla SVG; no inline styles/assets). */
 :root {
   --graph-background: #f8fafc;
@@ -146,6 +176,7 @@ main > form[action="/api/remote/login"] input[type="password"] {
   --graph-kind-correction: #b45309;
   --graph-kind-user-fact: #1d4ed8;
   --graph-kind-model-inference: #6d28d9;
+  --graph-kind-topic: #be185d;
   --graph-kind-other: #475569;
   --graph-match: #e11d48;
   --graph-selected: #111827;
@@ -165,6 +196,7 @@ main > form[action="/api/remote/login"] input[type="password"] {
     --graph-kind-correction: #fbbf24;
     --graph-kind-user-fact: #60a5fa;
     --graph-kind-model-inference: #a78bfa;
+    --graph-kind-topic: #f472b6;
     --graph-kind-other: #cbd5e1;
     --graph-match: #fb7185;
     --graph-selected: #f8fafc;
@@ -251,6 +283,20 @@ main > form[action="/api/remote/login"] input[type="password"] {
   background: transparent;
 }
 
+.memory-graph-legend__swatch--topic {
+  border-radius: 2px;
+  background: var(--graph-kind-topic);
+}
+
+.memory-graph-legend__swatch--similar {
+  height: 0;
+  border: 0;
+  border-bottom: 2px dotted var(--graph-edge);
+  border-radius: 0;
+  background: transparent;
+  opacity: 0.6;
+}
+
 #memory-graph-canvas {
   display: block;
   width: 100%;
@@ -301,6 +347,11 @@ main > form[action="/api/remote/login"] input[type="password"] {
 
 .memory-graph-node__dot.memory-graph-node--kind-other {
   fill: var(--graph-kind-other);
+}
+
+.memory-graph-node__dot.memory-graph-node--kind-topic {
+  fill: var(--graph-kind-topic);
+  stroke-width: 1;
 }
 
 .memory-graph-node__dot.memory-graph-node--retired {
@@ -354,6 +405,10 @@ main > form[action="/api/remote/login"] input[type="password"] {
   fill: var(--graph-match);
 }
 
+.memory-graph-node--topic .memory-graph-node__label {
+  font-style: italic;
+}
+
 .memory-graph-edge {
   stroke: var(--graph-edge);
   stroke-width: 1;
@@ -362,6 +417,13 @@ main > form[action="/api/remote/login"] input[type="password"] {
 
 .memory-graph-edge--consolidation {
   stroke-dasharray: 6 4;
+}
+
+/* Automatic similarity links: thin, dotted, and quieter than explicit edges. */
+.memory-graph-edge--similar {
+  stroke-width: 0.75;
+  stroke-dasharray: 2 3;
+  opacity: 0.45;
 }
 
 .memory-graph--focus .memory-graph-node--dim {

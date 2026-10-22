@@ -955,10 +955,39 @@ button[data-action-evidence="before"] {
   display: grid;
   gap: 0.25rem;
 }
+.memory-list-scroll {
+  max-height: 60vh;
+  overflow-y: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 0.25rem 0.75rem;
+}
+#memory-list li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+}
+.memory-topic-chip {
+  display: inline-block;
+  padding: 0 0.4rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  font-size: 0.75rem;
+  color: var(--muted-foreground);
+}
+#memory-list-all {
+  margin: 0.5rem 0;
+}
 #memory-detail {
   display: grid;
   gap: 0.5rem;
   margin-top: 0.5rem;
+}
+/* `display: grid` above would otherwise defeat the element's `hidden`
+   attribute (a UA `display: none`), leaving an empty detail panel visible. */
+#memory-detail[hidden] {
+  display: none;
 }
 #memory-detail-body {
   white-space: pre-wrap;
@@ -1047,6 +1076,20 @@ button[data-action-evidence="before"] {
   border: 2px dashed var(--muted-foreground);
   background: transparent;
 }
+
+.memory-graph-legend__swatch--topic {
+  border-radius: 2px;
+  background: var(--chart-5);
+}
+
+.memory-graph-legend__swatch--similar {
+  height: 0;
+  border: 0;
+  border-bottom: 2px dotted var(--muted-foreground);
+  border-radius: 0;
+  background: transparent;
+  opacity: 0.6;
+}
 #memory-graph-canvas {
   display: block;
   width: 100%;
@@ -1088,6 +1131,10 @@ button[data-action-evidence="before"] {
 }
 .memory-graph-node__dot.memory-graph-node--kind-other {
   fill: var(--muted-foreground);
+}
+.memory-graph-node__dot.memory-graph-node--kind-topic {
+  fill: var(--chart-5);
+  stroke-width: 1;
 }
 .memory-graph-node__dot.memory-graph-node--retired {
   fill: var(--muted-foreground);
@@ -1131,6 +1178,9 @@ button[data-action-evidence="before"] {
   font-weight: 700;
   fill: var(--chart-5);
 }
+.memory-graph-node--topic .memory-graph-node__label {
+  font-style: italic;
+}
 .memory-graph-edge {
   stroke: var(--muted-foreground);
   stroke-width: 1;
@@ -1138,6 +1188,12 @@ button[data-action-evidence="before"] {
 }
 .memory-graph-edge--consolidation {
   stroke-dasharray: 6 4;
+}
+/* Automatic similarity links: thin, dotted, and quieter than explicit edges. */
+.memory-graph-edge--similar {
+  stroke-width: 0.75;
+  stroke-dasharray: 2 3;
+  opacity: 0.45;
 }
 .memory-graph--focus .memory-graph-node--dim {
   opacity: 0.18;
