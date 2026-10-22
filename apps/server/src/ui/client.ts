@@ -24,11 +24,18 @@ import {
 import {
   GraphCanvas,
   type GraphData,
-  type GraphEdgeData,
-  type GraphNodeData,
+  type MemoryListRow,
+  memoryListRows,
+  parseGraphData,
+  withTopicHubs,
 } from "./graph.js";
 import { HandoffPanel } from "./handoff_panel.js";
 import { LearningPanel } from "./learning_panel.js";
+import {
+  browseRunId,
+  returnToBrowseGenerations,
+  searchButtonDisabledAfterAbandon,
+} from "./memory_list_actions.js";
 import { NotificationPanel } from "./notification_panel.js";
 import { ProposalPanel } from "./proposal_panel.js";
 import {
@@ -377,87 +384,6 @@ function formatInstant(ms: number): string {
   );
 }
 
-/**
- * Structural guard for the read-only graph response. Only the fields the
- * canvas needs are accepted; malformed rows are dropped rather than rendered
- * as partial nodes.
- */
-function parseGraphData(value: unknown): GraphData | null {
-  if (typeof value !== "object" || value === null) {
-    return null;
-  }
-  const body = value as {
-    searchId?: unknown;
-    version?: unknown;
-    scope?: unknown;
-    center?: unknown;
-    nodes?: unknown;
-    edges?: unknown;
-    truncated?: unknown;
-  };
-  if (
-    typeof body.searchId !== "string" ||
-    typeof body.version !== "string" ||
-    (body.scope !== "global" && body.scope !== "local") ||
-    !Array.isArray(body.nodes) ||
-    !Array.isArray(body.edges)
-  ) {
-    return null;
-  }
-  const nodes = body.nodes.flatMap<GraphNodeData>((item) => {
-    if (typeof item !== "object" || item === null) {
-      return [];
-    }
-    const node = item as {
-      handle?: unknown;
-      label?: unknown;
-      status?: unknown;
-      kind?: unknown;
-      episode?: unknown;
-    };
-    if (
-      typeof node.handle !== "string" ||
-      typeof node.label !== "string" ||
-      (node.status !== "active" && node.status !== "retired") ||
-      typeof node.kind !== "string"
-    ) {
-      return [];
-    }
-    return [
-      {
-        handle: node.handle,
-        label: node.label,
-        status: node.status,
-        kind: node.kind,
-        episode: node.episode ?? null,
-      },
-    ];
-  });
-  const edges = body.edges.flatMap<GraphEdgeData>((item) => {
-    if (typeof item !== "object" || item === null) {
-      return [];
-    }
-    const edge = item as { from?: unknown; to?: unknown; kind?: unknown };
-    if (
-      typeof edge.from !== "string" ||
-      typeof edge.to !== "string" ||
-      (edge.kind !== "related" && edge.kind !== "consolidation")
-    ) {
-      return [];
-    }
-    return [{ from: edge.from, to: edge.to, kind: edge.kind }];
-  });
-  return {
-    searchId: body.searchId,
-    version: body.version,
-    scope: body.scope,
-    center: typeof body.center === "string" ? body.center : null,
-    nodes,
-    edges,
-    truncated: body.truncated === true,
-  };
-}
-
 class ConversationApp {
   private sessionId: string | null = null;
   private activeRunId: string | null = null;
@@ -528,6 +454,9 @@ class ConversationApp {
   private readonly memoryInput: HTMLInputElement;
   private readonly memorySearchButton: HTMLButtonElement;
   private readonly memoryList: HTMLElement;
+  private readonly memoryListScroll: HTMLElement;
+  private readonly memoryListStatus: HTMLElement;
+  private readonly memoryListAll: HTMLButtonElement;
   private readonly memoryDetail: HTMLElement;
   private readonly memoryDetailBody: HTMLElement;
   private readonly memoryCorrectInput: HTMLTextAreaElement;
@@ -544,8 +473,11 @@ class ConversationApp {
   private readonly memoryGraphLocal: HTMLButtonElement;
   private readonly memoryGraphDepth: HTMLSelectElement;
   private readonly memoryGraphRetired: HTMLInputElement;
+  private readonly memoryGraphTopics: HTMLInputElement;
   private readonly memoryGraphStatus: HTMLElement;
   private readonly memoryGraphCanvas: GraphCanvas | null;
+  /** Latest raw graph payload; the topics toggle re-renders from this. */
+  private memoryGraphData: GraphData | null = null;
   /** True while the graph view (not the result list) is visible. */
   private memoryGraphView = false;
   /**
@@ -563,6 +495,19 @@ class ConversationApp {
   } | null = null;
   private memoryGraphSelected: string | null = null;
   private memoryGraphSeq = 0;
+  /**
+   * List view is a full-memory browse by default. A submitted query switches
+   * it to explicit search results until 「すべて表示」 (or an empty query)
+   * returns to the projection-backed browse.
+   */
+  private memoryListMode: "browse" | "search" = "browse";
+  private memoryBrowseRows: MemoryListRow[] = [];
+  private memoryBrowseScope: {
+    readonly sessionId: string;
+    readonly searchId: string;
+    readonly runId: string;
+  } | null = null;
+  private memoryBrowseSeq = 0;
   /**
    * Last explicit list-search scope (used to resolve list-row details even
    * after the graph replaced the shared detail binding).
@@ -650,6 +595,14 @@ class ConversationApp {
         "memory-search-button",
       ) as HTMLButtonElement | null) ?? document.createElement("button");
     this.memoryList = document.getElementById("memory-list") ?? el("ul");
+    this.memoryListScroll =
+      document.getElementById("memory-list-scroll") ?? el("div");
+    this.memoryListStatus =
+      document.getElementById("memory-list-status") ?? el("p");
+    this.memoryListAll =
+      (document.getElementById(
+        "memory-list-all",
+      ) as HTMLButtonElement | null) ?? document.createElement("button");
     this.memoryDetail = document.getElementById("memory-detail") ?? el("div");
     this.memoryDetailBody =
       document.getElementById("memory-detail-body") ?? el("pre");
@@ -699,6 +652,10 @@ class ConversationApp {
     this.memoryGraphRetired =
       (document.getElementById(
         "memory-graph-retired",
+      ) as HTMLInputElement | null) ?? document.createElement("input");
+    this.memoryGraphTopics =
+      (document.getElementById(
+        "memory-graph-topics",
       ) as HTMLInputElement | null) ?? document.createElement("input");
     this.memoryGraphStatus =
       document.getElementById("memory-graph-status") ?? el("p");
@@ -772,6 +729,14 @@ class ConversationApp {
       if (this.memoryGraphView && this.memoryGraphScope?.scope !== "local") {
         void this.loadMemoryGraph("global");
       }
+    });
+    this.memoryGraphTopics.addEventListener("change", () => {
+      if (this.memoryGraphView) {
+        this.renderMemoryGraph();
+      }
+    });
+    this.memoryListAll.addEventListener("click", () => {
+      this.showAllMemories();
     });
     this.memoryCorrectButton.addEventListener("click", () => {
       void this.stageMemoryMutation("record.correct");
@@ -1001,6 +966,11 @@ class ConversationApp {
     // subscription replays its terminal — a captured-active reload that
     // races completion can never append a second answer.
     await this.hydrateHistory();
+    // The list view is open by default: browse every projection node. This
+    // must run AFTER history hydration / pending-run recovery: before that
+    // `activeRunId` and the rendered runs are empty, so a normal reload
+    // would only ever report "create a Run" and never retry.
+    void this.loadMemoryBrowse();
     // C22: read the actual pending proposals/executions after the durable
     // history so a reload restores a still-pending approval card (and its
     // real progress/receipt) without ever persisting proposal content.
@@ -3604,7 +3574,8 @@ class ConversationApp {
     const sessionId = this.sessionId;
     const query = this.memoryInput.value.trim();
     if (query.length === 0) {
-      this.showNotice("検索語を入力してください");
+      // An empty query means "back to the full browse list", not an error.
+      this.showAllMemories();
       return;
     }
     const runId = this.activeRunId ?? this.latestRenderedRunId();
@@ -3614,6 +3585,7 @@ class ConversationApp {
     }
     this.memorySearchSeq += 1;
     const seq = this.memorySearchSeq;
+    this.setMemoryListMode("search");
     // Synchronous invalidation BEFORE the first await: no stale list item
     // remains selectable/countable while the new search is in flight.
     // The correction draft belongs to the previous (searchId, handle): clear
@@ -3733,7 +3705,7 @@ class ConversationApp {
     this.memoryViewList.setAttribute("aria-pressed", String(!graph));
     this.memoryViewGraph.setAttribute("aria-pressed", String(graph));
     this.memoryGraph.hidden = !graph;
-    this.memoryList.hidden = graph;
+    this.memoryListScroll.hidden = graph;
     if (graph) {
       this.memoryGraphCanvas?.setSearchQuery(this.memoryInput.value);
       if (this.memoryGraphScope === null) {
@@ -3741,7 +3713,52 @@ class ConversationApp {
       }
     } else {
       this.memoryGraphCanvas?.setSearchQuery("");
+      // Opening the list view always starts from the full browse projection.
+      this.showAllMemories();
     }
+  }
+
+  /** Toggle between projection-backed browse rows and search results. */
+  private setMemoryListMode(mode: "browse" | "search"): void {
+    this.memoryListMode = mode;
+    this.memoryListAll.hidden = mode !== "search";
+    this.memoryListStatus.hidden = mode !== "browse";
+  }
+
+  /**
+   * Return the list view to the full browse projection. Search state is
+   * dropped; the browse scope is replaced only by a fresh successful read.
+   */
+  private showAllMemories(): void {
+    this.setMemoryListMode("browse");
+    // Returning to browse abandons both an in-flight search and a pending
+    // detail read: bumping both generations makes their late responses
+    // stale, so neither can restore the previous selection or re-enable
+    // correction/retirement actions over the fresh browse state.
+    const generations = returnToBrowseGenerations(
+      this.memorySearchSeq,
+      this.memoryDetailSeq,
+    );
+    this.memorySearchSeq = generations.searchSeq;
+    this.memoryDetailSeq = generations.detailSeq;
+    this.memoryScope = null;
+    // The abandoned search's `finally` no longer re-enables the button
+    // (its sequence is stale), so reset it here. A mutation in flight keeps
+    // it disabled until that operation settles.
+    this.memorySearchButton.disabled = searchButtonDisabledAfterAbandon(
+      this.memoryMutating,
+    );
+    this.memorySelected = null;
+    this.memoryDetail.hidden = true;
+    this.memoryDetailBody.textContent = "";
+    this.memoryCorrectInput.value = "";
+    this.memoryRetryButton.hidden = true;
+    this.memoryOpStatus.textContent = "";
+    this.memoryOpStatus.dataset.searchId = "";
+    this.memoryOpStatus.dataset.operation = "";
+    this.setMemoryButtonsDisabled(true);
+    this.memoryList.textContent = "";
+    void this.loadMemoryBrowse();
   }
 
   /** In graph view the search box is a label highlighter, not a search. */
@@ -3892,10 +3909,8 @@ class ConversationApp {
     ) {
       this.memoryGraphSelected = null;
     }
-    this.memoryGraphCanvas?.setGraph(data, {
-      selected: this.memoryGraphSelected,
-      query: this.memoryInput.value,
-    });
+    this.memoryGraphData = data;
+    this.renderMemoryGraph();
     this.memoryGraphGlobal.setAttribute(
       "aria-pressed",
       String(data.scope === "global"),
@@ -3912,6 +3927,164 @@ class ConversationApp {
     } else {
       this.memoryGraphStatus.textContent = "";
     }
+  }
+
+  /** Re-render the retained graph (topic toggle changes the node set). */
+  private renderMemoryGraph(): void {
+    const data = this.memoryGraphData;
+    if (data === null) {
+      return;
+    }
+    const display =
+      this.memoryGraphTopics.checked === false
+        ? { nodes: data.nodes, edges: data.edges }
+        : withTopicHubs(data.nodes, data.edges);
+    this.memoryGraphCanvas?.setGraph(
+      {
+        ...data,
+        nodes: display.nodes,
+        edges: display.edges,
+      },
+      {
+        selected: this.memoryGraphSelected,
+        query: this.memoryInput.value,
+      },
+    );
+  }
+
+  private setBrowseStatus(text: string): void {
+    this.memoryListStatus.textContent = text;
+    this.memoryListStatus.hidden =
+      this.memoryListMode !== "browse" || text.length === 0;
+  }
+
+  /** Repaint the browse list (search results are a separate list mode). */
+  private renderMemoryBrowse(): void {
+    if (this.memoryListMode !== "browse") {
+      return;
+    }
+    this.memoryList.textContent = "";
+    for (const row of this.memoryBrowseRows) {
+      const item = el("li");
+      const button = el("button", `${row.handle} [${row.status}] ${row.label}`);
+      const handle = row.handle;
+      button.addEventListener("click", () => {
+        const scope = this.memoryBrowseScope;
+        if (scope === null) {
+          return;
+        }
+        void this.openMemoryDetail(scope.searchId, handle);
+      });
+      item.append(button);
+      for (const topic of row.topics) {
+        const chip = el("span", topic);
+        chip.className = "memory-topic-chip";
+        item.append(chip);
+      }
+      this.memoryList.append(item);
+    }
+  }
+
+  /**
+   * Load the global graph projection as the list view's full-memory browse.
+   * Uses its own generation/session guard (a browse response never touches a
+   * search result list) and keeps the existing 503 fallback: search still
+   * works when the memory server predates the graph ops.
+   */
+  private async loadMemoryBrowse(): Promise<void> {
+    if (this.sessionId === null) {
+      return;
+    }
+    if (this.memoryDisabled) {
+      this.memoryBrowseRows = [];
+      this.memoryBrowseScope = null;
+      this.setBrowseStatus("記憶は無効です");
+      this.renderMemoryBrowse();
+      return;
+    }
+    const sessionId = this.sessionId;
+    const runId = browseRunId(this.activeRunId, this.latestRenderedRunId());
+    if (runId === null) {
+      this.setBrowseStatus(
+        "メッセージを送信して Run を作ってから表示してください",
+      );
+      return;
+    }
+    this.memoryBrowseSeq += 1;
+    const seq = this.memoryBrowseSeq;
+    const current = (): boolean =>
+      this.sessionId === sessionId && seq === this.memoryBrowseSeq;
+    this.setBrowseStatus("読み込み中");
+    const params = new URLSearchParams({
+      includeRetired: "true",
+      runId,
+    });
+    let res: { status: number; body: unknown };
+    try {
+      res = await fetchJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/memory/graph?${params.toString()}`,
+      );
+    } catch {
+      if (current()) {
+        this.memoryBrowseRows = [];
+        this.memoryBrowseScope = null;
+        this.setBrowseStatus("error: 一覧の取得に失敗しました");
+        this.renderMemoryBrowse();
+        this.showNotice("記憶一覧の取得に失敗しました");
+      }
+      return;
+    }
+    if (!current()) {
+      return;
+    }
+    const code = (res.body as { error?: { code?: unknown } }).error?.code;
+    if (res.status === 404 && code === "memory_unavailable") {
+      this.memoryDisabled = true;
+      this.memoryBrowseRows = [];
+      this.memoryBrowseScope = null;
+      this.setBrowseStatus("記憶は無効です");
+      this.renderMemoryBrowse();
+      return;
+    }
+    if (res.status === 503 && code === "memory_graph_unavailable") {
+      this.memoryBrowseRows = [];
+      this.memoryBrowseScope = null;
+      this.setBrowseStatus("グラフ機能は記憶サーバーの更新後に利用できます");
+      this.renderMemoryBrowse();
+      this.showNotice("グラフ機能は記憶サーバーの更新後に利用できます");
+      return;
+    }
+    if (res.status !== 200) {
+      this.memoryBrowseRows = [];
+      this.memoryBrowseScope = null;
+      this.setBrowseStatus("error: 一覧の取得に失敗しました");
+      this.renderMemoryBrowse();
+      this.showNotice("記憶一覧の取得に失敗しました");
+      return;
+    }
+    const data = parseGraphData(res.body);
+    if (data === null) {
+      this.memoryBrowseRows = [];
+      this.memoryBrowseScope = null;
+      this.setBrowseStatus("error: 一覧の取得に失敗しました");
+      this.renderMemoryBrowse();
+      this.showNotice("記憶一覧の取得に失敗しました");
+      return;
+    }
+    this.memoryBrowseRows = memoryListRows(data.nodes);
+    this.memoryBrowseScope = {
+      sessionId,
+      searchId: data.searchId,
+      runId,
+    };
+    if (data.nodes.length === 0) {
+      this.setBrowseStatus("記憶がありません");
+    } else if (data.truncated) {
+      this.setBrowseStatus("一部のみ表示（上限）");
+    } else {
+      this.setBrowseStatus("");
+    }
+    this.renderMemoryBrowse();
   }
 
   /** Graph node click: select it and open the existing bound detail flow. */
@@ -3932,12 +4105,15 @@ class ConversationApp {
       (this.memoryGraphSelected === null && this.memorySelected === null);
   }
 
-  /** Refresh the visible graph after an acked mutation (version-cached). */
+  /** Refresh the visible projection after an acked mutation (version-cached). */
   private refreshGraphAfterMutation(): void {
-    if (this.memoryGraph.hidden || this.memoryGraphScope === null) {
+    if (!this.memoryGraph.hidden && this.memoryGraphScope !== null) {
+      void this.loadMemoryGraph(this.memoryGraphScope.scope);
       return;
     }
-    void this.loadMemoryGraph(this.memoryGraphScope.scope);
+    // The list browse must not keep showing a corrected/retired node. In
+    // search mode this refreshes the browse snapshot in the background.
+    void this.loadMemoryBrowse();
   }
 
   /** Latest rendered run id (originating-run fallback when idle). */
@@ -4062,9 +4238,11 @@ class ConversationApp {
         ? this.memoryScope
         : this.memoryListScope?.searchId === searchId
           ? this.memoryListScope
-          : this.memoryGraphScope?.searchId === searchId
-            ? this.memoryGraphScope
-            : null;
+          : this.memoryBrowseScope?.searchId === searchId
+            ? this.memoryBrowseScope
+            : this.memoryGraphScope?.searchId === searchId
+              ? this.memoryGraphScope
+              : null;
     if (scope === null || scope.sessionId !== sessionId) {
       this.showNotice("古い検索結果です。再検索してください");
       return;

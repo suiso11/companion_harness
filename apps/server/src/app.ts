@@ -191,6 +191,7 @@ export interface MemoryGraphHttpResult {
     readonly label: string;
     readonly status: "active" | "retired";
     readonly kind: string;
+    readonly topics?: readonly string[] | undefined;
     readonly episode: {
       readonly kind: "session" | "doc" | "day";
       readonly episodeKey: string;
@@ -200,7 +201,7 @@ export interface MemoryGraphHttpResult {
   readonly edges: ReadonlyArray<{
     readonly from: string;
     readonly to: string;
-    readonly kind: "related" | "consolidation";
+    readonly kind: "related" | "consolidation" | "similar";
   }>;
   readonly truncated: boolean;
 }

@@ -12,13 +12,17 @@ export interface GraphNodeData {
   readonly label: string;
   readonly status: "active" | "retired";
   readonly kind: string;
+  /** Derived general-category topics (remind PR #29); empty when absent. */
+  readonly topics?: readonly string[];
+  /** Client-side tag hub (`withTopicHubs`); never a real memory handle. */
+  readonly topicHub?: boolean;
   readonly episode: unknown;
 }
 
 export interface GraphEdgeData {
   readonly from: string;
   readonly to: string;
-  readonly kind: "related" | "consolidation";
+  readonly kind: "related" | "consolidation" | "similar";
 }
 
 export interface GraphData {
@@ -36,6 +40,28 @@ export interface GraphData {
  * (the production `/memory` route) so malformed rows are dropped rather than
  * rendered as partial nodes/edges. Legacy client has its own copy.
  */
+function parseGraphTopics(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const topics: string[] = [];
+  for (const raw of value) {
+    if (typeof raw !== "string") {
+      continue;
+    }
+    const topic = raw.trim();
+    if (
+      topic.length === 0 ||
+      Array.from(topic).length > 12 ||
+      topics.includes(topic)
+    ) {
+      continue;
+    }
+    topics.push(topic);
+  }
+  return topics.slice(0, 3);
+}
+
 export function parseGraphData(value: unknown): GraphData | null {
   if (typeof value !== "object" || value === null) {
     return null;
@@ -67,6 +93,7 @@ export function parseGraphData(value: unknown): GraphData | null {
       label?: unknown;
       status?: unknown;
       kind?: unknown;
+      topics?: unknown;
       episode?: unknown;
     };
     if (
@@ -77,12 +104,14 @@ export function parseGraphData(value: unknown): GraphData | null {
     ) {
       return [];
     }
+    const topics = parseGraphTopics(node.topics);
     return [
       {
         handle: node.handle,
         label: node.label,
         status: node.status,
         kind: node.kind,
+        ...(topics.length > 0 ? { topics } : {}),
         episode: node.episode ?? null,
       },
     ];
@@ -95,7 +124,9 @@ export function parseGraphData(value: unknown): GraphData | null {
     if (
       typeof edge.from !== "string" ||
       typeof edge.to !== "string" ||
-      (edge.kind !== "related" && edge.kind !== "consolidation")
+      (edge.kind !== "related" &&
+        edge.kind !== "consolidation" &&
+        edge.kind !== "similar")
     ) {
       return [];
     }
@@ -110,6 +141,95 @@ export function parseGraphData(value: unknown): GraphData | null {
     edges,
     truncated: body.truncated === true,
   };
+}
+
+export const TOPIC_HUB_PREFIX = "topic:";
+
+/** Stable synthetic handle for one client-side topic hub. */
+export function topicHubHandle(topic: string): string {
+  return `${TOPIC_HUB_PREFIX}${topic}`;
+}
+
+export interface TopicHubGraph {
+  readonly nodes: readonly GraphNodeData[];
+  readonly edges: readonly GraphEdgeData[];
+}
+
+/**
+ * Obsidian-style tags-as-nodes: append one hub node per distinct topic among
+ * the visible nodes plus a `related` edge from every member to its hub.
+ * Pure (never mutates the input); topics are deduped case-insensitively while
+ * the first spelling is kept. Nodes without topics are returned unchanged.
+ */
+export function withTopicHubs(
+  nodes: readonly GraphNodeData[],
+  edges: readonly GraphEdgeData[],
+): TopicHubGraph {
+  if (!nodes.some((node) => (node.topics?.length ?? 0) > 0)) {
+    return { nodes: [...nodes], edges: [...edges] };
+  }
+  const usedHandles = new Set(nodes.map((node) => node.handle));
+  const hubByKey = new Map<string, GraphNodeData>();
+  const hubEdges: GraphEdgeData[] = [];
+  for (const node of nodes) {
+    const seenInNode = new Set<string>();
+    for (const rawTopic of node.topics ?? []) {
+      const topic = rawTopic.trim();
+      const key = topic.toLowerCase();
+      if (topic.length === 0 || seenInNode.has(key)) {
+        continue;
+      }
+      seenInNode.add(key);
+      let hub = hubByKey.get(key);
+      if (hub === undefined) {
+        let handle = topicHubHandle(topic);
+        while (usedHandles.has(handle)) {
+          handle = `${handle}_`;
+        }
+        usedHandles.add(handle);
+        hub = {
+          handle,
+          label: topic,
+          status: "active",
+          kind: "topic",
+          topicHub: true,
+          episode: null,
+        };
+        hubByKey.set(key, hub);
+      }
+      hubEdges.push({ from: node.handle, to: hub.handle, kind: "related" });
+    }
+  }
+  return {
+    nodes: [...nodes, ...hubByKey.values()],
+    edges: [...edges, ...hubEdges],
+  };
+}
+
+/** One browse row per projection node, preserving the server's order. */
+export interface MemoryListRow {
+  readonly handle: string;
+  readonly status: "active" | "retired";
+  readonly label: string;
+  readonly topics: readonly string[];
+}
+
+export function memoryListRows(
+  nodes: readonly GraphNodeData[],
+): MemoryListRow[] {
+  const rows: MemoryListRow[] = [];
+  for (const node of nodes) {
+    if (node.topicHub === true) {
+      continue;
+    }
+    rows.push({
+      handle: node.handle,
+      status: node.status,
+      label: node.label,
+      topics: [...(node.topics ?? [])],
+    });
+  }
+  return rows;
 }
 
 export interface LayoutNode extends GraphNodeData {
@@ -135,6 +255,13 @@ export const GRAPH_WIDTH = 800;
 export const GRAPH_HEIGHT = 480;
 export const GRAPH_ALPHA_MIN = 0.02;
 export const GRAPH_ALPHA_DECAY = 0.97;
+/**
+ * Per-node x/y gravity toward the layout origin (d3 `forceX`/`forceY`
+ * strength). It is deliberately much stronger than a tiny drift correction:
+ * repulsion pushes disconnected components apart forever otherwise, so a
+ * visible two-cluster graph can settle against the canvas edge.
+ */
+export const GRAPH_CENTER_STRENGTH = 0.08;
 export const LABEL_ZOOM_THRESHOLD = 1.2;
 /** Graphs up to this many nodes always show every label. */
 export const LABEL_NODE_LIMIT = 80;
@@ -206,6 +333,11 @@ export function highlightHandles(
     result.add(neighbor);
   }
   return result;
+}
+
+/** CSS class for one edge kind (similar edges are dotted/dimmed in CSS). */
+export function graphEdgeClass(kind: GraphEdgeData["kind"]): string {
+  return `memory-graph-edge memory-graph-edge--${kind}`;
 }
 
 /** Case-insensitive substring match used by the graph-view search box. */
@@ -399,8 +531,9 @@ export function createLayout(
 
 /**
  * One deterministic simulation tick: O(n²) repulsion (n ≤ 500), spring
- * links, weak centering, velocity damping and alpha decay. A collision pass
- * keeps resting nodes from overlapping even in dense local graphs.
+ * links, per-node x/y gravity toward the origin, velocity damping and alpha
+ * decay. A collision pass keeps resting nodes from overlapping even in dense
+ * local graphs.
  */
 export function layoutStep(layout: GraphLayout): GraphLayout {
   if (layout.alpha <= 0) {
@@ -417,7 +550,6 @@ export function layoutStep(layout: GraphLayout): GraphLayout {
   const desired = Math.max(42, Math.min(96, spread * 0.72));
   const repulsion = spread * spread * 0.02;
   const spring = 0.018;
-  const centerPull = 0.0025;
   const damping = 0.84;
   const alpha = layout.alpha;
 
@@ -518,12 +650,16 @@ export function layoutStep(layout: GraphLayout): GraphLayout {
       continue;
     }
     if (!node.fixed) {
+      // d3-style forceX/forceY: every node, including each node of a
+      // disconnected component, is pulled toward the canvas origin. Scaling
+      // by alpha keeps the pull strong while the simulation is hot and lets
+      // it relax as the layout settles.
+      const gravityX = -node.x * GRAPH_CENTER_STRENGTH;
+      const gravityY = -node.y * GRAPH_CENTER_STRENGTH;
       node.vx =
-        (node.vx + (forceX[index] ?? 0) * alpha - node.x * centerPull) *
-        damping;
+        (node.vx + (forceX[index] ?? 0) * alpha + gravityX * alpha) * damping;
       node.vy =
-        (node.vy + (forceY[index] ?? 0) * alpha - node.y * centerPull) *
-        damping;
+        (node.vy + (forceY[index] ?? 0) * alpha + gravityY * alpha) * damping;
       node.x += node.vx;
       node.y += node.vy;
     } else {
@@ -569,6 +705,7 @@ const KIND_CLASSES: Readonly<Record<string, string>> = {
   correction: "memory-graph-node--kind-correction",
   user_fact: "memory-graph-node--kind-user-fact",
   model_inference: "memory-graph-node--kind-model-inference",
+  topic: "memory-graph-node--kind-topic",
 };
 
 export interface GraphCanvasCallbacks {
@@ -589,7 +726,7 @@ interface PointerGesture {
 interface RenderedNode {
   readonly layout: LayoutNode;
   readonly group: SVGGElement;
-  readonly circle: SVGCircleElement;
+  readonly dot: SVGElement;
   readonly label: SVGTextElement;
 }
 
@@ -719,38 +856,56 @@ export class GraphCanvas {
 
     for (const edge of layout.edges) {
       const element = this.doc.createElementNS(SVG_NS, "line");
-      element.setAttribute(
-        "class",
-        `memory-graph-edge memory-graph-edge--${edge.kind}`,
-      );
+      element.setAttribute("class", graphEdgeClass(edge.kind));
       this.edgeLayer.append(element);
       this.edgeElements.push({ element, edge });
     }
     for (const node of layout.nodes) {
+      const isHub = node.topicHub === true;
       const group = this.doc.createElementNS(SVG_NS, "g");
       group.setAttribute("class", this.nodeClass(node));
       group.setAttribute("tabindex", "0");
       group.setAttribute("role", "button");
-      group.setAttribute("aria-label", `${node.label} (${node.handle})`);
+      group.setAttribute(
+        "aria-label",
+        isHub ? `${node.label}（話題）` : `${node.label} (${node.handle})`,
+      );
       group.dataset.handle = node.handle;
-      const circle = this.doc.createElementNS(SVG_NS, "circle");
-      circle.setAttribute(
+      // Topic hubs are smaller diamonds; memory nodes keep their degree-sized
+      // disc. Both use the same collision radius from the layout.
+      const dotRadius = isHub ? Math.max(5, node.radius * 0.6) : node.radius;
+      const dot = this.doc.createElementNS(SVG_NS, isHub ? "rect" : "circle");
+      dot.setAttribute(
         "class",
         `memory-graph-node__dot ${this.nodeModifierClass(node)}`,
       );
-      circle.setAttribute("r", String(node.radius));
-      circle.setAttribute("cx", "0");
-      circle.setAttribute("cy", "0");
+      if (isHub) {
+        dot.setAttribute("x", String(-dotRadius));
+        dot.setAttribute("y", String(-dotRadius));
+        dot.setAttribute("width", String(dotRadius * 2));
+        dot.setAttribute("height", String(dotRadius * 2));
+        dot.setAttribute("rx", "1");
+        dot.setAttribute("transform", "rotate(45)");
+      } else {
+        dot.setAttribute("r", String(dotRadius));
+        dot.setAttribute("cx", "0");
+        dot.setAttribute("cy", "0");
+      }
       // Full label for the native tooltip; the visible text is truncated so a
-      // long memory never paints a wall of text over its neighbours.
+      // long memory never paints a wall of text over its neighbours. Topics
+      // are metadata, so they live in the tooltip rather than the label.
       const title = this.doc.createElementNS(SVG_NS, "title");
-      title.textContent = node.label;
+      const topics = node.topics ?? [];
+      title.textContent =
+        topics.length > 0
+          ? `${node.label}\n話題: ${topics.join("、")}`
+          : node.label;
       const label = this.doc.createElementNS(SVG_NS, "text");
       label.setAttribute("class", "memory-graph-node__label");
-      label.setAttribute("x", String(node.radius + 4));
+      label.setAttribute("x", String(dotRadius + 4));
       label.setAttribute("y", "4");
       label.textContent = truncateLabel(node.label);
-      group.append(title, circle, label);
+      group.append(title, dot, label);
       group.addEventListener("pointerenter", () => {
         this.hovered = node.handle;
         this.paintFocus();
@@ -778,7 +933,7 @@ export class GraphCanvas {
         }
       });
       this.nodeLayer.append(group);
-      this.rendered.set(node.handle, { layout: node, group, circle, label });
+      this.rendered.set(node.handle, { layout: node, group, dot, label });
     }
     this.paintFocus();
     this.render();
@@ -861,12 +1016,20 @@ export class GraphCanvas {
   }
 
   private nodeClass(node: LayoutNode): string {
-    return `memory-graph-node ${this.nodeModifierClass(node)}`;
+    const hub = node.topicHub === true ? " memory-graph-node--topic" : "";
+    return `memory-graph-node ${this.nodeModifierClass(node)}${hub}`;
   }
 
   private activate(handle: string): void {
+    const node = this.rendered.get(handle)?.layout;
     this.selected = handle;
     this.paintFocus();
+    // A topic hub has no memory detail: selecting it highlights its members
+    // through the normal 1-hop focus, but it never opens the detail panel or
+    // becomes a local-graph centre.
+    if (node?.topicHub === true) {
+      return;
+    }
     this.callbacks.onSelectionChange?.(handle);
     this.callbacks.onNodeActivate(handle);
   }
@@ -941,14 +1104,14 @@ export class GraphCanvas {
       }
       layoutStep(layout);
       if (layout.alpha <= 0 && this.fitPending) {
-        this.camera = fitCamera(
-          layout.nodes,
-          this.viewportWidth,
-          this.viewportHeight,
-        );
-        this.fitPending = false;
+        // Refit the *resting* layout (not the deterministic seed cloud):
+        // disconnected components can drift under repulsion, and a topic-hub
+        // toggle replaces the node set, so every settled simulation needs a
+        // fresh camera. fitToView clears fitPending and repaints.
+        this.fitToView();
+      } else {
+        this.render();
       }
-      this.render();
       if (layout.alpha > 0) {
         this.frame = window.requestAnimationFrame(tick);
       }

@@ -144,6 +144,16 @@ export const MemoryGraphEpisodeSchema = z.strictObject({
 });
 export type MemoryGraphEpisode = z.infer<typeof MemoryGraphEpisodeSchema>;
 
+/**
+ * Derived general-category topics on one node (remind PR #29): at most
+ * three short nouns, each 1..12 code points. Additive/optional: old remind
+ * responses without topics still validate unchanged.
+ */
+export const MemoryGraphTopicSchema = z
+  .string()
+  .min(1)
+  .refine(codePointsMax(12), { message: "topic over 12 code points" });
+
 export const MemoryGraphNodeSchema = z.strictObject({
   handle: MemoryHandleSchema,
   label: z
@@ -152,6 +162,7 @@ export const MemoryGraphNodeSchema = z.strictObject({
     .refine(codePointsMax(512), { message: "label over 512 code points" }),
   status: z.enum(["active", "retired"]),
   kind: z.string().min(1).max(64),
+  topics: z.array(MemoryGraphTopicSchema).max(3).optional(),
   episode: MemoryGraphEpisodeSchema.nullable(),
 });
 export type MemoryGraphNode = z.infer<typeof MemoryGraphNodeSchema>;
@@ -159,7 +170,7 @@ export type MemoryGraphNode = z.infer<typeof MemoryGraphNodeSchema>;
 export const MemoryGraphEdgeSchema = z.strictObject({
   from: MemoryHandleSchema,
   to: MemoryHandleSchema,
-  kind: z.enum(["related", "consolidation"]),
+  kind: z.enum(["related", "consolidation", "similar"]),
 });
 export type MemoryGraphEdge = z.infer<typeof MemoryGraphEdgeSchema>;
 

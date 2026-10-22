@@ -13,14 +13,24 @@ import { untrack } from "svelte";
 import {
   GraphCanvas,
   type GraphData,
+  type MemoryListRow,
+  memoryListRows,
   parseGraphData,
+  withTopicHubs,
 } from "../../server/src/ui/graph.js";
+import { returnToBrowseGenerations } from "../../server/src/ui/memory_list_actions.js";
 import { errorCode, fetchJson, postJson, randomUuid } from "./lib/api.js";
 import {
   graphShowAction,
   invalidateAfterMutation,
   retainLoadedGraph,
 } from "./lib/memory_graph_state.js";
+import {
+  browseFailure,
+  browseStatusText,
+  listModeForQuery,
+  type MemoryListMode,
+} from "./lib/memory_list_state.js";
 import { getSessionId } from "./lib/session.svelte.js";
 
 const POLL_INTERVAL_MS = 500;
@@ -69,6 +79,7 @@ type GraphScope = Scope & {
 let view = $state<"list" | "graph">("list");
 let graphStatus = $state("");
 let graphRetired = $state(false);
+let graphTopics = $state(true);
 let graphDepth = $state("1");
 let graphScope = $state<GraphScope | null>(null);
 let graphSelected = $state<string | null>(null);
@@ -87,6 +98,14 @@ let graphSeq = 0;
 /** The explicit list-search scope (kept separate from the graph snapshot). */
 let listScope: Scope | null = null;
 
+// List view browses the global projection by default; a submitted query
+// switches it to explicit search results until 「すべて表示」 (or an empty
+// query) returns to browse (same state machine as the legacy client).
+let listMode = $state<MemoryListMode>("browse");
+let browseRows = $state<MemoryListRow[]>([]);
+let browseScope = $state<Scope | null>(null);
+let browseStatus = $state("");
+
 // Non-reactive generation state: awaited responses apply only while their
 // own generation/session/target is still current (no stale overwrite).
 let scope: Scope | null = null;
@@ -94,6 +113,7 @@ let pending: { key: string; body: Record<string, unknown> } | null = null;
 let searchSeq = 0;
 let detailSeq = 0;
 let opSeq = 0;
+let browseSeq = 0;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -136,8 +156,10 @@ async function latestRunId(sessionId: string): Promise<string | null> {
 async function search(): Promise<void> {
   if (searching) return;
   const text = query.trim();
-  if (text.length === 0) {
-    notice = "検索語を入力してください";
+  const mode = listModeForQuery(text);
+  if (mode === "browse") {
+    // An empty query means "back to the full browse list", not an error.
+    showAllMemories();
     return;
   }
   if (memoryDisabled) {
@@ -153,6 +175,7 @@ async function search(): Promise<void> {
   const seq = searchSeq;
   // Synchronous invalidation before the first await: a prior result/selection
   // (and its draft) can never stay actionable or countable for the new query.
+  listMode = mode;
   selected = null;
   scope = null;
   hits = [];
@@ -233,10 +256,114 @@ async function search(): Promise<void> {
   }
 }
 
-/** Paint the retained payload onto the current (possibly new) canvas. */
+/**
+ * Toggle between projection-backed browse rows and search results.
+ * Dropping search state ensures a previous result (and its draft) can never
+ * stay actionable once the full list is shown.
+ */
+function showAllMemories(): void {
+  listMode = "browse";
+  // Returning to browse abandons both an in-flight search and a pending
+  // detail read: bumping both generations makes their late responses stale,
+  // so neither can restore the previous selection/hits over the fresh browse.
+  const generations = returnToBrowseGenerations(searchSeq, detailSeq);
+  searchSeq = generations.searchSeq;
+  detailSeq = generations.detailSeq;
+  selected = null;
+  scope = null;
+  hits = [];
+  searchId = null;
+  operation = null;
+  detailBody = "";
+  detailVisible = false;
+  correctText = "";
+  retryVisible = false;
+  actionsDisabled = true;
+  opStatus = "";
+  notice = "";
+  // The abandoned search's guarded `finally` cannot re-enable the search
+  // button (its sequence is stale), so reset the busy flag here.
+  searching = false;
+  void loadBrowse();
+}
+
+/**
+ * Load the global graph projection as the list view's full-memory browse.
+ * Uses its own generation/session guard (a browse response never touches a
+ * search result list) and keeps the existing 503 fallback: search still
+ * works when the memory server predates the graph ops.
+ */
+async function loadBrowse(): Promise<void> {
+  const sessionId = getSessionId();
+  if (sessionId === null) return;
+  if (memoryDisabled) {
+    browseRows = [];
+    browseScope = null;
+    browseStatus = "記憶は無効です";
+    return;
+  }
+  browseSeq += 1;
+  const seq = browseSeq;
+  const current = (): boolean =>
+    seq === browseSeq && getSessionId() === sessionId;
+  browseStatus = "読み込み中";
+  const runId = await latestRunId(sessionId);
+  if (!current()) return;
+  if (runId === null) {
+    browseStatus = "メッセージを送信して Run を作ってから表示してください";
+    return;
+  }
+  // Browse every memory (retired included), not just the graph's default.
+  const params = new URLSearchParams({
+    includeRetired: "true",
+    runId,
+  });
+  const res = await fetchJson(
+    `/api/sessions/${encodeURIComponent(sessionId)}/memory/graph?${params.toString()}`,
+  );
+  if (!current()) return;
+  const failure = browseFailure(res.status, errorCode(res.body));
+  if (failure === "disabled") {
+    memoryDisabled = true;
+    browseRows = [];
+    browseScope = null;
+    browseStatus = "記憶は無効です";
+    return;
+  }
+  if (failure === "graph_unavailable") {
+    browseRows = [];
+    browseScope = null;
+    browseStatus = "グラフ機能は記憶サーバーの更新後に利用できます";
+    notice = "グラフ機能は記憶サーバーの更新後に利用できます";
+    return;
+  }
+  const data = failure === null ? parseGraphData(res.body) : null;
+  if (failure !== null || data === null) {
+    browseRows = [];
+    browseScope = null;
+    browseStatus = "error: 一覧の取得に失敗しました";
+    notice = "記憶一覧の取得に失敗しました";
+    return;
+  }
+  browseRows = memoryListRows(data.nodes);
+  browseScope = {
+    sessionId,
+    searchId: data.searchId,
+    runId,
+  };
+  browseStatus = browseStatusText(data.nodes.length, data.truncated);
+}
+
+/** The retained payload plus optional client-side topic hubs. */
+function displayGraph(data: GraphData): GraphData {
+  if (graphTopics === false) return data;
+  return { ...data, ...withTopicHubs(data.nodes, data.edges) };
+}
+
+/** Paint the retained payload, optionally with derived topic hubs. */
 function paintGraph(): void {
   if (canvas === null || graphData === null) return;
-  canvas.setGraph(graphData, { selected: graphSelected, query });
+  canvas.setGraph(displayGraph(graphData), { selected: graphSelected, query });
 }
 
 /** Switch between the existing result list and the read-only graph. */
@@ -257,6 +384,8 @@ function switchView(next: "list" | "graph"): void {
     }
   } else {
     canvas?.setSearchQuery("");
+    // Opening the list view always starts from the full browse projection.
+    showAllMemories();
   }
 }
 
@@ -396,7 +525,13 @@ function refreshGraphAfterMutation(): void {
     view,
   );
   graphStale = result.retention.stale;
-  if (result.refetchNow) void loadGraph(graphScope?.scope ?? "global");
+  if (view === "graph") {
+    void loadGraph(graphScope?.scope ?? "global");
+    return;
+  }
+  // The list browse must not keep showing a corrected/retired node. In
+  // search mode this refreshes the browse snapshot in the background.
+  void loadBrowse();
 }
 
 // The GraphCanvas instance follows the container's mount state only: search
@@ -417,7 +552,10 @@ $effect(() => {
   canvas = instance;
   untrack(() => {
     if (graphData !== null && !graphStale) {
-      instance.setGraph(graphData, { selected: graphSelected, query });
+      instance.setGraph(displayGraph(graphData), {
+        selected: graphSelected,
+        query,
+      });
     } else {
       instance.setSearchQuery(query);
     }
@@ -449,9 +587,11 @@ async function openDetail(target: string, handle: string): Promise<void> {
       ? scope
       : listScope?.searchId === target
         ? listScope
-        : graphScope?.searchId === target
-          ? graphScope
-          : null;
+        : browseScope?.searchId === target
+          ? browseScope
+          : graphScope?.searchId === target
+            ? graphScope
+            : null;
   if (resolved === null) {
     notice = "古い検索結果です。再検索してください";
     return;
@@ -764,9 +904,14 @@ $effect(() => {
   detailSeq += 1;
   opSeq += 1;
   graphSeq += 1;
+  browseSeq += 1;
   selected = null;
   scope = null;
   listScope = null;
+  browseRows = [];
+  browseScope = null;
+  browseStatus = "";
+  listMode = "browse";
   graphScope = null;
   graphSelected = null;
   graphData = null;
@@ -798,6 +943,13 @@ $effect(() => {
   memoryDisabled = false;
   searching = false;
   mutating = false;
+  // The list view is open by default: browse every projection node.
+  // Untracked: `loadBrowse()` synchronously reads `memoryDisabled` (and
+  // other panel state), so a graph `memory_unavailable` response that flips
+  // that flag must not re-run this session-reset effect and loop requests.
+  untrack(() => {
+    void loadBrowse();
+  });
 });
 </script>
 
@@ -887,6 +1039,17 @@ $effect(() => {
           />
           引退も表示
         </label>
+        <label>
+          <input
+            id="memory-graph-topics"
+            type="checkbox"
+            bind:checked={graphTopics}
+            onchange={() => {
+              if (view === "graph") paintGraph();
+            }}
+          />
+          話題を表示
+        </label>
         <p id="memory-graph-status" aria-live="polite">{graphStatus}</p>
       </div>
       <svg
@@ -932,21 +1095,64 @@ $effect(() => {
             aria-hidden="true"
           ></span>引退
         </span>
+        <span class="memory-graph-legend__item">
+          <span
+            class="memory-graph-legend__swatch memory-graph-legend__swatch--topic"
+            aria-hidden="true"
+          ></span>話題
+        </span>
+        <span class="memory-graph-legend__item">
+          <span
+            class="memory-graph-legend__swatch memory-graph-legend__swatch--similar"
+            aria-hidden="true"
+          ></span>関連（自動）
+        </span>
       </p>
     </div>
   {:else}
-    <ul id="memory-list">
-      {#each hits as hit (hit.handle)}
-        <li>
-          <button
-            type="button"
-            onclick={() => void openDetail(searchId ?? "", hit.handle)}
-          >
-            {hit.handle} [{hit.status}] {hit.snippet}
-          </button>
-        </li>
-      {/each}
-    </ul>
+    {#if listMode === "browse" && browseStatus.length > 0}
+      <p class="memory-notice" role="status">{browseStatus}</p>
+    {/if}
+    {#if listMode === "search"}
+      <button id="memory-list-all" type="button" onclick={showAllMemories}>
+        すべて表示
+      </button>
+    {/if}
+    <div class="memory-list-scroll">
+      <ul id="memory-list">
+        {#if listMode === "browse"}
+          {#each browseRows as row (row.handle)}
+            <li>
+              <button
+                type="button"
+                disabled={browseScope === null}
+                onclick={() => {
+                  if (browseScope !== null) {
+                    void openDetail(browseScope.searchId, row.handle);
+                  }
+                }}
+              >
+                {row.handle} [{row.status}] {row.label}
+              </button>
+              {#each row.topics as topic (topic)}
+                <span class="memory-topic-chip">{topic}</span>
+              {/each}
+            </li>
+          {/each}
+        {:else}
+          {#each hits as hit (hit.handle)}
+            <li>
+              <button
+                type="button"
+                onclick={() => void openDetail(searchId ?? "", hit.handle)}
+              >
+                {hit.handle} [{hit.status}] {hit.snippet}
+              </button>
+            </li>
+          {/each}
+        {/if}
+      </ul>
+    </div>
   {/if}
   <div id="memory-detail" hidden={!detailVisible}>
     <pre id="memory-detail-body">{detailBody}</pre>

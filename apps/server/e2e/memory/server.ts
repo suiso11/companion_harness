@@ -23,6 +23,11 @@
 //   POST /seed          -> reset the temp remind DB and seed a small linked
 //                          graph through the REAL remind CLI (`record.remember`
 //                          with `links[]`) — hermetic graph fixtures
+//   POST /seed-association -> reset + seed five UNLINKED records, assign
+//                          topics through the real `topic.set`, then run
+//                          real `maintain.associate` (vectors-enabled config
+//                          copy; app config stays vector-free). Reports
+//                          supported:false when the CLI lacks those ops.
 //   POST /extraction    -> toggle the synthetic extraction result (graph
 //                          specs use "empty": the conversation still creates
 //                          a run, but adds no unrelated records)
@@ -40,6 +45,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:http";
@@ -99,6 +105,28 @@ const SEED_EDGE_COUNT = SEED_LINKS.reduce(
   0,
 );
 
+/**
+ * Association fixture: five unlinked records (four motorcycles + one cooking
+ * preference). Topics are assigned through the REAL `topic.set` CLI op, then
+ * ONE real `maintain.associate` pass derives similar_edges. The topic bonus
+ * (default 0.3) is what lifts the bike memories over minScore; embeddings
+ * are still required, hence the vectors-enabled fixture config copy.
+ */
+const ASSOC_LABELS = [
+  "Ninja H2のスーパーチャージャーの吸気音が好き",
+  "GSX-S1000Fに乗りたい",
+  "ZX-4R SEも候補",
+  "バイクはスピード重視で選ぶ",
+  "味噌汁は赤味噌が好き",
+] as const;
+const ASSOC_TOPICS: readonly (readonly string[])[] = [
+  ["バイク"],
+  ["バイク"],
+  ["バイク"],
+  ["バイク"],
+  ["料理"],
+];
+
 function hereDir(): string {
   return dirname(fileURLToPath(import.meta.url));
 }
@@ -134,7 +162,18 @@ function resolveCliPaths(): { entry: string; template: string } {
   return { entry, template };
 }
 
-function patchRemindConfig(templatePath: string, dir: string): string {
+interface RemindConfigPatch {
+  /** Absolute vector model dir; when set, vectors are enabled for this copy. */
+  readonly vectorsModelDir?: string;
+  /** Output file name inside the temp remind dir (one per config flavor). */
+  readonly configName?: string;
+}
+
+function patchRemindConfig(
+  templatePath: string,
+  dir: string,
+  patch: RemindConfigPatch = {},
+): string {
   const raw = readFileSync(templatePath, "utf-8");
   const parsed = JSON.parse(raw) as Record<string, unknown>;
   const dbPath = join(dir, REMIND_DB_NAME);
@@ -158,7 +197,17 @@ function patchRemindConfig(templatePath: string, dir: string): string {
     typeof vectors === "object" &&
     vectors !== null
   ) {
-    if ("enabled" in vectors) {
+    if (patch.vectorsModelDir !== undefined) {
+      // maintain.associate needs real embeddings to write similar_edges;
+      // topic.set alone only supplies the topic bonus. This copy of the
+      // config is used ONLY by the fixture control endpoint, so the app's
+      // own config (and the explicit-link graph fixtures) stay vector-free.
+      vectors.enabled = true;
+      vectors.modelDir = patch.vectorsModelDir;
+      const currentTimeout =
+        typeof vectors.timeoutMs === "number" ? vectors.timeoutMs : 0;
+      vectors.timeoutMs = Math.max(currentTimeout, 60_000);
+    } else {
       vectors.enabled = false;
     }
   }
@@ -168,9 +217,32 @@ function patchRemindConfig(templatePath: string, dir: string): string {
       llm.enabled = false;
     }
   }
-  const outPath = join(dir, "remind-memory-e2e.config.json");
+  const outPath = join(
+    dir,
+    patch.configName ?? "remind-memory-e2e.config.json",
+  );
   writeFileSync(outPath, JSON.stringify(parsed), "utf-8");
   return outPath;
+}
+
+/** Absolute pinned embedding model used only by the association fixture. */
+const ASSOCIATION_VECTOR_MODEL_DIR =
+  process.env.COMPANION_MEMORY_TEST_VECTORS_MODEL_DIR ??
+  "/home/molmot/remind/models/paraphrase-multilingual-MiniLM-L12-v2";
+
+function vectorModelFilesPresent(modelDir: string): boolean {
+  const required = [
+    "config.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "onnx/model_quantized.onnx",
+  ];
+  try {
+    return required.every((file) => statSync(join(modelDir, file)).size > 0);
+  } catch {
+    return false;
+  }
 }
 
 function answerCall(text: string): NormalizedToolCall {
@@ -268,6 +340,13 @@ const { entry, template } = resolveCliPaths();
 const dir = mkdtempSync(join(tmpdir(), "companion-memory-e2e-"));
 const remindDir = mkdtempSync(join(tmpdir(), "remind-memory-e2e-"));
 const remindConfig = patchRemindConfig(template, remindDir);
+const associationConfig = patchRemindConfig(template, remindDir, {
+  configName: "remind-association-e2e.config.json",
+  vectorsModelDir: ASSOCIATION_VECTOR_MODEL_DIR,
+});
+const associationVectorsPresent = vectorModelFilesPresent(
+  ASSOCIATION_VECTOR_MODEL_DIR,
+);
 const remindDbPath = join(remindDir, REMIND_DB_NAME);
 const legacyMarkerPath = join(remindDir, "legacy-graph.marker");
 const legacyEntryPath = join(dir, "remind-legacy-graph-wrapper.mjs");
@@ -281,6 +360,18 @@ const seedAddress = {
   entry,
   config: remindConfig,
   timeoutMs: 10_000,
+  maxResponseBytes: 65_536,
+} as const;
+/**
+ * Association fixture address: same real CLI + temp DB, but with vectors
+ * enabled. Auto-association on the app's own config stays degraded (vectors
+ * off), so explicit-link graph fixtures keep their exact node/edge counts.
+ */
+const associationAddress = {
+  executable: process.execPath,
+  entry,
+  config: associationConfig,
+  timeoutMs: 120_000,
   maxResponseBytes: 65_536,
 } as const;
 const dbPath = join(dir, "companion-memory-e2e.sqlite");
@@ -447,6 +538,138 @@ async function seedLinkedGraph(): Promise<{
   };
 }
 
+/**
+ * Seed the unlinked association fixture through the REAL CLI:
+ * `record.remember` (no links, no tags so external topics win) ->
+ * `record.get` (bodyHash) -> `topic.set` -> `maintain.associate`.
+ *
+ * A remind build without topic/association ops answers BAD_REQUEST; the
+ * control response then reports `supported: false` so the spec can skip
+ * explicitly instead of failing on a capability the pinned build lacks.
+ */
+async function seedAssociationGraph(): Promise<Record<string, unknown>> {
+  const base = {
+    scope: TEST_SCOPE,
+    labels: [...ASSOC_LABELS],
+    topics: ASSOC_TOPICS.map((topics) => [...topics]),
+    vectorModelPresent: associationVectorsPresent,
+    vectorModelDir: ASSOCIATION_VECTOR_MODEL_DIR,
+  };
+  const provenance = {
+    source: "session:assoc-e2e:turn:1",
+    observedAt: new Date().toISOString(),
+  };
+  const records: Array<{ id: string; bodyHash: string }> = [];
+  for (let index = 0; index < ASSOC_LABELS.length; index += 1) {
+    const body = ASSOC_LABELS[index];
+    if (body === undefined) {
+      continue;
+    }
+    const eventId = `assoc-e${index}`;
+    const event = await callMemoryCli(
+      associationAddress,
+      "event.append",
+      {
+        eventId,
+        sessionId: "assoc-e2e",
+        turnId: eventId,
+        body: `${body} raw`,
+        provenance,
+        scope: TEST_SCOPE,
+      },
+      `assoc-ev-${index}`,
+    );
+    if (!event.ok) {
+      throw new Error(`assoc event.append failed: ${event.code}`);
+    }
+    const remembered = await callMemoryCli(
+      associationAddress,
+      "record.remember",
+      {
+        body,
+        kind: "user_fact",
+        provenance,
+        scope: TEST_SCOPE,
+        links: [],
+        tags: [],
+        sourceRefs: [eventId],
+      },
+      `assoc-rem-${index}`,
+    );
+    if (!remembered.ok) {
+      throw new Error(`assoc record.remember failed: ${remembered.code}`);
+    }
+    const record = remembered.data?.record as { id?: unknown } | undefined;
+    if (typeof record?.id !== "string" || record.id.length === 0) {
+      throw new Error("assoc record.remember returned no record id");
+    }
+    const got = await callMemoryCli(
+      associationAddress,
+      "record.get",
+      { id: record.id, scope: TEST_SCOPE },
+      undefined,
+    );
+    const view = got.data?.record as { bodyHash?: unknown } | undefined;
+    if (!got.ok || typeof view?.bodyHash !== "string") {
+      // record.get exists in every remind build that has record.remember;
+      // treat an unexpected read failure as a real fixture error.
+      throw new Error(`assoc record.get failed: ${got.code}`);
+    }
+    records.push({ id: record.id, bodyHash: view.bodyHash });
+  }
+
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index];
+    const topics = ASSOC_TOPICS[index];
+    if (record === undefined || topics === undefined) {
+      continue;
+    }
+    const stored = await callMemoryCli(
+      associationAddress,
+      "topic.set",
+      {
+        scope: TEST_SCOPE,
+        id: record.id,
+        bodyHash: record.bodyHash,
+        topics: [...topics],
+      },
+      `assoc-topic-${index}`,
+    );
+    if (!stored.ok) {
+      if (stored.code === "BAD_REQUEST") {
+        return {
+          ...base,
+          supported: false,
+          reason: "remind build has no topic.set op",
+          stage: "topic.set",
+        };
+      }
+      throw new Error(`assoc topic.set failed: ${stored.code}`);
+    }
+  }
+
+  const associated = await callMemoryCli(
+    associationAddress,
+    "maintain.associate",
+    { scope: TEST_SCOPE, limit: 50 },
+    "assoc-maintain-1",
+  );
+  if (!associated.ok) {
+    if (associated.code === "BAD_REQUEST") {
+      return {
+        ...base,
+        supported: false,
+        reason: "remind build has no maintain.associate op",
+        stage: "maintain.associate",
+      };
+    }
+    throw new Error(`assoc maintain.associate failed: ${associated.code}`);
+  }
+  const associate =
+    (associated.data?.associate as Record<string, unknown> | undefined) ?? null;
+  return { ...base, supported: true, associate };
+}
+
 function readBody(req: import("node:http").IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -513,6 +736,13 @@ const control = createServer(async (req, res) => {
       setLegacyGraph(false);
       resetRemindStore();
       const seeded = await seedLinkedGraph();
+      json(200, seeded);
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/seed-association") {
+      setLegacyGraph(false);
+      resetRemindStore();
+      const seeded = await seedAssociationGraph();
       json(200, seeded);
       return;
     }
