@@ -18,6 +18,11 @@ export default defineConfig({
     minify: true,
     sourcemap: false,
     assetsDir: ".",
+    // One stylesheet for every route: Svelte component <style> blocks must
+    // land in the single `svelte-app.css` the server allowlists/serves. With
+    // CSS code splitting, a second fixed-name asset collides and Vite emits
+    // `svelte-app2.css`, which the strict asset allowlist would 404.
+    cssCodeSplit: false,
     rollupOptions: {
       output: {
         entryFileNames: "svelte-app.js",

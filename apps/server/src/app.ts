@@ -114,6 +114,11 @@ import type { RemoteConfig, ServerConfig } from "./config.js";
 import { ServerConfigError } from "./config.js";
 import { createStdServerLogger, type ServerLogger } from "./logger.js";
 import {
+  createMonitorSampler,
+  createWebSearchHealth,
+  type MonitorSampler,
+} from "./monitor.js";
+import {
   hashRemoteToken,
   issueRemoteToken,
   type RemoteLoginRateLimiter,
@@ -148,6 +153,7 @@ const FEATURE_UI_PATHS: ReadonlySet<string> = new Set([
   "/shadow",
   "/proposals",
   "/handoff",
+  "/monitor",
 ]);
 
 /**
@@ -416,6 +422,12 @@ export interface CreateAppDeps {
   remoteStore?: RemoteSessionStore;
   remotePassword?: RemotePasswordVerifier;
   remoteLoginLimiter?: RemoteLoginRateLimiter;
+  /**
+   * Host telemetry sampler (lazy, idle-stopping). Bootstrap owns one and
+   * stops it on shutdown; tests may inject a degraded sampler. Absent means
+   * a lazily-created default using the repository clock.
+   */
+  monitor?: MonitorSampler;
 }
 
 export interface ServerControls {
@@ -1251,6 +1263,10 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   const logger = deps.logger ?? createStdServerLogger(config.logLevel);
   const now = deps.now ?? Date.now;
   const assets = deps.assets ?? {};
+  // Lazy: constructing the sampler starts no timer and runs no child process.
+  const monitor = deps.monitor ?? createMonitorSampler({ now });
+  // Cached (10s) fixed-vocabulary SearXNG health; never exposes upstream URLs.
+  const webSearchHealth = createWebSearchHealth(config.webSearch, { now });
   /**
    * Slice (b) remote session wiring. Fail closed at composition time:
    * an enabled remote config without BOTH the token-hash store and the
@@ -4522,6 +4538,84 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
             ? { limit: query.values.limit }
             : {}),
         }),
+        200,
+      );
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  /* ---------------- system monitor (read-only host telemetry) ------- */
+  // Latest 20 model calls across runs + 24h totals + active run counts.
+  // Hardware is sampled lazily by `monitor` (2s cadence, 60-sample ring,
+  // idle auto-stop). The payload is scalar-only: no upstream URLs, raw
+  // errors, response bodies, prompts, or model output can cross this route.
+  app.get("/api/monitor", async (c) => {
+    const started = now();
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      const at = now();
+      const [snapshot, webSearch] = await Promise.all([
+        monitor.read(),
+        webSearchHealth.check(),
+      ]);
+      const since = at - 24 * 60 * 60 * 1000;
+      const recent = repo.listRecentModelCalls(20);
+      const totals = repo.getModelCallTotals(since);
+      const counts = repo.countRunsByStatus();
+      const [lastCall] = recent;
+      // cancel_requested is still an active run until settled.
+      const runningRuns = counts.running + counts.cancelRequested;
+      const queuedRuns = counts.queued;
+      const state =
+        runningRuns > 0 ? "generating" : queuedRuns > 0 ? "queued" : "idle";
+      const requests = recent.map((call) => {
+        const inputTokens = call.usage?.inputTokens ?? null;
+        const outputTokens = call.usage?.outputTokens ?? null;
+        // Includes prefill: whole-call duration, so this is a lower bound.
+        const outputTokS =
+          outputTokens !== null && outputTokens > 0 && call.durationMs > 0
+            ? outputTokens / (call.durationMs / 1000)
+            : null;
+        return {
+          at: call.createdAt,
+          runId: call.runId,
+          step: call.step,
+          model: call.model,
+          outcome: call.outcome,
+          errorCode: call.errorCode,
+          durationMs: call.durationMs,
+          inputTokens,
+          outputTokens,
+          outputTokS,
+        };
+      });
+      c.header("cache-control", "no-store");
+      logger.info("http.monitor", {
+        status: 200,
+        durationMs: Math.max(now() - started, 0),
+      });
+      return c.json(
+        {
+          version: 1,
+          time: at,
+          live: { state, runningRuns, queuedRuns },
+          services: {
+            model: {
+              configured: config.model !== null,
+              model: config.model?.model ?? null,
+              lastOutcome: lastCall?.outcome ?? null,
+              lastAt: lastCall?.createdAt ?? null,
+            },
+            webSearch: { status: webSearch },
+          },
+          requests,
+          totals,
+          hardware: snapshot.hardware,
+          history: snapshot.history,
+        },
         200,
       );
     } catch (error) {

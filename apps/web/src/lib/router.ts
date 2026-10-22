@@ -64,6 +64,12 @@ export const FEATURE_ROUTES: readonly FeatureRoute[] = [
     sectionId: "handoff",
     title: "引継ぎ",
   },
+  {
+    path: "/monitor",
+    label: "モニター",
+    sectionId: "monitor",
+    title: "モニター",
+  },
 ];
 
 /** Feature section ids hidden on a page (chat stays visible for context). */

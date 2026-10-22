@@ -1655,6 +1655,37 @@ COMPANION_WEB_SEARCH_JSON='{"enabled":true,"searxng_base_url":"http://127.0.0.1:
 
 ---
 
+# モニター (`/monitor`)
+
+ホストとモデル呼び出しの概況を 1 ページで確認できる読み取り専用ビューです。
+
+```text
+状態 / 実行中・待ち Run
+出力速度 (tok/s、プリフィル込みの概算)
+GPU ごとの使用率・VRAM・温度・電力 (直近 2 分)
+CPU / RAM
+サービス (モデル設定・SearXNG の ok/down/disabled)
+最新 20 件のモデル呼び出し
+24 時間の合計 (呼び出し数・入出力トークン・失敗数)
+```
+
+- データ源: GPU は `nvidia-smi` (`execFile`、shell なし、固定引数、
+  2 秒 timeout)、CPU/RAM は `/proc`、モデル呼び出しは `model_calls` の
+  メタデータのみ、SearXNG は `/healthz`。取得不能値は `0` ではなく
+  `null` (UI は `—`) になります。
+- サンプラーは遅延起動です。最初の読み取りまでタイマーも子プロセスも
+  なく、60 秒読み取りが無いと自動停止して履歴リングを破棄します。
+- 画面表示中のみ 2 秒間隔で同一オリジンの `GET /api/monitor` を
+  ポーリングします (タブ非表示で停止、再表示で即時 1 回)。
+- リモートモード有効時は他の API と同様にセッション必須です。応答は
+  スカラー値のみで、上流 URL・生のエラー・プロンプト・モデル出力は
+  含みません。
+- `model_calls(created_at)` の索引を additive migration `0029` で追加。
+- レイアウトは [Strata](https://github.com/Niko1221/Strata) (MIT) の
+  monitor に着想を得ています。コードはコピーしていません。
+
+---
+
 # リモートアクセス (default-off)
 
 tailnet 経由のリモート利用に向けた、明示的 Origin/Host allowlist +
