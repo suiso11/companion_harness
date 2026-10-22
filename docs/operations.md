@@ -579,7 +579,7 @@ COMPANION_VOICE_JSON='{"profile":"shunkin","timeoutMs":30000}'
   wrong part count falls back to the canonical text with a fixed reason.
 - The call is not an agent step: it writes no `model_calls` row, consumes no
   step/tool budget, and never extends the 300s run wall. It is bounded by
-  `timeoutMs` and the remaining wall budget. Real Gemma with MTP took
+  `timeoutMs` and the remaining wall budget. The current main model takes
   roughly 1-4s per answer.
 - Canonical text remains authoritative for history projection, memory
   intake, citations, and comparison output. `RunResult.voice` is only an
@@ -1527,7 +1527,7 @@ or complete activate config):
 
   Note (2026-10-19): the `qwen-local` observation above is historical and is
   left unchanged. The launcher now requests the model-agnostic LiteLLM alias
-  `local-chat` (currently mapped to Gemma 4 26B-A4B); the `qwen-local` alias
+  `local-chat` (currently mapped to Huihui Ornith 1.5 35B A3B); the `qwen-local` alias
   is being removed.
 
 ### C15 Calendar fake E2E harness fixes (observed: refresh + tombstone scenarios)
@@ -4522,7 +4522,9 @@ brownie（単一 Linux ホスト）で本構成が稼働中。Companion は syst
 （`companion.service` + `companion-deploy.timer`）で起動し、`tailscale serve`
 が tailnet HTTPS を終端して `127.0.0.1:<port>` へ proxy する。chat model は
 2026-10-19 に Gemma 4 26B-A4B（unsloth UD-Q4_K_XL）へ切替済み（Qwen 削除、
-`local-chat` alias は PR #90）。remind 側の自動デプロイは PR #92
+`local-chat` alias は PR #90）。2026-10-22 にメインを Huihui Ornith-1.5-35B-A3B
+abliterated (i1-Q4_K_M) へ切り替えた（下記「メインチャットモデル」参照）。
+remind 側の自動デプロイは PR #92
 （remind-deploy.timer、下記参照）で導入済み。
 ## remind CLI の本番配置・自動更新・モデル配置
 
@@ -4828,7 +4830,61 @@ ops/llm/apply.sh --yes
 1 行だけ追加する。下記「SearXNG」参照)。`--dest` / `LLM_DIR` で配置先を
 変更できる。
 
-### Gemma MTP 投機デコード
+### メインチャットモデル (Huihui Ornith 1.5 35B A3B abliterated, P40)
+
+2026-10-22 に chat model を Gemma 4 26B-A4B から切り替えた。LiteLLM の
+`local-chat` は compose service `main` (container `huihui-ornith-35b`) を指す。
+
+- 配置: P40 (`device_ids: ["0"]`)、llama.cpp image は従来と同じ digest pin。
+- `-c 16384 --n-gpu-layers 99 -fa on --jinja --alias huihui-ornith-35b`。
+  投機デコード (MTP) は使わない。
+- 実測 (P40, 2026-10-22): VRAM 20.8 GiB @ 16k、decode 約 61 tok/s、
+  prefill 約 961 tok/s @ 6k。thinking on/off で decode は同じ。
+- thinking は `reasoning_content` で返る。tool call も実測で成立
+  (Companion の agent loop で確認済み)。
+- 入手元: Hugging Face `huihui-ai/Huihui-Ornith-1.5-35B-A3B-abliterated` の
+  GGUF `mradermacher/Huihui-Ornith-1.5-35B-A3B-abliterated-i1-GGUF`
+  `i1-Q4_K_M` (21,713,463,808 bytes)。
+
+モデル配置 (ホスト):
+
+```sh
+mkdir -p /srv/models/huggingface/huihui-ornith-35b
+wget -c \
+  https://huggingface.co/mradermacher/Huihui-Ornith-1.5-35B-A3B-abliterated-i1-GGUF/resolve/main/Huihui-Ornith-1.5-35B-A3B-abliterated.i1-Q4_K_M.gguf \
+  -O /srv/models/huggingface/huihui-ornith-35b/Huihui-Ornith-1.5-35B-A3B-abliterated.i1-Q4_K_M.gguf
+```
+
+`/srv/models/huggingface` はコンテナの `/root/.cache/huggingface` に
+マウントされるため、コンテナ内の `-m` は
+`/root/.cache/huggingface/huihui-ornith-35b/Huihui-Ornith-1.5-35B-A3B-abliterated.i1-Q4_K_M.gguf`。
+
+反映:
+
+```sh
+ops/llm/apply.sh          # 差分確認のみ (本番は変更しない)
+ops/llm/apply.sh --yes    # /srv/llm へ反映し、main + litellm を収束
+```
+
+`apply.sh` は litellm_config.yaml 変更時に litellm を force-recreate する。
+起動後は LiteLLM の `/v1/models` で `local-chat` が
+`huihui-ornith-35b` を向いていることと、`/health` を確認する。
+
+rollback (Gemma 4 26B-A4B へ戻す):
+
+1. 切替前 commit を `git log -- ops/llm/compose.yaml` で特定する。
+2. `git show <commit>:ops/llm/compose.yaml` の `gemma` サービスブロックと
+   `ops/llm/litellm_config.yaml` の `local-chat` 行
+   (`openai/gemma-4-26b-a4b` / `http://gemma:8080/v1`) を戻す。
+3. `ops/llm/apply.sh --yes` を実行する。
+
+Gemma の GGUF と MTP draft (`specdec/mtp-gemma-4-26B-A4B-it-Q8_0.gguf`) は
+ディスクに残っているため、rollback に再ダウンロードは不要。
+
+### Gemma MTP 投機デコード（履歴・rollback 専用）
+
+2026-10-22 以降、メインチャットモデルは Huihui Ornith 1.5 35B A3B。
+以下の Gemma/MTP 手順は rollback 用の履歴として残す。
 
 `gemma` は MTP draft を使う投機デコードで起動する
 (`--spec-type draft-mtp --spec-draft-model ... --spec-draft-ngl 99`)。
@@ -4851,12 +4907,12 @@ draft acceptance 72.7%、VRAM +~0.5 GiB、tool call は有効。
 
 `ornith` は remind のメンテナンス処理 (重要度判定・トピック抽出・
 統合/整理) 専用のローカル LLM。Companion のチャット (`local-chat` /
-gemma) とは別系統で、remind が loopback の
+main) とは別系統で、remind が loopback の
 `http://127.0.0.1:18090` を直接叩く。LiteLLM には登録しない
 (既存の `local-chat` ルートを変えないため)。
 
-- イメージは gemma と同じ llama.cpp CUDA build を digest pin。
-- GPU は Quadro P5000 (`device_ids: ["1"]`)。gemma が index 指定なので
+- イメージは main と同じ llama.cpp CUDA build を digest pin。
+- GPU は Quadro P5000 (`device_ids: ["1"]`)。main が index 指定なので
   同じ方式で固定する。
 - 実測: VRAM 約 6.2 GiB、約 28 tok/s (P5000)。
 - `-c 8192`、`-ngl 99`、`-fa on`、`--jinja`、
@@ -4964,11 +5020,11 @@ ops/llm/rotate-keys.sh --yes \
 - `/srv/llm/.env` を `.env.bak-<UTC>` (0600) に退避し、0600 で atomic 更新。
 - `~/companion_master/.env.litellm` の `LITELLM_MASTER_KEY` も更新
   (同様に backup、0600)。
-- `gemma` + `litellm` を force-recreate し、`companion.service` を restart。
+- `main` + `litellm` を force-recreate し、`companion.service` を restart。
 - 最後に認証付き `GET /v1/models` が 200 を返すことを確認 (鍵は表示しない)。
 - 鍵は argv / 標準出力 / journal に出さない。失敗時は退避パスだけを表示する。
 
-注意: 現行 compose の llama.cpp (`gemma`) は `--api-key` を渡していないため、
-`LLAMA_API_KEY` は LiteLLM → gemma の outbound header としてのみ使われる。
-llama.cpp 側でも認証を強制する場合は、`compose.yaml` の gemma command に
+注意: 現行 compose の llama.cpp (`main`) は `--api-key` を渡していないため、
+`LLAMA_API_KEY` は LiteLLM → main の outbound header としてのみ使われる。
+llama.cpp 側でも認証を強制する場合は、`compose.yaml` の main command に
 `--api-key ${LLAMA_API_KEY}` を追加してから `apply.sh --yes` を実行する。

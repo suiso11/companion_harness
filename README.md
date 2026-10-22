@@ -1444,7 +1444,7 @@ kanji numerals with counters, ASCII words, URLs, code spans, negation count,
 and a bounded length ratio. Any failure falls back to the canonical text.
 The auxiliary call is not a step, is not recorded in `model_calls`, and does
 not consume the 8-step or tool budgets; it is bounded by the remaining run
-wall budget and `timeoutMs`. On Gemma with MTP, expect roughly 1-4s.
+wall budget and `timeoutMs`. On the current main model, expect roughly 1-4s.
 
 Canonical text remains authoritative for history projection, memory intake,
 citations, and comparison output. The voiced text is stored only as an

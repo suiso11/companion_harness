@@ -2,9 +2,14 @@
 # /srv/llm/compose.yaml. qwen was removed; images are pinned by digest.
 # Secrets stay in /srv/llm/.env (never committed) — see .env.example.
 services:
-  gemma:
+  main:
+    # Chat model for Companion (LiteLLM `local-chat`). Source:
+    # huihui-ai/Huihui-Ornith-1.5-35B-A3B-abliterated, GGUF by mradermacher
+    # i1-Q4_K_M (21,713,463,808 bytes). Measured on the P40 (2026-10-22):
+    # 20.8 GiB VRAM @ 16k, decode ~61 tok/s, prefill ~961 tok/s @ 6k;
+    # thinking on/off gives the same decode rate.
     image: ghcr.io/ggml-org/llama.cpp@sha256:f88fa8d94d872312a4ad117acd490fa997bef81f03f161f0cfe0d74272e5b5bb
-    container_name: gemma-4-26b-a4b
+    container_name: huihui-ornith-35b
     restart: unless-stopped
     environment:
       LLAMA_API_KEY: ${LLAMA_API_KEY}
@@ -19,7 +24,7 @@ services:
               capabilities: [gpu]
     command:
       - -m
-      - /root/.cache/huggingface/models--unsloth--gemma-4-26B-A4B-it-GGUF/snapshots/c099eb48e663fd284577b04978a94ffccb261841/gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf
+      - /root/.cache/huggingface/huihui-ornith-35b/Huihui-Ornith-1.5-35B-A3B-abliterated.i1-Q4_K_M.gguf
       - --host
       - 0.0.0.0
       - --port
@@ -32,16 +37,7 @@ services:
       - "on"
       - --jinja
       - --alias
-      - gemma-4-26b-a4b
-      # MTP speculative decoding (P40, temp 0, 5 prompts x2): decode 48.4 -> 80.7 tok/s,
-      # 72.7% draft acceptance, +~0.5 GiB VRAM, tool calls valid. n-max 6 and
-      # the E2B draft were slower.
-      - --spec-type
-      - draft-mtp
-      - --spec-draft-model
-      - /root/.cache/huggingface/specdec/mtp-gemma-4-26B-A4B-it-Q8_0.gguf
-      - --spec-draft-ngl
-      - "99"
+      - huihui-ornith-35b
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
     stop_grace_period: 30s
@@ -49,7 +45,7 @@ services:
   ornith:
     # Maintenance LLM for remind (importance / topics / consolidation),
     # called directly on loopback by remind. Not registered in LiteLLM.
-    # Shares the pinned llama.cpp build with gemma.
+    # Shares the pinned llama.cpp build with main.
     image: ghcr.io/ggml-org/llama.cpp@sha256:f88fa8d94d872312a4ad117acd490fa997bef81f03f161f0cfe0d74272e5b5bb
     container_name: ornith-1.5-9b
     restart: unless-stopped
@@ -62,7 +58,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              # Quadro P5000. gemma pins by index, so follow the same style;
+              # Quadro P5000. main pins by index, so follow the same style;
               # index 1 is the P5000 on this host.
               device_ids: ["1"]
               capabilities: [gpu]
@@ -106,7 +102,7 @@ services:
       - --port
       - "4000"
     depends_on:
-      gemma:
+      main:
         condition: service_healthy
 
   searxng:
