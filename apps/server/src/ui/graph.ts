@@ -1350,7 +1350,7 @@ export class GraphCanvas {
         topicHub: node.topicHub === true,
         selected: handle === this.selected,
         hovered: handle === this.hovered,
-        nearFocus: focusSet?.has(handle),
+        nearFocus: focusSet?.has(handle) ?? false,
       });
     }
     const visible = selectVisibleLabels(candidates, {
