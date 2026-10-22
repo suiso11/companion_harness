@@ -352,6 +352,9 @@ export function createOpenAICompatibleGateway(
       if (request.maxOutputTokens !== undefined) {
         body.max_tokens = request.maxOutputTokens;
       }
+      if (request.reasoning === "off") {
+        body.chat_template_kwargs = { enable_thinking: false };
+      }
       if (request.tools !== undefined && request.tools.length > 0) {
         body.tools = request.tools.map((tool) => ({
           type: "function",
@@ -420,6 +423,9 @@ async function streamOpenAIChat(options: {
   };
   if (request.maxOutputTokens !== undefined) {
     body.max_tokens = request.maxOutputTokens;
+  }
+  if (request.reasoning === "off") {
+    body.chat_template_kwargs = { enable_thinking: false };
   }
   if (request.tools !== undefined && request.tools.length > 0) {
     body.tools = request.tools.map((tool) => ({

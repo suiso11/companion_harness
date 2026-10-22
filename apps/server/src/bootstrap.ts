@@ -48,6 +48,7 @@ import {
   type ActionCreateReadPort,
   type ActionProposalStager,
   type AgentModelDelta,
+  type AgentVoiceLayer,
   applyAutonomyRestartFence,
   BUNDLED_SCHEMA_VERSION,
   CalendarActionWriteCapabilitySchema,
@@ -77,9 +78,11 @@ import {
   createMemoryStageRegistrations,
   createReferenceManager,
   createToolBroker,
+  createVoiceRenderer,
   createWebSearchRegistration,
   getSchemaVersion,
   type KernelDatabaseHandle,
+  loadBundledVoiceProfile,
   type MarkdownConnectorBinding,
   type MemoryManagePort,
   type MemoryManageStageResult,
@@ -94,6 +97,7 @@ import {
   ToolError,
   type ToolRegistration,
   toCalendarObservation,
+  voiceProfileFingerprint,
 } from "@companion/kernel";
 import {
   createOllamaGateway,
@@ -1444,6 +1448,29 @@ export async function startServer(
         modelName = config.model.model;
       }
     }
+    // Strict opt-in voice layer: only when BOTH the voice config and the
+    // model gateway are present. The renderer reuses the same gateway/model
+    // (one auxiliary call per accepted answer) and the private execution
+    // recorder when enabled. Logs a scalar marker only: no profile text,
+    // prompt, or voiced content.
+    let voiceLayer: AgentVoiceLayer | undefined;
+    if (config.voice !== null && modelGateway !== null) {
+      const profile = loadBundledVoiceProfile(config.voice.profile);
+      voiceLayer = {
+        render: createVoiceRenderer({
+          gateway: modelGateway,
+          model: modelName,
+          profile,
+          timeoutMs: config.voice.timeoutMs,
+          ...(executionRecorder === undefined
+            ? {}
+            : { recorder: executionRecorder }),
+        }),
+        profileId: profile.id,
+        profileVersion: voiceProfileFingerprint(profile),
+      };
+      logger.info("server.voice_ready", { status: 1 });
+    }
     // Conversation memory (strict opt-in, default memoryless): when
     // COMPANION_MEMORY_JSON is set, create the service BEFORE the engine
     // and agent so every consumer shares one wrapped repo. The wrapper is
@@ -2462,6 +2489,7 @@ export async function startServer(
           model: modelName,
           ...(memory !== null ? { memory: memory.recallHook } : {}),
           ...(executionRecorder === undefined ? {} : { executionRecorder }),
+          ...(voiceLayer === undefined ? {} : { voice: voiceLayer }),
           // PR-2: forward provisional step deltas to the ephemeral bus.
           // `content` pieces are intentionally dropped: free text is never
           // an answer (answer.submit terminal protocol), and no contract

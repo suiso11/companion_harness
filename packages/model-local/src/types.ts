@@ -55,6 +55,14 @@ export interface ChatRequest {
    * `options.num_predict`); absent means no cap is sent.
    */
   maxOutputTokens?: number;
+  /**
+   * Opt-in suppression of provider "thinking" output. Only `"off"` is
+   * accepted. Serialized provider-natively (OpenAI-compatible
+   * `chat_template_kwargs: { enable_thinking: false }`, Ollama
+   * `think: false`); absent leaves the request body byte-identical to the
+   * default no-thinking-flag request.
+   */
+  reasoning?: "off";
 }
 
 /**

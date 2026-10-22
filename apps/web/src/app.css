@@ -515,6 +515,17 @@ button:disabled {
   opacity: 0.5;
 }
 
+/* Per-answer voice toggle (原文 / 話し方): small and quiet. */
+#conversation .voice-toggle {
+  font-size: 0.75rem;
+  padding: 0.125rem 0.5rem;
+  border-radius: var(--radius-sm);
+  opacity: 0.8;
+}
+#conversation .voice-toggle[data-voice-view="voiced"] {
+  opacity: 1;
+}
+
 /* Citation chips stay quiet until hovered. */
 button[data-action-citation="true"],
 button[data-action-evidence="before"] {

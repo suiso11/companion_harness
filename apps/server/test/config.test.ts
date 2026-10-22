@@ -16,6 +16,7 @@ import {
   parseMarkdownRoots,
   parseMemoryConfig,
   parseModelConfig,
+  parseVoiceConfig,
   ServerConfigError,
 } from "../src/config.js";
 
@@ -746,5 +747,49 @@ describe("execution records config", () => {
         }),
       }).executionRecords,
     ).toEqual({ directory: "/tmp/private-records", retentionDays: 7 });
+  });
+});
+
+describe("voice config (COMPANION_VOICE_JSON)", () => {
+  it("is disabled when unset and defaults the timeout to 30000", () => {
+    expect(parseVoiceConfig(undefined)).toBeNull();
+    expect(parseVoiceConfig(JSON.stringify({ profile: "shunkin" }))).toEqual({
+      profile: "shunkin",
+      timeoutMs: 30000,
+    });
+    expect(
+      parseVoiceConfig(
+        JSON.stringify({ profile: "shunkin", timeoutMs: 120000 }),
+      ),
+    ).toEqual({ profile: "shunkin", timeoutMs: 120000 });
+  });
+
+  it("fails closed on unknown keys, profiles, and out-of-bounds timeouts", () => {
+    for (const raw of [
+      "not json",
+      "[]",
+      JSON.stringify({ profile: "shunkin", extra: true }),
+      JSON.stringify({ profile: "unknown" }),
+      JSON.stringify({}),
+      JSON.stringify({ profile: "shunkin", timeoutMs: 999 }),
+      JSON.stringify({ profile: "shunkin", timeoutMs: 120001 }),
+      JSON.stringify({ profile: "shunkin", timeoutMs: 1.5 }),
+    ]) {
+      expect(() => parseVoiceConfig(raw)).toThrow(ServerConfigError);
+    }
+  });
+
+  it("loads the opt-in env and keeps disabled legacy behavior unchanged", () => {
+    const env = baseEnv(tempDbPath());
+    expect(loadServerConfig(env).voice).toBeNull();
+    expect(
+      loadServerConfig({
+        ...env,
+        COMPANION_VOICE_JSON: JSON.stringify({
+          profile: "shunkin",
+          timeoutMs: 5000,
+        }),
+      }).voice,
+    ).toEqual({ profile: "shunkin", timeoutMs: 5000 });
   });
 });

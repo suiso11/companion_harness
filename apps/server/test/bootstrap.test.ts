@@ -1120,6 +1120,140 @@ describe("bootstrap M2 model wiring", () => {
     }
   });
 
+  it("wires the opt-in voice layer and exposes voiced parts in history", async () => {
+    const { env } = tempEnv();
+    const collecting = createCollectingLogger("debug");
+    const gateway: ModelGateway = {
+      provider: "ollama",
+      capabilities: { toolCalling: true },
+      baseUrl: MODEL_BASE,
+      chatUrl: `${MODEL_BASE}/api/chat`,
+      chat: async (request: ChatRequest) => {
+        const system = request.messages.find(
+          (message) => message.role === "system",
+        );
+        if (
+          (request.tools ?? []).length === 0 &&
+          (system?.content ?? "").includes("音声レンダラー")
+        ) {
+          return {
+            text: JSON.stringify({
+              parts: [{ text: "canonical answer でござります。" }],
+            }),
+            toolCalls: [],
+            stopReason: "stop",
+          };
+        }
+        return {
+          text: "",
+          toolCalls: [
+            {
+              id: "answer-1",
+              name: "answer.submit",
+              arguments: {
+                version: 1,
+                parts: [{ text: "canonical answer", citations: [] }],
+              },
+            },
+          ],
+          stopReason: "tool_calls",
+        };
+      },
+    };
+    const started = await startServer({
+      env: {
+        ...modelEnv(env),
+        COMPANION_VOICE_JSON: JSON.stringify({
+          profile: "shunkin",
+          timeoutMs: 5000,
+        }),
+      },
+      drainMs: 50,
+      modelGateway: gateway,
+      logger: collecting.logger,
+    });
+    servers.push(started);
+    try {
+      const base = `http://127.0.0.1:${started.port}`;
+      const created = await fetch(`${base}/api/sessions`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": randomUUID(),
+          origin: base,
+        },
+        body: "{}",
+      });
+      expect(created.status).toBe(201);
+      const { sessionId } = (await created.json()) as { sessionId: string };
+      const posted = await fetch(`${base}/api/sessions/${sessionId}/messages`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": randomUUID(),
+          origin: base,
+        },
+        body: JSON.stringify({ text: "say it in shunkin" }),
+      });
+      expect(posted.status).toBe(202);
+      const { run } = (await posted.json()) as { run: { id: string } };
+      const deadline = Date.now() + 5_000;
+      let status = "queued";
+      while (Date.now() < deadline) {
+        const response = await fetch(
+          `${base}/api/sessions/${sessionId}/runs/${run.id}/status`,
+        );
+        const body = (await response.json()) as { run: { status: string } };
+        status = body.run.status;
+        if (
+          status === "completed" ||
+          status === "failed" ||
+          status === "cancelled"
+        ) {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(status).toBe("completed");
+      const history = (await (
+        await fetch(`${base}/api/sessions/${sessionId}/history`)
+      ).json()) as {
+        items: Array<{
+          selectedRun: {
+            result: {
+              text: string;
+              voice?: { status: string; parts?: Array<{ text: string }> };
+            };
+          } | null;
+        }>;
+      };
+      const result = history.items.find((item) => item.selectedRun !== null)
+        ?.selectedRun?.result;
+      expect(result?.text).toBe("canonical answer");
+      expect(result?.voice?.status).toBe("rendered");
+      expect(result?.voice?.parts).toEqual([
+        { text: "canonical answer でござります。" },
+      ]);
+      expect(
+        collecting.records.some(
+          (record) => record.code === "server.voice_ready",
+        ),
+      ).toBe(true);
+      // The startup marker carries scalars only: no profile/voiced text.
+      const marker = collecting.records.find(
+        (record) => record.code === "server.voice_ready",
+      );
+      expect(JSON.stringify(marker)).not.toContain("canonical answer");
+      expect(JSON.stringify(marker)).not.toContain("でござります");
+    } finally {
+      await started.shutdown("test-voice");
+      const index = servers.indexOf(started);
+      if (index >= 0) {
+        servers.splice(index, 1);
+      }
+    }
+  });
+
   it("builds the production gateway from config when only fetch is injected", async () => {
     const { env } = tempEnv();
     const fetchImpl: FetchImpl = async () =>

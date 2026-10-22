@@ -51,6 +51,8 @@ import {
   STRUCTURED_ANSWER_VERSION,
   type StructuredAnswer,
   type ToolDescriptor,
+  type VoiceRender,
+  type VoiceRenderReason,
 } from "@companion/contracts";
 import type {
   ChatRequest,
@@ -93,6 +95,12 @@ export const AGENT_MAX_STEPS = MAX_MODEL_STEPS_PER_RUN;
 export const AGENT_STEP_TIMEOUT_MS = 120_000;
 /** Whole-Run wall budget in ms for all generateTurn calls (agreed 300s). */
 export const AGENT_WALL_MS = 300_000;
+/**
+ * Minimum wall budget that must remain before an auxiliary voice render is
+ * attempted. Below this the run keeps the canonical answer and attaches a
+ * fixed `skipped`/`timeout` voice marker instead of risking the wall budget.
+ */
+export const AGENT_VOICE_MIN_REMAINING_MS = 2_000;
 /** Max concurrent ordinary-tool executions per step (agreed 3). */
 export const AGENT_TOOL_CONCURRENCY = 3;
 /**
@@ -2251,6 +2259,21 @@ export type AgentModelStepFailedCallback = (
   failure: AgentModelStepFailure,
 ) => void;
 
+/**
+ * Optional auxiliary voice layer (voice-layer wiring). `render` is the
+ * never-throwing renderer created by `createVoiceRenderer`; the optional
+ * profile metadata is used only to build a deterministic `skipped` marker
+ * when the run's wall budget is too small to attempt a render.
+ */
+export interface AgentVoiceLayer {
+  render(
+    answer: StructuredAnswer,
+    input: { readonly signal: AbortSignal; readonly runId: string },
+  ): Promise<VoiceRender>;
+  readonly profileId?: string;
+  readonly profileVersion?: string;
+}
+
 export interface AgentStrategyOptions {
   /** Single kernel connection (scoped reads; writes go through repo/broker). */
   readonly db: Database.Database;
@@ -2302,6 +2325,14 @@ export interface AgentStrategyOptions {
   readonly promptVariantName?: string;
   /** Opt-in private local execution recorder (separate from public audit). */
   readonly executionRecorder?: ExecutionRecorder;
+  /**
+   * Optional auxiliary voice projection of an accepted answer. When absent
+   * the result is byte-identical to the previous V2 shape (no `voice` key).
+   * The render never writes model_calls / model.step rows and never consumes
+   * a step from the 8-step budget; it is bounded by the remaining wall
+   * budget and never extends AGENT_WALL_MS.
+   */
+  readonly voice?: AgentVoiceLayer;
 }
 
 function requirePositiveInt(value: number, what: string): number {
@@ -2679,13 +2710,14 @@ export function createAgentStrategy(
         // reserved / free-text) never reach the broker. Validation runs first;
         // the single audit row/event below reflects its outcome, so an invalid
         // step never records a contradictory completed+failed pair.
-        const terminal = handleAnswerClass({
+        const terminal = await handleAnswerClass({
           db,
           repo,
           runId,
           sessionId,
           classification,
           repairUsed,
+          signal: ctx.signal,
         });
         const terminalErrorCode: M2ModelErrorCode | null =
           terminal.kind === "succeeded"
@@ -2741,7 +2773,22 @@ export function createAgentStrategy(
         }
         if (terminal.kind === "succeeded") {
           clearWallTimer();
-          return terminal.result;
+          // Voice is an auxiliary projection rendered only after the step's
+          // model_calls row and model.step terminal event are durable, so a
+          // cancellation during voice can never leave a delivered step
+          // unaudited. The canonical result is already complete.
+          if (options.voice === undefined) {
+            return terminal.result;
+          }
+          const renderedVoice = await renderAnswerVoice({
+            voice: options.voice,
+            answer: terminal.result.answer,
+            runId,
+            signal: ctx.signal,
+            wallDeadline,
+            clock,
+          });
+          return buildRunResultV2(terminal.result.answer, renderedVoice);
         }
         throw terminal.strategyError;
       }
@@ -4481,6 +4528,86 @@ function answerInvalidDetail(args: unknown, error: unknown): string {
   return fallback;
 }
 
+/** Fixed profile marker used only when a caller supplies no metadata. */
+const VOICE_UNKNOWN_PROFILE_ID = "unknown";
+const VOICE_UNKNOWN_PROFILE_VERSION = "unknown";
+
+/**
+ * Auxiliary voice render bounded by the run's remaining wall budget.
+ *
+ * - Below AGENT_VOICE_MIN_REMAINING_MS: never calls the renderer, attaches a
+ *   deterministic `skipped` / `timeout` marker.
+ * - Otherwise the renderer receives the engine signal combined with a wall
+ *   timer for exactly the remaining budget, so a slow voice call can never
+ *   extend AGENT_WALL_MS.
+ * - Engine cancellation keeps priority and stays `execution_cancelled`;
+ *   a wall expiry during rendering yields the fixed `skipped` marker while
+ *   the already-validated canonical answer still completes.
+ */
+async function renderAnswerVoice(args: {
+  voice: AgentVoiceLayer;
+  answer: StructuredAnswer;
+  runId: string;
+  signal: AbortSignal;
+  wallDeadline: number;
+  clock: { now(): number };
+}): Promise<VoiceRender> {
+  const { voice, answer, runId, signal, wallDeadline, clock } = args;
+  const marker = (
+    status: "skipped" | "fallback",
+    reason: VoiceRenderReason,
+  ): VoiceRender => ({
+    profileId: voice.profileId ?? VOICE_UNKNOWN_PROFILE_ID,
+    profileVersion: voice.profileVersion ?? VOICE_UNKNOWN_PROFILE_VERSION,
+    status,
+    reason,
+  });
+
+  const remaining = wallDeadline - clock.now();
+  if (remaining < AGENT_VOICE_MIN_REMAINING_MS) {
+    return marker("skipped", "timeout");
+  }
+
+  const wallController = new AbortController();
+  let wallExpired = false;
+  const timer = setTimeout(
+    () => {
+      wallExpired = true;
+      wallController.abort();
+    },
+    Math.max(remaining, 1),
+  );
+  if (typeof (timer as unknown as { unref?: unknown }).unref === "function") {
+    (timer as unknown as { unref(): void }).unref();
+  }
+  try {
+    const voiceSignal = AbortSignal.any([signal, wallController.signal]);
+    const rendered = await voice.render(answer, {
+      signal: voiceSignal,
+      runId,
+    });
+    if (signal.aborted) {
+      throw new StrategyError("execution_cancelled");
+    }
+    if (wallExpired) {
+      return marker("skipped", "timeout");
+    }
+    return rendered;
+  } catch (error) {
+    if (error instanceof StrategyError) {
+      throw error;
+    }
+    if (signal.aborted) {
+      throw new StrategyError("execution_cancelled");
+    }
+    // The production renderer never throws; this is a defensive fallback
+    // for an injected layer. The canonical answer still completes.
+    return marker("fallback", "error");
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Validate terminal-protocol classes without touching the broker or the
  * audit store: validate the StructuredAnswer shape, run the structural
@@ -4489,14 +4616,15 @@ function answerInvalidDetail(args: unknown, error: unknown): string {
  * matching model.step terminal event from the returned verdict, so audit
  * finalization always observes classification/validation first.
  */
-function handleAnswerClass(args: {
+async function handleAnswerClass(args: {
   db: Database.Database;
   repo: KernelRepository;
   runId: string;
   sessionId: string;
   classification: Exclude<StepClassification, { kind: "ordinary" }>;
   repairUsed: boolean;
-}): AnswerHandling {
+  signal: AbortSignal;
+}): Promise<AnswerHandling> {
   const { db, repo, runId, sessionId, classification, repairUsed } = args;
 
   const maybeRepair = (
@@ -4562,6 +4690,9 @@ function handleAnswerClass(args: {
       // rendered text deterministically equals the parts joined by blank
       // lines. Citations are structural only (grant membership + exposure
       // presence); never a semantic-verification claim.
+      //
+      // Voice is deliberately NOT rendered here: the caller renders the
+      // auxiliary projection only after the step is finalized/audited.
       return {
         kind: "succeeded",
         result: buildRunResultV2(answer),

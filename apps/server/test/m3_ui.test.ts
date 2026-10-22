@@ -465,6 +465,69 @@ describe("M3 client reducer contract", () => {
     ).toEqual([{ text: "legacy", citations: [] }]);
   });
 
+  it("selects rendered voice text when asked while keeping canonical citations", () => {
+    const result = {
+      version: 2,
+      text: "a\n\nb",
+      answer: {
+        version: 1,
+        parts: [
+          { text: "a", citations: ["r1", "r2"] },
+          { text: "b", citations: [] },
+        ],
+      },
+      voice: {
+        profileId: "shunkin",
+        profileVersion: "3-0123456789ab",
+        status: "rendered",
+        parts: [{ text: "A" }, { text: "B" }],
+      },
+    };
+    // Default stays canonical (streaming/current callers unchanged).
+    expect(runResultToAnswerParts(result)).toEqual([
+      {
+        text: "a",
+        citations: ["r1", "r2"],
+        canonicalText: "a",
+        voicedText: "A",
+      },
+      { text: "b", citations: [], canonicalText: "b", voicedText: "B" },
+    ]);
+    // preferVoice swaps only the text; citations stay on canonical part i.
+    expect(runResultToAnswerParts(result, { preferVoice: true })).toEqual([
+      {
+        text: "A",
+        citations: ["r1", "r2"],
+        canonicalText: "a",
+        voicedText: "A",
+      },
+      { text: "B", citations: [], canonicalText: "b", voicedText: "B" },
+    ]);
+    // Fallback/skipped/mismatched/malformed voice silently keeps canonical.
+    for (const voice of [
+      {
+        profileId: "shunkin",
+        profileVersion: "3-0123456789ab",
+        status: "fallback",
+        reason: "error",
+      },
+      {
+        profileId: "shunkin",
+        profileVersion: "3-0123456789ab",
+        status: "rendered",
+        parts: [{ text: "only one" }],
+      },
+      { status: "rendered", parts: [{ text: "A" }, { text: 7 }] },
+    ]) {
+      expect(
+        runResultToAnswerParts({ ...result, voice }, { preferVoice: true }),
+      ).toEqual([
+        { text: "a", citations: ["r1", "r2"] },
+        { text: "b", citations: [] },
+      ]);
+    }
+  });
+
   it("accept response carries turnId + run.id (client retry/send contract)", async () => {
     // Regression: the client parses the exact contracts `PostMessageResponse`
     // `{ turnId, run: { id } }` (there is no top-level `runId`). A shape

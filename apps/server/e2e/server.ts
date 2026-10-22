@@ -53,9 +53,12 @@ import {
 } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { buildRunResultV2 } from "@companion/contracts";
 import {
   closeKernelDatabase,
   createKernelRepository,
+  createVoiceRenderer,
+  loadBundledVoiceProfile,
   migrateKernelDatabase,
   openKernelDatabase,
   RunEngine,
@@ -63,6 +66,7 @@ import {
   StrategyError,
   StrategyRegistry,
 } from "@companion/kernel";
+import type { ModelGateway } from "@companion/model-local";
 import { serve } from "@hono/node-server";
 import { createApp } from "../src/app.js";
 import { loadUiAssets } from "../src/bootstrap.js";
@@ -85,7 +89,10 @@ import {
   TEXT_HANG,
   TEXT_THINK,
   TEXT_THINK_TOOLS,
+  TEXT_VOICE,
   TEXT_WEB_SEARCH,
+  VOICE_CANONICAL_TEXT,
+  VOICE_RENDERED_TEXT,
 } from "./ports.js";
 
 const dir = mkdtempSync(join(tmpdir(), "companion-e2e-"));
@@ -97,6 +104,9 @@ const config = loadServerConfig({
   COMPANION_PORT: String(E2E_APP_PORT),
   COMPANION_TIME_ZONE: "UTC",
   COMPANION_LOG_LEVEL: "error",
+  // Voice is opt-in per spec run (the Playwright webServer sets it); the
+  // shared server only exposes the TEXT_VOICE fake branch when configured.
+  COMPANION_VOICE_JSON: process.env.COMPANION_VOICE_JSON,
 });
 const logger = createStdServerLogger("error");
 
@@ -164,6 +174,33 @@ const E2E_TOOL_NAME = "calendar.search";
 const E2E_TOOL_ARGS_HASH = createHash("sha256")
   .update("e2e-tool-args", "utf8")
   .digest("hex");
+
+// Voice spec harness: a fake model gateway that answers the production
+// voice renderer with one JSON object (no real LLM, no network). The
+// renderer and its fidelity gate are the real production code.
+const e2eVoiceGateway: ModelGateway = {
+  provider: "openai-compatible",
+  capabilities: { toolCalling: false },
+  baseUrl: "http://127.0.0.1:9",
+  chatUrl: "http://127.0.0.1:9/v1/chat/completions",
+  async chat() {
+    return {
+      text: JSON.stringify({ parts: [{ text: VOICE_RENDERED_TEXT }] }),
+      toolCalls: [],
+      stopReason: "stop",
+    };
+  },
+};
+
+let e2eVoiceRenderer: ReturnType<typeof createVoiceRenderer> | null = null;
+if (config.voice !== null) {
+  e2eVoiceRenderer = createVoiceRenderer({
+    gateway: e2eVoiceGateway,
+    model: "e2e-voice",
+    profile: loadBundledVoiceProfile(config.voice.profile),
+    timeoutMs: config.voice.timeoutMs,
+  });
+}
 
 // Deterministic fake strategy: predictable behavior from input text only.
 const registry = new StrategyRegistry();
@@ -531,6 +568,19 @@ registry.register("m0-default", async (ctx: RunStrategyContext) => {
         parts: [{ text: "cited mem answer", citations: ["m1"] }],
       },
     };
+  }
+  if (text.includes(TEXT_VOICE) && e2eVoiceRenderer !== null) {
+    // Real production voice projection: canonical answer first, then the
+    // auxiliary renderer's gated voiced parts (fake gateway supplies JSON).
+    const answer = {
+      version: 1 as const,
+      parts: [{ text: VOICE_CANONICAL_TEXT, citations: ["r1"] }],
+    };
+    const voice = await e2eVoiceRenderer(answer, {
+      runId: ctx.run.id,
+      signal: ctx.signal,
+    });
+    return buildRunResultV2(answer, voice);
   }
   if (text.includes(TEXT_CITE)) {
     // V2 structured answer with a structural r1 citation. The engine only

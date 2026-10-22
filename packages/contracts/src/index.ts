@@ -780,10 +780,21 @@ export {
   serializeExpandedLinkGraphEntry,
   utf8ByteLength,
 } from "./references.js";
-export type { RunResult, RunResultV1, RunResultV2 } from "./run_result.js";
+export type {
+  RunResult,
+  RunResultV1,
+  RunResultV2,
+  VoiceRender,
+  VoiceRenderPart,
+  VoiceRenderReason,
+  VoiceRenderStatus,
+} from "./run_result.js";
 export {
   buildRunResultV2,
   MAX_ASSISTANT_TEXT_LENGTH,
+  MAX_VOICE_PROFILE_VERSION_LENGTH,
+  MAX_VOICE_RENDER_PART_CODE_POINTS,
+  MIN_VOICE_RENDER_PART_CODE_POINTS,
   parseM0RunResult,
   parseRunResult,
   RUN_RESULT_REGISTRY,
@@ -792,6 +803,14 @@ export {
   RunResultV1Schema,
   RunResultV2Schema,
   renderRunResultText,
+  VOICE_PROFILE_ID_PATTERN,
+  VOICE_PROFILE_ID_REGEX,
+  VOICE_RENDER_REASONS,
+  VOICE_RENDER_STATUSES,
+  VoiceRenderPartSchema,
+  VoiceRenderReasonSchema,
+  VoiceRenderSchema,
+  VoiceRenderStatusSchema,
 } from "./run_result.js";
 export type {
   ActiveStatus,
