@@ -50,6 +50,7 @@ import {
   SNAPSHOT_BODY_VERSION,
   STRUCTURED_ANSWER_VERSION,
   type StructuredAnswer,
+  type TemporalContext,
   type ToolDescriptor,
   type VoiceRender,
   type VoiceRenderReason,
@@ -84,6 +85,11 @@ import {
 } from "./execution_records.js";
 import type { KernelRepository } from "./repository.js";
 import { type RunStrategy, StrategyError } from "./strategy.js";
+import {
+  formatCurrentDateTimeLine,
+  formatMemoryDateSuffix,
+  isCanonicalIsoInstant,
+} from "./temporal_format.js";
 
 /* ------------------------------------------------------------------ */
 /* Budgets (agreed §15.5; overrides are test hooks, never widened)      */
@@ -207,6 +213,13 @@ export interface ProjectPromptArgs {
   /** Fixed repair instruction appended after an invalid step (at most once). */
   readonly repairHint?: string | null;
   readonly systemPrompt?: string;
+  /**
+   * Frozen per-Turn temporal context. When present, exactly one
+   * `現在日時: …` line is added to the current user message (per-turn
+   * content only: the static system prompt stays byte-identical so the
+   * llama.cpp prefix cache keeps its prefix).
+   */
+  readonly temporal?: TemporalContext;
 }
 
 /** Fixed repair instructions (no raw model output echoed back). */
@@ -356,7 +369,17 @@ export function projectPrompt(args: ProjectPromptArgs): ChatRequest {
     args.repairHint === undefined || args.repairHint === null
       ? ""
       : `\nRepair instruction:\n${args.repairHint}`;
-  const head = `User request:\n${args.requestText}\n`;
+  // Per-turn temporal line lives in the CURRENT user content (never in the
+  // static system prompt), so it appears even when there are no memories and
+  // does not disturb the cached static prefix. Invalid temporal data fails
+  // closed (line omitted) rather than printing a wrong date.
+  const currentDateTimeLine =
+    args.temporal === undefined
+      ? null
+      : formatCurrentDateTimeLine(args.temporal.now, args.temporal.timeZone);
+  const temporalPrefix =
+    currentDateTimeLine === null ? "" : `${currentDateTimeLine}\n`;
+  const head = `${temporalPrefix}User request:\n${args.requestText}\n`;
   const trailer =
     "Call ordinary tools for evidence when needed, then submit exactly one answer.submit call alone.";
   const header = "Session references (frozen structural summary):";
@@ -559,6 +582,8 @@ export interface AgentMemorySnippet {
   readonly kind?: "user_fact" | "model_inference" | "summary" | "correction";
   /** Positive safe-integer revision, or undefined when absent/invalid. */
   readonly revision?: number;
+  /** Strict canonical ISO-8601 creation instant (rendered as 記録 date). */
+  readonly createdAt?: string;
 }
 
 /**
@@ -644,8 +669,9 @@ function recordMemoryStatus(
  */
 export function selectProjectedMemorySnippets(
   snippets: readonly AgentMemorySnippet[],
+  timeZone?: string,
 ): AgentMemorySnippet[] {
-  return projectMemoryBlock(snippets).kept;
+  return projectMemoryBlock(snippets, timeZone).kept;
 }
 
 /**
@@ -654,9 +680,14 @@ export function selectProjectedMemorySnippets(
  * `[user_fact]`, everything else — including an unknown/absent kind — is
  * explicitly marked as inference, never as fact. Longer labels only make
  * lines longer: the UTF-16 block budget still prunes whole lines, never
- * truncates a snippet.
+ * truncates a snippet. An optional frozen-turn IANA `timeZone` renders the
+ * record date ` (記録: YYYY-MM-DD)` per line; without it (or with an
+ * invalid zone) the date suffix is omitted.
  */
-function projectMemoryBlock(snippets: readonly AgentMemorySnippet[]): {
+function projectMemoryBlock(
+  snippets: readonly AgentMemorySnippet[],
+  timeZone?: string,
+): {
   block: string;
   kept: AgentMemorySnippet[];
 } {
@@ -668,10 +699,14 @@ function projectMemoryBlock(snippets: readonly AgentMemorySnippet[]): {
   if (capped.length === 0) {
     return { block: `${header} none.`, kept: [] };
   }
-  const lines = capped.map(
-    (snippet, index) =>
-      `- m${index + 1} [${memoryProvenanceLabel(snippet.kind)}]: ${snippet.snippet}`,
-  );
+  const lines = capped.map((snippet, index) => {
+    const dateSuffix =
+      snippet.createdAt === undefined || timeZone === undefined
+        ? null
+        : formatMemoryDateSuffix(snippet.createdAt, timeZone);
+    const label = memoryProvenanceLabel(snippet.kind);
+    return `- m${index + 1} [${label}]: ${snippet.snippet}${dateSuffix ?? ""}`;
+  });
   let end = lines.length;
   const render = (count: number): string =>
     count === lines.length
@@ -695,10 +730,11 @@ function projectMemoryBlock(snippets: readonly AgentMemorySnippet[]): {
  */
 export function formatMemoryPromptBlock(
   snippets: readonly AgentMemorySnippet[],
+  timeZone?: string,
 ): string {
   // The kept prefix is exactly selectProjectedMemorySnippets(snippets):
   // callers persist exposures for that prefix only (see recallMemoryForRun).
-  return projectMemoryBlock(snippets).block;
+  return projectMemoryBlock(snippets, timeZone).block;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1797,6 +1833,8 @@ async function recallMemoryForRun(args: {
   query: string;
   memory: AgentMemoryRecall;
   signal: AbortSignal;
+  /** Frozen-turn IANA zone for the per-line record date, when available. */
+  timeZone?: string;
 }): Promise<AgentMemorySnippet[]> {
   const { repo, sessionId, runId, scope, memory, signal } = args;
   const queryCps = Array.from(args.query);
@@ -1864,17 +1902,27 @@ async function recallMemoryForRun(args: {
       candidate.revision > 0
         ? candidate.revision
         : undefined;
+    // Additive createdAt: carried ONLY when it is a strict canonical ISO
+    // instant (exactly the Date#toISOString round-trip); offset/date-only/
+    // invalid values are treated as absent, never re-rendered. The date is
+    // display metadata only and never replaces the snippet text.
+    const createdAt: string | undefined = isCanonicalIsoInstant(
+      candidate.createdAt,
+    )
+      ? candidate.createdAt
+      : undefined;
     validated.push({
       recordId: candidate.recordId,
       recallId: candidate.recallId,
       snippet: candidate.snippet,
       ...(kind !== undefined ? { kind } : {}),
       ...(revision !== undefined ? { revision } : {}),
+      ...(createdAt !== undefined ? { createdAt } : {}),
     });
   }
   // Project BEFORE granting: only the actually shown prefix is exposed, so
   // a pruned tail keeps no citable `mN` and earns no feedback grant.
-  const kept = selectProjectedMemorySnippets(validated);
+  const kept = selectProjectedMemorySnippets(validated, args.timeZone);
   const out: AgentMemorySnippet[] = [];
   for (const snippet of kept) {
     if (signal.aborted) {
@@ -2509,6 +2557,9 @@ export function createAgentStrategy(
       const sessionId = ctx.run.sessionId;
       const requestText =
         ctx.turn.input.kind === "user_text" ? ctx.turn.input.text : "";
+      // The Turn's FROZEN temporal is authoritative for this run: its zone
+      // renders the current-date line and the memory record dates.
+      const temporal = ctx.turn.frozenContext.temporal;
       const history = loadHistory(db, sessionId, ctx.turn.seq);
       const frozenIds = frozenReferenceIds(ctx);
       const references = loadReferenceSummary(db, sessionId, frozenIds);
@@ -2528,6 +2579,7 @@ export function createAgentStrategy(
         tools: toolDefinitions,
         model,
         systemPrompt,
+        temporal,
       }).messages;
       // Authoritative recheck after synchronous preparation and before the
       // first gateway call: preparation that consumes/exceeds the wall budget
@@ -2574,11 +2626,12 @@ export function createAgentStrategy(
             query: requestText,
             memory: options.memory,
             signal: recallSignal,
+            timeZone: temporal.timeZone,
           });
           if (recalled.length > 0) {
             messages.push({
               role: "user",
-              content: formatMemoryPromptBlock(recalled),
+              content: formatMemoryPromptBlock(recalled, temporal.timeZone),
             });
           }
         } finally {

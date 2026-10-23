@@ -650,6 +650,14 @@ export {
   StrategyError,
   StrategyRegistry,
 } from "./strategy.js";
+export {
+  formatCurrentDateTimeLine,
+  formatMemoryDateSuffix,
+  formatZonedDate,
+  formatZonedDateTime,
+  isCanonicalIsoInstant,
+  localTimeZone,
+} from "./temporal_format.js";
 export type { TrustedObservation } from "./trial_authority.js";
 export {
   activeAliasFence,

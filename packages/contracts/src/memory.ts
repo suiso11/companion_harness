@@ -25,6 +25,8 @@ export const MemoryHitSchema = z.strictObject({
     .min(1)
     .refine(codePointsMax(512), { message: "snippet over 512 code points" }),
   status: z.enum(["active", "retired"]),
+  /** Remind record creation instant (canonical ISO-8601), when provided. */
+  createdAt: z.string().min(20).max(30).optional(),
 });
 export type MemoryHit = z.infer<typeof MemoryHitSchema>;
 
@@ -163,6 +165,8 @@ export const MemoryGraphNodeSchema = z.strictObject({
   status: z.enum(["active", "retired"]),
   kind: z.string().min(1).max(64),
   topics: z.array(MemoryGraphTopicSchema).max(3).optional(),
+  /** Remind record creation instant (canonical ISO-8601), when provided. */
+  createdAt: z.string().min(20).max(30).optional(),
   episode: MemoryGraphEpisodeSchema.nullable(),
 });
 export type MemoryGraphNode = z.infer<typeof MemoryGraphNodeSchema>;

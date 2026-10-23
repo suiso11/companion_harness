@@ -33,7 +33,7 @@ a missing DB fails without creating any DB or backup files.
 | `COMPANION_DB_PATH` | OS app-data `companion-harness/companion.sqlite` | Absolute or resolved; symlinks rejected fail-closed |
 | `COMPANION_HOST` | `127.0.0.1` | Loopback only (`127.0.0.1` / `localhost`) |
 | `COMPANION_PORT` | `3000` | `0` = ephemeral (tests only) |
-| `COMPANION_TIME_ZONE` | `UTC` | IANA name only (Intl membership) |
+| `COMPANION_TIME_ZONE` | `UTC` | IANA name only (Intl membership). The production launcher `run-google-readonly.sh` (systemd `companion.service` ExecStart) defaults it to `Asia/Tokyo` only when unset; an explicit export wins |
 | `COMPANION_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 | `COMPANION_MARKDOWN_ROOTS_JSON` | `[]` | Strict JSON array of `{ path, alias? }` (see below); unset means no Markdown connector |
 | `COMPANION_MODEL_JSON` | unset (no model) | Strict JSON object `{ adapter, baseUrl, model, apiKey? }` (see M2 below); unset registers no model strategy |
@@ -342,6 +342,16 @@ connector instance owns **all** configured roots.
   exposure). Idle `maintain.distill` runs one bounded batch per idle
   period anchored to the last completed run; a model-unavailable
   (LLM-disabled) distill answer acks normally with zero writes.
+- Memory dates: extraction anchors relative dates (`今日暑い`,
+  `今週の金曜日`, `一昨日`) to the turn's date in
+  `COMPANION_TIME_ZONE` and writes ABSOLUTE dates into the extracted
+  memory. Recall lines show the record date as `(記録: YYYY-MM-DD)` in
+  the same zone (omitted when unavailable), and the memory panel/detail
+  surfaces the same date. Chat receives a per-turn `現在日時: …` line
+  appended to the current user content — never in the static system
+  prompt, so the cached prefix is unchanged. Extraction runs with
+  reasoning off. The zone is frozen per turn from startup config; the
+  host's OS zone is never consulted.
 - Live HTTP smoke, 2026-10-15 (local, temp stores only): real Companion
   server + synthetic loopback Ollama gateway (scripted `answer.submit`
   plus `{"memories":[...]}` extraction) + REAL remind CLI against a

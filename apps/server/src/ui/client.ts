@@ -22,6 +22,7 @@ import {
   shouldResetConflictArm,
 } from "./autonomy_state.js";
 import {
+  formatRecordedAt,
   GraphCanvas,
   type GraphData,
   type MemoryListRow,
@@ -4006,7 +4007,13 @@ class ConversationApp {
     this.memoryList.textContent = "";
     for (const row of this.memoryBrowseRows) {
       const item = el("li");
-      const button = el("button", `${row.handle} [${row.status}] ${row.label}`);
+      const recorded =
+        row.createdAt === undefined ? null : formatRecordedAt(row.createdAt);
+      const button = el(
+        "button",
+        `${row.handle} [${row.status}] ${row.label}` +
+          (recorded === null ? "" : ` (記録: ${recorded})`),
+      );
       const handle = row.handle;
       button.addEventListener("click", () => {
         const scope = this.memoryBrowseScope;
@@ -4355,6 +4362,7 @@ class ConversationApp {
         status?: unknown;
         revision?: unknown;
         source?: unknown;
+        createdAt?: unknown;
       };
       stale?: unknown;
     };
@@ -4397,8 +4405,13 @@ class ConversationApp {
       this.memoryGraphLocal.disabled = false;
     }
     this.memoryDetail.hidden = false;
+    const recordedAt =
+      typeof body.current?.createdAt === "string"
+        ? formatRecordedAt(body.current.createdAt)
+        : null;
     this.memoryDetailBody.textContent =
       `引用スナップショット ${handle} [${snapshotStatus}]\n${snapshotSnippet}\n---\n` +
+      (recordedAt === null ? "" : `記録日時: ${recordedAt}\n`) +
       `現在 [${currentStatus} rev.${currentRevision} ${currentKind} ${currentSource}]\n${currentBody}` +
       (stale ? "\n---\n状態が変わっています。再検索してください" : "");
     this.memoryOpStatus.textContent = stale

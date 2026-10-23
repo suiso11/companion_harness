@@ -7,6 +7,49 @@
 
 /// <reference lib="dom" />
 
+/**
+ * `YYYY-MM-DD HH:MM` for a record instant in the browser's time zone.
+ * Falls back to UTC when the environment cannot resolve a zone; an invalid
+ * instant renders as null (callers omit the date rather than guess).
+ */
+export function formatRecordedAt(value: string): string | null {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) {
+    return null;
+  }
+  try {
+    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    }).formatToParts(date);
+    const get = (type: Intl.DateTimeFormatPartTypes): string =>
+      parts.find((part) => part.type === type)?.value ?? "";
+    const year = get("year");
+    const month = get("month");
+    const day = get("day");
+    const hour = get("hour");
+    const minute = get("minute");
+    if (
+      year === "" ||
+      month === "" ||
+      day === "" ||
+      hour === "" ||
+      minute === ""
+    ) {
+      return null;
+    }
+    return `${year}-${month}-${day} ${hour}:${minute}`;
+  } catch {
+    return null;
+  }
+}
+
 export interface GraphNodeData {
   readonly handle: string;
   readonly label: string;
@@ -16,6 +59,8 @@ export interface GraphNodeData {
   readonly topics?: readonly string[];
   /** Client-side tag hub (`withTopicHubs`); never a real memory handle. */
   readonly topicHub?: boolean;
+  /** Remind record creation instant (canonical ISO), when provided. */
+  readonly createdAt?: string;
   readonly episode: unknown;
 }
 
@@ -94,6 +139,7 @@ export function parseGraphData(value: unknown): GraphData | null {
       status?: unknown;
       kind?: unknown;
       topics?: unknown;
+      createdAt?: unknown;
       episode?: unknown;
     };
     if (
@@ -112,6 +158,11 @@ export function parseGraphData(value: unknown): GraphData | null {
         status: node.status,
         kind: node.kind,
         ...(topics.length > 0 ? { topics } : {}),
+        ...(typeof node.createdAt === "string" &&
+        node.createdAt.length >= 20 &&
+        node.createdAt.length <= 30
+          ? { createdAt: node.createdAt }
+          : {}),
         episode: node.episode ?? null,
       },
     ];
@@ -252,6 +303,8 @@ export interface MemoryListRow {
   readonly status: "active" | "retired";
   readonly label: string;
   readonly topics: readonly string[];
+  /** Record creation instant, when the projection carried one. */
+  readonly createdAt?: string;
 }
 
 export function memoryListRows(
@@ -267,6 +320,7 @@ export function memoryListRows(
       status: node.status,
       label: node.label,
       topics: [...(node.topics ?? [])],
+      ...(node.createdAt !== undefined ? { createdAt: node.createdAt } : {}),
     });
   }
   return rows;
@@ -1125,10 +1179,13 @@ export class GraphCanvas {
       // are metadata, so they live in the tooltip rather than the label.
       const title = this.doc.createElementNS(SVG_NS, "title");
       const topics = node.topics ?? [];
-      title.textContent =
-        topics.length > 0
-          ? `${node.label}\n話題: ${topics.join("、")}`
-          : node.label;
+      const recorded =
+        node.createdAt === undefined ? null : formatRecordedAt(node.createdAt);
+      title.textContent = [
+        node.label,
+        ...(topics.length > 0 ? [`話題: ${topics.join("、")}`] : []),
+        ...(recorded === null ? [] : [`記録: ${recorded}`]),
+      ].join("\n");
       const label = this.doc.createElementNS(SVG_NS, "text");
       label.setAttribute("class", "memory-graph-node__label");
       label.setAttribute("x", String(dotRadius + 4));

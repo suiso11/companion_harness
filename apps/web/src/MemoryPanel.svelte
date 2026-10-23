@@ -11,6 +11,7 @@
 // there before searching).
 import { untrack } from "svelte";
 import {
+  formatRecordedAt,
   GraphCanvas,
   type GraphData,
   type MemoryListRow,
@@ -40,6 +41,7 @@ interface Hit {
   handle: string;
   snippet: string;
   status: "active" | "retired";
+  createdAt?: string;
 }
 
 interface Scope {
@@ -230,6 +232,7 @@ async function search(): Promise<void> {
       handle?: unknown;
       snippet?: unknown;
       status?: unknown;
+      createdAt?: unknown;
     }>) {
       if (
         typeof raw.handle !== "string" ||
@@ -243,6 +246,9 @@ async function search(): Promise<void> {
         handle: raw.handle,
         snippet: raw.snippet,
         status: raw.status,
+        ...(typeof raw.createdAt === "string"
+          ? { createdAt: raw.createdAt }
+          : {}),
       });
     }
     scope = { sessionId, searchId: body.searchId, runId };
@@ -655,6 +661,7 @@ async function openDetail(target: string, handle: string): Promise<void> {
       status?: unknown;
       revision?: unknown;
       source?: unknown;
+      createdAt?: unknown;
     };
     stale?: unknown;
   };
@@ -672,6 +679,10 @@ async function openDetail(target: string, handle: string): Promise<void> {
     typeof body.current?.kind === "string" ? body.current.kind : "";
   const currentSource =
     typeof body.current?.source === "string" ? body.current.source : "";
+  const recordedAt =
+    typeof body.current?.createdAt === "string"
+      ? formatRecordedAt(body.current.createdAt)
+      : null;
   const stale = body.stale === true;
   // A draft typed for another target never carries over.
   if (
@@ -689,6 +700,7 @@ async function openDetail(target: string, handle: string): Promise<void> {
   detailVisible = true;
   detailBody =
     `引用スナップショット ${handle} [${snapshotStatus}]\n${snapshotSnippet}\n---\n` +
+    (recordedAt === null ? "" : `記録日時: ${recordedAt}\n`) +
     `現在 [${currentStatus} rev.${currentRevision} ${currentKind} ${currentSource}]\n${currentBody}` +
     (stale ? "\n---\n状態が変わっています。再検索してください" : "");
   opStatus = stale ? "stale: 引用時から状態が変化" : "";
@@ -1186,6 +1198,11 @@ $effect(() => {
                 }}
               >
                 {row.handle} [{row.status}] {row.label}
+                {#if row.createdAt !== undefined}
+                  {#each [formatRecordedAt(row.createdAt)] as recorded}
+                    {#if recorded !== null}(記録: {recorded}){/if}
+                  {/each}
+                {/if}
               </button>
               {#each row.topics as topic (topic)}
                 <span class="memory-topic-chip">{topic}</span>
@@ -1200,6 +1217,11 @@ $effect(() => {
                 onclick={() => void openDetail(searchId ?? "", hit.handle)}
               >
                 {hit.handle} [{hit.status}] {hit.snippet}
+                {#if hit.createdAt !== undefined}
+                  {#each [formatRecordedAt(hit.createdAt)] as recorded}
+                    {#if recorded !== null}(記録: {recorded}){/if}
+                  {/each}
+                {/if}
               </button>
             </li>
           {/each}

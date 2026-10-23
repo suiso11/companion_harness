@@ -34,6 +34,7 @@ import {
   createMemoryService,
   MEMORY_EXTRACT_MAX_ITEMS,
   MEMORY_EXTRACT_RETRY_MAX_ATTEMPTS,
+  MEMORY_EXTRACT_SYSTEM_PROMPT,
   MEMORY_RECALL_RUN_MARKER,
   type MemoryService,
   parseExtractionOutcome,
@@ -1022,6 +1023,22 @@ describe("completion cultivation and cite-gated feedback", () => {
       service.onRunCompleted(chosen.runId);
       await waitFor(() => ops.includes("event.append"));
       expect(calls.length).toBeGreaterThan(0);
+      // Extraction is a bounded transform: reasoning off, and the user
+      // content leads with the resolved current date/time line while the
+      // static system prompt is passed through byte-identical.
+      const extraction = calls[0] as {
+        reasoning?: unknown;
+        messages: Array<{ role: string; content: string }>;
+      };
+      expect(extraction.reasoning).toBe("off");
+      expect(extraction.messages[0]).toEqual({
+        role: "system",
+        content: MEMORY_EXTRACT_SYSTEM_PROMPT,
+      });
+      expect(extraction.messages[1]?.role).toBe("user");
+      expect(
+        extraction.messages[1]?.content.startsWith("Current date/time: "),
+      ).toBe(true);
       // The drain executes the remember fan-out to acked (stronger than
       // merely pending): two stable-keyed remember jobs must land.
       await waitFor(
