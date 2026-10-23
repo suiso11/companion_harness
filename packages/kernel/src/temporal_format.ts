@@ -67,11 +67,11 @@ export function formatZonedDate(
       month: "2-digit",
       day: "2-digit",
     }).formatToParts(date);
-    const valueOf = (type: Intl.DateTimeFormatPartTypes): string =>
+    const partValue = (type: Intl.DateTimeFormatPartTypes): string =>
       parts.find((part) => part.type === type)?.value ?? "";
-    const year = valueOf("year");
-    const month = valueOf("month");
-    const day = valueOf("day");
+    const year = partValue("year");
+    const month = partValue("month");
+    const day = partValue("day");
     if (year.length === 0 || month.length === 0 || day.length === 0) {
       return null;
     }

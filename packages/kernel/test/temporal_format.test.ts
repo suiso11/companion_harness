@@ -11,15 +11,15 @@ import {
 
 describe("formatZonedDateTime", () => {
   it("renders an instant in the configured IANA zone", () => {
-    expect(formatZonedDateTime(Date.parse("2026-10-22T18:30:00.000Z"), "Asia/Tokyo")).toBe(
-      "2026-10-23 (金) 03:30",
-    );
+    expect(
+      formatZonedDateTime(Date.parse("2026-10-22T18:30:00.000Z"), "Asia/Tokyo"),
+    ).toBe("2026-10-23 (金) 03:30");
   });
 
   it("rejects an invalid zone", () => {
-    expect(formatZonedDateTime(Date.parse("2026-10-22T18:30:00.000Z"), "Not/AZone")).toBe(
-      null,
-    );
+    expect(
+      formatZonedDateTime(Date.parse("2026-10-22T18:30:00.000Z"), "Not/AZone"),
+    ).toBe(null);
   });
 });
 
@@ -36,9 +36,9 @@ describe("formatZonedDate", () => {
 
 describe("formatMemoryDateSuffix", () => {
   it("renders the 記録 date when createdAt is present", () => {
-    expect(formatMemoryDateSuffix("2026-10-22T18:30:00.000Z", "Asia/Tokyo")).toBe(
-      " (記録: 2026-10-23)",
-    );
+    expect(
+      formatMemoryDateSuffix("2026-10-22T18:30:00.000Z", "Asia/Tokyo"),
+    ).toBe(" (記録: 2026-10-23)");
   });
   it("returns null when invalid", () => {
     expect(formatMemoryDateSuffix("nope", "Asia/Tokyo")).toBe(null);

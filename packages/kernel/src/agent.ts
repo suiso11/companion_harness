@@ -79,17 +79,17 @@ import {
 } from "./canonical.js";
 import { RepositoryValidationError } from "./errors.js";
 import {
-  formatCurrentDateTimeLine,
-  formatMemoryDateSuffix,
-  isCanonicalIsoInstant,
-} from "./temporal_format.js";
-import {
   ExecutionRecordError,
   type ExecutionRecorder,
   redactRawResponseBody,
 } from "./execution_records.js";
 import type { KernelRepository } from "./repository.js";
 import { type RunStrategy, StrategyError } from "./strategy.js";
+import {
+  formatCurrentDateTimeLine,
+  formatMemoryDateSuffix,
+  isCanonicalIsoInstant,
+} from "./temporal_format.js";
 
 /* ------------------------------------------------------------------ */
 /* Budgets (agreed §15.5; overrides are test hooks, never widened)      */
@@ -376,10 +376,7 @@ export function projectPrompt(args: ProjectPromptArgs): ChatRequest {
   const currentDateTimeLine =
     args.temporal === undefined
       ? null
-      : formatCurrentDateTimeLine(
-          args.temporal.now,
-          args.temporal.timeZone,
-        );
+      : formatCurrentDateTimeLine(args.temporal.now, args.temporal.timeZone);
   const temporalPrefix =
     currentDateTimeLine === null ? "" : `${currentDateTimeLine}\n`;
   const head = `${temporalPrefix}User request:\n${args.requestText}\n`;

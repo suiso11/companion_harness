@@ -269,14 +269,6 @@ export {
   withImmediateTx,
   writeIdempotencyRow,
 } from "./canonical.js";
-export {
-  formatCurrentDateTimeLine,
-  formatMemoryDateSuffix,
-  formatZonedDate,
-  formatZonedDateTime,
-  isCanonicalIsoInstant,
-  localTimeZone,
-} from "./temporal_format.js";
 export type {
   KernelDatabaseHandle,
   KernelDrizzle,
@@ -658,6 +650,14 @@ export {
   StrategyError,
   StrategyRegistry,
 } from "./strategy.js";
+export {
+  formatCurrentDateTimeLine,
+  formatMemoryDateSuffix,
+  formatZonedDate,
+  formatZonedDateTime,
+  isCanonicalIsoInstant,
+  localTimeZone,
+} from "./temporal_format.js";
 export type { TrustedObservation } from "./trial_authority.js";
 export {
   activeAliasFence,

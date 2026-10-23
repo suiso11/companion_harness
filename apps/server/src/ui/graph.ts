@@ -18,8 +18,7 @@ export function formatRecordedAt(value: string): string | null {
     return null;
   }
   try {
-    const timeZone =
-      Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
     const parts = new Intl.DateTimeFormat("en-US", {
       timeZone,
       year: "numeric",
@@ -36,7 +35,13 @@ export function formatRecordedAt(value: string): string | null {
     const day = get("day");
     const hour = get("hour");
     const minute = get("minute");
-    if (year === "" || month === "" || day === "" || hour === "" || minute === "") {
+    if (
+      year === "" ||
+      month === "" ||
+      day === "" ||
+      hour === "" ||
+      minute === ""
+    ) {
       return null;
     }
     return `${year}-${month}-${day} ${hour}:${minute}`;
@@ -1175,9 +1180,7 @@ export class GraphCanvas {
       const title = this.doc.createElementNS(SVG_NS, "title");
       const topics = node.topics ?? [];
       const recorded =
-        node.createdAt === undefined
-          ? null
-          : formatRecordedAt(node.createdAt);
+        node.createdAt === undefined ? null : formatRecordedAt(node.createdAt);
       title.textContent = [
         node.label,
         ...(topics.length > 0 ? [`話題: ${topics.join("、")}`] : []),

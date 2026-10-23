@@ -307,15 +307,16 @@ describe("prompt projection and answer rendering", () => {
     expect(JSON.stringify(plain)).not.toContain("現在日時:");
     const frozen = projectPrompt({
       ...base,
-      temporal: { now: Date.parse("2026-10-22T18:30:00.000Z"), timeZone: "Asia/Tokyo" },
+      temporal: {
+        now: Date.parse("2026-10-22T18:30:00.000Z"),
+        timeZone: "Asia/Tokyo",
+      },
     });
     expect(frozen.messages[0]).toEqual({
       role: "system",
       content: AGENT_SYSTEM_PROMPT,
     });
-    const occurrences = JSON.stringify(frozen)
-      .split("現在日時:")
-      .length - 1;
+    const occurrences = JSON.stringify(frozen).split("現在日時:").length - 1;
     expect(occurrences).toBe(1);
     expect(frozen.messages[1]?.role).toBe("user");
     expect(frozen.messages[1]?.content).toContain(

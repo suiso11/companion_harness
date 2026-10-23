@@ -1036,9 +1036,9 @@ describe("completion cultivation and cite-gated feedback", () => {
         content: MEMORY_EXTRACT_SYSTEM_PROMPT,
       });
       expect(extraction.messages[1]?.role).toBe("user");
-      expect(extraction.messages[1]?.content.startsWith("Current date/time: ")).toBe(
-        true,
-      );
+      expect(
+        extraction.messages[1]?.content.startsWith("Current date/time: "),
+      ).toBe(true);
       // The drain executes the remember fan-out to acked (stronger than
       // merely pending): two stable-keyed remember jobs must land.
       await waitFor(
