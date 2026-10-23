@@ -12,6 +12,7 @@ import {
   type GraphData,
   type GraphEdgeData,
   type GraphNodeData,
+  formatRecordedAt,
   graphBounds,
   highlightHandles,
   LABEL_FONT_SIZE,
@@ -21,6 +22,8 @@ import {
   labelCharLimit,
   labelMatches,
   layoutStep,
+  memoryListRows,
+  parseGraphData,
   MAX_ZOOM,
   MIN_ZOOM,
   runLayout,
@@ -698,5 +701,39 @@ describe("memory graph shell", () => {
     };
     expect(data.nodes).toHaveLength(3);
     expect(data.truncated).toBe(true);
+  });
+});
+
+describe("graph record dates", () => {
+  it("keeps createdAt through parse and list rows", () => {
+    const parsed = parseGraphData({
+      searchId: "s",
+      version: "v",
+      scope: "global",
+      center: null,
+      truncated: false,
+      edges: [],
+      nodes: [
+        {
+          handle: "m1",
+          label: "Alpha",
+          status: "active",
+          kind: "user_fact",
+          createdAt: "2026-10-22T18:30:00.000Z",
+          episode: null,
+        },
+      ],
+    });
+    expect(parsed?.nodes[0]?.createdAt).toBe("2026-10-22T18:30:00.000Z");
+    const rows = memoryListRows(parsed?.nodes ?? []);
+    expect(rows[0]?.createdAt).toBe("2026-10-22T18:30:00.000Z");
+    expect(rows[0]?.label).toBe("Alpha");
+  });
+
+  it("formats a record instant as YYYY-MM-DD HH:MM (browser zone)", () => {
+    expect(formatRecordedAt("2026-10-22T18:30:00.000Z")).toMatch(
+      /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/,
+    );
+    expect(formatRecordedAt("nope")).toBe(null);
   });
 });

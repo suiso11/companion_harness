@@ -1607,6 +1607,9 @@ export async function startServer(
         gateway: modelGateway,
         model: modelName,
         logger,
+        // Configured IANA zone: extraction's fallback when a Turn has no
+        // frozen temporal snapshot.
+        timeZone: config.timeZone,
         // Shared background admission (bootstrap-owned): post-completion
         // extraction and idle-distill drains admit ONE unit at a time
         // against the shadow worker below. Foreground memory paths

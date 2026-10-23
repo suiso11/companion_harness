@@ -14,6 +14,9 @@ COMPANION_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 FORK_DIR="${FORK_DIR:-$HOME/gcal-readonly}"
 ACCT="${GOOGLE_ACCOUNT_MODE:-normal}"
 COMPANION_PORT="${COMPANION_PORT:-3000}"
+# Memory/turn dates: the production launcher anchors relative dates to
+# Asia/Tokyo when COMPANION_TIME_ZONE is not explicitly exported.
+export COMPANION_TIME_ZONE="${COMPANION_TIME_ZONE:-Asia/Tokyo}"
 export GOOGLE_OAUTH_CREDENTIALS="${GOOGLE_OAUTH_CREDENTIALS:-$HOME/gcal-readonly/gcp-oauth.keys.json}"
 export GOOGLE_CALENDAR_MCP_READONLY_TOKEN_PATH="${GOOGLE_CALENDAR_MCP_READONLY_TOKEN_PATH:-$HOME/.config/google-calendar-mcp-readonly/tokens.json}"
 export GOOGLE_ACCOUNT_MODE="$ACCT"

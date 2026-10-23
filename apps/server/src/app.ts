@@ -192,6 +192,7 @@ export interface MemoryGraphHttpResult {
     readonly status: "active" | "retired";
     readonly kind: string;
     readonly topics?: readonly string[] | undefined;
+    readonly createdAt?: string | undefined;
     readonly episode: {
       readonly kind: "session" | "doc" | "day";
       readonly episodeKey: string;
@@ -224,6 +225,7 @@ export interface MemoryHttpPort {
       handle: string;
       snippet: string;
       status: "active" | "retired";
+      createdAt?: string;
     }[];
   }>;
   getMemoryDetail(input: {

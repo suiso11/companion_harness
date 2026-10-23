@@ -109,6 +109,38 @@ function astralSnippets(): Array<{
   return out;
 }
 
+describe("memory block record dates", () => {
+  const snippets = [
+    {
+      recordId: "r1",
+      recallId: "k1",
+      snippet: "User likes tea.",
+      kind: "user_fact" as const,
+      createdAt: "2026-10-22T18:30:00.000Z",
+    },
+  ];
+  it("appends the 記録 date in the frozen zone", () => {
+    expect(formatMemoryPromptBlock(snippets, "Asia/Tokyo")).toContain(
+      "- m1 [user_fact]: User likes tea. (記録: 2026-10-23)",
+    );
+  });
+  it("omits the date when createdAt is absent", () => {
+    const block = formatMemoryPromptBlock(
+      [
+        {
+          recordId: "r1",
+          recallId: "k1",
+          snippet: "User likes tea.",
+          kind: "user_fact" as const,
+        },
+      ],
+      "Asia/Tokyo",
+    );
+    expect(block).toContain("- m1 [user_fact]: User likes tea.");
+    expect(block).not.toContain("記録:");
+  });
+});
+
 describe("agent memory recall projection", () => {
   it("projects the astral 8192 prefix and exposes only what was rendered", async () => {
     const snippets = astralSnippets();

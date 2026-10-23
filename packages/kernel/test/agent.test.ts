@@ -290,6 +290,38 @@ describe("prompt projection and answer rendering", () => {
     });
     expect(JSON.stringify(repaired)).toContain("never both");
   });
+  it("puts exactly one 現在日時 line in the user message, never the system prompt", () => {
+    const tools = buildAgentToolDefinitions([]);
+    const base = {
+      requestText: "q",
+      history: [],
+      references: [],
+      tools,
+      model: "m",
+    };
+    const plain = projectPrompt(base);
+    expect(plain.messages[0]).toEqual({
+      role: "system",
+      content: AGENT_SYSTEM_PROMPT,
+    });
+    expect(JSON.stringify(plain)).not.toContain("現在日時:");
+    const frozen = projectPrompt({
+      ...base,
+      temporal: { now: Date.parse("2026-10-22T18:30:00.000Z"), timeZone: "Asia/Tokyo" },
+    });
+    expect(frozen.messages[0]).toEqual({
+      role: "system",
+      content: AGENT_SYSTEM_PROMPT,
+    });
+    const occurrences = JSON.stringify(frozen)
+      .split("現在日時:")
+      .length - 1;
+    expect(occurrences).toBe(1);
+    expect(frozen.messages[1]?.role).toBe("user");
+    expect(frozen.messages[1]?.content).toContain(
+      "現在日時: 2026-10-23 (金) 03:30 Asia/Tokyo\nUser request:\nq\n",
+    );
+  });
   it("renders answer parts joined by blank lines", () => {
     expect(
       renderAnswerText({
