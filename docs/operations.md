@@ -589,11 +589,12 @@ COMPANION_VOICE_JSON='{"profile":"shunkin","timeoutMs":30000}'
 - The canonical StructuredAnswer is validated first. Only after the step's
   model_calls row and terminal event are durable does one auxiliary model
   call run, with reasoning off and an output cap derived from the canonical
-  character count (clamped to 256-4096 tokens). The pure gate then checks,
-  per part: `[rN]`/`[mN]` citation markers, ordered number tokens, kanji
-  numerals with counters, ASCII words, URLs, code spans, negation markers,
-  and a bounded length ratio. Any mismatch, timeout, provider error, or
-  wrong part count falls back to the canonical text with a fixed reason.
+  character count (clamped to 256-4096 tokens). Any parsing-valid response
+  with one part per canonical part is accepted and shown; the prompt asks
+  the model to preserve facts, numbers, URLs, citation markers, and code,
+  but there is no structural fidelity gate. Only timeout, provider error,
+  malformed/empty output, a wrong part count, or an oversized canonical
+  answer falls back to the canonical text with a fixed reason.
 - The call is not an agent step: it writes no `model_calls` row, consumes no
   step/tool budget, and never extends the 300s run wall. It is bounded by
   `timeoutMs` and the remaining wall budget. The current main model takes
@@ -605,10 +606,11 @@ COMPANION_VOICE_JSON='{"profile":"shunkin","timeoutMs":30000}'
   draft streams canonical and the voiced version appears at completion.
 - The `shunkin` profile draws on 谷崎潤一郎『春琴抄』 (青空文庫, public
   domain) and 船場言葉 features documented at Wikipedia 大阪弁#船場言葉.
-- Limits: the gate cannot detect antonym swaps; prompt-based style can
-  drift across models; LoRA is future work (a per-request LoRA would apply
-  only to the voice call). Because `voice` extends the strict RunResult
-  schema, a pre-voice build cannot read rows that contain it.
+- Limits: without the gate, a voiced rendering can change negation or
+  ASCII wording if the model drifts; prompt-based style can drift across
+  models; LoRA is future work (a per-request LoRA would apply only to the
+  voice call). Because `voice` extends the strict RunResult schema, a
+  pre-voice build cannot read rows that contain it.
 
 ## Fixed-task comparison CLI (experimental)
 

@@ -64,6 +64,13 @@ export const VOICE_RENDER_STATUSES = [
 export const VoiceRenderStatusSchema = z.enum(VOICE_RENDER_STATUSES);
 export type VoiceRenderStatus = z.infer<typeof VoiceRenderStatusSchema>;
 
+/**
+ * Persisted `voice.reason` values. The renderer now produces only
+ * timeout/error/invalid_output/part_count/length/cancelled (and cancelled as
+ * skipped). The gate-specific values (citation_marker/number/negation/latin/
+ * url/code_block) are retained solely because stored `runs.result_json` rows
+ * are re-parsed with this schema; no new row carries them.
+ */
 export const VOICE_RENDER_REASONS = [
   "timeout",
   "error",

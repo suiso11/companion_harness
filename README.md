@@ -1438,10 +1438,12 @@ COMPANION_VOICE_JSON='{"profile":"shunkin","timeoutMs":30000}'
 
 Flow: the canonical answer is validated first, then after step finalization
 one auxiliary model call (reasoning off, output cap derived from the canonical
-length) asks the profile to voice the same parts. A pure gate then accepts it
-only if every part keeps its `[rN]`/`[mN]` citations, ordered number tokens,
-kanji numerals with counters, ASCII words, URLs, code spans, negation count,
-and a bounded length ratio. Any failure falls back to the canonical text.
+length) asks the profile to voice the same parts. Any response that parses as
+the expected JSON with one part per canonical part is accepted and shown; the
+prompt asks the model to preserve facts, numbers, URLs, citation markers, and
+code, but no structural fidelity gate runs. Only a timeout, provider error,
+malformed/empty output, wrong part count, or oversized canonical answer falls
+back to the canonical text.
 The auxiliary call is not a step, is not recorded in `model_calls`, and does
 not consume the 8-step or tool budgets; it is bounded by the remaining run
 wall budget and `timeoutMs`. On the current main model, expect roughly 1-4s.
@@ -1454,8 +1456,9 @@ answer streams canonical, and the voiced version appears when the run
 completes.
 
 The profile is based on 谷崎潤一郎『春琴抄』 (青空文庫, public domain) plus
-船場言葉 features (Wikipedia 大阪弁#船場言葉). Limits: the gate cannot catch
-antonym swaps; prompt-based style may drift; LoRA is future work (a
+船場言葉 features (Wikipedia 大阪弁#船場言葉). Limits: without the gate, a
+voiced rendering can change negation or ASCII wording if the model drifts;
+prompt-based style may drift; LoRA is future work (a
 per-request LoRA would apply to the voice call only). The optional `voice`
 field extends the strict RunResult schema, so rolling back to a pre-voice
 build cannot read rows containing it.

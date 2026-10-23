@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  checkVoiceAnswer,
   loadBundledVoiceProfile,
   parseVoiceProfile,
   voiceProfileFingerprint,
@@ -81,16 +80,6 @@ describe("bundled shunkin voice profile", () => {
       for (const form of plainForms) {
         expect(exemplar.voiced).not.toContain(form);
       }
-    }
-  });
-
-  it("keeps every exemplar inside the structural gate", () => {
-    const profile = loadBundledVoiceProfile();
-    for (const exemplar of profile.exemplars) {
-      expect(
-        checkVoiceAnswer([exemplar.canonical], [exemplar.voiced]),
-        exemplar.canonical,
-      ).toBeNull();
     }
   });
 });

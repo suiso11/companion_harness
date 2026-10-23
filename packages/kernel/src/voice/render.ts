@@ -3,13 +3,15 @@
 // This is an AUXILIARY model call, never the agent loop: it does not write
 // `model_calls` / `run_events`, consume tool budgets, or mutate a run. It
 // takes a validated StructuredAnswer, asks the local gateway for voiced
-// text, and only accepts the result when the pure gate proves that every
-// citation, number, ASCII word, URL, and code span survived unchanged.
+// text, and accepts any response that is valid VoiceResponse JSON with one
+// part per canonical part. No structural fidelity gate runs here: the
+// profile prompt still asks the model to preserve facts, numbers, URLs,
+// citations, and code, but the rendered text is always shown when usable.
 //
 // Failure is always conservative and total: `render()` never throws. Any
-// timeout, provider error, malformed response, wrong part count, or gate
-// rejection yields `fallback` (or `skipped`/`cancelled` for an external
-// abort) with a fixed reason. The canonical answer is never altered.
+// timeout, provider error, malformed response, or wrong part count yields
+// `fallback` (or `skipped`/`cancelled` for an external abort) with a fixed
+// reason. The canonical answer is never altered.
 //
 // When a private execution recorder is supplied, the exact request/response
 // pair is recorded under `voice.request` / `voice.response`; recorder
@@ -29,7 +31,6 @@ import type {
 } from "@companion/model-local";
 import { z } from "zod";
 import type { ExecutionRecorder } from "../execution_records.js";
-import { checkVoiceAnswer } from "./gate.js";
 import { type VoiceProfile, voiceProfileFingerprint } from "./profile.js";
 
 /** Default auxiliary voice-call budget (30s). */
@@ -383,10 +384,6 @@ export function createVoiceRenderer(
           fallback(profileId, profileVersion, "part_count"),
           rawText,
         );
-      }
-      const gateReason = checkVoiceAnswer(canonicalTexts, voicedTexts);
-      if (gateReason !== null) {
-        return finish(fallback(profileId, profileVersion, gateReason), rawText);
       }
       return finish(
         {
