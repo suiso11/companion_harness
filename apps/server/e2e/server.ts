@@ -177,7 +177,7 @@ const E2E_TOOL_ARGS_HASH = createHash("sha256")
 
 // Voice spec harness: a fake model gateway that answers the production
 // voice renderer with one JSON object (no real LLM, no network). The
-// renderer and its fidelity gate are the real production code.
+// renderer is the real production code.
 const e2eVoiceGateway: ModelGateway = {
   provider: "openai-compatible",
   capabilities: { toolCalling: false },
@@ -571,7 +571,7 @@ registry.register("m0-default", async (ctx: RunStrategyContext) => {
   }
   if (text.includes(TEXT_VOICE) && e2eVoiceRenderer !== null) {
     // Real production voice projection: canonical answer first, then the
-    // auxiliary renderer's gated voiced parts (fake gateway supplies JSON).
+    // auxiliary renderer's voiced parts (fake gateway supplies JSON).
     const answer = {
       version: 1 as const,
       parts: [{ text: VOICE_CANONICAL_TEXT, citations: ["r1"] }],

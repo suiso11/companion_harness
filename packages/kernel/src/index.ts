@@ -688,11 +688,6 @@ export {
   stageTrialProposal,
   wireModeForReadOnly,
 } from "./trial_authority.js";
-export type { VoiceGateReason } from "./voice/gate.js";
-export {
-  checkVoiceAnswer,
-  checkVoicePart,
-} from "./voice/gate.js";
 export type {
   BundledVoiceProfileId,
   VoiceProfile,

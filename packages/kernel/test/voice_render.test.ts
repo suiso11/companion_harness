@@ -80,7 +80,7 @@ function renderedText(parts: string[] = voiced): string {
 }
 
 describe("createVoiceRenderer", () => {
-  it("renders a gated voice answer through one auxiliary gateway call", async () => {
+  it("renders a valid voice answer through one auxiliary gateway call", async () => {
     const { renderer, calls } = rendererFor(renderedText());
     const voice = await renderer(answer(), { runId: "run-1" });
     expect(voice.status).toBe("rendered");
@@ -203,15 +203,21 @@ describe("createVoiceRenderer", () => {
     });
   });
 
-  it("falls back when the gate rejects a changed number", async () => {
+  it("renders a voiced part that changes negation and ASCII words", async () => {
     const { renderer } = rendererFor(
       renderedText([
         "明日は晴れでござります。r1",
-        "11:00にお会いしとくれやす。",
+        "APIは使わへんとあきまへんな。",
       ]),
     );
-    const voice = await renderer(answer(), { runId: "run-1" });
-    expect(voice).toMatchObject({ status: "fallback", reason: "number" });
+    const voice = await renderer(
+      answer(["明日は晴れです。r1", "APIは使わない。"]),
+      {
+        runId: "run-1",
+      },
+    );
+    expect(voice).toMatchObject({ status: "rendered" });
+    expect(voice.parts?.[1]?.text).toBe("APIは使わへんとあきまへんな。");
   });
 
   it("falls back on timeout", async () => {
