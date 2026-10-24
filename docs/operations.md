@@ -504,12 +504,16 @@ connector instance owns **all** configured roots.
   tick only while the real response reports `applied > 0`; deferred/
   no_grounded clusters wait for that re-arm instead of looping) —
   and `maintain.activation {scope, limit:20}` (armed by a remember or
-  consolidation, at most once per idle pass). Consolidation logs
-  `applied` plus per-outcome `written`/`unchanged`/`noGrounded`/
-  `deferred` and `degraded`; activation logs
-  `scored`/`scoreFailed`/`retired`/`reactivated`/`wouldRetire`/
-  `wouldReactivate`/`degraded`, so the preview signal (`wouldRetire`/
-  `wouldReactivate`) is visible in structured logs. Activation is
+  consolidation, at most once per idle pass). Each metric is one event
+  with a numeric `status` (the logger preserves numbers): consolidation
+  emits `memory.idle.consolidate.applied` / `.written` / `.unchanged` /
+  `.no_grounded` / `.deferred` / `.degraded` (0|1); activation emits
+  `memory.idle.activation.scored` / `.score_failed` / `.would_retire` /
+  `.would_reactivate` / `.retired` / `.reactivated` / `.degraded` (0|1),
+  so the preview signal (`wouldRetire`/`wouldReactivate`) is visible in
+  structured logs. An unparseable response logs
+  `memory.idle.consolidate.invalid` / `memory.idle.activation.invalid`
+  with `status:1`. Activation is
   PREVIEW-ONLY by decision (2026-10-24): remind's config keeps
   `activation.apply=false`, so Companion never sends `apply:true` — the op
   scores derived importance and reports what would change without changing

@@ -2141,19 +2141,35 @@ export function createMemoryService(
     return { counts, applied, degraded: data.degraded };
   }
 
-  function consolidateStatus(data: Record<string, unknown> | null): string {
+  /**
+   * One bounded log event per consolidation metric: the logger preserves
+   * numeric `status` values as-is (only string statuses are sanitized to
+   * the closed allowlist), so counts survive structured-log sanitization.
+   */
+  function logConsolidateSummary(data: Record<string, unknown> | null): void {
     const summary = consolidateSummary(data);
     if (summary === null) {
-      return "invalid";
+      log("warn", "memory.idle.consolidate.invalid", { status: 1 });
+      return;
     }
-    return (
-      `applied=${summary.applied}` +
-      ` written=${summary.counts.written}` +
-      ` unchanged=${summary.counts.unchanged}` +
-      ` noGrounded=${summary.counts.no_grounded_sentences}` +
-      ` deferred=${summary.counts.deferred}` +
-      ` degraded=${summary.degraded ? "true" : "false"}`
-    );
+    log("info", "memory.idle.consolidate.applied", {
+      status: summary.applied,
+    });
+    log("info", "memory.idle.consolidate.written", {
+      status: summary.counts.written,
+    });
+    log("info", "memory.idle.consolidate.unchanged", {
+      status: summary.counts.unchanged,
+    });
+    log("info", "memory.idle.consolidate.no_grounded", {
+      status: summary.counts.no_grounded_sentences,
+    });
+    log("info", "memory.idle.consolidate.deferred", {
+      status: summary.counts.deferred,
+    });
+    log("info", "memory.idle.consolidate.degraded", {
+      status: summary.degraded ? 1 : 0,
+    });
   }
 
   interface ActivationSummary {
@@ -2200,20 +2216,34 @@ export function createMemoryService(
     };
   }
 
-  function activationStatus(data: Record<string, unknown> | null): string {
+  /** One bounded numeric-status log event per activation metric. */
+  function logActivationSummary(data: Record<string, unknown> | null): void {
     const summary = activationSummary(data);
     if (summary === null) {
-      return "invalid";
+      log("warn", "memory.idle.activation.invalid", { status: 1 });
+      return;
     }
-    return (
-      `scored=${summary.scored}` +
-      ` scoreFailed=${summary.scoreFailed}` +
-      ` retired=${summary.retired}` +
-      ` reactivated=${summary.reactivated}` +
-      ` wouldRetire=${summary.wouldRetire}` +
-      ` wouldReactivate=${summary.wouldReactivate}` +
-      ` degraded=${summary.degraded ? "true" : "false"}`
-    );
+    log("info", "memory.idle.activation.scored", {
+      status: summary.scored,
+    });
+    log("info", "memory.idle.activation.score_failed", {
+      status: summary.scoreFailed,
+    });
+    log("info", "memory.idle.activation.would_retire", {
+      status: summary.wouldRetire,
+    });
+    log("info", "memory.idle.activation.would_reactivate", {
+      status: summary.wouldReactivate,
+    });
+    log("info", "memory.idle.activation.retired", {
+      status: summary.retired,
+    });
+    log("info", "memory.idle.activation.reactivated", {
+      status: summary.reactivated,
+    });
+    log("info", "memory.idle.activation.degraded", {
+      status: summary.degraded ? 1 : 0,
+    });
   }
 
   /**
@@ -2402,9 +2432,7 @@ export function createMemoryService(
           // retried on the next remember/associate re-arm, never every tick.
           consolidateDirty = summary !== null && summary.applied > 0;
           activationDirty = true;
-          log("info", "memory.idle.consolidate", {
-            status: consolidateStatus(consolidate.data),
-          });
+          logConsolidateSummary(consolidate.data);
         }
       }
     }
@@ -2444,9 +2472,7 @@ export function createMemoryService(
             });
           }
         } else if (activation.ok) {
-          log("info", "memory.idle.activation", {
-            status: activationStatus(activation.data),
-          });
+          logActivationSummary(activation.data);
         }
       }
     }
