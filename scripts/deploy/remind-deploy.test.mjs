@@ -10,10 +10,22 @@
 // uses one ?per_page=100 request and the classifier reports
 // too-many-checks clearly when total_count exceeds that page size.
 import { execFile } from "node:child_process";
-import { readFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+
+import { backupRemindPreDeploy } from "./remind-backup.mjs";
 
 const SCRIPT_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -124,5 +136,134 @@ describe("remind-deploy.sh CI-gate classifier", () => {
         `${'[{"total_count":1,"check_runs":[]}]'.replace("]", " ")} `,
       ),
     ).toBe("parse-error");
+  });
+});
+
+const PRE_DEPLOY = "pre-deploy DB backup";
+const FLIP = 'mv -Tf "$CURRENT_LINK.tmp.$$" "$CURRENT_LINK"';
+
+function shellSource() {
+  return readFileSync(SCRIPT_PATH, "utf8");
+}
+
+/** The shell command that takes the pre-deploy backup (through its guard). */
+function backupInvocation() {
+  const source = shellSource();
+  const start = source.indexOf("BACKUP_LINE=");
+  const end = source.indexOf('log "pre-deploy DB backup', start);
+  if (start < 0 || end < 0) {
+    throw new Error("pre-deploy backup invocation not found");
+  }
+  return source.slice(start, end);
+}
+
+function makeDb(dir) {
+  const dbPath = join(dir, "memory.db");
+  const db = new DatabaseSync(dbPath);
+  db.exec("CREATE TABLE t (x INTEGER)");
+  db.exec("INSERT INTO t VALUES (1)");
+  db.exec("PRAGMA user_version = 7");
+  db.close();
+  return dbPath;
+}
+
+describe("remind-deploy.sh pre-deploy DB backup", () => {
+  it("backs up before the symlink flip, on the failure path", () => {
+    const source = shellSource();
+    const backupAt = source.indexOf(`# --- ${PRE_DEPLOY}`);
+    const flipAt = source.indexOf(FLIP, backupAt);
+    expect(backupAt).toBeGreaterThan(0);
+    expect(flipAt).toBeGreaterThan(backupAt);
+    // Smoke gate must precede the backup: no DB write before build+sorted.
+    const smokeAt = source.indexOf("smoke test failed for $TARGET");
+    expect(smokeAt).toBeGreaterThan(0);
+    expect(backupAt).toBeGreaterThan(smokeAt);
+    // A backup failure routes into the existing rollback/exit-1 path.
+    expect(backupInvocation()).toMatch(/\|\|\s*\n?\s*fail_refuse/);
+    const failRefuse = source.slice(
+      source.indexOf("fail_refuse()"),
+      source.indexOf("if ! SCOPE="),
+    );
+    expect(failRefuse).toMatch(/rollback/);
+    expect(failRefuse).toMatch(/exit 1/);
+  });
+
+  it("writes remind-pre-deploy-<UTC>-<sha7>.sqlite with 0600 and user_version", async () => {
+    const work = mkdtempSync(join(tmpdir(), "predeploy-"));
+    try {
+      makeDb(work);
+      const config = join(work, "memory.config.json");
+      writeFileSync(config, JSON.stringify({ dbPath: "./memory.db" }));
+      const res = await backupRemindPreDeploy({
+        configPath: config,
+        sha: "ABCDEF1234567890",
+        now: new Date("2026-10-24T09:00:00Z"),
+      });
+      expect(res.skipped).toBe(false);
+      expect(res.file).toBe(
+        "remind-pre-deploy-20261024T090000Z-abcdef1.sqlite",
+      );
+      const path = join(work, "backups", res.file);
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+      expect(res.userVersion).toBe(7);
+      const db = new DatabaseSync(path, { readOnly: true });
+      try {
+        expect(db.prepare("PRAGMA integrity_check").get().integrity_check).toBe(
+          "ok",
+        );
+        expect(db.prepare("PRAGMA user_version").get().user_version).toBe(7);
+      } finally {
+        db.close();
+      }
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+
+  it("retains only the newest 10 pre-deploy backups", async () => {
+    const work = mkdtempSync(join(tmpdir(), "predeploy-"));
+    try {
+      makeDb(work);
+      const config = join(work, "memory.config.json");
+      writeFileSync(config, JSON.stringify({ dbPath: "./memory.db" }));
+      for (let i = 0; i < 12; i += 1) {
+        await backupRemindPreDeploy({
+          configPath: config,
+          sha: "abcdef1",
+          now: new Date(Date.UTC(2026, 9, 24, 9, 0, i)),
+        });
+      }
+      const backups = readdirSync(join(work, "backups")).filter((name) =>
+        name.startsWith("remind-pre-deploy-"),
+      );
+      expect(backups).toHaveLength(10);
+      expect(backups).not.toContain(
+        "remind-pre-deploy-20261024T090000Z-abcdef1.sqlite",
+      );
+      expect(backups).not.toContain(
+        "remind-pre-deploy-20261024T090001Z-abcdef1.sqlite",
+      );
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+
+  it("skips cleanly when the DB does not exist yet", async () => {
+    const work = mkdtempSync(join(tmpdir(), "predeploy-"));
+    try {
+      const config = join(work, "memory.config.json");
+      writeFileSync(config, JSON.stringify({ dbPath: "./memory.db" }));
+      const res = await backupRemindPreDeploy({
+        configPath: config,
+        sha: "abcdef1",
+      });
+      expect(res).toMatchObject({
+        skipped: true,
+        reason: "database missing",
+      });
+      expect(existsSync(join(work, "backups"))).toBe(false);
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
   });
 });

@@ -399,6 +399,22 @@ if [ "$SMOKE_FAILED" != "0" ]; then
   fail_refuse "smoke test failed for $TARGET (record.list did not return a valid ok envelope); rolling back"
 fi
 
+# --- pre-deploy DB backup -------------------------------------------------
+# A release can migrate the remind schema the first time the CLI opens the
+# live DB, and that migration has no other restore point. Immediately before
+# the flip, take a verified online backup next to the DB:
+#   <dbdir>/backups/remind-pre-deploy-<UTC ts>-<sha7>.sqlite  (0600)
+# The dbPath is resolved from the remind config (relative to the config
+# dir), never hardcoded. Newest 10 pre-deploy backups are kept. A DB that
+# does not exist yet (fresh install) is a clean skip. Backup or integrity
+# failure aborts through the normal failure path (no flip, exit 1).
+PREDEPLOY_SHA="$(git rev-parse --short=7 "$TARGET" 2>/dev/null ||
+  printf '%s' "$TARGET" | cut -c1-7)"
+BACKUP_LINE="$(node "$SCRIPT_DIR/remind-backup.mjs" \
+  --config "$SMOKE_CONFIG" --pre-deploy --sha "$PREDEPLOY_SHA" --keep 10 2>&1)" ||
+  fail_refuse "pre-deploy DB backup failed for $TARGET; refusing to switch $CURRENT_LINK"
+log "pre-deploy DB backup: $BACKUP_LINE"
+
 # --- atomic publish -------------------------------------------------------
 # Re-point $CURRENT_LINK at the verified release in one `mv -T`; readers
 # see either the old or the new release, never a partial tree (in-flight

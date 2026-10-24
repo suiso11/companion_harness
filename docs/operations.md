@@ -4594,7 +4594,19 @@ remind 側の自動デプロイは PR #92
    **常に今ビルドしたリリースの** `dist/src/cli.js` を使う。
    失敗時は state を `failed` にして直前の検証済みリリースへ symlink を
    戻し (rollback) exit 1。
-5. Smoke 合格後のみ `mv -T` で `~/remind_current` を
+5. Pre-deploy DB backup: Smoke 合格後、symlink 切替の**直前**に live DB
+   の online backup を取る。remind は新リリースの初回 CLI open 時に
+   schema migration を実行し得るため、これが唯一の復元点になる。
+   `memory.config.json` の `dbPath` (相対パスは config ディレクトリ基準) を
+   解決し、`<dbdir>/backups/remind-pre-deploy-<UTC ts>-<sha7>.sqlite`
+   (0600、ディレクトリ 0700) に保存する。`node:sqlite` の online backup
+   API で読み取り専用ソースからコピーし、`PRAGMA integrity_check` が
+   `ok` のときだけ rename する。`PRAGMA user_version` を journal に記録。
+   保持は pre-deploy prefix に一致する newest 10 世代のみ。
+   DB がまだ存在しない初回はログを出して skip。backup / integrity_check
+   の失敗は symlink を切り替えず、通常の失敗経路
+   (`failed` marker + rollback + exit 1) で中止する。
+6. 上記 backup 成功後のみ `mv -T` で `~/remind_current` を
    `~/remind_releases/<sha>` へ原子的に付け替え、state marker
    (`~/.local/state/companion/remind-deploy.state`) を `ok` に更新。
    リリースは直近 2 世代を保持 (実行中の子プロセスは自分のディレクトリを
@@ -4694,6 +4706,10 @@ RandomizedDelaySec=15min) に `scripts/deploy/companion-backup.sh` を実行す�
   ディレクトリ基準) を解決し、`node:sqlite` の online backup API で
   読み取り専用ソースからコピーする。コピーは `.partial` →
   `PRAGMA integrity_check` → 0600 → atomic rename。
+- remind の pre-deploy backup は上記 daily backup とは別に、deploy の
+  symlink 切替直前に `<dbdir>/backups/remind-pre-deploy-<UTC>-<sha7>.sqlite`
+  として newest 10 世代を保持する (`remind-deploy.sh`)。daily backup の
+  保持対象には含まれない。
 - prune は新世代の rename 成功後にのみ実行する。失敗時は `.partial` を
   削除し、既存の最新 good copy を残す。
 - 同時実行は flock (`$XDG_RUNTIME_DIR/companion-backup.lock`) で排他。
@@ -4718,7 +4734,8 @@ journalctl --user -u companion-backup.service -n 50
 
 1. remind CLI / それを呼ぶ処理を停止 (cron/常駐があれば止める)。
 2. 現行 DB / `-wal` / `-shm` を退避コピー。
-3. `~/.local/share/companion-backups/remind/` の選んだ世代を
+3. `~/.local/share/companion-backups/remind/` または (migration 直前へ
+   戻す場合は) `<dbdir>/backups/` の pre-deploy 世代を選び、
    `dbPath` 隣の一時ファイルへコピー。
 4. `PRAGMA integrity_check` が `ok` であることを確認。
 5. atomic rename で `dbPath` を置換し、古い sidecar を削除。

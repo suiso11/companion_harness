@@ -31,12 +31,45 @@ export declare function backupDb(options: {
   outDir: string;
   keep?: number;
   prefix?: string;
+  suffix?: string;
   now?: Date;
-}): Promise<{ file: string; path: string; removed: string[] }>;
+}): Promise<{
+  file: string;
+  path: string;
+  removed: string[];
+  userVersion: number;
+}>;
 
 export declare function backupRemindDb(options?: {
   configPath?: string;
   outDir?: string;
   keep?: number;
+  prefix?: string;
+  suffix?: string;
   now?: Date;
-}): Promise<{ file: string; path: string; removed: string[] }>;
+}): Promise<{
+  file: string;
+  path: string;
+  removed: string[];
+  userVersion: number;
+}>;
+
+export declare const PREDEPLOY_PREFIX: string;
+export declare const PREDEPLOY_KEEP: number;
+
+export declare function backupRemindPreDeploy(options?: {
+  configPath?: string;
+  sha: string;
+  keep?: number;
+  now?: Date;
+}): Promise<
+  | { skipped: true; reason: string; dbPath: string }
+  | {
+      skipped: false;
+      dbPath: string;
+      file: string;
+      path: string;
+      removed: string[];
+      userVersion: number;
+    }
+>;
