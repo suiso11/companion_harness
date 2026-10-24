@@ -204,7 +204,10 @@ describe("remind-deploy.sh pre-deploy DB backup", () => {
         "remind-pre-deploy-20261024T090000Z-abcdef1.sqlite",
       );
       const path = join(work, "backups", res.file);
-      expect(statSync(path).mode & 0o777).toBe(0o600);
+      // POSIX mode is best-effort on Windows (current-user ACL only).
+      if (process.platform !== "win32") {
+        expect(statSync(path).mode & 0o777).toBe(0o600);
+      }
       expect(res.userVersion).toBe(7);
       const db = new DatabaseSync(path, { readOnly: true });
       try {
