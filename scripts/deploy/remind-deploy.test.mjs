@@ -181,7 +181,11 @@ describe("remind-deploy.sh pre-deploy DB backup", () => {
     expect(smokeRunAt).toBeGreaterThan(backupAt);
     expect(flipAt).toBeGreaterThan(smokeRunAt);
     // The backup runs after the config path is resolved (it needs dbPath).
-    expect(source.indexOf('SMOKE_CONFIG="$(node "$SCRIPT_DIR/remindDeploy.mjs" field config')).toBeLessThan(backupAt);
+    expect(
+      source.indexOf(
+        'SMOKE_CONFIG="$(node "$SCRIPT_DIR/remindDeploy.mjs" field config',
+      ),
+    ).toBeLessThan(backupAt);
     // A backup failure routes into the existing rollback/exit-1 path.
     expect(backupInvocation()).toMatch(/\|\|\s*\n?\s*fail_refuse/);
     expect(backupInvocation()).toMatch(/--pre-deploy --sha "\$PREDEPLOY_SHA"/);
@@ -206,26 +210,26 @@ describe("remind-deploy.sh pre-deploy DB backup", () => {
     expect(beforeSmoke).toMatch(/\|\|\s*\n?\s*fail_refuse/);
     expect(beforeSmoke).not.toMatch(/run_smoke_bounded/);
     expect(beforeSmoke).not.toMatch(/mv -Tf/);
-    expect(
-      source.indexOf('run_smoke_bounded "$SMOKE_TMP"'),
-    ).toBeGreaterThan(backupAt);
+    expect(source.indexOf('run_smoke_bounded "$SMOKE_TMP"')).toBeGreaterThan(
+      backupAt,
+    );
   });
 
   it("names the pre-deploy backup in the post-smoke failure message", () => {
     const source = shellSource();
     const messageAt = source.indexOf("smoke test failed for $TARGET");
     expect(messageAt).toBeGreaterThan(0);
-    const message = source.slice(
-      messageAt,
-      source.indexOf('fi', messageAt),
-    );
+    const message = source.slice(messageAt, source.indexOf("fi", messageAt));
     // Smoke may already have migrated the live DB: tell the operator which
     // backup to restore manually (the deploy never auto-restores it).
-    expect(message).toContain("${PREDEPLOY_BACKUP}");
+    expect(message).toMatch(/\$\{PREDEPLOY_BACKUP\}/);
     expect(message).toMatch(/restore that backup manually/i);
     // The shell extracts the full path emitted by the backup CLI.
     expect(
-      source.slice(source.indexOf("BACKUP_LINE="), source.indexOf("SMOKE_REQUEST=")),
+      source.slice(
+        source.indexOf("BACKUP_LINE="),
+        source.indexOf("SMOKE_REQUEST="),
+      ),
     ).toMatch(/sed 's\/\.\* path=\/\//);
   });
 
