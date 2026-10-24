@@ -16,6 +16,14 @@
 # Companion callers is needed. COMPANION_MEMORY_JSON must point its `entry`
 # at ~/remind_current/dist/src/cli.js (see install.sh / docs/operations.md).
 #
+# DB restore point: the smoke run executes the NEW release CLI against the
+# LIVE remind config, so merely opening the DB there may already apply the
+# new schema migration. A verified pre-deploy backup is therefore taken
+# BEFORE the smoke run (this is the only pre-migration restore point). If
+# the smoke then fails, only the release is rolled back; the live DB may
+# already be migrated, so the failure message names the backup file for a
+# manual restore (never auto-restored).
+#
 # Interrupted-deploy recovery: a state marker
 # ($XDG_STATE_HOME/companion/remind-deploy.state, KEY=VALUE lines) records
 # target/prev sha + phase before any step; phase becomes "ok" only after
@@ -350,6 +358,33 @@ if ! SMOKE_CONFIG="$(node "$SCRIPT_DIR/remindDeploy.mjs" field config \
   --memory-json "$MEMORY_JSON" --fallback "$REMIND_CONFIG")"; then
   fail_refuse "cannot resolve the remind config path; refusing"
 fi
+
+# --- pre-deploy DB backup -------------------------------------------------
+# Take this BEFORE the smoke run: the smoke executes the NEW release CLI
+# against the LIVE config, so opening the DB there can already migrate the
+# schema. This backup is the only pre-migration restore point. Verified
+# online copy next to the DB:
+#   <dbdir>/backups/remind-pre-deploy-<UTC ts>-<sha7>.sqlite  (0600)
+# The dbPath is resolved from the remind config (relative to the config
+# dir), never hardcoded. Newest 10 pre-deploy backups are kept. A DB that
+# does not exist yet (fresh install) is a clean skip. Backup or integrity
+# failure aborts through the normal failure path before any smoke run and
+# before the flip (exit 1).
+PREDEPLOY_SHA="$(git rev-parse --short=7 "$TARGET" 2>/dev/null ||
+  printf '%s' "$TARGET" | cut -c1-7)"
+BACKUP_LINE="$(node "$SCRIPT_DIR/remind-backup.mjs" \
+  --config "$SMOKE_CONFIG" --pre-deploy --sha "$PREDEPLOY_SHA" --keep 10 2>&1)" ||
+  fail_refuse "pre-deploy DB backup failed for $TARGET; refusing to run the smoke or switch $CURRENT_LINK"
+log "pre-deploy DB backup: $BACKUP_LINE"
+# Full path of the verified backup (empty when the fresh-install DB is
+# missing); surfaced in the post-smoke failure so the operator can restore
+# manually. Never auto-restore here: the smoke may have migrated the live DB.
+PREDEPLOY_BACKUP="$(printf '%s\n' "$BACKUP_LINE" | sed 's/.* path=//')"
+case "$PREDEPLOY_BACKUP" in
+  "$BACKUP_LINE") PREDEPLOY_BACKUP="" ;;
+esac
+PREDEPLOY_BACKUP="${PREDEPLOY_BACKUP:-none}"
+
 SMOKE_REQUEST="$(SCOPE="$SCOPE" node --input-type=module -e '
 process.stdout.write(JSON.stringify({ v: 1, op: "record.list", params: { scope: process.env.SCOPE } }));
 ')"
@@ -396,7 +431,7 @@ elif ! node "$SCRIPT_DIR/remindDeploy.mjs" check-ok <"$SMOKE_TMP"; then
 fi
 rm -f "$SMOKE_TMP"
 if [ "$SMOKE_FAILED" != "0" ]; then
-  fail_refuse "smoke test failed for $TARGET (record.list did not return a valid ok envelope); rolling back"
+  fail_refuse "smoke test failed for $TARGET (record.list did not return a valid ok envelope); rolling back the release; pre-deploy DB backup ${PREDEPLOY_BACKUP} (the smoke may already have migrated the DB; restore that backup manually if needed)"
 fi
 
 # --- atomic publish -------------------------------------------------------

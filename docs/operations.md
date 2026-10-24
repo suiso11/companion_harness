@@ -4585,7 +4585,21 @@ remind 側の自動デプロイは PR #92
    `--slurp` 集約、旧 gh はストリーム結合でフォールバック)。
 3. `git archive <target>` を `~/remind_releases/<sha>` へ展開し、そこで
    `npm ci && npm run build` (remind は npm 管理。`dist/` は gitignore)。
-4. Smoke: `record.list` を1回実行し、本番クライアント
+4. Pre-deploy DB backup: Smoke の**直前**に live DB の online backup を
+   取る。Smoke は新リリースの CLI を live config に対して実行するため、
+   その初回 CLI open で schema migration が適用され得る。よってこの
+   backup が唯一の migration 前復元点であり、smoke より後に取っては
+   ならない。`memory.config.json` の `dbPath` (相対パスは config
+   ディレクトリ基準) を解決し、
+   `<dbdir>/backups/remind-pre-deploy-<UTC ts>-<sha7>.sqlite`
+   (0600、ディレクトリ 0700) に保存する。`node:sqlite` の online backup
+   API で読み取り専用ソースからコピーし、`PRAGMA integrity_check` が
+   `ok` のときだけ rename する。`PRAGMA user_version` を journal に記録。
+   保持は pre-deploy prefix に一致する newest 10 世代のみ。
+   DB がまだ存在しない初回はログを出して skip。backup / integrity_check
+   の失敗は smoke を実行せず、symlink も切り替えず、通常の失敗経路
+   (`failed` marker + rollback + exit 1) で中止する。
+5. Smoke: `record.list` を1回実行し、本番クライアント
    (`memory_cli.ts`) と同一の厳密検証で `{v:1,ok:true,code:"OK"}` を
    要求する (1行・LF 終端・完全な envelope キーセット・型チェック、
    `scripts/deploy/remindDeploy.mjs`、`timeout 30` で境界付き)。
@@ -4593,8 +4607,11 @@ remind 側の自動デプロイは PR #92
    (無ければ node 本体と remind config の `allowedScopes[0]`)、`entry` は
    **常に今ビルドしたリリースの** `dist/src/cli.js` を使う。
    失敗時は state を `failed` にして直前の検証済みリリースへ symlink を
-   戻し (rollback) exit 1。
-5. Smoke 合格後のみ `mv -T` で `~/remind_current` を
+   戻し (rollback) exit 1。この時点で live DB は smoke により既に
+   migration 済みかもしれないため、失敗メッセージには pre-deploy backup
+   のフルパスを含める。**自動 restore はしない** (必要なら運用者が手動で
+   戻す)。
+6. 上記 backup + smoke 成功後のみ `mv -T` で `~/remind_current` を
    `~/remind_releases/<sha>` へ原子的に付け替え、state marker
    (`~/.local/state/companion/remind-deploy.state`) を `ok` に更新。
    リリースは直近 2 世代を保持 (実行中の子プロセスは自分のディレクトリを
@@ -4694,6 +4711,12 @@ RandomizedDelaySec=15min) に `scripts/deploy/companion-backup.sh` を実行す�
   ディレクトリ基準) を解決し、`node:sqlite` の online backup API で
   読み取り専用ソースからコピーする。コピーは `.partial` →
   `PRAGMA integrity_check` → 0600 → atomic rename。
+- remind の pre-deploy backup は上記 daily backup とは別に、deploy の
+  smoke 実行**直前** (新 CLI が live DB を開いて migration し得るため) に
+  `<dbdir>/backups/remind-pre-deploy-<UTC>-<sha7>.sqlite` として newest 10
+  世代を保持する (`remind-deploy.sh`)。smoke 失敗時はこのパスを
+  失敗メッセージに出すが、自動 restore はしない。daily backup の保持対象
+  には含まれない。
 - prune は新世代の rename 成功後にのみ実行する。失敗時は `.partial` を
   削除し、既存の最新 good copy を残す。
 - 同時実行は flock (`$XDG_RUNTIME_DIR/companion-backup.lock`) で排他。
@@ -4718,7 +4741,8 @@ journalctl --user -u companion-backup.service -n 50
 
 1. remind CLI / それを呼ぶ処理を停止 (cron/常駐があれば止める)。
 2. 現行 DB / `-wal` / `-shm` を退避コピー。
-3. `~/.local/share/companion-backups/remind/` の選んだ世代を
+3. `~/.local/share/companion-backups/remind/` または (migration 直前へ
+   戻す場合は) `<dbdir>/backups/` の pre-deploy 世代を選び、
    `dbPath` 隣の一時ファイルへコピー。
 4. `PRAGMA integrity_check` が `ok` であることを確認。
 5. atomic rename で `dbPath` を置換し、古い sidecar を削除。

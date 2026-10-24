@@ -134,13 +134,18 @@ export function pruneGenerations(
   return removed;
 }
 
-function integrityOk(dbPath) {
+function inspectBackup(dbPath) {
   // Imported lazily so the CLI can report a stable error on old Node.
   return import("node:sqlite").then(({ DatabaseSync }) => {
     const db = new DatabaseSync(dbPath, { readOnly: true });
     try {
       const row = db.prepare("PRAGMA integrity_check").get();
-      return row?.integrity_check === "ok";
+      const versionRow = db.prepare("PRAGMA user_version").get();
+      const userVersion = versionRow?.user_version;
+      return {
+        ok: row?.integrity_check === "ok",
+        userVersion: Number.isInteger(userVersion) ? userVersion : 0,
+      };
     } finally {
       db.close();
     }
@@ -157,15 +162,20 @@ export async function backupDb({
   outDir,
   keep = DEFAULT_KEEP,
   prefix = "remind-",
+  suffix,
   now = new Date(),
 }) {
   ensurePrivateDir(outDir);
   const stamp = formatUtc(now);
-  const finalName = `${prefix}${stamp}-${process.pid}-${Math.random()
-    .toString(16)
-    .slice(2, 10)}.sqlite`;
+  const finalName =
+    typeof suffix === "string" && suffix.length > 0
+      ? `${prefix}${stamp}-${suffix}.sqlite`
+      : `${prefix}${stamp}-${process.pid}-${Math.random()
+          .toString(16)
+          .slice(2, 10)}.sqlite`;
   const finalPath = join(outDir, finalName);
   let renamed = false;
+  let userVersion = 0;
 
   // Stage the copy inside a private temp dir and rename ONLY the final file
   // out of it. SQLite sidecars (`-wal` / `-shm`) that node:sqlite leaves next
@@ -197,9 +207,11 @@ export async function backupDb({
     for (const sidecar of [`${partialPath}-wal`, `${partialPath}-shm`]) {
       if (existsSync(sidecar)) unlinkSync(sidecar);
     }
-    if (!(await integrityOk(partialPath))) {
+    const inspection = await inspectBackup(partialPath);
+    if (!inspection.ok) {
       throw new Error("remind backup failed: integrity_check");
     }
+    userVersion = inspection.userVersion;
     renameSync(partialPath, finalPath);
     renamed = true;
     secureFile(finalPath);
@@ -226,7 +238,12 @@ export async function backupDb({
   }
 
   const removed = pruneGenerations(outDir, keep, finalName, prefix);
-  return { file: basename(finalPath), path: finalPath, removed };
+  return {
+    file: basename(finalPath),
+    path: finalPath,
+    removed,
+    userVersion,
+  };
 }
 
 /**
@@ -237,6 +254,8 @@ export async function backupRemindDb({
   configPath = defaultConfigPath(),
   outDir = join(homedir(), ".local", "share", "companion-backups", "remind"),
   keep = DEFAULT_KEEP,
+  prefix = "remind-",
+  suffix,
   now = new Date(),
 } = {}) {
   if (!existsSync(configPath)) {
@@ -246,7 +265,44 @@ export async function backupRemindDb({
   if (!existsSync(dbPath)) {
     throw new Error("remind backup failed: database missing");
   }
-  return backupDb({ dbPath, outDir, keep, prefix: "remind-", now });
+  return backupDb({ dbPath, outDir, keep, prefix, suffix, now });
+}
+
+export const PREDEPLOY_PREFIX = "remind-pre-deploy-";
+export const PREDEPLOY_KEEP = 10;
+
+/**
+ * Verified pre-symlink-flip backup for remind-deploy.sh. The file lives in
+ * `<dbdir>/backups/` (next to the live DB) as
+ * `remind-pre-deploy-<UTC>-<sha7>.sqlite`. A missing DB (fresh install) is a
+ * clean skip; everything else rejects so the deploy can abort before flip.
+ */
+export async function backupRemindPreDeploy({
+  configPath = defaultConfigPath(),
+  sha,
+  keep = PREDEPLOY_KEEP,
+  now = new Date(),
+} = {}) {
+  if (typeof sha !== "string" || !/^[0-9a-f]{7,40}$/i.test(sha)) {
+    throw new Error("remind backup failed: invalid sha");
+  }
+  if (!existsSync(configPath)) {
+    throw new Error("remind backup failed: config missing");
+  }
+  const dbPath = resolveRemindDbPath(configPath);
+  if (!existsSync(dbPath)) {
+    return { skipped: true, reason: "database missing", dbPath };
+  }
+  const outDir = join(dirname(dbPath), "backups");
+  const result = await backupDb({
+    dbPath,
+    outDir,
+    keep,
+    prefix: PREDEPLOY_PREFIX,
+    suffix: sha.slice(0, 7).toLowerCase(),
+    now,
+  });
+  return { ...result, skipped: false, dbPath };
 }
 
 function parseArgs(argv) {
@@ -262,6 +318,18 @@ function parseArgs(argv) {
     } else if (arg === "--keep" && i + 1 < argv.length) {
       i += 1;
       out.keep = Number.parseInt(argv[i], 10);
+    } else if (arg === "--prefix" && i + 1 < argv.length) {
+      i += 1;
+      out.prefix = argv[i];
+    } else if (arg === "--suffix" && i + 1 < argv.length) {
+      i += 1;
+      out.suffix = argv[i];
+    } else if (arg === "--pre-deploy") {
+      out.preDeploy = true;
+      out.keep = PREDEPLOY_KEEP;
+    } else if (arg === "--sha" && i + 1 < argv.length) {
+      i += 1;
+      out.sha = argv[i];
     } else if (arg === "-h" || arg === "--help") {
       out.help = true;
     } else {
@@ -282,8 +350,24 @@ if (invokedAsMain) {
     const args = parseArgs(process.argv.slice(2));
     if (args.help) {
       process.stdout.write(
-        "usage: remind-backup.mjs [--config PATH] [--out-dir DIR] [--keep N]\n",
+        "usage: remind-backup.mjs [--config PATH] [--out-dir DIR] [--keep N]\n" +
+          "       remind-backup.mjs --pre-deploy --sha SHA [--config PATH] [--keep N]\n",
       );
+      process.exit(0);
+    }
+    if (args.preDeploy) {
+      const result = await backupRemindPreDeploy({
+        configPath: args.configPath ?? defaultConfigPath(),
+        sha: args.sha,
+        keep: Number.isFinite(args.keep) ? args.keep : PREDEPLOY_KEEP,
+      });
+      if (result.skipped) {
+        process.stdout.write(`skip=${result.reason}\n`);
+      } else {
+        process.stdout.write(
+          `backup=${result.file} user_version=${result.userVersion} removed=${result.removed.length} path=${result.path}\n`,
+        );
+      }
       process.exit(0);
     }
     const result = await backupRemindDb({
@@ -292,6 +376,8 @@ if (invokedAsMain) {
         args.outDir ??
         join(homedir(), ".local", "share", "companion-backups", "remind"),
       keep: Number.isFinite(args.keep) ? args.keep : DEFAULT_KEEP,
+      prefix: args.prefix,
+      suffix: args.suffix,
     });
     process.stdout.write(`${result.file}\n`);
   } catch (error) {
