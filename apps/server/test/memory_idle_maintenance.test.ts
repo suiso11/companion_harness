@@ -1,9 +1,11 @@
 // Idle derived maintenance beyond association (remind >=795c476):
-// `maintain.consolidate` runs after `maintain.associate`, re-arms while
-// its response reports remaining work, and `maintain.activation` runs its
-// preview-only scoring at most once per idle pass after a remember.
-// Foreground preemption aborts an in-flight consolidate, and an old remind
-// that answers BAD_REQUEST latches each op off until restart.
+// `maintain.consolidate` runs after `maintain.associate` with `{scope}`
+// only (remind's batchMax rejects a larger limit), re-arms for the next
+// tick only when the real response reports `applied > 0`, and
+// `maintain.activation` runs its flat preview-only scoring at most once
+// per idle pass after a remember. Foreground preemption aborts an
+// in-flight consolidate, and BAD_REQUEST/LIMIT_EXCEEDED latch each op off
+// until restart.
 //
 // Real migrated `:memory:` kernel DB + injected fake remind CLI (behavioral
 // contract only). No child, no remind DB, no network.
@@ -25,7 +27,6 @@ import type {
 import {
   createMemoryService,
   MEMORY_ACTIVATION_LIMIT,
-  MEMORY_CONSOLIDATE_LIMIT,
   MEMORY_DISTILL_TIMEOUT_MS,
   type MemoryService,
   stableMemoryJobKey,
@@ -146,11 +147,12 @@ function enqueueRememberChain(
 }
 
 describe("idle consolidation + activation scheduling", () => {
-  it("consolidates after association and re-arms while remaining>0; activation stays preview-only", async () => {
+  it("consolidates after association with {scope} only, re-arming on applied>0 but not on a deferred/unchanged pass", async () => {
     const f = await openRepo();
     try {
       const order: string[] = [];
       const consolidateKeys: Array<string | undefined> = [];
+      const consolidateParams: Array<Record<string, unknown>> = [];
       let consolidateRuns = 0;
       const activationCalls: Array<{
         params: Record<string, unknown>;
@@ -165,16 +167,41 @@ describe("idle consolidation + activation scheduling", () => {
         if (op === "maintain.consolidate") {
           order.push("consolidate");
           consolidateKeys.push(key);
+          consolidateParams.push(params);
           consolidateRuns += 1;
-          // Two passes report remaining work (re-arm), the third is done.
-          return okEnvelope({
-            consolidate: {
-              processed: 2,
-              unchanged: 1,
-              deferred: 0,
-              remaining: consolidateRuns <= 2 ? { topics: 1 } : 0,
-            },
-          });
+          // Two passes applied real writes (re-arm); the third is only
+          // deferred/unchanged work, which must NOT re-arm on its own.
+          return consolidateRuns <= 2
+            ? okEnvelope({
+                clusters: [
+                  {
+                    topic: "food",
+                    members: 2,
+                    sentencesKept: 1,
+                    outcome: "written",
+                  },
+                ],
+                applied: 1,
+                degraded: false,
+              })
+            : okEnvelope({
+                clusters: [
+                  {
+                    topic: "food",
+                    members: 1,
+                    sentencesKept: 0,
+                    outcome: "deferred",
+                  },
+                  {
+                    topic: "work",
+                    members: 1,
+                    sentencesKept: 0,
+                    outcome: "unchanged",
+                  },
+                ],
+                applied: 0,
+                degraded: false,
+              });
         }
         if (op === "maintain.activation") {
           order.push("activation");
@@ -184,15 +211,13 @@ describe("idle consolidation + activation scheduling", () => {
             timeoutMs: options?.timeoutMs,
           });
           return okEnvelope({
-            activation: {
-              scored: 5,
-              scoreFailed: 0,
-              retired: 0,
-              reactivated: 0,
-              wouldRetire: 1,
-              wouldReactivate: 2,
-              degraded: false,
-            },
+            scored: 5,
+            scoreFailed: 0,
+            retired: 0,
+            reactivated: 0,
+            wouldRetire: 1,
+            wouldReactivate: 2,
+            degraded: false,
           });
         }
         return okEnvelope(null);
@@ -209,9 +234,14 @@ describe("idle consolidation + activation scheduling", () => {
         order.indexOf("consolidate"),
       );
       expect(order).toContain("activation");
+      // applied=1 twice re-arms; applied=0 with deferred/unchanged does not.
       expect(consolidateRuns).toBe(3);
       // Per-pass keys (fresh nonce) make remind recompute every pass.
       expect(new Set(consolidateKeys).size).toBe(3);
+      for (const params of consolidateParams) {
+        expect(params).toEqual({ scope: SCOPE });
+        expect(params).not.toHaveProperty("limit");
+      }
 
       expect(activationCalls.length).toBeGreaterThanOrEqual(1);
       for (const call of activationCalls) {
@@ -224,7 +254,6 @@ describe("idle consolidation + activation scheduling", () => {
         expect(call.key).toBeDefined();
         expect(call.timeoutMs).toBe(MEMORY_DISTILL_TIMEOUT_MS);
       }
-      expect(MEMORY_CONSOLIDATE_LIMIT).toBeGreaterThan(0);
     } finally {
       f.close();
     }
@@ -240,17 +269,29 @@ describe("idle consolidation + activation scheduling", () => {
         }
         if (op === "maintain.consolidate") {
           return okEnvelope({
-            consolidate: {
-              processed: 1,
-              unchanged: 0,
-              deferred: 0,
-              remaining: 0,
-            },
+            clusters: [
+              {
+                topic: "work",
+                members: 1,
+                sentencesKept: 0,
+                outcome: "unchanged",
+              },
+            ],
+            applied: 0,
+            degraded: false,
           });
         }
         if (op === "maintain.activation") {
           activationCalls += 1;
-          return okEnvelope({ activation: { scored: 1, degraded: false } });
+          return okEnvelope({
+            scored: 1,
+            scoreFailed: 0,
+            retired: 0,
+            reactivated: 0,
+            wouldRetire: 0,
+            wouldReactivate: 0,
+            degraded: false,
+          });
         }
         return okEnvelope(null);
       };
@@ -298,11 +339,19 @@ describe("foreground preemption of consolidation", () => {
               }
             });
           }
-          return okEnvelope({ consolidate: { remaining: 0 } });
+          return okEnvelope({ clusters: [], applied: 0, degraded: false });
         }
         if (op === "maintain.activation") {
           activationCalls += 1;
-          return okEnvelope({ activation: { scored: 1, degraded: false } });
+          return okEnvelope({
+            scored: 1,
+            scoreFailed: 0,
+            retired: 0,
+            reactivated: 0,
+            wouldRetire: 0,
+            wouldReactivate: 0,
+            degraded: false,
+          });
         }
         if (op === "maintain.associate") {
           return okEnvelope({ associate: { remaining: 0 } });
@@ -350,6 +399,38 @@ describe("old remind compatibility for derived maintenance", () => {
       await waitFor(() => consolidateCalls >= 1 && activationCalls >= 1, 5000);
       await sleep(250);
       // Latched until restart: no per-tick retry storm.
+      expect(consolidateCalls).toBe(1);
+      expect(activationCalls).toBe(1);
+    } finally {
+      f.close();
+    }
+  });
+});
+
+describe("permanent derived-maintenance misconfiguration", () => {
+  it("latches LIMIT_EXCEEDED from consolidate and activation until restart", async () => {
+    const f = await openRepo();
+    try {
+      let consolidateCalls = 0;
+      let activationCalls = 0;
+      const cliCall: CliCall = async (_address, op) => {
+        if (op === "maintain.consolidate") {
+          consolidateCalls += 1;
+          return rejectedEnvelope("LIMIT_EXCEEDED");
+        }
+        if (op === "maintain.activation") {
+          activationCalls += 1;
+          return rejectedEnvelope("LIMIT_EXCEEDED");
+        }
+        return okEnvelope(null);
+      };
+      const service = makeService(f.repo, cliCall);
+      service.start();
+      enqueueRememberChain(f.repo, [{ body: "new fact", kind: "user_fact" }]);
+      await service.drainOnce();
+      await waitFor(() => consolidateCalls >= 1 && activationCalls >= 1, 5000);
+      await sleep(250);
+      // A permanent misconfig is logged once and latched, never retried.
       expect(consolidateCalls).toBe(1);
       expect(activationCalls).toBe(1);
     } finally {

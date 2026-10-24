@@ -496,12 +496,17 @@ connector instance owns **all** configured roots.
   silently until restart while the legacy graph/list keep working.
 - Derived consolidation + activation (remind >=`795c476`, 2026-10-24):
   the same idle tick continues after association with
-  `maintain.consolidate {scope, limit:20}` (clusters depend on topics and
-  edges, so it runs after `maintain.associate`; re-armed by a new remember
-  or association pass and while the response still reports remaining work)
+  `maintain.consolidate {scope}` — NO `limit`, because remind's
+  `consolidate.batchMax` (default 5) rejects a larger limit with
+  `LIMIT_EXCEEDED` and the CLI applies its configured batch size (clusters
+  depend on topics and edges, so it runs after `maintain.associate`;
+  re-armed by a new remember or association pass, and for the next idle
+  tick only while the real response reports `applied > 0`; deferred/
+  no_grounded clusters wait for that re-arm instead of looping) —
   and `maintain.activation {scope, limit:20}` (armed by a remember or
   consolidation, at most once per idle pass). Consolidation logs
-  `processed`/`unchanged`/`deferred`/`remaining`; activation logs
+  `applied` plus per-outcome `written`/`unchanged`/`noGrounded`/
+  `deferred` and `degraded`; activation logs
   `scored`/`scoreFailed`/`retired`/`reactivated`/`wouldRetire`/
   `wouldReactivate`/`degraded`, so the preview signal (`wouldRetire`/
   `wouldReactivate`) is visible in structured logs. Activation is
@@ -511,6 +516,8 @@ connector instance owns **all** configured roots.
   record status. Both calls use per-pass idempotency keys, the distill-grade
   timeout, foreground preemption/stop abort, single-flight, and the same
   old-remind `BAD_REQUEST` latch-until-restart (silent, no retry storm).
+  `LIMIT_EXCEEDED` is treated as a permanent misconfiguration: logged once
+  and latched off until restart, never retried every tick.
 - Not implemented (unchanged): memory perception, user export, and
   memory/session deletion APIs. There is no per-session memory
   delete/export endpoint.
