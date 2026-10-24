@@ -494,6 +494,23 @@ connector instance owns **all** configured roots.
   suiso11/remind#29 must merge first; an old remind answers `BAD_REQUEST`
   for `topic.pending`/`maintain.associate`, so those surfaces latch off
   silently until restart while the legacy graph/list keep working.
+- Derived consolidation + activation (remind >=`795c476`, 2026-10-24):
+  the same idle tick continues after association with
+  `maintain.consolidate {scope, limit:20}` (clusters depend on topics and
+  edges, so it runs after `maintain.associate`; re-armed by a new remember
+  or association pass and while the response still reports remaining work)
+  and `maintain.activation {scope, limit:20}` (armed by a remember or
+  consolidation, at most once per idle pass). Consolidation logs
+  `processed`/`unchanged`/`deferred`/`remaining`; activation logs
+  `scored`/`scoreFailed`/`retired`/`reactivated`/`wouldRetire`/
+  `wouldReactivate`/`degraded`, so the preview signal (`wouldRetire`/
+  `wouldReactivate`) is visible in structured logs. Activation is
+  PREVIEW-ONLY by decision (2026-10-24): remind's config keeps
+  `activation.apply=false`, so Companion never sends `apply:true` — the op
+  scores derived importance and reports what would change without changing
+  record status. Both calls use per-pass idempotency keys, the distill-grade
+  timeout, foreground preemption/stop abort, single-flight, and the same
+  old-remind `BAD_REQUEST` latch-until-restart (silent, no retry storm).
 - Not implemented (unchanged): memory perception, user export, and
   memory/session deletion APIs. There is no per-session memory
   delete/export endpoint.

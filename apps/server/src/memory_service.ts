@@ -107,6 +107,13 @@ export const MEMORY_TOPIC_MAX_CP = 12;
 export const MEMORY_REMIND_TAGS_MAX = 5;
 /** Bounded topic backfill page per idle tick (topic.pending limit). */
 export const MEMORY_TOPIC_BACKFILL_LIMIT = 8;
+/**
+ * Bounded derived-maintenance page per idle tick. Consolidation clusters
+ * records by topic (small pages keep one tick bounded); activation is
+ * preview-only and scores a small page (importance/relevance) per tick.
+ */
+export const MEMORY_CONSOLIDATE_LIMIT = 20;
+export const MEMORY_ACTIVATION_LIMIT = 20;
 export const MEMORY_EVENT_BODY_MAX_CP = 4000;
 export const MEMORY_RECALL_QUERY_MAX_CP = 500;
 /** Fixed provenance source stamped on Companion-written events/records. */
@@ -1112,6 +1119,20 @@ export function createMemoryService(
   let associateUnsupported = false;
   let topicsUnsupported = false;
   /**
+   * Derived consolidation + activation maintenance (remind >=795c476).
+   * `consolidateDirty` arms after an association pass wrote topics/edges
+   * and after a remember was enqueued, and stays armed while the last
+   * `maintain.consolidate` reported remaining work. `activationDirty`
+   * arms after a remember/consolidation and is consumed at most ONCE per
+   * idle pass (small preview page). The `*Unsupported` latches mirror the
+   * associate one: an old remind answering BAD_REQUEST is never retried
+   * until a restart (no per-tick error storm).
+   */
+  let consolidateDirty = false;
+  let consolidateUnsupported = false;
+  let activationDirty = false;
+  let activationUnsupported = false;
+  /**
    * Foreground preemption epoch: `notifyForeground()` bumps it, and an
    * in-flight idle-maintenance pass compares the value it captured at
    * start. A preemption therefore cancels the WHOLE pass (topic loop and
@@ -1585,9 +1606,13 @@ export function createMemoryService(
         // Best effort per item: one bad item never blocks its siblings.
       }
       index += 1;
-      // New remember work can change the similarity graph: the next idle
-      // maintenance pass re-runs `maintain.associate` once.
+      // New remember work can change the similarity graph and the
+      // consolidation clusters: the next idle maintenance pass re-runs
+      // `maintain.associate` and `maintain.consolidate` once, and a remember
+      // also makes activation scoring worth a preview pass.
       associateDirty = true;
+      consolidateDirty = true;
+      activationDirty = true;
     }
   }
 
@@ -2050,6 +2075,62 @@ export function createMemoryService(
     return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? raw : 0;
   }
 
+  function maintenanceCount(
+    data: Record<string, unknown> | null,
+    op: string,
+    field: string,
+  ): number {
+    if (data === null) {
+      return 0;
+    }
+    const scoped = isRecord(data[op]) ? data[op] : data;
+    const raw = scoped[field];
+    return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? raw : 0;
+  }
+
+  function consolidateRemaining(data: Record<string, unknown> | null): number {
+    if (data === null) {
+      return 0;
+    }
+    const scoped = isRecord(data.consolidate) ? data.consolidate : data;
+    const raw = scoped.remaining;
+    if (typeof raw === "number" && Number.isFinite(raw)) {
+      return raw > 0 ? raw : 0;
+    }
+    // "remaining" may be a per-type count map (e.g. {groups: 1}).
+    if (isRecord(raw)) {
+      let total = 0;
+      for (const value of Object.values(raw)) {
+        if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+          total += value;
+        }
+      }
+      return total;
+    }
+    return 0;
+  }
+
+  function consolidateStatus(data: Record<string, unknown> | null): string {
+    return (
+      `processed=${maintenanceCount(data, "consolidate", "processed")}` +
+      ` unchanged=${maintenanceCount(data, "consolidate", "unchanged")}` +
+      ` deferred=${maintenanceCount(data, "consolidate", "deferred")}` +
+      ` remaining=${consolidateRemaining(data)}`
+    );
+  }
+
+  function activationStatus(data: Record<string, unknown> | null): string {
+    return (
+      `scored=${maintenanceCount(data, "activation", "scored")}` +
+      ` scoreFailed=${maintenanceCount(data, "activation", "scoreFailed")}` +
+      ` retired=${maintenanceCount(data, "activation", "retired")}` +
+      ` reactivated=${maintenanceCount(data, "activation", "reactivated")}` +
+      ` wouldRetire=${maintenanceCount(data, "activation", "wouldRetire")}` +
+      ` wouldReactivate=${maintenanceCount(data, "activation", "wouldReactivate")}` +
+      ` degraded=${isRecord(data) && (isRecord(data.activation) ? data.activation : data).degraded === true ? "true" : "false"}`
+    );
+  }
+
   /**
    * One bounded idle maintenance pass (remind PR #29), in order:
    * 1. Topic backfill: `topic.pending {scope, limit: 8}` -> one MODEL call
@@ -2065,6 +2146,15 @@ export function createMemoryService(
    *    once no outbox job is pending any more: a remember awaiting retry
    *    must land before the similarity pass snapshots the store. Otherwise
    *    `associateDirty` stays armed for a later tick.
+   * 3. `maintain.consolidate {scope, limit}` after association (clusters
+   *    depend on topics/edges) when a remember/association armed it, and
+   *    while its response reports remaining work. A dirty remember also
+   *    arms consolidation.
+   * 4. `maintain.activation {scope, limit}` at most once per idle pass
+   *    when a remember/consolidation armed it. Preview-only: remind's
+   *    config has `activation.apply=false`, so this only scores importance
+   *    and reports wouldRetire/wouldReactivate (never status changes, and
+   *    Companion never sends `apply: true`).
    * An old remind answers BAD_REQUEST: latch that surface until restart
    * (silent, no per-tick retry storm).
    */
@@ -2183,6 +2273,70 @@ export function createMemoryService(
           associateUnsupported = true;
         } else if (associate.ok) {
           associateDirty = associateRemaining(associate.data) > 0;
+          // Association may have written topics/edges: consolidation
+          // clusters depend on them, so run it after associate this pass.
+          consolidateDirty = true;
+        }
+      }
+    }
+    if (!passActive()) {
+      return;
+    }
+    if (!consolidateUnsupported && consolidateDirty) {
+      const passNonce = randomUUID();
+      const key = stableMemoryJobKey("consolidate", scope, passNonce);
+      const consolidate = await idleMaintenanceCliCall(
+        "maintain.consolidate",
+        { scope, limit: MEMORY_CONSOLIDATE_LIMIT },
+        key,
+        distillTimeoutMs,
+      );
+      if (!passActive()) {
+        return;
+      }
+      if (consolidate !== null) {
+        if (!consolidate.ok && consolidate.code === "BAD_REQUEST") {
+          consolidateUnsupported = true;
+          consolidateDirty = false;
+        } else if (consolidate.ok) {
+          consolidateDirty = consolidateRemaining(consolidate.data) > 0;
+          activationDirty = true;
+          log("info", "memory.idle.consolidate", {
+            status: consolidateStatus(consolidate.data),
+          });
+        }
+      }
+    }
+    if (!passActive()) {
+      return;
+    }
+    if (!activationUnsupported && activationDirty) {
+      // Preview-only by decision (2026-10-24): remind's config keeps
+      // `activation.apply = false`, so this op only SCORES derived
+      // importance and reports wouldRetire/wouldReactivate counts; it
+      // never changes record status. Companion must never send
+      // `apply: true` here until activation is explicitly tuned.
+      const passNonce = randomUUID();
+      const key = stableMemoryJobKey("activation", scope, passNonce);
+      const activation = await idleMaintenanceCliCall(
+        "maintain.activation",
+        { scope, limit: MEMORY_ACTIVATION_LIMIT },
+        key,
+        distillTimeoutMs,
+      );
+      if (!passActive()) {
+        return;
+      }
+      // At most once per idle pass: consumed even on a transient failure
+      // (a later remember/consolidation re-arms it).
+      activationDirty = false;
+      if (activation !== null) {
+        if (!activation.ok && activation.code === "BAD_REQUEST") {
+          activationUnsupported = true;
+        } else if (activation.ok) {
+          log("info", "memory.idle.activation", {
+            status: activationStatus(activation.data),
+          });
         }
       }
     }
