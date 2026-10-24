@@ -168,24 +168,65 @@ function makeDb(dir) {
 }
 
 describe("remind-deploy.sh pre-deploy DB backup", () => {
-  it("backs up before the symlink flip, on the failure path", () => {
+  it("takes the verified backup before the smoke run and the flip", () => {
     const source = shellSource();
     const backupAt = source.indexOf(`# --- ${PRE_DEPLOY}`);
+    // The smoke runs the NEW release CLI against the LIVE config, so the
+    // backup (the only pre-migration restore point) must be taken first.
+    const smokeRequestAt = source.indexOf('SMOKE_REQUEST="$(SCOPE=');
+    const smokeRunAt = source.indexOf('run_smoke_bounded "$SMOKE_TMP"');
     const flipAt = source.indexOf(FLIP, backupAt);
     expect(backupAt).toBeGreaterThan(0);
-    expect(flipAt).toBeGreaterThan(backupAt);
-    // Smoke gate must precede the backup: no DB write before build+sorted.
-    const smokeAt = source.indexOf("smoke test failed for $TARGET");
-    expect(smokeAt).toBeGreaterThan(0);
-    expect(backupAt).toBeGreaterThan(smokeAt);
+    expect(smokeRequestAt).toBeGreaterThan(backupAt);
+    expect(smokeRunAt).toBeGreaterThan(backupAt);
+    expect(flipAt).toBeGreaterThan(smokeRunAt);
+    // The backup runs after the config path is resolved (it needs dbPath).
+    expect(source.indexOf('SMOKE_CONFIG="$(node "$SCRIPT_DIR/remindDeploy.mjs" field config')).toBeLessThan(backupAt);
     // A backup failure routes into the existing rollback/exit-1 path.
     expect(backupInvocation()).toMatch(/\|\|\s*\n?\s*fail_refuse/);
+    expect(backupInvocation()).toMatch(/--pre-deploy --sha "\$PREDEPLOY_SHA"/);
     const failRefuse = source.slice(
       source.indexOf("fail_refuse()"),
       source.indexOf("if ! SCOPE="),
     );
     expect(failRefuse).toMatch(/rollback/);
     expect(failRefuse).toMatch(/exit 1/);
+  });
+
+  it("prevents the smoke run and flip when the backup fails", () => {
+    const source = shellSource();
+    const backupAt = source.indexOf(`# --- ${PRE_DEPLOY}`);
+    // Everything the backup guard can reach before the smoke invocation must
+    // be the failure path: fail_refuse exits 1, so a failed backup can never
+    // fall through to the smoke or the symlink flip.
+    const beforeSmoke = source.slice(
+      source.indexOf("BACKUP_LINE="),
+      source.indexOf('SMOKE_REQUEST="$(SCOPE='),
+    );
+    expect(beforeSmoke).toMatch(/\|\|\s*\n?\s*fail_refuse/);
+    expect(beforeSmoke).not.toMatch(/run_smoke_bounded/);
+    expect(beforeSmoke).not.toMatch(/mv -Tf/);
+    expect(
+      source.indexOf('run_smoke_bounded "$SMOKE_TMP"'),
+    ).toBeGreaterThan(backupAt);
+  });
+
+  it("names the pre-deploy backup in the post-smoke failure message", () => {
+    const source = shellSource();
+    const messageAt = source.indexOf("smoke test failed for $TARGET");
+    expect(messageAt).toBeGreaterThan(0);
+    const message = source.slice(
+      messageAt,
+      source.indexOf('fi', messageAt),
+    );
+    // Smoke may already have migrated the live DB: tell the operator which
+    // backup to restore manually (the deploy never auto-restores it).
+    expect(message).toContain("${PREDEPLOY_BACKUP}");
+    expect(message).toMatch(/restore that backup manually/i);
+    // The shell extracts the full path emitted by the backup CLI.
+    expect(
+      source.slice(source.indexOf("BACKUP_LINE="), source.indexOf("SMOKE_REQUEST=")),
+    ).toMatch(/sed 's\/\.\* path=\/\//);
   });
 
   it("writes remind-pre-deploy-<UTC>-<sha7>.sqlite with 0600 and user_version", async () => {

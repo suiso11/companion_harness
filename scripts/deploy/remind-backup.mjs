@@ -365,7 +365,7 @@ if (invokedAsMain) {
         process.stdout.write(`skip=${result.reason}\n`);
       } else {
         process.stdout.write(
-          `backup=${result.file} user_version=${result.userVersion} removed=${result.removed.length}\n`,
+          `backup=${result.file} user_version=${result.userVersion} removed=${result.removed.length} path=${result.path}\n`,
         );
       }
       process.exit(0);
