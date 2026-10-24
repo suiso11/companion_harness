@@ -23,7 +23,11 @@ import {
   type BackgroundResourceGate,
   createBackgroundResourceGate,
 } from "../src/background_resource.js";
-import { createCollectingLogger, type ServerLogger } from "../src/logger.js";
+import {
+  createCollectingLogger,
+  type ServerLogger,
+  sanitizeLogStatus,
+} from "../src/logger.js";
 import {
   type MemoryCliAddress,
   type MemoryCliCallOptions,
@@ -1984,6 +1988,90 @@ describe("raw-first append and persistent extraction retries", () => {
             record.attempt === 1,
         ),
       ).toHaveLength(1);
+    } finally {
+      f.close();
+    }
+  });
+});
+
+describe("idle maintenance structured count logs", () => {
+  it("emits one numeric-status event per consolidate/activation metric", async () => {
+    const f = await openRepo();
+    try {
+      const collecting = createCollectingLogger("debug");
+      const ops: string[] = [];
+      const cliCall: CliCall = async (_address, op) => {
+        ops.push(op);
+        if (op === "maintain.associate") {
+          return okEnvelope({ remaining: 0 });
+        }
+        if (op === "maintain.consolidate") {
+          return okEnvelope({
+            clusters: [
+              {
+                topic: "topic-a",
+                members: 2,
+                sentencesKept: 1,
+                outcome: "written",
+              },
+              {
+                topic: "topic-b",
+                members: 1,
+                sentencesKept: 0,
+                outcome: "deferred",
+              },
+            ],
+            applied: 1,
+            degraded: false,
+          });
+        }
+        if (op === "maintain.activation") {
+          return okEnvelope({
+            scored: 4,
+            scoreFailed: 1,
+            retired: 0,
+            reactivated: 0,
+            wouldRetire: 2,
+            wouldReactivate: 1,
+            degraded: false,
+          });
+        }
+        return okEnvelope({});
+      };
+      const service = makeService(f.repo, cliCall, {
+        idleMs: 10,
+        logger: collecting.logger,
+      });
+      service.start();
+      await waitFor(() =>
+        collecting.records.some(
+          (record) => record.code === "memory.idle.activation.would_retire",
+        ),
+      );
+      const expected = new Map<string, number>([
+        ["memory.idle.consolidate.applied", 1],
+        ["memory.idle.consolidate.written", 1],
+        ["memory.idle.consolidate.unchanged", 0],
+        ["memory.idle.consolidate.no_grounded", 0],
+        ["memory.idle.consolidate.deferred", 1],
+        ["memory.idle.consolidate.degraded", 0],
+        ["memory.idle.activation.scored", 4],
+        ["memory.idle.activation.score_failed", 1],
+        ["memory.idle.activation.would_retire", 2],
+        ["memory.idle.activation.would_reactivate", 1],
+        ["memory.idle.activation.retired", 0],
+        ["memory.idle.activation.reactivated", 0],
+        ["memory.idle.activation.degraded", 0],
+      ]);
+      for (const [code, status] of expected) {
+        const record = collecting.records.find((entry) => entry.code === code);
+        expect(record, code).toBeDefined();
+        expect(record?.status, code).toBe(status);
+        // The real logger sanitization keeps numeric statuses as-is.
+        expect(sanitizeLogStatus(record?.status), code).not.toBe("unknown");
+      }
+      expect(ops).toContain("maintain.consolidate");
+      expect(ops).toContain("maintain.activation");
     } finally {
       f.close();
     }
