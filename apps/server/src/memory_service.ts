@@ -107,6 +107,13 @@ export const MEMORY_TOPIC_MAX_CP = 12;
 export const MEMORY_REMIND_TAGS_MAX = 5;
 /** Bounded topic backfill page per idle tick (topic.pending limit). */
 export const MEMORY_TOPIC_BACKFILL_LIMIT = 8;
+/**
+ * Bounded activation preview page per idle tick (remind cap is 200).
+ * Consolidation does NOT send a limit: remind's `consolidate.batchMax`
+ * (default 5) rejects a larger limit with LIMIT_EXCEEDED, so the CLI
+ * applies its configured batch size.
+ */
+export const MEMORY_ACTIVATION_LIMIT = 20;
 export const MEMORY_EVENT_BODY_MAX_CP = 4000;
 export const MEMORY_RECALL_QUERY_MAX_CP = 500;
 /** Fixed provenance source stamped on Companion-written events/records. */
@@ -1112,6 +1119,22 @@ export function createMemoryService(
   let associateUnsupported = false;
   let topicsUnsupported = false;
   /**
+   * Derived consolidation + activation maintenance (remind >=795c476).
+   * `consolidateDirty` arms after an association pass wrote topics/edges
+   * and after a remember was enqueued, and stays armed only while the last
+   * `maintain.consolidate` applied a real write (`applied > 0`). Deferred/
+   * no_grounded clusters wait for the next remember/association re-arm,
+   * never a per-tick retry loop. `activationDirty` arms after a remember/
+   * consolidation and is consumed at most ONCE per idle pass (small
+   * preview page). The `*Unsupported` latches mirror the associate one: a
+   * BAD_REQUEST or LIMIT_EXCEEDED answer is never retried until a restart
+   * (no per-tick error storm).
+   */
+  let consolidateDirty = false;
+  let consolidateUnsupported = false;
+  let activationDirty = false;
+  let activationUnsupported = false;
+  /**
    * Foreground preemption epoch: `notifyForeground()` bumps it, and an
    * in-flight idle-maintenance pass compares the value it captured at
    * start. A preemption therefore cancels the WHOLE pass (topic loop and
@@ -1585,9 +1608,13 @@ export function createMemoryService(
         // Best effort per item: one bad item never blocks its siblings.
       }
       index += 1;
-      // New remember work can change the similarity graph: the next idle
-      // maintenance pass re-runs `maintain.associate` once.
+      // New remember work can change the similarity graph and the
+      // consolidation clusters: the next idle maintenance pass re-runs
+      // `maintain.associate` and `maintain.consolidate` once, and a remember
+      // also makes activation scoring worth a preview pass.
       associateDirty = true;
+      consolidateDirty = true;
+      activationDirty = true;
     }
   }
 
@@ -2050,6 +2077,145 @@ export function createMemoryService(
     return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? raw : 0;
   }
 
+  type ConsolidateOutcome =
+    | "written"
+    | "unchanged"
+    | "no_grounded_sentences"
+    | "deferred";
+
+  interface ConsolidateSummary {
+    readonly counts: Record<ConsolidateOutcome, number>;
+    readonly applied: number;
+    readonly degraded: boolean;
+  }
+
+  function countOf(value: unknown): number | null {
+    return typeof value === "number" && Number.isFinite(value) && value >= 0
+      ? value
+      : null;
+  }
+
+  /**
+   * Strict parse of the real `maintain.consolidate` data (remind >=795c476):
+   * `{clusters: [{topic, members, sentencesKept, outcome, ...}], applied,
+   * degraded}`. There is NO `remaining`/flat/nested tolerance: a response
+   * that does not match is treated as "nothing to retry" (applied = 0).
+   */
+  function consolidateSummary(
+    data: Record<string, unknown> | null,
+  ): ConsolidateSummary | null {
+    if (data === null || !Array.isArray(data.clusters)) {
+      return null;
+    }
+    const applied = countOf(data.applied);
+    if (applied === null || typeof data.degraded !== "boolean") {
+      return null;
+    }
+    const counts: Record<ConsolidateOutcome, number> = {
+      written: 0,
+      unchanged: 0,
+      no_grounded_sentences: 0,
+      deferred: 0,
+    };
+    for (const cluster of data.clusters) {
+      if (!isRecord(cluster) || typeof cluster.topic !== "string") {
+        return null;
+      }
+      if (
+        countOf(cluster.members) === null ||
+        countOf(cluster.sentencesKept) === null
+      ) {
+        return null;
+      }
+      const outcome = cluster.outcome;
+      if (
+        outcome !== "written" &&
+        outcome !== "unchanged" &&
+        outcome !== "no_grounded_sentences" &&
+        outcome !== "deferred"
+      ) {
+        return null;
+      }
+      counts[outcome] += 1;
+    }
+    return { counts, applied, degraded: data.degraded };
+  }
+
+  function consolidateStatus(data: Record<string, unknown> | null): string {
+    const summary = consolidateSummary(data);
+    if (summary === null) {
+      return "invalid";
+    }
+    return (
+      `applied=${summary.applied}` +
+      ` written=${summary.counts.written}` +
+      ` unchanged=${summary.counts.unchanged}` +
+      ` noGrounded=${summary.counts.no_grounded_sentences}` +
+      ` deferred=${summary.counts.deferred}` +
+      ` degraded=${summary.degraded ? "true" : "false"}`
+    );
+  }
+
+  interface ActivationSummary {
+    readonly scored: number;
+    readonly scoreFailed: number;
+    readonly retired: number;
+    readonly reactivated: number;
+    readonly wouldRetire: number;
+    readonly wouldReactivate: number;
+    readonly degraded: boolean;
+  }
+
+  /** Strict parse of the real FLAT `maintain.activation` response data. */
+  function activationSummary(
+    data: Record<string, unknown> | null,
+  ): ActivationSummary | null {
+    if (data === null || typeof data.degraded !== "boolean") {
+      return null;
+    }
+    const fields = [
+      "scored",
+      "scoreFailed",
+      "retired",
+      "reactivated",
+      "wouldRetire",
+      "wouldReactivate",
+    ] as const;
+    const parsed: Partial<Record<(typeof fields)[number], number>> = {};
+    for (const field of fields) {
+      const value = countOf(data[field]);
+      if (value === null) {
+        return null;
+      }
+      parsed[field] = value;
+    }
+    return {
+      scored: parsed.scored as number,
+      scoreFailed: parsed.scoreFailed as number,
+      retired: parsed.retired as number,
+      reactivated: parsed.reactivated as number,
+      wouldRetire: parsed.wouldRetire as number,
+      wouldReactivate: parsed.wouldReactivate as number,
+      degraded: data.degraded,
+    };
+  }
+
+  function activationStatus(data: Record<string, unknown> | null): string {
+    const summary = activationSummary(data);
+    if (summary === null) {
+      return "invalid";
+    }
+    return (
+      `scored=${summary.scored}` +
+      ` scoreFailed=${summary.scoreFailed}` +
+      ` retired=${summary.retired}` +
+      ` reactivated=${summary.reactivated}` +
+      ` wouldRetire=${summary.wouldRetire}` +
+      ` wouldReactivate=${summary.wouldReactivate}` +
+      ` degraded=${summary.degraded ? "true" : "false"}`
+    );
+  }
+
   /**
    * One bounded idle maintenance pass (remind PR #29), in order:
    * 1. Topic backfill: `topic.pending {scope, limit: 8}` -> one MODEL call
@@ -2065,6 +2231,16 @@ export function createMemoryService(
    *    once no outbox job is pending any more: a remember awaiting retry
    *    must land before the similarity pass snapshots the store. Otherwise
    *    `associateDirty` stays armed for a later tick.
+   * 3. `maintain.consolidate {scope}` (NO limit: remind's batchMax
+   *    rejects a larger limit) after association (clusters depend on
+   *    topics/edges) when a remember/association armed it, and on the next
+   *    tick only while its real response reported `applied > 0`. A dirty
+   *    remember also arms consolidation.
+   * 4. `maintain.activation {scope, limit}` at most once per idle pass
+   *    when a remember/consolidation armed it. Preview-only: remind's
+   *    config has `activation.apply=false`, so this only scores importance
+   *    and reports wouldRetire/wouldReactivate (never status changes, and
+   *    Companion never sends `apply: true`).
    * An old remind answers BAD_REQUEST: latch that surface until restart
    * (silent, no per-tick retry storm).
    */
@@ -2183,6 +2359,94 @@ export function createMemoryService(
           associateUnsupported = true;
         } else if (associate.ok) {
           associateDirty = associateRemaining(associate.data) > 0;
+          // Association may have written topics/edges: consolidation
+          // clusters depend on them, so run it after associate this pass.
+          consolidateDirty = true;
+        }
+      }
+    }
+    if (!passActive()) {
+      return;
+    }
+    if (!consolidateUnsupported && consolidateDirty) {
+      const passNonce = randomUUID();
+      const key = stableMemoryJobKey("consolidate", scope, passNonce);
+      // No `limit`: remind's consolidate batchMax (default 5) rejects a
+      // larger limit with LIMIT_EXCEEDED, so the CLI applies its configured
+      // batch size (the request MUST stay {scope} only).
+      const consolidate = await idleMaintenanceCliCall(
+        "maintain.consolidate",
+        { scope },
+        key,
+        distillTimeoutMs,
+      );
+      if (!passActive()) {
+        return;
+      }
+      if (consolidate !== null) {
+        if (
+          !consolidate.ok &&
+          (consolidate.code === "BAD_REQUEST" ||
+            consolidate.code === "LIMIT_EXCEEDED")
+        ) {
+          consolidateUnsupported = true;
+          consolidateDirty = false;
+          if (consolidate.code === "LIMIT_EXCEEDED") {
+            log("warn", "memory.idle.consolidate_unsupported", {
+              status: consolidate.code,
+            });
+          }
+        } else if (consolidate.ok) {
+          const summary = consolidateSummary(consolidate.data);
+          // Re-arm only for a real write: deferred/no_grounded clusters are
+          // retried on the next remember/associate re-arm, never every tick.
+          consolidateDirty = summary !== null && summary.applied > 0;
+          activationDirty = true;
+          log("info", "memory.idle.consolidate", {
+            status: consolidateStatus(consolidate.data),
+          });
+        }
+      }
+    }
+    if (!passActive()) {
+      return;
+    }
+    if (!activationUnsupported && activationDirty) {
+      // Preview-only by decision (2026-10-24): remind's config keeps
+      // `activation.apply = false`, so this op only SCORES derived
+      // importance and reports wouldRetire/wouldReactivate counts; it
+      // never changes record status. Companion must never send
+      // `apply: true` here until activation is explicitly tuned.
+      const passNonce = randomUUID();
+      const key = stableMemoryJobKey("activation", scope, passNonce);
+      const activation = await idleMaintenanceCliCall(
+        "maintain.activation",
+        { scope, limit: MEMORY_ACTIVATION_LIMIT },
+        key,
+        distillTimeoutMs,
+      );
+      if (!passActive()) {
+        return;
+      }
+      // At most once per idle pass: consumed even on a transient failure
+      // (a later remember/consolidation re-arms it).
+      activationDirty = false;
+      if (activation !== null) {
+        if (
+          !activation.ok &&
+          (activation.code === "BAD_REQUEST" ||
+            activation.code === "LIMIT_EXCEEDED")
+        ) {
+          activationUnsupported = true;
+          if (activation.code === "LIMIT_EXCEEDED") {
+            log("warn", "memory.idle.activation_unsupported", {
+              status: activation.code,
+            });
+          }
+        } else if (activation.ok) {
+          log("info", "memory.idle.activation", {
+            status: activationStatus(activation.data),
+          });
         }
       }
     }

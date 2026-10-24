@@ -67,6 +67,9 @@ const ALLOWED_OPS: ReadonlySet<string> = new Set([
   "maintain.distill",
   // Derived association + topic maintenance (additive remind ops).
   "maintain.associate",
+  // Derived consolidation + preview-only activation (remind >=795c476).
+  "maintain.consolidate",
+  "maintain.activation",
   "topic.set",
   "topic.pending",
   "record.search",
@@ -87,6 +90,9 @@ const WRITE_OPS: ReadonlySet<string> = new Set([
   "record.feedback",
   "maintain.distill",
   "maintain.associate",
+  // Derived consolidation + preview-only activation (remind >=795c476).
+  "maintain.consolidate",
+  "maintain.activation",
   "topic.set",
   "record.correct",
   "record.retire",
