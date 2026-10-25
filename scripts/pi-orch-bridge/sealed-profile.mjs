@@ -16,9 +16,9 @@ import {
   closeSync,
   existsSync,
   lstatSync,
+  readdirSync as nodeReaddirSync,
   openSync,
   readFileSync,
-  readdirSync as nodeReaddirSync,
   readSync,
   realpathSync,
   statSync,
@@ -46,13 +46,6 @@ const HEX64_RE = /^[0-9a-f]{64}$/;
 const HEX40_RE = /^[0-9a-f]{40}$/;
 const ALIAS_RE = /^[a-z0-9_-]{1,64}$/;
 const CHECK_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
-const PATH_KEYS = [
-  "snapshotRoot",
-  "manifestPath",
-  "pristineSnapshotRoot",
-  "sourceRootOriginal",
-  "stateDir",
-];
 const NOOP_EXECUTABLES = new Set(["true", "false", ":"]);
 
 function fail(message) {
@@ -65,7 +58,8 @@ function isRecord(value) {
 
 function checkNoUnknown(obj, allowed, what) {
   for (const key of Object.keys(obj)) {
-    if (!allowed.includes(key)) fail(`${what} carries an unsupported key: ${key}`);
+    if (!allowed.includes(key))
+      fail(`${what} carries an unsupported key: ${key}`);
   }
 }
 
@@ -86,7 +80,12 @@ function needAbsolutePath(value, field) {
 }
 
 function needInt(value, field, min, max) {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < min || value > max) {
+  if (
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value < min ||
+    value > max
+  ) {
     fail(`field ${field} must be an integer in [${min}, ${max}]`);
   }
   return value;
@@ -113,8 +112,17 @@ function needArgs(value, field, allowAbsoluteGuest = false) {
     if (arg.includes("\0") || arg.includes("\n") || arg.includes("\r")) {
       fail(`field ${field} entries must not contain control characters`);
     }
-    if (allowAbsoluteGuest && arg.startsWith("/") && arg !== "/work" && !arg.startsWith("/work/") && arg !== "/scratch" && !arg.startsWith("/scratch/")) {
-      fail(`field ${field} absolute entries must be /work or /scratch guest paths`);
+    if (
+      allowAbsoluteGuest &&
+      arg.startsWith("/") &&
+      arg !== "/work" &&
+      !arg.startsWith("/work/") &&
+      arg !== "/scratch" &&
+      !arg.startsWith("/scratch/")
+    ) {
+      fail(
+        `field ${field} absolute entries must be /work or /scratch guest paths`,
+      );
     }
     out.push(arg);
   }
@@ -130,12 +138,14 @@ function needDigest(value, field) {
 
 function rejectNoopExecutable(path, field) {
   const base = path.slice(path.lastIndexOf("/") + 1);
-  if (NOOP_EXECUTABLES.has(base)) fail(`field ${field} must not be a no-op executable`);
+  if (NOOP_EXECUTABLES.has(base))
+    fail(`field ${field} must not be a no-op executable`);
 }
 
 export function hashFileSync(path) {
   const st = lstatSync(path);
-  if (st.isSymbolicLink() || !st.isFile()) fail(`content path is not a regular file: ${path}`);
+  if (st.isSymbolicLink() || !st.isFile())
+    fail(`content path is not a regular file: ${path}`);
   const hash = createHash("sha256");
   const fd = openSync(path, "r");
   try {
@@ -171,21 +181,29 @@ export function readNodeAbi(nodeRealpath) {
   });
   if (result.status !== 0) fail("pinned node binary did not report a Node ABI");
   const abi = Number(result.stdout.trim());
-  if (!Number.isSafeInteger(abi) || abi <= 0 || abi > 1000) fail("pinned node binary reported an invalid Node ABI");
+  if (!Number.isSafeInteger(abi) || abi <= 0 || abi > 1000)
+    fail("pinned node binary reported an invalid Node ABI");
   return abi;
 }
 
 function scopesOverlap(left, right) {
-  return left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`);
+  return (
+    left === right ||
+    left.startsWith(`${right}/`) ||
+    right.startsWith(`${left}/`)
+  );
 }
 
 /** Scratch roots are non-deliverable and must never hide or alias a source scope. */
 export function assertScratchDisjoint(allowedPaths, scratchPaths) {
   for (const scratch of scratchPaths) {
-    if (scratch === ".") fail("profile.scratchPaths must not grant the whole workspace");
+    if (scratch === ".")
+      fail("profile.scratchPaths must not grant the whole workspace");
     for (const allowed of allowedPaths) {
       if (scopesOverlap(scratch, allowed)) {
-        fail(`profile.scratchPaths entry overlaps an allowed path: ${scratch} vs ${allowed}`);
+        fail(
+          `profile.scratchPaths entry overlaps an allowed path: ${scratch} vs ${allowed}`,
+        );
       }
     }
   }
@@ -193,50 +211,104 @@ export function assertScratchDisjoint(allowedPaths, scratchPaths) {
 
 function isPathInside(child, parent) {
   const rel = relative(parent, child);
-  return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
+  return (
+    rel === "" ||
+    (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel))
+  );
 }
 
 function parseExecutor(raw) {
   if (!isRecord(raw)) fail("field profile.executor must be an object");
-  checkNoUnknown(raw, ["kind", "executable", "args", "contentDigest"], "profile.executor");
+  checkNoUnknown(
+    raw,
+    ["kind", "executable", "args", "contentDigest"],
+    "profile.executor",
+  );
   const kind = raw.kind === undefined ? "fixed" : raw.kind;
   if (kind !== "fixed" && kind !== "pi-orch-guest" && kind !== "real-pi") {
-    fail('profile.executor.kind must be "fixed", "pi-orch-guest", or "real-pi"');
+    fail(
+      'profile.executor.kind must be "fixed", "pi-orch-guest", or "real-pi"',
+    );
   }
-  const executable = needAbsolutePath(need(raw, "executable", "profile.executor"), "profile.executor.executable");
+  const executable = needAbsolutePath(
+    need(raw, "executable", "profile.executor"),
+    "profile.executor.executable",
+  );
   rejectNoopExecutable(executable, "profile.executor.executable");
-  const args = needArgs(need(raw, "args", "profile.executor"), "profile.executor.args");
+  const args = needArgs(
+    need(raw, "args", "profile.executor"),
+    "profile.executor.args",
+  );
   if ((kind === "pi-orch-guest" || kind === "real-pi") && args.length > 0) {
-    fail("profile.executor.args must be empty for the frozen pi-orch guest adapter");
+    fail(
+      "profile.executor.args must be empty for the frozen pi-orch guest adapter",
+    );
   }
   return {
     kind,
     executable,
     args,
-    contentDigest: needDigest(need(raw, "contentDigest", "profile.executor"), "profile.executor.contentDigest"),
+    contentDigest: needDigest(
+      need(raw, "contentDigest", "profile.executor"),
+      "profile.executor.contentDigest",
+    ),
   };
 }
 
 function parseChecks(raw) {
   if (!isRecord(raw)) fail("field profile.checks must be an object");
   const entries = Object.entries(raw);
-  if (entries.length === 0) fail("field profile.checks must carry at least one check");
+  if (entries.length === 0)
+    fail("field profile.checks must carry at least one check");
   const checks = {};
   for (const [id, entry] of entries) {
-    if (!CHECK_ID_RE.test(id)) fail(`profile.checks key must match [A-Za-z0-9_-]{1,64}: ${id}`);
+    if (!CHECK_ID_RE.test(id))
+      fail(`profile.checks key must match [A-Za-z0-9_-]{1,64}: ${id}`);
     if (!isRecord(entry)) fail(`field profile.checks[${id}] must be an object`);
-    checkNoUnknown(entry, ["executable", "args", "contentDigest", "expectExitCode", "expectStdoutIncludes"], `profile.checks[${id}]`);
-    const executable = needAbsolutePath(need(entry, "executable", `profile.checks[${id}]`), `profile.checks[${id}].executable`);
+    checkNoUnknown(
+      entry,
+      [
+        "executable",
+        "args",
+        "contentDigest",
+        "expectExitCode",
+        "expectStdoutIncludes",
+      ],
+      `profile.checks[${id}]`,
+    );
+    const executable = needAbsolutePath(
+      need(entry, "executable", `profile.checks[${id}]`),
+      `profile.checks[${id}].executable`,
+    );
     rejectNoopExecutable(executable, `profile.checks[${id}].executable`);
-    const expectExitCode = entry.expectExitCode === undefined ? 0 : needInt(entry.expectExitCode, `profile.checks[${id}].expectExitCode`, 0, 255);
+    const expectExitCode =
+      entry.expectExitCode === undefined
+        ? 0
+        : needInt(
+            entry.expectExitCode,
+            `profile.checks[${id}].expectExitCode`,
+            0,
+            255,
+          );
     let expectStdoutIncludes;
     if (entry.expectStdoutIncludes !== undefined) {
-      expectStdoutIncludes = needString(entry.expectStdoutIncludes, `profile.checks[${id}].expectStdoutIncludes`, 1024);
+      expectStdoutIncludes = needString(
+        entry.expectStdoutIncludes,
+        `profile.checks[${id}].expectStdoutIncludes`,
+        1024,
+      );
     }
     checks[id] = {
       executable,
-      args: needArgs(need(entry, "args", `profile.checks[${id}]`), `profile.checks[${id}].args`, true),
-      contentDigest: needDigest(need(entry, "contentDigest", `profile.checks[${id}]`), `profile.checks[${id}].contentDigest`),
+      args: needArgs(
+        need(entry, "args", `profile.checks[${id}]`),
+        `profile.checks[${id}].args`,
+        true,
+      ),
+      contentDigest: needDigest(
+        need(entry, "contentDigest", `profile.checks[${id}]`),
+        `profile.checks[${id}].contentDigest`,
+      ),
       expectExitCode,
       ...(expectStdoutIncludes !== undefined ? { expectStdoutIncludes } : {}),
     };
@@ -280,18 +352,27 @@ function assertRealPiRuntime(executor, runtime) {
     "piOrchExtensionRealpath",
     "piOrchLockRealpath",
   ]) {
-    if (runtime[key] === undefined) fail(`real-pi executor requires profile.runtime.${key}`);
+    if (runtime[key] === undefined)
+      fail(`real-pi executor requires profile.runtime.${key}`);
   }
   const root = dirname(dirname(runtime.piOrchLauncherRealpath));
   const expected = {
     piOrchShellRealpath: join(root, "scripts", "pi_codex_orchestrator.sh"),
     piOrchConfigRealpath: join(root, "scripts", "omp-orchestrator.yml"),
-    piOrchExtensionRealpath: join(root, ".pi", "extensions", "opencode-orchestrator", "omp.ts"),
+    piOrchExtensionRealpath: join(
+      root,
+      ".pi",
+      "extensions",
+      "opencode-orchestrator",
+      "omp.ts",
+    ),
     piOrchLockRealpath: join(root, "package-lock.json"),
   };
   for (const [key, path] of Object.entries(expected)) {
     if (runtime[key] !== path) {
-      fail(`profile.runtime.${key} must be derived from the pi-orch launcher root: ${path}`);
+      fail(
+        `profile.runtime.${key} must be derived from the pi-orch launcher root: ${path}`,
+      );
     }
   }
 }
@@ -315,62 +396,184 @@ function parseLimits(raw) {
   checkNoUnknown(raw, keys, "profile.limits");
   for (const key of keys) need(raw, key, "profile.limits");
   return {
-    maxDurationMs: needInt(raw.maxDurationMs, "profile.limits.maxDurationMs", 1_000, PROFILE_MAX_DURATION_MS),
-    maxModelCalls: needInt(raw.maxModelCalls, "profile.limits.maxModelCalls", 1, PROFILE_MAX_MODEL_CALLS),
-    maxOutputTokens: needInt(raw.maxOutputTokens, "profile.limits.maxOutputTokens", 1, PROFILE_MAX_OUTPUT_TOKENS),
-    maxModelCallMs: needInt(raw.maxModelCallMs, "profile.limits.maxModelCallMs", 1_000, PROFILE_MAX_MODEL_CALL_MS),
-    maxSourceBytes: needInt(raw.maxSourceBytes, "profile.limits.maxSourceBytes", 1, PROFILE_MAX_SOURCE_BYTES),
-    maxDependencyBytes: needInt(raw.maxDependencyBytes, "profile.limits.maxDependencyBytes", 1, PROFILE_MAX_DEPENDENCY_BYTES),
-    modelConcurrency: needInt(raw.modelConcurrency, "profile.limits.modelConcurrency", 1, PROFILE_MAX_MODEL_CONCURRENCY),
-    maxProcesses: needInt(raw.maxProcesses, "profile.limits.maxProcesses", 1, PROFILE_MAX_PROCESSES),
-    memoryMaxBytes: needInt(raw.memoryMaxBytes, "profile.limits.memoryMaxBytes", 16 * 1024 * 1024, PROFILE_MAX_MEMORY_BYTES),
-    cpuQuotaPercent: needInt(raw.cpuQuotaPercent, "profile.limits.cpuQuotaPercent", 1, PROFILE_MAX_CPU_PERCENT),
-    maxArtifactBytes: needInt(raw.maxArtifactBytes, "profile.limits.maxArtifactBytes", 1, PROFILE_MAX_ARTIFACT_BYTES),
-    workspaceMaxBytes: needInt(raw.workspaceMaxBytes, "profile.limits.workspaceMaxBytes", 1, PROFILE_MAX_WORKSPACE_BYTES),
+    maxDurationMs: needInt(
+      raw.maxDurationMs,
+      "profile.limits.maxDurationMs",
+      1_000,
+      PROFILE_MAX_DURATION_MS,
+    ),
+    maxModelCalls: needInt(
+      raw.maxModelCalls,
+      "profile.limits.maxModelCalls",
+      1,
+      PROFILE_MAX_MODEL_CALLS,
+    ),
+    maxOutputTokens: needInt(
+      raw.maxOutputTokens,
+      "profile.limits.maxOutputTokens",
+      1,
+      PROFILE_MAX_OUTPUT_TOKENS,
+    ),
+    maxModelCallMs: needInt(
+      raw.maxModelCallMs,
+      "profile.limits.maxModelCallMs",
+      1_000,
+      PROFILE_MAX_MODEL_CALL_MS,
+    ),
+    maxSourceBytes: needInt(
+      raw.maxSourceBytes,
+      "profile.limits.maxSourceBytes",
+      1,
+      PROFILE_MAX_SOURCE_BYTES,
+    ),
+    maxDependencyBytes: needInt(
+      raw.maxDependencyBytes,
+      "profile.limits.maxDependencyBytes",
+      1,
+      PROFILE_MAX_DEPENDENCY_BYTES,
+    ),
+    modelConcurrency: needInt(
+      raw.modelConcurrency,
+      "profile.limits.modelConcurrency",
+      1,
+      PROFILE_MAX_MODEL_CONCURRENCY,
+    ),
+    maxProcesses: needInt(
+      raw.maxProcesses,
+      "profile.limits.maxProcesses",
+      1,
+      PROFILE_MAX_PROCESSES,
+    ),
+    memoryMaxBytes: needInt(
+      raw.memoryMaxBytes,
+      "profile.limits.memoryMaxBytes",
+      16 * 1024 * 1024,
+      PROFILE_MAX_MEMORY_BYTES,
+    ),
+    cpuQuotaPercent: needInt(
+      raw.cpuQuotaPercent,
+      "profile.limits.cpuQuotaPercent",
+      1,
+      PROFILE_MAX_CPU_PERCENT,
+    ),
+    maxArtifactBytes: needInt(
+      raw.maxArtifactBytes,
+      "profile.limits.maxArtifactBytes",
+      1,
+      PROFILE_MAX_ARTIFACT_BYTES,
+    ),
+    workspaceMaxBytes: needInt(
+      raw.workspaceMaxBytes,
+      "profile.limits.workspaceMaxBytes",
+      1,
+      PROFILE_MAX_WORKSPACE_BYTES,
+    ),
   };
 }
 
 function parseModel(raw) {
   if (!isRecord(raw)) fail("field profile.model must be an object");
-  checkNoUnknown(raw, ["route", "sockHostPath", "externalConsent"], "profile.model");
+  checkNoUnknown(
+    raw,
+    ["route", "sockHostPath", "externalConsent"],
+    "profile.model",
+  );
   const route = need(raw, "route", "profile.model");
-  if (route !== "local" && route !== "synthetic-local" && route !== "external") {
-    fail('field profile.model.route must be "local", "synthetic-local", or "external"');
+  if (
+    route !== "local" &&
+    route !== "synthetic-local" &&
+    route !== "external"
+  ) {
+    fail(
+      'field profile.model.route must be "local", "synthetic-local", or "external"',
+    );
   }
   const externalConsent = need(raw, "externalConsent", "profile.model");
-  if (typeof externalConsent !== "boolean") fail("field profile.model.externalConsent must be a boolean");
-  if (route === "external" && !externalConsent) fail("external route requires frozen externalConsent true");
-  if (route !== "external" && externalConsent) fail("local/synthetic route must not claim externalConsent");
-  const sockHostPath = needAbsolutePath(need(raw, "sockHostPath", "profile.model"), "profile.model.sockHostPath");
+  if (typeof externalConsent !== "boolean")
+    fail("field profile.model.externalConsent must be a boolean");
+  if (route === "external" && !externalConsent)
+    fail("external route requires frozen externalConsent true");
+  if (route !== "external" && externalConsent)
+    fail("local/synthetic route must not claim externalConsent");
+  const sockHostPath = needAbsolutePath(
+    need(raw, "sockHostPath", "profile.model"),
+    "profile.model.sockHostPath",
+  );
   return { route, sockHostPath, externalConsent };
 }
 
 function parseDependencies(raw) {
   if (!isRecord(raw)) fail("field profile.dependencies must be an object");
-  checkNoUnknown(raw, ["root", "manifestPath", "digest", "nodeAbi", "mounts"], "profile.dependencies");
-  const root = needAbsolutePath(need(raw, "root", "profile.dependencies"), "profile.dependencies.root");
-  const manifestPath = needAbsolutePath(need(raw, "manifestPath", "profile.dependencies"), "profile.dependencies.manifestPath");
-  const digest = needDigest(need(raw, "digest", "profile.dependencies"), "profile.dependencies.digest");
+  checkNoUnknown(
+    raw,
+    ["root", "manifestPath", "digest", "nodeAbi", "mounts"],
+    "profile.dependencies",
+  );
+  const root = needAbsolutePath(
+    need(raw, "root", "profile.dependencies"),
+    "profile.dependencies.root",
+  );
+  const manifestPath = needAbsolutePath(
+    need(raw, "manifestPath", "profile.dependencies"),
+    "profile.dependencies.manifestPath",
+  );
+  const digest = needDigest(
+    need(raw, "digest", "profile.dependencies"),
+    "profile.dependencies.digest",
+  );
   const mountsRaw = need(raw, "mounts", "profile.dependencies");
-  if (!Array.isArray(mountsRaw) || mountsRaw.length === 0 || mountsRaw.length > 16) {
+  if (
+    !Array.isArray(mountsRaw) ||
+    mountsRaw.length === 0 ||
+    mountsRaw.length > 16
+  ) {
     fail("profile.dependencies.mounts must carry 1..16 entries");
   }
   const mounts = [];
   for (const mount of mountsRaw) {
-    if (!isRecord(mount)) fail("profile.dependencies.mounts entries must be objects");
-    checkNoUnknown(mount, ["source", "guestPath"], "profile.dependencies.mounts entry");
-    const source = needAbsolutePath(need(mount, "source", "profile.dependencies.mounts entry"), "profile.dependencies.mounts.source");
-    const guestPath = needString(need(mount, "guestPath", "profile.dependencies.mounts entry"), "profile.dependencies.mounts.guestPath", 512);
-    if (!guestPath.startsWith("/") || guestPath.includes("..") || guestPath === "/") {
-      fail("profile.dependencies.mounts.guestPath must be an absolute guest path");
+    if (!isRecord(mount))
+      fail("profile.dependencies.mounts entries must be objects");
+    checkNoUnknown(
+      mount,
+      ["source", "guestPath"],
+      "profile.dependencies.mounts entry",
+    );
+    const source = needAbsolutePath(
+      need(mount, "source", "profile.dependencies.mounts entry"),
+      "profile.dependencies.mounts.source",
+    );
+    const guestPath = needString(
+      need(mount, "guestPath", "profile.dependencies.mounts entry"),
+      "profile.dependencies.mounts.guestPath",
+      512,
+    );
+    if (
+      !guestPath.startsWith("/") ||
+      guestPath.includes("..") ||
+      guestPath === "/"
+    ) {
+      fail(
+        "profile.dependencies.mounts.guestPath must be an absolute guest path",
+      );
     }
     if (!isPathInside(realpathSync(source), realpathSync(root))) {
-      fail("dependency mount source must be inside the dependency closure root");
+      fail(
+        "dependency mount source must be inside the dependency closure root",
+      );
     }
     mounts.push({ source, guestPath });
   }
-  const nodeAbi = raw.nodeAbi === undefined ? undefined : needInt(raw.nodeAbi, "profile.dependencies.nodeAbi", 1, 1000);
-  return { root, manifestPath, digest, ...(nodeAbi !== undefined ? { nodeAbi } : {}), mounts };
+  const nodeAbi =
+    raw.nodeAbi === undefined
+      ? undefined
+      : needInt(raw.nodeAbi, "profile.dependencies.nodeAbi", 1, 1000);
+  return {
+    root,
+    manifestPath,
+    digest,
+    ...(nodeAbi !== undefined ? { nodeAbi } : {}),
+    mounts,
+  };
 }
 
 export function parseOperatorConfig(text) {
@@ -386,31 +589,62 @@ export function parseOperatorConfig(text) {
     ["version", "stateDir", "storage", "active", "sealed", "profile"],
     "operator config",
   );
-  for (const key of ["version", "stateDir", "storage", "active", "sealed", "profile"]) {
+  for (const key of [
+    "version",
+    "stateDir",
+    "storage",
+    "active",
+    "sealed",
+    "profile",
+  ]) {
     need(raw, key, "operator config");
   }
-  if (raw.version !== PROFILE_SCHEMA_VERSION) fail(`field version must be ${PROFILE_SCHEMA_VERSION}`);
+  if (raw.version !== PROFILE_SCHEMA_VERSION)
+    fail(`field version must be ${PROFILE_SCHEMA_VERSION}`);
   const stateDir = needAbsolutePath(raw.stateDir, "stateDir");
 
   if (!isRecord(raw.storage)) fail("field storage must be an object");
-  checkNoUnknown(raw.storage, ["maxRequestBytes", "maxArtifactBytes", "maxResultBytes", "maxDbBytes"], "field storage");
+  checkNoUnknown(
+    raw.storage,
+    ["maxRequestBytes", "maxArtifactBytes", "maxResultBytes", "maxDbBytes"],
+    "field storage",
+  );
   const storage = {};
-  for (const key of ["maxRequestBytes", "maxArtifactBytes", "maxResultBytes", "maxDbBytes"]) {
-    storage[key] = needInt(need(raw.storage, key, "field storage"), `storage.${key}`, 1, 16 * 1024 * 1024 * 1024);
+  for (const key of [
+    "maxRequestBytes",
+    "maxArtifactBytes",
+    "maxResultBytes",
+    "maxDbBytes",
+  ]) {
+    storage[key] = needInt(
+      need(raw.storage, key, "field storage"),
+      `storage.${key}`,
+      1,
+      16 * 1024 * 1024 * 1024,
+    );
   }
 
   if (!isRecord(raw.active)) fail("field active must be an object");
-  checkNoUnknown(raw.active, ["configFingerprint", "sourceRevision", "workspaceAlias"], "field active");
+  checkNoUnknown(
+    raw.active,
+    ["configFingerprint", "sourceRevision", "workspaceAlias"],
+    "field active",
+  );
   const active = {
-    configFingerprint: needDigest(need(raw.active, "configFingerprint", "field active"), "active.configFingerprint"),
+    configFingerprint: needDigest(
+      need(raw.active, "configFingerprint", "field active"),
+      "active.configFingerprint",
+    ),
     sourceRevision: (() => {
       const value = need(raw.active, "sourceRevision", "field active");
-      if (typeof value !== "string" || !HEX40_RE.test(value)) fail("field active.sourceRevision must be 40 lower-hex chars");
+      if (typeof value !== "string" || !HEX40_RE.test(value))
+        fail("field active.sourceRevision must be 40 lower-hex chars");
       return value;
     })(),
     workspaceAlias: (() => {
       const value = need(raw.active, "workspaceAlias", "field active");
-      if (typeof value !== "string" || !ALIAS_RE.test(value)) fail("field active.workspaceAlias must match [a-z0-9_-]{1,64}");
+      if (typeof value !== "string" || !ALIAS_RE.test(value))
+        fail("field active.workspaceAlias must match [a-z0-9_-]{1,64}");
       return value;
     })(),
   };
@@ -418,27 +652,71 @@ export function parseOperatorConfig(text) {
   if (!isRecord(raw.sealed)) fail("field sealed must be an object");
   checkNoUnknown(
     raw.sealed,
-    ["rootDir", "snapshotRoot", "manifestPath", "manifestDigest", "pristineSnapshotRoot", "sourceRootOriginal"],
+    [
+      "rootDir",
+      "snapshotRoot",
+      "manifestPath",
+      "manifestDigest",
+      "pristineSnapshotRoot",
+      "sourceRootOriginal",
+    ],
     "field sealed",
   );
   const sealed = {
-    rootDir: needAbsolutePath(need(raw.sealed, "rootDir", "field sealed"), "sealed.rootDir"),
-    snapshotRoot: needAbsolutePath(need(raw.sealed, "snapshotRoot", "field sealed"), "sealed.snapshotRoot"),
-    manifestPath: needAbsolutePath(need(raw.sealed, "manifestPath", "field sealed"), "sealed.manifestPath"),
-    manifestDigest: needDigest(need(raw.sealed, "manifestDigest", "field sealed"), "sealed.manifestDigest"),
-    pristineSnapshotRoot: needAbsolutePath(need(raw.sealed, "pristineSnapshotRoot", "field sealed"), "sealed.pristineSnapshotRoot"),
-    sourceRootOriginal: needAbsolutePath(need(raw.sealed, "sourceRootOriginal", "field sealed"), "sealed.sourceRootOriginal"),
+    rootDir: needAbsolutePath(
+      need(raw.sealed, "rootDir", "field sealed"),
+      "sealed.rootDir",
+    ),
+    snapshotRoot: needAbsolutePath(
+      need(raw.sealed, "snapshotRoot", "field sealed"),
+      "sealed.snapshotRoot",
+    ),
+    manifestPath: needAbsolutePath(
+      need(raw.sealed, "manifestPath", "field sealed"),
+      "sealed.manifestPath",
+    ),
+    manifestDigest: needDigest(
+      need(raw.sealed, "manifestDigest", "field sealed"),
+      "sealed.manifestDigest",
+    ),
+    pristineSnapshotRoot: needAbsolutePath(
+      need(raw.sealed, "pristineSnapshotRoot", "field sealed"),
+      "sealed.pristineSnapshotRoot",
+    ),
+    sourceRootOriginal: needAbsolutePath(
+      need(raw.sealed, "sourceRootOriginal", "field sealed"),
+      "sealed.sourceRootOriginal",
+    ),
   };
 
   if (!isRecord(raw.profile)) fail("field profile must be an object");
   checkNoUnknown(
     raw.profile,
-    ["executionBackend", "executor", "checks", "runtime", "model", "limits", "allowedPaths", "scratchPaths", "dependencies"],
+    [
+      "executionBackend",
+      "executor",
+      "checks",
+      "runtime",
+      "model",
+      "limits",
+      "allowedPaths",
+      "scratchPaths",
+      "dependencies",
+    ],
     "field profile",
   );
-  const executionBackend = need(raw.profile, "executionBackend", "field profile");
-  if (executionBackend !== "confined" && executionBackend !== "offline-fixture") {
-    fail('field profile.executionBackend must be "confined" or "offline-fixture"');
+  const executionBackend = need(
+    raw.profile,
+    "executionBackend",
+    "field profile",
+  );
+  if (
+    executionBackend !== "confined" &&
+    executionBackend !== "offline-fixture"
+  ) {
+    fail(
+      'field profile.executionBackend must be "confined" or "offline-fixture"',
+    );
   }
   const allowedPaths = need(raw.profile, "allowedPaths", "field profile");
   const scratchPaths = need(raw.profile, "scratchPaths", "field profile");
@@ -447,10 +725,18 @@ export function parseOperatorConfig(text) {
       fail(`field ${field} must carry ${minItems}..32 entries`);
     }
     return value.map((entry, index) => {
-      if (typeof entry !== "string" || entry.length === 0 || entry.length > 512) {
+      if (
+        typeof entry !== "string" ||
+        entry.length === 0 ||
+        entry.length > 512
+      ) {
         fail(`field ${field}[${index}] must be a relative path`);
       }
-      if (entry.startsWith("/") || entry.includes("\\") || entry.includes("\0")) {
+      if (
+        entry.startsWith("/") ||
+        entry.includes("\\") ||
+        entry.includes("\0")
+      ) {
         fail(`field ${field}[${index}] must be a relative POSIX path`);
       }
       for (const segment of entry.split("/")) {
@@ -470,14 +756,28 @@ export function parseOperatorConfig(text) {
     limits: parseLimits(need(raw.profile, "limits", "field profile")),
     allowedPaths: parseScopes(allowedPaths, "profile.allowedPaths"),
     scratchPaths: parseScopes(scratchPaths, "profile.scratchPaths", 0),
-    dependencies: parseDependencies(need(raw.profile, "dependencies", "field profile")),
+    dependencies: parseDependencies(
+      need(raw.profile, "dependencies", "field profile"),
+    ),
   };
   assertScratchDisjoint(profile.allowedPaths, profile.scratchPaths);
-  if (profile.executor.kind === "pi-orch-guest" && profile.runtime.ompRealpath === undefined) {
-    fail("profile.executor.kind pi-orch-guest requires profile.runtime.ompRealpath");
+  if (
+    profile.executor.kind === "pi-orch-guest" &&
+    profile.runtime.ompRealpath === undefined
+  ) {
+    fail(
+      "profile.executor.kind pi-orch-guest requires profile.runtime.ompRealpath",
+    );
   }
   assertRealPiRuntime(profile.executor, profile.runtime);
-  return { version: PROFILE_SCHEMA_VERSION, stateDir, storage, active, sealed, profile };
+  return {
+    version: PROFILE_SCHEMA_VERSION,
+    stateDir,
+    storage,
+    active,
+    sealed,
+    profile,
+  };
 }
 
 function hashIfPresent(path) {
@@ -500,14 +800,16 @@ export function computeEffectiveProfile(config) {
   const checks = {};
   for (const [id, check] of Object.entries(config.profile.checks)) {
     const actual = hashFileSync(check.executable);
-    if (actual !== check.contentDigest) fail(`check ${id} content digest does not match the pinned profile`);
+    if (actual !== check.contentDigest)
+      fail(`check ${id} content digest does not match the pinned profile`);
     checks[id] = { ...check, contentDigest: actual };
   }
   const runtime = {};
   for (const [key, path] of Object.entries(config.profile.runtime)) {
     const actual = hashIfPresent(path);
     if (actual === null) {
-      if (config.profile.executionBackend === "confined") fail(`runtime binary is missing: ${key}`);
+      if (config.profile.executionBackend === "confined")
+        fail(`runtime binary is missing: ${key}`);
       runtime[key] = { path, contentDigest: null };
       continue;
     }
@@ -534,13 +836,18 @@ export function computeEffectiveProfile(config) {
     runtime,
     model: config.profile.model,
     limits: config.profile.limits,
-    scopes: { allowedPaths: config.profile.allowedPaths, scratchPaths: config.profile.scratchPaths },
+    scopes: {
+      allowedPaths: config.profile.allowedPaths,
+      scratchPaths: config.profile.scratchPaths,
+    },
     executionBackend: config.profile.executionBackend,
     dependencies: {
       root: config.profile.dependencies.root,
       manifestPath: config.profile.dependencies.manifestPath,
       digest: config.profile.dependencies.digest,
-      manifestContentDigest: hashIfPresent(config.profile.dependencies.manifestPath),
+      manifestContentDigest: hashIfPresent(
+        config.profile.dependencies.manifestPath,
+      ),
       ...(config.profile.dependencies.nodeAbi !== undefined
         ? { nodeAbi: config.profile.dependencies.nodeAbi }
         : {}),
@@ -550,20 +857,36 @@ export function computeEffectiveProfile(config) {
   };
   if (config.profile.dependencies.nodeAbi !== undefined) {
     if (config.profile.runtime.nodeRealpath === undefined) {
-      fail("profile.dependencies.nodeAbi requires profile.runtime.nodeRealpath");
+      fail(
+        "profile.dependencies.nodeAbi requires profile.runtime.nodeRealpath",
+      );
     }
     const actualAbi = readNodeAbi(config.profile.runtime.nodeRealpath);
     if (actualAbi !== config.profile.dependencies.nodeAbi) {
-      fail("dependency closure Node ABI does not match the pinned runtime node");
+      fail(
+        "dependency closure Node ABI does not match the pinned runtime node",
+      );
     }
   }
-  const fingerprint = createHash("sha256").update(canonicalize(effective)).digest("hex");
-  return { fingerprint, effective, sourceRevision, executorDigest, checks, runtime, dependenciesManifestDigest: effective.dependencies.manifestContentDigest };
+  const fingerprint = createHash("sha256")
+    .update(canonicalize(effective))
+    .digest("hex");
+  return {
+    fingerprint,
+    effective,
+    sourceRevision,
+    executorDigest,
+    checks,
+    runtime,
+    dependenciesManifestDigest: effective.dependencies.manifestContentDigest,
+  };
 }
 
 export function assertProfileMatches(config, effective) {
   if (config.active.configFingerprint !== effective.fingerprint) {
-    fail("active.configFingerprint does not match the actual effective profile content");
+    fail(
+      "active.configFingerprint does not match the actual effective profile content",
+    );
   }
   if (config.active.sourceRevision !== effective.sourceRevision) {
     fail("active.sourceRevision is not the computed sealed snapshot revision");
@@ -582,14 +905,24 @@ export function loadSealedSnapshot(config, options = {}) {
     ["manifestPath", manifestPath],
     ["pristineSnapshotRoot", pristine],
   ]) {
-    if (!isPathInside(path, rootDir)) fail(`sealed.${label} must be inside sealed.rootDir`);
+    if (!isPathInside(path, rootDir))
+      fail(`sealed.${label} must be inside sealed.rootDir`);
   }
-  if (snapshotRoot === original || isPathInside(snapshotRoot, original) || isPathInside(original, snapshotRoot)) {
+  if (
+    snapshotRoot === original ||
+    isPathInside(snapshotRoot, original) ||
+    isPathInside(original, snapshotRoot)
+  ) {
     fail("snapshotRoot must not alias or contain the original source root");
   }
-  if (snapshotRoot === pristine) fail("snapshotRoot must be separate from the pristine snapshot");
-  if (existsSync(join(snapshotRoot, ".git"))) fail("sealed snapshot must not contain .git");
-  if (existsSync(join(snapshotRoot, "node_modules")) && lstatSync(join(snapshotRoot, "node_modules")).isSymbolicLink()) {
+  if (snapshotRoot === pristine)
+    fail("snapshotRoot must be separate from the pristine snapshot");
+  if (existsSync(join(snapshotRoot, ".git")))
+    fail("sealed snapshot must not contain .git");
+  if (
+    existsSync(join(snapshotRoot, "node_modules")) &&
+    lstatSync(join(snapshotRoot, "node_modules")).isSymbolicLink()
+  ) {
     fail("sealed snapshot must not expose a host node_modules symlink");
   }
   const manifestStat = statSync(manifestPath);
@@ -597,16 +930,28 @@ export function loadSealedSnapshot(config, options = {}) {
     fail("sealed manifest is missing or oversized");
   }
   const parsed = JSON.parse(readFileSync(manifestPath, "utf8"));
-  if (!isRecord(parsed) || parsed.schemaVersion !== 1 || !Array.isArray(parsed.entries)) {
+  if (
+    !isRecord(parsed) ||
+    parsed.schemaVersion !== 1 ||
+    !Array.isArray(parsed.entries)
+  ) {
     fail("sealed manifest is malformed");
   }
-  if (options.expectedManifestDigest !== undefined && options.expectedManifestDigest !== config.sealed.manifestDigest) {
-    fail("sealed.manifestDigest does not match the host-pinned expected digest");
+  if (
+    options.expectedManifestDigest !== undefined &&
+    options.expectedManifestDigest !== config.sealed.manifestDigest
+  ) {
+    fail(
+      "sealed.manifestDigest does not match the host-pinned expected digest",
+    );
   }
   if (parsed.manifestDigest !== config.sealed.manifestDigest) {
     fail("sealed.manifestDigest does not match the manifest file");
   }
-  if (parsed.manifestDigest !== options.expectedManifestDigest && options.expectedManifestDigest !== undefined) {
+  if (
+    parsed.manifestDigest !== options.expectedManifestDigest &&
+    options.expectedManifestDigest !== undefined
+  ) {
     fail("manifest file digest does not match the host-pinned expected digest");
   }
   if (parsed.snapshotRoot !== snapshotRoot) {
@@ -636,7 +981,9 @@ function denyDependencyName(name) {
     base === ".netrc" ||
     base === ".git-credentials" ||
     base === ".pgpass" ||
-    /\.(pem|key|p12|pfx|kdbx|ovpn|sqlite|sqlite3|db|db3|secret|secrets|credential|credentials|token|password)$/.test(base)
+    /\.(pem|key|p12|pfx|kdbx|ovpn|sqlite|sqlite3|db|db3|secret|secrets|credential|credentials|token|password)$/.test(
+      base,
+    )
   );
 }
 
@@ -654,7 +1001,8 @@ export function computeDependencyClosureDigest(rootInput, maxBytes) {
     const st = lstatSync(absolute);
     if (st.isSymbolicLink()) {
       const target = realpathSync(absolute);
-      if (!isPathInside(target, root)) fail(`dependency symlink escapes the closure: ${rel}`);
+      if (!isPathInside(target, root))
+        fail(`dependency symlink escapes the closure: ${rel}`);
       hashes.push(`${rel}\0L\0${relative(root, target)}`);
       return;
     }
@@ -662,16 +1010,21 @@ export function computeDependencyClosureDigest(rootInput, maxBytes) {
       const names = [...nodeReaddirSync(absolute)];
       names.sort();
       for (const name of names) {
-        if (rel === "" && name === ".git") fail("dependency closure must not contain .git");
+        if (rel === "" && name === ".git")
+          fail("dependency closure must not contain .git");
         walk(join(absolute, name), rel === "" ? name : `${rel}/${name}`);
       }
       return;
     }
     if (!st.isFile()) fail(`dependency entry is not a regular file: ${rel}`);
-    if (denyDependencyName(rel)) fail(`dependency closure contains a forbidden file: ${rel}`);
+    if (denyDependencyName(rel))
+      fail(`dependency closure contains a forbidden file: ${rel}`);
     total += st.size;
-    if (total > maxBytes) fail("dependency closure exceeds the declared byte cap");
-    hashes.push(`${rel}\0F\0${st.mode & 0o7777}\0${st.size}\0${hashFileSync(absolute)}`);
+    if (total > maxBytes)
+      fail("dependency closure exceeds the declared byte cap");
+    hashes.push(
+      `${rel}\0F\0${st.mode & 0o7777}\0${st.size}\0${hashFileSync(absolute)}`,
+    );
   };
   walk(root, "");
   const digest = createHash("sha256").update(hashes.join("\n")).digest("hex");
@@ -680,28 +1033,36 @@ export function computeDependencyClosureDigest(rootInput, maxBytes) {
 
 export function verifyDependencyClosure(deps, maxBytes) {
   const result = computeDependencyClosureDigest(deps.root, maxBytes);
-  if (result.digest !== deps.digest) fail("dependency closure digest does not match the pinned profile");
+  if (result.digest !== deps.digest)
+    fail("dependency closure digest does not match the pinned profile");
   return result;
 }
 
 export function assertConsent(profile, request) {
   if (profile.model.route === "external") {
-    if (request.externalModelConsent !== true) fail("request did not grant externalModelConsent for the frozen external route");
+    if (request.externalModelConsent !== true)
+      fail(
+        "request did not grant externalModelConsent for the frozen external route",
+      );
     return;
   }
   if (request.externalModelConsent) {
-    fail("request asks for external model use outside the frozen local profile");
+    fail(
+      "request asks for external model use outside the frozen local profile",
+    );
   }
 }
 
 export function assertRequestScopes(profile, request) {
   for (const path of request.relevantPaths) {
     if (!isPathInScopesLocal(path, profile.allowedPaths)) {
-      fail(`request relevantPath is outside the frozen operator scope: ${path}`);
+      fail(
+        `request relevantPath is outside the frozen operator scope: ${path}`,
+      );
     }
   }
   for (const id of request.requiredChecks) {
-    if (!Object.prototype.hasOwnProperty.call(profile.checks, id)) {
+    if (!Object.hasOwn(profile.checks, id)) {
       fail(`unknown required check: ${id}`);
     }
   }

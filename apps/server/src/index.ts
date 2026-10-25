@@ -8,6 +8,13 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export type {
+  CreateAppDeps,
+  CreatedServerApp,
+  EnginePort,
+  ServerControls,
+} from "./app.js";
+export { createApp, hostNameOfHeader } from "./app.js";
+export type {
   AutodispatchPlanner,
   AutodispatchPlanProposal,
   AutodispatchService,
@@ -17,13 +24,6 @@ export {
   createAutodispatchService,
   createModelAutodispatchPlanner,
 } from "./autodispatch_service.js";
-export type {
-  CreateAppDeps,
-  CreatedServerApp,
-  EnginePort,
-  ServerControls,
-} from "./app.js";
-export { createApp, hostNameOfHeader } from "./app.js";
 export type { StartedServer, StartServerOptions } from "./bootstrap.js";
 export {
   AGENT_STRATEGY_NAME,

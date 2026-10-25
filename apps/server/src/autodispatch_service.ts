@@ -11,6 +11,7 @@
 // self-approve. `discuss`/`unclear`/negation never create a grant.
 
 import { randomUUID } from "node:crypto";
+import type { TrialProfileSnapshot } from "@companion/contracts";
 import type {
   AutodispatchLimits,
   DispatchPlanContent,
@@ -18,19 +19,18 @@ import type {
   KernelRepository,
   StandingPolicyView,
 } from "@companion/kernel";
-import type { TrialProfileSnapshot } from "@companion/contracts";
-import type {
-  BackgroundOwner,
-  BackgroundResourceGate,
-} from "./background_resource.js";
-import { BACKGROUND_OWNER_AUTODISPATCH } from "./background_resource.js";
-import type { AutodispatchConfig } from "./config.js";
 import {
   AUTODISPATCH_MAX_RETAINED_JOBS,
   type AutodispatchMaterializer,
   createAutodispatchMaterializer,
   pruneAutodispatchMaterializations,
 } from "./autodispatch_materializer.js";
+import type {
+  BackgroundOwner,
+  BackgroundResourceGate,
+} from "./background_resource.js";
+import { BACKGROUND_OWNER_AUTODISPATCH } from "./background_resource.js";
+import type { AutodispatchConfig } from "./config.js";
 
 export interface AutodispatchChatGateway {
   chat(
@@ -329,7 +329,12 @@ export function createAutodispatchService(
           },
           controller,
         );
-        const current = readCurrentIntake(controller.signal, runId, sessionId, expected);
+        const current = readCurrentIntake(
+          controller.signal,
+          runId,
+          sessionId,
+          expected,
+        );
         if (current === null) return;
         if (!deps.config.operations.includes(proposal.operation)) return;
         if (!current.policy.operations.includes(proposal.operation)) return;
@@ -340,13 +345,19 @@ export function createAutodispatchService(
           intent: proposal.intent,
         });
         if (plan.status !== "frozen") return;
-        if (deps.config.dependencyRoot === null && deps.config.materialization === null) {
+        if (
+          deps.config.dependencyRoot === null &&
+          deps.config.materialization === null
+        ) {
           // Missing configured real bridge dependencies: honest block. We
           // never fake a successful check or dispatch.
           return;
         }
         if (materializer === null) return;
-        if (readCurrentIntake(controller.signal, runId, sessionId, expected) === null) {
+        if (
+          readCurrentIntake(controller.signal, runId, sessionId, expected) ===
+          null
+        ) {
           return;
         }
         if (prune() >= AUTODISPATCH_MAX_RETAINED_JOBS) {
@@ -379,22 +390,29 @@ export function createAutodispatchService(
         // Re-read every mutable trust input after the async materialization
         // gap. A stale/revoked/stopped/paused intake discards the prepared
         // private bytes and never creates a grant.
-        if (readCurrentIntake(controller.signal, runId, sessionId, expected) === null) {
+        if (
+          readCurrentIntake(controller.signal, runId, sessionId, expected) ===
+          null
+        ) {
           materializer.discard(prepared.materialization);
           return;
         }
         try {
-          const authorized = deps.repo.authorizeAutodispatch(sessionId, plan.id, {
-            profile: prepared.materialization.profile,
-            workspaceAlias: deps.config.workspaceAlias,
-            limits,
-            executionId,
-            dependencyDigest: prepared.materialization.state.dependencyDigest,
-            materialization: prepared.materialization,
-            materializationDigest:
-              prepared.materialization.digests.materialization,
-            now: now(),
-          });
+          const authorized = deps.repo.authorizeAutodispatch(
+            sessionId,
+            plan.id,
+            {
+              profile: prepared.materialization.profile,
+              workspaceAlias: deps.config.workspaceAlias,
+              limits,
+              executionId,
+              dependencyDigest: prepared.materialization.state.dependencyDigest,
+              materialization: prepared.materialization,
+              materializationDigest:
+                prepared.materialization.digests.materialization,
+              now: now(),
+            },
+          );
           if (
             authorized.execution.status !== "authorized" &&
             authorized.execution.status !== "reserved" &&

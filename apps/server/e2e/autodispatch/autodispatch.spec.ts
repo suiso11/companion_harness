@@ -14,7 +14,12 @@
 // candidate result is never presented as host-applied.
 
 import { randomUUID } from "node:crypto";
-import { expect, type APIRequestContext, type Page, test } from "@playwright/test";
+import {
+  type APIRequestContext,
+  expect,
+  type Page,
+  test,
+} from "@playwright/test";
 import {
   AD_TEXT_ANCHOR,
   AD_TEXT_DISCUSS,
@@ -38,9 +43,7 @@ async function arm(
   expect(res.ok()).toBe(true);
 }
 
-async function controlStatus(
-  request: APIRequestContext,
-): Promise<{
+async function controlStatus(request: APIRequestContext): Promise<{
   plannerCalls: number;
   workerIds: string[];
   parentToolNames: string[];
@@ -204,9 +207,9 @@ test.describe("standing-policy auto dispatch", () => {
       `${AUTODISPATCH_APP_ORIGIN}/api/autonomy/control`,
     );
     expect(resumedControl.ok()).toBe(true);
-    expect(
-      ((await resumedControl.json()) as { paused: boolean }).paused,
-    ).toBe(false);
+    expect(((await resumedControl.json()) as { paused: boolean }).paused).toBe(
+      false,
+    );
 
     // 4. Concrete request: foreground answers, background planner creates an
     //    execute plan + grant without any per-plan approval.
@@ -260,9 +263,7 @@ test.describe("standing-policy auto dispatch", () => {
     expect(status.childToolNames).toContain("capsule.read");
 
     // The synthetic source is unchanged: no host source apply.
-    const fixture = await request.get(
-      `${AUTODISPATCH_CONTROL_ORIGIN}/fixture`,
-    );
+    const fixture = await request.get(`${AUTODISPATCH_CONTROL_ORIGIN}/fixture`);
     expect((await fixture.json()).readme).toBe(README_TEXT);
 
     // 5. Discussion with markup must render as text and create no execution.
@@ -284,9 +285,9 @@ test.describe("standing-policy auto dispatch", () => {
       return global.__autodispatchXss ?? null;
     });
     expect(xssFlag).toBeNull();
-    expect(
-      (await controlStatus(request)).plannerCalls,
-    ).toBeGreaterThanOrEqual(2);
+    expect((await controlStatus(request)).plannerCalls).toBeGreaterThanOrEqual(
+      2,
+    );
 
     // Negated request also stays discussion-only (late grant absent).
     await arm(request, "discuss");
@@ -386,9 +387,9 @@ test.describe("standing-policy auto dispatch", () => {
     // Exactly the one earlier needs_decision plan, now superseded by STOP; the
     // late execute proposal never became a second (frozen/dispatched) plan.
     expect(body.plans.map((plan) => plan.status)).toEqual(["superseded"]);
-    expect(
-      body.policies.every((policy) => policy.status !== "active"),
-    ).toBe(true);
+    expect(body.policies.every((policy) => policy.status !== "active")).toBe(
+      true,
+    );
 
     await expect(page.locator("[data-autodispatch-execution]")).toHaveCount(0);
     await expect(

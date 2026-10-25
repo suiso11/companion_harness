@@ -4,11 +4,11 @@
 // and never resumes the global autonomy control: a human creates ONE
 // standing policy, then the existing durable intake/runner owns planning
 // and the candidate trial. Plan text is untrusted and renders as text only.
-import { fetchJson, postJson, randomUuid, type ApiResult } from "./lib/api.js";
+import { type ApiResult, fetchJson, postJson, randomUuid } from "./lib/api.js";
 import {
   type AutodispatchStatus,
-  capsLines,
   type ControlView,
+  capsLines,
   type DispatchExecution,
   type DispatchPlan,
   executionReasonText,
@@ -24,9 +24,9 @@ import {
   parseTrialDetail,
   planStatusText,
   policyStatusText,
-  selectLatestCompletedUserTurn,
   type SourceAnchor,
   type StandingPolicy,
+  selectLatestCompletedUserTurn,
   type TrialDetail,
 } from "./lib/autodispatch.js";
 
@@ -67,7 +67,11 @@ let loadSeq = 0;
 let actionSeq = 0;
 let detailSeq = 0;
 
-const EXPIRY_CHOICES: readonly { value: string; label: string; ms: number | null }[] = [
+const EXPIRY_CHOICES: readonly {
+  value: string;
+  label: string;
+  ms: number | null;
+}[] = [
   { value: "none", label: "無期限", ms: null },
   { value: "1h", label: "1時間", ms: 60 * 60 * 1000 },
   { value: "24h", label: "24時間", ms: 24 * 60 * 60 * 1000 },
@@ -134,7 +138,12 @@ async function loadDetails(
     // Refresh non-terminal detail rows: the grant is claimed/consumed after
     // the first read, so a one-shot cache would freeze the panel at "結果待ち"
     // and never show the on_ready evidence. Terminal outcomes stay cached.
-    .filter((id) => !(id in details) || details[id] === null || details[id]?.outcome === null)
+    .filter(
+      (id) =>
+        !(id in details) ||
+        details[id] === null ||
+        details[id]?.outcome === null,
+    )
     .slice(0, MAX_DETAIL_LOADS);
   if (ids.length === 0) return;
   detailSeq += 1;
@@ -152,14 +161,12 @@ async function loadDetails(
       return {
         id,
         cache: response.status === 200 || response.status === 404,
-        detail: response.status === 200 ? parseTrialDetail(response.body) : null,
+        detail:
+          response.status === 200 ? parseTrialDetail(response.body) : null,
       };
     }),
   );
-  if (
-    detailToken !== detailSeq ||
-    !isCurrent(sid, seq)
-  ) {
+  if (detailToken !== detailSeq || !isCurrent(sid, seq)) {
     return;
   }
   const next = { ...details };
@@ -169,7 +176,11 @@ async function loadDetails(
   details = next;
 }
 
-async function load(sid: string, seq: number, withAnchor = true): Promise<void> {
+async function load(
+  sid: string,
+  seq: number,
+  withAnchor = true,
+): Promise<void> {
   if (!isCurrent(sid, seq)) return;
   loadSeq += 1;
   const request = loadSeq;
@@ -277,7 +288,8 @@ async function runMutation(mutation: PendingMutation): Promise<void> {
 
   if (result.status === 0 || result.status >= 500) {
     pending = mutation;
-    notice = "通信に失敗しました。自動再送はしません。同じ操作を手動で再試行できます";
+    notice =
+      "通信に失敗しました。自動再送はしません。同じ操作を手動で再試行できます";
     return;
   }
   pending = null;
@@ -297,7 +309,8 @@ async function runMutation(mutation: PendingMutation): Promise<void> {
     }
   } else if (mutation.kind === "revoke") {
     if (result.status === 200) {
-      notice = "ポリシーを取り消しました。実行中の試行は既存の停止境界で終了します";
+      notice =
+        "ポリシーを取り消しました。実行中の試行は既存の停止境界で終了します";
     } else if (result.status === 409) {
       notice = "このポリシーは既に有効ではありません。状態を更新しました";
     } else if (result.status === 401) {
@@ -308,8 +321,7 @@ async function runMutation(mutation: PendingMutation): Promise<void> {
   } else {
     if (result.status === 200) {
       const body = (result.body ?? {}) as { revoked?: unknown };
-      const revoked =
-        typeof body.revoked === "number" ? body.revoked : null;
+      const revoked = typeof body.revoked === "number" ? body.revoked : null;
       notice =
         revoked === null
           ? "停止しました。実行中の試行は既存の停止境界で終了します"

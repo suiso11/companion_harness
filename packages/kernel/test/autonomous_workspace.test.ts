@@ -88,9 +88,7 @@ async function makeFixture(options?: {
     ...(options?.maxArtifactBytes === undefined
       ? {}
       : { maxArtifactBytes: options.maxArtifactBytes }),
-    ...(options?.maxBytes === undefined
-      ? {}
-      : { maxBytes: options.maxBytes }),
+    ...(options?.maxBytes === undefined ? {} : { maxBytes: options.maxBytes }),
   });
   return { source, snapshot };
 }
@@ -133,9 +131,9 @@ describe("createSealedWorkspaceSnapshot", () => {
     expect(snapshot.sourceIdentity.identityKind).toBe("content-manifest");
     expect(snapshot.sourceIdentity.includesUncommittedBytes).toBe(true);
     expect(snapshot.sourceIdentity.fileCount).toBe(4);
-    expect(snapshot.manifest.find((entry) => entry.path === "src/app.ts")?.sha256).toBe(
-      sha256("export const app = 'dirty-v1';\n"),
-    );
+    expect(
+      snapshot.manifest.find((entry) => entry.path === "src/app.ts")?.sha256,
+    ).toBe(sha256("export const app = 'dirty-v1';\n"));
     expect(
       readFileSync(join(snapshot.snapshotRoot, "src/app.ts"), "utf8"),
     ).toBe("export const app = 'dirty-v1';\n");
@@ -144,7 +142,9 @@ describe("createSealedWorkspaceSnapshot", () => {
       readFileSync(join(snapshot.snapshotRoot, "src/.env")),
     ).toThrow();
     expect(() =>
-      readFileSync(join(snapshot.snapshotRoot, "src/node_modules/dep/index.js")),
+      readFileSync(
+        join(snapshot.snapshotRoot, "src/node_modules/dep/index.js"),
+      ),
     ).toThrow();
     expect(() =>
       readFileSync(join(snapshot.snapshotRoot, "src/nested/.wt-work/evil.ts")),

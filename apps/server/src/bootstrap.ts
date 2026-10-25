@@ -114,8 +114,8 @@ import { serve } from "@hono/node-server";
 import { createApp, type EnginePort, type ServerControls } from "./app.js";
 import { resolveAutodispatchMaterialization } from "./autodispatch_materializer.js";
 import {
-  createAutodispatchService,
   type AutodispatchService,
+  createAutodispatchService,
 } from "./autodispatch_service.js";
 import { createBackgroundResourceGate } from "./background_resource.js";
 import {

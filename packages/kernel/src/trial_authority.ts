@@ -990,7 +990,10 @@ export function derivePolicyTrialGrant(
       throw new RepositoryValidationError(
         "timeoutMs exceeds the frozen operator profile",
       );
-    if (input.maxOutputBytes < 1024 || input.maxOutputBytes > profile.maxOutputBytes)
+    if (
+      input.maxOutputBytes < 1024 ||
+      input.maxOutputBytes > profile.maxOutputBytes
+    )
       throw new RepositoryValidationError(
         "maxOutputBytes exceeds the frozen operator profile",
       );
@@ -1009,14 +1012,10 @@ export function derivePolicyTrialGrant(
       profile.mandatoryChecks,
     );
     const ctl = db
-      .prepare(
-        "SELECT paused, version FROM autonomy_control WHERE id='global'",
-      )
+      .prepare("SELECT paused, version FROM autonomy_control WHERE id='global'")
       .get() as { paused: number; version: number } | undefined;
     if (ctl === undefined || ctl.paused === 1)
-      throw new RepositoryValidationError(
-        "autonomy paused: no policy grant",
-      );
+      throw new RepositoryValidationError("autonomy paused: no policy grant");
     const auth = checkTrialAuthority(
       db,
       session,

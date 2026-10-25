@@ -72,11 +72,9 @@ function completedTurn(
     { key: randomUUID(), now },
   );
   repo.startRun(posted.body.run.id, { now: now + 1 });
-  repo.completeRun(
-    posted.body.run.id,
-    { version: 1, text: "ack" } as never,
-    { now: now + 2 },
-  );
+  repo.completeRun(posted.body.run.id, { version: 1, text: "ack" } as never, {
+    now: now + 2,
+  });
   return {
     turnId: posted.body.turnId,
     runId: posted.body.run.id,
@@ -672,7 +670,12 @@ describe("autodispatch lifecycle fences against the existing trial authority", (
         repo.issueTrialLaunchPermit(sessionId, executionId, {
           key: randomUUID(),
           now: NOW + 34,
-          observation: obsActive(300, "control-boot", "3000", NOW + 34) as never,
+          observation: obsActive(
+            300,
+            "control-boot",
+            "3000",
+            NOW + 34,
+          ) as never,
           profile: profile(),
           requestHash: repo.hashTrialLaunchRequest(req),
         }),
@@ -694,12 +697,7 @@ describe("autodispatch lifecycle fences against the existing trial authority", (
         NOW + 50,
       );
       const secondExec = second.auth.execution.executionId as string;
-      const secondReq = claimPolicyGrant(
-        repo,
-        sessionId,
-        secondExec,
-        NOW + 60,
-      );
+      const secondReq = claimPolicyGrant(repo, sessionId, secondExec, NOW + 60);
       repo.registerTrialWorkerBoot(
         {
           executionId: secondExec,
@@ -722,7 +720,12 @@ describe("autodispatch lifecycle fences against the existing trial authority", (
         repo.issueTrialLaunchPermit(sessionId, secondExec, {
           key: randomUUID(),
           now: NOW + 63,
-          observation: obsActive(301, "control-boot-2", "3001", NOW + 63) as never,
+          observation: obsActive(
+            301,
+            "control-boot-2",
+            "3001",
+            NOW + 63,
+          ) as never,
           profile: profile(),
           requestHash: repo.hashTrialLaunchRequest(secondReq),
         }),
@@ -884,12 +887,16 @@ describe("autodispatch lifecycle fences against the existing trial authority", (
       );
       // The second connection re-reads the committed reservation; it must
       // see the slot spent instead of reserving a second grant.
-      const second = repoB.authorizeAutodispatch(sessionId, secondPlan.plan.id, {
-        profile: profile(),
-        workspaceAlias: "companion-harness",
-        limits,
-        now: NOW + 42,
-      });
+      const second = repoB.authorizeAutodispatch(
+        sessionId,
+        secondPlan.plan.id,
+        {
+          profile: profile(),
+          workspaceAlias: "companion-harness",
+          limits,
+          now: NOW + 42,
+        },
+      );
       expect(second.execution.status).toBe("denied");
       expect(second.execution.reason).toBe("quota-daily");
       const grants = handleA.raw

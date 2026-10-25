@@ -35,8 +35,8 @@
 // cannot select unlimited values through this module.
 
 import { createHash, randomUUID } from "node:crypto";
-import { constants as fsConstants } from "node:fs";
 import type { Stats } from "node:fs";
+import { constants as fsConstants } from "node:fs";
 import {
   chmod,
   lstat,
@@ -276,10 +276,7 @@ function isDeniedFileName(relativePath: string): boolean {
   );
 }
 
-function requireRelativePath(
-  value: unknown,
-  label: string,
-): string {
+function requireRelativePath(value: unknown, label: string): string {
   if (
     typeof value !== "string" ||
     value.length === 0 ||
@@ -324,9 +321,7 @@ function isPathInside(child: string, parent: string): boolean {
 }
 
 function isScopeMatch(scope: string, relativePath: string): boolean {
-  return (
-    scope === relativePath || relativePath.startsWith(`${scope}/`)
-  );
+  return scope === relativePath || relativePath.startsWith(`${scope}/`);
 }
 
 function hasSpecialModeBits(mode: number): boolean {
@@ -403,18 +398,13 @@ function checkAborted(signal: AbortSignal | undefined): void {
   signal?.throwIfAborted();
 }
 
-async function ensureEmptyOutputDirectory(
-  outputDir: string,
-): Promise<string> {
+async function ensureEmptyOutputDirectory(outputDir: string): Promise<string> {
   await mkdir(outputDir, { recursive: true, mode: 0o700 });
   await chmod(outputDir, 0o700);
   const canonicalOutput = await realpath(outputDir);
   const entries = await readdir(canonicalOutput);
   if (entries.length > 0) {
-    throw new SealedWorkspaceError(
-      "invalid_input",
-      "outputDir must be empty",
-    );
+    throw new SealedWorkspaceError("invalid_input", "outputDir must be empty");
   }
   return canonicalOutput;
 }
@@ -529,11 +519,7 @@ async function collectSourceFiles(
       requireRelativePath(allowedRoots[index], `allowedRoots[${index}]`),
     );
   }
-  ensureDistinctCase(
-    normalizedAllowedRoots,
-    "allowedRoots",
-    caseInsensitiveFs,
-  );
+  ensureDistinctCase(normalizedAllowedRoots, "allowedRoots", caseInsensitiveFs);
 
   for (let index = 0; index < allowedRoots.length; index += 1) {
     const root = requireRelativePath(
@@ -545,10 +531,7 @@ async function collectSourceFiles(
         allowedRoots[other],
         `allowedRoots[${other}]`,
       );
-      if (
-        isScopeMatch(previous, root) ||
-        isScopeMatch(root, previous)
-      ) {
+      if (isScopeMatch(previous, root) || isScopeMatch(root, previous)) {
         throw new SealedWorkspaceError(
           "invalid_input",
           `allowedRoots overlap: ${previous} and ${root}`,
@@ -658,12 +641,7 @@ async function copyAndHashFile(
     try {
       for (;;) {
         checkAborted(signal);
-        const result = await handle.read(
-          buffer,
-          0,
-          buffer.length,
-          null,
-        );
+        const result = await handle.read(buffer, 0, buffer.length, null);
         if (result.bytesRead === 0) {
           break;
         }
@@ -738,8 +716,7 @@ async function writeAtomicFile(
 export async function createSealedWorkspaceSnapshot(
   options: CreateSealedWorkspaceOptions,
 ): Promise<SealedWorkspaceSnapshot> {
-  const maxSourceBytes =
-    options.maxBytes ?? DEFAULT_MAX_SOURCE_BYTES;
+  const maxSourceBytes = options.maxBytes ?? DEFAULT_MAX_SOURCE_BYTES;
   const maxArtifactBytes =
     options.maxArtifactBytes ?? DEFAULT_MAX_ARTIFACT_BYTES;
   const maxFiles = options.maxFiles ?? DEFAULT_MAX_FILES;
@@ -770,9 +747,7 @@ export async function createSealedWorkspaceSnapshot(
     );
   }
 
-  const outputDir = await ensureEmptyOutputDirectory(
-    options.outputDir,
-  );
+  const outputDir = await ensureEmptyOutputDirectory(options.outputDir);
   // Reject an output directory nested anywhere inside the source root, not
   // only inside a selected subtree. The check runs after canonicalization so a
   // symlinked output alias cannot smuggle the snapshot back into the source
@@ -910,12 +885,7 @@ async function hashRegularFile(
     let readBytes = 0;
     for (;;) {
       checkAborted(signal);
-      const result = await handle.read(
-        buffer,
-        0,
-        buffer.length,
-        null,
-      );
+      const result = await handle.read(buffer, 0, buffer.length, null);
       if (result.bytesRead === 0) {
         break;
       }
@@ -1136,9 +1106,7 @@ export async function verifySealedWorkspaceSnapshot(
     ) {
       return { ok: false, reason: "snapshot source identity is inconsistent" };
     }
-    const canonicalSnapshotRoot = await realpath(
-      snapshot.snapshotRoot,
-    );
+    const canonicalSnapshotRoot = await realpath(snapshot.snapshotRoot);
     if (canonicalSnapshotRoot !== snapshot.snapshotRoot) {
       return {
         ok: false,
@@ -1263,9 +1231,7 @@ async function collectCandidateFiles(
   let totalBytes = 0;
 
   const inScratch = (relativePath: string): boolean =>
-    scratchRoots.some((scratch) =>
-      isScopeMatch(scratch, relativePath),
-    );
+    scratchRoots.some((scratch) => isScopeMatch(scratch, relativePath));
 
   const record = (
     absolutePath: string,
@@ -1381,7 +1347,9 @@ async function collectCandidateFiles(
   return { files, totalBytes };
 }
 
-function artifactDigest(artifact: Omit<CandidateArtifact, "artifactDigest">): string {
+function artifactDigest(
+  artifact: Omit<CandidateArtifact, "artifactDigest">,
+): string {
   const parts = [
     `${artifact.schemaVersion}\0${artifact.baseManifestDigest}\0${artifact.baseFileCount}`,
   ];
@@ -1412,18 +1380,12 @@ function artifactDigest(artifact: Omit<CandidateArtifact, "artifactDigest">): st
 export async function validateCandidateChanges(
   options: ValidateCandidateOptions,
 ): Promise<CandidateValidationResult> {
-  const verification = await verifySealedWorkspaceSnapshot(
-    options.snapshot,
-    {
-      expectedManifestDigest: options.expectedManifestDigest,
-      ...(options.signal === undefined ? {} : { signal: options.signal }),
-    },
-  );
+  const verification = await verifySealedWorkspaceSnapshot(options.snapshot, {
+    expectedManifestDigest: options.expectedManifestDigest,
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+  });
   if (!verification.ok) {
-    throw new SealedWorkspaceError(
-      "snapshot_tampered",
-      verification.reason,
-    );
+    throw new SealedWorkspaceError("snapshot_tampered", verification.reason);
   }
   checkAborted(options.signal);
   const candidateRoot = await realpath(options.candidateRoot).catch(() => {
@@ -1455,8 +1417,8 @@ export async function validateCandidateChanges(
   const allowedScopes = options.allowedEditPaths.map((entry) =>
     requireRelativePath(entry, "allowedEditPaths"),
   );
-  const scratchRoots = (options.generatedScratchRoots ?? []).map(
-    (entry) => requireRelativePath(entry, "generatedScratchRoots"),
+  const scratchRoots = (options.generatedScratchRoots ?? []).map((entry) =>
+    requireRelativePath(entry, "generatedScratchRoots"),
   );
   ensureDistinctCase(allowedScopes, "allowedEditPaths", caseInsensitiveFs);
   ensureDistinctCase(scratchRoots, "generatedScratchRoots", caseInsensitiveFs);

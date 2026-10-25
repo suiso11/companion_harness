@@ -1718,7 +1718,10 @@ export interface AutodispatchMaterializationConfig {
     readonly args: readonly string[];
   };
   readonly checks: Readonly<
-    Record<string, { readonly executable: string; readonly args: readonly string[] }>
+    Record<
+      string,
+      { readonly executable: string; readonly args: readonly string[] }
+    >
   >;
   readonly executionBackend: "confined" | "offline-fixture";
   readonly runtime: {
@@ -1764,11 +1767,7 @@ export interface AutodispatchConfig {
 
 const AD_PATH = /^(?:[A-Za-z0-9._-]+)(?:\/[A-Za-z0-9._-]+)*$/;
 
-function parseLiteralScopes(
-  raw: unknown,
-  what: string,
-  min: number,
-): string[] {
+function parseLiteralScopes(raw: unknown, what: string, min: number): string[] {
   if (!Array.isArray(raw) || raw.length < min || raw.length > 16) {
     throw configError(`autodispatch ${what} is invalid`);
   }
@@ -1838,10 +1837,7 @@ function parseAutodispatchCaps(raw: unknown): PolicyCaps {
   });
 }
 
-function parseMaterializationPath(
-  value: unknown,
-  what: string,
-): string {
+function parseMaterializationPath(value: unknown, what: string): string {
   if (
     typeof value !== "string" ||
     value.length < 1 ||
@@ -1912,7 +1908,7 @@ function parseMaterializationCommand(
   return {
     ...(kind !== undefined ? { kind } : {}),
     executable,
-    args: [...(argsRaw as string[])] ,
+    args: [...(argsRaw as string[])],
   };
 }
 
@@ -1941,21 +1937,32 @@ function parseAutodispatchMaterialization(
   }
   const stateDir = parseMaterializationPath(rec.stateDir, "stateDir");
   const executor = parseMaterializationCommand(rec.executor, "executor", true);
-  if (typeof rec.checks !== "object" || rec.checks === null || Array.isArray(rec.checks)) {
+  if (
+    typeof rec.checks !== "object" ||
+    rec.checks === null ||
+    Array.isArray(rec.checks)
+  ) {
     throw configError("autodispatch materialization checks are invalid");
   }
   const checksRec = rec.checks as Record<string, unknown>;
   if (Object.keys(checksRec).length !== checks.length) {
-    throw configError("autodispatch materialization checks must match configured checks");
+    throw configError(
+      "autodispatch materialization checks must match configured checks",
+    );
   }
-  const checkCommands: Record<string, { executable: string; args: string[] }> = {};
+  const checkCommands: Record<string, { executable: string; args: string[] }> =
+    {};
   for (const id of checks) {
     checkCommands[id] = parseMaterializationCommand(
       checksRec[id],
       `check ${id}`,
     );
   }
-  if (typeof rec.runtime !== "object" || rec.runtime === null || Array.isArray(rec.runtime)) {
+  if (
+    typeof rec.runtime !== "object" ||
+    rec.runtime === null ||
+    Array.isArray(rec.runtime)
+  ) {
     throw configError("autodispatch materialization runtime is invalid");
   }
   const runtimeRec = rec.runtime as Record<string, unknown>;
@@ -1974,7 +1981,9 @@ function parseAutodispatchMaterialization(
         key !== "piOrchLockRealpath",
     )
   ) {
-    throw configError("autodispatch materialization runtime has an unknown key");
+    throw configError(
+      "autodispatch materialization runtime has an unknown key",
+    );
   }
   const nodeRealpath = parseMaterializationPath(
     runtimeRec.nodeRealpath,
@@ -2017,7 +2026,9 @@ function parseAutodispatchMaterialization(
         entry.includes("\0"),
     )
   ) {
-    throw configError("autodispatch materialization allowedTopLevelFiles are invalid");
+    throw configError(
+      "autodispatch materialization allowedTopLevelFiles are invalid",
+    );
   }
   const maxDurationMs = requireRunnerInt(
     rec.maxDurationMs,
@@ -2030,13 +2041,21 @@ function parseAutodispatchMaterialization(
   }
   const executionBackend =
     rec.executionBackend === undefined ? "confined" : rec.executionBackend;
-  if (executionBackend !== "confined" && executionBackend !== "offline-fixture") {
-    throw configError("autodispatch materialization executionBackend is invalid");
+  if (
+    executionBackend !== "confined" &&
+    executionBackend !== "offline-fixture"
+  ) {
+    throw configError(
+      "autodispatch materialization executionBackend is invalid",
+    );
   }
   return Object.freeze({
     executionBackend,
     stateDir,
-    executor: Object.freeze({ ...executor, args: Object.freeze(executor.args) }),
+    executor: Object.freeze({
+      ...executor,
+      args: Object.freeze(executor.args),
+    }),
     checks: Object.freeze(checkCommands),
     runtime: Object.freeze({
       nodeRealpath,
@@ -2101,7 +2120,10 @@ export function parseAutodispatchConfig(
   if (typeof rec.enabled !== "boolean") {
     throw configError("autodispatch enabled flag is invalid");
   }
-  if (typeof rec.workspaceAlias !== "string" || !TRIAL_ALIAS_PATTERN.test(rec.workspaceAlias)) {
+  if (
+    typeof rec.workspaceAlias !== "string" ||
+    !TRIAL_ALIAS_PATTERN.test(rec.workspaceAlias)
+  ) {
     throw configError("autodispatch workspace alias is invalid");
   }
   if (
@@ -2130,7 +2152,11 @@ export function parseAutodispatchConfig(
   if (operations.includes("implement") && writeScopes.length === 0) {
     throw configError("autodispatch write scopes are required for implement");
   }
-  if (!Array.isArray(rec.checks) || rec.checks.length < 1 || rec.checks.length > 16) {
+  if (
+    !Array.isArray(rec.checks) ||
+    rec.checks.length < 1 ||
+    rec.checks.length > 16
+  ) {
     throw configError("autodispatch checks are invalid");
   }
   const checks: string[] = [];

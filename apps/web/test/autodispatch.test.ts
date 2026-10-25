@@ -112,7 +112,9 @@ describe("autodispatch status", () => {
   });
 
   test("rejects an unenabled or malformed body instead of inventing state", () => {
-    expect(parseAutodispatchStatus({ ...statusBody(), enabled: false })).toBeNull();
+    expect(
+      parseAutodispatchStatus({ ...statusBody(), enabled: false }),
+    ).toBeNull();
     expect(
       parseAutodispatchStatus({ ...statusBody(), operations: ["verify"] }),
     ).toBeNull();
@@ -145,21 +147,36 @@ describe("source anchor selection", () => {
           seq: 2,
           kind: "user_text",
           text: "committed decision",
-          selectedRun: { runId: "run-a", attempt: 1, finishedAt: 1, result: {} },
+          selectedRun: {
+            runId: "run-a",
+            attempt: 1,
+            finishedAt: 1,
+            result: {},
+          },
         },
         {
           turnId: "turn-0",
           seq: 1,
           kind: "user_text",
           text: "older",
-          selectedRun: { runId: "run-0", attempt: 1, finishedAt: 1, result: {} },
+          selectedRun: {
+            runId: "run-0",
+            attempt: 1,
+            finishedAt: 1,
+            result: {},
+          },
         },
         {
           turnId: "approval",
           seq: 4,
           kind: "action_approval",
           text: "not user text",
-          selectedRun: { runId: "run-x", attempt: 1, finishedAt: 1, result: {} },
+          selectedRun: {
+            runId: "run-x",
+            attempt: 1,
+            finishedAt: 1,
+            result: {},
+          },
         },
       ],
     });
@@ -191,11 +208,15 @@ describe("source anchor selection", () => {
 
 describe("operator bounds and trial detail", () => {
   test("operations can only narrow inside the actual allowed set", () => {
-    expect(narrowOperations(["implement", "bogus"], ["investigate"])).toEqual([]);
-    expect(narrowOperations(["investigate"], ["investigate", "implement"])).toEqual([
-      "investigate",
-    ]);
-    expect(capsLines(caps).some((line) => line.value.includes("ジョブ"))).toBe(false);
+    expect(narrowOperations(["implement", "bogus"], ["investigate"])).toEqual(
+      [],
+    );
+    expect(
+      narrowOperations(["investigate"], ["investigate", "implement"]),
+    ).toEqual(["investigate"]);
+    expect(capsLines(caps).some((line) => line.value.includes("ジョブ"))).toBe(
+      false,
+    );
     expect(capsLines(caps)).toHaveLength(10);
   });
 

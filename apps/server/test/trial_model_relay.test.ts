@@ -319,12 +319,9 @@ describe.skipIf(process.platform === "win32")("trial_model_relay", () => {
       );
       expect(res.status).toBe(200);
       expect(gw.calls.length).toBe(1);
-      expect((gw.calls[0] as ChatRequest).tools?.map((tool) => tool.name)).toEqual([
-        "capsule.read",
-        "capsule.grep",
-        "capsule.find",
-        "capsule.ls",
-      ]);
+      expect(
+        (gw.calls[0] as ChatRequest).tools?.map((tool) => tool.name),
+      ).toEqual(["capsule.read", "capsule.grep", "capsule.find", "capsule.ls"]);
       const call = JSON.parse(res.text).choices[0].message.tool_calls[0];
       expect(call.function.name).toBe("find");
       expect(JSON.parse(call.function.arguments)).toEqual({

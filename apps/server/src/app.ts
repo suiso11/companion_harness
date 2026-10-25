@@ -5881,10 +5881,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     if (
       operations === null ||
       operations.length < 1 ||
-      operations.some(
-        (op) =>
-          op !== "investigate" && op !== "implement",
-      ) ||
+      operations.some((op) => op !== "investigate" && op !== "implement") ||
       operations.some((op) => !ad.config.operations.includes(op))
     ) {
       return validationError(c);
@@ -5937,10 +5934,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       return apiError(c, 404, "not_found", "resource not found");
     }
     try {
-      return c.json(
-        repo.readAutodispatchPolicy(session.id, policyId.id),
-        200,
-      );
+      return c.json(repo.readAutodispatchPolicy(session.id, policyId.id), 200);
     } catch (error) {
       return mapDomainError(c, error);
     }

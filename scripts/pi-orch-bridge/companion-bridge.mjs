@@ -36,22 +36,15 @@ import { Socket as ControlSocket } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  companionScopeUnit,
+  validateCandidateChanges,
+  verifySealedWorkspaceSnapshot,
+} from "../../packages/kernel/src/autonomous_workspace.ts";
+import { CompanionJournal } from "./companion-journal.mjs";
+import {
   parseRequestFrame,
   serializeResult,
   validateWireResult,
 } from "./companion-protocol.mjs";
-import { CompanionJournal } from "./companion-journal.mjs";
-import {
-  assertConsent,
-  assertProfileMatches,
-  assertRequestBudget,
-  assertRequestScopes,
-  computeEffectiveProfile,
-  loadSealedSnapshot,
-  parseOperatorConfig,
-  verifyDependencyClosure,
-} from "./sealed-profile.mjs";
 import {
   buildCheckCommand,
   buildWholejobCommand,
@@ -62,9 +55,15 @@ import {
   stopOwnedScope,
 } from "./containment.mjs";
 import {
-  validateCandidateChanges,
-  verifySealedWorkspaceSnapshot,
-} from "../../packages/kernel/src/autonomous_workspace.ts";
+  assertConsent,
+  assertProfileMatches,
+  assertRequestBudget,
+  assertRequestScopes,
+  computeEffectiveProfile,
+  loadSealedSnapshot,
+  parseOperatorConfig,
+  verifyDependencyClosure,
+} from "./sealed-profile.mjs";
 
 export const BRIDGE_VERSION = 2;
 export const BRIDGE_WIRE_VERSION = 1;
@@ -83,10 +82,6 @@ const MSG_INVALID_REQUEST = "companion bridge: invalid request";
 const MSG_INFLIGHT = "companion bridge: inflight";
 const MSG_INTERNAL = "companion bridge: internal error";
 
-function isRecord(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function checkControlPipe(fd = 3) {
   let st;
   try {
@@ -94,7 +89,8 @@ function checkControlPipe(fd = 3) {
   } catch {
     throw new Error("control pipe unavailable");
   }
-  if (!st.isFIFO() && !st.isSocket()) throw new Error("control pipe must be FIFO or socket");
+  if (!st.isFIFO() && !st.isSocket())
+    throw new Error("control pipe must be FIFO or socket");
 }
 
 function redactedError(error) {
@@ -126,8 +122,12 @@ function rawResult(request, status, verified, report, evidence = {}) {
       workspaceTrial: true,
       productionApplied: false,
       checks: evidence.checks ?? [],
-      ...(evidence.workflowId !== undefined ? { workflowId: evidence.workflowId } : {}),
-      ...(evidence.artifact !== undefined ? { artifact: evidence.artifact } : {}),
+      ...(evidence.workflowId !== undefined
+        ? { workflowId: evidence.workflowId }
+        : {}),
+      ...(evidence.artifact !== undefined
+        ? { artifact: evidence.artifact }
+        : {}),
     },
   };
 }
@@ -145,10 +145,16 @@ function readGuestObservation(workRoot) {
   const path = join(workRoot, ".companion-observation", "guest.json");
   try {
     const stat = lstatSync(path);
-    if (stat.isSymbolicLink() || !stat.isFile() || stat.size > 64 * 1024) return null;
+    if (stat.isSymbolicLink() || !stat.isFile() || stat.size > 64 * 1024)
+      return null;
     const parsed = JSON.parse(readFileSync(path, "utf8"));
-    if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.tools)) return null;
-    if (parsed.engine !== "omp-headless-json" && parsed.engine !== "pi-orch-omp-json") return null;
+    if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.tools))
+      return null;
+    if (
+      parsed.engine !== "omp-headless-json" &&
+      parsed.engine !== "pi-orch-omp-json"
+    )
+      return null;
     return parsed;
   } catch {
     return null;
@@ -160,12 +166,28 @@ function observationFindings(observation) {
   const findings = [];
   for (const tool of observation.tools.slice(0, 8)) {
     if (!tool || typeof tool.name !== "string") continue;
-    const path = tool.args && typeof tool.args.path === "string" ? ` ${tool.args.path.slice(0, 256)}` : "";
-    const result = tool.result === "ok" ? "ok" : tool.result === "error" ? "denied" : "pending";
+    const path =
+      tool.args && typeof tool.args.path === "string"
+        ? ` ${tool.args.path.slice(0, 256)}`
+        : "";
+    const result =
+      tool.result === "ok"
+        ? "ok"
+        : tool.result === "error"
+          ? "denied"
+          : "pending";
     findings.push(`tool ${tool.name.slice(0, 64)}${path} (${result})`);
   }
-  for (const worker of (Array.isArray(observation.delegatedWorkers) ? observation.delegatedWorkers : []).slice(0, 8)) {
-    if (!worker || typeof worker.id !== "string" || typeof worker.status !== "string") continue;
+  for (const worker of (Array.isArray(observation.delegatedWorkers)
+    ? observation.delegatedWorkers
+    : []
+  ).slice(0, 8)) {
+    if (
+      !worker ||
+      typeof worker.id !== "string" ||
+      typeof worker.status !== "string"
+    )
+      continue;
     findings.push(
       `guest-reported worker ${worker.id.slice(0, 32)} ${worker.status.slice(0, 32)} (unattested)`,
     );
@@ -182,11 +204,18 @@ function observationFindings(observation) {
 // every fixed operator check passed + candidate scope revalidated + retained
 // artifact hashes matched. That still does not attest delegation, completion,
 // or semantic correctness.
-const DELEGATED_WORKER_STATUSES = new Set(["running", "done", "error", "cancelled"]);
+const DELEGATED_WORKER_STATUSES = new Set([
+  "running",
+  "done",
+  "error",
+  "cancelled",
+]);
 
 function evaluateDelegatedWorkers(observation, realPiRequired) {
   if (observation === null || observation.executorKind !== "real-pi") {
-    return realPiRequired ? { ok: false, missing: true } : { ok: true, missing: false };
+    return realPiRequired
+      ? { ok: false, missing: true }
+      : { ok: true, missing: false };
   }
   if (!Array.isArray(observation.delegatedWorkers)) {
     return { ok: false, missing: true };
@@ -219,7 +248,11 @@ function evaluateDelegatedWorkers(observation, realPiRequired) {
 // mismatched content.
 function readVerifiedCandidateBytes(workRoot, change, maxBytes) {
   if (change.candidateSha256 === null || change.kind === "delete") return null;
-  if (!Number.isSafeInteger(change.size) || change.size < 0 || change.size > maxBytes) {
+  if (
+    !Number.isSafeInteger(change.size) ||
+    change.size < 0 ||
+    change.size > maxBytes
+  ) {
     throw new Error("candidate retention exceeds the artifact cap");
   }
   const source = join(workRoot, ...change.path.split("/"));
@@ -237,7 +270,8 @@ function readVerifiedCandidateBytes(workRoot, change, maxBytes) {
       offset += read;
     }
     const extra = Buffer.allocUnsafe(1);
-    if (readSync(fd, extra, 0, 1, null) !== 0) throw new Error("candidate changed while retaining");
+    if (readSync(fd, extra, 0, 1, null) !== 0)
+      throw new Error("candidate changed while retaining");
     const digest = sha256(bytes);
     if (digest !== change.candidateSha256) {
       throw new Error("candidate bytes do not match the validated digest");
@@ -248,8 +282,18 @@ function readVerifiedCandidateBytes(workRoot, change, maxBytes) {
   }
 }
 
-function retainCandidateChanges(workRoot, changes, destination, artifactBytes, maxBytes) {
-  if (!Number.isSafeInteger(artifactBytes) || artifactBytes < 0 || artifactBytes > maxBytes) {
+function retainCandidateChanges(
+  workRoot,
+  changes,
+  destination,
+  artifactBytes,
+  maxBytes,
+) {
+  if (
+    !Number.isSafeInteger(artifactBytes) ||
+    artifactBytes < 0 ||
+    artifactBytes > maxBytes
+  ) {
     throw new Error("candidate retention exceeds the artifact cap");
   }
   let total = artifactBytes;
@@ -262,12 +306,16 @@ function retainCandidateChanges(workRoot, changes, destination, artifactBytes, m
     );
     if (bytes === null) continue;
     total += bytes.length;
-    if (total > maxBytes) throw new Error("candidate retention exceeds the artifact cap");
+    if (total > maxBytes)
+      throw new Error("candidate retention exceeds the artifact cap");
     const target = join(destination, ...change.path.split("/"));
     mkdirSync(join(target, ".."), { recursive: true, mode: 0o700 });
     const targetFd = openSync(
       target,
-      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
+      fsConstants.O_WRONLY |
+        fsConstants.O_CREAT |
+        fsConstants.O_EXCL |
+        fsConstants.O_NOFOLLOW,
       0o600,
     );
     try {
@@ -276,7 +324,11 @@ function retainCandidateChanges(workRoot, changes, destination, artifactBytes, m
       closeSync(targetFd);
     }
     chmodSync(target, 0o600);
-    retained.push({ path: change.path, sha256: change.candidateSha256, size: bytes.length });
+    retained.push({
+      path: change.path,
+      sha256: change.candidateSha256,
+      size: bytes.length,
+    });
   }
   return retained;
 }
@@ -366,7 +418,8 @@ async function main() {
           // Already exited.
         }
       }
-      if (currentUnit !== null && runtime !== null) stopOwnedScope(runtime, currentUnit, "SIGKILL");
+      if (currentUnit !== null && runtime !== null)
+        stopOwnedScope(runtime, currentUnit, "SIGKILL");
     }, 15_000);
     if (force.unref) force.unref();
   };
@@ -412,18 +465,25 @@ async function main() {
     runtime = config.profile.runtime;
     effective = computeEffectiveProfile(config);
     assertProfileMatches(config, effective);
-    snapshot = loadSealedSnapshot(config, { expectedManifestDigest: config.sealed.manifestDigest });
+    snapshot = loadSealedSnapshot(config, {
+      expectedManifestDigest: config.sealed.manifestDigest,
+    });
     const verified = await verifySealedWorkspaceSnapshot(snapshot, {
       expectedManifestDigest: config.sealed.manifestDigest,
     });
-    if (!verified.ok) throw new Error(`sealed snapshot verification failed: ${verified.reason}`);
+    if (!verified.ok)
+      throw new Error(
+        `sealed snapshot verification failed: ${verified.reason}`,
+      );
     if (verified.manifestDigest !== config.sealed.manifestDigest) {
       throw new Error("sealed snapshot digest changed during verification");
     }
     let sourceBytes = 0;
     for (const entry of snapshot.manifest) sourceBytes += entry.size;
-    if (snapshot.manifest.length > 20_000) throw new Error("sealed snapshot exceeds 20000 files");
-    if (sourceBytes > config.profile.limits.maxSourceBytes) throw new Error("sealed snapshot exceeds maxSourceBytes");
+    if (snapshot.manifest.length > 20_000)
+      throw new Error("sealed snapshot exceeds 20000 files");
+    if (sourceBytes > config.profile.limits.maxSourceBytes)
+      throw new Error("sealed snapshot exceeds maxSourceBytes");
   } catch (error) {
     process.stderr.write(`${MSG_INVALID_CONFIG}: ${redactedError(error)}\n`);
     process.exit(EXIT_INVALID);
@@ -436,7 +496,11 @@ async function main() {
   }
 
   try {
-    controlStream = new ControlSocket({ fd: 3, readable: true, writable: false });
+    controlStream = new ControlSocket({
+      fd: 3,
+      readable: true,
+      writable: false,
+    });
     controlStream.on("data", () => {});
     controlStream.on("end", requestCancel);
     controlStream.on("error", requestCancel);
@@ -453,7 +517,8 @@ async function main() {
     let total = 0;
     for await (const chunk of process.stdin) {
       total += chunk.length;
-      if (total > config.storage.maxRequestBytes) throw new Error("request too large");
+      if (total > config.storage.maxRequestBytes)
+        throw new Error("request too large");
       chunks.push(chunk);
     }
     frame = Buffer.concat(chunks);
@@ -464,9 +529,12 @@ async function main() {
   let request;
   try {
     request = parseRequestFrame(frame, config.storage.maxRequestBytes);
-    if (request.configFingerprint !== effective.fingerprint) throw new Error("config fingerprint mismatch");
-    if (request.sourceRevision !== effective.sourceRevision) throw new Error("source revision mismatch");
-    if (request.workspaceAlias !== config.active.workspaceAlias) throw new Error("workspace alias mismatch");
+    if (request.configFingerprint !== effective.fingerprint)
+      throw new Error("config fingerprint mismatch");
+    if (request.sourceRevision !== effective.sourceRevision)
+      throw new Error("source revision mismatch");
+    if (request.workspaceAlias !== config.active.workspaceAlias)
+      throw new Error("workspace alias mismatch");
     assertConsent(config.profile, request);
     assertRequestScopes(config.profile, request);
     assertRequestBudget(config.profile, request);
@@ -478,7 +546,11 @@ async function main() {
   try {
     journal = new CompanionJournal(config.stateDir, config.storage);
   } catch (error) {
-    exitWith(STDERR_FD, `${MSG_INTERNAL}: ${redactedError(error)}\n`, EXIT_INTERNAL);
+    exitWith(
+      STDERR_FD,
+      `${MSG_INTERNAL}: ${redactedError(error)}\n`,
+      EXIT_INTERNAL,
+    );
   }
 
   let reserve;
@@ -531,22 +603,31 @@ async function main() {
     mkdirSync(runDir, { recursive: true, mode: 0o700 });
     chmodSync(runDir, 0o700);
     const runStat = lstatSync(runDir);
-    if (runStat.isSymbolicLink() || !runStat.isDirectory()) throw new Error("run dir is not private");
+    if (runStat.isSymbolicLink() || !runStat.isDirectory())
+      throw new Error("run dir is not private");
 
-    const deadlineAt = Date.now() + Math.min(request.budget.timeoutMs, config.profile.limits.maxDurationMs);
+    const deadlineAt =
+      Date.now() +
+      Math.min(request.budget.timeoutMs, config.profile.limits.maxDurationMs);
     const remainingMs = () => deadlineAt - Date.now();
-    const deadlineTimer = setTimeout(() => {
-      deadlineFired = true;
-      requestCancel();
-    }, Math.max(0, remainingMs()));
+    const deadlineTimer = setTimeout(
+      () => {
+        deadlineFired = true;
+        requestCancel();
+      },
+      Math.max(0, remainingMs()),
+    );
     if (deadlineTimer.unref) deadlineTimer.unref();
 
     const observe = async (command, args, options) => {
       let timedOut = false;
-      const timer = setTimeout(() => {
-        timedOut = true;
-        requestCancel();
-      }, Math.max(0, options.timeoutMs));
+      const timer = setTimeout(
+        () => {
+          timedOut = true;
+          requestCancel();
+        },
+        Math.max(0, options.timeoutMs),
+      );
       if (timer.unref) timer.unref();
       try {
         const result = await spawnObserved(command, args, {
@@ -566,7 +647,13 @@ async function main() {
 
     const deps = (() => {
       try {
-        return { ok: true, value: verifyDependencyClosure(config.profile.dependencies, config.profile.limits.maxDependencyBytes) };
+        return {
+          ok: true,
+          value: verifyDependencyClosure(
+            config.profile.dependencies,
+            config.profile.limits.maxDependencyBytes,
+          ),
+        };
       } catch (error) {
         return { ok: false, reason: redactedError(error) };
       }
@@ -576,16 +663,25 @@ async function main() {
       expectedManifestDigest: config.sealed.manifestDigest,
     });
     if (!before.ok) {
-      outcome = errorOutcome("companion bridge: sealed snapshot failed before launch", [], 12, ["blocked: snapshot content"]);
+      outcome = errorOutcome(
+        "companion bridge: sealed snapshot failed before launch",
+        [],
+        12,
+        ["blocked: snapshot content"],
+      );
     } else if (!deps.ok) {
-      outcome = errorOutcome("companion bridge: blocked dependencies", [], 12, ["blocked: dependencies"]);
+      outcome = errorOutcome("companion bridge: blocked dependencies", [], 12, [
+        "blocked: dependencies",
+      ]);
     } else if (config.profile.executionBackend === "confined") {
       const preflight = preflightContainment(config.profile.runtime);
       if (!preflight.ok) {
-        outcome = errorOutcome("companion bridge: containment unavailable", [], 12, [
-          "blocked: containment",
-          preflight.reason,
-        ]);
+        outcome = errorOutcome(
+          "companion bridge: containment unavailable",
+          [],
+          12,
+          ["blocked: containment", preflight.reason],
+        );
       } else {
         let relayOk = false;
         try {
@@ -594,16 +690,29 @@ async function main() {
           relayOk = false;
         }
         if (!relayOk) {
-          outcome = errorOutcome("companion bridge: containment unavailable", [], 12, [
-            "blocked: containment",
-            "trusted model relay UDS is missing or not a socket",
-          ]);
+          outcome = errorOutcome(
+            "companion bridge: containment unavailable",
+            [],
+            12,
+            [
+              "blocked: containment",
+              "trusted model relay UDS is missing or not a socket",
+            ],
+          );
         }
       }
     }
 
     if (outcome === undefined && controlCancelled) {
-      outcome = { raw: rawResult(request, "cancelled", false, emptyReport("companion bridge: cancelled")), storedExit: 143 };
+      outcome = {
+        raw: rawResult(
+          request,
+          "cancelled",
+          false,
+          emptyReport("companion bridge: cancelled"),
+        ),
+        storedExit: 143,
+      };
     }
 
     if (outcome === undefined) {
@@ -611,7 +720,8 @@ async function main() {
       materializeSealedWork(snapshot.snapshotRoot, workRoot);
       if (request.mode === "write") ensureWriteBaseline(workRoot, runDir);
       const executorFile = config.profile.executor.executable;
-      if (lstatSync(executorFile).isSymbolicLink()) throw new Error("executor must not be a symlink");
+      if (lstatSync(executorFile).isSymbolicLink())
+        throw new Error("executor must not be a symlink");
       const jobFile = createJobFile(join(runDir, "job.json"), {
         version: 1,
         mode: request.mode,
@@ -634,8 +744,21 @@ async function main() {
       const unit = reserve.scopeUnit;
       let run;
       if (config.profile.executionBackend === "confined") {
-        const built = buildWholejobCommand(config.profile, { executorExecutable: executorFile, workRoot, jobFile }, unit);
-        if (process.env.PI_ORCH_DEBUG_LOG) { try { writeFileSync(`${process.env.PI_ORCH_DEBUG_LOG}.cmd`, JSON.stringify(built)); } catch { /* debug only */ } }
+        const built = buildWholejobCommand(
+          config.profile,
+          { executorExecutable: executorFile, workRoot, jobFile },
+          unit,
+        );
+        if (process.env.PI_ORCH_DEBUG_LOG) {
+          try {
+            writeFileSync(
+              `${process.env.PI_ORCH_DEBUG_LOG}.cmd`,
+              JSON.stringify(built),
+            );
+          } catch {
+            /* debug only */
+          }
+        }
         currentUnit = unit;
         run = await observe(built.command, built.args, {
           timeoutMs: remainingMs(),
@@ -643,31 +766,39 @@ async function main() {
         });
       } else {
         // Explicit synthetic regression backend. NOT containment.
-        run = await observe(
-          executorFile,
-          config.profile.executor.args,
-          {
-            cwd: workRoot,
-            timeoutMs: remainingMs(),
-            outputCap: Math.min(request.budget.maxOutputBytes, 1024 * 1024),
-            env: {
-              PATH: `${dirname(process.execPath)}:/usr/local/bin:/usr/bin:/bin`,
-              HOME: workRoot,
-              TMPDIR: workRoot,
-              COMPANION_JOB_FILE: jobFile,
-              COMPANION_MODEL_TOKEN: "dummy-bearer-not-a-secret",
-            },
+        run = await observe(executorFile, config.profile.executor.args, {
+          cwd: workRoot,
+          timeoutMs: remainingMs(),
+          outputCap: Math.min(request.budget.maxOutputBytes, 1024 * 1024),
+          env: {
+            PATH: `${dirname(process.execPath)}:/usr/local/bin:/usr/bin:/bin`,
+            HOME: workRoot,
+            TMPDIR: workRoot,
+            COMPANION_JOB_FILE: jobFile,
+            COMPANION_MODEL_TOKEN: "dummy-bearer-not-a-secret",
           },
-        );
+        });
       }
 
       if (controlCancelled && !deadlineFired) {
-        outcome = { raw: rawResult(request, "cancelled", false, emptyReport("companion bridge: cancelled")), storedExit: 143 };
+        outcome = {
+          raw: rawResult(
+            request,
+            "cancelled",
+            false,
+            emptyReport("companion bridge: cancelled"),
+          ),
+          storedExit: 143,
+        };
       } else if (deadlineFired || run.timedOut) {
         outcome = errorOutcome("companion bridge: timed out", [], 4);
       } else if (run.code !== 0) {
         if (process.env.PI_ORCH_DEBUG_LOG) {
-          try { writeFileSync(process.env.PI_ORCH_DEBUG_LOG, JSON.stringify(run)); } catch { /* debug only */ }
+          try {
+            writeFileSync(process.env.PI_ORCH_DEBUG_LOG, JSON.stringify(run));
+          } catch {
+            /* debug only */
+          }
         }
         outcome = errorOutcome("companion bridge: executor failed", [], 10);
       } else {
@@ -680,7 +811,12 @@ async function main() {
           generatedScratchRoots: config.profile.scratchPaths,
         });
         if (!validation.ok) {
-          outcome = errorOutcome("companion bridge: candidate scope violation", [], 10, validation.rejected);
+          outcome = errorOutcome(
+            "companion bridge: candidate scope violation",
+            [],
+            10,
+            validation.rejected,
+          );
         } else {
           const validatedArtifactDigest = validation.artifact.artifactDigest;
           const artifactDoc = {
@@ -694,16 +830,30 @@ async function main() {
             changes: validation.artifact.changes,
           };
           const artifactBytes = Buffer.from(`${JSON.stringify(artifactDoc)}\n`);
-          if (artifactBytes.length > config.profile.limits.maxArtifactBytes || artifactBytes.length > config.storage.maxArtifactBytes) {
+          if (
+            artifactBytes.length > config.profile.limits.maxArtifactBytes ||
+            artifactBytes.length > config.storage.maxArtifactBytes
+          ) {
             outcome = {
-              raw: rawResult(request, "unknown", false, emptyReport("companion bridge: artifact publication invalid")),
+              raw: rawResult(
+                request,
+                "unknown",
+                false,
+                emptyReport("companion bridge: artifact publication invalid"),
+              ),
               storedExit: 1,
             };
           } else {
-            writeFileSync(join(runDir, "artifact.json"), artifactBytes, { mode: 0o600 });
+            writeFileSync(join(runDir, "artifact.json"), artifactBytes, {
+              mode: 0o600,
+            });
             const checks = [];
             let stoppedEarly = false;
-            for (let index = 0; index < request.requiredChecks.length; index += 1) {
+            for (
+              let index = 0;
+              index < request.requiredChecks.length;
+              index += 1
+            ) {
               const id = request.requiredChecks[index];
               if (controlCancelled && !deadlineFired) break;
               if (deadlineFired || remainingMs() < 1000) {
@@ -711,7 +861,10 @@ async function main() {
                 break;
               }
               const check = config.profile.checks[id];
-              const checkRuntime = Math.min(remainingMs(), config.profile.limits.maxDurationMs);
+              const checkRuntime = Math.min(
+                remainingMs(),
+                config.profile.limits.maxDurationMs,
+              );
               let checkRun;
               if (config.profile.executionBackend === "confined") {
                 const scratchRoot = join(runDir, `check-${index}`);
@@ -726,13 +879,19 @@ async function main() {
                 currentUnit = checkUnit(request, index);
                 checkRun = await observe(built.command, built.args, {
                   timeoutMs: checkRuntime,
-                  outputCap: Math.min(request.budget.maxOutputBytes, 1024 * 1024),
+                  outputCap: Math.min(
+                    request.budget.maxOutputBytes,
+                    1024 * 1024,
+                  ),
                 });
               } else {
                 checkRun = await observe(check.executable, check.args, {
                   cwd: workRoot,
                   timeoutMs: checkRuntime,
-                  outputCap: Math.min(request.budget.maxOutputBytes, 1024 * 1024),
+                  outputCap: Math.min(
+                    request.budget.maxOutputBytes,
+                    1024 * 1024,
+                  ),
                   env: {
                     PATH: `${dirname(process.execPath)}:/usr/local/bin:/usr/bin:/bin`,
                     HOME: workRoot,
@@ -743,7 +902,8 @@ async function main() {
               if (controlCancelled && !deadlineFired) break;
               const outputMatched =
                 checkRun.code === check.expectExitCode &&
-                (check.expectStdoutIncludes === undefined || checkRun.stdout.includes(check.expectStdoutIncludes));
+                (check.expectStdoutIncludes === undefined ||
+                  checkRun.stdout.includes(check.expectStdoutIncludes));
               checks.push({
                 id,
                 exitCode: checkRun.timedOut ? 4 : checkRun.code,
@@ -758,17 +918,34 @@ async function main() {
 
             if (controlCancelled && !deadlineFired) {
               outcome = {
-                raw: rawResult(request, "cancelled", false, emptyReport("companion bridge: cancelled"), { checks }),
+                raw: rawResult(
+                  request,
+                  "cancelled",
+                  false,
+                  emptyReport("companion bridge: cancelled"),
+                  { checks },
+                ),
                 storedExit: 143,
               };
             } else if (stoppedEarly || deadlineFired) {
-              outcome = errorOutcome(deadlineFired ? "companion bridge: timed out" : "companion bridge: check failed", checks, deadlineFired ? 4 : 10);
+              outcome = errorOutcome(
+                deadlineFired
+                  ? "companion bridge: timed out"
+                  : "companion bridge: check failed",
+                checks,
+                deadlineFired ? 4 : 10,
+              );
             } else {
               const after = await verifySealedWorkspaceSnapshot(snapshot, {
                 expectedManifestDigest: config.sealed.manifestDigest,
               });
               if (!after.ok) {
-                outcome = errorOutcome("companion bridge: sealed snapshot changed after checks", checks, 12, ["blocked: snapshot content"]);
+                outcome = errorOutcome(
+                  "companion bridge: sealed snapshot changed after checks",
+                  checks,
+                  12,
+                  ["blocked: snapshot content"],
+                );
               } else {
                 // Operator checks run with /work bound writable. Re-validate the
                 // candidate AFTER every check, before any bytes are retained:
@@ -783,8 +960,16 @@ async function main() {
                   generatedScratchRoots: config.profile.scratchPaths,
                 });
                 if (!finalValidation.ok) {
-                  outcome = errorOutcome("companion bridge: candidate scope violation", checks, 10, finalValidation.rejected);
-                } else if (finalValidation.artifact.artifactDigest !== validatedArtifactDigest) {
+                  outcome = errorOutcome(
+                    "companion bridge: candidate scope violation",
+                    checks,
+                    10,
+                    finalValidation.rejected,
+                  );
+                } else if (
+                  finalValidation.artifact.artifactDigest !==
+                  validatedArtifactDigest
+                ) {
                   outcome = errorOutcome(
                     "companion bridge: candidate changed during operator checks",
                     checks,
@@ -809,10 +994,13 @@ async function main() {
                             "unknown",
                             false,
                             {
-                              summary: "companion bridge: guest-reported worker evidence missing",
+                              summary:
+                                "companion bridge: guest-reported worker evidence missing",
                               files: [],
                               findings: observationFindings(observation),
-                              unresolved: ["blocked: guest-reported worker evidence (unattested)"],
+                              unresolved: [
+                                "blocked: guest-reported worker evidence (unattested)",
+                              ],
                             },
                             { checks },
                           ),
@@ -822,14 +1010,19 @@ async function main() {
                           "companion bridge: guest-reported worker did not complete",
                           checks,
                           10,
-                          ["blocked: guest-reported worker did not complete (unattested)"],
+                          [
+                            "blocked: guest-reported worker did not complete (unattested)",
+                          ],
                         );
                     if (outcome.raw.report.findings.length === 0) {
-                      outcome.raw.report.findings = observationFindings(observation);
+                      outcome.raw.report.findings =
+                        observationFindings(observation);
                     }
                   } else {
                     const findings = [
-                      ...changes.slice(0, 8).map((change) => `${change.kind} ${change.path}`),
+                      ...changes
+                        .slice(0, 8)
+                        .map((change) => `${change.kind} ${change.path}`),
                       ...observationFindings(observation),
                     ].slice(0, 16);
                     try {
@@ -838,7 +1031,10 @@ async function main() {
                         changes,
                         join(runDir, "candidate"),
                         artifactBytes.length,
-                        Math.min(config.profile.limits.maxArtifactBytes, config.storage.maxArtifactBytes),
+                        Math.min(
+                          config.profile.limits.maxArtifactBytes,
+                          config.storage.maxArtifactBytes,
+                        ),
                       );
                     } catch {
                       throw new Error("candidate retention invalid");
@@ -865,7 +1061,11 @@ async function main() {
                       validateWireResult(raw, request.requiredChecks);
                       outcome = { raw, storedExit: 0, artifactBytes };
                     } catch {
-                      outcome = errorOutcome("companion bridge: result validation failed", checks, 10);
+                      outcome = errorOutcome(
+                        "companion bridge: result validation failed",
+                        checks,
+                        10,
+                      );
                     }
                   }
                 }
@@ -878,7 +1078,12 @@ async function main() {
     clearTimeout(deadlineTimer);
   } catch (error) {
     outcome = {
-      raw: rawResult(request, "unknown", false, emptyReport("companion bridge: internal error")),
+      raw: rawResult(
+        request,
+        "unknown",
+        false,
+        emptyReport("companion bridge: internal error"),
+      ),
       storedExit: 1,
     };
     void error;
@@ -888,7 +1093,15 @@ async function main() {
     finalize(outcome.raw, outcome.storedExit, outcome.artifactBytes);
   } catch {
     try {
-      finalize(rawResult(request, "unknown", false, emptyReport("companion bridge: internal error")), 1);
+      finalize(
+        rawResult(
+          request,
+          "unknown",
+          false,
+          emptyReport("companion bridge: internal error"),
+        ),
+        1,
+      );
     } catch {
       exitWith(STDERR_FD, `${MSG_INTERNAL}\n`, EXIT_INTERNAL);
     }

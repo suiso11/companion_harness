@@ -61,7 +61,8 @@ const README_TEXT =
 const INSTALLED_ROOT =
   process.env.PI_ORCH_INSTALLED_ROOT ??
   "/home/molmot/pi-codex-opencode-orchestrator";
-const INSTALLED_BIN = process.env.PI_ORCH_INSTALLED_BIN ?? "/home/molmot/.local/bin";
+const INSTALLED_BIN =
+  process.env.PI_ORCH_INSTALLED_BIN ?? "/home/molmot/.local/bin";
 const RUNTIME_DIR = process.env.XDG_RUNTIME_DIR || "/run/user/1000";
 const SESSION_BUS =
   process.env.DBUS_SESSION_BUS_ADDRESS || `unix:path=${RUNTIME_DIR}/bus`;
@@ -213,7 +214,10 @@ function toolCall(name: string, args: Record<string, unknown>): ChatResult {
   };
 }
 
-function plannerProposal(text: string, mode: PlannerMode): {
+function plannerProposal(
+  text: string,
+  mode: PlannerMode,
+): {
   operation: "investigate";
   intent: {
     kind: "execute" | "discuss" | "unclear";
@@ -246,7 +250,9 @@ function plannerProposal(text: string, mode: PlannerMode): {
   const runId = String(latestRunId || turn?.runId || "");
   const quoteText = String(turn?.text ?? "");
   const kind =
-    mode === "discuss" || mode === "xss" ? ("discuss" as const) : ("execute" as const);
+    mode === "discuss" || mode === "xss"
+      ? ("discuss" as const)
+      : ("execute" as const);
   return {
     operation: "investigate",
     intent: {
@@ -305,7 +311,10 @@ const modelGateway: ModelGateway = {
   capabilities: { toolCalling: true },
   baseUrl: MODEL_BASE,
   chatUrl: `${MODEL_BASE}/api/chat`,
-  async chat(request: ChatRequest, options?: { signal?: AbortSignal }): Promise<ChatResult> {
+  async chat(
+    request: ChatRequest,
+    options?: { signal?: AbortSignal },
+  ): Promise<ChatResult> {
     if (process.env.E2E_MODEL_DEBUG_LOG !== undefined) {
       try {
         const { appendFileSync } = await import("node:fs");
@@ -384,7 +393,11 @@ const modelGateway: ModelGateway = {
         stopReason: "stop",
       };
     }
-    if (names.length === 0 && results.length === 0 && lastUserText(request) === AD_TEXT_XSS) {
+    if (
+      names.length === 0 &&
+      results.length === 0 &&
+      lastUserText(request) === AD_TEXT_XSS
+    ) {
       return { text: "synthetic title", toolCalls: [], stopReason: "stop" };
     }
     return answer(
@@ -483,7 +496,11 @@ async function makeFixture(): Promise<NodeJS.ProcessEnv> {
     systemdRunRealpath: realpathSync("/usr/bin/systemd-run"),
     systemctlRealpath: realpathSync("/usr/bin/systemctl"),
     piOrchLauncherRealpath: launcher,
-    piOrchShellRealpath: join(launcherRoot, "scripts", "pi_codex_orchestrator.sh"),
+    piOrchShellRealpath: join(
+      launcherRoot,
+      "scripts",
+      "pi_codex_orchestrator.sh",
+    ),
     piOrchConfigRealpath: join(launcherRoot, "scripts", "omp-orchestrator.yml"),
     piOrchExtensionRealpath: join(
       launcherRoot,
@@ -664,7 +681,11 @@ const control = createServer(async (req, res) => {
 });
 
 await new Promise<void>((resolve) => {
-  (control as HttpServer).listen(AUTODISPATCH_CONTROL_PORT, "127.0.0.1", resolve);
+  (control as HttpServer).listen(
+    AUTODISPATCH_CONTROL_PORT,
+    "127.0.0.1",
+    resolve,
+  );
 });
 
 // Fixture-only hygiene: remove every synthetic temp root (source, SQLite,

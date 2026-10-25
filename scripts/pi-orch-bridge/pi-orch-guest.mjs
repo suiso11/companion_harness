@@ -23,7 +23,6 @@ import {
   chmodSync,
   closeSync,
   existsSync,
-  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -31,7 +30,7 @@ import {
   writeSync,
 } from "node:fs";
 import { createServer, request as httpRequest } from "node:http";
-import { basename, dirname, join, relative, isAbsolute } from "node:path";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
 
 const WORK_ROOT = "/work";
 const MODEL_UDS = process.env.COMPANION_MODEL_UDS ?? "/run/model.sock";
@@ -40,14 +39,24 @@ const OMP_BIN = process.env.COMPANION_OMP_BIN ?? "";
 const NODE_BIN = process.env.COMPANION_NODE_BIN ?? process.execPath;
 const EXECUTOR_KIND = process.env.COMPANION_EXECUTOR_KIND ?? "fixed";
 const PI_ORCH_LAUNCHER = process.env.COMPANION_PI_ORCH_LAUNCHER ?? "";
-const OBSERVATION_REL = process.env.COMPANION_OBSERVATION_REL ?? ".companion-observation/guest.json";
+const OBSERVATION_REL =
+  process.env.COMPANION_OBSERVATION_REL ?? ".companion-observation/guest.json";
 const MODEL_PROVIDER = "companion-local";
 const MODEL_ID = "companion-current";
 const MODEL_ALIAS = `${MODEL_PROVIDER}/${MODEL_ID}`;
 
-const MAX_REQUEST_BYTES = Math.min(Number(process.env.COMPANION_MAX_REQUEST_BYTES ?? 8 * 1024 * 1024), 16 * 1024 * 1024);
-const MAX_RESPONSE_BYTES = Math.min(Number(process.env.COMPANION_MAX_RESPONSE_BYTES ?? 4 * 1024 * 1024), 16 * 1024 * 1024);
-const MAX_MODEL_CALLS = Math.max(1, Math.min(Number(process.env.COMPANION_MAX_MODEL_CALLS ?? 8), 24));
+const MAX_REQUEST_BYTES = Math.min(
+  Number(process.env.COMPANION_MAX_REQUEST_BYTES ?? 8 * 1024 * 1024),
+  16 * 1024 * 1024,
+);
+const MAX_RESPONSE_BYTES = Math.min(
+  Number(process.env.COMPANION_MAX_RESPONSE_BYTES ?? 4 * 1024 * 1024),
+  16 * 1024 * 1024,
+);
+const MAX_MODEL_CALLS = Math.max(
+  1,
+  Math.min(Number(process.env.COMPANION_MAX_MODEL_CALLS ?? 8), 24),
+);
 const MAX_OMP_STDOUT_BYTES = 4 * 1024 * 1024;
 const MAX_OBSERVATION_BYTES = 64 * 1024;
 
@@ -75,7 +84,8 @@ function parseJob(path) {
   } catch {
     fail("frozen job is not valid JSON");
   }
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) fail("frozen job must be an object");
+  if (!raw || typeof raw !== "object" || Array.isArray(raw))
+    fail("frozen job must be an object");
   const allowed = new Set([
     "version",
     "mode",
@@ -91,20 +101,36 @@ function parseJob(path) {
     "requiredChecks",
     "externalModelConsent",
   ]);
-  for (const key of Object.keys(raw)) if (!allowed.has(key)) fail("frozen job carries an unsupported key");
+  for (const key of Object.keys(raw))
+    if (!allowed.has(key)) fail("frozen job carries an unsupported key");
   if (raw.version !== 1) fail("frozen job version must be 1");
-  if (raw.mode !== "read_only" && raw.mode !== "write") fail("frozen job mode is invalid");
-  if (typeof raw.objective !== "string" || raw.objective.length === 0 || raw.objective.length > 4096) {
+  if (raw.mode !== "read_only" && raw.mode !== "write")
+    fail("frozen job mode is invalid");
+  if (
+    typeof raw.objective !== "string" ||
+    raw.objective.length === 0 ||
+    raw.objective.length > 4096
+  ) {
     fail("frozen objective is invalid");
   }
-  if (!Array.isArray(raw.relevantPaths) || raw.relevantPaths.length === 0) fail("frozen relevantPaths are empty");
+  if (!Array.isArray(raw.relevantPaths) || raw.relevantPaths.length === 0)
+    fail("frozen relevantPaths are empty");
   for (const entry of raw.relevantPaths) {
-    if (typeof entry !== "string" || entry.length === 0 || entry.length > 512) fail("frozen relevantPath is invalid");
-    if (entry.startsWith("/") || entry.includes("..") || entry.includes("\0")) fail("frozen relevantPath must be relative");
+    if (typeof entry !== "string" || entry.length === 0 || entry.length > 512)
+      fail("frozen relevantPath is invalid");
+    if (entry.startsWith("/") || entry.includes("..") || entry.includes("\0"))
+      fail("frozen relevantPath must be relative");
   }
-  if (!raw.purpose || typeof raw.purpose !== "object") fail("frozen purpose is invalid");
-  if (typeof raw.purpose.statement !== "string" || raw.purpose.statement.length === 0) fail("frozen purpose statement is invalid");
-  const constraints = Array.isArray(raw.constraints) ? raw.constraints.filter((v) => typeof v === "string").slice(0, 16) : [];
+  if (!raw.purpose || typeof raw.purpose !== "object")
+    fail("frozen purpose is invalid");
+  if (
+    typeof raw.purpose.statement !== "string" ||
+    raw.purpose.statement.length === 0
+  )
+    fail("frozen purpose statement is invalid");
+  const constraints = Array.isArray(raw.constraints)
+    ? raw.constraints.filter((v) => typeof v === "string").slice(0, 16)
+    : [];
   return {
     mode: raw.mode,
     objective: raw.objective,
@@ -134,7 +160,9 @@ function buildPrompt(job) {
     `Purpose: ${job.statement}`,
     `Objective: ${job.objective}`,
     `Acceptance: ${job.acceptance}`,
-    ...(job.constraints.length > 0 ? [`Constraints: ${job.constraints.join("; ")}`] : []),
+    ...(job.constraints.length > 0
+      ? [`Constraints: ${job.constraints.join("; ")}`]
+      : []),
     "Write the smallest correct candidate file, then stop.",
   ].join("\n");
 }
@@ -168,7 +196,9 @@ function writePiAgentConfig(home, port) {
       },
     },
   };
-  writeFileSync(join(agentDir, "models.json"), `${JSON.stringify(models)}\n`, { mode: 0o600 });
+  writeFileSync(join(agentDir, "models.json"), `${JSON.stringify(models)}\n`, {
+    mode: 0o600,
+  });
 }
 
 function writeAgentConfig(agentDir, port) {
@@ -193,7 +223,12 @@ function writeAgentConfig(agentDir, port) {
   writeFileSync(join(agentDir, "models.yml"), models, { mode: 0o600 });
   writeFileSync(
     join(agentDir, "config.yml"),
-    ["enabledProviders:", `  - ${MODEL_PROVIDER}`, "disabledProviders: []", ""].join("\n"),
+    [
+      "enabledProviders:",
+      `  - ${MODEL_PROVIDER}`,
+      "disabledProviders: []",
+      "",
+    ].join("\n"),
     { mode: 0o600 },
   );
 }
@@ -206,7 +241,14 @@ function startModelRelay() {
       res.end(
         JSON.stringify({
           object: "list",
-          data: [{ id: MODEL_ID, object: "model", created: 0, owned_by: "companion-local" }],
+          data: [
+            {
+              id: MODEL_ID,
+              object: "model",
+              created: 0,
+              owned_by: "companion-local",
+            },
+          ],
         }),
       );
       return;
@@ -219,7 +261,9 @@ function startModelRelay() {
     calls += 1;
     if (calls > MAX_MODEL_CALLS) {
       res.writeHead(429, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: { message: "model call cap exceeded" } }));
+      res.end(
+        JSON.stringify({ error: { message: "model call cap exceeded" } }),
+      );
       return;
     }
     const bounded = [];
@@ -265,8 +309,13 @@ function startModelRelay() {
         },
       );
       upstream.on("error", () => {
-        if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" });
-        res.end(JSON.stringify({ error: { message: "trusted model relay unavailable" } }));
+        if (!res.headersSent)
+          res.writeHead(502, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            error: { message: "trusted model relay unavailable" },
+          }),
+        );
       });
       upstream.end(body);
     });
@@ -282,7 +331,8 @@ function startModelRelay() {
     server.on("error", reject);
     server.listen(0, "127.0.0.1", () => {
       const port = server.address()?.port;
-      if (!Number.isSafeInteger(port) || port <= 0) reject(new Error("relay bind failed"));
+      if (!Number.isSafeInteger(port) || port <= 0)
+        reject(new Error("relay bind failed"));
       else resolve({ server, port });
     });
   });
@@ -301,24 +351,50 @@ function addDelegatedStatus(workers, id, status, isError) {
   // Later manager events for the same worker supersede earlier ones
   // (spawn:running -> wait:done/error). The final observed status is the
   // reliable terminal state; the model's prose is never consulted.
-  workers.set(id, { id, status: bounded, ...(isError === true ? { isError: true } : {}) });
+  workers.set(id, {
+    id,
+    status: bounded,
+    ...(isError === true ? { isError: true } : {}),
+  });
 }
 
 function captureDelegatedStatus(workers, name, details, isError) {
-  if (!name.startsWith("opencode_") || !details || typeof details !== "object" || Array.isArray(details)) return;
+  if (
+    !name.startsWith("opencode_") ||
+    !details ||
+    typeof details !== "object" ||
+    Array.isArray(details)
+  )
+    return;
   if (Array.isArray(details.results)) {
     for (const result of details.results) {
-      if (!result || typeof result !== "object" || Array.isArray(result)) continue;
-      addDelegatedStatus(workers, result.id, result.status, isError === true || result.isError === true);
+      if (!result || typeof result !== "object" || Array.isArray(result))
+        continue;
+      addDelegatedStatus(
+        workers,
+        result.id,
+        result.status,
+        isError === true || result.isError === true,
+      );
     }
   }
   if (Array.isArray(details.tasks)) {
     for (const task of details.tasks) {
       if (!task || typeof task !== "object" || Array.isArray(task)) continue;
-      addDelegatedStatus(workers, task.id, task.status, isError === true || task.isError === true);
+      addDelegatedStatus(
+        workers,
+        task.id,
+        task.status,
+        isError === true || task.isError === true,
+      );
     }
   }
-  addDelegatedStatus(workers, details.id, details.status, isError === true || details.isError === true);
+  addDelegatedStatus(
+    workers,
+    details.id,
+    details.status,
+    isError === true || details.isError === true,
+  );
 }
 
 function summarizeEvents(text, stderrText) {
@@ -338,7 +414,11 @@ function summarizeEvents(text, stderrText) {
       continue;
     }
     if (!event || typeof event !== "object") continue;
-    if (event.type === "message_end" && event.message && typeof event.message === "object") {
+    if (
+      event.type === "message_end" &&
+      event.message &&
+      typeof event.message === "object"
+    ) {
       const message = event.message;
       if (message.role === "assistant") {
         modelCalls += 1;
@@ -349,27 +429,57 @@ function summarizeEvents(text, stderrText) {
               const key = `${block.id ?? ""}:${block.name ?? ""}`;
               if (!seen.has(key)) {
                 seen.add(key);
-                const entry = { name: String(block.name ?? "unknown").slice(0, 64), args: sanitizeArgs(block.arguments), result: "pending" };
+                const entry = {
+                  name: String(block.name ?? "unknown").slice(0, 64),
+                  args: sanitizeArgs(block.arguments),
+                  result: "pending",
+                };
                 tools.push(entry);
-                if (typeof block.id === "string" && block.id.length > 0 && block.id.length <= 128) byId.set(block.id, entry);
+                if (
+                  typeof block.id === "string" &&
+                  block.id.length > 0 &&
+                  block.id.length <= 128
+                )
+                  byId.set(block.id, entry);
               }
-            } else if (block.type === "text" && typeof block.text === "string") {
+            } else if (
+              block.type === "text" &&
+              typeof block.text === "string"
+            ) {
               finalText = block.text.slice(0, 2048);
             }
           }
         }
-        if (message.stopReason === "error") sawError = String(message.errorMessage ?? "model error").slice(0, 512);
+        if (message.stopReason === "error")
+          sawError = String(message.errorMessage ?? "model error").slice(
+            0,
+            512,
+          );
       } else if (message.role === "toolResult") {
         const name = String(message.toolName ?? "unknown").slice(0, 64);
-        const callId = typeof message.toolCallId === "string" ? message.toolCallId.slice(0, 128) : "";
-        const entry = (callId ? byId.get(callId) : undefined) ?? tools.find((tool) => tool.name === name && tool.result === "pending");
+        const callId =
+          typeof message.toolCallId === "string"
+            ? message.toolCallId.slice(0, 128)
+            : "";
+        const entry =
+          (callId ? byId.get(callId) : undefined) ??
+          tools.find((tool) => tool.name === name && tool.result === "pending");
         if (entry) entry.result = message.isError ? "error" : "ok";
-        captureDelegatedStatus(delegated, name, message.details, message.isError);
+        captureDelegatedStatus(
+          delegated,
+          name,
+          message.details,
+          message.isError,
+        );
       }
     }
   }
   const delegatedWorkers = [...delegated.values()].slice(0, 32);
-  if (delegatedWorkers.some((worker) => worker.status !== "done" || worker.isError === true)) {
+  if (
+    delegatedWorkers.some(
+      (worker) => worker.status !== "done" || worker.isError === true,
+    )
+  ) {
     sawError ||= "delegated worker did not complete";
   }
   if (stderrText.length > 0) sawError ||= stderrText.slice(0, 512);
@@ -392,7 +502,8 @@ function writeObservation(root, observation) {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   chmodSync(dir, 0o700);
   const text = `${JSON.stringify(observation)}\n`;
-  if (Buffer.byteLength(text) > MAX_OBSERVATION_BYTES) fail("observation is oversized");
+  if (Buffer.byteLength(text) > MAX_OBSERVATION_BYTES)
+    fail("observation is oversized");
   const fd = openSync(target, "w", 0o600);
   try {
     writeSync(fd, text);
@@ -404,11 +515,19 @@ function writeObservation(root, observation) {
 async function main() {
   const realPi = EXECUTOR_KIND === "real-pi";
   if (realPi) {
-    if (!PI_ORCH_LAUNCHER || !isAbsolute(PI_ORCH_LAUNCHER) || !existsSync(PI_ORCH_LAUNCHER)) {
+    if (
+      !PI_ORCH_LAUNCHER ||
+      !isAbsolute(PI_ORCH_LAUNCHER) ||
+      !existsSync(PI_ORCH_LAUNCHER)
+    ) {
       fail("pinned pi-orch launcher path is missing");
     }
-    if (!OMP_BIN || !isAbsolute(OMP_BIN) || !existsSync(OMP_BIN)) fail("pinned underlying OMP binary path is missing");
-    if (basename(OMP_BIN) !== "omp") fail("underlying OMP binary must be invoked as 'omp' by the pinned launcher");
+    if (!OMP_BIN || !isAbsolute(OMP_BIN) || !existsSync(OMP_BIN))
+      fail("pinned underlying OMP binary path is missing");
+    if (basename(OMP_BIN) !== "omp")
+      fail(
+        "underlying OMP binary must be invoked as 'omp' by the pinned launcher",
+      );
   } else if (!OMP_BIN || !isAbsolute(OMP_BIN)) {
     fail("pinned OMP binary path is missing");
   }
@@ -440,11 +559,16 @@ async function main() {
       "dist",
       "cli.js",
     );
-    if (!existsSync(piCli)) fail("pinned Pi worker CLI is missing from the launcher closure");
+    if (!existsSync(piCli))
+      fail("pinned Pi worker CLI is missing from the launcher closure");
     const realPiBin = join(scratch, "bin");
     mkdirSync(realPiBin, { recursive: true, mode: 0o700 });
     const wrapper = join(realPiBin, "pi");
-    writeFileSync(wrapper, `#!/bin/sh\nexec ${JSON.stringify(NODE_BIN)} ${JSON.stringify(piCli)} "$@"\n`, { mode: 0o700 });
+    writeFileSync(
+      wrapper,
+      `#!/bin/sh\nexec ${JSON.stringify(NODE_BIN)} ${JSON.stringify(piCli)} "$@"\n`,
+      { mode: 0o700 },
+    );
     chmodSync(wrapper, 0o700);
     workerPathPrefix = `${realPiBin}:`;
   }
@@ -454,7 +578,10 @@ async function main() {
     : job.mode === "read_only"
       ? "read"
       : "read,write";
-  const maxTimeSeconds = Math.max(1, Math.min(900, Number(process.env.COMPANION_GUEST_TIMEOUT_SECONDS ?? 300)));
+  const maxTimeSeconds = Math.max(
+    1,
+    Math.min(900, Number(process.env.COMPANION_GUEST_TIMEOUT_SECONDS ?? 300)),
+  );
   const args = realPi
     ? [
         "-p",
@@ -522,15 +649,23 @@ async function main() {
   const command = realPi ? NODE_BIN : OMP_BIN;
   const commandArgs = realPi ? [PI_ORCH_LAUNCHER, ...args] : args;
   const engine = realPi ? "pi-orch-omp-json" : "omp-headless-json";
-  const child = spawn(command, commandArgs, { cwd: WORK_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(command, commandArgs, {
+    cwd: WORK_ROOT,
+    env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
   let stdout = "";
   let stderr = "";
   let timedOut = false;
   child.stdout?.on("data", (chunk) => {
-    if (stdout.length < MAX_OMP_STDOUT_BYTES) stdout += chunk.toString("utf8").slice(0, MAX_OMP_STDOUT_BYTES - stdout.length);
+    if (stdout.length < MAX_OMP_STDOUT_BYTES)
+      stdout += chunk
+        .toString("utf8")
+        .slice(0, MAX_OMP_STDOUT_BYTES - stdout.length);
   });
   child.stderr?.on("data", (chunk) => {
-    if (stderr.length < 4096) stderr += chunk.toString("utf8").slice(0, 4096 - stderr.length);
+    if (stderr.length < 4096)
+      stderr += chunk.toString("utf8").slice(0, 4096 - stderr.length);
   });
   const timer = setTimeout(() => {
     timedOut = true;
@@ -551,7 +686,9 @@ async function main() {
   process.on("SIGINT", stop);
   const code = await new Promise((resolve) => {
     child.on("error", () => resolve(127));
-    child.on("close", (exitCode, signal) => resolve(exitCode ?? (signal ? 143 : 1)));
+    child.on("close", (exitCode, signal) =>
+      resolve(exitCode ?? (signal ? 143 : 1)),
+    );
   });
   clearTimeout(timer);
   try {
@@ -587,7 +724,8 @@ async function main() {
   if (timedOut) guestFailed("OMP exceeded the frozen guest timeout");
   if (code !== 0) guestFailed("OMP exited nonzero");
   if (summary.error) guestFailed("OMP reported a model or tool error");
-  if (summary.tools.length === 0) guestFailed("OMP produced no observed tool action");
+  if (summary.tools.length === 0)
+    guestFailed("OMP produced no observed tool action");
   process.exit(0);
 }
 

@@ -19,16 +19,12 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  createSealedWorkspaceSnapshot,
-  type SealedWorkspaceSnapshot,
-} from "../src/autonomous_workspace.js";
+import { CompanionJournal } from "../../../scripts/pi-orch-bridge/companion-journal.mjs";
 import {
   companionScopeUnit,
   computeTaskHash,
   type TrialWireRequest,
 } from "../../../scripts/pi-orch-bridge/companion-protocol.mjs";
-import { CompanionJournal } from "../../../scripts/pi-orch-bridge/companion-journal.mjs";
 import {
   buildCheckCommand,
   buildWholejobCommand,
@@ -38,12 +34,19 @@ import {
   computeDependencyClosureDigest,
   computeEffectiveProfile,
   hashFileSync,
-  parseOperatorConfig,
   type OperatorConfig,
+  parseOperatorConfig,
 } from "../../../scripts/pi-orch-bridge/sealed-profile.mjs";
+import {
+  createSealedWorkspaceSnapshot,
+  type SealedWorkspaceSnapshot,
+} from "../src/autonomous_workspace.js";
 
 const BRIDGE = join(
-  new URL("../../../scripts/pi-orch-bridge/companion-bridge.mjs", import.meta.url).pathname,
+  new URL(
+    "../../../scripts/pi-orch-bridge/companion-bridge.mjs",
+    import.meta.url,
+  ).pathname,
 );
 const roots: string[] = [];
 
@@ -86,7 +89,10 @@ async function makeFixture(options: {
   write(join(source, "src/app.ts"), "export const app = 'sealed';\n");
   write(join(source, "src/util.ts"), "export const util = 1;\n");
   write(join(source, "src/.env"), "TOP_SECRET=do-not-copy\n");
-  write(join(source, "src/node_modules/dep/index.js"), "module.exports = 'host';\n");
+  write(
+    join(source, "src/node_modules/dep/index.js"),
+    "module.exports = 'host';\n",
+  );
   write(join(source, "package.json"), '{"name":"synthetic"}\n');
 
   const snapshot = await createSealedWorkspaceSnapshot({
@@ -100,20 +106,25 @@ async function makeFixture(options: {
   write(join(pristine, "README.md"), "# pristine deployment base\n");
 
   const depsRoot = join(dir, "deps");
-  write(join(depsRoot, "node_modules/dep/index.js"), "module.exports = 'pinned';\n");
+  write(
+    join(depsRoot, "node_modules/dep/index.js"),
+    "module.exports = 'pinned';\n",
+  );
 
   const executorPath = join(dir, "bin", "executor.mjs");
   write(executorPath, `#!${process.execPath}\n${options.executorBody}`, 0o700);
   const checkPath = join(dir, "bin", "check.mjs");
   write(
     checkPath,
-    `#!${process.execPath}\n${options.checkBody ??
+    `#!${process.execPath}\n${
+      options.checkBody ??
       [
         "import { readFileSync } from 'node:fs';",
         "const p = process.argv[2] ?? 'src/app.ts';",
         "process.stdout.write(readFileSync(p, 'utf8').includes('app') ? 'check-ok\\n' : 'missing\\n');",
         "",
-      ].join("\n")}`,
+      ].join("\n")
+    }`,
     0o700,
   );
 
@@ -136,7 +147,11 @@ async function makeFixture(options: {
       maxResultBytes: 64 * 1024,
       maxDbBytes: 16 * 1024 * 1024,
     },
-    active: { configFingerprint: "0".repeat(64), sourceRevision: "0".repeat(40), workspaceAlias: "synthetic" },
+    active: {
+      configFingerprint: "0".repeat(64),
+      sourceRevision: "0".repeat(40),
+      workspaceAlias: "synthetic",
+    },
     sealed: {
       rootDir: dir,
       snapshotRoot: snapshot.snapshotRoot,
@@ -147,7 +162,11 @@ async function makeFixture(options: {
     },
     profile: {
       executionBackend: backend,
-      executor: { executable: executorPath, args: [], contentDigest: hashFileSync(executorPath) },
+      executor: {
+        executable: executorPath,
+        args: [],
+        contentDigest: hashFileSync(executorPath),
+      },
       checks: {
         "synthetic-check": {
           executable: checkPath,
@@ -166,7 +185,11 @@ async function makeFixture(options: {
               systemctlRealpath: fakeSystemctl,
             }
           : { nodeRealpath: fakeNode },
-      model: { route: "local", sockHostPath: join(dir, "model.sock"), externalConsent: false },
+      model: {
+        route: "local",
+        sockHostPath: join(dir, "model.sock"),
+        externalConsent: false,
+      },
       limits: {
         maxDurationMs: 30_000,
         maxModelCalls: 24,
@@ -186,8 +209,14 @@ async function makeFixture(options: {
       dependencies: {
         root: depsRoot,
         manifestPath: join(dir, "deps-manifest.json"),
-        digest: computeDependencyClosureDigest(depsRoot, 64 * 1024 * 1024).digest,
-        mounts: [{ source: join(depsRoot, "node_modules"), guestPath: "/deps/node_modules" }],
+        digest: computeDependencyClosureDigest(depsRoot, 64 * 1024 * 1024)
+          .digest,
+        mounts: [
+          {
+            source: join(depsRoot, "node_modules"),
+            guestPath: "/deps/node_modules",
+          },
+        ],
       },
     },
   };
@@ -197,7 +226,15 @@ async function makeFixture(options: {
   config.active.sourceRevision = effective.sourceRevision;
   const configPath = join(dir, "operator.json");
   writeFileSync(configPath, `${JSON.stringify(config)}\n`);
-  return { dir, configPath, config, snapshot, executorPath, checkPath, depsRoot };
+  return {
+    dir,
+    configPath,
+    config,
+    snapshot,
+    executorPath,
+    checkPath,
+    depsRoot,
+  };
 }
 
 function makeRequest(
@@ -236,11 +273,19 @@ interface BridgeRun {
 async function runBridge(
   fixture: Fixture,
   request: TrialWireRequest,
-  options: { cancelWhenMarker?: string; cancelAfterMs?: number; timeoutMs?: number } = {},
+  options: {
+    cancelWhenMarker?: string;
+    cancelAfterMs?: number;
+    timeoutMs?: number;
+  } = {},
 ): Promise<BridgeRun> {
-  const child = spawn(process.execPath, [BRIDGE, "--config", fixture.configPath], {
-    stdio: ["pipe", "pipe", "pipe", "pipe"],
-  });
+  const child = spawn(
+    process.execPath,
+    [BRIDGE, "--config", fixture.configPath],
+    {
+      stdio: ["pipe", "pipe", "pipe", "pipe"],
+    },
+  );
   let stdout = "";
   let stderr = "";
   child.stdout?.on("data", (chunk) => {
@@ -304,7 +349,12 @@ interface TrialWireResultShape {
   taskHash: string;
   report: { summary: string; unresolved: string[]; findings: string[] };
   evidence: {
-    checks: { id: string; exitCode: number | null; timedOut: boolean; outputMatched: boolean }[];
+    checks: {
+      id: string;
+      exitCode: number | null;
+      timedOut: boolean;
+      outputMatched: boolean;
+    }[];
     artifact?: { sha256: string; entryCount: number; bytes: number };
   };
 }
@@ -332,7 +382,9 @@ function guestReportBody(delegatedWorkers: unknown[], extraBody = ""): string {
 describe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
   it("--describe is side-effect free and marks sealed/test defaults", () => {
     const dir = tempRoot("describe");
-    const out = spawnSync(process.execPath, [BRIDGE, "--describe"], { encoding: "utf8" });
+    const out = spawnSync(process.execPath, [BRIDGE, "--describe"], {
+      encoding: "utf8",
+    });
     expect(out.status).toBe(0);
     expect(JSON.parse(out.stdout)).toMatchObject({
       version: 2,
@@ -394,11 +446,19 @@ describe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
       taskHash: request.taskHash,
     });
     expect(result.evidence.checks).toEqual([
-      { id: "synthetic-check", exitCode: 0, timedOut: false, outputMatched: true },
+      {
+        id: "synthetic-check",
+        exitCode: 0,
+        timedOut: false,
+        outputMatched: true,
+      },
     ]);
     expect(result.evidence.artifact).toBeDefined();
 
-    const journal = new CompanionJournal(fixture.config.stateDir, fixture.config.storage);
+    const journal = new CompanionJournal(
+      fixture.config.stateDir,
+      fixture.config.storage,
+    );
     const view = journal.inspect(request.executionId);
     expect(view?.state).toBe("done");
     expect(view?.scopeUnit).toBe(companionScopeUnit(request));
@@ -428,10 +488,15 @@ describe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
     );
 
     const failedFixture = await makeFixture({
-      executorBody: guestReportBody([{ id: "oc-1", status: "error", isError: true }]),
+      executorBody: guestReportBody([
+        { id: "oc-1", status: "error", isError: true },
+      ]),
       scratchPaths: [".companion-observation"],
     });
-    const failedRun = await runBridge(failedFixture, makeRequest(failedFixture));
+    const failedRun = await runBridge(
+      failedFixture,
+      makeRequest(failedFixture),
+    );
     expect(failedRun.status).toBe(0);
     const failedResult = resultOf(failedRun);
     // The synthetic check passed, but a real worker failure must never be
@@ -440,7 +505,12 @@ describe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
     expect(failedResult.verified).toBe(false);
     expect(failedResult.evidence.artifact).toBeUndefined();
     expect(failedResult.evidence.checks).toEqual([
-      { id: "synthetic-check", exitCode: 0, timedOut: false, outputMatched: true },
+      {
+        id: "synthetic-check",
+        exitCode: 0,
+        timedOut: false,
+        outputMatched: true,
+      },
     ]);
     expect(failedResult.report.unresolved).toContain(
       "blocked: guest-reported worker did not complete (unattested)",
@@ -450,7 +520,10 @@ describe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
       executorBody: guestReportBody([]),
       scratchPaths: [".companion-observation"],
     });
-    const missingRun = await runBridge(missingFixture, makeRequest(missingFixture));
+    const missingRun = await runBridge(
+      missingFixture,
+      makeRequest(missingFixture),
+    );
     expect(missingRun.status).toBe(0);
     const missingResult = resultOf(missingRun);
     expect(missingResult.status).toBe("unknown");
@@ -499,7 +572,8 @@ describe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
 
   it("write mode publishes only in-scope changes and rejects out-of-scope ones", async () => {
     const fixture = await makeFixture({
-      executorBody: "import { writeFileSync } from 'node:fs';\nwriteFileSync('src/new.ts', 'export const added = true;\\n');\n",
+      executorBody:
+        "import { writeFileSync } from 'node:fs';\nwriteFileSync('src/new.ts', 'export const added = true;\\n');\n",
     });
     const request = makeRequest(fixture, { mode: "write" });
     const run = await runBridge(fixture, request);
@@ -541,13 +615,25 @@ describe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
     expect(result.status).toBe("error");
     expect(result.verified).toBe(false);
     expect(result.evidence.artifact).toBeUndefined();
-    expect(result.report.summary).toContain("candidate changed during operator checks");
-    expect(result.report.unresolved).toContain("blocked: candidate changed during checks");
+    expect(result.report.summary).toContain(
+      "candidate changed during operator checks",
+    );
+    expect(result.report.unresolved).toContain(
+      "blocked: candidate changed during checks",
+    );
     expect(result.evidence.checks).toEqual([
-      { id: "synthetic-check", exitCode: 0, timedOut: false, outputMatched: true },
+      {
+        id: "synthetic-check",
+        exitCode: 0,
+        timedOut: false,
+        outputMatched: true,
+      },
     ]);
 
-    const journal = new CompanionJournal(fixture.config.stateDir, fixture.config.storage);
+    const journal = new CompanionJournal(
+      fixture.config.stateDir,
+      fixture.config.storage,
+    );
     const view = journal.inspect(request.executionId);
     const artifact = journal.readArtifact(request.executionId);
     journal.close();
@@ -650,7 +736,10 @@ describe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
     });
     const request = makeRequest(fixture);
     const started = Date.now();
-    const run = await runBridge(fixture, request, { cancelWhenMarker: marker, timeoutMs: 8000 });
+    const run = await runBridge(fixture, request, {
+      cancelWhenMarker: marker,
+      timeoutMs: 8000,
+    });
     expect(run.status).toBe(0);
     const result = resultOf(run);
     expect(result.status).toBe("cancelled");
@@ -673,7 +762,10 @@ describe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
     expect(profileRun.stderr).toContain("invalid operator config");
 
     writeFileSync(fixture.configPath, configText);
-    writeFileSync(join(fixture.snapshot.snapshotRoot, "src", "app.ts"), "tampered\n");
+    writeFileSync(
+      join(fixture.snapshot.snapshotRoot, "src", "app.ts"),
+      "tampered\n",
+    );
     const snapshotRun = await runBridge(fixture, request);
     expect(snapshotRun.status).toBe(2);
     expect(snapshotRun.stdout).toBe("");
@@ -708,7 +800,8 @@ describe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
   it("emits unknown when the artifact cannot be published within the declared cap", async () => {
     const fixture = await makeFixture({
       maxArtifactBytes: 256,
-      executorBody: "import { writeFileSync } from 'node:fs';\nwriteFileSync('src/new.ts', 'export const added = true;\\n');\n",
+      executorBody:
+        "import { writeFileSync } from 'node:fs';\nwriteFileSync('src/new.ts', 'export const added = true;\\n');\n",
     });
     const request = makeRequest(fixture, {
       mode: "write",
@@ -792,7 +885,10 @@ describe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
       },
       model: { sockHostPath: modelSock },
       dependencies: { mounts: [] },
-      executor: { executable: process.execPath, args: ["-e", observation, originalSource] },
+      executor: {
+        executable: process.execPath,
+        args: ["-e", observation, originalSource],
+      },
       limits: {
         memoryMaxBytes: 256 * 1024 * 1024,
         maxProcesses: 64,
@@ -844,7 +940,10 @@ describe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
         profile,
         { workRoot, scratchRoot },
         "capsule-test.scope",
-        { executable: process.execPath, args: ["-e", observation, originalSource] },
+        {
+          executable: process.execPath,
+          args: ["-e", observation, originalSource],
+        },
       ),
     );
     expect(check.status, check.stderr).toBe(0);

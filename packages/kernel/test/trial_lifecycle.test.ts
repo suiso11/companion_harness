@@ -977,7 +977,12 @@ describe("lifecycle: durable outcome projection for the session surface", () => 
         doneClaim.exec,
         {
           detail: "bridge-exit:0",
-          observation: obsGone(501, "boot-proj-done", "5011", NOW + 11) as never,
+          observation: obsGone(
+            501,
+            "boot-proj-done",
+            "5011",
+            NOW + 11,
+          ) as never,
           result: {
             taskHash: doneClaim.req.taskHash as string,
             exitCode: 0,
@@ -988,17 +993,17 @@ describe("lifecycle: durable outcome projection for the session surface", () => 
         },
         NOW + 11,
       );
-      expect(repo.readTrialWorkerOutcome(sessionId, doneClaim.exec)).toMatchObject(
-        {
-          status: "consumed",
-          recorded: true,
-          authorized: true,
-          succeeded: true,
-          quiescent: false,
-          detail: "bridge-exit:0",
-          summary: "bridge-exit:0",
-        },
-      );
+      expect(
+        repo.readTrialWorkerOutcome(sessionId, doneClaim.exec),
+      ).toMatchObject({
+        status: "consumed",
+        recorded: true,
+        authorized: true,
+        succeeded: true,
+        quiescent: false,
+        detail: "bridge-exit:0",
+        summary: "bridge-exit:0",
+      });
 
       // A real observed failure: the row is durable but NOT authorized.
       const failedClaim = await fullClaim(
@@ -1069,22 +1074,19 @@ describe("lifecycle: durable outcome projection for the session surface", () => 
         "ws",
         NOW + 60,
       );
-      repo.recordTrialQuiescence(
-        sessionId,
-        "ws",
-        quietClaim.exec,
-        NOW + 63,
-        { workspaceAlias: "ws", reason: "frontend-gone" },
-      );
-      expect(repo.readTrialWorkerOutcome(sessionId, quietClaim.exec)).toMatchObject(
-        {
-          status: "interrupted",
-          recorded: true,
-          authorized: false,
-          succeeded: false,
-          quiescent: true,
-        },
-      );
+      repo.recordTrialQuiescence(sessionId, "ws", quietClaim.exec, NOW + 63, {
+        workspaceAlias: "ws",
+        reason: "frontend-gone",
+      });
+      expect(
+        repo.readTrialWorkerOutcome(sessionId, quietClaim.exec),
+      ).toMatchObject({
+        status: "interrupted",
+        recorded: true,
+        authorized: false,
+        succeeded: false,
+        quiescent: true,
+      });
     } finally {
       closeKernelDatabase(handle);
     }

@@ -34,39 +34,47 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  createSealedWorkspaceSnapshot,
-  verifySealedWorkspaceSnapshot,
-  type SealedWorkspaceSnapshot,
-} from "../src/autonomous_workspace.js";
+import { CompanionJournal } from "../../../scripts/pi-orch-bridge/companion-journal.mjs";
 import {
   companionScopeUnit,
   computeTaskHash,
   type TrialWireRequest,
 } from "../../../scripts/pi-orch-bridge/companion-protocol.mjs";
-import { CompanionJournal } from "../../../scripts/pi-orch-bridge/companion-journal.mjs";
 import {
   computeDependencyClosureDigest,
   computeEffectiveProfile,
   hashFileSync,
-  parseOperatorConfig,
   type OperatorConfig,
+  parseOperatorConfig,
 } from "../../../scripts/pi-orch-bridge/sealed-profile.mjs";
+import {
+  createSealedWorkspaceSnapshot,
+  type SealedWorkspaceSnapshot,
+  verifySealedWorkspaceSnapshot,
+} from "../src/autonomous_workspace.js";
 
 const GUEST = fileURLToPath(
   new URL("../../../scripts/pi-orch-bridge/pi-orch-guest.mjs", import.meta.url),
 );
 const BRIDGE = fileURLToPath(
-  new URL("../../../scripts/pi-orch-bridge/companion-bridge.mjs", import.meta.url),
+  new URL(
+    "../../../scripts/pi-orch-bridge/companion-bridge.mjs",
+    import.meta.url,
+  ),
 );
 const INSTALLED_ROOT =
-  process.env.PI_ORCH_INSTALLED_ROOT ?? "/home/molmot/pi-codex-opencode-orchestrator";
-const INSTALLED_BIN = process.env.PI_ORCH_INSTALLED_BIN ?? "/home/molmot/.local/bin";
+  process.env.PI_ORCH_INSTALLED_ROOT ??
+  "/home/molmot/pi-codex-opencode-orchestrator";
+const INSTALLED_BIN =
+  process.env.PI_ORCH_INSTALLED_BIN ?? "/home/molmot/.local/bin";
 const RUNTIME_DIR = process.env.PI_ORCH_RUNTIME_DIR ?? "/run/user/1000";
-const SESSION_BUS = process.env.PI_ORCH_SESSION_BUS ?? `unix:path=${RUNTIME_DIR}/bus`;
+const SESSION_BUS =
+  process.env.PI_ORCH_SESSION_BUS ?? `unix:path=${RUNTIME_DIR}/bus`;
 
-const README_TEXT = "# Synthetic Acceptance\n\nThe child worker read this exact synthetic README.\n";
-const WRITE_README_TEXT = "# Synthetic Acceptance\n\nWritten by the real child Pi write tool as a scoped candidate.\n";
+const README_TEXT =
+  "# Synthetic Acceptance\n\nThe child worker read this exact synthetic README.\n";
+const WRITE_README_TEXT =
+  "# Synthetic Acceptance\n\nWritten by the real child Pi write tool as a scoped candidate.\n";
 const ACCEPTANCE = process.env.PI_ORCH_ACCEPTANCE === "1";
 
 type ModelScenario = "read" | "write";
@@ -108,7 +116,14 @@ function canRun(): boolean {
   for (const path of [
     join(INSTALLED_ROOT, "scripts", "pi-orch.mjs"),
     join(INSTALLED_ROOT, "scripts", "pi_codex_orchestrator.sh"),
-    join(INSTALLED_ROOT, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js"),
+    join(
+      INSTALLED_ROOT,
+      "node_modules",
+      "@earendil-works",
+      "pi-coding-agent",
+      "dist",
+      "cli.js",
+    ),
     join(INSTALLED_BIN, "node"),
     join(INSTALLED_BIN, "omp"),
     "/usr/bin/bwrap",
@@ -154,7 +169,10 @@ function toolNamesOf(body: Record<string, unknown>): string[] {
 function messagesOf(body: Record<string, unknown>): Record<string, unknown>[] {
   const messages = body.messages;
   return Array.isArray(messages)
-    ? messages.filter((m): m is Record<string, unknown> => Boolean(m) && typeof m === "object")
+    ? messages.filter(
+        (m): m is Record<string, unknown> =>
+          Boolean(m) && typeof m === "object",
+      )
     : [];
 }
 
@@ -201,7 +219,11 @@ function sendToolCall(
   sendChunk(response, model, {}, "tool_calls");
 }
 
-function sendText(response: import("node:http").ServerResponse, model: string, text: string): void {
+function sendText(
+  response: import("node:http").ServerResponse,
+  model: string,
+  text: string,
+): void {
   sendChunk(response, model, { role: "assistant", content: text }, null);
   sendChunk(response, model, {}, "stop");
 }
@@ -217,24 +239,37 @@ async function startSyntheticModel(
       response.end(
         JSON.stringify({
           object: "list",
-          data: [{ id: "companion-current", object: "model", created: 0, owned_by: "companion-local" }],
+          data: [
+            {
+              id: "companion-current",
+              object: "model",
+              created: 0,
+              owned_by: "companion-local",
+            },
+          ],
         }),
       );
       return;
     }
     if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
       response.writeHead(404, { "content-type": "application/json" });
-      response.end(JSON.stringify({ error: { message: "synthetic route not allowed" } }));
+      response.end(
+        JSON.stringify({ error: { message: "synthetic route not allowed" } }),
+      );
       return;
     }
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
-    const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<
+      string,
+      unknown
+    >;
     const toolNames = toolNamesOf(body);
     const messages = messagesOf(body);
     const toolMessages = messages.filter((message) => message.role === "tool");
     const parent = toolNames.includes("opencode_task");
-    const model = typeof body.model === "string" ? body.model : "companion-current";
+    const model =
+      typeof body.model === "string" ? body.model : "companion-current";
     const captured: CapturedRequest = { parent, toolNames, body, toolMessages };
     if (parent && toolMessages.length > 0) {
       const match = JSON.stringify(toolMessages).match(/oc-\d+/);
@@ -252,7 +287,8 @@ async function startSyntheticModel(
         // Parent OMP advertises opencode_task -> make the real extension
         // execute a real delegated read or write task.
         sendToolCall(response, model, "call-parent-task", "opencode_task", {
-          name: scenario === "write" ? "readme-child-write" : "readme-child-smoke",
+          name:
+            scenario === "write" ? "readme-child-write" : "readme-child-smoke",
           mode: scenario === "write" ? "write" : "read_only",
           objective:
             scenario === "write"
@@ -284,7 +320,9 @@ async function startSyntheticModel(
         });
       } else {
         // Child Pi worker advertises only read -> execute the real read tool.
-        sendToolCall(response, model, "call-child-read", "read", { path: "README.md" });
+        sendToolCall(response, model, "call-child-read", "read", {
+          path: "README.md",
+        });
       }
     } else {
       sendText(
@@ -298,7 +336,10 @@ async function startSyntheticModel(
           files: ["README.md"],
           findings:
             scenario === "write"
-              ? ["README candidate: # Synthetic Acceptance", "write tool executed"]
+              ? [
+                  "README candidate: # Synthetic Acceptance",
+                  "write tool executed",
+                ]
               : ["README heading: # Synthetic Acceptance"],
           unresolved: [],
         }),
@@ -341,7 +382,10 @@ async function makeFixture(modelSocket: string): Promise<Fixture> {
   write(join(pristine, "README.md"), "# pristine deployment base\n");
 
   const depsRoot = join(dir, "deps");
-  write(join(depsRoot, "node_modules", "dep", "index.js"), "module.exports = 'synthetic-dep';\n");
+  write(
+    join(depsRoot, "node_modules", "dep", "index.js"),
+    "module.exports = 'synthetic-dep';\n",
+  );
   const depsManifest = join(dir, "deps-manifest.json");
   write(depsManifest, `${JSON.stringify({ schemaVersion: 1, entries: [] })}\n`);
 
@@ -371,7 +415,11 @@ async function makeFixture(modelSocket: string): Promise<Fixture> {
     systemdRunRealpath: realpathSync("/usr/bin/systemd-run"),
     systemctlRealpath: realpathSync("/usr/bin/systemctl"),
     piOrchLauncherRealpath: launcher,
-    piOrchShellRealpath: join(launcherRoot, "scripts", "pi_codex_orchestrator.sh"),
+    piOrchShellRealpath: join(
+      launcherRoot,
+      "scripts",
+      "pi_codex_orchestrator.sh",
+    ),
     piOrchConfigRealpath: join(launcherRoot, "scripts", "omp-orchestrator.yml"),
     piOrchExtensionRealpath: join(
       launcherRoot,
@@ -423,7 +471,11 @@ async function makeFixture(modelSocket: string): Promise<Fixture> {
         },
       },
       runtime,
-      model: { route: "synthetic-local", sockHostPath: modelSocket, externalConsent: false },
+      model: {
+        route: "synthetic-local",
+        sockHostPath: modelSocket,
+        externalConsent: false,
+      },
       limits: {
         maxDurationMs: 120_000,
         maxModelCalls: 8,
@@ -445,8 +497,14 @@ async function makeFixture(modelSocket: string): Promise<Fixture> {
       dependencies: {
         root: depsRoot,
         manifestPath: depsManifest,
-        digest: computeDependencyClosureDigest(depsRoot, 64 * 1024 * 1024).digest,
-        mounts: [{ source: join(depsRoot, "node_modules"), guestPath: "/deps/node_modules" }],
+        digest: computeDependencyClosureDigest(depsRoot, 64 * 1024 * 1024)
+          .digest,
+        mounts: [
+          {
+            source: join(depsRoot, "node_modules"),
+            guestPath: "/deps/node_modules",
+          },
+        ],
       },
     },
   };
@@ -457,10 +515,20 @@ async function makeFixture(modelSocket: string): Promise<Fixture> {
   const configPath = join(dir, "operator.json");
   write(configPath, `${JSON.stringify(config)}\n`);
 
-  return { dir, configPath, config, snapshot, sourceReadme: README_TEXT, sourceRoot };
+  return {
+    dir,
+    configPath,
+    config,
+    snapshot,
+    sourceReadme: README_TEXT,
+    sourceRoot,
+  };
 }
 
-function makeRequest(fixture: Fixture, mode: "read_only" | "write" = "read_only"): TrialWireRequest {
+function makeRequest(
+  fixture: Fixture,
+  mode: "read_only" | "write" = "read_only",
+): TrialWireRequest {
   const unsigned = {
     version: 1 as const,
     executionId: randomUUID(),
@@ -468,7 +536,10 @@ function makeRequest(fixture: Fixture, mode: "read_only" | "write" = "read_only"
     sourceRevision: fixture.config.active.sourceRevision,
     workspaceAlias: "synthetic-real-pi",
     mode,
-    purpose: { statement: "real pi-orch acceptance smoke", scope: "synthetic README only" },
+    purpose: {
+      statement: "real pi-orch acceptance smoke",
+      scope: "synthetic README only",
+    },
     objective:
       mode === "write"
         ? "Delegate one scoped README write through the installed pi-orch extension."
@@ -496,16 +567,25 @@ interface BridgeRun {
   readonly stderr: string;
 }
 
-async function runBridge(fixture: Fixture, request: TrialWireRequest): Promise<BridgeRun> {
-  const child = spawn(process.execPath, [BRIDGE, "--config", fixture.configPath], {
-    stdio: ["pipe", "pipe", "pipe", "pipe"],
-    env: {
-      ...process.env,
-      XDG_RUNTIME_DIR: RUNTIME_DIR,
-      DBUS_SESSION_BUS_ADDRESS: SESSION_BUS,
-      ...(process.env.PI_ORCH_DEBUG_LOG ? { PI_ORCH_DEBUG_LOG: process.env.PI_ORCH_DEBUG_LOG } : {}),
+async function runBridge(
+  fixture: Fixture,
+  request: TrialWireRequest,
+): Promise<BridgeRun> {
+  const child = spawn(
+    process.execPath,
+    [BRIDGE, "--config", fixture.configPath],
+    {
+      stdio: ["pipe", "pipe", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        XDG_RUNTIME_DIR: RUNTIME_DIR,
+        DBUS_SESSION_BUS_ADDRESS: SESSION_BUS,
+        ...(process.env.PI_ORCH_DEBUG_LOG
+          ? { PI_ORCH_DEBUG_LOG: process.env.PI_ORCH_DEBUG_LOG }
+          : {}),
+      },
     },
-  });
+  );
   let stdout = "";
   let stderr = "";
   child.stdout?.on("data", (chunk) => {
@@ -546,7 +626,12 @@ interface TrialWireResultShape {
   taskHash: string;
   report: { summary: string; unresolved: string[]; findings: string[] };
   evidence: {
-    checks: { id: string; exitCode: number | null; timedOut: boolean; outputMatched: boolean }[];
+    checks: {
+      id: string;
+      exitCode: number | null;
+      timedOut: boolean;
+      outputMatched: boolean;
+    }[];
     artifact?: { sha256: string; entryCount: number; bytes: number };
   };
 }
@@ -582,7 +667,12 @@ describe("real installed pi-orch acceptance", { timeout: 200_000 }, () => {
         taskHash: request.taskHash,
       });
       expect(result.evidence.checks).toEqual([
-        { id: "readme-check", exitCode: 0, timedOut: false, outputMatched: true },
+        {
+          id: "readme-check",
+          exitCode: 0,
+          timedOut: false,
+          outputMatched: true,
+        },
       ]);
       expect(result.evidence.artifact).toBeDefined();
       expect(result.report.findings.join("\n")).toContain("opencode_task");
@@ -592,12 +682,17 @@ describe("real installed pi-orch acceptance", { timeout: 200_000 }, () => {
       const parentRequests = model.requests.filter((entry) => entry.parent);
       const childRequests = model.requests.filter((entry) => !entry.parent);
       expect(parentRequests.length).toBe(2);
-      expect(childRequests.length, JSON.stringify(parentRequests[1]?.toolMessages)).toBe(2);
+      expect(
+        childRequests.length,
+        JSON.stringify(parentRequests[1]?.toolMessages),
+      ).toBe(2);
       expect(parentRequests[0]?.toolNames).toContain("opencode_task");
       expect(childRequests[0]?.toolNames).toContain("read");
       expect(childRequests[0]?.toolNames).not.toContain("opencode_task");
 
-      const parentToolCall = JSON.stringify(parentRequests[0]?.body.messages ?? []);
+      const parentToolCall = JSON.stringify(
+        parentRequests[0]?.body.messages ?? [],
+      );
       expect(parentToolCall).toContain("opencode_task");
       expect(parentToolCall).toContain("README.md");
       const parentFinal = parentRequests[1];
@@ -608,26 +703,35 @@ describe("real installed pi-orch acceptance", { timeout: 200_000 }, () => {
 
       // The child read result is the actual README bytes, not a fabricated
       // observation. This is the decisive child tool-execution evidence.
-      const childToolResult = JSON.stringify(childRequests[1]?.toolMessages ?? []);
+      const childToolResult = JSON.stringify(
+        childRequests[1]?.toolMessages ?? [],
+      );
       expect(childToolResult).toContain("# Synthetic Acceptance");
       expect(childToolResult).toContain("read");
 
       // The original synthetic source and the sealed snapshot are unchanged.
-      expect(readFileSync(join(fixture.sourceRoot, "README.md"), "utf8")).toBe(fixture.sourceReadme);
+      expect(readFileSync(join(fixture.sourceRoot, "README.md"), "utf8")).toBe(
+        fixture.sourceReadme,
+      );
       const after = await verifySealedWorkspaceSnapshot(fixture.snapshot, {
         expectedManifestDigest: fixture.snapshot.manifestDigest,
       });
       expect(after.ok).toBe(true);
 
       // Journal reflects the exact request identity and a verified done state.
-      const journal = new CompanionJournal(fixture.config.stateDir, fixture.config.storage);
+      const journal = new CompanionJournal(
+        fixture.config.stateDir,
+        fixture.config.storage,
+      );
       const view = journal.inspect(request.executionId);
       const artifact = journal.readArtifact(request.executionId);
       journal.close();
       expect(view?.state).toBe("done");
       expect(view?.scopeUnit).toBe(companionScopeUnit(request));
       expect(artifact?.sha256).toBe(result.evidence.artifact?.sha256);
-      expect(sha256(artifact?.bytes.toString("utf8") ?? "")).toBe(result.evidence.artifact?.sha256);
+      expect(sha256(artifact?.bytes.toString("utf8") ?? "")).toBe(
+        result.evidence.artifact?.sha256,
+      );
     },
   );
 
@@ -661,7 +765,12 @@ describe("real installed pi-orch acceptance", { timeout: 200_000 }, () => {
         taskHash: request.taskHash,
       });
       expect(result.evidence.checks).toEqual([
-        { id: "readme-check", exitCode: 0, timedOut: false, outputMatched: true },
+        {
+          id: "readme-check",
+          exitCode: 0,
+          timedOut: false,
+          outputMatched: true,
+        },
       ]);
       expect(result.evidence.artifact).toMatchObject({ entryCount: 1 });
       expect(result.report.findings).toContain("modify README.md");
@@ -669,20 +778,29 @@ describe("real installed pi-orch acceptance", { timeout: 200_000 }, () => {
       const parentRequests = model.requests.filter((entry) => entry.parent);
       const childRequests = model.requests.filter((entry) => !entry.parent);
       expect(parentRequests.length).toBe(2);
-      expect(childRequests.length, JSON.stringify(parentRequests[1]?.toolMessages)).toBe(2);
+      expect(
+        childRequests.length,
+        JSON.stringify(parentRequests[1]?.toolMessages),
+      ).toBe(2);
       expect(parentRequests[0]?.toolNames).toContain("opencode_task");
       expect(childRequests[0]?.toolNames).toContain("write");
       expect(childRequests[0]?.toolNames).not.toContain("opencode_task");
-      expect(JSON.stringify(childRequests[0]?.body.messages ?? [])).toContain("Mode: write");
+      expect(JSON.stringify(childRequests[0]?.body.messages ?? [])).toContain(
+        "Mode: write",
+      );
       const parentFinal = parentRequests[1];
       expect(parentFinal?.workerId).toMatch(/^oc-\d+$/);
       expect(JSON.stringify(parentFinal?.toolMessages ?? [])).toContain(
         parentFinal?.workerId as string,
       );
-      expect(JSON.stringify(childRequests[1]?.toolMessages ?? [])).toContain("README.md");
+      expect(JSON.stringify(childRequests[1]?.toolMessages ?? [])).toContain(
+        "README.md",
+      );
 
       // The original synthetic source and the sealed snapshot are unchanged.
-      expect(readFileSync(join(fixture.sourceRoot, "README.md"), "utf8")).toBe(fixture.sourceReadme);
+      expect(readFileSync(join(fixture.sourceRoot, "README.md"), "utf8")).toBe(
+        fixture.sourceReadme,
+      );
       const after = await verifySealedWorkspaceSnapshot(fixture.snapshot, {
         expectedManifestDigest: fixture.snapshot.manifestDigest,
       });
@@ -690,16 +808,23 @@ describe("real installed pi-orch acceptance", { timeout: 200_000 }, () => {
 
       // The journal artifact records the exact candidate/base hashes and the
       // retained candidate bytes are those exact validated bytes.
-      const journal = new CompanionJournal(fixture.config.stateDir, fixture.config.storage);
+      const journal = new CompanionJournal(
+        fixture.config.stateDir,
+        fixture.config.storage,
+      );
       const view = journal.inspect(request.executionId);
       const artifact = journal.readArtifact(request.executionId);
       journal.close();
       expect(view?.state).toBe("done");
       expect(view?.scopeUnit).toBe(companionScopeUnit(request));
       expect(artifact?.sha256).toBe(result.evidence.artifact?.sha256);
-      expect(sha256(artifact?.bytes.toString("utf8") ?? "")).toBe(result.evidence.artifact?.sha256);
+      expect(sha256(artifact?.bytes.toString("utf8") ?? "")).toBe(
+        result.evidence.artifact?.sha256,
+      );
 
-      const artifactDoc = JSON.parse(artifact?.bytes.toString("utf8") ?? "{}") as {
+      const artifactDoc = JSON.parse(
+        artifact?.bytes.toString("utf8") ?? "{}",
+      ) as {
         changes: {
           path: string;
           kind: string;
@@ -710,7 +835,8 @@ describe("real installed pi-orch acceptance", { timeout: 200_000 }, () => {
       };
       expect(artifactDoc.changes).toHaveLength(1);
       const [change] = artifactDoc.changes;
-      if (change === undefined) throw new Error("candidate change missing from artifact");
+      if (change === undefined)
+        throw new Error("candidate change missing from artifact");
       expect(change).toMatchObject({
         path: "README.md",
         kind: "modify",
@@ -727,7 +853,9 @@ describe("real installed pi-orch acceptance", { timeout: 200_000 }, () => {
       );
       const candidateBytes = readFileSync(candidatePath);
       expect(candidateBytes.toString("utf8")).toBe(WRITE_README_TEXT);
-      expect(sha256(candidateBytes.toString("utf8"))).toBe(change.candidateSha256);
+      expect(sha256(candidateBytes.toString("utf8"))).toBe(
+        change.candidateSha256,
+      );
     },
   );
 });

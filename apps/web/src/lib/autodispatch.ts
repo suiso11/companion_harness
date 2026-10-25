@@ -149,9 +149,7 @@ function isOperation(value: unknown): value is Operation {
 }
 
 function readInt(value: unknown, min = 0): number | null {
-  return typeof value === "number" &&
-    Number.isInteger(value) &&
-    value >= min
+  return typeof value === "number" && Number.isInteger(value) && value >= min
     ? value
     : null;
 }
@@ -344,7 +342,9 @@ function readExecution(value: unknown): DispatchExecution | null {
 }
 
 /** Parse the actual GET /api/sessions/:id/autodispatch body. */
-export function parseAutodispatchStatus(value: unknown): AutodispatchStatus | null {
+export function parseAutodispatchStatus(
+  value: unknown,
+): AutodispatchStatus | null {
   if (!isRecord(value) || value.enabled !== true) return null;
   const caps = readCaps(value.caps);
   if (
@@ -408,7 +408,9 @@ export function parseControl(value: unknown): ControlView | null {
 }
 
 /** Read the latest committed `user_text` turn with a selected completed run. */
-export function selectLatestCompletedUserTurn(value: unknown): SourceAnchor | null {
+export function selectLatestCompletedUserTurn(
+  value: unknown,
+): SourceAnchor | null {
   if (!isRecord(value) || !Array.isArray(value.items)) return null;
   let best: SourceAnchor | null = null;
   for (const entry of value.items) {
@@ -461,7 +463,8 @@ export function parseTrialDetail(value: unknown): TrialDetail | null {
     // A durable outcome row is authoritative. `recorded === false` means the
     // worker has not reported yet (the legacy shape has no row flags): keep
     // outcome null so the panel shows 結果待ち instead of a false failure.
-    const recorded = typeof result.recorded === "boolean" ? result.recorded : true;
+    const recorded =
+      typeof result.recorded === "boolean" ? result.recorded : true;
     if (
       recorded &&
       typeof result.authorized === "boolean" &&
@@ -595,7 +598,10 @@ export function capsLines(caps: PolicyCaps): CapsLine[] {
     { label: "出力上限", value: formatBytes(caps.maxOutputBytes) },
     { label: "モデル呼び出し", value: `${caps.maxModelCalls} 回/実行` },
     { label: "出力トークン", value: `${caps.maxOutputTokens}/呼び出し` },
-    { label: "1呼び出し時間", value: `${Math.round(caps.perCallTimeoutMs / 1000)} 秒` },
+    {
+      label: "1呼び出し時間",
+      value: `${Math.round(caps.perCallTimeoutMs / 1000)} 秒`,
+    },
     { label: "リクエスト上限", value: formatBytes(caps.maxRequestBytes) },
     { label: "応答上限", value: formatBytes(caps.maxResponseBytes) },
     { label: "同時モデル", value: `${caps.maxConcurrent}` },

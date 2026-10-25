@@ -25,8 +25,9 @@ import {
   migrateKernelDatabase,
   openKernelDatabase,
 } from "@companion/kernel";
+import type { ModelGateway } from "@companion/model-local";
 import { describe, expect, it } from "vitest";
-import type { AutodispatchConfig } from "../src/config.js";
+import { verifySealedWorkspaceSnapshot } from "../../../packages/kernel/src/autonomous_workspace.js";
 import {
   cleanupTerminalAutodispatchMaterialization,
   createAutodispatchMaterializer,
@@ -39,16 +40,15 @@ import {
   createAutodispatchService,
 } from "../src/autodispatch_service.js";
 import { createBackgroundResourceGate } from "../src/background_resource.js";
+import type { AutodispatchConfig } from "../src/config.js";
+import { createCollectingLogger } from "../src/logger.js";
 import { TrialModelRelay } from "../src/trial_model_relay.js";
 import {
+  TrialRunner,
   type TrialRunnerObserverFns,
   type TrialRunnerRelay,
   type TrialRunnerSpawn,
-  TrialRunner,
 } from "../src/trial_runner.js";
-import { createCollectingLogger } from "../src/logger.js";
-import type { ModelGateway } from "@companion/model-local";
-import { verifySealedWorkspaceSnapshot } from "../../../packages/kernel/src/autonomous_workspace.js";
 
 const NOW = 1_760_000_000_000;
 const CAPS: AutodispatchConfig["caps"] = {
@@ -122,15 +122,29 @@ function makeFixture(): Fixture {
   const runtimeDir = mkdtempSync(join(tmpdir(), "ad-rt-"));
   chmodSync(runtimeDir, 0o700);
   const executor = join(dir, "bin", "executor.mjs");
-  write(executor, `#!${process.execPath}\nconsole.log('fixed executor');\n`, 0o700);
+  write(
+    executor,
+    `#!${process.execPath}\nconsole.log('fixed executor');\n`,
+    0o700,
+  );
   const check = join(dir, "bin", "check.mjs");
   write(check, `#!${process.execPath}\nconsole.log('check-ok');\n`, 0o700);
   const depSource = join(dir, "dep-source");
   write(
-    join(depSource, "node_modules", "better-sqlite3", "build", "Release", "better_sqlite3.node"),
+    join(
+      depSource,
+      "node_modules",
+      "better-sqlite3",
+      "build",
+      "Release",
+      "better_sqlite3.node",
+    ),
     "native-placeholder",
   );
-  write(join(depSource, "node_modules", "better-sqlite3", "package.json"), '{"name":"better-sqlite3"}\n');
+  write(
+    join(depSource, "node_modules", "better-sqlite3", "package.json"),
+    '{"name":"better-sqlite3"}\n',
+  );
   const config: AutodispatchConfig = {
     enabled: true,
     workspaceAlias: "companion-harness",
@@ -252,9 +266,9 @@ describe("autodispatch materializer", () => {
       expect(m.state.socketHostPath).not.toContain(
         join(fx.stateDir, "jobs", EXECUTION_ID),
       );
-      expect(Buffer.byteLength(m.state.socketHostPath, "utf8")).toBeLessThanOrEqual(
-        107,
-      );
+      expect(
+        Buffer.byteLength(m.state.socketHostPath, "utf8"),
+      ).toBeLessThanOrEqual(107);
       expect(m.state.socketDir.startsWith(fx.runtimeDir)).toBe(true);
       expect(statSync(m.state.socketDir).mode & 0o077).toBe(0);
       expect(m.state.dependencyDigest).toMatch(/^[0-9a-f]{64}$/);
@@ -268,9 +282,8 @@ describe("autodispatch materializer", () => {
           manifest: JSON.parse(readFileSync(m.state.manifestPath, "utf8"))
             .entries,
           manifestDigest: m.state.sourceManifestDigest,
-          sourceIdentity: JSON.parse(
-            readFileSync(m.state.manifestPath, "utf8"),
-          ).sourceIdentity,
+          sourceIdentity: JSON.parse(readFileSync(m.state.manifestPath, "utf8"))
+            .sourceIdentity,
           maxSourceBytes: 256 * 1024 * 1024,
           maxArtifactBytes: 256 * 1024,
           maxFiles: 20_000,
@@ -338,9 +351,9 @@ describe("autodispatch materializer", () => {
         "model.sock",
       );
       expect(Buffer.byteLength(former, "utf8")).toBeGreaterThan(107);
-      expect(Buffer.byteLength(m.state.socketHostPath, "utf8")).toBeLessThanOrEqual(
-        107,
-      );
+      expect(
+        Buffer.byteLength(m.state.socketHostPath, "utf8"),
+      ).toBeLessThanOrEqual(107);
       expect(m.state.runtimeDir).toBe(fx.runtimeDir);
       expect(dirname(m.state.socketHostPath)).toBe(m.state.socketDir);
       expect(m.state.socketHostPath.startsWith(longStateDir)).toBe(false);
@@ -428,7 +441,10 @@ describe("autodispatch materializer", () => {
       const tamperedSnapshot = await verifyAutodispatchMaterialization(m);
       expect(tamperedSnapshot.ok).toBe(false);
 
-      const result2 = await materializerFor({ ...fx, config: fx.config }).prepare({
+      const result2 = await materializerFor({
+        ...fx,
+        config: fx.config,
+      }).prepare({
         plan: PLAN,
         policy: POLICY,
         executionId: "99999999-9999-4999-8999-999999999999",
@@ -742,7 +758,12 @@ describe("autodispatch materializer + existing ledger/runner resolver", () => {
         stored?.materializationJson as string,
       ) as {
         profile: { timeoutMs: number };
-        state: { jobRoot: string; runDir: string; snapshotRoot: string; dependencyRoot: string };
+        state: {
+          jobRoot: string;
+          runDir: string;
+          snapshotRoot: string;
+          dependencyRoot: string;
+        };
       };
       expect(materialization.profile.timeoutMs).toBe(12_345);
 
@@ -764,8 +785,7 @@ describe("autodispatch materializer + existing ledger/runner resolver", () => {
                 // Exact unit bound: the wire budget below must match it.
                 runtimeMaxUsec: 12_345_000n,
               },
-        readIdentity: async () =>
-          exited.current ? "gone" : { ...identity },
+        readIdentity: async () => (exited.current ? "gone" : { ...identity }),
       };
       const relayFactory = (sockPath: string): TrialRunnerRelay => ({
         path: sockPath,
@@ -787,7 +807,12 @@ describe("autodispatch materializer + existing ledger/runner resolver", () => {
         child.stdin = { write() {}, end() {} };
         child.stdout = new EventEmitter();
         child.stderr = new EventEmitter();
-        child.stdio = [child.stdin, child.stdout, child.stderr, { destroy() {} }];
+        child.stdio = [
+          child.stdin,
+          child.stdout,
+          child.stderr,
+          { destroy() {} },
+        ];
         child.kill = () => {
           exited.current = true;
           child.emit("exit", 1, null);
@@ -834,7 +859,11 @@ describe("autodispatch materializer + existing ledger/runner resolver", () => {
             baseUrl: "http://127.0.0.1:9",
             chatUrl: "http://127.0.0.1:9/v1/chat/completions",
             async chat() {
-              return { text: "stub", toolCalls: [], stopReason: "stop" as const };
+              return {
+                text: "stub",
+                toolCalls: [],
+                stopReason: "stop" as const,
+              };
             },
           } as unknown as ModelGateway,
           observe: {
@@ -907,7 +936,11 @@ describe("autodispatch materializer + existing ledger/runner resolver", () => {
         now: NOW,
       });
       if (!active.ok) throw new Error("prepare failed");
-      const pruned = pruneAutodispatchMaterializations(repo, fx.config, NOW + 1);
+      const pruned = pruneAutodispatchMaterializations(
+        repo,
+        fx.config,
+        NOW + 1,
+      );
       expect(pruned.retained).toBe(1);
       expect(pruned.prepared).toBe(1);
       expect(existsSync(active.materialization.state.snapshotRoot)).toBe(true);
@@ -932,8 +965,12 @@ describe("autodispatch materializer + existing ledger/runner resolver", () => {
       cleanupTerminalAutodispatchMaterialization(forged, NOW + 3);
       // Idempotent repeat (already removed heavy roots).
       cleanupTerminalAutodispatchMaterialization(forged, NOW + 4);
-      expect(existsSync(terminal.materialization.state.snapshotRoot)).toBe(false);
-      expect(existsSync(join(sharedDepot, "node_modules", "pkg", "index.js"))).toBe(true);
+      expect(existsSync(terminal.materialization.state.snapshotRoot)).toBe(
+        false,
+      );
+      expect(
+        existsSync(join(sharedDepot, "node_modules", "pkg", "index.js")),
+      ).toBe(true);
       expect(
         JSON.parse(
           readFileSync(
@@ -947,5 +984,4 @@ describe("autodispatch materializer + existing ledger/runner resolver", () => {
       fx.cleanup();
     }
   });
-
 });

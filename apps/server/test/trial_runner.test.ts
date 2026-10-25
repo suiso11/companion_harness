@@ -2210,12 +2210,11 @@ describe("trial_runner", () => {
       });
       const originalClaim = repo.claimTrial.bind(repo);
       let claims = 0;
-      (repo as unknown as { claimTrial: typeof repo.claimTrial }).claimTrial = ((
-        ...args: Parameters<typeof repo.claimTrial>
-      ) => {
-        claims += 1;
-        return originalClaim(...args);
-      }) as typeof repo.claimTrial;
+      (repo as unknown as { claimTrial: typeof repo.claimTrial }).claimTrial =
+        ((...args: Parameters<typeof repo.claimTrial>) => {
+          claims += 1;
+          return originalClaim(...args);
+        }) as typeof repo.claimTrial;
 
       const exited = { current: false };
       const identity = {
@@ -2288,7 +2287,7 @@ describe("trial_runner", () => {
     const { handle, repo, sessionId } = await makeKernel();
     try {
       queueGrant(repo, sessionId, "b1", "ws");
-      let fail = true;
+      const fail = true;
       let resolverCalls = 0;
       const { logger } = createCollectingLogger("debug");
       const dir = mkdtempSync(join(tmpdir(), "trial-run-"));

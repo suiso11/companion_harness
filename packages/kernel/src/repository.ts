@@ -214,9 +214,13 @@ import {
   createActionExecutionService,
 } from "./action_executions.js";
 import {
+  type ActionProposalStager,
+  type CommittedProposal,
+  createActionProposalStager,
+} from "./action_proposals.js";
+import {
   type AuthorizeWithinPolicyOptions,
   type AutodispatchLimits,
-  type CreateStandingPolicyInput,
   authorizeWithinPolicy as autodispatchAuthorize,
   createDispatchPlan as autodispatchCreatePlan,
   createStandingPolicy as autodispatchCreatePolicy,
@@ -224,18 +228,14 @@ import {
   listDispatchPlans as autodispatchListPlans,
   listStandingPolicies as autodispatchListPolicies,
   readDispatchExecution as autodispatchReadExecution,
+  readIntentHistory as autodispatchReadIntentHistory,
   readDispatchMaterialization as autodispatchReadMaterialization,
   readDispatchPlan as autodispatchReadPlan,
-  readIntentHistory as autodispatchReadIntentHistory,
-  readRunSessionId as autodispatchReadRunSessionId,
   readStandingPolicy as autodispatchReadPolicy,
+  readRunSessionId as autodispatchReadRunSessionId,
   revokeStandingPolicy as autodispatchRevokePolicy,
+  type CreateStandingPolicyInput,
 } from "./autodispatch.js";
-import {
-  type ActionProposalStager,
-  type CommittedProposal,
-  createActionProposalStager,
-} from "./action_proposals.js";
 import {
   type AutonomyKeyOptions,
   applyAutonomyRestartFence,

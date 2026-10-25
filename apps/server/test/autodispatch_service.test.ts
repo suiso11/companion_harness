@@ -14,23 +14,23 @@ import {
   openKernelDatabase,
 } from "@companion/kernel";
 import { describe, expect, it } from "vitest";
-import { type AutodispatchConfig } from "../src/config.js";
-import {
-  type AutodispatchChatGateway,
-  type AutodispatchPlanProposal,
-  type AutodispatchPlanner,
-  type AutodispatchServiceDeps,
-  createAutodispatchService,
-} from "../src/autodispatch_service.js";
 import type {
   AutodispatchMaterialization,
   AutodispatchMaterializer,
 } from "../src/autodispatch_materializer.js";
 import {
+  type AutodispatchChatGateway,
+  type AutodispatchPlanner,
+  type AutodispatchPlanProposal,
+  type AutodispatchServiceDeps,
+  createAutodispatchService,
+} from "../src/autodispatch_service.js";
+import {
   BACKGROUND_OWNER_AUTODISPATCH,
   type BackgroundResourceGate,
   createBackgroundResourceGate,
 } from "../src/background_resource.js";
+import type { AutodispatchConfig } from "../src/config.js";
 
 const FP = "b".repeat(64);
 const REV = "a".repeat(40);
@@ -115,11 +115,9 @@ function completeTurn(
     { key: randomUUID(), now },
   );
   repo.startRun(posted.body.run.id, { now: now + 1 });
-  repo.completeRun(
-    posted.body.run.id,
-    { version: 1, text: "ok" } as never,
-    { now: now + 2 },
-  );
+  repo.completeRun(posted.body.run.id, { version: 1, text: "ok" } as never, {
+    now: now + 2,
+  });
   return { turnId: posted.body.turnId, runId: posted.body.run.id };
 }
 
@@ -198,9 +196,7 @@ async function waitFor(
   throw new Error(`timed out waiting for ${label}`);
 }
 
-async function waitForGateRelease(
-  gate: BackgroundResourceGate,
-): Promise<void> {
+async function waitForGateRelease(gate: BackgroundResourceGate): Promise<void> {
   await waitFor(() => {
     const reservation = gate.tryAcquire(BACKGROUND_OWNER_AUTODISPATCH);
     if (reservation === null) return false;

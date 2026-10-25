@@ -24,40 +24,40 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
-  readFileSync,
   readdirSync,
+  readFileSync,
   realpathSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
+import type { TrialProfileSnapshot } from "@companion/contracts";
 import type {
   DispatchPlanView,
   KernelRepository,
   StandingPolicyView,
 } from "@companion/kernel";
-import type { TrialProfileSnapshot } from "@companion/contracts";
-import { canonicalize } from "../../../scripts/pi-orch-bridge/companion-protocol.mjs";
-import {
-  prepareDependencyClosure,
-  prepareExecutorProfile,
-  type DependencyClosureResult,
-} from "../../../scripts/pi-orch-bridge/execution-profile.mjs";
-import {
-  computeEffectiveProfile,
-  loadSealedSnapshot,
-  parseOperatorConfig,
-  verifyDependencyClosure,
-  type OperatorConfig,
-} from "../../../scripts/pi-orch-bridge/sealed-profile.mjs";
 import {
   createSealedWorkspaceSnapshot,
   type SealedWorkspaceSnapshot,
   verifySealedWorkspaceSnapshot,
 } from "../../../packages/kernel/src/autonomous_workspace.js";
-import type { AutodispatchConfig } from "./config.js";
+import { canonicalize } from "../../../scripts/pi-orch-bridge/companion-protocol.mjs";
+import {
+  type DependencyClosureResult,
+  prepareDependencyClosure,
+  prepareExecutorProfile,
+} from "../../../scripts/pi-orch-bridge/execution-profile.mjs";
+import {
+  computeEffectiveProfile,
+  loadSealedSnapshot,
+  type OperatorConfig,
+  parseOperatorConfig,
+  verifyDependencyClosure,
+} from "../../../scripts/pi-orch-bridge/sealed-profile.mjs";
 import { verifyAutodispatchDependency } from "./autodispatch_dependencies.js";
+import type { AutodispatchConfig } from "./config.js";
 
 const SCHEMA_VERSION = 1;
 const MATERIALIZATION_DIGEST_PATTERN = /^[0-9a-f]{64}$/;
@@ -194,7 +194,8 @@ function readRetention(jobRoot: string): RetentionRecord | null {
   } catch {
     return null;
   }
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw))
+    return null;
   const rec = raw as Record<string, unknown>;
   if (rec.schemaVersion !== 1) return null;
   if (
@@ -216,7 +217,9 @@ function readRetention(jobRoot: string): RetentionRecord | null {
 }
 
 function writeRetention(jobRoot: string, record: RetentionRecord): void {
-  writeFileSync(retentionPath(jobRoot), JSON.stringify(record), { mode: 0o600 });
+  writeFileSync(retentionPath(jobRoot), JSON.stringify(record), {
+    mode: 0o600,
+  });
   chmodSync(retentionPath(jobRoot), 0o600);
 }
 
@@ -225,9 +228,7 @@ export function readAutodispatchRetentionStatus(
   jobRoot: string,
 ): { status: ArtifactRetentionStatus; createdAt: number } | null {
   const rec = readRetention(jobRoot);
-  return rec === null
-    ? null
-    : { status: rec.status, createdAt: rec.createdAt };
+  return rec === null ? null : { status: rec.status, createdAt: rec.createdAt };
 }
 
 /** Make a private owned tree deletable without following symlinks. */
@@ -329,7 +330,8 @@ export function cleanupTerminalAutodispatchMaterialization(
   now?: number,
 ): void {
   try {
-    if (process.env.DEBUG_CLEANUP === "1") console.error("cleanup-start", materialization.state.jobRoot);
+    if (process.env.DEBUG_CLEANUP === "1")
+      console.error("cleanup-start", materialization.state.jobRoot);
     const jobRoot = materialization.state.jobRoot;
     const st = lstatSync(jobRoot);
     if (st.isSymbolicLink() || !st.isDirectory()) return;
@@ -383,7 +385,8 @@ export function pruneAutodispatchMaterializations(
   let expired = 0;
   let retained = 0;
   let prepared = 0;
-  const cleanedRecords: Array<{ jobRoot: string; record: RetentionRecord }> = [];
+  const cleanedRecords: Array<{ jobRoot: string; record: RetentionRecord }> =
+    [];
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     const jobRoot = join(jobsRoot, entry.name);
@@ -477,7 +480,10 @@ function sha256Canonical(value: unknown): string {
 
 function isInside(child: string, parent: string): boolean {
   const rel = relative(parent, child);
-  return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
+  return (
+    rel === "" ||
+    (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel))
+  );
 }
 
 function canonicalAbsolute(value: string, what: string): string {
@@ -604,7 +610,10 @@ function blocked(
   return { ok: false, code, reason };
 }
 
-function policyScopes(config: AutodispatchConfig, plan: DispatchPlanView): string[] {
+function policyScopes(
+  config: AutodispatchConfig,
+  plan: DispatchPlanView,
+): string[] {
   const scopes = new Set<string>();
   for (const scope of config.readScopes) scopes.add(scope);
   if (plan.operation === "implement") {
@@ -619,12 +628,14 @@ function policyScopes(config: AutodispatchConfig, plan: DispatchPlanView): strin
 function withinScope(path: string, scopes: readonly string[]): boolean {
   return scopes.some(
     (scope) =>
-      path === scope ||
-      (scope !== "." && path.startsWith(`${scope}/`)),
+      path === scope || (scope !== "." && path.startsWith(`${scope}/`)),
   );
 }
 
-function assertPlanScope(config: AutodispatchConfig, plan: DispatchPlanView): boolean {
+function assertPlanScope(
+  config: AutodispatchConfig,
+  plan: DispatchPlanView,
+): boolean {
   const scopes = policyScopes(config, plan);
   for (const relevant of plan.relevantPaths) {
     if (relevant === ".") return false;
@@ -741,7 +752,10 @@ export async function verifyAutodispatchMaterialization(
     expectedManifestDigest: config.sealed.manifestDigest,
   });
   if (!verified.ok) {
-    return { ok: false, reason: `materialized sealed snapshot: ${verified.reason}` };
+    return {
+      ok: false,
+      reason: `materialized sealed snapshot: ${verified.reason}`,
+    };
   }
   if (verified.manifestDigest !== materialization.state.sourceManifestDigest) {
     return { ok: false, reason: "materialized source manifest drift" };
@@ -797,7 +811,10 @@ export async function resolveAutodispatchMaterialization(
 ): Promise<TrialMaterializationResolution> {
   let raw: ReturnType<KernelRepository["readAutodispatchMaterialization"]>;
   try {
-    raw = repo.readAutodispatchMaterialization(input.sessionId, input.executionId);
+    raw = repo.readAutodispatchMaterialization(
+      input.sessionId,
+      input.executionId,
+    );
   } catch {
     return { kind: "blocked", reason: "materialization ledger unreadable" };
   }
@@ -805,7 +822,10 @@ export async function resolveAutodispatchMaterialization(
   // A policy-ledger row without a materialization reference is NOT a manual
   // human grant: it must never fall back to the static profile.
   if (raw.materializationJson === null) {
-    return { kind: "blocked", reason: "policy execution has no materialization" };
+    return {
+      kind: "blocked",
+      reason: "policy execution has no materialization",
+    };
   }
   if (raw.status !== "authorized") {
     return { kind: "blocked", reason: "materialization not authorized" };
@@ -821,7 +841,10 @@ export async function resolveAutodispatchMaterialization(
     return { kind: "blocked", reason: "materialization identity drift" };
   }
   try {
-    if (materialization.state.sourceRootCanonical !== realpathSync(trust.sourceRoot)) {
+    if (
+      materialization.state.sourceRootCanonical !==
+      realpathSync(trust.sourceRoot)
+    ) {
       return { kind: "blocked", reason: "materialization source root drift" };
     }
   } catch {
@@ -858,9 +881,7 @@ export async function resolveAutodispatchMaterialization(
   }
   const verified = await verifyAutodispatchMaterialization(materialization);
   if (!verified.ok) return { kind: "blocked", reason: verified.reason };
-  if (
-    !isInside(materialization.state.runDir, materialization.state.jobRoot)
-  ) {
+  if (!isInside(materialization.state.runDir, materialization.state.jobRoot)) {
     return { kind: "blocked", reason: "materialized run directory invalid" };
   }
   const socketProblem = validateMaterializedSocketPaths(
@@ -889,14 +910,19 @@ export function createAutodispatchMaterializer(
     input: PrepareAutodispatchInput,
   ): Promise<PrepareAutodispatchResult> {
     const material = deps.config.materialization;
-    if (material === null) return blocked("config_missing", "materialization not configured");
+    if (material === null)
+      return blocked("config_missing", "materialization not configured");
     if (!deps.available || !deps.enabled || !deps.disclosedWholeRepoRead) {
       return blocked("config_missing", "operator profile not available");
     }
-    if (deps.config.dependencyRoot === null && material.dependencySourceNodeModules === null) {
+    if (
+      deps.config.dependencyRoot === null &&
+      material.dependencySourceNodeModules === null
+    ) {
       return blocked("dependency_unavailable", "no trusted dependency closure");
     }
-    if (input.signal?.aborted === true) return blocked("stopped", "intake stopped");
+    if (input.signal?.aborted === true)
+      return blocked("stopped", "intake stopped");
     if (!assertPlanScope(deps.config, input.plan)) {
       return blocked("plan_scope_violation", "plan path outside policy scopes");
     }
@@ -923,7 +949,10 @@ export function createAutodispatchMaterializer(
     try {
       const resolvedRuntimeDir = trustedRuntimeDir(deps.runtimeDir);
       if (resolvedRuntimeDir === null) {
-        return blocked("state_invalid", "trusted runtime directory unavailable");
+        return blocked(
+          "state_invalid",
+          "trusted runtime directory unavailable",
+        );
       }
       runtimeDir = resolvedRuntimeDir;
       // Length check BEFORE creating anything; mkdtemp replaces six X bytes
@@ -951,7 +980,10 @@ export function createAutodispatchMaterializer(
       chmodSync(jobRoot, 0o700);
       created = true;
     } catch {
-      return blocked("state_invalid", "materialization directory already exists");
+      return blocked(
+        "state_invalid",
+        "materialization directory already exists",
+      );
     }
     let success = false;
     let socketDir: string | null = null;
@@ -1003,7 +1035,9 @@ export function createAutodispatchMaterializer(
           );
         }
       } else if (deps.config.dependencyRoot !== null) {
-        const verified = verifyAutodispatchDependency(deps.config.dependencyRoot);
+        const verified = verifyAutodispatchDependency(
+          deps.config.dependencyRoot,
+        );
         if (!verified.ok) {
           return blocked("dependency_unavailable", verified.reason);
         }
@@ -1019,7 +1053,10 @@ export function createAutodispatchMaterializer(
           ],
         };
       } else {
-        return blocked("dependency_unavailable", "no trusted dependency closure");
+        return blocked(
+          "dependency_unavailable",
+          "no trusted dependency closure",
+        );
       }
 
       const runDir = join(jobRoot, "run");
@@ -1059,15 +1096,21 @@ export function createAutodispatchMaterializer(
       const scopes = policyScopes(deps.config, input.plan).filter(
         (scope) => scope !== ".",
       );
-      const checkCommands: Record<string, {
-        executable: string;
-        args: string[];
-        expectExitCode: number;
-      }> = {};
+      const checkCommands: Record<
+        string,
+        {
+          executable: string;
+          args: string[];
+          expectExitCode: number;
+        }
+      > = {};
       for (const checkId of input.policy.checks) {
         const command = material.checks[checkId];
         if (command === undefined) {
-          return blocked("executor_unavailable", "check executable not configured");
+          return blocked(
+            "executor_unavailable",
+            "check executable not configured",
+          );
         }
         checkCommands[checkId] = {
           executable: canonicalAbsolute(command.executable, "check executable"),
@@ -1079,17 +1122,33 @@ export function createAutodispatchMaterializer(
         executionBackend: material.executionBackend,
         executor: {
           kind: material.executor.kind ?? "fixed",
-          executable: canonicalAbsolute(material.executor.executable, "executor"),
+          executable: canonicalAbsolute(
+            material.executor.executable,
+            "executor",
+          ),
           args: [...material.executor.args],
         },
         checks: checkCommands,
         runtime: {
-          nodeRealpath: canonicalAbsolute(material.runtime.nodeRealpath, "node"),
+          nodeRealpath: canonicalAbsolute(
+            material.runtime.nodeRealpath,
+            "node",
+          ),
           ...(material.runtime.ompRealpath !== undefined
-            ? { ompRealpath: canonicalAbsolute(material.runtime.ompRealpath, "omp") }
+            ? {
+                ompRealpath: canonicalAbsolute(
+                  material.runtime.ompRealpath,
+                  "omp",
+                ),
+              }
             : {}),
           ...(material.runtime.bwrapRealpath !== undefined
-            ? { bwrapRealpath: canonicalAbsolute(material.runtime.bwrapRealpath, "bwrap") }
+            ? {
+                bwrapRealpath: canonicalAbsolute(
+                  material.runtime.bwrapRealpath,
+                  "bwrap",
+                ),
+              }
             : {}),
           ...(material.runtime.systemdRunRealpath !== undefined
             ? {
@@ -1193,13 +1252,18 @@ export function createAutodispatchMaterializer(
         effective.fingerprint !== preparedProfile.effective.fingerprint ||
         effective.sourceRevision !== preparedProfile.effective.sourceRevision
       ) {
-        return blocked("profile_failed", "materialized profile changed while finalizing");
+        return blocked(
+          "profile_failed",
+          "materialized profile changed while finalizing",
+        );
       }
       const checks: Record<string, string> = {};
       for (const id of Object.keys(
         effective.checks as Record<string, unknown>,
       ).sort()) {
-        const entry = (effective.checks as Record<string, { contentDigest?: unknown }>)[id];
+        const entry = (
+          effective.checks as Record<string, { contentDigest?: unknown }>
+        )[id];
         if (typeof entry?.contentDigest !== "string") {
           return blocked("profile_failed", "materialized check digest missing");
         }

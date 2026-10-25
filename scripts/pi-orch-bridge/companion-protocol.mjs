@@ -54,10 +54,15 @@ function needStringArray(value, field, minItems, maxItems, maxChars) {
   }
   const out = [];
   for (const entry of value) {
-    if (typeof entry !== "string" || entry.length === 0 || entry.length > maxChars) {
+    if (
+      typeof entry !== "string" ||
+      entry.length === 0 ||
+      entry.length > maxChars
+    ) {
       fail(`field ${field} entries must be 1..${maxChars} char strings`);
     }
-    if (entry.includes("\0")) fail(`field ${field} entries must not contain NUL`);
+    if (entry.includes("\0"))
+      fail(`field ${field} entries must not contain NUL`);
     out.push(entry);
   }
   return out;
@@ -71,7 +76,11 @@ function needRelevantPaths(value) {
   const out = [];
   const seen = new Set();
   for (const entry of value) {
-    if (typeof entry !== "string" || entry.length === 0 || entry.length > MAX_PATH_CHARS) {
+    if (
+      typeof entry !== "string" ||
+      entry.length === 0 ||
+      entry.length > MAX_PATH_CHARS
+    ) {
       fail("field relevantPaths entries must be 1..512 char strings");
     }
     if (entry.includes("\0") || entry.includes("\n") || entry.includes("\r")) {
@@ -83,9 +92,14 @@ function needRelevantPaths(value) {
       out.push(entry);
       continue;
     }
-    if (entry.startsWith("/")) fail("field relevantPaths entries must be repository-relative literals");
-    if (!LITERAL_PATH_RE.test(entry)) fail(`field relevantPaths must be concrete literals, not globs: ${entry}`);
-    if (entry.includes("\\")) fail(`field relevantPaths must not contain backslashes: ${entry}`);
+    if (entry.startsWith("/"))
+      fail("field relevantPaths entries must be repository-relative literals");
+    if (!LITERAL_PATH_RE.test(entry))
+      fail(
+        `field relevantPaths must be concrete literals, not globs: ${entry}`,
+      );
+    if (entry.includes("\\"))
+      fail(`field relevantPaths must not contain backslashes: ${entry}`);
     for (const segment of entry.split("/")) {
       if (segment === "" || segment === "." || segment === "..") {
         fail(`field relevantPaths entries must be concrete literals: ${entry}`);
@@ -113,7 +127,10 @@ function needCheckIds(value) {
   const ids = needStringArray(value, "requiredChecks", 1, MAX_CHECKS, 64);
   const seen = new Set();
   for (const id of ids) {
-    if (!CHECK_ID_RE.test(id)) fail(`field requiredChecks entries must match [A-Za-z0-9_-]{1,64}: ${id}`);
+    if (!CHECK_ID_RE.test(id))
+      fail(
+        `field requiredChecks entries must match [A-Za-z0-9_-]{1,64}: ${id}`,
+      );
     if (seen.has(id)) fail("field requiredChecks carries duplicate entries");
     seen.add(id);
   }
@@ -135,7 +152,9 @@ function needBudget(value) {
     timeoutMs < MIN_TIMEOUT_MS ||
     timeoutMs > MAX_TIMEOUT_MS
   ) {
-    fail(`field budget.timeoutMs must be an integer in [${MIN_TIMEOUT_MS}, ${MAX_TIMEOUT_MS}]`);
+    fail(
+      `field budget.timeoutMs must be an integer in [${MIN_TIMEOUT_MS}, ${MAX_TIMEOUT_MS}]`,
+    );
   }
   if (
     typeof maxOutputBytes !== "number" ||
@@ -143,7 +162,9 @@ function needBudget(value) {
     maxOutputBytes < MIN_OUTPUT_BYTES ||
     maxOutputBytes > MAX_OUTPUT_BYTES
   ) {
-    fail(`field budget.maxOutputBytes must be an integer in [${MIN_OUTPUT_BYTES}, ${MAX_OUTPUT_BYTES}]`);
+    fail(
+      `field budget.maxOutputBytes must be an integer in [${MIN_OUTPUT_BYTES}, ${MAX_OUTPUT_BYTES}]`,
+    );
   }
   return { timeoutMs, maxOutputBytes };
 }
@@ -172,7 +193,8 @@ export function canonicalize(value) {
     case "string":
       return JSON.stringify(value);
     case "number":
-      if (!Number.isFinite(value)) fail("canonical value carries non-finite number");
+      if (!Number.isFinite(value))
+        fail("canonical value carries non-finite number");
       return JSON.stringify(value);
     case "boolean":
       return value ? "true" : "false";
@@ -201,7 +223,8 @@ export function computeTaskHash(request) {
 export function validateWireRequest(raw) {
   if (!isRecord(raw)) fail("request must decode to an object");
   for (const key of Object.keys(raw)) {
-    if (!REQUEST_KEYS.includes(key)) fail(`request carries an unsupported key: ${key}`);
+    if (!REQUEST_KEYS.includes(key))
+      fail(`request carries an unsupported key: ${key}`);
   }
   for (const key of REQUEST_KEYS) {
     if (!(key in raw)) fail(`request is missing field: ${key}`);
@@ -213,13 +236,22 @@ export function validateWireRequest(raw) {
   if (typeof raw.taskHash !== "string" || !HEX64_RE.test(raw.taskHash)) {
     fail("field taskHash must be 64 lower-hex chars");
   }
-  if (typeof raw.configFingerprint !== "string" || !HEX64_RE.test(raw.configFingerprint)) {
+  if (
+    typeof raw.configFingerprint !== "string" ||
+    !HEX64_RE.test(raw.configFingerprint)
+  ) {
     fail("field configFingerprint must be 64 lower-hex chars");
   }
-  if (typeof raw.sourceRevision !== "string" || !HEX40_RE.test(raw.sourceRevision)) {
+  if (
+    typeof raw.sourceRevision !== "string" ||
+    !HEX40_RE.test(raw.sourceRevision)
+  ) {
     fail("field sourceRevision must be 40 lower-hex chars");
   }
-  if (typeof raw.workspaceAlias !== "string" || !ALIAS_RE.test(raw.workspaceAlias)) {
+  if (
+    typeof raw.workspaceAlias !== "string" ||
+    !ALIAS_RE.test(raw.workspaceAlias)
+  ) {
     fail("field workspaceAlias must match [a-z0-9_-]{1,64}");
   }
   if (raw.mode !== "read_only" && raw.mode !== "write") {
@@ -227,17 +259,45 @@ export function validateWireRequest(raw) {
   }
   if (!isRecord(raw.purpose)) fail("field purpose must be an object");
   for (const key of Object.keys(raw.purpose)) {
-    if (key !== "statement" && key !== "scope") fail(`field purpose carries an unsupported key: ${key}`);
+    if (key !== "statement" && key !== "scope")
+      fail(`field purpose carries an unsupported key: ${key}`);
   }
   const purpose = {
-    statement: needBoundedText(raw.purpose.statement, "purpose.statement", 1, MAX_STATEMENT_CHARS),
-    scope: needBoundedText(raw.purpose.scope, "purpose.scope", 1, MAX_STATEMENT_CHARS),
+    statement: needBoundedText(
+      raw.purpose.statement,
+      "purpose.statement",
+      1,
+      MAX_STATEMENT_CHARS,
+    ),
+    scope: needBoundedText(
+      raw.purpose.scope,
+      "purpose.scope",
+      1,
+      MAX_STATEMENT_CHARS,
+    ),
   };
-  const objective = needBoundedText(raw.objective, "objective", 1, MAX_OBJECTIVE_CHARS);
+  const objective = needBoundedText(
+    raw.objective,
+    "objective",
+    1,
+    MAX_OBJECTIVE_CHARS,
+  );
   const relevantPaths = needRelevantPaths(raw.relevantPaths);
-  const acceptance = needStringArray(raw.acceptance, "acceptance", 1, MAX_LIST_ITEMS, MAX_TEXT_SHORT);
+  const acceptance = needStringArray(
+    raw.acceptance,
+    "acceptance",
+    1,
+    MAX_LIST_ITEMS,
+    MAX_TEXT_SHORT,
+  );
   const requiredChecks = needCheckIds(raw.requiredChecks);
-  const constraints = needStringArray(raw.constraints, "constraints", 0, MAX_LIST_ITEMS, MAX_TEXT_SHORT);
+  const constraints = needStringArray(
+    raw.constraints,
+    "constraints",
+    0,
+    MAX_LIST_ITEMS,
+    MAX_TEXT_SHORT,
+  );
   const budget = needBudget(raw.budget);
   if (typeof raw.externalModelConsent !== "boolean") {
     fail("field externalModelConsent must be a boolean");
@@ -278,7 +338,8 @@ export function parseRequestFrame(frame, maxBytes) {
   }
   if (!text.endsWith("\n")) fail("frame must end with a single LF");
   const body = text.slice(0, -1);
-  if (body.includes("\n") || body.includes("\r")) fail("frame must carry exactly one JSONLF line");
+  if (body.includes("\n") || body.includes("\r"))
+    fail("frame must carry exactly one JSONLF line");
   let parsed;
   try {
     parsed = JSON.parse(body);
@@ -292,14 +353,20 @@ function needReportArrays(report) {
   const summary = needBoundedText(report.summary, "report.summary", 0, 1024);
   const needList = (value, field, maxChars, maxItems) => {
     if (!Array.isArray(value)) fail(`field ${field} must be an array`);
-    if (value.length > maxItems) fail(`field ${field} carries too many entries`);
+    if (value.length > maxItems)
+      fail(`field ${field} carries too many entries`);
     const out = [];
     const seen = new Set();
     for (const entry of value) {
-      if (typeof entry !== "string" || entry.length === 0 || entry.length > maxChars) {
+      if (
+        typeof entry !== "string" ||
+        entry.length === 0 ||
+        entry.length > maxChars
+      ) {
         fail(`field ${field} entries must be 1..${maxChars} char strings`);
       }
-      if (entry.includes("\0")) fail(`field ${field} entries must not contain NUL`);
+      if (entry.includes("\0"))
+        fail(`field ${field} entries must not contain NUL`);
       if (seen.has(entry)) fail(`field ${field} carries duplicate entries`);
       seen.add(entry);
       out.push(entry);
@@ -309,20 +376,36 @@ function needReportArrays(report) {
   return {
     summary,
     files: needList(report.files, "report.files", 512, MAX_RELEVANT_PATHS),
-    findings: needList(report.findings, "report.findings", MAX_TEXT_SHORT, MAX_RELEVANT_PATHS),
-    unresolved: needList(report.unresolved, "report.unresolved", MAX_TEXT_SHORT, MAX_RELEVANT_PATHS),
+    findings: needList(
+      report.findings,
+      "report.findings",
+      MAX_TEXT_SHORT,
+      MAX_RELEVANT_PATHS,
+    ),
+    unresolved: needList(
+      report.unresolved,
+      "report.unresolved",
+      MAX_TEXT_SHORT,
+      MAX_RELEVANT_PATHS,
+    ),
   };
 }
 
 function needChecks(value) {
   if (!Array.isArray(value)) fail("field evidence.checks must be an array");
-  if (value.length > MAX_CHECKS) fail("field evidence.checks carries too many entries");
+  if (value.length > MAX_CHECKS)
+    fail("field evidence.checks carries too many entries");
   const out = [];
   const seen = new Set();
   for (const item of value) {
     if (!isRecord(item)) fail("field evidence.checks entries must be objects");
     for (const key of Object.keys(item)) {
-      if (key !== "id" && key !== "exitCode" && key !== "timedOut" && key !== "outputMatched") {
+      if (
+        key !== "id" &&
+        key !== "exitCode" &&
+        key !== "timedOut" &&
+        key !== "outputMatched"
+      ) {
         fail(`field evidence.checks entry carries an unsupported key: ${key}`);
       }
     }
@@ -331,13 +414,25 @@ function needChecks(value) {
     }
     if (seen.has(item.id)) fail("field evidence.checks carries duplicate ids");
     seen.add(item.id);
-    if (item.exitCode !== null && (typeof item.exitCode !== "number" || !Number.isSafeInteger(item.exitCode))) {
+    if (
+      item.exitCode !== null &&
+      (typeof item.exitCode !== "number" ||
+        !Number.isSafeInteger(item.exitCode))
+    ) {
       fail("field evidence.checks exitCode must be an integer or null");
     }
-    if (typeof item.timedOut !== "boolean" || typeof item.outputMatched !== "boolean") {
+    if (
+      typeof item.timedOut !== "boolean" ||
+      typeof item.outputMatched !== "boolean"
+    ) {
       fail("field evidence.checks timedOut/outputMatched must be booleans");
     }
-    out.push({ id: item.id, exitCode: item.exitCode, timedOut: item.timedOut, outputMatched: item.outputMatched });
+    out.push({
+      id: item.id,
+      exitCode: item.exitCode,
+      timedOut: item.timedOut,
+      outputMatched: item.outputMatched,
+    });
   }
   return out;
 }
@@ -345,20 +440,36 @@ function needChecks(value) {
 export function validateWireResult(raw, requiredChecks) {
   if (!isRecord(raw)) fail("result must decode to an object");
   for (const key of Object.keys(raw)) {
-    if (key !== "version" && key !== "executionId" && key !== "taskHash" && key !== "status" && key !== "verified" && key !== "report" && key !== "evidence") {
+    if (
+      key !== "version" &&
+      key !== "executionId" &&
+      key !== "taskHash" &&
+      key !== "status" &&
+      key !== "verified" &&
+      key !== "report" &&
+      key !== "evidence"
+    ) {
       fail(`result carries an unsupported key: ${key}`);
     }
   }
   if (raw.version !== 1) fail("field version must be 1");
-  if (typeof raw.executionId !== "string" || !UUID_RE.test(raw.executionId)) fail("field executionId must be a UUID");
-  if (typeof raw.taskHash !== "string" || !HEX64_RE.test(raw.taskHash)) fail("field taskHash must be 64 lower-hex chars");
+  if (typeof raw.executionId !== "string" || !UUID_RE.test(raw.executionId))
+    fail("field executionId must be a UUID");
+  if (typeof raw.taskHash !== "string" || !HEX64_RE.test(raw.taskHash))
+    fail("field taskHash must be 64 lower-hex chars");
   if (!["done", "error", "cancelled", "unknown"].includes(raw.status)) {
     fail('field status must be "done", "error", "cancelled", or "unknown"');
   }
-  if (typeof raw.verified !== "boolean") fail("field verified must be a boolean");
+  if (typeof raw.verified !== "boolean")
+    fail("field verified must be a boolean");
   if (!isRecord(raw.report)) fail("field report must be an object");
   for (const key of Object.keys(raw.report)) {
-    if (key !== "summary" && key !== "files" && key !== "findings" && key !== "unresolved") {
+    if (
+      key !== "summary" &&
+      key !== "files" &&
+      key !== "findings" &&
+      key !== "unresolved"
+    ) {
       fail(`field report carries an unsupported key: ${key}`);
     }
   }
@@ -366,55 +477,92 @@ export function validateWireResult(raw, requiredChecks) {
   if (!isRecord(raw.evidence)) fail("field evidence must be an object");
   const evidence = raw.evidence;
   for (const key of Object.keys(evidence)) {
-    if (key !== "workflowId" && key !== "workerIds" && key !== "workspaceTrial" && key !== "productionApplied" && key !== "checks" && key !== "artifact") {
+    if (
+      key !== "workflowId" &&
+      key !== "workerIds" &&
+      key !== "workspaceTrial" &&
+      key !== "productionApplied" &&
+      key !== "checks" &&
+      key !== "artifact"
+    ) {
       fail(`field evidence carries an unsupported key: ${key}`);
     }
   }
   let workflowId;
   if (evidence.workflowId !== undefined) {
-    if (typeof evidence.workflowId !== "string" || evidence.workflowId.length === 0 || evidence.workflowId.length > 128) {
+    if (
+      typeof evidence.workflowId !== "string" ||
+      evidence.workflowId.length === 0 ||
+      evidence.workflowId.length > 128
+    ) {
       fail("field evidence.workflowId must be a 1..128 char string");
     }
-    if (evidence.workflowId.includes("\0")) fail("field evidence.workflowId must not contain NUL");
+    if (evidence.workflowId.includes("\0"))
+      fail("field evidence.workflowId must not contain NUL");
     workflowId = evidence.workflowId;
   }
-  if (!Array.isArray(evidence.workerIds)) fail("field evidence.workerIds must be an array");
-  if (evidence.workerIds.length > MAX_WORKER_IDS) fail("field evidence.workerIds carries too many entries");
+  if (!Array.isArray(evidence.workerIds))
+    fail("field evidence.workerIds must be an array");
+  if (evidence.workerIds.length > MAX_WORKER_IDS)
+    fail("field evidence.workerIds carries too many entries");
   const workerIds = [];
   for (const entry of evidence.workerIds) {
-    if (typeof entry !== "string" || entry.length === 0 || entry.length > 128 || entry.includes("\0")) {
+    if (
+      typeof entry !== "string" ||
+      entry.length === 0 ||
+      entry.length > 128 ||
+      entry.includes("\0")
+    ) {
       fail("field evidence.workerIds entries must be 1..128 char strings");
     }
     workerIds.push(entry);
   }
-  if (evidence.workspaceTrial !== true) fail("field evidence.workspaceTrial must be true");
-  if (evidence.productionApplied !== false) fail("field evidence.productionApplied must be false");
+  if (evidence.workspaceTrial !== true)
+    fail("field evidence.workspaceTrial must be true");
+  if (evidence.productionApplied !== false)
+    fail("field evidence.productionApplied must be false");
   const checks = needChecks(evidence.checks);
   let artifact;
   if (evidence.artifact !== undefined) {
-    if (!isRecord(evidence.artifact)) fail("field evidence.artifact must be an object");
+    if (!isRecord(evidence.artifact))
+      fail("field evidence.artifact must be an object");
     for (const key of Object.keys(evidence.artifact)) {
       if (key !== "sha256" && key !== "entryCount" && key !== "bytes") {
         fail(`field evidence.artifact carries an unsupported key: ${key}`);
       }
     }
-    if (typeof evidence.artifact.sha256 !== "string" || !HEX64_RE.test(evidence.artifact.sha256)) {
+    if (
+      typeof evidence.artifact.sha256 !== "string" ||
+      !HEX64_RE.test(evidence.artifact.sha256)
+    ) {
       fail("field evidence.artifact.sha256 must be 64 lower-hex chars");
     }
     const entryCount = evidence.artifact.entryCount;
     const bytes = evidence.artifact.bytes;
-    if (typeof entryCount !== "number" || !Number.isSafeInteger(entryCount) || entryCount < 0 || entryCount > MAX_MANIFEST_FILES) {
+    if (
+      typeof entryCount !== "number" ||
+      !Number.isSafeInteger(entryCount) ||
+      entryCount < 0 ||
+      entryCount > MAX_MANIFEST_FILES
+    ) {
       fail("field evidence.artifact.entryCount is out of range");
     }
-    if (typeof bytes !== "number" || !Number.isSafeInteger(bytes) || bytes < 0 || bytes > MAX_OUTPUT_BYTES) {
+    if (
+      typeof bytes !== "number" ||
+      !Number.isSafeInteger(bytes) ||
+      bytes < 0 ||
+      bytes > MAX_OUTPUT_BYTES
+    ) {
       fail("field evidence.artifact.bytes is out of range");
     }
     artifact = { sha256: evidence.artifact.sha256, entryCount, bytes };
   }
   if (raw.status === "done") {
     if (raw.verified !== true) fail("done results require verified true");
-    if (requiredChecks.length === 0) fail("done results require a nonempty required check set");
-    if (checks.length !== requiredChecks.length) fail("done results require exactly the required check IDs");
+    if (requiredChecks.length === 0)
+      fail("done results require a nonempty required check set");
+    if (checks.length !== requiredChecks.length)
+      fail("done results require exactly the required check IDs");
     const seen = new Set(checks.map((check) => check.id));
     for (const id of requiredChecks) {
       if (!seen.has(id)) fail(`done result is missing required check: ${id}`);
@@ -462,7 +610,8 @@ export function companionScopeUnit(request) {
 }
 
 export function isCompanionScopeUnit(parsedUnit, request) {
-  if (typeof parsedUnit !== "string" || !SCOPE_NONCE_RE.test(request.taskHash)) return false;
+  if (typeof parsedUnit !== "string" || !SCOPE_NONCE_RE.test(request.taskHash))
+    return false;
   return parsedUnit === companionScopeUnit(request);
 }
 

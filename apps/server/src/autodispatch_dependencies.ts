@@ -11,7 +11,13 @@
 // `dependency_unavailable`. No install, download, package script, or source
 // write happens here.
 
-import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
 import { join } from "node:path";
 import {
   hashFileSync,
@@ -73,9 +79,11 @@ function verifyUncached(rootInput: string): DependencyVerification {
   } catch {
     return unavailable("dependency root missing");
   }
-  if (root !== rootInput) return unavailable("dependency root is not canonical");
+  if (root !== rootInput)
+    return unavailable("dependency root is not canonical");
   try {
-    if (!statSync(root).isDirectory()) return unavailable("dependency root is not a directory");
+    if (!statSync(root).isDirectory())
+      return unavailable("dependency root is not a directory");
   } catch {
     return unavailable("dependency root unreadable");
   }
@@ -90,7 +98,9 @@ function verifyUncached(rootInput: string): DependencyVerification {
   }
   let manifest: ClosureManifest;
   try {
-    manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as ClosureManifest;
+    manifest = JSON.parse(
+      readFileSync(manifestPath, "utf8"),
+    ) as ClosureManifest;
   } catch {
     return unavailable("dependency closure manifest unreadable");
   }
@@ -109,9 +119,8 @@ function verifyUncached(rootInput: string): DependencyVerification {
   ) {
     return unavailable("dependency closure manifest invalid");
   }
-  const nativeModules: Array<
-    VerifiedDependencyDepot["nativeModules"][number]
-  > = [];
+  const nativeModules: Array<VerifiedDependencyDepot["nativeModules"][number]> =
+    [];
   for (const entry of manifest.nativeModules) {
     if (
       typeof entry !== "object" ||
@@ -133,7 +142,8 @@ function verifyUncached(rootInput: string): DependencyVerification {
       return unavailable("dependency native module path invalid");
     }
     const absolute = join(root, rel);
-    if (!existsSync(absolute)) return unavailable("dependency native module missing");
+    if (!existsSync(absolute))
+      return unavailable("dependency native module missing");
     try {
       if (hashFileSync(absolute) !== (entry as { sha256: string }).sha256) {
         return unavailable("dependency native module digest mismatch");
@@ -186,7 +196,8 @@ export function verifyAutodispatchDependency(
   let size: number;
   try {
     const st = lstatSync(`${rootInput}${MANIFEST_SUFFIX}`);
-    if (!st.isFile() || st.isSymbolicLink()) return unavailable("dependency closure manifest invalid");
+    if (!st.isFile() || st.isSymbolicLink())
+      return unavailable("dependency closure manifest invalid");
     mtimeMs = st.mtimeMs;
     size = st.size;
   } catch {

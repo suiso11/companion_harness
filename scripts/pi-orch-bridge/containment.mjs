@@ -8,13 +8,13 @@
 import { spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
-  cpSync,
   closeSync,
+  cpSync,
   existsSync,
   lstatSync,
   mkdirSync,
-  openSync,
   readdirSync as nodeReaddirSync,
+  openSync,
   readSync,
   writeSync,
 } from "node:fs";
@@ -23,13 +23,21 @@ import { dirname, join } from "node:path";
 const LIB_DIRS = ["/usr", "/bin", "/lib", "/lib64"];
 
 export function preflightContainment(runtime) {
-  for (const key of ["bwrapRealpath", "systemdRunRealpath", "systemctlRealpath"]) {
+  for (const key of [
+    "bwrapRealpath",
+    "systemdRunRealpath",
+    "systemctlRealpath",
+  ]) {
     if (typeof runtime[key] !== "string" || !existsSync(runtime[key])) {
       return { ok: false, reason: `missing runtime binary: ${key}` };
     }
   }
-  const bwrap = spawnSync(runtime.bwrapRealpath, ["--version"], { encoding: "utf8", timeout: 10_000 });
-  if (bwrap.status !== 0) return { ok: false, reason: "bwrap --version failed" };
+  const bwrap = spawnSync(runtime.bwrapRealpath, ["--version"], {
+    encoding: "utf8",
+    timeout: 10_000,
+  });
+  if (bwrap.status !== 0)
+    return { ok: false, reason: "bwrap --version failed" };
   const scope = spawnSync(
     runtime.systemdRunRealpath,
     ["--user", "--scope", "--quiet", "-p", "MemoryMax=64M", "true"],
@@ -38,7 +46,8 @@ export function preflightContainment(runtime) {
   if (scope.status !== 0) {
     return {
       ok: false,
-      reason: "user systemd scope unavailable (no DBUS_SESSION_BUS_ADDRESS/XDG_RUNTIME_DIR or systemd user bus)",
+      reason:
+        "user systemd scope unavailable (no DBUS_SESSION_BUS_ADDRESS/XDG_RUNTIME_DIR or systemd user bus)",
     };
   }
   return { ok: true };
@@ -52,10 +61,15 @@ export function preflightContainment(runtime) {
 export function materializeSealedWork(snapshotRoot, workRoot) {
   mkdirSync(workRoot, { recursive: true, mode: 0o700 });
   chmodSync(workRoot, 0o700);
-  cpSync(snapshotRoot, workRoot, { recursive: true, preserveTimestamps: false, force: true });
+  cpSync(snapshotRoot, workRoot, {
+    recursive: true,
+    preserveTimestamps: false,
+    force: true,
+  });
   const walk = (absolute, rel) => {
     const st = lstatSync(absolute);
-    if (st.isSymbolicLink()) throw new Error(`copied work contains a symlink: ${rel}`);
+    if (st.isSymbolicLink())
+      throw new Error(`copied work contains a symlink: ${rel}`);
     if (st.isDirectory()) {
       chmodSync(absolute, 0o700);
       const names = [];
@@ -63,13 +77,14 @@ export function materializeSealedWork(snapshotRoot, workRoot) {
       for (const name of names) walk(join(absolute, name), `${rel}/${name}`);
       return;
     }
-    if (!st.isFile()) throw new Error(`copied work contains a non-regular entry: ${rel}`);
+    if (!st.isFile())
+      throw new Error(`copied work contains a non-regular entry: ${rel}`);
     chmodSync(absolute, (st.mode & 0o111) !== 0 ? 0o700 : 0o600);
   };
-  for (const name of nodeReaddirSync(workRoot)) walk(join(workRoot, name), name);
+  for (const name of nodeReaddirSync(workRoot))
+    walk(join(workRoot, name), name);
   return workRoot;
 }
-
 
 function ensureDir(args, dir) {
   if (dir === "" || dir === "/") return;
@@ -136,7 +151,12 @@ function baseBwrapArgs(profile) {
   for (const dir of LIB_DIRS) {
     if (existsSync(dir)) args.push("--ro-bind", dir, dir);
   }
-  for (const file of ["/etc/ld.so.cache", "/etc/nsswitch.conf", "/etc/passwd", "/etc/group"]) {
+  for (const file of [
+    "/etc/ld.so.cache",
+    "/etc/nsswitch.conf",
+    "/etc/passwd",
+    "/etc/group",
+  ]) {
     if (existsSync(file)) args.push("--ro-bind", file, file);
   }
   if (existsSync("/etc/ssl")) args.push("--ro-bind", "/etc/ssl", "/etc/ssl");
@@ -321,10 +341,14 @@ export function buildCheckCommand(profile, paths, scopeUnit, check) {
 
 export function stopOwnedScope(runtime, unit, signal) {
   if (!/^capsule-[0-9a-f-]{36}-[A-Za-z0-9_-]{8,64}\.scope$/i.test(unit)) return;
-  const result = spawnSync(runtime.systemctlRealpath, ["--user", "kill", `--signal=${signal}`, unit], {
-    encoding: "utf8",
-    timeout: 10_000,
-  });
+  const result = spawnSync(
+    runtime.systemctlRealpath,
+    ["--user", "kill", `--signal=${signal}`, unit],
+    {
+      encoding: "utf8",
+      timeout: 10_000,
+    },
+  );
   void result;
 }
 
@@ -340,7 +364,8 @@ export function spawnObserved(command, args, options) {
     // only these two locator variables; never the rest of the host env.
     const defaultEnv = { PATH: "/usr/local/bin:/usr/bin:/bin" };
     for (const key of ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"]) {
-      if (typeof process.env[key] === "string" && process.env[key] !== "") defaultEnv[key] = process.env[key];
+      if (typeof process.env[key] === "string" && process.env[key] !== "")
+        defaultEnv[key] = process.env[key];
     }
     const child = spawn(command, args, {
       stdio: ["ignore", "pipe", "pipe"],

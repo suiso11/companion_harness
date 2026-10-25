@@ -23,12 +23,12 @@ import type {
   TrialProfileSnapshot,
   TrustedRuntimeObservation,
 } from "@companion/contracts";
+import type { KernelRepository } from "@companion/kernel";
+import type { ModelGateway } from "@companion/model-local";
 import {
   cleanupTerminalAutodispatchMaterialization,
   type TrialMaterializationResolution,
 } from "./autodispatch_materializer.js";
-import type { KernelRepository } from "@companion/kernel";
-import type { ModelGateway } from "@companion/model-local";
 import type { ServerLogger } from "./logger.js";
 import {
   TrialModelRelay,
@@ -1505,7 +1505,8 @@ export class TrialRunner {
     });
     await cleanup();
     this.ownedPids.delete(pid);
-    if (process.env.DEBUG_CLEANUP === "1") console.error("final-guard", materialization === undefined);
+    if (process.env.DEBUG_CLEANUP === "1")
+      console.error("final-guard", materialization === undefined);
     if (materialization !== undefined) {
       // The scope was observed GONE before this point: safe terminal cleanup
       // of the heavy per-execution copies while keeping the small artifacts.

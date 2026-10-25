@@ -1,4 +1,4 @@
-import type { OperatorConfig, EffectiveProfile } from "./sealed-profile.mjs";
+import type { EffectiveProfile, OperatorConfig } from "./sealed-profile.mjs";
 
 export interface PreparedSnapshot {
   schemaVersion: number;
@@ -54,7 +54,8 @@ export interface PrepareExecutorProfileOptions {
   policy: unknown;
 }
 
-export interface BuildBridgeExecConfigOptions extends PrepareExecutorProfileOptions {
+export interface BuildBridgeExecConfigOptions
+  extends PrepareExecutorProfileOptions {
   configPath?: string;
 }
 
@@ -62,13 +63,17 @@ export function prepareDependencyClosure(
   options: PrepareDependencyClosureOptions,
 ): DependencyClosureResult;
 
-export function prepareExecutorProfile(options: PrepareExecutorProfileOptions): Promise<{
+export function prepareExecutorProfile(
+  options: PrepareExecutorProfileOptions,
+): Promise<{
   config: OperatorConfig;
   effective: EffectiveProfile;
   snapshot: PreparedSnapshot;
 }>;
 
-export function buildBridgeExecConfig(options: BuildBridgeExecConfigOptions): Promise<{
+export function buildBridgeExecConfig(
+  options: BuildBridgeExecConfigOptions,
+): Promise<{
   config: OperatorConfig;
   configPath: string;
   effective: EffectiveProfile;

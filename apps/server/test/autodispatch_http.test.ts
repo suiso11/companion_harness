@@ -14,6 +14,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { TrialProfileSnapshot } from "@companion/contracts";
 import {
   closeKernelDatabase,
   createKernelRepository,
@@ -22,21 +23,17 @@ import {
   openKernelDatabase,
   RunEngine,
 } from "@companion/kernel";
-import type { TrialProfileSnapshot } from "@companion/contracts";
 import { describe, expect, it } from "vitest";
 import { type CreatedServerApp, createApp } from "../src/app.js";
 import {
-  createAutodispatchService,
   type AutodispatchPlanner,
+  createAutodispatchService,
 } from "../src/autodispatch_service.js";
 import {
   type BackgroundResourceGate,
   createBackgroundResourceGate,
 } from "../src/background_resource.js";
-import {
-  type AutodispatchConfig,
-  loadServerConfig,
-} from "../src/config.js";
+import { type AutodispatchConfig, loadServerConfig } from "../src/config.js";
 import { createCollectingLogger } from "../src/logger.js";
 
 const FP = "b".repeat(64);
@@ -167,7 +164,11 @@ function makeMaterializerFixture(): MaterializerFixture {
   const runtimeDir = join(dir, "rt");
   mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
   const executor = join(dir, "bin", "executor.mjs");
-  write(executor, `#!${process.execPath}\nconsole.log('fixed executor');\n`, 0o700);
+  write(
+    executor,
+    `#!${process.execPath}\nconsole.log('fixed executor');\n`,
+    0o700,
+  );
   const check = join(dir, "bin", "check.mjs");
   write(check, `#!${process.execPath}\nconsole.log('check-ok');\n`, 0o700);
   const depSource = join(dir, "dep-source");
@@ -289,11 +290,9 @@ function completeTurn(
     { key: randomUUID(), now },
   );
   repo.startRun(posted.body.run.id, { now: now + 1 });
-  repo.completeRun(
-    posted.body.run.id,
-    { version: 1, text: "ok" } as never,
-    { now: now + 2 },
-  );
+  repo.completeRun(posted.body.run.id, { version: 1, text: "ok" } as never, {
+    now: now + 2,
+  });
   return { turnId: posted.body.turnId, runId: posted.body.run.id };
 }
 
@@ -312,10 +311,7 @@ function policyBody(turnId: string) {
   };
 }
 
-function planBody(
-  policyId: string,
-  anchor: { turnId: string; runId: string },
-) {
+function planBody(policyId: string, anchor: { turnId: string; runId: string }) {
   return {
     policyId,
     operation: "implement",
@@ -387,9 +383,8 @@ describe("autodispatch HTTP + existing trial boundary", () => {
         {},
       );
       expect(first.status).toBe(201);
-      const executionId = (
-        first.body as { execution: { executionId: string } }
-      ).execution.executionId;
+      const executionId = (first.body as { execution: { executionId: string } })
+        .execution.executionId;
       expect(executionId).toMatch(/^[0-9a-f-]{36}$/);
 
       const second = await call(
@@ -455,7 +450,11 @@ describe("autodispatch HTTP + existing trial boundary", () => {
         {
           key: randomUUID(),
           now: NOW + 20,
-          limits: { operations: [...ad.operations], checks: [...ad.checks], caps: ad.caps },
+          limits: {
+            operations: [...ad.operations],
+            checks: [...ad.checks],
+            caps: ad.caps,
+          },
           parent: {
             statement: "Standing policy for the approved workspace",
             sourceTurnId: anchor.turnId,
@@ -517,9 +516,7 @@ describe("autodispatch HTTP + existing trial boundary", () => {
       });
       service.onRunCompleted(anchor.runId);
       const deadline = Date.now() + 2000;
-      let execution:
-        | { executionId: string | null; status: string }
-        | undefined;
+      let execution: { executionId: string | null; status: string } | undefined;
       while (Date.now() < deadline) {
         const items = repo.listAutodispatchExecutions(sessionId, 10);
         execution = items[0];
@@ -573,7 +570,13 @@ describe("trial grant outcome projection through the actual API", () => {
     const fixture = await makeApp();
     const { app, repo } = fixture;
     try {
-      const created = await call(app, "POST", "/api/sessions", {}, randomUUID());
+      const created = await call(
+        app,
+        "POST",
+        "/api/sessions",
+        {},
+        randomUUID(),
+      );
       expect(created.status).toBe(201);
       const sessionId = (created.body as { sessionId: string }).sessionId;
       const now = Date.now();

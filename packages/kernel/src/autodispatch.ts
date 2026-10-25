@@ -13,21 +13,27 @@
 // unset server config creates no policy, and autonomy_control starts paused.
 
 import { createHash } from "node:crypto";
-import type { TrialOperation, TrialProfileSnapshot } from "@companion/contracts";
+import type {
+  TrialOperation,
+  TrialProfileSnapshot,
+} from "@companion/contracts";
 import type Database from "better-sqlite3";
 import { parseStrictInstantMs } from "./action_strategy.js";
 import {
-  createPurpose,
-  createTask,
   type CreatePurposeInput,
   type CreateTaskInput,
+  createPurpose,
+  createTask,
 } from "./autonomy.js";
-import { canonicalJsonString, generateId } from "./canonical.js";
+import {
+  canonicalJsonString,
+  generateId,
+  withImmediateTx,
+} from "./canonical.js";
 import {
   RepositoryNotFoundError,
   RepositoryValidationError,
 } from "./errors.js";
-import { withImmediateTx } from "./canonical.js";
 import {
   derivePolicyTrialGrant,
   type PolicyGrantInput,
@@ -310,11 +316,7 @@ function validateCaps(raw: PolicyCaps, limits: PolicyCaps): PolicyCaps {
     timeoutMs: integer(raw?.timeoutMs, 1000, limits.timeoutMs),
     maxOutputBytes: integer(raw?.maxOutputBytes, 1024, limits.maxOutputBytes),
     maxModelCalls: integer(raw?.maxModelCalls, 1, limits.maxModelCalls),
-    maxOutputTokens: integer(
-      raw?.maxOutputTokens,
-      1,
-      limits.maxOutputTokens,
-    ),
+    maxOutputTokens: integer(raw?.maxOutputTokens, 1, limits.maxOutputTokens),
     perCallTimeoutMs: integer(
       raw?.perCallTimeoutMs,
       100,
@@ -394,7 +396,9 @@ function requireOwnedUserTextTurn(
 ): void {
   requireUuid(turnId, "sourceTurnId");
   const turn = db
-    .prepare("SELECT id, seq, input_json FROM turns WHERE id=? AND session_id=?")
+    .prepare(
+      "SELECT id, seq, input_json FROM turns WHERE id=? AND session_id=?",
+    )
     .get(turnId, sessionId) as TurnAnchorRow | undefined;
   if (turn === undefined || readTurnText(turn) === null) {
     throw new RepositoryValidationError(
@@ -425,9 +429,7 @@ function selectedCompletedRun(
     .prepare(
       "SELECT r.turn_id AS turnId, t.seq AS turnSeq FROM runs r JOIN turns t ON t.id=r.turn_id JOIN turn_selections s ON s.run_id=r.id AND s.turn_id=r.turn_id WHERE r.id=? AND r.session_id=? AND r.status='completed'",
     )
-    .get(runId, sessionId) as
-    | { turnId: string; turnSeq: number }
-    | undefined;
+    .get(runId, sessionId) as { turnId: string; turnSeq: number } | undefined;
   return row ?? null;
 }
 
@@ -470,7 +472,11 @@ export function validatePlanIntent(
     );
   }
   const quotesRaw = record.quotes;
-  if (!Array.isArray(quotesRaw) || quotesRaw.length < 1 || quotesRaw.length > 8) {
+  if (
+    !Array.isArray(quotesRaw) ||
+    quotesRaw.length < 1 ||
+    quotesRaw.length > 8
+  ) {
     throw new RepositoryValidationError("intent quotes must carry 1..8");
   }
   const quotes: IntentQuote[] = [];
@@ -483,7 +489,9 @@ export function validatePlanIntent(
     const runId = requireUuid(q.runId, "quote.runId");
     const text = requireText(q.text, "quote.text", 2000);
     const turn = db
-      .prepare("SELECT id, seq, input_json FROM turns WHERE id=? AND session_id=?")
+      .prepare(
+        "SELECT id, seq, input_json FROM turns WHERE id=? AND session_id=?",
+      )
       .get(turnId, session) as TurnAnchorRow | undefined;
     if (turn === undefined) {
       throw new RepositoryValidationError("intent quote turn is not owned");
@@ -608,7 +616,9 @@ export function createStandingPolicy(
   if (expiresAt !== null) {
     const ms = parseStrictInstantMs(expiresAt);
     if (ms === undefined || ms <= now) {
-      throw new RepositoryValidationError("policy expiry must be in the future");
+      throw new RepositoryValidationError(
+        "policy expiry must be in the future",
+      );
     }
   }
   if (options.parent.sourceTurnId !== undefined) {
@@ -850,10 +860,7 @@ export function createDispatchPlan(
     steps: normalizeList(input.content.steps, "steps", 0, 32),
     acceptance: normalizeList(input.content.acceptance, "acceptance", 0, 16),
     missing: normalizeList(input.content.missing, "missing", 0, 16),
-    relevantPaths: normalizePaths(
-      input.content.relevantPaths,
-      "relevantPaths",
-    ),
+    relevantPaths: normalizePaths(input.content.relevantPaths, "relevantPaths"),
   };
   if (
     input.operation !== "investigate" &&
@@ -1164,11 +1171,7 @@ function deny(
 
 function dayStart(now: number): number {
   const date = new Date(now);
-  return Date.UTC(
-    date.getUTCFullYear(),
-    date.getUTCMonth(),
-    date.getUTCDate(),
-  );
+  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
 }
 
 /**
@@ -1213,7 +1216,15 @@ export function authorizeWithinPolicy(
   }
   if (policy.status !== "active") {
     return {
-      execution: deny(db, session, plan, policy, dedupKey, "policy-inactive", now),
+      execution: deny(
+        db,
+        session,
+        plan,
+        policy,
+        dedupKey,
+        "policy-inactive",
+        now,
+      ),
       replayed: false,
     };
   }
@@ -1233,7 +1244,15 @@ export function authorizeWithinPolicy(
   }
   if (plan.policyVersion !== policy.version) {
     return {
-      execution: deny(db, session, plan, policy, dedupKey, "policy-version", now),
+      execution: deny(
+        db,
+        session,
+        plan,
+        policy,
+        dedupKey,
+        "policy-version",
+        now,
+      ),
       replayed: false,
     };
   }
@@ -1262,13 +1281,29 @@ export function authorizeWithinPolicy(
     .get() as { paused: number } | undefined;
   if (control === undefined || control.paused === 1) {
     return {
-      execution: deny(db, session, plan, policy, dedupKey, "control-paused", now),
+      execution: deny(
+        db,
+        session,
+        plan,
+        policy,
+        dedupKey,
+        "control-paused",
+        now,
+      ),
       replayed: false,
     };
   }
   if (plan.workspaceAlias !== options.workspaceAlias) {
     return {
-      execution: deny(db, session, plan, policy, dedupKey, "alias-mismatch", now),
+      execution: deny(
+        db,
+        session,
+        plan,
+        policy,
+        dedupKey,
+        "alias-mismatch",
+        now,
+      ),
       replayed: false,
     };
   }
@@ -1276,13 +1311,29 @@ export function authorizeWithinPolicy(
     confirmLimits(policy, options.limits);
   } catch {
     return {
-      execution: deny(db, session, plan, policy, dedupKey, "operator-limits", now),
+      execution: deny(
+        db,
+        session,
+        plan,
+        policy,
+        dedupKey,
+        "operator-limits",
+        now,
+      ),
       replayed: false,
     };
   }
   if (!options.limits.operations.includes(plan.operation)) {
     return {
-      execution: deny(db, session, plan, policy, dedupKey, "operation-not-allowed", now),
+      execution: deny(
+        db,
+        session,
+        plan,
+        policy,
+        dedupKey,
+        "operation-not-allowed",
+        now,
+      ),
       replayed: false,
     };
   }
@@ -1318,8 +1369,13 @@ export function authorizeWithinPolicy(
     options.executionId === undefined
       ? generateId()
       : requireUuid(options.executionId, "executionId");
-  if (options.materializationDigest !== undefined && !/^[0-9a-f]{64}$/.test(options.materializationDigest)) {
-    throw new RepositoryValidationError("materializationDigest must be 64 lower-hex chars");
+  if (
+    options.materializationDigest !== undefined &&
+    !/^[0-9a-f]{64}$/.test(options.materializationDigest)
+  ) {
+    throw new RepositoryValidationError(
+      "materializationDigest must be 64 lower-hex chars",
+    );
   }
   const reserved = withImmediateTx(
     db,
@@ -1552,8 +1608,8 @@ export function readRunSessionId(
   runId: string,
 ): string | null {
   const id = requireUuid(runId, "runId");
-  const row = db
-    .prepare("SELECT session_id FROM runs WHERE id=?")
-    .get(id) as { session_id: string } | undefined;
+  const row = db.prepare("SELECT session_id FROM runs WHERE id=?").get(id) as
+    | { session_id: string }
+    | undefined;
   return row?.session_id ?? null;
 }

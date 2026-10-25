@@ -11,8 +11,8 @@
 // handling. The PID file is written by the fixture itself into OS tmp.
 
 import {
-  readFileSync,
   readdirSync,
+  readFileSync,
   readlinkSync,
   realpathSync,
   rmSync,
