@@ -50,6 +50,8 @@ import {
   type TrialRunnerSpawn,
 } from "../src/trial_runner.js";
 
+const linuxDescribe = process.platform === "linux" ? describe : describe.skip;
+
 const NOW = 1_760_000_000_000;
 const CAPS: AutodispatchConfig["caps"] = {
   timeoutMs: 60_000,
@@ -235,7 +237,7 @@ const POLICY = {
 
 const EXECUTION_ID = "77777777-7777-4777-8777-777777777777";
 
-function materializerFor(fixture: Fixture) {
+function materializerFor(fixture: Fixture, platform?: NodeJS.Platform) {
   return createAutodispatchMaterializer({
     config: fixture.config,
     runtimeDir: fixture.runtimeDir,
@@ -244,10 +246,11 @@ function materializerFor(fixture: Fixture) {
     enabled: true,
     disclosedWholeRepoRead: true,
     now: () => NOW,
+    ...(platform === undefined ? {} : { platform }),
   });
 }
 
-describe("autodispatch materializer", () => {
+linuxDescribe("autodispatch materializer (Linux)", () => {
   it("prepares an exact sealed snapshot/depot/profile and excludes secrets", async () => {
     const fx = makeFixture();
     try {
@@ -480,359 +483,88 @@ async function openRepo(): Promise<{
   };
 }
 
-describe("autodispatch materializer + existing ledger/runner resolver", () => {
-  it("persists the exact materialization with the grant and resolves it before claim", async () => {
-    const fx = makeFixture();
-    const db = await openRepo();
-    try {
-      const repo = db.repo;
-      const ctl = repo.getAutonomyControlState();
-      repo.setAutonomyControlState(
-        { paused: false, expectedVersion: ctl.version },
-        { key: randomUUID(), now: NOW },
-      );
-      const sessionId = repo.createSession({ key: randomUUID(), now: NOW }).body
-        .sessionId;
-      const posted = repo.postMessage(
-        sessionId,
-        { text: "Please implement the feature. Go ahead." },
-        { key: randomUUID(), now: NOW + 10 },
-      );
-      repo.startRun(posted.body.run.id, { now: NOW + 11 });
-      repo.completeRun(
-        posted.body.run.id,
-        { version: 1, text: "ok" } as never,
-        { now: NOW + 12 },
-      );
-      const policy = repo.createAutodispatchPolicy(
-        sessionId,
-        {
-          workspaceAlias: fx.config.workspaceAlias,
-          operations: ["investigate", "implement"],
-          readScopes: ["src"],
-          writeScopes: ["src"],
-          checks: ["lint"],
-          caps: CAPS,
-          expiresAt: null,
-        },
-        {
-          key: randomUUID(),
-          now: NOW + 20,
-          limits: {
+linuxDescribe(
+  "autodispatch materializer + existing ledger/runner resolver (Linux)",
+  () => {
+    it("persists the exact materialization with the grant and resolves it before claim", async () => {
+      const fx = makeFixture();
+      const db = await openRepo();
+      try {
+        const repo = db.repo;
+        const ctl = repo.getAutonomyControlState();
+        repo.setAutonomyControlState(
+          { paused: false, expectedVersion: ctl.version },
+          { key: randomUUID(), now: NOW },
+        );
+        const sessionId = repo.createSession({ key: randomUUID(), now: NOW })
+          .body.sessionId;
+        const posted = repo.postMessage(
+          sessionId,
+          { text: "Please implement the feature. Go ahead." },
+          { key: randomUUID(), now: NOW + 10 },
+        );
+        repo.startRun(posted.body.run.id, { now: NOW + 11 });
+        repo.completeRun(
+          posted.body.run.id,
+          { version: 1, text: "ok" } as never,
+          { now: NOW + 12 },
+        );
+        const policy = repo.createAutodispatchPolicy(
+          sessionId,
+          {
+            workspaceAlias: fx.config.workspaceAlias,
             operations: ["investigate", "implement"],
+            readScopes: ["src"],
+            writeScopes: ["src"],
             checks: ["lint"],
             caps: CAPS,
+            expiresAt: null,
           },
-          parent: {
-            statement: "Standing policy for the approved workspace",
-            sourceTurnId: posted.body.turnId,
+          {
+            key: randomUUID(),
+            now: NOW + 20,
+            limits: {
+              operations: ["investigate", "implement"],
+              checks: ["lint"],
+              caps: CAPS,
+            },
+            parent: {
+              statement: "Standing policy for the approved workspace",
+              sourceTurnId: posted.body.turnId,
+            },
           },
-        },
-      );
-      const planner: AutodispatchPlanner = {
-        async propose(input) {
-          return {
-            operation: "implement",
-            content: {
-              goal: "Implement the accepted feature",
-              decisions: [],
-              nongoals: [],
-              steps: ["Edit src/app.ts"],
-              acceptance: ["lint passes"],
-              missing: [],
-              relevantPaths: ["src/app.ts"],
-            },
-            intent: {
-              kind: "execute",
-              quotes: [
-                {
-                  turnId: input.latestUserTurnId,
-                  runId: input.latestUserRunId,
-                  text: "implement the feature",
-                },
-              ],
-              latestUserTurnId: input.latestUserTurnId,
-              latestUserRunId: input.latestUserRunId,
-            },
-          };
-        },
-      };
-      const service = createAutodispatchService({
-        repo,
-        config: fx.config,
-        profile: {
-          available: true,
-          enabled: true,
-          mandatoryChecks: ["lint"],
-          configFingerprint: "b".repeat(64),
-          sourceRevision: "a".repeat(40),
-          currentModel: "test-model",
-          disclosedWholeRepoRead: true,
-          timeoutMs: CAPS.timeoutMs,
-          maxOutputBytes: CAPS.maxOutputBytes,
-        },
-        background: createBackgroundResourceGate(),
-        planner,
-        materializer: materializerFor(fx),
-        maxOutputTokens: 256,
-        now: () => NOW + 30,
-      });
-      service.onRunCompleted(posted.body.run.id);
-      const deadline = Date.now() + 3000;
-      let authorized:
-        | ReturnType<KernelRepository["listAutodispatchExecutions"]>[number]
-        | undefined;
-      while (Date.now() < deadline) {
-        authorized = repo
-          .listAutodispatchExecutions(sessionId, 10)
-          .find((item) => item.status === "authorized");
-        if (authorized !== undefined) break;
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-      expect(authorized).toBeDefined();
-      expect(policy.status).toBe("active");
-      expect(authorized?.executionId).not.toBeNull();
-      expect(authorized?.materialization?.sourceManifestDigest).toMatch(
-        /^[0-9a-f]{64}$/,
-      );
-      const resolved = await resolveAutodispatchMaterialization(
-        repo,
-        {
-          workspaceAlias: fx.config.workspaceAlias,
-          sourceRoot: fx.config.sourceRoot,
-          dependencyRoot: null,
-          checks: ["lint"],
-        },
-        {
-          sessionId,
-          executionId: authorized!.executionId!,
-          proposalId: "",
-        },
-      );
-      expect(resolved.kind).toBe("policy");
-      if (resolved.kind === "policy") {
-        expect(resolved.profile.configFingerprint).toMatch(/^[0-9a-f]{64}$/);
-        expect(resolved.socketHostPath.startsWith(fx.runtimeDir)).toBe(true);
-        expect(resolved.socketHostPath).not.toContain(
-          join("jobs", authorized!.executionId!),
         );
-        expect(statSync(resolved.runDir).isDirectory()).toBe(true);
-      }
-      await service.stop();
-    } finally {
-      db.close();
-      fx.cleanup();
-    }
-  });
-  it("uses the exact narrow non-whole-second policy timeout for profile, wire, and observed permit", async () => {
-    const base = makeFixture();
-    const fx: Fixture = {
-      ...base,
-      config: {
-        ...base.config,
-        materialization: {
-          ...base.config.materialization!,
-          maxDurationMs: 30_000,
-        },
-      },
-    };
-    // Policy is narrower than BOTH operator caps and not a whole second. The
-    // actual profile/budget/observed unit must all be exactly 12_345ms.
-    const narrowCaps = {
-      ...CAPS,
-      timeoutMs: 12_345,
-    };
-    const db = await openRepo();
-    try {
-      const repo = db.repo;
-      const ctl = repo.getAutonomyControlState();
-      repo.setAutonomyControlState(
-        { paused: false, expectedVersion: ctl.version },
-        { key: randomUUID(), now: NOW },
-      );
-      const sessionId = repo.createSession({ key: randomUUID(), now: NOW }).body
-        .sessionId;
-      const posted = repo.postMessage(
-        sessionId,
-        { text: "Please implement the feature. Go ahead." },
-        { key: randomUUID(), now: NOW + 10 },
-      );
-      repo.startRun(posted.body.run.id, { now: NOW + 11 });
-      repo.completeRun(
-        posted.body.run.id,
-        { version: 1, text: "ok" } as never,
-        { now: NOW + 12 },
-      );
-      repo.createAutodispatchPolicy(
-        sessionId,
-        {
-          workspaceAlias: fx.config.workspaceAlias,
-          operations: ["investigate", "implement"],
-          readScopes: ["src"],
-          writeScopes: ["src"],
-          checks: ["lint"],
-          caps: narrowCaps,
-          expiresAt: null,
-        },
-        {
-          key: randomUUID(),
-          now: NOW + 20,
-          limits: {
-            operations: ["investigate", "implement"],
-            checks: ["lint"],
-            caps: narrowCaps,
-          },
-          parent: {
-            statement: "Standing policy for the approved workspace",
-            sourceTurnId: posted.body.turnId,
-          },
-        },
-      );
-      const planner: AutodispatchPlanner = {
-        async propose(input) {
-          return {
-            operation: "implement",
-            content: {
-              goal: "Implement the accepted feature",
-              decisions: [],
-              nongoals: [],
-              steps: ["Edit src/app.ts"],
-              acceptance: ["lint passes"],
-              missing: [],
-              relevantPaths: ["src/app.ts"],
-            },
-            intent: {
-              kind: "execute",
-              quotes: [
-                {
-                  turnId: input.latestUserTurnId,
-                  runId: input.latestUserRunId,
-                  text: "implement the feature",
-                },
-              ],
-              latestUserTurnId: input.latestUserTurnId,
-              latestUserRunId: input.latestUserRunId,
-            },
-          };
-        },
-      };
-      const service = createAutodispatchService({
-        repo,
-        config: fx.config,
-        profile: {
-          available: true,
-          enabled: true,
-          mandatoryChecks: ["lint"],
-          configFingerprint: "b".repeat(64),
-          sourceRevision: "a".repeat(40),
-          currentModel: "test-model",
-          disclosedWholeRepoRead: true,
-          timeoutMs: CAPS.timeoutMs,
-          maxOutputBytes: CAPS.maxOutputBytes,
-        },
-        background: createBackgroundResourceGate(),
-        planner,
-        materializer: materializerFor(fx),
-        maxOutputTokens: 256,
-        now: () => NOW + 30,
-      });
-      service.onRunCompleted(posted.body.run.id);
-      const deadline = Date.now() + 3000;
-      let executionId: string | null = null;
-      while (Date.now() < deadline) {
-        const item = repo
-          .listAutodispatchExecutions(sessionId, 10)
-          .find((entry) => entry.status === "authorized");
-        if (item !== undefined) {
-          executionId = item.executionId;
-          break;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-      expect(executionId).not.toBeNull();
-      const stored = repo.readAutodispatchMaterialization(
-        sessionId,
-        executionId as string,
-      );
-      const materialization = JSON.parse(
-        stored?.materializationJson as string,
-      ) as {
-        profile: { timeoutMs: number };
-        state: {
-          jobRoot: string;
-          runDir: string;
-          snapshotRoot: string;
-          dependencyRoot: string;
-        };
-      };
-      expect(materialization.profile.timeoutMs).toBe(12_345);
-
-      const identity = {
-        pid: 5252,
-        bootId: "boot-narrow",
-        processStartTicks: "4242",
-      };
-      const exited = { current: false };
-      const observer: TrialRunnerObserverFns = {
-        expectedScopeUnit: (id: string) =>
-          `capsule-${id}-${"c".repeat(64)}.scope`,
-        queryScope: async () =>
-          exited.current
-            ? { scopeState: "gone" as const }
-            : {
-                scopeState: "active" as const,
-                remainingRuntimeMs: 12_345,
-                // Exact unit bound: the wire budget below must match it.
-                runtimeMaxUsec: 12_345_000n,
+        const planner: AutodispatchPlanner = {
+          async propose(input) {
+            return {
+              operation: "implement",
+              content: {
+                goal: "Implement the accepted feature",
+                decisions: [],
+                nongoals: [],
+                steps: ["Edit src/app.ts"],
+                acceptance: ["lint passes"],
+                missing: [],
+                relevantPaths: ["src/app.ts"],
               },
-        readIdentity: async () => (exited.current ? "gone" : { ...identity }),
-      };
-      const relayFactory = (sockPath: string): TrialRunnerRelay => ({
-        path: sockPath,
-        setPermitted() {},
-        revoke() {},
-        async start() {},
-        async close() {},
-      });
-      const spawnImpl = (() => {
-        const child = new EventEmitter() as EventEmitter & {
-          pid?: number;
-          stdin: { write: (chunk: string) => void; end: () => void };
-          stdout: EventEmitter;
-          stderr: EventEmitter;
-          stdio: unknown[];
-          kill: () => void;
+              intent: {
+                kind: "execute",
+                quotes: [
+                  {
+                    turnId: input.latestUserTurnId,
+                    runId: input.latestUserRunId,
+                    text: "implement the feature",
+                  },
+                ],
+                latestUserTurnId: input.latestUserTurnId,
+                latestUserRunId: input.latestUserRunId,
+              },
+            };
+          },
         };
-        child.pid = identity.pid;
-        child.stdin = { write() {}, end() {} };
-        child.stdout = new EventEmitter();
-        child.stderr = new EventEmitter();
-        child.stdio = [
-          child.stdin,
-          child.stdout,
-          child.stderr,
-          { destroy() {} },
-        ];
-        child.kill = () => {
-          exited.current = true;
-          child.emit("exit", 1, null);
-        };
-        setTimeout(() => {
-          exited.current = true;
-          child.emit("exit", 1, null);
-        }, 20);
-        return child;
-      }) as unknown as TrialRunnerSpawn;
-      const { logger } = createCollectingLogger("debug");
-      const runner = new TrialRunner({
-        repo,
-        config: {
-          nodeRealpath: process.execPath,
-          bridgeScriptPath: "/fake/bridge.mjs",
-          bridgeConfigTemplatePath: "/fake/template.json",
-          systemctlRealpath: "/usr/bin/systemctl",
-          xdgRuntimeDir: "/run/user/1000",
-          workspaceAlias: fx.config.workspaceAlias,
+        const service = createAutodispatchService({
+          repo,
+          config: fx.config,
           profile: {
             available: true,
             enabled: true,
@@ -844,144 +576,447 @@ describe("autodispatch materializer + existing ledger/runner resolver", () => {
             timeoutMs: CAPS.timeoutMs,
             maxOutputBytes: CAPS.maxOutputBytes,
           },
-          relayCaps: {
-            maxRequestBytes: 1_048_576,
-            maxModelCalls: 8,
-            maxOutputTokens: 256,
-            maxResponseBytes: 1_048_576,
-            perCallTimeoutMs: 5_000,
-            maxConcurrent: 1,
+          background: createBackgroundResourceGate(),
+          planner,
+          materializer: materializerFor(fx),
+          maxOutputTokens: 256,
+          now: () => NOW + 30,
+        });
+        service.onRunCompleted(posted.body.run.id);
+        const deadline = Date.now() + 3000;
+        let authorized:
+          | ReturnType<KernelRepository["listAutodispatchExecutions"]>[number]
+          | undefined;
+        while (Date.now() < deadline) {
+          authorized = repo
+            .listAutodispatchExecutions(sessionId, 10)
+            .find((item) => item.status === "authorized");
+          if (authorized !== undefined) break;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        expect(authorized).toBeDefined();
+        expect(policy.status).toBe("active");
+        expect(authorized?.executionId).not.toBeNull();
+        expect(authorized?.materialization?.sourceManifestDigest).toMatch(
+          /^[0-9a-f]{64}$/,
+        );
+        const resolved = await resolveAutodispatchMaterialization(
+          repo,
+          {
+            workspaceAlias: fx.config.workspaceAlias,
+            sourceRoot: fx.config.sourceRoot,
+            dependencyRoot: null,
+            checks: ["lint"],
           },
-          fixedModel: "test-model",
-          gateway: {
-            provider: "openai-compatible",
-            capabilities: { toolCalling: true },
-            baseUrl: "http://127.0.0.1:9",
-            chatUrl: "http://127.0.0.1:9/v1/chat/completions",
-            async chat() {
-              return {
-                text: "stub",
-                toolCalls: [],
-                stopReason: "stop" as const,
-              };
-            },
-          } as unknown as ModelGateway,
-          observe: {
-            activeTimeoutMs: 2_000,
-            goneTimeoutMs: 2_000,
-            pollIntervalMs: 5,
+          {
+            sessionId,
+            executionId: authorized!.executionId!,
+            proposalId: "",
           },
-          resolveMaterialization: (input) =>
-            resolveAutodispatchMaterialization(
-              repo,
-              {
-                workspaceAlias: fx.config.workspaceAlias,
-                sourceRoot: fx.config.sourceRoot,
-                dependencyRoot: null,
-                checks: ["lint"],
-                runtimeDir: fx.runtimeDir,
-              },
-              input,
-            ),
-        },
-        isForegroundBusy: () => false,
-        logger,
-        observer,
-        createRelay: relayFactory,
-        spawnImpl,
-        clock: () => NOW + 100,
-      });
-      const result = await runner.runNext();
-      expect(result.executionId).toBe(executionId);
-      const intent = repo.readTrialLaunchIntent(
-        sessionId,
-        executionId as string,
-      );
-      if (intent.request === null)
-        throw new Error("claimed launch intent request missing");
-      expect(intent.request.budget.timeoutMs).toBe(12_345);
-      expect(
-        repo.readTrialLaunchPermit(sessionId, executionId as string),
-      ).not.toBeNull();
-      // Gone was observed before cleanup: heavy copies are reclaimed, the
-      // small run dir + retention metadata stay for review.
-      expect(existsSync(materialization.state.snapshotRoot)).toBe(false);
-      expect(existsSync(materialization.state.dependencyRoot)).toBe(false);
-      expect(existsSync(materialization.state.runDir)).toBe(true);
-      expect(
-        JSON.parse(
-          readFileSync(
-            join(materialization.state.jobRoot, "retention.json"),
-            "utf8",
-          ),
-        ).status,
-      ).toBe("cleaned");
-      await service.stop();
-    } finally {
-      db.close();
-      base.cleanup();
-    }
-  });
-
-  it("retains active/unknown jobs and shared depots; terminal cleanup is idempotent", async () => {
-    const fx = makeFixture();
-    const db = await openRepo();
-    try {
-      const repo = db.repo;
-      const activeExecution = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-      const active = await materializerFor(fx).prepare({
-        plan: PLAN,
-        policy: POLICY,
-        executionId: activeExecution,
-        now: NOW,
-      });
-      if (!active.ok) throw new Error("prepare failed");
-      const pruned = pruneAutodispatchMaterializations(
-        repo,
-        fx.config,
-        NOW + 1,
-      );
-      expect(pruned.retained).toBe(1);
-      expect(pruned.prepared).toBe(1);
-      expect(existsSync(active.materialization.state.snapshotRoot)).toBe(true);
-
-      const terminalExecution = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-      const terminal = await materializerFor(fx).prepare({
-        plan: PLAN,
-        policy: POLICY,
-        executionId: terminalExecution,
-        now: NOW + 2,
-      });
-      if (!terminal.ok) throw new Error("prepare failed");
-      const sharedDepot = join(fx.dir, "shared-depot");
-      write(join(sharedDepot, "node_modules", "pkg", "index.js"), "shared\n");
-      const forged = {
-        ...terminal.materialization,
-        state: {
-          ...terminal.materialization.state,
-          dependencyRoot: sharedDepot,
+        );
+        expect(resolved.kind).toBe("policy");
+        if (resolved.kind === "policy") {
+          expect(resolved.profile.configFingerprint).toMatch(/^[0-9a-f]{64}$/);
+          expect(resolved.socketHostPath.startsWith(fx.runtimeDir)).toBe(true);
+          expect(resolved.socketHostPath).not.toContain(
+            join("jobs", authorized!.executionId!),
+          );
+          expect(statSync(resolved.runDir).isDirectory()).toBe(true);
+        }
+        await service.stop();
+      } finally {
+        db.close();
+        fx.cleanup();
+      }
+    });
+    it("uses the exact narrow non-whole-second policy timeout for profile, wire, and observed permit", async () => {
+      const base = makeFixture();
+      const fx: Fixture = {
+        ...base,
+        config: {
+          ...base.config,
+          materialization: {
+            ...base.config.materialization!,
+            maxDurationMs: 30_000,
+          },
         },
       };
-      cleanupTerminalAutodispatchMaterialization(forged, NOW + 3);
-      // Idempotent repeat (already removed heavy roots).
-      cleanupTerminalAutodispatchMaterialization(forged, NOW + 4);
-      expect(existsSync(terminal.materialization.state.snapshotRoot)).toBe(
-        false,
-      );
-      expect(
-        existsSync(join(sharedDepot, "node_modules", "pkg", "index.js")),
-      ).toBe(true);
-      expect(
-        JSON.parse(
-          readFileSync(
-            join(terminal.materialization.state.jobRoot, "retention.json"),
-            "utf8",
-          ),
-        ).status,
-      ).toBe("cleaned");
-    } finally {
-      db.close();
-      fx.cleanup();
-    }
-  });
+      // Policy is narrower than BOTH operator caps and not a whole second. The
+      // actual profile/budget/observed unit must all be exactly 12_345ms.
+      const narrowCaps = {
+        ...CAPS,
+        timeoutMs: 12_345,
+      };
+      const db = await openRepo();
+      try {
+        const repo = db.repo;
+        const ctl = repo.getAutonomyControlState();
+        repo.setAutonomyControlState(
+          { paused: false, expectedVersion: ctl.version },
+          { key: randomUUID(), now: NOW },
+        );
+        const sessionId = repo.createSession({ key: randomUUID(), now: NOW })
+          .body.sessionId;
+        const posted = repo.postMessage(
+          sessionId,
+          { text: "Please implement the feature. Go ahead." },
+          { key: randomUUID(), now: NOW + 10 },
+        );
+        repo.startRun(posted.body.run.id, { now: NOW + 11 });
+        repo.completeRun(
+          posted.body.run.id,
+          { version: 1, text: "ok" } as never,
+          { now: NOW + 12 },
+        );
+        repo.createAutodispatchPolicy(
+          sessionId,
+          {
+            workspaceAlias: fx.config.workspaceAlias,
+            operations: ["investigate", "implement"],
+            readScopes: ["src"],
+            writeScopes: ["src"],
+            checks: ["lint"],
+            caps: narrowCaps,
+            expiresAt: null,
+          },
+          {
+            key: randomUUID(),
+            now: NOW + 20,
+            limits: {
+              operations: ["investigate", "implement"],
+              checks: ["lint"],
+              caps: narrowCaps,
+            },
+            parent: {
+              statement: "Standing policy for the approved workspace",
+              sourceTurnId: posted.body.turnId,
+            },
+          },
+        );
+        const planner: AutodispatchPlanner = {
+          async propose(input) {
+            return {
+              operation: "implement",
+              content: {
+                goal: "Implement the accepted feature",
+                decisions: [],
+                nongoals: [],
+                steps: ["Edit src/app.ts"],
+                acceptance: ["lint passes"],
+                missing: [],
+                relevantPaths: ["src/app.ts"],
+              },
+              intent: {
+                kind: "execute",
+                quotes: [
+                  {
+                    turnId: input.latestUserTurnId,
+                    runId: input.latestUserRunId,
+                    text: "implement the feature",
+                  },
+                ],
+                latestUserTurnId: input.latestUserTurnId,
+                latestUserRunId: input.latestUserRunId,
+              },
+            };
+          },
+        };
+        const service = createAutodispatchService({
+          repo,
+          config: fx.config,
+          profile: {
+            available: true,
+            enabled: true,
+            mandatoryChecks: ["lint"],
+            configFingerprint: "b".repeat(64),
+            sourceRevision: "a".repeat(40),
+            currentModel: "test-model",
+            disclosedWholeRepoRead: true,
+            timeoutMs: CAPS.timeoutMs,
+            maxOutputBytes: CAPS.maxOutputBytes,
+          },
+          background: createBackgroundResourceGate(),
+          planner,
+          materializer: materializerFor(fx),
+          maxOutputTokens: 256,
+          now: () => NOW + 30,
+        });
+        service.onRunCompleted(posted.body.run.id);
+        const deadline = Date.now() + 3000;
+        let executionId: string | null = null;
+        while (Date.now() < deadline) {
+          const item = repo
+            .listAutodispatchExecutions(sessionId, 10)
+            .find((entry) => entry.status === "authorized");
+          if (item !== undefined) {
+            executionId = item.executionId;
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        expect(executionId).not.toBeNull();
+        const stored = repo.readAutodispatchMaterialization(
+          sessionId,
+          executionId as string,
+        );
+        const materialization = JSON.parse(
+          stored?.materializationJson as string,
+        ) as {
+          profile: { timeoutMs: number };
+          state: {
+            jobRoot: string;
+            runDir: string;
+            snapshotRoot: string;
+            dependencyRoot: string;
+          };
+        };
+        expect(materialization.profile.timeoutMs).toBe(12_345);
+
+        const identity = {
+          pid: 5252,
+          bootId: "boot-narrow",
+          processStartTicks: "4242",
+        };
+        const exited = { current: false };
+        const observer: TrialRunnerObserverFns = {
+          expectedScopeUnit: (id: string) =>
+            `capsule-${id}-${"c".repeat(64)}.scope`,
+          queryScope: async () =>
+            exited.current
+              ? { scopeState: "gone" as const }
+              : {
+                  scopeState: "active" as const,
+                  remainingRuntimeMs: 12_345,
+                  // Exact unit bound: the wire budget below must match it.
+                  runtimeMaxUsec: 12_345_000n,
+                },
+          readIdentity: async () => (exited.current ? "gone" : { ...identity }),
+        };
+        const relayFactory = (sockPath: string): TrialRunnerRelay => ({
+          path: sockPath,
+          setPermitted() {},
+          revoke() {},
+          async start() {},
+          async close() {},
+        });
+        const spawnImpl = (() => {
+          const child = new EventEmitter() as EventEmitter & {
+            pid?: number;
+            stdin: { write: (chunk: string) => void; end: () => void };
+            stdout: EventEmitter;
+            stderr: EventEmitter;
+            stdio: unknown[];
+            kill: () => void;
+          };
+          child.pid = identity.pid;
+          child.stdin = { write() {}, end() {} };
+          child.stdout = new EventEmitter();
+          child.stderr = new EventEmitter();
+          child.stdio = [
+            child.stdin,
+            child.stdout,
+            child.stderr,
+            { destroy() {} },
+          ];
+          child.kill = () => {
+            exited.current = true;
+            child.emit("exit", 1, null);
+          };
+          setTimeout(() => {
+            exited.current = true;
+            child.emit("exit", 1, null);
+          }, 20);
+          return child;
+        }) as unknown as TrialRunnerSpawn;
+        const { logger } = createCollectingLogger("debug");
+        const runner = new TrialRunner({
+          repo,
+          config: {
+            nodeRealpath: process.execPath,
+            bridgeScriptPath: "/fake/bridge.mjs",
+            bridgeConfigTemplatePath: "/fake/template.json",
+            systemctlRealpath: "/usr/bin/systemctl",
+            xdgRuntimeDir: "/run/user/1000",
+            workspaceAlias: fx.config.workspaceAlias,
+            profile: {
+              available: true,
+              enabled: true,
+              mandatoryChecks: ["lint"],
+              configFingerprint: "b".repeat(64),
+              sourceRevision: "a".repeat(40),
+              currentModel: "test-model",
+              disclosedWholeRepoRead: true,
+              timeoutMs: CAPS.timeoutMs,
+              maxOutputBytes: CAPS.maxOutputBytes,
+            },
+            relayCaps: {
+              maxRequestBytes: 1_048_576,
+              maxModelCalls: 8,
+              maxOutputTokens: 256,
+              maxResponseBytes: 1_048_576,
+              perCallTimeoutMs: 5_000,
+              maxConcurrent: 1,
+            },
+            fixedModel: "test-model",
+            gateway: {
+              provider: "openai-compatible",
+              capabilities: { toolCalling: true },
+              baseUrl: "http://127.0.0.1:9",
+              chatUrl: "http://127.0.0.1:9/v1/chat/completions",
+              async chat() {
+                return {
+                  text: "stub",
+                  toolCalls: [],
+                  stopReason: "stop" as const,
+                };
+              },
+            } as unknown as ModelGateway,
+            observe: {
+              activeTimeoutMs: 2_000,
+              goneTimeoutMs: 2_000,
+              pollIntervalMs: 5,
+            },
+            resolveMaterialization: (input) =>
+              resolveAutodispatchMaterialization(
+                repo,
+                {
+                  workspaceAlias: fx.config.workspaceAlias,
+                  sourceRoot: fx.config.sourceRoot,
+                  dependencyRoot: null,
+                  checks: ["lint"],
+                  runtimeDir: fx.runtimeDir,
+                },
+                input,
+              ),
+          },
+          isForegroundBusy: () => false,
+          logger,
+          observer,
+          createRelay: relayFactory,
+          spawnImpl,
+          clock: () => NOW + 100,
+        });
+        const result = await runner.runNext();
+        expect(result.executionId).toBe(executionId);
+        const intent = repo.readTrialLaunchIntent(
+          sessionId,
+          executionId as string,
+        );
+        if (intent.request === null)
+          throw new Error("claimed launch intent request missing");
+        expect(intent.request.budget.timeoutMs).toBe(12_345);
+        expect(
+          repo.readTrialLaunchPermit(sessionId, executionId as string),
+        ).not.toBeNull();
+        // Gone was observed before cleanup: heavy copies are reclaimed, the
+        // small run dir + retention metadata stay for review.
+        expect(existsSync(materialization.state.snapshotRoot)).toBe(false);
+        expect(existsSync(materialization.state.dependencyRoot)).toBe(false);
+        expect(existsSync(materialization.state.runDir)).toBe(true);
+        expect(
+          JSON.parse(
+            readFileSync(
+              join(materialization.state.jobRoot, "retention.json"),
+              "utf8",
+            ),
+          ).status,
+        ).toBe("cleaned");
+        await service.stop();
+      } finally {
+        db.close();
+        base.cleanup();
+      }
+    });
+
+    it("retains active/unknown jobs and shared depots; terminal cleanup is idempotent", async () => {
+      const fx = makeFixture();
+      const db = await openRepo();
+      try {
+        const repo = db.repo;
+        const activeExecution = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        const active = await materializerFor(fx).prepare({
+          plan: PLAN,
+          policy: POLICY,
+          executionId: activeExecution,
+          now: NOW,
+        });
+        if (!active.ok) throw new Error("prepare failed");
+        const pruned = pruneAutodispatchMaterializations(
+          repo,
+          fx.config,
+          NOW + 1,
+        );
+        expect(pruned.retained).toBe(1);
+        expect(pruned.prepared).toBe(1);
+        expect(existsSync(active.materialization.state.snapshotRoot)).toBe(
+          true,
+        );
+
+        const terminalExecution = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+        const terminal = await materializerFor(fx).prepare({
+          plan: PLAN,
+          policy: POLICY,
+          executionId: terminalExecution,
+          now: NOW + 2,
+        });
+        if (!terminal.ok) throw new Error("prepare failed");
+        const sharedDepot = join(fx.dir, "shared-depot");
+        write(join(sharedDepot, "node_modules", "pkg", "index.js"), "shared\n");
+        const forged = {
+          ...terminal.materialization,
+          state: {
+            ...terminal.materialization.state,
+            dependencyRoot: sharedDepot,
+          },
+        };
+        cleanupTerminalAutodispatchMaterialization(forged, NOW + 3);
+        // Idempotent repeat (already removed heavy roots).
+        cleanupTerminalAutodispatchMaterialization(forged, NOW + 4);
+        expect(existsSync(terminal.materialization.state.snapshotRoot)).toBe(
+          false,
+        );
+        expect(
+          existsSync(join(sharedDepot, "node_modules", "pkg", "index.js")),
+        ).toBe(true);
+        expect(
+          JSON.parse(
+            readFileSync(
+              join(terminal.materialization.state.jobRoot, "retention.json"),
+              "utf8",
+            ),
+          ).status,
+        ).toBe("cleaned");
+      } finally {
+        db.close();
+        fx.cleanup();
+      }
+    });
+  },
+);
+
+describe("unsupported host contract", () => {
+  it.each(["darwin", "win32"] as const)(
+    "fails closed on %s before any job output, grant, or host execution",
+    async (platform) => {
+      const fx = makeFixture();
+      try {
+        const result = await materializerFor(fx, platform).prepare({
+          plan: PLAN,
+          policy: POLICY,
+          executionId: EXECUTION_ID,
+          now: NOW,
+        });
+        expect(result).toMatchObject({
+          ok: false,
+          code: "unsupported_platform",
+        });
+        // No job/state tree and no relay socket were created, so no grant may
+        // reference a fabricated materialization and no host child can launch.
+        expect(existsSync(join(fx.stateDir, "jobs"))).toBe(false);
+        expect(readdirSync(fx.runtimeDir)).toEqual([]);
+      } finally {
+        fx.cleanup();
+      }
+    },
+  );
 });

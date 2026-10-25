@@ -8,6 +8,7 @@ import {
   appendFileSync,
   chmodSync,
   cpSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -28,6 +29,8 @@ import {
   validateCandidateChanges,
   verifySealedWorkspaceSnapshot,
 } from "../src/autonomous_workspace.js";
+
+const posixDescribe = process.platform === "win32" ? describe.skip : describe;
 
 const roots: string[] = [];
 
@@ -118,7 +121,7 @@ function rejected(result: CandidateValidationResult): string[] {
   return [...result.rejected];
 }
 
-describe("createSealedWorkspaceSnapshot", () => {
+posixDescribe("createSealedWorkspaceSnapshot", () => {
   it("copies only explicit allowed paths and includes dirty bytes", async () => {
     const { snapshot } = await makeFixture();
     expect(snapshot.manifest.map((entry) => entry.path)).toEqual([
@@ -216,7 +219,7 @@ describe("createSealedWorkspaceSnapshot", () => {
   });
 });
 
-describe("verifySealedWorkspaceSnapshot", () => {
+posixDescribe("verifySealedWorkspaceSnapshot", () => {
   it("detects snapshot content tampering", async () => {
     const { snapshot } = await makeFixture();
     appendFileSync(join(snapshot.snapshotRoot, "src/app.ts"), "tamper\n");
@@ -278,7 +281,7 @@ describe("verifySealedWorkspaceSnapshot", () => {
   });
 });
 
-describe("validateCandidateChanges", () => {
+posixDescribe("validateCandidateChanges", () => {
   it("returns verified add/modify/delete metadata with base hashes", async () => {
     const { snapshot } = await makeFixture();
     const candidate = await copyCandidate(snapshot);
@@ -552,5 +555,44 @@ describe("SealedWorkspaceError", () => {
     const error = new SealedWorkspaceError("scope_violation", "outside");
     expect(error.code).toBe("scope_violation");
     expect(error).toBeInstanceOf(Error);
+  });
+});
+
+describe("unsupported host contract", () => {
+  it("fails closed before creating any output or reading a snapshot", async () => {
+    const root = tempRoot("unsupported");
+    const output = join(root, "workspace");
+    await expectCode(
+      createSealedWorkspaceSnapshot({
+        sourceRoot: join(root, "does-not-exist"),
+        outputDir: output,
+        allowedRoots: [],
+        allowedTopLevelFiles: [],
+        platform: "win32",
+      }),
+      "unsupported_platform",
+    );
+    // The rejection is BEFORE mkdir/copy, so no consumer output exists.
+    expect(existsSync(output)).toBe(false);
+
+    const verified = await verifySealedWorkspaceSnapshot(
+      {} as SealedWorkspaceSnapshot,
+      { expectedManifestDigest: "not-a-digest", platform: "win32" },
+    );
+    expect(verified).toMatchObject({ ok: false });
+    if (verified.ok) throw new Error("expected unsupported rejection");
+    expect(verified.reason).toContain("unsupported_platform");
+
+    await expectCode(
+      validateCandidateChanges({
+        snapshot: {} as SealedWorkspaceSnapshot,
+        expectedManifestDigest: "not-a-digest",
+        candidateRoot: join(root, "does-not-exist"),
+        mode: "read_only",
+        allowedEditPaths: [],
+        platform: "win32",
+      }),
+      "unsupported_platform",
+    );
   });
 });

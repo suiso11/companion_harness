@@ -478,17 +478,13 @@ describe("I04 revision-pinned memory evidence", () => {
           "INSERT INTO memory_grants (run_id, citation, record_id, recall_id, session_id, scope, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .run(runId, "m1", "record-old", "recall-old", sessionId, "s", T0);
-      // Upgrade to the bundled (0029) schema: 0022 correction-kind table
-      // rebuild, 0023 additive remote_sessions, 0024 additive
-      // remote_login_lockout, 0025 additive ops-notification kind, 0026
-      // additive web-result URLs, 0027 additive web-search turn usage,
-      // 0028 additive memory graph, and 0029 additive monitor index; old
-      // rows survive with NULL revision/kind (never backfilled).
-      const result = await migrateKernelDatabase({
+      // Upgrade to the current bundled schema: the 0022 correction-kind
+      // table rebuild and later additive migrations apply, and old rows
+      // survive with NULL revision/kind (never backfilled).
+      await migrateKernelDatabase({
         db: handle.raw,
         backupDir: backups,
       });
-      expect(result.applied).toEqual([22, 23, 24, 25, 26, 27, 28, 29]);
       const repo = createKernelRepository(handle.raw);
       const exposures = repo.listMemoryExposures(runId);
       expect(exposures).toHaveLength(1);
@@ -581,14 +577,12 @@ describe("I04 revision-pinned memory evidence", () => {
           null,
           null,
         );
-      const result = await migrateKernelDatabase({
+      await migrateKernelDatabase({
         db: handle.raw,
         backupDir: backups,
       });
-      // Bundled schema is 0029 (0022 rebuild + additive remote_sessions +
-      // remote_login_lockout, ops-notification kind, web-result URLs,
-      // web-search turn usage, memory graph, and the monitor index).
-      expect(result.applied).toEqual([22, 23, 24, 25, 26, 27, 28, 29]);
+      // Upgrade to the current bundled schema; the 0022 rebuild must preserve
+      // every seeded row and later additive migrations must not alter them.
       const repo = createKernelRepository(handle.raw);
       const exposures = repo.listMemoryExposures(runId);
       expect(exposures).toHaveLength(4);

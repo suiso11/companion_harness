@@ -18,6 +18,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { CompanionJournal } from "../../../scripts/pi-orch-bridge/companion-journal.mjs";
 import {
@@ -42,11 +43,13 @@ import {
   type SealedWorkspaceSnapshot,
 } from "../src/autonomous_workspace.js";
 
-const BRIDGE = join(
+const posixDescribe = process.platform === "win32" ? describe.skip : describe;
+
+const BRIDGE = fileURLToPath(
   new URL(
     "../../../scripts/pi-orch-bridge/companion-bridge.mjs",
     import.meta.url,
-  ).pathname,
+  ),
 );
 const roots: string[] = [];
 
@@ -111,6 +114,7 @@ async function makeFixture(options: {
     "module.exports = 'pinned';\n",
   );
 
+  const backend = options.backend ?? "offline-fixture";
   const executorPath = join(dir, "bin", "executor.mjs");
   write(executorPath, `#!${process.execPath}\n${options.executorBody}`, 0o700);
   const checkPath = join(dir, "bin", "check.mjs");
@@ -137,7 +141,6 @@ async function makeFixture(options: {
   const fakeSystemctl = join(dir, "bin", "systemctl");
   write(fakeSystemctl, "#!/bin/sh\nexit 0\n", 0o700);
 
-  const backend = options.backend ?? "offline-fixture";
   const config: OperatorConfig = {
     version: 2,
     stateDir: join(dir, "state"),
@@ -379,7 +382,7 @@ function guestReportBody(delegatedWorkers: unknown[], extraBody = ""): string {
   )});\n${extraBody}`;
 }
 
-describe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
+describe("sealed pi-orch bridge portable protocol/command contract", () => {
   it("--describe is side-effect free and marks sealed/test defaults", () => {
     const dir = tempRoot("describe");
     const out = spawnSync(process.execPath, [BRIDGE, "--describe"], {
@@ -430,7 +433,9 @@ describe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
     expect(built.args).toContain("RuntimeMaxSec=12345ms");
     expect(built.args).not.toContain("RuntimeMaxSec=13");
   });
+});
 
+posixDescribe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
   it("runs a real synthetic read-only trial and retains artifact metadata", async () => {
     const fixture = await makeFixture({
       executorBody: "process.stdout.write('executor-ok\\n');\n",
@@ -829,138 +834,152 @@ describe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
     expect(sha256(run.stdout.trim())).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  it("launches a real bwrap guest/check with three-argument --setenv env groups", () => {
-    const bwrap = "/usr/bin/bwrap";
-    const dir = tempRoot("bwrap-env");
-    const workRoot = join(dir, "work");
-    mkdirSync(workRoot, { recursive: true });
-    write(join(workRoot, "work-secret.txt"), "confined-copy\n");
-    const originalSource = join(dir, "original-source", "secret.txt");
-    write(originalSource, "HOST_ORIGINAL_SECRET\n");
-    const jobFile = join(dir, "job.json");
-    write(jobFile, "{}\n");
-    const modelSock = join(dir, "model.sock");
-    write(modelSock, "");
-    const scratchRoot = join(dir, "scratch");
-    mkdirSync(scratchRoot, { recursive: true, mode: 0o700 });
+  it.skipIf(process.platform !== "linux")(
+    "launches a real bwrap guest/check with three-argument --setenv env groups",
+    () => {
+      const bwrap = "/usr/bin/bwrap";
+      const dir = tempRoot("bwrap-env");
+      const workRoot = join(dir, "work");
+      mkdirSync(workRoot, { recursive: true });
+      write(join(workRoot, "work-secret.txt"), "confined-copy\n");
+      const originalSource = join(dir, "original-source", "secret.txt");
+      write(originalSource, "HOST_ORIGINAL_SECRET\n");
+      const jobFile = join(dir, "job.json");
+      write(jobFile, "{}\n");
+      const modelSock = join(dir, "model.sock");
+      write(modelSock, "");
+      const scratchRoot = join(dir, "scratch");
+      mkdirSync(scratchRoot, { recursive: true, mode: 0o700 });
 
-    const observation = [
-      "const fs = require('node:fs');",
-      "let readable = false; let errorCode = null;",
-      "try { fs.readFileSync(process.argv[1], 'utf8'); readable = true; }",
-      "catch (error) { errorCode = error.code; }",
-      // Emulate the guest's OMP model config/cache write. It must land under
-      // the private scratch HOME, never in the /work source copy.
-      "let cacheWrite = false;",
-      "try {",
-      "  fs.mkdirSync(process.env.HOME + '/.omp/agent', { recursive: true, mode: 0o700 });",
-      "  fs.writeFileSync(process.env.HOME + '/.omp/agent/models.yml', 'probe', { mode: 0o600 });",
-      "  cacheWrite = true;",
-      "} catch {}",
-      "process.stdout.write(JSON.stringify({",
-      "home: process.env.HOME,",
-      "tmpdir: process.env.TMPDIR,",
-      "path: process.env.PATH,",
-      "token: process.env.COMPANION_MODEL_TOKEN,",
-      "omp: process.env.COMPANION_OMP_BIN,",
-      "job: process.env.COMPANION_JOB_FILE,",
-      "calls: process.env.COMPANION_MAX_MODEL_CALLS,",
-      "hostOnly: process.env.HOST_ONLY_SECRET ?? null,",
-      "cwd: process.cwd(),",
-      "readable,",
-      "errorCode,",
-      "cacheWrite,",
-      "workOmp: fs.existsSync('/work/.omp'),",
-      "workSecret: fs.readFileSync('/work/work-secret.txt', 'utf8'),",
-      "}));",
-    ].join("\n");
-    // A value with both spaces and '=' proves bwrap receives it as one argument.
-    const ompBin = "/nonexistent omp dir/omp=bin/omp candidate";
-    const profile = {
-      runtime: {
-        bwrapRealpath: bwrap,
-        systemdRunRealpath: "/usr/bin/systemd-run",
-        nodeRealpath: process.execPath,
-        ompRealpath: ompBin,
-      },
-      model: { sockHostPath: modelSock },
-      dependencies: { mounts: [] },
-      executor: {
-        executable: process.execPath,
-        args: ["-e", observation, originalSource],
-      },
-      limits: {
-        memoryMaxBytes: 256 * 1024 * 1024,
-        maxProcesses: 64,
-        cpuQuotaPercent: 100,
-        maxModelCalls: 24,
-        maxOutputTokens: 4096,
-        maxModelCallMs: 120_000,
-        modelConcurrency: 1,
-      },
-    };
-    const launch = (built: { args: string[] }) => {
-      const bwrapIndex = built.args.indexOf(bwrap);
-      expect(bwrapIndex).toBeGreaterThan(0);
-      return spawnSync(bwrap, built.args.slice(bwrapIndex + 1), {
-        encoding: "utf8",
-        timeout: 15_000,
-        env: { ...process.env, HOST_ONLY_SECRET: "host-only-leak" },
-      });
-    };
-
-    const guest = launch(
-      buildWholejobCommand(
-        profile,
-        { executorExecutable: process.execPath, workRoot, jobFile },
-        "capsule-test.scope",
-      ),
-    );
-    expect(guest.status, guest.stderr).toBe(0);
-    const guestEnv = JSON.parse(guest.stdout) as Record<string, unknown>;
-    expect(guestEnv).toMatchObject({
-      home: "/scratch",
-      tmpdir: "/scratch",
-      path: guestPathEnvironment(profile),
-      token: "dummy-bearer-not-a-secret",
-      omp: ompBin,
-      job: "/run/companion-job.json",
-      calls: "24",
-      hostOnly: null,
-      cwd: "/work",
-      readable: false,
-      errorCode: "ENOENT",
-      cacheWrite: true,
-      workOmp: false,
-      workSecret: "confined-copy\n",
-    });
-
-    const check = launch(
-      buildCheckCommand(
-        profile,
-        { workRoot, scratchRoot },
-        "capsule-test.scope",
-        {
+      const observation = [
+        "const fs = require('node:fs');",
+        "let readable = false; let errorCode = null;",
+        "try { fs.readFileSync(process.argv[1], 'utf8'); readable = true; }",
+        "catch (error) { errorCode = error.code; }",
+        // Emulate the guest's OMP model config/cache write. It must land under
+        // the private scratch HOME, never in the /work source copy.
+        "let cacheWrite = false;",
+        "try {",
+        "  fs.mkdirSync(process.env.HOME + '/.omp/agent', { recursive: true, mode: 0o700 });",
+        "  fs.writeFileSync(process.env.HOME + '/.omp/agent/models.yml', 'probe', { mode: 0o600 });",
+        "  cacheWrite = true;",
+        "} catch {}",
+        "process.stdout.write(JSON.stringify({",
+        "home: process.env.HOME,",
+        "tmpdir: process.env.TMPDIR,",
+        "path: process.env.PATH,",
+        "token: process.env.COMPANION_MODEL_TOKEN,",
+        "omp: process.env.COMPANION_OMP_BIN,",
+        "job: process.env.COMPANION_JOB_FILE,",
+        "calls: process.env.COMPANION_MAX_MODEL_CALLS,",
+        "hostOnly: process.env.HOST_ONLY_SECRET ?? null,",
+        "cwd: process.cwd(),",
+        "readable,",
+        "errorCode,",
+        "cacheWrite,",
+        "workOmp: fs.existsSync('/work/.omp'),",
+        "workSecret: fs.readFileSync('/work/work-secret.txt', 'utf8'),",
+        "}));",
+      ].join("\n");
+      // A value with both spaces and '=' proves bwrap receives it as one argument.
+      const ompBin = "/nonexistent omp dir/omp=bin/omp candidate";
+      const profile = {
+        runtime: {
+          bwrapRealpath: bwrap,
+          systemdRunRealpath: "/usr/bin/systemd-run",
+          nodeRealpath: process.execPath,
+          ompRealpath: ompBin,
+        },
+        model: { sockHostPath: modelSock },
+        dependencies: { mounts: [] },
+        executor: {
           executable: process.execPath,
           args: ["-e", observation, originalSource],
         },
-      ),
-    );
-    expect(check.status, check.stderr).toBe(0);
-    const checkEnv = JSON.parse(check.stdout) as Record<string, unknown>;
-    expect(checkEnv).toMatchObject({
-      home: "/scratch",
-      tmpdir: "/scratch",
-      path: guestPathEnvironment(profile),
-      hostOnly: null,
-      cwd: "/work",
-      readable: false,
-      errorCode: "ENOENT",
-      cacheWrite: true,
-      workOmp: false,
-      workSecret: "confined-copy\n",
-    });
-  });
+        limits: {
+          memoryMaxBytes: 256 * 1024 * 1024,
+          maxProcesses: 64,
+          cpuQuotaPercent: 100,
+          maxModelCalls: 24,
+          maxOutputTokens: 4096,
+          maxModelCallMs: 120_000,
+          modelConcurrency: 1,
+        },
+      };
+      const diagnostics = (result: ReturnType<typeof spawnSync>) => ({
+        status: result.status,
+        signal: result.signal,
+        error: result.error
+          ? {
+              code: (result.error as NodeJS.ErrnoException).code,
+              message: result.error.message,
+            }
+          : null,
+        stderr: result.stderr?.toString() ?? "",
+      });
+      const launch = (built: { args: string[] }) => {
+        const bwrapIndex = built.args.indexOf(bwrap);
+        expect(bwrapIndex).toBeGreaterThan(0);
+        return spawnSync(bwrap, built.args.slice(bwrapIndex + 1), {
+          encoding: "utf8",
+          timeout: 15_000,
+          env: { ...process.env, HOST_ONLY_SECRET: "host-only-leak" },
+        });
+      };
+
+      const guest = launch(
+        buildWholejobCommand(
+          profile,
+          { executorExecutable: process.execPath, workRoot, jobFile },
+          "capsule-test.scope",
+        ),
+      );
+      expect(guest.status, JSON.stringify(diagnostics(guest))).toBe(0);
+      const guestEnv = JSON.parse(guest.stdout) as Record<string, unknown>;
+      expect(guestEnv).toMatchObject({
+        home: "/scratch",
+        tmpdir: "/scratch",
+        path: guestPathEnvironment(profile),
+        token: "dummy-bearer-not-a-secret",
+        omp: ompBin,
+        job: "/run/companion-job.json",
+        calls: "24",
+        hostOnly: null,
+        cwd: "/work",
+        readable: false,
+        errorCode: "ENOENT",
+        cacheWrite: true,
+        workOmp: false,
+        workSecret: "confined-copy\n",
+      });
+
+      const check = launch(
+        buildCheckCommand(
+          profile,
+          { workRoot, scratchRoot },
+          "capsule-test.scope",
+          {
+            executable: process.execPath,
+            args: ["-e", observation, originalSource],
+          },
+        ),
+      );
+      expect(check.status, JSON.stringify(diagnostics(check))).toBe(0);
+      const checkEnv = JSON.parse(check.stdout) as Record<string, unknown>;
+      expect(checkEnv).toMatchObject({
+        home: "/scratch",
+        tmpdir: "/scratch",
+        path: guestPathEnvironment(profile),
+        hostOnly: null,
+        cwd: "/work",
+        readable: false,
+        errorCode: "ENOENT",
+        cacheWrite: true,
+        workOmp: false,
+        workSecret: "confined-copy\n",
+      });
+    },
+  );
 
   it("detects a dependency closure mismatch as blocked dependencies", async () => {
     const fixture = await makeFixture({

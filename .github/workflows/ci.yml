@@ -17,6 +17,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # The full matrix runs on both OSes. Native containment (bwrap) is a
+        # Linux-only provision step below; portable tests avoid blanket skips.
         os: [windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
@@ -63,6 +65,12 @@ jobs:
 
       - name: Typecheck
         run: pnpm typecheck
+
+      - name: Install Linux native containment runtime
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
 
       - name: Test
         env:

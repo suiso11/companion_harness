@@ -8,6 +8,7 @@ import { join } from "node:path";
 import type Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  BUNDLED_SCHEMA_VERSION,
   closeKernelDatabase,
   createKernelRepository,
   createReferenceManager,
@@ -289,16 +290,13 @@ describe("pre-0026 upgrade", () => {
         { key: key(), now: T0 + 1 },
       );
       const backups = join(dir, "backups");
-      const result = await migrateKernelDatabase({
+      await migrateKernelDatabase({
         db: handle.raw,
         backupDir: backups,
       });
-      // Migration 0026 (web_result_urls) and 0027 (web_search_turn_usage)
-      // both apply on the pre-web v25 schema; 0028 (memory graph) and 0029
-      // (model_calls created_at index) are the bundled head and apply in
-      // the same upgrade.
-      expect(result.applied).toEqual([26, 27, 28, 29]);
-      expect(getSchemaVersion(handle.raw)).toBe(29);
+      // The full upgrade must land on the authoritative bundled schema; the
+      // exact incidental migration ids are not part of this consumer contract.
+      expect(getSchemaVersion(handle.raw)).toBe(BUNDLED_SCHEMA_VERSION);
       // Existing rows survive verbatim; the new table starts empty.
       const sessions = handle.raw
         .prepare("SELECT COUNT(*) AS n FROM sessions")

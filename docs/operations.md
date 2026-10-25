@@ -5292,6 +5292,17 @@ This slice is **default off**. Live production is unchanged and no policy
 exists until an authenticated human creates one. Unset config means HTTP 404
 and a hidden panel; nothing is enabled or applied by this delivery.
 
+Runtime requirement: auto-dispatch is implemented for a **Linux** host only.
+Sealing depends on POSIX mode/ownership, `O_NOFOLLOW`/`lstat` checks, Linux
+`bwrap` + user systemd containment, and a Linux UDS model relay. Windows
+ACLs are not treated as equivalent: sealed workspace creation/verification,
+candidate validation, and materializer readiness fail closed with the stable
+code `unsupported_platform` before creating any output, job root, grant, or
+host execution. Do not relax the POSIX `0700`/`0600`, ownership, or symlink
+guards to emulate Windows. The standalone sealed-snapshot library remains
+usable on Darwin when its POSIX semantics are available; the runtime itself
+is Linux-only.
+
 - Env: `COMPANION_AUTODISPATCH_JSON` (strict JSON; unset = disabled). It
   requires `COMPANION_AUTONOMY_JSON` (trial runner) and matching alias,
   bridge paths, mandatory checks, and caps. Fields:

@@ -82,6 +82,7 @@ const SOCKET_FILE_NAME = "model.sock";
 
 export type MaterializationBlockerCode =
   | "config_missing"
+  | "unsupported_platform"
   | "state_invalid"
   | "snapshot_failed"
   | "dependency_unavailable"
@@ -162,6 +163,8 @@ export interface AutodispatchMaterializerDeps {
   readonly enabled: boolean;
   readonly disclosedWholeRepoRead: boolean;
   readonly now?: () => number;
+  /** Injectable platform override (tests). Defaults to process.platform. */
+  readonly platform?: NodeJS.Platform;
 }
 
 type ArtifactRetentionStatus = "prepared" | "cleaned" | "artifact-expired";
@@ -909,6 +912,16 @@ export function createAutodispatchMaterializer(
   async function prepare(
     input: PrepareAutodispatchInput,
   ): Promise<PrepareAutodispatchResult> {
+    // The sealed snapshot, POSIX modes, bwrap confinement and the relay UDS are
+    // a Linux runtime contract. Fail closed before creating a job root or
+    // touching the source/grant path; Windows ACLs are not an equivalent seal.
+    const platform = deps.platform ?? process.platform;
+    if (platform !== "linux") {
+      return blocked(
+        "unsupported_platform",
+        `sealed auto-dispatch requires a Linux POSIX runtime; unsupported platform: ${platform}`,
+      );
+    }
     const material = deps.config.materialization;
     if (material === null)
       return blocked("config_missing", "materialization not configured");

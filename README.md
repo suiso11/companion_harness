@@ -2313,6 +2313,16 @@ the separate global autonomy control. Activation needs an operator-private
 config plus explicit deployment approval; this repository is not enabled or
 deployed. No scheduler/queue/engine is introduced.
 
+Runtime requirement: this path is implemented for a **Linux** host only. It
+relies on POSIX permission/ownership semantics plus `O_NOFOLLOW`/`lstat`
+sealing, Linux `bwrap` + user systemd containment, and a Linux UDS relay.
+Windows ACLs are not treated as an equivalent seal: sealed snapshot and
+materializer entry points fail closed with `unsupported_platform` before
+creating output or a grant, and the POSIX `0700`/`0600` and symlink checks are
+never weakened to emulate Windows. The standalone sealed-snapshot library can
+still run on Darwin where those POSIX semantics hold; the actual auto-dispatch
+runtime remains Linux-only.
+
 The chat session shows a lazy-loaded 「自動ディスパッチ」 panel once the
 session exists. It lists the ACTUAL operator-bounded target alias, scopes,
 checks, caps and expiry, the global pause/dependency readiness, every

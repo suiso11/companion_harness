@@ -113,6 +113,12 @@ export interface CreateSealedWorkspaceOptions {
   readonly signal?: AbortSignal;
   /** Test seam; defaults to the real platform. Trusted host only. */
   readonly caseInsensitiveFs?: boolean;
+  /**
+   * Test seam; defaults to the real platform. Trusted host only. Creation is
+   * only supported on POSIX hosts where mode/ownership/no-follow semantics are
+   * enforceable; any other platform fails closed before touching the FS.
+   */
+  readonly platform?: NodeJS.Platform;
 }
 
 export type CandidateChangeKind = "add" | "modify" | "delete";
@@ -153,6 +159,8 @@ export interface ValidateCandidateOptions {
   readonly signal?: AbortSignal;
   /** Test seam; defaults to the real platform. Trusted host only. */
   readonly caseInsensitiveFs?: boolean;
+  /** Test seam; defaults to the real platform. Trusted host only. */
+  readonly platform?: NodeJS.Platform;
 }
 
 export type CandidateValidationResult =
@@ -161,6 +169,7 @@ export type CandidateValidationResult =
 
 export type WorkspaceViolationCode =
   | "invalid_input"
+  | "unsupported_platform"
   | "source_escape"
   | "symlink_rejected"
   | "nonregular_rejected"
@@ -396,6 +405,25 @@ function snapshotFileMode(mode: number): number {
 
 function checkAborted(signal: AbortSignal | undefined): void {
   signal?.throwIfAborted();
+}
+
+/**
+ * The sealed workspace relies on POSIX mode bits, ownership and
+ * O_NOFOLLOW/lstat semantics that plain Windows filesystem APIs do not
+ * provide. Fail closed explicitly on unsupported hosts BEFORE any directory,
+ * copy, or manifest is created instead of pretending an ACL is equivalent.
+ * Darwin keeps working when its POSIX semantics are available; the actual
+ * auto-dispatch runtime remains Linux-only.
+ */
+function requireSupportedSealedWorkspacePlatform(
+  platform: NodeJS.Platform = process.platform,
+): void {
+  if (platform !== "linux" && platform !== "darwin") {
+    throw new SealedWorkspaceError(
+      "unsupported_platform",
+      `sealed workspace requires POSIX mode/ownership/no-follow semantics; unsupported platform: ${platform}`,
+    );
+  }
 }
 
 async function ensureEmptyOutputDirectory(outputDir: string): Promise<string> {
@@ -716,6 +744,7 @@ async function writeAtomicFile(
 export async function createSealedWorkspaceSnapshot(
   options: CreateSealedWorkspaceOptions,
 ): Promise<SealedWorkspaceSnapshot> {
+  requireSupportedSealedWorkspacePlatform(options.platform);
   const maxSourceBytes = options.maxBytes ?? DEFAULT_MAX_SOURCE_BYTES;
   const maxArtifactBytes =
     options.maxArtifactBytes ?? DEFAULT_MAX_ARTIFACT_BYTES;
@@ -1062,6 +1091,8 @@ export interface VerifySealedWorkspaceOptions {
    */
   readonly expectedManifestDigest: string;
   readonly signal?: AbortSignal;
+  /** Test seam; defaults to the real platform. Trusted host only. */
+  readonly platform?: NodeJS.Platform;
 }
 
 export type VerifySealedWorkspaceResult =
@@ -1077,6 +1108,7 @@ export async function verifySealedWorkspaceSnapshot(
   options: VerifySealedWorkspaceOptions,
 ): Promise<VerifySealedWorkspaceResult> {
   try {
+    requireSupportedSealedWorkspacePlatform(options.platform);
     checkAborted(options.signal);
     const expectedManifestDigest = requireDigest(
       options.expectedManifestDigest,
@@ -1380,8 +1412,10 @@ function artifactDigest(
 export async function validateCandidateChanges(
   options: ValidateCandidateOptions,
 ): Promise<CandidateValidationResult> {
+  requireSupportedSealedWorkspacePlatform(options.platform);
   const verification = await verifySealedWorkspaceSnapshot(options.snapshot, {
     expectedManifestDigest: options.expectedManifestDigest,
+    ...(options.platform === undefined ? {} : { platform: options.platform }),
     ...(options.signal === undefined ? {} : { signal: options.signal }),
   });
   if (!verification.ok) {

@@ -36,6 +36,8 @@ import {
 import { type AutodispatchConfig, loadServerConfig } from "../src/config.js";
 import { createCollectingLogger } from "../src/logger.js";
 
+const linuxIt = process.platform === "linux" ? it : it.skip;
+
 const FP = "b".repeat(64);
 const REV = "a".repeat(40);
 const NOW = 1_760_000_000_000;
@@ -419,150 +421,155 @@ describe("autodispatch HTTP + existing trial boundary", () => {
     }
   });
 
-  it("intake service creates a plan and hands a queued grant to the existing runner", async () => {
-    const handle = openKernelDatabase(":memory:");
-    await migrateKernelDatabase({ db: handle.raw });
-    const repo = createKernelRepository(handle.raw);
-    const fx = makeMaterializerFixture();
-    const ad = fx.config;
-    const { logger } = createCollectingLogger("debug");
-    try {
-      resume(repo, NOW);
-      const session = repo.createSession({ key: randomUUID(), now: NOW });
-      const sessionId = session.body.sessionId;
-      const anchor = completeTurn(
-        repo,
-        sessionId,
-        "Please implement the feature in src/app.ts. Go ahead.",
-        NOW + 10,
-      );
-      const policy = repo.createAutodispatchPolicy(
-        sessionId,
-        {
-          workspaceAlias: ad.workspaceAlias,
-          operations: ["investigate", "implement"],
-          readScopes: [...ad.readScopes],
-          writeScopes: [...ad.writeScopes],
-          checks: [...ad.checks],
-          caps: ad.caps,
-          expiresAt: null,
-        },
-        {
-          key: randomUUID(),
-          now: NOW + 20,
-          limits: {
-            operations: [...ad.operations],
+  linuxIt(
+    "intake service creates a plan and hands a queued grant to the existing runner",
+    async () => {
+      const handle = openKernelDatabase(":memory:");
+      await migrateKernelDatabase({ db: handle.raw });
+      const repo = createKernelRepository(handle.raw);
+      const fx = makeMaterializerFixture();
+      const ad = fx.config;
+      const { logger } = createCollectingLogger("debug");
+      try {
+        resume(repo, NOW);
+        const session = repo.createSession({ key: randomUUID(), now: NOW });
+        const sessionId = session.body.sessionId;
+        const anchor = completeTurn(
+          repo,
+          sessionId,
+          "Please implement the feature in src/app.ts. Go ahead.",
+          NOW + 10,
+        );
+        const policy = repo.createAutodispatchPolicy(
+          sessionId,
+          {
+            workspaceAlias: ad.workspaceAlias,
+            operations: ["investigate", "implement"],
+            readScopes: [...ad.readScopes],
+            writeScopes: [...ad.writeScopes],
             checks: [...ad.checks],
             caps: ad.caps,
+            expiresAt: null,
           },
-          parent: {
-            statement: "Standing policy for the approved workspace",
-            sourceTurnId: anchor.turnId,
+          {
+            key: randomUUID(),
+            now: NOW + 20,
+            limits: {
+              operations: [...ad.operations],
+              checks: [...ad.checks],
+              caps: ad.caps,
+            },
+            parent: {
+              statement: "Standing policy for the approved workspace",
+              sourceTurnId: anchor.turnId,
+            },
           },
-        },
-      );
-      expect(policy.status).toBe("active");
-      const gate: BackgroundResourceGate = createBackgroundResourceGate();
-      const planner: AutodispatchPlanner = {
-        async propose(input) {
-          return {
-            operation: "implement",
-            content: {
-              goal: "Implement the accepted feature",
-              decisions: ["Use the existing runner"],
-              nongoals: [],
-              steps: ["Edit src/app.ts"],
-              acceptance: ["lint passes"],
-              missing: [],
-              relevantPaths: ["src/app.ts"],
-            },
-            intent: {
-              kind: "execute",
-              quotes: [
-                {
-                  turnId: input.latestUserTurnId,
-                  runId: input.latestUserRunId,
-                  text: "implement the feature",
-                },
-              ],
-              latestUserTurnId: input.latestUserTurnId,
-              latestUserRunId: input.latestUserRunId,
-            },
-          };
-        },
-      };
-      const service = createAutodispatchService({
-        repo,
-        config: ad,
-        runtimeDir: fx.runtimeDir,
-        profile: {
-          available: true,
-          enabled: true,
-          mandatoryChecks: ["lint"],
-          configFingerprint: FP,
-          sourceRevision: REV,
-          currentModel: "test-model",
-          disclosedWholeRepoRead: true,
-          timeoutMs: ad.caps.timeoutMs,
-          maxOutputBytes: ad.caps.maxOutputBytes,
-        },
-        // No injected materializer: the service constructs the REAL
-        // per-execution sealed-profile materializer from fx.config.
-        background: gate,
-        planner,
-        maxOutputTokens: 256,
-        logger,
-        now: () => NOW + 30,
-      });
-      service.onRunCompleted(anchor.runId);
-      const deadline = Date.now() + 2000;
-      let execution: { executionId: string | null; status: string } | undefined;
-      while (Date.now() < deadline) {
-        const items = repo.listAutodispatchExecutions(sessionId, 10);
-        execution = items[0];
-        if (execution !== undefined && execution.status !== "reserved") break;
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-      expect(execution?.status).toBe("authorized");
-      const executionId = execution?.executionId;
-      expect(typeof executionId).toBe("string");
+        );
+        expect(policy.status).toBe("active");
+        const gate: BackgroundResourceGate = createBackgroundResourceGate();
+        const planner: AutodispatchPlanner = {
+          async propose(input) {
+            return {
+              operation: "implement",
+              content: {
+                goal: "Implement the accepted feature",
+                decisions: ["Use the existing runner"],
+                nongoals: [],
+                steps: ["Edit src/app.ts"],
+                acceptance: ["lint passes"],
+                missing: [],
+                relevantPaths: ["src/app.ts"],
+              },
+              intent: {
+                kind: "execute",
+                quotes: [
+                  {
+                    turnId: input.latestUserTurnId,
+                    runId: input.latestUserRunId,
+                    text: "implement the feature",
+                  },
+                ],
+                latestUserTurnId: input.latestUserTurnId,
+                latestUserRunId: input.latestUserRunId,
+              },
+            };
+          },
+        };
+        const service = createAutodispatchService({
+          repo,
+          config: ad,
+          runtimeDir: fx.runtimeDir,
+          profile: {
+            available: true,
+            enabled: true,
+            mandatoryChecks: ["lint"],
+            configFingerprint: FP,
+            sourceRevision: REV,
+            currentModel: "test-model",
+            disclosedWholeRepoRead: true,
+            timeoutMs: ad.caps.timeoutMs,
+            maxOutputBytes: ad.caps.maxOutputBytes,
+          },
+          // No injected materializer: the service constructs the REAL
+          // per-execution sealed-profile materializer from fx.config.
+          background: gate,
+          planner,
+          maxOutputTokens: 256,
+          logger,
+          now: () => NOW + 30,
+        });
+        service.onRunCompleted(anchor.runId);
+        const deadline = Date.now() + 2000;
+        let execution:
+          | { executionId: string | null; status: string }
+          | undefined;
+        while (Date.now() < deadline) {
+          const items = repo.listAutodispatchExecutions(sessionId, 10);
+          execution = items[0];
+          if (execution !== undefined && execution.status !== "reserved") break;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        expect(execution?.status).toBe("authorized");
+        const executionId = execution?.executionId;
+        expect(typeof executionId).toBe("string");
 
-      // EXISTING TrialRunner boundary: claim the queued grant exactly once
-      // with the ACTUAL materialized profile bound at approval (never the
-      // wider static service snapshot).
-      const stored = repo.readAutodispatchMaterialization(
-        sessionId,
-        executionId as string,
-      );
-      const materialized = JSON.parse(
-        stored?.materializationJson ?? "null",
-      ) as { profile: TrialProfileSnapshot } | null;
-      if (materialized === null) throw new Error("materialization missing");
-      const claimed = repo.claimTrial(sessionId, executionId as string, {
-        key: randomUUID(),
-        now: NOW + 40,
-        profile: materialized.profile,
-        workspaceAlias: "companion-harness",
-      });
-      expect(claimed.body).toMatchObject({
-        request: {
-          objective: "Implement the accepted feature",
-          executionId,
-          budget: {
-            // The ACTUAL narrow materialized runtime cap, never widened to
-            // the policy maximum.
-            timeoutMs: 30_000,
-            maxOutputBytes: 1_000_000,
+        // EXISTING TrialRunner boundary: claim the queued grant exactly once
+        // with the ACTUAL materialized profile bound at approval (never the
+        // wider static service snapshot).
+        const stored = repo.readAutodispatchMaterialization(
+          sessionId,
+          executionId as string,
+        );
+        const materialized = JSON.parse(
+          stored?.materializationJson ?? "null",
+        ) as { profile: TrialProfileSnapshot } | null;
+        if (materialized === null) throw new Error("materialization missing");
+        const claimed = repo.claimTrial(sessionId, executionId as string, {
+          key: randomUUID(),
+          now: NOW + 40,
+          profile: materialized.profile,
+          workspaceAlias: "companion-harness",
+        });
+        expect(claimed.body).toMatchObject({
+          request: {
+            objective: "Implement the accepted feature",
+            executionId,
+            budget: {
+              // The ACTUAL narrow materialized runtime cap, never widened to
+              // the policy maximum.
+              timeoutMs: 30_000,
+              maxOutputBytes: 1_000_000,
+            },
           },
-        },
-      });
-      expect(stored?.materializationJson).not.toBeNull();
-      expect(stored?.digest).toMatch(/^[0-9a-f]{64}$/);
-    } finally {
-      closeKernelDatabase(handle);
-      fx.cleanup();
-    }
-  });
+        });
+        expect(stored?.materializationJson).not.toBeNull();
+        expect(stored?.digest).toMatch(/^[0-9a-f]{64}$/);
+      } finally {
+        closeKernelDatabase(handle);
+        fx.cleanup();
+      }
+    },
+  );
 });
 
 describe("trial grant outcome projection through the actual API", () => {
