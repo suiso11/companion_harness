@@ -2253,11 +2253,12 @@ run 完了時に自動更新し、明示的な「更新」でも再取得しま�
    バックエンド検証済みの同一 origin `/t/<id>` だけを開きます。
    browser から AGORA へ直接書き込みません。
 
-デプロイは operator が repo checkout から
-`scripts/deploy/install-agora-review.sh --check` →
-`scripts/deploy/install-agora-review.sh --apply` を実行します。UI profile は
-reasoning 用 env を変更せず、AGORA の既存 private store だけを確認します。
-patch は package manifest を変更しないため再 install は不要です。適用後は
-通常の `companion.service` restart だけで、専用 CLI は不要です。source rollback
-は code/docs のみで、AGORA DB は自動 restore しません。詳細は
-`docs/operations.md` の「AGORA レビュー (browser, local only)」を参照。
+デプロイは他の変更と同じく `origin/master` へ merge し、CI green を確認した
+うえで既存の auto-deploy (`scripts/deploy/companion-deploy.sh` /
+`companion-deploy.timer`) に任せます。dirty guard が tracked 変更を検出した
+場合は前進しないため、production へ未コミット patch を当てる手順は
+サポートしません。AGORA は `~/.config/companion/env` の
+`COMPANION_AGORA_JSON` (`dbPath` は private SQLite) で有効化し、operator CLI
+と同じ store を共有します。rollback は commit の切り戻しのみで、AGORA DB は
+自動 restore しません。詳細は `docs/operations.md` の
+「AGORA レビュー (browser, local only)」を参照。

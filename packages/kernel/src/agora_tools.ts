@@ -33,7 +33,10 @@ import {
 } from "@companion/contracts";
 import type { AgoraProposalRow, AgoraService } from "./agora.js";
 import { ToolError, type ToolRegistration } from "./broker.js";
-import type { ExecutionRecorder } from "./execution_records.js";
+import {
+  type ExecutionRecorder,
+  ExecutionRecordError,
+} from "./execution_records.js";
 import type { KernelRepository } from "./repository.js";
 
 export interface CreateAgoraToolRegistrationsOptions {
@@ -221,7 +224,10 @@ export function createAgoraToolRegistrations(
           proposal: proposalView(row, true),
           message: proposalMessage(row),
         };
-      } catch {
+      } catch (error) {
+        // Recording failures must retain fail-closed run settlement; never
+        // convert them into an ordinary tool result.
+        if (error instanceof ExecutionRecordError) throw error;
         throw new ToolError("execution_failed");
       }
     }) as ToolRegistration["handler"],
@@ -273,7 +279,8 @@ export function createAgoraToolRegistrations(
           proposal: proposalView(row, true),
           message: proposalMessage(row),
         };
-      } catch {
+      } catch (error) {
+        if (error instanceof ExecutionRecordError) throw error;
         throw new ToolError("execution_failed");
       }
     }) as ToolRegistration["handler"],
@@ -404,7 +411,8 @@ export function createAgoraToolRegistrations(
                 ? A_FAILED
                 : A_UNKNOWN,
         };
-      } catch {
+      } catch (error) {
+        if (error instanceof ExecutionRecordError) throw error;
         if (ctx.signal.aborted) throw new ToolError("execution_cancelled");
         // Not-owned/not-approved/hash mismatch are indistinguishable here so
         // another session's proposal existence is never revealed.

@@ -5169,71 +5169,43 @@ llama.cpp 側でも認証を強制する場合は、`compose.yaml` の main comm
 
 ### 正とする状態と適用後の状態
 
-- 正とする変更はリポジトリ直下の `agora-review-deploy.patch`。これは
-  **現在の production checkout の on-disk ファイル**に対する差分であり、
-  git HEAD ではない (production には未コミットの learning / reasoning
-  変更が存在し得る)。
-- production へは patch を **tracked modification として適用するだけ**。
-  ローカル commit は作らない。既存の auto-deploy dirty guard が dirty な
-  checkout の前進を拒否するため、上流へ merge / upstream するまで timer は
-  その tree を進めない。この点は意図した安全側の挙動である。
-- `scripts/deploy/install-agora-review.sh` は operator 用で、リポジトリ
-  checkout から実行する。production 側に新しい CLI は不要。UI は通常の
-  `companion.service` restart 後の標準 prestart build に含まれる。
-
-### ブラウザでの実作業
-
-1. チャット画面下部の「AGORA レビュー」パネルを開く。現在のセッションが
-   所有する提案だけを
-   `GET /api/sessions/:sessionId/agora/proposals` で表示する。AGORA 未設定
-   (404) のサーバーではパネル全体を非表示にする。パネル JS はセッションが
-   存在するときだけ遅延読み込みする。
-2. 宛先、タイトル / 本文 / スレッド ID、`payloadHash`、状態、期限、結果を
-   確認する。run 完了時に自動更新し、明示的な「更新」でも再取得する。
-3. 「承認」または「却下」をクリックする (body `{ "payloadHash": "..." }`)。
-   **承認と送信は別操作**で、承認だけでは送信されない。
-4. 承認済みかつ期限内の提案だけ「送信」をクリックする
-   (body `{ "payloadHash": "..." }`)。browser 承認
-   (`approvalSource: "browser"`) は人間の Send だけを許可し、モデルからの
-   send 要求は session 所有であっても denied になる。モデルが browser 承認を
-   先取りして送信することはできない。
-5. 429 は再送までの秒数を表示し、手動でのみ再送する。409 (stale hash /
-   state conflict) は一覧を再取得し、最新内容で明示操作し直す。通信失敗時も
-   状態を再取得し、自動再送はしない。`unknown` 結果は自動 retry しない
-   (実際に送信された可能性があるため)。
-6. 結果リンクはバックエンドが検証した同一 origin の `/t/<id>` だけを開く。
-   browser から AGORA へ直接 POST しない。提案本文は untrusted として
-   テキスト描画する。
+- 正とする状態は `origin/master` に merge され CI が green な commit。production
+  の `~/companion_master` はその commit を detached worktree として checkout
+  した状態で、on-disk patch やローカル commit は持たない。
+- production への反映は既存の「自動デプロイ」経路のみを使う:
+  `companion-deploy.timer` が `scripts/deploy/companion-deploy.sh` を実行し、
+  CI green / active-run なし / tracked 変更なしを確認してから
+  `origin/master` の先端へ進め、restart + health check を行う。dirty guard が
+  tracked 変更を検出した場合は前進せず exit 1 になる (変更は破棄しない)。
+- UI は通常の `companion.service` restart 後の標準 prestart build
+  (`scripts/build-ui.mjs`) に含まれる。production 側に専用 CLI は不要。
 
 ### デプロイ (operator, production 変更は明示実行のみ)
 
-```sh
-# repo checkout から。--check は read-only。
-scripts/deploy/install-agora-review.sh --check
+AGORA レビュー UI は他の変更と同じ経路で配布する。未コミットの patch を
+production に当てる手順はサポートしない。
 
-# 適用 (既定)。lock / timer pause / private snapshot / active-run gate /
-# restart / health は reasoning-budget と同じ既存経路を共有する。
-scripts/deploy/install-agora-review.sh --apply
+```sh
+# 1. PR を merge し、CI が green になったことを確認する。
+# 2. 通常の auto-deploy を待つか、同じ経路を手動で 1 回実行する。
+scripts/deploy/companion-deploy.sh
 ```
 
-- wrapper は固定 profile `agora-review` を選び、patch を
-  `agora-review-deploy.patch`、snapshot を profile 専用の private state dir
-  (`$HOME/.local/state/companion/agora-review-deploy`) に分離する。
-  profile / patch digest は固定 whitelist で、任意 patch の unpinned 適用は
-  できない。
-- UI profile は reasoning 用の `COMPANION_MODEL_JSON` /`reasoningBudgetTokens`
-  検査を行わない。auth、model、voice、learning、AGORA の既存 env は変更せず、
-  `COMPANION_AGORA_JSON` が有効で `dbPath` の private SQLite が安全に読める
-  ことだけを確認する (値や鍵は表示しない)。
-- 適用前に既存 AGORA private SQLite を、`node:sqlite` の online backup で
-  profile 専用の private state dir に snapshot する (integrity_check は
-  `ok` のみ)。additive migration (`session_id` / approval/result columns を
-  追加してから index 作成) は backward-compatible。source rollback は
-  code/docs のみを戻し、**DB は自動 restore しない** (新規に永続化された
-  ユーザー状態を消さないため)。必要な場合だけ operator が snapshot から
-  手動で復元する。
-- patch は package manifest / lockfile を変更しないため、再 install は不要。
-  main DB への migration も行わない。
+- `companion-deploy.sh` は `origin/master` の green commit を
+  `~/companion_master` へ進め、`pnpm install --frozen-lockfile` →
+  `systemctl --user restart companion.service` → `/health/live` の順に確認する。
+  失敗時は直前の sha へ自動 rollback する (詳細は「自動デプロイ」節)。
+- AGORA を有効にする場合は `~/.config/companion/env` (0600) に
+  `COMPANION_AGORA_JSON` を設定する。`dbPath` は private な SQLite を指し、
+  operator CLI と server が同じ store を共有する。値や鍵はログに出さない。
+  learning を併用する場合の `COMPANION_LEARNING_JSON` も同様に env で設定する。
+- AGORA private SQLite の additive migration (`session_id` /
+  approval/result columns) は backward-compatible。auto-deploy の rollback は
+  commit の切り戻しのみで DB は自動 restore しない (新規に永続化された
+  ユーザー状態を消さないため)。必要な場合だけ operator が事前 backup
+  (`scripts/deploy/companion-backup.sh`) から手動で復元する。
+- 適用後は「ブラウザでの実作業」の手順で list / approve / send を確認する。
+  外部への POST は人間が Send を明示したときだけ発生する。
 
 ### E2E (repo, actual browser)
 

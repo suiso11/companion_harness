@@ -25,6 +25,10 @@ import {
   selectLessonsForPromptBlock,
 } from "@companion/kernel";
 import type { ChatResult, ModelGateway } from "@companion/model-local";
+import {
+  BACKGROUND_OWNER_LEARNING_EXTRACTION,
+  type BackgroundResourceGate,
+} from "./background_resource.js";
 import type { ServerLogger } from "./logger.js";
 
 export const LEARNING_EXTRACT_INPUT_MAX_CP = 2000;
@@ -115,6 +119,13 @@ export interface LearningServiceOptions {
   readonly logger?: ServerLogger;
   readonly now?: () => number;
   readonly store?: LearningStore;
+  /**
+   * Shared server-owned background admission (bootstrap-injected). When
+   * present, extraction runs only while this unit can hold the single
+   * background model slot; a busy/closed gate skips this turn's optional
+   * reflection (fail-open, no gateway call).
+   */
+  readonly background?: BackgroundResourceGate | null;
 }
 
 export interface LearningService {
@@ -341,6 +352,7 @@ export function createLearningService(
   const gateway = options.gateway;
   const model = options.model;
   const logger = options.logger;
+  const background = options.background ?? null;
   let started = false;
   let stopped = false;
   /** Gateway calls currently running; stop() aborts and awaits them. */
@@ -367,6 +379,30 @@ export function createLearningService(
     answerText: string,
   ): Promise<ParsedLesson[] | null> {
     if (gateway === null || stopped) return null;
+    // Same admission as memory extraction / shadow deliberation: at most ONE
+    // model-heavy background unit runs at a time. A busy or closed gate
+    // skips this optional reflection entirely (fail-open) rather than
+    // competing with another background call behind its fixed deadline.
+    if (background?.closed === true) {
+      log("info", "learning.extract_skipped_closed", { status: 0 });
+      return null;
+    }
+    // Foreground preemption: a user run that became active before admission
+    // wins the shared resource; the gateway is never called concurrently.
+    try {
+      if (options.repo.hasActiveShadowBlock()) {
+        log("info", "learning.extract_skipped_foreground", { status: 0 });
+        return null;
+      }
+    } catch {
+      return null;
+    }
+    const lease =
+      background?.tryAcquire(BACKGROUND_OWNER_LEARNING_EXTRACTION) ?? null;
+    if (background !== null && lease === null) {
+      log("info", "learning.extract_skipped_busy", { status: 0 });
+      return null;
+    }
     const controller = new AbortController();
     inFlightControllers.add(controller);
     let timer: NodeJS.Timeout | undefined;
@@ -424,6 +460,7 @@ export function createLearningService(
     } finally {
       if (timer !== undefined) clearTimeout(timer);
       inFlightControllers.delete(controller);
+      if (lease !== null) background?.release(lease);
     }
   }
 

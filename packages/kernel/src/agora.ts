@@ -521,6 +521,9 @@ function extractRegistrationKey(text: string): string | null {
     typeof candidate !== "string" ||
     candidate.length < 1 ||
     candidate.length > 4096 ||
+    // Header-safe only: Node rejects CR/LF, NUL, and other control
+    // characters in an HTTP header value (ERR_INVALID_CHAR).
+    /[\u0000-\u0008\u000a-\u001f\u007f]/.test(candidate) ||
     candidate.includes("\0")
   ) {
     return null;
@@ -788,9 +791,11 @@ export function createAgoraStore(options: AgoraStoreOptions): AgoraStore {
     // share) an operator/other-session row merely because the bytes match.
     const existing = db
       .prepare(
-        "SELECT * FROM agora_proposals WHERE operation = ? AND payload_hash = ? AND status IN ('pending','approved') AND ((session_id IS NULL AND ? IS NULL) OR session_id = ?) ORDER BY created_at DESC LIMIT 1",
+        "SELECT * FROM agora_proposals WHERE operation = ? AND payload_hash = ? AND status IN ('pending','approved') AND expires_at > ? AND ((session_id IS NULL AND ? IS NULL) OR session_id = ?) ORDER BY created_at DESC LIMIT 1",
       )
-      .get(operation, hash, sessionId, sessionId) as RawProposal | undefined;
+      .get(operation, hash, now, sessionId, sessionId) as
+      | RawProposal
+      | undefined;
     if (existing !== undefined) {
       return toProposal(existing);
     }

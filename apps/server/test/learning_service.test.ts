@@ -17,6 +17,12 @@ import {
 import type { ModelGateway } from "@companion/model-local";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  BACKGROUND_OWNER_LEARNING_EXTRACTION,
+  BACKGROUND_OWNER_MEMORY_EXTRACTION,
+  type BackgroundResourceGate,
+  createBackgroundResourceGate,
+} from "../src/background_resource.js";
+import {
   createLearningService,
   type LearningService,
   parseLearningExtraction,
@@ -102,6 +108,7 @@ function deferredGateway(text: string): {
 function makeService(
   repo: KernelRepository,
   gateway: ModelGateway | null,
+  background?: BackgroundResourceGate,
 ): LearningService {
   const service = createLearningService({
     storePath: tempStore(),
@@ -109,6 +116,7 @@ function makeService(
     gateway,
     model: "extract-model",
     now: () => T0,
+    ...(background === undefined ? {} : { background }),
   });
   service.start();
   services.push(service);
@@ -293,6 +301,43 @@ describe("learning service extraction", () => {
     } finally {
       probe.close();
     }
+  });
+
+  it("admits extraction through the shared background gate and releases it", async () => {
+    // Busy gate: another background unit holds the single model slot, so the
+    // optional reflection is skipped without calling the gateway.
+    const busyRepo = await openRepo();
+    const busyGate = createBackgroundResourceGate();
+    const held = busyGate.tryAcquire(BACKGROUND_OWNER_MEMORY_EXTRACTION);
+    expect(held).not.toBeNull();
+    const busy = gatewayReturning(EXTRACTION);
+    const skipped = makeService(busyRepo, busy.gateway, busyGate);
+    const skippedRun = completeRun(busyRepo, {
+      text: "Please use ISO dates when you change calendar events.",
+      answer: "Understood. I will use ISO dates.",
+    });
+    skipped.onRunCompleted(skippedRun.runId);
+    await skipped.stop();
+    expect(busy.calls).toHaveLength(0);
+    busyGate.release(held as Exclude<typeof held, null>);
+
+    // Free gate: extraction runs under a learning lease and releases it, so a
+    // subsequent background unit can be admitted.
+    const repo = await openRepo();
+    const gate = createBackgroundResourceGate();
+    const free = gatewayReturning(EXTRACTION);
+    const service = makeService(repo, free.gateway, gate);
+    const run = completeRun(repo, {
+      text: "Please use ISO dates when you change calendar events.",
+      answer: "Understood. I will use ISO dates.",
+    });
+    service.onRunCompleted(run.runId);
+    await waitFor(() => free.calls.length === 1);
+    await waitFor(() => service.store.listReflections().length === 1);
+    const after = gate.tryAcquire(BACKGROUND_OWNER_LEARNING_EXTRACTION);
+    expect(after).not.toBeNull();
+    expect(after?.owner).toBe(BACKGROUND_OWNER_LEARNING_EXTRACTION);
+    if (after !== null) gate.release(after);
   });
 
   it("does not learn from malformed output or an unavailable gateway", async () => {

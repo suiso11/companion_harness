@@ -6,7 +6,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
-import { AGORA_SEND_LEASE_MS } from "../src/agora.js";
+import {
+  AGORA_PENDING_TTL_MS,
+  AGORA_SEND_LEASE_MS,
+} from "../src/agora.js";
 import {
   AGORA_HELLO_PATH,
   AGORA_MIN_WRITE_INTERVAL_MS,
@@ -777,6 +780,34 @@ describe("agora exact approval flow", () => {
       expect(f.posts).toHaveLength(1);
     } finally {
       restarted.close();
+    }
+  });
+
+  it("creates a fresh actionable draft instead of deduplicating expired content", () => {
+    const f = setup();
+    try {
+      const session = "55555555-5555-4555-8555-555555555555";
+      const payload = { title: "Expiring title", body: "Expiring body" };
+      const first = f.store.propose({
+        operation: "thread",
+        payload,
+        sessionId: session,
+      });
+      expect(first.status).toBe("pending");
+      // Advance past the pending TTL WITHOUT any list/show refresh (which is
+      // what would otherwise flip the stale row to failed).
+      f.advance(AGORA_PENDING_TTL_MS + 1);
+      const second = f.store.propose({
+        operation: "thread",
+        payload,
+        sessionId: session,
+      });
+      expect(second.id).not.toBe(first.id);
+      expect(second.status).toBe("pending");
+      // The fresh draft is actionable at the current instant.
+      expect(() => f.store.approve(second.id, second.payloadHash)).not.toThrow();
+    } finally {
+      f.store.close();
     }
   });
 
