@@ -158,65 +158,73 @@ export function createAgoraHttpTransport(
             finish(new ToolError("execution_cancelled"));
             return;
           }
-          req = httpsRequest(
-            {
-              protocol: "https:",
-              hostname: host,
-              path: `${url.pathname}${url.search}`,
-              method: "POST",
-              headers: {
-                host,
-                "content-type": "application/json",
-                accept: "application/json",
-                "content-length": String(payloadBytes),
-                ...headers,
+          try {
+            req = httpsRequest(
+              {
+                protocol: "https:",
+                hostname: host,
+                path: `${url.pathname}${url.search}`,
+                method: "POST",
+                headers: {
+                  host,
+                  "content-type": "application/json",
+                  accept: "application/json",
+                  "content-length": String(payloadBytes),
+                  ...headers,
+                },
+                lookup: createPinnedLookup(address),
+                servername: isIP(host) === 0 ? host : undefined,
               },
-              lookup: createPinnedLookup(address),
-              servername: isIP(host) === 0 ? host : undefined,
-            },
-            (response) => {
-              const status = response.statusCode ?? 0;
-              // No redirect following. The service classifies 3xx as
-              // ambiguous.
-              if (status >= 300 && status < 400) {
-                response.destroy();
-                finish(null, { status, text: "" });
-                return;
-              }
-              const declared = Number(response.headers["content-length"]);
-              if (Number.isFinite(declared) && declared > maxBytes) {
-                response.destroy();
-                finish(new ToolError("output_too_large"));
-                return;
-              }
-              response.on("data", (chunk: Buffer) => {
-                if (settled) return;
-                responseBytes += chunk.byteLength;
-                if (responseBytes > maxBytes) {
+              (response) => {
+                const status = response.statusCode ?? 0;
+                // No redirect following. The service classifies 3xx as
+                // ambiguous.
+                if (status >= 300 && status < 400) {
+                  response.destroy();
+                  finish(null, { status, text: "" });
+                  return;
+                }
+                const declared = Number(response.headers["content-length"]);
+                if (Number.isFinite(declared) && declared > maxBytes) {
                   response.destroy();
                   finish(new ToolError("output_too_large"));
                   return;
                 }
-                chunks.push(chunk);
-              });
-              response.on("error", () =>
-                finish(new ToolError("execution_failed")),
-              );
-              response.on("end", () => {
-                if (settled) return;
-                let text: string;
-                try {
-                  text = new TextDecoder("utf-8", { fatal: true }).decode(
-                    Buffer.concat(chunks),
-                  );
-                } catch {
-                  finish(new ToolError("output_invalid"));
-                  return;
-                }
-                finish(null, { status, text });
-              });
-            },
-          );
+                response.on("data", (chunk: Buffer) => {
+                  if (settled) return;
+                  responseBytes += chunk.byteLength;
+                  if (responseBytes > maxBytes) {
+                    response.destroy();
+                    finish(new ToolError("output_too_large"));
+                    return;
+                  }
+                  chunks.push(chunk);
+                });
+                response.on("error", () =>
+                  finish(new ToolError("execution_failed")),
+                );
+                response.on("end", () => {
+                  if (settled) return;
+                  let text: string;
+                  try {
+                    text = new TextDecoder("utf-8", { fatal: true }).decode(
+                      Buffer.concat(chunks),
+                    );
+                  } catch {
+                    finish(new ToolError("output_invalid"));
+                    return;
+                  }
+                  finish(null, { status, text });
+                });
+              },
+            );
+          } catch {
+            // Request construction can throw synchronously (e.g. an invalid
+            // header character). Settle as a terminal outcome instead of
+            // escaping this callback as an unhandled rejection.
+            finish(new ToolError("execution_failed"));
+            return;
+          }
           req.on("error", () => finish(new ToolError("execution_failed")));
           req.end(payload);
         },

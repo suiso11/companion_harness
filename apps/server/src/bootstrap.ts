@@ -2267,6 +2267,10 @@ export async function startServer(
         model: modelName,
         logger,
         now,
+        // Same shared background slot as memory extraction and shadow: a
+        // busy/closed gate (or an admitted foreground run) skips this
+        // optional reflection instead of competing for the local model.
+        background: backgroundResource,
       });
       learning.start();
       repo = wrapRepoWithLearningIntake(repo, learning);

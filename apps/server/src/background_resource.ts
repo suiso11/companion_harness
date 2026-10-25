@@ -4,6 +4,7 @@
 // memory service and the shadow worker. It admits at most ONE model-heavy
 // background work unit at a time across:
 // - memory post-completion extraction (`extractViaGateway`),
+// - conversation-learning post-completion extraction,
 // - shadow deliberation (`driveOneJob`: recall + claim + gateway call),
 // - idle-owned remind cultivation drains (`runIdleDistill`).
 //
@@ -41,6 +42,8 @@
 
 /** Fixed background owner identities (diagnostic labels only). */
 export const BACKGROUND_OWNER_MEMORY_EXTRACTION = "memory-extraction" as const;
+export const BACKGROUND_OWNER_LEARNING_EXTRACTION =
+  "learning-extraction" as const;
 export const BACKGROUND_OWNER_SHADOW = "shadow" as const;
 export const BACKGROUND_OWNER_MEMORY_IDLE_DISTILL =
   "memory-idle-distill" as const;
@@ -48,6 +51,7 @@ export const BACKGROUND_OWNER_AUTODISPATCH = "autodispatch" as const;
 
 export type BackgroundOwner =
   | typeof BACKGROUND_OWNER_MEMORY_EXTRACTION
+  | typeof BACKGROUND_OWNER_LEARNING_EXTRACTION
   | typeof BACKGROUND_OWNER_SHADOW
   | typeof BACKGROUND_OWNER_MEMORY_IDLE_DISTILL
   | typeof BACKGROUND_OWNER_AUTODISPATCH;
