@@ -757,6 +757,8 @@ export async function postChatCompletionStream(options: {
       new ModelLocalError(
         "request_failed",
         `model request failed with status ${status}`,
+        undefined,
+        { httpStatus: status },
       );
     const rawCapture = new RawSseCapture(
       response.status,
@@ -772,6 +774,8 @@ export async function postChatCompletionStream(options: {
       throw new ModelLocalError(
         "invalid_response",
         "model returned an oversized response",
+        undefined,
+        { invalidResponseCause: "response_too_large" },
       );
     }
     if (!response.ok) {
@@ -942,6 +946,8 @@ async function readSseStream(
           new ModelLocalError(
             "invalid_response",
             "model returned an oversized response",
+            undefined,
+            { invalidResponseCause: "response_too_large" },
           ),
         );
       }
@@ -1062,6 +1068,8 @@ function dispatchEvent(
     throw new ModelLocalError(
       "invalid_response",
       "model returned an invalid response",
+      undefined,
+      { invalidResponseCause: "malformed_json" },
     );
   }
   onChunkBody(parsed);

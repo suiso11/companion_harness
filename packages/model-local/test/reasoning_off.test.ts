@@ -8,6 +8,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { ModelLocalError } from "../src/errors.js";
+import { MAX_REASONING_BUDGET_TOKENS } from "../src/gateway.js";
 import { createOllamaGateway } from "../src/ollama.js";
 import { createOpenAICompatibleGateway } from "../src/openai_compatible.js";
 import type { FetchImpl } from "../src/types.js";
@@ -129,6 +130,97 @@ describe("reasoning off serialization", () => {
       stream: false,
       think: false,
     });
+  });
+
+  it("sends no budget alongside off (OpenAI-compatible)", async () => {
+    const { fetchImpl, bodies } = capture(openaiOk());
+    await createOpenAICompatibleGateway({
+      baseUrl: "http://127.0.0.1:8000",
+      fetchImpl,
+    }).chat({
+      model: "m",
+      messages: MESSAGES,
+      reasoning: "off",
+      reasoningBudgetTokens: 256,
+    });
+    expect(JSON.parse(bodies[0] as string)).toStrictEqual({
+      model: "m",
+      messages: MESSAGES,
+      stream: false,
+      chat_template_kwargs: { enable_thinking: false },
+    });
+  });
+
+  it("lets off win over an unsupported budget on Ollama", async () => {
+    const { fetchImpl, bodies } = capture(ollamaOk());
+    const result = await createOllamaGateway({
+      baseUrl: "http://127.0.0.1:11434",
+      fetchImpl,
+    }).chat({
+      model: "m",
+      messages: MESSAGES,
+      reasoning: "off",
+      reasoningBudgetTokens: 256,
+    });
+    expect(result.text).toBe("hi");
+    expect(JSON.parse(bodies[0] as string)).toStrictEqual({
+      model: "m",
+      messages: MESSAGES,
+      stream: false,
+      think: false,
+    });
+  });
+
+  it("rejects an active reasoning budget on Ollama before fetch", async () => {
+    const fetchImpl = vi.fn<FetchImpl>(async () => ollamaOk());
+    await expect(
+      createOllamaGateway({
+        baseUrl: "http://127.0.0.1:11434",
+        fetchImpl,
+      }).chat({
+        model: "m",
+        messages: MESSAGES,
+        reasoningBudgetTokens: 256,
+      }),
+    ).rejects.toMatchObject({
+      name: "ModelLocalError",
+      code: "unsupported_capability",
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    -1,
+    MAX_REASONING_BUDGET_TOKENS + 1,
+    1.5,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+  ])("rejects invalid reasoning budget %s before any I/O", async (budget) => {
+    const openaiFetch = vi.fn<FetchImpl>(async () => openaiOk());
+    const ollamaFetch = vi.fn<FetchImpl>(async () => ollamaOk());
+    for (const gateway of [
+      createOpenAICompatibleGateway({
+        baseUrl: "http://127.0.0.1:8000",
+        fetchImpl: openaiFetch,
+      }),
+      createOllamaGateway({
+        baseUrl: "http://127.0.0.1:11434",
+        fetchImpl: ollamaFetch,
+      }),
+    ]) {
+      await expect(
+        gateway.chat({
+          model: "m",
+          messages: MESSAGES,
+          reasoningBudgetTokens: budget,
+        }),
+      ).rejects.toMatchObject({
+        name: "ModelLocalError",
+        code: "invalid_request",
+      });
+    }
+    expect(openaiFetch).not.toHaveBeenCalled();
+    expect(ollamaFetch).not.toHaveBeenCalled();
   });
 
   it("rejects any value other than off before fetch (both adapters)", async () => {

@@ -49,6 +49,8 @@ import {
   type ActionProposalStager,
   type AgentModelDelta,
   type AgentVoiceLayer,
+  type AgoraStore,
+  type AgoraTransport,
   applyAutonomyRestartFence,
   BUNDLED_SCHEMA_VERSION,
   CalendarActionWriteCapabilitySchema,
@@ -62,6 +64,9 @@ import {
   createActionExecutionService,
   createActionStrategy,
   createAgentStrategy,
+  createAgoraHttpTransport,
+  createAgoraStore,
+  createAgoraToolRegistrations,
   createAutonomyReadRegistrations,
   createCalendarActionReadPort,
   createCalendarActionTargetResolver,
@@ -116,12 +121,14 @@ import {
   parseCalendarProfileName,
 } from "./calendarReadonlyProfile.js";
 import {
+  AGORA_API_KEY_ENV,
   assertDbPathHasNoSymlink,
   type CalendarConfig,
   DEFAULT_LOG_LEVEL,
   loadServerConfig,
   type MemoryConfig,
   type ModelConfig,
+  parseAgoraApiKey,
   type ServerConfig,
   ServerConfigError,
 } from "./config.js";
@@ -137,6 +144,10 @@ import {
   parseCreateWriteConnectorHint,
   parseCreateWriteProfileName,
 } from "./createWriteProfile.js";
+import {
+  createLearningService,
+  type LearningService,
+} from "./learning_service.js";
 import { createStdServerLogger, type ServerLogger } from "./logger.js";
 import {
   measureStoreSize,
@@ -230,6 +241,12 @@ export interface StartServerOptions {
    * and the stored `connector_instances` row for `connectorInstanceId`.
    */
   calendarBinding?: CalendarServerBinding | null;
+  /**
+   * Tests only: replace the fixed-host AGORA transport. Production never
+   * passes this (the kernel `createAgoraHttpTransport` remains the only
+   * default), so no arbitrary destination is introduced into the surface.
+   */
+  agoraTransport?: AgoraTransport;
   /**
    * C14: host-trusted MCP read-only binding definitions for the OWNED
    * Calendar composition. These come ONLY from trusted host code — NEVER
@@ -425,6 +442,8 @@ export interface StartedServer {
   toolBroker: ToolBroker | null;
   /** Conversation-memory service when COMPANION_MEMORY_JSON is set, else null. */
   memory: MemoryService | null;
+  /** Conversation-learning service when COMPANION_LEARNING_JSON is set, else null. */
+  learning: LearningService | null;
   /** Shadow-deliberation worker when a model gateway resolved, else null. */
   shadow: ShadowService | null;
   /** Root-side trial runner when trials are enabled, else null. */
@@ -871,9 +890,14 @@ export async function startServer(
   // passes `M5_RESCHEDULE_*` credentials via `startServer({ env })` runs the
   // first approved execution under the same account it configured.
   let frozenStartupEnv: Readonly<Record<string, string | undefined>>;
+  /** Captured once with config: AGORA credential (never logged). */
+  let agoraApiKey: string | null = null;
   try {
     config = loadServerConfig(options.env);
     frozenStartupEnv = Object.freeze({ ...(options.env ?? process.env) });
+    if (config.agora !== null) {
+      agoraApiKey = parseAgoraApiKey(frozenStartupEnv[AGORA_API_KEY_ENV]);
+    }
     frozenCalendarProfile = (options.env ?? process.env)[CALENDAR_PROFILE_ENV];
     frozenWriteProfile = (options.env ?? process.env)[
       RESCHEDULE_WRITE_PROFILE_ENV
@@ -937,6 +961,23 @@ export async function startServer(
   let onSigterm: (() => void) | undefined;
   /** Conversation-memory service (null = memoryless; set inside try). */
   let memory: MemoryService | null = null;
+  /** Conversation-learning service (null = disabled; set inside try). */
+  let learning: LearningService | null = null;
+  /**
+   * Opt-in AGORA store. Independently config-enabled (never gated by Web or
+   * memory) and always closed on shutdown/failure. No HTTP route is added.
+   */
+  let agoraStore: AgoraStore | undefined;
+  let agoraClosed = false;
+  const closeAgora = (): void => {
+    if (agoraStore === undefined || agoraClosed) return;
+    agoraClosed = true;
+    try {
+      agoraStore.close();
+    } catch {
+      // Best effort: the surrounding failure/shutdown result is authoritative.
+    }
+  };
   /** Shadow-deliberation worker (null = no gateway; set inside try). */
   let shadow: ShadowService | null = null;
   /** Root-side trial runner (null = trials disabled; set inside try). */
@@ -1512,6 +1553,22 @@ export async function startServer(
       cancelRun: (...args) => {
         const out = inner.cancelRun(...args);
         service.notifyForeground();
+        return out;
+      },
+    });
+    // Conversation learning is independent of remind. It wraps the final
+    // gated repo so durable completion triggers reflection even when no
+    // memory config exists. It only observes `applied` completion.
+    const wrapRepoWithLearningIntake = (
+      inner: KernelRepository,
+      service: LearningService,
+    ): KernelRepository => ({
+      ...inner,
+      completeRun: (...args) => {
+        const out = inner.completeRun(...args);
+        if (out.applied) {
+          service.onRunCompleted(args[0]);
+        }
         return out;
       },
     });
@@ -2139,6 +2196,55 @@ export async function startServer(
       const activeNotifications = notifications;
       repo = wrapRepoWithNotifications(repo, activeNotifications);
     }
+    // Conversation learning: independent opt-in (COMPANION_LEARNING_JSON).
+    // Reflection hooks observe the final repo; approved-lesson recall is
+    // injected into the agent below. The store is private and closed on
+    // every shutdown/failure path.
+    if (config.learning !== null) {
+      learning = createLearningService({
+        storePath: config.learning.dbPath,
+        repo,
+        gateway: modelGateway,
+        model: modelName,
+        logger,
+        now,
+      });
+      learning.start();
+      repo = wrapRepoWithLearningIntake(repo, learning);
+      logger.info("server.learning_ready", { status: 1 });
+    }
+
+    // Opt-in AGORA composition (COMPANION_AGORA_JSON). The store exists
+    // whenever the config is present, independent of Web/Markdown/memory.
+    // Read tools plus session-bound proposal/status/send tools share the
+    // SAME durable private store the operator CLI uses; no register/approve/
+    // reject model surface is added and the host stays fixed.
+    let agoraRegistrations: readonly ToolRegistration[] = [];
+    if (config.agora !== null) {
+      const agoraConfig = config.agora;
+      agoraStore = createAgoraStore({
+        path: agoraConfig.dbPath,
+        minWriteIntervalMs: agoraConfig.minWriteIntervalMs,
+        hostApiKey: agoraApiKey,
+        transport:
+          options.agoraTransport ??
+          createAgoraHttpTransport({
+            timeoutMs: agoraConfig.timeoutMs,
+            maxResponseBytes: agoraConfig.maxResponseBytes,
+          }),
+      });
+      agoraRegistrations = createAgoraToolRegistrations({
+        store: agoraStore,
+        repo,
+        clock: { now },
+        ...(executionRecorder === undefined
+          ? {}
+          : { recorder: executionRecorder }),
+      });
+      logger.info("server.agora_ready", {
+        status: agoraRegistrations.length,
+      });
+    }
 
     // M5 host-owned dedicated port (normal startup, no injection). The
     // conditional etag resolves concretely from the REPOSITORY-immutable
@@ -2233,7 +2339,12 @@ export async function startServer(
     const webSearchEnabled =
       config.webSearch.enabled === true &&
       config.webSearch.searxng_base_url !== undefined;
-    if (needsMarkdownTools || memory !== null || webSearchEnabled) {
+    if (
+      needsMarkdownTools ||
+      memory !== null ||
+      webSearchEnabled ||
+      agoraRegistrations.length > 0
+    ) {
       // Agent-visible base: the M1/M6/memory registrations below are ALSO
       // the agent's base toolset. Captured here so the agent broker (built
       // later) reuses the exact same registrations plus the always-on
@@ -2380,6 +2491,9 @@ export async function startServer(
         );
         logger.info("server.web_search_ready", { status: 1 });
       }
+      // AGORA tools are configuration-gated exactly like Web search; they
+      // reuse the same broker, budgets, audit and grant conventions.
+      registrations.push(...agoraRegistrations);
       toolBroker = createToolBroker({
         db: handle.raw,
         repo,
@@ -2494,7 +2608,15 @@ export async function startServer(
           broker: agentBroker,
           gateway: modelGateway,
           model: modelName,
+          // MAIN conversation only: the configured provider-side thinking
+          // budget is forwarded on every agent step/repair request. Auxiliary
+          // memory/voice/learning calls keep their own reasoning-off requests.
+          ...(config.model !== null &&
+          config.model.reasoningBudgetTokens !== undefined
+            ? { reasoningBudgetTokens: config.model.reasoningBudgetTokens }
+            : {}),
           ...(memory !== null ? { memory: memory.recallHook } : {}),
+          ...(learning !== null ? { learning: learning.recallHook } : {}),
           ...(executionRecorder === undefined ? {} : { executionRecorder }),
           ...(voiceLayer === undefined ? {} : { voice: voiceLayer }),
           // PR-2: forward provisional step deltas to the ephemeral bus.
@@ -2536,15 +2658,28 @@ export async function startServer(
               // Best effort: progress routing never fails the strategy.
             }
           },
-          // Fixed reason code for answer/citation step failures: metadata
-          // only (never model text, args, or provider bodies).
+          // Safe model-step failure observability: fixed M2/answer reason
+          // codes plus optional gateway code/cause and numeric HTTP status
+          // (never model text, args, bodies, headers, prompts, reasoning).
           onModelStepFailed: (failure): void => {
             try {
               logger.warn("model.step.failed", {
                 runId: failure.runId,
+                ...(failure.durationMs === undefined
+                  ? {}
+                  : { durationMs: failure.durationMs }),
                 ...(failure.reason === undefined
                   ? {}
                   : { reason: failure.reason }),
+                ...(failure.gatewayErrorCode === undefined
+                  ? {}
+                  : { gatewayErrorCode: failure.gatewayErrorCode }),
+                ...(failure.invalidResponseCause === undefined
+                  ? {}
+                  : { invalidResponseCause: failure.invalidResponseCause }),
+                ...(failure.httpStatus === undefined
+                  ? {}
+                  : { httpStatus: failure.httpStatus }),
               });
             } catch {
               // Best effort: observability never fails the strategy.
@@ -2926,6 +3061,9 @@ export async function startServer(
       assets: loadUiAssets(),
       actionsEnabled,
       createEnabled,
+      // Same durable opt-in store as the model tools; absent config means
+      // every AGORA review route stays a fixed 404.
+      ...(agoraStore !== undefined ? { agora: agoraStore } : {}),
       // PR-2 ephemeral deltas: multiplexed on run SSE streams only (never
       // persisted, never replayed, polling ignores them).
       modelDeltas: modelDeltaBus,
@@ -3050,6 +3188,13 @@ export async function startServer(
         // Best effort: the listen error carries the startup failure.
       }
       try {
+        if (learning !== null) {
+          await learning.stop();
+        }
+      } catch {
+        // Best effort: the listen error carries the startup failure.
+      }
+      try {
         if (notifications !== null) {
           await notifications.stop();
         }
@@ -3117,6 +3262,7 @@ export async function startServer(
       } catch {
         // Best effort.
       }
+      closeAgora();
       throw listenError;
     }
     startedListener = server;
@@ -3168,6 +3314,15 @@ export async function startServer(
         if (memory !== null) {
           try {
             await memory.stop();
+          } catch {
+            // Best effort: the engine drain below still runs.
+          }
+        }
+        // Stop conversation learning: abort/await in-flight reflection calls
+        // and close its private store before the DB close below.
+        if (learning !== null) {
+          try {
+            await learning.stop();
           } catch {
             // Best effort: the engine drain below still runs.
           }
@@ -3283,6 +3438,9 @@ export async function startServer(
             status: safeReason,
           });
         }
+        // Close the opt-in AGORA private store before the main DB; a failure
+        // is best-effort and never blocks the graceful shutdown report.
+        closeAgora();
         try {
           closeKernelDatabase(activeHandle);
         } catch {
@@ -3393,6 +3551,7 @@ export async function startServer(
       shutdown,
       toolBroker,
       memory,
+      learning,
       shadow,
       trialRunner,
       notifications,
@@ -3426,6 +3585,13 @@ export async function startServer(
     if (memory !== null) {
       try {
         await memory.stop();
+      } catch {
+        // Best effort: the original startup error carries the failure.
+      }
+    }
+    if (learning !== null) {
+      try {
+        await learning.stop();
       } catch {
         // Best effort: the original startup error carries the failure.
       }
@@ -3480,6 +3646,7 @@ export async function startServer(
     } catch {
       // Best effort: the original startup error carries the failure.
     }
+    closeAgora();
     if (handle !== undefined) {
       try {
         closeKernelDatabase(handle);

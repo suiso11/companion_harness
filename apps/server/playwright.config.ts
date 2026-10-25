@@ -11,18 +11,22 @@
 // broker pipeline, REAL UI — see docs/operations.md §Calendar E2E).
 
 import { defineConfig, devices } from "@playwright/test";
+import { AGORA_APP_ORIGIN } from "./e2e/agora/ports.js";
 import { CALENDAR_APP_ORIGIN } from "./e2e/calendar/ports.js";
 import { MEMORY_APP_ORIGIN } from "./e2e/memory/ports.js";
 import { E2E_APP_ORIGIN } from "./e2e/ports.js";
 
 const CALENDAR_MODE = process.env.COMPANION_E2E_CALENDAR === "1";
 const MEMORY_MODE = process.env.COMPANION_E2E_MEMORY === "1";
+const AGORA_MODE = process.env.COMPANION_E2E_AGORA === "1";
 
 const APP_ORIGIN = CALENDAR_MODE
   ? CALENDAR_APP_ORIGIN
   : MEMORY_MODE
     ? MEMORY_APP_ORIGIN
-    : E2E_APP_ORIGIN;
+    : AGORA_MODE
+      ? AGORA_APP_ORIGIN
+      : E2E_APP_ORIGIN;
 
 export default defineConfig({
   testDir: "./e2e",
@@ -40,25 +44,27 @@ export default defineConfig({
           "memory/memory_associate.spec.ts",
           "memory/memory_manage.spec.ts",
         ]
-      : [
-          "conversation.spec.ts",
-          "citation_recovery.spec.ts",
-          "sse_history.spec.ts",
-          "polling.spec.ts",
-          "autonomy.spec.ts",
-          "shadow.spec.ts",
-          "notifications.spec.ts",
-          "conversation_proposals.spec.ts",
-          "learning.spec.ts",
-          "handoff.spec.ts",
-          "monitor.spec.ts",
-          "mobile_layout.spec.ts",
-          "svelte_shell.spec.ts",
-          "thinking_status.spec.ts",
-          "draft_answer.spec.ts",
-          "web_search.spec.ts",
-          "voice.spec.ts",
-        ],
+      : AGORA_MODE
+        ? ["agora/agora.spec.ts"]
+        : [
+            "conversation.spec.ts",
+            "citation_recovery.spec.ts",
+            "sse_history.spec.ts",
+            "polling.spec.ts",
+            "autonomy.spec.ts",
+            "shadow.spec.ts",
+            "notifications.spec.ts",
+            "conversation_proposals.spec.ts",
+            "learning.spec.ts",
+            "handoff.spec.ts",
+            "monitor.spec.ts",
+            "mobile_layout.spec.ts",
+            "svelte_shell.spec.ts",
+            "thinking_status.spec.ts",
+            "draft_answer.spec.ts",
+            "web_search.spec.ts",
+            "voice.spec.ts",
+          ],
   timeout: 60_000,
   expect: { timeout: 15_000 },
   // Serial execution is REQUIRED for the calendar suite: the dedicated
@@ -86,7 +92,11 @@ export default defineConfig({
       ? "node scripts/build-ui.mjs && node --import tsx e2e/calendar/server.ts"
       : MEMORY_MODE
         ? "node scripts/build-ui.mjs && node --import tsx e2e/memory/server.ts"
-        : "node scripts/build-ui.mjs && node --import tsx e2e/server.ts",
+        : AGORA_MODE
+          ? // Always build through the standard guard: no prebuilt bundle
+            // reuse, so the AGORA browser smoke exercises the real budget.
+            "node scripts/build-ui.mjs && node --import tsx e2e/agora/server.ts"
+          : "node scripts/build-ui.mjs && node --import tsx e2e/server.ts",
     url: `${APP_ORIGIN}/health/live`,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,

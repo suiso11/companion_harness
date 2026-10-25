@@ -3315,6 +3315,21 @@ function evidenceForTurn(turn: Turn): {
     <button type="button" onclick={closeDrawer}>閉じる</button>
   </div>
 
+  <!-- Human-only AGORA review stays bound to the ACTUAL chat session. It is
+       loaded lazily only once a session exists, so the base chat entry keeps
+       its bundle budget; the panel itself hides on a 404 endpoint. A failed
+       chunk load surfaces a plain status message instead of blanking the
+       page. -->
+  {#if sessionId !== null}
+    {#await import("./AgoraPanel.svelte") then module}
+      <svelte:component this={module.default} {sessionId} />
+    {:catch}
+      <p class="agora-load-error" role="status">
+        AGORA レビューを読み込めませんでした。再読み込みしてください
+      </p>
+    {/await}
+  {/if}
+
   {#if children}
     <div class="feature-panel-slot">
       {@render children()}

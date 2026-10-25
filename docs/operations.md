@@ -279,7 +279,8 @@ connector instance owns **all** configured roots.
 - Unset `COMPANION_MODEL_JSON` (default) registers **no model strategy**:
   runs fail closed with a fixed code instead of producing fake LLM output.
 - When set, the value must be a strict JSON object with only
-  `{ adapter, baseUrl, model, apiKey? }`. Example:
+  `{ adapter, baseUrl, model, apiKey?, toolChoice?, reasoningBudgetTokens? }`.
+  Example:
   `{"adapter":"ollama","baseUrl":"http://127.0.0.1:11434","model":"llama3.1"}`.
   `adapter` is `ollama` (POST `{base}/api/chat`) or `openai-compatible`
   (POST `{base}/v1/chat/completions`, or `{base}/chat/completions` when the
@@ -296,6 +297,24 @@ connector instance owns **all** configured roots.
   configured, otherwise a private empty-registration broker (no direct
   model endpoint is ever added; `answer.submit` stays a reserved
   non-broker terminal protocol).
+- Optional **main-conversation thinking budget**:
+  `reasoningBudgetTokens` (integer `0..2147483647`, `openai-compatible`
+  only; Ollama rejects it fail-closed). It is serialized as the top-level
+  `reasoning_budget_tokens` field on every main-agent step and repair, and
+  never on auxiliary memory/voice/learning calls (those keep their own
+  reasoning-off requests). The stock launcher builds the default main
+  config with `reasoningBudgetTokens: 256`; an already-exported
+  `COMPANION_MODEL_JSON` wins and must add the field itself. Timeouts,
+  answer limits, retries, and model choice are unchanged. Efficacy and
+  failure-rate impact are **not yet measured**; this only bounds thinking
+  tokens.
+- Fixed safe failure diagnostics: `model.step.failed` may include
+  `gatewayErrorCode` (model-local closed code such as `request_failed`,
+  `timeout`, `invalid_response`), `invalidResponseCause` (`response_too_large`
+  or `malformed_json`), and numeric `httpStatus` (100..599). These are
+  allowlisted fixed/numeric values only; prompts, bodies, headers, raw
+  errors, and secrets are never logged. The public M2 error code is
+  unchanged.
 - Security limitations: model config values and keys are **never logged**
   (only the tool count is logged); `model_calls` persists adapter/model
   identifier metadata only (adapter, model, outcome, error code, timing,
@@ -5113,3 +5132,84 @@ ops/llm/rotate-keys.sh --yes \
 `LLAMA_API_KEY` は LiteLLM → main の outbound header としてのみ使われる。
 llama.cpp 側でも認証を強制する場合は、`compose.yaml` の main command に
 `--api-key ${LLAMA_API_KEY}` を追加してから `apply.sh --yes` を実行する。
+
+## AGORA レビュー (browser, local only)
+
+### 正とする状態と適用後の状態
+
+- 正とする変更はリポジトリ直下の `agora-review-deploy.patch`。これは
+  **現在の production checkout の on-disk ファイル**に対する差分であり、
+  git HEAD ではない (production には未コミットの learning / reasoning
+  変更が存在し得る)。
+- production へは patch を **tracked modification として適用するだけ**。
+  ローカル commit は作らない。既存の auto-deploy dirty guard が dirty な
+  checkout の前進を拒否するため、上流へ merge / upstream するまで timer は
+  その tree を進めない。この点は意図した安全側の挙動である。
+- `scripts/deploy/install-agora-review.sh` は operator 用で、リポジトリ
+  checkout から実行する。production 側に新しい CLI は不要。UI は通常の
+  `companion.service` restart 後の標準 prestart build に含まれる。
+
+### ブラウザでの実作業
+
+1. チャット画面下部の「AGORA レビュー」パネルを開く。現在のセッションが
+   所有する提案だけを
+   `GET /api/sessions/:sessionId/agora/proposals` で表示する。AGORA 未設定
+   (404) のサーバーではパネル全体を非表示にする。パネル JS はセッションが
+   存在するときだけ遅延読み込みする。
+2. 宛先、タイトル / 本文 / スレッド ID、`payloadHash`、状態、期限、結果を
+   確認する。run 完了時に自動更新し、明示的な「更新」でも再取得する。
+3. 「承認」または「却下」をクリックする (body `{ "payloadHash": "..." }`)。
+   **承認と送信は別操作**で、承認だけでは送信されない。
+4. 承認済みかつ期限内の提案だけ「送信」をクリックする
+   (body `{ "payloadHash": "..." }`)。browser 承認
+   (`approvalSource: "browser"`) は人間の Send だけを許可し、モデルからの
+   send 要求は session 所有であっても denied になる。モデルが browser 承認を
+   先取りして送信することはできない。
+5. 429 は再送までの秒数を表示し、手動でのみ再送する。409 (stale hash /
+   state conflict) は一覧を再取得し、最新内容で明示操作し直す。通信失敗時も
+   状態を再取得し、自動再送はしない。`unknown` 結果は自動 retry しない
+   (実際に送信された可能性があるため)。
+6. 結果リンクはバックエンドが検証した同一 origin の `/t/<id>` だけを開く。
+   browser から AGORA へ直接 POST しない。提案本文は untrusted として
+   テキスト描画する。
+
+### デプロイ (operator, production 変更は明示実行のみ)
+
+```sh
+# repo checkout から。--check は read-only。
+scripts/deploy/install-agora-review.sh --check
+
+# 適用 (既定)。lock / timer pause / private snapshot / active-run gate /
+# restart / health は reasoning-budget と同じ既存経路を共有する。
+scripts/deploy/install-agora-review.sh --apply
+```
+
+- wrapper は固定 profile `agora-review` を選び、patch を
+  `agora-review-deploy.patch`、snapshot を profile 専用の private state dir
+  (`$HOME/.local/state/companion/agora-review-deploy`) に分離する。
+  profile / patch digest は固定 whitelist で、任意 patch の unpinned 適用は
+  できない。
+- UI profile は reasoning 用の `COMPANION_MODEL_JSON` /`reasoningBudgetTokens`
+  検査を行わない。auth、model、voice、learning、AGORA の既存 env は変更せず、
+  `COMPANION_AGORA_JSON` が有効で `dbPath` の private SQLite が安全に読める
+  ことだけを確認する (値や鍵は表示しない)。
+- 適用前に既存 AGORA private SQLite を、`node:sqlite` の online backup で
+  profile 専用の private state dir に snapshot する (integrity_check は
+  `ok` のみ)。additive migration (`session_id` / approval/result columns を
+  追加してから index 作成) は backward-compatible。source rollback は
+  code/docs のみを戻し、**DB は自動 restore しない** (新規に永続化された
+  ユーザー状態を消さないため)。必要な場合だけ operator が snapshot から
+  手動で復元する。
+- patch は package manifest / lockfile を変更しないため、再 install は不要。
+  main DB への migration も行わない。
+
+### E2E (repo, actual browser)
+
+```sh
+cd apps/server
+COMPANION_E2E_AGORA=1 npx playwright test --config=playwright.config.ts
+```
+
+`e2e/agora` は clean な標準 `scripts/build-ui.mjs` build を要求し、AGORA へ
+実送信しない local fixture で 4 シナリオ (list / approve / reject / send
+denied/stale/unknown 系) を検証する。外部への POST は行わない。

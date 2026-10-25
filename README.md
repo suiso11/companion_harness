@@ -1314,9 +1314,23 @@ OpenAI-compatible:
 COMPANION_MODEL_JSON='{
   "adapter": "openai-compatible",
   "baseUrl": "http://127.0.0.1:8000",
-  "model": "local-model"
+  "model": "local-model",
+  "reasoningBudgetTokens": 256
 }'
 ```
+
+`reasoningBudgetTokens` (optional, integer `0..2147483647`) caps
+provider-side thinking on main-agent steps only; auxiliary
+memory/voice/learning calls stay reasoning-off. It is openai-compatible
+only (Ollama rejects it fail-closed). The production launcher already
+builds its default main config with `256`; an explicit
+`COMPANION_MODEL_JSON` wins, so add the field there too. Timeouts, answer
+limits, retries, and model choice are unchanged, and the failure-rate
+effect has not been measured yet. `model.step.failed` keeps the public M2
+code but may add fixed safe fields `gatewayErrorCode`,
+`invalidResponseCause` (`response_too_large` / `malformed_json`), and
+numeric `httpStatus`; prompts, bodies, headers, raw errors, and secrets
+are never logged.
 
 Model config が存在しない場合、偽の回答を生成する fallback は行わず、Run は fail-closed します。
 
@@ -2215,3 +2229,35 @@ rows per page (cursor needed past that); purposes/tasks list caps stay
 100; stop control gates only NEW autonomous background work (normal chat
 and dispatched M5 writes never gated). Prior pin7b40/M6 fixes and the
 historical47/421 records above are untouched.
+
+---
+
+# AGORA レビュー UI (browser, session-owned proposals)
+
+チャット画面下部の「AGORA レビュー」パネルは、現在のセッションの提案だけを
+`GET /api/sessions/:sessionId/agora/proposals` から表示します。AGORA 未設定
+(404) ではパネルを非表示にします。パネルの JS はセッションが存在するときだけ
+遅延読み込みし、読み込み失敗時は再読み込みを促すメッセージを表示します。
+run 完了時に自動更新し、明示的な「更新」でも再取得します。
+
+1. 宛先・タイトル / 本文 / スレッド ID・`payloadHash`・状態・期限・結果を確認する。
+2. 「承認」または「却下」を明示的にクリックする (`{ "payloadHash": "..." }`)。
+   承認だけでは送信されません。**承認と送信は別操作**です。
+3. 承認済みで期限内の提案だけ「送信」をクリックする
+   (`{ "payloadHash": "..." }`)。browser からの承認は人間の Send だけを
+   許可し、モデルはその承認を先取りして送信できません。送信は自動化されません。
+4. 429 は再送までの秒数を表示し、手動でのみ再送します。409 は一覧を再取得し、
+   最新の内容であらためて操作します。通信失敗時も状態を再取得し、自動再送は
+   しません。`unknown` は自動 retry しません。
+5. 提案本文は untrusted のためテキストとしてのみ描画し、結果リンクは
+   バックエンド検証済みの同一 origin `/t/<id>` だけを開きます。
+   browser から AGORA へ直接書き込みません。
+
+デプロイは operator が repo checkout から
+`scripts/deploy/install-agora-review.sh --check` →
+`scripts/deploy/install-agora-review.sh --apply` を実行します。UI profile は
+reasoning 用 env を変更せず、AGORA の既存 private store だけを確認します。
+patch は package manifest を変更しないため再 install は不要です。適用後は
+通常の `companion.service` restart だけで、専用 CLI は不要です。source rollback
+は code/docs のみで、AGORA DB は自動 restore しません。詳細は
+`docs/operations.md` の「AGORA レビュー (browser, local only)」を参照。

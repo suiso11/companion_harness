@@ -56,6 +56,17 @@ export interface ChatRequest {
    */
   maxOutputTokens?: number;
   /**
+   * Optional provider-side thinking-token budget. Only meaningful on the
+   * OpenAI-compatible adapter, which serializes it as the top-level
+   * `reasoning_budget_tokens` field understood by the installed
+   * llama-server; it counts thinking tokens, not total output tokens.
+   * `0` ends thinking immediately and positive values cap it. The Ollama
+   * adapter has no equivalent and fails closed with
+   * `unsupported_capability` when a budget is requested without
+   * `reasoning: "off"`. Never sent when `reasoning` is `"off"`.
+   */
+  reasoningBudgetTokens?: number;
+  /**
    * Opt-in suppression of provider "thinking" output. Only `"off"` is
    * accepted. Serialized provider-natively (OpenAI-compatible
    * `chat_template_kwargs: { enable_thinking: false }`, Ollama

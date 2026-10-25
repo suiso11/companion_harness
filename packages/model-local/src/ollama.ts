@@ -259,6 +259,19 @@ export function createOllamaGateway(options: GatewayOptions): ModelGateway {
     chatUrl,
     async chat(request, options: ChatCallOptions | undefined) {
       validateChatRequest(request);
+      // There is no proven Ollama equivalent for a thinking-token budget.
+      // Explicit `reasoning: "off"` wins (the budget is not active), so old
+      // configs that only rely on off keep working; any active budget fails
+      // closed before fetch instead of silently sending an unbounded call.
+      if (
+        request.reasoningBudgetTokens !== undefined &&
+        request.reasoning !== "off"
+      ) {
+        throw new ModelLocalError(
+          "unsupported_capability",
+          "ollama does not support a reasoning token budget",
+        );
+      }
       assertToolCallingCapability(OLLAMA_CAPABILITIES, request.tools);
       // Recompute the fetch target from the pinned base on every request
       // (never reuse the exposed `chatUrl` property) so a mutated gateway
