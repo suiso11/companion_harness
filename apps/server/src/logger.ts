@@ -6,6 +6,12 @@
 // fields are dropped, strings are length-capped, and errors map to codes.
 
 import { ANSWER_INVALID_REASON_REGEX } from "@companion/contracts";
+import {
+  MODEL_LOCAL_ERROR_CODES,
+  MODEL_LOCAL_INVALID_RESPONSE_CAUSES,
+  type ModelLocalErrorCode,
+  type ModelLocalInvalidResponseCause,
+} from "@companion/model-local";
 
 import type { ServerLogLevel } from "./config.js";
 
@@ -85,6 +91,12 @@ export interface ServerLogFields {
   readonly proposalId?: string;
   readonly scope?: string;
   readonly status?: number | string;
+  /** Fixed model-local gateway error code (never raw text). */
+  readonly gatewayErrorCode?: ModelLocalErrorCode;
+  /** Fixed invalid-response cause (oversize vs malformed JSON). */
+  readonly invalidResponseCause?: ModelLocalInvalidResponseCause;
+  /** Numeric HTTP status for a model request failure (100..599). */
+  readonly httpStatus?: number;
   readonly bytes?: number;
   readonly durationMs?: number;
   readonly attempt?: number;
@@ -114,6 +126,12 @@ export interface ServerLogger {
 }
 
 const MAX_STRING_LENGTH = 128;
+const GATEWAY_ERROR_CODES: ReadonlySet<string> = new Set(
+  MODEL_LOCAL_ERROR_CODES,
+);
+const INVALID_RESPONSE_CAUSES: ReadonlySet<string> = new Set(
+  MODEL_LOCAL_INVALID_RESPONSE_CAUSES,
+);
 
 function sanitizeString(value: unknown): string | undefined {
   if (typeof value !== "string") {
@@ -194,6 +212,27 @@ function sanitizeFields(fields: ServerLogFields | undefined): ServerLogFields {
     if (status !== undefined) {
       out.status = status;
     }
+  }
+  if (
+    typeof fields.gatewayErrorCode === "string" &&
+    GATEWAY_ERROR_CODES.has(fields.gatewayErrorCode)
+  ) {
+    out.gatewayErrorCode = fields.gatewayErrorCode;
+  }
+  if (
+    typeof fields.invalidResponseCause === "string" &&
+    INVALID_RESPONSE_CAUSES.has(fields.invalidResponseCause)
+  ) {
+    out.invalidResponseCause = fields.invalidResponseCause;
+  }
+  const httpStatus = sanitizeNumber(fields.httpStatus);
+  if (
+    httpStatus !== undefined &&
+    Number.isInteger(httpStatus) &&
+    httpStatus >= 100 &&
+    httpStatus <= 599
+  ) {
+    out.httpStatus = httpStatus;
   }
   const bytes = sanitizeNumber(fields.bytes);
   if (bytes !== undefined) {

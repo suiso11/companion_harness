@@ -8,6 +8,13 @@
 
 import {
   ActiveRunResponseSchema,
+  AgoraHttpDecisionRequestSchema,
+  AgoraHttpDecisionResponseSchema,
+  AgoraHttpListResponseSchema,
+  AgoraHttpProposalViewSchema,
+  AgoraHttpSendRequestSchema,
+  AgoraHttpSendResponseSchema,
+  AgoraHttpShowResponseSchema,
   type ApiErrorCode,
   AutonomyControlSetRequestSchema,
   AutonomyHistoryQuerySchema,
@@ -84,8 +91,15 @@ import {
 } from "@companion/contracts";
 import {
   ActionNotCancellableError,
+  AGORA_BASE_URL,
+  AgoraPayloadHashMismatchError,
+  AgoraProposalNotFoundError,
+  type AgoraProposalRow,
+  AgoraProposalStateConflictError,
+  type AgoraStore,
   AutonomyStateConflictError,
   AutonomyVersionConflictError,
+  agoraWritePath,
   HandoffStateConflictError,
   HandoffVersionConflictError,
   IdempotencyConflictError,
@@ -396,6 +410,15 @@ export interface CreateAppDeps {
    */
   memory?: MemoryHttpPort;
   /**
+   * Opt-in AGORA store (same durable private store the operator CLI and
+   * model tools use). Null/absent keeps every `/agora/*` review route at a
+   * fixed 404 and touches no credential. The API can read/list this exact
+   * session's proposals, approve/reject by exact payload hash, and send ONE
+   * already-approved proposal through the existing host-side primitive.
+   * There is deliberately no proposal-create/register route here.
+   */
+  agora?: AgoraStore | null;
+  /**
    * AV shadow worker wake hook (server-owned). Called synchronously AFTER a
    * committed autonomy mutation / control change / explicit shadow request
    * so meaningful new state re-drives the worker. Never throws back into
@@ -436,6 +459,14 @@ export interface CreateAppDeps {
 export interface ServerControls {
   readonly draining: boolean;
   markDraining(): void;
+  /**
+   * Register ONE admitted browser AGORA send handler. Returns an idempotent
+   * completion hook the handler MUST call in `finally`. Bootstrap awaits all
+   * admitted sends before closing the AGORA store (no post-close finishSend).
+   */
+  beginAgoraSend(): () => void;
+  /** Refuse new AGORA browser sends, then await every admitted one. */
+  drainAgoraSends(): Promise<void>;
 }
 
 export interface CreatedServerApp {
@@ -1013,8 +1044,69 @@ function strictQuery(
   return { ok: true, values };
 }
 
+/** Project one stored AGORA row into the exact browser review contract. */
+function agoraProposalView(row: AgoraProposalRow): unknown {
+  const payload = row.payload as {
+    name?: unknown;
+    description?: unknown;
+    title?: unknown;
+    body?: unknown;
+    threadId?: unknown;
+  };
+  return AgoraHttpProposalViewSchema.parse({
+    proposalId: row.id,
+    operation: row.operation,
+    status: row.status,
+    // Fixed by operation; never derived from request input.
+    destination: `${AGORA_BASE_URL}${agoraWritePath(row.operation, row.payload)}`,
+    payloadHash: row.payloadHash,
+    name: typeof payload.name === "string" ? payload.name : null,
+    description:
+      typeof payload.description === "string" ? payload.description : null,
+    title: typeof payload.title === "string" ? payload.title : null,
+    body: typeof payload.body === "string" ? payload.body : null,
+    threadId: typeof payload.threadId === "string" ? payload.threadId : null,
+    createdAt: row.createdAt,
+    expiresAt: row.expiresAt,
+    decidedAt: row.decidedAt,
+    consumedAt: row.consumedAt,
+    httpStatus: row.httpStatus,
+    resultCode: row.resultCode,
+    resultThreadId: row.resultThreadId,
+    resultUrl: row.resultUrl,
+  });
+}
+
 /** Fixed domain-error to HTTP mapping (§12.3). No raw errors leak. */
 function mapDomainError(c: Context, error: unknown): Response {
+  // AGORA session review: foreign/operator/unknown rows are indistinguishable
+  // 404s; stale hash and invalid state are fixed safe 409s. These subclasses
+  // must be checked BEFORE the generic validation mapping.
+  if (error instanceof AgoraProposalNotFoundError) {
+    return apiError(c, 404, "not_found", "resource not found");
+  }
+  if (error instanceof AgoraPayloadHashMismatchError) {
+    return c.json(
+      {
+        error: {
+          code: "agora_payload_hash_mismatch",
+          message: "proposal payload hash mismatch",
+        },
+      },
+      409,
+    );
+  }
+  if (error instanceof AgoraProposalStateConflictError) {
+    return c.json(
+      {
+        error: {
+          code: "agora_proposal_state_conflict",
+          message: "proposal is not in a state that allows this action",
+        },
+      },
+      409,
+    );
+  }
   if (
     error instanceof RepositoryValidationError ||
     error instanceof ServerConfigError
@@ -1261,6 +1353,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   const actionsEnabled = deps.actionsEnabled === true;
   const createEnabled = deps.createEnabled === true;
   const memory = deps.memory ?? null;
+  const agora = deps.agora ?? null;
   const shadowWake = deps.shadowWake;
   const shadowControlChanged = deps.shadowControlChanged;
   const logger = deps.logger ?? createStdServerLogger(config.logLevel);
@@ -1298,12 +1391,38 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     return hasValidRemoteSession(c, config, remoteStore, now);
   };
   let draining = false;
+  // Browser-initiated AGORA sends are direct HTTP handlers (not engine runs),
+  // so the engine drain never awaits them. Track admitted handlers here and
+  // drain them explicitly BEFORE the AGORA SQLite store closes on shutdown.
+  const inFlightAgoraSends = new Set<Promise<void>>();
+  let admitAgoraSends = true;
   const controls: ServerControls = {
     get draining() {
       return draining;
     },
     markDraining: () => {
       draining = true;
+    },
+    beginAgoraSend: () => {
+      if (!admitAgoraSends) {
+        // Drain already began; the handler's own `draining` check rejects
+        // the request. Nothing to track for this unreachable race.
+        return () => undefined;
+      }
+      let resolveDone!: () => void;
+      const done = new Promise<void>((resolve) => {
+        resolveDone = resolve;
+      });
+      inFlightAgoraSends.add(done);
+      return () => {
+        if (inFlightAgoraSends.delete(done)) resolveDone();
+      };
+    },
+    drainAgoraSends: async () => {
+      admitAgoraSends = false;
+      while (inFlightAgoraSends.size > 0) {
+        await Promise.all([...inFlightAgoraSends]);
+      }
     },
   };
   /**
@@ -2123,6 +2242,207 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         return c.json(body, 200);
       } catch (error) {
         return mapDomainError(c, error);
+      }
+    },
+  );
+
+  /* ---------------- AGORA session review (human-only) ---------------- */
+
+  // Read-only, exact-session proposal list. Operator-created (null session)
+  // and other-session rows are never returned. Bounded newest-first.
+  app.get("/api/sessions/:sessionId/agora/proposals", (c) => {
+    if (agora === null) {
+      return apiError(c, 404, "not_found", "resource not found");
+    }
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) return session.response;
+    if (!strictQuery(c, []).ok) return validationError(c);
+    try {
+      repo.getSession(session.id);
+      const proposals = agora
+        .listForSession(session.id)
+        .slice(0, 100)
+        .map((row) => agoraProposalView(row));
+      return c.json(AgoraHttpListResponseSchema.parse({ proposals }), 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  // One exact proposal owned by this session (foreign/operator -> fixed 404).
+  app.get("/api/sessions/:sessionId/agora/proposals/:proposalId", (c) => {
+    if (agora === null) {
+      return apiError(c, 404, "not_found", "resource not found");
+    }
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) return session.response;
+    const proposal = requireUuid(c, c.req.param("proposalId"), "proposalId");
+    if ("response" in proposal) return proposal.response;
+    if (!strictQuery(c, []).ok) return validationError(c);
+    try {
+      repo.getSession(session.id);
+      const body = AgoraHttpShowResponseSchema.parse({
+        proposal: agoraProposalView(
+          agora.showForSession(proposal.id, session.id),
+        ),
+      });
+      return c.json(body, 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  // Exact-hash approve. State-idempotent (repeat approve of the same exact
+  // bytes returns the already-approved row); wrong hash/state is a fixed
+  // 409. This route never sends and never accepts content.
+  app.post(
+    "/api/sessions/:sessionId/agora/proposals/:proposalId/approve",
+    async (c) => {
+      if (agora === null) {
+        return apiError(c, 404, "not_found", "resource not found");
+      }
+      const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+      if ("response" in session) return session.response;
+      const proposal = requireUuid(c, c.req.param("proposalId"), "proposalId");
+      if ("response" in proposal) return proposal.response;
+      const raw = await readJsonBody(c);
+      if (!raw.ok) return validationError(c);
+      const parsed = AgoraHttpDecisionRequestSchema.safeParse(raw.value);
+      if (!parsed.success) return validationError(c);
+      try {
+        repo.getSession(session.id);
+        const row = agora.approveForSession(
+          proposal.id,
+          parsed.data.payloadHash,
+          session.id,
+          now(),
+        );
+        const body = AgoraHttpDecisionResponseSchema.parse({
+          proposal: agoraProposalView(row),
+        });
+        logger.info("http.agora.approve", {
+          sessionId: session.id,
+          proposalId: proposal.id,
+          status: row.status,
+        });
+        return c.json(body, 200);
+      } catch (error) {
+        return mapDomainError(c, error);
+      }
+    },
+  );
+
+  // Exact-hash reject. Keyless and state-idempotent (repeat reject of the
+  // same exact bytes returns the rejected row). A stale hash never decides.
+  app.post(
+    "/api/sessions/:sessionId/agora/proposals/:proposalId/reject",
+    async (c) => {
+      if (agora === null) {
+        return apiError(c, 404, "not_found", "resource not found");
+      }
+      const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+      if ("response" in session) return session.response;
+      const proposal = requireUuid(c, c.req.param("proposalId"), "proposalId");
+      if ("response" in proposal) return proposal.response;
+      const raw = await readJsonBody(c);
+      if (!raw.ok) return validationError(c);
+      const parsed = AgoraHttpDecisionRequestSchema.safeParse(raw.value);
+      if (!parsed.success) return validationError(c);
+      try {
+        repo.getSession(session.id);
+        const row = agora.rejectForSession(
+          proposal.id,
+          parsed.data.payloadHash,
+          session.id,
+          now(),
+        );
+        const body = AgoraHttpDecisionResponseSchema.parse({
+          proposal: agoraProposalView(row),
+        });
+        logger.info("http.agora.reject", {
+          sessionId: session.id,
+          proposalId: proposal.id,
+          status: row.status,
+        });
+        return c.json(body, 200);
+      } catch (error) {
+        return mapDomainError(c, error);
+      }
+    },
+  );
+
+  // Explicit human Send click: exactly one already-approved proposal with
+  // this exact hash goes through the SAME host-side store/transport primitive
+  // the model tool uses. Never approves first; never a browser->AGORA POST.
+  app.post(
+    "/api/sessions/:sessionId/agora/proposals/:proposalId/send",
+    async (c) => {
+      if (agora === null) {
+        return apiError(c, 404, "not_found", "resource not found");
+      }
+      const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+      if ("response" in session) return session.response;
+      const proposal = requireUuid(c, c.req.param("proposalId"), "proposalId");
+      if ("response" in proposal) return proposal.response;
+      const raw = await readJsonBody(c);
+      if (!raw.ok) return validationError(c);
+      const parsed = AgoraHttpSendRequestSchema.safeParse(raw.value);
+      if (!parsed.success) return validationError(c);
+      // No idempotency replay exists for a send; during drain refuse the new
+      // external write with the standard 503/Retry-After.
+      if (draining) return shuttingDown(c);
+      const endAgoraSend = controls.beginAgoraSend();
+      try {
+        repo.getSession(session.id);
+        const result = await agora.send(proposal.id, parsed.data.payloadHash, {
+          sessionId: session.id,
+          now: now(),
+          // Explicit human Send click: may consume a browser approval.
+          actor: "human",
+        });
+        if (result.kind === "throttled") {
+          const row = agora.showForSession(proposal.id, session.id);
+          c.header(
+            "Retry-After",
+            String(Math.max(1, Math.ceil(result.retryAfterMs / 1000))),
+          );
+          return c.json(
+            AgoraHttpSendResponseSchema.parse({
+              outcome: "throttled",
+              proposal: agoraProposalView(row),
+              retryAfterMs: result.retryAfterMs,
+            }),
+            429,
+          );
+        }
+        if (result.kind === "key_missing") {
+          const row = agora.showForSession(proposal.id, session.id);
+          return c.json(
+            AgoraHttpSendResponseSchema.parse({
+              outcome: "key_missing",
+              proposal: agoraProposalView(row),
+              retryAfterMs: null,
+            }),
+            409,
+          );
+        }
+        logger.info("http.agora.send", {
+          sessionId: session.id,
+          proposalId: proposal.id,
+          status: result.kind,
+        });
+        return c.json(
+          AgoraHttpSendResponseSchema.parse({
+            outcome: result.kind,
+            proposal: agoraProposalView(result.proposal),
+            retryAfterMs: null,
+          }),
+          200,
+        );
+      } catch (error) {
+        return mapDomainError(c, error);
+      } finally {
+        endAgoraSend();
       }
     },
   );

@@ -26,7 +26,9 @@ export {
   startServerFromEnv,
 } from "./bootstrap.js";
 export type {
+  AgoraConfig,
   ExecutionRecordsConfig,
+  LearningConfig,
   MemoryConfig,
   ModelAdapter,
   ModelConfig,
@@ -36,13 +38,22 @@ export type {
   TrialConfig,
 } from "./config.js";
 export {
+  AGORA_API_KEY_ENV,
+  AGORA_CONFIG_DEFAULT_MAX_RESPONSE_BYTES,
+  AGORA_CONFIG_DEFAULT_TIMEOUT_MS,
+  AGORA_CONFIG_MAX_RESPONSE_BYTES,
+  AGORA_CONFIG_MAX_TIMEOUT_MS,
+  AGORA_CONFIG_MIN_WRITE_INTERVAL_MS,
   assertDbPathHasNoSymlink,
   defaultDbPath,
   EXECUTION_RECORDS_RETENTION_DEFAULT_DAYS,
   isIanaTimeZone,
   loadServerConfig,
   MAX_EXECUTION_RECORDS_RETENTION_DAYS,
+  parseAgoraApiKey,
+  parseAgoraConfig,
   parseExecutionRecordsConfig,
+  parseLearningConfig,
   parseMemoryConfig,
   parseModelConfig,
   parseTrialConfig,

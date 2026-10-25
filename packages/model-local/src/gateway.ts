@@ -80,6 +80,12 @@ export interface ModelGateway {
 /** Maximum sizes accepted on gateway inputs (generic, prompt-safe). */
 export const MAX_MODEL_NAME_LENGTH = 256;
 /**
+ * Maximum accepted thinking-token budget. The installed llama-server parses
+ * the field as a C++ `int`, so values above int32 would be truncated or
+ * rejected; `0` is valid (end thinking immediately).
+ */
+export const MAX_REASONING_BUDGET_TOKENS = 2_147_483_647;
+/**
  * Maximum accepted chat message content length (65_536 chars == 64KiB).
  * Aligned with the kernel per-call model-facing output budget so a legal
  * <=64KiB tool result is never rejected by a lower arbitrary message cap.
@@ -721,6 +727,19 @@ export function validateChatRequest(request: ChatRequest): void {
       "model request carries an invalid reasoning mode",
     );
   }
+  if (request.reasoningBudgetTokens !== undefined) {
+    if (
+      typeof request.reasoningBudgetTokens !== "number" ||
+      !Number.isSafeInteger(request.reasoningBudgetTokens) ||
+      request.reasoningBudgetTokens < 0 ||
+      request.reasoningBudgetTokens > MAX_REASONING_BUDGET_TOKENS
+    ) {
+      throw new ModelLocalError(
+        "invalid_request",
+        "model request carries an invalid reasoning budget",
+      );
+    }
+  }
   if (request.tools !== undefined) {
     validateToolDefinitions(request.tools);
   }
@@ -1096,6 +1115,8 @@ export async function postJsonNoRedirect(options: {
       new ModelLocalError(
         "request_failed",
         `model request failed with status ${status}`,
+        undefined,
+        { httpStatus: status },
       );
     const declared = parseDeclaredContentLength(response);
     if (declared !== undefined && declared > limit) {
@@ -1106,6 +1127,8 @@ export async function postJsonNoRedirect(options: {
       throw new ModelLocalError(
         "invalid_response",
         "model returned an oversized response",
+        undefined,
+        { invalidResponseCause: "response_too_large" },
       );
     }
     if (!response.ok) {
@@ -1136,6 +1159,8 @@ export async function postJsonNoRedirect(options: {
           new ModelLocalError(
             "invalid_response",
             "model returned an oversized response",
+            undefined,
+            { invalidResponseCause: "response_too_large" },
           ),
         failed: () =>
           new ModelLocalError(
@@ -1154,6 +1179,8 @@ export async function postJsonNoRedirect(options: {
       throw new ModelLocalError(
         "invalid_response",
         "model returned an invalid response",
+        undefined,
+        { invalidResponseCause: "malformed_json" },
       );
     }
   } finally {

@@ -1022,6 +1022,7 @@ test("PR28-1 lost reject during in-flight proposals sync recovers controls", asy
     await page.route("**/proposals", async (route) => {
       if (
         holdLists &&
+        !route.request().url().includes("/agora/") &&
         !route.request().url().includes("/approve") &&
         !route.request().url().includes("/reject") &&
         !route.request().url().includes("/execution")
@@ -1114,6 +1115,7 @@ test("PR28-2 stale pending list cannot downgrade approved ownership without runI
     await page.route("**/proposals", async (route) => {
       const url = route.request().url();
       if (
+        url.includes("/agora/") ||
         route.request().method() !== "GET" ||
         url.includes("/approve") ||
         url.includes("/reject") ||

@@ -354,6 +354,10 @@ export function createOpenAICompatibleGateway(
       }
       if (request.reasoning === "off") {
         body.chat_template_kwargs = { enable_thinking: false };
+      } else if (request.reasoningBudgetTokens !== undefined) {
+        // Installed llama-server parser: top-level `reasoning_budget_tokens`
+        // (alias `thinking_budget_tokens`), forwarded unchanged by LiteLLM.
+        body.reasoning_budget_tokens = request.reasoningBudgetTokens;
       }
       if (request.tools !== undefined && request.tools.length > 0) {
         body.tools = request.tools.map((tool) => ({
@@ -426,6 +430,10 @@ async function streamOpenAIChat(options: {
   }
   if (request.reasoning === "off") {
     body.chat_template_kwargs = { enable_thinking: false };
+  } else if (request.reasoningBudgetTokens !== undefined) {
+    // Same top-level field as the non-streaming path: llama-server applies
+    // it while the SSE deltas are generated.
+    body.reasoning_budget_tokens = request.reasoningBudgetTokens;
   }
   if (request.tools !== undefined && request.tools.length > 0) {
     body.tools = request.tools.map((tool) => ({

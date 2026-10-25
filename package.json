@@ -17,6 +17,8 @@
     "typecheck:e2e": "tsc --noEmit -p apps/server/tsconfig.e2e.json",
     "lint": "biome check .",
     "format": "biome check --write .",
+    "learning": "pnpm --filter @companion/server learning",
+    "agora": "pnpm --filter @companion/server agora",
     "records": "pnpm --filter @companion/server records",
     "compare": "pnpm --filter @companion/server compare"
   },

@@ -513,6 +513,10 @@ export interface ServerConfig {
   readonly memory: MemoryConfig | null;
   /** Opt-in private execution records; null (unset) means disabled. */
   readonly executionRecords: ExecutionRecordsConfig | null;
+  /** Opt-in conversation learning; null (unset) means learning disabled. */
+  readonly learning: LearningConfig | null;
+  /** Opt-in AGORA participation; null (unset) means disabled. */
+  readonly agora: AgoraConfig | null;
   /** Strict opt-in voice layer; null (unset) means disabled. */
   readonly voice: VoiceConfig | null;
   /** Strict opt-in remote (tailnet) Origin/Host allowlist (default off). */
@@ -546,10 +550,20 @@ export interface ModelConfig {
    * Ollama adapter.
    */
   readonly toolChoice?: "auto" | "required";
+  /**
+   * Optional provider-side thinking-token budget for the MAIN agent
+   * conversation only (memory/voice/learning helpers keep their own
+   * reasoning-off requests). Absent means no `reasoning_budget_tokens` field
+   * is sent. Only the OpenAI-compatible adapter supports it; the Ollama
+   * adapter fails config validation closed when a budget is requested.
+   */
+  readonly reasoningBudgetTokens?: number;
 }
 
 export const MAX_MODEL_NAME_LENGTH = 256;
 export const MAX_MODEL_API_KEY_LENGTH = 4096;
+/** Same provider-side bound as the model-local request validator. */
+export const MAX_MODEL_REASONING_BUDGET_TOKENS = 2_147_483_647;
 
 export class ServerConfigError extends Error {
   readonly code = "server_config_invalid" as const;
@@ -558,6 +572,176 @@ export class ServerConfigError extends Error {
     super(message, options);
     this.name = "ServerConfigError";
   }
+}
+
+/** Opt-in conversation-learning store (per-session reflections/lessons). */
+export interface LearningConfig {
+  /** Absolute private SQLite path. */
+  readonly dbPath: string;
+}
+
+/** Opt-in AGORA participation store (approvals + host-held credential). */
+export interface AgoraConfig {
+  /** Absolute private SQLite path. */
+  readonly dbPath: string;
+  readonly timeoutMs: number;
+  readonly maxResponseBytes: number;
+  /** Durable per-key write interval; never below 10 seconds. */
+  readonly minWriteIntervalMs: number;
+}
+
+/** Separate host-held AGORA API key env variable (never in config JSON). */
+export const AGORA_API_KEY_ENV = "COMPANION_AGORA_API_KEY" as const;
+export const AGORA_CONFIG_DEFAULT_TIMEOUT_MS = 15_000;
+export const AGORA_CONFIG_MAX_TIMEOUT_MS = 60_000;
+export const AGORA_CONFIG_DEFAULT_MAX_RESPONSE_BYTES = 256 * 1024;
+export const AGORA_CONFIG_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
+export const AGORA_CONFIG_MIN_WRITE_INTERVAL_MS = 10_000;
+
+const LEARNING_CONFIG_KEYS = new Set(["dbPath"]);
+const AGORA_CONFIG_KEYS = new Set([
+  "dbPath",
+  "timeoutMs",
+  "maxResponseBytes",
+  "minWriteIntervalMs",
+]);
+
+function requireConfigObject(
+  raw: string,
+  what: string,
+): Record<string, unknown> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw configError(`${what} must be a JSON object`);
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw configError(`${what} must be a JSON object`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function boundedInteger(
+  value: unknown,
+  fallback: number,
+  min: number,
+  max: number,
+  what: string,
+): number {
+  if (value === undefined) return fallback;
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value < min ||
+    value > max
+  ) {
+    throw configError(`${what} is out of bounds`);
+  }
+  return value;
+}
+
+/**
+ * Strict opt-in conversation-learning parser (COMPANION_LEARNING_JSON).
+ * Unset = null (disabled). Exact shape `{ dbPath }`; any unknown key fails
+ * closed. The store validates/creates the private path at construction.
+ */
+export function parseLearningConfig(
+  raw: string | undefined,
+): LearningConfig | null {
+  if (raw === undefined) return null;
+  const record = requireConfigObject(raw, "learning config");
+  for (const key of Object.keys(record)) {
+    if (!LEARNING_CONFIG_KEYS.has(key)) {
+      throw configError("learning config has an unknown key");
+    }
+  }
+  const dbPath = record.dbPath;
+  if (
+    typeof dbPath !== "string" ||
+    dbPath.length === 0 ||
+    dbPath.length > 4096 ||
+    dbPath.includes("\0") ||
+    !isAbsolute(dbPath)
+  ) {
+    throw configError("learning database path must be absolute");
+  }
+  return Object.freeze({ dbPath });
+}
+
+/**
+ * Strict opt-in AGORA parser (COMPANION_AGORA_JSON). Unset = null (disabled).
+ * Exact shape `{ dbPath, timeoutMs?, maxResponseBytes?,
+ * minWriteIntervalMs? }`; the endpoint host is fixed in the kernel and
+ * cannot be configured. The API key is read only from the separate
+ * COMPANION_AGORA_API_KEY variable via {@link parseAgoraApiKey}.
+ */
+export function parseAgoraConfig(raw: string | undefined): AgoraConfig | null {
+  if (raw === undefined) return null;
+  const record = requireConfigObject(raw, "agora config");
+  for (const key of Object.keys(record)) {
+    if (!AGORA_CONFIG_KEYS.has(key)) {
+      throw configError("agora config has an unknown key");
+    }
+  }
+  const dbPath = record.dbPath;
+  if (
+    typeof dbPath !== "string" ||
+    dbPath.length === 0 ||
+    dbPath.length > 4096 ||
+    dbPath.includes("\0") ||
+    !isAbsolute(dbPath)
+  ) {
+    throw configError("agora database path must be absolute");
+  }
+  const minWriteIntervalMs = boundedInteger(
+    record.minWriteIntervalMs,
+    AGORA_CONFIG_MIN_WRITE_INTERVAL_MS,
+    AGORA_CONFIG_MIN_WRITE_INTERVAL_MS,
+    24 * 60 * 60 * 1000,
+    "agora minWriteIntervalMs",
+  );
+  return Object.freeze({
+    dbPath,
+    timeoutMs: boundedInteger(
+      record.timeoutMs,
+      AGORA_CONFIG_DEFAULT_TIMEOUT_MS,
+      1,
+      AGORA_CONFIG_MAX_TIMEOUT_MS,
+      "agora timeoutMs",
+    ),
+    maxResponseBytes: boundedInteger(
+      record.maxResponseBytes,
+      AGORA_CONFIG_DEFAULT_MAX_RESPONSE_BYTES,
+      1024,
+      AGORA_CONFIG_MAX_RESPONSE_BYTES,
+      "agora maxResponseBytes",
+    ),
+    minWriteIntervalMs,
+  });
+}
+
+/**
+ * Validate the separate host-held AGORA key. Unset = null; a present but
+ * invalid value fails closed. The fixed error never contains the key.
+ */
+export function parseAgoraApiKey(raw: string | undefined): string | null {
+  if (raw === undefined) return null;
+  if (
+    typeof raw !== "string" ||
+    raw.length === 0 ||
+    raw.length > MAX_MODEL_API_KEY_LENGTH ||
+    raw.includes("\0")
+  ) {
+    throw configError("agora credential is invalid");
+  }
+  for (const character of raw) {
+    const code = character.codePointAt(0) ?? 0;
+    if (code < 0x21 || code > 0x7e) {
+      throw configError("agora credential is invalid");
+    }
+  }
+  return raw;
 }
 
 /** Opt-in private local execution-record store configuration. */
@@ -815,12 +999,16 @@ export function parseMarkdownRoots(
  * Strict local model parser (M2 server wiring).
  *
  * - Env COMPANION_MODEL_JSON is strict JSON only; unset means null (no model).
- * - Must be an exact object with only { adapter, baseUrl, model, apiKey? }.
+ * - Must be an exact object with only { adapter, baseUrl, model, apiKey?,
+ *   toolChoice?, reasoningBudgetTokens? }.
  * - adapter must be 'ollama' or 'openai-compatible'.
  * - baseUrl is validated with model-local's loopback URL rules (plain http,
  *   127.0.0.1/localhost/::1, no credentials/query/fragment); the normalized
  *   form is stored.
  * - model must be 1..256 chars with no NUL byte.
+ * - reasoningBudgetTokens when present must be an integer 0..2147483647 and
+ *   is supported only by the `openai-compatible` adapter; requesting it on
+ *   Ollama fails closed (no silent drop).
  * - apiKey when present must be a non-empty string up to 4096 chars with
  *   no NUL byte and a legal HTTP Authorization header value: printable
  *   ASCII U+0020..U+007E plus Latin-1 U+00A0..U+00FF only (C0/C1
@@ -848,7 +1036,8 @@ export function parseModelConfig(raw: string | undefined): ModelConfig | null {
       key !== "baseUrl" &&
       key !== "model" &&
       key !== "apiKey" &&
-      key !== "toolChoice"
+      key !== "toolChoice" &&
+      key !== "reasoningBudgetTokens"
     ) {
       throw configError("model config has an unknown key");
     }
@@ -859,6 +1048,7 @@ export function parseModelConfig(raw: string | undefined): ModelConfig | null {
     model?: unknown;
     apiKey?: unknown;
     toolChoice?: unknown;
+    reasoningBudgetTokens?: unknown;
   };
   if (record.adapter !== "ollama" && record.adapter !== "openai-compatible") {
     throw configError("model adapter is invalid");
@@ -884,6 +1074,19 @@ export function parseModelConfig(raw: string | undefined): ModelConfig | null {
   ) {
     throw configError("model tool choice is invalid");
   }
+  if (record.reasoningBudgetTokens !== undefined) {
+    if (
+      typeof record.reasoningBudgetTokens !== "number" ||
+      !Number.isSafeInteger(record.reasoningBudgetTokens) ||
+      record.reasoningBudgetTokens < 0 ||
+      record.reasoningBudgetTokens > MAX_MODEL_REASONING_BUDGET_TOKENS
+    ) {
+      throw configError("model reasoning budget is invalid");
+    }
+    if (record.adapter === "ollama") {
+      throw configError("model reasoning budget is unsupported by the adapter");
+    }
+  }
   if (record.apiKey !== undefined) {
     if (
       typeof record.apiKey !== "string" ||
@@ -904,6 +1107,11 @@ export function parseModelConfig(raw: string | undefined): ModelConfig | null {
           ...(record.toolChoice === undefined
             ? {}
             : { toolChoice: record.toolChoice }),
+          ...(record.reasoningBudgetTokens === undefined
+            ? {}
+            : {
+                reasoningBudgetTokens: record.reasoningBudgetTokens as number,
+              }),
         }
       : {
           adapter: record.adapter,
@@ -913,6 +1121,11 @@ export function parseModelConfig(raw: string | undefined): ModelConfig | null {
           ...(record.toolChoice === undefined
             ? {}
             : { toolChoice: record.toolChoice }),
+          ...(record.reasoningBudgetTokens === undefined
+            ? {}
+            : {
+                reasoningBudgetTokens: record.reasoningBudgetTokens as number,
+              }),
         },
   );
 }
@@ -1677,6 +1890,8 @@ export function loadServerConfig(
   const executionRecords = parseExecutionRecordsConfig(
     env.COMPANION_EXECUTION_RECORDS_JSON,
   );
+  const learning = parseLearningConfig(env.COMPANION_LEARNING_JSON);
+  const agora = parseAgoraConfig(env.COMPANION_AGORA_JSON);
   const voice = parseVoiceConfig(env.COMPANION_VOICE_JSON);
   const remote = parseRemoteConfig(env.COMPANION_REMOTE_JSON);
   if (remote.enabled && remote.allowedOrigins.length === 0) {
@@ -1716,6 +1931,8 @@ export function loadServerConfig(
     webSearch,
     memory,
     executionRecords,
+    learning,
+    agora,
     voice,
     remote,
     trial,

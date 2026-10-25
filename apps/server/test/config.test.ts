@@ -400,6 +400,71 @@ describe("model config", () => {
     }
   });
 
+  it("accepts an optional reasoningBudgetTokens for openai-compatible only", () => {
+    for (const reasoningBudgetTokens of [0, 256, 2_147_483_647]) {
+      const config = loadServerConfig(
+        modelEnv(
+          tempDbPath(),
+          JSON.stringify({
+            adapter: "openai-compatible",
+            baseUrl: "http://127.0.0.1:8000",
+            model: "m",
+            reasoningBudgetTokens,
+          }),
+        ),
+      );
+      expect(config.model?.reasoningBudgetTokens).toBe(reasoningBudgetTokens);
+      expect(Object.isFrozen(config.model)).toBe(true);
+    }
+  });
+
+  it("rejects invalid or unsupported reasoningBudgetTokens fail-closed", () => {
+    const invalidValues: unknown[] = [
+      -1,
+      1.5,
+      2_147_483_648,
+      Number.MAX_SAFE_INTEGER,
+      "256",
+      null,
+      true,
+    ];
+    for (const reasoningBudgetTokens of invalidValues) {
+      let message = "";
+      try {
+        parseModelConfig(
+          JSON.stringify({
+            adapter: "openai-compatible",
+            baseUrl: "http://127.0.0.1:8000",
+            model: "m",
+            reasoningBudgetTokens,
+          }),
+        );
+      } catch (error) {
+        expect(error).toBeInstanceOf(ServerConfigError);
+        message = (error as Error).message;
+      }
+      expect(message).toBe("model reasoning budget is invalid");
+      expect(message).not.toContain(String(reasoningBudgetTokens));
+    }
+    let unsupported = "";
+    try {
+      parseModelConfig(
+        JSON.stringify({
+          adapter: "ollama",
+          baseUrl: "http://127.0.0.1:11434",
+          model: "m",
+          reasoningBudgetTokens: 256,
+        }),
+      );
+    } catch (error) {
+      expect(error).toBeInstanceOf(ServerConfigError);
+      unsupported = (error as Error).message;
+    }
+    expect(unsupported).toBe(
+      "model reasoning budget is unsupported by the adapter",
+    );
+  });
+
   it("rejects malformed model configs fail-closed", () => {
     const bad = [
       "not-json",

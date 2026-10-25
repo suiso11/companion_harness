@@ -167,6 +167,37 @@ export type ModelStepCompletedPayload = z.infer<
 >;
 
 /**
+ * Closed gateway (model-local) error vocabulary retained as safe diagnostic
+ * detail beside the unchanged public M2 code. Mirrors the provider-neutral
+ * `@companion/model-local` code list; every value is a fixed literal, so no
+ * raw provider text, body, header, prompt, or reasoning can travel here.
+ */
+export const MODEL_GATEWAY_ERROR_CODES = [
+  "invalid_base_url",
+  "unsupported_capability",
+  "invalid_request",
+  "invalid_response",
+  "tool_call_invalid",
+  "answer_invalid",
+  "request_failed",
+  "transport_error",
+  "timeout",
+] as const;
+export type ModelGatewayErrorCode = (typeof MODEL_GATEWAY_ERROR_CODES)[number];
+export const ModelGatewayErrorCodeSchema = z.enum(MODEL_GATEWAY_ERROR_CODES);
+
+/** Closed `invalid_response` cause vocabulary (no bytes are ever included). */
+export const MODEL_INVALID_RESPONSE_CAUSES = [
+  "response_too_large",
+  "malformed_json",
+] as const;
+export type ModelInvalidResponseCause =
+  (typeof MODEL_INVALID_RESPONSE_CAUSES)[number];
+export const ModelInvalidResponseCauseSchema = z.enum(
+  MODEL_INVALID_RESPONSE_CAUSES,
+);
+
+/**
  * `model.step.failed` payload: step ordinal + fixed redacted code.
  * `durationMs` is optional because a failure (e.g. `model_unavailable`)
  * may occur before any timing is observed.
@@ -177,6 +208,12 @@ export const ModelStepFailedPayloadSchema = z.strictObject({
   durationMs: ModelStepDurationMsSchema.optional(),
   /** Additive optional cause for answer/citation failures (fixed codes). */
   reason: AnswerInvalidReasonSchema.optional(),
+  /** Additive safe gateway code beside the public M2 code (fixed enum). */
+  gatewayErrorCode: ModelGatewayErrorCodeSchema.optional(),
+  /** Additive fixed invalid-response cause (oversize vs malformed JSON). */
+  invalidResponseCause: ModelInvalidResponseCauseSchema.optional(),
+  /** Additive numeric HTTP status for a request failure (no body/header). */
+  httpStatus: z.number().int().min(100).max(599).optional(),
 });
 export type ModelStepFailedPayload = z.infer<
   typeof ModelStepFailedPayloadSchema

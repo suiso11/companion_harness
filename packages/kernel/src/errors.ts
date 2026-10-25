@@ -277,3 +277,32 @@ export class NotificationProjectionResetError extends KernelStorageError {
     super("notification_projection_reset_required", message);
   }
 }
+
+/* ------------------------------------------------------------------ */
+/* AGORA session review errors.                                        */
+/*                                                                     */
+/* These extend RepositoryValidationError so existing kernel callers   */
+/* that only distinguish validation failures keep working; the server  */
+/* maps the specific subclasses to fixed 404/409 API codes.            */
+/* ------------------------------------------------------------------ */
+
+/** Unknown proposal or one owned by another session/operator (404). */
+export class AgoraProposalNotFoundError extends RepositoryValidationError {
+  constructor() {
+    super("agora proposal not found");
+  }
+}
+
+/** The supplied exact payload hash does not match stored content (409). */
+export class AgoraPayloadHashMismatchError extends RepositoryValidationError {
+  constructor() {
+    super("agora payload hash does not match");
+  }
+}
+
+/** The proposal is not in a state that permits this decision/send (409). */
+export class AgoraProposalStateConflictError extends RepositoryValidationError {
+  constructor(message = "agora proposal state conflict") {
+    super(message);
+  }
+}

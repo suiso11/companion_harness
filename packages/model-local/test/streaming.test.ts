@@ -369,6 +369,78 @@ describe("tool-call argument accumulation", () => {
     expect(draftText).toBe("Hello draft world");
   });
 
+  it("matches non-streaming answer.submit semantics under a budget", async () => {
+    const tools = [{ name: "answer.submit", description: "submit" }];
+    const argsJson = JSON.stringify({
+      parts: [{ text: "Budgeted answer", citations: [] }],
+    });
+    const { fetchImpl: nonStreamFetch, calls: nonStreamCalls } = mockFetch(
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "",
+                tool_calls: [
+                  {
+                    id: "call_budget",
+                    type: "function",
+                    function: { name: "answer.submit", arguments: argsJson },
+                  },
+                ],
+              },
+              finish_reason: "tool_calls",
+            },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+    const request = baseRequest({ tools, reasoningBudgetTokens: 256 });
+    const nonStreamed = await createOpenAICompatibleGateway({
+      baseUrl: "http://127.0.0.1:8000",
+      fetchImpl: nonStreamFetch,
+    }).chat(request);
+    const { fetchImpl: streamFetch, calls: streamCalls } = mockFetch(
+      sseResponseFromChunks([
+        sseChunk({
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "call_budget",
+                    type: "function",
+                    function: { name: "answer.submit", arguments: argsJson },
+                  },
+                ],
+              },
+              finish_reason: "tool_calls",
+            },
+          ],
+        }),
+        "data: [DONE]\n\n",
+      ]),
+    );
+    const streamed = await streamingGateway(streamFetch).chat(request);
+    expect(streamed).toEqual(nonStreamed);
+    expect(streamed.stopReason).toBe("tool_calls");
+    expect(streamed.toolCalls).toHaveLength(1);
+    expect(streamed.toolCalls[0]).toMatchObject({
+      id: "call_budget",
+      name: "answer.submit",
+      arguments: { parts: [{ text: "Budgeted answer", citations: [] }] },
+    });
+    for (const calls of [nonStreamCalls, streamCalls]) {
+      const sent = JSON.parse(String(calls[0]?.init?.body)) as Record<
+        string,
+        unknown
+      >;
+      expect(sent.reasoning_budget_tokens).toBe(256);
+    }
+  });
+
   it("survives byte splits inside escapes and unicode", async () => {
     const tricky = 'a\\b"c\ndé\ud83d\ude00 end';
     const argsJson = JSON.stringify({ parts: [{ text: tricky }] });
@@ -543,6 +615,57 @@ describe("strict streaming errors", () => {
       expect(message).not.toContain(PROMPT_MARKER);
     }
   }
+
+  async function streamError(
+    chunks: string[],
+    options: { maxResponseBytes?: number } = {},
+  ): Promise<ModelLocalError> {
+    const { fetchImpl } = mockFetch(sseResponseFromChunks(chunks));
+    try {
+      await streamingGateway(fetchImpl).chat(baseRequest(), options);
+      expect.unreachable();
+    } catch (error) {
+      expect(error).toBeInstanceOf(ModelLocalError);
+      const err = error as ModelLocalError;
+      expect(err.message).not.toContain(PROMPT_MARKER);
+      return err;
+    }
+  }
+
+  it("classifies malformed JSON and oversized streams with safe causes", async () => {
+    const malformed = await streamError([
+      "data: not-json\n\n",
+      "data: [DONE]\n\n",
+    ]);
+    expect(malformed.code).toBe("invalid_response");
+    expect(malformed.invalidResponseCause).toBe("malformed_json");
+
+    const oversized = await streamError(
+      [
+        sseChunk({ choices: [{ delta: { content: "1234567890" } }] }),
+        "data: [DONE]\n\n",
+      ],
+      { maxResponseBytes: 10 },
+    );
+    expect(oversized.code).toBe("invalid_response");
+    expect(oversized.invalidResponseCause).toBe("response_too_large");
+  });
+
+  it("reports HTTP status without the provider body", async () => {
+    const { fetchImpl } = mockFetch(
+      new Response("provider-body-must-not-leak", { status: 502 }),
+    );
+    try {
+      await streamingGateway(fetchImpl).chat(baseRequest());
+      expect.unreachable();
+    } catch (error) {
+      expect(error).toBeInstanceOf(ModelLocalError);
+      const err = error as ModelLocalError;
+      expect(err.code).toBe("request_failed");
+      expect(err.httpStatus).toBe(502);
+      expect(err.message).not.toContain("provider-body-must-not-leak");
+    }
+  });
 
   it("rejects malformed chunks as invalid_response", async () => {
     await expectStreamCode(
@@ -796,6 +919,7 @@ describe("strict streaming errors", () => {
       expect.unreachable();
     } catch (error) {
       expect(error).toBeInstanceOf(DOMException);
+      expect(error).not.toBeInstanceOf(ModelLocalError);
       expect((error as DOMException).name).toBe("AbortError");
     }
   });
@@ -951,6 +1075,7 @@ describe("non-2xx error-body drain (abort semantics)", () => {
       expect.unreachable();
     } catch (error) {
       expect((error as ModelLocalError).code).toBe("request_failed");
+      expect((error as ModelLocalError).httpStatus).toBe(500);
     }
   });
 });

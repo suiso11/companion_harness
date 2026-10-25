@@ -76,6 +76,8 @@ export {
   parseStrictInstantMs,
 } from "./action_strategy.js";
 export type {
+  AgentLessonRecall,
+  AgentLessonSnippet,
   AgentMemoryFailureCode,
   AgentMemoryRecall,
   AgentMemorySnippet,
@@ -93,11 +95,19 @@ export type {
   StepClassification,
 } from "./agent.js";
 export {
+  AGENT_AGORA_HELLO_PARAMETERS,
+  AGENT_AGORA_PROPOSE_REPLY_PARAMETERS,
+  AGENT_AGORA_PROPOSE_THREAD_PARAMETERS,
+  AGENT_AGORA_READ_THREAD_PARAMETERS,
+  AGENT_AGORA_SEND_PARAMETERS,
+  AGENT_AGORA_STATUS_PARAMETERS,
   AGENT_CALENDAR_SEARCH_PARAMETERS,
   AGENT_HISTORY_USER_PREFIX,
   AGENT_INVALID_TOOL_FEEDBACK_CONTENT,
+  AGENT_LESSON_BLOCK_MAX_CHARS,
   AGENT_MARKDOWN_SEARCH_PARAMETERS,
   AGENT_MAX_HISTORY_ITEMS,
+  AGENT_MAX_LESSONS,
   AGENT_MAX_MEMORY_SNIPPETS,
   AGENT_MAX_STEPS,
   AGENT_MEMORY_BLOCK_MAX_CHARS,
@@ -128,6 +138,7 @@ export {
   EMPTY_MEMORY_CITATIONS,
   extractGrantCandidates,
   extractKnownOrdinalMappings,
+  formatLessonPromptBlock,
   formatMemoryPromptBlock,
   formatReferenceOmittedMarker,
   isProjectableHistoryItem,
@@ -141,11 +152,57 @@ export {
   projectPrompt,
   renderAnswerText,
   sanitizeModelFacingForFeedback,
+  selectLessonsForPromptBlock,
   selectProjectedMemorySnippets,
   translateReferenceArgs,
   trimConversationToCap,
   verifyCitations,
 } from "./agent.js";
+export type {
+  AgoraOperation,
+  AgoraPayload,
+  AgoraProposalRow,
+  AgoraProposalStatus,
+  AgoraRegisterPayload,
+  AgoraReplyPayload,
+  AgoraService,
+  AgoraStore,
+  AgoraStoreOptions,
+  AgoraThreadPayload,
+  AgoraTransport,
+  AgoraTransportGetResult,
+  AgoraTransportPostResult,
+} from "./agora.js";
+export {
+  AGORA_APPROVED_TTL_MS,
+  AGORA_BASE_URL,
+  AGORA_HELLO_PATH,
+  AGORA_HOST,
+  AGORA_MAX_BODY_CP,
+  AGORA_MAX_DESCRIPTION_CP,
+  AGORA_MAX_NAME_CP,
+  AGORA_MAX_READ_TEXT_CP,
+  AGORA_MAX_RESPONSE_BYTES_DEFAULT,
+  AGORA_MAX_TITLE_CP,
+  AGORA_MIN_WRITE_INTERVAL_MS,
+  AGORA_PENDING_TTL_MS,
+  AGORA_REGISTER_PATH,
+  AGORA_SEND_LEASE_MS,
+  AGORA_SUGGESTED_REGISTRATION,
+  AGORA_THREAD_PAGE_PREFIX,
+  AGORA_THREADS_PATH,
+  AGORA_TIMEOUT_MS_DEFAULT,
+  agoraPayloadHash,
+  agoraWritePath,
+  createAgoraStore,
+} from "./agora.js";
+export type { CreateAgoraToolRegistrationsOptions } from "./agora_tools.js";
+export {
+  AGORA_TOOL_NAMES,
+  createAgoraToolRegistrations,
+} from "./agora_tools.js";
+export type { AgoraHttpTransportOptions } from "./agora_transport.js";
+export { createAgoraHttpTransport } from "./agora_transport.js";
 export {
   AutonomyStateConflictError,
   AutonomyVersionConflictError,
@@ -285,6 +342,26 @@ export {
   openKernelDatabase,
   quickCheck,
 } from "./connection.js";
+export type {
+  LearningAppliedRow,
+  LearningCandidate,
+  LearningKind,
+  LearningProposalRow,
+  LearningProposalStatus,
+  LearningReflectionRow,
+  LearningStore,
+  LearningStoreOptions,
+} from "./conversation_learning.js";
+export {
+  createLearningStore,
+  LEARNING_APPLICABILITY_MAX_CP,
+  LEARNING_EVIDENCE_MAX_CP,
+  LEARNING_KINDS,
+  LEARNING_LESSON_MAX_CP,
+  LEARNING_MAX_CANDIDATES_PER_TURN,
+  LEARNING_PENDING_TTL_MS,
+  learningContentHash,
+} from "./conversation_learning.js";
 export type { ConversationProposalToolsOptions } from "./conversation_proposal_tools.js";
 export {
   createConversationProposalRegistrations,
@@ -306,6 +383,9 @@ export {
 } from "./engine.js";
 export {
   ActionNotCancellableError,
+  AgoraPayloadHashMismatchError,
+  AgoraProposalNotFoundError,
+  AgoraProposalStateConflictError,
   BackupError,
   BackupRequiredError,
   DatabaseStateInvalidError,
@@ -490,6 +570,20 @@ export {
   recordSystemNotice,
   systemNoticeFingerprint,
 } from "./notifications.js";
+export type {
+  PublicPageFetchOptions,
+  PublicPageFetchResult,
+} from "./public_web.js";
+export {
+  assertPublicHttpUrl,
+  createPinnedLookup,
+  fetchPublicPage,
+  htmlToText,
+  isPublicIpAddress,
+  PUBLIC_FETCH_MAX_BYTES_DEFAULT,
+  PUBLIC_FETCH_TIMEOUT_MS_DEFAULT,
+  unbracketHostname,
+} from "./public_web.js";
 export type {
   CalendarConnectorView,
   EnsureMarkdownConnectorOptions,

@@ -280,7 +280,8 @@ connector instance owns **all** configured roots.
 - Unset `COMPANION_MODEL_JSON` (default) registers **no model strategy**:
   runs fail closed with a fixed code instead of producing fake LLM output.
 - When set, the value must be a strict JSON object with only
-  `{ adapter, baseUrl, model, apiKey? }`. Example:
+  `{ adapter, baseUrl, model, apiKey?, toolChoice?, reasoningBudgetTokens? }`.
+  Example:
   `{"adapter":"ollama","baseUrl":"http://127.0.0.1:11434","model":"llama3.1"}`.
   `adapter` is `ollama` (POST `{base}/api/chat`) or `openai-compatible`
   (POST `{base}/v1/chat/completions`, or `{base}/chat/completions` when the
@@ -297,6 +298,24 @@ connector instance owns **all** configured roots.
   configured, otherwise a private empty-registration broker (no direct
   model endpoint is ever added; `answer.submit` stays a reserved
   non-broker terminal protocol).
+- Optional **main-conversation thinking budget**:
+  `reasoningBudgetTokens` (integer `0..2147483647`, `openai-compatible`
+  only; Ollama rejects it fail-closed). It is serialized as the top-level
+  `reasoning_budget_tokens` field on every main-agent step and repair, and
+  never on auxiliary memory/voice/learning calls (those keep their own
+  reasoning-off requests). The stock launcher builds the default main
+  config with `reasoningBudgetTokens: 256`; an already-exported
+  `COMPANION_MODEL_JSON` wins and must add the field itself. Timeouts,
+  answer limits, retries, and model choice are unchanged. Efficacy and
+  failure-rate impact are **not yet measured**; this only bounds thinking
+  tokens.
+- Fixed safe failure diagnostics: `model.step.failed` may include
+  `gatewayErrorCode` (model-local closed code such as `request_failed`,
+  `timeout`, `invalid_response`), `invalidResponseCause` (`response_too_large`
+  or `malformed_json`), and numeric `httpStatus` (100..599). These are
+  allowlisted fixed/numeric values only; prompts, bodies, headers, raw
+  errors, and secrets are never logged. The public M2 error code is
+  unchanged.
 - Security limitations: model config values and keys are **never logged**
   (only the tool count is logged); `model_calls` persists adapter/model
   identifier metadata only (adapter, model, outcome, error code, timing,
@@ -5145,3 +5164,56 @@ ops/llm/rotate-keys.sh --yes \
 `LLAMA_API_KEY` は LiteLLM → main の outbound header としてのみ使われる。
 llama.cpp 側でも認証を強制する場合は、`compose.yaml` の main command に
 `--api-key ${LLAMA_API_KEY}` を追加してから `apply.sh --yes` を実行する。
+
+## AGORA レビュー (browser, local only)
+
+### 正とする状態と適用後の状態
+
+- 正とする状態は `origin/master` に merge され CI が green な commit。production
+  の `~/companion_master` はその commit を detached worktree として checkout
+  した状態で、on-disk patch やローカル commit は持たない。
+- production への反映は既存の「自動デプロイ」経路のみを使う:
+  `companion-deploy.timer` が `scripts/deploy/companion-deploy.sh` を実行し、
+  CI green / active-run なし / tracked 変更なしを確認してから
+  `origin/master` の先端へ進め、restart + health check を行う。dirty guard が
+  tracked 変更を検出した場合は前進せず exit 1 になる (変更は破棄しない)。
+- UI は通常の `companion.service` restart 後の標準 prestart build
+  (`scripts/build-ui.mjs`) に含まれる。production 側に専用 CLI は不要。
+
+### デプロイ (operator, production 変更は明示実行のみ)
+
+AGORA レビュー UI は他の変更と同じ経路で配布する。未コミットの patch を
+production に当てる手順はサポートしない。
+
+```sh
+# 1. PR を merge し、CI が green になったことを確認する。
+# 2. 通常の auto-deploy を待つか、同じ経路を手動で 1 回実行する。
+scripts/deploy/companion-deploy.sh
+```
+
+- `companion-deploy.sh` は `origin/master` の green commit を
+  `~/companion_master` へ進め、`pnpm install --frozen-lockfile` →
+  `systemctl --user restart companion.service` → `/health/live` の順に確認する。
+  失敗時は直前の sha へ自動 rollback する (詳細は「自動デプロイ」節)。
+- AGORA を有効にする場合は `~/.config/companion/env` (0600) に
+  `COMPANION_AGORA_JSON` を設定する。`dbPath` は private な SQLite を指し、
+  operator CLI と server が同じ store を共有する。値や鍵はログに出さない。
+  learning を併用する場合の `COMPANION_LEARNING_JSON` も同様に env で設定する。
+- AGORA private SQLite の additive migration (`session_id` /
+  approval/result columns) は backward-compatible。auto-deploy の rollback は
+  commit の切り戻しのみで DB は自動 restore しない (新規に永続化された
+  ユーザー状態を消さないため)。必要な場合だけ operator が事前 backup
+  (`scripts/deploy/companion-backup.sh`) から手動で復元する。
+- 適用後は「ブラウザでの実作業」の手順で list / approve / send を確認する。
+  外部への POST は人間が Send を明示したときだけ発生する。
+
+### E2E (repo, actual browser)
+
+```sh
+cd apps/server
+COMPANION_E2E_AGORA=1 npx playwright test --config=playwright.config.ts
+```
+
+`e2e/agora` は clean な標準 `scripts/build-ui.mjs` build を要求し、AGORA へ
+実送信しない local fixture で 4 シナリオ (list / approve / reject / send
+denied/stale/unknown 系) を検証する。外部への POST は行わない。

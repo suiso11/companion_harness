@@ -19,6 +19,8 @@
     "smoke:startup": "vitest run --config pnpm-smoke.startup.config.mts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "biome check src",
+    "learning": "tsx src/learning_cli.ts",
+    "agora": "tsx src/agora_cli.ts",
     "records": "tsx src/records_cli.ts",
     "compare": "tsx src/compare_cli.ts"
   },

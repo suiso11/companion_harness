@@ -200,6 +200,7 @@ describe("declared content length", () => {
     } catch (error) {
       const err = expectRedacted(error);
       expect(err.code).toBe("invalid_response");
+      expect(err.invalidResponseCause).toBe("response_too_large");
       expect(err.message).toMatch(/oversized/i);
     }
     expect(readers).toBe(0);
@@ -360,7 +361,9 @@ describe("malformed JSON and non-2xx bodies", () => {
       });
       expect.unreachable();
     } catch (error) {
-      expect(expectRedacted(error).code).toBe("invalid_response");
+      const err = expectRedacted(error);
+      expect(err.code).toBe("invalid_response");
+      expect(err.invalidResponseCause).toBe("malformed_json");
     }
   });
 
@@ -378,6 +381,7 @@ describe("malformed JSON and non-2xx bodies", () => {
     } catch (error) {
       const err = expectRedacted(error, 500);
       expect(err.code).toBe("request_failed");
+      expect(err.httpStatus).toBe(500);
     }
   });
 
@@ -400,6 +404,7 @@ describe("malformed JSON and non-2xx bodies", () => {
     } catch (error) {
       const err = expectRedacted(error, 503);
       expect(err.code).toBe("request_failed");
+      expect(err.httpStatus).toBe(503);
     }
   });
 
@@ -422,6 +427,7 @@ describe("malformed JSON and non-2xx bodies", () => {
     } catch (error) {
       const err = expectRedacted(error, 500);
       expect(err.code).toBe("request_failed");
+      expect(err.httpStatus).toBe(500);
     }
   });
 });
