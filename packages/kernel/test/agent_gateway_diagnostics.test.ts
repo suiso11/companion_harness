@@ -177,4 +177,74 @@ describe("safe gateway failure diagnostics", () => {
       }
     }
   });
+
+  it("accepts every additive diagnostic on the strict payload and fires the sink", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const runId = newRunningRun(repo);
+      // The strict contract must accept all additive diagnostics (regression:
+      // a rejected payload rolled back the audit event AND skipped the sink).
+      expect(() =>
+        repo.appendModelStepEvent(
+          runId,
+          "model.step.failed",
+          {
+            step: 1,
+            errorCode: "model_unavailable",
+            durationMs: 5,
+            gatewayErrorCode: "request_failed",
+            invalidResponseCause: "malformed_json",
+            httpStatus: 429,
+          },
+          { now: T0 + 1 },
+        ),
+      ).not.toThrow();
+      const run = repo.getRun(runId);
+      const failed = repo
+        .getEvents(run.sessionId, runId, {})
+        .events.filter((event) => event.type === "model.step.failed");
+      expect(failed).toHaveLength(1);
+      expect(failed[0]?.payload).toMatchObject({
+        step: 1,
+        errorCode: "model_unavailable",
+        gatewayErrorCode: "request_failed",
+        invalidResponseCause: "malformed_json",
+        httpStatus: 429,
+      });
+
+      // The same failure path still emits model.step.failed AND fires the
+      // onModelStepFailed sink once.
+      const seen: AgentModelStepFailure[] = [];
+      const strategy = createAgentStrategy({
+        db: handle.raw,
+        repo,
+        broker: createToolBroker({
+          db: handle.raw,
+          repo,
+          registrations: [],
+        }),
+        gateway: failingGateway(
+          new ModelLocalError("request_failed", RAW, undefined, {
+            httpStatus: 429,
+          }),
+        ),
+        model: "m",
+        onModelStepFailed: (failure): void => {
+          seen.push(failure);
+        },
+      });
+      const liveRun = newRunningRun(repo);
+      await expect(strategy(ctxFor(repo, liveRun))).rejects.toMatchObject({
+        errorCode: "execution_failed",
+      });
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toMatchObject({
+        errorCode: "model_unavailable",
+        gatewayErrorCode: "request_failed",
+        httpStatus: 429,
+      });
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
 });
