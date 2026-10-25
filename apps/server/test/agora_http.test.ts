@@ -496,6 +496,53 @@ describe("AGORA session review HTTP API", () => {
     }
   });
 
+  it("awaits an admitted browser send before the store may close", async () => {
+    const f = await makeFixture();
+    try {
+      const owned = propose(f, SESSION_A, "Drain title");
+      f.store.approve(owned.id, owned.payloadHash);
+      let release!: (value: { status: number; text: string }) => void;
+      f.setPost(
+        () =>
+          new Promise((resolve) => {
+            release = resolve;
+          }),
+      );
+      const pending = post(f, base(SESSION_A, owned.id, "/send"), {
+        payloadHash: owned.payloadHash,
+      });
+      // Wait until the handler is genuinely inside the transport call.
+      const started = Date.now();
+      while (f.hits.length === 0) {
+        if (Date.now() - started > 2_000) throw new Error("send did not start");
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      let drained = false;
+      const drain = f.controls.drainAgoraSends().then(() => {
+        drained = true;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      // The store must NOT be closable while finishSend() still owes a write.
+      expect(drained).toBe(false);
+      release({
+        status: 201,
+        text: JSON.stringify({ threadId: "thread-drained" }),
+      });
+      await drain;
+      expect(drained).toBe(true);
+      const sent = await pending;
+      expect(sent.status).toBe(200);
+      expect((sent.body as { outcome: string }).outcome).toBe("sent");
+      expect(
+        (sent.body as { proposal: { status: string } }).proposal.status,
+      ).toBe("sent");
+      // Already drained: a second drain is an immediate no-op.
+      await f.controls.drainAgoraSends();
+    } finally {
+      f.close();
+    }
+  });
+
   it("keeps unknown terminal, throttles safely, and reports missing keys", async () => {
     const f = await makeFixture();
     try {

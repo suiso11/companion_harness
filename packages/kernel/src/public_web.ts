@@ -406,7 +406,11 @@ function isTextContentType(contentType: string): boolean {
     base === "application/xhtml+xml" ||
     base === "text/plain" ||
     base === "text/markdown" ||
-    base === "text/x-markdown"
+    base === "text/x-markdown" ||
+    // The AGORA hello API answers JSON; it is returned as bounded text like
+    // any other non-HTML body (never parsed here).
+    base === "application/json" ||
+    base.endsWith("+json")
   );
 }
 
@@ -501,7 +505,8 @@ export async function fetchPublicPage(
             method: "GET",
             headers: {
               host: url.host,
-              accept: "text/html,application/xhtml+xml,text/plain;q=0.9",
+              accept:
+                "text/html,application/xhtml+xml,application/json,text/plain;q=0.9",
               "user-agent": "companion-harness-web/1",
             },
             lookup: pinnedLookup,

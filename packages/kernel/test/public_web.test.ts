@@ -230,6 +230,31 @@ describe("IPv4/IPv6 public address policy", () => {
   });
 });
 
+describe("JSON responses", () => {
+  it("accepts application/json and +json as bounded text", async () => {
+    for (const contentType of [
+      "application/json",
+      "application/problem+json",
+    ]) {
+      const { port } = await startServer((_request, response) => {
+        response.writeHead(200, {
+          "content-type": `${contentType}; charset=utf-8`,
+        });
+        response.end('{"ok":true,"threadId":"t1"}');
+      });
+      const result = await fetchPublicPage("https://public.example/api/hello", {
+        resolvedAddresses: ["93.184.216.34"],
+        request: transportTo(port),
+        timeoutMs: 2_000,
+      });
+      expect(result.status).toBe(200);
+      expect(result.contentType).toBe(contentType);
+      expect(result.title).toBeNull();
+      expect(result.text).toBe('{"ok":true,"threadId":"t1"}');
+    }
+  });
+});
+
 describe("cancellation and deadlines before send", () => {
   it("does not send when cancelled during DNS and suppresses the late answer", async () => {
     let resolveDns: ((addresses: readonly string[]) => void) | undefined;

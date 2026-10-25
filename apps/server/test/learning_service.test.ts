@@ -352,6 +352,60 @@ describe("learning service extraction", () => {
   });
 });
 
+describe("learning prompt budget and provider thinking", () => {
+  it("sends reasoning off on the extraction request", async () => {
+    const repo = await openRepo();
+    const { gateway, calls } = gatewayReturning(EXTRACTION);
+    const service = makeService(repo, gateway);
+    const run = completeRun(repo, {
+      text: "Please use ISO dates when you change calendar events.",
+      answer: "Understood. I will use ISO dates.",
+    });
+    service.onRunCompleted(run.runId);
+    await waitFor(() => calls.length > 0);
+    expect((calls[0] as { reasoning?: string }).reasoning).toBe("off");
+  });
+
+  it("records applications only for lessons kept by the prompt budget", async () => {
+    const repo = await openRepo();
+    // Three grounded lessons at the field caps render past formatLessonPromptBlock's
+    // 4096-character limit, so exactly the last one is dropped.
+    const quote = `I will use ISO dates ${"z".repeat(470)}`;
+    const applicability = `calendar date changes ${"y".repeat(270)}`;
+    const lessons = [1, 2, 3].map((index) => ({
+      kind: "observation",
+      lesson: `calendar lesson ${index} ${"x".repeat(480)}`,
+      evidence: quote,
+      applicability,
+    }));
+    const { gateway } = gatewayReturning(JSON.stringify({ lessons }));
+    const service = makeService(repo, gateway);
+    const run = completeRun(repo, {
+      text: "Please use ISO dates when you change calendar events.",
+      answer: `Understood. ${quote}`,
+    });
+    service.onRunCompleted(run.runId);
+    await waitFor(() => service.store.listProposals().length === 3);
+    const proposals = service.store.listProposals();
+    for (const proposal of proposals) {
+      service.store.approve(proposal.id, proposal.contentHash);
+    }
+    const signal = new AbortController().signal;
+    const returned = await service.recallHook.recall({
+      sessionId: run.sessionId,
+      runId: "run-budget",
+      query: "calendar date change",
+      signal,
+    });
+    expect(returned).toHaveLength(2);
+    const applications = service.store.listApplications(run.sessionId);
+    expect(applications).toHaveLength(returned.length);
+    expect(applications.map((row) => row.proposalId).sort()).toEqual(
+      returned.map((row) => row.id).sort(),
+    );
+  });
+});
+
 describe("learning retrieval", () => {
   it("returns approved relevant same-session lessons only", async () => {
     const repo = await openRepo();

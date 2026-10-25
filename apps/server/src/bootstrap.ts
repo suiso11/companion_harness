@@ -3586,6 +3586,16 @@ export async function startServer(
             status: safeReason,
           });
         }
+        // Browser-initiated AGORA sends are direct HTTP handlers, so the
+        // engine drain above never awaited them. Refuse new sends and await
+        // every admitted one BEFORE the AGORA store closes; a transport
+        // completion after close would otherwise fail and strand the row in
+        // `sending` until lease recovery. Bounded by the transport timeout.
+        try {
+          await controls.drainAgoraSends();
+        } catch {
+          // Best effort: never block the graceful shutdown report.
+        }
         // Close the opt-in AGORA private store before the main DB; a failure
         // is best-effort and never blocks the graceful shutdown report.
         closeAgora();

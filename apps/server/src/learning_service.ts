@@ -22,6 +22,7 @@ import {
   type LearningProposalRow,
   type LearningStore,
   learningContentHash,
+  selectLessonsForPromptBlock,
 } from "@companion/kernel";
 import type { ChatResult, ModelGateway } from "@companion/model-local";
 import type { ServerLogger } from "./logger.js";
@@ -405,6 +406,7 @@ export function createLearningService(
               },
             ],
             tools: [],
+            reasoning: "off",
           },
           { signal: controller.signal },
         ),
@@ -586,16 +588,6 @@ export function createLearningService(
     }> = [];
     for (const { row } of selected) {
       if (input.signal.aborted) return [];
-      try {
-        store.recordApplication({
-          sessionId: input.sessionId,
-          runId: input.runId,
-          proposalId: row.id,
-          now: now(),
-        });
-      } catch {
-        // Application audit is best-effort; the lesson itself is still safe.
-      }
       out.push({
         id: row.id,
         kind: row.kind,
@@ -605,7 +597,23 @@ export function createLearningService(
         provenance: `accepted_completed_turn run=${row.runId} turn=${row.turnId}`,
       });
     }
-    return out;
+    // Record applications ONLY for the exact whole-lesson prefix the agent's
+    // advisory block retains after its fixed 4096-character budget; dropped
+    // lessons were never shown to the model, so they are not "applied".
+    const retained = selectLessonsForPromptBlock(out);
+    for (const lesson of retained) {
+      try {
+        store.recordApplication({
+          sessionId: input.sessionId,
+          runId: input.runId,
+          proposalId: lesson.id,
+          now: now(),
+        });
+      } catch {
+        // Application audit is best-effort; the lesson itself is still safe.
+      }
+    }
+    return [...retained];
   }
 
   return {

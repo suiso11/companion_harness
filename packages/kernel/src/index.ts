@@ -152,6 +152,7 @@ export {
   projectPrompt,
   renderAnswerText,
   sanitizeModelFacingForFeedback,
+  selectLessonsForPromptBlock,
   selectProjectedMemorySnippets,
   translateReferenceArgs,
   trimConversationToCap,

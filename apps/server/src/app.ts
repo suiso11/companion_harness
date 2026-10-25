@@ -467,6 +467,14 @@ export interface CreateAppDeps {
 export interface ServerControls {
   readonly draining: boolean;
   markDraining(): void;
+  /**
+   * Register ONE admitted browser AGORA send handler. Returns an idempotent
+   * completion hook the handler MUST call in `finally`. Bootstrap awaits all
+   * admitted sends before closing the AGORA store (no post-close finishSend).
+   */
+  beginAgoraSend(): () => void;
+  /** Refuse new AGORA browser sends, then await every admitted one. */
+  drainAgoraSends(): Promise<void>;
 }
 
 export interface CreatedServerApp {
@@ -1392,12 +1400,38 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     return hasValidRemoteSession(c, config, remoteStore, now);
   };
   let draining = false;
+  // Browser-initiated AGORA sends are direct HTTP handlers (not engine runs),
+  // so the engine drain never awaits them. Track admitted handlers here and
+  // drain them explicitly BEFORE the AGORA SQLite store closes on shutdown.
+  const inFlightAgoraSends = new Set<Promise<void>>();
+  let admitAgoraSends = true;
   const controls: ServerControls = {
     get draining() {
       return draining;
     },
     markDraining: () => {
       draining = true;
+    },
+    beginAgoraSend: () => {
+      if (!admitAgoraSends) {
+        // Drain already began; the handler's own `draining` check rejects
+        // the request. Nothing to track for this unreachable race.
+        return () => undefined;
+      }
+      let resolveDone!: () => void;
+      const done = new Promise<void>((resolve) => {
+        resolveDone = resolve;
+      });
+      inFlightAgoraSends.add(done);
+      return () => {
+        if (inFlightAgoraSends.delete(done)) resolveDone();
+      };
+    },
+    drainAgoraSends: async () => {
+      admitAgoraSends = false;
+      while (inFlightAgoraSends.size > 0) {
+        await Promise.all([...inFlightAgoraSends]);
+      }
     },
   };
   /**
@@ -2366,6 +2400,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       // No idempotency replay exists for a send; during drain refuse the new
       // external write with the standard 503/Retry-After.
       if (draining) return shuttingDown(c);
+      const endAgoraSend = controls.beginAgoraSend();
       try {
         repo.getSession(session.id);
         const result = await agora.send(proposal.id, parsed.data.payloadHash, {
@@ -2415,6 +2450,8 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         );
       } catch (error) {
         return mapDomainError(c, error);
+      } finally {
+        endAgoraSend();
       }
     },
   );
