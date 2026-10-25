@@ -404,4 +404,3 @@ export function copyBoundedFile(source, destination, maxBytes) {
   }
   return true;
 }
-
