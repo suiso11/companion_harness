@@ -913,6 +913,222 @@ function readProposalAlias(db: Database.Database, proposalId: string): string {
   return row.workspace_alias;
 }
 
+export interface PolicyGrantInput {
+  taskId: string;
+  objective: string;
+  acceptance: string[];
+  literalPatchPaths: string[];
+  operation: TrialOperation;
+  readOnlyMode: boolean;
+  expiry: string;
+  possibleExternalDataConsent: boolean;
+  timeoutMs: number;
+  maxOutputBytes: number;
+  requiredChecks: string[];
+  workspaceAlias: string;
+}
+
+/**
+ * Host policy-authorized grant derivation. This is the narrow extension of
+ * the SAME TrialAuthority owner used by human approval: it never invokes the
+ * human approve endpoint or bypasses CAS/one-use/fencing/claim/launch-permit/
+ * result/quiescence. It writes a complete frozen proposal + one queued grant
+ * in one immediate transaction after re-running every authority check.
+ *
+ * Only trusted host code may call this. A model/HTTP request body cannot name
+ * this path, a different profile/alias, a check set, or a numeric cap.
+ */
+export function derivePolicyTrialGrant(
+  db: Database.Database,
+  sessionId: string,
+  input: PolicyGrantInput,
+  options: {
+    now?: number;
+    profile: TrialProfileSnapshot;
+    workspaceAlias: string;
+    /** Trusted host preallocated UUID; never a model/HTTP body field. */
+    executionId?: string;
+  },
+): { proposalId: string; executionId: string; status: "queued" } {
+  const session = requireId(sessionId, "sessionId");
+  const now = nowMs(options.now);
+  const profile = profileOrThrow(options.profile);
+  assertWorkspaceAlias(options.workspaceAlias, "workspaceAlias");
+  return withImmediate(db, () => {
+    requireSession(db, session);
+    if (input.workspaceAlias !== options.workspaceAlias)
+      throw new RepositoryValidationError(
+        "policy grant alias must match the operator alias",
+      );
+    const expiryMs = parseStrictInstantMs(input.expiry);
+    if (expiryMs === undefined || expiryMs <= now)
+      throw new RepositoryValidationError(
+        "policy grant expiry must be a future strict instant",
+      );
+    requireProfileForNewGrant(profile);
+    requireNoActiveFence(db, input.workspaceAlias, "derive");
+    if (input.objective.length < 1 || input.objective.length > 8192)
+      throw new RepositoryValidationError("objective must be 1..8192 chars");
+    if (input.acceptance.length < 1 || input.acceptance.length > 16)
+      throw new RepositoryValidationError(
+        "acceptance must carry 1..16 entries",
+      );
+    for (const a of input.acceptance) {
+      if (a.length < 1 || a.length > 1024)
+        throw new RepositoryValidationError(
+          "acceptance entries must be 1..1024 chars",
+        );
+    }
+    if (
+      input.literalPatchPaths.length < 1 ||
+      input.literalPatchPaths.length > 16
+    )
+      throw new RepositoryValidationError(
+        "literalPatchPaths must carry 1..16 entries",
+      );
+    if (input.timeoutMs < 1000 || input.timeoutMs > profile.timeoutMs)
+      throw new RepositoryValidationError(
+        "timeoutMs exceeds the frozen operator profile",
+      );
+    if (input.maxOutputBytes < 1024 || input.maxOutputBytes > profile.maxOutputBytes)
+      throw new RepositoryValidationError(
+        "maxOutputBytes exceeds the frozen operator profile",
+      );
+    const normPaths = input.literalPatchPaths.map((w) =>
+      assertCanonicalLiteralPath(w, "literalPatchPath"),
+    );
+    if (
+      input.readOnlyMode !==
+      (input.operation === "investigate" || input.operation === "verify")
+    )
+      throw new RepositoryValidationError(
+        "readOnlyMode must match read-only operation",
+      );
+    const checks = requireChecksOrThrow(
+      input.requiredChecks,
+      profile.mandatoryChecks,
+    );
+    const ctl = db
+      .prepare(
+        "SELECT paused, version FROM autonomy_control WHERE id='global'",
+      )
+      .get() as { paused: number; version: number } | undefined;
+    if (ctl === undefined || ctl.paused === 1)
+      throw new RepositoryValidationError(
+        "autonomy paused: no policy grant",
+      );
+    const auth = checkTrialAuthority(
+      db,
+      session,
+      input.taskId,
+      input.operation,
+      input.readOnlyMode ? [] : normPaths,
+      input.workspaceAlias,
+      now,
+    );
+    const proposalId = generateId();
+    db.prepare(
+      "INSERT INTO trial_proposals (id, session_id, scope, task_id, goal_id, goal_version, task_version, objective, acceptance_json, paths_json, operation, read_only, expiry, consent, timeout_ms, max_output_bytes, checks_json, status, created_at, workspace_alias, profile_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'granted', ?, ?, ?)",
+    ).run(
+      proposalId,
+      session,
+      auth.scope,
+      input.taskId,
+      auth.goalId,
+      auth.goalVersion,
+      auth.taskVersion,
+      input.objective,
+      JSON.stringify(input.acceptance),
+      JSON.stringify(normPaths),
+      input.operation,
+      input.readOnlyMode ? 1 : 0,
+      input.expiry,
+      input.possibleExternalDataConsent ? 1 : 0,
+      input.timeoutMs,
+      input.maxOutputBytes,
+      JSON.stringify(checks),
+      now,
+      input.workspaceAlias,
+      JSON.stringify(profile),
+    );
+    const executionId =
+      options.executionId === undefined
+        ? generateId()
+        : requireId(options.executionId, "executionId");
+    db.prepare(
+      "INSERT INTO trial_grants (execution_id, proposal_id, session_id, scope, status, cancel_requested, control_generation, created_at, workspace_alias, approved_profile_json) VALUES (?,?,?,?, 'queued', 0, ?, ?, ?, ?)",
+    ).run(
+      executionId,
+      proposalId,
+      session,
+      auth.scope,
+      ctl.version,
+      now,
+      input.workspaceAlias,
+      JSON.stringify(profile),
+    );
+    return { proposalId, executionId, status: "queued" as const };
+  });
+}
+
+/**
+ * Shared freshness for POLICY-DERIVED grants only. A grant with no
+ * autodispatch execution link is a manual human grant and is unaffected.
+ * The host policy/plan/control generation is re-read from the SAME owner DB
+ * at claim, permit, and result so a revoked/expired policy, a superseded
+ * plan revision, a version change, or a STOP+resume generation change can
+ * never be authorized after the fact.
+ */
+function policyGrantFreshness(
+  db: Database.Database,
+  sessionId: string,
+  executionId: string,
+  grantControlGeneration: number,
+  now: number,
+): string | null {
+  const row = db
+    .prepare(
+      "SELECT e.status AS execution_status, e.policy_version AS execution_policy_version, p.status AS policy_status, p.version AS policy_version, p.expires_at AS expires_at, pl.id AS plan_id, pl.status AS plan_status, pl.policy_version AS plan_policy_version FROM autodispatch_executions e JOIN autodispatch_policies p ON p.id=e.policy_id AND p.session_id=e.session_id JOIN autodispatch_plans pl ON pl.id=e.plan_id AND pl.session_id=e.session_id WHERE e.execution_id=? AND e.session_id=?",
+    )
+    .get(executionId, sessionId) as
+    | {
+        execution_status: string;
+        execution_policy_version: number;
+        policy_status: string;
+        policy_version: number;
+        expires_at: string | null;
+        plan_id: string;
+        plan_status: string;
+        plan_policy_version: number;
+      }
+    | undefined;
+  if (row === undefined) return null; // manual grant
+  if (row.execution_status !== "authorized") return "policy-not-authorized";
+  if (row.policy_status !== "active") return `policy-${row.policy_status}`;
+  if (row.expires_at !== null) {
+    const expiry = parseStrictInstantMs(row.expires_at);
+    if (expiry === undefined || expiry <= now) return "policy-expired";
+  }
+  if (
+    row.policy_version !== row.execution_policy_version ||
+    row.plan_policy_version !== row.policy_version
+  )
+    return "policy-version-drift";
+  if (row.plan_status !== "dispatched") return "plan-superseded";
+  const latest = db
+    .prepare(
+      "SELECT id FROM autodispatch_plans WHERE session_id=? AND status NOT IN ('superseded') ORDER BY revision DESC LIMIT 1",
+    )
+    .get(sessionId) as { id: string } | undefined;
+  if (latest === undefined || latest.id !== row.plan_id) return "plan-stale";
+  const ctl = db
+    .prepare("SELECT version FROM autonomy_control WHERE id='global'")
+    .get() as { version: number } | undefined;
+  if (ctl === undefined || ctl.version !== grantControlGeneration)
+    return "control-generation";
+  return null;
+}
+
 /** Approve: fresh goal/task/constraints/profile/expiry/unpaused checks; one grant. */
 export function approveTrialProposal(
   db: Database.Database,
@@ -923,6 +1139,8 @@ export function approveTrialProposal(
     now?: number;
     profile: TrialProfileSnapshot;
     workspaceAlias: string;
+    /** Trusted host preallocated UUID; never a model/HTTP body field. */
+    executionId?: string;
   },
 ): {
   status: number;
@@ -1062,7 +1280,10 @@ export function approveTrialProposal(
         throw new RepositoryValidationError(
           "goal/task version drift since staging: re-stage for human review",
         );
-      const executionId = generateId();
+      const executionId =
+        options.executionId === undefined
+          ? generateId()
+          : requireId(options.executionId, "executionId");
       db.prepare(
         "INSERT INTO trial_grants (execution_id, proposal_id, session_id, scope, status, cancel_requested, control_generation, created_at, workspace_alias, approved_profile_json) VALUES (?,?,?,?, 'queued', 0, ?, ?, ?, ?)",
       ).run(
@@ -1276,6 +1497,17 @@ export function claimTrialGrant(
       throw new RepositoryValidationError(
         "paused: fresh explicit resume required",
       );
+    {
+      const stale = policyGrantFreshness(
+        db,
+        session,
+        exec,
+        g.control_generation,
+        now,
+      );
+      if (stale !== null)
+        throw new RepositoryValidationError(`policy grant stale: ${stale}`);
+    }
     if (!profile.available || !profile.enabled)
       throw new RepositoryValidationError("profile unavailable at claim");
     // Frozen alias/profile from APPROVAL bind the claim: never replaced
@@ -1895,6 +2127,17 @@ export function issueLaunchPermit(
       .get() as { paused: number; version: number };
     if (ctl.paused === 1)
       throw new RepositoryValidationError("paused: no permit");
+    {
+      const stale = policyGrantFreshness(
+        db,
+        session,
+        exec,
+        g.control_generation,
+        now,
+      );
+      if (stale !== null)
+        throw new RepositoryValidationError(`policy grant stale: ${stale}`);
+    }
     const prow = db
       .prepare("SELECT * FROM trial_proposals WHERE id=?")
       .get(g.proposal_id) as Parameters<typeof toProposalView>[0];
@@ -2023,16 +2266,33 @@ export function readLaunchPermit(
 }
 
 /**
+ * Session trial surface projection of one durable worker outcome. `summary`
+ * stays for the legacy read consumers; `recorded` separates "no row yet"
+ * from a durable false/unauthorized failure, and `succeeded`/`quiescent`/
+ * `detail` mirror the actual trial_worker_outcomes row (never inferred from
+ * an exit code or grant status).
+ */
+export interface WorkerOutcomeView {
+  status: string;
+  authorized: boolean;
+  summary: string;
+  recorded: boolean;
+  succeeded: boolean;
+  quiescent: boolean;
+  detail: string;
+}
+
+/**
  * Pure outcome read for the session trial surface (never mutates): the
- * grant status plus the durable worker outcome row (authorized flag +
- * fixed detail summary) for one session-owned execution. Foreign or
- * missing executions return null (the HTTP layer maps to 404).
+ * grant status plus the durable worker outcome row (authorized/succeeded/
+ * quiescent flags + fixed bounded detail) for one session-owned execution.
+ * Foreign or missing executions return null (the HTTP layer maps to 404).
  */
 export function readWorkerOutcome(
   db: Database.Database,
   sessionId: string,
   executionId: string,
-): { status: string; authorized: boolean; summary: string } | null {
+): WorkerOutcomeView | null {
   const session = requireId(sessionId, "sessionId");
   const exec = requireId(executionId, "executionId");
   const g = db
@@ -2041,15 +2301,38 @@ export function readWorkerOutcome(
   if (!g || g.session_id !== session) return null;
   const out = db
     .prepare(
-      "SELECT authorized, detail FROM trial_worker_outcomes WHERE execution_id=?",
+      "SELECT succeeded, quiescent, authorized, detail FROM trial_worker_outcomes WHERE execution_id=?",
     )
-    .get(exec) as { authorized: number; detail: string } | undefined;
+    .get(exec) as
+    | {
+        succeeded: number;
+        quiescent: number;
+        authorized: number;
+        detail: string;
+      }
+    | undefined;
   if (!out) {
-    return { status: g.status, authorized: false, summary: "" };
+    return {
+      status: g.status,
+      authorized: false,
+      summary: "",
+      recorded: false,
+      succeeded: false,
+      quiescent: false,
+      detail: "",
+    };
   }
   const summary =
     typeof out.detail === "string" ? out.detail.slice(0, 200) : "";
-  return { status: g.status, authorized: out.authorized === 1, summary };
+  return {
+    status: g.status,
+    authorized: out.authorized === 1,
+    summary,
+    recorded: true,
+    succeeded: out.succeeded === 1,
+    quiescent: out.quiescent === 1,
+    detail: summary,
+  };
 }
 
 /**
@@ -2061,7 +2344,7 @@ export function readWorkerOutcomeByProposal(
   db: Database.Database,
   sessionId: string,
   proposalId: string,
-): { status: string; authorized: boolean; summary: string } | null {
+): WorkerOutcomeView | null {
   const session = requireId(sessionId, "sessionId");
   const pid = requireId(proposalId, "proposalId");
   const g = db
@@ -2287,6 +2570,16 @@ export function recordWorkerResult(
       .prepare("SELECT paused, version FROM autonomy_control WHERE id='global'")
       .get() as { paused: number; version: number };
     if (ctl.paused === 1) fail("paused");
+    {
+      const stale = policyGrantFreshness(
+        db,
+        session,
+        exec,
+        g.control_generation,
+        now,
+      );
+      if (stale !== null) fail(stale);
+    }
     if (req && g.approved_profile_json !== null) {
       try {
         const approved = profileOrThrow(

@@ -72,10 +72,34 @@ const LOG_STATUS_ALLOWLIST: ReadonlySet<string> = new Set([
   "unsupported_option",
   "unknown_tool",
   "unknown_tool_call_id",
+  // Permanent pre-permit stop/denial reason codes for trial.permit_denied:
+  // fixed vocabulary only (no paths, content, or raw error text).
+  "latch",
+  "shutdown",
+  "foreground",
+  "paused",
+  "cancel",
+  "elapsed",
+  "no_observed",
+  "beyond_observed",
+  "none",
   "model_error",
   "model_timeout",
   "invalid_response",
   "response_cap_exceeded",
+  // Trial pre-boot abort diagnostic (trial.preboot_aborted): fixed call-site
+  // reason and allowlisted Node errno only (never raw error text/paths).
+  "stopped-before-relay",
+  "relay-start",
+  "config-setup",
+  "stopped-before-spawn",
+  "spawn",
+  "no-pid",
+  "eaddrinuse",
+  "eacces",
+  "enoent",
+  "enametoolong",
+  "einval",
   // Memory recall vector mode (F-I01-05, remind#16): metadata only, never
   // content. Logged via `memory.recall_vector` status; kept closed.
   "disabled",

@@ -214,6 +214,24 @@ import {
   createActionExecutionService,
 } from "./action_executions.js";
 import {
+  type AuthorizeWithinPolicyOptions,
+  type AutodispatchLimits,
+  type CreateStandingPolicyInput,
+  authorizeWithinPolicy as autodispatchAuthorize,
+  createDispatchPlan as autodispatchCreatePlan,
+  createStandingPolicy as autodispatchCreatePolicy,
+  listDispatchExecutions as autodispatchListExecutions,
+  listDispatchPlans as autodispatchListPlans,
+  listStandingPolicies as autodispatchListPolicies,
+  readDispatchExecution as autodispatchReadExecution,
+  readDispatchMaterialization as autodispatchReadMaterialization,
+  readDispatchPlan as autodispatchReadPlan,
+  readIntentHistory as autodispatchReadIntentHistory,
+  readRunSessionId as autodispatchReadRunSessionId,
+  readStandingPolicy as autodispatchReadPolicy,
+  revokeStandingPolicy as autodispatchRevokePolicy,
+} from "./autodispatch.js";
+import {
   type ActionProposalStager,
   type CommittedProposal,
   createActionProposalStager,
@@ -6969,6 +6987,82 @@ export function createKernelRepository(
   }
 
   /* Trial authority facade: DATA-only stage, one-grant approve, claim. */
+  /* Auto-dispatch ledger: policy/plan/execution + host authorization. */
+  function createAutodispatchPolicy(
+    sessionId: string,
+    input: CreateStandingPolicyInput,
+    options: {
+      key: string;
+      now?: number;
+      limits: AutodispatchLimits;
+      parent: {
+        statement: string;
+        sourceTurnId: string;
+        interpretation?: string;
+        validFrom?: string | null;
+        validUntil?: string | null;
+      };
+    },
+  ) {
+    return autodispatchCreatePolicy(
+      db,
+      sessionId,
+      input,
+      options as Parameters<typeof autodispatchCreatePolicy>[3],
+    );
+  }
+  function listAutodispatchPolicies(sessionId: string, limit?: number) {
+    return autodispatchListPolicies(db, sessionId, limit);
+  }
+  function readAutodispatchPolicy(sessionId: string, policyId: string) {
+    return autodispatchReadPolicy(db, sessionId, policyId);
+  }
+  function revokeAutodispatchPolicy(
+    sessionId: string,
+    policyId: string,
+    options: { now?: number; reason?: string } = {},
+  ) {
+    return autodispatchRevokePolicy(db, sessionId, policyId, options);
+  }
+  function createAutodispatchPlan(
+    sessionId: string,
+    input: Parameters<typeof autodispatchCreatePlan>[2],
+    options: { now?: number } = {},
+  ) {
+    return autodispatchCreatePlan(db, sessionId, input, options);
+  }
+  function listAutodispatchPlans(sessionId: string, limit?: number) {
+    return autodispatchListPlans(db, sessionId, limit);
+  }
+  function readAutodispatchPlan(sessionId: string, planId: string) {
+    return autodispatchReadPlan(db, sessionId, planId);
+  }
+  function authorizeAutodispatch(
+    sessionId: string,
+    planId: string,
+    options: AuthorizeWithinPolicyOptions,
+  ) {
+    return autodispatchAuthorize(db, sessionId, planId, options);
+  }
+  function readAutodispatchIntentHistory(sessionId: string, limit?: number) {
+    return autodispatchReadIntentHistory(db, sessionId, limit);
+  }
+  function readAutodispatchRunSession(runId: string): string | null {
+    return autodispatchReadRunSessionId(db, runId);
+  }
+  function listAutodispatchExecutions(sessionId: string, limit?: number) {
+    return autodispatchListExecutions(db, sessionId, limit);
+  }
+  function readAutodispatchExecution(sessionId: string, executionId: string) {
+    return autodispatchReadExecution(db, sessionId, executionId);
+  }
+  function readAutodispatchMaterialization(
+    sessionId: string,
+    executionId: string,
+  ) {
+    return autodispatchReadMaterialization(db, sessionId, executionId);
+  }
+
   function stageTrial(
     sessionId: string,
     request: unknown,
@@ -7884,6 +7978,19 @@ export function createKernelRepository(
     readPendingShadowJob,
     hasActiveShadowBlock,
 
+    createAutodispatchPolicy,
+    listAutodispatchPolicies,
+    readAutodispatchPolicy,
+    revokeAutodispatchPolicy,
+    createAutodispatchPlan,
+    listAutodispatchPlans,
+    readAutodispatchPlan,
+    authorizeAutodispatch,
+    readAutodispatchIntentHistory,
+    readAutodispatchRunSession,
+    listAutodispatchExecutions,
+    readAutodispatchExecution,
+    readAutodispatchMaterialization,
     stageTrial,
     listTrials,
     readTrial,

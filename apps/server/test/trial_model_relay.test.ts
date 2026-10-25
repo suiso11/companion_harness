@@ -283,6 +283,72 @@ describe.skipIf(process.platform === "win32")("trial_model_relay", () => {
     }
   });
 
+  it("native child read-only verbs (read,grep,find,ls) round-trip and unknown still rejects", async () => {
+    // Exact installed Pi backend read-only tool list (`piToolList`):
+    // read,grep,find,ls. The relay must map all of them to gateway-safe names
+    // and map a gateway call back to the exact native verb.
+    const gw = fakeGateway({
+      result: {
+        text: "",
+        toolCalls: [
+          {
+            id: "call_find",
+            name: "capsule.find",
+            arguments: { pattern: "README.md" },
+          },
+        ],
+        stopReason: "tool_calls",
+      },
+    });
+    const { relay, sock } = await startRelay(testCaps(), gw);
+    try {
+      relay.setPermitted(true);
+      const res = await postUds(
+        sock,
+        chatBody({
+          tools: ["read", "grep", "find", "ls"].map((name) => ({
+            type: "function",
+            function: {
+              name,
+              description: `synthetic native ${name}`,
+              parameters: { type: "object", properties: {} },
+            },
+          })),
+          tool_choice: "auto",
+        }),
+      );
+      expect(res.status).toBe(200);
+      expect(gw.calls.length).toBe(1);
+      expect((gw.calls[0] as ChatRequest).tools?.map((tool) => tool.name)).toEqual([
+        "capsule.read",
+        "capsule.grep",
+        "capsule.find",
+        "capsule.ls",
+      ]);
+      const call = JSON.parse(res.text).choices[0].message.tool_calls[0];
+      expect(call.function.name).toBe("find");
+      expect(JSON.parse(call.function.arguments)).toEqual({
+        pattern: "README.md",
+      });
+
+      // The new verbs are a fixed allowlist, not a passthrough: an arbitrary
+      // unknown native verb still fails closed before forwarding.
+      const unknown = await postUds(
+        sock,
+        chatBody({
+          tools: [
+            { type: "function", function: { name: "exec", description: "x" } },
+          ],
+        }),
+      );
+      expect(unknown.status).toBe(400);
+      expect(JSON.parse(unknown.text).error.message).toBe("unknown_tool");
+      expect(gw.calls.length).toBe(1);
+    } finally {
+      await relay.close();
+    }
+  });
+
   it("accepts tool_choice required from the guest", async () => {
     const gw = fakeGateway();
     const { relay, sock } = await startRelay(testCaps(), gw);

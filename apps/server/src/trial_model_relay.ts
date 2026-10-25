@@ -61,14 +61,32 @@ import {
 } from "@companion/model-local";
 import type { ServerLogger } from "./logger.js";
 
-/** Guest-native tool names spoken on the UDS wire (plain, no namespace). */
+/**
+ * Guest-native tool names spoken on the UDS wire (plain, no namespace).
+ * The installed pi-orch parent advertises the delegation tools alongside the
+ * fixed child tools; the relay is a transport, not a second authority (the
+ * sealed bridge still validates containment/scopes/checks).
+ *
+ * `find` and `ls` are the installed Pi backend's exact read-only child verbs
+ * (`piToolList` -> read,grep,find,ls); the installed OMP adapter maps its
+ * `glob` to `find` for native children. They are explicit, closed-vocabulary
+ * entries only: any other unlisted verb still fails closed as `unknown_tool`.
+ */
 export const GUEST_TOOL_NAMES = [
   "bash",
   "edit",
+  "find",
   "glob",
   "grep",
+  "ls",
   "read",
   "write",
+  "task",
+  "wait",
+  "opencode_task",
+  "opencode_spawn",
+  "opencode_wait",
+  "opencode_tools",
 ] as const;
 
 export type GuestToolName = (typeof GUEST_TOOL_NAMES)[number];

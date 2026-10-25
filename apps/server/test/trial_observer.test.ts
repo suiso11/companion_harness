@@ -1,7 +1,7 @@
 import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   computeRemainingRuntimeMs,
   expectedTrialScopeUnit,
@@ -11,6 +11,59 @@ import {
   queryScopeUnit,
   readProcessIdentity,
 } from "../src/trial_observer.js";
+
+type ExecFileImpl = (
+  file: string,
+  args: readonly string[],
+  options: unknown,
+  callback: (error: Error | null, stdout: string) => void,
+) => unknown;
+
+const execFileControl = vi.hoisted(() => {
+  let impl: ExecFileImpl | null = null;
+  return {
+    set(fn: ExecFileImpl): void {
+      impl = fn;
+    },
+    clear(): void {
+      impl = null;
+    },
+    get(): ExecFileImpl | null {
+      return impl;
+    },
+  };
+});
+
+// Deterministic execFile seam: default passthrough keeps the real-stub tests
+// below, one regression test installs a delayed callback implementation.
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return {
+    ...actual,
+    execFile: (
+      file: string,
+      args: readonly string[],
+      options: unknown,
+      callback: (error: Error | null, stdout: string) => void,
+    ) => {
+      const impl = execFileControl.get();
+      if (impl !== null) return impl(file, args, options, callback);
+      return (
+        actual.execFile as unknown as (
+          f: string,
+          a: readonly string[],
+          o: unknown,
+          cb: (error: Error | null, stdout: string) => void,
+        ) => unknown
+      )(file, args, options, callback);
+    },
+  };
+});
+
+afterEach(() => {
+  execFileControl.clear();
+  vi.restoreAllMocks();
+});
 
 describe("expectedTrialScopeUnit", () => {
   it("is byte-identical to the Own-pi formula for a sample pair", () => {
@@ -212,6 +265,62 @@ describe("systemctl show parsing", () => {
     },
   );
 
+  it.runIf(process.platform !== "win32")(
+    "samples the clock after a delayed systemctl result (activation during query)",
+    async () => {
+      const runtimeMaxUs = 300_000_000n;
+      const show = (enter: bigint) =>
+        [
+          "LoadState=loaded",
+          "ActiveState=active",
+          `ActiveEnterTimestampMonotonic=${enter}`,
+          `RuntimeMaxUSec=${runtimeMaxUs}`,
+          "MemoryMax=infinity",
+          "TasksMax=8",
+          "CPUQuotaPerSecUSec=infinity",
+        ].join("\n");
+      // Deterministic monotonic clock; no sleeps. The query starts at t0, the
+      // scope activates at t0+4ms while systemctl is still in flight, and the
+      // execFile callback returns after that activation.
+      let nowUs = 1_000_000n;
+      const clock = vi
+        .spyOn(process.hrtime, "bigint")
+        .mockImplementation(() => nowUs * 1000n);
+      const activatedAt = nowUs + 4_000n;
+      execFileControl.set((_file, _args, _options, callback) => {
+        nowUs = activatedAt;
+        callback(null, show(activatedAt));
+        return {};
+      });
+
+      const props = await queryScopeUnit("/fake/systemctl", "u.scope", {
+        xdgRuntimeDir: "/run/user/1000",
+        timeoutMs: 3000,
+      });
+      expect(clock).toHaveBeenCalled();
+      expect(props.scopeState).toBe("active");
+      // Old bug sampled t0 before execFile: 300004ms > RuntimeMax/1000. The
+      // post-query sample must never manufacture a bound above RuntimeMax.
+      const runtimeMaxMs = Number((runtimeMaxUs + 999n) / 1000n);
+      expect(props.remainingRuntimeMs).toBe(300000);
+      expect(props.remainingRuntimeMs).toBeLessThanOrEqual(runtimeMaxMs);
+
+      // A truly future ActiveEnter stamp is unknown, not a fabricated bound.
+      const futureNow = nowUs;
+      execFileControl.set((_file, _args, _options, callback) => {
+        nowUs = futureNow;
+        callback(null, show(futureNow + 1n));
+        return {};
+      });
+      const future = await queryScopeUnit("/fake/systemctl", "u.scope", {
+        xdgRuntimeDir: "/run/user/1000",
+        timeoutMs: 3000,
+      });
+      expect(future.scopeState).toBe("unknown");
+      expect(future.remainingRuntimeMs).toBeNull();
+    },
+  );
+
   it("remaining computation incl. infinity", () => {
     // enter=1s, max=20s, now=2s (all us) -> 19000ms.
     expect(computeRemainingRuntimeMs(1_000_000n, 20_000_000n, 2_000_000n)).toBe(
@@ -229,6 +338,10 @@ describe("systemctl show parsing", () => {
     );
     // missing denies.
     expect(computeRemainingRuntimeMs(null, 20_000_000n, 2_000_000n)).toBeNull();
+    // future ActiveEnter is unknown (never a manufactured within-bound value).
+    expect(
+      computeRemainingRuntimeMs(2_000_001n, 20_000_000n, 2_000_000n),
+    ).toBeNull();
   });
 
   it("parses systemd human time spans (as systemctl show renders them)", () => {

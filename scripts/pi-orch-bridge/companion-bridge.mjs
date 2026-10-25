@@ -1,0 +1,922 @@
+#!/usr/bin/env node
+// Sealed pi-orch bridge (TrialRunner-compatible CLI).
+//
+// Contract:
+//   node companion-bridge.mjs --describe
+//   node companion-bridge.mjs --config <absolute operator config>
+//
+// --config reads exactly one JSONLF request from stdin, requires fd3 to be a
+// FIFO/socket control pipe, reserves an idempotent journal row, and runs the
+// frozen operator executor/checks against a private copy of a verified SEALED
+// source snapshot. The original source root is never mounted, read, or bound.
+// stdout carries exactly one result JSONLF after a reservation; diagnostics
+// are redacted to fixed strings on stderr.
+//
+// Production execution uses systemd user scope + bwrap. If user systemd/bwrap
+// is unavailable the bridge returns an explicit error (containment blocker);
+// it never falls back to a host process. `offline-fixture` is an explicit
+// non-containment regression backend for synthetic tests only.
+
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import {
+  chmodSync,
+  closeSync,
+  constants as fsConstants,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
+import { Socket as ControlSocket } from "node:net";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  companionScopeUnit,
+  parseRequestFrame,
+  serializeResult,
+  validateWireResult,
+} from "./companion-protocol.mjs";
+import { CompanionJournal } from "./companion-journal.mjs";
+import {
+  assertConsent,
+  assertProfileMatches,
+  assertRequestBudget,
+  assertRequestScopes,
+  computeEffectiveProfile,
+  loadSealedSnapshot,
+  parseOperatorConfig,
+  verifyDependencyClosure,
+} from "./sealed-profile.mjs";
+import {
+  buildCheckCommand,
+  buildWholejobCommand,
+  createJobFile,
+  materializeSealedWork,
+  preflightContainment,
+  spawnObserved,
+  stopOwnedScope,
+} from "./containment.mjs";
+import {
+  validateCandidateChanges,
+  verifySealedWorkspaceSnapshot,
+} from "../../packages/kernel/src/autonomous_workspace.ts";
+
+export const BRIDGE_VERSION = 2;
+export const BRIDGE_WIRE_VERSION = 1;
+export const BRIDGE_MODES = ["read_only", "write"];
+
+const EXIT_OK = 0;
+const EXIT_INTERNAL = 1;
+const EXIT_INVALID = 2;
+const STDOUT_FD = 1;
+const STDERR_FD = 2;
+
+const MSG_INVALID_ARGS = "companion bridge: invalid arguments";
+const MSG_INVALID_CONFIG = "companion bridge: invalid operator config";
+const MSG_INVALID_PIPE = "companion bridge: invalid control pipe";
+const MSG_INVALID_REQUEST = "companion bridge: invalid request";
+const MSG_INFLIGHT = "companion bridge: inflight";
+const MSG_INTERNAL = "companion bridge: internal error";
+
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function checkControlPipe(fd = 3) {
+  let st;
+  try {
+    st = fstatSync(fd);
+  } catch {
+    throw new Error("control pipe unavailable");
+  }
+  if (!st.isFIFO() && !st.isSocket()) throw new Error("control pipe must be FIFO or socket");
+}
+
+function redactedError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.replace(/\/home\/[^\s:]+/g, "<path>").slice(0, 500);
+}
+
+function sha256(bytes) {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function emptyReport(summary) {
+  return { summary, files: [], findings: [], unresolved: [] };
+}
+
+// Provenance stays explicit and separate: `evidence.checks`/`artifact` are
+// host-executed/revalidated; `evidence.workerIds` (when present) come from the
+// guest-writable report and are guest-reported/unattested, never proof.
+function rawResult(request, status, verified, report, evidence = {}) {
+  return {
+    version: 1,
+    executionId: request.executionId,
+    taskHash: request.taskHash,
+    status,
+    verified,
+    report,
+    evidence: {
+      workerIds: evidence.workerIds ?? [],
+      workspaceTrial: true,
+      productionApplied: false,
+      checks: evidence.checks ?? [],
+      ...(evidence.workflowId !== undefined ? { workflowId: evidence.workflowId } : {}),
+      ...(evidence.artifact !== undefined ? { artifact: evidence.artifact } : {}),
+    },
+  };
+}
+
+function checkUnit(request, index) {
+  const nonce = `check-${index}-${request.taskHash.slice(0, 48)}`;
+  return `capsule-${request.executionId}-${nonce}.scope`;
+}
+
+// The guest owns /work and can write this file. It is an UNTRUSTED guest
+// self-report, exactly like model prose: never host evidence, never a
+// permission/adoption/resource/trust input. Host authority comes only from the
+// fixed operator checks and the post-check candidate/artifact revalidation.
+function readGuestObservation(workRoot) {
+  const path = join(workRoot, ".companion-observation", "guest.json");
+  try {
+    const stat = lstatSync(path);
+    if (stat.isSymbolicLink() || !stat.isFile() || stat.size > 64 * 1024) return null;
+    const parsed = JSON.parse(readFileSync(path, "utf8"));
+    if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.tools)) return null;
+    if (parsed.engine !== "omp-headless-json" && parsed.engine !== "pi-orch-omp-json") return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function observationFindings(observation) {
+  if (observation === null) return [];
+  const findings = [];
+  for (const tool of observation.tools.slice(0, 8)) {
+    if (!tool || typeof tool.name !== "string") continue;
+    const path = tool.args && typeof tool.args.path === "string" ? ` ${tool.args.path.slice(0, 256)}` : "";
+    const result = tool.result === "ok" ? "ok" : tool.result === "error" ? "denied" : "pending";
+    findings.push(`tool ${tool.name.slice(0, 64)}${path} (${result})`);
+  }
+  for (const worker of (Array.isArray(observation.delegatedWorkers) ? observation.delegatedWorkers : []).slice(0, 8)) {
+    if (!worker || typeof worker.id !== "string" || typeof worker.status !== "string") continue;
+    findings.push(
+      `guest-reported worker ${worker.id.slice(0, 32)} ${worker.status.slice(0, 32)} (unattested)`,
+    );
+  }
+  return findings;
+}
+
+// Conservative RELIABILITY downgrade over an UNTRUSTED guest report. The
+// reported worker status is guest-reported/unattested (the guest can rewrite
+// guest.json); it is never host evidence and never authorizes permission,
+// adoption, resources, or trust. A reported `done` proves nothing and cannot
+// make a host check pass or widen candidate scope. Missing/failed reports may
+// only downgrade the result to unknown/error. Host authority is exclusively:
+// every fixed operator check passed + candidate scope revalidated + retained
+// artifact hashes matched. That still does not attest delegation, completion,
+// or semantic correctness.
+const DELEGATED_WORKER_STATUSES = new Set(["running", "done", "error", "cancelled"]);
+
+function evaluateDelegatedWorkers(observation, realPiRequired) {
+  if (observation === null || observation.executorKind !== "real-pi") {
+    return realPiRequired ? { ok: false, missing: true } : { ok: true, missing: false };
+  }
+  if (!Array.isArray(observation.delegatedWorkers)) {
+    return { ok: false, missing: true };
+  }
+  const workers = observation.delegatedWorkers.slice(0, 32);
+  if (workers.length === 0) return { ok: false, missing: true };
+  for (const worker of workers) {
+    if (
+      !worker ||
+      typeof worker !== "object" ||
+      typeof worker.id !== "string" ||
+      worker.id.length === 0 ||
+      typeof worker.status !== "string" ||
+      !DELEGATED_WORKER_STATUSES.has(worker.status)
+    ) {
+      return { ok: false, missing: true };
+    }
+    if (worker.status !== "done" || worker.isError === true) {
+      return { ok: false, missing: false };
+    }
+  }
+  return { ok: true, missing: false };
+}
+
+// Retain the exact candidate bytes that the final validation hashed. The file
+// is opened with O_NOFOLLOW, the opened descriptor is bounded to the recorded
+// size, and the bytes are hashed again before they are written to the
+// retention directory. A path swap (including a symlink swap) or a byte change
+// after validation therefore fails closed instead of retaining stale or
+// mismatched content.
+function readVerifiedCandidateBytes(workRoot, change, maxBytes) {
+  if (change.candidateSha256 === null || change.kind === "delete") return null;
+  if (!Number.isSafeInteger(change.size) || change.size < 0 || change.size > maxBytes) {
+    throw new Error("candidate retention exceeds the artifact cap");
+  }
+  const source = join(workRoot, ...change.path.split("/"));
+  const fd = openSync(source, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  try {
+    const opened = fstatSync(fd);
+    if (!opened.isFile() || opened.size !== change.size) {
+      throw new Error("candidate changed while retaining");
+    }
+    const bytes = Buffer.allocUnsafe(change.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const read = readSync(fd, bytes, offset, bytes.length - offset, null);
+      if (read <= 0) throw new Error("candidate changed while retaining");
+      offset += read;
+    }
+    const extra = Buffer.allocUnsafe(1);
+    if (readSync(fd, extra, 0, 1, null) !== 0) throw new Error("candidate changed while retaining");
+    const digest = sha256(bytes);
+    if (digest !== change.candidateSha256) {
+      throw new Error("candidate bytes do not match the validated digest");
+    }
+    return bytes;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function retainCandidateChanges(workRoot, changes, destination, artifactBytes, maxBytes) {
+  if (!Number.isSafeInteger(artifactBytes) || artifactBytes < 0 || artifactBytes > maxBytes) {
+    throw new Error("candidate retention exceeds the artifact cap");
+  }
+  let total = artifactBytes;
+  const retained = [];
+  for (const change of changes) {
+    const bytes = readVerifiedCandidateBytes(
+      workRoot,
+      change,
+      maxBytes - artifactBytes,
+    );
+    if (bytes === null) continue;
+    total += bytes.length;
+    if (total > maxBytes) throw new Error("candidate retention exceeds the artifact cap");
+    const target = join(destination, ...change.path.split("/"));
+    mkdirSync(join(target, ".."), { recursive: true, mode: 0o700 });
+    const targetFd = openSync(
+      target,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
+      0o600,
+    );
+    try {
+      writeSync(targetFd, bytes, 0, bytes.length, 0);
+    } finally {
+      closeSync(targetFd);
+    }
+    chmodSync(target, 0o600);
+    retained.push({ path: change.path, sha256: change.candidateSha256, size: bytes.length });
+  }
+  return retained;
+}
+
+// The installed extension's direct-write guard requires a Git worktree with a
+// capturable baseline. Create that baseline only inside the private /work copy
+// of the verified sealed snapshot; the original source and its .git are never
+// mounted or read. .git is operator-owned scratch metadata and is excluded
+// from candidate source validation (and from relevantPaths).
+function ensureWriteBaseline(workRoot, runDir) {
+  const home = join(runDir, "git-home");
+  mkdirSync(home, { recursive: true, mode: 0o700 });
+  chmodSync(home, 0o700);
+  const env = {
+    PATH: `${dirname(process.execPath)}:/usr/local/bin:/usr/bin:/bin`,
+    HOME: home,
+    TMPDIR: home,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: join(home, "gitconfig"),
+    GIT_TERMINAL_PROMPT: "0",
+  };
+  const git = (args) => {
+    const result = spawnSync("git", args, {
+      cwd: workRoot,
+      env,
+      encoding: "utf8",
+      timeout: 30_000,
+      maxBuffer: 1024 * 1024,
+    });
+    if (result.status !== 0) throw new Error("git baseline setup failed");
+  };
+  git(["-c", "init.defaultBranch=main", "init", "-q"]);
+  git(["add", "-A"]);
+  git([
+    "-c",
+    "user.name=Companion Bridge",
+    "-c",
+    "user.email=bridge@localhost",
+    "commit",
+    "-q",
+    "--no-gpg-sign",
+    "-m",
+    "sealed baseline",
+  ]);
+}
+
+async function main() {
+  let controlStream = null;
+  let currentChild = null;
+  let currentUnit = null;
+  let runtime = null;
+  let controlCancelled = false;
+  let deadlineFired = false;
+
+  const exitWith = (fd, text, code) => {
+    try {
+      writeSync(fd, text);
+    } catch {
+      // Best effort.
+    }
+    try {
+      if (controlStream !== null) controlStream.destroy();
+    } catch {
+      // Best effort.
+    }
+    process.exit(code);
+  };
+
+  const requestCancel = () => {
+    if (controlCancelled) return;
+    controlCancelled = true;
+    if (currentChild !== null) {
+      try {
+        currentChild.kill("SIGTERM");
+      } catch {
+        // Already exited.
+      }
+    }
+    if (currentUnit !== null && runtime !== null) {
+      stopOwnedScope(runtime, currentUnit, "SIGTERM");
+    }
+    const force = setTimeout(() => {
+      if (currentChild !== null) {
+        try {
+          currentChild.kill("SIGKILL");
+        } catch {
+          // Already exited.
+        }
+      }
+      if (currentUnit !== null && runtime !== null) stopOwnedScope(runtime, currentUnit, "SIGKILL");
+    }, 15_000);
+    if (force.unref) force.unref();
+  };
+
+  const argv = process.argv.slice(2);
+  if (argv.includes("--describe")) {
+    exitWith(
+      STDOUT_FD,
+      `${JSON.stringify({
+        version: BRIDGE_VERSION,
+        wire: BRIDGE_WIRE_VERSION,
+        modes: BRIDGE_MODES,
+        sealed: true,
+        backends: ["confined", "offline-fixture"],
+        testDefaultLimits: "not-activated-policy",
+      })}\n`,
+      EXIT_OK,
+    );
+  }
+
+  let configPath;
+  for (let i = 0; i < argv.length; i += 1) {
+    if (argv[i] === "--config") {
+      if (configPath !== undefined || i + 1 >= argv.length) {
+        exitWith(STDERR_FD, `${MSG_INVALID_ARGS}\n`, EXIT_INVALID);
+      }
+      configPath = argv[i + 1];
+      i += 1;
+    } else {
+      exitWith(STDERR_FD, `${MSG_INVALID_ARGS}\n`, EXIT_INVALID);
+    }
+  }
+  if (configPath === undefined || !configPath.startsWith("/")) {
+    exitWith(STDERR_FD, `${MSG_INVALID_ARGS}\n`, EXIT_INVALID);
+  }
+
+  // Strict operator config and REAL effective-profile computation first.
+  let config;
+  let effective;
+  let snapshot;
+  try {
+    config = parseOperatorConfig(readFileSync(configPath, "utf8"));
+    runtime = config.profile.runtime;
+    effective = computeEffectiveProfile(config);
+    assertProfileMatches(config, effective);
+    snapshot = loadSealedSnapshot(config, { expectedManifestDigest: config.sealed.manifestDigest });
+    const verified = await verifySealedWorkspaceSnapshot(snapshot, {
+      expectedManifestDigest: config.sealed.manifestDigest,
+    });
+    if (!verified.ok) throw new Error(`sealed snapshot verification failed: ${verified.reason}`);
+    if (verified.manifestDigest !== config.sealed.manifestDigest) {
+      throw new Error("sealed snapshot digest changed during verification");
+    }
+    let sourceBytes = 0;
+    for (const entry of snapshot.manifest) sourceBytes += entry.size;
+    if (snapshot.manifest.length > 20_000) throw new Error("sealed snapshot exceeds 20000 files");
+    if (sourceBytes > config.profile.limits.maxSourceBytes) throw new Error("sealed snapshot exceeds maxSourceBytes");
+  } catch (error) {
+    process.stderr.write(`${MSG_INVALID_CONFIG}: ${redactedError(error)}\n`);
+    process.exit(EXIT_INVALID);
+  }
+
+  try {
+    checkControlPipe(3);
+  } catch {
+    exitWith(STDERR_FD, `${MSG_INVALID_PIPE}\n`, EXIT_INVALID);
+  }
+
+  try {
+    controlStream = new ControlSocket({ fd: 3, readable: true, writable: false });
+    controlStream.on("data", () => {});
+    controlStream.on("end", requestCancel);
+    controlStream.on("error", requestCancel);
+    controlStream.resume();
+  } catch {
+    requestCancel();
+  }
+  process.on("SIGINT", requestCancel);
+  process.on("SIGTERM", requestCancel);
+
+  let frame;
+  try {
+    const chunks = [];
+    let total = 0;
+    for await (const chunk of process.stdin) {
+      total += chunk.length;
+      if (total > config.storage.maxRequestBytes) throw new Error("request too large");
+      chunks.push(chunk);
+    }
+    frame = Buffer.concat(chunks);
+  } catch {
+    exitWith(STDERR_FD, `${MSG_INVALID_REQUEST}\n`, EXIT_INVALID);
+  }
+
+  let request;
+  try {
+    request = parseRequestFrame(frame, config.storage.maxRequestBytes);
+    if (request.configFingerprint !== effective.fingerprint) throw new Error("config fingerprint mismatch");
+    if (request.sourceRevision !== effective.sourceRevision) throw new Error("source revision mismatch");
+    if (request.workspaceAlias !== config.active.workspaceAlias) throw new Error("workspace alias mismatch");
+    assertConsent(config.profile, request);
+    assertRequestScopes(config.profile, request);
+    assertRequestBudget(config.profile, request);
+  } catch {
+    exitWith(STDERR_FD, `${MSG_INVALID_REQUEST}\n`, EXIT_INVALID);
+  }
+
+  let journal;
+  try {
+    journal = new CompanionJournal(config.stateDir, config.storage);
+  } catch (error) {
+    exitWith(STDERR_FD, `${MSG_INTERNAL}: ${redactedError(error)}\n`, EXIT_INTERNAL);
+  }
+
+  let reserve;
+  try {
+    reserve = journal.reserve(request, config.active, {
+      artifactCapBytes: config.storage.maxArtifactBytes,
+      resultCapBytes: config.storage.maxResultBytes,
+    });
+  } catch {
+    journal.close();
+    exitWith(STDERR_FD, `${MSG_INVALID_REQUEST}\n`, EXIT_INVALID);
+  }
+  if (reserve.kind === "duplicate-final") {
+    journal.close();
+    exitWith(STDOUT_FD, reserve.resultJsonLf, EXIT_OK);
+  }
+  if (reserve.kind === "duplicate-inflight") {
+    journal.close();
+    exitWith(STDERR_FD, `${MSG_INFLIGHT}\n`, EXIT_INVALID);
+  }
+
+  const runDir = join(config.stateDir, "runs", request.executionId);
+  const ownerToken = reserve.ownerToken;
+  let outcome;
+
+  const finalize = (raw, storedExit, artifactBytes) => {
+    const validated = validateWireResult(raw, request.requiredChecks);
+    const line = serializeResult(validated);
+    journal.finalize(request, {
+      resultJsonLf: line,
+      exitCode: storedExit,
+      ownerToken,
+      ...(artifactBytes !== undefined ? { artifactBytes } : {}),
+    });
+    writeSync(STDOUT_FD, line);
+  };
+
+  const errorOutcome = (summary, checks, storedExit, unresolved = []) => ({
+    raw: rawResult(
+      request,
+      "error",
+      false,
+      { summary, files: [], findings: [], unresolved },
+      { checks },
+    ),
+    storedExit,
+  });
+
+  try {
+    mkdirSync(runDir, { recursive: true, mode: 0o700 });
+    chmodSync(runDir, 0o700);
+    const runStat = lstatSync(runDir);
+    if (runStat.isSymbolicLink() || !runStat.isDirectory()) throw new Error("run dir is not private");
+
+    const deadlineAt = Date.now() + Math.min(request.budget.timeoutMs, config.profile.limits.maxDurationMs);
+    const remainingMs = () => deadlineAt - Date.now();
+    const deadlineTimer = setTimeout(() => {
+      deadlineFired = true;
+      requestCancel();
+    }, Math.max(0, remainingMs()));
+    if (deadlineTimer.unref) deadlineTimer.unref();
+
+    const observe = async (command, args, options) => {
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        requestCancel();
+      }, Math.max(0, options.timeoutMs));
+      if (timer.unref) timer.unref();
+      try {
+        const result = await spawnObserved(command, args, {
+          ...options,
+          onChild: (child) => {
+            currentChild = child;
+            options.onChild?.(child);
+          },
+        });
+        return { ...result, timedOut };
+      } finally {
+        clearTimeout(timer);
+        currentChild = null;
+        currentUnit = null;
+      }
+    };
+
+    const deps = (() => {
+      try {
+        return { ok: true, value: verifyDependencyClosure(config.profile.dependencies, config.profile.limits.maxDependencyBytes) };
+      } catch (error) {
+        return { ok: false, reason: redactedError(error) };
+      }
+    })();
+
+    const before = await verifySealedWorkspaceSnapshot(snapshot, {
+      expectedManifestDigest: config.sealed.manifestDigest,
+    });
+    if (!before.ok) {
+      outcome = errorOutcome("companion bridge: sealed snapshot failed before launch", [], 12, ["blocked: snapshot content"]);
+    } else if (!deps.ok) {
+      outcome = errorOutcome("companion bridge: blocked dependencies", [], 12, ["blocked: dependencies"]);
+    } else if (config.profile.executionBackend === "confined") {
+      const preflight = preflightContainment(config.profile.runtime);
+      if (!preflight.ok) {
+        outcome = errorOutcome("companion bridge: containment unavailable", [], 12, [
+          "blocked: containment",
+          preflight.reason,
+        ]);
+      } else {
+        let relayOk = false;
+        try {
+          relayOk = lstatSync(config.profile.model.sockHostPath).isSocket();
+        } catch {
+          relayOk = false;
+        }
+        if (!relayOk) {
+          outcome = errorOutcome("companion bridge: containment unavailable", [], 12, [
+            "blocked: containment",
+            "trusted model relay UDS is missing or not a socket",
+          ]);
+        }
+      }
+    }
+
+    if (outcome === undefined && controlCancelled) {
+      outcome = { raw: rawResult(request, "cancelled", false, emptyReport("companion bridge: cancelled")), storedExit: 143 };
+    }
+
+    if (outcome === undefined) {
+      const workRoot = join(runDir, "work");
+      materializeSealedWork(snapshot.snapshotRoot, workRoot);
+      if (request.mode === "write") ensureWriteBaseline(workRoot, runDir);
+      const executorFile = config.profile.executor.executable;
+      if (lstatSync(executorFile).isSymbolicLink()) throw new Error("executor must not be a symlink");
+      const jobFile = createJobFile(join(runDir, "job.json"), {
+        version: 1,
+        mode: request.mode,
+        executionId: request.executionId,
+        taskHash: request.taskHash,
+        profileFingerprint: effective.fingerprint,
+        sealed: {
+          manifestDigest: config.sealed.manifestDigest,
+          sourceRevision: effective.sourceRevision,
+          snapshotRoot: snapshot.snapshotRoot,
+        },
+        purpose: request.purpose,
+        objective: request.objective,
+        relevantPaths: request.relevantPaths,
+        acceptance: request.acceptance,
+        constraints: request.constraints,
+        requiredChecks: request.requiredChecks,
+        externalModelConsent: request.externalModelConsent,
+      });
+      const unit = reserve.scopeUnit;
+      let run;
+      if (config.profile.executionBackend === "confined") {
+        const built = buildWholejobCommand(config.profile, { executorExecutable: executorFile, workRoot, jobFile }, unit);
+        if (process.env.PI_ORCH_DEBUG_LOG) { try { writeFileSync(`${process.env.PI_ORCH_DEBUG_LOG}.cmd`, JSON.stringify(built)); } catch { /* debug only */ } }
+        currentUnit = unit;
+        run = await observe(built.command, built.args, {
+          timeoutMs: remainingMs(),
+          outputCap: Math.min(request.budget.maxOutputBytes, 1024 * 1024),
+        });
+      } else {
+        // Explicit synthetic regression backend. NOT containment.
+        run = await observe(
+          executorFile,
+          config.profile.executor.args,
+          {
+            cwd: workRoot,
+            timeoutMs: remainingMs(),
+            outputCap: Math.min(request.budget.maxOutputBytes, 1024 * 1024),
+            env: {
+              PATH: `${dirname(process.execPath)}:/usr/local/bin:/usr/bin:/bin`,
+              HOME: workRoot,
+              TMPDIR: workRoot,
+              COMPANION_JOB_FILE: jobFile,
+              COMPANION_MODEL_TOKEN: "dummy-bearer-not-a-secret",
+            },
+          },
+        );
+      }
+
+      if (controlCancelled && !deadlineFired) {
+        outcome = { raw: rawResult(request, "cancelled", false, emptyReport("companion bridge: cancelled")), storedExit: 143 };
+      } else if (deadlineFired || run.timedOut) {
+        outcome = errorOutcome("companion bridge: timed out", [], 4);
+      } else if (run.code !== 0) {
+        if (process.env.PI_ORCH_DEBUG_LOG) {
+          try { writeFileSync(process.env.PI_ORCH_DEBUG_LOG, JSON.stringify(run)); } catch { /* debug only */ }
+        }
+        outcome = errorOutcome("companion bridge: executor failed", [], 10);
+      } else {
+        const validation = await validateCandidateChanges({
+          snapshot,
+          expectedManifestDigest: config.sealed.manifestDigest,
+          candidateRoot: workRoot,
+          mode: request.mode,
+          allowedEditPaths: request.relevantPaths,
+          generatedScratchRoots: config.profile.scratchPaths,
+        });
+        if (!validation.ok) {
+          outcome = errorOutcome("companion bridge: candidate scope violation", [], 10, validation.rejected);
+        } else {
+          const validatedArtifactDigest = validation.artifact.artifactDigest;
+          const artifactDoc = {
+            schemaVersion: 2,
+            executionId: request.executionId,
+            taskHash: request.taskHash,
+            baseManifestDigest: validation.artifact.baseManifestDigest,
+            profileFingerprint: effective.fingerprint,
+            sourceRevision: effective.sourceRevision,
+            changeCount: validation.artifact.changeCount,
+            changes: validation.artifact.changes,
+          };
+          const artifactBytes = Buffer.from(`${JSON.stringify(artifactDoc)}\n`);
+          if (artifactBytes.length > config.profile.limits.maxArtifactBytes || artifactBytes.length > config.storage.maxArtifactBytes) {
+            outcome = {
+              raw: rawResult(request, "unknown", false, emptyReport("companion bridge: artifact publication invalid")),
+              storedExit: 1,
+            };
+          } else {
+            writeFileSync(join(runDir, "artifact.json"), artifactBytes, { mode: 0o600 });
+            const checks = [];
+            let stoppedEarly = false;
+            for (let index = 0; index < request.requiredChecks.length; index += 1) {
+              const id = request.requiredChecks[index];
+              if (controlCancelled && !deadlineFired) break;
+              if (deadlineFired || remainingMs() < 1000) {
+                stoppedEarly = true;
+                break;
+              }
+              const check = config.profile.checks[id];
+              const checkRuntime = Math.min(remainingMs(), config.profile.limits.maxDurationMs);
+              let checkRun;
+              if (config.profile.executionBackend === "confined") {
+                const scratchRoot = join(runDir, `check-${index}`);
+                mkdirSync(scratchRoot, { recursive: true, mode: 0o700 });
+                chmodSync(scratchRoot, 0o700);
+                const built = buildCheckCommand(
+                  config.profile,
+                  { workRoot, scratchRoot },
+                  checkUnit(request, index),
+                  check,
+                );
+                currentUnit = checkUnit(request, index);
+                checkRun = await observe(built.command, built.args, {
+                  timeoutMs: checkRuntime,
+                  outputCap: Math.min(request.budget.maxOutputBytes, 1024 * 1024),
+                });
+              } else {
+                checkRun = await observe(check.executable, check.args, {
+                  cwd: workRoot,
+                  timeoutMs: checkRuntime,
+                  outputCap: Math.min(request.budget.maxOutputBytes, 1024 * 1024),
+                  env: {
+                    PATH: `${dirname(process.execPath)}:/usr/local/bin:/usr/bin:/bin`,
+                    HOME: workRoot,
+                    TMPDIR: workRoot,
+                  },
+                });
+              }
+              if (controlCancelled && !deadlineFired) break;
+              const outputMatched =
+                checkRun.code === check.expectExitCode &&
+                (check.expectStdoutIncludes === undefined || checkRun.stdout.includes(check.expectStdoutIncludes));
+              checks.push({
+                id,
+                exitCode: checkRun.timedOut ? 4 : checkRun.code,
+                timedOut: checkRun.timedOut,
+                outputMatched,
+              });
+              if (checkRun.timedOut || !outputMatched) {
+                stoppedEarly = true;
+                break;
+              }
+            }
+
+            if (controlCancelled && !deadlineFired) {
+              outcome = {
+                raw: rawResult(request, "cancelled", false, emptyReport("companion bridge: cancelled"), { checks }),
+                storedExit: 143,
+              };
+            } else if (stoppedEarly || deadlineFired) {
+              outcome = errorOutcome(deadlineFired ? "companion bridge: timed out" : "companion bridge: check failed", checks, deadlineFired ? 4 : 10);
+            } else {
+              const after = await verifySealedWorkspaceSnapshot(snapshot, {
+                expectedManifestDigest: config.sealed.manifestDigest,
+              });
+              if (!after.ok) {
+                outcome = errorOutcome("companion bridge: sealed snapshot changed after checks", checks, 12, ["blocked: snapshot content"]);
+              } else {
+                // Operator checks run with /work bound writable. Re-validate the
+                // candidate AFTER every check, before any bytes are retained:
+                // a check must not be able to change or mask the deliverable
+                // between validation and retention.
+                const finalValidation = await validateCandidateChanges({
+                  snapshot,
+                  expectedManifestDigest: config.sealed.manifestDigest,
+                  candidateRoot: workRoot,
+                  mode: request.mode,
+                  allowedEditPaths: request.relevantPaths,
+                  generatedScratchRoots: config.profile.scratchPaths,
+                });
+                if (!finalValidation.ok) {
+                  outcome = errorOutcome("companion bridge: candidate scope violation", checks, 10, finalValidation.rejected);
+                } else if (finalValidation.artifact.artifactDigest !== validatedArtifactDigest) {
+                  outcome = errorOutcome(
+                    "companion bridge: candidate changed during operator checks",
+                    checks,
+                    10,
+                    ["blocked: candidate changed during checks"],
+                  );
+                } else {
+                  const changes = finalValidation.artifact.changes;
+                  const observation = readGuestObservation(workRoot);
+                  const guestReportEvidence = evaluateDelegatedWorkers(
+                    observation,
+                    config.profile.executor.kind === "real-pi",
+                  );
+                  if (!guestReportEvidence.ok) {
+                    // The guest report is not authority. A failed or missing
+                    // report may conservatively downgrade a run for reliability;
+                    // it is never promoted into host attestation.
+                    outcome = guestReportEvidence.missing
+                      ? {
+                          raw: rawResult(
+                            request,
+                            "unknown",
+                            false,
+                            {
+                              summary: "companion bridge: guest-reported worker evidence missing",
+                              files: [],
+                              findings: observationFindings(observation),
+                              unresolved: ["blocked: guest-reported worker evidence (unattested)"],
+                            },
+                            { checks },
+                          ),
+                          storedExit: 1,
+                        }
+                      : errorOutcome(
+                          "companion bridge: guest-reported worker did not complete",
+                          checks,
+                          10,
+                          ["blocked: guest-reported worker did not complete (unattested)"],
+                        );
+                    if (outcome.raw.report.findings.length === 0) {
+                      outcome.raw.report.findings = observationFindings(observation);
+                    }
+                  } else {
+                    const findings = [
+                      ...changes.slice(0, 8).map((change) => `${change.kind} ${change.path}`),
+                      ...observationFindings(observation),
+                    ].slice(0, 16);
+                    try {
+                      retainCandidateChanges(
+                        workRoot,
+                        changes,
+                        join(runDir, "candidate"),
+                        artifactBytes.length,
+                        Math.min(config.profile.limits.maxArtifactBytes, config.storage.maxArtifactBytes),
+                      );
+                    } catch {
+                      throw new Error("candidate retention invalid");
+                    }
+                    // `verified` here is ONLY the fixed host-check/scope/artifact
+                    // result; the guest worker report stays unattested.
+                    const summary =
+                      request.mode === "write"
+                        ? `sealed trial completed: ${changes.length} host-checked change(s); worker status guest-reported/unattested`
+                        : "sealed read-only trial completed; worker status guest-reported/unattested";
+                    const artifact = {
+                      sha256: sha256(artifactBytes),
+                      entryCount: changes.length,
+                      bytes: artifactBytes.length,
+                    };
+                    const raw = rawResult(
+                      request,
+                      "done",
+                      true,
+                      { summary, files: [], findings, unresolved: [] },
+                      { checks, artifact },
+                    );
+                    try {
+                      validateWireResult(raw, request.requiredChecks);
+                      outcome = { raw, storedExit: 0, artifactBytes };
+                    } catch {
+                      outcome = errorOutcome("companion bridge: result validation failed", checks, 10);
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    clearTimeout(deadlineTimer);
+  } catch (error) {
+    outcome = {
+      raw: rawResult(request, "unknown", false, emptyReport("companion bridge: internal error")),
+      storedExit: 1,
+    };
+    void error;
+  }
+
+  try {
+    finalize(outcome.raw, outcome.storedExit, outcome.artifactBytes);
+  } catch {
+    try {
+      finalize(rawResult(request, "unknown", false, emptyReport("companion bridge: internal error")), 1);
+    } catch {
+      exitWith(STDERR_FD, `${MSG_INTERNAL}\n`, EXIT_INTERNAL);
+    }
+  }
+  try {
+    if (controlStream !== null) controlStream.destroy();
+    journal.close();
+  } catch {
+    // Diagnostics only after a finalized line.
+  }
+  process.exit(EXIT_OK);
+}
+
+const invokedAsCli = (() => {
+  try {
+    return process.argv[1] === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
+})();
+
+if (invokedAsCli) {
+  main().catch(() => {
+    try {
+      writeSync(2, `${MSG_INTERNAL}\n`);
+    } catch {
+      // Best effort.
+    }
+    process.exit(EXIT_INTERNAL);
+  });
+}

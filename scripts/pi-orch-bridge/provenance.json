@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "pinnedAt": "2026-10-25",
+  "role": "sealed pi-orch bridge candidate; not production-enabled",
+  "candidateSource": {
+    "root": "/home/molmot/companion_harness/.c12-calendar/delivery-c22/.all-plan-progress/pi-orch-work",
+    "head": "426f9c7a0d91857875b5e777655e2a7341cf1d23",
+    "worktreeModified": true,
+    "files": {
+      "scripts/companion-bridge.mjs": "a836802225194de7ea48010d6aecfaf4aa44f708078d577f83e6f5646bd08b5c",
+      "scripts/companion-capsule.mjs": "98e87c0917214f1c36276bc981c06f247b7f9597775aa60e26c4086d88d4ee26",
+      ".pi/extensions/opencode-orchestrator/companion-protocol.ts": "ff7c4148410a31bbc75657ca7e62c2b99582404252d7e57ae603b353931b4043",
+      ".pi/extensions/opencode-orchestrator/companion-journal.ts": "53f88160cd9fb6cb9414d45ff050ff242a8a02264b12406e736823aba0d8b3eb",
+      ".pi/extensions/opencode-orchestrator/capsule.ts": "d90f6a86fdbff7f7b998bf87dd46cc1d5a6690f9deac50c18f81b186831a99ec",
+      ".pi/extensions/opencode-orchestrator/capsule-guest.mjs": "089e762e859fe098ecb9f5d3c1daeb0758f6c159d1cd3ec3df4be831ffd3ee55",
+      ".pi/extensions/opencode-orchestrator/capsule-check-init.mjs": "433c9959f8410965ac821f944145fa3ca15e2fcb50438ada7753dd562b9f6115"
+    },
+    "note": "The staged bridge reimplements the reviewed wire/journal contract without importing the mutable .c12 tree. The above digests are provenance pins only; they are not runtime dependencies."
+  },
+  "installedLauncher": {
+    "path": "/home/molmot/.local/bin/pi-orch",
+    "realpath": "/home/molmot/.local/lib/node-v24.12.0-linux-x64/lib/node_modules/pi-codex-opencode-orchestrator/scripts/pi-orch.mjs",
+    "sha256": "59e627e2ceca6ff48939d49ab12a089a94fff6b3b96a2838622f08efab98b5bc",
+    "version": "0.1.0",
+    "ompVersion": "18.12.1",
+    "note": "The installed launcher is NOT the bridge and is not used by the sealed bridge; it is recorded to keep installed provenance separate."
+  },
+  "runtimePins": {
+    "node": "24.12.0",
+    "pnpm": "11.25.0",
+    "vitest": "3.2.4",
+    "typescript": "5.9.3",
+    "better-sqlite3": "13.0.3"
+  },
+  "snapshot": {
+    "module": "packages/kernel/src/autonomous_workspace.ts",
+    "pristineSnapshotRoot": "/home/molmot/companion_harness/.stage-autonomous-dispatch/pristine/snapshot",
+    "manifestDigest": "f07d08c766648320f3e65cca4f459cf44a9238a3c2458a0d65166d0a25a6fb97",
+    "note": "pristine/snapshot is retained for a later reviewed deployment patch; it is never exposed to a guest.",
+    "sourceRoot": "/home/molmot/companion_master",
+    "fileCount": 601,
+    "totalBytes": 11048153,
+    "migrationHead": "0029_model_calls_created_index.sql",
+    "journalVersion": 8
+  }
+}

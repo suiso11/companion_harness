@@ -3330,6 +3330,20 @@ function evidenceForTurn(turn: Turn): {
     {/await}
   {/if}
 
+  <!-- Standing-policy auto-dispatch stays bound to the ACTUAL chat session.
+       It is a separate lazy chunk so the base chat entry keeps its bundle
+       budget, and it hides itself when the server config returns 404. The
+       panel never authorizes a plan or resumes the global control. -->
+  {#if sessionId !== null}
+    {#await import("./AutodispatchPanel.svelte") then module}
+      <svelte:component this={module.default} {sessionId} />
+    {:catch}
+      <p class="autodispatch-load-error" role="status">
+        自動ディスパッチを読み込めませんでした。再読み込みしてください
+      </p>
+    {/await}
+  {/if}
+
   {#if children}
     <div class="feature-panel-slot">
       {@render children()}

@@ -752,6 +752,44 @@ export {
   localTimeZone,
 } from "./temporal_format.js";
 export type { TrustedObservation } from "./trial_authority.js";
+export type {
+  AuthorizeWithinPolicyOptions,
+  AutodispatchLimits,
+  CreateStandingPolicyInput,
+  DispatchExecutionStatus,
+  DispatchExecutionView,
+  DispatchMaterializationSummary,
+  DispatchPlanContent,
+  DispatchPlanStatus,
+  DispatchPlanView,
+  IntentHistory,
+  IntentHistoryEntry,
+  IntentKind,
+  IntentQuote,
+  PlanIntent,
+  PolicyCaps,
+  StandingPolicyStatus,
+  StandingPolicyView,
+} from "./autodispatch.js";
+export {
+  AUTODISPATCH_SOURCE,
+  authorizeWithinPolicy,
+  createDispatchPlan,
+  createStandingPolicy,
+  DEFAULT_POLICY_CAPS,
+  isValidPolicyExpiry,
+  listDispatchExecutions,
+  listDispatchPlans,
+  listStandingPolicies,
+  readDispatchExecution,
+  readDispatchMaterialization,
+  readDispatchPlan,
+  readIntentHistory,
+  readRunSessionId,
+  readStandingPolicy,
+  revokeStandingPolicy,
+  validatePlanIntent,
+} from "./autodispatch.js";
 export {
   activeAliasFence,
   approveTrialProposal,
@@ -779,6 +817,7 @@ export {
   registerWorkerBoot,
   revokeAllClaimedForStop,
   stageTrialProposal,
+  derivePolicyTrialGrant,
   wireModeForReadOnly,
 } from "./trial_authority.js";
 export type {

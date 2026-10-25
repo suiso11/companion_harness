@@ -2195,6 +2195,141 @@ describe("trial_runner", () => {
     }
   });
 
+  it("singleflight: reentrant runNext during an async materialization resolver does not double-claim", async () => {
+    const { handle, repo, sessionId } = await makeKernel();
+    try {
+      const { executionId } = queueGrant(repo, sessionId, "b1", "ws");
+      let resolverCalls = 0;
+      // Explicit function type: the resolver is assigned synchronously in the
+      // Promise executor, but a nullable union narrows to never at the later
+      // call site (TS2349). A no-op default keeps the callable type without
+      // an `any` cast; the wait loop below only proceeds after assignment.
+      let release: (value: { kind: "manual" }) => void = () => {};
+      const pending = new Promise<{ kind: "manual" }>((resolve) => {
+        release = resolve;
+      });
+      const originalClaim = repo.claimTrial.bind(repo);
+      let claims = 0;
+      (repo as unknown as { claimTrial: typeof repo.claimTrial }).claimTrial = ((
+        ...args: Parameters<typeof repo.claimTrial>
+      ) => {
+        claims += 1;
+        return originalClaim(...args);
+      }) as typeof repo.claimTrial;
+
+      const exited = { current: false };
+      const identity = {
+        pid: 5511,
+        bootId: "boot-singleflight",
+        processStartTicks: "901",
+      };
+      const { spawnImpl, state } = createFakeSpawn();
+      const spawnProxy = ((cmd: string, args: string[], opts: unknown) => {
+        const child = (
+          spawnImpl as unknown as (
+            c: string,
+            a: string[],
+            o: unknown,
+          ) => FakeChild
+        )(cmd, args, opts);
+        child.pid = identity.pid;
+        const origEmit = child.emit.bind(child);
+        child.emit = ((event: string, ...rest: unknown[]) => {
+          if (event === "exit") exited.current = true;
+          return (origEmit as (...a: unknown[]) => boolean)(event, ...rest);
+        }) as FakeChild["emit"];
+        return child;
+      }) as unknown as TrialRunnerSpawn;
+      const observer = createObserver({
+        scopeBeforeExit: "active",
+        scopeAfterExit: "gone",
+        identity,
+        exited: () => exited.current,
+      });
+      const { factory } = createFakeRelayFactory();
+      const { logger } = createCollectingLogger("debug");
+      const dir = mkdtempSync(join(tmpdir(), "trial-run-"));
+      const runner = new TrialRunner({
+        repo,
+        config: {
+          ...runnerConfigBase("ws", writeTemplate(dir), join(dir, "runs")),
+          resolveMaterialization: async () => {
+            resolverCalls += 1;
+            return pending;
+          },
+        },
+        isForegroundBusy: () => false,
+        logger,
+        observer,
+        createRelay: factory,
+        spawnImpl: spawnProxy,
+        clock: makeClock(),
+      });
+
+      const first = runner.runNext();
+      // Wait until the first pick is parked inside the awaited resolver.
+      while (resolverCalls === 0) await new Promise((r) => setTimeout(r, 1));
+      const second = await runner.runNext();
+      expect(second).toEqual({ ran: false, outcome: "active" });
+      expect(claims).toBe(0);
+      expect(state.calls).toBe(0);
+
+      release({ kind: "manual" });
+      const out = await first;
+      expect(out).toMatchObject({ ran: true, executionId });
+      expect(claims).toBe(1);
+      expect(state.calls).toBe(1);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("singleflight: resolver throw releases the gate for the next pick", async () => {
+    const { handle, repo, sessionId } = await makeKernel();
+    try {
+      queueGrant(repo, sessionId, "b1", "ws");
+      let fail = true;
+      let resolverCalls = 0;
+      const { logger } = createCollectingLogger("debug");
+      const dir = mkdtempSync(join(tmpdir(), "trial-run-"));
+      const runner = new TrialRunner({
+        repo,
+        config: {
+          ...runnerConfigBase("ws", writeTemplate(dir), join(dir, "runs")),
+          resolveMaterialization: async () => {
+            resolverCalls += 1;
+            if (fail) throw new Error("resolver boom");
+            return { kind: "manual" };
+          },
+        },
+        isForegroundBusy: () => false,
+        logger,
+        observer: createObserver({
+          scopeBeforeExit: "active",
+          scopeAfterExit: "gone",
+          identity: { pid: 1, bootId: "b", processStartTicks: "1" },
+          exited: () => false,
+        }),
+        createRelay: createFakeRelayFactory().factory,
+        spawnImpl: (() => {
+          throw new Error("spawn must not run while resolver fails");
+        }) as unknown as TrialRunnerSpawn,
+        clock: makeClock(),
+      });
+      const failed = await runner.runNext();
+      expect(failed.ran).toBe(true);
+      expect(resolverCalls).toBe(1);
+      // Latch was released: a fresh pick consults the resolver again and
+      // reaches the claim/spawn path instead of returning active.
+      const next = runner.runNext();
+      const observed = await next;
+      expect(resolverCalls).toBe(2);
+      expect(observed.outcome).not.toBe("active");
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
   it("synchronous spawn failure settles the claimed grant instead of leaving it claimed", async () => {
     const { handle, repo, sessionId } = await makeKernel();
     try {

@@ -5245,3 +5245,230 @@ COMPANION_E2E_AGORA=1 npx playwright test --config=playwright.config.ts
 `e2e/agora` は clean な標準 `scripts/build-ui.mjs` build を要求し、AGORA へ
 実送信しない local fixture で 4 シナリオ (list / approve / reject / send
 denied/stale/unknown 系) を検証する。外部への POST は行わない。
+
+## Sealed pi-orch bridge candidate (2026-10-25; NOT production-enabled)
+
+The staged bridge is `.stage-autonomous-dispatch/scripts/pi-orch-bridge/`.
+Entry point:
+
+```sh
+node scripts/pi-orch-bridge/companion-bridge.mjs --config <absolute-json>
+```
+
+It keeps the reviewed TrialRunner contract: one JSONLF request on stdin,
+fd3 FIFO/socket cancellation, exactly one JSONLF result on stdout after a
+reservation, and the unchanged wire request/result fields (`version`,
+`executionId`, `taskHash`, `configFingerprint`, `sourceRevision`,
+`workspaceAlias`, `mode`, `purpose`, `objective`, `relevantPaths`,
+`acceptance`, `requiredChecks`, `constraints`, `budget`,
+`externalModelConsent`). `taskHash` is recomputed from the canonical request.
+`--describe` is side-effect free.
+
+Operator config is strict v2 (`stateDir`, `storage`, `active`, `sealed`,
+`profile`). `sealed` names `rootDir`, `snapshotRoot`, `manifestPath`,
+`manifestDigest`, `pristineSnapshotRoot`, `sourceRootOriginal`. `profile`
+contains `executionBackend` (`confined`|`offline-fixture`), the pinned
+`executor`/`checks` executables with content digests, `runtime` realpaths,
+`model` route/consent/UDS, conservative limits, `allowedPaths`,
+`scratchPaths`, and a separate `dependencies` closure (root, manifest,
+digest, read-only mounts). `active.configFingerprint` is checked against the
+ACTUAL effective profile (executor/check/runtime file hashes + sealed manifest
+digest + frozen fields), never trusted as a declaration. `sourceRevision` is
+derived from the sealed snapshot manifest digest; the request must match it.
+The original source root and `.git` are never mounted or bound.
+
+Launch semantics: verify the sealed snapshot before launch and again after
+checks; copy `snapshotRoot` to a private 0700 work dir outside the original
+source; verify the dependency closure (missing/tampered => `blocked:
+dependencies`, never a skipped check); run the fixed executor and then each
+required fixed check. `done` + `verified: true` requires every required check
+to exit with its configured code and stdout matcher. Candidate changes are
+validated against `request.relevantPaths`; deletions/modifications/additions
+outside scope, symlinks, and forbidden paths fail. Artifact metadata is
+written to `<stateDir>/runs/<executionId>/artifact.json` and retained in the
+SQLite journal (sha256/bytes); it contains only change metadata, not source
+bytes. Duplicate finals replay verbatim; inflight duplicates exit 2 without
+resend; an unknown final is durable.
+
+`confined` uses `systemd-run --user --scope` + `bwrap` with a read-only
+dependency closure, private `/work`, no host `$HOME`, a dummy bearer token,
+and only the relay UDS. If user systemd or the relay socket is unavailable the
+bridge returns an explicit `containment unavailable` error; it never falls
+back to a host process. `offline-fixture` is test-only and is NOT containment.
+Numeric limits in the staged profile are test/transport maxima, not activated
+production policy. Model-call/output-token caps are passed to the guest and
+must be enforced by the trusted host relay; they are not guest-enforced.
+
+Provenance is pinned in `scripts/pi-orch-bridge/provenance.json` (candidate
+HEAD `426f9c7`, source file digests, installed launcher `pi-orch` 0.1.0 /
+OMP 18.12.1, Node 24.12.0, pnpm 11.25.0, Vitest 3.2.4, tsc 5.9.3,
+better-sqlite3 13.0.3). The mutable `.c12` tree is not a runtime dependency.
+
+Actual 2026-10-25 smoke limits: the focused bridge suite passed 12/12 and
+staged `pnpm typecheck` passed. A real `bwrap` run proved the sealed snapshot
+is readable at `/input`, `/input` is read-only, and the original host source
+and host repository path are unreadable from the guest. Full confined launch
+was NOT proven: this worker has no user systemd bus (`DBUS_SESSION_BUS_ADDRESS`
+and `XDG_RUNTIME_DIR` unset), so the bridge correctly returned a containment
+blocker. No local model relay was available and the installed pi-orch
+entrypoint was only version-probed, not run. No source host apply, write,
+restart, deploy, or public post was performed.
+
+## Conversation -> plan -> standing-policy auto dispatch (schema 30/31)
+
+This slice is **default off**. Live production is unchanged and no policy
+exists until an authenticated human creates one. Unset config means HTTP 404
+and a hidden panel; nothing is enabled or applied by this delivery.
+
+- Env: `COMPANION_AUTODISPATCH_JSON` (strict JSON; unset = disabled). It
+  requires `COMPANION_AUTONOMY_JSON` (trial runner) and matching alias,
+  bridge paths, mandatory checks, and caps. Fields:
+  `enabled`, `workspaceAlias`, `sourceRoot`, `operations`
+  (`investigate`/`implement`), `readScopes`, `writeScopes`, `checks`,
+  `caps` (`timeoutMs`, `maxOutputBytes`, `maxModelCalls`,
+  `maxOutputTokens`, `perCallTimeoutMs`, `maxRequestBytes`,
+  `maxResponseBytes`, `maxConcurrent`, `jobsPerDay`,
+  `concurrentExecutions`), `dependencyRoot` (null = dispatch blocked as
+  `autodispatch_dependencies_missing`), `bridgeScriptPath`,
+  `bridgeConfigTemplatePath`, and optional `materialization`. Unknown keys,
+  bad paths, an `implement` operation without write scopes, checks that do
+  not equal the trial mandatory checks, or caps above the trial runner caps
+  fail config parsing (fail closed). Paths/checks/profile/bridge come only
+  from this operator config; a request cannot override them. Caps are
+  operator UPPER BOUNDS: a policy may choose smaller values and the
+  materializer applies the intersection with `maxDurationMs` and observed
+  limits. `externalModelConsent` is not an autodispatch config field; the
+  host derives it from the operation as described below.
+- `materialization` (strict): `stateDir` (absolute, outside `sourceRoot`),
+  `executor` (`kind` `fixed`|`pi-orch-guest`|`real-pi`, absolute executable,
+  args), `checks` (one command per configured check id, no extra keys),
+  `runtime` (`nodeRealpath` required; optional `ompRealpath`,
+  `bwrapRealpath`, `systemdRunRealpath`, `systemctlRealpath`,
+  `piOrchLauncherRealpath`, `piOrchShellRealpath`, `piOrchConfigRealpath`,
+  `piOrchExtensionRealpath`, `piOrchLockRealpath`), optional
+  `dependencySourceNodeModules`, `allowedTopLevelFiles` (top-level names,
+  no separators), `maxDurationMs`, `modelRoute` (`local`|`synthetic-local`),
+  and `executionBackend` (`confined`|`offline-fixture`; the latter is
+  test-only, not containment). `materialization: null` means auto-dispatch
+  can never issue a real grant (honest block). The model relay route and
+  model identity are operator configuration; no model name is hardcoded in
+  this feature. `externalModelConsent` is host-derived from the operation
+  (read-only grants do not claim it; write grants keep the existing consent
+  decision) and must match the frozen local route, so a request cannot
+  fabricate consent.
+- Dependency closure: `dependencyRoot` is not a free-form directory. It
+  must be the exact root produced by the bridge's real
+  `prepareDependencyClosure`, with sibling `<root>.closure-manifest.json`;
+  the host re-hashes the closure with the bridge's own
+  `verifyDependencyClosure`, requires a native compiled `better-sqlite3`
+  entry, and checks the pinned Node ABI. A missing/tampered manifest,
+  escaping path, wrong native digest, or ABI mismatch blocks dispatch as
+  `dependency_unavailable`; nothing is installed or downloaded. If
+  `materialization.dependencySourceNodeModules` is configured, a fresh
+  private depot is prepared per execution by the same
+  `prepareDependencyClosure` function. A plain empty directory or fabricated
+  manifest is not accepted.
+- Persistent ledger (migrations `0030_autodispatch.sql` and
+  `0031_autodispatch_materialization.sql`):
+  `autodispatch_policies` (version/status/expiry/revoke/scopes/caps/
+  parent human purpose), `autodispatch_plans` (revision, exact host
+  `plan_hash`, accepted turn/run anchors, status), and
+  `autodispatch_executions` (UNIQUE dedup key + one-use trial grant link,
+  immutable `materialization_json`/`materialization_digest`). There is no
+  new scheduler, queue, engine, or learning store.
+- Intake runs at the existing durable `completeRun` boundary, uses bounded
+  same-session selected `user_text` only, holds the shared
+  `BackgroundResourceGate`, and asks the model for strict JSON intent
+  (`execute`/`discuss`/`unclear`) plus a readable plan. The host validates
+  every quote against exact turn text, requires the selected completed
+  latest run, refuses negation, and rejects stale turns.
+- `authorizeWithinPolicy` is host-only. It rechecks policy status/version/
+  expiry, `autonomy_control` pause, operator alias/checks/operations/caps,
+  quota (atomic reservation), concurrency, and freshness, then derives a
+  bounded `kind=task` child of the human policy purpose and inserts a
+  frozen proposal + one queued grant inside the EXISTING TrialAuthority
+  (no human HTTP approve click, no CAS/one-use/fence/claim/permit bypass).
+  The existing TrialRunner poll consumes the grant. Results remain
+  `verified` only through the existing checks/artifact path; nothing is
+  host-applied, deployed, or auto-completed.
+- HTTP (same-origin/authenticated; session-scoped):
+  `GET /api/sessions/:id/autodispatch` (state/defaults),
+  `GET|POST /api/sessions/:id/autodispatch/policies`,
+  `GET .../policies/:policyId`,
+  `POST .../policies/:policyId/revoke`,
+  `POST .../stop`,
+  `GET|POST .../plans`, `GET .../plans/:planId`,
+  `POST .../plans/:planId/authorize` (strict `{}` body),
+  `GET .../executions`, `GET .../executions/:executionId`.
+  No key, raw config path, or original source root is returned.
+- UI (chat shell, lazy chunk): `AutodispatchPanel.svelte` on the actual
+  session. It shows the fixed candidate target, actual alias/scopes/checks/
+  caps/expiry, global pause plus `dependencyReady`, policies, plans and
+  executions. A human can create one standing policy only from the latest
+  completed `user_text` turn (after confirming the disclosed scope/caps),
+  revoke one policy, or stop all active policies. There is no per-plan
+  approve control and no browser execute/apply endpoint. Enable never
+  resumes the separate global autonomy control; resume stays on the
+  explicit 「タスク・目的」 surface. Plan/execution state refreshes on
+  `ch:run-settled`, bounded active polling while the document is visible,
+  and a manual refresh. Candidate trial details show required checks and
+  the fixed host-check/observed outcome; the API exposes no candidate
+  artifact body, so the panel says so rather than claiming an apply. Worker
+  status is labelled guest-reported/unattested and is never treated as
+  host evidence or as permission/adoption/trust input. A 404 config hides
+  the panel.
+- Stop/disable: `POST /api/sessions/:id/autodispatch/stop` revokes active
+  standing policies and interrupts intake; it does not resume the separate
+  global autonomy control (resume explicitly on 「タスク・目的」) and does
+  not force-kill an already-running trial (the existing TrialRunner stop
+  boundary applies). Unsetting `COMPANION_AUTODISPATCH_JSON` disables the
+  routes/panel on restart; existing ledger rows are not auto-applied or
+  replayed.
+- Unknown worker slots: a claimed slot whose result is unknown is retained
+  fail-closed. There is NO TTL force-clear. `recoverOnBoot` rechecks the
+  exact scope unit (executionId + taskHash derived) plus PID/boot identity
+  and settles only when both are gone; if either is alive or unknown the
+  `recover-unsettled-worker` fence remains and no speculative kill/retry
+  happens.
+- Honest gaps: a real Pi guest/dependency adapter remains operator-supplied;
+  this delivery does not attest guest worker status or prove end-to-end
+  real-model execution. Missing `dependencyRoot`, a missing bridge, or an
+  unhealthy runtime yields a blocked/denied ledger row, never a fake
+  check/done. No production enablement, restart, deploy, or source apply
+  was performed here. Activation requires an operator-private config with
+  the real paths/digests above plus explicit deployment approval.
+
+### Auto-dispatch verification and activation prerequisites
+
+The permanent tests and acceptance fixture are staged in the repository;
+they need no production enablement. From a staged checkout with installed
+dependencies, the existing commands are:
+
+```sh
+pnpm --filter @companion/kernel test -- autodispatch.test.ts autonomous_workspace.test.ts pi_orch_bridge.test.ts
+pnpm --filter @companion/server test -- autodispatch_service.test.ts autodispatch_materializer.test.ts autodispatch_http.test.ts
+COMPANION_E2E_AUTODISPATCH=1 pnpm --filter @companion/server test:e2e
+pnpm typecheck
+```
+
+The browser command builds the production UI through `scripts/build-ui.mjs`
+and launches the real autodispatch fixture; `preflight.mjs` terminates only
+a prior fixture whose argv and cwd match this exact fixture. The focused
+staged evidence was 2/2 real-browser scenarios plus 41 kernel, 37 observer,
+and 19 bridge tests. Those results do not attest a guest worker or authorize
+deployment.
+
+Read-only deployment preflight (no apply, env, DB, service, timer, or lock
+mutation):
+
+```sh
+node scripts/deploy/check-autonomous-dispatch.mjs --check
+node scripts/deploy/check-autonomous-dispatch.mjs --check --target /home/molmot/companion_master
+```
+
+Activation still requires an operator-private `COMPANION_AUTODISPATCH_JSON`
+(and `COMPANION_AUTONOMY_JSON`) that names the real sealed snapshot, runtime
+realpaths, dependency depot, checks, caps, bridge paths, and model consent,
+plus explicit deployment approval. The patch and manifest in this repository
+are candidate artifacts only; they are not applied and the feature remains
+disabled.

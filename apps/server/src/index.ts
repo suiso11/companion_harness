@@ -8,6 +8,16 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export type {
+  AutodispatchPlanner,
+  AutodispatchPlanProposal,
+  AutodispatchService,
+  AutodispatchServiceDeps,
+} from "./autodispatch_service.js";
+export {
+  createAutodispatchService,
+  createModelAutodispatchPlanner,
+} from "./autodispatch_service.js";
+export type {
   CreateAppDeps,
   CreatedServerApp,
   EnginePort,
@@ -27,6 +37,7 @@ export {
 } from "./bootstrap.js";
 export type {
   AgoraConfig,
+  AutodispatchConfig,
   ExecutionRecordsConfig,
   LearningConfig,
   MemoryConfig,
@@ -52,6 +63,7 @@ export {
   MAX_EXECUTION_RECORDS_RETENTION_DAYS,
   parseAgoraApiKey,
   parseAgoraConfig,
+  parseAutodispatchConfig,
   parseExecutionRecordsConfig,
   parseLearningConfig,
   parseMemoryConfig,
