@@ -222,7 +222,10 @@ test("revocation flags the handoff; dispatch blocked, cancel kept, reaffirm clea
 // newest 50-item page) survives the full dispatch→report lifecycle WITHOUT
 // a stale-version 409. The panel applies each 200-returned view to the map
 // immediately and the refresh re-reads the off-page row, so the second
-// human commit always carries the version the server holds.
+// human commit always carries the version the server holds. The fixture
+// starts the scenario from a FRESH panel mount (after all 52 records are
+// seeded) because the panel's newest-page cache is intentionally append-
+// only, so only a new instance can guarantee the target is off-page.
 test("older-page handoff dispatches→reports without a stale-version 409", async ({
   page,
 }) => {
@@ -253,9 +256,34 @@ test("older-page handoff dispatches→reports without a stale-version 409", asyn
     expect(filler.status).toBe(201);
   }
 
-  // Refresh loads the newest 50 page; the target is NOT on it — the row
-  // only appears after「古い履歴を読み込む」merges the older page.
-  await page.locator("#handoff-refresh").click();
+  // The live panel merged every seeded row into its instance cache while
+  // the fixtures were being created: a boot/background refresh during
+  // seeding can load the target while it is still on the newest page and
+  // retain it after it falls onto the older page. `refresh()` deliberately
+  // NEVER clears that map (older history and an open drawer must survive),
+  // so a manual refresh cannot hide the target. Start the pagination
+  // scenario from a FRESH panel instance (reload clears the cache) and wait
+  // for that boot read of the newest page before asserting absence.
+  const freshNewestPage = page.waitForResponse(
+    (response) => {
+      if (response.request().method() !== "GET") return false;
+      const url = new URL(response.url());
+      return (
+        url.pathname === `/api/sessions/${sessionId}/handoffs` &&
+        url.searchParams.get("limit") === "50" &&
+        url.searchParams.get("cursor") === null
+      );
+    },
+    { timeout: 15_000 },
+  );
+  await page.reload();
+  await page.locator("#handoff-create").waitFor({ timeout: 15_000 });
+  expect((await freshNewestPage).status()).toBe(200);
+
+  // The fresh boot GET loads only the newest 50 page; the target is NOT on
+  // it — the row only appears after「古い履歴を読み込む」merges the older
+  // page. `#handoff-more` becoming visible proves the boot page (and its
+  // cursor/hasMore) was applied, so this is a deterministic sync point.
   await expect(page.locator("#handoff-more")).toBeVisible({
     timeout: 15_000,
   });
