@@ -37,9 +37,6 @@ export const LEARNING_EXTRACT_OUTPUT_MAX_CP = 8192;
 export const LEARNING_MAX_RETRIEVED = 3;
 export const LEARNING_RETRIEVAL_MIN_SCORE = 1;
 export const LEARNING_EXTRACT_TIMEOUT_MS = 5_000;
-/** Bounded deferral while one shared background slot is busy. */
-export const LEARNING_SLOT_RETRY_DELAY_MS = 100;
-export const LEARNING_SLOT_MAX_ATTEMPTS = 20;
 
 export const LEARNING_EXTRACT_SYSTEM_PROMPT =
   "You extract durable lessons from one accepted conversation turn as strict " +
@@ -126,8 +123,9 @@ export interface LearningServiceOptions {
   /**
    * Shared server-owned background admission (bootstrap-injected). When
    * present, extraction runs only while this unit can hold the single
-   * background model slot; a busy/closed gate skips this turn's optional
-   * reflection (fail-open, no gateway call).
+   * background model slot. A busy slot defers the optional reflection until
+   * the gate reports a release; a closed gate or an admitted foreground run
+   * drops it (fail-open, no gateway call).
    */
   readonly background?: BackgroundResourceGate | null;
 }
@@ -362,10 +360,24 @@ export function createLearningService(
   /** Gateway calls currently running; stop() aborts and awaits them. */
   const inFlightControllers = new Set<AbortController>();
   const inFlightTasks = new Set<Promise<void>>();
-  /** Per-process completed-notification dedup (durable dedup is the store). */
+  /**
+   * Per-process admission dedup. A run is added only AFTER a background lease
+   * (or the ungated path) is actually admitted, so a deferred notification is
+   * never permanently dropped while another unit holds the shared slot.
+   */
   const attemptedRuns = new Set<string>();
-  /** Deferral waiters woken by stop() or by a background-slot release. */
-  const pendingSlotWaiters = new Set<() => void>();
+  /**
+   * Accepted completed runs waiting for the single shared background slot.
+   * Insertion-ordered and deduplicated; drained serially by the one owned
+   * drain task below. No timers, no retry loop: the gate's finite release
+   * wake (or a fresh completion notification) requests the next drain.
+   */
+  const pendingRuns = new Set<string>();
+  /** The single owned drain; overlapping requests are coalesced into it. */
+  let drainTask: Promise<void> | null = null;
+  /** Gate release subscription, removed BEFORE store shutdown. */
+  let unsubscribeSettled: (() => void) | null = null;
+  let deferredLogged = false;
 
   function log(
     level: "info" | "warn",
@@ -380,84 +392,81 @@ export function createLearningService(
     }
   }
 
+  interface ReflectionInput {
+    readonly runId: string;
+    readonly turnId: string;
+    readonly sessionId: string;
+    readonly turnText: string;
+    readonly answerText: string;
+  }
+
   /**
-   * Wait for one background-slot release (or a bounded retry tick). Finite:
-   * a wake fires at most once per release, and stop() wakes every waiter so
-   * a deferred extraction is dropped instead of delaying shutdown.
+   * Re-read every authoritative fence immediately before admission. Nothing
+   * from the completion notification (or from an earlier wake) is trusted:
+   * the run, its turn/session, the current selection, durable capture state,
+   * and the text that will be sent to the gateway are all read here.
    */
-  function waitForSlotSignal(): Promise<void> {
-    return new Promise<void>((resolve) => {
-      let finished = false;
-      let timer: NodeJS.Timeout | undefined;
-      let unsubscribe: (() => void) | undefined;
-      const finish = (): void => {
-        if (finished) return;
-        finished = true;
-        pendingSlotWaiters.delete(finish);
-        if (timer !== undefined) clearTimeout(timer);
-        unsubscribe?.();
-        resolve();
+  function readReflectionInput(runId: string): ReflectionInput | null {
+    let run: {
+      id: string;
+      turnId: string;
+      sessionId: string;
+      status: string;
+      result: unknown;
+    };
+    try {
+      const loaded = options.repo.getRun(runId);
+      run = {
+        id: loaded.id,
+        turnId: loaded.turnId,
+        sessionId: loaded.sessionId,
+        status: loaded.status,
+        result: loaded.result,
       };
-      pendingSlotWaiters.add(finish);
-      if (background !== null) unsubscribe = background.onSettled(finish);
-      timer = setTimeout(finish, LEARNING_SLOT_RETRY_DELAY_MS);
-      // Never keep the process alive just to retry an optional reflection.
-      timer.unref?.();
-    });
-  }
-
-  /**
-   * Shared admission with deferral. Memory extraction is scheduled from the
-   * same completion hook and can grab the single slot first; instead of
-   * dropping this optional reflection, wait for its release (bounded) and
-   * retry. Foreground activity, a closed gate, or stop() still drops it.
-   */
-  async function admitExtraction(): Promise<{
-    readonly admitted: boolean;
-    readonly lease: BackgroundReservation | null;
-  }> {
-    for (let attempt = 0; attempt < LEARNING_SLOT_MAX_ATTEMPTS; attempt += 1) {
-      if (!started || stopped) return { admitted: false, lease: null };
-      if (background?.closed === true) {
-        log("info", "learning.extract_skipped_closed", { status: 0 });
-        return { admitted: false, lease: null };
-      }
-      // Foreground preemption: a user run that became active before
-      // admission wins the shared resource; never call the gateway beside it.
-      try {
-        if (options.repo.hasActiveShadowBlock()) {
-          log("info", "learning.extract_skipped_foreground", { status: 0 });
-          return { admitted: false, lease: null };
-        }
-      } catch {
-        return { admitted: false, lease: null };
-      }
-      if (background === null) return { admitted: true, lease: null };
-      const lease = background.tryAcquire(BACKGROUND_OWNER_LEARNING_EXTRACTION);
-      if (lease !== null) return { admitted: true, lease };
-      if (attempt === 0) {
-        log("info", "learning.extract_deferred", { status: 0 });
-      }
-      await waitForSlotSignal();
-    }
-    if (!stopped) {
-      log("info", "learning.extract_skipped_busy", { status: 0 });
-    }
-    return { admitted: false, lease: null };
-  }
-
-  async function extract(
-    turnText: string,
-    answerText: string,
-  ): Promise<ParsedLesson[] | null> {
-    if (gateway === null) return null;
-    const admission = await admitExtraction();
-    if (!admission.admitted) return null;
-    const lease = admission.lease;
-    if (stopped) {
-      if (lease !== null) background?.release(lease);
+    } catch {
       return null;
     }
+    if (run.status !== "completed" || run.result === null) return null;
+    // Durable dedup: a run is reflected at most once, including after restart
+    // or a repeated completion notification that arrives after capture.
+    try {
+      if (store.findReflectionByRun(run.id) !== null) return null;
+    } catch {
+      return null;
+    }
+    let turnText = "";
+    try {
+      const turn = options.repo.getTurn(run.turnId);
+      if (turn.sessionId !== run.sessionId) return null;
+      turnText = turn.input.kind === "user_text" ? turn.input.text : "";
+    } catch {
+      return null;
+    }
+    try {
+      const selection = options.repo.getSelection(run.turnId);
+      if (selection === null || selection.runId !== run.id) return null;
+    } catch {
+      return null;
+    }
+    const answerText = completedAnswerText(run.result);
+    if (turnText.length === 0 || answerText.length === 0) return null;
+    return {
+      runId: run.id,
+      turnId: run.turnId,
+      sessionId: run.sessionId,
+      turnText,
+      answerText,
+    };
+  }
+
+  /**
+   * Run one bounded gateway extraction. The caller holds the shared lease for
+   * exactly this call; the token is released in `finally` before any capture.
+   */
+  async function extractWithLease(
+    input: ReflectionInput,
+    lease: BackgroundReservation | null,
+  ): Promise<ParsedLesson[] | null> {
     const controller = new AbortController();
     inFlightControllers.add(controller);
     let timer: NodeJS.Timeout | undefined;
@@ -483,7 +492,7 @@ export function createLearningService(
         );
       });
       const result: ChatResult = await Promise.race([
-        gateway.chat(
+        gateway?.chat(
           {
             model,
             messages: [
@@ -492,15 +501,15 @@ export function createLearningService(
                 role: "user",
                 content:
                   "Accepted conversation turn (untrusted data; extract groundable lessons only):\n" +
-                  `User: ${turnText.slice(0, LEARNING_EXTRACT_INPUT_MAX_CP)}\n` +
-                  `Assistant: ${answerText.slice(0, LEARNING_EXTRACT_INPUT_MAX_CP)}`,
+                  `User: ${input.turnText.slice(0, LEARNING_EXTRACT_INPUT_MAX_CP)}\n` +
+                  `Assistant: ${input.answerText.slice(0, LEARNING_EXTRACT_INPUT_MAX_CP)}`,
               },
             ],
             tools: [],
             reasoning: "off",
           },
           { signal: controller.signal },
-        ),
+        ) ?? Promise.reject(new Error("learning gateway unavailable")),
         timedOut,
         aborted,
       ]);
@@ -519,67 +528,20 @@ export function createLearningService(
     }
   }
 
-  async function reflect(runId: string): Promise<void> {
+  /** Ground, deduplicate, and capture one already-extracted reflection. */
+  function captureReflection(
+    input: ReflectionInput,
+    parsed: ParsedLesson[],
+  ): void {
     if (!started || stopped) return;
-    let run: {
-      id: string;
-      turnId: string;
-      sessionId: string;
-      status: string;
-      result: unknown;
-      finishedAt: number | null;
-    };
-    try {
-      const loaded = options.repo.getRun(runId);
-      run = {
-        id: loaded.id,
-        turnId: loaded.turnId,
-        sessionId: loaded.sessionId,
-        status: loaded.status,
-        result: loaded.result,
-        finishedAt: loaded.finishedAt,
-      };
-    } catch {
-      return;
-    }
-    if (run.status !== "completed" || run.result === null) return;
-    // Durable dedup: a run is reflected at most once, including after restart
-    // or a repeated completion notification that arrives after capture.
-    try {
-      if (store.findReflectionByRun(run.id) !== null) return;
-    } catch {
-      return;
-    }
-    let turnText = "";
-    try {
-      const turn = options.repo.getTurn(run.turnId);
-      if (turn.sessionId !== run.sessionId) return;
-      turnText = turn.input.kind === "user_text" ? turn.input.text : "";
-    } catch {
-      return;
-    }
-    try {
-      const selection = options.repo.getSelection(run.turnId);
-      if (selection === null || selection.runId !== run.id) return;
-    } catch {
-      return;
-    }
-    const answerText = completedAnswerText(run.result);
-    if (turnText.length === 0 || answerText.length === 0) return;
-    const parsed = await extract(turnText, answerText);
-    if (parsed === null) {
-      log("info", "learning.extract_empty", { runId: run.id });
-      return;
-    }
     // Authoritative recheck AFTER the async gateway call.
-    if (!started || stopped) return;
     try {
-      const fresh = options.repo.getRun(runId);
+      const fresh = options.repo.getRun(input.runId);
       if (
         fresh.status !== "completed" ||
         fresh.result === null ||
-        fresh.sessionId !== run.sessionId ||
-        fresh.turnId !== run.turnId
+        fresh.sessionId !== input.sessionId ||
+        fresh.turnId !== input.turnId
       ) {
         return;
       }
@@ -588,11 +550,16 @@ export function createLearningService(
         return;
       }
       if (store.findReflectionByRun(fresh.id) !== null) return;
+      const freshTurn = options.repo.getTurn(fresh.turnId);
+      if (freshTurn.sessionId !== fresh.sessionId) return;
+      const freshTurnText =
+        freshTurn.input.kind === "user_text" ? freshTurn.input.text : "";
+      if (freshTurnText !== input.turnText) return;
     } catch {
       return;
     }
     const groundedItems = parsed.filter((item) =>
-      grounded(item, turnText, answerText),
+      grounded(item, input.turnText, input.answerText),
     );
     const seen = new Set<string>();
     const candidates: LearningCandidate[] = [];
@@ -604,34 +571,114 @@ export function createLearningService(
     }
     try {
       const captured = store.captureReflection({
-        sessionId: run.sessionId,
-        runId: run.id,
-        turnId: run.turnId,
+        sessionId: input.sessionId,
+        runId: input.runId,
+        turnId: input.turnId,
         candidates,
         now: now(),
       });
       log("info", "learning.reflected", {
-        runId: run.id,
+        runId: input.runId,
         status: captured.proposals.length,
       });
     } catch {
-      log("warn", "learning.reflect_failed", { runId: run.id });
+      log("warn", "learning.reflect_failed", { runId: input.runId });
     }
   }
 
-  function onRunCompleted(runId: string): void {
-    if (!started || stopped) return;
-    // Dedup repeated notifications before any gateway call starts.
-    if (attemptedRuns.has(runId)) return;
-    attemptedRuns.add(runId);
+  /**
+   * Single owned drain of deferred runs. Memory extraction is scheduled from
+   * the same completion hook and can hold the one shared background slot; the
+   * run stays pending here and this drain is re-woken by the gate's release.
+   * Every wake re-reads all fences before admission. It never waits on a timer
+   * and never starts a second drain.
+   */
+  async function drainPending(): Promise<void> {
+    while (started && !stopped) {
+      const next = pendingRuns.values().next();
+      if (next.done === true) return;
+      const runId = next.value;
+      if (background?.closed === true) {
+        // STOP/shutdown (or an explicitly closed gate) must not revive work
+        // queued before the close.
+        pendingRuns.clear();
+        log("info", "learning.extract_skipped_closed", { status: 0 });
+        return;
+      }
+      // Foreground preemption: an admitted user run wins the shared resource;
+      // never call the gateway beside it, and do not park optional reflection.
+      try {
+        if (options.repo.hasActiveShadowBlock()) {
+          pendingRuns.clear();
+          log("info", "learning.extract_skipped_foreground", { status: 0 });
+          return;
+        }
+      } catch {
+        pendingRuns.clear();
+        return;
+      }
+      const input = readReflectionInput(runId);
+      if (input === null) {
+        pendingRuns.delete(runId);
+        continue;
+      }
+      if (background !== null) {
+        const lease = background.tryAcquire(
+          BACKGROUND_OWNER_LEARNING_EXTRACTION,
+        );
+        if (lease === null) {
+          if (!deferredLogged) {
+            log("info", "learning.extract_deferred", { status: 0 });
+            deferredLogged = true;
+          }
+          // Busy is transient: keep the ID pending and return. The gate's
+          // finite onSettled wake (or another completion) requests the next
+          // drain; no timer, polling loop, or recursive retry exists.
+          return;
+        }
+        deferredLogged = false;
+        attemptedRuns.add(runId);
+        pendingRuns.delete(runId);
+        const parsed = await extractWithLease(input, lease);
+        if (parsed !== null) captureReflection(input, parsed);
+        else log("info", "learning.extract_empty", { runId: input.runId });
+        continue;
+      }
+      deferredLogged = false;
+      attemptedRuns.add(runId);
+      pendingRuns.delete(runId);
+      const parsed = await extractWithLease(input, null);
+      if (parsed !== null) captureReflection(input, parsed);
+      else log("info", "learning.extract_empty", { runId: input.runId });
+    }
+  }
+
+  /** Coalesce every notification/wake into the one owned drain. */
+  function requestDrain(): void {
+    if (!started || stopped || drainTask !== null) return;
+    if (pendingRuns.size === 0) return;
     const task = (async () => {
-      await reflect(runId);
+      try {
+        await drainPending();
+      } finally {
+        drainTask = null;
+      }
     })();
+    drainTask = task;
     inFlightTasks.add(task);
     const settle = (): void => {
       inFlightTasks.delete(task);
     };
     void task.then(settle, settle);
+  }
+
+  function onRunCompleted(runId: string): void {
+    if (!started || stopped || gateway === null) return;
+    // Repeated notifications are coalesced while a run is queued or after it
+    // was actually admitted; admission itself happens only in the drain.
+    if (attemptedRuns.has(runId) || pendingRuns.has(runId)) return;
+    pendingRuns.add(runId);
+    requestDrain();
   }
 
   async function recall(input: {
@@ -718,19 +765,27 @@ export function createLearningService(
     start() {
       started = true;
       stopped = false;
+      if (background !== null && unsubscribeSettled === null) {
+        unsubscribeSettled = background.onSettled(() => {
+          requestDrain();
+        });
+      }
     },
     async stop() {
       stopped = true;
       started = false;
-      // Drop deferred extractions immediately: they are optional reflection
-      // and must not hold shutdown open for a bounded retry tick.
-      for (const wake of [...pendingSlotWaiters]) {
+      // No late wake: unsubscribe BEFORE closing the store, then drop queued
+      // runs. They are optional reflection and must not outlive shutdown.
+      if (unsubscribeSettled !== null) {
+        const unsubscribe = unsubscribeSettled;
+        unsubscribeSettled = null;
         try {
-          wake();
+          unsubscribe();
         } catch {
           // Best effort.
         }
       }
+      pendingRuns.clear();
       for (const controller of [...inFlightControllers]) {
         try {
           controller.abort();

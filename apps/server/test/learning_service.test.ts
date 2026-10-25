@@ -15,7 +15,7 @@ import {
   openKernelDatabase,
 } from "@companion/kernel";
 import type { ModelGateway } from "@companion/model-local";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   BACKGROUND_OWNER_LEARNING_EXTRACTION,
   BACKGROUND_OWNER_MEMORY_EXTRACTION,
@@ -157,6 +157,11 @@ async function waitFor(
     }
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
+}
+
+/** Yield one macrotask so already-started async drains settle deterministically. */
+function flushTasks(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 const EXTRACTION = JSON.stringify({
@@ -303,50 +308,245 @@ describe("learning service extraction", () => {
     }
   });
 
-  it("defers extraction while memory holds the shared slot, then extracts after release", async () => {
-    // Memory's completion hook can grab the single model slot first. Learning
-    // must wait for that release (bounded) instead of dropping the turn.
-    const busyRepo = await openRepo();
-    const busyGate = createBackgroundResourceGate();
-    const held = busyGate.tryAcquire(BACKGROUND_OWNER_MEMORY_EXTRACTION);
-    expect(held).not.toBeNull();
-    const busy = gatewayReturning(EXTRACTION);
-    const deferred = makeService(busyRepo, busy.gateway, busyGate);
-    const deferredRun = completeRun(busyRepo, {
-      text: "Please use ISO dates when you change calendar events.",
-      answer: "Understood. I will use ISO dates.",
-    });
-    deferred.onRunCompleted(deferredRun.runId);
-    await new Promise((resolve) => setTimeout(resolve, 60));
-    expect(busy.calls).toHaveLength(0);
-    expect(deferred.store.listReflections()).toHaveLength(0);
-    busyGate.release(held as Exclude<typeof held, null>);
-    await waitFor(() => busy.calls.length === 1);
-    await waitFor(() => deferred.store.listReflections().length === 1);
-    const deferredAfter = busyGate.tryAcquire(
-      BACKGROUND_OWNER_LEARNING_EXTRACTION,
-    );
-    expect(deferredAfter).not.toBeNull();
-    if (deferredAfter !== null) busyGate.release(deferredAfter);
-    await deferred.stop();
+  it("retains an accepted turn while memory holds the slot beyond the old retry window", async () => {
+    // Regression: the merged implementation retried a busy slot for only
+    // 100ms x 20 (about 2s), then dropped the accepted turn even after the
+    // legitimate memory lease was released. Valid background work may hold
+    // the slot longer than that; only the gate can decide admission.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const repo = await openRepo();
+      const gate = createBackgroundResourceGate();
+      const held = gate.tryAcquire(BACKGROUND_OWNER_MEMORY_EXTRACTION);
+      expect(held).not.toBeNull();
+      const deferred = deferredGateway(EXTRACTION);
+      const service = makeService(repo, deferred.gateway, gate);
+      const run = completeRun(repo, {
+        text: "Please use ISO dates when you change calendar events.",
+        answer: "Understood. I will use ISO dates.",
+      });
+      service.onRunCompleted(run.runId);
+      // A duplicate while queued must coalesce with the same pending run.
+      service.onRunCompleted(run.runId);
+      await flushTasks();
+      expect(deferred.calls).toHaveLength(0);
+      expect(service.store.listReflections()).toHaveLength(0);
 
-    // Free gate: extraction runs under a learning lease and releases it, so a
-    // subsequent background unit can be admitted.
+      // Hold the legitimate memory lease for 2500ms: past the old bounded
+      // retry window, still below the extraction deadline. The accepted turn
+      // must stay pending without polling or a gateway call.
+      await vi.advanceTimersByTimeAsync(2500);
+      await flushTasks();
+      expect(deferred.calls).toHaveLength(0);
+      expect(service.store.listReflections()).toHaveLength(0);
+
+      gate.release(held as Exclude<typeof held, null>);
+      // The release wake starts the one owned drain; the turn is still valid.
+      expect(deferred.calls).toHaveLength(1);
+      // A duplicate after admission is also a no-op.
+      service.onRunCompleted(run.runId);
+      await flushTasks();
+      expect(deferred.calls).toHaveLength(1);
+
+      deferred.release();
+      await flushTasks();
+      expect(service.store.listReflections()).toHaveLength(1);
+      // The gateway lease was released before capture, so another background
+      // unit can be admitted immediately.
+      const after = gate.tryAcquire(BACKGROUND_OWNER_LEARNING_EXTRACTION);
+      expect(after).not.toBeNull();
+      if (after !== null) gate.release(after);
+      await service.stop();
+
+      // The reflection is durable across a fresh store handle.
+      const probe = createLearningStore({ path: service.store.path });
+      try {
+        expect(probe.listReflections()).toHaveLength(1);
+      } finally {
+        probe.close();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("re-reads selection on wake and never extracts a superseded run", async () => {
     const repo = await openRepo();
     const gate = createBackgroundResourceGate();
-    const free = gatewayReturning(EXTRACTION);
-    const service = makeService(repo, free.gateway, gate);
+    const held = gate.tryAcquire(BACKGROUND_OWNER_MEMORY_EXTRACTION);
+    expect(held).not.toBeNull();
+    const deferred = deferredGateway(EXTRACTION);
+    const service = makeService(repo, deferred.gateway, gate);
     const run = completeRun(repo, {
       text: "Please use ISO dates when you change calendar events.",
       answer: "Understood. I will use ISO dates.",
     });
     service.onRunCompleted(run.runId);
-    await waitFor(() => free.calls.length === 1);
-    await waitFor(() => service.store.listReflections().length === 1);
-    const after = gate.tryAcquire(BACKGROUND_OWNER_LEARNING_EXTRACTION);
-    expect(after).not.toBeNull();
-    expect(after?.owner).toBe(BACKGROUND_OWNER_LEARNING_EXTRACTION);
-    if (after !== null) gate.release(after);
+    await flushTasks();
+    expect(deferred.calls).toHaveLength(0);
+
+    // Supersede with a retry that completes and becomes the selected run
+    // BEFORE the deferred wake is released.
+    const retry = repo.postRetry(run.sessionId, run.turnId, {
+      key: randomUUID(),
+      now: T0 + 10,
+    });
+    repo.startRun(retry.body.run.id, { now: T0 + 11 });
+    repo.completeRun(
+      retry.body.run.id,
+      buildRunResultV2({
+        version: 1,
+        parts: [{ text: "Retry answer", citations: [] }],
+      }),
+      { now: T0 + 12 },
+    );
+
+    gate.release(held as Exclude<typeof held, null>);
+    await flushTasks();
+    expect(deferred.calls).toHaveLength(0);
+    expect(service.store.listReflections()).toHaveLength(0);
+    await service.stop();
+
+    const probe = createLearningStore({ path: service.store.path });
+    try {
+      expect(probe.listReflections()).toHaveLength(0);
+    } finally {
+      probe.close();
+    }
+  });
+
+  it("drops a queued reflection when the gate closes before release", async () => {
+    const repo = await openRepo();
+    const gate = createBackgroundResourceGate();
+    const held = gate.tryAcquire(BACKGROUND_OWNER_MEMORY_EXTRACTION);
+    expect(held).not.toBeNull();
+    const { gateway, calls } = gatewayReturning(EXTRACTION);
+    const service = makeService(repo, gateway, gate);
+    const run = completeRun(repo, {
+      text: "Please use ISO dates when you change calendar events.",
+      answer: "Understood. I will use ISO dates.",
+    });
+    service.onRunCompleted(run.runId);
+    await flushTasks();
+    expect(calls).toHaveLength(0);
+
+    gate.close();
+    gate.release(held as Exclude<typeof held, null>);
+    await flushTasks();
+    expect(calls).toHaveLength(0);
+    // Reopening must not revive the run that was queued before the close.
+    gate.reopen();
+    await flushTasks();
+    expect(calls).toHaveLength(0);
+    expect(service.store.listReflections()).toHaveLength(0);
+    await service.stop();
+  });
+
+  it("shutdown drops pending work without a late gateway call or DB touch", async () => {
+    const repo = await openRepo();
+    const gate = createBackgroundResourceGate();
+    const held = gate.tryAcquire(BACKGROUND_OWNER_MEMORY_EXTRACTION);
+    expect(held).not.toBeNull();
+    const { gateway, calls } = gatewayReturning(EXTRACTION);
+    const service = makeService(repo, gateway, gate);
+    const run = completeRun(repo, {
+      text: "Please use ISO dates when you change calendar events.",
+      answer: "Understood. I will use ISO dates.",
+    });
+    service.onRunCompleted(run.runId);
+    await flushTasks();
+    await service.stop();
+
+    // The wake was unsubscribed before store close, and the queued run was
+    // dropped without touching the closed store.
+    gate.release(held as Exclude<typeof held, null>);
+    await flushTasks();
+    expect(calls).toHaveLength(0);
+    const probe = createLearningStore({ path: service.store.path });
+    try {
+      expect(probe.listReflections()).toHaveLength(0);
+    } finally {
+      probe.close();
+    }
+  });
+
+  it("drains multiple queued runs serially with one model call at a time", async () => {
+    const repo = await openRepo();
+    const rawGate = createBackgroundResourceGate();
+    let acquireAttempts = 0;
+    const gate: BackgroundResourceGate = {
+      tryAcquire(owner) {
+        acquireAttempts += 1;
+        return rawGate.tryAcquire(owner);
+      },
+      release: (reservation) => rawGate.release(reservation),
+      close: () => rawGate.close(),
+      reopen: () => rawGate.reopen(),
+      get closed() {
+        return rawGate.closed;
+      },
+      onSettled: (wake) => rawGate.onSettled(wake),
+      shutdown: () => rawGate.shutdown(),
+    };
+    const held = rawGate.tryAcquire(BACKGROUND_OWNER_MEMORY_EXTRACTION);
+    expect(held).not.toBeNull();
+    let active = 0;
+    let maxActive = 0;
+    const calls: unknown[] = [];
+    const releases: Array<() => void> = [];
+    const gateway: ModelGateway = {
+      provider: "openai-compatible",
+      capabilities: { toolCalling: false },
+      baseUrl: "http://127.0.0.1:9",
+      chatUrl: "http://127.0.0.1:9/v1/chat/completions",
+      async chat(request) {
+        calls.push(request);
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise<void>((resolve) => {
+          releases.push(resolve);
+        });
+        active -= 1;
+        return { text: EXTRACTION, toolCalls: [], stopReason: "stop" };
+      },
+    };
+    const service = makeService(repo, gateway, gate);
+    const first = completeRun(repo, {
+      text: "Please use ISO dates when you change calendar events.",
+      answer: "Understood. I will use ISO dates.",
+    });
+    const second = completeRun(repo, {
+      text: "Please use ISO dates when you change calendar events.",
+      answer: "Understood. I will use ISO dates.",
+    });
+    service.onRunCompleted(first.runId);
+    service.onRunCompleted(second.runId);
+    // Duplicate notifications while both runs are still queued.
+    service.onRunCompleted(first.runId);
+    service.onRunCompleted(second.runId);
+    await flushTasks();
+    // One failed admission for the head of the queue, then no timer/poll spin
+    // while the foreign lease is still held.
+    const attemptsWhileBusy = acquireAttempts;
+    await flushTasks();
+    expect(acquireAttempts).toBe(attemptsWhileBusy);
+    expect(calls).toHaveLength(0);
+
+    rawGate.release(held as Exclude<typeof held, null>);
+    expect(calls).toHaveLength(1);
+    expect(active).toBe(1);
+    // The second run stays queued while the first model call is in flight.
+    await flushTasks();
+    expect(calls).toHaveLength(1);
+    releases[0]?.();
+    await flushTasks();
+    expect(calls).toHaveLength(2);
+    expect(maxActive).toBe(1);
+    releases[1]?.();
+    await flushTasks();
+    expect(maxActive).toBe(1);
+    expect(service.store.listReflections()).toHaveLength(2);
+    await service.stop();
   });
 
   it("does not learn from malformed output or an unavailable gateway", async () => {
