@@ -8,7 +8,7 @@
 //   cross-session turns do not;
 // - the approval survives a full server restart.
 // No live network and no remind/memory dependency.
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -174,29 +174,47 @@ interface CliResult {
   stderr: string;
 }
 
+// Async subprocess invocation keeps the in-process HTTP server and fetch
+// sockets live while the CLI runs; a synchronous spawn would block both and
+// race the keep-alive connection expiry on Windows.
 function invokeLearningCli(
   args: readonly string[],
   env: NodeJS.ProcessEnv,
-): CliResult {
-  const result = spawnSync(
-    process.execPath,
-    ["--import", "tsx", CLI_PATH, ...args],
-    {
-      cwd: SERVER_DIR,
-      env: { ...env, PATH: process.env.PATH ?? "" },
-      encoding: "utf8",
-      timeout: 30_000,
-    },
-  );
-  return {
-    status: result.status,
-    stdout: result.stdout ?? "",
-    stderr: result.stderr ?? "",
-  };
+): Promise<CliResult> {
+  return new Promise((resolve) => {
+    execFile(
+      process.execPath,
+      ["--import", "tsx", CLI_PATH, ...args],
+      {
+        cwd: SERVER_DIR,
+        env: { ...env, PATH: process.env.PATH ?? "" },
+        encoding: "utf8",
+        timeout: 30_000,
+      },
+      (error, stdout, stderr) => {
+        // A nonzero exit is a numeric error code; spawn failures (ENOENT,
+        // timeout kills) carry no numeric status and map to null.
+        const status =
+          error === null
+            ? 0
+            : typeof error.code === "number"
+              ? error.code
+              : null;
+        resolve({
+          status,
+          stdout: stdout ?? "",
+          stderr: stderr ?? "",
+        });
+      },
+    );
+  });
 }
 
-function cliJson<T>(args: readonly string[], env: NodeJS.ProcessEnv): T {
-  const result = invokeLearningCli(args, env);
+async function cliJson<T>(
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+): Promise<T> {
+  const result = await invokeLearningCli(args, env);
   if (result.status !== 0) {
     throw new Error(`learning CLI failed: ${result.stderr.slice(0, 200)}`);
   }
@@ -211,7 +229,7 @@ async function waitCliProposal(env: NodeJS.ProcessEnv): Promise<{
 }> {
   const deadline = Date.now() + 10_000;
   for (;;) {
-    const rows = cliJson<
+    const rows = await cliJson<
       Array<{ id: string; contentHash: string; lesson: string; status: string }>
     >(["list", "pending"], env);
     const first = rows[0];
@@ -261,24 +279,24 @@ describe("learning runtime smoke", () => {
 
     // The candidate is pending and unusable until exact-hash approval.
     expect(proposal.status).toBe("pending");
-    expect(cliJson<{ status: string }>(["show", proposal.id], env).status).toBe(
-      "pending",
-    );
+    expect(
+      (await cliJson<{ status: string }>(["show", proposal.id], env)).status,
+    ).toBe("pending");
     await runTurn(base, sessionId, "How do I change a calendar event date?");
     expect(JSON.stringify(fake.agentPrompts.at(-1))).not.toContain(
       proposal.lesson,
     );
 
     // A wrong hash never approves; the exact hash from show does.
-    const mismatch = invokeLearningCli(
+    const mismatch = await invokeLearningCli(
       ["approve", proposal.id, "0".repeat(64)],
       env,
     );
     expect(mismatch.status).not.toBe(0);
-    expect(cliJson<{ status: string }>(["show", proposal.id], env).status).toBe(
-      "pending",
-    );
-    const approved = cliJson<{ status: string; contentHash: string }>(
+    expect(
+      (await cliJson<{ status: string }>(["show", proposal.id], env)).status,
+    ).toBe("pending");
+    const approved = await cliJson<{ status: string; contentHash: string }>(
       ["approve", proposal.id, proposal.contentHash],
       env,
     );
@@ -309,7 +327,7 @@ describe("learning runtime smoke", () => {
       proposal.lesson,
     );
 
-    const applied = cliJson<Array<{ proposalId: string }>>(
+    const applied = await cliJson<Array<{ proposalId: string }>>(
       ["applied", sessionId],
       env,
     );
@@ -325,15 +343,16 @@ describe("learning runtime smoke", () => {
       "Please use ISO dates when you change calendar events.",
     );
     const rejectTarget = await waitCliProposal(env);
-    const rejected = cliJson<{ status: string }>(
+    const rejected = await cliJson<{ status: string }>(
       ["reject", rejectTarget.id],
       env,
     );
     expect(rejected.status).toBe("rejected");
     expect(
-      cliJson<{ status: string }>(["show", rejectTarget.id], env).status,
+      (await cliJson<{ status: string }>(["show", rejectTarget.id], env))
+        .status,
     ).toBe("rejected");
-    const pendingAfterReject = cliJson<Array<{ id: string }>>(
+    const pendingAfterReject = await cliJson<Array<{ id: string }>>(
       ["list", "pending"],
       env,
     );
@@ -355,13 +374,13 @@ describe("learning runtime smoke", () => {
     servers.push(restarted);
     const restartedBase = `http://127.0.0.1:${restarted.port}`;
 
-    const persisted = cliJson<{ status: string; contentHash: string }>(
+    const persisted = await cliJson<{ status: string; contentHash: string }>(
       ["show", proposal.id],
       env,
     );
     expect(persisted.status).toBe("approved");
     expect(persisted.contentHash).toBe(proposal.contentHash);
-    const approvedList = cliJson<Array<{ id: string }>>(
+    const approvedList = await cliJson<Array<{ id: string }>>(
       ["list", "approved"],
       env,
     );
