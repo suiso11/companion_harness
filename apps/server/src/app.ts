@@ -94,12 +94,12 @@ import {
   AGORA_BASE_URL,
   AgoraPayloadHashMismatchError,
   AgoraProposalNotFoundError,
-  AgoraProposalStateConflictError,
   type AgoraProposalRow,
+  AgoraProposalStateConflictError,
   type AgoraStore,
-  agoraWritePath,
   AutonomyStateConflictError,
   AutonomyVersionConflictError,
+  agoraWritePath,
   HandoffStateConflictError,
   HandoffVersionConflictError,
   IdempotencyConflictError,
@@ -2236,34 +2236,27 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   });
 
   // One exact proposal owned by this session (foreign/operator -> fixed 404).
-  app.get(
-    "/api/sessions/:sessionId/agora/proposals/:proposalId",
-    (c) => {
-      if (agora === null) {
-        return apiError(c, 404, "not_found", "resource not found");
-      }
-      const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
-      if ("response" in session) return session.response;
-      const proposal = requireUuid(
-        c,
-        c.req.param("proposalId"),
-        "proposalId",
-      );
-      if ("response" in proposal) return proposal.response;
-      if (!strictQuery(c, []).ok) return validationError(c);
-      try {
-        repo.getSession(session.id);
-        const body = AgoraHttpShowResponseSchema.parse({
-          proposal: agoraProposalView(
-            agora.showForSession(proposal.id, session.id),
-          ),
-        });
-        return c.json(body, 200);
-      } catch (error) {
-        return mapDomainError(c, error);
-      }
-    },
-  );
+  app.get("/api/sessions/:sessionId/agora/proposals/:proposalId", (c) => {
+    if (agora === null) {
+      return apiError(c, 404, "not_found", "resource not found");
+    }
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) return session.response;
+    const proposal = requireUuid(c, c.req.param("proposalId"), "proposalId");
+    if ("response" in proposal) return proposal.response;
+    if (!strictQuery(c, []).ok) return validationError(c);
+    try {
+      repo.getSession(session.id);
+      const body = AgoraHttpShowResponseSchema.parse({
+        proposal: agoraProposalView(
+          agora.showForSession(proposal.id, session.id),
+        ),
+      });
+      return c.json(body, 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
 
   // Exact-hash approve. State-idempotent (repeat approve of the same exact
   // bytes returns the already-approved row); wrong hash/state is a fixed
@@ -2276,11 +2269,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       }
       const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
       if ("response" in session) return session.response;
-      const proposal = requireUuid(
-        c,
-        c.req.param("proposalId"),
-        "proposalId",
-      );
+      const proposal = requireUuid(c, c.req.param("proposalId"), "proposalId");
       if ("response" in proposal) return proposal.response;
       const raw = await readJsonBody(c);
       if (!raw.ok) return validationError(c);
@@ -2319,11 +2308,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       }
       const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
       if ("response" in session) return session.response;
-      const proposal = requireUuid(
-        c,
-        c.req.param("proposalId"),
-        "proposalId",
-      );
+      const proposal = requireUuid(c, c.req.param("proposalId"), "proposalId");
       if ("response" in proposal) return proposal.response;
       const raw = await readJsonBody(c);
       if (!raw.ok) return validationError(c);
@@ -2363,11 +2348,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       }
       const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
       if ("response" in session) return session.response;
-      const proposal = requireUuid(
-        c,
-        c.req.param("proposalId"),
-        "proposalId",
-      );
+      const proposal = requireUuid(c, c.req.param("proposalId"), "proposalId");
       if ("response" in proposal) return proposal.response;
       const raw = await readJsonBody(c);
       if (!raw.ok) return validationError(c);
@@ -2378,16 +2359,12 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       if (draining) return shuttingDown(c);
       try {
         repo.getSession(session.id);
-        const result = await agora.send(
-          proposal.id,
-          parsed.data.payloadHash,
-          {
-            sessionId: session.id,
-            now: now(),
-            // Explicit human Send click: may consume a browser approval.
-            actor: "human",
-          },
-        );
+        const result = await agora.send(proposal.id, parsed.data.payloadHash, {
+          sessionId: session.id,
+          now: now(),
+          // Explicit human Send click: may consume a browser approval.
+          actor: "human",
+        });
         if (result.kind === "throttled") {
           const row = agora.showForSession(proposal.id, session.id);
           c.header(

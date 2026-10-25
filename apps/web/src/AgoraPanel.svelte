@@ -7,7 +7,7 @@
 // a payload, and never posts to AGORA directly. All proposal text is untrusted:
 // it renders through text interpolation only (no {@html}). The only external
 // link is the backend-verified `resultUrl` for the fixed `/t/<id>` target.
-import { fetchJson, postJson, type ApiResult } from "./lib/api.js";
+import { type ApiResult, fetchJson, postJson } from "./lib/api.js";
 
 const SETTLED_EVENT = "ch:run-settled";
 
@@ -360,7 +360,8 @@ async function act(proposal: Proposal, kind: ActionKind): Promise<void> {
   if (result.status === 200) {
     const updated = parseProposalBody(result.body);
     if (updated !== null) replaceProposal(updated);
-    notice = kind === "approve" ? "承認しました。送信は別の操作です" : "却下しました";
+    notice =
+      kind === "approve" ? "承認しました。送信は別の操作です" : "却下しました";
     return;
   }
   if (result.status === 409) {

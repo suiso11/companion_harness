@@ -179,7 +179,7 @@ export function openPrivateSqlite(path: string): Database.Database {
     db.pragma("journal_mode = WAL");
     hardenPrivateSidecars(path);
     return db;
-  } catch (error) {
+  } catch {
     try {
       db?.close();
     } catch {

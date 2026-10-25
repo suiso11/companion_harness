@@ -167,11 +167,7 @@ export interface AgoraService {
   show(id: string): AgoraProposalRow;
   /** Session-scoped lookup: a different owner is reported as not found. */
   showForSession(id: string, sessionId: string): AgoraProposalRow;
-  approve(
-    id: string,
-    expectedHash: string,
-    now?: number,
-  ): AgoraProposalRow;
+  approve(id: string, expectedHash: string, now?: number): AgoraProposalRow;
   /** Session-owned approve: a mismatch/foreign row is a fixed not-found. */
   approveForSession(
     id: string,
@@ -311,7 +307,10 @@ function requireOperation(value: unknown): AgoraOperation {
 }
 
 function requireStatus(value: unknown): AgoraProposalStatus {
-  if (typeof value !== "string" || !STATUSES.has(value as AgoraProposalStatus)) {
+  if (
+    typeof value !== "string" ||
+    !STATUSES.has(value as AgoraProposalStatus)
+  ) {
     throw new RepositoryValidationError("agora status is invalid");
   }
   return value as AgoraProposalStatus;
@@ -357,9 +356,7 @@ function requireThreadId(value: unknown): string {
   return value;
 }
 
-function requireApprovalSource(
-  value: unknown,
-): AgoraApprovalSource | null {
+function requireApprovalSource(value: unknown): AgoraApprovalSource | null {
   if (value === null || value === undefined) return null;
   if (value === "operator" || value === "browser") return value;
   throw new RepositoryValidationError("agora approval source is invalid");
@@ -403,7 +400,11 @@ function validatePayload(
   operation: AgoraOperation,
   payload: unknown,
 ): AgoraPayload {
-  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+  if (
+    typeof payload !== "object" ||
+    payload === null ||
+    Array.isArray(payload)
+  ) {
     throw new RepositoryValidationError("agora payload is invalid");
   }
   const record = payload as Record<string, unknown>;
@@ -502,7 +503,9 @@ function toProposal(raw: RawProposal): AgoraProposalRow {
 function readJsonField(text: string): Record<string, unknown> | null {
   try {
     const parsed: unknown = JSON.parse(text);
-    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+    return typeof parsed === "object" &&
+      parsed !== null &&
+      !Array.isArray(parsed)
       ? (parsed as Record<string, unknown>)
       : null;
   } catch {
@@ -593,18 +596,17 @@ function extractResultTarget(
       : null;
   const candidateId =
     operation === "thread"
-      ? body.threadId ??
+      ? (body.threadId ??
         body.thread_id ??
         body.id ??
         nested?.id ??
-        nested?.threadId
-      : body.threadId ??
-        body.thread_id ??
-        nested?.id ??
-        nested?.threadId;
+        nested?.threadId)
+      : (body.threadId ?? body.thread_id ?? nested?.id ?? nested?.threadId);
   const resultThreadId = safeResultThreadId(candidateId);
   const resultUrl =
-    safeResultUrl(body.url ?? body.threadUrl ?? body.thread_url ?? nested?.url) ??
+    safeResultUrl(
+      body.url ?? body.threadUrl ?? body.thread_url ?? nested?.url,
+    ) ??
     (resultThreadId === null
       ? null
       : `${AGORA_BASE_URL}${AGORA_THREAD_PAGE_PREFIX}${encodeURIComponent(resultThreadId)}`);
@@ -712,9 +714,7 @@ export function createAgoraStore(options: AgoraStoreOptions): AgoraStore {
         );
       }
       if (!proposalColumns.has("result_thread_id")) {
-        db.exec(
-          "ALTER TABLE agora_proposals ADD COLUMN result_thread_id TEXT",
-        );
+        db.exec("ALTER TABLE agora_proposals ADD COLUMN result_thread_id TEXT");
       }
       if (!proposalColumns.has("result_url")) {
         db.exec("ALTER TABLE agora_proposals ADD COLUMN result_url TEXT");
@@ -822,8 +822,7 @@ export function createAgoraStore(options: AgoraStoreOptions): AgoraStore {
   // A `sending` row whose lease has expired belonged to a process that is no
   // longer demonstrably alive. It becomes terminal `unknown` (never retried)
   // but only then; a live lease is left untouched.
-  const staleSending =
-    `COALESCE(send_lease_until, COALESCE(consumed_at, 0) + ${AGORA_SEND_LEASE_MS})`;
+  const staleSending = `COALESCE(send_lease_until, COALESCE(consumed_at, 0) + ${AGORA_SEND_LEASE_MS})`;
 
   function recoverSending(now: number, id?: string): void {
     if (id === undefined) {
@@ -945,13 +944,7 @@ export function createAgoraStore(options: AgoraStoreOptions): AgoraStore {
       .prepare(
         "UPDATE agora_proposals SET status = 'approved', approval_source = ?, decided_at = ?, expires_at = ? WHERE id = ? AND status = 'pending' AND payload_hash = ?",
       )
-      .run(
-        source,
-        at,
-        at + AGORA_APPROVED_TTL_MS,
-        wanted,
-        hash,
-      );
+      .run(source, at, at + AGORA_APPROVED_TTL_MS, wanted, hash);
     if (moved.changes !== 1) {
       throw new AgoraProposalStateConflictError(
         "agora proposal changed concurrently",
@@ -1075,10 +1068,7 @@ export function createAgoraStore(options: AgoraStoreOptions): AgoraStore {
       // A model-requested send may only consume an operator (CLI) approval.
       // Browser approvals require the separate human Send click. This check
       // is inside the IMMEDIATE transaction, BEFORE throttle/lease/transport.
-      if (
-        input.actor === "model" &&
-        current.approvalSource === "browser"
-      ) {
+      if (input.actor === "model" && current.approvalSource === "browser") {
         throw new AgoraProposalStateConflictError(
           "agora proposal browser approval requires an explicit human send",
         );
@@ -1253,10 +1243,7 @@ export function createAgoraStore(options: AgoraStoreOptions): AgoraStore {
     return {
       status: out.status,
       untrusted: true as const,
-      body:
-        parsed === null
-          ? text.slice(0, AGORA_MAX_READ_TEXT_CP)
-          : parsed,
+      body: parsed === null ? text.slice(0, AGORA_MAX_READ_TEXT_CP) : parsed,
     };
   }
 

@@ -3663,9 +3663,7 @@ async function runModelStep(args: {
     model,
     messages: messages.map((message) => ({ ...message })),
     tools: [...toolDefinitions],
-    ...(reasoningBudgetTokens === undefined
-      ? {}
-      : { reasoningBudgetTokens }),
+    ...(reasoningBudgetTokens === undefined ? {} : { reasoningBudgetTokens }),
   };
   // The private record is written BEFORE the network call. A failed write is
   // explicit (the step fails) rather than silently producing a partial record.

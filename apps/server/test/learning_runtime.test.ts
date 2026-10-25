@@ -203,9 +203,7 @@ function cliJson<T>(args: readonly string[], env: NodeJS.ProcessEnv): T {
   return JSON.parse(result.stdout) as T;
 }
 
-async function waitCliProposal(
-  env: NodeJS.ProcessEnv,
-): Promise<{
+async function waitCliProposal(env: NodeJS.ProcessEnv): Promise<{
   id: string;
   contentHash: string;
   lesson: string;

@@ -621,9 +621,11 @@ describe("AGORA agent tools through the real server", () => {
       );
       expect(stillApproved.status).toBe(200);
       expect(
-        ((await stillApproved.json()) as {
-          proposal: { status: string };
-        }).proposal.status,
+        (
+          (await stillApproved.json()) as {
+            proposal: { status: string };
+          }
+        ).proposal.status,
       ).toBe("approved");
 
       // The explicit human Send click is allowed and consumes it once.

@@ -183,9 +183,7 @@ export const AgoraHttpProposalViewSchema = z.strictObject({
   resultThreadId: AgoraThreadIdSchema.nullable(),
   resultUrl: z.string().url().max(512).nullable(),
 });
-export type AgoraHttpProposalView = z.infer<
-  typeof AgoraHttpProposalViewSchema
->;
+export type AgoraHttpProposalView = z.infer<typeof AgoraHttpProposalViewSchema>;
 
 export const AgoraHttpListResponseSchema = z.strictObject({
   proposals: z.array(AgoraHttpProposalViewSchema).max(100),
@@ -233,6 +231,4 @@ export const AgoraHttpSendResponseSchema = z.strictObject({
   proposal: AgoraHttpProposalViewSchema.nullable(),
   retryAfterMs: z.number().int().nonnegative().nullable(),
 });
-export type AgoraHttpSendResponse = z.infer<
-  typeof AgoraHttpSendResponseSchema
->;
+export type AgoraHttpSendResponse = z.infer<typeof AgoraHttpSendResponseSchema>;

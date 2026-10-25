@@ -1,13 +1,7 @@
 // AGORA participation behavior: nothing reaches transport without an exact
 // human approval; approvals are one-use; writes are throttled; ambiguous
 // outcomes are terminal and never resent; keys never appear in results.
-import {
-  chmodSync,
-  mkdirSync,
-  mkdtempSync,
-  rmSync,
-  statSync,
-} from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import Database from "better-sqlite3";
@@ -16,9 +10,9 @@ import { AGORA_SEND_LEASE_MS } from "../src/agora.js";
 import {
   AGORA_HELLO_PATH,
   AGORA_MIN_WRITE_INTERVAL_MS,
+  type AgoraTransport,
   agoraPayloadHash,
   createAgoraStore,
-  type AgoraTransport,
   RepositoryValidationError,
 } from "../src/index.js";
 
@@ -36,16 +30,17 @@ function fakeTransport(): {
   posts: Posted[];
   gets: string[];
   setRegisterResponse: (status: number, text: string) => void;
-  setPost: (fn: (posted: Posted) => Promise<{ status: number; text: string }>) => void;
+  setPost: (
+    fn: (posted: Posted) => Promise<{ status: number; text: string }>,
+  ) => void;
 } {
   const posts: Posted[] = [];
   const gets: string[] = [];
-  let postFn: (
-    posted: Posted,
-  ) => Promise<{ status: number; text: string }> = async () => ({
-    status: 201,
-    text: "{}",
-  });
+  let postFn: (posted: Posted) => Promise<{ status: number; text: string }> =
+    async () => ({
+      status: 201,
+      text: "{}",
+    });
   let registerResponse = {
     status: 201,
     text: JSON.stringify({ api_key: KEY }),
@@ -86,7 +81,6 @@ afterEach(() => {
   while (cleanups.length > 0) {
     rmSync(cleanups.pop() as string, { recursive: true, force: true });
   }
-
 });
 
 function tempPath(): string {
@@ -141,9 +135,7 @@ function legacyProposalDdl(withLeaseColumns: boolean): string {
 // Exact populated store from before session ownership: one successful
 // registration (credential + sent register proposal) and one operator-approved
 // thread proposal. The optional lease columns model the oldest partial store.
-function seedLegacyAgoraStore(options: {
-  leaseColumns: boolean;
-}): LegacySeed {
+function seedLegacyAgoraStore(options: { leaseColumns: boolean }): LegacySeed {
   const path = tempPath();
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const registerId = "11111111-1111-4111-8111-111111111111";
@@ -236,9 +228,9 @@ describe("agora exact approval flow", () => {
     try {
       const payload = { name: "Companion Harness", description: "Draft body" };
       const proposal = f.store.propose({ operation: "register", payload });
-      await expect(f.store.send(proposal.id, proposal.payloadHash)).rejects.toThrow(
-        RepositoryValidationError,
-      );
+      await expect(
+        f.store.send(proposal.id, proposal.payloadHash),
+      ).rejects.toThrow(RepositoryValidationError);
       expect(f.posts).toHaveLength(0);
 
       // A hash for different content cannot approve or send this proposal.
@@ -404,9 +396,9 @@ describe("agora exact approval flow", () => {
       const first = await f.store.send(reply.id, reply.payloadHash);
       expect(first.kind).toBe("unknown");
       expect(f.posts).toHaveLength(2);
-      await expect(
-        f.store.send(reply.id, reply.payloadHash),
-      ).rejects.toThrow(RepositoryValidationError);
+      await expect(f.store.send(reply.id, reply.payloadHash)).rejects.toThrow(
+        RepositoryValidationError,
+      );
       expect(f.posts).toHaveLength(2);
 
       f.setPost(async () => ({ status: 302, text: "" }));
@@ -416,10 +408,7 @@ describe("agora exact approval flow", () => {
       });
       f.store.approve(redirect.id, redirect.payloadHash);
       f.advance(AGORA_MIN_WRITE_INTERVAL_MS);
-      const redirected = await f.store.send(
-        redirect.id,
-        redirect.payloadHash,
-      );
+      const redirected = await f.store.send(redirect.id, redirect.payloadHash);
       expect(redirected.kind).toBe("unknown");
     } finally {
       f.store.close();
@@ -446,9 +435,9 @@ describe("agora exact approval flow", () => {
       const out = await f.store.send(thread.id, thread.payloadHash);
       expect(out.kind).toBe("failed");
       expect(f.store.show(thread.id).status).toBe("failed");
-      await expect(
-        f.store.send(thread.id, thread.payloadHash),
-      ).rejects.toThrow(RepositoryValidationError);
+      await expect(f.store.send(thread.id, thread.payloadHash)).rejects.toThrow(
+        RepositoryValidationError,
+      );
     } finally {
       f.store.close();
     }
@@ -572,9 +561,9 @@ describe("agora exact approval flow", () => {
       });
       try {
         expect(other.show(thread.id).status).toBe("sending");
-        expect(
-          other.list("sending").some((row) => row.id === thread.id),
-        ).toBe(true);
+        expect(other.list("sending").some((row) => row.id === thread.id)).toBe(
+          true,
+        );
       } finally {
         other.close();
       }
@@ -872,15 +861,11 @@ describe("agora exact approval flow", () => {
 
       // The explicit human send consumes the same one-use approval exactly
       // once; a replay is refused.
-      const human = await store.send(
-        browser.id,
-        browser.payloadHash,
-        {
-          sessionId: session,
-          actor: "human",
-          now: f.now() + AGORA_MIN_WRITE_INTERVAL_MS,
-        },
-      );
+      const human = await store.send(browser.id, browser.payloadHash, {
+        sessionId: session,
+        actor: "human",
+        now: f.now() + AGORA_MIN_WRITE_INTERVAL_MS,
+      });
       expect(human.kind).toBe("sent");
       expect(f.posts).toHaveLength(2);
       await expect(

@@ -69,11 +69,13 @@ afterEach(() => {
   }
 });
 
-async function makeFixture(options: {
-  remote?: boolean;
-  agora?: boolean;
-  hostApiKey?: string | null;
-} = {}): Promise<Fixture> {
+async function makeFixture(
+  options: {
+    remote?: boolean;
+    agora?: boolean;
+    hostApiKey?: string | null;
+  } = {},
+): Promise<Fixture> {
   const dir = mkdtempSync(join(tmpdir(), "agora-http-"));
   cleanups.push(dir);
   const handle = openKernelDatabase(":memory:");
@@ -95,20 +97,21 @@ async function makeFixture(options: {
     COMPANION_TIME_ZONE: "UTC",
     COMPANION_LOG_LEVEL: "debug",
   });
-  const config = options.remote === true
-    ? Object.freeze({
-        ...base,
-        remote: Object.freeze({
-          enabled: true,
-          allowedOrigins: Object.freeze([ALLOWED_ORIGIN]),
-          passwordFile: join(dir, "remote-pass.json"),
-          absoluteTimeoutMs: DEFAULT_REMOTE_ABSOLUTE_TIMEOUT_MS,
-          idleTimeoutMs: DEFAULT_REMOTE_IDLE_TIMEOUT_MS,
-          maxFailures: DEFAULT_REMOTE_MAX_FAILURES,
-          lockoutMs: DEFAULT_REMOTE_LOCKOUT_MS,
-        } satisfies RemoteConfig),
-      })
-    : base;
+  const config =
+    options.remote === true
+      ? Object.freeze({
+          ...base,
+          remote: Object.freeze({
+            enabled: true,
+            allowedOrigins: Object.freeze([ALLOWED_ORIGIN]),
+            passwordFile: join(dir, "remote-pass.json"),
+            absoluteTimeoutMs: DEFAULT_REMOTE_ABSOLUTE_TIMEOUT_MS,
+            idleTimeoutMs: DEFAULT_REMOTE_IDLE_TIMEOUT_MS,
+            maxFailures: DEFAULT_REMOTE_MAX_FAILURES,
+            lockoutMs: DEFAULT_REMOTE_LOCKOUT_MS,
+          } satisfies RemoteConfig),
+        })
+      : base;
   let nowValue = T0;
   const hits: Hit[] = [];
   let postFn: PostFn = async (hit) =>
@@ -129,20 +132,19 @@ async function makeFixture(options: {
     path: join(dir, "private", "agora.sqlite"),
     transport,
     clock: { now: () => nowValue },
-    hostApiKey:
-      options.hostApiKey === undefined ? KEY : options.hostApiKey,
+    hostApiKey: options.hostApiKey === undefined ? KEY : options.hostApiKey,
   });
   const { logger } = createCollectingLogger("debug");
   const engine = new RunEngine({ db: handle.raw, repo, cancelGraceMs: 30 });
-  const remoteStore = options.remote === true
-    ? createSqliteRemoteSessionStore(handle.raw)
-    : null;
-  const remoteLimiter = options.remote === true
-    ? createSqliteRemoteLoginRateLimiter(handle.raw, {
-        maxFailures: config.remote?.maxFailures ?? 1,
-        lockoutMs: config.remote?.lockoutMs ?? 1000,
-      })
-    : null;
+  const remoteStore =
+    options.remote === true ? createSqliteRemoteSessionStore(handle.raw) : null;
+  const remoteLimiter =
+    options.remote === true
+      ? createSqliteRemoteLoginRateLimiter(handle.raw, {
+          maxFailures: config.remote?.maxFailures ?? 1,
+          lockoutMs: config.remote?.lockoutMs ?? 1000,
+        })
+      : null;
   const created = createApp({
     config,
     repo,
@@ -256,10 +258,7 @@ describe("AGORA session review HTTP API", () => {
         base(SESSION_A, proposal.id, "/approve"),
         {
           method: "POST",
-          headers: headers(
-            { origin: "https://evil.example" },
-            true,
-          ),
+          headers: headers({ origin: "https://evil.example" }, true),
           body: JSON.stringify({ payloadHash: proposal.payloadHash }),
         },
       );
@@ -293,29 +292,21 @@ describe("AGORA session review HTTP API", () => {
       const owned = propose(f, SESSION_A, "Owned title");
       const operator = propose(f, null, "Operator title");
 
-      const listA = await get(
-        f,
-        `/api/sessions/${SESSION_A}/agora/proposals`,
-      );
+      const listA = await get(f, `/api/sessions/${SESSION_A}/agora/proposals`);
       expect(listA.status).toBe(200);
-      const listBody = listA.body as { proposals: Array<{ proposalId: string }> };
+      const listBody = listA.body as {
+        proposals: Array<{ proposalId: string }>;
+      };
       expect(listBody.proposals.map((row) => row.proposalId)).toEqual([
         owned.id,
       ]);
 
-      const listB = await get(
-        f,
-        `/api/sessions/${SESSION_B}/agora/proposals`,
-      );
+      const listB = await get(f, `/api/sessions/${SESSION_B}/agora/proposals`);
       expect((listB.body as { proposals: unknown[] }).proposals).toHaveLength(
         0,
       );
-      expect(
-        (await get(f, base(SESSION_A, operator.id, ""))).status,
-      ).toBe(404);
-      expect(
-        (await get(f, base(SESSION_B, owned.id, ""))).status,
-      ).toBe(404);
+      expect((await get(f, base(SESSION_A, operator.id, ""))).status).toBe(404);
+      expect((await get(f, base(SESSION_B, owned.id, ""))).status).toBe(404);
       expect(
         (
           await post(f, base(SESSION_B, owned.id, "/approve"), {
@@ -349,9 +340,11 @@ describe("AGORA session review HTTP API", () => {
       const owned = propose(f, SESSION_A, "Exact title");
       const shown = await get(f, base(SESSION_A, owned.id, ""));
       expect(shown.status).toBe(200);
-      const view = (shown.body as {
-        proposal: Record<string, unknown>;
-      }).proposal;
+      const view = (
+        shown.body as {
+          proposal: Record<string, unknown>;
+        }
+      ).proposal;
       expect(view).toMatchObject({
         proposalId: owned.id,
         operation: "thread",
@@ -442,9 +435,15 @@ describe("AGORA session review HTTP API", () => {
         title: "Send title",
         body: "Send title body",
       });
-      const view = (sent.body as {
-        proposal: { status: string; resultThreadId: string; resultUrl: string };
-      }).proposal;
+      const view = (
+        sent.body as {
+          proposal: {
+            status: string;
+            resultThreadId: string;
+            resultUrl: string;
+          };
+        }
+      ).proposal;
       expect(view.status).toBe("sent");
       expect(view.resultThreadId).toBe("thread-verified");
       expect(view.resultUrl).toBe(

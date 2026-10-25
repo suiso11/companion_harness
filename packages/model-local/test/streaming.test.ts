@@ -641,7 +641,10 @@ describe("strict streaming errors", () => {
     expect(malformed.invalidResponseCause).toBe("malformed_json");
 
     const oversized = await streamError(
-      [sseChunk({ choices: [{ delta: { content: "1234567890" } }] }), "data: [DONE]\n\n"],
+      [
+        sseChunk({ choices: [{ delta: { content: "1234567890" } }] }),
+        "data: [DONE]\n\n",
+      ],
       { maxResponseBytes: 10 },
     );
     expect(oversized.code).toBe("invalid_response");
