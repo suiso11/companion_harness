@@ -5286,6 +5286,21 @@ blocker. No local model relay was available and the installed pi-orch
 entrypoint was only version-probed, not run. No source host apply, write,
 restart, deploy, or public post was performed.
 
+### Native Linux bwrap prerequisite
+
+The required native acceptance case executes `/usr/bin/bwrap` directly. On
+Ubuntu hosts with `kernel.apparmor_restrict_unprivileged_userns=1`, a scoped
+AppArmor profile for `/usr/bin/bwrap` must be loaded. CI first prefers the
+distro-provided profile (for example `/etc/apparmor.d/bwrap-userns-restrict`).
+When that file is absent, as on Ubuntu 24.04, CI loads the reviewed ABI 4
+upstream profile vendored at `.github/apparmor/bwrap-userns-restrict` on the
+disposable runner only. It restricts attachment to `/usr/bin/bwrap`; child
+execution stacks `unpriv_bwrap`, which audit-denies all capability use so the
+sandbox cannot exercise setup capabilities; capability bits are not cleared.
+Production use is a separate operator configuration requiring manual approval.
+No global sysctl, service, capability waiver, shared network, or host policy
+change is part of the product or test path.
+
 ## Conversation -> plan -> standing-policy auto dispatch (schema 30/31)
 
 This slice is **default off**. Live production is unchanged and no policy

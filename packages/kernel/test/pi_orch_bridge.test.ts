@@ -838,6 +838,12 @@ posixDescribe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
     "launches a real bwrap guest/check with three-argument --setenv env groups",
     () => {
       const bwrap = "/usr/bin/bwrap";
+      const probe = spawnSync(bwrap, ["--version"], { encoding: "utf8" });
+      expect(
+        probe.status,
+        `bwrap probe failed for ${bwrap}: ${probe.error?.message ?? ""} ${probe.stderr ?? ""}`,
+      ).toBe(0);
+      expect(probe.stdout).toContain("bubblewrap");
       const dir = tempRoot("bwrap-env");
       const workRoot = join(dir, "work");
       mkdirSync(workRoot, { recursive: true });

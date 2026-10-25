@@ -2286,6 +2286,16 @@ keeps the fail-closed fence and never guesses or retries. Provenance and actual
 smoke limits are in `docs/operations.md`; no production enablement or source
 host apply was performed.
 
+Native Linux acceptance requires a working `/usr/bin/bwrap`. On hosts where
+unprivileged user namespaces are AppArmor-restricted, an operator may need to
+load a scoped `/usr/bin/bwrap` profile with operator approval. CI prefers the
+distro profile; on Ubuntu 24.04, which ships no such profile, CI loads the
+reviewed ABI 4 backport in `.github/apparmor/bwrap-userns-restrict` on the
+disposable runner only. That profile keeps the parent setup allowance and
+stacks `unpriv_bwrap` on child exec to audit-deny all capability use. Production
+configuration remains a separate operator decision and manual approval; CI
+does not change product containment, flags, or global host policy.
+
 ## Auto-dispatch (conversation -> plan -> standing policy)
 
 Schema 30/31 adds a default-off, authenticated path from an accepted
