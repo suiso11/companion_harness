@@ -513,6 +513,19 @@ function readJsonField(text: string): Record<string, unknown> | null {
   }
 }
 
+/**
+ * Header-safe only: Node rejects CR/LF, NUL, and other control characters in
+ * an HTTP header value (ERR_INVALID_CHAR). Tabs are legal in header values,
+ * so they are the one sub-0x20 code point allowed through.
+ */
+function isHeaderSafe(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if ((code < 0x20 && code !== 0x09) || code === 0x7f) return false;
+  }
+  return true;
+}
+
 function extractRegistrationKey(text: string): string | null {
   const body = readJsonField(text);
   if (body === null) return null;
@@ -521,10 +534,7 @@ function extractRegistrationKey(text: string): string | null {
     typeof candidate !== "string" ||
     candidate.length < 1 ||
     candidate.length > 4096 ||
-    // Header-safe only: Node rejects CR/LF, NUL, and other control
-    // characters in an HTTP header value (ERR_INVALID_CHAR).
-    /[\u0000-\u0008\u000a-\u001f\u007f]/.test(candidate) ||
-    candidate.includes("\0")
+    !isHeaderSafe(candidate)
   ) {
     return null;
   }

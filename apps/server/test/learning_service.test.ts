@@ -303,23 +303,32 @@ describe("learning service extraction", () => {
     }
   });
 
-  it("admits extraction through the shared background gate and releases it", async () => {
-    // Busy gate: another background unit holds the single model slot, so the
-    // optional reflection is skipped without calling the gateway.
+  it("defers extraction while memory holds the shared slot, then extracts after release", async () => {
+    // Memory's completion hook can grab the single model slot first. Learning
+    // must wait for that release (bounded) instead of dropping the turn.
     const busyRepo = await openRepo();
     const busyGate = createBackgroundResourceGate();
     const held = busyGate.tryAcquire(BACKGROUND_OWNER_MEMORY_EXTRACTION);
     expect(held).not.toBeNull();
     const busy = gatewayReturning(EXTRACTION);
-    const skipped = makeService(busyRepo, busy.gateway, busyGate);
-    const skippedRun = completeRun(busyRepo, {
+    const deferred = makeService(busyRepo, busy.gateway, busyGate);
+    const deferredRun = completeRun(busyRepo, {
       text: "Please use ISO dates when you change calendar events.",
       answer: "Understood. I will use ISO dates.",
     });
-    skipped.onRunCompleted(skippedRun.runId);
-    await skipped.stop();
+    deferred.onRunCompleted(deferredRun.runId);
+    await new Promise((resolve) => setTimeout(resolve, 60));
     expect(busy.calls).toHaveLength(0);
+    expect(deferred.store.listReflections()).toHaveLength(0);
     busyGate.release(held as Exclude<typeof held, null>);
+    await waitFor(() => busy.calls.length === 1);
+    await waitFor(() => deferred.store.listReflections().length === 1);
+    const deferredAfter = busyGate.tryAcquire(
+      BACKGROUND_OWNER_LEARNING_EXTRACTION,
+    );
+    expect(deferredAfter).not.toBeNull();
+    if (deferredAfter !== null) busyGate.release(deferredAfter);
+    await deferred.stop();
 
     // Free gate: extraction runs under a learning lease and releases it, so a
     // subsequent background unit can be admitted.

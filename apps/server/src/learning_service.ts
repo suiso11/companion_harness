@@ -27,6 +27,7 @@ import {
 import type { ChatResult, ModelGateway } from "@companion/model-local";
 import {
   BACKGROUND_OWNER_LEARNING_EXTRACTION,
+  type BackgroundReservation,
   type BackgroundResourceGate,
 } from "./background_resource.js";
 import type { ServerLogger } from "./logger.js";
@@ -36,6 +37,9 @@ export const LEARNING_EXTRACT_OUTPUT_MAX_CP = 8192;
 export const LEARNING_MAX_RETRIEVED = 3;
 export const LEARNING_RETRIEVAL_MIN_SCORE = 1;
 export const LEARNING_EXTRACT_TIMEOUT_MS = 5_000;
+/** Bounded deferral while one shared background slot is busy. */
+export const LEARNING_SLOT_RETRY_DELAY_MS = 100;
+export const LEARNING_SLOT_MAX_ATTEMPTS = 20;
 
 export const LEARNING_EXTRACT_SYSTEM_PROMPT =
   "You extract durable lessons from one accepted conversation turn as strict " +
@@ -360,6 +364,8 @@ export function createLearningService(
   const inFlightTasks = new Set<Promise<void>>();
   /** Per-process completed-notification dedup (durable dedup is the store). */
   const attemptedRuns = new Set<string>();
+  /** Deferral waiters woken by stop() or by a background-slot release. */
+  const pendingSlotWaiters = new Set<() => void>();
 
   function log(
     level: "info" | "warn",
@@ -374,33 +380,82 @@ export function createLearningService(
     }
   }
 
+  /**
+   * Wait for one background-slot release (or a bounded retry tick). Finite:
+   * a wake fires at most once per release, and stop() wakes every waiter so
+   * a deferred extraction is dropped instead of delaying shutdown.
+   */
+  function waitForSlotSignal(): Promise<void> {
+    return new Promise<void>((resolve) => {
+      let finished = false;
+      let timer: NodeJS.Timeout | undefined;
+      let unsubscribe: (() => void) | undefined;
+      const finish = (): void => {
+        if (finished) return;
+        finished = true;
+        pendingSlotWaiters.delete(finish);
+        if (timer !== undefined) clearTimeout(timer);
+        unsubscribe?.();
+        resolve();
+      };
+      pendingSlotWaiters.add(finish);
+      if (background !== null) unsubscribe = background.onSettled(finish);
+      timer = setTimeout(finish, LEARNING_SLOT_RETRY_DELAY_MS);
+      // Never keep the process alive just to retry an optional reflection.
+      timer.unref?.();
+    });
+  }
+
+  /**
+   * Shared admission with deferral. Memory extraction is scheduled from the
+   * same completion hook and can grab the single slot first; instead of
+   * dropping this optional reflection, wait for its release (bounded) and
+   * retry. Foreground activity, a closed gate, or stop() still drops it.
+   */
+  async function admitExtraction(): Promise<{
+    readonly admitted: boolean;
+    readonly lease: BackgroundReservation | null;
+  }> {
+    for (let attempt = 0; attempt < LEARNING_SLOT_MAX_ATTEMPTS; attempt += 1) {
+      if (!started || stopped) return { admitted: false, lease: null };
+      if (background?.closed === true) {
+        log("info", "learning.extract_skipped_closed", { status: 0 });
+        return { admitted: false, lease: null };
+      }
+      // Foreground preemption: a user run that became active before
+      // admission wins the shared resource; never call the gateway beside it.
+      try {
+        if (options.repo.hasActiveShadowBlock()) {
+          log("info", "learning.extract_skipped_foreground", { status: 0 });
+          return { admitted: false, lease: null };
+        }
+      } catch {
+        return { admitted: false, lease: null };
+      }
+      if (background === null) return { admitted: true, lease: null };
+      const lease = background.tryAcquire(BACKGROUND_OWNER_LEARNING_EXTRACTION);
+      if (lease !== null) return { admitted: true, lease };
+      if (attempt === 0) {
+        log("info", "learning.extract_deferred", { status: 0 });
+      }
+      await waitForSlotSignal();
+    }
+    if (!stopped) {
+      log("info", "learning.extract_skipped_busy", { status: 0 });
+    }
+    return { admitted: false, lease: null };
+  }
+
   async function extract(
     turnText: string,
     answerText: string,
   ): Promise<ParsedLesson[] | null> {
-    if (gateway === null || stopped) return null;
-    // Same admission as memory extraction / shadow deliberation: at most ONE
-    // model-heavy background unit runs at a time. A busy or closed gate
-    // skips this optional reflection entirely (fail-open) rather than
-    // competing with another background call behind its fixed deadline.
-    if (background?.closed === true) {
-      log("info", "learning.extract_skipped_closed", { status: 0 });
-      return null;
-    }
-    // Foreground preemption: a user run that became active before admission
-    // wins the shared resource; the gateway is never called concurrently.
-    try {
-      if (options.repo.hasActiveShadowBlock()) {
-        log("info", "learning.extract_skipped_foreground", { status: 0 });
-        return null;
-      }
-    } catch {
-      return null;
-    }
-    const lease =
-      background?.tryAcquire(BACKGROUND_OWNER_LEARNING_EXTRACTION) ?? null;
-    if (background !== null && lease === null) {
-      log("info", "learning.extract_skipped_busy", { status: 0 });
+    if (gateway === null) return null;
+    const admission = await admitExtraction();
+    if (!admission.admitted) return null;
+    const lease = admission.lease;
+    if (stopped) {
+      if (lease !== null) background?.release(lease);
       return null;
     }
     const controller = new AbortController();
@@ -667,6 +722,15 @@ export function createLearningService(
     async stop() {
       stopped = true;
       started = false;
+      // Drop deferred extractions immediately: they are optional reflection
+      // and must not hold shutdown open for a bounded retry tick.
+      for (const wake of [...pendingSlotWaiters]) {
+        try {
+          wake();
+        } catch {
+          // Best effort.
+        }
+      }
       for (const controller of [...inFlightControllers]) {
         try {
           controller.abort();

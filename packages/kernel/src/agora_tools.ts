@@ -34,8 +34,8 @@ import {
 import type { AgoraProposalRow, AgoraService } from "./agora.js";
 import { ToolError, type ToolRegistration } from "./broker.js";
 import {
-  type ExecutionRecorder,
   ExecutionRecordError,
+  type ExecutionRecorder,
 } from "./execution_records.js";
 import type { KernelRepository } from "./repository.js";
 

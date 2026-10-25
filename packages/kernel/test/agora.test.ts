@@ -6,10 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  AGORA_PENDING_TTL_MS,
-  AGORA_SEND_LEASE_MS,
-} from "../src/agora.js";
+import { AGORA_PENDING_TTL_MS, AGORA_SEND_LEASE_MS } from "../src/agora.js";
 import {
   AGORA_HELLO_PATH,
   AGORA_MIN_WRITE_INTERVAL_MS,
@@ -805,7 +802,9 @@ describe("agora exact approval flow", () => {
       expect(second.id).not.toBe(first.id);
       expect(second.status).toBe("pending");
       // The fresh draft is actionable at the current instant.
-      expect(() => f.store.approve(second.id, second.payloadHash)).not.toThrow();
+      expect(() =>
+        f.store.approve(second.id, second.payloadHash),
+      ).not.toThrow();
     } finally {
       f.store.close();
     }
