@@ -36,4 +36,13 @@ describe("run-google-readonly.sh wire hash parity", () => {
     expect(script).toMatch(/^\s*exec pnpm start/m);
     expect(script).not.toMatch(/read\s+(-p|-[^\s]*p)/);
   });
+
+  it("exports the remind classifier key from .env.litellm only when unset, never echoing it", () => {
+    const script = readFileSync(scriptPath, "utf8");
+    expect(script).toMatch(/if \[ -z "\$\{REMIND_LLM_API_KEY:-\}" \]; then/);
+    expect(script).toContain('export REMIND_LLM_API_KEY="$_LITELLM_KEY"');
+    expect(script).not.toMatch(
+      /echo[^\n]*(REMIND_LLM_API_KEY|LITELLM_MASTER_KEY)/,
+    );
+  });
 });
