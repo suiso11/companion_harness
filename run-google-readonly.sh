@@ -27,18 +27,25 @@ export FORK_DIR ACCT
 unset COMPANION_ACTIONS_JSON
 # Model: prefer an already-exported COMPANION_MODEL_JSON; otherwise build it
 # from the private ignored runtime file (existing LiteLLM proxy, no new keys).
-if [ -z "${COMPANION_MODEL_JSON:-}" ]; then
-  _LITELLM_ENV_FILE="$COMPANION_DIR/.env.litellm"
-  if [ -f "$_LITELLM_ENV_FILE" ]; then
-    _LITELLM_KEY="$(sed -n 's/^LITELLM_MASTER_KEY=//p' "$_LITELLM_ENV_FILE" | head -n 1 | tr -d '\r\n')"
-    if [ -n "$_LITELLM_KEY" ]; then
+# The same file also supplies REMIND_LLM_API_KEY (only when not already set)
+# so the remind CLI child can reach the retention classifier through LiteLLM;
+# the value is exported, never echoed/logged. Exposure is unchanged: the key
+# is already carried in COMPANION_MODEL_JSON's apiKey.
+_LITELLM_ENV_FILE="$COMPANION_DIR/.env.litellm"
+if [ -f "$_LITELLM_ENV_FILE" ]; then
+  _LITELLM_KEY="$(sed -n 's/^LITELLM_MASTER_KEY=//p' "$_LITELLM_ENV_FILE" | head -n 1 | tr -d '\r\n')"
+  if [ -n "$_LITELLM_KEY" ]; then
+    if [ -z "${REMIND_LLM_API_KEY:-}" ]; then
+      export REMIND_LLM_API_KEY="$_LITELLM_KEY"
+    fi
+    if [ -z "${COMPANION_MODEL_JSON:-}" ]; then
       COMPANION_MODEL_JSON="$(LITELLM_MASTER_KEY="$_LITELLM_KEY" node --input-type=module -e 'const k=process.env.LITELLM_MASTER_KEY??"";process.stdout.write(JSON.stringify({adapter:"openai-compatible",baseUrl:"http://127.0.0.1:4000",model:"local-chat",reasoningBudgetTokens:256,apiKey:k}));')"
       export COMPANION_MODEL_JSON
     fi
-    unset _LITELLM_KEY
   fi
-  unset _LITELLM_ENV_FILE
+  unset _LITELLM_KEY
 fi
+unset _LITELLM_ENV_FILE
 export COMPANION_CALENDAR_JSON="$(node --input-type=module -e '
 import os from "node:os";
 import path from "node:path";

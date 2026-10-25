@@ -37,6 +37,7 @@ a missing DB fails without creating any DB or backup files.
 | `COMPANION_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 | `COMPANION_MARKDOWN_ROOTS_JSON` | `[]` | Strict JSON array of `{ path, alias? }` (see below); unset means no Markdown connector |
 | `COMPANION_MODEL_JSON` | unset (no model) | Strict JSON object `{ adapter, baseUrl, model, apiKey? }` (see M2 below); unset registers no model strategy |
+| `REMIND_LLM_API_KEY` | unset | Bearer token for the remind CLI retention classifier (`activation.llm.apiKeyEnv`). `run-google-readonly.sh` derives it from `.env.litellm` `LITELLM_MASTER_KEY` only when it is not already set, and never logs it. The child inherits it because Companion spawns remind without an `env` override. Same key is already present in `COMPANION_MODEL_JSON` / the LiteLLM proxy config, so the exposure is unchanged |
 | `COMPANION_EXECUTION_RECORDS_JSON` | unset (no private records) | Strict JSON object `{ directory, retentionDays? }`: absolute `directory`, `retentionDays` integer `0..3650` default `30` (see "Private execution records" below); no HTTP surface |
 | `COMPANION_CALENDAR_JSON` | unset (no Calendar) | Strict JSON object `{ selection, connector }` (see C14 below); unset registers no Calendar connector |
 | `COMPANION_CALENDAR_PROFILE` | unset (no profile) | Strict opt-in profile selector (see C14 profile below). Unset keeps the previous behavior (explicit host `mcpDefinitions` injection or fail-closed incomplete opt-in). Only `google-readonly` is accepted; any other value fails startup. Requires `COMPANION_CALENDAR_JSON` describing exactly the adopted candidate. |
@@ -4733,6 +4734,37 @@ npm run provision:llm   -- --dir ~/.local/share/remind/models/qwen25-15b-instruc
 ```
 
 `modelDir` の変更は次回の CLI 起動から効く (Companion restart 不要)。
+
+### 保持判定 (retention classifier) のモデル設定
+
+remind の保持判定 (retention classifier) は、ローカルで完結する埋め込み
+ではなく、メインチャットと同じ LiteLLM プロキシ経由のチャットモデルで
+実行する。`~/.config/remind/memory.config.json` に以下を追加する:
+
+```json
+"activation": {
+  "llm": {
+    "backend": "openai",
+    "baseUrl": "http://127.0.0.1:4000",
+    "model": "local-chat",
+    "apiKeyEnv": "REMIND_LLM_API_KEY"
+  }
+}
+```
+
+- remind は `apiKeyEnv` に指定した**環境変数名**を `process.env[...]` から
+  解決し、`:4000` の LiteLLM へ Bearer として送る。設定ファイルに
+ トークンそのものは書かない。
+- Companion は remind CLI を `memory_cli.ts` の `spawn()` で `env` 指定
+  なしに起動するため、子は Companion の環境をそのまま継承する。
+  `run-google-readonly.sh` は `.env.litellm` の `LITELLM_MASTER_KEY` が
+  あるとき、`REMIND_LLM_API_KEY` が未設定の場合に限り同じ値を export
+  する (既存の export を上書きしない。値は echo しない)。
+- これは新しい鍵の追加ではない。同じ鍵は既に `COMPANION_MODEL_JSON` の
+  `apiKey` として Companion の環境に載っており、LiteLLM 側の
+  `LITELLM_MASTER_KEY` でもあるため、露出は変わらない。
+- `activation.apply` は引き続き `false` (preview-only)。分類器が失敗して
+  も idle 処理は degrade し、記憶の通常利用は止まらない。
 
 
 ## バックアップと復元 (Companion + remind, user systemd)
