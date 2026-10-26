@@ -692,6 +692,22 @@ describe("sealed pi-orch bridge portable protocol/command contract", () => {
     expect(() => accessSync(GUEST, constants.X_OK)).not.toThrow();
   });
 
+  it("accepts dependency mount paths in sealed check args", async () => {
+    const fixture = await makeFixture({ executorBody: "" });
+    const config = structuredClone(fixture.config);
+    config.profile.checks["synthetic-check"].args = [
+      "/deps/node_modules/@biomejs/biome/bin/biome",
+      "check",
+      "/work",
+    ];
+    expect(() => parseOperatorConfig(JSON.stringify(config))).not.toThrow();
+
+    config.profile.checks["synthetic-check"].args = ["/etc/passwd"];
+    expect(() => parseOperatorConfig(JSON.stringify(config))).toThrow(
+      /absolute entries must be \/work, \/scratch, or \/deps/,
+    );
+  });
+
   it.skipIf(process.platform !== "linux")(
     "passes an explicit coordinator-free sealed --tools allowlist in the real-pi branch",
     () => {

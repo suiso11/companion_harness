@@ -508,8 +508,22 @@ try {
   );
 } catch (err) {
   // Failed builds never publish; remove the half-built root so it is not
-  // mistaken for a valid snapshot.
-  rmSync(ROOT, { recursive: true, force: true });
+  // mistaken for a valid snapshot. The dependency materializer seals copied
+  // directories read-only, so restore owner write permissions first: a plain
+  // rm would fail on mode 0555 entries and mask the original build error.
+  try {
+    execFileSync("chmod", ["-R", "u+rwX", ROOT], { stdio: "ignore" });
+  } catch {
+    // Best effort; rmSync below still gets its chance.
+  }
+  try {
+    rmSync(ROOT, { recursive: true, force: true });
+  } catch (cleanupErr) {
+    console.error(
+      "WARNING could not remove failed root:",
+      cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
+    );
+  }
   console.error("FAIL", err instanceof Error ? err.message : String(err));
   process.exit(1);
 }

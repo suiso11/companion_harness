@@ -473,3 +473,14 @@ describe("companion-deploy.sh trial-operator ordering", () => {
     );
   });
 });
+
+describe("build-trial-operator failure cleanup", () => {
+  const source = readFileSync(join(HERE, "build-trial-operator.mts"), "utf8");
+
+  it("restores owner write permissions before removing a failed root", () => {
+    const catchAt = source.lastIndexOf("} catch (err) {");
+    expect(catchAt).toBeGreaterThan(-1);
+    const block = source.slice(catchAt);
+    expect(block).toMatch(/chmod[\s\S]*?u\+rwX[\s\S]*?rmSync\(ROOT/);
+  });
+});
