@@ -26,6 +26,7 @@ import {
   AutonomyControlViewSchema,
   AutonomyHistoryQuerySchema,
   AutonomyListQuerySchema,
+  AutonomyTaskListQuerySchema,
   type BuildDeadlineScheduleResponse,
   BuildDeadlineScheduleResponseSchema,
   ConversationProposalAcceptRequestSchema,
@@ -5871,12 +5872,32 @@ export function createKernelRepository(
     query: unknown = {},
   ): TaskListResponse {
     const parsed = parseOrValidation(
-      () => AutonomyListQuerySchema.parse(query ?? {}),
+      () => AutonomyTaskListQuerySchema.parse(query ?? {}),
       "task list query",
     );
-    const out = autonomyListTasks(db, sessionId, parsed.limit);
+    if (parsed.status === undefined && parsed.kind === undefined) {
+      const out = autonomyListTasks(db, sessionId, parsed.limit);
+      return parseOrValidation(
+        () => TaskListResponseSchema.parse(out),
+        "task list response",
+      );
+    }
+    // SQL filters status/kind BEFORE the limit; the probe row (+1) is
+    // dropped so the public DTO never exceeds the requested page.
+    const out = autonomyListTasksFiltered(
+      db,
+      sessionId,
+      {
+        ...(parsed.status !== undefined ? { status: parsed.status } : {}),
+        ...(parsed.kind !== undefined ? { kind: parsed.kind } : {}),
+      },
+      parsed.limit,
+    );
     return parseOrValidation(
-      () => TaskListResponseSchema.parse(out),
+      () =>
+        TaskListResponseSchema.parse({
+          items: out.items.slice(0, parsed.limit),
+        }),
       "task list response",
     );
   }

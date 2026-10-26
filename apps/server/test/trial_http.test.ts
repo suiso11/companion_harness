@@ -315,6 +315,71 @@ describe("trial HTTP profile facts", () => {
   });
 });
 
+describe("task list filters for the staging form", () => {
+  it("filters kind/status in SQL before the limit", async () => {
+    const fixture = await makeApp(true);
+    try {
+      const { app } = fixture;
+      const created = await post(app, "/api/sessions", {}, randomUUID());
+      expect(created.status).toBe(201);
+      const sessionId = (created.body as { sessionId: string }).sessionId;
+      const base = Date.now();
+      const older = fixture.repo.createAutonomyTask(
+        sessionId,
+        {
+          scope: "default",
+          title: "older actionable task",
+          kind: "task",
+          speaker: "user",
+        },
+        { key: randomUUID(), now: base },
+      );
+      for (let index = 0; index < 55; index += 1) {
+        fixture.repo.createAutonomyTask(
+          sessionId,
+          {
+            scope: "default",
+            title: `chat ${index}`,
+            kind: "chat",
+            speaker: "user",
+          },
+          { key: randomUUID(), now: base + index + 1 },
+        );
+      }
+
+      const unfiltered = await get(app, `/api/sessions/${sessionId}/tasks`);
+      expect(unfiltered.status).toBe(200);
+      expect(
+        (unfiltered.body as { items: { id: string }[] }).items.some(
+          (task) => task.id === older.body.id,
+        ),
+      ).toBe(false);
+
+      const filtered = await get(
+        app,
+        `/api/sessions/${sessionId}/tasks?kind=task&status=open&limit=10`,
+      );
+      expect(filtered.status).toBe(200);
+      const items = (filtered.body as { items: { id: string }[] }).items;
+      expect(items.map((task) => task.id)).toContain(older.body.id);
+      expect(items.length).toBeLessThanOrEqual(10);
+
+      const badStatus = await get(
+        app,
+        `/api/sessions/${sessionId}/tasks?status=unknown`,
+      );
+      expect(badStatus.status).toBe(400);
+      const unknownKey = await get(
+        app,
+        `/api/sessions/${sessionId}/tasks?kind=task&extra=1`,
+      );
+      expect(unknownKey.status).toBe(400);
+    } finally {
+      fixture.close();
+    }
+  });
+});
+
 describe("trial HTTP proposal lifecycle", () => {
   it("stages then approves with the frozen config profile", async () => {
     const fixture = await makeApp(true);

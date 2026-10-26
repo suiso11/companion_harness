@@ -292,11 +292,15 @@ async function refreshForm(sessionId: string): Promise<void> {
   const mine = ++setupSeq;
   const base = `/api/sessions/${encodeURIComponent(sessionId)}`;
   let profileResult: { status: number; body: unknown };
-  let tasksResult: { status: number; body: unknown };
+  let openResult: { status: number; body: unknown };
+  let inProgressResult: { status: number; body: unknown };
   try {
-    [profileResult, tasksResult] = await Promise.all([
+    // Server-side filters run BEFORE the limit, so older actionable tasks
+    // cannot be hidden behind newer unrelated/kinds records.
+    [profileResult, openResult, inProgressResult] = await Promise.all([
       fetchJson(`${base}/trial-profile`),
-      fetchJson(`${base}/tasks?limit=50`),
+      fetchJson(`${base}/tasks?kind=task&status=open&limit=50`),
+      fetchJson(`${base}/tasks?kind=task&status=in_progress&limit=50`),
     ]);
   } catch {
     return;
@@ -319,11 +323,13 @@ async function refreshForm(sessionId: string): Promise<void> {
     expiryLocal = defaultTrialExpiryLocal();
     defaultsApplied = true;
   }
-  const items = (tasksResult.body as { items?: unknown }).items;
-  tasks =
-    tasksResult.status === 200 && Array.isArray(items)
+  const collect = (result: { status: number; body: unknown }): TaskOption[] => {
+    const items = (result.body as { items?: unknown }).items;
+    return result.status === 200 && Array.isArray(items)
       ? items.filter(isTaskOption)
       : [];
+  };
+  tasks = [...collect(openResult), ...collect(inProgressResult)];
   if (taskId !== "" && !tasks.some((task) => task.id === taskId)) {
     taskId = "";
   }

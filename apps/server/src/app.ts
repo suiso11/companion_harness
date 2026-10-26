@@ -19,6 +19,7 @@ import {
   AutonomyControlSetRequestSchema,
   AutonomyHistoryQuerySchema,
   AutonomyListQuerySchema,
+  AutonomyTaskListQuerySchema,
   CancelRunRequestSchema,
   CancelRunResponseSchema,
   ConversationProposalAcceptRequestSchema,
@@ -3924,19 +3925,24 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     if ("response" in session) {
       return session.response;
     }
-    const query = strictQuery(c, ["limit"]);
+    const query = strictQuery(c, ["limit", "status", "kind"]);
     if (!query.ok) {
       return validationError(c);
     }
+    const parsed = AutonomyTaskListQuerySchema.safeParse({
+      ...(query.values.limit !== undefined
+        ? { limit: query.values.limit }
+        : {}),
+      ...(query.values.status !== undefined
+        ? { status: query.values.status }
+        : {}),
+      ...(query.values.kind !== undefined ? { kind: query.values.kind } : {}),
+    });
+    if (!parsed.success) {
+      return validationError(c);
+    }
     try {
-      return c.json(
-        repo.listAutonomyTasks(session.id, {
-          ...(query.values.limit !== undefined
-            ? { limit: query.values.limit }
-            : {}),
-        }),
-        200,
-      );
+      return c.json(repo.listAutonomyTasks(session.id, parsed.data), 200);
     } catch (error) {
       return mapDomainError(c, error);
     }
