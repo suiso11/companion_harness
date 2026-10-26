@@ -48,8 +48,10 @@ export interface ChatCallOptions {
   /**
    * Optional raw response observer invoked after bounded reading and BEFORE
    * JSON parsing/normalization (success and non-2xx bodies alike). Headers
-   * are never exposed. On the streaming path it receives the status plus the
-   * exact received SSE bytes (bounded by the same per-call cap), exactly
+   * are never exposed. On the streaming path it receives the status plus
+   * the received SSE bytes up to the effective per-call cap (a bounded
+   * prefix; SSE framing is not counted against the decoded payload bound),
+   * exactly
    * once: on completion before normalization, before a malformed-chunk /
    * invalid-response failure, and after a non-2xx body is drained.
    * Cancellation (external abort or timeout) reports nothing: a cancelled

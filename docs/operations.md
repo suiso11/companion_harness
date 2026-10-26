@@ -584,8 +584,10 @@ be a strict JSON object with only `{ directory, retentionDays? }`:
 Recorded kinds (private, debug-oriented): `model.request` (provider,
 base/chat URL, model, messages, tool definitions, step settings, system
 prompt, prompt variant, harness fingerprint), `model.response.raw`
-(status plus the exact received body, including streaming SSE bytes and
-malformed bodies; headers are never captured), `model.response`
+(status plus the received body, including streaming SSE bytes and
+malformed bodies; streaming raw bytes are retained only up to the
+effective per-call response cap, so the record stores a bounded prefix
+when SSE framing exceeds it; headers are never captured), `model.response`
 (normalized text/tool calls/stop reason/usage/duration),
 `model.outcome`, `tool.input`, `tool.result`, `tool.error`,
 `tool.handler.result` / `tool.handler.error` (raw handler settlement,

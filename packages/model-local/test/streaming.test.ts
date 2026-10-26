@@ -2,12 +2,14 @@
 // strict malformed handling, abort, bounds, and partial-JSON drafts.
 import { describe, expect, it } from "vitest";
 import { ModelLocalError } from "../src/errors.js";
+import { MAX_RESPONSE_BYTES } from "../src/gateway.js";
 import {
   createOpenAICompatibleGateway,
   normalizeOpenAIResponse,
 } from "../src/openai_compatible.js";
 import {
   extractPartialPartsText,
+  MAX_STREAM_WIRE_BYTES,
   OpenAIStreamAccumulator,
   postChatCompletionStream,
 } from "../src/streaming.js";
@@ -32,6 +34,23 @@ function sseResponseFromChunks(chunks: string[]): Response {
 
 function sseChunk(body: unknown): string {
   return `data: ${JSON.stringify(body)}\n\n`;
+}
+
+/** Realistic per-token OpenAI chunk envelope (~230 raw bytes per delta). */
+function framedSseChunk(content: string, reasoning: string): string {
+  return sseChunk({
+    id: "chatcmpl-stream-regression",
+    object: "chat.completion.chunk",
+    created: 1,
+    model: "test-model",
+    choices: [
+      {
+        index: 0,
+        delta: { content, reasoning_content: reasoning },
+        finish_reason: null,
+      },
+    ],
+  });
 }
 
 function mockFetch(response: Response): {
@@ -642,7 +661,7 @@ describe("strict streaming errors", () => {
 
     const oversized = await streamError(
       [
-        sseChunk({ choices: [{ delta: { content: "1234567890" } }] }),
+        sseChunk({ choices: [{ delta: { content: "12345678901" } }] }),
         "data: [DONE]\n\n",
       ],
       { maxResponseBytes: 10 },
@@ -690,10 +709,10 @@ describe("strict streaming errors", () => {
   });
 
   it("rejects oversize bodies and content with non-stream classes", async () => {
-    // Raw SSE bytes over the per-call cap.
+    // Decoded content over the per-call cap (raw SSE framing is irrelevant).
     const { fetchImpl: capped } = mockFetch(
       sseResponseFromChunks([
-        sseChunk({ choices: [{ delta: { content: "1234567890" } }] }),
+        sseChunk({ choices: [{ delta: { content: "12345678901" } }] }),
         "data: [DONE]\n\n",
       ]),
     );
@@ -755,6 +774,110 @@ describe("strict streaming errors", () => {
       baseRequest({ tools: [{ name: "answer.submit", description: "s" }] }),
     );
   });
+
+  it("accepts long streams whose raw SSE framing exceeds MAX_RESPONSE_BYTES", async () => {
+    // Regression: per-token SSE envelopes (~230 raw bytes here) used to
+    // count against the 1 MiB response cap, failing valid long answers
+    // after ~3-4k tokens. Only the decoded payload may consume that budget.
+    const deltas = 5000;
+    const chunks: string[] = [];
+    for (let i = 0; i < deltas; i += 1) {
+      chunks.push(framedSseChunk("abcdefghij", "klmnopqrst"));
+    }
+    chunks.push("data: [DONE]\n\n");
+    const body = chunks.join("");
+    expect(new TextEncoder().encode(body).byteLength).toBeGreaterThan(
+      MAX_RESPONSE_BYTES,
+    );
+    const { fetchImpl } = mockFetch(sseResponseFromChunks(chunks));
+    const captured: string[] = [];
+    const result = await streamingGateway(fetchImpl).chat(baseRequest(), {
+      onRawResponse: (raw) => {
+        captured.push(raw.body);
+      },
+    });
+    expect(result.text).toHaveLength(deltas * 10);
+    expect(new TextEncoder().encode(result.text).byteLength).toBeLessThan(
+      MAX_RESPONSE_BYTES,
+    );
+    // Raw observation stays prefix-bounded by the decoded cap instead of
+    // retaining the (legitimately larger) SSE wire body.
+    expect(captured).toHaveLength(1);
+    expect((captured[0] as string).length).toBeLessThanOrEqual(
+      MAX_RESPONSE_BYTES,
+    );
+  }, 30_000);
+
+  it("bounds tool names and arguments by the decoded per-call cap", async () => {
+    const { fetchImpl } = mockFetch(
+      sseResponseFromChunks([
+        sseChunk({
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "call_cap",
+                    function: {
+                      name: "notes.search",
+                      arguments: `{"q":"${"x".repeat(100)}"}`,
+                    },
+                  },
+                ],
+              },
+              finish_reason: "tool_calls",
+            },
+          ],
+        }),
+        "data: [DONE]\n\n",
+      ]),
+    );
+    try {
+      await streamingGateway(fetchImpl).chat(
+        baseRequest({ tools: [{ name: "notes.search", description: "s" }] }),
+        { maxResponseBytes: 64 },
+      );
+      expect.unreachable();
+    } catch (error) {
+      expect(error).toMatchObject({
+        code: "invalid_response",
+        invalidResponseCause: "response_too_large",
+      });
+    }
+  });
+
+  it("rejects raw SSE wire bytes beyond MAX_STREAM_WIRE_BYTES", async () => {
+    // Transport-only ceiling: generate >64 MiB from repeated ~64 KiB
+    // ignorable lines without materializing the whole body in memory.
+    const encoder = new TextEncoder();
+    const block = encoder.encode(`${"x".repeat(64 * 1024)}\n`);
+    let sent = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent > MAX_STREAM_WIRE_BYTES) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(block);
+        sent += block.byteLength;
+      },
+    });
+    const fetchImpl: FetchImpl = async () =>
+      new Response(stream, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    try {
+      await streamingGateway(fetchImpl).chat(baseRequest());
+      expect.unreachable();
+    } catch (error) {
+      expect(error).toMatchObject({
+        code: "invalid_response",
+        invalidResponseCause: "response_too_large",
+      });
+    }
+  }, 30_000);
 
   it("rejects a stream that closes before the [DONE] sentinel", async () => {
     // Plain content arrived but the body ended without `data: [DONE]`:

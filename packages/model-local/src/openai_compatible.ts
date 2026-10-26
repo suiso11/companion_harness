@@ -21,6 +21,7 @@ import {
   normalizeNativeToolCallId,
   postJsonNoRedirect,
   resolveGatewayConfig,
+  resolveResponseByteLimit,
   throwInvalidToolArguments,
   toWireToolArgumentsJson,
   utf8ByteLength,
@@ -401,12 +402,13 @@ export function createOpenAICompatibleGateway(
  * error class are identical to the non-streaming path. Provisional pieces
  * (`content`, `reasoning_content`, `answer.submit` draft suffixes, terminal
  * usage) emit via `options.onDelta` best-effort. The same byte/step budgets
- * apply (raw SSE bytes share the per-call cap; text/argument bounds reject
+ * apply (the effective per-call cap bounds the decoded accumulated payload,
+ * not the SSE framing; text/argument bounds reject
  * incrementally); step/wall timeouts abort via `options.signal`.
- * `options.onRawResponse` observes the status and exact received SSE bytes
- * (bounded by that cap) once per call before normalization, including
- * malformed-chunk and drained non-2xx failures; abort/timeout reports
- * nothing.
+ * `options.onRawResponse` observes the status and received SSE bytes
+ * (prefix-bounded by that decoded cap) once per call before normalization,
+ * including malformed-chunk and drained non-2xx failures; abort/timeout
+ * reports nothing.
  */
 async function streamOpenAIChat(options: {
   fetchImpl: Parameters<typeof postJsonNoRedirect>[0]["fetchImpl"];
@@ -449,7 +451,9 @@ async function streamOpenAIChat(options: {
     }));
     body.tool_choice = toolChoice;
   }
-  const accumulator = new OpenAIStreamAccumulator();
+  const accumulator = new OpenAIStreamAccumulator({
+    maxDecodedBytes: resolveResponseByteLimit(callOptions?.maxResponseBytes),
+  });
   let draftEmitted = "";
   const emit = (delta: import("./types.js").ModelStreamDelta): void => {
     const onDelta = callOptions?.onDelta;

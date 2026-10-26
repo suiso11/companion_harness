@@ -623,8 +623,8 @@ export class TrialModelRelay {
     }, this.caps.perCallTimeoutMs);
     let result: ChatResult;
     try {
-      // The gateway enforces its own 1MiB per-call response ceiling, which
-      // matches the relay cap ceiling above: caps are validated, never
+      // The gateway enforces its own 1MiB per-call decoded response ceiling,
+      // which matches the relay cap ceiling above: caps are validated, never
       // silently clamped, so pass the cap through directly.
       result = await this.gateway.chat(
         {
