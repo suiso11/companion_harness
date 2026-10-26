@@ -15,7 +15,7 @@
 // Loop rules (agreed §15.4-§15.5, §15.8, §15.11):
 // - Max 8 `generateTurn` (gateway chat) calls per Run, repair included;
 //   never a ninth call. One repair max (subtype of the step budget).
-// - 120s per step, 300s wall for all steps. No retries, no fallback,
+// - 300s per step, 600s wall for all steps. No retries, no fallback,
 //   no router: a failed step either repairs once (answer/citation shape
 //   only) or fails the Run with a fixed redacted code.
 // - `answer.submit` is a reserved non-Broker terminal protocol: single
@@ -99,10 +99,10 @@ import {
 
 /** Max model steps per Run, repair included (never a ninth call). */
 export const AGENT_MAX_STEPS = MAX_MODEL_STEPS_PER_RUN;
-/** Per-step model timeout in ms (agreed 120s). */
-export const AGENT_STEP_TIMEOUT_MS = 120_000;
-/** Whole-Run wall budget in ms for all generateTurn calls (agreed 300s). */
-export const AGENT_WALL_MS = 300_000;
+/** Per-step model timeout in ms (agreed 300s / 5 min per model step). */
+export const AGENT_STEP_TIMEOUT_MS = 300_000;
+/** Whole-Run wall budget in ms for all generateTurn calls (agreed 600s). */
+export const AGENT_WALL_MS = 600_000;
 /**
  * Minimum wall budget that must remain before an auxiliary voice render is
  * attempted. Below this the run keeps the canonical answer and attaches a
@@ -2756,7 +2756,7 @@ export function createAgentStrategy(
     }
     // Wall budget starts at strategy invocation so synchronous preparation
     // (loadHistory/loadReferenceSummary/ordinal-map/projectPrompt) counts
-    // toward the 300s whole-run deadline (r3946692097). The setTimeout below
+    // toward the 600s whole-run deadline (r3946692097). The setTimeout below
     // cannot fire during synchronous work, so the authoritative clock
     // recheck after preparation (below) decides before any gateway call.
     const wallStart = clock.now();
@@ -3664,7 +3664,7 @@ async function runModelStep(args: {
   // Authoritative late-success gate shared by the race success handler
   // and the post-await recheck below. Engine cancellation wins where
   // already committed (signal aborted or the Run no longer running: the
-  // RunEngine alone owns the terminal lifecycle); then the 300s wall
+  // RunEngine alone owns the terminal lifecycle); then the 600s wall
   // budget (at-or-past the deadline); then the composed step deadline.
   // A late non-cooperative result is discarded with timeout/cancel
   // semantics and never completes the Run past budget.

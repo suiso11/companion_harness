@@ -318,7 +318,7 @@
 
 ### C03 — M2 local model/tool loop/citation
 元台帳状態: E。対象: `companion_harness/packages/kernel/`, `apps/server/`, tests; plan §15。依存: C01–C02。
-- [ ] `C03-01` [確認] local gateway opt-in configとtool submit一件のみ/max 8 repair/wall 300s/step 120sを確認する。
+- [ ] `C03-01` [確認] local gateway opt-in configとtool submit一件のみ/max 8 repair/wall 600s/step 300sを確認する。
 - [ ] `C03-02` [確認] concurrency 3・metadata-only audit・current-run evidence semanticsを確認する。
 - [ ] `C03-03` [確認] citation current-run Grant gate・full-or-snippet policy・cross-source handlingを確認する。
 - [ ] `C03-04` [確認] structural answer bounds/schema validation・cancel/no-prose/no automatic retryを確認する。

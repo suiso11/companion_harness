@@ -1,5 +1,5 @@
 // AgentStrategy wall-abort propagation (PR r3943508125): the Run-scoped
-// 300s wall signal is shared by model steps and ToolBroker invocations, so
+// 600s wall signal is shared by model steps and ToolBroker invocations, so
 // queued/running connector work is aborted/detached when the wall expires
 // before the Run fails with execution_failed (never execution_cancelled).
 // Deterministic: in-memory DBs, scripted gateways, fake timers/clocks.

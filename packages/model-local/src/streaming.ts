@@ -12,7 +12,7 @@
 // MAX_TOOL_CALL_ARGUMENTS_BYTES with the same redacted error classes as
 // the non-streaming path (`invalid_response`, `tool_call_invalid`,
 // `answer_invalid`). Step/wall timeouts arrive via the caller AbortSignal
-// (120s step / 300s wall owned by the kernel); external cancellation
+// (300s step / 600s wall owned by the kernel); external cancellation
 // rethrows the original abort rejection untouched. Malformed chunks reject
 // as `invalid_response` (same class as today). No retry, no fallback, no
 // redirect following, no logging of bodies/prompts/reasoning.

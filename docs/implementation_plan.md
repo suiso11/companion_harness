@@ -1075,7 +1075,7 @@ ModelGateway はプロバイダ応答を正規化し、1 モデルステップ�
 | 同一ステップ内の複数 `answer.submit`（重複回答） | **不正応答として扱う**。いずれも受理せず repair を促す |
 | free text のみ | **回答として受理しない**。構造化提出を促す repair を促す |
 
-- **repair は Run あたり 1 回のみ（one repair max）**。repair も含むすべての generateTurn 呼び出しはモデルステップ予算（§15.5 の max 8・wall 300s）を消費する。repair は subtype の制限であり、9 回目の呼び出しにはならない（never a ninth call）。repair 後も `answer.submit` が得られなければ Run は **failed**（固定・redact 済み error code）になる。
+- **repair は Run あたり 1 回のみ（one repair max）**。repair も含むすべての generateTurn 呼び出しはモデルステップ予算（§15.5 の max 8・wall 600s）を消費する。repair は subtype の制限であり、9 回目の呼び出しにはならない（never a ninth call）。repair 後も `answer.submit` が得られなければ Run は **failed**（固定・redact 済み error code）になる。
 
 ### 15.5 Agent ループの所有権境界と予算（合意）
 
@@ -1141,7 +1141,7 @@ ModelGateway はプロバイダ応答を正規化し、1 モデルステップ�
   - ModelGateway: ネイティブ tool calling 非対応モデルの拒否、loopback 外・リダイレクト・クラウドの拒否、シークレットがログ/監査/例外に現れないこと。
   - `answer.submit`: 単独提出の受理、ToolBroker 非経由・予算不消費、`answer` namespace の予約、one-only、free text JSON fallback が存在しないこと。
   - 応答正規化: 通常 tool のみ / `answer.submit` のみ / 混合・重複・free text の不正扱い、repair 1 回限定（予算内 subtype・9 回目なし）と repair 後失敗の failed 遷移。
-  - 予算: 全 generateTurn 呼び出しが max 8 ステップ・wall 300s・step 120s を消費すること、既存ツール予算の遵守、物理同時実行 3 へのキューイング・要求順返却・件数超過のみでの破棄なし。
+  - 予算: 全 generateTurn 呼び出しが max 8 ステップ・wall 600s・step 300s を消費すること、既存ツール予算の遵守、物理同時実行 3 へのキューイング・要求順返却・件数超過のみでの破棄なし。
   - プロンプト: 最小システム指示・境界保持、選択済み完了 Run のみ投影（未選択/失敗系・tool イベント・生応答の除外）、frozen 参照サマリのみ、`reference.open` の on demand 動作、「これ」の選択サマリ扱い。
   - EvidenceGrant / Citation 構造ゲート: 当該 Run grant 外 rN の拒否、snippet（送信時のみ）/ full（送信時のみ作成・upgrade）の整合、凍結サマリ・所属・過去引用での非付与、意味検証を行わないこと。
   - StructuredAnswer: exact 境界（parts 1-20 / text 1-4000 / citations 0-8 / 全体 16KiB）、不正 citation の repair → fixed failed、silent drop なし、一般会話での citations optional。
@@ -1674,7 +1674,7 @@ CREATE TABLE action_receipts (
 | 2 | M4 実装時 spike の成果物のみ: 採用する **安定版公式 MCP SDK の正確なパッケージ・バージョン（exact pin）** と、**特定の上流 Calendar MCP バインディングとの互換性確認（exact 上流ツール名・canonical input-schema hash の確認を含む）**。※M4 の意味論（パッケージ分割・許可モデル・binding identity・search exact 入力・Snapshot・revision 優先順位・tombstone・接続・セキュリティ、§17）は **合意済み** であり未解決ではない | M4 の PR 計画（spike） |
 | 3 | M3 の実装レベルのビルドチューニングのみ: esbuild バンドルのチューニング（チャンク分割・キャッシュ戦略等）。※M3 の契約（SSE exact ルート・カーソル・ワイヤ形式・poll 250ms・heartbeat 15s・5s backpressure・終了条件・reducer・履歴 exact・Retry/Stop exact・保持・描画・Origin/CSP、§16）は **合意済み** であり、heartbeat/poll 等の値は合意値のため未解決ではない | M3 の PR 計画 |
 | 4 | M1 の実装レベル詳細: Markdown パーサライブラリの選定と対応記法の厳密な範囲のみ。※検索境界値・正規化・順序・snippet 規則・Snapshot 全文保持・STRICT/DDL・EvidenceGrant・Resolver exact order・参照 API は **§14 で合意済み** のため未解決から除いた | M1 の PR 計画 |
-| 5 | M2 の実装レベル詳細: Ollama / OpenAI 互換アダプタのワイヤレベル詳細（正確なエンドポイント・パラメータ命名・ストリーミングの有無）、モデル固有の互換性（native tool calling の挙動差異・usage 表現・capabilities の申告形式）のみ。※予算（repair 含む max 8・wall 300s・step 120s・同時実行 3 キューイング）・`answer.submit` 非 Broker 端末・StructuredAnswer exact 境界・EvidenceGrant 付与規則・`model_calls` metadata-only・固定 error 家族・テスト方針・非目標は **§15 で合意済み** のため未解決から除いた。`model_calls` DDL・モデルイベント型名・エラーコード名の提案表記は計画内の提案として保持し未解決とはしない | M2 の PR 計画 |
+| 5 | M2 の実装レベル詳細: Ollama / OpenAI 互換アダプタのワイヤレベル詳細（正確なエンドポイント・パラメータ命名・ストリーミングの有無）、モデル固有の互換性（native tool calling の挙動差異・usage 表現・capabilities の申告形式）のみ。※予算（repair 含む max 8・wall 600s・step 300s・同時実行 3 キューイング）・`answer.submit` 非 Broker 端末・StructuredAnswer exact 境界・EvidenceGrant 付与規則・`model_calls` metadata-only・固定 error 家族・テスト方針・非目標は **§15 で合意済み** のため未解決から除いた。`model_calls` DDL・モデルイベント型名・エラーコード名の提案表記は計画内の提案として保持し未解決とはしない | M2 の PR 計画 |
 
 ※ 旧一覧にあった「RunEvent の payload 形状・SSE イベント契約」「ToolBroker の予算・dedup 契約」は **§9 ブロッカー 5・6 として合意済み** のため未解決から削除した。※ 旧 #1 の「M3（UI / SSE）の詳細設計」は **§16 として合意済み** のため未解決から除き、実装レベルのチューニングのみ #3 に残した。※ 旧 #1 の「M4（MCP / Calendar）の詳細設計」は **§17 として合意済み** のため未解決から除き、SDK の exact pin と上流 Calendar MCP バインディング互換性のみ #2 に spike 成果物として残した。※ 旧 #1 の「M5（Actions / Approval）の詳細設計」は **§18 として合意済み** のため未解決から除き、上流 write binding / 冪等性 capability と UI 文言のみ #1 に spike 詳細として残した。※ 旧 #5 の「M0 DDL 詳細（§10 の列型・インデックス確定）と冪等性リクエストの正規化・canonicalization の詳細ルール」は **§9 ブロッカー 7 として合意済み** のため未解決から削除した（DDL 自体は提案ラベルのまま、実装時の SQLite 構文検証で機械的調整の可能性を保持）。※ 旧 #4 の「保持期間（retention）・エクスポート・認証・リモートアクセス」と旧 #5 の「スナップショットの保持期間」は **§19（クロスカット運用・リリース計画）として合意済み**（ドメイン自動削除なし・唯一の自動削除は backup 最新 3 世代ローテーション・ユーザー向けエクスポートなし・認証 / リモートアクセスは §8 の非目標）のため未解決から削除し、**以後の番号を繰り上げた**。計画名は確定済みのため名称項目は一覧に含めない。
 

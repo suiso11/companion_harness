@@ -1,11 +1,11 @@
 // Late-success race (r3946441626): a non-cooperative gateway that ignores
 // its AbortSignal and resolves at/after a deadline must not complete the
 // Run past budget. After gateway.chat resolves, the step rechecks the
-// composed step timeout, the 300s wall deadline, and engine cancellation
+// composed step timeout, the 600s wall deadline, and engine cancellation
 // against authoritative state before the result can succeed or reach
 // answer.submit classification. Deterministic: in-memory DBs, deferred
 // (manually-resolved) gateways, injectable fake clocks, real timers (the
-// 120s/300s race timers never fire; only the recheck decides). No network.
+// 300s/600s race timers never fire; only the recheck decides). No network.
 
 import type {
   ChatRequest,
@@ -118,8 +118,8 @@ async function flushToGateway(): Promise<void> {
 }
 
 describe("late gateway success race", () => {
-  it("discards a non-cooperative success resolving exactly at the 120s step deadline", async () => {
-    expect(AGENT_STEP_TIMEOUT_MS).toBe(120_000);
+  it("discards a non-cooperative success resolving exactly at the 300s step deadline", async () => {
+    expect(AGENT_STEP_TIMEOUT_MS).toBe(300_000);
     const { handle, repo } = await setup();
     try {
       let now = T0;
@@ -144,7 +144,7 @@ describe("late gateway success race", () => {
       const pending = strategy(ctxFor(repo, runId));
       await flushToGateway();
       expect(release.resolve).not.toBeNull();
-      // Exact boundary is past budget (fail-closed): the real 120s race
+      // Exact boundary is past budget (fail-closed): the real 300s race
       // timer has not fired, so only the authoritative recheck discards.
       now = T0 + AGENT_STEP_TIMEOUT_MS;
       (release.resolve as (value: ChatResult) => void)(answerResult());
@@ -173,8 +173,8 @@ describe("late gateway success race", () => {
     }
   });
 
-  it("discards a non-cooperative success resolving exactly at the 300s wall deadline", async () => {
-    expect(AGENT_WALL_MS).toBe(300_000);
+  it("discards a non-cooperative success resolving exactly at the 600s wall deadline", async () => {
+    expect(AGENT_WALL_MS).toBe(600_000);
     const { handle, repo } = await setup();
     try {
       let now = T0;
@@ -196,7 +196,7 @@ describe("late gateway success race", () => {
         clock,
         // Oversized step budget isolates the wall: only the wall recheck
         // can discard this result.
-        stepTimeoutMs: 600_000,
+        stepTimeoutMs: 1_200_000,
       });
       const { sessionId, runId } = newRunningTurn(repo, T0);
       const pending = strategy(ctxFor(repo, runId));
@@ -416,8 +416,8 @@ describe("post-validation deadline (r3950636369)", () => {
     });
   }
 
-  it("discards a snapshot whose validation crosses the 120s step deadline", async () => {
-    expect(AGENT_STEP_TIMEOUT_MS).toBe(120_000);
+  it("discards a snapshot whose validation crosses the 300s step deadline", async () => {
+    expect(AGENT_STEP_TIMEOUT_MS).toBe(300_000);
     const { handle, repo } = await setup();
     try {
       let now = T0;
@@ -472,8 +472,8 @@ describe("post-validation deadline (r3950636369)", () => {
     }
   });
 
-  it("discards a snapshot whose validation crosses the 300s wall deadline", async () => {
-    expect(AGENT_WALL_MS).toBe(300_000);
+  it("discards a snapshot whose validation crosses the 600s wall deadline", async () => {
+    expect(AGENT_WALL_MS).toBe(600_000);
     const { handle, repo } = await setup();
     try {
       let now = T0;
@@ -495,7 +495,7 @@ describe("post-validation deadline (r3950636369)", () => {
         clock,
         // Oversized step budget isolates the wall: only the wall recheck
         // can discard this snapshot.
-        stepTimeoutMs: 600_000,
+        stepTimeoutMs: 1_200_000,
       });
       const { sessionId, runId } = newRunningTurn(repo, T0);
       const pending = strategy(ctxFor(repo, runId));
