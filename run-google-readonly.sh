@@ -39,7 +39,7 @@ if [ -f "$_LITELLM_ENV_FILE" ]; then
       export REMIND_LLM_API_KEY="$_LITELLM_KEY"
     fi
     if [ -z "${COMPANION_MODEL_JSON:-}" ]; then
-      COMPANION_MODEL_JSON="$(LITELLM_MASTER_KEY="$_LITELLM_KEY" node --input-type=module -e 'const k=process.env.LITELLM_MASTER_KEY??"";process.stdout.write(JSON.stringify({adapter:"openai-compatible",baseUrl:"http://127.0.0.1:4000",model:"local-chat",reasoningBudgetTokens:256,apiKey:k}));')"
+      COMPANION_MODEL_JSON="$(LITELLM_MASTER_KEY="$_LITELLM_KEY" node --input-type=module -e 'const k=process.env.LITELLM_MASTER_KEY??"";process.stdout.write(JSON.stringify({adapter:"openai-compatible",baseUrl:"http://127.0.0.1:4000",model:"local-chat",apiKey:k}));')"
       export COMPANION_MODEL_JSON
     fi
   fi

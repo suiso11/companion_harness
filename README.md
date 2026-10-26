@@ -1314,17 +1314,16 @@ OpenAI-compatible:
 COMPANION_MODEL_JSON='{
   "adapter": "openai-compatible",
   "baseUrl": "http://127.0.0.1:8000",
-  "model": "local-model",
-  "reasoningBudgetTokens": 256
+  "model": "local-model"
 }'
 ```
 
 `reasoningBudgetTokens` (optional, integer `0..2147483647`) caps
 provider-side thinking on main-agent steps only; auxiliary
 memory/voice/learning calls stay reasoning-off. It is openai-compatible
-only (Ollama rejects it fail-closed). The production launcher already
-builds its default main config with `256`; an explicit
-`COMPANION_MODEL_JSON` wins, so add the field there too. Timeouts, answer
+only (Ollama rejects it fail-closed). The production launcher leaves it
+unset (no thinking cap); an explicit `COMPANION_MODEL_JSON` can add the
+field when a cap is desired. Timeouts, answer
 limits, retries, and model choice are unchanged, and the failure-rate
 effect has not been measured yet. `model.step.failed` keeps the public M2
 code but may add fixed safe fields `gatewayErrorCode`,

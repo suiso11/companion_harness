@@ -303,9 +303,10 @@ connector instance owns **all** configured roots.
   only; Ollama rejects it fail-closed). It is serialized as the top-level
   `reasoning_budget_tokens` field on every main-agent step and repair, and
   never on auxiliary memory/voice/learning calls (those keep their own
-  reasoning-off requests). The stock launcher builds the default main
-  config with `reasoningBudgetTokens: 256`; an already-exported
-  `COMPANION_MODEL_JSON` wins and must add the field itself. Timeouts,
+  reasoning-off requests). The stock launcher leaves
+  `reasoningBudgetTokens` unset (no thinking cap), so long thinking is not
+  truncated by this field; an already-exported `COMPANION_MODEL_JSON` wins
+  and may add the field itself when a cap is desired. Timeouts,
   answer limits, retries, and model choice are unchanged. Efficacy and
   failure-rate impact are **not yet measured**; this only bounds thinking
   tokens.
