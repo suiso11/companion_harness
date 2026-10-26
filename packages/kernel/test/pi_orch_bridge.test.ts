@@ -695,14 +695,16 @@ describe("sealed pi-orch bridge portable protocol/command contract", () => {
   it("accepts dependency mount paths in sealed check args", async () => {
     const fixture = await makeFixture({ executorBody: "" });
     const config = structuredClone(fixture.config);
-    config.profile.checks["synthetic-check"].args = [
+    const check = config.profile.checks["synthetic-check"];
+    expect(check).toBeDefined();
+    check!.args = [
       "/deps/node_modules/@biomejs/biome/bin/biome",
       "check",
       "/work",
     ];
     expect(() => parseOperatorConfig(JSON.stringify(config))).not.toThrow();
 
-    config.profile.checks["synthetic-check"].args = ["/etc/passwd"];
+    check!.args = ["/etc/passwd"];
     expect(() => parseOperatorConfig(JSON.stringify(config))).toThrow(
       /absolute entries must be \/work, \/scratch, or \/deps/,
     );
