@@ -854,7 +854,8 @@ export class TrialModelRelay {
         const guestSystemCount = gatewayMessages.filter(
           (message) => message.role === "system" && message.content.length > 0,
         ).length;
-        const separatorLength = guestSystemCount > 0 ? 2 : 0;
+        // One "\n\n" separator per nonempty guest system part in the merge.
+        const separatorLength = guestSystemCount * 2;
         const contextBudget =
           GATEWAY_MAX_MESSAGE_CONTENT_LENGTH -
           guestSystemLength -

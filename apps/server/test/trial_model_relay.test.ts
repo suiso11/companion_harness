@@ -766,6 +766,49 @@ describe.skipIf(process.platform === "win32")("trial_model_relay", () => {
     }
   });
 
+  it("reserves one separator per nonempty guest system message", async () => {
+    const gw = fakeGateway();
+    const { relay, sock } = await startRelay(testCaps(), gw);
+    try {
+      relay.setPermitted(true);
+      const first = "synthetic first guest system prompt";
+      const second = "synthetic second guest system prompt";
+      const longDesc = `SYNTHETIC long description ${"z".repeat(70_000)}END-OF-DESCRIPTION`;
+      const res = await postUds(
+        sock,
+        chatBody({
+          messages: [
+            { role: "system", content: first },
+            { role: "system", content: second },
+            { role: "user", content: "synthetic user task" },
+          ],
+          tools: [
+            {
+              type: "function",
+              function: {
+                name: "bash",
+                description: longDesc,
+                parameters: { type: "object", properties: {} },
+              },
+            },
+          ],
+          tool_choice: "auto",
+        }),
+      );
+      expect(res.status).toBe(200);
+      const fwd = gw.calls[0] as ChatRequest;
+      expect(() => validateChatRequest(fwd)).not.toThrow();
+      const systems = fwd.messages.filter((m) => m.role === "system");
+      expect(systems.length).toBe(1);
+      expect(systems[0]?.content).toContain(first);
+      expect(systems[0]?.content).toContain(second);
+      expect(systems[0]?.content.length ?? 0).toBeLessThanOrEqual(65_536);
+      expect(systems[0]?.content).not.toContain("END-OF-DESCRIPTION");
+    } finally {
+      await relay.close();
+    }
+  });
+
   it("fails closed with a fixed invalid_request when the guest system prompt alone exceeds the bound", async () => {
     // Edge of the reservation fix: the prompt alone is already at/over the
     // gateway bound, so no truncation can produce a valid merged message.
