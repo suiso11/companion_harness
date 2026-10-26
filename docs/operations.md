@@ -5666,3 +5666,30 @@ realpaths, dependency depot, checks, caps, bridge paths, and model consent,
 plus explicit deployment approval. The patch and manifest in this repository
 are candidate artifacts only; they are not applied and the feature remains
 disabled.
+
+## Chat-driven task and trial proposals (model stages, human decides)
+
+The chat model is still read-only with respect to authority. It may stage
+proposals, but it never creates a purpose/task, grants a trial, or runs a
+workspace command. The normal-agent guidance is:
+
+- `purpose.list` (then `purpose.open`) finds an active goal; explicit user
+  goals are preferred. If a fitting goal exists, `task.propose` stages a
+  task draft under that explicit parent with a `sourceQuote` that must be an
+  exact substring appearing exactly once in the current user message.
+- With no fitting goal, `purpose.propose` stages a goal draft. The user
+  must explicitly adopt it in 候補 before trial authority can exist.
+- When the trial profile is configured (`COMPANION_TRIAL_*` /
+  `COMPANION_AUTONOMY_*`), `trial.propose` is advertised. It stages a
+  DATA-only trial proposal for an open task under an explicit user goal,
+  using the same kernel stager as `POST /api/sessions/:id/trials`. The
+  server injects the frozen workspace alias, `readOnlyMode` (derived from
+  the operation), profile caps, and mandatory checks; the model supplies
+  only objective/acceptance/paths/operation and `expiryMinutes` (10..1440,
+  converted to a whole-second RFC3339 instant from the server clock).
+- A staged proposal is not a grant. The human must accept task/purpose
+  drafts in 候補 and explicitly approve a trial in 試行の提案. The model is
+  instructed to say what it staged and that human action is still required.
+- Authority failures are returned to the model as fixed codes (for example
+  `requires_explicit_user_goal`, `goal_not_active`, `task_not_found`) so it
+  can explain the refusal without bypassing the gate.
