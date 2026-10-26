@@ -417,7 +417,9 @@ function parseLimits(raw) {
     maxModelCallMs: needInt(
       raw.maxModelCallMs,
       "profile.limits.maxModelCallMs",
-      1_000,
+      // A policy may legitimately narrow the per-call timeout to 100ms (the
+      // relay/policy parsers already accept >=100). Never clamp up to 1s.
+      100,
       PROFILE_MAX_MODEL_CALL_MS,
     ),
     maxSourceBytes: needInt(

@@ -277,6 +277,122 @@ describe("autodispatch policy/plan/authority", () => {
     }
   });
 
+  it("accepts empty write scopes for investigate-only policies while keeping write/read guards", async () => {
+    const { handle, repo, sessionId } = await fixture();
+    try {
+      const anchor = completedTurn(
+        repo,
+        sessionId,
+        "Please investigate src/app.ts and report. Go ahead.",
+        NOW + 10,
+      );
+      const parent = {
+        key: randomUUID(),
+        now: NOW + 20,
+        limits,
+        parent: {
+          statement: "Investigate-only standing policy",
+          sourceTurnId: anchor.turnId,
+        },
+      };
+      const policy = repo.createAutodispatchPolicy(
+        sessionId,
+        {
+          workspaceAlias: "companion-harness",
+          operations: ["investigate"],
+          readScopes: ["src"],
+          writeScopes: [],
+          checks: ["lint"],
+          caps,
+          expiresAt: null,
+        },
+        parent,
+      );
+      expect(policy.operations).toEqual(["investigate"]);
+      expect(policy.writeScopes).toEqual([]);
+      expect(policy.readScopes).toEqual(["src"]);
+      const plan = repo.createAutodispatchPlan(
+        sessionId,
+        {
+          policyId: policy.id,
+          operation: "investigate",
+          content: {
+            goal: "Investigate src/app.ts",
+            decisions: [],
+            nongoals: [],
+            steps: [],
+            acceptance: ["report findings"],
+            missing: [],
+            relevantPaths: ["src/app.ts"],
+          },
+          intent: {
+            kind: "execute",
+            quotes: [
+              {
+                turnId: anchor.turnId,
+                runId: anchor.runId,
+                text: "investigate src/app.ts",
+              },
+            ],
+            latestUserTurnId: anchor.turnId,
+            latestUserRunId: anchor.runId,
+          },
+        },
+        { now: NOW + 30 },
+      );
+      expect(plan.plan.status).toBe("frozen");
+      const auth = repo.authorizeAutodispatch(sessionId, plan.plan.id, {
+        profile: profile(),
+        workspaceAlias: "companion-harness",
+        limits,
+        now: NOW + 40,
+      });
+      expect(auth.execution.status).toBe("authorized");
+      const grants = handle.raw
+        .prepare("SELECT COUNT(*) AS n FROM trial_grants")
+        .get() as { n: number };
+      expect(grants.n).toBe(1);
+      const proposal = handle.raw
+        .prepare("SELECT read_only AS readOnly FROM trial_proposals")
+        .get() as { readOnly: number };
+      expect(proposal.readOnly).toBe(1);
+      // A policy that can implement still requires a concrete write scope.
+      expect(() =>
+        repo.createAutodispatchPolicy(
+          sessionId,
+          {
+            workspaceAlias: "companion-harness",
+            operations: ["investigate", "implement"],
+            readScopes: ["src"],
+            writeScopes: [],
+            checks: ["lint"],
+            caps,
+            expiresAt: null,
+          },
+          { ...parent, key: randomUUID() },
+        ),
+      ).toThrow(RepositoryValidationError);
+      // Read scopes remain mandatory even for investigate-only policies.
+      expect(() =>
+        repo.createAutodispatchPolicy(
+          sessionId,
+          {
+            workspaceAlias: "companion-harness",
+            operations: ["investigate"],
+            readScopes: [],
+            writeScopes: [],
+            checks: ["lint"],
+            caps,
+            expiresAt: null,
+          },
+          { ...parent, key: randomUUID() },
+        ),
+      ).toThrow(RepositoryValidationError);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
   it("does not execute for discuss/unclear/negation/out-of-scope", async () => {
     const { handle, repo, sessionId } = await fixture();
     try {

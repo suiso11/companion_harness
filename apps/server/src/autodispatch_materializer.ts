@@ -58,6 +58,10 @@ import {
 } from "../../../scripts/pi-orch-bridge/sealed-profile.mjs";
 import { verifyAutodispatchDependency } from "./autodispatch_dependencies.js";
 import type { AutodispatchConfig } from "./config.js";
+import {
+  type TrialModelRelayCaps,
+  validateTrialModelRelayCaps,
+} from "./trial_model_relay.js";
 
 const SCHEMA_VERSION = 1;
 const MATERIALIZATION_DIGEST_PATTERN = /^[0-9a-f]{64}$/;
@@ -105,6 +109,14 @@ export interface AutodispatchMaterialization {
     readonly createdAt: number;
   };
   readonly profile: TrialProfileSnapshot;
+  /**
+   * Immutable per-execution model budget derived at prepare time from the
+   * frozen policy intersect the operator (autodispatch) caps. Both the guest
+   * profile limits and the HOST trial relay use exactly these values; the
+   * digest below binds them so a post-grant policy/config read can never
+   * widen (or silently replace) the granted budget.
+   */
+  readonly budget: TrialModelRelayCaps;
   /** Exact private bridge operator config. Never returned by host routes. */
   readonly config: OperatorConfig;
   readonly state: {
@@ -400,7 +412,10 @@ export function pruneAutodispatchMaterializations(
       continue;
     }
     if (record.status === "artifact-expired") {
-      retained += 1;
+      // Audit tombstone only: the run artifacts were already removed by the
+      // one-time cleaned -> artifact-expired transition. It must not count
+      // toward the retained-artifact admission budget, and repeat prunes must
+      // not "expire" it again (capacity stays freed). Keep retention.json.
       continue;
     }
     // status prepared: only a terminal known-quiescent grant may release the
@@ -647,6 +662,71 @@ function assertPlanScope(
   return true;
 }
 
+/**
+ * Frozen per-execution model budget: policy caps intersect the operator
+ * (autodispatch) caps field by field. Never widens either side; both the
+ * guest profile limits and the host relay receive this same representation.
+ */
+function deriveEffectiveRelayCaps(
+  policyCaps: {
+    readonly maxModelCalls: number;
+    readonly maxOutputTokens: number;
+    readonly perCallTimeoutMs: number;
+    readonly maxRequestBytes: number;
+    readonly maxResponseBytes: number;
+    readonly maxConcurrent: number;
+  },
+  operatorCaps: {
+    readonly maxModelCalls: number;
+    readonly maxOutputTokens: number;
+    readonly perCallTimeoutMs: number;
+    readonly maxRequestBytes: number;
+    readonly maxResponseBytes: number;
+    readonly maxConcurrent: number;
+  },
+): TrialModelRelayCaps {
+  const caps: TrialModelRelayCaps = Object.freeze({
+    maxModelCalls: Math.min(
+      policyCaps.maxModelCalls,
+      operatorCaps.maxModelCalls,
+    ),
+    maxOutputTokens: Math.min(
+      policyCaps.maxOutputTokens,
+      operatorCaps.maxOutputTokens,
+    ),
+    perCallTimeoutMs: Math.min(
+      policyCaps.perCallTimeoutMs,
+      operatorCaps.perCallTimeoutMs,
+    ),
+    maxRequestBytes: Math.min(
+      policyCaps.maxRequestBytes,
+      operatorCaps.maxRequestBytes,
+    ),
+    maxResponseBytes: Math.min(
+      policyCaps.maxResponseBytes,
+      operatorCaps.maxResponseBytes,
+    ),
+    maxConcurrent: Math.min(
+      policyCaps.maxConcurrent,
+      operatorCaps.maxConcurrent,
+    ),
+  });
+  validateTrialModelRelayCaps(caps);
+  return caps;
+}
+
+function isTrialModelRelayCaps(value: unknown): value is TrialModelRelayCaps {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  try {
+    validateTrialModelRelayCaps(value as TrialModelRelayCaps);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function parseMaterialization(raw: string): AutodispatchMaterialization | null {
   let value: unknown;
   try {
@@ -661,6 +741,7 @@ function parseMaterialization(raw: string): AutodispatchMaterialization | null {
   if (rec.schemaVersion !== SCHEMA_VERSION) return null;
   if (typeof rec.reference !== "object" || rec.reference === null) return null;
   if (typeof rec.profile !== "object" || rec.profile === null) return null;
+  if (!isTrialModelRelayCaps(rec.budget)) return null;
   if (typeof rec.config !== "object" || rec.config === null) return null;
   if (typeof rec.state !== "object" || rec.state === null) return null;
   if (typeof rec.digests !== "object" || rec.digests === null) return null;
@@ -701,6 +782,7 @@ export async function verifyAutodispatchMaterialization(
       schemaVersion: materialization.schemaVersion,
       reference: materialization.reference,
       profile: materialization.profile,
+      budget: materialization.budget,
       config: materialization.config,
       state: materialization.state,
     }) !== materialization.digests.materialization
@@ -719,6 +801,17 @@ export async function verifyAutodispatchMaterialization(
     config = parseOperatorConfig(JSON.stringify(materialization.config));
   } catch {
     return { ok: false, reason: "materialized config unreadable" };
+  }
+  // The guest profile limits and the host relay budget are ONE frozen
+  // representation: their four shared fields must match exactly.
+  const guestLimits = config.profile.limits;
+  if (
+    guestLimits.maxModelCalls !== materialization.budget.maxModelCalls ||
+    guestLimits.maxOutputTokens !== materialization.budget.maxOutputTokens ||
+    guestLimits.maxModelCallMs !== materialization.budget.perCallTimeoutMs ||
+    guestLimits.modelConcurrency !== materialization.budget.maxConcurrent
+  ) {
+    return { ok: false, reason: "materialized model budget drift" };
   }
   let effective: ReturnType<typeof computeEffectiveProfile>;
   try {
@@ -794,6 +887,8 @@ export type TrialMaterializationResolution =
   | {
       readonly kind: "policy";
       readonly profile: TrialProfileSnapshot;
+      /** The exact immutable policy∩operator relay budget from the digest. */
+      readonly caps: TrialModelRelayCaps;
       readonly config: OperatorConfig;
       readonly runDir: string;
       readonly socketHostPath: string;
@@ -897,6 +992,7 @@ export async function resolveAutodispatchMaterialization(
   return {
     kind: "policy",
     profile: Object.freeze({ ...materialization.profile }),
+    caps: Object.freeze({ ...materialization.budget }),
     config: materialization.config,
     runDir: materialization.state.runDir,
     socketHostPath: materialization.state.socketHostPath,
@@ -1106,6 +1202,13 @@ export function createAutodispatchMaterializer(
         deps.config.caps.maxOutputBytes,
         MAX_ARTIFACT_BYTES * 4,
       );
+      // The SAME frozen policy∩operator budget feeds the guest profile, the
+      // host relay, and the digest. No later mutable policy/config read is
+      // consulted after the grant.
+      const budget = deriveEffectiveRelayCaps(
+        input.policy.caps,
+        deps.config.caps,
+      );
       const scopes = policyScopes(deps.config, input.plan).filter(
         (scope) => scope !== ".",
       );
@@ -1223,12 +1326,12 @@ export function createAutodispatchMaterializer(
         modelRoute: material.modelRoute,
         limits: {
           maxDurationMs: appliedTimeoutMs,
-          maxModelCalls: deps.config.caps.maxModelCalls,
-          maxOutputTokens: deps.config.caps.maxOutputTokens,
-          maxModelCallMs: deps.config.caps.perCallTimeoutMs,
+          maxModelCalls: budget.maxModelCalls,
+          maxOutputTokens: budget.maxOutputTokens,
+          maxModelCallMs: budget.perCallTimeoutMs,
           maxSourceBytes: MAX_SOURCE_BYTES,
           maxDependencyBytes: MAX_DEPENDENCY_BYTES,
-          modelConcurrency: deps.config.caps.maxConcurrent,
+          modelConcurrency: budget.maxConcurrent,
           maxProcesses: 256,
           memoryMaxBytes: 2 * 1024 * 1024 * 1024,
           cpuQuotaPercent: 100,
@@ -1312,6 +1415,7 @@ export function createAutodispatchMaterializer(
           createdAt: input.now ?? now(),
         },
         profile,
+        budget,
         config: reparsed,
         state: {
           jobRoot,

@@ -3063,32 +3063,84 @@ export interface QueuedTrialGrant {
   proposalId: string;
 }
 
-/** Oldest queued grant bound to an alias (fail closed on bad alias). */
-export function listQueuedTrialGrants(
-  db: Database.Database,
-  workspaceAlias: string,
-  limit = 1,
-): QueuedTrialGrant[] {
-  const alias = assertWorkspaceAlias(workspaceAlias, "workspaceAlias");
-  const capped = Math.min(Math.max(Math.floor(limit), 1), 100);
-  const rows = db
-    .prepare(
-      "SELECT execution_id, session_id, scope, created_at, proposal_id FROM trial_grants WHERE status='queued' AND workspace_alias=? ORDER BY created_at ASC, execution_id ASC LIMIT ?",
-    )
-    .all(alias, capped) as {
-    execution_id: string;
-    session_id: string;
-    scope: string;
-    created_at: number;
-    proposal_id: string;
-  }[];
-  return rows.map((r) => ({
+/** Stable oldest-first cursor: (created_at, execution_id) total order. */
+export interface QueuedTrialGrantCursor {
+  createdAt: number;
+  executionId: string;
+}
+
+interface QueuedGrantRow {
+  execution_id: string;
+  session_id: string;
+  scope: string;
+  created_at: number;
+  proposal_id: string;
+}
+
+function toQueuedGrant(r: QueuedGrantRow): QueuedTrialGrant {
+  return {
     executionId: r.execution_id,
     sessionId: r.session_id,
     scope: r.scope,
     createdAt: r.created_at,
     proposalId: r.proposal_id,
-  }));
+  };
+}
+
+/**
+ * Oldest queued grants bound to an alias (fail closed on bad alias).
+ *
+ * Optional `after` is an EXCLUSIVE keyset cursor and `through` is an INCLUSIVE
+ * snapshot boundary, both in the same `(created_at, execution_id)` total order
+ * as the returned array. This lets one runner pick page past permanently
+ * blocked heads without re-reading them, while `through` freezes the cohort
+ * that existed when the pick started (new arrivals wait for the next poll and
+ * can never extend one pick without bound).
+ */
+export function listQueuedTrialGrants(
+  db: Database.Database,
+  workspaceAlias: string,
+  limit = 1,
+  after?: QueuedTrialGrantCursor,
+  through?: QueuedTrialGrantCursor,
+): QueuedTrialGrant[] {
+  const alias = assertWorkspaceAlias(workspaceAlias, "workspaceAlias");
+  const capped = Math.min(Math.max(Math.floor(limit), 1), 100);
+  let sql =
+    "SELECT execution_id, session_id, scope, created_at, proposal_id FROM trial_grants WHERE status='queued' AND workspace_alias=?";
+  const params: Array<string | number> = [alias];
+  if (after !== undefined) {
+    sql += " AND (created_at > ? OR (created_at = ? AND execution_id > ?))";
+    params.push(after.createdAt, after.createdAt, after.executionId);
+  }
+  if (through !== undefined) {
+    sql += " AND (created_at < ? OR (created_at = ? AND execution_id <= ?))";
+    params.push(through.createdAt, through.createdAt, through.executionId);
+  }
+  sql += " ORDER BY created_at ASC, execution_id ASC LIMIT ?";
+  params.push(capped);
+  const rows = db.prepare(sql).all(...params) as QueuedGrantRow[];
+  return rows.map(toQueuedGrant);
+}
+
+/**
+ * Newest queued grants' keyset cursor, or null when the alias queue is empty.
+ * Pure SELECT: the runner uses it as the inclusive snapshot boundary for one
+ * pick so a continuously refilled tail cannot extend that pick.
+ */
+export function readQueuedTrialGrantHorizon(
+  db: Database.Database,
+  workspaceAlias: string,
+): QueuedTrialGrantCursor | null {
+  const alias = assertWorkspaceAlias(workspaceAlias, "workspaceAlias");
+  const row = db
+    .prepare(
+      "SELECT execution_id, created_at FROM trial_grants WHERE status='queued' AND workspace_alias=? ORDER BY created_at DESC, execution_id DESC LIMIT 1",
+    )
+    .get(alias) as { execution_id: string; created_at: number } | undefined;
+  return row === undefined
+    ? null
+    : { createdAt: row.created_at, executionId: row.execution_id };
 }
 
 export interface ClaimedTrialWorker {

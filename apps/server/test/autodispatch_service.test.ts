@@ -27,6 +27,7 @@ import {
 } from "../src/autodispatch_service.js";
 import {
   BACKGROUND_OWNER_AUTODISPATCH,
+  BACKGROUND_OWNER_MEMORY_EXTRACTION,
   type BackgroundResourceGate,
   createBackgroundResourceGate,
 } from "../src/background_resource.js";
@@ -125,6 +126,7 @@ function createPolicy(
   repo: KernelRepository,
   sessionId: string,
   sourceTurnId: string,
+  now = NOW + 20,
 ) {
   return repo.createAutodispatchPolicy(
     sessionId,
@@ -139,7 +141,7 @@ function createPolicy(
     },
     {
       key: randomUUID(),
-      now: NOW + 20,
+      now,
       limits: {
         operations: [...CONFIG.operations],
         checks: [...CONFIG.checks],
@@ -196,6 +198,12 @@ async function waitFor(
   throw new Error(`timed out waiting for ${label}`);
 }
 
+/** Deterministic drain turn: no timers/sleeps, just pending macrotasks. */
+async function flushDrain(): Promise<void> {
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+}
+
 async function waitForGateRelease(gate: BackgroundResourceGate): Promise<void> {
   await waitFor(() => {
     const reservation = gate.tryAcquire(BACKGROUND_OWNER_AUTODISPATCH);
@@ -224,6 +232,14 @@ function fakeMaterialization(
       createdAt: now,
     },
     profile: PROFILE,
+    budget: {
+      maxRequestBytes: CAPS.maxRequestBytes,
+      maxModelCalls: CAPS.maxModelCalls,
+      maxOutputTokens: CAPS.maxOutputTokens,
+      maxResponseBytes: CAPS.maxResponseBytes,
+      perCallTimeoutMs: CAPS.perCallTimeoutMs,
+      maxConcurrent: CAPS.maxConcurrent,
+    },
     config: {} as never,
     state: {
       jobRoot: "/synthetic/job",
@@ -453,6 +469,352 @@ describe("autodispatch service cancellation", () => {
       await waitForGateRelease(gate);
       expect(fx.repo.listAutodispatchPlans(sessionId, 100)).toHaveLength(0);
       expect(fx.repo.listAutodispatchExecutions(sessionId, 10)).toHaveLength(0);
+      await service.stop();
+    } finally {
+      fx.close();
+    }
+  });
+});
+describe("autodispatch service background-gate intake queue", () => {
+  it("keeps intake pending while memory holds the shared gate, then plans/grant once", async () => {
+    const fx = await makeFixture();
+    try {
+      resume(fx.repo);
+      const sessionId = fx.repo.createSession({
+        key: randomUUID(),
+        now: NOW,
+      }).body.sessionId;
+      const anchor = completeTurn(
+        fx.repo,
+        sessionId,
+        "Please implement the feature in src/app.ts. Go ahead.",
+        NOW + 10,
+      );
+      expect(createPolicy(fx.repo, sessionId, anchor.turnId).status).toBe(
+        "active",
+      );
+      const gate = createBackgroundResourceGate();
+      const memoryLease = gate.tryAcquire(BACKGROUND_OWNER_MEMORY_EXTRACTION);
+      expect(memoryLease).not.toBeNull();
+      let calls = 0;
+      const planner: AutodispatchPlanner = {
+        propose(input) {
+          calls += 1;
+          return Promise.resolve(proposalFor(input));
+        },
+      };
+      const service = makeService(fx.repo, gate, {
+        planner,
+        materializer: fakeMaterializer(),
+      });
+
+      // Memory owns the shared slot: the completion is queued, not dropped,
+      // and duplicate notifications are deduplicated.
+      service.onRunCompleted(anchor.runId);
+      service.onRunCompleted(anchor.runId);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(calls).toBe(0);
+      expect(fx.repo.listAutodispatchPlans(sessionId, 100)).toHaveLength(0);
+
+      if (memoryLease !== null) gate.release(memoryLease);
+      await waitFor(
+        () =>
+          fx.repo
+            .listAutodispatchExecutions(sessionId, 10)
+            .some((item) => item.status === "authorized"),
+        "one authorized execution after release",
+      );
+      expect(calls).toBe(1);
+      expect(fx.repo.listAutodispatchPlans(sessionId, 100)).toHaveLength(1);
+      expect(fx.repo.listAutodispatchExecutions(sessionId, 10)).toHaveLength(1);
+      await service.stop();
+    } finally {
+      fx.close();
+    }
+  });
+
+  it("drops queued intent invalidated by a newer turn or revoked policy before release", async () => {
+    const fx = await makeFixture();
+    try {
+      resume(fx.repo);
+      const sessionId = fx.repo.createSession({
+        key: randomUUID(),
+        now: NOW,
+      }).body.sessionId;
+      const anchor = completeTurn(
+        fx.repo,
+        sessionId,
+        "Please implement the feature in src/app.ts. Go ahead.",
+        NOW + 10,
+      );
+      const policy = createPolicy(fx.repo, sessionId, anchor.turnId);
+      expect(policy.status).toBe("active");
+      const gate = createBackgroundResourceGate();
+      let calls = 0;
+      const planner: AutodispatchPlanner = {
+        propose(input) {
+          calls += 1;
+          return Promise.resolve(proposalFor(input));
+        },
+      };
+      const service = makeService(fx.repo, gate, {
+        planner,
+        materializer: fakeMaterializer(),
+      });
+
+      // Newer user turn while the slot is held: the queued old intent must
+      // never reach the planner after release.
+      const memoryLease = gate.tryAcquire(BACKGROUND_OWNER_MEMORY_EXTRACTION);
+      service.onRunCompleted(anchor.runId);
+      completeTurn(fx.repo, sessionId, "Do something different.", NOW + 50);
+      if (memoryLease !== null) gate.release(memoryLease);
+      await waitForGateRelease(gate);
+      expect(calls).toBe(0);
+      expect(fx.repo.listAutodispatchPlans(sessionId, 100)).toHaveLength(0);
+
+      // Revoked policy while a fresh intake is queued: same result.
+      const next = completeTurn(
+        fx.repo,
+        sessionId,
+        "Implement the feature again.",
+        NOW + 80,
+      );
+      const nextPolicy = createPolicy(
+        fx.repo,
+        sessionId,
+        next.turnId,
+        NOW + 80,
+      );
+      expect(nextPolicy.status).toBe("active");
+      const held = gate.tryAcquire(BACKGROUND_OWNER_MEMORY_EXTRACTION);
+      expect(held).not.toBeNull();
+      service.onRunCompleted(next.runId);
+      fx.repo.revokeAutodispatchPolicy(sessionId, nextPolicy.id, {
+        now: NOW + 90,
+        reason: "test",
+      });
+      if (held !== null) gate.release(held);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(calls).toBe(0);
+      expect(fx.repo.listAutodispatchExecutions(sessionId, 10)).toHaveLength(0);
+      await service.stop();
+    } finally {
+      fx.close();
+    }
+  });
+
+  it("does not resurrect queued intent after a closed gate is reopened", async () => {
+    const fx = await makeFixture();
+    try {
+      resume(fx.repo);
+      const sessionId = fx.repo.createSession({
+        key: randomUUID(),
+        now: NOW,
+      }).body.sessionId;
+      const anchor = completeTurn(
+        fx.repo,
+        sessionId,
+        "Please implement the feature in src/app.ts. Go ahead.",
+        NOW + 10,
+      );
+      expect(createPolicy(fx.repo, sessionId, anchor.turnId).status).toBe(
+        "active",
+      );
+      const gate = createBackgroundResourceGate();
+      let calls = 0;
+      const planner: AutodispatchPlanner = {
+        propose(input) {
+          calls += 1;
+          return Promise.resolve(proposalFor(input));
+        },
+      };
+      const service = makeService(fx.repo, gate, {
+        planner,
+        materializer: fakeMaterializer(),
+      });
+      const held = gate.tryAcquire(BACKGROUND_OWNER_MEMORY_EXTRACTION);
+      service.onRunCompleted(anchor.runId);
+      gate.close();
+      if (held !== null) gate.release(held);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      gate.reopen();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(calls).toBe(0);
+      expect(fx.repo.listAutodispatchPlans(sessionId, 100)).toHaveLength(0);
+      await service.stop();
+    } finally {
+      fx.close();
+    }
+  });
+
+  it("stop settles a queued intake before DB close and ignores the later release", async () => {
+    const fx = await makeFixture();
+    let closed = false;
+    try {
+      resume(fx.repo);
+      const sessionId = fx.repo.createSession({
+        key: randomUUID(),
+        now: NOW,
+      }).body.sessionId;
+      const anchor = completeTurn(
+        fx.repo,
+        sessionId,
+        "Please implement the feature in src/app.ts. Go ahead.",
+        NOW + 10,
+      );
+      expect(createPolicy(fx.repo, sessionId, anchor.turnId).status).toBe(
+        "active",
+      );
+      const gate = createBackgroundResourceGate();
+      const held = gate.tryAcquire(BACKGROUND_OWNER_MEMORY_EXTRACTION);
+      let calls = 0;
+      const service = makeService(fx.repo, gate, {
+        planner: {
+          propose(input) {
+            calls += 1;
+            return Promise.resolve(proposalFor(input));
+          },
+        },
+        materializer: fakeMaterializer(),
+      });
+      service.onRunCompleted(anchor.runId);
+      await service.stop();
+      const plansBeforeClose = fx.repo.listAutodispatchPlans(sessionId, 100);
+      expect(plansBeforeClose).toHaveLength(0);
+      fx.close();
+      closed = true;
+      // The closed DB must never be touched by a post-stop wake.
+      if (held !== null) gate.release(held);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(calls).toBe(0);
+    } finally {
+      if (!closed) fx.close();
+    }
+  });
+
+  it("drops a queued intake after a pause/resume generation change (0 planner/grant)", async () => {
+    const fx = await makeFixture();
+    try {
+      resume(fx.repo);
+      const sessionId = fx.repo.createSession({
+        key: randomUUID(),
+        now: NOW,
+      }).body.sessionId;
+      const anchor = completeTurn(
+        fx.repo,
+        sessionId,
+        "Please implement the feature in src/app.ts. Go ahead.",
+        NOW + 10,
+      );
+      expect(createPolicy(fx.repo, sessionId, anchor.turnId).status).toBe(
+        "active",
+      );
+      const gate = createBackgroundResourceGate();
+      const memoryLease = gate.tryAcquire(BACKGROUND_OWNER_MEMORY_EXTRACTION);
+      expect(memoryLease).not.toBeNull();
+      let calls = 0;
+      const service = makeService(fx.repo, gate, {
+        planner: {
+          propose(input) {
+            calls += 1;
+            return Promise.resolve(proposalFor(input));
+          },
+        },
+        materializer: fakeMaterializer(),
+      });
+
+      // Capture happens here (resumed generation), then STOP and resume
+      // move the monotonic control version before the slot is released.
+      service.onRunCompleted(anchor.runId);
+      const paused = fx.repo.getAutonomyControlState();
+      fx.repo.setAutonomyControlState(
+        { paused: true, expectedVersion: paused.version },
+        { key: randomUUID(), now: NOW + 40 },
+      );
+      resume(fx.repo);
+      if (memoryLease !== null) gate.release(memoryLease);
+      await flushDrain();
+
+      expect(calls).toBe(0);
+      expect(fx.repo.listAutodispatchPlans(sessionId, 100)).toHaveLength(0);
+      expect(fx.repo.listAutodispatchExecutions(sessionId, 10)).toHaveLength(0);
+      await service.stop();
+    } finally {
+      fx.close();
+    }
+  });
+
+  it("coalesced closed wake never revives old intent and old duplicates stay dead", async () => {
+    const fx = await makeFixture();
+    try {
+      resume(fx.repo);
+      const sessionId = fx.repo.createSession({
+        key: randomUUID(),
+        now: NOW,
+      }).body.sessionId;
+      const anchor = completeTurn(
+        fx.repo,
+        sessionId,
+        "Please implement the feature in src/app.ts. Go ahead.",
+        NOW + 10,
+      );
+      expect(createPolicy(fx.repo, sessionId, anchor.turnId).status).toBe(
+        "active",
+      );
+      const gate = createBackgroundResourceGate();
+      const held = gate.tryAcquire(BACKGROUND_OWNER_MEMORY_EXTRACTION);
+      expect(held).not.toBeNull();
+      let calls = 0;
+      const service = makeService(fx.repo, gate, {
+        planner: {
+          propose(input) {
+            calls += 1;
+            return Promise.resolve(proposalFor(input));
+          },
+        },
+        materializer: fakeMaterializer(),
+      });
+
+      // The async drain is still unwinding while STOP + release arrive in
+      // the SAME tick: the wake coalesces, so only the closed branches can
+      // drop pending intent before a reopen.
+      service.onRunCompleted(anchor.runId);
+      gate.close();
+      if (held !== null) gate.release(held);
+      await flushDrain();
+      gate.reopen();
+      const fresh = gate.tryAcquire(BACKGROUND_OWNER_MEMORY_EXTRACTION);
+      if (fresh !== null) gate.release(fresh);
+      await flushDrain();
+      expect(calls).toBe(0);
+      expect(fx.repo.listAutodispatchPlans(sessionId, 100)).toHaveLength(0);
+
+      // A duplicate of the stopped-old completion must never requeue it.
+      service.onRunCompleted(anchor.runId);
+      await flushDrain();
+      expect(calls).toBe(0);
+      expect(fx.repo.listAutodispatchPlans(sessionId, 100)).toHaveLength(0);
+
+      // A genuinely fresh completed run after resume is still eligible.
+      const next = completeTurn(
+        fx.repo,
+        sessionId,
+        "Please implement the feature again. Go ahead.",
+        NOW + 60,
+      );
+      expect(
+        createPolicy(fx.repo, sessionId, next.turnId, NOW + 70).status,
+      ).toBe("active");
+      service.onRunCompleted(next.runId);
+      await flushDrain();
+      expect(calls).toBe(1);
+      const plans = fx.repo.listAutodispatchPlans(sessionId, 100);
+      expect(plans).toHaveLength(1);
+      expect(
+        fx.repo
+          .listAutodispatchExecutions(sessionId, 10)
+          .some((item) => item.status === "authorized"),
+      ).toBe(true);
       await service.stop();
     } finally {
       fx.close();

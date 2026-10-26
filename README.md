@@ -2308,7 +2308,12 @@ unchanged. Policy scopes, checks, caps, alias, bridge, dependency closure,
 materialization runtime, dependency depot, and model route/identity come from
 operator config, not the model; no model identifier is hardcoded. The configured `checks` must
 match the trial runner's mandatory checks and caps may only narrow the
-operator/trial upper bounds. The dependency root must be a real
+operator/trial upper bounds. At prepare/resolve time the six model-relay caps
+(requests, model calls, output tokens, response bytes, per-call timeout,
+concurrency) are frozen as the policy ∩ operator intersection, hashed with
+the materialization, and used by BOTH the guest profile and the host relay;
+the runner's static limits may tighten but never widen them. The dependency
+root must be a real
 `prepareDependencyClosure` depot (sibling `<root>.closure-manifest.json`,
 native `better-sqlite3`, pinned Node ABI); otherwise dispatch is explicitly
 blocked, never faked. `GET /api/sessions/:id/autodispatch` exposes state and
@@ -2321,7 +2326,17 @@ the exact scope unit and PID are gone; there is deliberately no TTL clear.
 `POST .../stop` revokes active policies and stops intake; it never resumes
 the separate global autonomy control. Activation needs an operator-private
 config plus explicit deployment approval; this repository is not enabled or
-deployed. No scheduler/queue/engine is introduced.
+deployed. No scheduler/queue/engine is introduced. A completion notification
+that cannot obtain the shared background slot stays pending (deduplicated)
+until the gate's existing finite release wake; the expected latest selected
+completed user turn, exact active policy id/version, and the monotonic
+autonomy-control version are captured at notification, so queued work never
+adopts a newer/broader policy and a pause+resume before release invalidates
+it. Completion ids are deduplicated once per process (queued or invalidated
+ones are never re-enqueued), while a genuinely fresh run id stays eligible. The existing
+runner pick pages the stable oldest-first queue with a keyset snapshot, so
+permanently blocked heads cannot starve a later valid manual or policy grant;
+blocked/unknown materialization stays queued (never blanket-revoked).
 
 Runtime requirement: this path is implemented for a **Linux** host only. It
 relies on POSIX permission/ownership semantics plus `O_NOFOLLOW`/`lstat`

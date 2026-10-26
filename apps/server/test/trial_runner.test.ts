@@ -2374,4 +2374,95 @@ describe("trial_runner", () => {
       closeKernelDatabase(handle);
     }
   });
+
+  it("pages past more than ten permanently blocked heads and runs the valid later grant", async () => {
+    const { handle, repo, sessionId } = await makeKernel();
+    try {
+      const alias = "ws";
+      const queueAt = (label: string, approveNow: number) => {
+        const { taskId } = makeAuthority(repo, sessionId, label);
+        const staged = repo.stageTrial(sessionId, stageInput(taskId) as never, {
+          key: randomUUID(),
+          now: approveNow - 1,
+          profile: profile(),
+          workspaceAlias: alias,
+        });
+        const approved = repo.approveTrial(sessionId, staged.body.id, {
+          key: randomUUID(),
+          now: approveNow,
+          profile: profile(),
+          workspaceAlias: alias,
+        });
+        return (approved.body as { executionId: string }).executionId;
+      };
+      const blocked = new Set<string>();
+      for (let i = 0; i < 12; i += 1) {
+        blocked.add(queueAt(`blocked-${i}`, NOW + 20 + i));
+      }
+      const valid = queueAt("valid", NOW + 100);
+      expect(blocked.has(valid)).toBe(false);
+
+      const identity = {
+        pid: 6611,
+        bootId: "boot-keyset",
+        processStartTicks: "771",
+      };
+      const exited = { current: false };
+      const { spawnImpl } = createFakeSpawn();
+      const spawnProxy = ((cmd: string, args: string[], opts: unknown) => {
+        const child = (
+          spawnImpl as unknown as (
+            c: string,
+            a: string[],
+            o: unknown,
+          ) => FakeChild
+        )(cmd, args, opts);
+        child.pid = identity.pid;
+        const origEmit = child.emit.bind(child);
+        child.emit = ((event: string, ...rest: unknown[]) => {
+          if (event === "exit") exited.current = true;
+          return (origEmit as (...a: unknown[]) => boolean)(event, ...rest);
+        }) as FakeChild["emit"];
+        return child;
+      }) as unknown as TrialRunnerSpawn;
+      const { factory } = createFakeRelayFactory();
+      const { logger } = createCollectingLogger("debug");
+      const dir = mkdtempSync(join(tmpdir(), "trial-run-"));
+      const runner = new TrialRunner({
+        repo,
+        config: {
+          ...runnerConfigBase("ws", writeTemplate(dir), join(dir, "runs")),
+          resolveMaterialization: async ({ executionId }) =>
+            blocked.has(executionId)
+              ? { kind: "blocked", reason: "synthetic-unavailable" }
+              : { kind: "manual" },
+        },
+        isForegroundBusy: () => false,
+        logger,
+        observer: createObserver({
+          scopeBeforeExit: "active",
+          scopeAfterExit: "gone",
+          identity,
+          exited: () => exited.current,
+        }),
+        createRelay: factory,
+        spawnImpl: spawnProxy,
+        clock: makeClock(),
+      });
+      const out = await runner.runNext();
+      expect(out).toMatchObject({ ran: true, executionId: valid });
+      expect(out.authorized).toBe(true);
+      // Blocked/unknown materialization is retained, never blanket-expired.
+      const queued = repo.listQueuedTrialGrantsForAlias(alias, 100);
+      expect(queued.map((g) => g.executionId).sort()).toEqual(
+        [...blocked].sort(),
+      );
+      // The blocked heads are behind the cursor: a second pick does not
+      // re-enter the resolver for the same successful row, and the queue
+      // snapshot remains finite.
+      expect(repo.listQueuedTrialGrantsForAlias(alias, 100)).toHaveLength(12);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
 });

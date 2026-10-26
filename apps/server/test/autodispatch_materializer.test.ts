@@ -3,8 +3,8 @@
 // pinned "Pi" runtime path, and a real migrated kernel repository. No model,
 // live Pi, production source, network, or user task is used.
 
+import { spawn as nodeSpawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { EventEmitter } from "node:events";
 import {
   chmodSync,
   existsSync,
@@ -16,6 +16,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -46,7 +47,6 @@ import { TrialModelRelay } from "../src/trial_model_relay.js";
 import {
   TrialRunner,
   type TrialRunnerObserverFns,
-  type TrialRunnerRelay,
   type TrialRunnerSpawn,
 } from "../src/trial_runner.js";
 
@@ -74,7 +74,11 @@ interface Fixture {
   readonly executor: string;
   readonly check: string;
   readonly depSource: string;
-  readonly config: AutodispatchConfig;
+  readonly config: AutodispatchConfig & {
+    readonly materialization: NonNullable<
+      AutodispatchConfig["materialization"]
+    >;
+  };
   readonly cleanup: () => void;
 }
 
@@ -105,6 +109,71 @@ function removeTree(path: string): void {
   };
   walk(path);
   rmSync(path, { recursive: true, force: true });
+}
+
+function postRelay(
+  sockPath: string,
+  body: string,
+): Promise<{ status: number; text: string }> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      {
+        socketPath: sockPath,
+        path: "/v1/chat/completions",
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "content-length": String(Buffer.byteLength(body)),
+        },
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (c: Buffer) => chunks.push(c));
+        res.on("end", () =>
+          resolve({
+            status: res.statusCode ?? 0,
+            text: Buffer.concat(chunks).toString("utf8"),
+          }),
+        );
+        res.on("error", reject);
+      },
+    );
+    req.on("error", reject);
+    req.end(body);
+  });
+}
+
+function relayChatBody(over: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    model: "companion/companion-current",
+    messages: [{ role: "user", content: "hi" }],
+    ...over,
+  });
+}
+
+function relayTestGateway(
+  onChat?: (options?: { signal?: AbortSignal }) => Promise<void> | void,
+): ModelGateway & { calls: Array<{ maxOutputTokens?: number }> } {
+  const calls: Array<{ maxOutputTokens?: number }> = [];
+  return {
+    calls,
+    provider: "openai-compatible",
+    capabilities: { toolCalling: true },
+    baseUrl: "http://127.0.0.1:9",
+    chatUrl: "http://127.0.0.1:9/v1/chat/completions",
+    async chat(
+      request: { maxOutputTokens?: number },
+      options?: { signal?: AbortSignal },
+    ) {
+      calls.push(
+        request.maxOutputTokens === undefined
+          ? {}
+          : { maxOutputTokens: request.maxOutputTokens },
+      );
+      if (onChat !== undefined) await onChat(options);
+      return { text: "hello", toolCalls: [], stopReason: "stop" as const };
+    },
+  } as unknown as ModelGateway & { calls: Array<{ maxOutputTokens?: number }> };
 }
 
 function makeFixture(): Fixture {
@@ -147,7 +216,7 @@ function makeFixture(): Fixture {
     join(depSource, "node_modules", "better-sqlite3", "package.json"),
     '{"name":"better-sqlite3"}\n',
   );
-  const config: AutodispatchConfig = {
+  const config = {
     enabled: true,
     workspaceAlias: "companion-harness",
     sourceRoot: source,
@@ -170,6 +239,10 @@ function makeFixture(): Fixture {
       maxDurationMs: 60_000,
       modelRoute: "local",
     },
+  } satisfies AutodispatchConfig & {
+    readonly materialization: NonNullable<
+      AutodispatchConfig["materialization"]
+    >;
   };
   return {
     dir,
@@ -322,7 +395,7 @@ linuxDescribe("autodispatch materializer (Linux)", () => {
       const config: AutodispatchConfig = {
         ...fx.config,
         materialization: {
-          ...fx.config.materialization!,
+          ...fx.config.materialization,
           stateDir: longStateDir,
         },
       };
@@ -403,7 +476,7 @@ linuxDescribe("autodispatch materializer (Linux)", () => {
       const noDeps = {
         ...fx.config,
         materialization: {
-          ...fx.config.materialization!,
+          ...fx.config.materialization,
           dependencySourceNodeModules: null,
         },
       } as AutodispatchConfig;
@@ -454,13 +527,217 @@ linuxDescribe("autodispatch materializer (Linux)", () => {
         now: NOW,
       });
       if (!result2.ok) throw new Error("prepare failed");
-      const clone = JSON.parse(
-        JSON.stringify(result2.materialization),
-      ) as typeof result2.materialization;
-      (clone.profile as { configFingerprint: string }).configFingerprint =
-        "0".repeat(64);
-      const tamperedProfile = await verifyAutodispatchMaterialization(clone);
+      const cloneMaterialization = () =>
+        JSON.parse(
+          JSON.stringify(result2.materialization),
+        ) as typeof result2.materialization;
+      // Each tamper starts from a FRESH valid clone: reusing a clone already
+      // invalidated by the profile change would pass for the wrong reason.
+      const profileClone = cloneMaterialization();
+      (
+        profileClone.profile as { configFingerprint: string }
+      ).configFingerprint = "0".repeat(64);
+      const tamperedProfile =
+        await verifyAutodispatchMaterialization(profileClone);
       expect(tamperedProfile.ok).toBe(false);
+      const budgetClone = cloneMaterialization();
+      (budgetClone.budget as { maxModelCalls: number }).maxModelCalls = 9;
+      const tamperedBudget =
+        await verifyAutodispatchMaterialization(budgetClone);
+      expect(tamperedBudget.ok).toBe(false);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it("derives the policy∩operator relay budget and the real relay enforces it", async () => {
+    const fx = makeFixture();
+    try {
+      const narrowPolicy = {
+        ...POLICY,
+        caps: {
+          ...CAPS,
+          maxModelCalls: 1,
+          maxOutputTokens: 32,
+          maxRequestBytes: 256,
+          maxResponseBytes: 512,
+        },
+      };
+      const result = await materializerFor(fx).prepare({
+        plan: PLAN,
+        policy: narrowPolicy,
+        executionId: EXECUTION_ID,
+        now: NOW,
+      });
+      if (!result.ok) throw new Error("prepare failed");
+      const m = result.materialization;
+      // Policy narrows the operator caps (1 < 8 etc.): never the reverse.
+      expect(m.budget).toMatchObject({
+        maxModelCalls: 1,
+        maxOutputTokens: 32,
+        maxRequestBytes: 256,
+        maxResponseBytes: 512,
+        perCallTimeoutMs: CAPS.perCallTimeoutMs,
+        maxConcurrent: 1,
+      });
+      // The guest profile carries the same four frozen limits.
+      expect(
+        (m.config.profile.limits as Record<string, number>).maxModelCalls,
+      ).toBe(1);
+      expect(
+        (m.config.profile.limits as Record<string, number>).maxOutputTokens,
+      ).toBe(32);
+      expect(
+        (m.config.profile.limits as Record<string, number>).maxModelCallMs,
+      ).toBe(CAPS.perCallTimeoutMs);
+      expect(
+        (m.config.profile.limits as Record<string, number>).modelConcurrency,
+      ).toBe(1);
+
+      const gw = relayTestGateway();
+      const relay = new TrialModelRelay({
+        sockPath: m.state.socketHostPath,
+        gateway: gw,
+        fixedModel: "test-model",
+        caps: m.budget,
+      });
+      await relay.start();
+      try {
+        relay.setPermitted(true);
+        const oversize = await postRelay(
+          m.state.socketHostPath,
+          relayChatBody({
+            messages: [{ role: "user", content: "x".repeat(1024) }],
+          }),
+        );
+        expect(oversize.status).toBe(413);
+        expect(JSON.parse(oversize.text).error.message).toBe(
+          "request_cap_exceeded",
+        );
+        expect(gw.calls.length).toBe(0);
+
+        const first = await postRelay(m.state.socketHostPath, relayChatBody());
+        expect(first.status).toBe(200);
+        expect(gw.calls.length).toBe(1);
+        // Frozen maxOutputTokens (32) is forwarded, not the operator 256.
+        expect(gw.calls[0]?.maxOutputTokens).toBe(32);
+
+        const second = await postRelay(m.state.socketHostPath, relayChatBody());
+        expect(second.status).toBe(429);
+        expect(JSON.parse(second.text).error.message).toBe(
+          "model_call_cap_exceeded",
+        );
+        expect(gw.calls.length).toBe(1);
+      } finally {
+        await relay.close();
+      }
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it("frozen concurrency 1 rejects a second overlapping relay call until the first settles", async () => {
+    const fx = makeFixture();
+    try {
+      const config: AutodispatchConfig = {
+        ...fx.config,
+        caps: { ...CAPS, maxConcurrent: 4 },
+      };
+      const result = await createAutodispatchMaterializer({
+        config,
+        runtimeDir: fx.runtimeDir,
+        currentModel: "test-model",
+        available: true,
+        enabled: true,
+        disclosedWholeRepoRead: true,
+        now: () => NOW,
+      }).prepare({
+        plan: PLAN,
+        policy: { ...POLICY, caps: { ...CAPS, maxConcurrent: 1 } },
+        executionId: EXECUTION_ID,
+        now: NOW,
+      });
+      if (!result.ok) throw new Error("prepare failed");
+      const m = result.materialization;
+      expect(m.budget.maxConcurrent).toBe(1);
+
+      let release: (() => void) | undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const gw = relayTestGateway(() => gate);
+      const relay = new TrialModelRelay({
+        sockPath: m.state.socketHostPath,
+        gateway: gw,
+        fixedModel: "test-model",
+        caps: m.budget,
+      });
+      await relay.start();
+      try {
+        relay.setPermitted(true);
+        const first = postRelay(m.state.socketHostPath, relayChatBody());
+        const deadline = Date.now() + 2000;
+        while (gw.calls.length === 0 && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        expect(gw.calls.length).toBe(1);
+        const second = await postRelay(m.state.socketHostPath, relayChatBody());
+        expect(second.status).toBe(429);
+        expect(JSON.parse(second.text).error.message).toBe("relay_busy");
+        release?.();
+        expect((await first).status).toBe(200);
+      } finally {
+        await relay.close();
+      }
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it("frozen per-call timeout aborts the actual relay request at the narrowed 100ms", async () => {
+    const fx = makeFixture();
+    try {
+      const result = await materializerFor(fx).prepare({
+        plan: PLAN,
+        policy: { ...POLICY, caps: { ...CAPS, perCallTimeoutMs: 100 } },
+        executionId: EXECUTION_ID,
+        now: NOW,
+      });
+      if (!result.ok) throw new Error("prepare failed");
+      const m = result.materialization;
+      expect(m.budget.perCallTimeoutMs).toBe(100);
+      expect(
+        (m.config.profile.limits as Record<string, number>).maxModelCallMs,
+      ).toBe(100);
+      const gw = relayTestGateway(
+        (options) =>
+          new Promise<void>((_resolve, reject) => {
+            options?.signal?.addEventListener(
+              "abort",
+              () => reject(new Error("aborted")),
+              { once: true },
+            );
+          }),
+      );
+      const relay = new TrialModelRelay({
+        sockPath: m.state.socketHostPath,
+        gateway: gw,
+        fixedModel: "test-model",
+        caps: m.budget,
+      });
+      await relay.start();
+      try {
+        relay.setPermitted(true);
+        const started = Date.now();
+        const res = await postRelay(m.state.socketHostPath, relayChatBody());
+        const elapsed = Date.now() - started;
+        expect(res.status).toBe(504);
+        expect(JSON.parse(res.text).error.message).toBe("model_timeout");
+        expect(elapsed).toBeLessThan(2_000);
+        expect(gw.calls.length).toBe(1);
+      } finally {
+        await relay.close();
+      }
     } finally {
       fx.cleanup();
     }
@@ -596,7 +873,14 @@ linuxDescribe(
         }
         expect(authorized).toBeDefined();
         expect(policy.status).toBe("active");
-        expect(authorized?.executionId).not.toBeNull();
+        const authorizedExecutionId = authorized?.executionId;
+        expect(authorizedExecutionId).not.toBeNull();
+        if (
+          authorizedExecutionId === undefined ||
+          authorizedExecutionId === null
+        ) {
+          throw new Error("authorized execution missing");
+        }
         expect(authorized?.materialization?.sourceManifestDigest).toMatch(
           /^[0-9a-f]{64}$/,
         );
@@ -610,7 +894,7 @@ linuxDescribe(
           },
           {
             sessionId,
-            executionId: authorized!.executionId!,
+            executionId: authorizedExecutionId,
             proposalId: "",
           },
         );
@@ -619,7 +903,7 @@ linuxDescribe(
           expect(resolved.profile.configFingerprint).toMatch(/^[0-9a-f]{64}$/);
           expect(resolved.socketHostPath.startsWith(fx.runtimeDir)).toBe(true);
           expect(resolved.socketHostPath).not.toContain(
-            join("jobs", authorized!.executionId!),
+            join("jobs", authorizedExecutionId),
           );
           expect(statSync(resolved.runDir).isDirectory()).toBe(true);
         }
@@ -629,24 +913,56 @@ linuxDescribe(
         fx.cleanup();
       }
     });
-    it("uses the exact narrow non-whole-second policy timeout for profile, wire, and observed permit", async () => {
+    it("enforces the materialized 1-call policy through the production runner relay", async () => {
       const base = makeFixture();
       const fx: Fixture = {
         ...base,
         config: {
           ...base.config,
           materialization: {
-            ...base.config.materialization!,
+            ...base.config.materialization,
             maxDurationMs: 30_000,
           },
         },
       };
-      // Policy is narrower than BOTH operator caps and not a whole second. The
-      // actual profile/budget/observed unit must all be exactly 12_345ms.
+      // Narrow policy: exactly one model call, non-whole-second timeout. The
+      // production TrialRunner must default-construct the REAL relay (no
+      // injected/fake factory) and pass the materialized budget through.
       const narrowCaps = {
         ...CAPS,
+        maxModelCalls: 1,
         timeoutMs: 12_345,
       };
+      const childScript = join(fx.dir, "trial-child.mjs");
+      write(
+        childScript,
+        [
+          'import { readFileSync, writeFileSync } from "node:fs";',
+          'import { request } from "node:http";',
+          'import { dirname, join } from "node:path";',
+          "const configPath = process.argv[process.argv.length - 1];",
+          'const config = JSON.parse(readFileSync(configPath, "utf8"));',
+          "const sockPath = config.profile.model.sockHostPath;",
+          'const req = JSON.parse(readFileSync(0, "utf8").trim());',
+          "function post() {",
+          "  return new Promise((resolve, reject) => {",
+          '    const body = JSON.stringify({ model: "companion/companion-current", messages: [{ role: "user", content: "hi" }] });',
+          '    const r = request({ socketPath: sockPath, path: "/v1/chat/completions", method: "POST", headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body) } }, (res) => {',
+          "      const chunks = [];",
+          '      res.on("data", (c) => chunks.push(c));',
+          '      res.on("end", () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString("utf8") }));',
+          "    });",
+          '    r.on("error", reject);',
+          "    r.end(body);",
+          "  });",
+          "}",
+          "const first = await post();",
+          "const second = await post();",
+          'writeFileSync(join(dirname(configPath), "child-requests.json"), JSON.stringify({ first, second }));',
+          'const checks = (req.requiredChecks || ["lint"]).map((id) => ({ id, ok: true }));',
+          'process.stdout.write(JSON.stringify({ taskHash: req.taskHash, exitCode: 0, checks, outputMatched: true, noTimeout: true }) + "\\n");',
+        ].join("\n"),
+      );
       const db = await openRepo();
       try {
         const repo = db.repo;
@@ -755,14 +1071,20 @@ linuxDescribe(
           await new Promise((resolve) => setTimeout(resolve, 10));
         }
         expect(executionId).not.toBeNull();
+        if (executionId === null) throw new Error("execution missing");
         const stored = repo.readAutodispatchMaterialization(
           sessionId,
-          executionId as string,
+          executionId,
         );
         const materialization = JSON.parse(
           stored?.materializationJson as string,
         ) as {
           profile: { timeoutMs: number };
+          budget: {
+            maxModelCalls: number;
+            perCallTimeoutMs: number;
+            maxConcurrent: number;
+          };
           state: {
             jobRoot: string;
             runDir: string;
@@ -771,6 +1093,7 @@ linuxDescribe(
           };
         };
         expect(materialization.profile.timeoutMs).toBe(12_345);
+        expect(materialization.budget.maxModelCalls).toBe(1);
 
         const identity = {
           pid: 5252,
@@ -792,40 +1115,16 @@ linuxDescribe(
                 },
           readIdentity: async () => (exited.current ? "gone" : { ...identity }),
         };
-        const relayFactory = (sockPath: string): TrialRunnerRelay => ({
-          path: sockPath,
-          setPermitted() {},
-          revoke() {},
-          async start() {},
-          async close() {},
-        });
-        const spawnImpl = (() => {
-          const child = new EventEmitter() as EventEmitter & {
-            pid?: number;
-            stdin: { write: (chunk: string) => void; end: () => void };
-            stdout: EventEmitter;
-            stderr: EventEmitter;
-            stdio: unknown[];
-            kill: () => void;
-          };
-          child.pid = identity.pid;
-          child.stdin = { write() {}, end() {} };
-          child.stdout = new EventEmitter();
-          child.stderr = new EventEmitter();
-          child.stdio = [
-            child.stdin,
-            child.stdout,
-            child.stderr,
-            { destroy() {} },
-          ];
-          child.kill = () => {
+        const gatewayCalls: number[] = [];
+        const spawnImpl = ((
+          command: string,
+          args: string[],
+          options: unknown,
+        ) => {
+          const child = nodeSpawn(command, args, options as never);
+          child.once("exit", () => {
             exited.current = true;
-            child.emit("exit", 1, null);
-          };
-          setTimeout(() => {
-            exited.current = true;
-            child.emit("exit", 1, null);
-          }, 20);
+          });
           return child;
         }) as unknown as TrialRunnerSpawn;
         const { logger } = createCollectingLogger("debug");
@@ -833,7 +1132,7 @@ linuxDescribe(
           repo,
           config: {
             nodeRealpath: process.execPath,
-            bridgeScriptPath: "/fake/bridge.mjs",
+            bridgeScriptPath: childScript,
             bridgeConfigTemplatePath: "/fake/template.json",
             systemctlRealpath: "/usr/bin/systemctl",
             xdgRuntimeDir: "/run/user/1000",
@@ -849,6 +1148,8 @@ linuxDescribe(
               timeoutMs: CAPS.timeoutMs,
               maxOutputBytes: CAPS.maxOutputBytes,
             },
+            // Deliberately the static operator ceiling (8): the runner must
+            // use the materialized policy budget (1) instead.
             relayCaps: {
               maxRequestBytes: 1_048_576,
               maxModelCalls: 8,
@@ -864,6 +1165,7 @@ linuxDescribe(
               baseUrl: "http://127.0.0.1:9",
               chatUrl: "http://127.0.0.1:9/v1/chat/completions",
               async chat() {
+                gatewayCalls.push(Date.now());
                 return {
                   text: "stub",
                   toolCalls: [],
@@ -892,21 +1194,42 @@ linuxDescribe(
           isForegroundBusy: () => false,
           logger,
           observer,
-          createRelay: relayFactory,
           spawnImpl,
           clock: () => NOW + 100,
         });
         const result = await runner.runNext();
         expect(result.executionId).toBe(executionId);
-        const intent = repo.readTrialLaunchIntent(
-          sessionId,
-          executionId as string,
-        );
+        expect(result.authorized).toBe(true);
+        expect(result.outcome).toBe("done");
+        // The real child made two actual OpenAI requests over the resolved
+        // materialized UDS: the first forwarded, the second hit the frozen
+        // 1-call consumer cap (429), and the real gateway was called once.
+        const childRequests = JSON.parse(
+          readFileSync(
+            join(materialization.state.runDir, "child-requests.json"),
+            "utf8",
+          ),
+        ) as {
+          first: { status: number; body: string };
+          second: { status: number; body: string };
+        };
+        expect(childRequests.first.status).toBe(200);
+        expect(childRequests.second.status).toBe(429);
+        expect(
+          (
+            JSON.parse(childRequests.second.body) as {
+              error: { message: string };
+            }
+          ).error.message,
+        ).toBe("model_call_cap_exceeded");
+        expect(gatewayCalls).toHaveLength(1);
+
+        const intent = repo.readTrialLaunchIntent(sessionId, executionId);
         if (intent.request === null)
           throw new Error("claimed launch intent request missing");
         expect(intent.request.budget.timeoutMs).toBe(12_345);
         expect(
-          repo.readTrialLaunchPermit(sessionId, executionId as string),
+          repo.readTrialLaunchPermit(sessionId, executionId),
         ).not.toBeNull();
         // Gone was observed before cleanup: heavy copies are reclaimed, the
         // small run dir + retention metadata stay for review.
@@ -986,6 +1309,68 @@ linuxDescribe(
             ),
           ).status,
         ).toBe("cleaned");
+      } finally {
+        db.close();
+        fx.cleanup();
+      }
+    });
+
+    it("does not let expired audit tombstones consume retained-artifact admission", async () => {
+      const fx = makeFixture();
+      const db = await openRepo();
+      try {
+        const repo = db.repo;
+        const jobsRoot = join(fx.stateDir, "jobs");
+        mkdirSync(jobsRoot, { recursive: true, mode: 0o700 });
+        for (let i = 0; i < 25; i += 1) {
+          const executionId = `expired-audit-${i}`;
+          const jobRoot = join(jobsRoot, executionId);
+          mkdirSync(jobRoot, { recursive: true, mode: 0o700 });
+          write(
+            join(jobRoot, "retention.json"),
+            JSON.stringify({
+              schemaVersion: 1,
+              executionId,
+              sessionId: "tombstone-session",
+              createdAt: NOW,
+              status: "artifact-expired",
+              expiredAt: NOW,
+            }),
+          );
+        }
+        const pruned = pruneAutodispatchMaterializations(
+          repo,
+          fx.config,
+          NOW + 100,
+        );
+        // Tombstones are audit-only and free capacity; they are not
+        // "re-expired" on every prune.
+        expect(pruned.retained).toBe(0);
+        expect(pruned.expired).toBe(0);
+        expect(
+          readFileSync(
+            join(jobsRoot, "expired-audit-0", "retention.json"),
+            "utf8",
+          ),
+        ).toContain("artifact-expired");
+
+        const validExecution = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+        const valid = await materializerFor(fx).prepare({
+          plan: PLAN,
+          policy: POLICY,
+          executionId: validExecution,
+          now: NOW + 200,
+        });
+        if (!valid.ok) throw new Error("prepare failed");
+        const after = pruneAutodispatchMaterializations(
+          repo,
+          fx.config,
+          NOW + 300,
+        );
+        // A genuinely prepared active job still counts and is retained.
+        expect(after.retained).toBe(1);
+        expect(after.prepared).toBe(1);
+        expect(existsSync(valid.materialization.state.snapshotRoot)).toBe(true);
       } finally {
         db.close();
         fx.cleanup();

@@ -285,9 +285,15 @@ function normalizeLiteralPath(value: unknown): string {
   }
   return value;
 }
-function normalizePaths(value: readonly string[], what: string): string[] {
-  if (!Array.isArray(value) || value.length < 1 || value.length > MAX_PATHS) {
-    throw new RepositoryValidationError(`${what} must carry 1..${MAX_PATHS}`);
+function normalizePaths(
+  value: readonly string[],
+  what: string,
+  min = 1,
+): string[] {
+  if (!Array.isArray(value) || value.length < min || value.length > MAX_PATHS) {
+    throw new RepositoryValidationError(
+      `${what} must carry ${min}..${MAX_PATHS}`,
+    );
   }
   const paths = value.map(normalizeLiteralPath);
   if (new Set(paths).size !== paths.length) {
@@ -599,7 +605,15 @@ export function createStandingPolicy(
     }
   }
   const readScopes = normalizePaths(input.readScopes, "readScopes");
-  const writeScopes = normalizePaths(input.writeScopes, "writeScopes");
+  // Investigate/verify/maintenance_trial are read-only operations; only
+  // `implement` consumes write scopes. An investigate-only policy may
+  // therefore carry no write scopes, while any policy that can implement
+  // still requires at least one canonical write scope.
+  const writeScopes = normalizePaths(
+    input.writeScopes,
+    "writeScopes",
+    operations.includes("implement") ? 1 : 0,
+  );
   const checks = normalizeList(input.checks, "checks", 1, 16);
   const digits = /^[A-Za-z0-9_-]{1,64}$/;
   if (!checks.every((entry) => digits.test(entry))) {

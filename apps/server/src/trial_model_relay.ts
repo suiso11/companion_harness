@@ -113,6 +113,43 @@ function isGuestToolName(value: unknown): value is GuestToolName {
   );
 }
 
+/** Canonical cap ordering: both inputs validated, each field is the minimum.
+ * Callers use this to apply host static ceilings WITHOUT ever widening a
+ * narrower execution policy. */
+export function narrowTrialModelRelayCaps(
+  staticCaps: TrialModelRelayCaps,
+  requestedCaps: TrialModelRelayCaps,
+): TrialModelRelayCaps {
+  validateTrialModelRelayCaps(staticCaps);
+  validateTrialModelRelayCaps(requestedCaps);
+  return Object.freeze({
+    maxRequestBytes: Math.min(
+      staticCaps.maxRequestBytes,
+      requestedCaps.maxRequestBytes,
+    ),
+    maxModelCalls: Math.min(
+      staticCaps.maxModelCalls,
+      requestedCaps.maxModelCalls,
+    ),
+    maxOutputTokens: Math.min(
+      staticCaps.maxOutputTokens,
+      requestedCaps.maxOutputTokens,
+    ),
+    maxResponseBytes: Math.min(
+      staticCaps.maxResponseBytes,
+      requestedCaps.maxResponseBytes,
+    ),
+    perCallTimeoutMs: Math.min(
+      staticCaps.perCallTimeoutMs,
+      requestedCaps.perCallTimeoutMs,
+    ),
+    maxConcurrent: Math.min(
+      staticCaps.maxConcurrent,
+      requestedCaps.maxConcurrent,
+    ),
+  });
+}
+
 /** Required caps: every field must be supplied; invalid values throw. */
 export interface TrialModelRelayCaps {
   /** Max UDS request body bytes (guest uses 16MiB; enforced before parse). */
@@ -192,7 +229,7 @@ function fixedErrorBody(code: string): string {
   return JSON.stringify({ error: { message: code, type: code } });
 }
 
-function validateCaps(caps: TrialModelRelayCaps): void {
+export function validateTrialModelRelayCaps(caps: TrialModelRelayCaps): void {
   if (!isRecord(caps as unknown as Record<string, unknown>)) {
     throw new Error("trial_model_relay: caps are required");
   }
@@ -269,7 +306,7 @@ export class TrialModelRelay {
     ) {
       throw new Error("trial_model_relay: fixedModel must be non-empty");
     }
-    validateCaps(options.caps);
+    validateTrialModelRelayCaps(options.caps);
     this.sockPath = options.sockPath;
     this.gateway = options.gateway;
     this.fixedModel = options.fixedModel;

@@ -31,6 +31,7 @@ import {
 } from "./autodispatch_materializer.js";
 import type { ServerLogger } from "./logger.js";
 import {
+  narrowTrialModelRelayCaps,
   TrialModelRelay,
   type TrialModelRelayCaps,
 } from "./trial_model_relay.js";
@@ -44,6 +45,9 @@ import {
 
 /** Stdout framing allowance beyond the frozen budget (one trailing line). */
 export const TRIAL_STDOUT_FRAMING_ALLOWANCE = 4096;
+/** Keyset page size for one pick. NOT a starve cutoff: pages continue until
+ * the pick's snapshot boundary, so an 11th/50th valid grant stays reachable. */
+const TRIAL_QUEUE_SCAN_PAGE = 50;
 /** Fixed stderr drain cap (diagnostics only, never forwarded). */
 export const TRIAL_STDERR_CAP_BYTES = 65536;
 /** Fixed reason codes (never free text into the kernel fence/detail). */
@@ -131,7 +135,11 @@ export interface TrialRunnerDeps {
   isForegroundBusy: () => boolean;
   logger: ServerLogger;
   observer?: TrialRunnerObserverFns | undefined;
-  createRelay?: ((sockPath: string) => TrialRunnerRelay) | undefined;
+  /** Receives the exact per-execution budget resolved from the immutable
+   * materialization (or the static config caps for a manual human grant). */
+  createRelay?:
+    | ((sockPath: string, caps: TrialModelRelayCaps) => TrialRunnerRelay)
+    | undefined;
   spawnImpl?: TrialRunnerSpawn | undefined;
   clock?: (() => number) | undefined;
   randomKey?: (() => string) | undefined;
@@ -177,7 +185,10 @@ export class TrialRunner {
   private readonly isForegroundBusy: () => boolean;
   private readonly logger: ServerLogger;
   private readonly observer: TrialRunnerObserverFns;
-  private readonly createRelay: (sockPath: string) => TrialRunnerRelay;
+  private readonly createRelay: (
+    sockPath: string,
+    caps: TrialModelRelayCaps,
+  ) => TrialRunnerRelay;
   private readonly spawnImpl: TrialRunnerSpawn;
   private readonly clock: () => number;
   private readonly randomKey: () => string;
@@ -252,12 +263,14 @@ export class TrialRunner {
     const fixedModel = cfg.fixedModel;
     this.createRelay =
       deps.createRelay ??
-      ((sockPath: string) =>
+      ((sockPath: string, requestedCaps: TrialModelRelayCaps) =>
         new TrialModelRelay({
           sockPath,
           gateway,
           fixedModel,
-          caps: { ...relayCaps },
+          // Host static runner caps may tighten the execution budget but can
+          // never widen the frozen policy/operator intersection.
+          caps: narrowTrialModelRelayCaps(relayCaps, requestedCaps),
           logger: this.logger,
         }));
     this.spawnImpl = deps.spawnImpl ?? nodeSpawn;
@@ -446,38 +459,33 @@ export class TrialRunner {
     }
     if (this.isForegroundBusy())
       return { ran: false, outcome: "foreground-busy" };
-    let queued: {
-      executionId: string;
-      sessionId: string;
-      scope: string;
-      proposalId: string;
-    }[];
+    // Freeze the finite cohort that exists at pick start. New arrivals after
+    // this boundary are left for the next poll, so continuous completion
+    // traffic can never extend (or spin) this pick. Pure SELECT.
+    let horizon: { createdAt: number; executionId: string } | null;
     try {
-      queued = this.repo.listQueuedTrialGrantsForAlias(
+      horizon = this.repo.readQueuedTrialGrantHorizonForAlias(
         this.config.workspaceAlias,
-        10,
-      ) as {
-        executionId: string;
-        sessionId: string;
-        scope: string;
-        proposalId: string;
-      }[];
+      );
     } catch {
       return { ran: false, outcome: "empty" };
     }
-    if (queued.length === 0) return { ran: false, outcome: "empty" };
+    if (horizon === null) return { ran: false, outcome: "empty" };
 
     // Head-of-line starvation guard: a permanently unclaimable head grant
     // (expired, authority lost, alias/profile drift) must not starve valid
-    // grants behind it. Walk the oldest-first queue: transient failures
-    // (paused/fence) return immediately; permanent failures retire the grant
-    // best-effort via expireTrial and continue to the next candidate.
+    // grants behind it. Keyset-page past it in the same stable
+    // (created_at, execution_id) order; transient failures (paused/fence/
+    // foreground/shutdown) return immediately; clearly unclaimable rows use
+    // the existing best-effort expire path. Blocked/unknown materialization
+    // is NEVER revoked: it is skipped for this pick only and stays queued.
     let next:
       | {
           executionId: string;
           sessionId: string;
           scope: string;
           proposalId: string;
+          createdAt: number;
         }
       | undefined;
     let claimBody: { request: TrialLaunchRequest; grant: { scope: string } };
@@ -489,91 +497,146 @@ export class TrialRunner {
     let selectedMaterialization:
       | Extract<TrialMaterializationResolution, { kind: "policy" }>
       | undefined;
-    for (const candidate of queued) {
-      let resolution: TrialMaterializationResolution = { kind: "manual" };
-      if (this.config.resolveMaterialization !== undefined) {
-        try {
-          resolution = await this.config.resolveMaterialization({
-            sessionId: candidate.sessionId,
-            executionId: candidate.executionId,
-            proposalId: candidate.proposalId,
-          });
-        } catch {
+    let cursor: { createdAt: number; executionId: string } | undefined;
+    let scanned = 0;
+    scan: while (true) {
+      let page: {
+        executionId: string;
+        sessionId: string;
+        scope: string;
+        proposalId: string;
+        createdAt: number;
+      }[];
+      try {
+        page = this.repo.listQueuedTrialGrantsForAlias(
+          this.config.workspaceAlias,
+          TRIAL_QUEUE_SCAN_PAGE,
+          cursor,
+          horizon,
+        );
+      } catch {
+        return { ran: false, outcome: "empty" };
+      }
+      if (page.length === 0) break;
+      for (const candidate of page) {
+        if (scanned > 0) {
+          // Preserve every admission gate across async candidate resolution:
+          // a STOP/pause/foreground change mid-scan must not claim or spawn.
+          if (this.shuttingDown || this.stopLatch) {
+            return { ran: false, outcome: "empty" };
+          }
+          try {
+            if (this.repo.getAutonomyControlState().paused) {
+              return { ran: false, outcome: "paused" };
+            }
+          } catch {
+            return { ran: false, outcome: "paused" };
+          }
+          if (this.isForegroundBusy()) {
+            return { ran: false, outcome: "foreground-busy" };
+          }
+        }
+        scanned += 1;
+        let resolution: TrialMaterializationResolution = { kind: "manual" };
+        if (this.config.resolveMaterialization !== undefined) {
+          try {
+            resolution = await this.config.resolveMaterialization({
+              sessionId: candidate.sessionId,
+              executionId: candidate.executionId,
+              proposalId: candidate.proposalId,
+            });
+          } catch {
+            // Transient/unknown resolution: keep the row queued and continue
+            // past it in this snapshot; never fall back to manual caps and
+            // never revoke ambiguous unavailable materialization.
+            this.logger.warn("trial.materialization_blocked", {});
+            continue;
+          }
+        }
+        if (resolution.kind === "blocked") {
           this.logger.warn("trial.materialization_blocked", {});
+          lastClaimFailed = {
+            executionId: candidate.executionId,
+            message: resolution.reason,
+          };
+          // No blanket expire: the policy/authority may become available.
           continue;
         }
-      }
-      if (resolution.kind === "blocked") {
-        this.logger.warn("trial.materialization_blocked", {});
-        lastClaimFailed = {
-          executionId: candidate.executionId,
-          message: resolution.reason,
-        };
-        continue;
-      }
-      const claimProfile =
-        resolution.kind === "policy" ? resolution.profile : this.config.profile;
-      try {
-        const out = this.repo.claimTrial(
-          candidate.sessionId,
-          candidate.executionId,
-          {
-            key: this.randomKey(),
-            now: this.clock(),
-            profile: claimProfile,
-            workspaceAlias: this.config.workspaceAlias,
-          },
-        );
-        // claimTrial body is { kind, grant, request, applied? }: normalize.
-        const raw = out.body as unknown as Record<string, unknown>;
-        selected = candidate;
-        selectedBody = {
-          request: raw.request as TrialLaunchRequest,
-          grant: raw.grant as { scope: string },
-        };
-        selectedMaterialization =
-          resolution.kind === "policy" ? resolution : undefined;
-        break;
-      } catch (error) {
-        if (isFenceError(error)) {
-          this.logger.warn("trial.claim_fenced", {});
-          return {
-            ran: false,
-            outcome: "fenced",
-            executionId: candidate.executionId,
-          };
-        }
-        const message = error instanceof Error ? error.message : String(error);
-        if (/paused/i.test(message)) {
-          return { ran: false, outcome: "paused" };
-        }
-        lastClaimFailed = {
-          executionId: candidate.executionId,
-          message,
-        };
-        // Best-effort retire so the next poll does not reselect this row.
+        const claimProfile =
+          resolution.kind === "policy"
+            ? resolution.profile
+            : this.config.profile;
         try {
-          if (
-            typeof candidate.proposalId === "string" &&
-            candidate.proposalId.length > 0
-          ) {
-            this.repo.expireTrial(
-              candidate.sessionId,
-              candidate.proposalId,
-              this.clock(),
-            );
+          const out = this.repo.claimTrial(
+            candidate.sessionId,
+            candidate.executionId,
+            {
+              key: this.randomKey(),
+              now: this.clock(),
+              profile: claimProfile,
+              workspaceAlias: this.config.workspaceAlias,
+            },
+          );
+          // claimTrial body is { kind, grant, request, applied? }: normalize.
+          const raw = out.body as unknown as Record<string, unknown>;
+          selected = candidate;
+          selectedBody = {
+            request: raw.request as TrialLaunchRequest,
+            grant: raw.grant as { scope: string },
+          };
+          selectedMaterialization =
+            resolution.kind === "policy" ? resolution : undefined;
+          break scan;
+        } catch (error) {
+          if (isFenceError(error)) {
+            this.logger.warn("trial.claim_fenced", {});
+            return {
+              ran: false,
+              outcome: "fenced",
+              executionId: candidate.executionId,
+            };
           }
-        } catch {
-          // Best effort: expiry never fails the skip.
+          const message =
+            error instanceof Error ? error.message : String(error);
+          if (/paused/i.test(message)) {
+            return { ran: false, outcome: "paused" };
+          }
+          lastClaimFailed = {
+            executionId: candidate.executionId,
+            message,
+          };
+          // Best-effort retire of a CLEARLY unclaimable row so a later poll
+          // does not reselect it. Unknown/transient rows never reach here.
+          try {
+            if (
+              typeof candidate.proposalId === "string" &&
+              candidate.proposalId.length > 0
+            ) {
+              this.repo.expireTrial(
+                candidate.sessionId,
+                candidate.proposalId,
+                this.clock(),
+              );
+            }
+          } catch {
+            // Best effort: expiry never fails the skip.
+          }
+          this.logger.warn("trial.claim_skipped_unclaimable", {});
         }
-        this.logger.warn("trial.claim_skipped_unclaimable", {});
       }
+      const tail = page[page.length - 1];
+      if (tail === undefined) break;
+      cursor = {
+        createdAt: tail.createdAt,
+        executionId: tail.executionId,
+      };
+      if (page.length < TRIAL_QUEUE_SCAN_PAGE) break;
     }
     next = selected;
     if (next === undefined || selectedBody === undefined) {
       this.logger.warn("trial.claim_failed", {});
       void lastClaimFailed;
-      const failedId = lastClaimFailed?.executionId ?? queued[0]?.executionId;
+      const failedId = lastClaimFailed?.executionId;
       return {
         ran: true,
         outcome: "claim-failed",
@@ -723,7 +786,8 @@ export class TrialRunner {
       ? materialization.socketHostPath
       : join(runDir, "relay", "model.sock");
     mkdirSync(dirname(sockPath), { recursive: true, mode: 0o700 });
-    const relay = this.createRelay(sockPath);
+    const executionCaps = materialization?.caps ?? this.config.relayCaps;
+    const relay = this.createRelay(sockPath, executionCaps);
     this.currentRelay = relay;
     const cleanup = async (): Promise<void> => {
       this.currentRelay = null;

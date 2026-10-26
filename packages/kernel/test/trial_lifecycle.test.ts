@@ -1092,3 +1092,92 @@ describe("lifecycle: durable outcome projection for the session surface", () => 
     }
   });
 });
+describe("lifecycle: queued grant keyset pagination for the runner", () => {
+  it("pages oldest-first past ties without duplicates, skips, or queue mutation", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      const alias = "ws";
+      const queueAt = (label: string, approveNow: number) => {
+        const { task } = goalTask(repo, sessionId, `page-${label}`);
+        const staged = repo.stageTrial(sessionId, stageInput(task.id), {
+          key: randomUUID(),
+          now: approveNow - 1,
+          profile: profile(),
+          workspaceAlias: alias,
+        });
+        const approved = repo.approveTrial(sessionId, staged.body.id, {
+          key: randomUUID(),
+          now: approveNow,
+          profile: profile(),
+          workspaceAlias: alias,
+        });
+        return (approved.body as { executionId: string }).executionId;
+      };
+      // Two same-millisecond rows exercise the execution_id tie-break.
+      queueAt("tie-a", NOW + 10);
+      queueAt("tie-b", NOW + 10);
+      queueAt("c", NOW + 11);
+      queueAt("d", NOW + 12);
+      queueAt("e", NOW + 13);
+
+      const full = repo.listQueuedTrialGrantsForAlias(alias, 100);
+      expect(full).toHaveLength(5);
+      expect(full.map((g) => g.createdAt)).toEqual(
+        [...full.map((g) => g.createdAt)].sort((a, b) => a - b),
+      );
+      const horizon = repo.readQueuedTrialGrantHorizonForAlias(alias);
+      expect(horizon).toEqual({
+        createdAt: full[4]?.createdAt,
+        executionId: full[4]?.executionId,
+      });
+
+      const paged: string[] = [];
+      let cursor: { createdAt: number; executionId: string } | undefined;
+      for (let page = 0; page < 10; page += 1) {
+        const rows = repo.listQueuedTrialGrantsForAlias(
+          alias,
+          2,
+          cursor,
+          horizon ?? undefined,
+        );
+        if (rows.length === 0) break;
+        paged.push(...rows.map((g) => g.executionId));
+        const tail = rows[rows.length - 1];
+        if (tail === undefined) break;
+        cursor = {
+          createdAt: tail.createdAt,
+          executionId: tail.executionId,
+        };
+      }
+      expect(paged).toEqual(full.map((g) => g.executionId));
+      expect(new Set(paged).size).toBe(paged.length);
+
+      // The snapshot boundary hides a newer arrival from THIS pick but the
+      // next horizon includes it; reads never change queued status.
+      queueAt("later", NOW + 20);
+      const afterBoundary = repo.listQueuedTrialGrantsForAlias(
+        alias,
+        100,
+        undefined,
+        horizon ?? undefined,
+      );
+      expect(afterBoundary.map((g) => g.executionId)).toEqual(
+        full.map((g) => g.executionId),
+      );
+      const nextHorizon = repo.readQueuedTrialGrantHorizonForAlias(alias);
+      expect(nextHorizon?.createdAt).toBe(NOW + 20);
+      expect(
+        repo.listQueuedTrialGrantsForAlias(alias, 100).map((g) => g.createdAt),
+      ).toContain(NOW + 20);
+      expect(repo.listQueuedTrialGrantsForAlias(alias, 100)).toHaveLength(6);
+      const stillQueued = handle.raw
+        .prepare(
+          "SELECT COUNT(*) AS n FROM trial_grants WHERE workspace_alias=? AND status='queued'",
+        )
+        .get(alias) as { n: number };
+      expect(stillQueued.n).toBe(6);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+});

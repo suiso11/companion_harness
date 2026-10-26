@@ -189,7 +189,10 @@ import {
 } from "./rescheduleWriteProfile.js";
 import { createShadowService, type ShadowService } from "./shadow_service.js";
 import { childFailedStatusForError } from "./supervisor.js";
-import { TrialModelRelay } from "./trial_model_relay.js";
+import {
+  narrowTrialModelRelayCaps,
+  TrialModelRelay,
+} from "./trial_model_relay.js";
 import { TrialRunner } from "./trial_runner.js";
 
 /** Graceful-drain natural-completion budget (§11.5: max 10s). */
@@ -2961,11 +2964,7 @@ export async function startServer(
     // final repo BEFORE RunEngine so the engine's completeRun is observed.
     if (options.autodispatch !== undefined) {
       autodispatch = options.autodispatch;
-    } else if (
-      config.autodispatch !== null &&
-      config.autodispatch.enabled &&
-      config.trial !== null
-    ) {
+    } else if (config.autodispatch?.enabled === true && config.trial !== null) {
       const adTrial = config.trial;
       const adProfile = {
         available: adTrial.available,
@@ -3065,6 +3064,7 @@ export async function startServer(
         maxOutputBytes: trialConfig.maxOutputBytes,
       };
       const runnerEngine = engine;
+      const autodispatchConfig = config.autodispatch;
       trialRunner = new TrialRunner({
         repo,
         config: {
@@ -3079,7 +3079,7 @@ export async function startServer(
           fixedModel: runnerModel,
           gateway: runnerGateway,
           observe: { ...trialConfig.runner.observe },
-          ...(config.autodispatch !== null
+          ...(autodispatchConfig !== null
             ? {
                 resolveMaterialization: (input: {
                   sessionId: string;
@@ -3089,10 +3089,10 @@ export async function startServer(
                   resolveAutodispatchMaterialization(
                     repo,
                     {
-                      workspaceAlias: config.autodispatch!.workspaceAlias,
-                      sourceRoot: config.autodispatch!.sourceRoot,
-                      dependencyRoot: config.autodispatch!.dependencyRoot,
-                      checks: config.autodispatch!.checks,
+                      workspaceAlias: autodispatchConfig.workspaceAlias,
+                      sourceRoot: autodispatchConfig.sourceRoot,
+                      dependencyRoot: autodispatchConfig.dependencyRoot,
+                      checks: autodispatchConfig.checks,
                       runtimeDir: trialConfig.runner.xdgRuntimeDir,
                     },
                     input,
@@ -3102,12 +3102,14 @@ export async function startServer(
         },
         isForegroundBusy: () => runnerEngine.inflightCount() > 0,
         logger,
-        createRelay: (sockPath: string) =>
+        createRelay: (sockPath: string, caps) =>
           new TrialModelRelay({
             sockPath,
             gateway: runnerGateway,
             fixedModel: runnerModel,
-            caps: { ...trialConfig.runner.relay },
+            // Enforce the host runner static ceiling over the execution
+            // budget; the intersection never widens the granted policy.
+            caps: narrowTrialModelRelayCaps(trialConfig.runner.relay, caps),
             logger,
           }),
       });

@@ -241,11 +241,11 @@ interface Fixture extends CreatedServerApp {
   close: () => void;
 }
 
-async function makeApp(): Promise<Fixture> {
+async function makeApp(env: NodeJS.ProcessEnv = envConfig()): Promise<Fixture> {
   const handle = openKernelDatabase(":memory:");
   await migrateKernelDatabase({ db: handle.raw });
   const repo = createKernelRepository(handle.raw);
-  const config = loadServerConfig(envConfig());
+  const config = loadServerConfig(env);
   const { logger } = createCollectingLogger("debug");
   const engine = new RunEngine({ db: handle.raw, repo, cancelGraceMs: 30 });
   const created = createApp({ config, repo, engine, logger });
@@ -416,6 +416,100 @@ describe("autodispatch HTTP + existing trial boundary", () => {
         (listing.body as { executions: { status: string }[] }).executions[0]
           ?.status,
       ).toBe("authorized");
+    } finally {
+      fx.close();
+    }
+  });
+
+  it("creates an investigated-only policy with empty write scopes over the real HTTP/config path", async () => {
+    const env = envConfig();
+    const autodispatch = JSON.parse(
+      env.COMPANION_AUTODISPATCH_JSON as string,
+    ) as Record<string, unknown>;
+    autodispatch.operations = ["investigate"];
+    autodispatch.writeScopes = [];
+    env.COMPANION_AUTODISPATCH_JSON = JSON.stringify(autodispatch);
+    const fx = await makeApp(env);
+    try {
+      resume(fx.repo, NOW);
+      const sessionId = fx.repo.createSession({
+        key: randomUUID(),
+        now: NOW - 1,
+      }).body.sessionId;
+      const anchor = completeTurn(
+        fx.repo,
+        sessionId,
+        "Please investigate src/app.ts and report. Go ahead.",
+        NOW + 10,
+      );
+
+      const policy = await call(
+        fx.app,
+        "POST",
+        `/api/sessions/${sessionId}/autodispatch/policies`,
+        policyBody(anchor.turnId),
+        randomUUID(),
+      );
+      expect(policy.status).toBe(201);
+      const policyView = policy.body as {
+        id: string;
+        operations: string[];
+        writeScopes: string[];
+      };
+      expect(policyView.operations).toEqual(["investigate"]);
+      expect(policyView.writeScopes).toEqual([]);
+
+      const plan = await call(
+        fx.app,
+        "POST",
+        `/api/sessions/${sessionId}/autodispatch/plans`,
+        {
+          policyId: policyView.id,
+          operation: "investigate",
+          content: {
+            goal: "Investigate src/app.ts",
+            decisions: [],
+            nongoals: [],
+            steps: [],
+            acceptance: ["report findings"],
+            missing: [],
+            relevantPaths: ["src/app.ts"],
+          },
+          intent: {
+            kind: "execute",
+            quotes: [
+              {
+                turnId: anchor.turnId,
+                runId: anchor.runId,
+                text: "investigate src/app.ts",
+              },
+            ],
+            latestUserTurnId: anchor.turnId,
+            latestUserRunId: anchor.runId,
+          },
+        },
+      );
+      expect(plan.status).toBe(201);
+      const planId = (plan.body as { plan: { id: string } }).plan.id;
+
+      const authorized = await call(
+        fx.app,
+        "POST",
+        `/api/sessions/${sessionId}/autodispatch/plans/${planId}/authorize`,
+        {},
+      );
+      expect(authorized.status).toBe(201);
+      expect(
+        (authorized.body as { execution: { status: string } }).execution.status,
+      ).toBe("authorized");
+      const grants = fx.db.raw
+        .prepare("SELECT COUNT(*) AS n FROM trial_grants")
+        .get() as { n: number };
+      expect(grants.n).toBe(1);
+      const proposal = fx.db.raw
+        .prepare("SELECT read_only AS readOnly FROM trial_proposals")
+        .get() as { readOnly: number };
+      expect(proposal.readOnly).toBe(1);
     } finally {
       fx.close();
     }

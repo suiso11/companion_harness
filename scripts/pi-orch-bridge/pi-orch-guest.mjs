@@ -59,6 +59,11 @@ const MAX_MODEL_CALLS = Math.max(
 );
 const MAX_OMP_STDOUT_BYTES = 4 * 1024 * 1024;
 const MAX_OBSERVATION_BYTES = 64 * 1024;
+// Pinned to scripts/pi-orch-bridge/companion-protocol.mjs (the canonical wire
+// contract): MAX_LIST_ITEMS=16, MAX_TEXT_SHORT=1024. The guest is a
+// standalone copied artifact, so it cannot import the host protocol module.
+const MAX_LIST_ITEMS = 16;
+const MAX_TEXT_SHORT = 1024;
 
 function fail(message) {
   process.stderr.write(`pi-orch guest: ${message}\n`);
@@ -131,14 +136,40 @@ function parseJob(path) {
   const constraints = Array.isArray(raw.constraints)
     ? raw.constraints.filter((v) => typeof v === "string").slice(0, 16)
     : [];
+  if (
+    !Array.isArray(raw.acceptance) ||
+    raw.acceptance.length < 1 ||
+    raw.acceptance.length > MAX_LIST_ITEMS
+  ) {
+    fail("frozen acceptance is invalid");
+  }
+  const acceptance = [];
+  for (const entry of raw.acceptance) {
+    if (
+      typeof entry !== "string" ||
+      entry.length === 0 ||
+      entry.length > MAX_TEXT_SHORT ||
+      entry.includes("\0")
+    ) {
+      fail("frozen acceptance is invalid");
+    }
+    acceptance.push(entry);
+  }
   return {
     mode: raw.mode,
     objective: raw.objective,
     statement: raw.purpose.statement,
     relevantPaths: raw.relevantPaths,
-    acceptance: typeof raw.acceptance === "string" ? raw.acceptance : "",
+    acceptance,
     constraints,
   };
+}
+
+function formatAcceptance(criteria) {
+  return [
+    "Acceptance criteria (all must hold, in order):",
+    ...criteria.map((criterion, index) => `${index + 1}. ${criterion}`),
+  ].join("\n");
 }
 
 function buildPrompt(job) {
@@ -150,6 +181,7 @@ function buildPrompt(job) {
       `Relevant paths: ${paths}.`,
       `Purpose: ${job.statement}`,
       `Objective: ${job.objective}`,
+      formatAcceptance(job.acceptance),
       "Read the relevant files and then answer with a short factual report.",
     ].join("\n");
   }
@@ -159,7 +191,7 @@ function buildPrompt(job) {
     `Relevant paths: ${paths}.`,
     `Purpose: ${job.statement}`,
     `Objective: ${job.objective}`,
-    `Acceptance: ${job.acceptance}`,
+    formatAcceptance(job.acceptance),
     ...(job.constraints.length > 0
       ? [`Constraints: ${job.constraints.join("; ")}`]
       : []),

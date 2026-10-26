@@ -5334,9 +5334,14 @@ is Linux-only.
   fail config parsing (fail closed). Paths/checks/profile/bridge come only
   from this operator config; a request cannot override them. Caps are
   operator UPPER BOUNDS: a policy may choose smaller values and the
-  materializer applies the intersection with `maxDurationMs` and observed
-  limits. `externalModelConsent` is not an autodispatch config field; the
-  host derives it from the operation as described below.
+  materializer freezes the six relay caps (request bytes, model calls,
+  output tokens, response bytes, per-call timeout, model concurrency) as the
+  policy ∩ operator intersection in the hashed materialization; the guest
+  profile and the host trial relay use exactly that frozen budget, and the
+  host's static runner limits may only narrow it further. Per-call timeout
+  may legitimately narrow to 100ms. `externalModelConsent` is not an
+  autodispatch config field; the host derives it from the operation as
+  described below.
 - `materialization` (strict): `stateDir` (absolute, outside `sourceRoot`),
   `executor` (`kind` `fixed`|`pi-orch-guest`|`real-pi`, absolute executable,
   args), `checks` (one command per configured check id, no extra keys),
@@ -5380,13 +5385,33 @@ is Linux-only.
   (`execute`/`discuss`/`unclear`) plus a readable plan. The host validates
   every quote against exact turn text, requires the selected completed
   latest run, refuses negation, and rejects stale turns.
+- Intake admission is queued, not dropped: if the shared
+  `BackgroundResourceGate` is held (for example by memory extraction) the
+  completion ID and its expected latest selected completed user turn plus the
+  exact active policy id/version stay pending and are drained on the gate's
+  existing finite `onSettled` release. A newer user turn, revoked/expired
+  policy, paused/closed gate, a pause+resume control-version change, or
+  foreground activity invalidates a queued intent before any planner call.
+  The expected control version is captured at notification and must be
+  exactly unchanged at every pre-planner/post-async fence. Completion ids are
+  deduplicated once per process when accepted (busy work stays pending and is
+  drained directly), so a duplicate or invalidated old completion is never
+  re-enqueued, while a fresh run id remains eligible. `stop()` unsubscribes
+  the wake, clears the queue, aborts/awaits every owned task, and never
+  revives queued work after a later `reopen`.
 - `authorizeWithinPolicy` is host-only. It rechecks policy status/version/
   expiry, `autonomy_control` pause, operator alias/checks/operations/caps,
   quota (atomic reservation), concurrency, and freshness, then derives a
   bounded `kind=task` child of the human policy purpose and inserts a
   frozen proposal + one queued grant inside the EXISTING TrialAuthority
   (no human HTTP approve click, no CAS/one-use/fence/claim/permit bypass).
-  The existing TrialRunner poll consumes the grant. Results remain
+  The existing TrialRunner poll consumes the grant. One pick pages the
+  stable `(created_at, execution_id)` queue oldest-first with an exclusive
+  keyset cursor and an inclusive snapshot boundary, so blocked heads are
+  skipped without re-reading them and continuous new arrivals cannot extend
+  that pick; clearly unclaimable rows use the existing expire path, while
+  blocked/unknown materialization and unknown workers are retained, never
+  revoked or launched on widened/manual caps. Results remain
   `verified` only through the existing checks/artifact path; nothing is
   host-applied, deployed, or auto-completed.
 - HTTP (same-origin/authenticated; session-scoped):
@@ -5435,6 +5460,12 @@ is Linux-only.
   check/done. No production enablement, restart, deploy, or source apply
   was performed here. Activation requires an operator-private config with
   the real paths/digests above plus explicit deployment approval.
+- Materialization retention: `retention.json` keeps a terminal
+  `artifact-expired` audit tombstone after the one-time expiry removes the
+  small run artifacts. Tombstones do not consume the retained-artifact
+  admission budget (real `cleaned` artifacts still count to the fixed 7-day /
+  20-job bound); prepared active/unknown/unreadable jobs are always retained
+  until known quiescence.
 
 ### Auto-dispatch verification and activation prerequisites
 

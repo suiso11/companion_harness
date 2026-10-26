@@ -372,7 +372,9 @@ import {
   listClaimedTrialWorkers,
   listQueuedTrialGrants,
   listTrialProposals,
+  type QueuedTrialGrantCursor,
   readLaunchPermit,
+  readQueuedTrialGrantHorizon,
   readTrialIntent,
   readTrialProposal,
   readWorkerOutcome,
@@ -7635,9 +7637,24 @@ export function createKernelRepository(
   /**
    * Runner pick read (pure SELECT): oldest queued grant for an alias.
    * Empty array when nothing is queued (runNext no-op).
+   *
+   * `after` is an exclusive `(createdAt, executionId)` keyset cursor and
+   * `through` an inclusive snapshot boundary, so one pick can page past
+   * permanently blocked heads without re-reading them while staying bounded
+   * to the cohort that existed when the pick started.
    */
-  function listQueuedTrialGrantsForAlias(workspaceAlias: string, limit = 1) {
-    return listQueuedTrialGrants(db, workspaceAlias, limit);
+  function listQueuedTrialGrantsForAlias(
+    workspaceAlias: string,
+    limit = 1,
+    after?: QueuedTrialGrantCursor,
+    through?: QueuedTrialGrantCursor,
+  ) {
+    return listQueuedTrialGrants(db, workspaceAlias, limit, after, through);
+  }
+
+  /** Runner snapshot boundary (pure SELECT): newest queued grant cursor. */
+  function readQueuedTrialGrantHorizonForAlias(workspaceAlias: string) {
+    return readQueuedTrialGrantHorizon(db, workspaceAlias);
   }
 
   /** Runner recovery scan (pure SELECT): claimed grants with boot rows. */
@@ -8011,6 +8028,7 @@ export function createKernelRepository(
     trialAuthorityDeadline,
     reconcileTrialExpiries,
     listQueuedTrialGrantsForAlias,
+    readQueuedTrialGrantHorizonForAlias,
     listClaimedTrialWorkersForRecovery,
     ingestNotifications,
     listNotifications,
