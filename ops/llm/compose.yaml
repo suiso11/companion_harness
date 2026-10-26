@@ -46,6 +46,23 @@ services:
       - -fa
       - "on"
       - --jinja
+      # This model is hybrid (recurrent/Mamba-like state), so prefix reuse
+      # needs context checkpoints. The default 8192 spacing produced none for
+      # a ~17k system+tools guest prompt, and every trial-guest turn
+      # re-prefilled ~18k tokens (~30s; 66s under contention) per llama.cpp
+      # b11541 logs. 1024 keeps up to 32 checkpoints (default --ctx-checkpoints)
+      # inside the 65536 window while still bounding checkpoint memory.
+      - --checkpoint-min-step
+      - "1024"
+      # Bound concurrency to 2 slots: abandoned relay requests kept running
+      # (60s relay timeout, LiteLLM retried 2x), filling 3-4 slots and
+      # overflowing the shared 65k KV pool ("Context size has been exceeded").
+      # --kv-unified is required because setting --parallel explicitly makes
+      # llama.cpp split -c across slots (2 x 32768) instead of the shared pool,
+      # which would reject the guest's 65536 contextWindow.
+      - --parallel
+      - "2"
+      - --kv-unified
       # Cap thinking so one turn cannot burn the whole step budget. Measured
       # 2026-10-23 on 8 Companion-like prompts: unlimited 8/8 valid, reasoning
       # max 1251 chars, completion max 911 tokens; budget 512 8/8 valid,
