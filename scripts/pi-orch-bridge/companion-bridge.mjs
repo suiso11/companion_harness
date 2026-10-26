@@ -169,7 +169,7 @@ const DIAGNOSTIC_SECRET_PATTERN = /(?:sk-|Bearer\s+)[A-Za-z0-9._-]+/g;
 function redactDiagnostic(value) {
   return String(value ?? "")
     .replace(DIAGNOSTIC_SECRET_PATTERN, "[redacted]")
-    .replace(/\u0000/g, "");
+    .replaceAll("\u0000", "");
 }
 
 // A failure diagnostic must stay small enough for the bounded journal report
