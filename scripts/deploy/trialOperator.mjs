@@ -250,9 +250,20 @@ const FROZEN_ROOT_RE = /^frozen-[0-9a-f]{7,40}-(\d{8}T\d{6}Z)$/;
 
 // Select old frozen roots to prune, newest first by the timestamp suffix. The
 // root name also contains the commit sha, so comparing whole names would order
-// by sha first; the timestamp is the only creation-order key.
-export function selectFrozenRootsToPrune(names, currentRootName, keep = 2) {
+// by sha first; the timestamp is the only creation-order key. Roots in
+// `protectedRoots` (plus the current root) are referenced by an operator.json
+// that a rollback may restore, so they are never pruned regardless of age.
+// Only the newest `keep` UNREFERENCED roots survive.
+export function selectFrozenRootsToPrune(
+  names,
+  currentRootName,
+  keep = 2,
+  protectedRoots = [],
+) {
   if (!Number.isInteger(keep) || keep < 1) fail("keep must be >= 1");
+  if (!Array.isArray(protectedRoots)) {
+    fail("protectedRoots must be an array");
+  }
   const frozen = names
     .map((name) => ({ name, match: FROZEN_ROOT_RE.exec(name) }))
     .filter((entry) => entry.match !== null)
@@ -261,12 +272,96 @@ export function selectFrozenRootsToPrune(names, currentRootName, keep = 2) {
       return byTime !== 0 ? byTime : b.name.localeCompare(a.name);
     })
     .map((entry) => entry.name);
-  const keepSet = new Set();
-  for (const name of [currentRootName, ...frozen]) {
-    if (keepSet.size >= keep) break;
-    keepSet.add(name);
+  const protectedSet = new Set(
+    [currentRootName, ...protectedRoots].filter(
+      (name) => typeof name === "string" && FROZEN_ROOT_RE.test(name),
+    ),
+  );
+  const unreferenced = frozen.filter((name) => !protectedSet.has(name));
+  const keepSet = new Set(unreferenced.slice(0, keep));
+  return unreferenced.filter((name) => !keepSet.has(name));
+}
+
+/**
+ * Top-level directory name of the frozen root referenced by an operator.json,
+ * or null when it does not point inside `stateRoot`. A present-but-unreadable
+ * operator file throws: pruning must fail closed rather than guess.
+ */
+export function frozenRootReferencedByOperator(operatorJsonText, stateRoot) {
+  if (typeof stateRoot !== "string" || !ABS_RE.test(stateRoot)) {
+    fail("stateRoot must be an absolute path");
   }
-  return frozen.filter((name) => !keepSet.has(name));
+  if (typeof operatorJsonText !== "string" || operatorJsonText.length === 0) {
+    return null;
+  }
+  let doc;
+  try {
+    doc = JSON.parse(operatorJsonText);
+  } catch {
+    fail("operator.json is not valid JSON; refusing to prune by reference");
+  }
+  const rootDir =
+    isRecord(doc) && isRecord(doc.sealed) ? doc.sealed.rootDir : null;
+  if (typeof rootDir !== "string" || !ABS_RE.test(rootDir)) return null;
+  const prefix = stateRoot.replace(/\/+$/, "") + "/";
+  if (!rootDir.startsWith(prefix)) return null;
+  const name = rootDir.slice(prefix.length).split("/")[0];
+  return typeof name === "string" && FROZEN_ROOT_RE.test(name) ? name : null;
+}
+
+/**
+ * The effective model name the server will use, derived exactly like
+ * run-google-readonly.sh: an already-exported COMPANION_MODEL_JSON wins;
+ * otherwise a non-empty LITELLM_MASTER_KEY in .env.litellm selects the
+ * existing local LiteLLM alias. API keys are never returned or logged.
+ */
+export function resolveCurrentModel(env, litellmEnvText = null) {
+  const raw = env?.COMPANION_MODEL_JSON;
+  if (typeof raw === "string" && raw.length > 0) {
+    let doc;
+    try {
+      doc = JSON.parse(raw);
+    } catch {
+      fail("COMPANION_MODEL_JSON is not valid JSON");
+    }
+    if (
+      !isRecord(doc) ||
+      typeof doc.model !== "string" ||
+      doc.model.length === 0
+    ) {
+      fail("COMPANION_MODEL_JSON.model is required to derive the trial model");
+    }
+    return doc.model;
+  }
+  if (typeof litellmEnvText === "string") {
+    const prefix = "LITELLM_MASTER_KEY=";
+    for (const line of litellmEnvText.split(/\r?\n/)) {
+      if (
+        line.startsWith(prefix) &&
+        line.slice(prefix.length).trim().length > 0
+      ) {
+        return "local-chat";
+      }
+    }
+  }
+  fail(
+    "cannot determine the effective model name (set COMPANION_MODEL_JSON or a non-empty LITELLM_MASTER_KEY in .env.litellm)",
+  );
+}
+
+// Keep only requested checks whose launcher is safe inside the sealed guest
+// (the dependency closure is mounted at /deps/node_modules only, so tsc
+// cannot resolve project imports from /work). Never silently accepts an
+// empty result.
+export function selectSealedChecks(selected, supported) {
+  if (!Array.isArray(selected) || !Array.isArray(supported)) {
+    fail("selected and supported checks must be arrays");
+  }
+  const out = selected.filter((id) => supported.includes(id));
+  if (out.length === 0) {
+    fail("no supported mandatoryChecks remain for the sealed guest");
+  }
+  return out;
 }
 
 // Return only the command map entries the host selected. The materializer

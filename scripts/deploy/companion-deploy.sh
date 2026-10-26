@@ -205,8 +205,9 @@ pnpm install --frozen-lockfile
 # --- frozen trial operator: rebuild from the deployed sha, then restart ---
 # The builder exports a clean archive of HEAD, verifies the materialized
 # snapshot, and only then atomically switches operator.json + autonomy.env.
-# A failure must NOT block app deploys: leave autonomy.env untouched so trials
-# fail closed until the next deploy.
+# A failure must NOT block app deploys, but it must fail CLOSED: a retained
+# profile can still match the restarted server, so replace autonomy.env with
+# an empty file (no COMPANION_AUTONOMY_JSON line) before the restart.
 if [ -f "$TRIAL_OPERATOR_INPUT" ]; then
   TRIAL_OPERATOR_FILE="$(node -e 'const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));process.stdout.write(j.operatorFile ?? "")' "$TRIAL_OPERATOR_INPUT" 2>/dev/null || true)"
   TRIAL_ENV_FILE="$(node -e 'const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));process.stdout.write(j.environmentFile ?? "")' "$TRIAL_OPERATOR_INPUT" 2>/dev/null || true)"
@@ -226,8 +227,32 @@ if [ -n "$TRIAL_OPERATOR_FILE" ] && [ -n "$TRIAL_ENV_FILE" ]; then
 fi
 if [ -f "$TRIAL_OPERATOR_INPUT" ]; then
   log "rebuilding frozen trial operator for $TARGET"
-  if ! COMPANION_TRIAL_OPERATOR_INPUT="$TRIAL_OPERATOR_INPUT" pnpm --filter @companion/server exec tsx "$SCRIPT_DIR/build-trial-operator.mts"; then
-    log "WARNING trial operator rebuild FAILED; autonomy.env left unchanged (trials fail closed until next deploy)"
+  BUILD_OK=1
+  if [ -n "$TRIAL_BACKUP_DIR" ]; then
+    COMPANION_TRIAL_OPERATOR_INPUT="$TRIAL_OPERATOR_INPUT" \
+      COMPANION_TRIAL_ROLLBACK_OPERATOR_FILE="$TRIAL_BACKUP_DIR/operator.json" \
+      pnpm --filter @companion/server exec tsx "$SCRIPT_DIR/build-trial-operator.mts" || BUILD_OK=0
+  else
+    COMPANION_TRIAL_OPERATOR_INPUT="$TRIAL_OPERATOR_INPUT" \
+      pnpm --filter @companion/server exec tsx "$SCRIPT_DIR/build-trial-operator.mts" || BUILD_OK=0
+  fi
+  if [ "$BUILD_OK" != "1" ]; then
+    log "ERROR trial operator rebuild FAILED for $TARGET; disabling trials before restart (fail closed)"
+    # Atomically replace autonomy.env with an EMPTY file: systemd then loads
+    # no COMPANION_AUTONOMY_JSON and the restarted server runs with trials off.
+    # Never leave a stale (possibly revision-matching) profile in place.
+    TRIAL_ENV_TMP="${TRIAL_ENV_FILE}.tmp-$$"
+    if mkdir -p "$(dirname "$TRIAL_ENV_FILE")" \
+      && : > "$TRIAL_ENV_TMP" \
+      && chmod 600 "$TRIAL_ENV_TMP" \
+      && mv -f "$TRIAL_ENV_TMP" "$TRIAL_ENV_FILE"; then
+      log "autonomy.env reset (trials disabled) before restart"
+    else
+      rm -f "$TRIAL_ENV_TMP"
+      log "ERROR could not disable trials; rolling back instead of restarting with a stale profile"
+      rollback
+      exit 1
+    fi
   fi
 else
   log "trial operator input missing ($TRIAL_OPERATOR_INPUT); skipping trial rebuild"

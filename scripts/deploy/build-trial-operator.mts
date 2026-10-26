@@ -31,8 +31,11 @@ import { pathToFileURL } from "node:url";
 
 import {
   formatAutonomyEnvLine,
+  frozenRootReferencedByOperator,
+  resolveCurrentModel,
   selectCheckCommands,
   selectFrozenRootsToPrune,
+  selectSealedChecks,
   validateTrialOperatorInput,
 } from "./trialOperator.mjs";
 
@@ -79,6 +82,16 @@ if (existsSync(ROOT)) fail(`target root already exists: ${ROOT}`);
 const SRC = join(ROOT, "source");
 const STATE = join(ROOT, "state");
 const DEP_SOURCE = join(input.stateRoot, "dep-source-clean", "node_modules");
+
+// The trial model must equal the model the restarted server will use or
+// bootstrap.ts refuses to start ("trial currentModel must match model
+// config"). Derive it exactly like run-google-readonly.sh from the deploy
+// environment; the key value is never returned or logged.
+const LITELLM_ENV_FILE = join(input.sourceRepo, ".env.litellm");
+const currentModel = resolveCurrentModel(
+  process.env,
+  existsSync(LITELLM_ENV_FILE) ? readFileSync(LITELLM_ENV_FILE, "utf8") : null,
+);
 
 // Load the validators/materializer from the deployed checkout so the build
 // uses exactly the deployed code. (The sealed content itself comes from the
@@ -200,26 +213,34 @@ try {
     concurrentExecutions: 1,
   };
   // Check executables must be the pinned node runtime: the guest binds only
-  // the executable at its own path, so a bare `typescript/bin/tsc` launcher
-  // would lose its sibling `../lib` tree. The dependency closure is mounted
-  // read-only at /deps/node_modules, so launch the JS entrypoints through node
-  // with guest-side paths. `node` itself is always bound at its host path.
+  // the executable at its own path, so a bare launcher would lose its sibling
+  // tree. The dependency closure is mounted read-only at /deps/node_modules.
+  // `node` itself is always bound at its host path.
+  //
+  // Only `lint` is a valid sealed-workspace check. The dependency closure is
+  // mounted at /deps/node_modules, which TypeScript does NOT consult when it
+  // resolves imports from project files under /work (and pnpm workspace
+  // package links do not exist inside the sealed snapshot), so a `typecheck`
+  // gate would reject every candidate. Biome needs no project dependencies.
+  // Requested-but-unsupported checks are dropped loudly, never silently.
   const checks = {
-    typecheck: {
-      executable: NODE,
-      args: [
-        "/deps/node_modules/typescript/bin/tsc",
-        "-p",
-        "/work/apps/server/tsconfig.json",
-        "--noEmit",
-      ],
-    },
     lint: {
       executable: NODE,
       args: ["/deps/node_modules/@biomejs/biome/bin/biome", "check", "/work"],
     },
   };
-  const selectedChecks = input.mandatoryChecks;
+  const selectedChecks = selectSealedChecks(
+    input.mandatoryChecks,
+    Object.keys(checks),
+  );
+  const droppedChecks = input.mandatoryChecks.filter(
+    (id: string) => !selectedChecks.includes(id),
+  );
+  if (droppedChecks.length > 0) {
+    console.error(
+      `WARNING unsupported checks are not sealed-workspace runnable and were dropped: ${droppedChecks.join(",")}`,
+    );
+  }
   const selectedCheckCommands = selectCheckCommands(checks, selectedChecks);
 
   const trialRaw = {
@@ -228,7 +249,7 @@ try {
     mandatoryChecks: selectedChecks,
     configFingerprint: "0".repeat(64),
     sourceRevision: "0".repeat(40),
-    currentModel: "local-chat",
+    currentModel,
     disclosedWholeRepoRead: true,
     timeoutMs: limits.timeoutMs,
     maxOutputBytes: limits.maxOutputBytes,
@@ -256,7 +277,10 @@ try {
     operations: ["investigate", "implement"],
     readScopes: ["apps", "packages", "scripts", "docs"],
     writeScopes: ["apps", "packages"],
-    checks: selectedCheckCommands,
+    // Top-level checks are the selected NAMES (array); materialization below
+    // carries the filtered command map, exactly as parseAutodispatchConfig
+    // expects.
+    checks: selectedChecks,
     caps,
     dependencyRoot: null,
     bridgeScriptPath: trialRaw.runner.bridgeScriptPath,
@@ -270,7 +294,7 @@ try {
         ),
         args: [],
       },
-      checks,
+      checks: selectedCheckCommands,
       executionBackend: "confined",
       runtime,
       dependencySourceNodeModules: DEP_SOURCE,
@@ -338,7 +362,7 @@ try {
   const materializer = createAutodispatchMaterializer({
     config: ad,
     runtimeDir: `/run/user/${process.getuid?.() ?? 1000}`,
-    currentModel: "local-chat",
+    currentModel,
     available: true,
     enabled: true,
     disclosedWholeRepoRead: true,
@@ -424,12 +448,38 @@ try {
     throw err;
   }
 
-  // 6. Prune old frozen roots, keeping the newest two.
+  // 6. Prune old frozen roots BY REFERENCE: the published operator.json, the
+  // pre-deploy operator (restored by a rollback), and the deploy's rollback
+  // backup must never be pruned even if an older timestamp sorts them out.
+  // Only the newest two unreferenced roots are kept.
   const rootNames = readdirSync(input.stateRoot, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
     .filter((name) => name.startsWith("frozen-"));
-  const prune = selectFrozenRootsToPrune(rootNames, basename(ROOT), 2);
+  const rollbackOperatorFile =
+    process.env.COMPANION_TRIAL_ROLLBACK_OPERATOR_FILE ?? "";
+  const rollbackOperatorText =
+    rollbackOperatorFile.length > 0 && existsSync(rollbackOperatorFile)
+      ? readFileSync(rollbackOperatorFile, "utf8")
+      : null;
+  const protectedRoots = [
+    frozenRootReferencedByOperator(
+      readFileSync(input.operatorFile, "utf8"),
+      input.stateRoot,
+    ),
+    previousOperator === null
+      ? null
+      : frozenRootReferencedByOperator(previousOperator, input.stateRoot),
+    rollbackOperatorText === null
+      ? null
+      : frozenRootReferencedByOperator(rollbackOperatorText, input.stateRoot),
+  ].filter((name): name is string => name !== null);
+  const prune = selectFrozenRootsToPrune(
+    rootNames,
+    basename(ROOT),
+    2,
+    protectedRoots,
+  );
   for (const name of prune) {
     const target = join(input.stateRoot, name);
     if (!target.startsWith(input.stateRoot + "/")) continue;

@@ -5723,11 +5723,24 @@ master or a changed guest never leaves a stale digest (trials fail closed).
 - Publish is atomic: `operator.json` then
   `~/.config/companion/autonomy.env` (0600, one line
   `COMPANION_AUTONOMY_JSON='…'`). The previous frozen root is retained until
-  success; afterwards only the newest two frozen roots are kept.
+  success; afterwards pruning is BY REFERENCE: the root referenced by the
+  published `operator.json`, by the pre-deploy operator, or by the deploy's
+  rollback backup is never pruned, and only the newest two unreferenced roots
+  are kept.
+- The trial model name is derived from the deploy environment exactly like
+  `run-google-readonly.sh`: an exported `COMPANION_MODEL_JSON` wins, otherwise
+  a non-empty `LITELLM_MASTER_KEY` in `.env.litellm` selects `local-chat`.
+  The build fails if neither determines a model (never publish a profile that
+  `bootstrap.ts` would reject).
+- Sealed checks: only `lint` is runnable. The dependency closure is mounted at
+  `/deps/node_modules`, which TypeScript cannot use to resolve project imports
+  from `/work`, so `typecheck` is dropped loudly from the selected check set;
+  Biome needs no project dependencies.
 - Deploy: `scripts/deploy/companion-deploy.sh` runs the builder after
-  `pnpm install` and before the service restart. A builder failure logs
-  `WARNING trial operator rebuild FAILED` and the app deploy continues WITHOUT
-  touching `autonomy.env`, so trials fail closed until the next deploy.
+  `pnpm install` and before the service restart. A builder failure fails
+  CLOSED: `autonomy.env` is atomically replaced with an empty file (no
+  `COMPANION_AUTONOMY_JSON` line), so the restarted server runs with trials
+  disabled; the app deploy continues.
 - systemd: `scripts/deploy/systemd/companion.service` loads
   `EnvironmentFile=-%h/.config/companion/autonomy.env` after the main env file
   (later files win). Hosts installed from an older unit also need the

@@ -7,9 +7,16 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import {
+  parseAutodispatchConfig,
+  parseTrialConfig,
+} from "../../apps/server/src/config.ts";
+import {
   formatAutonomyEnvLine,
+  frozenRootReferencedByOperator,
+  resolveCurrentModel,
   selectCheckCommands,
   selectFrozenRootsToPrune,
+  selectSealedChecks,
   validateTrialOperatorInput,
 } from "./trialOperator.mjs";
 
@@ -128,33 +135,262 @@ describe("formatAutonomyEnvLine", () => {
 });
 
 describe("selectFrozenRootsToPrune", () => {
-  it("keeps the current root plus the newest other root", () => {
-    const names = [
+  const names = [
+    "frozen-aaaaaaa-20260101T000000Z",
+    "frozen-bbbbbbb-20260102T000000Z",
+    "frozen-ccccccc-20260103T000000Z",
+    "src-aaaaaaa",
+  ];
+
+  it("protects the current root and keeps the newest two unreferenced roots", () => {
+    expect(
+      selectFrozenRootsToPrune(names, "frozen-ccccccc-20260103T000000Z", 2),
+    ).toEqual([]);
+  });
+
+  it("never prunes a root referenced by the operator or rollback backup", () => {
+    // The oldest root is still active on the previous revision.
+    expect(
+      selectFrozenRootsToPrune(names, "frozen-ccccccc-20260103T000000Z", 2, [
+        "frozen-aaaaaaa-20260101T000000Z",
+      ]),
+    ).toEqual([]);
+  });
+
+  it("prunes only unreferenced roots older than the newest two", () => {
+    const many = [
       "frozen-aaaaaaa-20260101T000000Z",
       "frozen-bbbbbbb-20260102T000000Z",
       "frozen-ccccccc-20260103T000000Z",
-      "src-aaaaaaa",
+      "frozen-ddddddd-20260104T000000Z",
+      "frozen-eeeeeee-20260105T000000Z",
     ];
     expect(
-      selectFrozenRootsToPrune(names, "frozen-ccccccc-20260103T000000Z", 2),
-    ).toEqual(["frozen-aaaaaaa-20260101T000000Z"]);
+      selectFrozenRootsToPrune(many, "frozen-eeeeeee-20260105T000000Z", 2, [
+        "frozen-aaaaaaa-20260101T000000Z",
+      ]),
+    ).toEqual(["frozen-bbbbbbb-20260102T000000Z"]);
   });
 
   it("orders by timestamp suffix, not by commit sha in the name", () => {
-    const names = [
-      "frozen-fffffff-20260101T000000Z",
-      "frozen-aaaaaaa-20260102T000000Z",
-      "frozen-bbbbbbb-20260103T000000Z",
-    ];
     expect(
-      selectFrozenRootsToPrune(names, "frozen-bbbbbbb-20260103T000000Z", 2),
-    ).toEqual(["frozen-fffffff-20260101T000000Z"]);
+      selectFrozenRootsToPrune(
+        [
+          "frozen-fffffff-20260101T000000Z",
+          "frozen-aaaaaaa-20260102T000000Z",
+          "frozen-bbbbbbb-20260103T000000Z",
+        ],
+        "frozen-bbbbbbb-20260103T000000Z",
+        2,
+      ),
+    ).toEqual([]);
   });
 
   it("never prunes non-frozen entries", () => {
     expect(
       selectFrozenRootsToPrune(["dep-source-clean", "src-x"], "frozen-a", 2),
     ).toEqual([]);
+  });
+});
+
+describe("frozenRootReferencedByOperator", () => {
+  const stateRoot = "/home/u/.local/share/companion-harness/autonomy";
+  const operatorText = JSON.stringify({
+    sealed: {
+      rootDir: `${stateRoot}/frozen-abcdef0-20260101T000000Z/state/jobs/x`,
+    },
+  });
+
+  it("returns the frozen root referenced by operator.json", () => {
+    expect(frozenRootReferencedByOperator(operatorText, stateRoot)).toBe(
+      "frozen-abcdef0-20260101T000000Z",
+    );
+  });
+
+  it("ignores roots outside the state root and non-frozen paths", () => {
+    expect(
+      frozenRootReferencedByOperator(
+        JSON.stringify({
+          sealed: { rootDir: "/other/frozen-abcdef0-20260101T000000Z" },
+        }),
+        stateRoot,
+      ),
+    ).toBeNull();
+    expect(
+      frozenRootReferencedByOperator(
+        JSON.stringify({
+          sealed: { rootDir: `${stateRoot}/dep-source-clean` },
+        }),
+        stateRoot,
+      ),
+    ).toBeNull();
+  });
+
+  it("fails closed on unreadable operator JSON", () => {
+    expect(() => frozenRootReferencedByOperator("{", stateRoot)).toThrow(
+      /refusing to prune/,
+    );
+  });
+});
+
+describe("resolveCurrentModel", () => {
+  it("uses the model from an exported COMPANION_MODEL_JSON", () => {
+    expect(
+      resolveCurrentModel({
+        COMPANION_MODEL_JSON: JSON.stringify({
+          adapter: "openai-compatible",
+          baseUrl: "http://127.0.0.1:4000",
+          model: "host-model",
+          apiKey: "secret",
+        }),
+      }),
+    ).toBe("host-model");
+  });
+
+  it("falls back to local-chat from a non-empty .env.litellm key", () => {
+    expect(resolveCurrentModel({}, "LITELLM_MASTER_KEY=abc\n")).toBe(
+      "local-chat",
+    );
+    expect(() => resolveCurrentModel({}, "LITELLM_MASTER_KEY=\n")).toThrow(
+      /cannot determine/,
+    );
+  });
+
+  it("fails the build when no model can be determined", () => {
+    expect(() => resolveCurrentModel({})).toThrow(/cannot determine/);
+    expect(() =>
+      resolveCurrentModel({ COMPANION_MODEL_JSON: JSON.stringify({}) }),
+    ).toThrow(/model is required/);
+    expect(() => resolveCurrentModel({ COMPANION_MODEL_JSON: "{" })).toThrow(
+      /not valid JSON/,
+    );
+  });
+});
+
+describe("selectSealedChecks", () => {
+  it("drops checks the sealed workspace cannot run", () => {
+    expect(selectSealedChecks(["lint", "typecheck"], ["lint"])).toEqual([
+      "lint",
+    ]);
+  });
+
+  it("fails when nothing runnable remains", () => {
+    expect(() => selectSealedChecks(["typecheck"], ["lint"])).toThrow(
+      /no supported mandatoryChecks/,
+    );
+  });
+});
+
+describe("autodispatch config shape (real parser)", () => {
+  const relay = {
+    maxRequestBytes: 1_048_576,
+    maxModelCalls: 64,
+    maxOutputTokens: 4096,
+    maxResponseBytes: 1_048_576,
+    perCallTimeoutMs: 60_000,
+    maxConcurrent: 1,
+  };
+  const observe = {
+    activeTimeoutMs: 5000,
+    goneTimeoutMs: 5000,
+    pollIntervalMs: 50,
+  };
+  const bridge =
+    "/srv/companion_master/scripts/pi-orch-bridge/companion-bridge.mjs";
+  const trial = parseTrialConfig(
+    JSON.stringify({
+      available: true,
+      enabled: true,
+      mandatoryChecks: ["lint"],
+      configFingerprint: "0".repeat(64),
+      sourceRevision: "0".repeat(40),
+      currentModel: resolveCurrentModel({
+        COMPANION_MODEL_JSON: JSON.stringify({ model: "local-chat" }),
+      }),
+      disclosedWholeRepoRead: true,
+      timeoutMs: 900_000,
+      maxOutputBytes: 262_144,
+      workspaceAlias: "companion-harness",
+      runner: {
+        nodeRealpath: "/usr/bin/node",
+        bridgeScriptPath: bridge,
+        bridgeConfigTemplatePath:
+          "/home/u/.config/companion/trial-operator.json",
+        systemctlRealpath: "/usr/bin/systemctl",
+        xdgRuntimeDir: "/run/user/1000",
+        relay,
+        observe,
+        pollMs: 500,
+      },
+    }),
+  );
+  const selectedChecks = selectSealedChecks(["lint", "typecheck"], ["lint"]);
+  const adRaw = {
+    enabled: true,
+    workspaceAlias: "companion-harness",
+    sourceRoot: "/synthetic/source",
+    operations: ["investigate", "implement"],
+    readScopes: ["apps", "packages", "scripts", "docs"],
+    writeScopes: ["apps", "packages"],
+    checks: selectedChecks,
+    caps: {
+      timeoutMs: 900_000,
+      maxOutputBytes: 262_144,
+      maxModelCalls: 64,
+      maxOutputTokens: 4096,
+      perCallTimeoutMs: 60_000,
+      maxRequestBytes: relay.maxRequestBytes,
+      maxResponseBytes: relay.maxResponseBytes,
+      maxConcurrent: 1,
+      jobsPerDay: 3,
+      concurrentExecutions: 1,
+    },
+    dependencyRoot: null,
+    bridgeScriptPath: bridge,
+    bridgeConfigTemplatePath: "/home/u/.config/companion/trial-operator.json",
+    materialization: {
+      stateDir: "/synthetic/state",
+      executor: {
+        kind: "real-pi",
+        executable:
+          "/synthetic/source/scripts/pi-orch-bridge/pi-orch-guest.mjs",
+        args: [],
+      },
+      checks: {
+        lint: {
+          executable: "/usr/bin/node",
+          args: [
+            "/deps/node_modules/@biomejs/biome/bin/biome",
+            "check",
+            "/work",
+          ],
+        },
+      },
+      executionBackend: "confined",
+      runtime: { nodeRealpath: "/usr/bin/node" },
+      dependencySourceNodeModules: "/synthetic/dep-source-clean/node_modules",
+      allowedTopLevelFiles: ["package.json"],
+      maxDurationMs: 900_000,
+      modelRoute: "local",
+    },
+  };
+
+  it("accepts checks as a name array plus the materialization command map", () => {
+    const parsed = parseAutodispatchConfig(JSON.stringify(adRaw), trial);
+    expect(parsed).not.toBeNull();
+    expect(parsed?.checks).toEqual(["lint"]);
+    expect(Object.keys(parsed?.materialization?.checks ?? {})).toEqual([
+      "lint",
+    ]);
+  });
+
+  it("rejects the filtered command map in the top-level checks field", () => {
+    expect(() =>
+      parseAutodispatchConfig(
+        JSON.stringify({ ...adRaw, checks: adRaw.materialization.checks }),
+        trial,
+      ),
+    ).toThrow(/autodispatch checks are invalid/);
   });
 });
 
@@ -218,10 +454,22 @@ describe("companion-deploy.sh trial-operator ordering", () => {
     expect(source).toMatch(/notify_success[\s\S]*?rm -rf "\$TRIAL_BACKUP_DIR"/);
   });
 
-  it("does not block the deploy when the trial rebuild fails", () => {
+  it("fails closed by atomically emptying autonomy.env when the rebuild fails", () => {
     const block = source.slice(installAt, restartAt);
-    expect(block).toMatch(/if ! .*build-trial-operator\.mts/);
-    expect(block).toMatch(/autonomy\.env left unchanged/);
-    expect(block).not.toMatch(/build-trial-operator\.mts[\s\S]*?\bexit 1\b/);
+    expect(block).toContain("BUILD_OK=0");
+    expect(block).toMatch(/rebuild FAILED[\s\S]*?fail closed/);
+    expect(block).toContain('TRIAL_ENV_TMP="${TRIAL_ENV_FILE}.tmp-$$"');
+    expect(block).toMatch(/: > "\$TRIAL_ENV_TMP"/);
+    expect(block).toMatch(/mv -f "\$TRIAL_ENV_TMP" "\$TRIAL_ENV_FILE"/);
+    expect(block).not.toContain("autonomy.env left unchanged");
+    expect(block.indexOf("TRIAL_ENV_TMP")).toBeLessThan(
+      source.indexOf("systemctl --user restart", buildAt),
+    );
+  });
+
+  it("passes the rollback operator path to the builder for safe pruning", () => {
+    expect(source).toContain(
+      'COMPANION_TRIAL_ROLLBACK_OPERATOR_FILE="$TRIAL_BACKUP_DIR/operator.json"',
+    );
   });
 });
