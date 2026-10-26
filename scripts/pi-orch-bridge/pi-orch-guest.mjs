@@ -55,7 +55,7 @@ const MAX_RESPONSE_BYTES = Math.min(
 );
 const MAX_MODEL_CALLS = Math.max(
   1,
-  Math.min(Number(process.env.COMPANION_MAX_MODEL_CALLS ?? 8), 24),
+  Math.min(Number(process.env.COMPANION_MAX_MODEL_CALLS ?? 8), 64),
 );
 const MAX_OMP_STDOUT_BYTES = 4 * 1024 * 1024;
 const MAX_OBSERVATION_BYTES = 64 * 1024;

@@ -30,7 +30,7 @@ export const PROFILE_SCHEMA_VERSION = 2;
 
 // Test/transport maxima. Not adopted production values.
 export const PROFILE_MAX_DURATION_MS = 900_000;
-export const PROFILE_MAX_MODEL_CALLS = 24;
+export const PROFILE_MAX_MODEL_CALLS = 64;
 export const PROFILE_MAX_OUTPUT_TOKENS = 4_096;
 export const PROFILE_MAX_MODEL_CALL_MS = 120_000;
 export const PROFILE_MAX_SOURCE_BYTES = 256 * 1024 * 1024;
