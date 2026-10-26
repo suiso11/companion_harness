@@ -570,6 +570,26 @@ describe("sealed pi-orch bridge portable protocol/command contract", () => {
     expect(existsSync(join(dir, "state"))).toBe(false);
   });
 
+  it.skipIf(process.platform === "win32")(
+    "accepts maxModelCalls up to the 64-call ceiling and rejects 65",
+    async () => {
+      const fixture = await makeFixture({
+        executorBody: "process.stdout.write('executor-ok\\n');\n",
+      });
+      const atCeiling = structuredClone(fixture.config);
+      atCeiling.profile.limits.maxModelCalls = 64;
+      expect(() =>
+        parseOperatorConfig(JSON.stringify(atCeiling)),
+      ).not.toThrow();
+
+      const aboveCeiling = structuredClone(fixture.config);
+      aboveCeiling.profile.limits.maxModelCalls = 65;
+      expect(() => parseOperatorConfig(JSON.stringify(aboveCeiling))).toThrow(
+        /profile\.limits\.maxModelCalls must be an integer in \[1, 64\]/,
+      );
+    },
+  );
+
   it("pins the transient scope to the exact frozen millisecond runtime bound", () => {
     const built = buildWholejobCommand(
       {
