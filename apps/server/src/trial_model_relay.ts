@@ -33,8 +33,10 @@
 //     wire, gateway-safe `capsule.<name>` names toward ModelGateway.
 //
 // Host relay guarantees in this module:
-//   - Socket file created in a 0700 private dir, chmod 0600, unlinked on
-//     close (stale socket unlinked before bind).
+//   - Socket file created in a 0700 private dir, chmod 0600, unlinked only
+//     by close for a socket this instance actually bound. Bind never removes
+//     an existing path: EADDRINUSE (including a stale file with no listener)
+//     fails closed and the operator must remove it.
 //   - Gate: `setPermitted(true)` is called by the runner only after the
 //     kernel permit; before that, or after `revoke()` (Stop/cancel/FG
 //     preempt), every request gets a fixed error response and is NOT
@@ -61,14 +63,32 @@ import {
 } from "@companion/model-local";
 import type { ServerLogger } from "./logger.js";
 
-/** Guest-native tool names spoken on the UDS wire (plain, no namespace). */
+/**
+ * Guest-native tool names spoken on the UDS wire (plain, no namespace).
+ * The installed pi-orch parent advertises the delegation tools alongside the
+ * fixed child tools; the relay is a transport, not a second authority (the
+ * sealed bridge still validates containment/scopes/checks).
+ *
+ * `find` and `ls` are the installed Pi backend's exact read-only child verbs
+ * (`piToolList` -> read,grep,find,ls); the installed OMP adapter maps its
+ * `glob` to `find` for native children. They are explicit, closed-vocabulary
+ * entries only: any other unlisted verb still fails closed as `unknown_tool`.
+ */
 export const GUEST_TOOL_NAMES = [
   "bash",
   "edit",
+  "find",
   "glob",
   "grep",
+  "ls",
   "read",
   "write",
+  "task",
+  "wait",
+  "opencode_task",
+  "opencode_spawn",
+  "opencode_wait",
+  "opencode_tools",
 ] as const;
 
 export type GuestToolName = (typeof GUEST_TOOL_NAMES)[number];
@@ -93,6 +113,43 @@ function isGuestToolName(value: unknown): value is GuestToolName {
     typeof value === "string" &&
     (GUEST_TOOL_NAMES as readonly string[]).includes(value)
   );
+}
+
+/** Canonical cap ordering: both inputs validated, each field is the minimum.
+ * Callers use this to apply host static ceilings WITHOUT ever widening a
+ * narrower execution policy. */
+export function narrowTrialModelRelayCaps(
+  staticCaps: TrialModelRelayCaps,
+  requestedCaps: TrialModelRelayCaps,
+): TrialModelRelayCaps {
+  validateTrialModelRelayCaps(staticCaps);
+  validateTrialModelRelayCaps(requestedCaps);
+  return Object.freeze({
+    maxRequestBytes: Math.min(
+      staticCaps.maxRequestBytes,
+      requestedCaps.maxRequestBytes,
+    ),
+    maxModelCalls: Math.min(
+      staticCaps.maxModelCalls,
+      requestedCaps.maxModelCalls,
+    ),
+    maxOutputTokens: Math.min(
+      staticCaps.maxOutputTokens,
+      requestedCaps.maxOutputTokens,
+    ),
+    maxResponseBytes: Math.min(
+      staticCaps.maxResponseBytes,
+      requestedCaps.maxResponseBytes,
+    ),
+    perCallTimeoutMs: Math.min(
+      staticCaps.perCallTimeoutMs,
+      requestedCaps.perCallTimeoutMs,
+    ),
+    maxConcurrent: Math.min(
+      staticCaps.maxConcurrent,
+      requestedCaps.maxConcurrent,
+    ),
+  });
 }
 
 /** Required caps: every field must be supplied; invalid values throw. */
@@ -174,7 +231,7 @@ function fixedErrorBody(code: string): string {
   return JSON.stringify({ error: { message: code, type: code } });
 }
 
-function validateCaps(caps: TrialModelRelayCaps): void {
+export function validateTrialModelRelayCaps(caps: TrialModelRelayCaps): void {
   if (!isRecord(caps as unknown as Record<string, unknown>)) {
     throw new Error("trial_model_relay: caps are required");
   }
@@ -230,6 +287,8 @@ export class TrialModelRelay {
   private readonly liveControllers = new Set<AbortController>();
   private readonly openSockets = new Set<Socket>();
   private started = false;
+  /** True only after THIS instance successfully bound the socket path. */
+  private bound = false;
 
   constructor(options: TrialModelRelayOptions) {
     if (!isRecord(options as unknown as Record<string, unknown>)) {
@@ -251,7 +310,7 @@ export class TrialModelRelay {
     ) {
       throw new Error("trial_model_relay: fixedModel must be non-empty");
     }
-    validateCaps(options.caps);
+    validateTrialModelRelayCaps(options.caps);
     this.sockPath = options.sockPath;
     this.gateway = options.gateway;
     this.fixedModel = options.fixedModel;
@@ -363,11 +422,9 @@ export class TrialModelRelay {
     const dir = dirname(this.sockPath);
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     chmodSync(dir, 0o700);
-    try {
-      unlinkSync(this.sockPath);
-    } catch {
-      // Fresh bind: no stale socket.
-    }
+    // Never unlink an existing path before bind: the runner maps EADDRINUSE
+    // to launch-failed. A stale socket file with no listener is also refused
+    // (the operator must remove it); ownership is proven only by OUR bind.
     this.server = createServer((req, res) => {
       void this.handleRequest(req, res);
     });
@@ -377,24 +434,34 @@ export class TrialModelRelay {
         this.openSockets.delete(sock);
       });
     });
-    await new Promise<void>((resolve, reject) => {
-      if (this.server === null) {
-        reject(new Error("trial_model_relay: server missing"));
-        return;
-      }
-      this.server.once("error", reject);
-      this.server.listen(this.sockPath, () => {
-        this.server?.removeListener("error", reject);
-        resolve();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        if (this.server === null) {
+          reject(new Error("trial_model_relay: server missing"));
+          return;
+        }
+        this.server.once("error", reject);
+        this.server.listen(this.sockPath, () => {
+          this.server?.removeListener("error", reject);
+          resolve();
+        });
       });
-    });
+    } catch (error) {
+      // This instance never owned the path: drop the server and do NOT
+      // unlink anything on a later close().
+      this.server = null;
+      throw error;
+    }
+    this.bound = true;
     chmodSync(this.sockPath, 0o600);
     this.started = true;
   }
 
   async close(): Promise<void> {
     const server = this.server;
+    const ownedSocket = this.bound;
     this.server = null;
+    this.bound = false;
     this.permitted = false;
     this.revokedObserved = true;
     this.notifyPermitWaiters("revoked");
@@ -428,10 +495,14 @@ export class TrialModelRelay {
       });
     }
     this.openSockets.clear();
-    try {
-      unlinkSync(this.sockPath);
-    } catch {
-      // Already gone: close is idempotent.
+    // Only remove the path this instance actually bound. A failed/foreign
+    // bind or a reused stale path must never be deleted by close().
+    if (ownedSocket) {
+      try {
+        unlinkSync(this.sockPath);
+      } catch {
+        // Already gone: close is idempotent.
+      }
     }
     this.started = false;
   }

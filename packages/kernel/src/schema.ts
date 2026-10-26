@@ -1366,6 +1366,8 @@ export const trialProposals = sqliteTable("trial_proposals", {
   timeoutMs: integer("timeout_ms").notNull(),
   maxOutputBytes: integer("max_output_bytes").notNull(),
   checksJson: text("checks_json").notNull(),
+  // Schema32: frozen wire constraints (plan decisions/non-goals/steps).
+  constraintsJson: text("constraints_json").notNull().default("[]"),
   status: text("status").notNull(),
   createdAt: integer("created_at").notNull(),
   // Schema13: frozen staging-time workspace alias + profile snapshot JSON.

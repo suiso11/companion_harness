@@ -219,6 +219,24 @@ import {
   createActionProposalStager,
 } from "./action_proposals.js";
 import {
+  type AuthorizeWithinPolicyOptions,
+  type AutodispatchLimits,
+  authorizeWithinPolicy as autodispatchAuthorize,
+  createDispatchPlan as autodispatchCreatePlan,
+  createStandingPolicy as autodispatchCreatePolicy,
+  listDispatchExecutions as autodispatchListExecutions,
+  listDispatchPlans as autodispatchListPlans,
+  listStandingPolicies as autodispatchListPolicies,
+  readDispatchExecution as autodispatchReadExecution,
+  readIntentHistory as autodispatchReadIntentHistory,
+  readDispatchMaterialization as autodispatchReadMaterialization,
+  readDispatchPlan as autodispatchReadPlan,
+  readStandingPolicy as autodispatchReadPolicy,
+  readRunSessionId as autodispatchReadRunSessionId,
+  revokeStandingPolicy as autodispatchRevokePolicy,
+  type CreateStandingPolicyInput,
+} from "./autodispatch.js";
+import {
   type AutonomyKeyOptions,
   applyAutonomyRestartFence,
   assertOwnedPurpose,
@@ -354,7 +372,9 @@ import {
   listClaimedTrialWorkers,
   listQueuedTrialGrants,
   listTrialProposals,
+  type QueuedTrialGrantCursor,
   readLaunchPermit,
+  readQueuedTrialGrantHorizon,
   readTrialIntent,
   readTrialProposal,
   readWorkerOutcome,
@@ -365,6 +385,7 @@ import {
   registerWorkerBoot,
   stageTrialProposal,
   type TrustedObservation,
+  isNeverLaunchedRevokedTrialGrant as trialGrantNeverLaunched,
 } from "./trial_authority.js";
 
 /**
@@ -6969,6 +6990,82 @@ export function createKernelRepository(
   }
 
   /* Trial authority facade: DATA-only stage, one-grant approve, claim. */
+  /* Auto-dispatch ledger: policy/plan/execution + host authorization. */
+  function createAutodispatchPolicy(
+    sessionId: string,
+    input: CreateStandingPolicyInput,
+    options: {
+      key: string;
+      now?: number;
+      limits: AutodispatchLimits;
+      parent: {
+        statement: string;
+        sourceTurnId: string;
+        interpretation?: string;
+        validFrom?: string | null;
+        validUntil?: string | null;
+      };
+    },
+  ) {
+    return autodispatchCreatePolicy(
+      db,
+      sessionId,
+      input,
+      options as Parameters<typeof autodispatchCreatePolicy>[3],
+    );
+  }
+  function listAutodispatchPolicies(sessionId: string, limit?: number) {
+    return autodispatchListPolicies(db, sessionId, limit);
+  }
+  function readAutodispatchPolicy(sessionId: string, policyId: string) {
+    return autodispatchReadPolicy(db, sessionId, policyId);
+  }
+  function revokeAutodispatchPolicy(
+    sessionId: string,
+    policyId: string,
+    options: { now?: number; reason?: string } = {},
+  ) {
+    return autodispatchRevokePolicy(db, sessionId, policyId, options);
+  }
+  function createAutodispatchPlan(
+    sessionId: string,
+    input: Parameters<typeof autodispatchCreatePlan>[2],
+    options: { now?: number } = {},
+  ) {
+    return autodispatchCreatePlan(db, sessionId, input, options);
+  }
+  function listAutodispatchPlans(sessionId: string, limit?: number) {
+    return autodispatchListPlans(db, sessionId, limit);
+  }
+  function readAutodispatchPlan(sessionId: string, planId: string) {
+    return autodispatchReadPlan(db, sessionId, planId);
+  }
+  function authorizeAutodispatch(
+    sessionId: string,
+    planId: string,
+    options: AuthorizeWithinPolicyOptions,
+  ) {
+    return autodispatchAuthorize(db, sessionId, planId, options);
+  }
+  function readAutodispatchIntentHistory(sessionId: string, limit?: number) {
+    return autodispatchReadIntentHistory(db, sessionId, limit);
+  }
+  function readAutodispatchRunSession(runId: string): string | null {
+    return autodispatchReadRunSessionId(db, runId);
+  }
+  function listAutodispatchExecutions(sessionId: string, limit?: number) {
+    return autodispatchListExecutions(db, sessionId, limit);
+  }
+  function readAutodispatchExecution(sessionId: string, executionId: string) {
+    return autodispatchReadExecution(db, sessionId, executionId);
+  }
+  function readAutodispatchMaterialization(
+    sessionId: string,
+    executionId: string,
+  ) {
+    return autodispatchReadMaterialization(db, sessionId, executionId);
+  }
+
   function stageTrial(
     sessionId: string,
     request: unknown,
@@ -7416,6 +7513,15 @@ export function createKernelRepository(
     return readTrialIntent(db, sessionId, executionId);
   }
 
+  /** Internal proof read only: owned, revoked, never claimed/launched grant.
+   * Missing/foreign => false; DB errors propagate; no mutation. */
+  function isNeverLaunchedRevokedTrialGrant(
+    sessionId: string,
+    executionId: string,
+  ): boolean {
+    return trialGrantNeverLaunched(db, sessionId, executionId);
+  }
+
   function registerTrialWorkerBoot(
     input: {
       executionId: string;
@@ -7541,9 +7647,24 @@ export function createKernelRepository(
   /**
    * Runner pick read (pure SELECT): oldest queued grant for an alias.
    * Empty array when nothing is queued (runNext no-op).
+   *
+   * `after` is an exclusive `(createdAt, executionId)` keyset cursor and
+   * `through` an inclusive snapshot boundary, so one pick can page past
+   * permanently blocked heads without re-reading them while staying bounded
+   * to the cohort that existed when the pick started.
    */
-  function listQueuedTrialGrantsForAlias(workspaceAlias: string, limit = 1) {
-    return listQueuedTrialGrants(db, workspaceAlias, limit);
+  function listQueuedTrialGrantsForAlias(
+    workspaceAlias: string,
+    limit = 1,
+    after?: QueuedTrialGrantCursor,
+    through?: QueuedTrialGrantCursor,
+  ) {
+    return listQueuedTrialGrants(db, workspaceAlias, limit, after, through);
+  }
+
+  /** Runner snapshot boundary (pure SELECT): newest queued grant cursor. */
+  function readQueuedTrialGrantHorizonForAlias(workspaceAlias: string) {
+    return readQueuedTrialGrantHorizon(db, workspaceAlias);
   }
 
   /** Runner recovery scan (pure SELECT): claimed grants with boot rows. */
@@ -7884,6 +8005,19 @@ export function createKernelRepository(
     readPendingShadowJob,
     hasActiveShadowBlock,
 
+    createAutodispatchPolicy,
+    listAutodispatchPolicies,
+    readAutodispatchPolicy,
+    revokeAutodispatchPolicy,
+    createAutodispatchPlan,
+    listAutodispatchPlans,
+    readAutodispatchPlan,
+    authorizeAutodispatch,
+    readAutodispatchIntentHistory,
+    readAutodispatchRunSession,
+    listAutodispatchExecutions,
+    readAutodispatchExecution,
+    readAutodispatchMaterialization,
     stageTrial,
     listTrials,
     readTrial,
@@ -7893,6 +8027,7 @@ export function createKernelRepository(
     fenceTrialUnknown,
     hashTrialLaunchRequest,
     readTrialLaunchIntent,
+    isNeverLaunchedRevokedTrialGrant,
     registerTrialWorkerBoot,
     issueTrialLaunchPermit,
     readTrialLaunchPermit,
@@ -7904,6 +8039,7 @@ export function createKernelRepository(
     trialAuthorityDeadline,
     reconcileTrialExpiries,
     listQueuedTrialGrantsForAlias,
+    readQueuedTrialGrantHorizonForAlias,
     listClaimedTrialWorkersForRecovery,
     ingestNotifications,
     listNotifications,

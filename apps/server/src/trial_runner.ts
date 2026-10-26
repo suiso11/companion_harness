@@ -17,7 +17,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type {
   TrialLaunchRequest,
   TrialProfileSnapshot,
@@ -25,8 +25,18 @@ import type {
 } from "@companion/contracts";
 import type { KernelRepository } from "@companion/kernel";
 import type { ModelGateway } from "@companion/model-local";
+import {
+  computeEffectiveProfile,
+  type OperatorConfig,
+  parseOperatorConfig,
+} from "../../../scripts/pi-orch-bridge/sealed-profile.mjs";
+import {
+  cleanupTerminalAutodispatchMaterialization,
+  type TrialMaterializationResolution,
+} from "./autodispatch_materializer.js";
 import type { ServerLogger } from "./logger.js";
 import {
+  narrowTrialModelRelayCaps,
   TrialModelRelay,
   type TrialModelRelayCaps,
 } from "./trial_model_relay.js";
@@ -40,6 +50,9 @@ import {
 
 /** Stdout framing allowance beyond the frozen budget (one trailing line). */
 export const TRIAL_STDOUT_FRAMING_ALLOWANCE = 4096;
+/** Keyset page size for one pick. NOT a starve cutoff: pages continue until
+ * the pick's snapshot boundary, so an 11th/50th valid grant stays reachable. */
+const TRIAL_QUEUE_SCAN_PAGE = 50;
 /** Fixed stderr drain cap (diagnostics only, never forwarded). */
 export const TRIAL_STDERR_CAP_BYTES = 65536;
 /** Fixed reason codes (never free text into the kernel fence/detail). */
@@ -47,6 +60,91 @@ export const TRIAL_REASON_INVALID_RESULT = "bridge-result-invalid";
 export const TRIAL_REASON_FENCE_UNKNOWN_SCOPE = "scope-unknown-after-exit";
 export const TRIAL_REASON_FENCE_ACTIVE_SCOPE = "scope-active-after-exit";
 export const TRIAL_REASON_FENCE_RECOVER_UNSETTLED = "recover-unsettled-worker";
+
+/** Closed errno vocabulary for the pre-boot abort diagnostic (safe only). */
+const PREBOOT_ERRNO_ALLOWLIST: ReadonlySet<string> = new Set([
+  "EADDRINUSE",
+  "EACCES",
+  "ENOENT",
+  "ENAMETOOLONG",
+  "EINVAL",
+]);
+
+function prebootErrno(error: unknown): string {
+  if (typeof error !== "object" || error === null) {
+    return "unknown";
+  }
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" && PREBOOT_ERRNO_ALLOWLIST.has(code)
+    ? code
+    : "unknown";
+}
+
+/**
+ * Frozen manual-execution model budget: the approved V2 operator config's
+ * guest limits/storage intersect the host runner's static relay caps. This
+ * uses the SAME relay narrowing helper as the policy path, so the manual
+ * template can never widen either the operator-derived or host ceiling.
+ */
+function requiredLimit(config: OperatorConfig, key: string): number {
+  const value = config.profile.limits[key];
+  if (typeof value !== "number") {
+    throw new Error(`approved operator limit missing: ${key}`);
+  }
+  return value;
+}
+
+export function manualRelayCapsFromConfig(
+  config: OperatorConfig,
+  staticCaps: TrialModelRelayCaps,
+): TrialModelRelayCaps {
+  return narrowTrialModelRelayCaps(staticCaps, {
+    maxRequestBytes: config.storage.maxRequestBytes,
+    maxModelCalls: requiredLimit(config, "maxModelCalls"),
+    maxOutputTokens: requiredLimit(config, "maxOutputTokens"),
+    maxResponseBytes: config.storage.maxResultBytes,
+    perCallTimeoutMs: requiredLimit(config, "maxModelCallMs"),
+    maxConcurrent: requiredLimit(config, "modelConcurrency"),
+  });
+}
+
+/**
+ * Manual grants use the approved operator config itself, never a legacy
+ * template rewrite. The config must still prove the exact frozen profile the
+ * human approved: effective fingerprint === snapshot fingerprint, the
+ * operator-declared active fingerprint/source revision match that computed
+ * content, and the advertised mandatory check set is exactly the effective
+ * check set. Any drift fails before the relay/boot (known quiescence).
+ */
+function readApprovedOperatorConfig(
+  path: string,
+  profile: TrialProfileSnapshot,
+): OperatorConfig {
+  const config = parseOperatorConfig(readFileSync(path, "utf8"));
+  const effective = computeEffectiveProfile(config);
+  if (effective.fingerprint !== profile.configFingerprint) {
+    throw new Error("approved profile fingerprint drift");
+  }
+  if (config.active.configFingerprint !== effective.fingerprint) {
+    throw new Error("operator active fingerprint drift");
+  }
+  if (
+    effective.sourceRevision !== profile.sourceRevision ||
+    config.active.sourceRevision !== effective.sourceRevision
+  ) {
+    throw new Error("approved source revision drift");
+  }
+  const effectiveChecks = Object.keys(
+    effective.checks as Record<string, unknown>,
+  )
+    .sort()
+    .join("\n");
+  const mandatoryChecks = [...profile.mandatoryChecks].sort().join("\n");
+  if (effectiveChecks !== mandatoryChecks) {
+    throw new Error("approved mandatory check set drift");
+  }
+  return config;
+}
 
 export interface TrialRunnerObserveTimeouts {
   /** Bound for the scope to become active after spawn. */
@@ -57,10 +155,19 @@ export interface TrialRunnerObserveTimeouts {
   pollIntervalMs: number;
 }
 
+export type TrialMaterializationResolver = (input: {
+  readonly sessionId: string;
+  readonly executionId: string;
+  readonly proposalId: string;
+}) => Promise<TrialMaterializationResolution> | TrialMaterializationResolution;
+
 export interface TrialRunnerConfig {
   nodeRealpath: string;
   bridgeScriptPath: string;
-  /** Absolute JSON template path; only modelSockHostPath is replaced. */
+  /** Absolute path to the frozen approved V2 OperatorConfig JSON. It is
+   * parsed and fingerprint-verified per manual execution, its
+   * `profile.model.sockHostPath` is used verbatim, and the parsed config is
+   * copied verbatim to the private run dir (no template rewrite). */
   bridgeConfigTemplatePath: string;
   systemctlRealpath: string;
   xdgRuntimeDir: string;
@@ -71,6 +178,9 @@ export interface TrialRunnerConfig {
   gateway: ModelGateway;
   observe: TrialRunnerObserveTimeouts;
   runDirBase?: string | undefined;
+  /** Optional policy-only materialization resolver. Manual human trial
+   * grants return {kind:"manual"} and keep the unchanged static path. */
+  resolveMaterialization?: TrialMaterializationResolver | undefined;
 }
 
 export interface TrialRunnerObserverFns {
@@ -99,7 +209,11 @@ export interface TrialRunnerDeps {
   isForegroundBusy: () => boolean;
   logger: ServerLogger;
   observer?: TrialRunnerObserverFns | undefined;
-  createRelay?: ((sockPath: string) => TrialRunnerRelay) | undefined;
+  /** Receives the exact per-execution budget resolved from the immutable
+   * materialization (or the static config caps for a manual human grant). */
+  createRelay?:
+    | ((sockPath: string, caps: TrialModelRelayCaps) => TrialRunnerRelay)
+    | undefined;
   spawnImpl?: TrialRunnerSpawn | undefined;
   clock?: (() => number) | undefined;
   randomKey?: (() => string) | undefined;
@@ -145,11 +259,23 @@ export class TrialRunner {
   private readonly isForegroundBusy: () => boolean;
   private readonly logger: ServerLogger;
   private readonly observer: TrialRunnerObserverFns;
-  private readonly createRelay: (sockPath: string) => TrialRunnerRelay;
+  private readonly createRelay: (
+    sockPath: string,
+    caps: TrialModelRelayCaps,
+  ) => TrialRunnerRelay;
   private readonly spawnImpl: TrialRunnerSpawn;
   private readonly clock: () => number;
   private readonly randomKey: () => string;
   private active = false;
+  /**
+   * Singleflight gate for the WHOLE runNext pick. Set synchronously before
+   * the first await (materialization resolution / claim) and released in
+   * finally. Without it, a poll reentering while an async policy resolver is
+   * pending observes active=false and claims/spawns the same grant again.
+   * `active` keeps its existing meaning (a claimed, executing run) for
+   * busy/shutdown semantics.
+   */
+  private pickInFlight = false;
   private readonly ownedPids = new Set<number>();
   private shuttingDown = false;
   private currentRelay: TrialRunnerRelay | null = null;
@@ -211,12 +337,14 @@ export class TrialRunner {
     const fixedModel = cfg.fixedModel;
     this.createRelay =
       deps.createRelay ??
-      ((sockPath: string) =>
+      ((sockPath: string, requestedCaps: TrialModelRelayCaps) =>
         new TrialModelRelay({
           sockPath,
           gateway,
           fixedModel,
-          caps: { ...relayCaps },
+          // Host static runner caps may tighten the execution budget but can
+          // never widen the frozen policy/operator intersection.
+          caps: narrowTrialModelRelayCaps(relayCaps, requestedCaps),
           logger: this.logger,
         }));
     this.spawnImpl = deps.spawnImpl ?? nodeSpawn;
@@ -376,6 +504,21 @@ export class TrialRunner {
 
   /** Execute ONE oldest queued grant for the alias, or no-op with a reason. */
   async runNext(): Promise<TrialRunNextResult> {
+    // Singleflight: claim the pick slot synchronously BEFORE any await so a
+    // reentrant poll during async materialization resolution cannot pass the
+    // gate and double-claim/spawn. Released in finally even on resolver/claim
+    // throw. `active` remains the claimed-run flag.
+    if (this.active || this.pickInFlight)
+      return { ran: false, outcome: "active" };
+    this.pickInFlight = true;
+    try {
+      return await this.runNextInner();
+    } finally {
+      this.pickInFlight = false;
+    }
+  }
+
+  private async runNextInner(): Promise<TrialRunNextResult> {
     if (this.active) return { ran: false, outcome: "active" };
     if (this.shuttingDown) return { ran: false, outcome: "empty" };
     // Fresh per-pick latch: idle revokes are no-ops and must not leak into
@@ -390,38 +533,33 @@ export class TrialRunner {
     }
     if (this.isForegroundBusy())
       return { ran: false, outcome: "foreground-busy" };
-    let queued: {
-      executionId: string;
-      sessionId: string;
-      scope: string;
-      proposalId: string;
-    }[];
+    // Freeze the finite cohort that exists at pick start. New arrivals after
+    // this boundary are left for the next poll, so continuous completion
+    // traffic can never extend (or spin) this pick. Pure SELECT.
+    let horizon: { createdAt: number; executionId: string } | null;
     try {
-      queued = this.repo.listQueuedTrialGrantsForAlias(
+      horizon = this.repo.readQueuedTrialGrantHorizonForAlias(
         this.config.workspaceAlias,
-        10,
-      ) as {
-        executionId: string;
-        sessionId: string;
-        scope: string;
-        proposalId: string;
-      }[];
+      );
     } catch {
       return { ran: false, outcome: "empty" };
     }
-    if (queued.length === 0) return { ran: false, outcome: "empty" };
+    if (horizon === null) return { ran: false, outcome: "empty" };
 
     // Head-of-line starvation guard: a permanently unclaimable head grant
     // (expired, authority lost, alias/profile drift) must not starve valid
-    // grants behind it. Walk the oldest-first queue: transient failures
-    // (paused/fence) return immediately; permanent failures retire the grant
-    // best-effort via expireTrial and continue to the next candidate.
+    // grants behind it. Keyset-page past it in the same stable
+    // (created_at, execution_id) order; transient failures (paused/fence/
+    // foreground/shutdown) return immediately; clearly unclaimable rows use
+    // the existing best-effort expire path. Blocked/unknown materialization
+    // is NEVER revoked: it is skipped for this pick only and stays queued.
     let next:
       | {
           executionId: string;
           sessionId: string;
           scope: string;
           proposalId: string;
+          createdAt: number;
         }
       | undefined;
     let claimBody: { request: TrialLaunchRequest; grant: { scope: string } };
@@ -430,66 +568,149 @@ export class TrialRunner {
     let selectedBody:
       | { request: TrialLaunchRequest; grant: { scope: string } }
       | undefined;
-    for (const candidate of queued) {
+    let selectedMaterialization:
+      | Extract<TrialMaterializationResolution, { kind: "policy" }>
+      | undefined;
+    let cursor: { createdAt: number; executionId: string } | undefined;
+    let scanned = 0;
+    scan: while (true) {
+      let page: {
+        executionId: string;
+        sessionId: string;
+        scope: string;
+        proposalId: string;
+        createdAt: number;
+      }[];
       try {
-        const out = this.repo.claimTrial(
-          candidate.sessionId,
-          candidate.executionId,
-          {
-            key: this.randomKey(),
-            now: this.clock(),
-            profile: this.config.profile,
-            workspaceAlias: this.config.workspaceAlias,
-          },
+        page = this.repo.listQueuedTrialGrantsForAlias(
+          this.config.workspaceAlias,
+          TRIAL_QUEUE_SCAN_PAGE,
+          cursor,
+          horizon,
         );
-        // claimTrial body is { kind, grant, request, applied? }: normalize.
-        const raw = out.body as unknown as Record<string, unknown>;
-        selected = candidate;
-        selectedBody = {
-          request: raw.request as TrialLaunchRequest,
-          grant: raw.grant as { scope: string },
-        };
-        break;
-      } catch (error) {
-        if (isFenceError(error)) {
-          this.logger.warn("trial.claim_fenced", {});
-          return {
-            ran: false,
-            outcome: "fenced",
-            executionId: candidate.executionId,
-          };
-        }
-        const message = error instanceof Error ? error.message : String(error);
-        if (/paused/i.test(message)) {
-          return { ran: false, outcome: "paused" };
-        }
-        lastClaimFailed = {
-          executionId: candidate.executionId,
-          message,
-        };
-        // Best-effort retire so the next poll does not reselect this row.
-        try {
-          if (
-            typeof candidate.proposalId === "string" &&
-            candidate.proposalId.length > 0
-          ) {
-            this.repo.expireTrial(
-              candidate.sessionId,
-              candidate.proposalId,
-              this.clock(),
-            );
-          }
-        } catch {
-          // Best effort: expiry never fails the skip.
-        }
-        this.logger.warn("trial.claim_skipped_unclaimable", {});
+      } catch {
+        return { ran: false, outcome: "empty" };
       }
+      if (page.length === 0) break;
+      for (const candidate of page) {
+        if (scanned > 0) {
+          // Preserve every admission gate across async candidate resolution:
+          // a STOP/pause/foreground change mid-scan must not claim or spawn.
+          if (this.shuttingDown || this.stopLatch) {
+            return { ran: false, outcome: "empty" };
+          }
+          try {
+            if (this.repo.getAutonomyControlState().paused) {
+              return { ran: false, outcome: "paused" };
+            }
+          } catch {
+            return { ran: false, outcome: "paused" };
+          }
+          if (this.isForegroundBusy()) {
+            return { ran: false, outcome: "foreground-busy" };
+          }
+        }
+        scanned += 1;
+        let resolution: TrialMaterializationResolution = { kind: "manual" };
+        if (this.config.resolveMaterialization !== undefined) {
+          try {
+            resolution = await this.config.resolveMaterialization({
+              sessionId: candidate.sessionId,
+              executionId: candidate.executionId,
+              proposalId: candidate.proposalId,
+            });
+          } catch {
+            // Transient/unknown resolution: keep the row queued and continue
+            // past it in this snapshot; never fall back to manual caps and
+            // never revoke ambiguous unavailable materialization.
+            this.logger.warn("trial.materialization_blocked", {});
+            continue;
+          }
+        }
+        if (resolution.kind === "blocked") {
+          this.logger.warn("trial.materialization_blocked", {});
+          lastClaimFailed = {
+            executionId: candidate.executionId,
+            message: resolution.reason,
+          };
+          // No blanket expire: the policy/authority may become available.
+          continue;
+        }
+        const claimProfile =
+          resolution.kind === "policy"
+            ? resolution.profile
+            : this.config.profile;
+        try {
+          const out = this.repo.claimTrial(
+            candidate.sessionId,
+            candidate.executionId,
+            {
+              key: this.randomKey(),
+              now: this.clock(),
+              profile: claimProfile,
+              workspaceAlias: this.config.workspaceAlias,
+            },
+          );
+          // claimTrial body is { kind, grant, request, applied? }: normalize.
+          const raw = out.body as unknown as Record<string, unknown>;
+          selected = candidate;
+          selectedBody = {
+            request: raw.request as TrialLaunchRequest,
+            grant: raw.grant as { scope: string },
+          };
+          selectedMaterialization =
+            resolution.kind === "policy" ? resolution : undefined;
+          break scan;
+        } catch (error) {
+          if (isFenceError(error)) {
+            this.logger.warn("trial.claim_fenced", {});
+            return {
+              ran: false,
+              outcome: "fenced",
+              executionId: candidate.executionId,
+            };
+          }
+          const message =
+            error instanceof Error ? error.message : String(error);
+          if (/paused/i.test(message)) {
+            return { ran: false, outcome: "paused" };
+          }
+          lastClaimFailed = {
+            executionId: candidate.executionId,
+            message,
+          };
+          // Best-effort retire of a CLEARLY unclaimable row so a later poll
+          // does not reselect it. Unknown/transient rows never reach here.
+          try {
+            if (
+              typeof candidate.proposalId === "string" &&
+              candidate.proposalId.length > 0
+            ) {
+              this.repo.expireTrial(
+                candidate.sessionId,
+                candidate.proposalId,
+                this.clock(),
+              );
+            }
+          } catch {
+            // Best effort: expiry never fails the skip.
+          }
+          this.logger.warn("trial.claim_skipped_unclaimable", {});
+        }
+      }
+      const tail = page[page.length - 1];
+      if (tail === undefined) break;
+      cursor = {
+        createdAt: tail.createdAt,
+        executionId: tail.executionId,
+      };
+      if (page.length < TRIAL_QUEUE_SCAN_PAGE) break;
     }
     next = selected;
     if (next === undefined || selectedBody === undefined) {
       this.logger.warn("trial.claim_failed", {});
       void lastClaimFailed;
-      const failedId = lastClaimFailed?.executionId ?? queued[0]?.executionId;
+      const failedId = lastClaimFailed?.executionId;
       return {
         ran: true,
         outcome: "claim-failed",
@@ -516,6 +737,11 @@ export class TrialRunner {
         } catch {
           // Best effort: quiescence evidence never fails the outcome.
         }
+        if (selectedMaterialization !== undefined) {
+          cleanupTerminalAutodispatchMaterialization(
+            selectedMaterialization.materialization,
+          );
+        }
         return {
           ran: true,
           outcome: "launch-failed",
@@ -526,6 +752,8 @@ export class TrialRunner {
         next.sessionId,
         next.executionId,
         claimBody.request,
+        selectedMaterialization?.profile ?? this.config.profile,
+        selectedMaterialization,
       );
       this.currentRun = run;
       return await run;
@@ -566,7 +794,22 @@ export class TrialRunner {
     sessionId: string,
     executionId: string,
     scopeFallback: string,
+    reason: string,
+    errno: string,
+    materialization?: Extract<
+      TrialMaterializationResolution,
+      { kind: "policy" }
+    >,
   ): void {
+    try {
+      this.logger.info("trial.preboot_aborted", {
+        sessionId,
+        reason,
+        status: errno,
+      });
+    } catch {
+      // Best effort: diagnostics never affect the abort path.
+    }
     try {
       let scope = scopeFallback;
       try {
@@ -584,22 +827,86 @@ export class TrialRunner {
     } catch {
       // Best effort.
     }
+    if (materialization !== undefined) {
+      // No child was ever spawned: actual quiescence is known.
+      cleanupTerminalAutodispatchMaterialization(
+        materialization.materialization,
+      );
+    }
   }
 
   private async executeClaimed(
     sessionId: string,
     executionId: string,
     request: TrialLaunchRequest,
+    profile: TrialProfileSnapshot,
+    materialization?: Extract<
+      TrialMaterializationResolution,
+      { kind: "policy" }
+    >,
   ): Promise<TrialRunNextResult> {
     const now = this.clock();
     void now;
     this.logger.info("trial.run_start", {});
+    const policyRun = materialization !== undefined;
+    // Manual grants carry the approved V2 operator config itself. Parse and
+    // verify it BEFORE creating any relay/run dir so config drift is a
+    // known-quiescence pre-boot abort with no socket and no spawn.
+    let manualConfig: OperatorConfig | undefined;
+    if (!policyRun) {
+      try {
+        manualConfig = readApprovedOperatorConfig(
+          this.config.bridgeConfigTemplatePath,
+          profile,
+        );
+      } catch (error) {
+        this.abortClaimedBeforeBoot(
+          sessionId,
+          executionId,
+          request.workspaceAlias,
+          "config-setup",
+          prebootErrno(error),
+          materialization,
+        );
+        return { ran: true, outcome: "launch-failed", executionId };
+      }
+    }
     const base = this.config.runDirBase ?? tmpdir();
     mkdirSync(base, { recursive: true, mode: 0o700 });
-    const runDir = mkdtempSync(join(base, "trial-exec-"));
+    // A fresh private run dir always holds this execution's copy of the
+    // approved config; it is never used as the socket location anymore.
+    const runDir = policyRun
+      ? materialization.runDir
+      : mkdtempSync(join(base, "trial-exec-"));
+    mkdirSync(runDir, { recursive: true, mode: 0o700 });
     chmodSync(runDir, 0o700);
-    const sockPath = join(runDir, "relay", "model.sock");
-    const relay = this.createRelay(sockPath);
+    let sockPath: string;
+    let executionCaps: TrialModelRelayCaps;
+    if (policyRun) {
+      sockPath = materialization.socketHostPath;
+      executionCaps = materialization.caps;
+    } else {
+      if (manualConfig === undefined) {
+        // Defensive: the parse above either assigned or aborted.
+        this.abortClaimedBeforeBoot(
+          sessionId,
+          executionId,
+          request.workspaceAlias,
+          "config-setup",
+          "unknown",
+          materialization,
+        );
+        return { ran: true, outcome: "launch-failed", executionId };
+      }
+      // The approved operator config's own socket path is used verbatim.
+      sockPath = manualConfig.profile.model.sockHostPath;
+      executionCaps = manualRelayCapsFromConfig(
+        manualConfig,
+        this.config.relayCaps,
+      );
+    }
+    mkdirSync(dirname(sockPath), { recursive: true, mode: 0o700 });
+    const relay = this.createRelay(sockPath, executionCaps);
     this.currentRelay = relay;
     const cleanup = async (): Promise<void> => {
       this.currentRelay = null;
@@ -610,10 +917,12 @@ export class TrialRunner {
       } catch {
         // Best effort: close is idempotent.
       }
-      try {
-        rmSync(runDir, { recursive: true, force: true });
-      } catch {
-        // Best effort: run dir removal never fails the outcome.
+      if (!policyRun) {
+        try {
+          rmSync(runDir, { recursive: true, force: true });
+        } catch {
+          // Best effort: run dir removal never fails the outcome.
+        }
       }
     };
 
@@ -632,12 +941,15 @@ export class TrialRunner {
           sessionId,
           executionId,
           request.workspaceAlias,
+          "stopped-before-relay",
+          "unknown",
+          materialization,
         );
         await cleanup();
         return { ran: true, outcome: "launch-failed", executionId };
       }
       await relay.start();
-    } catch {
+    } catch (error) {
       // Launch setup failed after claim: settle the claimed grant (known
       // quiescence → interrupted, never authorized) instead of leaving it
       // claimed with no boot row (the scheduler would never reselect it).
@@ -645,30 +957,49 @@ export class TrialRunner {
         sessionId,
         executionId,
         request.workspaceAlias,
+        "relay-start",
+        prebootErrno(error),
+        materialization,
       );
       await cleanup();
       return { ran: true, outcome: "launch-failed", executionId };
     }
 
-    // Per-execution bridge config: 0700 dir already set; 0600 file; ONLY
-    // modelSockHostPath is replaced from the absolute JSON template.
+    // Per-execution bridge config: 0700 dir already set; 0600 file. The
+    // approved/manual config is copied VERBATIM (its own model.sockHostPath
+    // already equals the relay path), never rewritten or recomputed.
     const execConfigPath = join(runDir, "bridge.config.json");
     try {
-      const template = JSON.parse(
-        readFileSync(this.config.bridgeConfigTemplatePath, "utf8"),
-      ) as Record<string, unknown>;
-      const execConfig = { ...template, modelSockHostPath: sockPath };
+      let execConfig: unknown;
+      if (policyRun) {
+        // EXACT materialized operator config: the relay UDS is already the
+        // request-bound path included in the frozen fingerprint. Do NOT
+        // rewrite any profile field or recompute/ignore the digest.
+        const model = materialization.config.profile.model;
+        if (model.sockHostPath !== sockPath) {
+          throw new Error("materialized relay path drift");
+        }
+        execConfig = materialization.config;
+      } else {
+        if (manualConfig === undefined) {
+          throw new Error("approved operator config missing");
+        }
+        execConfig = manualConfig;
+      }
       writeFileSync(execConfigPath, JSON.stringify(execConfig), {
         mode: 0o600,
       });
       chmodSync(execConfigPath, 0o600);
-    } catch {
+    } catch (error) {
       // Config setup failed after claim: settle the claimed grant (known
       // quiescence → interrupted, never authorized), never leave it claimed.
       this.abortClaimedBeforeBoot(
         sessionId,
         executionId,
         request.workspaceAlias,
+        "config-setup",
+        prebootErrno(error),
+        materialization,
       );
       await cleanup();
       return { ran: true, outcome: "launch-failed", executionId };
@@ -689,6 +1020,9 @@ export class TrialRunner {
         sessionId,
         executionId,
         request.workspaceAlias,
+        "stopped-before-spawn",
+        "unknown",
+        materialization,
       );
       await cleanup();
       return { ran: true, outcome: "launch-failed", executionId };
@@ -704,13 +1038,16 @@ export class TrialRunner {
           stdio: ["pipe", "pipe", "pipe", "pipe"],
         },
       ) as ChildProcess;
-    } catch {
+    } catch (error) {
       // Synchronous spawn failure after claim: settle the claimed grant
       // (known quiescence → interrupted, never authorized).
       this.abortClaimedBeforeBoot(
         sessionId,
         executionId,
         request.workspaceAlias,
+        "spawn",
+        prebootErrno(error),
+        materialization,
       );
       await cleanup();
       return { ran: true, outcome: "launch-failed", executionId };
@@ -728,6 +1065,9 @@ export class TrialRunner {
         sessionId,
         executionId,
         request.workspaceAlias,
+        "no-pid",
+        "unknown",
+        materialization,
       );
       await cleanup();
       return { ran: true, outcome: "launch-failed", executionId };
@@ -1006,15 +1346,45 @@ export class TrialRunner {
     // unobserved bound (infinite/unparsable RuntimeMax) or observed remaining
     // beyond the observed bound denies too: the observation would otherwise
     // certify a bound the kernel cannot verify against the frozen budget.
-    if (
-      this.stopRequested(sessionId, executionId) ||
-      remainingRuntimeMs <= 0 ||
-      observedTimeoutMs === null ||
-      remainingRuntimeMs > observedTimeoutMs
-    ) {
+    const elapsedRuntime = remainingRuntimeMs <= 0;
+    const noObservedBound = observedTimeoutMs === null;
+    const beyondObservedBound =
+      observedTimeoutMs !== null && remainingRuntimeMs > observedTimeoutMs;
+    let stopReason = "none";
+    if (this.stopLatch) stopReason = "latch";
+    else if (this.shuttingDown) stopReason = "shutdown";
+    else {
+      try {
+        if (this.repo.getAutonomyControlState().paused) stopReason = "paused";
+      } catch {
+        stopReason = "paused";
+      }
+    }
+    if (stopReason === "none" && this.isForegroundBusy())
+      stopReason = "foreground";
+    if (stopReason === "none") {
+      try {
+        const intent = this.repo.readTrialLaunchIntent(sessionId, executionId);
+        if (
+          (intent.grant as { cancelRequested?: boolean }).cancelRequested ===
+          true
+        )
+          stopReason = "cancel";
+      } catch {
+        // Best effort.
+      }
+    }
+    if (stopReason === "none") {
+      if (elapsedRuntime) stopReason = "elapsed";
+      else if (noObservedBound) stopReason = "no_observed";
+      else if (beyondObservedBound) stopReason = "beyond_observed";
+    }
+    if (stopReason !== "none") {
       this.logger.warn("trial.permit_denied", {
         runId: executionId,
-        reason: "unknown",
+        reason: stopReason,
+        durationMs: remainingRuntimeMs,
+        bytes: observedTimeoutMs ?? -1,
       });
       try {
         relay.revoke();
@@ -1043,7 +1413,7 @@ export class TrialRunner {
         key: this.randomKey(),
         now: this.clock(),
         observation,
-        profile: this.config.profile,
+        profile,
         requestHash,
       });
       this.logger.info("trial.permit_issued", { runId: executionId });
@@ -1319,6 +1689,15 @@ export class TrialRunner {
     });
     await cleanup();
     this.ownedPids.delete(pid);
+    if (process.env.DEBUG_CLEANUP === "1")
+      console.error("final-guard", materialization === undefined);
+    if (materialization !== undefined) {
+      // The scope was observed GONE before this point: safe terminal cleanup
+      // of the heavy per-execution copies while keeping the small artifacts.
+      cleanupTerminalAutodispatchMaterialization(
+        materialization.materialization,
+      );
+    }
     this.logger.info("trial.run_end", {});
     return { ran: true, outcome, executionId, authorized };
   }

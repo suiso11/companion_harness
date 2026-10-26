@@ -112,6 +112,11 @@ import {
 } from "@companion/model-local";
 import { serve } from "@hono/node-server";
 import { createApp, type EnginePort, type ServerControls } from "./app.js";
+import { resolveAutodispatchMaterialization } from "./autodispatch_materializer.js";
+import {
+  type AutodispatchService,
+  createAutodispatchService,
+} from "./autodispatch_service.js";
 import { createBackgroundResourceGate } from "./background_resource.js";
 import {
   assertGoogleReadonlyHintCompatible,
@@ -184,7 +189,10 @@ import {
 } from "./rescheduleWriteProfile.js";
 import { createShadowService, type ShadowService } from "./shadow_service.js";
 import { childFailedStatusForError } from "./supervisor.js";
-import { TrialModelRelay } from "./trial_model_relay.js";
+import {
+  narrowTrialModelRelayCaps,
+  TrialModelRelay,
+} from "./trial_model_relay.js";
 import { TrialRunner } from "./trial_runner.js";
 
 /** Graceful-drain natural-completion budget (§11.5: max 10s). */
@@ -300,6 +308,12 @@ export interface StartServerOptions {
    * `StartedServer.trialRunner`. Production never passes this field.
    */
   trialRunner?: TrialRunner | null;
+  /**
+   * Auto-dispatch intake seam (tests): `undefined` constructs the real
+   * service only when COMPANION_AUTODISPATCH_JSON is enabled; `null`
+   * disables it. Production never passes this field.
+   */
+  autodispatch?: AutodispatchService | null;
   /**
    * M6: the DEDICATED trusted create MCP transport
    * factory used ONLY when the host-owned create profile
@@ -448,6 +462,8 @@ export interface StartedServer {
   shadow: ShadowService | null;
   /** Root-side trial runner when trials are enabled, else null. */
   trialRunner: TrialRunner | null;
+  /** Conversation->plan->policy intake service when enabled, else null. */
+  autodispatch: AutodispatchService | null;
   /** Notification projector (always on: durable feed + deadline alerts). */
   notifications: NotificationService | null;
 }
@@ -982,6 +998,7 @@ export async function startServer(
   let shadow: ShadowService | null = null;
   /** Root-side trial runner (null = trials disabled; set inside try). */
   let trialRunner: TrialRunner | null = null;
+  let autodispatch: AutodispatchService | null = null;
   let trialTimer: NodeJS.Timeout | undefined;
   const clearTrialTimer = (): void => {
     if (trialTimer !== undefined) {
@@ -1564,6 +1581,51 @@ export async function startServer(
       service: LearningService,
     ): KernelRepository => ({
       ...inner,
+      completeRun: (...args) => {
+        const out = inner.completeRun(...args);
+        if (out.applied) {
+          service.onRunCompleted(args[0]);
+        }
+        return out;
+      },
+    });
+    /**
+     * Auto-dispatch intake wrapper: observes the SAME durable completion as
+     * memory/learning and runs strictly AFTER all foreground wrappers. It
+     * holds the shared background gate and never blocks chat.
+     */
+    const wrapRepoWithAutodispatchIntake = (
+      inner: KernelRepository,
+      service: AutodispatchService,
+    ): KernelRepository => ({
+      ...inner,
+      postMessage: (...args) => {
+        const out = inner.postMessage(...args);
+        try {
+          service.notifyForeground();
+        } catch {
+          // Best effort: the message already committed.
+        }
+        return out;
+      },
+      postRetry: (...args) => {
+        const out = inner.postRetry(...args);
+        try {
+          service.notifyForeground();
+        } catch {
+          // Best effort: the retry already committed.
+        }
+        return out;
+      },
+      cancelRun: (...args) => {
+        const out = inner.cancelRun(...args);
+        try {
+          service.notifyForeground();
+        } catch {
+          // Best effort: the cancel already committed.
+        }
+        return out;
+      },
       completeRun: (...args) => {
         const out = inner.completeRun(...args);
         if (out.applied) {
@@ -2895,6 +2957,45 @@ export async function startServer(
       }
     }
 
+    // Conversation -> plan -> standing-policy auto dispatch intake. Strict
+    // opt-in (COMPANION_AUTODISPATCH_JSON) and default disabled. The service
+    // only OBSERVES durable completions; it never spawns. A queued grant is
+    // consumed by the existing TrialRunner poll loop below. Compose it on the
+    // final repo BEFORE RunEngine so the engine's completeRun is observed.
+    if (options.autodispatch !== undefined) {
+      autodispatch = options.autodispatch;
+    } else if (config.autodispatch?.enabled === true && config.trial !== null) {
+      const adTrial = config.trial;
+      const adProfile = {
+        available: adTrial.available,
+        enabled: adTrial.enabled,
+        mandatoryChecks: [...adTrial.mandatoryChecks],
+        configFingerprint: adTrial.configFingerprint,
+        sourceRevision: adTrial.sourceRevision,
+        currentModel: adTrial.currentModel,
+        disclosedWholeRepoRead: adTrial.disclosedWholeRepoRead,
+        timeoutMs: adTrial.timeoutMs,
+        maxOutputBytes: adTrial.maxOutputBytes,
+      };
+      autodispatch = createAutodispatchService({
+        repo,
+        config: config.autodispatch,
+        runtimeDir: adTrial.runner.xdgRuntimeDir,
+        profile: adProfile,
+        background: backgroundResource,
+        ...(modelGateway !== null && modelName !== null
+          ? { gateway: modelGateway, model: modelName }
+          : {}),
+        maxOutputTokens: config.autodispatch.caps.maxOutputTokens,
+        logger,
+        now,
+      });
+    }
+    if (autodispatch !== null) {
+      repo = wrapRepoWithAutodispatchIntake(repo, autodispatch);
+      logger.info("server.autodispatch_ready", { status: 1 });
+    }
+
     engine = new RunEngine({
       db: handle.raw,
       repo,
@@ -2963,6 +3064,7 @@ export async function startServer(
         maxOutputBytes: trialConfig.maxOutputBytes,
       };
       const runnerEngine = engine;
+      const autodispatchConfig = config.autodispatch;
       trialRunner = new TrialRunner({
         repo,
         config: {
@@ -2977,15 +3079,37 @@ export async function startServer(
           fixedModel: runnerModel,
           gateway: runnerGateway,
           observe: { ...trialConfig.runner.observe },
+          ...(autodispatchConfig !== null
+            ? {
+                resolveMaterialization: (input: {
+                  sessionId: string;
+                  executionId: string;
+                  proposalId: string;
+                }) =>
+                  resolveAutodispatchMaterialization(
+                    repo,
+                    {
+                      workspaceAlias: autodispatchConfig.workspaceAlias,
+                      sourceRoot: autodispatchConfig.sourceRoot,
+                      dependencyRoot: autodispatchConfig.dependencyRoot,
+                      checks: autodispatchConfig.checks,
+                      runtimeDir: trialConfig.runner.xdgRuntimeDir,
+                    },
+                    input,
+                  ),
+              }
+            : {}),
         },
         isForegroundBusy: () => runnerEngine.inflightCount() > 0,
         logger,
-        createRelay: (sockPath: string) =>
+        createRelay: (sockPath: string, caps) =>
           new TrialModelRelay({
             sockPath,
             gateway: runnerGateway,
             fixedModel: runnerModel,
-            caps: { ...trialConfig.runner.relay },
+            // Enforce the host runner static ceiling over the execution
+            // budget; the intersection never widens the granted policy.
+            caps: narrowTrialModelRelayCaps(trialConfig.runner.relay, caps),
             logger,
           }),
       });
@@ -3072,6 +3196,15 @@ export async function startServer(
       // persisted, never replayed, polling ignores them).
       modelDeltas: modelDeltaBus,
       ...(memory !== null ? { memory } : {}),
+      // Human STOP aborts only this service's owned in-flight intake; the
+      // narrow app port never kills a worker/global process.
+      ...(autodispatch !== null
+        ? {
+            autodispatchForeground: (): void => {
+              autodispatch?.notifyForeground();
+            },
+          }
+        : {}),
       ...(remoteStore !== null &&
       remotePassword !== null &&
       remoteLoginLimiter !== null
@@ -3173,6 +3306,13 @@ export async function startServer(
       try {
         if (shadow !== null) {
           await shadow.stop();
+        }
+      } catch {
+        // Best effort: the listen error carries the startup failure.
+      }
+      try {
+        if (autodispatch !== null) {
+          await autodispatch.stop();
         }
       } catch {
         // Best effort: the listen error carries the startup failure.
@@ -3305,6 +3445,16 @@ export async function startServer(
         // close fd3 + await bridge exit bounded by the drain budget — never
         // leaves a bridge orphaned, records nothing as authorized. The
         // engine drain below then sweeps residual runs.
+        // Stop auto-dispatch intake BEFORE the trial runner/DB teardown:
+        // abort the planner and await every owned intake task so no plan or
+        // grant write can race the engine drain or land after DB close.
+        if (autodispatch !== null) {
+          try {
+            await autodispatch.stop();
+          } catch {
+            // Best effort: the engine drain below still runs.
+          }
+        }
         if (trialRunner !== null) {
           try {
             await trialRunner.shutdown(drainMs);
@@ -3568,6 +3718,7 @@ export async function startServer(
       learning,
       shadow,
       trialRunner,
+      autodispatch,
       notifications,
     };
   } catch (error) {
@@ -3581,6 +3732,15 @@ export async function startServer(
     if (shadow !== null) {
       try {
         await shadow.stop();
+      } catch {
+        // Best effort: the original startup error carries the failure.
+      }
+    }
+    // Settle owned auto-dispatch intake before the DB close below: a planner
+    // or gateway that ignores abort is settled by the service deadline.
+    if (autodispatch !== null) {
+      try {
+        await autodispatch.stop();
       } catch {
         // Best effort: the original startup error carries the failure.
       }

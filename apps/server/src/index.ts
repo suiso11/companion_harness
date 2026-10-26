@@ -14,6 +14,16 @@ export type {
   ServerControls,
 } from "./app.js";
 export { createApp, hostNameOfHeader } from "./app.js";
+export type {
+  AutodispatchPlanner,
+  AutodispatchPlanProposal,
+  AutodispatchService,
+  AutodispatchServiceDeps,
+} from "./autodispatch_service.js";
+export {
+  createAutodispatchService,
+  createModelAutodispatchPlanner,
+} from "./autodispatch_service.js";
 export type { StartedServer, StartServerOptions } from "./bootstrap.js";
 export {
   AGENT_STRATEGY_NAME,
@@ -27,6 +37,7 @@ export {
 } from "./bootstrap.js";
 export type {
   AgoraConfig,
+  AutodispatchConfig,
   ExecutionRecordsConfig,
   LearningConfig,
   MemoryConfig,
@@ -52,6 +63,7 @@ export {
   MAX_EXECUTION_RECORDS_RETENTION_DAYS,
   parseAgoraApiKey,
   parseAgoraConfig,
+  parseAutodispatchConfig,
   parseExecutionRecordsConfig,
   parseLearningConfig,
   parseMemoryConfig,

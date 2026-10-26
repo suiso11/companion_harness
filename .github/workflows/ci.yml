@@ -17,6 +17,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # The full matrix runs on both OSes. Native containment (bwrap) is a
+        # Linux-only provision step below; portable tests avoid blanket skips.
         os: [windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
@@ -63,6 +65,72 @@ jobs:
 
       - name: Typecheck
         run: pnpm typecheck
+
+      - name: Install Linux native containment runtime
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap apparmor
+
+          # Ubuntu restricts unprivileged user namespaces by default. Prefer a
+          # distro AppArmor profile scoped to exactly /usr/bin/bwrap when one
+          # is installed. This is runtime admission for the parent namespace,
+          # not a guest waiver.
+          profile=""
+          for candidate in \
+            /etc/apparmor.d/bwrap-userns-restrict \
+            /etc/apparmor.d/bwrap; do
+            if [ -f "${candidate}" ]; then
+              profile="${candidate}"
+              break
+            fi
+          done
+          restrict="$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)"
+          if [ -n "${profile}" ]; then
+            sudo apparmor_parser --replace "${profile}"
+            echo "Loaded distro AppArmor profile: ${profile}"
+          elif [ "${restrict}" = "1" ]; then
+            # Ubuntu 24.04 ships apparmor 4.0.1 but does not install an
+            # official /usr/bin/bwrap profile. Load the reviewed ABI 4
+            # backport from this repository on the disposable runner only.
+            # The profile keeps the parent bwrap setup allowance and stacks
+            # unpriv_bwrap on child exec, which audit-denies all capabilities.
+            vendored="${GITHUB_WORKSPACE}/.github/apparmor/bwrap-userns-restrict"
+            if [ ! -f "${vendored}" ]; then
+              echo "::error::Ubuntu user namespaces are restricted, no distro /usr/bin/bwrap profile exists, and the vendored ABI4 fallback is missing."
+              uname -a || true
+              sysctl kernel.apparmor_restrict_unprivileged_userns || true
+              cat /sys/module/apparmor/parameters/enabled 2>/dev/null || true
+              ls -l /usr/bin/bwrap 2>/dev/null || true
+              ls -l /etc/apparmor.d/bwrap* 2>/dev/null || true
+              ls /usr/share/apparmor/extra-profiles/ 2>/dev/null || true
+              exit 1
+            fi
+            sudo apparmor_parser --replace \
+              -I /etc/apparmor.d \
+              --base /etc/apparmor.d \
+              "${vendored}"
+            echo "Loaded CI-only ABI4 fallback AppArmor profile: ${vendored}"
+          else
+            echo "Unprivileged user-namespace restriction is inactive; no /usr/bin/bwrap profile load is needed."
+          fi
+
+      - name: Native bubblewrap containment preflight
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          if ! /usr/bin/bwrap --ro-bind / / --unshare-net /bin/true; then
+            echo "::error::Native /usr/bin/bwrap containment preflight failed."
+            uname -a || true
+            cat /proc/version 2>/dev/null || true
+            cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || true
+            cat /sys/module/apparmor/parameters/enabled 2>/dev/null || true
+            ls -l /usr/bin/bwrap 2>/dev/null || true
+            ls -l /etc/apparmor.d/bwrap* 2>/dev/null || true
+            sudo aa-status 2>/dev/null || true
+            exit 1
+          fi
 
       - name: Test
         env:

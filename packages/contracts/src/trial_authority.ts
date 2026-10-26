@@ -102,6 +102,9 @@ export const TrialProposalViewSchema = z.strictObject({
   taskVersion: z.number().int().min(1),
   objective: z.string().min(1).max(8192),
   acceptance: z.array(z.string()),
+  /** Frozen plan decisions/non-goals/steps carried to the wire `constraints`
+   * (already prefixed). Manual staging always carries an empty list. */
+  constraints: z.array(z.string().min(1).max(1024)).max(16),
   literalPatchPaths: z.array(z.string()),
   operation: TrialOperationSchema,
   readOnlyMode: z.boolean(),

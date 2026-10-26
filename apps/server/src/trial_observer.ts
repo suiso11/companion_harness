@@ -236,6 +236,10 @@ export function computeRemainingRuntimeMs(
     runtimeMaxUsec === "infinity"
   )
     return null; // infinity RuntimeMax: deny (unknown remaining).
+  // A truly future ActiveEnter stamp cannot come from a query sampled after
+  // the systemctl result: it means the clocks/stamps disagree. Treat it as
+  // unknown instead of manufacturing a remaining bound above RuntimeMax.
+  if (activeEnterMonotonicUs > nowMonotonicUs) return null;
   const diffUs = activeEnterMonotonicUs + runtimeMaxUsec - nowMonotonicUs;
   if (diffUs <= 0n) return 0;
   const ms = Number((diffUs + 999n) / 1000n); // ceil to ms.
@@ -288,7 +292,6 @@ export async function queryScopeUnit(
   )
     throw new Error("queryScopeUnit: xdgRuntimeDir is required");
   const timeoutMs = options.timeoutMs ?? 5000;
-  const nowUs = options.nowMonotonicUs ?? monotonicNowUs();
   let stdout: string;
   try {
     stdout = await new Promise<string>((resolve, reject) => {
@@ -313,6 +316,12 @@ export async function queryScopeUnit(
   } catch {
     return { scopeState: "unknown" };
   }
+  // Sample the clock AFTER the asynchronous query returns: the unit may have
+  // activated while systemctl was in flight, so a pre-exec sample would place
+  // `now` before ActiveEnterTimestampMonotonic and inflate remainingRuntimeMs
+  // above RuntimeMax (false beyond-observed permit denial). An explicitly
+  // injected test clock keeps its exact call-time semantics.
+  const nowUs = options.nowMonotonicUs ?? monotonicNowUs();
   const kv = parseSystemctlShow(stdout);
   const loadState = kv.LoadState;
   const activeState = kv.ActiveState;

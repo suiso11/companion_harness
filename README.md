@@ -2262,3 +2262,103 @@ run 完了時に自動更新し、明示的な「更新」でも再取得しま�
 と同じ store を共有します。rollback は commit の切り戻しのみで、AGORA DB は
 自動 restore しません。詳細は `docs/operations.md` の
 「AGORA レビュー (browser, local only)」を参照。
+
+## Sealed pi-orch bridge candidate (2026-10-25; not production-enabled)
+
+Staged entry point: `scripts/pi-orch-bridge/companion-bridge.mjs --config
+<absolute-json>`. It preserves the TrialRunner wire contract (stdin JSONLF,
+fd3 cancel, one stdout result line) and computes the effective profile
+fingerprint/source revision from real file and sealed-manifest content. The
+guest receives only a verified sealed snapshot copy, a pinned dependency
+closure, a dummy bearer token, and the relay UDS; the original source/.git and
+host `$HOME` are never mounted. `done`/`verified` means every fixed operator
+check passed AND the post-check candidate scope/artifact hashes were
+revalidated and retained; it does NOT attest delegation, completion, or
+semantic correctness. `.companion-observation/guest.json` is guest-writable
+and is only an untrusted guest report (like model prose): a reported worker
+success is never host evidence or a permission/adoption/trust input. A
+missing/failed report may only conservatively downgrade a run for reliability.
+Missing user systemd/relay or dependencies fail closed. The `offline-fixture`
+backend is test-only and not containment. An unknown/claimed worker slot is
+intentionally retained (not a TTL leak): boot recovery rechecks the exact
+scope unit plus PID identity and settles only when both are gone, otherwise it
+keeps the fail-closed fence and never guesses or retries. Provenance and actual
+smoke limits are in `docs/operations.md`; no production enablement or source
+host apply was performed.
+
+Native Linux acceptance requires a working `/usr/bin/bwrap`. On hosts where
+unprivileged user namespaces are AppArmor-restricted, an operator may need to
+load a scoped `/usr/bin/bwrap` profile with operator approval. CI prefers the
+distro profile; on Ubuntu 24.04, which ships no such profile, CI loads the
+reviewed ABI 4 backport in `.github/apparmor/bwrap-userns-restrict` on the
+disposable runner only. That profile keeps the parent setup allowance and
+stacks `unpriv_bwrap` on child exec to audit-deny all capability use. Production
+configuration remains a separate operator decision and manual approval; CI
+does not change product containment, flags, or global host policy.
+
+## Auto-dispatch (conversation -> plan -> standing policy)
+
+Schema 30/31 adds a default-off, authenticated path from an accepted
+conversation to one frozen plan, host standing-policy authorization, and the
+EXISTING TrialRunner grant/claim/launch/result boundary; schema 31 only keeps
+the per-execution materialization reference. Set
+`COMPANION_AUTODISPATCH_JSON` (with `COMPANION_AUTONOMY_JSON`) to opt in;
+unset means disabled (HTTP 404, panel hidden) and live production is
+unchanged. Policy scopes, checks, caps, alias, bridge, dependency closure,
+materialization runtime, dependency depot, and model route/identity come from
+operator config, not the model; no model identifier is hardcoded. The configured `checks` must
+match the trial runner's mandatory checks and caps may only narrow the
+operator/trial upper bounds. At prepare/resolve time the six model-relay caps
+(requests, model calls, output tokens, response bytes, per-call timeout,
+concurrency) are frozen as the policy ∩ operator intersection, hashed with
+the materialization, and used by BOTH the guest profile and the host relay;
+the runner's static limits may tighten but never widen them. The dependency
+root must be a real
+`prepareDependencyClosure` depot (sibling `<root>.closure-manifest.json`,
+native `better-sqlite3`, pinned Node ABI); otherwise dispatch is explicitly
+blocked, never faked. `GET /api/sessions/:id/autodispatch` exposes state and
+proposed defaults; the remaining policy/plan/execution routes are documented
+in `docs/operations.md`. Checks are bounded fixed host checks only; a
+`done`/`verified` candidate does not prove delegation, completion, or worker
+status (guest reports are unattested), and source is never applied. An
+unknown claimed worker slot is held fail-closed until boot recovery proves
+the exact scope unit and PID are gone; there is deliberately no TTL clear.
+`POST .../stop` revokes active policies and stops intake; it never resumes
+the separate global autonomy control. Activation needs an operator-private
+config plus explicit deployment approval; this repository is not enabled or
+deployed. No scheduler/queue/engine is introduced. A completion notification
+that cannot obtain the shared background slot stays pending (deduplicated)
+until the gate's existing finite release wake; the expected latest selected
+completed user turn, exact active policy id/version, and the monotonic
+autonomy-control version are captured at notification, so queued work never
+adopts a newer/broader policy and a pause+resume before release invalidates
+it. Completion ids are deduplicated once per process (queued or invalidated
+ones are never re-enqueued), while a genuinely fresh run id stays eligible. The existing
+runner pick pages the stable oldest-first queue with a keyset snapshot, so
+permanently blocked heads cannot starve a later valid manual or policy grant;
+blocked/unknown materialization stays queued (never blanket-revoked).
+
+Runtime requirement: this path is implemented for a **Linux** host only. It
+relies on POSIX permission/ownership semantics plus `O_NOFOLLOW`/`lstat`
+sealing, Linux `bwrap` + user systemd containment, and a Linux UDS relay.
+Windows ACLs are not treated as an equivalent seal: sealed snapshot and
+materializer entry points fail closed with `unsupported_platform` before
+creating output or a grant, and the POSIX `0700`/`0600` and symlink checks are
+never weakened to emulate Windows. The standalone sealed-snapshot library can
+still run on Darwin where those POSIX semantics hold; the actual auto-dispatch
+runtime remains Linux-only.
+
+The chat session shows a lazy-loaded 「自動ディスパッチ」 panel once the
+session exists. It lists the ACTUAL operator-bounded target alias, scopes,
+checks, caps and expiry, the global pause/dependency readiness, every
+standing policy, and the automatic plan/execution ledger. A human creates
+ONE standing policy from the latest COMPLETED user turn (explicit scope/caps
+confirmation, no fabricated turn id), then may revoke it or stop all active
+policies. There is no per-plan approve button. Plans/executions/results
+refresh on the existing `ch:run-settled` hook, bounded active polling, and a
+manual refresh; a policy enable never resumes the separate global autonomy
+control (resume it explicitly on 「タスク・目的」). Candidate trial details
+show required checks and the fixed-host-check/observed outcome, with worker
+status explicitly labelled as guest-reported/unattested; source is never
+applied, deployed, or published. Disabled config returns 404 and hides the
+panel.

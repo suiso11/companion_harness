@@ -100,6 +100,7 @@ import {
   AutonomyStateConflictError,
   AutonomyVersionConflictError,
   agoraWritePath,
+  type DispatchPlanContent,
   HandoffStateConflictError,
   HandoffVersionConflictError,
   IdempotencyConflictError,
@@ -409,6 +410,13 @@ export interface CreateAppDeps {
    * `/memory/*` route answers 404 without touching the repository.
    */
   memory?: MemoryHttpPort;
+  /**
+   * Narrow human-STOP hook for auto-dispatch intake (server-owned). Called
+   * after the committed policy revocations so the service aborts only its
+   * OWN in-flight planner/gateway work. Absent (default) keeps the route
+   * revocation-only and never touches any process.
+   */
+  autodispatchForeground?: () => void;
   /**
    * Opt-in AGORA store (same durable private store the operator CLI and
    * model tools use). Null/absent keeps every `/agora/*` review route at a
@@ -1353,6 +1361,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   const actionsEnabled = deps.actionsEnabled === true;
   const createEnabled = deps.createEnabled === true;
   const memory = deps.memory ?? null;
+  const autodispatchForeground = deps.autodispatchForeground;
   const agora = deps.agora ?? null;
   const shadowWake = deps.shadowWake;
   const shadowControlChanged = deps.shadowControlChanged;
@@ -4963,6 +4972,33 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     );
   }
 
+  /** Operator auto-dispatch bounds; null = feature disabled (default). */
+  function autodispatchOf(cfg: ServerConfig) {
+    const ad = cfg.autodispatch;
+    if (ad === null || !ad.enabled) return null;
+    const trial = cfg.trial;
+    if (trial === null) return null;
+    return {
+      config: ad,
+      profile: {
+        available: trial.available,
+        enabled: trial.enabled,
+        mandatoryChecks: [...trial.mandatoryChecks],
+        configFingerprint: trial.configFingerprint,
+        sourceRevision: trial.sourceRevision,
+        currentModel: trial.currentModel,
+        disclosedWholeRepoRead: trial.disclosedWholeRepoRead,
+        timeoutMs: trial.timeoutMs,
+        maxOutputBytes: trial.maxOutputBytes,
+      } as TrialProfileSnapshot,
+      limits: {
+        operations: [...ad.operations],
+        checks: [...ad.checks],
+        caps: ad.caps,
+      },
+    };
+  }
+
   /** Frozen config profile snapshot + workspace alias (never body flags). */
   function trialProfileOf(cfg: ServerConfig): {
     profile: TrialProfileSnapshot;
@@ -5739,6 +5775,354 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
           durationMs: Math.max(now() - started, 0),
         });
         return c.json(body, out.status as 200);
+      } catch (error) {
+        return mapDomainError(c, error);
+      }
+    },
+  );
+
+  /* ------------------------------------------------------------------ */
+  /* Auto-dispatch: conversation -> plan -> standing policy -> trial grant */
+  /* ------------------------------------------------------------------ */
+
+  app.get("/api/sessions/:sessionId/autodispatch", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) return session.response;
+    const gated = strictQuery(c, ["limit"]);
+    if (!gated.ok) return validationError(c);
+    const ad = autodispatchOf(config);
+    if (ad === null) {
+      return apiError(c, 404, "not_found", "resource not found");
+    }
+    try {
+      return c.json(
+        {
+          enabled: true,
+          workspaceAlias: ad.config.workspaceAlias,
+          operations: ad.config.operations,
+          checks: ad.config.checks,
+          readScopes: ad.config.readScopes,
+          writeScopes: ad.config.writeScopes,
+          caps: ad.config.caps,
+          dependencyReady: ad.config.dependencyRoot !== null,
+          policies: repo.listAutodispatchPolicies(session.id, 100),
+          plans: repo.listAutodispatchPlans(session.id, 50),
+          executions: repo.listAutodispatchExecutions(session.id, 50),
+        },
+        200,
+      );
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get("/api/sessions/:sessionId/autodispatch/policies", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) return session.response;
+    if (!strictQuery(c, ["limit"]).ok) return validationError(c);
+    if (autodispatchOf(config) === null) {
+      return apiError(c, 404, "not_found", "resource not found");
+    }
+    try {
+      return c.json(
+        { items: repo.listAutodispatchPolicies(session.id, 100) },
+        200,
+      );
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  // Human-only standing policy creation through the authenticated
+  // same-origin API. Paths/checks/profile/bridge come from operator config;
+  // the body can only narrow operations/caps, never widen them.
+  app.post("/api/sessions/:sessionId/autodispatch/policies", async (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) return session.response;
+    const keyed = requireIdempotencyKey(c);
+    if ("response" in keyed) return keyed.response;
+    if (!strictQuery(c, []).ok) return validationError(c);
+    const ad = autodispatchOf(config);
+    if (ad === null) {
+      return apiError(c, 404, "not_found", "resource not found");
+    }
+    const raw = await readJsonBody(c);
+    if (!raw.ok) return validationError(c);
+    const body = raw.value;
+    if (typeof body !== "object" || body === null || Array.isArray(body)) {
+      return validationError(c);
+    }
+    const b = body as Record<string, unknown>;
+    const allowedKeys = new Set([
+      "statement",
+      "sourceTurnId",
+      "operations",
+      "caps",
+      "expiresAt",
+    ]);
+    if (Object.keys(b).some((k) => !allowedKeys.has(k))) {
+      return validationError(c);
+    }
+    if (
+      typeof b.statement !== "string" ||
+      b.statement.length < 1 ||
+      b.statement.length > 2000 ||
+      typeof b.sourceTurnId !== "string" ||
+      !/^[0-9a-f-]{36}$/.test(b.sourceTurnId)
+    ) {
+      return validationError(c);
+    }
+    const operations =
+      b.operations === undefined
+        ? [...ad.config.operations]
+        : Array.isArray(b.operations)
+          ? b.operations
+          : null;
+    if (
+      operations === null ||
+      operations.length < 1 ||
+      operations.some((op) => op !== "investigate" && op !== "implement") ||
+      operations.some((op) => !ad.config.operations.includes(op))
+    ) {
+      return validationError(c);
+    }
+    if (draining) return shuttingDown(c);
+    try {
+      const policy = repo.createAutodispatchPolicy(
+        session.id,
+        {
+          workspaceAlias: ad.config.workspaceAlias,
+          operations: operations as ("investigate" | "implement")[],
+          readScopes: [...ad.config.readScopes],
+          writeScopes: [...ad.config.writeScopes],
+          checks: [...ad.config.checks],
+          caps: (b.caps ?? ad.config.caps) as typeof ad.config.caps,
+          expiresAt:
+            b.expiresAt === undefined || b.expiresAt === null
+              ? null
+              : String(b.expiresAt),
+        },
+        {
+          key: keyed.key,
+          now: now(),
+          limits: ad.limits,
+          parent: {
+            statement: b.statement,
+            sourceTurnId: b.sourceTurnId,
+            interpretation:
+              "Standing auto-dispatch policy accepted once by the human",
+          },
+        },
+      );
+      logger.info("http.autodispatch.policy", {
+        sessionId: session.id,
+        status: 201,
+      });
+      return c.json(policy, 201);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get("/api/sessions/:sessionId/autodispatch/policies/:policyId", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) return session.response;
+    const policyId = requireUuid(c, c.req.param("policyId"), "policyId");
+    if ("response" in policyId) return policyId.response;
+    if (!strictQuery(c, []).ok) return validationError(c);
+    if (autodispatchOf(config) === null) {
+      return apiError(c, 404, "not_found", "resource not found");
+    }
+    try {
+      return c.json(repo.readAutodispatchPolicy(session.id, policyId.id), 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.post(
+    "/api/sessions/:sessionId/autodispatch/policies/:policyId/revoke",
+    async (c) => {
+      const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+      if ("response" in session) return session.response;
+      const policyId = requireUuid(c, c.req.param("policyId"), "policyId");
+      if ("response" in policyId) return policyId.response;
+      if (!strictQuery(c, []).ok) return validationError(c);
+      const raw = await readJsonBody(c);
+      if (!raw.ok) return validationError(c);
+      if (
+        typeof raw.value !== "object" ||
+        raw.value === null ||
+        Array.isArray(raw.value)
+      ) {
+        return validationError(c);
+      }
+      if (!isEmptyBody(raw.value)) return validationError(c);
+      if (autodispatchOf(config) === null) {
+        return apiError(c, 404, "not_found", "resource not found");
+      }
+      if (draining) return shuttingDown(c);
+      try {
+        return c.json(
+          repo.revokeAutodispatchPolicy(session.id, policyId.id, {
+            now: now(),
+            reason: "human-revoke",
+          }),
+          200,
+        );
+      } catch (error) {
+        return mapDomainError(c, error);
+      }
+    },
+  );
+
+  app.post("/api/sessions/:sessionId/autodispatch/stop", async (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) return session.response;
+    if (!strictQuery(c, []).ok) return validationError(c);
+    const ad = autodispatchOf(config);
+    if (ad === null) {
+      return apiError(c, 404, "not_found", "resource not found");
+    }
+    if (draining) return shuttingDown(c);
+    try {
+      const active = repo
+        .listAutodispatchPolicies(session.id, 100)
+        .filter((policy) => policy.status === "active");
+      for (const policy of active) {
+        repo.revokeAutodispatchPolicy(session.id, policy.id, {
+          now: now(),
+          reason: "human-stop",
+        });
+      }
+      // Abort only the service's OWN in-flight intake. Never kills a worker
+      // or any global process; a throwing hook cannot undo the revocations.
+      try {
+        autodispatchForeground?.();
+      } catch {
+        // Best effort: the committed revocations remain authoritative.
+      }
+      return c.json({ revoked: active.length }, 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.post("/api/sessions/:sessionId/autodispatch/plans", async (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) return session.response;
+    if (!strictQuery(c, []).ok) return validationError(c);
+    if (autodispatchOf(config) === null) {
+      return apiError(c, 404, "not_found", "resource not found");
+    }
+    const raw = await readJsonBody(c);
+    if (!raw.ok) return validationError(c);
+    const body = raw.value as Record<string, unknown>;
+    if (
+      typeof body !== "object" ||
+      body === null ||
+      Array.isArray(body) ||
+      typeof body.policyId !== "string" ||
+      (body.operation !== "investigate" && body.operation !== "implement") ||
+      typeof body.intent !== "object" ||
+      body.intent === null ||
+      typeof body.content !== "object" ||
+      body.content === null
+    ) {
+      return validationError(c);
+    }
+    if (draining) return shuttingDown(c);
+    try {
+      const out = repo.createAutodispatchPlan(
+        session.id,
+        {
+          policyId: body.policyId,
+          operation: body.operation,
+          content: body.content as DispatchPlanContent,
+          intent: body.intent,
+        },
+        { now: now() },
+      );
+      return c.json(
+        { plan: out.plan, replayed: out.replayed },
+        out.replayed ? 200 : 201,
+      );
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get("/api/sessions/:sessionId/autodispatch/plans", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) return session.response;
+    if (!strictQuery(c, ["limit"]).ok) return validationError(c);
+    if (autodispatchOf(config) === null) {
+      return apiError(c, 404, "not_found", "resource not found");
+    }
+    try {
+      return c.json({ items: repo.listAutodispatchPlans(session.id, 50) }, 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get("/api/sessions/:sessionId/autodispatch/plans/:planId", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) return session.response;
+    const planId = requireUuid(c, c.req.param("planId"), "planId");
+    if ("response" in planId) return planId.response;
+    if (!strictQuery(c, []).ok) return validationError(c);
+    if (autodispatchOf(config) === null) {
+      return apiError(c, 404, "not_found", "resource not found");
+    }
+    try {
+      return c.json(repo.readAutodispatchPlan(session.id, planId.id), 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  // There is deliberately NO public POST /plans/:planId/authorize route:
+  // a browser/model request could otherwise mint an unsealed, unlaunchable
+  // grant. Automatic authorization is service-internal only. Manual trial
+  // staging/approval keep their separate human APIs.
+  app.get("/api/sessions/:sessionId/autodispatch/executions", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) return session.response;
+    if (!strictQuery(c, ["limit"]).ok) return validationError(c);
+    if (autodispatchOf(config) === null) {
+      return apiError(c, 404, "not_found", "resource not found");
+    }
+    try {
+      return c.json(
+        { items: repo.listAutodispatchExecutions(session.id, 50) },
+        200,
+      );
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get(
+    "/api/sessions/:sessionId/autodispatch/executions/:executionId",
+    (c) => {
+      const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+      if ("response" in session) return session.response;
+      const executionId = requireUuid(
+        c,
+        c.req.param("executionId"),
+        "executionId",
+      );
+      if ("response" in executionId) return executionId.response;
+      if (!strictQuery(c, []).ok) return validationError(c);
+      if (autodispatchOf(config) === null) {
+        return apiError(c, 404, "not_found", "resource not found");
+      }
+      try {
+        return c.json(
+          repo.readAutodispatchExecution(session.id, executionId.id),
+          200,
+        );
       } catch (error) {
         return mapDomainError(c, error);
       }

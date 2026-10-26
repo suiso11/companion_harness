@@ -863,19 +863,29 @@ test("autonomy history Load more renders 201 task events losslessly", async ({
   const more = page.locator("#autonomy-task-history-more-button");
   await expect(more).toBeVisible();
 
+  const renderedSeqs = async (): Promise<number[]> => {
+    const text = (await detail.textContent()) ?? "";
+    return Array.from(text.matchAll(/#(\d+) /g), (match) => Number(match[1]));
+  };
+
   // Load more until the cursor exhausts: every page appends, never rewrites.
   for (let round = 0; round < 10; round += 1) {
     if (!(await more.isVisible())) {
       break;
     }
+    // The final page hides the button only after its response is applied, so
+    // racing the next visibility check/click against that hide would fail
+    // intermittently. Wait for the rendered history seq count to grow before
+    // checking visibility again: that is the authoritative page-completion
+    // signal, and it keeps each click fully settled before the next one.
+    const before = (await renderedSeqs()).length;
     await more.click();
-    await page.waitForTimeout(300);
+    await expect
+      .poll(async () => (await renderedSeqs()).length, { timeout: 15_000 })
+      .toBeGreaterThan(before);
   }
   await expect(more).toBeHidden({ timeout: 15_000 });
-  const text = (await detail.textContent()) ?? "";
-  const seqs = Array.from(text.matchAll(/#(\d+) /g), (match) =>
-    Number(match[1]),
-  );
+  const seqs = await renderedSeqs();
   expect(seqs).toHaveLength(201);
   expect(seqs).toEqual(Array.from({ length: 201 }, (_, index) => index + 1));
 });

@@ -203,6 +203,44 @@ export {
 } from "./agora_tools.js";
 export type { AgoraHttpTransportOptions } from "./agora_transport.js";
 export { createAgoraHttpTransport } from "./agora_transport.js";
+export type {
+  AuthorizeWithinPolicyOptions,
+  AutodispatchLimits,
+  CreateStandingPolicyInput,
+  DispatchExecutionStatus,
+  DispatchExecutionView,
+  DispatchMaterializationSummary,
+  DispatchPlanContent,
+  DispatchPlanStatus,
+  DispatchPlanView,
+  IntentHistory,
+  IntentHistoryEntry,
+  IntentKind,
+  IntentQuote,
+  PlanIntent,
+  PolicyCaps,
+  StandingPolicyStatus,
+  StandingPolicyView,
+} from "./autodispatch.js";
+export {
+  AUTODISPATCH_SOURCE,
+  authorizeWithinPolicy,
+  createDispatchPlan,
+  createStandingPolicy,
+  DEFAULT_POLICY_CAPS,
+  isValidPolicyExpiry,
+  listDispatchExecutions,
+  listDispatchPlans,
+  listStandingPolicies,
+  readDispatchExecution,
+  readDispatchMaterialization,
+  readDispatchPlan,
+  readIntentHistory,
+  readRunSessionId,
+  readStandingPolicy,
+  revokeStandingPolicy,
+  validatePlanIntent,
+} from "./autodispatch.js";
 export {
   AutonomyStateConflictError,
   AutonomyVersionConflictError,
@@ -761,6 +799,7 @@ export {
   checkTrialAuthority,
   claimTrialGrant,
   clearAliasFence,
+  derivePolicyTrialGrant,
   expireTrialProposal,
   fenceUnknownExecution,
   hashTrialRequest,

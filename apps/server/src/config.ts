@@ -30,6 +30,8 @@ import {
 import {
   BUNDLED_VOICE_PROFILE_IDS,
   type BundledVoiceProfileId,
+  DEFAULT_POLICY_CAPS,
+  type PolicyCaps,
 } from "@companion/kernel";
 import {
   MAX_RESPONSE_BYTES as GATEWAY_MAX_RESPONSE_BYTES,
@@ -528,6 +530,13 @@ export interface ServerConfig {
    * request body. No defaults for caps/checks: every field required.
    */
   readonly trial: TrialConfig | null;
+  /**
+   * Strict opt-in conversation -> plan -> standing-policy auto dispatch.
+   * Null (unset) means the whole feature is disabled: no policy API, no
+   * intake plan generation, no dispatch. Even when set, a human must create
+   * a policy and autonomy control must be unpaused.
+   */
+  readonly autodispatch: AutodispatchConfig | null;
 }
 
 /** Local model adapter (loopback-only, strict opt-in). */
@@ -1700,6 +1709,573 @@ function parseTrialRunnerConfig(raw: unknown): TrialRunnerHostConfig {
   });
 }
 
+export interface AutodispatchMaterializationConfig {
+  /** Private host state root, canonical and outside the source tree. */
+  readonly stateDir: string;
+  readonly executor: {
+    readonly kind?: "fixed" | "pi-orch-guest" | "real-pi";
+    readonly executable: string;
+    readonly args: readonly string[];
+  };
+  readonly checks: Readonly<
+    Record<
+      string,
+      { readonly executable: string; readonly args: readonly string[] }
+    >
+  >;
+  readonly executionBackend: "confined" | "offline-fixture";
+  readonly runtime: {
+    readonly nodeRealpath: string;
+    readonly ompRealpath?: string;
+    readonly bwrapRealpath?: string;
+    readonly systemdRunRealpath?: string;
+    readonly systemctlRealpath?: string;
+    readonly piOrchLauncherRealpath?: string;
+    readonly piOrchShellRealpath?: string;
+    readonly piOrchConfigRealpath?: string;
+    readonly piOrchExtensionRealpath?: string;
+    readonly piOrchLockRealpath?: string;
+  };
+  /** Approved pnpm node_modules closure source used to prepare a fresh
+   * read-only per-execution depot. Null = only an already-prepared
+   * dependencyRoot may be verified. */
+  readonly dependencySourceNodeModules: string | null;
+  readonly allowedTopLevelFiles: readonly string[];
+  readonly maxDurationMs: number;
+  readonly modelRoute: "local" | "synthetic-local";
+}
+
+export interface AutodispatchConfig {
+  readonly enabled: boolean;
+  readonly workspaceAlias: string;
+  /** Canonical absolute source root mapped to the fixed alias. */
+  readonly sourceRoot: string;
+  readonly operations: readonly ("investigate" | "implement")[];
+  readonly readScopes: readonly string[];
+  readonly writeScopes: readonly string[];
+  readonly checks: readonly string[];
+  /** Operator UPPER BOUNDS (a policy may choose smaller values). */
+  readonly caps: PolicyCaps;
+  /** Trusted offline dependency closure; null => dispatch is blocked. */
+  readonly dependencyRoot: string | null;
+  readonly bridgeScriptPath: string;
+  readonly bridgeConfigTemplatePath: string;
+  /** Exact per-execution sealed-profile/executor materializer inputs. Null
+   * means auto-dispatch can never issue a real grant (honest block). */
+  readonly materialization: AutodispatchMaterializationConfig | null;
+}
+
+const AD_PATH = /^(?:[A-Za-z0-9._-]+)(?:\/[A-Za-z0-9._-]+)*$/;
+
+function parseLiteralScopes(raw: unknown, what: string, min: number): string[] {
+  if (!Array.isArray(raw) || raw.length < min || raw.length > 16) {
+    throw configError(`autodispatch ${what} is invalid`);
+  }
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of raw) {
+    if (
+      typeof entry !== "string" ||
+      entry.length < 1 ||
+      entry.length > 1024 ||
+      !AD_PATH.test(entry) ||
+      seen.has(entry)
+    ) {
+      throw configError(`autodispatch ${what} is invalid`);
+    }
+    seen.add(entry);
+    out.push(entry);
+  }
+  return out;
+}
+
+/**
+ * Omitted autodispatch caps stay at the conservative policy defaults, but the
+ * fields that the trial runner also budgets default to the narrower of the
+ * policy default and the operator's runner/trial ceiling. Explicit caps are
+ * still validated against the runner below (defaults never widen them).
+ */
+function defaultAutodispatchCaps(trial: TrialConfig | null): PolicyCaps {
+  if (trial === null) return DEFAULT_POLICY_CAPS;
+  const relay = trial.runner.relay;
+  return Object.freeze({
+    timeoutMs: Math.min(DEFAULT_POLICY_CAPS.timeoutMs, trial.timeoutMs),
+    maxOutputBytes: Math.min(
+      DEFAULT_POLICY_CAPS.maxOutputBytes,
+      trial.maxOutputBytes,
+    ),
+    maxModelCalls: Math.min(
+      DEFAULT_POLICY_CAPS.maxModelCalls,
+      relay.maxModelCalls,
+    ),
+    maxOutputTokens: Math.min(
+      DEFAULT_POLICY_CAPS.maxOutputTokens,
+      relay.maxOutputTokens,
+    ),
+    perCallTimeoutMs: Math.min(
+      DEFAULT_POLICY_CAPS.perCallTimeoutMs,
+      relay.perCallTimeoutMs,
+    ),
+    maxRequestBytes: Math.min(
+      DEFAULT_POLICY_CAPS.maxRequestBytes,
+      relay.maxRequestBytes,
+    ),
+    maxResponseBytes: Math.min(
+      DEFAULT_POLICY_CAPS.maxResponseBytes,
+      relay.maxResponseBytes,
+    ),
+    maxConcurrent: Math.min(
+      DEFAULT_POLICY_CAPS.maxConcurrent,
+      relay.maxConcurrent,
+    ),
+    jobsPerDay: DEFAULT_POLICY_CAPS.jobsPerDay,
+    concurrentExecutions: DEFAULT_POLICY_CAPS.concurrentExecutions,
+  });
+}
+
+function parseAutodispatchCaps(
+  raw: unknown,
+  defaults: PolicyCaps = DEFAULT_POLICY_CAPS,
+): PolicyCaps {
+  if (raw === undefined) return defaults;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw configError("autodispatch caps are invalid");
+  }
+  const keys = Object.keys(raw);
+  const allowed = [
+    "timeoutMs",
+    "maxOutputBytes",
+    "maxModelCalls",
+    "maxOutputTokens",
+    "perCallTimeoutMs",
+    "maxRequestBytes",
+    "maxResponseBytes",
+    "maxConcurrent",
+    "jobsPerDay",
+    "concurrentExecutions",
+  ];
+  if (keys.some((key) => !allowed.includes(key))) {
+    throw configError("autodispatch caps are invalid");
+  }
+  const rec = raw as Record<string, unknown>;
+  const num = (key: string, min: number, max: number): number => {
+    const value = rec[key];
+    if (
+      typeof value !== "number" ||
+      !Number.isInteger(value) ||
+      value < min ||
+      value > max
+    ) {
+      throw configError("autodispatch caps are invalid");
+    }
+    return value;
+  };
+  return Object.freeze({
+    timeoutMs: num("timeoutMs", 1000, 3600000),
+    maxOutputBytes: num("maxOutputBytes", 1024, 268435456),
+    maxModelCalls: num("maxModelCalls", 1, 64),
+    maxOutputTokens: num("maxOutputTokens", 1, 32768),
+    perCallTimeoutMs: num("perCallTimeoutMs", 100, 60000),
+    maxRequestBytes: num("maxRequestBytes", 1024, 16777216),
+    maxResponseBytes: num("maxResponseBytes", 1024, 16777216),
+    maxConcurrent: num("maxConcurrent", 1, 16),
+    jobsPerDay: num("jobsPerDay", 1, 64),
+    concurrentExecutions: num("concurrentExecutions", 1, 16),
+  });
+}
+
+function parseMaterializationPath(value: unknown, what: string): string {
+  if (
+    typeof value !== "string" ||
+    value.length < 1 ||
+    value.length > 4096 ||
+    value.includes("\0") ||
+    !isAbsolute(value)
+  ) {
+    throw configError(`autodispatch materialization ${what} is invalid`);
+  }
+  return value;
+}
+
+function parseMaterializationCommand(
+  raw: unknown,
+  what: string,
+  allowKind = false,
+): {
+  kind?: "fixed" | "pi-orch-guest" | "real-pi";
+  executable: string;
+  args: string[];
+} {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw configError(`autodispatch materialization ${what} is invalid`);
+  }
+  const rec = raw as Record<string, unknown>;
+  const keys = Object.keys(rec);
+  if (
+    keys.some(
+      (key) =>
+        key !== "executable" &&
+        key !== "args" &&
+        !(allowKind && key === "kind"),
+    )
+  ) {
+    throw configError(`autodispatch materialization ${what} is invalid`);
+  }
+  let kind: "fixed" | "pi-orch-guest" | "real-pi" | undefined;
+  if (allowKind && rec.kind !== undefined) {
+    if (
+      rec.kind !== "fixed" &&
+      rec.kind !== "pi-orch-guest" &&
+      rec.kind !== "real-pi"
+    ) {
+      throw configError(`autodispatch materialization ${what} kind is invalid`);
+    }
+    kind = rec.kind;
+  }
+  const executable = parseMaterializationPath(
+    rec.executable,
+    `${what} executable`,
+  );
+  const argsRaw = rec.args ?? [];
+  if (
+    !Array.isArray(argsRaw) ||
+    argsRaw.length > 64 ||
+    argsRaw.some(
+      (arg) =>
+        typeof arg !== "string" ||
+        arg.length < 1 ||
+        arg.length > 4096 ||
+        arg.includes("\0") ||
+        arg.includes("\n") ||
+        arg.includes("\r"),
+    )
+  ) {
+    throw configError(`autodispatch materialization ${what} args are invalid`);
+  }
+  return {
+    ...(kind !== undefined ? { kind } : {}),
+    executable,
+    args: [...(argsRaw as string[])],
+  };
+}
+
+function parseAutodispatchMaterialization(
+  raw: unknown,
+  checks: readonly string[],
+): AutodispatchMaterializationConfig | null {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw configError("autodispatch materialization is invalid");
+  }
+  const rec = raw as Record<string, unknown>;
+  const allowed = [
+    "stateDir",
+    "executor",
+    "checks",
+    "runtime",
+    "dependencySourceNodeModules",
+    "allowedTopLevelFiles",
+    "maxDurationMs",
+    "modelRoute",
+    "executionBackend",
+  ];
+  if (Object.keys(rec).some((key) => !allowed.includes(key))) {
+    throw configError("autodispatch materialization has an unknown key");
+  }
+  const stateDir = parseMaterializationPath(rec.stateDir, "stateDir");
+  const executor = parseMaterializationCommand(rec.executor, "executor", true);
+  if (
+    typeof rec.checks !== "object" ||
+    rec.checks === null ||
+    Array.isArray(rec.checks)
+  ) {
+    throw configError("autodispatch materialization checks are invalid");
+  }
+  const checksRec = rec.checks as Record<string, unknown>;
+  if (Object.keys(checksRec).length !== checks.length) {
+    throw configError(
+      "autodispatch materialization checks must match configured checks",
+    );
+  }
+  const checkCommands: Record<string, { executable: string; args: string[] }> =
+    {};
+  for (const id of checks) {
+    checkCommands[id] = parseMaterializationCommand(
+      checksRec[id],
+      `check ${id}`,
+    );
+  }
+  if (
+    typeof rec.runtime !== "object" ||
+    rec.runtime === null ||
+    Array.isArray(rec.runtime)
+  ) {
+    throw configError("autodispatch materialization runtime is invalid");
+  }
+  const runtimeRec = rec.runtime as Record<string, unknown>;
+  if (
+    Object.keys(runtimeRec).some(
+      (key) =>
+        key !== "nodeRealpath" &&
+        key !== "ompRealpath" &&
+        key !== "bwrapRealpath" &&
+        key !== "systemdRunRealpath" &&
+        key !== "systemctlRealpath" &&
+        key !== "piOrchLauncherRealpath" &&
+        key !== "piOrchShellRealpath" &&
+        key !== "piOrchConfigRealpath" &&
+        key !== "piOrchExtensionRealpath" &&
+        key !== "piOrchLockRealpath",
+    )
+  ) {
+    throw configError(
+      "autodispatch materialization runtime has an unknown key",
+    );
+  }
+  const nodeRealpath = parseMaterializationPath(
+    runtimeRec.nodeRealpath,
+    "runtime nodeRealpath",
+  );
+  const optionalRuntimePath = (key: string): string | undefined =>
+    runtimeRec[key] === undefined
+      ? undefined
+      : parseMaterializationPath(runtimeRec[key], `runtime ${key}`);
+  const ompRealpath = optionalRuntimePath("ompRealpath");
+  const bwrapRealpath = optionalRuntimePath("bwrapRealpath");
+  const systemdRunRealpath = optionalRuntimePath("systemdRunRealpath");
+  const systemctlRealpath = optionalRuntimePath("systemctlRealpath");
+  const piOrchLauncherRealpath = optionalRuntimePath("piOrchLauncherRealpath");
+  const piOrchShellRealpath = optionalRuntimePath("piOrchShellRealpath");
+  const piOrchConfigRealpath = optionalRuntimePath("piOrchConfigRealpath");
+  const piOrchExtensionRealpath = optionalRuntimePath(
+    "piOrchExtensionRealpath",
+  );
+  const piOrchLockRealpath = optionalRuntimePath("piOrchLockRealpath");
+  const dependencySourceNodeModules =
+    rec.dependencySourceNodeModules === undefined ||
+    rec.dependencySourceNodeModules === null
+      ? null
+      : parseMaterializationPath(
+          rec.dependencySourceNodeModules,
+          "dependencySourceNodeModules",
+        );
+  const topRaw = rec.allowedTopLevelFiles ?? [];
+  if (
+    !Array.isArray(topRaw) ||
+    topRaw.length > 64 ||
+    topRaw.some(
+      (entry) =>
+        typeof entry !== "string" ||
+        entry.length < 1 ||
+        entry.length > 256 ||
+        entry.includes("/") ||
+        entry.includes("\\") ||
+        entry.includes("\0"),
+    )
+  ) {
+    throw configError(
+      "autodispatch materialization allowedTopLevelFiles are invalid",
+    );
+  }
+  const maxDurationMs = requireRunnerInt(
+    rec.maxDurationMs,
+    1000,
+    900000,
+    "autodispatch materialization maxDurationMs is invalid",
+  );
+  if (rec.modelRoute !== "local" && rec.modelRoute !== "synthetic-local") {
+    throw configError("autodispatch materialization modelRoute is invalid");
+  }
+  const executionBackend =
+    rec.executionBackend === undefined ? "confined" : rec.executionBackend;
+  if (
+    executionBackend !== "confined" &&
+    executionBackend !== "offline-fixture"
+  ) {
+    throw configError(
+      "autodispatch materialization executionBackend is invalid",
+    );
+  }
+  return Object.freeze({
+    executionBackend,
+    stateDir,
+    executor: Object.freeze({
+      ...executor,
+      args: Object.freeze(executor.args),
+    }),
+    checks: Object.freeze(checkCommands),
+    runtime: Object.freeze({
+      nodeRealpath,
+      ...(ompRealpath !== undefined ? { ompRealpath } : {}),
+      ...(bwrapRealpath !== undefined ? { bwrapRealpath } : {}),
+      ...(systemdRunRealpath !== undefined ? { systemdRunRealpath } : {}),
+      ...(systemctlRealpath !== undefined ? { systemctlRealpath } : {}),
+      ...(piOrchLauncherRealpath !== undefined
+        ? { piOrchLauncherRealpath }
+        : {}),
+      ...(piOrchShellRealpath !== undefined ? { piOrchShellRealpath } : {}),
+      ...(piOrchConfigRealpath !== undefined ? { piOrchConfigRealpath } : {}),
+      ...(piOrchExtensionRealpath !== undefined
+        ? { piOrchExtensionRealpath }
+        : {}),
+      ...(piOrchLockRealpath !== undefined ? { piOrchLockRealpath } : {}),
+    }),
+    dependencySourceNodeModules,
+    allowedTopLevelFiles: Object.freeze([...(topRaw as string[])]),
+    maxDurationMs,
+    modelRoute: rec.modelRoute,
+  }) as AutodispatchMaterializationConfig;
+}
+
+/**
+ * Strict opt-in auto-dispatch operator config. Every trusted mapping
+ * (alias/sourceRoot/scopes/checks/caps/bridge/dependency) lives here; the
+ * model cannot choose or widen any of it. Unknown keys fail closed.
+ */
+export function parseAutodispatchConfig(
+  raw: string | undefined,
+  trial: TrialConfig | null,
+): AutodispatchConfig | null {
+  if (raw === undefined) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw configError("autodispatch config must be a JSON object");
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw configError("autodispatch config must be a JSON object");
+  }
+  const allowed = [
+    "enabled",
+    "workspaceAlias",
+    "sourceRoot",
+    "operations",
+    "readScopes",
+    "writeScopes",
+    "checks",
+    "caps",
+    "dependencyRoot",
+    "bridgeScriptPath",
+    "bridgeConfigTemplatePath",
+    "materialization",
+  ];
+  if (Object.keys(parsed).some((key) => !allowed.includes(key))) {
+    throw configError("autodispatch config has an unknown key");
+  }
+  const rec = parsed as Record<string, unknown>;
+  if (typeof rec.enabled !== "boolean") {
+    throw configError("autodispatch enabled flag is invalid");
+  }
+  if (
+    typeof rec.workspaceAlias !== "string" ||
+    !TRIAL_ALIAS_PATTERN.test(rec.workspaceAlias)
+  ) {
+    throw configError("autodispatch workspace alias is invalid");
+  }
+  if (
+    typeof rec.sourceRoot !== "string" ||
+    rec.sourceRoot.length < 1 ||
+    rec.sourceRoot.length > 4096 ||
+    !isAbsolute(rec.sourceRoot)
+  ) {
+    throw configError("autodispatch source root must be absolute");
+  }
+  if (!Array.isArray(rec.operations) || rec.operations.length < 1) {
+    throw configError("autodispatch operations are invalid");
+  }
+  const operations: ("investigate" | "implement")[] = [];
+  for (const op of rec.operations) {
+    if (op !== "investigate" && op !== "implement") {
+      throw configError("autodispatch operations are invalid");
+    }
+    if (operations.includes(op)) {
+      throw configError("autodispatch operations are invalid");
+    }
+    operations.push(op);
+  }
+  const readScopes = parseLiteralScopes(rec.readScopes, "read scopes", 1);
+  const writeScopes = parseLiteralScopes(rec.writeScopes, "write scopes", 0);
+  if (operations.includes("implement") && writeScopes.length === 0) {
+    throw configError("autodispatch write scopes are required for implement");
+  }
+  if (
+    !Array.isArray(rec.checks) ||
+    rec.checks.length < 1 ||
+    rec.checks.length > 16
+  ) {
+    throw configError("autodispatch checks are invalid");
+  }
+  const checks: string[] = [];
+  for (const check of rec.checks) {
+    if (
+      typeof check !== "string" ||
+      check.length < 1 ||
+      check.length > 64 ||
+      !TRIAL_CHECK_PATTERN.test(check)
+    ) {
+      throw configError("autodispatch checks are invalid");
+    }
+    checks.push(check);
+  }
+  const caps = parseAutodispatchCaps(rec.caps, defaultAutodispatchCaps(trial));
+  const dependencyRoot =
+    rec.dependencyRoot === undefined || rec.dependencyRoot === null
+      ? null
+      : requireRunnerAbsolutePath(rec.dependencyRoot);
+  const materialization = parseAutodispatchMaterialization(
+    rec.materialization,
+    checks,
+  );
+  const bridgeScriptPath = requireRunnerAbsolutePath(rec.bridgeScriptPath);
+  const bridgeConfigTemplatePath = requireRunnerAbsolutePath(
+    rec.bridgeConfigTemplatePath,
+  );
+  if (trial !== null) {
+    if (trial.workspaceAlias !== rec.workspaceAlias) {
+      throw configError("autodispatch alias must match trial alias");
+    }
+    if (
+      trial.runner.bridgeScriptPath !== bridgeScriptPath ||
+      trial.runner.bridgeConfigTemplatePath !== bridgeConfigTemplatePath
+    ) {
+      throw configError("autodispatch bridge must match trial bridge");
+    }
+    if (
+      trial.mandatoryChecks.length !== checks.length ||
+      !checks.every((check) => trial.mandatoryChecks.includes(check))
+    ) {
+      throw configError("autodispatch checks must match trial checks");
+    }
+    if (
+      trial.timeoutMs < caps.timeoutMs ||
+      trial.maxOutputBytes < caps.maxOutputBytes ||
+      trial.runner.relay.maxModelCalls < caps.maxModelCalls ||
+      trial.runner.relay.maxOutputTokens < caps.maxOutputTokens ||
+      trial.runner.relay.perCallTimeoutMs < caps.perCallTimeoutMs ||
+      trial.runner.relay.maxRequestBytes < caps.maxRequestBytes ||
+      trial.runner.relay.maxResponseBytes < caps.maxResponseBytes ||
+      trial.runner.relay.maxConcurrent < caps.maxConcurrent
+    ) {
+      throw configError("autodispatch caps must fit trial runner caps");
+    }
+  }
+  return Object.freeze({
+    enabled: rec.enabled,
+    workspaceAlias: rec.workspaceAlias,
+    sourceRoot: rec.sourceRoot,
+    operations: Object.freeze(operations),
+    readScopes: Object.freeze(readScopes),
+    writeScopes: Object.freeze(writeScopes),
+    checks: Object.freeze(checks),
+    caps,
+    dependencyRoot,
+    bridgeScriptPath,
+    bridgeConfigTemplatePath,
+    materialization,
+  });
+}
+
 export function parseTrialConfig(raw: string | undefined): TrialConfig | null {
   if (raw === undefined) {
     return null;
@@ -1908,6 +2484,13 @@ export function loadServerConfig(
   if (trial !== null && model === null) {
     throw configError("trial config requires model config");
   }
+  const autodispatch = parseAutodispatchConfig(
+    env.COMPANION_AUTODISPATCH_JSON,
+    trial,
+  );
+  if (autodispatch !== null && trial === null) {
+    throw configError("autodispatch config requires trial config");
+  }
   const parsed = ServerConfigSchema.safeParse({
     dbPath,
     host: host.data,
@@ -1936,5 +2519,6 @@ export function loadServerConfig(
     voice,
     remote,
     trial,
+    autodispatch,
   });
 }

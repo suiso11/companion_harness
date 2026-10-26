@@ -7,6 +7,7 @@ import {
   migrateKernelDatabase,
   openKernelDatabase,
   RepositoryValidationError,
+  revokeAllClaimedForStop,
 } from "../src/index.js";
 
 const NOW = 1_750_000_000_000;
@@ -354,6 +355,244 @@ describe("trial authority", () => {
         },
       );
       expect(ok2.status).toBe(201);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("stages/approves/claims a local write grant without external data consent", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      const { task } = goalTask(repo, sessionId, "sx-local-write");
+      const staged = repo.stageTrial(
+        sessionId,
+        stageInput(task.id, { possibleExternalDataConsent: false }),
+        {
+          key: randomUUID(),
+          now: NOW + 4,
+          profile: profile(),
+          workspaceAlias: "ws",
+        },
+      );
+      expect(staged.body.possibleExternalDataConsent).toBe(false);
+      const approved = repo.approveTrial(sessionId, staged.body.id, {
+        key: randomUUID(),
+        now: NOW + 5,
+        profile: profile(),
+        workspaceAlias: "ws",
+      });
+      const executionId = (approved.body as { executionId: string })
+        .executionId;
+      const claimed = repo.claimTrial(sessionId, executionId, {
+        key: randomUUID(),
+        now: NOW + 6,
+        profile: profile(),
+        workspaceAlias: "ws",
+      });
+      expect((claimed.body as { kind: string }).kind).toBe("result");
+      const request = (
+        claimed.body as {
+          request: {
+            mode: string;
+            externalModelConsent: boolean;
+            relevantPaths: string[];
+          };
+        }
+      ).request;
+      expect(request.mode).toBe("write");
+      expect(request.externalModelConsent).toBe(false);
+      expect(request.relevantPaths).toEqual(["src/a.ts"]);
+      const row = handle.raw
+        .prepare(
+          "SELECT read_only, consent, paths_json FROM trial_proposals WHERE id=?",
+        )
+        .get(staged.body.id) as {
+        read_only: number;
+        consent: number;
+        paths_json: string;
+      };
+      expect(row.read_only).toBe(0);
+      expect(row.consent).toBe(0);
+      expect(JSON.parse(row.paths_json)).toEqual(["src/a.ts"]);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("restart fence revokes a claimed unbooted grant while retaining claim evidence", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      const { task } = goalTask(repo, sessionId, "sx-fence-claim");
+      const staged = repo.stageTrial(
+        sessionId,
+        stageInput(task.id, { possibleExternalDataConsent: false }),
+        {
+          key: randomUUID(),
+          now: NOW + 4,
+          profile: profile(),
+          workspaceAlias: "ws",
+        },
+      );
+      const approved = repo.approveTrial(sessionId, staged.body.id, {
+        key: randomUUID(),
+        now: NOW + 5,
+        profile: profile(),
+        workspaceAlias: "ws",
+      });
+      const executionId = (approved.body as { executionId: string })
+        .executionId;
+      repo.claimTrial(sessionId, executionId, {
+        key: randomUUID(),
+        now: NOW + 6,
+        profile: profile(),
+        workspaceAlias: "ws",
+      });
+      const fence = repo.applyAutonomyRestartFenceNow(NOW + 7);
+      expect(fence.paused).toBe(true);
+      const grant = handle.raw
+        .prepare(
+          "SELECT status, claimed_at, request_json FROM trial_grants WHERE execution_id=?",
+        )
+        .get(executionId) as {
+        status: string;
+        claimed_at: number | null;
+        request_json: string | null;
+      };
+      expect(grant.status).toBe("revoked");
+      expect(grant.claimed_at).not.toBeNull();
+      expect(grant.request_json).not.toBeNull();
+      for (const table of [
+        "trial_worker_boots",
+        "trial_launch_permits",
+        "trial_worker_outcomes",
+      ]) {
+        const count = handle.raw
+          .prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE execution_id=?`)
+          .get(executionId) as { n: number };
+        expect(count.n).toBe(0);
+      }
+      // A claimed-then-revoked grant is NOT the never-launched shortcut.
+      expect(
+        repo.isNeverLaunchedRevokedTrialGrant(sessionId, executionId),
+      ).toBe(false);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("reports only an owned revoked grant that never launched", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      const first = goalTask(repo, sessionId, "sx1");
+      const staged = repo.stageTrial(sessionId, stageInput(first.task.id), {
+        key: randomUUID(),
+        now: NOW + 4,
+        profile: profile(),
+        workspaceAlias: "ws",
+      });
+      const approved = repo.approveTrial(sessionId, staged.body.id, {
+        key: randomUUID(),
+        now: NOW + 5,
+        profile: profile(),
+        workspaceAlias: "ws",
+      });
+      const queuedExec = (approved.body as { executionId: string }).executionId;
+      expect(repo.isNeverLaunchedRevokedTrialGrant(sessionId, queuedExec)).toBe(
+        false,
+      );
+      repo.expireTrial(sessionId, staged.body.id, NOW + 6);
+      expect(repo.isNeverLaunchedRevokedTrialGrant(sessionId, queuedExec)).toBe(
+        true,
+      );
+      expect(
+        repo.isNeverLaunchedRevokedTrialGrant(sessionId, randomUUID()),
+      ).toBe(false);
+      const otherSession = repo.createSession({
+        key: randomUUID(),
+        now: NOW + 7,
+      }).body.sessionId;
+      expect(
+        repo.isNeverLaunchedRevokedTrialGrant(otherSession, queuedExec),
+      ).toBe(false);
+
+      // Defensive boot row on an otherwise revoked-unclaimed grant is not proof.
+      const orphan = goalTask(repo, sessionId, "sx3");
+      const orphanStaged = repo.stageTrial(
+        sessionId,
+        stageInput(orphan.task.id),
+        {
+          key: randomUUID(),
+          now: NOW + 8,
+          profile: profile(),
+          workspaceAlias: "ws",
+        },
+      );
+      const orphanApproved = repo.approveTrial(
+        sessionId,
+        orphanStaged.body.id,
+        {
+          key: randomUUID(),
+          now: NOW + 9,
+          profile: profile(),
+          workspaceAlias: "ws",
+        },
+      );
+      const orphanExec = (orphanApproved.body as { executionId: string })
+        .executionId;
+      repo.expireTrial(sessionId, orphanStaged.body.id, NOW + 10);
+      handle.raw
+        .prepare(
+          "INSERT INTO trial_worker_boots (execution_id, session_id, pid, boot_id, process_start_ticks, observed_at, started_at) VALUES (?,?,?,?,?,?,?)",
+        )
+        .run(
+          orphanExec,
+          sessionId,
+          901,
+          "orphan-boot",
+          "9010",
+          NOW + 11,
+          NOW + 11,
+        );
+      expect(repo.isNeverLaunchedRevokedTrialGrant(sessionId, orphanExec)).toBe(
+        false,
+      );
+
+      // Claimed (with a registered worker boot) then revoked: NOT never-launched.
+      const second = goalTask(repo, sessionId, "sx2");
+      const staged2 = repo.stageTrial(sessionId, stageInput(second.task.id), {
+        key: randomUUID(),
+        now: NOW + 8,
+        profile: profile(),
+        workspaceAlias: "ws",
+      });
+      const approved2 = repo.approveTrial(sessionId, staged2.body.id, {
+        key: randomUUID(),
+        now: NOW + 9,
+        profile: profile(),
+        workspaceAlias: "ws",
+      });
+      const claimedExec = (approved2.body as { executionId: string })
+        .executionId;
+      repo.claimTrial(sessionId, claimedExec, {
+        key: randomUUID(),
+        now: NOW + 10,
+        profile: profile(),
+        workspaceAlias: "ws",
+      });
+      repo.registerTrialWorkerBoot(
+        {
+          executionId: claimedExec,
+          sessionId,
+          pid: 900,
+          bootId: "getter-boot",
+          processStartTicks: "9000",
+        },
+        NOW + 11,
+      );
+      expect(revokeAllClaimedForStop(handle.raw, NOW + 12)).toBeGreaterThan(0);
+      expect(
+        repo.isNeverLaunchedRevokedTrialGrant(sessionId, claimedExec),
+      ).toBe(false);
     } finally {
       closeKernelDatabase(handle);
     }

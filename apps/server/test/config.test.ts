@@ -11,11 +11,13 @@ import {
   isIanaTimeZone,
   loadServerConfig,
   MAX_MARKDOWN_ROOTS,
+  parseAutodispatchConfig,
   parseCalendarConfig,
   parseExecutionRecordsConfig,
   parseMarkdownRoots,
   parseMemoryConfig,
   parseModelConfig,
+  parseTrialConfig,
   parseVoiceConfig,
   ServerConfigError,
 } from "../src/config.js";
@@ -856,5 +858,95 @@ describe("voice config (COMPANION_VOICE_JSON)", () => {
         }),
       }).voice,
     ).toEqual({ profile: "shunkin", timeoutMs: 5000 });
+  });
+});
+
+describe("autodispatch caps defaults fit the trial runner", () => {
+  function trialConfig(perCallTimeoutMs: number) {
+    return {
+      available: true,
+      enabled: true,
+      mandatoryChecks: ["lint"],
+      configFingerprint: "b".repeat(64),
+      sourceRevision: "a".repeat(40),
+      currentModel: "test-model",
+      disclosedWholeRepoRead: true,
+      timeoutMs: 60_000,
+      maxOutputBytes: 1_000_000,
+      workspaceAlias: "companion-harness",
+      runner: {
+        nodeRealpath: "/usr/bin/node",
+        bridgeScriptPath: "/opt/bridge.mjs",
+        bridgeConfigTemplatePath: "/opt/bridge.template.json",
+        systemctlRealpath: "/usr/bin/systemctl",
+        xdgRuntimeDir: "/run/user/1000",
+        relay: {
+          maxRequestBytes: 1_048_576,
+          maxModelCalls: 8,
+          maxOutputTokens: 256,
+          maxResponseBytes: 1_048_576,
+          perCallTimeoutMs,
+          maxConcurrent: 1,
+        },
+        observe: {
+          activeTimeoutMs: 5000,
+          goneTimeoutMs: 5000,
+          pollIntervalMs: 50,
+        },
+        pollMs: 500,
+      },
+    };
+  }
+
+  function autodispatchConfig() {
+    return {
+      enabled: true,
+      workspaceAlias: "companion-harness",
+      sourceRoot: "/synthetic/source",
+      operations: ["investigate", "implement"],
+      readScopes: ["src"],
+      writeScopes: ["src"],
+      checks: ["lint"],
+      dependencyRoot: "/synthetic/deps",
+      bridgeScriptPath: "/opt/bridge.mjs",
+      bridgeConfigTemplatePath: "/opt/bridge.template.json",
+    };
+  }
+
+  it("derives omitted caps field-wise from the trial runner caps", () => {
+    const trial = parseTrialConfig(JSON.stringify(trialConfig(60_000)));
+    expect(trial).not.toBeNull();
+    const autodispatch = parseAutodispatchConfig(
+      JSON.stringify(autodispatchConfig()),
+      trial,
+    );
+    expect(autodispatch).not.toBeNull();
+    expect(autodispatch?.caps.perCallTimeoutMs).toBeLessThanOrEqual(60_000);
+    expect(autodispatch?.caps.maxModelCalls).toBeLessThanOrEqual(8);
+    expect(autodispatch?.caps.maxOutputTokens).toBeLessThanOrEqual(256);
+  });
+
+  it("still rejects explicit caps that exceed the trial runner caps", () => {
+    const trial = parseTrialConfig(JSON.stringify(trialConfig(60_000)));
+    expect(() =>
+      parseAutodispatchConfig(
+        JSON.stringify({
+          ...autodispatchConfig(),
+          caps: {
+            timeoutMs: 60_000,
+            maxOutputBytes: 1_000_000,
+            maxModelCalls: 9,
+            maxOutputTokens: 256,
+            perCallTimeoutMs: 5000,
+            maxRequestBytes: 1_048_576,
+            maxResponseBytes: 1_048_576,
+            maxConcurrent: 1,
+            jobsPerDay: 3,
+            concurrentExecutions: 1,
+          },
+        }),
+        trial,
+      ),
+    ).toThrow("autodispatch caps must fit trial runner caps");
   });
 });

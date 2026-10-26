@@ -928,3 +928,256 @@ describe("lifecycle: faithful empty-checks failure is terminal observed", () => 
     }
   });
 });
+
+describe("lifecycle: durable outcome projection for the session surface", () => {
+  it("keeps pending distinct and exposes the actual success/failure/quiescence row flags", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      // Pending: the grant exists but no durable worker row has been recorded.
+      const doneClaim = await fullClaim(
+        repo,
+        sessionId,
+        "proj-done",
+        "ws",
+        NOW + 4,
+      );
+      repo.registerTrialWorkerBoot(
+        {
+          executionId: doneClaim.exec,
+          sessionId,
+          pid: 501,
+          bootId: "boot-proj-done",
+          processStartTicks: "5011",
+        },
+        NOW + 7,
+      );
+      permitFor(
+        repo,
+        sessionId,
+        doneClaim.exec,
+        doneClaim.req,
+        501,
+        "boot-proj-done",
+        "5011",
+        NOW + 8,
+      );
+      const pending = repo.readTrialWorkerOutcome(sessionId, doneClaim.exec);
+      expect(pending).toMatchObject({
+        status: "claimed",
+        recorded: false,
+        authorized: false,
+        succeeded: false,
+        quiescent: false,
+        summary: "",
+        detail: "",
+      });
+
+      repo.recordTrialWorkerResult(
+        sessionId,
+        doneClaim.exec,
+        {
+          detail: "bridge-exit:0",
+          observation: obsGone(
+            501,
+            "boot-proj-done",
+            "5011",
+            NOW + 11,
+          ) as never,
+          result: {
+            taskHash: doneClaim.req.taskHash as string,
+            exitCode: 0,
+            checks: [{ id: "lint", ok: true }],
+            outputMatched: true,
+            noTimeout: true,
+          },
+        },
+        NOW + 11,
+      );
+      expect(
+        repo.readTrialWorkerOutcome(sessionId, doneClaim.exec),
+      ).toMatchObject({
+        status: "consumed",
+        recorded: true,
+        authorized: true,
+        succeeded: true,
+        quiescent: false,
+        detail: "bridge-exit:0",
+        summary: "bridge-exit:0",
+      });
+
+      // A real observed failure: the row is durable but NOT authorized.
+      const failedClaim = await fullClaim(
+        repo,
+        sessionId,
+        "proj-failed",
+        "ws",
+        NOW + 40,
+      );
+      repo.registerTrialWorkerBoot(
+        {
+          executionId: failedClaim.exec,
+          sessionId,
+          pid: 502,
+          bootId: "boot-proj-failed",
+          processStartTicks: "5022",
+        },
+        NOW + 43,
+      );
+      permitFor(
+        repo,
+        sessionId,
+        failedClaim.exec,
+        failedClaim.req,
+        502,
+        "boot-proj-failed",
+        "5022",
+        NOW + 44,
+      );
+      repo.recordTrialWorkerResult(
+        sessionId,
+        failedClaim.exec,
+        {
+          detail: "bridge-exit:1",
+          observation: obsGone(
+            502,
+            "boot-proj-failed",
+            "5022",
+            NOW + 47,
+          ) as never,
+          result: {
+            taskHash: failedClaim.req.taskHash as string,
+            exitCode: 1,
+            checks: [],
+            outputMatched: false,
+            noTimeout: false,
+          },
+        },
+        NOW + 47,
+      );
+      const failed = repo.readTrialWorkerOutcome(sessionId, failedClaim.exec);
+      expect(failed).toMatchObject({
+        status: "interrupted",
+        recorded: true,
+        authorized: false,
+        succeeded: true,
+        quiescent: false,
+      });
+      expect(failed?.detail).toContain("observed-not-authorized");
+      expect(failed?.detail).toContain("bridge-exit:1");
+
+      // Known quiescence is a durable row with quiescent=1, succeeded=0 and
+      // never authorized.
+      const quietClaim = await fullClaim(
+        repo,
+        sessionId,
+        "proj-quiet",
+        "ws",
+        NOW + 60,
+      );
+      repo.recordTrialQuiescence(sessionId, "ws", quietClaim.exec, NOW + 63, {
+        workspaceAlias: "ws",
+        reason: "frontend-gone",
+      });
+      expect(
+        repo.readTrialWorkerOutcome(sessionId, quietClaim.exec),
+      ).toMatchObject({
+        status: "interrupted",
+        recorded: true,
+        authorized: false,
+        succeeded: false,
+        quiescent: true,
+      });
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+});
+describe("lifecycle: queued grant keyset pagination for the runner", () => {
+  it("pages oldest-first past ties without duplicates, skips, or queue mutation", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      const alias = "ws";
+      const queueAt = (label: string, approveNow: number) => {
+        const { task } = goalTask(repo, sessionId, `page-${label}`);
+        const staged = repo.stageTrial(sessionId, stageInput(task.id), {
+          key: randomUUID(),
+          now: approveNow - 1,
+          profile: profile(),
+          workspaceAlias: alias,
+        });
+        const approved = repo.approveTrial(sessionId, staged.body.id, {
+          key: randomUUID(),
+          now: approveNow,
+          profile: profile(),
+          workspaceAlias: alias,
+        });
+        return (approved.body as { executionId: string }).executionId;
+      };
+      // Two same-millisecond rows exercise the execution_id tie-break.
+      queueAt("tie-a", NOW + 10);
+      queueAt("tie-b", NOW + 10);
+      queueAt("c", NOW + 11);
+      queueAt("d", NOW + 12);
+      queueAt("e", NOW + 13);
+
+      const full = repo.listQueuedTrialGrantsForAlias(alias, 100);
+      expect(full).toHaveLength(5);
+      expect(full.map((g) => g.createdAt)).toEqual(
+        [...full.map((g) => g.createdAt)].sort((a, b) => a - b),
+      );
+      const horizon = repo.readQueuedTrialGrantHorizonForAlias(alias);
+      expect(horizon).toEqual({
+        createdAt: full[4]?.createdAt,
+        executionId: full[4]?.executionId,
+      });
+
+      const paged: string[] = [];
+      let cursor: { createdAt: number; executionId: string } | undefined;
+      for (let page = 0; page < 10; page += 1) {
+        const rows = repo.listQueuedTrialGrantsForAlias(
+          alias,
+          2,
+          cursor,
+          horizon ?? undefined,
+        );
+        if (rows.length === 0) break;
+        paged.push(...rows.map((g) => g.executionId));
+        const tail = rows[rows.length - 1];
+        if (tail === undefined) break;
+        cursor = {
+          createdAt: tail.createdAt,
+          executionId: tail.executionId,
+        };
+      }
+      expect(paged).toEqual(full.map((g) => g.executionId));
+      expect(new Set(paged).size).toBe(paged.length);
+
+      // The snapshot boundary hides a newer arrival from THIS pick but the
+      // next horizon includes it; reads never change queued status.
+      queueAt("later", NOW + 20);
+      const afterBoundary = repo.listQueuedTrialGrantsForAlias(
+        alias,
+        100,
+        undefined,
+        horizon ?? undefined,
+      );
+      expect(afterBoundary.map((g) => g.executionId)).toEqual(
+        full.map((g) => g.executionId),
+      );
+      const nextHorizon = repo.readQueuedTrialGrantHorizonForAlias(alias);
+      expect(nextHorizon?.createdAt).toBe(NOW + 20);
+      expect(
+        repo.listQueuedTrialGrantsForAlias(alias, 100).map((g) => g.createdAt),
+      ).toContain(NOW + 20);
+      expect(repo.listQueuedTrialGrantsForAlias(alias, 100)).toHaveLength(6);
+      const stillQueued = handle.raw
+        .prepare(
+          "SELECT COUNT(*) AS n FROM trial_grants WHERE workspace_alias=? AND status='queued'",
+        )
+        .get(alias) as { n: number };
+      expect(stillQueued.n).toBe(6);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+});

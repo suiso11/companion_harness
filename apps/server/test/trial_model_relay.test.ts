@@ -1,4 +1,4 @@
-import { mkdtempSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, statSync, writeFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -160,6 +160,63 @@ describe.skipIf(process.platform === "win32")("trial_model_relay", () => {
     expect(() => statSync(sock)).toThrow();
   });
 
+  // Linux-only: expects exclusive-bind EADDRINUSE from a second listener on a
+  // real unix socket path, which Windows does not model the same way.
+  it.runIf(process.platform === "linux")(
+    "fails closed on an occupied socket path without unlinking it",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "trial-relay-occupied-"));
+      const sock = join(dir, "relay", "model.sock");
+      const first = new TrialModelRelay({
+        sockPath: sock,
+        gateway: fakeGateway(),
+        fixedModel: FIXED_MODEL,
+        caps: testCaps(),
+      });
+      await first.start();
+      const second = new TrialModelRelay({
+        sockPath: sock,
+        gateway: fakeGateway(),
+        fixedModel: FIXED_MODEL,
+        caps: testCaps(),
+      });
+      await expect(second.start()).rejects.toMatchObject({
+        code: "EADDRINUSE",
+      });
+      // A failed bind never owns the path: close must not delete first's socket.
+      await second.close();
+      expect(existsSync(sock)).toBe(true);
+      first.setPermitted(true);
+      const stillOwned = await postUds(sock, chatBody());
+      expect(stillOwned.status).toBe(200);
+      await first.close();
+      expect(existsSync(sock)).toBe(false);
+    },
+  );
+
+  // Linux-only: requires binding a pre-existing stale unix socket path to fail
+  // with EADDRINUSE, which Windows does not model the same way.
+  it.runIf(process.platform === "linux")(
+    "fails closed on a stale socket file with no listener",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "trial-relay-stale-"));
+      const sock = join(dir, "model.sock");
+      writeFileSync(sock, "");
+      const relay = new TrialModelRelay({
+        sockPath: sock,
+        gateway: fakeGateway(),
+        fixedModel: FIXED_MODEL,
+        caps: testCaps(),
+      });
+      await expect(relay.start()).rejects.toMatchObject({
+        code: "EADDRINUSE",
+      });
+      await relay.close();
+      // Operator-owned stale path is preserved for explicit removal.
+      expect(existsSync(sock)).toBe(true);
+    },
+  );
+
   it("pre-permit request waits bounded then refuses without forwarding", async () => {
     const gw = fakeGateway();
     const { relay, sock } = await startRelay(
@@ -278,6 +335,69 @@ describe.skipIf(process.platform === "win32")("trial_model_relay", () => {
       });
       // Usage omitted when the provider omits it.
       expect("usage" in payload).toBe(false);
+    } finally {
+      await relay.close();
+    }
+  });
+
+  it("native child read-only verbs (read,grep,find,ls) round-trip and unknown still rejects", async () => {
+    // Exact installed Pi backend read-only tool list (`piToolList`):
+    // read,grep,find,ls. The relay must map all of them to gateway-safe names
+    // and map a gateway call back to the exact native verb.
+    const gw = fakeGateway({
+      result: {
+        text: "",
+        toolCalls: [
+          {
+            id: "call_find",
+            name: "capsule.find",
+            arguments: { pattern: "README.md" },
+          },
+        ],
+        stopReason: "tool_calls",
+      },
+    });
+    const { relay, sock } = await startRelay(testCaps(), gw);
+    try {
+      relay.setPermitted(true);
+      const res = await postUds(
+        sock,
+        chatBody({
+          tools: ["read", "grep", "find", "ls"].map((name) => ({
+            type: "function",
+            function: {
+              name,
+              description: `synthetic native ${name}`,
+              parameters: { type: "object", properties: {} },
+            },
+          })),
+          tool_choice: "auto",
+        }),
+      );
+      expect(res.status).toBe(200);
+      expect(gw.calls.length).toBe(1);
+      expect(
+        (gw.calls[0] as ChatRequest).tools?.map((tool) => tool.name),
+      ).toEqual(["capsule.read", "capsule.grep", "capsule.find", "capsule.ls"]);
+      const call = JSON.parse(res.text).choices[0].message.tool_calls[0];
+      expect(call.function.name).toBe("find");
+      expect(JSON.parse(call.function.arguments)).toEqual({
+        pattern: "README.md",
+      });
+
+      // The new verbs are a fixed allowlist, not a passthrough: an arbitrary
+      // unknown native verb still fails closed before forwarding.
+      const unknown = await postUds(
+        sock,
+        chatBody({
+          tools: [
+            { type: "function", function: { name: "exec", description: "x" } },
+          ],
+        }),
+      );
+      expect(unknown.status).toBe(400);
+      expect(JSON.parse(unknown.text).error.message).toBe("unknown_tool");
+      expect(gw.calls.length).toBe(1);
     } finally {
       await relay.close();
     }
