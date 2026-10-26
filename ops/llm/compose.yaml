@@ -8,6 +8,10 @@ services:
     # i1-Q4_K_M (21,713,463,808 bytes). Measured on the P40 (2026-10-22):
     # 20.8 GiB VRAM @ 16k, decode ~61 tok/s, prefill ~961 tok/s @ 6k;
     # thinking on/off gives the same decode rate.
+    # 2026-10-26 P40: 49152 ctx q8_0 KV → GPU0 21.0/24.0 GiB, 4 slots
+    # (kv_unified), prefill ~557 tok/s @20k, decode 59 tok/s short / 32 tok/s
+    # @20k context, tool call valid; reason: trial guests (pi-orch) need
+    # ~17k tokens of system+tools, 16k rejected at 17,026.
     image: ghcr.io/ggml-org/llama.cpp@sha256:f88fa8d94d872312a4ad117acd490fa997bef81f03f161f0cfe0d74272e5b5bb
     container_name: huihui-ornith-35b
     restart: unless-stopped
@@ -30,7 +34,11 @@ services:
       - --port
       - "8080"
       - -c
-      - "16384"
+      - "49152"
+      - --cache-type-k
+      - q8_0
+      - --cache-type-v
+      - q8_0
       - --n-gpu-layers
       - "99"
       - -fa
