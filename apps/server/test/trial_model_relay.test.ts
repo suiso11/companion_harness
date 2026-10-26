@@ -715,6 +715,57 @@ describe.skipIf(process.platform === "win32")("trial_model_relay", () => {
     }
   });
 
+  it("reserves guest system prompt space when truncating relay tool context", async () => {
+    // Codex P2: the tool-context truncation budget must account for the
+    // guest system prompt and its separator, otherwise merging an
+    // already-maxed relay context with even a short prompt exceeds the
+    // gateway bound and the relay rejects a valid guest call.
+    const gw = fakeGateway();
+    const { relay, sock } = await startRelay(testCaps(), gw);
+    try {
+      relay.setPermitted(true);
+      const guestPrompt = "synthetic guest system prompt";
+      const longDesc = `SYNTHETIC long description ${"z".repeat(70_000)}END-OF-DESCRIPTION`;
+      const res = await postUds(
+        sock,
+        chatBody({
+          messages: [
+            { role: "system", content: guestPrompt },
+            { role: "user", content: "synthetic user task" },
+          ],
+          tools: [
+            {
+              type: "function",
+              function: {
+                name: "bash",
+                description: longDesc,
+                parameters: { type: "object", properties: {} },
+              },
+            },
+          ],
+          tool_choice: "auto",
+        }),
+      );
+      expect(res.status).toBe(200);
+      expect(gw.calls.length).toBe(1);
+      const fwd = gw.calls[0] as ChatRequest;
+      expect(() => validateChatRequest(fwd)).not.toThrow();
+      const systems = fwd.messages.filter((m) => m.role === "system");
+      expect(systems.length).toBe(1);
+      const first = fwd.messages[0];
+      expect(first?.role).toBe("system");
+      expect(first?.content).toContain("[trial-relay tool context]");
+      expect(first?.content).toContain("[truncated to gateway bound]");
+      // Guest prompt survives intact, after the truncated relay context.
+      expect(first?.content).toContain(guestPrompt);
+      expect(first?.content?.length ?? 0).toBeLessThanOrEqual(65_536);
+      // The tail of the oversized description was actually truncated away.
+      expect(first?.content).not.toContain("END-OF-DESCRIPTION");
+    } finally {
+      await relay.close();
+    }
+  });
+
   it("maps gateway error codes to relay reasons and traces httpStatus", async () => {
     const cases: Array<{
       error: unknown;

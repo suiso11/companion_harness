@@ -842,10 +842,29 @@ export class TrialModelRelay {
           fullDescriptions
             .map((entry) => `- ${entry.name}: ${entry.description}`)
             .join("\n");
-        if (context.length > GATEWAY_MAX_MESSAGE_CONTENT_LENGTH) {
+        // The merged leading system message must still fit the gateway bound
+        // after the relay context is joined with the guest system prompt(s)
+        // and their separators. Reserve that space BEFORE truncating so the
+        // truncation path yields a usable request instead of an oversize
+        // merged message (which would be rejected as invalid_request).
+        const guestSystemLength = gatewayMessages
+          .filter((message) => message.role === "system")
+          .map((message) => message.content.length)
+          .reduce((total, length) => total + length, 0);
+        const guestSystemCount = gatewayMessages.filter(
+          (message) => message.role === "system" && message.content.length > 0,
+        ).length;
+        const separatorLength = guestSystemCount > 0 ? 2 : 0;
+        const contextBudget =
+          GATEWAY_MAX_MESSAGE_CONTENT_LENGTH -
+          guestSystemLength -
+          separatorLength;
+        if (context.length > contextBudget) {
+          const marker = "\n[truncated to gateway bound]";
           context =
-            context.slice(0, GATEWAY_MAX_MESSAGE_CONTENT_LENGTH - 32) +
-            "\n[truncated to gateway bound]";
+            contextBudget <= marker.length
+              ? context.slice(0, Math.max(0, contextBudget))
+              : context.slice(0, contextBudget - marker.length) + marker;
         }
         toolContext = context;
       }
