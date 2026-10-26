@@ -546,6 +546,144 @@ function runGuestJob(objective: string): {
   return { status: run.status, stderr: run.stderr ?? "", prompt };
 }
 
+// Runs the REAL guest in the real-pi branch with a fake pinned launcher that
+// records the argv the guest hands it. This pins the sealed tool allowlist at
+// the actual process boundary instead of asserting on source text.
+function runRealPiGuestJob(mode: "read_only" | "write"): {
+  readonly status: number | null;
+  readonly stderr: string;
+  readonly argv: string[];
+} {
+  const dir = tempRoot("guest-realpi");
+  const workRoot = join(dir, "work");
+  mkdirSync(workRoot, { recursive: true });
+  const fake = join(workRoot, "fake");
+  // The guest resolves the pinned Pi CLI from dirname(dirname(launcher)),
+  // exactly like the installed launcher closure.
+  const launcherRoot = workRoot;
+  mkdirSync(
+    join(launcherRoot, "node_modules/@earendil-works/pi-coding-agent/dist"),
+    { recursive: true },
+  );
+  write(
+    join(
+      launcherRoot,
+      "node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+    ),
+    "// fake pinned worker closure\n",
+  );
+  write(join(fake, "omp"), "#!/bin/sh\nexit 0\n", 0o700);
+  const events = [
+    {
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "t1",
+            name: "read",
+            arguments: { path: "src/app.ts" },
+          },
+          { type: "text", text: "ok" },
+        ],
+      },
+    },
+    {
+      type: "message_end",
+      message: {
+        role: "toolResult",
+        toolName: "read",
+        toolCallId: "t1",
+        isError: false,
+      },
+    },
+  ]
+    .map((event) => JSON.stringify(event))
+    .join("\n");
+  const launcher = join(fake, "launcher.mjs");
+  write(
+    launcher,
+    `import { writeFileSync } from 'node:fs';\nwriteFileSync('/work/captured-argv.json', JSON.stringify(process.argv.slice(2)));\nprocess.stdout.write(${JSON.stringify(`${events}\n`)});\n`,
+    0o700,
+  );
+  const jobFile = join(dir, "job.json");
+  write(
+    jobFile,
+    `${JSON.stringify({
+      version: 1,
+      mode,
+      executionId: randomUUID(),
+      taskHash: "a".repeat(64),
+      profileFingerprint: "b".repeat(64),
+      sealed: {
+        manifestDigest: "c".repeat(64),
+        sourceRevision: "d".repeat(40),
+        snapshotRoot: "/snapshot",
+      },
+      purpose: { statement: "synthetic argv bound", scope: "synthetic" },
+      objective: "inspect src/app.ts",
+      relevantPaths: ["src"],
+      acceptance: ["bounded"],
+      constraints: [],
+      requiredChecks: ["synthetic-check"],
+      externalModelConsent: false,
+    })}\n`,
+    0o600,
+  );
+  const bound = minimalNamespaceBindings();
+  const run = spawnSync(
+    "/usr/bin/bwrap",
+    [
+      "--die-with-parent",
+      "--new-session",
+      "--unshare-all",
+      "--unshare-user",
+      "--proc",
+      "/proc",
+      "--dev",
+      "/dev",
+      "--tmpfs",
+      "/scratch",
+      ...bound,
+      "--bind",
+      workRoot,
+      "/work",
+      "--ro-bind",
+      jobFile,
+      jobFile,
+      "--chdir",
+      "/work",
+      "--",
+      process.execPath,
+      GUEST,
+    ],
+    {
+      encoding: "utf8",
+      timeout: 20_000,
+      env: {
+        HOME: "/scratch",
+        TMPDIR: "/scratch",
+        COMPANION_JOB_FILE: jobFile,
+        COMPANION_MODEL_UDS: join(dir, "model.sock"),
+        COMPANION_OMP_BIN: "/work/fake/omp",
+        COMPANION_NODE_BIN: process.execPath,
+        COMPANION_EXECUTOR_KIND: "real-pi",
+        COMPANION_PI_ORCH_LAUNCHER: "/work/fake/launcher.mjs",
+      },
+    },
+  );
+  let argv: string[] = [];
+  try {
+    argv = JSON.parse(
+      readFileSync(join(workRoot, "captured-argv.json"), "utf8"),
+    ) as string[];
+  } catch {
+    // Rejected jobs never invoke the fake launcher.
+  }
+  return { status: run.status, stderr: run.stderr ?? "", argv };
+}
+
 describe("sealed pi-orch bridge portable protocol/command contract", () => {
   it("ships the frozen guest executor as an executable file", () => {
     // The confined bridge ro-binds this exact path into bwrap and execs it
@@ -553,6 +691,30 @@ describe("sealed pi-orch bridge portable protocol/command contract", () => {
     // trial fail before the guest starts; pin the exec bit in the tree.
     expect(() => accessSync(GUEST, constants.X_OK)).not.toThrow();
   });
+
+  it.skipIf(process.platform !== "linux")(
+    "passes an explicit coordinator-free sealed --tools allowlist in the real-pi branch",
+    () => {
+      const cases: ["read_only" | "write", string][] = [
+        ["read_only", "read,grep,glob"],
+        ["write", "read,grep,glob,write"],
+      ];
+      for (const [mode, expected] of cases) {
+        const run = runRealPiGuestJob(mode);
+        expect(run.status, run.stderr).toBe(0);
+        const index = run.argv.lastIndexOf("--tools");
+        expect(index).toBeGreaterThanOrEqual(0);
+        const toolsArg = run.argv[index + 1] as string;
+        expect(toolsArg).toBe(expected);
+        const exposed = toolsArg.split(",");
+        expect(exposed).not.toContain("task");
+        expect(exposed).not.toContain("wait");
+        expect(exposed.some((name) => name.startsWith("opencode_"))).toBe(
+          false,
+        );
+      }
+    },
+  );
 
   it("--describe is side-effect free and marks sealed/test defaults", () => {
     const dir = tempRoot("describe");
@@ -663,6 +825,61 @@ describe("sealed pi-orch bridge portable protocol/command contract", () => {
 });
 
 posixDescribe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
+  it("persists bounded, redacted failure diagnostics on executor nonzero", async () => {
+    const observation = JSON.stringify({
+      schemaVersion: 1,
+      engine: "omp-headless-json",
+      executorKind: "fixed",
+      mode: "read_only",
+      tools: [
+        { name: "read", result: "error" },
+        { name: "grep", result: "ok" },
+      ],
+      ompExitCode: 3,
+      timedOut: false,
+      error: "model failed sk-OBSECRET123",
+    });
+    const fixture = await makeFixture({
+      executorBody: [
+        "import { mkdirSync, writeFileSync } from 'node:fs';",
+        "mkdirSync('.companion-observation', { recursive: true });",
+        `writeFileSync('.companion-observation/guest.json', ${JSON.stringify(observation)});`,
+        `process.stderr.write(${JSON.stringify(`fatal Bearer abc.def-123\n${"x".repeat(5000)}`)});`,
+        `process.stdout.write(${JSON.stringify("out sk-STDOUTSECRET123\n")});`,
+        "process.exit(3);",
+      ].join("\n"),
+    });
+    const request = makeRequest(fixture);
+    const run = await runBridge(fixture, request);
+    expect(run.status).toBe(0);
+    const result = resultOf(run);
+    expect(result.status).toBe("error");
+    expect(result.report.summary).toBe("companion bridge: executor failed");
+    const joined = result.report.unresolved.join("\n");
+    expect(joined).toContain(
+      "engine=omp-headless-json executorKind=fixed ompExitCode=3",
+    );
+    expect(joined).toContain("toolCount=2 toolErrors=1");
+    expect(joined).toContain("guest stderr:");
+    expect(joined).toContain("guest stdout:");
+    expect(joined).not.toContain("sk-OBSECRET123");
+    expect(joined).not.toContain("sk-STDOUTSECRET123");
+    expect(joined).not.toContain("Bearer abc.def-123");
+    for (const entry of result.report.unresolved) {
+      expect(new TextEncoder().encode(entry).length).toBeLessThanOrEqual(2048);
+      expect(entry.length).toBeLessThanOrEqual(1024);
+    }
+
+    const journal = new CompanionJournal(
+      fixture.config.stateDir,
+      fixture.config.storage,
+    );
+    const view = journal.inspect(request.executionId);
+    journal.close();
+    expect(view?.state).toBe("error");
+    expect(view?.exitCode).toBe(10);
+  });
+
   it("runs a real synthetic read-only trial and retains artifact metadata", async () => {
     const fixture = await makeFixture({
       executorBody: "process.stdout.write('executor-ok\\n');\n",

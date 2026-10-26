@@ -233,7 +233,7 @@ function buildPrompt(job) {
   if (job.mode === "read_only") {
     return [
       "You are inspecting a sealed read-only workspace at /work.",
-      "Use only the read tool. Do not write, edit, or run commands.",
+      "Use only the read, grep, and glob tools. Do not write, edit, or run commands.",
       `Relevant paths: ${paths}.`,
       `Purpose: ${job.statement}`,
       `Objective: ${job.objective}`,
@@ -246,7 +246,7 @@ function buildPrompt(job) {
   }
   return [
     "You are making one minimal candidate change in a sealed workspace at /work.",
-    "Use the read and write tools. Do not run commands and do not touch other paths.",
+    "Use the read, grep, glob, and write tools. Do not run commands and do not touch other paths.",
     `Relevant paths: ${paths}.`,
     `Purpose: ${job.statement}`,
     `Objective: ${job.objective}`,
@@ -662,11 +662,12 @@ async function main() {
     workerPathPrefix = `${realPiBin}:`;
   }
 
-  const tools = realPi
-    ? "read,grep,glob,write,task,wait,opencode_task,opencode_spawn,opencode_wait,opencode_tools"
-    : job.mode === "read_only"
-      ? "read"
-      : "read,write";
+  // Only the sealed read-only/write tool profile may be exposed. The pinned
+  // launcher injects coordinator delegation tools (task/wait/opencode_*) before
+  // "$@"; a later --tools wins in the pinned Pi CLI parser, so the explicit
+  // value below must stay after the launcher's injection.
+  const tools =
+    job.mode === "read_only" ? "read,grep,glob" : "read,grep,glob,write";
   const requestedTimeout = process.env.COMPANION_GUEST_TIMEOUT_SECONDS;
   let maxTimeSeconds = 300;
   if (requestedTimeout !== undefined) {
@@ -690,6 +691,8 @@ async function main() {
         "--approval-mode",
         "yolo",
         "--auto-approve",
+        "--tools",
+        tools,
         "--max-time",
         String(maxTimeSeconds),
         buildPrompt(job),

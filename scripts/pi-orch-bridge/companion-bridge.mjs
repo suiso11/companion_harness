@@ -161,6 +161,67 @@ function readGuestObservation(workRoot) {
   }
 }
 
+// The journal protocol caps each report entry at 1024 characters (which is
+// also <= 2048 bytes), so bounded heads must fit that tighter entry limit.
+const DIAGNOSTIC_HEAD_BYTES = 1024;
+const DIAGNOSTIC_SECRET_PATTERN = /(?:sk-|Bearer\s+)[A-Za-z0-9._-]+/g;
+
+function redactDiagnostic(value) {
+  return String(value ?? "").replace(DIAGNOSTIC_SECRET_PATTERN, "[redacted]");
+}
+
+// A failure diagnostic must stay small enough for the bounded journal report
+// and must never retain credential-shaped material from untrusted output.
+function boundedDiagnostic(value, limit = DIAGNOSTIC_HEAD_BYTES) {
+  const text = redactDiagnostic(value);
+  const bytes = Buffer.from(text, "utf8");
+  if (bytes.length <= limit) return text;
+  const marker = "\n[truncated]";
+  const room = Math.max(0, limit - Buffer.byteLength(marker, "utf8"));
+  return `${bytes
+    .subarray(0, room)
+    .toString("utf8")
+    .replace(/\uFFFD+$/u, "")}${marker}`;
+}
+
+// The guest observation and the executor heads are the only failure evidence
+// the bridge currently has; persist them (bounded/redacted) with exit 10 so a
+// future nonzero can be diagnosed instead of collapsing to a generic message.
+function executorFailureDiagnostics(workRoot, run) {
+  const diagnostics = [];
+  const observation = readGuestObservation(workRoot);
+  if (observation === null) {
+    diagnostics.push("diagnostic: guest observation missing");
+  } else {
+    const observedTools = Array.isArray(observation.tools)
+      ? observation.tools
+      : [];
+    const toolErrors = observedTools.filter(
+      (tool) => tool && tool.result === "error",
+    ).length;
+    const errorKind =
+      typeof observation.error === "string" && observation.error.length > 0
+        ? observation.error
+        : "none";
+    diagnostics.push(
+      boundedDiagnostic(
+        `diagnostic: guest observation engine=${observation.engine} executorKind=${observation.executorKind} ompExitCode=${observation.ompExitCode ?? "unknown"} timedOut=${observation.timedOut === true} toolCount=${observedTools.length} toolErrors=${toolErrors} error=${errorKind}`,
+      ),
+    );
+  }
+  if (typeof run.stderr === "string" && run.stderr.length > 0) {
+    diagnostics.push(
+      boundedDiagnostic(`diagnostic: guest stderr: ${run.stderr}`),
+    );
+  }
+  if (typeof run.stdout === "string" && run.stdout.length > 0) {
+    diagnostics.push(
+      boundedDiagnostic(`diagnostic: guest stdout: ${run.stdout}`),
+    );
+  }
+  return diagnostics;
+}
+
 function observationFindings(observation) {
   if (observation === null) return [];
   const findings = [];
@@ -990,7 +1051,12 @@ async function main() {
             /* debug only */
           }
         }
-        outcome = errorOutcome("companion bridge: executor failed", [], 10);
+        outcome = errorOutcome(
+          "companion bridge: executor failed",
+          [],
+          10,
+          executorFailureDiagnostics(workRoot, run),
+        );
       } else {
         const validation = await validateCandidateChanges({
           snapshot,
