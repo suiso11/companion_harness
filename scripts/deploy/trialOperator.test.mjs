@@ -203,6 +203,12 @@ describe("disableTrialEnv", () => {
   });
 });
 
+describe("parseTrialConfig blank value", () => {
+  it("rejects an empty string, so a blank env line cannot disable trials", () => {
+    expect(() => parseTrialConfig("")).toThrow(/JSON object/);
+  });
+});
+
 describe("sealedLintArgs", () => {
   it("names only source paths and never the guest observation scratch", () => {
     const args = sealedLintArgs("/deps/biome", [
@@ -597,6 +603,26 @@ describe("companion-deploy.sh trial-operator ordering", () => {
     expect(block.indexOf("TRIAL_ENV_TMP")).toBeLessThan(
       source.indexOf("systemctl --user restart", buildAt),
     );
+  });
+
+  it("treats a legacy main-env COMPANION_AUTONOMY_JSON as a migration error", () => {
+    const detectAt = source.indexOf("still defines COMPANION_AUTONOMY_JSON");
+    expect(detectAt).toBeGreaterThan(-1);
+    expect(detectAt).toBeLessThan(buildAt);
+    const legacyAt = source.indexOf('"$TRIAL_LEGACY_MAIN_ENV" = "1"');
+    const legacyEnd = source.indexOf(
+      'elif [ -f "$TRIAL_OPERATOR_INPUT" ]',
+      legacyAt,
+    );
+    expect(legacyAt).toBeGreaterThan(detectAt);
+    const block = source.slice(legacyAt, legacyEnd);
+    expect(block).not.toContain("build-trial-operator.mts");
+    expect(block).toContain("disable-trial-env.mjs");
+    expect(block).toContain("overriding legacy main-env value");
+    expect(block).toMatch(
+      /no usable prior trial config[\s\S]*?rollback[\s\S]*?exit 1/,
+    );
+    expect(block).toContain("Aborting the deploy before restart");
   });
 
   it("passes the rollback operator path to the builder for safe pruning", () => {
