@@ -529,8 +529,13 @@ export function validatePlanIntent(
     );
   }
   const latestText = readTurnText(latest) ?? "";
+  // Only an actual stop/cancel instruction negates an execute intent. Match
+  // imperative directives at a clause start (start, sentence punctuation, or
+  // comma), never substrings such as "stopwatch" or "cancellation bug", and
+  // never scoped constraints such as "do not change X". The Japanese te-form
+  // commands are unambiguous directives even mid-clause ("やっぱりやめて").
   const negated =
-    /(やめ|中止|やらない|しないで|取り消|不要|stop|cancel|don'?t|do not)/i.test(
+    /(?:^|[.!?;:,。！？；、\n]\s*)(?:please\s+)?(?:stop|abort|cancel|don['’]?t\s+do\s+it|never\s+mind)\b|(?:やめて|止めて|やめろ|止めろ)|(?:^|[.!?;:,。！？；、\n]\s*)(?:中止|キャンセルして)/iu.test(
       latestText,
     );
   const finalKind: IntentKind =

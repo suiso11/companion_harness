@@ -54,6 +54,7 @@ import {
   loadSealedSnapshot,
   type OperatorConfig,
   parseOperatorConfig,
+  readNodeAbi,
   verifyDependencyClosure,
 } from "../../../scripts/pi-orch-bridge/sealed-profile.mjs";
 import { verifyAutodispatchDependency } from "./autodispatch_dependencies.js";
@@ -738,6 +739,16 @@ function intersectScopes(
   return [...scopes];
 }
 
+/** Frozen-policy ∩ current-config write scopes. An implement plan's
+ * relevantPaths are edit paths, so they must be inside the write authority
+ * only (never widened by read scopes). */
+function policyWriteScopes(
+  config: AutodispatchConfig,
+  policy: StandingPolicyView,
+): string[] {
+  return intersectScopes(policy.writeScopes, config.writeScopes);
+}
+
 function policyScopes(
   config: AutodispatchConfig,
   policy: StandingPolicyView,
@@ -747,10 +758,7 @@ function policyScopes(
     intersectScopes(policy.readScopes, config.readScopes),
   );
   if (plan.operation === "implement") {
-    for (const scope of intersectScopes(
-      policy.writeScopes,
-      config.writeScopes,
-    )) {
+    for (const scope of policyWriteScopes(config, policy)) {
       scopes.add(scope);
     }
   }
@@ -775,7 +783,13 @@ function assertPlanScope(
   policy: StandingPolicyView,
   plan: DispatchPlanView,
 ): boolean {
-  const scopes = policyScopes(config, policy, plan);
+  // Implement edits are constrained to the frozen write scopes only.
+  // Investigate has no writes, so the snapshot read/write union is the
+  // correct (still intersected) scope check.
+  const scopes =
+    plan.operation === "implement"
+      ? policyWriteScopes(config, policy)
+      : policyScopes(config, policy, plan);
   for (const relevant of plan.relevantPaths) {
     if (relevant === ".") return false;
     if (!withinScope(relevant, scopes)) return false;
@@ -1244,6 +1258,7 @@ export function createAutodispatchMaterializer(
         root: string;
         manifestPath: string;
         digest: string;
+        nodeAbi: number | null;
         mounts: DependencyClosureResult["mounts"];
       };
       if (material.dependencySourceNodeModules !== null) {
@@ -1258,6 +1273,7 @@ export function createAutodispatchMaterializer(
             root: prepared.root,
             manifestPath: prepared.manifestPath,
             digest: prepared.digest,
+            nodeAbi: prepared.nodeAbi,
             mounts: prepared.mounts,
           };
         } catch {
@@ -1277,6 +1293,7 @@ export function createAutodispatchMaterializer(
           root: verified.depot.root,
           manifestPath: verified.depot.manifestPath,
           digest: verified.depot.digest,
+          nodeAbi: verified.depot.nodeAbi,
           mounts: [
             {
               source: join(verified.depot.root, "node_modules"),
@@ -1288,6 +1305,30 @@ export function createAutodispatchMaterializer(
         return blocked(
           "dependency_unavailable",
           "no trusted dependency closure",
+        );
+      }
+
+      // The dependency closure's native modules were built for one Node ABI.
+      // Bind it to the pinned runtime BEFORE any guest starts; a mismatch is a
+      // dependency availability failure, not a later profile surprise.
+      let runtimeNodeAbi: number;
+      try {
+        runtimeNodeAbi = readNodeAbi(
+          canonicalAbsolute(material.runtime.nodeRealpath, "node"),
+        );
+      } catch {
+        return blocked(
+          "dependency_unavailable",
+          "pinned runtime node ABI unavailable",
+        );
+      }
+      if (
+        typeof dependency.nodeAbi !== "number" ||
+        runtimeNodeAbi !== dependency.nodeAbi
+      ) {
+        return blocked(
+          "dependency_unavailable",
+          "dependency closure Node ABI does not match the pinned runtime node",
         );
       }
 
@@ -1332,9 +1373,13 @@ export function createAutodispatchMaterializer(
         input.policy.caps,
         deps.config.caps,
       );
-      const scopes = policyScopes(deps.config, input.policy, input.plan).filter(
-        (scope) => scope !== ".",
-      );
+      // Implement plans expose only the intersected write scopes as edit
+      // paths; the snapshot still copies the read∪write union above.
+      const scopes = (
+        input.plan.operation === "implement"
+          ? policyWriteScopes(deps.config, input.policy)
+          : policyScopes(deps.config, input.policy, input.plan)
+      ).filter((scope) => scope !== ".");
       const checkCommands: Record<
         string,
         {
@@ -1467,6 +1512,7 @@ export function createAutodispatchMaterializer(
           root: dependency.root,
           manifestPath: dependency.manifestPath,
           digest: dependency.digest,
+          nodeAbi: runtimeNodeAbi,
           mounts: dependency.mounts,
         },
       };

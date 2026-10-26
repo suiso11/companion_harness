@@ -104,4 +104,5 @@ export function assertConsent(profile: unknown, request: unknown): void;
 export function assertRequestScopes(profile: unknown, request: unknown): void;
 export function assertRequestBudget(profile: unknown, request: unknown): void;
 export function hashFileSync(path: string): string;
+export function readNodeAbi(nodeRealpath: string): number;
 export function sourceRevisionForManifest(manifestDigest: string): string;

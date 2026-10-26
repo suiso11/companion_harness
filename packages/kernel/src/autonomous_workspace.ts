@@ -483,6 +483,26 @@ async function collectSourceFiles(
     });
   };
 
+  // A literal file root and a directory root are both explicit allowlist
+  // entries. No component may be a symlink: realpath must resolve to exactly
+  // the canonical path built from the canonical source root. This rejects a
+  // symlinked ancestor (for example `src/approved -> ../private`) for both
+  // root kinds.
+  const resolveAllowedRootPath = async (
+    absoluteRoot: string,
+    root: string,
+  ): Promise<string> => {
+    const expectedAbsolute = join(canonicalRoot, ...root.split("/"));
+    const canonical = await realpath(absoluteRoot).catch(() => null);
+    if (canonical === null || canonical !== expectedAbsolute) {
+      throw new SealedWorkspaceError(
+        "symlink_rejected",
+        `allowed root path contains a symlink: ${root}`,
+      );
+    }
+    return canonical;
+  };
+
   const walk = async (
     absoluteDir: string,
     relativeDir: string,
@@ -598,14 +618,7 @@ async function collectSourceFiles(
           `allowed root is a denied file: ${root}`,
         );
       }
-      const expectedAbsolute = join(canonicalRoot, ...root.split("/"));
-      const canonicalFile = await realpath(absoluteRoot).catch(() => null);
-      if (canonicalFile === null || canonicalFile !== expectedAbsolute) {
-        throw new SealedWorkspaceError(
-          "symlink_rejected",
-          `allowed root path contains a symlink: ${root}`,
-        );
-      }
+      const canonicalFile = await resolveAllowedRootPath(absoluteRoot, root);
       await addFile(canonicalFile, root);
       continue;
     }
@@ -615,7 +628,10 @@ async function collectSourceFiles(
         `allowed root is not a directory: ${root}`,
       );
     }
-    const canonicalAllowedRoot = await realpath(absoluteRoot);
+    const canonicalAllowedRoot = await resolveAllowedRootPath(
+      absoluteRoot,
+      root,
+    );
     if (!isPathInside(canonicalAllowedRoot, canonicalRoot)) {
       throw new SealedWorkspaceError(
         "source_escape",

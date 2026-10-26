@@ -507,6 +507,95 @@ linuxDescribe("autodispatch materializer (Linux)", () => {
     }
   });
 
+  it("requires implement plan paths to stay inside the intersected write scopes", async () => {
+    const fx = makeFixture();
+    try {
+      write(join(fx.source, "src", "allowed", "x.ts"), "export const x = 1;\n");
+      const materializer = createAutodispatchMaterializer({
+        config: {
+          ...fx.config,
+          readScopes: ["src"],
+          writeScopes: ["src/allowed"],
+        },
+        runtimeDir: fx.runtimeDir,
+        currentModel: "test-model",
+        available: true,
+        enabled: true,
+        disclosedWholeRepoRead: true,
+        now: () => NOW,
+      });
+      const policy = {
+        ...POLICY,
+        readScopes: ["src"],
+        writeScopes: ["src"],
+      };
+      // A read-scope-only path is not an implement edit path.
+      const denied = await materializer.prepare({
+        plan: { ...PLAN, relevantPaths: ["src/denied.ts"] },
+        policy,
+        executionId: randomUUID(),
+        now: NOW,
+      });
+      expect(denied.ok).toBe(false);
+      if (!denied.ok) expect(denied.code).toBe("plan_scope_violation");
+
+      const allowed = await materializer.prepare({
+        plan: { ...PLAN, relevantPaths: ["src/allowed/x.ts"] },
+        policy,
+        executionId: randomUUID(),
+        now: NOW,
+      });
+      expect(allowed.ok).toBe(true);
+      if (allowed.ok) {
+        expect(allowed.materialization.config.profile.allowedPaths).toEqual([
+          "src/allowed",
+        ]);
+      }
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it("fails closed when the depot Node ABI differs from the pinned runtime", async () => {
+    const fx = makeFixture();
+    try {
+      const actualAbi = Number(process.versions.modules);
+      const mismatchedAbi = actualAbi === 1 ? 2 : 1;
+      const prepared = prepareDependencyClosure({
+        sourceNodeModules: join(fx.depSource, "node_modules"),
+        destinationRoot: join(fx.dir, "abi-mismatch-depot"),
+        nodeRealpath: process.execPath,
+        expectedNodeAbi: mismatchedAbi,
+      });
+      const materializer = createAutodispatchMaterializer({
+        config: {
+          ...fx.config,
+          dependencyRoot: prepared.root,
+          materialization: {
+            ...fx.config.materialization,
+            dependencySourceNodeModules: null,
+          },
+        },
+        runtimeDir: fx.runtimeDir,
+        currentModel: "test-model",
+        available: true,
+        enabled: true,
+        disclosedWholeRepoRead: true,
+        now: () => NOW,
+      });
+      const result = await materializer.prepare({
+        plan: PLAN,
+        policy: POLICY,
+        executionId: randomUUID(),
+        now: NOW,
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.code).toBe("dependency_unavailable");
+    } finally {
+      fx.cleanup();
+    }
+  });
+
   it("rejects tampered snapshot/profile/depot before launch", async () => {
     const fx = makeFixture();
     try {
@@ -1506,10 +1595,11 @@ linuxDescribe(
           paths.filter((path) => path === "src/feature/app.ts"),
         ).toHaveLength(1);
         // Snapshot collapse must not collapse the separate policy scopes,
-        // plan paths, or check authority.
-        expect(materialization.config.profile.allowedPaths).toEqual(
-          expect.arrayContaining(["src", "src/feature"]),
-        );
+        // plan paths, or check authority. Implement edit paths are the
+        // intersected write scope only (reads stay in the snapshot).
+        expect(materialization.config.profile.allowedPaths).toEqual([
+          "src/feature",
+        ]);
         expect(materialization.profile.mandatoryChecks).toEqual(["lint"]);
       } finally {
         fx.cleanup();

@@ -264,6 +264,26 @@ posixDescribe("createSealedWorkspaceSnapshot", () => {
     );
   });
 
+  it("rejects a directory root whose ancestor is a symlink", async () => {
+    const source = tempRoot("directory-symlink-ancestor-source");
+    write(join(source, "src/app.ts"), "export const app = 1;\n");
+    write(join(source, "private/subdir/secret.ts"), "PRIVATE = 1;\n");
+    symlinkSync("../private", join(source, "src/approved"));
+    const output = join(tempRoot("output"), "workspace");
+    await expectCode(
+      createSealedWorkspaceSnapshot({
+        sourceRoot: source,
+        outputDir: output,
+        allowedRoots: ["src/approved/subdir"],
+        allowedTopLevelFiles: [],
+      }),
+      "symlink_rejected",
+    );
+    // Fail closed before any source byte is copied: no snapshot or manifest.
+    expect(existsSync(join(output, "snapshot"))).toBe(false);
+    expect(existsSync(join(output, "workspace-manifest.json"))).toBe(false);
+  });
+
   it("rejects a denied file in a literal file root", async () => {
     const source = tempRoot("literal-file-denied-source");
     write(join(source, "src/app.ts"), "export const app = 1;\n");

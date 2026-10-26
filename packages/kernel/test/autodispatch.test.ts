@@ -564,6 +564,50 @@ describe("autodispatch policy/plan/authority", () => {
     }
   });
 
+  it("only treats standalone stop/cancel directives as negation", async () => {
+    const { handle, repo, sessionId } = await fixture();
+    try {
+      const cases: { text: string; frozen: boolean }[] = [
+        {
+          text: "We should implement the feature. Implement a stopwatch in src/timer.ts.",
+          frozen: true,
+        },
+        {
+          text: "We should implement the feature. Fix the cancellation bug in src/job.ts.",
+          frozen: true,
+        },
+        {
+          text: "We should implement the feature; do not change the public API.",
+          frozen: true,
+        },
+        {
+          text: "We should implement the feature. Stop, don't do it.",
+          frozen: false,
+        },
+        {
+          text: "Maybe we could implement the feature later. やっぱりやめて。",
+          frozen: false,
+        },
+      ];
+      let now = NOW + 100;
+      for (const entry of cases) {
+        const anchor = completedTurn(repo, sessionId, entry.text, now);
+        now += 10;
+        const policy = createPolicy(repo, sessionId, anchor.turnId, now);
+        now += 10;
+        const out = repo.createAutodispatchPlan(
+          sessionId,
+          planInput(policy.id, anchor, "execute"),
+          { now },
+        );
+        expect(out.plan.status === "frozen").toBe(entry.frozen);
+        now += 10;
+      }
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
   it("denies expired/revoked/paused policy and stale turn/plan", async () => {
     const { handle, repo, sessionId } = await fixture();
     try {
