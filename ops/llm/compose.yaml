@@ -8,10 +8,12 @@ services:
     # i1-Q4_K_M (21,713,463,808 bytes). Measured on the P40 (2026-10-22):
     # 20.8 GiB VRAM @ 16k, decode ~61 tok/s, prefill ~961 tok/s @ 6k;
     # thinking on/off gives the same decode rate.
-    # 2026-10-26 P40: 49152 ctx q8_0 KV → GPU0 21.0/24.0 GiB, 4 slots
-    # (kv_unified), prefill ~557 tok/s @20k, decode 59 tok/s short / 32 tok/s
-    # @20k context, tool call valid; reason: trial guests (pi-orch) need
-    # ~17k tokens of system+tools, 16k rejected at 17,026.
+    # 2026-10-26 P40: 65536 ctx q8_0 KV. Must be >= the pi-orch guest
+    # contextWindow (65536) so the guest's own compaction kicks in before
+    # llama.cpp rejects the request; 49152 overflowed in a real trial after
+    # ~7 turns. Guest needs ~17k tokens of system+tools too, so 16k was out
+    # (rejected at 17,026). At 49152 q8_0 measured GPU0 21.0/24.0 GiB,
+    # prefill ~557 tok/s @20k, decode 59 tok/s short / 32 tok/s @20k.
     image: ghcr.io/ggml-org/llama.cpp@sha256:f88fa8d94d872312a4ad117acd490fa997bef81f03f161f0cfe0d74272e5b5bb
     container_name: huihui-ornith-35b
     restart: unless-stopped
@@ -34,7 +36,7 @@ services:
       - --port
       - "8080"
       - -c
-      - "49152"
+      - "65536"
       - --cache-type-k
       - q8_0
       - --cache-type-v
