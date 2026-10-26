@@ -362,6 +362,20 @@ connector instance owns **all** configured roots.
   exposure). Idle `maintain.distill` runs one bounded batch per idle
   period anchored to the last completed run; a model-unavailable
   (LLM-disabled) distill answer acks normally with zero writes.
+- Speaker grounding (2026-10-26): extraction input wraps the user turn in
+  `<user_message>` and the answer in `<assistant_message>`, entity-escaping
+  each segment so content cannot break out of its own block. The strict
+  `{"memories":[...]}` schema adds an optional `evidence` string (bounded
+  to 500 code points) that is REQUIRED for `user_fact`: it must be a
+  verbatim quote from the user turn (NFKC + whitespace-normalized
+  substring). Missing, paraphrased, or assistant-only evidence downgrades
+  the item to `model_inference` (the memory is kept, never dropped, and
+  never presented as a user fact); `evidence` is grounding input only and
+  is never persisted. `summary`/`model_inference` may omit it. Prompt rule:
+  assistant-only suggestions, assumptions, and inferences are never
+  restated as user facts. Recall already carries each item's kind and
+  renders it as `- mN [kind]: ...`, with only `user_fact` labeled as a
+  user-stated fact.
 - Memory dates: extraction anchors relative dates (`今日暑い`,
   `今週の金曜日`, `一昨日`) to the turn's date in
   `COMPANION_TIME_ZONE` and writes ABSOLUTE dates into the extracted
