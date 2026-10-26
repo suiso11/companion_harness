@@ -221,7 +221,11 @@ export type RelayRequestReason =
   | "model_error"
   | "model_timeout"
   | "invalid_response"
-  | "response_cap_exceeded";
+  | "response_cap_exceeded"
+  | "request_failed"
+  | "transport_error"
+  | "tool_call_invalid"
+  | "unsupported_capability";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -383,12 +387,14 @@ export class TrialModelRelay {
       | "rejected",
     startMs: number,
     reason?: RelayRequestReason,
+    httpStatus?: number,
   ): void {
     if (this.logger === null) return;
     this.logger.info("trial.relay_request", {
       status,
       durationMs: Math.max(0, Date.now() - startMs),
       ...(reason === undefined ? {} : { reason }),
+      ...(httpStatus === undefined ? {} : { httpStatus }),
     });
   }
 
@@ -650,7 +656,12 @@ export class TrialModelRelay {
       const code = gatewayErrorCode(error);
       res.writeHead(502, { "content-type": "application/json" });
       res.end(fixedErrorBody(code));
-      this.logRelayRequest("rejected", startMs, toRelayReason(code));
+      this.logRelayRequest(
+        "rejected",
+        startMs,
+        toRelayReason(code),
+        gatewayErrorHttpStatus(error),
+      );
       return;
     } finally {
       clearTimeout(timer);
@@ -788,10 +799,11 @@ export class TrialModelRelay {
         }
       }
     }
-    const gatewayMessages: ChatMessage[] = rawMessages.map((entry) =>
+    let gatewayMessages: ChatMessage[] = rawMessages.map((entry) =>
       this.translateMessage(entry, idToGateway),
     );
     let gatewayTools: ToolDefinition[] | undefined;
+    let toolContext: string | undefined;
     if (body.tools !== undefined && body.tools !== null) {
       const rawTools = body.tools;
       if (!Array.isArray(rawTools))
@@ -825,20 +837,37 @@ export class TrialModelRelay {
         (entry) => entry.description.length > GATEWAY_TOOL_DESCRIPTION_LIMIT,
       );
       if (needsContext) {
-        if (gatewayMessages.length >= GATEWAY_MAX_MESSAGES_PER_REQUEST) {
-          throw new TranslationError("invalid_request");
-        }
         let context =
           `${RELAY_TOOL_CONTEXT_PREFIX}\n` +
           fullDescriptions
             .map((entry) => `- ${entry.name}: ${entry.description}`)
             .join("\n");
-        if (context.length > GATEWAY_MAX_MESSAGE_CONTENT_LENGTH) {
+        // The merged leading system message must still fit the gateway bound
+        // after the relay context is joined with the guest system prompt(s)
+        // and their separators. Reserve that space BEFORE truncating so the
+        // truncation path yields a usable request instead of an oversize
+        // merged message (which would be rejected as invalid_request).
+        const guestSystemLength = gatewayMessages
+          .filter((message) => message.role === "system")
+          .map((message) => message.content.length)
+          .reduce((total, length) => total + length, 0);
+        const guestSystemCount = gatewayMessages.filter(
+          (message) => message.role === "system" && message.content.length > 0,
+        ).length;
+        // One "\n\n" separator per nonempty guest system part in the merge.
+        const separatorLength = guestSystemCount * 2;
+        const contextBudget =
+          GATEWAY_MAX_MESSAGE_CONTENT_LENGTH -
+          guestSystemLength -
+          separatorLength;
+        if (context.length > contextBudget) {
+          const marker = "\n[truncated to gateway bound]";
           context =
-            context.slice(0, GATEWAY_MAX_MESSAGE_CONTENT_LENGTH - 32) +
-            "\n[truncated to gateway bound]";
+            contextBudget <= marker.length
+              ? context.slice(0, Math.max(0, contextBudget))
+              : context.slice(0, contextBudget - marker.length) + marker;
         }
-        gatewayMessages.unshift({ role: "system", content: context });
+        toolContext = context;
       }
       for (const tool of gatewayTools) {
         if (tool.description.length > GATEWAY_TOOL_DESCRIPTION_LIMIT) {
@@ -846,7 +875,55 @@ export class TrialModelRelay {
         }
       }
     }
+    gatewayMessages = this.mergeSystemMessages(gatewayMessages, toolContext);
     return { gatewayMessages, gatewayTools, maxOutputTokens, stream };
+  }
+
+  /**
+   * Enforce the strict single-leading-system-message contract required by
+   * the llama.cpp/Jinja chat template behind the gateway. Native opencode
+   * bodies already start with a system prompt, so the relay tool context is
+   * MERGED into that message instead of unshifted (two leading system
+   * messages made LiteLLM return 500 "System message must be at the
+   * beginning"). Any guest system message appearing later in history is
+   * also folded into the single leading message (in original order):
+   * the strict template forbids it anywhere else. Trusted relay text stays
+   * before guest text, separated by a blank line.
+   */
+  private mergeSystemMessages(
+    messages: ChatMessage[],
+    toolContext: string | undefined,
+  ): ChatMessage[] {
+    const systemContents = messages
+      .filter((message) => message.role === "system")
+      .map((message) => message.content);
+    // Fast path: one leading system message and no tool context to merge.
+    if (
+      toolContext === undefined &&
+      systemContents.length <= 1 &&
+      messages[0]?.role === "system"
+    ) {
+      return messages;
+    }
+    if (systemContents.length === 0 && toolContext === undefined) {
+      return messages;
+    }
+    const rest = messages.filter((message) => message.role !== "system");
+    if (
+      toolContext !== undefined &&
+      systemContents.length === 0 &&
+      rest.length + 1 > GATEWAY_MAX_MESSAGES_PER_REQUEST
+    ) {
+      throw new TranslationError("invalid_request");
+    }
+    const merged = [toolContext, ...systemContents]
+      .filter((part): part is string => typeof part === "string")
+      .filter((part) => part.length > 0)
+      .join("\n\n");
+    if (merged.length > GATEWAY_MAX_MESSAGE_CONTENT_LENGTH) {
+      throw new TranslationError("invalid_request");
+    }
+    return [{ role: "system", content: merged }, ...rest];
   }
 
   /**
@@ -1115,6 +1192,10 @@ const RELAY_REASONS: ReadonlySet<string> = new Set([
   "model_timeout",
   "invalid_response",
   "response_cap_exceeded",
+  "request_failed",
+  "transport_error",
+  "tool_call_invalid",
+  "unsupported_capability",
 ]);
 
 /** Map an arbitrary code to the closed reason vocabulary (never echoes). */
@@ -1129,6 +1210,19 @@ function toRelayReason(code: string): RelayRequestReason {
  * reported as model_timeout); anything else becomes model_error. Never
  * echoes raw gateway detail; model-local validation itself is untouched.
  */
+function gatewayErrorHttpStatus(error: unknown): number | undefined {
+  if (typeof error !== "object" || error === null || !("httpStatus" in error)) {
+    return undefined;
+  }
+  const raw = (error as { httpStatus: unknown }).httpStatus;
+  return typeof raw === "number" &&
+    Number.isInteger(raw) &&
+    raw >= 100 &&
+    raw <= 599
+    ? raw
+    : undefined;
+}
+
 function gatewayErrorCode(error: unknown): string {
   if (typeof error === "object" && error !== null && "code" in error) {
     const raw = (error as { code: unknown }).code;

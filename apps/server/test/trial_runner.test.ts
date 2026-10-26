@@ -18,6 +18,7 @@ import {
   type KernelRepository,
   migrateKernelDatabase,
   openKernelDatabase,
+  RepositoryValidationError,
 } from "@companion/kernel";
 import type { ModelGateway } from "@companion/model-local";
 import { describe, expect, it } from "vitest";
@@ -35,6 +36,7 @@ import {
   type TrialRunnerObserverFns,
   type TrialRunnerRelay,
   type TrialRunnerSpawn,
+  trialPermitDeniedReason,
 } from "../src/trial_runner.js";
 
 const NOW = 1_750_000_000_000;
@@ -536,6 +538,24 @@ function postRelay(
 }
 
 describe("trial_runner", () => {
+  it("maps known permit-issuance validation categories to fixed reasons", () => {
+    const cases: Array<[string, string]> = [
+      ["grant is invoked: permit requires a claimed grant", "not_claimed"],
+      ["grant cancel requested: no permit", "cancel_requested"],
+      ["launch permit already issued: one-use only", "already_issued"],
+      ["policy grant stale: generation changed", "stale"],
+      ["grant expired", "stale"],
+      ["request hash mismatch", "unknown"],
+    ];
+    for (const [message, expected] of cases) {
+      expect(
+        trialPermitDeniedReason(new RepositoryValidationError(message)),
+      ).toBe(expected);
+    }
+    expect(trialPermitDeniedReason(new Error("fence is active"))).toBe("fence");
+    expect(trialPermitDeniedReason("raw")).toBe("unknown");
+  });
+
   it("maps the real bridge wire result line to an authorized done proof", async () => {
     const { handle, repo, sessionId } = await makeKernel();
     try {

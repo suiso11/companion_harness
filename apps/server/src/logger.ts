@@ -87,6 +87,16 @@ const LOG_STATUS_ALLOWLIST: ReadonlySet<string> = new Set([
   "model_timeout",
   "invalid_response",
   "response_cap_exceeded",
+  // Gateway failure codes surfaced as relay reasons (fixed strings only).
+  "request_failed",
+  "transport_error",
+  "tool_call_invalid",
+  "unsupported_capability",
+  // Permit-issuance denial categories (fixed; no raw validation text).
+  "not_claimed",
+  "cancel_requested",
+  "already_issued",
+  "stale",
   // Trial pre-boot abort diagnostic (trial.preboot_aborted): fixed call-site
   // reason and allowlisted Node errno only (never raw error text/paths).
   "stopped-before-relay",
