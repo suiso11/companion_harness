@@ -364,6 +364,41 @@ export function selectSealedChecks(selected, supported) {
   return out;
 }
 
+// Fail before publishing when the host autodispatch config (loaded by the
+// restarted server from companion/env) selects a different check set than the
+// sealed trial profile. parseAutodispatchConfig requires the two to match, so
+// a lint-only trial on a lint+typecheck host would otherwise pass the build and
+// then fail the server's startup/health gate.
+export function assertHostAutodispatchChecks(raw, selected) {
+  if (raw === undefined || raw === null || raw === "") return;
+  if (!Array.isArray(selected) || selected.length === 0) {
+    fail("selected checks must be a non-empty array");
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    fail("host COMPANION_AUTODISPATCH_JSON is not valid JSON");
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    fail("host COMPANION_AUTODISPATCH_JSON must be a JSON object");
+  }
+  const hostChecks = parsed.checks;
+  if (!Array.isArray(hostChecks)) {
+    fail("host COMPANION_AUTODISPATCH_JSON checks must be an array");
+  }
+  const want = [...selected].sort();
+  const got = [...hostChecks].sort();
+  if (
+    want.length !== got.length ||
+    !want.every((check, i) => check === got[i])
+  ) {
+    fail(
+      `host autodispatch checks [${got.join(",")}] do not match the sealed trial checks [${want.join(",")}]; migrate the host config before deploying`,
+    );
+  }
+}
+
 // Return only the command map entries the host selected. The materializer
 // config requires the command map size to equal the configured check list,
 // so a single-check host profile must not receive both commands.

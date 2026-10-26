@@ -30,6 +30,7 @@ import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import {
+  assertHostAutodispatchChecks,
   formatAutonomyEnvLine,
   frozenRootReferencedByOperator,
   resolveCurrentModel,
@@ -144,6 +145,10 @@ for (const [key, path] of Object.entries(input.runtime)) {
 const NODE = runtime.nodeRealpath;
 if (!NODE) fail("runtime.nodeRealpath is required");
 
+// Set once operator.json + autonomy.env are published. A failure afterwards
+// must not delete the published root, because both files would then point at
+// a missing snapshot/executor.
+let published = false;
 try {
   mkdirSync(STATE, { recursive: true, mode: 0o700 });
   mkdirSync(SRC, { recursive: true, mode: 0o700 });
@@ -173,9 +178,19 @@ try {
       `deployed node_modules missing (run pnpm install): ${sourceNodeModules}`,
     );
   }
-  execFileSync("cp", ["-al", sourceNodeModules, DEP_SOURCE], {
-    stdio: "inherit",
-  });
+  try {
+    execFileSync("cp", ["-al", sourceNodeModules, DEP_SOURCE], {
+      stdio: "inherit",
+    });
+  } catch {
+    // Hard links cannot cross filesystems (stateRoot and the checkout are
+    // independently configurable). Fall back to a real copy, removing any
+    // partial staging tree first.
+    rmSync(DEP_SOURCE, { recursive: true, force: true });
+    execFileSync("cp", ["-a", sourceNodeModules, DEP_SOURCE], {
+      stdio: "inherit",
+    });
+  }
   const workspaceLinks = join(
     DEP_SOURCE,
     ".pnpm",
@@ -315,6 +330,15 @@ try {
   const ad =
     parseAutodispatchConfig(JSON.stringify(adRaw), trialPre) ??
     fail("autodispatch parse");
+  // The restarted server loads COMPANION_AUTODISPATCH_JSON from companion/env,
+  // not this synthetic config. Reject a check-set mismatch before publishing:
+  // otherwise the build succeeds and the server fails its startup gate.
+  const hostAutodispatch = process.env.COMPANION_AUTODISPATCH_JSON;
+  assertHostAutodispatchChecks(hostAutodispatch, selectedChecks);
+  if (hostAutodispatch !== undefined) {
+    const hostAd = parseAutodispatchConfig(hostAutodispatch, trialPre);
+    if (hostAd === null) fail("host autodispatch parse returned null");
+  }
   const policy = {
     id: "manual-freeze",
     sessionId: "manual",
@@ -439,6 +463,7 @@ try {
   parseTrialConfig(autonomyJson) ?? fail("final trial parse");
   try {
     atomicWrite(input.environmentFile, formatAutonomyEnvLine(autonomyJson));
+    published = true;
   } catch (err) {
     if (previousOperator !== null) {
       atomicWrite(input.operatorFile, previousOperator);
@@ -451,40 +476,50 @@ try {
   // 6. Prune old frozen roots BY REFERENCE: the published operator.json, the
   // pre-deploy operator (restored by a rollback), and the deploy's rollback
   // backup must never be pruned even if an older timestamp sorts them out.
-  // Only the newest two unreferenced roots are kept.
-  const rootNames = readdirSync(input.stateRoot, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => entry.name)
-    .filter((name) => name.startsWith("frozen-"));
-  const rollbackOperatorFile =
-    process.env.COMPANION_TRIAL_ROLLBACK_OPERATOR_FILE ?? "";
-  const rollbackOperatorText =
-    rollbackOperatorFile.length > 0 && existsSync(rollbackOperatorFile)
-      ? readFileSync(rollbackOperatorFile, "utf8")
-      : null;
-  const protectedRoots = [
-    frozenRootReferencedByOperator(
-      readFileSync(input.operatorFile, "utf8"),
-      input.stateRoot,
-    ),
-    previousOperator === null
-      ? null
-      : frozenRootReferencedByOperator(previousOperator, input.stateRoot),
-    rollbackOperatorText === null
-      ? null
-      : frozenRootReferencedByOperator(rollbackOperatorText, input.stateRoot),
-  ].filter((name): name is string => name !== null);
-  const prune = selectFrozenRootsToPrune(
-    rootNames,
-    basename(ROOT),
-    2,
-    protectedRoots,
-  );
-  for (const name of prune) {
-    const target = join(input.stateRoot, name);
-    if (!target.startsWith(input.stateRoot + "/")) continue;
-    execFileSync("chmod", ["-R", "u+rwX", target], { stdio: "ignore" });
-    rmSync(target, { recursive: true, force: true });
+  // Only the newest two unreferenced roots are kept. Pruning is best-effort
+  // AFTER publication: a prune failure (old root unremovable, malformed
+  // previous operator, ...) must not delete the root both files now reference.
+  let prune: string[] = [];
+  try {
+    const rootNames = readdirSync(input.stateRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .filter((name) => name.startsWith("frozen-"));
+    const rollbackOperatorFile =
+      process.env.COMPANION_TRIAL_ROLLBACK_OPERATOR_FILE ?? "";
+    const rollbackOperatorText =
+      rollbackOperatorFile.length > 0 && existsSync(rollbackOperatorFile)
+        ? readFileSync(rollbackOperatorFile, "utf8")
+        : null;
+    const protectedRoots = [
+      frozenRootReferencedByOperator(
+        readFileSync(input.operatorFile, "utf8"),
+        input.stateRoot,
+      ),
+      previousOperator === null
+        ? null
+        : frozenRootReferencedByOperator(previousOperator, input.stateRoot),
+      rollbackOperatorText === null
+        ? null
+        : frozenRootReferencedByOperator(rollbackOperatorText, input.stateRoot),
+    ].filter((name): name is string => name !== null);
+    prune = selectFrozenRootsToPrune(
+      rootNames,
+      basename(ROOT),
+      2,
+      protectedRoots,
+    );
+    for (const name of prune) {
+      const target = join(input.stateRoot, name);
+      if (!target.startsWith(input.stateRoot + "/")) continue;
+      execFileSync("chmod", ["-R", "u+rwX", target], { stdio: "ignore" });
+      rmSync(target, { recursive: true, force: true });
+    }
+  } catch (pruneErr) {
+    console.error(
+      "WARNING pruning skipped; published root preserved:",
+      pruneErr instanceof Error ? pruneErr.message : String(pruneErr),
+    );
   }
 
   console.log(
@@ -507,22 +542,25 @@ try {
     ),
   );
 } catch (err) {
-  // Failed builds never publish; remove the half-built root so it is not
-  // mistaken for a valid snapshot. The dependency materializer seals copied
+  // Only remove the half-built root while it is unpublished. After
+  // publication the operator.json/autonomy.env pair points here, so deleting
+  // it would leave trials broken. The dependency materializer seals copied
   // directories read-only, so restore owner write permissions first: a plain
   // rm would fail on mode 0555 entries and mask the original build error.
-  try {
-    execFileSync("chmod", ["-R", "u+rwX", ROOT], { stdio: "ignore" });
-  } catch {
-    // Best effort; rmSync below still gets its chance.
-  }
-  try {
-    rmSync(ROOT, { recursive: true, force: true });
-  } catch (cleanupErr) {
-    console.error(
-      "WARNING could not remove failed root:",
-      cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
-    );
+  if (!published) {
+    try {
+      execFileSync("chmod", ["-R", "u+rwX", ROOT], { stdio: "ignore" });
+    } catch {
+      // Best effort; rmSync below still gets its chance.
+    }
+    try {
+      rmSync(ROOT, { recursive: true, force: true });
+    } catch (cleanupErr) {
+      console.error(
+        "WARNING could not remove failed root:",
+        cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
+      );
+    }
   }
   console.error("FAIL", err instanceof Error ? err.message : String(err));
   process.exit(1);

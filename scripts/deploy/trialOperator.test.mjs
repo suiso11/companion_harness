@@ -11,6 +11,7 @@ import {
   parseTrialConfig,
 } from "../../apps/server/src/config.ts";
 import {
+  assertHostAutodispatchChecks,
   formatAutonomyEnvLine,
   frozenRootReferencedByOperator,
   resolveCurrentModel,
@@ -391,6 +392,39 @@ describe("autodispatch config shape (real parser)", () => {
         trial,
       ),
     ).toThrow(/autodispatch checks are invalid/);
+  });
+});
+
+describe("assertHostAutodispatchChecks", () => {
+  it("accepts an absent or matching host check set", () => {
+    expect(() =>
+      assertHostAutodispatchChecks(undefined, ["lint"]),
+    ).not.toThrow();
+    expect(() =>
+      assertHostAutodispatchChecks(JSON.stringify({ checks: ["lint"] }), [
+        "lint",
+      ]),
+    ).not.toThrow();
+  });
+
+  it("rejects a host check set the sealed trial cannot match", () => {
+    expect(() =>
+      assertHostAutodispatchChecks(
+        JSON.stringify({ checks: ["lint", "typecheck"] }),
+        ["lint"],
+      ),
+    ).toThrow(/do not match the sealed trial checks/);
+  });
+
+  it("rejects malformed host config", () => {
+    expect(() => assertHostAutodispatchChecks("not-json", ["lint"])).toThrow(
+      /not valid JSON/,
+    );
+    expect(() =>
+      assertHostAutodispatchChecks(JSON.stringify({ checks: "lint" }), [
+        "lint",
+      ]),
+    ).toThrow(/checks must be an array/);
   });
 });
 
