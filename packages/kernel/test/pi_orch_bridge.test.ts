@@ -9,6 +9,8 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
+  accessSync,
+  constants,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -545,6 +547,13 @@ function runGuestJob(objective: string): {
 }
 
 describe("sealed pi-orch bridge portable protocol/command contract", () => {
+  it("ships the frozen guest executor as an executable file", () => {
+    // The confined bridge ro-binds this exact path into bwrap and execs it
+    // directly. A non-executable checkout (for example mode 0644) makes every
+    // trial fail before the guest starts; pin the exec bit in the tree.
+    expect(() => accessSync(GUEST, constants.X_OK)).not.toThrow();
+  });
+
   it("--describe is side-effect free and marks sealed/test defaults", () => {
     const dir = tempRoot("describe");
     const out = spawnSync(process.execPath, [BRIDGE, "--describe"], {
