@@ -7,7 +7,12 @@
 // the optional delta callback only (never validated, never persisted).
 //
 // Bounds: the effective per-call byte cap (min(maxResponseBytes,
-// MAX_RESPONSE_BYTES)) applies to raw SSE bytes; accumulated text honors
+// MAX_RESPONSE_BYTES)) applies to the DECODED accumulated payload (UTF-8
+// bytes of content, reasoning, tool-call names/arguments and the
+// provisional answer draft), matching the non-streaming response bound.
+// Raw SSE framing is separately capped by MAX_STREAM_WIRE_BYTES for
+// transport safety only, so per-token `data:` envelopes never consume the
+// caller's response budget. Accumulated text honors
 // MAX_MESSAGE_CONTENT_LENGTH and per-tool arguments honor
 // MAX_TOOL_CALL_ARGUMENTS_BYTES with the same redacted error classes as
 // the non-streaming path (`invalid_response`, `tool_call_invalid`,
@@ -26,6 +31,7 @@ import {
   isAnswerSubmitTool,
   isRecord,
   MAX_MESSAGE_CONTENT_LENGTH,
+  MAX_RESPONSE_BYTES,
   MAX_TOOL_CALLS_PER_MESSAGE,
   resolveResponseByteLimit,
   utf8ByteLength,
@@ -49,11 +55,25 @@ export interface StreamChunkPieces {
 }
 
 /**
+ * Absolute raw SSE wire cap for one streamed call (64 MiB, transport
+ * safety only). The caller's effective response cap bounds the DECODED
+ * payload instead (see `OpenAIStreamAccumulator`); this much larger wire
+ * bound only stops a runaway provider from streaming unbounded framing.
+ * Exceeding either bound fails closed with the same `invalid_response` /
+ * `response_too_large` class. Exported so operators and tests can reason
+ * about the ceiling.
+ */
+export const MAX_STREAM_WIRE_BYTES = 64 * 1024 * 1024;
+
+/**
  * Bounded capture of the raw SSE bytes actually received for one call.
  * Disabled (zero work, no retained chunks, no extra copy) when the caller
- * did not pass `onRawResponse`. When enabled it retains at most the existing
- * per-call byte cap (the same effective limit that bounds reading), so the
- * raw observer can never see more than the reader accepted. Decoding is
+ * did not pass `onRawResponse`. When enabled it retains at most the
+ * effective per-call DECODED byte cap, so the observer never retains more
+ * than the caller's response budget even when the SSE wire (framing) is
+ * legitimately larger; bytes beyond that prefix are dropped. The observer
+ * therefore sees a bounded prefix, never the whole oversized wire body.
+ * Decoding is
  * non-fatal: malformed UTF-8 is exactly one of the failures this observer
  * exists to expose, so replacement characters are preferable to throwing
  * from the recording hook. Headers are never part of the captured value.
@@ -140,16 +160,31 @@ interface AccumulatedToolCall {
  * classes and identical ChatResult). The accumulator itself never throws
  * per-tool answer codes for size: when the tool name is already known an
  * oversize increment rejects with the same per-tool code the finalizer
- * would produce; otherwise the finalizer classifies it.
+ * would produce; otherwise the finalizer classifies it. Independently, the
+ * decoded accumulated payload (content + reasoning + every tool name and
+ * arguments + provisional answer draft, in UTF-8 bytes) is bounded by the
+ * effective per-call cap, so SSE framing never eats the response budget.
  */
 export class OpenAIStreamAccumulator {
+  private readonly maxDecodedBytes: number;
   private content = "";
   private reasoning = "";
+  private contentBytes = 0;
+  private reasoningBytes = 0;
+  private toolNameBytes = 0;
+  private toolArgumentBytes = 0;
+  private draftCache = "";
+  private draftBytes = 0;
+  private draftDirty = false;
   private readonly tools = new Map<number, AccumulatedToolCall>();
   private finishReason = "";
   private rawUsage: unknown = undefined;
   private seenUsage = false;
   private done = false;
+
+  constructor(options: { maxDecodedBytes?: number } = {}) {
+    this.maxDecodedBytes = options.maxDecodedBytes ?? MAX_RESPONSE_BYTES;
+  }
 
   /** Append one parsed chunk body; returns the provisional pieces. */
   pushChunkBody(body: unknown): StreamChunkPieces {
@@ -239,6 +274,7 @@ export class OpenAIStreamAccumulator {
       }
       if (typeof delta.content === "string" && delta.content.length > 0) {
         this.content += delta.content;
+        this.contentBytes += utf8ByteLength(delta.content);
         contentPiece += delta.content;
         assertAssistantTextWithinBound(this.content);
       }
@@ -257,6 +293,7 @@ export class OpenAIStreamAccumulator {
         delta.reasoning_content.length > 0
       ) {
         this.reasoning += delta.reasoning_content;
+        this.reasoningBytes += utf8ByteLength(delta.reasoning_content);
         reasoningPiece += delta.reasoning_content;
         // Same character bound as assistant text: reasoning buffers stay
         // finite under the identical redacted code.
@@ -295,6 +332,7 @@ export class OpenAIStreamAccumulator {
       this.rawUsage = body.usage;
       this.seenUsage = true;
     }
+    this.assertDecodedWithinBound();
     return { content: contentPiece, reasoning: reasoningPiece, toolDeltas };
   }
 
@@ -369,6 +407,39 @@ export class OpenAIStreamAccumulator {
    * ChatResult.
    */
   getAnswerDraftText(): string {
+    this.ensureDraft();
+    return this.draftCache;
+  }
+
+  /**
+   * Enforce the effective per-call cap on the decoded accumulated payload:
+   * UTF-8 bytes of content + reasoning + every tool-call name/arguments +
+   * the provisional draft already accumulated. The raw SSE wire has its
+   * own much larger transport cap (`MAX_STREAM_WIRE_BYTES`).
+   */
+  private assertDecodedWithinBound(): void {
+    this.ensureDraft();
+    const total =
+      this.contentBytes +
+      this.reasoningBytes +
+      this.toolNameBytes +
+      this.toolArgumentBytes +
+      this.draftBytes;
+    if (total > this.maxDecodedBytes) {
+      throw new ModelLocalError(
+        "invalid_response",
+        "model returned an oversized response",
+        undefined,
+        { invalidResponseCause: "response_too_large" },
+      );
+    }
+  }
+
+  /** Recompute the provisional draft (and its UTF-8 size) when stale. */
+  private ensureDraft(): void {
+    if (!this.draftDirty) {
+      return;
+    }
     const ordered = [...this.tools.entries()].sort((a, b) => a[0] - b[0]);
     let draft = "";
     for (const [, call] of ordered) {
@@ -384,7 +455,9 @@ export class OpenAIStreamAccumulator {
       // rendering), never direct adjacency.
       draft += (draft.length === 0 ? "" : "\n\n") + piece;
     }
-    return draft;
+    this.draftCache = draft;
+    this.draftBytes = utf8ByteLength(draft);
+    this.draftDirty = false;
   }
 
   private appendToolCallDelta(entry: unknown): {
@@ -475,6 +548,7 @@ export class OpenAIStreamAccumulator {
           );
         }
         if (fn.name.length > 0) {
+          const previousName = call.name;
           if (call.name === undefined) {
             call.name = fn.name;
           } else if (fn.name === call.name) {
@@ -493,6 +567,12 @@ export class OpenAIStreamAccumulator {
               "model returned an invalid response",
             );
           }
+          if (call.name !== previousName) {
+            this.draftDirty = true;
+            this.toolNameBytes +=
+              utf8ByteLength(call.name ?? "") -
+              utf8ByteLength(previousName ?? "");
+          }
         }
       }
       if (fn.arguments !== undefined && fn.arguments !== null) {
@@ -503,9 +583,11 @@ export class OpenAIStreamAccumulator {
           );
         }
         call.argumentsText += fn.arguments;
+        this.toolArgumentBytes += utf8ByteLength(fn.arguments);
+        this.draftDirty = true;
         // Incremental size guard with the same per-tool codes as the
         // finalizer once the name is known; unknown-name prefixes stay
-        // bounded by the shared raw SSE byte cap until finalize classifies.
+        // bounded by the decoded per-call cap until finalize classifies.
         if (call.name !== undefined) {
           assertToolArgumentsByteLengthForTool(
             utf8ByteLength(call.argumentsText),
@@ -691,11 +773,14 @@ function decodeJsonStringPrefix(
  * `onChunkBody` until `data: [DONE]`. Transport guards mirror
  * `postJsonNoRedirect`: loopback revalidation, `redirect: "error"`, single
  * attempt, composed external-signal + `timeoutMs` abort, bounded raw bytes
- * (effective per-call cap), fixed redacted errors. Non-2xx statuses drain
- * within the same bound and reject as `request_failed` with the status.
+ * (the decoded per-call cap retains the raw-capture prefix; the much larger
+ * MAX_STREAM_WIRE_BYTES bounds transport), fixed redacted errors. Non-2xx
+ * statuses drain within the decoded per-call cap and reject as
+ * `request_failed` with the status.
  * External cancellation rethrows the original abort rejection untouched.
  * The optional `onRawResponse` observer receives the status plus the exact
- * received SSE bytes decoded (bounded by the same cap) exactly once per
+ * received SSE bytes decoded (bounded by the decoded per-call cap) exactly
+ * once per
  * call: after a completed stream before normalization, before a malformed
  * chunk / invalid-response failure, and after a non-2xx body is drained.
  * Headers are never included. Cancellation (external abort or timeout) does
@@ -716,7 +801,10 @@ export async function postChatCompletionStream(options: {
   onChunkBody: (body: unknown) => void;
 }): Promise<void> {
   const safeUrl = assertPinnedLoopbackFetchUrl(options.url);
-  const limit = resolveResponseByteLimit(options.maxResponseBytes);
+  // The caller's effective cap bounds the DECODED payload (enforced by the
+  // accumulator); the raw SSE wire only has the much larger transport bound.
+  const decodedLimit = resolveResponseByteLimit(options.maxResponseBytes);
+  const wireLimit = MAX_STREAM_WIRE_BYTES;
   const externalSignal = options.signal;
   if (isAborted(externalSignal)) {
     throw toAbortRejection(externalSignal as AbortSignal);
@@ -762,11 +850,17 @@ export async function postChatCompletionStream(options: {
       );
     const rawCapture = new RawSseCapture(
       response.status,
-      limit,
+      decodedLimit,
       options.onRawResponse,
     );
     const declared = parseDeclaredContentLength(response);
-    if (declared !== undefined && declared > limit) {
+    // A successful SSE body may legitimately exceed the decoded cap because
+    // of framing, so only the wire bound applies there. Non-2xx bodies keep
+    // the decoded per-call cap exactly as before.
+    if (
+      declared !== undefined &&
+      declared > (response.ok ? wireLimit : decodedLimit)
+    ) {
       cancelBody(response);
       if (!response.ok) {
         throw requestFailed(response.status);
@@ -783,7 +877,7 @@ export async function postChatCompletionStream(options: {
         response,
         controller,
         externalSignal,
-        limit,
+        decodedLimit,
         rawCapture,
       );
       // Non-2xx bodies are reported before the fixed status failure is
@@ -796,7 +890,7 @@ export async function postChatCompletionStream(options: {
       response,
       controller,
       externalSignal,
-      limit,
+      wireLimit,
       rawCapture,
       options.onChunkBody,
     );
@@ -825,7 +919,7 @@ async function readSseStream(
   response: Response,
   controller: AbortController,
   externalSignal: AbortSignal | undefined,
-  limit: number,
+  wireLimit: number,
   rawCapture: RawSseCapture,
   onChunkBody: (body: unknown) => void,
 ): Promise<void> {
@@ -937,11 +1031,11 @@ async function readSseStream(
         break;
       }
       totalBytes += value.byteLength;
-      // Retain at most the per-call cap; an overflowing chunk contributes
-      // only the prefix that fits (never beyond the existing raw bound).
+      // Retain at most the decoded per-call cap; an overflowing chunk
+      // contributes only the prefix that fits (bounded raw observation).
       rawCapture.push(value);
-      if (totalBytes > limit) {
-        cancelQuietly(reader, "exceeds limit");
+      if (totalBytes > wireLimit) {
+        cancelQuietly(reader, "exceeds wire limit");
         fail(
           new ModelLocalError(
             "invalid_response",

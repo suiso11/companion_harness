@@ -75,6 +75,7 @@ export {
 } from "./openai_compatible.js";
 export {
   extractPartialPartsText,
+  MAX_STREAM_WIRE_BYTES,
   OpenAIStreamAccumulator,
   postChatCompletionStream,
 } from "./streaming.js";
