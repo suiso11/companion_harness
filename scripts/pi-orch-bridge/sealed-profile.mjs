@@ -118,10 +118,12 @@ function needArgs(value, field, allowAbsoluteGuest = false) {
       arg !== "/work" &&
       !arg.startsWith("/work/") &&
       arg !== "/scratch" &&
-      !arg.startsWith("/scratch/")
+      !arg.startsWith("/scratch/") &&
+      arg !== "/deps" &&
+      !arg.startsWith("/deps/")
     ) {
       fail(
-        `field ${field} absolute entries must be /work or /scratch guest paths`,
+        `field ${field} absolute entries must be /work, /scratch, or /deps guest paths`,
       );
     }
     out.push(arg);

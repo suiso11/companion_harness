@@ -166,10 +166,38 @@ if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
 fi
 
 PREV="$CURRENT"
+# Trial profile paths/backups are filled in just before the rebuild below.
+TRIAL_OPERATOR_INPUT="${COMPANION_TRIAL_OPERATOR_INPUT:-$HOME/.config/companion/trial-operator.json}"
+# Main systemd EnvironmentFile (companion.service). It is loaded BEFORE
+# autonomy.env, so a legacy inline COMPANION_AUTONOMY_JSON here would win
+# whenever autonomy.env has no COMPANION_AUTONOMY_JSON line.
+TRIAL_MAIN_ENV_FILE="${COMPANION_MAIN_ENV_FILE:-$HOME/.config/companion/env}"
+TRIAL_LEGACY_MAIN_ENV=0
+TRIAL_OPERATOR_FILE=""
+TRIAL_ENV_FILE=""
+TRIAL_BACKUP_DIR=""
 rollback() {
   log "rolling back to $PREV"
   git switch --detach "$PREV"
   pnpm install --frozen-lockfile
+  # The new revision's trial profile may already be published; restore the
+  # pre-deploy operator.json/autonomy.env pair before restarting the old app so
+  # trials never run against the rejected revision.
+  if [ -n "$TRIAL_BACKUP_DIR" ]; then
+    if [ -f "$TRIAL_BACKUP_DIR/operator.json" ]; then
+      cp -p "$TRIAL_BACKUP_DIR/operator.json" "$TRIAL_OPERATOR_FILE"
+    else
+      rm -f "$TRIAL_OPERATOR_FILE"
+    fi
+    if [ -f "$TRIAL_BACKUP_DIR/autonomy.env" ]; then
+      cp -p "$TRIAL_BACKUP_DIR/autonomy.env" "$TRIAL_ENV_FILE"
+    else
+      rm -f "$TRIAL_ENV_FILE"
+    fi
+    rm -rf "$TRIAL_BACKUP_DIR"
+    TRIAL_BACKUP_DIR=""
+    log "restored the previous trial operator profile before rollback restart"
+  fi
   systemctl --user restart companion.service
   log "rollback complete (previous revision restored and restarted)"
   notify_rollback "$TARGET" "health check or restart failed"
@@ -178,6 +206,113 @@ rollback() {
 log "switching to $TARGET"
 git switch --detach "$TARGET"
 pnpm install --frozen-lockfile
+
+# --- frozen trial operator: rebuild from the deployed sha, then restart ---
+# The builder exports a clean archive of HEAD, verifies the materialized
+# snapshot, and only then atomically switches operator.json + autonomy.env.
+# A failure must NOT block app deploys, but it must fail CLOSED: a retained
+# profile can still match the restarted server, so rewrite autonomy.env with
+# an explicit `enabled:false` line before the restart.
+if [ -f "$TRIAL_OPERATOR_INPUT" ]; then
+  TRIAL_OPERATOR_FILE="$(node -e 'const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));process.stdout.write(j.operatorFile ?? "")' "$TRIAL_OPERATOR_INPUT" 2>/dev/null || true)"
+  TRIAL_ENV_FILE="$(node -e 'const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));process.stdout.write(j.environmentFile ?? "")' "$TRIAL_OPERATOR_INPUT" 2>/dev/null || true)"
+  # Migration guard: before the trial operator split, hosts kept the inline
+  # COMPANION_AUTONOMY_JSON in the main env file. autonomy.env is loaded after
+  # it, so we must write an explicit disabled line; a missing/blank line would
+  # let the stale inline config win. Never rewrite the operator-owned main env.
+  if [ -f "$TRIAL_MAIN_ENV_FILE" ] \
+    && grep -Eq '^[[:space:]]*(export[[:space:]]+)?COMPANION_AUTONOMY_JSON=' "$TRIAL_MAIN_ENV_FILE"; then
+    TRIAL_LEGACY_MAIN_ENV=1
+    log "ERROR $TRIAL_MAIN_ENV_FILE still defines COMPANION_AUTONOMY_JSON (legacy inline trial config); remove that line and keep it only in autonomy.env. Skipping the trial rebuild and forcing trials disabled for this deploy."
+  fi
+fi
+if [ -n "$TRIAL_OPERATOR_FILE" ] && [ -n "$TRIAL_ENV_FILE" ]; then
+  TRIAL_BACKUP_DIR="$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/companion-trial-backup.XXXXXX" 2>/dev/null || true)"
+  if [ -n "$TRIAL_BACKUP_DIR" ]; then
+    if [ -f "$TRIAL_OPERATOR_FILE" ]; then
+      cp -p "$TRIAL_OPERATOR_FILE" "$TRIAL_BACKUP_DIR/operator.json"
+    fi
+    if [ -f "$TRIAL_ENV_FILE" ]; then
+      cp -p "$TRIAL_ENV_FILE" "$TRIAL_BACKUP_DIR/autonomy.env"
+    fi
+  else
+    log "WARNING could not create a trial profile backup; a rollback cannot restore it"
+  fi
+fi
+if [ -f "$TRIAL_OPERATOR_INPUT" ] && [ "$TRIAL_LEGACY_MAIN_ENV" = "1" ]; then
+  # Chosen migration path: do not rebuild (or trust) a profile while the main
+  # env still defines the legacy inline value. Write an explicit disabled
+  # fallback in autonomy.env, which is loaded AFTER the main env and therefore
+  # overrides it. A blank line cannot be used: parseTrialConfig("") rejects the
+  # empty string, so the app would not start. Without a prior valid config
+  # there is nothing safe to override with, so abort before the restart.
+  if [ -z "$TRIAL_OPERATOR_FILE" ] || [ -z "$TRIAL_ENV_FILE" ]; then
+    log "ERROR cannot write the disabled trial fallback: $TRIAL_OPERATOR_INPUT has no usable operatorFile/environmentFile; remove COMPANION_AUTONOMY_JSON from $TRIAL_MAIN_ENV_FILE and retry. Aborting the deploy before restart."
+    rollback
+    exit 1
+  fi
+  DISABLED_ENV_LINE="$(node "$SCRIPT_DIR/disable-trial-env.mjs" "$TRIAL_ENV_FILE" "$DEPLOY_DIR/.env.litellm" 2>/dev/null || true)"
+  if [ -z "$DISABLED_ENV_LINE" ]; then
+    log "ERROR no usable prior trial config to write as disabled; remove COMPANION_AUTONOMY_JSON from $TRIAL_MAIN_ENV_FILE (an empty autonomy.env cannot override it) and retry. Aborting the deploy before restart."
+    rollback
+    exit 1
+  fi
+  TRIAL_ENV_TMP="${TRIAL_ENV_FILE}.tmp-$$"
+  if mkdir -p "$(dirname "$TRIAL_ENV_FILE")" \
+    && printf '%s\n' "$DISABLED_ENV_LINE" > "$TRIAL_ENV_TMP" \
+    && chmod 600 "$TRIAL_ENV_TMP" \
+    && mv -f "$TRIAL_ENV_TMP" "$TRIAL_ENV_FILE"; then
+    log "autonomy.env reset (trials disabled, overriding legacy main-env value) before restart"
+  else
+    rm -f "$TRIAL_ENV_TMP"
+    log "ERROR could not write the disabled trial fallback over the legacy main-env value; rolling back instead of restarting with ambiguous config"
+    rollback
+    exit 1
+  fi
+elif [ -f "$TRIAL_OPERATOR_INPUT" ]; then
+  log "rebuilding frozen trial operator for $TARGET"
+  BUILD_OK=1
+  if [ -n "$TRIAL_BACKUP_DIR" ]; then
+    COMPANION_TRIAL_OPERATOR_INPUT="$TRIAL_OPERATOR_INPUT" \
+      COMPANION_TRIAL_ROLLBACK_OPERATOR_FILE="$TRIAL_BACKUP_DIR/operator.json" \
+      pnpm --filter @companion/server exec tsx "$SCRIPT_DIR/build-trial-operator.mts" || BUILD_OK=0
+  else
+    COMPANION_TRIAL_OPERATOR_INPUT="$TRIAL_OPERATOR_INPUT" \
+      pnpm --filter @companion/server exec tsx "$SCRIPT_DIR/build-trial-operator.mts" || BUILD_OK=0
+  fi
+  if [ "$BUILD_OK" != "1" ]; then
+    log "ERROR trial operator rebuild FAILED for $TARGET; disabling trials before restart (fail closed)"
+    # Keep the previous config but force `enabled:false`: an EMPTY file would
+    # break startup on hosts that also set COMPANION_AUTODISPATCH_JSON, since
+    # the server rejects autodispatch without a trial config. If no usable
+    # previous config exists, fall back to an empty file, but roll back rather
+    # than restart unstartable when autodispatch is configured.
+    # Rebind the model with the same resolver as the builder (exported
+    # COMPANION_MODEL_JSON, else the private .env.litellm alias) so a host
+    # model change plus a failed rebuild still starts with trials off.
+    DISABLED_ENV_LINE="$(node "$SCRIPT_DIR/disable-trial-env.mjs" "$TRIAL_ENV_FILE" "$DEPLOY_DIR/.env.litellm" 2>/dev/null || true)"
+    if [ -z "$DISABLED_ENV_LINE" ] && [ -n "${COMPANION_AUTODISPATCH_JSON:-}" ]; then
+      log "ERROR no usable prior trial config to keep disabled; rolling back instead of restarting with autodispatch but no trial config"
+      rollback
+      exit 1
+    fi
+    TRIAL_ENV_TMP="${TRIAL_ENV_FILE}.tmp-$$"
+    if mkdir -p "$(dirname "$TRIAL_ENV_FILE")" \
+      && printf '%s\n' "$DISABLED_ENV_LINE" > "$TRIAL_ENV_TMP" \
+      && chmod 600 "$TRIAL_ENV_TMP" \
+      && mv -f "$TRIAL_ENV_TMP" "$TRIAL_ENV_FILE"; then
+      log "autonomy.env reset (trials disabled) before restart"
+    else
+      rm -f "$TRIAL_ENV_TMP"
+      log "ERROR could not disable trials; rolling back instead of restarting with a stale profile"
+      rollback
+      exit 1
+    fi
+  fi
+else
+  log "trial operator input missing ($TRIAL_OPERATOR_INPUT); skipping trial rebuild"
+fi
+
 # NOTE: `pnpm start` runs the UI build via its prestart hook, so no
 # separate build step is needed here.
 
@@ -195,6 +330,10 @@ while [ "$i" -lt 30 ]; do
     # Server has restarted and is healthy: DB writes are safe now, so
     # notices are written only after health is ok.
     notify_success "$TARGET"
+    if [ -n "$TRIAL_BACKUP_DIR" ]; then
+      rm -rf "$TRIAL_BACKUP_DIR"
+      TRIAL_BACKUP_DIR=""
+    fi
     exit 0
   fi
   sleep 2

@@ -9,6 +9,8 @@ OnFailure=companion-alert@%n.service
 Type=simple
 WorkingDirectory=%h/companion_master
 EnvironmentFile=%h/.config/companion/env
+# Trial operator config is rebuilt by companion-deploy; later files win.
+EnvironmentFile=-%h/.config/companion/autonomy.env
 ExecStart=%h/companion_master/run-google-readonly.sh
 Restart=on-failure
 RestartSec=5
