@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   closeKernelDatabase,
   createKernelRepository,
@@ -664,12 +664,13 @@ describe("autodispatch policy/plan/authority", () => {
         "Please implement the feature in src/app.ts. Go.",
         NOW + 10,
       );
+      const elevatedLimits = {
+        ...limits,
+        caps: { ...DEFAULT_POLICY_CAPS, concurrentExecutions: 4 },
+      };
       const policy = createPolicy(repo, sessionId, anchor.turnId, NOW + 20, {
         caps: { ...caps, concurrentExecutions: 4 },
-        limits: {
-          ...limits,
-          caps: { ...DEFAULT_POLICY_CAPS, concurrentExecutions: 4 },
-        },
+        limits: elevatedLimits,
       });
 
       // Claim: a newer QUEUED user turn alone invalidates the old plan even
@@ -685,7 +686,7 @@ describe("autodispatch policy/plan/authority", () => {
         {
           profile: profile(),
           workspaceAlias: "companion-harness",
-          limits,
+          limits: elevatedLimits,
           now: NOW + 22,
         },
       );
@@ -722,7 +723,7 @@ describe("autodispatch policy/plan/authority", () => {
         {
           profile: profile(),
           workspaceAlias: "companion-harness",
-          limits,
+          limits: elevatedLimits,
           now: NOW + 35,
         },
       );
@@ -772,7 +773,7 @@ describe("autodispatch policy/plan/authority", () => {
         {
           profile: profile(),
           workspaceAlias: "companion-harness",
-          limits,
+          limits: elevatedLimits,
           now: NOW + 43,
         },
       );
@@ -931,6 +932,66 @@ describe("autodispatch policy/plan/authority", () => {
       closeKernelDatabase(handle);
     }
   });
+
+  it("applies a lowered operator quota to an already-created policy", async () => {
+    const { handle, repo, sessionId } = await fixture();
+    try {
+      const anchor = completedTurn(
+        repo,
+        sessionId,
+        "Please implement the feature in src/app.ts. Do it.",
+        NOW + 10,
+      );
+      // Policy approved with jobsPerDay 3; the operator config is later
+      // narrowed to 1 and must still cap this existing policy.
+      const policy = createPolicy(repo, sessionId, anchor.turnId, NOW + 20);
+      const loweredLimits = {
+        ...limits,
+        caps: { ...limits.caps, jobsPerDay: 1 },
+      };
+      const p1 = repo.createAutodispatchPlan(
+        sessionId,
+        planInput(policy.id, anchor),
+        { now: NOW + 21 },
+      );
+      const first = repo.authorizeAutodispatch(sessionId, p1.plan.id, {
+        profile: profile(),
+        workspaceAlias: "companion-harness",
+        limits: loweredLimits,
+        now: NOW + 30,
+      });
+      expect(first.execution.status).toBe("authorized");
+
+      const anchor2 = completedTurn(
+        repo,
+        sessionId,
+        "Please implement the feature second part in src/other.ts. Go.",
+        NOW + 40,
+      );
+      const p2 = repo.createAutodispatchPlan(
+        sessionId,
+        {
+          ...planInput(policy.id, anchor2),
+          content: {
+            ...planInput(policy.id, anchor2).content,
+            goal: "Implement the second part",
+            relevantPaths: ["src/other.ts"],
+          },
+        },
+        { now: NOW + 41 },
+      );
+      const second = repo.authorizeAutodispatch(sessionId, p2.plan.id, {
+        profile: profile(),
+        workspaceAlias: "companion-harness",
+        limits: loweredLimits,
+        now: NOW + 42,
+      });
+      expect(second.execution.status).toBe("denied");
+      expect(second.execution.reason).toBe("quota-daily");
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
 });
 
 describe("autodispatch lifecycle fences against the existing trial authority", () => {
@@ -961,6 +1022,98 @@ describe("autodispatch lifecycle fences against the existing trial authority", (
         .prepare("SELECT status FROM trial_grants WHERE execution_id=?")
         .get(executionId) as { status: string };
       expect(grant.status).toBe("revoked");
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("applies revoke grant handling when a policy expires", async () => {
+    const { handle, repo, sessionId } = await fixture();
+    try {
+      const anchor = completedTurn(
+        repo,
+        sessionId,
+        "Please implement the feature in src/app.ts. Go.",
+        NOW + 10,
+      );
+      const queuedPolicy = createPolicy(
+        repo,
+        sessionId,
+        anchor.turnId,
+        NOW + 20,
+        { expiresAt: new Date(Date.now() + 60_000).toISOString() },
+      );
+      const queued = authorizePolicyGrant(
+        repo,
+        sessionId,
+        queuedPolicy.id,
+        anchor,
+        NOW + 21,
+      );
+      expect(queued.auth.execution.status).toBe("authorized");
+      const queuedExec = queued.auth.execution.executionId as string;
+
+      const expireQueued = vi
+        .spyOn(Date, "now")
+        .mockReturnValue(Date.now() + 120_000);
+      try {
+        expect(
+          repo.readAutodispatchPolicy(sessionId, queuedPolicy.id).status,
+        ).toBe("expired");
+      } finally {
+        expireQueued.mockRestore();
+      }
+      const queuedGrant = handle.raw
+        .prepare("SELECT status FROM trial_grants WHERE execution_id=?")
+        .get(queuedExec) as { status: string };
+      expect(queuedGrant.status).toBe("revoked");
+      expect(repo.isNeverLaunchedRevokedTrialGrant(sessionId, queuedExec)).toBe(
+        true,
+      );
+
+      const anchor2 = completedTurn(
+        repo,
+        sessionId,
+        "Please implement the feature second part in src/other.ts. Go.",
+        NOW + 40,
+      );
+      const claimedPolicy = createPolicy(
+        repo,
+        sessionId,
+        anchor2.turnId,
+        NOW + 50,
+        { expiresAt: new Date(Date.now() + 60_000).toISOString() },
+      );
+      const claimed = authorizePolicyGrant(
+        repo,
+        sessionId,
+        claimedPolicy.id,
+        anchor2,
+        NOW + 51,
+      );
+      const claimedExec = claimed.auth.execution.executionId as string;
+      claimPolicyGrant(repo, sessionId, claimedExec, NOW + 60);
+
+      const expireClaimed = vi
+        .spyOn(Date, "now")
+        .mockReturnValue(Date.now() + 120_000);
+      try {
+        expect(
+          repo.readAutodispatchPolicy(sessionId, claimedPolicy.id).status,
+        ).toBe("expired");
+      } finally {
+        expireClaimed.mockRestore();
+      }
+      const claimedGrant = handle.raw
+        .prepare(
+          "SELECT status, cancel_requested FROM trial_grants WHERE execution_id=?",
+        )
+        .get(claimedExec) as { status: string; cancel_requested: number };
+      expect(claimedGrant.status).toBe("claimed");
+      expect(claimedGrant.cancel_requested).toBe(1);
+      expect(
+        repo.isNeverLaunchedRevokedTrialGrant(sessionId, claimedExec),
+      ).toBe(false);
     } finally {
       closeKernelDatabase(handle);
     }

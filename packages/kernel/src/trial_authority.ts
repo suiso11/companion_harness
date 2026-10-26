@@ -554,9 +554,7 @@ function normalizeWireConstraints(value: unknown): string[] {
   if (!Array.isArray(value))
     throw new RepositoryValidationError("constraints must be an array");
   if (value.length > 16)
-    throw new RepositoryValidationError(
-      "constraints must carry 0..16 entries",
-    );
+    throw new RepositoryValidationError("constraints must carry 0..16 entries");
   const seen = new Set<string>();
   const out: string[] = [];
   for (const entry of value) {

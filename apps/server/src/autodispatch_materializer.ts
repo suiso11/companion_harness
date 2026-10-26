@@ -713,15 +713,50 @@ function collapseSnapshotRoots(roots: readonly string[]): string[] {
     .sort();
 }
 
-function policyScopes(
-  config: AutodispatchConfig,
-  plan: DispatchPlanView,
+/**
+ * Frozen-policy ∩ current-config scopes. The policy is the approval the human
+ * made; a later config edit may only narrow it. For every pair, contribute the
+ * narrower path when one contains the other (equal -> itself, policy under
+ * config -> policy, config under policy -> config, disjoint -> nothing).
+ * Adding config scopes that the policy never approved would widen the
+ * materialized profile, so they are never included.
+ */
+function intersectScopes(
+  policyScopes: readonly string[],
+  configScopes: readonly string[],
 ): string[] {
   const scopes = new Set<string>();
-  for (const scope of config.readScopes) scopes.add(scope);
-  if (plan.operation === "implement") {
-    for (const scope of config.writeScopes) scopes.add(scope);
+  for (const approved of policyScopes) {
+    for (const current of configScopes) {
+      if (approved === current || withinScope(approved, [current])) {
+        scopes.add(approved);
+      } else if (withinScope(current, [approved])) {
+        scopes.add(current);
+      }
+    }
   }
+  return [...scopes];
+}
+
+function policyScopes(
+  config: AutodispatchConfig,
+  policy: StandingPolicyView,
+  plan: DispatchPlanView,
+): string[] {
+  const scopes = new Set<string>(
+    intersectScopes(policy.readScopes, config.readScopes),
+  );
+  if (plan.operation === "implement") {
+    for (const scope of intersectScopes(
+      policy.writeScopes,
+      config.writeScopes,
+    )) {
+      scopes.add(scope);
+    }
+  }
+  // The policy has no separate allowedTopLevelFiles notion; keep the existing
+  // operator-approved top-level file behavior (it is still snapshot-filtered
+  // and never becomes an arbitrary path).
   for (const top of config.materialization?.allowedTopLevelFiles ?? []) {
     scopes.add(top);
   }
@@ -737,9 +772,10 @@ function withinScope(path: string, scopes: readonly string[]): boolean {
 
 function assertPlanScope(
   config: AutodispatchConfig,
+  policy: StandingPolicyView,
   plan: DispatchPlanView,
 ): boolean {
-  const scopes = policyScopes(config, plan);
+  const scopes = policyScopes(config, policy, plan);
   for (const relevant of plan.relevantPaths) {
     if (relevant === ".") return false;
     if (!withinScope(relevant, scopes)) return false;
@@ -1117,7 +1153,7 @@ export function createAutodispatchMaterializer(
     }
     if (input.signal?.aborted === true)
       return blocked("stopped", "intake stopped");
-    if (!assertPlanScope(deps.config, input.plan)) {
+    if (!assertPlanScope(deps.config, input.policy, input.plan)) {
       return blocked("plan_scope_violation", "plan path outside policy scopes");
     }
     let sourceRoot: string;
@@ -1187,7 +1223,7 @@ export function createAutodispatchMaterializer(
         sourceRoot,
         outputDir: join(jobRoot, "sealed-workspace"),
         allowedRoots: collapseSnapshotRoots(
-          policyScopes(deps.config, input.plan).filter(
+          policyScopes(deps.config, input.policy, input.plan).filter(
             (scope) => !material.allowedTopLevelFiles.includes(scope),
           ),
         ),
@@ -1296,7 +1332,7 @@ export function createAutodispatchMaterializer(
         input.policy.caps,
         deps.config.caps,
       );
-      const scopes = policyScopes(deps.config, input.plan).filter(
+      const scopes = policyScopes(deps.config, input.policy, input.plan).filter(
         (scope) => scope !== ".",
       );
       const checkCommands: Record<

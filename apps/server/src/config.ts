@@ -1789,8 +1789,55 @@ function parseLiteralScopes(raw: unknown, what: string, min: number): string[] {
   return out;
 }
 
-function parseAutodispatchCaps(raw: unknown): PolicyCaps {
-  if (raw === undefined) return DEFAULT_POLICY_CAPS;
+/**
+ * Omitted autodispatch caps stay at the conservative policy defaults, but the
+ * fields that the trial runner also budgets default to the narrower of the
+ * policy default and the operator's runner/trial ceiling. Explicit caps are
+ * still validated against the runner below (defaults never widen them).
+ */
+function defaultAutodispatchCaps(trial: TrialConfig | null): PolicyCaps {
+  if (trial === null) return DEFAULT_POLICY_CAPS;
+  const relay = trial.runner.relay;
+  return Object.freeze({
+    timeoutMs: Math.min(DEFAULT_POLICY_CAPS.timeoutMs, trial.timeoutMs),
+    maxOutputBytes: Math.min(
+      DEFAULT_POLICY_CAPS.maxOutputBytes,
+      trial.maxOutputBytes,
+    ),
+    maxModelCalls: Math.min(
+      DEFAULT_POLICY_CAPS.maxModelCalls,
+      relay.maxModelCalls,
+    ),
+    maxOutputTokens: Math.min(
+      DEFAULT_POLICY_CAPS.maxOutputTokens,
+      relay.maxOutputTokens,
+    ),
+    perCallTimeoutMs: Math.min(
+      DEFAULT_POLICY_CAPS.perCallTimeoutMs,
+      relay.perCallTimeoutMs,
+    ),
+    maxRequestBytes: Math.min(
+      DEFAULT_POLICY_CAPS.maxRequestBytes,
+      relay.maxRequestBytes,
+    ),
+    maxResponseBytes: Math.min(
+      DEFAULT_POLICY_CAPS.maxResponseBytes,
+      relay.maxResponseBytes,
+    ),
+    maxConcurrent: Math.min(
+      DEFAULT_POLICY_CAPS.maxConcurrent,
+      relay.maxConcurrent,
+    ),
+    jobsPerDay: DEFAULT_POLICY_CAPS.jobsPerDay,
+    concurrentExecutions: DEFAULT_POLICY_CAPS.concurrentExecutions,
+  });
+}
+
+function parseAutodispatchCaps(
+  raw: unknown,
+  defaults: PolicyCaps = DEFAULT_POLICY_CAPS,
+): PolicyCaps {
+  if (raw === undefined) return defaults;
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     throw configError("autodispatch caps are invalid");
   }
@@ -2171,7 +2218,7 @@ export function parseAutodispatchConfig(
     }
     checks.push(check);
   }
-  const caps = parseAutodispatchCaps(rec.caps);
+  const caps = parseAutodispatchCaps(rec.caps, defaultAutodispatchCaps(trial));
   const dependencyRoot =
     rec.dependencyRoot === undefined || rec.dependencyRoot === null
       ? null

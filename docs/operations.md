@@ -5350,16 +5350,23 @@ is Linux-only.
   `autodispatch_dependencies_missing`), `bridgeScriptPath`,
   `bridgeConfigTemplatePath`, and optional `materialization`. Unknown keys,
   bad paths, an `implement` operation without write scopes, checks that do
-  not equal the trial mandatory checks, or caps above the trial runner caps
-  fail config parsing (fail closed). Paths/checks/profile/bridge come only
-  from this operator config; a request cannot override them. Caps are
-  operator UPPER BOUNDS: a policy may choose smaller values and the
+  not equal the trial mandatory checks, or explicit caps above the trial
+  runner caps fail config parsing (fail closed). Omitted `caps` default
+  field-wise to the narrower of the policy defaults and the trial/runner
+  ceiling, so a runner `perCallTimeoutMs` of 60000 loads with an effective
+  default at or below 60000 instead of failing startup. Paths/checks/profile/
+  bridge come only from this operator config; a request cannot override them.
+  Caps are operator UPPER BOUNDS: a policy may choose smaller values and the
   materializer freezes the six relay caps (request bytes, model calls,
   output tokens, response bytes, per-call timeout, model concurrency) as the
   policy ∩ operator intersection in the hashed materialization; the guest
   profile and the host trial relay use exactly that frozen budget, and the
   host's static runner limits may only narrow it further. Per-call timeout
-  may legitimately narrow to 100ms. `externalModelConsent` is not an
+  may legitimately narrow to 100ms. The materialized read/write scopes are
+  likewise the FROZEN policy scopes ∩ the current config scopes (the narrower
+  of each contained pair, nothing for disjoint pairs); a config edit can only
+  narrow what the human approved, and a disjoint scope blocks the plan before
+  any snapshot/grant. `externalModelConsent` is not an
   autodispatch config field; the host derives it from the operation as
   described below.
 - `materialization` (strict): `stateDir` (absolute, outside `sourceRoot`),
@@ -5430,6 +5437,12 @@ is Linux-only.
   bounded `kind=task` child of the human policy purpose and inserts a
   frozen proposal + one queued grant inside the EXISTING TrialAuthority
   (no human HTTP approve click, no CAS/one-use/fence/claim/permit bypass).
+  Quota uses the narrower of the policy caps and the CURRENT operator
+  `limits.caps`, so lowering `jobsPerDay`/`concurrentExecutions` also applies
+  to an already-created policy. Policy expiry applies the same terminal grant
+  handling as an explicit revoke in one transaction: queued grants become
+  `revoked`, claimed grants get `cancel_requested`, and frozen plans/reserved
+  executions are superseded.
   The existing TrialRunner poll consumes the grant. One pick pages the
   stable `(created_at, execution_id)` queue oldest-first with an exclusive
   keyset cursor and an inclusive snapshot boundary, so blocked heads are
@@ -5464,11 +5477,16 @@ is Linux-only.
   `blocked` before any reservation/task/proposal/grant exists. Nothing is
   silently truncated. Manual staging keeps an empty constraint list.
 - Guest answer reporting: a completed read-only run forwards the guest's
-  bounded `finalText` (control characters stripped, at most 4096 chars,
-  split into ≤1024-char report findings) as
-  `guest answer (unattested): ...`. It is guest prose only: never a check
-  result, authorization input, completion evidence, or artifact claim, and
-  write runs may include the same labelled findings.
+  bounded `finalText` (control characters stripped, at most 4096 chars from
+  the guest, split into ≤1024-char report findings) as
+  `guest answer (unattested): ...`. The complete serialized result line
+  (JSON + LF, UTF-8 bytes) stays within
+  `min(request.budget.maxOutputBytes, storage.maxResultBytes)`; when needed
+  the unattested answer is first truncated on a UTF-8 boundary and marked
+  `[truncated]`, then optional findings are dropped from the end. Checks,
+  artifact, and authorization/identity fields are never trimmed. It is guest
+  prose only: never a check result, authorization input, completion evidence,
+  or artifact claim, and write runs may include the same labelled findings.
 - Frozen guest timeout: the bridge passes
   `min(request.budget.timeoutMs, profile.limits.maxDurationMs)` as
   `COMPANION_GUEST_TIMEOUT_SECONDS` into the confined guest environment

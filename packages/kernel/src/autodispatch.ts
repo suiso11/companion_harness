@@ -700,6 +700,32 @@ export function readStandingPolicy(
   return expireReadPolicy(db, row, nowMs());
 }
 
+/**
+ * Shared terminal-policy cleanup for revoke and unattended expiry. Called
+ * INSIDE the caller's transaction so a policy status transition and the grant
+ * handling it implies can never be observed apart.
+ */
+function applyTerminalPolicyEffects(
+  db: Database.Database,
+  session: string,
+  policyId: string,
+  now: number,
+  reason: string,
+): void {
+  db.prepare(
+    "UPDATE autodispatch_plans SET status='superseded', updated_at=? WHERE policy_id=? AND session_id=? AND status IN ('frozen','needs_decision','discuss','blocked')",
+  ).run(now, policyId, session);
+  db.prepare(
+    "UPDATE autodispatch_executions SET status='superseded', reason=?, updated_at=? WHERE policy_id=? AND session_id=? AND status='reserved'",
+  ).run(reason, now, policyId, session);
+  db.prepare(
+    "UPDATE trial_grants SET status='revoked' WHERE status='queued' AND execution_id IN (SELECT execution_id FROM autodispatch_executions WHERE policy_id=? AND session_id=? AND execution_id IS NOT NULL)",
+  ).run(policyId, session);
+  db.prepare(
+    "UPDATE trial_grants SET cancel_requested=1 WHERE status='claimed' AND execution_id IN (SELECT execution_id FROM autodispatch_executions WHERE policy_id=? AND session_id=? AND execution_id IS NOT NULL)",
+  ).run(policyId, session);
+}
+
 function expireReadPolicy(
   db: Database.Database,
   row: Record<string, unknown>,
@@ -709,14 +735,28 @@ function expireReadPolicy(
   if (view.status === "active" && view.expiresAt !== null) {
     const ms = parseStrictInstantMs(view.expiresAt);
     if (ms !== undefined && ms <= now) {
-      db.prepare(
-        "UPDATE autodispatch_policies SET status='expired', updated_at=? WHERE id=? AND status='active'",
-      ).run(now, view.id);
-      return rowToPolicy({
-        ...row,
-        status: "expired",
-        updated_at: now,
+      withImmediateTx(db, () => {
+        const result = db
+          .prepare(
+            "UPDATE autodispatch_policies SET status='expired', updated_at=? WHERE id=? AND status='active'",
+          )
+          .run(now, view.id);
+        if (result.changes > 0) {
+          applyTerminalPolicyEffects(
+            db,
+            view.sessionId,
+            view.id,
+            now,
+            "policy-expired",
+          );
+        }
       });
+      // Re-read after the transaction: a concurrent revoke/expiry must never
+      // be reported back as a stale active policy.
+      const fresh = db
+        .prepare("SELECT * FROM autodispatch_policies WHERE id=?")
+        .get(view.id) as Record<string, unknown> | undefined;
+      if (fresh !== undefined) return rowToPolicy(fresh);
     }
   }
   return view;
@@ -762,18 +802,7 @@ export function revokeStandingPolicy(
     // status and records cancel_requested so the existing authority/runner
     // quiescence path remains the only terminal transition. No arbitrary PID
     // is ever killed here.
-    db.prepare(
-      "UPDATE autodispatch_plans SET status='superseded', updated_at=? WHERE policy_id=? AND session_id=? AND status IN ('frozen','needs_decision','discuss','blocked')",
-    ).run(now, id, session);
-    db.prepare(
-      "UPDATE autodispatch_executions SET status='superseded', reason='policy-revoked', updated_at=? WHERE policy_id=? AND session_id=? AND status='reserved'",
-    ).run(now, id, session);
-    db.prepare(
-      "UPDATE trial_grants SET status='revoked' WHERE status='queued' AND execution_id IN (SELECT execution_id FROM autodispatch_executions WHERE policy_id=? AND session_id=? AND execution_id IS NOT NULL)",
-    ).run(id, session);
-    db.prepare(
-      "UPDATE trial_grants SET cancel_requested=1 WHERE status='claimed' AND execution_id IN (SELECT execution_id FROM autodispatch_executions WHERE policy_id=? AND session_id=? AND execution_id IS NOT NULL)",
-    ).run(id, session);
+    applyTerminalPolicyEffects(db, session, id, now, "policy-revoked");
   });
   return readStandingPolicy(db, session, id);
 }
@@ -1428,7 +1457,16 @@ export function authorizeWithinPolicy(
   // SQLite connections serialize here instead of both observing a free slot.
   // `reserved` rows count as already-spent daily slots and as concurrent
   // grants (they have no trial grant yet) to close the reserve-to-authorize
-  // window across connections.
+  // window across connections. Policy caps are upper bounds: a later operator
+  // config narrowing must still apply to an already-created policy.
+  const effectiveJobsPerDay = Math.min(
+    policy.caps.jobsPerDay,
+    options.limits.caps.jobsPerDay,
+  );
+  const effectiveConcurrentExecutions = Math.min(
+    policy.caps.concurrentExecutions,
+    options.limits.caps.concurrentExecutions,
+  );
   const reservationId =
     options.executionId === undefined
       ? generateId()
@@ -1458,7 +1496,7 @@ export function authorizeWithinPolicy(
           "SELECT COUNT(*) AS count FROM autodispatch_executions WHERE session_id=? AND policy_id=? AND status IN ('reserved','authorized') AND created_at>=?",
         )
         .get(session, policy.id, dayStart(now)) as { count: number };
-      if (usedToday.count >= policy.caps.jobsPerDay) {
+      if (usedToday.count >= effectiveJobsPerDay) {
         return { reserved: false, quotaReason: "quota-daily" };
       }
       const activeCount = db
@@ -1466,7 +1504,7 @@ export function authorizeWithinPolicy(
           "SELECT COUNT(*) AS count FROM autodispatch_executions e LEFT JOIN trial_grants g ON g.execution_id=e.execution_id WHERE e.session_id=? AND e.policy_id=? AND (e.status='reserved' OR (e.status='authorized' AND g.status IN ('queued','claimed')))",
         )
         .get(session, policy.id) as { count: number };
-      if (activeCount.count >= policy.caps.concurrentExecutions) {
+      if (activeCount.count >= effectiveConcurrentExecutions) {
         return { reserved: false, quotaReason: "quota-concurrent" };
       }
       db.prepare(

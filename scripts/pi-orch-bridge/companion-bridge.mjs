@@ -198,6 +198,10 @@ function observationFindings(observation) {
 const MAX_GUEST_ANSWER_CHARS = 4096;
 const MAX_GUEST_ANSWER_CHUNK = 900;
 const MAX_REPORT_FINDINGS = 16;
+const GUEST_ANSWER_LABEL = "guest answer (unattested)";
+const GUEST_ANSWER_SINGLE_PREFIX = `${GUEST_ANSWER_LABEL}: `;
+const GUEST_ANSWER_CHUNK_PREFIX = `${GUEST_ANSWER_LABEL} `;
+const TRUNCATION_MARKER = " [truncated]";
 
 function boundedGuestAnswer(observation) {
   if (
@@ -207,18 +211,13 @@ function boundedGuestAnswer(observation) {
   )
     return "";
   return observation.finalText
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, " ")
+    .replace(/\p{Cc}/gu, " ")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, MAX_GUEST_ANSWER_CHARS);
 }
 
-// The guest's final prose is UNATTESTED, exactly like its tool/worker lines.
-// It is forwarded only as clearly labelled report findings (never checks,
-// authorization, artifact, or completion evidence) after stripping control
-// characters and bounding the total forwarded size.
-function guestAnswerFindings(observation) {
-  const answer = boundedGuestAnswer(observation);
+function buildGuestAnswerFindings(answer, truncated = false) {
   if (answer.length === 0) return [];
   const chunks = [];
   for (let i = 0; i < answer.length; i += MAX_GUEST_ANSWER_CHUNK)
@@ -226,10 +225,33 @@ function guestAnswerFindings(observation) {
   return chunks.map((chunk, index) => {
     const label =
       chunks.length === 1
-        ? "guest answer (unattested): "
-        : `guest answer (unattested) ${index + 1}/${chunks.length}: `;
-    return `${label}${chunk}`;
+        ? GUEST_ANSWER_SINGLE_PREFIX
+        : `${GUEST_ANSWER_CHUNK_PREFIX}${index + 1}/${chunks.length}: `;
+    const suffix =
+      truncated && index === chunks.length - 1 ? TRUNCATION_MARKER : "";
+    return `${label}${chunk}${suffix}`;
   });
+}
+
+function guestAnswerChunkText(entry) {
+  if (entry.startsWith(GUEST_ANSWER_SINGLE_PREFIX))
+    return entry.slice(GUEST_ANSWER_SINGLE_PREFIX.length);
+  if (!entry.startsWith(GUEST_ANSWER_CHUNK_PREFIX)) return null;
+  const rest = entry.slice(GUEST_ANSWER_CHUNK_PREFIX.length);
+  const match = /^\d+\/\d+: /.exec(rest);
+  return match === null ? null : rest.slice(match[0].length);
+}
+
+function isGuestAnswerFinding(entry) {
+  return guestAnswerChunkText(entry) !== null;
+}
+
+// The guest's final prose is UNATTESTED, exactly like its tool/worker lines.
+// It is forwarded only as clearly labelled report findings (never checks,
+// authorization, artifact, or completion evidence) after stripping control
+// characters and bounding the total forwarded size.
+function guestAnswerFindings(observation) {
+  return buildGuestAnswerFindings(boundedGuestAnswer(observation));
 }
 
 function reportFindings(observation, extra = []) {
@@ -247,6 +269,114 @@ function reportFindings(observation, extra = []) {
     out.push(entry);
   }
   return out;
+}
+
+function resultLineCap(request, config) {
+  // TrialRunner accepts budget.maxOutputBytes + a framing allowance, but the
+  // conservative bound for the complete JSON+LF line is the request budget.
+  return Math.min(request.budget.maxOutputBytes, config.storage.maxResultBytes);
+}
+
+function serializedResultBytes(raw) {
+  return Buffer.byteLength(serializeResult(raw), "utf8");
+}
+
+// Cut on a UTF-8 code-point boundary so a multibyte character is never split
+// into a replacement sequence.
+function truncateUtf8(text, maxBytes) {
+  const bytes = Buffer.from(text, "utf8");
+  if (bytes.length <= maxBytes) return text;
+  let end = maxBytes;
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1;
+  return bytes.subarray(0, end).toString("utf8");
+}
+
+function extractGuestAnswer(findings) {
+  const chunks = [];
+  for (const entry of findings) {
+    const text = guestAnswerChunkText(entry);
+    if (text !== null) chunks.push(text);
+  }
+  return chunks.join(" ");
+}
+
+function withoutGuestAnswer(raw) {
+  return {
+    ...raw,
+    report: {
+      ...raw.report,
+      findings: raw.report.findings.filter(
+        (entry) => !isGuestAnswerFinding(entry),
+      ),
+    },
+  };
+}
+
+function withGuestAnswer(raw, answer, truncated) {
+  return {
+    ...raw,
+    report: {
+      ...raw.report,
+      findings: [
+        ...buildGuestAnswerFindings(answer, truncated),
+        ...raw.report.findings.filter((entry) => !isGuestAnswerFinding(entry)),
+      ],
+    },
+  };
+}
+
+// Keep the COMPLETE serialized result line within the request output
+// allowance. The unattested guest answer is shrunk first (UTF-8-safe, marked
+// truncated), then optional findings are dropped from the end. Checks, the
+// artifact, and authorization/identity fields are never trimmed.
+function fitResultLineBudget(raw, request, config) {
+  const cap = resultLineCap(request, config);
+  if (serializedResultBytes(raw) <= cap) return raw;
+  if (!Array.isArray(raw.report?.findings)) return raw;
+  let fitted = raw;
+  const answer = extractGuestAnswer(raw.report.findings);
+  if (answer.length > 0) {
+    const reduced = withoutGuestAnswer(raw);
+    if (serializedResultBytes(reduced) > cap) {
+      // Not even the remaining fields fit: drop the answer, then let the
+      // optional-finding loop below make room.
+      fitted = reduced;
+    } else {
+      const fullBytes = Buffer.byteLength(answer, "utf8");
+      let low = 1;
+      let high = fullBytes;
+      let best = null;
+      while (low <= high) {
+        const mid = Math.floor((low + high) / 2);
+        const truncated = mid < fullBytes;
+        const candidate = withGuestAnswer(
+          reduced,
+          truncateUtf8(answer, mid),
+          truncated,
+        );
+        if (serializedResultBytes(candidate) <= cap) {
+          best = candidate;
+          low = mid + 1;
+        } else {
+          high = mid - 1;
+        }
+      }
+      fitted = best ?? reduced;
+    }
+  }
+  while (
+    serializedResultBytes(fitted) > cap &&
+    fitted.report.findings.length > 0
+  ) {
+    fitted = {
+      ...fitted,
+      report: {
+        ...fitted.report,
+        findings: fitted.report.findings.slice(0, -1),
+      },
+    };
+  }
+  return fitted;
 }
 
 // Conservative RELIABILITY downgrade over an UNTRUSTED guest report. The
@@ -631,8 +761,11 @@ async function main() {
   let outcome;
 
   const finalize = (raw, storedExit, artifactBytes) => {
-    const validated = validateWireResult(raw, request.requiredChecks);
+    const fitted = fitResultLineBudget(raw, request, config);
+    const validated = validateWireResult(fitted, request.requiredChecks);
     const line = serializeResult(validated);
+    if (Buffer.byteLength(line, "utf8") > resultLineCap(request, config))
+      throw new Error("final result exceeds the output allowance");
     journal.finalize(request, {
       resultJsonLf: line,
       exitCode: storedExit,
@@ -1072,8 +1205,7 @@ async function main() {
                           ],
                         );
                     if (outcome.raw.report.findings.length === 0) {
-                      outcome.raw.report.findings =
-                        reportFindings(observation);
+                      outcome.raw.report.findings = reportFindings(observation);
                     }
                   } else {
                     const findings = reportFindings(

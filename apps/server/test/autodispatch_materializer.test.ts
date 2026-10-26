@@ -1601,6 +1601,83 @@ linuxDescribe(
       }
     });
 
+    it("materializes only the frozen-policy ∩ current-config scope intersection", async () => {
+      const fx = makeFixture();
+      try {
+        const prepare = async (
+          configRead: string[],
+          policyRead: string[],
+          relevantPath: string,
+        ) => {
+          const materializer = createAutodispatchMaterializer({
+            config: {
+              ...fx.config,
+              readScopes: configRead,
+              writeScopes: [],
+            },
+            runtimeDir: fx.runtimeDir,
+            currentModel: "test-model",
+            available: true,
+            enabled: true,
+            disclosedWholeRepoRead: true,
+            now: () => NOW,
+          });
+          return materializer.prepare({
+            plan: {
+              ...PLAN,
+              operation: "investigate",
+              relevantPaths: [relevantPath],
+            },
+            policy: {
+              ...POLICY,
+              readScopes: policyRead,
+              writeScopes: [],
+            },
+            executionId: randomUUID(),
+            now: NOW,
+          });
+        };
+        const manifestPaths = (result: Awaited<ReturnType<typeof prepare>>) => {
+          if (!result.ok) throw new Error(result.reason);
+          const manifest = JSON.parse(
+            readFileSync(result.materialization.state.manifestPath, "utf8"),
+          ) as { entries: { path: string }[] };
+          return manifest.entries.map((entry) => entry.path);
+        };
+
+        // Policy narrower than an expanded current config: only src/app.ts.
+        const policyNarrower = await prepare(
+          ["src"],
+          ["src/app.ts"],
+          "src/app.ts",
+        );
+        expect(manifestPaths(policyNarrower)).toEqual([
+          "package.json",
+          "src/app.ts",
+        ]);
+
+        // Current config narrower than the policy: the config still wins.
+        const configNarrower = await prepare(
+          ["src/app.ts"],
+          ["src"],
+          "src/app.ts",
+        );
+        expect(manifestPaths(configNarrower)).toEqual([
+          "package.json",
+          "src/app.ts",
+        ]);
+
+        // Disjoint policy/config scopes approve nothing and block the plan.
+        const disjoint = await prepare(["build"], ["src"], "src/app.ts");
+        expect(disjoint.ok).toBe(false);
+        if (!disjoint.ok) {
+          expect(disjoint.code).toBe("plan_scope_violation");
+        }
+      } finally {
+        fx.cleanup();
+      }
+    });
+
     it("materializes pnpm links whose copied packages real Node can import, with .pnpm native evidence", async () => {
       const fx = makeFixture();
       const sourceRoot = mkdtempSync(join(tmpdir(), "pnpm-closure-"));

@@ -63,10 +63,18 @@ const MAX_OBSERVATION_BYTES = 64 * 1024;
 // its observation and exit instead of being killed at the boundary.
 const GUEST_TIMEOUT_MARGIN_SECONDS = 2;
 // Pinned to scripts/pi-orch-bridge/companion-protocol.mjs (the canonical wire
-// contract): MAX_LIST_ITEMS=16, MAX_TEXT_SHORT=1024. The guest is a
-// standalone copied artifact, so it cannot import the host protocol module.
-const MAX_LIST_ITEMS = 16;
+// contract): MAX_RELEVANT_PATHS=16, MAX_PATH_CHARS=512, MAX_TEXT_SHORT=1024,
+// MAX_STATEMENT_CHARS=4096, MAX_OBJECTIVE_CHARS=8192, MAX_LIST_ITEMS=16,
+// MAX_CHECKS=16. The guest is a standalone copied artifact, so it cannot
+// import the host protocol module; keep these literals in lockstep.
+const MAX_RELEVANT_PATHS = 16;
+const MAX_PATH_CHARS = 512;
 const MAX_TEXT_SHORT = 1024;
+const MAX_STATEMENT_CHARS = 4096;
+const MAX_OBJECTIVE_CHARS = 8192;
+const MAX_LIST_ITEMS = 16;
+const MAX_CHECKS = 16;
+const MAX_CHECK_ID_CHARS = 64;
 
 function fail(message) {
   process.stderr.write(`pi-orch guest: ${message}\n`);
@@ -117,14 +125,22 @@ function parseJob(path) {
   if (
     typeof raw.objective !== "string" ||
     raw.objective.length === 0 ||
-    raw.objective.length > 4096
+    raw.objective.length > MAX_OBJECTIVE_CHARS
   ) {
     fail("frozen objective is invalid");
   }
-  if (!Array.isArray(raw.relevantPaths) || raw.relevantPaths.length === 0)
-    fail("frozen relevantPaths are empty");
+  if (
+    !Array.isArray(raw.relevantPaths) ||
+    raw.relevantPaths.length < 1 ||
+    raw.relevantPaths.length > MAX_RELEVANT_PATHS
+  )
+    fail("frozen relevantPaths are invalid");
   for (const entry of raw.relevantPaths) {
-    if (typeof entry !== "string" || entry.length === 0 || entry.length > 512)
+    if (
+      typeof entry !== "string" ||
+      entry.length === 0 ||
+      entry.length > MAX_PATH_CHARS
+    )
       fail("frozen relevantPath is invalid");
     if (entry.startsWith("/") || entry.includes("..") || entry.includes("\0"))
       fail("frozen relevantPath must be relative");
@@ -133,10 +149,29 @@ function parseJob(path) {
     fail("frozen purpose is invalid");
   if (
     typeof raw.purpose.statement !== "string" ||
-    raw.purpose.statement.length === 0
+    raw.purpose.statement.length === 0 ||
+    raw.purpose.statement.length > MAX_STATEMENT_CHARS
   )
     fail("frozen purpose statement is invalid");
-  if (!Array.isArray(raw.constraints) || raw.constraints.length > 16)
+  if (
+    !Array.isArray(raw.requiredChecks) ||
+    raw.requiredChecks.length < 1 ||
+    raw.requiredChecks.length > MAX_CHECKS
+  )
+    fail("frozen requiredChecks are invalid");
+  for (const entry of raw.requiredChecks) {
+    if (
+      typeof entry !== "string" ||
+      entry.length === 0 ||
+      entry.length > MAX_CHECK_ID_CHARS ||
+      entry.includes("\0")
+    )
+      fail("frozen requiredCheck is invalid");
+  }
+  if (
+    !Array.isArray(raw.constraints) ||
+    raw.constraints.length > MAX_LIST_ITEMS
+  )
     fail("frozen constraints are invalid");
   const constraints = [];
   for (const entry of raw.constraints) {
@@ -215,9 +250,7 @@ function buildPrompt(job) {
     `Relevant paths: ${paths}.`,
     `Purpose: ${job.statement}`,
     `Objective: ${job.objective}`,
-    ...(job.constraints.length > 0
-      ? [formatConstraints(job.constraints)]
-      : []),
+    ...(job.constraints.length > 0 ? [formatConstraints(job.constraints)] : []),
     formatAcceptance(job.acceptance),
     "Write the smallest correct candidate file, then stop.",
   ].join("\n");

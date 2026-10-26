@@ -390,6 +390,133 @@ function guestReportBody(
   )});\n${extraBody}`;
 }
 
+// Runs the REAL guest script in a minimal bwrap namespace with a fake OMP that
+// captures the rendered prompt. /work does not exist on the host, so the
+// process-level guest parse path needs a private workspace bind.
+function runGuestJob(objective: string): {
+  readonly status: number | null;
+  readonly stderr: string;
+  readonly prompt: string;
+} {
+  const dir = tempRoot("guest-parse");
+  const workRoot = join(dir, "work");
+  mkdirSync(workRoot, { recursive: true });
+  const bin = join(dir, "bin");
+  mkdirSync(bin, { recursive: true });
+  const omp = join(bin, "omp");
+  const guestPromptPath = "/work/captured-prompt.txt";
+  const events = [
+    {
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "t1",
+            name: "read",
+            arguments: { path: "src/app.ts" },
+          },
+          { type: "text", text: "ok" },
+        ],
+      },
+    },
+    {
+      type: "message_end",
+      message: {
+        role: "toolResult",
+        toolName: "read",
+        toolCallId: "t1",
+        isError: false,
+      },
+    },
+  ]
+    .map((event) => JSON.stringify(event))
+    .join("\n");
+  write(
+    omp,
+    `#!${process.execPath}\nimport { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(guestPromptPath)}, process.argv.at(-1) ?? "");\nprocess.stdout.write(${JSON.stringify(`${events}\n`)});\n`,
+    0o700,
+  );
+  const jobFile = join(dir, "job.json");
+  write(
+    jobFile,
+    `${JSON.stringify({
+      version: 1,
+      mode: "read_only",
+      executionId: randomUUID(),
+      taskHash: "a".repeat(64),
+      profileFingerprint: "b".repeat(64),
+      sealed: {
+        manifestDigest: "c".repeat(64),
+        sourceRevision: "d".repeat(40),
+        snapshotRoot: "/snapshot",
+      },
+      purpose: { statement: "synthetic objective bound", scope: "synthetic" },
+      objective,
+      relevantPaths: ["src"],
+      acceptance: ["bounded"],
+      constraints: [],
+      requiredChecks: ["synthetic-check"],
+      externalModelConsent: false,
+    })}\n`,
+    0o600,
+  );
+  const bound = ["/usr", "/etc", "/home", "/lib", "/lib64", "/bin"].flatMap(
+    (path) => (existsSync(path) ? ["--ro-bind", path, path] : []),
+  );
+  const run = spawnSync(
+    "/usr/bin/bwrap",
+    [
+      "--die-with-parent",
+      "--new-session",
+      "--unshare-all",
+      "--unshare-user",
+      "--proc",
+      "/proc",
+      "--dev",
+      "/dev",
+      "--tmpfs",
+      "/scratch",
+      ...bound,
+      "--bind",
+      workRoot,
+      "/work",
+      "--ro-bind",
+      jobFile,
+      jobFile,
+      "--ro-bind",
+      omp,
+      omp,
+      "--chdir",
+      "/work",
+      "--",
+      process.execPath,
+      GUEST,
+    ],
+    {
+      encoding: "utf8",
+      timeout: 20_000,
+      env: {
+        HOME: "/scratch",
+        TMPDIR: "/scratch",
+        COMPANION_JOB_FILE: jobFile,
+        COMPANION_MODEL_UDS: join(dir, "model.sock"),
+        COMPANION_OMP_BIN: omp,
+        COMPANION_NODE_BIN: process.execPath,
+        COMPANION_EXECUTOR_KIND: "fixed",
+      },
+    },
+  );
+  let prompt = "";
+  try {
+    prompt = readFileSync(join(workRoot, "captured-prompt.txt"), "utf8");
+  } catch {
+    // Rejected jobs never invoke the fake OMP.
+  }
+  return { status: run.status, stderr: run.stderr ?? "", prompt };
+}
+
 describe("sealed pi-orch bridge portable protocol/command contract", () => {
   it("--describe is side-effect free and marks sealed/test defaults", () => {
     const dir = tempRoot("describe");
@@ -611,6 +738,47 @@ posixDescribe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
     expect(joined.length).toBeLessThanOrEqual(4096 + 6 * 40);
     expect(answerEntries.every((entry) => entry.length <= 1024)).toBe(true);
     // The answer is prose only: host checks remain the sole verified evidence.
+    expect(result.evidence.checks).toEqual([
+      {
+        id: "synthetic-check",
+        exitCode: 0,
+        timedOut: false,
+        outputMatched: true,
+      },
+    ]);
+  });
+
+  it("truncates an unattested multibyte answer to keep the result line within maxOutputBytes", async () => {
+    const answer = `日本語の回答: ${"詳細な説明です。".repeat(500)}`;
+    const fixture = await makeFixture({
+      executorBody: guestReportBody(
+        [{ id: "oc-answer", status: "done" }],
+        "",
+        answer,
+      ),
+      scratchPaths: [".companion-observation"],
+    });
+    const request = makeRequest(fixture, {
+      budget: { timeoutMs: 10_000, maxOutputBytes: 4096 },
+    });
+    const run = await runBridge(fixture, request);
+    expect(run.status).toBe(0);
+    const lines = run.stdout.split("\n").filter((line) => line.length > 0);
+    expect(lines).toHaveLength(1);
+    // The complete serialized line (JSON + LF, UTF-8 bytes) is capped.
+    expect(Buffer.byteLength(run.stdout, "utf8")).toBeLessThanOrEqual(4096);
+    const result = JSON.parse(lines[0] as string) as TrialWireResultShape;
+    expect(result.status).toBe("done");
+    expect(result.verified).toBe(true);
+    const answers = result.report.findings.filter((entry) =>
+      entry.startsWith("guest answer (unattested)"),
+    );
+    expect(answers.length).toBeGreaterThan(0);
+    const joined = answers.join(" ");
+    expect(joined).toContain("日本語");
+    expect(joined).toContain("[truncated]");
+    // Host evidence is untouched by answer fitting.
+    expect(result.evidence.artifact).toBeDefined();
     expect(result.evidence.checks).toEqual([
       {
         id: "synthetic-check",
@@ -1082,6 +1250,31 @@ posixDescribe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
     expect(result.status).toBe("error");
     expect(result.report.unresolved).toContain("blocked: dependencies");
   });
+
+  it.skipIf(process.platform !== "linux")(
+    "accepts canonical 8192-char objectives through the real guest parse path and rejects 8193",
+    () => {
+      const bwrap = "/usr/bin/bwrap";
+      const probe = spawnSync(bwrap, ["--version"], { encoding: "utf8" });
+      expect(
+        probe.status,
+        `bwrap probe failed: ${probe.error?.message ?? ""} ${probe.stderr ?? ""}`,
+      ).toBe(0);
+      for (const length of [4097, 8192]) {
+        const objective = "o".repeat(length);
+        const run = runGuestJob(objective);
+        expect(run.status, run.stderr).toBe(0);
+        // The parsed objective reaches the rendered prompt unchanged.
+        expect(run.prompt).toContain(`Objective: ${objective}`);
+      }
+      const tooLong = runGuestJob("o".repeat(8193));
+      expect(tooLong.status).toBe(2);
+      expect(tooLong.stderr).toContain("frozen objective is invalid");
+      expect(tooLong.prompt).toBe("");
+    },
+    30_000,
+  );
+
   it.skipIf(process.platform !== "linux")(
     "the real guest terminates on the frozen timeout before the bridge deadline",
     async () => {
