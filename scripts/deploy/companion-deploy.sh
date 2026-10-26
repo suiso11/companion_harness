@@ -243,7 +243,10 @@ if [ -f "$TRIAL_OPERATOR_INPUT" ]; then
     # the server rejects autodispatch without a trial config. If no usable
     # previous config exists, fall back to an empty file, but roll back rather
     # than restart unstartable when autodispatch is configured.
-    DISABLED_ENV_LINE="$(node "$SCRIPT_DIR/disable-trial-env.mjs" "$TRIAL_ENV_FILE" 2>/dev/null || true)"
+    # Rebind the model with the same resolver as the builder (exported
+    # COMPANION_MODEL_JSON, else the private .env.litellm alias) so a host
+    # model change plus a failed rebuild still starts with trials off.
+    DISABLED_ENV_LINE="$(node "$SCRIPT_DIR/disable-trial-env.mjs" "$TRIAL_ENV_FILE" "$DEPLOY_DIR/.env.litellm" 2>/dev/null || true)"
     if [ -z "$DISABLED_ENV_LINE" ] && [ -n "${COMPANION_AUTODISPATCH_JSON:-}" ]; then
       log "ERROR no usable prior trial config to keep disabled; rolling back instead of restarting with autodispatch but no trial config"
       rollback

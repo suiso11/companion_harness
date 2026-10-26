@@ -34,6 +34,9 @@ import {
   formatAutonomyEnvLine,
   frozenRootReferencedByOperator,
   resolveCurrentModel,
+  SEALED_SOURCE_ROOTS,
+  SEALED_TOP_LEVEL_FILES,
+  sealedLintArgs,
   selectCheckCommands,
   selectFrozenRootsToPrune,
   selectSealedChecks,
@@ -238,10 +241,14 @@ try {
   // package links do not exist inside the sealed snapshot), so a `typecheck`
   // gate would reject every candidate. Biome needs no project dependencies.
   // Requested-but-unsupported checks are dropped loudly, never silently.
+  //
+  // Target source paths explicitly: the guest writes generated scratch
+  // (.companion-observation/guest.json) into /work before checks run, and
+  // checking the whole tree would fail formatting on that untrusted file.
   const checks = {
     lint: {
       executable: NODE,
-      args: ["/deps/node_modules/@biomejs/biome/bin/biome", "check", "/work"],
+      args: sealedLintArgs("/deps/node_modules/@biomejs/biome/bin/biome"),
     },
   };
   const selectedChecks = selectSealedChecks(
@@ -290,7 +297,7 @@ try {
     workspaceAlias: input.workspaceAlias,
     sourceRoot: SRC,
     operations: ["investigate", "implement"],
-    readScopes: ["apps", "packages", "scripts", "docs"],
+    readScopes: [...SEALED_SOURCE_ROOTS],
     writeScopes: ["apps", "packages"],
     // Top-level checks are the selected NAMES (array); materialization below
     // carries the filtered command map, exactly as parseAutodispatchConfig
@@ -313,16 +320,7 @@ try {
       executionBackend: "confined",
       runtime,
       dependencySourceNodeModules: DEP_SOURCE,
-      allowedTopLevelFiles: [
-        "package.json",
-        "pnpm-lock.yaml",
-        "pnpm-workspace.yaml",
-        "tsconfig.json",
-        "biome.json",
-        ".gitignore",
-        ".node-version",
-        "README.md",
-      ],
+      allowedTopLevelFiles: [...SEALED_TOP_LEVEL_FILES],
       maxDurationMs: limits.timeoutMs,
       modelRoute: "local",
     },
@@ -347,7 +345,7 @@ try {
     version: 1,
     status: "active",
     operations: ["investigate", "implement"],
-    readScopes: ["apps", "packages", "scripts", "docs"],
+    readScopes: [...SEALED_SOURCE_ROOTS],
     writeScopes: ["apps", "packages"],
     checks: selectedChecks,
     caps: { ...caps },

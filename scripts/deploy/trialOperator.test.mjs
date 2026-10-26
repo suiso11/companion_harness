@@ -16,6 +16,10 @@ import {
   formatAutonomyEnvLine,
   frozenRootReferencedByOperator,
   resolveCurrentModel,
+  SEALED_SOURCE_ROOTS,
+  SEALED_TOP_LEVEL_FILES,
+  sealedLintArgs,
+  sealedLintTargets,
   selectCheckCommands,
   selectFrozenRootsToPrune,
   selectSealedChecks,
@@ -142,16 +146,53 @@ describe("disableTrialEnv", () => {
     enabled: true,
     mandatoryChecks: ["lint"],
     workspaceAlias: "companion-harness",
+    currentModel: "local-chat",
   });
+  const env = {
+    COMPANION_MODEL_JSON: JSON.stringify({ model: "local-chat" }),
+  };
+  const parse = (line) =>
+    JSON.parse(line.slice(line.indexOf("'") + 1, line.lastIndexOf("'")));
 
   it("keeps the previous config valid but disabled", () => {
-    const line = disableTrialEnv(`COMPANION_AUTONOMY_JSON='${json}'\n`);
+    const line = disableTrialEnv(`COMPANION_AUTONOMY_JSON='${json}'\n`, {
+      env,
+    });
     expect(line).toBe(
       `COMPANION_AUTONOMY_JSON='${JSON.stringify({ ...JSON.parse(json), enabled: false })}'\n`,
     );
+    expect(parse(line)).toMatchObject({
+      enabled: false,
+      mandatoryChecks: ["lint"],
+      currentModel: "local-chat",
+    });
+  });
+
+  it("rebinds the disabled fallback to the effective host model", () => {
+    const line = disableTrialEnv(`COMPANION_AUTONOMY_JSON='${json}'\n`, {
+      env: { COMPANION_MODEL_JSON: JSON.stringify({ model: "new-model" }) },
+    });
+    expect(parse(line)).toMatchObject({
+      enabled: false,
+      currentModel: "new-model",
+    });
+  });
+
+  it("rebinds through the .env.litellm alias like the builder", () => {
+    const line = disableTrialEnv(`COMPANION_AUTONOMY_JSON='${json}'\n`, {
+      env: {},
+      litellmEnvText: "LITELLM_MASTER_KEY=abc\n",
+    });
+    expect(parse(line)).toMatchObject({
+      enabled: false,
+      currentModel: "local-chat",
+    });
+  });
+
+  it("returns nothing when the effective model cannot be resolved", () => {
     expect(
-      JSON.parse(line.slice(line.indexOf("'") + 1, line.lastIndexOf("'"))),
-    ).toMatchObject({ enabled: false, mandatoryChecks: ["lint"] });
+      disableTrialEnv(`COMPANION_AUTONOMY_JSON='${json}'\n`, { env: {} }),
+    ).toBe("");
   });
 
   it("returns nothing when no usable line exists", () => {
@@ -159,6 +200,32 @@ describe("disableTrialEnv", () => {
     expect(disableTrialEnv("OTHER=1\n")).toBe("");
     expect(disableTrialEnv("COMPANION_AUTONOMY_JSON='not json'\n")).toBe("");
     expect(disableTrialEnv("COMPANION_AUTONOMY_JSON='[]'\n")).toBe("");
+  });
+});
+
+describe("sealedLintArgs", () => {
+  it("names only source paths and never the guest observation scratch", () => {
+    const args = sealedLintArgs("/deps/biome", [
+      ...SEALED_SOURCE_ROOTS,
+      ...SEALED_TOP_LEVEL_FILES,
+      ".companion-observation",
+      ".companion-observation/guest.json",
+    ]);
+    expect(args).not.toContain("/work");
+    expect(args.some((arg) => arg.includes(".companion-observation"))).toBe(
+      false,
+    );
+    expect(args).toContain("/work/apps");
+    expect(args).toContain("/work/packages");
+    expect(args).toContain("/work/package.json");
+    expect(args).toContain("--files-ignore-unknown=true");
+  });
+
+  it("defaults to the sealed source roots and preserved top-level files", () => {
+    expect(sealedLintTargets()).toEqual([
+      ...SEALED_SOURCE_ROOTS.map((entry) => `/work/${entry}`),
+      ...SEALED_TOP_LEVEL_FILES.map((entry) => `/work/${entry}`),
+    ]);
   });
 });
 

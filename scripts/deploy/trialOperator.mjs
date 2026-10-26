@@ -246,6 +246,58 @@ export function formatAutonomyEnvLine(json) {
   return `COMPANION_AUTONOMY_JSON='${json}'\n`;
 }
 
+/** Guest-generated scratch root inside /work (untrusted, never source). */
+export const GUEST_OBSERVATION_SCRATCH_ROOT = ".companion-observation";
+/** Directories copied into the sealed /work snapshot. */
+export const SEALED_SOURCE_ROOTS = ["apps", "packages", "scripts", "docs"];
+/** Top-level files preserved by the materializer snapshot filter. */
+export const SEALED_TOP_LEVEL_FILES = [
+  "package.json",
+  "pnpm-lock.yaml",
+  "pnpm-workspace.yaml",
+  "tsconfig.json",
+  "biome.json",
+  ".gitignore",
+  ".node-version",
+  "README.md",
+];
+
+/**
+ * Explicit /work paths for the sealed lint check. Passing the workspace root
+ * would also lint the guest's `.companion-observation/guest.json`, which is
+ * generated scratch (the bridge already excludes it from artifact checks), so
+ * only source roots and preserved top-level files are named.
+ */
+export function sealedLintTargets(
+  entries = [...SEALED_SOURCE_ROOTS, ...SEALED_TOP_LEVEL_FILES],
+) {
+  if (!Array.isArray(entries)) fail("lint entries must be an array");
+  return entries
+    .filter((entry) => typeof entry === "string" && entry.length > 0)
+    .filter(
+      (entry) =>
+        entry !== GUEST_OBSERVATION_SCRATCH_ROOT &&
+        !entry.startsWith(`${GUEST_OBSERVATION_SCRATCH_ROOT}/`),
+    )
+    .map((entry) => `/work/${entry}`);
+}
+
+/** Full biome argv for the sealed lint check (explicit source paths only). */
+export function sealedLintArgs(
+  biomePath,
+  entries = [...SEALED_SOURCE_ROOTS, ...SEALED_TOP_LEVEL_FILES],
+) {
+  if (typeof biomePath !== "string" || !ABS_RE.test(biomePath)) {
+    fail("biomePath must be an absolute path");
+  }
+  return [
+    biomePath,
+    "check",
+    "--files-ignore-unknown=true",
+    ...sealedLintTargets(entries),
+  ];
+}
+
 const FROZEN_ROOT_RE = /^frozen-[0-9a-f]{7,40}-(\d{8}T\d{6}Z)$/;
 
 // Select old frozen roots to prune, newest first by the timestamp suffix. The
