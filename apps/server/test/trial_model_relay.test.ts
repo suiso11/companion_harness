@@ -34,6 +34,7 @@ function testCaps(
 interface FakeGatewayOpts {
   result?: ChatResult;
   hang?: boolean;
+  error?: unknown;
   onChat?: (request: ChatRequest, options?: unknown) => void;
   signalSeen?: { current: AbortSignal | null };
 }
@@ -54,6 +55,7 @@ function fakeGateway(
     ): Promise<ChatResult> {
       calls.push(request);
       opts.onChat?.(request, options);
+      if (opts.error !== undefined) throw opts.error;
       if (opts.signalSeen !== undefined && options?.signal !== undefined) {
         opts.signalSeen.current = options.signal;
       }
@@ -637,11 +639,22 @@ describe.skipIf(process.platform === "win32")("trial_model_relay", () => {
         expect(tool.description.length).toBeGreaterThan(0);
         expect(tool.description.length).toBeLessThanOrEqual(1024);
       }
-      // Full native text preserved in a trusted labeled system message.
+      // Full native text preserved in ONE leading system message: the real
+      // guest system prompt must be merged, never a second leading system
+      // message (the LiteLLM/llama.cpp 500 root cause).
+      expect(fwd.messages.length).toBe(2);
+      expect(fwd.messages.filter((m) => m.role === "system").length).toBe(1);
       const first = fwd.messages[0];
       expect(first?.role).toBe("system");
       expect(first?.content).toContain("[trial-relay tool context]");
       expect(first?.content).toContain(longDesc);
+      expect(first?.content).toContain("synthetic system prompt");
+      // Trusted relay text precedes the guest system prompt.
+      expect(first?.content?.indexOf("[trial-relay tool context]")).toBe(0);
+      expect(
+        first?.content?.indexOf("synthetic system prompt"),
+      ).toBeGreaterThan(first?.content?.indexOf(longDesc) ?? -1);
+      expect(fwd.messages[1]?.role).toBe("user");
       // Guest-visible round-trip still works (stream SSE with tool_calls).
       expect(res.headers["content-type"]).toContain("text/event-stream");
       const trace = records.filter((r) => r.code === "trial.relay_request");
@@ -649,6 +662,108 @@ describe.skipIf(process.platform === "win32")("trial_model_relay", () => {
       expect(trace[0]?.status).toBe("forwarded");
     } finally {
       await relay.close();
+    }
+  });
+
+  it("folds a later guest system message into the single leading system message", async () => {
+    const gw = fakeGateway();
+    const { relay, sock } = await startRelay(testCaps(), gw);
+    try {
+      relay.setPermitted(true);
+      const longDesc = `SYNTHETIC long description ${"y".repeat(4600)}`;
+      const res = await postUds(
+        sock,
+        chatBody({
+          messages: [
+            { role: "system", content: "synthetic leading prompt" },
+            { role: "user", content: "first task" },
+            { role: "system", content: "synthetic late prompt" },
+            { role: "user", content: "second task" },
+          ],
+          tools: [
+            {
+              type: "function",
+              function: {
+                name: "bash",
+                description: longDesc,
+                parameters: { type: "object", properties: {} },
+              },
+            },
+          ],
+        }),
+      );
+      expect(res.status).toBe(200);
+      const fwd = gw.calls[0] as ChatRequest;
+      expect(() => validateChatRequest(fwd)).not.toThrow();
+      expect(fwd.messages.filter((m) => m.role === "system").length).toBe(1);
+      const first = fwd.messages[0];
+      expect(first?.role).toBe("system");
+      expect(first?.content).toContain("[trial-relay tool context]");
+      expect(first?.content).toContain("synthetic leading prompt");
+      expect(first?.content).toContain("synthetic late prompt");
+      // Original guest order is preserved in the merged leading message.
+      expect(
+        first?.content?.indexOf("synthetic leading prompt") ?? -1,
+      ).toBeLessThan(first?.content?.indexOf("synthetic late prompt") ?? -1);
+      expect(fwd.messages.map((m) => m.role)).toEqual([
+        "system",
+        "user",
+        "user",
+      ]);
+    } finally {
+      await relay.close();
+    }
+  });
+
+  it("maps gateway error codes to relay reasons and traces httpStatus", async () => {
+    const cases: Array<{
+      error: unknown;
+      reason: string;
+      httpStatus?: number;
+    }> = [
+      {
+        error: { code: "request_failed", httpStatus: 500 },
+        reason: "request_failed",
+        httpStatus: 500,
+      },
+      { error: { code: "transport_error" }, reason: "transport_error" },
+      { error: { code: "tool_call_invalid" }, reason: "tool_call_invalid" },
+      {
+        error: { code: "unsupported_capability" },
+        reason: "unsupported_capability",
+      },
+      { error: new Error("raw detail must not leak"), reason: "model_error" },
+    ];
+    for (const entry of cases) {
+      const gw = fakeGateway({ error: entry.error });
+      const { logger, records } = createCollectingLogger("debug");
+      const dir = mkdtempSync(join(tmpdir(), "trial-relay-"));
+      const sock = join(dir, "relay", "model.sock");
+      const relay = new TrialModelRelay({
+        sockPath: sock,
+        gateway: gw,
+        fixedModel: FIXED_MODEL,
+        caps: testCaps(),
+        logger,
+      });
+      await relay.start();
+      try {
+        relay.setPermitted(true);
+        const res = await postUds(sock, chatBody());
+        expect(res.status).toBe(502);
+        expect(JSON.parse(res.text).error.message).toBe(entry.reason);
+        const trace = records.filter((r) => r.code === "trial.relay_request");
+        expect(trace.length).toBe(1);
+        expect(trace[0]?.status).toBe("rejected");
+        expect(trace[0]?.reason).toBe(entry.reason);
+        if (entry.httpStatus === undefined) {
+          expect(trace[0]).not.toHaveProperty("httpStatus");
+        } else {
+          expect(trace[0]?.httpStatus).toBe(entry.httpStatus);
+        }
+      } finally {
+        await relay.close();
+      }
     }
   });
 

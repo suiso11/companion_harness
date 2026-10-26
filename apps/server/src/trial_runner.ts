@@ -23,7 +23,10 @@ import type {
   TrialProfileSnapshot,
   TrustedRuntimeObservation,
 } from "@companion/contracts";
-import type { KernelRepository } from "@companion/kernel";
+import {
+  type KernelRepository,
+  RepositoryValidationError,
+} from "@companion/kernel";
 import type { ModelGateway } from "@companion/model-local";
 import {
   computeEffectiveProfile,
@@ -245,6 +248,40 @@ function sleep(ms: number): Promise<void> {
 function isFenceError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /fence/i.test(message);
+}
+
+/** Fixed permit-denial categories for otherwise-opaque issuance failures. */
+export type TrialPermitDeniedReason =
+  | "not_claimed"
+  | "cancel_requested"
+  | "already_issued"
+  | "stale"
+  | "fence"
+  | "unknown";
+
+/**
+ * Map a known RepositoryValidationError category from `issueTrialLaunchPermit`
+ * to a fixed reason. The kernel error only carries the generic
+ * `validation_error` code, so the stable category messages (no guest or
+ * provider text) are matched exactly/by fixed prefix; anything unrecognized
+ * stays `unknown` and no message body is ever logged.
+ */
+export function trialPermitDeniedReason(
+  error: unknown,
+): TrialPermitDeniedReason {
+  if (isFenceError(error)) return "fence";
+  if (!(error instanceof RepositoryValidationError)) return "unknown";
+  const message = error.message;
+  if (
+    message.includes("requires a claimed grant") ||
+    message.startsWith("grant is ")
+  ) {
+    return "not_claimed";
+  }
+  if (message.includes("cancel requested")) return "cancel_requested";
+  if (message.includes("already issued")) return "already_issued";
+  if (message.includes("stale") || message.includes("expired")) return "stale";
+  return "unknown";
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -1420,7 +1457,7 @@ export class TrialRunner {
     } catch (error) {
       this.logger.warn("trial.permit_denied", {
         runId: executionId,
-        reason: isFenceError(error) ? "fence" : "unknown",
+        reason: trialPermitDeniedReason(error),
       });
       try {
         relay.revoke();
