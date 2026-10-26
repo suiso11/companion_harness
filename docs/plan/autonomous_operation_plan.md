@@ -151,7 +151,7 @@ pi-orch は成果物・差分・テスト・エラー・阻害要因を返し、
 
 - 共有モデル relay では **foreground の chat/read/write を常に優先**。背景の計画補助・検証は 1 同時実行。
 - 計画生成は material な区切りでのみ。トークン毎のモデル呼び出しをしない。既存 `BackgroundResourceGate` の admission を再利用し、新 scheduler を作らない。
-- 初期提案値（未較正・未承認）: concurrency 1、1 plan revision あたり生成 1 回、1 dispatch あたり runner 1、bounded read 4、reasoning 256（実際に supported な場合のみ）。既存 step 120 / run 300 は最終安全弁として不変。
+- 初期提案値（未較正・未承認）: concurrency 1、1 plan revision あたり生成 1 回、1 dispatch あたり runner 1、bounded read 4、reasoning 256（実際に supported な場合のみ）。既存 step 300 / run 600 は最終安全弁として不変。
 - **自動実行の前に machine-enforced caps が必要。** 既存 handoff の数値上限は人間ラベルで強制されないため、これを強制済みと偽らない。caps が未強制なら自動 dispatch しない。durable bounded accounting の設計を P0 に含める。
 - 結果分類: useful / noop / blocked / unknown / malformed / transport / timeout。同一原因の連続失敗で回路遮断し、再帰 replan をしない。
 - 予算枯渇時は dispatch しない。reset/再起動で期限切れ grant を復活させない。

@@ -323,8 +323,8 @@ connector instance owns **all** configured roots.
   prompts, raw responses, reasoning, or secrets; the ONLY exception is the
   explicit private execution-record store below (default off), which also
   never records `apiKey` or headers. Single attempt per
-  step (no retry, no fallback, no router, no redirects); per-step 120s
-  and 300s whole-run wall budgets with at most one repair inside max 8
+  step (no retry, no fallback, no router, no redirects); per-step 300s
+  and 600s whole-run wall budgets with at most one repair inside max 8
   steps; native tool calling only.
 
 ### Conversation memory (strict opt-in remind CLI)
@@ -644,7 +644,7 @@ COMPANION_VOICE_JSON='{"profile":"shunkin","timeoutMs":30000}'
   malformed/empty output, a wrong part count, or an oversized canonical
   answer falls back to the canonical text with a fixed reason.
 - The call is not an agent step: it writes no `model_calls` row, consumes no
-  step/tool budget, and never extends the 300s run wall. It is bounded by
+  step/tool budget, and never extends the 600s run wall. It is bounded by
   `timeoutMs` and the remaining wall budget. The current main model takes
   roughly 1-4s per answer.
 - Canonical text remains authoritative for history projection, memory

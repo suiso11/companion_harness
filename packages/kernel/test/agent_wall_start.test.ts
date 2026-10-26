@@ -1,4 +1,4 @@
-// Wall-start entry (r3946692097): the 300s whole-run wall deadline starts at
+// Wall-start entry (r3946692097): the 600s whole-run wall deadline starts at
 // strategy invocation before any loadHistory/loadReferenceSummary/ordinal-map
 // /projectPrompt work, with an authoritative clock/deadline recheck after
 // synchronous preparation and before the first gateway call. Preparation that
@@ -110,7 +110,7 @@ function prepConsumingDb(raw: unknown, onPrepare: () => void): unknown {
 
 describe("wall deadline starts before preparation", () => {
   it("fails without model invocation when DB preparation reaches the exact wall deadline", async () => {
-    expect(AGENT_WALL_MS).toBe(300_000);
+    expect(AGENT_WALL_MS).toBe(600_000);
     const { handle, repo } = await setup();
     try {
       let now = T0;
@@ -198,7 +198,7 @@ describe("wall deadline starts before preparation", () => {
         model: "m",
         clock,
         // Oversized step budget isolates the wall: only the wall decides.
-        stepTimeoutMs: 600_000,
+        stepTimeoutMs: 1_200_000,
       });
       const { runId } = newRunningTurn(repo, T0);
       await expect(strategy(ctxFor(repo, runId))).resolves.toEqual({

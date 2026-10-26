@@ -65,14 +65,14 @@ export class ShadowPanel {
   private static readonly POLL_INTERVAL_MS = 2000;
   /**
    * Bounded active-job watch window (GET-only): the shadow gateway call is
-   * allowed a full `AGENT_STEP_TIMEOUT_MS` (120s) wall budget IN ADDITION
+   * allowed a full `AGENT_STEP_TIMEOUT_MS` (300s) wall budget IN ADDITION
    * to pre-claim recall, so a fixed 20s watch would abandon a valid slower
-   * deliberation as pending/claimed. The window covers the 120s gateway
-   * budget plus a 15s recall/pre-claim margin (135s total, polled every
+   * deliberation as pending/claimed. The window covers the 300s gateway
+   * budget plus a 15s recall/pre-claim margin (315s total, polled every
    * 2s); session change, selection change, or terminal status still exits
    * early, so the watch never loops forever.
    */
-  private static readonly POLL_WINDOW_MS = 135_000;
+  private static readonly POLL_WINDOW_MS = 315_000;
   private static readonly POLL_MAX_TICKS = Math.ceil(
     ShadowPanel.POLL_WINDOW_MS / ShadowPanel.POLL_INTERVAL_MS,
   );
