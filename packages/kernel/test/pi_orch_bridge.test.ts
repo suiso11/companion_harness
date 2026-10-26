@@ -837,14 +837,14 @@ posixDescribe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
       ],
       ompExitCode: 3,
       timedOut: false,
-      error: "model failed sk-OBSECRET123",
+      error: "model failed \u0000sk-OBSECRET123",
     });
     const fixture = await makeFixture({
       executorBody: [
         "import { mkdirSync, writeFileSync } from 'node:fs';",
         "mkdirSync('.companion-observation', { recursive: true });",
         `writeFileSync('.companion-observation/guest.json', ${JSON.stringify(observation)});`,
-        `process.stderr.write(${JSON.stringify(`fatal Bearer abc.def-123\n${"x".repeat(5000)}`)});`,
+        `process.stderr.write(${JSON.stringify(`fatal \u0000Bearer abc.def-123\n${"x".repeat(5000)}`)});`,
         `process.stdout.write(${JSON.stringify("out sk-STDOUTSECRET123\n")});`,
         "process.exit(3);",
       ].join("\n"),
@@ -878,6 +878,30 @@ posixDescribe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
     journal.close();
     expect(view?.state).toBe("error");
     expect(view?.exitCode).toBe(10);
+
+    // The diagnostics must also fit the total result frame, not just each
+    // entry, or a small output budget would replace exit 10 with an internal
+    // error and discard the classification.
+    const tightRequest = makeRequest(fixture, {
+      budget: { timeoutMs: 10_000, maxOutputBytes: 1024 },
+    });
+    const tight = await runBridge(fixture, tightRequest);
+    const tightResult = resultOf(tight);
+    expect(tightResult.status).toBe("error");
+    expect(tightResult.report.summary).toBe(
+      "companion bridge: executor failed",
+    );
+    expect(new TextEncoder().encode(tight.stdout).length).toBeLessThanOrEqual(
+      1024,
+    );
+    const tightJournal = new CompanionJournal(
+      fixture.config.stateDir,
+      fixture.config.storage,
+    );
+    const tightView = tightJournal.inspect(tightRequest.executionId);
+    tightJournal.close();
+    expect(tightView?.state).toBe("error");
+    expect(tightView?.exitCode).toBe(10);
   });
 
   it("runs a real synthetic read-only trial and retains artifact metadata", async () => {

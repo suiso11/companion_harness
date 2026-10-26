@@ -167,7 +167,9 @@ const DIAGNOSTIC_HEAD_BYTES = 1024;
 const DIAGNOSTIC_SECRET_PATTERN = /(?:sk-|Bearer\s+)[A-Za-z0-9._-]+/g;
 
 function redactDiagnostic(value) {
-  return String(value ?? "").replace(DIAGNOSTIC_SECRET_PATTERN, "[redacted]");
+  return String(value ?? "")
+    .replace(DIAGNOSTIC_SECRET_PATTERN, "[redacted]")
+    .replace(/\u0000/g, "");
 }
 
 // A failure diagnostic must stay small enough for the bounded journal report
@@ -1057,6 +1059,18 @@ async function main() {
           10,
           executorFailureDiagnostics(workRoot, run),
         );
+        // The report frame has a total byte allowance, not just per-entry
+        // limits. Drop diagnostics (lowest value last) until the failure
+        // result fits so low-output-budget jobs keep exit 10 and status
+        // "error" instead of falling back to an internal error.
+        const diagnosticCap = resultLineCap(request, config) - 64;
+        while (
+          outcome.raw.report.unresolved.length > 0 &&
+          Buffer.byteLength(`${JSON.stringify(outcome.raw)}\n`, "utf8") >
+            diagnosticCap
+        ) {
+          outcome.raw.report.unresolved.pop();
+        }
       } else {
         const validation = await validateCandidateChanges({
           snapshot,
