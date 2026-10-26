@@ -304,12 +304,17 @@ connector instance owns **all** configured roots.
   `reasoning_budget_tokens` field on every main-agent step and repair, and
   never on auxiliary memory/voice/learning calls (those keep their own
   reasoning-off requests). The stock launcher leaves
-  `reasoningBudgetTokens` unset (no thinking cap), so long thinking is not
-  truncated by this field; an already-exported `COMPANION_MODEL_JSON` wins
-  and may add the field itself when a cap is desired. Timeouts,
-  answer limits, retries, and model choice are unchanged. Efficacy and
-  failure-rate impact are **not yet measured**; this only bounds thinking
-  tokens.
+  `reasoningBudgetTokens` unset (no app-level thinking cap); the local
+  llama-server for the main model enforces a 2048-token server-side
+  `--reasoning-budget` (2026-10-26), so runaway thinking cannot consume the
+  4096-token output limit and 300s step budget. An already-exported
+  `COMPANION_MODEL_JSON` wins and may add the field itself when a
+  per-request cap is desired. Timeouts, answer limits, retries, and model
+  choice are unchanged. Production evidence without the server budget: chat
+  thinking never terminated, every request reached 4096 output tokens at
+  ~20 tok/s (two concurrent duplicates), and the chat turn timed out at
+  300.22s. Normal reasoning measured <=1251 chars, so 2048 only cuts runaway
+  thinking.
 - Fixed safe failure diagnostics: `model.step.failed` may include
   `gatewayErrorCode` (model-local closed code such as `request_failed`,
   `timeout`, `invalid_response`), `invalidResponseCause` (`response_too_large`
@@ -5028,18 +5033,21 @@ ops/llm/apply.sh --yes
   P40 (24 GiB) に収める。64k は pi-orch guest の `contextWindow` (65536) 以上に
   する必要がある (guest 側の compaction より先に llama.cpp が overflow すると
   trial が落ちる。48k では実 trial の約 7 turn で `Context size has been exceeded`)。
-- thinking のトークン上限は llama-server 側では設けない (2026-10-26 に
-  `main.command` から `--reasoning-budget` と `--reasoning-budget-message` を削除)。
-  ユーザー判断で思考トークン上限は不要。Companion 側の上限 (256) も #143 で
-  削除済み。wall-clock の時間上限 (5 分 / 10 分) は維持する。
+- thinking のトークン上限は llama-server 側で `--reasoning-budget 2048` /
+  `--reasoning-budget-message "\n\n考えはここまで。回答します。\n"` を設定
+  (2026-10-26)。本番では上限なしだと chat の thinking が終了せず、全リクエストが
+  4096 output tokens / 約 20 tok/s (2 並列の重複) に達し、300s step limit で
+  打ち切られた (chat は 300.22s で時間切れ)。正常な reasoning は最大 1251 文字
+  (2026-10-23 実測) なので 2048 は暴走だけを切る。上限を超えると end-of-thinking
+  タグの前に message が注入され、モデルは自然に thinking を終了する。
+  Companion 側の app-level 上限 (256) は #143 で削除済み。wall-clock の時間上限
+  (5 分 / 10 分) は維持する。
   参考実測 (8 本の Companion 風プロンプト、2026-10-23): 無制限は 8/8 valid、
   reasoning 最大 1251 文字、completion 最大 911 トークン。budget 512 も 8/8 valid で
-  completion p50 458、256 も 8/8 valid。切替前の本番は completion p90 1454 /
-  最大 2298 トークン、step p90 82.7 秒 (`model_step_timeout` 1 回) だった。
-  サーバー既定を変えるのではなく、上限が必要な場合だけリクエスト単位で指定する。
+  completion p50 458、256 も 8/8 valid。
 - リクエスト単位の指定: OpenAI 互換 body に `thinking_budget_tokens`
   (例: `{"thinking_budget_tokens": 256, "chat_template_kwargs": {"enable_thinking": true}}`)
-  を渡すとその 1 回だけ上限を指定できる (サーバー既定は無制限)。LiteLLM 経由
+  を渡すとその 1 回だけ上限を指定できる (サーバー既定は 2048)。LiteLLM 経由
   (`local-chat`) でもそのまま転送されることを 2026-10-23 に確認 (64 → reasoning
   104 文字、512 → 1697 文字)。
 - 実測 (P40, 2026-10-26): 49152 ctx + q8_0 KV → GPU0 21.0/24.0 GiB、
@@ -5060,8 +5068,9 @@ ops/llm/apply.sh --yes
   埋まって共有 65k KV pool が overflow していた (`Context size has been exceeded`)。
   `--parallel` を明示すると既定で slot ごとに `-c` を分割する (2 x 32768) ため、
   guest の 65536 contextWindow を維持するには `--kv-unified` が必須。
-  LiteLLM 側は `local-chat` の `litellm_params` に `num_retries: 0` と
-  `timeout: 300` を設定し、放棄済みリクエストの増幅を止める。
+  LiteLLM 側は `local-chat` の `litellm_params` に `num_retries: 0` /
+  `max_retries: 0` と `timeout: 300`、`router_settings` に `num_retries: 0`
+  を設定し、Router と OpenAI SDK client の両方の自動再送を止める。
 - thinking は `reasoning_content` で返る。tool call も実測で成立
   (Companion の agent loop で確認済み)。
 - 入手元: Hugging Face `huihui-ai/Huihui-Ornith-1.5-35B-A3B-abliterated` の
