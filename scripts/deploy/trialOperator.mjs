@@ -246,18 +246,44 @@ export function formatAutonomyEnvLine(json) {
   return `COMPANION_AUTONOMY_JSON='${json}'\n`;
 }
 
-// Select old frozen roots to prune, newest first by timestamp suffix. The
-// newly built root is always kept, as are the newest (keep - 1) others.
+const FROZEN_ROOT_RE = /^frozen-[0-9a-f]{7,40}-(\d{8}T\d{6}Z)$/;
+
+// Select old frozen roots to prune, newest first by the timestamp suffix. The
+// root name also contains the commit sha, so comparing whole names would order
+// by sha first; the timestamp is the only creation-order key.
 export function selectFrozenRootsToPrune(names, currentRootName, keep = 2) {
   if (!Number.isInteger(keep) || keep < 1) fail("keep must be >= 1");
-  const frozen = names.filter((name) =>
-    /^frozen-[0-9a-f]{7,40}-\d{8}T\d{6}Z$/.test(name),
-  );
-  frozen.sort().reverse();
+  const frozen = names
+    .map((name) => ({ name, match: FROZEN_ROOT_RE.exec(name) }))
+    .filter((entry) => entry.match !== null)
+    .sort((a, b) => {
+      const byTime = (b.match?.[1] ?? "").localeCompare(a.match?.[1] ?? "");
+      return byTime !== 0 ? byTime : b.name.localeCompare(a.name);
+    })
+    .map((entry) => entry.name);
   const keepSet = new Set();
   for (const name of [currentRootName, ...frozen]) {
     if (keepSet.size >= keep) break;
     keepSet.add(name);
   }
   return frozen.filter((name) => !keepSet.has(name));
+}
+
+// Return only the command map entries the host selected. The materializer
+// config requires the command map size to equal the configured check list,
+// so a single-check host profile must not receive both commands.
+export function selectCheckCommands(available, selected) {
+  const out = {};
+  for (const id of selected) {
+    if (
+      typeof id !== "string" ||
+      typeof available !== "object" ||
+      available === null ||
+      !(id in available)
+    ) {
+      fail(`unsupported mandatoryChecks entry: ${String(id)}`);
+    }
+    out[id] = available[id];
+  }
+  return out;
 }

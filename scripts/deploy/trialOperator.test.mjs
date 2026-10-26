@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   formatAutonomyEnvLine,
+  selectCheckCommands,
   selectFrozenRootsToPrune,
   validateTrialOperatorInput,
 } from "./trialOperator.mjs";
@@ -139,10 +140,46 @@ describe("selectFrozenRootsToPrune", () => {
     ).toEqual(["frozen-aaaaaaa-20260101T000000Z"]);
   });
 
+  it("orders by timestamp suffix, not by commit sha in the name", () => {
+    const names = [
+      "frozen-fffffff-20260101T000000Z",
+      "frozen-aaaaaaa-20260102T000000Z",
+      "frozen-bbbbbbb-20260103T000000Z",
+    ];
+    expect(
+      selectFrozenRootsToPrune(names, "frozen-bbbbbbb-20260103T000000Z", 2),
+    ).toEqual(["frozen-fffffff-20260101T000000Z"]);
+  });
+
   it("never prunes non-frozen entries", () => {
     expect(
       selectFrozenRootsToPrune(["dep-source-clean", "src-x"], "frozen-a", 2),
     ).toEqual([]);
+  });
+});
+
+describe("selectCheckCommands", () => {
+  const available = {
+    lint: {
+      executable: "/usr/bin/node",
+      args: ["/deps/biome", "check", "/work"],
+    },
+    typecheck: { executable: "/usr/bin/node", args: ["/deps/tsc"] },
+  };
+
+  it("returns only the selected checks", () => {
+    expect(Object.keys(selectCheckCommands(available, ["lint"]))).toEqual([
+      "lint",
+    ]);
+    expect(Object.keys(selectCheckCommands(available, ["typecheck"]))).toEqual([
+      "typecheck",
+    ]);
+  });
+
+  it("rejects an unknown check", () => {
+    expect(() => selectCheckCommands(available, ["deploy"])).toThrow(
+      /unsupported mandatoryChecks/,
+    );
   });
 });
 
@@ -161,6 +198,24 @@ describe("companion-deploy.sh trial-operator ordering", () => {
     expect(installAt).toBeGreaterThan(-1);
     expect(buildAt).toBeGreaterThan(installAt);
     expect(restartAt).toBeGreaterThan(buildAt);
+  });
+
+  it("restores the previous trial profile before a rollback restart", () => {
+    const rollbackAt = source.indexOf("\nrollback() {") + 1;
+    const rollbackEnd = source.indexOf("\n}\n", rollbackAt);
+    const body = source.slice(rollbackAt, rollbackEnd);
+    expect(body).toContain("$TRIAL_BACKUP_DIR/operator.json");
+    expect(body).toContain("$TRIAL_BACKUP_DIR/autonomy.env");
+    expect(body.indexOf("TRIAL_BACKUP_DIR/operator.json")).toBeLessThan(
+      body.indexOf("systemctl --user restart"),
+    );
+  });
+
+  it("backs up the profile before the build and clears it on success", () => {
+    const backupAt = source.indexOf("companion-trial-backup");
+    expect(backupAt).toBeGreaterThan(-1);
+    expect(backupAt).toBeLessThan(source.indexOf("build-trial-operator.mts"));
+    expect(source).toMatch(/notify_success[\s\S]*?rm -rf "\$TRIAL_BACKUP_DIR"/);
   });
 
   it("does not block the deploy when the trial rebuild fails", () => {

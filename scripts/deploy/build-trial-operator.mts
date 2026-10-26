@@ -31,13 +31,15 @@ import { pathToFileURL } from "node:url";
 
 import {
   formatAutonomyEnvLine,
+  selectCheckCommands,
   selectFrozenRootsToPrune,
   validateTrialOperatorInput,
 } from "./trialOperator.mjs";
 
+// Throw instead of exiting so the catch below always runs and removes the
+// half-built root. process.exit(1) would skip the cleanup.
 const fail = (message: string): never => {
-  console.error("FAIL", message);
-  process.exit(1);
+  throw new Error(message);
 };
 
 const INPUT_PATH =
@@ -197,31 +199,28 @@ try {
     jobsPerDay: limits.jobsPerDay,
     concurrentExecutions: 1,
   };
-  const DEP_NM = join(
-    STATE,
-    "jobs",
-    "manual-freeze-v2",
-    "dependency",
-    "node_modules",
-  );
+  // Check executables must be the pinned node runtime: the guest binds only
+  // the executable at its own path, so a bare `typescript/bin/tsc` launcher
+  // would lose its sibling `../lib` tree. The dependency closure is mounted
+  // read-only at /deps/node_modules, so launch the JS entrypoints through node
+  // with guest-side paths. `node` itself is always bound at its host path.
   const checks = {
     typecheck: {
-      executable: join(DEP_NM, "typescript", "bin", "tsc"),
-      args: ["-p", "/work/apps/server/tsconfig.json", "--noEmit"],
+      executable: NODE,
+      args: [
+        "/deps/node_modules/typescript/bin/tsc",
+        "-p",
+        "/work/apps/server/tsconfig.json",
+        "--noEmit",
+      ],
     },
     lint: {
-      executable: join(DEP_NM, "@biomejs", "biome", "bin", "biome"),
-      args: ["check", "/work"],
+      executable: NODE,
+      args: ["/deps/node_modules/@biomejs/biome/bin/biome", "check", "/work"],
     },
   };
   const selectedChecks = input.mandatoryChecks;
-  if (
-    selectedChecks.some((id) => checks[id as keyof typeof checks] === undefined)
-  ) {
-    fail(
-      `unsupported mandatoryChecks entry (known: ${Object.keys(checks).join(", ")})`,
-    );
-  }
+  const selectedCheckCommands = selectCheckCommands(checks, selectedChecks);
 
   const trialRaw = {
     available: true,
@@ -257,7 +256,7 @@ try {
     operations: ["investigate", "implement"],
     readScopes: ["apps", "packages", "scripts", "docs"],
     writeScopes: ["apps", "packages"],
-    checks: selectedChecks,
+    checks: selectedCheckCommands,
     caps,
     dependencyRoot: null,
     bridgeScriptPath: trialRaw.runner.bridgeScriptPath,
@@ -461,5 +460,6 @@ try {
   // Failed builds never publish; remove the half-built root so it is not
   // mistaken for a valid snapshot.
   rmSync(ROOT, { recursive: true, force: true });
-  fail(err instanceof Error ? err.message : String(err));
+  console.error("FAIL", err instanceof Error ? err.message : String(err));
+  process.exit(1);
 }

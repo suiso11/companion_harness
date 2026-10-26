@@ -166,10 +166,33 @@ if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
 fi
 
 PREV="$CURRENT"
+# Trial profile paths/backups are filled in just before the rebuild below.
+TRIAL_OPERATOR_INPUT="${COMPANION_TRIAL_OPERATOR_INPUT:-$HOME/.config/companion/trial-operator.json}"
+TRIAL_OPERATOR_FILE=""
+TRIAL_ENV_FILE=""
+TRIAL_BACKUP_DIR=""
 rollback() {
   log "rolling back to $PREV"
   git switch --detach "$PREV"
   pnpm install --frozen-lockfile
+  # The new revision's trial profile may already be published; restore the
+  # pre-deploy operator.json/autonomy.env pair before restarting the old app so
+  # trials never run against the rejected revision.
+  if [ -n "$TRIAL_BACKUP_DIR" ]; then
+    if [ -f "$TRIAL_BACKUP_DIR/operator.json" ]; then
+      cp -p "$TRIAL_BACKUP_DIR/operator.json" "$TRIAL_OPERATOR_FILE"
+    else
+      rm -f "$TRIAL_OPERATOR_FILE"
+    fi
+    if [ -f "$TRIAL_BACKUP_DIR/autonomy.env" ]; then
+      cp -p "$TRIAL_BACKUP_DIR/autonomy.env" "$TRIAL_ENV_FILE"
+    else
+      rm -f "$TRIAL_ENV_FILE"
+    fi
+    rm -rf "$TRIAL_BACKUP_DIR"
+    TRIAL_BACKUP_DIR=""
+    log "restored the previous trial operator profile before rollback restart"
+  fi
   systemctl --user restart companion.service
   log "rollback complete (previous revision restored and restarted)"
   notify_rollback "$TARGET" "health check or restart failed"
@@ -184,7 +207,23 @@ pnpm install --frozen-lockfile
 # snapshot, and only then atomically switches operator.json + autonomy.env.
 # A failure must NOT block app deploys: leave autonomy.env untouched so trials
 # fail closed until the next deploy.
-TRIAL_OPERATOR_INPUT="${COMPANION_TRIAL_OPERATOR_INPUT:-$HOME/.config/companion/trial-operator.json}"
+if [ -f "$TRIAL_OPERATOR_INPUT" ]; then
+  TRIAL_OPERATOR_FILE="$(node -e 'const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));process.stdout.write(j.operatorFile ?? "")' "$TRIAL_OPERATOR_INPUT" 2>/dev/null || true)"
+  TRIAL_ENV_FILE="$(node -e 'const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));process.stdout.write(j.environmentFile ?? "")' "$TRIAL_OPERATOR_INPUT" 2>/dev/null || true)"
+fi
+if [ -n "$TRIAL_OPERATOR_FILE" ] && [ -n "$TRIAL_ENV_FILE" ]; then
+  TRIAL_BACKUP_DIR="$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/companion-trial-backup.XXXXXX" 2>/dev/null || true)"
+  if [ -n "$TRIAL_BACKUP_DIR" ]; then
+    if [ -f "$TRIAL_OPERATOR_FILE" ]; then
+      cp -p "$TRIAL_OPERATOR_FILE" "$TRIAL_BACKUP_DIR/operator.json"
+    fi
+    if [ -f "$TRIAL_ENV_FILE" ]; then
+      cp -p "$TRIAL_ENV_FILE" "$TRIAL_BACKUP_DIR/autonomy.env"
+    fi
+  else
+    log "WARNING could not create a trial profile backup; a rollback cannot restore it"
+  fi
+fi
 if [ -f "$TRIAL_OPERATOR_INPUT" ]; then
   log "rebuilding frozen trial operator for $TARGET"
   if ! COMPANION_TRIAL_OPERATOR_INPUT="$TRIAL_OPERATOR_INPUT" pnpm --filter @companion/server exec tsx "$SCRIPT_DIR/build-trial-operator.mts"; then
@@ -211,6 +250,10 @@ while [ "$i" -lt 30 ]; do
     # Server has restarted and is healthy: DB writes are safe now, so
     # notices are written only after health is ok.
     notify_success "$TARGET"
+    if [ -n "$TRIAL_BACKUP_DIR" ]; then
+      rm -rf "$TRIAL_BACKUP_DIR"
+      TRIAL_BACKUP_DIR=""
+    fi
     exit 0
   fi
   sleep 2
