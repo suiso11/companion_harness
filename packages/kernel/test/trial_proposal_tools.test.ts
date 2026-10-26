@@ -285,6 +285,17 @@ describe("trial.propose", () => {
       expect(AGENT_SYSTEM_PROMPT).toContain("trial.propose");
       expect(AGENT_SYSTEM_PROMPT).toContain("候補");
       expect(AGENT_SYSTEM_PROMPT).toContain("試行の提案");
+      // Fit-goal check: unrelated personal chores must not ride a project goal.
+      expect(AGENT_SYSTEM_PROMPT).toContain("actually fits the request");
+      expect(AGENT_SYSTEM_PROMPT).toContain("部屋の掃除");
+      expect(AGENT_SYSTEM_PROMPT).toContain("purpose.propose");
+      // User-facing wording: plain Japanese, no raw ids or field names.
+      expect(AGENT_SYSTEM_PROMPT).toContain("in plain Japanese");
+      expect(AGENT_SYSTEM_PROMPT).toContain(
+        "raw UUIDs or internal field names",
+      );
+      // The frozen per-turn temporal line must not be echoed.
+      expect(AGENT_SYSTEM_PROMPT).toContain("Never echo the per-turn");
     } finally {
       closeKernelDatabase(handle);
     }
