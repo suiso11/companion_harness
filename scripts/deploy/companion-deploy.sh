@@ -238,12 +238,20 @@ if [ -f "$TRIAL_OPERATOR_INPUT" ]; then
   fi
   if [ "$BUILD_OK" != "1" ]; then
     log "ERROR trial operator rebuild FAILED for $TARGET; disabling trials before restart (fail closed)"
-    # Atomically replace autonomy.env with an EMPTY file: systemd then loads
-    # no COMPANION_AUTONOMY_JSON and the restarted server runs with trials off.
-    # Never leave a stale (possibly revision-matching) profile in place.
+    # Keep the previous config but force `enabled:false`: an EMPTY file would
+    # break startup on hosts that also set COMPANION_AUTODISPATCH_JSON, since
+    # the server rejects autodispatch without a trial config. If no usable
+    # previous config exists, fall back to an empty file, but roll back rather
+    # than restart unstartable when autodispatch is configured.
+    DISABLED_ENV_LINE="$(node "$SCRIPT_DIR/disable-trial-env.mjs" "$TRIAL_ENV_FILE" 2>/dev/null || true)"
+    if [ -z "$DISABLED_ENV_LINE" ] && [ -n "${COMPANION_AUTODISPATCH_JSON:-}" ]; then
+      log "ERROR no usable prior trial config to keep disabled; rolling back instead of restarting with autodispatch but no trial config"
+      rollback
+      exit 1
+    fi
     TRIAL_ENV_TMP="${TRIAL_ENV_FILE}.tmp-$$"
     if mkdir -p "$(dirname "$TRIAL_ENV_FILE")" \
-      && : > "$TRIAL_ENV_TMP" \
+      && printf '%s\n' "$DISABLED_ENV_LINE" > "$TRIAL_ENV_TMP" \
       && chmod 600 "$TRIAL_ENV_TMP" \
       && mv -f "$TRIAL_ENV_TMP" "$TRIAL_ENV_FILE"; then
       log "autonomy.env reset (trials disabled) before restart"

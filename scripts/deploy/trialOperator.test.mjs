@@ -10,6 +10,7 @@ import {
   parseAutodispatchConfig,
   parseTrialConfig,
 } from "../../apps/server/src/config.ts";
+import { disableTrialEnv } from "./disable-trial-env.mjs";
 import {
   assertHostAutodispatchChecks,
   formatAutonomyEnvLine,
@@ -132,6 +133,32 @@ describe("formatAutonomyEnvLine", () => {
     expect(() => formatAutonomyEnvLine('{"x":"\'"}')).toThrow(/quotes/);
     expect(() => formatAutonomyEnvLine('{"x":\n1}')).toThrow(/newlines/);
     expect(() => formatAutonomyEnvLine("not json")).toThrow();
+  });
+});
+
+describe("disableTrialEnv", () => {
+  const json = JSON.stringify({
+    available: true,
+    enabled: true,
+    mandatoryChecks: ["lint"],
+    workspaceAlias: "companion-harness",
+  });
+
+  it("keeps the previous config valid but disabled", () => {
+    const line = disableTrialEnv(`COMPANION_AUTONOMY_JSON='${json}'\n`);
+    expect(line).toBe(
+      `COMPANION_AUTONOMY_JSON='${JSON.stringify({ ...JSON.parse(json), enabled: false })}'\n`,
+    );
+    expect(
+      JSON.parse(line.slice(line.indexOf("'") + 1, line.lastIndexOf("'"))),
+    ).toMatchObject({ enabled: false, mandatoryChecks: ["lint"] });
+  });
+
+  it("returns nothing when no usable line exists", () => {
+    expect(disableTrialEnv("")).toBe("");
+    expect(disableTrialEnv("OTHER=1\n")).toBe("");
+    expect(disableTrialEnv("COMPANION_AUTONOMY_JSON='not json'\n")).toBe("");
+    expect(disableTrialEnv("COMPANION_AUTONOMY_JSON='[]'\n")).toBe("");
   });
 });
 
@@ -488,13 +515,17 @@ describe("companion-deploy.sh trial-operator ordering", () => {
     expect(source).toMatch(/notify_success[\s\S]*?rm -rf "\$TRIAL_BACKUP_DIR"/);
   });
 
-  it("fails closed by atomically emptying autonomy.env when the rebuild fails", () => {
+  it("fails closed by atomically disabling autonomy.env when the rebuild fails", () => {
     const block = source.slice(installAt, restartAt);
     expect(block).toContain("BUILD_OK=0");
     expect(block).toMatch(/rebuild FAILED[\s\S]*?fail closed/);
+    expect(block).toContain("disable-trial-env.mjs");
     expect(block).toContain('TRIAL_ENV_TMP="${TRIAL_ENV_FILE}.tmp-$$"');
-    expect(block).toMatch(/: > "\$TRIAL_ENV_TMP"/);
+    expect(block).toMatch(
+      /printf '%s\\n' "\$DISABLED_ENV_LINE" > "\$TRIAL_ENV_TMP"/,
+    );
     expect(block).toMatch(/mv -f "\$TRIAL_ENV_TMP" "\$TRIAL_ENV_FILE"/);
+    expect(block).toContain("COMPANION_AUTODISPATCH_JSON");
     expect(block).not.toContain("autonomy.env left unchanged");
     expect(block.indexOf("TRIAL_ENV_TMP")).toBeLessThan(
       source.indexOf("systemctl --user restart", buildAt),
