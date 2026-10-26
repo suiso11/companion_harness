@@ -13,11 +13,12 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { CompanionJournal } from "../../../scripts/pi-orch-bridge/companion-journal.mjs";
@@ -390,6 +391,34 @@ function guestReportBody(
   )});\n${extraBody}`;
 }
 
+const FHS_ROOTS = ["/usr", "/etc", "/home", "/lib", "/lib64", "/bin"];
+
+// CI Node installs live outside the FHS roots above (for example
+// /opt/hostedtoolcache/node/<version>/<arch>/bin/node). Bind the canonical
+// Node install root at its own host path so the guest, and shebangs pinned to
+// process.execPath, resolve inside the minimal namespace.
+function minimalNamespaceBindings(): string[] {
+  const args = FHS_ROOTS.filter((path) => existsSync(path)).flatMap((path) => [
+    "--ro-bind",
+    path,
+    path,
+  ]);
+  const nodeRoot = dirname(dirname(realpathSync(process.execPath)));
+  const covered = FHS_ROOTS.some(
+    (path) => nodeRoot === path || nodeRoot.startsWith(`${path}/`),
+  );
+  if (!covered && existsSync(nodeRoot)) {
+    // Mirror pushRoBindWithParents: create missing parents before the bind.
+    let current = "";
+    for (const part of nodeRoot.split("/").filter(Boolean).slice(0, -1)) {
+      current += `/${part}`;
+      args.push("--dir", current);
+    }
+    args.push("--ro-bind", nodeRoot, nodeRoot);
+  }
+  return args;
+}
+
 // Runs the REAL guest script in a minimal bwrap namespace with a fake OMP that
 // captures the rendered prompt. /work does not exist on the host, so the
 // process-level guest parse path needs a private workspace bind.
@@ -462,9 +491,7 @@ function runGuestJob(objective: string): {
     })}\n`,
     0o600,
   );
-  const bound = ["/usr", "/etc", "/home", "/lib", "/lib64", "/bin"].flatMap(
-    (path) => (existsSync(path) ? ["--ro-bind", path, path] : []),
-  );
+  const bound = minimalNamespaceBindings();
   const run = spawnSync(
     "/usr/bin/bwrap",
     [
@@ -1321,9 +1348,7 @@ posixDescribe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
       const started = Date.now();
       // A minimal, writable-root namespace (not `--dev-bind / /`, whose host
       // root is not writable and cannot create the `/work` mountpoint).
-      const bound = ["/usr", "/etc", "/home", "/lib", "/lib64", "/bin"].flatMap(
-        (path) => (existsSync(path) ? ["--ro-bind", path, path] : []),
-      );
+      const bound = minimalNamespaceBindings();
       const run = spawnSync(
         bwrap,
         [
