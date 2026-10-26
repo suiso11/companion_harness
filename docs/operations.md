@@ -4382,6 +4382,14 @@ proposals, grants, runner, or bridge spawn.
   (`bridgeScriptPath` + `bridgeConfigTemplatePath`, spawned via
   `nodeRealpath` under a systemd scope checked via `systemctlRealpath`
   / `xdgRuntimeDir`). No other bridge is supported.
+- The real-pi guest pins its own `--tools` allowlist after the launcher's
+  injected list: `read,grep,glob` for read-only jobs and
+  `read,grep,glob,write` for write jobs. Coordinator delegation tools
+  (`task`, `wait`, `opencode_*`) are never exposed to the sealed guest.
+- A nonzero executor remains exit 10, but the journal report now carries
+  bounded (2048-byte) redacted diagnostics: guest observation fields
+  (`engine`, `executorKind`, `ompExitCode`, `timedOut`, tool counts,
+  `error`) when `guest.json` exists, plus stdout/stderr heads.
 - `bridgeConfigTemplatePath` is the FROZEN approved V2 OperatorConfig
   JSON, not a legacy template. For each manual execution it is parsed
   (`parseOperatorConfig`) and recomputed (`computeEffectiveProfile`);
