@@ -25,7 +25,9 @@ SHIM_DIR="$(mktemp -d "${TMPDIR:-/tmp}/apply-shim.XXXXXX")"
 LOG="$(mktemp "${TMPDIR:-/tmp}/apply-dockerlog.XXXXXX")"
 cat >"$SHIM_DIR/docker" <<EOF
 #!/bin/sh
-# stub: record argv and exit 0; never talks to a real daemon
+# stub: record argv and exit 0; never talks to a real daemon.
+# A marker line separates invocations so tests can assert per-invocation argv.
+printf '%s\n' '=== invocation ===' >>"$LOG"
 for a in "\$@"; do printf '%s\n' "\$a" >>"$LOG"; done
 exit 0
 EOF
@@ -87,5 +89,39 @@ if grep -q -- '--force-recreate' "$LOG"; then
   fail 'compose-only change must not force-recreate bind-mounted services'
 fi
 
+# --- compose + litellm change together -------------------------------------
+# Regression: a compose.yaml change (e.g. main's command) must still be
+# reconciled when a bind-mounted config also changes. apply.sh must first run
+# a plain `up -d --remove-orphans` (no service args) and then an additional
+# `up -d --remove-orphans --force-recreate litellm`.
+printf '\n# stale\n' >>"$TARGET/compose.yaml"
+printf '\n# stale\n' >>"$TARGET/litellm_config.yaml"
+: >"$LOG"
+OUT3="$("$SCRIPT_DIR/apply.sh" --yes --dest "$TARGET" 2>&1)" || {
+  printf '%s\n' "$OUT3" >&2
+  fail 'apply.sh --yes (compose+litellm) exited non-zero'
+}
+cmp -s "$SCRIPT_DIR/compose.yaml" "$TARGET/compose.yaml" ||
+  fail 'compose.yaml was not refreshed on compose+litellm change'
+cmp -s "$SCRIPT_DIR/litellm_config.yaml" "$TARGET/litellm_config.yaml" ||
+  fail 'litellm_config.yaml was not refreshed on compose+litellm change'
+awk '
+  /^=== invocation ===$/ { n++; next }
+  { args[n] = args[n] " " $0 " " }
+  END {
+    plain = 0
+    recreate = 0
+    for (i = 1; i <= n; i++) {
+      if (args[i] ~ / compose / && args[i] ~ / up / && args[i] ~ / -d / &&
+          args[i] ~ / --remove-orphans / &&
+          args[i] !~ /--force-recreate/ &&
+          args[i] !~ / litellm / && args[i] !~ / searxng /) plain = 1
+      if (args[i] ~ /--force-recreate/ && args[i] ~ / litellm/) recreate = 1
+    }
+    exit !(plain && recreate)
+  }
+' "$LOG" || fail 'compose+litellm change must reconcile all services then force-recreate litellm'
+
 printf 'PASS: apply.sh --yes isolated (temp dest %s, docker shimmed)\n' "$TARGET"
 printf 'PASS: apply.sh --yes compose-only change reconciles without force-recreate\n'
+printf 'PASS: apply.sh --yes compose+litellm change reconciles all then recreates litellm\n'

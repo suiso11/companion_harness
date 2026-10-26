@@ -19,6 +19,9 @@
 # When litellm_config.yaml changes, the litellm container is force-recreated
 # because the file is a bind mount: the atomic rename below swaps the inode,
 # so a plain `up -d` would keep the old config live inside the container.
+# Recreating bind-mounted services is an additional step: apply.sh always
+# runs a plain `up -d --remove-orphans` first so compose.yaml changes to any
+# service (main included) are reconciled even when a config file also changed.
 #
 # Usage: ops/llm/apply.sh [--yes] [--dest /srv/llm]
 
@@ -229,15 +232,18 @@ fi
 [ "$LITELLM_CHANGED" -eq 1 ] && RECREATE_SERVICES="litellm"
 [ "$SEARXNG_CHANGED" -eq 1 ] && RECREATE_SERVICES="$RECREATE_SERVICES searxng"
 
+# Always reconcile the whole stack first so a compose.yaml change (including
+# main's command) is applied. A targeted `up --force-recreate` of only the
+# bind-mounted services would skip that.
+docker compose --project-directory "$DEST" --env-file "$DEST/.env" \
+  -f "$DEST/compose.yaml" up -d --remove-orphans
+
 # litellm_config.yaml / searxng/settings.yml are bind-mounted; the atomic
-# renames above swap the inodes, so only --force-recreate makes the
-# containers see the new files.
+# renames above swap the inodes, so an additional --force-recreate is needed
+# for those containers to see the new files.
 if [ -n "$RECREATE_SERVICES" ]; then
   # shellcheck disable=SC2086
   docker compose --project-directory "$DEST" --env-file "$DEST/.env" \
     -f "$DEST/compose.yaml" up -d --remove-orphans --force-recreate $RECREATE_SERVICES
-else
-  docker compose --project-directory "$DEST" --env-file "$DEST/.env" \
-    -f "$DEST/compose.yaml" up -d --remove-orphans
 fi
 printf 'apply: containers reconciled (litellm on :4000, main/huihui-ornith-35b internal :8080, ornith on 127.0.0.1:18090, searxng on 127.0.0.1:8888)\n'
