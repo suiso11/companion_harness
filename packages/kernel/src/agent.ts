@@ -173,6 +173,9 @@ export const AGENT_SYSTEM_PROMPT =
   "task exists under an explicit user goal, call trial.propose. Always " +
   "state in answer.submit what you staged and that the user must accept it " +
   "in 候補 or approve it in 試行の提案. " +
+  "Proposals are not citations: never cite proposal, purpose, or task " +
+  "ids in answer.submit; citations are only rN/mN evidence ids received " +
+  "from tools. " +
   "Submit the final response exactly once with answer.submit. " +
   "Do not embed reasoning or raw data beyond the answer parts.";
 
@@ -2506,8 +2509,39 @@ function collectCitedOrdinals(answer: StructuredAnswer): number[] {
  * corrupted. Grants are always derived from the ORIGINAL delivered payload,
  * never from this projection. No semantic inference or fallback to
  * canonicalKey/path.
+ *
+ * Per-tool-family allowlist of structural UUIDs the model may see. These
+ * are the model's OWN session-scoped handles: ids of records the calling
+ * run just read from its own session (purpose/task lists and opens) and
+ * ids of proposals it just staged. They are inputs to proposal-only tools
+ * (`purpose.open`, `task.propose` with `parentPurposeId`,
+ * `trial.propose` with `taskId`) which re-check ownership, scope, explicit
+ * user goal, and version CAS server-side, so seeing them grants no
+ * capability: staging still grants nothing and human adoption/approval
+ * remains the only path. Keys not listed stay on the ordinary rN /
+ * `[redacted]` path (e.g. `sourceTurnId`, `supersededBy`, `goalId` are not
+ * accepted as input by any model tool). Matched by tool-name prefix.
  */
-const AGORA_VISIBLE_UUID_KEYS: ReadonlySet<string> = new Set(["proposalId"]);
+const TOOL_VISIBLE_UUID_KEYS: ReadonlyArray<
+  readonly [prefix: string, keys: ReadonlySet<string>]
+> = [
+  ["agora.", new Set(["proposalId"])],
+  ["purpose.", new Set(["purposeId", "proposalId"])],
+  ["task.", new Set(["taskId", "parentPurposeId", "proposalId"])],
+  ["trial.", new Set(["proposalId", "taskId"])],
+];
+
+/** Allowlisted structural UUID keys for a tool, or undefined to redact all. */
+export function visibleUuidKeysForTool(
+  toolName: string,
+): ReadonlySet<string> | undefined {
+  for (const [prefix, keys] of TOOL_VISIBLE_UUID_KEYS) {
+    if (toolName.startsWith(prefix)) {
+      return keys;
+    }
+  }
+  return undefined;
+}
 
 export function sanitizeModelFacingForFeedback(
   value: unknown,
@@ -4781,9 +4815,7 @@ async function executeOrdinaryTools(args: {
         ? sanitizeModelFacingForFeedback(
             entry.data,
             uuidToOrdinal,
-            call.name.startsWith("agora.")
-              ? AGORA_VISIBLE_UUID_KEYS
-              : undefined,
+            visibleUuidKeysForTool(call.name),
           )
         : null;
     const full = buildToolFeedbackContent(

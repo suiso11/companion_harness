@@ -157,6 +157,7 @@ export {
   translateReferenceArgs,
   trimConversationToCap,
   verifyCitations,
+  visibleUuidKeysForTool,
 } from "./agent.js";
 export type {
   AgoraOperation,
