@@ -766,6 +766,44 @@ describe.skipIf(process.platform === "win32")("trial_model_relay", () => {
     }
   });
 
+  it("fails closed with a fixed invalid_request when the guest system prompt alone exceeds the bound", async () => {
+    // Edge of the reservation fix: the prompt alone is already at/over the
+    // gateway bound, so no truncation can produce a valid merged message.
+    // The relay must reject deterministically (fixed 400 invalid_request,
+    // no forward, no crash) instead of forwarding an oversize request.
+    const gw = fakeGateway();
+    const { relay, sock } = await startRelay(testCaps(), gw);
+    try {
+      relay.setPermitted(true);
+      const hugePrompt = `synthetic oversized guest prompt ${"q".repeat(70_000)}`;
+      const res = await postUds(
+        sock,
+        chatBody({
+          messages: [
+            { role: "system", content: hugePrompt },
+            { role: "user", content: "synthetic user task" },
+          ],
+          tools: [
+            {
+              type: "function",
+              function: {
+                name: "bash",
+                description: `SYNTHETIC long description ${"z".repeat(70_000)}`,
+                parameters: { type: "object", properties: {} },
+              },
+            },
+          ],
+          tool_choice: "auto",
+        }),
+      );
+      expect(res.status).toBe(400);
+      expect(JSON.parse(res.text).error.message).toBe("invalid_request");
+      expect(gw.calls.length).toBe(0);
+    } finally {
+      await relay.close();
+    }
+  });
+
   it("maps gateway error codes to relay reasons and traces httpStatus", async () => {
     const cases: Array<{
       error: unknown;
