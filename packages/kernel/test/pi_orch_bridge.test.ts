@@ -92,6 +92,11 @@ async function makeFixture(options: {
   readonly backend?: "confined" | "offline-fixture";
   readonly maxArtifactBytes?: number;
   readonly scratchPaths?: string[];
+  /**
+   * Portable contract tests only parse the config; they must also run on
+   * platforms where sealed snapshot creation fails closed (win32).
+   */
+  readonly sealedSnapshot?: boolean;
 }): Promise<Fixture> {
   const dir = tempRoot("fixture");
   const source = join(dir, "source");
@@ -104,12 +109,15 @@ async function makeFixture(options: {
   );
   write(join(source, "package.json"), '{"name":"synthetic"}\n');
 
-  const snapshot = await createSealedWorkspaceSnapshot({
-    sourceRoot: source,
-    outputDir: join(dir, "sealed", "workspace"),
-    allowedRoots: ["src"],
-    allowedTopLevelFiles: ["package.json"],
-  });
+  const snapshot =
+    options.sealedSnapshot === false
+      ? null
+      : await createSealedWorkspaceSnapshot({
+          sourceRoot: source,
+          outputDir: join(dir, "sealed", "workspace"),
+          allowedRoots: ["src"],
+          allowedTopLevelFiles: ["package.json"],
+        });
   const pristine = join(dir, "pristine", "snapshot");
   mkdirSync(pristine, { recursive: true });
   write(join(pristine, "README.md"), "# pristine deployment base\n");
@@ -163,9 +171,10 @@ async function makeFixture(options: {
     },
     sealed: {
       rootDir: dir,
-      snapshotRoot: snapshot.snapshotRoot,
-      manifestPath: snapshot.manifestPath,
-      manifestDigest: snapshot.manifestDigest,
+      snapshotRoot: snapshot?.snapshotRoot ?? join(dir, "sealed", "workspace"),
+      manifestPath:
+        snapshot?.manifestPath ?? join(dir, "sealed", "manifest.json"),
+      manifestDigest: snapshot?.manifestDigest ?? "0".repeat(64),
       pristineSnapshotRoot: pristine,
       sourceRootOriginal: source,
     },
@@ -239,7 +248,7 @@ async function makeFixture(options: {
     dir,
     configPath,
     config,
-    snapshot,
+    snapshot: snapshot as SealedWorkspaceSnapshot,
     executorPath,
     checkPath,
     depsRoot,
@@ -693,7 +702,10 @@ describe("sealed pi-orch bridge portable protocol/command contract", () => {
   });
 
   it("accepts dependency mount paths in sealed check args", async () => {
-    const fixture = await makeFixture({ executorBody: "" });
+    const fixture = await makeFixture({
+      executorBody: "",
+      sealedSnapshot: false,
+    });
     const config = structuredClone(fixture.config);
     const check = config.profile.checks["synthetic-check"];
     expect(check).toBeDefined();
