@@ -6,6 +6,13 @@ model_list:
       model: openai/huihui-ornith-35b
       api_base: http://main:8080/v1
       api_key: os.environ/LLAMA_API_KEY
+      # The relay abandons a turn at 60s, but llama.cpp keeps generating.
+      # Do not multiply those abandoned requests: no automatic retries, and
+      # allow the normal guest step (up to 300s) to finish instead of being
+      # cut off. Evidence: llama.cpp b11541 logs showed 3-4 concurrent slots
+      # and "Context size has been exceeded" after 2x LiteLLM retries.
+      num_retries: 0
+      timeout: 300
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY

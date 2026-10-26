@@ -5049,6 +5049,19 @@ ops/llm/apply.sh --yes
   上記の通り guest `contextWindow` 65536 に合わせるため。
 - 実測 (P40, 2026-10-22): VRAM 20.8 GiB @ 16k、decode 約 61 tok/s、
   prefill 約 961 tok/s @ 6k。thinking on/off で decode は同じ。
+- prefix reuse (2026-10-26): このモデルは hybrid (recurrent state) のため、
+  llama.cpp は context checkpoint がないと過去の prefix を再利用できない。
+  既定の `--checkpoint-min-step 8192` では約 17k の guest prompt で
+  checkpoint が 1 個も作られず、trial guest の各 turn が毎回 ~18k tokens を
+  prefill していた (b11541 ログ。単独 ~30 秒 / 競合時 66 秒)。現在は
+  `--checkpoint-min-step 1024` (`--ctx-checkpoints` は既定 32)。
+- 同時実行は `--parallel 2 --kv-unified` に制限。relay が 60 秒で諦めた
+  リクエストも llama.cpp では生成が続き、LiteLLM の既定 2 retry で 3-4 slot が
+  埋まって共有 65k KV pool が overflow していた (`Context size has been exceeded`)。
+  `--parallel` を明示すると既定で slot ごとに `-c` を分割する (2 x 32768) ため、
+  guest の 65536 contextWindow を維持するには `--kv-unified` が必須。
+  LiteLLM 側は `local-chat` の `litellm_params` に `num_retries: 0` と
+  `timeout: 300` を設定し、放棄済みリクエストの増幅を止める。
 - thinking は `reasoning_content` で返る。tool call も実測で成立
   (Companion の agent loop で確認済み)。
 - 入手元: Hugging Face `huihui-ai/Huihui-Ornith-1.5-35B-A3B-abliterated` の
