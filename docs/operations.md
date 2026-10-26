@@ -5028,20 +5028,20 @@ ops/llm/apply.sh --yes
   P40 (24 GiB) に収める。64k は pi-orch guest の `contextWindow` (65536) 以上に
   する必要がある (guest 側の compaction より先に llama.cpp が overflow すると
   trial が落ちる。48k では実 trial の約 7 turn で `Context size has been exceeded`)。
-- thinking の上限は `--reasoning-budget 512` (2026-10-23 から)。予算を使い切ると
-  `--reasoning-budget-message "\n\n考えはここまで。回答します。\n"` を
-  end-of-thinking タグの直前に注入して思考を打ち切るため、回答はそのまま続く。
-  実測 (8 本の Companion 風プロンプト、2026-10-23): 無制限は 8/8 valid、
+- thinking のトークン上限は llama-server 側では設けない (2026-10-26 に
+  `main.command` から `--reasoning-budget` と `--reasoning-budget-message` を削除)。
+  ユーザー判断で思考トークン上限は不要。Companion 側の上限 (256) も #143 で
+  削除済み。wall-clock の時間上限 (5 分 / 10 分) は維持する。
+  参考実測 (8 本の Companion 風プロンプト、2026-10-23): 無制限は 8/8 valid、
   reasoning 最大 1251 文字、completion 最大 911 トークン。budget 512 も 8/8 valid で
   completion p50 458、256 も 8/8 valid。切替前の本番は completion p90 1454 /
   最大 2298 トークン、step p90 82.7 秒 (`model_step_timeout` 1 回) だった。
-  上限を変えるときは `compose.yaml` の `main.command` の `--reasoning-budget`
-  の値だけを変えて `ops/llm/apply.sh --yes`。`0` で思考なし、`-1` で無制限。
-- リクエスト単位の上書き: OpenAI 互換 body に `thinking_budget_tokens`
+  サーバー既定を変えるのではなく、上限が必要な場合だけリクエスト単位で指定する。
+- リクエスト単位の指定: OpenAI 互換 body に `thinking_budget_tokens`
   (例: `{"thinking_budget_tokens": 256, "chat_template_kwargs": {"enable_thinking": true}}`)
-  を渡すとその 1 回だけ上限が変わる。LiteLLM 経由 (`local-chat`) でも
-  そのまま転送されることを 2026-10-23 に確認 (64 → reasoning 104 文字、
-  512 → 1697 文字)。
+  を渡すとその 1 回だけ上限を指定できる (サーバー既定は無制限)。LiteLLM 経由
+  (`local-chat`) でもそのまま転送されることを 2026-10-23 に確認 (64 → reasoning
+  104 文字、512 → 1697 文字)。
 - 実測 (P40, 2026-10-26): 49152 ctx + q8_0 KV → GPU0 21.0/24.0 GiB、
   prefill 約 557 tok/s @ 20k、decode 59 tok/s (短い文脈) / 32 tok/s (@ 20k context)、
   tool call 有効。48k の切替理由: trial guest (pi-orch) は system + tools で

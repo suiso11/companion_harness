@@ -63,17 +63,6 @@ services:
       - --parallel
       - "2"
       - --kv-unified
-      # Cap thinking so one turn cannot burn the whole step budget. Measured
-      # 2026-10-23 on 8 Companion-like prompts: unlimited 8/8 valid, reasoning
-      # max 1251 chars, completion max 911 tokens; budget 512 8/8 valid,
-      # completion p50 458; budget 256 8/8 valid. Production before the switch:
-      # completion p90 1454 / max 2298 tokens, step p90 82.7s, 1
-      # model_step_timeout. The message is injected before the end-of-thinking
-      # tag when the budget is exhausted, so the model ends thinking naturally.
-      - --reasoning-budget
-      - "512"
-      - --reasoning-budget-message
-      - "\n\n考えはここまで。回答します。\n"
       - --alias
       - huihui-ornith-35b
     healthcheck:
