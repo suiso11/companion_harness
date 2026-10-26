@@ -1516,6 +1516,91 @@ linuxDescribe(
       }
     });
 
+    it("prepares a literal file read scope with only that file and top-level files", async () => {
+      const fx = makeFixture();
+      try {
+        const materializer = createAutodispatchMaterializer({
+          config: {
+            ...fx.config,
+            readScopes: ["src/app.ts"],
+            writeScopes: [],
+          },
+          runtimeDir: fx.runtimeDir,
+          currentModel: "test-model",
+          available: true,
+          enabled: true,
+          disclosedWholeRepoRead: true,
+          now: () => NOW,
+        });
+        const result = await materializer.prepare({
+          plan: {
+            ...PLAN,
+            operation: "investigate",
+            relevantPaths: ["src/app.ts"],
+          },
+          policy: {
+            ...POLICY,
+            readScopes: ["src/app.ts"],
+            writeScopes: [],
+          },
+          executionId: randomUUID(),
+          now: NOW,
+        });
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const manifest = JSON.parse(
+          readFileSync(result.materialization.state.manifestPath, "utf8"),
+        ) as { entries: { path: string }[] };
+        expect(manifest.entries.map((entry) => entry.path)).toEqual([
+          "package.json",
+          "src/app.ts",
+        ]);
+      } finally {
+        fx.cleanup();
+      }
+    });
+
+    it("collapses a literal file scope under a directory scope and keeps the directory", async () => {
+      const fx = makeFixture();
+      try {
+        const materializer = createAutodispatchMaterializer({
+          config: {
+            ...fx.config,
+            readScopes: ["src/app.ts"],
+            writeScopes: ["src"],
+          },
+          runtimeDir: fx.runtimeDir,
+          currentModel: "test-model",
+          available: true,
+          enabled: true,
+          disclosedWholeRepoRead: true,
+          now: () => NOW,
+        });
+        const result = await materializer.prepare({
+          plan: { ...PLAN, operation: "implement" },
+          policy: {
+            ...POLICY,
+            readScopes: ["src/app.ts"],
+            writeScopes: ["src"],
+          },
+          executionId: randomUUID(),
+          now: NOW,
+        });
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const manifest = JSON.parse(
+          readFileSync(result.materialization.state.manifestPath, "utf8"),
+        ) as { entries: { path: string }[] };
+        const paths = manifest.entries.map((entry) => entry.path);
+        // The file scope is covered by the directory scope, while the
+        // directory itself is never collapsed under a file scope.
+        expect(paths.filter((path) => path === "src/app.ts")).toHaveLength(1);
+        expect(paths).toContain("src/nested/deep.ts");
+      } finally {
+        fx.cleanup();
+      }
+    });
+
     it("materializes pnpm links whose copied packages real Node can import, with .pnpm native evidence", async () => {
       const fx = makeFixture();
       const sourceRoot = mkdtempSync(join(tmpdir(), "pnpm-closure-"));

@@ -196,7 +196,21 @@ function dependencyArgs(dependencies) {
  * read-only dependency closure, a dummy bearer token, and a UDS relay path;
  * the real credential stays in the trusted host relay.
  */
-export function buildWholejobCommand(profile, paths, scopeUnit) {
+export function buildWholejobCommand(
+  profile,
+  paths,
+  scopeUnit,
+  options = {},
+) {
+  // The guest must stop before the bridge's outer deadline. The effective
+  // bound is min(request budget, frozen profile duration); round DOWN to
+  // whole seconds so the guest never gets a wider window than the grant.
+  const guestTimeoutSeconds = Math.max(
+    1,
+    Math.floor(
+      (options.guestTimeoutMs ?? profile.limits.maxDurationMs) / 1000,
+    ),
+  );
   const args = [
     "--user",
     "--scope",
@@ -273,6 +287,9 @@ export function buildWholejobCommand(profile, paths, scopeUnit) {
     "--setenv",
     "COMPANION_OBSERVATION_REL",
     ".companion-observation/guest.json",
+    "--setenv",
+    "COMPANION_GUEST_TIMEOUT_SECONDS",
+    String(guestTimeoutSeconds),
     "--setenv",
     "COMPANION_MAX_MODEL_CALLS",
     String(profile.limits.maxModelCalls),

@@ -59,6 +59,9 @@ const MAX_MODEL_CALLS = Math.max(
 );
 const MAX_OMP_STDOUT_BYTES = 4 * 1024 * 1024;
 const MAX_OBSERVATION_BYTES = 64 * 1024;
+// Stop this far before the bridge's outer deadline so the guest can write
+// its observation and exit instead of being killed at the boundary.
+const GUEST_TIMEOUT_MARGIN_SECONDS = 2;
 // Pinned to scripts/pi-orch-bridge/companion-protocol.mjs (the canonical wire
 // contract): MAX_LIST_ITEMS=16, MAX_TEXT_SHORT=1024. The guest is a
 // standalone copied artifact, so it cannot import the host protocol module.
@@ -133,9 +136,20 @@ function parseJob(path) {
     raw.purpose.statement.length === 0
   )
     fail("frozen purpose statement is invalid");
-  const constraints = Array.isArray(raw.constraints)
-    ? raw.constraints.filter((v) => typeof v === "string").slice(0, 16)
-    : [];
+  if (!Array.isArray(raw.constraints) || raw.constraints.length > 16)
+    fail("frozen constraints are invalid");
+  const constraints = [];
+  for (const entry of raw.constraints) {
+    if (
+      typeof entry !== "string" ||
+      entry.length === 0 ||
+      entry.length > MAX_TEXT_SHORT ||
+      entry.includes("\0")
+    ) {
+      fail("frozen constraint is invalid");
+    }
+    constraints.push(entry);
+  }
   if (
     !Array.isArray(raw.acceptance) ||
     raw.acceptance.length < 1 ||
@@ -172,6 +186,13 @@ function formatAcceptance(criteria) {
   ].join("\n");
 }
 
+function formatConstraints(constraints) {
+  return [
+    "Frozen decisions/non-goals/steps (all must hold):",
+    ...constraints.map((constraint) => `- ${constraint}`),
+  ].join("\n");
+}
+
 function buildPrompt(job) {
   const paths = job.relevantPaths.join(", ");
   if (job.mode === "read_only") {
@@ -181,6 +202,9 @@ function buildPrompt(job) {
       `Relevant paths: ${paths}.`,
       `Purpose: ${job.statement}`,
       `Objective: ${job.objective}`,
+      ...(job.constraints.length > 0
+        ? [formatConstraints(job.constraints)]
+        : []),
       formatAcceptance(job.acceptance),
       "Read the relevant files and then answer with a short factual report.",
     ].join("\n");
@@ -191,10 +215,10 @@ function buildPrompt(job) {
     `Relevant paths: ${paths}.`,
     `Purpose: ${job.statement}`,
     `Objective: ${job.objective}`,
-    formatAcceptance(job.acceptance),
     ...(job.constraints.length > 0
-      ? [`Constraints: ${job.constraints.join("; ")}`]
+      ? [formatConstraints(job.constraints)]
       : []),
+    formatAcceptance(job.acceptance),
     "Write the smallest correct candidate file, then stop.",
   ].join("\n");
 }
@@ -478,7 +502,7 @@ function summarizeEvents(text, stderrText) {
               block.type === "text" &&
               typeof block.text === "string"
             ) {
-              finalText = block.text.slice(0, 2048);
+              finalText = block.text.slice(0, 4096);
             }
           }
         }
@@ -610,10 +634,17 @@ async function main() {
     : job.mode === "read_only"
       ? "read"
       : "read,write";
-  const maxTimeSeconds = Math.max(
-    1,
-    Math.min(900, Number(process.env.COMPANION_GUEST_TIMEOUT_SECONDS ?? 300)),
-  );
+  const requestedTimeout = process.env.COMPANION_GUEST_TIMEOUT_SECONDS;
+  let maxTimeSeconds = 300;
+  if (requestedTimeout !== undefined) {
+    const seconds = Number(requestedTimeout);
+    if (!Number.isFinite(seconds) || seconds <= 0)
+      fail("COMPANION_GUEST_TIMEOUT_SECONDS must be a positive number");
+    maxTimeSeconds = Math.max(
+      1,
+      Math.min(900, Math.floor(seconds) - GUEST_TIMEOUT_MARGIN_SECONDS),
+    );
+  }
   const args = realPi
     ? [
         "-p",

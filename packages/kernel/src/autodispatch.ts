@@ -1183,6 +1183,38 @@ function deny(
   );
 }
 
+const MAX_WIRE_CONSTRAINTS = 16;
+const MAX_WIRE_CONSTRAINT_CHARS = 1024;
+
+/** Frozen plan decisions/non-goals/steps -> wire `constraints`.
+ * Prefixes are added BEFORE the bound check: an entry that only fits the
+ * plan schema but not the wire (or a list over 16) fails closed here at
+ * authorization, before any reservation/task/grant is created. */
+function planWireConstraints(plan: DispatchPlanView): string[] {
+  const entries = [
+    ...plan.decisions.map((entry) => `Decision: ${entry}`),
+    ...plan.nongoals.map((entry) => `Non-goal: ${entry}`),
+    ...plan.steps.map((entry) => `Step: ${entry}`),
+  ];
+  if (entries.length > MAX_WIRE_CONSTRAINTS) {
+    throw new RepositoryValidationError(
+      `plan constraints exceed ${MAX_WIRE_CONSTRAINTS} wire entries`,
+    );
+  }
+  for (const entry of entries) {
+    if (
+      entry.length < 1 ||
+      entry.length > MAX_WIRE_CONSTRAINT_CHARS ||
+      entry.includes("\0")
+    ) {
+      throw new RepositoryValidationError(
+        `plan constraint exceeds ${MAX_WIRE_CONSTRAINT_CHARS} wire chars`,
+      );
+    }
+  }
+  return entries;
+}
+
 function dayStart(now: number): number {
   const date = new Date(now);
   return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
@@ -1374,6 +1406,24 @@ export function authorizeWithinPolicy(
       replayed: false,
     };
   }
+  let constraints: string[];
+  try {
+    constraints = planWireConstraints(plan);
+  } catch {
+    const denied = deny(
+      db,
+      session,
+      plan,
+      policy,
+      dedupKey,
+      "plan-constraints-overflow",
+      now,
+    );
+    db.prepare(
+      "UPDATE autodispatch_plans SET status='blocked', updated_at=? WHERE id=? AND status='frozen'",
+    ).run(now, plan.id);
+    return { execution: denied, replayed: false };
+  }
   // Quota + reservation share ONE BEGIN IMMEDIATE transaction, so separate
   // SQLite connections serialize here instead of both observing a free slot.
   // `reserved` rows count as already-spent daily slots and as concurrent
@@ -1496,6 +1546,7 @@ export function authorizeWithinPolicy(
       objective: plan.goal,
       acceptance:
         plan.acceptance.length > 0 ? [...plan.acceptance] : [plan.goal],
+      constraints,
       literalPatchPaths: paths,
       operation: plan.operation,
       readOnlyMode: !writeOperation,

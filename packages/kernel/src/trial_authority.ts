@@ -549,6 +549,34 @@ function requireChecksOrThrow(
   return [...requiredChecks];
 }
 
+function normalizeWireConstraints(value: unknown): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value))
+    throw new RepositoryValidationError("constraints must be an array");
+  if (value.length > 16)
+    throw new RepositoryValidationError(
+      "constraints must carry 0..16 entries",
+    );
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const entry of value) {
+    if (
+      typeof entry !== "string" ||
+      entry.length < 1 ||
+      entry.length > 1024 ||
+      entry.includes("\0")
+    )
+      throw new RepositoryValidationError(
+        "constraints entries must be 1..1024 char strings without NUL",
+      );
+    if (seen.has(entry))
+      throw new RepositoryValidationError("constraints must be unique");
+    seen.add(entry);
+    out.push(entry);
+  }
+  return out;
+}
+
 function profileBindingKey(p: TrialProfileSnapshot): string {
   return canonicalJsonString({
     available: p.available,
@@ -742,6 +770,7 @@ export function stageTrialProposal(
           taskVersion: auth.taskVersion,
           objective: input.objective,
           acceptance: input.acceptance,
+          constraints: [],
           literalPatchPaths: normPaths,
           operation: input.operation,
           readOnlyMode: input.readOnlyMode,
@@ -811,6 +840,7 @@ function toProposalView(r: {
   task_version: number;
   objective: string;
   acceptance_json: string;
+  constraints_json?: string | null;
   paths_json: string;
   operation: string;
   read_only: number;
@@ -865,6 +895,10 @@ function toProposalView(r: {
         taskVersion: r.task_version,
         objective: r.objective,
         acceptance: JSON.parse(r.acceptance_json),
+        constraints:
+          typeof r.constraints_json === "string"
+            ? (JSON.parse(r.constraints_json) as string[])
+            : [],
         literalPatchPaths: JSON.parse(r.paths_json),
         operation: r.operation,
         readOnlyMode: r.read_only === 1,
@@ -913,6 +947,10 @@ export interface PolicyGrantInput {
   taskId: string;
   objective: string;
   acceptance: string[];
+  /** Already-prefixed plan decisions/non-goals/steps. Omitted = none.
+   * Bounded exactly like the wire `constraints` field; over-bound input
+   * fails before any proposal/grant write. */
+  constraints?: string[];
   literalPatchPaths: string[];
   operation: TrialOperation;
   readOnlyMode: boolean;
@@ -1007,6 +1045,7 @@ export function derivePolicyTrialGrant(
       input.requiredChecks,
       profile.mandatoryChecks,
     );
+    const constraints = normalizeWireConstraints(input.constraints);
     const ctl = db
       .prepare("SELECT paused, version FROM autonomy_control WHERE id='global'")
       .get() as { paused: number; version: number } | undefined;
@@ -1023,7 +1062,7 @@ export function derivePolicyTrialGrant(
     );
     const proposalId = generateId();
     db.prepare(
-      "INSERT INTO trial_proposals (id, session_id, scope, task_id, goal_id, goal_version, task_version, objective, acceptance_json, paths_json, operation, read_only, expiry, consent, timeout_ms, max_output_bytes, checks_json, status, created_at, workspace_alias, profile_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'granted', ?, ?, ?)",
+      "INSERT INTO trial_proposals (id, session_id, scope, task_id, goal_id, goal_version, task_version, objective, acceptance_json, paths_json, operation, read_only, expiry, consent, timeout_ms, max_output_bytes, checks_json, constraints_json, status, created_at, workspace_alias, profile_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'granted', ?, ?, ?)",
     ).run(
       proposalId,
       session,
@@ -1042,6 +1081,7 @@ export function derivePolicyTrialGrant(
       input.timeoutMs,
       input.maxOutputBytes,
       JSON.stringify(checks),
+      JSON.stringify(constraints),
       now,
       input.workspaceAlias,
       JSON.stringify(profile),
@@ -1649,7 +1689,7 @@ export function claimTrialGrant(
       relevantPaths: wirePaths,
       acceptance: view.acceptance,
       requiredChecks: view.requiredChecks,
-      constraints: [] as string[],
+      constraints: [...view.constraints],
       budget: {
         timeoutMs: view.timeoutMs,
         maxOutputBytes: view.maxOutputBytes,

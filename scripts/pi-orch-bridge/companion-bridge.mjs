@@ -195,6 +195,60 @@ function observationFindings(observation) {
   return findings;
 }
 
+const MAX_GUEST_ANSWER_CHARS = 4096;
+const MAX_GUEST_ANSWER_CHUNK = 900;
+const MAX_REPORT_FINDINGS = 16;
+
+function boundedGuestAnswer(observation) {
+  if (
+    observation === null ||
+    typeof observation.finalText !== "string" ||
+    observation.finalText.length === 0
+  )
+    return "";
+  return observation.finalText
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MAX_GUEST_ANSWER_CHARS);
+}
+
+// The guest's final prose is UNATTESTED, exactly like its tool/worker lines.
+// It is forwarded only as clearly labelled report findings (never checks,
+// authorization, artifact, or completion evidence) after stripping control
+// characters and bounding the total forwarded size.
+function guestAnswerFindings(observation) {
+  const answer = boundedGuestAnswer(observation);
+  if (answer.length === 0) return [];
+  const chunks = [];
+  for (let i = 0; i < answer.length; i += MAX_GUEST_ANSWER_CHUNK)
+    chunks.push(answer.slice(i, i + MAX_GUEST_ANSWER_CHUNK));
+  return chunks.map((chunk, index) => {
+    const label =
+      chunks.length === 1
+        ? "guest answer (unattested): "
+        : `guest answer (unattested) ${index + 1}/${chunks.length}: `;
+    return `${label}${chunk}`;
+  });
+}
+
+function reportFindings(observation, extra = []) {
+  const out = [];
+  const seen = new Set();
+  const candidates = [
+    ...guestAnswerFindings(observation),
+    ...extra,
+    ...observationFindings(observation),
+  ];
+  for (const entry of candidates) {
+    if (out.length >= MAX_REPORT_FINDINGS) break;
+    if (seen.has(entry)) continue;
+    seen.add(entry);
+    out.push(entry);
+  }
+  return out;
+}
+
 // Conservative RELIABILITY downgrade over an UNTRUSTED guest report. The
 // reported worker status is guest-reported/unattested (the guest can rewrite
 // guest.json); it is never host evidence and never authorizes permission,
@@ -606,9 +660,11 @@ async function main() {
     if (runStat.isSymbolicLink() || !runStat.isDirectory())
       throw new Error("run dir is not private");
 
-    const deadlineAt =
-      Date.now() +
-      Math.min(request.budget.timeoutMs, config.profile.limits.maxDurationMs);
+    const effectiveDurationMs = Math.min(
+      request.budget.timeoutMs,
+      config.profile.limits.maxDurationMs,
+    );
+    const deadlineAt = Date.now() + effectiveDurationMs;
     const remainingMs = () => deadlineAt - Date.now();
     const deadlineTimer = setTimeout(
       () => {
@@ -748,6 +804,7 @@ async function main() {
           config.profile,
           { executorExecutable: executorFile, workRoot, jobFile },
           unit,
+          { guestTimeoutMs: effectiveDurationMs },
         );
         if (process.env.PI_ORCH_DEBUG_LOG) {
           try {
@@ -997,7 +1054,7 @@ async function main() {
                               summary:
                                 "companion bridge: guest-reported worker evidence missing",
                               files: [],
-                              findings: observationFindings(observation),
+                              findings: reportFindings(observation),
                               unresolved: [
                                 "blocked: guest-reported worker evidence (unattested)",
                               ],
@@ -1016,15 +1073,15 @@ async function main() {
                         );
                     if (outcome.raw.report.findings.length === 0) {
                       outcome.raw.report.findings =
-                        observationFindings(observation);
+                        reportFindings(observation);
                     }
                   } else {
-                    const findings = [
-                      ...changes
+                    const findings = reportFindings(
+                      observation,
+                      changes
                         .slice(0, 8)
                         .map((change) => `${change.kind} ${change.path}`),
-                      ...observationFindings(observation),
-                    ].slice(0, 16);
+                    );
                     try {
                       retainCandidateChanges(
                         workRoot,

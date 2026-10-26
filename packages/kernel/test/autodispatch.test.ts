@@ -211,7 +211,11 @@ function claimPolicyGrant(
     profile: profile(),
     workspaceAlias: "companion-harness",
   });
-  return (claimed.body as { request: { taskHash: string } }).request;
+  return (
+    claimed.body as {
+      request: { taskHash: string; constraints: string[] };
+    }
+  ).request;
 }
 
 async function fileFixture() {
@@ -276,6 +280,84 @@ describe("autodispatch policy/plan/authority", () => {
         .prepare("SELECT COUNT(*) AS n FROM trial_proposals")
         .get() as { n: number };
       expect(proposals.n).toBe(1);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("carries frozen decisions/non-goals/steps into the claimed wire constraints", async () => {
+    const { handle, repo, sessionId } = await fixture();
+    try {
+      const anchor = completedTurn(
+        repo,
+        sessionId,
+        "Please implement the feature in src/app.ts. Yes, go ahead.",
+        NOW + 10,
+      );
+      const policy = createPolicy(repo, sessionId, anchor.turnId, NOW + 20);
+      const { auth } = authorizePolicyGrant(
+        repo,
+        sessionId,
+        policy.id,
+        anchor,
+        NOW + 21,
+      );
+      expect(auth.execution.status).toBe("authorized");
+      const request = claimPolicyGrant(
+        repo,
+        sessionId,
+        auth.execution.executionId as string,
+        NOW + 30,
+      );
+      expect(request.constraints).toEqual([
+        "Decision: Use the existing pipeline",
+        "Non-goal: No production deployment",
+        "Step: Edit src/app.ts",
+      ]);
+      expect(request.taskHash).toMatch(/^[0-9a-f]{64}$/);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("denies an over-bound plan before any proposal/grant is created", async () => {
+    const { handle, repo, sessionId } = await fixture();
+    try {
+      const anchor = completedTurn(
+        repo,
+        sessionId,
+        "Please implement the feature in src/app.ts. Yes, go ahead.",
+        NOW + 10,
+      );
+      const policy = createPolicy(repo, sessionId, anchor.turnId, NOW + 20);
+      const manySteps = planInput(policy.id, anchor);
+      manySteps.content.steps = Array.from(
+        { length: 17 },
+        (_, index) => `Step ${index + 1}`,
+      );
+      const created = repo.createAutodispatchPlan(sessionId, manySteps, {
+        now: NOW + 30,
+      });
+      const auth = repo.authorizeAutodispatch(sessionId, created.plan.id, {
+        profile: profile(),
+        workspaceAlias: "companion-harness",
+        limits,
+        now: NOW + 40,
+      });
+      expect(auth.execution.status).toBe("denied");
+      expect(auth.execution.reason).toBe("plan-constraints-overflow");
+      const proposals = handle.raw
+        .prepare("SELECT COUNT(*) AS n FROM trial_proposals")
+        .get() as { n: number };
+      const grants = handle.raw
+        .prepare("SELECT COUNT(*) AS n FROM trial_grants")
+        .get() as { n: number };
+      expect(proposals.n).toBe(0);
+      expect(grants.n).toBe(0);
+      const plan = handle.raw
+        .prepare("SELECT status FROM autodispatch_plans WHERE id=?")
+        .get(created.plan.id) as { status: string };
+      expect(plan.status).toBe("blocked");
     } finally {
       closeKernelDatabase(handle);
     }

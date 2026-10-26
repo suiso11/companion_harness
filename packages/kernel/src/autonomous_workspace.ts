@@ -586,6 +586,29 @@ async function collectSourceFiles(
         `allowed root symlink rejected: ${root}`,
       );
     }
+    if (rootStat.isFile()) {
+      // A literal file scope (for example `src/app.ts`) is an explicit,
+      // exact allowlist entry, not a directory walk. No path component may
+      // be a symlink: realpath must resolve to the same canonical path built
+      // from the canonical source root. Denied file names and a denied first
+      // directory segment are rejected exactly like other roots.
+      if (isDeniedFileName(root)) {
+        throw new SealedWorkspaceError(
+          "forbidden_path",
+          `allowed root is a denied file: ${root}`,
+        );
+      }
+      const expectedAbsolute = join(canonicalRoot, ...root.split("/"));
+      const canonicalFile = await realpath(absoluteRoot).catch(() => null);
+      if (canonicalFile === null || canonicalFile !== expectedAbsolute) {
+        throw new SealedWorkspaceError(
+          "symlink_rejected",
+          `allowed root path contains a symlink: ${root}`,
+        );
+      }
+      await addFile(canonicalFile, root);
+      continue;
+    }
     if (!rootStat.isDirectory()) {
       throw new SealedWorkspaceError(
         "invalid_input",

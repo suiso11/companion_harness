@@ -2689,58 +2689,65 @@ describe("trial_runner", () => {
     }
   });
 
-  it("manual caps are the real relay intersection of the V2 config and static caps", async () => {
-    const fixture = makeOperatorFixture(
-      mkdtempSync(join(tmpdir(), "trial-operator-caps-")),
-      { maxRequestBytes: 1024, maxModelCalls: 1, maxOutputTokens: 64 },
-    );
-    const caps = manualRelayCapsFromConfig(fixture.config, {
-      maxRequestBytes: 1024 * 1024,
-      maxModelCalls: 8,
-      maxOutputTokens: 256,
-      maxResponseBytes: 1024 * 1024,
-      perCallTimeoutMs: 5000,
-      maxConcurrent: 1,
-    });
-    expect(caps.maxRequestBytes).toBe(1024);
-    expect(caps.maxModelCalls).toBe(1);
-    const sock = fixture.config.profile.model.sockHostPath;
-    const relay = new TrialModelRelay({
-      sockPath: sock,
-      gateway: stubGateway,
-      fixedModel: "test-model",
-      caps,
-    });
-    await relay.start();
-    try {
-      relay.setPermitted(true);
-      const smallBody = JSON.stringify({
-        model: "companion/companion-current",
-        messages: [{ role: "user", content: "hi" }],
+  // Linux-only like the real-relay suite: this binds a real unix-domain
+  // socket with POSIX permissions. Windows runners return EACCES and other
+  // hosts are not the deployed systemd Linux target. All other caps tests
+  // here stay platform-independent.
+  it.runIf(process.platform === "linux")(
+    "manual caps are the real relay intersection of the V2 config and static caps",
+    async () => {
+      const fixture = makeOperatorFixture(
+        mkdtempSync(join(tmpdir(), "trial-operator-caps-")),
+        { maxRequestBytes: 1024, maxModelCalls: 1, maxOutputTokens: 64 },
+      );
+      const caps = manualRelayCapsFromConfig(fixture.config, {
+        maxRequestBytes: 1024 * 1024,
+        maxModelCalls: 8,
+        maxOutputTokens: 256,
+        maxResponseBytes: 1024 * 1024,
+        perCallTimeoutMs: 5000,
+        maxConcurrent: 1,
       });
-      // Real relay enforcement, not a createRelay argument echo: the
-      // template's 1KiB request cap rejects the oversized body.
-      const oversized = await postRelay(
-        sock,
-        JSON.stringify({
+      expect(caps.maxRequestBytes).toBe(1024);
+      expect(caps.maxModelCalls).toBe(1);
+      const sock = fixture.config.profile.model.sockHostPath;
+      const relay = new TrialModelRelay({
+        sockPath: sock,
+        gateway: stubGateway,
+        fixedModel: "test-model",
+        caps,
+      });
+      await relay.start();
+      try {
+        relay.setPermitted(true);
+        const smallBody = JSON.stringify({
           model: "companion/companion-current",
-          messages: [{ role: "user", content: "x".repeat(2048) }],
-        }),
-      );
-      expect(oversized.status).toBe(413);
-      expect(JSON.parse(oversized.text).error.message).toBe(
-        "request_cap_exceeded",
-      );
-      const first = await postRelay(sock, smallBody);
-      expect(first.status).toBe(200);
-      const second = await postRelay(sock, smallBody);
-      expect(second.status).toBe(429);
-      expect(JSON.parse(second.text).error.message).toBe(
-        "model_call_cap_exceeded",
-      );
-    } finally {
-      await relay.close();
-    }
-    expect(existsSync(sock)).toBe(false);
-  });
+          messages: [{ role: "user", content: "hi" }],
+        });
+        // Real relay enforcement, not a createRelay argument echo: the
+        // template's 1KiB request cap rejects the oversized body.
+        const oversized = await postRelay(
+          sock,
+          JSON.stringify({
+            model: "companion/companion-current",
+            messages: [{ role: "user", content: "x".repeat(2048) }],
+          }),
+        );
+        expect(oversized.status).toBe(413);
+        expect(JSON.parse(oversized.text).error.message).toBe(
+          "request_cap_exceeded",
+        );
+        const first = await postRelay(sock, smallBody);
+        expect(first.status).toBe(200);
+        const second = await postRelay(sock, smallBody);
+        expect(second.status).toBe(429);
+        expect(JSON.parse(second.text).error.message).toBe(
+          "model_call_cap_exceeded",
+        );
+      } finally {
+        await relay.close();
+      }
+      expect(existsSync(sock)).toBe(false);
+    },
+  );
 });

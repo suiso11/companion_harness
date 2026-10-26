@@ -51,6 +51,9 @@ const BRIDGE = fileURLToPath(
     import.meta.url,
   ),
 );
+const GUEST = fileURLToPath(
+  new URL("../../../scripts/pi-orch-bridge/pi-orch-guest.mjs", import.meta.url),
+);
 const roots: string[] = [];
 
 afterEach(() => {
@@ -368,7 +371,11 @@ function sha256(text: string): string {
 
 // The guest owns this file. Tests use it to model an UNTRUSTED guest report,
 // not host evidence; the bridge must never treat a reported `done` as proof.
-function guestReportBody(delegatedWorkers: unknown[], extraBody = ""): string {
+function guestReportBody(
+  delegatedWorkers: unknown[],
+  extraBody = "",
+  finalText?: string,
+): string {
   return `import { mkdirSync, writeFileSync } from 'node:fs';\nmkdirSync('.companion-observation', { recursive: true });\nwriteFileSync('.companion-observation/guest.json', ${JSON.stringify(
     JSON.stringify({
       schemaVersion: 1,
@@ -378,6 +385,7 @@ function guestReportBody(delegatedWorkers: unknown[], extraBody = ""): string {
       tools: [],
       delegatedWorkers,
       error: "",
+      ...(finalText === undefined ? {} : { finalText }),
     }),
   )});\n${extraBody}`;
 }
@@ -432,6 +440,42 @@ describe("sealed pi-orch bridge portable protocol/command contract", () => {
     // frozen budget and make the kernel's observed/permit equality deny.
     expect(built.args).toContain("RuntimeMaxSec=12345ms");
     expect(built.args).not.toContain("RuntimeMaxSec=13");
+  });
+
+  it("passes the effective frozen timeout to the guest without widening it", () => {
+    const built = buildWholejobCommand(
+      {
+        runtime: {
+          bwrapRealpath: "/usr/bin/bwrap",
+          systemdRunRealpath: "/usr/bin/systemd-run",
+          nodeRealpath: process.execPath,
+        },
+        model: { sockHostPath: "/tmp/model.sock" },
+        dependencies: { mounts: [] },
+        executor: { executable: process.execPath, args: [] },
+        limits: {
+          memoryMaxBytes: 256 * 1024 * 1024,
+          maxProcesses: 64,
+          cpuQuotaPercent: 100,
+          maxModelCalls: 1,
+          maxOutputTokens: 1,
+          maxModelCallMs: 1,
+          modelConcurrency: 1,
+          maxDurationMs: 30_000,
+        },
+      },
+      {
+        executorExecutable: process.execPath,
+        workRoot: "/tmp/work",
+        jobFile: "/tmp/companion-job.json",
+      },
+      "capsule-test.scope",
+      { guestTimeoutMs: 12_345 },
+    );
+    const index = built.args.indexOf("COMPANION_GUEST_TIMEOUT_SECONDS");
+    expect(index).toBeGreaterThan(0);
+    // Floor, never round up: a wider guest window than the grant is a bug.
+    expect(built.args[index + 1]).toBe("12");
   });
 });
 
@@ -537,6 +581,44 @@ posixDescribe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
     expect(missingResult.report.unresolved).toContain(
       "blocked: guest-reported worker evidence (unattested)",
     );
+  });
+
+  it("forwards a bounded, explicitly unattested guest answer into a read-only report", async () => {
+    const answer = `synthetic answer: src/app.ts exports app\u0000\u0007 ${"detail ".repeat(900)}`;
+    const fixture = await makeFixture({
+      executorBody: guestReportBody(
+        [{ id: "oc-answer", status: "done" }],
+        "",
+        answer,
+      ),
+      scratchPaths: [".companion-observation"],
+    });
+    const run = await runBridge(fixture, makeRequest(fixture));
+    expect(run.status).toBe(0);
+    const result = resultOf(run);
+    expect(result.status).toBe("done");
+    const answerEntries = result.report.findings.filter((entry) =>
+      entry.startsWith("guest answer (unattested)"),
+    );
+    expect(answerEntries.length).toBeGreaterThan(0);
+    const joined = answerEntries.join(" ");
+    expect(joined).toContain("synthetic answer: src/app.ts exports app");
+    expect(joined).toContain("detail");
+    // Control characters are stripped and the forwarded answer stays within
+    // the 4 KiB bound even when the guest wrote much more.
+    expect(joined).not.toContain("\u0000");
+    expect(joined).not.toContain("\u0007");
+    expect(joined.length).toBeLessThanOrEqual(4096 + 6 * 40);
+    expect(answerEntries.every((entry) => entry.length <= 1024)).toBe(true);
+    // The answer is prose only: host checks remain the sole verified evidence.
+    expect(result.evidence.checks).toEqual([
+      {
+        id: "synthetic-check",
+        exitCode: 0,
+        timedOut: false,
+        outputMatched: true,
+      },
+    ]);
   });
 
   it("a forged guest done report cannot bypass host checks or candidate scope", async () => {
@@ -1000,4 +1082,111 @@ posixDescribe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
     expect(result.status).toBe("error");
     expect(result.report.unresolved).toContain("blocked: dependencies");
   });
+  it.skipIf(process.platform !== "linux")(
+    "the real guest terminates on the frozen timeout before the bridge deadline",
+    async () => {
+      const bwrap = "/usr/bin/bwrap";
+      const probe = spawnSync(bwrap, ["--version"], { encoding: "utf8" });
+      expect(
+        probe.status,
+        `bwrap probe failed: ${probe.error?.message ?? ""} ${probe.stderr ?? ""}`,
+      ).toBe(0);
+      const dir = tempRoot("guest-timeout");
+      const workRoot = join(dir, "work");
+      mkdirSync(workRoot, { recursive: true });
+      const bin = join(dir, "bin");
+      mkdirSync(bin, { recursive: true });
+      const omp = join(bin, "omp");
+      // Basename must be omp; exec keeps SIGTERM on this PID (a shell that
+      // left `sleep` holding the stdio pipe would delay `close` past the cap).
+      // It deliberately outlives the guest cap.
+      write(omp, "#!/bin/sh\nexec sleep 30\n", 0o700);
+      const jobFile = join(dir, "job.json");
+      write(
+        jobFile,
+        `${JSON.stringify({
+          version: 1,
+          mode: "read_only",
+          executionId: randomUUID(),
+          taskHash: "a".repeat(64),
+          profileFingerprint: "b".repeat(64),
+          sealed: {
+            manifestDigest: "c".repeat(64),
+            sourceRevision: "d".repeat(40),
+            snapshotRoot: "/snapshot",
+          },
+          purpose: { statement: "synthetic timeout", scope: "synthetic" },
+          objective: "Prove the frozen guest timeout is honored.",
+          relevantPaths: ["src"],
+          acceptance: ["bounded"],
+          constraints: ["Decision: stay within the frozen budget"],
+          requiredChecks: ["synthetic-check"],
+          externalModelConsent: false,
+        })}\n`,
+        0o600,
+      );
+      const started = Date.now();
+      // A minimal, writable-root namespace (not `--dev-bind / /`, whose host
+      // root is not writable and cannot create the `/work` mountpoint).
+      const bound = ["/usr", "/etc", "/home", "/lib", "/lib64", "/bin"].flatMap(
+        (path) => (existsSync(path) ? ["--ro-bind", path, path] : []),
+      );
+      const run = spawnSync(
+        bwrap,
+        [
+          "--die-with-parent",
+          "--new-session",
+          "--unshare-all",
+          "--unshare-user",
+          "--proc",
+          "/proc",
+          "--dev",
+          "/dev",
+          "--tmpfs",
+          "/scratch",
+          ...bound,
+          "--bind",
+          workRoot,
+          "/work",
+          "--ro-bind",
+          jobFile,
+          jobFile,
+          "--ro-bind",
+          omp,
+          omp,
+          "--chdir",
+          "/work",
+          "--",
+          process.execPath,
+          GUEST,
+        ],
+        {
+          encoding: "utf8",
+          timeout: 20_000,
+          env: {
+            HOME: "/scratch",
+            TMPDIR: "/scratch",
+            COMPANION_JOB_FILE: jobFile,
+            COMPANION_MODEL_UDS: join(dir, "model.sock"),
+            COMPANION_OMP_BIN: omp,
+            COMPANION_NODE_BIN: process.execPath,
+            COMPANION_EXECUTOR_KIND: "fixed",
+            // 4 - 2 margin => the guest must stop after ~2s, well before 4s.
+            COMPANION_GUEST_TIMEOUT_SECONDS: "4",
+          },
+        },
+      );
+      const elapsed = Date.now() - started;
+      expect(run.status, run.stderr).toBe(10);
+      expect(run.stderr).toContain("exceeded the frozen guest timeout");
+      expect(elapsed).toBeLessThan(10_000);
+      const observation = JSON.parse(
+        readFileSync(
+          join(workRoot, ".companion-observation", "guest.json"),
+          "utf8",
+        ),
+      ) as { timedOut: boolean; mode: string };
+      expect(observation).toMatchObject({ mode: "read_only", timedOut: true });
+    },
+  );
 });

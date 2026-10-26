@@ -50,6 +50,7 @@ export function buildWholejobCommand(
     jobFile: string;
   },
   scopeUnit: string,
+  options?: { guestTimeoutMs?: number },
 ): ContainmentCommand;
 
 export function buildCheckCommand(

@@ -5395,8 +5395,9 @@ is Linux-only.
   package's real `.pnpm/.../node_modules/<pkg>` directory rather than the
   logical link path. A plain empty directory, an escaping symlink, or a
   fabricated manifest is not accepted.
-- Persistent ledger (migrations `0030_autodispatch.sql` and
-  `0031_autodispatch_materialization.sql`):
+- Persistent ledger (migrations `0030_autodispatch.sql`,
+  `0031_autodispatch_materialization.sql`, and
+  `0032_trial_proposal_constraints.sql`):
   `autodispatch_policies` (version/status/expiry/revoke/scopes/caps/
   parent human purpose), `autodispatch_plans` (revision, exact host
   `plan_hash`, accepted turn/run anchors, status), and
@@ -5452,6 +5453,29 @@ is Linux-only.
   turn or a changed retry selection invalidates the old grant even when the
   planner has not saved a newer plan; manual (non-policy) grants are not
   affected.
+- Frozen plan constraints: the plan's `decisions`, `nongoals`, and `steps`
+  are mapped in that order to the wire `constraints` list with fixed
+  `Decision: `, `Non-goal: `, and `Step: ` prefixes, then frozen on the
+  proposal (`constraints_json`) and used by `claimTrialGrant` (so the wire
+  `taskHash` covers them). The guest prompt renders every constraint for
+  both read-only and write runs. Mapping is bounded exactly like the wire
+  field (max 16 entries, 1..1024 chars each) AFTER prefixes are added: an
+  over-bound plan is denied as `plan-constraints-overflow` and marked
+  `blocked` before any reservation/task/proposal/grant exists. Nothing is
+  silently truncated. Manual staging keeps an empty constraint list.
+- Guest answer reporting: a completed read-only run forwards the guest's
+  bounded `finalText` (control characters stripped, at most 4096 chars,
+  split into ≤1024-char report findings) as
+  `guest answer (unattested): ...`. It is guest prose only: never a check
+  result, authorization input, completion evidence, or artifact claim, and
+  write runs may include the same labelled findings.
+- Frozen guest timeout: the bridge passes
+  `min(request.budget.timeoutMs, profile.limits.maxDurationMs)` as
+  `COMPANION_GUEST_TIMEOUT_SECONDS` into the confined guest environment
+  (floored to whole seconds, never widened). The guest validates a supplied
+  value and stops two seconds earlier so it can write its observation and
+  exit before the bridge's outer deadline; the unconfigured manual path
+  keeps the existing 300-second default.
 - HTTP (same-origin/authenticated; session-scoped):
   `GET /api/sessions/:id/autodispatch` (state/defaults),
   `GET|POST /api/sessions/:id/autodispatch/policies`,

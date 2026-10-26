@@ -186,6 +186,99 @@ posixDescribe("createSealedWorkspaceSnapshot", () => {
     );
   });
 
+  it("copies a literal nested file root alone and excludes siblings", async () => {
+    const source = tempRoot("literal-file-source");
+    write(join(source, "package.json"), '{"name":"literal"}\n');
+    write(join(source, "src/app.ts"), "export const app = 1;\n");
+    write(join(source, "src/nested/deep.ts"), "export const deep = 2;\n");
+    write(join(source, "src/nested/sibling.ts"), "export const sibling = 3;\n");
+    const snapshot = await createSealedWorkspaceSnapshot({
+      sourceRoot: source,
+      outputDir: join(tempRoot("output"), "workspace"),
+      allowedRoots: ["src/nested/deep.ts"],
+      allowedTopLevelFiles: ["package.json"],
+    });
+    expect(snapshot.manifest.map((entry) => entry.path)).toEqual([
+      "package.json",
+      "src/nested/deep.ts",
+    ]);
+    expect(snapshot.sourceIdentity.fileCount).toBe(2);
+    expect(
+      readFileSync(join(snapshot.snapshotRoot, "src/nested/deep.ts"), "utf8"),
+    ).toBe("export const deep = 2;\n");
+    expect(() =>
+      readFileSync(join(snapshot.snapshotRoot, "src/app.ts")),
+    ).toThrow();
+    expect(() =>
+      readFileSync(join(snapshot.snapshotRoot, "src/nested/sibling.ts")),
+    ).toThrow();
+
+    // A literal file scope is an exact allowedEditPaths entry: the scoped
+    // file may change, while a sibling remains a scope violation.
+    const candidate = await copyCandidate(snapshot);
+    write(join(candidate, "src/nested/deep.ts"), "export const deep = 4;\n");
+    const accepted = await validateCandidateChanges({
+      snapshot,
+      expectedManifestDigest: snapshot.manifestDigest,
+      candidateRoot: candidate,
+      mode: "write",
+      allowedEditPaths: ["src/nested/deep.ts"],
+    });
+    expect(accepted.ok).toBe(true);
+
+    const siblingCandidate = await copyCandidate(snapshot);
+    write(join(siblingCandidate, "src/nested/sibling.ts"), "extra\n");
+    const siblingResult = await validateCandidateChanges({
+      snapshot,
+      expectedManifestDigest: snapshot.manifestDigest,
+      candidateRoot: siblingCandidate,
+      mode: "write",
+      allowedEditPaths: ["src/nested/deep.ts"],
+    });
+    expect(rejected(siblingResult).join("\n")).toContain("scope_violation");
+  });
+
+  it("rejects symlinked parents and files in a literal file root", async () => {
+    const source = tempRoot("literal-file-symlink-source");
+    write(join(source, "src/app.ts"), "export const app = 1;\n");
+    symlinkSync("app.ts", join(source, "src/link.ts"));
+    symlinkSync("src", join(source, "alias"));
+    const output = join(tempRoot("output"), "workspace");
+    await expectCode(
+      createSealedWorkspaceSnapshot({
+        sourceRoot: source,
+        outputDir: output,
+        allowedRoots: ["src/link.ts"],
+        allowedTopLevelFiles: [],
+      }),
+      "symlink_rejected",
+    );
+    await expectCode(
+      createSealedWorkspaceSnapshot({
+        sourceRoot: source,
+        outputDir: join(tempRoot("output"), "workspace"),
+        allowedRoots: ["alias/app.ts"],
+        allowedTopLevelFiles: [],
+      }),
+      "symlink_rejected",
+    );
+  });
+
+  it("rejects a denied file in a literal file root", async () => {
+    const source = tempRoot("literal-file-denied-source");
+    write(join(source, "src/app.ts"), "export const app = 1;\n");
+    write(join(source, "src/.env"), "TOP_SECRET=do-not-copy\n");
+    await expectCode(
+      createSealedWorkspaceSnapshot({
+        sourceRoot: source,
+        outputDir: join(tempRoot("output"), "workspace"),
+        allowedRoots: ["src/.env"],
+        allowedTopLevelFiles: [],
+      }),
+      "forbidden_path",
+    );
+  });
+
   it("rejects an output directory inside an allowed subtree", async () => {
     const source = tempRoot("overlap-source");
     write(join(source, "src/app.ts"), "export const app = 1;\n");
