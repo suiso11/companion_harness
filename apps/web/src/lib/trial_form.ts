@@ -57,14 +57,20 @@ export function defaultTrialExpiryLocal(nowMs: number = Date.now()): string {
   return toLocalInputValue(nowMs + TRIAL_DEFAULT_EXPIRY_MS);
 }
 
-/** `datetime-local` (local wall clock) → strict RFC3339 UTC instant.
- * Invalid/empty input yields null; seconds/millis are zeroed by the input
- * granularity. */
-export function localInputToRfc3339(value: string): string | null {
+/** `datetime-local` (local wall clock) → strict RFC3339 UTC instant at
+ * WHOLE-SECOND precision (`...:SSZ`). The trial stage wire rejects a
+ * fractional-seconds instant, so the milliseconds produced by `toISOString`
+ * are truncated here. Invalid/empty/past input yields null: an expiry must be
+ * strictly in the future at staging time. */
+export function localInputToRfc3339(
+  value: string,
+  nowMs: number = Date.now(),
+): string | null {
   if (value.length === 0) return null;
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return null;
-  return parsed.toISOString();
+  if (parsed.getTime() <= nowMs) return null;
+  return parsed.toISOString().replace(/\.\d{3}Z$/, "Z");
 }
 
 /** One entry per non-empty trimmed line (order preserved). */

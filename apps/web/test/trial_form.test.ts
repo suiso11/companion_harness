@@ -1,6 +1,10 @@
 // Unit tests for the native trial staging form mapping (no DOM, no Svelte).
 import { describe, expect, test } from "vitest";
 import {
+  parseStrictCalendarInstantMs,
+  TrialStageRequestSchema,
+} from "../../../packages/contracts/src/index.js";
+import {
   buildTrialStageBody,
   clampTrialCap,
   defaultTrialExpiryLocal,
@@ -26,7 +30,7 @@ function inputs(overrides: Record<string, unknown> = {}) {
     acceptanceText: "it works\n\n  tests pass  \n",
     pathsText: "src/a.ts\nsrc/b.ts\n",
     operation: "implement",
-    expiryLocal: "2026-10-26T12:30",
+    expiryLocal: "2030-10-26T12:30",
     timeoutValue: "5000",
     maxOutputBytesValue: "10000",
     possibleExternalDataConsent: false,
@@ -48,27 +52,50 @@ describe("trial operation mapping", () => {
 });
 
 describe("expiry conversion", () => {
-  test("local datetime-local value becomes the same RFC3339 instant", () => {
+  test("local datetime-local value becomes a WHOLE-SECOND UTC RFC3339 instant", () => {
     const date = new Date(2026, 9, 26, 12, 30, 0, 0);
     const local = toLocalInputValue(date.getTime());
     expect(local).toBe("2026-10-26T12:30");
-    expect(localInputToRfc3339(local)).toBe(date.toISOString());
+    const wire = localInputToRfc3339(local, date.getTime() - 1000);
+    expect(wire).toBe(date.toISOString().replace(/\.\d{3}Z$/, "Z"));
+    expect(wire).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+  });
+
+  test("form wire format is accepted by the real server/contract validator", () => {
+    const date = new Date(2030, 0, 1, 0, 0, 0, 0);
+    const wire = localInputToRfc3339(toLocalInputValue(date.getTime()), 0);
+    expect(wire).not.toBeNull();
+    // The exact predicate the kernel stage path applies to `expiry`
+    // (`parseStrictInstantMs` -> contracts). If the wire rule drifts this
+    // fails, not just the UI formatting assertion.
+    expect(parseStrictCalendarInstantMs(wire as string)).toBe(date.getTime());
   });
 
   test("default expiry is now + 3h in local input form", () => {
     const now = new Date(2026, 9, 26, 9, 0, 0, 0).getTime();
     const local = defaultTrialExpiryLocal(now);
-    expect(localInputToRfc3339(local)).toBe(
-      new Date(now + TRIAL_DEFAULT_EXPIRY_MS).toISOString(),
+    const wire = localInputToRfc3339(local, now);
+    expect(wire).toBe(
+      new Date(now + TRIAL_DEFAULT_EXPIRY_MS)
+        .toISOString()
+        .replace(/\.\d{3}Z$/, "Z"),
     );
-    expect(new Date(localInputToRfc3339(local) ?? "").getTime()).toBe(
-      now + 3 * 60 * 60 * 1000,
-    );
+    expect(new Date(wire ?? "").getTime()).toBe(now + 3 * 60 * 60 * 1000);
   });
 
-  test("invalid/empty expiry yields null", () => {
+  test("invalid/empty/past expiry yields null", () => {
     expect(localInputToRfc3339("")).toBeNull();
     expect(localInputToRfc3339("not-a-date")).toBeNull();
+    const past = new Date(2020, 0, 1, 0, 0, 0, 0);
+    expect(
+      localInputToRfc3339(toLocalInputValue(past.getTime()), past.getTime()),
+    ).toBeNull();
+    expect(
+      localInputToRfc3339(
+        toLocalInputValue(past.getTime()),
+        past.getTime() - 1000,
+      ),
+    ).not.toBeNull();
   });
 });
 
@@ -100,11 +127,15 @@ describe("buildTrialStageBody", () => {
       literalPatchPaths: ["src/a.ts", "src/b.ts"],
       operation: "implement",
       readOnlyMode: false,
-      expiry: new Date("2026-10-26T12:30").toISOString(),
+      expiry: new Date("2030-10-26T12:30")
+        .toISOString()
+        .replace(/\.\d{3}Z$/, "Z"),
       possibleExternalDataConsent: false,
       objectiveResourceCaps: { timeoutMs: 5000, maxOutputBytes: 10000 },
       requiredChecks: ["lint", "typecheck"],
     });
+    // The whole body must satisfy the real server wire schema too.
+    expect(TrialStageRequestSchema.safeParse(result.body).success).toBe(true);
   });
 
   test("read-only operations derive readOnlyMode=true", () => {
