@@ -245,6 +245,15 @@ describe("trial HTTP disabled surface", () => {
         "trials_disabled",
       );
 
+      const profile = await get(
+        app,
+        `/api/sessions/${sessionId}/trial-profile`,
+      );
+      expect(profile.status).toBe(404);
+      expect((profile.body as { error: { code: string } }).error.code).toBe(
+        "trials_disabled",
+      );
+
       const grant = await get(
         app,
         `/api/sessions/${sessionId}/trial-grants/${randomUUID()}`,
@@ -262,6 +271,109 @@ describe("trial HTTP disabled surface", () => {
 
       // No trial row was persisted by any disabled attempt.
       expect(trialProposalCount(fixture)).toBe(0);
+    } finally {
+      fixture.close();
+    }
+  });
+});
+
+describe("trial HTTP profile facts", () => {
+  it("returns the frozen form facts and derived read-only operations", async () => {
+    const fixture = await makeApp(true);
+    try {
+      const { app } = fixture;
+      const created = await post(app, "/api/sessions", {}, randomUUID());
+      expect(created.status).toBe(201);
+      const sessionId = (created.body as { sessionId: string }).sessionId;
+
+      const profile = await get(
+        app,
+        `/api/sessions/${sessionId}/trial-profile`,
+      );
+      expect(profile.status).toBe(200);
+      expect(profile.body).toEqual({
+        workspaceAlias: "ws",
+        mandatoryChecks: ["lint"],
+        ceilings: { timeoutMs: 60000, maxOutputBytes: 1000000 },
+        operations: [
+          { operation: "investigate", readOnlyMode: true },
+          { operation: "implement", readOnlyMode: false },
+          { operation: "verify", readOnlyMode: true },
+          { operation: "maintenance_trial", readOnlyMode: false },
+        ],
+      });
+
+      // Unknown query keys fail closed like the other strict trial reads.
+      const rejected = await get(
+        app,
+        `/api/sessions/${sessionId}/trial-profile?extra=1`,
+      );
+      expect(rejected.status).toBe(400);
+    } finally {
+      fixture.close();
+    }
+  });
+});
+
+describe("task list filters for the staging form", () => {
+  it("filters kind/status in SQL before the limit", async () => {
+    const fixture = await makeApp(true);
+    try {
+      const { app } = fixture;
+      const created = await post(app, "/api/sessions", {}, randomUUID());
+      expect(created.status).toBe(201);
+      const sessionId = (created.body as { sessionId: string }).sessionId;
+      const base = Date.now();
+      const older = fixture.repo.createAutonomyTask(
+        sessionId,
+        {
+          scope: "default",
+          title: "older actionable task",
+          kind: "task",
+          speaker: "user",
+        },
+        { key: randomUUID(), now: base },
+      );
+      for (let index = 0; index < 55; index += 1) {
+        fixture.repo.createAutonomyTask(
+          sessionId,
+          {
+            scope: "default",
+            title: `chat ${index}`,
+            kind: "chat",
+            speaker: "user",
+          },
+          { key: randomUUID(), now: base + index + 1 },
+        );
+      }
+
+      const unfiltered = await get(app, `/api/sessions/${sessionId}/tasks`);
+      expect(unfiltered.status).toBe(200);
+      expect(
+        (unfiltered.body as { items: { id: string }[] }).items.some(
+          (task) => task.id === older.body.id,
+        ),
+      ).toBe(false);
+
+      const filtered = await get(
+        app,
+        `/api/sessions/${sessionId}/tasks?kind=task&status=open&limit=10`,
+      );
+      expect(filtered.status).toBe(200);
+      const items = (filtered.body as { items: { id: string }[] }).items;
+      expect(items.map((task) => task.id)).toContain(older.body.id);
+      expect(items.length).toBeLessThanOrEqual(10);
+
+      const badStatus = await get(
+        app,
+        `/api/sessions/${sessionId}/tasks?status=unknown`,
+      );
+      expect(badStatus.status).toBe(400);
+      const unknownKey = await get(
+        app,
+        `/api/sessions/${sessionId}/tasks?kind=task&extra=1`,
+      );
+      expect(unknownKey.status).toBe(400);
     } finally {
       fixture.close();
     }

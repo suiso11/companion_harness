@@ -284,6 +284,7 @@ export {
   AutonomyListQuerySchema,
   AutonomyRequestHashSchema,
   AutonomyScopeSchema,
+  AutonomyTaskListQuerySchema,
   ConversationDraftKindSchema,
   ConversationProposalAcceptRequestSchema,
   ConversationProposalAcceptResponseSchema,

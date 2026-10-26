@@ -482,6 +482,17 @@ export type AutonomyListQuery = z.infer<typeof AutonomyListQuerySchema>;
 export type AutonomyListQueryInput = z.input<typeof AutonomyListQuerySchema>;
 
 /**
+ * Public task-list query. `status`/`kind` filter in SQL BEFORE `limit`, so an
+ * older actionable task is never hidden behind newer unrelated records.
+ */
+export const AutonomyTaskListQuerySchema = z.strictObject({
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  status: TaskStatusSchema.optional(),
+  kind: TaskKindSchema.optional(),
+});
+export type AutonomyTaskListQuery = z.infer<typeof AutonomyTaskListQuerySchema>;
+
+/**
  * Bounded immutable-history page query (borrowed run-events pagination
  * caps: default 50 / max 200). `afterSeq` is the exclusive per-record event
  * cursor (0 = from the start); the server reads `seq > afterSeq ORDER BY

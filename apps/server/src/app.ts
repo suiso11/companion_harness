@@ -19,6 +19,7 @@ import {
   AutonomyControlSetRequestSchema,
   AutonomyHistoryQuerySchema,
   AutonomyListQuerySchema,
+  AutonomyTaskListQuerySchema,
   CancelRunRequestSchema,
   CancelRunResponseSchema,
   ConversationProposalAcceptRequestSchema,
@@ -85,9 +86,11 @@ import {
   TaskHoldRequestSchema,
   TaskResumeRequestSchema,
   TaskTransitionRequestSchema,
+  TrialOperationSchema,
   type TrialProfileSnapshot,
   TrialProposalViewSchema,
   TrialStageRequestSchema,
+  trialOperationIsReadOnly,
 } from "@companion/contracts";
 import {
   ActionNotCancellableError,
@@ -3922,19 +3925,24 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     if ("response" in session) {
       return session.response;
     }
-    const query = strictQuery(c, ["limit"]);
+    const query = strictQuery(c, ["limit", "status", "kind"]);
     if (!query.ok) {
       return validationError(c);
     }
+    const parsed = AutonomyTaskListQuerySchema.safeParse({
+      ...(query.values.limit !== undefined
+        ? { limit: query.values.limit }
+        : {}),
+      ...(query.values.status !== undefined
+        ? { status: query.values.status }
+        : {}),
+      ...(query.values.kind !== undefined ? { kind: query.values.kind } : {}),
+    });
+    if (!parsed.success) {
+      return validationError(c);
+    }
     try {
-      return c.json(
-        repo.listAutonomyTasks(session.id, {
-          ...(query.values.limit !== undefined
-            ? { limit: query.values.limit }
-            : {}),
-        }),
-        200,
-      );
+      return c.json(repo.listAutonomyTasks(session.id, parsed.data), 200);
     } catch (error) {
       return mapDomainError(c, error);
     }
@@ -5023,6 +5031,40 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       workspaceAlias: trial.workspaceAlias,
     };
   }
+
+  // Frozen operator profile facts for the UI staging form (pure read: no DB
+  // access, no expiry/mutation). Same UUID/query gate and fixed disabled
+  // 404 as the other trial GETs; the body carries ONLY what the form needs
+  // (alias, mandatory checks, resource ceilings, operations + derived
+  // read-only mode) so no body field can ever override them.
+  app.get("/api/sessions/:sessionId/trial-profile", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    const frozen = trialProfileOf(config);
+    if (frozen === null) {
+      return trialsDisabled(c, false);
+    }
+    return c.json(
+      {
+        workspaceAlias: frozen.workspaceAlias,
+        mandatoryChecks: [...frozen.profile.mandatoryChecks],
+        ceilings: {
+          timeoutMs: frozen.profile.timeoutMs,
+          maxOutputBytes: frozen.profile.maxOutputBytes,
+        },
+        operations: TrialOperationSchema.options.map((operation) => ({
+          operation,
+          readOnlyMode: trialOperationIsReadOnly(operation),
+        })),
+      },
+      200,
+    );
+  });
 
   /** Strict exactly-empty body (approve/expire carry no inputs). */
   function isEmptyBody(value: unknown): boolean {
