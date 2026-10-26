@@ -5701,3 +5701,36 @@ workspace command. The normal-agent guidance is:
 - Authority failures are returned to the model as fixed codes (for example
   `requires_explicit_user_goal`, `goal_not_active`, `task_not_found`) so it
   can explain the refusal without bypassing the gate.
+
+
+## Frozen trial operator lifecycle
+
+The trial (`COMPANION_AUTONOMY_JSON`) runs against a sealed snapshot of the
+deployed revision, with the guest adapter and check binaries pinned by content
+digest. The snapshot is rebuilt automatically on every deploy so a moved
+master or a changed guest never leaves a stale digest (trials fail closed).
+
+- Host input (no secrets): `~/.config/companion/trial-operator.json` —
+  `workspaceAlias`, `sourceRepo` (the deploy checkout), `sourceRef`
+  (`origin/master`), `stateRoot`, `operatorFile`, `environmentFile`,
+  `mandatoryChecks`, `limits`, `runner` caps, and absolute `runtime` paths.
+- Builder: `scripts/deploy/build-trial-operator.mts`. It exports the deployed
+  SHA with `git archive` (never the working tree), materializes a new
+  `frozen-<sha7>-<stamp>/` root, verifies the snapshot against the archive and
+  the profile fingerprint with `parseOperatorConfig` +
+  `computeEffectiveProfile`, and validates the autonomy JSON with the real
+  `parseTrialConfig`.
+- Publish is atomic: `operator.json` then
+  `~/.config/companion/autonomy.env` (0600, one line
+  `COMPANION_AUTONOMY_JSON='…'`). The previous frozen root is retained until
+  success; afterwards only the newest two frozen roots are kept.
+- Deploy: `scripts/deploy/companion-deploy.sh` runs the builder after
+  `pnpm install` and before the service restart. A builder failure logs
+  `WARNING trial operator rebuild FAILED` and the app deploy continues WITHOUT
+  touching `autonomy.env`, so trials fail closed until the next deploy.
+- systemd: `scripts/deploy/systemd/companion.service` loads
+  `EnvironmentFile=-%h/.config/companion/autonomy.env` after the main env file
+  (later files win). Hosts installed from an older unit also need the
+  equivalent drop-in `~/.config/systemd/user/companion.service.d/autonomy.conf`.
+- Run manually with:
+  `pnpm --filter @companion/server exec tsx scripts/deploy/build-trial-operator.mts`.

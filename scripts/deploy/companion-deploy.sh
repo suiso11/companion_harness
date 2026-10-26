@@ -178,6 +178,22 @@ rollback() {
 log "switching to $TARGET"
 git switch --detach "$TARGET"
 pnpm install --frozen-lockfile
+
+# --- frozen trial operator: rebuild from the deployed sha, then restart ---
+# The builder exports a clean archive of HEAD, verifies the materialized
+# snapshot, and only then atomically switches operator.json + autonomy.env.
+# A failure must NOT block app deploys: leave autonomy.env untouched so trials
+# fail closed until the next deploy.
+TRIAL_OPERATOR_INPUT="${COMPANION_TRIAL_OPERATOR_INPUT:-$HOME/.config/companion/trial-operator.json}"
+if [ -f "$TRIAL_OPERATOR_INPUT" ]; then
+  log "rebuilding frozen trial operator for $TARGET"
+  if ! COMPANION_TRIAL_OPERATOR_INPUT="$TRIAL_OPERATOR_INPUT" pnpm --filter @companion/server exec tsx "$SCRIPT_DIR/build-trial-operator.mts"; then
+    log "WARNING trial operator rebuild FAILED; autonomy.env left unchanged (trials fail closed until next deploy)"
+  fi
+else
+  log "trial operator input missing ($TRIAL_OPERATOR_INPUT); skipping trial rebuild"
+fi
+
 # NOTE: `pnpm start` runs the UI build via its prestart hook, so no
 # separate build step is needed here.
 
