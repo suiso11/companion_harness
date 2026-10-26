@@ -4980,8 +4980,9 @@ ops/llm/apply.sh --yes
 `local-chat` は compose service `main` (container `huihui-ornith-35b`) を指す。
 
 - 配置: P40 (`device_ids: ["0"]`)、llama.cpp image は従来と同じ digest pin。
-- `-c 16384 --n-gpu-layers 99 -fa on --jinja --alias huihui-ornith-35b`。
-  投機デコード (MTP) は使わない。
+- `-c 49152 --cache-type-k q8_0 --cache-type-v q8_0 --n-gpu-layers 99 -fa on --jinja --alias huihui-ornith-35b`。
+  投機デコード (MTP) は使わない。KV cache は q8_0 に量子化して 48k context を
+  P40 (24 GiB) に収める (4 slots, kv_unified)。
 - thinking の上限は `--reasoning-budget 512` (2026-10-23 から)。予算を使い切ると
   `--reasoning-budget-message "\n\n考えはここまで。回答します。\n"` を
   end-of-thinking タグの直前に注入して思考を打ち切るため、回答はそのまま続く。
@@ -4996,6 +4997,10 @@ ops/llm/apply.sh --yes
   を渡すとその 1 回だけ上限が変わる。LiteLLM 経由 (`local-chat`) でも
   そのまま転送されることを 2026-10-23 に確認 (64 → reasoning 104 文字、
   512 → 1697 文字)。
+- 実測 (P40, 2026-10-26): 49152 ctx + q8_0 KV → GPU0 21.0/24.0 GiB、
+  4 slots (kv_unified)、prefill 約 557 tok/s @ 20k、decode 59 tok/s (短い文脈) /
+  32 tok/s (@ 20k context)、tool call 有効。切替理由: trial guest (pi-orch) は
+  system + tools で約 17k トークンを要し、16k では 17,026 で拒否された。
 - 実測 (P40, 2026-10-22): VRAM 20.8 GiB @ 16k、decode 約 61 tok/s、
   prefill 約 961 tok/s @ 6k。thinking on/off で decode は同じ。
 - thinking は `reasoning_content` で返る。tool call も実測で成立
@@ -5027,6 +5032,10 @@ ops/llm/apply.sh --yes    # /srv/llm へ反映し、main + litellm を収束
 `apply.sh` は litellm_config.yaml 変更時に litellm を force-recreate する。
 起動後は LiteLLM の `/v1/models` で `local-chat` が
 `huihui-ornith-35b` を向いていることと、`/health` を確認する。
+
+rollback (48k ctx / q8_0 KV の変更だけを戻す): `ops/llm/compose.yaml` の
+`main.command` を切替前 (`-c 16384`、`--cache-type-k/v` なし) に戻して
+`ops/llm/apply.sh --yes` を実行する。
 
 rollback (Gemma 4 26B-A4B へ戻す):
 
