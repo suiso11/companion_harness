@@ -282,6 +282,30 @@ describe("answer_invalid reason codes", () => {
     }
   });
 
+  it("records a parse:citations failure when a UUID is used as a citation", async () => {
+    // Live-eval shape: after tool failures the model cited its own handle
+    // (a real UUID) instead of rN/mN evidence, which is structurally invalid
+    // at answer.submit, not a citation-grant miss.
+    const bad = answerCall([
+      {
+        text: LEAK,
+        citations: ["11111111-1111-4111-8111-111111111111"],
+      },
+    ]);
+    const { thrown, payloads } = await runScript([
+      chatResult([bad]),
+      chatResult([bad]),
+    ]);
+    expect(thrown).toMatchObject({ errorCode: "output_invalid" });
+    expect(payloads[0]).toMatchObject({
+      errorCode: "answer_invalid",
+      // A 36-char UUID exceeds the 11-char citation bound first; a short
+      // non-rN/mN marker (e.g. "p1") would surface as invalid_format.
+      reason: "parse:too_big@parts.0.citations.0",
+    });
+    expect(JSON.stringify(payloads)).not.toContain(LEAK);
+  });
+
   it("records citation_not_granted when the cited ordinal is not granted", async () => {
     const bad = answerCall([{ text: LEAK, citations: ["r1"] }]);
     const { payloads } = await runScript([

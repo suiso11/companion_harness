@@ -83,6 +83,7 @@ import {
   createMemoryStageRegistrations,
   createReferenceManager,
   createToolBroker,
+  createTrialProposalRegistrations,
   createVoiceRenderer,
   createWebSearchRegistration,
   getSchemaVersion,
@@ -2654,6 +2655,28 @@ export async function startServer(
       // AV03 handoff tools: read-only handoff.list/open only (NO model
       // write tool exists anywhere; create/dispatch/verify/attempts are
       // human HTTP only).
+      // trial.propose exists only when the frozen trial profile exists; it
+      // stages a DATA-only trial through the same repository stager the
+      // human HTTP route uses (approval stays human-only).
+      const trialProposalRegistrations =
+        config.trial === null
+          ? []
+          : createTrialProposalRegistrations({
+              repo,
+              profile: {
+                available: config.trial.available,
+                enabled: config.trial.enabled,
+                mandatoryChecks: [...config.trial.mandatoryChecks],
+                configFingerprint: config.trial.configFingerprint,
+                sourceRevision: config.trial.sourceRevision,
+                currentModel: config.trial.currentModel,
+                disclosedWholeRepoRead: config.trial.disclosedWholeRepoRead,
+                timeoutMs: config.trial.timeoutMs,
+                maxOutputBytes: config.trial.maxOutputBytes,
+              },
+              workspaceAlias: config.trial.workspaceAlias,
+              now,
+            });
       const agentBroker = createToolBroker({
         db: handle.raw,
         repo,
@@ -2663,6 +2686,7 @@ export async function startServer(
           ...createConversationProposalRegistrations({ repo }),
           ...createLearningRegistrations({ repo }),
           ...createHandoffRegistrations({ repo }),
+          ...trialProposalRegistrations,
         ],
         ...(executionRecorder === undefined ? {} : { executionRecorder }),
       });

@@ -157,6 +157,7 @@ export {
   translateReferenceArgs,
   trimConversationToCap,
   verifyCitations,
+  visibleUuidKeysForTool,
 } from "./agent.js";
 export type {
   AgoraOperation,
@@ -821,6 +822,12 @@ export {
   stageTrialProposal,
   wireModeForReadOnly,
 } from "./trial_authority.js";
+export type { TrialProposalToolsOptions } from "./trial_proposal_tools.js";
+export {
+  createTrialProposalRegistrations,
+  TrialProposeToolInputSchema,
+  TrialProposeToolOutputSchema,
+} from "./trial_proposal_tools.js";
 export type {
   BundledVoiceProfileId,
   VoiceProfile,

@@ -123,7 +123,7 @@ export function createConversationProposalRegistrations(
       version: 1,
       title: "Propose a purpose draft",
       description:
-        "Stage (never create) one inferred purpose draft quoting the current user message verbatim with a separate interpretation. Human adoption happens outside the model; a staged permission kind is only a claim, never capability.",
+        "Call when the user asks for something concrete that has no existing goal to attach to (or explicitly wants a new goal). Finds an active goal first with purpose.list. Stage (never create) one inferred purpose draft: sourceQuote MUST be an exact substring appearing exactly once in the user's current message, with a separate interpretation. The human adopts it in 候補; a staged permission kind is only a claim, never capability. Tell the user that an explicitly adopted goal is required before trials.",
       category: "write",
       defaultTimeoutMs: 15_000,
       maxTimeoutMs: 60_000,
@@ -175,7 +175,7 @@ export function createConversationProposalRegistrations(
       version: 1,
       title: "Propose a task draft",
       description:
-        "Stage (never create) one inferred task draft quoting the current user message verbatim with a separate interpretation under an explicit parent purpose. Human adoption happens outside the model; no deadline is ever staged.",
+        "Call when the user asks to do/track something concrete and purpose.list shows a fitting active goal (prefer explicit user goals). First read purpose.open for parentPurposeId + expectedParentVersion, then stage (never create) one inferred task draft under that explicit parent. sourceQuote MUST be an exact substring appearing exactly once in the user's current message; no deadline is ever staged. The human adopts it in 候補; always say so.",
       category: "write",
       defaultTimeoutMs: 15_000,
       maxTimeoutMs: 60_000,
