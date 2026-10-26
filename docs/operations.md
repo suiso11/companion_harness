@@ -4383,6 +4383,34 @@ proposals, grants, runner, or bridge spawn.
   relay caps intersected with the host static `runner.relay` caps, so
   neither side can widen the other.
 
+### UI staging (native /trials)
+
+The native `/trials` page can create one DATA-only proposal without
+leaving the UI. It first reads `GET
+/api/sessions/:id/trial-profile` (pure read; fixed `trials_disabled` 404
+when unset) for the frozen form facts: `workspaceAlias`,
+`mandatoryChecks`, the `timeoutMs`/`maxOutputBytes` ceilings, and every
+allowed operation with its derived `readOnlyMode`. Nothing on that
+response is editable in the browser. The form then offers:
+
+- target task (only session tasks in `open`/`in_progress`; there is no
+  create-task path here, the hint links to 「タスク・目的」),
+- objective, 1–16 acceptance lines, and 1–16 literal target paths,
+- operation (`調査`/`実装`/`検証`/`保守（試行）`); `readOnlyMode` is
+  derived automatically (`investigate`/`verify` = read-only),
+- expiry (local `datetime-local`, default now + 3h, converted to an
+  RFC3339 UTC instant),
+- timeout / output cap (default = the operator ceiling, clamped to the
+  ceiling and the schema minimum), external-data consent (default off),
+  and the frozen `mandatoryChecks` shown read-only.
+
+Submit is a `POST /api/sessions/:id/trials` with a fresh
+`Idempotency-Key`; server error codes render as fixed Japanese notices,
+and success refreshes the list and selects the new staged proposal.
+Approval remains the separate explicit 「承認する」 button (unchanged).
+The legacy `/legacy` trial panel is list/approve/expire only: this
+staging form is native-only by design.
+
 ### Runtime behavior
 
 - Startup boots with the global control paused; autonomous work starts

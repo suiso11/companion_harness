@@ -245,6 +245,15 @@ describe("trial HTTP disabled surface", () => {
         "trials_disabled",
       );
 
+      const profile = await get(
+        app,
+        `/api/sessions/${sessionId}/trial-profile`,
+      );
+      expect(profile.status).toBe(404);
+      expect((profile.body as { error: { code: string } }).error.code).toBe(
+        "trials_disabled",
+      );
+
       const grant = await get(
         app,
         `/api/sessions/${sessionId}/trial-grants/${randomUUID()}`,
@@ -262,6 +271,44 @@ describe("trial HTTP disabled surface", () => {
 
       // No trial row was persisted by any disabled attempt.
       expect(trialProposalCount(fixture)).toBe(0);
+    } finally {
+      fixture.close();
+    }
+  });
+});
+
+describe("trial HTTP profile facts", () => {
+  it("returns the frozen form facts and derived read-only operations", async () => {
+    const fixture = await makeApp(true);
+    try {
+      const { app } = fixture;
+      const created = await post(app, "/api/sessions", {}, randomUUID());
+      expect(created.status).toBe(201);
+      const sessionId = (created.body as { sessionId: string }).sessionId;
+
+      const profile = await get(
+        app,
+        `/api/sessions/${sessionId}/trial-profile`,
+      );
+      expect(profile.status).toBe(200);
+      expect(profile.body).toEqual({
+        workspaceAlias: "ws",
+        mandatoryChecks: ["lint"],
+        ceilings: { timeoutMs: 60000, maxOutputBytes: 1000000 },
+        operations: [
+          { operation: "investigate", readOnlyMode: true },
+          { operation: "implement", readOnlyMode: false },
+          { operation: "verify", readOnlyMode: true },
+          { operation: "maintenance_trial", readOnlyMode: false },
+        ],
+      });
+
+      // Unknown query keys fail closed like the other strict trial reads.
+      const rejected = await get(
+        app,
+        `/api/sessions/${sessionId}/trial-profile?extra=1`,
+      );
+      expect(rejected.status).toBe(400);
     } finally {
       fixture.close();
     }

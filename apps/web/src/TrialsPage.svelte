@@ -18,6 +18,15 @@ import { type TrialProposalStatus, trialProposalModel } from "./lib/reducer.js";
 // into /trials adopts or creates the session ON BOOT here (the chat shell is
 // not mounted on this route), and every session change rebinds the panel.
 import { ensureSession, getSessionId } from "./lib/session.svelte.js";
+import {
+  buildTrialStageBody,
+  defaultTrialExpiryLocal,
+  TRIAL_LINE_MAX,
+  TRIAL_OPERATIONS,
+  trialFormErrorText,
+  trialOperation,
+  trialStageErrorText,
+} from "./lib/trial_form.js";
 
 interface TrialProposal {
   readonly id: string;
@@ -133,6 +142,83 @@ function trialOutcomeLines(
   return lines;
 }
 
+/** Frozen operator profile facts read from GET /trial-profile. */
+interface TrialProfileFacts {
+  readonly workspaceAlias: string;
+  readonly mandatoryChecks: readonly string[];
+  readonly ceilings: {
+    readonly timeoutMs: number;
+    readonly maxOutputBytes: number;
+  };
+  readonly operations: readonly {
+    readonly operation: string;
+    readonly readOnlyMode: boolean;
+  }[];
+}
+
+/** Open (actionable) session tasks offered by the staging form. */
+interface TaskOption {
+  readonly id: string;
+  readonly title: string;
+  readonly status: string;
+}
+
+/** Structural guard: malformed profile bodies hide the form (fail closed). */
+function isTrialProfileFacts(value: unknown): value is TrialProfileFacts {
+  if (typeof value !== "object" || value === null) return false;
+  const item = value as Record<string, unknown>;
+  const ceilings = item.ceilings as Record<string, unknown> | null;
+  if (typeof ceilings !== "object" || ceilings === null) return false;
+  if (
+    !Number.isInteger(ceilings.timeoutMs) ||
+    (ceilings.timeoutMs as number) < 1000 ||
+    !Number.isInteger(ceilings.maxOutputBytes) ||
+    (ceilings.maxOutputBytes as number) < 1024
+  ) {
+    return false;
+  }
+  if (
+    typeof item.workspaceAlias !== "string" ||
+    !/^[a-z0-9_-]{1,64}$/.test(item.workspaceAlias)
+  ) {
+    return false;
+  }
+  if (
+    !Array.isArray(item.mandatoryChecks) ||
+    !item.mandatoryChecks.every(
+      (check) =>
+        typeof check === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(check),
+    )
+  ) {
+    return false;
+  }
+  if (!Array.isArray(item.operations)) return false;
+  return item.operations.every((entry) => {
+    if (typeof entry !== "object" || entry === null) return false;
+    const option = entry as Record<string, unknown>;
+    const known = trialOperation(
+      typeof option.operation === "string" ? option.operation : "",
+    );
+    return (
+      known !== null &&
+      typeof option.readOnlyMode === "boolean" &&
+      option.readOnlyMode === known.readOnlyMode
+    );
+  });
+}
+
+function isTaskOption(value: unknown): value is TaskOption {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value as Record<string, unknown>;
+  return (
+    typeof row.id === "string" &&
+    typeof row.title === "string" &&
+    typeof row.status === "string" &&
+    row.kind === "task" &&
+    (row.status === "open" || row.status === "in_progress")
+  );
+}
+
 let proposals = $state<TrialProposal[]>([]);
 let statusText = $state("");
 let detailVisible = $state(false);
@@ -143,6 +229,26 @@ let decisionVisible = $state(false);
 let selected = $state<string | null>(null);
 let mutating = $state(false);
 let seq = 0;
+
+// Staging form (native only): operator facts from GET /trial-profile, open
+// session tasks from GET /tasks. readOnlyMode is always derived from the
+// selected operation; requiredChecks is always the frozen mandatory set.
+let profile = $state<TrialProfileFacts | null>(null);
+let formVisible = $state(false);
+let formStatus = $state("");
+let submitting = $state(false);
+let tasks = $state<TaskOption[]>([]);
+let taskId = $state("");
+let objective = $state("");
+let acceptanceText = $state("");
+let pathsText = $state("");
+let operationValue = $state("investigate");
+let expiryLocal = $state("");
+let timeoutValue = $state("");
+let maxOutputBytesValue = $state("");
+let consent = $state(false);
+let defaultsApplied = false;
+let setupSeq = 0;
 
 /** Stale-response guard: only the latest generation may render. */
 function current(mine: number, sessionId: string | null): boolean {
@@ -179,6 +285,103 @@ async function refreshList(): Promise<void> {
       ? "承認待ちの試行の提案があります"
       : "承認待ちの試行の提案はありません";
   if (selected !== null) await select(selected);
+}
+
+/** Load the form facts (profile + actionable tasks) for this session. */
+async function refreshForm(sessionId: string): Promise<void> {
+  const mine = ++setupSeq;
+  const base = `/api/sessions/${encodeURIComponent(sessionId)}`;
+  let profileResult: { status: number; body: unknown };
+  let tasksResult: { status: number; body: unknown };
+  try {
+    [profileResult, tasksResult] = await Promise.all([
+      fetchJson(`${base}/trial-profile`),
+      fetchJson(`${base}/tasks?limit=50`),
+    ]);
+  } catch {
+    return;
+  }
+  if (setupSeq !== mine || getSessionId() !== sessionId) return;
+  if (
+    profileResult.status !== 200 ||
+    !isTrialProfileFacts(profileResult.body)
+  ) {
+    profile = null;
+    formVisible = false;
+    formStatus = "";
+    return;
+  }
+  profile = profileResult.body;
+  formVisible = true;
+  if (!defaultsApplied) {
+    timeoutValue = String(profile.ceilings.timeoutMs);
+    maxOutputBytesValue = String(profile.ceilings.maxOutputBytes);
+    expiryLocal = defaultTrialExpiryLocal();
+    defaultsApplied = true;
+  }
+  const items = (tasksResult.body as { items?: unknown }).items;
+  tasks =
+    tasksResult.status === 200 && Array.isArray(items)
+      ? items.filter(isTaskOption)
+      : [];
+  if (taskId !== "" && !tasks.some((task) => task.id === taskId)) {
+    taskId = "";
+  }
+  if (taskId === "" && tasks.length > 0) {
+    taskId = tasks[0]?.id ?? "";
+  }
+}
+
+/** POST one strict stage body with a fresh Idempotency-Key, then select the
+ * returned proposal. Approval stays a separate explicit button. */
+async function stageTrial(): Promise<void> {
+  const sessionId = getSessionId();
+  const currentProfile = profile;
+  if (sessionId === null || currentProfile === null || submitting) return;
+  const built = buildTrialStageBody(
+    {
+      taskId,
+      objective,
+      acceptanceText,
+      pathsText,
+      operation: operationValue,
+      expiryLocal,
+      timeoutValue,
+      maxOutputBytesValue,
+      possibleExternalDataConsent: consent,
+    },
+    {
+      mandatoryChecks: currentProfile.mandatoryChecks,
+      ceilings: currentProfile.ceilings,
+    },
+  );
+  if (!built.ok) {
+    formStatus = trialFormErrorText(built.error);
+    return;
+  }
+  submitting = true;
+  try {
+    const result = await postJson(
+      `/api/sessions/${encodeURIComponent(sessionId)}/trials`,
+      built.body,
+      randomUuid(),
+    );
+    if (result.status !== 201) {
+      formStatus = trialStageErrorText(result.status, result.body);
+      return;
+    }
+    formStatus = "提案を作成しました。内容を確認して承認してください";
+    objective = "";
+    acceptanceText = "";
+    pathsText = "";
+    consent = false;
+    expiryLocal = defaultTrialExpiryLocal();
+    const created = (result.body as { id?: unknown }).id;
+    await refreshList();
+    if (typeof created === "string") await select(created);
+  } finally {
+    submitting = false;
+  }
 }
 
 async function select(proposalId: string): Promise<void> {
@@ -305,7 +508,13 @@ $effect(() => {
   detailLines = [];
   detailTitles = [];
   seq += 1;
+  defaultsApplied = false;
+  taskId = "";
+  profile = null;
+  formVisible = false;
+  formStatus = "";
   void refreshList();
+  void refreshForm(sessionId);
 });
 </script>
 
@@ -316,6 +525,111 @@ $effect(() => {
 <section id="trials" aria-label="試行の提案" class="feature-panel">
   <h2>試行の提案</h2>
   <p id="trial-status" aria-live="polite">{statusText}</p>
+  {#if formVisible && profile !== null}
+    <form
+      id="trial-stage-form"
+      aria-label="新しい試行を提案"
+      onsubmit={(event) => {
+        event.preventDefault();
+        void stageTrial();
+      }}
+    >
+      <h3>新しい試行を提案</h3>
+      <p id="trial-profile-summary">
+        作業領域: {profile.workspaceAlias}・必須チェック:
+        {profile.mandatoryChecks.join(", ")}
+      </p>
+      {#if tasks.length === 0}
+        <p id="trial-task-hint">
+          対象にできる作業がありません。<a href="/tasks">タスク・目的</a>で作業を作成してください。
+        </p>
+      {/if}
+      <label>
+        対象の作業
+        <select id="trial-task-select" bind:value={taskId}>
+          {#each tasks as task (task.id)}
+            <option value={task.id}>{task.title}（{task.status}）</option>
+          {/each}
+        </select>
+      </label>
+      <label>
+        目的
+        <textarea
+          id="trial-objective"
+          rows="3"
+          bind:value={objective}
+        ></textarea>
+      </label>
+      <label>
+        受け入れ条件（1行に1件・1〜{TRIAL_LINE_MAX}件）
+        <textarea
+          id="trial-acceptance"
+          rows="3"
+          bind:value={acceptanceText}
+        ></textarea>
+      </label>
+      <label>
+        対象パス（1行に1件・1〜{TRIAL_LINE_MAX}件）
+        <textarea id="trial-paths" rows="3" bind:value={pathsText}></textarea>
+      </label>
+      <label>
+        操作
+        <select id="trial-operation" bind:value={operationValue}>
+          {#each TRIAL_OPERATIONS as option (option.value)}
+            <option value={option.value}>{option.label}</option>
+          {/each}
+        </select>
+      </label>
+      <p id="trial-readonly-mode">
+        読み取り専用: {trialOperation(operationValue)?.readOnlyMode
+          ? "はい（自動）"
+          : "いいえ（自動）"}
+      </p>
+      <label>
+        期限（ローカル時刻）
+        <input
+          id="trial-expiry"
+          type="datetime-local"
+          bind:value={expiryLocal}
+        />
+      </label>
+      <label>
+        タイムアウト（ミリ秒・上限 {profile.ceilings.timeoutMs}）
+        <input
+          id="trial-timeout"
+          type="text"
+          inputmode="numeric"
+          autocomplete="off"
+          bind:value={timeoutValue}
+        />
+      </label>
+      <label>
+        出力上限（バイト・上限 {profile.ceilings.maxOutputBytes}）
+        <input
+          id="trial-output-cap"
+          type="text"
+          inputmode="numeric"
+          autocomplete="off"
+          bind:value={maxOutputBytesValue}
+        />
+      </label>
+      <label>
+        外部データの取り込みに同意する
+        <input
+          id="trial-consent"
+          type="checkbox"
+          bind:checked={consent}
+        />
+      </label>
+      <p id="trial-required-checks">
+        必須チェック（固定）: {profile.mandatoryChecks.join(", ")}
+      </p>
+      <button id="trial-stage-submit" type="submit" disabled={submitting}>
+        提案を作成
+      </button>
+      <p id="trial-form-status" aria-live="polite">{formStatus}</p>
+    </form>
+  {/if}
   <ul id="trial-list">
     {#each proposals as proposal (proposal.id)}
       <li>
