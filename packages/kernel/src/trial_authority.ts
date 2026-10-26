@@ -692,10 +692,6 @@ export function stageTrialProposal(
         "readOnlyMode must match read-only operation",
       );
     }
-    if (!input.possibleExternalDataConsent && !input.readOnlyMode)
-      throw new RepositoryValidationError(
-        "external data consent decision required",
-      );
     if (input.timeoutMs > profile.timeoutMs)
       throw new RepositoryValidationError(
         "request timeoutMs exceeds operator cap",
@@ -1073,10 +1069,11 @@ export function derivePolicyTrialGrant(
 /**
  * Shared freshness for POLICY-DERIVED grants only. A grant with no
  * autodispatch execution link is a manual human grant and is unaffected.
- * The host policy/plan/control generation is re-read from the SAME owner DB
- * at claim, permit, and result so a revoked/expired policy, a superseded
- * plan revision, a version change, or a STOP+resume generation change can
- * never be authorized after the fact.
+ * The host policy/plan/control generation and the frozen human source
+ * turn/run are re-read from the SAME owner DB at claim, permit, and result,
+ * so a revoked/expired policy, a superseded plan revision, a newer user
+ * turn/retry selection, a version change, or a STOP+resume generation change
+ * can never be authorized after the fact. Manual grants stay unaffected.
  */
 function policyGrantFreshness(
   db: Database.Database,
@@ -1087,7 +1084,7 @@ function policyGrantFreshness(
 ): string | null {
   const row = db
     .prepare(
-      "SELECT e.status AS execution_status, e.policy_version AS execution_policy_version, p.status AS policy_status, p.version AS policy_version, p.expires_at AS expires_at, pl.id AS plan_id, pl.status AS plan_status, pl.policy_version AS plan_policy_version FROM autodispatch_executions e JOIN autodispatch_policies p ON p.id=e.policy_id AND p.session_id=e.session_id JOIN autodispatch_plans pl ON pl.id=e.plan_id AND pl.session_id=e.session_id WHERE e.execution_id=? AND e.session_id=?",
+      "SELECT e.status AS execution_status, e.policy_version AS execution_policy_version, p.status AS policy_status, p.version AS policy_version, p.expires_at AS expires_at, pl.id AS plan_id, pl.status AS plan_status, pl.policy_version AS plan_policy_version, pl.source_turn_id AS source_turn_id, pl.source_run_id AS source_run_id FROM autodispatch_executions e JOIN autodispatch_policies p ON p.id=e.policy_id AND p.session_id=e.session_id JOIN autodispatch_plans pl ON pl.id=e.plan_id AND pl.session_id=e.session_id WHERE e.execution_id=? AND e.session_id=?",
     )
     .get(executionId, sessionId) as
     | {
@@ -1099,6 +1096,8 @@ function policyGrantFreshness(
         plan_id: string;
         plan_status: string;
         plan_policy_version: number;
+        source_turn_id: string;
+        source_run_id: string;
       }
     | undefined;
   if (row === undefined) return null; // manual grant
@@ -1120,12 +1119,50 @@ function policyGrantFreshness(
     )
     .get(sessionId) as { id: string } | undefined;
   if (latest === undefined || latest.id !== row.plan_id) return "plan-stale";
+  // The plan freezes the accepted human source turn/run. Compare it to the
+  // CURRENT latest human user_text turn (any run status) and that turn's
+  // CURRENT selected completed run. A fresh queued/completed/cancelled turn
+  // or a retry-selection change invalidates the old grant even when the
+  // planner never persisted a newer plan.
+  const currentTurn = db
+    .prepare(
+      "SELECT id FROM turns WHERE session_id=? AND json_extract(input_json,'$.kind')='user_text' ORDER BY seq DESC LIMIT 1",
+    )
+    .get(sessionId) as { id: string } | undefined;
+  if (currentTurn === undefined || currentTurn.id !== row.source_turn_id)
+    return "source-stale";
+  const currentRun = db
+    .prepare(
+      "SELECT s.run_id AS run_id FROM turn_selections s JOIN runs r ON r.id=s.run_id WHERE s.turn_id=? AND r.status='completed'",
+    )
+    .get(currentTurn.id) as { run_id: string } | undefined;
+  if (currentRun === undefined || currentRun.run_id !== row.source_run_id)
+    return "source-stale";
   const ctl = db
     .prepare("SELECT version FROM autonomy_control WHERE id='global'")
     .get() as { version: number } | undefined;
   if (ctl === undefined || ctl.version !== grantControlGeneration)
     return "control-generation";
   return null;
+}
+
+/**
+ * Internal proof read for the execution-profile/recovery boundary: true ONLY
+ * for an owned grant that is revoked before ever being claimed or launched.
+ * A missing/foreign grant is false; database errors propagate. This is a
+ * pure SELECT (one statement, no transaction/mutation).
+ */
+export function isNeverLaunchedRevokedTrialGrant(
+  db: Database.Database,
+  sessionId: string,
+  executionId: string,
+): boolean {
+  const row = db
+    .prepare(
+      "SELECT 1 AS ok FROM trial_grants g WHERE g.execution_id=? AND g.session_id=? AND g.status='revoked' AND g.claimed_at IS NULL AND g.request_json IS NULL AND NOT EXISTS (SELECT 1 FROM trial_worker_boots b WHERE b.execution_id=g.execution_id) AND NOT EXISTS (SELECT 1 FROM trial_launch_permits p WHERE p.execution_id=g.execution_id) AND NOT EXISTS (SELECT 1 FROM trial_worker_outcomes o WHERE o.execution_id=g.execution_id) LIMIT 1",
+    )
+    .get(executionId, sessionId) as { ok: number } | undefined;
+  return row !== undefined;
 }
 
 /** Approve: fresh goal/task/constraints/profile/expiry/unpaused checks; one grant. */

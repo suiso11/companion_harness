@@ -86,7 +86,11 @@ function createPolicy(
   sessionId: string,
   turnId: string,
   now: number,
-  extra: { caps?: PolicyCaps; expiresAt?: string | null } = {},
+  extra: {
+    caps?: PolicyCaps;
+    expiresAt?: string | null;
+    limits?: typeof limits;
+  } = {},
 ) {
   return repo.createAutodispatchPolicy(
     sessionId,
@@ -102,7 +106,7 @@ function createPolicy(
     {
       key: randomUUID(),
       now,
-      limits,
+      limits: extra.limits ?? limits,
       parent: {
         statement: "Use the standing auto-dispatch policy for this workspace",
         sourceTurnId: turnId,
@@ -272,6 +276,43 @@ describe("autodispatch policy/plan/authority", () => {
         .prepare("SELECT COUNT(*) AS n FROM trial_proposals")
         .get() as { n: number };
       expect(proposals.n).toBe(1);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("keeps local auto-dispatch writes unconsented without weakening write scope", async () => {
+    const { handle, repo, sessionId } = await fixture();
+    try {
+      const anchor = completedTurn(
+        repo,
+        sessionId,
+        "Please implement the feature in src/app.ts. Go ahead.",
+        NOW + 10,
+      );
+      const policy = createPolicy(repo, sessionId, anchor.turnId, NOW + 20);
+      const { auth } = authorizePolicyGrant(
+        repo,
+        sessionId,
+        policy.id,
+        anchor,
+        NOW + 21,
+      );
+      expect(auth.execution.status).toBe("authorized");
+      const proposal = handle.raw
+        .prepare(
+          "SELECT read_only AS readOnly, consent, paths_json AS pathsJson FROM trial_proposals",
+        )
+        .get() as { readOnly: number; consent: number; pathsJson: string };
+      // A local/synthetic-local route never carries external-data consent,
+      // but the write operation and its policy-approved paths are unchanged.
+      expect(proposal.readOnly).toBe(0);
+      expect(proposal.consent).toBe(0);
+      expect(JSON.parse(proposal.pathsJson)).toEqual(["src/app.ts"]);
+      const grant = handle.raw
+        .prepare("SELECT status FROM trial_grants WHERE execution_id=?")
+        .get(auth.execution.executionId) as { status: string };
+      expect(grant.status).toBe("queued");
     } finally {
       closeKernelDatabase(handle);
     }
@@ -527,6 +568,224 @@ describe("autodispatch policy/plan/authority", () => {
         .prepare("SELECT COUNT(*) AS n FROM trial_grants")
         .get() as { n: number };
       expect(grants.n).toBe(0);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("invalidates a policy grant at claim/permit/result when a newer turn appears without a new plan", async () => {
+    const { handle, repo, sessionId } = await fixture();
+    try {
+      const anchor = completedTurn(
+        repo,
+        sessionId,
+        "Please implement the feature in src/app.ts. Go.",
+        NOW + 10,
+      );
+      const policy = createPolicy(repo, sessionId, anchor.turnId, NOW + 20, {
+        caps: { ...caps, concurrentExecutions: 4 },
+        limits: {
+          ...limits,
+          caps: { ...DEFAULT_POLICY_CAPS, concurrentExecutions: 4 },
+        },
+      });
+
+      // Claim: a newer QUEUED user turn alone invalidates the old plan even
+      // though the planner never persisted a newer plan.
+      const firstPlan = repo.createAutodispatchPlan(
+        sessionId,
+        planInput(policy.id, anchor),
+        { now: NOW + 21 },
+      );
+      const firstAuth = repo.authorizeAutodispatch(
+        sessionId,
+        firstPlan.plan.id,
+        {
+          profile: profile(),
+          workspaceAlias: "companion-harness",
+          limits,
+          now: NOW + 22,
+        },
+      );
+      expect(firstAuth.execution.status).toBe("authorized");
+      const firstExec = firstAuth.execution.executionId as string;
+      const queuedTurn = repo.postMessage(
+        sessionId,
+        { text: "Please implement the feature in src/app.ts. Go." },
+        { key: randomUUID(), now: NOW + 30 },
+      );
+      expect(() =>
+        claimPolicyGrant(repo, sessionId, firstExec, NOW + 31),
+      ).toThrow(/source-stale/);
+      repo.startRun(queuedTurn.body.run.id, { now: NOW + 32 });
+      repo.completeRun(
+        queuedTurn.body.run.id,
+        { version: 1, text: "ok" } as never,
+        { now: NOW + 33 },
+      );
+      const secondAnchor = {
+        turnId: queuedTurn.body.turnId,
+        runId: queuedTurn.body.run.id,
+      };
+
+      // Permit: a newer COMPLETED user turn invalidates a claimed grant.
+      const secondPlan = repo.createAutodispatchPlan(
+        sessionId,
+        planInput(policy.id, secondAnchor),
+        { now: NOW + 34 },
+      );
+      const secondAuth = repo.authorizeAutodispatch(
+        sessionId,
+        secondPlan.plan.id,
+        {
+          profile: profile(),
+          workspaceAlias: "companion-harness",
+          limits,
+          now: NOW + 35,
+        },
+      );
+      expect(secondAuth.execution.status).toBe("authorized");
+      const secondExec = secondAuth.execution.executionId as string;
+      const secondReq = claimPolicyGrant(repo, sessionId, secondExec, NOW + 36);
+      repo.registerTrialWorkerBoot(
+        {
+          executionId: secondExec,
+          sessionId,
+          pid: 510,
+          bootId: "source-boot-2",
+          processStartTicks: "5100",
+        },
+        NOW + 37,
+      );
+      const newer = completedTurn(
+        repo,
+        sessionId,
+        "Please implement the feature in src/app.ts again. Go.",
+        NOW + 38,
+      );
+      expect(() =>
+        repo.issueTrialLaunchPermit(sessionId, secondExec, {
+          key: randomUUID(),
+          now: NOW + 41,
+          observation: obsActive(
+            510,
+            "source-boot-2",
+            "5100",
+            NOW + 41,
+          ) as never,
+          profile: profile(),
+          requestHash: repo.hashTrialLaunchRequest(secondReq),
+        }),
+      ).toThrow(/source-stale/);
+
+      // Result: a newer turn after permit cannot authorize a late result.
+      const thirdPlan = repo.createAutodispatchPlan(
+        sessionId,
+        planInput(policy.id, newer),
+        { now: NOW + 42 },
+      );
+      const thirdAuth = repo.authorizeAutodispatch(
+        sessionId,
+        thirdPlan.plan.id,
+        {
+          profile: profile(),
+          workspaceAlias: "companion-harness",
+          limits,
+          now: NOW + 43,
+        },
+      );
+      expect(thirdAuth.execution.status).toBe("authorized");
+      const thirdExec = thirdAuth.execution.executionId as string;
+      const thirdReq = claimPolicyGrant(repo, sessionId, thirdExec, NOW + 44);
+      repo.registerTrialWorkerBoot(
+        {
+          executionId: thirdExec,
+          sessionId,
+          pid: 511,
+          bootId: "source-boot-3",
+          processStartTicks: "5110",
+        },
+        NOW + 45,
+      );
+      repo.issueTrialLaunchPermit(sessionId, thirdExec, {
+        key: randomUUID(),
+        now: NOW + 46,
+        observation: obsActive(511, "source-boot-3", "5110", NOW + 46) as never,
+        profile: profile(),
+        requestHash: repo.hashTrialLaunchRequest(thirdReq),
+      });
+      completedTurn(
+        repo,
+        sessionId,
+        "Please implement the feature in src/app.ts once more. Go.",
+        NOW + 47,
+      );
+      const late = repo.recordTrialWorkerResult(
+        sessionId,
+        thirdExec,
+        {
+          detail: "late native done",
+          observation: obsGone(511, "source-boot-3", "5110", NOW + 50) as never,
+          result: {
+            taskHash: thirdReq.taskHash,
+            exitCode: 0,
+            checks: [{ id: "lint", ok: true }],
+            outputMatched: true,
+            noTimeout: true,
+          },
+        },
+        NOW + 50,
+      );
+      expect(late.authorized).toBe(false);
+      expect(late.outcome).toBe("observed");
+      const outcome = handle.raw
+        .prepare(
+          "SELECT detail FROM trial_worker_outcomes WHERE execution_id=?",
+        )
+        .get(thirdExec) as { detail: string };
+      expect(outcome.detail).toContain("source-stale");
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("invalidates a policy grant when the latest turn selects a completed retry", async () => {
+    const { handle, repo, sessionId } = await fixture();
+    try {
+      const anchor = completedTurn(
+        repo,
+        sessionId,
+        "Please implement the feature in src/app.ts. Go.",
+        NOW + 10,
+      );
+      const policy = createPolicy(repo, sessionId, anchor.turnId, NOW + 20);
+      const { auth } = authorizePolicyGrant(
+        repo,
+        sessionId,
+        policy.id,
+        anchor,
+        NOW + 21,
+      );
+      expect(auth.execution.status).toBe("authorized");
+      const executionId = auth.execution.executionId as string;
+      const retried = repo.postRetry(sessionId, anchor.turnId, {
+        key: randomUUID(),
+        now: NOW + 30,
+      });
+      repo.startRun(retried.body.run.id, { now: NOW + 31 });
+      repo.completeRun(
+        retried.body.run.id,
+        { version: 1, text: "retry" } as never,
+        { now: NOW + 32 },
+      );
+      expect(retried.body.run.id).not.toBe(anchor.runId);
+      const selected = handle.raw
+        .prepare("SELECT run_id AS runId FROM turn_selections WHERE turn_id=?")
+        .get(anchor.turnId) as { runId: string };
+      expect(selected.runId).toBe(retried.body.run.id);
+      expect(() =>
+        claimPolicyGrant(repo, sessionId, executionId, NOW + 33),
+      ).toThrow(/source-stale/);
     } finally {
       closeKernelDatabase(handle);
     }

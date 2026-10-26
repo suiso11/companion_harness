@@ -4365,6 +4365,21 @@ proposals, grants, runner, or bridge spawn.
   (`bridgeScriptPath` + `bridgeConfigTemplatePath`, spawned via
   `nodeRealpath` under a systemd scope checked via `systemctlRealpath`
   / `xdgRuntimeDir`). No other bridge is supported.
+- `bridgeConfigTemplatePath` is the FROZEN approved V2 OperatorConfig
+  JSON, not a legacy template. For each manual execution it is parsed
+  (`parseOperatorConfig`) and recomputed (`computeEffectiveProfile`);
+  the effective fingerprint must equal `configFingerprint`, the
+  operator-declared `active.configFingerprint` must match that computed
+  value, `active.sourceRevision`/computed source revision must equal
+  `sourceRevision`, and the sorted effective check IDs must equal the
+  approved `mandatoryChecks`. Any mismatch aborts the claimed grant
+  before boot as known quiescence (`config-setup`; never authorized).
+  Its `profile.model.sockHostPath` is used verbatim, the parsed config is
+  copied verbatim into the execution's private `0700` run dir as a
+  `0600` file, and no active fingerprint is ever rewritten/recomputed.
+  The manual relay budget is the template's storage/`limits` mapped to
+  relay caps intersected with the host static `runner.relay` caps, so
+  neither side can widen the other.
 
 ### Runtime behavior
 
@@ -4377,6 +4392,11 @@ proposals, grants, runner, or bridge spawn.
 - STOP revokes only `claimed` grants (`queued` survives; reclaim needs a
   fresh resume). Foreground work preempts background trials; shutdown
   drains the runner (bridge child reaped, no orphan scope).
+- The relay binds its configured socket path exclusively and never
+  unlinks an existing path before `listen`. An occupied path (including
+  a stale socket/file with no listener) fails closed as `launch-failed`
+  (`relay-start`); the operator must remove it. Only a relay that
+  actually bound the path unlinks it on `close`.
 - An unknown execution raises a durable per-alias fence that denies
   further stage/approve/claim for that workspace alias until the exact
   fence row is cleared; unrelated scopes/aliases continue.
@@ -5355,10 +5375,10 @@ is Linux-only.
   test-only, not containment). `materialization: null` means auto-dispatch
   can never issue a real grant (honest block). The model relay route and
   model identity are operator configuration; no model name is hardcoded in
-  this feature. `externalModelConsent` is host-derived from the operation
-  (read-only grants do not claim it; write grants keep the existing consent
-  decision) and must match the frozen local route, so a request cannot
-  fabricate consent.
+  this feature. Auto-dispatch derives `externalModelConsent` from the
+  frozen local/synthetic-local route, never from the write operation, so
+  all auto grants carry false; write permission still comes from the
+  approved policy/plan write scopes. A request cannot fabricate consent.
 - Dependency closure: `dependencyRoot` is not a free-form directory. It
   must be the exact root produced by the bridge's real
   `prepareDependencyClosure`, with sibling `<root>.closure-manifest.json`;
@@ -5369,8 +5389,12 @@ is Linux-only.
   `dependency_unavailable`; nothing is installed or downloaded. If
   `materialization.dependencySourceNodeModules` is configured, a fresh
   private depot is prepared per execution by the same
-  `prepareDependencyClosure` function. A plain empty directory or fabricated
-  manifest is not accepted.
+  `prepareDependencyClosure` function. pnpm root/scoped/transitive
+  `node_modules` symlinks are recreated inside the copied depot (never
+  dereferenced to a host path), and native metadata is resolved from the
+  package's real `.pnpm/.../node_modules/<pkg>` directory rather than the
+  logical link path. A plain empty directory, an escaping symlink, or a
+  fabricated manifest is not accepted.
 - Persistent ledger (migrations `0030_autodispatch.sql` and
   `0031_autodispatch_materialization.sql`):
   `autodispatch_policies` (version/status/expiry/revoke/scopes/caps/
@@ -5413,7 +5437,21 @@ is Linux-only.
   blocked/unknown materialization and unknown workers are retained, never
   revoked or launched on widened/manual caps. Results remain
   `verified` only through the existing checks/artifact path; nothing is
-  host-applied, deployed, or auto-completed.
+  host-applied, deployed, or auto-completed. Automatic authorization is
+  INTERNAL to this service: there is deliberately no public
+  `POST .../plans/:planId/authorize` route, because an HTTP body could
+  otherwise mint an unsealed/unlaunchable grant. Manual trial staging and
+  approval remain on their separate human APIs. Auto-dispatch materializes
+  only a frozen local/synthetic-local model route, so its grants carry
+  `possibleExternalDataConsent=false` even for write operations; write
+  permission still comes from the approved policy/write scopes, never from
+  consent. At claim, launch-permit, and result time the shared freshness
+  check compares the plan's frozen `source_turn_id`/`source_run_id` with the
+  CURRENT latest human `user_text` turn (regardless of run status) and that
+  turn's current selected completed run. A newer queued/completed/cancelled
+  turn or a changed retry selection invalidates the old grant even when the
+  planner has not saved a newer plan; manual (non-policy) grants are not
+  affected.
 - HTTP (same-origin/authenticated; session-scoped):
   `GET /api/sessions/:id/autodispatch` (state/defaults),
   `GET|POST /api/sessions/:id/autodispatch/policies`,
@@ -5421,8 +5459,9 @@ is Linux-only.
   `POST .../policies/:policyId/revoke`,
   `POST .../stop`,
   `GET|POST .../plans`, `GET .../plans/:planId`,
-  `POST .../plans/:planId/authorize` (strict `{}` body),
   `GET .../executions`, `GET .../executions/:executionId`.
+  There is no plan-authorize route; a POST to that removed path returns the
+  ordinary 404 and cannot create a grant, proposal, execution, or quota use.
   No key, raw config path, or original source root is returned.
 - UI (chat shell, lazy chunk): `AutodispatchPanel.svelte` on the actual
   session. It shows the fixed candidate target, actual alias/scopes/checks/
@@ -5460,12 +5499,23 @@ is Linux-only.
   check/done. No production enablement, restart, deploy, or source apply
   was performed here. Activation requires an operator-private config with
   the real paths/digests above plus explicit deployment approval.
-- Materialization retention: `retention.json` keeps a terminal
-  `artifact-expired` audit tombstone after the one-time expiry removes the
-  small run artifacts. Tombstones do not consume the retained-artifact
-  admission budget (real `cleaned` artifacts still count to the fixed 7-day /
-  20-job bound); prepared active/unknown/unreadable jobs are always retained
-  until known quiescence.
+- Materialization retention: the sealed snapshot copies each approved
+  read/write root once; descendant snapshot roots under the same approved
+  ancestor are collapsed only for the copy, while the separate policy read/
+  write scopes, plan `relevantPaths`, and check authority stay unchanged.
+  `retention.json` keeps a terminal `artifact-expired` audit tombstone after
+  the one-time expiry removes the small run artifacts. A grant durably
+  revoked before it was ever claimed/launched (no boot, permit, or outcome)
+  is reclaimed immediately: its own heavy snapshot/dependency copies, run/
+  bridge-state, and exact digest-bound private socket dir are removed and the
+  job becomes an `artifact-expired` tombstone, freeing admission capacity
+  without the 7-day/20-job retained window. Missing, unreadable, foreign,
+  claimed/restarted, boot/permit/outcome-bearing, or otherwise unknown
+  workers are HOLD. Other terminal cleanup requires actual durable
+  quiescence evidence (an authorized consumed result or a quiescent/
+  observed-gone interrupted outcome), not merely a status plus summary.
+  Tombstones do not consume the retained-artifact admission budget (real
+  `cleaned` artifacts still count to the fixed 7-day / 20-job bound).
 
 ### Auto-dispatch verification and activation prerequisites
 

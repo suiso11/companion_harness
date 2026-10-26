@@ -13,7 +13,7 @@
 // clears old controls/plans; untrusted plan text renders as text; and the
 // candidate result is never presented as host-applied.
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   type APIRequestContext,
   expect,
@@ -32,10 +32,16 @@ import {
 
 const README_TEXT =
   "# Synthetic Acceptance\n\nThe child worker read this exact synthetic README.\n";
+const WRITE_CANDIDATE_TEXT =
+  "# Synthetic Acceptance\n\nWritten by the real child worker as a scoped candidate.\n";
+
+function sha256(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
+}
 
 async function arm(
   request: APIRequestContext,
-  mode: "execute" | "discuss" | "missing" | "hang" | "xss",
+  mode: "execute" | "discuss" | "missing" | "hang" | "xss" | "implement-write",
 ): Promise<void> {
   const res = await request.post(`${AUTODISPATCH_CONTROL_ORIGIN}/arm`, {
     data: { mode },
@@ -395,5 +401,118 @@ test.describe("standing-policy auto dispatch", () => {
     await expect(
       page.locator('[data-autodispatch-plan-status="dispatched"]'),
     ).toHaveCount(0);
+  });
+
+  test("implement-write produces a real child write candidate that never touches the source", async ({
+    page,
+    request,
+  }) => {
+    test.setTimeout(240_000);
+
+    // 1. Human enables ONE policy from a real completed turn, then resumes
+    //    the separate global autonomy control.
+    await send(page, AD_TEXT_ANCHOR);
+    await settle(page, "Foreground answer accepted.");
+    await enablePolicy(page);
+    await resumeAutonomy(page);
+
+    // 2. The planner emits operation=implement, so the real trial runs in
+    //    write mode and the real child Pi worker chooses its write tool.
+    await arm(request, "implement-write");
+    await send(page, AD_TEXT_EXECUTE);
+    await settle(page, "Foreground answer accepted.");
+
+    await expect(
+      page.locator('[data-autodispatch-plan-status="dispatched"]'),
+    ).toBeVisible({ timeout: 90_000 });
+    await expect(
+      page.locator('[data-autodispatch-execution-status="authorized"]'),
+    ).toBeVisible({ timeout: 90_000 });
+    await expect(page.locator("[data-autodispatch-outcome]")).toContainText(
+      "bridge-exit:0",
+      { timeout: 120_000 },
+    );
+    await expect(page.locator("[data-autodispatch-panel]")).toContainText(
+      "書き込み候補",
+    );
+    await expect(page.locator("[data-autodispatch-panel]")).not.toContainText(
+      "本番反映済み",
+    );
+
+    // 3. The synthetic gateway saw the real child write tool action.
+    const status = await controlStatus(request);
+    expect(status.parentToolNames).toContain("capsule.opencode_task");
+    expect(status.childToolNames).toContain("capsule.write");
+
+    // 4. Derive the actual session from the REAL UI shell (no seeded rows),
+    //    then read the production execution ledger for its execution id.
+    const sessionId = await page.evaluate(() => {
+      try {
+        return localStorage.getItem("ch.sessionId");
+      } catch {
+        return null;
+      }
+    });
+    expect(sessionId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    );
+    if (sessionId === null) throw new Error("session id missing");
+
+    let executionId = "";
+    await expect
+      .poll(
+        async () => {
+          const res = await request.get(
+            `${AUTODISPATCH_APP_ORIGIN}/api/sessions/${encodeURIComponent(sessionId)}/autodispatch/executions`,
+          );
+          if (!res.ok()) return "";
+          const body = (await res.json()) as {
+            items?: Array<{ executionId?: string | null }>;
+          };
+          const match = (body.items ?? []).find(
+            (item) =>
+              typeof item.executionId === "string" &&
+              item.executionId.length > 0,
+          );
+          executionId = match?.executionId ?? "";
+          return executionId;
+        },
+        { timeout: 30_000 },
+      )
+      .toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+      );
+
+    // 5. The fixture-owned artifact reader proves the EXACT retained candidate
+    //    bytes, while the source README stays untouched.
+    const artifactResponse = await request.get(
+      `${AUTODISPATCH_CONTROL_ORIGIN}/artifact/${executionId}`,
+    );
+    expect(artifactResponse.ok()).toBe(true);
+    const artifact = (await artifactResponse.json()) as {
+      candidate: string;
+      candidateSha256: string;
+      artifactSha256: string;
+      changes: Array<{
+        path: string;
+        kind: string;
+        baseSha256: string | null;
+        candidateSha256: string | null;
+      }>;
+    };
+
+    const fixture = await request.get(`${AUTODISPATCH_CONTROL_ORIGIN}/fixture`);
+    expect((await fixture.json()).readme).toBe(README_TEXT);
+    expect(artifact.candidateSha256).toBe(sha256(WRITE_CANDIDATE_TEXT));
+    expect(artifact.artifactSha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(JSON.stringify(artifact)).not.toContain("/tmp/");
+    expect(artifact.changes).toHaveLength(1);
+    expect(artifact.changes[0]).toMatchObject({
+      path: "README.md",
+      kind: "modify",
+      baseSha256: sha256(README_TEXT),
+      candidateSha256: sha256(WRITE_CANDIDATE_TEXT),
+    });
+    expect(artifact.changes[0]?.candidateSha256).toBe(artifact.candidateSha256);
   });
 });

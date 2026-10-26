@@ -1,4 +1,4 @@
-import { mkdtempSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, statSync, writeFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -158,6 +158,53 @@ describe.skipIf(process.platform === "win32")("trial_model_relay", () => {
       await relay.close();
     }
     expect(() => statSync(sock)).toThrow();
+  });
+
+  it("fails closed on an occupied socket path without unlinking it", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "trial-relay-occupied-"));
+    const sock = join(dir, "relay", "model.sock");
+    const first = new TrialModelRelay({
+      sockPath: sock,
+      gateway: fakeGateway(),
+      fixedModel: FIXED_MODEL,
+      caps: testCaps(),
+    });
+    await first.start();
+    const second = new TrialModelRelay({
+      sockPath: sock,
+      gateway: fakeGateway(),
+      fixedModel: FIXED_MODEL,
+      caps: testCaps(),
+    });
+    await expect(second.start()).rejects.toMatchObject({
+      code: "EADDRINUSE",
+    });
+    // A failed bind never owns the path: close must not delete first's socket.
+    await second.close();
+    expect(existsSync(sock)).toBe(true);
+    first.setPermitted(true);
+    const stillOwned = await postUds(sock, chatBody());
+    expect(stillOwned.status).toBe(200);
+    await first.close();
+    expect(existsSync(sock)).toBe(false);
+  });
+
+  it("fails closed on a stale socket file with no listener", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "trial-relay-stale-"));
+    const sock = join(dir, "model.sock");
+    writeFileSync(sock, "");
+    const relay = new TrialModelRelay({
+      sockPath: sock,
+      gateway: fakeGateway(),
+      fixedModel: FIXED_MODEL,
+      caps: testCaps(),
+    });
+    await expect(relay.start()).rejects.toMatchObject({
+      code: "EADDRINUSE",
+    });
+    await relay.close();
+    // Operator-owned stale path is preserved for explicit removal.
+    expect(existsSync(sock)).toBe(true);
   });
 
   it("pre-permit request waits bounded then refuses without forwarding", async () => {

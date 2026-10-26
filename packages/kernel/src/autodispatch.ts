@@ -1500,11 +1500,11 @@ export function authorizeWithinPolicy(
       operation: plan.operation,
       readOnlyMode: !writeOperation,
       expiry,
-      // The auto-dispatch materializer freezes a LOCAL model route, so a
-      // read-only grant must not claim external-data consent (the bridge
-      // rejects consent outside the frozen local route). Write grants keep
-      // the existing kernel-required consent decision.
-      possibleExternalDataConsent: writeOperation,
+      // Auto dispatch supports ONLY frozen local/synthetic-local model
+      // routes. Consent for possible external data must therefore stay
+      // false even for write operations: writing is authorized by the
+      // policy/plan/write scopes, not by model-route consent.
+      possibleExternalDataConsent: false,
       timeoutMs: appliedTimeoutMs,
       maxOutputBytes: appliedMaxOutputBytes,
       requiredChecks: [...policy.checks],

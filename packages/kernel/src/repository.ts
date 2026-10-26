@@ -385,6 +385,7 @@ import {
   registerWorkerBoot,
   stageTrialProposal,
   type TrustedObservation,
+  isNeverLaunchedRevokedTrialGrant as trialGrantNeverLaunched,
 } from "./trial_authority.js";
 
 /**
@@ -7512,6 +7513,15 @@ export function createKernelRepository(
     return readTrialIntent(db, sessionId, executionId);
   }
 
+  /** Internal proof read only: owned, revoked, never claimed/launched grant.
+   * Missing/foreign => false; DB errors propagate; no mutation. */
+  function isNeverLaunchedRevokedTrialGrant(
+    sessionId: string,
+    executionId: string,
+  ): boolean {
+    return trialGrantNeverLaunched(db, sessionId, executionId);
+  }
+
   function registerTrialWorkerBoot(
     input: {
       executionId: string;
@@ -8017,6 +8027,7 @@ export function createKernelRepository(
     fenceTrialUnknown,
     hashTrialLaunchRequest,
     readTrialLaunchIntent,
+    isNeverLaunchedRevokedTrialGrant,
     registerTrialWorkerBoot,
     issueTrialLaunchPermit,
     readTrialLaunchPermit,

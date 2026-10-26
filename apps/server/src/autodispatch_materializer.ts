@@ -370,6 +370,36 @@ export function cleanupTerminalAutodispatchMaterialization(
 }
 
 /**
+ * Read the exact host-pinned materialization for a retention row. Identity
+ * and the canonical JSON digest must still match; the current executor/check/
+ * runtime binary fingerprints are intentionally NOT re-read here so operator
+ * drift after a revoke cannot pin cleanup forever.
+ */
+function exactStoredMaterialization(
+  repo: KernelRepository,
+  sessionId: string,
+  executionId: string,
+  jobRoot: string,
+): AutodispatchMaterialization | undefined {
+  try {
+    const stored = repo.readAutodispatchMaterialization(sessionId, executionId);
+    if (typeof stored?.materializationJson !== "string") return undefined;
+    const parsed = parseMaterialization(stored.materializationJson);
+    if (
+      parsed === null ||
+      parsed.reference.executionId !== executionId ||
+      parsed.state.jobRoot !== jobRoot ||
+      !hasExactMaterializationDigest(parsed)
+    ) {
+      return undefined;
+    }
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Startup/pre-prepare sweep. It only removes previously MATERIALIZED copies
  * whose existing grant/worker outcome proves terminal known-quiescence.
  * Active/unknown/unreadable rows and jobs without our exact retention record
@@ -418,8 +448,48 @@ export function pruneAutodispatchMaterializations(
       // not "expire" it again (capacity stays freed). Keep retention.json.
       continue;
     }
-    // status prepared: only a terminal known-quiescent grant may release the
-    // heavy copies. No outcome row (or an unreadable/active row) => retain.
+    // A durable grant revoked before ever being claimed/launched has no
+    // worker that can still use its bytes. The exact ledger materialization
+    // must still bind the job root + private socket digest; if that proof is
+    // missing/tampered/foreign we HOLD rather than guess.
+    let revokedNeverLaunched = false;
+    try {
+      revokedNeverLaunched = repo.isNeverLaunchedRevokedTrialGrant(
+        record.sessionId,
+        record.executionId,
+      );
+    } catch {
+      revokedNeverLaunched = false;
+    }
+    if (revokedNeverLaunched) {
+      const materialization = exactStoredMaterialization(
+        repo,
+        record.sessionId,
+        record.executionId,
+        jobRoot,
+      );
+      if (materialization === undefined) {
+        prepared += 1;
+        retained += 1;
+        continue;
+      }
+      cleanupHeavyRoots(jobRoot, materialization);
+      // No worker ever launched, so the retained evidence is already expired;
+      // free admission immediately instead of waiting for the 7-day/count
+      // retained window.
+      removeOwnedCopyRoot(jobRoot, join(jobRoot, "run"));
+      removeOwnedCopyRoot(jobRoot, join(jobRoot, "bridge-state"));
+      writeRetention(jobRoot, {
+        ...record,
+        status: "artifact-expired",
+        expiredAt: now,
+      });
+      expired += 1;
+      continue;
+    }
+    // status prepared: only a terminal row with ACTUAL durable quiescence
+    // evidence may release the heavy copies. Merely having a status/summary
+    // (including a late/observed placeholder) is not enough.
     let terminal = false;
     try {
       const outcome = repo.readTrialWorkerOutcome(
@@ -428,8 +498,12 @@ export function pruneAutodispatchMaterializations(
       );
       terminal =
         outcome !== null &&
-        outcome.summary !== "" &&
-        (outcome.status === "consumed" || outcome.status === "interrupted");
+        outcome.recorded === true &&
+        ((outcome.status === "consumed" &&
+          outcome.succeeded &&
+          outcome.authorized) ||
+          (outcome.status === "interrupted" &&
+            (outcome.quiescent || outcome.succeeded)));
     } catch {
       terminal = false;
     }
@@ -438,26 +512,16 @@ export function pruneAutodispatchMaterializations(
       retained += 1;
       continue;
     }
-    let quiescentMaterialization: AutodispatchMaterialization | undefined;
-    try {
-      const stored = repo.readAutodispatchMaterialization(
-        record.sessionId,
-        record.executionId,
-      );
-      if (typeof stored?.materializationJson === "string") {
-        const parsed = parseMaterialization(stored.materializationJson);
-        // Never trust a stale/tampered row when deleting a path outside the
-        // job root: identity and host-pinned digest must still match.
-        if (
-          parsed !== null &&
-          parsed.reference.executionId === record.executionId &&
-          hasExactMaterializationDigest(parsed)
-        ) {
-          quiescentMaterialization = parsed;
-        }
-      }
-    } catch {
-      quiescentMaterialization = undefined;
+    const quiescentMaterialization = exactStoredMaterialization(
+      repo,
+      record.sessionId,
+      record.executionId,
+      jobRoot,
+    );
+    if (quiescentMaterialization === undefined) {
+      prepared += 1;
+      retained += 1;
+      continue;
     }
     cleanupHeavyRoots(jobRoot, quiescentMaterialization);
     writeRetention(jobRoot, {
@@ -626,6 +690,27 @@ function blocked(
   reason: string,
 ): PrepareAutodispatchResult {
   return { ok: false, code, reason };
+}
+
+/**
+ * Collapse snapshot-copy roots that are already covered by an approved
+ * ancestor (for example read `src` + write `src/feature` -> copy `src` once).
+ * This ONLY feeds createSealedWorkspaceSnapshot; the separate policy
+ * read/write scopes, plan relevantPaths, and check authority stay intact.
+ * A literal `.` is never introduced here and `src` never collapses `src2`.
+ */
+function collapseSnapshotRoots(roots: readonly string[]): string[] {
+  const unique = [...new Set(roots)];
+  return unique
+    .filter(
+      (candidate) =>
+        !unique.some(
+          (other) =>
+            other !== candidate &&
+            (other === "." || candidate.startsWith(`${other}/`)),
+        ),
+    )
+    .sort();
 }
 
 function policyScopes(
@@ -1101,8 +1186,10 @@ export function createAutodispatchMaterializer(
       const snapshot = await createSealedWorkspaceSnapshot({
         sourceRoot,
         outputDir: join(jobRoot, "sealed-workspace"),
-        allowedRoots: policyScopes(deps.config, input.plan).filter(
-          (scope) => !material.allowedTopLevelFiles.includes(scope),
+        allowedRoots: collapseSnapshotRoots(
+          policyScopes(deps.config, input.plan).filter(
+            (scope) => !material.allowedTopLevelFiles.includes(scope),
+          ),
         ),
         allowedTopLevelFiles: material.allowedTopLevelFiles,
         maxBytes: MAX_SOURCE_BYTES,

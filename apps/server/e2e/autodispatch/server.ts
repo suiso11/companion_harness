@@ -17,7 +17,7 @@
 // The source fixture is a tiny synthetic README; no user code or credential
 // is read. Temp dirs are removed on shutdown.
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync,
   copyFileSync,
@@ -55,6 +55,16 @@ const MODEL_BASE = "http://127.0.0.1:9";
 const WORKSPACE_ALIAS = "autodispatch-e2e";
 const README_TEXT =
   "# Synthetic Acceptance\n\nThe child worker read this exact synthetic README.\n";
+// Distinct from README_TEXT so the artifact proves the candidate bytes came
+// from the real child write tool, not from the fixture's source constant.
+const WRITE_CANDIDATE_TEXT =
+  "# Synthetic Acceptance\n\nWritten by the real child worker as a scoped candidate.\n";
+
+// Module-scope fixture locations set by makeFixture BEFORE the control server
+// starts: GET /fixture reads the ACTUAL source file, and GET /artifact reads
+// the ACTUAL bridge run directory. Neither ever returns a host path.
+let sourceRoot = "";
+let stateDir = "";
 
 // Host locators for the ACTUAL installed pi-orch closure. These are pinned
 // test inputs, not production config: no production env/source is touched.
@@ -70,7 +80,13 @@ const SESSION_BUS =
 process.env.XDG_RUNTIME_DIR = RUNTIME_DIR;
 process.env.DBUS_SESSION_BUS_ADDRESS = SESSION_BUS;
 
-type PlannerMode = "execute" | "discuss" | "missing" | "hang" | "xss";
+type PlannerMode =
+  | "execute"
+  | "discuss"
+  | "missing"
+  | "hang"
+  | "xss"
+  | "implement-write";
 
 interface Observation {
   plannerCalls: number;
@@ -218,7 +234,7 @@ function plannerProposal(
   text: string,
   mode: PlannerMode,
 ): {
-  operation: "investigate";
+  operation: "investigate" | "implement";
   intent: {
     kind: "execute" | "discuss" | "unclear";
     quotes: Array<{ turnId: string; runId: string; text: string }>;
@@ -254,7 +270,7 @@ function plannerProposal(
       ? ("discuss" as const)
       : ("execute" as const);
   return {
-    operation: "investigate",
+    operation: mode === "implement-write" ? "implement" : "investigate",
     intent: {
       kind,
       quotes: [{ turnId, runId, text: quoteText }],
@@ -358,21 +374,58 @@ const modelGateway: ModelGateway = {
     observation.relayCalls += 1;
     if (names.includes("capsule.opencode_task")) {
       observation.parentToolNames = names;
+      const writeTask = plannerMode === "implement-write";
       if (results.length === 0) {
-        return toolCall("capsule.opencode_task", {
-          name: "readme-child-investigate",
-          mode: "read_only",
-          objective: "Inspect README.md and report its first heading.",
-          relevant_paths: ["README.md"],
-          expected_output: "A structured report quoting the README heading.",
-        });
+        return toolCall(
+          "capsule.opencode_task",
+          writeTask
+            ? {
+                name: "readme-child-write",
+                mode: "write",
+                objective: "Replace README.md with the exact candidate text.",
+                relevant_paths: ["README.md"],
+                expected_output:
+                  "A structured report; the exact README candidate bytes are retained.",
+              }
+            : {
+                name: "readme-child-investigate",
+                mode: "read_only",
+                objective: "Inspect README.md and report its first heading.",
+                relevant_paths: ["README.md"],
+                expected_output:
+                  "A structured report quoting the README heading.",
+              },
+        );
       }
       const match = JSON.stringify(results).match(/oc-\d+/);
       if (match !== null) observation.workerIds.push(match[0]);
       return {
         text: `Delegation complete; the real child worker ${
           match?.[0] ?? "unknown"
-        } read README.md and returned its report.`,
+        } ${writeTask ? "wrote" : "read"} README.md and returned its report.`,
+        toolCalls: [],
+        stopReason: "stop",
+      };
+    }
+    if (names.includes("capsule.write") && plannerMode === "implement-write") {
+      observation.childToolNames = names;
+      if (results.length === 0) {
+        return toolCall("capsule.write", {
+          path: "README.md",
+          content: WRITE_CANDIDATE_TEXT,
+        });
+      }
+      return {
+        text: JSON.stringify({
+          summary:
+            "Child worker wrote the exact README candidate in the sealed workspace.",
+          files: ["README.md"],
+          findings: [
+            "README candidate: # Synthetic Acceptance",
+            "write tool executed",
+          ],
+          unresolved: [],
+        }),
         toolCalls: [],
         stopReason: "stop",
       };
@@ -430,11 +483,11 @@ function dependencyDepot(root: string): string {
 
 async function makeFixture(): Promise<NodeJS.ProcessEnv> {
   const root = makeRoot("companion-autodispatch-e2e-");
-  const sourceRoot = join(root, "source");
+  sourceRoot = join(root, "source");
   write(join(sourceRoot, "README.md"), README_TEXT);
   write(join(sourceRoot, ".env"), "SHOULD_NOT_BE_READ=1\n");
 
-  const stateDir = join(root, "state");
+  stateDir = join(root, "state");
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   const dependencyRoot = dependencyDepot(root);
 
@@ -613,6 +666,13 @@ function readBody(req: import("node:http").IncomingMessage): Promise<string> {
   });
 }
 
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function sha256Hex(bytes: Buffer): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
 const control = createServer(async (req, res) => {
   res.on("error", () => {});
   const url = new URL(req.url ?? "/", "http://127.0.0.1");
@@ -630,7 +690,58 @@ const control = createServer(async (req, res) => {
     return;
   }
   if (req.method === "GET" && url.pathname === "/fixture") {
-    json(200, { readme: README_TEXT });
+    try {
+      json(200, {
+        readme: readFileSync(join(sourceRoot, "README.md"), "utf8"),
+      });
+    } catch {
+      json(500, { error: "source_read_failed" });
+    }
+    return;
+  }
+  if (req.method === "GET" && url.pathname.startsWith("/artifact/")) {
+    const executionId = url.pathname.slice("/artifact/".length);
+    if (!UUID_PATTERN.test(executionId)) {
+      json(400, { error: "invalid_execution_id" });
+      return;
+    }
+    // The bridge pins stateDir=jobRoot/bridge-state and
+    // runDir=join(stateDir, "runs", executionId). Read ONLY that execution's
+    // retained candidate/artifact; no host path is ever returned.
+    const runDir = join(
+      stateDir,
+      "jobs",
+      executionId,
+      "bridge-state",
+      "runs",
+      executionId,
+    );
+    let candidateBytes: Buffer;
+    let artifactBytes: Buffer;
+    try {
+      candidateBytes = readFileSync(join(runDir, "candidate", "README.md"));
+      artifactBytes = readFileSync(join(runDir, "artifact.json"));
+    } catch {
+      json(404, { error: "artifact_not_found" });
+      return;
+    }
+    let parsedArtifact: { changes?: unknown };
+    try {
+      parsedArtifact = JSON.parse(artifactBytes.toString("utf8")) as {
+        changes?: unknown;
+      };
+    } catch {
+      json(500, { error: "artifact_invalid" });
+      return;
+    }
+    json(200, {
+      candidate: candidateBytes.toString("utf8"),
+      candidateSha256: sha256Hex(candidateBytes),
+      artifactSha256: sha256Hex(artifactBytes),
+      changes: Array.isArray(parsedArtifact.changes)
+        ? parsedArtifact.changes
+        : [],
+    });
     return;
   }
   if (req.method === "POST" && url.pathname === "/arm") {
@@ -640,7 +751,8 @@ const control = createServer(async (req, res) => {
       parsed.mode === "discuss" ||
       parsed.mode === "missing" ||
       parsed.mode === "hang" ||
-      parsed.mode === "xss"
+      parsed.mode === "xss" ||
+      parsed.mode === "implement-write"
     ) {
       plannerMode = parsed.mode;
       json(200, { mode: plannerMode });

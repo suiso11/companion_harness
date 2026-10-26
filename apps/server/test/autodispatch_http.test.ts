@@ -342,7 +342,7 @@ function planBody(policyId: string, anchor: { turnId: string; runId: string }) {
 }
 
 describe("autodispatch HTTP + existing trial boundary", () => {
-  it("creates one grant per plan revision and replays duplicate authorize", async () => {
+  it("refuses the removed public authorize route without minting a grant or quota", async () => {
     const fx = await makeApp();
     try {
       resume(fx.repo, NOW);
@@ -378,33 +378,32 @@ describe("autodispatch HTTP + existing trial boundary", () => {
       expect(plan.status).toBe(201);
       const planId = (plan.body as { plan: { id: string } }).plan.id;
 
-      const first = await call(
-        fx.app,
-        "POST",
-        `/api/sessions/${sessionId}/autodispatch/plans/${planId}/authorize`,
-        {},
-      );
-      expect(first.status).toBe(201);
-      const executionId = (first.body as { execution: { executionId: string } })
-        .execution.executionId;
-      expect(executionId).toMatch(/^[0-9a-f-]{36}$/);
+      // The public route is gone: a caller cannot mint a grant (and thereby
+      // spend a daily/concurrent quota slot) without the service's sealed
+      // materialization and internal authorization path.
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const refused = await call(
+          fx.app,
+          "POST",
+          `/api/sessions/${sessionId}/autodispatch/plans/${planId}/authorize`,
+          {},
+        );
+        expect(refused.status).toBe(404);
+        expect((refused.body as { error: { code: string } }).error.code).toBe(
+          "not_found",
+        );
+      }
 
-      const second = await call(
-        fx.app,
-        "POST",
-        `/api/sessions/${sessionId}/autodispatch/plans/${planId}/authorize`,
-        {},
-      );
-      expect(second.status).toBe(200);
-      expect(
-        (second.body as { execution: { executionId: string } }).execution
-          .executionId,
-      ).toBe(executionId);
-
-      const grants = fx.db.raw
-        .prepare("SELECT COUNT(*) AS n FROM trial_grants")
-        .get() as { n: number };
-      expect(grants.n).toBe(1);
+      for (const table of [
+        "trial_grants",
+        "trial_proposals",
+        "autodispatch_executions",
+      ]) {
+        const row = fx.db.raw
+          .prepare(`SELECT COUNT(*) AS n FROM ${table}`)
+          .get() as { n: number };
+        expect(row.n).toBe(0);
+      }
 
       const listing = await call(
         fx.app,
@@ -413,9 +412,8 @@ describe("autodispatch HTTP + existing trial boundary", () => {
       );
       expect(listing.status).toBe(200);
       expect(
-        (listing.body as { executions: { status: string }[] }).executions[0]
-          ?.status,
-      ).toBe("authorized");
+        (listing.body as { executions: { status: string }[] }).executions,
+      ).toHaveLength(0);
     } finally {
       fx.close();
     }
@@ -490,26 +488,36 @@ describe("autodispatch HTTP + existing trial boundary", () => {
         },
       );
       expect(plan.status).toBe(201);
-      const planId = (plan.body as { plan: { id: string } }).plan.id;
+      const planView = plan.body as {
+        plan: { id: string; operation: string; status: string };
+      };
+      expect(planView.plan.operation).toBe("investigate");
+      expect(planView.plan.status).toBe("frozen");
 
-      const authorized = await call(
+      // The portable investigate-only policy/plan remains accepted, but the
+      // removed public route can never turn it into an unsealed grant.
+      const refused = await call(
         fx.app,
         "POST",
-        `/api/sessions/${sessionId}/autodispatch/plans/${planId}/authorize`,
+        `/api/sessions/${sessionId}/autodispatch/plans/${planView.plan.id}/authorize`,
         {},
       );
-      expect(authorized.status).toBe(201);
-      expect(
-        (authorized.body as { execution: { status: string } }).execution.status,
-      ).toBe("authorized");
+      expect(refused.status).toBe(404);
       const grants = fx.db.raw
         .prepare("SELECT COUNT(*) AS n FROM trial_grants")
         .get() as { n: number };
-      expect(grants.n).toBe(1);
-      const proposal = fx.db.raw
-        .prepare("SELECT read_only AS readOnly FROM trial_proposals")
-        .get() as { readOnly: number };
-      expect(proposal.readOnly).toBe(1);
+      expect(grants.n).toBe(0);
+      const proposals = fx.db.raw
+        .prepare("SELECT COUNT(*) AS n FROM trial_proposals")
+        .get() as { n: number };
+      expect(proposals.n).toBe(0);
+      const stillFrozen = await call(
+        fx.app,
+        "GET",
+        `/api/sessions/${sessionId}/autodispatch/plans/${planView.plan.id}`,
+      );
+      expect(stillFrozen.status).toBe(200);
+      expect((stillFrozen.body as { status: string }).status).toBe("frozen");
     } finally {
       fx.close();
     }

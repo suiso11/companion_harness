@@ -8,7 +8,8 @@
 
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -20,25 +21,165 @@ import {
 } from "@companion/kernel";
 import type { ModelGateway } from "@companion/model-local";
 import { describe, expect, it } from "vitest";
-import { createCollectingLogger } from "../src/logger.js";
 import {
+  computeEffectiveProfile,
+  hashFileSync,
+  type OperatorConfig,
+  parseOperatorConfig,
+} from "../../../scripts/pi-orch-bridge/sealed-profile.mjs";
+import { createCollectingLogger } from "../src/logger.js";
+import { TrialModelRelay } from "../src/trial_model_relay.js";
+import {
+  manualRelayCapsFromConfig,
   TrialRunner,
   type TrialRunnerObserverFns,
   type TrialRunnerRelay,
   type TrialRunnerSpawn,
 } from "../src/trial_runner.js";
 
-const FP = "b".repeat(64);
-const REV = "a".repeat(40);
 const NOW = 1_750_000_000_000;
+
+interface OperatorFixture {
+  readonly dir: string;
+  readonly path: string;
+  readonly config: OperatorConfig;
+  readonly fingerprint: string;
+  readonly sourceRevision: string;
+  readonly executorPath: string;
+  readonly checkPath: string;
+}
+
+/**
+ * A real V2 approved operator config (same frozen shape as the production
+ * materializer): parseOperatorConfig + computeEffectiveProfile drive the
+ * active fingerprint/source revision. The sealed snapshot itself is not read
+ * by the manual pre-boot validation, so this fixture needs only real
+ * executor/check/runtime files.
+ */
+function makeOperatorFixture(
+  dir: string,
+  options: {
+    executorBody?: string;
+    maxModelCalls?: number;
+    maxOutputTokens?: number;
+    maxRequestBytes?: number;
+  } = {},
+): OperatorFixture {
+  const root = join(dir, "operator");
+  const bin = join(root, "bin");
+  mkdirSync(bin, { recursive: true, mode: 0o700 });
+  const depsNodeModules = join(root, "deps", "node_modules");
+  mkdirSync(depsNodeModules, { recursive: true, mode: 0o700 });
+  const executorPath = join(bin, "executor.mjs");
+  writeFileSync(
+    executorPath,
+    `#!${process.execPath}\n${options.executorBody ?? "export {};\n"}`,
+    { mode: 0o700 },
+  );
+  const checkPath = join(bin, "check.mjs");
+  writeFileSync(checkPath, `#!${process.execPath}\nexport {};\n`, {
+    mode: 0o700,
+  });
+  const config: OperatorConfig = {
+    version: 2,
+    stateDir: join(root, "state"),
+    storage: {
+      maxRequestBytes: options.maxRequestBytes ?? 64 * 1024,
+      maxArtifactBytes: 64 * 1024,
+      maxResultBytes: 64 * 1024,
+      maxDbBytes: 16 * 1024 * 1024,
+    },
+    active: {
+      configFingerprint: "0".repeat(64),
+      sourceRevision: "0".repeat(40),
+      workspaceAlias: "ws",
+    },
+    sealed: {
+      rootDir: join(root, "sealed"),
+      snapshotRoot: join(root, "sealed", "snapshot"),
+      manifestPath: join(root, "sealed", "manifest.json"),
+      manifestDigest: "d".repeat(64),
+      pristineSnapshotRoot: join(root, "sealed", "pristine"),
+      sourceRootOriginal: join(root, "source"),
+    },
+    profile: {
+      executionBackend: "offline-fixture",
+      executor: {
+        executable: executorPath,
+        args: [],
+        contentDigest: hashFileSync(executorPath),
+      },
+      checks: {
+        lint: {
+          executable: checkPath,
+          args: [],
+          contentDigest: hashFileSync(checkPath),
+          expectExitCode: 0,
+        },
+      },
+      runtime: { nodeRealpath: process.execPath },
+      model: {
+        route: "local",
+        sockHostPath: join(root, "relay", "model.sock"),
+        externalConsent: false,
+      },
+      limits: {
+        maxDurationMs: 60_000,
+        maxModelCalls: options.maxModelCalls ?? 8,
+        maxOutputTokens: options.maxOutputTokens ?? 256,
+        maxModelCallMs: 500,
+        maxSourceBytes: 256 * 1024 * 1024,
+        maxDependencyBytes: 1024 * 1024,
+        modelConcurrency: 1,
+        maxProcesses: 64,
+        memoryMaxBytes: 256 * 1024 * 1024,
+        cpuQuotaPercent: 100,
+        maxArtifactBytes: 64 * 1024,
+        workspaceMaxBytes: 8 * 1024 * 1024,
+      },
+      allowedPaths: ["src", "package.json"],
+      scratchPaths: [],
+      dependencies: {
+        root: join(root, "deps"),
+        manifestPath: join(root, "deps-manifest.json"),
+        digest: "e".repeat(64),
+        mounts: [
+          {
+            source: depsNodeModules,
+            guestPath: "/deps/node_modules",
+          },
+        ],
+      },
+    },
+  };
+  const parsed = parseOperatorConfig(JSON.stringify(config));
+  const effective = computeEffectiveProfile(parsed);
+  parsed.active.configFingerprint = effective.fingerprint;
+  parsed.active.sourceRevision = effective.sourceRevision;
+  const path = join(root, "operator.json");
+  writeFileSync(path, `${JSON.stringify(parsed)}\n`, { mode: 0o600 });
+  return {
+    dir: root,
+    path,
+    config: parsed,
+    fingerprint: effective.fingerprint,
+    sourceRevision: effective.sourceRevision,
+    executorPath,
+    checkPath,
+  };
+}
+
+const OPERATOR = makeOperatorFixture(
+  mkdtempSync(join(tmpdir(), "trial-operator-")),
+);
 
 function profile() {
   return {
     available: true,
     enabled: true,
     mandatoryChecks: ["lint"],
-    configFingerprint: FP,
-    sourceRevision: REV,
+    configFingerprint: OPERATOR.fingerprint,
+    sourceRevision: OPERATOR.sourceRevision,
     currentModel: "test-model",
     disclosedWholeRepoRead: true,
     timeoutMs: 60000,
@@ -356,13 +497,42 @@ function makeClock() {
   return () => NOW + (Date.now() - t0);
 }
 
-function writeTemplate(dir: string): string {
-  const path = join(dir, "bridge.template.json");
-  writeFileSync(
-    path,
-    JSON.stringify({ modelSockHostPath: "/placeholder", otherKey: "keep" }),
-  );
-  return path;
+function writeTemplate(_dir: string): string {
+  // bridgeConfigTemplatePath names the frozen approved V2 operator config,
+  // not a legacy JSON template: no per-run modelSockHostPath rewrite exists.
+  return OPERATOR.path;
+}
+
+function postRelay(
+  sockPath: string,
+  body: string,
+): Promise<{ status: number; text: string }> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      {
+        socketPath: sockPath,
+        path: "/v1/chat/completions",
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "content-length": String(Buffer.byteLength(body)),
+        },
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk: Buffer) => chunks.push(chunk));
+        res.on("end", () =>
+          resolve({
+            status: res.statusCode ?? 0,
+            text: Buffer.concat(chunks).toString("utf8"),
+          }),
+        );
+        res.on("error", reject);
+      },
+    );
+    req.on("error", reject);
+    req.end(body);
+  });
 }
 
 describe("trial_runner", () => {
@@ -2464,5 +2634,113 @@ describe("trial_runner", () => {
     } finally {
       closeKernelDatabase(handle);
     }
+  });
+
+  it("aborts before boot when the approved config fingerprint drifts", async () => {
+    const { handle, repo, sessionId } = await makeKernel();
+    try {
+      const { executionId } = queueGrant(repo, sessionId, "b1", "ws");
+      const drifted = makeOperatorFixture(
+        mkdtempSync(join(tmpdir(), "trial-operator-drift-")),
+        { executorBody: "export const drifted = true;\n" },
+      );
+      // Deliberately claim the ORIGINAL fingerprint in the operator's active
+      // block: the actual effective content still differs from the approved
+      // profile snapshot, so the runner must fail before relay/boot.
+      const tampered = {
+        ...drifted.config,
+        active: {
+          ...drifted.config.active,
+          configFingerprint: OPERATOR.fingerprint,
+        },
+      };
+      writeFileSync(drifted.path, `${JSON.stringify(tampered)}\n`, {
+        mode: 0o600,
+      });
+      const { factory, relays } = createFakeRelayFactory();
+      const { spawnImpl, state } = createFakeSpawn();
+      const { logger } = createCollectingLogger("debug");
+      const dir = mkdtempSync(join(tmpdir(), "trial-run-"));
+      const runner = new TrialRunner({
+        repo,
+        config: runnerConfigBase("ws", drifted.path, join(dir, "runs")),
+        isForegroundBusy: () => false,
+        logger,
+        createRelay: factory,
+        spawnImpl,
+        clock: makeClock(),
+      });
+      const out = await runner.runNext();
+      expect(out).toMatchObject({
+        ran: true,
+        outcome: "launch-failed",
+        executionId,
+      });
+      expect(relays.length).toBe(0);
+      expect(state.calls).toBe(0);
+      const outcome = repo.readTrialWorkerOutcome(sessionId, executionId);
+      expect(outcome?.status).toBe("interrupted");
+      expect(outcome?.quiescent).toBe(true);
+      expect(
+        repo.readTrialLaunchIntent(sessionId, executionId).grant.status,
+      ).not.toBe("claimed");
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("manual caps are the real relay intersection of the V2 config and static caps", async () => {
+    const fixture = makeOperatorFixture(
+      mkdtempSync(join(tmpdir(), "trial-operator-caps-")),
+      { maxRequestBytes: 1024, maxModelCalls: 1, maxOutputTokens: 64 },
+    );
+    const caps = manualRelayCapsFromConfig(fixture.config, {
+      maxRequestBytes: 1024 * 1024,
+      maxModelCalls: 8,
+      maxOutputTokens: 256,
+      maxResponseBytes: 1024 * 1024,
+      perCallTimeoutMs: 5000,
+      maxConcurrent: 1,
+    });
+    expect(caps.maxRequestBytes).toBe(1024);
+    expect(caps.maxModelCalls).toBe(1);
+    const sock = fixture.config.profile.model.sockHostPath;
+    const relay = new TrialModelRelay({
+      sockPath: sock,
+      gateway: stubGateway,
+      fixedModel: "test-model",
+      caps,
+    });
+    await relay.start();
+    try {
+      relay.setPermitted(true);
+      const smallBody = JSON.stringify({
+        model: "companion/companion-current",
+        messages: [{ role: "user", content: "hi" }],
+      });
+      // Real relay enforcement, not a createRelay argument echo: the
+      // template's 1KiB request cap rejects the oversized body.
+      const oversized = await postRelay(
+        sock,
+        JSON.stringify({
+          model: "companion/companion-current",
+          messages: [{ role: "user", content: "x".repeat(2048) }],
+        }),
+      );
+      expect(oversized.status).toBe(413);
+      expect(JSON.parse(oversized.text).error.message).toBe(
+        "request_cap_exceeded",
+      );
+      const first = await postRelay(sock, smallBody);
+      expect(first.status).toBe(200);
+      const second = await postRelay(sock, smallBody);
+      expect(second.status).toBe(429);
+      expect(JSON.parse(second.text).error.message).toBe(
+        "model_call_cap_exceeded",
+      );
+    } finally {
+      await relay.close();
+    }
+    expect(existsSync(sock)).toBe(false);
   });
 });

@@ -6082,49 +6082,10 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     }
   });
 
-  // Host authorization only: the body is strictly empty. The model/UI can
-  // never name a profile, alias, scope, check, or cap here.
-  app.post(
-    "/api/sessions/:sessionId/autodispatch/plans/:planId/authorize",
-    async (c) => {
-      const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
-      if ("response" in session) return session.response;
-      const planId = requireUuid(c, c.req.param("planId"), "planId");
-      if ("response" in planId) return planId.response;
-      if (!strictQuery(c, []).ok) return validationError(c);
-      const raw = await readJsonBody(c);
-      if (!raw.ok) return validationError(c);
-      if (!isEmptyBody(raw.value)) return validationError(c);
-      const ad = autodispatchOf(config);
-      if (ad === null) {
-        return apiError(c, 404, "not_found", "resource not found");
-      }
-      if (ad.config.dependencyRoot === null) {
-        return c.json(
-          {
-            error: {
-              code: "autodispatch_dependencies_missing",
-              message: "trusted dependency closure is not configured",
-            },
-          },
-          409,
-        );
-      }
-      if (draining) return shuttingDown(c);
-      try {
-        const out = repo.authorizeAutodispatch(session.id, planId.id, {
-          profile: ad.profile,
-          workspaceAlias: ad.config.workspaceAlias,
-          limits: ad.limits,
-          now: now(),
-        });
-        return c.json(out, out.replayed ? 200 : 201);
-      } catch (error) {
-        return mapDomainError(c, error);
-      }
-    },
-  );
-
+  // There is deliberately NO public POST /plans/:planId/authorize route:
+  // a browser/model request could otherwise mint an unsealed, unlaunchable
+  // grant. Automatic authorization is service-internal only. Manual trial
+  // staging/approval keep their separate human APIs.
   app.get("/api/sessions/:sessionId/autodispatch/executions", (c) => {
     const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
     if ("response" in session) return session.response;

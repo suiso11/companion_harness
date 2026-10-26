@@ -14,11 +14,13 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   closeKernelDatabase,
   createKernelRepository,
@@ -29,7 +31,10 @@ import {
 import type { ModelGateway } from "@companion/model-local";
 import { describe, expect, it } from "vitest";
 import { verifySealedWorkspaceSnapshot } from "../../../packages/kernel/src/autonomous_workspace.js";
+import { prepareDependencyClosure } from "../../../scripts/pi-orch-bridge/execution-profile.mjs";
+import { verifyAutodispatchDependency } from "../src/autodispatch_dependencies.js";
 import {
+  type AutodispatchMaterialization,
   cleanupTerminalAutodispatchMaterialization,
   createAutodispatchMaterializer,
   pruneAutodispatchMaterializations,
@@ -760,6 +765,151 @@ async function openRepo(): Promise<{
   };
 }
 
+/** Real session/policy/frozen plan used as the genuine human source for
+ * cleanup regressions. Each caller gets its own session/policy so real
+ * authorize/revoke calls never conflict with daily/concurrent quotas. */
+async function seedAutodispatchLedger(
+  repo: KernelRepository,
+  config: Fixture["config"],
+) {
+  const ctl = repo.getAutonomyControlState();
+  repo.setAutonomyControlState(
+    { paused: false, expectedVersion: ctl.version },
+    { key: randomUUID(), now: NOW },
+  );
+  const sessionId = repo.createSession({ key: randomUUID(), now: NOW }).body
+    .sessionId;
+  const posted = repo.postMessage(
+    sessionId,
+    { text: "Please implement the feature. Go ahead." },
+    { key: randomUUID(), now: NOW + 10 },
+  );
+  repo.startRun(posted.body.run.id, { now: NOW + 11 });
+  repo.completeRun(posted.body.run.id, { version: 1, text: "ok" } as never, {
+    now: NOW + 12,
+  });
+  const policy = repo.createAutodispatchPolicy(
+    sessionId,
+    {
+      workspaceAlias: config.workspaceAlias,
+      operations: ["investigate", "implement"],
+      readScopes: ["src"],
+      writeScopes: ["src"],
+      checks: ["lint"],
+      caps: CAPS,
+      expiresAt: null,
+    },
+    {
+      key: randomUUID(),
+      now: NOW + 20,
+      limits: {
+        operations: ["investigate", "implement"],
+        checks: ["lint"],
+        caps: CAPS,
+      },
+      parent: {
+        statement: "Standing policy for the approved workspace",
+        sourceTurnId: posted.body.turnId,
+      },
+    },
+  );
+  const plan = repo.createAutodispatchPlan(
+    sessionId,
+    {
+      policyId: policy.id,
+      operation: "implement",
+      content: {
+        goal: "Implement the accepted feature",
+        decisions: [],
+        nongoals: [],
+        steps: ["Edit src/app.ts"],
+        acceptance: ["lint passes"],
+        missing: [],
+        relevantPaths: ["src/app.ts"],
+      },
+      intent: {
+        kind: "execute",
+        quotes: [
+          {
+            turnId: posted.body.turnId,
+            runId: posted.body.run.id,
+            text: "implement the feature",
+          },
+        ],
+        latestUserTurnId: posted.body.turnId,
+        latestUserRunId: posted.body.run.id,
+      },
+    },
+    { now: NOW + 30 },
+  ).plan;
+  return {
+    sessionId,
+    policy,
+    plan,
+    runId: posted.body.run.id,
+    turnId: posted.body.turnId,
+  };
+}
+
+type SeededAutodispatch = Awaited<ReturnType<typeof seedAutodispatchLedger>>;
+
+/** Prepare real bytes for an already-frozen human plan. */
+async function prepareRealJob(
+  fx: Fixture,
+  seed: SeededAutodispatch,
+  now: number,
+): Promise<AutodispatchMaterialization> {
+  const prepared = await materializerFor(fx).prepare({
+    plan: seed.plan,
+    policy: seed.policy,
+    executionId: randomUUID(),
+    now,
+  });
+  if (!prepared.ok) throw new Error(`prepare failed: ${prepared.code}`);
+  return prepared.materialization;
+}
+
+/** Create the actual one-use grant bound to the exact prepared bytes. */
+function authorizePreparedJob(
+  repo: KernelRepository,
+  seed: SeededAutodispatch,
+  materialization: AutodispatchMaterialization,
+  now: number,
+): void {
+  const authorized = repo.authorizeAutodispatch(seed.sessionId, seed.plan.id, {
+    profile: materialization.profile,
+    workspaceAlias: seed.policy.workspaceAlias,
+    limits: {
+      operations: ["investigate", "implement"],
+      checks: ["lint"],
+      caps: CAPS,
+    },
+    executionId: materialization.reference.executionId,
+    dependencyDigest: materialization.state.dependencyDigest,
+    materialization,
+    materializationDigest: materialization.digests.materialization,
+    now,
+  });
+  if (authorized.execution.status !== "authorized") {
+    throw new Error(`authorize failed: ${authorized.execution.status}`);
+  }
+}
+
+/** Claim through the real lifecycle so claimed/boot evidence is authentic. */
+function claimPreparedJob(
+  repo: KernelRepository,
+  seed: SeededAutodispatch,
+  materialization: AutodispatchMaterialization,
+  now: number,
+): void {
+  repo.claimTrial(seed.sessionId, materialization.reference.executionId, {
+    key: randomUUID(),
+    now,
+    profile: materialization.profile,
+    workspaceAlias: seed.policy.workspaceAlias,
+  });
+}
+
 linuxDescribe(
   "autodispatch materializer + existing ledger/runner resolver (Linux)",
   () => {
@@ -1309,6 +1459,450 @@ linuxDescribe(
             ),
           ).status,
         ).toBe("cleaned");
+      } finally {
+        db.close();
+        fx.cleanup();
+      }
+    });
+
+    it("collapses nested snapshot roots without widening policy write scopes", async () => {
+      const fx = makeFixture();
+      try {
+        write(
+          join(fx.source, "src", "feature", "app.ts"),
+          "export const feature = 1;\n",
+        );
+        const config = {
+          ...fx.config,
+          readScopes: ["src"],
+          writeScopes: ["src/feature"],
+        };
+        const materializer = createAutodispatchMaterializer({
+          config,
+          runtimeDir: fx.runtimeDir,
+          currentModel: "test-model",
+          available: true,
+          enabled: true,
+          disclosedWholeRepoRead: true,
+          now: () => NOW,
+        });
+        const result = await materializer.prepare({
+          plan: { ...PLAN, relevantPaths: ["src/feature/app.ts"] },
+          policy: POLICY,
+          executionId: randomUUID(),
+          now: NOW,
+        });
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const materialization = result.materialization;
+        const manifest = JSON.parse(
+          readFileSync(materialization.state.manifestPath, "utf8"),
+        ) as { entries: { path: string }[] };
+        const paths = manifest.entries.map((entry) => entry.path);
+        // read src + write src/feature is copied as the approved ancestor
+        // once, not as overlapping roots (which used to reject the plan).
+        expect(paths.filter((path) => path === "src/app.ts")).toHaveLength(1);
+        expect(
+          paths.filter((path) => path === "src/feature/app.ts"),
+        ).toHaveLength(1);
+        // Snapshot collapse must not collapse the separate policy scopes,
+        // plan paths, or check authority.
+        expect(materialization.config.profile.allowedPaths).toEqual(
+          expect.arrayContaining(["src", "src/feature"]),
+        );
+        expect(materialization.profile.mandatoryChecks).toEqual(["lint"]);
+      } finally {
+        fx.cleanup();
+      }
+    });
+
+    it("materializes pnpm links whose copied packages real Node can import, with .pnpm native evidence", async () => {
+      const fx = makeFixture();
+      const sourceRoot = mkdtempSync(join(tmpdir(), "pnpm-closure-"));
+      const escapeSource = mkdtempSync(join(tmpdir(), "pnpm-escape-"));
+      const outside = mkdtempSync(join(tmpdir(), "pnpm-outside-"));
+      const destinationRoot = join(fx.dir, "pnpm-destination");
+      const escapeDestination = join(fx.dir, "pnpm-escape-destination");
+      try {
+        const nm = join(sourceRoot, "node_modules");
+        write(
+          join(
+            nm,
+            ".pnpm",
+            "example@1.0.0",
+            "node_modules",
+            "example",
+            "package.json",
+          ),
+          '{"name":"example","type":"module"}\n',
+        );
+        write(
+          join(
+            nm,
+            ".pnpm",
+            "example@1.0.0",
+            "node_modules",
+            "example",
+            "index.js",
+          ),
+          'import { scoped } from "@scope/dep";\nexport const value = 42;\nexport { scoped };\n',
+        );
+        write(
+          join(
+            nm,
+            ".pnpm",
+            "@scope+dep@1.0.0",
+            "node_modules",
+            "@scope",
+            "dep",
+            "package.json",
+          ),
+          '{"name":"@scope/dep","type":"module"}\n',
+        );
+        write(
+          join(
+            nm,
+            ".pnpm",
+            "@scope+dep@1.0.0",
+            "node_modules",
+            "@scope",
+            "dep",
+            "index.js",
+          ),
+          'export const scoped = "dep";\n',
+        );
+        mkdirSync(
+          join(nm, ".pnpm", "example@1.0.0", "node_modules", "@scope"),
+          { recursive: true, mode: 0o700 },
+        );
+        symlinkSync(
+          "../../../@scope+dep@1.0.0/node_modules/@scope/dep",
+          join(nm, ".pnpm", "example@1.0.0", "node_modules", "@scope", "dep"),
+        );
+        write(
+          join(
+            nm,
+            ".pnpm",
+            "@scope+pkg@1.0.0",
+            "node_modules",
+            "@scope",
+            "pkg",
+            "package.json",
+          ),
+          '{"name":"@scope/pkg","type":"module"}\n',
+        );
+        write(
+          join(
+            nm,
+            ".pnpm",
+            "@scope+pkg@1.0.0",
+            "node_modules",
+            "@scope",
+            "pkg",
+            "index.js",
+          ),
+          'export const pkg = "pkg";\n',
+        );
+        write(
+          join(
+            nm,
+            ".pnpm",
+            "better-sqlite3@1.0.0",
+            "node_modules",
+            "better-sqlite3",
+            "package.json",
+          ),
+          '{"name":"better-sqlite3","version":"1.0.0"}\n',
+        );
+        write(
+          join(
+            nm,
+            ".pnpm",
+            "better-sqlite3@1.0.0",
+            "node_modules",
+            "better-sqlite3",
+            "build",
+            "Release",
+            "better_sqlite3.node",
+          ),
+          "native-pnpm-placeholder",
+        );
+        symlinkSync(
+          ".pnpm/example@1.0.0/node_modules/example",
+          join(nm, "example"),
+        );
+        mkdirSync(join(nm, "@scope"), { recursive: true, mode: 0o700 });
+        symlinkSync(
+          "../.pnpm/@scope+pkg@1.0.0/node_modules/@scope/pkg",
+          join(nm, "@scope", "pkg"),
+        );
+        symlinkSync(
+          ".pnpm/better-sqlite3@1.0.0/node_modules/better-sqlite3",
+          join(nm, "better-sqlite3"),
+        );
+
+        const prepared = prepareDependencyClosure({
+          sourceNodeModules: nm,
+          destinationRoot,
+          nodeRealpath: process.execPath,
+          maxBytes: 10 * 1024 * 1024,
+          maxEntries: 10_000,
+        });
+        const native = prepared.nativeModules.find(
+          (entry) => entry.package === "better-sqlite3",
+        );
+        const expectedNativePath =
+          "node_modules/.pnpm/better-sqlite3@1.0.0/node_modules/better-sqlite3/build/Release/better_sqlite3.node";
+        expect(native?.path).toBe(expectedNativePath);
+        expect(native?.sha256).toMatch(/^[0-9a-f]{64}$/);
+        expect(existsSync(join(prepared.root, expectedNativePath))).toBe(true);
+        // The real consumer accepts the canonical .pnpm path and re-hashes it.
+        expect(verifyAutodispatchDependency(prepared.root)).toMatchObject({
+          ok: true,
+        });
+
+        // Actual Node imports through the copied root symlink, a scoped
+        // root symlink, and the package's transitive scoped link.
+        const example = await import(
+          `${pathToFileURL(join(prepared.root, "node_modules", "example", "index.js")).href}?v=${randomUUID()}`
+        );
+        expect(example.value).toBe(42);
+        expect(example.scoped).toBe("dep");
+        const scoped = await import(
+          `${pathToFileURL(join(prepared.root, "node_modules", "@scope", "pkg", "index.js")).href}?v=${randomUUID()}`
+        );
+        expect(scoped.pkg).toBe("pkg");
+
+        // Escaping links remain rejected; no external workspace allowance.
+        const escapeNm = join(escapeSource, "node_modules");
+        mkdirSync(escapeNm, { recursive: true, mode: 0o700 });
+        write(join(outside, "index.js"), "export const escaped = 1;\n");
+        symlinkSync(outside, join(escapeNm, "escape"));
+        expect(() =>
+          prepareDependencyClosure({
+            sourceNodeModules: escapeNm,
+            destinationRoot: escapeDestination,
+            nodeRealpath: process.execPath,
+          }),
+        ).toThrow(/escapes the approved depot/);
+      } finally {
+        removeTree(sourceRoot);
+        removeTree(escapeSource);
+        removeTree(outside);
+        removeTree(destinationRoot);
+        removeTree(escapeDestination);
+        fx.cleanup();
+      }
+    });
+
+    it("immediately expires revoked never-launched jobs and frees admission capacity", async () => {
+      const fx = makeFixture();
+      const db = await openRepo();
+      try {
+        const materializations: AutodispatchMaterialization[] = [];
+        for (let index = 0; index < 20; index += 1) {
+          // A fresh human session/policy/plan per job keeps the real daily
+          // and concurrent quota honest instead of bypassing it.
+          const seed = await seedAutodispatchLedger(db.repo, fx.config);
+          const at = NOW + 100 + index * 10;
+          const materialization = await prepareRealJob(fx, seed, at);
+          authorizePreparedJob(db.repo, seed, materialization, at + 1);
+          db.repo.revokeAutodispatchPolicy(seed.sessionId, seed.policy.id, {
+            now: at + 2,
+            reason: "test cancellation",
+          });
+          materializations.push(materialization);
+        }
+        const pruned = pruneAutodispatchMaterializations(
+          db.repo,
+          fx.config,
+          NOW + 1000,
+        );
+        expect(pruned).toEqual({
+          cleaned: 0,
+          expired: 20,
+          retained: 0,
+          prepared: 0,
+        });
+        for (const materialization of materializations) {
+          expect(existsSync(materialization.state.snapshotRoot)).toBe(false);
+          expect(existsSync(materialization.state.dependencyRoot)).toBe(false);
+          expect(existsSync(materialization.state.runDir)).toBe(false);
+          expect(
+            existsSync(join(materialization.state.jobRoot, "bridge-state")),
+          ).toBe(false);
+          expect(existsSync(materialization.state.socketDir)).toBe(false);
+          expect(
+            JSON.parse(
+              readFileSync(
+                join(materialization.state.jobRoot, "retention.json"),
+                "utf8",
+              ),
+            ).status,
+          ).toBe("artifact-expired");
+        }
+        // Original source and the operator/shared dependency source are
+        // never touched by reclamation.
+        expect(
+          readFileSync(join(fx.source, "src", "app.ts"), "utf8"),
+        ).toContain("export const app");
+        expect(
+          readFileSync(
+            join(
+              fx.depSource,
+              "node_modules",
+              "better-sqlite3",
+              "build",
+              "Release",
+              "better_sqlite3.node",
+            ),
+            "utf8",
+          ),
+        ).toBe("native-placeholder");
+
+        // Admission capacity is free now, not after the retained window.
+        // prepare() alone does not enforce admission, so run the REAL service
+        // intake (prune -> prepare -> authorize) on a fresh completed human
+        // turn and observe the actual authorized grant.
+        const nextSeed = await seedAutodispatchLedger(db.repo, fx.config);
+        const planner: AutodispatchPlanner = {
+          async propose(input) {
+            return {
+              operation: "implement",
+              content: {
+                goal: "Implement the accepted feature",
+                decisions: [],
+                nongoals: [],
+                steps: ["Edit src/app.ts"],
+                acceptance: ["lint passes"],
+                missing: [],
+                relevantPaths: ["src/app.ts"],
+              },
+              intent: {
+                kind: "execute",
+                quotes: [
+                  {
+                    turnId: input.latestUserTurnId,
+                    runId: input.latestUserRunId,
+                    text: "implement the feature",
+                  },
+                ],
+                latestUserTurnId: input.latestUserTurnId,
+                latestUserRunId: input.latestUserRunId,
+              },
+            };
+          },
+        };
+        const service = createAutodispatchService({
+          repo: db.repo,
+          config: fx.config,
+          profile: {
+            available: true,
+            enabled: true,
+            mandatoryChecks: ["lint"],
+            configFingerprint: "b".repeat(64),
+            sourceRevision: "a".repeat(40),
+            currentModel: "test-model",
+            disclosedWholeRepoRead: true,
+            timeoutMs: CAPS.timeoutMs,
+            maxOutputBytes: CAPS.maxOutputBytes,
+          },
+          background: createBackgroundResourceGate(),
+          planner,
+          materializer: materializerFor(fx),
+          maxOutputTokens: 256,
+          now: () => NOW + 2000,
+        });
+        service.onRunCompleted(nextSeed.runId);
+        const deadline = Date.now() + 3000;
+        let admitted:
+          | ReturnType<KernelRepository["listAutodispatchExecutions"]>[number]
+          | undefined;
+        while (Date.now() < deadline) {
+          admitted = db.repo
+            .listAutodispatchExecutions(nextSeed.sessionId, 10)
+            .find((item) => item.status === "authorized");
+          if (admitted !== undefined) break;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        expect(admitted?.status).toBe("authorized");
+        expect(admitted?.executionId).not.toBeNull();
+        await service.stop();
+      } finally {
+        db.close();
+        fx.cleanup();
+      }
+    });
+
+    it("holds revoked jobs with claimed/restart/boot/unknown-worker evidence", async () => {
+      const fx = makeFixture();
+      const db = await openRepo();
+      try {
+        const materializations: AutodispatchMaterialization[] = [];
+        let tick = NOW + 100;
+        const addCancelled = async (
+          mode: "claimed" | "boot" | "restart",
+        ): Promise<void> => {
+          const seed = await seedAutodispatchLedger(db.repo, fx.config);
+          const materialization = await prepareRealJob(fx, seed, tick++);
+          authorizePreparedJob(db.repo, seed, materialization, tick++);
+          claimPreparedJob(db.repo, seed, materialization, tick++);
+          if (mode !== "claimed") {
+            const pid = 4100 + materializations.length;
+            db.repo.registerTrialWorkerBoot(
+              {
+                executionId: materialization.reference.executionId,
+                sessionId: seed.sessionId,
+                pid,
+                bootId: `boot-cleanup-${materializations.length}`,
+                processStartTicks: String(pid),
+              },
+              tick++,
+            );
+          }
+          if (mode === "restart") {
+            // The real restart-recovery boundary must not erase in-flight
+            // worker evidence; cleanup still has to hold.
+            db.repo.recover({ now: tick++ });
+          }
+          db.repo.revokeAutodispatchPolicy(seed.sessionId, seed.policy.id, {
+            now: tick++,
+            reason: "test cancellation",
+          });
+          materializations.push(materialization);
+        };
+        await addCancelled("claimed");
+        await addCancelled("boot");
+        await addCancelled("restart");
+        // Materialized bytes with no ledger grant at all (crash window before
+        // authorize) are unknown, not proof of an unlaunched worker.
+        const unknownSeed = await seedAutodispatchLedger(db.repo, fx.config);
+        materializations.push(await prepareRealJob(fx, unknownSeed, tick++));
+
+        const pruned = pruneAutodispatchMaterializations(
+          db.repo,
+          fx.config,
+          NOW + 1000,
+        );
+        expect(pruned).toEqual({
+          cleaned: 0,
+          expired: 0,
+          retained: 4,
+          prepared: 4,
+        });
+        for (const materialization of materializations) {
+          expect(existsSync(materialization.state.snapshotRoot)).toBe(true);
+          expect(existsSync(materialization.state.dependencyRoot)).toBe(true);
+          expect(existsSync(materialization.state.socketDir)).toBe(true);
+          expect(
+            JSON.parse(
+              readFileSync(
+                join(materialization.state.jobRoot, "retention.json"),
+                "utf8",
+              ),
+            ).status,
+          ).toBe("prepared");
+        }
       } finally {
         db.close();
         fx.cleanup();

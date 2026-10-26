@@ -26,6 +26,11 @@ import type {
 import type { KernelRepository } from "@companion/kernel";
 import type { ModelGateway } from "@companion/model-local";
 import {
+  computeEffectiveProfile,
+  type OperatorConfig,
+  parseOperatorConfig,
+} from "../../../scripts/pi-orch-bridge/sealed-profile.mjs";
+import {
   cleanupTerminalAutodispatchMaterialization,
   type TrialMaterializationResolution,
 } from "./autodispatch_materializer.js";
@@ -75,6 +80,72 @@ function prebootErrno(error: unknown): string {
     : "unknown";
 }
 
+/**
+ * Frozen manual-execution model budget: the approved V2 operator config's
+ * guest limits/storage intersect the host runner's static relay caps. This
+ * uses the SAME relay narrowing helper as the policy path, so the manual
+ * template can never widen either the operator-derived or host ceiling.
+ */
+function requiredLimit(config: OperatorConfig, key: string): number {
+  const value = config.profile.limits[key];
+  if (typeof value !== "number") {
+    throw new Error(`approved operator limit missing: ${key}`);
+  }
+  return value;
+}
+
+export function manualRelayCapsFromConfig(
+  config: OperatorConfig,
+  staticCaps: TrialModelRelayCaps,
+): TrialModelRelayCaps {
+  return narrowTrialModelRelayCaps(staticCaps, {
+    maxRequestBytes: config.storage.maxRequestBytes,
+    maxModelCalls: requiredLimit(config, "maxModelCalls"),
+    maxOutputTokens: requiredLimit(config, "maxOutputTokens"),
+    maxResponseBytes: config.storage.maxResultBytes,
+    perCallTimeoutMs: requiredLimit(config, "maxModelCallMs"),
+    maxConcurrent: requiredLimit(config, "modelConcurrency"),
+  });
+}
+
+/**
+ * Manual grants use the approved operator config itself, never a legacy
+ * template rewrite. The config must still prove the exact frozen profile the
+ * human approved: effective fingerprint === snapshot fingerprint, the
+ * operator-declared active fingerprint/source revision match that computed
+ * content, and the advertised mandatory check set is exactly the effective
+ * check set. Any drift fails before the relay/boot (known quiescence).
+ */
+function readApprovedOperatorConfig(
+  path: string,
+  profile: TrialProfileSnapshot,
+): OperatorConfig {
+  const config = parseOperatorConfig(readFileSync(path, "utf8"));
+  const effective = computeEffectiveProfile(config);
+  if (effective.fingerprint !== profile.configFingerprint) {
+    throw new Error("approved profile fingerprint drift");
+  }
+  if (config.active.configFingerprint !== effective.fingerprint) {
+    throw new Error("operator active fingerprint drift");
+  }
+  if (
+    effective.sourceRevision !== profile.sourceRevision ||
+    config.active.sourceRevision !== effective.sourceRevision
+  ) {
+    throw new Error("approved source revision drift");
+  }
+  const effectiveChecks = Object.keys(
+    effective.checks as Record<string, unknown>,
+  )
+    .sort()
+    .join("\n");
+  const mandatoryChecks = [...profile.mandatoryChecks].sort().join("\n");
+  if (effectiveChecks !== mandatoryChecks) {
+    throw new Error("approved mandatory check set drift");
+  }
+  return config;
+}
+
 export interface TrialRunnerObserveTimeouts {
   /** Bound for the scope to become active after spawn. */
   activeTimeoutMs: number;
@@ -93,7 +164,10 @@ export type TrialMaterializationResolver = (input: {
 export interface TrialRunnerConfig {
   nodeRealpath: string;
   bridgeScriptPath: string;
-  /** Absolute JSON template path; only modelSockHostPath is replaced. */
+  /** Absolute path to the frozen approved V2 OperatorConfig JSON. It is
+   * parsed and fingerprint-verified per manual execution, its
+   * `profile.model.sockHostPath` is used verbatim, and the parsed config is
+   * copied verbatim to the private run dir (no template rewrite). */
   bridgeConfigTemplatePath: string;
   systemctlRealpath: string;
   xdgRuntimeDir: string;
@@ -774,19 +848,64 @@ export class TrialRunner {
     const now = this.clock();
     void now;
     this.logger.info("trial.run_start", {});
+    const policyRun = materialization !== undefined;
+    // Manual grants carry the approved V2 operator config itself. Parse and
+    // verify it BEFORE creating any relay/run dir so config drift is a
+    // known-quiescence pre-boot abort with no socket and no spawn.
+    let manualConfig: OperatorConfig | undefined;
+    if (!policyRun) {
+      try {
+        manualConfig = readApprovedOperatorConfig(
+          this.config.bridgeConfigTemplatePath,
+          profile,
+        );
+      } catch (error) {
+        this.abortClaimedBeforeBoot(
+          sessionId,
+          executionId,
+          request.workspaceAlias,
+          "config-setup",
+          prebootErrno(error),
+          materialization,
+        );
+        return { ran: true, outcome: "launch-failed", executionId };
+      }
+    }
     const base = this.config.runDirBase ?? tmpdir();
     mkdirSync(base, { recursive: true, mode: 0o700 });
-    const policyRun = materialization !== undefined;
+    // A fresh private run dir always holds this execution's copy of the
+    // approved config; it is never used as the socket location anymore.
     const runDir = policyRun
       ? materialization.runDir
       : mkdtempSync(join(base, "trial-exec-"));
     mkdirSync(runDir, { recursive: true, mode: 0o700 });
     chmodSync(runDir, 0o700);
-    const sockPath = policyRun
-      ? materialization.socketHostPath
-      : join(runDir, "relay", "model.sock");
+    let sockPath: string;
+    let executionCaps: TrialModelRelayCaps;
+    if (policyRun) {
+      sockPath = materialization.socketHostPath;
+      executionCaps = materialization.caps;
+    } else {
+      if (manualConfig === undefined) {
+        // Defensive: the parse above either assigned or aborted.
+        this.abortClaimedBeforeBoot(
+          sessionId,
+          executionId,
+          request.workspaceAlias,
+          "config-setup",
+          "unknown",
+          materialization,
+        );
+        return { ran: true, outcome: "launch-failed", executionId };
+      }
+      // The approved operator config's own socket path is used verbatim.
+      sockPath = manualConfig.profile.model.sockHostPath;
+      executionCaps = manualRelayCapsFromConfig(
+        manualConfig,
+        this.config.relayCaps,
+      );
+    }
     mkdirSync(dirname(sockPath), { recursive: true, mode: 0o700 });
-    const executionCaps = materialization?.caps ?? this.config.relayCaps;
     const relay = this.createRelay(sockPath, executionCaps);
     this.currentRelay = relay;
     const cleanup = async (): Promise<void> => {
@@ -846,8 +965,9 @@ export class TrialRunner {
       return { ran: true, outcome: "launch-failed", executionId };
     }
 
-    // Per-execution bridge config: 0700 dir already set; 0600 file; ONLY
-    // modelSockHostPath is replaced from the absolute JSON template.
+    // Per-execution bridge config: 0700 dir already set; 0600 file. The
+    // approved/manual config is copied VERBATIM (its own model.sockHostPath
+    // already equals the relay path), never rewritten or recomputed.
     const execConfigPath = join(runDir, "bridge.config.json");
     try {
       let execConfig: unknown;
@@ -861,10 +981,10 @@ export class TrialRunner {
         }
         execConfig = materialization.config;
       } else {
-        const template = JSON.parse(
-          readFileSync(this.config.bridgeConfigTemplatePath, "utf8"),
-        ) as Record<string, unknown>;
-        execConfig = { ...template, modelSockHostPath: sockPath };
+        if (manualConfig === undefined) {
+          throw new Error("approved operator config missing");
+        }
+        execConfig = manualConfig;
       }
       writeFileSync(execConfigPath, JSON.stringify(execConfig), {
         mode: 0o600,

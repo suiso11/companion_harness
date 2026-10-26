@@ -123,12 +123,16 @@ function copyClosure(sourceRoot, destinationRoot, budget) {
       if (!isInside(resolved, sourceRoot))
         fail(`dependency symlink escapes the approved depot: ${rel}`);
       const targetRel = relative(sourceRoot, resolved);
+      // The copied closure lives at destinationRoot/node_modules, so the
+      // recreated link must resolve inside THAT tree (not a sibling
+      // destinationRoot/.pnpm path that was never materialized).
+      const targetPath = join("node_modules", targetRel);
       const linkTarget = relative(
         dirname(destinationAbsolute),
-        join(destinationRoot, targetRel),
+        join(destinationRoot, targetPath),
       );
       symlinkSync(linkTarget, destinationAbsolute);
-      entries.push({ path: rel, type: "symlink", target: targetRel });
+      entries.push({ path: rel, type: "symlink", target: targetPath });
       return;
     }
     if (st.isDirectory()) {
@@ -185,10 +189,42 @@ function makeTreeReadOnly(root) {
   for (const name of readdirSync(root)) walk(join(root, name));
 }
 
-function nativeModulesFor(entries, requiredPackages) {
+/**
+ * Resolve a required package's REAL directory inside the freshly copied
+ * node_modules tree. pnpm links `node_modules/<pkg>` (and scoped/transitive
+ * links) to `.pnpm/.../node_modules/<pkg>`; native binaries and package bytes
+ * live in that resolved directory, not under the logical link path. Fresh
+ * manifests only need the copied bytes, so no legacy target rewriting.
+ */
+function resolveRequiredPackageDirectory(destinationRoot, name) {
+  if (
+    typeof name !== "string" ||
+    name.length === 0 ||
+    name.includes("\\") ||
+    name.includes("\0") ||
+    name.split("/").some((part) => part === "" || part === "." || part === "..")
+  ) {
+    fail(`required native package name invalid: ${name}`);
+  }
+  const nodeModulesRoot = realpathSync(join(destinationRoot, "node_modules"));
+  const packageDirectory = realpathSync(join(nodeModulesRoot, name));
+  if (
+    packageDirectory === nodeModulesRoot ||
+    !isInside(packageDirectory, nodeModulesRoot)
+  ) {
+    fail(`required native package escapes node_modules: ${name}`);
+  }
+  if (!statSync(packageDirectory).isDirectory())
+    fail(`required native package is not a directory: ${name}`);
+  return relative(nodeModulesRoot, packageDirectory).split(sep).join("/");
+}
+
+function nativeModulesFor(destinationRoot, entries, requiredPackages) {
   const found = [];
   for (const name of requiredPackages) {
-    const prefix = `node_modules/${name}/`;
+    const resolved = resolveRequiredPackageDirectory(destinationRoot, name);
+    const directory = `node_modules/${resolved}`;
+    const prefix = `${directory}/`;
     const native = entries.filter(
       (entry) =>
         entry.type === "file" &&
@@ -286,9 +322,11 @@ export function prepareDependencyClosure(options) {
       "a declared native dependency requires nodeRealpath or expectedNodeAbi",
     );
   }
-  const nativeModules = nativeModulesFor(entries, requiredPackages).map(
-    (entry) => ({ ...entry, nodeAbi }),
-  );
+  const nativeModules = nativeModulesFor(
+    destinationReal,
+    entries,
+    requiredPackages,
+  ).map((entry) => ({ ...entry, nodeAbi }));
 
   const manifestPath = `${destinationReal}${MANIFEST_SUFFIX}`;
   const manifest = {
