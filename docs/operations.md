@@ -4442,6 +4442,9 @@ staging form is native-only by design.
   a stale socket/file with no listener) fails closed as `launch-failed`
   (`relay-start`); the operator must remove it. Only a relay that
   actually bound the path unlinks it on `close`.
+- Every relayed model call is sent with `reasoning: "off"`: the sealed
+  guest never sees thinking text, so unrequested hybrid-model thinking
+  only burns the per-call timeout.
 - An unknown execution raises a durable per-alias fence that denies
   further stage/approve/claim for that workspace alias until the exact
   fence row is cleared; unrelated scopes/aliases continue.

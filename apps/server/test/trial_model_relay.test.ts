@@ -342,6 +342,20 @@ describe.skipIf(process.platform === "win32")("trial_model_relay", () => {
     }
   });
 
+  it("forwards reasoning off so hybrid local models cannot think unboundedly", async () => {
+    const gw = fakeGateway();
+    const { relay, sock } = await startRelay(testCaps(), gw);
+    try {
+      relay.setPermitted(true);
+      const res = await postUds(sock, chatBody());
+      expect(res.status).toBe(200);
+      expect(gw.calls.length).toBe(1);
+      expect((gw.calls[0] as ChatRequest).reasoning).toBe("off");
+    } finally {
+      await relay.close();
+    }
+  });
+
   it("native child read-only verbs (read,grep,find,ls) round-trip and unknown still rejects", async () => {
     // Exact installed Pi backend read-only tool list (`piToolList`):
     // read,grep,find,ls. The relay must map all of them to gateway-safe names

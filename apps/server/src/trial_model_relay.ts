@@ -634,6 +634,10 @@ export class TrialModelRelay {
             ? {}
             : { tools: translated.gatewayTools }),
           maxOutputTokens: translated.maxOutputTokens,
+          // The relayed guest never receives thinking text, so its tokens are
+          // pure latency. Without a global llama-server budget, a hybrid
+          // model can think unboundedly and blow the per-call timeout.
+          reasoning: "off",
         },
         {
           signal: controller.signal,
