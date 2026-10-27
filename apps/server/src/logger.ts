@@ -135,6 +135,14 @@ export interface ServerLogFields {
   readonly step?: number;
   /** Fixed abortable retry delay in ms (model.step.retried only). */
   readonly delayMs?: number;
+  /** Count of citation entries dropped from an accepted answer. */
+  readonly dropped?: number;
+  /**
+   * Comma-joined fixed citation-drop reason codes
+   * (`too_long,invalid_format,unresolved,over_limit`). Closed vocabulary;
+   * never citation ids, model text, or arbitrary reasons.
+   */
+  readonly reasons?: string;
   readonly bytes?: number;
   readonly durationMs?: number;
   readonly attempt?: number;
@@ -170,6 +178,13 @@ const GATEWAY_ERROR_CODES: ReadonlySet<string> = new Set(
 const INVALID_RESPONSE_CAUSES: ReadonlySet<string> = new Set(
   MODEL_LOCAL_INVALID_RESPONSE_CAUSES,
 );
+/** Closed citation-drop reason vocabulary (counts/codes only). */
+const CITATION_DROP_REASONS: ReadonlySet<string> = new Set([
+  "too_long",
+  "invalid_format",
+  "unresolved",
+  "over_limit",
+]);
 
 function sanitizeString(value: unknown): string | undefined {
   if (typeof value !== "string") {
@@ -217,6 +232,25 @@ function sanitizeNumber(value: unknown): number | undefined {
     return undefined;
   }
   return value;
+}
+
+/** Preserve only the closed citation-drop reason vocabulary, in order. */
+function sanitizeCitationDropReasons(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const reasons = value.split(",");
+  if (reasons.length === 0 || reasons.length > CITATION_DROP_REASONS.size) {
+    return undefined;
+  }
+  const seen = new Set<string>();
+  for (const reason of reasons) {
+    if (!CITATION_DROP_REASONS.has(reason)) {
+      return undefined;
+    }
+    seen.add(reason);
+  }
+  return [...seen].join(",");
 }
 
 function sanitizeFields(fields: ServerLogFields | undefined): ServerLogFields {
@@ -279,6 +313,14 @@ function sanitizeFields(fields: ServerLogFields | undefined): ServerLogFields {
   const delayMs = sanitizeNumber(fields.delayMs);
   if (delayMs !== undefined && Number.isInteger(delayMs) && delayMs >= 0) {
     out.delayMs = delayMs;
+  }
+  const dropped = sanitizeNumber(fields.dropped);
+  if (dropped !== undefined && Number.isInteger(dropped) && dropped >= 0) {
+    out.dropped = dropped;
+  }
+  const reasons = sanitizeCitationDropReasons(fields.reasons);
+  if (reasons !== undefined) {
+    out.reasons = reasons;
   }
   const bytes = sanitizeNumber(fields.bytes);
   if (bytes !== undefined) {

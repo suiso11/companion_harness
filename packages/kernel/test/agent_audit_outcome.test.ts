@@ -361,7 +361,7 @@ describe("audit-outcome coherence: one row + one terminal event per step", () =>
     },
   );
 
-  it("grant-invalid citation records single failed citation_invalid then repairs", async () => {
+  it("grant-invalid citation is dropped and the step completes once", async () => {
     const { handle, repo } = await setup();
     try {
       const broker = createToolBroker({
@@ -369,7 +369,7 @@ describe("audit-outcome coherence: one row + one terminal event per step", () =>
         repo,
         registrations: [],
       });
-      const { gateway } = scriptGateway([
+      const { gateway, calls } = scriptGateway([
         chatResult([
           toolCall(
             "answer.submit",
@@ -377,7 +377,6 @@ describe("audit-outcome coherence: one row + one terminal event per step", () =>
             "a-cite-bad",
           ),
         ]),
-        chatResult([answerCall([{ text: "clean", citations: [] }])]),
       ]);
       const strategy = createAgentStrategy({
         db: handle.raw,
@@ -388,12 +387,13 @@ describe("audit-outcome coherence: one row + one terminal event per step", () =>
       });
       const { sessionId, runId } = newRunningTurn(repo, T0);
       await strategy(ctxFor(repo, runId));
+      expect(calls).toHaveLength(1);
       const rows = repo.listModelCalls(runId);
-      expect(rows).toHaveLength(2);
+      expect(rows).toHaveLength(1);
       expect(rows[0]).toMatchObject({
         step: 1,
-        outcome: "failed",
-        errorCode: "citation_invalid",
+        outcome: "completed",
+        errorCode: null,
       });
       const events = stepEvents(repo, sessionId, runId);
       expect(
@@ -402,21 +402,14 @@ describe("audit-outcome coherence: one row + one terminal event per step", () =>
             e.type === "model.step.completed" &&
             (e.payload as { step: number }).step === 1,
         ),
-      ).toHaveLength(0);
+      ).toHaveLength(1);
       expect(
         events.filter(
           (e) =>
             e.type === "model.step.failed" &&
             (e.payload as { step: number }).step === 1,
         ),
-      ).toHaveLength(1);
-      expect(
-        events.find(
-          (e) =>
-            e.type === "model.step.failed" &&
-            (e.payload as { step: number }).step === 1,
-        )?.payload,
-      ).toMatchObject({ step: 1, errorCode: "citation_invalid" });
+      ).toHaveLength(0);
     } finally {
       closeKernelDatabase(handle);
     }

@@ -39,6 +39,7 @@ import {
   DEFAULT_WEB_TOP_K,
   type FrozenContext,
   type M2ModelErrorCode,
+  MAX_CITATIONS_PER_PART,
   MAX_MODEL_STEPS_PER_RUN,
   MAX_SEARCH_LIMIT,
   MAX_WEB_TOP_K,
@@ -563,6 +564,178 @@ export function verifyCitations(
 
 /** Shared empty memory-citation set (no memory integration). */
 export const EMPTY_MEMORY_CITATIONS: ReadonlySet<string> = new Set<string>();
+
+/* ------------------------------------------------------------------ */
+/* Tolerant citation handling (drop-only, never rewrite)                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Fixed cause for one dropped citation entry. Only these codes are ever
+ * emitted; citation ids and model-authored values never leave the kernel.
+ */
+export type CitationDropReason =
+  | "too_long"
+  | "invalid_format"
+  | "unresolved"
+  | "over_limit";
+
+const CITATION_DROP_REASON_ORDER: readonly CitationDropReason[] = [
+  "too_long",
+  "invalid_format",
+  "unresolved",
+  "over_limit",
+];
+
+/** Fixed metadata for the `answer.citations_dropped` event/log. */
+export interface AgentCitationsDropped {
+  readonly runId: string;
+  readonly step: number;
+  readonly dropped: number;
+  readonly reasons: readonly CitationDropReason[];
+}
+
+/** Best-effort citations-dropped sink (exceptions are swallowed). */
+export type AgentCitationsDroppedCallback = (
+  dropped: AgentCitationsDropped,
+) => void;
+
+interface SchemaCitationDrop {
+  readonly value: unknown;
+  readonly dropped: number;
+  readonly reasons: readonly CitationDropReason[];
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+/**
+ * Remove ONLY individual citation entries that the contracts schema would
+ * reject: non-string entries, over-long ids, structurally malformed ids, and
+ * valid ids beyond the per-part maximum (the first eight valid survive).
+ *
+ * The payload shape (parts, text, version, unknown keys) is never repaired
+ * here: a non-answer-shaped payload returns null and keeps the existing
+ * strict-parse/repair path. The returned value is a shallow copy so the
+ * original model arguments are never mutated, and part text is untouched.
+ */
+function dropSchemaInvalidCitations(
+  rawArgs: unknown,
+): SchemaCitationDrop | null {
+  const record = asRecord(rawArgs);
+  if (record === null) {
+    return null;
+  }
+  const parts = record.parts;
+  if (!Array.isArray(parts)) {
+    return null;
+  }
+  const reasons = new Set<CitationDropReason>();
+  let dropped = 0;
+  const nextParts: unknown[] = [];
+  for (const rawPart of parts) {
+    const part = asRecord(rawPart);
+    if (part === null) {
+      return null;
+    }
+    const citations = part.citations;
+    if (!Array.isArray(citations)) {
+      return null;
+    }
+    const kept: string[] = [];
+    for (const citation of citations) {
+      if (typeof citation !== "string") {
+        dropped += 1;
+        reasons.add("invalid_format");
+        continue;
+      }
+      if (citation.length > 11) {
+        dropped += 1;
+        reasons.add("too_long");
+        continue;
+      }
+      if (
+        !CITATION_ID_REGEX.test(citation) &&
+        !MEMORY_CITATION_ID_REGEX.test(citation)
+      ) {
+        dropped += 1;
+        reasons.add("invalid_format");
+        continue;
+      }
+      if (kept.length >= MAX_CITATIONS_PER_PART) {
+        dropped += 1;
+        reasons.add("over_limit");
+        continue;
+      }
+      kept.push(citation);
+    }
+    nextParts.push({ ...part, citations: kept });
+  }
+  if (dropped === 0) {
+    return { value: rawArgs, dropped: 0, reasons: [] };
+  }
+  return {
+    value: { ...record, parts: nextParts },
+    dropped,
+    reasons: CITATION_DROP_REASON_ORDER.filter((reason) => reasons.has(reason)),
+  };
+}
+
+/** Structural resolution check mirrored from `verifyCitations`. */
+function citationResolves(
+  citation: string,
+  ordinalToReferenceId: ReadonlyMap<number, string>,
+  grantedReferenceIds: ReadonlySet<string>,
+  grantedMemoryCitations: ReadonlySet<string>,
+): boolean {
+  if (MEMORY_CITATION_ID_REGEX.test(citation)) {
+    return grantedMemoryCitations.has(citation);
+  }
+  if (!CITATION_ID_REGEX.test(citation)) {
+    return false;
+  }
+  const ordinal = Number(citation.slice(1));
+  const referenceId = ordinalToReferenceId.get(ordinal);
+  return referenceId !== undefined && grantedReferenceIds.has(referenceId);
+}
+
+/**
+ * Drop unresolvable citation entries (unknown ordinal, cross-session
+ * reference, missing current-run grant, ungranted mN) while preserving the
+ * part text and every resolvable citation. Dropping only reduces claimed
+ * evidence; nothing is invented, rewritten, or re-targeted.
+ */
+function dropUnresolvedCitations(
+  answer: StructuredAnswer,
+  ordinalToReferenceId: ReadonlyMap<number, string>,
+  grantedReferenceIds: ReadonlySet<string>,
+  grantedMemoryCitations: ReadonlySet<string>,
+): { answer: StructuredAnswer; dropped: number } {
+  let dropped = 0;
+  const parts = answer.parts.map((part) => {
+    const citations = part.citations.filter((citation) => {
+      const ok = citationResolves(
+        citation,
+        ordinalToReferenceId,
+        grantedReferenceIds,
+        grantedMemoryCitations,
+      );
+      if (!ok) {
+        dropped += 1;
+      }
+      return ok;
+    });
+    return citations.length === part.citations.length
+      ? part
+      : { ...part, citations };
+  });
+  return {
+    answer: dropped === 0 ? answer : { ...answer, parts },
+    dropped,
+  };
+}
 
 /**
  * Collect cited mN memory ordinals from an already validated
@@ -2765,6 +2938,13 @@ export interface AgentStrategyOptions {
    */
   readonly onModelStepRetried?: AgentModelStepRetriedCallback;
   /**
+   * Optional `answer.citations_dropped` sink (additive observability).
+   * Receives only the step, dropped count, and fixed reason codes; citation
+   * ids/contents and model text never travel here. Fired only when the
+   * tolerant path accepts an answer after dropping invalid citations.
+   */
+  readonly onCitationsDropped?: AgentCitationsDroppedCallback;
+  /**
    * Optional pre-answer memory recall (server-owned remind CLI boundary).
    * When present, the strategy performs one bounded recall before the first
    * model step, snapshots exposures via `repo.recordMemoryExposure`, and
@@ -2864,6 +3044,7 @@ export function createAgentStrategy(
   const clock = options.clock ?? { now: () => Date.now() };
   const onModelStepFailed = options.onModelStepFailed;
   const onModelStepRetried = options.onModelStepRetried;
+  const onCitationsDropped = options.onCitationsDropped;
   const stepTimeoutMs =
     options.stepTimeoutMs === undefined
       ? AGENT_STEP_TIMEOUT_MS
@@ -3252,15 +3433,20 @@ export function createAgentStrategy(
               repo,
               runId,
               sessionId,
+              step,
               classification,
               repairUsed,
               signal: ctx.signal,
+              ...(onCitationsDropped === undefined
+                ? {}
+                : { onCitationsDropped }),
             })
           : await handleAnswerClass({
               db,
               repo,
               runId,
               sessionId,
+              step,
               // Non-truncated ordinary steps already continued above.
               classification: classification as Exclude<
                 StepClassification,
@@ -3268,6 +3454,9 @@ export function createAgentStrategy(
               >,
               repairUsed,
               signal: ctx.signal,
+              ...(onCitationsDropped === undefined
+                ? {}
+                : { onCitationsDropped }),
             });
         const terminalErrorCode: M2ModelErrorCode | null =
           terminal.kind === "succeeded"
@@ -5378,9 +5567,11 @@ async function handleTruncatedClass(args: {
   repo: KernelRepository;
   runId: string;
   sessionId: string;
+  step: number;
   classification: StepClassification;
   repairUsed: boolean;
   signal: AbortSignal;
+  onCitationsDropped?: AgentCitationsDroppedCallback | undefined;
 }): Promise<AnswerHandling> {
   const { classification, repairUsed } = args;
   if (classification.kind === "single_answer") {
@@ -5442,11 +5633,22 @@ async function handleAnswerClass(args: {
   repo: KernelRepository;
   runId: string;
   sessionId: string;
+  step: number;
   classification: Exclude<StepClassification, { kind: "ordinary" }>;
   repairUsed: boolean;
   signal: AbortSignal;
+  onCitationsDropped?: AgentCitationsDroppedCallback | undefined;
 }): Promise<AnswerHandling> {
-  const { db, repo, runId, sessionId, classification, repairUsed } = args;
+  const {
+    db,
+    repo,
+    runId,
+    sessionId,
+    step,
+    classification,
+    repairUsed,
+    onCitationsDropped,
+  } = args;
 
   const maybeRepair = (
     reason: AgentRepairReason,
@@ -5477,19 +5679,42 @@ async function handleAnswerClass(args: {
       return maybeRepair("free_text");
     case "single_answer": {
       let answer: StructuredAnswer;
+      const dropReasons = new Set<CitationDropReason>();
+      let droppedCount = 0;
+      const normalizedArgs = normalizeAnswerSubmitVersion(
+        classification.call.arguments,
+      );
       try {
         // The kernel authors the protocol version on the model's behalf
         // (omitted or an exact alternate spelling of 1); any other value the
         // model does send stays there and fails strict validation below.
-        answer = parseStructuredAnswer(
-          normalizeAnswerSubmitVersion(classification.call.arguments),
-        );
+        answer = parseStructuredAnswer(normalizedArgs);
       } catch (error) {
-        return maybeRepair(
-          "answer_invalid",
-          answerInvalidDetail(classification.call.arguments, error),
-          answerInvalidReason(classification.call.arguments, error),
-        );
+        // Fail-safe tolerance: if the ONLY obstacle is individual citation
+        // entries, drop exactly those entries and re-validate the rest of the
+        // payload strictly. Anything else (parts/text/bytes/unknown keys/
+        // non-citation shape) keeps the existing answer_invalid repair path.
+        const sanitized = dropSchemaInvalidCitations(normalizedArgs);
+        if (sanitized === null || sanitized.dropped === 0) {
+          return maybeRepair(
+            "answer_invalid",
+            answerInvalidDetail(classification.call.arguments, error),
+            answerInvalidReason(classification.call.arguments, error),
+          );
+        }
+        try {
+          answer = parseStructuredAnswer(sanitized.value);
+        } catch {
+          return maybeRepair(
+            "answer_invalid",
+            answerInvalidDetail(classification.call.arguments, error),
+            answerInvalidReason(classification.call.arguments, error),
+          );
+        }
+        droppedCount += sanitized.dropped;
+        for (const reason of sanitized.reasons) {
+          dropReasons.add(reason);
+        }
       }
       const cited = collectCitedOrdinals(answer);
       // r3946377098: empty citations perform no reference scan at all.
@@ -5497,14 +5722,47 @@ async function handleAnswerClass(args: {
         cited.length === 0
           ? new Map<number, string>()
           : loadBoundedOrdinalMap(db, sessionId, cited);
+      const grantedReferenceIds = loadGrantedIds(repo, runId);
+      const grantedMemoryCitations = loadGrantedMemoryCitations(repo, runId);
       const verification = verifyCitations(
         answer,
         ordinalMap,
-        loadGrantedIds(repo, runId),
-        loadGrantedMemoryCitations(repo, runId),
+        grantedReferenceIds,
+        grantedMemoryCitations,
       );
       if (!verification.ok) {
-        return maybeRepair("citation_invalid");
+        // Same fail-safe rule for resolvability: unknown/cross-session/
+        // ungranted citations are dropped instead of failing the answer.
+        // The answer text is unchanged and no citation is invented or
+        // re-targeted; every remaining citation still passes the structural
+        // gate. A rule requiring at least one citation for some answer kind
+        // would still fail through the existing path (none exists here).
+        const filtered = dropUnresolvedCitations(
+          answer,
+          ordinalMap,
+          grantedReferenceIds,
+          grantedMemoryCitations,
+        );
+        if (filtered.dropped === 0) {
+          return maybeRepair("citation_invalid");
+        }
+        answer = filtered.answer;
+        droppedCount += filtered.dropped;
+        dropReasons.add("unresolved");
+      }
+      if (droppedCount > 0 && onCitationsDropped !== undefined) {
+        try {
+          onCitationsDropped({
+            runId,
+            step,
+            dropped: droppedCount,
+            reasons: CITATION_DROP_REASON_ORDER.filter((reason) =>
+              dropReasons.has(reason),
+            ),
+          });
+        } catch {
+          // Observability is best effort; the accepted answer stands.
+        }
       }
       // Durable structured persistence: the validated answer (exact
       // part-to-citations mapping) is stored in the V2 RunResult; the

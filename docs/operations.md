@@ -340,6 +340,18 @@ connector instance owns **all** configured roots.
   allowlisted fixed/numeric values only; prompts, bodies, headers, raw
   errors, and secrets are never logged. The public M2 error code is
   unchanged.
+- Tolerant citations: when `answer.submit` fails **only** because individual
+  citation entries are invalid (too long, bad `rN`/`mN` format, unknown or
+  unresolvable reference id, or more than 8 per part), the kernel drops those
+  entries and accepts the answer with its text unchanged. The first eight
+  structurally valid entries per part survive; no citation is invented,
+  rewritten, or re-targeted. Non-citation failures (parts/text size, total
+  bytes, unknown keys, non-citation shape) still take the existing
+  `answer_invalid` repair path. Each accepted drop emits the fixed
+  `answer.citations_dropped` log with `{ runId, step, dropped, reasons }`
+  (`too_long|invalid_format|unresolved|over_limit`) and never carries citation
+  ids or model text. There is no minimum-citation rule: an answer whose
+  citations are all dropped is accepted with none.
 - Security limitations: model config values and keys are **never logged**
   (only the tool count is logged); `model_calls` persists adapter/model
   identifier metadata only (adapter, model, outcome, error code, timing,

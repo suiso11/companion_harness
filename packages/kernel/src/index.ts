@@ -76,6 +76,8 @@ export {
   parseStrictInstantMs,
 } from "./action_strategy.js";
 export type {
+  AgentCitationsDropped,
+  AgentCitationsDroppedCallback,
   AgentLessonRecall,
   AgentLessonSnippet,
   AgentMemoryFailureCode,
@@ -89,6 +91,7 @@ export type {
   AgentRepairReason,
   AgentStrategyOptions,
   AgentVoiceLayer,
+  CitationDropReason,
   CitationVerification,
   ProjectedHistoryItem,
   ProjectedReferenceSummary,

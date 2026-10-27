@@ -2796,6 +2796,21 @@ export async function startServer(
               // Best effort: observability never fails the strategy.
             }
           },
+          // Tolerant citation handling: fixed count + reason codes only,
+          // never citation ids or model text. The accepted answer is
+          // unchanged apart from the dropped (reduced) evidence claims.
+          onCitationsDropped: (dropped): void => {
+            try {
+              logger.warn("answer.citations_dropped", {
+                runId: dropped.runId,
+                step: dropped.step,
+                dropped: dropped.dropped,
+                reasons: dropped.reasons.join(","),
+              });
+            } catch {
+              // Best effort: observability never fails the strategy.
+            }
+          },
         }),
       );
       logger.info("server.model_ready", {
