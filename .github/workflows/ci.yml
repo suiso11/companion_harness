@@ -57,8 +57,26 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build pinned remind CLI (real dependency, no models)
-        run: npm ci --no-audit --no-fund && npm run build
+        shell: bash
         working-directory: .ci/remind
+        run: |
+          # onnxruntime-node's install script downloads native binaries, so
+          # npm ci can hit transient registry/CDN timeouts. Retry up to 3
+          # attempts with linear backoff, then build exactly once.
+          attempts=3
+          for attempt in $(seq 1 "$attempts"); do
+            if npm ci --no-audit --no-fund; then
+              break
+            fi
+            if [ "$attempt" -eq "$attempts" ]; then
+              echo "::error::npm ci failed after $attempts attempts"
+              exit 1
+            fi
+            delay=$((attempt * 15))
+            echo "::warning::npm ci attempt $attempt failed; retrying in ${delay}s"
+            sleep "$delay"
+          done
+          npm run build
 
       - name: Lint (Biome)
         run: pnpm lint
@@ -165,8 +183,26 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build pinned remind CLI (real dependency, no models)
-        run: npm ci --no-audit --no-fund && npm run build
+        shell: bash
         working-directory: .ci/remind
+        run: |
+          # onnxruntime-node's install script downloads native binaries, so
+          # npm ci can hit transient registry/CDN timeouts. Retry up to 3
+          # attempts with linear backoff, then build exactly once.
+          attempts=3
+          for attempt in $(seq 1 "$attempts"); do
+            if npm ci --no-audit --no-fund; then
+              break
+            fi
+            if [ "$attempt" -eq "$attempts" ]; then
+              echo "::error::npm ci failed after $attempts attempts"
+              exit 1
+            fi
+            delay=$((attempt * 15))
+            echo "::warning::npm ci attempt $attempt failed; retrying in ${delay}s"
+            sleep "$delay"
+          done
+          npm run build
 
       - name: Install Playwright chromium (with OS deps)
         run: pnpm exec playwright install --with-deps chromium
