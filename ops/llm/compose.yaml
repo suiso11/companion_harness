@@ -63,6 +63,17 @@ services:
       - --parallel
       - "2"
       - --kv-unified
+      # Cap runaway thinking without truncating normal reasoning: production
+      # 2026-10-26 without a budget showed chat thinking never terminating;
+      # every request ran to 4096 output tokens at ~20 tok/s (2 concurrent
+      # duplicates) and hit the 300s step limit (chat turn 300.22s). Normal
+      # reasoning measured <=1251 chars (2026-10-23), so 2048 only cuts
+      # runaway thinking. The message is injected before the end-of-thinking
+      # tag when the budget is exhausted, so the model ends thinking naturally.
+      - --reasoning-budget
+      - "2048"
+      - --reasoning-budget-message
+      - "\n\n考えはここまで。回答します。\n"
       - --alias
       - huihui-ornith-35b
     healthcheck:

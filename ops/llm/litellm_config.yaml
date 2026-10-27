@@ -11,8 +11,20 @@ model_list:
       # allow the normal guest step (up to 300s) to finish instead of being
       # cut off. Evidence: llama.cpp b11541 logs showed 3-4 concurrent slots
       # and "Context size has been exceeded" after 2x LiteLLM retries.
+      # litellm_params.num_retries is LiteLLM's per-deployment retry count;
+      # router_settings.num_retries below disables the Router's own retries.
       num_retries: 0
+      # max_retries is the OpenAI SDK client-level retry count for the
+      # `openai/` provider. Set it to 0 as well: a client retry would resend
+      # the request while the original is still generating in llama.cpp.
+      max_retries: 0
       timeout: 300
+
+router_settings:
+  # Router default is 2 retries across a model group. local-chat has one
+  # deployment, so a retry only duplicates the abandoned generation and
+  # puts a second request into the already-busy 2-slot KV pool.
+  num_retries: 0
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
