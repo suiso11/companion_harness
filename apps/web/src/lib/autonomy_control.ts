@@ -57,6 +57,15 @@ export async function postAutonomyControl(
   );
 }
 
+// Revalidation cadence for the banner: the pause can be applied from another
+// tab (`/tasks`) or a server restart, so a mounted page must refresh too.
+export const AUTONOMY_BANNER_REFRESH_MS = 30_000;
+
+/** Poll only while the document is actually visible. */
+export function shouldPollBanner(visibility: string): boolean {
+  return visibility === "visible";
+}
+
 /** Banner visibility mapping: only a valid paused snapshot shows it. */
 export type AutonomyBannerState = "paused" | "running" | "unknown";
 

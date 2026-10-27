@@ -7,10 +7,12 @@
 import { onMount } from "svelte";
 import { randomUuid } from "./api.js";
 import {
+  AUTONOMY_BANNER_REFRESH_MS,
   type AutonomyControlSnapshot,
   autonomyBannerState,
   fetchAutonomyControl,
   postAutonomyControl,
+  shouldPollBanner,
 } from "./autonomy_control.js";
 
 let snapshot = $state<AutonomyControlSnapshot | null>(null);
@@ -51,7 +53,26 @@ async function resume(): Promise<void> {
 }
 
 onMount(() => {
+  // An already-open page must discover a pause applied from another tab
+  // (`/tasks`) or by a server restart, so revalidate on focus, on tab
+  // visibility, and on a low-frequency poll (review #155).
+  const onFocus = (): void => {
+    void refresh();
+  };
+  const onVisibility = (): void => {
+    if (shouldPollBanner(document.visibilityState)) void refresh();
+  };
+  window.addEventListener("focus", onFocus);
+  document.addEventListener("visibilitychange", onVisibility);
+  const timer = window.setInterval(() => {
+    if (shouldPollBanner(document.visibilityState)) void refresh();
+  }, AUTONOMY_BANNER_REFRESH_MS);
   void refresh();
+  return () => {
+    window.removeEventListener("focus", onFocus);
+    document.removeEventListener("visibilitychange", onVisibility);
+    window.clearInterval(timer);
+  };
 });
 </script>
 

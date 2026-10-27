@@ -1,10 +1,12 @@
 // Paused banner visibility mapping + shared resume request contract.
 import { describe, expect, test } from "vitest";
 import {
+  AUTONOMY_BANNER_REFRESH_MS,
   AUTONOMY_CONTROL_PATH,
   autonomyBannerState,
   buildControlBody,
   parseAutonomyControl,
+  shouldPollBanner,
 } from "../src/lib/autonomy_control.js";
 
 describe("autonomy paused banner", () => {
@@ -44,5 +46,16 @@ describe("autonomy paused banner", () => {
       paused: false,
       expectedVersion: 12,
     });
+  });
+});
+
+describe("autonomy paused banner revalidation", () => {
+  test("polls on a bounded cadence", () => {
+    expect(AUTONOMY_BANNER_REFRESH_MS).toBe(30_000);
+  });
+
+  test("only polls while the document is visible", () => {
+    expect(shouldPollBanner("visible")).toBe(true);
+    expect(shouldPollBanner("hidden")).toBe(false);
   });
 });
