@@ -72,6 +72,43 @@ export const FEATURE_ROUTES: readonly FeatureRoute[] = [
   },
 ];
 
+export interface NavItem {
+  readonly path: string;
+  readonly label: string;
+}
+
+const ROUTE_BY_PATH = new Map(
+  FEATURE_ROUTES.map((route) => [route.path, route] as const),
+);
+
+/** Nav entry that reuses the feature route label (single source of truth). */
+function navItem(path: string, fallbackLabel: string): NavItem {
+  const route = ROUTE_BY_PATH.get(path);
+  return { path, label: route?.label ?? fallbackLabel };
+}
+
+/**
+ * Primary destinations stay visible in the header. `開発・運用` surfaces are
+ * grouped separately (they are operator tools, not everyday chat surfaces).
+ */
+export const PRIMARY_NAV: readonly NavItem[] = [
+  { path: "/", label: "チャット" },
+  navItem("/memory", "記憶"),
+  navItem("/tasks", "タスク・目的"),
+  navItem("/proposals", "候補"),
+  navItem("/notifications", "通知"),
+  navItem("/monitor", "モニター"),
+];
+
+export const DEV_NAV_LABEL = "開発・運用";
+
+export const DEV_NAV: readonly NavItem[] = [
+  navItem("/trials", "試行の提案"),
+  navItem("/shadow", "試行"),
+  navItem("/learning", "学び"),
+  navItem("/handoff", "引継ぎ"),
+];
+
 /** Feature section ids hidden on a page (chat stays visible for context). */
 export function hiddenSectionIds(active: FeatureRoute): string[] {
   return FEATURE_ROUTES.filter((route) => route.path !== active.path).map(

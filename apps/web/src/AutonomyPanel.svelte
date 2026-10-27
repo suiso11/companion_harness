@@ -31,6 +31,11 @@
 
 import { fetchJson, postJson, randomUuid } from "./lib/api.js";
 import { notifyAutonomyChanged } from "./lib/autonomy.svelte.js";
+import {
+  AUTONOMY_CONTROL_PATH,
+  buildControlBody,
+  fetchAutonomyControl,
+} from "./lib/autonomy_control.js";
 import { revealHashTarget } from "./lib/router.js";
 import { getSessionId } from "./lib/session.svelte.js";
 
@@ -77,7 +82,7 @@ interface PendingCommand {
 
 /** Legacy `retryRefreshesControl` (autonomy_state.ts). */
 function retryRefreshesControl(endpoint: string): boolean {
-  return endpoint === "/api/autonomy/control";
+  return endpoint === AUTONOMY_CONTROL_PATH;
 }
 
 /** Legacy `revalidateConflictArm`: an arm that left the active set is dropped. */
@@ -300,36 +305,20 @@ async function refreshControl(): Promise<void> {
   // Session binding: the response applies only while the same session still
   // holds (a boot/rebind before the fetch lands must discard this token).
   const sessionId = getSessionId();
-  let result: { status: number; body: unknown };
-  try {
-    result = await fetchJson("/api/autonomy/control");
-  } catch {
-    return;
-  }
+  const snapshot = await fetchAutonomyControl();
   if (seq !== controlSeq || getSessionId() !== sessionId) return;
-  const body = result.body as {
-    paused?: unknown;
-    version?: unknown;
-  };
-  if (
-    result.status !== 200 ||
-    typeof body.paused !== "boolean" ||
-    typeof body.version !== "number"
-  ) {
-    return;
-  }
-  controlVersion = body.version;
-  controlStatus =
-    body.paused === true
-      ? "自律動作は停止中です。通常の会話は利用できます。／自律作業は停止中です。通常の会話は利用できます。"
-      : "自律動作は再開されています。通常の会話は利用できます。／自律作業は再開されています。通常の会話は利用できます。";
+  if (snapshot === null) return;
+  controlVersion = snapshot.version;
+  controlStatus = snapshot.paused
+    ? "自律動作は停止中です。通常の会話は利用できます。／自律作業は停止中です。通常の会話は利用できます。"
+    : "自律動作は再開されています。通常の会話は利用できます。／自律作業は再開されています。通常の会話は利用できます。";
 }
 
 async function setControl(paused: boolean): Promise<void> {
-  const result = await runAutonomyMutation("/api/autonomy/control", {
-    paused,
-    expectedVersion: controlVersion,
-  });
+  const result = await runAutonomyMutation(
+    AUTONOMY_CONTROL_PATH,
+    buildControlBody(paused, controlVersion),
+  );
   if (result === null) return;
   if (result.status === 200) {
     await refreshControl();

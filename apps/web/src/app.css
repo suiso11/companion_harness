@@ -172,6 +172,51 @@ body {
   color: var(--secondary-foreground);
 }
 
+/* `開発・運用` disclosure: native <details> keeps keyboard support + CSP. */
+.feature-links-dev {
+  position: relative;
+}
+
+.feature-links-dev summary {
+  padding: 0.2rem 0.5rem;
+  border-radius: var(--radius-sm);
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font-size: 0.85rem;
+  white-space: nowrap;
+  list-style: none;
+}
+
+.feature-links-dev summary::-webkit-details-marker {
+  display: none;
+}
+
+.feature-links-dev[open] summary,
+.feature-links-dev summary:hover {
+  background: var(--accent);
+  color: var(--accent-foreground);
+}
+
+.feature-links-dev-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 0.25rem);
+  z-index: 30;
+  display: flex;
+  min-width: 10rem;
+  flex-direction: column;
+  padding: 0.25rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow: 0 8px 24px oklch(0 0 0 / 35%);
+}
+
+.feature-links-dev-menu a {
+  padding: 0.3rem 0.5rem;
+}
+
 .sessions {
   display: flex;
   flex-wrap: wrap;
