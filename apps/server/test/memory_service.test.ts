@@ -422,6 +422,99 @@ describe("parseExtractionOutput model decisions", () => {
     );
   });
 
+  it("keeps a faithful paraphrase whose body is covered by the user turn", () => {
+    const out = parseExtractionOutcome(
+      JSON.stringify({
+        memories: [
+          { body: "turn digest", kind: "summary" },
+          {
+            body: "ユーザーは週末に釣りに行きたい",
+            kind: "user_fact",
+            evidence: "週末は釣りに行きたい",
+          },
+        ],
+      }),
+      "週末は釣りに行きたい",
+      "週末の釣り、楽しみですね。",
+    );
+    expect(out.items[1]).toMatchObject({
+      body: "ユーザーは週末に釣りに行きたい",
+      kind: "user_fact",
+    });
+    expect(out.downgradedByCoverage).toBe(0);
+    expect(out.downgradedByAssistantTerms).toBe(0);
+  });
+
+  it("downgrades an unrelated body even when the quote is real", () => {
+    const out = parseExtractionOutcome(
+      JSON.stringify({
+        memories: [
+          { body: "turn digest", kind: "summary" },
+          {
+            body: "ユーザーはギターの弦を交換した",
+            kind: "user_fact",
+            evidence: "今日は寒い",
+          },
+        ],
+      }),
+      "今日は寒い",
+      "寒い日は温かくしてください。",
+    );
+    // Downgrade only: the memory is kept, never dropped.
+    expect(out.items).toHaveLength(2);
+    expect(out.items[1]).toMatchObject({
+      body: "ユーザーはギターの弦を交換した",
+      kind: "model_inference",
+    });
+    expect(out.downgradedByCoverage).toBe(1);
+    expect(out.downgradedByAssistantTerms).toBe(0);
+  });
+
+  it("downgrades a covered body embellished with assistant-only terms", () => {
+    const out = parseExtractionOutcome(
+      JSON.stringify({
+        memories: [
+          { body: "turn digest", kind: "summary" },
+          {
+            body: "ユーザーは水の沸点を高圧で測った",
+            kind: "user_fact",
+            evidence: "水の沸点を測った",
+          },
+        ],
+      }),
+      "水の沸点を測った",
+      "水の沸点を高圧で測ったのですね。",
+    );
+    expect(out.items[1]).toMatchObject({
+      body: "ユーザーは水の沸点を高圧で測った",
+      kind: "model_inference",
+    });
+    expect(out.downgradedByCoverage).toBe(0);
+    expect(out.downgradedByAssistantTerms).toBe(1);
+  });
+
+  it("treats colloquial-to-formal rewrites as uncovered (documented)", () => {
+    // Token coverage is intentionally conservative: "あっつい" -> "暑い" is
+    // semantically faithful but shares only the generic date token, so the
+    // body is downgraded rather than presented as a user-stated fact.
+    const out = parseExtractionOutcome(
+      JSON.stringify({
+        memories: [
+          { body: "turn digest", kind: "summary" },
+          {
+            body: "ユーザーは今日は暑いと感じている",
+            kind: "user_fact",
+            evidence: "今日あっつい",
+          },
+        ],
+      }),
+      "今日あっつい",
+      "暑い日は水分補給を。",
+    );
+    expect(out.items[1]?.kind).toBe("model_inference");
+    expect(out.downgradedByCoverage).toBe(1);
+  });
+
   it("rejects valid items that lack the mandatory summary (store-everything)", () => {
     // Any valid item set MUST carry at least one summary: without it the
     // turn is unrecallable through raw descent, so the output is invalid.
