@@ -461,6 +461,51 @@ describe("trial HTTP proposal lifecycle", () => {
       expect(grantBody.grant.proposalId).toBe(proposalId);
       expect(grantBody.proposal.id).toBe(proposalId);
       expect(grantBody.request).toBeNull();
+
+      // Schema33 report surface: the bounded sealed report is returned on
+      // the trial detail GET with explicit provenance, and never as HTML.
+      const rawDb = fixture.db.raw as unknown as {
+        prepare: (sql: string) => { run: (...args: unknown[]) => void };
+      };
+      rawDb
+        .prepare(
+          "INSERT INTO trial_worker_reports (execution_id, session_id, summary, findings_json, unresolved_json, checks_json, artifact_json, verified, recorded_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        )
+        .run(
+          executionId,
+          sessionId,
+          "sealed trial completed",
+          JSON.stringify([
+            "guest answer (unattested): <img src=x onerror=alert(1)>",
+          ]),
+          JSON.stringify(["blocked: needs review"]),
+          JSON.stringify([{ name: "lint", outcome: "passed", exit: 0 }]),
+          JSON.stringify({ sha256: "c".repeat(64), entryCount: 3 }),
+          1,
+          1,
+        );
+      const detail = await get(app, `${base}/${proposalId}`);
+      expect(detail.status).toBe(200);
+      expect((detail.body as { report: unknown }).report).toMatchObject({
+        summary: "sealed trial completed",
+        findings: ["guest answer (unattested): <img src=x onerror=alert(1)>"],
+        unresolved: ["blocked: needs review"],
+        checks: [{ name: "lint", outcome: "passed", exit: 0 }],
+        artifact: { sha256: "c".repeat(64), entryCount: 3 },
+        verified: true,
+        provenance: {
+          findings: "guest-reported-unattested",
+          checks: "host-checked",
+          artifact: "host-checked",
+        },
+      });
+      const listedWithReport = await get(app, base);
+      const firstItem = (
+        listedWithReport.body as {
+          items: { id: string; reportSummary: string | null }[];
+        }
+      ).items.find((item) => item.id === proposalId);
+      expect(firstItem?.reportSummary).toBe("sealed trial completed");
     } finally {
       fixture.close();
     }

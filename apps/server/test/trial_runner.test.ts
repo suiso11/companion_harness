@@ -652,8 +652,127 @@ describe("trial_runner", () => {
       };
       expect(stored.authorized).toBe(1);
       expect(stored.detail).toContain("bridge-exit:0");
+      // The parsed wire report must persist as unattested presentation data
+      // (regression: it was previously nested in `result` and dropped).
+      const report = repo.readTrialWorkerReport(
+        sessionId,
+        out.executionId as string,
+      );
+      expect(report).not.toBeNull();
+      expect(report).toMatchObject({
+        summary: "fixed",
+        findings: ["EDIT_APPLIED"],
+        unresolved: [],
+        verified: true,
+        provenance: {
+          findings: "guest-reported-unattested",
+          checks: "host-checked",
+          artifact: "host-checked",
+        },
+      });
+      expect(report?.checks.length).toBeGreaterThan(0);
       const taskView = repo.getAutonomyTask(sessionId, taskId);
       expect(taskView.status).not.toBe("completed");
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("never shows a zero-exit check as passed when outputMatched is false", async () => {
+    const { handle, repo, sessionId } = await makeKernel();
+    try {
+      const { executionId } = queueGrant(repo, sessionId, "b1", "ws");
+      void executionId;
+      const exited = { current: false };
+      const identity = {
+        pid: 4251,
+        bootId: "boot-mismatch",
+        processStartTicks: "12351",
+      };
+      // Exit code 0 but the stdout assertion did not match: the bridge's own
+      // ok predicate fails the check, so the report surface must too.
+      const mismatchLineForRequest = (
+        request: Record<string, unknown>,
+      ): string =>
+        JSON.stringify({
+          version: 1,
+          executionId: request.executionId,
+          taskHash: request.taskHash,
+          status: "done",
+          verified: true,
+          report: {
+            summary: "ran",
+            files: [],
+            findings: ["check output differed"],
+            unresolved: [],
+          },
+          evidence: {
+            workerIds: ["w1"],
+            workspaceTrial: true,
+            productionApplied: false,
+            checks: ((request.requiredChecks as string[]) ?? ["lint"]).map(
+              (id) => ({
+                id,
+                exitCode: 0,
+                timedOut: false,
+                outputMatched: false,
+              }),
+            ),
+          },
+        });
+      const { spawnImpl } = createFakeSpawn({
+        lineForRequest: mismatchLineForRequest,
+      });
+      const spawnProxy = ((cmd: string, args: string[], opts: unknown) => {
+        const child = (
+          spawnImpl as unknown as (
+            c: string,
+            a: string[],
+            o: unknown,
+          ) => FakeChild
+        )(cmd, args, opts);
+        child.pid = identity.pid;
+        exited.current = false;
+        const origEmit = child.emit.bind(child);
+        child.emit = ((event: string, ...rest: unknown[]) => {
+          if (event === "exit") exited.current = true;
+          return (origEmit as (...a: unknown[]) => boolean)(event, ...rest);
+        }) as FakeChild["emit"];
+        return child;
+      }) as unknown as TrialRunnerSpawn;
+      const observer = createObserver({
+        scopeBeforeExit: "active",
+        scopeAfterExit: "gone",
+        identity,
+        exited: () => exited.current,
+      });
+      const { factory } = createFakeRelayFactory();
+      const { logger } = createCollectingLogger("debug");
+      const dir = mkdtempSync(join(tmpdir(), "trial-run-"));
+      const runner = new TrialRunner({
+        repo,
+        config: runnerConfigBase("ws", writeTemplate(dir), join(dir, "runs")),
+        isForegroundBusy: () => false,
+        logger,
+        observer,
+        createRelay: factory,
+        spawnImpl: spawnProxy,
+        clock: makeClock(),
+      });
+      const out = await runner.runNext();
+      expect(out).toMatchObject({
+        ran: true,
+        outcome: "observed",
+        authorized: false,
+      });
+      const report = repo.readTrialWorkerReport(
+        sessionId,
+        out.executionId as string,
+      );
+      expect(report).not.toBeNull();
+      expect(report?.checks).toEqual([
+        { name: "lint", outcome: "failed", exit: 0 },
+      ]);
     } finally {
       closeKernelDatabase(handle);
     }

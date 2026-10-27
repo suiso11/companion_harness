@@ -5252,10 +5252,18 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     }
     try {
       const body = repo.listTrials(session.id, { limit: parsed.data.limit });
-      const items = body.items.map((item) => ({
-        ...item,
-        outcome: repo.readTrialWorkerOutcomeByProposal(session.id, item.id),
-      }));
+      const items = body.items.map((item) => {
+        const report = repo.readTrialWorkerReportByProposal(
+          session.id,
+          item.id,
+        );
+        return {
+          ...item,
+          outcome: repo.readTrialWorkerOutcomeByProposal(session.id, item.id),
+          // One-line chat card summary only (the bounded matrix stays on GET).
+          reportSummary: report === null ? null : report.summary,
+        };
+      });
       return c.json({ ...body, items }, 200);
     } catch (error) {
       return mapDomainError(c, error);
@@ -5288,7 +5296,13 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         session.id,
         proposal.id,
       );
-      return c.json({ ...found, outcome }, 200);
+      // Bounded sealed-trial report (null until the bridge result landed).
+      // Guest text is presentation-only; checks/artifact are host-checked.
+      const report = repo.readTrialWorkerReportByProposal(
+        session.id,
+        proposal.id,
+      );
+      return c.json({ ...found, outcome, report }, 200);
     } catch (error) {
       return mapDomainError(c, error);
     }

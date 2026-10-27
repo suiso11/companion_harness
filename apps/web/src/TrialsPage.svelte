@@ -143,6 +143,100 @@ function trialOutcomeLines(
   return lines;
 }
 
+/** Bounded sealed-trial report attached to the trial detail GET. Guest text
+ * (summary/findings/unresolved) is UNATTESTED presentation data; checks and
+ * artifact are host-checked. Malformed bodies render as absent. */
+interface TrialReport {
+  readonly summary: string;
+  readonly findings: readonly string[];
+  readonly unresolved: readonly string[];
+  readonly checks: readonly {
+    readonly name: string;
+    readonly outcome: string;
+    readonly exit: number | null;
+  }[];
+  readonly artifact: {
+    readonly sha256: string;
+    readonly entryCount: number;
+  } | null;
+  readonly verified: boolean;
+}
+
+const GUEST_PROVENANCE = "guest-reported-unattested";
+const HOST_PROVENANCE = "host-checked";
+
+function reportStrings(value: unknown, max: number): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((entry): entry is string => typeof entry === "string")
+    .slice(0, max);
+}
+
+function readTrialReport(value: unknown): TrialReport | null {
+  if (typeof value !== "object" || value === null) return null;
+  const report = (value as Record<string, unknown>).report;
+  if (report === null || report === undefined) return null;
+  if (typeof report !== "object" || Array.isArray(report)) return null;
+  const record = report as Record<string, unknown>;
+  if (typeof record.summary !== "string") return null;
+  if (typeof record.verified !== "boolean") return null;
+  const provenance = record.provenance;
+  if (typeof provenance !== "object" || provenance === null) return null;
+  const prov = provenance as Record<string, unknown>;
+  if (
+    prov.findings !== GUEST_PROVENANCE ||
+    prov.checks !== HOST_PROVENANCE ||
+    prov.artifact !== HOST_PROVENANCE
+  ) {
+    return null;
+  }
+  const checksRaw = Array.isArray(record.checks) ? record.checks : [];
+  const checks: { name: string; outcome: string; exit: number | null }[] = [];
+  for (const entry of checksRaw) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const check = entry as Record<string, unknown>;
+    if (
+      typeof check.name !== "string" ||
+      (check.outcome !== "passed" && check.outcome !== "failed") ||
+      (check.exit !== null &&
+        !(typeof check.exit === "number" && Number.isInteger(check.exit)))
+    ) {
+      continue;
+    }
+    checks.push({
+      name: check.name.slice(0, 64),
+      outcome: check.outcome,
+      exit: check.exit,
+    });
+  }
+  let artifact: TrialReport["artifact"] = null;
+  const rawArtifact = record.artifact;
+  if (typeof rawArtifact === "object" && rawArtifact !== null) {
+    const a = rawArtifact as Record<string, unknown>;
+    if (
+      typeof a.sha256 === "string" &&
+      /^[0-9a-f]{64}$/.test(a.sha256) &&
+      typeof a.entryCount === "number" &&
+      Number.isInteger(a.entryCount) &&
+      a.entryCount >= 0
+    ) {
+      artifact = { sha256: a.sha256, entryCount: a.entryCount };
+    }
+  }
+  return {
+    summary: record.summary.slice(0, 2048),
+    findings: reportStrings(record.findings, 16).map((line) =>
+      line.slice(0, 1024),
+    ),
+    unresolved: reportStrings(record.unresolved, 8).map((line) =>
+      line.slice(0, 1024),
+    ),
+    checks,
+    artifact,
+    verified: record.verified,
+  };
+}
+
 /** Frozen operator profile facts read from GET /trial-profile. */
 interface TrialProfileFacts {
   readonly workspaceAlias: string;
@@ -230,6 +324,7 @@ let detailTitles = $state<readonly (string | undefined)[]>([]);
 let opStatus = $state("");
 let decisionVisible = $state(false);
 let selected = $state<string | null>(null);
+let detailReport = $state<TrialReport | null>(null);
 let mutating = $state(false);
 let seq = 0;
 
@@ -274,6 +369,7 @@ async function refreshList(): Promise<void> {
     proposals = [];
     detailVisible = false;
     selected = null;
+    detailReport = null;
     statusText = "試行の提案は無効です";
     return;
   }
@@ -438,6 +534,7 @@ async function select(proposalId: string): Promise<void> {
   if (fetched.status !== 200 || !isTrialProposal(fetched.body)) return;
   const proposal = fetched.body;
   const outcome = readTrialOutcome(fetched.body);
+  detailReport = readTrialReport(fetched.body);
   selected = proposal.id;
   const model = trialProposalModel(
     {
@@ -698,6 +795,42 @@ $effect(() => {
         <div title={detailTitles[i]}>{line}</div>
       {/each}
     </pre>
+    {#if detailReport !== null}
+      {@const report = detailReport}
+      <section id="trial-report" aria-label="試行の報告">
+        <h3>報告</h3>
+        <p id="trial-report-summary">{report.summary}</p>
+        <h3>ホスト検証</h3>
+        <p id="trial-report-verified">
+          検証済み: {report.verified ? "はい" : "いいえ"}
+        </p>
+        <ul id="trial-report-checks">
+          {#each report.checks as check (check.name)}
+            <li>
+              {check.name}: {check.outcome}
+              {#if check.exit !== null}（終了コード {check.exit}）{/if}
+            </li>
+          {/each}
+        </ul>
+        {#if report.artifact !== null}
+          <p id="trial-report-artifact">
+            成果物: {report.artifact.sha256}（{report.artifact.entryCount} 件）
+          </p>
+        {/if}
+        <h3>ゲスト報告（未検証）</h3>
+        <ul id="trial-report-findings">
+          {#each report.findings as finding, index (index)}
+            <li>{finding}</li>
+          {/each}
+        </ul>
+        <h3>未解決</h3>
+        <ul id="trial-report-unresolved">
+          {#each report.unresolved as item, index (index)}
+            <li>{item}</li>
+          {/each}
+        </ul>
+      </section>
+    {/if}
     <button
       id="trial-approve-button"
       type="button"

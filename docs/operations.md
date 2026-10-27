@@ -4464,6 +4464,18 @@ staging form is native-only by design.
 - Results are workspace trials only: journal lines always carry
   `productionApplied: false`, and trial completion never auto-completes
   the owning Task/Goal (they stay `open`/`active`).
+- The sealed trial result is no longer journal-only: the bridge result
+  line already carries the bounded report, and schema 33
+  (`trial_worker_reports`, BUNDLED 33) persists it with the worker outcome
+  in the same transaction. `GET /api/sessions/:id/trials/:proposalId`
+  returns `report` = `{summary ≤2KB, findings ≤16×1KB, unresolved ≤8,
+  checks [{name,outcome,exit}], artifact|null {sha256,entryCount},
+  verified, provenance}`. Provenance is explicit: findings/summary/
+  unresolved are `guest-reported-unattested` (plain text only, never HTML
+  or authority); checks/artifact are `host-checked`. The server never reads
+  the frozen bridge journal. `/trials` renders 報告 / ホスト検証 /
+  ゲスト報告（未検証）/ 未解決, and a terminal chat trial card shows a
+  one-line summary plus a link to `/trials`.
 - Verified 2026-10-17, synthetic only (fixed `synth-e2e-model` over a
   loopback relay, never a real model): full server A+B driver green —
   scenario A `consumed`/`authorized`/`bridge-exit:0` (12 model calls,

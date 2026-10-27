@@ -1,4 +1,4 @@
--- Schema33: human-only confirmation of chat-adopted goals. A purpose that
+-- Schema34: human-only confirmation of chat-adopted goals. A purpose that
 -- was adopted from a conversation proposal is stored non-explicit with
 -- source_kind='self' and can therefore never authorize a trial; the
 -- confirmation route flips exactly that record to an explicit user goal

@@ -158,13 +158,23 @@ describe("conversationProposalCards", () => {
 });
 
 describe("trialProposalCards", () => {
-  it("only exposes still-staged trials with approve/expire", () => {
+  it("exposes staged trials with actions and terminal trials as links", () => {
     const cards = trialProposalCards([
       { id: "t1", status: "staged", objective: "テストを追加する" },
-      { id: "t2", status: "granted", objective: "古い提案" },
+      {
+        id: "t2",
+        status: "granted",
+        objective: "古い提案",
+        reportSummary: "封印試行が完了しました",
+        outcome: {
+          status: "consumed",
+          authorized: true,
+          summary: "bridge-exit:0",
+        },
+      },
       { id: "t3", status: "expired", objective: "取り消し済み" },
     ]);
-    expect(cards).toHaveLength(1);
+    expect(cards).toHaveLength(3);
     expect(cards[0]).toMatchObject({
       key: "trial:t1",
       source: "trial",
@@ -176,6 +186,22 @@ describe("trialProposalCards", () => {
       canAccept: false,
       canReject: false,
       detailLines: [],
+      summaryLine: "",
+      detailHref: "",
+    });
+    // Terminal guest summary is a plain one-line string; the detail link is
+    // the only way to the bounded report.
+    expect(cards[1]).toMatchObject({
+      status: "granted",
+      canApprove: false,
+      canExpire: false,
+      summaryLine: "封印試行が完了しました",
+      detailHref: "/trials",
+    });
+    expect(cards[2]).toMatchObject({
+      status: "expired",
+      summaryLine: "結果: expired",
+      detailHref: "/trials",
     });
   });
 
