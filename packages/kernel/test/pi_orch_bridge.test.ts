@@ -587,24 +587,11 @@ function runRealPiGuestJob(mode: "read_only" | "write"): {
   const workRoot = join(dir, "work");
   mkdirSync(workRoot, { recursive: true });
   const fake = join(workRoot, "fake");
-  // The guest resolves the pinned Pi CLI from dirname(dirname(launcher)),
-  // exactly like the installed launcher closure.
-  const launcherRoot = workRoot;
-  mkdirSync(
-    join(launcherRoot, "node_modules/@earendil-works/pi-coding-agent/dist"),
-    { recursive: true },
-  );
-  write(
-    join(
-      launcherRoot,
-      "node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
-    ),
-    "// fake pinned worker closure\n",
-  );
   const launcher = join(fake, "launcher.mjs");
-  // Present only so the guest's pinned-launcher path check passes; it must
+  // Present only so the guest's frozen profile-path check passes; it must
   // never be executed, because the real launcher loads the coordinator
-  // extension that appends "[Coordinator-only parent contract]".
+  // extension that appends "[Coordinator-only parent contract]". The direct
+  // worker needs no child Pi CLI/shim from the launcher closure.
   write(
     launcher,
     `import { writeFileSync } from 'node:fs';\nwriteFileSync('/work/launcher-was-executed', 'yes');\n`,

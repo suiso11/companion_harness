@@ -269,40 +269,10 @@ function buildPrompt(job) {
   ].join("\n");
 }
 
-// The child Pi backend has its OWN agent directory and model registry
-// (~/.pi/agent/models.json). Registering the synthetic relay only in the OMP
-// registry leaves the child unable to resolve `companion-local/companion-current`.
-// The child inherits guest HOME (Pi's default agent dir), so this registration
-// stays inside the guest and never touches the host's ~/.pi or credentials.
-function writePiAgentConfig(home, port) {
-  const agentDir = join(home, ".pi", "agent");
-  mkdirSync(agentDir, { recursive: true, mode: 0o700 });
-  chmodSync(agentDir, 0o700);
-  const models = {
-    providers: {
-      [MODEL_PROVIDER]: {
-        baseUrl: `http://127.0.0.1:${port}/v1`,
-        api: "openai-completions",
-        apiKey: "dummy-bearer-not-a-secret",
-        models: [
-          {
-            id: MODEL_ID,
-            name: "Companion synthetic local",
-            contextWindow: 65536,
-            maxTokens: 2048,
-            reasoning: false,
-            input: ["text"],
-            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-          },
-        ],
-      },
-    },
-  };
-  writeFileSync(join(agentDir, "models.json"), `${JSON.stringify(models)}\n`, {
-    mode: 0o600,
-  });
-}
-
+// Direct OMP workers read only ~/.omp/agent (models.yml/config.yml). The old
+// child-Pi registry (~/.pi/agent/models.json) belonged to the coordinator
+// extension's delegated Pi workers, which the direct-worker guest no longer
+// starts, so it is intentionally not created.
 function writeAgentConfig(agentDir, port) {
   mkdirSync(agentDir, { recursive: true, mode: 0o700 });
   chmodSync(agentDir, 0o700);
@@ -627,9 +597,7 @@ async function main() {
     if (!OMP_BIN || !isAbsolute(OMP_BIN) || !existsSync(OMP_BIN))
       fail("pinned underlying OMP binary path is missing");
     if (basename(OMP_BIN) !== "omp")
-      fail(
-        "underlying OMP binary must be invoked as 'omp' by the pinned launcher",
-      );
+      fail("pinned OMP binary must be invoked as 'omp'");
   } else if (!OMP_BIN || !isAbsolute(OMP_BIN)) {
     fail("pinned OMP binary path is missing");
   }
@@ -641,39 +609,11 @@ async function main() {
   mkdirSync(home, { recursive: true, mode: 0o700 });
   mkdirSync(scratch, { recursive: true, mode: 0o700 });
   writeAgentConfig(agentDir, port);
-  // Real child Pi workers use Pi's own registry; only the OMP registry exists
-  // for the fixed executor. Register the same loopback synthetic model there.
-  if (realPi) writePiAgentConfig(home, port);
 
-  // The installed extension resolves its Pi worker binary from its own
-  // module graph and falls back to a bare "pi" when that resolution is not
-  // available in the OMP extension loader. Provide that exact installed Pi
-  // CLI inside the guest scratch tmpfs; this is a shim to the pinned
-  // /piorch node_modules closure, not a different executor.
-  let workerPathPrefix = "";
-  if (realPi) {
-    const launcherRoot = dirname(dirname(PI_ORCH_LAUNCHER));
-    const piCli = join(
-      launcherRoot,
-      "node_modules",
-      "@earendil-works",
-      "pi-coding-agent",
-      "dist",
-      "cli.js",
-    );
-    if (!existsSync(piCli))
-      fail("pinned Pi worker CLI is missing from the launcher closure");
-    const realPiBin = join(scratch, "bin");
-    mkdirSync(realPiBin, { recursive: true, mode: 0o700 });
-    const wrapper = join(realPiBin, "pi");
-    writeFileSync(
-      wrapper,
-      `#!/bin/sh\nexec ${JSON.stringify(NODE_BIN)} ${JSON.stringify(piCli)} "$@"\n`,
-      { mode: 0o700 },
-    );
-    chmodSync(wrapper, 0o700);
-    workerPathPrefix = `${realPiBin}:`;
-  }
+  // The sealed direct worker executes OMP_BIN itself; it never runs the
+  // launcher and never starts a child Pi worker. The launcher closure pin is
+  // still validated above because the frozen real-pi profile requires it, but
+  // the launcher path is provenance only and no scratch "pi" shim is needed.
 
   // Only the sealed read-only/write tool profile may be exposed, and the
   // guest must never inherit the pi-orch coordinator contract. The pinned
@@ -723,7 +663,7 @@ async function main() {
     buildPrompt(job),
   ];
   const env = {
-    PATH: `${workerPathPrefix}${dirname(NODE_BIN)}:${dirname(OMP_BIN)}:/usr/local/bin:/usr/bin:/bin`,
+    PATH: `${dirname(NODE_BIN)}:${dirname(OMP_BIN)}:/usr/local/bin:/usr/bin:/bin`,
     HOME: home,
     TMPDIR: scratch,
     PI_SKIP_VERSION_CHECK: "1",
@@ -793,6 +733,8 @@ async function main() {
     schemaVersion: 1,
     engine,
     executorKind: EXECUTOR_KIND,
+    // Provenance only: the launcher path comes from the frozen profile pin and
+    // is recorded for audit, but the direct worker never executes it.
     ...(realPi ? { launcher: PI_ORCH_LAUNCHER } : {}),
     modelAlias: MODEL_ALIAS,
     mode: job.mode,
