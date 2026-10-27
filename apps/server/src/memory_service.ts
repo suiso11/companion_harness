@@ -58,6 +58,10 @@ import {
   BACKGROUND_OWNER_MEMORY_IDLE_DISTILL,
   type BackgroundResourceGate,
 } from "./background_resource.js";
+import {
+  escapeExtractionDelimiters,
+  isGroundedExtractionQuote,
+} from "./extraction_grounding.js";
 import type { ServerLogger } from "./logger.js";
 import {
   callMemoryCli,
@@ -665,44 +669,14 @@ function sliceCodePoints(text: string, max: number): string {
 }
 
 /**
- * Escape a speaker segment so content cannot close or open the extraction
- * delimiters (`<user_message>`, `<assistant_message>`). Both speaker blocks
- * are model-facing untrusted data; entity escaping is the only transformation
- * (no paraphrasing), so the model still sees the user's own words.
- */
-function escapeExtractionDelimiters(text: string): string {
-  return text
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
-}
-
-/** Reverse `escapeExtractionDelimiters` for a model-supplied evidence quote. */
-function unescapeExtractionDelimiters(text: string): string {
-  return text
-    .replaceAll("&lt;", "<")
-    .replaceAll("&gt;", ">")
-    .replaceAll("&amp;", "&");
-}
-
-/**
- * Grounding normalization: NFKC plus whitespace collapse/trim. This only
- * forgives formatting differences between a verbatim quote and the user's
- * turn; it never paraphrases and is deliberately case-sensitive.
- */
-function normalizeExtractionGrounding(text: string): string {
-  return text.normalize("NFKC").replace(/\s+/g, " ").trim();
-}
-
-/**
  * Fail-safe provenance resolution for extracted items. `user_fact` is
  * accepted ONLY when the model supplied a bounded verbatim `evidence`
  * quote that is a substring of the user's own turn text (after grounding
- * normalization). Missing/invalid/ungrounded evidence DOWNGRADES the item to
- * `model_inference` — the memory is kept, never silently dropped, and never
- * presented as something the user stated. Without turn text (legacy direct
- * parser callers) no grounding verdict is possible; the caller must supply
- * the user turn for production extraction.
+ * normalization; see extraction_grounding.ts). Missing/invalid/ungrounded
+ * evidence DOWNGRADES the item to `model_inference` — the memory is kept,
+ * never silently dropped, and never presented as something the user stated.
+ * Without turn text (legacy direct parser callers) no grounding verdict is
+ * possible; the caller must supply the user turn for production extraction.
  */
 function resolveExtractedKind(
   kind: string,
@@ -715,13 +689,7 @@ function resolveExtractedKind(
   if (evidence === undefined) {
     return "model_inference";
   }
-  const quote = normalizeExtractionGrounding(
-    unescapeExtractionDelimiters(evidence),
-  );
-  if (quote.length === 0) {
-    return "model_inference";
-  }
-  return normalizeExtractionGrounding(userText).includes(quote)
+  return isGroundedExtractionQuote(evidence, userText)
     ? "user_fact"
     : "model_inference";
 }

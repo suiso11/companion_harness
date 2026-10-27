@@ -400,6 +400,18 @@ connector instance owns **all** configured roots.
   restated as user facts. Recall already carries each item's kind and
   renders it as `- mN [kind]: ...`, with only `user_fact` labeled as a
   user-stated fact.
+- Learning speaker grounding (2026-10-27): conversation-learning extraction
+  now uses the same shared delimiters/escaping and grounding helper
+  (`apps/server/src/extraction_grounding.ts`) as memory. The extraction
+  input wraps the accepted turn in `<user_message>` / `<assistant_message>`
+  (entity-escaped), and a `user_confirmed_feedback` lesson is accepted ONLY
+  when its `evidence` is a verbatim NFKC/whitespace-normalized substring of
+  the user's own message. Assistant-only evidence is downgraded to
+  `observation` (kept, never user-confirmed); evidence grounded in neither
+  speaker is still dropped. The approved-lesson advisory block labels every
+  kind and states that only `[user_confirmed_feedback]` reflects what the
+  user said; all other kinds are unverified model observations. The
+  pending/approval flow is unchanged.
 - Memory dates: extraction anchors relative dates (`今日暑い`,
   `今週の金曜日`, `一昨日`) to the turn's date in
   `COMPANION_TIME_ZONE` and writes ABSOLUTE dates into the extracted
