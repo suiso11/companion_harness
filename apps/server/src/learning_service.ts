@@ -227,6 +227,21 @@ function bounded(value: unknown, min: number, max: number): string | null {
 }
 
 /**
+ * The learning contract is ONE complete fence wrapper: after trimming, the
+ * text must end with the closing fence and must not contain a second fence
+ * token. `stripOneJsonFence` is shared with memory extraction, which tolerates
+ * a missing closing fence and trailing text; here those must stay `invalid`
+ * instead of silently dropping prose and capturing a fenced payload.
+ */
+function hasCompleteSingleJsonFence(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("```")) return true;
+  if (trimmed.length < 6 || !trimmed.endsWith("```")) return false;
+  const inner = trimmed.slice(3, trimmed.length - 3);
+  return !inner.includes("```") && inner.trim().length > 0;
+}
+
+/**
  * Strict extraction parser. Returns null for malformed output (no record is
  * fabricated), [] only for a valid empty list, and bounded valid items
  * otherwise. Grounding is enforced separately by the caller.
@@ -236,7 +251,9 @@ export function parseLearningExtraction(text: string): ParsedLesson[] | null {
   // Tolerate exactly ONE surrounding markdown code fence (``` or ```json)
   // plus surrounding whitespace, using the same helper as memory extraction.
   // This is not a free-text fallback: the unwrapped content must still be
-  // the single strict-JSON object enforced below.
+  // the single strict-JSON object enforced below, and the wrapper must be
+  // complete (no trailing prose, no unterminated fence).
+  if (!hasCompleteSingleJsonFence(text)) return null;
   const payload = stripOneJsonFence(text);
   if (payload.length === 0) return null;
   let parsed: unknown;

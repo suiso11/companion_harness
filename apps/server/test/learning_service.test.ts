@@ -707,6 +707,11 @@ describe("learning service extraction", () => {
     // One fence only: leading prose and multiple fences stay invalid.
     expect(parseLearningExtraction(`Here you go:\n${fenced}`)).toBeNull();
     expect(parseLearningExtraction(`${fenced}\n${fenced}`)).toBeNull();
+    // The closing fence must be the end of the response; trailing prose is
+    // not a single surrounding wrapper and must not be silently discarded.
+    expect(parseLearningExtraction(`${fenced}\nHere is prose`)).toBeNull();
+    // An opening fence with no closing fence is not a complete wrapper.
+    expect(parseLearningExtraction(`\`\`\`json\n${EXTRACTION}`)).toBeNull();
 
     const repo = await openRepo();
     const { gateway, calls } = gatewayReturning(fenced);
