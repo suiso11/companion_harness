@@ -1,6 +1,5 @@
 <script lang="ts">
 import { onMount, type Snippet, tick } from "svelte";
-import AutonomyPausedBanner from "./lib/AutonomyPausedBanner.svelte";
 import {
   errorCode,
   fetchJson,
@@ -18,6 +17,16 @@ import {
 } from "./lib/draft.js";
 import FeatureNav from "./lib/FeatureNav.svelte";
 import Markdown from "./lib/Markdown.svelte";
+import {
+  type ChatProposalCardView,
+  conversationProposalCards,
+  createProposalSyncGuard,
+  type FrozenProposalDecision,
+  frozenProposalDecision,
+  type ParentPurposeSnapshot,
+  proposalCardErrorText,
+  trialProposalCards,
+} from "./lib/proposal_cards.js";
 import {
   ACTION_PROGRESS_TEXT,
   type AnswerPartView,
@@ -226,6 +235,16 @@ let chipMeta = new Map<string, string>();
 let chipMetaVersion = $state(0);
 const chipHydrationDone = new Set<string>();
 let cards: CardState[] = $state([]);
+// Chat proposal cards (conversation + trial). Read-only projections of the
+// existing list endpoints; every decision is an explicit human click.
+let proposalCards: ChatProposalCardView[] = $state([]);
+let proposalDeciding = $state<string | null>(null);
+let proposalNotice = $state("");
+// Frozen retry state for the keyed card decisions: an uncertain reply keeps
+// the SAME Idempotency-Key + body until a definitive 2xx/4xx arrives.
+let pendingCardDecision: FrozenProposalDecision<unknown> | null = null;
+// Generation guard: only the latest syncProposals() may apply its result.
+const proposalSync = createProposalSyncGuard();
 let authExpired = $state(false);
 let loginPassword = $state("");
 let loginError = $state("");
@@ -442,6 +461,13 @@ function resetChatState(): void {
   for (const timer of pendingExpiryTimers.values()) window.clearTimeout(timer);
   pendingExpiryTimers = new Map();
   cards = [];
+  // Proposal cards are session-scoped too, and an in-flight sync/decision
+  // from the previous session must not leak into the new one (review #154).
+  proposalSync.invalidate();
+  proposalCards = [];
+  proposalDeciding = null;
+  proposalNotice = "";
+  pendingCardDecision = null;
   actionRunStops = new Map();
   degradedMemory = false;
   notice = "";
@@ -1445,6 +1471,7 @@ function renderRunView(runId: string): void {
         terminalHydrated.add(runId);
         void hydrateHistory().then(() => {
           void syncActions();
+          void syncProposals();
         });
       }
       return;
@@ -1468,6 +1495,7 @@ function renderRunView(runId: string): void {
       void hydrateHistory().then(() => {
         void checkDegradedMemory(runId);
         void syncActions();
+        void syncProposals();
       });
     }
     return;
@@ -1491,6 +1519,7 @@ function renderRunView(runId: string): void {
           retryTurnId = turnId;
         }
         void syncActions();
+        void syncProposals();
       });
     }
     return;
@@ -1504,6 +1533,7 @@ function renderRunView(runId: string): void {
       terminalHydrated.add(runId);
       void hydrateHistory().then(() => {
         void syncActions();
+        void syncProposals();
       });
     }
     return;
@@ -2180,6 +2210,238 @@ async function syncActions(): Promise<void> {
   }
 }
 
+/**
+ * Run ids visible in the current session projection: durable history runs
+ * plus the live/adopted run. Conversation proposals are only shown when
+ * their source run is one of these (no cross-visit leakage).
+ */
+function knownRunIds(): Set<string> {
+  const ids = new Set<string>();
+  for (const turn of turns) {
+    if (turn.run !== null) ids.add(turn.run.runId);
+  }
+  for (const runId of runTurns.keys()) ids.add(runId);
+  if (activeRunId !== null) ids.add(activeRunId);
+  return ids;
+}
+
+function proposalListItems(body: unknown): unknown[] {
+  if (typeof body !== "object" || body === null) return [];
+  const items = (body as { items?: unknown }).items;
+  return Array.isArray(items) ? items : [];
+}
+
+function isConversationProposalItem(
+  value: unknown,
+): value is Parameters<typeof conversationProposalCards>[0][number] {
+  if (typeof value !== "object" || value === null) return false;
+  const item = value as {
+    id?: unknown;
+    status?: unknown;
+    version?: unknown;
+  };
+  return (
+    typeof item.id === "string" &&
+    typeof item.status === "string" &&
+    typeof item.version === "number"
+  );
+}
+
+function isTrialProposalItem(
+  value: unknown,
+): value is Parameters<typeof trialProposalCards>[0][number] {
+  if (typeof value !== "object" || value === null) return false;
+  const item = value as { id?: unknown; status?: unknown };
+  return typeof item.id === "string" && typeof item.status === "string";
+}
+
+/**
+ * Readonly parent-purpose snapshots for the staged `task` proposals about to
+ * be rendered, from the same endpoint the Proposals panel uses. A failed or
+ * malformed read stores null, which leaves 採用する disabled (fail closed).
+ */
+async function loadParentSnapshots(
+  sid: string,
+  items: readonly Parameters<typeof conversationProposalCards>[0][number][],
+  runIds: ReadonlySet<string>,
+): Promise<Map<string, ParentPurposeSnapshot | null>> {
+  const ids = new Set<string>();
+  for (const item of items) {
+    if (item.status !== "pending" || item.target !== "task") continue;
+    if (typeof item.sourceRunId !== "string") continue;
+    if (!runIds.has(item.sourceRunId)) continue;
+    if (
+      typeof item.parentPurposeId === "string" &&
+      item.parentPurposeId !== ""
+    ) {
+      ids.add(item.parentPurposeId);
+    }
+  }
+  const parents = new Map<string, ParentPurposeSnapshot | null>();
+  await Promise.all(
+    [...ids].map(async (parentId) => {
+      let snapshot: ParentPurposeSnapshot | null = null;
+      try {
+        const res = await fetchJson(
+          `/api/sessions/${encodeURIComponent(sid)}/purposes/${encodeURIComponent(parentId)}`,
+        );
+        if (
+          res.status === 200 &&
+          typeof res.body === "object" &&
+          res.body !== null
+        ) {
+          const body = res.body as {
+            statement?: unknown;
+            version?: unknown;
+            status?: unknown;
+          };
+          if (
+            typeof body.statement === "string" &&
+            typeof body.version === "number" &&
+            typeof body.status === "string"
+          ) {
+            snapshot = {
+              statement: body.statement,
+              version: body.version,
+              status: body.status,
+            };
+          }
+        }
+      } catch {
+        snapshot = null;
+      }
+      parents.set(parentId, snapshot);
+    }),
+  );
+  return parents;
+}
+
+/**
+ * Read-only refresh of the chat proposal cards from the existing session
+ * list endpoints. Called after run completion and after every card button;
+ * a missing/disabled endpoint simply yields no cards.
+ */
+async function syncProposals(): Promise<void> {
+  if (sessionId === null) return;
+  const sid = sessionId;
+  const seq = proposalSync.next();
+  let listed: [
+    { status: number; body: unknown },
+    { status: number; body: unknown },
+  ];
+  try {
+    listed = await Promise.all([
+      fetchJson(
+        `/api/sessions/${encodeURIComponent(sid)}/conversation-proposals?limit=50&status=pending`,
+      ),
+      fetchJson(`/api/sessions/${encodeURIComponent(sid)}/trials?limit=50`),
+    ]);
+  } catch {
+    return;
+  }
+  if (sessionId !== sid || !proposalSync.isCurrent(seq)) return;
+  const [conversation, trials] = listed;
+  const runIds = knownRunIds();
+  const conversationItems =
+    conversation.status === 200
+      ? proposalListItems(conversation.body).filter(isConversationProposalItem)
+      : [];
+  const trialItems =
+    trials.status === 200
+      ? proposalListItems(trials.body).filter(isTrialProposalItem)
+      : [];
+  const parents = await loadParentSnapshots(sid, conversationItems, runIds);
+  if (sessionId !== sid || !proposalSync.isCurrent(seq)) return;
+  proposalCards = [
+    ...conversationProposalCards(conversationItems, runIds, parents),
+    ...trialProposalCards(trialItems),
+  ];
+}
+
+async function decideConversationProposalCard(
+  card: ChatProposalCardView,
+  action: "accept" | "reject",
+): Promise<void> {
+  if (sessionId === null || proposalDeciding !== null) return;
+  const sid = sessionId;
+  proposalDeciding = card.key;
+  proposalNotice = "";
+  // Same body the Proposals panel sends: CAS on the staged version. An
+  // uncertain retry reuses this exact key + expectedVersion (review #154).
+  pendingCardDecision = frozenProposalDecision(
+    pendingCardDecision,
+    card.key + action,
+    { expectedVersion: card.version },
+    randomUuid(),
+  );
+  const result = await postJson(
+    `/api/sessions/${encodeURIComponent(sid)}/conversation-proposals/${encodeURIComponent(card.proposalId)}/${action}`,
+    pendingCardDecision.body,
+    pendingCardDecision.key,
+  );
+  if (sessionId !== sid) return;
+  proposalDeciding = null;
+  if (result.status === 0 || result.status >= 500) {
+    // Network / 5xx: keep the frozen command and the card for a retry.
+    proposalNotice = proposalCardErrorText(0);
+    return;
+  }
+  pendingCardDecision = null;
+  proposalNotice =
+    result.status === 200 || result.status === 201
+      ? action === "accept"
+        ? "採用しました"
+        : "見送りました"
+      : proposalCardErrorText(result.status);
+  await syncProposals();
+  void syncActions();
+}
+
+async function decideTrialProposalCard(
+  card: ChatProposalCardView,
+  action: "approve" | "expire",
+): Promise<void> {
+  if (sessionId === null || proposalDeciding !== null) return;
+  const sid = sessionId;
+  proposalDeciding = card.key;
+  proposalNotice = "";
+  // Same freeze as conversation decisions: an uncertain approve reply must
+  // retry with the exact same Idempotency-Key, not a fresh one (review #154).
+  // Expire stays keyless (state-idempotent) and never disturbs a frozen key.
+  const decision =
+    action === "approve"
+      ? frozenProposalDecision(
+          pendingCardDecision,
+          card.key + action,
+          {},
+          randomUuid(),
+        )
+      : null;
+  if (decision !== null) pendingCardDecision = decision;
+  // postJson/readJson never throw: a transport failure is status 0.
+  const result = await postJson(
+    `/api/sessions/${encodeURIComponent(sid)}/trials/${encodeURIComponent(card.proposalId)}/${action}`,
+    decision?.body ?? {},
+    decision?.key ?? null,
+  );
+  if (sessionId !== sid) return;
+  proposalDeciding = null;
+  if (decision !== null && (result.status === 0 || result.status >= 500)) {
+    // Uncertain outcome: keep the frozen key + card for a retry.
+    proposalNotice = proposalCardErrorText(0);
+    return;
+  }
+  if (decision !== null) pendingCardDecision = null;
+  const ok =
+    action === "approve" ? result.status === 201 : result.status === 200;
+  proposalNotice = ok
+    ? action === "approve"
+      ? "承認しました"
+      : "取り消しました"
+    : proposalCardErrorText(result.status);
+  await syncProposals();
+}
+
 async function syncExecution(summary: ProposalSummary): Promise<boolean> {
   if (sessionId === null) return false;
   const sid = sessionId;
@@ -2758,6 +3020,8 @@ async function bootSession(): Promise<void> {
   if (sessionId !== sid) return;
   await syncActions();
   if (sessionId !== sid) return;
+  await syncProposals();
+  if (sessionId !== sid) return;
   // The captured run id is subscribed exactly once, even when the run has
   // already completed meanwhile: the durable event backlog renders or
   // dedups, and the terminal view releases the composer normally.
@@ -2851,6 +3115,8 @@ $effect(() => {
     runView.notice,
     runView.visible,
     cards.length,
+    proposalCards.length,
+    proposalNotice,
     showThinking,
     thinkingCollapsed,
     booted,
@@ -2923,7 +3189,9 @@ function evidenceForTurn(turn: Turn): {
   </header>
 
   {#if activePath === "/"}
-    <AutonomyPausedBanner />
+    {#await import("./lib/AutonomyPausedBanner.svelte") then banner}
+      <svelte:component this={banner.default} />
+    {/await}
   {/if}
 
   {#if authExpired}
@@ -3269,6 +3537,71 @@ function evidenceForTurn(turn: Turn): {
         {/if}
       </section>
     {/each}
+    {#each proposalCards as card (card.key)}
+      <section
+        data-proposal-card={card.source}
+        data-proposal-kind={card.kindLabel}
+        data-proposal-status={card.status}
+        data-proposal-id={card.proposalId}
+        aria-label="提案カード"
+      >
+        <p data-proposal-label="true">{card.kindLabel}の提案</p>
+        {#if card.heading !== ""}
+          <p data-proposal-heading="true">{card.heading}</p>
+        {/if}
+        {#if card.quote !== ""}
+          <p data-proposal-quote="true">引用: {card.quote}</p>
+        {/if}
+        {#if card.parentLine !== ""}
+          <p data-proposal-parent="true">{card.parentLine}</p>
+        {/if}
+        {#each card.detailLines as line, index (index)}
+          <p data-proposal-detail="true">{line}</p>
+        {/each}
+        {#if card.source === "conversation"}
+          <button
+            type="button"
+            data-proposal-action="accept"
+            hidden={!card.canAccept}
+            disabled={!card.canAccept || proposalDeciding !== null}
+            onclick={() => void decideConversationProposalCard(card, "accept")}
+          >
+            採用する
+          </button>
+          <button
+            type="button"
+            data-proposal-action="reject"
+            hidden={!card.canReject}
+            disabled={!card.canReject || proposalDeciding !== null}
+            onclick={() => void decideConversationProposalCard(card, "reject")}
+          >
+            見送る
+          </button>
+        {:else}
+          <button
+            type="button"
+            data-proposal-action="approve"
+            hidden={!card.canApprove}
+            disabled={!card.canApprove || proposalDeciding !== null}
+            onclick={() => void decideTrialProposalCard(card, "approve")}
+          >
+            承認する
+          </button>
+          <button
+            type="button"
+            data-proposal-action="expire"
+            hidden={!card.canExpire}
+            disabled={!card.canExpire || proposalDeciding !== null}
+            onclick={() => void decideTrialProposalCard(card, "expire")}
+          >
+            取り消す
+          </button>
+        {/if}
+      </section>
+    {/each}
+    {#if proposalNotice !== ""}
+      <p role="status" data-proposal-notice="true">{proposalNotice}</p>
+    {/if}
   </div>
   </main>
 

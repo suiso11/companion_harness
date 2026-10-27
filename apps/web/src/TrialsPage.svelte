@@ -12,7 +12,6 @@
 // - expire: keyless state-idempotent POST .../trials/:id/expire;
 //   200 → 取り消しました, else 取り消しに失敗しました.
 // Every string renders via text interpolation only (no {@html}).
-import AutonomyPausedBanner from "./lib/AutonomyPausedBanner.svelte";
 import { fetchJson, postJson, randomUuid } from "./lib/api.js";
 import { type TrialProposalStatus, trialProposalModel } from "./lib/reducer.js";
 // Shared reactive session store (session-rebinding group): a direct deep-link
@@ -529,7 +528,9 @@ $effect(() => {
   <title>試行の提案 · Companion Harness</title>
 </svelte:head>
 
-<AutonomyPausedBanner />
+{#await import("./lib/AutonomyPausedBanner.svelte") then banner}
+  <svelte:component this={banner.default} />
+{/await}
 
 <section id="trials" aria-label="試行の提案" class="feature-panel">
   <h2>試行の提案</h2>
