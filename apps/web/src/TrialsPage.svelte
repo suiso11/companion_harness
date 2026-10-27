@@ -13,6 +13,8 @@
 //   200 → 取り消しました, else 取り消しに失敗しました.
 // Every string renders via text interpolation only (no {@html}).
 import { fetchJson, postJson, randomUuid } from "./lib/api.js";
+import type { GoalConfirmationFields } from "./lib/goal_confirm.js";
+import { trialHintForParentGoal } from "./lib/goal_confirm.js";
 import { type TrialProposalStatus, trialProposalModel } from "./lib/reducer.js";
 // Shared reactive session store (session-rebinding group): a direct deep-link
 // into /trials adopts or creates the session ON BOOT here (the chat shell is
@@ -255,6 +257,7 @@ interface TaskOption {
   readonly id: string;
   readonly title: string;
   readonly status: string;
+  readonly parentPurposeId: string | null;
 }
 
 /** Structural guard: malformed profile bodies hide the form (fail closed). */
@@ -309,6 +312,7 @@ function isTaskOption(value: unknown): value is TaskOption {
     typeof row.title === "string" &&
     typeof row.status === "string" &&
     row.kind === "task" &&
+    (row.parentPurposeId === null || typeof row.parentPurposeId === "string") &&
     (row.status === "open" || row.status === "in_progress")
   );
 }
@@ -333,6 +337,8 @@ let formVisible = $state(false);
 let formStatus = $state("");
 let submitting = $state(false);
 let tasks = $state<TaskOption[]>([]);
+/** purposeId → confirmation-relevant purpose fields (kind/status/explicit). */
+let goalFields = $state<Record<string, GoalConfirmationFields>>({});
 let taskId = $state("");
 let objective = $state("");
 let acceptanceText = $state("");
@@ -390,14 +396,17 @@ async function refreshForm(sessionId: string): Promise<void> {
   let profileResult: { status: number; body: unknown };
   let openResult: { status: number; body: unknown };
   let inProgressResult: { status: number; body: unknown };
+  let purposesResult: { status: number; body: unknown };
   try {
     // Server-side filters run BEFORE the limit, so older actionable tasks
     // cannot be hidden behind newer unrelated/kinds records.
-    [profileResult, openResult, inProgressResult] = await Promise.all([
-      fetchJson(`${base}/trial-profile`),
-      fetchJson(`${base}/tasks?kind=task&status=open&limit=50`),
-      fetchJson(`${base}/tasks?kind=task&status=in_progress&limit=50`),
-    ]);
+    [profileResult, openResult, inProgressResult, purposesResult] =
+      await Promise.all([
+        fetchJson(`${base}/trial-profile`),
+        fetchJson(`${base}/tasks?kind=task&status=open&limit=50`),
+        fetchJson(`${base}/tasks?kind=task&status=in_progress&limit=50`),
+        fetchJson(`${base}/purposes?limit=100`),
+      ]);
   } catch {
     return;
   }
@@ -425,6 +434,30 @@ async function refreshForm(sessionId: string): Promise<void> {
       ? items.filter(isTaskOption)
       : [];
   };
+  const purposesBody =
+    purposesResult.status === 200
+      ? (purposesResult.body as { items?: unknown }).items
+      : undefined;
+  const nextGoalFields: Record<string, GoalConfirmationFields> = {};
+  if (Array.isArray(purposesBody)) {
+    for (const entry of purposesBody) {
+      const row = entry as {
+        id?: unknown;
+        explicit?: unknown;
+        status?: unknown;
+        sourceKind?: unknown;
+        kind?: unknown;
+      };
+      if (typeof row.id === "string")
+        nextGoalFields[row.id] = {
+          explicit: row.explicit,
+          status: row.status,
+          sourceKind: row.sourceKind,
+          kind: row.kind,
+        };
+    }
+  }
+  goalFields = nextGoalFields;
   tasks = [...collect(openResult), ...collect(inProgressResult)];
   if (taskId !== "" && !tasks.some((task) => task.id === taskId)) {
     taskId = "";
@@ -433,6 +466,14 @@ async function refreshForm(sessionId: string): Promise<void> {
     taskId = tasks[0]?.id ?? "";
   }
 }
+
+/** Hint shown when the selected task's parent goal is still non-explicit
+ * (trial authority requires an explicit user goal; the fix is the
+ * confirmation button in the goals list, never a bypass here). */
+const selectedGoalHint = $derived.by<string | null>(() => {
+  const task = tasks.find((entry) => entry.id === taskId);
+  return trialHintForParentGoal(goalFields, task?.parentPurposeId ?? null);
+});
 
 /** POST one strict stage body with a fresh Idempotency-Key, then select the
  * returned proposal. Approval stays a separate explicit button. */
@@ -646,6 +687,9 @@ $effect(() => {
         作業領域: {profile.workspaceAlias}・必須チェック:
         {profile.mandatoryChecks.join(", ")}
       </p>
+      {#if selectedGoalHint !== null}
+        <p id="trial-goal-authority-hint">{selectedGoalHint}</p>
+      {/if}
       {#if tasks.length === 0}
         <p id="trial-task-hint">
           対象にできる作業がありません。<a href="/tasks">タスク・目的</a>で作業を作成してください。

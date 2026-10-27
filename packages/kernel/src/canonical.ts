@@ -111,6 +111,7 @@ export const IDEMPOTENCY_OPERATIONS = {
   correctPurpose: { operation: "autonomy_correct_purpose", schemaVersion: 2 },
   revokePurpose: { operation: "autonomy_revoke_purpose", schemaVersion: 1 },
   achievePurpose: { operation: "autonomy_achieve_purpose", schemaVersion: 1 },
+  confirmPurpose: { operation: "autonomy_confirm_purpose", schemaVersion: 1 },
   createTask: { operation: "autonomy_create_task", schemaVersion: 1 },
   startTask: { operation: "autonomy_start_task", schemaVersion: 1 },
   holdTask: { operation: "autonomy_hold_task", schemaVersion: 1 },

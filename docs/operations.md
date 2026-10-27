@@ -5791,3 +5791,7 @@ master or a changed guest never leaves a stale digest (trials fail closed).
   `state/jobs/<job>/bridge-state/companion-journal.db` (under the trial
   `stateRoot`). They are NOT exposed through the trial API yet, so inspect that
   SQLite file directly for outcomes.
+
+### 会話から採用した目的の確定（人間のみ）
+
+会話中の提案から採用された目的は `is_explicit=0 / source_kind='self'` で保存されるため、それだけでは試行権限（明示的な利用者の目的を要求）を満たしません。利用者が目的一覧の「会話から採用（未確認）」バッジ横の「自分の目的として確定」を押すと、`POST /api/sessions/:sessionId/goals/:goalId/confirm`（Idempotency-Key + `expectedVersion` CAS）がその目的を**その場で** `is_explicit=1 / source_kind='user'` に更新し、`confirmed_from='conversation_proposal'`・`confirmed_at` に確定の出所を記録します（目的イベントとして追記、行の id・scope・依存タスクは不変）。この経路は HTTP のみで、モデルツール・自動実行経路からは呼べません。退避・完了済みの目的は 409、既に明示的な目的は 200 の no-op、`expectedVersion` 不一致は 409 です。試行の提案フォームは、選択した作業の親目的が未確認のとき、この確定ボタンへの案内を表示します。

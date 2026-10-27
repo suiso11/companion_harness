@@ -246,6 +246,7 @@ import {
   achievePurpose as autonomyAchievePurpose,
   cancelTask as autonomyCancelTask,
   completeTask as autonomyCompleteTask,
+  confirmPurpose as autonomyConfirmPurpose,
   correctPurpose as autonomyCorrectPurpose,
   createPurpose as autonomyCreatePurpose,
   createTask as autonomyCreateTask,
@@ -5806,6 +5807,30 @@ export function createKernelRepository(
     return { status: out.status, body, replayed: out.replayed };
   }
 
+  function confirmAutonomyPurpose(
+    sessionId: string,
+    purposeId: string,
+    request: unknown,
+    options: AutonomyKeyOptions,
+  ): { status: number; body: PurposeView; replayed: boolean } {
+    const parsed = parseOrValidation(
+      () => PurposeTransitionRequestSchema.parse(request),
+      "purpose confirm request",
+    );
+    const out = autonomyConfirmPurpose(
+      db,
+      sessionId,
+      purposeId,
+      parsed.expectedVersion,
+      options,
+    );
+    const body = parseOrValidation(
+      () => PurposeViewSchema.parse(out.body),
+      "purpose response",
+    );
+    return { status: out.status, body, replayed: out.replayed };
+  }
+
   function listAutonomyPurposeConflicts(
     sessionId: string,
   ): PurposeConflictListResponse {
@@ -7978,6 +8003,7 @@ export function createKernelRepository(
     correctAutonomyPurpose,
     revokeAutonomyPurpose,
     achieveAutonomyPurpose,
+    confirmAutonomyPurpose,
     listAutonomyPurposeConflicts,
     recordAutonomyPurposeConflict,
     createAutonomyTask,

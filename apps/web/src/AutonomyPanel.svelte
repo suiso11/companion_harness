@@ -36,6 +36,12 @@ import {
   buildControlBody,
   fetchAutonomyControl,
 } from "./lib/autonomy_control.js";
+import {
+  CONFIRM_GOAL_LABEL,
+  goalConfirmPath,
+  isConversationAdoptedGoal,
+  UNCONFIRMED_GOAL_BADGE,
+} from "./lib/goal_confirm.js";
 import { revealHashTarget } from "./lib/router.js";
 import { getSessionId } from "./lib/session.svelte.js";
 
@@ -47,6 +53,8 @@ interface PurposeRow {
   readonly validFrom: string;
   readonly validUntil: string;
   readonly version: number;
+  readonly explicit: boolean;
+  readonly sourceKind: string;
 }
 
 interface TaskRow {
@@ -411,6 +419,8 @@ function renderPurposes(result: { status: number; body: unknown }): void {
       validFrom: typeof row.validFrom === "string" ? row.validFrom : "",
       validUntil: typeof row.validUntil === "string" ? row.validUntil : "",
       version: row.version,
+      explicit: row.explicit === true,
+      sourceKind: typeof row.sourceKind === "string" ? row.sourceKind : "user",
     });
   }
   purposes = rows;
@@ -894,6 +904,31 @@ async function transitionPurpose(op: "revoke" | "achieve"): Promise<void> {
   }
 }
 
+/** Human confirmation of a chat-adopted goal (badge → button). */
+async function confirmGoal(id: string): Promise<void> {
+  const sessionId = getSessionId();
+  if (sessionId === null) return;
+  const version = purposeVersions.get(id);
+  if (version === undefined) {
+    await refreshLists();
+    return;
+  }
+  const result = await runAutonomyMutation(goalConfirmPath(sessionId, id), {
+    expectedVersion: version,
+  });
+  if (result === null) return;
+  if (result.status === 200) {
+    await refreshLists();
+    notifyAutonomyChanged();
+    notice("自分の目的として確定しました");
+  } else if (result.status === 409) {
+    await refreshLists();
+    notice("他の変更がありました。一覧を更新しました");
+  } else {
+    notice("目的の確定に失敗しました");
+  }
+}
+
 async function markConflict(): Promise<void> {
   const sessionId = getSessionId();
   const id = selectedPurpose;
@@ -1254,6 +1289,16 @@ $effect(() => {
             ? `・期間 ${purpose.validFrom.length > 0 ? purpose.validFrom : "指定なし"}〜${purpose.validUntil.length > 0 ? purpose.validUntil : "指定なし"}`
             : ""}）
         </button>
+        {#if isConversationAdoptedGoal(purpose)}
+          <span class="goal-unconfirmed-badge">{UNCONFIRMED_GOAL_BADGE}</span>
+          <button
+            id={`autonomy-purpose-confirm-${purpose.id}`}
+            type="button"
+            onclick={() => void confirmGoal(purpose.id)}
+          >
+            {CONFIRM_GOAL_LABEL}
+          </button>
+        {/if}
       </li>
     {/each}
   </ul>

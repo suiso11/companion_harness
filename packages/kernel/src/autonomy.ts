@@ -127,6 +127,23 @@ export class AutonomyStateConflictError extends KernelStorageError {
   }
 }
 
+/** Only goal-kind purposes can be confirmed; every other kind is refused (409). */
+export class PurposeNotGoalError extends KernelStorageError {
+  constructor(kind: string) {
+    super(
+      "purpose_not_goal",
+      `purpose kind ${kind} cannot be confirmed as a goal`,
+    );
+  }
+}
+
+/** An already-explicit purpose not sourced from the user is not confirmable (409). */
+export class PurposeNotConfirmableError extends KernelStorageError {
+  constructor(message: string) {
+    super("purpose_not_confirmable", message);
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Local strict helpers (same conventions as the M0 repository).        */
 /* ------------------------------------------------------------------ */
@@ -417,6 +434,8 @@ interface RawPurpose {
   is_explicit: number;
   source_kind: string;
   source_turn_id: string | null;
+  confirmed_from: string | null;
+  confirmed_at: number | null;
   statement: string;
   interpretation: string | null;
   status: string;
@@ -498,6 +517,8 @@ function toPurposeView(row: RawPurpose): {
   explicit: boolean;
   sourceKind: ProvenanceSource;
   sourceTurnId: string | null;
+  confirmedFrom: string | null;
+  confirmedAt: number | null;
   interpretation: string | null;
   status: "active" | "superseded" | "revoked" | "achieved";
   version: number;
@@ -519,6 +540,8 @@ function toPurposeView(row: RawPurpose): {
         explicit: row.is_explicit === 1,
         sourceKind: row.source_kind,
         sourceTurnId: row.source_turn_id,
+        confirmedFrom: row.confirmed_from,
+        confirmedAt: row.confirmed_at,
         interpretation: row.interpretation,
         status: row.status,
         version: row.version,
@@ -1826,6 +1849,124 @@ export function achievePurpose(
     options.key,
     nowMs(options.now),
   );
+}
+
+/**
+ * Human-only confirmation of a goal that was adopted from a chat proposal.
+ *
+ * Adopted goals are stored `explicit=false, source_kind='self'` and can
+ * NEVER authorize a trial on their own; only this route (no model tool, no
+ * autonomy path) may promote one. The record is updated IN PLACE (id, scope
+ * and dependents are preserved) to the exact trusted shape of a manually
+ * created user goal (`is_explicit=1, source_kind='user'`) plus a recorded
+ * provenance pair (`confirmed_from='conversation_proposal'`, `confirmed_at`).
+ * Already-explicit goals replay as a 200 no-op (no version bump, no event);
+ * CAS mismatch and terminal goals are 409.
+ */
+export function confirmPurpose(
+  db: Database.Database,
+  sessionId: string,
+  purposeId: string,
+  expectedVersion: number,
+  options: AutonomyKeyOptions,
+): {
+  status: number;
+  body: ReturnType<typeof toPurposeView>;
+  replayed: boolean;
+} {
+  const session = requireId(sessionId, "sessionId");
+  const purpose = requireId(purposeId, "purposeId");
+  const key = requireKey(options.key);
+  const now = nowMs(options.now);
+  const scope = `purpose:${purpose}:confirm`;
+  const hash = requestHash(
+    IDEMPOTENCY_OPERATIONS.confirmPurpose.operation,
+    IDEMPOTENCY_OPERATIONS.confirmPurpose.schemaVersion,
+    { sessionId: session, purposeId: purpose, expectedVersion },
+  );
+  return withImmediate(db, () => {
+    // Ownership-first: foreign ids are 404 before any idempotency-cache read.
+    const row = assertOwnedPurpose(db, session, purpose);
+    // Confirmation is a goal-only operation: every other kind is refused
+    // before any cache replay or write (fail closed on the record kind).
+    if (row.kind !== "goal") {
+      throw new PurposeNotGoalError(row.kind);
+    }
+    const existing = toStoredResponse(db, scope, key);
+    if (existing !== null) {
+      if (existing.requestHash !== hash) {
+        throw new IdempotencyConflictError(scope);
+      }
+      const stored = parseOrValidation(
+        () => PurposeViewSchema.parse(existing.responseBody),
+        "stored purpose body",
+      );
+      return { status: existing.responseStatus, body: stored, replayed: true };
+    }
+    if (row.version !== expectedVersion) {
+      throw new AutonomyVersionConflictError(expectedVersion, row.version);
+    }
+    // Terminal goals are refused even when they were already explicit
+    // (a retired goal can never regain trial authority by confirmation).
+    if (row.status !== "active") {
+      throw new AutonomyStateConflictError(
+        `purpose ${row.id} is ${row.status} and cannot be confirmed`,
+      );
+    }
+    if (row.is_explicit === 1) {
+      // Already explicit user-sourced goals replay as a 200 no-op below.
+      // Any other explicit provenance (self/external) can never be
+      // laundered into user consent by pressing confirm.
+      if (row.source_kind !== "user") {
+        throw new PurposeNotConfirmableError(
+          `purpose ${row.id} is already explicit from ${row.source_kind} and cannot be confirmed`,
+        );
+      }
+    } else {
+      const moved = db
+        .prepare(
+          "UPDATE autonomy_purposes SET is_explicit = 1, source_kind = 'user', confirmed_from = 'conversation_proposal', confirmed_at = ?, version = ?, updated_at = ? WHERE id = ? AND status = 'active' AND is_explicit = 0 AND version = ?",
+        )
+        .run(now, row.version + 1, now, row.id, row.version);
+      if (moved.changes !== 1) {
+        throw new AutonomyVersionConflictError(expectedVersion, row.version);
+      }
+      // Same append-only transition trail as every other goal change. The
+      // closed event vocabulary has no 'confirmed' member, so the
+      // confirmation is recorded as an in-place correction and the
+      // provenance lives in the dedicated columns above.
+      appendPurposeEventInTx(
+        db,
+        row.id,
+        session,
+        "corrected",
+        "active",
+        "active",
+        row.statement,
+        now,
+      );
+      // Confirmation changes provenance + version, so it is a policy
+      // change like every other purpose mutation: same-TX durable shadow
+      // source (advances the scope epoch and fences any in-flight job, so
+      // a successor deliberates on the confirmed goal).
+      enqueueShadowPolicyChangeInTx(
+        db,
+        session,
+        row.scope,
+        "purpose",
+        row.id,
+        "purpose.confirmed",
+        now,
+      );
+    }
+    const current = readPurpose(db, row.id);
+    if (current === null) {
+      throw new RepositoryNotFoundError(`purpose ${row.id} not found`);
+    }
+    const body = toPurposeView(current);
+    storeIdempotentResponse(db, scope, key, hash, 200, body, now);
+    return { status: 200, body, replayed: false };
+  });
 }
 
 /* ------------------------------------------------------------------ */

@@ -725,4 +725,97 @@ describe("autonomy HTTP", () => {
       closeKernelDatabase(handle);
     }
   });
+
+  it("confirms a chat-adopted goal only through the human route", async () => {
+    const fixture = await makeApp();
+    try {
+      const { app } = fixture;
+      const created = await post(app, "/api/sessions", {}, randomUUID());
+      const sessionId = (created.body as { sessionId: string }).sessionId;
+      const base = `/api/sessions/${sessionId}`;
+      // Adopted shape: non-explicit, self-sourced.
+      const made = await post(
+        app,
+        `${base}/purposes`,
+        {
+          scope: "health",
+          statement: "walk daily",
+          kind: "goal",
+          explicit: false,
+          sourceKind: "self",
+        },
+        randomUUID(),
+      );
+      expect(made.status).toBe(201);
+      const goalId = (made.body as { id: string }).id;
+      const version = (made.body as { version: number }).version;
+
+      // No Idempotency-Key is rejected before any write.
+      const unkeyed = await post(app, `${base}/goals/${goalId}/confirm`, {
+        expectedVersion: version,
+      });
+      expect(unkeyed.status).toBe(400);
+
+      // Stale CAS is a 409 and does not promote.
+      const stale = await post(
+        app,
+        `${base}/goals/${goalId}/confirm`,
+        { expectedVersion: version + 7 },
+        randomUUID(),
+      );
+      expect(stale.status).toBe(409);
+      const before = await get(app, `${base}/purposes/${goalId}`);
+      expect((before.body as { explicit: boolean }).explicit).toBe(false);
+
+      const key = randomUUID();
+      const ok = await post(
+        app,
+        `${base}/goals/${goalId}/confirm`,
+        { expectedVersion: version },
+        key,
+      );
+      expect(ok.status).toBe(200);
+      expect((ok.body as { explicit: boolean }).explicit).toBe(true);
+      expect((ok.body as { sourceKind: string }).sourceKind).toBe("user");
+      // Same key replays byte-identically (still 200).
+      const replay = await post(
+        app,
+        `${base}/goals/${goalId}/confirm`,
+        { expectedVersion: version },
+        key,
+      );
+      expect(replay.status).toBe(200);
+      expect((replay.body as { version: number }).version).toBe(
+        (ok.body as { version: number }).version,
+      );
+      // Already explicit under a NEW key: idempotent 200, no version bump.
+      const again = await post(
+        app,
+        `${base}/goals/${goalId}/confirm`,
+        { expectedVersion: (ok.body as { version: number }).version },
+        randomUUID(),
+      );
+      expect(again.status).toBe(200);
+      expect((again.body as { version: number }).version).toBe(
+        (ok.body as { version: number }).version,
+      );
+
+      // Retired goals are 409.
+      await post(
+        app,
+        `${base}/purposes/${goalId}/revoke`,
+        { expectedVersion: (ok.body as { version: number }).version },
+        randomUUID(),
+      );
+      const retired = await post(
+        app,
+        `${base}/goals/${goalId}/confirm`,
+        { expectedVersion: (again.body as { version: number }).version + 1 },
+        randomUUID(),
+      );
+      expect(retired.status).toBe(409);
+    } finally {
+      fixture.close();
+    }
+  });
 });
