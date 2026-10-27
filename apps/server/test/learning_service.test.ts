@@ -24,9 +24,11 @@ import {
 } from "../src/background_resource.js";
 import {
   createLearningService,
+  LEARNING_EXTRACT_TIMEOUT_MS,
   type LearningService,
   parseLearningExtraction,
 } from "../src/learning_service.js";
+import type { ServerLogger } from "../src/logger.js";
 
 const T0 = 1790000000000;
 const dirs: string[] = [];
@@ -105,10 +107,35 @@ function deferredGateway(text: string): {
   };
 }
 
+/** Fixed-code recorder: every diagnostic code the service emits, in order. */
+function recordingLogger(): { logger: ServerLogger; codes: string[] } {
+  const codes: string[] = [];
+  const logger: ServerLogger = {
+    level: "debug",
+    log: (_level, code) => {
+      codes.push(code);
+    },
+    debug: (code) => {
+      codes.push(code);
+    },
+    info: (code) => {
+      codes.push(code);
+    },
+    warn: (code) => {
+      codes.push(code);
+    },
+    error: (code) => {
+      codes.push(code);
+    },
+  };
+  return { logger, codes };
+}
+
 function makeService(
   repo: KernelRepository,
   gateway: ModelGateway | null,
   background?: BackgroundResourceGate,
+  logger?: ServerLogger,
 ): LearningService {
   const service = createLearningService({
     storePath: tempStore(),
@@ -117,6 +144,7 @@ function makeService(
     model: "extract-model",
     now: () => T0,
     ...(background === undefined ? {} : { background }),
+    ...(logger === undefined ? {} : { logger }),
   });
   service.start();
   services.push(service);
@@ -563,6 +591,138 @@ describe("learning service extraction", () => {
     unavailable.onRunCompleted(run2.runId);
     await new Promise((resolve) => setTimeout(resolve, 80));
     expect(unavailable.store.listReflections()).toHaveLength(0);
+  });
+
+  it("gives a slow local extraction the full budget and logs extract_timeout", async () => {
+    // A local 35B model needs 5-15s for one strict-JSON extraction; the old
+    // 5s cap aborted every attempt and the blanket catch logged extract_empty.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const repo = await openRepo();
+      let signal: AbortSignal | undefined;
+      const gateway: ModelGateway = {
+        provider: "openai-compatible",
+        capabilities: { toolCalling: false },
+        baseUrl: "http://127.0.0.1:9",
+        chatUrl: "http://127.0.0.1:9/v1/chat/completions",
+        chat: (_request, options) => {
+          signal = options?.signal;
+          // Ignores the abort signal: the service's own race must settle.
+          return new Promise<never>(() => undefined);
+        },
+      };
+      const { logger, codes } = recordingLogger();
+      const service = makeService(repo, gateway, undefined, logger);
+      const run = completeRun(repo, {
+        text: "Please use ISO dates when you change calendar events.",
+        answer: "Understood. I will use ISO dates.",
+      });
+      service.onRunCompleted(run.runId);
+      await flushTasks();
+      expect(signal).toBeDefined();
+      // Past the OLD 5s cap: still in flight, no diagnostic yet.
+      await vi.advanceTimersByTimeAsync(5_000);
+      await flushTasks();
+      expect(codes).not.toContain("learning.extract_timeout");
+      expect(codes).not.toContain("learning.extract_empty");
+      // The real budget expires: our own abort fires and is reported honestly.
+      await vi.advanceTimersByTimeAsync(LEARNING_EXTRACT_TIMEOUT_MS);
+      await flushTasks();
+      expect(signal?.aborted).toBe(true);
+      expect(codes).toContain("learning.extract_timeout");
+      expect(codes).not.toContain("learning.extract_empty");
+      expect(service.store.listReflections()).toHaveLength(0);
+      await service.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("splits invalid, valid-empty, and gateway-failure diagnostics", async () => {
+    const invalidLog = recordingLogger();
+    const invalidRepo = await openRepo();
+    const invalid = makeService(
+      invalidRepo,
+      gatewayReturning("not json").gateway,
+      undefined,
+      invalidLog.logger,
+    );
+    const invalidRun = completeRun(invalidRepo, {
+      text: "hello",
+      answer: "hi",
+    });
+    invalid.onRunCompleted(invalidRun.runId);
+    await waitFor(() => invalidLog.codes.length > 0);
+    expect(invalidLog.codes).toContain("learning.extract_invalid");
+    expect(invalidLog.codes).not.toContain("learning.extract_empty");
+
+    const emptyLog = recordingLogger();
+    const emptyRepo = await openRepo();
+    const empty = makeService(
+      emptyRepo,
+      gatewayReturning(JSON.stringify({ lessons: [] })).gateway,
+      undefined,
+      emptyLog.logger,
+    );
+    const emptyRun = completeRun(emptyRepo, { text: "hello", answer: "hi" });
+    empty.onRunCompleted(emptyRun.runId);
+    await waitFor(() => emptyLog.codes.length > 0);
+    expect(emptyLog.codes).toContain("learning.extract_empty");
+    expect(emptyLog.codes).not.toContain("learning.extract_invalid");
+    expect(empty.store.listReflections()).toHaveLength(0);
+
+    const failedLog = recordingLogger();
+    const failedRepo = await openRepo();
+    const failed = makeService(
+      failedRepo,
+      {
+        provider: "openai-compatible",
+        capabilities: { toolCalling: false },
+        baseUrl: "http://127.0.0.1:9",
+        chatUrl: "http://127.0.0.1:9/v1/chat/completions",
+        chat: async () => {
+          throw new Error(
+            "gateway exploded with secret text that must not log",
+          );
+        },
+      },
+      undefined,
+      failedLog.logger,
+    );
+    const failedRun = completeRun(failedRepo, { text: "hello", answer: "hi" });
+    failed.onRunCompleted(failedRun.runId);
+    await waitFor(() => failedLog.codes.length > 0);
+    expect(failedLog.codes).toContain("learning.extract_failed");
+    expect(failedLog.codes).not.toContain("learning.extract_empty");
+    expect(failedLog.codes).not.toContain("learning.extract_timeout");
+    expect(failed.store.listReflections()).toHaveLength(0);
+  });
+
+  it("parses one ```json fenced block but still rejects surrounding prose", async () => {
+    const fenced = `\`\`\`json\n${EXTRACTION}\n\`\`\``;
+    expect(parseLearningExtraction(fenced)).toHaveLength(3);
+    expect(
+      parseLearningExtraction(`  \`\`\`json\n${EXTRACTION}\n\`\`\`  `),
+    ).toHaveLength(3);
+    // One fence only: leading prose and multiple fences stay invalid.
+    expect(parseLearningExtraction(`Here you go:\n${fenced}`)).toBeNull();
+    expect(parseLearningExtraction(`${fenced}\n${fenced}`)).toBeNull();
+
+    const repo = await openRepo();
+    const { gateway, calls } = gatewayReturning(fenced);
+    const service = makeService(repo, gateway);
+    const run = completeRun(repo, {
+      text: "Please use ISO dates when you change calendar events.",
+      answer: "Understood. I will use ISO dates.",
+    });
+    service.onRunCompleted(run.runId);
+    await waitFor(() => service.store.listProposals().length > 0);
+    expect(calls).toHaveLength(1);
+    // Same grounding rules apply inside the fence: two grounded items remain.
+    expect(service.store.listProposals()).toHaveLength(2);
+    expect(
+      service.store.listProposals().every((row) => row.status === "pending"),
+    ).toBe(true);
   });
 
   it("never reflects a cancelled or superseded run", async () => {
