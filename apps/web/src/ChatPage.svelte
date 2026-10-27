@@ -1,6 +1,5 @@
 <script lang="ts">
 import { onMount, type Snippet, tick } from "svelte";
-import AutonomyPausedBanner from "./lib/AutonomyPausedBanner.svelte";
 import {
   errorCode,
   fetchJson,
@@ -3170,7 +3169,9 @@ function evidenceForTurn(turn: Turn): {
   </header>
 
   {#if activePath === "/"}
-    <AutonomyPausedBanner />
+    {#await import("./lib/AutonomyPausedBanner.svelte") then banner}
+      <svelte:component this={banner.default} />
+    {/await}
   {/if}
 
   {#if authExpired}
