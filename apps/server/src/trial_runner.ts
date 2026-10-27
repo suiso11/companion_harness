@@ -58,6 +58,16 @@ export const TRIAL_STDOUT_FRAMING_ALLOWANCE = 4096;
 const TRIAL_QUEUE_SCAN_PAGE = 50;
 /** Bounded stderr head kept for exit diagnostics (never forwarded/raw). */
 export const TRIAL_STDERR_CAP_BYTES = 2048;
+/**
+ * "Active" means the sealed capsule's systemd scope unit reaching `active`.
+ * Before that unit exists the bridge still verifies the frozen snapshot and
+ * runs its systemd-run containment preflight: measured ~4-9 s on the
+ * operator host (longer for write scopes), while operator configs may ship
+ * `observe.activeTimeoutMs: 5000`. Waiting less than this floor turns real
+ * startup into a false `interrupted`; the wait still never outlives the
+ * trial budget (`request.budget.timeoutMs`).
+ */
+export const TRIAL_SCOPE_ACTIVE_FLOOR_MS = 60_000;
 /** Fixed reason codes (never free text into the kernel fence/detail). */
 export const TRIAL_REASON_INVALID_RESULT = "bridge-result-invalid";
 export const TRIAL_REASON_FENCE_UNKNOWN_SCOPE = "scope-unknown-after-exit";
@@ -1198,6 +1208,7 @@ export class TrialRunner {
       }
     };
     this.currentCloseFd3 = closeFd3;
+    const launchFailureReport = () => bridgeFailureReport(stderrChunks);
     const failLaunch = async (): Promise<TrialRunNextResult> => {
       try {
         relay.revoke();
@@ -1214,6 +1225,10 @@ export class TrialRunner {
           ? {}
           : { reason: bridgeExit.signal.toLowerCase() }),
       });
+      // Persist the bounded redacted stderr head with the quiescence record
+      // so a pre-boot bridge exit (e.g. wire scope rejection) is diagnosable
+      // instead of only `interrupted` with no report.
+      const report = launchFailureReport();
       try {
         const intent = this.repo.readTrialLaunchIntent(sessionId, executionId);
         this.repo.recordTrialQuiescence(
@@ -1221,6 +1236,11 @@ export class TrialRunner {
           intent.grant.scope as string,
           executionId,
           this.clock(),
+          {
+            workspaceAlias: request.workspaceAlias,
+            reason: "launch-failed",
+            report,
+          },
         );
       } catch {
         // Best effort: quiescence evidence never fails the outcome.
@@ -1268,7 +1288,16 @@ export class TrialRunner {
     } catch {
       return await failLaunch();
     }
-    const activeDeadline = this.clock() + this.config.observe.activeTimeoutMs;
+    // Real sealed startup must not be mistaken for a hang; keep the wait
+    // bounded by the frozen trial budget.
+    const activeWaitMs = Math.min(
+      Math.max(
+        this.config.observe.activeTimeoutMs,
+        TRIAL_SCOPE_ACTIVE_FLOOR_MS,
+      ),
+      request.budget.timeoutMs,
+    );
+    const activeDeadline = this.clock() + activeWaitMs;
     const scopeWaitStart = this.clock();
     let remainingRuntimeMs = request.budget.timeoutMs;
     let observedRuntimeMaxUsec: ScopeUnitProps["runtimeMaxUsec"];
@@ -1286,6 +1315,7 @@ export class TrialRunner {
         }
         closeFd3();
         await awaitChildExit();
+        const report = launchFailureReport();
         try {
           const intent = this.repo.readTrialLaunchIntent(
             sessionId,
@@ -1296,6 +1326,11 @@ export class TrialRunner {
             intent.grant.scope as string,
             executionId,
             this.clock(),
+            {
+              workspaceAlias: request.workspaceAlias,
+              reason: "stopped-before-active",
+              report,
+            },
           );
         } catch {
           // Best effort.

@@ -70,7 +70,9 @@ export const TrialStageRequestSchema = z.strictObject({
   taskId: UuidSchema,
   objective: z.string().min(1).max(8192),
   acceptance: z.array(z.string().min(1).max(1024)).min(1).max(16),
-  literalPatchPaths: z.array(z.string().min(1).max(512)).min(1).max(16),
+  /** Empty is accepted only for read-only requests (pathless read scopes to
+   * the frozen profile's allowedPaths at claim); stage rejects empty writes. */
+  literalPatchPaths: z.array(z.string().min(1).max(512)).max(16),
   operation: TrialOperationSchema,
   readOnlyMode: z.boolean(),
   expiry: z.string().min(1).max(128),

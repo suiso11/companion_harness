@@ -21,7 +21,7 @@ import {
   RepositoryValidationError,
 } from "@companion/kernel";
 import type { ModelGateway } from "@companion/model-local";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   computeEffectiveProfile,
   hashFileSync,
@@ -191,7 +191,7 @@ function profile() {
   };
 }
 
-function stageInput(taskId: string) {
+function stageInput(taskId: string, extra: Record<string, unknown> = {}) {
   return {
     taskId,
     objective: "obj",
@@ -203,6 +203,7 @@ function stageInput(taskId: string) {
     possibleExternalDataConsent: true,
     objectiveResourceCaps: { timeoutMs: 5000, maxOutputBytes: 10000 },
     requiredChecks: ["lint"],
+    ...extra,
   };
 }
 
@@ -259,14 +260,19 @@ function queueGrant(
   scope: string,
   alias: string,
   taskId?: string,
+  stageExtra: Record<string, unknown> = {},
 ) {
   const owned = taskId ?? makeAuthority(repo, sessionId, scope).taskId;
-  const staged = repo.stageTrial(sessionId, stageInput(owned) as never, {
-    key: randomUUID(),
-    now: NOW + 4,
-    profile: profile(),
-    workspaceAlias: alias,
-  });
+  const staged = repo.stageTrial(
+    sessionId,
+    stageInput(owned, stageExtra) as never,
+    {
+      key: randomUUID(),
+      now: NOW + 4,
+      profile: profile(),
+      workspaceAlias: alias,
+    },
+  );
   const approved = repo.approveTrial(
     sessionId,
     (staged.body as { id: string }).id,
@@ -288,6 +294,10 @@ function queueGrant(
 interface FakeBridgeBehavior {
   /** When true, the bridge hangs until fd3 is destroyed, then exits. */
   hangUntilFd3?: boolean;
+  /** Delay before the fake bridge exits after stdin (default 5ms). */
+  exitDelayMs?: number;
+  /** Emit this stderr line just before the fake bridge exits. */
+  stderrBeforeExit?: string;
   /** Line emitter: defaults to a valid done line derived from the request. */
   lineForRequest?: ((request: Record<string, unknown>) => string) | undefined;
   exitCode?: number | undefined;
@@ -342,6 +352,8 @@ function createFakeSpawn(behavior: FakeBridgeBehavior = {}) {
     const finish = (line: string | null, code: number): void => {
       if (state.exited) return;
       state.exited = true;
+      if (behavior.stderrBeforeExit !== undefined)
+        stderr.emit("data", Buffer.from(`${behavior.stderrBeforeExit}\n`));
       if (line !== null) stdout.emit("data", Buffer.from(`${line}\n`));
       child.emit("exit", code, null);
     };
@@ -356,7 +368,10 @@ function createFakeSpawn(behavior: FakeBridgeBehavior = {}) {
             unknown
           >;
           const line = behavior.lineForRequest?.(req) ?? validDoneLine(req);
-          setTimeout(() => finish(line, behavior.exitCode ?? 1), 5);
+          setTimeout(
+            () => finish(line, behavior.exitCode ?? 1),
+            behavior.exitDelayMs ?? 5,
+          );
         }
       },
     };
@@ -375,9 +390,12 @@ function createFakeSpawn(behavior: FakeBridgeBehavior = {}) {
             unknown
           >;
           const line = behavior.lineForRequest?.(req) ?? validDoneLine(req);
-          setTimeout(() => finish(line, behavior.exitCode ?? 0), 5);
+          setTimeout(
+            () => finish(line, behavior.exitCode ?? 0),
+            behavior.exitDelayMs ?? 5,
+          );
         } catch {
-          setTimeout(() => finish(null, 1), 5);
+          setTimeout(() => finish(null, 1), behavior.exitDelayMs ?? 5);
         }
       },
     };
@@ -1168,6 +1186,240 @@ describe("trial_runner", () => {
       expect(
         repo.readTrialLaunchIntent(sessionId, executionId).grant.status,
       ).toBe("interrupted");
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("does not cancel a valid launch while sealed startup exceeds 5s", async () => {
+    const { handle, repo, sessionId } = await makeKernel();
+    try {
+      const { executionId } = queueGrant(
+        repo,
+        sessionId,
+        "b1",
+        "ws",
+        undefined,
+        {
+          objectiveResourceCaps: { timeoutMs: 60_000, maxOutputBytes: 10_000 },
+        },
+      );
+      const identity = {
+        pid: 4345,
+        bootId: "boot-slow",
+        processStartTicks: "888",
+      };
+      // Real startup: snapshot verification + containment preflight take
+      // >5s before the capsule scope exists. The configured 5s must not
+      // cancel it; the 60s floor applies (budget still 60s).
+      const { spawnImpl, state } = createFakeSpawn({ exitDelayMs: 9_000 });
+      const spawnProxy = ((cmd: string, args: string[], opts: unknown) => {
+        const child = (
+          spawnImpl as unknown as (
+            c: string,
+            a: string[],
+            o: unknown,
+          ) => FakeChild
+        )(cmd, args, opts);
+        child.pid = identity.pid;
+        return child;
+      }) as unknown as TrialRunnerSpawn;
+      const started = Date.now();
+      const observer: TrialRunnerObserverFns = {
+        expectedScopeUnit: (eid: string) =>
+          `capsule-${eid}-${"c".repeat(64)}.scope`,
+        queryScope: async () => {
+          if (Date.now() - started <= 5_200)
+            return { scopeState: "unknown" as const };
+          if (state.exited) return { scopeState: "gone" as const };
+          return {
+            scopeState: "active" as const,
+            remainingRuntimeMs: 60_000,
+            runtimeMaxUsec: 60_000_000n,
+          };
+        },
+        readIdentity: async () => ({ ...identity }),
+      };
+      const { factory } = createFakeRelayFactory();
+      const { logger } = createCollectingLogger("debug");
+      const dir = mkdtempSync(join(tmpdir(), "trial-run-"));
+      const runner = new TrialRunner({
+        repo,
+        config: {
+          ...runnerConfigBase("ws", writeTemplate(dir), join(dir, "runs")),
+          observe: {
+            activeTimeoutMs: 5000,
+            goneTimeoutMs: 2000,
+            pollIntervalMs: 20,
+          },
+        },
+        isForegroundBusy: () => false,
+        logger,
+        observer,
+        createRelay: factory,
+        spawnImpl: spawnProxy,
+        clock: makeClock(),
+      });
+      const out = await runner.runNext();
+      expect(out).toMatchObject({ ran: true, executionId });
+      expect(out.outcome).toBe("done");
+      expect(out.authorized).toBe(true);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("cancels a scope that never activates at the 60s startup bound", async () => {
+    vi.useFakeTimers();
+    const { handle, repo, sessionId } = await makeKernel();
+    try {
+      const { executionId } = queueGrant(
+        repo,
+        sessionId,
+        "b1",
+        "ws",
+        undefined,
+        {
+          objectiveResourceCaps: { timeoutMs: 60_000, maxOutputBytes: 10_000 },
+        },
+      );
+      const identity = {
+        pid: 4346,
+        bootId: "boot-hang",
+        processStartTicks: "889",
+      };
+      const { spawnImpl, state } = createFakeSpawn({
+        hangUntilFd3: true,
+        stderrBeforeExit:
+          "sealed-profile: capsule never reached active within startup bound",
+      });
+      const spawnProxy = ((cmd: string, args: string[], opts: unknown) => {
+        const child = (
+          spawnImpl as unknown as (
+            c: string,
+            a: string[],
+            o: unknown,
+          ) => FakeChild
+        )(cmd, args, opts);
+        child.pid = identity.pid;
+        return child;
+      }) as unknown as TrialRunnerSpawn;
+      const observer: TrialRunnerObserverFns = {
+        expectedScopeUnit: (eid: string) =>
+          `capsule-${eid}-${"c".repeat(64)}.scope`,
+        queryScope: async () => ({ scopeState: "unknown" as const }),
+        readIdentity: async () => ({ ...identity }),
+      };
+      const { factory, relays } = createFakeRelayFactory();
+      const { logger } = createCollectingLogger("debug");
+      const dir = mkdtempSync(join(tmpdir(), "trial-run-"));
+      const runner = new TrialRunner({
+        repo,
+        config: {
+          ...runnerConfigBase("ws", writeTemplate(dir), join(dir, "runs")),
+          observe: {
+            activeTimeoutMs: 5000,
+            goneTimeoutMs: 2000,
+            pollIntervalMs: 20,
+          },
+        },
+        isForegroundBusy: () => false,
+        logger,
+        observer,
+        createRelay: factory,
+        spawnImpl: spawnProxy,
+        clock: makeClock(),
+      });
+      const pending = runner.runNext();
+      await vi.advanceTimersByTimeAsync(61_000);
+      const out = await pending;
+      expect(out).toMatchObject({
+        ran: true,
+        outcome: "launch-failed",
+        executionId,
+      });
+      expect(state.fd3Destroyed).toBe(true);
+      expect(relays[0]?.revoked).toBe(true);
+      // The stopped-before-active branch persists the bounded stderr
+      // diagnostics with the known-quiescence outcome (not only the
+      // synchronous launch-failure branch).
+      expect(repo.readTrialWorkerOutcome(sessionId, executionId)?.status).toBe(
+        "interrupted",
+      );
+      const report = repo.readTrialWorkerReport(sessionId, executionId);
+      expect(report?.hostDiagnostics?.[0]).toContain(
+        "never reached active within startup bound",
+      );
+    } finally {
+      vi.useRealTimers();
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("stores bridge stderr diagnostics on an exit-2 launch failure", async () => {
+    const { handle, repo, sessionId } = await makeKernel();
+    try {
+      const { executionId } = queueGrant(repo, sessionId, "b1", "ws");
+      const identity = {
+        pid: 4347,
+        bootId: "boot-exit2",
+        processStartTicks: "890",
+      };
+      const { spawnImpl } = createFakeSpawn({
+        exitCode: 2,
+        stderrBeforeExit:
+          "sealed-profile: request relevantPath is outside the frozen operator scope: .",
+      });
+      const spawnProxy = ((cmd: string, args: string[], opts: unknown) => {
+        const child = (
+          spawnImpl as unknown as (
+            c: string,
+            a: string[],
+            o: unknown,
+          ) => FakeChild
+        )(cmd, args, opts);
+        child.pid = identity.pid;
+        return child;
+      }) as unknown as TrialRunnerSpawn;
+      const observer = createObserver({
+        scopeBeforeExit: "unknown",
+        scopeAfterExit: "gone",
+        identity,
+        exited: () => false,
+      });
+      const { factory } = createFakeRelayFactory();
+      const { logger } = createCollectingLogger("debug");
+      const dir = mkdtempSync(join(tmpdir(), "trial-run-"));
+      const runner = new TrialRunner({
+        repo,
+        config: {
+          ...runnerConfigBase("ws", writeTemplate(dir), join(dir, "runs")),
+          observe: {
+            activeTimeoutMs: 5000,
+            goneTimeoutMs: 2000,
+            pollIntervalMs: 5,
+          },
+        },
+        isForegroundBusy: () => false,
+        logger,
+        observer,
+        createRelay: factory,
+        spawnImpl: spawnProxy,
+        clock: makeClock(),
+      });
+      const out = await runner.runNext();
+      expect(out).toMatchObject({
+        ran: true,
+        outcome: "launch-failed",
+        executionId,
+      });
+      expect(repo.readTrialWorkerOutcome(sessionId, executionId)?.status).toBe(
+        "interrupted",
+      );
+      const report = repo.readTrialWorkerReport(sessionId, executionId);
+      expect(report?.hostDiagnostics?.[0]).toContain(
+        "outside the frozen operator scope",
+      );
     } finally {
       closeKernelDatabase(handle);
     }
